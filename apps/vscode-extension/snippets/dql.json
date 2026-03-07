@@ -1,0 +1,62 @@
+{
+  "Dashboard": {
+    "prefix": "dql-dashboard",
+    "body": [
+      "dashboard \"${1:Revenue Overview}\" {",
+      "  chart.line(",
+      "    SELECT ${2:order_date}, ${3:SUM(revenue)} as ${4:total}",
+      "    FROM ${5:orders}",
+      "    GROUP BY ${2:order_date},",
+      "    x = ${2:order_date},",
+      "    y = ${4:total},",
+      "    title = \"${6:Revenue Trend}\"",
+      "  )",
+      "}"
+    ],
+    "description": "Create a dashboard with a line chart"
+  },
+  "Block": {
+    "prefix": "dql-block",
+    "body": [
+      "block \"${1:revenue_by_segment}\" {",
+      "  domain = \"${2:sales}\"",
+      "  type = \"chart.bar\"",
+      "  description = \"${3:Revenue grouped by customer segment}\"",
+      "  owner = \"${4:data-team}\"",
+      "  query = \"\"\"",
+      "    SELECT ${5:segment}, SUM(${6:revenue}) as ${7:rev}",
+      "    FROM ${8:orders}",
+      "    GROUP BY ${5:segment}",
+      "  \"\"\"",
+      "  visualization {",
+      "    x = ${5:segment}",
+      "    y = ${7:rev}",
+      "    title = \"${9:Revenue by Segment}\"",
+      "  }",
+      "  tests {",
+      "    assert ${7:rev} > 0",
+      "  }",
+      "}"
+    ],
+    "description": "Create a reusable DQL block"
+  },
+  "Workbook": {
+    "prefix": "dql-workbook",
+    "body": [
+      "workbook \"${1:Executive Review}\" {",
+      "  page \"${2:Overview}\" {",
+      "    layout(columns = 12) {",
+      "      row {",
+      "        chart.kpi(",
+      "          SELECT SUM(${3:revenue}) as total FROM ${4:orders},",
+      "          metrics = [\"total\"],",
+      "          title = \"${5:Total Revenue}\"",
+      "        ) span 12",
+      "      }",
+      "    }",
+      "  }",
+      "}"
+    ],
+    "description": "Create a workbook page skeleton"
+  }
+}

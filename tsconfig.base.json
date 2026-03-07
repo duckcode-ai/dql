@@ -1,0 +1,28 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "baseUrl": ".",
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "paths": {
+      "@dql/core": ["packages/dql-core/src/index.ts"],
+      "@dql/compiler": ["packages/dql-compiler/src/index.ts"],
+      "@dql/runtime": ["packages/dql-runtime/src/index.ts"],
+      "@dql/charts": ["packages/dql-charts/src/index.ts"],
+      "@dql/lsp": ["packages/dql-lsp/src/index.ts"],
+      "@dql/connectors": ["packages/dql-connectors/src/index.ts"],
+      "@dql/governance": ["packages/dql-governance/src/index.ts"],
+      "@dql/project": ["packages/dql-project/src/index.ts"]
+    },
+    "declaration": true,
+    "declarationMap": true,
+    "sourceMap": true,
+    "strict": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "forceConsistentCasingInFileNames": true,
+    "resolveJsonModule": true,
+    "isolatedModules": true,
+    "composite": true
+  }
+}

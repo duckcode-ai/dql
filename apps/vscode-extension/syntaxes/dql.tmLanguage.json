@@ -1,0 +1,92 @@
+{
+  "name": "DQL",
+  "scopeName": "source.dql",
+  "patterns": [
+    { "include": "#comments" },
+    { "include": "#decorators" },
+    { "include": "#keywords" },
+    { "include": "#types" },
+    { "include": "#numbers" },
+    { "include": "#strings" },
+    { "include": "#operators" }
+  ],
+  "repository": {
+    "comments": {
+      "patterns": [
+        {
+          "name": "comment.line.double-slash.dql",
+          "match": "//.*$"
+        }
+      ]
+    },
+    "decorators": {
+      "patterns": [
+        {
+          "name": "entity.name.function.decorator.dql",
+          "match": "@[A-Za-z_][A-Za-z0-9_]*"
+        }
+      ]
+    },
+    "keywords": {
+      "patterns": [
+        {
+          "name": "keyword.control.dql",
+          "match": "\\b(dashboard|workbook|page|layout|row|span|chart|filter|param|let|import|from|use|block|domain|type|description|tags|owner|params|query|visualization|tests|assert|IN)\\b"
+        }
+      ]
+    },
+    "types": {
+      "patterns": [
+        {
+          "name": "entity.name.type.chart.dql",
+          "match": "(?<=chart\\.)[A-Za-z_][A-Za-z0-9_\\-]*"
+        },
+        {
+          "name": "entity.name.type.filter.dql",
+          "match": "(?<=filter\\.)[A-Za-z_][A-Za-z0-9_\\-]*"
+        }
+      ]
+    },
+    "numbers": {
+      "patterns": [
+        {
+          "name": "constant.numeric.dql",
+          "match": "\\b-?[0-9]+(?:\\.[0-9]+)?\\b"
+        }
+      ]
+    },
+    "strings": {
+      "patterns": [
+        {
+          "name": "string.quoted.triple.dql",
+          "begin": "\"\"\"",
+          "end": "\"\"\""
+        },
+        {
+          "name": "string.quoted.double.dql",
+          "begin": "\"",
+          "end": "\"",
+          "patterns": [
+            { "name": "constant.character.escape.dql", "match": "\\\\." }
+          ]
+        },
+        {
+          "name": "string.quoted.single.dql",
+          "begin": "'",
+          "end": "'",
+          "patterns": [
+            { "name": "constant.character.escape.dql", "match": "\\\\." }
+          ]
+        }
+      ]
+    },
+    "operators": {
+      "patterns": [
+        {
+          "name": "keyword.operator.comparison.dql",
+          "match": "(>=|<=|==|!=|>|<|=)"
+        }
+      ]
+    }
+  }
+}

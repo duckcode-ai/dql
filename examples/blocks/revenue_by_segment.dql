@@ -1,0 +1,31 @@
+block "Revenue by Segment" {
+    domain = "revenue"
+    type = "chart.bar"
+    description = "Quarterly revenue grouped by customer segment"
+    tags = ["revenue", "segment", "quarterly"]
+    owner = "dql-example"
+
+    params {
+        period = "current_quarter"
+    }
+
+    query = """
+        SELECT
+            segment_tier AS segment,
+            SUM(amount) AS revenue
+        FROM fct_revenue
+        WHERE fiscal_period = ${period}
+        GROUP BY segment_tier
+        ORDER BY revenue DESC
+    """
+
+    visualization {
+        chart = "bar"
+        x = segment
+        y = revenue
+    }
+
+    tests {
+        assert row_count > 0
+    }
+}

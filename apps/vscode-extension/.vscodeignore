@@ -1,0 +1,8 @@
+**/.git/**
+**/.turbo/**
+**/src/**
+**/scripts/**
+**/tsconfig.json
+**/*.tsbuildinfo
+**/*.map
+pnpm-lock.yaml

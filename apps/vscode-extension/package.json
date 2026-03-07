@@ -1,0 +1,70 @@
+{
+  "name": "dql-language-support",
+  "displayName": "DQL Language Support",
+  "description": "Syntax highlighting, snippets, formatting, and language server support for DQL.",
+  "version": "0.1.0",
+  "publisher": "dql",
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/duckcode-ai/dql.git",
+    "directory": "apps/vscode-extension"
+  },
+  "private": false,
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Programming Languages",
+    "Linters",
+    "Formatters"
+  ],
+  "activationEvents": [
+    "onLanguage:dql"
+  ],
+  "main": "./dist/extension.js",
+  "contributes": {
+    "languages": [
+      {
+        "id": "dql",
+        "aliases": [
+          "DQL",
+          "DuckCode Query Language"
+        ],
+        "extensions": [
+          ".dql"
+        ],
+        "configuration": "./language-configuration.json"
+      }
+    ],
+    "grammars": [
+      {
+        "language": "dql",
+        "scopeName": "source.dql",
+        "path": "./syntaxes/dql.tmLanguage.json"
+      }
+    ],
+    "snippets": [
+      {
+        "language": "dql",
+        "path": "./snippets/dql.json"
+      }
+    ]
+  },
+  "scripts": {
+    "typecheck": "tsc -p . --noEmit",
+    "build": "pnpm run typecheck && node ./scripts/build.mjs",
+    "dev": "node ./scripts/build.mjs --watch",
+    "package": "vsce package --no-dependencies",
+    "publish:vsce": "vsce publish --no-dependencies"
+  },
+  "dependencies": {},
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "@types/vscode": "^1.85.0",
+    "@vscode/vsce": "^3.2.2",
+    "esbuild": "^0.25.0",
+    "typescript": "^5.7.0",
+    "vscode-languageclient": "^9.0.1"
+  }
+}

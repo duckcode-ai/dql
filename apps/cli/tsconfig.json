@@ -1,0 +1,14 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "outDir": "./dist",
+    "rootDir": "./src"
+  },
+  "include": ["src/**/*"],
+  "references": [
+    { "path": "../../packages/dql-core" },
+    { "path": "../../packages/dql-compiler" },
+    { "path": "../../packages/dql-project" },
+    { "path": "../../packages/dql-governance" }
+  ]
+}

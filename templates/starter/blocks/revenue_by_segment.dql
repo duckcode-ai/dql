@@ -1,0 +1,20 @@
+block "Revenue by Segment" {
+    domain = "revenue"
+    type = "chart.bar"
+    description = "Starter block for segment revenue analysis"
+    tags = ["starter", "revenue"]
+    owner = "template"
+
+    query = """
+        SELECT segment_tier AS segment, SUM(amount) AS revenue
+        FROM fct_revenue
+        GROUP BY segment_tier
+        ORDER BY revenue DESC
+    """
+
+    visualization {
+        chart = "bar"
+        x = segment
+        y = revenue
+    }
+}
