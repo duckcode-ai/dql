@@ -1,0 +1,34 @@
+name: Feature request
+description: Propose an improvement to the public DQL language, tooling, docs, or examples.
+title: '[Feature]: '
+labels:
+  - enhancement
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem or use case
+      description: What public workflow is blocked or awkward today?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed change
+      description: Describe the language, tooling, or docs change you want.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: What are you doing today instead?
+    validations:
+      required: false
+  - type: textarea
+    id: adoption
+    attributes:
+      label: Adoption impact
+      description: Why would this improve DQL adoption, authoring, or reuse?
+    validations:
+      required: false

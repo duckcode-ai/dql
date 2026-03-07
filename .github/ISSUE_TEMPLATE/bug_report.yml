@@ -1,0 +1,61 @@
+name: Bug report
+description: Report a defect in the DQL language, tooling, CLI, runtime, or extension.
+title: '[Bug]: '
+labels:
+  - bug
+body:
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      description: Which public DQL surface is affected?
+      options:
+        - CLI
+        - Compiler
+        - Runtime
+        - Project registry
+        - Governance
+        - VS Code extension
+        - Docs or examples
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: Package or extension version where you saw the issue.
+      placeholder: '0.1.0'
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+      description: What should have happened?
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+      description: What happened instead?
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Reproduction
+      description: Include a minimal DQL file, CLI command, or editor steps.
+      placeholder: |
+        1. Run `dql ...`
+        2. Open `example.dql`
+        3. Observe ...
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: OS, Node.js version, pnpm version, editor version, connector details if relevant.
+    validations:
+      required: false
