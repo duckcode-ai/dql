@@ -4,6 +4,7 @@ import {
   parseMetricDefinition,
   parseDimensionDefinition,
   parseHierarchyDefinition,
+  parseBlockCompanionDefinition,
 } from './semantic-layer.js';
 
 describe('SemanticLayer', () => {
@@ -165,5 +166,31 @@ describe('parseHierarchyDefinition', () => {
     expect(hierarchy.drillPaths?.[0].name).toBe('calendar');
     expect(hierarchy.defaultDrillPath).toBe('calendar');
     expect(hierarchy.owner).toBe('analytics');
+  });
+});
+
+describe('parseBlockCompanionDefinition', () => {
+  it('parses companion business metadata for a block', () => {
+    const companion = parseBlockCompanionDefinition({
+      name: 'revenue_by_segment',
+      block: 'revenue_by_segment',
+      domain: 'revenue',
+      description: 'Business context for segment revenue reporting',
+      owner: 'finance-analytics',
+      tags: ['revenue', 'segment'],
+      glossary: ['ARR', 'net retention'],
+      semanticMappings: {
+        segment: 'segment_tier',
+        revenue: 'total_revenue',
+      },
+      lineage: ['warehouse.fct_revenue', 'warehouse.dim_segment'],
+      notes: ['Reviewed with finance on 2026-03-01'],
+      reviewStatus: 'review',
+    });
+
+    expect(companion.block).toBe('revenue_by_segment');
+    expect(companion.reviewStatus).toBe('review');
+    expect(companion.semanticMappings?.segment).toBe('segment_tier');
+    expect(companion.lineage).toEqual(['warehouse.fct_revenue', 'warehouse.dim_segment']);
   });
 });

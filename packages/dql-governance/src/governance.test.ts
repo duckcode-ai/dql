@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { TestRunner } from './test-runner.js';
-import { Certifier } from './certifier.js';
+import { Certifier, PROMOTABLE_RULES } from './certifier.js';
 import { CostEstimator } from './cost-estimator.js';
 import { PolicyEngine } from './policy-engine.js';
 import type { BlockRecord, TestResultSummary } from '@dql/project';
@@ -191,6 +191,23 @@ describe('Certifier', () => {
     const result = certifier.evaluate(block, testResults);
     expect(result.certified).toBe(true); // warnings don't block certification
     expect(result.warnings.some((w) => w.rule === 'Block has tags')).toBe(true);
+  });
+
+  it('rejects promotable certification for draft-only git paths', () => {
+    const certifier = new Certifier(PROMOTABLE_RULES);
+    const block = makeBlock({
+      description: 'Test',
+      gitPath: 'blocks/_drafts/revenue/test-block.dql',
+    });
+    const testResults: TestResultSummary = {
+      passed: 1, failed: 0, skipped: 0, duration: 10,
+      assertions: [{ name: 'test1', passed: true }],
+      runAt: new Date(),
+    };
+
+    const result = certifier.evaluate(block, testResults);
+    expect(result.certified).toBe(false);
+    expect(result.errors.some((e) => e.rule === 'Block is in a canonical Git path')).toBe(true);
   });
 });
 

@@ -23,8 +23,8 @@ Not included:
 ```bash
 pnpm install
 pnpm build
-node apps/cli/dist/index.js parse examples/blocks/revenue_by_segment.dql
-node apps/cli/dist/index.js fmt --check examples/blocks/revenue_by_segment.dql
+pnpm exec dql parse examples/blocks/revenue_by_segment.dql
+pnpm exec dql fmt --check examples/blocks/revenue_by_segment.dql
 ```
 
 ## Workspace layout
@@ -46,7 +46,7 @@ packages/
 
 examples/
   blocks/             Example DQL blocks
-  semantic-layer/     Example metric and dimension definitions
+  semantic-layer/     Example metric, dimension, hierarchy, and companion metadata definitions
 
 templates/
   starter/            Minimal Git-native starter project
@@ -55,8 +55,9 @@ templates/
 ## Use cases this repo supports
 
 - Author reusable DQL blocks in Git
+- Author query-only DQL blocks when no visualization is needed
 - Validate and format blocks locally
-- Define semantic-layer metadata for metrics and dimensions
+- Define semantic-layer metadata for metrics, dimensions, hierarchies, and block companion metadata
 - Test and certify blocks before promotion
 - Build DQL-aware editor workflows in VS Code
 

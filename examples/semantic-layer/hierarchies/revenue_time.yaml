@@ -1,0 +1,26 @@
+name: revenue_time
+label: Revenue Time
+description: Calendar drill path for revenue reporting
+domain: revenue
+levels:
+  - name: fiscal_year
+    label: Fiscal Year
+    dimension: fiscal_year
+    order: 1
+  - name: fiscal_quarter
+    label: Fiscal Quarter
+    dimension: fiscal_quarter
+    order: 2
+  - name: fiscal_month
+    label: Fiscal Month
+    dimension: fiscal_month
+    order: 3
+drillPaths:
+  - name: fiscal_calendar
+    levels:
+      - fiscal_year
+      - fiscal_quarter
+      - fiscal_month
+defaultDrillPath: fiscal_calendar
+defaultRollup: sum
+owner: finance-analytics

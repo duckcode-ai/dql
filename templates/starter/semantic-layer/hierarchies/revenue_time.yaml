@@ -1,0 +1,12 @@
+name: revenue_time
+label: Revenue Time
+description: Example fiscal calendar hierarchy
+domain: revenue
+levels:
+  - name: fiscal_year
+    dimension: fiscal_year
+    order: 1
+  - name: fiscal_quarter
+    dimension: fiscal_quarter
+    order: 2
+defaultRollup: sum

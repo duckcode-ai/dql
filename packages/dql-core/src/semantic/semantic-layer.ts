@@ -57,6 +57,20 @@ export interface HierarchyDefinition {
   owner?: string;
 }
 
+export interface BlockCompanionDefinition {
+  name: string;
+  block: string;
+  domain?: string;
+  description: string;
+  owner?: string;
+  tags?: string[];
+  glossary?: string[];
+  semanticMappings?: Record<string, string>;
+  lineage?: string[];
+  notes?: string[];
+  reviewStatus?: 'draft' | 'review' | 'approved';
+}
+
 export interface SemanticLayerConfig {
   metrics: MetricDefinition[];
   dimensions: DimensionDefinition[];
@@ -141,6 +155,27 @@ export function parseHierarchyDefinition(raw: Record<string, unknown>): Hierarch
     defaultRollup: validateRollupType(String(raw.defaultRollup ?? 'sum')),
     tags: Array.isArray(raw.tags) ? raw.tags.map(String) : undefined,
     owner: raw.owner ? String(raw.owner) : undefined,
+  };
+}
+
+export function parseBlockCompanionDefinition(raw: Record<string, unknown>): BlockCompanionDefinition {
+  return {
+    name: String(raw.name ?? raw.block ?? ''),
+    block: String(raw.block ?? raw.name ?? ''),
+    domain: raw.domain != null ? String(raw.domain) : undefined,
+    description: String(raw.description ?? ''),
+    owner: raw.owner ? String(raw.owner) : undefined,
+    tags: Array.isArray(raw.tags) ? raw.tags.map(String) : undefined,
+    glossary: Array.isArray(raw.glossary) ? raw.glossary.map(String) : undefined,
+    semanticMappings:
+      raw.semanticMappings && typeof raw.semanticMappings === 'object' && !Array.isArray(raw.semanticMappings)
+        ? Object.fromEntries(
+          Object.entries(raw.semanticMappings as Record<string, unknown>).map(([key, value]) => [key, String(value)]),
+        )
+        : undefined,
+    lineage: Array.isArray(raw.lineage) ? raw.lineage.map(String) : undefined,
+    notes: Array.isArray(raw.notes) ? raw.notes.map(String) : undefined,
+    reviewStatus: validateReviewStatus(raw.reviewStatus),
   };
 }
 
@@ -329,4 +364,12 @@ function validateDimensionType(t: string): DimensionDefinition['type'] {
 function validateRollupType(t: string): HierarchyRollupType {
   const valid = ['sum', 'count', 'count_distinct', 'avg', 'min', 'max', 'none'];
   return valid.includes(t) ? (t as HierarchyRollupType) : 'sum';
+}
+
+function validateReviewStatus(value: unknown): BlockCompanionDefinition['reviewStatus'] {
+  const normalized = String(value ?? '').toLowerCase();
+  if (normalized === 'draft' || normalized === 'review' || normalized === 'approved') {
+    return normalized;
+  }
+  return undefined;
 }
