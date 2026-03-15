@@ -706,6 +706,13 @@ export class Parser {
       }
     }
 
+    if (!blockType) {
+      this.error(
+        `Block "${nameToken.value}" is missing a required type declaration. Add type = "semantic" for dbt metric blocks or type = "custom" for SQL blocks.`,
+      );
+      blockType = 'custom'; // error-recovery default — keeps downstream analysis working
+    }
+
     this.expect(TokenType.RightBrace);
 
     return {

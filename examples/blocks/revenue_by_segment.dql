@@ -1,6 +1,6 @@
 block "Revenue by Segment" {
     domain = "revenue"
-    type = "chart.bar"
+    type = "custom"
     description = "Quarterly revenue grouped by customer segment"
     tags = ["revenue", "segment", "quarterly"]
     owner = "dql-example"

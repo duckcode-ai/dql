@@ -2,7 +2,7 @@
  * Project and block registry types for the open DQL ecosystem.
  */
 
-export type BlockStatus = 'draft' | 'review' | 'certified' | 'deprecated';
+export type BlockStatus = 'draft' | 'review' | 'certified' | 'deprecated' | 'pending_recertification';
 
 export interface BlockRecord {
   id: string;

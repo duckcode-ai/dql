@@ -466,9 +466,18 @@ describe('SemanticAnalyzer - Block Declarations', () => {
       query = """SELECT SUM(amount) FROM orders"""
     }`;
 
-    const ast = parse(source);
-    const diagnostics = analyze(ast);
-    const errors = diagnostics.filter((d) => d.severity === 'error');
+    // After A3, the parser itself records the missing-type error and throws DQLSyntaxError.
+    // Catch it and verify the error is present in the diagnostics.
+    let errors: import('../errors/diagnostic.js').Diagnostic[] = [];
+    try {
+      const ast = parse(source);
+      errors = analyze(ast).filter((d) => d.severity === 'error');
+    } catch (e: unknown) {
+      const syntaxErr = e as { diagnostics?: import('../errors/diagnostic.js').Diagnostic[] };
+      if (syntaxErr.diagnostics) {
+        errors = syntaxErr.diagnostics.filter((d) => d.severity === 'error');
+      }
+    }
     expect(errors.some((e) => e.message.includes('type'))).toBe(true);
   });
 
@@ -568,14 +577,24 @@ describe('BlockDecl — blockType validation', () => {
         query = """SELECT SUM(amount) as revenue FROM orders"""
       }
     `;
-    const ast = parse(source);
-    const diagnostics = analyze(ast);
-    const errors = diagnostics.filter((d) => d.severity === 'error');
+    // After A3, the parser itself records the missing-type error and throws DQLSyntaxError.
+    let errors: import('../errors/diagnostic.js').Diagnostic[] = [];
+    try {
+      const ast = parse(source);
+      errors = analyze(ast).filter((d) => d.severity === 'error');
+    } catch (e: unknown) {
+      const syntaxErr = e as { diagnostics?: import('../errors/diagnostic.js').Diagnostic[] };
+      if (syntaxErr.diagnostics) {
+        errors = syntaxErr.diagnostics.filter((d) => d.severity === 'error');
+      }
+    }
     expect(errors.length).toBeGreaterThanOrEqual(1);
     expect(errors.some((e) => e.message.includes('type'))).toBe(true);
   });
 
-  it('errors when a semantic block has a query field', () => {
+  it('accepts a semantic block with both metricRef and query (import-adapter pattern)', () => {
+    // Import adapters (dbt YAML, schema introspection) produce blocks with
+    // metricRef (provenance) AND pre-compiled SQL. Both fields are valid together.
     const source = `
       block "Revenue Trend" {
         domain = "finance"
@@ -589,8 +608,7 @@ describe('BlockDecl — blockType validation', () => {
     const ast = parse(source);
     const diagnostics = analyze(ast);
     const errors = diagnostics.filter((d) => d.severity === 'error');
-    expect(errors.length).toBeGreaterThanOrEqual(1);
-    expect(errors.some((e) => e.message.includes('semantic block must not have a query'))).toBe(true);
+    expect(errors).toHaveLength(0);
   });
 
   it('errors when a custom block is missing a query field', () => {
@@ -671,6 +689,31 @@ describe('BlockDecl — blockType validation', () => {
     expect(blockNode.blockType).toBe('semantic');
     expect(blockNode.metricRef).toBe('monthly_churn_rate');
     expect(blockNode.query).toBeUndefined();
+  });
+
+  it('parses a fully-imported semantic block with metricRef and query', () => {
+    const source = `
+      block "Revenue Growth" {
+        domain = "finance"
+        type = "semantic"
+        metric = "revenue_growth"
+        query = """
+          SELECT date, SUM(amount) as revenue
+          FROM fct_revenue
+          GROUP BY date
+        """
+        owner = "analytics@acme.com"
+      }
+    `;
+    const ast = parse(source);
+    const blockNode = ast.statements.find((s) => s.kind === 'BlockDecl') as any;
+    expect(blockNode).toBeDefined();
+    expect(blockNode.blockType).toBe('semantic');
+    expect(blockNode.metricRef).toBe('revenue_growth');
+    expect(blockNode.query).toBeDefined();
+    const diagnostics = analyze(ast);
+    const errors = diagnostics.filter((d) => d.severity === 'error');
+    expect(errors).toHaveLength(0);
   });
 
   it('errors when blockType value is not semantic or custom', () => {

@@ -1,6 +1,6 @@
 block "Revenue Trend Query" {
     domain = "revenue"
-    type = "chart.line"
+    type = "custom"
     description = "Reusable revenue trend query without embedded visualization metadata"
     tags = ["revenue", "trend", "query-only"]
     owner = "finance-analytics"

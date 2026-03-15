@@ -156,3 +156,41 @@ describe('lowerProgram', () => {
     expect(diagnostics.some((d) => d.includes("Unknown drill hierarchy 'unknown_hierarchy'"))).toBe(true);
   });
 });
+
+// ---- Phase A: IR block tests (A13) ----
+
+describe('lowerProgram — Phase A block IR', () => {
+  // A13a: custom block lowers to ChartIR with blockType = 'custom'
+  it('A13a — custom block lowers to ChartIR with blockType = "custom"', () => {
+    const source = `block "Revenue Custom" {
+      domain = "revenue"
+      type = "custom"
+      query = """SELECT SUM(amount) AS total FROM orders"""
+      visualization {
+        chart = "bar"
+        x = segment
+        y = total
+      }
+    }`;
+
+    const ast = parse(source);
+    const dashboards = lowerProgram(ast);
+    expect(dashboards).toHaveLength(1);
+    expect(dashboards[0].charts).toHaveLength(1);
+    expect(dashboards[0].charts[0].blockType).toBe('custom');
+  });
+
+  // A13b: semantic block without a query lowers to null (not included in output)
+  it('A13b — semantic block without query lowers to null (not included in output)', () => {
+    const source = `block "Revenue Metric" {
+      domain = "revenue"
+      type = "semantic"
+      metric = "revenue_growth"
+    }`;
+
+    const ast = parse(source);
+    const dashboards = lowerProgram(ast);
+    // lowerBlockDecl returns null when there is no query — so no DashboardIR is produced
+    expect(dashboards).toHaveLength(0);
+  });
+});

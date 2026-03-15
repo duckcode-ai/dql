@@ -58,6 +58,7 @@ export interface ChartIR {
   connection?: string;
   annotations?: AnnotationIR[];
   materializeRefresh?: string;
+  blockType?: 'semantic' | 'custom';
   drillConfig?: DrillConfigIR;
 }
 

@@ -254,7 +254,7 @@ export interface BlockDeclNode extends BaseNode {
   name: string;
   domain?: string;
   /** Execution routing type. 'semantic' routes to MetricFlow; 'custom' routes to the SQL runtime. Required. */
-  blockType?: 'semantic' | 'custom';
+  blockType: 'semantic' | 'custom';
   /** For blockType 'semantic': the dbt metric name this block references. Must not have a query field. */
   metricRef?: string;
   description?: string;
