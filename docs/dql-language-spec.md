@@ -50,15 +50,42 @@ A block is the atomic unit of the platform:
 ```dql
 block "Block Name" {
     domain = "domain_name"
-    type = "chart.bar"
+    type = "custom"           // required: "custom" or "semantic"
     description = "Human-readable description"
     tags = ["tag1", "tag2"]
     owner = "username"
 
     params { ... }
-    query = """..."""
+    query = """..."""          // required for type = "custom"
     visualization { ... }
     tests { ... }
+}
+```
+
+### Block Types
+
+Every block must declare its execution type:
+
+| Value | Description |
+|-------|-------------|
+| `type = "custom"` | Certified SQL block — the `query` field contains the SQL executed at runtime |
+| `type = "semantic"` | Semantic layer reference — the `metric` field references a dbt metric by name; SQL is managed by the semantic layer, not the block |
+
+```dql
+// Custom block (certified SQL)
+block "Revenue by Segment" {
+    type = "custom"
+    domain = "revenue"
+    query = """SELECT segment, SUM(revenue) FROM fct_revenue GROUP BY 1"""
+    // ...
+}
+
+// Semantic block (dbt metric reference)
+block "ARR Growth" {
+    type = "semantic"
+    domain = "finance"
+    metric = "annual_recurring_revenue"
+    // query field must be omitted
 }
 ```
 
@@ -67,7 +94,7 @@ block "Block Name" {
 | Field | Type | Description |
 |-------|------|-------------|
 | `domain` | string | Business domain (revenue, retention, sales, etc.) |
-| `type` | string | Block type (chart.bar, metric.card, predict.score, etc.) |
+| `type` | string | Block type — must be `"semantic"` or `"custom"` (see Block Types above) |
 
 ### Optional Fields
 
