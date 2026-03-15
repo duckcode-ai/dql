@@ -358,11 +358,38 @@ export class SemanticAnalyzer {
     }
 
     if (!node.blockType) {
-      this.reporter.warning('Block is missing a type declaration.', node.span);
-    }
-
-    if (!node.query) {
-      this.reporter.warning('Block has no query.', node.span);
+      this.reporter.error(
+        'Block is missing a required type declaration. Add type = "semantic" for dbt metric blocks or type = "custom" for SQL blocks.',
+        node.span,
+      );
+    } else if (node.blockType === 'semantic') {
+      // Semantic blocks route to MetricFlow — they must NOT contain raw SQL.
+      if (node.query) {
+        this.reporter.error(
+          'A semantic block must not have a query field. Semantic blocks reference a dbt metric via metric = "metric_name". Remove the query block.',
+          node.span,
+        );
+      }
+      if (!node.metricRef) {
+        this.reporter.warning(
+          'A semantic block should declare the dbt metric it references via metric = "metric_name".',
+          node.span,
+        );
+      }
+    } else if (node.blockType === 'custom') {
+      // Custom blocks route to the SQL runtime — they must contain a query.
+      if (!node.query) {
+        this.reporter.error(
+          'A custom block must have a query field containing the certified SQL. Add a query = """SELECT ...""" block.',
+          node.span,
+        );
+      }
+      if (node.metricRef) {
+        this.reporter.warning(
+          'A custom block should not declare a metric reference. The metric field is only meaningful on semantic blocks.',
+          node.span,
+        );
+      }
     }
 
     // Validate SQL interpolations in block query

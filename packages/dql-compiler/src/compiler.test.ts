@@ -165,7 +165,7 @@ describe('compile', () => {
   it('compiles a standalone block declaration into a dashboard', () => {
     const source = `block "Revenue by Segment" {
       domain = "revenue"
-      type = "chart.bar"
+      type = "custom"
       params {
         period = "current_quarter"
       }

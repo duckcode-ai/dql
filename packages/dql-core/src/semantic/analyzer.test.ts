@@ -450,7 +450,8 @@ describe('SemanticAnalyzer', () => {
 describe('SemanticAnalyzer - Block Declarations', () => {
   it('warns when block is missing domain', () => {
     const source = `block "Revenue" {
-      type = "chart.bar"
+      type = "semantic"
+      metric = "revenue_growth"
     }`;
 
     const ast = parse(source);
@@ -459,33 +460,34 @@ describe('SemanticAnalyzer - Block Declarations', () => {
     expect(warnings.some((w) => w.message.includes('missing a domain'))).toBe(true);
   });
 
-  it('warns when block is missing type', () => {
+  it('errors when block is missing type', () => {
     const source = `block "Revenue" {
       domain = "revenue"
+      query = """SELECT SUM(amount) FROM orders"""
     }`;
 
     const ast = parse(source);
     const diagnostics = analyze(ast);
-    const warnings = diagnostics.filter((d) => d.severity === 'warning');
-    expect(warnings.some((w) => w.message.includes('missing a type'))).toBe(true);
+    const errors = diagnostics.filter((d) => d.severity === 'error');
+    expect(errors.some((e) => e.message.includes('type'))).toBe(true);
   });
 
-  it('warns when block has no query', () => {
+  it('errors when a custom block has no query field', () => {
     const source = `block "Revenue" {
       domain = "revenue"
-      type = "chart.bar"
+      type = "custom"
     }`;
 
     const ast = parse(source);
     const diagnostics = analyze(ast);
-    const warnings = diagnostics.filter((d) => d.severity === 'warning');
-    expect(warnings.some((w) => w.message.includes('no query'))).toBe(true);
+    const errors = diagnostics.filter((d) => d.severity === 'error');
+    expect(errors.some((e) => e.message.includes('custom block must have a query'))).toBe(true);
   });
 
   it('validates SQL interpolations against block params', () => {
     const source = `block "Revenue" {
       domain = "revenue"
-      type = "chart.bar"
+      type = "custom"
 
       params {
         period = "Q1"
@@ -505,7 +507,7 @@ describe('SemanticAnalyzer - Block Declarations', () => {
   it('reports undefined SQL interpolation variable in block', () => {
     const source = `block "Revenue" {
       domain = "revenue"
-      type = "chart.bar"
+      type = "custom"
 
       query = """
         SELECT * FROM sales WHERE period = {undefined_var}
@@ -518,10 +520,10 @@ describe('SemanticAnalyzer - Block Declarations', () => {
     expect(errors.some((e) => e.message.includes("Undefined variable 'undefined_var'"))).toBe(true);
   });
 
-  it('accepts a complete valid block without errors', () => {
+  it('accepts a complete valid custom block without errors', () => {
     const source = `block "Revenue by Segment" {
       domain = "revenue"
-      type = "chart.bar"
+      type = "custom"
       description = "Quarterly revenue"
       tags = ["revenue", "segment"]
 
@@ -551,5 +553,146 @@ describe('SemanticAnalyzer - Block Declarations', () => {
     const diagnostics = analyze(ast);
     const errors = diagnostics.filter((d) => d.severity === 'error');
     expect(errors).toHaveLength(0);
+  });
+});
+
+// ── Phase A: blockType enforcement ───────────────────────────────────────────
+
+describe('BlockDecl — blockType validation', () => {
+  it('errors when blockType is missing', () => {
+    const source = `
+      block "Revenue KPI" {
+        domain = "finance"
+        description = "Monthly revenue"
+        owner = "analytics@example.com"
+        query = """SELECT SUM(amount) as revenue FROM orders"""
+      }
+    `;
+    const ast = parse(source);
+    const diagnostics = analyze(ast);
+    const errors = diagnostics.filter((d) => d.severity === 'error');
+    expect(errors.length).toBeGreaterThanOrEqual(1);
+    expect(errors.some((e) => e.message.includes('type'))).toBe(true);
+  });
+
+  it('errors when a semantic block has a query field', () => {
+    const source = `
+      block "Revenue Trend" {
+        domain = "finance"
+        type = "semantic"
+        metric = "revenue_growth"
+        description = "dbt metric"
+        owner = "analytics@example.com"
+        query = """SELECT date, SUM(amount) FROM orders GROUP BY date"""
+      }
+    `;
+    const ast = parse(source);
+    const diagnostics = analyze(ast);
+    const errors = diagnostics.filter((d) => d.severity === 'error');
+    expect(errors.length).toBeGreaterThanOrEqual(1);
+    expect(errors.some((e) => e.message.includes('semantic block must not have a query'))).toBe(true);
+  });
+
+  it('errors when a custom block is missing a query field', () => {
+    const source = `
+      block "Pipeline Analysis" {
+        domain = "sales"
+        type = "custom"
+        description = "Pipeline coverage"
+        owner = "analytics@example.com"
+      }
+    `;
+    const ast = parse(source);
+    const diagnostics = analyze(ast);
+    const errors = diagnostics.filter((d) => d.severity === 'error');
+    expect(errors.length).toBeGreaterThanOrEqual(1);
+    expect(errors.some((e) => e.message.includes('custom block must have a query'))).toBe(true);
+  });
+
+  it('accepts a valid semantic block with metricRef and no query', () => {
+    const source = `
+      block "Revenue Growth" {
+        domain = "finance"
+        type = "semantic"
+        metric = "revenue_growth"
+        description = "Monthly revenue growth from dbt metric"
+        owner = "analytics@example.com"
+        tags = ["finance", "revenue"]
+        visualization {
+          chart_type = "line"
+        }
+      }
+    `;
+    const ast = parse(source);
+    const diagnostics = analyze(ast);
+    const errors = diagnostics.filter((d) => d.severity === 'error');
+    expect(errors).toHaveLength(0);
+  });
+
+  it('accepts a valid custom block with a query and no metricRef', () => {
+    const source = `
+      block "Pipeline Coverage" {
+        domain = "sales"
+        type = "custom"
+        description = "Pipeline deal coverage by stage"
+        owner = "analytics@example.com"
+        tags = ["sales", "pipeline"]
+        query = """
+          SELECT stage, COUNT(*) as deals, SUM(arr) as arr
+          FROM opportunities
+          WHERE close_date >= CURRENT_DATE
+          GROUP BY stage
+          ORDER BY arr DESC
+        """
+        visualization {
+          chart_type = "bar"
+        }
+      }
+    `;
+    const ast = parse(source);
+    const diagnostics = analyze(ast);
+    const errors = diagnostics.filter((d) => d.severity === 'error');
+    expect(errors).toHaveLength(0);
+  });
+
+  it('parses the metricRef field correctly from a semantic block', () => {
+    const source = `
+      block "Churn Rate" {
+        domain = "retention"
+        type = "semantic"
+        metric = "monthly_churn_rate"
+        description = "Monthly churn from dbt semantic layer"
+        owner = "analytics@example.com"
+      }
+    `;
+    const ast = parse(source);
+    const blockNode = ast.statements.find((s) => s.kind === 'BlockDecl') as any;
+    expect(blockNode).toBeDefined();
+    expect(blockNode.blockType).toBe('semantic');
+    expect(blockNode.metricRef).toBe('monthly_churn_rate');
+    expect(blockNode.query).toBeUndefined();
+  });
+
+  it('errors when blockType value is not semantic or custom', () => {
+    const source = `
+      block "Bad Block" {
+        domain = "finance"
+        type = "chart.bar"
+        description = "Using old visualization type syntax"
+        owner = "analytics@example.com"
+        query = """SELECT 1"""
+      }
+    `;
+    // Parser should recover with an error diagnostic
+    let parseErrors = 0;
+    try {
+      const ast = parse(source);
+      const diagnostics = analyze(ast);
+      // Either a parse error or analyze error is acceptable
+      parseErrors = diagnostics.filter((d) => d.severity === 'error').length;
+    } catch {
+      parseErrors = 1;
+    }
+    expect(parseErrors).toBeGreaterThanOrEqual(1);
   });
 });

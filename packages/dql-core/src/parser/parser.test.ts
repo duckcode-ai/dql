@@ -408,7 +408,8 @@ describe('Parser - Block Declaration', () => {
   it('parses a minimal block declaration', () => {
     const source = `block "Revenue by Segment" {
       domain = "revenue"
-      type = "chart.bar"
+      type = "custom"
+      query = """SELECT tier, SUM(revenue) FROM fct_revenue GROUP BY tier"""
     }`;
 
     const ast = parse(source);
@@ -418,14 +419,14 @@ describe('Parser - Block Declaration', () => {
     if (block.kind === NodeKind.BlockDecl) {
       expect(block.name).toBe('Revenue by Segment');
       expect(block.domain).toBe('revenue');
-      expect(block.blockType).toBe('chart.bar');
+      expect(block.blockType).toBe('custom');
     }
   });
 
   it('parses a full block with all sections', () => {
     const source = `block "Revenue by Segment" {
       domain = "revenue"
-      type = "chart.bar"
+      type = "custom"
       description = "Quarterly revenue breakdown"
       tags = ["revenue", "segment", "quarterly"]
 
@@ -463,7 +464,7 @@ describe('Parser - Block Declaration', () => {
     if (block.kind === NodeKind.BlockDecl) {
       expect(block.name).toBe('Revenue by Segment');
       expect(block.domain).toBe('revenue');
-      expect(block.blockType).toBe('chart.bar');
+      expect(block.blockType).toBe('custom');
       expect(block.description).toBe('Quarterly revenue breakdown');
       expect(block.tags).toEqual(['revenue', 'segment', 'quarterly']);
 
@@ -505,7 +506,7 @@ describe('Parser - Block Declaration', () => {
     @cache("1h")
     block "Daily Revenue" {
       domain = "revenue"
-      type = "metric.card"
+      type = "custom"
       query = """
         SELECT SUM(revenue) as total FROM fct_revenue
       """
@@ -526,7 +527,8 @@ describe('Parser - Block Declaration', () => {
   it('parses block alongside dashboard', () => {
     const source = `block "Churn KPI" {
       domain = "retention"
-      type = "metric.card"
+      type = "semantic"
+      metric = "churn_rate"
     }
 
     dashboard "Overview" {
@@ -546,8 +548,9 @@ describe('Parser - Block Declaration', () => {
   it('parses block owner field', () => {
     const source = `block "Owned" {
       domain = "revenue"
-      type = "chart.bar"
+      type = "custom"
       owner = "kranthi"
+      query = """SELECT 1"""
     }`;
     const ast = parse(source);
     const block = ast.statements[0];
@@ -560,7 +563,8 @@ describe('Parser - Block Declaration', () => {
   it('parses block test operators >= <= == !=', () => {
     const source = `block "Operator Test" {
       domain = "ops"
-      type = "chart.bar"
+      type = "custom"
+      query = """SELECT COUNT(*) as row_count FROM ops_data"""
       tests {
         assert row_count >= 1
         assert row_count <= 100
