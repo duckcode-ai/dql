@@ -4,6 +4,10 @@ export interface CLIFlags {
   help: boolean;
   check: boolean;
   input: string;
+  data?: string;
+  port?: number;
+  watch?: boolean;
+  noOpen?: boolean;
 }
 
 export interface ParsedArgs {
@@ -37,6 +41,14 @@ export function parseArgs(argv: string[]): ParsedArgs {
       if (fmt === 'json' || fmt === 'text') flags.format = fmt;
     } else if (arg === '--input' && i + 1 < argv.length) {
       flags.input = argv[++i];
+    } else if (arg === '--data' && i + 1 < argv.length) {
+      flags.data = argv[++i];
+    } else if (arg === '--port' && i + 1 < argv.length) {
+      flags.port = Number(argv[++i]);
+    } else if (arg === '--watch' || arg === '-w') {
+      flags.watch = true;
+    } else if (arg === '--no-open') {
+      flags.noOpen = true;
     } else if (!command) {
       command = arg;
     } else if (!file) {

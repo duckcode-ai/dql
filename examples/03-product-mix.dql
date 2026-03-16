@@ -1,0 +1,25 @@
+// Example 3: Donut chart — Product Revenue Mix
+// Run with: dql run examples/03-product-mix.dql --data examples/data/sales.csv
+
+block "Product Revenue Mix" {
+  domain = "sales"
+  type = "custom"
+  description = "Revenue share by product"
+  tags = ["sales", "product", "breakdown"]
+
+  query = """
+    SELECT
+      product,
+      SUM(revenue) AS revenue,
+      ROUND(100.0 * SUM(revenue) / SUM(SUM(revenue)) OVER (), 1) AS pct_share
+    FROM data
+    GROUP BY product
+    ORDER BY revenue DESC
+  """
+
+  visualization {
+    chart = "donut"
+    label = product
+    value = revenue
+  }
+}

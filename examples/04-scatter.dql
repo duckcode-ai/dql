@@ -1,0 +1,28 @@
+// Example 4: Scatter plot — Revenue vs Units by Region
+// Run with: dql run examples/04-scatter.dql --data examples/data/sales.csv
+
+block "Revenue vs Units" {
+  domain = "sales"
+  type = "custom"
+  description = "Scatter of revenue vs units per region-product combination"
+  tags = ["sales", "correlation", "scatter"]
+
+  query = """
+    SELECT
+      region,
+      product,
+      SUM(revenue) AS revenue,
+      SUM(units) AS units,
+      ROUND(SUM(revenue) / NULLIF(SUM(units), 0), 0) AS revenue_per_unit
+    FROM data
+    GROUP BY region, product
+    ORDER BY revenue DESC
+  """
+
+  visualization {
+    chart = "scatter"
+    x = units
+    y = revenue
+    color = region
+  }
+}

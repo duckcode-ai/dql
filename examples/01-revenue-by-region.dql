@@ -1,0 +1,32 @@
+// Example 1: Bar chart — Revenue by Region
+// Run with: dql run examples/01-revenue-by-region.dql --data examples/data/sales.csv
+
+block "Revenue by Region" {
+  domain = "sales"
+  type = "custom"
+  description = "Total revenue broken down by sales region"
+  tags = ["sales", "regional", "revenue"]
+  owner = "analytics-team"
+
+  query = """
+    SELECT
+      region,
+      SUM(revenue) AS total_revenue,
+      COUNT(*) AS deal_count
+    FROM data
+    GROUP BY region
+    ORDER BY total_revenue DESC
+  """
+
+  visualization {
+    chart = "bar"
+    x = region
+    y = total_revenue
+    color = "#6366f1"
+  }
+
+  tests {
+    assert row_count > 0
+    assert max(total_revenue) > 0
+  }
+}

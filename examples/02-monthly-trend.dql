@@ -1,0 +1,31 @@
+// Example 2: Line chart — Monthly Revenue Trend
+// Run with: dql run examples/02-monthly-trend.dql --data examples/data/sales.csv
+
+block "Monthly Revenue Trend" {
+  domain = "sales"
+  type = "custom"
+  description = "Revenue trend aggregated by month"
+  tags = ["sales", "trend", "time-series"]
+
+  query = """
+    SELECT
+      strftime(CAST(date AS DATE), '%Y-%m') AS month,
+      SUM(revenue) AS revenue,
+      COUNT(DISTINCT region) AS active_regions
+    FROM data
+    GROUP BY month
+    ORDER BY month
+  """
+
+  visualization {
+    chart = "line"
+    x = month
+    y = revenue
+    color = "#10b981"
+  }
+
+  tests {
+    assert row_count >= 12
+    assert min(revenue) > 0
+  }
+}

@@ -29,7 +29,8 @@
     "@duckcodeailabs/dql-core": "workspace:*",
     "@duckcodeailabs/dql-compiler": "workspace:*",
     "@duckcodeailabs/dql-project": "workspace:*",
-    "@duckcodeailabs/dql-governance": "workspace:*"
+    "@duckcodeailabs/dql-governance": "workspace:*",
+    "duckdb": "^1.1.0"
   },
   "devDependencies": {
     "typescript": "^5.7.0",
