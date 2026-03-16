@@ -1,37 +1,112 @@
 # DQL
 
-DQL is an open language and toolkit for durable analytics assets in Git. It gives teams a typed way to define reusable blocks, semantic-layer metadata, testing rules, and editor tooling without depending on the closed DuckCode coworker product.
+DQL (DuckCode Query Language) is an open, declarative language for defining durable analytics assets in Git. It gives teams a typed way to author reusable blocks — self-contained, testable, version-controlled units of data analysis that combine SQL, visualization config, parameters, and assertions. DQL does not require DuckCode Studio — it works standalone.
 
-## V1 scope
+## Install
 
-Included in this repo:
-- `@dql/core` for parsing, semantic analysis, and formatting
-- `@dql/compiler`, `@dql/runtime`, and `@dql/charts` for rendering and execution
-- `@dql/project` for Git-backed block/project primitives
-- `@dql/governance` for testing and certification primitives
-- `@dql/lsp` and `DQL Language Support` for VS Code authoring
-- examples and a starter template
-
-Not included:
-- notebook coworker UI
-- agentic generation
-- MCP runtime
-- approvals, run memory, or product orchestration
-
-## Quick start
+npm packages are coming shortly. For now, clone from source:
 
 ```bash
+git clone https://github.com/duckcode-ai/dql.git
+cd dql
 pnpm install
 pnpm build
-pnpm exec dql parse examples/blocks/revenue_by_segment.dql
-pnpm exec dql fmt --check examples/blocks/revenue_by_segment.dql
+# The dql binary is now available via:
+node apps/cli/dist/index.js --help
+# or
+pnpm exec dql --help
 ```
 
-## Workspace layout
+Once published:
 
-```text
+```bash
+npm install -g @dql/cli   # global dql binary
+# or for library use:
+npm install @dql/core @dql/compiler
+```
+
+## Quick Start
+
+Write a block, parse it, then certify it:
+
+```bash
+# 1. Write a block (see example below)
+# 2. Parse and validate
+pnpm exec dql parse examples/blocks/revenue_by_segment.dql
+# 3. Certify (checks owner, description, tags, domain)
+pnpm exec dql certify examples/blocks/revenue_by_segment.dql
+```
+
+### Example DQL block
+
+```dql
+block "Revenue by Segment" {
+    domain      = "revenue"
+    type        = "custom"
+    description = "Quarterly revenue grouped by customer segment"
+    owner       = "data-team"
+    tags        = ["revenue", "segment", "quarterly"]
+
+    params {
+        period = "current_quarter"
+    }
+
+    query = """
+        SELECT segment_tier AS segment, SUM(amount) AS revenue
+        FROM fct_revenue
+        WHERE fiscal_period = ${period}
+        GROUP BY segment_tier
+        ORDER BY revenue DESC
+    """
+
+    visualization {
+        chart = "bar"
+        x     = segment
+        y     = revenue
+    }
+
+    tests {
+        assert row_count > 0
+    }
+}
+```
+
+## Documentation
+
+- [Getting Started](./docs/getting-started.md) — installation paths, first block walkthrough, Node.js API
+- [Language Specification](./docs/dql-language-spec.md) — full syntax reference, block types, chart types, AST
+- [CLI Reference](./docs/cli-reference.md) — all commands and flags
+- [Publishing](./docs/publishing.md) — how to publish `@dql/*` packages to npm
+- [VS Code Extension](#vs-code-extension) — install `DQL Language Support`
+
+## VS Code Extension
+
+Search **DQL Language Support** in the Extensions panel, or install from the command line:
+
+```bash
+code --install-extension dql.dql-language-support
+```
+
+The extension provides syntax highlighting, snippets, formatting on save, and Language Server Protocol support (completions, hover, diagnostics) backed by `@dql/lsp`.
+
+## Package Reference
+
+| Package | Description |
+|---|---|
+| `@dql/core` | Lexer, parser, AST, semantic analysis, formatter |
+| `@dql/compiler` | IR lowering, Vega-Lite / React / HTML / runtime code generation |
+| `@dql/governance` | Block testing, certification rules, cost estimation |
+| `@dql/project` | Git-backed block registry and project primitives |
+| `@dql/lsp` | Language Server Protocol implementation |
+| `@dql/runtime` | Browser runtime: data fetching, Vega rendering, hot-reload client |
+| `@dql/charts` | visx-powered React SVG chart components |
+| `@dql/cli` | Public CLI (`dql parse`, `dql certify`, `dql fmt`, …) |
+
+## Workspace Layout
+
+```
 apps/
-  cli/                Public DQL CLI
+  cli/                Public DQL CLI (@dql/cli)
   vscode-extension/   DQL Language Support for VS Code
 
 packages/
@@ -46,19 +121,21 @@ packages/
 
 examples/
   blocks/             Example DQL blocks
-  semantic-layer/     Example metric, dimension, hierarchy, and companion metadata definitions
+  semantic-layer/     Example metric, dimension, hierarchy definitions
 
 templates/
   starter/            Minimal Git-native starter project
 ```
 
-## Use cases this repo supports
+## What This Repo Does Not Include
 
-- Author reusable DQL blocks in Git
-- Author query-only DQL blocks when no visualization is needed
-- Validate and format blocks locally
-- Define semantic-layer metadata for metrics, dimensions, hierarchies, and block companion metadata
-- Test and certify blocks before promotion
-- Build DQL-aware editor workflows in VS Code
+- Notebook coworker UI
+- Agentic / natural-language block generation
+- MCP runtime
+- Approvals, run history, or product orchestration
 
-See [Getting Started](./docs/getting-started.md), [Project Structure](./docs/project-structure.md), [V1 Support Scope](./docs/v1-support-scope.md), and [Publishing](./docs/publishing.md).
+Those remain part of the closed DuckCode product.
+
+## License
+
+Apache-2.0 — see [LICENSE](./LICENSE).
