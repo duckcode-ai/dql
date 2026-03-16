@@ -20,9 +20,12 @@
     "build:types": "tsc",
     "build:bundle": "node build.mjs",
     "test": "vitest run --passWithNoTests",
-    "clean": "rm -rf dist tsconfig.tsbuildinfo"
+    "clean": "rm -rf dist tsconfig.tsbuildinfo",
+    "prepublishOnly": "pnpm run build"
   },
-  "files": ["dist"],
+  "files": [
+    "dist"
+  ],
   "repository": {
     "type": "git",
     "url": "https://github.com/duckcode-ai/dql.git",
@@ -36,5 +39,8 @@
     "vitest": "^3.0.0",
     "typescript": "^5.7.0",
     "@types/node": "^22.0.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
   }
 }
