@@ -1,13 +1,13 @@
 # DQL Language Specification
 
 **Version:** 1.0.0  
-**Status:** Implemented in `@dql/core`
+**Status:** Implemented in `@duckcodeailabs/dql-core`
 
 ---
 
 ## Overview
 
-DQL (DuckCode Query Language) is a declarative language for defining analytics blocks — self-contained, testable, version-controlled units of data analysis. Each block wraps SQL with metadata, visualization config, parameters, and test assertions.
+DQL (DuckCode Query Language) is a declarative language for defining analytics blocks — self-contained, testable, version-controlled units of data analysis. Each block wraps SQL with metadata, optional visualization config, parameters, and test assertions.
 
 ## Lexical Structure
 
@@ -50,15 +50,42 @@ A block is the atomic unit of the platform:
 ```dql
 block "Block Name" {
     domain = "domain_name"
-    type = "chart.bar"
+    type = "custom"           // required: "custom" or "semantic"
     description = "Human-readable description"
     tags = ["tag1", "tag2"]
     owner = "username"
 
     params { ... }
-    query = """..."""
+    query = """..."""          // required for type = "custom"
     visualization { ... }
     tests { ... }
+}
+```
+
+### Block Types
+
+Every block must declare its execution type:
+
+| Value | Description |
+|-------|-------------|
+| `type = "custom"` | Certified SQL block — the `query` field contains the SQL executed at runtime |
+| `type = "semantic"` | Semantic layer reference — the `metric` field references a dbt metric by name; SQL is managed by the semantic layer, not the block |
+
+```dql
+// Custom block (certified SQL)
+block "Revenue by Segment" {
+    type = "custom"
+    domain = "revenue"
+    query = """SELECT segment, SUM(revenue) FROM fct_revenue GROUP BY 1"""
+    // ...
+}
+
+// Semantic block (dbt metric reference)
+block "ARR Growth" {
+    type = "semantic"
+    domain = "finance"
+    metric = "annual_recurring_revenue"
+    // query field must be omitted
 }
 ```
 
@@ -67,7 +94,7 @@ block "Block Name" {
 | Field | Type | Description |
 |-------|------|-------------|
 | `domain` | string | Business domain (revenue, retention, sales, etc.) |
-| `type` | string | Block type (chart.bar, metric.card, predict.score, etc.) |
+| `type` | string | Block type — must be `"semantic"` or `"custom"` (see Block Types above) |
 
 ### Optional Fields
 
@@ -106,6 +133,8 @@ query = """
 ```
 
 ## Visualization
+
+The `visualization` section is optional. Query-only blocks can omit it when the asset is meant for reuse, validation, or downstream composition rather than direct chart rendering.
 
 Visualization config maps query columns to chart properties:
 
@@ -174,7 +203,7 @@ import { RevenueBySegment } from "./revenue/rev-by-segment.dql"
 
 ## Semantic Layer Integration
 
-Blocks can reference metrics and dimensions from the semantic layer:
+Blocks can reference metrics and dimensions from the semantic layer. The semantic layer can also carry hierarchy definitions and optional companion business metadata for individual blocks:
 
 ```yaml
 # semantic-layer/metrics/revenue.yaml
@@ -185,7 +214,34 @@ metrics:
     table: fct_revenue
 ```
 
-The `SemanticLayer` class validates that block references resolve to known metrics/dimensions.
+```yaml
+# semantic-layer/hierarchies/revenue_time.yaml
+name: revenue_time
+label: Revenue Time
+description: Calendar drill path for revenue reporting
+domain: revenue
+levels:
+  - name: fiscal_year
+    dimension: fiscal_year
+    order: 1
+  - name: fiscal_quarter
+    dimension: fiscal_quarter
+    order: 2
+```
+
+```yaml
+# semantic-layer/blocks/revenue_by_segment.yaml
+name: revenue_by_segment
+block: revenue_by_segment
+domain: revenue
+description: Business context and semantic mappings for the segment revenue block
+semanticMappings:
+  segment: segment_tier
+  revenue: total_revenue
+reviewStatus: review
+```
+
+The `SemanticLayer` class validates metric, dimension, and hierarchy definitions. Companion metadata is a separate typed YAML contract for block-level business context.
 
 ## AST Node Types
 

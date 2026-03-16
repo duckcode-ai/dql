@@ -32,7 +32,7 @@ filter.dropdown(SELECT DISTINCT region FROM orders,label="Region",param="region"
   it('formats block declarations with params/query/visualization/tests', () => {
     const source = `block "rev_by_segment" {
       domain = "sales"
-      type = "chart.bar"
+      type = "custom"
       params { region = "NA" }
       query = """
         SELECT segment, SUM(revenue) as rev

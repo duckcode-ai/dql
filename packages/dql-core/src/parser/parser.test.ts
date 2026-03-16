@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { parse } from './parser.js';
 import { NodeKind } from '../ast/nodes.js';
+import { analyze } from '../semantic/analyzer.js';
 
 describe('Parser', () => {
   it('parses a standalone chart call', () => {
@@ -408,7 +409,8 @@ describe('Parser - Block Declaration', () => {
   it('parses a minimal block declaration', () => {
     const source = `block "Revenue by Segment" {
       domain = "revenue"
-      type = "chart.bar"
+      type = "custom"
+      query = """SELECT tier, SUM(revenue) FROM fct_revenue GROUP BY tier"""
     }`;
 
     const ast = parse(source);
@@ -418,14 +420,14 @@ describe('Parser - Block Declaration', () => {
     if (block.kind === NodeKind.BlockDecl) {
       expect(block.name).toBe('Revenue by Segment');
       expect(block.domain).toBe('revenue');
-      expect(block.blockType).toBe('chart.bar');
+      expect(block.blockType).toBe('custom');
     }
   });
 
   it('parses a full block with all sections', () => {
     const source = `block "Revenue by Segment" {
       domain = "revenue"
-      type = "chart.bar"
+      type = "custom"
       description = "Quarterly revenue breakdown"
       tags = ["revenue", "segment", "quarterly"]
 
@@ -463,7 +465,7 @@ describe('Parser - Block Declaration', () => {
     if (block.kind === NodeKind.BlockDecl) {
       expect(block.name).toBe('Revenue by Segment');
       expect(block.domain).toBe('revenue');
-      expect(block.blockType).toBe('chart.bar');
+      expect(block.blockType).toBe('custom');
       expect(block.description).toBe('Quarterly revenue breakdown');
       expect(block.tags).toEqual(['revenue', 'segment', 'quarterly']);
 
@@ -505,7 +507,7 @@ describe('Parser - Block Declaration', () => {
     @cache("1h")
     block "Daily Revenue" {
       domain = "revenue"
-      type = "metric.card"
+      type = "custom"
       query = """
         SELECT SUM(revenue) as total FROM fct_revenue
       """
@@ -526,7 +528,8 @@ describe('Parser - Block Declaration', () => {
   it('parses block alongside dashboard', () => {
     const source = `block "Churn KPI" {
       domain = "retention"
-      type = "metric.card"
+      type = "semantic"
+      metric = "churn_rate"
     }
 
     dashboard "Overview" {
@@ -546,8 +549,9 @@ describe('Parser - Block Declaration', () => {
   it('parses block owner field', () => {
     const source = `block "Owned" {
       domain = "revenue"
-      type = "chart.bar"
+      type = "custom"
       owner = "kranthi"
+      query = """SELECT 1"""
     }`;
     const ast = parse(source);
     const block = ast.statements[0];
@@ -560,7 +564,8 @@ describe('Parser - Block Declaration', () => {
   it('parses block test operators >= <= == !=', () => {
     const source = `block "Operator Test" {
       domain = "ops"
-      type = "chart.bar"
+      type = "custom"
+      query = """SELECT COUNT(*) as row_count FROM ops_data"""
       tests {
         assert row_count >= 1
         assert row_count <= 100
@@ -590,6 +595,101 @@ describe('Parser - Block Declaration', () => {
       if (dashboard.body[0].kind === NodeKind.UseDecl) {
         expect(dashboard.body[0].name).toBe('Revenue by Segment');
       }
+    }
+  });
+});
+
+// ---- Phase A: Block Schema tests (A8–A12) ----
+
+describe('Block declarations — Phase A schema enforcement', () => {
+  // A8: parser emits error for block missing type (parse throws DQLSyntaxError)
+  it('A8 — emits error for block missing type declaration', () => {
+    const source = `block "Revenue KPI" {
+      domain = "revenue"
+      query = """SELECT SUM(amount) FROM orders"""
+    }`;
+    // The parser records the missing-type error and throws DQLSyntaxError with diagnostics.
+    let errors: Array<{ severity: string; message: string }> = [];
+    try {
+      const ast = parse(source);
+      errors = analyze(ast).filter((d) => d.severity === 'error');
+    } catch (e: unknown) {
+      const syntaxErr = e as { diagnostics?: Array<{ severity: string; message: string }> };
+      if (syntaxErr.diagnostics) {
+        errors = syntaxErr.diagnostics.filter((d) => d.severity === 'error');
+      }
+    }
+    expect(errors.length).toBeGreaterThanOrEqual(1);
+    expect(errors.some((e) => e.message.toLowerCase().includes('missing a required type'))).toBe(true);
+  });
+
+  // A9: semantic analyzer rejects semantic block with query but no metricRef
+  it('A9 — semantic analyzer rejects semantic block with query and no metricRef', () => {
+    const source = `block "Revenue Metric" {
+      domain = "revenue"
+      type = "semantic"
+      query = """SELECT SUM(amount) FROM orders"""
+    }`;
+    const ast = parse(source);
+    const diagnostics = analyze(ast);
+    const errors = diagnostics.filter((d) => d.severity === 'error');
+    expect(errors.length).toBeGreaterThanOrEqual(1);
+    expect(errors.some((e) => e.message.includes('must not contain a query field'))).toBe(true);
+  });
+
+  // A10: semantic analyzer rejects custom block without query
+  it('A10 — semantic analyzer rejects custom block without query', () => {
+    const source = `block "Revenue Custom" {
+      domain = "revenue"
+      type = "custom"
+    }`;
+    const ast = parse(source);
+    const diagnostics = analyze(ast);
+    const errors = diagnostics.filter((d) => d.severity === 'error');
+    expect(errors.length).toBeGreaterThanOrEqual(1);
+    expect(errors.some((e) => e.message.includes('must have a query field'))).toBe(true);
+  });
+
+  // A11: accepts semantic block with only metricRef (no query)
+  it('A11 — accepts semantic block with metricRef and no query', () => {
+    const source = `block "Revenue Metric" {
+      domain = "revenue"
+      type = "semantic"
+      metric = "revenue_growth"
+    }`;
+    const ast = parse(source);
+    const diagnostics = analyze(ast);
+    const errors = diagnostics.filter((d) => d.severity === 'error');
+    expect(errors).toHaveLength(0);
+
+    const block = ast.statements[0];
+    expect(block.kind).toBe(NodeKind.BlockDecl);
+    if (block.kind === NodeKind.BlockDecl) {
+      expect(block.blockType).toBe('semantic');
+      expect(block.metricRef).toBe('revenue_growth');
+    }
+  });
+
+  // A12: accepts custom block with SQL
+  it('A12 — accepts custom block with SQL query', () => {
+    const source = `block "Revenue Custom" {
+      domain = "revenue"
+      type = "custom"
+      query = """SELECT SUM(amount) AS total FROM orders"""
+      visualization {
+        chart = "kpi"
+        y = total
+      }
+    }`;
+    const ast = parse(source);
+    const diagnostics = analyze(ast);
+    const errors = diagnostics.filter((d) => d.severity === 'error');
+    expect(errors).toHaveLength(0);
+
+    const block = ast.statements[0];
+    expect(block.kind).toBe(NodeKind.BlockDecl);
+    if (block.kind === NodeKind.BlockDecl) {
+      expect(block.blockType).toBe('custom');
     }
   });
 });

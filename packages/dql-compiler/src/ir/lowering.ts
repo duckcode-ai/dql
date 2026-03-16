@@ -15,7 +15,7 @@ import {
   type LayoutRowNode,
   type DashboardBodyItem,
   type SemanticLayer,
-} from '@dql/core';
+} from '@duckcodeailabs/dql-core';
 import type {
   WorkbookIR,
   PageIR,
@@ -729,12 +729,8 @@ function processSQL(
 function lowerBlockDecl(node: BlockDeclNode, _options: LoweringOptions): DashboardIR | null {
   if (!node.query) return null;
 
-  let chartType = 'bar';
-  if (node.blockType && node.blockType.startsWith('chart.')) {
-    chartType = node.blockType.slice('chart.'.length);
-  }
   const vizChartType = getBlockVisualizationChartType(node);
-  if (vizChartType) chartType = vizChartType;
+  const chartType = vizChartType ? vizChartType : 'bar';
 
   const normalizedChartType = normalizeChartTypeAlias(chartType);
   const config = lowerBlockVisualizationConfig(node);
@@ -760,6 +756,7 @@ function lowerBlockDecl(node: BlockDeclNode, _options: LoweringOptions): Dashboa
       sqlParams: params,
       config,
       title: node.description || node.name,
+      blockType: node.blockType,
     }],
     filters: [],
     params: paramIRs,

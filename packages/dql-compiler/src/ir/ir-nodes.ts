@@ -1,4 +1,4 @@
-import type { ChartType, FilterType, ParamType } from '@dql/core';
+import type { ChartType, FilterType, ParamType } from '@duckcodeailabs/dql-core';
 
 // ---- Workbook / Page ----
 
@@ -58,6 +58,7 @@ export interface ChartIR {
   connection?: string;
   annotations?: AnnotationIR[];
   materializeRefresh?: string;
+  blockType?: 'semantic' | 'custom';
   drillConfig?: DrillConfigIR;
 }
 

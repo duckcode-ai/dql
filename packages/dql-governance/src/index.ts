@@ -1,7 +1,7 @@
 export { TestRunner } from './test-runner.js';
 export type { BlockTestAssertion, QueryExecutor } from './test-runner.js';
 
-export { Certifier, BUILTIN_RULES } from './certifier.js';
+export { Certifier, BUILTIN_RULES, PROMOTABLE_RULES } from './certifier.js';
 export type { CertificationRule, CertificationCheckResult, CertificationResult } from './certifier.js';
 
 export { CostEstimator } from './cost-estimator.js';

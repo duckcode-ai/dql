@@ -621,7 +621,8 @@ export class Parser {
     this.expect(TokenType.LeftBrace);
 
     let domain: string | undefined;
-    let blockType: string | undefined;
+    let blockType: 'semantic' | 'custom' | undefined;
+    let metricRef: string | undefined;
     let description: string | undefined;
     let tags: string[] | undefined;
     let owner: string | undefined;
@@ -640,7 +641,20 @@ export class Parser {
         this.advance();
         this.expect(TokenType.Equals);
         const val = this.expect(TokenType.StringLiteral);
-        blockType = val.value;
+        const raw = val.value;
+        if (raw === 'semantic' || raw === 'custom') {
+          blockType = raw;
+        } else {
+          this.error(
+            `Block type must be "semantic" or "custom", got "${raw}". Use type = "semantic" for dbt metric blocks or type = "custom" for SQL blocks.`,
+          );
+          blockType = 'custom'; // recover gracefully
+        }
+      } else if (this.check(TokenType.MetricKeyword)) {
+        this.advance();
+        this.expect(TokenType.Equals);
+        const val = this.expect(TokenType.StringLiteral);
+        metricRef = val.value;
       } else if (this.check(TokenType.DescriptionKeyword)) {
         this.advance();
         this.expect(TokenType.Equals);
@@ -686,10 +700,17 @@ export class Parser {
         break;
       } else {
         this.error(
-          `Unexpected token '${this.current().value}' inside block. Expected 'domain', 'type', 'description', 'tags', 'owner', 'params', 'query', 'visualization', 'tests', or '}'.`,
+          `Unexpected token '${this.current().value}' inside block. Expected 'domain', 'type', 'metric', 'description', 'tags', 'owner', 'params', 'query', 'visualization', 'tests', or '}'.`,
         );
         this.advance();
       }
+    }
+
+    if (!blockType) {
+      this.error(
+        `Block "${nameToken.value}" is missing a required type declaration. Add type = "semantic" for dbt metric blocks or type = "custom" for SQL blocks.`,
+      );
+      blockType = 'custom'; // error-recovery default — keeps downstream analysis working
     }
 
     this.expect(TokenType.RightBrace);
@@ -699,6 +720,7 @@ export class Parser {
       name: nameToken.value,
       domain,
       blockType,
+      metricRef,
       description,
       tags,
       owner,
@@ -857,6 +879,7 @@ export class Parser {
   private isBlockFieldKeyword(type: TokenType): boolean {
     return type === TokenType.DomainKeyword
       || type === TokenType.TypeKeyword
+      || type === TokenType.MetricKeyword
       || type === TokenType.DescriptionKeyword
       || type === TokenType.TagsKeyword
       || type === TokenType.OwnerKeyword

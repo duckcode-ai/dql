@@ -26,16 +26,16 @@ importers:
 
   apps/cli:
     dependencies:
-      '@dql/compiler':
+      '@duckcodeailabs/dql-compiler':
         specifier: workspace:*
         version: link:../../packages/dql-compiler
-      '@dql/core':
+      '@duckcodeailabs/dql-core':
         specifier: workspace:*
         version: link:../../packages/dql-core
-      '@dql/governance':
+      '@duckcodeailabs/dql-governance':
         specifier: workspace:*
         version: link:../../packages/dql-governance
-      '@dql/project':
+      '@duckcodeailabs/dql-project':
         specifier: workspace:*
         version: link:../../packages/dql-project
     devDependencies:
@@ -106,10 +106,10 @@ importers:
         specifier: ^3.3.0
         version: 3.12.0(react-dom@18.3.1(react@18.3.1))(react@18.3.1)
       react:
-        specifier: ^18.3.0
+        specifier: ^18.0.0
         version: 18.3.1
       react-dom:
-        specifier: ^18.3.0
+        specifier: ^18.0.0
         version: 18.3.1(react@18.3.1)
     devDependencies:
       '@types/react':
@@ -127,7 +127,7 @@ importers:
 
   packages/dql-compiler:
     dependencies:
-      '@dql/core':
+      '@duckcodeailabs/dql-core':
         specifier: workspace:*
         version: link:../dql-core
     devDependencies:
@@ -198,10 +198,10 @@ importers:
 
   packages/dql-governance:
     dependencies:
-      '@dql/core':
+      '@duckcodeailabs/dql-core':
         specifier: workspace:*
         version: link:../dql-core
-      '@dql/project':
+      '@duckcodeailabs/dql-project':
         specifier: workspace:*
         version: link:../dql-project
     devDependencies:
@@ -214,7 +214,7 @@ importers:
 
   packages/dql-lsp:
     dependencies:
-      '@dql/core':
+      '@duckcodeailabs/dql-core':
         specifier: workspace:*
         version: link:../dql-core
       vscode-languageserver:
@@ -230,7 +230,7 @@ importers:
 
   packages/dql-project:
     dependencies:
-      '@dql/core':
+      '@duckcodeailabs/dql-core':
         specifier: workspace:*
         version: link:../dql-core
       better-sqlite3:

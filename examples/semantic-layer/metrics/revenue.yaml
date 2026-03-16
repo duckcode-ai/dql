@@ -1,0 +1,11 @@
+name: total_revenue
+label: Total Revenue
+description: Sum of recognized revenue
+domain: revenue
+sql: SUM(amount)
+type: sum
+table: fct_revenue
+tags:
+  - revenue
+  - finance
+owner: finance-analytics

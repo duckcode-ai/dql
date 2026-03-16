@@ -1,0 +1,25 @@
+block "Revenue Trend Query" {
+    domain = "revenue"
+    type = "custom"
+    description = "Reusable revenue trend query without embedded visualization metadata"
+    tags = ["revenue", "trend", "query-only"]
+    owner = "finance-analytics"
+
+    params {
+        months_back = 12
+    }
+
+    query = """
+        SELECT
+            DATE_TRUNC('month', recognized_at) AS revenue_month,
+            SUM(amount) AS total_revenue
+        FROM fct_revenue
+        WHERE recognized_at >= CURRENT_DATE - INTERVAL '${months_back} months'
+        GROUP BY 1
+        ORDER BY 1
+    """
+
+    tests {
+        assert row_count > 0
+    }
+}

@@ -1,5 +1,5 @@
 {
-  "name": "@dql/project",
+  "name": "@duckcodeailabs/dql-project",
   "version": "0.1.0",
   "description": "DQL project and block registry primitives: block metadata, versions, sync, and storage adapters",
   "license": "Apache-2.0",
@@ -15,9 +15,12 @@
   "scripts": {
     "build": "rm -rf dist tsconfig.tsbuildinfo && tsc -b",
     "test": "vitest run --passWithNoTests",
-    "clean": "rm -rf dist tsconfig.tsbuildinfo"
+    "clean": "rm -rf dist tsconfig.tsbuildinfo",
+    "prepublishOnly": "pnpm run build"
   },
-  "files": ["dist"],
+  "files": [
+    "dist"
+  ],
   "repository": {
     "type": "git",
     "url": "https://github.com/duckcode-ai/dql.git",
@@ -27,12 +30,15 @@
     "access": "public"
   },
   "dependencies": {
-    "@dql/core": "workspace:*",
+    "@duckcodeailabs/dql-core": "workspace:*",
     "better-sqlite3": "^11.7.0"
   },
   "devDependencies": {
     "@types/better-sqlite3": "^7.6.0",
     "typescript": "^5.7.0",
     "vitest": "^3.0.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
   }
 }

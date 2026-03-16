@@ -1,4 +1,4 @@
-import type { BlockRecord, TestResultSummary } from '@dql/project';
+import type { BlockRecord, TestResultSummary } from '@duckcodeailabs/dql-project';
 
 /**
  * Certification rule that a block must pass to be certified.
@@ -114,6 +114,30 @@ export const BUILTIN_RULES: CertificationRule[] = [
       }
       return { passed: true };
     },
+  },
+];
+
+export const PROMOTABLE_RULES: CertificationRule[] = [
+  ...BUILTIN_RULES,
+  {
+    id: 'canonical-git-path',
+    name: 'Block is in a canonical Git path',
+    description: 'Promotable blocks must not live under draft-only paths',
+    severity: 'error',
+    check: (block) => ({
+      passed: !!block.gitPath && !block.gitPath.includes('/_drafts/') && !block.gitPath.startsWith('blocks/_drafts/'),
+      message: block.gitPath ? 'Block is still stored in a draft-only path' : 'Missing Git path',
+    }),
+  },
+  {
+    id: 'stable-version',
+    name: 'Block has a stable version',
+    description: 'Promotable blocks must have a semantic version',
+    severity: 'error',
+    check: (block) => ({
+      passed: /^\d+\.\d+\.\d+$/.test(block.version),
+      message: `Version "${block.version}" is not a stable semantic version`,
+    }),
   },
 ];
 

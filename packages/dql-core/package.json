@@ -1,7 +1,8 @@
 {
-  "name": "@dql/core",
+  "name": "@duckcodeailabs/dql-core",
   "version": "0.1.0",
   "description": "DQL language core: lexer, parser, AST, semantic analysis",
+  "license": "Apache-2.0",
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
@@ -15,10 +16,21 @@
     "build": "rm -rf dist tsconfig.tsbuildinfo && tsc",
     "test": "vitest run",
     "test:watch": "vitest",
-    "clean": "rm -rf dist tsconfig.tsbuildinfo"
+    "clean": "rm -rf dist tsconfig.tsbuildinfo",
+    "prepublishOnly": "pnpm run build"
   },
-  "files": ["dist"],
-  "keywords": ["dql", "dashboard", "query", "language", "lexer", "parser", "ast"],
+  "files": [
+    "dist"
+  ],
+  "keywords": [
+    "dql",
+    "dashboard",
+    "query",
+    "language",
+    "lexer",
+    "parser",
+    "ast"
+  ],
   "repository": {
     "type": "git",
     "url": "https://github.com/duckcode-ai/dql.git",
@@ -31,5 +43,8 @@
     "vitest": "^3.0.0",
     "typescript": "^5.7.0",
     "@types/node": "^22.0.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
   }
 }

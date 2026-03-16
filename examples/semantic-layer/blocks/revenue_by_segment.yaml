@@ -1,0 +1,21 @@
+name: revenue_by_segment
+block: revenue_by_segment
+domain: revenue
+description: Business metadata and semantic mappings for the revenue by segment block
+owner: finance-analytics
+tags:
+  - revenue
+  - segment
+  - executive
+glossary:
+  - ARR is normalized before segment rollup.
+  - Segment uses the finance-approved tier mapping.
+semanticMappings:
+  segment: segment_tier
+  revenue: total_revenue
+lineage:
+  - warehouse.fct_revenue
+  - warehouse.dim_segment
+notes:
+  - Reviewed with finance leadership for Q1 board reporting.
+reviewStatus: review
