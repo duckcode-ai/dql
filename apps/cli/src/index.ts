@@ -46,7 +46,7 @@ async function main() {
   // Commands that don't need a file argument
   if (command === 'notebook') {
     try {
-      await runNotebook(flags as unknown as Record<string, unknown>);
+      await runNotebook({ data: flags.data, port: flags.port, noOpen: flags.noOpen });
     } catch (err) {
       console.error(`Error: ${err instanceof Error ? err.message : String(err)}`);
       process.exit(1);

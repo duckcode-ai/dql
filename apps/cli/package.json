@@ -8,7 +8,7 @@
     "dql": "./dist/index.js"
   },
   "scripts": {
-    "build": "rm -rf dist tsconfig.tsbuildinfo && tsc -b",
+    "build": "rm -rf dist tsconfig.tsbuildinfo && tsc -b && cp -r ../notebook/dist dist/notebook-dist",
     "dev": "tsx src/index.ts",
     "test": "vitest run --passWithNoTests",
     "clean": "rm -rf dist tsconfig.tsbuildinfo",
@@ -18,7 +18,8 @@
     "access": "public"
   },
   "files": [
-    "dist"
+    "dist",
+    "dist/notebook-dist"
   ],
   "repository": {
     "type": "git",
