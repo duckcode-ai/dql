@@ -1,5 +1,5 @@
 import { readFileSync } from 'node:fs';
-import { Parser } from '@dql/core';
+import { Parser } from '@duckcodeailabs/dql-core';
 import type { CLIFlags } from '../args.js';
 
 function formatExpected(expr: any): string {

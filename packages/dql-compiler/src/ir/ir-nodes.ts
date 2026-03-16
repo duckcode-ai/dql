@@ -1,4 +1,4 @@
-import type { ChartType, FilterType, ParamType } from '@dql/core';
+import type { ChartType, FilterType, ParamType } from '@duckcodeailabs/dql-core';
 
 // ---- Workbook / Page ----
 

@@ -13,7 +13,7 @@ Choose the path that fits your workflow.
 
 ### Path A — CLI only (standalone authoring)
 
-Install the `dql` binary globally once `@dql/cli` is published to npm:
+Install the `dql` binary globally once `@duckcodeailabs/dql-cli` is published to npm:
 
 ```bash
 npm install -g @dql/cli
@@ -53,7 +53,7 @@ Or install from the command line:
 code --install-extension dql.dql-language-support
 ```
 
-The extension provides syntax highlighting, snippet expansion, format-on-save, hover documentation, and live diagnostics via the Language Server (`@dql/lsp`). It does not require any separate server process — the language server is bundled into the extension.
+The extension provides syntax highlighting, snippet expansion, format-on-save, hover documentation, and live diagnostics via the Language Server (`@duckcodeailabs/dql-lsp`). It does not require any separate server process — the language server is bundled into the extension.
 
 ---
 
@@ -212,7 +212,7 @@ pnpm exec dql fmt blocks/revenue_by_segment.dql --check
 After `npm install @dql/core`:
 
 ```typescript
-import { Parser, SemanticAnalyzer, formatDQL } from '@dql/core';
+import { Parser, SemanticAnalyzer, formatDQL } from '@duckcodeailabs/dql-core';
 import { readFileSync } from 'node:fs';
 
 const source = readFileSync('blocks/revenue_by_segment.dql', 'utf-8');
@@ -238,7 +238,7 @@ const formatted = formatDQL(source);
 console.log(formatted);
 ```
 
-The `@dql/core` package exports:
+The `@duckcodeailabs/dql-core` package exports:
 - `Parser` — tokenises and parses `.dql` source into a typed AST
 - `SemanticAnalyzer` — validates block structure, required fields, chart types
 - `formatDQL` / `formatProgram` — canonical formatter
@@ -249,8 +249,8 @@ The `@dql/core` package exports:
 ## Using @dql/compiler to Compile to HTML
 
 ```typescript
-import { Parser } from '@dql/core';
-import { compile } from '@dql/compiler';
+import { Parser } from '@duckcodeailabs/dql-core';
+import { compile } from '@duckcodeailabs/dql-compiler';
 import { readFileSync } from 'node:fs';
 
 const source = readFileSync('blocks/revenue_by_segment.dql', 'utf-8');

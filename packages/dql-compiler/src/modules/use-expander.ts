@@ -1,4 +1,4 @@
-import { NodeKind, type ProgramNode, type DashboardBodyItem } from '@dql/core';
+import { NodeKind, type ProgramNode, type DashboardBodyItem } from '@duckcodeailabs/dql-core';
 import type { ModuleSymbol } from './resolver.js';
 
 /**

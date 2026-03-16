@@ -1,7 +1,7 @@
 # DQL Language Specification
 
 **Version:** 1.0.0  
-**Status:** Implemented in `@dql/core`
+**Status:** Implemented in `@duckcodeailabs/dql-core`
 
 ---
 

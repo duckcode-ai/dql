@@ -1,5 +1,5 @@
 {
-  "name": "@dql/project",
+  "name": "@duckcodeailabs/dql-project",
   "version": "0.1.0",
   "description": "DQL project and block registry primitives: block metadata, versions, sync, and storage adapters",
   "license": "Apache-2.0",
@@ -30,7 +30,7 @@
     "access": "public"
   },
   "dependencies": {
-    "@dql/core": "workspace:*",
+    "@duckcodeailabs/dql-core": "workspace:*",
     "better-sqlite3": "^11.7.0"
   },
   "devDependencies": {

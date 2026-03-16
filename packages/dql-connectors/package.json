@@ -1,5 +1,5 @@
 {
-  "name": "@dql/connectors",
+  "name": "@duckcodeailabs/dql-connectors",
   "version": "0.1.0",
   "description": "DQL database connectors: PostgreSQL, SQLite, MySQL, BigQuery, Snowflake",
   "license": "Apache-2.0",

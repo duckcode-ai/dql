@@ -1,7 +1,7 @@
 import { readFileSync } from 'node:fs';
-import { Parser } from '@dql/core';
-import { Certifier } from '@dql/governance';
-import type { BlockRecord } from '@dql/project';
+import { Parser } from '@duckcodeailabs/dql-core';
+import { Certifier } from '@duckcodeailabs/dql-governance';
+import type { BlockRecord } from '@duckcodeailabs/dql-project';
 import type { CLIFlags } from '../args.js';
 
 export async function runCertify(filePath: string, flags: CLIFlags): Promise<void> {

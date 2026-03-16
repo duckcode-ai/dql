@@ -1,6 +1,6 @@
 # CLI Reference
 
-The `dql` binary is provided by `@dql/cli`. All commands accept a positional file path argument and a shared set of flags.
+The `dql` binary is provided by `@duckcodeailabs/dql-cli`. All commands accept a positional file path argument and a shared set of flags.
 
 ## Usage
 
@@ -84,7 +84,7 @@ dql certify examples/blocks/revenue_by_segment.dql
 dql certify examples/blocks/revenue_by_segment.dql --format json
 ```
 
-**What it checks (via `Certifier` in `@dql/governance`):**
+**What it checks (via `Certifier` in `@duckcodeailabs/dql-governance`):**
 
 - `domain` field is present and non-empty
 - `type` field is present (`"custom"` or `"semantic"`)
@@ -128,7 +128,7 @@ dql certify examples/blocks/revenue_by_segment.dql --format json
 
 ### `dql fmt <file.dql>`
 
-Format a `.dql` file in place using the canonical DQL formatter (`formatDQL` from `@dql/core`).
+Format a `.dql` file in place using the canonical DQL formatter (`formatDQL` from `@duckcodeailabs/dql-core`).
 
 ```bash
 # Format and write back:

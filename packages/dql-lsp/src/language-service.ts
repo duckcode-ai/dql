@@ -1,5 +1,5 @@
-import { parse, analyze, formatDQL } from '@dql/core';
-import type { Diagnostic as DQLDiagnostic } from '@dql/core';
+import { parse, analyze, formatDQL } from '@duckcodeailabs/dql-core';
+import type { Diagnostic as DQLDiagnostic } from '@duckcodeailabs/dql-core';
 
 export interface LSDiagnostic {
   range: { start: { line: number; character: number }; end: { line: number; character: number } };

@@ -11,4 +11,4 @@ semantic-layer/
   blocks/
 ```
 
-Use the CLI from the root `dql` workspace or install published `@dql/*` packages in your own project.
+Use the CLI from the root `dql` workspace or install published `@duckcodeailabs/dql-*` packages in your own project.

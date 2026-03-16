@@ -76,7 +76,7 @@ block "Revenue by Segment" {
 - [Getting Started](./docs/getting-started.md) — installation paths, first block walkthrough, Node.js API
 - [Language Specification](./docs/dql-language-spec.md) — full syntax reference, block types, chart types, AST
 - [CLI Reference](./docs/cli-reference.md) — all commands and flags
-- [Publishing](./docs/publishing.md) — how to publish `@dql/*` packages to npm
+- [Publishing](./docs/publishing.md) — how to publish `@duckcodeailabs/dql-*` packages to npm
 - [VS Code Extension](#vs-code-extension) — install `DQL Language Support`
 
 ## VS Code Extension
@@ -87,20 +87,20 @@ Search **DQL Language Support** in the Extensions panel, or install from the com
 code --install-extension dql.dql-language-support
 ```
 
-The extension provides syntax highlighting, snippets, formatting on save, and Language Server Protocol support (completions, hover, diagnostics) backed by `@dql/lsp`.
+The extension provides syntax highlighting, snippets, formatting on save, and Language Server Protocol support (completions, hover, diagnostics) backed by `@duckcodeailabs/dql-lsp`.
 
 ## Package Reference
 
 | Package | Description |
 |---|---|
-| `@dql/core` | Lexer, parser, AST, semantic analysis, formatter |
-| `@dql/compiler` | IR lowering, Vega-Lite / React / HTML / runtime code generation |
-| `@dql/governance` | Block testing, certification rules, cost estimation |
-| `@dql/project` | Git-backed block registry and project primitives |
-| `@dql/lsp` | Language Server Protocol implementation |
-| `@dql/runtime` | Browser runtime: data fetching, Vega rendering, hot-reload client |
-| `@dql/charts` | visx-powered React SVG chart components |
-| `@dql/cli` | Public CLI (`dql parse`, `dql certify`, `dql fmt`, …) |
+| `@duckcodeailabs/dql-core` | Lexer, parser, AST, semantic analysis, formatter |
+| `@duckcodeailabs/dql-compiler` | IR lowering, Vega-Lite / React / HTML / runtime code generation |
+| `@duckcodeailabs/dql-governance` | Block testing, certification rules, cost estimation |
+| `@duckcodeailabs/dql-project` | Git-backed block registry and project primitives |
+| `@duckcodeailabs/dql-lsp` | Language Server Protocol implementation |
+| `@duckcodeailabs/dql-runtime` | Browser runtime: data fetching, Vega rendering, hot-reload client |
+| `@duckcodeailabs/dql-charts` | visx-powered React SVG chart components |
+| `@duckcodeailabs/dql-cli` | Public CLI (`dql parse`, `dql certify`, `dql fmt`, …) |
 
 ## Workspace Layout
 

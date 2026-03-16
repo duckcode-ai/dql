@@ -10,7 +10,7 @@ This repository publishes the public DQL packages to npm and the editor extensio
 - `npm whoami` returns your username (run `npm login` if not)
 - pnpm 9+, Node.js 18+
 - GitHub Actions secrets configured on the repository:
-  - `NPM_TOKEN` — for `@dql/*` package publishing
+  - `NPM_TOKEN` — for `@duckcodeailabs/dql-*` package publishing
   - `VSCE_PAT` — for VS Code extension publishing from CI (optional)
 
 ---
@@ -108,7 +108,7 @@ cd packages/dql-core
 pnpm publish --access public
 ```
 
-`--access public` is required because all packages are scoped (`@dql/`) and scoped packages default to private on npm. Each `package.json` also carries `"publishConfig": { "access": "public" }` as a safety net.
+`--access public` is required because all packages are scoped (`@duckcodeailabs/dql-`) and scoped packages default to private on npm. Each `package.json` also carries `"publishConfig": { "access": "public" }` as a safety net.
 
 ---
 
@@ -157,7 +157,7 @@ Published packages:
 ## Notes
 
 - Do not publish packages from the closed DuckCode product from this repository.
-- `@dql/cli` registers a `dql` binary on install.
+- `@duckcodeailabs/dql-cli` registers a `dql` binary on install.
 - `dql-language-support` is packaged separately through `vsce`, not `npm publish`.
 - `v0.1.0` is the first public OSS release for the DQL language, tooling, and project system.
 

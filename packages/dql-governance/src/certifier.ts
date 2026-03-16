@@ -1,4 +1,4 @@
-import type { BlockRecord, TestResultSummary } from '@dql/project';
+import type { BlockRecord, TestResultSummary } from '@duckcodeailabs/dql-project';
 
 /**
  * Certification rule that a block must pass to be certified.

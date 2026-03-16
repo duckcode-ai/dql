@@ -1,5 +1,5 @@
 import { readFileSync, writeFileSync } from 'node:fs';
-import { formatDQL } from '@dql/core';
+import { formatDQL } from '@duckcodeailabs/dql-core';
 import type { CLIFlags } from '../args.js';
 
 export async function runFmt(filePath: string, flags: CLIFlags): Promise<void> {

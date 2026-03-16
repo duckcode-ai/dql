@@ -1,5 +1,5 @@
 import { readFileSync } from 'node:fs';
-import { Parser, SemanticAnalyzer, printAST } from '@dql/core';
+import { Parser, SemanticAnalyzer, printAST } from '@duckcodeailabs/dql-core';
 import type { CLIFlags } from '../args.js';
 
 export async function runParse(filePath: string, flags: CLIFlags): Promise<void> {

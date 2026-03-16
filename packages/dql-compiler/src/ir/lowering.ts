@@ -15,7 +15,7 @@ import {
   type LayoutRowNode,
   type DashboardBodyItem,
   type SemanticLayer,
-} from '@dql/core';
+} from '@duckcodeailabs/dql-core';
 import type {
   WorkbookIR,
   PageIR,

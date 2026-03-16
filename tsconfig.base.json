@@ -5,14 +5,14 @@
     "module": "NodeNext",
     "moduleResolution": "NodeNext",
     "paths": {
-      "@dql/core": ["packages/dql-core/src/index.ts"],
-      "@dql/compiler": ["packages/dql-compiler/src/index.ts"],
-      "@dql/runtime": ["packages/dql-runtime/src/index.ts"],
-      "@dql/charts": ["packages/dql-charts/src/index.ts"],
-      "@dql/lsp": ["packages/dql-lsp/src/index.ts"],
-      "@dql/connectors": ["packages/dql-connectors/src/index.ts"],
-      "@dql/governance": ["packages/dql-governance/src/index.ts"],
-      "@dql/project": ["packages/dql-project/src/index.ts"]
+      "@duckcodeailabs/dql-core": ["packages/dql-core/src/index.ts"],
+      "@duckcodeailabs/dql-compiler": ["packages/dql-compiler/src/index.ts"],
+      "@duckcodeailabs/dql-runtime": ["packages/dql-runtime/src/index.ts"],
+      "@duckcodeailabs/dql-charts": ["packages/dql-charts/src/index.ts"],
+      "@duckcodeailabs/dql-lsp": ["packages/dql-lsp/src/index.ts"],
+      "@duckcodeailabs/dql-connectors": ["packages/dql-connectors/src/index.ts"],
+      "@duckcodeailabs/dql-governance": ["packages/dql-governance/src/index.ts"],
+      "@duckcodeailabs/dql-project": ["packages/dql-project/src/index.ts"]
     },
     "declaration": true,
     "declarationMap": true,

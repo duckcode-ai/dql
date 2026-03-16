@@ -1,0 +1,10 @@
+.git
+.github
+.turbo
+**/node_modules
+**/dist
+**/.next
+**/coverage
+**/.DS_Store
+pnpm-debug.log*
+*.tsbuildinfo
