@@ -1,4 +1,4 @@
-# Publishing @dql/* to npm
+# Publishing @duckcodeailabs/dql-* to npm
 
 This repository publishes the public DQL packages to npm and the editor extension to the VS Code marketplace.
 
@@ -20,16 +20,16 @@ This repository publishes the public DQL packages to npm and the editor extensio
 The release script (`scripts/release-packages.mjs`) publishes packages in the following order, which respects the dependency graph:
 
 ```
-@dql/core                    (no @dql/* deps)
-@dql/compiler                (depends on @dql/core)
-@dql/runtime                 (no @dql/* deps)
-@dql/charts                  (no @dql/* deps; peer deps: react)
-@dql/project                 (depends on @dql/core)
-@dql/governance              (depends on @dql/core, @dql/project)
-@dql/connectors              (no @dql/* deps)
-@dql/lsp                     (depends on @dql/core)
-@dql/cli                     (depends on @dql/core, @dql/compiler,
-                                         @dql/project, @dql/governance)
+@duckcodeailabs/dql-core                    (no @duckcodeailabs/dql-* deps)
+@duckcodeailabs/dql-compiler                (depends on @duckcodeailabs/dql-core)
+@duckcodeailabs/dql-runtime                 (no @duckcodeailabs/dql-* deps)
+@duckcodeailabs/dql-charts                  (no @duckcodeailabs/dql-* deps; peer deps: react)
+@duckcodeailabs/dql-project                 (depends on @duckcodeailabs/dql-core)
+@duckcodeailabs/dql-governance              (depends on @duckcodeailabs/dql-core, @duckcodeailabs/dql-project)
+@duckcodeailabs/dql-connectors              (no @duckcodeailabs/dql-* deps)
+@duckcodeailabs/dql-lsp                     (depends on @duckcodeailabs/dql-core)
+@duckcodeailabs/dql-cli                     (depends on @duckcodeailabs/dql-core, @duckcodeailabs/dql-compiler,
+                                         @duckcodeailabs/dql-project, @duckcodeailabs/dql-governance)
 ```
 
 ---
@@ -142,14 +142,14 @@ gh release create v0.1.0 \
   --notes "Initial public release.
 
 Published packages:
-- [@dql/core@0.1.0](https://www.npmjs.com/package/@dql/core)
-- [@dql/compiler@0.1.0](https://www.npmjs.com/package/@dql/compiler)
-- [@dql/runtime@0.1.0](https://www.npmjs.com/package/@dql/runtime)
-- [@dql/charts@0.1.0](https://www.npmjs.com/package/@dql/charts)
-- [@dql/project@0.1.0](https://www.npmjs.com/package/@dql/project)
-- [@dql/governance@0.1.0](https://www.npmjs.com/package/@dql/governance)
-- [@dql/lsp@0.1.0](https://www.npmjs.com/package/@dql/lsp)
-- [@dql/cli@0.1.0](https://www.npmjs.com/package/@dql/cli)"
+- [@duckcodeailabs/dql-core@0.1.0](https://www.npmjs.com/package/@duckcodeailabs/dql-core)
+- [@duckcodeailabs/dql-compiler@0.1.0](https://www.npmjs.com/package/@duckcodeailabs/dql-compiler)
+- [@duckcodeailabs/dql-runtime@0.1.0](https://www.npmjs.com/package/@duckcodeailabs/dql-runtime)
+- [@duckcodeailabs/dql-charts@0.1.0](https://www.npmjs.com/package/@duckcodeailabs/dql-charts)
+- [@duckcodeailabs/dql-project@0.1.0](https://www.npmjs.com/package/@duckcodeailabs/dql-project)
+- [@duckcodeailabs/dql-governance@0.1.0](https://www.npmjs.com/package/@duckcodeailabs/dql-governance)
+- [@duckcodeailabs/dql-lsp@0.1.0](https://www.npmjs.com/package/@duckcodeailabs/dql-lsp)
+- [@duckcodeailabs/dql-cli@0.1.0](https://www.npmjs.com/package/@duckcodeailabs/dql-cli)"
 ```
 
 ---

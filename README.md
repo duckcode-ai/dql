@@ -20,9 +20,9 @@ pnpm exec dql --help
 Once published:
 
 ```bash
-npm install -g @dql/cli   # global dql binary
+npm install -g @duckcodeailabs/dql-cli   # global dql binary
 # or for library use:
-npm install @dql/core @dql/compiler
+npm install @duckcodeailabs/dql-core @duckcodeailabs/dql-compiler
 ```
 
 ## Quick Start
@@ -106,7 +106,7 @@ The extension provides syntax highlighting, snippets, formatting on save, and La
 
 ```
 apps/
-  cli/                Public DQL CLI (@dql/cli)
+  cli/                Public DQL CLI (@duckcodeailabs/dql-cli)
   vscode-extension/   DQL Language Support for VS Code
 
 packages/

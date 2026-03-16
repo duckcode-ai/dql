@@ -16,7 +16,7 @@ Choose the path that fits your workflow.
 Install the `dql` binary globally once `@duckcodeailabs/dql-cli` is published to npm:
 
 ```bash
-npm install -g @dql/cli
+npm install -g @duckcodeailabs/dql-cli
 dql --help
 ```
 
@@ -36,7 +36,7 @@ node apps/cli/dist/index.js --help
 ### Path B — Library (embed in your application)
 
 ```bash
-npm install @dql/core @dql/compiler
+npm install @duckcodeailabs/dql-core @duckcodeailabs/dql-compiler
 ```
 
 This gives you the parser, AST, semantic analyser, formatter, and full compilation pipeline as importable ESM modules. No CLI required.
@@ -207,9 +207,9 @@ pnpm exec dql fmt blocks/revenue_by_segment.dql --check
 
 ---
 
-## Using @dql/core in Node.js
+## Using @duckcodeailabs/dql-core in Node.js
 
-After `npm install @dql/core`:
+After `npm install @duckcodeailabs/dql-core`:
 
 ```typescript
 import { Parser, SemanticAnalyzer, formatDQL } from '@duckcodeailabs/dql-core';
@@ -246,7 +246,7 @@ The `@duckcodeailabs/dql-core` package exports:
 
 ---
 
-## Using @dql/compiler to Compile to HTML
+## Using @duckcodeailabs/dql-compiler to Compile to HTML
 
 ```typescript
 import { Parser } from '@duckcodeailabs/dql-core';
