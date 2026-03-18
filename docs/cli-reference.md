@@ -172,23 +172,45 @@ dql fmt examples/blocks/revenue_by_segment.dql --check
 
 ### `dql test <file.dql>`
 
-Inspect the test assertions declared in each block. In the OSS CLI, test execution requires a live database connection; this command performs a dry run that shows which assertions exist without executing them.
+Execute the `tests { assert ... }` assertions declared in each block using DuckDB in-process. By default, DuckDB runs against an in-memory database (`:memory:`). Use `--db <path>` to target a real DuckDB file on disk.
 
 ```bash
 dql test examples/blocks/revenue_by_segment.dql
+dql test examples/blocks/revenue_by_segment.dql --db ./warehouse.duckdb
 dql test examples/blocks/revenue_by_segment.dql --format json
 ```
 
-**Text output:**
+**Flags specific to `test`:**
+
+| Flag | Description |
+|---|---|
+| `--db <path>` | Path to a DuckDB database file. Defaults to `:memory:` (an ephemeral in-process database). |
+
+**What it does:**
+
+1. Parses and semantically analyses the file (same as `dql parse`).
+2. For each block, compiles the SQL query with parameter defaults substituted.
+3. Executes the query against DuckDB (in-memory or `--db` file).
+4. Evaluates each `assert` expression against the result set.
+5. Exits `0` if all assertions pass, `1` if any fail.
+
+**Text output (all pass):**
 
 ```
   ✓ Found 1 block(s) in examples/blocks/revenue_by_segment.dql
 
   Block: "Revenue by Segment"
     Tests: 1 assertion(s)
-    → assert row_count > 0
-    Status: ⚠ Dry run (no database connection)
-    Hint: Connect a database to execute assertions
+    → assert row_count > 0    ✓ PASSED
+    Status: ✓ All assertions passed
+```
+
+**Text output (assertion fails):**
+
+```
+  Block: "Revenue by Segment"
+    → assert row_count > 0    ✗ FAILED  (actual: 0)
+  Status: ✗ 1 assertion(s) failed
 ```
 
 **JSON output shape:**
@@ -196,10 +218,19 @@ dql test examples/blocks/revenue_by_segment.dql --format json
 ```json
 {
   "file": "examples/blocks/revenue_by_segment.dql",
+  "db": ":memory:",
   "blocks": [
-    { "name": "Revenue by Segment", "tests": 1 }
+    {
+      "name": "Revenue by Segment",
+      "tests": 1,
+      "passed": 1,
+      "failed": 0,
+      "assertions": [
+        { "expression": "row_count > 0", "passed": true, "actual": 42 }
+      ]
+    }
   ],
-  "note": "Test execution requires a database connection. Use --connection to specify."
+  "summary": { "passed": 1, "failed": 0 }
 }
 ```
 

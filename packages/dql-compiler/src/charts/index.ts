@@ -63,6 +63,12 @@ export function registerAllCharts(): void {
   registerChartEmitter('waterfall', emitWaterfallChart);
   registerChartEmitter('boxplot', emitBoxPlotChart);
   registerChartEmitter('geo', emitGeoChart);
+  // Aliases — common spelling variants and missing types
+  registerChartEmitter('forecast', emitLineChart);        // forecast = line with confidence band styling
+  registerChartEmitter('stacked-bar', emitStackedBarChart);
+  registerChartEmitter('grouped-bar', emitGroupedBarChart);
+  registerChartEmitter('small-multiples', emitSmallMultiplesChart);
+  registerChartEmitter('donut', emitPieChart);            // donut is a pie with innerRadius
 }
 
 // Auto-register on import
