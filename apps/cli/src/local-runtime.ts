@@ -1,5 +1,5 @@
 import { createServer } from 'node:http';
-import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
+import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { dirname, extname, join, normalize, resolve } from 'node:path';
 import { QueryExecutor, type ConnectionConfig } from '@duckcodeailabs/dql-connectors';
 import {
@@ -38,11 +38,113 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
     const url = new URL(requestUrl, 'http://127.0.0.1');
     const path = url.pathname || '/';
 
+    // CORS — needed for dql-notebook SPA dev mode
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, OPTIONS');
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+    if (req.method === 'OPTIONS') {
+      res.writeHead(204);
+      res.end();
+      return;
+    }
+
     if (req.method === 'GET' && path === '/api/health') {
       res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
       res.end(serializeJSON({ status: 'ok' }));
       return;
     }
+
+    // ── dql-notebook file management API ─────────────────────────────────────
+    // GET  /api/notebooks          — list all .dql/.dqlnb files grouped by folder
+    // GET  /api/notebook-content   — read a file (?path=relative/path)
+    // POST /api/notebooks          — create new notebook
+    // PUT  /api/notebook-content   — save file
+    // GET  /api/schema             — list data files for schema panel
+    if (req.method === 'GET' && path === '/api/notebooks') {
+      res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+      res.end(serializeJSON(scanNotebookFiles(projectRoot)));
+      return;
+    }
+
+    if (req.method === 'GET' && path === '/api/notebook-content') {
+      const filePath = url.searchParams.get('path');
+      if (!filePath) {
+        res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({ error: 'Missing path query parameter' }));
+        return;
+      }
+      const absPath = safeJoin(projectRoot, filePath);
+      if (!absPath || !existsSync(absPath)) {
+        res.writeHead(404, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({ error: 'File not found' }));
+        return;
+      }
+      res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+      res.end(serializeJSON({ content: readFileSync(absPath, 'utf-8') }));
+      return;
+    }
+
+    if (req.method === 'POST' && path === '/api/notebooks') {
+      try {
+        const body = await readJSON(req);
+        const { name, template } = body as { name: string; template: string };
+        if (!name || typeof name !== 'string') {
+          res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
+          res.end(serializeJSON({ error: 'Missing notebook name' }));
+          return;
+        }
+        const slug = name.toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '') || 'notebook';
+        const nbDir = join(projectRoot, 'notebooks');
+        mkdirSync(nbDir, { recursive: true });
+        const nbPath = join(nbDir, `${slug}.dqlnb`);
+        if (existsSync(nbPath)) {
+          res.writeHead(409, { 'Content-Type': 'application/json; charset=utf-8' });
+          res.end(serializeJSON({ error: 'Notebook already exists' }));
+          return;
+        }
+        const content = buildNotebookTemplate(name, template ?? 'blank');
+        writeFileSync(nbPath, content, 'utf-8');
+        res.writeHead(201, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({ path: `notebooks/${slug}.dqlnb`, content }));
+      } catch (error) {
+        res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({ error: error instanceof Error ? error.message : String(error) }));
+      }
+      return;
+    }
+
+    if (req.method === 'PUT' && path === '/api/notebook-content') {
+      try {
+        const body = await readJSON(req);
+        const { path: filePath, content } = body as { path: string; content: string };
+        if (!filePath || typeof content !== 'string') {
+          res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
+          res.end(serializeJSON({ error: 'Missing path or content' }));
+          return;
+        }
+        const absPath = safeJoin(projectRoot, filePath);
+        if (!absPath) {
+          res.writeHead(403, { 'Content-Type': 'application/json; charset=utf-8' });
+          res.end(serializeJSON({ error: 'Invalid path' }));
+          return;
+        }
+        mkdirSync(dirname(absPath), { recursive: true });
+        writeFileSync(absPath, content, 'utf-8');
+        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({ ok: true }));
+      } catch (error) {
+        res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({ error: error instanceof Error ? error.message : String(error) }));
+      }
+      return;
+    }
+
+    if (req.method === 'GET' && path === '/api/schema') {
+      res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+      res.end(serializeJSON(scanDataFiles(projectRoot)));
+      return;
+    }
+    // ── end dql-notebook API ──────────────────────────────────────────────────
 
     if (req.method === 'POST' && path === '/api/query') {
       try {
@@ -398,6 +500,10 @@ function contentTypeFor(filePath: string): string {
       return 'text/css; charset=utf-8';
     case '.svg':
       return 'image/svg+xml';
+    case '.woff2':
+      return 'font/woff2';
+    case '.woff':
+      return 'font/woff';
     default:
       return 'text/plain; charset=utf-8';
   }
@@ -459,4 +565,75 @@ function normalizeNotebookCell(value: unknown): NotebookCell | null {
 
 function isConnectionConfig(value: unknown): value is ConnectionConfig {
   return Boolean(value && typeof value === 'object' && 'driver' in (value as Record<string, unknown>));
+}
+
+// ── dql-notebook helper functions ─────────────────────────────────────────────
+
+type NotebookFileEntry = {
+  name: string;
+  path: string;
+  type: 'notebook' | 'workbook' | 'block' | 'dashboard';
+  folder: string;
+};
+
+function scanNotebookFiles(projectRoot: string): NotebookFileEntry[] {
+  const result: NotebookFileEntry[] = [];
+  const folderMap: Record<string, NotebookFileEntry['type']> = {
+    notebooks: 'notebook',
+    workbooks: 'workbook',
+    blocks: 'block',
+    dashboards: 'dashboard',
+  };
+  for (const [folder, type] of Object.entries(folderMap)) {
+    const dir = join(projectRoot, folder);
+    if (!existsSync(dir)) continue;
+    try {
+      for (const entry of readdirSync(dir, { withFileTypes: true })) {
+        if (!entry.isFile()) continue;
+        if (!entry.name.endsWith('.dql') && !entry.name.endsWith('.dqlnb')) continue;
+        result.push({
+          name: entry.name.replace(/\.(dql|dqlnb)$/, ''),
+          path: `${folder}/${entry.name}`,
+          type,
+          folder,
+        });
+      }
+    } catch { /* skip unreadable dirs */ }
+  }
+  return result;
+}
+
+function scanDataFiles(projectRoot: string): { name: string; path: string; columns: never[] }[] {
+  const dataDir = join(projectRoot, 'data');
+  if (!existsSync(dataDir)) return [];
+  try {
+    return readdirSync(dataDir, { withFileTypes: true })
+      .filter((e) => e.isFile() && /\.(csv|parquet|json)$/.test(e.name))
+      .map((e) => ({ name: e.name, path: `data/${e.name}`, columns: [] }));
+  } catch { return []; }
+}
+
+function buildNotebookTemplate(title: string, template: string): string {
+  const id = () => Math.random().toString(36).slice(2, 10);
+  let cells: object[];
+
+  if (template === 'revenue') {
+    cells = [
+      { id: id(), type: 'markdown', content: `# ${title}\n\nRevenue analysis using DQL and DuckDB.` },
+      { id: id(), type: 'sql', name: 'revenue_summary', content: "SELECT\n  segment_tier AS segment,\n  SUM(amount) AS total_revenue,\n  COUNT(*) AS deals\nFROM read_csv_auto('./data/revenue.csv')\nGROUP BY segment_tier\nORDER BY total_revenue DESC" },
+      { id: id(), type: 'sql', name: 'revenue_trend', content: "SELECT\n  recognized_at AS date,\n  SUM(amount) AS revenue\nFROM read_csv_auto('./data/revenue.csv')\nGROUP BY recognized_at\nORDER BY recognized_at" },
+    ];
+  } else if (template === 'pipeline') {
+    cells = [
+      { id: id(), type: 'markdown', content: `# ${title}\n\nPipeline health and conversion analysis.` },
+      { id: id(), type: 'sql', name: 'pipeline_overview', content: "SELECT *\nFROM read_csv_auto('./data/pipeline.csv')\nLIMIT 100" },
+    ];
+  } else {
+    cells = [
+      { id: id(), type: 'markdown', content: `# ${title}\n\nAdd your analysis here.` },
+      { id: id(), type: 'sql', name: 'query_1', content: 'SELECT 1 AS hello' },
+    ];
+  }
+
+  return JSON.stringify({ version: 1, title, cells }, null, 2);
 }
