@@ -3,6 +3,7 @@
 ## Prerequisites
 
 - Node.js 18 or newer
+- For local preview with the default file/DuckDB runtime, use Node 18, 20, or 22 LTS when possible
 - pnpm 9 or newer (for monorepo / source builds)
 
 ---
@@ -31,7 +32,11 @@ pnpm build
 pnpm exec dql --help
 # Or invoke the compiled entry point directly:
 node apps/cli/dist/index.js --help
+# Or, inside a generated project without a global install:
+../node_modules/.bin/dql --help
 ```
+
+If you switch Node versions after the initial install, rerun `pnpm install` before using local preview so native DuckDB bindings are rebuilt for the active runtime.
 
 ### Path B — Library (embed in your application)
 
@@ -60,6 +65,8 @@ The extension provides syntax highlighting, snippet expansion, format-on-save, h
 ## Quickstart Project
 
 Scaffold a local-first DQL project with sample data:
+
+These commands assume `dql` is on your shell `PATH`. If you are running from a source checkout, use `pnpm exec dql` from the repo root or `../node_modules/.bin/dql` from inside the generated project.
 
 ```bash
 dql init my-dql-project
@@ -94,6 +101,8 @@ dql preview blocks/pipeline_health.dql --open
 dql build blocks/pipeline_health.dql
 dql serve dist/pipeline_health
 ```
+
+If the default preview port is already in use, pass `--port 4474` or another open port to `preview` or `serve`.
 
 ---
 

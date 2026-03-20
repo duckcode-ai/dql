@@ -29,7 +29,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
 
     if (req.method === 'GET' && path === '/api/health') {
       res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
-      res.end(JSON.stringify({ status: 'ok' }));
+      res.end(serializeJSON({ status: 'ok' }));
       return;
     }
 
@@ -38,7 +38,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
         const body = await readJSON(req);
         if (typeof body.sql !== 'string' || body.sql.trim().length === 0) {
           res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
-          res.end(JSON.stringify({ columns: [], rows: [], error: 'Missing SQL in request body.' }));
+          res.end(serializeJSON({ columns: [], rows: [], error: 'Missing SQL in request body.' }));
           return;
         }
         const result = await executor.executeQuery(
@@ -47,11 +47,16 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           body.variables && typeof body.variables === 'object' ? body.variables : {},
           connection,
         );
+        const payload = serializeJSON(result);
         res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
-        res.end(JSON.stringify(result));
+        res.end(payload);
       } catch (error) {
+        if (res.headersSent || res.writableEnded) {
+          res.end();
+          return;
+        }
         res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' });
-        res.end(JSON.stringify({
+        res.end(serializeJSON({
           columns: [],
           rows: [],
           error: error instanceof Error ? error.message : String(error),
@@ -99,6 +104,49 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
       }
       resolvePromise(address.port);
     });
+  });
+}
+
+export async function assertLocalQueryRuntimeReady(
+  executor: QueryExecutor,
+  connection: ConnectionConfig,
+): Promise<void> {
+  try {
+    const connector = await executor.getConnector(connection);
+    const ok = await connector.ping();
+    if (!ok) {
+      throw new Error(`Connection check failed for driver "${connection.driver}".`);
+    }
+  } catch (error) {
+    throw new Error(formatLocalQueryRuntimeError(connection, error));
+  }
+}
+
+export function formatLocalQueryRuntimeError(
+  connection: ConnectionConfig,
+  error: unknown,
+): string {
+  const detail = error instanceof Error ? error.message : String(error);
+  const driver = connection.driver;
+  const currentNode = process.versions.node;
+
+  if (
+    (driver === 'file' || driver === 'duckdb') &&
+    detail.includes('duckdb.node')
+  ) {
+    return `Local query runtime is unavailable for driver "${driver}": DuckDB native bindings could not be loaded. Current Node.js runtime: ${currentNode}. Reinstall dependencies with a supported LTS Node release (for example Node 18, 20, or 22), then rerun "pnpm install". Original error: ${detail}`;
+  }
+
+  return `Local query runtime is unavailable for driver "${driver}": ${detail}`;
+}
+
+export function serializeJSON(value: unknown): string {
+  return JSON.stringify(value, (_key, current) => {
+    if (typeof current === 'bigint') {
+      const asNumber = Number(current);
+      return Number.isSafeInteger(asNumber) ? asNumber : current.toString();
+    }
+    return current;
   });
 }
 

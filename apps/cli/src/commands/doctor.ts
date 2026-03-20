@@ -1,7 +1,8 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
+import { QueryExecutor } from '@duckcodeailabs/dql-connectors';
 import type { CLIFlags } from '../args.js';
-import { findProjectRoot, loadProjectConfig } from '../local-runtime.js';
+import { assertLocalQueryRuntimeReady, findProjectRoot, loadProjectConfig } from '../local-runtime.js';
 
 interface Check {
   name: string;
@@ -50,6 +51,9 @@ export async function runDoctor(targetPath: string | null, flags: CLIFlags): Pro
 
   if (config.defaultConnection?.driver === 'file' || config.defaultConnection?.driver === 'duckdb') {
     checks.push(checkDuckDBDependency(projectRoot));
+  }
+  if (config.defaultConnection?.driver) {
+    checks.push(await checkLocalQueryRuntime(projectRoot, config.defaultConnection));
   }
 
   const passed = checks.filter((check) => check.ok).length;
@@ -112,5 +116,29 @@ function checkDuckDBDependency(projectRoot: string): Check {
       ok: false,
       detail: 'failed to parse package.json',
     };
+  }
+}
+
+async function checkLocalQueryRuntime(projectRoot: string, connection: NonNullable<ReturnType<typeof loadProjectConfig>['defaultConnection']>): Promise<Check> {
+  const previousCwd = process.cwd();
+  const executor = new QueryExecutor();
+
+  try {
+    process.chdir(projectRoot);
+    await assertLocalQueryRuntimeReady(executor, connection);
+    return {
+      name: 'Local query runtime',
+      ok: true,
+      detail: `driver=${connection.driver} is available`,
+    };
+  } catch (error) {
+    return {
+      name: 'Local query runtime',
+      ok: false,
+      detail: error instanceof Error ? error.message : String(error),
+    };
+  } finally {
+    process.chdir(previousCwd);
+    await executor.disconnect().catch(() => {});
   }
 }

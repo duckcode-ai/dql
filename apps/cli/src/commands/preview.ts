@@ -4,7 +4,7 @@ import { dirname, join, resolve } from 'node:path';
 import { compile, writeBundle } from '@duckcodeailabs/dql-compiler';
 import { QueryExecutor } from '@duckcodeailabs/dql-connectors';
 import type { CLIFlags } from '../args.js';
-import { findProjectRoot, loadProjectConfig, startLocalServer } from '../local-runtime.js';
+import { assertLocalQueryRuntimeReady, findProjectRoot, loadProjectConfig, startLocalServer } from '../local-runtime.js';
 import { maybeOpenBrowser } from '../open-browser.js';
 
 export async function runPreview(filePath: string, flags: CLIFlags): Promise<void> {
@@ -32,11 +32,12 @@ export async function runPreview(filePath: string, flags: CLIFlags): Promise<voi
   const executor = new QueryExecutor();
   const connection = config.defaultConnection ?? { driver: 'file', filepath: ':memory:' };
   process.chdir(projectRoot);
+  await assertLocalQueryRuntimeReady(executor, connection);
   const port = await startLocalServer({
     rootDir: previewDir,
     executor,
     connection,
-    preferredPort: config.preview?.port ?? 3474,
+    preferredPort: flags.port ?? config.preview?.port ?? 3474,
   });
   const url = `http://127.0.0.1:${port}`;
   maybeOpenBrowser(url, flags.open ?? config.preview?.open ?? true);

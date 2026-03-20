@@ -147,6 +147,8 @@ ${indentBlock(query, 8)}
         assert row_count > 0
     }
 }
+`;
+}
 
 function buildSemanticBlockTemplate(opts: {
   title: string;
@@ -161,8 +163,6 @@ function buildSemanticBlockTemplate(opts: {
     owner = "${opts.owner}"
     tags = ["starter", "semantic", "${opts.domain}"]
     metric = "${opts.metricName}"
-}
-`;
 }
 `;
 }

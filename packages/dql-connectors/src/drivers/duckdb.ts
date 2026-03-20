@@ -8,7 +8,8 @@ export class DuckDBConnector implements DatabaseConnector {
 
   async connect(config: ConnectionConfig): Promise<void> {
     // Dynamic import to avoid requiring duckdb when not used
-    const duckdb = await import('duckdb');
+    const duckdbModule = await import('duckdb');
+    const duckdb = resolveDuckDBModule(duckdbModule);
 
     const dbPath = config.filepath ?? ':memory:';
 
@@ -50,17 +51,19 @@ export class DuckDBConnector implements DatabaseConnector {
           return;
         }
 
-        // Infer columns from first row
-        const columns: ColumnMeta[] = Object.keys(result[0]).map((name) => ({
+        const normalizedRows = result.map((row: Row) => normalizeDuckDBRow(row));
+
+        // Infer columns from first normalized row so JSON-facing types match runtime values.
+        const columns: ColumnMeta[] = Object.keys(normalizedRows[0]).map((name) => ({
           name,
-          type: inferDuckDBType(result[0][name]),
+          type: inferDuckDBType(normalizedRows[0][name]),
           driverType: 'duckdb',
         }));
 
         resolve({
           columns,
-          rows: result as Row[],
-          rowCount: result.length,
+          rows: normalizedRows,
+          rowCount: normalizedRows.length,
           executionTimeMs,
         });
       };
@@ -97,6 +100,53 @@ export class DuckDBConnector implements DatabaseConnector {
       return false;
     }
   }
+}
+
+export function resolveDuckDBModule(module: unknown): { Database: new (path: string, callback: (err: Error | null) => void) => any } {
+  const candidate = (
+    module &&
+    typeof module === 'object' &&
+    'Database' in module &&
+    typeof (module as { Database?: unknown }).Database === 'function'
+  )
+    ? module
+    : (
+      module &&
+      typeof module === 'object' &&
+      'default' in module &&
+      (module as { default?: unknown }).default &&
+      typeof (module as { default: { Database?: unknown } }).default.Database === 'function'
+    )
+      ? (module as { default: { Database: new (path: string, callback: (err: Error | null) => void) => any } }).default
+      : null;
+
+  if (!candidate) {
+    throw new Error('DuckDB module did not expose a Database constructor.');
+  }
+
+  return candidate as { Database: new (path: string, callback: (err: Error | null) => void) => any };
+}
+
+export function normalizeDuckDBRow(row: Row): Row {
+  return Object.fromEntries(
+    Object.entries(row).map(([key, value]) => [key, normalizeDuckDBValue(value)]),
+  ) as Row;
+}
+
+export function normalizeDuckDBValue(value: unknown): unknown {
+  if (typeof value === 'bigint') {
+    const asNumber = Number(value);
+    return Number.isSafeInteger(asNumber) ? asNumber : value.toString();
+  }
+  if (Array.isArray(value)) {
+    return value.map((item) => normalizeDuckDBValue(item));
+  }
+  if (value && typeof value === 'object' && !(value instanceof Date)) {
+    return Object.fromEntries(
+      Object.entries(value as Record<string, unknown>).map(([key, nested]) => [key, normalizeDuckDBValue(nested)]),
+    );
+  }
+  return value;
 }
 
 function inferDuckDBType(value: unknown): ColumnType {

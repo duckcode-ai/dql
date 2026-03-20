@@ -7,6 +7,10 @@ settings:
 importers:
 
   .:
+    dependencies:
+      '@duckcodeailabs/dql-cli':
+        specifier: workspace:*
+        version: link:apps/cli
     devDependencies:
       '@types/node':
         specifier: ^22.0.0
@@ -29,6 +33,9 @@ importers:
       '@duckcodeailabs/dql-compiler':
         specifier: workspace:*
         version: link:../../packages/dql-compiler
+      '@duckcodeailabs/dql-connectors':
+        specifier: workspace:*
+        version: link:../../packages/dql-connectors
       '@duckcodeailabs/dql-core':
         specifier: workspace:*
         version: link:../../packages/dql-core

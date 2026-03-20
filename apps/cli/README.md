@@ -6,6 +6,8 @@ Use the CLI to scaffold projects, validate blocks, preview charts locally, and b
 
 ## Install
 
+For local preview with file/DuckDB-backed starter data, use Node 18, 20, or 22 LTS. If you change Node versions after installing dependencies, rerun `pnpm install` so native modules are rebuilt for the active runtime.
+
 ```bash
 npm install -g @duckcodeailabs/dql-cli
 ```
@@ -16,7 +18,15 @@ Or run it without a global install:
 npx @duckcodeailabs/dql-cli --help
 ```
 
+From this repo, you can also run:
+
+```bash
+pnpm exec dql --help
+```
+
 ## Quick Start
+
+These commands assume `dql` is installed globally. From a source checkout, use `pnpm exec dql` from the repo root or `../node_modules/.bin/dql` from the generated project.
 
 ```bash
 dql init my-dql-project

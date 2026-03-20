@@ -4,6 +4,8 @@ DQL (DuckCode Query Language) is an open, declarative language for defining dura
 
 ## Install
 
+For local preview with the default file/DuckDB runtime, use an active LTS Node release such as Node 18, 20, or 22. If you switch Node versions after installing dependencies, rerun `pnpm install` so native modules are rebuilt for the current runtime.
+
 If you are using a published CLI package:
 
 ```bash
@@ -18,10 +20,12 @@ git clone https://github.com/duckcode-ai/dql.git
 cd dql
 pnpm install
 pnpm build
-# The dql binary is now available via:
+# The dql binary is available from the repo root via:
 node apps/cli/dist/index.js --help
 # or
 pnpm exec dql --help
+# If you `cd` into a generated project without a global install, invoke:
+../node_modules/.bin/dql --help
 ```
 
 For library use:
@@ -33,6 +37,8 @@ npm install @duckcodeailabs/dql-core @duckcodeailabs/dql-compiler
 ## Quick Start
 
 Create a starter project, parse a block, then preview it locally:
+
+These commands assume `dql` is installed globally. If you are running from a source checkout, use `pnpm exec dql` from the repo root, or `../node_modules/.bin/dql` after `cd`-ing into the generated project.
 
 ```bash
 dql init my-dql-project

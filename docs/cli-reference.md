@@ -130,6 +130,7 @@ dql doctor --format json
 - `blocks/`, `semantic-layer/`, and `data/`
 - default connection presence
 - `duckdb` dependency when local file/DuckDB preview is configured
+- local query runtime readiness for the configured default connection
 
 ---
 
@@ -147,6 +148,7 @@ dql preview blocks/pipeline_health.dql
 - Starts a local HTTP server
 - Exposes `POST /api/query` backed by the default connection in `dql.config.json`
 - Renders charts against local DuckDB/file-backed sample data when applicable
+- Uses `--port` when provided; otherwise falls back to `dql.config.json` and then `3474`
 
 **Text output:**
 

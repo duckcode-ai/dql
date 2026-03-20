@@ -2,7 +2,7 @@ import { existsSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { QueryExecutor } from '@duckcodeailabs/dql-connectors';
 import type { CLIFlags } from '../args.js';
-import { findProjectRoot, loadProjectConfig, startLocalServer } from '../local-runtime.js';
+import { assertLocalQueryRuntimeReady, findProjectRoot, loadProjectConfig, startLocalServer } from '../local-runtime.js';
 import { maybeOpenBrowser } from '../open-browser.js';
 
 export async function runServe(targetDir: string | null, flags: CLIFlags): Promise<void> {
@@ -16,6 +16,7 @@ export async function runServe(targetDir: string | null, flags: CLIFlags): Promi
   const connection = config.defaultConnection ?? { driver: 'file' as const, filepath: ':memory:' };
 
   process.chdir(projectRoot);
+  await assertLocalQueryRuntimeReady(executor, connection);
   const port = await startLocalServer({
     rootDir,
     executor,
