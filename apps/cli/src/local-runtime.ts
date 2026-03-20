@@ -6,6 +6,7 @@ import { QueryExecutor, type ConnectionConfig } from '@duckcodeailabs/dql-connec
 export interface ProjectConfig {
   project?: string;
   defaultConnection?: ConnectionConfig;
+  dataDir?: string;
   preview?: {
     port?: number;
     theme?: string;

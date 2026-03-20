@@ -92,6 +92,131 @@ before connecting cloud warehouses.
 
 ---
 
+## Connector Reference
+
+Use strict JSON in `dql.config.json`. Pick one `defaultConnection` block and
+replace the starter value with the connector you actually want to use.
+
+### SQLite
+
+1. Create or choose a local SQLite database file.
+2. Update `dql.config.json`:
+
+```json
+{
+  "defaultConnection": {
+    "driver": "sqlite",
+    "filepath": "./local/dev.sqlite"
+  }
+}
+```
+
+3. Query tables from that database directly in DQL.
+
+### PostgreSQL
+
+1. Make sure your PostgreSQL instance is reachable from your machine.
+2. Update `dql.config.json`:
+
+```json
+{
+  "defaultConnection": {
+    "driver": "postgresql",
+    "host": "localhost",
+    "port": 5432,
+    "database": "analytics",
+    "username": "postgres",
+    "password": "postgres",
+    "ssl": false
+  }
+}
+```
+
+3. Run `dql doctor`.
+4. Preview or build against your warehouse-backed tables.
+
+### MySQL
+
+1. Make sure your MySQL instance is reachable from your machine.
+2. Update `dql.config.json`:
+
+```json
+{
+  "defaultConnection": {
+    "driver": "mysql",
+    "host": "localhost",
+    "port": 3306,
+    "database": "analytics",
+    "username": "root",
+    "password": "root",
+    "ssl": false
+  }
+}
+```
+
+3. Run `dql doctor`.
+
+### Snowflake
+
+1. Identify your Snowflake account, warehouse, database, schema, and role.
+2. Update `dql.config.json`:
+
+```json
+{
+  "defaultConnection": {
+    "driver": "snowflake",
+    "account": "your-account",
+    "warehouse": "COMPUTE_WH",
+    "database": "ANALYTICS",
+    "schema": "PUBLIC",
+    "username": "user",
+    "password": "password",
+    "role": "ANALYST"
+  }
+}
+```
+
+3. Run `dql doctor`.
+
+### BigQuery
+
+1. Make sure your local environment already has access to the target GCP project.
+2. Update `dql.config.json`:
+
+```json
+{
+  "defaultConnection": {
+    "driver": "bigquery",
+    "projectId": "your-gcp-project"
+  }
+}
+```
+
+3. Run `dql doctor`.
+
+### SQL Server / MSSQL
+
+1. Make sure your SQL Server instance is reachable from your machine.
+2. Update `dql.config.json`:
+
+```json
+{
+  "defaultConnection": {
+    "driver": "mssql",
+    "host": "localhost",
+    "port": 1433,
+    "database": "analytics",
+    "username": "sa",
+    "password": "yourStrong(!)Password",
+    "ssl": false
+  }
+}
+```
+
+3. Run `dql doctor`.
+
+---
+
 ## Tips for Easy Testing
 
 - keep sample datasets in `data/`
@@ -116,6 +241,7 @@ Check that:
 - `dql.config.json` exists
 - `defaultConnection` is set
 - your query paths are correct relative to the project root
+- your selected connector settings match the reference above
 
 ### `read_csv_auto(...)` cannot find a file
 
@@ -132,3 +258,6 @@ If your environment does not include DuckDB yet, add it to your local project:
 ```bash
 npm install duckdb
 ```
+
+If you changed Node versions after installing dependencies, rerun `pnpm install`
+before using local file or DuckDB preview.

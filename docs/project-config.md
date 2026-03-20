@@ -80,6 +80,8 @@ Example DuckDB database file:
 }
 ```
 
+For more connector-specific examples, see [Data Sources](./data-sources.md).
+
 ### `dataDir`
 
 Convenience convention for local project data. The CLI does not rewrite queries
