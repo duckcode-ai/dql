@@ -161,13 +161,33 @@ function TableRow({
 }) {
   const { dispatch } = useNotebook();
   const [hovered, setHovered] = useState(false);
+  const [loadingColumns, setLoadingColumns] = useState(false);
+
+  const handleToggle = async () => {
+    dispatch({ type: 'TOGGLE_SCHEMA_TABLE', tableName: table.name });
+
+    // Lazy-load columns on first expand when no columns exist
+    if (!table.expanded && table.columns.length === 0) {
+      setLoadingColumns(true);
+      try {
+        const columns = await api.describeTable(table.path);
+        if (columns.length > 0) {
+          dispatch({ type: 'SET_TABLE_COLUMNS', tableName: table.name, columns });
+        }
+      } catch (err) {
+        console.error('describeTable failed:', err);
+      } finally {
+        setLoadingColumns(false);
+      }
+    }
+  };
 
   return (
     <div>
       <button
         onMouseEnter={() => setHovered(true)}
         onMouseLeave={() => setHovered(false)}
-        onClick={() => dispatch({ type: 'TOGGLE_SCHEMA_TABLE', tableName: table.name })}
+        onClick={handleToggle}
         style={{
           width: '100%',
           display: 'flex',
@@ -223,9 +243,35 @@ function TableRow({
 
       {table.expanded && (
         <div style={{ paddingLeft: 26 }}>
-          {table.columns.map((col) => (
-            <ColumnRow key={col.name} col={col} t={t} />
-          ))}
+          {loadingColumns ? (
+            <div
+              style={{
+                padding: '4px 10px',
+                fontSize: 11,
+                color: t.textMuted,
+                fontFamily: t.font,
+                fontStyle: 'italic',
+              }}
+            >
+              ...
+            </div>
+          ) : table.columns.length === 0 ? (
+            <div
+              style={{
+                padding: '4px 10px',
+                fontSize: 11,
+                color: t.textMuted,
+                fontFamily: t.font,
+                fontStyle: 'italic',
+              }}
+            >
+              No columns
+            </div>
+          ) : (
+            table.columns.map((col) => (
+              <ColumnRow key={col.name} col={col} t={t} />
+            ))
+          )}
         </div>
       )}
     </div>

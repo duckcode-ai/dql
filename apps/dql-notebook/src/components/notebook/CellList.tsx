@@ -1,6 +1,7 @@
 import type { Theme } from '../../themes/notebook-theme';
-import React from 'react';
-import { useNotebook } from '../../store/NotebookStore';
+import React, { useState, useCallback, useEffect, useRef } from 'react';
+import { useNotebook, makeCell } from '../../store/NotebookStore';
+import { useQueryExecution } from '../../hooks/useQueryExecution';
 import { themes } from '../../themes/notebook-theme';
 import { CellComponent } from '../cells/Cell';
 import { AddCellBar } from './AddCellBar';
@@ -10,8 +11,116 @@ interface CellListProps {
 }
 
 export function CellList({ registerCellRef }: CellListProps) {
-  const { state } = useNotebook();
+  const { state, dispatch } = useNotebook();
+  const { executeCell } = useQueryExecution();
   const t = themes[state.themeMode];
+
+  // focusedCellId: the cell selected in command mode (not editing)
+  const [focusedCellId, setFocusedCellId] = useState<string | null>(null);
+  // Track last "d" keypress time for double-d detection
+  const lastDPressRef = useRef<number>(0);
+
+  const handleGutterClick = useCallback((cellId: string) => {
+    setFocusedCellId(cellId);
+  }, []);
+
+  // Global keyboard handler for command mode shortcuts
+  useEffect(() => {
+    function onKeyDown(e: KeyboardEvent) {
+      if (!focusedCellId) return;
+
+      // If the event target is an input/textarea/contenteditable, skip
+      const target = e.target as HTMLElement;
+      if (
+        target.tagName === 'TEXTAREA' ||
+        target.tagName === 'INPUT' ||
+        target.isContentEditable ||
+        // CodeMirror editor is focused
+        target.closest('.cm-editor')
+      ) {
+        setFocusedCellId(null);
+        return;
+      }
+
+      const cells = state.cells;
+      const idx = cells.findIndex((c) => c.id === focusedCellId);
+      if (idx === -1) return;
+
+      switch (e.key) {
+        case 'a': {
+          e.preventDefault();
+          const cell = makeCell('sql');
+          if (idx === 0) {
+            // Prepend: add then move up from position 1 → 0
+            dispatch({ type: 'ADD_CELL', cell, afterId: cells[0].id });
+            dispatch({ type: 'MOVE_CELL', id: cell.id, direction: 'up' });
+          } else {
+            const afterId = cells[idx - 1].id;
+            dispatch({ type: 'ADD_CELL', cell, afterId });
+          }
+          setFocusedCellId(cell.id);
+          break;
+        }
+
+        case 'b': {
+          e.preventDefault();
+          const cell = makeCell('sql');
+          dispatch({ type: 'ADD_CELL', cell, afterId: focusedCellId });
+          setFocusedCellId(cell.id);
+          break;
+        }
+
+        case 'd': {
+          e.preventDefault();
+          const now = Date.now();
+          if (now - lastDPressRef.current <= 500) {
+            // Double-d: delete cell
+            dispatch({ type: 'DELETE_CELL', id: focusedCellId });
+            // Focus adjacent cell
+            if (cells.length > 1) {
+              const newFocusIdx = idx > 0 ? idx - 1 : 1;
+              setFocusedCellId(cells[newFocusIdx]?.id ?? null);
+            } else {
+              setFocusedCellId(null);
+            }
+            lastDPressRef.current = 0;
+          } else {
+            lastDPressRef.current = now;
+          }
+          break;
+        }
+
+        case 'Enter': {
+          if (e.shiftKey) {
+            e.preventDefault();
+            const cell = cells[idx];
+            if (cell && cell.type !== 'markdown') {
+              executeCell(cell.id);
+            }
+          }
+          break;
+        }
+
+        default:
+          break;
+      }
+    }
+
+    document.addEventListener('keydown', onKeyDown);
+    return () => document.removeEventListener('keydown', onKeyDown);
+  }, [focusedCellId, state.cells, dispatch, executeCell]);
+
+  // Clear focus when clicking outside any cell
+  useEffect(() => {
+    function onMouseDown(e: MouseEvent) {
+      const target = e.target as HTMLElement;
+      if (!target.closest('[data-cell-id]')) {
+        setFocusedCellId(null);
+      }
+    }
+    document.addEventListener('mousedown', onMouseDown);
+    return () => document.removeEventListener('mousedown', onMouseDown);
+  }, []);
 
   if (state.cells.length === 0) {
     return (
@@ -44,7 +153,27 @@ export function CellList({ registerCellRef }: CellListProps) {
 
       {state.cells.map((cell, index) => (
         <React.Fragment key={cell.id}>
-          <div ref={(el) => registerCellRef(cell.id, el)}>
+          <div
+            ref={(el) => registerCellRef(cell.id, el)}
+            data-cell-id={cell.id}
+            onClick={(e) => {
+              // Select cell on gutter/header click but not editor area
+              const target = e.target as HTMLElement;
+              if (
+                !target.closest('.cm-editor') &&
+                !target.closest('textarea') &&
+                !target.closest('input')
+              ) {
+                setFocusedCellId(cell.id);
+              }
+            }}
+            style={{
+              outline: focusedCellId === cell.id ? `2px solid ${t.accent}40` : 'none',
+              outlineOffset: 2,
+              borderRadius: 10,
+              transition: 'outline 0.1s',
+            }}
+          >
             <CellComponent cell={cell} index={index} />
           </div>
           <AddCellBar afterId={cell.id} />

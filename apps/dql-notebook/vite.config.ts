@@ -6,6 +6,21 @@ export default defineConfig({
   build: {
     outDir: 'dist',
     emptyOutDir: true,
+    rollupOptions: {
+      output: {
+        manualChunks: {
+          codemirror: [
+            '@codemirror/state',
+            '@codemirror/view',
+            '@codemirror/commands',
+            '@codemirror/lang-sql',
+            '@codemirror/language',
+            '@codemirror/theme-one-dark',
+          ],
+          react: ['react', 'react-dom'],
+        },
+      },
+    },
   },
   base: '/',
 })

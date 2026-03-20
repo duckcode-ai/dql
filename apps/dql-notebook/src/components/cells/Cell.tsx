@@ -1,11 +1,12 @@
 import type { Theme } from '../../themes/notebook-theme';
-import React, { useState, useRef, useCallback } from 'react';
+import React, { useState, useCallback, useEffect } from 'react';
 import { useNotebook } from '../../store/NotebookStore';
 import { themes } from '../../themes/notebook-theme';
 import { useQueryExecution } from '../../hooks/useQueryExecution';
 import { SQLCellEditor } from './SQLCellEditor';
 import { MarkdownCellEditor } from './MarkdownCellEditor';
 import { TableOutput } from '../output/TableOutput';
+import { ChartOutput, detectChartType } from '../output/ChartOutput';
 import { ErrorOutput } from '../output/ErrorOutput';
 import type { Cell } from '../../store/types';
 
@@ -93,10 +94,18 @@ export function CellComponent({ cell, index }: CellProps) {
   const [nameEditing, setNameEditing] = useState(false);
   const [nameDraft, setNameDraft] = useState(cell.name ?? '');
   const [showOutput, setShowOutput] = useState(true);
-  const editorRef = useRef<HTMLTextAreaElement>(null);
+  const [viewMode, setViewMode] = useState<'chart' | 'table'>('table');
 
   const borderColor = getCellBorderColor(cell, t);
   const isExecutable = cell.type !== 'markdown';
+
+  // When result first arrives (status → success), auto-detect chart type
+  useEffect(() => {
+    if (cell.status === 'success' && cell.result) {
+      const chartType = detectChartType(cell.result);
+      setViewMode(chartType !== 'table' ? 'chart' : 'table');
+    }
+  }, [cell.status, cell.result]);
 
   const handleRun = useCallback(() => {
     if (isExecutable) {
@@ -133,6 +142,7 @@ export function CellComponent({ cell, index }: CellProps) {
   };
 
   const hasOutput = (cell.result || cell.error) && cell.type !== 'markdown';
+  const canChart = cell.result ? detectChartType(cell.result) !== 'table' : false;
 
   return (
     <div
@@ -301,13 +311,10 @@ export function CellComponent({ cell, index }: CellProps) {
           />
         ) : (
           <SQLCellEditor
-            ref={editorRef}
             value={cell.content}
             onChange={handleContentChange}
             onRun={handleRun}
             themeMode={state.themeMode}
-            placeholder={cell.type === 'dql' ? 'DQL query...' : 'SELECT ...'}
-            disabled={cell.status === 'running'}
           />
         )}
 
@@ -353,6 +360,33 @@ export function CellComponent({ cell, index }: CellProps) {
                 </span>
               )}
               <div style={{ flex: 1 }} />
+
+              {/* Chart / Table toggle (when result is chartable) */}
+              {cell.result && canChart && showOutput && (
+                <div style={{ display: 'flex', alignItems: 'center', gap: 3 }}>
+                  {(['chart', 'table'] as const).map((mode) => (
+                    <button
+                      key={mode}
+                      onClick={() => setViewMode(mode)}
+                      style={{
+                        padding: '1px 7px',
+                        fontSize: 10,
+                        fontFamily: t.font,
+                        borderRadius: 3,
+                        border: `1px solid ${viewMode === mode ? t.accent : t.btnBorder}`,
+                        background: viewMode === mode ? `${t.accent}20` : 'transparent',
+                        color: viewMode === mode ? t.accent : t.textMuted,
+                        cursor: 'pointer',
+                        transition: 'all 0.15s',
+                        textTransform: 'capitalize',
+                      }}
+                    >
+                      {mode === 'chart' ? 'Chart' : 'Table'}
+                    </button>
+                  ))}
+                </div>
+              )}
+
               <button
                 onClick={() => setShowOutput((s) => !s)}
                 style={{
@@ -385,7 +419,11 @@ export function CellComponent({ cell, index }: CellProps) {
               <>
                 {cell.error && <ErrorOutput message={cell.error} themeMode={state.themeMode} />}
                 {cell.result && !cell.error && (
-                  <TableOutput result={cell.result} themeMode={state.themeMode} />
+                  viewMode === 'chart' && canChart ? (
+                    <ChartOutput result={cell.result} themeMode={state.themeMode} />
+                  ) : (
+                    <TableOutput result={cell.result} themeMode={state.themeMode} />
+                  )
                 )}
               </>
             )}

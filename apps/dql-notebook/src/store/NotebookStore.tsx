@@ -132,6 +132,14 @@ function notebookReducer(state: NotebookState, action: NotebookAction): Notebook
     case 'FILE_ADDED':
       return { ...state, files: [...state.files, action.file] };
 
+    case 'SET_TABLE_COLUMNS':
+      return {
+        ...state,
+        schemaTables: state.schemaTables.map((t) =>
+          t.name === action.tableName ? { ...t, columns: action.columns } : t
+        ),
+      };
+
     default:
       return state;
   }

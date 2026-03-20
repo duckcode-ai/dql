@@ -93,4 +93,5 @@ export type NotebookAction =
   | { type: 'CLOSE_NEW_NOTEBOOK_MODAL' }
   | { type: 'SET_NOTEBOOK_DIRTY'; dirty: boolean }
   | { type: 'SET_SAVING'; saving: boolean }
-  | { type: 'FILE_ADDED'; file: NotebookFile };
+  | { type: 'FILE_ADDED'; file: NotebookFile }
+  | { type: 'SET_TABLE_COLUMNS'; tableName: string; columns: SchemaColumn[] };

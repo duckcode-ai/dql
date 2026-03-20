@@ -1,4 +1,4 @@
-import type { NotebookFile, QueryResult, SchemaTable } from '../store/types';
+import type { NotebookFile, QueryResult, SchemaTable, SchemaColumn } from '../store/types';
 
 const BASE = window.location.origin;
 
@@ -59,6 +59,25 @@ export const api = {
   async getSchema(): Promise<SchemaTable[]> {
     try {
       return await request<SchemaTable[]>('/api/schema');
+    } catch {
+      return [];
+    }
+  },
+
+  async describeTable(filePath: string): Promise<SchemaColumn[]> {
+    // Build SQL using read_csv_auto for CSV files, or a generic DESCRIBE query
+    const safePath = filePath.replace(/'/g, "''");
+    const sql = `DESCRIBE SELECT * FROM read_csv_auto('${safePath}') LIMIT 0`;
+    try {
+      const result = await request<QueryResult>('/api/query', {
+        method: 'POST',
+        body: JSON.stringify({ sql }),
+      });
+      // DuckDB DESCRIBE returns rows with column_name and column_type fields
+      return result.rows.map((row) => ({
+        name: String(row['column_name'] ?? row['Field'] ?? ''),
+        type: String(row['column_type'] ?? row['Type'] ?? ''),
+      }));
     } catch {
       return [];
     }
