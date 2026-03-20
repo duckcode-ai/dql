@@ -1,0 +1,4 @@
+name: gmv
+label: Gross Merchandise Value
+domain: commerce
+description: Total order value across the commerce sample dataset.

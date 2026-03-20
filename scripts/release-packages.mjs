@@ -20,6 +20,7 @@ const packages = [
   'packages/dql-project',
   'packages/dql-governance',
   'packages/dql-connectors',
+  'packages/dql-notebook',
   'packages/dql-lsp',
   'apps/cli',
 ];

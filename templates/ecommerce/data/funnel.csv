@@ -1,0 +1,6 @@
+step,users,conversion_rate,sort_order
+Landing Session,18000,1.00,1
+Product View,13420,0.75,2
+Add to Cart,6280,0.35,3
+Checkout Start,3125,0.17,4
+Purchase,1543,0.09,5

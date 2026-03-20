@@ -1,0 +1,13 @@
+{
+  "project": "saas-metrics",
+  "defaultConnection": {
+    "driver": "file",
+    "filepath": ":memory:"
+  },
+  "dataDir": "./data",
+  "preview": {
+    "port": 3474,
+    "open": true,
+    "theme": "dark"
+  }
+}

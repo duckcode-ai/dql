@@ -4,18 +4,47 @@ This page helps new users find the fastest working examples in the DQL repo.
 
 ## Best First Example
 
-Start with the scaffolded starter project:
+Start with the scaffolded starter project or the richer example folders:
 
 ```bash
 dql init my-dql-project
 cd my-dql-project
-dql new block "Pipeline Health"
-dql preview blocks/pipeline_health.dql --open
+dql notebook
 ```
 
 This is the recommended first-run experience because it includes local data and a working config file.
 
 ## Repo Examples
+
+### `examples/ecommerce-analytics/`
+
+Use this example if you want the strongest open-source first impression.
+
+Good for learning:
+
+- browser notebook flow with `.dqlnb` files
+- realistic commerce metrics and funnel analysis
+- reusable blocks plus a polished dashboard
+
+### `examples/saas-metrics/`
+
+Use this example to explore recurring revenue, churn, and cohort retention.
+
+Good for learning:
+
+- MRR and churn modeling in DQL
+- notebook-first analysis for executive KPIs
+- blending reusable blocks with dashboard rollups
+
+### `examples/nyc-taxi/`
+
+Use this example to explore mobility analytics with local sample trip data.
+
+Good for learning:
+
+- operations metrics and time-series analysis
+- notebook-driven ad hoc SQL exploration
+- charting non-financial datasets in DQL
 
 ### `examples/finance-kpi/`
 
@@ -93,7 +122,7 @@ Good for learning:
 
 ## Starter Template Files
 
-When you run `dql init`, the starter template gives you a small local project to experiment with.
+When you run `dql init`, the starter template gives you a local project plus a browser notebook walkthrough to experiment with.
 
 Key files:
 
@@ -101,16 +130,17 @@ Key files:
 - `blocks/revenue_trend_query_only.dql`
 - `data/revenue.csv`
 - `dql.config.json`
+- `notebooks/welcome.dqlnb`
 
 These are the most important files for open-source evaluation because they work without external warehouse credentials.
 
 ## Recommended Order
 
-1. `examples/finance-kpi/`
-2. `examples/dashboard-local/`
-3. `examples/duckdb-local/`
-4. `examples/workbook-local/`
-5. `examples/semantic-block/`
+1. `examples/ecommerce-analytics/`
+2. `examples/saas-metrics/`
+3. `examples/nyc-taxi/`
+4. `examples/dashboard-local/`
+5. `examples/workbook-local/`
 
 ## Suggested Learning Path
 
@@ -144,7 +174,6 @@ Try changing:
 
 ## Related Docs
 
-- [Quickstart](./quickstart.md)
 - [Getting Started](./getting-started.md)
 - [Language Specification](./dql-language-spec.md)
 - [Data Sources](./data-sources.md)

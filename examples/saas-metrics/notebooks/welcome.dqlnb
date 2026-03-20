@@ -1,0 +1,23 @@
+{
+  "version": 1,
+  "metadata": {
+    "title": "SaaS Metrics Welcome",
+    "description": "Browser notebook walkthrough for the SaaS example.",
+    "createdWith": "dql",
+    "template": "saas"
+  },
+  "cells": [
+    {
+      "id": "intro",
+      "type": "markdown",
+      "title": "Welcome",
+      "source": "# SaaS Metrics\n\nUse this notebook to inspect MRR by plan and retention trends."
+    },
+    {
+      "id": "mrr-plan",
+      "type": "dql",
+      "title": "MRR by Plan",
+      "source": "block \"MRR by Plan Tier\" {\n    domain = \"saas\"\n    type = \"custom\"\n\n    query = \"\"\"\n        SELECT plan_tier, ROUND(SUM(mrr), 2) AS revenue\n        FROM read_csv_auto('./data/subscriptions.csv')\n        WHERE status = 'active'\n        GROUP BY plan_tier\n        ORDER BY revenue DESC\n    \"\"\"\n\n    visualization {\n        chart = \"bar\"\n        x = plan_tier\n        y = revenue\n    }\n}"
+    }
+  ]
+}

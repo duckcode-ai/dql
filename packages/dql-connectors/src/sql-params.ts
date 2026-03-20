@@ -33,7 +33,7 @@ export function normalizeSQLPlaceholders(
   driver: ConnectionConfig['driver'],
 ): string {
   if (!sql) return sql;
-  if (driver === 'postgresql' || driver === 'mssql') return sql;
+  if (driver === 'postgresql' || driver === 'mssql' || driver === 'redshift' || driver === 'fabric') return sql;
 
   // Replace $N -> ? outside quoted regions.
   let out = '';

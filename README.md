@@ -1,48 +1,113 @@
 # DQL
 
-DQL (DuckCode Query Language) is an open, declarative language for defining durable analytics assets in Git. It gives teams a typed way to author reusable blocks — self-contained, testable, version-controlled units of data analysis that combine SQL, visualization config, parameters, and assertions. DQL does not require DuckCode Studio — it works standalone.
+DQL (Domain Query Language) is an open, declarative language for defining durable analytics assets in Git. It gives teams a typed way to author reusable blocks — self-contained, testable, version-controlled units of data analysis that combine SQL, visualization config, parameters, and assertions. DQL does not require DuckCode Studio — it works standalone.
 
 ## Install
 
-For local preview with the default file/DuckDB runtime, use an active LTS Node release such as Node 18, 20, or 22. If you switch Node versions after installing dependencies, rerun `pnpm install` so native modules are rebuilt for the current runtime.
+For local preview with the default file/DuckDB runtime, use an active LTS Node release such as Node 18, 20, or 22.
 
-If you are using a published CLI package:
+For most users, this is the only install path you need.
+
+### Install the CLI
 
 ```bash
 npm install -g @duckcodeailabs/dql-cli
 dql --help
 ```
 
-To build from source instead:
+Then you can scaffold a project anywhere:
+
+```bash
+mkdir DQL-Examples
+cd DQL-Examples
+dql init dql-example --template ecommerce
+cd dql-example
+dql doctor
+dql notebook
+```
+
+Run `dql notebook` from the project root that contains `dql.config.json`. If you stay in a parent folder, pass the project path explicitly with `dql notebook ./dql-example`.
+
+### If you do not want a global install
+
+```bash
+mkdir DQL-Examples
+cd DQL-Examples
+npm init -y
+npm install -D @duckcodeailabs/dql-cli
+npx dql --help
+npx dql init dql-example --template ecommerce
+```
+
+### If you installed only library packages
+
+If you install only:
+
+```bash
+npm install @duckcodeailabs/dql-core @duckcodeailabs/dql-compiler
+```
+
+you will **not** get the `dql` command. Those are library packages, not the CLI.
+
+### Source repo / contributor workflow
+
+If you are contributing to DQL itself, use the monorepo workflow below. Commands such as `pnpm --filter @duckcodeailabs/dql-cli ...` work **only inside the DQL source repo**.
 
 ```bash
 git clone https://github.com/duckcode-ai/dql.git
 cd dql
 pnpm install
 pnpm build
-# The dql binary is available from the repo root via:
-node apps/cli/dist/index.js --help
-# or
-pnpm exec dql --help
-# If you `cd` into a generated project without a global install, invoke:
-../node_modules/.bin/dql --help
+pnpm test
+pnpm --filter @duckcodeailabs/dql-cli exec dql --help
 ```
 
-For library use:
+From the repo root you can scaffold and test projects like this:
 
 ```bash
-npm install @duckcodeailabs/dql-core @duckcodeailabs/dql-compiler
+pnpm --filter @duckcodeailabs/dql-cli exec dql init /tmp/dql-smoke --template ecommerce
+pnpm --filter @duckcodeailabs/dql-cli exec dql notebook /tmp/dql-smoke
 ```
+
+### Common install mistakes
+
+- If you see `zsh: command not found: dql`, the CLI is not installed globally and is not available on your `PATH`.
+- If you see `No projects matched the filters`, you are running `pnpm --filter ...` outside the DQL monorepo.
+- If you installed only `@duckcodeailabs/dql-core` and `@duckcodeailabs/dql-compiler`, you installed libraries, not the CLI.
+
+## Fastest working command
+
+```bash
+npm install -g @duckcodeailabs/dql-cli
+dql init my-dql-project --template ecommerce
+cd my-dql-project
+dql doctor
+dql notebook
+```
+
+## Try DQL in 60 Seconds
+
+The fastest way to evaluate DQL is to scaffold a themed project and open the browser notebook.
+
+These commands assume `dql` is installed globally. If you used a local project install instead, replace `dql` with `npx dql`.
+
+```bash
+dql init my-dql-project --template ecommerce
+cd my-dql-project
+dql doctor
+dql notebook
+```
+
+The notebook sidebar lists files from the active project and opens them as raw source links for quick inspection.
 
 ## Quick Start
 
-Create a starter project, parse a block, then preview it locally:
-
-These commands assume `dql` is installed globally. If you are running from a source checkout, use `pnpm exec dql` from the repo root, or `../node_modules/.bin/dql` after `cd`-ing into the generated project.
+Create a project, explore it in the notebook, then parse, preview, and build assets:
 
 ```bash
-dql init my-dql-project
+dql init my-dql-project --template ecommerce
 cd my-dql-project
+dql notebook
 dql new block "Pipeline Health"
 dql new semantic-block "ARR Growth"
 dql new dashboard "Revenue Overview"
@@ -53,6 +118,53 @@ dql preview blocks/pipeline_health.dql --open
 dql build blocks/pipeline_health.dql
 dql serve dist/pipeline_health
 ```
+
+## Choose a Template
+
+| Template | Best for | What you get |
+|---|---|---|
+| `starter` | Smallest local-first flow | Revenue sample data, starter blocks, welcome notebook |
+| `ecommerce` | Strongest OSS product demo | Channel revenue, funnel analysis, realistic commerce dataset |
+| `saas` | Revenue + retention evaluation | MRR, churn pressure, cohort analysis |
+| `taxi` | Time-series and operations analysis | Trip volume, fare trends, borough analysis |
+
+Use any template with:
+
+```bash
+dql init my-project --template ecommerce
+```
+
+## Common Use Cases
+
+- **Evaluate DQL quickly** — scaffold a template, run `dql doctor`, and open `dql notebook`
+- **Explore data interactively** — use DQL, SQL, markdown, and linked chart cells in the notebook
+- **Author durable analytics blocks** — keep SQL, metadata, chart config, and tests in Git
+- **Build static dashboards** — compile blocks, dashboards, and workbooks with `dql build`
+- **Validate the full repo** — run source smoke tests before release or contribution
+
+See [Use Cases](./docs/use-cases.md) for recommended paths by user goal.
+
+## Real Repo Setup
+
+If you want to work from the real repo instead of a published CLI package:
+
+```bash
+git clone https://github.com/duckcode-ai/dql.git
+cd dql
+pnpm install
+pnpm build
+pnpm test
+pnpm --filter @duckcodeailabs/dql-cli exec dql --help
+```
+
+Then smoke-test the browser notebook flow:
+
+```bash
+pnpm --filter @duckcodeailabs/dql-cli exec dql init /tmp/dql-smoke --template ecommerce
+pnpm --filter @duckcodeailabs/dql-cli exec dql notebook /tmp/dql-smoke
+```
+
+For the full repo validation flow, see [Repo Testing](./docs/repo-testing.md).
 
 ### Example DQL block
 
@@ -91,9 +203,11 @@ block "Revenue by Segment" {
 ## Documentation
 
 - [Why DQL](./docs/why-dql.md) — what problem DQL solves and when it is the right tool
-- [Quickstart](./docs/quickstart.md) — the fastest path from install to local chart preview
-- [Getting Started](./docs/getting-started.md) — installation paths, first block walkthrough, Node.js API
+- [Getting Started](./docs/getting-started.md) — canonical onboarding guide: install, notebook flow, first block walkthrough, and Node.js API
+- [Quickstart](./docs/quickstart.md) — short compatibility page with the fastest commands
+- [Use Cases](./docs/use-cases.md) — recommended paths for evaluation, notebook usage, authoring, and release validation
 - [Examples](./docs/examples.md) — where to start, what each example teaches, and what to try next
+- [Repo Testing](./docs/repo-testing.md) — full source checkout smoke tests and manual validation checklist
 - [FAQ](./docs/faq.md) — common questions about standalone DQL usage and scope
 - [Compatibility](./docs/compatibility.md) — current runtime, connector, and workflow support matrix
 - [Language Specification](./docs/dql-language-spec.md) — full syntax reference, block types, chart types, AST
@@ -123,6 +237,7 @@ The extension provides syntax highlighting, snippets, formatting on save, and La
 | `@duckcodeailabs/dql-compiler` | IR lowering, Vega-Lite / React / HTML / runtime code generation |
 | `@duckcodeailabs/dql-governance` | Block testing, certification rules, cost estimation |
 | `@duckcodeailabs/dql-project` | Git-backed block registry and project primitives |
+| `@duckcodeailabs/dql-notebook` | Notebook document model and execution helpers |
 | `@duckcodeailabs/dql-lsp` | Language Server Protocol implementation |
 | `@duckcodeailabs/dql-runtime` | Browser runtime: data fetching, Vega rendering, hot-reload client |
 | `@duckcodeailabs/dql-charts` | visx-powered React SVG chart components |
@@ -133,6 +248,7 @@ The extension provides syntax highlighting, snippets, formatting on save, and La
 ```
 apps/
   cli/                Public DQL CLI (@duckcodeailabs/dql-cli)
+  notebook-browser/   Browser-first notebook
   vscode-extension/   DQL Language Support for VS Code
 
 packages/
@@ -144,6 +260,7 @@ packages/
   dql-connectors/     Database connector layer
   dql-governance/     Test and certification primitives
   dql-project/        Block registry and project primitives
+  dql-notebook/       Notebook document model and execution helpers
 
 examples/
   README.md           Example guide

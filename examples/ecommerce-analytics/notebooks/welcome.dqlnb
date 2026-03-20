@@ -1,0 +1,23 @@
+{
+  "version": 1,
+  "metadata": {
+    "title": "E-commerce Analytics Welcome",
+    "description": "Browser notebook walkthrough for the e-commerce example.",
+    "createdWith": "dql",
+    "template": "ecommerce"
+  },
+  "cells": [
+    {
+      "id": "intro",
+      "type": "markdown",
+      "title": "Welcome",
+      "source": "# E-commerce Analytics\n\nRun the DQL and SQL cells below to compare channel revenue and funnel conversion."
+    },
+    {
+      "id": "gmv-by-channel",
+      "type": "dql",
+      "title": "GMV by Channel",
+      "source": "block \"GMV by Channel\" {\n    domain = \"commerce\"\n    type = \"custom\"\n\n    query = \"\"\"\n        SELECT channel, ROUND(SUM(order_total), 2) AS revenue\n        FROM read_csv_auto('./data/orders.csv')\n        GROUP BY channel\n        ORDER BY revenue DESC\n    \"\"\"\n\n    visualization {\n        chart = \"bar\"\n        x = channel\n        y = revenue\n    }\n}"
+    }
+  ]
+}

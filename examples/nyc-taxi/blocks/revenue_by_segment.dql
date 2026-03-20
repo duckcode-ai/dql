@@ -1,0 +1,17 @@
+block "Trips by Borough" {
+    domain = "mobility"
+    type = "custom"
+
+    query = """
+        SELECT pickup_borough, COUNT(*) AS revenue
+        FROM read_csv_auto('./data/trips.csv')
+        GROUP BY pickup_borough
+        ORDER BY revenue DESC
+    """
+
+    visualization {
+        chart = "bar"
+        x = pickup_borough
+        y = revenue
+    }
+}

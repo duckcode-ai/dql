@@ -1,0 +1,13 @@
+account_id,account_name,owner_segment,plan_tier,status,mrr,expansion_mrr,risk_bucket,renewal_month
+A-100,Acme Cloud,Enterprise,Enterprise,active,48000,6200,low,2025-06
+A-101,North Ridge,Mid-Market,Growth,active,18400,2400,medium,2025-05
+A-102,Blue Orbit,SMB,Starter,active,3400,200,low,2025-04
+A-103,Helio Systems,Enterprise,Enterprise,at_risk,52100,0,high,2025-03
+A-104,Vector Health,Mid-Market,Growth,active,19600,1800,medium,2025-08
+A-105,Studio Works,SMB,Starter,churned,2200,0,critical,2025-02
+A-106,SignalWare,Enterprise,Enterprise,active,43500,4100,low,2025-07
+A-107,Maple Commerce,Mid-Market,Growth,active,17100,1200,medium,2025-04
+A-108,Linea Labs,SMB,Starter,active,2800,0,medium,2025-06
+A-109,Quartz Energy,Enterprise,Enterprise,active,50300,7300,low,2025-09
+A-110,Summit Bio,Mid-Market,Growth,at_risk,15800,0,high,2025-03
+A-111,Glider Ops,SMB,Starter,active,2600,150,low,2025-05

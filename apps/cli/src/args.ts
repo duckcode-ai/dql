@@ -11,6 +11,7 @@ export interface CLIFlags {
   domain: string;
   owner: string;
   queryOnly: boolean;
+  template: string;
 }
 
 export interface ParsedArgs {
@@ -34,6 +35,7 @@ export function parseArgs(argv: string[]): ParsedArgs {
     domain: '',
     owner: '',
     queryOnly: false,
+    template: 'starter',
   };
 
   let command: string | null = null;
@@ -70,6 +72,8 @@ export function parseArgs(argv: string[]): ParsedArgs {
       flags.domain = argv[++i];
     } else if (arg === '--owner' && i + 1 < argv.length) {
       flags.owner = argv[++i];
+    } else if (arg === '--template' && i + 1 < argv.length) {
+      flags.template = argv[++i];
     } else if (arg === '--query-only') {
       flags.queryOnly = true;
     } else if (!command) {

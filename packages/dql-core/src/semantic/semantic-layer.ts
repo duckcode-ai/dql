@@ -57,6 +57,52 @@ export interface HierarchyDefinition {
   owner?: string;
 }
 
+// ── Cube / Semantic Model Types ──
+
+export interface JoinDefinition {
+  name: string;
+  left: string;   // cube name
+  right: string;  // cube name
+  type: 'inner' | 'left' | 'right' | 'full';
+  sql: string;    // e.g. "${left}.customer_id = ${right}.id"
+}
+
+export interface TimeDimensionDefinition extends DimensionDefinition {
+  granularities: ('day' | 'week' | 'month' | 'quarter' | 'year')[];
+  primaryTime?: boolean;
+}
+
+export interface CubeDefinition {
+  name: string;
+  label: string;
+  description: string;
+  sql: string;           // base table/subquery
+  table: string;         // shorthand table name
+  domain: string;
+  measures: MetricDefinition[];
+  dimensions: DimensionDefinition[];
+  timeDimensions: TimeDimensionDefinition[];
+  joins: JoinDefinition[];
+  defaultTimeDimension?: string;
+  owner?: string;
+  tags?: string[];
+}
+
+export interface ComposeQueryOptions {
+  metrics: string[];
+  dimensions: string[];
+  timeDimension?: { name: string; granularity: string };
+  filters?: Array<{ dimension: string; operator: string; values: string[] }>;
+  orderBy?: Array<{ name: string; direction: 'asc' | 'desc' }>;
+  limit?: number;
+}
+
+export interface ComposeQueryResult {
+  sql: string;
+  joins: string[];
+  tables: string[];
+}
+
 export interface BlockCompanionDefinition {
   name: string;
   block: string;
@@ -187,6 +233,9 @@ export class SemanticLayer {
   private metrics: Map<string, MetricDefinition> = new Map();
   private dimensions: Map<string, DimensionDefinition> = new Map();
   private hierarchies: Map<string, HierarchyDefinition> = new Map();
+  private cubes: Map<string, CubeDefinition> = new Map();
+  // cube-name → list of joins for that cube (adjacency list)
+  private joinGraph: Map<string, JoinDefinition[]> = new Map();
 
   constructor(config?: SemanticLayerConfig) {
     if (config) {
@@ -202,6 +251,257 @@ export class SemanticLayer {
 
   addDimension(dimension: DimensionDefinition): void {
     this.dimensions.set(dimension.name, dimension);
+  }
+
+  addCube(cube: CubeDefinition): void {
+    this.cubes.set(cube.name, cube);
+    // Auto-populate flat maps for backward compatibility
+    for (const m of cube.measures) this.metrics.set(m.name, m);
+    for (const d of cube.dimensions) this.dimensions.set(d.name, d);
+    for (const td of cube.timeDimensions) this.dimensions.set(td.name, td);
+    // Register joins in adjacency list
+    for (const join of cube.joins) {
+      const existing = this.joinGraph.get(join.left) ?? [];
+      existing.push(join);
+      this.joinGraph.set(join.left, existing);
+      // Also add reverse direction
+      const rev = this.joinGraph.get(join.right) ?? [];
+      rev.push({ ...join, left: join.right, right: join.left });
+      this.joinGraph.set(join.right, rev);
+    }
+  }
+
+  getCube(name: string): CubeDefinition | undefined {
+    return this.cubes.get(name);
+  }
+
+  listCubes(): CubeDefinition[] {
+    return Array.from(this.cubes.values());
+  }
+
+  /** BFS shortest join path between two cube names. Returns empty array if same cube. */
+  findJoinPath(fromCube: string, toCube: string): JoinDefinition[] {
+    if (fromCube === toCube) return [];
+    const queue: Array<{ cube: string; path: JoinDefinition[] }> = [{ cube: fromCube, path: [] }];
+    const visited = new Set<string>([fromCube]);
+    while (queue.length > 0) {
+      const { cube, path } = queue.shift()!;
+      const neighbors = this.joinGraph.get(cube) ?? [];
+      for (const join of neighbors) {
+        if (visited.has(join.right)) continue;
+        const newPath = [...path, join];
+        if (join.right === toCube) return newPath;
+        visited.add(join.right);
+        queue.push({ cube: join.right, path: newPath });
+      }
+    }
+    return []; // no path found
+  }
+
+  /** Compose a multi-metric, cross-table SQL query using join graph traversal. */
+  composeQuery(options: ComposeQueryOptions): ComposeQueryResult | null {
+    const { metrics, dimensions, timeDimension, filters, orderBy, limit } = options;
+    if (metrics.length === 0) return null;
+
+    // Resolve metric definitions
+    const resolvedMetrics = metrics
+      .map((m) => this.metrics.get(m))
+      .filter(Boolean) as MetricDefinition[];
+    if (resolvedMetrics.length === 0) return null;
+
+    // Resolve dimension definitions
+    const resolvedDimensions = dimensions
+      .map((d) => this.dimensions.get(d))
+      .filter(Boolean) as DimensionDefinition[];
+
+    // Resolve time dimension
+    let timeDimDef: DimensionDefinition | undefined;
+    if (timeDimension) {
+      timeDimDef = this.dimensions.get(timeDimension.name);
+    }
+
+    // Find the primary table (from first metric)
+    const primaryTable = resolvedMetrics[0].table;
+
+    // Collect all tables referenced
+    const allTables = new Set<string>([primaryTable]);
+    for (const m of resolvedMetrics) allTables.add(m.table);
+    for (const d of resolvedDimensions) allTables.add(d.table);
+    if (timeDimDef) allTables.add(timeDimDef.table);
+
+    // Find which cube corresponds to a table
+    const cubeByTable = (table: string): string | undefined => {
+      for (const [name, cube] of this.cubes) {
+        if (cube.table === table || cube.name === table) return name;
+      }
+      return table; // fallback: treat table as cube name
+    };
+
+    // Build JOIN clauses using join graph
+    const primaryCube = cubeByTable(primaryTable);
+    const joinsUsed: JoinDefinition[] = [];
+    const joinedTables = new Set<string>([primaryTable]);
+
+    for (const table of allTables) {
+      if (table === primaryTable) continue;
+      const targetCube = cubeByTable(table) ?? table;
+      const path = this.findJoinPath(primaryCube ?? primaryTable, targetCube);
+      for (const join of path) {
+        const joinKey = `${join.left}_${join.right}`;
+        if (!joinsUsed.some((j) => `${j.left}_${j.right}` === joinKey)) {
+          joinsUsed.push(join);
+          joinedTables.add(join.right);
+        }
+      }
+      // If no path found, still include the table with a simple reference
+      if (!joinedTables.has(table)) {
+        joinedTables.add(table);
+      }
+    }
+
+    // Build SELECT
+    const selectParts: string[] = [];
+
+    // Add dimensions
+    for (const d of resolvedDimensions) {
+      const prefix = d.table !== primaryTable ? `${d.table}.` : '';
+      const sql = d.sql.includes('.') ? d.sql : `${prefix}${d.sql}`;
+      selectParts.push(`${sql} AS ${d.name}`);
+    }
+
+    // Add time dimension with granularity
+    if (timeDimDef && timeDimension) {
+      const grain = timeDimension.granularity;
+      const tdSql = timeDimDef.sql.includes('.') ? timeDimDef.sql : `${timeDimDef.table}.${timeDimDef.sql}`;
+      const truncated = grain === 'day'
+        ? `DATE_TRUNC('day', ${tdSql})`
+        : grain === 'week'
+          ? `DATE_TRUNC('week', ${tdSql})`
+          : grain === 'month'
+            ? `DATE_TRUNC('month', ${tdSql})`
+            : grain === 'quarter'
+              ? `DATE_TRUNC('quarter', ${tdSql})`
+              : `DATE_TRUNC('year', ${tdSql})`;
+      selectParts.push(`${truncated} AS ${timeDimDef.name}_${grain}`);
+    }
+
+    // Add metrics
+    for (const m of resolvedMetrics) {
+      selectParts.push(`${m.sql} AS ${m.name}`);
+    }
+
+    // Build FROM + JOINs
+    let fromClause = `FROM ${primaryTable}`;
+    const joinClauses: string[] = [];
+    for (const join of joinsUsed) {
+      const rightCube = this.cubes.get(join.right);
+      const rightTable = rightCube?.table ?? join.right;
+      const resolvedSql = join.sql
+        .replace('${left}', join.left)
+        .replace('${right}', join.right);
+      joinClauses.push(`${join.type.toUpperCase()} JOIN ${rightTable} ON ${resolvedSql}`);
+    }
+
+    // Build GROUP BY
+    const groupByParts: string[] = [];
+    for (const d of resolvedDimensions) {
+      const prefix = d.table !== primaryTable ? `${d.table}.` : '';
+      const sql = d.sql.includes('.') ? d.sql : `${prefix}${d.sql}`;
+      groupByParts.push(sql);
+    }
+    if (timeDimDef && timeDimension) {
+      const grain = timeDimension.granularity;
+      const tdSql = timeDimDef.sql.includes('.') ? timeDimDef.sql : `${timeDimDef.table}.${timeDimDef.sql}`;
+      groupByParts.push(`DATE_TRUNC('${grain}', ${tdSql})`);
+    }
+
+    // Build WHERE
+    const whereParts: string[] = [];
+    for (const f of filters ?? []) {
+      if (!f.dimension) continue;
+      const dimDef = this.dimensions.get(f.dimension);
+      const dimSql = dimDef?.sql ?? f.dimension;
+      const v0 = f.values?.[0] ?? '';
+      const v1 = f.values?.[1] ?? '';
+      // Detect if value looks numeric (no quoting needed)
+      const isNumeric = (v: string) => /^-?\d+(\.\d+)?$/.test(v.trim());
+      const quote = (v: string) => isNumeric(v) ? v : `'${v.replace(/'/g, "''")}'`;
+
+      switch (f.operator) {
+        case 'equals':
+          if (f.values.length <= 1) {
+            whereParts.push(`${dimSql} = ${quote(v0)}`);
+          } else {
+            whereParts.push(`${dimSql} IN (${f.values.map(quote).join(', ')})`);
+          }
+          break;
+        case 'not_equals':
+          whereParts.push(`${dimSql} != ${quote(v0)}`);
+          break;
+        case 'in':
+          if (f.values.length > 0) {
+            whereParts.push(`${dimSql} IN (${f.values.map(quote).join(', ')})`);
+          }
+          break;
+        case 'not_in':
+          if (f.values.length > 0) {
+            whereParts.push(`${dimSql} NOT IN (${f.values.map(quote).join(', ')})`);
+          }
+          break;
+        case 'contains':
+          whereParts.push(`${dimSql} LIKE '%${v0.replace(/'/g, "''")}%'`);
+          break;
+        case 'starts_with':
+          whereParts.push(`${dimSql} LIKE '${v0.replace(/'/g, "''")}%'`);
+          break;
+        case 'ends_with':
+          whereParts.push(`${dimSql} LIKE '%${v0.replace(/'/g, "''")}'`);
+          break;
+        case 'gt':
+          whereParts.push(`${dimSql} > ${quote(v0)}`);
+          break;
+        case 'gte':
+          whereParts.push(`${dimSql} >= ${quote(v0)}`);
+          break;
+        case 'lt':
+          whereParts.push(`${dimSql} < ${quote(v0)}`);
+          break;
+        case 'lte':
+          whereParts.push(`${dimSql} <= ${quote(v0)}`);
+          break;
+        case 'between':
+          if (v0 && v1) {
+            whereParts.push(`${dimSql} BETWEEN ${quote(v0)} AND ${quote(v1)}`);
+          }
+          break;
+        case 'is_null':
+          whereParts.push(`${dimSql} IS NULL`);
+          break;
+        case 'is_not_null':
+          whereParts.push(`${dimSql} IS NOT NULL`);
+          break;
+      }
+    }
+
+    // Build ORDER BY
+    const orderByParts: string[] = [];
+    for (const o of orderBy ?? []) {
+      orderByParts.push(`${o.name} ${o.direction.toUpperCase()}`);
+    }
+
+    // Compose full SQL
+    let sql = `SELECT\n  ${selectParts.join(',\n  ')}\n${fromClause}`;
+    if (joinClauses.length > 0) sql += `\n${joinClauses.join('\n')}`;
+    if (whereParts.length > 0) sql += `\nWHERE ${whereParts.join('\n  AND ')}`;
+    if (groupByParts.length > 0) sql += `\nGROUP BY ${groupByParts.join(', ')}`;
+    if (orderByParts.length > 0) sql += `\nORDER BY ${orderByParts.join(', ')}`;
+    if (limit) sql += `\nLIMIT ${limit}`;
+
+    return {
+      sql,
+      joins: joinClauses,
+      tables: Array.from(allTables),
+    };
   }
 
   addHierarchy(hierarchy: HierarchyDefinition): void {
@@ -327,11 +627,19 @@ export class SemanticLayer {
 
   /**
    * Generate SQL for a metric with optional dimension grouping.
+   * Delegates to composeQuery() to leverage the join graph when cubes are available.
    */
   generateMetricSQL(metricName: string, groupBy?: string[]): string | null {
     const metric = this.metrics.get(metricName);
     if (!metric) return null;
 
+    // If we have cubes registered, use composeQuery for cross-table JOIN support
+    if (this.cubes.size > 0) {
+      const result = this.composeQuery({ metrics: [metricName], dimensions: groupBy ?? [] });
+      if (result) return result.sql;
+    }
+
+    // Fallback: simple single-table SQL (original behavior, no cubes loaded)
     const dims = (groupBy ?? [])
       .map((d) => this.dimensions.get(d))
       .filter(Boolean) as DimensionDefinition[];
@@ -349,6 +657,60 @@ export class SemanticLayer {
     }
     return sql;
   }
+}
+
+export function parseCubeDefinition(raw: Record<string, unknown>): CubeDefinition {
+  const measuresRaw = Array.isArray(raw.measures) ? raw.measures : [];
+  const dimensionsRaw = Array.isArray(raw.dimensions) ? raw.dimensions : [];
+  const timeDimsRaw = Array.isArray(raw.time_dimensions ?? raw.timeDimensions) ? (raw.time_dimensions ?? raw.timeDimensions) as unknown[] : [];
+  const joinsRaw = Array.isArray(raw.joins) ? raw.joins : [];
+
+  const measures = measuresRaw
+    .filter((m): m is Record<string, unknown> => !!m && typeof m === 'object')
+    .map((m) => parseMetricDefinition({ ...m, table: String(raw.table ?? raw.name ?? '') }));
+
+  const dimensions = dimensionsRaw
+    .filter((d): d is Record<string, unknown> => !!d && typeof d === 'object')
+    .map((d) => parseDimensionDefinition({ ...d, table: String(raw.table ?? raw.name ?? '') }));
+
+  const timeDimensions = (timeDimsRaw as unknown[])
+    .filter((td): td is Record<string, unknown> => !!td && typeof td === 'object')
+    .map((td): TimeDimensionDefinition => {
+      const base = parseDimensionDefinition({ ...td, table: String(raw.table ?? raw.name ?? ''), type: 'date' });
+      const granRaw = Array.isArray((td as Record<string, unknown>).granularities) ? (td as Record<string, unknown>).granularities as unknown[] : ['day', 'month', 'year'];
+      const validGranularities = ['day', 'week', 'month', 'quarter', 'year'];
+      return {
+        ...base,
+        granularities: granRaw.map(String).filter((g) => validGranularities.includes(g)) as TimeDimensionDefinition['granularities'],
+        primaryTime: Boolean((td as Record<string, unknown>).primary_time ?? (td as Record<string, unknown>).primaryTime ?? false),
+      };
+    });
+
+  const joins = joinsRaw
+    .filter((j): j is Record<string, unknown> => !!j && typeof j === 'object')
+    .map((j): JoinDefinition => ({
+      name: String(j.name ?? ''),
+      left: String(raw.name ?? ''),
+      right: String(j.name ?? ''),
+      type: (['inner', 'left', 'right', 'full'].includes(String(j.type ?? 'left')) ? String(j.type ?? 'left') : 'left') as JoinDefinition['type'],
+      sql: String(j.sql ?? ''),
+    }));
+
+  return {
+    name: String(raw.name ?? ''),
+    label: String(raw.label ?? raw.name ?? ''),
+    description: String(raw.description ?? ''),
+    sql: String(raw.sql ?? `SELECT * FROM ${String(raw.table ?? raw.name ?? '')}`),
+    table: String(raw.table ?? raw.name ?? ''),
+    domain: String(raw.domain ?? ''),
+    measures,
+    dimensions,
+    timeDimensions,
+    joins,
+    defaultTimeDimension: raw.default_time_dimension != null ? String(raw.default_time_dimension) : undefined,
+    owner: raw.owner ? String(raw.owner) : undefined,
+    tags: Array.isArray(raw.tags) ? raw.tags.map(String) : undefined,
+  };
 }
 
 function validateMetricType(t: string): MetricDefinition['type'] {

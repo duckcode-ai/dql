@@ -1,8 +1,8 @@
-import type { DatabaseConnector, ConnectionConfig } from '../connector.js';
+import type { DatabaseConnector, ConnectionConfig, DriverName } from '../connector.js';
 import type { QueryResult, ColumnMeta, ColumnType, Row } from '../result-types.js';
 
 export class MSSQLConnector implements DatabaseConnector {
-  readonly driverName = 'mssql';
+  readonly driverName: DriverName = 'mssql';
   private pool: any = null;
   private sql: any = null;
 

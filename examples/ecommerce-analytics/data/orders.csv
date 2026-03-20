@@ -1,0 +1,11 @@
+order_id,order_date,customer_id,segment,channel,region,order_total,gross_margin,is_repeat,payment_method
+1001,2025-01-03,C-001,Enterprise,Paid Search,North America,12400,0.41,false,Card
+1002,2025-01-05,C-002,Mid-Market,Organic Search,EMEA,8600,0.37,true,Card
+1003,2025-01-08,C-003,SMB,Lifecycle,North America,2400,0.54,true,ACH
+1004,2025-01-11,C-004,Enterprise,Partner,APAC,15200,0.46,false,Wire
+1005,2025-01-14,C-005,Mid-Market,Paid Social,North America,5400,0.35,false,Card
+1006,2025-01-18,C-006,SMB,Organic Search,LATAM,1800,0.51,true,Card
+1007,2025-01-22,C-002,Mid-Market,Lifecycle,EMEA,9200,0.39,true,Card
+1008,2025-01-27,C-007,Enterprise,Partner,North America,17600,0.48,true,Wire
+1009,2025-02-02,C-008,Mid-Market,Paid Search,EMEA,7300,0.36,false,Card
+1010,2025-02-06,C-009,SMB,Organic Search,North America,2100,0.56,false,ACH

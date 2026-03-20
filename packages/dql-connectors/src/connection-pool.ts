@@ -7,6 +7,12 @@ import { BigQueryConnector } from './drivers/bigquery.js';
 import { DuckDBConnector } from './drivers/duckdb.js';
 import { MSSQLConnector } from './drivers/mssql.js';
 import { FileConnector } from './drivers/file.js';
+import { RedshiftConnector } from './drivers/redshift.js';
+import { FabricConnector } from './drivers/fabric.js';
+import { ClickHouseConnector } from './drivers/clickhouse.js';
+import { DatabricksConnector } from './drivers/databricks.js';
+import { AthenaConnector } from './drivers/athena.js';
+import { TrinoConnector } from './drivers/trino.js';
 import { createHash } from 'node:crypto';
 
 function stableSerialize(value: unknown): string {
@@ -34,12 +40,21 @@ export function createConnectionConfigKey(config: ConnectionConfig): string {
     database: config.database,
     username: config.username,
     password: config.password,
+    token: config.token,
     ssl: config.ssl,
     filepath: config.filepath,
     projectId: config.projectId,
     account: config.account,
     warehouse: config.warehouse,
+    workgroup: config.workgroup,
     connectionString: config.connectionString,
+    schema: config.schema,
+    role: config.role,
+    region: config.region,
+    outputLocation: config.outputLocation,
+    httpPath: config.httpPath,
+    catalog: config.catalog,
+    privateKey: config.privateKey,
   };
   const payload = stableSerialize(normalized);
   return createHash('sha1').update(payload).digest('hex');
@@ -94,6 +109,18 @@ export class ConnectionPoolManager {
         return new MSSQLConnector();
       case 'file':
         return new FileConnector();
+      case 'redshift':
+        return new RedshiftConnector();
+      case 'fabric':
+        return new FabricConnector();
+      case 'clickhouse':
+        return new ClickHouseConnector();
+      case 'databricks':
+        return new DatabricksConnector();
+      case 'athena':
+        return new AthenaConnector();
+      case 'trino':
+        return new TrinoConnector();
       default:
         throw new Error(`Unsupported database driver: ${config.driver}`);
     }

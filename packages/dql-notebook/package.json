@@ -1,0 +1,40 @@
+{
+  "name": "@duckcodeailabs/dql-notebook",
+  "version": "0.1.3",
+  "description": "Notebook document model and execution helpers for DQL",
+  "license": "Apache-2.0",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "rm -rf dist tsconfig.tsbuildinfo && tsc",
+    "test": "vitest run --passWithNoTests",
+    "clean": "rm -rf dist tsconfig.tsbuildinfo"
+  },
+  "files": [
+    "dist"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/duckcode-ai/dql.git",
+    "directory": "packages/dql-notebook"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "dependencies": {
+    "@duckcodeailabs/dql-core": "workspace:*",
+    "@duckcodeailabs/dql-connectors": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "typescript": "^5.7.0",
+    "vitest": "^3.0.0"
+  }
+}

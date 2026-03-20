@@ -113,7 +113,7 @@ dql preview blocks/pipeline_health.dql --open
 
 Then read:
 
-- [Quickstart](./quickstart.md)
+- [Getting Started](./getting-started.md)
 - [Examples](./examples.md)
 - [Project Config](./project-config.md)
 - [Data Sources](./data-sources.md)

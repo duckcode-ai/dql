@@ -21,12 +21,14 @@ describe('runInit', () => {
       owner: '',
       port: null,
       queryOnly: false,
+      template: 'starter',
       verbose: false,
     });
 
     expect(readdirSync(projectDir)).toContain('blocks');
     expect(readdirSync(projectDir)).toContain('data');
     expect(readdirSync(projectDir)).toContain('dql.config.json');
+    expect(readdirSync(projectDir)).toContain('notebooks');
 
     const config = readFileSync(join(projectDir, 'dql.config.json'), 'utf-8');
     expect(config).toContain('demo-project');
@@ -34,5 +36,8 @@ describe('runInit', () => {
     const block = readFileSync(join(projectDir, 'blocks', 'revenue_by_segment.dql'), 'utf-8');
     expect(block).toContain('type = "custom"');
     expect(block).toContain("read_csv_auto('./data/revenue.csv')");
+
+    const notebook = readFileSync(join(projectDir, 'notebooks', 'welcome.dqlnb'), 'utf-8');
+    expect(notebook).toContain('Revenue by Segment');
   });
 });

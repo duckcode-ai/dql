@@ -1,0 +1,11 @@
+customer_id,customer_name,segment,region,acquisition_channel,first_order_date,health_score
+C-001,Northstar Health,Enterprise,North America,Paid Search,2025-01-03,92
+C-002,Blue Pine Retail,Mid-Market,EMEA,Organic Search,2024-11-19,87
+C-003,Maple & Co,SMB,North America,Lifecycle,2024-12-01,79
+C-004,Harbor Commerce,Enterprise,APAC,Partner,2025-01-11,90
+C-005,Studio Relay,Mid-Market,North America,Paid Social,2025-01-14,74
+C-006,Rio Goods,SMB,LATAM,Organic Search,2024-10-08,82
+C-007,Vertex Home,Enterprise,North America,Partner,2024-09-22,95
+C-008,Atlas Europe,Mid-Market,EMEA,Paid Search,2025-02-02,71
+C-009,North Loop,SMB,North America,Organic Search,2025-02-06,77
+C-010,Pacific Devices,Enterprise,APAC,Lifecycle,2024-08-12,88

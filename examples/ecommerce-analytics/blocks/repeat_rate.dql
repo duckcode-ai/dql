@@ -1,0 +1,18 @@
+block "Repeat Revenue Mix" {
+    domain = "commerce"
+    type = "custom"
+
+    query = """
+        SELECT CASE WHEN is_repeat THEN 'Repeat' ELSE 'First Order' END AS order_type,
+               ROUND(SUM(order_total), 2) AS revenue
+        FROM read_csv_auto('./data/orders.csv')
+        GROUP BY order_type
+        ORDER BY revenue DESC
+    """
+
+    visualization {
+        chart = "bar"
+        x = order_type
+        y = revenue
+    }
+}

@@ -5,6 +5,7 @@ export {
   parseDimensionDefinition,
   parseHierarchyDefinition,
   parseBlockCompanionDefinition,
+  parseCubeDefinition,
 } from './semantic-layer.js';
 export type {
   MetricDefinition,
@@ -15,4 +16,9 @@ export type {
   HierarchyDrillPathDefinition,
   HierarchyRollupType,
   SemanticLayerConfig,
+  JoinDefinition,
+  TimeDimensionDefinition,
+  CubeDefinition,
+  ComposeQueryOptions,
+  ComposeQueryResult,
 } from './semantic-layer.js';

@@ -45,11 +45,12 @@ These flags are specific to `dql new ...` scaffolds.
 
 ### `dql init [directory]`
 
-Create a local DQL starter project with sample data, starter blocks, and `dql.config.json`.
+Create a local DQL starter project with sample data, starter blocks, a welcome notebook, and `dql.config.json`.
 
 ```bash
 dql init my-dql-project
 cd my-dql-project
+dql notebook
 ```
 
 **What it creates:**
@@ -58,8 +59,40 @@ cd my-dql-project
 - `dashboards/` for dashboard scaffolds
 - `data/revenue.csv` for local preview flows
 - `dql.config.json` with a file/DuckDB-friendly default connection
+- `notebooks/welcome.dqlnb` for browser-first exploration
 - `workbooks/` for workbook scaffolds
 - `semantic-layer/` starter definitions
+
+**Useful flags:**
+
+- `--template <starter|ecommerce|saas|taxi>` — scaffold a themed starter project
+- `--open` — scaffold the project and immediately open the notebook
+
+---
+
+### `dql notebook [path]`
+
+Launch the browser-first DQL notebook for the current project or a specified path.
+
+```bash
+dql notebook
+dql notebook my-dql-project
+dql notebook --port 4488
+```
+
+**What it does:**
+
+- Starts a local notebook UI on top of the same `/api/query` runtime used by preview/serve
+- Loads `notebooks/welcome.dqlnb` when present
+- Supports DQL, SQL, markdown, and linked chart cells
+- Exposes connector form definitions for local and remote drivers
+
+**Text output:**
+
+```text
+  ✓ Notebook ready: http://127.0.0.1:3474
+    Press Ctrl+C to stop.
+```
 
 ---
 

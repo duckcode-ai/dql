@@ -31,6 +31,7 @@ describe('runDoctor', () => {
       owner: '',
       port: null,
       queryOnly: false,
+      template: 'starter',
       verbose: false,
     });
 

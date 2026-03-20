@@ -133,7 +133,7 @@ dql preview blocks/pipeline_health.dql --open
 
 Then continue with:
 
-- [Quickstart](./quickstart.md)
+- [Getting Started](./getting-started.md)
 - [Examples](./examples.md)
 - [FAQ](./faq.md)
 - [Migration Guides](./migration-guides/README.md)

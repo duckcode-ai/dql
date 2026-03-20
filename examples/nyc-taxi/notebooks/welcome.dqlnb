@@ -1,0 +1,23 @@
+{
+  "version": 1,
+  "metadata": {
+    "title": "NYC Taxi Welcome",
+    "description": "Browser notebook walkthrough for the taxi example.",
+    "createdWith": "dql",
+    "template": "taxi"
+  },
+  "cells": [
+    {
+      "id": "intro",
+      "type": "markdown",
+      "title": "Welcome",
+      "source": "# NYC Taxi\n\nRun the cells below to inspect pickup volume and hourly fares."
+    },
+    {
+      "id": "trips-borough",
+      "type": "dql",
+      "title": "Trips by Borough",
+      "source": "block \"Trips by Borough\" {\n    domain = \"mobility\"\n    type = \"custom\"\n\n    query = \"\"\"\n        SELECT pickup_borough, COUNT(*) AS revenue\n        FROM read_csv_auto('./data/trips.csv')\n        GROUP BY pickup_borough\n        ORDER BY revenue DESC\n    \"\"\"\n\n    visualization {\n        chart = \"bar\"\n        x = pickup_borough\n        y = revenue\n    }\n}"
+    }
+  ]
+}

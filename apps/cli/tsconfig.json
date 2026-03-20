@@ -10,6 +10,7 @@
     { "path": "../../packages/dql-core" },
     { "path": "../../packages/dql-compiler" },
     { "path": "../../packages/dql-project" },
-    { "path": "../../packages/dql-governance" }
+    { "path": "../../packages/dql-governance" },
+    { "path": "../../packages/dql-notebook" }
   ]
 }

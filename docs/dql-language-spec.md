@@ -7,7 +7,7 @@
 
 ## Overview
 
-DQL (DuckCode Query Language) is a declarative language for defining analytics blocks — self-contained, testable, version-controlled units of data analysis. Each block wraps SQL with metadata, optional visualization config, parameters, and test assertions.
+DQL (Domain Query Language) is a declarative language for defining analytics blocks — self-contained, testable, version-controlled units of data analysis. Each block wraps SQL with metadata, optional visualization config, parameters, and test assertions.
 
 ## Lexical Structure
 

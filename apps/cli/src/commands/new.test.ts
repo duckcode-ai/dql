@@ -23,6 +23,7 @@ describe('runNew', () => {
       owner: '',
       port: null,
       queryOnly: false,
+      template: 'starter',
       verbose: false,
     });
 
@@ -40,6 +41,7 @@ describe('runNew', () => {
         owner: 'tester',
         port: null,
         queryOnly: false,
+        template: 'starter',
         verbose: false,
       });
 
@@ -74,6 +76,7 @@ describe('runNew', () => {
       owner: '',
       port: null,
       queryOnly: false,
+      template: 'starter',
       verbose: false,
     });
 
@@ -92,6 +95,7 @@ describe('runNew', () => {
         owner: 'tester',
         port: null,
         queryOnly: false,
+        template: 'starter',
         verbose: false,
       });
 
@@ -107,6 +111,7 @@ describe('runNew', () => {
         owner: 'tester',
         port: null,
         queryOnly: false,
+        template: 'starter',
         verbose: false,
       });
 
@@ -145,6 +150,7 @@ describe('runNew', () => {
       owner: '',
       port: null,
       queryOnly: false,
+      template: 'starter',
       verbose: false,
     });
 
@@ -163,6 +169,7 @@ describe('runNew', () => {
         owner: 'tester',
         port: null,
         queryOnly: false,
+        template: 'starter',
         verbose: false,
       });
 

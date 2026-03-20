@@ -1,9 +1,9 @@
 import pg from 'pg';
-import type { DatabaseConnector, ConnectionConfig } from '../connector.js';
+import type { DatabaseConnector, ConnectionConfig, DriverName } from '../connector.js';
 import type { QueryResult, ColumnMeta, ColumnType, Row } from '../result-types.js';
 
 export class PostgreSQLConnector implements DatabaseConnector {
-  readonly driverName = 'postgresql';
+  readonly driverName: DriverName = 'postgresql';
   private pool: pg.Pool | null = null;
 
   async connect(config: ConnectionConfig): Promise<void> {

@@ -14,14 +14,26 @@ Choose the path that fits your workflow.
 
 ### Path A — CLI only (standalone authoring)
 
-If you are using a published CLI package, install the `dql` binary globally:
+If you are in a new project folder or external repo, install the `dql` binary globally:
 
 ```bash
 npm install -g @duckcodeailabs/dql-cli
 dql --help
 ```
 
-Until then, build from source:
+Or install it locally and run it with `npx`:
+
+```bash
+npm init -y
+npm install -D @duckcodeailabs/dql-cli
+npx dql --help
+```
+
+Use this path if you are **not** inside the DQL monorepo.
+
+### Path B — Source repo / contributor workflow
+
+If you cloned the DQL repo itself, use the monorepo workflow instead:
 
 ```bash
 git clone https://github.com/duckcode-ai/dql.git
@@ -36,17 +48,19 @@ node apps/cli/dist/index.js --help
 ../node_modules/.bin/dql --help
 ```
 
+Commands such as `pnpm --filter @duckcodeailabs/dql-cli exec dql ...` work only in this cloned repo.
+
 If you switch Node versions after the initial install, rerun `pnpm install` before using local preview so native DuckDB bindings are rebuilt for the active runtime.
 
-### Path B — Library (embed in your application)
+### Path C — Library (embed in your application)
 
 ```bash
 npm install @duckcodeailabs/dql-core @duckcodeailabs/dql-compiler
 ```
 
-This gives you the parser, AST, semantic analyser, formatter, and full compilation pipeline as importable ESM modules. No CLI required.
+This gives you the parser, AST, semantic analyser, formatter, and full compilation pipeline as importable ESM modules. It does **not** install the `dql` CLI.
 
-### Path C — VS Code extension
+### Path D — VS Code extension
 
 1. Open VS Code, go to the **Extensions** panel (`Cmd+Shift+X` / `Ctrl+Shift+X`).
 2. Search for **DQL Language Support**.
@@ -62,6 +76,14 @@ The extension provides syntax highlighting, snippet expansion, format-on-save, h
 
 ---
 
+## Common installation mistakes
+
+- `zsh: command not found: dql` means the CLI is not installed globally and you are not using `npx dql`.
+- `No projects matched the filters` means you ran `pnpm --filter ...` outside the DQL source repo.
+- Installing `@duckcodeailabs/dql-core` and `@duckcodeailabs/dql-compiler` gives you libraries only, not the CLI binary.
+
+---
+
 ## Quickstart Project
 
 Scaffold a local-first DQL project with sample data:
@@ -69,23 +91,33 @@ Scaffold a local-first DQL project with sample data:
 These commands assume `dql` is on your shell `PATH`. If you are running from a source checkout, use `pnpm exec dql` from the repo root or `../node_modules/.bin/dql` from inside the generated project.
 
 ```bash
-dql init my-dql-project
+dql init my-dql-project --template starter
 cd my-dql-project
 ```
+
+Run notebook commands from inside `my-dql-project`, or pass the project path explicitly such as `dql notebook ./my-dql-project`.
 
 This creates:
 
 - `blocks/` — starter charted and query-only blocks
 - `data/` — local sample CSV for previewing with DuckDB/file connectors
 - `dql.config.json` — starter project configuration
+- `notebooks/` — welcome notebook for browser-first exploration
 - `semantic-layer/` — example semantic definitions and companion metadata
+
+To evaluate the strongest OSS path, use a themed template instead:
+
+```bash
+dql init my-dql-project --template ecommerce
+```
 
 See also:
 
-- [Quickstart](./quickstart.md)
+- [Use Cases](./use-cases.md)
 - [Project Config](./project-config.md)
 - [Data Sources](./data-sources.md)
 - [Examples](./examples.md)
+- [Repo Testing](./repo-testing.md)
 - [FAQ](./faq.md)
 - [Compatibility](./compatibility.md)
 - [Migration Guides](./migration-guides/README.md)
@@ -94,6 +126,7 @@ See also:
 Preview the starter block locally:
 
 ```bash
+dql notebook
 dql new block "Pipeline Health"
 dql doctor
 dql parse blocks/pipeline_health.dql
@@ -102,7 +135,26 @@ dql build blocks/pipeline_health.dql
 dql serve dist/pipeline_health
 ```
 
+Inside the notebook, the left sidebar now shows only files from the active project, and each file opens as a raw source view in a new tab for quick reference while editing cells.
+
 If the default preview port is already in use, pass `--port 4474` or another open port to `preview` or `serve`.
+
+---
+
+## Real Repo Setup
+
+If you are contributing to DQL itself, validate the repo from the source checkout:
+
+```bash
+git clone https://github.com/duckcode-ai/dql.git
+cd dql
+pnpm install
+pnpm build
+pnpm test
+pnpm --filter @duckcodeailabs/dql-cli exec dql --help
+```
+
+Then follow [Repo Testing](./repo-testing.md) for starter-template smoke tests, example checks, and notebook validation.
 
 ---
 

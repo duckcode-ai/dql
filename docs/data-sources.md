@@ -1,6 +1,6 @@
 # Data Sources
 
-DQL Phase 1 is optimized for **local-first experimentation**.
+DQL Phase 1 is optimized for **local-first experimentation with a browser notebook on top**.
 
 The easiest way to adopt DQL is to preview blocks against local files using the
 `file` or `duckdb` connectors.
@@ -9,14 +9,13 @@ The easiest way to adopt DQL is to preview blocks against local files using the
 
 ## Best First Experience
 
-Use the starter project and sample CSV:
+Use the starter project and sample CSV, then open the notebook immediately:
 
 ```bash
 dql init my-dql-project
 cd my-dql-project
 dql doctor
-dql new block "Pipeline Health"
-dql preview blocks/pipeline_health.dql
+dql notebook
 ```
 
 The starter block reads from:
@@ -78,14 +77,20 @@ Then your DQL query can use normal SQL against tables inside that database.
 
 DQL also ships connector support for:
 
-- PostgreSQL
-- MySQL
+- File-backed local DuckDB queries
+- DuckDB
 - SQLite
+- PostgreSQL
+- Redshift
+- MySQL
+- SQL Server / MSSQL
+- Microsoft Fabric
 - Snowflake
 - BigQuery
-- SQL Server / MSSQL
-- DuckDB
-- File-backed local DuckDB queries
+- ClickHouse
+- Databricks SQL
+- Amazon Athena
+- Trino
 
 For open-source adoption, we recommend starting with local file or DuckDB mode
 before connecting cloud warehouses.
@@ -215,11 +220,106 @@ replace the starter value with the connector you actually want to use.
 
 3. Run `dql doctor`.
 
+### Redshift
+
+```json
+{
+  "defaultConnection": {
+    "driver": "redshift",
+    "host": "example-cluster.abc123.us-east-1.redshift.amazonaws.com",
+    "port": 5439,
+    "database": "analytics",
+    "username": "analyst",
+    "password": "secret",
+    "ssl": true
+  }
+}
+```
+
+### Microsoft Fabric
+
+```json
+{
+  "defaultConnection": {
+    "driver": "fabric",
+    "host": "workspace.datawarehouse.fabric.microsoft.com",
+    "port": 1433,
+    "database": "analytics",
+    "username": "user",
+    "password": "secret",
+    "ssl": true
+  }
+}
+```
+
+### ClickHouse
+
+```json
+{
+  "defaultConnection": {
+    "driver": "clickhouse",
+    "host": "play.clickhouse.com",
+    "port": 8443,
+    "database": "default",
+    "username": "play",
+    "password": "play",
+    "ssl": true
+  }
+}
+```
+
+### Databricks SQL
+
+```json
+{
+  "defaultConnection": {
+    "driver": "databricks",
+    "host": "dbc-example.cloud.databricks.com",
+    "warehouse": "warehouse-id",
+    "catalog": "main",
+    "schema": "analytics",
+    "token": "dapi..."
+  }
+}
+```
+
+### Athena
+
+```json
+{
+  "defaultConnection": {
+    "driver": "athena",
+    "region": "us-east-1",
+    "database": "analytics",
+    "outputLocation": "s3://my-query-results/",
+    "workgroup": "primary"
+  }
+}
+```
+
+### Trino
+
+```json
+{
+  "defaultConnection": {
+    "driver": "trino",
+    "host": "trino.example.com",
+    "port": 8080,
+    "catalog": "lakehouse",
+    "schema": "analytics",
+    "username": "analyst",
+    "password": "secret",
+    "ssl": true
+  }
+}
+```
+
 ---
 
 ## Tips for Easy Testing
 
 - keep sample datasets in `data/`
+- start with `dql notebook` so you can iterate cell-by-cell before formalizing blocks
 - use query-only blocks for validation flows
 - add `tests { assert row_count > 0 }` to every starter block
 - prefer small local CSV or Parquet files for examples

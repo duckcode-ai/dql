@@ -1,6 +1,6 @@
 # Compatibility
 
-This document describes the current DQL open-source compatibility target for local use, package consumption, and experimentation.
+This document describes the current DQL open-source compatibility target for local use, package consumption, browser notebook workflows, and experimentation.
 
 ## Runtime Requirements
 
@@ -18,6 +18,7 @@ This document describes the current DQL open-source compatibility target for loc
 The current open-source Phase 1 workflow centers on:
 
 - `dql init`
+- `dql notebook`
 - `dql doctor`
 - `dql parse`
 - `dql fmt`
@@ -151,13 +152,15 @@ Because the connector workspace depends on several database client libraries, so
 If you want the lowest-friction setup, prefer the local-first path:
 
 - starter project
+- `dql notebook`
 - `file` or `duckdb` connector
 - local preview server
 
 ## Known OSS Phase 1 Limits
 
-- The easiest supported path today is local-first preview, not full enterprise deployment.
+- The easiest supported path today is local-first preview and browser notebook exploration, not full enterprise deployment.
 - `dql preview` and `dql serve` use a lightweight local query API for interactive rendering.
+- `dql notebook` uses the same local query API and adds notebook execution plus connection forms.
 - `dql test` is most useful when a runnable query execution path is configured.
 - The fastest adoption path is currently the CLI and source workspace; published package availability may depend on your release process.
 
@@ -173,7 +176,7 @@ If you want the smoothest experience, use this baseline:
 
 ## Related Docs
 
-- [Quickstart](./quickstart.md)
+- [Getting Started](./getting-started.md)
 - [FAQ](./faq.md)
 - [Project Config](./project-config.md)
 - [Data Sources](./data-sources.md)

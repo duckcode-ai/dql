@@ -5,7 +5,6 @@ This document is for maintainers releasing the open-source DQL packages and VS C
 If you are trying DQL as a user, start with:
 
 - [Why DQL](./why-dql.md)
-- [Quickstart](./quickstart.md)
 - [Getting Started](./getting-started.md)
 
 This repository publishes the public DQL packages to npm and the editor extension to the VS Code marketplace.
@@ -35,9 +34,11 @@ The release script (`scripts/release-packages.mjs`) publishes packages in the fo
 @duckcodeailabs/dql-project                 (depends on @duckcodeailabs/dql-core)
 @duckcodeailabs/dql-governance              (depends on @duckcodeailabs/dql-core, @duckcodeailabs/dql-project)
 @duckcodeailabs/dql-connectors              (no @duckcodeailabs/dql-* deps)
+@duckcodeailabs/dql-notebook                (depends on @duckcodeailabs/dql-core, @duckcodeailabs/dql-connectors)
 @duckcodeailabs/dql-lsp                     (depends on @duckcodeailabs/dql-core)
 @duckcodeailabs/dql-cli                     (depends on @duckcodeailabs/dql-core, @duckcodeailabs/dql-compiler,
-                                         @duckcodeailabs/dql-project, @duckcodeailabs/dql-governance)
+                                         @duckcodeailabs/dql-project, @duckcodeailabs/dql-governance,
+                                         @duckcodeailabs/dql-connectors, @duckcodeailabs/dql-notebook)
 ```
 
 ---
@@ -105,6 +106,7 @@ packages/dql-charts
 packages/dql-project
 packages/dql-governance
 packages/dql-connectors
+packages/dql-notebook
 packages/dql-lsp
 apps/cli
 ```

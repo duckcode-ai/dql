@@ -26,4 +26,11 @@ describe('parseArgs', () => {
     const parsed = parseArgs(['serve', 'dist/demo', '--open', '--no-open']);
     expect(parsed.flags.open).toBe(false);
   });
+
+  it('parses notebook init template selection', () => {
+    const parsed = parseArgs(['init', 'demo', '--template', 'ecommerce']);
+    expect(parsed.command).toBe('init');
+    expect(parsed.file).toBe('demo');
+    expect(parsed.flags.template).toBe('ecommerce');
+  });
 });

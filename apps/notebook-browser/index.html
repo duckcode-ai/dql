@@ -1,0 +1,83 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>DQL Notebook</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <div id="app" class="app-shell">
+      <aside class="sidebar">
+        <div class="brand">
+          <div class="brand-mark">DQL</div>
+          <div>
+            <strong>Notebook</strong>
+            <p id="project-name">Loading project…</p>
+          </div>
+        </div>
+        <section>
+          <div class="section-title">Files</div>
+          <ul id="file-list" class="file-list"></ul>
+        </section>
+        <section>
+          <div class="section-title">Connections</div>
+          <div id="connection-summary" class="panel small"></div>
+          <label class="field-label" for="driver-select">Add connection</label>
+          <select id="driver-select"></select>
+          <div id="connection-fields"></div>
+          <div class="row-actions">
+            <button id="save-connection" class="secondary">Save draft</button>
+            <button id="test-connection" class="secondary">Test</button>
+          </div>
+          <div id="connection-status" class="status"></div>
+        </section>
+      </aside>
+
+      <main class="main">
+        <header class="toolbar">
+          <div>
+            <h1 id="notebook-title">Notebook</h1>
+            <p class="subtitle">DQL cells, SQL cells, markdown, and linked charts.</p>
+          </div>
+          <div class="toolbar-actions">
+            <button data-add="dql">Add DQL</button>
+            <button data-add="sql">Add SQL</button>
+            <button data-add="markdown">Add Markdown</button>
+            <button data-add="chart">Add Chart</button>
+            <button id="run-all" class="primary">Run all</button>
+            <button id="export-notebook" class="primary">Export .dqlnb</button>
+          </div>
+        </header>
+
+        <section id="cells" class="cells"></section>
+      </main>
+    </div>
+
+    <template id="cell-template">
+      <article class="cell">
+        <div class="cell-header">
+          <div>
+            <span class="cell-type"></span>
+            <input class="cell-title" type="text" />
+          </div>
+          <div class="cell-actions">
+            <button data-action="up">↑</button>
+            <button data-action="down">↓</button>
+            <button data-action="run">Run</button>
+            <button data-action="delete">Delete</button>
+          </div>
+        </div>
+        <div class="cell-body">
+          <textarea class="cell-source" spellcheck="false"></textarea>
+          <div class="chart-editor hidden"></div>
+          <div class="markdown-preview hidden"></div>
+          <div class="cell-status"></div>
+          <div class="cell-output"></div>
+        </div>
+      </article>
+    </template>
+
+    <script type="module" src="./app.js"></script>
+  </body>
+</html>

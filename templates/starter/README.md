@@ -1,13 +1,14 @@
 # __PROJECT_NAME__
 
 This starter gives you a local-first DQL project that is ready for parsing,
-previewing, and experimentation.
+previewing, notebook exploration, and experimentation.
 
 ```text
 blocks/
 dashboards/
 data/
 dql.config.json
+notebooks/
 workbooks/
 semantic-layer/
   metrics/
@@ -20,6 +21,7 @@ semantic-layer/
 
 ```bash
 dql doctor
+dql notebook
 dql new block "Pipeline Health"
 dql new semantic-block "ARR Growth"
 dql new dashboard "Revenue Overview"
@@ -36,6 +38,7 @@ dql serve dist/pipeline_health
 - `dashboards/` — empty folder for dashboard scaffolds
 - `data/` — sample revenue CSV for local DuckDB/file preview flows
 - `dql.config.json` — starter project configuration
+- `notebooks/welcome.dqlnb` — guided notebook walkthrough for the browser notebook
 - `workbooks/` — empty folder for workbook scaffolds
 - `semantic-layer/` — example metrics, dimensions, hierarchies, and companion metadata
 

@@ -1,7 +1,14 @@
 import { createServer } from 'node:http';
-import { existsSync, readFileSync, statSync } from 'node:fs';
+import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
 import { dirname, extname, join, normalize, resolve } from 'node:path';
 import { QueryExecutor, type ConnectionConfig } from '@duckcodeailabs/dql-connectors';
+import {
+  buildExecutionPlan,
+  createWelcomeNotebook,
+  deserializeNotebook,
+  getConnectorFormSchemas,
+  type NotebookCell,
+} from '@duckcodeailabs/dql-notebook';
 
 export interface ProjectConfig {
   project?: string;
@@ -16,17 +23,20 @@ export interface ProjectConfig {
 
 export interface LocalServerOptions {
   rootDir: string;
+  projectRoot?: string;
   executor: QueryExecutor;
   connection: ConnectionConfig;
   preferredPort: number;
 }
 
 export async function startLocalServer(opts: LocalServerOptions): Promise<number> {
-  const { rootDir, executor, connection, preferredPort } = opts;
+  const { rootDir, executor, connection, preferredPort, projectRoot = process.cwd() } = opts;
+  const projectConfig = loadProjectConfig(projectRoot);
 
   const server = createServer(async (req, res) => {
     const requestUrl = req.url || '/';
-    const path = requestUrl.split('?')[0] || '/';
+    const url = new URL(requestUrl, 'http://127.0.0.1');
+    const path = url.pathname || '/';
 
     if (req.method === 'GET' && path === '/api/health') {
       res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
@@ -42,11 +52,17 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           res.end(serializeJSON({ columns: [], rows: [], error: 'Missing SQL in request body.' }));
           return;
         }
+        const prepared = prepareLocalExecution(
+          typeof body.sql === 'string' ? body.sql : '',
+          isConnectionConfig(body.connection) ? body.connection : connection,
+          projectRoot,
+          projectConfig,
+        );
         const result = await executor.executeQuery(
-          body.sql,
+          prepared.sql,
           Array.isArray(body.sqlParams) ? body.sqlParams : [],
           body.variables && typeof body.variables === 'object' ? body.variables : {},
-          connection,
+          prepared.connection,
         );
         const payload = serializeJSON(result);
         res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
@@ -62,6 +78,97 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           rows: [],
           error: error instanceof Error ? error.message : String(error),
         }));
+      }
+      return;
+    }
+
+    if (req.method === 'POST' && path === '/api/test-connection') {
+      try {
+        const body = await readJSON(req);
+        const target = normalizeProjectConnection(
+          isConnectionConfig(body.connection) ? body.connection : connection,
+          projectRoot,
+        );
+        const connector = await executor.getConnector(target);
+        const ok = await connector.ping();
+        res.writeHead(ok ? 200 : 400, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({ ok }));
+      } catch (error) {
+        res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({ ok: false, error: error instanceof Error ? error.message : String(error) }));
+      }
+      return;
+    }
+
+    if (req.method === 'GET' && path === '/api/notebook/bootstrap') {
+      const welcomeNotebook = resolveNotebook(projectRoot, projectConfig.project ?? 'DQL Project');
+      res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+      res.end(serializeJSON({
+        projectRoot,
+        project: projectConfig.project ?? 'DQL Project',
+        defaultConnection: projectConfig.defaultConnection ?? connection,
+        connectorForms: getConnectorFormSchemas(),
+        files: listProjectFiles(projectRoot),
+        notebook: welcomeNotebook,
+      }));
+      return;
+    }
+
+    if (req.method === 'GET' && path === '/api/notebook/file') {
+      const relativePath = url.searchParams.get('path');
+      if (!relativePath) {
+        res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({ error: 'Missing file path.' }));
+        return;
+      }
+
+      const filePath = safeJoin(projectRoot, relativePath);
+      if (!filePath || !existsSync(filePath) || statSync(filePath).isDirectory()) {
+        res.writeHead(404, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({ error: `File not found: ${relativePath}` }));
+        return;
+      }
+
+      res.writeHead(200, { 'Content-Type': contentTypeFor(filePath) });
+      res.end(readFileSync(filePath));
+      return;
+    }
+
+    if (req.method === 'POST' && path === '/api/notebook/execute') {
+      try {
+        const body = await readJSON(req);
+        const cell = normalizeNotebookCell(body.cell);
+        if (!cell) {
+          res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
+          res.end(serializeJSON({ error: 'Missing notebook cell payload.' }));
+          return;
+        }
+
+        const plan = buildExecutionPlan(cell);
+        if (!plan) {
+          res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+          res.end(serializeJSON({ cellType: cell.type, result: null }));
+          return;
+        }
+
+        const prepared = prepareLocalExecution(
+          plan.sql,
+          isConnectionConfig(body.connection) ? body.connection : connection,
+          projectRoot,
+          projectConfig,
+        );
+        const result = await executor.executeQuery(prepared.sql, plan.sqlParams, plan.variables, prepared.connection);
+        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({
+          cellType: cell.type,
+          title: plan.title,
+          chartConfig: plan.chartConfig,
+          tests: plan.tests,
+          result,
+        }));
+      } catch (error) {
+        res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({ error: error instanceof Error ? error.message : String(error) }));
       }
       return;
     }
@@ -202,6 +309,60 @@ export function loadProjectConfig(projectRoot: string): ProjectConfig {
   return JSON.parse(readFileSync(configPath, 'utf-8')) as ProjectConfig;
 }
 
+export function prepareLocalExecution(
+  sql: string,
+  connection: ConnectionConfig,
+  projectRoot: string,
+  projectConfig: ProjectConfig,
+): { sql: string; connection: ConnectionConfig } {
+  const normalizedConnection = normalizeProjectConnection(connection, projectRoot);
+  return {
+    sql: shouldResolveProjectPaths(normalizedConnection)
+      ? resolveProjectRelativeSqlPaths(sql, projectRoot, projectConfig.dataDir)
+      : sql,
+    connection: normalizedConnection,
+  };
+}
+
+export function normalizeProjectConnection(connection: ConnectionConfig, projectRoot: string): ConnectionConfig {
+  const normalized: ConnectionConfig = { ...connection };
+
+  if ((normalized.driver === 'file' || normalized.driver === 'duckdb') && normalized.filepath && normalized.filepath !== ':memory:' && !isAbsoluteLikePath(normalized.filepath)) {
+    normalized.filepath = resolve(projectRoot, normalized.filepath);
+  }
+
+  if (normalized.driver === 'sqlite' && normalized.database && normalized.database !== ':memory:' && !isAbsoluteLikePath(normalized.database)) {
+    normalized.database = resolve(projectRoot, normalized.database);
+  }
+
+  return normalized;
+}
+
+export function resolveProjectRelativeSqlPaths(sql: string, projectRoot: string, dataDir?: string): string {
+  const resolvedRoot = resolve(projectRoot);
+  const normalizedDataDir = typeof dataDir === 'string' && dataDir.trim().length > 0
+    ? resolve(projectRoot, dataDir)
+    : join(resolvedRoot, 'data');
+
+  return sql.replace(
+    /\b(read_csv_auto|read_csv|read_parquet|read_json_auto|read_json|read_ndjson_auto|read_ndjson|read_xlsx|parquet_scan)\s*\(\s*(['"])(\.{1,2}\/[^'"]*)\2/gi,
+    (_match, fnName: string, quote: string, relativePath: string) => {
+      const absolutePath = relativePath.startsWith('./data/')
+        ? join(normalizedDataDir, relativePath.slice('./data/'.length))
+        : resolve(resolvedRoot, relativePath);
+      return `${fnName}(${quote}${absolutePath.replaceAll('\\', '/')}${quote}`;
+    },
+  );
+}
+
+function shouldResolveProjectPaths(connection: ConnectionConfig): boolean {
+  return connection.driver === 'file' || connection.driver === 'duckdb' || connection.driver === 'sqlite';
+}
+
+function isAbsoluteLikePath(value: string): boolean {
+  return value.startsWith('/') || value.startsWith('\\') || /^[A-Za-z]:[\\/]/.test(value);
+}
+
 function readJSON(req: import('node:http').IncomingMessage): Promise<any> {
   return new Promise((resolvePromise, reject) => {
     const chunks: Buffer[] = [];
@@ -235,7 +396,67 @@ function contentTypeFor(filePath: string): string {
       return 'application/javascript; charset=utf-8';
     case '.css':
       return 'text/css; charset=utf-8';
+    case '.svg':
+      return 'image/svg+xml';
     default:
       return 'text/plain; charset=utf-8';
   }
+}
+
+function listProjectFiles(projectRoot: string): string[] {
+  const allowed = new Set(['.dql', '.sql', '.md', '.json', '.csv', '.yaml', '.yml', '.dqlnb']);
+  const files: string[] = [];
+
+  walk(projectRoot);
+  return files.sort();
+
+  function walk(currentDir: string): void {
+    for (const entry of readdirSync(currentDir)) {
+      if (entry === 'node_modules' || entry === '.git' || entry === 'dist') {
+        continue;
+      }
+
+      const fullPath = join(currentDir, entry);
+      const stat = statSync(fullPath);
+      if (stat.isDirectory()) {
+        walk(fullPath);
+        continue;
+      }
+
+      if (allowed.has(extname(entry))) {
+        files.push(fullPath.slice(projectRoot.length + 1));
+      }
+    }
+  }
+}
+
+function resolveNotebook(projectRoot: string, projectTitle: string) {
+  const notebookPath = join(projectRoot, 'notebooks', 'welcome.dqlnb');
+  if (existsSync(notebookPath)) {
+    return deserializeNotebook(readFileSync(notebookPath, 'utf-8'));
+  }
+  return createWelcomeNotebook('starter', projectTitle);
+}
+
+function normalizeNotebookCell(value: unknown): NotebookCell | null {
+  if (!value || typeof value !== 'object') {
+    return null;
+  }
+
+  const candidate = value as Partial<NotebookCell>;
+  if (typeof candidate.id !== 'string' || typeof candidate.type !== 'string' || typeof candidate.source !== 'string') {
+    return null;
+  }
+
+  return {
+    id: candidate.id,
+    type: candidate.type as NotebookCell['type'],
+    source: candidate.source,
+    title: typeof candidate.title === 'string' ? candidate.title : undefined,
+    config: candidate.config,
+  };
+}
+
+function isConnectionConfig(value: unknown): value is ConnectionConfig {
+  return Boolean(value && typeof value === 'object' && 'driver' in (value as Record<string, unknown>));
 }

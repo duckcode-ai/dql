@@ -35,6 +35,7 @@ describe('runBuild', () => {
       owner: '',
       port: null,
       queryOnly: false,
+      template: 'starter',
       verbose: false,
     });
 

@@ -13,6 +13,7 @@ import { runCertify } from './commands/certify.js';
 import { runInfo } from './commands/info.js';
 import { runMigrate } from './commands/migrate.js';
 import { runFmt } from './commands/fmt.js';
+import { runNotebook } from './commands/notebook.js';
 
 const HELP = `
   dql — DQL CLI
@@ -30,6 +31,7 @@ const HELP = `
     dql info <file.dql>             Show block metadata
     dql migrate <source>            Scaffold migration from looker/tableau/dbt/metabase/raw-sql
     dql fmt <file.dql>              Format DQL file in place
+    dql notebook [path]             Launch the browser-first notebook for a project
     dql --help                      Show this help
 
   Options:
@@ -45,6 +47,7 @@ const HELP = `
     --domain <name>                 Domain for new block scaffolds (default: general)
     --owner <name>                  Owner for new block scaffolds (default: current user)
     --query-only                    Create a query-only block without visualization
+    --template <name>               Template to use for "init" (default: starter)
 `;
 
 async function main() {
@@ -55,7 +58,7 @@ async function main() {
     process.exit(0);
   }
 
-  if (!file && command !== 'init' && command !== 'serve' && command !== 'doctor') {
+  if (!file && command !== 'init' && command !== 'serve' && command !== 'doctor' && command !== 'notebook') {
     console.error('Error: No file/argument specified. Run "dql --help" for usage.');
     process.exit(1);
   }
@@ -97,6 +100,9 @@ async function main() {
         break;
       case 'fmt':
         await runFmt(file!, flags);
+        break;
+      case 'notebook':
+        await runNotebook(file, flags);
         break;
       default:
         console.error(`Unknown command: ${command}. Run "dql --help" for usage.`);

@@ -1,0 +1,13 @@
+trip_id,pickup_date,pickup_hour,pickup_borough,dropoff_borough,payment_type,fare_amount,tip_amount,trip_miles,airport_flag
+T-001,2025-01-03,6,Manhattan,Queens,Card,32.5,6.2,8.4,true
+T-002,2025-01-03,7,Brooklyn,Manhattan,Card,21.4,4.1,5.6,false
+T-003,2025-01-04,8,Queens,Manhattan,Cash,27.8,0,7.1,true
+T-004,2025-01-04,9,Manhattan,Brooklyn,Card,18.9,3.7,4.9,false
+T-005,2025-01-05,11,Bronx,Manhattan,Card,25.7,5.1,6.8,false
+T-006,2025-01-05,12,Manhattan,Queens,Card,34.2,6.8,8.9,true
+T-007,2025-01-06,13,Queens,Brooklyn,Card,19.3,3.5,5.2,false
+T-008,2025-01-06,15,Manhattan,Manhattan,Card,14.6,3.2,2.8,false
+T-009,2025-01-07,17,Brooklyn,Queens,Cash,16.8,0,4.1,false
+T-010,2025-01-07,18,Manhattan,Staten Island,Card,41.1,7.4,12.3,false
+T-011,2025-01-08,19,Queens,Manhattan,Card,29.6,5.9,7.7,true
+T-012,2025-01-08,21,Brooklyn,Manhattan,Card,22.1,4.6,5.9,false
