@@ -1,0 +1,23 @@
+dashboard "Pipeline Overview" {
+  chart.kpi(
+    SELECT SUM(amount) AS total_pipeline FROM read_csv_auto('./data/pipeline.csv'),
+    metrics = ["total_pipeline"],
+    title = "Open Pipeline"
+  )
+
+  chart.bar(
+    SELECT stage, SUM(amount) AS pipeline_amount
+    FROM read_csv_auto('./data/pipeline.csv')
+    GROUP BY stage,
+    x = stage,
+    y = pipeline_amount,
+    title = "Pipeline by Stage"
+  )
+
+  chart.table(
+    SELECT rep_name, region, stage, amount, close_month
+    FROM read_csv_auto('./data/pipeline.csv')
+    ORDER BY amount DESC,
+    title = "Top Opportunities"
+  )
+}

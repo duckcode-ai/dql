@@ -1,0 +1,8 @@
+name: fiscal_quarter
+label: Fiscal Quarter
+description: Finance fiscal quarter label
+sql: fiscal_quarter
+type: string
+table: finance_arr
+tags:
+  - finance

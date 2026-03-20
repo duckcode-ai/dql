@@ -1,15 +1,15 @@
 block "Revenue Trend Query" {
     domain = "revenue"
-    type = "chart.line"
-    description = "Starter query-only block for monthly revenue trends"
+    type = "custom"
+    description = "Starter query-only block for monthly revenue trends using local CSV sample data"
     tags = ["starter", "revenue", "query-only"]
     owner = "template"
 
     query = """
         SELECT
-            DATE_TRUNC('month', recognized_at) AS revenue_month,
+            DATE_TRUNC('month', CAST(recognized_at AS DATE)) AS revenue_month,
             SUM(amount) AS total_revenue
-        FROM fct_revenue
+        FROM read_csv_auto('./data/revenue.csv')
         GROUP BY 1
         ORDER BY 1
     """

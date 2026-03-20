@@ -4,7 +4,14 @@ DQL (DuckCode Query Language) is an open, declarative language for defining dura
 
 ## Install
 
-npm packages are coming shortly. For now, clone from source:
+If you are using a published CLI package:
+
+```bash
+npm install -g @duckcodeailabs/dql-cli
+dql --help
+```
+
+To build from source instead:
 
 ```bash
 git clone https://github.com/duckcode-ai/dql.git
@@ -17,24 +24,28 @@ node apps/cli/dist/index.js --help
 pnpm exec dql --help
 ```
 
-Once published:
+For library use:
 
 ```bash
-npm install -g @duckcodeailabs/dql-cli   # global dql binary
-# or for library use:
 npm install @duckcodeailabs/dql-core @duckcodeailabs/dql-compiler
 ```
 
 ## Quick Start
 
-Write a block, parse it, then certify it:
+Create a starter project, parse a block, then preview it locally:
 
 ```bash
-# 1. Write a block (see example below)
-# 2. Parse and validate
-pnpm exec dql parse examples/blocks/revenue_by_segment.dql
-# 3. Certify (checks owner, description, tags, domain)
-pnpm exec dql certify examples/blocks/revenue_by_segment.dql
+dql init my-dql-project
+cd my-dql-project
+dql new block "Pipeline Health"
+dql new semantic-block "ARR Growth"
+dql new dashboard "Revenue Overview"
+dql new workbook "Quarterly Review"
+dql doctor
+dql parse blocks/pipeline_health.dql
+dql preview blocks/pipeline_health.dql --open
+dql build blocks/pipeline_health.dql
+dql serve dist/pipeline_health
 ```
 
 ### Example DQL block
@@ -73,10 +84,19 @@ block "Revenue by Segment" {
 
 ## Documentation
 
+- [Why DQL](./docs/why-dql.md) — what problem DQL solves and when it is the right tool
+- [Quickstart](./docs/quickstart.md) — the fastest path from install to local chart preview
 - [Getting Started](./docs/getting-started.md) — installation paths, first block walkthrough, Node.js API
+- [Examples](./docs/examples.md) — where to start, what each example teaches, and what to try next
+- [FAQ](./docs/faq.md) — common questions about standalone DQL usage and scope
+- [Compatibility](./docs/compatibility.md) — current runtime, connector, and workflow support matrix
 - [Language Specification](./docs/dql-language-spec.md) — full syntax reference, block types, chart types, AST
 - [CLI Reference](./docs/cli-reference.md) — all commands and flags
-- [Publishing](./docs/publishing.md) — how to publish `@duckcodeailabs/dql-*` packages to npm
+- [Project Config](./docs/project-config.md) — how `dql.config.json` drives local preview and serving
+- [Data Sources](./docs/data-sources.md) — local CSV/Parquet, DuckDB, and connector setup
+- [Migration Guides](./docs/migration-guides/README.md) — practical paths from raw SQL, dbt metrics, and saved BI queries
+- [OSS Readiness Checklist](./docs/oss-readiness-checklist.md) — maintainer checklist for launch readiness and remaining blockers
+- [Publishing](./docs/publishing.md) — maintainer guide for releasing `@duckcodeailabs/dql-*` packages
 - [VS Code Extension](#vs-code-extension) — install `DQL Language Support`
 
 ## VS Code Extension
@@ -100,7 +120,7 @@ The extension provides syntax highlighting, snippets, formatting on save, and La
 | `@duckcodeailabs/dql-lsp` | Language Server Protocol implementation |
 | `@duckcodeailabs/dql-runtime` | Browser runtime: data fetching, Vega rendering, hot-reload client |
 | `@duckcodeailabs/dql-charts` | visx-powered React SVG chart components |
-| `@duckcodeailabs/dql-cli` | Public CLI (`dql parse`, `dql certify`, `dql fmt`, …) |
+| `@duckcodeailabs/dql-cli` | Public CLI (`dql init`, `dql preview`, `dql parse`, `dql certify`, `dql fmt`, …) |
 
 ## Workspace Layout
 
@@ -120,6 +140,7 @@ packages/
   dql-project/        Block registry and project primitives
 
 examples/
+  README.md           Example guide
   blocks/             Example DQL blocks
   semantic-layer/     Example metric, dimension, hierarchy definitions
 

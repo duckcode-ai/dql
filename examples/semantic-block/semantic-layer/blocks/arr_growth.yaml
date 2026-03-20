@@ -1,0 +1,12 @@
+name: arr_growth
+block: arr_growth
+domain: finance
+description: Companion business metadata for the ARR Growth semantic block
+owner: finance-analytics
+tags:
+  - finance
+  - semantic
+semanticMappings:
+  arr: annual_recurring_revenue
+  quarter: fiscal_quarter
+reviewStatus: review

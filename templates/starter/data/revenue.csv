@@ -1,0 +1,13 @@
+recognized_at,segment_tier,amount,fiscal_period,fiscal_year,fiscal_quarter
+2025-01-03,Enterprise,185000,current_quarter,2025,Q1
+2025-01-14,Mid-Market,92000,current_quarter,2025,Q1
+2025-01-25,SMB,28000,current_quarter,2025,Q1
+2025-02-05,Enterprise,210000,current_quarter,2025,Q1
+2025-02-09,Mid-Market,101000,current_quarter,2025,Q1
+2025-02-18,SMB,31000,current_quarter,2025,Q1
+2025-03-02,Enterprise,223000,current_quarter,2025,Q1
+2025-03-11,Mid-Market,108000,current_quarter,2025,Q1
+2025-03-19,SMB,34000,current_quarter,2025,Q1
+2025-04-07,Enterprise,205000,next_quarter,2025,Q2
+2025-04-16,Mid-Market,99000,next_quarter,2025,Q2
+2025-04-23,SMB,29000,next_quarter,2025,Q2

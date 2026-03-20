@@ -1,0 +1,12 @@
+{
+  "projectName": "semantic-block-example",
+  "defaultConnection": {
+    "driver": "file",
+    "filepath": ":memory:"
+  },
+  "preview": {
+    "port": 3314,
+    "open": false,
+    "theme": "light"
+  }
+}

@@ -1,0 +1,8 @@
+block "ARR Growth" {
+    domain = "finance"
+    type = "semantic"
+    description = "Semantic block that references annual recurring revenue"
+    owner = "dql-example"
+    tags = ["semantic", "finance", "arr"]
+    metric = "annual_recurring_revenue"
+}

@@ -1,0 +1,32 @@
+workbook "Quarterly Business Review" {
+  page "Executive Summary" {
+    chart.kpi(
+      SELECT SUM(revenue) AS total_revenue FROM read_csv_auto('./data/finance.csv'),
+      metrics = ["total_revenue"],
+      title = "Total Revenue"
+    )
+  }
+
+  page "Revenue Trend" {
+    chart.line(
+      SELECT month, SUM(revenue) AS total_revenue
+      FROM read_csv_auto('./data/finance.csv')
+      GROUP BY month
+      ORDER BY month,
+      x = month,
+      y = total_revenue,
+      title = "Revenue Trend"
+    )
+  }
+
+  page "Cost by Region" {
+    chart.bar(
+      SELECT region, SUM(expense) AS total_expense
+      FROM read_csv_auto('./data/finance.csv')
+      GROUP BY region,
+      x = region,
+      y = total_expense,
+      title = "Cost by Region"
+    )
+  }
+}

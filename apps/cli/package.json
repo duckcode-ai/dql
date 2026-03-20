@@ -26,6 +26,7 @@
     "directory": "apps/cli"
   },
   "dependencies": {
+    "@duckcodeailabs/dql-connectors": "workspace:*",
     "@duckcodeailabs/dql-core": "workspace:*",
     "@duckcodeailabs/dql-compiler": "workspace:*",
     "@duckcodeailabs/dql-project": "workspace:*",

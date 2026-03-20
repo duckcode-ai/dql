@@ -1,5 +1,13 @@
 # Publishing @duckcodeailabs/dql-* to npm
 
+This document is for maintainers releasing the open-source DQL packages and VS Code extension.
+
+If you are trying DQL as a user, start with:
+
+- [Why DQL](./why-dql.md)
+- [Quickstart](./quickstart.md)
+- [Getting Started](./getting-started.md)
+
 This repository publishes the public DQL packages to npm and the editor extension to the VS Code marketplace.
 
 ---

@@ -1,10 +1,12 @@
 # CLI Reference
 
-The `dql` binary is provided by `@duckcodeailabs/dql-cli`. All commands accept a positional file path argument and a shared set of flags.
+The `dql` binary is provided by `@duckcodeailabs/dql-cli`. Most commands accept a positional file path argument and a shared set of flags.
 
 ## Usage
 
-```
+```text
+dql init [directory]
+dql new <block|semantic-block|dashboard|workbook> <name> [flags]
 dql <command> <file.dql> [flags]
 ```
 
@@ -12,19 +14,188 @@ Run `dql --help` (or `dql -h`) to print the help text and exit.
 
 ---
 
-## Global Flags
+## Shared Flags
 
-These flags are accepted by every command.
+These flags are the most commonly used flags across the CLI.
 
 | Flag | Short | Default | Description |
 |---|---|---|---|
 | `--format json\|text` | | `text` | Output format. `json` is suitable for CI pipelines and programmatic consumers. |
 | `--verbose` | `-v` | `false` | Show detailed output (e.g. full AST for `parse`, cost factor breakdown for `info`). |
+| `--open` | | | Open the preview or served bundle in a browser. |
+| `--no-open` | | | Disable automatic browser opening even if the project config enables it. |
 | `--help` | `-h` | | Print help and exit 0. |
+| `--out-dir <path>` | | | Output directory for `build`. |
+| `--port <number>` | | | Preferred local port for `preview` or `serve`. |
+
+## `new` Flags
+
+These flags are specific to `dql new ...` scaffolds.
+
+| Flag | Default | Description |
+|---|---|---|
+| `--chart <type>` | | | Chart type for `new block` scaffolds. |
+| `--domain <name>` | | | Domain for `new block` scaffolds. |
+| `--owner <name>` | | | Owner for `new block` scaffolds. |
+| `--query-only` | | `false` | Create a query-only block without a visualization section. |
 
 ---
 
 ## Commands
+
+### `dql init [directory]`
+
+Create a local DQL starter project with sample data, starter blocks, and `dql.config.json`.
+
+```bash
+dql init my-dql-project
+cd my-dql-project
+```
+
+**What it creates:**
+
+- `blocks/` with starter charted and query-only blocks
+- `dashboards/` for dashboard scaffolds
+- `data/revenue.csv` for local preview flows
+- `dql.config.json` with a file/DuckDB-friendly default connection
+- `workbooks/` for workbook scaffolds
+- `semantic-layer/` starter definitions
+
+---
+
+### `dql new <block|semantic-block|dashboard|workbook> <name>`
+
+Create a new DQL block, semantic block, dashboard, or workbook inside the current project.
+
+```bash
+dql new block "Pipeline Health"
+dql new semantic-block "ARR Growth"
+dql new dashboard "Revenue Overview" --chart line
+dql new workbook "Quarterly Review"
+dql new block "Revenue Trend" --chart line --domain finance
+dql new block "Top Accounts" --chart table --query-only
+```
+
+**What it does:**
+
+- creates a new `.dql` file in `blocks/`, `dashboards/`, or `workbooks/` by default
+- for `semantic-block`, also creates starter semantic-layer YAML in `semantic-layer/metrics/` and `semantic-layer/blocks/`
+- uses local `data/revenue.csv` if it exists, so starter projects get previewable blocks immediately
+- falls back to placeholder SQL when no starter data is available
+- supports `--out-dir` if you want to write somewhere other than the default scaffold folder
+
+**Flags most useful for `new block`:**
+
+- `--chart <type>` — scaffold `bar`, `line`, `table`, or `kpi`
+- `--domain <name>` — set the block domain
+- `--owner <name>` — set the block owner
+- `--query-only` — omit the visualization section
+
+**Semantic block note:**
+
+`dql new semantic-block` generates:
+
+- a `type = "semantic"` block in `blocks/`
+- a starter metric definition in `semantic-layer/metrics/`
+- companion block metadata in `semantic-layer/blocks/`
+
+**Text output:**
+
+```text
+  ✓ Created DQL block: Pipeline Health
+    Path: /path/to/project/blocks/pipeline_health.dql
+
+  Next steps:
+    1. dql parse blocks/pipeline_health.dql
+    2. dql preview blocks/pipeline_health.dql
+```
+
+---
+
+### `dql doctor [path]`
+
+Run a lightweight setup check for a DQL project.
+
+```bash
+dql doctor
+dql doctor my-dql-project
+dql doctor --format json
+```
+
+**What it checks:**
+
+- Node.js version
+- project root discovery
+- `dql.config.json`
+- `blocks/`, `semantic-layer/`, and `data/`
+- default connection presence
+- `duckdb` dependency when local file/DuckDB preview is configured
+
+---
+
+### `dql preview <file.dql>`
+
+Compile a block, dashboard, or workbook to local HTML and serve it with a tiny local query API for browser preview.
+
+```bash
+dql preview blocks/pipeline_health.dql
+```
+
+**What it does:**
+
+- Compiles the DQL source to HTML
+- Starts a local HTTP server
+- Exposes `POST /api/query` backed by the default connection in `dql.config.json`
+- Renders charts against local DuckDB/file-backed sample data when applicable
+
+**Text output:**
+
+```text
+  ✓ Preview ready: http://127.0.0.1:3474
+    Press Ctrl+C to stop.
+```
+
+---
+
+### `dql build <file.dql>`
+
+Compile a block, dashboard, or workbook to a static output directory containing `index.html`, chart specs, and build metadata.
+
+```bash
+dql build blocks/pipeline_health.dql
+dql build blocks/pipeline_health.dql --out-dir out/pipeline
+```
+
+**Text output:**
+
+```text
+  ✓ Built DQL bundle
+    Source: /path/to/project/blocks/pipeline_health.dql
+    Output: /path/to/project/dist/pipeline_health
+```
+
+---
+
+### `dql serve [directory]`
+
+Serve a built DQL bundle locally using the same lightweight `/api/query` runtime as `preview`.
+
+```bash
+dql serve dist/pipeline_health
+dql serve --port 4488
+```
+
+If no directory is provided, `serve` defaults to `dist/` in the current working directory.
+
+**Text output:**
+
+```text
+  ✓ Serving DQL bundle: http://127.0.0.1:3474
+    Root: /path/to/project/dist/revenue_by_segment
+    Press Ctrl+C to stop.
+```
+
+---
 
 ### `dql parse <file.dql>`
 
@@ -260,7 +431,7 @@ With `--verbose`, individual cost factors are listed (e.g. missing WHERE clause,
 
 Scaffold a DQL block from a foreign tool definition. The `<source>` argument is one of: `looker`, `tableau`, `dbt`, `metabase`, `raw-sql`.
 
-This command is **scaffold-only** in the OSS CLI. It prints a template block and migration notes; it does not parse or transform actual source files automatically (except for dbt, which requires manual inspection).
+This command is **scaffold-only** in the OSS CLI. It prints a template block and migration notes; it does not automatically parse or transform source files.
 
 ```bash
 dql migrate looker
@@ -278,11 +449,11 @@ dql migrate raw-sql --format json
 
 | Source | Method | OSS Coverage |
 |---|---|---|
-| `looker` | Parse LookML explores + measures + dimensions → DQL blocks + semantic layer YAML | ~80% automated |
-| `tableau` | Extract via REST API → generate one DQL block per sheet | Semi-automated |
-| `dbt` | Inspect models and metrics, scaffold DQL blocks and semantic layer files | Planning-only in V1 |
-| `metabase` | Export via API → generate one DQL block per saved question | ~85% automated |
-| `raw-sql` | AI-assisted wrapping of ad-hoc SQL into DQL block structure | AI-assisted |
+| `looker` | Print a Looker-oriented scaffold and migration checklist | Scaffold-only |
+| `tableau` | Print a Tableau-oriented scaffold and migration checklist | Scaffold-only |
+| `dbt` | Print a dbt-oriented scaffold and semantic-block planning notes | Scaffold-only |
+| `metabase` | Print a Metabase-oriented scaffold and migration checklist | Scaffold-only |
+| `raw-sql` | Print a raw SQL wrapper scaffold for manual cleanup | Scaffold-only |
 
 **Text output (example for `looker`):**
 
@@ -303,6 +474,12 @@ dql migrate raw-sql --format json
     3. Run: dql test blocks/migrated/example.dql
     4. Commit and push for certification
 ```
+
+For practical migration walkthroughs, see:
+
+- [`migration-guides/raw-sql.md`](./migration-guides/raw-sql.md)
+- [`migration-guides/dbt.md`](./migration-guides/dbt.md)
+- [`migration-guides/saved-bi-query.md`](./migration-guides/saved-bi-query.md)
 
 ---
 

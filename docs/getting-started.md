@@ -13,7 +13,7 @@ Choose the path that fits your workflow.
 
 ### Path A — CLI only (standalone authoring)
 
-Install the `dql` binary globally once `@duckcodeailabs/dql-cli` is published to npm:
+If you are using a published CLI package, install the `dql` binary globally:
 
 ```bash
 npm install -g @duckcodeailabs/dql-cli
@@ -54,6 +54,46 @@ code --install-extension dql.dql-language-support
 ```
 
 The extension provides syntax highlighting, snippet expansion, format-on-save, hover documentation, and live diagnostics via the Language Server (`@duckcodeailabs/dql-lsp`). It does not require any separate server process — the language server is bundled into the extension.
+
+---
+
+## Quickstart Project
+
+Scaffold a local-first DQL project with sample data:
+
+```bash
+dql init my-dql-project
+cd my-dql-project
+```
+
+This creates:
+
+- `blocks/` — starter charted and query-only blocks
+- `data/` — local sample CSV for previewing with DuckDB/file connectors
+- `dql.config.json` — starter project configuration
+- `semantic-layer/` — example semantic definitions and companion metadata
+
+See also:
+
+- [Quickstart](./quickstart.md)
+- [Project Config](./project-config.md)
+- [Data Sources](./data-sources.md)
+- [Examples](./examples.md)
+- [FAQ](./faq.md)
+- [Compatibility](./compatibility.md)
+- [Migration Guides](./migration-guides/README.md)
+- [Why DQL](./why-dql.md)
+
+Preview the starter block locally:
+
+```bash
+dql new block "Pipeline Health"
+dql doctor
+dql parse blocks/pipeline_health.dql
+dql preview blocks/pipeline_health.dql --open
+dql build blocks/pipeline_health.dql
+dql serve dist/pipeline_health
+```
 
 ---
 
@@ -249,16 +289,18 @@ The `@duckcodeailabs/dql-core` package exports:
 ## Using @duckcodeailabs/dql-compiler to Compile to HTML
 
 ```typescript
-import { Parser } from '@duckcodeailabs/dql-core';
 import { compile } from '@duckcodeailabs/dql-compiler';
 import { readFileSync } from 'node:fs';
 
 const source = readFileSync('blocks/revenue_by_segment.dql', 'utf-8');
-const parser = new Parser(source, 'revenue_by_segment.dql');
-const ast = parser.parse();
 
-const html = compile(ast, { target: 'html' });
-console.log(html);
+const result = compile(source, { file: 'blocks/revenue_by_segment.dql' });
+
+if (result.errors.length > 0) {
+  console.error(result.errors);
+} else {
+  console.log(result.dashboards[0].html);
+}
 ```
 
 ---

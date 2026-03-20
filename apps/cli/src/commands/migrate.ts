@@ -16,16 +16,16 @@ export interface MigrationResult {
 function generateBlockDQL(opts: {
   name: string;
   domain: string;
-  type: string;
   description: string;
   sql: string;
   owner: string;
   tags: string[];
+  chart: string;
 }): string {
   const tagStr = opts.tags.map((t) => `"${t}"`).join(', ');
   return `block "${opts.name}" {
     domain = "${opts.domain}"
-    type = "${opts.type}"
+    type = "custom"
     description = "${opts.description}"
     tags = [${tagStr}]
     owner = "${opts.owner}"
@@ -35,7 +35,7 @@ function generateBlockDQL(opts: {
     """
 
     visualization {
-        chart = "bar"
+        chart = "${opts.chart}"
         x = dimension
         y = measure
     }
@@ -67,11 +67,11 @@ export async function runMigrate(file: string, flags: CLIFlags): Promise<void> {
       exampleBlock: generateBlockDQL({
         name: `migrated-from-${source}`,
         domain: 'migrated',
-        type: 'chart.bar',
         description: `Auto-migrated from ${source}`,
         sql: 'SELECT dimension, SUM(measure) AS measure\nFROM source_table\nGROUP BY dimension',
         owner: 'migration-bot',
         tags: ['migrated', source],
+        chart: 'bar',
       }),
     }, null, 2));
     return;
@@ -115,11 +115,11 @@ export async function runMigrate(file: string, flags: CLIFlags): Promise<void> {
   const example = generateBlockDQL({
     name: `migrated-from-${source}`,
     domain: 'migrated',
-    type: 'chart.bar',
     description: `Auto-migrated from ${source}`,
     sql: 'SELECT dimension, SUM(measure) AS measure\nFROM source_table\nGROUP BY dimension',
     owner: 'migration-bot',
     tags: ['migrated', source],
+    chart: 'bar',
   });
   console.log(example.split('\n').map((l) => `    ${l}`).join('\n'));
 

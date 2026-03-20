@@ -1,0 +1,12 @@
+{
+  "projectName": "finance-kpi-example",
+  "defaultConnection": {
+    "driver": "file",
+    "filepath": ":memory:"
+  },
+  "preview": {
+    "port": 3310,
+    "open": true,
+    "theme": "light"
+  }
+}

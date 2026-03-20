@@ -6,6 +6,7 @@
   },
   "include": ["src/**/*"],
   "references": [
+    { "path": "../../packages/dql-connectors" },
     { "path": "../../packages/dql-core" },
     { "path": "../../packages/dql-compiler" },
     { "path": "../../packages/dql-project" },

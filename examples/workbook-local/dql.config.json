@@ -1,0 +1,12 @@
+{
+  "projectName": "workbook-local-example",
+  "defaultConnection": {
+    "driver": "file",
+    "filepath": ":memory:"
+  },
+  "preview": {
+    "port": 3312,
+    "open": true,
+    "theme": "light"
+  }
+}

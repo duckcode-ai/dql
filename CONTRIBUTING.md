@@ -20,3 +20,9 @@ pnpm test
 - Add or update tests when behavior changes.
 - Update docs or examples when syntax or workflow changes.
 - Avoid introducing product-specific assumptions into public packages.
+
+## Release readiness
+
+Before treating a change as OSS-ready, review the launch checklist:
+
+- [`docs/oss-readiness-checklist.md`](./docs/oss-readiness-checklist.md)

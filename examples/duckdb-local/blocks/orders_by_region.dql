@@ -1,0 +1,24 @@
+block "Orders by Region" {
+    domain = "sales"
+    type = "custom"
+    description = "Local DuckDB-backed revenue trend example"
+    owner = "dql-example"
+    tags = ["duckdb", "sales", "local-data"]
+
+    query = """
+        SELECT order_month, SUM(revenue) AS total_revenue
+        FROM read_csv_auto('./data/orders.csv')
+        GROUP BY order_month
+        ORDER BY order_month
+    """
+
+    visualization {
+        chart = "line"
+        x = order_month
+        y = total_revenue
+    }
+
+    tests {
+        assert row_count > 0
+    }
+}
