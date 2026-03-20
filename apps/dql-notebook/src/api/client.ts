@@ -28,7 +28,7 @@ export const api = {
 
   async readNotebook(path: string): Promise<{ content: string }> {
     return request<{ content: string }>(
-      `/api/notebooks/read?path=${encodeURIComponent(path)}`
+      `/api/notebook-content?path=${encodeURIComponent(path)}`
     );
   },
 
@@ -36,15 +36,15 @@ export const api = {
     name: string,
     template: string
   ): Promise<{ path: string; content: string }> {
-    return request<{ path: string; content: string }>('/api/notebooks/create', {
+    return request<{ path: string; content: string }>('/api/notebooks', {
       method: 'POST',
       body: JSON.stringify({ name, template }),
     });
   },
 
   async saveNotebook(path: string, content: string): Promise<void> {
-    return request<void>('/api/notebooks/save', {
-      method: 'POST',
+    return request<void>('/api/notebook-content', {
+      method: 'PUT',
       body: JSON.stringify({ path, content }),
     });
   },

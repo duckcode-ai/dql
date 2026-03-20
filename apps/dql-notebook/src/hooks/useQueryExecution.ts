@@ -1,6 +1,7 @@
 import { useCallback } from 'react';
 import { useNotebook, makeCellId } from '../store/NotebookStore';
 import { api } from '../api/client';
+import { useVariableSubstitution } from './useVariableSubstitution';
 import type { Cell } from '../store/types';
 
 /**
@@ -29,14 +30,18 @@ function extractSql(cell: Cell): string | null {
 
 export function useQueryExecution() {
   const { state, dispatch } = useNotebook();
+  const { substituteVariables } = useVariableSubstitution();
 
   const executeCell = useCallback(
     async (cellId: string) => {
       const cell = state.cells.find((c) => c.id === cellId);
       if (!cell) return;
 
-      const sql = extractSql(cell);
-      if (!sql) return;
+      const rawSql = extractSql(cell);
+      if (!rawSql) return;
+
+      // Substitute {{cell_name}} references with inline CTEs
+      const { sql } = substituteVariables(rawSql);
 
       const start = Date.now();
 

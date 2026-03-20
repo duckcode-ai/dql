@@ -5,6 +5,7 @@ import type { Theme } from '../../themes/notebook-theme';
 import { api } from '../../api/client';
 import { serializeDqlNotebook } from '../../utils/parse-workbook';
 import { useQueryExecution } from '../../hooks/useQueryExecution';
+import { downloadDashboard } from '../../utils/export-dashboard';
 
 function DQLLogo({ t }: { t: Theme }) {
   return (
@@ -46,6 +47,7 @@ export function Header() {
   const [runHover, setRunHover] = useState(false);
   const [saveHover, setSaveHover] = useState(false);
   const [themeHover, setThemeHover] = useState(false);
+  const [exportHover, setExportHover] = useState(false);
   const titleInputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
@@ -260,6 +262,34 @@ export function Header() {
           ) : (
             <>Save</>
           )}
+        </button>
+
+        {/* Separator */}
+        <div style={{ width: 1, height: 20, background: t.headerBorder }} />
+
+        {/* Export Dashboard */}
+        <button
+          onClick={() => {
+            if (state.activeFile) {
+              downloadDashboard(state.notebookTitle || 'dashboard', state.cells);
+            }
+          }}
+          disabled={!state.activeFile}
+          onMouseEnter={() => setExportHover(true)}
+          onMouseLeave={() => setExportHover(false)}
+          title="Export as standalone HTML dashboard"
+          style={{
+            ...btnBase,
+            background: exportHover && state.activeFile ? t.btnHover : t.btnBg,
+            color: t.textSecondary,
+            opacity: !state.activeFile ? 0.4 : 1,
+          }}
+        >
+          <svg width="11" height="11" viewBox="0 0 16 16" fill="currentColor">
+            <path d="M2.75 14A1.75 1.75 0 0 1 1 12.25v-2.5a.75.75 0 0 1 1.5 0v2.5c0 .138.112.25.25.25h10.5a.25.25 0 0 0 .25-.25v-2.5a.75.75 0 0 1 1.5 0v2.5A1.75 1.75 0 0 1 13.25 14Z" />
+            <path d="M7.25 7.689V2a.75.75 0 0 1 1.5 0v5.689l1.97-1.97a.749.749 0 1 1 1.06 1.06l-3.25 3.25a.749.749 0 0 1-1.06 0L4.22 6.779a.749.749 0 1 1 1.06-1.06l1.97 1.97Z" />
+          </svg>
+          Export
         </button>
       </div>
     </div>

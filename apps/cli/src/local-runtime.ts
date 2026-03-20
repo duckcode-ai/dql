@@ -1,6 +1,7 @@
 import { createServer } from 'node:http';
-import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, watch, writeFileSync } from 'node:fs';
 import { dirname, extname, join, normalize, resolve } from 'node:path';
+import type { IncomingMessage, ServerResponse } from 'node:http';
 import { QueryExecutor, type ConnectionConfig } from '@duckcodeailabs/dql-connectors';
 import {
   buildExecutionPlan,
@@ -33,6 +34,27 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
   const { rootDir, executor, connection, preferredPort, projectRoot = process.cwd() } = opts;
   const projectConfig = loadProjectConfig(projectRoot);
 
+  // SSE clients for /api/watch hot-reload
+  const sseClients = new Set<ServerResponse>();
+
+  // Watch notebooks/ and workbooks/ dirs for changes
+  if (projectRoot) {
+    for (const dir of ['notebooks', 'workbooks', 'blocks', 'dashboards']) {
+      const watchDir = join(projectRoot, dir);
+      if (!existsSync(watchDir)) continue;
+      try {
+        watch(watchDir, { persistent: false }, (eventType, filename) => {
+          if (!filename) return;
+          const path = `${dir}/${filename}`;
+          const payload = JSON.stringify({ type: eventType === 'rename' ? 'file-added' : 'file-changed', path });
+          for (const client of sseClients) {
+            try { client.write(`event: change\ndata: ${payload}\n\n`); } catch { sseClients.delete(client); }
+          }
+        });
+      } catch { /* dir not watchable */ }
+    }
+  }
+
   const server = createServer(async (req, res) => {
     const requestUrl = req.url || '/';
     const url = new URL(requestUrl, 'http://127.0.0.1');
@@ -51,6 +73,20 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
     if (req.method === 'GET' && path === '/api/health') {
       res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
       res.end(serializeJSON({ status: 'ok' }));
+      return;
+    }
+
+    // SSE endpoint for hot-reload file watching
+    if (req.method === 'GET' && path === '/api/watch') {
+      res.writeHead(200, {
+        'Content-Type': 'text/event-stream',
+        'Cache-Control': 'no-cache',
+        'Connection': 'keep-alive',
+        'X-Accel-Buffering': 'no',
+      });
+      res.write(': connected\n\n');
+      sseClients.add(res);
+      req.on('close', () => { sseClients.delete(res); });
       return;
     }
 

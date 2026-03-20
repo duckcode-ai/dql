@@ -3,6 +3,7 @@ import { NotebookProvider, useNotebook } from './store/NotebookStore';
 import { AppShell } from './components/layout/AppShell';
 import { themes } from './themes/notebook-theme';
 import { api } from './api/client';
+import { useHotReload } from './hooks/useHotReload';
 
 function AppInner() {
   const { state, dispatch } = useNotebook();
@@ -58,6 +59,9 @@ function AppInner() {
       dispatch({ type: 'SET_SCHEMA_LOADING', loading: false });
     });
   }, [dispatch]);
+
+  // Hot reload — watches project files via SSE and refreshes state
+  useHotReload();
 
   return <AppShell />;
 }
