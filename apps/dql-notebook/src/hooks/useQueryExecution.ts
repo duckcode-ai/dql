@@ -7,25 +7,38 @@ import type { Cell } from '../store/types';
 /**
  * Extract executable SQL from a cell.
  * - sql cells: use content directly
- * - dql cells: extract SELECT ... portions
- * - markdown cells: return null (not executable)
+ * - dql cells: extract the SQL inside query = """...""", or plain SQL keywords
+ * - markdown/param cells: return null (not executable)
  */
 function extractSql(cell: Cell): string | null {
-  if (cell.type === 'markdown') return null;
+  if (cell.type === 'markdown' || cell.type === 'param') return null;
   if (cell.type === 'sql') return cell.content.trim() || null;
 
-  // dql: extract SELECT/WITH/INSERT/UPDATE/DELETE statements via simple regex
   const dqlContent = cell.content.trim();
   if (!dqlContent) return null;
 
-  // Try to find SQL keywords at line start or as the whole content
-  const sqlMatch = dqlContent.match(
-    /\b(SELECT|WITH|INSERT|UPDATE|DELETE|CREATE|DROP|ALTER|SHOW|DESCRIBE|EXPLAIN)\b[\s\S]*/i
-  );
-  if (sqlMatch) return sqlMatch[0].trim();
+  // DQL block syntax: extract SQL from inside query = """..."""
+  // Handles both 'query = """..."""' and bare triple-quote blocks
+  const tripleQuoteMatch = dqlContent.match(/query\s*=\s*"""([\s\S]*?)"""/i);
+  if (tripleQuoteMatch) return tripleQuoteMatch[1].trim() || null;
 
-  // Fall back to using content as-is
-  return dqlContent;
+  // Bare triple-quote block (no 'query =' prefix)
+  const bareTripleMatch = dqlContent.match(/"""([\s\S]*?)"""/);
+  if (bareTripleMatch) return bareTripleMatch[1].trim() || null;
+
+  // Plain SQL in a dql cell (no block syntax): match from first SQL keyword
+  // but stop before any DQL-only syntax (visualization/tests/block blocks)
+  const sqlKeywordMatch = dqlContent.match(
+    /\b(SELECT|WITH|INSERT|UPDATE|DELETE|CREATE|DROP|ALTER|SHOW|DESCRIBE|EXPLAIN)\b([\s\S]*)/i
+  );
+  if (sqlKeywordMatch) {
+    // Strip trailing DQL block sections like visualization { ... }
+    const raw = sqlKeywordMatch[0];
+    const dqlSectionStart = raw.search(/\b(visualization|tests|block)\s*\{/i);
+    return (dqlSectionStart > 0 ? raw.slice(0, dqlSectionStart) : raw).trim();
+  }
+
+  return null;
 }
 
 export function useQueryExecution() {

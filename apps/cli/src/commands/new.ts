@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readdirSync, writeFileSync } from 'node:fs';
 import { basename, join, resolve } from 'node:path';
 import type { CLIFlags } from '../args.js';
 import { findProjectRoot } from '../local-runtime.js';
@@ -12,10 +12,12 @@ export async function runNew(subject: string | null, rest: string[], flags: CLIF
   const title = toTitle(rawName);
   const slug = toSlug(rawName);
   const usingStarterData = existsSync(join(projectRoot, 'data', 'revenue.csv'));
+  // Detect available data files for smarter notebook templates
+  const availableDataFiles = detectAvailableDataFiles(projectRoot);
 
   // Notebooks use .dqlnb extension and their own creation path
   if (kind === 'notebook') {
-    return runNewNotebook({ projectRoot, title, slug, flags, usingStarterData });
+    return runNewNotebook({ projectRoot, title, slug, flags, usingStarterData, availableDataFiles });
   }
 
   const outputDir = resolve(projectRoot, defaultDirForKind(kind, flags.outDir));
@@ -394,8 +396,9 @@ async function runNewNotebook(opts: {
   slug: string;
   flags: CLIFlags;
   usingStarterData: boolean;
+  availableDataFiles: string[];
 }): Promise<void> {
-  const { projectRoot, title, slug, flags, usingStarterData } = opts;
+  const { projectRoot, title, slug, flags, usingStarterData, availableDataFiles } = opts;
   const outputDir = resolve(projectRoot, flags.outDir || 'notebooks');
   const filePath = join(outputDir, `${slug}.dqlnb`);
 
@@ -406,7 +409,7 @@ async function runNewNotebook(opts: {
   mkdirSync(outputDir, { recursive: true });
 
   const template = flags.chart || 'blank'; // reuse --chart flag as template selector
-  const cells = buildNotebookCells(title, template, usingStarterData);
+  const cells = buildNotebookCells(title, template, usingStarterData, availableDataFiles);
   const content = JSON.stringify({ version: 1, title, cells }, null, 2);
   writeFileSync(filePath, content, 'utf-8');
 
@@ -426,22 +429,44 @@ async function runNewNotebook(opts: {
   console.log('');
 }
 
-function buildNotebookCells(title: string, template: string, usingStarterData: boolean): object[] {
+function buildNotebookCells(
+  title: string,
+  template: string,
+  usingStarterData: boolean,
+  availableDataFiles: string[] = [],
+): object[] {
   const id = () => Math.random().toString(36).slice(2, 10);
-  const src = usingStarterData ? `read_csv_auto('./data/revenue.csv')` : 'your_table';
 
-  if (template === 'revenue' && usingStarterData) {
+  // Pick the best available data source — prefer template-specific CSVs, fall back to any CSV
+  function dataSrc(preferred: string[]): string {
+    for (const name of preferred) {
+      if (availableDataFiles.includes(name)) return `read_csv_auto('./data/${name}')`;
+    }
+    if (availableDataFiles.length > 0) return `read_csv_auto('./data/${availableDataFiles[0]}')`;
+    return 'your_table';
+  }
+
+  if (template === 'revenue') {
+    const src = dataSrc(['revenue.csv', 'orders.csv']);
     return [
       { id: id(), type: 'markdown', content: `# ${title}\n\nRevenue analysis using DQL and DuckDB.` },
-      { id: id(), type: 'sql', name: 'revenue_summary', content: `SELECT\n  segment_tier AS segment,\n  SUM(amount) AS total_revenue,\n  COUNT(*) AS deals\nFROM ${src}\nGROUP BY segment_tier\nORDER BY total_revenue DESC` },
-      { id: id(), type: 'sql', name: 'revenue_trend', content: `SELECT\n  recognized_at AS date,\n  SUM(amount) AS revenue\nFROM ${src}\nGROUP BY recognized_at\nORDER BY recognized_at` },
+      { id: id(), type: 'sql', name: 'revenue_summary', content: `SELECT *\nFROM ${src}\nLIMIT 100` },
     ];
   }
 
   if (template === 'pipeline') {
+    const src = dataSrc(['pipeline.csv', 'orders.csv', 'funnel.csv']);
     return [
       { id: id(), type: 'markdown', content: `# ${title}\n\nPipeline health and conversion analysis.` },
       { id: id(), type: 'sql', name: 'pipeline_overview', content: `SELECT *\nFROM ${src}\nLIMIT 100` },
+    ];
+  }
+
+  if (usingStarterData && availableDataFiles.length > 0) {
+    const src = dataSrc(availableDataFiles);
+    return [
+      { id: id(), type: 'markdown', content: `# ${title}\n\nAdd your analysis here.` },
+      { id: id(), type: 'sql', name: 'query_1', content: `SELECT *\nFROM ${src}\nLIMIT 10` },
     ];
   }
 
@@ -449,6 +474,19 @@ function buildNotebookCells(title: string, template: string, usingStarterData: b
     { id: id(), type: 'markdown', content: `# ${title}\n\nAdd your analysis here.` },
     { id: id(), type: 'sql', name: 'query_1', content: `SELECT 1 AS hello` },
   ];
+}
+
+/** List CSV/Parquet/JSON files in the project's data/ directory */
+function detectAvailableDataFiles(projectRoot: string): string[] {
+  try {
+    const dataDir = join(projectRoot, 'data');
+    if (!existsSync(dataDir)) return [];
+    return readdirSync(dataDir)
+      .filter((f) => /\.(csv|parquet|json|jsonl|ndjson|xlsx)$/i.test(f))
+      .sort();
+  } catch {
+    return [];
+  }
 }
 
 function normalizeChart(value: string): string {

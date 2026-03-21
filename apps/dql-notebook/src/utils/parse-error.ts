@@ -76,10 +76,10 @@ export function parseQueryError(raw: string): ParsedQueryError {
   } else if (type === 'Input Error') {
     if (/No files found/i.test(cleaned)) {
       hint =
-        "File not found — check the path. Use read_csv_auto('data/filename.csv') relative to your project root.";
+        "File not found — use read_csv_auto('./data/filename.csv'). Open the Schema panel (left sidebar) to see all files available in your data/ folder.";
     }
   } else if (type === 'File Error') {
-    hint = "File could not be read — check the path and make sure the file exists.";
+    hint = "File could not be read — use read_csv_auto('./data/filename.csv'). Open the Schema panel to browse available data files.";
   } else if (type === 'Type Error') {
     hint =
       'Type mismatch — you may be comparing or casting incompatible types (e.g. text vs number).';
