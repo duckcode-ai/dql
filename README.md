@@ -9,7 +9,49 @@ SQL queries disappear into Slack. Charts drift from the queries that power them.
 - AI generated a perfect query last Tuesday. It's gone now.
 - "Is this metric still correct?" — nobody can answer that.
 
-DQL turns one-off analytics work into durable, testable, reviewable assets.
+→ **[Why DQL exists and what problem it solves](./docs/why-dql.md)**
+
+---
+
+## Install
+
+Requires Node 18, 20, or 22 (active LTS).
+
+```bash
+npm install -g @duckcodeailabs/dql-cli
+dql init my-dql-project --template ecommerce
+cd my-dql-project
+dql doctor
+dql notebook
+```
+
+→ **[Full installation guide — global, local, source, and library paths](./docs/getting-started.md)**
+
+---
+
+## The Notebook
+
+`dql notebook` opens a local browser UI — no cloud, no Python, no setup beyond the CLI.
+
+- **SQL cells** — write and run SQL against local files, powered by DuckDB
+- **Param cells** — live widgets (text, number, date, select) wired to `{{variable}}` references in SQL
+- **Markdown cells** — annotate your analysis
+- **Auto-charting** — bar and line charts detected from query shape, table/chart toggle
+- **Export** — standalone HTML dashboard or `.dql` workbook file
+
+```bash
+dql notebook                      # open notebook for current project
+dql notebook ./my-dql-project     # specify project path
+dql new notebook "Revenue Analysis"  # scaffold a new .dqlnb file
+```
+
+→ **[Notebook guide — cells, param widgets, variable substitution, export](./docs/notebook.md)**
+
+---
+
+## DQL Blocks
+
+A DQL block is the core reusable unit — one file that holds everything needed to produce a trusted analytics answer.
 
 ```dql
 block "Revenue by Segment" {
@@ -41,159 +83,92 @@ block "Revenue by Segment" {
 }
 ```
 
-`dql notebook` opens a local browser notebook — SQL cells, markdown, param widgets, and auto-charting, all powered by DuckDB. No cloud required.
-
----
-
-## Install
-
-Requires Node 18, 20, or 22 (active LTS).
-
-### Install the CLI
+Scaffold, validate, preview, and build blocks with the CLI:
 
 ```bash
-npm install -g @duckcodeailabs/dql-cli
-dql --help
-```
-
-Scaffold a project and open the notebook:
-
-```bash
-mkdir DQL-Examples
-cd DQL-Examples
-dql init dql-example --template ecommerce
-cd dql-example
-dql doctor
-dql notebook
-```
-
-Run `dql notebook` from the project root containing `dql.config.json`. To run from a parent directory: `dql notebook ./dql-example`.
-
-### Without a global install
-
-```bash
-mkdir DQL-Examples
-cd DQL-Examples
-npm init -y
-npm install -D @duckcodeailabs/dql-cli
-npx dql --help
-npx dql init dql-example --template ecommerce
-```
-
-### Library packages only
-
-Installing just the libraries does not give you the `dql` command:
-
-```bash
-npm install @duckcodeailabs/dql-core @duckcodeailabs/dql-compiler
-```
-
-Those are library packages. For the CLI, install `@duckcodeailabs/dql-cli`.
-
-### Source / contributor workflow
-
-```bash
-git clone https://github.com/duckcode-ai/dql.git
-cd dql
-pnpm install
-pnpm build
-pnpm test
-pnpm --filter @duckcodeailabs/dql-cli exec dql --help
-```
-
-Scaffold and test from the repo:
-
-```bash
-pnpm --filter @duckcodeailabs/dql-cli exec dql init /tmp/dql-smoke --template ecommerce
-pnpm --filter @duckcodeailabs/dql-cli exec dql notebook /tmp/dql-smoke
-```
-
-### Common mistakes
-
-- `zsh: command not found: dql` — CLI is not installed globally or not on your PATH.
-- `No projects matched the filters` — you are running `pnpm --filter` outside the DQL monorepo.
-- Installed only `dql-core` and `dql-compiler` — those are libraries, not the CLI.
-
----
-
-## 60-Second Quickstart
-
-```bash
-npm install -g @duckcodeailabs/dql-cli
-dql init my-dql-project --template ecommerce
-cd my-dql-project
-dql doctor
-dql notebook
-```
-
-The notebook sidebar lists all blocks in the project. Open any `.dql` file, run SQL cells, and explore the data interactively.
-
----
-
-## Quick Start — Full Workflow
-
-```bash
-dql init my-dql-project --template ecommerce
-cd my-dql-project
-dql notebook
 dql new block "Pipeline Health"
-dql new semantic-block "ARR Growth"
-dql new dashboard "Revenue Overview"
-dql new workbook "Quarterly Review"
-dql doctor
 dql parse blocks/pipeline_health.dql
 dql preview blocks/pipeline_health.dql --open
 dql build blocks/pipeline_health.dql
-dql serve dist/pipeline_health
 ```
+
+→ **[Full language reference — block syntax, chart types, params, tests, workbooks](./docs/dql-language-spec.md)**
 
 ---
 
-## Templates
+## CLI Reference
+
+Every command has a clear job:
+
+| Command | What it does |
+|---|---|
+| `dql init` | Scaffold a new DQL project with sample data and starter blocks |
+| `dql notebook` | Open the browser notebook for interactive SQL exploration |
+| `dql new block` | Create a new `.dql` block file |
+| `dql new notebook` | Create a new `.dqlnb` notebook file |
+| `dql parse` | Validate syntax and run semantic analysis |
+| `dql preview` | Compile and serve a block locally with live data |
+| `dql build` | Compile to a static HTML bundle |
+| `dql serve` | Serve a built bundle locally |
+| `dql certify` | Check governance rules (owner, description, tags, domain) |
+| `dql fmt` | Format a `.dql` file in place |
+| `dql doctor` | Diagnose project setup, config, and runtime readiness |
+
+→ **[Full CLI reference — all commands, flags, and exit codes](./docs/cli-reference.md)**
+
+---
+
+## Data Sources
+
+DQL works without a cloud warehouse. The default runtime uses DuckDB to query local CSV and Parquet files directly.
+
+```json
+{
+  "connections": {
+    "default": {
+      "driver": "duckdb",
+      "path": ":memory:"
+    }
+  }
+}
+```
+
+Connect to Postgres, BigQuery, or Snowflake the same way — swap the driver in `dql.config.json`.
+
+→ **[Data sources guide — local files, DuckDB, Postgres, and remote connectors](./docs/data-sources.md)**
+
+---
+
+## Project Templates
+
+Pick a template when running `dql init` to get a working project immediately:
 
 | Template | Best for | What you get |
 |---|---|---|
-| `starter` | Smallest local-first flow | Revenue sample data, starter blocks, welcome notebook |
-| `ecommerce` | Strongest OSS product demo | Channel revenue, funnel analysis, realistic commerce dataset |
-| `saas` | Revenue + retention evaluation | MRR, churn pressure, cohort analysis |
-| `taxi` | Time-series and operations analysis | Trip volume, fare trends, borough analysis |
+| `starter` | Smallest local-first flow | Revenue CSV, starter blocks, welcome notebook |
+| `ecommerce` | Strongest OSS demo | Channel revenue, funnel analysis, commerce dataset |
+| `saas` | Revenue + retention | MRR, churn pressure, cohort analysis |
+| `taxi` | Time-series and ops | Trip volume, fare trends, borough analysis |
 
 ```bash
 dql init my-project --template ecommerce
 ```
 
----
-
-## Common Use Cases
-
-- **Evaluate DQL quickly** — scaffold a template, run `dql doctor`, open `dql notebook`
-- **Explore data interactively** — SQL, markdown, linked chart cells, and param widgets in the notebook
-- **Author durable analytics blocks** — SQL, metadata, chart config, and tests together in Git
-- **Build static dashboards** — compile blocks, dashboards, and workbooks with `dql build`
-- **Validate the full repo** — run source smoke tests before release or contribution
-
-See [Use Cases](./docs/use-cases.md) for recommended paths by user goal.
+→ **[Getting started — full project walkthrough](./docs/getting-started.md)**
 
 ---
 
-## Documentation
+## Migration
 
-- [Why DQL](./docs/why-dql.md) — what problem DQL solves and when it is the right tool
-- [Getting Started](./docs/getting-started.md) — install, notebook flow, first block walkthrough, and Node.js API
-- [Quickstart](./docs/quickstart.md) — fastest commands and compatibility notes
-- [Use Cases](./docs/use-cases.md) — recommended paths for evaluation, notebook usage, authoring, and release validation
-- [Examples](./docs/examples.md) — where to start, what each example teaches, and what to try next
-- [Repo Testing](./docs/repo-testing.md) — full source checkout smoke tests and manual validation checklist
-- [FAQ](./docs/faq.md) — common questions about standalone DQL usage and scope
-- [Compatibility](./docs/compatibility.md) — current runtime, connector, and workflow support matrix
-- [Language Specification](./docs/dql-language-spec.md) — full syntax reference, block types, chart types, AST
-- [CLI Reference](./docs/cli-reference.md) — all commands and flags
-- [Project Config](./docs/project-config.md) — how `dql.config.json` drives local preview and serving
-- [Data Sources](./docs/data-sources.md) — local CSV/Parquet, DuckDB, and connector setup
-- [Migration Guides](./docs/migration-guides/README.md) — practical paths from raw SQL, dbt metrics, and saved BI queries
-- [OSS Readiness Checklist](./docs/oss-readiness-checklist.md) — maintainer checklist for launch readiness
-- [Publishing](./docs/publishing.md) — maintainer guide for releasing `@duckcodeailabs/dql-*` packages
-- [VS Code Extension](#vs-code-extension) — install `DQL Language Support`
+Coming from raw SQL, dbt, or a saved BI query?
+
+```bash
+dql migrate raw-sql
+dql migrate dbt
+dql migrate looker
+```
+
+→ **[Migration guides — from raw SQL, dbt, and BI tools](./docs/migration-guides/README.md)**
 
 ---
 
@@ -205,7 +180,41 @@ Search **DQL Language Support** in the Extensions panel, or:
 code --install-extension dql.dql-language-support
 ```
 
-Provides syntax highlighting, snippets, format-on-save, and LSP support (completions, hover, diagnostics) via `@duckcodeailabs/dql-lsp`.
+Provides syntax highlighting, snippets, format-on-save, and LSP support (completions, hover, diagnostics).
+
+---
+
+## Use Cases
+
+Not sure where to start? Pick your goal:
+
+- **Explore a CSV interactively** → `dql init` + `dql notebook`
+- **Author a reusable block** → `dql new block` + `dql preview`
+- **Build a shareable dashboard** → `dql build` + `dql serve`
+- **Migrate from raw SQL or dbt** → `dql migrate`
+- **Embed the parser in Node.js** → `@duckcodeailabs/dql-core`
+
+→ **[Use cases — recommended paths by goal](./docs/use-cases.md)**
+
+---
+
+## All Documentation
+
+| Guide | What it covers |
+|---|---|
+| [Why DQL](./docs/why-dql.md) | The problem, before/after, personas, DQL vs dbt/BI/SQL |
+| [Quickstart](./docs/quickstart.md) | 5-minute path from install to running notebook |
+| [Getting Started](./docs/getting-started.md) | Full install, first block, notebook walkthrough, Node.js API |
+| [Notebook Guide](./docs/notebook.md) | All cell types, param widgets, variable refs, export |
+| [CLI Reference](./docs/cli-reference.md) | Every command, flag, and exit code |
+| [Language Spec](./docs/dql-language-spec.md) | Full `.dql` syntax: blocks, charts, params, workbooks |
+| [Data Sources](./docs/data-sources.md) | Local CSV/Parquet, DuckDB, Postgres, connectors |
+| [Project Config](./docs/project-config.md) | `dql.config.json` — connections, ports, defaults |
+| [Migration Guides](./docs/migration-guides/README.md) | From raw SQL, dbt, Looker, Tableau |
+| [Use Cases](./docs/use-cases.md) | Paths by user goal |
+| [Examples](./docs/examples.md) | Example projects and what each teaches |
+| [FAQ](./docs/faq.md) | Common questions about scope, notebook, and compatibility |
+| [Compatibility](./docs/compatibility.md) | Runtime, connector, and workflow support matrix |
 
 ---
 
@@ -213,45 +222,16 @@ Provides syntax highlighting, snippets, format-on-save, and LSP support (complet
 
 | Package | Description |
 |---|---|
+| `@duckcodeailabs/dql-cli` | Public CLI — `dql init`, `dql notebook`, `dql preview`, `dql parse`, … |
 | `@duckcodeailabs/dql-core` | Lexer, parser, AST, semantic analysis, formatter |
-| `@duckcodeailabs/dql-compiler` | IR lowering, Vega-Lite / React / HTML / runtime code generation |
-| `@duckcodeailabs/dql-governance` | Block testing, certification rules, cost estimation |
+| `@duckcodeailabs/dql-compiler` | IR lowering, HTML/React/runtime code generation |
+| `@duckcodeailabs/dql-governance` | Certification rules, cost estimation |
 | `@duckcodeailabs/dql-project` | Git-backed block registry and project primitives |
 | `@duckcodeailabs/dql-notebook` | Notebook document model and execution helpers |
 | `@duckcodeailabs/dql-lsp` | Language Server Protocol implementation |
-| `@duckcodeailabs/dql-runtime` | Browser runtime: data fetching, Vega rendering, hot-reload client |
-| `@duckcodeailabs/dql-charts` | visx-powered React SVG chart components |
-| `@duckcodeailabs/dql-cli` | Public CLI (`dql init`, `dql preview`, `dql parse`, `dql certify`, `dql fmt`, …) |
-
----
-
-## Workspace Layout
-
-```
-apps/
-  cli/                Public DQL CLI (@duckcodeailabs/dql-cli)
-  notebook-browser/   Browser-first notebook
-  vscode-extension/   DQL Language Support for VS Code
-
-packages/
-  dql-core/           Parser, AST, semantic analysis, formatter
-  dql-compiler/       DQL compilation pipeline
-  dql-runtime/        Browser runtime
-  dql-charts/         React chart components
-  dql-lsp/            Language server
-  dql-connectors/     Database connector layer
-  dql-governance/     Test and certification primitives
-  dql-project/        Block registry and project primitives
-  dql-notebook/       Notebook document model and execution helpers
-
-examples/
-  README.md           Example guide
-  blocks/             Example DQL blocks
-  semantic-layer/     Example metric, dimension, hierarchy definitions
-
-templates/
-  starter/            Minimal Git-native starter project
-```
+| `@duckcodeailabs/dql-runtime` | Browser runtime: data fetching, hot-reload |
+| `@duckcodeailabs/dql-charts` | React SVG chart components |
+| `@duckcodeailabs/dql-connectors` | Database connector layer |
 
 ---
 
