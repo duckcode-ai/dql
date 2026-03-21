@@ -1,13 +1,13 @@
 # DQL
 
-SQL queries disappear into Slack. Charts drift from the queries that power them. AI generates code that nobody can find next week. DQL fixes that.
-
-**DQL is an open-source analytics language, CLI, and notebook UI** — each analytics answer lives in a single `.dql` file: SQL + visualization config + owner + tests + parameters, all Git-trackable.
-
 - Your team copy-pastes the same query into 12 dashboards. They drift. Nobody knows which is right.
 - Someone changes the SQL. The chart breaks. There was no review.
 - AI generated a perfect query last Tuesday. It's gone now.
 - "Is this metric still correct?" — nobody can answer that.
+
+**DQL fixes that.**
+
+**DQL is an open-source analytics language, CLI, and notebook UI** — each analytics answer lives in a single `.dql` file: SQL + visualization config + owner + tests + parameters, all Git-trackable. No more query sprawl. No more broken charts. No more lost work.
 
 → **[Why DQL exists and what problem it solves](./docs/why-dql.md)**
 
