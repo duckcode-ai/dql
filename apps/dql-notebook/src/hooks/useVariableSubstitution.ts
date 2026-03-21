@@ -1,6 +1,6 @@
 import { useCallback } from 'react';
 import { useNotebook } from '../store/NotebookStore';
-import type { Cell, QueryResult } from '../store/types';
+import type { Cell, ParamType, QueryResult } from '../store/types';
 
 /**
  * Builds a WITH clause from a named cell's result, so that
@@ -38,8 +38,22 @@ function buildCTE(name: string, result: QueryResult): string {
 }
 
 /**
+ * Formats a param value as a SQL literal.
+ * Numbers and dates are injected as-is; text values are single-quoted.
+ */
+function formatParamLiteral(value: string, paramType: ParamType): string {
+  if (paramType === 'number') {
+    const n = Number(value);
+    return isNaN(n) ? `'${value.replace(/'/g, "''")}'` : String(n);
+  }
+  // date and text — single-quoted
+  return `'${value.replace(/'/g, "''")}'`;
+}
+
+/**
  * Returns a function that rewrites SQL by substituting {{cell_name}}
- * references with inline CTEs from successful cell results.
+ * references.  For param cells the value is injected as a SQL literal.
+ * For non-param named cells an inline CTE is built from their result.
  */
 export function useVariableSubstitution() {
   const { state } = useNotebook();
@@ -55,18 +69,32 @@ export function useVariableSubstitution() {
       const cteFragments: string[] = [];
       let rewritten = sql;
 
-      // Build a map of named cells with successful results
+      // Build maps: param cells and query-result cells
+      const paramCells = new Map<string, Cell>();
       const namedResults = new Map<string, QueryResult>();
       for (const cell of state.cells) {
         const name = cell.name?.trim();
-        if (name && cell.status === 'success' && cell.result) {
+        if (!name) continue;
+        if (cell.type === 'param') {
+          paramCells.set(name, cell);
+        } else if (cell.status === 'success' && cell.result) {
           namedResults.set(name, cell.result);
         }
       }
 
       for (const match of matches) {
         const varName = match[1];
-        if (namedResults.has(varName)) {
+
+        if (paramCells.has(varName)) {
+          // Inject literal value directly
+          const paramCell = paramCells.get(varName)!;
+          const cfg = paramCell.paramConfig;
+          const rawValue = paramCell.paramValue ?? cfg?.defaultValue ?? '';
+          const paramType: ParamType = cfg?.paramType ?? 'text';
+          const literal = formatParamLiteral(rawValue, paramType);
+          rewritten = rewritten.replace(match[0], literal);
+          substituted.push(varName);
+        } else if (namedResults.has(varName)) {
           cteFragments.push(buildCTE(varName, namedResults.get(varName)!));
           // Replace {{cell_name}} with just the name (it'll be resolved via CTE)
           rewritten = rewritten.replace(match[0], `"${varName}"`);
@@ -74,17 +102,19 @@ export function useVariableSubstitution() {
         }
       }
 
-      if (cteFragments.length === 0) return { sql, substituted: [] };
+      if (cteFragments.length === 0 && substituted.length === 0) {
+        return { sql, substituted: [] };
+      }
 
-      // Prepend WITH clause, handling existing WITH
-      const trimmed = rewritten.trimStart();
-      const hasExistingWith = /^WITH\s+/i.test(trimmed);
-
-      if (hasExistingWith) {
-        // Insert our CTEs at the start of the existing WITH list
-        rewritten = rewritten.replace(/^(\s*WITH\s+)/i, `$1${cteFragments.join(',\n')},\n`);
-      } else {
-        rewritten = `WITH ${cteFragments.join(',\n')}\n${rewritten}`;
+      if (cteFragments.length > 0) {
+        // Prepend WITH clause, handling existing WITH
+        const trimmed = rewritten.trimStart();
+        const hasExistingWith = /^WITH\s+/i.test(trimmed);
+        if (hasExistingWith) {
+          rewritten = rewritten.replace(/^(\s*WITH\s+)/i, `$1${cteFragments.join(',\n')},\n`);
+        } else {
+          rewritten = `WITH ${cteFragments.join(',\n')}\n${rewritten}`;
+        }
       }
 
       return { sql: rewritten, substituted };

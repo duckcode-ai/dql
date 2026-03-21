@@ -3,7 +3,7 @@ import { basename, join, resolve } from 'node:path';
 import type { CLIFlags } from '../args.js';
 import { findProjectRoot } from '../local-runtime.js';
 
-type ScaffoldKind = 'block' | 'dashboard' | 'workbook' | 'semantic-block';
+type ScaffoldKind = 'block' | 'dashboard' | 'workbook' | 'semantic-block' | 'notebook';
 
 export async function runNew(subject: string | null, rest: string[], flags: CLIFlags): Promise<void> {
   const { kind, rawName } = resolveNewTarget(subject, rest);
@@ -11,6 +11,13 @@ export async function runNew(subject: string | null, rest: string[], flags: CLIF
   const projectRoot = findProjectRoot(process.cwd());
   const title = toTitle(rawName);
   const slug = toSlug(rawName);
+  const usingStarterData = existsSync(join(projectRoot, 'data', 'revenue.csv'));
+
+  // Notebooks use .dqlnb extension and their own creation path
+  if (kind === 'notebook') {
+    return runNewNotebook({ projectRoot, title, slug, flags, usingStarterData });
+  }
+
   const outputDir = resolve(projectRoot, defaultDirForKind(kind, flags.outDir));
   const filePath = join(outputDir, `${slug}.dql`);
 
@@ -23,7 +30,6 @@ export async function runNew(subject: string | null, rest: string[], flags: CLIF
   const owner = flags.owner || process.env.USER || 'team';
   const domain = flags.domain || 'general';
   const chart = normalizeChart(flags.chart || 'bar');
-  const usingStarterData = existsSync(join(projectRoot, 'data', 'revenue.csv'));
   const metricName = `${slug}_metric`;
 
   const content = buildTemplate({
@@ -76,7 +82,7 @@ function resolveNewTarget(subject: string | null, rest: string[]): { kind: Scaff
     throw new Error('Usage: dql new <block|dashboard|workbook> <name>');
   }
 
-  if (subject === 'block' || subject === 'dashboard' || subject === 'workbook' || subject === 'semantic-block') {
+  if (subject === 'block' || subject === 'dashboard' || subject === 'workbook' || subject === 'semantic-block' || subject === 'notebook') {
     const rawName = rest.join(' ').trim();
     if (!rawName) {
       throw new Error(`Missing ${subject} name. Usage: dql new ${subject} <name>`);
@@ -374,10 +380,75 @@ function defaultDirForKind(kind: ScaffoldKind, outDir: string): string {
       return 'blocks';
     case 'workbook':
       return 'workbooks';
+    case 'notebook':
+      return 'notebooks';
     case 'block':
     default:
       return 'blocks';
   }
+}
+
+async function runNewNotebook(opts: {
+  projectRoot: string;
+  title: string;
+  slug: string;
+  flags: CLIFlags;
+  usingStarterData: boolean;
+}): Promise<void> {
+  const { projectRoot, title, slug, flags, usingStarterData } = opts;
+  const outputDir = resolve(projectRoot, flags.outDir || 'notebooks');
+  const filePath = join(outputDir, `${slug}.dqlnb`);
+
+  if (existsSync(filePath)) {
+    throw new Error(`Notebook already exists: ${filePath}`);
+  }
+
+  mkdirSync(outputDir, { recursive: true });
+
+  const template = flags.chart || 'blank'; // reuse --chart flag as template selector
+  const cells = buildNotebookCells(title, template, usingStarterData);
+  const content = JSON.stringify({ version: 1, title, cells }, null, 2);
+  writeFileSync(filePath, content, 'utf-8');
+
+  const relativePath = relativeToProject(projectRoot, filePath);
+
+  if (flags.format === 'json') {
+    console.log(JSON.stringify({ created: true, type: 'notebook', name: title, path: filePath }, null, 2));
+    return;
+  }
+
+  console.log(`\n  ✓ Created DQL notebook: ${title}`);
+  console.log(`    Path: ${filePath}`);
+  console.log('');
+  console.log('  Next steps:');
+  console.log(`    1. dql notebook  (opens the interactive notebook UI)`);
+  console.log(`    2. Open "${relativePath}" from the Files panel`);
+  console.log('');
+}
+
+function buildNotebookCells(title: string, template: string, usingStarterData: boolean): object[] {
+  const id = () => Math.random().toString(36).slice(2, 10);
+  const src = usingStarterData ? `read_csv_auto('./data/revenue.csv')` : 'your_table';
+
+  if (template === 'revenue' && usingStarterData) {
+    return [
+      { id: id(), type: 'markdown', content: `# ${title}\n\nRevenue analysis using DQL and DuckDB.` },
+      { id: id(), type: 'sql', name: 'revenue_summary', content: `SELECT\n  segment_tier AS segment,\n  SUM(amount) AS total_revenue,\n  COUNT(*) AS deals\nFROM ${src}\nGROUP BY segment_tier\nORDER BY total_revenue DESC` },
+      { id: id(), type: 'sql', name: 'revenue_trend', content: `SELECT\n  recognized_at AS date,\n  SUM(amount) AS revenue\nFROM ${src}\nGROUP BY recognized_at\nORDER BY recognized_at` },
+    ];
+  }
+
+  if (template === 'pipeline') {
+    return [
+      { id: id(), type: 'markdown', content: `# ${title}\n\nPipeline health and conversion analysis.` },
+      { id: id(), type: 'sql', name: 'pipeline_overview', content: `SELECT *\nFROM ${src}\nLIMIT 100` },
+    ];
+  }
+
+  return [
+    { id: id(), type: 'markdown', content: `# ${title}\n\nAdd your analysis here.` },
+    { id: id(), type: 'sql', name: 'query_1', content: `SELECT 1 AS hello` },
+  ];
 }
 
 function normalizeChart(value: string): string {

@@ -1,6 +1,15 @@
 export type ThemeMode = 'dark' | 'light';
-export type CellType = 'sql' | 'markdown' | 'dql';
+export type CellType = 'sql' | 'markdown' | 'dql' | 'param';
 export type CellStatus = 'idle' | 'running' | 'success' | 'error';
+
+export type ParamType = 'text' | 'select' | 'date' | 'number';
+
+export interface ParamConfig {
+  paramType: ParamType;
+  label: string;
+  defaultValue: string;
+  options?: string[];
+}
 export type SidebarPanel = 'files' | 'schema' | 'outline' | null;
 export type DevPanelTab = 'logs' | 'errors';
 
@@ -20,6 +29,8 @@ export interface Cell {
   result?: QueryResult;
   error?: string;
   executionCount?: number;
+  paramConfig?: ParamConfig;
+  paramValue?: string;
 }
 
 export interface NotebookFile {
@@ -94,4 +105,5 @@ export type NotebookAction =
   | { type: 'SET_NOTEBOOK_DIRTY'; dirty: boolean }
   | { type: 'SET_SAVING'; saving: boolean }
   | { type: 'FILE_ADDED'; file: NotebookFile }
-  | { type: 'SET_TABLE_COLUMNS'; tableName: string; columns: SchemaColumn[] };
+  | { type: 'SET_TABLE_COLUMNS'; tableName: string; columns: SchemaColumn[] }
+  | { type: 'SET_PARAM_VALUE'; id: string; value: string };

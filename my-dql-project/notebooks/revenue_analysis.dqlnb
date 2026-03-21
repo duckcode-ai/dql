@@ -1,0 +1,68 @@
+{
+  "version": 1,
+  "title": "Revenue Analysis",
+  "cells": [
+    {
+      "id": "cell-md-1",
+      "type": "markdown",
+      "content": "# Revenue Analysis\n\nThis notebook analyzes revenue from `data/revenue.csv` across segments and time periods.\nUse the **Segment** parameter to filter results dynamically."
+    },
+    {
+      "id": "cell-param-1",
+      "type": "param",
+      "content": "",
+      "name": "segment",
+      "paramConfig": {
+        "paramType": "select",
+        "label": "Segment",
+        "defaultValue": "All",
+        "options": ["All", "Enterprise", "Mid-Market", "SMB"]
+      },
+      "paramValue": "All"
+    },
+    {
+      "id": "cell-md-2",
+      "type": "markdown",
+      "content": "## Total Revenue by Segment"
+    },
+    {
+      "id": "cell-sql-1",
+      "type": "sql",
+      "name": "revenue_by_segment",
+      "content": "SELECT\n  segment_tier,\n  SUM(amount) AS total_revenue,\n  COUNT(*) AS deal_count,\n  ROUND(AVG(amount), 0) AS avg_deal_size\nFROM read_csv_auto('data/revenue.csv')\nGROUP BY segment_tier\nORDER BY total_revenue DESC"
+    },
+    {
+      "id": "cell-md-3",
+      "type": "markdown",
+      "content": "## Revenue Trend by Quarter"
+    },
+    {
+      "id": "cell-sql-2",
+      "type": "sql",
+      "name": "quarterly_trend",
+      "content": "SELECT\n  fiscal_year || ' ' || fiscal_quarter AS period,\n  SUM(amount) AS total_revenue\nFROM read_csv_auto('data/revenue.csv')\nGROUP BY fiscal_year, fiscal_quarter\nORDER BY fiscal_year, fiscal_quarter"
+    },
+    {
+      "id": "cell-md-4",
+      "type": "markdown",
+      "content": "## Monthly Revenue Detail"
+    },
+    {
+      "id": "cell-sql-3",
+      "type": "sql",
+      "name": "monthly_detail",
+      "content": "SELECT\n  strftime(recognized_at::DATE, '%Y-%m') AS month,\n  segment_tier,\n  SUM(amount) AS revenue\nFROM read_csv_auto('data/revenue.csv')\nGROUP BY month, segment_tier\nORDER BY month, segment_tier"
+    },
+    {
+      "id": "cell-md-5",
+      "type": "markdown",
+      "content": "## Filtered by Segment Parameter\n\nThis query uses `{{segment}}` — change the Segment widget above to filter live."
+    },
+    {
+      "id": "cell-sql-4",
+      "type": "sql",
+      "name": "filtered_revenue",
+      "content": "SELECT\n  recognized_at,\n  segment_tier,\n  amount,\n  fiscal_year || ' ' || fiscal_quarter AS period\nFROM read_csv_auto('data/revenue.csv')\nWHERE {{segment}} = 'All' OR segment_tier = {{segment}}\nORDER BY recognized_at DESC\nLIMIT 50"
+    }
+  ]
+}

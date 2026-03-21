@@ -140,6 +140,15 @@ function notebookReducer(state: NotebookState, action: NotebookAction): Notebook
         ),
       };
 
+    case 'SET_PARAM_VALUE':
+      return {
+        ...state,
+        cells: state.cells.map((c) =>
+          c.id === action.id ? { ...c, paramValue: action.value } : c
+        ),
+        notebookDirty: true,
+      };
+
     default:
       return state;
   }
@@ -174,10 +183,20 @@ export function makeCellId(): string {
 
 // Helper to create a blank cell
 export function makeCell(type: Cell['type'], content = ''): Cell {
-  return {
+  const base: Cell = {
     id: makeCellId(),
     type,
     content,
     status: 'idle',
   };
+  if (type === 'param') {
+    base.content = '';
+    base.paramConfig = {
+      paramType: 'text',
+      label: 'Parameter',
+      defaultValue: '',
+      options: [],
+    };
+  }
+  return base;
 }

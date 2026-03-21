@@ -1,4 +1,4 @@
-import type { Cell } from '../store/types';
+import type { Cell, ParamConfig } from '../store/types';
 import { makeCellId } from '../store/NotebookStore';
 
 export interface ParsedWorkbook {
@@ -87,9 +87,11 @@ export interface DqlNotebookFile {
   title: string;
   cells: Array<{
     id: string;
-    type: 'sql' | 'markdown' | 'dql';
+    type: 'sql' | 'markdown' | 'dql' | 'param';
     content: string;
     name?: string;
+    paramConfig?: ParamConfig;
+    paramValue?: string;
   }>;
 }
 
@@ -102,6 +104,8 @@ export function parseDqlNotebook(content: string): ParsedWorkbook {
       content: c.content || '',
       name: c.name,
       status: 'idle' as const,
+      ...(c.paramConfig ? { paramConfig: c.paramConfig } : {}),
+      ...(c.paramValue !== undefined ? { paramValue: c.paramValue } : {}),
     }));
     return { title: data.title || 'Untitled', cells };
   } catch {
@@ -131,6 +135,8 @@ export function serializeDqlNotebook(title: string, cells: Cell[]): string {
       type: c.type,
       content: c.content,
       ...(c.name ? { name: c.name } : {}),
+      ...(c.paramConfig ? { paramConfig: c.paramConfig } : {}),
+      ...(c.paramValue !== undefined ? { paramValue: c.paramValue } : {}),
     })),
   };
   return JSON.stringify(data, null, 2);

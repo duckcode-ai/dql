@@ -12,6 +12,7 @@ const CELL_TYPE_LABELS: { type: CellType; label: string; color: string }[] = [
   { type: 'sql', label: 'SQL', color: '#388bfd' },
   { type: 'markdown', label: 'Markdown', color: '#56d364' },
   { type: 'dql', label: 'DQL', color: '#e3b341' },
+  { type: 'param', label: 'Param', color: '#e3b341' },
 ];
 
 export function AddCellBar({ afterId }: AddCellBarProps) {

@@ -5,6 +5,7 @@ import { themes } from '../../themes/notebook-theme';
 import { useQueryExecution } from '../../hooks/useQueryExecution';
 import { SQLCellEditor } from './SQLCellEditor';
 import { MarkdownCellEditor } from './MarkdownCellEditor';
+import { ParamCell } from './ParamCell';
 import { TableOutput } from '../output/TableOutput';
 import { ChartOutput, detectChartType } from '../output/ChartOutput';
 import { ErrorOutput } from '../output/ErrorOutput';
@@ -19,12 +20,14 @@ const TYPE_LABELS: Record<string, string> = {
   sql: 'SQL',
   markdown: 'MD',
   dql: 'DQL',
+  param: 'PARAM',
 };
 
 const TYPE_COLORS: Record<string, string> = {
   sql: '#388bfd',
   markdown: '#56d364',
   dql: '#e3b341',
+  param: '#e3b341',
 };
 
 function getCellBorderColor(cell: Cell, t: Theme): string {
@@ -97,7 +100,24 @@ export function CellComponent({ cell, index }: CellProps) {
   const [viewMode, setViewMode] = useState<'chart' | 'table'>('table');
 
   const borderColor = getCellBorderColor(cell, t);
-  const isExecutable = cell.type !== 'markdown';
+  const isExecutable = cell.type !== 'markdown' && cell.type !== 'param';
+
+  // Param cells get their own fully self-contained rendering
+  if (cell.type === 'param') {
+    return (
+      <div
+        onMouseEnter={() => setCellHovered(true)}
+        onMouseLeave={() => setCellHovered(false)}
+        style={{ display: 'flex', gap: 0, marginBottom: 2 }}
+      >
+        {/* Gutter placeholder */}
+        <div style={{ width: 40, flexShrink: 0 }} />
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <ParamCell cell={cell} themeMode={state.themeMode} />
+        </div>
+      </div>
+    );
+  }
 
   // When result first arrives (status → success), auto-detect chart type
   useEffect(() => {

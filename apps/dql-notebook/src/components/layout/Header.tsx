@@ -6,6 +6,7 @@ import { api } from '../../api/client';
 import { serializeDqlNotebook } from '../../utils/parse-workbook';
 import { useQueryExecution } from '../../hooks/useQueryExecution';
 import { downloadDashboard } from '../../utils/export-dashboard';
+import { downloadWorkbookDql } from '../../utils/export-workbook-dql';
 
 function DQLLogo({ t }: { t: Theme }) {
   return (
@@ -48,6 +49,8 @@ export function Header() {
   const [saveHover, setSaveHover] = useState(false);
   const [themeHover, setThemeHover] = useState(false);
   const [exportHover, setExportHover] = useState(false);
+  const [exportDropdownOpen, setExportDropdownOpen] = useState(false);
+  const exportDropdownRef = useRef<HTMLDivElement>(null);
   const titleInputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
@@ -56,6 +59,18 @@ export function Header() {
       titleInputRef.current.select();
     }
   }, [editingTitle]);
+
+  // Close export dropdown on outside click
+  useEffect(() => {
+    if (!exportDropdownOpen) return;
+    function handler(e: MouseEvent) {
+      if (exportDropdownRef.current && !exportDropdownRef.current.contains(e.target as Node)) {
+        setExportDropdownOpen(false);
+      }
+    }
+    document.addEventListener('mousedown', handler);
+    return () => document.removeEventListener('mousedown', handler);
+  }, [exportDropdownOpen]);
 
   const startEditTitle = () => {
     setTitleDraft(state.notebookTitle);
@@ -267,32 +282,112 @@ export function Header() {
         {/* Separator */}
         <div style={{ width: 1, height: 20, background: t.headerBorder }} />
 
-        {/* Export Dashboard */}
-        <button
-          onClick={() => {
-            if (state.activeFile) {
-              downloadDashboard(state.notebookTitle || 'dashboard', state.cells);
-            }
-          }}
-          disabled={!state.activeFile}
-          onMouseEnter={() => setExportHover(true)}
-          onMouseLeave={() => setExportHover(false)}
-          title="Export as standalone HTML dashboard"
-          style={{
-            ...btnBase,
-            background: exportHover && state.activeFile ? t.btnHover : t.btnBg,
-            color: t.textSecondary,
-            opacity: !state.activeFile ? 0.4 : 1,
-          }}
-        >
-          <svg width="11" height="11" viewBox="0 0 16 16" fill="currentColor">
-            <path d="M2.75 14A1.75 1.75 0 0 1 1 12.25v-2.5a.75.75 0 0 1 1.5 0v2.5c0 .138.112.25.25.25h10.5a.25.25 0 0 0 .25-.25v-2.5a.75.75 0 0 1 1.5 0v2.5A1.75 1.75 0 0 1 13.25 14Z" />
-            <path d="M7.25 7.689V2a.75.75 0 0 1 1.5 0v5.689l1.97-1.97a.749.749 0 1 1 1.06 1.06l-3.25 3.25a.749.749 0 0 1-1.06 0L4.22 6.779a.749.749 0 1 1 1.06-1.06l1.97 1.97Z" />
-          </svg>
-          Export
-        </button>
+        {/* Export dropdown */}
+        <div ref={exportDropdownRef} style={{ position: 'relative' }}>
+          <button
+            onClick={() => {
+              if (state.activeFile) setExportDropdownOpen((o) => !o);
+            }}
+            disabled={!state.activeFile}
+            onMouseEnter={() => setExportHover(true)}
+            onMouseLeave={() => setExportHover(false)}
+            title="Export options"
+            style={{
+              ...btnBase,
+              background: (exportHover || exportDropdownOpen) && state.activeFile ? t.btnHover : t.btnBg,
+              color: t.textSecondary,
+              opacity: !state.activeFile ? 0.4 : 1,
+            }}
+          >
+            <svg width="11" height="11" viewBox="0 0 16 16" fill="currentColor">
+              <path d="M2.75 14A1.75 1.75 0 0 1 1 12.25v-2.5a.75.75 0 0 1 1.5 0v2.5c0 .138.112.25.25.25h10.5a.25.25 0 0 0 .25-.25v-2.5a.75.75 0 0 1 1.5 0v2.5A1.75 1.75 0 0 1 13.25 14Z" />
+              <path d="M7.25 7.689V2a.75.75 0 0 1 1.5 0v5.689l1.97-1.97a.749.749 0 1 1 1.06 1.06l-3.25 3.25a.749.749 0 0 1-1.06 0L4.22 6.779a.749.749 0 1 1 1.06-1.06l1.97 1.97Z" />
+            </svg>
+            Export
+            <svg width="8" height="8" viewBox="0 0 8 8" fill="currentColor" style={{ marginLeft: 1 }}>
+              <path d="M1 2.5l3 3 3-3" stroke="currentColor" fill="none" strokeWidth="1.2" strokeLinecap="round" />
+            </svg>
+          </button>
+
+          {exportDropdownOpen && (
+            <div
+              style={{
+                position: 'absolute',
+                top: 32,
+                right: 0,
+                zIndex: 200,
+                background: t.modalBg,
+                border: `1px solid ${t.cellBorder}`,
+                borderRadius: 8,
+                boxShadow: '0 8px 24px rgba(0,0,0,0.3)',
+                padding: 4,
+                minWidth: 160,
+                display: 'flex',
+                flexDirection: 'column',
+                gap: 2,
+              }}
+            >
+              <ExportMenuItem
+                label="Export HTML"
+                description="Standalone dashboard"
+                t={t}
+                onClick={() => {
+                  downloadDashboard(state.notebookTitle || 'dashboard', state.cells);
+                  setExportDropdownOpen(false);
+                }}
+              />
+              <ExportMenuItem
+                label="Export .dql"
+                description="DQL workbook file"
+                t={t}
+                onClick={() => {
+                  downloadWorkbookDql(state.notebookTitle || 'notebook', state.cells);
+                  setExportDropdownOpen(false);
+                }}
+              />
+            </div>
+          )}
+        </div>
       </div>
     </div>
+  );
+}
+
+function ExportMenuItem({
+  label,
+  description,
+  t,
+  onClick,
+}: {
+  label: string;
+  description: string;
+  t: Theme;
+  onClick: () => void;
+}) {
+  const [hovered, setHovered] = useState(false);
+  return (
+    <button
+      onClick={onClick}
+      onMouseEnter={() => setHovered(true)}
+      onMouseLeave={() => setHovered(false)}
+      style={{
+        background: hovered ? t.btnHover : 'transparent',
+        border: 'none',
+        borderRadius: 5,
+        cursor: 'pointer',
+        padding: '6px 10px',
+        textAlign: 'left' as const,
+        display: 'flex',
+        flexDirection: 'column',
+        gap: 1,
+        transition: 'background 0.12s',
+      }}
+    >
+      <span style={{ fontSize: 12, fontWeight: 500, color: t.textPrimary, fontFamily: t.font }}>
+        {label}
+      </span>
+      <span style={{ fontSize: 10, color: t.textMuted, fontFamily: t.font }}>{description}</span>
+    </button>
   );
 }
 
