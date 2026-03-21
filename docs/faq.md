@@ -10,11 +10,67 @@ No. DQL works standalone.
 
 You can scaffold a local project, validate blocks, preview charts, and build bundles directly with the DQL CLI.
 
+## Does DQL have a notebook UI?
+
+Yes. Run `dql notebook` from any DQL project root and it opens a local browser notebook.
+
+The notebook supports:
+- **SQL cells** — run queries against local CSV/Parquet files via DuckDB
+- **Markdown cells** — prose, headers, callouts
+- **Param widgets** — adjust query parameters interactively without editing SQL
+- **Auto-charting** — results render as charts based on visualization config in your `.dql` files
+- **Export** — save results or share notebook files (`.dqlnb`)
+
+```bash
+dql init my-project --template ecommerce
+cd my-project
+dql notebook
+```
+
+## Can I use DQL for just the notebook, without writing .dql files?
+
+Yes. The notebook works with plain SQL cells. You do not need to author `.dql` block files to explore data.
+
+Drop a CSV in the `data/` folder of your project, open `dql notebook`, and start writing SQL. `.dql` block files are the durable output you create when you want to commit a query as a reusable, testable asset — but they are not required to use the notebook.
+
+## How is DQL different from a Jupyter notebook?
+
+Jupyter is Python-first and requires a kernel runtime. DQL notebook is SQL-first with no Python runtime needed.
+
+Key differences:
+
+| | Jupyter | DQL Notebook |
+|---|---|---|
+| Primary language | Python | SQL |
+| Execution runtime | Python kernel | DuckDB (in-browser) |
+| Chart setup | matplotlib / Plotly code | Declarative config, auto-rendered |
+| File format | `.ipynb` JSON | `.dqlnb` JSON |
+| Git diff | Noisy (cell outputs embedded) | Clean (no embedded outputs) |
+| Local data | Manual file loading | Drop CSV in `data/`, query immediately |
+
+Both are Git-trackable. DQL notebook is purpose-built for SQL analytics without writing any Python.
+
+## I just want to explore a CSV file. Can DQL help?
+
+Yes. This is the fastest DQL workflow:
+
+```bash
+npm install -g @duckcodeailabs/dql-cli
+dql init myproject && cd myproject
+dql notebook
+```
+
+Drop your CSV into the `data/` folder. In the notebook, query it immediately:
+
+```sql
+SELECT * FROM read_csv_auto('data/yourfile.csv') LIMIT 20
+```
+
+No warehouse, no credentials, no configuration. DuckDB reads the file directly.
+
 ## Can I preview visualizations locally?
 
-Yes.
-
-The recommended local flow is:
+Yes. The recommended local flow is:
 
 ```bash
 dql init my-dql-project
@@ -67,12 +123,13 @@ Start with these:
 
 - `dql init`
 - `dql doctor`
+- `dql notebook`
 - `dql parse`
 - `dql preview`
 - `dql build`
 - `dql serve`
 
-These cover setup, validation, experimentation, and sharing.
+These cover setup, validation, interactive exploration, and sharing.
 
 ## Does `dql test` execute assertions against a real database?
 
@@ -84,12 +141,11 @@ Without a runnable database connection, test flows are limited to structural dis
 
 This repo does not include:
 
-- notebook coworker UI
-- natural-language or agentic product flows
+- Natural-language or agentic block generation
 - MCP runtime
-- approval workflows and product orchestration
+- Approval workflows and product orchestration
 
-Those are separate from the standalone open-source DQL language/tooling layer.
+Those are separate from the standalone open-source DQL language/tooling layer. The notebook UI (`dql notebook`) is fully included.
 
 ## How is DQL different from dbt?
 
@@ -101,14 +157,12 @@ Many teams can use both together rather than choosing one over the other.
 
 ## How do I get started fastest?
 
-Use this sequence:
-
 ```bash
-dql init my-dql-project
+npm install -g @duckcodeailabs/dql-cli
+dql init my-dql-project --template ecommerce
 cd my-dql-project
 dql doctor
-dql new block "Pipeline Health"
-dql preview blocks/pipeline_health.dql --open
+dql notebook
 ```
 
 Then read:

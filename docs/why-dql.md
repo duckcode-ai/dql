@@ -1,137 +1,114 @@
 # Why DQL
 
-DQL exists to make analytics outputs durable, reviewable, and reusable.
+## The $40,000 Question
 
-Instead of scattering logic across saved queries, dashboards, notebooks, and chat transcripts, DQL packages an analytics asset into a single file that can live in Git.
+You query revenue last Tuesday. A colleague queries it Thursday. The numbers differ by $40,000. Neither of you knows why.
 
-## The Problem DQL Solves
+Was it the date filter? A different join? A customer segment definition that changed last month? You spend two hours digging through Slack, a shared Notion doc, and three BI "saved queries" that all have slightly different SQL. You never find a definitive answer. You ship the number you feel most confident about and move on.
 
-Many teams already have SQL, BI dashboards, metrics, notebooks, and AI-generated queries. The problem is not only query generation — it is keeping the useful answers consistent over time.
+This is not a data quality problem. It is a version control problem. Your analytics logic has no canonical home, no ownership, no history, and no tests. The same SQL exists in five places and has quietly drifted into five different answers.
 
-Common pain points:
+DQL fixes the root cause: it makes each analytics answer a single file that lives in Git.
 
-- the same SQL gets copied into many places
-- nobody knows which version is trusted
-- chart settings and business logic drift apart
-- important queries are hard to test
-- AI-generated answers disappear into chat history
-- reuse depends on tribal knowledge instead of shared assets
+---
 
-DQL turns those one-off answers into reusable blocks.
+## Before DQL / After DQL
 
-## What DQL Is
+| Situation | Before | After |
+|---|---|---|
+| Where does the revenue query live? | Slack, Notion, BI saved queries, a notebook | `blocks/revenue_by_segment.dql` in Git |
+| Who owns this metric? | Unknown, ask around | `owner = "data-team"` in the block |
+| Why did the number change? | No way to know | `git log blocks/revenue_by_segment.dql` |
+| Is the chart still in sync with the SQL? | Maybe — last person to edit either might know | Chart config lives inside the same file as the SQL |
+| Can I run this against my local CSV? | Set up a whole environment | `dql preview blocks/revenue_by_segment.dql --open` |
+| Can someone review my analytics change? | No standard workflow | Open a PR — the diff shows exactly what changed |
+| Does this query actually return data? | Ship and hope | `tests { assert row_count > 0 }` |
+| Can I reuse this across dashboards? | Copy-paste and drift | Reference the block by name |
 
-DQL is a Git-native language for analytics blocks.
+---
 
-A DQL block can include:
+## Who DQL Is For
 
-- metadata
-- SQL or semantic references
-- parameters
-- visualization settings
-- assertions
+### Data Analyst
 
-That makes one file useful across authoring, preview, testing, versioning, and later product workflows.
+You answer the same question every Monday. Someone asks on Thursday and gets a different number because they ran a slightly different query. You have no way to say "use this one, it is the canonical version."
 
-## Why Not Just Keep Using Raw SQL?
+DQL gives you a place to commit the answer. One file, one home, one source of truth. When someone asks again, you send them a Git path.
 
-Raw SQL is a great starting point, but it usually lacks:
+### Analytics Engineer
 
-- ownership metadata
-- tags and discoverability
-- chart configuration
-- reusable parameters
-- lightweight assertions
-- a consistent packaging format
+You use dbt to model clean tables. But once the data leaves dbt, it scatters. The charting logic lives in Tableau. The segment definitions live in a Notion doc. The filter parameters live in someone's head. There is no PR review for analytics answers — only for models.
 
-DQL keeps SQL, but wraps it in a more durable artifact.
+DQL is the dbt-style layer for answer assets. The same rigor you bring to models — versioning, testing, ownership — now applies to the blocks that actually get used in dashboards and reports.
 
-## Why Not Just Use a BI Tool?
+### Data Team Lead
 
-BI tools are useful for exploration and presentation, but teams often outgrow saved-query sprawl.
+You cannot trust the dashboards. Not because the data is bad, but because you cannot tell which queries are current, which are stale, and whether any of them have tests. When someone changes a dashboard, there is no diff. No review. No rollback.
 
-DQL is useful when you want assets that are:
+DQL gives your team a Git-native analytics workflow. Changes go through PRs. Every block has an owner. Failures have a traceable cause.
 
-- stored in Git
-- easy to diff and review
-- portable across tools
-- connected to code review and CI
-- reusable outside one vendor UI
+---
 
-## Why Not Just Use dbt?
+## DQL vs Everything Else
 
-dbt and DQL solve different problems.
+| | Raw SQL | dbt | BI Tools | DQL |
+|---|---|---|---|---|
+| Git-native | Manual | Yes (models) | No | Yes (blocks) |
+| Testable | No | Yes (models) | No | Yes (answers) |
+| Local preview | No | No | No | Yes |
+| Visualization config | No | No | Yes | Yes |
+| Reusable parameters | No | Macros | Limited | Yes |
+| Portable (no vendor lock-in) | Yes | Partial | No | Yes |
+| Covers the "answer" layer | No | No | Yes | Yes |
 
-- dbt is strong for transformations, modeling, and semantic definitions
-- DQL is strong for packaging reusable analytics answers and views
+> dbt and DQL are complementary. Use dbt to model your data. Use DQL for the blocks that answer business questions on top of those models.
 
-Many teams should use both:
+---
 
-- dbt for modeling and metrics
-- DQL for durable answer assets, visualization-ready blocks, and local preview workflows
+## Why Now: The AI Angle
 
-## Why DQL in the AI Era?
+AI can write a SQL query in ten seconds. That is not the problem anymore.
 
-AI makes it easier to generate SQL quickly, but generation is only part of the workflow.
+The problem is that AI-generated SQL creates sprawl faster than humans ever could. Every conversation produces a query. Few of them get saved anywhere useful. None of them have tests. None of them have owners. Three months later, six people have independently asked the same question and gotten six slightly different answers.
 
-Teams still need to decide:
+DQL is the contract layer that makes AI-generated analytics durable. You take the query the AI wrote, wrap it in a block, add an owner, add a test, commit it. Now it exists. Now it can be reviewed. Now it does not disappear.
 
-- which result is trusted
-- how to reuse it
-- how to review changes
-- how to attach tests and metadata
-- how to keep the answer stable over time
+AI proposes. DQL keeps.
 
-DQL is valuable because it gives generated or hand-written analytics work a durable contract.
+---
 
-In short:
+## What It Feels Like to Use DQL
 
-- AI can propose
-- DQL helps teams keep and reuse what matters
+**1. Init.** You have a CSV. You run `dql init myproject` and `dql notebook`. The browser opens. You drag the CSV into `data/`. You are writing SQL against it in thirty seconds, no warehouse credentials, no setup.
 
-## What Makes DQL Useful for Open Source Users
+**2. Explore.** The notebook gives you SQL cells, markdown cells, and param widgets. You write a query. DQL auto-charts it. You adjust the visualization config inline. You try a different filter using a param widget — no code change needed.
 
-The open-source DQL workflow is designed to be local-first and tool-light:
+**3. Author a block.** When the query is right, you run `dql new block "Revenue by Segment"`. A `.dql` file is scaffolded with your SQL, chart config, and a test stub. You fill in the owner and tags.
 
-- scaffold a project with `dql init`
-- validate with `dql parse`
-- preview locally with `dql preview`
-- build static bundles with `dql build`
-- serve them with `dql serve`
+**4. Preview.** `dql preview blocks/revenue_by_segment.dql --open` renders the chart in the browser with live data. You tweak the SQL. Hot reload. Done.
 
-You can try it without DuckCode Studio and without warehouse credentials by starting with local CSV or DuckDB-backed examples.
+**5. Commit.** `git add blocks/revenue_by_segment.dql && git commit`. Your analytics answer now has a home, a history, and a diff. The next person who asks gets a file path, not a screenshot.
 
-## Best Fit
-
-DQL is a good fit when you want:
-
-- analytics assets in Git
-- reusable charted or query-only blocks
-- testable answer definitions
-- local preview outside a larger product
-- a bridge between SQL, semantic models, and presentation
-
-## Not the Best Fit
-
-DQL may be unnecessary if:
-
-- you only need one-off SQL exploration
-- you never intend to reuse or version the result
-- your entire workflow already lives comfortably inside one BI tool
-- you are looking for a notebook UI or AI coworker product rather than a language/tooling layer
+---
 
 ## Good First Step
 
-If you want to evaluate DQL quickly, start here:
+```bash
+npm install -g @duckcodeailabs/dql-cli
+dql init my-dql-project --template ecommerce
+cd my-dql-project
+dql doctor
+dql notebook
+```
+
+Then author your first block:
 
 ```bash
-dql init my-dql-project
-cd my-dql-project
 dql new block "Pipeline Health"
 dql preview blocks/pipeline_health.dql --open
 ```
 
-Then continue with:
+Continue with:
 
 - [Getting Started](./getting-started.md)
 - [Examples](./examples.md)
