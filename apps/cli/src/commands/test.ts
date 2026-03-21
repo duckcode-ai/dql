@@ -1,5 +1,9 @@
 import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
 import { Parser } from '@duckcodeailabs/dql-core';
+import { QueryExecutor, type ConnectionConfig } from '@duckcodeailabs/dql-connectors';
+import { buildExecutionPlan, type NotebookCell } from '@duckcodeailabs/dql-notebook';
+import { loadProjectConfig, prepareLocalExecution } from '../local-runtime.js';
 import type { CLIFlags } from '../args.js';
 
 function formatExpected(expr: any): string {
@@ -13,45 +17,162 @@ function formatExpected(expr: any): string {
   return JSON.stringify(expr);
 }
 
+function evaluateAssertion(
+  field: string,
+  operator: string,
+  expected: unknown,
+  result: { columns: string[]; rows: Record<string, unknown>[]; rowCount: number },
+): { pass: boolean; actual: unknown; message: string } {
+  // row_count is a special field
+  if (field === 'row_count') {
+    const actual = result.rowCount;
+    const exp = Number(expected);
+    const pass = compareValues(actual, operator, exp);
+    return { pass, actual, message: `row_count ${operator} ${expected}` };
+  }
+
+  // Column-level assertions: check if column exists and apply to first row
+  if (!result.columns.includes(field)) {
+    return { pass: false, actual: undefined, message: `Column '${field}' not found in results` };
+  }
+
+  const actual = result.rows[0]?.[field];
+  const pass = compareValues(actual, operator, expected);
+  return { pass, actual, message: `${field} ${operator} ${expected}` };
+}
+
+function compareValues(actual: unknown, operator: string, expected: unknown): boolean {
+  const a = Number(actual);
+  const e = Number(expected);
+  switch (operator) {
+    case '>': return a > e;
+    case '>=': return a >= e;
+    case '<': return a < e;
+    case '<=': return a <= e;
+    case '==': case '=': return actual == expected;
+    case '!=': return actual != expected;
+    default: return false;
+  }
+}
+
+function resolveConnection(flags: CLIFlags): ConnectionConfig {
+  const conn = flags.connection;
+  if (!conn || conn === 'duckdb' || conn === 'file') {
+    return { driver: 'file', filepath: ':memory:' };
+  }
+  // Treat as a file path to a DuckDB database
+  return { driver: 'duckdb', filepath: conn };
+}
+
 export async function runTest(filePath: string, flags: CLIFlags): Promise<void> {
   const source = readFileSync(filePath, 'utf-8');
   const parser = new Parser(source, filePath);
   const ast = parser.parse();
 
-  // Find block declarations with tests
   const blocks = ast.statements.filter((s: any) => s.kind === 'BlockDecl');
 
   if (blocks.length === 0) {
-    console.log('\n  ⚠ No block declarations found in file.');
+    console.log('\n  No block declarations found in file.');
     console.log('');
     return;
   }
 
-  if (flags.format === 'json') {
-    console.log(JSON.stringify({
-      file: filePath,
-      blocks: blocks.map((b: any) => ({
-        name: b.name,
-        tests: b.tests?.length ?? 0,
-      })),
-      note: 'Test execution requires a database connection. Use --connection to specify.',
-    }, null, 2));
+  // Dry run mode (no --connection)
+  if (!flags.connection) {
+    if (flags.format === 'json') {
+      console.log(JSON.stringify({
+        file: filePath,
+        blocks: blocks.map((b: any) => ({
+          name: b.name,
+          tests: b.tests?.length ?? 0,
+        })),
+        note: 'Test execution requires a database connection. Use --connection to specify.',
+      }, null, 2));
+      return;
+    }
+
+    console.log(`\n  Found ${blocks.length} block(s) in ${filePath}`);
+    for (const block of blocks) {
+      const b = block as any;
+      const testCount = b.tests?.length ?? 0;
+      console.log(`\n  Block: "${b.name}"`);
+      console.log(`    Tests: ${testCount} assertion(s)`);
+      if (testCount > 0) {
+        for (const test of b.tests) {
+          console.log(`    -> assert ${test.field} ${test.operator} ${formatExpected(test.expected)}`);
+        }
+      }
+      console.log('    Status: Dry run (no database connection)');
+      console.log('    Hint: Use --connection duckdb to execute assertions');
+    }
+    console.log('');
     return;
   }
 
-  console.log(`\n  ✓ Found ${blocks.length} block(s) in ${filePath}`);
+  // Live execution mode
+  const projectRoot = process.cwd();
+  const projectConfig = loadProjectConfig(projectRoot);
+  const connection = resolveConnection(flags);
+  const executor = new QueryExecutor();
+
+  let totalTests = 0;
+  let passed = 0;
+  let failed = 0;
+
   for (const block of blocks) {
     const b = block as any;
     const testCount = b.tests?.length ?? 0;
+    if (testCount === 0) continue;
+
     console.log(`\n  Block: "${b.name}"`);
-    console.log(`    Tests: ${testCount} assertion(s)`);
-    if (testCount > 0) {
-      for (const test of b.tests) {
-        console.log(`    → assert ${test.field} ${test.operator} ${formatExpected(test.expected)}`);
+
+    try {
+      // Build execution plan for this block
+      const cell: NotebookCell = {
+        id: b.name,
+        type: 'dql',
+        source,
+        title: b.name,
+      };
+      const plan = buildExecutionPlan(cell);
+      if (!plan) {
+        console.log(`    SKIP: Could not build execution plan`);
+        continue;
       }
+
+      // Execute the query
+      const prepared = prepareLocalExecution(plan.sql, connection, projectRoot, projectConfig);
+      const rawResult = await executor.executeQuery(prepared.sql, plan.sqlParams, plan.variables, prepared.connection);
+
+      const columns = Array.isArray(rawResult?.columns)
+        ? rawResult.columns.map((c: any) => typeof c === 'string' ? c : c?.name ?? String(c))
+        : [];
+      const rows = Array.isArray(rawResult?.rows) ? rawResult.rows : [];
+      const rowCount = rows.length;
+
+      // Run assertions
+      for (const test of plan.tests) {
+        totalTests++;
+        const assertion = evaluateAssertion(test.field, test.operator, test.expected, { columns, rows, rowCount });
+        if (assertion.pass) {
+          passed++;
+          console.log(`    PASS: assert ${assertion.message} (actual: ${assertion.actual})`);
+        } else {
+          failed++;
+          console.log(`    FAIL: assert ${assertion.message} (actual: ${assertion.actual})`);
+        }
+      }
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      console.log(`    ERROR: ${msg}`);
+      failed += testCount;
+      totalTests += testCount;
     }
-    console.log('    Status: ⚠ Dry run (no database connection)');
-    console.log('    Hint: Connect a database to execute assertions');
   }
-  console.log('');
+
+  console.log(`\n  Results: ${passed} passed, ${failed} failed, ${totalTests} total\n`);
+
+  if (failed > 0) {
+    process.exitCode = 1;
+  }
 }

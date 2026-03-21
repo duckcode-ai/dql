@@ -2,6 +2,14 @@ export type ThemeMode = 'dark' | 'light';
 export type CellType = 'sql' | 'markdown' | 'dql' | 'param';
 export type CellStatus = 'idle' | 'running' | 'success' | 'error';
 
+export interface CellChartConfig {
+  chart?: string;   // 'bar' | 'line' | 'pie' | 'kpi' | 'table'
+  x?: string;       // X-axis column
+  y?: string;       // Y-axis column
+  color?: string;   // Color-by column
+  title?: string;
+}
+
 export type ParamType = 'text' | 'select' | 'date' | 'number';
 
 export interface ParamConfig {
@@ -31,6 +39,7 @@ export interface Cell {
   executionCount?: number;
   paramConfig?: ParamConfig;
   paramValue?: string;
+  chartConfig?: CellChartConfig;  // Explicit chart config from DQL visualization block
 }
 
 export interface NotebookFile {

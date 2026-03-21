@@ -6,9 +6,10 @@ import type { Cell, ParamConfig, ThemeMode } from '../../store/types';
 interface ParamCellProps {
   cell: Cell;
   themeMode: ThemeMode;
+  onApplyParam?: (paramName: string) => void;
 }
 
-export function ParamCell({ cell, themeMode }: ParamCellProps) {
+export function ParamCell({ cell, themeMode, onApplyParam }: ParamCellProps) {
   const { dispatch } = useNotebook();
   const t = themes[themeMode];
   const [configOpen, setConfigOpen] = useState(false);
@@ -364,6 +365,29 @@ export function ParamCell({ cell, themeMode }: ParamCellProps) {
           >
             {currentValue}
           </span>
+        )}
+
+        {/* Apply button — re-runs downstream cells that reference this param */}
+        {cell.name && onApplyParam && (
+          <button
+            onClick={() => onApplyParam(cell.name!)}
+            title={`Re-run cells that use {{${cell.name}}}`}
+            style={{
+              background: '#e3b341',
+              border: 'none',
+              borderRadius: 5,
+              cursor: 'pointer',
+              color: '#000',
+              fontSize: 11,
+              fontWeight: 600,
+              fontFamily: t.font,
+              padding: '4px 12px',
+              flexShrink: 0,
+              transition: 'opacity 0.15s',
+            }}
+          >
+            Apply
+          </button>
         )}
       </div>
     </div>

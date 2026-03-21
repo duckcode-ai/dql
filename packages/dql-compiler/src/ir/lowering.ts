@@ -727,6 +727,51 @@ function processSQL(
 }
 
 function lowerBlockDecl(node: BlockDeclNode, _options: LoweringOptions): DashboardIR | null {
+  // Semantic blocks: compose SQL from the semantic layer
+  if (!node.query && node.blockType === 'semantic' && node.metricRef) {
+    if (!_options.semanticLayer) return null;
+    const composed = _options.semanticLayer.composeQuery({
+      metrics: [node.metricRef],
+      dimensions: [],
+    });
+    if (!composed) return null;
+
+    const vizChartType = getBlockVisualizationChartType(node);
+    const chartType = vizChartType ? vizChartType : 'bar';
+    const normalizedChartType = normalizeChartTypeAlias(chartType);
+    const config = lowerBlockVisualizationConfig(node);
+    const paramIRs: ParamIR[] = (node.params?.params ?? []).map((p) => ({
+      name: p.name,
+      paramType: inferParamType(p.initializer),
+      defaultValue: evaluateExpression(p.initializer),
+    }));
+    const variables: Record<string, unknown> = {};
+    for (const p of node.params?.params ?? []) {
+      variables[p.name] = evaluateExpression(p.initializer);
+    }
+
+    return {
+      title: node.name,
+      charts: [{
+        id: 'chart-0',
+        chartType: normalizedChartType as ChartIR['chartType'],
+        sql: composed.sql,
+        sqlParams: [],
+        config,
+        title: node.description || node.name,
+        blockType: node.blockType,
+      }],
+      filters: [],
+      params: paramIRs,
+      schedule: extractSchedule(node.decorators),
+      notifications: extractNotifications(node.decorators),
+      alerts: extractAlerts(node.decorators),
+      layout: buildLayout(1),
+      variables,
+      layoutDiagnostics: undefined,
+    };
+  }
+
   if (!node.query) return null;
 
   const vizChartType = getBlockVisualizationChartType(node);

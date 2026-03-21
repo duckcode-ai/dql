@@ -1,14 +1,14 @@
 import type { Theme } from '../../themes/notebook-theme';
-import React, { useState, useCallback, useEffect } from 'react';
+import React, { useState, useCallback, useEffect, useMemo } from 'react';
 import { useNotebook } from '../../store/NotebookStore';
 import { themes } from '../../themes/notebook-theme';
-import { useQueryExecution } from '../../hooks/useQueryExecution';
+import { useQueryExecution, getBlockImportPath, getBlockImport } from '../../hooks/useQueryExecution';
 import { SQLCellEditor } from './SQLCellEditor';
 import { MarkdownCellEditor } from './MarkdownCellEditor';
 import { ParamCell } from './ParamCell';
 import { SnippetPicker } from './SnippetPicker';
 import { TableOutput } from '../output/TableOutput';
-import { ChartOutput, detectChartType } from '../output/ChartOutput';
+import { ChartOutput, detectChartType, resolveChartType } from '../output/ChartOutput';
 import { ErrorOutput } from '../output/ErrorOutput';
 import type { Cell } from '../../store/types';
 import { format as formatSQL } from 'sql-formatter';
@@ -93,7 +93,7 @@ function ExecutionBadge({ cell, t }: { cell: Cell; t: Theme }) {
 export function CellComponent({ cell, index }: CellProps) {
   const { state, dispatch } = useNotebook();
   const t = themes[state.themeMode];
-  const { executeCell } = useQueryExecution();
+  const { executeCell, executeDependents } = useQueryExecution();
 
   const [cellHovered, setCellHovered] = useState(false);
   const [nameEditing, setNameEditing] = useState(false);
@@ -105,9 +105,16 @@ export function CellComponent({ cell, index }: CellProps) {
   const isExecutable = cell.type !== 'markdown' && cell.type !== 'param';
 
   // Build schema map for SQL autocomplete: { tableName: ['col1', 'col2'] }
-  const editorSchema = state.schemaTables.length > 0
-    ? Object.fromEntries(state.schemaTables.map((tbl) => [tbl.name, tbl.columns.map((c) => c.name)]))
-    : undefined;
+  // useMemo ensures stable reference — only changes when schemaTables content changes
+  const editorSchema = useMemo(
+    () =>
+      state.schemaTables.length > 0
+        ? Object.fromEntries(
+            state.schemaTables.map((tbl) => [tbl.name, tbl.columns.map((c) => c.name)])
+          )
+        : undefined,
+    [state.schemaTables]
+  );
 
   // Param cells get their own fully self-contained rendering
   if (cell.type === 'param') {
@@ -120,19 +127,19 @@ export function CellComponent({ cell, index }: CellProps) {
         {/* Gutter placeholder */}
         <div style={{ width: 40, flexShrink: 0 }} />
         <div style={{ flex: 1, minWidth: 0 }}>
-          <ParamCell cell={cell} themeMode={state.themeMode} />
+          <ParamCell cell={cell} themeMode={state.themeMode} onApplyParam={executeDependents} />
         </div>
       </div>
     );
   }
 
-  // When result first arrives (status → success), auto-detect chart type
+  // When result first arrives (status → success), resolve chart type (explicit config > heuristic)
   useEffect(() => {
     if (cell.status === 'success' && cell.result) {
-      const chartType = detectChartType(cell.result);
+      const chartType = resolveChartType(cell.result, cell.chartConfig);
       setViewMode(chartType !== 'table' ? 'chart' : 'table');
     }
-  }, [cell.status, cell.result]);
+  }, [cell.status, cell.result, cell.chartConfig]);
 
   const handleRun = useCallback(() => {
     if (isExecutable) {
@@ -190,7 +197,10 @@ export function CellComponent({ cell, index }: CellProps) {
   };
 
   const hasOutput = (cell.result || cell.error) && cell.type !== 'markdown';
-  const canChart = cell.result ? detectChartType(cell.result) !== 'table' : false;
+  // canChart: explicit chartConfig overrides heuristic detection
+  const canChart = cell.result
+    ? resolveChartType(cell.result, cell.chartConfig) !== 'table'
+    : false;
 
   return (
     <div
@@ -397,6 +407,13 @@ export function CellComponent({ cell, index }: CellProps) {
             onChange={handleContentChange}
             themeMode={state.themeMode}
           />
+        ) : getBlockImportPath(cell) ? (
+          // @import block reference — show a compact file-reference UI
+          <BlockImportView
+            cell={cell}
+            onChange={handleContentChange}
+            t={t}
+          />
         ) : (
           <SQLCellEditor
             value={cell.content}
@@ -516,7 +533,7 @@ export function CellComponent({ cell, index }: CellProps) {
                 )}
                 {cell.result && !cell.error && (
                   viewMode === 'chart' && canChart ? (
-                    <ChartOutput result={cell.result} themeMode={state.themeMode} />
+                    <ChartOutput result={cell.result} themeMode={state.themeMode} chartConfig={cell.chartConfig} />
                   ) : (
                     <TableOutput result={cell.result} themeMode={state.themeMode} />
                   )
@@ -526,6 +543,121 @@ export function CellComponent({ cell, index }: CellProps) {
           </div>
         )}
       </div>
+    </div>
+  );
+}
+
+function BlockImportView({
+  cell,
+  onChange,
+  t,
+}: {
+  cell: Cell;
+  onChange: (content: string) => void;
+  t: Theme;
+}) {
+  const blockImport = getBlockImport(cell)!;
+  const blockPath = blockImport.path;
+  const blockParams = blockImport.params;
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState(cell.content);
+
+  if (editing) {
+    return (
+      <div style={{ padding: '8px 12px' }}>
+        <input
+          autoFocus
+          value={draft}
+          onChange={(e) => setDraft(e.target.value)}
+          onBlur={() => { onChange(draft); setEditing(false); }}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter') { onChange(draft); setEditing(false); }
+            if (e.key === 'Escape') setEditing(false);
+          }}
+          style={{
+            width: '100%',
+            background: t.editorBg,
+            border: `1px solid ${t.cellBorderActive}`,
+            borderRadius: 4,
+            color: t.textSecondary,
+            fontSize: 12,
+            fontFamily: t.fontMono,
+            padding: '4px 8px',
+            outline: 'none',
+          }}
+        />
+      </div>
+    );
+  }
+
+  const fileName = blockPath.split('/').pop() ?? blockPath;
+  return (
+    <div
+      style={{
+        display: 'flex',
+        alignItems: 'center',
+        gap: 8,
+        padding: '8px 12px',
+        cursor: 'default',
+      }}
+    >
+      {/* Block file icon */}
+      <svg width="14" height="14" viewBox="0 0 16 16" fill={t.accent} style={{ flexShrink: 0 }}>
+        <path d="M2 1.75C2 .784 2.784 0 3.75 0h6.586c.464 0 .909.184 1.237.513l2.914 2.914c.329.328.513.773.513 1.237v9.586A1.75 1.75 0 0 1 13.25 16h-9.5A1.75 1.75 0 0 1 2 14.25Zm1.75-.25a.25.25 0 0 0-.25.25v12.5c0 .138.112.25.25.25h9.5a.25.25 0 0 0 .25-.25V6h-2.75A1.75 1.75 0 0 1 9 4.25V1.5Zm6.75.062V4.25c0 .138.112.25.25.25h2.688Z" />
+      </svg>
+      <span
+        style={{
+          fontFamily: t.fontMono,
+          fontSize: 12,
+          color: t.accent,
+          overflow: 'hidden',
+          textOverflow: 'ellipsis',
+          whiteSpace: 'nowrap' as const,
+        }}
+        title={blockPath}
+      >
+        {fileName}
+      </span>
+      {blockPath !== fileName && (
+        <span style={{ fontSize: 11, color: t.textMuted, fontFamily: t.font }}>· {blockPath}</span>
+      )}
+      {/* Show inline params if any */}
+      {Object.keys(blockParams).length > 0 && (
+        <span style={{ display: 'flex', gap: 4, flexWrap: 'wrap' as const, marginLeft: 4 }}>
+          {Object.entries(blockParams).map(([k, v]) => (
+            <span
+              key={k}
+              style={{
+                fontSize: 10,
+                fontFamily: t.fontMono,
+                background: `${t.accent}18`,
+                color: t.accent,
+                border: `1px solid ${t.accent}30`,
+                borderRadius: 3,
+                padding: '0 5px',
+              }}
+            >
+              {k}="{v}"
+            </span>
+          ))}
+        </span>
+      )}
+      <button
+        onClick={() => { setDraft(cell.content); setEditing(true); }}
+        title="Edit block path"
+        style={{
+          background: 'transparent',
+          border: 'none',
+          cursor: 'pointer',
+          color: t.textMuted,
+          padding: '2px 4px',
+          fontSize: 11,
+          fontFamily: t.font,
+          marginLeft: 'auto',
+        }}
+      >
+        edit
+      </button>
     </div>
   );
 }

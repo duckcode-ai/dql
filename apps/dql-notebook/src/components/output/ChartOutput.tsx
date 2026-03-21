@@ -1,14 +1,15 @@
 import React, { useState } from 'react';
 import { themes } from '../../themes/notebook-theme';
 import { TableOutput } from './TableOutput';
-import type { QueryResult } from '../../store/types';
+import type { QueryResult, CellChartConfig } from '../../store/types';
 
 interface ChartOutputProps {
   result: QueryResult;
   themeMode: 'dark' | 'light';
+  chartConfig?: CellChartConfig;  // Explicit config from DQL visualization block
 }
 
-export type ChartType = 'bar' | 'line' | 'table';
+export type ChartType = 'bar' | 'line' | 'pie' | 'kpi' | 'table';
 
 const DATE_NAME_RE = /date|time|at|day|month|year/i;
 const LABEL_NAME_RE = /^(label|name|category)$/i;
@@ -24,7 +25,20 @@ function isStringLike(v: unknown): boolean {
   return typeof v === 'string' || typeof v === 'number';
 }
 
-/** Detect chart type from result columns and sample rows */
+/**
+ * Resolve chart type: explicit config takes priority, heuristics as fallback.
+ * chartConfig.chart values: 'bar', 'line', 'pie', 'kpi', 'table'
+ */
+export function resolveChartType(result: QueryResult, chartConfig?: CellChartConfig): ChartType {
+  if (chartConfig?.chart) {
+    const c = chartConfig.chart.toLowerCase();
+    if (c === 'bar' || c === 'line' || c === 'pie' || c === 'kpi') return c;
+    if (c === 'table') return 'table';
+  }
+  return detectChartType(result);
+}
+
+/** Heuristic chart type detection from result columns and sample rows */
 export function detectChartType(result: QueryResult): ChartType {
   const { columns, rows } = result;
   if (columns.length < 2 || rows.length === 0) return 'table';
@@ -360,19 +374,222 @@ function LineChart({ result, themeMode }: LineChartProps) {
   );
 }
 
+// ─── Pie Chart ────────────────────────────────────────────────────────────────
+
+const MAX_PIE_SLICES = 12;
+const PIE_PALETTE = [
+  '#388bfd', '#56d364', '#e3b341', '#f78166', '#a371f7',
+  '#39c5cf', '#ffa657', '#ff7b72', '#89d185', '#d2a8ff',
+  '#58a6ff', '#3fb950',
+];
+
+interface PieChartProps {
+  result: QueryResult;
+  themeMode: 'dark' | 'light';
+  chartConfig?: CellChartConfig;
+}
+
+function PieChart({ result, themeMode, chartConfig }: PieChartProps) {
+  const t = themes[themeMode];
+  const [hoveredIdx, setHoveredIdx] = useState<number | null>(null);
+
+  const labelCol = (chartConfig?.x
+    ? result.columns.find((c) => c === chartConfig.x)
+    : undefined) ?? result.columns.find((c) => LABEL_NAME_RE.test(c)) ?? result.columns[0];
+  const valueCol = (chartConfig?.y
+    ? result.columns.find((c) => c === chartConfig.y)
+    : undefined) ?? result.columns.find((c) => VALUE_NAME_RE.test(c)) ?? result.columns[1];
+
+  const rawData = result.rows.slice(0, MAX_PIE_SLICES).map((row) => ({
+    label: String(row[labelCol] ?? ''),
+    value: Math.abs(Number(row[valueCol] ?? 0)),
+  }));
+
+  const total = rawData.reduce((s, d) => s + d.value, 0) || 1;
+
+  const CX = 90, CY = 90, R = 70, IR = 40;
+  const slices: Array<{ path: string; color: string; label: string; value: number; pct: number }> = [];
+  let angle = -Math.PI / 2;
+
+  rawData.forEach((d, i) => {
+    const sweep = (d.value / total) * 2 * Math.PI;
+    const a1 = angle;
+    const a2 = angle + sweep;
+    const lx1 = CX + R * Math.cos(a1);
+    const ly1 = CY + R * Math.sin(a1);
+    const lx2 = CX + R * Math.cos(a2);
+    const ly2 = CY + R * Math.sin(a2);
+    const ix1 = CX + IR * Math.cos(a1);
+    const iy1 = CY + IR * Math.sin(a1);
+    const ix2 = CX + IR * Math.cos(a2);
+    const iy2 = CY + IR * Math.sin(a2);
+    const large = sweep > Math.PI ? 1 : 0;
+    const path = [
+      `M ${lx1} ${ly1}`,
+      `A ${R} ${R} 0 ${large} 1 ${lx2} ${ly2}`,
+      `L ${ix2} ${iy2}`,
+      `A ${IR} ${IR} 0 ${large} 0 ${ix1} ${iy1}`,
+      'Z',
+    ].join(' ');
+    slices.push({ path, color: PIE_PALETTE[i % PIE_PALETTE.length], label: d.label, value: d.value, pct: (d.value / total) * 100 });
+    angle = a2;
+  });
+
+  const hovered = hoveredIdx !== null ? slices[hoveredIdx] : null;
+
+  return (
+    <div style={{ display: 'flex', alignItems: 'center', gap: 16, padding: '8px 12px', flexWrap: 'wrap' }}>
+      <svg
+        width={180}
+        height={180}
+        style={{ flexShrink: 0 }}
+        onMouseLeave={() => setHoveredIdx(null)}
+      >
+        {slices.map((s, i) => (
+          <path
+            key={i}
+            d={s.path}
+            fill={s.color}
+            opacity={hoveredIdx === null || hoveredIdx === i ? 1 : 0.55}
+            style={{ cursor: 'pointer', transition: 'opacity 0.15s' }}
+            onMouseEnter={() => setHoveredIdx(i)}
+          />
+        ))}
+        {/* Center label */}
+        <text x={CX} y={CY - 5} textAnchor="middle" fontSize={11} fontFamily={t.fontMono} fill={t.textSecondary}>
+          {hovered ? abbreviate(hovered.value) : abbreviate(total)}
+        </text>
+        <text x={CX} y={CY + 9} textAnchor="middle" fontSize={9} fontFamily={t.font} fill={t.textMuted}>
+          {hovered ? `${hovered.pct.toFixed(1)}%` : 'total'}
+        </text>
+      </svg>
+
+      {/* Legend */}
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 4, maxHeight: 180, overflowY: 'auto', flex: 1 }}>
+        {slices.map((s, i) => (
+          <div
+            key={i}
+            style={{ display: 'flex', alignItems: 'center', gap: 6, cursor: 'default', opacity: hoveredIdx === null || hoveredIdx === i ? 1 : 0.5 }}
+            onMouseEnter={() => setHoveredIdx(i)}
+            onMouseLeave={() => setHoveredIdx(null)}
+          >
+            <div style={{ width: 10, height: 10, borderRadius: 2, background: s.color, flexShrink: 0 }} />
+            <span style={{ fontSize: 11, fontFamily: t.font, color: t.textSecondary, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' as const }}>
+              {s.label}
+            </span>
+            <span style={{ fontSize: 11, fontFamily: t.fontMono, color: t.textMuted, marginLeft: 'auto', flexShrink: 0 }}>
+              {s.pct.toFixed(1)}%
+            </span>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+// ─── KPI Card ─────────────────────────────────────────────────────────────────
+
+interface KpiCardProps {
+  result: QueryResult;
+  themeMode: 'dark' | 'light';
+  chartConfig?: CellChartConfig;
+}
+
+function KpiCard({ result, themeMode, chartConfig }: KpiCardProps) {
+  const t = themes[themeMode];
+  const row = result.rows[0];
+  if (!row) return null;
+
+  // Find the value column: explicit y, or first numeric column
+  const yCol = chartConfig?.y && result.columns.includes(chartConfig.y)
+    ? chartConfig.y
+    : result.columns.find((c) => isNumericValue(row[c])) ?? result.columns[0];
+
+  const rawVal = row[yCol];
+  const numVal = Number(rawVal);
+  const displayVal = isNaN(numVal) ? String(rawVal) : numVal.toLocaleString(undefined, { maximumFractionDigits: 2 });
+
+  // Label: explicit title, or x column value, or column name
+  const label = chartConfig?.title
+    ?? (chartConfig?.x && row[chartConfig.x] ? String(row[chartConfig.x]) : yCol);
+
+  return (
+    <div
+      style={{
+        display: 'flex',
+        flexDirection: 'column',
+        alignItems: 'center',
+        justifyContent: 'center',
+        padding: '32px 24px',
+        gap: 8,
+      }}
+    >
+      <span
+        style={{
+          fontSize: 40,
+          fontWeight: 700,
+          fontFamily: t.fontMono,
+          color: t.accent,
+          lineHeight: 1.1,
+        }}
+      >
+        {displayVal}
+      </span>
+      <span
+        style={{
+          fontSize: 13,
+          fontFamily: t.font,
+          color: t.textMuted,
+          textTransform: 'uppercase',
+          letterSpacing: '0.08em',
+          fontWeight: 500,
+        }}
+      >
+        {label}
+      </span>
+    </div>
+  );
+}
+
 // ─── ChartOutput ──────────────────────────────────────────────────────────────
 
-export function ChartOutput({ result, themeMode }: ChartOutputProps) {
+export function ChartOutput({ result, themeMode, chartConfig }: ChartOutputProps) {
   const t = themes[themeMode];
-  const detectedType = detectChartType(result);
-  const [view, setView] = useState<'chart' | 'table'>(
-    detectedType !== 'table' ? 'chart' : 'table'
-  );
+  const resolvedType = resolveChartType(result, chartConfig);
+  const canChart = resolvedType !== 'table';
+  const [view, setView] = useState<'chart' | 'table'>(canChart ? 'chart' : 'table');
 
-  const canChart = detectedType !== 'table';
+  // Use explicit x/y columns from chartConfig when rendering bar/line charts
+  const xCol = chartConfig?.x && result.columns.includes(chartConfig.x) ? chartConfig.x : undefined;
+  const yCol = chartConfig?.y && result.columns.includes(chartConfig.y) ? chartConfig.y : undefined;
+  const configuredResult = (xCol || yCol) ? reorderColumns(result, xCol, yCol) : result;
+
+  // Column mismatch warnings
+  const warnings: string[] = [];
+  if (chartConfig?.x && !result.columns.includes(chartConfig.x)) {
+    warnings.push(`Column '${chartConfig.x}' not found in results — using auto-detection.`);
+  }
+  if (chartConfig?.y && !result.columns.includes(chartConfig.y)) {
+    warnings.push(`Column '${chartConfig.y}' not found in results — using auto-detection.`);
+  }
+
+  const chartLabel = resolvedType === 'line' ? 'Line' : resolvedType === 'pie' ? 'Pie' : resolvedType === 'kpi' ? 'KPI' : 'Bar';
+
+  // KPI renders without toggle bar
+  if (resolvedType === 'kpi') {
+    return (
+      <div>
+        {warnings.length > 0 && <ColumnWarnings warnings={warnings} t={t} />}
+        <KpiCard result={result} themeMode={themeMode} chartConfig={chartConfig} />
+      </div>
+    );
+  }
 
   return (
     <div>
+      {/* Column warnings */}
+      {warnings.length > 0 && <ColumnWarnings warnings={warnings} t={t} />}
+
       {/* Toggle bar */}
       {canChart && (
         <div
@@ -406,7 +623,7 @@ export function ChartOutput({ result, themeMode }: ChartOutputProps) {
                 textTransform: 'capitalize',
               }}
             >
-              {mode === 'chart' ? (detectedType === 'line' ? 'Line' : 'Chart') : 'Table'}
+              {mode === 'chart' ? chartLabel : 'Table'}
             </button>
           ))}
         </div>
@@ -415,11 +632,55 @@ export function ChartOutput({ result, themeMode }: ChartOutputProps) {
       {/* Content */}
       {view === 'table' || !canChart ? (
         <TableOutput result={result} themeMode={themeMode} />
-      ) : detectedType === 'line' ? (
-        <LineChart result={result} themeMode={themeMode} />
+      ) : resolvedType === 'line' ? (
+        <LineChart result={configuredResult} themeMode={themeMode} />
+      ) : resolvedType === 'pie' ? (
+        <PieChart result={result} themeMode={themeMode} chartConfig={chartConfig} />
       ) : (
-        <BarChart result={result} themeMode={themeMode} />
+        <BarChart result={configuredResult} themeMode={themeMode} />
       )}
     </div>
   );
+}
+
+function ColumnWarnings({ warnings, t }: { warnings: string[]; t: typeof themes['dark'] }) {
+  return (
+    <div
+      style={{
+        padding: '4px 12px',
+        background: '#e3b34115',
+        borderBottom: `1px solid #e3b34130`,
+        display: 'flex',
+        flexDirection: 'column',
+        gap: 2,
+      }}
+    >
+      {warnings.map((w, i) => (
+        <span key={i} style={{ fontSize: 11, color: '#e3b341', fontFamily: t.font }}>
+          {w}
+        </span>
+      ))}
+    </div>
+  );
+}
+
+/** Reorder columns so that the explicit x/y cols come first (for bar/line charts) */
+function reorderColumns(result: QueryResult, xCol?: string, yCol?: string): QueryResult {
+  const cols = result.columns;
+  const ordered: string[] = [];
+  if (xCol && cols.includes(xCol)) ordered.push(xCol);
+  if (yCol && cols.includes(yCol)) ordered.push(yCol);
+  for (const c of cols) {
+    if (!ordered.includes(c)) ordered.push(c);
+  }
+  if (ordered.join(',') === cols.join(',')) return result;
+  return {
+    ...result,
+    columns: ordered,
+    rows: result.rows.map((row) => {
+      const reordered: Record<string, unknown> = {};
+      for (const c of ordered) reordered[c] = row[c];
+      return reordered;
+    }),
+  };
 }

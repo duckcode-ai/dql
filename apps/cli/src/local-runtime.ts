@@ -10,6 +10,7 @@ import {
   getConnectorFormSchemas,
   type NotebookCell,
 } from '@duckcodeailabs/dql-notebook';
+import { loadSemanticLayerFromDir, type SemanticLayer } from '@duckcodeailabs/dql-core';
 
 export interface ProjectConfig {
   project?: string;
@@ -34,12 +35,23 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
   const { rootDir, executor, connection, preferredPort, projectRoot = process.cwd() } = opts;
   const projectConfig = loadProjectConfig(projectRoot);
 
+  // Load semantic layer from project's semantic-layer/ directory
+  let semanticLayer: SemanticLayer | undefined;
+  const semanticLayerDir = join(projectRoot, 'semantic-layer');
+  if (existsSync(semanticLayerDir)) {
+    try {
+      semanticLayer = loadSemanticLayerFromDir(semanticLayerDir);
+    } catch {
+      // Semantic layer loading failed — continue without it
+    }
+  }
+
   // SSE clients for /api/watch hot-reload
   const sseClients = new Set<ServerResponse>();
 
-  // Watch notebooks/ and workbooks/ dirs for changes
+  // Watch notebooks/, workbooks/, semantic-layer/, and data/ dirs for changes
   if (projectRoot) {
-    for (const dir of ['notebooks', 'workbooks', 'blocks', 'dashboards']) {
+    for (const dir of ['notebooks', 'workbooks', 'blocks', 'dashboards', 'semantic-layer', 'data']) {
       const watchDir = join(projectRoot, dir);
       if (!existsSync(watchDir)) continue;
       try {
@@ -49,6 +61,10 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           const payload = JSON.stringify({ type: eventType === 'rename' ? 'file-added' : 'file-changed', path });
           for (const client of sseClients) {
             try { client.write(`event: change\ndata: ${payload}\n\n`); } catch { sseClients.delete(client); }
+          }
+          // Hot-reload semantic layer on change
+          if (dir === 'semantic-layer') {
+            try { semanticLayer = loadSemanticLayerFromDir(semanticLayerDir); } catch { /* keep previous */ }
           }
         });
       } catch { /* dir not watchable */ }
@@ -236,6 +252,44 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
       return;
     }
 
+    // Semantic layer query endpoint: compose SQL from metrics/dimensions
+    if (req.method === 'POST' && path === '/api/semantic-query') {
+      try {
+        if (!semanticLayer) {
+          res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
+          res.end(serializeJSON({ error: 'No semantic layer configured. Add YAML files to semantic-layer/ directory.' }));
+          return;
+        }
+        const body = await readJSON(req);
+        const { metrics = [], dimensions = [], filters = [], limit } = body as {
+          metrics: string[];
+          dimensions: string[];
+          filters?: Array<{ dimension: string; operator: string; values: string[] }>;
+          limit?: number;
+        };
+        const composed = semanticLayer.composeQuery({ metrics, dimensions, filters, limit });
+        if (!composed) {
+          res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
+          res.end(serializeJSON({ error: `Could not compose query for metrics: [${metrics.join(', ')}]` }));
+          return;
+        }
+        // Execute the composed SQL
+        const prepared = prepareLocalExecution(composed.sql, connection, projectRoot, projectConfig);
+        const result = await executor.executeQuery(prepared.sql, [], {}, prepared.connection);
+        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({
+          sql: composed.sql,
+          tables: composed.tables,
+          joins: composed.joins,
+          result: normalizeQueryResult(result),
+        }));
+      } catch (error) {
+        res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({ error: error instanceof Error ? error.message : String(error) }));
+      }
+      return;
+    }
+
     if (req.method === 'POST' && path === '/api/test-connection') {
       try {
         const body = await readJSON(req);
@@ -298,7 +352,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           return;
         }
 
-        const plan = buildExecutionPlan(cell);
+        const plan = buildExecutionPlan(cell, { semanticLayer });
         if (!plan) {
           res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
           res.end(serializeJSON({ cellType: cell.type, result: null }));

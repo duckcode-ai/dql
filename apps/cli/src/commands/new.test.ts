@@ -24,6 +24,7 @@ describe('runNew', () => {
       port: null,
       queryOnly: false,
       template: 'starter',
+      connection: '',
       verbose: false,
     });
 
@@ -42,6 +43,7 @@ describe('runNew', () => {
         port: null,
         queryOnly: false,
         template: 'starter',
+        connection: '',
         verbose: false,
       });
 
@@ -77,6 +79,7 @@ describe('runNew', () => {
       port: null,
       queryOnly: false,
       template: 'starter',
+      connection: '',
       verbose: false,
     });
 
@@ -96,6 +99,7 @@ describe('runNew', () => {
         port: null,
         queryOnly: false,
         template: 'starter',
+        connection: '',
         verbose: false,
       });
 
@@ -112,6 +116,7 @@ describe('runNew', () => {
         port: null,
         queryOnly: false,
         template: 'starter',
+        connection: '',
         verbose: false,
       });
 
@@ -151,6 +156,7 @@ describe('runNew', () => {
       port: null,
       queryOnly: false,
       template: 'starter',
+      connection: '',
       verbose: false,
     });
 
@@ -170,6 +176,7 @@ describe('runNew', () => {
         port: null,
         queryOnly: false,
         template: 'starter',
+        connection: '',
         verbose: false,
       });
 

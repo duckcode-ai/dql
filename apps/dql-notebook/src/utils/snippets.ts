@@ -148,6 +148,21 @@ FROM (
 }`,
   },
 
+  {
+    id: 'dql-import',
+    label: '@import block (simple)',
+    description: 'Reference a block file by path — runs the block\'s SQL without copying it',
+    category: 'DQL',
+    code: `@import "./blocks/my_block.dql"`,
+  },
+  {
+    id: 'dql-import-params',
+    label: '@import block with params',
+    description: 'Import a block and override its default parameter values',
+    category: 'DQL',
+    code: `@import "./blocks/my_block.dql" with period = "Q4_2024", segment = "Enterprise"`,
+  },
+
   // Analysis category
   {
     id: 'revenue-by-segment',

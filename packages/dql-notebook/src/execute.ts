@@ -4,6 +4,7 @@ import {
   type BlockDeclNode,
   type ExpressionNode,
   type NamedArgNode,
+  type SemanticLayer,
 } from '@duckcodeailabs/dql-core';
 import type { SQLParamSpec } from '@duckcodeailabs/dql-connectors';
 import type { NotebookCell, NotebookChartConfig } from './document.js';
@@ -17,7 +18,14 @@ export interface NotebookExecutionPlan {
   tests: Array<{ field: string; operator: string; expected: unknown }>;
 }
 
-export function buildExecutionPlan(cell: NotebookCell): NotebookExecutionPlan | null {
+export interface BuildExecutionPlanOptions {
+  semanticLayer?: SemanticLayer;
+}
+
+export function buildExecutionPlan(
+  cell: NotebookCell,
+  options?: BuildExecutionPlanOptions,
+): NotebookExecutionPlan | null {
   if (cell.type === 'markdown' || cell.type === 'chart') {
     return null;
   }
@@ -39,8 +47,14 @@ export function buildExecutionPlan(cell: NotebookCell): NotebookExecutionPlan | 
   if (!block) {
     throw new Error('DQL notebook cells must contain a block declaration.');
   }
+
+  // Semantic blocks: compose SQL from the semantic layer
+  if (block.blockType === 'semantic') {
+    return buildSemanticPlan(block, options?.semanticLayer);
+  }
+
   if (block.blockType !== 'custom') {
-    throw new Error('Only custom DQL blocks can run inside the notebook today.');
+    throw new Error(`Unsupported block type "${block.blockType}". Only "custom" and "semantic" blocks can run in the notebook.`);
   }
   if (!block.query) {
     throw new Error('DQL notebook block is missing a query field.');
@@ -123,6 +137,70 @@ function processSQL(
   }
 
   return { sql, params };
+}
+
+function buildSemanticPlan(
+  block: BlockDeclNode,
+  semanticLayer?: SemanticLayer,
+): NotebookExecutionPlan {
+  if (!semanticLayer) {
+    throw new Error(
+      'Semantic block requires a semantic-layer/ configuration. ' +
+      'Add metric and dimension YAML files to your project\'s semantic-layer/ directory.',
+    );
+  }
+
+  // Extract metric reference from the block's metricRef field
+  const metrics: string[] = [];
+  const dimensions: string[] = [];
+
+  if (block.metricRef) {
+    metrics.push(block.metricRef);
+  }
+
+  // Also extract dimensions from block params if they reference dimension names
+  // For now, dimensions can be passed via block params named "dimensions"
+  for (const param of block.params?.params ?? []) {
+    const val = evaluateExpression(param.initializer);
+    if (param.name === 'dimensions' && Array.isArray(val)) {
+      dimensions.push(...val.map(String));
+    } else if (param.name === 'metrics' && Array.isArray(val)) {
+      metrics.push(...val.map(String));
+    }
+  }
+
+  if (metrics.length === 0) {
+    throw new Error(
+      `Semantic block "${block.name}" has no metric references. ` +
+      'Add metricRef = "metric_name" to your block declaration.',
+    );
+  }
+
+  const composed = semanticLayer.composeQuery({ metrics, dimensions });
+  if (!composed) {
+    throw new Error(
+      `Could not compose SQL for semantic block "${block.name}". ` +
+      `Check that metrics [${metrics.join(', ')}] exist in your semantic-layer/ definitions.`,
+    );
+  }
+
+  const chartConfig = block.visualization ? lowerChartConfig(block.visualization.properties) : undefined;
+  const variables = Object.fromEntries(
+    (block.params?.params ?? []).map((param) => [param.name, evaluateExpression(param.initializer)]),
+  );
+
+  return {
+    title: block.name,
+    sql: composed.sql,
+    sqlParams: [],
+    variables,
+    chartConfig,
+    tests: (block.tests ?? []).map((test) => ({
+      field: test.field,
+      operator: test.operator,
+      expected: evaluateExpression(test.expected),
+    })),
+  };
 }
 
 function evaluateExpression(node: ExpressionNode): unknown {

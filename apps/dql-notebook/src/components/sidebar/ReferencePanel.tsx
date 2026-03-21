@@ -198,23 +198,47 @@ function RefTable({
   );
 }
 
-const DQL_BLOCK_TEMPLATE = `block "My Block" {
-    domain      = "analytics"
+const DQL_BLOCK_TEMPLATE = `block "Revenue by Channel" {
+    domain      = "revenue"
     type        = "custom"
-    description = "Describe what this block does"
+    description = "Revenue grouped by sales channel"
     owner       = "data-team"
-    tags        = ["analytics"]
+    tags        = ["revenue"]
+
+    params {
+        period = "current_quarter"
+    }
 
     query = """
-        SELECT *
-        FROM read_csv_auto('data/filename.csv')
-        LIMIT 100
+        SELECT channel,
+               SUM(order_total) AS revenue
+        FROM read_csv_auto('data/orders.csv')
+        WHERE fiscal_period = \${period}
+        GROUP BY channel
+        ORDER BY revenue DESC
     """
 
     visualization {
-        chart = "table"
+        chart = "bar"
+        x     = channel
+        y     = revenue
+    }
+
+    tests {
+        assert row_count > 0
     }
 }`;
+
+const DQL_IMPORT_TEMPLATE = `-- Simple import (uses block's default params)
+@import "./blocks/revenue_by_channel.dql"
+
+-- Import with custom params (override block defaults)
+@import "./blocks/revenue_by_channel.dql" with period = "Q4_2024"
+
+-- Import with multiple params
+@import "./blocks/pipeline_health.dql" with
+    stage = "Closed Won",
+    region = "EMEA"`;
 
 export function ReferencePanel({ themeMode }: ReferencePanelProps) {
   const t = themes[themeMode];
@@ -292,9 +316,10 @@ FROM table_name`}
           t={t}
           rows={[
             ["table", "Tabular data grid (default)"],
-            ["bar", "Bar chart — set x and y fields"],
-            ["line", "Line chart — set x and y fields"],
-            ["kpi", "Single big-number KPI card"],
+            ["bar", "Bar chart — use x and y fields"],
+            ["line", "Line chart — use x (date) and y (value)"],
+            ["pie", "Pie/donut chart — use x (label) and y (value)"],
+            ["kpi", "Single big-number KPI card (dql preview)"],
           ]}
         />
         <div
@@ -307,16 +332,31 @@ FROM table_name`}
           }}
         >
           Set chart type inside the{' '}
-          <code
-            style={{ fontFamily: t.fontMono, color: t.accent, fontSize: 11 }}
-          >
-            visualization &#123; chart = "bar" &#125;
+          <code style={{ fontFamily: t.fontMono, color: t.accent, fontSize: 11 }}>
+            visualization &#123; chart = "pie"; x = label_col; y = value_col &#125;
           </code>{' '}
           block.
         </div>
       </Section>
 
-      {/* 5. Variable References */}
+      {/* 5. Block Imports */}
+      <Section title="Block Imports (@import)" defaultOpen={false} t={t}>
+        <div
+          style={{ fontSize: 12, color: t.textSecondary, lineHeight: 1.7, fontFamily: t.font, marginBottom: 6 }}
+        >
+          Reference a <code style={{ fontFamily: t.fontMono, color: t.accent, fontSize: 11 }}>.dql</code> block
+          file instead of copying its SQL. Run the cell to execute the block's query.
+        </div>
+        <CodeBlock t={t} code={DQL_IMPORT_TEMPLATE} />
+        <div
+          style={{ marginTop: 8, fontSize: 11, color: t.textMuted, fontFamily: t.font, lineHeight: 1.6 }}
+        >
+          Parameters override the block's <code style={{ fontFamily: t.fontMono, color: t.accent, fontSize: 11 }}>params &#123; &#125;</code> defaults.
+          The block's <code style={{ fontFamily: t.fontMono, color: t.accent, fontSize: 11 }}>visualization</code> config is applied automatically.
+        </div>
+      </Section>
+
+      {/* 6. Variable References */}
       <Section title="Variable References" defaultOpen={false} t={t}>
         <div
           style={{

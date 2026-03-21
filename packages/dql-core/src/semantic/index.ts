@@ -22,3 +22,7 @@ export type {
   ComposeQueryOptions,
   ComposeQueryResult,
 } from './semantic-layer.js';
+export {
+  loadSemanticLayerFromDir,
+  loadSemanticLayerFromConfig,
+} from './yaml-loader.js';

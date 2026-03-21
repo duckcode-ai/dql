@@ -12,6 +12,7 @@ export interface CLIFlags {
   owner: string;
   queryOnly: boolean;
   template: string;
+  connection: string;
 }
 
 export interface ParsedArgs {
@@ -36,6 +37,7 @@ export function parseArgs(argv: string[]): ParsedArgs {
     owner: '',
     queryOnly: false,
     template: 'starter',
+    connection: '',
   };
 
   let command: string | null = null;
@@ -74,6 +76,8 @@ export function parseArgs(argv: string[]): ParsedArgs {
       flags.owner = argv[++i];
     } else if (arg === '--template' && i + 1 < argv.length) {
       flags.template = argv[++i];
+    } else if (arg === '--connection' && i + 1 < argv.length) {
+      flags.connection = argv[++i];
     } else if (arg === '--query-only') {
       flags.queryOnly = true;
     } else if (!command) {

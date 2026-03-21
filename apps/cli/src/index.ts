@@ -14,6 +14,7 @@ import { runInfo } from './commands/info.js';
 import { runMigrate } from './commands/migrate.js';
 import { runFmt } from './commands/fmt.js';
 import { runNotebook } from './commands/notebook.js';
+import { runValidate } from './commands/validate.js';
 
 const HELP = `
   dql — DQL CLI
@@ -26,7 +27,8 @@ const HELP = `
     dql preview <file.dql>          Render a local browser preview for a DQL file
     dql serve [directory]           Serve a built DQL bundle locally
     dql parse <file.dql>            Parse and analyze a DQL file
-    dql test <file.dql>             Inspect block tests
+    dql test <file.dql>             Inspect block tests (use --connection to execute)
+    dql validate [path]             Validate all DQL files and semantic references
     dql certify <file.dql>          Evaluate certification rules
     dql info <file.dql>             Show block metadata
     dql migrate <source>            Scaffold migration from looker/tableau/dbt/metabase/raw-sql
@@ -48,6 +50,7 @@ const HELP = `
     --owner <name>                  Owner for new block scaffolds (default: current user)
     --query-only                    Create a query-only block without visualization
     --template <name>               Template to use for "init" (default: starter)
+    --connection <driver|path>      Database connection for "test" (e.g. duckdb, path/to/db)
 `;
 
 async function main() {
@@ -58,7 +61,7 @@ async function main() {
     process.exit(0);
   }
 
-  if (!file && command !== 'init' && command !== 'serve' && command !== 'doctor' && command !== 'notebook') {
+  if (!file && command !== 'init' && command !== 'serve' && command !== 'doctor' && command !== 'notebook' && command !== 'validate') {
     console.error('Error: No file/argument specified. Run "dql --help" for usage.');
     process.exit(1);
   }
@@ -103,6 +106,9 @@ async function main() {
         break;
       case 'notebook':
         await runNotebook(file, flags);
+        break;
+      case 'validate':
+        await runValidate(file, flags);
         break;
       default:
         console.error(`Unknown command: ${command}. Run "dql --help" for usage.`);

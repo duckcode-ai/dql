@@ -27,6 +27,7 @@ These flags are the most commonly used flags across the CLI.
 | `--help` | `-h` | | Print help and exit 0. |
 | `--out-dir <path>` | | | Output directory for `build`. |
 | `--port <number>` | | | Preferred local port for `preview` or `serve`. |
+| `--connection <driver\|path>` | | | Database connection for `test` (e.g. `duckdb`, path to `.duckdb` file). |
 
 ## `new` Flags
 
@@ -407,36 +408,75 @@ dql fmt examples/blocks/revenue_by_segment.dql --check
 
 ### `dql test <file.dql>`
 
-Inspect the test assertions declared in each block. In the OSS CLI, test execution requires a live database connection; this command performs a dry run that shows which assertions exist without executing them.
+Run test assertions declared in DQL blocks. Without `--connection`, performs a dry run showing which assertions exist. With `--connection`, executes the block's SQL and evaluates each assertion.
 
 ```bash
+# Dry run (lists assertions without executing)
 dql test examples/blocks/revenue_by_segment.dql
-dql test examples/blocks/revenue_by_segment.dql --format json
+
+# Live execution against DuckDB in-memory
+dql test examples/blocks/revenue_by_segment.dql --connection duckdb
+
+# Live execution against a DuckDB database file
+dql test examples/blocks/revenue_by_segment.dql --connection ./analytics.duckdb
 ```
+
+**Text output (live execution):**
+
+```
+  Block: "Revenue by Segment"
+    PASS: assert row_count > 0 (actual: 5)
+
+  Results: 1 passed, 0 failed, 1 total
+```
+
+**Text output (dry run):**
+
+```
+  Found 1 block(s) in examples/blocks/revenue_by_segment.dql
+
+  Block: "Revenue by Segment"
+    Tests: 1 assertion(s)
+    -> assert row_count > 0
+    Status: Dry run (no database connection)
+    Hint: Use --connection duckdb to execute assertions
+```
+
+---
+
+### `dql validate [path]`
+
+Validate all `.dql` files in a project. Parses every block, runs semantic analysis, and checks that semantic block metric references exist in the semantic layer.
+
+```bash
+# Validate current project
+dql validate
+
+# Validate a specific project directory
+dql validate my-dql-project
+
+# JSON output for CI
+dql validate --format json
+```
+
+**What it checks:**
+
+- Syntax correctness (lexer/parser)
+- Semantic analysis (required fields, valid chart types)
+- Metric references in semantic blocks match semantic-layer YAML definitions
 
 **Text output:**
 
 ```
-  ✓ Found 1 block(s) in examples/blocks/revenue_by_segment.dql
+  Validated 5 DQL file(s)
 
-  Block: "Revenue by Segment"
-    Tests: 1 assertion(s)
-    → assert row_count > 0
-    Status: ⚠ Dry run (no database connection)
-    Hint: Connect a database to execute assertions
+  ERROR blocks/arr_growth.dql: Metric "arr_growth_metric" referenced in block "ARR Growth" not found in semantic layer
+  WARN  blocks/pipeline.dql:3: Visualization chart type "barchart" is not recognised
+
+  1 error(s), 1 warning(s)
 ```
 
-**JSON output shape:**
-
-```json
-{
-  "file": "examples/blocks/revenue_by_segment.dql",
-  "blocks": [
-    { "name": "Revenue by Segment", "tests": 1 }
-  ],
-  "note": "Test execution requires a database connection. Use --connection to specify."
-}
-```
+**Exit code:** `1` if any errors are found, `0` otherwise.
 
 ---
 

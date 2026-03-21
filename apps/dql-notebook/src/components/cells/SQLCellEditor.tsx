@@ -6,7 +6,7 @@ import {
   highlightActiveLine,
   highlightActiveLineGutter,
 } from '@codemirror/view';
-import { EditorState } from '@codemirror/state';
+import { EditorState, Compartment } from '@codemirror/state';
 import { defaultKeymap, indentWithTab, toggleComment, historyKeymap } from '@codemirror/commands';
 import { sql } from '@codemirror/lang-sql';
 import { oneDark } from '@codemirror/theme-one-dark';
@@ -151,10 +151,12 @@ export function SQLCellEditor({
   const viewRef = useRef<EditorView | null>(null);
   const onRunRef = useRef(onRun);
   const onChangeRef = useRef(onChange);
+  // Compartment lets us swap SQL language/schema without destroying the editor
+  const schemaCompartment = useRef(new Compartment());
   onRunRef.current = onRun;
   onChangeRef.current = onChange;
 
-  // Recreate editor when themeMode or schema changes
+  // Create editor once per themeMode change only (NOT when schema changes)
   useEffect(() => {
     if (!containerRef.current) return;
 
@@ -205,8 +207,8 @@ export function SQLCellEditor({
       '.cm-foldGutter': { cursor: 'pointer' },
     });
 
-    // Build SQL language support with optional schema autocompletion
-    const sqlLang = schema
+    // Initial SQL language with current schema (wrapped in compartment)
+    const initialSqlLang = schema
       ? sql({ schema, upperCaseKeywords: false })
       : sql({ upperCaseKeywords: false });
 
@@ -214,8 +216,8 @@ export function SQLCellEditor({
       runKeymap,
       updateListener,
       baseTheme,
-      // Language + completion
-      sqlLang,
+      // Language wrapped in compartment for hot-swapping schema
+      schemaCompartment.current.of(initialSqlLang),
       autocompletion({ closeOnBlur: false }),
       // Developer experience extensions
       bracketMatching(),
@@ -246,7 +248,19 @@ export function SQLCellEditor({
       viewRef.current = null;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [themeMode, schema]);
+  }, [themeMode]);
+
+  // Hot-swap schema via compartment — no editor destroy/recreate, no focus loss
+  useEffect(() => {
+    const view = viewRef.current;
+    if (!view) return;
+    const newSqlLang = schema
+      ? sql({ schema, upperCaseKeywords: false })
+      : sql({ upperCaseKeywords: false });
+    view.dispatch({
+      effects: schemaCompartment.current.reconfigure(newSqlLang),
+    });
+  }, [schema]);
 
   // Sync external value changes without recreating the editor
   useEffect(() => {

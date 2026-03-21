@@ -127,6 +127,26 @@ block "Pipeline Health" {
 }
 ```
 
+**Chart types:** DQL cells support `chart = "bar"`, `"line"`, `"pie"`, `"kpi"`, and `"table"` in their `visualization` block. The chart type is persisted when you save the notebook and restored on reload.
+
+**KPI cards:** Use `chart = "kpi"` to render a single big-number card. The first numeric column in the result is displayed as a large-format number with the column name (or `title` from config) as a label.
+
+**Block imports (`@import`):**
+
+DQL cells also support `@import` to reference a block file without copying its SQL:
+
+```dql
+@import "./blocks/pipeline_health.dql"
+```
+
+Override the block's default parameters:
+
+```dql
+@import "./blocks/pipeline_health.dql" with period = "previous_quarter"
+```
+
+The imported block's SQL is executed with merged parameters, and its `visualization` config is applied automatically.
+
 ---
 
 ### Param Cell
@@ -153,7 +173,7 @@ Renders a live interactive widget that injects a value into downstream SQL cells
 
 A dropdown widget renders immediately. When the user picks a value, any downstream cell that references `{{segment}}` will use the new value on its next run.
 
-> **Note:** Param cells do not have a "run" step — the widget is always live. Only the downstream SQL cells that reference the param need to be re-run after changing the value.
+> **Tip:** Click the **Apply** button next to the param widget to automatically re-run all downstream cells that reference `{{param_name}}`. This saves you from manually re-running each dependent cell after changing a value.
 
 ---
 

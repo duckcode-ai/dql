@@ -22,6 +22,7 @@ describe('runInit', () => {
       port: null,
       queryOnly: false,
       template: 'starter',
+      connection: '',
       verbose: false,
     });
 

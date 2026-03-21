@@ -40,11 +40,15 @@
     "access": "public"
   },
   "devDependencies": {
-    "vitest": "^3.0.0",
+    "@types/js-yaml": "^4.0.9",
+    "@types/node": "^22.0.0",
     "typescript": "^5.7.0",
-    "@types/node": "^22.0.0"
+    "vitest": "^3.0.0"
   },
   "engines": {
     "node": ">=18.0.0"
+  },
+  "dependencies": {
+    "js-yaml": "^4.1.1"
   }
 }

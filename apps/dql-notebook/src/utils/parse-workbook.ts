@@ -1,4 +1,4 @@
-import type { Cell, ParamConfig } from '../store/types';
+import type { Cell, ParamConfig, CellChartConfig } from '../store/types';
 import { makeCellId } from '../store/NotebookStore';
 
 export interface ParsedWorkbook {
@@ -82,9 +82,16 @@ export function parseDqlWorkbook(content: string): ParsedWorkbook {
 /**
  * Parse a .dqlnb JSON notebook file.
  */
+export interface NotebookMetadata {
+  author?: string;
+  createdAt?: string;
+  modifiedAt?: string;
+}
+
 export interface DqlNotebookFile {
   version: number;
   title: string;
+  metadata?: NotebookMetadata;
   cells: Array<{
     id: string;
     type: 'sql' | 'markdown' | 'dql' | 'param';
@@ -92,6 +99,7 @@ export interface DqlNotebookFile {
     name?: string;
     paramConfig?: ParamConfig;
     paramValue?: string;
+    chartConfig?: CellChartConfig;
   }>;
 }
 
@@ -109,6 +117,7 @@ export function parseDqlNotebook(content: string): ParsedWorkbook {
       status: 'idle' as const,
       ...(c.paramConfig ? { paramConfig: c.paramConfig } : {}),
       ...(c.paramValue !== undefined ? { paramValue: c.paramValue } : {}),
+      ...(c.chartConfig ? { chartConfig: c.chartConfig } : {}),
     }));
     return { title, cells };
   } catch {
@@ -129,10 +138,15 @@ export function parseDqlNotebook(content: string): ParsedWorkbook {
 /**
  * Serialize cells back to .dqlnb JSON format.
  */
-export function serializeDqlNotebook(title: string, cells: Cell[]): string {
+export function serializeDqlNotebook(title: string, cells: Cell[], existingMetadata?: NotebookMetadata): string {
   const data: DqlNotebookFile = {
     version: 1,
     title,
+    metadata: {
+      ...existingMetadata,
+      modifiedAt: new Date().toISOString(),
+      ...(!existingMetadata?.createdAt ? { createdAt: new Date().toISOString() } : {}),
+    },
     cells: cells.map((c) => ({
       id: c.id,
       type: c.type,
@@ -140,6 +154,7 @@ export function serializeDqlNotebook(title: string, cells: Cell[]): string {
       ...(c.name ? { name: c.name } : {}),
       ...(c.paramConfig ? { paramConfig: c.paramConfig } : {}),
       ...(c.paramValue !== undefined ? { paramValue: c.paramValue } : {}),
+      ...(c.chartConfig ? { chartConfig: c.chartConfig } : {}),
     })),
   };
   return JSON.stringify(data, null, 2);
