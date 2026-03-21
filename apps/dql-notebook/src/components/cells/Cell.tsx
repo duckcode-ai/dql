@@ -11,6 +11,7 @@ import { TableOutput } from '../output/TableOutput';
 import { ChartOutput, detectChartType } from '../output/ChartOutput';
 import { ErrorOutput } from '../output/ErrorOutput';
 import type { Cell } from '../../store/types';
+import { format as formatSQL } from 'sql-formatter';
 
 interface CellProps {
   cell: Cell;
@@ -103,6 +104,11 @@ export function CellComponent({ cell, index }: CellProps) {
   const borderColor = getCellBorderColor(cell, t);
   const isExecutable = cell.type !== 'markdown' && cell.type !== 'param';
 
+  // Build schema map for SQL autocomplete: { tableName: ['col1', 'col2'] }
+  const editorSchema = state.schemaTables.length > 0
+    ? Object.fromEntries(state.schemaTables.map((tbl) => [tbl.name, tbl.columns.map((c) => c.name)]))
+    : undefined;
+
   // Param cells get their own fully self-contained rendering
   if (cell.type === 'param') {
     return (
@@ -140,6 +146,27 @@ export function CellComponent({ cell, index }: CellProps) {
     },
     [cell.id, dispatch]
   );
+
+  const handleFormat = useCallback(() => {
+    if (!cell.content.trim()) return;
+    try {
+      const formatted = formatSQL(cell.content, {
+        language: 'sql',
+        tabWidth: 2,
+        keywordCase: 'upper',
+        linesBetweenQueries: 1,
+      });
+      dispatch({ type: 'UPDATE_CELL', id: cell.id, updates: { content: formatted } });
+    } catch {
+      // If formatter fails (e.g. invalid SQL), leave as-is
+    }
+  }, [cell.content, cell.id, dispatch]);
+
+  const handleFixAndRun = useCallback(() => {
+    handleFormat();
+    // Small delay so the formatted content propagates before running
+    setTimeout(() => executeCell(cell.id), 80);
+  }, [handleFormat, executeCell, cell.id]);
 
   const handleDelete = () => {
     dispatch({ type: 'DELETE_CELL', id: cell.id });
@@ -229,6 +256,37 @@ export function CellComponent({ cell, index }: CellProps) {
               cellType={cell.type}
               onInsert={(code) => handleContentChange(code)}
             />
+          )}
+
+          {/* Format button — shown on hover for sql/dql cells */}
+          {cellHovered && (cell.type === 'sql' || cell.type === 'dql') && (
+            <button
+              title="Format SQL (clean up whitespace & keywords)"
+              onClick={handleFormat}
+              style={{
+                background: 'transparent',
+                border: `1px solid ${t.btnBorder}`,
+                borderRadius: 4,
+                color: t.textMuted,
+                fontSize: 10,
+                fontFamily: t.font,
+                fontWeight: 600,
+                letterSpacing: '0.04em',
+                padding: '1px 7px',
+                cursor: 'pointer',
+                transition: 'color 0.15s, border-color 0.15s',
+              }}
+              onMouseEnter={(e) => {
+                (e.currentTarget as HTMLButtonElement).style.color = t.textSecondary;
+                (e.currentTarget as HTMLButtonElement).style.borderColor = t.accent;
+              }}
+              onMouseLeave={(e) => {
+                (e.currentTarget as HTMLButtonElement).style.color = t.textMuted;
+                (e.currentTarget as HTMLButtonElement).style.borderColor = t.btnBorder;
+              }}
+            >
+              Format
+            </button>
           )}
 
           {/* Cell name */}
@@ -345,6 +403,7 @@ export function CellComponent({ cell, index }: CellProps) {
             onChange={handleContentChange}
             onRun={handleRun}
             themeMode={state.themeMode}
+            schema={editorSchema}
           />
         )}
 
@@ -447,7 +506,14 @@ export function CellComponent({ cell, index }: CellProps) {
 
             {showOutput && (
               <>
-                {cell.error && <ErrorOutput message={cell.error} themeMode={state.themeMode} />}
+                {cell.error && (
+                  <ErrorOutput
+                    message={cell.error}
+                    themeMode={state.themeMode}
+                    onFix={isExecutable ? handleFixAndRun : undefined}
+                    schemaTables={state.schemaTables}
+                  />
+                )}
                 {cell.result && !cell.error && (
                   viewMode === 'chart' && canChart ? (
                     <ChartOutput result={cell.result} themeMode={state.themeMode} />

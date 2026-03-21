@@ -10,14 +10,17 @@
     "clean": "rm -rf dist"
   },
   "dependencies": {
+    "@codemirror/autocomplete": "^6.20.1",
     "@codemirror/commands": "^6.7.1",
     "@codemirror/lang-sql": "^6.8.0",
     "@codemirror/language": "^6.10.8",
+    "@codemirror/search": "^6.6.0",
     "@codemirror/state": "^6.5.2",
     "@codemirror/theme-one-dark": "^6.1.2",
     "@codemirror/view": "^6.36.3",
     "react": "^18.3.0",
-    "react-dom": "^18.3.0"
+    "react-dom": "^18.3.0",
+    "sql-formatter": "^15.7.2"
   },
   "devDependencies": {
     "@types/react": "^18.3.0",
