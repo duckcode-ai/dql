@@ -1,0 +1,21 @@
+workbook "Quarterly Review" {
+  page "Summary" {
+    chart.kpi(
+      SELECT SUM(amount) AS total_revenue FROM read_csv_auto('./data/revenue.csv'),
+      metrics = ["total_revenue"],
+      title = "Total Revenue"
+    )
+  }
+
+  page "Trend" {
+    chart.line(
+      SELECT recognized_at AS revenue_date, SUM(amount) AS total_revenue
+      FROM read_csv_auto('./data/revenue.csv')
+      GROUP BY recognized_at
+      ORDER BY recognized_at,
+      x = revenue_date,
+      y = total_revenue,
+      title = "Revenue Trend"
+    )
+  }
+}

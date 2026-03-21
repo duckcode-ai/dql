@@ -1,0 +1,29 @@
+block "Revenue by Segment" {
+    domain = "revenue"
+    type = "custom"
+    description = "Starter block for segment revenue analysis using local CSV sample data"
+    tags = ["starter", "revenue"]
+    owner = "template"
+
+    params {
+        period = "current_quarter"
+    }
+
+    query = """
+        SELECT segment_tier AS segment, SUM(amount) AS revenue
+        FROM read_csv_auto('./data/revenue.csv')
+        WHERE fiscal_period = ${period}
+        GROUP BY segment_tier
+        ORDER BY revenue DESC
+    """
+
+    visualization {
+        chart = "bar"
+        x = segment
+        y = revenue
+    }
+
+    tests {
+        assert row_count > 0
+    }
+}

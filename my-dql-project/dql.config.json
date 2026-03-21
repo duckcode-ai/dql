@@ -1,0 +1,13 @@
+{
+  "project": "my-dql-project",
+  "defaultConnection": {
+    "driver": "file",
+    "filepath": ":memory:"
+  },
+  "dataDir": "./data",
+  "preview": {
+    "port": 3474,
+    "open": true,
+    "theme": "light"
+  }
+}
