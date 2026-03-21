@@ -308,6 +308,84 @@ pnpm exec dql fmt blocks/revenue_by_segment.dql --check
 
 ---
 
+## Your First Notebook
+
+The DQL Notebook is a browser-first SQL environment backed by DuckDB. It runs locally — no server setup, no cloud account.
+
+### 1. Launch the notebook
+
+From inside your project directory:
+
+```bash
+dql notebook
+```
+
+Or pass the project path explicitly:
+
+```bash
+dql notebook ./my-dql-project
+```
+
+The terminal prints:
+
+```
+  ✓ Notebook ready: http://127.0.0.1:3474
+    Press Ctrl+C to stop.
+```
+
+The browser opens automatically. If you want to suppress that, use `--no-open`.
+
+### 2. Open a notebook file
+
+The left sidebar shows the `notebooks/` folder. Click `welcome.dqlnb` to open the starter notebook, or click **New Notebook** to start fresh.
+
+### 3. Run your first SQL cell
+
+Click **+ SQL** to add a SQL cell. Type a query against the starter data:
+
+```sql
+SELECT segment_tier, SUM(amount) AS total_revenue
+FROM read_csv_auto('data/revenue.csv')
+GROUP BY segment_tier
+ORDER BY total_revenue DESC
+```
+
+Press `Shift+Enter` (or `Cmd+Enter`) to run. Results appear as a table below the cell. If DQL detects a chartable shape, a chart toggle appears alongside the table view.
+
+Give the cell a name — click the cell label area and type `revenue_by_segment`. Named cells can be referenced by downstream cells.
+
+### 4. Add a Param cell
+
+Click **+ Param** to add a parameter cell. Configure it:
+
+- **Name:** `segment`
+- **Type:** `select`
+- **Options:** `All`, `Enterprise`, `Mid-Market`, `SMB`
+- **Default:** `All`
+
+A live dropdown widget renders immediately below the cell configuration.
+
+### 5. Use `{{variable}}` in a downstream SQL cell
+
+Add another SQL cell and reference both the param and the named result cell:
+
+```sql
+SELECT * FROM {{revenue_by_segment}}
+WHERE {{segment}} = 'All' OR segment_tier = {{segment}}
+```
+
+Run it. When you change the dropdown in the param cell, re-running this cell filters to the selected segment. Param values are injected as SQL literals; named SQL cells are injected as CTEs.
+
+For a full reference on variable substitution, see [Notebook Guide — Variable Substitution](./notebook.md#variable-substitution).
+
+### 6. Save and export
+
+- Press `Cmd+S` to save the notebook as a `.dqlnb` file.
+- Click **Export HTML** to generate a standalone dashboard you can share without running the CLI.
+- Click **Export .dql** to save the notebook as a workbook in DQL block syntax.
+
+---
+
 ## Using @duckcodeailabs/dql-core in Node.js
 
 After `npm install @duckcodeailabs/dql-core`:
@@ -380,14 +458,3 @@ Then:
 1. Add charted or query-only blocks under `blocks/`
 2. Add metrics, dimensions, and hierarchies under `semantic-layer/`
 3. Add optional block companion YAML under `semantic-layer/blocks/` for business metadata
-
----
-
-## What Is Not Included
-
-- Notebook coworker UI
-- Natural-language block generation
-- MCP runtime
-- Approvals or run history
-
-Those remain part of the closed DuckCode product.

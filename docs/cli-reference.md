@@ -6,7 +6,7 @@ The `dql` binary is provided by `@duckcodeailabs/dql-cli`. Most commands accept 
 
 ```text
 dql init [directory]
-dql new <block|semantic-block|dashboard|workbook> <name> [flags]
+dql new <block|semantic-block|dashboard|workbook|notebook> <name> [flags]
 dql <command> <file.dql> [flags]
 ```
 
@@ -96,15 +96,16 @@ dql notebook --port 4488
 
 ---
 
-### `dql new <block|semantic-block|dashboard|workbook> <name>`
+### `dql new <block|semantic-block|dashboard|workbook|notebook> <name>`
 
-Create a new DQL block, semantic block, dashboard, or workbook inside the current project.
+Create a new DQL block, semantic block, dashboard, workbook, or notebook inside the current project.
 
 ```bash
 dql new block "Pipeline Health"
 dql new semantic-block "ARR Growth"
 dql new dashboard "Revenue Overview" --chart line
 dql new workbook "Quarterly Review"
+dql new notebook "Revenue Analysis"
 dql new block "Revenue Trend" --chart line --domain finance
 dql new block "Top Accounts" --chart table --query-only
 ```
@@ -132,7 +133,35 @@ dql new block "Top Accounts" --chart table --query-only
 - a starter metric definition in `semantic-layer/metrics/`
 - companion block metadata in `semantic-layer/blocks/`
 
+#### `dql new notebook <name>`
+
+Scaffold a new `.dqlnb` notebook file inside the project's `notebooks/` directory.
+
+```bash
+dql new notebook "Revenue Analysis"
+dql new notebook "Q4 Review"
+dql new notebook "Churn Deep Dive" --out-dir reports/
+```
+
+**What it creates:**
+
+- `notebooks/revenue_analysis.dqlnb` — a JSON notebook file with a starter SQL cell pre-populated to query `data/revenue.csv` when it exists
+- The new file is immediately visible in the notebook UI sidebar if the notebook server is already running (hot reload picks it up automatically)
+
 **Text output:**
+
+```text
+  ✓ Created notebook: Revenue Analysis
+    Path: /path/to/project/notebooks/revenue_analysis.dqlnb
+
+  Next steps:
+    1. dql notebook
+    2. Open notebooks/revenue_analysis.dqlnb from the sidebar
+```
+
+You can also create notebooks directly from the notebook UI using the **New Notebook** button. See the [Notebook Guide](./notebook.md) for details.
+
+**Text output (for block/dashboard/workbook):**
 
 ```text
   ✓ Created DQL block: Pipeline Health
