@@ -218,7 +218,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           body.variables && typeof body.variables === 'object' ? body.variables : {},
           prepared.connection,
         );
-        const payload = serializeJSON(result);
+        const payload = serializeJSON(normalizeQueryResult(result));
         res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
         res.end(payload);
       } catch (error) {
@@ -311,14 +311,14 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           projectRoot,
           projectConfig,
         );
-        const result = await executor.executeQuery(prepared.sql, plan.sqlParams, plan.variables, prepared.connection);
+        const rawResult = await executor.executeQuery(prepared.sql, plan.sqlParams, plan.variables, prepared.connection);
         res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
         res.end(serializeJSON({
           cellType: cell.type,
           title: plan.title,
           chartConfig: plan.chartConfig,
           tests: plan.tests,
-          result,
+          result: normalizeQueryResult(rawResult),
         }));
       } catch (error) {
         res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' });
@@ -400,6 +400,33 @@ export function formatLocalQueryRuntimeError(
   }
 
   return `Local query runtime is unavailable for driver "${driver}": ${detail}`;
+}
+
+/**
+ * Normalize connector QueryResult → SPA-friendly shape.
+ * Connector returns columns as ColumnMeta[] ({name,type,driverType}).
+ * The notebook SPA expects columns as string[] (just names).
+ */
+function normalizeQueryResult(result: any): {
+  columns: string[];
+  rows: Record<string, unknown>[];
+  rowCount: number;
+  executionTime: number;
+} {
+  const rawCols: unknown[] = Array.isArray(result?.columns) ? result.columns : [];
+  const columns = rawCols.map((c) =>
+    typeof c === 'string' ? c : typeof (c as any)?.name === 'string' ? (c as any).name : String(c)
+  );
+  return {
+    columns,
+    rows: Array.isArray(result?.rows) ? result.rows : [],
+    rowCount: typeof result?.rowCount === 'number' ? result.rowCount : (result?.rows?.length ?? 0),
+    executionTime: typeof result?.executionTimeMs === 'number'
+      ? result.executionTimeMs
+      : typeof result?.executionTime === 'number'
+        ? result.executionTime
+        : 0,
+  };
 }
 
 export function serializeJSON(value: unknown): string {
