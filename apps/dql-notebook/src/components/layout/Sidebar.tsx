@@ -5,6 +5,7 @@ import { FilesPanel } from '../sidebar/FilesPanel';
 import { SchemaPanel } from '../sidebar/SchemaPanel';
 import { OutlinePanel } from '../sidebar/OutlinePanel';
 import { ConnectionPanel } from '../sidebar/ConnectionPanel';
+import { ReferencePanel } from '../sidebar/ReferencePanel';
 import type { NotebookFile } from '../../store/types';
 
 interface SidebarProps {
@@ -17,6 +18,7 @@ const PANEL_TITLES: Record<string, string> = {
   schema: 'Schema',
   outline: 'Outline',
   connection: 'Connection',
+  reference: 'Quick Reference',
 };
 
 export function Sidebar({ onOpenFile, onNavigateToCell }: SidebarProps) {
@@ -91,6 +93,7 @@ export function Sidebar({ onOpenFile, onNavigateToCell }: SidebarProps) {
         {panel === 'schema' && <SchemaPanel />}
         {panel === 'outline' && <OutlinePanel onNavigate={onNavigateToCell} />}
         {panel === 'connection' && <ConnectionPanel />}
+        {panel === 'reference' && <ReferencePanel themeMode={state.themeMode} />}
       </div>
     </div>
   );

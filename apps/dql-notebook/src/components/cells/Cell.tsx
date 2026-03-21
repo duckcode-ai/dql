@@ -6,6 +6,7 @@ import { useQueryExecution } from '../../hooks/useQueryExecution';
 import { SQLCellEditor } from './SQLCellEditor';
 import { MarkdownCellEditor } from './MarkdownCellEditor';
 import { ParamCell } from './ParamCell';
+import { SnippetPicker } from './SnippetPicker';
 import { TableOutput } from '../output/TableOutput';
 import { ChartOutput, detectChartType } from '../output/ChartOutput';
 import { ErrorOutput } from '../output/ErrorOutput';
@@ -220,6 +221,15 @@ export function CellComponent({ cell, index }: CellProps) {
           >
             {TYPE_LABELS[cell.type]}
           </span>
+
+          {/* Templates button — shown on hover for sql/dql cells */}
+          {cellHovered && (cell.type === 'sql' || cell.type === 'dql') && (
+            <SnippetPicker
+              themeMode={state.themeMode}
+              cellType={cell.type}
+              onInsert={(code) => handleContentChange(code)}
+            />
+          )}
 
           {/* Cell name */}
           {nameEditing ? (
