@@ -12,9 +12,9 @@ import {
 import { maybeOpenBrowser } from '../open-browser.js';
 
 const COMMAND_DIR = dirname(fileURLToPath(import.meta.url));
-// Prefer the new React SPA (apps/dql-notebook), fall back to legacy vanilla app
-const REACT_APP_DIR = resolve(COMMAND_DIR, '../../../dql-notebook/dist');
-const LEGACY_APP_DIR = resolve(COMMAND_DIR, '../../../../apps/notebook-browser');
+// Bundled assets are always at dist/assets/ relative to the CLI dist root
+const REACT_APP_DIR = resolve(COMMAND_DIR, '../assets/dql-notebook');
+const LEGACY_APP_DIR = resolve(COMMAND_DIR, '../assets/notebook-browser');
 const NOTEBOOK_APP_DIR = existsSync(join(REACT_APP_DIR, 'index.html')) ? REACT_APP_DIR : LEGACY_APP_DIR;
 
 export async function runNotebook(targetArg: string | null, flags: CLIFlags): Promise<void> {

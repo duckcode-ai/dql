@@ -17,6 +17,10 @@ const assets = [
     source: resolve(REPO_ROOT, 'apps/notebook-browser'),
     target: join(ASSETS_ROOT, 'notebook-browser'),
   },
+  {
+    source: resolve(REPO_ROOT, 'apps/dql-notebook/dist'),
+    target: join(ASSETS_ROOT, 'dql-notebook'),
+  },
 ];
 
 mkdirSync(ASSETS_ROOT, { recursive: true });
