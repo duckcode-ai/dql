@@ -50,10 +50,23 @@ export const api = {
   },
 
   async executeQuery(sql: string): Promise<QueryResult> {
-    return request<QueryResult>('/api/query', {
+    const raw = await request<any>('/api/query', {
       method: 'POST',
       body: JSON.stringify({ sql }),
     });
+    // Normalize: older server versions return columns as ColumnMeta[] ({name,type,driverType}).
+    // Always coerce to string[] so React never tries to render objects as children.
+    const columns: string[] = Array.isArray(raw?.columns)
+      ? raw.columns.map((c: unknown) =>
+          typeof c === 'string' ? c : typeof (c as any)?.name === 'string' ? (c as any).name : String(c)
+        )
+      : [];
+    return {
+      columns,
+      rows: Array.isArray(raw?.rows) ? raw.rows : [],
+      rowCount: raw?.rowCount ?? raw?.rows?.length ?? 0,
+      executionTime: raw?.executionTime ?? raw?.executionTimeMs ?? 0,
+    };
   },
 
   async getSchema(): Promise<SchemaTable[]> {
