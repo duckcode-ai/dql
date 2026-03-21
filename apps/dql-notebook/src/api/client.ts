@@ -64,6 +64,25 @@ export const api = {
     }
   },
 
+  async getConnections(): Promise<{ default: string; connections: Record<string, unknown> }> {
+    try {
+      return await request<{ default: string; connections: Record<string, unknown> }>('/api/connections');
+    } catch {
+      return { default: 'unknown', connections: {} };
+    }
+  },
+
+  async testConnection(): Promise<{ ok: boolean; message: string }> {
+    try {
+      return await request<{ ok: boolean; message: string }>('/api/test-connection', {
+        method: 'POST',
+        body: JSON.stringify({}),
+      });
+    } catch (e: any) {
+      return { ok: false, message: e.message ?? 'Connection failed' };
+    }
+  },
+
   async describeTable(filePath: string): Promise<SchemaColumn[]> {
     // Build SQL using read_csv_auto for CSV files, or a generic DESCRIBE query
     const safePath = filePath.replace(/'/g, "''");

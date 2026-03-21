@@ -65,6 +65,14 @@ function OutlineIcon() {
   );
 }
 
+function ConnectionIcon() {
+  return (
+    <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor">
+      <path d="M1 2.75C1 1.784 1.784 1 2.75 1h2.5C6.216 1 7 1.784 7 2.75v2.5C7 6.216 6.216 7 5.25 7h-2.5C1.784 7 1 6.216 1 5.25Zm1.75-.25a.25.25 0 0 0-.25.25v2.5c0 .138.112.25.25.25h2.5A.25.25 0 0 0 6 5.25v-2.5A.25.25 0 0 0 5.25 2.5ZM9 2.75C9 1.784 9.784 1 10.75 1h2.5C14.216 1 15 1.784 15 2.75v2.5C15 6.216 14.216 7 13.25 7h-2.5C9.784 7 9 6.216 9 5.25Zm1.75-.25a.25.25 0 0 0-.25.25v2.5c0 .138.112.25.25.25h2.5a.25.25 0 0 0 .25-.25v-2.5a.25.25 0 0 0-.25-.25ZM1 10.75C1 9.784 1.784 9 2.75 9h2.5C6.216 9 7 9.784 7 10.75v2.5C7 14.216 6.216 15 5.25 15h-2.5C1.784 15 1 14.216 1 13.25Zm1.75-.25a.25.25 0 0 0-.25.25v2.5c0 .138.112.25.25.25h2.5a.25.25 0 0 0 .25-.25v-2.5a.25.25 0 0 0-.25-.25ZM13 9.75a.75.75 0 0 1 .75.75v1.75H15.5a.75.75 0 0 1 0 1.5h-1.75V15.5a.75.75 0 0 1-1.5 0v-1.75H10.5a.75.75 0 0 1 0-1.5h1.75V10.5A.75.75 0 0 1 13 9.75Z" />
+    </svg>
+  );
+}
+
 function HelpIcon() {
   return (
     <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor">
@@ -134,6 +142,15 @@ export function ActivityBar() {
         t={t}
       >
         <OutlineIcon />
+      </IconButton>
+
+      <IconButton
+        title="Connection"
+        active={state.sidebarPanel === 'connection' && state.sidebarOpen}
+        onClick={() => handlePanelClick('connection')}
+        t={t}
+      >
+        <ConnectionIcon />
       </IconButton>
 
       {/* Spacer pushes remaining items to bottom */}

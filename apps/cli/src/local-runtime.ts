@@ -180,6 +180,22 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
       res.end(serializeJSON(scanDataFiles(projectRoot)));
       return;
     }
+
+    if (req.method === 'GET' && path === '/api/connections') {
+      const cfg = loadProjectConfig(projectRoot);
+      const raw = cfg as any;
+      const connections: Record<string, unknown> = raw.connections ?? {};
+      // If no explicit connections map, surface the defaultConnection as "default"
+      if (Object.keys(connections).length === 0 && cfg.defaultConnection) {
+        connections['default'] = cfg.defaultConnection;
+      }
+      const defaultKey = raw.defaultConnection
+        ? 'default'
+        : Object.keys(connections)[0] ?? 'default';
+      res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+      res.end(serializeJSON({ default: defaultKey, connections }));
+      return;
+    }
     // ── end dql-notebook API ──────────────────────────────────────────────────
 
     if (req.method === 'POST' && path === '/api/query') {

@@ -10,7 +10,7 @@ export interface ParamConfig {
   defaultValue: string;
   options?: string[];
 }
-export type SidebarPanel = 'files' | 'schema' | 'outline' | null;
+export type SidebarPanel = 'files' | 'schema' | 'outline' | 'connection' | null;
 export type DevPanelTab = 'logs' | 'errors';
 
 export interface QueryResult {

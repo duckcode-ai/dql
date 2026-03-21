@@ -4,6 +4,7 @@ import { themes } from '../../themes/notebook-theme';
 import { FilesPanel } from '../sidebar/FilesPanel';
 import { SchemaPanel } from '../sidebar/SchemaPanel';
 import { OutlinePanel } from '../sidebar/OutlinePanel';
+import { ConnectionPanel } from '../sidebar/ConnectionPanel';
 import type { NotebookFile } from '../../store/types';
 
 interface SidebarProps {
@@ -15,6 +16,7 @@ const PANEL_TITLES: Record<string, string> = {
   files: 'Explorer',
   schema: 'Schema',
   outline: 'Outline',
+  connection: 'Connection',
 };
 
 export function Sidebar({ onOpenFile, onNavigateToCell }: SidebarProps) {
@@ -88,6 +90,7 @@ export function Sidebar({ onOpenFile, onNavigateToCell }: SidebarProps) {
         {panel === 'files' && <FilesPanel onOpenFile={onOpenFile} />}
         {panel === 'schema' && <SchemaPanel />}
         {panel === 'outline' && <OutlinePanel onNavigate={onNavigateToCell} />}
+        {panel === 'connection' && <ConnectionPanel />}
       </div>
     </div>
   );

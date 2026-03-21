@@ -98,16 +98,19 @@ export interface DqlNotebookFile {
 export function parseDqlNotebook(content: string): ParsedWorkbook {
   try {
     const data = JSON.parse(content) as DqlNotebookFile;
+    // Support both "title" (our format) and "metadata.title" (legacy format)
+    const title = data.title || (data as any).metadata?.title || 'Untitled';
     const cells: Cell[] = (data.cells || []).map((c) => ({
       id: c.id || makeCellId(),
       type: c.type || 'sql',
-      content: c.content || '',
-      name: c.name,
+      // Support both "content" (our format) and "source" (legacy format)
+      content: c.content ?? (c as any).source ?? '',
+      name: c.name || (c as any).title,
       status: 'idle' as const,
       ...(c.paramConfig ? { paramConfig: c.paramConfig } : {}),
       ...(c.paramValue !== undefined ? { paramValue: c.paramValue } : {}),
     }));
-    return { title: data.title || 'Untitled', cells };
+    return { title, cells };
   } catch {
     return {
       title: 'Untitled',
