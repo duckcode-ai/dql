@@ -1,4 +1,8 @@
 name: channel
 label: Channel
-domain: commerce
 description: Order acquisition channel.
+sql: channel
+type: string
+table: orders
+tags:
+  - commerce

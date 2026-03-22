@@ -1,0 +1,77 @@
+# Cube Definition — groups measures, dimensions, time dimensions, and joins
+# into a single semantic model. This is the recommended way to define
+# complex, multi-table semantic layers.
+#
+# The DQL notebook will automatically discover this cube and display
+# its measures and dimensions in the Semantic Layer sidebar panel.
+
+name: revenue
+label: Revenue Cube
+description: Core revenue analysis cube built on the starter revenue data.
+table: fct_revenue
+domain: revenue
+owner: analytics-team
+
+# Measures — aggregate calculations shown as "Metrics" in the UI
+measures:
+  - name: total_revenue
+    label: Total Revenue
+    description: Sum of all recognized revenue.
+    sql: SUM(amount)
+    type: sum
+    tags:
+      - revenue
+      - kpi
+
+  - name: deal_count
+    label: Deal Count
+    description: Number of revenue deals.
+    sql: COUNT(*)
+    type: count
+
+  - name: avg_deal_size
+    label: Average Deal Size
+    description: Average revenue per deal.
+    sql: AVG(amount)
+    type: avg
+    tags:
+      - revenue
+
+# Dimensions — grouping columns shown as "Dimensions" in the UI
+dimensions:
+  - name: segment_tier
+    label: Segment Tier
+    description: Customer segment (Enterprise, Mid-Market, SMB).
+    sql: segment_tier
+    type: string
+
+  - name: fiscal_period
+    label: Fiscal Period
+    description: Fiscal period classification.
+    sql: fiscal_period
+    type: string
+
+# Time Dimensions — date columns with granularity support (day/week/month/quarter/year)
+time_dimensions:
+  - name: recognized_at
+    label: Recognition Date
+    description: Date revenue was recognized.
+    sql: recognized_at
+    primary_time: true
+    granularities:
+      - day
+      - week
+      - month
+      - quarter
+      - year
+
+# Joins — connect this cube to other cubes for cross-table queries
+# Example (uncomment if you have a customers cube):
+# joins:
+#   - name: customers
+#     type: left
+#     sql: "${left}.customer_id = ${right}.id"
+
+tags:
+  - revenue
+  - starter

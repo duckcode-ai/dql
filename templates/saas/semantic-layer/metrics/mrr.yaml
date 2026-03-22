@@ -1,4 +1,10 @@
 name: mrr
 label: Monthly Recurring Revenue
-domain: saas
 description: Monthly recurring revenue across active subscriptions.
+domain: saas
+sql: SUM(mrr)
+type: sum
+table: subscriptions
+tags:
+  - revenue
+  - saas

@@ -6,6 +6,7 @@ import {
   parseHierarchyDefinition,
   parseBlockCompanionDefinition,
 } from './semantic-layer.js';
+import { getDialect } from './sql-dialect.js';
 
 describe('SemanticLayer', () => {
   it('adds and retrieves metrics', () => {
@@ -192,5 +193,137 @@ describe('parseBlockCompanionDefinition', () => {
     expect(companion.reviewStatus).toBe('review');
     expect(companion.semanticMappings?.segment).toBe('segment_tier');
     expect(companion.lineage).toEqual(['warehouse.fct_revenue', 'warehouse.dim_segment']);
+  });
+});
+
+describe('SQL Dialect support', () => {
+  function buildLayerWithTimeDimension(): SemanticLayer {
+    const layer = new SemanticLayer();
+    layer.addMetric({
+      name: 'total_revenue', label: 'Total Revenue', description: 'Sum',
+      domain: 'revenue', sql: 'SUM(amount)', type: 'sum', table: 'orders',
+    });
+    layer.addDimension({
+      name: 'order_date', label: 'Order Date', description: 'Date of order',
+      sql: 'order_date', type: 'date', table: 'orders',
+    });
+    layer.addDimension({
+      name: 'channel', label: 'Channel', description: 'Sales channel',
+      sql: 'channel', type: 'string', table: 'orders',
+    });
+    return layer;
+  }
+
+  it('generates DuckDB-compatible SQL by default', () => {
+    const layer = buildLayerWithTimeDimension();
+    const result = layer.composeQuery({
+      metrics: ['total_revenue'],
+      dimensions: ['channel'],
+      timeDimension: { name: 'order_date', granularity: 'month' },
+    });
+    expect(result).not.toBeNull();
+    expect(result!.sql).toContain("DATE_TRUNC('month', orders.order_date)");
+  });
+
+  it('generates BigQuery-compatible SQL with reversed DATE_TRUNC args', () => {
+    const layer = buildLayerWithTimeDimension();
+    const result = layer.composeQuery({
+      metrics: ['total_revenue'],
+      dimensions: ['channel'],
+      timeDimension: { name: 'order_date', granularity: 'month' },
+      driver: 'bigquery',
+    });
+    expect(result).not.toBeNull();
+    expect(result!.sql).toContain('DATE_TRUNC(orders.order_date, MONTH)');
+  });
+
+  it('generates MySQL-compatible DATE_FORMAT for month truncation', () => {
+    const layer = buildLayerWithTimeDimension();
+    const result = layer.composeQuery({
+      metrics: ['total_revenue'],
+      dimensions: ['channel'],
+      timeDimension: { name: 'order_date', granularity: 'month' },
+      driver: 'mysql',
+    });
+    expect(result).not.toBeNull();
+    expect(result!.sql).toContain("DATE_FORMAT(orders.order_date, '%Y-%m-01')");
+  });
+
+  it('generates ClickHouse-compatible toStartOfMonth for month truncation', () => {
+    const layer = buildLayerWithTimeDimension();
+    const result = layer.composeQuery({
+      metrics: ['total_revenue'],
+      dimensions: ['channel'],
+      timeDimension: { name: 'order_date', granularity: 'month' },
+      driver: 'clickhouse',
+    });
+    expect(result).not.toBeNull();
+    expect(result!.sql).toContain('toStartOfMonth(orders.order_date)');
+  });
+
+  it('generates MSSQL-compatible DATETRUNC for month truncation', () => {
+    const layer = buildLayerWithTimeDimension();
+    const result = layer.composeQuery({
+      metrics: ['total_revenue'],
+      dimensions: ['channel'],
+      timeDimension: { name: 'order_date', granularity: 'month' },
+      driver: 'mssql',
+    });
+    expect(result).not.toBeNull();
+    expect(result!.sql).toContain('DATETRUNC(month, orders.order_date)');
+  });
+
+  it('generates SQLite-compatible STRFTIME for month truncation', () => {
+    const layer = buildLayerWithTimeDimension();
+    const result = layer.composeQuery({
+      metrics: ['total_revenue'],
+      dimensions: ['channel'],
+      timeDimension: { name: 'order_date', granularity: 'month' },
+      driver: 'sqlite',
+    });
+    expect(result).not.toBeNull();
+    expect(result!.sql).toContain("STRFTIME('%Y-%m-01', orders.order_date)");
+  });
+
+  it('uses OFFSET/FETCH for MSSQL LIMIT clause', () => {
+    const layer = buildLayerWithTimeDimension();
+    const result = layer.composeQuery({
+      metrics: ['total_revenue'],
+      dimensions: ['channel'],
+      limit: 10,
+      driver: 'mssql',
+    });
+    expect(result).not.toBeNull();
+    expect(result!.sql).toContain('OFFSET 0 ROWS FETCH NEXT 10 ROWS ONLY');
+    expect(result!.sql).not.toContain('LIMIT');
+  });
+
+  it('accepts a dialect object directly', () => {
+    const layer = buildLayerWithTimeDimension();
+    const dialect = getDialect('snowflake');
+    const result = layer.composeQuery({
+      metrics: ['total_revenue'],
+      dimensions: ['channel'],
+      timeDimension: { name: 'order_date', granularity: 'quarter' },
+      dialect,
+    });
+    expect(result).not.toBeNull();
+    expect(result!.sql).toContain("DATE_TRUNC('quarter', orders.order_date)");
+  });
+
+  it('all 14 drivers resolve to a valid dialect', () => {
+    const drivers = [
+      'postgresql', 'redshift', 'duckdb', 'file', 'snowflake', 'bigquery',
+      'mysql', 'sqlite', 'mssql', 'fabric', 'clickhouse', 'databricks',
+      'trino', 'athena',
+    ];
+    for (const driver of drivers) {
+      const dialect = getDialect(driver);
+      expect(dialect).toBeDefined();
+      expect(dialect.name).toBeTruthy();
+      // Every dialect must produce valid dateTrunc output
+      const result = dialect.dateTrunc('month', 'col');
+      expect(result).toBeTruthy();
+    }
   });
 });

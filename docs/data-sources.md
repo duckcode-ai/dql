@@ -316,6 +316,69 @@ replace the starter value with the connector you actually want to use.
 
 ---
 
+## Semantic Layer + Connector Integration
+
+All 14 connectors fully support the semantic layer. When you define metrics and
+dimensions in `semantic-layer/` YAML files, DQL automatically generates
+**database-specific SQL** for the configured connector.
+
+### How It Works
+
+1. Define metrics/dimensions in YAML (same shape as dbt semantic layer):
+
+```yaml
+# semantic-layer/metrics/revenue.yaml
+name: total_revenue
+sql: SUM(amount)
+type: sum
+table: orders
+```
+
+2. Reference them in semantic blocks (no raw SQL needed):
+
+```dql
+block "Revenue by Channel" {
+    type = "semantic"
+    metric = "total_revenue"
+    visualization { chart = "bar" }
+}
+```
+
+3. DQL composes the right SQL for your database:
+
+| Feature | PostgreSQL | BigQuery | MySQL | Snowflake | MSSQL | ClickHouse | SQLite |
+|---------|-----------|----------|-------|-----------|-------|------------|--------|
+| DATE_TRUNC | `DATE_TRUNC('month', col)` | `DATE_TRUNC(col, MONTH)` | `DATE_FORMAT(col, '%Y-%m-01')` | `DATE_TRUNC('month', col)` | `DATETRUNC(month, col)` | `toStartOfMonth(col)` | `STRFTIME('%Y-%m-01', col)` |
+| LIMIT | `LIMIT N` | `LIMIT N` | `LIMIT N` | `LIMIT N` | `OFFSET 0 ROWS FETCH NEXT N ROWS ONLY` | `LIMIT N` | `LIMIT N` |
+| Identifier quoting | `"col"` | `` `col` `` | `` `col` `` | `"col"` | `[col]` | `"col"` | `"col"` |
+
+### Semantic Query API
+
+The runtime exposes `POST /api/semantic-query` for programmatic access:
+
+```json
+{
+  "metrics": ["total_revenue"],
+  "dimensions": ["channel"],
+  "timeDimension": { "name": "order_date", "granularity": "month" },
+  "filters": [{ "dimension": "channel", "operator": "equals", "values": ["web"] }],
+  "limit": 100,
+  "connection": {
+    "driver": "snowflake",
+    "account": "...",
+    "warehouse": "...",
+    "database": "...",
+    "username": "...",
+    "password": "..."
+  }
+}
+```
+
+The `connection` field is optional — if omitted, uses `defaultConnection` from
+`dql.config.json`. The dialect is automatically selected based on the driver.
+
+---
+
 ## Tips for Easy Testing
 
 - keep sample datasets in `data/`

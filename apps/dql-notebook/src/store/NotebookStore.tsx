@@ -13,6 +13,14 @@ const initialState: NotebookState = {
   notebookDirty: false,
   schemaTables: [],
   schemaLoading: false,
+  semanticLayer: {
+    available: false,
+    provider: null,
+    metrics: [],
+    dimensions: [],
+    hierarchies: [],
+    loading: false,
+  },
   devPanelOpen: false,
   devPanelTab: 'logs',
   queryLog: [],
@@ -147,6 +155,18 @@ function notebookReducer(state: NotebookState, action: NotebookAction): Notebook
           c.id === action.id ? { ...c, paramValue: action.value } : c
         ),
         notebookDirty: true,
+      };
+
+    case 'SET_SEMANTIC_LAYER':
+      return {
+        ...state,
+        semanticLayer: { ...action.layer, loading: false },
+      };
+
+    case 'SET_SEMANTIC_LOADING':
+      return {
+        ...state,
+        semanticLayer: { ...state.semanticLayer, loading: action.loading },
       };
 
     default:

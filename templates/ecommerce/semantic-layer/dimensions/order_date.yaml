@@ -1,0 +1,9 @@
+name: order_date
+label: Order Date
+description: Date the order was placed.
+sql: order_date
+type: date
+table: orders
+tags:
+  - commerce
+  - time

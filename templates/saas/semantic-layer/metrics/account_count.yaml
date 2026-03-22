@@ -1,0 +1,10 @@
+name: account_count
+label: Account Count
+description: Total number of accounts.
+domain: saas
+sql: COUNT(DISTINCT account_id)
+type: count_distinct
+table: subscriptions
+tags:
+  - accounts
+  - saas

@@ -1,0 +1,8 @@
+name: status
+label: Account Status
+description: Subscription status (active, at_risk, churned).
+sql: status
+type: string
+table: subscriptions
+tags:
+  - saas

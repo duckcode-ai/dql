@@ -1,0 +1,14 @@
+name: trip_route
+label: Trip Route
+description: Drill from pickup borough to dropoff borough.
+domain: transportation
+levels:
+  - name: pickup_borough
+    label: Pickup Borough
+    dimension: pickup_borough
+    order: 1
+  - name: dropoff_borough
+    label: Dropoff Borough
+    dimension: dropoff_borough
+    order: 2
+defaultRollup: sum

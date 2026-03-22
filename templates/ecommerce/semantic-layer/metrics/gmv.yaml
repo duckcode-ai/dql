@@ -1,4 +1,10 @@
 name: gmv
 label: Gross Merchandise Value
-domain: commerce
 description: Total order value across the commerce sample dataset.
+domain: commerce
+sql: SUM(order_total)
+type: sum
+table: orders
+tags:
+  - revenue
+  - commerce

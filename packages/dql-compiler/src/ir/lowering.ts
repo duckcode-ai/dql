@@ -38,6 +38,8 @@ import type {
 
 export interface LoweringOptions {
   semanticLayer?: SemanticLayer;
+  /** Driver name for SQL dialect selection in semantic query composition. */
+  driver?: string;
   diagnostics?: string[];
 }
 
@@ -733,6 +735,7 @@ function lowerBlockDecl(node: BlockDeclNode, _options: LoweringOptions): Dashboa
     const composed = _options.semanticLayer.composeQuery({
       metrics: [node.metricRef],
       dimensions: [],
+      driver: _options.driver,
     });
     if (!composed) return null;
 

@@ -1,0 +1,18 @@
+name: customer_geo
+label: Customer Geography
+description: Drill from region down to customer segment.
+domain: commerce
+levels:
+  - name: region
+    label: Region
+    dimension: region
+    order: 1
+  - name: segment
+    label: Segment
+    dimension: segment
+    order: 2
+  - name: channel
+    label: Channel
+    dimension: channel
+    order: 3
+defaultRollup: sum

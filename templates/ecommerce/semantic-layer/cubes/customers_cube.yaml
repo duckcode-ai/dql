@@ -1,0 +1,49 @@
+# Customers cube — joinable from the orders cube.
+
+name: customers
+label: Customers Cube
+description: Customer master data.
+table: customers
+domain: commerce
+
+measures:
+  - name: customer_count
+    label: Customer Count
+    sql: COUNT(DISTINCT customer_id)
+    type: count_distinct
+  - name: avg_health_score
+    label: Average Health Score
+    sql: AVG(health_score)
+    type: avg
+
+dimensions:
+  - name: customer_name
+    label: Customer Name
+    sql: customer_name
+    type: string
+  - name: segment
+    label: Segment
+    sql: segment
+    type: string
+  - name: region
+    label: Region
+    sql: region
+    type: string
+  - name: acquisition_channel
+    label: Acquisition Channel
+    sql: acquisition_channel
+    type: string
+
+time_dimensions:
+  - name: first_order_date
+    label: First Order Date
+    sql: first_order_date
+    primary_time: true
+    granularities:
+      - month
+      - quarter
+      - year
+
+tags:
+  - commerce
+  - customers

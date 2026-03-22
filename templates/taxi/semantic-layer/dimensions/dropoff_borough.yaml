@@ -1,0 +1,9 @@
+name: dropoff_borough
+label: Dropoff Borough
+description: Borough where the trip ended.
+sql: dropoff_borough
+type: string
+table: trips
+tags:
+  - geo
+  - taxi

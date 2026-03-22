@@ -18,7 +18,7 @@ export interface ParamConfig {
   defaultValue: string;
   options?: string[];
 }
-export type SidebarPanel = 'files' | 'schema' | 'outline' | 'connection' | 'reference' | null;
+export type SidebarPanel = 'files' | 'schema' | 'outline' | 'connection' | 'reference' | 'semantic' | null;
 export type DevPanelTab = 'logs' | 'errors';
 
 export interface QueryResult {
@@ -62,6 +62,43 @@ export interface SchemaTable {
   expanded?: boolean;
 }
 
+export interface SemanticMetric {
+  name: string;
+  label: string;
+  description: string;
+  domain: string;
+  type: string;
+  table: string;
+  tags: string[];
+  owner: string | null;
+}
+
+export interface SemanticDimension {
+  name: string;
+  label: string;
+  description: string;
+  type: string;
+  table: string;
+  tags: string[];
+}
+
+export interface SemanticHierarchy {
+  name: string;
+  label: string;
+  description: string;
+  domain?: string;
+  levels: Array<{ name: string; label: string }>;
+}
+
+export interface SemanticLayerState {
+  available: boolean;
+  provider: string | null;
+  metrics: SemanticMetric[];
+  dimensions: SemanticDimension[];
+  hierarchies: SemanticHierarchy[];
+  loading: boolean;
+}
+
 export interface QueryLogEntry {
   id: string;
   cellName: string;
@@ -83,6 +120,7 @@ export interface NotebookState {
   notebookDirty: boolean;
   schemaTables: SchemaTable[];
   schemaLoading: boolean;
+  semanticLayer: SemanticLayerState;
   devPanelOpen: boolean;
   devPanelTab: DevPanelTab;
   queryLog: QueryLogEntry[];
@@ -115,4 +153,6 @@ export type NotebookAction =
   | { type: 'SET_SAVING'; saving: boolean }
   | { type: 'FILE_ADDED'; file: NotebookFile }
   | { type: 'SET_TABLE_COLUMNS'; tableName: string; columns: SchemaColumn[] }
-  | { type: 'SET_PARAM_VALUE'; id: string; value: string };
+  | { type: 'SET_PARAM_VALUE'; id: string; value: string }
+  | { type: 'SET_SEMANTIC_LAYER'; layer: Omit<SemanticLayerState, 'loading'> }
+  | { type: 'SET_SEMANTIC_LOADING'; loading: boolean };

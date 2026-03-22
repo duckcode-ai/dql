@@ -26,3 +26,7 @@ export {
   loadSemanticLayerFromDir,
   loadSemanticLayerFromConfig,
 } from './yaml-loader.js';
+export { resolveSemanticLayer } from './providers/index.js';
+export type { SemanticLayerProviderConfig } from './providers/index.js';
+export { getDialect, listDialectDrivers } from './sql-dialect.js';
+export type { SQLDialect } from './sql-dialect.js';

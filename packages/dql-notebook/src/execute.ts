@@ -20,6 +20,8 @@ export interface NotebookExecutionPlan {
 
 export interface BuildExecutionPlanOptions {
   semanticLayer?: SemanticLayer;
+  /** Driver name for SQL dialect selection (e.g. 'snowflake', 'bigquery'). */
+  driver?: string;
 }
 
 export function buildExecutionPlan(
@@ -50,7 +52,7 @@ export function buildExecutionPlan(
 
   // Semantic blocks: compose SQL from the semantic layer
   if (block.blockType === 'semantic') {
-    return buildSemanticPlan(block, options?.semanticLayer);
+    return buildSemanticPlan(block, options?.semanticLayer, options?.driver);
   }
 
   if (block.blockType !== 'custom') {
@@ -142,6 +144,7 @@ function processSQL(
 function buildSemanticPlan(
   block: BlockDeclNode,
   semanticLayer?: SemanticLayer,
+  driver?: string,
 ): NotebookExecutionPlan {
   if (!semanticLayer) {
     throw new Error(
@@ -176,7 +179,7 @@ function buildSemanticPlan(
     );
   }
 
-  const composed = semanticLayer.composeQuery({ metrics, dimensions });
+  const composed = semanticLayer.composeQuery({ metrics, dimensions, driver });
   if (!composed) {
     throw new Error(
       `Could not compose SQL for semantic block "${block.name}". ` +

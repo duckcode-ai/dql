@@ -3,6 +3,8 @@
  * Maps to the architecture spec's semantic-layer/ directory structure.
  */
 
+import { getDialect, type SQLDialect } from './sql-dialect.js';
+
 export interface MetricDefinition {
   name: string;
   label: string;
@@ -95,6 +97,10 @@ export interface ComposeQueryOptions {
   filters?: Array<{ dimension: string; operator: string; values: string[] }>;
   orderBy?: Array<{ name: string; direction: 'asc' | 'desc' }>;
   limit?: number;
+  /** SQL dialect for the target database. Defaults to DuckDB if not specified. */
+  dialect?: SQLDialect;
+  /** Shorthand: driver name (e.g. 'snowflake', 'bigquery') to auto-resolve dialect. */
+  driver?: string;
 }
 
 export interface ComposeQueryResult {
@@ -300,7 +306,8 @@ export class SemanticLayer {
 
   /** Compose a multi-metric, cross-table SQL query using join graph traversal. */
   composeQuery(options: ComposeQueryOptions): ComposeQueryResult | null {
-    const { metrics, dimensions, timeDimension, filters, orderBy, limit } = options;
+    const { metrics, dimensions, timeDimension, filters, orderBy, limit, driver } = options;
+    const dialect = options.dialect ?? getDialect(driver);
     if (metrics.length === 0) return null;
 
     // Resolve metric definitions
@@ -369,19 +376,11 @@ export class SemanticLayer {
       selectParts.push(`${sql} AS ${d.name}`);
     }
 
-    // Add time dimension with granularity
+    // Add time dimension with granularity (dialect-aware)
     if (timeDimDef && timeDimension) {
       const grain = timeDimension.granularity;
       const tdSql = timeDimDef.sql.includes('.') ? timeDimDef.sql : `${timeDimDef.table}.${timeDimDef.sql}`;
-      const truncated = grain === 'day'
-        ? `DATE_TRUNC('day', ${tdSql})`
-        : grain === 'week'
-          ? `DATE_TRUNC('week', ${tdSql})`
-          : grain === 'month'
-            ? `DATE_TRUNC('month', ${tdSql})`
-            : grain === 'quarter'
-              ? `DATE_TRUNC('quarter', ${tdSql})`
-              : `DATE_TRUNC('year', ${tdSql})`;
+      const truncated = dialect.dateTrunc(grain, tdSql);
       selectParts.push(`${truncated} AS ${timeDimDef.name}_${grain}`);
     }
 
@@ -412,7 +411,7 @@ export class SemanticLayer {
     if (timeDimDef && timeDimension) {
       const grain = timeDimension.granularity;
       const tdSql = timeDimDef.sql.includes('.') ? timeDimDef.sql : `${timeDimDef.table}.${timeDimDef.sql}`;
-      groupByParts.push(`DATE_TRUNC('${grain}', ${tdSql})`);
+      groupByParts.push(dialect.dateTrunc(grain, tdSql));
     }
 
     // Build WHERE
@@ -489,13 +488,13 @@ export class SemanticLayer {
       orderByParts.push(`${o.name} ${o.direction.toUpperCase()}`);
     }
 
-    // Compose full SQL
+    // Compose full SQL (dialect-aware)
     let sql = `SELECT\n  ${selectParts.join(',\n  ')}\n${fromClause}`;
     if (joinClauses.length > 0) sql += `\n${joinClauses.join('\n')}`;
     if (whereParts.length > 0) sql += `\nWHERE ${whereParts.join('\n  AND ')}`;
     if (groupByParts.length > 0) sql += `\nGROUP BY ${groupByParts.join(', ')}`;
     if (orderByParts.length > 0) sql += `\nORDER BY ${orderByParts.join(', ')}`;
-    if (limit) sql += `\nLIMIT ${limit}`;
+    if (limit) sql += `\n${dialect.limitClause(limit)}`;
 
     return {
       sql,

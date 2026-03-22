@@ -57,6 +57,14 @@ function SchemaIcon() {
   );
 }
 
+function SemanticIcon() {
+  return (
+    <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor">
+      <path d="M8 1.5a6.5 6.5 0 1 0 0 13 6.5 6.5 0 0 0 0-13ZM0 8a8 8 0 1 1 16 0A8 8 0 0 1 0 8Zm6.5-2a1.5 1.5 0 1 1 3 0 1.5 1.5 0 0 1-3 0Zm-2 4.5a1.5 1.5 0 1 1 3 0 1.5 1.5 0 0 1-3 0Zm5 0a1.5 1.5 0 1 1 3 0 1.5 1.5 0 0 1-3 0Z" />
+    </svg>
+  );
+}
+
 function OutlineIcon() {
   return (
     <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor">
@@ -144,6 +152,15 @@ export function ActivityBar() {
       </IconButton>
 
       <IconButton
+        title="Semantic Layer"
+        active={state.sidebarPanel === 'semantic' && state.sidebarOpen}
+        onClick={() => handlePanelClick('semantic')}
+        t={t}
+      >
+        <SemanticIcon />
+      </IconButton>
+
+      <IconButton
         title="Outline"
         active={state.sidebarPanel === 'outline' && state.sidebarOpen}
         onClick={() => handlePanelClick('outline')}
@@ -174,9 +191,9 @@ export function ActivityBar() {
       <div style={{ flex: 1 }} />
 
       <IconButton
-        title="Help"
-        active={false}
-        onClick={() => {}}
+        title="Help & Reference"
+        active={state.sidebarPanel === 'reference' && state.sidebarOpen}
+        onClick={() => handlePanelClick('reference')}
         t={t}
       >
         <HelpIcon />

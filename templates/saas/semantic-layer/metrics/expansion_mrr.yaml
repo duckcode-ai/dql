@@ -1,0 +1,11 @@
+name: expansion_mrr
+label: Expansion MRR
+description: Additional MRR from upsells and expansions.
+domain: saas
+sql: SUM(expansion_mrr)
+type: sum
+table: subscriptions
+tags:
+  - revenue
+  - saas
+  - growth

@@ -1,0 +1,9 @@
+name: risk_bucket
+label: Risk Bucket
+description: Account risk level (low, medium, high).
+sql: risk_bucket
+type: string
+table: subscriptions
+tags:
+  - saas
+  - risk

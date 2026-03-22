@@ -1,0 +1,9 @@
+name: pickup_date
+label: Pickup Date
+description: Date the trip started.
+sql: pickup_date
+type: date
+table: trips
+tags:
+  - time
+  - taxi

@@ -1,0 +1,10 @@
+name: trip_count
+label: Trip Count
+description: Total number of trips.
+domain: transportation
+sql: COUNT(trip_id)
+type: count
+table: trips
+tags:
+  - trips
+  - taxi

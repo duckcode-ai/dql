@@ -1,4 +1,4 @@
-import type { NotebookFile, QueryResult, SchemaTable, SchemaColumn } from '../store/types';
+import type { NotebookFile, QueryResult, SchemaTable, SchemaColumn, SemanticLayerState } from '../store/types';
 
 const BASE = window.location.origin;
 
@@ -93,6 +93,14 @@ export const api = {
       });
     } catch (e: any) {
       return { ok: false, message: e.message ?? 'Connection failed' };
+    }
+  },
+
+  async getSemanticLayer(): Promise<Omit<SemanticLayerState, 'loading'>> {
+    try {
+      return await request<Omit<SemanticLayerState, 'loading'>>('/api/semantic-layer');
+    } catch {
+      return { available: false, provider: null, metrics: [], dimensions: [], hierarchies: [] };
     }
   },
 

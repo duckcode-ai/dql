@@ -229,6 +229,130 @@ const DQL_BLOCK_TEMPLATE = `block "Revenue by Channel" {
     }
 }`;
 
+const SEMANTIC_METRIC_YAML = `# semantic-layer/metrics/total_revenue.yaml
+name: total_revenue
+label: Total Revenue
+description: Sum of all recognized revenue.
+domain: finance
+sql: SUM(amount)
+type: sum          # sum|count|count_distinct|avg|min|max|custom
+table: fct_revenue
+tags:
+  - revenue
+  - kpi`;
+
+const SEMANTIC_DIMENSION_YAML = `# semantic-layer/dimensions/segment.yaml
+name: segment
+label: Customer Segment
+description: Customer segment tier.
+sql: segment_tier
+type: string       # string|number|date|boolean
+table: fct_revenue`;
+
+const SEMANTIC_HIERARCHY_YAML = `# semantic-layer/hierarchies/time.yaml
+name: fiscal_time
+label: Fiscal Time
+description: Drill from year to quarter.
+domain: finance
+levels:
+  - name: fiscal_year
+    dimension: fiscal_year
+    order: 1
+  - name: fiscal_quarter
+    dimension: fiscal_quarter
+    order: 2
+defaultRollup: sum`;
+
+const SEMANTIC_CUBE_YAML = `# semantic-layer/cubes/revenue_cube.yaml
+name: revenue
+label: Revenue Cube
+table: fct_revenue
+domain: finance
+
+measures:
+  - name: total_revenue
+    sql: SUM(amount)
+    type: sum
+  - name: deal_count
+    sql: COUNT(*)
+    type: count
+
+dimensions:
+  - name: segment_tier
+    sql: segment_tier
+    type: string
+
+time_dimensions:
+  - name: recognized_at
+    sql: recognized_at
+    primary_time: true
+    granularities: [day, month, quarter, year]
+
+joins:
+  - name: customers
+    type: left
+    sql: "\${left}.customer_id = \${right}.id"`;
+
+const SEMANTIC_CONFIG_DQL = `{
+  "semanticLayer": {
+    "provider": "dql"
+  }
+}`;
+
+const SEMANTIC_CONFIG_DBT = `{
+  "semanticLayer": {
+    "provider": "dbt",
+    "projectPath": "/path/to/your/dbt-project"
+  }
+}`;
+
+const SEMANTIC_CONFIG_CUBEJS = `{
+  "semanticLayer": {
+    "provider": "cubejs",
+    "projectPath": "/path/to/your/cube-project"
+  }
+}`;
+
+const CONNECTION_DUCKDB = `{
+  "defaultConnection": {
+    "driver": "file",
+    "filepath": ":memory:"
+  }
+}`;
+
+const CONNECTION_SNOWFLAKE = `{
+  "defaultConnection": {
+    "driver": "snowflake",
+    "account": "acme.snowflakecomputing.com",
+    "username": "your_user",
+    "password": "\${SNOWFLAKE_PASSWORD}",
+    "database": "ANALYTICS",
+    "schema": "PUBLIC",
+    "warehouse": "COMPUTE_WH",
+    "role": "ANALYST"
+  }
+}`;
+
+const CONNECTION_BIGQUERY = `{
+  "defaultConnection": {
+    "driver": "bigquery",
+    "project": "your-gcp-project-id",
+    "dataset": "analytics",
+    "keyFilename": "./service-account.json"
+  }
+}`;
+
+const CONNECTION_POSTGRES = `{
+  "defaultConnection": {
+    "driver": "postgres",
+    "host": "localhost",
+    "port": 5432,
+    "database": "analytics",
+    "username": "your_user",
+    "password": "\${POSTGRES_PASSWORD}"
+  }
+}`;
+
 const DQL_IMPORT_TEMPLATE = `-- Simple import (uses block's default params)
 @import "./blocks/revenue_by_channel.dql"
 
@@ -356,7 +480,112 @@ FROM table_name`}
         </div>
       </Section>
 
-      {/* 6. Variable References */}
+      {/* 6. Semantic Layer Setup */}
+      <Section title="Semantic Layer" defaultOpen={false} t={t}>
+        <div style={{ fontSize: 12, color: t.textSecondary, lineHeight: 1.7, fontFamily: t.font, marginBottom: 8 }}>
+          Define reusable metrics, dimensions, and hierarchies in YAML.
+          They appear in the{' '}
+          <strong style={{ color: t.textPrimary }}>Semantic Layer</strong> sidebar panel.
+        </div>
+
+        <div style={{ fontSize: 11, fontWeight: 600, color: t.textSecondary, fontFamily: t.font, margin: '10px 0 4px', letterSpacing: '0.03em' }}>
+          Directory Structure
+        </div>
+        <CodeBlock t={t} code={`my-project/
+├── dql.config.json
+└── semantic-layer/
+    ├── metrics/       ← one YAML per metric
+    ├── dimensions/    ← one YAML per dimension
+    ├── hierarchies/   ← optional drill paths
+    └── cubes/         ← optional (groups all into one)`} />
+
+        <div style={{ fontSize: 11, fontWeight: 600, color: t.textSecondary, fontFamily: t.font, margin: '12px 0 4px', letterSpacing: '0.03em' }}>
+          Metric YAML
+        </div>
+        <CodeBlock t={t} code={SEMANTIC_METRIC_YAML} />
+
+        <div style={{ fontSize: 11, fontWeight: 600, color: t.textSecondary, fontFamily: t.font, margin: '12px 0 4px', letterSpacing: '0.03em' }}>
+          Dimension YAML
+        </div>
+        <CodeBlock t={t} code={SEMANTIC_DIMENSION_YAML} />
+
+        <div style={{ fontSize: 11, fontWeight: 600, color: t.textSecondary, fontFamily: t.font, margin: '12px 0 4px', letterSpacing: '0.03em' }}>
+          Hierarchy YAML
+        </div>
+        <CodeBlock t={t} code={SEMANTIC_HIERARCHY_YAML} />
+
+        <div style={{ fontSize: 11, fontWeight: 600, color: t.textSecondary, fontFamily: t.font, margin: '12px 0 4px', letterSpacing: '0.03em' }}>
+          Cube YAML (advanced — multi-table with joins)
+        </div>
+        <CodeBlock t={t} code={SEMANTIC_CUBE_YAML} />
+      </Section>
+
+      {/* 7. Semantic Layer Providers */}
+      <Section title="Semantic Layer Providers" defaultOpen={false} t={t}>
+        <div style={{ fontSize: 12, color: t.textSecondary, lineHeight: 1.7, fontFamily: t.font, marginBottom: 8 }}>
+          Add to your <code style={{ fontFamily: t.fontMono, color: t.accent, fontSize: 11 }}>dql.config.json</code> to
+          connect a semantic layer provider.
+        </div>
+
+        <div style={{ fontSize: 11, fontWeight: 600, color: t.textSecondary, fontFamily: t.font, margin: '10px 0 4px', letterSpacing: '0.03em' }}>
+          DQL Native (YAML files in semantic-layer/)
+        </div>
+        <CodeBlock t={t} code={SEMANTIC_CONFIG_DQL} />
+
+        <div style={{ fontSize: 11, fontWeight: 600, color: t.textSecondary, fontFamily: t.font, margin: '12px 0 4px', letterSpacing: '0.03em' }}>
+          dbt (reads models/**/*.yml)
+        </div>
+        <CodeBlock t={t} code={SEMANTIC_CONFIG_DBT} />
+        <div style={{ marginTop: 4, fontSize: 11, color: t.textMuted, fontFamily: t.font, lineHeight: 1.5 }}>
+          Point to your dbt project root (directory with <code style={{ fontFamily: t.fontMono, fontSize: 10 }}>dbt_project.yml</code>).
+          Reads <code style={{ fontFamily: t.fontMono, fontSize: 10 }}>semantic_models</code> and{' '}
+          <code style={{ fontFamily: t.fontMono, fontSize: 10 }}>metrics</code> blocks (dbt 1.6+).
+        </div>
+
+        <div style={{ fontSize: 11, fontWeight: 600, color: t.textSecondary, fontFamily: t.font, margin: '12px 0 4px', letterSpacing: '0.03em' }}>
+          Cube.js (reads model/ or schema/)
+        </div>
+        <CodeBlock t={t} code={SEMANTIC_CONFIG_CUBEJS} />
+        <div style={{ marginTop: 4, fontSize: 11, color: t.textMuted, fontFamily: t.font, lineHeight: 1.5 }}>
+          Point to your Cube.js project root. Reads{' '}
+          <code style={{ fontFamily: t.fontMono, fontSize: 10 }}>cubes:</code> blocks from YAML schema files.
+        </div>
+      </Section>
+
+      {/* 8. Connection Setup */}
+      <Section title="Connection Setup" defaultOpen={false} t={t}>
+        <div style={{ fontSize: 12, color: t.textSecondary, lineHeight: 1.7, fontFamily: t.font, marginBottom: 8 }}>
+          Configure <code style={{ fontFamily: t.fontMono, color: t.accent, fontSize: 11 }}>defaultConnection</code> in{' '}
+          <code style={{ fontFamily: t.fontMono, color: t.accent, fontSize: 11 }}>dql.config.json</code>.
+        </div>
+
+        <div style={{ fontSize: 11, fontWeight: 600, color: t.textSecondary, fontFamily: t.font, margin: '10px 0 4px', letterSpacing: '0.03em' }}>
+          DuckDB (in-memory — default)
+        </div>
+        <CodeBlock t={t} code={CONNECTION_DUCKDB} />
+
+        <div style={{ fontSize: 11, fontWeight: 600, color: t.textSecondary, fontFamily: t.font, margin: '12px 0 4px', letterSpacing: '0.03em' }}>
+          Snowflake
+        </div>
+        <CodeBlock t={t} code={CONNECTION_SNOWFLAKE} />
+
+        <div style={{ fontSize: 11, fontWeight: 600, color: t.textSecondary, fontFamily: t.font, margin: '12px 0 4px', letterSpacing: '0.03em' }}>
+          BigQuery
+        </div>
+        <CodeBlock t={t} code={CONNECTION_BIGQUERY} />
+
+        <div style={{ fontSize: 11, fontWeight: 600, color: t.textSecondary, fontFamily: t.font, margin: '12px 0 4px', letterSpacing: '0.03em' }}>
+          PostgreSQL
+        </div>
+        <CodeBlock t={t} code={CONNECTION_POSTGRES} />
+
+        <div style={{ marginTop: 8, fontSize: 11, color: t.textMuted, fontFamily: t.font, lineHeight: 1.5 }}>
+          Use <code style={{ fontFamily: t.fontMono, fontSize: 10 }}>${'${ENV_VAR}'}</code> syntax for secrets.
+          Run <code style={{ fontFamily: t.fontMono, fontSize: 10 }}>dql doctor</code> to verify your connection.
+        </div>
+      </Section>
+
+      {/* 9. Variable References */}
       <Section title="Variable References" defaultOpen={false} t={t}>
         <div
           style={{

@@ -1,0 +1,10 @@
+name: order_count
+label: Order Count
+description: Total number of orders.
+domain: commerce
+sql: COUNT(order_id)
+type: count
+table: orders
+tags:
+  - orders
+  - commerce

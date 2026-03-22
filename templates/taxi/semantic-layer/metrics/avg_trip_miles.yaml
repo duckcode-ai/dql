@@ -1,0 +1,10 @@
+name: avg_trip_miles
+label: Average Trip Miles
+description: Average distance per trip.
+domain: transportation
+sql: AVG(trip_miles)
+type: avg
+table: trips
+tags:
+  - trips
+  - taxi
