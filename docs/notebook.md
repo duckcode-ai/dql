@@ -231,6 +231,96 @@ The Schema panel (left sidebar, second icon) auto-discovers tables by scanning t
 
 ---
 
+## Semantic Panel
+
+The Semantic panel (left sidebar, diamond icon) lets you browse and query metrics, dimensions, and hierarchies defined in your project's semantic layer.
+
+### What it shows
+
+- **Metrics** — reusable aggregations (e.g., Total Revenue = `SUM(amount)`)
+- **Dimensions** — groupable columns (e.g., Segment, Region, Channel)
+- **Hierarchies** — drill paths (e.g., Year → Quarter → Month)
+- **Provider badge** — shows whether the source is `dql`, `dbt`, or `cubejs`
+
+Click any metric or dimension to expand it and see its SQL expression, type, table, tags, and description.
+
+Use the search box to filter by name, label, description, or tags.
+
+### Compose Query (point-and-click)
+
+The **Compose Query** section at the top of the Semantic panel lets you build SQL without writing it:
+
+1. **Check metrics** — select one or more metrics (e.g., GMV, Order Count)
+2. **Check dimensions** — select grouping columns (e.g., Region, Segment)
+3. **Click "Compose SQL"** — DQL generates the appropriate SQL for your database driver
+4. **Click "+ Insert as Cell"** — a new SQL cell is added to the end of your notebook with the query pre-filled
+5. **Press Shift+Enter** to run it
+
+The generated SQL uses the correct dialect for your configured connection (DuckDB, Postgres, Snowflake, etc.).
+
+**Alternative:** Click **Copy** to copy the SQL to your clipboard and paste it manually.
+
+### Mixing semantic queries with custom SQL
+
+You can use semantic-composed cells and hand-written SQL cells in the same notebook. They all run against the same database connection.
+
+**Example workflow:**
+
+```
+Cell 1 [SQL - from Compose Query] — name it "revenue_by_region"
+  SELECT region, SUM(order_total) AS gmv, COUNT(*) AS order_count
+  FROM orders
+  GROUP BY region ORDER BY gmv DESC
+
+Cell 2 [SQL - custom] — your own deeper analysis
+  SELECT
+      region,
+      channel,
+      AVG(order_total) AS avg_order,
+      COUNT(DISTINCT customer_id) AS unique_customers
+  FROM orders
+  GROUP BY region, channel
+  ORDER BY avg_order DESC
+
+Cell 3 [SQL - custom] — reference cell 1 as a CTE
+  SELECT * FROM {{revenue_by_region}}
+  WHERE gmv > 10000
+
+Cell 4 [Param] — segment filter dropdown
+  Name: segment | Type: select | Options: All, Enterprise, SMB
+
+Cell 5 [SQL - custom] — filtered by param
+  SELECT * FROM {{revenue_by_region}}
+  WHERE '{{segment}}' = 'All' OR region = '{{segment}}'
+```
+
+### Setting up the semantic layer
+
+If the panel shows "Set Up Semantic Layer", you need to configure it in `dql.config.json`:
+
+**DQL native (write YAML files):**
+```json
+{ "semanticLayer": { "provider": "dql" } }
+```
+
+**dbt (point to your dbt project):**
+```json
+{ "semanticLayer": { "provider": "dbt", "projectPath": "/path/to/dbt-project" } }
+```
+
+**Cube.js (point to your Cube project):**
+```json
+{ "semanticLayer": { "provider": "cubejs", "projectPath": "/path/to/cube-project" } }
+```
+
+See the [Semantic Layer Guide](./semantic-layer-guide.md) for full details on YAML format, dbt integration, and Cube.js integration.
+
+### Refreshing
+
+Click the refresh button (↻) in the Semantic panel toolbar to reload definitions after editing YAML files. No restart needed.
+
+---
+
 ## Hot Reload
 
 The notebook server watches the project directory for file changes. When a `.dqlnb` file is modified on disk (e.g. by another editor or a CLI command like `dql new notebook`), the UI reloads it automatically. CSS and UI assets also hot-reload during development.

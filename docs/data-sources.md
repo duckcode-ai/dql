@@ -1,36 +1,34 @@
-# Data Sources
+# Data Sources & Connector Reference
 
-DQL Phase 1 is optimized for **local-first experimentation with a browser notebook on top**.
-
-The easiest way to adopt DQL is to preview blocks against local files using the
-`file` or `duckdb` connectors.
+DQL supports **14 database connectors** out of the box. Start with local file mode (no database needed), then connect to your warehouse when ready.
 
 ---
 
-## Best First Experience
-
-Use the starter project and sample CSV, then open the notebook immediately:
+## Quick Start (No Database)
 
 ```bash
-dql init my-dql-project
-cd my-dql-project
-dql doctor
-dql notebook
+npx @duckcodeailabs/dql-cli init my-project --template ecommerce
+cd my-project
+npx @duckcodeailabs/dql-cli notebook
 ```
 
-The starter block reads from:
+The default `driver: "file"` uses DuckDB in-memory. Query local CSV, Parquet, and JSON files:
 
 ```sql
-SELECT * FROM read_csv_auto('./data/revenue.csv')
+SELECT * FROM read_csv_auto('./data/orders.csv')
+SELECT * FROM read_parquet('./data/events.parquet')
+SELECT * FROM read_json('./data/config.json')
 ```
-
-This avoids needing a warehouse account on day one.
 
 ---
 
-## Local File Mode
+## Connector Config Reference
 
-Use this in `dql.config.json`:
+All connections go in `dql.config.json` under `defaultConnection`. Use `${ENV_VAR}` for secrets — DQL resolves them from your shell environment.
+
+### Local / Embedded
+
+#### DuckDB In-Memory (`file`)
 
 ```json
 {
@@ -41,109 +39,77 @@ Use this in `dql.config.json`:
 }
 ```
 
-Then write queries like:
+| Field | Required | Description |
+|---|---|---|
+| `driver` | | Must be `"file"` |
+| `filepath` | | Path to `.duckdb` file, or `":memory:"` (default) |
 
-```sql
-SELECT *
-FROM read_csv_auto('./data/revenue.csv')
-```
-
-You can also use DuckDB readers such as:
-
-- `read_csv_auto(...)`
-- `read_parquet(...)`
-- `read_json(...)`
-
----
-
-## DuckDB File Mode
-
-If you already have a DuckDB database file:
+#### DuckDB File (`duckdb`)
 
 ```json
 {
   "defaultConnection": {
     "driver": "duckdb",
-    "filepath": "./local/dev.duckdb"
+    "filepath": "./data/warehouse.duckdb"
   }
 }
 ```
 
-Then your DQL query can use normal SQL against tables inside that database.
+| Field | Required | Description |
+|---|---|---|
+| `driver` | | Must be `"duckdb"` |
+| `filepath` | | Path to the `.duckdb` database file |
 
----
-
-## Warehouse Connectors
-
-DQL also ships connector support for:
-
-- File-backed local DuckDB queries
-- DuckDB
-- SQLite
-- PostgreSQL
-- Redshift
-- MySQL
-- SQL Server / MSSQL
-- Microsoft Fabric
-- Snowflake
-- BigQuery
-- ClickHouse
-- Databricks SQL
-- Amazon Athena
-- Trino
-
-For open-source adoption, we recommend starting with local file or DuckDB mode
-before connecting cloud warehouses.
-
----
-
-## Connector Reference
-
-Use strict JSON in `dql.config.json`. Pick one `defaultConnection` block and
-replace the starter value with the connector you actually want to use.
-
-### SQLite
-
-1. Create or choose a local SQLite database file.
-2. Update `dql.config.json`:
+#### SQLite (`sqlite`)
 
 ```json
 {
   "defaultConnection": {
     "driver": "sqlite",
-    "filepath": "./local/dev.sqlite"
+    "database": "./data/analytics.sqlite"
   }
 }
 ```
 
-3. Query tables from that database directly in DQL.
+| Field | Required | Description |
+|---|---|---|
+| `driver` | | Must be `"sqlite"` |
+| `database` | | Path to the `.sqlite` or `.db` file |
 
-### PostgreSQL
+---
 
-1. Make sure your PostgreSQL instance is reachable from your machine.
-2. Update `dql.config.json`:
+### Relational Databases
+
+#### PostgreSQL (`postgres`)
 
 ```json
 {
   "defaultConnection": {
-    "driver": "postgresql",
+    "driver": "postgres",
     "host": "localhost",
     "port": 5432,
     "database": "analytics",
-    "username": "postgres",
-    "password": "postgres",
+    "username": "analyst",
+    "password": "${POSTGRES_PASSWORD}",
     "ssl": false
   }
 }
 ```
 
-3. Run `dql doctor`.
-4. Preview or build against your warehouse-backed tables.
+| Field | Required | Default | Description |
+|---|---|---|---|
+| `driver` | | — | Must be `"postgres"` |
+| `host` | | — | Hostname or IP address |
+| `port` | | `5432` | Port number |
+| `database` | | — | Database name |
+| `username` | | — | Database user |
+| `password` | | — | Password (use `${ENV_VAR}`) |
+| `ssl` | | `false` | Enable SSL/TLS |
+| `schema` | | `"public"` | Default schema |
 
-### MySQL
+**Works with:** PostgreSQL, Supabase, Amazon RDS, Aurora, Neon, CockroachDB
 
-1. Make sure your MySQL instance is reachable from your machine.
-2. Update `dql.config.json`:
+#### MySQL (`mysql`)
 
 ```json
 {
@@ -153,56 +119,25 @@ replace the starter value with the connector you actually want to use.
     "port": 3306,
     "database": "analytics",
     "username": "root",
-    "password": "root",
+    "password": "${MYSQL_PASSWORD}",
     "ssl": false
   }
 }
 ```
 
-3. Run `dql doctor`.
+| Field | Required | Default | Description |
+|---|---|---|---|
+| `driver` | | — | Must be `"mysql"` |
+| `host` | | — | Hostname or IP address |
+| `port` | | `3306` | Port number |
+| `database` | | — | Database name |
+| `username` | | — | Database user |
+| `password` | | — | Password (use `${ENV_VAR}`) |
+| `ssl` | | `false` | Enable SSL/TLS |
 
-### Snowflake
+**Works with:** MySQL, MariaDB, PlanetScale, TiDB, Vitess
 
-1. Identify your Snowflake account, warehouse, database, schema, and role.
-2. Update `dql.config.json`:
-
-```json
-{
-  "defaultConnection": {
-    "driver": "snowflake",
-    "account": "your-account",
-    "warehouse": "COMPUTE_WH",
-    "database": "ANALYTICS",
-    "schema": "PUBLIC",
-    "username": "user",
-    "password": "password",
-    "role": "ANALYST"
-  }
-}
-```
-
-3. Run `dql doctor`.
-
-### BigQuery
-
-1. Make sure your local environment already has access to the target GCP project.
-2. Update `dql.config.json`:
-
-```json
-{
-  "defaultConnection": {
-    "driver": "bigquery",
-    "projectId": "your-gcp-project"
-  }
-}
-```
-
-3. Run `dql doctor`.
-
-### SQL Server / MSSQL
-
-1. Make sure your SQL Server instance is reachable from your machine.
-2. Update `dql.config.json`:
+#### SQL Server (`mssql`)
 
 ```json
 {
@@ -212,47 +147,131 @@ replace the starter value with the connector you actually want to use.
     "port": 1433,
     "database": "analytics",
     "username": "sa",
-    "password": "yourStrong(!)Password",
+    "password": "${MSSQL_PASSWORD}",
     "ssl": false
   }
 }
 ```
 
-3. Run `dql doctor`.
+| Field | Required | Default | Description |
+|---|---|---|---|
+| `driver` | | — | Must be `"mssql"` |
+| `host` | | — | Hostname or IP address |
+| `port` | | `1433` | Port number |
+| `database` | | — | Database name |
+| `username` | | — | Database user |
+| `password` | | — | Password (use `${ENV_VAR}`) |
+| `ssl` | | `false` | Enable SSL/TLS |
 
-### Redshift
+**Works with:** SQL Server, Azure SQL Database, Azure SQL Managed Instance
+
+---
+
+### Cloud Data Warehouses
+
+#### Snowflake (`snowflake`)
+
+```json
+{
+  "defaultConnection": {
+    "driver": "snowflake",
+    "account": "your-account.snowflakecomputing.com",
+    "username": "your_user",
+    "password": "${SNOWFLAKE_PASSWORD}",
+    "database": "ANALYTICS",
+    "schema": "PUBLIC",
+    "warehouse": "COMPUTE_WH",
+    "role": "ANALYST"
+  }
+}
+```
+
+| Field | Required | Default | Description |
+|---|---|---|---|
+| `driver` | | — | Must be `"snowflake"` |
+| `account` | | — | Snowflake account identifier (e.g., `abc123.us-east-1`) |
+| `username` | | — | Snowflake username |
+| `password` | | — | Password (use `${ENV_VAR}`) |
+| `database` | | — | Database name |
+| `schema` | | `"PUBLIC"` | Default schema |
+| `warehouse` | | — | Virtual warehouse name |
+| `role` | | — | Role to use for the session |
+
+#### BigQuery (`bigquery`)
+
+```json
+{
+  "defaultConnection": {
+    "driver": "bigquery",
+    "project": "your-gcp-project-id",
+    "dataset": "analytics",
+    "keyFilename": "./service-account.json"
+  }
+}
+```
+
+| Field | Required | Default | Description |
+|---|---|---|---|
+| `driver` | | — | Must be `"bigquery"` |
+| `project` | | — | GCP project ID |
+| `dataset` | | — | Default dataset |
+| `keyFilename` | | — | Path to service account JSON key file |
+| `location` | | `"US"` | Dataset location (e.g., `"EU"`, `"us-central1"`) |
+
+**Auth:** If `keyFilename` is not set, uses Application Default Credentials (`gcloud auth application-default login`).
+
+#### Amazon Redshift (`redshift`)
 
 ```json
 {
   "defaultConnection": {
     "driver": "redshift",
-    "host": "example-cluster.abc123.us-east-1.redshift.amazonaws.com",
+    "host": "cluster.abc123.us-east-1.redshift.amazonaws.com",
     "port": 5439,
     "database": "analytics",
     "username": "analyst",
-    "password": "secret",
+    "password": "${REDSHIFT_PASSWORD}",
     "ssl": true
   }
 }
 ```
 
-### Microsoft Fabric
+| Field | Required | Default | Description |
+|---|---|---|---|
+| `driver` | | — | Must be `"redshift"` |
+| `host` | | — | Cluster endpoint |
+| `port` | | `5439` | Port number |
+| `database` | | — | Database name |
+| `username` | | — | Database user |
+| `password` | | — | Password (use `${ENV_VAR}`) |
+| `ssl` | | `true` | Enable SSL (recommended) |
+| `schema` | | `"public"` | Default schema |
+
+#### Databricks SQL (`databricks`)
 
 ```json
 {
   "defaultConnection": {
-    "driver": "fabric",
-    "host": "workspace.datawarehouse.fabric.microsoft.com",
-    "port": 1433,
-    "database": "analytics",
-    "username": "user",
-    "password": "secret",
-    "ssl": true
+    "driver": "databricks",
+    "host": "dbc-example.cloud.databricks.com",
+    "warehouse": "your-sql-warehouse-id",
+    "catalog": "main",
+    "schema": "analytics",
+    "token": "${DATABRICKS_TOKEN}"
   }
 }
 ```
 
-### ClickHouse
+| Field | Required | Default | Description |
+|---|---|---|---|
+| `driver` | | — | Must be `"databricks"` |
+| `host` | | — | Workspace hostname |
+| `warehouse` | | — | SQL Warehouse ID (from the HTTP Path) |
+| `catalog` | | `"main"` | Unity Catalog name |
+| `schema` | | `"default"` | Default schema |
+| `token` | | — | Personal access token (use `${ENV_VAR}`) |
+
+#### ClickHouse (`clickhouse`)
 
 ```json
 {
@@ -262,28 +281,25 @@ replace the starter value with the connector you actually want to use.
     "port": 8443,
     "database": "default",
     "username": "play",
-    "password": "play",
+    "password": "${CLICKHOUSE_PASSWORD}",
     "ssl": true
   }
 }
 ```
 
-### Databricks SQL
+| Field | Required | Default | Description |
+|---|---|---|---|
+| `driver` | | — | Must be `"clickhouse"` |
+| `host` | | — | Hostname |
+| `port` | | `8443` | HTTP(S) port |
+| `database` | | `"default"` | Database name |
+| `username` | | — | User |
+| `password` | | — | Password (use `${ENV_VAR}`) |
+| `ssl` | | `true` | Enable SSL |
 
-```json
-{
-  "defaultConnection": {
-    "driver": "databricks",
-    "host": "dbc-example.cloud.databricks.com",
-    "warehouse": "warehouse-id",
-    "catalog": "main",
-    "schema": "analytics",
-    "token": "dapi..."
-  }
-}
-```
+**Works with:** ClickHouse Cloud, self-hosted ClickHouse
 
-### Athena
+#### Amazon Athena (`athena`)
 
 ```json
 {
@@ -297,7 +313,17 @@ replace the starter value with the connector you actually want to use.
 }
 ```
 
-### Trino
+| Field | Required | Default | Description |
+|---|---|---|---|
+| `driver` | | — | Must be `"athena"` |
+| `region` | | — | AWS region |
+| `database` | | — | Athena database (Glue catalog) |
+| `outputLocation` | | — | S3 path for query results |
+| `workgroup` | | `"primary"` | Athena workgroup |
+
+**Auth:** Uses AWS SDK default credential chain (env vars, `~/.aws/credentials`, IAM role).
+
+#### Trino (`trino`)
 
 ```json
 {
@@ -308,43 +334,109 @@ replace the starter value with the connector you actually want to use.
     "catalog": "lakehouse",
     "schema": "analytics",
     "username": "analyst",
-    "password": "secret",
+    "password": "${TRINO_PASSWORD}",
     "ssl": true
   }
 }
+```
+
+| Field | Required | Default | Description |
+|---|---|---|---|
+| `driver` | | — | Must be `"trino"` |
+| `host` | | — | Trino coordinator hostname |
+| `port` | | `8080` | Port number |
+| `catalog` | | — | Default catalog |
+| `schema` | | `"default"` | Default schema |
+| `username` | | — | User |
+| `password` | | — | Password (if auth is enabled) |
+| `ssl` | | `false` | Enable SSL |
+
+**Works with:** Trino, Starburst, Starburst Galaxy
+
+#### Microsoft Fabric (`fabric`)
+
+```json
+{
+  "defaultConnection": {
+    "driver": "fabric",
+    "host": "workspace.datawarehouse.fabric.microsoft.com",
+    "port": 1433,
+    "database": "analytics",
+    "username": "user",
+    "password": "${FABRIC_PASSWORD}",
+    "ssl": true
+  }
+}
+```
+
+| Field | Required | Default | Description |
+|---|---|---|---|
+| `driver` | | — | Must be `"fabric"` |
+| `host` | | — | Fabric SQL endpoint |
+| `port` | | `1433` | Port number |
+| `database` | | — | Lakehouse or warehouse name |
+| `username` | | — | Azure AD user or service principal |
+| `password` | | — | Password or token (use `${ENV_VAR}`) |
+| `ssl` | | `true` | Enable SSL (required for Fabric) |
+
+---
+
+## All Connectors at a Glance
+
+| Driver | `driver` value | Typical use | Auth method |
+|---|---|---|---|
+| DuckDB In-Memory | `file` | Local CSV/Parquet analysis | None |
+| DuckDB File | `duckdb` | Persistent local warehouse | None |
+| SQLite | `sqlite` | Lightweight embedded DB | None |
+| PostgreSQL | `postgres` | Supabase, RDS, Aurora, Neon | user/password |
+| MySQL | `mysql` | MariaDB, PlanetScale, TiDB | user/password |
+| SQL Server | `mssql` | Azure SQL, on-prem MSSQL | user/password |
+| Snowflake | `snowflake` | Cloud data warehouse | user/password + account |
+| BigQuery | `bigquery` | Google Cloud analytics | Service account or ADC |
+| Redshift | `redshift` | AWS data warehouse | user/password |
+| Databricks | `databricks` | Lakehouse analytics | Personal access token |
+| ClickHouse | `clickhouse` | Real-time analytics | user/password |
+| Athena | `athena` | S3-based serverless queries | AWS credentials |
+| Trino | `trino` | Federated queries, Starburst | user/password |
+| Fabric | `fabric` | Microsoft Fabric lakehouse | Azure AD |
+
+---
+
+## Security Best Practices
+
+**Never hardcode secrets.** Use environment variables:
+
+```json
+{
+  "defaultConnection": {
+    "driver": "snowflake",
+    "password": "${SNOWFLAKE_PASSWORD}"
+  }
+}
+```
+
+Set the variable before running DQL:
+
+```bash
+export SNOWFLAKE_PASSWORD="your-secret"
+npx @duckcodeailabs/dql-cli notebook
+```
+
+Or use a `.env` file (add to `.gitignore`):
+
+```bash
+# .env (never commit this)
+SNOWFLAKE_PASSWORD=your-secret
+POSTGRES_PASSWORD=your-secret
 ```
 
 ---
 
 ## Semantic Layer + Connector Integration
 
-All 14 connectors fully support the semantic layer. When you define metrics and
-dimensions in `semantic-layer/` YAML files, DQL automatically generates
-**database-specific SQL** for the configured connector.
+All 14 connectors support the semantic layer. DQL generates **database-specific SQL** for each driver.
 
-### How It Works
-
-1. Define metrics/dimensions in YAML (same shape as dbt semantic layer):
-
-```yaml
-# semantic-layer/metrics/revenue.yaml
-name: total_revenue
-sql: SUM(amount)
-type: sum
-table: orders
-```
-
-2. Reference them in semantic blocks (no raw SQL needed):
-
-```dql
-block "Revenue by Channel" {
-    type = "semantic"
-    metric = "total_revenue"
-    visualization { chart = "bar" }
-}
-```
-
-3. DQL composes the right SQL for your database:
+### SQL dialect differences (handled automatically)
 
 | Feature | PostgreSQL | BigQuery | MySQL | Snowflake | MSSQL | ClickHouse | SQLite |
 |---------|-----------|----------|-------|-----------|-------|------------|--------|
@@ -354,7 +446,7 @@ block "Revenue by Channel" {
 
 ### Semantic Query API
 
-The runtime exposes `POST /api/semantic-query` for programmatic access:
+The notebook runtime exposes `POST /api/semantic-query`:
 
 ```json
 {
@@ -362,65 +454,45 @@ The runtime exposes `POST /api/semantic-query` for programmatic access:
   "dimensions": ["channel"],
   "timeDimension": { "name": "order_date", "granularity": "month" },
   "filters": [{ "dimension": "channel", "operator": "equals", "values": ["web"] }],
-  "limit": 100,
-  "connection": {
-    "driver": "snowflake",
-    "account": "...",
-    "warehouse": "...",
-    "database": "...",
-    "username": "...",
-    "password": "..."
-  }
+  "limit": 100
 }
 ```
 
-The `connection` field is optional — if omitted, uses `defaultConnection` from
-`dql.config.json`. The dialect is automatically selected based on the driver.
+Uses `defaultConnection` automatically. Override with a `"connection": { ... }` field if needed.
 
 ---
 
-## Tips for Easy Testing
+## Test Your Connection
 
-- keep sample datasets in `data/`
-- start with `dql notebook` so you can iterate cell-by-cell before formalizing blocks
-- use query-only blocks for validation flows
-- add `tests { assert row_count > 0 }` to every starter block
-- prefer small local CSV or Parquet files for examples
+### From the CLI
+
+```bash
+npx @duckcodeailabs/dql-cli doctor
+```
+
+Look for:
+```
+ Default connection    driver=postgres
+ Local query runtime   driver=postgres is available
+```
+
+### From the Notebook
+
+1. Launch: `npx @duckcodeailabs/dql-cli notebook`
+2. Click the **Connection** panel (plug icon) in the sidebar
+3. Click **Test Connection**
+4. See "Connected to postgres successfully" (or your driver)
 
 ---
 
 ## Troubleshooting
 
-### Preview works but query fails
-
-Run:
-
-```bash
-dql doctor
-```
-
-Check that:
-
-- `dql.config.json` exists
-- `defaultConnection` is set
-- your query paths are correct relative to the project root
-- your selected connector settings match the reference above
-
-### `read_csv_auto(...)` cannot find a file
-
-Use project-relative paths like:
-
-```sql
-FROM read_csv_auto('./data/revenue.csv')
-```
-
-### Local DuckDB support is missing
-
-If your environment does not include DuckDB yet, add it to your local project:
-
-```bash
-npm install duckdb
-```
-
-If you changed Node versions after installing dependencies, rerun `pnpm install`
-before using local file or DuckDB preview.
+| Problem | Cause | Fix |
+|---------|-------|-----|
+| `command not found: dql` | CLI not installed | Use `npx @duckcodeailabs/dql-cli` |
+| `read_csv_auto(...) file not found` | Wrong path | Use `./data/file.csv` (project-relative) |
+| Connection refused | Database not running or wrong host/port | Check `host`, `port`, firewall rules |
+| Authentication failed | Wrong credentials | Verify `username`, `password`, env vars |
+| SSL required | Cloud database requires SSL | Add `"ssl": true` to config |
+| `${ENV_VAR}` not resolved | Environment variable not set | `export ENV_VAR=value` before running |
+| DuckDB native module error | Node version changed | Run `pnpm install` to rebuild bindings |
