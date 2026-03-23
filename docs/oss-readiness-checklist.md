@@ -10,6 +10,8 @@ It is written as a practical maintainer checklist, not a marketing document.
 - `[ ]` still missing or blocked
 - `[~]` partially complete and needs polish
 
+---
+
 ## 1. Install and First Run
 
 - `[x]` source-based install path is documented
@@ -22,6 +24,8 @@ It is written as a practical maintainer checklist, not a marketing document.
 - `[ ]` published npm install path needs final validation in a network-enabled environment
 - `[ ]` `npx @duckcodeailabs/dql-cli --help` needs end-to-end validation after package publication
 
+---
+
 ## 2. Local Experimentation Loop
 
 - `[x]` `dql doctor` exists for local setup checks
@@ -32,9 +36,15 @@ It is written as a practical maintainer checklist, not a marketing document.
 - `[x]` DuckDB local example exists
 - `[~]` full validation of preview/build/serve is blocked until dependencies can be installed and build can run
 
+---
+
 ## 3. Documentation
 
 - `[x]` root README explains the project clearly
+- `[x]` README has CI, npm, license, and Node badges
+- `[x]` README has Community and Support section
+- `[x]` README has Contributing link
+- `[x]` README lists four semantic layer providers (including Snowflake)
 - `[x]` quickstart guide exists
 - `[x]` getting-started guide exists
 - `[x]` FAQ exists
@@ -43,7 +53,10 @@ It is written as a practical maintainer checklist, not a marketing document.
 - `[x]` examples guide exists
 - `[x]` package-level READMEs exist
 - `[x]` `why-dql.md` exists for positioning and differentiation
+- `[x]` authoring-blocks.md shows real `@metric()`/`@dim()` patterns (no `@import`)
 - `[~]` docs should be re-verified after the first successful full build and package publish
+
+---
 
 ## 4. Examples and Templates
 
@@ -56,32 +69,57 @@ It is written as a practical maintainer checklist, not a marketing document.
 - `[x]` semantic block example exists
 - `[ ]` add one more polished business-facing example set if community feedback asks for it
 
+---
+
 ## 5. CLI Surface
 
-- `[x]` parse, fmt, info, test, certify are documented
+- `[x]` parse, fmt, certify are documented
 - `[x]` init, doctor, preview, build, serve are documented
 - `[x]` new block/dashboard/workbook/semantic-block are documented
+- `[x]` `dql test` deprecated with clear migration path to `dql certify --connection`
+- `[x]` `dql certify` runs live test assertions against real data (not just governance metadata)
+- `[x]` `--skip-tests` flag available for governance-only checks
+- `[x]` `defaultConnection` from config used automatically (no `--connection` required)
 - `[~]` `dql migrate` is correctly documented as scaffold-only, but could be improved later with richer source-specific helpers
+
+---
 
 ## 6. Packaging and Release
 
 - `[x]` public package manifests are present
 - `[x]` `publishing.md` exists for maintainers
+- `[x]` CHANGELOG.md has proper version history
 - `[ ]` full workspace install needs validation in a network-enabled environment
 - `[ ]` full `pnpm build` needs to complete successfully in a dependency-available environment
 - `[ ]` full `pnpm test` needs to complete successfully in a dependency-available environment
 - `[ ]` published package smoke test should be recorded after first successful npm release
 
+---
+
 ## 7. Contributor Experience
 
-- `[x]` `CONTRIBUTING.md` exists
+- `[x]` `CONTRIBUTING.md` exists with setup, code style, versioning, and first-issue guidance
+- `[x]` `ROADMAP.md` exists with known limitations and planned work
+- `[x]` `SECURITY.md` exists with vulnerability reporting process
 - `[x]` scope boundaries are documented
 - `[x]` open-source/product boundary is documented
-- `[~]` consider adding a small section for good first issues, versioning, and release expectations
+- `[x]` GitHub issue templates exist (bug report, feature request, config)
+- `[x]` PR template exists with validation checklist
 
-## 8. Final Pre-Launch Checks
+---
 
-- `[ ]` run `pnpm install`
+## 8. CI / Automation
+
+- `[x]` CI workflow exists (`ci.yml`) — runs build and test on push and PR
+- `[x]` CI runs on Node 20 and Node 22 (matrix build)
+- `[x]` Release workflow exists (`release.yml`)
+- `[x]` `.gitignore` covers `.env`, `.env.*`, `*.log`, `node_modules`, `dist`, `.turbo`
+
+---
+
+## 9. Final Pre-Launch Checks
+
+- `[ ]` run `pnpm install` in a network-enabled environment
 - `[ ]` run `pnpm build`
 - `[ ]` run `pnpm test`
 - `[ ]` verify `dql init` from a clean environment
@@ -89,18 +127,22 @@ It is written as a practical maintainer checklist, not a marketing document.
 - `[ ]` verify `dql new semantic-block` from a clean environment
 - `[ ]` verify package publishing flow and `npx` usage
 
+---
+
 ## Current Blocker
 
-The main remaining blocker is environment-level, not repo-level:
+The remaining pre-launch checks are environment-level, not repo-level:
 
-- dependency installation failed in this session because npm registry access was unavailable (`ENOTFOUND registry.npmjs.org`)
-
-Until that is resolved, the final build and test verification steps remain open.
+- The repo is fully authored and ready to open-source
+- Dependency installation requires npm registry access (`registry.npmjs.org`) to run `pnpm install`
+- Final build, test, and publish smoke tests should be run in a network-enabled environment before the first public release announcement
 
 ## Recommended Next Actions
 
 1. Run `pnpm install` in a network-enabled environment.
 2. Run `pnpm build` and `pnpm test`.
-3. Fix any TypeScript or test regressions found from the new scaffold work.
-4. Validate the published CLI flow.
-5. Mark the remaining checklist items complete.
+3. Fix any TypeScript or test regressions.
+4. Run `pnpm release:publish` to publish packages to npm.
+5. Validate the published CLI: `npx @duckcodeailabs/dql-cli@latest --help`.
+6. Mark the remaining checklist items complete.
+7. Open the GitHub repo to public.

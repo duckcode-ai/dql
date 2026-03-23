@@ -1,5 +1,10 @@
 # DQL
 
+[![CI](https://github.com/duckcode-ai/dql/actions/workflows/ci.yml/badge.svg)](https://github.com/duckcode-ai/dql/actions/workflows/ci.yml)
+[![npm](https://img.shields.io/npm/v/@duckcodeailabs/dql-cli?label=dql-cli)](https://www.npmjs.com/package/@duckcodeailabs/dql-cli)
+[![License](https://img.shields.io/badge/license-Apache--2.0-blue)](./LICENSE)
+[![Node](https://img.shields.io/badge/node-18%20%7C%2020%20%7C%2022-green)](https://nodejs.org)
+
 - Your team copy-pastes the same query into 12 dashboards. They drift. Nobody knows which is right.
 - Someone changes the SQL. The chart breaks. There was no review.
 - AI generated a perfect query last Tuesday. It's gone now.
@@ -137,13 +142,14 @@ semantic-layer/
   cubes/revenue_cube.yaml
 ```
 
-Three provider modes are supported:
+Four provider modes are supported:
 
 | Provider | Source | Use when |
 |---|---|---|
 | `dql` (default) | Local `semantic-layer/` YAML files | Standalone projects, getting started |
 | `dbt` | dbt `models/**/*.yml` semantic models | You already use dbt for transformations |
 | `cubejs` | Cube.js `model/` or `schema/` definitions | You already use Cube for your semantic layer |
+| `snowflake` | Snowflake semantic views (live connection) | You use Snowflake as your semantic layer |
 
 Configure in `dql.config.json`:
 
@@ -304,6 +310,8 @@ Not sure where to start? Pick your goal:
 |---|---|
 | [FAQ](./docs/faq.md) | Common questions about scope, notebook, and compatibility |
 | [Compatibility](./docs/compatibility.md) | Runtime, connector, and workflow support matrix |
+| [Roadmap](./ROADMAP.md) | Planned features and known limitations |
+| [Security](./SECURITY.md) | Vulnerability reporting and credential handling |
 
 ---
 
@@ -331,6 +339,28 @@ Not sure where to start? Pick your goal:
 - Approvals, run history, or product orchestration
 
 Those remain part of the closed DuckCode product.
+
+---
+
+## Contributing
+
+Contributions are welcome. See [CONTRIBUTING.md](./CONTRIBUTING.md) for setup, code style, and PR guidelines.
+
+Areas where help is most useful:
+- New database connector drivers
+- Additional semantic layer providers
+- Language spec improvements and test coverage
+- Documentation and examples
+
+---
+
+## Community and Support
+
+- **Bugs and feature requests** — [open a GitHub issue](https://github.com/duckcode-ai/dql/issues)
+- **Questions and discussion** — [GitHub Discussions](https://github.com/duckcode-ai/dql/discussions)
+- **Roadmap** — see [ROADMAP.md](./ROADMAP.md) for planned work and known limitations
+
+This project follows standard GitHub community norms. Please be respectful in all interactions.
 
 ---
 
