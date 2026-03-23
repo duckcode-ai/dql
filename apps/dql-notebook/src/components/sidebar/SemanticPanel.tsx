@@ -749,6 +749,17 @@ export function SemanticPanel() {
   "provider": "cubejs",
   "projectPath": "/path/to/cube-project"
 }`}</pre>
+
+          <div style={{ fontSize: 10, fontWeight: 600, color: t.accent, marginTop: 8, letterSpacing: '0.03em' }}>
+            D) Snowflake — introspects Snowflake semantic views
+          </div>
+          <pre style={preStyle}>{`"semanticLayer": {
+  "provider": "snowflake",
+  "projectPath": "MY_DATABASE"
+}`}</pre>
+          <div style={{ fontSize: 10, color: t.textMuted, fontFamily: t.font, marginTop: 3, lineHeight: 1.5 }}>
+            Requires a Snowflake <code style={{ fontFamily: t.fontMono, fontSize: 9 }}>defaultConnection</code>. DQL introspects semantic views automatically.
+          </div>
         </div>
 
         {/* Step 2 — Add YAML (for DQL native) */}

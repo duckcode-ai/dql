@@ -5,37 +5,6 @@ import { useVariableSubstitution } from './useVariableSubstitution';
 import type { Cell, CellChartConfig } from '../store/types';
 
 /**
- * Parse block import from a DQL cell.
- * Supports: @import "./blocks/name.dql"
- *       and @import "./blocks/name.dql" with period = "Q4", segment = "Enterprise"
- */
-export function getBlockImportPath(cell: Cell): string | null {
-  const info = getBlockImport(cell);
-  return info ? info.path : null;
-}
-
-export function getBlockImport(cell: Cell): { path: string; params: Record<string, string> } | null {
-  if (cell.type !== 'dql') return null;
-  const content = cell.content.trim();
-  // @import "./path.dql" [with key = "value", ...]
-  const m = content.match(/^@import\s+["']([^"']+\.dql)["'](?:\s+with\s+([\s\S]+))?$/i);
-  if (!m) return null;
-  const path = m[1];
-  const params: Record<string, string> = {};
-  if (m[2]) {
-    for (const part of m[2].split(',')) {
-      const eq = part.indexOf('=');
-      if (eq < 0) continue;
-      const k = part.slice(0, eq).trim();
-      let v = part.slice(eq + 1).trim();
-      v = v.replace(/^["']|["']$/g, ''); // strip surrounding quotes
-      if (k) params[k] = v;
-    }
-  }
-  return { path, params };
-}
-
-/**
  * Parse the visualization section of a DQL block into a CellChartConfig.
  * Uses regex instead of the full DQL parser — handles simple cases.
  */
@@ -57,78 +26,10 @@ function parseDqlChartConfig(content: string): CellChartConfig | undefined {
 }
 
 /**
- * Extract default param values and types from a DQL block's params {} section.
- * Returns map of param name → { value, type }.
- */
-interface BlockParam {
-  value: string;
-  type: 'text' | 'number' | 'date';
-}
-
-function parseBlockDefaultParams(content: string): Record<string, BlockParam> {
-  const paramsMatch = content.match(/params\s*\{([^}]+)\}/is);
-  if (!paramsMatch) return {};
-  const params: Record<string, BlockParam> = {};
-  for (const m of paramsMatch[1].matchAll(/(\w+)\s*(?::\s*(\w+)\s*)?=\s*["']([^"']*)["']/g)) {
-    const name = m[1];
-    const rawType = m[2]?.toLowerCase();
-    const type: BlockParam['type'] =
-      rawType === 'number' ? 'number' : rawType === 'date' ? 'date' : 'text';
-    params[name] = { value: m[3], type };
-  }
-  return params;
-}
-
-/**
- * Substitute ${param_name} placeholders in SQL with actual values.
- * Type-aware: numbers are unquoted, dates use DATE literal, text is quoted.
- * Throws on missing required params.
- */
-function applyBlockParams(
-  sql: string,
-  values: Record<string, string>,
-  paramDefs: Record<string, BlockParam>,
-  blockPath?: string,
-): string {
-  const missing: string[] = [];
-  const result = sql.replace(/\$\{(\w+)\}/g, (match, name) => {
-    const val = values[name];
-    if (val === undefined) {
-      missing.push(name);
-      return match; // keep placeholder for error message
-    }
-    const paramType = paramDefs[name]?.type ?? 'text';
-    if (paramType === 'number') {
-      // Validate numeric to prevent SQL injection
-      const num = Number(val);
-      return isNaN(num) ? `'${val.replace(/'/g, "''")}'` : String(num);
-    }
-    if (paramType === 'date') {
-      return `DATE '${val.replace(/'/g, "''")}'`;
-    }
-    return `'${val.replace(/'/g, "''")}'`;
-  });
-  if (missing.length > 0) {
-    const location = blockPath ? ` in block ${blockPath}` : '';
-    throw new Error(`Missing required parameter(s): ${missing.join(', ')}${location}`);
-  }
-  return result;
-}
-
-/**
- * Extract executable SQL from raw DQL content string (no cell wrapper).
- * Used for block file imports.
- */
-export function extractSqlFromDqlContent(content: string): string | null {
-  return extractSqlFromText(content.trim());
-}
-
-/**
  * Extract executable SQL from a cell.
  * - sql cells: use content directly
  * - dql cells: extract the SQL inside query = """...""", or plain SQL keywords
  * - markdown/param cells: return null (not executable)
- * - @import cells: handled separately in executeCell (async file read)
  */
 function extractSql(cell: Cell): string | null {
   if (cell.type === 'markdown' || cell.type === 'param') return null;
@@ -136,9 +37,6 @@ function extractSql(cell: Cell): string | null {
 
   const dqlContent = cell.content.trim();
   if (!dqlContent) return null;
-
-  // @import cells are handled asynchronously in executeCell
-  if (/^@import\s+/i.test(dqlContent)) return '__IMPORT__';
 
   return extractSqlFromText(dqlContent);
 }
@@ -224,44 +122,11 @@ export function useQueryExecution() {
       const cell = state.cells.find((c) => c.id === cellId);
       if (!cell) return;
 
-      let rawSql = extractSql(cell);
+      const rawSql = extractSql(cell);
       if (!rawSql) return;
 
-      // Resolve @import block references — read the block file and extract its SQL
-      if (rawSql === '__IMPORT__') {
-        const blockImport = getBlockImport(cell)!;
-        try {
-          const { content: blockContent } = await api.readNotebook(blockImport.path);
-          rawSql = extractSqlFromDqlContent(blockContent);
-          if (!rawSql) {
-            throw new Error(`No executable SQL found in block: ${blockImport.path}`);
-          }
-          // Merge block default params with caller-provided params, then substitute
-          const paramDefs = parseBlockDefaultParams(blockContent);
-          const defaultValues: Record<string, string> = {};
-          for (const [k, v] of Object.entries(paramDefs)) defaultValues[k] = v.value;
-          const mergedValues = { ...defaultValues, ...blockImport.params };
-          if (Object.keys(mergedValues).length > 0 || /\$\{\w+\}/.test(rawSql)) {
-            rawSql = applyBlockParams(rawSql, mergedValues, paramDefs, blockImport.path);
-          }
-          // Store chart config from the imported block's visualization section
-          const importedChartConfig = parseDqlChartConfig(blockContent);
-          if (importedChartConfig) {
-            dispatch({ type: 'UPDATE_CELL', id: cellId, updates: { chartConfig: importedChartConfig } });
-          }
-        } catch (err) {
-          const message = err instanceof Error ? err.message : String(err);
-          dispatch({
-            type: 'UPDATE_CELL',
-            id: cellId,
-            updates: { status: 'error', error: message, executionCount: (cell.executionCount ?? 0) + 1 },
-          });
-          return;
-        }
-      }
-
       // For inline DQL cells, extract chart config from the visualization block
-      if (cell.type === 'dql' && rawSql !== '__IMPORT__') {
+      if (cell.type === 'dql') {
         const dqlChartConfig = parseDqlChartConfig(cell.content);
         if (dqlChartConfig && JSON.stringify(dqlChartConfig) !== JSON.stringify(cell.chartConfig)) {
           dispatch({ type: 'UPDATE_CELL', id: cellId, updates: { chartConfig: dqlChartConfig } });

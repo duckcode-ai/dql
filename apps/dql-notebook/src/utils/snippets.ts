@@ -149,18 +149,40 @@ FROM (
   },
 
   {
-    id: 'dql-import',
-    label: '@import block (simple)',
-    description: 'Reference a block file by path — runs the block\'s SQL without copying it',
+    id: 'dql-semantic-metric',
+    label: 'Semantic metric reference',
+    description: 'Reference a metric and dimension from the semantic layer in a SQL cell',
     category: 'DQL',
-    code: `@import "./blocks/my_block.dql"`,
+    code: `SELECT @dim(segment), @metric(total_revenue)
+FROM fct_revenue
+GROUP BY @dim(segment)
+ORDER BY @metric(total_revenue) DESC`,
   },
   {
-    id: 'dql-import-params',
-    label: '@import block with params',
-    description: 'Import a block and override its default parameter values',
+    id: 'dql-semantic-block',
+    label: 'Semantic block (inline)',
+    description: 'DQL block that references a named metric from the semantic layer — no SQL duplication',
     category: 'DQL',
-    code: `@import "./blocks/my_block.dql" with period = "Q4_2024", segment = "Enterprise"`,
+    code: `block "ARR by Plan Tier" {
+    domain      = "revenue"
+    type        = "semantic"
+    owner       = "data-team"
+    description = "Annual Recurring Revenue by subscription plan tier"
+    tags        = ["arr", "revenue", "saas"]
+
+    metric     = "arr"
+    dimensions = ["plan_tier"]
+
+    visualization {
+        chart = "bar"
+        x     = plan_tier
+        y     = arr
+    }
+
+    tests {
+        assert row_count > 0
+    }
+}`,
   },
 
   // Analysis category

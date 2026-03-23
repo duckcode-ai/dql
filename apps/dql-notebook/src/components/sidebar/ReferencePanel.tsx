@@ -353,16 +353,26 @@ const CONNECTION_POSTGRES = `{
   }
 }`;
 
-const DQL_IMPORT_TEMPLATE = `-- Simple import (uses block's default params)
-@import "./blocks/revenue_by_channel.dql"
+const SEMANTIC_REFS_TEMPLATE = `-- Reference metrics and dimensions inline in any SQL cell.
+-- DQL resolves these at query time — no SQL duplication.
+SELECT
+  @dim(segment),
+  @metric(total_revenue)
+FROM fct_revenue
+GROUP BY @dim(segment)
+ORDER BY @metric(total_revenue) DESC
 
--- Import with custom params (override block defaults)
-@import "./blocks/revenue_by_channel.dql" with period = "Q4_2024"
+-- Or use Compose Query in the Semantic Layer panel:
+-- 1. Pick metrics + dimensions (+ optional time dimension)
+-- 2. Click "Compose SQL"
+-- 3. Click "+ Insert as Cell" to add the generated SQL`;
 
--- Import with multiple params
-@import "./blocks/pipeline_health.dql" with
-    stage = "Closed Won",
-    region = "EMEA"`;
+const SEMANTIC_CONFIG_SNOWFLAKE = `{
+  "semanticLayer": {
+    "provider": "snowflake",
+    "projectPath": "MY_DATABASE"
+  }
+}`;
 
 export function ReferencePanel({ themeMode }: ReferencePanelProps) {
   const t = themes[themeMode];
@@ -432,6 +442,11 @@ FROM table_name`}
       {/* 3. DQL Block Structure */}
       <Section title="DQL Block Structure" defaultOpen={true} t={t}>
         <CodeBlock t={t} code={DQL_BLOCK_TEMPLATE} />
+        <div style={{ marginTop: 8, fontSize: 11, color: t.textMuted, fontFamily: t.font, lineHeight: 1.6 }}>
+          Run <code style={{ fontFamily: t.fontMono, color: t.accent, fontSize: 11 }}>dql certify &lt;file&gt; --connection duckdb</code> to
+          execute <code style={{ fontFamily: t.fontMono, color: t.accent, fontSize: 11 }}>tests &#123;&#125;</code> assertions against live data.
+          Use <code style={{ fontFamily: t.fontMono, color: t.accent, fontSize: 11 }}>--skip-tests</code> to check governance fields only.
+        </div>
       </Section>
 
       {/* 4. DQL Chart Types */}
@@ -463,21 +478,18 @@ FROM table_name`}
         </div>
       </Section>
 
-      {/* 5. Block Imports */}
-      <Section title="Block Imports (@import)" defaultOpen={false} t={t}>
+      {/* 5. Semantic Layer Usage */}
+      <Section title="Semantic Layer Usage" defaultOpen={false} t={t}>
         <div
           style={{ fontSize: 12, color: t.textSecondary, lineHeight: 1.7, fontFamily: t.font, marginBottom: 6 }}
         >
-          Reference a <code style={{ fontFamily: t.fontMono, color: t.accent, fontSize: 11 }}>.dql</code> block
-          file instead of copying its SQL. Run the cell to execute the block's query.
+          Use{' '}
+          <code style={{ fontFamily: t.fontMono, color: t.accent, fontSize: 11 }}>@metric(name)</code>
+          {' '}and{' '}
+          <code style={{ fontFamily: t.fontMono, color: t.accent, fontSize: 11 }}>@dim(name)</code>
+          {' '}inline in SQL cells, or use Compose Query in the Semantic Layer panel.
         </div>
-        <CodeBlock t={t} code={DQL_IMPORT_TEMPLATE} />
-        <div
-          style={{ marginTop: 8, fontSize: 11, color: t.textMuted, fontFamily: t.font, lineHeight: 1.6 }}
-        >
-          Parameters override the block's <code style={{ fontFamily: t.fontMono, color: t.accent, fontSize: 11 }}>params &#123; &#125;</code> defaults.
-          The block's <code style={{ fontFamily: t.fontMono, color: t.accent, fontSize: 11 }}>visualization</code> config is applied automatically.
-        </div>
+        <CodeBlock t={t} code={SEMANTIC_REFS_TEMPLATE} />
       </Section>
 
       {/* 6. Semantic Layer Setup */}
@@ -549,6 +561,17 @@ FROM table_name`}
         <div style={{ marginTop: 4, fontSize: 11, color: t.textMuted, fontFamily: t.font, lineHeight: 1.5 }}>
           Point to your Cube.js project root. Reads{' '}
           <code style={{ fontFamily: t.fontMono, fontSize: 10 }}>cubes:</code> blocks from YAML schema files.
+        </div>
+
+        <div style={{ fontSize: 11, fontWeight: 600, color: t.textSecondary, fontFamily: t.font, margin: '12px 0 4px', letterSpacing: '0.03em' }}>
+          Snowflake Semantic Views (requires live connection)
+        </div>
+        <CodeBlock t={t} code={SEMANTIC_CONFIG_SNOWFLAKE} />
+        <div style={{ marginTop: 4, fontSize: 11, color: t.textMuted, fontFamily: t.font, lineHeight: 1.5 }}>
+          Introspects Snowflake semantic views via{' '}
+          <code style={{ fontFamily: t.fontMono, fontSize: 10 }}>SHOW SEMANTIC VIEWS</code>.
+          Set <code style={{ fontFamily: t.fontMono, fontSize: 10 }}>projectPath</code> to your database name to scope discovery.
+          Requires a Snowflake connection in <code style={{ fontFamily: t.fontMono, fontSize: 10 }}>defaultConnection</code>.
         </div>
       </Section>
 
