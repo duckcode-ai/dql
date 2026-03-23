@@ -491,6 +491,44 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
       return;
     }
 
+    // Create a new metric YAML file in semantic-layer/metrics/
+    if (req.method === 'POST' && path === '/api/semantic-layer/metric') {
+      try {
+        const body = await readJSON(req);
+        const { name, label, description, domain, sql, type, table, tags } = body as {
+          name: string; label: string; description: string; domain: string;
+          sql: string; type: string; table: string; tags?: string[];
+        };
+        if (!name || !sql || !type || !table) {
+          res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
+          res.end(serializeJSON({ error: 'name, sql, type, and table are required' }));
+          return;
+        }
+        const slug = name.toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '');
+        const metricsDir = join(projectRoot, 'semantic-layer', 'metrics');
+        mkdirSync(metricsDir, { recursive: true });
+        const filePath = join(metricsDir, `${slug}.yaml`);
+        const tagList = Array.isArray(tags) && tags.length > 0
+          ? `\ntags:\n${tags.map(t => `  - ${t}`).join('\n')}`
+          : '';
+        const yaml = `name: ${slug}
+label: ${label || name}
+description: ${description || ''}
+domain: ${domain || 'general'}
+sql: ${sql}
+type: ${type}
+table: ${table}${tagList}
+`;
+        writeFileSync(filePath, yaml, 'utf-8');
+        res.writeHead(201, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({ ok: true, path: `semantic-layer/metrics/${slug}.yaml` }));
+      } catch (error) {
+        res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({ error: error instanceof Error ? error.message : String(error) }));
+      }
+      return;
+    }
+
     if (req.method !== 'GET') {
       res.writeHead(405, { 'Content-Type': 'text/plain; charset=utf-8' });
       res.end('Method not allowed');

@@ -353,19 +353,19 @@ const CONNECTION_POSTGRES = `{
   }
 }`;
 
-const SEMANTIC_REFS_TEMPLATE = `-- Reference metrics and dimensions inline in any SQL cell.
--- DQL resolves these at query time — no SQL duplication.
-SELECT
-  @dim(segment),
-  @metric(total_revenue)
-FROM fct_revenue
-GROUP BY @dim(segment)
-ORDER BY @metric(total_revenue) DESC
-
--- Or use Compose Query in the Semantic Layer panel:
+const SEMANTIC_REFS_TEMPLATE = `-- Primary workflow: use Compose Query in the Semantic Layer panel
 -- 1. Pick metrics + dimensions (+ optional time dimension)
 -- 2. Click "Compose SQL"
--- 3. Click "+ Insert as Cell" to add the generated SQL`;
+-- 3. Click "+ Insert as Cell" → edit and run
+
+-- Advanced: reference metrics inline in any SQL cell
+-- DQL resolves @metric() and @dim() at query time
+SELECT
+  @dim(segment_tier),
+  @metric(total_revenue)
+FROM fct_revenue
+GROUP BY @dim(segment_tier)
+ORDER BY @metric(total_revenue) DESC`;
 
 const SEMANTIC_CONFIG_SNOWFLAKE = `{
   "semanticLayer": {
@@ -483,11 +483,8 @@ FROM table_name`}
         <div
           style={{ fontSize: 12, color: t.textSecondary, lineHeight: 1.7, fontFamily: t.font, marginBottom: 6 }}
         >
-          Use{' '}
-          <code style={{ fontFamily: t.fontMono, color: t.accent, fontSize: 11 }}>@metric(name)</code>
-          {' '}and{' '}
-          <code style={{ fontFamily: t.fontMono, color: t.accent, fontSize: 11 }}>@dim(name)</code>
-          {' '}inline in SQL cells, or use Compose Query in the Semantic Layer panel.
+          Primary workflow: open the <strong>Semantic Layer</strong> panel → Compose Query → pick metrics and dimensions → Compose SQL → + Insert as Cell.
+          Advanced: use <code style={{ fontFamily: t.fontMono, color: t.accent, fontSize: 11 }}>@metric(name)</code> and <code style={{ fontFamily: t.fontMono, color: t.accent, fontSize: 11 }}>@dim(name)</code> refs directly in any SQL cell.
         </div>
         <CodeBlock t={t} code={SEMANTIC_REFS_TEMPLATE} />
       </Section>
@@ -510,6 +507,10 @@ FROM table_name`}
     ├── dimensions/    ← one YAML per dimension
     ├── hierarchies/   ← optional drill paths
     └── cubes/         ← optional (groups all into one)`} />
+
+        <div style={{ marginTop: 8, padding: '6px 8px', background: `${t.accent}10`, border: `1px solid ${t.accent}30`, borderRadius: 4, fontSize: 11, color: t.textSecondary, fontFamily: t.font, lineHeight: 1.6 }}>
+          <strong style={{ color: t.textPrimary }}>Recommended:</strong> For multi-table projects, use a <code style={{ fontFamily: t.fontMono, fontSize: 10 }}>cubes/</code> file — it keeps metrics, dimensions, and joins together. Use standalone <code style={{ fontFamily: t.fontMono, fontSize: 10 }}>metrics/</code> and <code style={{ fontFamily: t.fontMono, fontSize: 10 }}>dimensions/</code> files only for simple single-table projects.
+        </div>
 
         <div style={{ fontSize: 11, fontWeight: 600, color: t.textSecondary, fontFamily: t.font, margin: '12px 0 4px', letterSpacing: '0.03em' }}>
           Metric YAML

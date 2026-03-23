@@ -4,6 +4,7 @@ import { Parser } from '@duckcodeailabs/dql-core';
 import { QueryExecutor, type ConnectionConfig } from '@duckcodeailabs/dql-connectors';
 import { buildExecutionPlan, type NotebookCell } from '@duckcodeailabs/dql-notebook';
 import { loadProjectConfig, prepareLocalExecution } from '../local-runtime.js';
+import type { ProjectConfig } from '../local-runtime.js';
 import type { CLIFlags } from '../args.js';
 
 function formatExpected(expr: any): string {
@@ -55,16 +56,25 @@ function compareValues(actual: unknown, operator: string, expected: unknown): bo
   }
 }
 
-function resolveConnection(flags: CLIFlags): ConnectionConfig {
+function resolveConnection(flags: CLIFlags, projectConfig: ProjectConfig): ConnectionConfig {
   const conn = flags.connection;
-  if (!conn || conn === 'duckdb' || conn === 'file') {
+  if (conn && conn !== 'duckdb' && conn !== 'file') {
+    return { driver: 'duckdb', filepath: conn };
+  }
+  if (conn === 'duckdb' || conn === 'file') {
     return { driver: 'file', filepath: ':memory:' };
   }
-  // Treat as a file path to a DuckDB database
-  return { driver: 'duckdb', filepath: conn };
+  if (projectConfig.defaultConnection) {
+    return projectConfig.defaultConnection;
+  }
+  return { driver: 'file', filepath: ':memory:' };
 }
 
 export async function runTest(filePath: string, flags: CLIFlags): Promise<void> {
+  console.log('  ⚠ dql test is deprecated. Use dql certify --connection <driver> instead.');
+  console.log('    dql certify runs governance checks AND test assertions together.');
+  console.log('');
+  const projectConfig = loadProjectConfig(process.cwd());
   const source = readFileSync(filePath, 'utf-8');
   const parser = new Parser(source, filePath);
   const ast = parser.parse();
@@ -77,8 +87,8 @@ export async function runTest(filePath: string, flags: CLIFlags): Promise<void> 
     return;
   }
 
-  // Dry run mode (no --connection)
-  if (!flags.connection) {
+  // Dry run mode (no --connection and no defaultConnection in config)
+  if (!flags.connection && !projectConfig.defaultConnection) {
     if (flags.format === 'json') {
       console.log(JSON.stringify({
         file: filePath,
@@ -111,8 +121,7 @@ export async function runTest(filePath: string, flags: CLIFlags): Promise<void> 
 
   // Live execution mode
   const projectRoot = process.cwd();
-  const projectConfig = loadProjectConfig(projectRoot);
-  const connection = resolveConnection(flags);
+  const connection = resolveConnection(flags, projectConfig);
   const executor = new QueryExecutor();
 
   let totalTests = 0;

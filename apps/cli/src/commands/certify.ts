@@ -5,14 +5,21 @@ import type { BlockRecord, TestResultSummary, TestAssertionResult } from '@duckc
 import { QueryExecutor, type ConnectionConfig } from '@duckcodeailabs/dql-connectors';
 import { buildExecutionPlan, type NotebookCell } from '@duckcodeailabs/dql-notebook';
 import { loadProjectConfig, prepareLocalExecution } from '../local-runtime.js';
+import type { ProjectConfig } from '../local-runtime.js';
 import type { CLIFlags } from '../args.js';
 
-function resolveConnection(flags: CLIFlags): ConnectionConfig {
+function resolveConnection(flags: CLIFlags, projectConfig: ProjectConfig): ConnectionConfig {
   const conn = flags.connection;
-  if (!conn || conn === 'duckdb' || conn === 'file') {
+  if (conn && conn !== 'duckdb' && conn !== 'file') {
+    return { driver: 'duckdb', filepath: conn };
+  }
+  if (conn === 'duckdb' || conn === 'file') {
     return { driver: 'file', filepath: ':memory:' };
   }
-  return { driver: 'duckdb', filepath: conn };
+  if (projectConfig.defaultConnection) {
+    return projectConfig.defaultConnection;
+  }
+  return { driver: 'file', filepath: ':memory:' };
 }
 
 function compareValues(actual: unknown, operator: string, expected: unknown): boolean {
@@ -44,13 +51,13 @@ async function runBlockTests(
   b: any,
   source: string,
   flags: CLIFlags,
+  projectConfig: ProjectConfig,
 ): Promise<TestResultSummary | null> {
   const tests: any[] = b.tests ?? [];
   if (tests.length === 0) return null;
 
   const projectRoot = process.cwd();
-  const projectConfig = loadProjectConfig(projectRoot);
-  const connection = resolveConnection(flags);
+  const connection = resolveConnection(flags, projectConfig);
   const executor = new QueryExecutor();
   const start = Date.now();
   const assertions: TestAssertionResult[] = [];
@@ -138,6 +145,7 @@ async function runBlockTests(
 }
 
 export async function runCertify(filePath: string, flags: CLIFlags): Promise<void> {
+  const projectConfig = loadProjectConfig(process.cwd());
   const source = readFileSync(filePath, 'utf-8');
   const parser = new Parser(source, filePath);
   const ast = parser.parse();
@@ -176,14 +184,15 @@ export async function runCertify(filePath: string, flags: CLIFlags): Promise<voi
 
     // Run tests unless --skip-tests is set
     let testResults: TestResultSummary | null = null;
+    const hasConnection = !!flags.connection || !!projectConfig.defaultConnection;
     if (!flags.skipTests && (b.tests ?? []).length > 0) {
-      if (!flags.connection) {
+      if (!hasConnection) {
         if (flags.format !== 'json') {
           console.log(`\n  Block: "${record.name}"`);
-          console.log('  ⚠ Tests skipped: no database connection. Use --connection to run assertions.');
+          console.log('  ⚠ Tests skipped: no database connection. Add defaultConnection to dql.config.json or use --connection.');
         }
       } else {
-        testResults = await runBlockTests(b, source, flags);
+        testResults = await runBlockTests(b, source, flags, projectConfig);
       }
     }
 

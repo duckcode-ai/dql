@@ -621,11 +621,148 @@ function ComposeQuerySection({ t, metrics, dimensions, onInsertCell }: { t: Them
   );
 }
 
+const METRIC_TYPES = ['sum', 'count', 'count_distinct', 'avg', 'min', 'max'] as const;
+
+function NewMetricForm({ t, onClose, onCreated }: { t: Theme; onClose: () => void; onCreated: () => void }) {
+  const [name, setName] = useState('');
+  const [label, setLabel] = useState('');
+  const [sql, setSql] = useState('');
+  const [metricType, setMetricType] = useState('sum');
+  const [table, setTable] = useState('');
+  const [domain, setDomain] = useState('');
+  const [description, setDescription] = useState('');
+  const [submitting, setSubmitting] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const inputStyle = {
+    width: '100%',
+    padding: '4px 7px',
+    background: t.editorBg,
+    border: `1px solid ${t.cellBorder}`,
+    borderRadius: 4,
+    color: t.textPrimary,
+    fontSize: 11,
+    fontFamily: t.fontMono,
+    outline: 'none',
+    boxSizing: 'border-box' as const,
+  };
+
+  const labelStyle = {
+    fontSize: 10,
+    fontWeight: 600,
+    color: t.textSecondary,
+    fontFamily: t.font,
+    letterSpacing: '0.04em',
+    textTransform: 'uppercase' as const,
+    display: 'block',
+    marginBottom: 3,
+    marginTop: 8,
+  };
+
+  const handleSubmit = async () => {
+    if (!name.trim() || !sql.trim() || !table.trim()) {
+      setError('Name, SQL expression, and table are required.');
+      return;
+    }
+    setSubmitting(true);
+    setError(null);
+    const result = await api.createMetric({
+      name: name.trim(),
+      label: label.trim() || name.trim(),
+      description: description.trim(),
+      domain: domain.trim() || 'general',
+      sql: sql.trim(),
+      type: metricType,
+      table: table.trim(),
+    });
+    setSubmitting(false);
+    if (result.ok) {
+      onCreated();
+      onClose();
+    } else {
+      setError(result.error ?? 'Unknown error');
+    }
+  };
+
+  return (
+    <div style={{
+      position: 'absolute', inset: 0, zIndex: 100,
+      background: `${t.sidebarBg}f0`,
+      display: 'flex', flexDirection: 'column',
+      padding: '12px 14px',
+      overflowY: 'auto',
+    }}>
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 10 }}>
+        <span style={{ fontSize: 12, fontWeight: 600, color: t.textPrimary, fontFamily: t.font }}>New Metric</span>
+        <button onClick={onClose} style={{ background: 'transparent', border: 'none', cursor: 'pointer', color: t.textMuted, fontSize: 16, fontFamily: t.font, padding: '0 2px' }}>×</button>
+      </div>
+
+      <span style={labelStyle}>Name *</span>
+      <input style={inputStyle} value={name} onChange={e => setName(e.target.value)} placeholder="total_revenue" />
+
+      <span style={labelStyle}>Label</span>
+      <input style={inputStyle} value={label} onChange={e => setLabel(e.target.value)} placeholder="Total Revenue" />
+
+      <span style={labelStyle}>SQL Expression *</span>
+      <input style={inputStyle} value={sql} onChange={e => setSql(e.target.value)} placeholder="SUM(amount)" />
+
+      <span style={labelStyle}>Aggregation Type *</span>
+      <select value={metricType} onChange={e => setMetricType(e.target.value)} style={{ ...inputStyle, cursor: 'pointer' }}>
+        {METRIC_TYPES.map(mt => <option key={mt} value={mt}>{mt}</option>)}
+      </select>
+
+      <span style={labelStyle}>Table / Source *</span>
+      <input style={inputStyle} value={table} onChange={e => setTable(e.target.value)} placeholder="fct_revenue or read_csv_auto('data/revenue.csv')" />
+
+      <span style={labelStyle}>Domain</span>
+      <input style={inputStyle} value={domain} onChange={e => setDomain(e.target.value)} placeholder="finance" />
+
+      <span style={labelStyle}>Description</span>
+      <input style={inputStyle} value={description} onChange={e => setDescription(e.target.value)} placeholder="Sum of all recognized revenue" />
+
+      {error && (
+        <div style={{ marginTop: 8, padding: '4px 8px', background: '#f8514922', border: '1px solid #f8514944', borderRadius: 4, fontSize: 10, color: '#f85149' }}>
+          {error}
+        </div>
+      )}
+
+      <div style={{ display: 'flex', gap: 6, marginTop: 12 }}>
+        <button
+          onClick={handleSubmit}
+          disabled={submitting}
+          style={{
+            flex: 1, padding: '5px 0', background: t.accent, color: '#fff',
+            border: 'none', borderRadius: 5, fontSize: 11, fontWeight: 600,
+            fontFamily: t.font, cursor: submitting ? 'not-allowed' : 'pointer',
+            opacity: submitting ? 0.7 : 1,
+          }}
+        >
+          {submitting ? 'Creating...' : 'Create Metric'}
+        </button>
+        <button
+          onClick={onClose}
+          style={{
+            padding: '5px 12px', background: 'transparent',
+            border: `1px solid ${t.cellBorder}`, borderRadius: 5,
+            fontSize: 11, fontFamily: t.font, color: t.textMuted, cursor: 'pointer',
+          }}
+        >
+          Cancel
+        </button>
+      </div>
+      <div style={{ marginTop: 10, fontSize: 10, color: t.textMuted, fontFamily: t.font, lineHeight: 1.5 }}>
+        Creates <code style={{ fontFamily: t.fontMono }}>semantic-layer/metrics/{'{name}'}.yaml</code> and reloads the panel automatically.
+      </div>
+    </div>
+  );
+}
+
 export function SemanticPanel() {
   const { state, dispatch } = useNotebook();
   const t = themes[state.themeMode];
   const [searchQuery, setSearchQuery] = useState('');
   const [refreshHover, setRefreshHover] = useState(false);
+  const [showNewMetric, setShowNewMetric] = useState(false);
 
   const [expandedSections, setExpandedSections] = useState({
     metrics: true,
@@ -831,7 +968,14 @@ table: fct_revenue`}</pre>
   }
 
   return (
-    <div style={{ flex: 1, overflow: 'auto', display: 'flex', flexDirection: 'column' }}>
+    <div style={{ flex: 1, overflow: 'auto', display: 'flex', flexDirection: 'column', position: 'relative' }}>
+      {showNewMetric && (
+        <NewMetricForm
+          t={t}
+          onClose={() => setShowNewMetric(false)}
+          onCreated={() => handleRefresh()}
+        />
+      )}
       {/* Toolbar */}
       <div
         style={{
@@ -861,6 +1005,23 @@ table: fct_revenue`}</pre>
         <span style={{ flex: 1, fontSize: 11, color: t.textMuted, fontFamily: t.font }}>
           {sl.metrics.length} metrics
         </span>
+        <button
+          onClick={() => setShowNewMetric(true)}
+          title="Create a new metric YAML file"
+          style={{
+            background: t.accent,
+            border: 'none',
+            borderRadius: 4,
+            color: '#fff',
+            cursor: 'pointer',
+            fontSize: 10,
+            fontWeight: 600,
+            fontFamily: t.font,
+            padding: '2px 8px',
+          }}
+        >
+          + New
+        </button>
         <button
           onClick={handleRefresh}
           onMouseEnter={() => setRefreshHover(true)}

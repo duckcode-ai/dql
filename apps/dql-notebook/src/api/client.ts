@@ -119,6 +119,26 @@ export const api = {
     }
   },
 
+  async createMetric(metric: {
+    name: string;
+    label: string;
+    description: string;
+    domain: string;
+    sql: string;
+    type: string;
+    table: string;
+    tags?: string[];
+  }): Promise<{ ok: boolean; path?: string; error?: string }> {
+    try {
+      return await request<{ ok: boolean; path: string }>('/api/semantic-layer/metric', {
+        method: 'POST',
+        body: JSON.stringify(metric),
+      });
+    } catch (e: any) {
+      return { ok: false, error: e.message ?? 'Failed to create metric' };
+    }
+  },
+
   async describeTable(filePath: string): Promise<SchemaColumn[]> {
     // Build SQL using read_csv_auto for CSV files, or a generic DESCRIBE query
     const safePath = filePath.replace(/'/g, "''");

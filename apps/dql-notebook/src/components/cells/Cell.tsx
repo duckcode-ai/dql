@@ -90,6 +90,136 @@ function ExecutionBadge({ cell, t }: { cell: Cell; t: Theme }) {
   );
 }
 
+interface BlockFields {
+  domain: string;
+  owner: string;
+  description: string;
+  tags: string[];
+  blockType: string;
+}
+
+function parseBlockFields(content: string): BlockFields | null {
+  if (!/^\s*block\s+"/i.test(content.trim())) return null;
+  const str = (key: string) =>
+    content.match(new RegExp(`\\b${key}\\s*=\\s*"([^"]*)"`, 'i'))?.[1] ?? '';
+  const tagsMatch = content.match(/\btags\s*=\s*\[([^\]]*)\]/i);
+  const tags = tagsMatch
+    ? (tagsMatch[1].match(/"([^"]*)"/g) ?? []).map((s: string) => s.slice(1, -1))
+    : [];
+  return {
+    domain: str('domain'),
+    owner: str('owner'),
+    description: str('description'),
+    blockType: str('type') || 'custom',
+    tags,
+  };
+}
+
+function setBlockStringField(content: string, key: string, value: string): string {
+  const re = new RegExp(`(\\b${key}\\s*=\\s*)"[^"]*"`, 'i');
+  return re.test(content) ? content.replace(re, `$1"${value.replace(/"/g, '\\"')}"`) : content;
+}
+
+function setBlockTags(content: string, tags: string[]): string {
+  const tagStr = tags.map((t: string) => `"${t}"`).join(', ');
+  const re = /(\btags\s*=\s*)\[[^\]]*\]/i;
+  return re.test(content) ? content.replace(re, `$1[${tagStr}]`) : content;
+}
+
+function BlockGovernanceBar({
+  content,
+  onChange,
+  t,
+}: {
+  content: string;
+  onChange: (next: string) => void;
+  t: Theme;
+}) {
+  const fields = parseBlockFields(content);
+  if (!fields) return null;
+
+  const fieldStyle = {
+    background: t.editorBg,
+    border: `1px solid ${t.cellBorder}`,
+    borderRadius: 3,
+    color: t.textSecondary,
+    fontSize: 11,
+    fontFamily: t.fontMono,
+    padding: '2px 6px',
+    outline: 'none',
+  };
+
+  const labelStyle = {
+    fontSize: 9,
+    fontWeight: 700,
+    color: t.textMuted,
+    fontFamily: t.font,
+    letterSpacing: '0.05em',
+    textTransform: 'uppercase' as const,
+    marginRight: 4,
+    flexShrink: 0,
+  };
+
+  const groupStyle = {
+    display: 'flex',
+    alignItems: 'center',
+    gap: 4,
+  };
+
+  return (
+    <div
+      style={{
+        display: 'flex',
+        flexWrap: 'wrap' as const,
+        gap: '4px 12px',
+        padding: '5px 10px',
+        borderBottom: `1px solid ${t.cellBorder}`,
+        background: `${t.tableHeaderBg}40`,
+      }}
+    >
+      <div style={groupStyle}>
+        <span style={labelStyle}>domain</span>
+        <input
+          style={{ ...fieldStyle, width: 80 }}
+          value={fields.domain}
+          placeholder="e.g. finance"
+          onChange={e => onChange(setBlockStringField(content, 'domain', e.target.value))}
+        />
+      </div>
+      <div style={groupStyle}>
+        <span style={labelStyle}>owner</span>
+        <input
+          style={{ ...fieldStyle, width: 90 }}
+          value={fields.owner}
+          placeholder="e.g. data-team"
+          onChange={e => onChange(setBlockStringField(content, 'owner', e.target.value))}
+        />
+      </div>
+      <div style={groupStyle}>
+        <span style={labelStyle}>tags</span>
+        <input
+          style={{ ...fieldStyle, width: 110 }}
+          value={fields.tags.join(', ')}
+          placeholder="revenue, kpi"
+          onChange={e => {
+            const tags = e.target.value.split(',').map(s => s.trim()).filter(Boolean);
+            onChange(setBlockTags(content, tags));
+          }}
+        />
+      </div>
+      <div style={{ ...groupStyle, flex: 1 }}>
+        <span style={labelStyle}>description</span>
+        <input
+          style={{ ...fieldStyle, flex: 1, minWidth: 120 }}
+          value={fields.description}
+          placeholder="What this block measures"
+          onChange={e => onChange(setBlockStringField(content, 'description', e.target.value))}
+        />
+      </div>
+    </div>
+  );
+}
+
 export function CellComponent({ cell, index }: CellProps) {
   const { state, dispatch } = useNotebook();
   const t = themes[state.themeMode];
@@ -242,6 +372,7 @@ export function CellComponent({ cell, index }: CellProps) {
         >
           {/* Type badge */}
           <span
+            title={cell.type === 'dql' ? 'DQL cell — write a governed block (type, owner, description, tests) or use @metric()/@dim() refs' : cell.type === 'sql' ? 'SQL cell — write raw SQL, reference other cells with {{name}}' : undefined}
             style={{
               fontSize: 10,
               fontWeight: 700,
@@ -399,6 +530,15 @@ export function CellComponent({ cell, index }: CellProps) {
             </div>
           )}
         </div>
+
+        {/* Governance bar — shown for DQL cells that contain a block declaration */}
+        {cell.type === 'dql' && (
+          <BlockGovernanceBar
+            content={cell.content}
+            onChange={handleContentChange}
+            t={t}
+          />
+        )}
 
         {/* Editor area */}
         {cell.type === 'markdown' ? (

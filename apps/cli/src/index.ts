@@ -28,7 +28,7 @@ const HELP = `
     dql preview <file.dql>          Render a local browser preview for a DQL file
     dql serve [directory]           Serve a built DQL bundle locally
     dql parse <file.dql>            Parse and analyze a DQL file
-    dql test <file.dql>             Inspect block tests (use --connection to execute)
+    dql test <file.dql>             [deprecated] Use dql certify --connection instead
     dql validate [path]             Validate all DQL files and semantic references
     dql certify <file.dql>          Evaluate certification rules
     dql info <file.dql>             Show block metadata
@@ -52,7 +52,7 @@ const HELP = `
     --owner <name>                  Owner for new block scaffolds (default: current user)
     --query-only                    Create a query-only block without visualization
     --template <name>               Template to use for "init" (default: starter)
-    --connection <driver|path>      Database connection for "test" (e.g. duckdb, path/to/db)
+    --connection <driver|path>      Database connection for certify/test (e.g. duckdb, path/to/db)
 `;
 
 async function main() {
