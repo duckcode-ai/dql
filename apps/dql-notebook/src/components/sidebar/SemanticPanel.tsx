@@ -1,6 +1,6 @@
 import type { Theme } from '../../themes/notebook-theme';
 import React, { useState, useEffect, useMemo } from 'react';
-import { useNotebook } from '../../store/NotebookStore';
+import { useNotebook, makeCell } from '../../store/NotebookStore';
 import { themes } from '../../themes/notebook-theme';
 import { api } from '../../api/client';
 import type { SemanticMetric, SemanticDimension, SemanticHierarchy } from '../../store/types';
@@ -311,7 +311,7 @@ function HierarchyRow({ hierarchy, t }: { hierarchy: SemanticHierarchy; t: Theme
   );
 }
 
-function ComposeQuerySection({ t, metrics, dimensions }: { t: Theme; metrics: SemanticMetric[]; dimensions: SemanticDimension[] }) {
+function ComposeQuerySection({ t, metrics, dimensions, onInsertCell }: { t: Theme; metrics: SemanticMetric[]; dimensions: SemanticDimension[]; onInsertCell?: (sql: string) => void }) {
   const [expanded, setExpanded] = useState(false);
   const [selectedMetrics, setSelectedMetrics] = useState<Set<string>>(new Set());
   const [selectedDims, setSelectedDims] = useState<Set<string>>(new Set());
@@ -496,21 +496,41 @@ function ComposeQuerySection({ t, metrics, dimensions }: { t: Theme; metrics: Se
                 <span style={{ fontSize: 10, fontWeight: 600, color: t.textSecondary, textTransform: 'uppercase' as const, letterSpacing: '0.04em' }}>
                   Generated SQL
                 </span>
-                <button
-                  onClick={handleCopy}
-                  style={{
-                    background: 'transparent',
-                    border: `1px solid ${t.cellBorder}`,
-                    borderRadius: 3,
-                    color: copied ? '#56d364' : t.textMuted,
-                    cursor: 'pointer',
-                    fontSize: 9,
-                    fontFamily: t.font,
-                    padding: '1px 6px',
-                  }}
-                >
-                  {copied ? 'Copied!' : 'Copy'}
-                </button>
+                <div style={{ display: 'flex', gap: 4 }}>
+                  {onInsertCell && (
+                    <button
+                      onClick={() => composedSql && onInsertCell(composedSql)}
+                      style={{
+                        background: t.accent,
+                        border: 'none',
+                        borderRadius: 3,
+                        color: '#fff',
+                        cursor: 'pointer',
+                        fontSize: 9,
+                        fontWeight: 600,
+                        fontFamily: t.font,
+                        padding: '2px 8px',
+                      }}
+                    >
+                      + Insert as Cell
+                    </button>
+                  )}
+                  <button
+                    onClick={handleCopy}
+                    style={{
+                      background: 'transparent',
+                      border: `1px solid ${t.cellBorder}`,
+                      borderRadius: 3,
+                      color: copied ? '#56d364' : t.textMuted,
+                      cursor: 'pointer',
+                      fontSize: 9,
+                      fontFamily: t.font,
+                      padding: '1px 6px',
+                    }}
+                  >
+                    {copied ? 'Copied!' : 'Copy'}
+                  </button>
+                </div>
               </div>
               <pre style={{
                 margin: 0,
@@ -793,7 +813,15 @@ table: fct_revenue`}</pre>
       </div>
 
       {/* Compose Query */}
-      <ComposeQuerySection t={t} metrics={sl.metrics} dimensions={sl.dimensions} />
+      <ComposeQuerySection
+        t={t}
+        metrics={sl.metrics}
+        dimensions={sl.dimensions}
+        onInsertCell={(sql) => {
+          const cell = makeCell('sql', sql);
+          dispatch({ type: 'ADD_CELL', cell });
+        }}
+      />
 
       {/* Search */}
       <div style={{ padding: '6px 8px', borderBottom: `1px solid ${t.headerBorder}` }}>
