@@ -17,7 +17,7 @@ Choose the path that fits your workflow.
 If you are in a new project folder or external repo, install the `dql` binary globally:
 
 ```bash
-npm install -g @duckcodeailabs/dql-cli
+npm install -g @duckcodeailabs/dql-cli@0.4.0
 dql --help
 ```
 
@@ -25,7 +25,7 @@ Or install it locally and run it with `npx`:
 
 ```bash
 npm init -y
-npm install -D @duckcodeailabs/dql-cli
+npm install -D @duckcodeailabs/dql-cli@0.4.0
 npx dql --help
 ```
 
@@ -55,7 +55,7 @@ If you switch Node versions after the initial install, rerun `pnpm install` befo
 ### Path C — Library (embed in your application)
 
 ```bash
-npm install @duckcodeailabs/dql-core @duckcodeailabs/dql-compiler
+npm install @duckcodeailabs/dql-core@0.3.0 @duckcodeailabs/dql-compiler@0.2.1
 ```
 
 This gives you the parser, AST, semantic analyser, formatter, and full compilation pipeline as importable ESM modules. It does **not** install the `dql` CLI.
@@ -102,8 +102,8 @@ This creates:
 - `blocks/` — starter charted and query-only blocks
 - `data/` — local sample CSV for previewing with DuckDB/file connectors
 - `dql.config.json` — starter project configuration
-- `notebooks/` — welcome notebook for browser-first exploration
-- `semantic-layer/` — example semantic definitions and companion metadata
+- `notebooks/` — welcome notebook and semantic layer tutorial for browser-first exploration
+- `semantic-layer/` — example metrics, dimensions, hierarchies, and cubes in YAML format
 
 To evaluate the strongest OSS path, use a themed template instead:
 
@@ -113,6 +113,7 @@ dql init my-dql-project --template ecommerce
 
 See also:
 
+- [Semantic Layer Guide](./semantic-layer-guide.md)
 - [Use Cases](./use-cases.md)
 - [Project Config](./project-config.md)
 - [Data Sources](./data-sources.md)

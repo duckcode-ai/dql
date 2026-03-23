@@ -18,7 +18,7 @@
 Requires Node 18, 20, or 22 (active LTS).
 
 ```bash
-npm install -g @duckcodeailabs/dql-cli
+npm install -g @duckcodeailabs/dql-cli@0.4.0
 dql init my-dql-project --template ecommerce
 cd my-dql-project
 dql doctor
@@ -26,6 +26,12 @@ dql notebook
 ```
 
 → **[Full installation guide — global, local, source, and library paths](./docs/getting-started.md)**
+
+### Library packages (for embedding in your app)
+
+```bash
+npm install @duckcodeailabs/dql-core@0.3.0 @duckcodeailabs/dql-compiler@0.2.1 @duckcodeailabs/dql-notebook@0.2.1
+```
 
 ---
 
@@ -139,16 +145,52 @@ Connect to Postgres, BigQuery, or Snowflake the same way — swap the driver in 
 
 ---
 
+## Semantic Layer
+
+DQL includes a built-in semantic layer — define metrics, dimensions, hierarchies, and cubes in YAML files, then reference them in your notebooks and blocks.
+
+```
+semantic-layer/
+  metrics/revenue.yaml
+  dimensions/segment.yaml
+  hierarchies/revenue_time.yaml
+  cubes/revenue_cube.yaml
+```
+
+Three provider modes are supported:
+
+| Provider | Source | Use when |
+|---|---|---|
+| `dql` (default) | Local `semantic-layer/` YAML files | Standalone projects, getting started |
+| `dbt` | dbt `models/**/*.yml` semantic models | You already use dbt for transformations |
+| `cubejs` | Cube.js `model/` or `schema/` definitions | You already use Cube for your semantic layer |
+
+Configure in `dql.config.json`:
+
+```json
+{
+  "semanticLayer": {
+    "provider": "dql"
+  }
+}
+```
+
+The notebook sidebar shows your semantic layer live — browse metrics, dimensions, and hierarchies, click to insert into SQL cells.
+
+→ **[Semantic layer guide — setup, providers, YAML format, notebook integration](./docs/semantic-layer-guide.md)**
+
+---
+
 ## Project Templates
 
 Pick a template when running `dql init` to get a working project immediately:
 
 | Template | Best for | What you get |
 |---|---|---|
-| `starter` | Smallest local-first flow | Revenue CSV, starter blocks, welcome notebook |
-| `ecommerce` | Strongest OSS demo | Channel revenue, funnel analysis, commerce dataset |
-| `saas` | Revenue + retention | MRR, churn pressure, cohort analysis |
-| `taxi` | Time-series and ops | Trip volume, fare trends, borough analysis |
+| `starter` | Smallest local-first flow | Revenue CSV, starter blocks, semantic layer tutorial, welcome notebook |
+| `ecommerce` | Strongest OSS demo | Channel revenue, funnel analysis, semantic cubes, commerce dataset |
+| `saas` | Revenue + retention | MRR, churn pressure, cohort analysis, semantic metrics |
+| `taxi` | Time-series and ops | Trip volume, fare trends, borough analysis, semantic dimensions |
 
 ```bash
 dql init my-project --template ecommerce
@@ -209,6 +251,7 @@ Not sure where to start? Pick your goal:
 | [CLI Reference](./docs/cli-reference.md) | Every command, flag, and exit code |
 | [Language Spec](./docs/dql-language-spec.md) | Full `.dql` syntax: blocks, charts, params, workbooks |
 | [Data Sources](./docs/data-sources.md) | Local CSV/Parquet, DuckDB, Postgres, connectors |
+| [Semantic Layer](./docs/semantic-layer-guide.md) | Metrics, dimensions, cubes, dbt/Cube.js providers |
 | [Project Config](./docs/project-config.md) | `dql.config.json` — connections, ports, defaults |
 | [Migration Guides](./docs/migration-guides/README.md) | From raw SQL, dbt, Looker, Tableau |
 | [Use Cases](./docs/use-cases.md) | Paths by user goal |
@@ -222,12 +265,12 @@ Not sure where to start? Pick your goal:
 
 | Package | Description |
 |---|---|
-| `@duckcodeailabs/dql-cli` | Public CLI — `dql init`, `dql notebook`, `dql preview`, `dql parse`, … |
-| `@duckcodeailabs/dql-core` | Lexer, parser, AST, semantic analysis, formatter |
-| `@duckcodeailabs/dql-compiler` | IR lowering, HTML/React/runtime code generation |
+| `@duckcodeailabs/dql-cli` `0.4.0` | Public CLI — `dql init`, `dql notebook`, `dql preview`, `dql parse`, … |
+| `@duckcodeailabs/dql-core` `0.3.0` | Lexer, parser, AST, semantic analysis, semantic layer, formatter |
+| `@duckcodeailabs/dql-compiler` `0.2.1` | IR lowering, HTML/React/runtime code generation |
 | `@duckcodeailabs/dql-governance` | Certification rules, cost estimation |
 | `@duckcodeailabs/dql-project` | Git-backed block registry and project primitives |
-| `@duckcodeailabs/dql-notebook` | Notebook document model and execution helpers |
+| `@duckcodeailabs/dql-notebook` `0.2.1` | Notebook document model and execution helpers |
 | `@duckcodeailabs/dql-lsp` | Language Server Protocol implementation |
 | `@duckcodeailabs/dql-runtime` | Browser runtime: data fetching, hot-reload |
 | `@duckcodeailabs/dql-charts` | React SVG chart components |
