@@ -28,8 +28,9 @@ dql --help
 |---|---|
 | Brand new, want to explore DQL | [Tutorial 1: Sample Data](#tutorial-1-start-with-sample-data) |
 | Have an existing dbt project | [Tutorial 2: Existing dbt Project](#tutorial-2-existing-dbt-project) |
-| Have an existing Cube.js project | [Tutorial 3: Existing-cubejs-project](#tutorial-3-existing-cubejs-project) |
+| Have an existing Cube.js project | [Tutorial 3: Existing Cube.js Project](#tutorial-3-existing-cubejs-project) |
 | Connecting to a cloud warehouse | [Tutorial 4: Cloud Database](#tutorial-4-connect-to-a-cloud-database) |
+| Adding DQL to your existing repo | [Tutorial 5: Own Repo (no template)](#tutorial-5-add-dql-to-your-own-repo) |
 
 ---
 
@@ -157,6 +158,63 @@ Output:
     • region   [string]  Region
     ...
 ```
+
+### Step 8 — From notebook to a committed block file
+
+Once you've found a query worth keeping, promote it to a reusable `.dql` block:
+
+**1. Create a block file:**
+
+```bash
+npx @duckcodeailabs/dql-cli new block "Revenue by Segment"
+# Creates blocks/revenue_by_segment.dql
+```
+
+**2. Open the file and fill in the block:**
+
+```dql
+block "Revenue by Segment" {
+    domain      = "revenue"
+    type        = "custom"
+    owner       = "data-team"
+    description = "GMV and order count broken out by customer segment"
+    tags        = ["revenue", "segment"]
+
+    query = """
+        SELECT segment, SUM(order_total) AS revenue, COUNT(*) AS orders
+        FROM read_csv_auto('./data/orders.csv')
+        GROUP BY segment
+        ORDER BY revenue DESC
+    """
+
+    visualization {
+        chart = "bar"
+        x     = segment
+        y     = revenue
+    }
+
+    tests {
+        assert row_count > 0
+    }
+}
+```
+
+**3. Validate and preview:**
+
+```bash
+npx @duckcodeailabs/dql-cli parse blocks/revenue_by_segment.dql
+npx @duckcodeailabs/dql-cli preview blocks/revenue_by_segment.dql --open
+```
+
+**4. Certify and commit:**
+
+```bash
+npx @duckcodeailabs/dql-cli certify blocks/revenue_by_segment.dql
+git add blocks/revenue_by_segment.dql
+git commit -m "feat: add revenue by segment block"
+```
+
+→ **[Full block authoring guide — custom blocks, semantic blocks, tests, certify](./authoring-blocks.md)**
 
 ---
 
@@ -464,6 +522,158 @@ Restart the notebook — your metrics appear in the Semantic Panel.
 
 ---
 
+## Tutorial 5: Add DQL to Your Own Repo
+
+**Time:** 5 minutes. Works with any existing project — no semantic layer required.
+
+This path is for teams adding DQL to an existing repo without adopting a full template. You get the DQL notebook, block authoring, and CLI tooling while keeping your existing project structure untouched.
+
+### Step 1 — Run init in your existing project directory
+
+```bash
+cd ~/code/my-existing-project
+npx @duckcodeailabs/dql-cli init . --template starter
+```
+
+**What this adds** (minimal footprint):
+- `dql.config.json` — project config (edit this to point at your database)
+- `blocks/` — empty folder for your DQL blocks
+- `notebooks/` — empty folder for notebook files
+- `data/revenue.csv` — sample data for local testing (safe to delete)
+- `semantic-layer/` — example YAML files (safe to delete or ignore)
+
+**What this does NOT touch:**
+- Your existing source files, models, or configurations
+- `package.json`, `.gitignore`, or any other existing file
+- Your database, warehouse, or any external system
+
+### Step 2 — Remove sample assets you don't need
+
+If you're pointing at your own database and don't want the sample data:
+
+```bash
+rm -rf data/                    # remove sample CSV files
+rm -rf semantic-layer/          # remove if you don't have a semantic layer yet
+```
+
+Or keep them — they won't interfere with anything.
+
+### Step 3 — Point at your real database
+
+Edit `dql.config.json` to use your warehouse. Examples:
+
+**Snowflake:**
+```json
+{
+  "project": "my-existing-project",
+  "defaultConnection": {
+    "driver": "snowflake",
+    "account": "your-account.snowflakecomputing.com",
+    "username": "${SNOWFLAKE_USER}",
+    "password": "${SNOWFLAKE_PASSWORD}",
+    "database": "ANALYTICS",
+    "schema": "PUBLIC",
+    "warehouse": "COMPUTE_WH"
+  }
+}
+```
+
+**BigQuery:**
+```json
+{
+  "project": "my-existing-project",
+  "defaultConnection": {
+    "driver": "bigquery",
+    "projectId": "my-gcp-project",
+    "keyFilename": "${GOOGLE_APPLICATION_CREDENTIALS}",
+    "dataset": "analytics"
+  }
+}
+```
+
+See [Data Sources](./data-sources.md) for all 14 supported drivers.
+
+### Step 4 — Verify the setup
+
+```bash
+npx @duckcodeailabs/dql-cli doctor
+```
+
+This checks your Node version, config file, and database connection. Fix any reported issues before proceeding.
+
+### Step 5 — Open the notebook against your real tables
+
+```bash
+npx @duckcodeailabs/dql-cli notebook
+```
+
+Click the **Schema** panel in the sidebar to browse your actual tables and columns. Run SQL against your database just like any query tool.
+
+### Step 6 — Write your first block against real tables
+
+```bash
+npx @duckcodeailabs/dql-cli new block "Daily Active Users"
+```
+
+Edit `blocks/daily_active_users.dql`:
+
+```dql
+block "Daily Active Users" {
+    domain      = "product"
+    type        = "custom"
+    owner       = "analytics-team"
+    description = "Daily unique users by product area"
+    tags        = ["dau", "product", "engagement"]
+
+    params {
+        days_back = "30"
+    }
+
+    query = """
+        SELECT
+            event_date,
+            product_area,
+            COUNT(DISTINCT user_id) AS dau
+        FROM analytics.public.events
+        WHERE event_date >= CURRENT_DATE - INTERVAL '${days_back} days'
+        GROUP BY event_date, product_area
+        ORDER BY event_date DESC
+    """
+
+    visualization {
+        chart = "line"
+        x     = event_date
+        y     = dau
+    }
+
+    tests {
+        assert row_count > 0
+    }
+}
+```
+
+### Step 7 — Validate, preview, and commit
+
+```bash
+npx @duckcodeailabs/dql-cli parse blocks/daily_active_users.dql
+npx @duckcodeailabs/dql-cli preview blocks/daily_active_users.dql --open
+npx @duckcodeailabs/dql-cli certify blocks/daily_active_users.dql
+git add blocks/daily_active_users.dql dql.config.json
+git commit -m "feat: add DQL notebook and daily active users block"
+```
+
+### Ignoring DQL artifacts in git
+
+If you want to exclude the sample data from version control:
+
+```bash
+echo "data/" >> .gitignore
+```
+
+The `blocks/`, `notebooks/`, and `dql.config.json` should be committed — they are the value.
+
+---
+
 ## How the Notebook Works with DQL
 
 ### Three ways to query
@@ -542,6 +752,7 @@ npx @duckcodeailabs/dql-cli notebook        # Launch the notebook
 
 ## Next Steps
 
+- [Authoring Blocks](./authoring-blocks.md) — full lifecycle: create, test, certify, and commit custom and semantic blocks
 - [Semantic Layer Guide](./semantic-layer-guide.md) — deep dive into metrics, dimensions, hierarchies, cubes
 - [Notebook Guide](./notebook.md) — cell types, variable substitution, export
 - [Data Sources & Connector Reference](./data-sources.md) — all 14 database drivers with config fields

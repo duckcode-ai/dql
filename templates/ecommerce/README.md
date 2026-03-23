@@ -1,6 +1,6 @@
 # __PROJECT_NAME__
 
-This template packages a realistic e-commerce analytics sandbox for DQL.
+This template packages a realistic e-commerce analytics sandbox for DQL. It covers channel revenue analysis, repeat purchase behavior, funnel analysis, and semantic metrics — a complete starting point for commerce analytics.
 
 ## Included assets
 
@@ -25,3 +25,9 @@ dql preview blocks/revenue_by_segment.dql --open
 - Compare performance across paid, partner, organic, and lifecycle channels
 - Track repeat order contribution by region and segment
 - Use the notebook to iterate on funnel SQL before promoting it into reusable blocks
+
+## Next Steps
+
+- [Authoring Blocks](https://github.com/duckcodeailabs/dql/blob/main/docs/authoring-blocks.md) — promote your notebook queries into certified, reusable `.dql` blocks
+- [Semantic Layer Guide](https://github.com/duckcodeailabs/dql/blob/main/docs/semantic-layer-guide.md) — extend the included semantic layer with your own metrics and dimensions
+- [Getting Started](https://github.com/duckcodeailabs/dql/blob/main/docs/getting-started.md) — connect to a cloud database or add DQL to an existing repo

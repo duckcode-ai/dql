@@ -18,7 +18,7 @@
 Requires Node 18, 20, or 22 (active LTS).
 
 ```bash
-npm install -g @duckcodeailabs/dql-cli@0.4.0
+npm install -g @duckcodeailabs/dql-cli
 dql init my-dql-project --template ecommerce
 cd my-dql-project
 dql doctor
@@ -27,10 +27,31 @@ dql notebook
 
 → **[Full installation guide — global, local, source, and library paths](./docs/getting-started.md)**
 
+### 5-Minute Start
+
+```bash
+npm install -g @duckcodeailabs/dql-cli   # install CLI
+dql init my-project --template starter   # scaffold project
+cd my-project && dql doctor              # verify setup
+dql notebook                             # open browser notebook
+```
+
+→ **[Quickstart — zero to running notebook in 5 minutes](./docs/quickstart.md)**
+
+### Choose Your Path
+
+| Starting point | Tutorial |
+|---|---|
+| Brand new, no database | [Tutorial 1: Sample Data](./docs/getting-started.md#tutorial-1-start-with-sample-data) |
+| Existing dbt project | [Tutorial 2: dbt Integration](./docs/getting-started.md#tutorial-2-existing-dbt-project) |
+| Existing Cube.js project | [Tutorial 3: Cube.js Integration](./docs/getting-started.md#tutorial-3-existing-cubejs-project) |
+| Own database, no semantic layer | [Tutorial 4: Cloud Database](./docs/getting-started.md#tutorial-4-connect-to-a-cloud-database) |
+| Adding DQL to an existing repo | [Tutorial 5: Own Repo (no template)](./docs/getting-started.md#tutorial-5-add-dql-to-your-own-repo) |
+
 ### Library packages (for embedding in your app)
 
 ```bash
-npm install @duckcodeailabs/dql-core@0.3.0 @duckcodeailabs/dql-compiler@0.2.1 @duckcodeailabs/dql-notebook@0.2.1
+npm install @duckcodeailabs/dql-core@0.3.2 @duckcodeailabs/dql-compiler@0.2.3 @duckcodeailabs/dql-notebook@0.2.3
 ```
 
 ---
@@ -98,50 +119,9 @@ dql preview blocks/pipeline_health.dql --open
 dql build blocks/pipeline_health.dql
 ```
 
+→ **[Authoring blocks — create, test, certify, and commit custom and semantic blocks](./docs/authoring-blocks.md)**
+
 → **[Full language reference — block syntax, chart types, params, tests, workbooks](./docs/dql-language-spec.md)**
-
----
-
-## CLI Reference
-
-Every command has a clear job:
-
-| Command | What it does |
-|---|---|
-| `dql init` | Scaffold a new DQL project with sample data and starter blocks |
-| `dql notebook` | Open the browser notebook for interactive SQL exploration |
-| `dql new block` | Create a new `.dql` block file |
-| `dql new notebook` | Create a new `.dqlnb` notebook file |
-| `dql parse` | Validate syntax and run semantic analysis |
-| `dql preview` | Compile and serve a block locally with live data |
-| `dql build` | Compile to a static HTML bundle |
-| `dql serve` | Serve a built bundle locally |
-| `dql certify` | Check governance rules (owner, description, tags, domain) |
-| `dql fmt` | Format a `.dql` file in place |
-| `dql doctor` | Diagnose project setup, config, and runtime readiness |
-
-→ **[Full CLI reference — all commands, flags, and exit codes](./docs/cli-reference.md)**
-
----
-
-## Data Sources
-
-DQL works without a cloud warehouse. The default runtime uses DuckDB to query local CSV and Parquet files directly.
-
-```json
-{
-  "connections": {
-    "default": {
-      "driver": "duckdb",
-      "path": ":memory:"
-    }
-  }
-}
-```
-
-Connect to Postgres, BigQuery, or Snowflake the same way — swap the driver in `dql.config.json`.
-
-→ **[Data sources guide — local files, DuckDB, Postgres, and remote connectors](./docs/data-sources.md)**
 
 ---
 
@@ -181,6 +161,27 @@ The notebook sidebar shows your semantic layer live — browse metrics, dimensio
 
 ---
 
+## Data Sources
+
+DQL works without a cloud warehouse. The default runtime uses DuckDB to query local CSV and Parquet files directly.
+
+```json
+{
+  "connections": {
+    "default": {
+      "driver": "duckdb",
+      "path": ":memory:"
+    }
+  }
+}
+```
+
+Connect to Postgres, BigQuery, or Snowflake the same way — swap the driver in `dql.config.json`.
+
+→ **[Data sources guide — local files, DuckDB, Postgres, and remote connectors](./docs/data-sources.md)**
+
+---
+
 ## Project Templates
 
 Pick a template when running `dql init` to get a working project immediately:
@@ -197,6 +198,28 @@ dql init my-project --template ecommerce
 ```
 
 → **[Getting started — full project walkthrough](./docs/getting-started.md)**
+
+---
+
+## CLI Reference
+
+Every command has a clear job:
+
+| Command | What it does |
+|---|---|
+| `dql init` | Scaffold a new DQL project with sample data and starter blocks |
+| `dql notebook` | Open the browser notebook for interactive SQL exploration |
+| `dql new block` | Create a new `.dql` block file |
+| `dql new notebook` | Create a new `.dqlnb` notebook file |
+| `dql parse` | Validate syntax and run semantic analysis |
+| `dql preview` | Compile and serve a block locally with live data |
+| `dql build` | Compile to a static HTML bundle |
+| `dql serve` | Serve a built bundle locally |
+| `dql certify` | Check governance rules (owner, description, tags, domain) |
+| `dql fmt` | Format a `.dql` file in place |
+| `dql doctor` | Diagnose project setup, config, and runtime readiness |
+
+→ **[Full CLI reference — all commands, flags, and exit codes](./docs/cli-reference.md)**
 
 ---
 
@@ -240,22 +263,45 @@ Not sure where to start? Pick your goal:
 
 ---
 
-## All Documentation
+## Documentation
+
+### Start Here
 
 | Guide | What it covers |
 |---|---|
-| [Why DQL](./docs/why-dql.md) | The problem, before/after, personas, DQL vs dbt/BI/SQL |
 | [Quickstart](./docs/quickstart.md) | 5-minute path from install to running notebook |
-| [Getting Started](./docs/getting-started.md) | Full install, first block, notebook walkthrough, Node.js API |
-| [Notebook Guide](./docs/notebook.md) | All cell types, param widgets, variable refs, export |
-| [CLI Reference](./docs/cli-reference.md) | Every command, flag, and exit code |
-| [Language Spec](./docs/dql-language-spec.md) | Full `.dql` syntax: blocks, charts, params, workbooks |
-| [Data Sources](./docs/data-sources.md) | Local CSV/Parquet, DuckDB, Postgres, connectors |
+| [Getting Started](./docs/getting-started.md) | Choose your path: sample data, dbt, Cube.js, own DB, own repo |
+
+### Core Workflows
+
+| Guide | What it covers |
+|---|---|
+| [Notebook Guide](./docs/notebook.md) | Cell types, param widgets, variable refs, export |
+| [Authoring Blocks](./docs/authoring-blocks.md) | Create, test, certify, and commit .dql blocks (custom + semantic) |
 | [Semantic Layer](./docs/semantic-layer-guide.md) | Metrics, dimensions, cubes, dbt/Cube.js providers |
-| [Project Config](./docs/project-config.md) | `dql.config.json` — connections, ports, defaults |
+
+### Reference
+
+| Guide | What it covers |
+|---|---|
+| [CLI Reference](./docs/cli-reference.md) | Every command, flag, and exit code |
+| [Data Sources](./docs/data-sources.md) | All 14 database drivers with config fields |
+| [Language Spec](./docs/dql-language-spec.md) | Full .dql syntax: blocks, charts, params, workbooks |
+| [Project Config](./docs/project-config.md) | dql.config.json — connections, ports, defaults |
+
+### Migrate & Examples
+
+| Guide | What it covers |
+|---|---|
 | [Migration Guides](./docs/migration-guides/README.md) | From raw SQL, dbt, Looker, Tableau |
-| [Use Cases](./docs/use-cases.md) | Paths by user goal |
-| [Examples](./docs/examples.md) | Example projects and what each teaches |
+| [Examples](./docs/examples.md) | Walkthrough of ecommerce, SaaS, NYC taxi example projects |
+| [Use Cases](./docs/use-cases.md) | Recommended paths by goal |
+| [Why DQL](./docs/why-dql.md) | The problem, before/after, personas, DQL vs alternatives |
+
+### Help & Compatibility
+
+| Guide | What it covers |
+|---|---|
 | [FAQ](./docs/faq.md) | Common questions about scope, notebook, and compatibility |
 | [Compatibility](./docs/compatibility.md) | Runtime, connector, and workflow support matrix |
 
@@ -265,12 +311,12 @@ Not sure where to start? Pick your goal:
 
 | Package | Description |
 |---|---|
-| `@duckcodeailabs/dql-cli` `0.4.0` | Public CLI — `dql init`, `dql notebook`, `dql preview`, `dql parse`, … |
-| `@duckcodeailabs/dql-core` `0.3.0` | Lexer, parser, AST, semantic analysis, semantic layer, formatter |
-| `@duckcodeailabs/dql-compiler` `0.2.1` | IR lowering, HTML/React/runtime code generation |
+| `@duckcodeailabs/dql-cli` `0.5.2` | Public CLI — `dql init`, `dql notebook`, `dql preview`, `dql parse`, … |
+| `@duckcodeailabs/dql-core` `0.3.2` | Lexer, parser, AST, semantic analysis, semantic layer, formatter |
+| `@duckcodeailabs/dql-compiler` `0.2.3` | IR lowering, HTML/React/runtime code generation |
 | `@duckcodeailabs/dql-governance` | Certification rules, cost estimation |
 | `@duckcodeailabs/dql-project` | Git-backed block registry and project primitives |
-| `@duckcodeailabs/dql-notebook` `0.2.1` | Notebook document model and execution helpers |
+| `@duckcodeailabs/dql-notebook` `0.2.3` | Notebook document model and execution helpers |
 | `@duckcodeailabs/dql-lsp` | Language Server Protocol implementation |
 | `@duckcodeailabs/dql-runtime` | Browser runtime: data fetching, hot-reload |
 | `@duckcodeailabs/dql-charts` | React SVG chart components |

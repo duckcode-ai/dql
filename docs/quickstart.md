@@ -79,7 +79,8 @@ Click **Export HTML** in the header bar. You get a standalone HTML file — shar
 
 ## What to read next
 
+- [Getting Started](./getting-started.md) — choose your path: sample data, dbt, Cube.js, own DB, or own repo
+- [Authoring Blocks](./authoring-blocks.md) — create, test, certify, and commit custom and semantic `.dql` blocks
 - [Notebook Guide](./notebook.md) — cell types, variable substitution, keyboard shortcuts, and export formats
-- [Getting Started](./getting-started.md) — full install options, first block walkthrough, and library usage
 - [CLI Reference](./cli-reference.md) — all commands and flags
 - [Data Sources](./data-sources.md) — connecting to remote databases
