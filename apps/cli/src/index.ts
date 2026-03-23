@@ -15,6 +15,7 @@ import { runMigrate } from './commands/migrate.js';
 import { runFmt } from './commands/fmt.js';
 import { runNotebook } from './commands/notebook.js';
 import { runValidate } from './commands/validate.js';
+import { runSemantic } from './commands/semantic.js';
 
 const HELP = `
   dql — DQL CLI
@@ -34,6 +35,7 @@ const HELP = `
     dql migrate <source>            Scaffold migration from looker/tableau/dbt/metabase/raw-sql
     dql fmt <file.dql>              Format DQL file in place
     dql notebook [path]             Launch the browser-first notebook for a project
+    dql semantic <sub> [path]       Semantic layer: list, validate, query, pull
     dql --help                      Show this help
 
   Options:
@@ -61,7 +63,7 @@ async function main() {
     process.exit(0);
   }
 
-  if (!file && command !== 'init' && command !== 'serve' && command !== 'doctor' && command !== 'notebook' && command !== 'validate') {
+  if (!file && command !== 'init' && command !== 'serve' && command !== 'doctor' && command !== 'notebook' && command !== 'validate' && command !== 'semantic') {
     console.error('Error: No file/argument specified. Run "dql --help" for usage.');
     process.exit(1);
   }
@@ -109,6 +111,9 @@ async function main() {
         break;
       case 'validate':
         await runValidate(file, flags);
+        break;
+      case 'semantic':
+        await runSemantic(file, rest, flags);
         break;
       default:
         console.error(`Unknown command: ${command}. Run "dql --help" for usage.`);

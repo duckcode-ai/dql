@@ -1,0 +1,26 @@
+block "Cohort Retention Trend" {
+    domain = "saas"
+    type = "custom"
+    description = "Monthly cohort retention rate and MRR retention over time"
+    tags = ["retention", "cohort"]
+
+    query = """
+        SELECT cohort_month,
+               starting_accounts,
+               retained_accounts,
+               ROUND(retention_rate * 100, 1) AS retention_pct,
+               ROUND(retained_mrr::FLOAT / starting_mrr * 100, 1) AS mrr_retention_pct
+        FROM read_csv_auto('./data/cohorts.csv')
+        ORDER BY cohort_month
+    """
+
+    visualization {
+        chart = "line"
+        x = cohort_month
+        y = retention_pct
+    }
+
+    tests {
+        assert row_count >= 6
+    }
+}

@@ -1,0 +1,26 @@
+block "Hourly Trip Demand" {
+    domain = "mobility"
+    type = "custom"
+    description = "Trip volume distribution by hour of day"
+    tags = ["trips", "demand", "time"]
+
+    query = """
+        SELECT pickup_hour,
+               COUNT(*) AS trips,
+               ROUND(AVG(fare_amount), 2) AS avg_fare,
+               ROUND(AVG(tip_amount), 2) AS avg_tip
+        FROM read_csv_auto('./data/trips.csv')
+        GROUP BY pickup_hour
+        ORDER BY pickup_hour
+    """
+
+    visualization {
+        chart = "bar"
+        x = pickup_hour
+        y = trips
+    }
+
+    tests {
+        assert row_count >= 5
+    }
+}

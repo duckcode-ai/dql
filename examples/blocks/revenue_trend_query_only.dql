@@ -13,7 +13,7 @@ block "Revenue Trend Query" {
         SELECT
             DATE_TRUNC('month', recognized_at) AS revenue_month,
             SUM(amount) AS total_revenue
-        FROM fct_revenue
+        FROM read_csv_auto('./data/revenue.csv')
         WHERE recognized_at >= CURRENT_DATE - INTERVAL '${months_back} months'
         GROUP BY 1
         ORDER BY 1

@@ -104,6 +104,17 @@ export const api = {
     }
   },
 
+  async composeQuery(metrics: string[], dimensions: string[]): Promise<{ sql: string } | { error: string }> {
+    try {
+      return await request<{ sql: string }>('/api/semantic-query', {
+        method: 'POST',
+        body: JSON.stringify({ metrics, dimensions }),
+      });
+    } catch (e: any) {
+      return { error: e.message ?? 'Failed to compose query' };
+    }
+  },
+
   async describeTable(filePath: string): Promise<SchemaColumn[]> {
     // Build SQL using read_csv_auto for CSV files, or a generic DESCRIBE query
     const safePath = filePath.replace(/'/g, "''");

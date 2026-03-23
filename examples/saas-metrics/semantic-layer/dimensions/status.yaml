@@ -1,0 +1,8 @@
+name: status
+label: Account Status
+description: Current account status (active, at_risk, churned)
+sql: status
+type: string
+table: read_csv_auto('./data/subscriptions.csv')
+tags:
+  - lifecycle

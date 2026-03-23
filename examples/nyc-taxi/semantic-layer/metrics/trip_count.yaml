@@ -1,0 +1,10 @@
+name: trip_count
+label: Trip Count
+description: Total number of taxi trips
+domain: transportation
+sql: COUNT(*)
+type: count
+table: read_csv_auto('./data/trips.csv')
+tags:
+  - volume
+  - kpi

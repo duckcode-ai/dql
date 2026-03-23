@@ -1,0 +1,10 @@
+name: gross_margin_pct
+label: Gross Margin %
+description: Average gross margin percentage across orders
+domain: commerce
+sql: ROUND(AVG(gross_margin) * 100, 1)
+type: avg
+table: read_csv_auto('./data/orders.csv')
+tags:
+  - margin
+  - kpi

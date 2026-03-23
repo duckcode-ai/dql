@@ -623,6 +623,7 @@ export class Parser {
     let domain: string | undefined;
     let blockType: 'semantic' | 'custom' | undefined;
     let metricRef: string | undefined;
+    let metricsRef: string[] | undefined;
     let description: string | undefined;
     let tags: string[] | undefined;
     let owner: string | undefined;
@@ -655,6 +656,15 @@ export class Parser {
         this.expect(TokenType.Equals);
         const val = this.expect(TokenType.StringLiteral);
         metricRef = val.value;
+      } else if (this.check(TokenType.MetricsKeyword)) {
+        this.advance();
+        this.expect(TokenType.Equals);
+        const arrExpr = this.parseArrayLiteral();
+        if (arrExpr.kind === NodeKind.ArrayLiteral) {
+          metricsRef = arrExpr.elements
+            .filter((e): e is import('../ast/nodes.js').StringLiteralNode => e.kind === NodeKind.StringLiteral)
+            .map((e) => e.value);
+        }
       } else if (this.check(TokenType.DescriptionKeyword)) {
         this.advance();
         this.expect(TokenType.Equals);
@@ -700,7 +710,7 @@ export class Parser {
         break;
       } else {
         this.error(
-          `Unexpected token '${this.current().value}' inside block. Expected 'domain', 'type', 'metric', 'description', 'tags', 'owner', 'params', 'query', 'visualization', 'tests', or '}'.`,
+          `Unexpected token '${this.current().value}' inside block. Expected 'domain', 'type', 'metric', 'metrics', 'description', 'tags', 'owner', 'params', 'query', 'visualization', 'tests', or '}'.`,
         );
         this.advance();
       }
@@ -721,6 +731,7 @@ export class Parser {
       domain,
       blockType,
       metricRef,
+      metricsRef,
       description,
       tags,
       owner,

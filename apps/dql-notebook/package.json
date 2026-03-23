@@ -1,5 +1,5 @@
 {
-  "name": "@duckcodeailabs/dql-notebook",
+  "name": "@duckcodeailabs/dql-notebook-app",
   "version": "0.1.1",
   "private": true,
   "type": "module",

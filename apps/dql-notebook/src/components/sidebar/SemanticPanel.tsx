@@ -311,6 +311,232 @@ function HierarchyRow({ hierarchy, t }: { hierarchy: SemanticHierarchy; t: Theme
   );
 }
 
+function ComposeQuerySection({ t, metrics, dimensions }: { t: Theme; metrics: SemanticMetric[]; dimensions: SemanticDimension[] }) {
+  const [expanded, setExpanded] = useState(false);
+  const [selectedMetrics, setSelectedMetrics] = useState<Set<string>>(new Set());
+  const [selectedDims, setSelectedDims] = useState<Set<string>>(new Set());
+  const [composedSql, setComposedSql] = useState<string | null>(null);
+  const [composeError, setComposeError] = useState<string | null>(null);
+  const [composing, setComposing] = useState(false);
+  const [copied, setCopied] = useState(false);
+
+  const toggleMetric = (name: string) => {
+    setSelectedMetrics(prev => {
+      const next = new Set(prev);
+      next.has(name) ? next.delete(name) : next.add(name);
+      return next;
+    });
+    setComposedSql(null);
+  };
+
+  const toggleDim = (name: string) => {
+    setSelectedDims(prev => {
+      const next = new Set(prev);
+      next.has(name) ? next.delete(name) : next.add(name);
+      return next;
+    });
+    setComposedSql(null);
+  };
+
+  const handleCompose = async () => {
+    if (selectedMetrics.size === 0) return;
+    setComposing(true);
+    setComposeError(null);
+    try {
+      const result = await api.composeQuery(
+        Array.from(selectedMetrics),
+        Array.from(selectedDims),
+      );
+      if ('error' in result) {
+        setComposeError(result.error);
+      } else {
+        setComposedSql(result.sql);
+      }
+    } catch (e: any) {
+      setComposeError(e.message ?? 'Failed to compose');
+    } finally {
+      setComposing(false);
+    }
+  };
+
+  const handleCopy = () => {
+    if (composedSql) {
+      navigator.clipboard.writeText(composedSql);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1500);
+    }
+  };
+
+  const checkboxStyle = (selected: boolean) => ({
+    width: 14,
+    height: 14,
+    borderRadius: 3,
+    border: `1.5px solid ${selected ? t.accent : t.cellBorder}`,
+    background: selected ? t.accent : 'transparent',
+    cursor: 'pointer' as const,
+    display: 'flex' as const,
+    alignItems: 'center' as const,
+    justifyContent: 'center' as const,
+    flexShrink: 0 as const,
+    transition: 'all 0.15s',
+  });
+
+  return (
+    <div style={{ borderBottom: `1px solid ${t.headerBorder}` }}>
+      <button
+        onClick={() => setExpanded(!expanded)}
+        style={{
+          width: '100%',
+          display: 'flex',
+          alignItems: 'center',
+          gap: 6,
+          padding: '6px 10px',
+          background: expanded ? `${t.accent}10` : 'transparent',
+          border: 'none',
+          cursor: 'pointer',
+          color: t.accent,
+          fontSize: 11,
+          fontWeight: 600,
+          fontFamily: t.font,
+          textAlign: 'left' as const,
+        }}
+      >
+        <svg width="10" height="10" viewBox="0 0 16 16" fill="currentColor">
+          <path d="M8 1.5a6.5 6.5 0 1 0 0 13 6.5 6.5 0 0 0 0-13ZM0 8a8 8 0 1 1 16 0A8 8 0 0 1 0 8Zm6.5-2a1.5 1.5 0 1 1 3 0 1.5 1.5 0 0 1-3 0Zm-2 4.5a1.5 1.5 0 1 1 3 0 1.5 1.5 0 0 1-3 0Zm5 0a1.5 1.5 0 1 1 3 0 1.5 1.5 0 0 1-3 0Z" />
+        </svg>
+        Compose Query
+        <svg
+          width="10"
+          height="10"
+          viewBox="0 0 10 10"
+          fill="currentColor"
+          style={{ marginLeft: 'auto', transform: expanded ? 'rotate(90deg)' : 'rotate(0deg)', transition: 'transform 0.15s' }}
+        >
+          <path d="M3 2l4 3-4 3V2Z" />
+        </svg>
+      </button>
+
+      {expanded && (
+        <div style={{ padding: '6px 10px 10px', fontSize: 11, fontFamily: t.font }}>
+          {/* Metric selection */}
+          <div style={{ fontSize: 10, fontWeight: 600, color: t.textSecondary, marginBottom: 4, textTransform: 'uppercase' as const, letterSpacing: '0.04em' }}>
+            Select Metrics
+          </div>
+          <div style={{ maxHeight: 120, overflowY: 'auto', marginBottom: 8 }}>
+            {metrics.map(m => (
+              <label
+                key={m.name}
+                style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '2px 0', cursor: 'pointer', color: t.textPrimary, fontSize: 11 }}
+                onClick={() => toggleMetric(m.name)}
+              >
+                <div style={checkboxStyle(selectedMetrics.has(m.name))}>
+                  {selectedMetrics.has(m.name) && (
+                    <svg width="8" height="8" viewBox="0 0 10 10" fill="#fff"><path d="M8.5 2.5L4 7 1.5 4.5" stroke="#fff" strokeWidth="1.5" fill="none" /></svg>
+                  )}
+                </div>
+                <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{m.label || m.name}</span>
+                <span style={{ fontSize: 9, color: METRIC_TYPE_COLORS[m.type] ?? t.accent, marginLeft: 'auto', flexShrink: 0 }}>{m.type}</span>
+              </label>
+            ))}
+          </div>
+
+          {/* Dimension selection */}
+          <div style={{ fontSize: 10, fontWeight: 600, color: t.textSecondary, marginBottom: 4, textTransform: 'uppercase' as const, letterSpacing: '0.04em' }}>
+            Select Dimensions (optional)
+          </div>
+          <div style={{ maxHeight: 120, overflowY: 'auto', marginBottom: 8 }}>
+            {dimensions.map(d => (
+              <label
+                key={d.name}
+                style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '2px 0', cursor: 'pointer', color: t.textPrimary, fontSize: 11 }}
+                onClick={() => toggleDim(d.name)}
+              >
+                <div style={checkboxStyle(selectedDims.has(d.name))}>
+                  {selectedDims.has(d.name) && (
+                    <svg width="8" height="8" viewBox="0 0 10 10" fill="#fff"><path d="M8.5 2.5L4 7 1.5 4.5" stroke="#fff" strokeWidth="1.5" fill="none" /></svg>
+                  )}
+                </div>
+                <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{d.label || d.name}</span>
+              </label>
+            ))}
+          </div>
+
+          {/* Compose button */}
+          <button
+            onClick={handleCompose}
+            disabled={selectedMetrics.size === 0 || composing}
+            style={{
+              width: '100%',
+              padding: '5px 12px',
+              background: selectedMetrics.size === 0 ? t.pillBg : t.accent,
+              color: selectedMetrics.size === 0 ? t.textMuted : '#fff',
+              border: 'none',
+              borderRadius: 5,
+              cursor: selectedMetrics.size === 0 ? 'not-allowed' : 'pointer',
+              fontSize: 11,
+              fontWeight: 600,
+              fontFamily: t.font,
+              opacity: composing ? 0.7 : 1,
+            }}
+          >
+            {composing ? 'Composing...' : `Compose SQL (${selectedMetrics.size} metric${selectedMetrics.size !== 1 ? 's' : ''})`}
+          </button>
+
+          {/* Error */}
+          {composeError && (
+            <div style={{ marginTop: 6, padding: '4px 8px', background: '#f8514922', border: '1px solid #f8514944', borderRadius: 4, fontSize: 10, color: '#f85149' }}>
+              {composeError}
+            </div>
+          )}
+
+          {/* Composed SQL output */}
+          {composedSql && (
+            <div style={{ marginTop: 8 }}>
+              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 4 }}>
+                <span style={{ fontSize: 10, fontWeight: 600, color: t.textSecondary, textTransform: 'uppercase' as const, letterSpacing: '0.04em' }}>
+                  Generated SQL
+                </span>
+                <button
+                  onClick={handleCopy}
+                  style={{
+                    background: 'transparent',
+                    border: `1px solid ${t.cellBorder}`,
+                    borderRadius: 3,
+                    color: copied ? '#56d364' : t.textMuted,
+                    cursor: 'pointer',
+                    fontSize: 9,
+                    fontFamily: t.font,
+                    padding: '1px 6px',
+                  }}
+                >
+                  {copied ? 'Copied!' : 'Copy'}
+                </button>
+              </div>
+              <pre style={{
+                margin: 0,
+                padding: '6px 8px',
+                background: t.editorBg,
+                border: `1px solid ${t.cellBorder}`,
+                borderRadius: 4,
+                fontFamily: t.fontMono,
+                fontSize: 10,
+                color: t.textSecondary,
+                lineHeight: 1.5,
+                whiteSpace: 'pre-wrap' as const,
+                wordBreak: 'break-all' as const,
+                maxHeight: 200,
+                overflowY: 'auto' as const,
+              }}>
+                {composedSql}
+              </pre>
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
 export function SemanticPanel() {
   const { state, dispatch } = useNotebook();
   const t = themes[state.themeMode];
@@ -565,6 +791,9 @@ table: fct_revenue`}</pre>
           </svg>
         </button>
       </div>
+
+      {/* Compose Query */}
+      <ComposeQuerySection t={t} metrics={sl.metrics} dimensions={sl.dimensions} />
 
       {/* Search */}
       <div style={{ padding: '6px 8px', borderBottom: `1px solid ${t.headerBorder}` }}>

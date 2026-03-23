@@ -1,0 +1,8 @@
+name: plan_tier
+label: Plan Tier
+description: Subscription plan tier (Enterprise, Growth, Starter)
+sql: plan_tier
+type: string
+table: read_csv_auto('./data/subscriptions.csv')
+tags:
+  - plan

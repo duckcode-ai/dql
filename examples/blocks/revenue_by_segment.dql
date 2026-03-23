@@ -13,7 +13,7 @@ block "Revenue by Segment" {
         SELECT
             segment_tier AS segment,
             SUM(amount) AS revenue
-        FROM fct_revenue
+        FROM read_csv_auto('./data/revenue.csv')
         WHERE fiscal_period = ${period}
         GROUP BY segment_tier
         ORDER BY revenue DESC

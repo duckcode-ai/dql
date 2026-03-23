@@ -1,0 +1,10 @@
+name: gmv
+label: Gross Merchandise Value
+description: Total order revenue across all channels
+domain: commerce
+sql: SUM(order_total)
+type: sum
+table: read_csv_auto('./data/orders.csv')
+tags:
+  - revenue
+  - kpi

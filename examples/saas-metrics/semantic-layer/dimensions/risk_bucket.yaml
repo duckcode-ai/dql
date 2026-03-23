@@ -1,0 +1,8 @@
+name: risk_bucket
+label: Risk Bucket
+description: Account risk classification (low, medium, high, critical)
+sql: risk_bucket
+type: string
+table: read_csv_auto('./data/subscriptions.csv')
+tags:
+  - risk

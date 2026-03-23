@@ -1,0 +1,26 @@
+block "Revenue by Region" {
+    domain = "commerce"
+    type = "custom"
+    description = "GMV breakdown by geographic region"
+    tags = ["revenue", "geography"]
+
+    query = """
+        SELECT region,
+               ROUND(SUM(order_total), 2) AS revenue,
+               COUNT(*) AS orders,
+               ROUND(AVG(order_total), 2) AS avg_order
+        FROM read_csv_auto('./data/orders.csv')
+        GROUP BY region
+        ORDER BY revenue DESC
+    """
+
+    visualization {
+        chart = "bar"
+        x = region
+        y = revenue
+    }
+
+    tests {
+        assert row_count >= 3
+    }
+}

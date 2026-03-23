@@ -257,6 +257,8 @@ export interface BlockDeclNode extends BaseNode {
   blockType: 'semantic' | 'custom';
   /** For blockType 'semantic': the dbt metric name this block references. Must not have a query field. */
   metricRef?: string;
+  /** For blockType 'semantic': multiple metric references. Takes precedence over metricRef when present. */
+  metricsRef?: string[];
   description?: string;
   tags?: string[];
   owner?: string;

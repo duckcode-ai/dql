@@ -1,0 +1,26 @@
+block "Monthly Revenue Trend" {
+    domain = "commerce"
+    type = "custom"
+    description = "Month-over-month GMV trend with order counts"
+    tags = ["revenue", "trend"]
+
+    query = """
+        SELECT DATE_TRUNC('month', order_date::DATE) AS month,
+               ROUND(SUM(order_total), 2) AS revenue,
+               COUNT(*) AS orders,
+               ROUND(AVG(order_total), 2) AS avg_order_value
+        FROM read_csv_auto('./data/orders.csv')
+        GROUP BY 1
+        ORDER BY 1
+    """
+
+    visualization {
+        chart = "line"
+        x = month
+        y = revenue
+    }
+
+    tests {
+        assert row_count >= 3
+    }
+}

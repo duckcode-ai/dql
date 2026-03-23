@@ -4,4 +4,4 @@ description: Sum of recognized revenue
 domain: revenue
 sql: SUM(amount)
 type: sum
-table: fct_revenue
+table: read_csv_auto('./data/revenue.csv')

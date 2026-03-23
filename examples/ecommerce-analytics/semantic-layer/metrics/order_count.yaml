@@ -1,0 +1,10 @@
+name: order_count
+label: Order Count
+description: Total number of orders
+domain: commerce
+sql: COUNT(*)
+type: count
+table: read_csv_auto('./data/orders.csv')
+tags:
+  - orders
+  - kpi

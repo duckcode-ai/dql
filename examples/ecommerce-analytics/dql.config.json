@@ -5,6 +5,9 @@
     "filepath": ":memory:"
   },
   "dataDir": "./data",
+  "semanticLayer": {
+    "provider": "dql"
+  },
   "preview": {
     "port": 3474,
     "open": true,

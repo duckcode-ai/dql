@@ -103,6 +103,46 @@
     }
   },
 
+  "_semantic_option_5_dbt_remote_github": {
+    "semanticLayer": {
+      "provider": "dbt",
+      "source": "github",
+      "repoUrl": "https://github.com/your-org/dbt-metrics.git",
+      "branch": "main",
+      "subPath": "models"
+    },
+    "_notes": {
+      "how_it_works": "Clones the remote repo into ~/.dql/cache/repos/ and reads dbt semantic models from it",
+      "auth": "For private repos, set GITHUB_TOKEN environment variable",
+      "cache": "Cached for 10 minutes; use 'dql semantic pull' to force refresh"
+    }
+  },
+
+  "_semantic_option_6_cubejs_remote_gitlab": {
+    "semanticLayer": {
+      "provider": "cubejs",
+      "source": "gitlab",
+      "repoUrl": "https://gitlab.com/your-org/cube-schema.git",
+      "branch": "main",
+      "subPath": ""
+    },
+    "_notes": {
+      "auth": "For private repos, set GITLAB_TOKEN environment variable"
+    }
+  },
+
+  "_semantic_option_7_snowflake": {
+    "semanticLayer": {
+      "provider": "snowflake",
+      "projectPath": "MY_DATABASE"
+    },
+    "_notes": {
+      "how_it_works": "Introspects Snowflake semantic views (SHOW SEMANTIC VIEWS) via the active connection",
+      "requires": "Snowflake account with semantic views (CREATE SEMANTIC VIEW) and a configured Snowflake connection",
+      "projectPath_usage": "Optional: filters semantic views to a specific database"
+    }
+  },
+
   "_comment_preview": "=== PREVIEW / NOTEBOOK OPTIONS ===",
 
   "dataDir": "./data",

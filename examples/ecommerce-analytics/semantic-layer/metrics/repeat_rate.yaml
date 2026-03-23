@@ -1,0 +1,10 @@
+name: repeat_rate
+label: Repeat Purchase Rate
+description: Percentage of orders that are repeat purchases
+domain: commerce
+sql: ROUND(AVG(CASE WHEN is_repeat THEN 1.0 ELSE 0.0 END) * 100, 1)
+type: avg
+table: read_csv_auto('./data/orders.csv')
+tags:
+  - retention
+  - kpi

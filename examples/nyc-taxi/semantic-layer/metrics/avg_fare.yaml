@@ -1,0 +1,9 @@
+name: avg_fare
+label: Average Fare
+description: Average fare amount per trip
+domain: transportation
+sql: ROUND(AVG(fare_amount), 2)
+type: avg
+table: read_csv_auto('./data/trips.csv')
+tags:
+  - revenue

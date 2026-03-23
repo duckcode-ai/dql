@@ -35,6 +35,7 @@ export enum TokenType {
   VarKeyword = 'VarKeyword',
   DefaultKeyword = 'DefaultKeyword',
   MetricKeyword = 'MetricKeyword',
+  MetricsKeyword = 'MetricsKeyword',
   ColonToken = 'ColonToken',
   TripleQuoteString = 'TripleQuoteString',
   GreaterThan = 'GreaterThan',
@@ -108,6 +109,7 @@ const KEYWORDS: Record<string, TokenType> = {
   default: TokenType.DefaultKeyword,
   IN: TokenType.InKeyword,
   metric: TokenType.MetricKeyword,
+  metrics: TokenType.MetricsKeyword,
 };
 
 export function lookupKeyword(identifier: string): TokenType {

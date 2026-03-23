@@ -1,0 +1,10 @@
+name: avg_order_value
+label: Average Order Value
+description: Average revenue per order
+domain: commerce
+sql: AVG(order_total)
+type: avg
+table: read_csv_auto('./data/orders.csv')
+tags:
+  - revenue
+  - kpi

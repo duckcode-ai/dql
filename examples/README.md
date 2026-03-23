@@ -2,13 +2,18 @@
 
 This folder now contains both small syntax references and fuller open-source showcase projects you can inspect without setting up DuckCode Studio.
 
-## Included Examples
+## Showcase Examples (with Semantic Layer)
+
+| Example | Data | Metrics | Dimensions | Blocks |
+|---|---|---|---|---|
+| `ecommerce-analytics/` | 50 orders across 4 regions | gmv, order_count, avg_order_value, gross_margin_pct, repeat_rate | channel, segment, region, order_date | 5 |
+| `saas-metrics/` | 31 SaaS accounts + 12 cohorts | mrr, expansion_mrr, account_count, avg_mrr | plan_tier, status, owner_segment, risk_bucket | 4 |
+| `nyc-taxi/` | 40 taxi trips across 5 boroughs | total_fare, trip_count, avg_fare, total_tips | pickup_borough, dropoff_borough, payment_type, airport_flag | 3 |
+
+## Utility Examples
 
 - `blocks/revenue_by_segment.dql` — a simple charted block example
 - `blocks/revenue_trend_query_only.dql` — a simple query-only block example
-- `ecommerce-analytics/` — realistic commerce KPIs, funnel analysis, and notebook walkthrough
-- `saas-metrics/` — MRR, churn, and retention examples with notebook walkthrough
-- `nyc-taxi/` — trip operations example with browser notebook support
 - `finance-kpi/` — smallest runnable KPI-style project
 - `dashboard-local/` — multi-chart local dashboard example
 - `workbook-local/` — multi-page workbook example

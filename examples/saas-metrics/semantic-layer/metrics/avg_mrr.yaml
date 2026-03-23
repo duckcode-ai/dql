@@ -1,0 +1,9 @@
+name: avg_mrr
+label: Average MRR per Account
+description: Average monthly recurring revenue per account
+domain: saas
+sql: ROUND(AVG(mrr), 2)
+type: avg
+table: read_csv_auto('./data/subscriptions.csv')
+tags:
+  - revenue

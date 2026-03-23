@@ -15,6 +15,14 @@ const DRIVER_LABELS: Record<string, string> = {
   bigquery: 'BigQuery',
   snowflake: 'Snowflake',
   sqlite: 'SQLite',
+  mysql: 'MySQL',
+  mssql: 'SQL Server',
+  redshift: 'Amazon Redshift',
+  databricks: 'Databricks',
+  clickhouse: 'ClickHouse',
+  athena: 'Amazon Athena',
+  trino: 'Trino',
+  fabric: 'Microsoft Fabric',
 };
 
 const DRIVER_COLORS: Record<string, string> = {
@@ -24,6 +32,14 @@ const DRIVER_COLORS: Record<string, string> = {
   bigquery: '#4285f4',
   snowflake: '#29b5e8',
   sqlite: '#003b57',
+  mysql: '#00758f',
+  mssql: '#cc2927',
+  redshift: '#8c4fff',
+  databricks: '#ff3621',
+  clickhouse: '#ffcc00',
+  athena: '#ff9900',
+  trino: '#dd00a1',
+  fabric: '#0078d4',
 };
 
 export function ConnectionPanel() {
@@ -190,6 +206,14 @@ export function ConnectionPanel() {
             { driver: 'postgres', desc: 'PostgreSQL / Supabase / RDS' },
             { driver: 'bigquery', desc: 'Google BigQuery' },
             { driver: 'snowflake', desc: 'Snowflake' },
+            { driver: 'mysql', desc: 'MySQL / MariaDB / PlanetScale' },
+            { driver: 'mssql', desc: 'SQL Server / Azure SQL' },
+            { driver: 'redshift', desc: 'Amazon Redshift' },
+            { driver: 'databricks', desc: 'Databricks SQL' },
+            { driver: 'clickhouse', desc: 'ClickHouse' },
+            { driver: 'athena', desc: 'Amazon Athena' },
+            { driver: 'trino', desc: 'Trino / Starburst' },
+            { driver: 'fabric', desc: 'Microsoft Fabric' },
           ].map(({ driver, desc }) => (
             <div key={driver} style={{ display: 'flex', gap: 8, alignItems: 'baseline' }}>
               <code style={{ fontSize: 10, fontFamily: t.fontMono, color: t.textMuted, minWidth: 80, flexShrink: 0 }}>

@@ -13,9 +13,11 @@ import {
 import {
   loadSemanticLayerFromDir,
   resolveSemanticLayer,
+  resolveSemanticLayerWithDiagnostics,
   getDialect,
   type SemanticLayer,
   type SemanticLayerProviderConfig,
+  type SemanticLayerResult,
 } from '@duckcodeailabs/dql-core';
 
 export interface ProjectConfig {
@@ -44,13 +46,17 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
 
   // Load semantic layer via provider system (dql native, dbt, cubejs, etc.)
   let semanticLayer: SemanticLayer | undefined;
+  let semanticLayerErrors: string[] = [];
+  let semanticDetectedProvider: string | undefined;
   const semanticLayerDir = join(projectRoot, 'semantic-layer');
   const semanticConfig = projectConfig.semanticLayer;
-  try {
-    semanticLayer = resolveSemanticLayer(semanticConfig, projectRoot);
-  } catch {
-    // Provider-based loading failed — try legacy fallback
-    if (!semanticLayer && existsSync(semanticLayerDir)) {
+  {
+    const result = resolveSemanticLayerWithDiagnostics(semanticConfig, projectRoot);
+    semanticLayer = result.layer;
+    semanticLayerErrors = result.errors;
+    semanticDetectedProvider = result.detectedProvider;
+    // Legacy fallback if provider system returned nothing and no errors
+    if (!semanticLayer && semanticLayerErrors.length === 0 && existsSync(semanticLayerDir)) {
       try { semanticLayer = loadSemanticLayerFromDir(semanticLayerDir); } catch { /* continue without */ }
     }
   }
@@ -73,7 +79,13 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           }
           // Hot-reload semantic layer on change
           if (dir === 'semantic-layer') {
-            try { semanticLayer = resolveSemanticLayer(semanticConfig, projectRoot); } catch { /* keep previous */ }
+            const refreshed = resolveSemanticLayerWithDiagnostics(semanticConfig, projectRoot);
+            if (refreshed.layer) {
+              semanticLayer = refreshed.layer;
+              semanticLayerErrors = refreshed.errors;
+            } else if (refreshed.errors.length > 0) {
+              semanticLayerErrors = refreshed.errors;
+            }
           }
         });
       } catch { /* dir not watchable */ }
@@ -227,7 +239,8 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
         res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
         res.end(serializeJSON({
           available: false,
-          provider: projectConfig.semanticLayer?.provider ?? null,
+          provider: projectConfig.semanticLayer?.provider ?? semanticDetectedProvider ?? null,
+          errors: semanticLayerErrors,
           metrics: [],
           dimensions: [],
           hierarchies: [],
@@ -262,11 +275,27 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
       res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
       res.end(serializeJSON({
         available: true,
-        provider: projectConfig.semanticLayer?.provider ?? 'dql',
+        provider: projectConfig.semanticLayer?.provider ?? semanticDetectedProvider ?? 'dql',
+        errors: semanticLayerErrors,
         metrics,
         dimensions,
         hierarchies,
       }));
+      return;
+    }
+    // ── Semantic completions for SQL cells ─────────────────────────────────────
+    if (req.method === 'GET' && path === '/api/semantic-completions') {
+      const completions: Array<{ type: string; name: string; label: string; description: string; sql: string }> = [];
+      if (semanticLayer) {
+        for (const m of semanticLayer.listMetrics()) {
+          completions.push({ type: 'metric', name: m.name, label: m.label, description: m.description ?? '', sql: m.sql });
+        }
+        for (const d of semanticLayer.listDimensions()) {
+          completions.push({ type: 'dimension', name: d.name, label: d.label, description: d.description ?? '', sql: d.sql });
+        }
+      }
+      res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+      res.end(serializeJSON({ completions }));
       return;
     }
     // ── end dql-notebook API ──────────────────────────────────────────────────
@@ -361,11 +390,18 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
         );
         const connector = await executor.getConnector(target);
         const ok = await connector.ping();
+        const driver = target.driver ?? 'unknown';
         res.writeHead(ok ? 200 : 400, { 'Content-Type': 'application/json; charset=utf-8' });
-        res.end(serializeJSON({ ok }));
+        res.end(serializeJSON({
+          ok,
+          message: ok ? `Connected to ${driver} successfully` : `Connection to ${driver} failed`,
+        }));
       } catch (error) {
         res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' });
-        res.end(serializeJSON({ ok: false, error: error instanceof Error ? error.message : String(error) }));
+        res.end(serializeJSON({
+          ok: false,
+          message: error instanceof Error ? error.message : String(error),
+        }));
       }
       return;
     }

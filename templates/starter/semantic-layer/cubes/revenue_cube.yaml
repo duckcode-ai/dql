@@ -8,7 +8,7 @@
 name: revenue
 label: Revenue Cube
 description: Core revenue analysis cube built on the starter revenue data.
-table: fct_revenue
+table: read_csv_auto('./data/revenue.csv')
 domain: revenue
 owner: analytics-team
 

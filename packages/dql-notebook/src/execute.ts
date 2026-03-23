@@ -8,6 +8,7 @@ import {
 } from '@duckcodeailabs/dql-core';
 import type { SQLParamSpec } from '@duckcodeailabs/dql-connectors';
 import type { NotebookCell, NotebookChartConfig } from './document.js';
+import { resolveSemanticRefs, hasSemanticRefs } from './semantic-refs.js';
 
 export interface NotebookExecutionPlan {
   title: string;
@@ -33,9 +34,21 @@ export function buildExecutionPlan(
   }
 
   if (cell.type === 'sql') {
+    // Resolve @metric(name) and @dim(name) references in SQL cells
+    let resolvedSql = cell.source;
+    if (options?.semanticLayer && hasSemanticRefs(cell.source)) {
+      const resolution = resolveSemanticRefs(cell.source, options.semanticLayer);
+      if (resolution.unresolvedRefs.length > 0) {
+        throw new Error(
+          `Unresolved semantic references in SQL cell: ${resolution.unresolvedRefs.join(', ')}. ` +
+          'Check that these metrics/dimensions exist in your semantic layer.',
+        );
+      }
+      resolvedSql = resolution.resolvedSql;
+    }
     return {
       title: cell.title || 'SQL cell',
-      sql: cell.source,
+      sql: resolvedSql,
       sqlParams: [],
       variables: {},
       chartConfig: cell.config,
@@ -153,16 +166,17 @@ function buildSemanticPlan(
     );
   }
 
-  // Extract metric reference from the block's metricRef field
+  // Extract metric references: metricsRef (array) takes precedence over metricRef (single)
   const metrics: string[] = [];
   const dimensions: string[] = [];
 
-  if (block.metricRef) {
+  if (block.metricsRef && block.metricsRef.length > 0) {
+    metrics.push(...block.metricsRef);
+  } else if (block.metricRef) {
     metrics.push(block.metricRef);
   }
 
-  // Also extract dimensions from block params if they reference dimension names
-  // For now, dimensions can be passed via block params named "dimensions"
+  // Also extract dimensions/metrics from block params if they reference names
   for (const param of block.params?.params ?? []) {
     const val = evaluateExpression(param.initializer);
     if (param.name === 'dimensions' && Array.isArray(val)) {
@@ -175,7 +189,7 @@ function buildSemanticPlan(
   if (metrics.length === 0) {
     throw new Error(
       `Semantic block "${block.name}" has no metric references. ` +
-      'Add metricRef = "metric_name" to your block declaration.',
+      'Add metric = "metric_name" or metrics = ["metric1", "metric2"] to your block declaration.',
     );
   }
 

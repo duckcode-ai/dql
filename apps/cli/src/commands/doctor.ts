@@ -1,6 +1,7 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { QueryExecutor } from '@duckcodeailabs/dql-connectors';
+import { resolveSemanticLayerWithDiagnostics } from '@duckcodeailabs/dql-core';
 import type { CLIFlags } from '../args.js';
 import { assertLocalQueryRuntimeReady, findProjectRoot, loadProjectConfig } from '../local-runtime.js';
 
@@ -47,6 +48,7 @@ export async function runDoctor(targetPath: string | null, flags: CLIFlags): Pro
       ok: Boolean(config.defaultConnection?.driver),
       detail: config.defaultConnection?.driver ? `driver=${config.defaultConnection.driver}` : 'not configured',
     },
+    checkSemanticLayer(config.semanticLayer, projectRoot),
   ];
 
   if (config.defaultConnection?.driver === 'file' || config.defaultConnection?.driver === 'duckdb') {
@@ -115,6 +117,46 @@ function checkDuckDBDependency(projectRoot: string): Check {
       name: 'duckdb dependency',
       ok: false,
       detail: 'failed to parse package.json',
+    };
+  }
+}
+
+function checkSemanticLayer(semanticConfig: unknown, projectRoot: string): Check {
+  try {
+    const result = resolveSemanticLayerWithDiagnostics(
+      semanticConfig as Parameters<typeof resolveSemanticLayerWithDiagnostics>[0],
+      projectRoot,
+    );
+
+    if (result.errors.length > 0) {
+      return {
+        name: 'Semantic layer',
+        ok: false,
+        detail: result.errors.join('; '),
+      };
+    }
+
+    if (!result.layer) {
+      return {
+        name: 'Semantic layer',
+        ok: true,
+        detail: 'not configured (optional)',
+      };
+    }
+
+    const metrics = result.layer.listMetrics().length;
+    const dims = result.layer.listDimensions().length;
+    const provider = result.detectedProvider ?? 'configured';
+    return {
+      name: 'Semantic layer',
+      ok: true,
+      detail: `provider=${provider}, ${metrics} metrics, ${dims} dimensions`,
+    };
+  } catch (err) {
+    return {
+      name: 'Semantic layer',
+      ok: false,
+      detail: err instanceof Error ? err.message : String(err),
     };
   }
 }

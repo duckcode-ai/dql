@@ -69,12 +69,18 @@ export async function runInit(targetArg: string | null, flags: CLIFlags): Promis
   if (targetArg && targetArg !== '.') {
     console.log(`    1. cd ${targetArg}`);
     console.log('    2. dql notebook');
-    console.log('    3. dql parse blocks/revenue_by_segment.dql');
+    console.log('    3. dql doctor');
   } else {
     console.log('    1. dql notebook');
-    console.log('    2. dql parse blocks/revenue_by_segment.dql');
+    console.log('    2. dql doctor');
   }
   console.log('');
+  const others = listTemplates().filter((t) => t !== templateId);
+  if (others.length > 0) {
+    console.log(`  Other templates: ${others.join(', ')}`);
+    console.log('    e.g. dql init my-project --template ecommerce');
+    console.log('');
+  }
 
   if (flags.open) {
     await runNotebook(targetDir, flags);
