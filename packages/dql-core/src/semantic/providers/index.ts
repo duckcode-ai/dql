@@ -1,4 +1,4 @@
-export { resolveSemanticLayer, resolveSemanticLayerWithDiagnostics } from './registry.js';
+export { resolveSemanticLayer, resolveSemanticLayerWithDiagnostics, resolveSemanticLayerAsync } from './registry.js';
 export type { SemanticLayerResult } from './registry.js';
 export type { SemanticLayerProviderConfig, SemanticLayerProvider } from './provider.js';
 export { resolveRepoSource, pullCachedRepo } from './repo-resolver.js';

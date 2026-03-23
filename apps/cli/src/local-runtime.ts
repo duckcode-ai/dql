@@ -12,8 +12,7 @@ import {
 } from '@duckcodeailabs/dql-notebook';
 import {
   loadSemanticLayerFromDir,
-  resolveSemanticLayer,
-  resolveSemanticLayerWithDiagnostics,
+  resolveSemanticLayerAsync,
   getDialect,
   type SemanticLayer,
   type SemanticLayerProviderConfig,
@@ -51,7 +50,10 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
   const semanticLayerDir = join(projectRoot, 'semantic-layer');
   const semanticConfig = projectConfig.semanticLayer;
   {
-    const result = resolveSemanticLayerWithDiagnostics(semanticConfig, projectRoot);
+    const executeQuery = semanticConfig?.provider === 'snowflake'
+      ? async (sql: string) => { const r = await executor.executeQuery(sql, [], {}, connection); return { rows: r.rows }; }
+      : undefined;
+    const result = await resolveSemanticLayerAsync(semanticConfig, projectRoot, executeQuery);
     semanticLayer = result.layer;
     semanticLayerErrors = result.errors;
     semanticDetectedProvider = result.detectedProvider;
@@ -77,15 +79,24 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           for (const client of sseClients) {
             try { client.write(`event: change\ndata: ${payload}\n\n`); } catch { sseClients.delete(client); }
           }
-          // Hot-reload semantic layer on change
+          // Hot-reload semantic layer on change and notify frontend
           if (dir === 'semantic-layer') {
-            const refreshed = resolveSemanticLayerWithDiagnostics(semanticConfig, projectRoot);
-            if (refreshed.layer) {
-              semanticLayer = refreshed.layer;
-              semanticLayerErrors = refreshed.errors;
-            } else if (refreshed.errors.length > 0) {
-              semanticLayerErrors = refreshed.errors;
-            }
+            const executeQuery = semanticConfig?.provider === 'snowflake'
+              ? async (sql: string) => { const r = await executor.executeQuery(sql, [], {}, connection); return { rows: r.rows }; }
+              : undefined;
+            resolveSemanticLayerAsync(semanticConfig, projectRoot, executeQuery).then((refreshed) => {
+              if (refreshed.layer) {
+                semanticLayer = refreshed.layer;
+                semanticLayerErrors = refreshed.errors;
+              } else if (refreshed.errors.length > 0) {
+                semanticLayerErrors = refreshed.errors;
+              }
+              // Notify all connected notebook clients to re-fetch the semantic layer
+              const reloadPayload = JSON.stringify({ type: 'semantic-reload' });
+              for (const client of sseClients) {
+                try { client.write(`event: change\ndata: ${reloadPayload}\n\n`); } catch { sseClients.delete(client); }
+              }
+            }).catch(() => { /* reload errors are non-fatal */ });
           }
         });
       } catch { /* dir not watchable */ }

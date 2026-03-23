@@ -10,6 +10,7 @@ import type { SemanticLayerProviderConfig } from './provider.js';
 import { DqlProvider } from './dql-provider.js';
 import { DbtProvider } from './dbt-provider.js';
 import { CubejsProvider } from './cubejs-provider.js';
+import { SnowflakeSemanticProvider, type SnowflakeQueryExecutor } from './snowflake-provider.js';
 import { resolveRepoSource } from './repo-resolver.js';
 
 export interface SemanticLayerResult {
@@ -44,6 +45,39 @@ export function resolveSemanticLayerWithDiagnostics(
   }
 
   return autoDetect(projectRoot);
+}
+
+/**
+ * Async variant of resolveSemanticLayerWithDiagnostics.
+ * Required for the Snowflake provider which needs a live query executor.
+ * All other providers fall back to the sync path.
+ */
+export async function resolveSemanticLayerAsync(
+  config: SemanticLayerProviderConfig | undefined,
+  projectRoot: string,
+  executeQuery?: SnowflakeQueryExecutor,
+): Promise<SemanticLayerResult> {
+  if (config?.provider === 'snowflake') {
+    if (!executeQuery) {
+      return { layer: undefined, errors: ['Snowflake provider requires a live query executor. Ensure the connection is initialised before calling resolveSemanticLayerAsync.'] };
+    }
+    try {
+      let effectiveRoot = projectRoot;
+      let effectiveConfig = config;
+      if (config.source && config.source !== 'local' && config.repoUrl) {
+        const resolved = resolveRepoSource(config, projectRoot);
+        effectiveRoot = resolved.localPath;
+        effectiveConfig = { ...config, projectPath: undefined };
+      }
+      const provider = new SnowflakeSemanticProvider(executeQuery);
+      const layer = await provider.loadAsync(effectiveConfig, effectiveRoot);
+      return { layer, errors: [] };
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : String(error);
+      return { layer: undefined, errors: [`Failed to load snowflake semantic layer: ${msg}`] };
+    }
+  }
+  return resolveSemanticLayerWithDiagnostics(config, projectRoot);
 }
 
 function autoDetect(projectRoot: string): SemanticLayerResult {

@@ -104,11 +104,15 @@ export const api = {
     }
   },
 
-  async composeQuery(metrics: string[], dimensions: string[]): Promise<{ sql: string } | { error: string }> {
+  async composeQuery(
+    metrics: string[],
+    dimensions: string[],
+    timeDimension?: { name: string; granularity: string },
+  ): Promise<{ sql: string } | { error: string }> {
     try {
       return await request<{ sql: string }>('/api/semantic-query', {
         method: 'POST',
-        body: JSON.stringify({ metrics, dimensions }),
+        body: JSON.stringify({ metrics, dimensions, timeDimension }),
       });
     } catch (e: any) {
       return { error: e.message ?? 'Failed to compose query' };

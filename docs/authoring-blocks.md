@@ -299,41 +299,45 @@ git commit -m "feat: add ARR by plan tier semantic block"
 
 ## Using Blocks in the Notebook
 
-Once a block is committed, import it directly into a notebook cell:
+There are three ways to work with semantic metrics and blocks in a notebook.
 
-### Import a block
+### Pattern 1 — Reference semantic metrics inline in a SQL cell
 
-In a DQL cell, use `@import`:
-
-```dql
-@import "./blocks/revenue_by_segment.dql"
-```
-
-This runs the block's query and renders its visualization inline in the notebook.
-
-### Override params
-
-Pass params to override the block's defaults:
-
-```dql
-@import "./blocks/revenue_by_segment.dql" with period = "previous_quarter"
-```
-
-Multiple params:
-
-```dql
-@import "./blocks/revenue_by_segment.dql" with period = "previous_quarter", segment = "Enterprise"
-```
-
-### Reference block output in downstream cells
-
-Name the import cell (e.g., `rev_data`), then reference it in a SQL cell:
+In any SQL cell, use `@metric(name)` and `@dim(name)` inline refs. DQL resolves these at execution time — `@metric(name)` expands to the metric's aggregation expression aliased as the metric name, and `@dim(name)` expands to the dimension column. GROUP BY is cleaned up automatically.
 
 ```sql
-SELECT * FROM {{rev_data}}
-WHERE revenue > 50000
-ORDER BY revenue DESC
+SELECT @dim(segment), @metric(total_revenue)
+FROM fct_revenue
+GROUP BY @dim(segment)
+ORDER BY @metric(total_revenue) DESC
 ```
+
+This is the recommended pattern for exploratory queries that reference your semantic layer without duplicating metric definitions.
+
+### Pattern 2 — Write a DQL block inline in a notebook DQL cell
+
+Add a cell with type `dql` and write the block body directly inside the cell. This is for ad-hoc governed queries inside the notebook without a separate `.dql` file.
+
+```dql
+block "Revenue by Segment" {
+    type   = "semantic"
+    metric = "total_revenue"
+    dimensions = ["segment"]
+    owner  = "data-team"
+}
+```
+
+### Pattern 3 — Use Compose Query to insert a SQL cell (recommended)
+
+The canonical workflow for semantic metrics is:
+
+1. Open the **Semantic Layer** sidebar panel
+2. Expand **Compose Query**
+3. Pick metrics and dimensions (and optionally a time dimension + granularity)
+4. Click **Compose SQL** — DQL generates dialect-correct SQL with the right aggregations and joins
+5. Click **+ Insert as Cell** — the SQL cell appears in the notebook, ready to run
+
+This gives you the generated SQL as a starting point that you can edit before running.
 
 ---
 

@@ -3,8 +3,8 @@ import { useNotebook } from '../store/NotebookStore';
 import { api } from '../api/client';
 
 interface WatchEvent {
-  type: 'file-changed' | 'file-added' | 'file-deleted';
-  path: string;
+  type: 'file-changed' | 'file-added' | 'file-deleted' | 'semantic-reload';
+  path?: string;
 }
 
 /**
@@ -47,6 +47,14 @@ export function useHotReload() {
             // Refresh file list
             api.listNotebooks().then((files) => {
               dispatch({ type: 'SET_FILES', files });
+            });
+          }
+
+          if (event.type === 'semantic-reload') {
+            // Re-fetch semantic layer so the panel reflects the updated YAML
+            dispatch({ type: 'SET_SEMANTIC_LOADING', loading: true });
+            api.getSemanticLayer().then((layer) => {
+              dispatch({ type: 'SET_SEMANTIC_LAYER', layer });
             });
           }
         } catch {

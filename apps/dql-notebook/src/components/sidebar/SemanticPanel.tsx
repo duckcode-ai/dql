@@ -311,14 +311,21 @@ function HierarchyRow({ hierarchy, t }: { hierarchy: SemanticHierarchy; t: Theme
   );
 }
 
+const GRANULARITIES = ['day', 'week', 'month', 'quarter', 'year'] as const;
+type Granularity = typeof GRANULARITIES[number];
+
 function ComposeQuerySection({ t, metrics, dimensions, onInsertCell }: { t: Theme; metrics: SemanticMetric[]; dimensions: SemanticDimension[]; onInsertCell?: (sql: string) => void }) {
   const [expanded, setExpanded] = useState(false);
   const [selectedMetrics, setSelectedMetrics] = useState<Set<string>>(new Set());
   const [selectedDims, setSelectedDims] = useState<Set<string>>(new Set());
+  const [selectedTimeDim, setSelectedTimeDim] = useState<string>('');
+  const [granularity, setGranularity] = useState<Granularity>('month');
   const [composedSql, setComposedSql] = useState<string | null>(null);
   const [composeError, setComposeError] = useState<string | null>(null);
   const [composing, setComposing] = useState(false);
   const [copied, setCopied] = useState(false);
+
+  const dateDimensions = dimensions.filter(d => d.type === 'date');
 
   const toggleMetric = (name: string) => {
     setSelectedMetrics(prev => {
@@ -343,9 +350,11 @@ function ComposeQuerySection({ t, metrics, dimensions, onInsertCell }: { t: Them
     setComposing(true);
     setComposeError(null);
     try {
+      const timeDimension = selectedTimeDim ? { name: selectedTimeDim, granularity } : undefined;
       const result = await api.composeQuery(
         Array.from(selectedMetrics),
         Array.from(selectedDims),
+        timeDimension,
       );
       if ('error' in result) {
         setComposeError(result.error);
@@ -460,6 +469,61 @@ function ComposeQuerySection({ t, metrics, dimensions, onInsertCell }: { t: Them
               </label>
             ))}
           </div>
+
+          {/* Time dimension picker — only shown when date dimensions exist */}
+          {dateDimensions.length > 0 && (
+            <div style={{ marginBottom: 8 }}>
+              <div style={{ fontSize: 10, fontWeight: 600, color: t.textSecondary, marginBottom: 4, textTransform: 'uppercase' as const, letterSpacing: '0.04em' }}>
+                Time Dimension (optional)
+              </div>
+              <select
+                value={selectedTimeDim}
+                onChange={e => { setSelectedTimeDim(e.target.value); setComposedSql(null); }}
+                style={{
+                  width: '100%',
+                  padding: '3px 6px',
+                  background: t.editorBg,
+                  border: `1px solid ${t.cellBorder}`,
+                  borderRadius: 4,
+                  color: selectedTimeDim ? t.textPrimary : t.textMuted,
+                  fontSize: 11,
+                  fontFamily: t.font,
+                  marginBottom: 4,
+                  cursor: 'pointer',
+                }}
+              >
+                <option value="">None</option>
+                {dateDimensions.map(d => (
+                  <option key={d.name} value={d.name}>{d.label || d.name}</option>
+                ))}
+              </select>
+              {selectedTimeDim && (
+                <div style={{ display: 'flex', gap: 4 }}>
+                  {GRANULARITIES.map(g => (
+                    <button
+                      key={g}
+                      onClick={() => { setGranularity(g); setComposedSql(null); }}
+                      style={{
+                        flex: 1,
+                        padding: '2px 0',
+                        background: granularity === g ? t.accent : t.pillBg,
+                        border: 'none',
+                        borderRadius: 3,
+                        color: granularity === g ? '#fff' : t.textMuted,
+                        fontSize: 9,
+                        fontWeight: 600,
+                        fontFamily: t.font,
+                        cursor: 'pointer',
+                        textTransform: 'capitalize' as const,
+                      }}
+                    >
+                      {g}
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
 
           {/* Compose button */}
           <button

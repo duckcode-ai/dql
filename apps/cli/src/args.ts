@@ -13,6 +13,7 @@ export interface CLIFlags {
   queryOnly: boolean;
   template: string;
   connection: string;
+  skipTests: boolean;
 }
 
 export interface ParsedArgs {
@@ -38,6 +39,7 @@ export function parseArgs(argv: string[]): ParsedArgs {
     queryOnly: false,
     template: 'starter',
     connection: '',
+    skipTests: false,
   };
 
   let command: string | null = null;
@@ -80,6 +82,8 @@ export function parseArgs(argv: string[]): ParsedArgs {
       flags.connection = argv[++i];
     } else if (arg === '--query-only') {
       flags.queryOnly = true;
+    } else if (arg === '--skip-tests') {
+      flags.skipTests = true;
     } else if (!command) {
       command = arg;
     } else if (!file) {
