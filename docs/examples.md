@@ -1,180 +1,75 @@
 # Examples
 
-This page helps new users find the fastest working examples in the DQL repo.
+All examples live in `templates/` and can be scaffolded with `dql init --template <name>`.
 
-## Best First Example
-
-Start with the scaffolded starter project or the richer example folders:
+## Quickstart
 
 ```bash
-dql init my-dql-project
-cd my-dql-project
+npm install -g @duckcodeailabs/dql-cli@0.4.0
+dql init my-project --template starter
+cd my-project
 dql notebook
 ```
 
-This is the recommended first-run experience because it includes local data and a working config file.
+## Available Templates
 
-## Repo Examples
+| Template | Best for | What you get |
+|---|---|---|
+| `starter` | First-run experience | Revenue CSV, starter blocks, semantic layer tutorial, welcome notebook |
+| `ecommerce` | Commerce analytics | Channel revenue, funnel analysis, semantic cubes, full dataset |
+| `saas` | Revenue + retention | MRR, churn pressure, cohort analysis, semantic metrics |
+| `taxi` | Time-series and ops | Trip volume, fare trends, borough analysis, semantic dimensions |
+| `finance-kpi` | Smallest runnable project | Single KPI block, local CSV, minimal layout |
+| `dashboard` | Multi-chart dashboards | Dashboard syntax with KPI, bar, and table charts |
+| `workbook` | Multi-page reports | Workbook syntax with multiple pages |
+| `duckdb-local` | DuckDB connection path | Local DuckDB driver config, no warehouse needed |
 
-### `examples/ecommerce-analytics/`
+## Scaffold any template
 
-Use this example if you want the strongest open-source first impression.
-
-Good for learning:
-
-- browser notebook flow with `.dqlnb` files
-- realistic commerce metrics and funnel analysis
-- reusable blocks plus a polished dashboard
-
-### `examples/saas-metrics/`
-
-Use this example to explore recurring revenue, churn, and cohort retention.
-
-Good for learning:
-
-- MRR and churn modeling in DQL
-- notebook-first analysis for executive KPIs
-- blending reusable blocks with dashboard rollups
-
-### `examples/nyc-taxi/`
-
-Use this example to explore mobility analytics with local sample trip data.
-
-Good for learning:
-
-- operations metrics and time-series analysis
-- notebook-driven ad hoc SQL exploration
-- charting non-financial datasets in DQL
-
-### `examples/finance-kpi/`
-
-Use this example if you want the smallest fully runnable DQL project.
-
-Good for learning:
-
-- local project layout
-- KPI chart output
-- `dql preview` and `dql build` basics
-
-### `examples/dashboard-local/`
-
-Use this example to see multiple chart calls in one dashboard file.
-
-Good for learning:
-
-- dashboard syntax
-- mixing KPI, bar, and table charts
-- local CSV-backed dashboards
-
-### `examples/workbook-local/`
-
-Use this example to see a workbook with multiple pages.
-
-Good for learning:
-
-- workbook syntax
-- multi-page compiled output
-- local reporting flows
-
-### `examples/duckdb-local/`
-
-Use this example to try DQL with a `duckdb` default connection.
-
-Good for learning:
-
-- local DuckDB execution path
-- local analytics without warehouse credentials
-- preview flow with a different default driver
-
-### `examples/semantic-block/`
-
-Use this example to understand semantic block structure and semantic-layer layout.
-
-Good for learning:
-
-- `type = "semantic"`
-- metric references
-- semantic-layer companion files
-
-### `examples/blocks/revenue_by_segment.dql`
-
-Use this example to understand a standard charted block with:
-
-- a SQL query
-- a visualization section
-- reusable block metadata
-
-Good for learning:
-
-- block structure
-- bar chart configuration
-- field mapping from SQL output to chart axes
-
-### `examples/blocks/revenue_trend_query_only.dql`
-
-Use this example to understand a query-only block without a chart.
-
-Good for learning:
-
-- query-only assets
-- metadata and block structure without visualization
-- workflows where a table or downstream export matters more than charting
-
-## Starter Template Files
-
-When you run `dql init`, the starter template gives you a local project plus a browser notebook walkthrough to experiment with.
-
-Key files:
-
-- `blocks/revenue_by_segment.dql`
-- `blocks/revenue_trend_query_only.dql`
-- `data/revenue.csv`
-- `dql.config.json`
-- `notebooks/welcome.dqlnb`
-
-These are the most important files for open-source evaluation because they work without external warehouse credentials.
-
-## Recommended Order
-
-1. `examples/ecommerce-analytics/`
-2. `examples/saas-metrics/`
-3. `examples/nyc-taxi/`
-4. `examples/dashboard-local/`
-5. `examples/workbook-local/`
+```bash
+dql init my-project --template ecommerce
+dql init my-project --template finance-kpi
+dql init my-project --template dashboard
+```
 
 ## Suggested Learning Path
 
-### 1. Preview the starter chart
+### 1. Start with the notebook
 
 ```bash
-dql preview blocks/pipeline_health.dql --open
+dql notebook
 ```
 
 ### 2. Parse a block and inspect its structure
 
 ```bash
-dql parse blocks/pipeline_health.dql --verbose
+dql parse blocks/revenue_by_segment.dql --verbose
 ```
 
-### 3. Build and serve the bundle
+### 3. Preview and build
 
 ```bash
-dql build blocks/pipeline_health.dql
-dql serve dist/pipeline_health --open
+dql preview blocks/revenue_by_segment.dql --open
+dql build blocks/revenue_by_segment.dql
+dql serve dist/revenue_by_segment --open
 ```
 
-### 4. Modify the block
+### 4. Explore the semantic layer
 
-Try changing:
+Open the notebook sidebar and click the **Semantic** tab to browse metrics, dimensions, and hierarchies defined in `semantic-layer/`.
 
-- `chart = "bar"` to another supported chart
-- the SQL aggregation
-- the title or tags
-- the preview port in `dql.config.json`
+## Recommended Order
+
+1. `starter` — get oriented
+2. `ecommerce` — strongest full demo
+3. `saas` — recurring revenue and churn
+4. `taxi` — time-series and operations
+5. `dashboard` — multi-chart layout
+6. `workbook` — multi-page reporting
 
 ## Related Docs
 
 - [Getting Started](./getting-started.md)
+- [Semantic Layer Guide](./semantic-layer-guide.md)
 - [Language Specification](./dql-language-spec.md)
 - [Data Sources](./data-sources.md)
-- [Migration Guides](./migration-guides/README.md)

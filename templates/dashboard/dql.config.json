@@ -1,13 +1,15 @@
 {
-  "project": "ecommerce-analytics",
+  "project": "__PROJECT_NAME__",
   "defaultConnection": {
     "driver": "file",
     "filepath": ":memory:"
   },
   "dataDir": "./data",
+
   "semanticLayer": {
     "provider": "dql"
   },
+
   "preview": {
     "port": 3474,
     "open": true,

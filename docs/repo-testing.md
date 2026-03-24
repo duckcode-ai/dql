@@ -78,34 +78,37 @@ pnpm --filter @duckcodeailabs/dql-cli exec dql notebook /tmp/dql-taxi-smoke
 
 ## 3. Validate repo examples
 
-These examples are the best high-signal OSS demos:
+These templates are the best high-signal OSS demos:
 
-- `examples/ecommerce-analytics/`
-- `examples/saas-metrics/`
-- `examples/nyc-taxi/`
+- `templates/ecommerce/`
+- `templates/saas/`
+- `templates/taxi/`
 
-Run this flow in each example folder:
+Scaffold and test each template:
 
 ```bash
-pnpm --filter @duckcodeailabs/dql-cli exec dql doctor examples/ecommerce-analytics
-pnpm --filter @duckcodeailabs/dql-cli exec dql parse examples/ecommerce-analytics/blocks/revenue_by_segment.dql
-pnpm --filter @duckcodeailabs/dql-cli exec dql notebook examples/ecommerce-analytics
+dql init /tmp/test-ecommerce --template ecommerce
+dql doctor /tmp/test-ecommerce
+dql parse /tmp/test-ecommerce/blocks/revenue_by_segment.dql
+dql notebook /tmp/test-ecommerce
 
-pnpm --filter @duckcodeailabs/dql-cli exec dql doctor examples/saas-metrics
-pnpm --filter @duckcodeailabs/dql-cli exec dql parse examples/saas-metrics/blocks/revenue_by_segment.dql
-pnpm --filter @duckcodeailabs/dql-cli exec dql notebook examples/saas-metrics
+dql init /tmp/test-saas --template saas
+dql doctor /tmp/test-saas
+dql parse /tmp/test-saas/blocks/revenue_by_segment.dql
+dql notebook /tmp/test-saas
 
-pnpm --filter @duckcodeailabs/dql-cli exec dql doctor examples/nyc-taxi
-pnpm --filter @duckcodeailabs/dql-cli exec dql parse examples/nyc-taxi/blocks/revenue_by_segment.dql
-pnpm --filter @duckcodeailabs/dql-cli exec dql notebook examples/nyc-taxi
+dql init /tmp/test-taxi --template taxi
+dql doctor /tmp/test-taxi
+dql parse /tmp/test-taxi/blocks/revenue_by_segment.dql
+dql notebook /tmp/test-taxi
 ```
 
-Also test at least one dashboard build per example:
+Also test at least one dashboard build per template:
 
 ```bash
-pnpm --filter @duckcodeailabs/dql-cli exec dql build examples/ecommerce-analytics/dashboards/revenue_command_center.dql
-pnpm --filter @duckcodeailabs/dql-cli exec dql build examples/saas-metrics/dashboards/growth_scorecard.dql
-pnpm --filter @duckcodeailabs/dql-cli exec dql build examples/nyc-taxi/dashboards/city_operations.dql
+dql build /tmp/test-ecommerce/dashboards/revenue_command_center.dql
+dql build /tmp/test-saas/dashboards/growth_scorecard.dql
+dql build /tmp/test-taxi/dashboards/city_operations.dql
 ```
 
 ## 4. Manual browser checklist

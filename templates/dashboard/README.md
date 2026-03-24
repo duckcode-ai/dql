@@ -1,17 +1,23 @@
-# Dashboard Local Example
+# Dashboard
 
-This example shows a dashboard with multiple chart calls over local CSV data.
+Multi-chart dashboard over local CSV data — KPI, bar, and table charts in one file.
+
+## Scaffold
+
+```bash
+dql init my-project --template dashboard
+cd my-project
+```
 
 ## What it demonstrates
 
-- dashboard syntax
+- Dashboard syntax
 - KPI, bar, and table charts in one file
-- local file-based preview without warehouse credentials
+- Local file-based preview without warehouse credentials
 
 ## Run it
 
 ```bash
-cd dql/examples/dashboard-local
 dql doctor
 dql preview dashboards/pipeline_overview.dql --open
 ```

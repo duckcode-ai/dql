@@ -1,17 +1,23 @@
-# Workbook Local Example
+# Workbook
 
-This example shows a multi-page workbook that compiles into a tabbed HTML report.
+Multi-page workbook that compiles into a tabbed HTML report.
+
+## Scaffold
+
+```bash
+dql init my-project --template workbook
+cd my-project
+```
 
 ## What it demonstrates
 
-- workbook syntax
-- multiple pages in one file
-- a local-first reporting flow with CSV data
+- Workbook syntax
+- Multiple pages in one file
+- Local-first reporting flow with CSV data
 
 ## Run it
 
 ```bash
-cd dql/examples/workbook-local
 dql doctor
 dql preview workbooks/quarterly_business_review.dql --open
 ```

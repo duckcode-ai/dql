@@ -66,7 +66,7 @@ dql notebook
 
 **Useful flags:**
 
-- `--template <starter|ecommerce|saas|taxi>` — scaffold a themed starter project
+- `--template <starter|ecommerce|saas|taxi|finance-kpi|dashboard|workbook|duckdb-local>` — scaffold a themed project
 - `--open` — scaffold the project and immediately open the notebook
 
 ---
@@ -267,9 +267,9 @@ If no directory is provided, `serve` defaults to `dist/` in the current working 
 Parse a `.dql` file and run semantic analysis. Reports syntax errors, unknown keywords, missing required fields, and any semantic warnings.
 
 ```bash
-dql parse examples/blocks/revenue_by_segment.dql
-dql parse examples/blocks/revenue_by_segment.dql --verbose
-dql parse examples/blocks/revenue_by_segment.dql --format json
+dql parse blocks/revenue_by_segment.dql
+dql parse blocks/revenue_by_segment.dql --verbose
+dql parse blocks/revenue_by_segment.dql --format json
 ```
 
 **What it validates:**
@@ -280,7 +280,7 @@ dql parse examples/blocks/revenue_by_segment.dql --format json
 **Text output (no issues):**
 
 ```
-  ✓ Parsed: examples/blocks/revenue_by_segment.dql
+  ✓ Parsed: blocks/revenue_by_segment.dql
     Statements: 1
     Diagnostics: ✓ No errors, no warnings
 ```
@@ -288,7 +288,7 @@ dql parse examples/blocks/revenue_by_segment.dql --format json
 **Text output (with issues):**
 
 ```
-  ✓ Parsed: examples/blocks/revenue_by_segment.dql
+  ✓ Parsed: blocks/revenue_by_segment.dql
     Statements: 1
 
   ✗ Errors (1):
@@ -302,7 +302,7 @@ dql parse examples/blocks/revenue_by_segment.dql --format json
 
 ```json
 {
-  "file": "examples/blocks/revenue_by_segment.dql",
+  "file": "blocks/revenue_by_segment.dql",
   "statements": 1,
   "diagnostics": [],
   "ast": { ... }   // only present with --verbose
@@ -316,8 +316,8 @@ dql parse examples/blocks/revenue_by_segment.dql --format json
 Evaluate certification rules against every block declared in the file. Certification checks that a block has the governance metadata required to be promoted (owner, description, tags, domain, and type).
 
 ```bash
-dql certify examples/blocks/revenue_by_segment.dql
-dql certify examples/blocks/revenue_by_segment.dql --format json
+dql certify blocks/revenue_by_segment.dql
+dql certify blocks/revenue_by_segment.dql --format json
 ```
 
 **What it checks (via `Certifier` in `@duckcodeailabs/dql-governance`):**
@@ -368,10 +368,10 @@ Format a `.dql` file in place using the canonical DQL formatter (`formatDQL` fro
 
 ```bash
 # Format and write back:
-dql fmt examples/blocks/revenue_by_segment.dql
+dql fmt blocks/revenue_by_segment.dql
 
 # Check only — exits 1 if the file needs formatting (CI-safe):
-dql fmt examples/blocks/revenue_by_segment.dql --check
+dql fmt blocks/revenue_by_segment.dql --check
 ```
 
 **Flags specific to `fmt`:**
@@ -383,25 +383,25 @@ dql fmt examples/blocks/revenue_by_segment.dql --check
 **Text output (write mode, changed):**
 
 ```
-  ✓ Formatted: examples/blocks/revenue_by_segment.dql
+  ✓ Formatted: blocks/revenue_by_segment.dql
 ```
 
 **Text output (write mode, already formatted):**
 
 ```
-  ✓ No changes: examples/blocks/revenue_by_segment.dql
+  ✓ No changes: blocks/revenue_by_segment.dql
 ```
 
 **Text output (check mode, needs changes):**
 
 ```
-  ✗ Needs formatting: examples/blocks/revenue_by_segment.dql
+  ✗ Needs formatting: blocks/revenue_by_segment.dql
 ```
 
 **JSON output shape:**
 
 ```json
-{ "file": "examples/blocks/revenue_by_segment.dql", "changed": true, "mode": "check" }
+{ "file": "blocks/revenue_by_segment.dql", "changed": true, "mode": "check" }
 ```
 
 ---
@@ -412,13 +412,13 @@ Run test assertions declared in DQL blocks. Without `--connection`, performs a d
 
 ```bash
 # Dry run (lists assertions without executing)
-dql test examples/blocks/revenue_by_segment.dql
+dql test blocks/revenue_by_segment.dql
 
 # Live execution against DuckDB in-memory
-dql test examples/blocks/revenue_by_segment.dql --connection duckdb
+dql test blocks/revenue_by_segment.dql --connection duckdb
 
 # Live execution against a DuckDB database file
-dql test examples/blocks/revenue_by_segment.dql --connection ./analytics.duckdb
+dql test blocks/revenue_by_segment.dql --connection ./analytics.duckdb
 ```
 
 **Text output (live execution):**
@@ -433,7 +433,7 @@ dql test examples/blocks/revenue_by_segment.dql --connection ./analytics.duckdb
 **Text output (dry run):**
 
 ```
-  Found 1 block(s) in examples/blocks/revenue_by_segment.dql
+  Found 1 block(s) in blocks/revenue_by_segment.dql
 
   Block: "Revenue by Segment"
     Tests: 1 assertion(s)
@@ -485,9 +485,9 @@ dql validate --format json
 Print structured metadata for every block in the file, including a query cost estimate score (0–100) derived from static SQL analysis.
 
 ```bash
-dql info examples/blocks/revenue_by_segment.dql
-dql info examples/blocks/revenue_by_segment.dql --verbose   # shows cost factors
-dql info examples/blocks/revenue_by_segment.dql --format json
+dql info blocks/revenue_by_segment.dql
+dql info blocks/revenue_by_segment.dql --verbose   # shows cost factors
+dql info blocks/revenue_by_segment.dql --format json
 ```
 
 **Text output:**

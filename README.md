@@ -194,10 +194,14 @@ Pick a template when running `dql init` to get a working project immediately:
 
 | Template | Best for | What you get |
 |---|---|---|
-| `starter` | Smallest local-first flow | Revenue CSV, starter blocks, semantic layer tutorial, welcome notebook |
-| `ecommerce` | Strongest OSS demo | Channel revenue, funnel analysis, semantic cubes, commerce dataset |
+| `starter` | First-run experience | Revenue CSV, starter blocks, semantic layer tutorial, welcome notebook |
+| `ecommerce` | Commerce analytics | Channel revenue, funnel analysis, semantic cubes, full dataset |
 | `saas` | Revenue + retention | MRR, churn pressure, cohort analysis, semantic metrics |
 | `taxi` | Time-series and ops | Trip volume, fare trends, borough analysis, semantic dimensions |
+| `finance-kpi` | Smallest runnable project | Single KPI block, local CSV, minimal layout |
+| `dashboard` | Multi-chart dashboards | Dashboard syntax with KPI, bar, and table charts |
+| `workbook` | Multi-page reports | Workbook syntax with multiple pages |
+| `duckdb-local` | DuckDB connection path | Local DuckDB driver config, no warehouse needed |
 
 ```bash
 dql init my-project --template ecommerce
@@ -300,8 +304,8 @@ Not sure where to start? Pick your goal:
 | Guide | What it covers |
 |---|---|
 | [Migration Guides](./docs/migration-guides/README.md) | From raw SQL, dbt, Looker, Tableau |
-| [Examples](./docs/examples.md) | Walkthrough of ecommerce, SaaS, NYC taxi example projects |
 | [Use Cases](./docs/use-cases.md) | Recommended paths by goal |
+| [Examples](./docs/examples.md) | All templates, suggested learning path |
 | [Why DQL](./docs/why-dql.md) | The problem, before/after, personas, DQL vs alternatives |
 
 ### Help & Compatibility

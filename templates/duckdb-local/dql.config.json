@@ -1,0 +1,18 @@
+{
+  "project": "__PROJECT_NAME__",
+  "defaultConnection": {
+    "driver": "duckdb",
+    "filepath": ":memory:"
+  },
+  "dataDir": "./data",
+
+  "semanticLayer": {
+    "provider": "dql"
+  },
+
+  "preview": {
+    "port": 3474,
+    "open": true,
+    "theme": "dark"
+  }
+}
