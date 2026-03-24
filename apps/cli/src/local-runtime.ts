@@ -14,9 +14,18 @@ import {
   loadSemanticLayerFromDir,
   resolveSemanticLayerAsync,
   getDialect,
+  Parser,
+  buildLineageGraph,
+  analyzeImpact,
+  buildTrustChain,
+  detectDomainFlows,
+  getDomainTrustOverview,
   type SemanticLayer,
   type SemanticLayerProviderConfig,
   type SemanticLayerResult,
+  type LineageBlockInput,
+  type LineageMetricInput,
+  type LineageDimensionInput,
 } from '@duckcodeailabs/dql-core';
 
 export interface ProjectConfig {
@@ -434,6 +443,103 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           ok: false,
           message: error instanceof Error ? error.message : String(error),
         }));
+      }
+      return;
+    }
+
+    // ---- Lineage API ----
+    if (req.method === 'GET' && path === '/api/lineage') {
+      try {
+        const graph = buildProjectLineageGraph(projectRoot, semanticLayer);
+        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON(graph.toJSON()));
+      } catch (error) {
+        res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({ error: error instanceof Error ? error.message : String(error) }));
+      }
+      return;
+    }
+
+    if (req.method === 'GET' && path.startsWith('/api/lineage/domain/')) {
+      const domain = decodeURIComponent(path.slice('/api/lineage/domain/'.length));
+      try {
+        const graph = buildProjectLineageGraph(projectRoot, semanticLayer);
+        const overview = getDomainTrustOverview(graph, domain);
+        const nodes = graph.getNodesByDomain(domain);
+        const flows = detectDomainFlows(graph);
+        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({
+          domain,
+          overview,
+          nodes,
+          inFlows: flows.filter((f) => f.to === domain),
+          outFlows: flows.filter((f) => f.from === domain),
+        }));
+      } catch (error) {
+        res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({ error: error instanceof Error ? error.message : String(error) }));
+      }
+      return;
+    }
+
+    if (req.method === 'GET' && path.startsWith('/api/lineage/impact/')) {
+      const blockName = decodeURIComponent(path.slice('/api/lineage/impact/'.length));
+      try {
+        const graph = buildProjectLineageGraph(projectRoot, semanticLayer);
+        const nodeId = `block:${blockName}`;
+        if (!graph.getNode(nodeId)) {
+          res.writeHead(404, { 'Content-Type': 'application/json; charset=utf-8' });
+          res.end(serializeJSON({ error: `Block "${blockName}" not found` }));
+          return;
+        }
+        const impact = analyzeImpact(graph, nodeId);
+        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON(impact));
+      } catch (error) {
+        res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({ error: error instanceof Error ? error.message : String(error) }));
+      }
+      return;
+    }
+
+    if (req.method === 'GET' && path.startsWith('/api/lineage/block/')) {
+      const blockName = decodeURIComponent(path.slice('/api/lineage/block/'.length));
+      try {
+        const graph = buildProjectLineageGraph(projectRoot, semanticLayer);
+        const nodeId = `block:${blockName}`;
+        const node = graph.getNode(nodeId);
+        if (!node) {
+          res.writeHead(404, { 'Content-Type': 'application/json; charset=utf-8' });
+          res.end(serializeJSON({ error: `Block "${blockName}" not found` }));
+          return;
+        }
+        const ancestors = graph.ancestors(nodeId);
+        const descendants = graph.descendants(nodeId);
+        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({ node, ancestors, descendants }));
+      } catch (error) {
+        res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({ error: error instanceof Error ? error.message : String(error) }));
+      }
+      return;
+    }
+
+    if (req.method === 'GET' && path === '/api/lineage/trust-chain') {
+      const from = url.searchParams.get('from');
+      const to = url.searchParams.get('to');
+      if (!from || !to) {
+        res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({ error: 'Missing "from" and "to" query parameters' }));
+        return;
+      }
+      try {
+        const graph = buildProjectLineageGraph(projectRoot, semanticLayer);
+        const chain = buildTrustChain(graph, `block:${from}`, `block:${to}`);
+        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON(chain ?? { error: 'No path found' }));
+      } catch (error) {
+        res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({ error: error instanceof Error ? error.message : String(error) }));
       }
       return;
     }
@@ -938,4 +1044,68 @@ function buildNotebookTemplate(title: string, template: string): string {
   }
 
   return JSON.stringify({ version: 1, title, cells }, null, 2);
+}
+
+/** Build a lineage graph from the project's blocks and semantic layer. */
+function buildProjectLineageGraph(projectRoot: string, semanticLayer: SemanticLayer | null | undefined) {
+  const blocks: LineageBlockInput[] = [];
+  const metrics: LineageMetricInput[] = [];
+  const dimensions: LineageDimensionInput[] = [];
+
+  // Scan .dql files
+  const dirs = ['blocks', 'dashboards', 'workbooks'];
+  for (const dir of dirs) {
+    const dirPath = join(projectRoot, dir);
+    if (!existsSync(dirPath)) continue;
+    for (const entry of readdirSync(dirPath, { withFileTypes: true })) {
+      if (!entry.isFile() || extname(entry.name) !== '.dql') continue;
+      try {
+        const source = readFileSync(join(dirPath, entry.name), 'utf-8');
+        const parser = new Parser(source, `${dir}/${entry.name}`);
+        const ast = parser.parse();
+        for (const stmt of ast.statements) {
+          const block = stmt as any;
+          if (block.kind !== 'BlockDecl') continue;
+          blocks.push({
+            name: block.name,
+            sql: block.query?.rawSQL ?? '',
+            domain: extractProp(block, 'domain'),
+            owner: extractProp(block, 'owner'),
+            status: extractProp(block, 'status') as any,
+            blockType: block.blockType,
+            metricRef: block.metricRef,
+            chartType: extractVizChart(block),
+          });
+        }
+      } catch { /* skip unparseable */ }
+    }
+  }
+
+  // Load from semantic layer
+  if (semanticLayer) {
+    for (const m of semanticLayer.listMetrics()) {
+      metrics.push({ name: m.name, table: m.table, domain: m.domain, type: m.type });
+    }
+    for (const d of semanticLayer.listDimensions()) {
+      dimensions.push({ name: d.name, table: d.table });
+    }
+  }
+
+  return buildLineageGraph(blocks, metrics, dimensions);
+}
+
+function extractProp(block: any, key: string): string | undefined {
+  // Check direct AST fields first (parser puts domain, owner, type directly on the node)
+  if (block[key] !== undefined && block[key] !== null) return String(block[key]);
+  for (const prop of block.properties ?? []) {
+    if (prop.key === key && prop.value?.kind === 'Literal') return String(prop.value.value);
+  }
+  return undefined;
+}
+
+function extractVizChart(block: any): string | undefined {
+  for (const prop of block.visualization?.properties ?? []) {
+    if (prop.key === 'chart' && prop.value?.kind === 'Literal') return String(prop.value.value);
+  }
+  return undefined;
 }

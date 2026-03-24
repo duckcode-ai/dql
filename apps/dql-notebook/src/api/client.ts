@@ -157,4 +157,30 @@ export const api = {
       return [];
     }
   },
+
+  async fetchLineage(): Promise<{ nodes: any[]; edges: any[] }> {
+    try {
+      return await request<{ nodes: any[]; edges: any[] }>('/api/lineage');
+    } catch {
+      return { nodes: [], edges: [] };
+    }
+  },
+
+  async fetchBlockLineage(blockName: string): Promise<{ node: any; ancestors: any[]; descendants: any[] } | null> {
+    try {
+      return await request<{ node: any; ancestors: any[]; descendants: any[] }>(
+        `/api/lineage/block/${encodeURIComponent(blockName)}`,
+      );
+    } catch {
+      return null;
+    }
+  },
+
+  async fetchImpactAnalysis(blockName: string): Promise<any> {
+    try {
+      return await request<any>(`/api/lineage/impact/${encodeURIComponent(blockName)}`);
+    } catch {
+      return null;
+    }
+  },
 };

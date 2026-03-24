@@ -65,6 +65,14 @@ function SemanticIcon() {
   );
 }
 
+function LineageIcon() {
+  return (
+    <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor">
+      <path d="M4 2a2 2 0 1 1 0 4 2 2 0 0 1 0-4Zm8 4a2 2 0 1 1 0 4 2 2 0 0 1 0-4Zm-8 4a2 2 0 1 1 0 4 2 2 0 0 1 0-4ZM6 4h4l2 4-2 4H6" stroke="currentColor" strokeWidth="1.2" fill="none" />
+    </svg>
+  );
+}
+
 function OutlineIcon() {
   return (
     <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor">
@@ -158,6 +166,15 @@ export function ActivityBar() {
         t={t}
       >
         <SemanticIcon />
+      </IconButton>
+
+      <IconButton
+        title="Lineage"
+        active={state.sidebarPanel === 'lineage' && state.sidebarOpen}
+        onClick={() => handlePanelClick('lineage')}
+        t={t}
+      >
+        <LineageIcon />
       </IconButton>
 
       <IconButton

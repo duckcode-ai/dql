@@ -41,6 +41,43 @@ export interface LoweringOptions {
   /** Driver name for SQL dialect selection in semantic query composition. */
   driver?: string;
   diagnostics?: string[];
+  /**
+   * Registry of known block names to their materialized table/view names.
+   * Used to resolve ref("block_name") calls in SQL queries.
+   * Key = block name, Value = materialized table/view name (defaults to block name).
+   */
+  blockRegistry?: Map<string, string>;
+}
+
+/** Result of ref() resolution on a SQL string */
+export interface RefResolutionResult {
+  /** SQL with ref() calls replaced by actual table/view names */
+  sql: string;
+  /** Block names referenced via ref() */
+  dependencies: string[];
+}
+
+/**
+ * Resolve ref("block_name") calls in a SQL string using the block registry.
+ *
+ * If no registry is provided, ref() calls are left as-is (the block name is
+ * used as the table name directly, assuming it will be materialized as a view).
+ */
+export function resolveRefs(sql: string, blockRegistry?: Map<string, string>): RefResolutionResult {
+  const dependencies: string[] = [];
+  const resolved = sql.replace(
+    /\bref\s*\(\s*["']([^"']+)["']\s*\)/gi,
+    (_match, blockName: string) => {
+      dependencies.push(blockName);
+      if (blockRegistry) {
+        const tableName = blockRegistry.get(blockName);
+        if (tableName) return `"${tableName}"`;
+      }
+      // Fallback: use block name as table name
+      return `"${blockName}"`;
+    },
+  );
+  return { sql: resolved, dependencies };
 }
 
 export function lowerProgram(program: ProgramNode, options: LoweringOptions = {}): DashboardIR[] {
@@ -782,7 +819,9 @@ function lowerBlockDecl(node: BlockDeclNode, _options: LoweringOptions): Dashboa
 
   const normalizedChartType = normalizeChartTypeAlias(chartType);
   const config = lowerBlockVisualizationConfig(node);
-  const { sql, params } = processSQL(node.query.rawSQL, node.query.interpolations);
+  // Resolve ref() calls before processing interpolations
+  const refResult = resolveRefs(node.query.rawSQL, _options.blockRegistry);
+  const { sql, params } = processSQL(refResult.sql, node.query.interpolations);
 
   const paramIRs: ParamIR[] = (node.params?.params ?? []).map((p) => ({
     name: p.name,
@@ -797,6 +836,7 @@ function lowerBlockDecl(node: BlockDeclNode, _options: LoweringOptions): Dashboa
 
   return {
     title: node.name,
+    dependencies: refResult.dependencies,
     charts: [{
       id: 'chart-0',
       chartType: normalizedChartType as ChartIR['chartType'],

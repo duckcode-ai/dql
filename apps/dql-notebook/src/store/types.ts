@@ -18,7 +18,7 @@ export interface ParamConfig {
   defaultValue: string;
   options?: string[];
 }
-export type SidebarPanel = 'files' | 'schema' | 'outline' | 'connection' | 'reference' | 'semantic' | null;
+export type SidebarPanel = 'files' | 'schema' | 'outline' | 'connection' | 'reference' | 'semantic' | 'lineage' | null;
 export type DevPanelTab = 'logs' | 'errors';
 
 export interface QueryResult {

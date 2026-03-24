@@ -15,4 +15,4 @@ export type {
   LayoutItemIR,
 } from './ir-nodes.js';
 
-export { lowerProgram, lowerWorkbookProgram } from './lowering.js';
+export { lowerProgram, lowerWorkbookProgram, resolveRefs, type RefResolutionResult, type LoweringOptions } from './lowering.js';

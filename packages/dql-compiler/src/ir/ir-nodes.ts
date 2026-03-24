@@ -42,6 +42,8 @@ export interface DashboardIR {
   variables: Record<string, unknown>;
   refreshInterval?: number;
   layoutDiagnostics?: LayoutDiagnostic[];
+  /** Block names this dashboard/block depends on via ref() calls */
+  dependencies?: string[];
 }
 
 export interface ChartIR {
