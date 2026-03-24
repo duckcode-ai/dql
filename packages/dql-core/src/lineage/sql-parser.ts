@@ -27,6 +27,10 @@ export function extractTablesFromSql(sql: string): SqlParseResult {
   // Strip comments first (refs inside comments should be ignored)
   const noComments = stripComments(sql);
 
+  // Extract DuckDB reader functions BEFORE stripping string literals
+  // (because the file path is inside quotes that would be stripped)
+  const readerTables = extractReaderFunctions(noComments);
+
   // Strip non-ref string literals, then extract refs from the result.
   // This ensures ref("block") and ref('block') are preserved, but
   // 'ref("fake")' (a string literal containing ref) is stripped.
@@ -54,6 +58,11 @@ export function extractTablesFromSql(sql: string): SqlParseResult {
   const intoPattern = /\bINTO\s+([a-zA-Z_][a-zA-Z0-9_.]*|"[^"]+")/gi;
   for (const match of cleaned.matchAll(intoPattern)) {
     addTableRef(rawTables, match[1]);
+  }
+
+  // Add DuckDB reader function references (extracted before string stripping)
+  for (const rt of readerTables) {
+    rawTables.add(rt);
   }
 
   // Filter out CTEs, SQL keywords that might match, and DuckDB functions
@@ -91,6 +100,16 @@ function extractCteNames(sql: string): string[] {
   }
 
   return ctes;
+}
+
+/** Extract DuckDB reader function calls (e.g., read_csv_auto('./data/file.csv')) */
+function extractReaderFunctions(sql: string): string[] {
+  const results: string[] = [];
+  const pattern = /\b(read_csv_auto|read_csv|read_parquet|read_json|read_json_auto)\s*\(\s*['"]([^'"]+)['"]\s*(?:,\s*[^)]*?)?\)/gi;
+  for (const match of sql.matchAll(pattern)) {
+    results.push(`${match[1]}('${match[2]}')`);
+  }
+  return results;
 }
 
 /** Extract ref("block_name") calls from SQL */

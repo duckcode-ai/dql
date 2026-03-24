@@ -56,7 +56,7 @@ dql notebook                             # open browser notebook
 ### Library packages (for embedding in your app)
 
 ```bash
-npm install @duckcodeailabs/dql-core@0.6.0 @duckcodeailabs/dql-compiler@0.6.0 @duckcodeailabs/dql-notebook@0.6.0
+npm install @duckcodeailabs/dql-core@0.7.0 @duckcodeailabs/dql-compiler@0.7.0 @duckcodeailabs/dql-notebook@0.7.0
 ```
 
 ---
@@ -147,10 +147,15 @@ dql build blocks/pipeline_health.dql
 DQL tracks how data flows from source tables through blocks, semantic metrics, business domains, and charts — the full "trust chain" from raw data to rendered answer.
 
 ```bash
-dql lineage                                          # full project lineage
+dql compile                                          # generate dql-manifest.json
+dql compile --dbt-manifest path/to/manifest.json     # import dbt lineage as upstream
+dql lineage                                          # full project lineage with data flow DAG
 dql lineage raw_orders                               # upstream/downstream for a block
+dql lineage orders                                   # smart lookup: resolves to table:orders
+dql lineage --table orders                           # explicit table lookup
+dql lineage --metric total_revenue                   # explicit metric lookup
 dql lineage --domain finance                         # domain-scoped view
-dql lineage --impact raw_orders                      # what breaks if this changes?
+dql lineage --impact orders                          # what breaks if this table changes?
 dql lineage --trust-chain raw_orders exec_dashboard  # certification at every hop
 dql lineage --format json                            # export for CI/integrations
 ```
@@ -263,6 +268,7 @@ Every command has a clear job:
 | `dql build` | Compile to a static HTML bundle |
 | `dql serve` | Serve a built bundle locally |
 | `dql certify` | Check governance rules (owner, description, tags, domain) |
+| `dql compile` | Generate project manifest (`dql-manifest.json`) with lineage and dependencies |
 | `dql lineage` | Show data lineage, trust chains, impact analysis, cross-domain flows |
 | `dql fmt` | Format a `.dql` file in place |
 | `dql doctor` | Diagnose project setup, config, and runtime readiness |
@@ -360,7 +366,7 @@ Not sure where to start? Pick your goal:
 
 ## Package Reference
 
-All packages share a unified version number (`0.6.0`).
+All packages share a unified version number (`0.7.0`).
 
 | Package | Description |
 |---|---|

@@ -8,3 +8,4 @@ export * from './semantic/index.js';
 export * from './errors/index.js';
 export * from './formatter/index.js';
 export * from './lineage/index.js';
+export * from './manifest/index.js';

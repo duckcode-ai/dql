@@ -6,6 +6,30 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 
 ---
 
+## v0.7.0 — 2026-03-24
+
+### Added
+- **`dql compile` command** — generates `dql-manifest.json`, a complete project artifact containing all blocks, notebooks, metrics, sources, dependencies, and pre-computed lineage (similar to dbt's `manifest.json`)
+- **Manifest system** (`packages/dql-core/src/manifest/`) — `DQLManifest` type with `ManifestBlock`, `ManifestNotebook`, `ManifestMetric`, `ManifestSource`, `ManifestLineage`
+- **Recursive directory scanning** — blocks and notebooks in nested subdirectories are now discovered (no longer flat-only)
+- **Config-driven semantic layer path** — reads `semanticLayer.path` from `dql.config.json` instead of hardcoding `semantic-layer/`
+- **Notebook lineage** — `.dqlnb` notebook SQL/DQL cells are scanned for table and ref() dependencies; DQL cells declaring blocks are added to the lineage graph
+- **dbt manifest import** — `dql compile --dbt-manifest path/to/manifest.json` imports dbt models and sources with column-level metadata as upstream nodes
+- **Smart node lookup** — `dql lineage <name>` auto-resolves to block, table, metric, or dimension (no type prefix needed)
+- **`dql lineage --table <name>`** — show lineage for a specific source table
+- **`dql lineage --metric <name>`** — show lineage for a specific metric
+- **`dql lineage --impact <name>`** — impact analysis now works on any node type (tables, metrics), not just blocks
+- **`dql lineage --no-manifest`** — force live scan, skip reading `dql-manifest.json`
+- **DuckDB reader function extraction** — `read_csv_auto()`, `read_parquet()`, `read_json()` calls in SQL are now extracted as source table dependencies
+- **Rich lineage summary** — `dql lineage` now shows actual block/table/metric names, ownership, data flow relationships, and a DAG tree visualization
+
+### Changed
+- `dql lineage` reads from `dql-manifest.json` when available for faster lookups; falls back to live scanning
+- Lineage output shows direct vs transitive upstream/downstream, with `*` marking direct connections
+- `dql lineage` data flow tree renders from root source tables through all downstream nodes
+
+---
+
 ## v0.6.0 — 2026-03-24
 
 ### Added

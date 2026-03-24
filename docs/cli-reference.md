@@ -531,58 +531,123 @@ With `--verbose`, individual cost factors are listed (e.g. missing WHERE clause,
 
 ---
 
-### `dql lineage [block] [path]`
+### `dql compile [path]`
 
-Show data lineage for a DQL project — how data flows from source tables through blocks, semantic metrics, domains, and charts.
+Generate the project manifest (`dql-manifest.json`) — a complete compiled artifact containing all blocks, notebooks, metrics, sources, dependencies, and pre-computed lineage. Similar to dbt's `manifest.json`.
 
 ```bash
-# Full project summary
+# Compile current project
+dql compile
+
+# Compile with verbose block details
+dql compile --verbose
+
+# Import dbt manifest as upstream lineage
+dql compile --dbt-manifest path/to/manifest.json
+
+# Output manifest to stdout as JSON
+dql compile --format json
+
+# Write manifest to a custom directory
+dql compile --out-dir ./dist
+```
+
+**What `dql compile` scans:**
+
+- `.dql` files in `blocks/`, `dashboards/`, `workbooks/` (recursive)
+- `.dqlnb` notebook files in `notebooks/` and other directories (recursive)
+- Semantic layer YAML in `semantic-layer/` (or custom path from config)
+- DQL cells inside notebooks that declare blocks
+
+**Flags specific to `compile`:**
+
+| Flag | Description |
+|---|---|
+| `--dbt-manifest <path>` | Import dbt `manifest.json` — models and sources become upstream nodes with column metadata |
+| `--out-dir <path>` | Write `dql-manifest.json` to a custom directory |
+| `--format json` | Output manifest to stdout instead of writing a file |
+| `--verbose` | Show block details and dependencies after compilation |
+
+**Manifest contents:**
+
+| Section | What it contains |
+|---|---|
+| `blocks` | All blocks with SQL, dependencies (table + ref), tests, tags, domain, owner |
+| `notebooks` | Notebook SQL/DQL cells with table and ref dependencies |
+| `metrics` | Semantic layer metrics with source tables and domains |
+| `dimensions` | Semantic layer dimensions |
+| `sources` | All source tables with origin tracking (sql/semantic/dbt) and dbt column metadata |
+| `lineage` | Pre-computed lineage graph with nodes, edges, cross-domain flows, domain trust |
+| `dbtImport` | dbt import metadata (if `--dbt-manifest` was used) |
+
+---
+
+### `dql lineage [name] [path]`
+
+Show data lineage for a DQL project — how data flows from source tables through blocks, semantic metrics, domains, and charts. When `dql-manifest.json` exists (from `dql compile`), lineage reads from it for faster results.
+
+```bash
+# Full project summary with data flow DAG
 dql lineage
 
-# Specific block (upstream + downstream)
+# Smart lookup — auto-resolves to block, table, metric, or dimension
 dql lineage raw_orders
+dql lineage orders          # resolves to table:orders
+dql lineage total_revenue   # resolves to metric:total_revenue
+
+# Explicit type lookup
+dql lineage --table orders
+dql lineage --metric total_revenue
 
 # Domain-scoped view
 dql lineage --domain finance
 
-# Impact analysis
-dql lineage -- --impact raw_orders
+# Impact analysis (works on any node type)
+dql lineage --impact orders
+dql lineage --impact raw_orders
 
 # Trust chain between two blocks
-dql lineage -- --trust-chain raw_orders exec_dashboard
+dql lineage --trust-chain raw_orders exec_dashboard
 
 # JSON export
 dql lineage --format json
 
+# Force live scan (skip manifest)
+dql lineage --no-manifest
+
 # Specify project path
 dql lineage /path/to/project
-dql lineage raw_orders /path/to/project
 ```
 
 **What it shows:**
 
-- **Summary** (default) — node counts by type, edge counts, cross-domain flows, domain trust scores
-- **Block lineage** — upstream sources and downstream dependents for a named block
+- **Summary** (default) — source tables, blocks with domains/owners/dependencies, metrics, data flow DAG tree, cross-domain flows, domain trust scores
+- **Node lineage** — direct and transitive upstream/downstream for any block, table, metric, or dimension
 - **Domain lineage** — all nodes in a domain, data flows in and out, trust score
-- **Impact analysis** — all downstream affected nodes grouped by domain, with certification status
+- **Impact analysis** — all downstream affected nodes grouped by domain, with certification status (works on tables, metrics, and blocks)
 - **Trust chain** — certification status at every node in the path between two blocks
 
 **Flags specific to `lineage`:**
 
 | Flag | Description |
 |---|---|
+| `--table <name>` | Show lineage for a specific source table |
+| `--metric <name>` | Show lineage for a specific metric |
 | `--domain <name>` | Show lineage scoped to a business domain |
-| `--impact <block>` | Impact analysis: what downstream nodes are affected by a change |
+| `--impact <name>` | Impact analysis: what downstream nodes are affected by a change (any node type) |
 | `--trust-chain <from> <to>` | Show trust chain between two blocks with certification checkpoints |
 | `--format json` | Export the full lineage graph as JSON |
+| `--no-manifest` | Force live scanning instead of reading `dql-manifest.json` |
 
-**What builds the graph:**
+**How lineage is built:**
 
-- SQL parsing extracts table references from `FROM`, `JOIN`, and `INTO` clauses
+- `dql compile` scans all blocks, notebooks, and semantic layer definitions
+- SQL parsing extracts table references from `FROM`, `JOIN`, `INTO` clauses, and DuckDB reader functions (`read_csv_auto()`, etc.)
 - `ref("block_name")` calls create explicit `feeds_into` edges between blocks
 - Semantic layer metric `table` fields connect metrics to source tables
 - `domain` fields on blocks/metrics create domain nodes and cross-domain edges
 - `visualization` config creates chart nodes
+- dbt `manifest.json` import enriches source tables with column-level metadata
 
 See the [Lineage Guide](./lineage.md) for full documentation.
 

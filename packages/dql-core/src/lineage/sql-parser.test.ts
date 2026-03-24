@@ -195,6 +195,6 @@ describe('extractTablesFromSql', () => {
       FROM read_csv_auto('./data/revenue.csv')
       GROUP BY segment_tier
     `);
-    expect(result.tables).toEqual([]);
+    expect(result.tables).toEqual(["read_csv_auto('./data/revenue.csv')"]);
   });
 });

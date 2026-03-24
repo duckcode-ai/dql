@@ -6,7 +6,7 @@ For completed changes, see [CHANGELOG.md](./CHANGELOG.md).
 
 ---
 
-## Current State (v0.6.0)
+## Current State (v0.7.0)
 
 DQL is **production-usable** for:
 - Authoring and validating `.dql` blocks with SQL, tests, and governance metadata
@@ -15,7 +15,11 @@ DQL is **production-usable** for:
 - Building and serving static HTML dashboards and workbooks
 - Certifying blocks with live test assertion execution
 - **Answer-layer lineage** — `ref()` system, SQL table extraction, lineage graph, cross-domain flow tracking, trust chains, impact analysis
-- **Lineage CLI** — `dql lineage` with summary, block, domain, impact, trust-chain, and JSON export subcommands
+- **`dql compile`** — generates `dql-manifest.json` project artifact with blocks, notebooks, metrics, sources, dependencies, and lineage
+- **dbt manifest import** — `dql compile --dbt-manifest` connects dbt's lineage as upstream into DQL's answer layer
+- **Notebook lineage** — `.dqlnb` SQL/DQL cells included in lineage graph and manifest
+- **Smart lineage lookup** — `dql lineage <name>` resolves any node type; `--table`, `--metric`, `--impact` work on all node types
+- **Lineage CLI** — `dql lineage` with summary, block, table, metric, domain, impact, trust-chain, and JSON export subcommands
 - **Lineage API** — REST endpoints for lineage graph, block lineage, domain lineage, impact analysis
 - **Lineage notebook panel** — interactive sidebar panel for browsing lineage in the notebook UI
 
@@ -47,7 +51,7 @@ DQL is **production-usable** for:
 
 ---
 
-## Planned for v0.6.0
+## Planned for v0.8.0
 
 - Remove `dql test` command (deprecated in v0.5.2)
 - Block Governance Bar: switch from regex to full AST round-trip editing
@@ -57,18 +61,19 @@ DQL is **production-usable** for:
 - Streaming / paginated query results for large datasets
 - **Materializations** — `materialized = "table" | "view" | "incremental" | "ephemeral"` for blocks
 - **Column-level lineage** — track which specific columns flow through which blocks
-- **dbt manifest import** — parse dbt `manifest.json` to connect dbt's lineage as upstream into DQL's answer-layer lineage
 - **Interactive lineage visualization** — DAG rendering in the notebook with domain coloring and trust indicators
+- **Database catalog introspection** — `dql compile --connection` introspects actual table schemas into manifest
 
 ---
 
-## Planned for v0.7.0
+## Planned for v0.9.0
 
 - dbt Cloud API integration for remote schema discovery
 - Offline semantic layer cache for Snowflake provider
 - `dql diff` — show semantic diff between two `.dql` files or block versions
 - Improved LSP: completions for `@metric()` / `@dim()` refs in SQL cells
 - More project templates: healthcare KPIs, marketing attribution
+- OpenLineage export for integration with DataHub, Atlan, Monte Carlo
 
 ---
 

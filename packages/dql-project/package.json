@@ -1,6 +1,6 @@
 {
   "name": "@duckcodeailabs/dql-project",
-  "version": "0.6.0",
+  "version": "0.7.0",
   "description": "DQL project and block registry primitives: block metadata, versions, sync, and storage adapters",
   "license": "Apache-2.0",
   "type": "module",

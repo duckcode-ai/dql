@@ -81,8 +81,8 @@ This runs `pnpm build && pnpm test` and then packs each package into `.release-a
 ### Step 3 — Tag the release
 
 ```bash
-git tag -a v0.6.0 -m "DQL v0.6.0"
-git push origin v0.6.0
+git tag -a v0.7.0 -m "DQL v0.7.0"
+git push origin v0.7.0
 ```
 
 ### Step 4 — Publish
@@ -147,28 +147,30 @@ Obtain a Personal Access Token from https://dev.azure.com under the `dql` publis
 After all packages are published, create a GitHub release against the tag:
 
 ```bash
-gh release create v0.6.0 \
-  --title "v0.6.0 — Answer-Layer Lineage" \
+gh release create v0.7.0 \
+  --title "v0.7.0 — Project Manifest & Enhanced Lineage" \
   --notes "## Highlights
 
-- **Answer-layer lineage engine** — track data flow from source tables through blocks, metrics, domains, and charts
-- **ref() system** — declare explicit block dependencies with \`ref(\"block_name\")\`
-- **Cross-domain flow detection** — see when data crosses business domain boundaries
-- **Trust chains** — certification status at every node from source to rendered answer
-- **Impact analysis** — \`dql lineage --impact block_name\` shows what breaks if a block changes
-- **Unified versioning** — all packages now share a single version number
+- **\`dql compile\`** — generates \`dql-manifest.json\` project artifact (like dbt's manifest.json)
+- **dbt manifest import** — \`dql compile --dbt-manifest\` connects dbt lineage as upstream
+- **Notebook lineage** — \`.dqlnb\` SQL/DQL cells included in lineage and manifest
+- **Smart lineage lookup** — \`dql lineage orders\` auto-resolves to table, block, or metric
+- **\`--table\` / \`--metric\` flags** — explicit type lookup for lineage queries
+- **Impact analysis on any node** — \`dql lineage --impact orders\` works on tables, metrics, blocks
+- **DuckDB reader extraction** — \`read_csv_auto()\` / \`read_parquet()\` tracked as source tables
+- **Rich lineage summary** — data flow DAG tree, block details, cross-domain flows
 
 Published packages:
-- [@duckcodeailabs/dql-cli@0.6.0](https://www.npmjs.com/package/@duckcodeailabs/dql-cli)
-- [@duckcodeailabs/dql-core@0.6.0](https://www.npmjs.com/package/@duckcodeailabs/dql-core)
-- [@duckcodeailabs/dql-compiler@0.6.0](https://www.npmjs.com/package/@duckcodeailabs/dql-compiler)
-- [@duckcodeailabs/dql-connectors@0.6.0](https://www.npmjs.com/package/@duckcodeailabs/dql-connectors)
-- [@duckcodeailabs/dql-runtime@0.6.0](https://www.npmjs.com/package/@duckcodeailabs/dql-runtime)
-- [@duckcodeailabs/dql-charts@0.6.0](https://www.npmjs.com/package/@duckcodeailabs/dql-charts)
-- [@duckcodeailabs/dql-project@0.6.0](https://www.npmjs.com/package/@duckcodeailabs/dql-project)
-- [@duckcodeailabs/dql-governance@0.6.0](https://www.npmjs.com/package/@duckcodeailabs/dql-governance)
-- [@duckcodeailabs/dql-notebook@0.6.0](https://www.npmjs.com/package/@duckcodeailabs/dql-notebook)
-- [@duckcodeailabs/dql-lsp@0.6.0](https://www.npmjs.com/package/@duckcodeailabs/dql-lsp)"
+- [@duckcodeailabs/dql-cli@0.7.0](https://www.npmjs.com/package/@duckcodeailabs/dql-cli)
+- [@duckcodeailabs/dql-core@0.7.0](https://www.npmjs.com/package/@duckcodeailabs/dql-core)
+- [@duckcodeailabs/dql-compiler@0.7.0](https://www.npmjs.com/package/@duckcodeailabs/dql-compiler)
+- [@duckcodeailabs/dql-connectors@0.7.0](https://www.npmjs.com/package/@duckcodeailabs/dql-connectors)
+- [@duckcodeailabs/dql-runtime@0.7.0](https://www.npmjs.com/package/@duckcodeailabs/dql-runtime)
+- [@duckcodeailabs/dql-charts@0.7.0](https://www.npmjs.com/package/@duckcodeailabs/dql-charts)
+- [@duckcodeailabs/dql-project@0.7.0](https://www.npmjs.com/package/@duckcodeailabs/dql-project)
+- [@duckcodeailabs/dql-governance@0.7.0](https://www.npmjs.com/package/@duckcodeailabs/dql-governance)
+- [@duckcodeailabs/dql-notebook@0.7.0](https://www.npmjs.com/package/@duckcodeailabs/dql-notebook)
+- [@duckcodeailabs/dql-lsp@0.7.0](https://www.npmjs.com/package/@duckcodeailabs/dql-lsp)"
 ```
 
 ---
@@ -178,7 +180,7 @@ Published packages:
 - Do not publish packages from the closed DuckCode product from this repository.
 - `@duckcodeailabs/dql-cli` registers a `dql` binary on install.
 - `dql-language-support` is packaged separately through `vsce`, not `npm publish`.
-- `v0.6.0` is the current release. All packages use unified versioning — bump all together.
+- `v0.7.0` is the current release. All packages use unified versioning — bump all together.
 
 ---
 

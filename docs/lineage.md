@@ -20,23 +20,35 @@ DQL tracks how data flows from source tables through blocks, semantic metrics, b
 ## Quick Start
 
 ```bash
-# See your project's full lineage graph
+# Step 1: Compile your project to generate the manifest
+dql compile
+
+# Step 2: See your project's full lineage graph (reads from manifest)
 dql lineage
 
-# See upstream/downstream for a specific block
-dql lineage raw_orders
+# Look up any node — block, table, or metric (auto-resolved)
+dql lineage raw_orders          # block
+dql lineage orders              # source table
+dql lineage total_revenue       # metric
+
+# Explicit type lookup
+dql lineage --table orders
+dql lineage --metric total_revenue
 
 # See cross-domain data flows for a domain
 dql lineage --domain finance
 
-# Impact analysis: what breaks if this block changes?
-dql lineage --impact raw_orders
+# Impact analysis: what breaks if this node changes? (works on any type)
+dql lineage --impact orders
 
 # Trust chain: certification status from source to destination
 dql lineage --trust-chain raw_orders exec_dashboard
 
 # Export lineage as JSON (for integrations or CI)
 dql lineage --format json
+
+# Import dbt lineage as upstream
+dql compile --dbt-manifest path/to/manifest.json
 ```
 
 ---

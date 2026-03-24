@@ -17,6 +17,7 @@ import { runNotebook } from './commands/notebook.js';
 import { runValidate } from './commands/validate.js';
 import { runSemantic } from './commands/semantic.js';
 import { runLineage } from './commands/lineage.js';
+import { runCompile } from './commands/compile.js';
 
 const HELP = `
   dql — DQL CLI
@@ -37,6 +38,7 @@ const HELP = `
     dql fmt <file.dql>              Format DQL file in place
     dql notebook [path]             Launch the browser-first notebook for a project
     dql semantic <sub> [path]       Semantic layer: list, validate, query, pull
+    dql compile [path]              Generate project manifest (dql-manifest.json)
     dql lineage [block] [path]      Answer-layer lineage analysis
     dql --help                      Show this help
 
@@ -65,7 +67,7 @@ async function main() {
     process.exit(0);
   }
 
-  if (!file && command !== 'init' && command !== 'serve' && command !== 'doctor' && command !== 'notebook' && command !== 'validate' && command !== 'semantic' && command !== 'lineage') {
+  if (!file && command !== 'init' && command !== 'serve' && command !== 'doctor' && command !== 'notebook' && command !== 'validate' && command !== 'semantic' && command !== 'lineage' && command !== 'compile') {
     console.error('Error: No file/argument specified. Run "dql --help" for usage.');
     process.exit(1);
   }
@@ -116,6 +118,9 @@ async function main() {
         break;
       case 'semantic':
         await runSemantic(file, rest, flags);
+        break;
+      case 'compile':
+        await runCompile(file, rest, flags);
         break;
       case 'lineage':
         await runLineage(file, rest, flags);
