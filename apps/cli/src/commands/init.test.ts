@@ -24,6 +24,7 @@ describe('runInit', () => {
       template: 'starter',
       connection: '',
       verbose: false,
+      skipTests: false,
     });
 
     expect(readdirSync(projectDir)).toContain('blocks');

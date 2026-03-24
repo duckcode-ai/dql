@@ -34,6 +34,7 @@ describe('runDoctor', () => {
       template: 'starter',
       connection: '',
       verbose: false,
+      skipTests: false,
     });
 
     expect(spy).toHaveBeenCalled();

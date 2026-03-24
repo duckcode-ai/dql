@@ -63,6 +63,27 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
     }
   }
 
+  // Auto-register data/ CSV and Parquet files as DuckDB views so semantic layer
+  // queries like `FROM orders` resolve without requiring read_csv_auto() in SQL.
+  if (connection.driver === 'file' || connection.driver === 'duckdb') {
+    const dataDir = projectConfig.dataDir
+      ? resolve(projectRoot, projectConfig.dataDir)
+      : join(projectRoot, 'data');
+    if (existsSync(dataDir)) {
+      try {
+        const files = readdirSync(dataDir, { withFileTypes: true })
+          .filter((e) => e.isFile() && /\.(csv|parquet)$/i.test(e.name));
+        for (const file of files) {
+          const tableName = file.name.replace(/\.(csv|parquet)$/i, '');
+          const absPath = join(dataDir, file.name).replaceAll('\\', '/');
+          const reader = file.name.endsWith('.parquet') ? 'read_parquet' : 'read_csv_auto';
+          const ddl = `CREATE OR REPLACE VIEW "${tableName}" AS SELECT * FROM ${reader}('${absPath}')`;
+          try { await executor.executeQuery(ddl, [], {}, connection); } catch { /* non-fatal */ }
+        }
+      } catch { /* non-fatal */ }
+    }
+  }
+
   // SSE clients for /api/watch hot-reload
   const sseClients = new Set<ServerResponse>();
 
