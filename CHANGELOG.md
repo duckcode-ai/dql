@@ -6,6 +6,36 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 
 ---
 
+## v0.6.0 — 2026-03-24
+
+### Added
+- **Answer-layer lineage engine** — tracks data flow from source tables through blocks, semantic metrics, business domains, and charts
+- **`ref("block_name")` system** — declare explicit block-to-block dependencies in SQL queries, similar to dbt's `ref()`
+- **`dql lineage` CLI command** — full lineage analysis with subcommands:
+  - `dql lineage` — project summary with node counts, cross-domain flows, domain trust scores
+  - `dql lineage <block>` — upstream/downstream for a specific block
+  - `dql lineage --domain <name>` — domain-scoped view with data flows in/out
+  - `dql lineage --impact <block>` — impact analysis showing affected downstream nodes by domain
+  - `dql lineage --trust-chain <from> <to>` — certification status at every hop between two blocks
+  - `dql lineage --format json` — export full lineage graph as JSON
+- **Cross-domain flow detection** — automatic detection when data crosses business domain boundaries (e.g., data → finance → executive)
+- **Trust chain scoring** — certified blocks are trust checkpoints; trust score = certified/total ratio
+- **Lineage API endpoints** — `GET /api/lineage`, `/api/lineage/block/:name`, `/api/lineage/domain/:name`, `/api/lineage/impact/:block`, `/api/lineage/trust-chain`
+- **Notebook Lineage Panel** — sidebar panel showing blocks, metrics, source tables, domains, and cross-domain flows
+- **SQL table extractor** — lightweight regex-based parser for FROM/JOIN/INTO/CTE table extraction
+- **Dependency resolver** — topological sort with circular dependency detection
+- **DuckDB reader normalization** — `read_csv_auto('./data/revenue.csv')` normalizes to `revenue` in lineage nodes
+- **Edge deduplication** — prevents duplicate edges in the lineage graph
+- **Comprehensive lineage documentation** — new `docs/lineage.md` with tutorials, CLI reference, and dbt complement strategy
+- **Unified package versioning** — all 10 packages now share a single version number (0.6.0)
+
+### Changed
+- Updated all documentation to cover lineage, ref(), and cross-domain flows
+- README now includes Lineage & Trust Chains section
+- ROADMAP updated with lineage as shipped feature
+
+---
+
 ## v0.5.2 — 2026-03-23
 
 ### Added
