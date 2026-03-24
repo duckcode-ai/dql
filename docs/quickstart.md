@@ -71,7 +71,19 @@ Change the dropdown and re-run to filter results by segment.
 
 ---
 
-## Step 6 — Export a dashboard
+## Step 6 — View lineage
+
+Open a new terminal (keep the notebook running) and run:
+
+```bash
+dql lineage
+```
+
+You'll see a summary of blocks, metrics, source tables, and domain trust scores. In the notebook, click the **Lineage** icon (graph icon) in the left sidebar for the same view.
+
+---
+
+## Step 7 — Export a dashboard
 
 Click **Export HTML** in the header bar. You get a standalone HTML file — shareable without any DQL runtime.
 
@@ -81,6 +93,7 @@ Click **Export HTML** in the header bar. You get a standalone HTML file — shar
 
 - [Getting Started](./getting-started.md) — choose your path: sample data, dbt, Cube.js, own DB, or own repo
 - [Authoring Blocks](./authoring-blocks.md) — create, test, certify, and commit custom and semantic `.dql` blocks
+- [Lineage & Trust Chains](./lineage.md) — ref() system, impact analysis, cross-domain flows
 - [Notebook Guide](./notebook.md) — cell types, variable substitution, keyboard shortcuts, and export formats
 - [CLI Reference](./cli-reference.md) — all commands and flags
 - [Data Sources](./data-sources.md) — connecting to remote databases

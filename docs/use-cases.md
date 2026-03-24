@@ -75,7 +75,33 @@ Best fit:
 - static artifact reviews in PRs
 - browser validation before embedding elsewhere
 
-## 5. Connect to a real database
+## 5. Track data lineage and impact
+
+Use this path if you want to understand data flow, cross-domain dependencies, and certification trust chains.
+
+Typical workflow:
+
+```bash
+dql lineage                                 # full project lineage summary
+dql lineage revenue_by_segment              # upstream/downstream for a block
+dql lineage --domain finance                # what's in the finance domain?
+dql lineage --impact clean_orders           # what breaks if clean_orders changes?
+dql lineage --trust-chain raw_orders exec_dashboard  # trust at every hop
+dql lineage --format json > lineage.json    # export for CI or external tools
+```
+
+Best fit:
+
+- teams tracking cross-domain data flows (data → finance → executive)
+- analytics engineers assessing impact before changing upstream blocks
+- data governance leads auditing certification coverage by domain
+- CI pipelines that need lineage metadata for automated checks
+
+See also:
+
+- [Lineage & Trust Chains](./lineage.md)
+
+## 6. Connect to a real database
 
 Use this path after you validate the local-first experience.
 
@@ -96,7 +122,7 @@ See also:
 - [Data Sources](./data-sources.md)
 - [CLI Reference](./cli-reference.md)
 
-## 6. Validate the full repo before release
+## 7. Validate the full repo before release
 
 Use this path if you are contributing to DQL itself.
 

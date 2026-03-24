@@ -14,6 +14,10 @@ DQL is **production-usable** for:
 - Connecting to existing semantic layers (dbt, Cube.js, Snowflake semantic views)
 - Building and serving static HTML dashboards and workbooks
 - Certifying blocks with live test assertion execution
+- **Answer-layer lineage** — `ref()` system, SQL table extraction, lineage graph, cross-domain flow tracking, trust chains, impact analysis
+- **Lineage CLI** — `dql lineage` with summary, block, domain, impact, trust-chain, and JSON export subcommands
+- **Lineage API** — REST endpoints for lineage graph, block lineage, domain lineage, impact analysis
+- **Lineage notebook panel** — interactive sidebar panel for browsing lineage in the notebook UI
 
 ---
 
@@ -51,6 +55,10 @@ DQL is **production-usable** for:
 - Dimension, hierarchy, and cube creation from the Semantic Panel UI
 - `dql preview --mock` — synthetic data preview without a live connection
 - Streaming / paginated query results for large datasets
+- **Materializations** — `materialized = "table" | "view" | "incremental" | "ephemeral"` for blocks
+- **Column-level lineage** — track which specific columns flow through which blocks
+- **dbt manifest import** — parse dbt `manifest.json` to connect dbt's lineage as upstream into DQL's answer-layer lineage
+- **Interactive lineage visualization** — DAG rendering in the notebook with domain coloring and trust indicators
 
 ---
 

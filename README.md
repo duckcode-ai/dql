@@ -115,6 +115,18 @@ block "Revenue by Segment" {
 }
 ```
 
+Use `ref("block_name")` to declare explicit dependencies between blocks:
+
+```dql
+block "Executive Summary" {
+    domain = "executive"
+    query  = """
+        SELECT * FROM ref("revenue_by_segment")
+        WHERE revenue > 10000
+    """
+}
+```
+
 Scaffold, validate, preview, and build blocks with the CLI:
 
 ```bash
@@ -127,6 +139,31 @@ dql build blocks/pipeline_health.dql
 → **[Authoring blocks — create, test, certify, and commit custom and semantic blocks](./docs/authoring-blocks.md)**
 
 → **[Full language reference — block syntax, chart types, params, tests, workbooks](./docs/dql-language-spec.md)**
+
+---
+
+## Lineage & Trust Chains
+
+DQL tracks how data flows from source tables through blocks, semantic metrics, business domains, and charts — the full "trust chain" from raw data to rendered answer.
+
+```bash
+dql lineage                                          # full project lineage
+dql lineage raw_orders                               # upstream/downstream for a block
+dql lineage --domain finance                         # domain-scoped view
+dql lineage --impact raw_orders                      # what breaks if this changes?
+dql lineage --trust-chain raw_orders exec_dashboard  # certification at every hop
+dql lineage --format json                            # export for CI/integrations
+```
+
+Cross-domain flow detection is built in — DQL shows when data crosses team boundaries:
+
+```
+  Cross-Domain Flows:
+    data -> finance (1 edge(s))
+    finance -> executive (1 edge(s))
+```
+
+→ **[Lineage guide — ref(), trust chains, impact analysis, cross-domain flows](./docs/lineage.md)**
 
 ---
 
@@ -226,6 +263,7 @@ Every command has a clear job:
 | `dql build` | Compile to a static HTML bundle |
 | `dql serve` | Serve a built bundle locally |
 | `dql certify` | Check governance rules (owner, description, tags, domain) |
+| `dql lineage` | Show data lineage, trust chains, impact analysis, cross-domain flows |
 | `dql fmt` | Format a `.dql` file in place |
 | `dql doctor` | Diagnose project setup, config, and runtime readiness |
 
@@ -288,6 +326,7 @@ Not sure where to start? Pick your goal:
 |---|---|
 | [Notebook Guide](./docs/notebook.md) | Cell types, param widgets, variable refs, export |
 | [Authoring Blocks](./docs/authoring-blocks.md) | Create, test, certify, and commit .dql blocks (custom + semantic) |
+| [Lineage & Trust Chains](./docs/lineage.md) | ref() system, cross-domain flows, impact analysis, trust chains |
 | [Semantic Layer](./docs/semantic-layer-guide.md) | Metrics, dimensions, cubes, dbt/Cube.js providers |
 
 ### Reference

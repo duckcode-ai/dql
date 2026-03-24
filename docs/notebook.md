@@ -46,9 +46,11 @@ dql notebook ./my-dql-project --port 4488 --no-open
 The notebook UI has four main areas:
 
 - **Header bar** — project name, Save button, Export menu, and connection status
-- **Left sidebar** — three panels toggled by icons:
+- **Left sidebar** — panels toggled by icons:
   - **Files** — lists all files in the active project; click any file to open a source view in a new tab
   - **Schema** — auto-discovered tables from `data/`; expand a table to see column names and types
+  - **Semantic** — browse and compose queries from your semantic layer (metrics, dimensions)
+  - **Lineage** — view data lineage: blocks, source tables, metrics, domains, and cross-domain flows
   - **Outline** — lists every named cell in the open notebook for quick navigation
 - **Cell area** — the main editing surface; cells stack vertically and can be reordered by dragging
 - **Dev panel** — collapsible bottom panel showing the last query sent to DuckDB and its raw response; useful for debugging
@@ -318,6 +320,36 @@ See the [Semantic Layer Guide](./semantic-layer-guide.md) for full details on YA
 ### Refreshing
 
 Click the refresh button (↻) in the Semantic panel toolbar to reload definitions after editing YAML files. No restart needed.
+
+---
+
+## Lineage Panel
+
+The Lineage panel (graph icon in the sidebar, between Semantic and Outline) shows how data flows through your project.
+
+### What it shows
+
+- **Summary bar** — total counts of blocks, metrics, source tables, and domains
+- **Blocks** — all blocks with their domain and owner; click to see upstream/downstream
+- **Metrics** — semantic layer metrics and their source tables
+- **Source Tables** — external tables read by blocks
+- **Domains** — business domains with trust scores
+- **Cross-Domain Flows** — which domains send data to or receive data from other domains
+
+### Exploring a block's lineage
+
+Click any block name to see:
+- **Upstream** — source tables and blocks it depends on
+- **Downstream** — blocks, metrics, and charts that depend on it
+- **Domain** — which business domain it belongs to
+
+### When to use
+
+- Before changing a block — check what depends on it
+- When exploring unfamiliar projects — understand the data flow
+- During code review — verify that cross-domain dependencies are intentional
+
+The panel reads from the same lineage API as `dql lineage`. See the [Lineage Guide](./lineage.md) for CLI commands and the ref() system.
 
 ---
 

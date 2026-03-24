@@ -5,7 +5,7 @@ All examples live in `templates/` and can be scaffolded with `dql init --templat
 ## Quickstart
 
 ```bash
-npm install -g @duckcodeailabs/dql-cli@0.4.0
+npm install -g @duckcodeailabs/dql-cli
 dql init my-project --template starter
 cd my-project
 dql notebook
@@ -58,6 +58,33 @@ dql serve dist/revenue_by_segment --open
 
 Open the notebook sidebar and click the **Semantic** tab to browse metrics, dimensions, and hierarchies defined in `semantic-layer/`.
 
+### 5. View lineage
+
+```bash
+dql lineage
+dql lineage --domain revenue
+dql lineage "Revenue by Segment"
+```
+
+Or click the **Lineage** icon in the notebook sidebar.
+
+### 6. Add block dependencies with ref()
+
+Create a second block that references the first:
+
+```dql
+block "Top Segments" {
+    domain = "executive"
+    type   = "custom"
+    query  = """
+        SELECT * FROM ref("revenue_by_segment")
+        WHERE revenue > 10000
+    """
+}
+```
+
+Run `dql lineage` to see the dependency graph and cross-domain flows.
+
 ## Recommended Order
 
 1. `starter` — get oriented
@@ -70,6 +97,7 @@ Open the notebook sidebar and click the **Semantic** tab to browse metrics, dime
 ## Related Docs
 
 - [Getting Started](./getting-started.md)
+- [Lineage & Trust Chains](./lineage.md)
 - [Semantic Layer Guide](./semantic-layer-guide.md)
 - [Language Specification](./dql-language-spec.md)
 - [Data Sources](./data-sources.md)

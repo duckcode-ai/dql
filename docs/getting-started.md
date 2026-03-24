@@ -159,7 +159,25 @@ Output:
     ...
 ```
 
-### Step 8 — From notebook to a committed block file
+### Step 8 — View lineage
+
+See how data flows through your project:
+
+```bash
+npx @duckcodeailabs/dql-cli lineage
+```
+
+You'll see a summary of blocks, metrics, dimensions, source tables, and any cross-domain data flows.
+
+To see what depends on a specific block:
+
+```bash
+npx @duckcodeailabs/dql-cli lineage "Revenue by Segment"
+```
+
+In the notebook, click the **Lineage** icon (graph icon) in the left sidebar to browse the lineage graph visually.
+
+### Step 9 — From notebook to a committed block file
 
 Once you've found a query worth keeping, promote it to a reusable `.dql` block:
 
@@ -280,7 +298,31 @@ In the notebook:
 3. Click **+ Insert as Cell** to add it to the notebook
 4. Press **Shift+Enter** — the query runs against your Snowflake (or other) database
 
-### Step 5 — Write custom SQL alongside dbt metrics
+### Step 5 — View lineage from dbt through DQL
+
+DQL's lineage picks up where dbt stops. dbt tracks `raw → staging → mart`. DQL tracks `mart → block → metric → domain → chart`.
+
+```bash
+npx @duckcodeailabs/dql-cli lineage
+```
+
+Use `ref()` in your DQL blocks to create explicit dependencies:
+
+```dql
+block "Revenue Trend" {
+    domain = "finance"
+    type   = "custom"
+    query  = """
+        SELECT month, SUM(amount) AS revenue
+        FROM ref("clean_orders")
+        GROUP BY month
+    """
+}
+```
+
+`dql lineage --impact clean_orders` shows all downstream DQL blocks affected when the upstream data changes.
+
+### Step 6 — Write custom SQL alongside dbt metrics
 
 You can write any SQL that your database supports:
 
@@ -428,7 +470,7 @@ cubes:
 
 ## Tutorial 4: Connect to a Cloud Database
 
-If you don't have a semantic layer but want to use DQL's notebook against your database:
+Connect DQL to your warehouse — Snowflake, BigQuery, PostgreSQL, or any of the 14 supported drivers.
 
 ### Step 1 — Create a project
 
@@ -439,10 +481,26 @@ cd my-project
 
 ### Step 2 — Configure your connection
 
-Edit `dql.config.json` with your database driver. See [Connector Config Reference](./data-sources.md#connector-config-reference) for all 14 supported drivers.
+Edit `dql.config.json` with your database driver. Here are examples for the most common warehouses:
 
-Example for PostgreSQL:
+**Snowflake:**
+```json
+{
+  "project": "my-project",
+  "defaultConnection": {
+    "driver": "snowflake",
+    "account": "your-account.snowflakecomputing.com",
+    "username": "${SNOWFLAKE_USER}",
+    "password": "${SNOWFLAKE_PASSWORD}",
+    "database": "ANALYTICS",
+    "schema": "PUBLIC",
+    "warehouse": "COMPUTE_WH",
+    "role": "ANALYST"
+  }
+}
+```
 
+**PostgreSQL:**
 ```json
 {
   "project": "my-project",
@@ -458,6 +516,28 @@ Example for PostgreSQL:
 }
 ```
 
+**BigQuery:**
+```json
+{
+  "project": "my-project",
+  "defaultConnection": {
+    "driver": "bigquery",
+    "project": "your-gcp-project-id",
+    "dataset": "analytics",
+    "keyFilename": "${GOOGLE_APPLICATION_CREDENTIALS}"
+  }
+}
+```
+
+Set environment variables before running DQL:
+
+```bash
+export SNOWFLAKE_USER="your_user"
+export SNOWFLAKE_PASSWORD="your_password"
+```
+
+See [Data Sources](./data-sources.md) for all 14 drivers.
+
 ### Step 3 — Test the connection
 
 ```bash
@@ -469,11 +549,27 @@ In the notebook, click the **Connection** panel (plug icon) in the sidebar and c
 
 ### Step 4 — Query your tables
 
+**Snowflake:**
+```sql
+SELECT table_schema, table_name, row_count
+FROM information_schema.tables
+WHERE table_schema NOT IN ('INFORMATION_SCHEMA')
+ORDER BY table_schema, table_name
+```
+
+**PostgreSQL:**
 ```sql
 SELECT table_schema, table_name
 FROM information_schema.tables
 WHERE table_schema NOT IN ('pg_catalog', 'information_schema')
 ORDER BY table_schema, table_name
+```
+
+**BigQuery:**
+```sql
+SELECT table_name, row_count, size_bytes
+FROM `your-project.analytics.INFORMATION_SCHEMA.TABLES`
+ORDER BY table_name
 ```
 
 ### Step 5 — Add semantic definitions (optional)
@@ -519,6 +615,54 @@ Add the provider to `dql.config.json`:
 ```
 
 Restart the notebook — your metrics appear in the Semantic Panel.
+
+### Step 6 — Create blocks with ref() and view lineage
+
+Create blocks that build on each other using `ref()`:
+
+```bash
+npx @duckcodeailabs/dql-cli new block "Order Summary"
+npx @duckcodeailabs/dql-cli new block "Revenue Report"
+```
+
+Edit `blocks/order_summary.dql`:
+```dql
+block "Order Summary" {
+    domain = "data"
+    type   = "custom"
+    owner  = "data-team"
+    query  = """
+        SELECT status, COUNT(*) AS orders, SUM(amount) AS revenue
+        FROM public.orders
+        GROUP BY status
+    """
+}
+```
+
+Edit `blocks/revenue_report.dql`:
+```dql
+block "Revenue Report" {
+    domain = "finance"
+    type   = "custom"
+    owner  = "finance-team"
+    query  = """
+        SELECT * FROM ref("order_summary")
+        WHERE revenue > 1000
+    """
+    visualization {
+        chart = "bar"
+        x     = status
+        y     = revenue
+    }
+}
+```
+
+View the lineage:
+```bash
+npx @duckcodeailabs/dql-cli lineage
+```
+
+You'll see cross-domain flows from `data → finance` and the full dependency chain from source tables through blocks.
 
 ---
 
@@ -652,14 +796,59 @@ block "Daily Active Users" {
 }
 ```
 
-### Step 7 — Validate, preview, and commit
+### Step 7 — Add dependencies with ref()
+
+When blocks depend on each other, use `ref()` to make the dependency explicit:
+
+```bash
+npx @duckcodeailabs/dql-cli new block "Engagement Summary"
+```
+
+Edit `blocks/engagement_summary.dql`:
+
+```dql
+block "Engagement Summary" {
+    domain = "product"
+    type   = "custom"
+    owner  = "analytics-team"
+
+    query = """
+        SELECT product_area, AVG(dau) AS avg_dau
+        FROM ref("daily_active_users")
+        GROUP BY product_area
+        ORDER BY avg_dau DESC
+    """
+
+    visualization {
+        chart = "bar"
+        x     = product_area
+        y     = avg_dau
+    }
+}
+```
+
+`ref("daily_active_users")` creates a tracked dependency — DQL knows `engagement_summary` depends on `daily_active_users`.
+
+### Step 8 — View lineage
+
+```bash
+npx @duckcodeailabs/dql-cli lineage
+```
+
+See cross-domain flows, trust scores, and the full dependency graph. Use impact analysis to understand what breaks if a block changes:
+
+```bash
+npx @duckcodeailabs/dql-cli lineage --impact daily_active_users
+```
+
+### Step 9 — Validate, preview, and commit
 
 ```bash
 npx @duckcodeailabs/dql-cli parse blocks/daily_active_users.dql
 npx @duckcodeailabs/dql-cli preview blocks/daily_active_users.dql --open
 npx @duckcodeailabs/dql-cli certify blocks/daily_active_users.dql
-git add blocks/daily_active_users.dql dql.config.json
-git commit -m "feat: add DQL notebook and daily active users block"
+git add blocks/ dql.config.json
+git commit -m "feat: add DQL notebook with DAU and engagement blocks"
 ```
 
 ### Ignoring DQL artifacts in git
@@ -753,6 +942,7 @@ npx @duckcodeailabs/dql-cli notebook        # Launch the notebook
 ## Next Steps
 
 - [Authoring Blocks](./authoring-blocks.md) — full lifecycle: create, test, certify, and commit custom and semantic blocks
+- [Lineage & Trust Chains](./lineage.md) — ref() system, cross-domain flows, impact analysis, trust chains
 - [Semantic Layer Guide](./semantic-layer-guide.md) — deep dive into metrics, dimensions, hierarchies, cubes
 - [Notebook Guide](./notebook.md) — cell types, variable substitution, export
 - [Data Sources & Connector Reference](./data-sources.md) — all 14 database drivers with config fields

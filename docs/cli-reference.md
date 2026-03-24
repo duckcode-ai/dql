@@ -531,6 +531,63 @@ With `--verbose`, individual cost factors are listed (e.g. missing WHERE clause,
 
 ---
 
+### `dql lineage [block] [path]`
+
+Show data lineage for a DQL project — how data flows from source tables through blocks, semantic metrics, domains, and charts.
+
+```bash
+# Full project summary
+dql lineage
+
+# Specific block (upstream + downstream)
+dql lineage raw_orders
+
+# Domain-scoped view
+dql lineage --domain finance
+
+# Impact analysis
+dql lineage -- --impact raw_orders
+
+# Trust chain between two blocks
+dql lineage -- --trust-chain raw_orders exec_dashboard
+
+# JSON export
+dql lineage --format json
+
+# Specify project path
+dql lineage /path/to/project
+dql lineage raw_orders /path/to/project
+```
+
+**What it shows:**
+
+- **Summary** (default) — node counts by type, edge counts, cross-domain flows, domain trust scores
+- **Block lineage** — upstream sources and downstream dependents for a named block
+- **Domain lineage** — all nodes in a domain, data flows in and out, trust score
+- **Impact analysis** — all downstream affected nodes grouped by domain, with certification status
+- **Trust chain** — certification status at every node in the path between two blocks
+
+**Flags specific to `lineage`:**
+
+| Flag | Description |
+|---|---|
+| `--domain <name>` | Show lineage scoped to a business domain |
+| `--impact <block>` | Impact analysis: what downstream nodes are affected by a change |
+| `--trust-chain <from> <to>` | Show trust chain between two blocks with certification checkpoints |
+| `--format json` | Export the full lineage graph as JSON |
+
+**What builds the graph:**
+
+- SQL parsing extracts table references from `FROM`, `JOIN`, and `INTO` clauses
+- `ref("block_name")` calls create explicit `feeds_into` edges between blocks
+- Semantic layer metric `table` fields connect metrics to source tables
+- `domain` fields on blocks/metrics create domain nodes and cross-domain edges
+- `visualization` config creates chart nodes
+
+See the [Lineage Guide](./lineage.md) for full documentation.
+
+---
+
 ### `dql migrate <source>`
 
 Scaffold a DQL block from a foreign tool definition. The `<source>` argument is one of: `looker`, `tableau`, `dbt`, `metabase`, `raw-sql`.

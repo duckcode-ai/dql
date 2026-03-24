@@ -485,6 +485,40 @@ Look for:
 
 ---
 
+## Lineage with Remote Databases
+
+All 14 connectors work with DQL's lineage engine. When your blocks query remote tables, lineage automatically tracks the source tables:
+
+```dql
+block "Revenue Summary" {
+    domain = "finance"
+    type   = "custom"
+    owner  = "finance-team"
+    query  = """
+        SELECT segment, SUM(amount) AS revenue
+        FROM analytics.public.fct_orders
+        GROUP BY segment
+    """
+}
+```
+
+`dql lineage` shows `analytics.public.fct_orders` as a `source_table` node connected to the block. Schema-qualified names are preserved.
+
+Use `ref()` to connect blocks that span different domains or teams:
+
+```dql
+block "Exec Dashboard" {
+    domain = "executive"
+    query  = """
+        SELECT * FROM ref("revenue_summary")
+    """
+}
+```
+
+Cross-domain flows (e.g., `finance → executive`) are detected automatically. See the [Lineage Guide](./lineage.md) for the full lineage CLI and API.
+
+---
+
 ## Troubleshooting
 
 | Problem | Cause | Fix |

@@ -341,6 +341,51 @@ This gives you the generated SQL as a starting point that you can edit before ru
 
 ---
 
+## Block Dependencies with ref()
+
+Use `ref("block_name")` in your SQL to declare that one block depends on another. This creates explicit lineage edges and enables impact analysis.
+
+```dql
+block "clean_orders" {
+    domain = "data"
+    type   = "custom"
+    owner  = "data-team"
+    query  = """
+        SELECT * FROM orders WHERE status != 'cancelled'
+    """
+}
+
+block "revenue_by_segment" {
+    domain = "finance"
+    type   = "custom"
+    owner  = "finance-team"
+    query  = """
+        SELECT segment, SUM(amount) AS revenue
+        FROM ref("clean_orders")
+        GROUP BY segment
+    """
+}
+```
+
+**What ref() gives you:**
+- `dql lineage revenue_by_segment` shows `clean_orders` as an upstream dependency
+- `dql lineage --impact clean_orders` shows `revenue_by_segment` is affected by changes
+- Cross-domain edges are detected automatically (`data` → `finance` in this example)
+- Trust chain analysis shows certification status at every hop
+
+**When to use ref():**
+- When one block reads from another block's output
+- When you want lineage tracking between blocks
+- When blocks span different business domains
+
+**When NOT to use ref():**
+- For external tables (just use the table name directly — DQL extracts these from SQL automatically)
+- For semantic blocks (they reference metrics, not other blocks)
+
+See the [Lineage Guide](./lineage.md) for the full ref() and lineage documentation.
+
+---
+
 ## Block Governance
 
 ### What `dql certify` checks
@@ -393,7 +438,8 @@ tests {
 
 ## Next Steps
 
+- [Lineage & Trust Chains](./lineage.md) — ref() system, cross-domain flows, impact analysis, trust chains
 - [Semantic Layer Guide](./semantic-layer-guide.md) — define your own metrics and dimensions in YAML
 - [Notebook Guide](./notebook.md) — full reference for cells, params, variable substitution, and export
 - [Language Spec](./dql-language-spec.md) — full `.dql` syntax reference: all chart types, param types, test operators
-- [CLI Reference](./cli-reference.md) — `dql certify`, `dql fmt`, `dql build`, and all other commands
+- [CLI Reference](./cli-reference.md) — `dql certify`, `dql fmt`, `dql lineage`, and all other commands
