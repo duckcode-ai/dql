@@ -56,7 +56,7 @@ dql notebook                             # open browser notebook
 ### Library packages (for embedding in your app)
 
 ```bash
-npm install @duckcodeailabs/dql-core@0.3.2 @duckcodeailabs/dql-compiler@0.2.3 @duckcodeailabs/dql-notebook@0.2.3
+npm install @duckcodeailabs/dql-core@0.6.0 @duckcodeailabs/dql-compiler@0.6.0 @duckcodeailabs/dql-notebook@0.6.0
 ```
 
 ---
@@ -360,14 +360,16 @@ Not sure where to start? Pick your goal:
 
 ## Package Reference
 
+All packages share a unified version number (`0.6.0`).
+
 | Package | Description |
 |---|---|
-| `@duckcodeailabs/dql-cli` `0.5.2` | Public CLI — `dql init`, `dql notebook`, `dql preview`, `dql parse`, … |
-| `@duckcodeailabs/dql-core` `0.3.2` | Lexer, parser, AST, semantic analysis, semantic layer, formatter |
-| `@duckcodeailabs/dql-compiler` `0.2.3` | IR lowering, HTML/React/runtime code generation |
+| `@duckcodeailabs/dql-cli` | Public CLI — `dql init`, `dql notebook`, `dql lineage`, `dql preview`, `dql parse`, … |
+| `@duckcodeailabs/dql-core` | Lexer, parser, AST, semantic analysis, semantic layer, lineage engine, formatter |
+| `@duckcodeailabs/dql-compiler` | IR lowering, ref() resolution, HTML/React/runtime code generation |
 | `@duckcodeailabs/dql-governance` | Certification rules, cost estimation |
 | `@duckcodeailabs/dql-project` | Git-backed block registry and project primitives |
-| `@duckcodeailabs/dql-notebook` `0.2.3` | Notebook document model and execution helpers |
+| `@duckcodeailabs/dql-notebook` | Notebook document model and execution helpers |
 | `@duckcodeailabs/dql-lsp` | Language Server Protocol implementation |
 | `@duckcodeailabs/dql-runtime` | Browser runtime: data fetching, hot-reload |
 | `@duckcodeailabs/dql-charts` | React SVG chart components |

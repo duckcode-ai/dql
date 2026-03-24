@@ -1,6 +1,6 @@
 {
   "name": "@duckcodeailabs/dql-lsp",
-  "version": "0.1.7",
+  "version": "0.6.0",
   "description": "DQL Language Server Protocol implementation",
   "license": "Apache-2.0",
   "type": "module",
