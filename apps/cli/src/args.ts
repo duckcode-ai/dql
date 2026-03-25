@@ -37,7 +37,7 @@ export function parseArgs(argv: string[]): ParsedArgs {
     domain: '',
     owner: '',
     queryOnly: false,
-    template: 'starter',
+    template: '',
     connection: '',
     skipTests: false,
   };

@@ -7,8 +7,7 @@ DQL supports **14 database connectors** out of the box. Start with local file mo
 ## Quick Start (No Database)
 
 ```bash
-npx @duckcodeailabs/dql-cli init my-project --template ecommerce
-cd my-project
+npx @duckcodeailabs/dql-cli init .
 npx @duckcodeailabs/dql-cli notebook
 ```
 

@@ -95,8 +95,7 @@ AI proposes. DQL keeps.
 
 ```bash
 npm install -g @duckcodeailabs/dql-cli
-dql init my-dql-project --template ecommerce
-cd my-dql-project
+dql init .
 dql doctor
 dql notebook
 ```

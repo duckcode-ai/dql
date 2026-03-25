@@ -46,28 +46,25 @@ These flags are specific to `dql new ...` scaffolds.
 
 ### `dql init [directory]`
 
-Create a local DQL starter project with sample data, starter blocks, a welcome notebook, and `dql.config.json`.
+Initialize DQL in a project. Auto-detects dbt projects (`dbt_project.yml`) and DuckDB files.
 
 ```bash
-dql init my-dql-project
-cd my-dql-project
+dql init .
+dql doctor
 dql notebook
 ```
 
 **What it creates:**
 
-- `blocks/` with starter charted and query-only blocks
-- `dashboards/` for dashboard scaffolds
-- `data/revenue.csv` for local preview flows
-- `dql.config.json` with a file/DuckDB-friendly default connection
+- `blocks/` directory for DQL analytics blocks
+- `dql.config.json` with auto-detected connection and semantic layer provider
 - `notebooks/welcome.dqlnb` for browser-first exploration
-- `workbooks/` for workbook scaffolds
-- `semantic-layer/` starter definitions
+
+When a dbt project is detected, the semantic layer provider is set to `dbt` and the welcome notebook includes queries against dbt mart tables.
 
 **Useful flags:**
 
-- `--template <starter|ecommerce|saas|taxi|finance-kpi|dashboard|workbook|duckdb-local>` — scaffold a themed project
-- `--open` — scaffold the project and immediately open the notebook
+- `--open` — initialize the project and immediately open the notebook
 
 ---
 
@@ -190,7 +187,7 @@ dql doctor --format json
 - Node.js version
 - project root discovery
 - `dql.config.json`
-- `blocks/`, `semantic-layer/`, and `data/`
+- `blocks/` directory
 - default connection presence
 - `duckdb` dependency when local file/DuckDB preview is configured
 - local query runtime readiness for the configured default connection

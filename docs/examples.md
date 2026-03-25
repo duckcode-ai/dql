@@ -1,35 +1,15 @@
 # Examples
 
-All examples live in `templates/` and can be scaffolded with `dql init --template <name>`.
+DQL works best on top of a real dbt project. The recommended starting point is the [Jaffle Shop](https://github.com/dbt-labs/Semantic-Layer-Online-Course) dbt project.
 
 ## Quickstart
 
 ```bash
+git clone https://github.com/dbt-labs/Semantic-Layer-Online-Course.git jaffle-shop
+cd jaffle-shop
+pip install dbt-duckdb && dbt deps && dbt build --profiles-dir .
 npm install -g @duckcodeailabs/dql-cli
-dql init my-project --template starter
-cd my-project
-dql notebook
-```
-
-## Available Templates
-
-| Template | Best for | What you get |
-|---|---|---|
-| `starter` | First-run experience | Revenue CSV, starter blocks, semantic layer tutorial, welcome notebook |
-| `ecommerce` | Commerce analytics | Channel revenue, funnel analysis, semantic cubes, full dataset |
-| `saas` | Revenue + retention | MRR, churn pressure, cohort analysis, semantic metrics |
-| `taxi` | Time-series and ops | Trip volume, fare trends, borough analysis, semantic dimensions |
-| `finance-kpi` | Smallest runnable project | Single KPI block, local CSV, minimal layout |
-| `dashboard` | Multi-chart dashboards | Dashboard syntax with KPI, bar, and table charts |
-| `workbook` | Multi-page reports | Workbook syntax with multiple pages |
-| `duckdb-local` | DuckDB connection path | Local DuckDB driver config, no warehouse needed |
-
-## Scaffold any template
-
-```bash
-dql init my-project --template ecommerce
-dql init my-project --template finance-kpi
-dql init my-project --template dashboard
+dql init . && dql notebook
 ```
 
 ## Suggested Learning Path
@@ -40,30 +20,31 @@ dql init my-project --template dashboard
 dql notebook
 ```
 
-### 2. Parse a block and inspect its structure
+### 2. Create and parse a block
 
 ```bash
-dql parse blocks/revenue_by_segment.dql --verbose
+dql new block "Top Customers" --domain finance
+dql parse blocks/top_customers.dql --verbose
 ```
 
 ### 3. Preview and build
 
 ```bash
-dql preview blocks/revenue_by_segment.dql --open
-dql build blocks/revenue_by_segment.dql
-dql serve dist/revenue_by_segment --open
+dql preview blocks/top_customers.dql --open
+dql build blocks/top_customers.dql
+dql serve dist/top_customers --open
 ```
 
 ### 4. Explore the semantic layer
 
-Open the notebook sidebar and click the **Semantic** tab to browse metrics, dimensions, and hierarchies defined in `semantic-layer/`.
+Open the notebook sidebar and click the **Semantic** tab to browse metrics, dimensions, and hierarchies from the dbt project.
 
 ### 5. View lineage
 
 ```bash
+dql compile --dbt-manifest target/manifest.json
 dql lineage
-dql lineage --domain revenue
-dql lineage "Revenue by Segment"
+dql lineage --domain finance
 ```
 
 Or click the **Lineage** icon in the notebook sidebar.
@@ -77,22 +58,13 @@ block "Top Segments" {
     domain = "executive"
     type   = "custom"
     query  = """
-        SELECT * FROM ref("revenue_by_segment")
-        WHERE revenue > 10000
+        SELECT * FROM ref("top_customers")
+        WHERE total_spend > 100
     """
 }
 ```
 
 Run `dql lineage` to see the dependency graph and cross-domain flows.
-
-## Recommended Order
-
-1. `starter` — get oriented
-2. `ecommerce` — strongest full demo
-3. `saas` — recurring revenue and churn
-4. `taxi` — time-series and operations
-5. `dashboard` — multi-chart layout
-6. `workbook` — multi-page reporting
 
 ## Related Docs
 

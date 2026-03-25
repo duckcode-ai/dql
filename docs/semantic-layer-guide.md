@@ -7,11 +7,10 @@ The semantic layer lets you define reusable metrics, dimensions, and hierarchies
 ### 1. Create a project (if you don't have one)
 
 ```bash
-dql init my-project --template starter
-cd my-project
+dql init .
 ```
 
-This creates a project with sample semantic layer files already configured.
+This creates a DQL project. If a dbt project is detected, the semantic layer provider is set to `dbt` automatically.
 
 ### 2. Open the notebook
 

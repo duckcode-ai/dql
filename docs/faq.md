@@ -22,8 +22,7 @@ The notebook supports:
 - **Export** — save results or share notebook files (`.dqlnb`)
 
 ```bash
-dql init my-project --template ecommerce
-cd my-project
+dql init .
 dql notebook
 ```
 
@@ -159,8 +158,7 @@ Many teams can use both together rather than choosing one over the other.
 
 ```bash
 npm install -g @duckcodeailabs/dql-cli
-dql init my-dql-project --template ecommerce
-cd my-dql-project
+dql init .
 dql doctor
 dql notebook
 ```

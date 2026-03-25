@@ -27,10 +27,10 @@ describe('parseArgs', () => {
     expect(parsed.flags.open).toBe(false);
   });
 
-  it('parses notebook init template selection', () => {
-    const parsed = parseArgs(['init', 'demo', '--template', 'ecommerce']);
+  it('parses init with connection flag', () => {
+    const parsed = parseArgs(['init', 'demo', '--connection', 'duckdb']);
     expect(parsed.command).toBe('init');
     expect(parsed.file).toBe('demo');
-    expect(parsed.flags.template).toBe('ecommerce');
+    expect(parsed.flags.connection).toBe('duckdb');
   });
 });

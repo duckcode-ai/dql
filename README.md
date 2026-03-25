@@ -24,34 +24,24 @@ Requires Node 18, 20, or 22 (active LTS).
 
 ```bash
 npm install -g @duckcodeailabs/dql-cli
-dql init my-dql-project --template ecommerce
-cd my-dql-project
+dql init .
 dql doctor
 dql notebook
 ```
 
-→ **[Full installation guide — global, local, source, and library paths](./docs/getting-started.md)**
+→ **[Full getting started guide with the Jaffle Shop dbt project](./docs/getting-started.md)**
 
 ### 5-Minute Start
 
 ```bash
-npm install -g @duckcodeailabs/dql-cli   # install CLI
-dql init my-project --template starter   # scaffold project
-cd my-project && dql doctor              # verify setup
-dql notebook                             # open browser notebook
+git clone https://github.com/dbt-labs/Semantic-Layer-Online-Course.git jaffle-shop
+cd jaffle-shop
+pip install dbt-duckdb && dbt deps && dbt build --profiles-dir .
+npm install -g @duckcodeailabs/dql-cli
+dql init . && dql notebook
 ```
 
 → **[Quickstart — zero to running notebook in 5 minutes](./docs/quickstart.md)**
-
-### Choose Your Path
-
-| Starting point | Tutorial |
-|---|---|
-| Brand new, no database | [Tutorial 1: Sample Data](./docs/getting-started.md#tutorial-1-start-with-sample-data) |
-| Existing dbt project | [Tutorial 2: dbt Integration](./docs/getting-started.md#tutorial-2-existing-dbt-project) |
-| Existing Cube.js project | [Tutorial 3: Cube.js Integration](./docs/getting-started.md#tutorial-3-existing-cubejs-project) |
-| Own database, no semantic layer | [Tutorial 4: Cloud Database](./docs/getting-started.md#tutorial-4-connect-to-a-cloud-database) |
-| Adding DQL to an existing repo | [Tutorial 5: Own Repo (no template)](./docs/getting-started.md#tutorial-5-add-dql-to-your-own-repo) |
 
 ### Library packages (for embedding in your app)
 
@@ -230,26 +220,13 @@ Connect to Postgres, BigQuery, or Snowflake the same way — swap the driver in 
 
 ---
 
-## Project Templates
+## Getting Started with dbt
 
-Pick a template when running `dql init` to get a working project immediately:
+DQL is the **answer layer for dbt**. The recommended getting-started path uses the [Jaffle Shop](https://github.com/dbt-labs/Semantic-Layer-Online-Course) dbt project — a real dataset with models, metrics, and a semantic layer.
 
-| Template | Best for | What you get |
-|---|---|---|
-| `starter` | First-run experience | Revenue CSV, starter blocks, semantic layer tutorial, welcome notebook |
-| `ecommerce` | Commerce analytics | Channel revenue, funnel analysis, semantic cubes, full dataset |
-| `saas` | Revenue + retention | MRR, churn pressure, cohort analysis, semantic metrics |
-| `taxi` | Time-series and ops | Trip volume, fare trends, borough analysis, semantic dimensions |
-| `finance-kpi` | Smallest runnable project | Single KPI block, local CSV, minimal layout |
-| `dashboard` | Multi-chart dashboards | Dashboard syntax with KPI, bar, and table charts |
-| `workbook` | Multi-page reports | Workbook syntax with multiple pages |
-| `duckdb-local` | DuckDB connection path | Local DuckDB driver config, no warehouse needed |
+`dql init` auto-detects dbt projects and DuckDB files, scaffolding a minimal DQL project on top of your existing data.
 
-```bash
-dql init my-project --template ecommerce
-```
-
-→ **[Getting started — full project walkthrough](./docs/getting-started.md)**
+→ **[Getting started — full walkthrough with Jaffle Shop](./docs/getting-started.md)**
 
 ---
 
@@ -259,7 +236,7 @@ Every command has a clear job:
 
 | Command | What it does |
 |---|---|
-| `dql init` | Scaffold a new DQL project with sample data and starter blocks |
+| `dql init` | Initialize DQL in a project (auto-detects dbt) |
 | `dql notebook` | Open the browser notebook for interactive SQL exploration |
 | `dql new block` | Create a new `.dql` block file |
 | `dql new notebook` | Create a new `.dqlnb` notebook file |
@@ -307,7 +284,7 @@ Provides syntax highlighting, snippets, format-on-save, and LSP support (complet
 
 Not sure where to start? Pick your goal:
 
-- **Explore a CSV interactively** → `dql init` + `dql notebook`
+- **Explore a dbt project interactively** → `dql init` + `dql notebook`
 - **Author a reusable block** → `dql new block` + `dql preview`
 - **Build a shareable dashboard** → `dql build` + `dql serve`
 - **Migrate from raw SQL or dbt** → `dql migrate`
@@ -324,7 +301,7 @@ Not sure where to start? Pick your goal:
 | Guide | What it covers |
 |---|---|
 | [Quickstart](./docs/quickstart.md) | 5-minute path from install to running notebook |
-| [Getting Started](./docs/getting-started.md) | Choose your path: sample data, dbt, Cube.js, own DB, own repo |
+| [Getting Started](./docs/getting-started.md) | Full walkthrough with Jaffle Shop dbt project |
 
 ### Core Workflows
 
@@ -350,7 +327,7 @@ Not sure where to start? Pick your goal:
 |---|---|
 | [Migration Guides](./docs/migration-guides/README.md) | From raw SQL, dbt, Looker, Tableau |
 | [Use Cases](./docs/use-cases.md) | Recommended paths by goal |
-| [Examples](./docs/examples.md) | All templates, suggested learning path |
+| [Examples](./docs/examples.md) | Suggested learning path and block examples |
 | [Why DQL](./docs/why-dql.md) | The problem, before/after, personas, DQL vs alternatives |
 
 ### Help & Compatibility

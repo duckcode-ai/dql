@@ -9,7 +9,7 @@ Use this if you want to:
 - verify the monorepo builds cleanly
 - smoke-test the CLI from source
 - test the browser notebook end-to-end
-- validate starter templates and example projects before release
+- validate the getting-started flow before release
 
 ## Prerequisites
 
@@ -35,80 +35,39 @@ pnpm --filter @duckcodeailabs/dql-cli exec dql --help
 
 The rest of this guide assumes you stay at the repo root and invoke the CLI the same way.
 
-## 2. Smoke-test starter templates
+## 2. Smoke-test init and notebook
 
-The fastest confidence pass is to scaffold each template, run the local checks, and open the notebook.
+The fastest confidence pass is to scaffold a project, run the local checks, and open the notebook.
 
-### Starter
+### Basic init (no dbt)
 
 ```bash
-rm -rf /tmp/dql-starter-smoke
-pnpm --filter @duckcodeailabs/dql-cli exec dql init /tmp/dql-starter-smoke --template starter
-pnpm --filter @duckcodeailabs/dql-cli exec dql doctor /tmp/dql-starter-smoke
-pnpm --filter @duckcodeailabs/dql-cli exec dql parse /tmp/dql-starter-smoke/blocks/revenue_by_segment.dql
-pnpm --filter @duckcodeailabs/dql-cli exec dql build /tmp/dql-starter-smoke/blocks/revenue_by_segment.dql
-pnpm --filter @duckcodeailabs/dql-cli exec dql notebook /tmp/dql-starter-smoke
+rm -rf /tmp/dql-smoke
+pnpm --filter @duckcodeailabs/dql-cli exec dql init /tmp/dql-smoke
+pnpm --filter @duckcodeailabs/dql-cli exec dql doctor /tmp/dql-smoke
+pnpm --filter @duckcodeailabs/dql-cli exec dql notebook /tmp/dql-smoke
 ```
 
-### E-commerce, SaaS, Taxi
-
-Repeat the same pattern for the themed templates:
+### With Jaffle Shop dbt project
 
 ```bash
-pnpm --filter @duckcodeailabs/dql-cli exec dql init /tmp/dql-ecommerce-smoke --template ecommerce
-pnpm --filter @duckcodeailabs/dql-cli exec dql init /tmp/dql-saas-smoke --template saas
-pnpm --filter @duckcodeailabs/dql-cli exec dql init /tmp/dql-taxi-smoke --template taxi
+git clone https://github.com/dbt-labs/Semantic-Layer-Online-Course.git /tmp/jaffle-shop
+cd /tmp/jaffle-shop
+pip install dbt-duckdb && dbt deps && dbt build --profiles-dir .
+pnpm --filter @duckcodeailabs/dql-cli exec dql init .
+pnpm --filter @duckcodeailabs/dql-cli exec dql doctor .
+pnpm --filter @duckcodeailabs/dql-cli exec dql notebook .
 ```
 
-For each generated project, run:
+## 3. Validate block workflows
+
+From a scaffolded project:
 
 ```bash
-pnpm --filter @duckcodeailabs/dql-cli exec dql doctor /tmp/dql-ecommerce-smoke
-pnpm --filter @duckcodeailabs/dql-cli exec dql parse /tmp/dql-ecommerce-smoke/blocks/revenue_by_segment.dql
-pnpm --filter @duckcodeailabs/dql-cli exec dql notebook /tmp/dql-ecommerce-smoke
-
-pnpm --filter @duckcodeailabs/dql-cli exec dql doctor /tmp/dql-saas-smoke
-pnpm --filter @duckcodeailabs/dql-cli exec dql parse /tmp/dql-saas-smoke/blocks/revenue_by_segment.dql
-pnpm --filter @duckcodeailabs/dql-cli exec dql notebook /tmp/dql-saas-smoke
-
-pnpm --filter @duckcodeailabs/dql-cli exec dql doctor /tmp/dql-taxi-smoke
-pnpm --filter @duckcodeailabs/dql-cli exec dql parse /tmp/dql-taxi-smoke/blocks/revenue_by_segment.dql
-pnpm --filter @duckcodeailabs/dql-cli exec dql notebook /tmp/dql-taxi-smoke
-```
-
-## 3. Validate repo examples
-
-These templates are the best high-signal OSS demos:
-
-- `templates/ecommerce/`
-- `templates/saas/`
-- `templates/taxi/`
-
-Scaffold and test each template:
-
-```bash
-dql init /tmp/test-ecommerce --template ecommerce
-dql doctor /tmp/test-ecommerce
-dql parse /tmp/test-ecommerce/blocks/revenue_by_segment.dql
-dql notebook /tmp/test-ecommerce
-
-dql init /tmp/test-saas --template saas
-dql doctor /tmp/test-saas
-dql parse /tmp/test-saas/blocks/revenue_by_segment.dql
-dql notebook /tmp/test-saas
-
-dql init /tmp/test-taxi --template taxi
-dql doctor /tmp/test-taxi
-dql parse /tmp/test-taxi/blocks/revenue_by_segment.dql
-dql notebook /tmp/test-taxi
-```
-
-Also test at least one dashboard build per template:
-
-```bash
-dql build /tmp/test-ecommerce/dashboards/revenue_command_center.dql
-dql build /tmp/test-saas/dashboards/growth_scorecard.dql
-dql build /tmp/test-taxi/dashboards/city_operations.dql
+cd /tmp/dql-smoke
+pnpm --filter @duckcodeailabs/dql-cli exec dql new block "Test Block" --domain test
+pnpm --filter @duckcodeailabs/dql-cli exec dql parse blocks/test_block.dql
+pnpm --filter @duckcodeailabs/dql-cli exec dql certify blocks/test_block.dql
 ```
 
 ## 4. Manual browser checklist
@@ -129,11 +88,11 @@ After opening the notebook, verify these flows manually:
 
 The new notebook flow should not break the classic preview flow.
 
-Run this from at least one starter project and one example:
+Run this from a scaffolded project with a block:
 
 ```bash
-pnpm --filter @duckcodeailabs/dql-cli exec dql preview /tmp/dql-starter-smoke/blocks/revenue_by_segment.dql --open
-pnpm --filter @duckcodeailabs/dql-cli exec dql build /tmp/dql-starter-smoke/blocks/revenue_by_segment.dql
+pnpm --filter @duckcodeailabs/dql-cli exec dql preview /tmp/dql-smoke/blocks/test_block.dql --open
+pnpm --filter @duckcodeailabs/dql-cli exec dql build /tmp/dql-smoke/blocks/test_block.dql
 ```
 
 ## 6. Release confidence checklist
@@ -142,10 +101,10 @@ Before publishing or tagging a release, confirm:
 
 - `pnpm build` passes from the repo root
 - `pnpm test` passes from the repo root
-- `dql --help` shows `notebook` and `--template`
-- all four templates scaffold correctly
-- the three showcase examples open in the notebook
-- at least one block and one dashboard build successfully
+- `dql --help` shows `notebook` and all commands
+- `dql init` scaffolds correctly (with and without dbt project)
+- the notebook opens and queries run
+- at least one block builds successfully
 
 ## Troubleshooting
 

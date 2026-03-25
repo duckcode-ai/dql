@@ -6,13 +6,14 @@ The command snippets assume `dql` is already available on your shell `PATH`. If 
 
 ## 1. Evaluate DQL quickly
 
-Use this path if you want to understand the product in under ten minutes.
+Use this path if you want to understand the product in under ten minutes. Start with the [Jaffle Shop](https://github.com/dbt-labs/Semantic-Layer-Online-Course) dbt project:
 
 ```bash
-dql init my-dql-project --template ecommerce
-cd my-dql-project
-dql doctor
-dql notebook
+git clone https://github.com/dbt-labs/Semantic-Layer-Online-Course.git jaffle-shop
+cd jaffle-shop
+pip install dbt-duckdb && dbt deps && dbt build --profiles-dir .
+npm install -g @duckcodeailabs/dql-cli
+dql init . && dql doctor && dql notebook
 ```
 
 Best fit:
@@ -21,22 +22,15 @@ Best fit:
 - data practitioners comparing DQL with Malloy or notebook-first tooling
 - contributors reviewing the end-user experience
 
-## 2. Explore sample data in the browser notebook
+## 2. Explore data in the browser notebook
 
-Use this path if you want an interactive, cell-by-cell workflow.
+Use this path if you want an interactive, cell-by-cell workflow against a real dbt project.
 
 Best fit:
 
-- ad hoc SQL exploration
+- ad hoc SQL exploration against dbt mart tables
 - DQL block prototyping
 - notebook-based demos and internal enablement
-
-Recommended templates:
-
-- `starter` — smallest local-first flow
-- `ecommerce` — strongest OSS demo story
-- `saas` — recurring revenue and retention metrics
-- `taxi` — time-series and operations analysis
 
 ## 3. Author reusable analytics blocks
 
