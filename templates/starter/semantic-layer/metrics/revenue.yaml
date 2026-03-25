@@ -1,7 +1,0 @@
-name: total_revenue
-label: Total Revenue
-description: Sum of recognized revenue
-domain: revenue
-sql: SUM(amount)
-type: sum
-table: read_csv_auto('./data/revenue.csv')

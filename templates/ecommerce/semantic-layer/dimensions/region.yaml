@@ -1,9 +1,0 @@
-name: region
-label: Region
-description: Geographic region of the order.
-sql: region
-type: string
-table: orders
-tags:
-  - commerce
-  - geo

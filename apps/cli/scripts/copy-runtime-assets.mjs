@@ -10,10 +10,6 @@ const ASSETS_ROOT = join(DIST_ROOT, 'assets');
 
 const assets = [
   {
-    source: resolve(REPO_ROOT, 'templates'),
-    target: join(ASSETS_ROOT, 'templates'),
-  },
-  {
     source: resolve(REPO_ROOT, 'apps/notebook-browser'),
     target: join(ASSETS_ROOT, 'notebook-browser'),
   },
@@ -78,4 +74,3 @@ if (changed) {
   cliPkg.files = ['.'];
   writeFileSync(join(CLI_ROOT, 'dist', 'package.json'), JSON.stringify(cliPkg, null, 2) + '\n');
 }
-

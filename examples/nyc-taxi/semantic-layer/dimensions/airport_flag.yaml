@@ -1,8 +1,0 @@
-name: airport_flag
-label: Airport Trip
-description: Whether the trip involved an airport pickup or dropoff
-sql: airport_flag
-type: boolean
-table: read_csv_auto('./data/trips.csv')
-tags:
-  - trip_type

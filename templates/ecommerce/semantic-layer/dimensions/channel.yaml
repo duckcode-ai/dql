@@ -1,8 +1,0 @@
-name: channel
-label: Channel
-description: Order acquisition channel.
-sql: channel
-type: string
-table: orders
-tags:
-  - commerce

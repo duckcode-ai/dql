@@ -1,8 +1,0 @@
-name: payment_type
-label: Payment Type
-description: Method of payment (Card, Cash)
-sql: payment_type
-type: string
-table: read_csv_auto('./data/trips.csv')
-tags:
-  - payment

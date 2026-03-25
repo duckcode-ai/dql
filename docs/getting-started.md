@@ -1,793 +1,165 @@
-# Getting Started
+# Getting Started with DQL
+
+DQL is the **answer layer** on top of dbt. dbt transforms your data — DQL turns it into trusted, governed analytics answers with SQL blocks, notebooks, lineage, and a semantic layer.
+
+This guide walks you through setting up DQL with the **Jaffle Shop** dbt project — the same dataset used in dbt's official Semantic Layer course.
+
+---
 
 ## Prerequisites
 
-- **Node.js 18+** (LTS 18, 20, or 22 recommended)
-- No database required — DQL runs locally with DuckDB out of the box
+- **Python 3.9+** (for dbt)
+- **Node.js 18+** (for DQL)
+- **Git**
 
 ---
 
-## Install
+## Step 1: Clone the Jaffle Shop dbt Project
 
 ```bash
-npx @duckcodeailabs/dql-cli --help
+git clone https://github.com/dbt-labs/Semantic-Layer-Online-Course.git jaffle-shop
+cd jaffle-shop
 ```
 
-Or install globally:
+This is dbt Labs' official Semantic Layer course project. It includes:
+- Staging and mart models (customers, orders, order items, products, supplies)
+- Semantic model definitions (metrics, dimensions, entities)
+- A MetricFlow time spine
+
+---
+
+## Step 2: Install dbt with DuckDB
+
+```bash
+pip install dbt-duckdb
+```
+
+Create a `profiles.yml` in the project root so dbt uses a local DuckDB file:
+
+```bash
+cat > profiles.yml << 'EOF'
+jaffle_shop:
+  target: dev
+  outputs:
+    dev:
+      type: duckdb
+      path: ./jaffle_shop.duckdb
+      schema: main
+      threads: 4
+EOF
+```
+
+---
+
+## Step 3: Run dbt
+
+```bash
+dbt deps                          # install dbt packages (dbt_utils, dbt_date)
+dbt build --profiles-dir .        # seed, build models, run tests — all into DuckDB
+```
+
+After this completes, you have a `jaffle_shop.duckdb` file with the full data model:
+
+| Table | Description |
+|---|---|
+| `dim_customers` | Customer dimension with lifetime spend, order counts, type (new/returning) |
+| `fct_orders` | Fact table with order totals, tax, supply costs, item counts |
+| `order_items` | Order line items with product prices and supply costs |
+| `stg_customers` | Staging: cleaned customer records |
+| `stg_orders` | Staging: cleaned orders with dollar conversion |
+| `stg_order_items` | Staging: cleaned order items |
+| `stg_products` | Staging: products with food/drink flags |
+| `stg_supplies` | Staging: supplies with perishability flags |
+
+---
+
+## Step 4: Install DQL
 
 ```bash
 npm install -g @duckcodeailabs/dql-cli
-dql --help
 ```
 
 ---
 
-## Choose Your Path
+## Step 5: Initialize DQL in the Project
 
-| You are... | Start here |
-|---|---|
-| Brand new, want to explore DQL | [Tutorial 1: Sample Data](#tutorial-1-start-with-sample-data) |
-| Have an existing dbt project | [Tutorial 2: Existing dbt Project](#tutorial-2-existing-dbt-project) |
-| Have an existing Cube.js project | [Tutorial 3: Existing Cube.js Project](#tutorial-3-existing-cubejs-project) |
-| Connecting to a cloud warehouse | [Tutorial 4: Cloud Database](#tutorial-4-connect-to-a-cloud-database) |
-| Adding DQL to your existing repo | [Tutorial 5: Own Repo (no template)](#tutorial-5-add-dql-to-your-own-repo) |
+```bash
+dql init .
+```
+
+DQL auto-detects the dbt project and creates:
+- `dql.config.json` — points to `jaffle_shop.duckdb`, uses the `dbt` semantic layer provider
+- `blocks/` — directory for your DQL analytics blocks
+- `notebooks/welcome.dqlnb` — a starter notebook with queries against the mart tables
 
 ---
 
-## Tutorial 1: Start with Sample Data
-
-**Time:** 3 minutes. No database needed.
-
-### Step 1 — Scaffold a project
+## Step 6: Verify Setup
 
 ```bash
-npx @duckcodeailabs/dql-cli init my-analytics --template ecommerce
-cd my-analytics
+dql doctor
 ```
 
-This creates a complete project with:
-- `data/orders.csv` — 50 sample ecommerce orders
-- `semantic-layer/` — 5 metrics (GMV, order count, avg order value, etc.) and 4 dimensions
-- `blocks/` — pre-built DQL analysis blocks
-- `notebooks/welcome.dqlnb` — interactive welcome notebook
+This checks that `dql.config.json` exists, the DuckDB connection works, and the semantic layer loads.
 
-Other templates: `--template saas`, `--template taxi`, `--template starter`
+---
 
-### Step 2 — Verify the project
+## Step 7: Open the Notebook
 
 ```bash
-npx @duckcodeailabs/dql-cli doctor
+dql notebook
 ```
 
-Expected output:
+This opens a browser-based notebook connected to your Jaffle Shop DuckDB database. The welcome notebook includes:
+- `SHOW TABLES` — see all tables built by dbt
+- Customer overview query against `dim_customers`
+- A DQL block querying `fct_orders` with chart visualization
+- Product analysis against `order_items`
 
-```
-  DQL Doctor
-  ✓ Node.js                 version=22.x (requires >= 18)
-  ✓ Project root             found
-  ✓ dql.config.json          found
-  ✓ blocks/                  found
-  ✓ semantic-layer/          found
-  ✓ data/                    found
-  ✓ Default connection       driver=file
-  ✓ Semantic layer           provider=configured, 5 metrics, 4 dimensions
-  ✓ Local query runtime      driver=file is available
-  Summary: 10/10 checks passed
-```
+---
 
-### Step 3 — Open the notebook
+## Step 8: Import dbt Lineage
 
 ```bash
-npx @duckcodeailabs/dql-cli notebook
+dql compile --dbt-manifest target/manifest.json
 ```
 
-Your browser opens to `http://127.0.0.1:3474`. You'll see:
-- **Left sidebar** — Files, Schema, Semantic Layer, Outline, Connection panels
-- **Cell area** — the welcome notebook with guided examples
-
-### Step 4 — Run a SQL cell
-
-Click **+ SQL** to add a cell. Type:
-
-```sql
-SELECT segment, SUM(order_total) AS revenue, COUNT(*) AS orders
-FROM read_csv_auto('./data/orders.csv')
-GROUP BY segment
-ORDER BY revenue DESC
-```
-
-Press **Shift+Enter** to run. Results appear as a table. Click the chart icon to see a bar chart.
-
-### Step 5 — Use the Semantic Layer
-
-Click the **Semantic Layer** icon in the left sidebar (the diamond icon). You'll see:
-- **Metrics:** GMV, Order Count, Avg Order Value, Gross Margin %, Repeat Rate
-- **Dimensions:** Segment, Region, Channel, Order Date
-
-**Compose a query without writing SQL:**
-
-1. Expand **Compose Query**
-2. Check **GMV** and **Order Count** metrics
-3. Check **Region** dimension
-4. Click **Compose SQL**
-5. Click **+ Insert as Cell** — a new SQL cell appears with the generated query
-6. Press **Shift+Enter** to run it
-
-### Step 6 — Mix semantic + custom SQL
-
-You can use both approaches in the same notebook:
-
-```sql
--- Cell 1: semantic-generated (inserted from Compose Query)
-SELECT region, SUM(order_total) AS gmv, COUNT(*) AS order_count
-FROM read_csv_auto('./data/orders.csv')
-GROUP BY region ORDER BY gmv DESC
-```
-
-```sql
--- Cell 2: your own custom SQL referencing the same data
-SELECT
-    segment,
-    channel,
-    AVG(order_total) AS avg_order,
-    COUNT(CASE WHEN is_repeat = true THEN 1 END) AS repeat_orders
-FROM read_csv_auto('./data/orders.csv')
-GROUP BY segment, channel
-ORDER BY avg_order DESC
-```
-
-Both work side by side. The semantic layer helps you discover what metrics exist; custom SQL lets you go deeper.
-
-### Step 7 — List semantic definitions from CLI
+This imports dbt's lineage graph as upstream context into DQL's manifest. Now run:
 
 ```bash
-npx @duckcodeailabs/dql-cli semantic list
+dql lineage
 ```
 
-Output:
+You'll see the full data flow from dbt's source tables through staging, marts, and into your DQL blocks — the complete answer-layer lineage.
 
-```
-  Semantic Layer (configured)
-  Metrics (5):
-    • gmv           [sum]   Gross Merchandise Value
-    • order_count   [count] Order Count
-    • avg_order_value [avg] Average Order Value
-    ...
-  Dimensions (4):
-    • segment  [string]  Segment
-    • region   [string]  Region
-    ...
-```
+---
 
-### Step 8 — View lineage
+## Step 9: Create Your Own Blocks
 
-See how data flows through your project:
-
-```bash
-npx @duckcodeailabs/dql-cli lineage
-```
-
-You'll see a summary of blocks, metrics, dimensions, source tables, and any cross-domain data flows.
-
-To see what depends on a specific block:
-
-```bash
-npx @duckcodeailabs/dql-cli lineage "Revenue by Segment"
-```
-
-In the notebook, click the **Lineage** icon (graph icon) in the left sidebar to browse the lineage graph visually.
-
-### Step 9 — From notebook to a committed block file
-
-Once you've found a query worth keeping, promote it to a reusable `.dql` block:
-
-**1. Create a block file:**
-
-```bash
-npx @duckcodeailabs/dql-cli new block "Revenue by Segment"
-# Creates blocks/revenue_by_segment.dql
-```
-
-**2. Open the file and fill in the block:**
+Create a file `blocks/top_customers.dql`:
 
 ```dql
-block "Revenue by Segment" {
-    domain      = "revenue"
+block "Top Customers" {
+    domain      = "finance"
     type        = "custom"
     owner       = "data-team"
-    description = "GMV and order count broken out by customer segment"
-    tags        = ["revenue", "segment"]
-
-    query = """
-        SELECT segment, SUM(order_total) AS revenue, COUNT(*) AS orders
-        FROM read_csv_auto('./data/orders.csv')
-        GROUP BY segment
-        ORDER BY revenue DESC
-    """
-
-    visualization {
-        chart = "bar"
-        x     = segment
-        y     = revenue
-    }
-
-    tests {
-        assert row_count > 0
-    }
-}
-```
-
-**3. Validate and preview:**
-
-```bash
-npx @duckcodeailabs/dql-cli parse blocks/revenue_by_segment.dql
-npx @duckcodeailabs/dql-cli preview blocks/revenue_by_segment.dql --open
-```
-
-**4. Certify and commit:**
-
-```bash
-npx @duckcodeailabs/dql-cli certify blocks/revenue_by_segment.dql
-git add blocks/revenue_by_segment.dql
-git commit -m "feat: add revenue by segment block"
-```
-
-→ **[Full block authoring guide — custom blocks, semantic blocks, tests, certify](./authoring-blocks.md)**
-
----
-
-## Tutorial 2: Existing dbt Project
-
-**Time:** 5 minutes. Requires a dbt project with `semantic_models` (dbt 1.6+).
-
-### Step 1 — Create a DQL project in your dbt repo
-
-```bash
-cd ~/code/my-dbt-project
-npx @duckcodeailabs/dql-cli init . --template starter
-```
-
-This adds `dql.config.json`, `blocks/`, and `notebooks/` without overwriting your existing files.
-
-### Step 2 — Configure the semantic layer
-
-Edit `dql.config.json`:
-
-```json
-{
-  "project": "my-dbt-project",
-  "defaultConnection": {
-    "driver": "snowflake",
-    "account": "your-account.snowflakecomputing.com",
-    "username": "your_user",
-    "password": "${SNOWFLAKE_PASSWORD}",
-    "database": "ANALYTICS",
-    "schema": "PUBLIC",
-    "warehouse": "COMPUTE_WH",
-    "role": "ANALYST"
-  },
-  "semanticLayer": {
-    "provider": "dbt",
-    "projectPath": "."
-  }
-}
-```
-
-**Key:** `"provider": "dbt"` tells DQL to scan your `models/**/*.yml` for `semantic_models` and `metrics` blocks.
-
-**Using environment variables:** Wrap secrets in `${VAR_NAME}` — DQL resolves them from your shell environment at runtime.
-
-### Step 3 — Verify DQL sees your dbt metrics
-
-```bash
-npx @duckcodeailabs/dql-cli doctor
-npx @duckcodeailabs/dql-cli semantic list
-```
-
-You should see your dbt metrics and dimensions listed.
-
-### Step 4 — Open the notebook and query
-
-```bash
-npx @duckcodeailabs/dql-cli notebook
-```
-
-In the notebook:
-1. The **Semantic Panel** shows your dbt metrics and dimensions
-2. Use **Compose Query** to generate SQL from your dbt semantic models
-3. Click **+ Insert as Cell** to add it to the notebook
-4. Press **Shift+Enter** — the query runs against your Snowflake (or other) database
-
-### Step 5 — View lineage from dbt through DQL
-
-DQL's lineage picks up where dbt stops. dbt tracks `raw → staging → mart`. DQL tracks `mart → block → metric → domain → chart`.
-
-```bash
-npx @duckcodeailabs/dql-cli lineage
-```
-
-Use `ref()` in your DQL blocks to create explicit dependencies:
-
-```dql
-block "Revenue Trend" {
-    domain = "finance"
-    type   = "custom"
-    query  = """
-        SELECT month, SUM(amount) AS revenue
-        FROM ref("clean_orders")
-        GROUP BY month
-    """
-}
-```
-
-`dql lineage --impact clean_orders` shows all downstream DQL blocks affected when the upstream data changes.
-
-### Step 6 — Write custom SQL alongside dbt metrics
-
-You can write any SQL that your database supports:
-
-```sql
--- Custom SQL against your Snowflake tables
-SELECT
-    c.customer_segment,
-    SUM(o.amount) AS revenue,
-    COUNT(DISTINCT o.customer_id) AS customers
-FROM analytics.public.fct_orders o
-JOIN analytics.public.dim_customers c ON o.customer_id = c.id
-WHERE o.order_date >= '2024-01-01'
-GROUP BY 1
-ORDER BY revenue DESC
-```
-
-The notebook runs both semantic-composed and custom SQL queries against the same database connection.
-
-### What your dbt YAML should look like
-
-```yaml
-# models/staging/_schema.yml
-semantic_models:
-  - name: orders
-    model: ref('stg_orders')
-    defaults:
-      agg_time_dimension: order_date
-    entities:
-      - name: customer
-        type: foreign
-        expr: customer_id
-    dimensions:
-      - name: status
-        type: categorical
-      - name: order_date
-        type: time
-        type_params:
-          time_granularity: day
-    measures:
-      - name: total_revenue
-        agg: sum
-        expr: amount
-      - name: order_count
-        agg: count
-        expr: id
-
-metrics:
-  - name: revenue
-    label: Total Revenue
-    type: simple
-    type_params:
-      measure: total_revenue
-```
-
-### dbt aggregation type mapping
-
-| dbt `agg` | DQL `type` |
-|-----------|------------|
-| `sum` | `sum` |
-| `count` | `count` |
-| `count_distinct` | `count_distinct` |
-| `average` / `avg` | `avg` |
-| `min` | `min` |
-| `max` | `max` |
-
----
-
-## Tutorial 3: Existing Cube.js Project
-
-**Time:** 5 minutes. Requires a Cube.js project with YAML cube definitions.
-
-### Step 1 — Create a DQL project in your Cube repo
-
-```bash
-cd ~/code/my-cube-project
-npx @duckcodeailabs/dql-cli init . --template starter
-```
-
-### Step 2 — Configure the semantic layer
-
-Edit `dql.config.json`:
-
-```json
-{
-  "project": "my-cube-project",
-  "defaultConnection": {
-    "driver": "postgres",
-    "host": "localhost",
-    "port": 5432,
-    "database": "analytics",
-    "username": "analyst",
-    "password": "${POSTGRES_PASSWORD}"
-  },
-  "semanticLayer": {
-    "provider": "cubejs",
-    "projectPath": "."
-  }
-}
-```
-
-DQL scans `model/` or `schema/` for YAML files containing `cubes:` blocks.
-
-### Step 3 — Verify and launch
-
-```bash
-npx @duckcodeailabs/dql-cli doctor
-npx @duckcodeailabs/dql-cli semantic list
-npx @duckcodeailabs/dql-cli notebook
-```
-
-### Step 4 — Use Compose Query + custom SQL
-
-Same as the dbt workflow:
-1. **Semantic Panel** → **Compose Query** → select measures/dimensions → **Compose SQL**
-2. Click **+ Insert as Cell** to add the generated SQL
-3. Write additional custom SQL cells for ad-hoc analysis
-
-### What your Cube.js YAML should look like
-
-```yaml
-# model/Orders.yml
-cubes:
-  - name: Orders
-    sql_table: public.orders
-    measures:
-      - name: count
-        type: count
-      - name: totalAmount
-        type: sum
-        sql: amount
-    dimensions:
-      - name: status
-        type: string
-        sql: status
-      - name: createdAt
-        type: time
-        sql: created_at
-    joins:
-      - name: Users
-        sql: "{CUBE}.user_id = {Users}.id"
-        relationship: many_to_one
-```
-
----
-
-## Tutorial 4: Connect to a Cloud Database
-
-Connect DQL to your warehouse — Snowflake, BigQuery, PostgreSQL, or any of the 14 supported drivers.
-
-### Step 1 — Create a project
-
-```bash
-npx @duckcodeailabs/dql-cli init my-project --template starter
-cd my-project
-```
-
-### Step 2 — Configure your connection
-
-Edit `dql.config.json` with your database driver. Here are examples for the most common warehouses:
-
-**Snowflake:**
-```json
-{
-  "project": "my-project",
-  "defaultConnection": {
-    "driver": "snowflake",
-    "account": "your-account.snowflakecomputing.com",
-    "username": "${SNOWFLAKE_USER}",
-    "password": "${SNOWFLAKE_PASSWORD}",
-    "database": "ANALYTICS",
-    "schema": "PUBLIC",
-    "warehouse": "COMPUTE_WH",
-    "role": "ANALYST"
-  }
-}
-```
-
-**PostgreSQL:**
-```json
-{
-  "project": "my-project",
-  "defaultConnection": {
-    "driver": "postgres",
-    "host": "your-db-host.com",
-    "port": 5432,
-    "database": "analytics",
-    "username": "analyst",
-    "password": "${DB_PASSWORD}",
-    "ssl": true
-  }
-}
-```
-
-**BigQuery:**
-```json
-{
-  "project": "my-project",
-  "defaultConnection": {
-    "driver": "bigquery",
-    "project": "your-gcp-project-id",
-    "dataset": "analytics",
-    "keyFilename": "${GOOGLE_APPLICATION_CREDENTIALS}"
-  }
-}
-```
-
-Set environment variables before running DQL:
-
-```bash
-export SNOWFLAKE_USER="your_user"
-export SNOWFLAKE_PASSWORD="your_password"
-```
-
-See [Data Sources](./data-sources.md) for all 14 drivers.
-
-### Step 3 — Test the connection
-
-```bash
-npx @duckcodeailabs/dql-cli doctor
-npx @duckcodeailabs/dql-cli notebook
-```
-
-In the notebook, click the **Connection** panel (plug icon) in the sidebar and click **Test Connection** to verify.
-
-### Step 4 — Query your tables
-
-**Snowflake:**
-```sql
-SELECT table_schema, table_name, row_count
-FROM information_schema.tables
-WHERE table_schema NOT IN ('INFORMATION_SCHEMA')
-ORDER BY table_schema, table_name
-```
-
-**PostgreSQL:**
-```sql
-SELECT table_schema, table_name
-FROM information_schema.tables
-WHERE table_schema NOT IN ('pg_catalog', 'information_schema')
-ORDER BY table_schema, table_name
-```
-
-**BigQuery:**
-```sql
-SELECT table_name, row_count, size_bytes
-FROM `your-project.analytics.INFORMATION_SCHEMA.TABLES`
-ORDER BY table_name
-```
-
-### Step 5 — Add semantic definitions (optional)
-
-Create YAML files to define reusable metrics:
-
-```bash
-mkdir -p semantic-layer/metrics semantic-layer/dimensions
-```
-
-`semantic-layer/metrics/revenue.yaml`:
-
-```yaml
-name: total_revenue
-label: Total Revenue
-description: Sum of all order amounts
-sql: SUM(amount)
-type: sum
-table: public.orders
-tags:
-  - revenue
-  - kpi
-```
-
-`semantic-layer/dimensions/status.yaml`:
-
-```yaml
-name: order_status
-label: Order Status
-sql: status
-type: string
-table: public.orders
-```
-
-Add the provider to `dql.config.json`:
-
-```json
-{
-  "semanticLayer": {
-    "provider": "dql"
-  }
-}
-```
-
-Restart the notebook — your metrics appear in the Semantic Panel.
-
-### Step 6 — Create blocks with ref() and view lineage
-
-Create blocks that build on each other using `ref()`:
-
-```bash
-npx @duckcodeailabs/dql-cli new block "Order Summary"
-npx @duckcodeailabs/dql-cli new block "Revenue Report"
-```
-
-Edit `blocks/order_summary.dql`:
-```dql
-block "Order Summary" {
-    domain = "data"
-    type   = "custom"
-    owner  = "data-team"
-    query  = """
-        SELECT status, COUNT(*) AS orders, SUM(amount) AS revenue
-        FROM public.orders
-        GROUP BY status
-    """
-}
-```
-
-Edit `blocks/revenue_report.dql`:
-```dql
-block "Revenue Report" {
-    domain = "finance"
-    type   = "custom"
-    owner  = "finance-team"
-    query  = """
-        SELECT * FROM ref("order_summary")
-        WHERE revenue > 1000
-    """
-    visualization {
-        chart = "bar"
-        x     = status
-        y     = revenue
-    }
-}
-```
-
-View the lineage:
-```bash
-npx @duckcodeailabs/dql-cli lineage
-```
-
-You'll see cross-domain flows from `data → finance` and the full dependency chain from source tables through blocks.
-
----
-
-## Tutorial 5: Add DQL to Your Own Repo
-
-**Time:** 5 minutes. Works with any existing project — no semantic layer required.
-
-This path is for teams adding DQL to an existing repo without adopting a full template. You get the DQL notebook, block authoring, and CLI tooling while keeping your existing project structure untouched.
-
-### Step 1 — Run init in your existing project directory
-
-```bash
-cd ~/code/my-existing-project
-npx @duckcodeailabs/dql-cli init . --template starter
-```
-
-**What this adds** (minimal footprint):
-- `dql.config.json` — project config (edit this to point at your database)
-- `blocks/` — empty folder for your DQL blocks
-- `notebooks/` — empty folder for notebook files
-- `data/revenue.csv` — sample data for local testing (safe to delete)
-- `semantic-layer/` — example YAML files (safe to delete or ignore)
-
-**What this does NOT touch:**
-- Your existing source files, models, or configurations
-- `package.json`, `.gitignore`, or any other existing file
-- Your database, warehouse, or any external system
-
-### Step 2 — Remove sample assets you don't need
-
-If you're pointing at your own database and don't want the sample data:
-
-```bash
-rm -rf data/                    # remove sample CSV files
-rm -rf semantic-layer/          # remove if you don't have a semantic layer yet
-```
-
-Or keep them — they won't interfere with anything.
-
-### Step 3 — Point at your real database
-
-Edit `dql.config.json` to use your warehouse. Examples:
-
-**Snowflake:**
-```json
-{
-  "project": "my-existing-project",
-  "defaultConnection": {
-    "driver": "snowflake",
-    "account": "your-account.snowflakecomputing.com",
-    "username": "${SNOWFLAKE_USER}",
-    "password": "${SNOWFLAKE_PASSWORD}",
-    "database": "ANALYTICS",
-    "schema": "PUBLIC",
-    "warehouse": "COMPUTE_WH"
-  }
-}
-```
-
-**BigQuery:**
-```json
-{
-  "project": "my-existing-project",
-  "defaultConnection": {
-    "driver": "bigquery",
-    "projectId": "my-gcp-project",
-    "keyFilename": "${GOOGLE_APPLICATION_CREDENTIALS}",
-    "dataset": "analytics"
-  }
-}
-```
-
-See [Data Sources](./data-sources.md) for all 14 supported drivers.
-
-### Step 4 — Verify the setup
-
-```bash
-npx @duckcodeailabs/dql-cli doctor
-```
-
-This checks your Node version, config file, and database connection. Fix any reported issues before proceeding.
-
-### Step 5 — Open the notebook against your real tables
-
-```bash
-npx @duckcodeailabs/dql-cli notebook
-```
-
-Click the **Schema** panel in the sidebar to browse your actual tables and columns. Run SQL against your database just like any query tool.
-
-### Step 6 — Write your first block against real tables
-
-```bash
-npx @duckcodeailabs/dql-cli new block "Daily Active Users"
-```
-
-Edit `blocks/daily_active_users.dql`:
-
-```dql
-block "Daily Active Users" {
-    domain      = "product"
-    type        = "custom"
-    owner       = "analytics-team"
-    description = "Daily unique users by product area"
-    tags        = ["dau", "product", "engagement"]
-
-    params {
-        days_back = "30"
-    }
+    description = "Top 10 customers by lifetime spend"
 
     query = """
         SELECT
-            event_date,
-            product_area,
-            COUNT(DISTINCT user_id) AS dau
-        FROM analytics.public.events
-        WHERE event_date >= CURRENT_DATE - INTERVAL '${days_back} days'
-        GROUP BY event_date, product_area
-        ORDER BY event_date DESC
+            customer_name,
+            customer_type,
+            count_lifetime_orders AS orders,
+            lifetime_spend AS total_spend
+        FROM dim_customers
+        ORDER BY lifetime_spend DESC
+        LIMIT 10
     """
 
     visualization {
-        chart = "line"
-        x     = event_date
-        y     = dau
+        chart = "bar"
+        x     = customer_name
+        y     = total_spend
     }
 
     tests {
@@ -796,156 +168,40 @@ block "Daily Active Users" {
 }
 ```
 
-### Step 7 — Add dependencies with ref()
-
-When blocks depend on each other, use `ref()` to make the dependency explicit:
+Preview it:
 
 ```bash
-npx @duckcodeailabs/dql-cli new block "Engagement Summary"
+dql preview blocks/top_customers.dql --open
 ```
-
-Edit `blocks/engagement_summary.dql`:
-
-```dql
-block "Engagement Summary" {
-    domain = "product"
-    type   = "custom"
-    owner  = "analytics-team"
-
-    query = """
-        SELECT product_area, AVG(dau) AS avg_dau
-        FROM ref("daily_active_users")
-        GROUP BY product_area
-        ORDER BY avg_dau DESC
-    """
-
-    visualization {
-        chart = "bar"
-        x     = product_area
-        y     = avg_dau
-    }
-}
-```
-
-`ref("daily_active_users")` creates a tracked dependency — DQL knows `engagement_summary` depends on `daily_active_users`.
-
-### Step 8 — View lineage
-
-```bash
-npx @duckcodeailabs/dql-cli lineage
-```
-
-See cross-domain flows, trust scores, and the full dependency graph. Use impact analysis to understand what breaks if a block changes:
-
-```bash
-npx @duckcodeailabs/dql-cli lineage --impact daily_active_users
-```
-
-### Step 9 — Validate, preview, and commit
-
-```bash
-npx @duckcodeailabs/dql-cli parse blocks/daily_active_users.dql
-npx @duckcodeailabs/dql-cli preview blocks/daily_active_users.dql --open
-npx @duckcodeailabs/dql-cli certify blocks/daily_active_users.dql
-git add blocks/ dql.config.json
-git commit -m "feat: add DQL notebook with DAU and engagement blocks"
-```
-
-### Ignoring DQL artifacts in git
-
-If you want to exclude the sample data from version control:
-
-```bash
-echo "data/" >> .gitignore
-```
-
-The `blocks/`, `notebooks/`, and `dql.config.json` should be committed — they are the value.
 
 ---
 
-## How the Notebook Works with DQL
+## Step 10: Build and Serve
 
-### Three ways to query
+```bash
+dql build blocks/top_customers.dql
+dql serve
+```
 
-| Method | When to use | How |
+This compiles the block to a standalone HTML dashboard and serves it locally.
+
+---
+
+## What You Have Now
+
+| Layer | Tool | What it does |
 |---|---|---|
-| **Compose Query** (point-and-click) | Explore semantic metrics without writing SQL | Sidebar → Semantic → Compose Query → Insert as Cell |
-| **Custom SQL** | Ad-hoc analysis, complex joins, window functions | Add a SQL cell → write SQL → Shift+Enter |
-| **DQL Block** | Governed, reusable, chartable queries | Add a DQL cell → write block syntax |
+| **Transformation** | dbt | raw → staging → mart tables |
+| **Answer** | DQL | mart tables → governed blocks → notebooks → charts |
 
-### They work together
-
-```
-┌─────────────────────────────────────────────────────┐
-│  Notebook                                           │
-│                                                     │
-│  [Markdown] ## Revenue Analysis                     │
-│                                                     │
-│  [SQL - from Compose Query]                         │
-│  SELECT region, SUM(order_total) AS gmv             │
-│  FROM orders GROUP BY region                        │
-│  → Table + Bar Chart                                │
-│                                                     │
-│  [SQL - custom]                                     │
-│  SELECT region, channel,                            │
-│    AVG(order_total) AS avg_order                    │
-│  FROM orders GROUP BY 1, 2                          │
-│  → Table                                            │
-│                                                     │
-│  [DQL Block]                                        │
-│  block "Top Segments" { ... }                       │
-│  → Governed chart with metadata                     │
-│                                                     │
-│  [Param] segment = [All ▾]                          │
-│                                                     │
-│  [SQL] SELECT * FROM {{top_segments}}               │
-│        WHERE segment = {{segment}}                  │
-│  → Filtered results                                 │
-└─────────────────────────────────────────────────────┘
-```
-
-### Cell reference chaining
-
-Name any SQL cell (e.g., `revenue_data`), then reference it downstream:
-
-```sql
--- This injects revenue_data as a CTE automatically
-SELECT * FROM {{revenue_data}}
-WHERE revenue > 10000
-```
-
-### Keyboard shortcuts
-
-| Shortcut | Action |
-|---|---|
-| `Shift+Enter` | Run cell |
-| `Cmd+S` | Save notebook |
-| `a` | Add cell above (command mode) |
-| `b` | Add cell below (command mode) |
-| `d d` | Delete cell (command mode) |
-
----
-
-## Verify Your Setup
-
-Run these commands from your project directory:
-
-```bash
-npx @duckcodeailabs/dql-cli doctor         # Check project health
-npx @duckcodeailabs/dql-cli semantic list   # List semantic definitions
-npx @duckcodeailabs/dql-cli parse blocks/   # Validate all blocks
-npx @duckcodeailabs/dql-cli notebook        # Launch the notebook
-```
+DQL picks up where dbt stops. Every analytics answer is a `.dql` file with SQL + visualization + owner + tests — all Git-trackable.
 
 ---
 
 ## Next Steps
 
-- [Authoring Blocks](./authoring-blocks.md) — full lifecycle: create, test, certify, and commit custom and semantic blocks
-- [Lineage & Trust Chains](./lineage.md) — ref() system, cross-domain flows, impact analysis, trust chains
-- [Semantic Layer Guide](./semantic-layer-guide.md) — deep dive into metrics, dimensions, hierarchies, cubes
-- [Notebook Guide](./notebook.md) — cell types, variable substitution, export
-- [Data Sources & Connector Reference](./data-sources.md) — all 14 database drivers with config fields
+- [Notebook Guide](./notebook.md) — cell types, param widgets, variable refs, export
+- [Authoring Blocks](./authoring-blocks.md) — create, test, certify, and commit DQL blocks
+- [Semantic Layer](./semantic-layer-guide.md) — metrics, dimensions, dbt/Cube.js providers
+- [Lineage](./lineage.md) — ref() system, trust chains, impact analysis
 - [CLI Reference](./cli-reference.md) — all commands and flags
-- [Examples](./examples.md) — ecommerce, NYC taxi, SaaS metrics walkthroughs
-- [FAQ](./faq.md) — common questions and troubleshooting

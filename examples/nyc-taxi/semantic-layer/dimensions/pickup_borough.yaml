@@ -1,8 +1,0 @@
-name: pickup_borough
-label: Pickup Borough
-description: NYC borough where the trip originated
-sql: pickup_borough
-type: string
-table: read_csv_auto('./data/trips.csv')
-tags:
-  - geography

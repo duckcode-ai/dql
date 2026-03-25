@@ -1,8 +1,0 @@
-name: owner_segment
-label: Owner Segment
-description: Account owner segment (Enterprise, Mid-Market, SMB).
-sql: owner_segment
-type: string
-table: subscriptions
-tags:
-  - saas

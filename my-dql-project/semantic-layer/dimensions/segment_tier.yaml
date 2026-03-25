@@ -1,6 +1,0 @@
-name: segment_tier
-label: Segment Tier
-description: Customer segment tier
-sql: segment_tier
-type: string
-table: read_csv_auto('./data/revenue.csv')

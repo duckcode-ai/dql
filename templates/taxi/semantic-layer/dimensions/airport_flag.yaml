@@ -1,8 +1,0 @@
-name: airport_flag
-label: Airport Trip
-description: Whether the trip was to or from an airport.
-sql: airport_flag
-type: boolean
-table: trips
-tags:
-  - taxi

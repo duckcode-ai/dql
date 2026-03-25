@@ -1,8 +1,0 @@
-name: region
-label: Geographic Region
-description: Geographic region of the order
-sql: region
-type: string
-table: read_csv_auto('./data/orders.csv')
-tags:
-  - geography

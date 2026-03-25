@@ -1,142 +1,152 @@
-import { cpSync, existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
-import { basename, dirname, join, resolve } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { basename, join, resolve } from 'node:path';
 import { createWelcomeNotebook, serializeNotebook } from '@duckcodeailabs/dql-notebook';
 import type { CLIFlags } from '../args.js';
 import { runNotebook } from './notebook.js';
 
-const COMMAND_DIR = dirname(fileURLToPath(import.meta.url));
-const PACKAGED_TEMPLATE_ROOT = resolve(COMMAND_DIR, '../assets/templates');
-const REPO_TEMPLATE_ROOT = resolve(COMMAND_DIR, '../../../../templates');
-const TEMPLATE_ROOT = existsSync(PACKAGED_TEMPLATE_ROOT) ? PACKAGED_TEMPLATE_ROOT : REPO_TEMPLATE_ROOT;
-
-const TEXT_FILE_EXTENSIONS = new Set([
-  '.json',
-  '.md',
-  '.yaml',
-  '.yml',
-  '.dql',
-  '.gitignore',
-  '.txt',
-]);
-
 export async function runInit(targetArg: string | null, flags: CLIFlags): Promise<void> {
-  const templateId = flags.template || 'starter';
-  const templateDir = resolve(TEMPLATE_ROOT, templateId);
-
-  if (!existsSync(templateDir)) {
-    throw new Error(`Template "${templateId}" not found. Available templates: ${listTemplates().join(', ')}`);
-  }
-
   const targetDir = resolve(targetArg || '.');
   const projectName = basename(targetDir) || 'dql-project';
 
-  if (existsSync(targetDir)) {
-    const contents = readdirSync(targetDir);
-    if (contents.length > 0) {
-      throw new Error(`Target directory is not empty: ${targetDir}`);
-    }
-  } else {
+  // Create target directory if it doesn't exist
+  if (!existsSync(targetDir)) {
     mkdirSync(targetDir, { recursive: true });
   }
 
-  cpSync(templateDir, targetDir, { recursive: true });
-  replaceTokens(targetDir, {
-    '__PROJECT_NAME__': projectName,
-  });
-  ensureWelcomeNotebook(targetDir, projectName, templateId);
+  // Detect if this is a dbt project
+  const isDbt = existsSync(join(targetDir, 'dbt_project.yml'));
 
+  // Detect DuckDB file in the directory
+  const duckdbPath = detectDuckDBFile(targetDir);
+
+  // Don't overwrite existing dql.config.json
+  const configPath = join(targetDir, 'dql.config.json');
+  if (!existsSync(configPath)) {
+    const config = buildConfig(projectName, isDbt, duckdbPath);
+    writeFileSync(configPath, JSON.stringify(config, null, 2) + '\n');
+  }
+
+  // Create DQL directories
+  const dirs = ['blocks', 'notebooks'];
+  if (!isDbt) {
+    dirs.push('semantic-layer', 'semantic-layer/metrics', 'semantic-layer/dimensions');
+  }
+  for (const dir of dirs) {
+    const dirPath = join(targetDir, dir);
+    if (!existsSync(dirPath)) {
+      mkdirSync(dirPath, { recursive: true });
+    }
+  }
+
+  // Create .gitignore for DQL artifacts
+  const gitignorePath = join(targetDir, '.gitignore');
+  const dqlIgnoreEntries = '\n# DQL\ndql-manifest.json\n*.duckdb\n*.duckdb.wal\n';
+  if (existsSync(gitignorePath)) {
+    const existing = readFileSync(gitignorePath, 'utf-8');
+    if (!existing.includes('dql-manifest.json')) {
+      writeFileSync(gitignorePath, existing + dqlIgnoreEntries);
+    }
+  } else {
+    writeFileSync(gitignorePath, 'node_modules/\n' + dqlIgnoreEntries);
+  }
+
+  // Create welcome notebook
+  const notebookPath = join(targetDir, 'notebooks', 'welcome.dqlnb');
+  if (!existsSync(notebookPath)) {
+    const nb = createWelcomeNotebook(isDbt ? 'dbt' : 'default', projectName);
+    writeFileSync(notebookPath, serializeNotebook(nb), 'utf-8');
+  }
+
+  // Output
   if (flags.format === 'json') {
     console.log(JSON.stringify({
       project: projectName,
       path: targetDir,
       created: true,
-      template: templateId,
-      nextSteps: [
-        `cd ${targetArg || '.'}`,
-        'dql notebook',
-        'dql parse blocks/revenue_by_segment.dql',
-      ],
+      dbt: isDbt,
+      duckdb: duckdbPath ?? null,
     }, null, 2));
     return;
   }
 
-  console.log(`\n  ✓ Created DQL project: ${projectName}`);
+  console.log(`\n  DQL project initialized: ${projectName}`);
   console.log(`    Path: ${targetDir}`);
-  console.log(`    Template: ${templateId}`);
+  if (isDbt) {
+    console.log('    dbt project detected — using dbt semantic layer provider');
+  }
+  if (duckdbPath) {
+    console.log(`    DuckDB: ${duckdbPath}`);
+  }
+  console.log('');
+  console.log('  Created:');
+  console.log('    dql.config.json');
+  console.log('    blocks/');
+  console.log('    notebooks/welcome.dqlnb');
   console.log('');
   console.log('  Next steps:');
-  if (targetArg && targetArg !== '.') {
-    console.log(`    1. cd ${targetArg}`);
-    console.log('    2. dql notebook');
-    console.log('    3. dql doctor');
-  } else {
-    console.log('    1. dql notebook');
-    console.log('    2. dql doctor');
+  const step = targetArg && targetArg !== '.' ? 1 : 0;
+  if (step === 1) console.log(`    ${step}. cd ${targetArg}`);
+  console.log(`    ${step + 1}. dql doctor`);
+  console.log(`    ${step + 2}. dql notebook`);
+  if (isDbt) {
+    console.log(`    ${step + 3}. dql compile --dbt-manifest target/manifest.json`);
   }
   console.log('');
-  const others = listTemplates().filter((t) => t !== templateId);
-  if (others.length > 0) {
-    console.log(`  Other templates: ${others.join(', ')}`);
-    console.log('    e.g. dql init my-project --template ecommerce');
-    console.log('');
-  }
 
   if (flags.open) {
     await runNotebook(targetDir, flags);
   }
 }
 
-function replaceTokens(rootDir: string, replacements: Record<string, string>): void {
-  const entries = readdirSync(rootDir);
-
-  for (const entry of entries) {
-    const fullPath = join(rootDir, entry);
-    const stat = statSync(fullPath);
-
-    if (stat.isDirectory()) {
-      replaceTokens(fullPath, replacements);
-      continue;
+function detectDuckDBFile(dir: string): string | null {
+  // Common DuckDB file locations in dbt projects
+  const candidates = [
+    'jaffle_shop.duckdb',
+    'dev.duckdb',
+    'target/dev.duckdb',
+    'reports/jaffle_shop.duckdb',
+  ];
+  for (const candidate of candidates) {
+    if (existsSync(join(dir, candidate))) {
+      return candidate;
     }
-
-    if (!shouldTreatAsText(fullPath)) {
-      continue;
-    }
-
-    let content = readFileSync(fullPath, 'utf-8');
-    for (const [token, value] of Object.entries(replacements)) {
-      content = content.split(token).join(value);
-    }
-    writeFileSync(fullPath, content, 'utf-8');
+  }
+  // Search root directory for any .duckdb file
+  try {
+    const { readdirSync } = require('node:fs');
+    const entries = readdirSync(dir);
+    const duckdb = entries.find((e: string) => e.endsWith('.duckdb'));
+    return duckdb ?? null;
+  } catch {
+    return null;
   }
 }
 
-function shouldTreatAsText(filePath: string): boolean {
-  const fileName = basename(filePath);
-  if (fileName === '.gitignore') {
-    return true;
+function buildConfig(
+  projectName: string,
+  isDbt: boolean,
+  duckdbPath: string | null,
+): Record<string, unknown> {
+  const config: Record<string, unknown> = {
+    project: projectName,
+    connections: {
+      default: {
+        driver: 'duckdb',
+        path: duckdbPath ?? ':memory:',
+      },
+    },
+  };
+
+  if (isDbt) {
+    config.semanticLayer = {
+      provider: 'dbt',
+      projectPath: '.',
+    };
+  } else {
+    config.semanticLayer = {
+      provider: 'dql',
+    };
   }
 
-  const dot = fileName.lastIndexOf('.');
-  const ext = dot >= 0 ? fileName.slice(dot) : '';
-  return TEXT_FILE_EXTENSIONS.has(ext);
-}
-
-function listTemplates(): string[] {
-  if (!existsSync(TEMPLATE_ROOT)) {
-    return [];
-  }
-  return readdirSync(TEMPLATE_ROOT).filter((entry) => statSync(join(TEMPLATE_ROOT, entry)).isDirectory()).sort();
-}
-
-function ensureWelcomeNotebook(targetDir: string, projectName: string, templateId: string): void {
-  const notebookDir = join(targetDir, 'notebooks');
-  mkdirSync(notebookDir, { recursive: true });
-  const notebookPath = join(notebookDir, 'welcome.dqlnb');
-
-  if (existsSync(notebookPath)) {
-    return;
-  }
-
-  writeFileSync(notebookPath, serializeNotebook(createWelcomeNotebook(templateId, projectName)), 'utf-8');
+  return config;
 }

@@ -1,8 +1,0 @@
-name: plan_tier
-label: Plan Tier
-description: Subscription plan tier (Starter, Growth, Enterprise).
-sql: plan_tier
-type: string
-table: subscriptions
-tags:
-  - saas

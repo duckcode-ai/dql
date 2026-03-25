@@ -1,8 +1,0 @@
-name: segment
-label: Customer Segment
-description: Customer segment (Enterprise, Mid-Market, SMB).
-sql: segment
-type: string
-table: orders
-tags:
-  - commerce

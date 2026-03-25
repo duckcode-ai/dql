@@ -1,8 +1,0 @@
-block "ARR Growth" {
-    domain = "general"
-    type = "semantic"
-    description = "Starter semantic block for arr growth"
-    owner = "Kranthi"
-    tags = ["starter", "semantic", "general"]
-    metric = "arr_growth_metric"
-}

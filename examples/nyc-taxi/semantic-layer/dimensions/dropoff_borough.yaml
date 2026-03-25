@@ -1,8 +1,0 @@
-name: dropoff_borough
-label: Dropoff Borough
-description: NYC borough where the trip ended
-sql: dropoff_borough
-type: string
-table: read_csv_auto('./data/trips.csv')
-tags:
-  - geography

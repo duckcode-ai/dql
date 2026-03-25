@@ -1,9 +1,0 @@
-name: pickup_borough
-label: Pickup Borough
-description: Borough where the trip started.
-sql: pickup_borough
-type: string
-table: trips
-tags:
-  - geo
-  - taxi

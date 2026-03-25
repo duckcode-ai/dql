@@ -78,132 +78,66 @@ export function deserializeNotebook(raw: string): NotebookDocument {
 export function createWelcomeNotebook(template: string, projectTitle: string): NotebookDocument {
   const normalized = template.toLowerCase();
 
-  if (normalized === 'ecommerce') {
-    return createNotebookDocument(`${projectTitle} Welcome`, [
+  if (normalized === 'dbt') {
+    return createNotebookDocument(`${projectTitle} — DQL Notebook`, [
       {
         id: 'intro',
         type: 'markdown',
         title: 'Welcome',
-        source: `# ${projectTitle}\n\nThis notebook gives you a browser-first tour of DQL using the bundled e-commerce sample data. Run the cells below to explore revenue, funnel health, and repeat purchase behavior.`,
+        source: `# ${projectTitle}\n\nThis notebook connects to your dbt project's DuckDB database. Run the cells below to explore the mart tables built by dbt.\n\n> DQL is the **answer layer** on top of dbt. dbt transforms your data — DQL turns it into trusted, governed analytics answers.`,
+      },
+      {
+        id: 'sql-tables',
+        type: 'sql',
+        title: 'Available Tables',
+        source: `-- List all tables in your DuckDB database\nSHOW TABLES;`,
+      },
+      {
+        id: 'sql-customers',
+        type: 'sql',
+        title: 'Customer Overview',
+        source: `SELECT\n  customer_type,\n  COUNT(*) AS customers,\n  ROUND(AVG(count_lifetime_orders), 1) AS avg_orders,\n  ROUND(AVG(lifetime_spend), 2) AS avg_spend\nFROM dim_customers\nGROUP BY customer_type\nORDER BY customers DESC;`,
       },
       {
         id: 'dql-revenue',
         type: 'dql',
-        title: 'Revenue by Channel',
-        source: `block "Revenue by Channel" {\n    domain = "commerce"\n    type = "custom"\n    description = "Starter DQL block for channel-level revenue"\n\n    query = """\n        SELECT channel, ROUND(SUM(order_total), 2) AS revenue\n        FROM read_csv_auto('./data/orders.csv')\n        GROUP BY channel\n        ORDER BY revenue DESC\n    """\n\n    visualization {\n        chart = "bar"\n        x = channel\n        y = revenue\n    }\n\n    tests {\n        assert row_count > 0\n    }\n}`,
+        title: 'Order Revenue',
+        source: `block "Order Revenue" {\n    domain = "finance"\n    type   = "custom"\n    owner  = "data-team"\n    description = "Total order revenue over time"\n\n    query = """\n        SELECT\n            DATE_TRUNC('month', ordered_at) AS month,\n            COUNT(*) AS orders,\n            ROUND(SUM(order_total), 2) AS revenue\n        FROM fct_orders\n        GROUP BY 1\n        ORDER BY 1\n    """\n\n    visualization {\n        chart = "bar"\n        x     = month\n        y     = revenue\n    }\n\n    tests {\n        assert row_count > 0\n    }\n}`,
       },
       {
-        id: 'sql-funnel',
+        id: 'sql-items',
         type: 'sql',
-        title: 'Checkout Funnel',
-        source: `SELECT step, users\nFROM read_csv_auto('./data/funnel.csv')\nORDER BY sort_order;`,
+        title: 'Top Products',
+        source: `SELECT\n  p.product_name,\n  COUNT(*) AS items_sold,\n  ROUND(SUM(oi.product_price), 2) AS total_revenue\nFROM order_items oi\nJOIN stg_products p ON oi.product_id = p.product_id\nGROUP BY p.product_name\nORDER BY total_revenue DESC\nLIMIT 10;`,
       },
       {
-        id: 'chart-funnel',
-        type: 'chart',
-        title: 'Funnel View',
-        source: '',
-        config: {
-          sourceCellId: 'sql-funnel',
-          chart: 'bar',
-          x: 'step',
-          y: 'users',
-          title: 'Funnel conversion by step',
-        },
-      },
-    ], { description: 'Guided walkthrough for the e-commerce template.', template: 'ecommerce' });
-  }
-
-  if (normalized === 'saas') {
-    return createNotebookDocument(`${projectTitle} Welcome`, [
-      {
-        id: 'intro',
+        id: 'next-steps',
         type: 'markdown',
-        title: 'Welcome',
-        source: `# ${projectTitle}\n\nThis notebook highlights MRR, churn, and expansion revenue using the bundled SaaS sample data.`,
+        title: 'Next Steps',
+        source: `## Next steps\n\n1. **Add SQL cells** — query any table from your dbt project\n2. **Create DQL blocks** — wrap queries with governance (owner, domain, tests)\n3. **Import lineage** — run \`dql compile --dbt-manifest target/manifest.json\`\n4. **View lineage** — run \`dql lineage\` to see the full data flow\n5. **Export** — save as \`.dqlnb\` for git-trackable analytics`,
       },
-      {
-        id: 'dql-mrr',
-        type: 'dql',
-        title: 'MRR by Plan',
-        source: `block "MRR by Plan" {\n    domain = "saas"\n    type = "custom"\n    description = "Monthly recurring revenue by plan tier"\n\n    query = """\n        SELECT plan_tier, ROUND(SUM(mrr), 2) AS mrr\n        FROM read_csv_auto('./data/subscriptions.csv')\n        WHERE status = 'active'\n        GROUP BY plan_tier\n        ORDER BY mrr DESC\n    """\n\n    visualization {\n        chart = "bar"\n        x = plan_tier\n        y = mrr\n    }\n}`,
-      },
-      {
-        id: 'sql-cohort',
-        type: 'sql',
-        title: 'Logo Retention',
-        source: `SELECT cohort_month, retained_accounts\nFROM read_csv_auto('./data/cohorts.csv')\nORDER BY cohort_month;`,
-      },
-      {
-        id: 'chart-cohort',
-        type: 'chart',
-        title: 'Retention Trend',
-        source: '',
-        config: {
-          sourceCellId: 'sql-cohort',
-          chart: 'line',
-          x: 'cohort_month',
-          y: 'retained_accounts',
-          title: 'Retained accounts by cohort',
-        },
-      },
-    ], { description: 'Guided walkthrough for the SaaS template.', template: 'saas' });
+    ], { description: 'DQL notebook for exploring a dbt project with DuckDB.', template: 'dbt' });
   }
 
-  if (normalized === 'taxi') {
-    return createNotebookDocument(`${projectTitle} Welcome`, [
-      {
-        id: 'intro',
-        type: 'markdown',
-        title: 'Welcome',
-        source: `# ${projectTitle}\n\nThis notebook explores trip volume, fares, and pickup patterns using the bundled taxi dataset.`,
-      },
-      {
-        id: 'dql-borough',
-        type: 'dql',
-        title: 'Trips by Borough',
-        source: `block "Trips by Borough" {\n    domain = "mobility"\n    type = "custom"\n    description = "Trip count by pickup borough"\n\n    query = """\n        SELECT pickup_borough, COUNT(*) AS trip_count\n        FROM read_csv_auto('./data/trips.csv')\n        GROUP BY pickup_borough\n        ORDER BY trip_count DESC\n    """\n\n    visualization {\n        chart = "bar"\n        x = pickup_borough\n        y = trip_count\n    }\n}`,
-      },
-      {
-        id: 'sql-fare',
-        type: 'sql',
-        title: 'Average Fare by Hour',
-        source: `SELECT pickup_hour, ROUND(AVG(fare_amount), 2) AS avg_fare\nFROM read_csv_auto('./data/trips.csv')\nGROUP BY pickup_hour\nORDER BY pickup_hour;`,
-      },
-      {
-        id: 'chart-fare',
-        type: 'chart',
-        title: 'Hourly Fare Trend',
-        source: '',
-        config: {
-          sourceCellId: 'sql-fare',
-          chart: 'line',
-          x: 'pickup_hour',
-          y: 'avg_fare',
-          title: 'Average fare by pickup hour',
-        },
-      },
-    ], { description: 'Guided walkthrough for the NYC taxi template.', template: 'taxi' });
-  }
-
-  return createNotebookDocument(`${projectTitle} Welcome`, [
+  // Default notebook for non-dbt projects
+  return createNotebookDocument(`${projectTitle} — DQL Notebook`, [
     {
       id: 'intro',
       type: 'markdown',
       title: 'Welcome',
-      source: `# ${projectTitle}\n\nWelcome to the browser-first DQL notebook. Use this notebook to edit DQL, run raw SQL, and compare chart configurations without leaving the browser.`,
+      source: `# ${projectTitle}\n\nWelcome to the DQL notebook. Use this notebook to write SQL, create governed DQL blocks, and build analytics answers — all tracked in Git.`,
     },
     {
-      id: 'dql-starter',
-      type: 'dql',
-      title: 'Starter DQL Block',
-      source: `block "Revenue by Segment" {\n    domain = "revenue"\n    type = "custom"\n    description = "Starter block for segment revenue analysis"\n\n    query = """\n        SELECT segment_tier AS segment, SUM(amount) AS revenue\n        FROM read_csv_auto('./data/revenue.csv')\n        GROUP BY segment_tier\n        ORDER BY revenue DESC\n    """\n\n    visualization {\n        chart = "bar"\n        x = segment\n        y = revenue\n    }\n}`,
+      id: 'sql-starter',
+      type: 'sql',
+      title: 'Starter Query',
+      source: `-- Write your SQL here\n-- DQL uses DuckDB — you can query local CSV, Parquet, and JSON files directly\n-- Example: SELECT * FROM read_csv_auto('./data/my_file.csv') LIMIT 10;`,
     },
     {
-      id: 'markdown-next',
+      id: 'next-steps',
       type: 'markdown',
       title: 'Next Steps',
-      source: `## What to try next\n\n- Edit the SQL in the DQL cell and run it again\n- Add a new SQL or markdown cell from the toolbar\n- Export this notebook as a \`.dqlnb\` file for git-friendly review`,
+      source: `## Next steps\n\n1. **Add data** — place CSV/Parquet files in your project or connect to a database\n2. **Write SQL cells** — query your data interactively\n3. **Create DQL blocks** — wrap queries with governance (owner, domain, tests)\n4. **Export** — save as \`.dqlnb\` for git-trackable analytics`,
     },
-  ], { description: 'Guided walkthrough for the starter template.', template: 'starter' });
+  ], { description: 'DQL notebook for interactive analytics.', template: 'default' });
 }

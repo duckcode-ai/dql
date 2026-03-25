@@ -1,8 +1,0 @@
-name: segment
-label: Customer Segment
-description: Customer tier classification (Enterprise, Mid-Market, SMB)
-sql: segment
-type: string
-table: read_csv_auto('./data/orders.csv')
-tags:
-  - customer

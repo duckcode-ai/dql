@@ -1,8 +1,0 @@
-name: order_date
-label: Order Date
-description: Date the order was placed
-sql: order_date
-type: date
-table: read_csv_auto('./data/orders.csv')
-tags:
-  - time

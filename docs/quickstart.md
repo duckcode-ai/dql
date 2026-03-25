@@ -1,99 +1,63 @@
 # Quickstart
 
-Get from zero to a running notebook in under 5 minutes.
+Go from zero to a running DQL notebook in 5 minutes using the Jaffle Shop dbt project.
 
 ---
 
-## Step 1 — Install the CLI
+## 1. Set Up the dbt Project
+
+```bash
+git clone https://github.com/dbt-labs/Semantic-Layer-Online-Course.git jaffle-shop
+cd jaffle-shop
+pip install dbt-duckdb
+```
+
+Create a local DuckDB profile:
+
+```bash
+cat > profiles.yml << 'EOF'
+jaffle_shop:
+  target: dev
+  outputs:
+    dev:
+      type: duckdb
+      path: ./jaffle_shop.duckdb
+      schema: main
+      threads: 4
+EOF
+```
+
+Build the project:
+
+```bash
+dbt deps && dbt build --profiles-dir .
+```
+
+## 2. Install and Initialize DQL
 
 ```bash
 npm install -g @duckcodeailabs/dql-cli
-dql --help
+dql init .
+dql doctor
 ```
 
-> **Note:** Requires Node.js 18 or newer. Use Node 18, 20, or 22 LTS for best DuckDB compatibility.
-
----
-
-## Step 2 — Initialize a project
-
-```bash
-dql init my-dql-project --template starter
-cd my-dql-project
-```
-
-This creates `blocks/`, `notebooks/`, `data/revenue.csv`, and `dql.config.json`.
-
----
-
-## Step 3 — Open the notebook
+## 3. Open the Notebook
 
 ```bash
 dql notebook
 ```
 
-The browser opens at `http://127.0.0.1:3474`. The welcome notebook loads automatically.
+Your browser opens with a notebook connected to the Jaffle Shop DuckDB database. Query `dim_customers`, `fct_orders`, and `order_items` — write SQL cells, create governed DQL blocks, and visualize results.
 
----
-
-## Step 4 — Run your first query
-
-Click **+ SQL** to add a SQL cell. Paste this query and press `Shift+Enter`:
-
-```sql
-SELECT segment_tier, SUM(amount) AS total_revenue
-FROM read_csv_auto('data/revenue.csv')
-GROUP BY segment_tier
-ORDER BY total_revenue DESC
-```
-
-Results appear as a table. Name the cell `revenue_by_segment` using the label field at the top of the cell.
-
----
-
-## Step 5 — Add a param cell
-
-Click **+ Param** and configure:
-
-- **Name:** `segment`
-- **Type:** `select`
-- **Options:** `All, Enterprise, Mid-Market, SMB`
-- **Default:** `All`
-
-Add a new SQL cell and run:
-
-```sql
-SELECT * FROM {{revenue_by_segment}}
-WHERE {{segment}} = 'All' OR segment_tier = {{segment}}
-```
-
-Change the dropdown and re-run to filter results by segment.
-
----
-
-## Step 6 — View lineage
-
-Open a new terminal (keep the notebook running) and run:
+## 4. Import dbt Lineage
 
 ```bash
+dql compile --dbt-manifest target/manifest.json
 dql lineage
 ```
 
-You'll see a summary of blocks, metrics, source tables, and domain trust scores. In the notebook, click the **Lineage** icon (graph icon) in the left sidebar for the same view.
+See the full data flow from dbt's source tables through your DQL blocks.
 
 ---
 
-## Step 7 — Export a dashboard
-
-Click **Export HTML** in the header bar. You get a standalone HTML file — shareable without any DQL runtime.
-
----
-
-## What to read next
-
-- [Getting Started](./getting-started.md) — choose your path: sample data, dbt, Cube.js, own DB, or own repo
-- [Authoring Blocks](./authoring-blocks.md) — create, test, certify, and commit custom and semantic `.dql` blocks
-- [Lineage & Trust Chains](./lineage.md) — ref() system, impact analysis, cross-domain flows
-- [Notebook Guide](./notebook.md) — cell types, variable substitution, keyboard shortcuts, and export formats
-- [CLI Reference](./cli-reference.md) — all commands and flags
-- [Data Sources](./data-sources.md) — connecting to remote databases
+> **[Full walkthrough with all steps](./getting-started.md)**

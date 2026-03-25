@@ -1,8 +1,0 @@
-name: channel
-label: Acquisition Channel
-description: Marketing channel that drove the order
-sql: channel
-type: string
-table: read_csv_auto('./data/orders.csv')
-tags:
-  - marketing

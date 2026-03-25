@@ -1,8 +1,0 @@
-name: payment_type
-label: Payment Type
-description: Payment method used (Card, Cash).
-sql: payment_type
-type: string
-table: trips
-tags:
-  - taxi

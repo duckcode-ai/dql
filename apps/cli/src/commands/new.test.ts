@@ -23,7 +23,7 @@ describe('runNew', () => {
       owner: '',
       port: null,
       queryOnly: false,
-      template: 'starter',
+      template: '',
       connection: '',
       verbose: false,
       skipTests: false,
@@ -43,7 +43,7 @@ describe('runNew', () => {
         owner: 'tester',
         port: null,
         queryOnly: false,
-        template: 'starter',
+        template: '',
         connection: '',
         verbose: false,
         skipTests: false,
@@ -56,7 +56,7 @@ describe('runNew', () => {
       expect(block).toContain('block "Pipeline Health"');
       expect(block).toContain('domain = "sales"');
       expect(block).toContain('owner = "tester"');
-      expect(block).toContain("read_csv_auto('./data/revenue.csv')");
+      expect(block).toContain('your_table');
       expect(block).toContain('chart = "bar"');
     } finally {
       process.chdir(originalCwd);
@@ -80,7 +80,7 @@ describe('runNew', () => {
       owner: '',
       port: null,
       queryOnly: false,
-      template: 'starter',
+      template: '',
       connection: '',
       verbose: false,
       skipTests: false,
@@ -101,7 +101,7 @@ describe('runNew', () => {
         owner: 'tester',
         port: null,
         queryOnly: false,
-        template: 'starter',
+        template: '',
         connection: '',
         verbose: false,
         skipTests: false,
@@ -119,7 +119,7 @@ describe('runNew', () => {
         owner: 'tester',
         port: null,
         queryOnly: false,
-        template: 'starter',
+        template: '',
         connection: '',
         verbose: false,
         skipTests: false,
@@ -160,7 +160,7 @@ describe('runNew', () => {
       owner: '',
       port: null,
       queryOnly: false,
-      template: 'starter',
+      template: '',
       connection: '',
       verbose: false,
       skipTests: false,
@@ -181,7 +181,7 @@ describe('runNew', () => {
         owner: 'tester',
         port: null,
         queryOnly: false,
-        template: 'starter',
+        template: '',
         connection: '',
         verbose: false,
         skipTests: false,

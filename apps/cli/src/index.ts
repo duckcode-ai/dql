@@ -23,7 +23,7 @@ const HELP = `
   dql — DQL CLI
 
   Usage:
-    dql init [directory]             Scaffold a local DQL project
+    dql init [directory]             Initialize DQL in a project (auto-detects dbt)
     dql new <type> <name>           Create a new block, semantic block, dashboard, or workbook
     dql build <file.dql>            Compile a DQL file to a static HTML bundle
     dql doctor [path]               Run local setup checks for a DQL project
@@ -55,7 +55,6 @@ const HELP = `
     --domain <name>                 Domain for new block scaffolds (default: general)
     --owner <name>                  Owner for new block scaffolds (default: current user)
     --query-only                    Create a query-only block without visualization
-    --template <name>               Template to use for "init" (default: starter)
     --connection <driver|path>      Database connection for certify/test (e.g. duckdb, path/to/db)
 `;
 
