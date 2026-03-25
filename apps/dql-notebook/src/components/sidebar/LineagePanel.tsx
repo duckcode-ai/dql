@@ -138,7 +138,7 @@ function NodeRow({ node, t, onClick }: { node: LineageNode; t: Theme; onClick?: 
 }
 
 export function LineagePanel() {
-  const { state } = useNotebook();
+  const { state, dispatch } = useNotebook();
   const t = themes[state.themeMode];
 
   const [loading, setLoading] = useState(true);
@@ -199,22 +199,54 @@ export function LineagePanel() {
 
   return (
     <div style={{ overflow: 'auto', flex: 1, fontSize: 12 }}>
-      {/* Summary bar */}
+      {/* Graph view button + Summary bar */}
       <div style={{
-        padding: '8px 8px',
+        padding: '6px 8px',
         borderBottom: `1px solid ${t.headerBorder}`,
-        display: 'flex',
-        gap: 8,
-        flexWrap: 'wrap',
-        fontSize: 11,
-        color: t.textMuted,
       }}>
-        <span>{blocks.length} blocks</span>
-        <span>{metrics.length} metrics</span>
-        <span>{tables.length} tables</span>
-        {crossDomainEdges.length > 0 && (
-          <span style={{ color: '#d2a8ff' }}>{crossDomainEdges.length} cross-domain</span>
-        )}
+        <button
+          onClick={() => dispatch({ type: 'TOGGLE_LINEAGE_FULLSCREEN' })}
+          style={{
+            width: '100%',
+            padding: '6px 10px',
+            marginBottom: 6,
+            background: state.lineageFullscreen ? '#388bfd' : 'transparent',
+            border: `1px solid ${state.lineageFullscreen ? '#388bfd' : '#30363d'}`,
+            borderRadius: 5,
+            color: state.lineageFullscreen ? '#fff' : t.textPrimary,
+            fontSize: 11,
+            fontWeight: 600,
+            cursor: 'pointer',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            gap: 6,
+            transition: 'all 0.15s',
+          }}
+        >
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+            <circle cx="6" cy="6" r="3" />
+            <circle cx="18" cy="6" r="3" />
+            <circle cx="18" cy="18" r="3" />
+            <line x1="8.6" y1="7.4" x2="15.4" y2="16.6" />
+            <line x1="9" y1="6" x2="15" y2="6" />
+          </svg>
+          {state.lineageFullscreen ? 'Close Graph View' : 'Open Graph View'}
+        </button>
+        <div style={{
+          display: 'flex',
+          gap: 8,
+          flexWrap: 'wrap',
+          fontSize: 11,
+          color: t.textMuted,
+        }}>
+          <span>{blocks.length} blocks</span>
+          <span>{metrics.length} metrics</span>
+          <span>{tables.length} tables</span>
+          {crossDomainEdges.length > 0 && (
+            <span style={{ color: '#d2a8ff' }}>{crossDomainEdges.length} cross-domain</span>
+          )}
+        </div>
       </div>
 
       {/* Block detail view */}

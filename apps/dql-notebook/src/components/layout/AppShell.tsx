@@ -7,6 +7,7 @@ import { Header } from './Header';
 import { DevPanel } from './DevPanel';
 import { NotebookEditor } from '../notebook/NotebookEditor';
 import { NewNotebookModal } from '../modals/NewNotebookModal';
+import { LineageDAG } from '../sidebar/LineageDAG';
 import { api } from '../../api/client';
 import { parseNotebookFile } from '../../utils/parse-workbook';
 import { makeCell } from '../../store/NotebookStore';
@@ -93,11 +94,17 @@ export function AppShell() {
             minWidth: 0,
           }}
         >
-          <NotebookEditor
-            onOpenFile={handleOpenFile}
-            registerCellRef={registerCellRef}
-          />
-          <DevPanel />
+          {state.lineageFullscreen ? (
+            <LineageDAG />
+          ) : (
+            <>
+              <NotebookEditor
+                onOpenFile={handleOpenFile}
+                registerCellRef={registerCellRef}
+              />
+              <DevPanel />
+            </>
+          )}
         </div>
       </div>
 

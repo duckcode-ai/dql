@@ -127,6 +127,7 @@ export interface NotebookState {
   newNotebookModalOpen: boolean;
   executionCounter: number;
   savingFile: boolean;
+  lineageFullscreen: boolean;
 }
 
 export type NotebookAction =
@@ -155,4 +156,5 @@ export type NotebookAction =
   | { type: 'SET_TABLE_COLUMNS'; tableName: string; columns: SchemaColumn[] }
   | { type: 'SET_PARAM_VALUE'; id: string; value: string }
   | { type: 'SET_SEMANTIC_LAYER'; layer: Omit<SemanticLayerState, 'loading'> }
-  | { type: 'SET_SEMANTIC_LOADING'; loading: boolean };
+  | { type: 'SET_SEMANTIC_LOADING'; loading: boolean }
+  | { type: 'TOGGLE_LINEAGE_FULLSCREEN' };

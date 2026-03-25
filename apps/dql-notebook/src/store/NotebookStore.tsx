@@ -27,6 +27,7 @@ const initialState: NotebookState = {
   newNotebookModalOpen: false,
   executionCounter: 0,
   savingFile: false,
+  lineageFullscreen: false,
 };
 
 function notebookReducer(state: NotebookState, action: NotebookAction): NotebookState {
@@ -168,6 +169,9 @@ function notebookReducer(state: NotebookState, action: NotebookAction): Notebook
         ...state,
         semanticLayer: { ...state.semanticLayer, loading: action.loading },
       };
+
+    case 'TOGGLE_LINEAGE_FULLSCREEN':
+      return { ...state, lineageFullscreen: !state.lineageFullscreen };
 
     default:
       return state;
