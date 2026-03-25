@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
 import { basename, join, resolve } from 'node:path';
 import { createWelcomeNotebook, serializeNotebook } from '@duckcodeailabs/dql-notebook';
 import type { CLIFlags } from '../args.js';
@@ -69,13 +69,14 @@ export async function runInit(targetArg: string | null, flags: CLIFlags): Promis
     return;
   }
 
-  console.log(`\n  DQL project initialized: ${projectName}`);
+  console.log(`\n  ✓ DQL project initialized: ${projectName}`);
   console.log(`    Path: ${targetDir}`);
+  console.log('');
+  console.log('  Detected:');
+  console.log(`    dbt project: ${isDbt ? 'yes (dbt_project.yml found)' : 'no'}`);
+  console.log(`    DuckDB file: ${duckdbPath ?? 'none (using :memory:)'}`);
   if (isDbt) {
-    console.log('    dbt project detected — using dbt semantic layer provider');
-  }
-  if (duckdbPath) {
-    console.log(`    DuckDB: ${duckdbPath}`);
+    console.log('    Semantic layer: dbt provider');
   }
   console.log('');
   console.log('  Created:');
@@ -103,7 +104,10 @@ function detectDuckDBFile(dir: string): string | null {
   const candidates = [
     'jaffle_shop.duckdb',
     'dev.duckdb',
+    'database.duckdb',
+    'analytics.duckdb',
     'target/dev.duckdb',
+    'target/jaffle_shop.duckdb',
     'reports/jaffle_shop.duckdb',
   ];
   for (const candidate of candidates) {
@@ -113,7 +117,6 @@ function detectDuckDBFile(dir: string): string | null {
   }
   // Search root directory for any .duckdb file
   try {
-    const { readdirSync } = require('node:fs');
     const entries = readdirSync(dir);
     const duckdb = entries.find((e: string) => e.endsWith('.duckdb'));
     return duckdb ?? null;
