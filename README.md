@@ -46,7 +46,7 @@ dql init . && dql notebook
 ### Library packages (for embedding in your app)
 
 ```bash
-npm install @duckcodeailabs/dql-core@0.8.0 @duckcodeailabs/dql-compiler@0.8.0 @duckcodeailabs/dql-notebook@0.8.0
+npm install @duckcodeailabs/dql-core@0.8.1 @duckcodeailabs/dql-compiler@0.8.1 @duckcodeailabs/dql-notebook@0.8.1
 ```
 
 ---
@@ -343,7 +343,7 @@ Not sure where to start? Pick your goal:
 
 ## Package Reference
 
-All packages share a unified version number (`0.8.0`).
+All packages share a unified version number (`0.8.1`).
 
 | Package | Description |
 |---|---|

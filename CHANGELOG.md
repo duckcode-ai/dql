@@ -6,6 +6,47 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 
 ---
 
+## v0.8.1 — 2026-03-25
+
+### Fixed
+- **`dql init` detection improvements** — added more DuckDB filename candidates (`database.duckdb`, `analytics.duckdb`, `target/jaffle_shop.duckdb`), improved detection output with clear status for dbt project and DuckDB file discovery
+- **`dql init` works on non-empty directories** — removed the "Target directory is not empty" guard so `dql init .` works inside existing dbt projects (e.g., Jaffle Shop)
+
+### Changed
+- Init output now shows detection results: dbt project (yes/no), DuckDB file path, and semantic layer provider
+
+---
+
+## v0.8.0 — 2026-03-25
+
+### Added
+- **Interactive lineage DAG visualization** — full React Flow + dagre-powered graph in the notebook, with node type filtering, click-to-focus highlighting, minimap, legend, and detail panel (`LineageDAG.tsx`)
+- **Lineage fullscreen toggle** — "Open Graph View" button in lineage sidebar panel switches main content area to the DAG canvas
+- **Jaffle Shop getting-started flow** — `dql init` auto-detects `dbt_project.yml` and `.duckdb` files, scaffolds config with dbt provider, creates welcome notebook
+
+### Removed
+- **Project templates** — removed `templates/` directory, `--template` CLI flag, and all template-based scaffolding. `dql init` now always creates a minimal project structure.
+- **Example projects** — removed `examples/` and `my-dql-project/` directories
+
+### Changed
+- All documentation updated to use Jaffle Shop dbt project as the canonical getting-started path
+- README, quickstart, CLI reference, FAQ, and use cases rewritten to remove template references
+- Package versions bumped to 0.8.0 across all 10 packages
+
+---
+
+## v0.7.1 — 2026-03-24
+
+### Added
+- **Inline cell lineage** — SQL cells in the notebook now show upstream table dependencies and `@metric()` / `@dim()` tracking inline
+- **Client-side ColumnMeta normalization** — backward-compatible normalization of `ColumnMeta[]` to `string[]` at the API boundary
+
+### Fixed
+- React crash from inconsistent ColumnMeta format at API boundary
+- Added `@codemirror/autocomplete` and `@codemirror/search` dependencies, updated `sql-formatter`
+
+---
+
 ## v0.7.0 — 2026-03-24
 
 ### Added
