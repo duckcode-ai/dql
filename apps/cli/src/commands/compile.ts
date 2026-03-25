@@ -38,8 +38,10 @@ export async function runCompile(
 
   // Determine project root — first non-flag positional arg, or cwd
   const pathCandidates = allArgs.filter((a) => !a.startsWith('-'));
-  // Remove the dbt manifest path from candidates
-  const filteredCandidates = pathCandidates.filter((c) => c !== allArgs[dbtIdx + 1]);
+  // Remove the dbt manifest path from candidates (only if --dbt-manifest was found)
+  const filteredCandidates = dbtIdx >= 0
+    ? pathCandidates.filter((c) => c !== allArgs[dbtIdx + 1])
+    : pathCandidates;
   const projectRoot = resolve(filteredCandidates[0] ?? '.');
 
   if (!existsSync(join(projectRoot, 'dql.config.json'))) {

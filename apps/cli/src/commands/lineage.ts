@@ -345,6 +345,23 @@ function printSummary(graph: LineageGraph, _flags: CLIFlags): void {
     }
   }
 
+  // Shared Table Correlation — blocks reading the same tables
+  const tableReaders = new Map<string, string[]>();
+  for (const t of sourceTables) {
+    const downstream = graph.getOutgoingEdges(t.id)
+      .map((e) => graph.getNode(e.target))
+      .filter((n): n is LineageNode => n !== undefined && n.type === 'block');
+    if (downstream.length >= 2) {
+      tableReaders.set(t.name, downstream.map((n) => n.name));
+    }
+  }
+  if (tableReaders.size > 0) {
+    console.log(`\n  Shared Tables (${tableReaders.size}):`);
+    for (const [table, readers] of [...tableReaders.entries()].sort()) {
+      console.log(`    ${table} <- ${readers.join(', ')}`);
+    }
+  }
+
   // Data Flow DAG
   console.log('\n  Data Flow:');
   console.log('  ' + '-'.repeat(50));

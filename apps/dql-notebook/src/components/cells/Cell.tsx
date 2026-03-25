@@ -10,6 +10,7 @@ import { SnippetPicker } from './SnippetPicker';
 import { TableOutput } from '../output/TableOutput';
 import { ChartOutput, detectChartType, resolveChartType } from '../output/ChartOutput';
 import { ErrorOutput } from '../output/ErrorOutput';
+import { CellLineage } from './CellLineage';
 import type { Cell } from '../../store/types';
 import { format as formatSQL } from 'sql-formatter';
 
@@ -674,6 +675,17 @@ export function CellComponent({ cell, index }: CellProps) {
               </>
             )}
           </div>
+        )}
+
+        {/* Inline lineage panel for SQL/DQL cells */}
+        {isExecutable && (
+          <CellLineage
+            cellContent={cell.content}
+            cellType={cell.type as 'sql' | 'dql'}
+            cellName={cell.name}
+            themeMode={state.themeMode}
+            t={t}
+          />
         )}
       </div>
     </div>

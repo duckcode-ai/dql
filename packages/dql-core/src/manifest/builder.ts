@@ -177,9 +177,13 @@ function scanBlocks(projectRoot: string, dirs: string[]): Record<string, Manifes
             rawTableRefs: parseResult.tables,
             tableDependencies: parseResult.tables.map(normalizeTableName),
             refDependencies: parseResult.refs,
+            metricRefs: parseResult.metricRefs,
+            dimensionRefs: parseResult.dimensionRefs,
             allDependencies: [
               ...parseResult.refs,
               ...parseResult.tables.map(normalizeTableName),
+              ...parseResult.metricRefs.map((m) => `@metric(${m})`),
+              ...parseResult.dimensionRefs.map((d) => `@dim(${d})`),
             ],
             chartType: extractVisualizationChart(block),
             metricRef: block.metricRef,

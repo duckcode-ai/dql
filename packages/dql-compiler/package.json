@@ -1,6 +1,6 @@
 {
   "name": "@duckcodeailabs/dql-compiler",
-  "version": "0.7.0",
+  "version": "0.7.1",
   "description": "DQL compiler: IR lowering, Vega-Lite code generation, HTML/CSS emitting",
   "license": "Apache-2.0",
   "type": "module",

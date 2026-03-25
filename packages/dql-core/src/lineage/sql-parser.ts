@@ -13,6 +13,10 @@ export interface SqlParseResult {
   ctes: string[];
   /** ref() calls found in the SQL */
   refs: string[];
+  /** @metric() references found in the SQL */
+  metricRefs: string[];
+  /** @dim() references found in the SQL */
+  dimensionRefs: string[];
 }
 
 /**
@@ -80,7 +84,11 @@ export function extractTablesFromSql(sql: string): SqlParseResult {
     return !cteNamesLower.has(lower) && !sqlKeywords.has(lower);
   });
 
-  return { tables, ctes, refs };
+  // Extract @metric() and @dim() semantic references
+  const metricRefs = extractSemanticRefs(noComments, 'metric');
+  const dimensionRefs = extractSemanticRefs(noComments, 'dim');
+
+  return { tables, ctes, refs, metricRefs, dimensionRefs };
 }
 
 /** Extract CTE names from WITH ... AS (...) patterns */
@@ -150,6 +158,16 @@ function stripStringLiterals(sql: string): string {
     /ref\("__REF_PLACEHOLDER_(\d+)__"\)/g,
     (_match, idx: string) => `ref('${refArgs[parseInt(idx)]}')`
   );
+}
+
+/** Extract @metric() or @dim() references from SQL */
+function extractSemanticRefs(sql: string, type: 'metric' | 'dim'): string[] {
+  const refs: string[] = [];
+  const pattern = new RegExp(`@${type}\\s*\\(\\s*["']?([^"')]+)["']?\\s*\\)`, 'gi');
+  for (const match of sql.matchAll(pattern)) {
+    refs.push(match[1].trim());
+  }
+  return [...new Set(refs)];
 }
 
 /** Normalize and add a table reference */

@@ -56,7 +56,11 @@ export interface ManifestBlock {
   tableDependencies: string[];
   /** Block dependencies via ref() */
   refDependencies: string[];
-  /** All upstream dependencies (tables + refs combined) */
+  /** @metric() references in SQL */
+  metricRefs?: string[];
+  /** @dim() references in SQL */
+  dimensionRefs?: string[];
+  /** All upstream dependencies (tables + refs + semantic refs combined) */
   allDependencies: string[];
   /** Visualization chart type */
   chartType?: string;

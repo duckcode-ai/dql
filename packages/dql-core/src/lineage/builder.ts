@@ -152,6 +152,31 @@ export function buildLineageGraph(
       }
     }
 
+    // @metric() references in SQL → block depends on metric
+    for (const metRef of parseResult.metricRefs) {
+      const metricNodeId = `metric:${metRef}`;
+      if (graph.getNode(metricNodeId)) {
+        graph.addEdge({
+          source: metricNodeId,
+          target: blockNodeId,
+          type: 'aggregates',
+        });
+        addCrossDomainEdgeIfNeeded(graph, metricNodeId, blockNodeId);
+      }
+    }
+
+    // @dim() references in SQL → block depends on dimension
+    for (const dimRef of parseResult.dimensionRefs) {
+      const dimNodeId = `dimension:${dimRef}`;
+      if (graph.getNode(dimNodeId)) {
+        graph.addEdge({
+          source: dimNodeId,
+          target: blockNodeId,
+          type: 'reads_from',
+        });
+      }
+    }
+
     // Semantic block → metric edge
     if (block.blockType === 'semantic' && block.metricRef) {
       const metricNodeId = `metric:${block.metricRef}`;
