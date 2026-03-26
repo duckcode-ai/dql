@@ -42,6 +42,13 @@ export const api = {
     });
   },
 
+  async createBlock(name: string): Promise<{ path: string; content: string }> {
+    return request<{ path: string; content: string }>('/api/blocks', {
+      method: 'POST',
+      body: JSON.stringify({ name }),
+    });
+  },
+
   async saveNotebook(path: string, content: string): Promise<void> {
     return request<void>('/api/notebook-content', {
       method: 'PUT',
@@ -139,10 +146,13 @@ export const api = {
     }
   },
 
-  async describeTable(filePath: string): Promise<SchemaColumn[]> {
-    // Build SQL using read_csv_auto for CSV files, or a generic DESCRIBE query
-    const safePath = filePath.replace(/'/g, "''");
-    const sql = `DESCRIBE SELECT * FROM read_csv_auto('${safePath}') LIMIT 0`;
+  async describeTable(tablePath: string): Promise<SchemaColumn[]> {
+    // Determine if this is a data file or a database table
+    const isFile = /\.(csv|parquet|json)$/i.test(tablePath) || tablePath.startsWith('data/');
+    const safePath = tablePath.replace(/'/g, "''");
+    const sql = isFile
+      ? `DESCRIBE SELECT * FROM read_csv_auto('${safePath}') LIMIT 0`
+      : `DESCRIBE "${safePath}"`;
     try {
       const result = await request<QueryResult>('/api/query', {
         method: 'POST',

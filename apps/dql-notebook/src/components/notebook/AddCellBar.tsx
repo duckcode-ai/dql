@@ -20,7 +20,10 @@ export function AddCellBar({ afterId }: AddCellBarProps) {
   const t = themes[state.themeMode];
   const [hovered, setHovered] = useState(false);
   const [popoverOpen, setPopoverOpen] = useState(false);
+  const [blockSearchOpen, setBlockSearchOpen] = useState(false);
+  const [blockQuery, setBlockQuery] = useState('');
   const containerRef = useRef<HTMLDivElement>(null);
+  const blockSearchRef = useRef<HTMLInputElement>(null);
 
   // Close popover when clicking outside
   useEffect(() => {
@@ -38,6 +41,20 @@ export function AddCellBar({ afterId }: AddCellBarProps) {
     const cell = makeCell(type);
     dispatch({ type: 'ADD_CELL', cell, afterId });
     setPopoverOpen(false);
+    setBlockSearchOpen(false);
+  };
+
+  const blockFiles = state.files.filter((f) => f.type === 'block');
+  const filteredBlocks = blockQuery
+    ? blockFiles.filter((f) => f.name.toLowerCase().includes(blockQuery.toLowerCase()))
+    : blockFiles;
+
+  const insertBlockRef = (file: { path: string }) => {
+    const cell = makeCell('sql', `-- Block: ${file.path}\n@include('${file.path}')`);
+    dispatch({ type: 'ADD_CELL', cell, afterId });
+    setPopoverOpen(false);
+    setBlockSearchOpen(false);
+    setBlockQuery('');
   };
 
   return (
@@ -111,18 +128,63 @@ export function AddCellBar({ afterId }: AddCellBarProps) {
             boxShadow: '0 8px 24px rgba(0,0,0,0.3)',
             padding: 4,
             display: 'flex',
+            flexDirection: 'column',
             gap: 4,
           }}
         >
-          {CELL_TYPE_LABELS.map(({ type, label, color }) => (
+          <div style={{ display: 'flex', gap: 4 }}>
+            {CELL_TYPE_LABELS.map(({ type, label, color }) => (
+              <CellTypeButton
+                key={type}
+                label={label}
+                color={color}
+                onClick={() => addCell(type)}
+                t={t}
+              />
+            ))}
             <CellTypeButton
-              key={type}
-              label={label}
-              color={color}
-              onClick={() => addCell(type)}
+              label="Block"
+              color="#d2a8ff"
+              onClick={() => {
+                setBlockSearchOpen((p) => !p);
+                setTimeout(() => blockSearchRef.current?.focus(), 50);
+              }}
               t={t}
             />
-          ))}
+          </div>
+
+          {/* Block search panel */}
+          {blockSearchOpen && (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 4, padding: '4px 2px' }}>
+              <input
+                ref={blockSearchRef}
+                value={blockQuery}
+                onChange={(e) => setBlockQuery(e.target.value)}
+                placeholder="Search blocks..."
+                style={{
+                  background: t.inputBg,
+                  border: `1px solid ${t.inputBorder}`,
+                  borderRadius: 4,
+                  color: t.textPrimary,
+                  fontSize: 11,
+                  fontFamily: t.font,
+                  padding: '4px 8px',
+                  outline: 'none',
+                }}
+              />
+              <div style={{ maxHeight: 160, overflow: 'auto', display: 'flex', flexDirection: 'column', gap: 2 }}>
+                {filteredBlocks.length === 0 ? (
+                  <div style={{ fontSize: 11, color: t.textMuted, fontFamily: t.font, padding: '4px 8px', fontStyle: 'italic' }}>
+                    {blockFiles.length === 0 ? 'No blocks yet' : 'No matches'}
+                  </div>
+                ) : (
+                  filteredBlocks.map((file) => (
+                    <BlockSearchItem key={file.path} file={file} onClick={() => insertBlockRef(file)} t={t} />
+                  ))
+                )}
+              </div>
+            </div>
+          )}
         </div>
       )}
     </div>
@@ -162,6 +224,43 @@ function CellTypeButton({
       }}
     >
       {label}
+    </button>
+  );
+}
+
+function BlockSearchItem({
+  file,
+  onClick,
+  t,
+}: {
+  file: { name: string; path: string };
+  onClick: () => void;
+  t: Theme;
+}) {
+  const [hovered, setHovered] = useState(false);
+  return (
+    <button
+      onClick={onClick}
+      onMouseEnter={() => setHovered(true)}
+      onMouseLeave={() => setHovered(false)}
+      style={{
+        background: hovered ? t.sidebarItemHover : 'transparent',
+        border: 'none',
+        borderRadius: 4,
+        cursor: 'pointer',
+        color: t.textPrimary,
+        fontSize: 11,
+        fontFamily: t.font,
+        padding: '4px 8px',
+        textAlign: 'left' as const,
+        display: 'flex',
+        flexDirection: 'column',
+        gap: 1,
+        transition: 'background 0.1s',
+      }}
+    >
+      <span style={{ fontWeight: 500 }}>{file.name.replace(/\.dql$/, '')}</span>
+      <span style={{ fontSize: 10, color: t.textMuted, fontFamily: t.fontMono }}>{file.path}</span>
     </button>
   );
 }

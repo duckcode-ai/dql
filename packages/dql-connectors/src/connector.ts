@@ -40,10 +40,17 @@ export interface ConnectionConfig {
 
 export type DriverName = ConnectionConfig['driver'];
 
+export interface TableInfo {
+  schema: string;
+  name: string;
+  type: string; // 'BASE TABLE' | 'VIEW' | etc.
+}
+
 export interface DatabaseConnector {
   readonly driverName: DriverName;
   connect(config: ConnectionConfig): Promise<void>;
   execute(sql: string, params?: unknown[]): Promise<QueryResult>;
   disconnect(): Promise<void>;
   ping(): Promise<boolean>;
+  listTables?(): Promise<TableInfo[]>;
 }

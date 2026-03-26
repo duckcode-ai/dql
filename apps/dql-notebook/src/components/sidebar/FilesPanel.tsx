@@ -143,6 +143,11 @@ export function FilesPanel({ onOpenFile }: FilesPanelProps) {
       {(Object.keys(FOLDER_LABELS) as FolderKey[]).map((key) => {
         const files = grouped[key];
         const expanded = expandedFolders[key];
+        const onAdd = key === 'notebooks'
+          ? () => dispatch({ type: 'OPEN_NEW_NOTEBOOK_MODAL' })
+          : key === 'blocks'
+            ? () => dispatch({ type: 'OPEN_NEW_BLOCK_MODAL' })
+            : undefined;
 
         return (
           <div key={key}>
@@ -151,6 +156,7 @@ export function FilesPanel({ onOpenFile }: FilesPanelProps) {
               count={files.length}
               expanded={expanded}
               onToggle={() => toggleFolder(key)}
+              onAdd={onAdd}
               t={t}
             />
             {expanded && (
@@ -192,69 +198,103 @@ function FolderHeader({
   count,
   expanded,
   onToggle,
+  onAdd,
   t,
 }: {
   label: string;
   count: number;
   expanded: boolean;
   onToggle: () => void;
+  onAdd?: () => void;
   t: Theme;
 }) {
   const [hovered, setHovered] = useState(false);
+  const [addHover, setAddHover] = useState(false);
   return (
-    <button
-      onClick={onToggle}
+    <div
       onMouseEnter={() => setHovered(true)}
       onMouseLeave={() => setHovered(false)}
       style={{
-        width: '100%',
         display: 'flex',
         alignItems: 'center',
-        gap: 6,
-        padding: '3px 8px 3px 10px',
         background: hovered ? t.sidebarItemHover : 'transparent',
-        border: 'none',
-        cursor: 'pointer',
-        color: t.textSecondary,
-        fontSize: 11,
-        fontWeight: 600,
-        fontFamily: t.font,
-        letterSpacing: '0.04em',
-        textTransform: 'uppercase' as const,
-        textAlign: 'left' as const,
         transition: 'background 0.1s',
       }}
     >
-      <svg
-        width="10"
-        height="10"
-        viewBox="0 0 10 10"
-        fill="currentColor"
+      <button
+        onClick={onToggle}
         style={{
-          transform: expanded ? 'rotate(90deg)' : 'rotate(0deg)',
-          transition: 'transform 0.15s',
-          flexShrink: 0,
+          flex: 1,
+          display: 'flex',
+          alignItems: 'center',
+          gap: 6,
+          padding: '3px 0 3px 10px',
+          background: 'transparent',
+          border: 'none',
+          cursor: 'pointer',
+          color: t.textSecondary,
+          fontSize: 11,
+          fontWeight: 600,
+          fontFamily: t.font,
+          letterSpacing: '0.04em',
+          textTransform: 'uppercase' as const,
+          textAlign: 'left' as const,
         }}
       >
-        <path d="M3 2l4 3-4 3V2Z" />
-      </svg>
-      <FolderIcon expanded={expanded} />
-      <span style={{ flex: 1 }}>{label}</span>
-      {count > 0 && (
-        <span
+        <svg
+          width="10"
+          height="10"
+          viewBox="0 0 10 10"
+          fill="currentColor"
           style={{
-            background: t.pillBg,
-            color: t.textMuted,
-            borderRadius: 10,
-            padding: '0 5px',
-            fontSize: 10,
-            fontWeight: 500,
+            transform: expanded ? 'rotate(90deg)' : 'rotate(0deg)',
+            transition: 'transform 0.15s',
+            flexShrink: 0,
           }}
         >
-          {count}
-        </span>
+          <path d="M3 2l4 3-4 3V2Z" />
+        </svg>
+        <FolderIcon expanded={expanded} />
+        <span style={{ flex: 1 }}>{label}</span>
+        {count > 0 && (
+          <span
+            style={{
+              background: t.pillBg,
+              color: t.textMuted,
+              borderRadius: 10,
+              padding: '0 5px',
+              fontSize: 10,
+              fontWeight: 500,
+            }}
+          >
+            {count}
+          </span>
+        )}
+      </button>
+      {onAdd && hovered && (
+        <button
+          onClick={(e) => { e.stopPropagation(); onAdd(); }}
+          onMouseEnter={() => setAddHover(true)}
+          onMouseLeave={() => setAddHover(false)}
+          title={`New ${label.slice(0, -1)}`}
+          style={{
+            background: addHover ? t.btnHover : 'transparent',
+            border: 'none',
+            borderRadius: 4,
+            cursor: 'pointer',
+            color: addHover ? t.accent : t.textMuted,
+            fontSize: 14,
+            lineHeight: 1,
+            padding: '2px 8px',
+            marginRight: 4,
+            flexShrink: 0,
+            transition: 'color 0.1s',
+          }}
+        >
+          +
+        </button>
       )}
-    </button>
+    </div>
   );
 }
 

@@ -101,6 +101,8 @@ export interface ComposeQueryOptions {
   dialect?: SQLDialect;
   /** Shorthand: driver name (e.g. 'snowflake', 'bigquery') to auto-resolve dialect. */
   driver?: string;
+  /** Maps semantic table names to actual database table names (e.g. 'stg_orders' → 'main.stg_orders'). */
+  tableMapping?: Record<string, string>;
 }
 
 export interface ComposeQueryResult {
@@ -306,8 +308,9 @@ export class SemanticLayer {
 
   /** Compose a multi-metric, cross-table SQL query using join graph traversal. */
   composeQuery(options: ComposeQueryOptions): ComposeQueryResult | null {
-    const { metrics, dimensions, timeDimension, filters, orderBy, limit, driver } = options;
+    const { metrics, dimensions, timeDimension, filters, orderBy, limit, driver, tableMapping } = options;
     const dialect = options.dialect ?? getDialect(driver);
+    const resolveTable = (name: string): string => tableMapping?.[name] ?? name;
     if (metrics.length === 0) return null;
 
     // Resolve metric definitions
@@ -389,15 +392,15 @@ export class SemanticLayer {
       selectParts.push(`${m.sql} AS ${m.name}`);
     }
 
-    // Build FROM + JOINs
-    let fromClause = `FROM ${primaryTable}`;
+    // Build FROM + JOINs (apply tableMapping for actual DB table names)
+    let fromClause = `FROM ${resolveTable(primaryTable)}`;
     const joinClauses: string[] = [];
     for (const join of joinsUsed) {
       const rightCube = this.cubes.get(join.right);
-      const rightTable = rightCube?.table ?? join.right;
+      const rightTable = resolveTable(rightCube?.table ?? join.right);
       const resolvedSql = join.sql
-        .replace('${left}', join.left)
-        .replace('${right}', join.right);
+        .replace('${left}', resolveTable(join.left))
+        .replace('${right}', rightTable);
       joinClauses.push(`${join.type.toUpperCase()} JOIN ${rightTable} ON ${resolvedSql}`);
     }
 

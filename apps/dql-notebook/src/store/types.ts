@@ -60,6 +60,7 @@ export interface SchemaTable {
   path: string;
   columns: SchemaColumn[];
   expanded?: boolean;
+  source?: 'file' | 'database';
 }
 
 export interface SemanticMetric {
@@ -125,6 +126,8 @@ export interface NotebookState {
   devPanelTab: DevPanelTab;
   queryLog: QueryLogEntry[];
   newNotebookModalOpen: boolean;
+  newBlockModalOpen: boolean;
+  autoSave: boolean;
   executionCounter: number;
   savingFile: boolean;
   lineageFullscreen: boolean;
@@ -150,6 +153,9 @@ export type NotebookAction =
   | { type: 'APPEND_QUERY_LOG'; entry: QueryLogEntry }
   | { type: 'OPEN_NEW_NOTEBOOK_MODAL' }
   | { type: 'CLOSE_NEW_NOTEBOOK_MODAL' }
+  | { type: 'OPEN_NEW_BLOCK_MODAL' }
+  | { type: 'CLOSE_NEW_BLOCK_MODAL' }
+  | { type: 'SET_AUTO_SAVE'; enabled: boolean }
   | { type: 'SET_NOTEBOOK_DIRTY'; dirty: boolean }
   | { type: 'SET_SAVING'; saving: boolean }
   | { type: 'FILE_ADDED'; file: NotebookFile }

@@ -25,6 +25,8 @@ const initialState: NotebookState = {
   devPanelTab: 'logs',
   queryLog: [],
   newNotebookModalOpen: false,
+  newBlockModalOpen: false,
+  autoSave: false,
   executionCounter: 0,
   savingFile: false,
   lineageFullscreen: false,
@@ -131,6 +133,15 @@ function notebookReducer(state: NotebookState, action: NotebookAction): Notebook
 
     case 'CLOSE_NEW_NOTEBOOK_MODAL':
       return { ...state, newNotebookModalOpen: false };
+
+    case 'OPEN_NEW_BLOCK_MODAL':
+      return { ...state, newBlockModalOpen: true };
+
+    case 'CLOSE_NEW_BLOCK_MODAL':
+      return { ...state, newBlockModalOpen: false };
+
+    case 'SET_AUTO_SAVE':
+      return { ...state, autoSave: action.enabled };
 
     case 'SET_NOTEBOOK_DIRTY':
       return { ...state, notebookDirty: action.dirty };

@@ -7,6 +7,7 @@ import { Header } from './Header';
 import { DevPanel } from './DevPanel';
 import { NotebookEditor } from '../notebook/NotebookEditor';
 import { NewNotebookModal } from '../modals/NewNotebookModal';
+import { NewBlockModal } from '../modals/NewBlockModal';
 import { LineageDAG } from '../sidebar/LineageDAG';
 import { api } from '../../api/client';
 import { parseNotebookFile } from '../../utils/parse-workbook';
@@ -110,6 +111,7 @@ export function AppShell() {
 
       {/* Modals */}
       {state.newNotebookModalOpen && <NewNotebookModal onFileOpened={handleOpenFile} />}
+      {state.newBlockModalOpen && <NewBlockModal onFileOpened={handleOpenFile} />}
     </div>
   );
 }

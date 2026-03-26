@@ -88,7 +88,10 @@ export function Header() {
     if (!state.activeFile) return;
     dispatch({ type: 'SET_SAVING', saving: true });
     try {
-      const content = serializeDqlNotebook(state.notebookTitle, state.cells);
+      // Block files save as raw content; notebooks serialize to JSON
+      const content = state.activeFile.type === 'block'
+        ? (state.cells[0]?.content ?? '')
+        : serializeDqlNotebook(state.notebookTitle, state.cells);
       await api.saveNotebook(state.activeFile.path, content);
       dispatch({ type: 'SET_NOTEBOOK_DIRTY', dirty: false });
       setSavedFlash(true);
@@ -99,6 +102,27 @@ export function Header() {
       dispatch({ type: 'SET_SAVING', saving: false });
     }
   }, [state.activeFile, state.notebookTitle, state.cells, dispatch]);
+
+  // Cmd/Ctrl+S keyboard shortcut
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => {
+      if ((e.metaKey || e.ctrlKey) && e.key === 's') {
+        e.preventDefault();
+        handleSave();
+      }
+    };
+    document.addEventListener('keydown', handler);
+    return () => document.removeEventListener('keydown', handler);
+  }, [handleSave]);
+
+  // Auto-save: trigger save after 2s of inactivity when dirty
+  useEffect(() => {
+    if (!state.autoSave || !state.notebookDirty || !state.activeFile) return;
+    const timer = setTimeout(() => {
+      handleSave();
+    }, 2000);
+    return () => clearTimeout(timer);
+  }, [state.autoSave, state.notebookDirty, state.activeFile, state.cells, handleSave]);
 
   const toggleTheme = () => {
     dispatch({ type: 'SET_THEME', mode: state.themeMode === 'dark' ? 'light' : 'dark' });
@@ -145,6 +169,24 @@ export function Header() {
             flexShrink: 0,
           }}
         />
+        {state.activeFile && (
+          <span
+            style={{
+              fontSize: 10,
+              fontWeight: 600,
+              color: state.activeFile.type === 'block' ? '#e3b341' : t.accent,
+              background: `${state.activeFile.type === 'block' ? '#e3b341' : t.accent}18`,
+              borderRadius: 4,
+              padding: '2px 6px',
+              fontFamily: t.font,
+              textTransform: 'uppercase',
+              letterSpacing: '0.05em',
+              flexShrink: 0,
+            }}
+          >
+            {state.activeFile.type}
+          </span>
+        )}
         {state.activeFile ? (
           editingTitle ? (
             <input
@@ -260,6 +302,7 @@ export function Header() {
           disabled={!state.activeFile || state.savingFile}
           onMouseEnter={() => setSaveHover(true)}
           onMouseLeave={() => setSaveHover(false)}
+          title="Save (Cmd+S)"
           style={{
             ...btnBase,
             background: saveHover && state.activeFile ? t.btnHover : t.btnBg,
@@ -277,6 +320,24 @@ export function Header() {
           ) : (
             <>Save</>
           )}
+        </button>
+
+        {/* Auto-save toggle */}
+        <button
+          onClick={() => dispatch({ type: 'SET_AUTO_SAVE', enabled: !state.autoSave })}
+          title={state.autoSave ? 'Auto-save on' : 'Auto-save off'}
+          style={{
+            ...btnBase,
+            background: state.autoSave ? `${t.accent}20` : t.btnBg,
+            color: state.autoSave ? t.accent : t.textMuted,
+            padding: '0 6px',
+            fontSize: 10,
+            fontWeight: 600,
+            letterSpacing: '0.03em',
+            border: `1px solid ${state.autoSave ? t.accent : t.btnBorder}`,
+          }}
+        >
+          AUTO
         </button>
 
         {/* Separator */}

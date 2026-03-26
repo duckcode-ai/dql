@@ -254,8 +254,75 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
     }
 
     if (req.method === 'GET' && path === '/api/schema') {
-      res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
-      res.end(serializeJSON(scanDataFiles(projectRoot)));
+      try {
+        const dataFiles = scanDataFiles(projectRoot);
+        // Also query database tables from the connected database
+        let dbTables: { name: string; path: string; columns: never[]; source: string }[] = [];
+        try {
+          const connector = await executor.getConnector(connection);
+          if (typeof connector.listTables === 'function') {
+            const tables = await connector.listTables();
+            dbTables = tables.map((t) => {
+              const qualifiedName = t.schema ? `${t.schema}.${t.name}` : t.name;
+              return { name: qualifiedName, path: qualifiedName, columns: [] as never[], source: 'database' };
+            });
+          } else {
+            // Fallback: query information_schema directly
+            const result = await executor.executeQuery(
+              `SELECT table_schema, table_name FROM information_schema.tables WHERE table_schema NOT IN ('information_schema', 'pg_catalog') ORDER BY table_schema, table_name`,
+              [], {}, connection,
+            );
+            dbTables = result.rows.map((row) => {
+              const schema = String(row['table_schema'] ?? '');
+              const name = String(row['table_name'] ?? '');
+              const qualifiedName = schema ? `${schema}.${name}` : name;
+              return { name: qualifiedName, path: qualifiedName, columns: [] as never[], source: 'database' };
+            });
+          }
+        } catch {
+          // Non-fatal: schema discovery from DB may fail if not connected
+        }
+        // Merge: data files first, then db tables (dedup by name)
+        const seen = new Set(dataFiles.map((f) => f.name));
+        const merged = [
+          ...dataFiles.map((f) => ({ ...f, source: 'file' })),
+          ...dbTables.filter((t) => !seen.has(t.name)),
+        ];
+        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON(merged));
+      } catch (error) {
+        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON(scanDataFiles(projectRoot)));
+      }
+      return;
+    }
+
+    if (req.method === 'POST' && path === '/api/blocks') {
+      try {
+        const body = await readJSON(req);
+        const { name } = body as { name: string };
+        if (!name || typeof name !== 'string') {
+          res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
+          res.end(serializeJSON({ error: 'Missing block name' }));
+          return;
+        }
+        const slug = name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '') || 'block';
+        const blocksDir = join(projectRoot, 'blocks');
+        mkdirSync(blocksDir, { recursive: true });
+        const blockPath = join(blocksDir, `${slug}.dql`);
+        if (existsSync(blockPath)) {
+          res.writeHead(409, { 'Content-Type': 'application/json; charset=utf-8' });
+          res.end(serializeJSON({ error: 'Block already exists' }));
+          return;
+        }
+        const content = `-- ${name}\nSELECT 1;\n`;
+        writeFileSync(blockPath, content, 'utf-8');
+        res.writeHead(201, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({ path: `blocks/${slug}.dql`, content }));
+      } catch (error) {
+        res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({ error: error instanceof Error ? error.message : String(error) }));
+      }
       return;
     }
 
@@ -399,7 +466,36 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
         // Resolve which connection to use — request can override default
         const targetConnection = isConnectionConfig(body.connection) ? body.connection : connection;
         const driver = targetConnection.driver;
-        const composed = semanticLayer.composeQuery({ metrics, dimensions, filters, limit, timeDimension, orderBy, driver });
+        // Build table mapping: resolve semantic model names to actual DB table names
+        let tableMapping: Record<string, string> | undefined;
+        try {
+          const tablesResult = await executor.executeQuery(
+            `SELECT table_schema, table_name FROM information_schema.tables WHERE table_schema NOT IN ('information_schema', 'pg_catalog')`,
+            [], {}, targetConnection,
+          );
+          const dbTableNames = new Set<string>();
+          const schemaQualified = new Map<string, string>();
+          for (const row of tablesResult.rows) {
+            const schema = String(row['table_schema'] ?? '');
+            const name = String(row['table_name'] ?? '');
+            dbTableNames.add(name);
+            schemaQualified.set(name, schema ? `${schema}.${name}` : name);
+          }
+          // For each table in the semantic layer, map to qualified name if it exists
+          const allSemanticTables = new Set<string>();
+          for (const m of semanticLayer.listMetrics()) allSemanticTables.add(m.table);
+          for (const d of semanticLayer.listDimensions()) allSemanticTables.add(d.table);
+          tableMapping = {};
+          for (const semTable of allSemanticTables) {
+            if (dbTableNames.has(semTable) && schemaQualified.has(semTable)) {
+              tableMapping[semTable] = schemaQualified.get(semTable)!;
+            }
+          }
+          if (Object.keys(tableMapping).length === 0) tableMapping = undefined;
+        } catch {
+          // Non-fatal: proceed without table mapping
+        }
+        const composed = semanticLayer.composeQuery({ metrics, dimensions, filters, limit, timeDimension, orderBy, driver, tableMapping });
         if (!composed) {
           res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
           res.end(serializeJSON({ error: `Could not compose query for metrics: [${metrics.join(', ')}]` }));
