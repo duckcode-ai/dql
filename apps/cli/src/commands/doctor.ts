@@ -16,6 +16,22 @@ export async function runDoctor(targetPath: string | null, flags: CLIFlags): Pro
   const projectRoot = findProjectRoot(cwd);
   const config = loadProjectConfig(projectRoot);
 
+  // loadProjectConfig normalizes connections.default → defaultConnection
+  const defaultConnection = config.defaultConnection;
+
+  // Detect dbt project for conditional checks
+  const isDbt = existsSync(join(projectRoot, 'dbt_project.yml'));
+
+  // For dbt projects, semantic-layer/ dir is not needed (dbt provides it)
+  const hasSemanticLayerDir = existsSync(join(projectRoot, 'semantic-layer'));
+  const semanticLayerOk = isDbt || hasSemanticLayerDir;
+  const semanticLayerDetail = isDbt
+    ? (hasSemanticLayerDir ? 'found' : 'provided by dbt')
+    : (hasSemanticLayerDir ? 'found' : 'missing');
+
+  // data/ is optional
+  const hasDataDir = existsSync(join(projectRoot, 'data'));
+
   const checks: Check[] = [
     checkNodeVersion(),
     {
@@ -35,27 +51,27 @@ export async function runDoctor(targetPath: string | null, flags: CLIFlags): Pro
     },
     {
       name: 'semantic-layer/',
-      ok: existsSync(join(projectRoot, 'semantic-layer')),
-      detail: existsSync(join(projectRoot, 'semantic-layer')) ? 'found' : 'missing',
+      ok: semanticLayerOk,
+      detail: semanticLayerDetail,
     },
     {
       name: 'data/',
-      ok: existsSync(join(projectRoot, 'data')),
-      detail: existsSync(join(projectRoot, 'data')) ? 'found' : 'missing',
+      ok: true,
+      detail: hasDataDir ? 'found' : 'not found (optional)',
     },
     {
       name: 'Default connection',
-      ok: Boolean(config.defaultConnection?.driver),
-      detail: config.defaultConnection?.driver ? `driver=${config.defaultConnection.driver}` : 'not configured',
+      ok: Boolean(defaultConnection?.driver),
+      detail: defaultConnection?.driver ? `driver=${defaultConnection.driver}` : 'not configured',
     },
     checkSemanticLayer(config.semanticLayer, projectRoot),
   ];
 
-  if (config.defaultConnection?.driver === 'file' || config.defaultConnection?.driver === 'duckdb') {
+  if (defaultConnection?.driver === 'file' || defaultConnection?.driver === 'duckdb') {
     checks.push(checkDuckDBDependency(projectRoot));
   }
-  if (config.defaultConnection?.driver) {
-    checks.push(await checkLocalQueryRuntime(projectRoot, config.defaultConnection));
+  if (defaultConnection?.driver) {
+    checks.push(await checkLocalQueryRuntime(projectRoot, defaultConnection));
   }
 
   const passed = checks.filter((check) => check.ok).length;

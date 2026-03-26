@@ -135,7 +135,7 @@ function buildConfig(
     connections: {
       default: {
         driver: 'duckdb',
-        path: duckdbPath ?? ':memory:',
+        filepath: duckdbPath ?? ':memory:',
       },
     },
   };

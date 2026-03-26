@@ -816,7 +816,24 @@ export function loadProjectConfig(projectRoot: string): ProjectConfig {
     return {};
   }
 
-  return JSON.parse(readFileSync(configPath, 'utf-8')) as ProjectConfig;
+  const raw = JSON.parse(readFileSync(configPath, 'utf-8')) as Record<string, unknown>;
+  const config = raw as unknown as ProjectConfig;
+
+  // Normalize modern `connections.default` format to `defaultConnection`
+  if (!config.defaultConnection && raw.connections) {
+    const connections = raw.connections as Record<string, Record<string, unknown>>;
+    const defaultConn = connections.default;
+    if (defaultConn?.driver) {
+      // Support both `filepath` (correct) and `path` (legacy/init compat)
+      const filepath = (defaultConn.filepath ?? defaultConn.path) as string | undefined;
+      config.defaultConnection = {
+        driver: defaultConn.driver as ConnectionConfig['driver'],
+        ...(filepath ? { filepath } : {}),
+      };
+    }
+  }
+
+  return config;
 }
 
 export function prepareLocalExecution(
