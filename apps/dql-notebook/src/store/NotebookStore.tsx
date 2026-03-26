@@ -30,6 +30,7 @@ const initialState: NotebookState = {
   executionCounter: 0,
   savingFile: false,
   lineageFullscreen: false,
+  dashboardMode: false,
 };
 
 function notebookReducer(state: NotebookState, action: NotebookAction): NotebookState {
@@ -102,6 +103,15 @@ function notebookReducer(state: NotebookState, action: NotebookAction): Notebook
       } else if (action.direction === 'down' && idx < newCells.length - 1) {
         [newCells[idx], newCells[idx + 1]] = [newCells[idx + 1], newCells[idx]];
       }
+      return { ...state, cells: newCells, notebookDirty: true };
+    }
+
+    case 'REORDER_CELL': {
+      const { fromIndex, toIndex } = action;
+      if (fromIndex === toIndex || fromIndex < 0 || toIndex < 0 || fromIndex >= state.cells.length || toIndex >= state.cells.length) return state;
+      const newCells = [...state.cells];
+      const [moved] = newCells.splice(fromIndex, 1);
+      newCells.splice(toIndex, 0, moved);
       return { ...state, cells: newCells, notebookDirty: true };
     }
 
@@ -183,6 +193,9 @@ function notebookReducer(state: NotebookState, action: NotebookAction): Notebook
 
     case 'TOGGLE_LINEAGE_FULLSCREEN':
       return { ...state, lineageFullscreen: !state.lineageFullscreen };
+
+    case 'TOGGLE_DASHBOARD_MODE':
+      return { ...state, dashboardMode: !state.dashboardMode };
 
     default:
       return state;

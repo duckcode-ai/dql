@@ -1,8 +1,11 @@
-import { useCallback } from 'react';
+import { useCallback, useRef } from 'react';
 import { useNotebook, makeCellId } from '../store/NotebookStore';
 import { api } from '../api/client';
 import { useVariableSubstitution } from './useVariableSubstitution';
 import type { Cell, CellChartConfig } from '../store/types';
+
+// Global map of running AbortControllers keyed by cellId
+const runningControllers = new Map<string, AbortController>();
 
 /**
  * Parse the visualization section of a DQL block into a CellChartConfig.
@@ -138,6 +141,13 @@ export function useQueryExecution() {
 
       const start = Date.now();
 
+      // Cancel any previous execution for this cell
+      const prev = runningControllers.get(cellId);
+      if (prev) prev.abort();
+
+      const controller = new AbortController();
+      runningControllers.set(cellId, controller);
+
       // Mark running
       dispatch({
         type: 'UPDATE_CELL',
@@ -146,7 +156,7 @@ export function useQueryExecution() {
       });
 
       try {
-        const result = await api.executeQuery(sql);
+        const result = await api.executeQuery(sql, controller.signal);
         const elapsed = Date.now() - start;
 
         const nextCount = (cell.executionCount ?? 0) + 1;
@@ -185,6 +195,16 @@ export function useQueryExecution() {
           });
         }, 2000);
       } catch (err) {
+        // If aborted, show cancelled status instead of error
+        if (controller.signal.aborted) {
+          dispatch({
+            type: 'UPDATE_CELL',
+            id: cellId,
+            updates: { status: 'idle', error: undefined },
+          });
+          return;
+        }
+
         const elapsed = Date.now() - start;
         const message = err instanceof Error ? err.message : String(err);
 
@@ -209,6 +229,8 @@ export function useQueryExecution() {
             error: message,
           },
         });
+      } finally {
+        runningControllers.delete(cellId);
       }
     },
     [state.cells, dispatch]
@@ -236,5 +258,18 @@ export function useQueryExecution() {
     [state.cells, executeCell]
   );
 
-  return { executeCell, executeAll, executeDependents };
+  const cancelCell = useCallback((cellId: string) => {
+    const controller = runningControllers.get(cellId);
+    if (controller) {
+      controller.abort();
+      runningControllers.delete(cellId);
+    }
+    dispatch({
+      type: 'UPDATE_CELL',
+      id: cellId,
+      updates: { status: 'idle' },
+    });
+  }, [dispatch]);
+
+  return { executeCell, executeAll, executeDependents, cancelCell };
 }

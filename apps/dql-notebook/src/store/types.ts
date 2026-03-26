@@ -3,7 +3,7 @@ export type CellType = 'sql' | 'markdown' | 'dql' | 'param';
 export type CellStatus = 'idle' | 'running' | 'success' | 'error';
 
 export interface CellChartConfig {
-  chart?: string;   // 'bar' | 'line' | 'pie' | 'kpi' | 'table'
+  chart?: string;   // bar | line | area | pie | donut | scatter | heatmap | funnel | waterfall | histogram | gauge | stacked-bar | grouped-bar | kpi | table
   x?: string;       // X-axis column
   y?: string;       // Y-axis column
   color?: string;   // Color-by column
@@ -55,12 +55,19 @@ export interface SchemaColumn {
   type: string;
 }
 
+export type GovernanceStatus = 'draft' | 'review' | 'certified' | 'deprecated' | 'pending_recertification';
+
 export interface SchemaTable {
   name: string;
   path: string;
   columns: SchemaColumn[];
   expanded?: boolean;
   source?: 'file' | 'database';
+  governance?: {
+    status?: GovernanceStatus;
+    owner?: string;
+    domain?: string;
+  };
 }
 
 export interface SemanticMetric {
@@ -131,6 +138,7 @@ export interface NotebookState {
   executionCounter: number;
   savingFile: boolean;
   lineageFullscreen: boolean;
+  dashboardMode: boolean;
 }
 
 export type NotebookAction =
@@ -163,4 +171,6 @@ export type NotebookAction =
   | { type: 'SET_PARAM_VALUE'; id: string; value: string }
   | { type: 'SET_SEMANTIC_LAYER'; layer: Omit<SemanticLayerState, 'loading'> }
   | { type: 'SET_SEMANTIC_LOADING'; loading: boolean }
-  | { type: 'TOGGLE_LINEAGE_FULLSCREEN' };
+  | { type: 'TOGGLE_LINEAGE_FULLSCREEN' }
+  | { type: 'REORDER_CELL'; fromIndex: number; toIndex: number }
+  | { type: 'TOGGLE_DASHBOARD_MODE' };

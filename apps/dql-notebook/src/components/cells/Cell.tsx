@@ -8,7 +8,8 @@ import { MarkdownCellEditor } from './MarkdownCellEditor';
 import { ParamCell } from './ParamCell';
 import { SnippetPicker } from './SnippetPicker';
 import { TableOutput } from '../output/TableOutput';
-import { ChartOutput, detectChartType, resolveChartType } from '../output/ChartOutput';
+import { ChartOutput, detectChartType, resolveChartType, renderChart, CHART_TYPE_OPTIONS } from '../output/ChartOutput';
+import type { ChartType } from '../output/ChartOutput';
 import { ErrorOutput } from '../output/ErrorOutput';
 import { CellLineage } from './CellLineage';
 import type { Cell } from '../../store/types';
@@ -49,6 +50,7 @@ function getCellBorderColor(cell: Cell, t: Theme): string {
 function ExecutionBadge({ cell, t }: { cell: Cell; t: Theme }) {
   let label = '';
   let color = t.textMuted;
+  let timeLabel = '';
 
   if (cell.status === 'running') {
     label = '[*]';
@@ -59,6 +61,10 @@ function ExecutionBadge({ cell, t }: { cell: Cell; t: Theme }) {
   } else if (cell.executionCount !== undefined) {
     label = `[${cell.executionCount}]`;
     color = t.textMuted;
+    if (cell.result?.executionTime !== undefined) {
+      const ms = cell.result.executionTime;
+      timeLabel = ms < 1000 ? `${ms}ms` : `${(ms / 1000).toFixed(1)}s`;
+    }
   } else {
     label = '[ ]';
     color = t.textMuted;
@@ -69,10 +75,11 @@ function ExecutionBadge({ cell, t }: { cell: Cell; t: Theme }) {
       style={{
         width: 40,
         display: 'flex',
-        alignItems: 'flex-start',
-        justifyContent: 'center',
+        flexDirection: 'column',
+        alignItems: 'center',
         paddingTop: 12,
         flexShrink: 0,
+        gap: 2,
       }}
     >
       <span
@@ -85,8 +92,20 @@ function ExecutionBadge({ cell, t }: { cell: Cell; t: Theme }) {
           transition: 'color 0.2s',
         }}
       >
-        {label}
+        {cell.status === 'running' ? (
+          <span style={{ display: 'inline-block', animation: 'spin 0.8s linear infinite' }}>
+            <svg width="12" height="12" viewBox="0 0 12 12" fill="none">
+              <circle cx="6" cy="6" r="4.5" stroke={color} strokeWidth="1.5" strokeDasharray="14 7" />
+            </svg>
+            <style>{`@keyframes spin { to { transform: rotate(360deg); } }`}</style>
+          </span>
+        ) : label}
       </span>
+      {timeLabel && (
+        <span style={{ fontFamily: t.fontMono, fontSize: 8, color: t.textMuted, lineHeight: 1, userSelect: 'none' }}>
+          {timeLabel}
+        </span>
+      )}
     </div>
   );
 }
@@ -224,13 +243,16 @@ function BlockGovernanceBar({
 export function CellComponent({ cell, index }: CellProps) {
   const { state, dispatch } = useNotebook();
   const t = themes[state.themeMode];
-  const { executeCell, executeDependents } = useQueryExecution();
+  const { executeCell, executeDependents, cancelCell } = useQueryExecution();
 
   const [cellHovered, setCellHovered] = useState(false);
   const [nameEditing, setNameEditing] = useState(false);
   const [nameDraft, setNameDraft] = useState(cell.name ?? '');
   const [showOutput, setShowOutput] = useState(true);
   const [viewMode, setViewMode] = useState<'chart' | 'table'>('table');
+  const [selectedChartType, setSelectedChartType] = useState<ChartType | null>(null);
+  const [chartDropdownOpen, setChartDropdownOpen] = useState(false);
+  const [chartConfigOpen, setChartConfigOpen] = useState(false);
 
   const borderColor = getCellBorderColor(cell, t);
   const isExecutable = cell.type !== 'markdown' && cell.type !== 'param';
@@ -268,6 +290,7 @@ export function CellComponent({ cell, index }: CellProps) {
   useEffect(() => {
     if (cell.status === 'success' && cell.result) {
       const chartType = resolveChartType(cell.result, cell.chartConfig);
+      setSelectedChartType(chartType !== 'table' ? chartType : null);
       setViewMode(chartType !== 'table' ? 'chart' : 'table');
     }
   }, [cell.status, cell.result, cell.chartConfig]);
@@ -499,14 +522,20 @@ export function CellComponent({ cell, index }: CellProps) {
                 </HeaderActionBtn>
               )}
 
-              {/* Run button */}
-              {isExecutable && (
+              {/* Run / Cancel button */}
+              {isExecutable && cell.status === 'running' ? (
+                <HeaderActionBtn title="Cancel execution" onClick={() => cancelCell(cell.id)} t={t} danger>
+                  <svg width="11" height="11" viewBox="0 0 10 10" fill="currentColor">
+                    <rect x="2" y="2" width="6" height="6" rx="1" />
+                  </svg>
+                </HeaderActionBtn>
+              ) : isExecutable ? (
                 <HeaderActionBtn title="Run cell (Shift+Enter)" onClick={handleRun} t={t} accent>
                   <svg width="11" height="11" viewBox="0 0 10 10" fill="currentColor">
                     <path d="M1.5 1.5l7 3.5-7 3.5V1.5Z" />
                   </svg>
                 </HeaderActionBtn>
-              )}
+              ) : null}
 
               {/* Move up */}
               <HeaderActionBtn title="Move up" onClick={handleMoveUp} t={t}>
@@ -555,6 +584,7 @@ export function CellComponent({ cell, index }: CellProps) {
             onRun={handleRun}
             themeMode={state.themeMode}
             schema={editorSchema}
+            errorMessage={cell.status === 'error' ? cell.error : undefined}
           />
         )}
 
@@ -601,29 +631,78 @@ export function CellComponent({ cell, index }: CellProps) {
               )}
               <div style={{ flex: 1 }} />
 
-              {/* Chart / Table toggle (when result is chartable) */}
-              {cell.result && canChart && showOutput && (
-                <div style={{ display: 'flex', alignItems: 'center', gap: 3 }}>
-                  {(['chart', 'table'] as const).map((mode) => (
+              {/* Chart type selector + Table toggle */}
+              {cell.result && showOutput && (
+                <div style={{ display: 'flex', alignItems: 'center', gap: 3, position: 'relative' }}>
+                  {/* Table button */}
+                  <button
+                    onClick={() => { setViewMode('table'); setChartDropdownOpen(false); }}
+                    style={{
+                      padding: '1px 7px', fontSize: 10, fontFamily: t.font, borderRadius: 3,
+                      border: `1px solid ${viewMode === 'table' ? t.accent : t.btnBorder}`,
+                      background: viewMode === 'table' ? `${t.accent}20` : 'transparent',
+                      color: viewMode === 'table' ? t.accent : t.textMuted,
+                      cursor: 'pointer', transition: 'all 0.15s',
+                    }}
+                  >
+                    Table
+                  </button>
+                  {/* Chart type dropdown trigger */}
+                  <div style={{ position: 'relative' }}>
                     <button
-                      key={mode}
-                      onClick={() => setViewMode(mode)}
+                      onClick={() => {
+                        if (viewMode === 'chart' && chartDropdownOpen) {
+                          setChartDropdownOpen(false);
+                        } else {
+                          setViewMode('chart');
+                          setChartDropdownOpen((p) => !p);
+                        }
+                      }}
                       style={{
-                        padding: '1px 7px',
-                        fontSize: 10,
-                        fontFamily: t.font,
-                        borderRadius: 3,
-                        border: `1px solid ${viewMode === mode ? t.accent : t.btnBorder}`,
-                        background: viewMode === mode ? `${t.accent}20` : 'transparent',
-                        color: viewMode === mode ? t.accent : t.textMuted,
-                        cursor: 'pointer',
-                        transition: 'all 0.15s',
-                        textTransform: 'capitalize',
+                        padding: '1px 7px', fontSize: 10, fontFamily: t.font, borderRadius: 3,
+                        border: `1px solid ${viewMode === 'chart' ? t.accent : t.btnBorder}`,
+                        background: viewMode === 'chart' ? `${t.accent}20` : 'transparent',
+                        color: viewMode === 'chart' ? t.accent : t.textMuted,
+                        cursor: 'pointer', transition: 'all 0.15s',
+                        display: 'flex', alignItems: 'center', gap: 3,
                       }}
                     >
-                      {mode === 'chart' ? 'Chart' : 'Table'}
+                      {selectedChartType ? CHART_TYPE_OPTIONS.find((o) => o.value === selectedChartType)?.label ?? 'Chart' : 'Chart'}
+                      <svg width="6" height="6" viewBox="0 0 8 8" fill="currentColor">
+                        <path d="M1 2.5l3 3 3-3" stroke="currentColor" fill="none" strokeWidth="1.2" strokeLinecap="round" />
+                      </svg>
                     </button>
-                  ))}
+                    {chartDropdownOpen && (
+                      <ChartTypeDropdown
+                        selected={selectedChartType}
+                        onSelect={(ct) => {
+                          setSelectedChartType(ct);
+                          setViewMode('chart');
+                          setChartDropdownOpen(false);
+                        }}
+                        onClose={() => setChartDropdownOpen(false)}
+                        t={t}
+                      />
+                    )}
+                  </div>
+                  {/* Config gear */}
+                  {viewMode === 'chart' && (
+                    <button
+                      onClick={() => setChartConfigOpen((p) => !p)}
+                      title="Chart configuration"
+                      style={{
+                        padding: '1px 5px', fontSize: 11, borderRadius: 3, cursor: 'pointer',
+                        border: `1px solid ${chartConfigOpen ? t.accent : t.btnBorder}`,
+                        background: chartConfigOpen ? `${t.accent}20` : 'transparent',
+                        color: chartConfigOpen ? t.accent : t.textMuted,
+                        transition: 'all 0.15s', display: 'flex', alignItems: 'center',
+                      }}
+                    >
+                      <svg width="10" height="10" viewBox="0 0 16 16" fill="currentColor">
+                        <path d="M8 0a8.2 8.2 0 0 1 .701.031C9.444.095 9.99.645 10.16 1.29l.288 1.107c.018.066.079.158.212.224.231.114.454.243.668.386.123.082.233.09.299.071l1.103-.303c.644-.176 1.392.021 1.82.63.27.386.506.798.704 1.23.315.698.043 1.44-.476 1.89l-.815.806a.338.338 0 0 0-.079.262c.02.267.02.538 0 .805a.338.338 0 0 0 .079.262l.815.806c.52.45.79 1.192.476 1.89a7.22 7.22 0 0 1-.704 1.23c-.428.609-1.176.806-1.82.63l-1.103-.303c-.066-.019-.176-.011-.299.071a5.09 5.09 0 0 1-.668.386c-.133.066-.194.158-.212.224l-.288 1.107c-.169.645-.715 1.196-1.458 1.26a8.006 8.006 0 0 1-1.402 0c-.743-.064-1.29-.614-1.458-1.26l-.289-1.106c-.018-.066-.079-.158-.212-.224a5.09 5.09 0 0 1-.668-.387c-.123-.082-.233-.09-.299-.071l-1.103.303c-.644.176-1.392-.021-1.82-.63a7.12 7.12 0 0 1-.704-1.23c-.315-.698-.043-1.44.476-1.89l.815-.806a.338.338 0 0 0 .079-.262 6.08 6.08 0 0 1 0-.805.338.338 0 0 0-.079-.262l-.815-.806c-.52-.45-.79-1.192-.476-1.89a7.22 7.22 0 0 1 .704-1.23c.428-.609 1.176-.806 1.82-.63l1.103.303c.066.019.176.011.299-.071.214-.143.437-.272.668-.386.133-.066.194-.158.212-.224L6.54 1.29C6.71.645 7.256.095 7.999.031 8.236.01 8.474 0 8.713 0H8ZM8 5a3 3 0 1 0 0 6 3 3 0 0 0 0-6Z" />
+                      </svg>
+                    </button>
+                  )}
                 </div>
               )}
 
@@ -666,8 +745,18 @@ export function CellComponent({ cell, index }: CellProps) {
                   />
                 )}
                 {cell.result && !cell.error && (
-                  viewMode === 'chart' && canChart ? (
-                    <ChartOutput result={cell.result} themeMode={state.themeMode} chartConfig={cell.chartConfig} />
+                  viewMode === 'chart' && selectedChartType ? (
+                    <>
+                      {renderChart(selectedChartType, cell.result, state.themeMode, cell.chartConfig)}
+                      {chartConfigOpen && (
+                        <ChartConfigPanel
+                          columns={cell.result.columns}
+                          chartConfig={cell.chartConfig}
+                          onChange={(cfg) => dispatch({ type: 'UPDATE_CELL', id: cell.id, updates: { chartConfig: { ...cell.chartConfig, ...cfg } } })}
+                          t={t}
+                        />
+                      )}
+                    </>
                   ) : (
                     <TableOutput result={cell.result} themeMode={state.themeMode} />
                   )
@@ -744,5 +833,159 @@ function HeaderActionBtn({
     >
       {children}
     </button>
+  );
+}
+
+function ChartTypeDropdown({
+  selected,
+  onSelect,
+  onClose,
+  t,
+}: {
+  selected: ChartType | null;
+  onSelect: (ct: ChartType) => void;
+  onClose: () => void;
+  t: Theme;
+}) {
+  const [hoveredItem, setHoveredItem] = useState<string | null>(null);
+
+  React.useEffect(() => {
+    const handler = (e: MouseEvent) => {
+      // Close on outside click after a small delay
+      setTimeout(() => onClose(), 0);
+    };
+    document.addEventListener('mousedown', handler);
+    return () => document.removeEventListener('mousedown', handler);
+  }, [onClose]);
+
+  return (
+    <div
+      onMouseDown={(e) => e.stopPropagation()}
+      style={{
+        position: 'absolute',
+        top: 24,
+        right: 0,
+        zIndex: 200,
+        background: t.cellBg,
+        border: `1px solid ${t.cellBorder}`,
+        borderRadius: 6,
+        boxShadow: '0 8px 24px rgba(0,0,0,0.3)',
+        padding: 4,
+        minWidth: 130,
+        maxHeight: 280,
+        overflowY: 'auto',
+        display: 'flex',
+        flexDirection: 'column',
+        gap: 1,
+      }}
+    >
+      {CHART_TYPE_OPTIONS.map(({ value, label }) => (
+        <button
+          key={value}
+          onClick={() => onSelect(value)}
+          onMouseEnter={() => setHoveredItem(value)}
+          onMouseLeave={() => setHoveredItem(null)}
+          style={{
+            background: selected === value ? `${t.accent}20` : hoveredItem === value ? t.btnHover : 'transparent',
+            border: 'none',
+            borderRadius: 4,
+            cursor: 'pointer',
+            color: selected === value ? t.accent : t.textSecondary,
+            fontSize: 11,
+            fontFamily: t.font,
+            fontWeight: selected === value ? 600 : 400,
+            padding: '4px 10px',
+            textAlign: 'left' as const,
+            transition: 'background 0.1s',
+          }}
+        >
+          {label}
+        </button>
+      ))}
+    </div>
+  );
+}
+
+function ChartConfigPanel({
+  columns,
+  chartConfig,
+  onChange,
+  t,
+}: {
+  columns: string[];
+  chartConfig?: import('../../store/types').CellChartConfig;
+  onChange: (cfg: Partial<import('../../store/types').CellChartConfig>) => void;
+  t: Theme;
+}) {
+  const selectStyle = {
+    background: t.inputBg,
+    border: `1px solid ${t.inputBorder}`,
+    borderRadius: 4,
+    color: t.textPrimary,
+    fontSize: 11,
+    fontFamily: t.fontMono,
+    padding: '3px 6px',
+    outline: 'none',
+    minWidth: 100,
+    flex: 1,
+  };
+
+  const labelStyle = {
+    fontSize: 9,
+    fontWeight: 700 as const,
+    color: t.textMuted,
+    fontFamily: t.font,
+    letterSpacing: '0.05em',
+    textTransform: 'uppercase' as const,
+    minWidth: 40,
+    flexShrink: 0,
+  };
+
+  return (
+    <div
+      style={{
+        display: 'flex',
+        flexWrap: 'wrap',
+        gap: '6px 16px',
+        padding: '8px 12px',
+        borderTop: `1px solid ${t.cellBorder}`,
+        background: `${t.tableHeaderBg}40`,
+      }}
+    >
+      {/* X axis */}
+      <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+        <span style={labelStyle}>X axis</span>
+        <select style={selectStyle} value={chartConfig?.x ?? ''} onChange={(e) => onChange({ x: e.target.value || undefined })}>
+          <option value="">Auto</option>
+          {columns.map((c) => <option key={c} value={c}>{c}</option>)}
+        </select>
+      </div>
+      {/* Y axis */}
+      <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+        <span style={labelStyle}>Y axis</span>
+        <select style={selectStyle} value={chartConfig?.y ?? ''} onChange={(e) => onChange({ y: e.target.value || undefined })}>
+          <option value="">Auto</option>
+          {columns.map((c) => <option key={c} value={c}>{c}</option>)}
+        </select>
+      </div>
+      {/* Color */}
+      <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+        <span style={labelStyle}>Color</span>
+        <select style={selectStyle} value={chartConfig?.color ?? ''} onChange={(e) => onChange({ color: e.target.value || undefined })}>
+          <option value="">None</option>
+          {columns.map((c) => <option key={c} value={c}>{c}</option>)}
+        </select>
+      </div>
+      {/* Title */}
+      <div style={{ display: 'flex', alignItems: 'center', gap: 6, flex: 1, minWidth: 150 }}>
+        <span style={labelStyle}>Title</span>
+        <input
+          style={{ ...selectStyle, fontFamily: t.font }}
+          value={chartConfig?.title ?? ''}
+          placeholder="Chart title"
+          onChange={(e) => onChange({ title: e.target.value || undefined })}
+        />
+      </div>
+    </div>
   );
 }

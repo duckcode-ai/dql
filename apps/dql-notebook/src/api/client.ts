@@ -56,10 +56,11 @@ export const api = {
     });
   },
 
-  async executeQuery(sql: string): Promise<QueryResult> {
+  async executeQuery(sql: string, signal?: AbortSignal): Promise<QueryResult> {
     const raw = await request<any>('/api/query', {
       method: 'POST',
       body: JSON.stringify({ sql }),
+      signal,
     });
     // Normalize: older server versions return columns as ColumnMeta[] ({name,type,driverType}).
     // Always coerce to string[] so React never tries to render objects as children.
@@ -90,6 +91,13 @@ export const api = {
     } catch {
       return { default: 'unknown', connections: {} };
     }
+  },
+
+  async saveConnections(connections: Record<string, unknown>): Promise<{ ok: boolean }> {
+    return request<{ ok: boolean }>('/api/connections', {
+      method: 'PUT',
+      body: JSON.stringify({ connections }),
+    });
   },
 
   async testConnection(): Promise<{ ok: boolean; message: string }> {

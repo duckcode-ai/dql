@@ -12,12 +12,16 @@ import { LineageDAG } from '../sidebar/LineageDAG';
 import { api } from '../../api/client';
 import { parseNotebookFile } from '../../utils/parse-workbook';
 import { makeCell } from '../../store/NotebookStore';
+import { useKeyboardShortcuts } from '../../hooks/useKeyboardShortcuts';
 import type { NotebookFile } from '../../store/types';
 
 export function AppShell() {
   const { state, dispatch } = useNotebook();
   const t = themes[state.themeMode];
   const cellRefs = useRef<Record<string, HTMLDivElement>>({});
+
+  // Global keyboard shortcuts
+  useKeyboardShortcuts();
 
   const handleOpenFile = useCallback(
     async (file: NotebookFile) => {

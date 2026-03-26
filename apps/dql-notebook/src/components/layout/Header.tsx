@@ -340,6 +340,30 @@ export function Header() {
           AUTO
         </button>
 
+        {/* Dashboard mode toggle */}
+        <button
+          onClick={() => dispatch({ type: 'TOGGLE_DASHBOARD_MODE' })}
+          disabled={!state.activeFile}
+          title={state.dashboardMode ? 'Switch to editor mode' : 'Switch to dashboard mode'}
+          style={{
+            ...btnBase,
+            background: state.dashboardMode ? `${t.accent}20` : t.btnBg,
+            color: state.dashboardMode ? t.accent : t.textSecondary,
+            border: `1px solid ${state.dashboardMode ? t.accent : t.btnBorder}`,
+            opacity: !state.activeFile ? 0.4 : 1,
+            padding: '0 8px',
+          }}
+        >
+          <svg width="11" height="11" viewBox="0 0 16 16" fill="currentColor">
+            {state.dashboardMode ? (
+              <path d="M2 1.75C2 .784 2.784 0 3.75 0h6.586c.464 0 .909.184 1.237.513l2.914 2.914c.329.328.513.773.513 1.237v9.586A1.75 1.75 0 0 1 13.25 16h-9.5A1.75 1.75 0 0 1 2 14.25Zm1.75-.25a.25.25 0 0 0-.25.25v12.5c0 .138.112.25.25.25h9.5a.25.25 0 0 0 .25-.25V6h-2.75A1.75 1.75 0 0 1 8.75 4.25V1.5Z" />
+            ) : (
+              <path d="M0 1.75C0 .784.784 0 1.75 0h12.5C15.216 0 16 .784 16 1.75v3.585a.746.746 0 0 1 0 .83v8.085A1.75 1.75 0 0 1 14.25 16H1.75A1.75 1.75 0 0 1 0 14.25Zm1.75-.25a.25.25 0 0 0-.25.25V5h13V1.75a.25.25 0 0 0-.25-.25ZM1.5 6.5v7.75c0 .138.112.25.25.25H7v-8Zm7 8h5.75a.25.25 0 0 0 .25-.25V6.5h-6Z" />
+            )}
+          </svg>
+          {state.dashboardMode ? 'Editor' : 'Dashboard'}
+        </button>
+
         {/* Separator */}
         <div style={{ width: 1, height: 20, background: t.headerBorder }} />
 

@@ -4,6 +4,7 @@ import { useNotebook } from '../../store/NotebookStore';
 import { themes } from '../../themes/notebook-theme';
 import { WelcomeScreen } from './WelcomeScreen';
 import { CellList } from './CellList';
+import { DashboardView } from './DashboardView';
 import type { NotebookFile } from '../../store/types';
 
 interface NotebookEditorProps {
@@ -17,6 +18,11 @@ export function NotebookEditor({ onOpenFile, registerCellRef }: NotebookEditorPr
 
   if (!state.activeFile) {
     return <WelcomeScreen onOpenFile={onOpenFile} />;
+  }
+
+  // Dashboard / presentation mode
+  if (state.dashboardMode) {
+    return <DashboardView />;
   }
 
   return (

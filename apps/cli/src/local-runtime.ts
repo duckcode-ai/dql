@@ -341,6 +341,28 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
       res.end(serializeJSON({ default: defaultKey, connections }));
       return;
     }
+    // Save/update connections
+    if (req.method === 'PUT' && path === '/api/connections') {
+      try {
+        const body = await readJSON(req);
+        const configPath = join(projectRoot, 'dql.config.json');
+        let raw: Record<string, unknown> = {};
+        if (existsSync(configPath)) {
+          raw = JSON.parse(readFileSync(configPath, 'utf-8')) as Record<string, unknown>;
+        }
+        if (body.connections && typeof body.connections === 'object') {
+          raw.connections = body.connections;
+        }
+        writeFileSync(configPath, JSON.stringify(raw, null, 2) + '\n', 'utf-8');
+        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({ ok: true }));
+      } catch (error) {
+        res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({ error: error instanceof Error ? error.message : String(error) }));
+      }
+      return;
+    }
+
     // ── Semantic layer discovery API ─────────────────────────────────────────
     if (req.method === 'GET' && path === '/api/semantic-layer') {
       if (!semanticLayer) {

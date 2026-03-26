@@ -1,12 +1,14 @@
 import React, { useRef, useEffect } from 'react';
 import {
   EditorView,
+  Decoration,
   keymap,
   lineNumbers,
   highlightActiveLine,
   highlightActiveLineGutter,
+  hoverTooltip,
 } from '@codemirror/view';
-import { EditorState, Compartment } from '@codemirror/state';
+import { EditorState, Compartment, StateField, StateEffect } from '@codemirror/state';
 import { defaultKeymap, indentWithTab, toggleComment, historyKeymap } from '@codemirror/commands';
 import { sql } from '@codemirror/lang-sql';
 import { oneDark } from '@codemirror/theme-one-dark';
@@ -34,7 +36,72 @@ interface SQLCellEditorProps {
   themeMode: 'dark' | 'light';
   autoFocus?: boolean;
   schema?: Record<string, string[]>;
+  errorMessage?: string;
 }
+
+/**
+ * Parse a DuckDB/SQL error message to extract line and column info.
+ * Common patterns:
+ * - "LINE 2: ..." (DuckDB)
+ * - "at line 3, column 5"
+ * - "Error at position 42"
+ * Returns { line, col } (1-based) or null if not parseable.
+ */
+function parseErrorLocation(msg: string): { line: number; col: number } | null {
+  // DuckDB: "LINE 2: SELECT * FROM ..."
+  const lineMatch = msg.match(/LINE\s+(\d+)/i);
+  if (lineMatch) {
+    const line = parseInt(lineMatch[1], 10);
+    // Try to find column from caret indicator (^) often on the next line
+    const caretMatch = msg.match(/\n(\s*)\^/);
+    const col = caretMatch ? caretMatch[1].length + 1 : 1;
+    return { line, col };
+  }
+  // Generic: "at line X, column Y"
+  const lcMatch = msg.match(/at line\s+(\d+),?\s*column\s+(\d+)/i);
+  if (lcMatch) {
+    return { line: parseInt(lcMatch[1], 10), col: parseInt(lcMatch[2], 10) };
+  }
+  // Fallback: "line X"
+  const simpleLine = msg.match(/line\s+(\d+)/i);
+  if (simpleLine) {
+    return { line: parseInt(simpleLine[1], 10), col: 1 };
+  }
+  return null;
+}
+
+// Effect to update error decorations
+const setErrorEffect = StateEffect.define<{ from: number; to: number; message: string } | null>();
+
+const errorDecoField = StateField.define({
+  create() {
+    return Decoration.none;
+  },
+  update(decos, tr) {
+    for (const e of tr.effects) {
+      if (e.is(setErrorEffect)) {
+        if (!e.value) return Decoration.none;
+        const { from, to, message } = e.value;
+        return Decoration.set([
+          Decoration.mark({
+            class: 'cm-sql-error',
+            attributes: { title: message },
+          }).range(from, to),
+        ]);
+      }
+    }
+    return decos;
+  },
+  provide: (f) => EditorView.decorations.from(f),
+});
+
+const errorTheme = EditorView.baseTheme({
+  '.cm-sql-error': {
+    textDecoration: 'underline wavy #f85149',
+    textUnderlineOffset: '3px',
+    background: 'rgba(248, 81, 73, 0.08)',
+  },
+});
 
 // Light theme for CodeMirror — GitHub-inspired
 const lightTheme = EditorView.theme(
@@ -145,6 +212,7 @@ export function SQLCellEditor({
   themeMode,
   autoFocus,
   schema,
+  errorMessage,
 }: SQLCellEditorProps) {
   const t = themes[themeMode];
   const containerRef = useRef<HTMLDivElement>(null);
@@ -231,6 +299,9 @@ export function SQLCellEditor({
       EditorView.lineWrapping,
       // Search
       search({ top: true }),
+      // Error decoration support
+      errorDecoField,
+      errorTheme,
       // Theme
       ...(themeMode === 'dark'
         ? [oneDark, darkPanelTheme]
@@ -273,6 +344,47 @@ export function SQLCellEditor({
       });
     }
   }, [value]);
+
+  // Update inline error decorations when errorMessage changes
+  useEffect(() => {
+    const view = viewRef.current;
+    if (!view) return;
+
+    if (!errorMessage) {
+      // Clear error decorations
+      view.dispatch({ effects: setErrorEffect.of(null) });
+      return;
+    }
+
+    const loc = parseErrorLocation(errorMessage);
+    const doc = view.state.doc;
+
+    if (loc && loc.line >= 1 && loc.line <= doc.lines) {
+      const line = doc.line(loc.line);
+      const from = line.from + Math.max(0, loc.col - 1);
+      // Underline from error position to end of line (or at least 1 char)
+      const to = Math.max(from + 1, line.to);
+      view.dispatch({
+        effects: setErrorEffect.of({
+          from: Math.min(from, doc.length),
+          to: Math.min(to, doc.length),
+          message: errorMessage,
+        }),
+      });
+    } else {
+      // Can't determine line — underline first line as fallback
+      if (doc.lines >= 1) {
+        const line = doc.line(1);
+        view.dispatch({
+          effects: setErrorEffect.of({
+            from: line.from,
+            to: Math.max(line.from + 1, line.to),
+            message: errorMessage,
+          }),
+        });
+      }
+    }
+  }, [errorMessage]);
 
   return (
     <div

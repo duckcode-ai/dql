@@ -20,6 +20,10 @@ export function CellList({ registerCellRef }: CellListProps) {
   // Track last "d" keypress time for double-d detection
   const lastDPressRef = useRef<number>(0);
 
+  // Drag-and-drop state
+  const [dragIndex, setDragIndex] = useState<number | null>(null);
+  const [dropIndex, setDropIndex] = useState<number | null>(null);
+
   const handleGutterClick = useCallback((cellId: string) => {
     setFocusedCellId(cellId);
   }, []);
@@ -122,6 +126,37 @@ export function CellList({ registerCellRef }: CellListProps) {
     return () => document.removeEventListener('mousedown', onMouseDown);
   }, []);
 
+  // Drag handlers
+  const handleDragStart = useCallback((e: React.DragEvent, index: number) => {
+    setDragIndex(index);
+    e.dataTransfer.effectAllowed = 'move';
+    e.dataTransfer.setData('text/plain', String(index));
+    // Make the dragged element semi-transparent
+    const target = e.currentTarget as HTMLElement;
+    setTimeout(() => { target.style.opacity = '0.4'; }, 0);
+  }, []);
+
+  const handleDragEnd = useCallback((e: React.DragEvent) => {
+    (e.currentTarget as HTMLElement).style.opacity = '1';
+    setDragIndex(null);
+    setDropIndex(null);
+  }, []);
+
+  const handleDragOver = useCallback((e: React.DragEvent, index: number) => {
+    e.preventDefault();
+    e.dataTransfer.dropEffect = 'move';
+    setDropIndex(index);
+  }, []);
+
+  const handleDrop = useCallback((e: React.DragEvent, toIndex: number) => {
+    e.preventDefault();
+    if (dragIndex !== null && dragIndex !== toIndex) {
+      dispatch({ type: 'REORDER_CELL', fromIndex: dragIndex, toIndex });
+    }
+    setDragIndex(null);
+    setDropIndex(null);
+  }, [dragIndex, dispatch]);
+
   if (state.cells.length === 0) {
     return (
       <div
@@ -156,6 +191,11 @@ export function CellList({ registerCellRef }: CellListProps) {
           <div
             ref={(el) => registerCellRef(cell.id, el)}
             data-cell-id={cell.id}
+            draggable
+            onDragStart={(e) => handleDragStart(e, index)}
+            onDragEnd={handleDragEnd}
+            onDragOver={(e) => handleDragOver(e, index)}
+            onDrop={(e) => handleDrop(e, index)}
             onClick={(e) => {
               // Select cell on gutter/header click but not editor area
               const target = e.target as HTMLElement;
@@ -171,14 +211,53 @@ export function CellList({ registerCellRef }: CellListProps) {
               outline: focusedCellId === cell.id ? `2px solid ${t.accent}40` : 'none',
               outlineOffset: 2,
               borderRadius: 10,
-              transition: 'outline 0.1s',
+              transition: 'outline 0.1s, transform 0.15s',
+              position: 'relative',
+              // Drop indicator
+              ...(dropIndex === index && dragIndex !== null && dragIndex !== index
+                ? { borderTop: `2px solid ${t.accent}` }
+                : {}),
             }}
           >
+            {/* Drag handle — visible on hover */}
+            <div
+              style={{
+                position: 'absolute',
+                left: -20,
+                top: 8,
+                width: 16,
+                height: 24,
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                cursor: 'grab',
+                color: t.textMuted,
+                opacity: 0,
+                transition: 'opacity 0.15s',
+                zIndex: 5,
+              }}
+              className="drag-handle"
+            >
+              <svg width="8" height="14" viewBox="0 0 8 14" fill="currentColor">
+                <circle cx="2" cy="2" r="1.2" />
+                <circle cx="6" cy="2" r="1.2" />
+                <circle cx="2" cy="7" r="1.2" />
+                <circle cx="6" cy="7" r="1.2" />
+                <circle cx="2" cy="12" r="1.2" />
+                <circle cx="6" cy="12" r="1.2" />
+              </svg>
+            </div>
             <CellComponent cell={cell} index={index} />
           </div>
           <AddCellBar afterId={cell.id} />
         </React.Fragment>
       ))}
+
+      {/* Global style for drag handle visibility */}
+      <style>{`
+        [data-cell-id]:hover .drag-handle { opacity: 0.5 !important; }
+        [data-cell-id]:hover .drag-handle:hover { opacity: 1 !important; }
+      `}</style>
     </div>
   );
 }

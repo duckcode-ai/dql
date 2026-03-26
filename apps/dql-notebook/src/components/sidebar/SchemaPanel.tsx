@@ -3,7 +3,7 @@ import React, { useState } from 'react';
 import { useNotebook } from '../../store/NotebookStore';
 import { themes } from '../../themes/notebook-theme';
 import { api } from '../../api/client';
-import type { SchemaColumn } from '../../store/types';
+import type { SchemaColumn, GovernanceStatus } from '../../store/types';
 
 const TYPE_COLORS: Record<string, string> = {
   varchar: '#388bfd',
@@ -231,6 +231,9 @@ function TableRow({
         <span style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
           {table.name}
         </span>
+        {table.governance?.status && (
+          <GovernanceBadge status={table.governance.status} t={t} />
+        )}
         {table.columns.length > 0 && (
           <span
             style={{
@@ -249,6 +252,21 @@ function TableRow({
 
       {table.expanded && (
         <div style={{ paddingLeft: 26 }}>
+          {/* Governance details */}
+          {table.governance && (table.governance.owner || table.governance.domain) && (
+            <div style={{ padding: '3px 10px', display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+              {table.governance.domain && (
+                <span style={{ fontSize: 9, fontFamily: t.font, color: t.textMuted }}>
+                  <span style={{ fontWeight: 600 }}>domain:</span> {table.governance.domain}
+                </span>
+              )}
+              {table.governance.owner && (
+                <span style={{ fontSize: 9, fontFamily: t.font, color: t.textMuted }}>
+                  <span style={{ fontWeight: 600 }}>owner:</span> {table.governance.owner}
+                </span>
+              )}
+            </div>
+          )}
           {loadingColumns ? (
             <div
               style={{
@@ -330,5 +348,38 @@ function ColumnRow({ col, t }: { col: SchemaColumn; t: Theme }) {
         {col.type.toLowerCase()}
       </span>
     </div>
+  );
+}
+
+const GOVERNANCE_STYLES: Record<GovernanceStatus, { color: string; label: string; icon: string }> = {
+  certified: { color: '#56d364', label: 'Certified', icon: '✓' },
+  review: { color: '#e3b341', label: 'In Review', icon: '◎' },
+  draft: { color: '#8b949e', label: 'Draft', icon: '○' },
+  deprecated: { color: '#f85149', label: 'Deprecated', icon: '✗' },
+  pending_recertification: { color: '#ffa657', label: 'Re-cert', icon: '↻' },
+};
+
+function GovernanceBadge({ status, t }: { status: GovernanceStatus; t: Theme }) {
+  const style = GOVERNANCE_STYLES[status];
+  if (!style) return null;
+  return (
+    <span
+      title={style.label}
+      style={{
+        fontSize: 8,
+        fontWeight: 700,
+        fontFamily: t.font,
+        color: style.color,
+        background: `${style.color}18`,
+        border: `1px solid ${style.color}40`,
+        borderRadius: 3,
+        padding: '0 4px',
+        flexShrink: 0,
+        letterSpacing: '0.04em',
+        lineHeight: '14px',
+      }}
+    >
+      {style.icon} {style.label.toUpperCase()}
+    </span>
   );
 }

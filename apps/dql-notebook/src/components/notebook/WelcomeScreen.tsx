@@ -113,16 +113,11 @@ export function WelcomeScreen({ onOpenFile }: WelcomeScreenProps) {
           />
 
           <ActionCard
-            title="Browse Examples"
-            description="Explore sample notebooks and DQL workbooks."
-            icon={<ExamplesIcon />}
-            accent={t.success}
-            onClick={() => {
-              const exampleFile = state.files.find(
-                (f) => f.folder.toLowerCase() === 'notebooks'
-              );
-              if (exampleFile) onOpenFile(exampleFile);
-            }}
+            title="New Block"
+            description="Create a reusable SQL block file."
+            icon={<BlockIcon />}
+            accent="#e3b341"
+            onClick={() => dispatch({ type: 'OPEN_NEW_BLOCK_MODAL' })}
             t={t}
           />
         </div>
@@ -159,9 +154,13 @@ export function WelcomeScreen({ onOpenFile }: WelcomeScreenProps) {
           >
             {[
               ['Shift + Enter', 'Run cell'],
+              ['\u2318 + S', 'Save notebook'],
+              ['\u2318 + B', 'Toggle sidebar'],
+              ['\u2318 + D', 'Dashboard mode'],
+              ['\u2318 + Shift + Enter', 'Run all cells'],
+              ['\u2318 + J', 'Toggle dev panel'],
               ['Click +', 'Add a new cell'],
-              ['Double-click MD cell', 'Edit markdown'],
-              ['Header title', 'Click to rename notebook'],
+              ['Drag handle', 'Reorder cells'],
             ].map(([key, desc]) => (
               <div key={key} style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
                 <kbd
@@ -383,10 +382,10 @@ function ClockIcon() {
   );
 }
 
-function ExamplesIcon() {
+function BlockIcon() {
   return (
     <svg width="18" height="18" viewBox="0 0 16 16" fill="currentColor">
-      <path d="M.24 2.375C.24 1.064 1.225.001 2.409.001h6.451a1.17 1.17 0 0 1 .828.344l3.311 3.312a1.17 1.17 0 0 1 .344.828v9.14c0 1.31-.985 2.374-2.169 2.374H2.41C1.225 16 .24 14.937.24 13.625ZM2.41 1.376a.846.846 0 0 0-.844.86v11.39c0 .47.38.86.844.86h8.774a.847.847 0 0 0 .844-.86V5.157L8.688 1.373H2.41Z" />
+      <path d="M8.75 1.75a.75.75 0 0 0-1.5 0V6.5H2.75a.75.75 0 0 0 0 1.5H7.25v4.75a.75.75 0 0 0 1.5 0V8H13.25a.75.75 0 0 0 0-1.5H8.75V1.75Z" />
     </svg>
   );
 }
