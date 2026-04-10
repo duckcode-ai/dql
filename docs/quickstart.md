@@ -1,6 +1,6 @@
 # Quickstart
 
-Go from zero to a running DQL notebook in 5 minutes using the Jaffle Shop dbt project.
+Go from zero to a running DQL notebook in 5 minutes using the Jaffle Shop dbt project with dbt semantic models already included.
 
 ---
 
@@ -11,6 +11,8 @@ git clone https://github.com/dbt-labs/Semantic-Layer-Online-Course.git jaffle-sh
 cd jaffle-shop
 pip install dbt-duckdb
 ```
+
+This guide uses `dbt-labs/Semantic-Layer-Online-Course` because it matches DQL's dbt-provider walkthrough out of the box: the repo already contains the semantic models and metrics that DQL will surface in the notebook.
 
 Create a local DuckDB profile:
 
@@ -60,4 +62,6 @@ See the full data flow from dbt's source tables through your DQL blocks.
 
 ---
 
+> If you want the fastest non-dbt path instead, run `npm install -g @duckcodeailabs/dql-cli`, then `dql init my-dql-project && cd my-dql-project && dql notebook`.
+>
 > **[Full walkthrough with all steps](./getting-started.md)**

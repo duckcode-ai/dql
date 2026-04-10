@@ -1,4 +1,19 @@
-import type { NotebookFile, QueryResult, SchemaTable, SchemaColumn, SemanticLayerState } from '../store/types';
+import type {
+  NotebookFile,
+  QueryResult,
+  SchemaTable,
+  SchemaColumn,
+  SemanticLayerState,
+  SemanticDimension,
+  SemanticMetric,
+  SemanticHierarchy,
+  SemanticTreeNode,
+  SemanticObjectDetail,
+  BlockStudioCatalog,
+  BlockStudioOpenPayload,
+  BlockStudioPreview,
+  BlockStudioValidation,
+} from '../store/types';
 
 const BASE = window.location.origin;
 
@@ -47,6 +62,82 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ name }),
     });
+  },
+
+  async getBlockStudioCatalog(): Promise<BlockStudioCatalog> {
+    return request<BlockStudioCatalog>('/api/block-studio/catalog');
+  },
+
+  async openBlockStudio(path: string): Promise<BlockStudioOpenPayload> {
+    return request<BlockStudioOpenPayload>(`/api/block-studio/open?path=${encodeURIComponent(path)}`);
+  },
+
+  async validateBlockStudio(source: string, path?: string | null): Promise<BlockStudioValidation> {
+    return request<BlockStudioValidation>('/api/block-studio/validate', {
+      method: 'POST',
+      body: JSON.stringify({ source, path }),
+    });
+  },
+
+  async runBlockStudio(source: string, path?: string | null): Promise<BlockStudioPreview> {
+    return request<BlockStudioPreview>('/api/block-studio/run', {
+      method: 'POST',
+      body: JSON.stringify({ source, path }),
+    });
+  },
+
+  async saveBlockStudio(payload: {
+    path?: string | null;
+    source: string;
+    metadata: {
+      name: string;
+      domain: string;
+      description: string;
+      owner: string;
+      tags: string[];
+    };
+  }): Promise<BlockStudioOpenPayload> {
+    return request<BlockStudioOpenPayload>('/api/block-studio/save', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    });
+  },
+
+  async saveAsBlock(payload: {
+    cellId: string;
+    notebookPath?: string | null;
+    name: string;
+    domain?: string;
+    content: string;
+    description?: string;
+    tags?: string[];
+    metricRefs?: string[];
+    template?: string;
+  }): Promise<{ path: string; content: string }> {
+    return request<{ path: string; content: string }>('/api/blocks/save-from-cell', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    });
+  },
+
+  async getBlockTemplates(): Promise<Array<{ id: string; name: string; description: string; content: string }>> {
+    try {
+      const response = await request<{ templates: Array<{ id: string; name: string; description: string; content: string }> }>(
+        '/api/blocks/templates',
+      );
+      return response.templates;
+    } catch {
+      return [];
+    }
+  },
+
+  async listBlocks(domain?: string): Promise<NotebookFile[]> {
+    try {
+      const files = await request<NotebookFile[]>('/api/notebooks');
+      return files.filter((file) => file.type === 'block' && (!domain || file.path.startsWith(`blocks/${domain}/`)));
+    } catch {
+      return [];
+    }
   },
 
   async saveNotebook(path: string, content: string): Promise<void> {
@@ -115,7 +206,119 @@ export const api = {
     try {
       return await request<Omit<SemanticLayerState, 'loading'>>('/api/semantic-layer');
     } catch {
-      return { available: false, provider: null, metrics: [], dimensions: [], hierarchies: [] };
+      return {
+        available: false,
+        provider: null,
+        metrics: [],
+        dimensions: [],
+        hierarchies: [],
+        domains: [],
+        tags: [],
+        favorites: [],
+        recentlyUsed: [],
+        lastSyncTime: null,
+      };
+    }
+  },
+
+  async getSemanticTree(): Promise<SemanticTreeNode> {
+    const result = await request<{ tree: SemanticTreeNode }>('/api/semantic-layer/tree');
+    return result.tree;
+  },
+
+  async getSemanticObject(id: string): Promise<SemanticObjectDetail> {
+    return request<SemanticObjectDetail>(`/api/semantic-layer/object/${encodeURIComponent(id)}`);
+  },
+
+  async importSemanticLayer(payload: {
+    provider: 'dbt' | 'cubejs' | 'snowflake';
+    projectPath?: string;
+    repoUrl?: string;
+    branch?: string;
+    subPath?: string;
+    connection?: string;
+  }): Promise<any> {
+    return request<any>('/api/semantic-layer/import', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    });
+  },
+
+  async syncSemanticLayer(): Promise<any> {
+    return request<any>('/api/semantic-layer/sync', {
+      method: 'POST',
+      body: JSON.stringify({}),
+    });
+  },
+
+  async searchSemanticLayer(params: {
+    query?: string;
+    domain?: string;
+    tag?: string;
+    type?: 'metric' | 'dimension' | 'hierarchy';
+  }): Promise<{ metrics: SemanticMetric[]; dimensions: SemanticDimension[]; hierarchies: SemanticHierarchy[] }> {
+    const search = new URLSearchParams();
+    if (params.query) search.set('q', params.query);
+    if (params.domain) search.set('domain', params.domain);
+    if (params.tag) search.set('tag', params.tag);
+    if (params.type) search.set('type', params.type);
+    try {
+      return await request<{ metrics: SemanticMetric[]; dimensions: SemanticDimension[]; hierarchies: SemanticHierarchy[] }>(
+        `/api/semantic-layer/search?${search.toString()}`,
+      );
+    } catch {
+      return { metrics: [], dimensions: [], hierarchies: [] };
+    }
+  },
+
+  async getFavorites(): Promise<string[]> {
+    try {
+      const result = await request<{ favorites: string[] }>('/api/user-prefs/favorites');
+      return result.favorites;
+    } catch {
+      return [];
+    }
+  },
+
+  async toggleFavorite(name: string): Promise<string[]> {
+    const result = await request<{ favorites: string[] }>('/api/user-prefs/favorites', {
+      method: 'POST',
+      body: JSON.stringify({ name }),
+    });
+    return result.favorites;
+  },
+
+  async getRecentlyUsed(): Promise<string[]> {
+    try {
+      const result = await request<{ recentlyUsed: string[] }>('/api/user-prefs/recent');
+      return result.recentlyUsed;
+    } catch {
+      return [];
+    }
+  },
+
+  async trackUsage(name: string): Promise<string[]> {
+    try {
+      const result = await request<{ recentlyUsed: string[] }>('/api/user-prefs/recent', {
+        method: 'POST',
+        body: JSON.stringify({ name }),
+      });
+      return result.recentlyUsed;
+    } catch {
+      return [];
+    }
+  },
+
+  async getCompatibleDimensions(metrics: string[]): Promise<SemanticDimension[]> {
+    const search = new URLSearchParams();
+    if (metrics.length > 0) search.set('metrics', metrics.join(','));
+    try {
+      const result = await request<{ dimensions: SemanticDimension[] }>(
+        `/api/semantic-layer/compatible-dims?${search.toString()}`,
+      );
+      return result.dimensions;
+    } catch {
+      return [];
     }
   },
 
@@ -132,6 +335,43 @@ export const api = {
     } catch (e: any) {
       return { error: e.message ?? 'Failed to compose query' };
     }
+  },
+
+  async previewSemanticBuilder(payload: {
+    metrics: string[];
+    dimensions: string[];
+    filters?: Array<{ dimension: string; operator: string; values: string[] }>;
+    timeDimension?: { name: string; granularity: string };
+    orderBy?: Array<{ name: string; direction: 'asc' | 'desc' }>;
+    limit?: number;
+  }): Promise<{ sql: string; joins: string[]; tables: string[]; result: QueryResult } | { error: string }> {
+    try {
+      return await request<{ sql: string; joins: string[]; tables: string[]; result: QueryResult }>('/api/semantic-builder/preview', {
+        method: 'POST',
+        body: JSON.stringify(payload),
+      });
+    } catch (e: any) {
+      return { error: e.message ?? 'Failed to preview semantic block' };
+    }
+  },
+
+  async saveSemanticBuilder(payload: {
+    name: string;
+    domain?: string;
+    description?: string;
+    owner?: string;
+    tags?: string[];
+    metrics: string[];
+    dimensions: string[];
+    filters?: Array<{ dimension: string; operator: string; values: string[] }>;
+    timeDimension?: { name: string; granularity: string };
+    chart?: string;
+    blockType?: 'semantic' | 'custom';
+  }): Promise<{ path: string; content: string; companionPath: string }> {
+    return request<{ path: string; content: string; companionPath: string }>('/api/semantic-builder/save', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    });
   },
 
   async createMetric(metric: {

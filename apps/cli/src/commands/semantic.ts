@@ -4,6 +4,8 @@
  *   dql semantic validate [path]   — Validate semantic layer definitions
  *   dql semantic query [path]      — Compose a SQL query from metric/dimension names
  *   dql semantic pull [path]       — Pull/refresh a remote semantic layer repo cache
+ *   dql semantic import <provider> [path] — Import provider metadata into local semantic-layer YAML
+ *   dql semantic sync [path]       — Re-run the last semantic import from manifest
  */
 
 import { resolve, join } from 'node:path';
@@ -12,15 +14,21 @@ import {
   resolveSemanticLayerWithDiagnostics,
   pullCachedRepo,
 } from '@duckcodeailabs/dql-core';
+import { QueryExecutor } from '@duckcodeailabs/dql-connectors';
 import type { CLIFlags } from '../args.js';
 import { findProjectRoot, loadProjectConfig } from '../local-runtime.js';
+import { loadSemanticImportManifest, performSemanticImport, syncSemanticImport } from '../semantic-import.js';
 
 export async function runSemantic(
   subcommand: string | null,
   rest: string[],
   flags: CLIFlags,
 ): Promise<void> {
-  const targetArg = rest[0] ?? '.';
+  const targetArg = subcommand === 'import'
+    ? (rest[1] ?? '.')
+    : subcommand === 'query'
+      ? '.'
+      : (rest[0] ?? '.');
   const baseDir = resolve(targetArg);
   const projectRoot = findProjectRoot(baseDir);
 
@@ -41,6 +49,10 @@ export async function runSemantic(
       return semanticQuery(semanticConfig, projectRoot, rest.slice(1), flags);
     case 'pull':
       return semanticPull(semanticConfig, flags);
+    case 'import':
+      return semanticImport(projectRoot, rest, flags);
+    case 'sync':
+      return semanticSync(projectRoot, flags);
     default:
       console.log(`
   dql semantic — Semantic layer management
@@ -50,6 +62,8 @@ export async function runSemantic(
     dql semantic validate [path]             Validate semantic layer definitions
     dql semantic query <metrics> [dims]      Compose a SQL query from metric/dimension names
     dql semantic pull [path]                 Refresh remote semantic layer cache
+    dql semantic import <provider> [path]    Import provider metadata into local semantic-layer YAML
+    dql semantic sync [path]                 Refresh the last semantic import from manifest
 
   Options:
     --format json|text    Output format (default: text)
@@ -311,4 +325,139 @@ function semanticPull(
     }
     console.log(`  Cache: ${result.localPath}`);
   }
+}
+
+async function semanticImport(
+  projectRoot: string,
+  rest: string[],
+  flags: CLIFlags,
+): Promise<void> {
+  const provider = rest[0] as 'dbt' | 'cubejs' | 'snowflake' | undefined;
+  if (!provider || (provider !== 'dbt' && provider !== 'cubejs' && provider !== 'snowflake')) {
+    console.error('Usage: dql semantic import <dbt|cubejs|snowflake> [path] [--input <source-path>]');
+    process.exit(1);
+  }
+
+  const config = loadProjectConfig(projectRoot);
+  const sourceConfig = buildImportSourceConfig(provider, config.semanticLayer, flags.input, projectRoot);
+  const executeQuery = provider === 'snowflake'
+    ? createSnowflakeQueryExecutor(config, projectRoot)
+    : undefined;
+  const result = await performSemanticImport({
+    targetProjectRoot: projectRoot,
+    provider,
+    sourceConfig,
+    executeQuery,
+  });
+
+  if (flags.format === 'json') {
+    console.log(JSON.stringify(result, null, 2));
+    return;
+  }
+
+  console.log(`\n  ✓ Imported semantic layer from ${provider}`);
+  console.log(`    Target: ${projectRoot}`);
+  console.log(`    Manifest: ${join(projectRoot, 'semantic-layer', 'imports', 'manifest.json')}`);
+  console.log('');
+  console.log('  Imported objects:');
+  for (const [kind, count] of Object.entries(result.counts)) {
+    console.log(`    ${kind}: ${count}`);
+  }
+  if (result.manifest.warnings.length > 0) {
+    console.log('');
+    console.log('  Warnings:');
+    for (const warning of result.manifest.warnings) {
+      console.log(`    - ${warning}`);
+    }
+  }
+  console.log('');
+}
+
+async function semanticSync(
+  projectRoot: string,
+  flags: CLIFlags,
+): Promise<void> {
+  const config = loadProjectConfig(projectRoot);
+  const manifest = loadSemanticImportManifest(projectRoot);
+  if (!manifest) {
+    console.error('No semantic import manifest found. Run `dql semantic import <provider>` first.');
+    process.exit(1);
+  }
+
+  const executeQuery = manifest.provider === 'snowflake'
+    ? createSnowflakeQueryExecutor(config, projectRoot)
+    : undefined;
+  const result = await syncSemanticImport({
+    targetProjectRoot: projectRoot,
+    executeQuery,
+  });
+
+  if (flags.format === 'json') {
+    console.log(JSON.stringify(result, null, 2));
+    return;
+  }
+
+  console.log(`\n  ✓ Synced semantic import from ${manifest.provider}`);
+  console.log(`    Imported at: ${result.manifest.importedAt}`);
+  console.log(`    Manifest: ${join(projectRoot, 'semantic-layer', 'imports', 'manifest.json')}`);
+  console.log('');
+}
+
+function buildImportSourceConfig(
+  provider: 'dbt' | 'cubejs' | 'snowflake',
+  semanticConfig: unknown,
+  inputPath: string,
+  projectRoot: string,
+) {
+  const current = (semanticConfig ?? {}) as {
+    projectPath?: string;
+    repoUrl?: string;
+    branch?: string;
+    subPath?: string;
+    connection?: string;
+    source?: 'local' | 'github' | 'gitlab';
+  };
+
+  if (provider === 'snowflake') {
+    return {
+      provider,
+      projectPath: current.projectPath,
+      connection: current.connection,
+    };
+  }
+
+  if (inputPath) {
+    return {
+      provider,
+      projectPath: resolve(projectRoot, inputPath),
+    };
+  }
+
+  return {
+    provider,
+    projectPath: current.projectPath,
+    repoUrl: current.repoUrl,
+    branch: current.branch,
+    subPath: current.subPath,
+    source: current.source,
+  };
+}
+
+function createSnowflakeQueryExecutor(
+  config: ReturnType<typeof loadProjectConfig>,
+  projectRoot: string,
+) {
+  const connection = config.defaultConnection;
+  if (!connection || connection.driver !== 'snowflake') {
+    throw new Error('Snowflake semantic import requires a default Snowflake connection in dql.config.json.');
+  }
+  const executor = new QueryExecutor();
+  const normalizedConnection = {
+    ...connection,
+    filepath: connection.filepath ? resolve(projectRoot, connection.filepath) : connection.filepath,
+  };
+  return async (sql: string) => {
+    const result = await executor.executeQuery(sql, [], {}, normalizedConnection);
+    return { rows: result.rows };
+  };
 }

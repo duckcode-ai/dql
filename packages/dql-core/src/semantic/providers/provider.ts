@@ -18,8 +18,26 @@ export interface SemanticLayerProviderConfig {
   connection?: string;
 }
 
+export interface ImportPreview {
+  metrics: Array<{ name: string; label: string; domain?: string; type?: string; table?: string }>;
+  dimensions: Array<{ name: string; label: string; domain?: string; type?: string; table?: string }>;
+  cubes: Array<{ name: string; label: string; domain?: string; table?: string }>;
+  domains: string[];
+  warnings: string[];
+  totalMetrics: number;
+  totalDimensions: number;
+}
+
+export interface ImportValidationResult {
+  valid: boolean;
+  errors: string[];
+  warnings: string[];
+}
+
 export interface SemanticLayerProvider {
   readonly name: string;
   /** Load semantic definitions and populate a SemanticLayer instance. */
   load(config: SemanticLayerProviderConfig, projectRoot: string): SemanticLayer;
+  preview?(config: SemanticLayerProviderConfig, projectRoot: string): ImportPreview;
+  validate?(config: SemanticLayerProviderConfig, projectRoot: string): ImportValidationResult;
 }

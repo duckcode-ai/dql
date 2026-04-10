@@ -5,6 +5,15 @@
 
 import { getDialect, type SQLDialect } from './sql-dialect.js';
 
+export interface SemanticSourceMetadata {
+  provider: string;
+  objectType: string;
+  objectId: string;
+  objectName?: string;
+  importedAt?: string;
+  extra?: Record<string, unknown>;
+}
+
 export interface MetricDefinition {
   name: string;
   label: string;
@@ -16,16 +25,23 @@ export interface MetricDefinition {
   filters?: Record<string, string>;
   tags?: string[];
   owner?: string;
+  cube?: string;
+  aggregation?: string;
+  source?: SemanticSourceMetadata;
 }
 
 export interface DimensionDefinition {
   name: string;
   label: string;
   description: string;
+  domain?: string;
   sql: string;
   type: 'string' | 'number' | 'date' | 'boolean';
   table: string;
   tags?: string[];
+  owner?: string;
+  cube?: string;
+  source?: SemanticSourceMetadata;
 }
 
 export type HierarchyRollupType = 'sum' | 'count' | 'count_distinct' | 'avg' | 'min' | 'max' | 'none';
@@ -57,9 +73,39 @@ export interface HierarchyDefinition {
   defaultRollup?: HierarchyRollupType;
   tags?: string[];
   owner?: string;
+  source?: SemanticSourceMetadata;
 }
 
 // ── Cube / Semantic Model Types ──
+
+export interface SegmentDefinition {
+  name: string;
+  label: string;
+  description: string;
+  domain?: string;
+  cube: string;
+  sql: string;
+  tags?: string[];
+  owner?: string;
+  source?: SemanticSourceMetadata;
+}
+
+export interface PreAggregationDefinition {
+  name: string;
+  label: string;
+  description: string;
+  domain?: string;
+  cube: string;
+  measures?: string[];
+  dimensions?: string[];
+  timeDimension?: string;
+  granularity?: string;
+  refreshKey?: string;
+  sql?: string;
+  tags?: string[];
+  owner?: string;
+  source?: SemanticSourceMetadata;
+}
 
 export interface JoinDefinition {
   name: string;
@@ -85,9 +131,12 @@ export interface CubeDefinition {
   dimensions: DimensionDefinition[];
   timeDimensions: TimeDimensionDefinition[];
   joins: JoinDefinition[];
+  segments: SegmentDefinition[];
+  preAggregations: PreAggregationDefinition[];
   defaultTimeDimension?: string;
   owner?: string;
   tags?: string[];
+  source?: SemanticSourceMetadata;
 }
 
 export interface ComposeQueryOptions {
@@ -119,6 +168,9 @@ export interface BlockCompanionDefinition {
   owner?: string;
   tags?: string[];
   glossary?: string[];
+  source?: SemanticSourceMetadata;
+  semanticMetrics?: string[];
+  semanticDimensions?: string[];
   semanticMappings?: Record<string, string>;
   lineage?: string[];
   notes?: string[];
@@ -129,6 +181,20 @@ export interface SemanticLayerConfig {
   metrics: MetricDefinition[];
   dimensions: DimensionDefinition[];
   hierarchies?: HierarchyDefinition[];
+  segments?: SegmentDefinition[];
+  preAggregations?: PreAggregationDefinition[];
+}
+
+export interface SemanticSearchOptions {
+  domains?: string[];
+  tags?: string[];
+  types?: Array<'metric' | 'dimension' | 'hierarchy'>;
+}
+
+export interface SemanticSearchResults {
+  metrics: MetricDefinition[];
+  dimensions: DimensionDefinition[];
+  hierarchies: HierarchyDefinition[];
 }
 
 /**
@@ -147,6 +213,9 @@ export function parseMetricDefinition(raw: Record<string, unknown>): MetricDefin
     filters: raw.filters as Record<string, string> | undefined,
     tags: Array.isArray(raw.tags) ? raw.tags.map(String) : undefined,
     owner: raw.owner ? String(raw.owner) : undefined,
+    cube: raw.cube ? String(raw.cube) : undefined,
+    aggregation: raw.aggregation ? String(raw.aggregation) : undefined,
+    source: parseSourceMetadata(raw.source),
   };
 }
 
@@ -155,10 +224,14 @@ export function parseDimensionDefinition(raw: Record<string, unknown>): Dimensio
     name: String(raw.name ?? ''),
     label: String(raw.label ?? raw.name ?? ''),
     description: String(raw.description ?? ''),
+    domain: raw.domain != null ? String(raw.domain) : undefined,
     sql: String(raw.sql ?? ''),
     type: validateDimensionType(String(raw.type ?? 'string')),
     table: String(raw.table ?? ''),
     tags: Array.isArray(raw.tags) ? raw.tags.map(String) : undefined,
+    owner: raw.owner ? String(raw.owner) : undefined,
+    cube: raw.cube ? String(raw.cube) : undefined,
+    source: parseSourceMetadata(raw.source),
   };
 }
 
@@ -209,6 +282,40 @@ export function parseHierarchyDefinition(raw: Record<string, unknown>): Hierarch
     defaultRollup: validateRollupType(String(raw.defaultRollup ?? 'sum')),
     tags: Array.isArray(raw.tags) ? raw.tags.map(String) : undefined,
     owner: raw.owner ? String(raw.owner) : undefined,
+    source: parseSourceMetadata(raw.source),
+  };
+}
+
+export function parseSegmentDefinition(raw: Record<string, unknown>): SegmentDefinition {
+  return {
+    name: String(raw.name ?? ''),
+    label: String(raw.label ?? raw.name ?? ''),
+    description: String(raw.description ?? ''),
+    domain: raw.domain != null ? String(raw.domain) : undefined,
+    cube: String(raw.cube ?? ''),
+    sql: String(raw.sql ?? ''),
+    tags: Array.isArray(raw.tags) ? raw.tags.map(String) : undefined,
+    owner: raw.owner ? String(raw.owner) : undefined,
+    source: parseSourceMetadata(raw.source),
+  };
+}
+
+export function parsePreAggregationDefinition(raw: Record<string, unknown>): PreAggregationDefinition {
+  return {
+    name: String(raw.name ?? ''),
+    label: String(raw.label ?? raw.name ?? ''),
+    description: String(raw.description ?? ''),
+    domain: raw.domain != null ? String(raw.domain) : undefined,
+    cube: String(raw.cube ?? ''),
+    measures: Array.isArray(raw.measures) ? raw.measures.map(String) : undefined,
+    dimensions: Array.isArray(raw.dimensions) ? raw.dimensions.map(String) : undefined,
+    timeDimension: raw.timeDimension != null ? String(raw.timeDimension) : raw.time_dimension != null ? String(raw.time_dimension) : undefined,
+    granularity: raw.granularity != null ? String(raw.granularity) : undefined,
+    refreshKey: raw.refreshKey != null ? String(raw.refreshKey) : raw.refresh_key != null ? String(raw.refresh_key) : undefined,
+    sql: raw.sql != null ? String(raw.sql) : undefined,
+    tags: Array.isArray(raw.tags) ? raw.tags.map(String) : undefined,
+    owner: raw.owner ? String(raw.owner) : undefined,
+    source: parseSourceMetadata(raw.source),
   };
 }
 
@@ -221,6 +328,9 @@ export function parseBlockCompanionDefinition(raw: Record<string, unknown>): Blo
     owner: raw.owner ? String(raw.owner) : undefined,
     tags: Array.isArray(raw.tags) ? raw.tags.map(String) : undefined,
     glossary: Array.isArray(raw.glossary) ? raw.glossary.map(String) : undefined,
+    source: parseSourceMetadata(raw.source),
+    semanticMetrics: Array.isArray(raw.semanticMetrics) ? raw.semanticMetrics.map(String) : undefined,
+    semanticDimensions: Array.isArray(raw.semanticDimensions) ? raw.semanticDimensions.map(String) : undefined,
     semanticMappings:
       raw.semanticMappings && typeof raw.semanticMappings === 'object' && !Array.isArray(raw.semanticMappings)
         ? Object.fromEntries(
@@ -241,6 +351,8 @@ export class SemanticLayer {
   private metrics: Map<string, MetricDefinition> = new Map();
   private dimensions: Map<string, DimensionDefinition> = new Map();
   private hierarchies: Map<string, HierarchyDefinition> = new Map();
+  private segments: Map<string, SegmentDefinition> = new Map();
+  private preAggregations: Map<string, PreAggregationDefinition> = new Map();
   private cubes: Map<string, CubeDefinition> = new Map();
   // cube-name → list of joins for that cube (adjacency list)
   private joinGraph: Map<string, JoinDefinition[]> = new Map();
@@ -250,6 +362,8 @@ export class SemanticLayer {
       for (const m of config.metrics) this.addMetric(m);
       for (const d of config.dimensions) this.addDimension(d);
       for (const h of config.hierarchies ?? []) this.addHierarchy(h);
+      for (const s of config.segments ?? []) this.addSegment(s);
+      for (const p of config.preAggregations ?? []) this.addPreAggregation(p);
     }
   }
 
@@ -264,9 +378,11 @@ export class SemanticLayer {
   addCube(cube: CubeDefinition): void {
     this.cubes.set(cube.name, cube);
     // Auto-populate flat maps for backward compatibility
-    for (const m of cube.measures) this.metrics.set(m.name, m);
-    for (const d of cube.dimensions) this.dimensions.set(d.name, d);
-    for (const td of cube.timeDimensions) this.dimensions.set(td.name, td);
+    for (const m of cube.measures) this.metrics.set(m.name, { ...m, cube: m.cube ?? cube.name, domain: m.domain || cube.domain, owner: m.owner ?? cube.owner, source: m.source ?? cube.source });
+    for (const d of cube.dimensions) this.dimensions.set(d.name, { ...d, cube: d.cube ?? cube.name, domain: d.domain ?? cube.domain, owner: d.owner ?? cube.owner, source: d.source ?? cube.source });
+    for (const td of cube.timeDimensions) this.dimensions.set(td.name, { ...td, cube: td.cube ?? cube.name, domain: td.domain ?? cube.domain, owner: td.owner ?? cube.owner, source: td.source ?? cube.source });
+    for (const segment of cube.segments) this.segments.set(segment.name, { ...segment, cube: segment.cube || cube.name, domain: segment.domain ?? cube.domain, owner: segment.owner ?? cube.owner, source: segment.source ?? cube.source });
+    for (const preAggregation of cube.preAggregations) this.preAggregations.set(preAggregation.name, { ...preAggregation, cube: preAggregation.cube || cube.name, domain: preAggregation.domain ?? cube.domain, owner: preAggregation.owner ?? cube.owner, source: preAggregation.source ?? cube.source });
     // Register joins in adjacency list
     for (const join of cube.joins) {
       const existing = this.joinGraph.get(join.left) ?? [];
@@ -285,6 +401,32 @@ export class SemanticLayer {
 
   listCubes(): CubeDefinition[] {
     return Array.from(this.cubes.values());
+  }
+
+  addSegment(segment: SegmentDefinition): void {
+    this.segments.set(segment.name, segment);
+  }
+
+  addPreAggregation(preAggregation: PreAggregationDefinition): void {
+    this.preAggregations.set(preAggregation.name, preAggregation);
+  }
+
+  getSegment(name: string): SegmentDefinition | undefined {
+    return this.segments.get(name);
+  }
+
+  getPreAggregation(name: string): PreAggregationDefinition | undefined {
+    return this.preAggregations.get(name);
+  }
+
+  listSegments(domain?: string): SegmentDefinition[] {
+    const all = Array.from(this.segments.values());
+    return domain ? all.filter((segment) => segment.domain === domain) : all;
+  }
+
+  listPreAggregations(domain?: string): PreAggregationDefinition[] {
+    const all = Array.from(this.preAggregations.values());
+    return domain ? all.filter((preAggregation) => preAggregation.domain === domain) : all;
   }
 
   /** BFS shortest join path between two cube names. Returns empty array if same cube. */
@@ -546,13 +688,53 @@ export class SemanticLayer {
     return domain ? all.filter((m) => m.domain === domain) : all;
   }
 
-  listDimensions(): DimensionDefinition[] {
-    return Array.from(this.dimensions.values());
+  listDimensions(domain?: string): DimensionDefinition[] {
+    const all = Array.from(this.dimensions.values());
+    return domain ? all.filter((d) => d.domain === domain) : all;
   }
 
   listHierarchies(domain?: string): HierarchyDefinition[] {
     const all = Array.from(this.hierarchies.values());
     return domain ? all.filter((h) => h.domain === domain) : all;
+  }
+
+  listDomains(): string[] {
+    const domains = new Set<string>();
+    for (const metric of this.metrics.values()) {
+      if (metric.domain) domains.add(metric.domain);
+    }
+    for (const dimension of this.dimensions.values()) {
+      if (dimension.domain) domains.add(dimension.domain);
+    }
+    for (const hierarchy of this.hierarchies.values()) {
+      if (hierarchy.domain) domains.add(hierarchy.domain);
+    }
+    for (const segment of this.segments.values()) {
+      if (segment.domain) domains.add(segment.domain);
+    }
+    for (const preAggregation of this.preAggregations.values()) {
+      if (preAggregation.domain) domains.add(preAggregation.domain);
+    }
+    for (const cube of this.cubes.values()) {
+      if (cube.domain) domains.add(cube.domain);
+    }
+    return Array.from(domains).sort((a, b) => a.localeCompare(b));
+  }
+
+  listTags(): string[] {
+    const tags = new Set<string>();
+    const collect = (values?: string[]) => {
+      for (const value of values ?? []) {
+        if (value) tags.add(value);
+      }
+    };
+    for (const metric of this.metrics.values()) collect(metric.tags);
+    for (const dimension of this.dimensions.values()) collect(dimension.tags);
+    for (const hierarchy of this.hierarchies.values()) collect(hierarchy.tags);
+    for (const segment of this.segments.values()) collect(segment.tags);
+    for (const preAggregation of this.preAggregations.values()) collect(preAggregation.tags);
+    for (const cube of this.cubes.values()) collect(cube.tags);
+    return Array.from(tags).sort((a, b) => a.localeCompare(b));
   }
 
   resolveDrillPath(hierarchyName: string, drillPathName?: string): HierarchyLevelDefinition[] {
@@ -606,6 +788,85 @@ export class SemanticLayer {
           d.description.toLowerCase().includes(q),
       ),
     };
+  }
+
+  searchAdvanced(query: string, options: SemanticSearchOptions = {}): SemanticSearchResults {
+    const q = query.trim().toLowerCase();
+    const domainSet = new Set((options.domains ?? []).filter(Boolean));
+    const tagSet = new Set((options.tags ?? []).filter(Boolean));
+    const typeSet = new Set(options.types ?? []);
+
+    const matchesQuery = (values: Array<string | undefined>): boolean => {
+      if (!q) return true;
+      return values.some((value) => (value ?? '').toLowerCase().includes(q));
+    };
+    const matchesDomain = (domain?: string): boolean => domainSet.size === 0 || (!!domain && domainSet.has(domain));
+    const matchesTags = (tags?: string[]): boolean => tagSet.size === 0 || (tags ?? []).some((tag) => tagSet.has(tag));
+    const wantsType = (type: 'metric' | 'dimension' | 'hierarchy'): boolean => typeSet.size === 0 || typeSet.has(type);
+
+    return {
+      metrics: wantsType('metric')
+        ? Array.from(this.metrics.values()).filter((metric) =>
+            matchesQuery([metric.name, metric.label, metric.description, metric.table, metric.domain, ...(metric.tags ?? [])]) &&
+            matchesDomain(metric.domain) &&
+            matchesTags(metric.tags),
+          )
+        : [],
+      dimensions: wantsType('dimension')
+        ? Array.from(this.dimensions.values()).filter((dimension) =>
+            matchesQuery([dimension.name, dimension.label, dimension.description, dimension.table, dimension.domain, ...(dimension.tags ?? [])]) &&
+            matchesDomain(dimension.domain) &&
+            matchesTags(dimension.tags),
+          )
+        : [],
+      hierarchies: wantsType('hierarchy')
+        ? Array.from(this.hierarchies.values()).filter((hierarchy) =>
+            matchesQuery([hierarchy.name, hierarchy.label, hierarchy.description, hierarchy.domain, ...(hierarchy.tags ?? [])]) &&
+            matchesDomain(hierarchy.domain) &&
+            matchesTags(hierarchy.tags),
+          )
+        : [],
+    };
+  }
+
+  listCompatibleDimensions(metricNames: string[]): DimensionDefinition[] {
+    const resolvedMetrics = metricNames
+      .map((name) => this.metrics.get(name))
+      .filter((metric): metric is MetricDefinition => Boolean(metric));
+    if (resolvedMetrics.length === 0) return [];
+
+    const reachableTables = new Set<string>();
+    const resolveCubeNameForTable = (table: string): string | undefined => {
+      for (const cube of this.cubes.values()) {
+        if (cube.table === table || cube.name === table) return cube.name;
+      }
+      return undefined;
+    };
+
+    for (const metric of resolvedMetrics) {
+      reachableTables.add(metric.table);
+      const cubeName = resolveCubeNameForTable(metric.table);
+      if (!cubeName) continue;
+
+      const queue = [cubeName];
+      const visited = new Set<string>(queue);
+      while (queue.length > 0) {
+        const current = queue.shift()!;
+        const cube = this.cubes.get(current);
+        if (cube?.table) reachableTables.add(cube.table);
+        const joins = this.joinGraph.get(current) ?? [];
+        for (const join of joins) {
+          const next = join.right;
+          if (visited.has(next)) continue;
+          visited.add(next);
+          queue.push(next);
+        }
+      }
+    }
+
+    return Array.from(this.dimensions.values())
+      .filter((dimension) => reachableTables.has(dimension.table))
+      .sort((a, b) => a.label.localeCompare(b.label));
   }
 
   /**
@@ -666,19 +927,24 @@ export function parseCubeDefinition(raw: Record<string, unknown>): CubeDefinitio
   const dimensionsRaw = Array.isArray(raw.dimensions) ? raw.dimensions : [];
   const timeDimsRaw = Array.isArray(raw.time_dimensions ?? raw.timeDimensions) ? (raw.time_dimensions ?? raw.timeDimensions) as unknown[] : [];
   const joinsRaw = Array.isArray(raw.joins) ? raw.joins : [];
+  const segmentsRaw = Array.isArray(raw.segments) ? raw.segments : [];
+  const preAggregationsRaw = Array.isArray(raw.pre_aggregations ?? raw.preAggregations) ? (raw.pre_aggregations ?? raw.preAggregations) as unknown[] : [];
+  const cubeName = String(raw.name ?? '');
+  const cubeTable = String(raw.table ?? raw.name ?? '');
+  const cubeSource = parseSourceMetadata(raw.source);
 
   const measures = measuresRaw
     .filter((m): m is Record<string, unknown> => !!m && typeof m === 'object')
-    .map((m) => parseMetricDefinition({ ...m, table: String(raw.table ?? raw.name ?? '') }));
+    .map((m) => parseMetricDefinition({ ...m, table: cubeTable, cube: cubeName, source: m.source ?? cubeSource }));
 
   const dimensions = dimensionsRaw
     .filter((d): d is Record<string, unknown> => !!d && typeof d === 'object')
-    .map((d) => parseDimensionDefinition({ ...d, table: String(raw.table ?? raw.name ?? '') }));
+    .map((d) => parseDimensionDefinition({ ...d, table: cubeTable, cube: cubeName, source: d.source ?? cubeSource }));
 
   const timeDimensions = (timeDimsRaw as unknown[])
     .filter((td): td is Record<string, unknown> => !!td && typeof td === 'object')
     .map((td): TimeDimensionDefinition => {
-      const base = parseDimensionDefinition({ ...td, table: String(raw.table ?? raw.name ?? ''), type: 'date' });
+      const base = parseDimensionDefinition({ ...td, table: cubeTable, cube: cubeName, type: 'date', source: (td as Record<string, unknown>).source ?? cubeSource });
       const granRaw = Array.isArray((td as Record<string, unknown>).granularities) ? (td as Record<string, unknown>).granularities as unknown[] : ['day', 'month', 'year'];
       const validGranularities = ['day', 'week', 'month', 'quarter', 'year'];
       return {
@@ -692,26 +958,37 @@ export function parseCubeDefinition(raw: Record<string, unknown>): CubeDefinitio
     .filter((j): j is Record<string, unknown> => !!j && typeof j === 'object')
     .map((j): JoinDefinition => ({
       name: String(j.name ?? ''),
-      left: String(raw.name ?? ''),
-      right: String(j.name ?? ''),
+      left: String(j.left ?? cubeName),
+      right: String(j.right ?? j.name ?? ''),
       type: (['inner', 'left', 'right', 'full'].includes(String(j.type ?? 'left')) ? String(j.type ?? 'left') : 'left') as JoinDefinition['type'],
       sql: String(j.sql ?? ''),
     }));
 
+  const segments = segmentsRaw
+    .filter((s): s is Record<string, unknown> => !!s && typeof s === 'object')
+    .map((s) => parseSegmentDefinition({ ...s, cube: cubeName, domain: raw.domain, source: s.source ?? cubeSource }));
+
+  const preAggregations = preAggregationsRaw
+    .filter((p): p is Record<string, unknown> => !!p && typeof p === 'object')
+    .map((p) => parsePreAggregationDefinition({ ...p, cube: cubeName, domain: raw.domain, source: p.source ?? cubeSource }));
+
   return {
-    name: String(raw.name ?? ''),
+    name: cubeName,
     label: String(raw.label ?? raw.name ?? ''),
     description: String(raw.description ?? ''),
-    sql: String(raw.sql ?? `SELECT * FROM ${String(raw.table ?? raw.name ?? '')}`),
-    table: String(raw.table ?? raw.name ?? ''),
+    sql: String(raw.sql ?? `SELECT * FROM ${cubeTable}`),
+    table: cubeTable,
     domain: String(raw.domain ?? ''),
     measures,
     dimensions,
     timeDimensions,
     joins,
+    segments,
+    preAggregations,
     defaultTimeDimension: raw.default_time_dimension != null ? String(raw.default_time_dimension) : undefined,
     owner: raw.owner ? String(raw.owner) : undefined,
     tags: Array.isArray(raw.tags) ? raw.tags.map(String) : undefined,
+    source: cubeSource,
   };
 }
 
@@ -736,4 +1013,24 @@ function validateReviewStatus(value: unknown): BlockCompanionDefinition['reviewS
     return normalized;
   }
   return undefined;
+}
+
+function parseSourceMetadata(value: unknown): SemanticSourceMetadata | undefined {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
+  const raw = value as Record<string, unknown>;
+  const provider = raw.provider ? String(raw.provider) : '';
+  const objectType = raw.objectType ? String(raw.objectType) : raw.object_type ? String(raw.object_type) : '';
+  const objectId = raw.objectId ? String(raw.objectId) : raw.object_id ? String(raw.object_id) : '';
+  if (!provider || !objectType || !objectId) return undefined;
+  const extra = raw.extra && typeof raw.extra === 'object' && !Array.isArray(raw.extra)
+    ? raw.extra as Record<string, unknown>
+    : undefined;
+  return {
+    provider,
+    objectType,
+    objectId,
+    objectName: raw.objectName ? String(raw.objectName) : raw.object_name ? String(raw.object_name) : undefined,
+    importedAt: raw.importedAt ? String(raw.importedAt) : raw.imported_at ? String(raw.imported_at) : undefined,
+    extra,
+  };
 }

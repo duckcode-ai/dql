@@ -1,1164 +1,770 @@
-import type { Theme } from '../../themes/notebook-theme';
-import React, { useState, useEffect, useMemo } from 'react';
-import { useNotebook, makeCell } from '../../store/NotebookStore';
-import { themes } from '../../themes/notebook-theme';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { api } from '../../api/client';
-import type { SemanticMetric, SemanticDimension, SemanticHierarchy } from '../../store/types';
+import { insertSemanticReference, serializeSemanticDragRef } from '../../editor/semantic-completions';
+import { makeCell, useNotebook } from '../../store/NotebookStore';
+import type {
+  SemanticLayerState,
+  SemanticObjectDetail,
+  SemanticTreeNode,
+} from '../../store/types';
+import type { Theme } from '../../themes/notebook-theme';
+import { themes } from '../../themes/notebook-theme';
+import { MetricDetailPanel } from './MetricDetailPanel';
+import { SemanticSearchBar } from './SemanticSearchBar';
+import { SemanticTreeNode as TreeRow } from './SemanticTreeNode';
 
-const METRIC_TYPE_COLORS: Record<string, string> = {
-  sum: '#56d364',
-  count: '#388bfd',
-  count_distinct: '#388bfd',
-  avg: '#e3b341',
-  min: '#f778ba',
-  max: '#f778ba',
-  custom: '#d2a8ff',
-};
-
-function MetricIcon() {
+function PanelSectionHeader({ label, count, t }: { label: string; count?: number; t: Theme }) {
   return (
-    <svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor">
-      <path d="M8 1a7 7 0 1 0 0 14A7 7 0 0 0 8 1Zm0 1.5a5.5 5.5 0 1 1 0 11 5.5 5.5 0 0 1 0-11Zm0 2a.75.75 0 0 1 .75.75v2h2a.75.75 0 0 1 0 1.5h-2v2a.75.75 0 0 1-1.5 0v-2h-2a.75.75 0 0 1 0-1.5h2v-2A.75.75 0 0 1 8 4.5Z" />
-    </svg>
-  );
-}
-
-function DimensionIcon() {
-  return (
-    <svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor">
-      <path d="M1 2.75C1 1.784 1.784 1 2.75 1h10.5c.966 0 1.75.784 1.75 1.75v10.5A1.75 1.75 0 0 1 13.25 15H2.75A1.75 1.75 0 0 1 1 13.25Zm1.75-.25a.25.25 0 0 0-.25.25v10.5c0 .138.112.25.25.25h10.5a.25.25 0 0 0 .25-.25V2.75a.25.25 0 0 0-.25-.25ZM8 4a.75.75 0 0 1 .75.75v6.5a.75.75 0 0 1-1.5 0v-6.5A.75.75 0 0 1 8 4Zm-3 3a.75.75 0 0 1 .75.75v3.5a.75.75 0 0 1-1.5 0v-3.5A.75.75 0 0 1 5 7Zm6-1a.75.75 0 0 1 .75.75v4.5a.75.75 0 0 1-1.5 0v-4.5A.75.75 0 0 1 11 6Z" />
-    </svg>
-  );
-}
-
-function HierarchyIcon() {
-  return (
-    <svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor">
-      <path d="M8 1a1 1 0 0 1 1 1v2.586l2.293-2.293a1 1 0 0 1 1.414 1.414L10.414 6H13a1 1 0 1 1 0 2h-2.586l2.293 2.293a1 1 0 0 1-1.414 1.414L9 9.414V12a1 1 0 1 1-2 0V9.414l-2.293 2.293a1 1 0 0 1-1.414-1.414L5.586 8H3a1 1 0 0 1 0-2h2.586L3.293 3.707a1 1 0 0 1 1.414-1.414L7 4.586V2a1 1 0 0 1 1-1Z" />
-    </svg>
-  );
-}
-
-function SectionHeader({
-  label,
-  count,
-  expanded,
-  onToggle,
-  t,
-}: {
-  label: string;
-  count: number;
-  expanded: boolean;
-  onToggle: () => void;
-  t: Theme;
-}) {
-  const [hovered, setHovered] = useState(false);
-  return (
-    <button
-      onClick={onToggle}
-      onMouseEnter={() => setHovered(true)}
-      onMouseLeave={() => setHovered(false)}
+    <div
       style={{
-        width: '100%',
-        display: 'flex',
-        alignItems: 'center',
-        gap: 6,
-        padding: '3px 8px 3px 10px',
-        background: hovered ? t.sidebarItemHover : 'transparent',
-        border: 'none',
-        cursor: 'pointer',
-        color: t.textSecondary,
-        fontSize: 11,
-        fontWeight: 600,
+        padding: '8px 10px 4px',
+        fontSize: 10,
+        fontWeight: 700,
+        color: t.textMuted,
         fontFamily: t.font,
-        letterSpacing: '0.04em',
-        textTransform: 'uppercase' as const,
-        textAlign: 'left' as const,
-        transition: 'background 0.1s',
+        textTransform: 'uppercase',
+        letterSpacing: '0.05em',
       }}
     >
-      <svg
-        width="10"
-        height="10"
-        viewBox="0 0 10 10"
-        fill="currentColor"
-        style={{
-          transform: expanded ? 'rotate(90deg)' : 'rotate(0deg)',
-          transition: 'transform 0.15s',
-          flexShrink: 0,
-        }}
-      >
-        <path d="M3 2l4 3-4 3V2Z" />
-      </svg>
-      <span style={{ flex: 1 }}>{label}</span>
-      {count > 0 && (
-        <span
-          style={{
-            background: t.pillBg,
-            color: t.textMuted,
-            borderRadius: 10,
-            padding: '0 5px',
-            fontSize: 10,
-            fontWeight: 500,
-          }}
-        >
-          {count}
-        </span>
-      )}
-    </button>
-  );
-}
-
-function MetricRow({ metric, t }: { metric: SemanticMetric; t: Theme }) {
-  const [hovered, setHovered] = useState(false);
-  const [expanded, setExpanded] = useState(false);
-  const typeColor = METRIC_TYPE_COLORS[metric.type] ?? t.accent;
-
-  return (
-    <div>
-      <button
-        onClick={() => setExpanded(!expanded)}
-        onMouseEnter={() => setHovered(true)}
-        onMouseLeave={() => setHovered(false)}
-        style={{
-          width: '100%',
-          display: 'flex',
-          alignItems: 'center',
-          gap: 6,
-          padding: '4px 8px 4px 22px',
-          background: hovered ? t.sidebarItemHover : 'transparent',
-          border: 'none',
-          cursor: 'pointer',
-          color: t.textPrimary,
-          fontSize: 12,
-          fontFamily: t.font,
-          textAlign: 'left' as const,
-          transition: 'background 0.1s',
-        }}
-      >
-        <span style={{ color: typeColor, flexShrink: 0 }}>
-          <MetricIcon />
-        </span>
-        <span
-          style={{
-            flex: 1,
-            overflow: 'hidden',
-            textOverflow: 'ellipsis',
-            whiteSpace: 'nowrap',
-          }}
-        >
-          {metric.label || metric.name}
-        </span>
-        <span
-          style={{
-            fontSize: 9,
-            fontFamily: t.fontMono,
-            color: typeColor,
-            background: `${typeColor}18`,
-            borderRadius: 4,
-            padding: '1px 4px',
-            flexShrink: 0,
-          }}
-        >
-          {metric.type}
-        </span>
-      </button>
-      {expanded && (
-        <div style={{ padding: '2px 8px 6px 40px', fontSize: 11, color: t.textMuted, fontFamily: t.font, lineHeight: 1.5 }}>
-          {metric.description && <div>{metric.description}</div>}
-          <div style={{ fontFamily: t.fontMono, fontSize: 10, color: t.textSecondary, marginTop: 2 }}>
-            table: {metric.table}
-          </div>
-          {metric.domain && (
-            <div style={{ fontFamily: t.fontMono, fontSize: 10, color: t.textSecondary }}>
-              domain: {metric.domain}
-            </div>
-          )}
-          {metric.tags.length > 0 && (
-            <div style={{ display: 'flex', gap: 3, flexWrap: 'wrap', marginTop: 3 }}>
-              {metric.tags.map((tag) => (
-                <span
-                  key={tag}
-                  style={{
-                    fontSize: 9,
-                    background: t.pillBg,
-                    color: t.textMuted,
-                    borderRadius: 3,
-                    padding: '1px 4px',
-                  }}
-                >
-                  {tag}
-                </span>
-              ))}
-            </div>
-          )}
-        </div>
-      )}
+      {label}
+      {typeof count === 'number' ? ` · ${count}` : ''}
     </div>
   );
 }
 
-function DimensionRow({ dimension, t }: { dimension: SemanticDimension; t: Theme }) {
-  const [hovered, setHovered] = useState(false);
-  const typeColor = dimension.type === 'date' ? '#e3b341' : dimension.type === 'number' ? '#56d364' : '#388bfd';
+function SetupState({
+  t,
+  provider,
+  onImport,
+  onRefresh,
+}: {
+  t: Theme;
+  provider: string | null;
+  onImport: (provider: 'dbt' | 'cubejs' | 'snowflake') => void;
+  onRefresh: () => void;
+}) {
+  const codeStyle = { background: t.pillBg, padding: '1px 4px', borderRadius: 3, fontSize: 10, fontFamily: t.fontMono } as const;
+  const suggestedProvider = provider === 'cubejs' || provider === 'snowflake' ? provider : 'dbt';
+
+  return (
+    <div style={{ flex: 1, overflowY: 'auto', padding: '12px 14px', fontFamily: t.font }}>
+      <div style={{ fontSize: 12, fontWeight: 600, color: t.textPrimary, marginBottom: 8 }}>Semantic layer not loaded</div>
+      <div style={{ fontSize: 11, color: t.textMuted, lineHeight: 1.6, marginBottom: 10 }}>
+        Import your provider metadata into <code style={codeStyle}>semantic-layer/</code> or refresh the current project state.
+      </div>
+      <div style={{ display: 'flex', gap: 8, marginTop: 12 }}>
+        <button
+          onClick={() => onImport(suggestedProvider)}
+          style={{ background: t.accent, border: 'none', borderRadius: 6, color: '#fff', cursor: 'pointer', fontSize: 11, fontFamily: t.font, padding: '6px 14px' }}
+        >
+          Import {suggestedProvider}
+        </button>
+        <button
+          onClick={onRefresh}
+          style={{ background: 'transparent', border: `1px solid ${t.cellBorder}`, borderRadius: 6, color: t.textSecondary, cursor: 'pointer', fontSize: 11, fontFamily: t.font, padding: '6px 12px' }}
+        >
+          Refresh
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function GuidedBuilderPanel({
+  t,
+  semanticLayer,
+  onClose,
+  onSaved,
+}: {
+  t: Theme;
+  semanticLayer: SemanticLayerState;
+  onClose: () => void;
+  onSaved: (result: { path: string; content: string; companionPath: string }) => void;
+}) {
+  const [step, setStep] = useState(1);
+  const [name, setName] = useState('new_semantic_block');
+  const [domain, setDomain] = useState('');
+  const [description, setDescription] = useState('');
+  const [owner, setOwner] = useState('');
+  const [tags, setTags] = useState('');
+  const [chart, setChart] = useState('table');
+  const [blockType, setBlockType] = useState<'semantic' | 'custom'>('semantic');
+  const [metrics, setMetrics] = useState<string[]>([]);
+  const [dimensions, setDimensions] = useState<string[]>([]);
+  const [timeDimensionName, setTimeDimensionName] = useState('');
+  const [granularity, setGranularity] = useState('month');
+  const [preview, setPreview] = useState<{ sql: string; joins: string[]; tables: string[]; result: any } | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [loadingCompatibleDimensions, setLoadingCompatibleDimensions] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [compatibleDimensions, setCompatibleDimensions] = useState(semanticLayer.dimensions);
+
+  useEffect(() => {
+    let cancelled = false;
+    if (metrics.length === 0) {
+      setCompatibleDimensions(semanticLayer.dimensions);
+      return;
+    }
+    setLoadingCompatibleDimensions(true);
+    void api.getCompatibleDimensions(metrics)
+      .then((dimensions) => {
+        if (!cancelled) {
+          setCompatibleDimensions(dimensions);
+        }
+      })
+      .finally(() => {
+        if (!cancelled) {
+          setLoadingCompatibleDimensions(false);
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [metrics, semanticLayer.dimensions]);
+
+  const timeDimensions = compatibleDimensions.filter((dimension) => dimension.type === 'date');
+  const categoricalDimensions = compatibleDimensions.filter((dimension) => dimension.type !== 'date');
+
+  const toggle = (value: string, values: string[], setValues: React.Dispatch<React.SetStateAction<string[]>>) => {
+    setValues((prev) => prev.includes(value) ? prev.filter((item) => item !== value) : [...prev, value]);
+  };
+
+  const inputStyle: React.CSSProperties = {
+    width: '100%',
+    background: t.inputBg,
+    border: `1px solid ${t.inputBorder}`,
+    borderRadius: 6,
+    color: t.textPrimary,
+    fontSize: 12,
+    fontFamily: t.font,
+    padding: '7px 10px',
+    outline: 'none',
+    boxSizing: 'border-box',
+  };
+
+  const handlePreview = async () => {
+    if (metrics.length === 0) {
+      setError('Select at least one metric.');
+      return;
+    }
+    setLoading(true);
+    setError(null);
+    const response = await api.previewSemanticBuilder({
+      metrics,
+      dimensions,
+      timeDimension: timeDimensionName ? { name: timeDimensionName, granularity } : undefined,
+    });
+    setLoading(false);
+    if ('error' in response) {
+      setError(response.error);
+      return;
+    }
+    setPreview(response);
+    setStep(3);
+  };
+
+  const handleSave = async () => {
+    if (!name.trim()) {
+      setError('Block name is required.');
+      return;
+    }
+    setSaving(true);
+    setError(null);
+    try {
+      const result = await api.saveSemanticBuilder({
+        name: name.trim(),
+        domain: domain.trim() || undefined,
+        description: description.trim() || undefined,
+        owner: owner.trim() || undefined,
+        tags: tags.split(',').map((tag) => tag.trim()).filter(Boolean),
+        metrics,
+        dimensions,
+        timeDimension: timeDimensionName ? { name: timeDimensionName, granularity } : undefined,
+        chart,
+        blockType,
+      });
+      onSaved(result);
+      onClose();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setSaving(false);
+    }
+  };
 
   return (
     <div
-      onMouseEnter={() => setHovered(true)}
-      onMouseLeave={() => setHovered(false)}
       style={{
+        position: 'absolute',
+        inset: 0,
+        zIndex: 200,
+        background: `${t.sidebarBg}f4`,
         display: 'flex',
-        alignItems: 'center',
-        gap: 6,
-        padding: '4px 8px 4px 22px',
-        background: hovered ? t.sidebarItemHover : 'transparent',
-        cursor: 'default',
-        transition: 'background 0.1s',
+        flexDirection: 'column',
       }}
     >
-      <span style={{ color: t.textMuted, flexShrink: 0 }}>
-        <DimensionIcon />
-      </span>
-      <span
-        style={{
-          flex: 1,
-          fontSize: 12,
-          fontFamily: t.font,
-          color: t.textSecondary,
-          overflow: 'hidden',
-          textOverflow: 'ellipsis',
-          whiteSpace: 'nowrap',
-        }}
-        title={dimension.description}
-      >
-        {dimension.label || dimension.name}
-      </span>
-      <span
-        style={{
-          fontSize: 9,
-          fontFamily: t.fontMono,
-          color: typeColor,
-          background: `${typeColor}18`,
-          borderRadius: 4,
-          padding: '1px 4px',
-          flexShrink: 0,
-        }}
-      >
-        {dimension.type}
-      </span>
-    </div>
-  );
-}
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '10px 12px', borderBottom: `1px solid ${t.headerBorder}` }}>
+        <div style={{ fontSize: 12, fontWeight: 600, color: t.textPrimary, fontFamily: t.font }}>Guided Block Builder</div>
+        <button onClick={onClose} style={{ background: 'transparent', border: 'none', color: t.textMuted, cursor: 'pointer', fontSize: 16 }}>×</button>
+      </div>
 
-function HierarchyRow({ hierarchy, t }: { hierarchy: SemanticHierarchy; t: Theme }) {
-  const [hovered, setHovered] = useState(false);
-  const [expanded, setExpanded] = useState(false);
-
-  return (
-    <div>
-      <button
-        onClick={() => setExpanded(!expanded)}
-        onMouseEnter={() => setHovered(true)}
-        onMouseLeave={() => setHovered(false)}
-        style={{
-          width: '100%',
-          display: 'flex',
-          alignItems: 'center',
-          gap: 6,
-          padding: '4px 8px 4px 22px',
-          background: hovered ? t.sidebarItemHover : 'transparent',
-          border: 'none',
-          cursor: 'pointer',
-          color: t.textSecondary,
-          fontSize: 12,
-          fontFamily: t.font,
-          textAlign: 'left' as const,
-          transition: 'background 0.1s',
-        }}
-      >
-        <span style={{ color: '#d2a8ff', flexShrink: 0 }}>
-          <HierarchyIcon />
-        </span>
-        <span style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-          {hierarchy.label || hierarchy.name}
-        </span>
-        <span style={{ fontSize: 10, color: t.textMuted, background: t.pillBg, borderRadius: 8, padding: '1px 5px', flexShrink: 0 }}>
-          {hierarchy.levels.length}
-        </span>
-      </button>
-      {expanded && (
-        <div style={{ paddingLeft: 40 }}>
-          {hierarchy.levels.map((level, i) => (
-            <div
-              key={level.name}
-              style={{
-                display: 'flex',
-                alignItems: 'center',
-                gap: 4,
-                padding: '2px 0',
-                fontSize: 11,
-                fontFamily: t.fontMono,
-                color: t.textMuted,
-              }}
-            >
-              <span style={{ color: t.textMuted, fontSize: 9 }}>{i + 1}.</span>
-              {level.label || level.name}
-            </div>
-          ))}
-        </div>
-      )}
-    </div>
-  );
-}
-
-const GRANULARITIES = ['day', 'week', 'month', 'quarter', 'year'] as const;
-type Granularity = typeof GRANULARITIES[number];
-
-function ComposeQuerySection({ t, metrics, dimensions, onInsertCell }: { t: Theme; metrics: SemanticMetric[]; dimensions: SemanticDimension[]; onInsertCell?: (sql: string) => void }) {
-  const [expanded, setExpanded] = useState(false);
-  const [selectedMetrics, setSelectedMetrics] = useState<Set<string>>(new Set());
-  const [selectedDims, setSelectedDims] = useState<Set<string>>(new Set());
-  const [selectedTimeDim, setSelectedTimeDim] = useState<string>('');
-  const [granularity, setGranularity] = useState<Granularity>('month');
-  const [composedSql, setComposedSql] = useState<string | null>(null);
-  const [composeError, setComposeError] = useState<string | null>(null);
-  const [composing, setComposing] = useState(false);
-  const [copied, setCopied] = useState(false);
-
-  const dateDimensions = dimensions.filter(d => d.type === 'date');
-
-  const toggleMetric = (name: string) => {
-    setSelectedMetrics(prev => {
-      const next = new Set(prev);
-      next.has(name) ? next.delete(name) : next.add(name);
-      return next;
-    });
-    setComposedSql(null);
-  };
-
-  const toggleDim = (name: string) => {
-    setSelectedDims(prev => {
-      const next = new Set(prev);
-      next.has(name) ? next.delete(name) : next.add(name);
-      return next;
-    });
-    setComposedSql(null);
-  };
-
-  const handleCompose = async () => {
-    if (selectedMetrics.size === 0) return;
-    setComposing(true);
-    setComposeError(null);
-    try {
-      const timeDimension = selectedTimeDim ? { name: selectedTimeDim, granularity } : undefined;
-      const result = await api.composeQuery(
-        Array.from(selectedMetrics),
-        Array.from(selectedDims),
-        timeDimension,
-      );
-      if ('error' in result) {
-        setComposeError(result.error);
-      } else {
-        setComposedSql(result.sql);
-      }
-    } catch (e: any) {
-      setComposeError(e.message ?? 'Failed to compose');
-    } finally {
-      setComposing(false);
-    }
-  };
-
-  const handleCopy = () => {
-    if (composedSql) {
-      navigator.clipboard.writeText(composedSql);
-      setCopied(true);
-      setTimeout(() => setCopied(false), 1500);
-    }
-  };
-
-  const checkboxStyle = (selected: boolean) => ({
-    width: 14,
-    height: 14,
-    borderRadius: 3,
-    border: `1.5px solid ${selected ? t.accent : t.cellBorder}`,
-    background: selected ? t.accent : 'transparent',
-    cursor: 'pointer' as const,
-    display: 'flex' as const,
-    alignItems: 'center' as const,
-    justifyContent: 'center' as const,
-    flexShrink: 0 as const,
-    transition: 'all 0.15s',
-  });
-
-  return (
-    <div style={{ borderBottom: `1px solid ${t.headerBorder}` }}>
-      <button
-        onClick={() => setExpanded(!expanded)}
-        style={{
-          width: '100%',
-          display: 'flex',
-          alignItems: 'center',
-          gap: 6,
-          padding: '6px 10px',
-          background: expanded ? `${t.accent}10` : 'transparent',
-          border: 'none',
-          cursor: 'pointer',
-          color: t.accent,
-          fontSize: 11,
-          fontWeight: 600,
-          fontFamily: t.font,
-          textAlign: 'left' as const,
-        }}
-      >
-        <svg width="10" height="10" viewBox="0 0 16 16" fill="currentColor">
-          <path d="M8 1.5a6.5 6.5 0 1 0 0 13 6.5 6.5 0 0 0 0-13ZM0 8a8 8 0 1 1 16 0A8 8 0 0 1 0 8Zm6.5-2a1.5 1.5 0 1 1 3 0 1.5 1.5 0 0 1-3 0Zm-2 4.5a1.5 1.5 0 1 1 3 0 1.5 1.5 0 0 1-3 0Zm5 0a1.5 1.5 0 1 1 3 0 1.5 1.5 0 0 1-3 0Z" />
-        </svg>
-        Compose Query
-        <svg
-          width="10"
-          height="10"
-          viewBox="0 0 10 10"
-          fill="currentColor"
-          style={{ marginLeft: 'auto', transform: expanded ? 'rotate(90deg)' : 'rotate(0deg)', transition: 'transform 0.15s' }}
-        >
-          <path d="M3 2l4 3-4 3V2Z" />
-        </svg>
-      </button>
-
-      {expanded && (
-        <div style={{ padding: '6px 10px 10px', fontSize: 11, fontFamily: t.font }}>
-          {/* Metric selection */}
-          <div style={{ fontSize: 10, fontWeight: 600, color: t.textSecondary, marginBottom: 4, textTransform: 'uppercase' as const, letterSpacing: '0.04em' }}>
-            Select Metrics
-          </div>
-          <div style={{ maxHeight: 120, overflowY: 'auto', marginBottom: 8 }}>
-            {metrics.map(m => (
-              <label
-                key={m.name}
-                style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '2px 0', cursor: 'pointer', color: t.textPrimary, fontSize: 11 }}
-                onClick={() => toggleMetric(m.name)}
-              >
-                <div style={checkboxStyle(selectedMetrics.has(m.name))}>
-                  {selectedMetrics.has(m.name) && (
-                    <svg width="8" height="8" viewBox="0 0 10 10" fill="#fff"><path d="M8.5 2.5L4 7 1.5 4.5" stroke="#fff" strokeWidth="1.5" fill="none" /></svg>
-                  )}
-                </div>
-                <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{m.label || m.name}</span>
-                <span style={{ fontSize: 9, color: METRIC_TYPE_COLORS[m.type] ?? t.accent, marginLeft: 'auto', flexShrink: 0 }}>{m.type}</span>
-              </label>
-            ))}
-          </div>
-
-          {/* Dimension selection */}
-          <div style={{ fontSize: 10, fontWeight: 600, color: t.textSecondary, marginBottom: 4, textTransform: 'uppercase' as const, letterSpacing: '0.04em' }}>
-            Select Dimensions (optional)
-          </div>
-          <div style={{ maxHeight: 120, overflowY: 'auto', marginBottom: 8 }}>
-            {dimensions.map(d => (
-              <label
-                key={d.name}
-                style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '2px 0', cursor: 'pointer', color: t.textPrimary, fontSize: 11 }}
-                onClick={() => toggleDim(d.name)}
-              >
-                <div style={checkboxStyle(selectedDims.has(d.name))}>
-                  {selectedDims.has(d.name) && (
-                    <svg width="8" height="8" viewBox="0 0 10 10" fill="#fff"><path d="M8.5 2.5L4 7 1.5 4.5" stroke="#fff" strokeWidth="1.5" fill="none" /></svg>
-                  )}
-                </div>
-                <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{d.label || d.name}</span>
-              </label>
-            ))}
-          </div>
-
-          {/* Time dimension picker — only shown when date dimensions exist */}
-          {dateDimensions.length > 0 && (
-            <div style={{ marginBottom: 8 }}>
-              <div style={{ fontSize: 10, fontWeight: 600, color: t.textSecondary, marginBottom: 4, textTransform: 'uppercase' as const, letterSpacing: '0.04em' }}>
-                Time Dimension (optional)
-              </div>
-              <select
-                value={selectedTimeDim}
-                onChange={e => { setSelectedTimeDim(e.target.value); setComposedSql(null); }}
-                style={{
-                  width: '100%',
-                  padding: '3px 6px',
-                  background: t.editorBg,
-                  border: `1px solid ${t.cellBorder}`,
-                  borderRadius: 4,
-                  color: selectedTimeDim ? t.textPrimary : t.textMuted,
-                  fontSize: 11,
-                  fontFamily: t.font,
-                  marginBottom: 4,
-                  cursor: 'pointer',
-                }}
-              >
-                <option value="">None</option>
-                {dateDimensions.map(d => (
-                  <option key={d.name} value={d.name}>{d.label || d.name}</option>
-                ))}
-              </select>
-              {selectedTimeDim && (
-                <div style={{ display: 'flex', gap: 4 }}>
-                  {GRANULARITIES.map(g => (
-                    <button
-                      key={g}
-                      onClick={() => { setGranularity(g); setComposedSql(null); }}
-                      style={{
-                        flex: 1,
-                        padding: '2px 0',
-                        background: granularity === g ? t.accent : t.pillBg,
-                        border: 'none',
-                        borderRadius: 3,
-                        color: granularity === g ? '#fff' : t.textMuted,
-                        fontSize: 9,
-                        fontWeight: 600,
-                        fontFamily: t.font,
-                        cursor: 'pointer',
-                        textTransform: 'capitalize' as const,
-                      }}
-                    >
-                      {g}
-                    </button>
-                  ))}
-                </div>
-              )}
-            </div>
-          )}
-
-          {/* Compose button */}
-          <button
-            onClick={handleCompose}
-            disabled={selectedMetrics.size === 0 || composing}
+      <div style={{ display: 'flex', gap: 8, padding: '8px 12px', borderBottom: `1px solid ${t.headerBorder}` }}>
+        {[1, 2, 3, 4].map((index) => (
+          <div
+            key={index}
             style={{
-              width: '100%',
-              padding: '5px 12px',
-              background: selectedMetrics.size === 0 ? t.pillBg : t.accent,
-              color: selectedMetrics.size === 0 ? t.textMuted : '#fff',
-              border: 'none',
-              borderRadius: 5,
-              cursor: selectedMetrics.size === 0 ? 'not-allowed' : 'pointer',
-              fontSize: 11,
-              fontWeight: 600,
+              flex: 1,
+              textAlign: 'center',
+              padding: '6px 0',
+              borderRadius: 6,
+              background: step === index ? `${t.accent}18` : t.pillBg,
+              color: step === index ? t.accent : t.textMuted,
+              fontSize: 10,
               fontFamily: t.font,
-              opacity: composing ? 0.7 : 1,
+              fontWeight: 600,
             }}
           >
-            {composing ? 'Composing...' : `Compose SQL (${selectedMetrics.size} metric${selectedMetrics.size !== 1 ? 's' : ''})`}
-          </button>
+            Step {index}
+          </div>
+        ))}
+      </div>
 
-          {/* Error */}
-          {composeError && (
-            <div style={{ marginTop: 6, padding: '4px 8px', background: '#f8514922', border: '1px solid #f8514944', borderRadius: 4, fontSize: 10, color: '#f85149' }}>
-              {composeError}
+      <div style={{ flex: 1, overflowY: 'auto', padding: '12px', display: 'grid', gap: 12 }}>
+        {step === 1 && (
+          <>
+            <PanelSectionHeader label="Choose Metrics" count={metrics.length} t={t} />
+            <div style={{ display: 'grid', gap: 4, maxHeight: 220, overflowY: 'auto' }}>
+              {semanticLayer.metrics.map((metric) => (
+                <label key={metric.name} style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 11, color: t.textPrimary, fontFamily: t.font }}>
+                  <input type="checkbox" checked={metrics.includes(metric.name)} onChange={() => toggle(metric.name, metrics, setMetrics)} />
+                  <span style={{ flex: 1 }}>{metric.label || metric.name}</span>
+                  <span style={{ color: t.textMuted, fontFamily: t.fontMono }}>{metric.domain || 'uncategorized'}</span>
+                </label>
+              ))}
             </div>
-          )}
+          </>
+        )}
 
-          {/* Composed SQL output */}
-          {composedSql && (
-            <div style={{ marginTop: 8 }}>
-              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 4 }}>
-                <span style={{ fontSize: 10, fontWeight: 600, color: t.textSecondary, textTransform: 'uppercase' as const, letterSpacing: '0.04em' }}>
-                  Generated SQL
-                </span>
-                <div style={{ display: 'flex', gap: 4 }}>
-                  {onInsertCell && (
-                    <button
-                      onClick={() => composedSql && onInsertCell(composedSql)}
-                      style={{
-                        background: t.accent,
-                        border: 'none',
-                        borderRadius: 3,
-                        color: '#fff',
-                        cursor: 'pointer',
-                        fontSize: 9,
-                        fontWeight: 600,
-                        fontFamily: t.font,
-                        padding: '2px 8px',
-                      }}
-                    >
-                      + Insert as Cell
-                    </button>
-                  )}
-                  <button
-                    onClick={handleCopy}
-                    style={{
-                      background: 'transparent',
-                      border: `1px solid ${t.cellBorder}`,
-                      borderRadius: 3,
-                      color: copied ? '#56d364' : t.textMuted,
-                      cursor: 'pointer',
-                      fontSize: 9,
-                      fontFamily: t.font,
-                      padding: '1px 6px',
-                    }}
-                  >
-                    {copied ? 'Copied!' : 'Copy'}
-                  </button>
+        {step === 2 && (
+          <>
+            <PanelSectionHeader label="Dimensions" count={dimensions.length} t={t} />
+            {loadingCompatibleDimensions && (
+              <div style={{ fontSize: 11, color: t.textMuted, fontFamily: t.font }}>Resolving compatible dimensions…</div>
+            )}
+            <div style={{ display: 'grid', gap: 4, maxHeight: 180, overflowY: 'auto' }}>
+              {categoricalDimensions.map((dimension) => (
+                <label key={dimension.name} style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 11, color: t.textPrimary, fontFamily: t.font }}>
+                  <input type="checkbox" checked={dimensions.includes(dimension.name)} onChange={() => toggle(dimension.name, dimensions, setDimensions)} />
+                  <span style={{ flex: 1 }}>{dimension.label || dimension.name}</span>
+                  <span style={{ color: t.textMuted, fontFamily: t.fontMono }}>{dimension.table}</span>
+                </label>
+              ))}
+            </div>
+            <div style={{ display: 'grid', gap: 8 }}>
+              <div style={{ fontSize: 11, color: t.textSecondary, fontFamily: t.font }}>Time grain</div>
+              <select value={timeDimensionName} onChange={(event) => setTimeDimensionName(event.target.value)} style={inputStyle}>
+                <option value="">No time dimension</option>
+                {timeDimensions.map((dimension) => (
+                  <option key={dimension.name} value={dimension.name}>{dimension.label || dimension.name}</option>
+                ))}
+              </select>
+              {timeDimensionName && (
+                <select value={granularity} onChange={(event) => setGranularity(event.target.value)} style={inputStyle}>
+                  <option value="day">day</option>
+                  <option value="week">week</option>
+                  <option value="month">month</option>
+                  <option value="quarter">quarter</option>
+                  <option value="year">year</option>
+                </select>
+              )}
+            </div>
+          </>
+        )}
+
+        {step === 3 && (
+          <>
+            <PanelSectionHeader label="Preview SQL" t={t} />
+            {preview && (
+              <>
+                <pre style={{ margin: 0, padding: '10px', background: t.editorBg, border: `1px solid ${t.cellBorder}`, borderRadius: 6, fontSize: 10, color: t.textSecondary, fontFamily: t.fontMono, whiteSpace: 'pre-wrap' }}>
+                  {preview.sql}
+                </pre>
+                <div style={{ fontSize: 11, color: t.textMuted, fontFamily: t.font }}>
+                  {preview.tables.length} table(s) · {preview.result.rowCount ?? preview.result.rows.length} row(s)
                 </div>
-              </div>
-              <pre style={{
-                margin: 0,
-                padding: '6px 8px',
-                background: t.editorBg,
-                border: `1px solid ${t.cellBorder}`,
-                borderRadius: 4,
-                fontFamily: t.fontMono,
-                fontSize: 10,
-                color: t.textSecondary,
-                lineHeight: 1.5,
-                whiteSpace: 'pre-wrap' as const,
-                wordBreak: 'break-all' as const,
-                maxHeight: 200,
-                overflowY: 'auto' as const,
-              }}>
-                {composedSql}
-              </pre>
+              </>
+            )}
+          </>
+        )}
+
+        {step === 4 && (
+          <>
+            <div style={{ display: 'grid', gap: 8 }}>
+              <input value={name} onChange={(event) => setName(event.target.value)} style={inputStyle} placeholder="Block name" />
+              <input value={domain} onChange={(event) => setDomain(event.target.value)} style={inputStyle} placeholder="Domain" />
+              <input value={description} onChange={(event) => setDescription(event.target.value)} style={inputStyle} placeholder="Description" />
+              <input value={owner} onChange={(event) => setOwner(event.target.value)} style={inputStyle} placeholder="Owner" />
+              <input value={tags} onChange={(event) => setTags(event.target.value)} style={inputStyle} placeholder="Tags (comma separated)" />
+              <select value={chart} onChange={(event) => setChart(event.target.value)} style={inputStyle}>
+                <option value="table">table</option>
+                <option value="bar">bar</option>
+                <option value="line">line</option>
+                <option value="kpi">kpi</option>
+              </select>
+              <select value={blockType} onChange={(event) => setBlockType(event.target.value as 'semantic' | 'custom')} style={inputStyle}>
+                <option value="semantic">semantic block</option>
+                <option value="custom">custom block</option>
+              </select>
             </div>
+          </>
+        )}
+
+        {error && <div style={{ color: t.error, fontSize: 11, fontFamily: t.font }}>{error}</div>}
+      </div>
+
+      <div style={{ display: 'flex', justifyContent: 'space-between', gap: 8, padding: '10px 12px', borderTop: `1px solid ${t.headerBorder}` }}>
+        <button
+          onClick={() => setStep((value) => Math.max(1, value - 1))}
+          disabled={step === 1}
+          style={{ background: t.btnBg, border: `1px solid ${t.btnBorder}`, borderRadius: 6, color: t.textSecondary, cursor: 'pointer', fontSize: 11, fontFamily: t.font, padding: '6px 12px' }}
+        >
+          Back
+        </button>
+        <div style={{ display: 'flex', gap: 8 }}>
+          {step < 2 && (
+            <button
+              onClick={() => setStep(2)}
+              style={{ background: t.accent, border: 'none', borderRadius: 6, color: '#fff', cursor: 'pointer', fontSize: 11, fontFamily: t.font, padding: '6px 12px' }}
+            >
+              Next
+            </button>
+          )}
+          {step === 2 && (
+            <button
+              onClick={() => void handlePreview()}
+              disabled={loading}
+              style={{ background: t.accent, border: 'none', borderRadius: 6, color: '#fff', cursor: 'pointer', fontSize: 11, fontFamily: t.font, padding: '6px 12px' }}
+            >
+              {loading ? 'Previewing…' : 'Preview'}
+            </button>
+          )}
+          {step === 3 && (
+            <button
+              onClick={() => setStep(4)}
+              style={{ background: t.accent, border: 'none', borderRadius: 6, color: '#fff', cursor: 'pointer', fontSize: 11, fontFamily: t.font, padding: '6px 12px' }}
+            >
+              Continue
+            </button>
+          )}
+          {step === 4 && (
+            <button
+              onClick={() => void handleSave()}
+              disabled={saving}
+              style={{ background: t.accent, border: 'none', borderRadius: 6, color: '#fff', cursor: 'pointer', fontSize: 11, fontFamily: t.font, padding: '6px 12px' }}
+            >
+              {saving ? 'Saving…' : 'Save Block'}
+            </button>
           )}
         </div>
-      )}
+      </div>
     </div>
   );
 }
 
-const METRIC_TYPES = ['sum', 'count', 'count_distinct', 'avg', 'min', 'max'] as const;
+interface TreeFilters {
+  query: string;
+  provider: string;
+  domain: string;
+  cube: string;
+  owner: string;
+  tag: string;
+  type: string;
+}
 
-function NewMetricForm({ t, onClose, onCreated }: { t: Theme; onClose: () => void; onCreated: () => void }) {
-  const [name, setName] = useState('');
-  const [label, setLabel] = useState('');
-  const [sql, setSql] = useState('');
-  const [metricType, setMetricType] = useState('sum');
-  const [table, setTable] = useState('');
-  const [domain, setDomain] = useState('');
-  const [description, setDescription] = useState('');
-  const [submitting, setSubmitting] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+interface FlatTreeRow {
+  node: SemanticTreeNode;
+  depth: number;
+  hasChildren: boolean;
+  isExpanded: boolean;
+}
 
-  const inputStyle = {
-    width: '100%',
-    padding: '4px 7px',
-    background: t.editorBg,
-    border: `1px solid ${t.cellBorder}`,
-    borderRadius: 4,
-    color: t.textPrimary,
-    fontSize: 11,
-    fontFamily: t.fontMono,
-    outline: 'none',
-    boxSizing: 'border-box' as const,
-  };
+const TREE_ROW_HEIGHT = 31;
+const TREE_OVERSCAN = 10;
 
-  const labelStyle = {
-    fontSize: 10,
-    fontWeight: 600,
-    color: t.textSecondary,
-    fontFamily: t.font,
-    letterSpacing: '0.04em',
-    textTransform: 'uppercase' as const,
-    display: 'block',
-    marginBottom: 3,
-    marginTop: 8,
-  };
+function filterTree(node: SemanticTreeNode, filters: TreeFilters): SemanticTreeNode | null {
+  const q = filters.query.trim().toLowerCase();
+  const metaValues = Object.values(node.meta ?? {})
+    .filter((value): value is string | number | boolean => value != null)
+    .map((value) => String(value).toLowerCase());
+  const matchesQuery = !q || node.label.toLowerCase().includes(q) || node.id.toLowerCase().includes(q) || metaValues.some((value) => value.includes(q));
+  const matchesType = !filters.type || node.kind === filters.type || node.kind === 'provider' || node.kind === 'domain' || node.kind === 'group';
+  const matchesDomain = !filters.domain || node.kind === 'provider' || node.kind === 'group' || (node.meta?.domain === filters.domain || (node.kind === 'domain' && node.label === filters.domain));
+  const matchesProvider = !filters.provider || node.meta?.provider === filters.provider || (node.kind === 'provider' && node.id === `provider:${filters.provider}`);
+  const matchesCube = !filters.cube || node.meta?.cube === filters.cube || (node.kind === 'cube' && (node.meta?.cube === filters.cube || node.label === filters.cube));
+  const matchesOwner = !filters.owner || node.meta?.owner === filters.owner;
+  const matchesTag = !filters.tag || String(node.meta?.tags ?? '').split(',').filter(Boolean).includes(filters.tag);
 
-  const handleSubmit = async () => {
-    if (!name.trim() || !sql.trim() || !table.trim()) {
-      setError('Name, SQL expression, and table are required.');
-      return;
+  const children = (node.children ?? [])
+    .map((child) => filterTree(child, filters))
+    .filter((child): child is SemanticTreeNode => Boolean(child));
+
+  if (children.length > 0) {
+    return { ...node, children, count: node.kind === 'provider' || node.kind === 'domain' || node.kind === 'group' ? children.length : node.count };
+  }
+
+  return matchesQuery && matchesType && matchesDomain && matchesProvider && matchesCube && matchesOwner && matchesTag
+    ? { ...node, children: [] }
+    : null;
+}
+
+function countTreeLeaves(node: SemanticTreeNode): number {
+  if (!node.children || node.children.length === 0) return node.kind === 'group' || node.kind === 'provider' || node.kind === 'domain' ? 0 : 1;
+  return node.children.reduce((sum, child) => sum + countTreeLeaves(child), 0);
+}
+
+function collectFacetValues(node: SemanticTreeNode | null, key: string): string[] {
+  if (!node) return [];
+  const values = new Set<string>();
+  const visit = (current: SemanticTreeNode) => {
+    const value = current.meta?.[key];
+    if (typeof value === 'string' && value.trim()) {
+      values.add(value.trim());
     }
-    setSubmitting(true);
-    setError(null);
-    const result = await api.createMetric({
-      name: name.trim(),
-      label: label.trim() || name.trim(),
-      description: description.trim(),
-      domain: domain.trim() || 'general',
-      sql: sql.trim(),
-      type: metricType,
-      table: table.trim(),
-    });
-    setSubmitting(false);
-    if (result.ok) {
-      onCreated();
-      onClose();
-    } else {
-      setError(result.error ?? 'Unknown error');
-    }
+    for (const child of current.children ?? []) visit(child);
   };
+  visit(node);
+  return Array.from(values).sort((a, b) => a.localeCompare(b));
+}
 
-  return (
-    <div style={{
-      position: 'absolute', inset: 0, zIndex: 100,
-      background: `${t.sidebarBg}f0`,
-      display: 'flex', flexDirection: 'column',
-      padding: '12px 14px',
-      overflowY: 'auto',
-    }}>
-      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 10 }}>
-        <span style={{ fontSize: 12, fontWeight: 600, color: t.textPrimary, fontFamily: t.font }}>New Metric</span>
-        <button onClick={onClose} style={{ background: 'transparent', border: 'none', cursor: 'pointer', color: t.textMuted, fontSize: 16, fontFamily: t.font, padding: '0 2px' }}>×</button>
-      </div>
-
-      <span style={labelStyle}>Name *</span>
-      <input style={inputStyle} value={name} onChange={e => setName(e.target.value)} placeholder="total_revenue" />
-
-      <span style={labelStyle}>Label</span>
-      <input style={inputStyle} value={label} onChange={e => setLabel(e.target.value)} placeholder="Total Revenue" />
-
-      <span style={labelStyle}>SQL Expression *</span>
-      <input style={inputStyle} value={sql} onChange={e => setSql(e.target.value)} placeholder="SUM(amount)" />
-
-      <span style={labelStyle}>Aggregation Type *</span>
-      <select value={metricType} onChange={e => setMetricType(e.target.value)} style={{ ...inputStyle, cursor: 'pointer' }}>
-        {METRIC_TYPES.map(mt => <option key={mt} value={mt}>{mt}</option>)}
-      </select>
-
-      <span style={labelStyle}>Table / Source *</span>
-      <input style={inputStyle} value={table} onChange={e => setTable(e.target.value)} placeholder="fct_revenue or read_csv_auto('data/revenue.csv')" />
-
-      <span style={labelStyle}>Domain</span>
-      <input style={inputStyle} value={domain} onChange={e => setDomain(e.target.value)} placeholder="finance" />
-
-      <span style={labelStyle}>Description</span>
-      <input style={inputStyle} value={description} onChange={e => setDescription(e.target.value)} placeholder="Sum of all recognized revenue" />
-
-      {error && (
-        <div style={{ marginTop: 8, padding: '4px 8px', background: '#f8514922', border: '1px solid #f8514944', borderRadius: 4, fontSize: 10, color: '#f85149' }}>
-          {error}
-        </div>
-      )}
-
-      <div style={{ display: 'flex', gap: 6, marginTop: 12 }}>
-        <button
-          onClick={handleSubmit}
-          disabled={submitting}
-          style={{
-            flex: 1, padding: '5px 0', background: t.accent, color: '#fff',
-            border: 'none', borderRadius: 5, fontSize: 11, fontWeight: 600,
-            fontFamily: t.font, cursor: submitting ? 'not-allowed' : 'pointer',
-            opacity: submitting ? 0.7 : 1,
-          }}
-        >
-          {submitting ? 'Creating...' : 'Create Metric'}
-        </button>
-        <button
-          onClick={onClose}
-          style={{
-            padding: '5px 12px', background: 'transparent',
-            border: `1px solid ${t.cellBorder}`, borderRadius: 5,
-            fontSize: 11, fontFamily: t.font, color: t.textMuted, cursor: 'pointer',
-          }}
-        >
-          Cancel
-        </button>
-      </div>
-      <div style={{ marginTop: 10, fontSize: 10, color: t.textMuted, fontFamily: t.font, lineHeight: 1.5 }}>
-        Creates <code style={{ fontFamily: t.fontMono }}>semantic-layer/metrics/{'{name}'}.yaml</code> and reloads the panel automatically.
-      </div>
-    </div>
-  );
+function flattenTreeRows(nodes: SemanticTreeNode[], expanded: Record<string, boolean>, depth: number = 0): FlatTreeRow[] {
+  const rows: FlatTreeRow[] = [];
+  for (const node of nodes) {
+    const hasChildren = Boolean(node.children && node.children.length > 0);
+    const isExpanded = expanded[node.id] ?? (depth < 2);
+    rows.push({ node, depth, hasChildren, isExpanded });
+    if (hasChildren && isExpanded) {
+      rows.push(...flattenTreeRows(node.children ?? [], expanded, depth + 1));
+    }
+  }
+  return rows;
 }
 
 export function SemanticPanel() {
   const { state, dispatch } = useNotebook();
   const t = themes[state.themeMode];
-  const [searchQuery, setSearchQuery] = useState('');
-  const [refreshHover, setRefreshHover] = useState(false);
-  const [showNewMetric, setShowNewMetric] = useState(false);
-
-  const [expandedSections, setExpandedSections] = useState({
-    metrics: true,
-    dimensions: true,
-    hierarchies: false,
-  });
-
   const sl = state.semanticLayer;
+
+  const [tree, setTree] = useState<SemanticTreeNode | null>(null);
+  const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [selectedItem, setSelectedItem] = useState<SemanticObjectDetail | null>(null);
+  const [builderOpen, setBuilderOpen] = useState(false);
+  const [query, setQuery] = useState('');
+  const [providerFilter, setProviderFilter] = useState('');
+  const [domainFilter, setDomainFilter] = useState('');
+  const [cubeFilter, setCubeFilter] = useState('');
+  const [ownerFilter, setOwnerFilter] = useState('');
+  const [tagFilter, setTagFilter] = useState('');
+  const [typeFilter, setTypeFilter] = useState('');
+  const [expanded, setExpanded] = useState<Record<string, boolean>>({});
+  const [syncing, setSyncing] = useState(false);
+  const [scrollTop, setScrollTop] = useState(0);
+  const [viewportHeight, setViewportHeight] = useState(400);
+  const treeContainerRef = useRef<HTMLDivElement | null>(null);
 
   const handleRefresh = async () => {
     dispatch({ type: 'SET_SEMANTIC_LOADING', loading: true });
     try {
-      const layer = await api.getSemanticLayer();
+      const [layer, nextTree] = await Promise.all([
+        api.getSemanticLayer(),
+        api.getSemanticTree().catch(() => null),
+      ]);
       dispatch({ type: 'SET_SEMANTIC_LAYER', layer });
-    } catch (err) {
-      console.error('Semantic layer refresh failed:', err);
+      setTree(nextTree);
     } finally {
       dispatch({ type: 'SET_SEMANTIC_LOADING', loading: false });
     }
   };
 
-  // Load on mount if not already loaded
   useEffect(() => {
-    if (sl.metrics.length === 0 && !sl.loading) {
-      handleRefresh();
+    if ((sl.metrics.length === 0 && sl.dimensions.length === 0 && !sl.loading) || !tree) {
+      void handleRefresh();
     }
   }, []);
 
-  // Filter by search
-  const q = searchQuery.toLowerCase();
-  const filteredMetrics = useMemo(() =>
-    q ? sl.metrics.filter((m) =>
-      m.name.toLowerCase().includes(q) ||
-      m.label.toLowerCase().includes(q) ||
-      m.description.toLowerCase().includes(q) ||
-      m.tags.some((tag) => tag.toLowerCase().includes(q))
-    ) : sl.metrics,
-    [sl.metrics, q]
-  );
+  useEffect(() => {
+    if (!selectedId) {
+      setSelectedItem(null);
+      return;
+    }
+    if (selectedId.startsWith('provider:') || selectedId.startsWith('domain:') || selectedId.startsWith('group:')) {
+      setSelectedItem(null);
+      return;
+    }
+    void api.getSemanticObject(selectedId)
+      .then(setSelectedItem)
+      .catch(() => setSelectedItem(null));
+  }, [selectedId]);
 
-  const filteredDimensions = useMemo(() =>
-    q ? sl.dimensions.filter((d) =>
-      d.name.toLowerCase().includes(q) ||
-      d.label.toLowerCase().includes(q) ||
-      d.description.toLowerCase().includes(q)
-    ) : sl.dimensions,
-    [sl.dimensions, q]
-  );
+  const filteredTree = useMemo(() => {
+    if (!tree) return null;
+    const base = filterTree(tree, {
+      query,
+      provider: providerFilter,
+      domain: domainFilter,
+      cube: cubeFilter,
+      owner: ownerFilter,
+      tag: tagFilter,
+      type: typeFilter,
+    });
+    return base;
+  }, [tree, query, providerFilter, domainFilter, cubeFilter, ownerFilter, tagFilter, typeFilter]);
 
-  const filteredHierarchies = useMemo(() =>
-    q ? sl.hierarchies.filter((h) =>
-      h.name.toLowerCase().includes(q) ||
-      h.label.toLowerCase().includes(q)
-    ) : sl.hierarchies,
-    [sl.hierarchies, q]
-  );
+  const favoritesSet = useMemo(() => new Set(sl.favorites), [sl.favorites]);
+  const metricsByName = useMemo(() => new Map(sl.metrics.map((metric) => [metric.name, metric])), [sl.metrics]);
+  const dimensionsByName = useMemo(() => new Map(sl.dimensions.map((dimension) => [dimension.name, dimension])), [sl.dimensions]);
+  const providerOptions = useMemo(() => collectFacetValues(tree, 'provider'), [tree]);
+  const cubeOptions = useMemo(() => collectFacetValues(tree, 'cube'), [tree]);
+  const ownerOptions = useMemo(() => collectFacetValues(tree, 'owner'), [tree]);
+  const flatRows = useMemo(() => flattenTreeRows(filteredTree?.children ?? [], expanded), [filteredTree, expanded]);
+  const totalTreeHeight = flatRows.length * TREE_ROW_HEIGHT;
+  const visibleWindow = useMemo(() => {
+    const startIndex = Math.max(0, Math.floor(scrollTop / TREE_ROW_HEIGHT) - TREE_OVERSCAN);
+    const endIndex = Math.min(flatRows.length, Math.ceil((scrollTop + viewportHeight) / TREE_ROW_HEIGHT) + TREE_OVERSCAN);
+    return {
+      startIndex,
+      endIndex,
+      offsetTop: startIndex * TREE_ROW_HEIGHT,
+      rows: flatRows.slice(startIndex, endIndex),
+    };
+  }, [flatRows, scrollTop, viewportHeight]);
 
-  const toggleSection = (key: keyof typeof expandedSections) => {
-    setExpandedSections((prev) => ({ ...prev, [key]: !prev[key] }));
+  useEffect(() => {
+    const element = treeContainerRef.current;
+    if (!element) return;
+    const updateHeight = () => setViewportHeight(element.clientHeight || 400);
+    updateHeight();
+    if (typeof ResizeObserver === 'undefined') {
+      window.addEventListener('resize', updateHeight);
+      return () => window.removeEventListener('resize', updateHeight);
+    }
+    const observer = new ResizeObserver(() => updateHeight());
+    observer.observe(element);
+    return () => observer.disconnect();
+  }, [filteredTree]);
+
+  useEffect(() => {
+    setScrollTop(0);
+    if (treeContainerRef.current) {
+      treeContainerRef.current.scrollTop = 0;
+    }
+  }, [query, providerFilter, domainFilter, cubeFilter, ownerFilter, tagFilter, typeFilter]);
+
+  const insertMetricOrDimension = async (item: SemanticObjectDetail) => {
+    const reference = item.kind === 'metric' ? `@metric(${item.name})` : `@dim(${item.name})`;
+    if (!insertSemanticReference(reference)) {
+      dispatch({ type: 'ADD_CELL', cell: makeCell('sql', reference) });
+    }
+    dispatch({ type: 'ADD_SEMANTIC_RECENT', name: item.name });
   };
 
-  const codeStyle = { background: t.pillBg, padding: '1px 4px', borderRadius: 3, fontSize: 10, fontFamily: t.fontMono } as const;
-  const stepLabelStyle = { fontSize: 11, fontWeight: 600, color: t.textPrimary, fontFamily: t.font, marginBottom: 4 } as const;
-  const stepDescStyle = { fontSize: 11, color: t.textMuted, fontFamily: t.font, lineHeight: 1.6, marginBottom: 2 } as const;
-  const preStyle = {
-    margin: '4px 0 0',
-    padding: '6px 8px',
-    background: t.editorBg,
-    border: `1px solid ${t.cellBorder}`,
-    borderRadius: 4,
-    fontFamily: t.fontMono,
-    fontSize: 10,
-    color: t.textSecondary,
-    lineHeight: 1.5,
-    whiteSpace: 'pre' as const,
-    overflowX: 'auto' as const,
+  const renderLeaf = (node: SemanticTreeNode, depth: number) => {
+    const refKind = node.kind === 'metric' || node.kind === 'dimension' ? node.kind : null;
+    const refName = node.id.split(':').slice(1).join(':');
+
+    return (
+      <TreeRow
+        key={node.id}
+        label={node.label}
+        depth={depth}
+        badge={node.kind === 'metric' || node.kind === 'dimension' || node.kind === 'segment' || node.kind === 'pre_aggregation' ? node.kind : undefined}
+        selected={selectedId === node.id}
+        onClick={() => setSelectedId(node.id)}
+        onDoubleClick={() => {
+          if (node.kind === 'metric' || node.kind === 'dimension') {
+            const object = node.kind === 'metric'
+              ? metricsByName.get(node.id.slice('metric:'.length))
+              : dimensionsByName.get(node.id.slice('dimension:'.length));
+            if (object) {
+              const ref = node.kind === 'metric' ? `@metric(${object.name})` : `@dim(${object.name})`;
+              if (!insertSemanticReference(ref)) {
+                dispatch({ type: 'ADD_CELL', cell: makeCell('sql', ref) });
+              }
+            }
+          }
+        }}
+        onFavoriteToggle={refKind
+          ? () => void api.toggleFavorite(refName).then((favorites) => dispatch({ type: 'SET_SEMANTIC_FAVORITES', favorites }))
+          : undefined}
+        favorite={refKind ? favoritesSet.has(refName) : undefined}
+        onDragStart={refKind
+          ? (event) => {
+              event.dataTransfer.effectAllowed = 'copy';
+              event.dataTransfer.setData('text/plain', refName);
+              event.dataTransfer.setData('application/dql-semantic-ref', serializeSemanticDragRef(refKind, refName));
+            }
+          : undefined}
+        t={t}
+      />
+    );
+  };
+
+  const renderTreeRow = (row: FlatTreeRow): React.ReactNode => {
+    const { node, depth, hasChildren, isExpanded } = row;
+    if (!hasChildren) return renderLeaf(node, depth);
+    return (
+      <div key={node.id}>
+        <TreeRow
+          label={node.label}
+          depth={depth}
+          count={node.children?.length}
+          expanded={isExpanded}
+          onToggle={() => setExpanded((prev) => ({ ...prev, [node.id]: !isExpanded }))}
+          onClick={() => setSelectedId(node.id)}
+          selected={selectedId === node.id}
+          t={t}
+        />
+      </div>
+    );
+  };
+
+  const handleSync = async () => {
+    setSyncing(true);
+    try {
+      await api.syncSemanticLayer();
+      await handleRefresh();
+    } finally {
+      setSyncing(false);
+    }
   };
 
   if (!sl.available && !sl.loading) {
     return (
-      <div style={{ flex: 1, overflowY: 'auto', padding: '12px 14px', fontFamily: t.font }}>
-        {/* Header */}
-        <div style={{ textAlign: 'center', marginBottom: 14 }}>
-          <svg width="28" height="28" viewBox="0 0 16 16" fill={t.accent} style={{ opacity: 0.7 }}>
-            <path d="M8 1.5a6.5 6.5 0 1 0 0 13 6.5 6.5 0 0 0 0-13ZM0 8a8 8 0 1 1 16 0A8 8 0 0 1 0 8Zm6.5-2a1.5 1.5 0 1 1 3 0 1.5 1.5 0 0 1-3 0Zm-2 4.5a1.5 1.5 0 1 1 3 0 1.5 1.5 0 0 1-3 0Zm5 0a1.5 1.5 0 1 1 3 0 1.5 1.5 0 0 1-3 0Z" />
-          </svg>
-          <div style={{ fontSize: 12, fontWeight: 600, color: t.textPrimary, marginTop: 6 }}>
-            Set Up Semantic Layer
-          </div>
-          <div style={{ fontSize: 11, color: t.textMuted, marginTop: 2, lineHeight: 1.5 }}>
-            Choose a provider below, then click Retry.
-          </div>
-        </div>
-
-        {/* Step 1 — Choose Provider */}
-        <div style={{ marginBottom: 12 }}>
-          <div style={stepLabelStyle}>Step 1: Pick a provider</div>
-          <div style={stepDescStyle}>
-            Add <code style={codeStyle}>semanticLayer</code> to your <code style={codeStyle}>dql.config.json</code>:
-          </div>
-
-          <div style={{ fontSize: 10, fontWeight: 600, color: t.accent, marginTop: 8, letterSpacing: '0.03em' }}>
-            A) DQL Native — write YAML files directly
-          </div>
-          <pre style={preStyle}>{`"semanticLayer": {
-  "provider": "dql"
-}`}</pre>
-
-          <div style={{ fontSize: 10, fontWeight: 600, color: t.accent, marginTop: 8, letterSpacing: '0.03em' }}>
-            B) dbt — point to your dbt project
-          </div>
-          <pre style={preStyle}>{`"semanticLayer": {
-  "provider": "dbt",
-  "projectPath": "/path/to/dbt-project"
-}`}</pre>
-
-          <div style={{ fontSize: 10, fontWeight: 600, color: t.accent, marginTop: 8, letterSpacing: '0.03em' }}>
-            C) Cube.js — point to your Cube project
-          </div>
-          <pre style={preStyle}>{`"semanticLayer": {
-  "provider": "cubejs",
-  "projectPath": "/path/to/cube-project"
-}`}</pre>
-
-          <div style={{ fontSize: 10, fontWeight: 600, color: t.accent, marginTop: 8, letterSpacing: '0.03em' }}>
-            D) Snowflake — introspects Snowflake semantic views
-          </div>
-          <pre style={preStyle}>{`"semanticLayer": {
-  "provider": "snowflake",
-  "projectPath": "MY_DATABASE"
-}`}</pre>
-          <div style={{ fontSize: 10, color: t.textMuted, fontFamily: t.font, marginTop: 3, lineHeight: 1.5 }}>
-            Requires a Snowflake <code style={{ fontFamily: t.fontMono, fontSize: 9 }}>defaultConnection</code>. DQL introspects semantic views automatically.
-          </div>
-        </div>
-
-        {/* Step 2 — Add YAML (for DQL native) */}
-        <div style={{ marginBottom: 12 }}>
-          <div style={stepLabelStyle}>Step 2: Add definitions (DQL native only)</div>
-          <div style={stepDescStyle}>
-            Create YAML files in your project:
-          </div>
-          <pre style={preStyle}>{`semantic-layer/
-  metrics/total_revenue.yaml
-  dimensions/segment.yaml
-  hierarchies/time.yaml     (optional)
-  cubes/revenue_cube.yaml   (optional)`}</pre>
-
-          <div style={{ ...stepDescStyle, marginTop: 6 }}>
-            Minimal metric example:
-          </div>
-          <pre style={preStyle}>{`name: total_revenue
-label: Total Revenue
-sql: SUM(amount)
-type: sum
-table: fct_revenue`}</pre>
-        </div>
-
-        {/* Step 3 — Restart */}
-        <div style={{ marginBottom: 14 }}>
-          <div style={stepLabelStyle}>Step 3: Restart & refresh</div>
-          <div style={stepDescStyle}>
-            Restart <code style={codeStyle}>dql notebook</code>, then click Retry below.
-          </div>
-        </div>
-
-        {/* Actions */}
-        <div style={{ display: 'flex', gap: 8, justifyContent: 'center' }}>
-          <button
-            onClick={handleRefresh}
-            style={{
-              background: t.accent,
-              border: 'none',
-              borderRadius: 6,
-              color: '#fff',
-              cursor: 'pointer',
-              fontSize: 11,
-              fontWeight: 600,
-              fontFamily: t.font,
-              padding: '6px 16px',
-            }}
-          >
-            Retry
-          </button>
-          <button
-            onClick={() => dispatch({ type: 'SET_SIDEBAR_PANEL', panel: 'reference' })}
-            style={{
-              background: 'transparent',
-              border: `1px solid ${t.cellBorder}`,
-              borderRadius: 6,
-              color: t.textSecondary,
-              cursor: 'pointer',
-              fontSize: 11,
-              fontFamily: t.font,
-              padding: '6px 12px',
-            }}
-          >
-            Full Reference
-          </button>
-        </div>
-      </div>
+      <SetupState
+        t={t}
+        provider={sl.provider}
+        onImport={(provider) => void api.importSemanticLayer({ provider }).then(() => handleRefresh())}
+        onRefresh={() => void handleRefresh()}
+      />
     );
   }
 
+  const treeLeafCount = filteredTree ? countTreeLeaves(filteredTree) : 0;
+
   return (
-    <div style={{ flex: 1, overflow: 'auto', display: 'flex', flexDirection: 'column', position: 'relative' }}>
-      {showNewMetric && (
-        <NewMetricForm
+    <div style={{ flex: 1, overflow: 'hidden', display: 'flex', flexDirection: 'column', position: 'relative' }}>
+      {builderOpen && (
+        <GuidedBuilderPanel
           t={t}
-          onClose={() => setShowNewMetric(false)}
-          onCreated={() => handleRefresh()}
+          semanticLayer={sl}
+          onClose={() => setBuilderOpen(false)}
+          onSaved={(result) => {
+            dispatch({
+              type: 'FILE_ADDED',
+              file: {
+                name: result.path.split('/').pop() ?? result.path,
+                path: result.path,
+                type: 'block',
+                folder: 'blocks',
+              },
+            });
+          }}
         />
       )}
-      {/* Toolbar */}
-      <div
-        style={{
-          padding: '8px 10px',
-          display: 'flex',
-          alignItems: 'center',
-          gap: 6,
-          borderBottom: `1px solid ${t.headerBorder}`,
-        }}
-      >
+
+      <div style={{ padding: '8px 10px', display: 'flex', alignItems: 'center', gap: 6, borderBottom: `1px solid ${t.headerBorder}` }}>
         {sl.provider && (
-          <span
-            style={{
-              fontSize: 9,
-              fontWeight: 600,
-              color: t.accent,
-              background: `${t.accent}18`,
-              borderRadius: 4,
-              padding: '1px 5px',
-              textTransform: 'uppercase',
-              letterSpacing: '0.04em',
-            }}
-          >
+          <span style={{ fontSize: 9, fontWeight: 600, color: t.accent, background: `${t.accent}18`, borderRadius: 4, padding: '1px 5px', textTransform: 'uppercase', letterSpacing: '0.04em' }}>
             {sl.provider}
           </span>
         )}
         <span style={{ flex: 1, fontSize: 11, color: t.textMuted, fontFamily: t.font }}>
-          {sl.metrics.length} metrics
+          {sl.metrics.length} metrics · {sl.dimensions.length} dimensions
+          {sl.lastSyncTime ? ` · synced ${new Date(sl.lastSyncTime).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}` : ''}
         </span>
-        <button
-          onClick={() => setShowNewMetric(true)}
-          title="Create a new metric YAML file"
-          style={{
-            background: t.accent,
-            border: 'none',
-            borderRadius: 4,
-            color: '#fff',
-            cursor: 'pointer',
-            fontSize: 10,
-            fontWeight: 600,
-            fontFamily: t.font,
-            padding: '2px 8px',
-          }}
-        >
-          + New
+        <button onClick={() => setBuilderOpen(true)} style={{ background: t.accent, border: 'none', borderRadius: 4, color: '#fff', cursor: 'pointer', fontSize: 10, fontWeight: 600, fontFamily: t.font, padding: '2px 8px' }}>
+          Build
         </button>
         <button
-          onClick={handleRefresh}
-          onMouseEnter={() => setRefreshHover(true)}
-          onMouseLeave={() => setRefreshHover(false)}
-          title="Refresh semantic layer"
-          style={{
-            background: refreshHover ? t.btnHover : 'transparent',
-            border: `1px solid ${refreshHover ? t.btnBorder : 'transparent'}`,
-            borderRadius: 4,
-            cursor: 'pointer',
-            color: refreshHover ? t.textSecondary : t.textMuted,
-            fontSize: 11,
-            fontFamily: t.font,
-            padding: '2px 6px',
-            display: 'flex',
-            alignItems: 'center',
-            gap: 4,
-            transition: 'all 0.15s',
-          }}
+          onClick={() => void handleSync()}
+          style={{ background: 'transparent', border: `1px solid ${t.cellBorder}`, borderRadius: 4, color: t.textSecondary, cursor: 'pointer', fontSize: 10, fontFamily: t.font, padding: '2px 6px' }}
         >
-          <svg width="11" height="11" viewBox="0 0 16 16" fill="currentColor">
-            <path d="M1.705 8.005a.75.75 0 0 1 .834.656 5.5 5.5 0 0 0 9.592 2.97l-1.204-1.204a.25.25 0 0 1 .177-.427h3.646a.25.25 0 0 1 .25.25v3.646a.25.25 0 0 1-.427.177l-1.38-1.38A7.002 7.002 0 0 1 1.05 8.84a.75.75 0 0 1 .656-.834ZM8 2.5a5.487 5.487 0 0 0-4.131 1.869l1.204 1.204A.25.25 0 0 1 4.896 6H1.25A.25.25 0 0 1 1 5.75V2.104a.25.25 0 0 1 .427-.177l1.38 1.38A7.002 7.002 0 0 1 14.95 7.16a.75.75 0 0 1-1.49.178A5.5 5.5 0 0 0 8 2.5Z" />
-          </svg>
+          {syncing ? 'Syncing…' : 'Sync'}
+        </button>
+        <button
+          onClick={() => void handleRefresh()}
+          style={{ background: 'transparent', border: `1px solid ${t.cellBorder}`, borderRadius: 4, color: t.textSecondary, cursor: 'pointer', fontSize: 10, fontFamily: t.font, padding: '2px 6px' }}
+        >
+          {sl.loading ? 'Loading…' : 'Refresh'}
         </button>
       </div>
 
-      {/* Compose Query */}
-      <ComposeQuerySection
+      <SemanticSearchBar
+        query={query}
+        provider={providerFilter}
+        cube={cubeFilter}
+        owner={ownerFilter}
+        domain={domainFilter}
+        tag={tagFilter}
+        type={typeFilter}
+        providers={providerOptions}
+        cubes={cubeOptions}
+        owners={ownerOptions}
+        domains={sl.domains}
+        tags={sl.tags}
+        onQueryChange={setQuery}
+        onProviderChange={setProviderFilter}
+        onCubeChange={setCubeFilter}
+        onOwnerChange={setOwnerFilter}
+        onDomainChange={setDomainFilter}
+        onTagChange={setTagFilter}
+        onTypeChange={setTypeFilter}
         t={t}
-        metrics={sl.metrics}
-        dimensions={sl.dimensions}
-        onInsertCell={(sql) => {
-          const cell = makeCell('sql', sql);
-          dispatch({ type: 'ADD_CELL', cell });
-        }}
       />
 
-      {/* Search */}
-      <div style={{ padding: '6px 8px', borderBottom: `1px solid ${t.headerBorder}` }}>
-        <input
-          type="text"
-          placeholder="Search metrics, dimensions..."
-          value={searchQuery}
-          onChange={(e) => setSearchQuery(e.target.value)}
-          style={{
-            width: '100%',
-            padding: '4px 8px',
-            background: t.cellBg,
-            border: `1px solid ${t.cellBorder}`,
-            borderRadius: 4,
-            color: t.textPrimary,
-            fontSize: 11,
-            fontFamily: t.font,
-            outline: 'none',
-          }}
-        />
+      <PanelSectionHeader label="Semantic Tree" count={treeLeafCount} t={t} />
+      <div
+        ref={treeContainerRef}
+        onScroll={(event) => setScrollTop(event.currentTarget.scrollTop)}
+        style={{ flex: 1, overflowY: 'auto' }}
+      >
+        <div style={{ height: totalTreeHeight, position: 'relative' }}>
+          <div
+            style={{
+              position: 'absolute',
+              top: visibleWindow.offsetTop,
+              left: 0,
+              right: 0,
+            }}
+          >
+            {visibleWindow.rows.map((row) => renderTreeRow(row))}
+          </div>
+        </div>
       </div>
 
-      {sl.loading ? (
-        <div style={{ padding: '8px 12px', display: 'flex', flexDirection: 'column', gap: 8 }}>
-          {[1, 2, 3].map((i) => (
-            <div
-              key={i}
-              style={{
-                height: 28,
-                borderRadius: 4,
-                background: t.pillBg,
-                opacity: 0.6,
-                animation: 'pulse 1.5s ease-in-out infinite',
-              }}
-            />
-          ))}
-          <style>{`@keyframes pulse { 0%,100%{opacity:.6} 50%{opacity:.3} }`}</style>
-        </div>
-      ) : (
-        <div style={{ overflow: 'auto', flex: 1 }}>
-          {/* Metrics */}
-          <SectionHeader
-            label="Metrics"
-            count={filteredMetrics.length}
-            expanded={expandedSections.metrics}
-            onToggle={() => toggleSection('metrics')}
-            t={t}
-          />
-          {expandedSections.metrics && (
-            <div>
-              {filteredMetrics.length === 0 ? (
-                <div style={{ padding: '4px 14px 4px 32px', fontSize: 12, color: t.textMuted, fontFamily: t.font, fontStyle: 'italic' }}>
-                  {q ? 'No matching metrics' : 'No metrics defined'}
-                </div>
-              ) : (
-                filteredMetrics.map((m) => <MetricRow key={m.name} metric={m} t={t} />)
-              )}
-            </div>
-          )}
-
-          {/* Dimensions */}
-          <SectionHeader
-            label="Dimensions"
-            count={filteredDimensions.length}
-            expanded={expandedSections.dimensions}
-            onToggle={() => toggleSection('dimensions')}
-            t={t}
-          />
-          {expandedSections.dimensions && (
-            <div>
-              {filteredDimensions.length === 0 ? (
-                <div style={{ padding: '4px 14px 4px 32px', fontSize: 12, color: t.textMuted, fontFamily: t.font, fontStyle: 'italic' }}>
-                  {q ? 'No matching dimensions' : 'No dimensions defined'}
-                </div>
-              ) : (
-                filteredDimensions.map((d) => <DimensionRow key={d.name} dimension={d} t={t} />)
-              )}
-            </div>
-          )}
-
-          {/* Hierarchies */}
-          {sl.hierarchies.length > 0 && (
-            <>
-              <SectionHeader
-                label="Hierarchies"
-                count={filteredHierarchies.length}
-                expanded={expandedSections.hierarchies}
-                onToggle={() => toggleSection('hierarchies')}
-                t={t}
-              />
-              {expandedSections.hierarchies && (
-                <div>
-                  {filteredHierarchies.map((h) => (
-                    <HierarchyRow key={h.name} hierarchy={h} t={t} />
-                  ))}
-                </div>
-              )}
-            </>
-          )}
-        </div>
-      )}
+      <MetricDetailPanel
+        item={selectedItem}
+        favorite={Boolean(selectedItem && favoritesSet.has(selectedItem.name))}
+        onInsert={() => selectedItem && (selectedItem.kind === 'metric' || selectedItem.kind === 'dimension') && void insertMetricOrDimension(selectedItem)}
+        onPreview={() => {
+          if (!selectedItem?.sql) return;
+          const sql = selectedItem.kind === 'cube' && selectedItem.table
+            ? `SELECT * FROM ${selectedItem.table} LIMIT 25`
+            : selectedItem.sql;
+          dispatch({ type: 'ADD_CELL', cell: makeCell('sql', sql) });
+        }}
+        onCopySql={() => {
+          if (selectedItem?.sql) {
+            void navigator.clipboard.writeText(selectedItem.sql);
+          }
+        }}
+        onToggleFavorite={() => {
+          if (selectedItem && (selectedItem.kind === 'metric' || selectedItem.kind === 'dimension')) {
+            void api.toggleFavorite(selectedItem.name).then((favorites) => dispatch({ type: 'SET_SEMANTIC_FAVORITES', favorites }));
+          }
+        }}
+        t={t}
+      />
     </div>
   );
 }

@@ -59,6 +59,8 @@ pnpm --filter @duckcodeailabs/dql-cli exec dql doctor .
 pnpm --filter @duckcodeailabs/dql-cli exec dql notebook .
 ```
 
+Use the semantic-layer course repo here so the smoke test covers the dbt semantic models and metrics that DQL is expected to import.
+
 ## 3. Validate block workflows
 
 From a scaffolded project:

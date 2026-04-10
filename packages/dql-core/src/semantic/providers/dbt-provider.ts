@@ -195,6 +195,14 @@ function convertSemanticModel(model: DbtSemanticModel): CubeDefinition {
     sql: buildAggSql(m.agg, m.expr ?? m.name),
     type: AGG_TYPE_MAP[m.agg] ?? 'custom',
     table: tableName,
+    cube: model.name,
+    aggregation: m.agg,
+    source: {
+      provider: 'dbt',
+      objectType: 'measure',
+      objectId: `${model.name}.${m.name}`,
+      objectName: m.name,
+    },
   }));
 
   const dimensions: DimensionDefinition[] = [];
@@ -217,8 +225,15 @@ function convertSemanticModel(model: DbtSemanticModel): CubeDefinition {
         sql: sqlExpr,
         type: 'date',
         table: tableName,
+        cube: model.name,
         granularities: defaultGrans,
         primaryTime: isPrimary,
+        source: {
+          provider: 'dbt',
+          objectType: 'time_dimension',
+          objectId: `${model.name}.${dim.name}`,
+          objectName: dim.name,
+        },
       });
     } else {
       dimensions.push({
@@ -228,6 +243,13 @@ function convertSemanticModel(model: DbtSemanticModel): CubeDefinition {
         sql: sqlExpr,
         type: dqlType,
         table: tableName,
+        cube: model.name,
+        source: {
+          provider: 'dbt',
+          objectType: 'dimension',
+          objectId: `${model.name}.${dim.name}`,
+          objectName: dim.name,
+        },
       });
     }
   }
@@ -257,7 +279,15 @@ function convertSemanticModel(model: DbtSemanticModel): CubeDefinition {
     dimensions,
     timeDimensions,
     joins,
+    segments: [],
+    preAggregations: [],
     defaultTimeDimension: model.defaults?.agg_time_dimension,
+    source: {
+      provider: 'dbt',
+      objectType: 'semantic_model',
+      objectId: model.name,
+      objectName: model.name,
+    },
   };
 }
 
@@ -294,5 +324,13 @@ function convertDbtMetric(
     sql: buildAggSql(measureInfo.agg, measureInfo.sql),
     type: AGG_TYPE_MAP[measureInfo.agg] ?? 'custom',
     table: measureInfo.table,
+    cube: measureInfo.modelName,
+    aggregation: dbtMetric.type,
+    source: {
+      provider: 'dbt',
+      objectType: 'metric',
+      objectId: dbtMetric.name,
+      objectName: dbtMetric.name,
+    },
   };
 }

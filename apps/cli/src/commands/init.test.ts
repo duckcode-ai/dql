@@ -1,4 +1,4 @@
-import { mkdtempSync, readFileSync, readdirSync } from 'node:fs';
+import { mkdtempSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { describe, expect, it } from 'vitest';
@@ -38,5 +38,39 @@ describe('runInit', () => {
 
     const notebook = readFileSync(join(projectDir, 'notebooks', 'welcome.dqlnb'), 'utf-8');
     expect(notebook).toContain('DQL');
+  });
+
+  it('detects a Jaffle Shop-style dbt project and DuckDB file', async () => {
+    const projectDir = mkdtempSync(join(tmpdir(), 'dql-init-dbt-'));
+    writeFileSync(join(projectDir, 'dbt_project.yml'), 'name: "jaffle_shop"\n');
+    writeFileSync(join(projectDir, 'jaffle_shop.duckdb'), '');
+
+    await runInit(projectDir, {
+      check: false,
+      chart: '',
+      domain: '',
+      format: 'json',
+      help: false,
+      open: null,
+      input: '',
+      outDir: '',
+      owner: '',
+      port: null,
+      queryOnly: false,
+      template: '',
+      connection: '',
+      verbose: false,
+      skipTests: false,
+    });
+
+    const config = JSON.parse(readFileSync(join(projectDir, 'dql.config.json'), 'utf-8')) as {
+      connections: { default: { filepath: string } };
+      semanticLayer: { provider: string; projectPath: string };
+    };
+
+    expect(config.connections.default.filepath).toBe('jaffle_shop.duckdb');
+    expect(config.semanticLayer.provider).toBe('dbt');
+    expect(config.semanticLayer.projectPath).toBe('.');
+    expect(readdirSync(projectDir)).not.toContain('semantic-layer');
   });
 });

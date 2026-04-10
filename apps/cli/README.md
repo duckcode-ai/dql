@@ -31,11 +31,19 @@ These commands assume `dql` is installed globally. From a source checkout, use `
 ```bash
 dql init my-dql-project
 cd my-dql-project
-dql new block "Pipeline Health"
-dql new semantic-block "ARR Growth"
-dql new dashboard "Revenue Overview"
 dql doctor
-dql preview blocks/pipeline_health.dql --open
+dql notebook
+```
+
+If you want the dbt-integrated starter instead, use the Jaffle Shop semantic-layer course repo:
+
+```bash
+git clone https://github.com/dbt-labs/Semantic-Layer-Online-Course.git jaffle-shop
+cd jaffle-shop
+pip install dbt-duckdb && dbt deps && dbt build --profiles-dir .
+npm install -g @duckcodeailabs/dql-cli
+dql init .
+dql notebook
 ```
 
 ## Core Commands

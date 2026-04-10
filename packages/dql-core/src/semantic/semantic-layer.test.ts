@@ -117,6 +117,109 @@ describe('SemanticLayer', () => {
     expect(refs.valid).toEqual(['geo_hierarchy', 'city_level']);
     expect(refs.unknown).toEqual(['missing_ref']);
   });
+
+  it('registers segments and pre-aggregations and resolves compatible dimensions across joins', () => {
+    const layer = new SemanticLayer();
+    layer.addCube({
+      name: 'orders',
+      label: 'Orders',
+      description: 'Orders cube',
+      sql: 'SELECT * FROM orders',
+      table: 'orders',
+      domain: 'revenue',
+      measures: [
+        {
+          name: 'total_revenue',
+          label: 'Total Revenue',
+          description: '',
+          domain: 'revenue',
+          sql: 'SUM(amount)',
+          type: 'sum',
+          table: 'orders',
+          cube: 'orders',
+          tags: ['finance'],
+        },
+      ],
+      dimensions: [
+        {
+          name: 'order_status',
+          label: 'Order Status',
+          description: '',
+          domain: 'revenue',
+          sql: 'status',
+          type: 'string',
+          table: 'orders',
+          cube: 'orders',
+        },
+      ],
+      timeDimensions: [],
+      joins: [
+        {
+          name: 'customers',
+          left: 'orders',
+          right: 'customers',
+          type: 'left',
+          sql: '${left}.customer_id = ${right}.id',
+        },
+      ],
+      segments: [
+        {
+          name: 'completed_orders',
+          label: 'Completed Orders',
+          description: '',
+          domain: 'revenue',
+          cube: 'orders',
+          sql: "status = 'completed'",
+        },
+      ],
+      preAggregations: [
+        {
+          name: 'orders_monthly_rollup',
+          label: 'Orders Monthly Rollup',
+          description: '',
+          domain: 'revenue',
+          cube: 'orders',
+          measures: ['total_revenue'],
+          dimensions: ['order_status'],
+          timeDimension: 'order_date',
+          granularity: 'month',
+        },
+      ],
+      tags: ['finance'],
+    });
+    layer.addCube({
+      name: 'customers',
+      label: 'Customers',
+      description: 'Customers cube',
+      sql: 'SELECT * FROM customers',
+      table: 'customers',
+      domain: 'revenue',
+      measures: [],
+      dimensions: [
+        {
+          name: 'customer_country',
+          label: 'Customer Country',
+          description: '',
+          domain: 'revenue',
+          sql: 'country',
+          type: 'string',
+          table: 'customers',
+          cube: 'customers',
+        },
+      ],
+      timeDimensions: [],
+      joins: [],
+      segments: [],
+      preAggregations: [],
+    });
+
+    expect(layer.listSegments('revenue').map((segment) => segment.name)).toEqual(['completed_orders']);
+    expect(layer.listPreAggregations('revenue').map((preAggregation) => preAggregation.name)).toEqual(['orders_monthly_rollup']);
+    expect(layer.listCompatibleDimensions(['total_revenue']).map((dimension) => dimension.name)).toContain('customer_country');
+    expect(layer.searchAdvanced('revenue', { domains: ['revenue'], types: ['metric'] }).metrics.map((metric) => metric.name)).toContain('total_revenue');
+    expect(layer.listDomains()).toEqual(['revenue']);
+    expect(layer.listTags()).toContain('finance');
+  });
 });
 
 describe('parseMetricDefinition', () => {

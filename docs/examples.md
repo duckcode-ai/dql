@@ -1,6 +1,6 @@
 # Examples
 
-DQL works best on top of a real dbt project. The recommended starting point is the [Jaffle Shop](https://github.com/dbt-labs/Semantic-Layer-Online-Course) dbt project.
+DQL works best on top of a real dbt project. The recommended starting point is the [Jaffle Shop semantic-layer course repo](https://github.com/dbt-labs/Semantic-Layer-Online-Course), because it already includes dbt semantic models and metrics.
 
 ## Quickstart
 

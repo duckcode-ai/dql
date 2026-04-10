@@ -138,6 +138,14 @@ export class SnowflakeSemanticProvider {
             type: aggregation,
             table: fqn,
             domain: view.schemaName,
+            cube: view.name,
+            aggregation,
+            source: {
+              provider: 'snowflake',
+              objectType: 'metric',
+              objectId: `${fqn}.${colName}`,
+              objectName: colName,
+            },
           });
         }
       }
@@ -170,6 +178,13 @@ export class SnowflakeSemanticProvider {
             sql: colName,
             type: dimType,
             table: fqn,
+            cube: view.name,
+            source: {
+              provider: 'snowflake',
+              objectType: 'dimension',
+              objectId: `${fqn}.${colName}`,
+              objectName: colName,
+            },
           });
         }
       }
@@ -212,6 +227,14 @@ export class SnowflakeSemanticProvider {
             dimensions: [],
             timeDimensions: [],
             joins: [],
+            segments: [],
+            preAggregations: [],
+            source: {
+              provider: 'snowflake',
+              objectType: 'semantic_view',
+              objectId: cubeTable,
+              objectName: cubeName,
+            },
           });
 
           // Ensure both cubes exist
@@ -286,4 +309,3 @@ function inferDimensionType(colType: string): DimensionType {
   }
   return 'string';
 }
-

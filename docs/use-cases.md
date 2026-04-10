@@ -6,7 +6,7 @@ The command snippets assume `dql` is already available on your shell `PATH`. If 
 
 ## 1. Evaluate DQL quickly
 
-Use this path if you want to understand the product in under ten minutes. Start with the [Jaffle Shop](https://github.com/dbt-labs/Semantic-Layer-Online-Course) dbt project:
+Use this path if you want to understand the product in under ten minutes. Start with the [Jaffle Shop semantic-layer course repo](https://github.com/dbt-labs/Semantic-Layer-Online-Course), which already includes dbt semantic models and metrics:
 
 ```bash
 git clone https://github.com/dbt-labs/Semantic-Layer-Online-Course.git jaffle-shop

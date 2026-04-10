@@ -24,14 +24,19 @@ Requires Node 18, 20, or 22 (active LTS).
 
 ```bash
 npm install -g @duckcodeailabs/dql-cli
-dql init .
+dql init my-dql-project
+cd my-dql-project
 dql doctor
 dql notebook
 ```
 
+This is the fastest DQL-only path: local project, local notebook, no dbt repo required.
+
+If you want the dbt-integrated walkthrough, use the Jaffle Shop semantic-layer course project:
+
 → **[Full getting started guide with the Jaffle Shop dbt project](./docs/getting-started.md)**
 
-### 5-Minute Start
+### 5-Minute Start with dbt + Jaffle Shop
 
 ```bash
 git clone https://github.com/dbt-labs/Semantic-Layer-Online-Course.git jaffle-shop
@@ -40,6 +45,8 @@ pip install dbt-duckdb && dbt deps && dbt build --profiles-dir .
 npm install -g @duckcodeailabs/dql-cli
 dql init . && dql notebook
 ```
+
+We use `dbt-labs/Semantic-Layer-Online-Course` for the dbt walkthrough because it already includes the dbt semantic models and metrics that DQL reads via the `dbt` provider.
 
 → **[Quickstart — zero to running notebook in 5 minutes](./docs/quickstart.md)**
 
@@ -222,7 +229,7 @@ Connect to Postgres, BigQuery, or Snowflake the same way — swap the driver in 
 
 ## Getting Started with dbt
 
-DQL is the **answer layer for dbt**. The recommended getting-started path uses the [Jaffle Shop](https://github.com/dbt-labs/Semantic-Layer-Online-Course) dbt project — a real dataset with models, metrics, and a semantic layer.
+DQL is the **answer layer for dbt**. The recommended getting-started path uses the [Jaffle Shop semantic-layer course repo](https://github.com/dbt-labs/Semantic-Layer-Online-Course) — a real dataset with models, metrics, and semantic definitions that DQL can read directly.
 
 `dql init` auto-detects dbt projects and DuckDB files, scaffolding a minimal DQL project on top of your existing data.
 

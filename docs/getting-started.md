@@ -2,7 +2,7 @@
 
 DQL is the **answer layer** on top of dbt. dbt transforms your data — DQL turns it into trusted, governed analytics answers with SQL blocks, notebooks, lineage, and a semantic layer.
 
-This guide walks you through setting up DQL with the **Jaffle Shop** dbt project — the same dataset used in dbt's official Semantic Layer course.
+This guide walks you through setting up DQL with the **Jaffle Shop** dbt project used in dbt's official Semantic Layer course.
 
 ---
 
@@ -21,7 +21,7 @@ git clone https://github.com/dbt-labs/Semantic-Layer-Online-Course.git jaffle-sh
 cd jaffle-shop
 ```
 
-This is dbt Labs' official Semantic Layer course project. It includes:
+This is the recommended repo for DQL's dbt walkthrough because it already includes dbt semantic models and metrics. It includes:
 - Staging and mart models (customers, orders, order items, products, supplies)
 - Semantic model definitions (metrics, dimensions, entities)
 - A MetricFlow time spine
@@ -200,6 +200,7 @@ DQL picks up where dbt stops. Every analytics answer is a `.dql` file with SQL +
 
 ## Next Steps
 
+- [Quickstart](./quickstart.md) — short dbt + Jaffle Shop path
 - [Notebook Guide](./notebook.md) — cell types, param widgets, variable refs, export
 - [Authoring Blocks](./authoring-blocks.md) — create, test, certify, and commit DQL blocks
 - [Semantic Layer](./semantic-layer-guide.md) — metrics, dimensions, dbt/Cube.js providers

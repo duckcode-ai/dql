@@ -78,6 +78,24 @@ interface CubeJsCube {
     sql: string;
     relationship: string;
   }>;
+  segments?: Array<{
+    name: string;
+    sql?: string;
+    title?: string;
+    description?: string;
+  }>;
+  pre_aggregations?: Array<{
+    name: string;
+    type?: string;
+    measures?: string[];
+    dimensions?: string[];
+    time_dimension?: string;
+    granularity?: string;
+    refresh_key?: string;
+    sql?: string;
+    title?: string;
+    description?: string;
+  }>;
 }
 
 export class CubejsProvider implements SemanticLayerProvider {
@@ -166,6 +184,14 @@ function convertCube(raw: CubeJsCube): CubeDefinition {
       sql: buildAggSql(aggType, sqlExpr),
       type: aggType,
       table: tableName,
+      cube: cubeName,
+      aggregation: m.type,
+      source: {
+        provider: 'cubejs',
+        objectType: 'measure',
+        objectId: `${cubeName}.${m.name}`,
+        objectName: m.name,
+      },
     };
   });
 
@@ -184,8 +210,15 @@ function convertCube(raw: CubeJsCube): CubeDefinition {
         sql: sqlExpr,
         type: 'date',
         table: tableName,
+        cube: cubeName,
         granularities: ['day', 'week', 'month', 'quarter', 'year'],
         primaryTime: Boolean(dim.primary_key ?? dim.primaryKey),
+        source: {
+          provider: 'cubejs',
+          objectType: 'time_dimension',
+          objectId: `${cubeName}.${dim.name}`,
+          objectName: dim.name,
+        },
       });
     } else {
       dimensions.push({
@@ -195,6 +228,13 @@ function convertCube(raw: CubeJsCube): CubeDefinition {
         sql: sqlExpr,
         type: dqlType,
         table: tableName,
+        cube: cubeName,
+        source: {
+          provider: 'cubejs',
+          objectType: 'dimension',
+          objectId: `${cubeName}.${dim.name}`,
+          objectName: dim.name,
+        },
       });
     }
   }
@@ -215,6 +255,42 @@ function convertCube(raw: CubeJsCube): CubeDefinition {
     };
   });
 
+  const segments = (raw.segments ?? []).map((segment) => ({
+    name: segment.name,
+    label: segment.title ?? segment.name,
+    description: segment.description ?? '',
+    domain: '',
+    cube: cubeName,
+    sql: segment.sql ?? '',
+    source: {
+      provider: 'cubejs',
+      objectType: 'segment',
+      objectId: `${cubeName}.${segment.name}`,
+      objectName: segment.name,
+    },
+  }));
+
+  const preAggregations = (raw.pre_aggregations ?? []).map((preAggregation) => ({
+    name: preAggregation.name,
+    label: preAggregation.title ?? preAggregation.name,
+    description: preAggregation.description ?? '',
+    domain: '',
+    cube: cubeName,
+    measures: preAggregation.measures,
+    dimensions: preAggregation.dimensions,
+    timeDimension: preAggregation.time_dimension,
+    granularity: preAggregation.granularity,
+    refreshKey: preAggregation.refresh_key,
+    sql: preAggregation.sql,
+    source: {
+      provider: 'cubejs',
+      objectType: 'pre_aggregation',
+      objectId: `${cubeName}.${preAggregation.name}`,
+      objectName: preAggregation.name,
+      extra: preAggregation.type ? { type: preAggregation.type } : undefined,
+    },
+  }));
+
   return {
     name: cubeName,
     label: raw.title ?? cubeName,
@@ -226,6 +302,14 @@ function convertCube(raw: CubeJsCube): CubeDefinition {
     dimensions,
     timeDimensions,
     joins,
+    segments,
+    preAggregations,
+    source: {
+      provider: 'cubejs',
+      objectType: 'cube',
+      objectId: cubeName,
+      objectName: cubeName,
+    },
   };
 }
 

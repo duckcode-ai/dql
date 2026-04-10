@@ -4,7 +4,7 @@
  * from a project's semantic-layer/ directory and returns a populated SemanticLayer.
  */
 
-import { readFileSync, readdirSync, existsSync } from 'node:fs';
+import { readFileSync, readdirSync, existsSync, statSync } from 'node:fs';
 import { join, extname } from 'node:path';
 import * as yaml from 'js-yaml';
 import {
@@ -13,6 +13,8 @@ import {
   parseDimensionDefinition,
   parseHierarchyDefinition,
   parseCubeDefinition,
+  parseSegmentDefinition,
+  parsePreAggregationDefinition,
 } from './semantic-layer.js';
 
 /**
@@ -23,6 +25,8 @@ import {
  *     dimensions/    → *.yaml dimension definitions
  *     hierarchies/   → *.yaml hierarchy definitions
  *     cubes/         → *.yaml cube definitions
+ *     segments/      → *.yaml segment definitions
+ *     pre_aggregations/ → *.yaml pre-aggregation definitions
  *     blocks/        → *.yaml block companion definitions (metadata only, not loaded into layer)
  */
 export function loadSemanticLayerFromDir(semanticLayerDir: string): SemanticLayer {
@@ -33,15 +37,16 @@ export function loadSemanticLayerFromDir(semanticLayerDir: string): SemanticLaye
     { folder: 'dimensions', loader: (raw) => layer.addDimension(parseDimensionDefinition(raw)) },
     { folder: 'hierarchies', loader: (raw) => layer.addHierarchy(parseHierarchyDefinition(raw)) },
     { folder: 'cubes', loader: (raw) => layer.addCube(parseCubeDefinition(raw)) },
+    { folder: 'segments', loader: (raw) => layer.addSegment(parseSegmentDefinition(raw)) },
+    { folder: 'pre_aggregations', loader: (raw) => layer.addPreAggregation(parsePreAggregationDefinition(raw)) },
   ];
 
   for (const { folder, loader } of subdirs) {
     const dir = join(semanticLayerDir, folder);
     if (!existsSync(dir)) continue;
-    for (const file of readdirSync(dir)) {
-      if (extname(file) !== '.yaml' && extname(file) !== '.yml') continue;
+    for (const filePath of collectYamlFiles(dir)) {
       try {
-        const content = readFileSync(join(dir, file), 'utf-8');
+        const content = readFileSync(filePath, 'utf-8');
         const raw = yaml.load(content) as Record<string, unknown>;
         if (raw && typeof raw === 'object') {
           loader(raw);
@@ -78,6 +83,10 @@ export function loadSemanticLayerFromConfig(
         layer.addHierarchy(parseHierarchyDefinition(raw));
       } else if (pathLower.includes('/cubes/') || pathLower.includes('\\cubes\\')) {
         layer.addCube(parseCubeDefinition(raw));
+      } else if (pathLower.includes('/segments/') || pathLower.includes('\\segments\\')) {
+        layer.addSegment(parseSegmentDefinition(raw));
+      } else if (pathLower.includes('/pre_aggregations/') || pathLower.includes('\\pre_aggregations\\')) {
+        layer.addPreAggregation(parsePreAggregationDefinition(raw));
       }
     } catch {
       // Skip malformed files
@@ -85,4 +94,22 @@ export function loadSemanticLayerFromConfig(
   }
 
   return layer;
+}
+
+function collectYamlFiles(dir: string): string[] {
+  const results: string[] = [];
+  for (const entry of readdirSync(dir)) {
+    const filePath = join(dir, entry);
+    try {
+      const stat = statSync(filePath);
+      if (stat.isDirectory()) {
+        results.push(...collectYamlFiles(filePath));
+      } else if (stat.isFile() && (extname(entry) === '.yaml' || extname(entry) === '.yml')) {
+        results.push(filePath);
+      }
+    } catch {
+      // Skip unreadable entries.
+    }
+  }
+  return results;
 }

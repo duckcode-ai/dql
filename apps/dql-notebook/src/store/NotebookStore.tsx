@@ -2,6 +2,7 @@ import React, { createContext, useContext, useReducer, type ReactNode } from 're
 import type { NotebookState, NotebookAction, Cell } from './types';
 
 const initialState: NotebookState = {
+  mainView: 'notebook',
   themeMode: 'dark',
   sidebarPanel: 'files',
   sidebarOpen: true,
@@ -19,7 +20,12 @@ const initialState: NotebookState = {
     metrics: [],
     dimensions: [],
     hierarchies: [],
+    domains: [],
+    tags: [],
+    favorites: [],
+    recentlyUsed: [],
     loading: false,
+    lastSyncTime: null,
   },
   devPanelOpen: false,
   devPanelTab: 'logs',
@@ -31,10 +37,21 @@ const initialState: NotebookState = {
   savingFile: false,
   lineageFullscreen: false,
   dashboardMode: false,
+  activeBlockPath: null,
+  blockStudioDraft: '',
+  blockStudioDirty: false,
+  blockStudioPreview: null,
+  blockStudioValidation: null,
+  blockStudioMetadata: null,
+  blockStudioCatalog: null,
+  blockStudioCatalogLoading: false,
 };
 
 function notebookReducer(state: NotebookState, action: NotebookAction): NotebookState {
   switch (action.type) {
+    case 'SET_MAIN_VIEW':
+      return { ...state, mainView: action.view };
+
     case 'SET_THEME':
       return { ...state, themeMode: action.mode };
 
@@ -57,6 +74,31 @@ function notebookReducer(state: NotebookState, action: NotebookAction): Notebook
         cells: action.cells,
         notebookTitle: action.title,
         notebookDirty: false,
+        mainView: action.file.type === 'block' ? 'block_studio' : 'notebook',
+        activeBlockPath: action.file.type === 'block' ? action.file.path : null,
+        blockStudioDraft: action.file.type === 'block' ? state.blockStudioDraft : '',
+        blockStudioDirty: false,
+        blockStudioPreview: action.file.type === 'block' ? state.blockStudioPreview : null,
+        blockStudioValidation: action.file.type === 'block' ? state.blockStudioValidation : null,
+        blockStudioMetadata: action.file.type === 'block' ? state.blockStudioMetadata : null,
+      };
+
+    case 'OPEN_BLOCK_STUDIO':
+      return {
+        ...state,
+        activeFile: action.file,
+        cells: [],
+        notebookTitle: action.payload.metadata.name,
+        notebookDirty: false,
+        mainView: 'block_studio',
+        sidebarOpen: false,
+        dashboardMode: false,
+        activeBlockPath: action.payload.path,
+        blockStudioDraft: action.payload.source,
+        blockStudioDirty: false,
+        blockStudioPreview: null,
+        blockStudioValidation: action.payload.validation,
+        blockStudioMetadata: action.payload.metadata,
       };
 
     case 'SET_CELLS':
@@ -191,11 +233,62 @@ function notebookReducer(state: NotebookState, action: NotebookAction): Notebook
         semanticLayer: { ...state.semanticLayer, loading: action.loading },
       };
 
+    case 'SET_SEMANTIC_FAVORITES':
+      return {
+        ...state,
+        semanticLayer: { ...state.semanticLayer, favorites: action.favorites },
+      };
+
+    case 'ADD_SEMANTIC_RECENT': {
+      const nextRecent = [action.name, ...state.semanticLayer.recentlyUsed.filter((item) => item !== action.name)].slice(0, 12);
+      return {
+        ...state,
+        semanticLayer: { ...state.semanticLayer, recentlyUsed: nextRecent },
+      };
+    }
+
+    case 'SET_SEMANTIC_DOMAINS':
+      return {
+        ...state,
+        semanticLayer: {
+          ...state.semanticLayer,
+          domains: action.domains,
+          tags: action.tags,
+          lastSyncTime: action.lastSyncTime ?? state.semanticLayer.lastSyncTime,
+        },
+      };
+
     case 'TOGGLE_LINEAGE_FULLSCREEN':
       return { ...state, lineageFullscreen: !state.lineageFullscreen };
 
     case 'TOGGLE_DASHBOARD_MODE':
       return { ...state, dashboardMode: !state.dashboardMode };
+
+    case 'SET_BLOCK_STUDIO_DRAFT':
+      return { ...state, blockStudioDraft: action.draft, blockStudioDirty: true };
+
+    case 'SET_BLOCK_STUDIO_DIRTY':
+      return { ...state, blockStudioDirty: action.dirty };
+
+    case 'SET_BLOCK_STUDIO_PREVIEW':
+      return { ...state, blockStudioPreview: action.preview };
+
+    case 'SET_BLOCK_STUDIO_VALIDATION':
+      return { ...state, blockStudioValidation: action.validation };
+
+    case 'SET_BLOCK_STUDIO_METADATA':
+      return {
+        ...state,
+        blockStudioMetadata: action.metadata,
+        notebookTitle: action.metadata.name,
+        blockStudioDirty: true,
+      };
+
+    case 'SET_BLOCK_STUDIO_CATALOG':
+      return { ...state, blockStudioCatalog: action.catalog };
+
+    case 'SET_BLOCK_STUDIO_CATALOG_LOADING':
+      return { ...state, blockStudioCatalogLoading: action.loading };
 
     default:
       return state;

@@ -2,31 +2,11 @@ import { useCallback, useRef } from 'react';
 import { useNotebook, makeCellId } from '../store/NotebookStore';
 import { api } from '../api/client';
 import { useVariableSubstitution } from './useVariableSubstitution';
-import type { Cell, CellChartConfig } from '../store/types';
+import type { Cell } from '../store/types';
+import { extractSqlFromText, parseDqlChartConfig } from '../utils/block-studio';
 
 // Global map of running AbortControllers keyed by cellId
 const runningControllers = new Map<string, AbortController>();
-
-/**
- * Parse the visualization section of a DQL block into a CellChartConfig.
- * Uses regex instead of the full DQL parser — handles simple cases.
- */
-function parseDqlChartConfig(content: string): CellChartConfig | undefined {
-  const vizMatch = content.match(/visualization\s*\{([^}]+)\}/is);
-  if (!vizMatch) return undefined;
-  const body = vizMatch[1];
-  const get = (key: string) =>
-    body.match(new RegExp(`\\b${key}\\s*=\\s*["']?([\\w-]+)["']?`, 'i'))?.[1];
-  const chart = get('chart');
-  if (!chart) return undefined;
-  return {
-    chart,
-    x: get('x'),
-    y: get('y'),
-    color: get('color'),
-    title: get('title'),
-  };
-}
 
 /**
  * Extract executable SQL from a cell.
@@ -42,78 +22,6 @@ function extractSql(cell: Cell): string | null {
   if (!dqlContent) return null;
 
   return extractSqlFromText(dqlContent);
-}
-
-function extractSqlFromText(dqlContent: string): string | null {
-
-  // DQL block syntax: extract SQL from inside query = """..."""
-  // Handles both 'query = """..."""' and bare triple-quote blocks
-  const tripleQuoteMatch = dqlContent.match(/query\s*=\s*"""([\s\S]*?)"""/i);
-  if (tripleQuoteMatch) return tripleQuoteMatch[1].trim() || null;
-
-  // Bare triple-quote block (no 'query =' prefix)
-  const bareTripleMatch = dqlContent.match(/"""([\s\S]*?)"""/);
-  if (bareTripleMatch) return bareTripleMatch[1].trim() || null;
-
-  // Dashboard/workbook files should be previewed with `dql preview`, not run as SQL
-  if (/^\s*(dashboard|workbook)\s+"/i.test(dqlContent)) return null;
-
-  // Plain SQL in a dql cell (no block syntax): match from first SQL keyword
-  // but stop before any DQL-only syntax (visualization/tests/block blocks)
-  // or before a named-arg boundary like ", identifier =" (from chart.kpi calls)
-  const sqlKeywordMatch = dqlContent.match(
-    /\b(SELECT|WITH|INSERT|UPDATE|DELETE|CREATE|DROP|ALTER|SHOW|DESCRIBE|EXPLAIN)\b([\s\S]*)/i
-  );
-  if (sqlKeywordMatch) {
-    let raw = sqlKeywordMatch[0];
-    // Stop before DQL block sections
-    const dqlSectionStart = raw.search(/\b(visualization|tests|block)\s*\{/i);
-    if (dqlSectionStart > 0) raw = raw.slice(0, dqlSectionStart);
-    // Stop at named-arg boundary: ", identifier =" (DQL chart call syntax)
-    // Use the same heuristic as scanSQLBoundary: stop at ", word =" at paren depth 1
-    raw = trimAtNamedArgBoundary(raw);
-    return raw.trim() || null;
-  }
-
-  return null;
-}
-
-/**
- * Trim SQL text at the first ", identifier =" pattern at paren-depth 1.
- * Mirrors the scanSQLBoundary logic used by the DQL compiler.
- */
-function trimAtNamedArgBoundary(sql: string): string {
-  let depth = 0;
-  for (let i = 0; i < sql.length; i++) {
-    const ch = sql[i];
-    if (ch === '(' ) { depth++; continue; }
-    if (ch === ')') { if (depth > 0) depth--; continue; }
-    // Skip string literals
-    if (ch === "'" || ch === '"') {
-      i++;
-      while (i < sql.length && sql[i] !== ch) {
-        if (sql[i] === '\\') i++;
-        i++;
-      }
-      continue;
-    }
-    if (ch === ',' && depth === 0) {
-      // Look ahead for "whitespace identifier ="
-      let j = i + 1;
-      while (j < sql.length && /\s/.test(sql[j])) j++;
-      if (j < sql.length && /[a-zA-Z_]/.test(sql[j])) {
-        const identStart = j;
-        while (j < sql.length && /[a-zA-Z0-9_]/.test(sql[j])) j++;
-        let k = j;
-        while (k < sql.length && /\s/.test(sql[k])) k++;
-        if (k < sql.length && sql[k] === '=' && sql[k + 1] !== '=') {
-          // Named-arg boundary — trim here
-          return sql.slice(0, i);
-        }
-      }
-    }
-  }
-  return sql;
 }
 
 export function useQueryExecution() {

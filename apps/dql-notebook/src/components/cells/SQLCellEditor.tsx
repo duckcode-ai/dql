@@ -1,4 +1,4 @@
-import React, { useRef, useEffect } from 'react';
+import React, { useRef, useEffect, useState } from 'react';
 import {
   EditorView,
   Decoration,
@@ -28,6 +28,15 @@ import {
 } from '@codemirror/autocomplete';
 import { search, searchKeymap } from '@codemirror/search';
 import { themes } from '../../themes/notebook-theme';
+import {
+  SEMANTIC_REF_MIME,
+  clearActiveSemanticEditor,
+  insertSemanticReferenceAtCoords,
+  parseSemanticDragRef,
+  semanticCompletionSource,
+  setActiveSemanticEditor,
+} from '../../editor/semantic-completions';
+import { api } from '../../api/client';
 
 interface SQLCellEditorProps {
   value: string;
@@ -217,6 +226,7 @@ export function SQLCellEditor({
   const t = themes[themeMode];
   const containerRef = useRef<HTMLDivElement>(null);
   const viewRef = useRef<EditorView | null>(null);
+  const [dragActive, setDragActive] = useState(false);
   const onRunRef = useRef(onRun);
   const onChangeRef = useRef(onChange);
   // Compartment lets us swap SQL language/schema without destroying the editor
@@ -259,6 +269,15 @@ export function SQLCellEditor({
       }
     });
 
+    const editorDomHandlers = EditorView.domEventHandlers({
+      focus: (_event, view) => {
+        setActiveSemanticEditor(view);
+      },
+      blur: (_event, view) => {
+        clearActiveSemanticEditor(view);
+      },
+    });
+
     const baseTheme = EditorView.theme({
       '&': {
         background: t.editorBg,
@@ -283,10 +302,11 @@ export function SQLCellEditor({
     const extensions = [
       runKeymap,
       updateListener,
+      editorDomHandlers,
       baseTheme,
       // Language wrapped in compartment for hot-swapping schema
       schemaCompartment.current.of(initialSqlLang),
-      autocompletion({ closeOnBlur: false }),
+      autocompletion({ closeOnBlur: false, override: [semanticCompletionSource] }),
       // Developer experience extensions
       bracketMatching(),
       closeBrackets(),
@@ -388,9 +408,33 @@ export function SQLCellEditor({
 
   return (
     <div
-      ref={containerRef}
-      style={{ background: t.editorBg, minHeight: 80 }}
-    />
+      onDragOver={(event) => {
+        if (!event.dataTransfer.types.includes(SEMANTIC_REF_MIME)) return;
+        event.preventDefault();
+        setDragActive(true);
+      }}
+      onDragLeave={() => setDragActive(false)}
+      onDrop={(event) => {
+        const view = viewRef.current;
+        if (!view) return;
+        const payload = parseSemanticDragRef(event.dataTransfer.getData(SEMANTIC_REF_MIME));
+        if (!payload) return;
+        event.preventDefault();
+        setDragActive(false);
+        insertSemanticReferenceAtCoords(view, payload.reference, { x: event.clientX, y: event.clientY });
+        void api.trackUsage(payload.name);
+        window.dispatchEvent(new CustomEvent('dql:semantic-used', { detail: { name: payload.name } }));
+      }}
+      style={{
+        background: t.editorBg,
+        minHeight: 80,
+        border: dragActive ? `1px solid ${t.accent}` : '1px solid transparent',
+        borderRadius: 6,
+        transition: 'border-color 0.15s',
+      }}
+    >
+      <div ref={containerRef} style={{ minHeight: 80 }} />
+    </div>
   );
 }
 

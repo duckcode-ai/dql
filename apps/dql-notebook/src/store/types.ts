@@ -20,6 +20,7 @@ export interface ParamConfig {
 }
 export type SidebarPanel = 'files' | 'schema' | 'outline' | 'connection' | 'reference' | 'semantic' | 'lineage' | null;
 export type DevPanelTab = 'logs' | 'errors';
+export type MainView = 'notebook' | 'block_studio';
 
 export interface QueryResult {
   columns: string[];
@@ -75,6 +76,7 @@ export interface SemanticMetric {
   label: string;
   description: string;
   domain: string;
+  sql: string;
   type: string;
   table: string;
   tags: string[];
@@ -85,9 +87,12 @@ export interface SemanticDimension {
   name: string;
   label: string;
   description: string;
+  domain?: string;
+  sql: string;
   type: string;
   table: string;
   tags: string[];
+  owner: string | null;
 }
 
 export interface SemanticHierarchy {
@@ -98,13 +103,59 @@ export interface SemanticHierarchy {
   levels: Array<{ name: string; label: string }>;
 }
 
+export interface SemanticTreeNode {
+  id: string;
+  label: string;
+  kind: 'provider' | 'domain' | 'cube' | 'group' | 'metric' | 'dimension' | 'hierarchy' | 'segment' | 'pre_aggregation';
+  count?: number;
+  meta?: Record<string, string | number | boolean | null | undefined>;
+  children?: SemanticTreeNode[];
+}
+
+export interface SemanticObjectDetail {
+  id: string;
+  kind: 'cube' | 'metric' | 'dimension' | 'hierarchy' | 'segment' | 'pre_aggregation';
+  name: string;
+  label: string;
+  description: string;
+  domain: string;
+  cube?: string;
+  table?: string;
+  sql?: string;
+  type?: string;
+  tags: string[];
+  owner: string | null;
+  source: {
+    provider: string;
+    objectType: string;
+    objectId: string;
+    objectName?: string;
+    importedAt?: string;
+    extra?: Record<string, unknown>;
+  } | null;
+  filePath: string | null;
+  importedAt: string | null;
+  joins?: Array<{ name: string; left: string; right: string; type: string; sql: string }>;
+  levels?: Array<{ name: string; label: string; description: string; dimension: string; order: number }>;
+  measures?: string[];
+  dimensions?: string[];
+  timeDimension?: string;
+  granularity?: string;
+  refreshKey?: string;
+}
+
 export interface SemanticLayerState {
   available: boolean;
   provider: string | null;
   metrics: SemanticMetric[];
   dimensions: SemanticDimension[];
   hierarchies: SemanticHierarchy[];
+  domains: string[];
+  tags: string[];
+  favorites: string[];
+  recentlyUsed: string[];
   loading: boolean;
+  lastSyncTime: string | null;
 }
 
 export interface QueryLogEntry {
@@ -116,7 +167,71 @@ export interface QueryLogEntry {
   error?: string;
 }
 
+export interface BlockStudioDiagnostic {
+  severity: 'error' | 'warning' | 'info';
+  message: string;
+  code?: string;
+}
+
+export interface BlockStudioValidation {
+  valid: boolean;
+  diagnostics: BlockStudioDiagnostic[];
+  semanticRefs: {
+    metrics: string[];
+    dimensions: string[];
+    segments: string[];
+  };
+  chartConfig?: CellChartConfig;
+  executableSql?: string | null;
+}
+
+export interface BlockStudioPreview {
+  sql: string;
+  result: QueryResult;
+  chartConfig?: CellChartConfig;
+}
+
+export interface BlockStudioMetadata {
+  name: string;
+  path: string | null;
+  domain: string;
+  description: string;
+  owner: string;
+  tags: string[];
+  reviewStatus?: string;
+}
+
+export interface DatabaseSchemaNode {
+  id: string;
+  label: string;
+  kind: 'schema' | 'table' | 'column';
+  path?: string;
+  type?: string;
+  children?: DatabaseSchemaNode[];
+}
+
+export interface BlockStudioCatalog {
+  semanticTree: SemanticTreeNode | null;
+  databaseTree: DatabaseSchemaNode[];
+  connection: {
+    default: string;
+    current: string;
+    connections: Record<string, unknown>;
+  };
+  favorites: string[];
+  recentlyUsed: string[];
+}
+
+export interface BlockStudioOpenPayload {
+  path: string;
+  source: string;
+  metadata: BlockStudioMetadata;
+  companionPath: string | null;
+  validation: BlockStudioValidation;
+}
+
 export interface NotebookState {
+  mainView: MainView;
   themeMode: ThemeMode;
   sidebarPanel: SidebarPanel;
   sidebarOpen: boolean;
@@ -139,9 +254,18 @@ export interface NotebookState {
   savingFile: boolean;
   lineageFullscreen: boolean;
   dashboardMode: boolean;
+  activeBlockPath: string | null;
+  blockStudioDraft: string;
+  blockStudioDirty: boolean;
+  blockStudioPreview: BlockStudioPreview | null;
+  blockStudioValidation: BlockStudioValidation | null;
+  blockStudioMetadata: BlockStudioMetadata | null;
+  blockStudioCatalog: BlockStudioCatalog | null;
+  blockStudioCatalogLoading: boolean;
 }
 
 export type NotebookAction =
+  | { type: 'SET_MAIN_VIEW'; view: MainView }
   | { type: 'SET_THEME'; mode: ThemeMode }
   | { type: 'SET_SIDEBAR_PANEL'; panel: SidebarPanel }
   | { type: 'TOGGLE_SIDEBAR' }
@@ -171,6 +295,17 @@ export type NotebookAction =
   | { type: 'SET_PARAM_VALUE'; id: string; value: string }
   | { type: 'SET_SEMANTIC_LAYER'; layer: Omit<SemanticLayerState, 'loading'> }
   | { type: 'SET_SEMANTIC_LOADING'; loading: boolean }
+  | { type: 'SET_SEMANTIC_FAVORITES'; favorites: string[] }
+  | { type: 'ADD_SEMANTIC_RECENT'; name: string }
+  | { type: 'SET_SEMANTIC_DOMAINS'; domains: string[]; tags: string[]; lastSyncTime?: string | null }
   | { type: 'TOGGLE_LINEAGE_FULLSCREEN' }
   | { type: 'REORDER_CELL'; fromIndex: number; toIndex: number }
-  | { type: 'TOGGLE_DASHBOARD_MODE' };
+  | { type: 'TOGGLE_DASHBOARD_MODE' }
+  | { type: 'OPEN_BLOCK_STUDIO'; file: NotebookFile; payload: BlockStudioOpenPayload }
+  | { type: 'SET_BLOCK_STUDIO_DRAFT'; draft: string }
+  | { type: 'SET_BLOCK_STUDIO_DIRTY'; dirty: boolean }
+  | { type: 'SET_BLOCK_STUDIO_PREVIEW'; preview: BlockStudioPreview | null }
+  | { type: 'SET_BLOCK_STUDIO_VALIDATION'; validation: BlockStudioValidation | null }
+  | { type: 'SET_BLOCK_STUDIO_METADATA'; metadata: BlockStudioMetadata }
+  | { type: 'SET_BLOCK_STUDIO_CATALOG'; catalog: BlockStudioCatalog | null }
+  | { type: 'SET_BLOCK_STUDIO_CATALOG_LOADING'; loading: boolean };

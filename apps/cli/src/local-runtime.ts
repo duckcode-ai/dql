@@ -1,6 +1,6 @@
 import { createServer } from 'node:http';
-import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, watch, writeFileSync } from 'node:fs';
-import { dirname, extname, join, normalize, resolve } from 'node:path';
+import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, watch, writeFileSync } from 'node:fs';
+import { dirname, extname, join, normalize, relative, resolve } from 'node:path';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { QueryExecutor, type ConnectionConfig } from '@duckcodeailabs/dql-connectors';
 import {
@@ -27,6 +27,14 @@ import {
   type LineageMetricInput,
   type LineageDimensionInput,
 } from '@duckcodeailabs/dql-core';
+import { listBlockTemplates } from './block-templates.js';
+import {
+  buildSemanticObjectDetail,
+  buildSemanticTree,
+  loadSemanticImportManifest,
+  performSemanticImport,
+  syncSemanticImport,
+} from './semantic-import.js';
 
 export interface ProjectConfig {
   project?: string;
@@ -57,7 +65,10 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
   let semanticLayerErrors: string[] = [];
   let semanticDetectedProvider: string | undefined;
   const semanticLayerDir = join(projectRoot, 'semantic-layer');
+  let semanticImportManifest = loadSemanticImportManifest(projectRoot);
+  const userPrefsPath = join(projectRoot, '.dql-user-prefs.json');
   const semanticConfig = projectConfig.semanticLayer;
+  let semanticLastSyncTime: string | null = null;
   {
     const executeQuery = semanticConfig?.provider === 'snowflake'
       ? async (sql: string) => { const r = await executor.executeQuery(sql, [], {}, connection); return { rows: r.rows }; }
@@ -66,9 +77,14 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
     semanticLayer = result.layer;
     semanticLayerErrors = result.errors;
     semanticDetectedProvider = result.detectedProvider;
+    semanticLastSyncTime = result.layer ? new Date().toISOString() : null;
+    semanticImportManifest = loadSemanticImportManifest(projectRoot);
     // Legacy fallback if provider system returned nothing and no errors
     if (!semanticLayer && semanticLayerErrors.length === 0 && existsSync(semanticLayerDir)) {
-      try { semanticLayer = loadSemanticLayerFromDir(semanticLayerDir); } catch { /* continue without */ }
+      try {
+        semanticLayer = loadSemanticLayerFromDir(semanticLayerDir);
+        semanticLastSyncTime = new Date().toISOString();
+      } catch { /* continue without */ }
     }
   }
 
@@ -118,6 +134,8 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
               if (refreshed.layer) {
                 semanticLayer = refreshed.layer;
                 semanticLayerErrors = refreshed.errors;
+                semanticLastSyncTime = new Date().toISOString();
+                semanticImportManifest = loadSemanticImportManifest(projectRoot);
               } else if (refreshed.errors.length > 0) {
                 semanticLayerErrors = refreshed.errors;
               }
@@ -300,26 +318,231 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
     if (req.method === 'POST' && path === '/api/blocks') {
       try {
         const body = await readJSON(req);
-        const { name } = body as { name: string };
+        const {
+          name,
+          domain,
+          content,
+          description,
+          tags,
+          metricRefs,
+          template,
+        } = body as {
+          name: string;
+          domain?: string;
+          content?: string;
+          description?: string;
+          tags?: string[];
+          metricRefs?: string[];
+          template?: string;
+        };
         if (!name || typeof name !== 'string') {
           res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
           res.end(serializeJSON({ error: 'Missing block name' }));
           return;
         }
-        const slug = name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '') || 'block';
-        const blocksDir = join(projectRoot, 'blocks');
-        mkdirSync(blocksDir, { recursive: true });
-        const blockPath = join(blocksDir, `${slug}.dql`);
-        if (existsSync(blockPath)) {
+        const created = createBlockArtifacts(projectRoot, {
+          name,
+          domain,
+          content,
+          description,
+          tags,
+          metricRefs,
+          template,
+        });
+        res.writeHead(201, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON(created));
+      } catch (error) {
+        if (error instanceof Error && error.message === 'BLOCK_EXISTS') {
           res.writeHead(409, { 'Content-Type': 'application/json; charset=utf-8' });
           res.end(serializeJSON({ error: 'Block already exists' }));
           return;
         }
-        const content = `-- ${name}\nSELECT 1;\n`;
-        writeFileSync(blockPath, content, 'utf-8');
+        res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({ error: error instanceof Error ? error.message : String(error) }));
+      }
+      return;
+    }
+
+    if (req.method === 'POST' && path === '/api/blocks/save-from-cell') {
+      try {
+        const body = await readJSON(req);
+        const {
+          name,
+          domain,
+          content,
+          description,
+          tags,
+          metricRefs,
+          template,
+        } = body as {
+          name: string;
+          domain?: string;
+          content: string;
+          description?: string;
+          tags?: string[];
+          metricRefs?: string[];
+          template?: string;
+        };
+        if (!name || typeof name !== 'string' || !content || typeof content !== 'string') {
+          res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
+          res.end(serializeJSON({ error: 'name and content are required' }));
+          return;
+        }
+        const created = createBlockArtifacts(projectRoot, {
+          name,
+          domain,
+          content,
+          description,
+          tags,
+          metricRefs,
+          template,
+        });
         res.writeHead(201, { 'Content-Type': 'application/json; charset=utf-8' });
-        res.end(serializeJSON({ path: `blocks/${slug}.dql`, content }));
+        res.end(serializeJSON(created));
       } catch (error) {
+        if (error instanceof Error && error.message === 'BLOCK_EXISTS') {
+          res.writeHead(409, { 'Content-Type': 'application/json; charset=utf-8' });
+          res.end(serializeJSON({ error: 'Block already exists' }));
+          return;
+        }
+        res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({ error: error instanceof Error ? error.message : String(error) }));
+      }
+      return;
+    }
+
+    if (req.method === 'GET' && path === '/api/blocks/templates') {
+      res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+      res.end(serializeJSON({ templates: listBlockTemplates() }));
+      return;
+    }
+
+    if (req.method === 'GET' && path === '/api/block-studio/catalog') {
+      try {
+        const cfg = loadProjectConfig(projectRoot) as any;
+        const connections: Record<string, unknown> = cfg.connections ?? {};
+        if (Object.keys(connections).length === 0 && cfg.defaultConnection) {
+          connections.default = cfg.defaultConnection;
+        }
+        const defaultKey = cfg.defaultConnection ? 'default' : Object.keys(connections)[0] ?? 'default';
+        const userPrefs = readUserPrefs(userPrefsPath);
+        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({
+          semanticTree: semanticLayer ? buildSemanticTree(semanticLayer, semanticImportManifest) : null,
+          databaseTree: await buildDatabaseSchemaTree(projectRoot, executor, connection),
+          connection: {
+            default: defaultKey,
+            current: defaultKey,
+            connections,
+          },
+          favorites: userPrefs.favorites,
+          recentlyUsed: userPrefs.recentlyUsed,
+        }));
+      } catch (error) {
+        res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({ error: error instanceof Error ? error.message : String(error) }));
+      }
+      return;
+    }
+
+    if (req.method === 'GET' && path === '/api/block-studio/open') {
+      try {
+        const relativePath = url.searchParams.get('path');
+        if (!relativePath) {
+          res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
+          res.end(serializeJSON({ error: 'Missing block path.' }));
+          return;
+        }
+        const payload = openBlockStudioDocument(projectRoot, relativePath, semanticLayer);
+        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON(payload));
+      } catch (error) {
+        res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({ error: error instanceof Error ? error.message : String(error) }));
+      }
+      return;
+    }
+
+    if (req.method === 'POST' && path === '/api/block-studio/validate') {
+      try {
+        const body = await readJSON(req);
+        const source = typeof body.source === 'string' ? body.source : '';
+        const validation = validateBlockStudioSource(source, semanticLayer);
+        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON(validation));
+      } catch (error) {
+        res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({ error: error instanceof Error ? error.message : String(error) }));
+      }
+      return;
+    }
+
+    if (req.method === 'POST' && path === '/api/block-studio/run') {
+      try {
+        const body = await readJSON(req);
+        const source = typeof body.source === 'string' ? body.source : '';
+        const validation = validateBlockStudioSource(source, semanticLayer);
+        if (!validation.executableSql) {
+          res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
+          res.end(serializeJSON({ error: 'No executable SQL found in block source.' }));
+          return;
+        }
+        const sql = resolveProjectRelativeSqlPaths(validation.executableSql, projectRoot, projectConfig.dataDir);
+        const result = await executor.executeQuery(sql, [], {}, connection);
+        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({
+          sql: validation.executableSql,
+          result: normalizeQueryResult(result),
+          chartConfig: validation.chartConfig ?? null,
+        }));
+      } catch (error) {
+        res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({ error: error instanceof Error ? error.message : String(error) }));
+      }
+      return;
+    }
+
+    if (req.method === 'POST' && path === '/api/block-studio/save') {
+      try {
+        const body = await readJSON(req);
+        const source = typeof body.source === 'string' ? body.source : '';
+        const metadata = body.metadata && typeof body.metadata === 'object'
+          ? body.metadata as {
+              name?: string;
+              domain?: string;
+              description?: string;
+              owner?: string;
+              tags?: string[];
+            }
+          : {};
+        if (!source.trim()) {
+          res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
+          res.end(serializeJSON({ error: 'Block source is required.' }));
+          return;
+        }
+        if (!metadata.name || typeof metadata.name !== 'string') {
+          res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
+          res.end(serializeJSON({ error: 'Block name is required.' }));
+          return;
+        }
+        const savedPath = saveBlockStudioArtifacts(projectRoot, {
+          currentPath: typeof body.path === 'string' ? body.path : undefined,
+          source,
+          name: metadata.name,
+          domain: metadata.domain,
+          description: metadata.description,
+          owner: metadata.owner,
+          tags: Array.isArray(metadata.tags) ? metadata.tags.map(String) : [],
+        });
+        const payload = openBlockStudioDocument(projectRoot, savedPath, semanticLayer);
+        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON(payload));
+      } catch (error) {
+        if (error instanceof Error && error.message === 'BLOCK_EXISTS') {
+          res.writeHead(409, { 'Content-Type': 'application/json; charset=utf-8' });
+          res.end(serializeJSON({ error: 'Block already exists' }));
+          return;
+        }
         res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' });
         res.end(serializeJSON({ error: error instanceof Error ? error.message : String(error) }));
       }
@@ -365,6 +588,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
 
     // ── Semantic layer discovery API ─────────────────────────────────────────
     if (req.method === 'GET' && path === '/api/semantic-layer') {
+      const userPrefs = readUserPrefs(userPrefsPath);
       if (!semanticLayer) {
         res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
         res.end(serializeJSON({
@@ -374,6 +598,11 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           metrics: [],
           dimensions: [],
           hierarchies: [],
+          domains: [],
+          tags: [],
+          favorites: userPrefs.favorites,
+          recentlyUsed: userPrefs.recentlyUsed,
+          lastSyncTime: semanticLastSyncTime,
         }));
         return;
       }
@@ -382,6 +611,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
         label: m.label,
         description: m.description,
         domain: m.domain,
+        sql: m.sql,
         type: m.type,
         table: m.table,
         tags: m.tags ?? [],
@@ -391,9 +621,12 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
         name: d.name,
         label: d.label,
         description: d.description,
+        domain: d.domain,
+        sql: d.sql,
         type: d.type,
         table: d.table,
         tags: d.tags ?? [],
+        owner: d.owner ?? null,
       }));
       const hierarchies = semanticLayer.listHierarchies().map((h) => ({
         name: h.name,
@@ -410,18 +643,273 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
         metrics,
         dimensions,
         hierarchies,
+        domains: semanticLayer.listDomains(),
+        tags: semanticLayer.listTags(),
+        favorites: userPrefs.favorites,
+        recentlyUsed: userPrefs.recentlyUsed,
+        lastSyncTime: semanticLastSyncTime,
       }));
+      return;
+    }
+    if (req.method === 'GET' && path === '/api/semantic-layer/tree') {
+      if (!semanticLayer) {
+        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({
+          tree: {
+            id: 'provider:dql',
+            label: 'semantic layer',
+            kind: 'provider',
+            count: 0,
+            children: [],
+          },
+        }));
+        return;
+      }
+      res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+      res.end(serializeJSON({
+        tree: buildSemanticTree(semanticLayer, semanticImportManifest),
+      }));
+      return;
+    }
+    if (req.method === 'GET' && path.startsWith('/api/semantic-layer/object/')) {
+      if (!semanticLayer) {
+        res.writeHead(404, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({ error: 'No semantic layer configured.' }));
+        return;
+      }
+      const id = decodeURIComponent(path.slice('/api/semantic-layer/object/'.length));
+      const detail = buildSemanticObjectDetail(semanticLayer, semanticImportManifest, id);
+      if (!detail) {
+        res.writeHead(404, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({ error: `Unknown semantic object: ${id}` }));
+        return;
+      }
+      res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+      res.end(serializeJSON(detail));
+      return;
+    }
+    if (req.method === 'POST' && path === '/api/semantic-layer/import') {
+      try {
+        const body = await readJSON(req);
+        const provider = body.provider as 'dbt' | 'cubejs' | 'snowflake';
+        if (provider !== 'dbt' && provider !== 'cubejs' && provider !== 'snowflake') {
+          res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
+          res.end(serializeJSON({ error: 'provider must be one of dbt, cubejs, snowflake' }));
+          return;
+        }
+        const sourceConfig = provider === 'snowflake'
+          ? {
+              provider,
+              projectPath: body.projectPath ?? projectConfig.semanticLayer?.projectPath,
+              connection: body.connection ?? projectConfig.semanticLayer?.connection,
+            }
+          : {
+              provider,
+              projectPath: typeof body.projectPath === 'string' ? body.projectPath : projectConfig.semanticLayer?.projectPath,
+              repoUrl: typeof body.repoUrl === 'string' ? body.repoUrl : projectConfig.semanticLayer?.repoUrl,
+              branch: typeof body.branch === 'string' ? body.branch : projectConfig.semanticLayer?.branch,
+              subPath: typeof body.subPath === 'string' ? body.subPath : projectConfig.semanticLayer?.subPath,
+              source: body.repoUrl || projectConfig.semanticLayer?.repoUrl
+                ? ((body.source ?? projectConfig.semanticLayer?.source ?? 'github') as 'local' | 'github' | 'gitlab')
+                : 'local',
+            };
+        const executeQuery = provider === 'snowflake'
+          ? async (sql: string) => {
+              const result = await executor.executeQuery(sql, [], {}, connection);
+              return { rows: result.rows };
+            }
+          : undefined;
+        const importResult = await performSemanticImport({
+          targetProjectRoot: projectRoot,
+          provider,
+          sourceConfig,
+          executeQuery,
+        });
+        const refreshed = await resolveSemanticLayerAsync({ provider: 'dql', path: './semantic-layer' }, projectRoot);
+        semanticLayer = refreshed.layer;
+        semanticLayerErrors = refreshed.errors;
+        semanticDetectedProvider = refreshed.detectedProvider ?? 'dql';
+        semanticLastSyncTime = importResult.manifest.importedAt;
+        semanticImportManifest = importResult.manifest;
+        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON(importResult));
+      } catch (error) {
+        res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({ error: error instanceof Error ? error.message : String(error) }));
+      }
+      return;
+    }
+    if (req.method === 'POST' && path === '/api/semantic-layer/sync') {
+      try {
+        const executeQuery = semanticImportManifest?.provider === 'snowflake'
+          ? async (sql: string) => {
+              const result = await executor.executeQuery(sql, [], {}, connection);
+              return { rows: result.rows };
+            }
+          : undefined;
+        const importResult = await syncSemanticImport({
+          targetProjectRoot: projectRoot,
+          executeQuery,
+        });
+        const refreshed = await resolveSemanticLayerAsync({ provider: 'dql', path: './semantic-layer' }, projectRoot);
+        semanticLayer = refreshed.layer;
+        semanticLayerErrors = refreshed.errors;
+        semanticDetectedProvider = refreshed.detectedProvider ?? 'dql';
+        semanticLastSyncTime = importResult.manifest.importedAt;
+        semanticImportManifest = importResult.manifest;
+        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON(importResult));
+      } catch (error) {
+        res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({ error: error instanceof Error ? error.message : String(error) }));
+      }
+      return;
+    }
+    if (req.method === 'GET' && path === '/api/semantic-layer/search') {
+      if (!semanticLayer) {
+        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({ metrics: [], dimensions: [], hierarchies: [] }));
+        return;
+      }
+      const q = url.searchParams.get('q') ?? '';
+      const domain = url.searchParams.get('domain') ?? '';
+      const tag = url.searchParams.get('tag') ?? '';
+      const type = url.searchParams.get('type') ?? '';
+      const results = semanticLayer.searchAdvanced(q, {
+        domains: domain ? [domain] : undefined,
+        tags: tag ? [tag] : undefined,
+        types: type === 'metric' || type === 'dimension' || type === 'hierarchy' ? [type] : undefined,
+      });
+      res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+      res.end(serializeJSON({
+        metrics: results.metrics.map((m) => ({
+          name: m.name,
+          label: m.label,
+          description: m.description,
+          domain: m.domain,
+          sql: m.sql,
+          type: m.type,
+          table: m.table,
+          tags: m.tags ?? [],
+          owner: m.owner ?? null,
+        })),
+        dimensions: results.dimensions.map((d) => ({
+          name: d.name,
+          label: d.label,
+          description: d.description,
+          domain: d.domain,
+          sql: d.sql,
+          type: d.type,
+          table: d.table,
+          tags: d.tags ?? [],
+          owner: d.owner ?? null,
+        })),
+        hierarchies: results.hierarchies.map((h) => ({
+          name: h.name,
+          label: h.label,
+          description: h.description,
+          domain: h.domain,
+          levels: h.levels.map((l) => ({ name: l.name, label: l.label })),
+        })),
+      }));
+      return;
+    }
+    if (req.method === 'GET' && path === '/api/semantic-layer/compatible-dims') {
+      if (!semanticLayer) {
+        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({ dimensions: [] }));
+        return;
+      }
+      const metrics = (url.searchParams.get('metrics') ?? '')
+        .split(',')
+        .map((value) => value.trim())
+        .filter(Boolean);
+      const dimensions = semanticLayer.listCompatibleDimensions(metrics).map((d) => ({
+        name: d.name,
+        label: d.label,
+        description: d.description,
+        domain: d.domain,
+        sql: d.sql,
+        type: d.type,
+        table: d.table,
+        tags: d.tags ?? [],
+        owner: d.owner ?? null,
+      }));
+      res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+      res.end(serializeJSON({ dimensions }));
+      return;
+    }
+    if (req.method === 'GET' && path === '/api/user-prefs/favorites') {
+      res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+      res.end(serializeJSON({ favorites: readUserPrefs(userPrefsPath).favorites }));
+      return;
+    }
+    if (req.method === 'POST' && path === '/api/user-prefs/favorites') {
+      try {
+        const body = await readJSON(req);
+        const prefs = readUserPrefs(userPrefsPath);
+        const name = typeof body.name === 'string' ? body.name.trim() : '';
+        if (name) {
+          prefs.favorites = prefs.favorites.includes(name)
+            ? prefs.favorites.filter((item) => item !== name)
+            : [...prefs.favorites, name].sort((a, b) => a.localeCompare(b));
+          writeUserPrefs(userPrefsPath, prefs);
+        }
+        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({ favorites: prefs.favorites }));
+      } catch (error) {
+        res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({ error: error instanceof Error ? error.message : String(error) }));
+      }
+      return;
+    }
+    if (req.method === 'GET' && path === '/api/user-prefs/recent') {
+      res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+      res.end(serializeJSON({ recentlyUsed: readUserPrefs(userPrefsPath).recentlyUsed }));
+      return;
+    }
+    if (req.method === 'POST' && path === '/api/user-prefs/recent') {
+      try {
+        const body = await readJSON(req);
+        const prefs = readUserPrefs(userPrefsPath);
+        const name = typeof body.name === 'string' ? body.name.trim() : '';
+        if (name) {
+          prefs.recentlyUsed = [name, ...prefs.recentlyUsed.filter((item) => item !== name)].slice(0, 12);
+          writeUserPrefs(userPrefsPath, prefs);
+        }
+        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({ recentlyUsed: prefs.recentlyUsed }));
+      } catch (error) {
+        res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({ error: error instanceof Error ? error.message : String(error) }));
+      }
       return;
     }
     // ── Semantic completions for SQL cells ─────────────────────────────────────
     if (req.method === 'GET' && path === '/api/semantic-completions') {
-      const completions: Array<{ type: string; name: string; label: string; description: string; sql: string }> = [];
+      const completions: Array<{ type: string; name: string; label: string; description: string; sql: string; domain?: string; tags: string[] }> = [];
       if (semanticLayer) {
         for (const m of semanticLayer.listMetrics()) {
-          completions.push({ type: 'metric', name: m.name, label: m.label, description: m.description ?? '', sql: m.sql });
+          completions.push({
+            type: 'metric',
+            name: m.name,
+            label: m.label,
+            description: m.description ?? '',
+            sql: m.sql,
+            domain: m.domain,
+            tags: m.tags ?? [],
+          });
         }
         for (const d of semanticLayer.listDimensions()) {
-          completions.push({ type: 'dimension', name: d.name, label: d.label, description: d.description ?? '', sql: d.sql });
+          completions.push({
+            type: 'dimension',
+            name: d.name,
+            label: d.label,
+            description: d.description ?? '',
+            sql: d.sql,
+            domain: d.domain,
+            tags: d.tags ?? [],
+          });
         }
       }
       res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
@@ -534,6 +1022,149 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           result: normalizeQueryResult(result),
         }));
       } catch (error) {
+        res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({ error: error instanceof Error ? error.message : String(error) }));
+      }
+      return;
+    }
+
+    if (req.method === 'POST' && path === '/api/semantic-builder/preview') {
+      try {
+        if (!semanticLayer) {
+          res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
+          res.end(serializeJSON({ error: 'No semantic layer configured.' }));
+          return;
+        }
+        const body = await readJSON(req);
+        const { metrics = [], dimensions = [], filters = [], limit, timeDimension, orderBy } = body as {
+          metrics: string[];
+          dimensions: string[];
+          filters?: Array<{ dimension: string; operator: string; values: string[] }>;
+          timeDimension?: { name: string; granularity: string };
+          orderBy?: Array<{ name: string; direction: 'asc' | 'desc' }>;
+          limit?: number;
+        };
+        const targetConnection = isConnectionConfig(body.connection) ? body.connection : connection;
+        const driver = targetConnection.driver;
+        let tableMapping: Record<string, string> | undefined;
+        try {
+          const tablesResult = await executor.executeQuery(
+            `SELECT table_schema, table_name FROM information_schema.tables WHERE table_schema NOT IN ('information_schema', 'pg_catalog')`,
+            [], {}, targetConnection,
+          );
+          const schemaQualified = new Map<string, string>();
+          for (const row of tablesResult.rows) {
+            const schema = String(row['table_schema'] ?? '');
+            const name = String(row['table_name'] ?? '');
+            schemaQualified.set(name, schema ? `${schema}.${name}` : name);
+          }
+          tableMapping = {};
+          for (const metric of semanticLayer.listMetrics()) {
+            if (schemaQualified.has(metric.table)) tableMapping[metric.table] = schemaQualified.get(metric.table)!;
+          }
+          for (const dimension of semanticLayer.listDimensions()) {
+            if (schemaQualified.has(dimension.table)) tableMapping[dimension.table] = schemaQualified.get(dimension.table)!;
+          }
+          if (Object.keys(tableMapping).length === 0) tableMapping = undefined;
+        } catch {
+          tableMapping = undefined;
+        }
+        const composed = semanticLayer.composeQuery({ metrics, dimensions, filters, limit, timeDimension, orderBy, driver, tableMapping });
+        if (!composed) {
+          res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
+          res.end(serializeJSON({ error: 'Could not compose semantic block preview SQL.' }));
+          return;
+        }
+        const prepared = prepareLocalExecution(composed.sql, targetConnection, projectRoot, projectConfig);
+        const result = await executor.executeQuery(prepared.sql, [], {}, prepared.connection);
+        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({
+          sql: composed.sql,
+          joins: composed.joins,
+          tables: composed.tables,
+          result: normalizeQueryResult(result),
+        }));
+      } catch (error) {
+        res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({ error: error instanceof Error ? error.message : String(error) }));
+      }
+      return;
+    }
+
+    if (req.method === 'POST' && path === '/api/semantic-builder/save') {
+      try {
+        if (!semanticLayer) {
+          res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
+          res.end(serializeJSON({ error: 'No semantic layer configured.' }));
+          return;
+        }
+        const body = await readJSON(req);
+        const {
+          name,
+          domain,
+          description,
+          owner,
+          tags,
+          metrics = [],
+          dimensions = [],
+          timeDimension,
+          filters = [],
+          chart = 'table',
+          blockType = 'semantic',
+        } = body as {
+          name: string;
+          domain?: string;
+          description?: string;
+          owner?: string;
+          tags?: string[];
+          metrics: string[];
+          dimensions: string[];
+          timeDimension?: { name: string; granularity: string };
+          filters?: Array<{ dimension: string; operator: string; values: string[] }>;
+          chart?: string;
+          blockType?: 'semantic' | 'custom';
+        };
+        if (!name || metrics.length === 0) {
+          res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
+          res.end(serializeJSON({ error: 'name and at least one metric are required.' }));
+          return;
+        }
+        const targetConnection = isConnectionConfig(body.connection) ? body.connection : connection;
+        const composed = semanticLayer.composeQuery({
+          metrics,
+          dimensions,
+          filters,
+          timeDimension,
+          driver: targetConnection.driver,
+        });
+        if (!composed) {
+          res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
+          res.end(serializeJSON({ error: 'Could not compose semantic block SQL.' }));
+          return;
+        }
+        const created = createSemanticBuilderBlock(projectRoot, {
+          name,
+          domain,
+          description,
+          owner,
+          tags,
+          metrics,
+          dimensions,
+          timeDimension,
+          chart,
+          blockType,
+          sql: composed.sql,
+          tables: composed.tables,
+          provider: semanticImportManifest?.provider ?? semanticDetectedProvider ?? 'dql',
+        });
+        res.writeHead(201, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON(created));
+      } catch (error) {
+        if (error instanceof Error && error.message === 'BLOCK_EXISTS') {
+          res.writeHead(409, { 'Content-Type': 'application/json; charset=utf-8' });
+          res.end(serializeJSON({ error: 'Block already exists' }));
+          return;
+        }
         res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' });
         res.end(serializeJSON({ error: error instanceof Error ? error.message : String(error) }));
       }
@@ -1130,20 +1761,30 @@ function scanNotebookFiles(projectRoot: string): NotebookFileEntry[] {
   for (const [folder, type] of Object.entries(folderMap)) {
     const dir = join(projectRoot, folder);
     if (!existsSync(dir)) continue;
+    collect(dir, folder, type);
+  }
+  return result;
+
+  function collect(currentDir: string, relativeDir: string, type: NotebookFileEntry['type']): void {
     try {
-      for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      for (const entry of readdirSync(currentDir, { withFileTypes: true })) {
+        const fullPath = join(currentDir, entry.name);
+        const relativePath = `${relativeDir}/${entry.name}`;
+        if (entry.isDirectory()) {
+          collect(fullPath, relativePath, type);
+          continue;
+        }
         if (!entry.isFile()) continue;
         if (!entry.name.endsWith('.dql') && !entry.name.endsWith('.dqlnb')) continue;
         result.push({
           name: entry.name.replace(/\.(dql|dqlnb)$/, ''),
-          path: `${folder}/${entry.name}`,
+          path: relativePath,
           type,
-          folder,
+          folder: relativeDir.split('/')[0] ?? relativeDir,
         });
       }
     } catch { /* skip unreadable dirs */ }
   }
-  return result;
 }
 
 function scanDataFiles(projectRoot: string): { name: string; path: string; columns: never[] }[] {
@@ -1154,6 +1795,776 @@ function scanDataFiles(projectRoot: string): { name: string; path: string; colum
       .filter((e) => e.isFile() && /\.(csv|parquet|json)$/.test(e.name))
       .map((e) => ({ name: e.name, path: `data/${e.name}`, columns: [] }));
   } catch { return []; }
+}
+
+interface UserPrefs {
+  favorites: string[];
+  recentlyUsed: string[];
+}
+
+function readUserPrefs(userPrefsPath: string): UserPrefs {
+  try {
+    if (!existsSync(userPrefsPath)) {
+      return { favorites: [], recentlyUsed: [] };
+    }
+    const raw = JSON.parse(readFileSync(userPrefsPath, 'utf-8')) as Partial<UserPrefs>;
+    return {
+      favorites: Array.isArray(raw.favorites) ? raw.favorites.map(String) : [],
+      recentlyUsed: Array.isArray(raw.recentlyUsed) ? raw.recentlyUsed.map(String) : [],
+    };
+  } catch {
+    return { favorites: [], recentlyUsed: [] };
+  }
+}
+
+function writeUserPrefs(userPrefsPath: string, prefs: UserPrefs): void {
+  writeFileSync(userPrefsPath, JSON.stringify(prefs, null, 2) + '\n', 'utf-8');
+}
+
+function buildDatabaseSchemaTree(
+  projectRoot: string,
+  executor: QueryExecutor,
+  connection: ConnectionConfig,
+): Promise<Array<{
+  id: string;
+  label: string;
+  kind: 'schema' | 'table' | 'column';
+  path?: string;
+  type?: string;
+  children?: Array<{ id: string; label: string; kind: 'schema' | 'table' | 'column'; path?: string; type?: string; children?: unknown[] }>;
+}>> {
+  return (async () => {
+    const dataFiles = scanDataFiles(projectRoot);
+    let dbTables: Array<{ name: string; path: string }> = [];
+    try {
+      const connector = await executor.getConnector(connection);
+      if (typeof connector.listTables === 'function') {
+        const tables = await connector.listTables();
+        dbTables = tables.map((table) => {
+          const qualifiedName = table.schema ? `${table.schema}.${table.name}` : table.name;
+          return { name: qualifiedName, path: qualifiedName };
+        });
+      }
+    } catch {
+      // fall through and return what we have
+    }
+
+    const schemaMap = new Map<string, Array<{ name: string; path: string }>>();
+    for (const table of dbTables) {
+      const [schema, ...rest] = table.name.split('.');
+      const schemaName = rest.length > 0 ? schema : 'default';
+      const tableName = rest.length > 0 ? rest.join('.') : schema;
+      const existing = schemaMap.get(schemaName) ?? [];
+      existing.push({ name: tableName, path: table.path });
+      schemaMap.set(schemaName, existing);
+    }
+
+    const databaseNodes = Array.from(schemaMap.entries())
+      .sort((a, b) => a[0].localeCompare(b[0]))
+      .map(([schemaName, tables]) => ({
+        id: `db-schema:${schemaName}`,
+        label: schemaName,
+        kind: 'schema' as const,
+        children: tables
+          .sort((a, b) => a.name.localeCompare(b.name))
+          .map((table) => ({
+            id: `db-table:${table.path}`,
+            label: table.name,
+            kind: 'table' as const,
+            path: table.path,
+            children: [],
+          })),
+      }));
+
+    if (dataFiles.length > 0) {
+      databaseNodes.unshift({
+        id: 'db-schema:files',
+        label: 'files',
+        kind: 'schema',
+        children: dataFiles.map((file) => ({
+          id: `db-table:${file.path}`,
+          label: file.name,
+          kind: 'table',
+          path: file.path,
+          children: [],
+        })),
+      });
+    }
+
+    return databaseNodes;
+  })();
+}
+
+function openBlockStudioDocument(
+  projectRoot: string,
+  relativePath: string,
+  semanticLayer?: SemanticLayer,
+): {
+  path: string;
+  source: string;
+  metadata: {
+    name: string;
+    path: string | null;
+    domain: string;
+    description: string;
+    owner: string;
+    tags: string[];
+    reviewStatus?: string;
+  };
+  companionPath: string | null;
+  validation: ReturnType<typeof validateBlockStudioSource>;
+} {
+  const normalizedPath = normalize(relativePath).replace(/^\/+/, '');
+  if (!normalizedPath.startsWith('blocks/')) {
+    throw new Error('Invalid block path');
+  }
+  const absPath = join(projectRoot, normalizedPath);
+  if (!existsSync(absPath)) {
+    throw new Error(`File not found: ${normalizedPath}`);
+  }
+  const source = readFileSync(absPath, 'utf-8');
+  const companionPath = blockCompanionRelativePath(normalizedPath);
+  const companion = companionPath ? readBlockCompanionFile(projectRoot, companionPath) : null;
+  const parsedMetadata = parseBlockSourceMetadata(source);
+  const fileName = normalizedPath.split('/').pop()?.replace(/\.dql$/, '') ?? 'block';
+  const metadata = {
+    name: parsedMetadata.name || companion?.name || fileName,
+    path: normalizedPath,
+    domain: parsedMetadata.domain || companion?.domain || normalizedPath.split('/').slice(1, -1).join('/') || 'uncategorized',
+    description: parsedMetadata.description || companion?.description || '',
+    owner: parsedMetadata.owner || companion?.owner || '',
+    tags: parsedMetadata.tags.length > 0 ? parsedMetadata.tags : companion?.tags ?? [],
+    reviewStatus: companion?.reviewStatus,
+  };
+  return {
+    path: normalizedPath,
+    source,
+    metadata,
+    companionPath: companionPath && existsSync(join(projectRoot, companionPath)) ? companionPath : null,
+    validation: validateBlockStudioSource(source, semanticLayer),
+  };
+}
+
+function validateBlockStudioSource(
+  source: string,
+  semanticLayer?: SemanticLayer,
+): {
+  valid: boolean;
+  diagnostics: Array<{ severity: 'error' | 'warning' | 'info'; message: string; code?: string }>;
+  semanticRefs: { metrics: string[]; dimensions: string[]; segments: string[] };
+  chartConfig?: { chart?: string; x?: string; y?: string; color?: string; title?: string };
+  executableSql?: string | null;
+} {
+  const diagnostics: Array<{ severity: 'error' | 'warning' | 'info'; message: string; code?: string }> = [];
+  try {
+    const parser = new Parser(source, '<block-studio>');
+    parser.parse();
+  } catch (error) {
+    diagnostics.push({
+      severity: 'error',
+      code: 'syntax',
+      message: error instanceof Error ? error.message : String(error),
+    });
+  }
+
+  const semanticRefs = extractBlockStudioSemanticReferences(source);
+  if (semanticLayer) {
+    const refValidation = semanticLayer.validateReferences([
+      ...semanticRefs.metrics,
+      ...semanticRefs.dimensions,
+      ...semanticRefs.segments,
+    ]);
+    for (const unknown of refValidation.unknown) {
+      diagnostics.push({
+        severity: 'error',
+        code: 'semantic_ref',
+        message: `Unknown semantic reference: ${unknown}`,
+      });
+    }
+  }
+
+  const chartConfig = extractBlockStudioChartConfig(source);
+  if (!chartConfig) {
+    diagnostics.push({
+      severity: 'warning',
+      code: 'visualization_missing',
+      message: 'Block has no visualization section yet.',
+    });
+  }
+
+  const executableSql = extractBlockStudioSql(source);
+  if (!executableSql) {
+    diagnostics.push({
+      severity: 'warning',
+      code: 'sql_missing',
+      message: 'No executable SQL found in the block source.',
+    });
+  }
+
+  return {
+    valid: diagnostics.every((diagnostic) => diagnostic.severity !== 'error'),
+    diagnostics,
+    semanticRefs,
+    chartConfig: chartConfig ?? undefined,
+    executableSql,
+  };
+}
+
+function saveBlockStudioArtifacts(
+  projectRoot: string,
+  options: {
+    currentPath?: string;
+    source: string;
+    name: string;
+    domain?: string;
+    description?: string;
+    owner?: string;
+    tags?: string[];
+  },
+): string {
+  const slug = options.name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '') || 'block';
+  const safeDomain = (options.domain ?? '')
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9/_-]+/g, '-')
+    .replace(/^\/+|\/+$/g, '') || 'uncategorized';
+  const targetRelativePath = `blocks/${safeDomain}/${slug}.dql`;
+  const targetPath = join(projectRoot, targetRelativePath);
+  const previousPath = options.currentPath ? normalize(options.currentPath).replace(/^\/+/, '') : null;
+
+  if (existsSync(targetPath) && previousPath !== targetRelativePath) {
+    throw new Error('BLOCK_EXISTS');
+  }
+
+  mkdirSync(dirname(targetPath), { recursive: true });
+  writeFileSync(targetPath, options.source.trimEnd() + '\n', 'utf-8');
+  writeBlockCompanionFile(projectRoot, {
+    slug,
+    name: options.name,
+    domain: safeDomain,
+    description: options.description,
+    owner: options.owner,
+    tags: options.tags,
+    provider: 'dql',
+    content: options.source,
+  });
+
+  if (previousPath && previousPath !== targetRelativePath) {
+    const previousAbsPath = join(projectRoot, previousPath);
+    if (existsSync(previousAbsPath)) rmSync(previousAbsPath, { force: true });
+    const previousCompanion = blockCompanionRelativePath(previousPath);
+    if (previousCompanion) {
+      const previousCompanionPath = join(projectRoot, previousCompanion);
+      if (existsSync(previousCompanionPath)) rmSync(previousCompanionPath, { force: true });
+    }
+  }
+
+  return targetRelativePath;
+}
+
+function blockCompanionRelativePath(blockPath: string): string | null {
+  const normalized = normalize(blockPath).replace(/^\/+/, '');
+  if (!normalized.startsWith('blocks/')) return null;
+  const withoutRoot = normalized.slice('blocks/'.length).replace(/\.dql$/, '.yaml');
+  return join('semantic-layer', 'blocks', withoutRoot).replaceAll('\\', '/');
+}
+
+function readBlockCompanionFile(projectRoot: string, relativePath: string) {
+  const absPath = join(projectRoot, relativePath);
+  if (!existsSync(absPath)) return null;
+  try {
+    const content = readFileSync(absPath, 'utf-8');
+    const lines = content.split(/\r?\n/);
+    const topLevel: Record<string, string> = {};
+    const arrays: Record<string, string[]> = {};
+    let currentArray: string | null = null;
+
+    for (const rawLine of lines) {
+      const line = rawLine.replace(/\t/g, '  ');
+      if (!line.trim() || line.trimStart().startsWith('#')) continue;
+
+      if (/^\S[^:]*:\s*$/.test(line)) {
+        currentArray = line.trim().slice(0, -1);
+        if (['tags', 'lineage', 'semanticMetrics', 'semanticDimensions'].includes(currentArray)) {
+          arrays[currentArray] = [];
+        }
+        continue;
+      }
+
+      const itemMatch = line.match(/^\s*-\s*(.+)\s*$/);
+      if (itemMatch && currentArray && arrays[currentArray]) {
+        arrays[currentArray].push(parseYamlScalar(itemMatch[1]));
+        continue;
+      }
+
+      const scalarMatch = line.match(/^([A-Za-z0-9_]+):\s*(.+)\s*$/);
+      if (scalarMatch) {
+        currentArray = null;
+        topLevel[scalarMatch[1]] = parseYamlScalar(scalarMatch[2]);
+      }
+    }
+
+    return {
+      name: topLevel.name ?? '',
+      block: topLevel.block ?? '',
+      domain: topLevel.domain ?? '',
+      description: topLevel.description ?? '',
+      owner: topLevel.owner ?? '',
+      tags: arrays.tags ?? [],
+      reviewStatus: topLevel.reviewStatus ?? '',
+    };
+  } catch {
+    return null;
+  }
+}
+
+function parseBlockSourceMetadata(source: string): {
+  name: string;
+  domain: string;
+  description: string;
+  owner: string;
+  tags: string[];
+} {
+  const name = source.match(/^\s*block\s+"([^"]+)"/i)?.[1] ?? '';
+  const extractString = (key: string) => source.match(new RegExp(`\\b${key}\\s*=\\s*"([^"]*)"`, 'i'))?.[1] ?? '';
+  const tags = source.match(/\btags\s*=\s*\[([^\]]*)\]/i);
+  return {
+    name,
+    domain: extractString('domain'),
+    description: extractString('description'),
+    owner: extractString('owner'),
+    tags: tags ? (tags[1].match(/"([^"]*)"/g) ?? []).map((value) => value.slice(1, -1)) : [],
+  };
+}
+
+function extractBlockStudioChartConfig(source: string): { chart?: string; x?: string; y?: string; color?: string; title?: string } | null {
+  const vizMatch = source.match(/visualization\s*\{([^}]+)\}/is);
+  if (!vizMatch) return null;
+  const body = vizMatch[1];
+  const get = (key: string) => body.match(new RegExp(`\\b${key}\\s*=\\s*["']?([\\w-]+)["']?`, 'i'))?.[1];
+  const chart = get('chart');
+  if (!chart) return null;
+  const title = body.match(/\btitle\s*=\s*"([^"]+)"/i)?.[1];
+  return {
+    chart,
+    x: get('x'),
+    y: get('y'),
+    color: get('color'),
+    title,
+  };
+}
+
+function extractBlockStudioSql(source: string): string | null {
+  const tripleQuoteMatch = source.match(/query\s*=\s*"""([\s\S]*?)"""/i);
+  if (tripleQuoteMatch) return tripleQuoteMatch[1].trim() || null;
+  const bareTripleMatch = source.match(/"""([\s\S]*?)"""/);
+  if (bareTripleMatch) return bareTripleMatch[1].trim() || null;
+  if (/^\s*(dashboard|workbook)\s+"/i.test(source)) return null;
+  const sqlKeywordMatch = source.match(/\b(SELECT|WITH|INSERT|UPDATE|DELETE|CREATE|DROP|ALTER|SHOW|DESCRIBE|EXPLAIN)\b([\s\S]*)/i);
+  if (!sqlKeywordMatch) return null;
+  let raw = sqlKeywordMatch[0];
+  const dqlSectionStart = raw.search(/\b(visualization|tests|block)\s*\{/i);
+  if (dqlSectionStart > 0) raw = raw.slice(0, dqlSectionStart);
+  return raw.trim() || null;
+}
+
+function extractBlockStudioSemanticReferences(source: string): { metrics: string[]; dimensions: string[]; segments: string[] } {
+  const metrics = new Set<string>();
+  const dimensions = new Set<string>();
+  const segments = new Set<string>();
+  const semanticRegex = /@(metric|dim)\(([^)]+)\)/gi;
+  let match: RegExpExecArray | null;
+  while ((match = semanticRegex.exec(source))) {
+    const name = match[2].trim();
+    if (!name) continue;
+    if (match[1].toLowerCase() === 'metric') metrics.add(name);
+    else dimensions.add(name);
+  }
+  const segmentRegex = /\/\*\s*segment:([^*]+)\*\//gi;
+  while ((match = segmentRegex.exec(source))) {
+    const name = match[1].trim();
+    if (name) segments.add(name);
+  }
+  return {
+    metrics: Array.from(metrics),
+    dimensions: Array.from(dimensions),
+    segments: Array.from(segments),
+  };
+}
+
+export function createBlockArtifacts(
+  projectRoot: string,
+  options: {
+    name: string;
+    domain?: string;
+    content?: string;
+    description?: string;
+    tags?: string[];
+    metricRefs?: string[];
+    template?: string;
+  },
+): { path: string; content: string; companionPath: string } {
+  const slug = options.name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '') || 'block';
+  const safeDomain = (options.domain ?? '')
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9/_-]+/g, '-')
+    .replace(/^\/+|\/+$/g, '');
+  const blocksDir = safeDomain ? join(projectRoot, 'blocks', safeDomain) : join(projectRoot, 'blocks');
+  mkdirSync(blocksDir, { recursive: true });
+  const blockPath = join(blocksDir, `${slug}.dql`);
+  if (existsSync(blockPath)) {
+    throw new Error('BLOCK_EXISTS');
+  }
+
+  const templateContent = options.template
+    ? listBlockTemplates().find((template) => template.id === options.template)?.content
+    : undefined;
+  const fileContent = normalizeBlockStudioContent({
+    name: options.name,
+    domain: safeDomain || 'uncategorized',
+    description: options.description,
+    tags: options.tags,
+    content: options.content?.trim() || templateContent,
+  });
+
+  writeFileSync(blockPath, fileContent, 'utf-8');
+  const relativePath = safeDomain ? `blocks/${safeDomain}/${slug}.dql` : `blocks/${slug}.dql`;
+  const companionPath = writeBlockCompanionFile(projectRoot, {
+    slug,
+    name: options.name,
+    domain: safeDomain || 'uncategorized',
+    description: options.description,
+    tags: options.tags,
+    provider: 'dql',
+    content: fileContent,
+  });
+  return {
+    path: relativePath,
+    content: fileContent,
+    companionPath,
+  };
+}
+
+export function createSemanticBuilderBlock(
+  projectRoot: string,
+  options: {
+    name: string;
+    domain?: string;
+    description?: string;
+    owner?: string;
+    tags?: string[];
+    metrics: string[];
+    dimensions: string[];
+    timeDimension?: { name: string; granularity: string };
+    chart?: string;
+    blockType: 'semantic' | 'custom';
+    sql: string;
+    tables: string[];
+    provider: string;
+  },
+): { path: string; content: string; companionPath: string } {
+  const slug = options.name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '') || 'block';
+  const safeDomain = (options.domain ?? '')
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9/_-]+/g, '-')
+    .replace(/^\/+|\/+$/g, '') || 'uncategorized';
+  const blocksDir = join(projectRoot, 'blocks', safeDomain);
+  mkdirSync(blocksDir, { recursive: true });
+  const blockPath = join(blocksDir, `${slug}.dql`);
+  if (existsSync(blockPath)) {
+    throw new Error('BLOCK_EXISTS');
+  }
+
+  const content = options.blockType === 'custom'
+    ? buildCustomSemanticBlockContent(options)
+    : buildSemanticBlockContent(options);
+  writeFileSync(blockPath, content, 'utf-8');
+
+  const companionPath = writeBlockCompanionFile(projectRoot, {
+    slug,
+    name: options.name,
+    domain: safeDomain,
+    description: options.description,
+    owner: options.owner,
+    tags: options.tags,
+    provider: options.provider,
+    content,
+    lineage: options.tables,
+    semanticMetrics: options.metrics,
+    semanticDimensions: [
+      ...options.dimensions,
+      ...(options.timeDimension ? [options.timeDimension.name] : []),
+    ],
+  });
+
+  return {
+    path: `blocks/${safeDomain}/${slug}.dql`,
+    content,
+    companionPath,
+  };
+}
+
+function buildSemanticBlockContent(options: {
+  name: string;
+  domain?: string;
+  description?: string;
+  owner?: string;
+  tags?: string[];
+  metrics: string[];
+  dimensions: string[];
+  timeDimension?: { name: string; granularity: string };
+  chart?: string;
+}): string {
+  const lines = [
+    `block "${options.name}" {`,
+    `    domain = "${options.domain ?? 'uncategorized'}"`,
+    '    type = "semantic"',
+  ];
+  if (options.description) lines.push(`    description = "${escapeDqlString(options.description)}"`);
+  if (options.owner) lines.push(`    owner = "${escapeDqlString(options.owner)}"`);
+  if (options.tags && options.tags.length > 0) {
+    lines.push(`    tags = [${options.tags.map((tag) => `"${escapeDqlString(tag)}"`).join(', ')}]`);
+  }
+  if (options.metrics.length === 1) {
+    lines.push(`    metric = "${escapeDqlString(options.metrics[0])}"`);
+  } else {
+    lines.push(`    metrics = [${options.metrics.map((metric) => `"${escapeDqlString(metric)}"`).join(', ')}]`);
+  }
+  if (options.dimensions.length > 0) {
+    lines.push(`    dimensions = [${options.dimensions.map((dimension) => `"${escapeDqlString(dimension)}"`).join(', ')}]`);
+  }
+  if (options.timeDimension) {
+    lines.push(`    time_dimension = "${escapeDqlString(options.timeDimension.name)}"`);
+    lines.push(`    granularity = "${escapeDqlString(options.timeDimension.granularity)}"`);
+  }
+  const visualization = buildVisualizationBlock(options.chart ?? 'table', options.dimensions, options.timeDimension, options.metrics);
+  if (visualization) {
+    lines.push('');
+    lines.push(...visualization);
+  }
+  lines.push('}');
+  return lines.join('\n') + '\n';
+}
+
+function buildCustomSemanticBlockContent(options: {
+  name: string;
+  domain?: string;
+  description?: string;
+  owner?: string;
+  tags?: string[];
+  chart?: string;
+  sql: string;
+  metrics: string[];
+  dimensions: string[];
+  timeDimension?: { name: string; granularity: string };
+}): string {
+  const lines = [
+    `block "${options.name}" {`,
+    `    domain = "${options.domain ?? 'uncategorized'}"`,
+    '    type = "custom"',
+  ];
+  if (options.description) lines.push(`    description = "${escapeDqlString(options.description)}"`);
+  if (options.owner) lines.push(`    owner = "${escapeDqlString(options.owner)}"`);
+  if (options.tags && options.tags.length > 0) {
+    lines.push(`    tags = [${options.tags.map((tag) => `"${escapeDqlString(tag)}"`).join(', ')}]`);
+  }
+  lines.push('');
+  lines.push('    query = """');
+  lines.push(...indentBlock(options.sql.trim(), 8).split('\n'));
+  lines.push('    """');
+  const visualization = buildVisualizationBlock(options.chart ?? 'table', options.dimensions, options.timeDimension, options.metrics);
+  if (visualization) {
+    lines.push('');
+    lines.push(...visualization);
+  }
+  lines.push('}');
+  return lines.join('\n') + '\n';
+}
+
+function buildVisualizationBlock(
+  chart: string,
+  dimensions: string[],
+  timeDimension: { name: string; granularity: string } | undefined,
+  metrics: string[],
+): string[] | null {
+  const x = timeDimension ? `${timeDimension.name}_${timeDimension.granularity}` : dimensions[0];
+  const y = metrics[0];
+  if (!x && chart !== 'kpi' && chart !== 'table') return null;
+  if (chart === 'table') {
+    return ['    visualization {', '        chart = "table"', '    }'];
+  }
+  if (chart === 'kpi') {
+    return ['    visualization {', '        chart = "kpi"', `        y = ${y}`, '    }'];
+  }
+  return [
+    '    visualization {',
+    `        chart = "${chart}"`,
+    `        x = ${x}`,
+    `        y = ${y}`,
+    '    }',
+  ];
+}
+
+function writeBlockCompanionFile(
+  projectRoot: string,
+  options: {
+    slug: string;
+    name: string;
+    domain: string;
+    description?: string;
+    owner?: string;
+    tags?: string[];
+    provider?: string;
+    content: string;
+    lineage?: string[];
+    semanticMetrics?: string[];
+    semanticDimensions?: string[];
+  },
+): string {
+  const extractedRefs = extractSemanticReferenceNames(options.content);
+  const semanticMetrics = Array.from(new Set([...(options.semanticMetrics ?? []), ...extractedRefs.metrics]));
+  const semanticDimensions = Array.from(new Set([...(options.semanticDimensions ?? []), ...extractedRefs.dimensions]));
+  const companionDir = join(projectRoot, 'semantic-layer', 'blocks', options.domain);
+  mkdirSync(companionDir, { recursive: true });
+  const companionPath = join(companionDir, `${options.slug}.yaml`);
+  const lines = [
+    `name: ${options.slug}`,
+    `block: ${options.slug}`,
+    `domain: ${options.domain}`,
+    `description: ${yamlScalar(options.description?.trim() || options.name)}`,
+  ];
+  if (options.owner) lines.push(`owner: ${yamlScalar(options.owner)}`);
+  if (options.tags && options.tags.length > 0) {
+    lines.push('tags:');
+    for (const tag of options.tags) lines.push(`  - ${yamlScalar(tag)}`);
+  }
+  if (options.provider) {
+    lines.push('source:');
+    lines.push(`  provider: ${yamlScalar(options.provider)}`);
+    lines.push('  objectType: block');
+    lines.push(`  objectId: ${yamlScalar(options.slug)}`);
+  }
+  if (semanticMetrics.length > 0) {
+    lines.push('semanticMetrics:');
+    for (const metric of semanticMetrics) lines.push(`  - ${yamlScalar(metric)}`);
+  }
+  if (semanticDimensions.length > 0) {
+    lines.push('semanticDimensions:');
+    for (const dimension of semanticDimensions) lines.push(`  - ${yamlScalar(dimension)}`);
+  }
+  const mappingEntries = [
+    ...semanticMetrics.map((metric) => [metric, metric] as const),
+    ...semanticDimensions.map((dimension) => [dimension, dimension] as const),
+  ];
+  if (mappingEntries.length > 0) {
+    lines.push('semanticMappings:');
+    for (const [key, value] of mappingEntries) {
+      lines.push(`  ${key}: ${yamlScalar(value)}`);
+    }
+  }
+  if (options.lineage && options.lineage.length > 0) {
+    lines.push('lineage:');
+    for (const table of options.lineage) lines.push(`  - ${yamlScalar(table)}`);
+  }
+  lines.push('reviewStatus: draft');
+  writeFileSync(companionPath, lines.join('\n') + '\n', 'utf-8');
+  return relative(projectRoot, companionPath).replaceAll('\\', '/');
+}
+
+function extractSemanticReferenceNames(content: string): { metrics: string[]; dimensions: string[] } {
+  const metrics = new Set<string>();
+  const dimensions = new Set<string>();
+  const regex = /@(metric|dim)\(([^)]+)\)/gi;
+  let match: RegExpExecArray | null;
+  while ((match = regex.exec(content))) {
+    const name = match[2].trim();
+    if (!name) continue;
+    if (match[1].toLowerCase() === 'metric') {
+      metrics.add(name);
+    } else {
+      dimensions.add(name);
+    }
+  }
+  return {
+    metrics: Array.from(metrics),
+    dimensions: Array.from(dimensions),
+  };
+}
+
+function escapeDqlString(value: string): string {
+  return value.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+}
+
+function indentBlock(value: string, spaces: number): string {
+  const prefix = ' '.repeat(spaces);
+  return value.split('\n').map((line) => `${prefix}${line}`).join('\n');
+}
+
+function normalizeBlockStudioContent(options: {
+  name: string;
+  domain: string;
+  description?: string;
+  tags?: string[];
+  content?: string;
+}): string {
+  const content = options.content?.trim();
+  if (content && /^\s*block\s+"/i.test(content)) {
+    return `${content.trimEnd()}\n`;
+  }
+
+  return buildBlankBlockContent({
+    name: options.name,
+    domain: options.domain,
+    description: options.description,
+    tags: options.tags,
+    sql: content || 'SELECT 1 AS value',
+  });
+}
+
+function buildBlankBlockContent(options: {
+  name: string;
+  domain: string;
+  description?: string;
+  tags?: string[];
+  sql: string;
+}): string {
+  const lines = [
+    `block "${escapeDqlString(options.name)}" {`,
+    `    domain = "${escapeDqlString(options.domain)}"`,
+    '    type = "custom"',
+    `    description = "${escapeDqlString(options.description?.trim() || options.name)}"`,
+    '    owner = ""',
+  ];
+  lines.push(`    tags = [${(options.tags ?? []).map((tag) => `"${escapeDqlString(tag)}"`).join(', ')}]`);
+  lines.push('');
+  lines.push('    query = """');
+  lines.push(...indentBlock(options.sql.trim(), 8).split('\n'));
+  lines.push('    """');
+  lines.push('');
+  lines.push('    visualization {');
+  lines.push('        chart = "table"');
+  lines.push('    }');
+  lines.push('}');
+  return lines.join('\n') + '\n';
+}
+
+function parseYamlScalar(value: string): string {
+  const trimmed = value.trim();
+  if (!trimmed) return '';
+  if (
+    (trimmed.startsWith('"') && trimmed.endsWith('"'))
+    || (trimmed.startsWith("'") && trimmed.endsWith("'"))
+  ) {
+    return trimmed.slice(1, -1);
+  }
+  return trimmed;
+}
+
+function yamlScalar(value: string): string {
+  if (/^[a-zA-Z0-9_.:/-]+$/.test(value)) return value;
+  return JSON.stringify(value);
 }
 
 function buildNotebookTemplate(title: string, template: string): string {

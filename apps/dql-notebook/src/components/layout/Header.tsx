@@ -7,6 +7,7 @@ import { serializeDqlNotebook } from '../../utils/parse-workbook';
 import { useQueryExecution } from '../../hooks/useQueryExecution';
 import { downloadDashboard } from '../../utils/export-dashboard';
 import { downloadWorkbookDql } from '../../utils/export-workbook-dql';
+import { setBlockName } from '../../utils/block-studio';
 
 function DQLLogo({ t }: { t: Theme }) {
   return (
@@ -52,6 +53,7 @@ export function Header() {
   const [exportDropdownOpen, setExportDropdownOpen] = useState(false);
   const exportDropdownRef = useRef<HTMLDivElement>(null);
   const titleInputRef = useRef<HTMLInputElement>(null);
+  const currentDirty = state.mainView === 'block_studio' ? state.blockStudioDirty : state.notebookDirty;
 
   useEffect(() => {
     if (editingTitle && titleInputRef.current) {
@@ -80,7 +82,21 @@ export function Header() {
   const commitTitle = () => {
     setEditingTitle(false);
     if (titleDraft.trim() && titleDraft !== state.notebookTitle) {
-      dispatch({ type: 'SET_NOTEBOOK_DIRTY', dirty: true });
+      if (state.mainView === 'block_studio' && state.blockStudioMetadata) {
+        dispatch({
+          type: 'SET_BLOCK_STUDIO_METADATA',
+          metadata: {
+            ...state.blockStudioMetadata,
+            name: titleDraft.trim(),
+          },
+        });
+        dispatch({
+          type: 'SET_BLOCK_STUDIO_DRAFT',
+          draft: setBlockName(state.blockStudioDraft, titleDraft.trim()),
+        });
+      } else {
+        dispatch({ type: 'SET_NOTEBOOK_DIRTY', dirty: true });
+      }
     }
   };
 
@@ -88,12 +104,47 @@ export function Header() {
     if (!state.activeFile) return;
     dispatch({ type: 'SET_SAVING', saving: true });
     try {
-      // Block files save as raw content; notebooks serialize to JSON
-      const content = state.activeFile.type === 'block'
-        ? (state.cells[0]?.content ?? '')
-        : serializeDqlNotebook(state.notebookTitle, state.cells);
-      await api.saveNotebook(state.activeFile.path, content);
-      dispatch({ type: 'SET_NOTEBOOK_DIRTY', dirty: false });
+      if (state.mainView === 'block_studio') {
+        if (!state.blockStudioMetadata) return;
+        const payload = await api.saveBlockStudio({
+          path: state.activeBlockPath,
+          source: state.blockStudioDraft,
+          metadata: {
+            name: state.blockStudioMetadata.name,
+            domain: state.blockStudioMetadata.domain,
+            description: state.blockStudioMetadata.description,
+            owner: state.blockStudioMetadata.owner,
+            tags: state.blockStudioMetadata.tags,
+          },
+        });
+        dispatch({
+          type: 'OPEN_BLOCK_STUDIO',
+          file: {
+            name: `${payload.metadata.name}.dql`,
+            path: payload.path,
+            type: 'block',
+            folder: 'blocks',
+          },
+          payload,
+        });
+        if (!state.files.some((file) => file.path === payload.path)) {
+          dispatch({
+            type: 'FILE_ADDED',
+            file: {
+              name: `${payload.metadata.name}.dql`,
+              path: payload.path,
+              type: 'block',
+              folder: 'blocks',
+            },
+          });
+        }
+      } else {
+        const content = state.activeFile.type === 'block'
+          ? (state.cells[0]?.content ?? '')
+          : serializeDqlNotebook(state.notebookTitle, state.cells);
+        await api.saveNotebook(state.activeFile.path, content);
+        dispatch({ type: 'SET_NOTEBOOK_DIRTY', dirty: false });
+      }
       setSavedFlash(true);
       setTimeout(() => setSavedFlash(false), 2000);
     } catch (err) {
@@ -101,7 +152,17 @@ export function Header() {
     } finally {
       dispatch({ type: 'SET_SAVING', saving: false });
     }
-  }, [state.activeFile, state.notebookTitle, state.cells, dispatch]);
+  }, [
+    state.activeFile,
+    state.activeBlockPath,
+    state.blockStudioDraft,
+    state.blockStudioMetadata,
+    state.files,
+    state.mainView,
+    state.notebookTitle,
+    state.cells,
+    dispatch,
+  ]);
 
   // Cmd/Ctrl+S keyboard shortcut
   useEffect(() => {
@@ -117,12 +178,12 @@ export function Header() {
 
   // Auto-save: trigger save after 2s of inactivity when dirty
   useEffect(() => {
-    if (!state.autoSave || !state.notebookDirty || !state.activeFile) return;
+    if (!state.autoSave || !currentDirty || !state.activeFile) return;
     const timer = setTimeout(() => {
       handleSave();
     }, 2000);
     return () => clearTimeout(timer);
-  }, [state.autoSave, state.notebookDirty, state.activeFile, state.cells, handleSave]);
+  }, [state.autoSave, currentDirty, state.activeFile, state.cells, state.blockStudioDraft, handleSave]);
 
   const toggleTheme = () => {
     dispatch({ type: 'SET_THEME', mode: state.themeMode === 'dark' ? 'light' : 'dark' });
@@ -232,7 +293,7 @@ export function Header() {
               }}
             >
               {state.notebookTitle || 'Untitled'}
-              {state.notebookDirty && (
+              {currentDirty && (
                 <span style={{ color: t.textMuted, marginLeft: 4 }}>●</span>
               )}
             </span>
@@ -258,8 +319,8 @@ export function Header() {
       <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
         {/* Run All */}
         <button
-          onClick={executeAll}
-          disabled={!state.activeFile}
+          onClick={state.mainView === 'block_studio' ? undefined : executeAll}
+          disabled={!state.activeFile || state.mainView === 'block_studio'}
           onMouseEnter={() => setRunHover(true)}
           onMouseLeave={() => setRunHover(false)}
           style={{
@@ -267,7 +328,7 @@ export function Header() {
             background: runHover && state.activeFile ? t.accent : t.accent,
             color: '#ffffff',
             border: `1px solid ${t.accent}`,
-            opacity: !state.activeFile ? 0.4 : runHover ? 0.9 : 1,
+            opacity: !state.activeFile || state.mainView === 'block_studio' ? 0.4 : runHover ? 0.9 : 1,
           }}
         >
           <svg width="10" height="10" viewBox="0 0 10 10" fill="currentColor">

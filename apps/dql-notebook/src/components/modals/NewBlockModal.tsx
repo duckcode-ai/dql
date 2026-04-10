@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { useNotebook, makeCell } from '../../store/NotebookStore';
+import { useNotebook } from '../../store/NotebookStore';
 import { themes } from '../../themes/notebook-theme';
 import { api } from '../../api/client';
 import type { NotebookFile } from '../../store/types';
@@ -57,7 +57,7 @@ export function NewBlockModal({ onFileOpened }: NewBlockModalProps) {
     const slug = slugify(name);
 
     try {
-      const result = await api.createBlock(name);
+      const result = await api.createBlock(name.trim());
       const file: NotebookFile = {
         name: `${slug}.dql`,
         path: result.path,
@@ -66,12 +66,6 @@ export function NewBlockModal({ onFileOpened }: NewBlockModalProps) {
         isNew: true,
       };
       dispatch({ type: 'FILE_ADDED', file });
-      dispatch({
-        type: 'OPEN_FILE',
-        file,
-        cells: [makeCell('sql', result.content)],
-        title: name.trim(),
-      });
       dispatch({ type: 'CLOSE_NEW_BLOCK_MODAL' });
       onFileOpened(file);
     } catch (e: any) {

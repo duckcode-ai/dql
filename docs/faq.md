@@ -156,12 +156,17 @@ Many teams can use both together rather than choosing one over the other.
 
 ## How do I get started fastest?
 
+Fastest DQL-only path:
+
 ```bash
 npm install -g @duckcodeailabs/dql-cli
-dql init .
+dql init my-dql-project
+cd my-dql-project
 dql doctor
 dql notebook
 ```
+
+If you want the dbt-integrated path, start from `dbt-labs/Semantic-Layer-Online-Course` so DQL can pick up dbt semantic models and metrics immediately.
 
 Then read:
 

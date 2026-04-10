@@ -7,6 +7,7 @@ import { SQLCellEditor } from './SQLCellEditor';
 import { MarkdownCellEditor } from './MarkdownCellEditor';
 import { ParamCell } from './ParamCell';
 import { SnippetPicker } from './SnippetPicker';
+import { SaveAsBlockModal } from '../modals/SaveAsBlockModal';
 import { TableOutput } from '../output/TableOutput';
 import { ChartOutput, detectChartType, resolveChartType, renderChart, CHART_TYPE_OPTIONS } from '../output/ChartOutput';
 import type { ChartType } from '../output/ChartOutput';
@@ -253,6 +254,7 @@ export function CellComponent({ cell, index }: CellProps) {
   const [selectedChartType, setSelectedChartType] = useState<ChartType | null>(null);
   const [chartDropdownOpen, setChartDropdownOpen] = useState(false);
   const [chartConfigOpen, setChartConfigOpen] = useState(false);
+  const [saveAsBlockOpen, setSaveAsBlockOpen] = useState(false);
 
   const borderColor = getCellBorderColor(cell, t);
   const isExecutable = cell.type !== 'markdown' && cell.type !== 'param';
@@ -366,6 +368,23 @@ export function CellComponent({ cell, index }: CellProps) {
         marginBottom: 2,
       }}
     >
+      {saveAsBlockOpen && (
+        <SaveAsBlockModal
+          cell={cell}
+          onClose={() => setSaveAsBlockOpen(false)}
+          onSaved={({ path, name }) => {
+            dispatch({
+              type: 'FILE_ADDED',
+              file: {
+                name,
+                path,
+                type: 'block',
+                folder: 'blocks',
+              },
+            });
+          }}
+        />
+      )}
       {/* Gutter */}
       <ExecutionBadge cell={cell} t={t} />
 
@@ -423,9 +442,9 @@ export function CellComponent({ cell, index }: CellProps) {
             />
           )}
 
-          {/* Format button — shown on hover for sql/dql cells */}
-          {cellHovered && (cell.type === 'sql' || cell.type === 'dql') && (
-            <button
+              {/* Format button — shown on hover for sql/dql cells */}
+              {cellHovered && (cell.type === 'sql' || cell.type === 'dql') && (
+                <button
               title="Format SQL (clean up whitespace & keywords)"
               onClick={handleFormat}
               style={{
@@ -451,8 +470,38 @@ export function CellComponent({ cell, index }: CellProps) {
               }}
             >
               Format
-            </button>
-          )}
+                </button>
+              )}
+
+              {cellHovered && (cell.type === 'sql' || cell.type === 'dql') && (
+                <button
+                  title="Save this cell as a reusable block"
+                  onClick={() => setSaveAsBlockOpen(true)}
+                  style={{
+                    background: 'transparent',
+                    border: `1px solid ${t.btnBorder}`,
+                    borderRadius: 4,
+                    color: t.textMuted,
+                    fontSize: 10,
+                    fontFamily: t.font,
+                    fontWeight: 600,
+                    letterSpacing: '0.04em',
+                    padding: '1px 7px',
+                    cursor: 'pointer',
+                    transition: 'color 0.15s, border-color 0.15s',
+                  }}
+                  onMouseEnter={(e) => {
+                    (e.currentTarget as HTMLButtonElement).style.color = t.textSecondary;
+                    (e.currentTarget as HTMLButtonElement).style.borderColor = t.accent;
+                  }}
+                  onMouseLeave={(e) => {
+                    (e.currentTarget as HTMLButtonElement).style.color = t.textMuted;
+                    (e.currentTarget as HTMLButtonElement).style.borderColor = t.btnBorder;
+                  }}
+                >
+                  Save as Block
+                </button>
+              )}
 
           {/* Cell name */}
           {nameEditing ? (

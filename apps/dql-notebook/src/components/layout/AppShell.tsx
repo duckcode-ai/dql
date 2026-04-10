@@ -8,6 +8,7 @@ import { DevPanel } from './DevPanel';
 import { NotebookEditor } from '../notebook/NotebookEditor';
 import { NewNotebookModal } from '../modals/NewNotebookModal';
 import { NewBlockModal } from '../modals/NewBlockModal';
+import { BlockStudio } from '../block-studio/BlockStudio';
 import { LineageDAG } from '../sidebar/LineageDAG';
 import { api } from '../../api/client';
 import { parseNotebookFile } from '../../utils/parse-workbook';
@@ -26,6 +27,14 @@ export function AppShell() {
   const handleOpenFile = useCallback(
     async (file: NotebookFile) => {
       try {
+        if (file.type === 'block') {
+          const payload = await api.openBlockStudio(file.path);
+          dispatch({ type: 'OPEN_BLOCK_STUDIO', file, payload });
+          if (state.sidebarPanel !== 'files') {
+            dispatch({ type: 'SET_SIDEBAR_PANEL', panel: 'files' });
+          }
+          return;
+        }
         const { content } = await api.readNotebook(file.path);
         const { title, cells } = parseNotebookFile(file.path, content);
         dispatch({ type: 'OPEN_FILE', file, cells, title });
@@ -35,13 +44,43 @@ export function AppShell() {
         }
       } catch (err) {
         console.error('Failed to open file:', err);
-        // Open with an empty cell as fallback
-        dispatch({
-          type: 'OPEN_FILE',
-          file,
-          cells: [makeCell('sql')],
-          title: file.name,
-        });
+        if (file.type === 'block') {
+          try {
+            const { content } = await api.readNotebook(file.path);
+            dispatch({
+              type: 'OPEN_BLOCK_STUDIO',
+              file,
+              payload: {
+                path: file.path,
+                source: content,
+                companionPath: null,
+                metadata: {
+                  name: file.name.replace(/\.dql$/i, ''),
+                  path: file.path,
+                  domain: file.path.split('/').slice(1, -1).join('/') || 'uncategorized',
+                  description: '',
+                  owner: '',
+                  tags: [],
+                },
+                validation: {
+                  valid: false,
+                  diagnostics: [{ severity: 'warning', message: 'Opened block without studio metadata. Save once to normalize it.' }],
+                  semanticRefs: { metrics: [], dimensions: [], segments: [] },
+                },
+              },
+            });
+            return;
+          } catch (fallbackErr) {
+            console.error('Failed to open block fallback:', fallbackErr);
+          }
+        } else {
+          dispatch({
+            type: 'OPEN_FILE',
+            file,
+            cells: [makeCell('sql')],
+            title: file.name,
+          });
+        }
       }
     },
     [dispatch, state.sidebarPanel]
@@ -103,11 +142,17 @@ export function AppShell() {
             <LineageDAG />
           ) : (
             <>
-              <NotebookEditor
-                onOpenFile={handleOpenFile}
-                registerCellRef={registerCellRef}
-              />
-              <DevPanel />
+              {state.mainView === 'block_studio' ? (
+                <BlockStudio />
+              ) : (
+                <>
+                  <NotebookEditor
+                    onOpenFile={handleOpenFile}
+                    registerCellRef={registerCellRef}
+                  />
+                  <DevPanel />
+                </>
+              )}
             </>
           )}
         </div>

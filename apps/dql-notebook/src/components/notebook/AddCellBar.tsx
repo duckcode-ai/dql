@@ -3,6 +3,8 @@ import React, { useState, useRef, useEffect } from 'react';
 import { useNotebook, makeCell } from '../../store/NotebookStore';
 import { themes } from '../../themes/notebook-theme';
 import type { CellType } from '../../store/types';
+import { parseSemanticDragRef, SEMANTIC_REF_MIME } from '../../editor/semantic-completions';
+import { api } from '../../api/client';
 
 interface AddCellBarProps {
   afterId?: string;
@@ -22,6 +24,7 @@ export function AddCellBar({ afterId }: AddCellBarProps) {
   const [popoverOpen, setPopoverOpen] = useState(false);
   const [blockSearchOpen, setBlockSearchOpen] = useState(false);
   const [blockQuery, setBlockQuery] = useState('');
+  const [dropActive, setDropActive] = useState(false);
   const containerRef = useRef<HTMLDivElement>(null);
   const blockSearchRef = useRef<HTMLInputElement>(null);
 
@@ -60,9 +63,26 @@ export function AddCellBar({ afterId }: AddCellBarProps) {
   return (
     <div
       ref={containerRef}
+      onDragOver={(event) => {
+        if (!event.dataTransfer.types.includes(SEMANTIC_REF_MIME)) return;
+        event.preventDefault();
+        setDropActive(true);
+      }}
+      onDragLeave={() => setDropActive(false)}
+      onDrop={(event) => {
+        const payload = parseSemanticDragRef(event.dataTransfer.getData(SEMANTIC_REF_MIME));
+        if (!payload) return;
+        event.preventDefault();
+        setDropActive(false);
+        const cell = makeCell('sql', payload.reference);
+        dispatch({ type: 'ADD_CELL', cell, afterId });
+        void api.trackUsage(payload.name);
+        window.dispatchEvent(new CustomEvent('dql:semantic-used', { detail: { name: payload.name } }));
+      }}
       onMouseEnter={() => setHovered(true)}
       onMouseLeave={() => {
         setHovered(false);
+        setDropActive(false);
       }}
       style={{
         position: 'relative',
@@ -80,13 +100,13 @@ export function AddCellBar({ afterId }: AddCellBarProps) {
           left: 0,
           right: 0,
           height: 1,
-          background: hovered || popoverOpen ? t.cellBorderActive : 'transparent',
+          background: dropActive ? t.accent : hovered || popoverOpen ? t.cellBorderActive : 'transparent',
           transition: 'background 0.15s',
         }}
       />
 
       {/* + button */}
-      {(hovered || popoverOpen) && (
+      {(hovered || popoverOpen || dropActive) && (
         <button
           onClick={() => setPopoverOpen((p) => !p)}
           style={{
@@ -95,8 +115,8 @@ export function AddCellBar({ afterId }: AddCellBarProps) {
             height: 22,
             padding: '0 10px',
             borderRadius: 11,
-            border: `1px solid ${t.cellBorderActive}`,
-            background: `${t.accent}18`,
+            border: `1px solid ${dropActive ? t.accent : t.cellBorderActive}`,
+            background: dropActive ? `${t.accent}28` : `${t.accent}18`,
             color: t.accent,
             cursor: 'pointer',
             fontSize: 12,
