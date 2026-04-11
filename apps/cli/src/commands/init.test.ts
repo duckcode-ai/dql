@@ -1,4 +1,4 @@
-import { mkdtempSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { describe, expect, it } from 'vitest';
@@ -72,5 +72,68 @@ describe('runInit', () => {
     expect(config.semanticLayer.provider).toBe('dbt');
     expect(config.semanticLayer.projectPath).toBe('.');
     expect(readdirSync(projectDir)).not.toContain('semantic-layer');
+  });
+
+  it('auto-imports dbt semantic definitions into local semantic-layer YAML on init', async () => {
+    const projectDir = mkdtempSync(join(tmpdir(), 'dql-init-dbt-semantic-'));
+    const metricsDir = join(projectDir, 'models', 'metrics');
+    mkdirSync(metricsDir, { recursive: true });
+
+    writeFileSync(join(projectDir, 'dbt_project.yml'), 'name: "jaffle_shop"\n');
+    writeFileSync(join(projectDir, 'jaffle_shop.duckdb'), '');
+    writeFileSync(
+      join(metricsDir, 'orders.yml'),
+      `semantic_models:
+  - name: orders
+    model: ref('fct_orders')
+    defaults:
+      agg_time_dimension: ordered_at
+    entities:
+      - name: order
+        type: primary
+        expr: order_id
+    dimensions:
+      - name: ordered_at
+        type: time
+        type_params:
+          time_granularity: day
+    measures:
+      - name: order_total
+        agg: sum
+        expr: order_total
+metrics:
+  - name: order_total
+    type: simple
+    type_params:
+      measure: order_total
+`,
+    );
+
+    await runInit(projectDir, {
+      check: false,
+      chart: '',
+      domain: '',
+      format: 'json',
+      help: false,
+      open: null,
+      input: '',
+      outDir: '',
+      owner: '',
+      port: null,
+      queryOnly: false,
+      template: '',
+      connection: '',
+      verbose: false,
+      skipTests: false,
+    });
+
+    const config = JSON.parse(readFileSync(join(projectDir, 'dql.config.json'), 'utf-8')) as {
+      semanticLayer: { provider: string; path?: string };
+    };
+
+    expect(config.semanticLayer.provider).toBe('dql');
+    expect(config.semanticLayer.path).toBe('./semantic-layer');
+    expect(readdirSync(projectDir)).toContain('semantic-layer');
+    expect(readFileSync(join(projectDir, 'semantic-layer', 'imports', 'manifest.json'), 'utf-8')).toContain('"provider": "dbt"');
   });
 });

@@ -9,7 +9,9 @@ git clone https://github.com/dbt-labs/Semantic-Layer-Online-Course.git jaffle-sh
 cd jaffle-shop
 pip install dbt-duckdb && dbt deps && dbt build --profiles-dir .
 npm install -g @duckcodeailabs/dql-cli
-dql init . && dql notebook
+dql init .
+dql semantic import dbt .
+dql notebook
 ```
 
 ## Suggested Learning Path
@@ -37,7 +39,7 @@ dql serve dist/top_customers --open
 
 ### 4. Explore the semantic layer
 
-Open the notebook sidebar and click the **Semantic** tab to browse metrics, dimensions, and hierarchies from the dbt project.
+Open Block Studio or the notebook semantic tools to browse the imported local metrics, dimensions, and hierarchies under `semantic-layer/`.
 
 ### 5. View lineage
 

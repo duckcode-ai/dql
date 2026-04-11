@@ -638,6 +638,20 @@ export function SemanticPanel() {
     }
   };
 
+  const handleOpenStudio = () => {
+    if (state.activeFile?.type === 'block') {
+      void api.openBlockStudio(state.activeFile.path).then((payload) => {
+        dispatch({
+          type: 'OPEN_BLOCK_STUDIO',
+          file: state.activeFile!,
+          payload,
+        });
+      });
+      return;
+    }
+    dispatch({ type: 'OPEN_NEW_BLOCK_MODAL' });
+  };
+
   if (!sl.available && !sl.loading) {
     return (
       <SetupState
@@ -659,14 +673,24 @@ export function SemanticPanel() {
           semanticLayer={sl}
           onClose={() => setBuilderOpen(false)}
           onSaved={(result) => {
-            dispatch({
-              type: 'FILE_ADDED',
-              file: {
-                name: result.path.split('/').pop() ?? result.path,
-                path: result.path,
-                type: 'block',
-                folder: 'blocks',
-              },
+            const file = {
+              name: result.path.split('/').pop() ?? result.path,
+              path: result.path,
+              type: 'block' as const,
+              folder: 'blocks',
+            };
+            if (!state.files.some((existing) => existing.path === result.path)) {
+              dispatch({
+                type: 'FILE_ADDED',
+                file,
+              });
+            }
+            void api.openBlockStudio(result.path).then((payload) => {
+              dispatch({
+                type: 'OPEN_BLOCK_STUDIO',
+                file,
+                payload,
+              });
             });
           }}
         />
@@ -682,8 +706,17 @@ export function SemanticPanel() {
           {sl.metrics.length} metrics · {sl.dimensions.length} dimensions
           {sl.lastSyncTime ? ` · synced ${new Date(sl.lastSyncTime).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}` : ''}
         </span>
-        <button onClick={() => setBuilderOpen(true)} style={{ background: t.accent, border: 'none', borderRadius: 4, color: '#fff', cursor: 'pointer', fontSize: 10, fontWeight: 600, fontFamily: t.font, padding: '2px 8px' }}>
-          Build
+        <button
+          onClick={handleOpenStudio}
+          style={{ background: t.accent, border: 'none', borderRadius: 4, color: '#fff', cursor: 'pointer', fontSize: 10, fontWeight: 600, fontFamily: t.font, padding: '2px 8px' }}
+        >
+          Open Studio
+        </button>
+        <button
+          onClick={() => setBuilderOpen(true)}
+          style={{ background: 'transparent', border: `1px solid ${t.cellBorder}`, borderRadius: 4, color: t.textSecondary, cursor: 'pointer', fontSize: 10, fontFamily: t.font, padding: '2px 8px' }}
+        >
+          Quick Build
         </button>
         <button
           onClick={() => void handleSync()}
@@ -697,6 +730,15 @@ export function SemanticPanel() {
         >
           {sl.loading ? 'Loading…' : 'Refresh'}
         </button>
+      </div>
+
+      <div style={{ padding: '10px', borderBottom: `1px solid ${t.headerBorder}`, background: `${t.accent}0d`, display: 'grid', gap: 6 }}>
+        <div style={{ fontSize: 11, fontWeight: 600, color: t.textPrimary, fontFamily: t.font }}>
+          Build blocks in Block Studio
+        </div>
+        <div style={{ fontSize: 11, color: t.textMuted, fontFamily: t.font, lineHeight: 1.5 }}>
+          Use the full-screen studio to author DQL with semantic metrics, database schemas, validation, results, and visualization in one workspace.
+        </div>
       </div>
 
       <SemanticSearchBar

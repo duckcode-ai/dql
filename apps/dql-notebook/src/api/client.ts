@@ -398,9 +398,13 @@ export const api = {
     // Determine if this is a data file or a database table
     const isFile = /\.(csv|parquet|json)$/i.test(tablePath) || tablePath.startsWith('data/');
     const safePath = tablePath.replace(/'/g, "''");
+    const qualifiedIdentifier = tablePath
+      .split('.')
+      .map((part) => `"${part.replace(/"/g, '""')}"`)
+      .join('.');
     const sql = isFile
       ? `DESCRIBE SELECT * FROM read_csv_auto('${safePath}') LIMIT 0`
-      : `DESCRIBE "${safePath}"`;
+      : `DESCRIBE ${qualifiedIdentifier}`;
     try {
       const result = await request<QueryResult>('/api/query', {
         method: 'POST',

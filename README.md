@@ -43,10 +43,12 @@ git clone https://github.com/dbt-labs/Semantic-Layer-Online-Course.git jaffle-sh
 cd jaffle-shop
 pip install dbt-duckdb && dbt deps && dbt build --profiles-dir .
 npm install -g @duckcodeailabs/dql-cli
-dql init . && dql notebook
+dql init .
+dql semantic import dbt .
+dql notebook
 ```
 
-We use `dbt-labs/Semantic-Layer-Online-Course` for the dbt walkthrough because it already includes the dbt semantic models and metrics that DQL reads via the `dbt` provider.
+We use `dbt-labs/Semantic-Layer-Online-Course` for the dbt walkthrough because it already includes the dbt semantic models and metrics DQL can normalize into local `semantic-layer/` YAML. After `dql semantic import dbt .`, DQL switches to canonical local semantic mode and Block Studio reads from that imported catalog.
 
 → **[Quickstart — zero to running notebook in 5 minutes](./docs/quickstart.md)**
 

@@ -1,5 +1,5 @@
 import type { Theme } from '../../themes/notebook-theme';
-import React, { useState } from 'react';
+import React, { useMemo, useState } from 'react';
 import { useNotebook } from '../../store/NotebookStore';
 import { themes } from '../../themes/notebook-theme';
 import { api } from '../../api/client';
@@ -61,6 +61,7 @@ export function SchemaPanel() {
   const { state, dispatch } = useNotebook();
   const t = themes[state.themeMode];
   const [refreshHover, setRefreshHover] = useState(false);
+  const [query, setQuery] = useState('');
 
   const handleRefresh = async () => {
     dispatch({ type: 'SET_SCHEMA_LOADING', loading: true });
@@ -72,6 +73,49 @@ export function SchemaPanel() {
     } finally {
       dispatch({ type: 'SET_SCHEMA_LOADING', loading: false });
     }
+  };
+
+  const filteredTables = useMemo(() => {
+    const normalized = query.trim().toLowerCase();
+    if (!normalized) return state.schemaTables;
+    return state.schemaTables.filter((table) => {
+      const matchesTable = [table.name, table.path, table.objectType]
+        .filter((value): value is string => Boolean(value))
+        .some((value) => value.toLowerCase().includes(normalized));
+      const matchesColumn = table.columns.some((column) => column.name.toLowerCase().includes(normalized) || column.type.toLowerCase().includes(normalized));
+      return matchesTable || matchesColumn;
+    });
+  }, [query, state.schemaTables]);
+
+  const groupedTables = useMemo(() => {
+    const groups = new Map<string, typeof filteredTables>();
+    for (const table of filteredTables) {
+      const [schema, ...rest] = table.name.split('.');
+      const schemaName = rest.length > 0 ? schema : table.source === 'file' ? 'files' : 'default';
+      const existing = groups.get(schemaName) ?? [];
+      existing.push(table);
+      groups.set(schemaName, existing);
+    }
+    return Array.from(groups.entries()).sort((a, b) => a[0].localeCompare(b[0]));
+  }, [filteredTables]);
+
+  const stats = {
+    schemas: groupedTables.length,
+    tables: state.schemaTables.length,
+    columns: state.schemaTables.reduce((sum, table) => sum + table.columns.length, 0),
+  };
+
+  const inputStyle: React.CSSProperties = {
+    width: '100%',
+    background: t.inputBg,
+    border: `1px solid ${t.inputBorder}`,
+    borderRadius: 6,
+    color: t.textPrimary,
+    fontSize: 12,
+    fontFamily: t.font,
+    padding: '7px 10px',
+    outline: 'none',
+    boxSizing: 'border-box',
   };
 
   return (
@@ -86,41 +130,56 @@ export function SchemaPanel() {
       {/* Toolbar */}
       <div
         style={{
-          padding: '8px 10px',
-          display: 'flex',
-          alignItems: 'center',
-          gap: 6,
+          padding: '10px',
+          display: 'grid',
+          gap: 10,
           borderBottom: `1px solid ${t.headerBorder}`,
         }}
       >
-        <span style={{ flex: 1, fontSize: 11, color: t.textMuted, fontFamily: t.font }}>
-          {state.schemaTables.length} tables
-        </span>
-        <button
-          onClick={handleRefresh}
-          onMouseEnter={() => setRefreshHover(true)}
-          onMouseLeave={() => setRefreshHover(false)}
-          title="Refresh schema"
-          style={{
-            background: refreshHover ? t.btnHover : 'transparent',
-            border: `1px solid ${refreshHover ? t.btnBorder : 'transparent'}`,
-            borderRadius: 4,
-            cursor: 'pointer',
-            color: refreshHover ? t.textSecondary : t.textMuted,
-            fontSize: 11,
-            fontFamily: t.font,
-            padding: '2px 6px',
-            display: 'flex',
-            alignItems: 'center',
-            gap: 4,
-            transition: 'all 0.15s',
-          }}
-        >
-          <svg width="11" height="11" viewBox="0 0 16 16" fill="currentColor">
-            <path d="M1.705 8.005a.75.75 0 0 1 .834.656 5.5 5.5 0 0 0 9.592 2.97l-1.204-1.204a.25.25 0 0 1 .177-.427h3.646a.25.25 0 0 1 .25.25v3.646a.25.25 0 0 1-.427.177l-1.38-1.38A7.002 7.002 0 0 1 1.05 8.84a.75.75 0 0 1 .656-.834ZM8 2.5a5.487 5.487 0 0 0-4.131 1.869l1.204 1.204A.25.25 0 0 1 4.896 6H1.25A.25.25 0 0 1 1 5.75V2.104a.25.25 0 0 1 .427-.177l1.38 1.38A7.002 7.002 0 0 1 14.95 7.16a.75.75 0 0 1-1.49.178A5.5 5.5 0 0 0 8 2.5Z" />
-          </svg>
-          Refresh
-        </button>
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8 }}>
+          <div>
+            <div style={{ fontSize: 12, fontWeight: 700, color: t.textPrimary, fontFamily: t.font }}>Database Catalog</div>
+            <div style={{ fontSize: 11, color: t.textMuted, fontFamily: t.font }}>
+              Browse schemas, tables, views, and loaded columns from the active connection.
+            </div>
+          </div>
+          <button
+            onClick={handleRefresh}
+            onMouseEnter={() => setRefreshHover(true)}
+            onMouseLeave={() => setRefreshHover(false)}
+            title="Refresh schema"
+            style={{
+              background: refreshHover ? t.btnHover : 'transparent',
+              border: `1px solid ${refreshHover ? t.btnBorder : t.btnBorder}`,
+              borderRadius: 6,
+              cursor: 'pointer',
+              color: refreshHover ? t.textSecondary : t.textMuted,
+              fontSize: 11,
+              fontFamily: t.font,
+              padding: '6px 8px',
+              display: 'flex',
+              alignItems: 'center',
+              gap: 4,
+              transition: 'all 0.15s',
+            }}
+          >
+            <svg width="11" height="11" viewBox="0 0 16 16" fill="currentColor">
+              <path d="M1.705 8.005a.75.75 0 0 1 .834.656 5.5 5.5 0 0 0 9.592 2.97l-1.204-1.204a.25.25 0 0 1 .177-.427h3.646a.25.25 0 0 1 .25.25v3.646a.25.25 0 0 1-.427.177l-1.38-1.38A7.002 7.002 0 0 1 1.05 8.84a.75.75 0 0 1 .656-.834ZM8 2.5a5.487 5.487 0 0 0-4.131 1.869l1.204 1.204A.25.25 0 0 1 4.896 6H1.25A.25.25 0 0 1 1 5.75V2.104a.25.25 0 0 1 .427-.177l1.38 1.38A7.002 7.002 0 0 1 14.95 7.16a.75.75 0 0 1-1.49.178A5.5 5.5 0 0 0 8 2.5Z" />
+            </svg>
+            Refresh
+          </button>
+        </div>
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, minmax(0, 1fr))', gap: 8 }}>
+          <CatalogStat label="Schemas" value={stats.schemas} t={t} />
+          <CatalogStat label="Tables" value={stats.tables} t={t} />
+          <CatalogStat label="Columns" value={stats.columns} t={t} />
+        </div>
+        <input
+          value={query}
+          onChange={(event) => setQuery(event.target.value)}
+          placeholder="Search schemas, tables, columns..."
+          style={inputStyle}
+        />
       </div>
 
       {/* Content */}
@@ -141,13 +200,63 @@ export function SchemaPanel() {
           <br />
           Connect a data source to explore schema.
         </div>
+      ) : filteredTables.length === 0 ? (
+        <div
+          style={{
+            padding: '24px 14px',
+            color: t.textMuted,
+            fontSize: 12,
+            fontFamily: t.font,
+            textAlign: 'center',
+            fontStyle: 'italic',
+          }}
+        >
+          No database objects match the current search.
+        </div>
       ) : (
         <div style={{ overflow: 'auto', flex: 1 }}>
-          {state.schemaTables.map((table) => (
-            <TableRow key={table.name} table={table} t={t} />
+          {groupedTables.map(([schemaName, tables]) => (
+            <div key={schemaName}>
+              <div
+                style={{
+                  padding: '8px 10px 4px',
+                  fontSize: 10,
+                  fontWeight: 700,
+                  color: t.textMuted,
+                  fontFamily: t.font,
+                  textTransform: 'uppercase',
+                  letterSpacing: '0.05em',
+                }}
+              >
+                {schemaName} · {tables.length}
+              </div>
+              {tables.map((table) => (
+                <TableRow key={table.name} table={table} t={t} />
+              ))}
+            </div>
           ))}
         </div>
       )}
+    </div>
+  );
+}
+
+function CatalogStat({ label, value, t }: { label: string; value: number; t: Theme }) {
+  return (
+    <div
+      style={{
+        background: t.cellBg,
+        border: `1px solid ${t.headerBorder}`,
+        borderRadius: 8,
+        padding: '8px 10px',
+      }}
+    >
+      <div style={{ fontSize: 9, fontWeight: 700, color: t.textMuted, fontFamily: t.font, textTransform: 'uppercase', letterSpacing: '0.05em' }}>
+        {label}
+      </div>
+      <div style={{ fontSize: 18, fontWeight: 700, color: t.textPrimary, fontFamily: t.font, marginTop: 2 }}>
+        {value}
+      </div>
     </div>
   );
 }
@@ -231,6 +340,21 @@ function TableRow({
         <span style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
           {table.name}
         </span>
+        {table.objectType && (
+          <span
+            style={{
+              fontSize: 9,
+              fontFamily: t.fontMono,
+              color: t.accent,
+              background: `${t.accent}18`,
+              borderRadius: 4,
+              padding: '1px 4px',
+              flexShrink: 0,
+            }}
+          >
+            {table.objectType.toLowerCase().includes('view') ? 'view' : 'table'}
+          </span>
+        )}
         {table.governance?.status && (
           <GovernanceBadge status={table.governance.status} t={t} />
         )}

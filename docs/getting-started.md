@@ -88,9 +88,17 @@ dql init .
 ```
 
 DQL auto-detects the dbt project and creates:
-- `dql.config.json` — points to `jaffle_shop.duckdb`, uses the `dbt` semantic layer provider
+- `dql.config.json` — points to `jaffle_shop.duckdb`
 - `blocks/` — directory for your DQL analytics blocks
 - `notebooks/welcome.dqlnb` — a starter notebook with queries against the mart tables
+
+Import the dbt semantic layer into DQL's canonical local YAML:
+
+```bash
+dql semantic import dbt .
+```
+
+This writes normalized local files under `semantic-layer/`, records an import manifest, and switches DQL into local semantic mode.
 
 ---
 
@@ -100,7 +108,7 @@ DQL auto-detects the dbt project and creates:
 dql doctor
 ```
 
-This checks that `dql.config.json` exists, the DuckDB connection works, and the semantic layer loads.
+This checks that `dql.config.json` exists, the DuckDB connection works, and the imported local semantic layer loads.
 
 ---
 

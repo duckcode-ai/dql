@@ -7,6 +7,7 @@ import {
   assertLocalQueryRuntimeReady,
   findProjectRoot,
   loadProjectConfig,
+  normalizeProjectConnection,
   startLocalServer,
 } from '../local-runtime.js';
 import { maybeOpenBrowser } from '../open-browser.js';
@@ -27,7 +28,10 @@ export async function runNotebook(targetArg: string | null, flags: CLIFlags): Pr
   }
   const config = loadProjectConfig(projectRoot);
   const executor = new QueryExecutor();
-  const connection = config.defaultConnection ?? { driver: 'file' as const, filepath: ':memory:' };
+  const connection = normalizeProjectConnection(
+    config.defaultConnection ?? { driver: 'file' as const, filepath: ':memory:' },
+    projectRoot,
+  );
 
   await assertLocalQueryRuntimeReady(executor, connection);
 

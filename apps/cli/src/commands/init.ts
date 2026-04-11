@@ -1,7 +1,8 @@
-import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs';
 import { basename, join, resolve } from 'node:path';
 import { createWelcomeNotebook, serializeNotebook } from '@duckcodeailabs/dql-notebook';
 import type { CLIFlags } from '../args.js';
+import { performSemanticImport } from '../semantic-import.js';
 import { runNotebook } from './notebook.js';
 
 export async function runInit(targetArg: string | null, flags: CLIFlags): Promise<void> {
@@ -15,6 +16,7 @@ export async function runInit(targetArg: string | null, flags: CLIFlags): Promis
 
   // Detect if this is a dbt project
   const isDbt = existsSync(join(targetDir, 'dbt_project.yml'));
+  const hasDbtSemanticDefinitions = isDbt && containsDbtSemanticDefinitions(join(targetDir, 'models'));
 
   // Detect DuckDB file in the directory
   const duckdbPath = detectDuckDBFile(targetDir);
@@ -57,6 +59,19 @@ export async function runInit(targetArg: string | null, flags: CLIFlags): Promis
     writeFileSync(notebookPath, serializeNotebook(nb), 'utf-8');
   }
 
+  let importedSemanticCatalog = false;
+  if (isDbt && hasDbtSemanticDefinitions && !existsSync(join(targetDir, 'semantic-layer', 'imports', 'manifest.json'))) {
+    await performSemanticImport({
+      targetProjectRoot: targetDir,
+      provider: 'dbt',
+      sourceConfig: {
+        provider: 'dbt',
+        projectPath: '.',
+      },
+    });
+    importedSemanticCatalog = true;
+  }
+
   // Output
   if (flags.format === 'json') {
     console.log(JSON.stringify({
@@ -76,13 +91,16 @@ export async function runInit(targetArg: string | null, flags: CLIFlags): Promis
   console.log(`    dbt project: ${isDbt ? 'yes (dbt_project.yml found)' : 'no'}`);
   console.log(`    DuckDB file: ${duckdbPath ?? 'none (using :memory:)'}`);
   if (isDbt) {
-    console.log('    Semantic layer: dbt provider');
+    console.log(`    Semantic layer: ${importedSemanticCatalog ? 'imported dbt catalog into semantic-layer/' : hasDbtSemanticDefinitions ? 'dbt project with semantic definitions detected' : 'dbt project detected (no semantic definitions imported)'}`);
   }
   console.log('');
   console.log('  Created:');
   console.log('    dql.config.json');
   console.log('    blocks/');
   console.log('    notebooks/welcome.dqlnb');
+  if (importedSemanticCatalog) {
+    console.log('    semantic-layer/ (imported local semantic catalog)');
+  }
   console.log('');
   console.log('  Next steps:');
   const step = targetArg && targetArg !== '.' ? 1 : 0;
@@ -90,13 +108,63 @@ export async function runInit(targetArg: string | null, flags: CLIFlags): Promis
   console.log(`    ${step + 1}. dql doctor`);
   console.log(`    ${step + 2}. dql notebook`);
   if (isDbt) {
-    console.log(`    ${step + 3}. dql compile --dbt-manifest target/manifest.json`);
+    if (!importedSemanticCatalog && hasDbtSemanticDefinitions) {
+      console.log(`    ${step + 3}. dql semantic import dbt .`);
+      console.log(`    ${step + 4}. dql compile --dbt-manifest target/manifest.json`);
+    } else {
+      console.log(`    ${step + 3}. dql compile --dbt-manifest target/manifest.json`);
+    }
   }
   console.log('');
 
   if (flags.open) {
     await runNotebook(targetDir, flags);
   }
+}
+
+function containsDbtSemanticDefinitions(root: string): boolean {
+  if (!existsSync(root)) return false;
+
+  const stack = [root];
+  while (stack.length > 0) {
+    const current = stack.pop();
+    if (!current) continue;
+
+    let entries: string[];
+    try {
+      entries = readdirSync(current);
+    } catch {
+      continue;
+    }
+
+    for (const entry of entries) {
+      const fullPath = join(current, entry);
+      let stats;
+      try {
+        stats = statSync(fullPath);
+      } catch {
+        continue;
+      }
+
+      if (stats.isDirectory()) {
+        stack.push(fullPath);
+        continue;
+      }
+
+      if (!entry.endsWith('.yml') && !entry.endsWith('.yaml')) continue;
+
+      try {
+        const contents = readFileSync(fullPath, 'utf-8');
+        if (contents.includes('semantic_models:') || contents.includes('\nmetrics:') || contents.startsWith('metrics:')) {
+          return true;
+        }
+      } catch {
+        // Ignore unreadable files during best-effort detection.
+      }
+    }
+  }
+
+  return false;
 }
 
 function detectDuckDBFile(dir: string): string | null {

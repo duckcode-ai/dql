@@ -57,7 +57,8 @@ export interface LocalServerOptions {
 }
 
 export async function startLocalServer(opts: LocalServerOptions): Promise<number> {
-  const { rootDir, executor, connection, preferredPort, projectRoot = process.cwd() } = opts;
+  const { rootDir, executor, connection: rawConnection, preferredPort, projectRoot = process.cwd() } = opts;
+  const connection = normalizeProjectConnection(rawConnection, projectRoot);
   const projectConfig = loadProjectConfig(projectRoot);
 
   // Load semantic layer via provider system (dql native, dbt, cubejs, etc.)
@@ -275,30 +276,66 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
       try {
         const dataFiles = scanDataFiles(projectRoot);
         // Also query database tables from the connected database
-        let dbTables: { name: string; path: string; columns: never[]; source: string }[] = [];
+        let dbTables: { name: string; path: string; columns: Array<{ name: string; type: string }>; source: string; objectType?: string }[] = [];
         try {
-          const connector = await executor.getConnector(connection);
-          if (typeof connector.listTables === 'function') {
-            const tables = await connector.listTables();
-            dbTables = tables.map((t) => {
-              const qualifiedName = t.schema ? `${t.schema}.${t.name}` : t.name;
-              return { name: qualifiedName, path: qualifiedName, columns: [] as never[], source: 'database' };
+          const tablesResult = await executor.executeQuery(
+            `SELECT table_schema, table_name, table_type
+             FROM information_schema.tables
+             WHERE table_schema NOT IN ('information_schema', 'pg_catalog')
+             ORDER BY table_schema, table_name`,
+            [], {}, connection,
+          );
+          const columnsResult = await executor.executeQuery(
+            `SELECT table_schema, table_name, column_name, data_type
+             FROM information_schema.columns
+             WHERE table_schema NOT IN ('information_schema', 'pg_catalog')
+             ORDER BY table_schema, table_name, ordinal_position`,
+            [], {}, connection,
+          );
+          const columnsByPath = columnsResult.rows.reduce((map, row) => {
+            const schema = String(row['table_schema'] ?? '');
+            const name = String(row['table_name'] ?? '');
+            const qualifiedName = schema ? `${schema}.${name}` : name;
+            const next = map.get(qualifiedName) ?? [];
+            next.push({
+              name: String(row['column_name'] ?? ''),
+              type: String(row['data_type'] ?? ''),
             });
-          } else {
-            // Fallback: query information_schema directly
-            const result = await executor.executeQuery(
-              `SELECT table_schema, table_name FROM information_schema.tables WHERE table_schema NOT IN ('information_schema', 'pg_catalog') ORDER BY table_schema, table_name`,
-              [], {}, connection,
-            );
-            dbTables = result.rows.map((row) => {
-              const schema = String(row['table_schema'] ?? '');
-              const name = String(row['table_name'] ?? '');
-              const qualifiedName = schema ? `${schema}.${name}` : name;
-              return { name: qualifiedName, path: qualifiedName, columns: [] as never[], source: 'database' };
-            });
-          }
+            map.set(qualifiedName, next);
+            return map;
+          }, new Map<string, Array<{ name: string; type: string }>>());
+
+          dbTables = tablesResult.rows.map((row) => {
+            const schema = String(row['table_schema'] ?? '');
+            const name = String(row['table_name'] ?? '');
+            const qualifiedName = schema ? `${schema}.${name}` : name;
+            return {
+              name: qualifiedName,
+              path: qualifiedName,
+              columns: columnsByPath.get(qualifiedName) ?? [],
+              source: 'database',
+              objectType: String(row['table_type'] ?? ''),
+            };
+          });
         } catch {
-          // Non-fatal: schema discovery from DB may fail if not connected
+          try {
+            const connector = await executor.getConnector(connection);
+            if (typeof connector.listTables === 'function') {
+              const tables = await connector.listTables();
+              dbTables = tables.map((t) => {
+                const qualifiedName = t.schema ? `${t.schema}.${t.name}` : t.name;
+                return {
+                  name: qualifiedName,
+                  path: qualifiedName,
+                  columns: [],
+                  source: 'database',
+                  objectType: t.type,
+                };
+              });
+            }
+          } catch {
+            // Non-fatal: schema discovery from DB may fail if not connected
+          }
         }
         // Merge: data files first, then db tables (dedup by name)
         const seen = new Set(dataFiles.map((f) => f.name));
@@ -1835,27 +1872,65 @@ function buildDatabaseSchemaTree(
 }>> {
   return (async () => {
     const dataFiles = scanDataFiles(projectRoot);
-    let dbTables: Array<{ name: string; path: string }> = [];
+    let dbTables: Array<{ schema: string; name: string; path: string; type?: string }> = [];
+    let dbColumnsByPath = new Map<string, Array<{ name: string; type: string }>>();
     try {
-      const connector = await executor.getConnector(connection);
-      if (typeof connector.listTables === 'function') {
-        const tables = await connector.listTables();
-        dbTables = tables.map((table) => {
-          const qualifiedName = table.schema ? `${table.schema}.${table.name}` : table.name;
-          return { name: qualifiedName, path: qualifiedName };
+      const catalogRows = await executor.executeQuery(
+        `SELECT table_schema, table_name, table_type
+         FROM information_schema.tables
+         WHERE table_schema NOT IN ('information_schema', 'pg_catalog')
+         ORDER BY table_schema, table_name`,
+        [], {}, connection,
+      );
+      dbTables = catalogRows.rows.map((row) => {
+        const schema = String(row['table_schema'] ?? 'default');
+        const name = String(row['table_name'] ?? '');
+        const type = String(row['table_type'] ?? 'TABLE');
+        const path = schema ? `${schema}.${name}` : name;
+        return { schema, name, path, type };
+      });
+
+      const columnRows = await executor.executeQuery(
+        `SELECT table_schema, table_name, column_name, data_type
+         FROM information_schema.columns
+         WHERE table_schema NOT IN ('information_schema', 'pg_catalog')
+         ORDER BY table_schema, table_name, ordinal_position`,
+        [], {}, connection,
+      );
+      dbColumnsByPath = columnRows.rows.reduce((map, row) => {
+        const schema = String(row['table_schema'] ?? 'default');
+        const tableName = String(row['table_name'] ?? '');
+        const path = schema ? `${schema}.${tableName}` : tableName;
+        const next = map.get(path) ?? [];
+        next.push({
+          name: String(row['column_name'] ?? ''),
+          type: String(row['data_type'] ?? ''),
         });
-      }
+        map.set(path, next);
+        return map;
+      }, new Map<string, Array<{ name: string; type: string }>>());
     } catch {
-      // fall through and return what we have
+      try {
+        const connector = await executor.getConnector(connection);
+        if (typeof connector.listTables === 'function') {
+          const tables = await connector.listTables();
+          dbTables = tables.map((table) => {
+            const schema = table.schema || 'default';
+            const path = table.schema ? `${table.schema}.${table.name}` : table.name;
+            return { schema, name: table.name, path, type: table.type };
+          });
+        }
+      } catch {
+        // fall through and return what we have
+      }
     }
 
-    const schemaMap = new Map<string, Array<{ name: string; path: string }>>();
+    const schemaMap = new Map<string, Array<{ name: string; path: string; type?: string }>>();
     for (const table of dbTables) {
-      const [schema, ...rest] = table.name.split('.');
-      const schemaName = rest.length > 0 ? schema : 'default';
-      const tableName = rest.length > 0 ? rest.join('.') : schema;
+      const schemaName = table.schema || 'default';
+      const tableName = table.name;
       const existing = schemaMap.get(schemaName) ?? [];
-      existing.push({ name: tableName, path: table.path });
+      existing.push({ name: tableName, path: table.path, type: table.type });
       schemaMap.set(schemaName, existing);
     }
 
@@ -1872,7 +1947,14 @@ function buildDatabaseSchemaTree(
             label: table.name,
             kind: 'table' as const,
             path: table.path,
-            children: [],
+            type: table.type,
+            children: (dbColumnsByPath.get(table.path) ?? []).map((column) => ({
+              id: `db-column:${table.path}:${column.name}`,
+              label: column.name,
+              kind: 'column' as const,
+              path: table.path,
+              type: column.type,
+            })),
           })),
       }));
 
@@ -1886,6 +1968,7 @@ function buildDatabaseSchemaTree(
           label: file.name,
           kind: 'table',
           path: file.path,
+          type: 'FILE',
           children: [],
         })),
       });

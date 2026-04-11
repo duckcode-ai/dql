@@ -64,6 +64,7 @@ export interface SchemaTable {
   columns: SchemaColumn[];
   expanded?: boolean;
   source?: 'file' | 'database';
+  objectType?: string;
   governance?: {
     status?: GovernanceStatus;
     owner?: string;

@@ -40,6 +40,7 @@ dbt deps && dbt build --profiles-dir .
 ```bash
 npm install -g @duckcodeailabs/dql-cli
 dql init .
+dql semantic import dbt .
 dql doctor
 ```
 

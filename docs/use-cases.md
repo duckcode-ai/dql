@@ -13,7 +13,10 @@ git clone https://github.com/dbt-labs/Semantic-Layer-Online-Course.git jaffle-sh
 cd jaffle-shop
 pip install dbt-duckdb && dbt deps && dbt build --profiles-dir .
 npm install -g @duckcodeailabs/dql-cli
-dql init . && dql doctor && dql notebook
+dql init .
+dql semantic import dbt .
+dql doctor
+dql notebook
 ```
 
 Best fit:

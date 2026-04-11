@@ -5,6 +5,7 @@ import { useNotebook } from '../../store/NotebookStore';
 import type {
   BlockStudioDiagnostic,
   DatabaseSchemaNode,
+  SemanticLayerState,
   SemanticObjectDetail,
   SemanticTreeNode,
 } from '../../store/types';
@@ -55,6 +56,7 @@ export function BlockStudio() {
   const [selectedSemanticObject, setSelectedSemanticObject] = useState<SemanticObjectDetail | null>(null);
   const [databaseTree, setDatabaseTree] = useState<DatabaseSchemaNode[]>([]);
   const [expandedDbNodes, setExpandedDbNodes] = useState<Record<string, boolean>>({});
+  const [databaseQuery, setDatabaseQuery] = useState('');
   const [running, setRunning] = useState(false);
   const [saving, setSaving] = useState(false);
   const [scrollTop, setScrollTop] = useState(0);
@@ -92,13 +94,17 @@ export function BlockStudio() {
   }, [state.blockStudioDraft, state.activeBlockPath, dispatch]);
 
   const semanticTree = state.blockStudioCatalog?.semanticTree ?? null;
-  const providerOptions = useMemo(() => collectFacetValues(semanticTree, 'provider'), [semanticTree]);
-  const cubeOptions = useMemo(() => collectFacetValues(semanticTree, 'cube'), [semanticTree]);
-  const ownerOptions = useMemo(() => collectFacetValues(semanticTree, 'owner'), [semanticTree]);
+  const effectiveSemanticTree = useMemo(
+    () => hasSemanticNodes(semanticTree) ? semanticTree : buildFallbackSemanticTree(state.semanticLayer),
+    [semanticTree, state.semanticLayer],
+  );
+  const providerOptions = useMemo(() => collectFacetValues(effectiveSemanticTree, 'provider'), [effectiveSemanticTree]);
+  const cubeOptions = useMemo(() => collectFacetValues(effectiveSemanticTree, 'cube'), [effectiveSemanticTree]);
+  const ownerOptions = useMemo(() => collectFacetValues(effectiveSemanticTree, 'owner'), [effectiveSemanticTree]);
 
   const filteredSemanticTree = useMemo(() => {
-    if (!semanticTree) return null;
-    return filterSemanticTree(semanticTree, {
+    if (!effectiveSemanticTree) return null;
+    return filterSemanticTree(effectiveSemanticTree, {
       query,
       provider: providerFilter,
       domain: domainFilter,
@@ -107,12 +113,25 @@ export function BlockStudio() {
       tag: tagFilter,
       type: typeFilter,
     });
-  }, [semanticTree, query, providerFilter, domainFilter, cubeFilter, ownerFilter, tagFilter, typeFilter]);
+  }, [effectiveSemanticTree, query, providerFilter, domainFilter, cubeFilter, ownerFilter, tagFilter, typeFilter]);
 
   const flatSemanticRows = useMemo(
     () => flattenSemanticRows(filteredSemanticTree?.children ?? [], expanded),
     [filteredSemanticTree, expanded],
   );
+  const filteredDatabaseTree = useMemo(
+    () => filterDatabaseTree(databaseTree, databaseQuery),
+    [databaseTree, databaseQuery],
+  );
+  const databaseStats = useMemo(
+    () => summarizeDatabaseTree(databaseTree),
+    [databaseTree],
+  );
+  const semanticStats = {
+    metrics: state.semanticLayer.metrics.length,
+    dimensions: state.semanticLayer.dimensions.length,
+    hierarchies: state.semanticLayer.hierarchies.length,
+  };
   const totalTreeHeight = flatSemanticRows.length * TREE_ROW_HEIGHT;
   const visibleRows = useMemo(() => {
     const startIndex = Math.max(0, Math.floor(scrollTop / TREE_ROW_HEIGHT) - TREE_OVERSCAN);
@@ -248,60 +267,89 @@ export function BlockStudio() {
   const currentChart = state.blockStudioValidation?.chartConfig ?? state.blockStudioPreview?.chartConfig ?? { chart: 'table' };
 
   return (
-    <div style={{ flex: 1, display: 'grid', gridTemplateColumns: '320px minmax(0, 1fr) 360px', overflow: 'hidden', background: t.appBg }}>
+    <div style={{ flex: 1, display: 'grid', gridTemplateColumns: '360px minmax(0, 1fr) 340px', overflow: 'hidden', background: t.appBg }}>
       <div style={{ borderRight: `1px solid ${t.headerBorder}`, display: 'flex', flexDirection: 'column', overflow: 'hidden', background: t.sidebarBg }}>
-        <div style={{ display: 'flex', padding: 10, gap: 8, borderBottom: `1px solid ${t.headerBorder}` }}>
+        <div style={{ padding: 14, display: 'grid', gap: 12, borderBottom: `1px solid ${t.headerBorder}` }}>
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10 }}>
+            <div>
+              <div style={{ fontSize: 12, fontWeight: 700, color: t.textPrimary, fontFamily: t.font }}>Block Studio</div>
+              <div style={{ fontSize: 11, color: t.textMuted, fontFamily: t.font }}>
+                Build DQL with semantic models and live database structure in one workspace.
+              </div>
+            </div>
+            {state.semanticLayer.provider && (
+              <span style={{ fontSize: 10, fontWeight: 700, color: t.accent, background: `${t.accent}18`, borderRadius: 999, padding: '5px 9px', textTransform: 'uppercase', letterSpacing: '0.04em' }}>
+                {state.semanticLayer.provider}
+              </span>
+            )}
+          </div>
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, minmax(0, 1fr))', gap: 8 }}>
+            <StudioStatCard label="Metrics" value={semanticStats.metrics} t={t} />
+            <StudioStatCard label="Dimensions" value={semanticStats.dimensions} t={t} />
+            <StudioStatCard label="Hierarchies" value={semanticStats.hierarchies} t={t} />
+          </div>
+        </div>
+
+        <div style={{ display: 'flex', padding: '10px 12px', gap: 8, borderBottom: `1px solid ${t.headerBorder}` }}>
           <ExplorerTabButton active={explorerTab === 'semantic'} onClick={() => setExplorerTab('semantic')} label="Semantic Layer" />
           <ExplorerTabButton active={explorerTab === 'database'} onClick={() => setExplorerTab('database')} label="Database" />
         </div>
 
         {explorerTab === 'semantic' ? (
           <>
-            <SemanticSearchBar
-              query={query}
-              provider={providerFilter}
-              cube={cubeFilter}
-              owner={ownerFilter}
-              domain={domainFilter}
-              tag={tagFilter}
-              type={typeFilter}
-              providers={providerOptions}
-              cubes={cubeOptions}
-              owners={ownerOptions}
-              domains={state.semanticLayer.domains}
-              tags={state.semanticLayer.tags}
-              onQueryChange={setQuery}
-              onProviderChange={setProviderFilter}
-              onCubeChange={setCubeFilter}
-              onOwnerChange={setOwnerFilter}
-              onDomainChange={setDomainFilter}
-              onTagChange={setTagFilter}
-              onTypeChange={setTypeFilter}
-              t={t}
-            />
+            <div style={{ padding: 12, borderBottom: `1px solid ${t.headerBorder}`, background: `${t.cellBg}66` }}>
+              <SemanticSearchBar
+                query={query}
+                provider={providerFilter}
+                cube={cubeFilter}
+                owner={ownerFilter}
+                domain={domainFilter}
+                tag={tagFilter}
+                type={typeFilter}
+                providers={providerOptions}
+                cubes={cubeOptions}
+                owners={ownerOptions}
+                domains={state.semanticLayer.domains}
+                tags={state.semanticLayer.tags}
+                onQueryChange={setQuery}
+                onProviderChange={setProviderFilter}
+                onCubeChange={setCubeFilter}
+                onOwnerChange={setOwnerFilter}
+                onDomainChange={setDomainFilter}
+                onTagChange={setTagFilter}
+                onTypeChange={setTypeFilter}
+                t={t}
+              />
+            </div>
             <div
               ref={semanticTreeRef}
               onScroll={(event) => setScrollTop(event.currentTarget.scrollTop)}
-              style={{ flex: 1, overflowY: 'auto', borderBottom: `1px solid ${t.headerBorder}` }}
+              style={{ flex: 1, overflowY: 'auto', borderBottom: `1px solid ${t.headerBorder}`, background: t.cellBg }}
             >
-              <div style={{ height: totalTreeHeight, position: 'relative' }}>
-                <div style={{ position: 'absolute', top: visibleRows.offsetTop, left: 0, right: 0 }}>
-                  {visibleRows.rows.map((row) => (
-                    <SemanticRow
-                      key={row.node.id}
-                      row={row}
-                      selectedId={selectedSemanticId}
-                      setSelectedId={setSelectedSemanticId}
-                      expanded={expanded}
-                      setExpanded={setExpanded}
-                      onInsert={handleSemanticInsert}
-                      favorites={new Set(state.semanticLayer.favorites)}
-                      dispatch={dispatch}
-                      t={t}
-                    />
-                  ))}
+              {state.blockStudioCatalogLoading ? (
+                <EmptyPanel message="Loading semantic catalog…" />
+              ) : flatSemanticRows.length === 0 ? (
+                <EmptyPanel message="No semantic objects match the current filters." />
+              ) : (
+                <div style={{ height: totalTreeHeight, position: 'relative' }}>
+                  <div style={{ position: 'absolute', top: visibleRows.offsetTop, left: 0, right: 0 }}>
+                    {visibleRows.rows.map((row) => (
+                      <SemanticRow
+                        key={row.node.id}
+                        row={row}
+                        selectedId={selectedSemanticId}
+                        setSelectedId={setSelectedSemanticId}
+                        expanded={expanded}
+                        setExpanded={setExpanded}
+                        onInsert={handleSemanticInsert}
+                        favorites={new Set(state.semanticLayer.favorites)}
+                        dispatch={dispatch}
+                        t={t}
+                      />
+                    ))}
+                  </div>
                 </div>
-              </div>
+              )}
             </div>
             <MetricDetailPanel
               item={selectedSemanticObject}
@@ -325,21 +373,29 @@ export function BlockStudio() {
           </>
         ) : (
           <DatabaseExplorer
-            tree={databaseTree}
+            tree={filteredDatabaseTree}
+            totalTree={databaseTree}
             expanded={expandedDbNodes}
             setExpanded={setExpandedDbNodes}
             onEnsureColumns={ensureDbColumns}
             onInsert={handleDatabaseInsert}
+            query={databaseQuery}
+            onQueryChange={setDatabaseQuery}
+            stats={databaseStats}
+            connectionName={state.blockStudioCatalog?.connection.current ?? 'default'}
             t={t}
           />
         )}
       </div>
 
       <div style={{ display: 'flex', flexDirection: 'column', minWidth: 0, overflow: 'hidden' }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '10px 12px', borderBottom: `1px solid ${t.headerBorder}`, background: t.cellBg }}>
-          <span style={{ fontSize: 12, fontWeight: 600, color: t.textPrimary, fontFamily: t.font }}>
-            Source
-          </span>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '12px 14px', borderBottom: `1px solid ${t.headerBorder}`, background: t.cellBg }}>
+          <div>
+            <div style={{ fontSize: 12, fontWeight: 700, color: t.textPrimary, fontFamily: t.font }}>DQL Source</div>
+            <div style={{ fontSize: 11, color: t.textMuted, fontFamily: t.font }}>
+              Use templates, insert semantic refs, run, validate, and save from one editor.
+            </div>
+          </div>
           <div style={{ flex: 1 }} />
           <TemplateButton label="Semantic Skeleton" onClick={() => handleDraftChange(buildSemanticSkeleton(state.blockStudioMetadata?.name ?? 'New Block'))} />
           <TemplateButton label="Custom Skeleton" onClick={() => handleDraftChange(buildCustomSkeleton(state.blockStudioMetadata?.name ?? 'New Block'))} />
@@ -359,11 +415,19 @@ export function BlockStudio() {
       </div>
 
       <div style={{ borderLeft: `1px solid ${t.headerBorder}`, display: 'flex', flexDirection: 'column', overflow: 'hidden', background: t.cellBg }}>
-        <div style={{ display: 'flex', padding: 10, gap: 8, borderBottom: `1px solid ${t.headerBorder}`, flexWrap: 'wrap' }}>
+        <div style={{ padding: '12px 14px', display: 'grid', gap: 10, borderBottom: `1px solid ${t.headerBorder}` }}>
+          <div>
+            <div style={{ fontSize: 12, fontWeight: 700, color: t.textPrimary, fontFamily: t.font }}>Preview & Governance</div>
+            <div style={{ fontSize: 11, color: t.textMuted, fontFamily: t.font }}>
+              Validate references, inspect results, tune visualization, and save companion metadata.
+            </div>
+          </div>
+          <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
           <ExplorerTabButton active={resultTab === 'validate'} onClick={() => setResultTab('validate')} label="Validate" />
           <ExplorerTabButton active={resultTab === 'results'} onClick={() => setResultTab('results')} label="Results" />
           <ExplorerTabButton active={resultTab === 'visualization'} onClick={() => setResultTab('visualization')} label="Visualization" />
           <ExplorerTabButton active={resultTab === 'save'} onClick={() => setResultTab('save')} label="Save" />
+          </div>
         </div>
 
         <div style={{ flex: 1, overflow: 'auto' }}>
@@ -443,6 +507,26 @@ function ExplorerTabButton({ active, onClick, label, busy }: { active: boolean; 
 
 function TemplateButton(props: { label: string; onClick: () => void; busy?: boolean }) {
   return <ExplorerTabButton active={false} {...props} />;
+}
+
+function StudioStatCard({ label, value, t }: { label: string; value: number; t: Theme }) {
+  return (
+    <div
+      style={{
+        background: t.cellBg,
+        border: `1px solid ${t.headerBorder}`,
+        borderRadius: 10,
+        padding: '10px 12px',
+      }}
+    >
+      <div style={{ fontSize: 10, fontWeight: 700, color: t.textMuted, fontFamily: t.font, textTransform: 'uppercase', letterSpacing: '0.05em' }}>
+        {label}
+      </div>
+      <div style={{ fontSize: 20, fontWeight: 700, color: t.textPrimary, fontFamily: t.font, marginTop: 4 }}>
+        {value}
+      </div>
+    </div>
+  );
 }
 
 function DiagnosticsPanel({ diagnostics, t }: { diagnostics: BlockStudioDiagnostic[]; t: Theme }) {
@@ -577,27 +661,56 @@ function EmptyPanel({ message }: { message: string }) {
 
 function DatabaseExplorer({
   tree,
+  totalTree,
   expanded,
   setExpanded,
   onEnsureColumns,
   onInsert,
+  query,
+  onQueryChange,
+  stats,
+  connectionName,
   t,
 }: {
   tree: DatabaseSchemaNode[];
+  totalTree: DatabaseSchemaNode[];
   expanded: Record<string, boolean>;
   setExpanded: React.Dispatch<React.SetStateAction<Record<string, boolean>>>;
   onEnsureColumns: (node: DatabaseSchemaNode) => Promise<void>;
   onInsert: (snippet: string) => void;
+  query: string;
+  onQueryChange: (value: string) => void;
+  stats: { schemas: number; tables: number; columns: number };
+  connectionName: string;
   t: Theme;
 }) {
+  const inputStyle: React.CSSProperties = {
+    width: '100%',
+    background: t.inputBg,
+    border: `1px solid ${t.inputBorder}`,
+    borderRadius: 8,
+    color: t.textPrimary,
+    fontSize: 12,
+    fontFamily: t.font,
+    padding: '8px 10px',
+    outline: 'none',
+    boxSizing: 'border-box',
+  };
+
   const renderNode = (node: DatabaseSchemaNode, depth: number = 0): React.ReactNode => {
     const hasChildren = node.kind !== 'column';
     const isExpanded = expanded[node.id] ?? depth < 1;
+    const childCount = node.kind === 'schema'
+      ? node.children?.length
+      : node.kind === 'table'
+        ? node.children?.length
+        : undefined;
     return (
       <div key={node.id}>
         <TreeRow
           label={node.label}
           depth={depth}
+          count={childCount}
           expanded={hasChildren ? isExpanded : undefined}
           onToggle={hasChildren ? () => {
             setExpanded((prev) => ({ ...prev, [node.id]: !isExpanded }));
@@ -608,6 +721,9 @@ function DatabaseExplorer({
             if (node.kind === 'table' && node.path) onInsert(node.path);
             if (node.kind === 'column') onInsert(node.label);
           }}
+          onDoubleClick={() => {
+            if (node.kind === 'table' && node.path) onInsert(`SELECT *\nFROM ${node.path}\nLIMIT 100`);
+          }}
           t={t}
         />
         {hasChildren && isExpanded && node.children?.map((child) => renderNode(child, depth + 1))}
@@ -616,9 +732,41 @@ function DatabaseExplorer({
   };
 
   return (
-    <div style={{ flex: 1, overflowY: 'auto', paddingTop: 6 }}>
-      {tree.map((node) => renderNode(node))}
-    </div>
+    <>
+      <div style={{ padding: 12, display: 'grid', gap: 12, borderBottom: `1px solid ${t.headerBorder}`, background: `${t.cellBg}66` }}>
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10 }}>
+          <div>
+            <div style={{ fontSize: 12, fontWeight: 700, color: t.textPrimary, fontFamily: t.font }}>Database Browser</div>
+            <div style={{ fontSize: 11, color: t.textMuted, fontFamily: t.font }}>
+              Browse the active connection, inspect schemas and columns, then insert tables or starter queries into the block.
+            </div>
+          </div>
+          <span style={{ fontSize: 10, fontWeight: 700, color: t.accent, background: `${t.accent}18`, borderRadius: 999, padding: '5px 9px', textTransform: 'uppercase', letterSpacing: '0.04em' }}>
+            {connectionName}
+          </span>
+        </div>
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, minmax(0, 1fr))', gap: 8 }}>
+          <StudioStatCard label="Schemas" value={stats.schemas} t={t} />
+          <StudioStatCard label="Tables" value={stats.tables} t={t} />
+          <StudioStatCard label="Columns" value={stats.columns} t={t} />
+        </div>
+        <input
+          value={query}
+          onChange={(event) => onQueryChange(event.target.value)}
+          placeholder="Search schemas, tables, columns..."
+          style={inputStyle}
+        />
+      </div>
+      <div style={{ flex: 1, overflowY: 'auto', padding: tree.length > 0 ? '6px 0 0' : 0 }}>
+        {totalTree.length === 0 ? (
+          <EmptyPanel message="No schemas were found for the active connection yet." />
+        ) : tree.length === 0 ? (
+          <EmptyPanel message="No database objects match the current search." />
+        ) : (
+          tree.map((node) => renderNode(node))
+        )}
+      </div>
+    </>
   );
 }
 
@@ -767,7 +915,7 @@ function flattenSemanticRows(nodes: SemanticTreeNode[], expanded: Record<string,
   const rows: FlatSemanticRow[] = [];
   for (const node of nodes) {
     const hasChildren = Boolean(node.children && node.children.length > 0);
-    const isExpanded = expanded[node.id] ?? depth < 2;
+    const isExpanded = expanded[node.id] ?? depth < 3;
     rows.push({ node, depth, hasChildren, isExpanded });
     if (hasChildren && isExpanded) {
       rows.push(...flattenSemanticRows(node.children ?? [], expanded, depth + 1));
@@ -782,4 +930,171 @@ function updateDatabaseTree(tree: DatabaseSchemaNode[], nodeId: string, replacem
     if (!node.children) return node;
     return { ...node, children: updateDatabaseTree(node.children, nodeId, replacement) };
   });
+}
+
+function filterDatabaseTree(tree: DatabaseSchemaNode[], query: string): DatabaseSchemaNode[] {
+  const normalized = query.trim().toLowerCase();
+  if (!normalized) return tree;
+
+  const filterNode = (node: DatabaseSchemaNode): DatabaseSchemaNode | null => {
+    const matches = [node.label, node.path, node.type]
+      .filter((value): value is string => Boolean(value))
+      .some((value) => value.toLowerCase().includes(normalized));
+
+    const children = (node.children ?? [])
+      .map((child) => filterNode(child))
+      .filter((child): child is DatabaseSchemaNode => Boolean(child));
+
+    if (matches || children.length > 0) {
+      return { ...node, children };
+    }
+    return null;
+  };
+
+  return tree
+    .map((node) => filterNode(node))
+    .filter((node): node is DatabaseSchemaNode => Boolean(node));
+}
+
+function summarizeDatabaseTree(tree: DatabaseSchemaNode[]): { schemas: number; tables: number; columns: number } {
+  let schemas = 0;
+  let tables = 0;
+  let columns = 0;
+
+  const visit = (node: DatabaseSchemaNode) => {
+    if (node.kind === 'schema') schemas += 1;
+    if (node.kind === 'table') tables += 1;
+    if (node.kind === 'column') columns += 1;
+    for (const child of node.children ?? []) visit(child);
+  };
+
+  for (const node of tree) visit(node);
+  return { schemas, tables, columns };
+}
+
+function hasSemanticNodes(tree: SemanticTreeNode | null): boolean {
+  return Boolean(tree && tree.children && tree.children.length > 0);
+}
+
+function buildFallbackSemanticTree(layer: SemanticLayerState): SemanticTreeNode | null {
+  if (layer.metrics.length === 0 && layer.dimensions.length === 0 && layer.hierarchies.length === 0) {
+    return null;
+  }
+
+  const provider = layer.provider ?? 'dql';
+  const domainMap = new Map<string, SemanticTreeNode[]>();
+
+  const pushToDomain = (domain: string, entry: SemanticTreeNode) => {
+    const next = domainMap.get(domain) ?? [];
+    next.push(entry);
+    domainMap.set(domain, next);
+  };
+
+  for (const metric of layer.metrics) {
+    const domain = metric.domain || 'uncategorized';
+    pushToDomain(domain, {
+      id: `metric:${metric.name}`,
+      label: metric.label || metric.name,
+      kind: 'metric',
+      meta: {
+        provider,
+        domain,
+        cube: metric.table,
+        owner: metric.owner ?? '',
+        tags: metric.tags.join(','),
+      },
+    });
+  }
+
+  for (const dimension of layer.dimensions) {
+    const domain = dimension.domain || 'uncategorized';
+    pushToDomain(domain, {
+      id: `dimension:${dimension.name}`,
+      label: dimension.label || dimension.name,
+      kind: 'dimension',
+      meta: {
+        provider,
+        domain,
+        cube: dimension.table,
+        owner: dimension.owner ?? '',
+        tags: dimension.tags.join(','),
+      },
+    });
+  }
+
+  for (const hierarchy of layer.hierarchies) {
+    const domain = hierarchy.domain || 'uncategorized';
+    pushToDomain(domain, {
+      id: `hierarchy:${hierarchy.name}`,
+      label: hierarchy.label || hierarchy.name,
+      kind: 'hierarchy',
+      meta: {
+        provider,
+        domain,
+      },
+    });
+  }
+
+  const domainNodes = Array.from(domainMap.entries())
+    .sort((a, b) => a[0].localeCompare(b[0]))
+    .map(([domain, items]) => {
+      const metrics = items.filter((item) => item.kind === 'metric');
+      const dimensions = items.filter((item) => item.kind === 'dimension');
+      const hierarchies = items.filter((item) => item.kind === 'hierarchy');
+      const children: SemanticTreeNode[] = [];
+      if (metrics.length > 0) {
+        children.push({
+          id: `group:${domain}:metrics`,
+          label: 'Metrics',
+          kind: 'group',
+          count: metrics.length,
+          meta: { provider, domain },
+          children: metrics.sort((a, b) => a.label.localeCompare(b.label)),
+        });
+      }
+      if (dimensions.length > 0) {
+        children.push({
+          id: `group:${domain}:dimensions`,
+          label: 'Dimensions',
+          kind: 'group',
+          count: dimensions.length,
+          meta: { provider, domain },
+          children: dimensions.sort((a, b) => a.label.localeCompare(b.label)),
+        });
+      }
+      if (hierarchies.length > 0) {
+        children.push({
+          id: `group:${domain}:hierarchies`,
+          label: 'Hierarchies',
+          kind: 'group',
+          count: hierarchies.length,
+          meta: { provider, domain },
+          children: hierarchies.sort((a, b) => a.label.localeCompare(b.label)),
+        });
+      }
+      return {
+        id: `domain:${provider}:${domain}`,
+        label: domain,
+        kind: 'domain' as const,
+        count: children.length,
+        meta: { provider, domain },
+        children,
+      };
+    });
+
+  return {
+    id: 'root:semantic',
+    label: 'Semantic Layer',
+    kind: 'group',
+    children: [
+      {
+        id: `provider:${provider}`,
+        label: provider.toUpperCase(),
+        kind: 'provider',
+        count: domainNodes.length,
+        meta: { provider },
+        children: domainNodes,
+      },
+    ],
+  };
 }

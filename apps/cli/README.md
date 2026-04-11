@@ -43,6 +43,7 @@ cd jaffle-shop
 pip install dbt-duckdb && dbt deps && dbt build --profiles-dir .
 npm install -g @duckcodeailabs/dql-cli
 dql init .
+dql semantic import dbt .
 dql notebook
 ```
 

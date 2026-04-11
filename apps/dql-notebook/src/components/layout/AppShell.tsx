@@ -30,9 +30,6 @@ export function AppShell() {
         if (file.type === 'block') {
           const payload = await api.openBlockStudio(file.path);
           dispatch({ type: 'OPEN_BLOCK_STUDIO', file, payload });
-          if (state.sidebarPanel !== 'files') {
-            dispatch({ type: 'SET_SIDEBAR_PANEL', panel: 'files' });
-          }
           return;
         }
         const { content } = await api.readNotebook(file.path);
