@@ -45,6 +45,9 @@ importers:
       '@duckcodeailabs/dql-notebook':
         specifier: workspace:*
         version: link:../../packages/dql-notebook
+      '@duckcodeailabs/dql-notebook-app':
+        specifier: workspace:*
+        version: link:../dql-notebook
       '@duckcodeailabs/dql-project':
         specifier: workspace:*
         version: link:../../packages/dql-project

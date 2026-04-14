@@ -31,7 +31,8 @@
     "@duckcodeailabs/dql-compiler": "workspace:*",
     "@duckcodeailabs/dql-project": "workspace:*",
     "@duckcodeailabs/dql-governance": "workspace:*",
-    "@duckcodeailabs/dql-notebook": "workspace:*"
+    "@duckcodeailabs/dql-notebook": "workspace:*",
+    "@duckcodeailabs/dql-notebook-app": "workspace:*"
   },
   "devDependencies": {
     "typescript": "^5.7.0",

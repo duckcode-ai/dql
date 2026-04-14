@@ -16,9 +16,43 @@
  *   const layer = await provider.loadAsync(config, projectRoot);
  */
 
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { SemanticLayer } from '../semantic-layer.js';
 import type { MetricDefinition, DimensionDefinition, CubeDefinition, JoinDefinition } from '../semantic-layer.js';
 import type { SemanticLayerProviderConfig } from './provider.js';
+
+const CACHE_TTL_MS = 60 * 60 * 1000; // 1 hour
+
+interface SnowflakeCacheEntry {
+  timestamp: number;
+  views: SemanticViewInfo[];
+  viewDescriptions: Record<string, SnowflakeQueryRow[]>;
+  relationships: Record<string, SnowflakeQueryRow[]>;
+}
+
+function getCachePath(projectRoot: string): string {
+  return join(projectRoot, 'semantic-layer', 'cache', 'snowflake-introspection.json');
+}
+
+function readCache(projectRoot: string): SnowflakeCacheEntry | null {
+  const path = getCachePath(projectRoot);
+  if (!existsSync(path)) return null;
+  try {
+    const data = JSON.parse(readFileSync(path, 'utf-8')) as SnowflakeCacheEntry;
+    if (Date.now() - data.timestamp > CACHE_TTL_MS) return null;
+    return data;
+  } catch {
+    return null;
+  }
+}
+
+function writeCache(projectRoot: string, entry: SnowflakeCacheEntry): void {
+  const path = getCachePath(projectRoot);
+  const dir = join(projectRoot, 'semantic-layer', 'cache');
+  if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+  writeFileSync(path, JSON.stringify(entry, null, 2), 'utf-8');
+}
 
 type MetricType = MetricDefinition['type'];
 type DimensionType = DimensionDefinition['type'];
@@ -42,6 +76,7 @@ export class SnowflakeSemanticProvider {
   /**
    * Load semantic layer definitions from Snowflake semantic views.
    * This is async because it needs to query Snowflake metadata.
+   * Uses a file cache (1-hour TTL) to avoid repeated introspection.
    */
   async loadAsync(
     config: SemanticLayerProviderConfig,
@@ -50,17 +85,178 @@ export class SnowflakeSemanticProvider {
     const layer = new SemanticLayer();
     const database = config.projectPath; // Reuse projectPath as database filter
 
+    // Try reading from cache first
+    const cached = readCache(_projectRoot);
+    if (cached) {
+      this.populateLayerFromCache(layer, cached);
+      return layer;
+    }
+
     // 1. Discover semantic views
     const views = await this.discoverSemanticViews(database);
 
     // 2. For each semantic view, load its metrics and dimensions
+    const cacheEntry: SnowflakeCacheEntry = {
+      timestamp: Date.now(),
+      views,
+      viewDescriptions: {},
+      relationships: {},
+    };
+
     for (const view of views) {
-      await this.loadViewMetrics(layer, view);
-      await this.loadViewDimensions(layer, view);
-      await this.loadViewRelationships(layer, view);
+      const fqn = `"${view.databaseName}"."${view.schemaName}"."${view.name}"`;
+      try {
+        const desc = await this.executeQuery(`DESC SEMANTIC VIEW ${fqn}`);
+        cacheEntry.viewDescriptions[fqn] = desc.rows;
+      } catch { /* skip */ }
+      try {
+        const rels = await this.executeQuery(
+          `SELECT * FROM TABLE(INFORMATION_SCHEMA.SEMANTIC_VIEW_RELATIONSHIPS('${fqn}'))`,
+        );
+        cacheEntry.relationships[fqn] = rels.rows;
+      } catch { /* skip */ }
     }
 
+    // Populate layer from the fresh data
+    this.populateLayerFromCache(layer, cacheEntry);
+
+    // Write cache for next time
+    writeCache(_projectRoot, cacheEntry);
+
     return layer;
+  }
+
+  /**
+   * Clear the cached introspection so the next load queries Snowflake fresh.
+   */
+  static clearCache(projectRoot: string): boolean {
+    const path = getCachePath(projectRoot);
+    if (existsSync(path)) {
+      const { unlinkSync } = require('node:fs');
+      unlinkSync(path);
+      return true;
+    }
+    return false;
+  }
+
+  /**
+   * Check if cache is present and fresh.
+   */
+  static isCached(projectRoot: string): { cached: boolean; age?: number } {
+    const path = getCachePath(projectRoot);
+    if (!existsSync(path)) return { cached: false };
+    try {
+      const data = JSON.parse(readFileSync(path, 'utf-8')) as SnowflakeCacheEntry;
+      const age = Date.now() - data.timestamp;
+      return { cached: age <= CACHE_TTL_MS, age };
+    } catch {
+      return { cached: false };
+    }
+  }
+
+  private populateLayerFromCache(layer: SemanticLayer, cache: SnowflakeCacheEntry): void {
+    for (const view of cache.views) {
+      const fqn = `"${view.databaseName}"."${view.schemaName}"."${view.name}"`;
+      const descRows = cache.viewDescriptions[fqn] ?? [];
+      const relRows = cache.relationships[fqn] ?? [];
+
+      // Process metrics and dimensions from cached description
+      for (const row of descRows) {
+        const colName = String(row['name'] ?? row['NAME'] ?? '');
+        const colType = String(row['type'] ?? row['TYPE'] ?? '');
+        const semanticRole = String(row['semantic_role'] ?? row['SEMANTIC_ROLE'] ?? row['kind'] ?? row['KIND'] ?? '');
+        const expression = String(row['expression'] ?? row['EXPRESSION'] ?? row['default'] ?? row['DEFAULT'] ?? colName);
+        const description = String(row['comment'] ?? row['COMMENT'] ?? '');
+
+        if (semanticRole.toLowerCase() === 'measure' || semanticRole.toLowerCase() === 'metric') {
+          const aggregation = inferAggregation(colType, expression);
+          layer.addMetric({
+            name: `${view.name}.${colName}`,
+            label: colName.replace(/_/g, ' '),
+            description: description || `Metric from ${view.name}`,
+            sql: expression,
+            type: aggregation,
+            table: fqn,
+            domain: view.schemaName,
+            cube: view.name,
+            aggregation,
+            source: {
+              provider: 'snowflake',
+              objectType: 'metric',
+              objectId: `${fqn}.${colName}`,
+              objectName: colName,
+            },
+          });
+        } else if (semanticRole.toLowerCase() === 'dimension' || semanticRole.toLowerCase() === 'entity') {
+          const dimType = inferDimensionType(colType);
+          layer.addDimension({
+            name: `${view.name}.${colName}`,
+            label: colName.replace(/_/g, ' '),
+            description: description || `Dimension from ${view.name}`,
+            sql: colName,
+            type: dimType,
+            table: fqn,
+            cube: view.name,
+            source: {
+              provider: 'snowflake',
+              objectType: 'dimension',
+              objectId: `${fqn}.${colName}`,
+              objectName: colName,
+            },
+          });
+        }
+      }
+
+      // Process relationships
+      for (const row of relRows) {
+        const leftTable = String(row['left_table'] ?? row['LEFT_TABLE'] ?? '');
+        const rightTable = String(row['right_table'] ?? row['RIGHT_TABLE'] ?? '');
+        const joinType = String(row['join_type'] ?? row['JOIN_TYPE'] ?? 'left');
+        const joinCondition = String(row['join_condition'] ?? row['JOIN_CONDITION'] ?? '');
+
+        if (leftTable && rightTable && joinCondition) {
+          const leftName = leftTable.split('.').pop() ?? leftTable;
+          const rightName = rightTable.split('.').pop() ?? rightTable;
+
+          const emptyCube = (cubeName: string, cubeTable: string): CubeDefinition => ({
+            name: cubeName,
+            label: cubeName,
+            description: `Auto-discovered from Snowflake semantic view`,
+            sql: `SELECT * FROM ${cubeTable}`,
+            table: cubeTable,
+            domain: view.schemaName,
+            measures: [],
+            dimensions: [],
+            timeDimensions: [],
+            joins: [],
+            segments: [],
+            preAggregations: [],
+            source: {
+              provider: 'snowflake',
+              objectType: 'semantic_view',
+              objectId: cubeTable,
+              objectName: cubeName,
+            },
+          });
+
+          if (!layer.getCube(leftName)) layer.addCube(emptyCube(leftName, leftTable));
+          if (!layer.getCube(rightName)) layer.addCube(emptyCube(rightName, rightTable));
+
+          const leftCube = layer.getCube(leftName);
+          if (leftCube) {
+            const jt = joinType.toLowerCase();
+            const joinDef: JoinDefinition = {
+              name: `${leftName}_${rightName}`,
+              left: leftName,
+              right: rightName,
+              type: jt.includes('right') ? 'right' : jt.includes('full') ? 'full' : jt.includes('inner') ? 'inner' : 'left',
+              sql: joinCondition,
+            };
+            leftCube.joins.push(joinDef);
+          }
+        }
+      }
+    }
   }
 
   /**
@@ -111,159 +307,6 @@ export class SnowflakeSemanticProvider {
     }
   }
 
-  /**
-   * Load metrics from a semantic view's metadata.
-   */
-  private async loadViewMetrics(layer: SemanticLayer, view: SemanticViewInfo): Promise<void> {
-    const fqn = `"${view.databaseName}"."${view.schemaName}"."${view.name}"`;
-
-    try {
-      // DESC SEMANTIC VIEW returns columns with their semantic roles
-      const result = await this.executeQuery(`DESC SEMANTIC VIEW ${fqn}`);
-
-      for (const row of result.rows) {
-        const colName = String(row['name'] ?? row['NAME'] ?? '');
-        const colType = String(row['type'] ?? row['TYPE'] ?? '');
-        const semanticRole = String(row['semantic_role'] ?? row['SEMANTIC_ROLE'] ?? row['kind'] ?? row['KIND'] ?? '');
-        const expression = String(row['expression'] ?? row['EXPRESSION'] ?? row['default'] ?? row['DEFAULT'] ?? colName);
-        const description = String(row['comment'] ?? row['COMMENT'] ?? '');
-
-        if (semanticRole.toLowerCase() === 'measure' || semanticRole.toLowerCase() === 'metric') {
-          const aggregation = inferAggregation(colType, expression);
-          layer.addMetric({
-            name: `${view.name}.${colName}`,
-            label: colName.replace(/_/g, ' '),
-            description: description || `Metric from ${view.name}`,
-            sql: expression,
-            type: aggregation,
-            table: fqn,
-            domain: view.schemaName,
-            cube: view.name,
-            aggregation,
-            source: {
-              provider: 'snowflake',
-              objectType: 'metric',
-              objectId: `${fqn}.${colName}`,
-              objectName: colName,
-            },
-          });
-        }
-      }
-    } catch {
-      // Silently skip views we can't describe — they'll show as having no metrics
-    }
-  }
-
-  /**
-   * Load dimensions from a semantic view's metadata.
-   */
-  private async loadViewDimensions(layer: SemanticLayer, view: SemanticViewInfo): Promise<void> {
-    const fqn = `"${view.databaseName}"."${view.schemaName}"."${view.name}"`;
-
-    try {
-      const result = await this.executeQuery(`DESC SEMANTIC VIEW ${fqn}`);
-
-      for (const row of result.rows) {
-        const colName = String(row['name'] ?? row['NAME'] ?? '');
-        const colType = String(row['type'] ?? row['TYPE'] ?? '');
-        const semanticRole = String(row['semantic_role'] ?? row['SEMANTIC_ROLE'] ?? row['kind'] ?? row['KIND'] ?? '');
-        const description = String(row['comment'] ?? row['COMMENT'] ?? '');
-
-        if (semanticRole.toLowerCase() === 'dimension' || semanticRole.toLowerCase() === 'entity') {
-          const dimType = inferDimensionType(colType);
-          layer.addDimension({
-            name: `${view.name}.${colName}`,
-            label: colName.replace(/_/g, ' '),
-            description: description || `Dimension from ${view.name}`,
-            sql: colName,
-            type: dimType,
-            table: fqn,
-            cube: view.name,
-            source: {
-              provider: 'snowflake',
-              objectType: 'dimension',
-              objectId: `${fqn}.${colName}`,
-              objectName: colName,
-            },
-          });
-        }
-      }
-    } catch {
-      // Skip on error
-    }
-  }
-
-  /**
-   * Load relationships/joins from a semantic view's metadata.
-   */
-  private async loadViewRelationships(layer: SemanticLayer, view: SemanticViewInfo): Promise<void> {
-    const fqn = `"${view.databaseName}"."${view.schemaName}"."${view.name}"`;
-
-    try {
-      // Try to get relationship metadata — this varies by Snowflake version
-      const result = await this.executeQuery(
-        `SELECT * FROM TABLE(INFORMATION_SCHEMA.SEMANTIC_VIEW_RELATIONSHIPS('${fqn}'))`,
-      );
-
-      for (const row of result.rows) {
-        const leftTable = String(row['left_table'] ?? row['LEFT_TABLE'] ?? '');
-        const rightTable = String(row['right_table'] ?? row['RIGHT_TABLE'] ?? '');
-        const joinType = String(row['join_type'] ?? row['JOIN_TYPE'] ?? 'left');
-        const joinCondition = String(row['join_condition'] ?? row['JOIN_CONDITION'] ?? '');
-
-        if (leftTable && rightTable && joinCondition) {
-          // Register as a cube with join if both sides are available
-          const leftName = leftTable.split('.').pop() ?? leftTable;
-          const rightName = rightTable.split('.').pop() ?? rightTable;
-
-          const emptyCube = (cubeName: string, cubeTable: string): CubeDefinition => ({
-            name: cubeName,
-            label: cubeName,
-            description: `Auto-discovered from Snowflake semantic view`,
-            sql: `SELECT * FROM ${cubeTable}`,
-            table: cubeTable,
-            domain: view.schemaName,
-            measures: [],
-            dimensions: [],
-            timeDimensions: [],
-            joins: [],
-            segments: [],
-            preAggregations: [],
-            source: {
-              provider: 'snowflake',
-              objectType: 'semantic_view',
-              objectId: cubeTable,
-              objectName: cubeName,
-            },
-          });
-
-          // Ensure both cubes exist
-          if (!layer.getCube(leftName)) {
-            layer.addCube(emptyCube(leftName, leftTable));
-          }
-          if (!layer.getCube(rightName)) {
-            layer.addCube(emptyCube(rightName, rightTable));
-          }
-
-          // Add join to the left cube
-          const leftCube = layer.getCube(leftName);
-          if (leftCube) {
-            const jt = joinType.toLowerCase();
-            const joinDef: JoinDefinition = {
-              name: `${leftName}_${rightName}`,
-              left: leftName,
-              right: rightName,
-              type: jt.includes('right') ? 'right' : jt.includes('full') ? 'full' : jt.includes('inner') ? 'inner' : 'left',
-              sql: joinCondition,
-            };
-            leftCube.joins.push(joinDef);
-          }
-        }
-      }
-    } catch {
-      // Relationship introspection is optional — older Snowflake may not support it
-    }
-  }
 }
 
 interface SemanticViewInfo {

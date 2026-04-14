@@ -8,6 +8,7 @@ import { ConnectionPanel } from '../sidebar/ConnectionPanel';
 import { ReferencePanel } from '../sidebar/ReferencePanel';
 import { SemanticPanel } from '../sidebar/SemanticPanel';
 import { LineagePanel } from '../sidebar/LineagePanel';
+import { BlockLibraryPanel } from '../sidebar/BlockLibraryPanel';
 import type { NotebookFile } from '../../store/types';
 
 interface SidebarProps {
@@ -20,6 +21,7 @@ const PANEL_TITLES: Record<string, string> = {
   schema: 'Schema',
   semantic: 'Semantic Layer',
   lineage: 'Lineage',
+  block_library: 'Block Library',
   outline: 'Outline',
   connection: 'Connection',
   reference: 'Quick Reference',
@@ -97,6 +99,7 @@ export function Sidebar({ onOpenFile, onNavigateToCell }: SidebarProps) {
         {panel === 'schema' && <SchemaPanel />}
         {panel === 'semantic' && <SemanticPanel />}
         {panel === 'lineage' && <LineagePanel />}
+        {panel === 'block_library' && <BlockLibraryPanel />}
         {panel === 'outline' && <OutlinePanel onNavigate={onNavigateToCell} />}
         {panel === 'connection' && <ConnectionPanel />}
         {panel === 'reference' && <ReferencePanel themeMode={state.themeMode} />}

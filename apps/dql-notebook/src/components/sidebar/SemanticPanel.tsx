@@ -12,6 +12,8 @@ import { themes } from '../../themes/notebook-theme';
 import { MetricDetailPanel } from './MetricDetailPanel';
 import { SemanticSearchBar } from './SemanticSearchBar';
 import { SemanticTreeNode as TreeRow } from './SemanticTreeNode';
+import { SetupWizard } from '../modals/SetupWizard';
+import { detectChartType } from '../output/ChartOutput';
 
 function PanelSectionHeader({ label, count, t }: { label: string; count?: number; t: Theme }) {
   return (
@@ -32,39 +34,88 @@ function PanelSectionHeader({ label, count, t }: { label: string; count?: number
   );
 }
 
+const PROVIDER_CARDS = [
+  { id: 'dbt' as const, label: 'dbt', color: '#ff694a', desc: 'Import semantic models, metrics, and dimensions' },
+  { id: 'cubejs' as const, label: 'Cube.js', color: '#7a77ff', desc: 'Import cubes, measures, joins, and pre-aggregations' },
+  { id: 'snowflake' as const, label: 'Snowflake', color: '#29b5e8', desc: 'Introspect semantic views for metrics and dimensions' },
+];
+
 function SetupState({
   t,
   provider,
-  onImport,
+  errors,
+  onOpenWizard,
   onRefresh,
 }: {
   t: Theme;
   provider: string | null;
-  onImport: (provider: 'dbt' | 'cubejs' | 'snowflake') => void;
+  errors?: string[];
+  onOpenWizard: () => void;
   onRefresh: () => void;
 }) {
-  const codeStyle = { background: t.pillBg, padding: '1px 4px', borderRadius: 3, fontSize: 10, fontFamily: t.fontMono } as const;
-  const suggestedProvider = provider === 'cubejs' || provider === 'snowflake' ? provider : 'dbt';
-
   return (
-    <div style={{ flex: 1, overflowY: 'auto', padding: '12px 14px', fontFamily: t.font }}>
-      <div style={{ fontSize: 12, fontWeight: 600, color: t.textPrimary, marginBottom: 8 }}>Semantic layer not loaded</div>
-      <div style={{ fontSize: 11, color: t.textMuted, lineHeight: 1.6, marginBottom: 10 }}>
-        Import your provider metadata into <code style={codeStyle}>semantic-layer/</code> or refresh the current project state.
+    <div style={{ flex: 1, overflowY: 'auto', padding: '14px', fontFamily: t.font }}>
+      <div style={{ fontSize: 13, fontWeight: 600, color: t.textPrimary, marginBottom: 4 }}>
+        Connect your Semantic Layer
       </div>
-      <div style={{ display: 'flex', gap: 8, marginTop: 12 }}>
-        <button
-          onClick={() => onImport(suggestedProvider)}
-          style={{ background: t.accent, border: 'none', borderRadius: 6, color: '#fff', cursor: 'pointer', fontSize: 11, fontFamily: t.font, padding: '6px 14px' }}
-        >
-          Import {suggestedProvider}
-        </button>
-        <button
-          onClick={onRefresh}
-          style={{ background: 'transparent', border: `1px solid ${t.cellBorder}`, borderRadius: 6, color: t.textSecondary, cursor: 'pointer', fontSize: 11, fontFamily: t.font, padding: '6px 12px' }}
-        >
-          Refresh
-        </button>
+      <div style={{ fontSize: 12, color: t.textMuted, lineHeight: 1.5, marginBottom: 14 }}>
+        Import metrics and dimensions from your existing data stack to build certified DQL blocks.
+      </div>
+
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginBottom: 14 }}>
+        {PROVIDER_CARDS.map((p) => {
+          const isDetected = provider === p.id;
+          return (
+            <button key={p.id} onClick={onOpenWizard} style={{
+              background: t.inputBg,
+              border: `1px solid ${isDetected ? p.color : t.cellBorder}`,
+              borderRadius: 8, padding: '10px 12px', cursor: 'pointer',
+              textAlign: 'left', display: 'flex', alignItems: 'center', gap: 10,
+              transition: 'border-color 0.15s',
+            }}>
+              <span style={{
+                display: 'inline-block', width: 8, height: 8, borderRadius: '50%',
+                background: p.color, flexShrink: 0,
+              }} />
+              <div style={{ flex: 1 }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                  <span style={{ fontSize: 12, fontWeight: 600, color: t.textPrimary, fontFamily: t.font }}>
+                    {p.label}
+                  </span>
+                  {isDetected && (
+                    <span style={{
+                      fontSize: 9, fontWeight: 600, color: p.color, fontFamily: t.font,
+                      background: `${p.color}18`, padding: '1px 6px', borderRadius: 6,
+                    }}>Detected</span>
+                  )}
+                </div>
+                <span style={{ fontSize: 11, color: t.textMuted, fontFamily: t.font }}>{p.desc}</span>
+              </div>
+            </button>
+          );
+        })}
+      </div>
+
+      {errors && errors.length > 0 && (
+        <div style={{
+          background: `${t.error}12`, border: `1px solid ${t.error}40`,
+          borderRadius: 8, padding: '8px 12px', marginBottom: 12,
+        }}>
+          {errors.map((e, i) => (
+            <div key={i} style={{ fontSize: 11, color: t.error, fontFamily: t.font, lineHeight: 1.4 }}>{e}</div>
+          ))}
+        </div>
+      )}
+
+      <div style={{ display: 'flex', gap: 8 }}>
+        <button onClick={onOpenWizard} style={{
+          background: t.accent, border: 'none', borderRadius: 6, color: '#fff',
+          cursor: 'pointer', fontSize: 12, fontFamily: t.font, fontWeight: 500, padding: '7px 16px',
+        }}>Setup Wizard</button>
+        <button onClick={onRefresh} style={{
+          background: 'transparent', border: `1px solid ${t.cellBorder}`, borderRadius: 6,
+          color: t.textSecondary, cursor: 'pointer', fontSize: 12, fontFamily: t.font, padding: '7px 14px',
+        }}>Refresh</button>
       </div>
     </div>
   );
@@ -161,6 +212,13 @@ function GuidedBuilderPanel({
       return;
     }
     setPreview(response);
+    // Auto-suggest chart type based on result shape
+    if (response.result && response.result.columns && response.result.rows) {
+      const suggested = detectChartType(response.result);
+      if (suggested !== 'table') {
+        setChart(suggested);
+      }
+    }
     setStep(3);
   };
 
@@ -306,12 +364,25 @@ function GuidedBuilderPanel({
               <input value={description} onChange={(event) => setDescription(event.target.value)} style={inputStyle} placeholder="Description" />
               <input value={owner} onChange={(event) => setOwner(event.target.value)} style={inputStyle} placeholder="Owner" />
               <input value={tags} onChange={(event) => setTags(event.target.value)} style={inputStyle} placeholder="Tags (comma separated)" />
-              <select value={chart} onChange={(event) => setChart(event.target.value)} style={inputStyle}>
-                <option value="table">table</option>
-                <option value="bar">bar</option>
-                <option value="line">line</option>
-                <option value="kpi">kpi</option>
-              </select>
+              <div>
+                <select value={chart} onChange={(event) => setChart(event.target.value)} style={inputStyle}>
+                  <option value="table">table</option>
+                  <option value="bar">bar</option>
+                  <option value="line">line</option>
+                  <option value="scatter">scatter</option>
+                  <option value="pie">pie</option>
+                  <option value="area">area</option>
+                  <option value="kpi">kpi</option>
+                  <option value="heatmap">heatmap</option>
+                  <option value="funnel">funnel</option>
+                  <option value="gauge">gauge</option>
+                </select>
+                {preview?.result && chart !== 'table' && (
+                  <div style={{ fontSize: 10, color: t.accent, fontFamily: t.font, marginTop: 2 }}>
+                    Suggested based on result shape
+                  </div>
+                )}
+              </div>
               <select value={blockType} onChange={(event) => setBlockType(event.target.value as 'semantic' | 'custom')} style={inputStyle}>
                 <option value="semantic">semantic block</option>
                 <option value="custom">custom block</option>
@@ -468,6 +539,11 @@ export function SemanticPanel() {
   const [typeFilter, setTypeFilter] = useState('');
   const [expanded, setExpanded] = useState<Record<string, boolean>>({});
   const [syncing, setSyncing] = useState(false);
+  const [wizardOpen, setWizardOpen] = useState(false);
+  const [selectMode, setSelectMode] = useState(false);
+  const [selectedMetrics, setSelectedMetrics] = useState<Set<string>>(new Set());
+  const [selectedDimensions, setSelectedDimensions] = useState<Set<string>>(new Set());
+  const [composing, setComposing] = useState(false);
   const [scrollTop, setScrollTop] = useState(0);
   const [viewportHeight, setViewportHeight] = useState(400);
   const treeContainerRef = useRef<HTMLDivElement | null>(null);
@@ -571,15 +647,24 @@ export function SemanticPanel() {
   const renderLeaf = (node: SemanticTreeNode, depth: number) => {
     const refKind = node.kind === 'metric' || node.kind === 'dimension' ? node.kind : null;
     const refName = node.id.split(':').slice(1).join(':');
+    const isChecked = refKind === 'metric' ? selectedMetrics.has(refName) : refKind === 'dimension' ? selectedDimensions.has(refName) : false;
 
     return (
+      <div key={node.id} style={{ display: 'flex', alignItems: 'center' }}>
+        {selectMode && refKind && (
+          <input
+            type="checkbox"
+            checked={isChecked}
+            onChange={() => toggleSelection(refKind, refName)}
+            style={{ marginLeft: depth * 12 + 6, marginRight: -depth * 12 - 2, accentColor: t.accent, cursor: 'pointer' }}
+          />
+        )}
       <TreeRow
-        key={node.id}
         label={node.label}
-        depth={depth}
+        depth={selectMode && refKind ? 0 : depth}
         badge={node.kind === 'metric' || node.kind === 'dimension' || node.kind === 'segment' || node.kind === 'pre_aggregation' ? node.kind : undefined}
         selected={selectedId === node.id}
-        onClick={() => setSelectedId(node.id)}
+        onClick={() => { if (selectMode && refKind) { toggleSelection(refKind, refName); } else { setSelectedId(node.id); } }}
         onDoubleClick={() => {
           if (node.kind === 'metric' || node.kind === 'dimension') {
             const object = node.kind === 'metric'
@@ -606,6 +691,7 @@ export function SemanticPanel() {
           : undefined}
         t={t}
       />
+      </div>
     );
   };
 
@@ -638,6 +724,40 @@ export function SemanticPanel() {
     }
   };
 
+  const toggleSelection = (kind: 'metric' | 'dimension', name: string) => {
+    if (kind === 'metric') {
+      setSelectedMetrics((prev) => {
+        const next = new Set(prev);
+        if (next.has(name)) next.delete(name); else next.add(name);
+        return next;
+      });
+    } else {
+      setSelectedDimensions((prev) => {
+        const next = new Set(prev);
+        if (next.has(name)) next.delete(name); else next.add(name);
+        return next;
+      });
+    }
+  };
+
+  const handleCompose = async () => {
+    if (selectedMetrics.size === 0) return;
+    setComposing(true);
+    try {
+      const result = await api.composeQuery(
+        Array.from(selectedMetrics),
+        Array.from(selectedDimensions),
+      );
+      if ('error' in result) return;
+      dispatch({ type: 'ADD_CELL', cell: makeCell('sql', result.sql) });
+      setSelectMode(false);
+      setSelectedMetrics(new Set());
+      setSelectedDimensions(new Set());
+    } finally {
+      setComposing(false);
+    }
+  };
+
   const handleOpenStudio = () => {
     if (state.activeFile?.type === 'block') {
       void api.openBlockStudio(state.activeFile.path).then((payload) => {
@@ -654,12 +774,22 @@ export function SemanticPanel() {
 
   if (!sl.available && !sl.loading) {
     return (
-      <SetupState
-        t={t}
-        provider={sl.provider}
-        onImport={(provider) => void api.importSemanticLayer({ provider }).then(() => handleRefresh())}
-        onRefresh={() => void handleRefresh()}
-      />
+      <>
+        <SetupState
+          t={t}
+          provider={sl.provider}
+          errors={(state.semanticLayer as any).errors}
+          onOpenWizard={() => setWizardOpen(true)}
+          onRefresh={() => void handleRefresh()}
+        />
+        {wizardOpen && (
+          <SetupWizard
+            detectedProvider={sl.provider}
+            onClose={() => setWizardOpen(false)}
+            onImported={() => void handleRefresh()}
+          />
+        )}
+      </>
     );
   }
 
@@ -717,6 +847,17 @@ export function SemanticPanel() {
           style={{ background: 'transparent', border: `1px solid ${t.cellBorder}`, borderRadius: 4, color: t.textSecondary, cursor: 'pointer', fontSize: 10, fontFamily: t.font, padding: '2px 8px' }}
         >
           Quick Build
+        </button>
+        <button
+          onClick={() => { setSelectMode((v) => !v); if (selectMode) { setSelectedMetrics(new Set()); setSelectedDimensions(new Set()); } }}
+          style={{
+            background: selectMode ? `${t.accent}20` : 'transparent',
+            border: `1px solid ${selectMode ? t.accent : t.cellBorder}`,
+            borderRadius: 4, color: selectMode ? t.accent : t.textSecondary,
+            cursor: 'pointer', fontSize: 10, fontFamily: t.font, padding: '2px 8px',
+          }}
+        >
+          {selectMode ? 'Cancel' : 'Select'}
         </button>
         <button
           onClick={() => void handleSync()}
@@ -807,6 +948,31 @@ export function SemanticPanel() {
         }}
         t={t}
       />
+
+      {/* Floating compose bar when items are selected */}
+      {selectMode && (selectedMetrics.size > 0 || selectedDimensions.size > 0) && (
+        <div style={{
+          padding: '8px 12px', borderTop: `1px solid ${t.headerBorder}`,
+          background: t.cellBg, display: 'flex', alignItems: 'center', gap: 8,
+        }}>
+          <span style={{ flex: 1, fontSize: 11, color: t.textMuted, fontFamily: t.font }}>
+            {selectedMetrics.size} metric{selectedMetrics.size !== 1 ? 's' : ''}
+            {selectedDimensions.size > 0 ? `, ${selectedDimensions.size} dim${selectedDimensions.size !== 1 ? 's' : ''}` : ''}
+          </span>
+          <button
+            onClick={() => void handleCompose()}
+            disabled={composing || selectedMetrics.size === 0}
+            style={{
+              background: t.accent, border: 'none', borderRadius: 6, color: '#fff',
+              cursor: composing ? 'not-allowed' : 'pointer', fontSize: 11, fontWeight: 600,
+              fontFamily: t.font, padding: '6px 14px',
+              opacity: composing || selectedMetrics.size === 0 ? 0.5 : 1,
+            }}
+          >
+            {composing ? 'Composing...' : 'Compose Query'}
+          </button>
+        </div>
+      )}
     </div>
   );
 }

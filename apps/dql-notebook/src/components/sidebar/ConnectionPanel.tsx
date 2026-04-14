@@ -59,6 +59,27 @@ const DRIVER_FIELDS: Record<string, string[]> = {
   fabric: ['server', 'database', 'authentication'],
 };
 
+const QUICK_CONNECT_PRESETS = [
+  {
+    name: 'default',
+    label: 'Local DuckDB',
+    description: 'In-memory DuckDB — no configuration needed',
+    config: { driver: 'duckdb', filepath: ':memory:' },
+  },
+  {
+    name: 'postgres',
+    label: 'PostgreSQL',
+    description: 'Connect to a local PostgreSQL instance',
+    config: { driver: 'postgres', host: 'localhost', port: 5432, database: 'postgres', user: 'postgres', password: '' },
+  },
+  {
+    name: 'snowflake',
+    label: 'Snowflake',
+    description: 'Connect to your Snowflake data warehouse',
+    config: { driver: 'snowflake', account: '', warehouse: '', database: '', schema: 'PUBLIC', username: '', password: '' },
+  },
+];
+
 export function ConnectionPanel() {
   const { state } = useNotebook();
   const t = themes[state.themeMode];
@@ -77,7 +98,13 @@ export function ConnectionPanel() {
   const [editFields, setEditFields] = useState<Record<string, string>>({});
 
   useEffect(() => {
-    api.getConnections().then(setInfo);
+    api.getConnections().then((connInfo) => {
+      setInfo(connInfo);
+      // Auto-test if connections exist
+      if (Object.keys(connInfo.connections).length > 0) {
+        api.testConnection().then(setTestResult);
+      }
+    });
   }, []);
 
   const handleTest = async () => {
@@ -188,6 +215,25 @@ export function ConnectionPanel() {
   return (
     <div style={{ flex: 1, overflow: 'auto', padding: '12px 12px 20px' }}>
 
+      {/* Connection status indicator */}
+      {testResult && (
+        <div style={{
+          display: 'flex', alignItems: 'center', gap: 6,
+          padding: '6px 10px', marginBottom: 10, borderRadius: 6,
+          background: testResult.ok ? `${t.success}12` : `${t.error}12`,
+          border: `1px solid ${testResult.ok ? t.success : t.error}30`,
+        }}>
+          <span style={{
+            width: 8, height: 8, borderRadius: '50%',
+            background: testResult.ok ? t.success : t.error,
+            flexShrink: 0,
+          }} />
+          <span style={{ fontSize: 11, fontFamily: t.font, color: testResult.ok ? t.success : t.error }}>
+            {testResult.ok ? 'Connected' : 'Disconnected'}
+          </span>
+        </div>
+      )}
+
       {/* Connection list */}
       <div style={sectionLabel}>Connections</div>
       {info === null ? (
@@ -257,6 +303,57 @@ export function ConnectionPanel() {
             </div>
           );
         })
+      )}
+
+      {/* Quick Connect presets */}
+      {!addingNew && !editing && Object.keys(connections).length === 0 && (
+        <>
+          <div style={{ ...sectionLabel, marginTop: 8 }}>Quick Connect</div>
+          <div style={{ display: 'grid', gap: 6, marginBottom: 12 }}>
+            {QUICK_CONNECT_PRESETS.map((preset) => (
+              <button
+                key={preset.name}
+                onClick={async () => {
+                  setSaving(true);
+                  try {
+                    const conns = { ...connections, [preset.name]: preset.config };
+                    await api.saveConnections(conns);
+                    const refreshed = await api.getConnections();
+                    setInfo(refreshed);
+                    // Auto-test
+                    setTesting(true);
+                    const result = await api.testConnection();
+                    setTestResult(result);
+                    setTesting(false);
+                  } finally {
+                    setSaving(false);
+                  }
+                }}
+                disabled={saving}
+                style={{
+                  display: 'flex', alignItems: 'center', gap: 8, padding: '8px 12px',
+                  background: t.cellBg, border: `1px solid ${t.cellBorder}`, borderRadius: 7,
+                  cursor: saving ? 'not-allowed' : 'pointer', textAlign: 'left' as const,
+                  transition: 'border-color 0.15s',
+                }}
+              >
+                <span style={{
+                  width: 8, height: 8, borderRadius: '50%',
+                  background: DRIVER_COLORS[preset.config.driver] ?? t.accent,
+                  flexShrink: 0,
+                }} />
+                <div>
+                  <div style={{ fontSize: 12, fontWeight: 600, color: t.textPrimary, fontFamily: t.font }}>
+                    {preset.label}
+                  </div>
+                  <div style={{ fontSize: 10, color: t.textMuted, fontFamily: t.font }}>
+                    {preset.description}
+                  </div>
+                </div>
+              </button>
+            ))}
+          </div>
+        </>
       )}
 
       {/* Add new connection form */}

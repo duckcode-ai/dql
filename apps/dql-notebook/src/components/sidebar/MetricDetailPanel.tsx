@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useState } from 'react';
 import type { SemanticObjectDetail } from '../../store/types';
 import type { Theme } from '../../themes/notebook-theme';
 
@@ -100,22 +100,38 @@ export function MetricDetailPanel({
       )}
 
       {item.sql && (
-        <pre
-          style={{
-            margin: 0,
-            padding: '8px 10px',
-            background: t.editorBg,
-            border: `1px solid ${t.cellBorder}`,
-            borderRadius: 6,
-            fontSize: 10,
-            fontFamily: t.fontMono,
-            color: t.textSecondary,
-            overflowX: 'auto',
-            whiteSpace: 'pre-wrap',
-          }}
-        >
-          {item.sql}
-        </pre>
+        <div style={{ position: 'relative' }}>
+          <pre
+            style={{
+              margin: 0,
+              padding: '8px 10px',
+              paddingRight: 32,
+              background: t.editorBg,
+              border: `1px solid ${t.cellBorder}`,
+              borderRadius: 6,
+              fontSize: 10,
+              fontFamily: t.fontMono,
+              color: t.textSecondary,
+              overflowX: 'auto',
+              whiteSpace: 'pre-wrap',
+            }}
+          >
+            {item.sql}
+          </pre>
+          <button
+            onClick={onCopySql}
+            title="Copy SQL"
+            style={{
+              position: 'absolute', top: 6, right: 6,
+              background: t.btnBg, border: `1px solid ${t.cellBorder}`,
+              borderRadius: 4, color: t.textMuted, cursor: 'pointer',
+              fontSize: 10, fontFamily: t.font, padding: '2px 6px',
+              opacity: 0.7, lineHeight: 1,
+            }}
+          >
+            Copy
+          </button>
+        </div>
       )}
 
       {item.joins && item.joins.length > 0 && (

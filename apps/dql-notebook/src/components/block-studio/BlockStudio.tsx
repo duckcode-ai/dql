@@ -27,7 +27,7 @@ import {
 } from '../../utils/block-studio';
 
 type ExplorerTab = 'semantic' | 'database';
-type ResultTab = 'validate' | 'results' | 'visualization' | 'save';
+type ResultTab = 'validate' | 'results' | 'visualization' | 'save' | 'history' | 'tests';
 
 interface FlatSemanticRow {
   node: SemanticTreeNode;
@@ -59,6 +59,11 @@ export function BlockStudio() {
   const [databaseQuery, setDatabaseQuery] = useState('');
   const [running, setRunning] = useState(false);
   const [saving, setSaving] = useState(false);
+  const [historyEntries, setHistoryEntries] = useState<Array<{ hash: string; date: string; author: string; message: string }>>([]);
+  const [historyLoaded, setHistoryLoaded] = useState(false);
+  const [testResults, setTestResults] = useState<Array<{ field: string; operator: string; expected: string; passed: boolean; actual?: string }> | null>(null);
+  const [testRunning, setTestRunning] = useState(false);
+  const [statusUpdating, setStatusUpdating] = useState(false);
   const [scrollTop, setScrollTop] = useState(0);
   const [viewportHeight, setViewportHeight] = useState(400);
   const semanticTreeRef = useRef<HTMLDivElement | null>(null);
@@ -426,6 +431,13 @@ export function BlockStudio() {
           <ExplorerTabButton active={resultTab === 'validate'} onClick={() => setResultTab('validate')} label="Validate" />
           <ExplorerTabButton active={resultTab === 'results'} onClick={() => setResultTab('results')} label="Results" />
           <ExplorerTabButton active={resultTab === 'visualization'} onClick={() => setResultTab('visualization')} label="Visualization" />
+          <ExplorerTabButton active={resultTab === 'tests'} onClick={() => setResultTab('tests')} label="Tests" />
+          <ExplorerTabButton active={resultTab === 'history'} onClick={() => {
+            setResultTab('history');
+            if (!historyLoaded && state.activeBlockPath) {
+              api.getBlockHistory(state.activeBlockPath).then((r) => { setHistoryEntries(r.entries); setHistoryLoaded(true); });
+            }
+          }} label="History" />
           <ExplorerTabButton active={resultTab === 'save'} onClick={() => setResultTab('save')} label="Save" />
           </div>
         </div>
@@ -456,25 +468,62 @@ export function BlockStudio() {
               t={t}
             />
           )}
-          {resultTab === 'save' && (
-            <SavePanel
-              metadata={state.blockStudioMetadata}
-              draftMetadata={draftMetadata}
-              onChange={(next) => {
-                if (!state.blockStudioMetadata) return;
-                dispatch({ type: 'SET_BLOCK_STUDIO_METADATA', metadata: { ...state.blockStudioMetadata, ...next } });
-                let draft = state.blockStudioDraft;
-                if (typeof next.name === 'string') draft = setBlockName(draft, next.name);
-                if (typeof next.domain === 'string') draft = setBlockStringField(draft, 'domain', next.domain);
-                if (typeof next.owner === 'string') draft = setBlockStringField(draft, 'owner', next.owner);
-                if (typeof next.description === 'string') draft = setBlockStringField(draft, 'description', next.description);
-                if (next.tags) draft = setBlockTags(draft, next.tags);
-                handleDraftChange(draft);
+          {resultTab === 'tests' && (
+            <TestsPanel
+              source={state.blockStudioDraft}
+              blockPath={state.activeBlockPath}
+              testResults={testResults}
+              running={testRunning}
+              onRunTests={async () => {
+                if (!state.activeBlockPath) return;
+                setTestRunning(true);
+                try {
+                  const result = await api.runBlockTests(state.blockStudioDraft, state.activeBlockPath);
+                  setTestResults(result.assertions ?? []);
+                } catch { setTestResults([]); }
+                finally { setTestRunning(false); }
               }}
-              onSave={() => void handleSave()}
-              saving={saving}
               t={t}
             />
+          )}
+          {resultTab === 'history' && (
+            <HistoryPanel entries={historyEntries} t={t} />
+          )}
+          {resultTab === 'save' && (
+            <div style={{ display: 'grid', gap: 12 }}>
+              {state.activeBlockPath && state.blockStudioMetadata && (
+                <div style={{ padding: '12px 12px 0' }}>
+                  <StatusWorkflow
+                    currentStatus={state.blockStudioMetadata.reviewStatus ?? 'draft'}
+                    blockPath={state.activeBlockPath}
+                    onStatusChanged={(newStatus) => {
+                      if (state.blockStudioMetadata) {
+                        dispatch({ type: 'SET_BLOCK_STUDIO_METADATA', metadata: { ...state.blockStudioMetadata, reviewStatus: newStatus } });
+                      }
+                    }}
+                    t={t}
+                  />
+                </div>
+              )}
+              <SavePanel
+                metadata={state.blockStudioMetadata}
+                draftMetadata={draftMetadata}
+                onChange={(next) => {
+                  if (!state.blockStudioMetadata) return;
+                  dispatch({ type: 'SET_BLOCK_STUDIO_METADATA', metadata: { ...state.blockStudioMetadata, ...next } });
+                  let draft = state.blockStudioDraft;
+                  if (typeof next.name === 'string') draft = setBlockName(draft, next.name);
+                  if (typeof next.domain === 'string') draft = setBlockStringField(draft, 'domain', next.domain);
+                  if (typeof next.owner === 'string') draft = setBlockStringField(draft, 'owner', next.owner);
+                  if (typeof next.description === 'string') draft = setBlockStringField(draft, 'description', next.description);
+                  if (next.tags) draft = setBlockTags(draft, next.tags);
+                  handleDraftChange(draft);
+                }}
+                onSave={() => void handleSave()}
+                saving={saving}
+                t={t}
+              />
+            </div>
           )}
         </div>
       </div>
@@ -657,6 +706,214 @@ function EmptyPanel({ message }: { message: string }) {
   const { state } = useNotebook();
   const t = themes[state.themeMode];
   return <div style={{ padding: 16, fontSize: 12, color: t.textMuted }}>{message}</div>;
+}
+
+const STATUS_COLORS: Record<string, string> = {
+  draft: '#8b949e',
+  review: '#d29922',
+  certified: '#3fb950',
+  deprecated: '#f85149',
+};
+
+const STATUS_TRANSITIONS: Record<string, string[]> = {
+  draft: ['review'],
+  review: ['certified', 'draft'],
+  certified: ['deprecated'],
+  deprecated: ['draft'],
+};
+
+function StatusWorkflow({
+  currentStatus,
+  blockPath,
+  onStatusChanged,
+  t,
+}: {
+  currentStatus: string;
+  blockPath: string | null;
+  onStatusChanged: (newStatus: string) => void;
+  t: Theme;
+}) {
+  const [updating, setUpdating] = useState(false);
+  const transitions = STATUS_TRANSITIONS[currentStatus] ?? [];
+
+  const handleTransition = async (newStatus: string) => {
+    if (!blockPath) return;
+    setUpdating(true);
+    try {
+      const result = await api.updateBlockStatus(blockPath, newStatus);
+      if (result.ok && result.status) {
+        onStatusChanged(result.status);
+      }
+    } finally {
+      setUpdating(false);
+    }
+  };
+
+  return (
+    <div style={{
+      display: 'flex', alignItems: 'center', gap: 8,
+      padding: '10px 12px', background: t.pillBg, borderRadius: 8,
+    }}>
+      <span style={{ fontSize: 11, color: t.textMuted, fontFamily: t.font }}>Status:</span>
+      <span style={{
+        fontSize: 11, fontWeight: 600,
+        color: STATUS_COLORS[currentStatus] ?? t.textMuted,
+        background: `${STATUS_COLORS[currentStatus] ?? t.textMuted}18`,
+        padding: '2px 8px', borderRadius: 4, textTransform: 'uppercase',
+        letterSpacing: '0.04em', fontFamily: t.font,
+      }}>{currentStatus}</span>
+      <span style={{ flex: 1 }} />
+      {transitions.map((status) => (
+        <button key={status} onClick={() => void handleTransition(status)} disabled={updating} style={{
+          background: status === 'certified' ? '#3fb950' : status === 'deprecated' ? '#f85149' : t.btnBg,
+          border: `1px solid ${status === 'certified' ? '#3fb950' : status === 'deprecated' ? '#f85149' : t.btnBorder}`,
+          borderRadius: 4, color: status === 'certified' || status === 'deprecated' ? '#fff' : t.textSecondary,
+          cursor: updating ? 'not-allowed' : 'pointer', fontSize: 10, fontWeight: 600,
+          fontFamily: t.font, padding: '3px 10px', textTransform: 'capitalize',
+          opacity: updating ? 0.5 : 1,
+        }}>
+          {updating ? '...' : status === 'certified' ? 'Certify' : status === 'deprecated' ? 'Deprecate' : `Move to ${status}`}
+        </button>
+      ))}
+    </div>
+  );
+}
+
+function TestsPanel({
+  source,
+  blockPath,
+  testResults,
+  running,
+  onRunTests,
+  t,
+}: {
+  source: string;
+  blockPath: string | null;
+  testResults: Array<{ field: string; operator: string; expected: string; passed: boolean; actual?: string }> | null;
+  running: boolean;
+  onRunTests: () => void;
+  t: Theme;
+}) {
+  // Quick parse for test assertions from source
+  const assertionMatches = [...source.matchAll(/assert\s+(\w+)\s*(>=?|<=?|==|!=|IN)\s*(\S+)/g)];
+  const assertions = assertionMatches.map((m) => ({ field: m[1], operator: m[2], expected: m[3] }));
+
+  return (
+    <div style={{ padding: 12, display: 'grid', gap: 10 }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+        <span style={{ fontSize: 12, fontWeight: 600, color: t.textPrimary, fontFamily: t.font }}>
+          Test Assertions
+        </span>
+        <span style={{ flex: 1 }} />
+        <button onClick={onRunTests} disabled={running || !blockPath} style={{
+          background: t.accent, border: 'none', borderRadius: 6, color: '#fff',
+          cursor: running || !blockPath ? 'not-allowed' : 'pointer',
+          fontSize: 11, fontWeight: 600, fontFamily: t.font, padding: '5px 14px',
+          opacity: running || !blockPath ? 0.5 : 1,
+        }}>
+          {running ? 'Running...' : 'Run Tests'}
+        </button>
+      </div>
+
+      {assertions.length === 0 && (
+        <div style={{ fontSize: 12, color: t.textMuted, fontFamily: t.font, lineHeight: 1.5 }}>
+          No test assertions found. Add assertions in your block:
+          <pre style={{
+            margin: '8px 0 0', padding: '8px 10px', background: t.editorBg,
+            border: `1px solid ${t.cellBorder}`, borderRadius: 6,
+            fontSize: 10, fontFamily: t.fontMono, color: t.textSecondary,
+          }}>
+{`tests {
+  assert row_count > 0
+  assert max_value <= 1000000
+}`}
+          </pre>
+        </div>
+      )}
+
+      {assertions.map((a, i) => {
+        const result = testResults?.[i];
+        const passed = result?.passed;
+        return (
+          <div key={i} style={{
+            padding: '8px 12px', borderRadius: 8,
+            border: `1px solid ${result ? (passed ? '#3fb95040' : '#f8514940') : t.cellBorder}`,
+            background: result ? (passed ? '#3fb95008' : '#f8514908') : 'transparent',
+            display: 'flex', alignItems: 'center', gap: 8,
+          }}>
+            {result && (
+              <span style={{
+                fontSize: 14, color: passed ? '#3fb950' : '#f85149', fontWeight: 700,
+              }}>{passed ? '\u2713' : '\u2717'}</span>
+            )}
+            <div style={{ flex: 1 }}>
+              <div style={{ fontSize: 12, color: t.textPrimary, fontFamily: t.fontMono }}>
+                {a.field} {a.operator} {a.expected}
+              </div>
+              {result && !passed && result.actual && (
+                <div style={{ fontSize: 11, color: '#f85149', fontFamily: t.font, marginTop: 2 }}>
+                  Actual: {result.actual}
+                </div>
+              )}
+            </div>
+          </div>
+        );
+      })}
+
+      {testResults && testResults.length > 0 && (
+        <div style={{
+          padding: '8px 12px', background: t.pillBg, borderRadius: 8,
+          fontSize: 12, fontFamily: t.font, color: t.textSecondary,
+        }}>
+          {testResults.filter((r) => r.passed).length}/{testResults.length} passed
+        </div>
+      )}
+    </div>
+  );
+}
+
+function HistoryPanel({
+  entries,
+  t,
+}: {
+  entries: Array<{ hash: string; date: string; author: string; message: string }>;
+  t: Theme;
+}) {
+  if (entries.length === 0) {
+    return <EmptyPanel message="No version history available. Commit changes to build history." />;
+  }
+
+  return (
+    <div style={{ padding: 12, display: 'grid', gap: 8 }}>
+      <div style={{ fontSize: 12, fontWeight: 600, color: t.textPrimary, fontFamily: t.font }}>
+        Version History
+      </div>
+      {entries.map((entry) => (
+        <div key={entry.hash} style={{
+          padding: '8px 12px', border: `1px solid ${t.cellBorder}`,
+          borderRadius: 8, background: t.inputBg,
+        }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 4 }}>
+            <span style={{
+              fontSize: 10, fontFamily: t.fontMono, color: t.accent,
+              background: `${t.accent}12`, padding: '1px 6px', borderRadius: 4,
+            }}>
+              {entry.hash.slice(0, 7)}
+            </span>
+            <span style={{ fontSize: 11, color: t.textMuted, fontFamily: t.font }}>
+              {new Date(entry.date).toLocaleDateString()}
+            </span>
+            <span style={{ fontSize: 11, color: t.textMuted, fontFamily: t.font, marginLeft: 'auto' }}>
+              {entry.author}
+            </span>
+          </div>
+          <div style={{ fontSize: 12, color: t.textPrimary, fontFamily: t.font }}>
+            {entry.message}
+          </div>
+        </div>
+      ))}
+    </div>
+  );
 }
 
 function DatabaseExplorer({
