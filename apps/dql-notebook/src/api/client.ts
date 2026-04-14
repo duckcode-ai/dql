@@ -64,6 +64,49 @@ export const api = {
     });
   },
 
+  async getBlockLibrary(): Promise<{
+    blocks: Array<{
+      name: string; domain: string; status: string;
+      owner: string | null; tags: string[]; path: string;
+      lastModified: string; description: string;
+    }>;
+  }> {
+    try {
+      return await request('/api/blocks/library');
+    } catch {
+      return { blocks: [] };
+    }
+  },
+
+  async updateBlockStatus(path: string, newStatus: string): Promise<{ ok: boolean; status?: string; error?: string }> {
+    return request('/api/blocks/status', {
+      method: 'POST',
+      body: JSON.stringify({ path, newStatus }),
+    });
+  },
+
+  async getBlockHistory(path: string): Promise<{
+    entries: Array<{ hash: string; date: string; author: string; message: string }>;
+  }> {
+    try {
+      return await request(`/api/blocks/history?path=${encodeURIComponent(path)}`);
+    } catch {
+      return { entries: [] };
+    }
+  },
+
+  async runBlockTests(source: string, path: string | null): Promise<{
+    assertions: Array<{ field: string; operator: string; expected: string; passed: boolean; actual?: string }>;
+    passed: number;
+    failed: number;
+    duration: number;
+  }> {
+    return request('/api/blocks/run-tests', {
+      method: 'POST',
+      body: JSON.stringify({ source, path }),
+    });
+  },
+
   async getBlockStudioCatalog(): Promise<BlockStudioCatalog> {
     return request<BlockStudioCatalog>('/api/block-studio/catalog');
   },
@@ -246,6 +289,38 @@ export const api = {
 
   async syncSemanticLayer(): Promise<any> {
     return request<any>('/api/semantic-layer/sync', {
+      method: 'POST',
+      body: JSON.stringify({}),
+    });
+  },
+
+  async previewSemanticImport(payload: {
+    provider: 'dbt' | 'cubejs' | 'snowflake';
+    projectPath?: string;
+    repoUrl?: string;
+    branch?: string;
+    subPath?: string;
+    connection?: string;
+  }): Promise<{
+    provider: string;
+    counts: Record<string, number>;
+    domains: string[];
+    warnings: string[];
+    objects: Array<{ kind: string; name: string; label: string; domain: string }>;
+  }> {
+    return request('/api/semantic-layer/import-preview', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    });
+  },
+
+  async previewSyncDiff(): Promise<{
+    added: Array<{ kind: string; name: string; label: string; domain: string }>;
+    removed: Array<{ kind: string; name: string; label: string; domain: string }>;
+    changed: Array<{ kind: string; name: string; label: string; domain: string }>;
+    unchanged: number;
+  }> {
+    return request('/api/semantic-layer/sync-preview', {
       method: 'POST',
       body: JSON.stringify({}),
     });

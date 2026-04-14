@@ -31,8 +31,10 @@ import { listBlockTemplates } from './block-templates.js';
 import {
   buildSemanticObjectDetail,
   buildSemanticTree,
+  computeSyncDiff,
   loadSemanticImportManifest,
   performSemanticImport,
+  previewSemanticImport,
   syncSemanticImport,
 } from './semantic-import.js';
 
@@ -454,6 +456,206 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
       return;
     }
 
+    // ── Block library (list all blocks with metadata) ────────────────────
+    if (req.method === 'GET' && path === '/api/blocks/library') {
+      try {
+        const blocksDir = join(projectRoot, 'blocks');
+        const blocks: Array<{
+          name: string; domain: string; status: string;
+          owner: string | null; tags: string[]; path: string;
+          lastModified: string; description: string;
+        }> = [];
+        if (existsSync(blocksDir)) {
+          const scanDir = (dir: string) => {
+            for (const entry of readdirSync(dir, { withFileTypes: true })) {
+              if (entry.isDirectory()) {
+                scanDir(join(dir, entry.name));
+              } else if (entry.name.endsWith('.dql')) {
+                const filePath = join(dir, entry.name);
+                const relPath = relative(projectRoot, filePath);
+                try {
+                  const source = readFileSync(filePath, 'utf-8');
+                  const stat = statSync(filePath);
+                  // Quick regex parse for key block fields
+                  const nameMatch = /block\s+"([^"]+)"/.exec(source);
+                  const domainMatch = /domain\s*=\s*"([^"]+)"/.exec(source);
+                  const statusMatch = /status\s*=\s*"([^"]+)"/.exec(source);
+                  const ownerMatch = /owner\s*=\s*"([^"]+)"/.exec(source);
+                  const descMatch = /description\s*=\s*"([^"]+)"/.exec(source);
+                  const tagsMatch = /tags\s*=\s*\[([^\]]*)\]/.exec(source);
+                  const parsedTags = tagsMatch
+                    ? tagsMatch[1].split(',').map((tag) => tag.trim().replace(/^"|"$/g, '')).filter(Boolean)
+                    : [];
+                  blocks.push({
+                    name: nameMatch?.[1] ?? entry.name.replace('.dql', ''),
+                    domain: domainMatch?.[1] ?? 'uncategorized',
+                    status: statusMatch?.[1] ?? 'draft',
+                    owner: ownerMatch?.[1] ?? null,
+                    tags: parsedTags,
+                    path: relPath,
+                    lastModified: stat.mtime.toISOString(),
+                    description: descMatch?.[1] ?? '',
+                  });
+                } catch { /* skip unreadable files */ }
+              }
+            }
+          };
+          scanDir(blocksDir);
+        }
+        blocks.sort((a, b) => new Date(b.lastModified).getTime() - new Date(a.lastModified).getTime());
+        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({ blocks }));
+      } catch (error) {
+        res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({ error: error instanceof Error ? error.message : String(error) }));
+      }
+      return;
+    }
+
+    // ── Block status update ──────────────────────────────────────────────
+    if (req.method === 'POST' && path === '/api/blocks/status') {
+      try {
+        const body = await readJSON(req);
+        const blockPath = body.path as string;
+        const newStatus = body.newStatus as string;
+        const validStatuses = ['draft', 'review', 'certified', 'deprecated'];
+        if (!validStatuses.includes(newStatus)) {
+          res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
+          res.end(serializeJSON({ error: `Status must be one of: ${validStatuses.join(', ')}` }));
+          return;
+        }
+        const absPath = resolve(projectRoot, blockPath);
+        if (!existsSync(absPath)) {
+          res.writeHead(404, { 'Content-Type': 'application/json; charset=utf-8' });
+          res.end(serializeJSON({ error: 'Block file not found' }));
+          return;
+        }
+        let source = readFileSync(absPath, 'utf-8');
+        // Update or insert status field
+        if (/status\s*=\s*"[^"]*"/.test(source)) {
+          source = source.replace(/status\s*=\s*"[^"]*"/, `status = "${newStatus}"`);
+        } else {
+          // Insert after first { in block declaration
+          source = source.replace(/block\s+"[^"]*"\s*\{/, (match) => `${match}\n  status = "${newStatus}"`);
+        }
+        writeFileSync(absPath, source, 'utf-8');
+        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({ ok: true, status: newStatus }));
+      } catch (error) {
+        res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({ error: error instanceof Error ? error.message : String(error) }));
+      }
+      return;
+    }
+
+    // ── Block version history (git log) ──────────────────────────────────
+    if (req.method === 'GET' && path === '/api/blocks/history') {
+      try {
+        const blockPath = url.searchParams.get('path');
+        if (!blockPath) {
+          res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
+          res.end(serializeJSON({ error: 'path parameter is required' }));
+          return;
+        }
+        const { execSync } = await import('node:child_process');
+        const gitLog = execSync(
+          `git log --format="%H|||%ai|||%an|||%s" -20 -- "${blockPath}"`,
+          { cwd: projectRoot, encoding: 'utf-8', timeout: 10000 },
+        ).trim();
+        const entries = gitLog
+          ? gitLog.split('\n').map((line) => {
+              const [hash, date, author, message] = line.split('|||');
+              return { hash, date, author, message };
+            })
+          : [];
+        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({ entries }));
+      } catch (error) {
+        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({ entries: [] }));
+      }
+      return;
+    }
+
+    // ── Run block tests ────────────────────────────────────────────────
+    if (req.method === 'POST' && path === '/api/blocks/run-tests') {
+      try {
+        const body = await readJSON(req);
+        const source = body.source as string;
+        if (!source) {
+          res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
+          res.end(serializeJSON({ error: 'source is required' }));
+          return;
+        }
+        // Parse the block to extract tests and query SQL
+        const parser = new Parser(source, '<run-tests>');
+        const ast = parser.parse();
+        const blockNode = ast.body.find((n: any) => n.kind === 'BlockDecl') as any;
+        if (!blockNode) {
+          res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
+          res.end(serializeJSON({ error: 'No block declaration found in source' }));
+          return;
+        }
+        const testNodes: Array<{ field: string; operator: string; expected: any }> = blockNode.tests ?? [];
+        if (testNodes.length === 0) {
+          res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+          res.end(serializeJSON({ assertions: [], passed: 0, failed: 0, duration: 0 }));
+          return;
+        }
+        // Get the block's base SQL
+        const baseSql = blockNode.query?.rawSQL?.trim() ?? '';
+        if (!baseSql) {
+          res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
+          res.end(serializeJSON({ error: 'Block has no query SQL to test against' }));
+          return;
+        }
+        const resolvedSql = resolveProjectRelativeSqlPaths(baseSql, projectRoot, projectConfig.dataDir);
+
+        // Build and run assertions
+        const start = Date.now();
+        const results: Array<{ field: string; operator: string; expected: string; passed: boolean; actual?: string }> = [];
+        for (const test of testNodes) {
+          const field = test.field;
+          const op = test.operator;
+          const expected = test.expected;
+          // Extract the expected value from the AST node
+          const expectedValue = typeof expected === 'object' && expected !== null
+            ? (expected.value ?? String(expected))
+            : expected;
+          // Build a SQL query that computes the aggregate for this assertion
+          const testSql = `SELECT ${field} AS test_value FROM (${resolvedSql}) AS __test_block`;
+          try {
+            const result = await executor.executeQuery(testSql, [], {}, connection);
+            const actualRaw = result.rows?.[0];
+            const actual = actualRaw ? Object.values(actualRaw)[0] : undefined;
+            const actualNum = Number(actual);
+            const expectedNum = Number(expectedValue);
+            let passed = false;
+            switch (op) {
+              case '>': passed = actualNum > expectedNum; break;
+              case '<': passed = actualNum < expectedNum; break;
+              case '>=': passed = actualNum >= expectedNum; break;
+              case '<=': passed = actualNum <= expectedNum; break;
+              case '==': passed = String(actual) === String(expectedValue); break;
+              case '!=': passed = String(actual) !== String(expectedValue); break;
+              default: passed = false;
+            }
+            results.push({ field, operator: op, expected: String(expectedValue), passed, actual: String(actual ?? '') });
+          } catch (err) {
+            results.push({ field, operator: op, expected: String(expectedValue), passed: false, actual: `Error: ${err instanceof Error ? err.message : String(err)}` });
+          }
+        }
+        const duration = Date.now() - start;
+        const passed = results.filter((r) => r.passed).length;
+        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({ assertions: results, passed, failed: results.length - passed, duration }));
+      } catch (error) {
+        res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({ error: error instanceof Error ? error.message : String(error) }));
+      }
+      return;
+    }
+
     if (req.method === 'GET' && path === '/api/block-studio/catalog') {
       try {
         const cfg = loadProjectConfig(projectRoot) as any;
@@ -771,8 +973,16 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
         res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
         res.end(serializeJSON(importResult));
       } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        const hint = message.includes('conflict')
+          ? 'A file conflict was detected. Remove or rename the conflicting file and retry.'
+          : message.includes('dbt_project.yml')
+            ? 'Ensure your dbt project path contains a valid dbt_project.yml file.'
+            : message.includes('query executor')
+              ? 'A Snowflake connection is required. Configure one in the Connection panel first.'
+              : 'Check the provider path and ensure the source files are accessible.';
         res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' });
-        res.end(serializeJSON({ error: error instanceof Error ? error.message : String(error) }));
+        res.end(serializeJSON({ error: message, hint }));
       }
       return;
     }
@@ -797,11 +1007,92 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
         res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
         res.end(serializeJSON(importResult));
       } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        const hint = message.includes('No semantic import manifest')
+          ? 'No previous import found. Use the Setup Wizard to import a semantic layer first.'
+          : 'Check the source configuration and retry.';
+        res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({ error: message, hint }));
+      }
+      return;
+    }
+    // ── Semantic layer import preview (dry-run) ──────────────────────────
+    if (req.method === 'POST' && path === '/api/semantic-layer/import-preview') {
+      try {
+        const body = await readJSON(req);
+        const provider = body.provider as 'dbt' | 'cubejs' | 'snowflake';
+        if (provider !== 'dbt' && provider !== 'cubejs' && provider !== 'snowflake') {
+          res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
+          res.end(serializeJSON({ error: 'provider must be one of dbt, cubejs, snowflake' }));
+          return;
+        }
+        const sourceConfig = provider === 'snowflake'
+          ? {
+              provider,
+              projectPath: body.projectPath ?? projectConfig.semanticLayer?.projectPath,
+              connection: body.connection ?? projectConfig.semanticLayer?.connection,
+            }
+          : {
+              provider,
+              projectPath: typeof body.projectPath === 'string' ? body.projectPath : projectConfig.semanticLayer?.projectPath,
+              repoUrl: typeof body.repoUrl === 'string' ? body.repoUrl : projectConfig.semanticLayer?.repoUrl,
+              branch: typeof body.branch === 'string' ? body.branch : projectConfig.semanticLayer?.branch,
+              subPath: typeof body.subPath === 'string' ? body.subPath : projectConfig.semanticLayer?.subPath,
+              source: body.repoUrl || projectConfig.semanticLayer?.repoUrl
+                ? ((body.source ?? projectConfig.semanticLayer?.source ?? 'github') as 'local' | 'github' | 'gitlab')
+                : 'local',
+            };
+        const executeQuery = provider === 'snowflake'
+          ? async (sql: string) => {
+              const result = await executor.executeQuery(sql, [], {}, connection);
+              return { rows: result.rows };
+            }
+          : undefined;
+        const preview = await previewSemanticImport({
+          targetProjectRoot: projectRoot,
+          provider,
+          sourceConfig,
+          executeQuery,
+        });
+        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON(preview));
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        const hint = message.includes('dbt_project.yml')
+          ? 'Ensure your dbt project path contains a valid dbt_project.yml file.'
+          : message.includes('model/') || message.includes('schema/')
+            ? 'Ensure your Cube.js project has a model/ or schema/ directory.'
+            : message.includes('query executor')
+              ? 'A Snowflake connection is required. Configure one in the Connection panel first.'
+              : 'Check the provider path and ensure the source files are accessible.';
+        res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({ error: message, hint }));
+      }
+      return;
+    }
+
+    // ── Semantic layer sync diff preview ────────────────────────────────
+    if (req.method === 'POST' && path === '/api/semantic-layer/sync-preview') {
+      try {
+        const executeQuery = semanticImportManifest?.provider === 'snowflake'
+          ? async (sql: string) => {
+              const result = await executor.executeQuery(sql, [], {}, connection);
+              return { rows: result.rows };
+            }
+          : undefined;
+        const diff = await computeSyncDiff({
+          targetProjectRoot: projectRoot,
+          executeQuery,
+        });
+        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON(diff));
+      } catch (error) {
         res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' });
         res.end(serializeJSON({ error: error instanceof Error ? error.message : String(error) }));
       }
       return;
     }
+
     if (req.method === 'GET' && path === '/api/semantic-layer/search') {
       if (!semanticLayer) {
         res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });

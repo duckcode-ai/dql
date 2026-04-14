@@ -104,11 +104,39 @@ export function detectChartType(result: QueryResult): ChartType {
 
 // ─── Shared Utils ─────────────────────────────────────────────────────────────
 
-const PIE_PALETTE = [
-  '#388bfd', '#56d364', '#e3b341', '#f78166', '#a371f7',
-  '#39c5cf', '#ffa657', '#ff7b72', '#89d185', '#d2a8ff',
-  '#58a6ff', '#3fb950',
-];
+const COLOR_PALETTES: Record<string, string[]> = {
+  default: [
+    '#388bfd', '#56d364', '#e3b341', '#f78166', '#a371f7',
+    '#39c5cf', '#ffa657', '#ff7b72', '#89d185', '#d2a8ff',
+    '#58a6ff', '#3fb950',
+  ],
+  warm: [
+    '#f85149', '#f78166', '#ffa657', '#e3b341', '#d29922',
+    '#db6d28', '#ff7b72', '#ffa198', '#ffdfb6', '#e6c174',
+    '#c4a35a', '#b08c3e',
+  ],
+  cool: [
+    '#388bfd', '#58a6ff', '#79c0ff', '#39c5cf', '#56d364',
+    '#3fb950', '#a371f7', '#d2a8ff', '#bc8cff', '#6cb6ff',
+    '#2ea043', '#1f6feb',
+  ],
+  mono: [
+    '#c9d1d9', '#b1bac4', '#8b949e', '#6e7681', '#484f58',
+    '#30363d', '#21262d', '#161b22', '#a0a8b2', '#9e9e9e',
+    '#757575', '#616161',
+  ],
+  pastel: [
+    '#b8d8f8', '#b4e6c8', '#f4e6a0', '#f8c4a4', '#d2b8f0',
+    '#a8e0e0', '#f8d8a0', '#f4b8b4', '#c0e8c0', '#e0d0f8',
+    '#a8d8f8', '#b0e8b0',
+  ],
+};
+
+const PIE_PALETTE = COLOR_PALETTES.default;
+
+function getPalette(name?: string): string[] {
+  return COLOR_PALETTES[name ?? 'default'] ?? COLOR_PALETTES.default;
+}
 
 function abbreviate(n: number): string {
   if (Math.abs(n) >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
@@ -143,19 +171,20 @@ type ThemeRef = ReturnType<typeof themes['dark'] extends infer T ? () => T : nev
 
 // ─── Bar Chart ────────────────────────────────────────────────────────────────
 
-const MAX_BARS = 20;
+const DEFAULT_MAX_ITEMS = 20;
 
 function BarChart({ result, themeMode, chartConfig }: { result: QueryResult; themeMode: 'dark' | 'light'; chartConfig?: CellChartConfig }) {
   const t = themes[themeMode];
   const [hoveredIdx, setHoveredIdx] = useState<number | null>(null);
   const { labelCol, valueCol } = pickColumns(result, chartConfig);
+  const maxItems = chartConfig?.maxItems ?? DEFAULT_MAX_ITEMS;
 
-  const data = result.rows.slice(0, MAX_BARS).map((row) => ({
+  const data = result.rows.slice(0, maxItems).map((row) => ({
     label: String(row[labelCol] ?? ''),
     value: Number(row[valueCol] ?? 0),
   }));
 
-  const truncated = result.rows.length > MAX_BARS;
+  const truncated = result.rows.length > maxItems;
   const maxVal = Math.max(...data.map((d) => d.value), 1);
 
   const BAR_H = 28, LABEL_W = 120, GAP = 6, PADDING = 12;
@@ -184,7 +213,7 @@ function BarChart({ result, themeMode, chartConfig }: { result: QueryResult; the
       </svg>
       {truncated && (
         <div style={{ fontSize: 11, color: t.textMuted, fontFamily: t.font, fontStyle: 'italic', padding: '4px 12px' }}>
-          Showing {MAX_BARS} of {result.rows.length} rows
+          Showing {DEFAULT_MAX_ITEMS} of {result.rows.length} rows
         </div>
       )}
     </div>
@@ -203,8 +232,8 @@ function GroupedBarChart({ result, themeMode, chartConfig }: { result: QueryResu
   const valueCols = result.columns.filter((c) => c !== labelCol && sample.some((r) => isNumericValue(r[c])));
   if (valueCols.length === 0) return <BarChart result={result} themeMode={themeMode} chartConfig={chartConfig} />;
 
-  const labels = result.rows.slice(0, MAX_BARS).map((r) => String(r[labelCol] ?? ''));
-  const maxVal = Math.max(...result.rows.slice(0, MAX_BARS).flatMap((r) => valueCols.map((c) => Math.abs(Number(r[c] ?? 0)))), 1);
+  const labels = result.rows.slice(0, DEFAULT_MAX_ITEMS).map((r) => String(r[labelCol] ?? ''));
+  const maxVal = Math.max(...result.rows.slice(0, DEFAULT_MAX_ITEMS).flatMap((r) => valueCols.map((c) => Math.abs(Number(r[c] ?? 0)))), 1);
 
   const GROUP_H = 24, BAR_H = GROUP_H / valueCols.length, LABEL_W = 120, PAD = 12, GAP = 8;
   const svgH = labels.length * (GROUP_H + GAP) + PAD * 2;
@@ -268,7 +297,7 @@ function StackedBarChart({ result, themeMode, chartConfig }: { result: QueryResu
   const valueCols = result.columns.filter((c) => c !== labelCol && sample.some((r) => isNumericValue(r[c])));
   if (valueCols.length === 0) return <BarChart result={result} themeMode={themeMode} chartConfig={chartConfig} />;
 
-  const rows = result.rows.slice(0, MAX_BARS);
+  const rows = result.rows.slice(0, DEFAULT_MAX_ITEMS);
   const labels = rows.map((r) => String(r[labelCol] ?? ''));
   const maxTotal = Math.max(...rows.map((r) => valueCols.reduce((s, c) => s + Math.abs(Number(r[c] ?? 0)), 0)), 1);
 
@@ -955,16 +984,143 @@ function KpiCard({ result, themeMode, chartConfig }: { result: QueryResult; them
 
 // ─── ChartOutput ──────────────────────────────────────────────────────────────
 
-export function ChartOutput({ result, themeMode, chartConfig }: ChartOutputProps) {
+function ChartConfigPopover({
+  config,
+  columns,
+  onChange,
+  onClose,
+  t,
+}: {
+  config: CellChartConfig;
+  columns: string[];
+  onChange: (updates: Partial<CellChartConfig>) => void;
+  onClose: () => void;
+  t: typeof themes['dark'];
+}) {
+  const inputStyle: React.CSSProperties = {
+    background: t.inputBg,
+    border: `1px solid ${t.inputBorder}`,
+    borderRadius: 4,
+    color: t.textPrimary,
+    fontSize: 11,
+    fontFamily: t.font,
+    padding: '4px 8px',
+    outline: 'none',
+    width: '100%',
+    boxSizing: 'border-box' as const,
+  };
+
+  return (
+    <div
+      style={{
+        position: 'absolute',
+        top: 4,
+        right: 4,
+        zIndex: 100,
+        background: t.cellBg,
+        border: `1px solid ${t.headerBorder}`,
+        borderRadius: 8,
+        padding: 12,
+        width: 240,
+        boxShadow: '0 4px 16px rgba(0,0,0,0.3)',
+        display: 'grid',
+        gap: 8,
+      }}
+      onClick={(e) => e.stopPropagation()}
+    >
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+        <span style={{ fontSize: 11, fontWeight: 600, color: t.textPrimary, fontFamily: t.font }}>Chart Settings</span>
+        <button onClick={onClose} style={{ background: 'none', border: 'none', color: t.textMuted, cursor: 'pointer', fontSize: 14 }}>&times;</button>
+      </div>
+      <label style={{ fontSize: 10, color: t.textMuted, fontFamily: t.font }}>
+        Title
+        <input value={config.title ?? ''} onChange={(e) => onChange({ title: e.target.value || undefined })} placeholder="Chart title" style={{ ...inputStyle, marginTop: 2 }} />
+      </label>
+      <label style={{ fontSize: 10, color: t.textMuted, fontFamily: t.font }}>
+        X-axis label
+        <input value={config.xLabel ?? ''} onChange={(e) => onChange({ xLabel: e.target.value || undefined })} placeholder="Auto" style={{ ...inputStyle, marginTop: 2 }} />
+      </label>
+      <label style={{ fontSize: 10, color: t.textMuted, fontFamily: t.font }}>
+        Y-axis label
+        <input value={config.yLabel ?? ''} onChange={(e) => onChange({ yLabel: e.target.value || undefined })} placeholder="Auto" style={{ ...inputStyle, marginTop: 2 }} />
+      </label>
+      <label style={{ fontSize: 10, color: t.textMuted, fontFamily: t.font }}>
+        Legend
+        <select value={config.legendPosition ?? 'top'} onChange={(e) => onChange({ legendPosition: e.target.value as CellChartConfig['legendPosition'] })} style={{ ...inputStyle, marginTop: 2 }}>
+          <option value="top">Top</option>
+          <option value="bottom">Bottom</option>
+          <option value="left">Left</option>
+          <option value="right">Right</option>
+          <option value="none">Hidden</option>
+        </select>
+      </label>
+      <label style={{ fontSize: 10, color: t.textMuted, fontFamily: t.font }}>
+        Color palette
+        <select value={config.colorPalette ?? 'default'} onChange={(e) => onChange({ colorPalette: e.target.value as CellChartConfig['colorPalette'] })} style={{ ...inputStyle, marginTop: 2 }}>
+          {Object.keys(COLOR_PALETTES).map((p) => (
+            <option key={p} value={p}>{p.charAt(0).toUpperCase() + p.slice(1)}</option>
+          ))}
+        </select>
+      </label>
+      <label style={{ fontSize: 10, color: t.textMuted, fontFamily: t.font }}>
+        Max items
+        <input type="number" value={config.maxItems ?? DEFAULT_MAX_ITEMS} min={5} max={200} onChange={(e) => onChange({ maxItems: parseInt(e.target.value) || DEFAULT_MAX_ITEMS })} style={{ ...inputStyle, marginTop: 2 }} />
+      </label>
+    </div>
+  );
+}
+
+export function ChartOutput({ result, themeMode, chartConfig, onConfigChange }: ChartOutputProps & { onConfigChange?: (updates: Partial<CellChartConfig>) => void }) {
   const t = themes[themeMode];
   const resolvedType = resolveChartType(result, chartConfig);
+  const [showConfig, setShowConfig] = useState(false);
 
   // KPI renders without toggle bar
   if (resolvedType === 'kpi') {
     return <KpiCard result={result} themeMode={themeMode} chartConfig={chartConfig} />;
   }
 
-  return renderChart(resolvedType, result, themeMode, chartConfig);
+  return (
+    <div style={{ position: 'relative' }}>
+      {chartConfig?.title && (
+        <div style={{ padding: '8px 12px 0', fontSize: 13, fontWeight: 600, color: t.textPrimary, fontFamily: t.font, textAlign: 'center' }}>
+          {chartConfig.title}
+        </div>
+      )}
+      {onConfigChange && (
+        <button
+          onClick={() => setShowConfig(!showConfig)}
+          title="Chart settings"
+          style={{
+            position: 'absolute',
+            top: 4,
+            right: 4,
+            zIndex: 50,
+            background: showConfig ? `${t.accent}18` : 'transparent',
+            border: `1px solid ${showConfig ? t.accent : 'transparent'}`,
+            borderRadius: 4,
+            color: showConfig ? t.accent : t.textMuted,
+            cursor: 'pointer',
+            fontSize: 14,
+            padding: '2px 6px',
+            lineHeight: 1,
+          }}
+        >
+          &#9881;
+        </button>
+      )}
+      {showConfig && onConfigChange && (
+        <ChartConfigPopover
+          config={chartConfig ?? {}}
+          columns={result.columns}
+          onChange={(updates) => onConfigChange(updates)}
+          onClose={() => setShowConfig(false)}
+          t={t}
+        />
+      )}
+      {renderChart(resolvedType, result, themeMode, chartConfig)}
+    </div>
+  );
 }
 
 export function renderChart(chartType: ChartType, result: QueryResult, themeMode: 'dark' | 'light', chartConfig?: CellChartConfig): React.ReactElement | null {

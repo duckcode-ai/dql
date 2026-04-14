@@ -169,6 +169,20 @@ export function ActivityBar() {
       </IconButton>
 
       <IconButton
+        title="Block Library"
+        active={state.sidebarPanel === 'block_library' && state.sidebarOpen}
+        onClick={() => handlePanelClick('block_library')}
+        t={t}
+      >
+        <svg width="18" height="18" viewBox="0 0 18 18" fill="none">
+          <rect x="2" y="2" width="6" height="6" rx="1" stroke="currentColor" strokeWidth="1.3" />
+          <rect x="10" y="2" width="6" height="6" rx="1" stroke="currentColor" strokeWidth="1.3" />
+          <rect x="2" y="10" width="6" height="6" rx="1" stroke="currentColor" strokeWidth="1.3" />
+          <rect x="10" y="10" width="6" height="6" rx="1" stroke="currentColor" strokeWidth="1.3" />
+        </svg>
+      </IconButton>
+
+      <IconButton
         title="Lineage"
         active={state.sidebarPanel === 'lineage' && state.sidebarOpen}
         onClick={() => handlePanelClick('lineage')}

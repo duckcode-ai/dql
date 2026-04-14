@@ -8,6 +8,11 @@ export interface CellChartConfig {
   y?: string;       // Y-axis column
   color?: string;   // Color-by column
   title?: string;
+  xLabel?: string;
+  yLabel?: string;
+  legendPosition?: 'top' | 'bottom' | 'left' | 'right' | 'none';
+  colorPalette?: 'default' | 'warm' | 'cool' | 'mono' | 'pastel';
+  maxItems?: number;
 }
 
 export type ParamType = 'text' | 'select' | 'date' | 'number';
@@ -18,7 +23,7 @@ export interface ParamConfig {
   defaultValue: string;
   options?: string[];
 }
-export type SidebarPanel = 'files' | 'schema' | 'outline' | 'connection' | 'reference' | 'semantic' | 'lineage' | null;
+export type SidebarPanel = 'files' | 'schema' | 'outline' | 'connection' | 'reference' | 'semantic' | 'lineage' | 'block_library' | null;
 export type DevPanelTab = 'logs' | 'errors';
 export type MainView = 'notebook' | 'block_studio';
 

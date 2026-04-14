@@ -50,6 +50,21 @@ export interface SemanticImportResult {
   counts: Record<SemanticImportManifestObject['kind'], number>;
 }
 
+export interface SemanticImportPreview {
+  provider: 'dbt' | 'cubejs' | 'snowflake';
+  counts: Record<SemanticImportManifestObject['kind'], number>;
+  domains: string[];
+  warnings: string[];
+  objects: Array<{ kind: SemanticImportManifestObject['kind']; name: string; label: string; domain: string }>;
+}
+
+export interface SemanticSyncDiff {
+  added: Array<{ kind: SemanticImportManifestObject['kind']; name: string; label: string; domain: string }>;
+  removed: Array<{ kind: SemanticImportManifestObject['kind']; name: string; label: string; domain: string }>;
+  changed: Array<{ kind: SemanticImportManifestObject['kind']; name: string; label: string; domain: string }>;
+  unchanged: number;
+}
+
 export interface SemanticTreeNode {
   id: string;
   label: string;
@@ -474,6 +489,103 @@ export function buildSemanticObjectDetail(
   }
 
   return null;
+}
+
+/**
+ * Preview a semantic import without writing any files.
+ * Returns counts, domains, warnings, and object summaries.
+ */
+export async function previewSemanticImport(opts: {
+  targetProjectRoot: string;
+  provider: 'dbt' | 'cubejs' | 'snowflake';
+  sourceConfig: SemanticLayerProviderConfig;
+  executeQuery?: SnowflakeQueryExecutor;
+}): Promise<SemanticImportPreview> {
+  const targetProjectRoot = resolve(opts.targetProjectRoot);
+  const source = resolveImportSource(targetProjectRoot, opts.sourceConfig);
+  const layer = await loadLayerForImport(opts.provider, source.localPath, source.config, opts.executeQuery);
+  const warnings = [...source.warnings, ...collectImportWarnings(opts.provider, layer)];
+  const objects = collectObjects(layer);
+
+  const summaries = objects.map((obj) => ({
+    kind: obj.kind,
+    name: obj.name,
+    label: obj.label,
+    domain: normalizeDomain(obj.domain),
+  }));
+
+  const domains = [...new Set(summaries.map((o) => o.domain))].sort();
+
+  return {
+    provider: opts.provider,
+    counts: countObjects(summaries.map((o) => ({ ...o, id: objectId(o.kind, o.name), filePath: '' }))),
+    domains,
+    warnings,
+    objects: summaries,
+  };
+}
+
+/**
+ * Compute the diff between the current manifest and a fresh import, without applying changes.
+ */
+export async function computeSyncDiff(opts: {
+  targetProjectRoot: string;
+  executeQuery?: SnowflakeQueryExecutor;
+}): Promise<SemanticSyncDiff> {
+  const manifest = loadSemanticImportManifest(opts.targetProjectRoot);
+  if (!manifest) {
+    throw new Error('No semantic import manifest found. Run `dql semantic import <provider>` first.');
+  }
+
+  const sourceConfig: SemanticLayerProviderConfig = {
+    provider: manifest.provider,
+    projectPath: manifest.source.projectPath,
+    repoUrl: manifest.source.repoUrl,
+    branch: manifest.source.branch,
+    subPath: manifest.source.subPath,
+    connection: manifest.source.connection,
+  };
+
+  const targetProjectRoot = resolve(opts.targetProjectRoot);
+  const source = resolveImportSource(targetProjectRoot, sourceConfig);
+  const layer = await loadLayerForImport(manifest.provider, source.localPath, source.config, opts.executeQuery);
+  const newObjects = collectObjects(layer);
+
+  const newById = new Map(
+    newObjects.map((obj) => [objectId(obj.kind, obj.name), obj]),
+  );
+  const oldById = new Map(
+    manifest.objects.map((obj) => [obj.id, obj]),
+  );
+
+  const added: SemanticSyncDiff['added'] = [];
+  const removed: SemanticSyncDiff['removed'] = [];
+  const changed: SemanticSyncDiff['changed'] = [];
+  let unchanged = 0;
+
+  for (const [id, obj] of newById) {
+    const old = oldById.get(id);
+    if (!old) {
+      added.push({ kind: obj.kind, name: obj.name, label: obj.label, domain: normalizeDomain(obj.domain) });
+    } else {
+      // Compare domain and label to detect changes
+      const oldDomain = old.domain;
+      const newDomain = normalizeDomain(obj.domain);
+      if (old.label !== obj.label || oldDomain !== newDomain) {
+        changed.push({ kind: obj.kind, name: obj.name, label: obj.label, domain: newDomain });
+      } else {
+        unchanged++;
+      }
+    }
+  }
+
+  for (const [id, old] of oldById) {
+    if (!newById.has(id)) {
+      removed.push({ kind: old.kind, name: old.name, label: old.label, domain: old.domain });
+    }
+  }
+
+  return { added, removed, changed, unchanged };
 }
 
 function resolveImportSource(
