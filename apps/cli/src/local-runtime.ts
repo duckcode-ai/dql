@@ -590,7 +590,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
         // Parse the block to extract tests and query SQL
         const parser = new Parser(source, '<run-tests>');
         const ast = parser.parse();
-        const blockNode = ast.body.find((n: any) => n.kind === 'BlockDecl') as any;
+        const blockNode = ast.statements.find((n: any) => n.kind === 'BlockDecl') as any;
         if (!blockNode) {
           res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
           res.end(serializeJSON({ error: 'No block declaration found in source' }));
