@@ -6,7 +6,7 @@ For completed changes, see [CHANGELOG.md](./CHANGELOG.md).
 
 ---
 
-## Current State (v0.8.1)
+## Current State (v0.8.6)
 
 DQL is **production-usable** for:
 - Authoring and validating `.dql` blocks with SQL, tests, and governance metadata
@@ -17,8 +17,12 @@ DQL is **production-usable** for:
 - **Answer-layer lineage** — `ref()` system, SQL table extraction, lineage graph, cross-domain flow tracking, trust chains, impact analysis
 - **Interactive lineage DAG** — React Flow + dagre graph visualization in the notebook with filtering, focus mode, minimap, and detail panel
 - **`dql compile`** — generates `dql-manifest.json` project artifact with blocks, notebooks, metrics, sources, dependencies, and lineage
-- **dbt project auto-detection** — `dql init` detects `dbt_project.yml` and `.duckdb` files, configures semantic layer provider automatically
+- **dbt project auto-detection** — `dql init` detects `dbt_project.yml` and `.duckdb` files, configures semantic layer provider, auto-imports semantic definitions
 - **Jaffle Shop integration** — canonical getting-started path uses the dbt Jaffle Shop project
+- **Enterprise onboarding** — connect any of 14 database drivers, import semantic metrics, build/test/save blocks from Block Studio
+- **Connection hot-swap** — change database connections at runtime from the notebook Connection Panel without restarting
+- **14 database connectors** — DuckDB, PostgreSQL, MySQL, Snowflake, BigQuery, Redshift, Databricks, MSSQL, SQLite, ClickHouse, Athena, Trino, Fabric, with `listTables()` and `listColumns()` introspection
+- **Block Studio** — built-in IDE with database explorer, semantic panel, live validation, run/test/save workflow
 - **Lineage CLI** — `dql lineage` with summary, block, table, metric, domain, impact, trust-chain, and JSON export subcommands
 - **Lineage API** — REST endpoints for lineage graph, block lineage, domain lineage, impact analysis
 
@@ -60,7 +64,6 @@ DQL is **production-usable** for:
 - Streaming / paginated query results for large datasets
 - **Materializations** — `materialized = "table" | "view" | "incremental" | "ephemeral"` for blocks
 - **Column-level lineage** — track which specific columns flow through which blocks
-- **Database catalog introspection** — `dql compile --connection` introspects actual table schemas into manifest
 
 ---
 
