@@ -6,6 +6,30 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 
 ---
 
+## v0.8.6 — 2026-04-14
+
+### Added
+- **14-driver schema introspection** — all database connectors now implement `listTables()` and `listColumns()` with a 3-tier fallback strategy (information_schema → connector methods → lazy loading)
+- **Connection hot-swap** — changing the database connection via the notebook Connection Panel or `PUT /api/connections` re-initializes the executor at runtime without restarting the server
+- **Block Studio improvements** — save guard opens NewBlockModal when metadata is missing, save/catalog errors shown as inline banners with retry, sidebar no longer forced closed
+- **`dql doctor` notebook asset check** — verifies the notebook SPA assets (`index.html`) are bundled correctly
+- **`dql --version` / `-V` flag** — prints the CLI version
+- **Driver-aware welcome notebook** — `createWelcomeNotebook()` generates database-specific SQL (`SHOW TABLES` for DuckDB, `information_schema` for Postgres/Snowflake/etc.)
+- **Semantic import uses project config** — re-resolve after import uses `dql.config.json` provider, not hardcoded `'dql'`
+- **`/api/describe-table` endpoint** — lazy column loading for the schema sidebar and Block Studio
+- **Type-colored column badges** — shared color utility for schema browser (blue=string, green=number, pink=boolean, gold=date, purple=json)
+
+### Documentation
+- **README rewrite** — three clear install paths (DQL-only, Jaffle Shop, Enterprise), Block Studio section, version 0.8.6
+- **Quickstart rewrite** — two-track guide (Path A: DQL-only 2min, Path B: dbt+Jaffle Shop 5min) with Block Studio walkthrough
+- **Getting Started rewrite** — fixed stale table references, added Block Studio step-by-step (Step 7), clarified auto-import behavior
+- **NEW: Enterprise Getting Started** — 11-step guide for teams with existing dbt repos and production databases (Snowflake, Postgres, BigQuery, etc.)
+- **Examples rewrite** — three-path table, Block Studio in learning path, parameterized block examples
+- **Semantic Layer Guide** — added Snowflake provider section (Option D) with config and notebook UI import steps
+- **Data Sources** — documented Connection Panel hot-swap workflow
+
+---
+
 ## v0.8.2 — 2026-03-25
 
 ### Fixed
