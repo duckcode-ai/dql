@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest';
-import { LineageGraph } from './lineage-graph.js';
+import { LineageGraph, getLayerForNodeType, type LineageLayer } from './lineage-graph.js';
 import { buildLineageGraph } from './builder.js';
-import { queryLineage } from './query.js';
+import { queryLineage, queryCompleteLineagePaths } from './query.js';
 import {
   buildTrustChain,
   analyzeImpact,
@@ -231,11 +231,14 @@ describe('buildLineageGraph', () => {
         (edge) => edge.source === 'dbt_model:stg_customers' && edge.type === 'depends_on',
       ),
     ).toBe(true);
+    // Edge direction: block feeds into dashboard (data flows block → dashboard)
     expect(
-      graph.getOutgoingEdges('dashboard:Customer Notebook').some(
-        (edge) => edge.target === 'block:customer_summary' && edge.type === 'contains',
+      graph.getIncomingEdges('dashboard:Customer Notebook').some(
+        (edge) => edge.source === 'block:customer_summary' && edge.type === 'contains',
       ),
     ).toBe(true);
+    // ancestors of dashboard should include the block
+    expect(graph.ancestors('dashboard:Customer Notebook').map((n) => n.id)).toContain('block:customer_summary');
   });
 });
 
@@ -423,5 +426,148 @@ describe('queryLineage', () => {
       'block:revenue_by_region',
     ]);
     expect(result.graph.nodes.every((node) => ['block', 'metric'].includes(node.type))).toBe(true);
+  });
+});
+
+describe('LineageGraph layers', () => {
+  it('getLayerForNodeType returns correct layers', () => {
+    expect(getLayerForNodeType('source_table')).toBe('source');
+    expect(getLayerForNodeType('dbt_source')).toBe('source');
+    expect(getLayerForNodeType('dbt_model')).toBe('transform');
+    expect(getLayerForNodeType('block')).toBe('answer');
+    expect(getLayerForNodeType('metric')).toBe('answer');
+    expect(getLayerForNodeType('dashboard')).toBe('consumption');
+    expect(getLayerForNodeType('chart')).toBe('consumption');
+  });
+
+  it('getNodesByLayer returns nodes filtered by layer', () => {
+    const graph = new LineageGraph();
+    graph.addNode({ id: 'table:a', type: 'source_table', layer: 'source', name: 'a' });
+    graph.addNode({ id: 'dbt:b', type: 'dbt_model', layer: 'transform', name: 'b' });
+    graph.addNode({ id: 'block:c', type: 'block', layer: 'answer', name: 'c' });
+    graph.addNode({ id: 'dash:d', type: 'dashboard', layer: 'consumption', name: 'd' });
+
+    expect(graph.getNodesByLayer('source')).toHaveLength(1);
+    expect(graph.getNodesByLayer('transform')).toHaveLength(1);
+    expect(graph.getNodesByLayer('answer')).toHaveLength(1);
+    expect(graph.getNodesByLayer('consumption')).toHaveLength(1);
+  });
+
+  it('builder assigns layers to all nodes', () => {
+    const graph = buildLineageGraph(
+      [{ name: 'orders_block', sql: 'SELECT * FROM orders', domain: 'sales', chartType: 'table' }],
+      [{ name: 'total_orders', table: 'orders', domain: 'sales', type: 'count' }],
+      [],
+      {
+        dbtModels: [
+          { name: 'raw_orders', uniqueId: 'source.shop.raw_orders', type: 'source', dependsOn: [] },
+          { name: 'stg_orders', uniqueId: 'model.shop.stg_orders', type: 'model', dependsOn: ['source.shop.raw_orders'] },
+        ],
+        dashboards: [{ name: 'Sales Dashboard', blocks: ['orders_block'], charts: [] }],
+      },
+    );
+
+    // Source layer
+    expect(graph.getNode('dbt_source:raw_orders')?.layer).toBe('source');
+    // Transform layer
+    expect(graph.getNode('dbt_model:stg_orders')?.layer).toBe('transform');
+    // Answer layer
+    expect(graph.getNode('block:orders_block')?.layer).toBe('answer');
+    expect(graph.getNode('metric:total_orders')?.layer).toBe('answer');
+    // Consumption layer
+    expect(graph.getNode('dashboard:Sales Dashboard')?.layer).toBe('consumption');
+    expect(graph.getNode('chart:orders_block')?.layer).toBe('consumption');
+  });
+});
+
+describe('queryCompleteLineagePaths', () => {
+  it('computes upstream and downstream paths for a block', () => {
+    const graph = buildLineageGraph(
+      [
+        { name: 'raw_data', sql: 'SELECT * FROM source_table', domain: 'data' },
+        { name: 'transformed', sql: 'SELECT * FROM ref("raw_data")', domain: 'analytics' },
+      ],
+      [],
+      [],
+      {
+        dashboards: [{ name: 'Analytics Dashboard', blocks: ['transformed'], charts: [] }],
+      },
+    );
+
+    const result = queryCompleteLineagePaths(graph, 'block:transformed');
+    expect(result).not.toBeNull();
+    expect(result!.focalNode.id).toBe('block:transformed');
+
+    // Upstream paths: source_table → raw_data → transformed
+    expect(result!.upstreamPaths.length).toBeGreaterThan(0);
+    const upPath = result!.upstreamPaths[0];
+    expect(upPath.nodes[0].type).toBe('source_table');
+    expect(upPath.nodes[upPath.nodes.length - 1].id).toBe('block:transformed');
+
+    // Downstream paths: transformed → dashboard
+    expect(result!.downstreamPaths.length).toBeGreaterThan(0);
+    const downPath = result!.downstreamPaths[0];
+    expect(downPath.nodes[0].id).toBe('block:transformed');
+    expect(downPath.nodes[downPath.nodes.length - 1].type).toBe('dashboard');
+  });
+
+  it('returns null for non-existent node', () => {
+    const graph = buildLineageGraph([], [], []);
+    expect(queryCompleteLineagePaths(graph, 'block:nonexistent')).toBeNull();
+  });
+
+  it('includes layer summary', () => {
+    const graph = buildLineageGraph(
+      [{ name: 'test_block', sql: 'SELECT * FROM raw_table', domain: 'test' }],
+      [],
+      [],
+    );
+
+    const result = queryCompleteLineagePaths(graph, 'block:test_block');
+    expect(result).not.toBeNull();
+    expect(result!.layerSummary).toHaveProperty('source');
+    expect(result!.layerSummary).toHaveProperty('answer');
+  });
+
+  it('traverses full dbt chain through to dashboard', () => {
+    const graph = buildLineageGraph(
+      [{ name: 'customer_report', sql: 'SELECT * FROM dim_customers', domain: 'reports' }],
+      [],
+      [],
+      {
+        dbtModels: [
+          { name: 'raw_customers', uniqueId: 'source.jaffle.raw_customers', type: 'source', dependsOn: [] },
+          { name: 'stg_customers', uniqueId: 'model.jaffle.stg_customers', type: 'model', dependsOn: ['source.jaffle.raw_customers'] },
+          { name: 'dim_customers', uniqueId: 'model.jaffle.dim_customers', type: 'model', dependsOn: ['model.jaffle.stg_customers'] },
+        ],
+        dashboards: [{ name: 'Customer Report', blocks: ['customer_report'], charts: [] }],
+      },
+    );
+
+    const result = queryCompleteLineagePaths(graph, 'block:customer_report');
+    expect(result).not.toBeNull();
+
+    // Should have upstream path through dbt chain: raw_customers → stg_customers → dim_customers → customer_report
+    const upPaths = result!.upstreamPaths;
+    expect(upPaths.length).toBeGreaterThan(0);
+
+    // Find the longest upstream path (through entire dbt chain)
+    const longest = upPaths.reduce((a, b) => (a.nodes.length > b.nodes.length ? a : b));
+    expect(longest.nodes.length).toBeGreaterThanOrEqual(4); // source → stg → dim → block
+
+    // First node should be a dbt source
+    expect(longest.nodes[0].type).toBe('dbt_source');
+    // Last node should be the block
+    expect(longest.nodes[longest.nodes.length - 1].id).toBe('block:customer_report');
+
+    // Layers should span source → transform → answer
+    expect(longest.layers).toContain('source');
+    expect(longest.layers).toContain('transform');
+    expect(longest.layers).toContain('answer');
+
+    // Should have downstream path to dashboard
+    expect(result!.downstreamPaths.length).toBeGreaterThan(0);
+    const downPath = result!.downstreamPaths[0];
+    expect(downPath.nodes[downPath.nodes.length - 1].type).toBe('dashboard');
   });
 });

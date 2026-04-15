@@ -18,11 +18,34 @@ export type LineageNodeType =
   | 'chart'
   | 'dashboard';
 
+/** Conceptual layer a node belongs to in the lineage flow. */
+export type LineageLayer = 'source' | 'transform' | 'answer' | 'consumption';
+
+/** Map from node type to its default lineage layer. */
+const NODE_TYPE_TO_LAYER: Record<LineageNodeType, LineageLayer> = {
+  source_table: 'source',
+  dbt_source: 'source',
+  dbt_model: 'transform',
+  block: 'answer',
+  metric: 'answer',
+  dimension: 'answer',
+  domain: 'answer',
+  chart: 'consumption',
+  dashboard: 'consumption',
+};
+
+/** Get the default layer for a node type. */
+export function getLayerForNodeType(type: LineageNodeType): LineageLayer {
+  return NODE_TYPE_TO_LAYER[type];
+}
+
 export interface LineageNode {
   /** Unique identifier (e.g., "block:revenue_by_segment", "metric:total_revenue") */
   id: string;
   type: LineageNodeType;
   name: string;
+  /** Conceptual layer in the lineage flow (source → transform → answer → consumption) */
+  layer?: LineageLayer;
   /** Business domain this node belongs to */
   domain?: string;
   /** Certification status (for blocks) */
@@ -116,6 +139,11 @@ export class LineageGraph {
   /** Get nodes by type. */
   getNodesByType(type: LineageNodeType): LineageNode[] {
     return [...this.nodes.values()].filter((n) => n.type === type);
+  }
+
+  /** Get nodes by lineage layer. */
+  getNodesByLayer(layer: LineageLayer): LineageNode[] {
+    return [...this.nodes.values()].filter((n) => (n.layer ?? getLayerForNodeType(n.type)) === layer);
   }
 
   /** Get nodes by domain. */

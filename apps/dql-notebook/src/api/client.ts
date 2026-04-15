@@ -552,4 +552,25 @@ export const api = {
       return null;
     }
   },
+
+  async fetchLineagePaths(
+    nodeId: string,
+    options?: { maxDepth?: number; maxPaths?: number },
+  ): Promise<{
+    focalNode: any;
+    upstreamPaths: Array<{ nodes: any[]; edges: any[]; layers: string[] }>;
+    downstreamPaths: Array<{ nodes: any[]; edges: any[]; layers: string[] }>;
+    layerSummary: Record<string, number>;
+  } | null> {
+    try {
+      const params = new URLSearchParams();
+      if (options?.maxDepth) params.set('maxDepth', String(options.maxDepth));
+      if (options?.maxPaths) params.set('maxPaths', String(options.maxPaths));
+      const qs = params.toString();
+      const url = `/api/lineage/paths/${encodeURIComponent(nodeId)}${qs ? `?${qs}` : ''}`;
+      return await request<any>(url);
+    } catch {
+      return null;
+    }
+  },
 };

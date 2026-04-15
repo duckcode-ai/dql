@@ -823,6 +823,10 @@ export function CellComponent({ cell, index }: CellProps) {
             cellName={cell.name}
             themeMode={state.themeMode}
             t={t}
+            onFocusNode={(nodeId) => {
+              dispatch({ type: 'SET_LINEAGE_FOCUS', nodeId });
+              if (!state.lineageFullscreen) dispatch({ type: 'TOGGLE_LINEAGE_FULLSCREEN' });
+            }}
           />
         )}
       </div>

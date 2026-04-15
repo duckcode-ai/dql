@@ -19,32 +19,19 @@ import Dagre from '@dagrejs/dagre';
 import { api } from '../../api/client';
 import { useNotebook } from '../../store/NotebookStore';
 import { themes } from '../../themes/notebook-theme';
-
-interface LineageNode {
-  id: string;
-  type: string;
-  name: string;
-  domain?: string;
-  status?: string;
-}
-
-interface LineageEdge {
-  source: string;
-  target: string;
-  type: string;
-}
-
-const NODE_TYPE_COLORS: Record<string, string> = {
-  source_table: '#8b949e',
-  dbt_model: '#ff7b72',
-  dbt_source: '#79c0ff',
-  block: '#56d364',
-  metric: '#388bfd',
-  dimension: '#e3b341',
-  domain: '#d2a8ff',
-  chart: '#f778ba',
-  dashboard: '#d2a8ff',
-};
+import {
+  NODE_TYPE_COLORS,
+  TYPE_TITLES,
+  EDGE_TYPE_COLORS,
+  EDGE_TITLES,
+  LAYER_COLORS,
+  LAYER_LABELS,
+  LAYER_ORDER,
+  getNodeLayer,
+  type LineageNode,
+  type LineageEdge,
+  type LineageLayerName,
+} from '../lineage/lineage-constants';
 
 const TYPE_LABELS: Record<string, string> = {
   source_table: 'TABLE',
@@ -58,44 +45,20 @@ const TYPE_LABELS: Record<string, string> = {
   dashboard: 'NOTEBOOK',
 };
 
-const TYPE_TITLES: Record<string, string> = {
-  source_table: 'Source Table',
-  dbt_model: 'dbt Model',
-  dbt_source: 'dbt Source',
-  block: 'DQL Block',
-  metric: 'Metric',
-  dimension: 'Dimension',
-  domain: 'Business Domain',
-  chart: 'Chart',
-  dashboard: 'Notebook',
-};
+type LayoutMode = 'flow' | 'layered';
 
-const EDGE_TYPE_COLORS: Record<string, string> = {
-  reads_from: '#8b949e',
-  feeds_into: '#56d364',
-  aggregates: '#388bfd',
-  visualizes: '#f778ba',
-  depends_on: '#ff7b72',
-  contains: '#d2a8ff',
-  crosses_domain: '#d2a8ff',
-};
-
-const EDGE_TITLES: Record<string, string> = {
-  reads_from: 'reads from',
-  feeds_into: 'feeds into',
-  aggregates: 'aggregates into',
-  visualizes: 'visualizes',
-  depends_on: 'dbt depends on',
-  contains: 'notebook contains',
-  crosses_domain: 'crosses domain',
-};
-
-function layoutGraph(nodes: Node[], edges: Edge[]) {
+function layoutGraph(nodes: Node[], edges: Edge[], mode: LayoutMode = 'flow') {
   const graph = new Dagre.graphlib.Graph().setDefaultEdgeLabel(() => ({}));
-  graph.setGraph({ rankdir: 'LR', ranksep: 80, nodesep: 40, marginx: 32, marginy: 32 });
+  graph.setGraph({ rankdir: 'LR', ranksep: mode === 'layered' ? 100 : 80, nodesep: 40, marginx: 32, marginy: 32 });
 
   for (const node of nodes) {
-    graph.setNode(node.id, { width: 190, height: 58 });
+    const opts: Record<string, unknown> = { width: 190, height: 58 };
+    // In layered mode, assign a rank based on the node's lineage layer
+    if (mode === 'layered' && node.data?.layer) {
+      const layerIndex = LAYER_ORDER.indexOf(node.data.layer as LineageLayerName);
+      if (layerIndex >= 0) opts.rank = layerIndex;
+    }
+    graph.setNode(node.id, opts);
   }
   for (const edge of edges) {
     graph.setEdge(edge.source, edge.target);
@@ -221,6 +184,7 @@ export function LineageDAG() {
     dashboard: true,
     domain: true,
   });
+  const [layoutMode, setLayoutMode] = useState<LayoutMode>('flow');
 
   const [rfNodes, setRfNodes, onNodesChange] = useNodesState<Node>([]);
   const [rfEdges, setRfEdges, onEdgesChange] = useEdgesState<Edge>([]);
@@ -273,6 +237,7 @@ export function LineageDAG() {
         label: node.name,
         nodeType: node.type,
         domain: node.domain,
+        layer: getNodeLayer(node),
       },
     }));
 
@@ -292,9 +257,9 @@ export function LineageDAG() {
       },
     }));
 
-    setRfNodes(layoutGraph(nodes, edges));
+    setRfNodes(layoutGraph(nodes, edges, layoutMode));
     setRfEdges(edges);
-  }, [filteredGraph, setRfEdges, setRfNodes]);
+  }, [filteredGraph, layoutMode, setRfEdges, setRfNodes]);
 
   const focusNode = useCallback(async (nodeId: string) => {
     const result = await api.queryLineage({ focus: nodeId });
@@ -340,7 +305,39 @@ export function LineageDAG() {
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100%', background: '#0d1117' }}>
       <div style={{ padding: 8, borderBottom: `1px solid ${t.headerBorder}`, background: t.sidebarBg }}>
-        <div style={{ display: 'flex', gap: 6, marginBottom: 8, flexWrap: 'wrap' }}>
+        {/* Layout toggle + type filters */}
+        <div style={{ display: 'flex', gap: 6, marginBottom: 8, flexWrap: 'wrap', alignItems: 'center' }}>
+          <div style={{ display: 'flex', borderRadius: 6, border: `1px solid ${t.headerBorder}`, overflow: 'hidden', marginRight: 4 }}>
+            <button
+              onClick={() => setLayoutMode('flow')}
+              style={{
+                padding: '4px 8px',
+                fontSize: 10,
+                fontWeight: 700,
+                border: 'none',
+                cursor: 'pointer',
+                background: layoutMode === 'flow' ? '#30363d' : 'transparent',
+                color: layoutMode === 'flow' ? '#e6edf3' : '#8b949e',
+              }}
+            >
+              Flow
+            </button>
+            <button
+              onClick={() => setLayoutMode('layered')}
+              style={{
+                padding: '4px 8px',
+                fontSize: 10,
+                fontWeight: 700,
+                border: 'none',
+                borderLeft: `1px solid ${t.headerBorder}`,
+                cursor: 'pointer',
+                background: layoutMode === 'layered' ? '#30363d' : 'transparent',
+                color: layoutMode === 'layered' ? '#e6edf3' : '#8b949e',
+              }}
+            >
+              Layered
+            </button>
+          </div>
           <FilterChip label="Tables" active={visibleTypes.source_table} color={NODE_TYPE_COLORS.source_table} onClick={() => setVisibleTypes((current) => ({ ...current, source_table: !current.source_table }))} />
           <FilterChip label="dbt Models" active={visibleTypes.dbt_model} color={NODE_TYPE_COLORS.dbt_model} onClick={() => setVisibleTypes((current) => ({ ...current, dbt_model: !current.dbt_model }))} />
           <FilterChip label="dbt Sources" active={visibleTypes.dbt_source} color={NODE_TYPE_COLORS.dbt_source} onClick={() => setVisibleTypes((current) => ({ ...current, dbt_source: !current.dbt_source }))} />

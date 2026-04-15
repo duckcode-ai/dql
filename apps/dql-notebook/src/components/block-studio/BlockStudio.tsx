@@ -13,6 +13,9 @@ import { themes } from '../../themes/notebook-theme';
 import type { Theme } from '../../themes/notebook-theme';
 import { SQLCellEditor } from '../cells/SQLCellEditor';
 import { ChartOutput, CHART_TYPE_OPTIONS, resolveChartType } from '../output/ChartOutput';
+import { MiniLineageGraph } from '../lineage/MiniLineageGraph';
+import { LineagePathSection, LayerSummary } from '../lineage/LineagePathBreadcrumb';
+import type { CompletePathResult } from '../lineage/lineage-constants';
 import { TableOutput } from '../output/TableOutput';
 import { MetricDetailPanel } from '../sidebar/MetricDetailPanel';
 import { SemanticSearchBar } from '../sidebar/SemanticSearchBar';
@@ -75,7 +78,8 @@ export function BlockStudio() {
     incoming: Array<{ edge: { type: string }; node?: { id: string; type: string; name: string; domain?: string } }>;
     outgoing: Array<{ edge: { type: string }; node?: { id: string; type: string; name: string; domain?: string } }>;
   } | null>(null);
-  const [lineageGraph, setLineageGraph] = useState<{ nodes: Array<{ id: string; type: string; name: string; domain?: string }>; edges: Array<{ source: string; target: string; type: string }> } | null>(null);
+  const [lineageGraph, setLineageGraph] = useState<{ nodes: Array<{ id: string; type: string; name: string; domain?: string; layer?: string }>; edges: Array<{ source: string; target: string; type: string }> } | null>(null);
+  const [lineagePaths, setLineagePaths] = useState<CompletePathResult | null>(null);
   const [statusUpdating, setStatusUpdating] = useState(false);
   const [scrollTop, setScrollTop] = useState(0);
   const [viewportHeight, setViewportHeight] = useState(400);
@@ -210,14 +214,17 @@ export function BlockStudio() {
     void Promise.all([
       api.fetchLineageNode(nodeId),
       api.queryLineage({ focus: nodeId }),
+      api.fetchLineagePaths(nodeId),
     ])
-      .then(([detail, focused]) => {
+      .then(([detail, focused, paths]) => {
         setLineageDetail(detail);
         setLineageGraph(focused.graph ?? null);
+        setLineagePaths(paths);
       })
       .catch(() => {
         setLineageDetail(null);
         setLineageGraph(null);
+        setLineagePaths(null);
       })
       .finally(() => setLineageLoading(false));
   }, [activeBlockName, dispatch]);
@@ -711,6 +718,7 @@ export function BlockStudio() {
               loading={lineageLoading}
               detail={lineageDetail}
               graph={lineageGraph}
+              paths={lineagePaths}
               onSelectNode={(nodeId) => {
                 dispatch({ type: 'SET_LINEAGE_FOCUS', nodeId });
                 if (!state.lineageFullscreen) dispatch({ type: 'TOGGLE_LINEAGE_FULLSCREEN' });
@@ -935,6 +943,7 @@ function BlockLineagePanel({
   loading,
   detail,
   graph,
+  paths,
   onSelectNode,
   onOpenFull,
   t,
@@ -947,13 +956,16 @@ function BlockLineagePanel({
     outgoing: Array<{ edge: { type: string }; node?: { id: string; type: string; name: string; domain?: string } }>;
   } | null;
   graph: {
-    nodes: Array<{ id: string; type: string; name: string; domain?: string }>;
+    nodes: Array<{ id: string; type: string; name: string; domain?: string; layer?: string }>;
     edges: Array<{ source: string; target: string; type: string }>;
   } | null;
+  paths: CompletePathResult | null;
   onSelectNode: (nodeId: string) => void;
   onOpenFull: () => void;
   t: Theme;
 }) {
+  const [detailsExpanded, setDetailsExpanded] = useState(false);
+
   if (!blockName) {
     return <EmptyPanel message="Lineage will appear once the block has a name." />;
   }
@@ -980,10 +992,11 @@ function BlockLineagePanel({
     );
   }
 
-  const pathSummary = graph ? buildLineagePathSummary(graph, detail.node.id) : null;
+  const focalNodeId = `block:${blockName}`;
 
   return (
-    <div style={{ padding: 12, display: 'grid', gap: 12 }}>
+    <div style={{ padding: 12, display: 'grid', gap: 12, overflowY: 'auto' }}>
+      {/* Header */}
       <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
         <div>
           <div style={{ fontSize: 12, fontWeight: 700, color: t.textPrimary, fontFamily: t.font }}>
@@ -1002,98 +1015,83 @@ function BlockLineagePanel({
         </button>
       </div>
 
-      {pathSummary && (pathSummary.upstreamPaths.length > 0 || pathSummary.downstreamPaths.length > 0) && (
-        <div style={{ display: 'grid', gap: 12 }}>
-          <div style={{ fontSize: 11, fontWeight: 700, color: t.textMuted, fontFamily: t.font, textTransform: 'uppercase', letterSpacing: '0.04em' }}>
-            Path Summary
-          </div>
+      {/* Layer Summary */}
+      {paths?.layerSummary && <LayerSummary layerSummary={paths.layerSummary} t={t} />}
+
+      {/* Embedded Mini-Graph */}
+      {graph && graph.nodes.length > 0 && (
+        <MiniLineageGraph
+          nodes={graph.nodes}
+          edges={graph.edges}
+          focalNodeId={focalNodeId}
+          height={220}
+          onNodeClick={onSelectNode}
+          layoutMode="flow"
+        />
+      )}
+
+      {/* Complete Paths (from API) */}
+      {paths && (paths.upstreamPaths.length > 0 || paths.downstreamPaths.length > 0) && (
+        <div style={{ display: 'grid', gap: 10 }}>
           <div style={{ fontSize: 12, color: t.textMuted, fontFamily: t.font, lineHeight: 1.5 }}>
-            Read this as provenance and consumption: raw source tables and dbt models flow into the current DQL block, and downstream paths show which notebooks or analytics objects use the block.
+            Source tables and dbt models flow into this block. Downstream paths show notebooks and charts that consume it.
           </div>
-          {pathSummary.upstreamPaths.length > 0 && (
+          {paths.upstreamPaths.length > 0 && (
             <LineagePathSection
               title="Source to Block"
-              paths={pathSummary.upstreamPaths}
-              onSelectNode={onSelectNode}
+              paths={paths.upstreamPaths}
+              onNodeClick={onSelectNode}
+              focalNodeId={focalNodeId}
               t={t}
             />
           )}
-          {pathSummary.downstreamPaths.length > 0 && (
+          {paths.downstreamPaths.length > 0 && (
             <LineagePathSection
               title="Block to Consumption"
-              paths={pathSummary.downstreamPaths}
-              onSelectNode={onSelectNode}
+              paths={paths.downstreamPaths}
+              onNodeClick={onSelectNode}
+              focalNodeId={focalNodeId}
               t={t}
             />
           )}
         </div>
       )}
 
-      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, minmax(0, 1fr))', gap: 12 }}>
-        <LineageList
-          title="Upstream"
-          entries={detail.incoming}
-          emptyMessage="No upstream dependencies yet."
-          onSelectNode={onSelectNode}
-          t={t}
-        />
-        <LineageList
-          title="Downstream"
-          entries={detail.outgoing}
-          emptyMessage="No downstream dependencies yet."
-          onSelectNode={onSelectNode}
-          t={t}
-        />
-      </div>
-    </div>
-  );
-}
-
-function LineagePathSection({
-  title,
-  paths,
-  onSelectNode,
-  t,
-}: {
-  title: string;
-  paths: Array<Array<{ id: string; type: string; name: string; domain?: string }>>;
-  onSelectNode: (nodeId: string) => void;
-  t: Theme;
-}) {
-  return (
-    <div style={{ border: `1px solid ${t.cellBorder}`, borderRadius: 10, overflow: 'hidden', background: t.inputBg }}>
-      <div style={{ padding: '10px 12px', borderBottom: `1px solid ${t.cellBorder}`, fontSize: 11, fontWeight: 700, color: t.textMuted, fontFamily: t.font, textTransform: 'uppercase', letterSpacing: '0.04em' }}>
-        {title}
-      </div>
-      <div style={{ display: 'grid', gap: 8, padding: 12 }}>
-        {paths.slice(0, 4).map((path, index) => (
-          <div key={`${title}-${index}`} style={{ display: 'flex', flexWrap: 'wrap', gap: 6, alignItems: 'center' }}>
-            {path.map((node, nodeIndex) => (
-              <React.Fragment key={node.id}>
-                <button
-                  onClick={() => onSelectNode(node.id)}
-                  style={{
-                    background: t.pillBg,
-                    border: `1px solid ${t.cellBorder}`,
-                    borderRadius: 999,
-                    color: t.textPrimary,
-                    cursor: 'pointer',
-                    fontSize: 11,
-                    fontFamily: t.font,
-                    padding: '5px 10px',
-                  }}
-                  title={node.domain ? `${node.type} · ${node.domain}` : node.type}
-                >
-                  {formatLineageNodeLabel(node)}
-                </button>
-                {nodeIndex < path.length - 1 && (
-                  <span style={{ color: t.textMuted, fontSize: 11, fontFamily: t.font }}>→</span>
-                )}
-              </React.Fragment>
-            ))}
-          </div>
-        ))}
-      </div>
+      {/* Collapsible Upstream/Downstream Details */}
+      <button
+        onClick={() => setDetailsExpanded((e) => !e)}
+        style={{
+          background: 'none',
+          border: `1px solid ${t.cellBorder}`,
+          borderRadius: 6,
+          padding: '6px 10px',
+          color: t.textMuted,
+          cursor: 'pointer',
+          fontSize: 11,
+          fontFamily: t.font,
+          textAlign: 'left',
+        }}
+      >
+        {detailsExpanded ? '▾' : '▸'} Upstream / Downstream Details
+      </button>
+      {detailsExpanded && (
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, minmax(0, 1fr))', gap: 12 }}>
+          <LineageList
+            title="Upstream"
+            entries={detail.incoming}
+            emptyMessage="No upstream dependencies yet."
+            onSelectNode={onSelectNode}
+            t={t}
+          />
+          <LineageList
+            title="Downstream"
+            entries={detail.outgoing}
+            emptyMessage="No downstream dependencies yet."
+            onSelectNode={onSelectNode}
+            t={t}
+          />
+        </div>
+      )}
     </div>
   );
 }
@@ -1153,101 +1151,6 @@ function LineageList({
   );
 }
 
-function buildLineagePathSummary(
-  graph: {
-    nodes: Array<{ id: string; type: string; name: string; domain?: string }>;
-    edges: Array<{ source: string; target: string; type: string }>;
-  },
-  focalNodeId: string,
-) {
-  const nodeMap = new Map(graph.nodes.map((node) => [node.id, node]));
-  const incoming = new Map<string, string[]>();
-  const outgoing = new Map<string, string[]>();
-
-  for (const edge of graph.edges) {
-    if (!incoming.has(edge.target)) incoming.set(edge.target, []);
-    if (!outgoing.has(edge.source)) outgoing.set(edge.source, []);
-    incoming.get(edge.target)!.push(edge.source);
-    outgoing.get(edge.source)!.push(edge.target);
-  }
-
-  const upstreamPaths = collectPathsToRoots(focalNodeId, incoming, nodeMap, new Set<string>());
-  const downstreamPaths = collectPathsToLeaves(focalNodeId, outgoing, nodeMap, new Set<string>());
-
-  return {
-    upstreamPaths: dedupeLineagePaths(upstreamPaths),
-    downstreamPaths: dedupeLineagePaths(downstreamPaths),
-  };
-}
-
-function collectPathsToRoots(
-  nodeId: string,
-  incoming: Map<string, string[]>,
-  nodeMap: Map<string, { id: string; type: string; name: string; domain?: string }>,
-  visiting: Set<string>,
-): Array<Array<{ id: string; type: string; name: string; domain?: string }>> {
-  const node = nodeMap.get(nodeId);
-  if (!node) return [];
-  if (visiting.has(nodeId)) return [[node]];
-  const parents = incoming.get(nodeId) ?? [];
-  if (parents.length === 0) return [[node]];
-
-  visiting.add(nodeId);
-  const paths = parents.flatMap((parentId) =>
-    collectPathsToRoots(parentId, incoming, nodeMap, visiting).map((path) => [...path, node]),
-  );
-  visiting.delete(nodeId);
-  return paths;
-}
-
-function collectPathsToLeaves(
-  nodeId: string,
-  outgoing: Map<string, string[]>,
-  nodeMap: Map<string, { id: string; type: string; name: string; domain?: string }>,
-  visiting: Set<string>,
-): Array<Array<{ id: string; type: string; name: string; domain?: string }>> {
-  const node = nodeMap.get(nodeId);
-  if (!node) return [];
-  if (visiting.has(nodeId)) return [[node]];
-  const children = outgoing.get(nodeId) ?? [];
-  if (children.length === 0) return [[node]];
-
-  visiting.add(nodeId);
-  const paths = children.flatMap((childId) =>
-    collectPathsToLeaves(childId, outgoing, nodeMap, visiting).map((path) => [node, ...path]),
-  );
-  visiting.delete(nodeId);
-  return paths;
-}
-
-function dedupeLineagePaths(paths: Array<Array<{ id: string; type: string; name: string; domain?: string }>>) {
-  const seen = new Set<string>();
-  return paths.filter((path) => {
-    const key = path.map((node) => node.id).join('>');
-    if (seen.has(key)) return false;
-    seen.add(key);
-    return true;
-  });
-}
-
-function formatLineageNodeLabel(node: { type: string; name: string }) {
-  const typeLabel = node.type === 'dbt_model'
-    ? 'DBT'
-    : node.type === 'dbt_source'
-      ? 'SRC'
-      : node.type === 'dashboard'
-        ? 'NB'
-        : node.type === 'source_table'
-          ? 'TBL'
-          : node.type === 'block'
-            ? 'BLK'
-            : node.type === 'metric'
-              ? 'MET'
-              : node.type === 'dimension'
-                ? 'DIM'
-                : node.type.toUpperCase();
-  return `${typeLabel} ${node.name}`;
-}
 
 function SavePanel({
   metadata,

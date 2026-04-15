@@ -24,6 +24,7 @@ import {
   detectDomainFlows,
   getDomainTrustOverview,
   queryLineage,
+  queryCompleteLineagePaths,
   LineageGraph,
   type SemanticLayer,
   type SemanticLayerProviderConfig,
@@ -1721,6 +1722,27 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
       return;
     }
 
+    if (req.method === 'GET' && path.startsWith('/api/lineage/paths/')) {
+      const rawNodeId = decodeURIComponent(path.slice('/api/lineage/paths/'.length));
+      try {
+        const graph = buildProjectLineageGraph(projectRoot, semanticLayer);
+        const maxDepth = Number(url.searchParams.get('maxDepth') ?? '10') || 10;
+        const maxPaths = Number(url.searchParams.get('maxPaths') ?? '20') || 20;
+        const result = queryCompleteLineagePaths(graph, rawNodeId, { maxDepth, maxPaths });
+        if (!result) {
+          res.writeHead(404, { 'Content-Type': 'application/json; charset=utf-8' });
+          res.end(serializeJSON({ error: `Node "${rawNodeId}" not found` }));
+          return;
+        }
+        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON(result));
+      } catch (error) {
+        res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({ error: error instanceof Error ? error.message : String(error) }));
+      }
+      return;
+    }
+
     if (req.method === 'GET' && path === '/api/lineage/trust-chain') {
       const from = url.searchParams.get('from');
       const to = url.searchParams.get('to');
@@ -3373,7 +3395,20 @@ function buildNotebookTemplate(title: string, template: string): string {
 }
 
 /** Build a lineage graph from the project's blocks and semantic layer. */
+// Simple lineage graph cache: rebuilds at most every 5 seconds
+let _lineageCache: { graph: InstanceType<typeof LineageGraph>; builtAt: number } | null = null;
+const LINEAGE_CACHE_TTL_MS = 5000;
+
 function buildProjectLineageGraph(projectRoot: string, semanticLayer: SemanticLayer | null | undefined) {
+  if (_lineageCache && Date.now() - _lineageCache.builtAt < LINEAGE_CACHE_TTL_MS) {
+    return _lineageCache.graph;
+  }
+  const graph = buildProjectLineageGraphUncached(projectRoot, semanticLayer);
+  _lineageCache = { graph, builtAt: Date.now() };
+  return graph;
+}
+
+function buildProjectLineageGraphUncached(projectRoot: string, semanticLayer: SemanticLayer | null | undefined) {
   const manifestPath = join(projectRoot, 'dql-manifest.json');
   if (existsSync(manifestPath)) {
     try {

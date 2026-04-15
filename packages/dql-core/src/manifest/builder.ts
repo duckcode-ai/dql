@@ -581,6 +581,7 @@ function buildManifestLineage(
     blockType: b.blockType,
     metricRef: b.metricRef,
     chartType: b.chartType,
+    filePath: b.filePath,
   }));
 
   const lineageMetrics: LineageMetricInput[] = Object.values(metrics).map((m) => ({
@@ -595,16 +596,40 @@ function buildManifestLineage(
     table: d.table,
   }));
 
-  const dashboards: LineageDashboardInput[] = Object.values(notebooks ?? {}).map((notebook) => ({
-    name: notebook.title,
-    blocks: notebook.cells
+  const dashboards: LineageDashboardInput[] = Object.values(notebooks ?? {}).map((notebook) => {
+    const blockNames = notebook.cells
       .map((cell) => cell.blockName)
-      .filter((name): name is string => Boolean(name)),
-    charts: notebook.cells
-      .filter((cell) => cell.chartType && cell.blockName)
-      .map((cell) => cell.blockName!)
-      .filter(Boolean),
-  }));
+      .filter((name): name is string => Boolean(name));
+    const blockNameSet = new Set(blockNames);
+
+    // Collect ref() dependencies from all cells (not just block-declaring cells)
+    const refDeps = new Set<string>();
+    const tableDeps = new Set<string>();
+    for (const cell of notebook.cells) {
+      for (const ref of cell.refDependencies ?? []) {
+        if (!blockNameSet.has(ref)) refDeps.add(ref);
+      }
+      // Only collect table deps from cells that don't declare a block
+      // (block-declaring cells have their own lineage edges)
+      if (!cell.blockName) {
+        for (const table of cell.tableDependencies ?? []) {
+          tableDeps.add(table);
+        }
+      }
+    }
+
+    return {
+      name: notebook.title,
+      filePath: notebook.filePath,
+      blocks: blockNames,
+      charts: notebook.cells
+        .filter((cell) => cell.chartType && cell.blockName)
+        .map((cell) => cell.blockName!)
+        .filter(Boolean),
+      refDependencies: [...refDeps],
+      tableDependencies: [...tableDeps],
+    };
+  });
 
   const dbtModels: LineageDbtModelInput[] = (dbtImport?.dbtDag?.models ?? []).map((model) => ({
     name: model.name,

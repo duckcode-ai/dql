@@ -7,7 +7,7 @@
  */
 
 import { extractTablesFromSql } from './sql-parser.js';
-import { LineageGraph } from './lineage-graph.js';
+import { LineageGraph, getLayerForNodeType } from './lineage-graph.js';
 
 // ---- Input types (kept simple to avoid coupling to specific packages) ----
 
@@ -26,6 +26,8 @@ export interface LineageBlockInput {
   chartType?: string;
   /** Materialized table/view name */
   materializedAs?: string;
+  /** File path of the block definition */
+  filePath?: string;
 }
 
 export interface LineageMetricInput {
@@ -63,6 +65,12 @@ export interface LineageDashboardInput {
   name: string;
   blocks: string[];
   charts: string[];
+  /** File path of the notebook */
+  filePath?: string;
+  /** Block names referenced via ref() in SQL cells */
+  refDependencies?: string[];
+  /** Table names referenced in SQL cells (for tracing non-block SQL) */
+  tableDependencies?: string[];
 }
 
 /**
@@ -87,10 +95,19 @@ export function buildLineageGraph(
   for (const dbtModel of options.dbtModels ?? []) {
     const nodeId = `${dbtModel.type === 'model' ? 'dbt_model' : 'dbt_source'}:${dbtModel.name}`;
     dbtNodeMap.set(dbtModel.name.toLowerCase(), nodeId);
+    // Also index by schema-qualified name for SQL references like "schema.table"
+    if (dbtModel.schema) {
+      dbtNodeMap.set(`${dbtModel.schema}.${dbtModel.name}`.toLowerCase(), nodeId);
+    }
+    if (dbtModel.database && dbtModel.schema) {
+      dbtNodeMap.set(`${dbtModel.database}.${dbtModel.schema}.${dbtModel.name}`.toLowerCase(), nodeId);
+    }
     dbtUniqueIdMap.set(dbtModel.uniqueId, nodeId);
+    const nodeType = dbtModel.type === 'model' ? 'dbt_model' as const : 'dbt_source' as const;
     graph.addNode({
       id: nodeId,
-      type: dbtModel.type === 'model' ? 'dbt_model' : 'dbt_source',
+      type: nodeType,
+      layer: getLayerForNodeType(nodeType),
       name: dbtModel.name,
       metadata: {
         uniqueId: dbtModel.uniqueId,
@@ -122,6 +139,7 @@ export function buildLineageGraph(
     graph.addNode({
       id: `block:${block.name}`,
       type: 'block',
+      layer: 'answer',
       name: block.name,
       domain: block.domain,
       owner: block.owner,
@@ -129,6 +147,7 @@ export function buildLineageGraph(
       metadata: {
         blockType: block.blockType,
         materializedAs: block.materializedAs,
+        filePath: block.filePath,
       },
     });
   }
@@ -138,6 +157,7 @@ export function buildLineageGraph(
     graph.addNode({
       id: `metric:${metric.name}`,
       type: 'metric',
+      layer: 'answer',
       name: metric.name,
       domain: metric.domain,
       metadata: { type: metric.type },
@@ -157,6 +177,7 @@ export function buildLineageGraph(
     graph.addNode({
       id: `dimension:${dim.name}`,
       type: 'dimension',
+      layer: 'answer',
       name: dim.name,
     });
 
@@ -188,7 +209,10 @@ export function buildLineageGraph(
     // SQL table references
     for (const table of parseResult.tables) {
       const resolved = materializedMap.get(table.toLowerCase());
-      const dbtResolved = dbtNodeMap.get(normalizeTableName(table).toLowerCase());
+      const normalizedTable = normalizeTableName(table).toLowerCase();
+      // Try full name first, then strip schema prefix for fallback
+      const dbtResolved = dbtNodeMap.get(normalizedTable)
+        ?? (normalizedTable.includes('.') ? dbtNodeMap.get(normalizedTable.split('.').pop()!) : undefined);
       if (dbtResolved) {
         graph.addEdge({
           source: dbtResolved,
@@ -258,6 +282,7 @@ export function buildLineageGraph(
       graph.addNode({
         id: chartNodeId,
         type: 'chart',
+        layer: 'consumption',
         name: `${block.name} (${block.chartType})`,
         domain: block.domain,
         metadata: { chartType: block.chartType },
@@ -278,22 +303,43 @@ export function buildLineageGraph(
     graph.addNode({
       id: dashboardId,
       type: 'dashboard',
+      layer: 'consumption',
       name: dashboard.name,
+      metadata: { filePath: dashboard.filePath },
     });
     for (const blockName of dashboard.blocks) {
       if (!graph.getNode(`block:${blockName}`)) continue;
+      // Edge direction: block feeds into dashboard (data flows block → dashboard)
       graph.addEdge({
-        source: dashboardId,
-        target: `block:${blockName}`,
+        source: `block:${blockName}`,
+        target: dashboardId,
         type: 'contains',
       });
     }
     for (const chartName of dashboard.charts) {
       if (!graph.getNode(`chart:${chartName}`)) continue;
       graph.addEdge({
-        source: dashboardId,
-        target: `chart:${chartName}`,
+        source: `chart:${chartName}`,
+        target: dashboardId,
         type: 'contains',
+      });
+    }
+    // Add edges for blocks referenced via ref() in notebook SQL cells
+    for (const refBlock of dashboard.refDependencies ?? []) {
+      if (!graph.getNode(`block:${refBlock}`)) continue;
+      graph.addEdge({
+        source: `block:${refBlock}`,
+        target: dashboardId,
+        type: 'contains',
+      });
+    }
+    // Add edges for tables referenced in notebook SQL cells
+    for (const table of dashboard.tableDependencies ?? []) {
+      const tableNodeId = ensureTableNode(graph, table, dbtNodeMap);
+      graph.addEdge({
+        source: tableNodeId,
+        target: dashboardId,
+        type: 'reads_from',
       });
     }
   }
@@ -318,6 +364,7 @@ function ensureTableNode(
     graph.addNode({
       id: nodeId,
       type: 'source_table',
+      layer: 'source',
       name: tableName,
     });
   }
@@ -366,6 +413,7 @@ function addDomainNodes(graph: LineageGraph): void {
     graph.addNode({
       id: domainNodeId,
       type: 'domain',
+      layer: 'answer',
       name: domain,
       domain,
     });

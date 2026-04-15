@@ -15,10 +15,12 @@ export {
 
 export {
   LineageGraph,
+  getLayerForNodeType,
   type LineageNode,
   type LineageEdge,
   type LineageNodeType,
   type LineageEdgeType,
+  type LineageLayer,
   type LineageGraphJSON,
 } from './lineage-graph.js';
 
@@ -34,8 +36,12 @@ export {
 
 export {
   queryLineage,
+  queryCompleteLineagePaths,
   type LineageQuery,
   type LineageQueryResult,
+  type LineagePath,
+  type CompletePathResult,
+  type CompletePathOptions,
 } from './query.js';
 
 export {

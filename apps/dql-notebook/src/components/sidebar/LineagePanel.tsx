@@ -3,56 +3,18 @@ import type { Theme } from '../../themes/notebook-theme';
 import { api } from '../../api/client';
 import { useNotebook } from '../../store/NotebookStore';
 import { themes } from '../../themes/notebook-theme';
-
-interface LineageNode {
-  id: string;
-  type: string;
-  name: string;
-  domain?: string;
-  status?: string;
-}
-
-interface LineageEdge {
-  source: string;
-  target: string;
-  type: string;
-}
-
-const NODE_TYPE_COLORS: Record<string, string> = {
-  source_table: '#8b949e',
-  dbt_model: '#ff7b72',
-  dbt_source: '#79c0ff',
-  block: '#56d364',
-  metric: '#388bfd',
-  dimension: '#e3b341',
-  domain: '#d2a8ff',
-  chart: '#f778ba',
-  dashboard: '#d2a8ff',
-};
-
-const TYPE_LABELS: Record<string, string> = {
-  source_table: 'TBL',
-  dbt_model: 'DBT',
-  dbt_source: 'SRC',
-  block: 'BLK',
-  metric: 'MET',
-  dimension: 'DIM',
-  domain: 'DOM',
-  chart: 'CHT',
-  dashboard: 'DASH',
-};
-
-const TYPE_TITLES: Record<string, string> = {
-  source_table: 'Source Table',
-  dbt_model: 'dbt Model',
-  dbt_source: 'dbt Source',
-  block: 'DQL Block',
-  metric: 'Metric',
-  dimension: 'Dimension',
-  domain: 'Domain',
-  chart: 'Chart',
-  dashboard: 'Notebook',
-};
+import {
+  NODE_TYPE_COLORS,
+  TYPE_LABELS,
+  TYPE_TITLES,
+  LAYER_COLORS,
+  LAYER_LABELS,
+  LAYER_ORDER,
+  getNodeLayer,
+  type LineageNode,
+  type LineageEdge,
+  type LineageLayerName,
+} from '../lineage/lineage-constants';
 
 function NodeTypeBadge({ type }: { type: string }) {
   const color = NODE_TYPE_COLORS[type] ?? '#8b949e';
@@ -239,6 +201,8 @@ export function LineagePanel() {
     dispatch({ type: 'SET_LINEAGE_FOCUS', nodeId: null });
   }, [dispatch]);
 
+  const [groupBy, setGroupBy] = useState<'type' | 'layer'>('type');
+
   const grouped = useMemo(() => ({
     dashboards: allNodes.filter((node) => node.type === 'dashboard'),
     blocks: allNodes.filter((node) => node.type === 'block'),
@@ -247,6 +211,17 @@ export function LineagePanel() {
     tables: allNodes.filter((node) => node.type === 'source_table'),
     domains: allNodes.filter((node) => node.type === 'domain'),
   }), [allNodes]);
+
+  const layerGrouped = useMemo(() => {
+    const groups: Record<LineageLayerName, LineageNode[]> = {
+      source: [], transform: [], answer: [], consumption: [],
+    };
+    for (const node of allNodes) {
+      const layer = getNodeLayer(node);
+      groups[layer].push(node);
+    }
+    return groups;
+  }, [allNodes]);
 
   const focusedRelatedNodes = useMemo(() => {
     if (!focusedNode || !focusedGraph) {
@@ -366,12 +341,63 @@ export function LineagePanel() {
 
         {!focusedNode && (
           <>
-            <Section title="Notebooks" nodes={grouped.dashboards} t={t} onSelect={handleSelectNode} />
-            <Section title="DQL Blocks" nodes={grouped.blocks} t={t} onSelect={handleSelectNode} />
-            <Section title="dbt Models" nodes={grouped.dbtModels} t={t} onSelect={handleSelectNode} />
-            <Section title="dbt Sources" nodes={grouped.dbtSources} t={t} onSelect={handleSelectNode} />
-            <Section title="Source Tables" nodes={grouped.tables} t={t} onSelect={handleSelectNode} />
-            <Section title="Business Domains" nodes={grouped.domains} t={t} onSelect={handleSelectNode} />
+            {/* Layer summary bar */}
+            <div style={{ padding: '6px 8px', display: 'flex', gap: 8, flexWrap: 'wrap', borderBottom: `1px solid ${t.headerBorder}` }}>
+              {LAYER_ORDER.map((layer) => {
+                const count = layerGrouped[layer].length;
+                if (count === 0) return null;
+                return (
+                  <span key={layer} style={{ display: 'inline-flex', alignItems: 'center', gap: 3, fontSize: 10, color: t.textMuted }}>
+                    <span style={{ width: 8, height: 8, borderRadius: 2, background: LAYER_COLORS[layer], display: 'inline-block' }} />
+                    {LAYER_LABELS[layer]}: {count}
+                  </span>
+                );
+              })}
+              <span style={{ flex: 1 }} />
+              {/* Group by toggle */}
+              <div style={{ display: 'flex', borderRadius: 4, border: `1px solid ${t.headerBorder}`, overflow: 'hidden' }}>
+                <button
+                  onClick={() => setGroupBy('type')}
+                  style={{
+                    padding: '2px 6px', fontSize: 9, fontWeight: 700, border: 'none', cursor: 'pointer',
+                    background: groupBy === 'type' ? `${t.headerBorder}` : 'transparent',
+                    color: groupBy === 'type' ? t.textPrimary : t.textMuted,
+                  }}
+                >Type</button>
+                <button
+                  onClick={() => setGroupBy('layer')}
+                  style={{
+                    padding: '2px 6px', fontSize: 9, fontWeight: 700, border: 'none', cursor: 'pointer',
+                    borderLeft: `1px solid ${t.headerBorder}`,
+                    background: groupBy === 'layer' ? `${t.headerBorder}` : 'transparent',
+                    color: groupBy === 'layer' ? t.textPrimary : t.textMuted,
+                  }}
+                >Layer</button>
+              </div>
+            </div>
+
+            {groupBy === 'type' ? (
+              <>
+                <Section title="Notebooks" nodes={grouped.dashboards} t={t} onSelect={handleSelectNode} />
+                <Section title="DQL Blocks" nodes={grouped.blocks} t={t} onSelect={handleSelectNode} />
+                <Section title="dbt Models" nodes={grouped.dbtModels} t={t} onSelect={handleSelectNode} />
+                <Section title="dbt Sources" nodes={grouped.dbtSources} t={t} onSelect={handleSelectNode} />
+                <Section title="Source Tables" nodes={grouped.tables} t={t} onSelect={handleSelectNode} />
+                <Section title="Business Domains" nodes={grouped.domains} t={t} onSelect={handleSelectNode} />
+              </>
+            ) : (
+              <>
+                {LAYER_ORDER.map((layer) => (
+                  <Section
+                    key={layer}
+                    title={LAYER_LABELS[layer]}
+                    nodes={layerGrouped[layer]}
+                    t={t}
+                    onSelect={handleSelectNode}
+                  />
+                ))}
+              </>
+            )}
           </>
         )}
       </div>

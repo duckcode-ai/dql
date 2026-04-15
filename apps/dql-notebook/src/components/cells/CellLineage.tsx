@@ -1,40 +1,15 @@
 import type { Theme } from '../../themes/notebook-theme';
 import React, { useState, useEffect, useCallback } from 'react';
 import { api } from '../../api/client';
-
-interface LineageNode {
-  id: string;
-  type: string;
-  name: string;
-  domain?: string;
-  status?: string;
-  owner?: string;
-}
-
-const NODE_TYPE_COLORS: Record<string, string> = {
-  source_table: '#8b949e',
-  block: '#56d364',
-  metric: '#388bfd',
-  dimension: '#e3b341',
-  domain: '#d2a8ff',
-  chart: '#f778ba',
-};
-
-const TYPE_LABELS: Record<string, string> = {
-  source_table: 'TBL',
-  block: 'BLK',
-  metric: 'MET',
-  dimension: 'DIM',
-  chart: 'CHT',
-  domain: 'DOM',
-};
-
-const STATUS_COLORS: Record<string, string> = {
-  certified: '#56d364',
-  draft: '#8b949e',
-  review: '#e3b341',
-  deprecated: '#f85149',
-};
+import {
+  NODE_TYPE_COLORS,
+  TYPE_LABELS,
+  STATUS_COLORS,
+  type LineageNode,
+  type LineagePath,
+  type CompletePathResult,
+} from '../lineage/lineage-constants';
+import { LineagePathBreadcrumb } from '../lineage/LineagePathBreadcrumb';
 
 /** Extract a block name from DQL cell content: block "name" { ... } */
 function extractBlockName(content: string): string | null {
@@ -42,10 +17,9 @@ function extractBlockName(content: string): string | null {
   return m ? m[1] : null;
 }
 
-/** Extract table names from SQL for lineage lookup */
+/** Extract table names from SQL for lineage lookup (lightweight client-side) */
 function extractSQLTables(sql: string): string[] {
   const tables: string[] = [];
-  // FROM / JOIN table references
   const pattern = /\b(?:FROM|JOIN)\s+([a-zA-Z_][\w.]*)/gi;
   for (const m of sql.matchAll(pattern)) {
     const name = m[1].toLowerCase();
@@ -53,7 +27,6 @@ function extractSQLTables(sql: string): string[] {
       tables.push(name);
     }
   }
-  // ref("block_name") references
   const refPattern = /\bref\s*\(\s*"([^"]+)"\s*\)/gi;
   for (const m of sql.matchAll(refPattern)) {
     tables.push(m[1]);
@@ -110,18 +83,20 @@ interface CellLineageProps {
   cellName?: string;
   themeMode: 'dark' | 'light';
   t: Theme;
+  /** Called when a node is clicked to focus the full lineage DAG */
+  onFocusNode?: (nodeId: string) => void;
 }
 
-export function CellLineage({ cellContent, cellType, cellName, themeMode, t }: CellLineageProps) {
+export function CellLineage({ cellContent, cellType, cellName, themeMode, t, onFocusNode }: CellLineageProps) {
   const [expanded, setExpanded] = useState(false);
   const [loading, setLoading] = useState(false);
   const [ancestors, setAncestors] = useState<LineageNode[]>([]);
   const [descendants, setDescendants] = useState<LineageNode[]>([]);
   const [tables, setTables] = useState<string[]>([]);
   const [semanticRefs, setSemanticRefs] = useState<{ metrics: string[]; dimensions: string[] }>({ metrics: [], dimensions: [] });
+  const [pathResult, setPathResult] = useState<CompletePathResult | null>(null);
   const [error, setError] = useState<string | null>(null);
 
-  // Determine the block/table name to look up
   const blockName = cellType === 'dql' ? extractBlockName(cellContent) : null;
   const lookupName = blockName || cellName;
 
@@ -132,23 +107,29 @@ export function CellLineage({ cellContent, cellType, cellName, themeMode, t }: C
     setError(null);
 
     try {
-      // Extract SQL-level dependencies
+      // Extract SQL-level dependencies (lightweight client-side parse)
       const sqlTables = extractSQLTables(cellContent);
       setTables(sqlTables);
       setSemanticRefs(extractSemanticRefs(cellContent));
 
-      // Try to fetch block-level lineage from API
+      // Fetch block-level lineage from API
       if (lookupName) {
-        const data = await api.fetchBlockLineage(lookupName);
+        const [data, paths] = await Promise.all([
+          api.fetchBlockLineage(lookupName),
+          api.fetchLineagePaths(`block:${lookupName}`),
+        ]);
         if (data) {
           setAncestors(data.ancestors ?? []);
           setDescendants(data.descendants ?? []);
+        }
+        if (paths) {
+          setPathResult(paths);
         }
       } else {
         // For unnamed SQL cells, fetch full lineage and find matching tables
         const fullLineage = await api.fetchLineage();
         const matchingNodes = fullLineage.nodes.filter(
-          (n: LineageNode) => sqlTables.some((t) => n.name === t || n.id === `table:${t}` || n.id === `block:${t}`)
+          (n: LineageNode) => sqlTables.some((tbl) => n.name === tbl || n.id === `table:${tbl}` || n.id === `block:${tbl}`)
         );
         setAncestors(matchingNodes);
         setDescendants([]);
@@ -168,15 +149,10 @@ export function CellLineage({ cellContent, cellType, cellName, themeMode, t }: C
 
   const hasContent = tables.length > 0 || semanticRefs.metrics.length > 0 || semanticRefs.dimensions.length > 0;
 
-  // Don't show the toggle for empty/trivial cells
   if (!cellContent.trim()) return null;
 
   return (
-    <div
-      style={{
-        borderTop: `1px solid ${t.cellBorder}`,
-      }}
-    >
+    <div style={{ borderTop: `1px solid ${t.cellBorder}` }}>
       {/* Toggle bar */}
       <button
         onClick={() => setExpanded((e) => !e)}
@@ -195,16 +171,7 @@ export function CellLineage({ cellContent, cellType, cellName, themeMode, t }: C
           transition: 'background 0.15s',
         }}
       >
-        <svg
-          width="12"
-          height="12"
-          viewBox="0 0 16 16"
-          fill="none"
-          stroke="currentColor"
-          strokeWidth="1.5"
-          style={{ flexShrink: 0 }}
-        >
-          {/* Lineage icon: connected nodes */}
+        <svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" style={{ flexShrink: 0 }}>
           <circle cx="4" cy="4" r="2" />
           <circle cx="12" cy="8" r="2" />
           <circle cx="4" cy="12" r="2" />
@@ -213,14 +180,29 @@ export function CellLineage({ cellContent, cellType, cellName, themeMode, t }: C
         </svg>
         <span>Lineage</span>
         <svg
-          width="8"
-          height="8"
-          viewBox="0 0 10 10"
-          fill="currentColor"
+          width="8" height="8" viewBox="0 0 10 10" fill="currentColor"
           style={{ transform: expanded ? 'rotate(0deg)' : 'rotate(-90deg)', transition: 'transform 0.15s' }}
         >
           <path d="M1 3l4 4 4-4" stroke="currentColor" fill="none" strokeWidth="1.5" />
         </svg>
+        {/* View in DAG button (shown when expanded and a node exists) */}
+        {expanded && lookupName && onFocusNode && (
+          <span
+            onClick={(e) => {
+              e.stopPropagation();
+              onFocusNode(`block:${lookupName}`);
+            }}
+            style={{
+              marginLeft: 'auto',
+              fontSize: 9,
+              color: t.accent,
+              cursor: 'pointer',
+              textDecoration: 'underline',
+            }}
+          >
+            View in DAG
+          </span>
+        )}
       </button>
 
       {/* Lineage content */}
@@ -232,17 +214,39 @@ export function CellLineage({ cellContent, cellType, cellName, themeMode, t }: C
             <div style={{ color: t.error, padding: '4px 0' }}>{error}</div>
           ) : (
             <>
+              {/* Complete Paths (from API) */}
+              {pathResult && (pathResult.upstreamPaths.length > 0 || pathResult.downstreamPaths.length > 0) && (
+                <div style={{ marginBottom: 8 }}>
+                  <div style={{ fontSize: 9, fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.5px', color: t.textMuted, marginBottom: 4 }}>
+                    Complete Paths
+                  </div>
+                  <div style={{ display: 'grid', gap: 6 }}>
+                    {pathResult.upstreamPaths.slice(0, 3).map((path, i) => (
+                      <LineagePathBreadcrumb
+                        key={`up-${i}`}
+                        path={path}
+                        onNodeClick={onFocusNode}
+                        focalNodeId={lookupName ? `block:${lookupName}` : undefined}
+                        t={t}
+                      />
+                    ))}
+                    {pathResult.downstreamPaths.slice(0, 2).map((path, i) => (
+                      <LineagePathBreadcrumb
+                        key={`down-${i}`}
+                        path={path}
+                        onNodeClick={onFocusNode}
+                        focalNodeId={lookupName ? `block:${lookupName}` : undefined}
+                        t={t}
+                      />
+                    ))}
+                  </div>
+                </div>
+              )}
+
               {/* SQL Dependencies */}
               {tables.length > 0 && (
                 <div style={{ marginBottom: 6 }}>
-                  <div style={{
-                    fontSize: 9,
-                    fontWeight: 700,
-                    textTransform: 'uppercase',
-                    letterSpacing: '0.5px',
-                    color: t.textMuted,
-                    marginBottom: 3,
-                  }}>
+                  <div style={{ fontSize: 9, fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.5px', color: t.textMuted, marginBottom: 3 }}>
                     Reads From ({tables.length})
                   </div>
                   {tables.map((table) => (
@@ -257,14 +261,7 @@ export function CellLineage({ cellContent, cellType, cellName, themeMode, t }: C
               {/* Semantic References */}
               {semanticRefs.metrics.length > 0 && (
                 <div style={{ marginBottom: 6 }}>
-                  <div style={{
-                    fontSize: 9,
-                    fontWeight: 700,
-                    textTransform: 'uppercase',
-                    letterSpacing: '0.5px',
-                    color: t.textMuted,
-                    marginBottom: 3,
-                  }}>
+                  <div style={{ fontSize: 9, fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.5px', color: t.textMuted, marginBottom: 3 }}>
                     Metrics ({semanticRefs.metrics.length})
                   </div>
                   {semanticRefs.metrics.map((m) => (
@@ -278,14 +275,7 @@ export function CellLineage({ cellContent, cellType, cellName, themeMode, t }: C
 
               {semanticRefs.dimensions.length > 0 && (
                 <div style={{ marginBottom: 6 }}>
-                  <div style={{
-                    fontSize: 9,
-                    fontWeight: 700,
-                    textTransform: 'uppercase',
-                    letterSpacing: '0.5px',
-                    color: t.textMuted,
-                    marginBottom: 3,
-                  }}>
+                  <div style={{ fontSize: 9, fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.5px', color: t.textMuted, marginBottom: 3 }}>
                     Dimensions ({semanticRefs.dimensions.length})
                   </div>
                   {semanticRefs.dimensions.map((d) => (
@@ -300,14 +290,7 @@ export function CellLineage({ cellContent, cellType, cellName, themeMode, t }: C
               {/* Upstream (from API) */}
               {ancestors.length > 0 && (
                 <div style={{ marginBottom: 6 }}>
-                  <div style={{
-                    fontSize: 9,
-                    fontWeight: 700,
-                    textTransform: 'uppercase',
-                    letterSpacing: '0.5px',
-                    color: t.textMuted,
-                    marginBottom: 3,
-                  }}>
+                  <div style={{ fontSize: 9, fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.5px', color: t.textMuted, marginBottom: 3 }}>
                     Upstream ({ancestors.length})
                   </div>
                   {ancestors.map((n) => (
@@ -319,14 +302,7 @@ export function CellLineage({ cellContent, cellType, cellName, themeMode, t }: C
               {/* Downstream (from API) */}
               {descendants.length > 0 && (
                 <div style={{ marginBottom: 6 }}>
-                  <div style={{
-                    fontSize: 9,
-                    fontWeight: 700,
-                    textTransform: 'uppercase',
-                    letterSpacing: '0.5px',
-                    color: t.textMuted,
-                    marginBottom: 3,
-                  }}>
+                  <div style={{ fontSize: 9, fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.5px', color: t.textMuted, marginBottom: 3 }}>
                     Downstream ({descendants.length})
                   </div>
                   {descendants.map((n) => (
@@ -336,7 +312,7 @@ export function CellLineage({ cellContent, cellType, cellName, themeMode, t }: C
               )}
 
               {/* No lineage found */}
-              {!hasContent && ancestors.length === 0 && descendants.length === 0 && (
+              {!hasContent && ancestors.length === 0 && descendants.length === 0 && !pathResult && (
                 <div style={{ color: t.textMuted, padding: '2px 0' }}>
                   No lineage dependencies detected for this cell.
                 </div>
