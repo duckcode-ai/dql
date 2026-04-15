@@ -248,7 +248,7 @@ export function buildSemanticTree(
         table: cube.table,
       },
       children: [
-        buildGroupNode('metric', 'Measures', cube.measures.map((metric) => toLeaf('metric', metric.name, metric.label, {
+        buildGroupNode(`cube:${cube.name}`, 'metric', 'Measures', cube.measures.map((metric) => toLeaf('metric', metric.name, metric.label, {
           provider: metric.source?.provider ?? providerName,
           domain: normalizeDomain(metric.domain),
           cube: metric.cube ?? cube.name,
@@ -256,7 +256,7 @@ export function buildSemanticTree(
           tags: (metric.tags ?? []).join(','),
           table: metric.table,
         }))),
-        buildGroupNode('dimension', 'Dimensions', [...cube.dimensions, ...cube.timeDimensions].map((dimension) => toLeaf('dimension', dimension.name, dimension.label, {
+        buildGroupNode(`cube:${cube.name}`, 'dimension', 'Dimensions', [...cube.dimensions, ...cube.timeDimensions].map((dimension) => toLeaf('dimension', dimension.name, dimension.label, {
           provider: dimension.source?.provider ?? providerName,
           domain: normalizeDomain(dimension.domain),
           cube: dimension.cube ?? cube.name,
@@ -264,14 +264,14 @@ export function buildSemanticTree(
           tags: (dimension.tags ?? []).join(','),
           table: dimension.table,
         }))),
-        buildGroupNode('segment', 'Segments', cube.segments.map((segment) => toLeaf('segment', segment.name, segment.label, {
+        buildGroupNode(`cube:${cube.name}`, 'segment', 'Segments', cube.segments.map((segment) => toLeaf('segment', segment.name, segment.label, {
           provider: segment.source?.provider ?? providerName,
           domain: normalizeDomain(segment.domain),
           cube: segment.cube || cube.name,
           owner: segment.owner ?? cube.owner ?? null,
           tags: (segment.tags ?? []).join(','),
         }))),
-        buildGroupNode('pre_aggregation', 'Pre-aggregations', cube.preAggregations.map((preAggregation) => toLeaf('pre_aggregation', preAggregation.name, preAggregation.label, {
+        buildGroupNode(`cube:${cube.name}`, 'pre_aggregation', 'Pre-aggregations', cube.preAggregations.map((preAggregation) => toLeaf('pre_aggregation', preAggregation.name, preAggregation.label, {
           provider: preAggregation.source?.provider ?? providerName,
           domain: normalizeDomain(preAggregation.domain),
           cube: preAggregation.cube || cube.name,
@@ -283,7 +283,7 @@ export function buildSemanticTree(
 
     const children: SemanticTreeNode[] = [...cubeNodes];
     const looseNodes = [
-      buildGroupNode('metric', 'Metrics', looseMetrics.map((metric) => toLeaf('metric', metric.name, metric.label, {
+      buildGroupNode(`domain:${domain}`, 'metric', 'Metrics', looseMetrics.map((metric) => toLeaf('metric', metric.name, metric.label, {
         provider: metric.source?.provider ?? providerName,
         domain: normalizeDomain(metric.domain),
         cube: metric.cube ?? null,
@@ -291,7 +291,7 @@ export function buildSemanticTree(
         tags: (metric.tags ?? []).join(','),
         table: metric.table,
       }))),
-      buildGroupNode('dimension', 'Dimensions', looseDimensions.map((dimension) => toLeaf('dimension', dimension.name, dimension.label, {
+      buildGroupNode(`domain:${domain}`, 'dimension', 'Dimensions', looseDimensions.map((dimension) => toLeaf('dimension', dimension.name, dimension.label, {
         provider: dimension.source?.provider ?? providerName,
         domain: normalizeDomain(dimension.domain),
         cube: dimension.cube ?? null,
@@ -299,20 +299,20 @@ export function buildSemanticTree(
         tags: (dimension.tags ?? []).join(','),
         table: dimension.table,
       }))),
-      buildGroupNode('hierarchy', 'Hierarchies', domainHierarchies.map((hierarchy) => toLeaf('hierarchy', hierarchy.name, hierarchy.label, {
+      buildGroupNode(`domain:${domain}`, 'hierarchy', 'Hierarchies', domainHierarchies.map((hierarchy) => toLeaf('hierarchy', hierarchy.name, hierarchy.label, {
         provider: hierarchy.source?.provider ?? providerName,
         domain: normalizeDomain(hierarchy.domain),
         owner: hierarchy.owner ?? null,
         tags: (hierarchy.tags ?? []).join(','),
       }))),
-      buildGroupNode('segment', 'Segments', segments.filter((segment) => segment.domain === domain && !segment.cube).map((segment) => toLeaf('segment', segment.name, segment.label, {
+      buildGroupNode(`domain:${domain}`, 'segment', 'Segments', segments.filter((segment) => segment.domain === domain && !segment.cube).map((segment) => toLeaf('segment', segment.name, segment.label, {
         provider: segment.source?.provider ?? providerName,
         domain: normalizeDomain(segment.domain),
         cube: segment.cube || null,
         owner: segment.owner ?? null,
         tags: (segment.tags ?? []).join(','),
       }))),
-      buildGroupNode('pre_aggregation', 'Pre-aggregations', preAggregations.filter((preAggregation) => preAggregation.domain === domain && !preAggregation.cube).map((preAggregation) => toLeaf('pre_aggregation', preAggregation.name, preAggregation.label, {
+      buildGroupNode(`domain:${domain}`, 'pre_aggregation', 'Pre-aggregations', preAggregations.filter((preAggregation) => preAggregation.domain === domain && !preAggregation.cube).map((preAggregation) => toLeaf('pre_aggregation', preAggregation.name, preAggregation.label, {
         provider: preAggregation.source?.provider ?? providerName,
         domain: normalizeDomain(preAggregation.domain),
         cube: preAggregation.cube || null,
@@ -866,13 +866,14 @@ function yamlBlockScalar(value: string, indent: number = 2): string {
 }
 
 function buildGroupNode(
+  scope: string,
   kind: SemanticImportManifestObject['kind'],
   label: string,
   children: SemanticTreeNode[],
 ): SemanticTreeNode | null {
   if (children.length === 0) return null;
   return {
-    id: `group:${kind}:${label.toLowerCase()}`,
+    id: `group:${scope}:${kind}:${label.toLowerCase().replace(/[^a-z0-9]+/g, '-')}`,
     label,
     kind: 'group',
     count: children.length,

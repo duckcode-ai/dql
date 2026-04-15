@@ -10,6 +10,8 @@ import { NewNotebookModal } from '../modals/NewNotebookModal';
 import { NewBlockModal } from '../modals/NewBlockModal';
 import { BlockStudio } from '../block-studio/BlockStudio';
 import { LineageDAG } from '../sidebar/LineageDAG';
+import { ConnectionPanel } from '../sidebar/ConnectionPanel';
+import { ReferencePanel } from '../sidebar/ReferencePanel';
 import { api } from '../../api/client';
 import { parseNotebookFile } from '../../utils/parse-workbook';
 import { makeCell } from '../../store/NotebookStore';
@@ -121,7 +123,6 @@ export function AppShell() {
         {state.sidebarOpen && (
           <Sidebar
             onOpenFile={handleOpenFile}
-            onNavigateToCell={handleNavigateToCell}
           />
         )}
 
@@ -137,6 +138,20 @@ export function AppShell() {
         >
           {state.lineageFullscreen ? (
             <LineageDAG />
+          ) : state.mainView === 'connection' ? (
+            <FullPageSection
+              title="Connections"
+              description="Manage database connections, edit driver settings, and test connectivity in a full-page workspace."
+            >
+              <ConnectionPanel />
+            </FullPageSection>
+          ) : state.mainView === 'reference' ? (
+            <FullPageSection
+              title="Quick Reference"
+              description="Browse the complete DQL guide, semantic workflows, and authoring patterns in a documentation-style view."
+            >
+              <ReferencePanel themeMode={state.themeMode} />
+            </FullPageSection>
           ) : (
             <>
               {state.mainView === 'block_studio' ? (
@@ -158,6 +173,30 @@ export function AppShell() {
       {/* Modals */}
       {state.newNotebookModalOpen && <NewNotebookModal onFileOpened={handleOpenFile} />}
       {state.newBlockModalOpen && <NewBlockModal onFileOpened={handleOpenFile} />}
+    </div>
+  );
+}
+
+function FullPageSection({
+  title,
+  description,
+  children,
+}: {
+  title: string;
+  description: string;
+  children: React.ReactNode;
+}) {
+  return (
+    <div style={{ flex: 1, display: 'flex', flexDirection: 'column', minWidth: 0, overflow: 'hidden' }}>
+      <div style={{ padding: '18px 24px 12px', borderBottom: '1px solid rgba(127, 127, 127, 0.16)' }}>
+        <div style={{ fontSize: 22, fontWeight: 700 }}>{title}</div>
+        <div style={{ fontSize: 13, opacity: 0.72, marginTop: 6, maxWidth: 760, lineHeight: 1.5 }}>
+          {description}
+        </div>
+      </div>
+      <div style={{ flex: 1, minHeight: 0, overflow: 'auto' }}>
+        {children}
+      </div>
     </div>
   );
 }

@@ -14,6 +14,8 @@
 
 **DQL is an open-source analytics language, CLI, and notebook UI** — each analytics answer lives in a single `.dql` file: SQL + visualization config + owner + tests + parameters, all Git-trackable. No more query sprawl. No more broken charts. No more lost work.
 
+→ **[Start with the docs hub](./docs/README.md)**
+
 → **[Why DQL exists and what problem it solves](./docs/why-dql.md)**
 
 ---
@@ -42,6 +44,10 @@ Your browser opens with a notebook connected to DuckDB in-memory. Write SQL cell
 
 → **[Quickstart — zero to running notebook in 2 minutes](./docs/quickstart.md)**
 
+→ **[Install and first project](./docs/01-start-here/install-and-first-project.md)**
+
+→ **[Full getting started guide with the Jaffle Shop dbt project](./docs/01-start-here/dbt-jaffle-shop.md)**
+
 ### Path B: dbt + Jaffle Shop (5 minutes)
 
 Use the Jaffle Shop dbt project to see DQL's full power — semantic metrics, lineage, and Block Studio.
@@ -64,6 +70,8 @@ dql notebook
 `dql init .` auto-detects the dbt project, finds `jaffle_shop.duckdb`, and imports semantic metrics/dimensions from the dbt YAML files — all in one step.
 
 → **[Full getting started guide with Jaffle Shop](./docs/getting-started.md)**
+
+→ **[Quickstart — zero to running notebook in 5 minutes](./docs/01-start-here/dbt-jaffle-shop.md)**
 
 ### Path C: Enterprise — Your dbt Repo + Your Database
 
@@ -352,8 +360,12 @@ Not sure where to start? Pick your goal:
 
 | Guide | What it covers |
 |---|---|
-| [Quickstart](./docs/quickstart.md) | 2-minute path from install to running notebook (DQL-only or dbt) |
-| [Getting Started](./docs/getting-started.md) | Full walkthrough with Jaffle Shop dbt project |
+| [Docs Hub](./docs/README.md) | Ordered documentation index for new users and contributors |
+| [Install and First Project](./docs/01-start-here/install-and-first-project.md) | Clean first-time-user setup path |
+| [Run From Source](./docs/01-start-here/run-from-source.md) | Clone, install, build, test, and smoke-test locally |
+| [dbt + Jaffle Shop Walkthrough](./docs/01-start-here/dbt-jaffle-shop.md) | Step-by-step dbt-backed semantic-layer setup |
+| [Quickstart](./docs/quickstart.md) | Short dbt-based path from setup to notebook |
+| [Getting Started](./docs/getting-started.md) | Detailed walkthrough with Jaffle Shop dbt project |
 | [Enterprise Getting Started](./docs/enterprise-getting-started.md) | Your own dbt repo + Snowflake/Postgres/BigQuery |
 
 ### Core Workflows

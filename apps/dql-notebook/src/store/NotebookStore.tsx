@@ -50,13 +50,26 @@ const initialState: NotebookState = {
 function notebookReducer(state: NotebookState, action: NotebookAction): NotebookState {
   switch (action.type) {
     case 'SET_MAIN_VIEW':
-      return { ...state, mainView: action.view };
+      return { ...state, mainView: action.view, lineageFullscreen: false };
 
     case 'SET_THEME':
       return { ...state, themeMode: action.mode };
 
     case 'SET_SIDEBAR_PANEL':
-      return { ...state, sidebarPanel: action.panel, sidebarOpen: action.panel !== null };
+      return {
+        ...state,
+        sidebarPanel: action.panel,
+        sidebarOpen: action.panel !== null && action.panel !== 'connection' && action.panel !== 'reference',
+        lineageFullscreen: false,
+        mainView:
+          action.panel === 'connection'
+            ? 'connection'
+            : action.panel === 'reference'
+              ? 'reference'
+              : state.activeFile?.type === 'block'
+                ? 'block_studio'
+                : 'notebook',
+      };
 
     case 'TOGGLE_SIDEBAR':
       return { ...state, sidebarOpen: !state.sidebarOpen };
@@ -81,6 +94,7 @@ function notebookReducer(state: NotebookState, action: NotebookAction): Notebook
         blockStudioPreview: action.file.type === 'block' ? state.blockStudioPreview : null,
         blockStudioValidation: action.file.type === 'block' ? state.blockStudioValidation : null,
         blockStudioMetadata: action.file.type === 'block' ? state.blockStudioMetadata : null,
+        lineageFullscreen: false,
       };
 
     case 'OPEN_BLOCK_STUDIO':
@@ -91,6 +105,7 @@ function notebookReducer(state: NotebookState, action: NotebookAction): Notebook
         notebookTitle: action.payload.metadata.name,
         notebookDirty: false,
         mainView: 'block_studio',
+        sidebarPanel: state.sidebarPanel === 'semantic' ? 'files' : state.sidebarPanel,
         dashboardMode: false,
         activeBlockPath: action.payload.path,
         blockStudioDraft: action.payload.source,
@@ -98,6 +113,7 @@ function notebookReducer(state: NotebookState, action: NotebookAction): Notebook
         blockStudioPreview: null,
         blockStudioValidation: action.payload.validation,
         blockStudioMetadata: action.payload.metadata,
+        lineageFullscreen: false,
       };
 
     case 'SET_CELLS':

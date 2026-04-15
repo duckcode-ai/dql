@@ -73,14 +73,6 @@ function LineageIcon() {
   );
 }
 
-function OutlineIcon() {
-  return (
-    <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor">
-      <path d="M2 2h12a1 1 0 0 1 0 2H2a1 1 0 0 1 0-2Zm0 4h8a1 1 0 0 1 0 2H2a1 1 0 0 1 0-2Zm0 4h10a1 1 0 0 1 0 2H2a1 1 0 0 1 0-2Z" />
-    </svg>
-  );
-}
-
 function ConnectionIcon() {
   return (
     <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor">
@@ -116,8 +108,14 @@ function SettingsIcon() {
 export function ActivityBar() {
   const { state, dispatch } = useNotebook();
   const t = themes[state.themeMode];
+  const showSemanticButton = state.mainView !== 'block_studio';
 
   function handlePanelClick(panel: SidebarPanel) {
+    const fullPagePanel = panel === 'connection' || panel === 'reference';
+    if (fullPagePanel) {
+      dispatch({ type: 'SET_SIDEBAR_PANEL', panel });
+      return;
+    }
     if (state.sidebarPanel === panel && state.sidebarOpen) {
       dispatch({ type: 'TOGGLE_SIDEBAR' });
     } else {
@@ -159,14 +157,16 @@ export function ActivityBar() {
         <SchemaIcon />
       </IconButton>
 
-      <IconButton
-        title="Semantic Layer"
-        active={state.sidebarPanel === 'semantic' && state.sidebarOpen}
-        onClick={() => handlePanelClick('semantic')}
-        t={t}
-      >
-        <SemanticIcon />
-      </IconButton>
+      {showSemanticButton && (
+        <IconButton
+          title="Semantic Layer"
+          active={state.sidebarPanel === 'semantic' && state.sidebarOpen}
+          onClick={() => handlePanelClick('semantic')}
+          t={t}
+        >
+          <SemanticIcon />
+        </IconButton>
+      )}
 
       <IconButton
         title="Block Library"
@@ -192,17 +192,8 @@ export function ActivityBar() {
       </IconButton>
 
       <IconButton
-        title="Outline"
-        active={state.sidebarPanel === 'outline' && state.sidebarOpen}
-        onClick={() => handlePanelClick('outline')}
-        t={t}
-      >
-        <OutlineIcon />
-      </IconButton>
-
-      <IconButton
         title="Connection"
-        active={state.sidebarPanel === 'connection' && state.sidebarOpen}
+        active={state.mainView === 'connection'}
         onClick={() => handlePanelClick('connection')}
         t={t}
       >
@@ -211,7 +202,7 @@ export function ActivityBar() {
 
       <IconButton
         title="Reference"
-        active={state.sidebarPanel === 'reference' && state.sidebarOpen}
+        active={state.mainView === 'reference'}
         onClick={() => handlePanelClick('reference')}
         t={t}
       >
@@ -223,7 +214,7 @@ export function ActivityBar() {
 
       <IconButton
         title="Help & Reference"
-        active={state.sidebarPanel === 'reference' && state.sidebarOpen}
+        active={state.mainView === 'reference'}
         onClick={() => handlePanelClick('reference')}
         t={t}
       >

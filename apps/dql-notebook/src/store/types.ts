@@ -23,9 +23,9 @@ export interface ParamConfig {
   defaultValue: string;
   options?: string[];
 }
-export type SidebarPanel = 'files' | 'schema' | 'outline' | 'connection' | 'reference' | 'semantic' | 'lineage' | 'block_library' | null;
+export type SidebarPanel = 'files' | 'schema' | 'connection' | 'reference' | 'semantic' | 'lineage' | null;
 export type DevPanelTab = 'logs' | 'errors';
-export type MainView = 'notebook' | 'block_studio';
+export type MainView = 'notebook' | 'block_studio' | 'connection' | 'reference';
 
 export interface QueryResult {
   columns: string[];

@@ -9,6 +9,22 @@ export interface BlockFields {
   name: string;
 }
 
+interface ParsedBlockDocument extends BlockFields {
+  metric: string;
+  metrics: string[];
+  dimensions: string[];
+  timeDimension: string;
+  granularity: string;
+  query: string;
+  visualization: string;
+  tests: string;
+}
+
+interface SemanticSelection {
+  kind: 'metric' | 'dimension';
+  name: string;
+}
+
 export function parseDqlChartConfig(content: string): CellChartConfig | undefined {
   const vizMatch = content.match(/visualization\s*\{([^}]+)\}/is);
   if (!vizMatch) return undefined;
@@ -22,7 +38,7 @@ export function parseDqlChartConfig(content: string): CellChartConfig | undefine
     x: get('x'),
     y: get('y'),
     color: get('color'),
-    title: get('title'),
+    title: body.match(/\btitle\s*=\s*"([^"]+)"/i)?.[1],
   };
 }
 
@@ -89,67 +105,110 @@ function trimAtNamedArgBoundary(sql: string): string {
 }
 
 export function parseBlockFields(content: string): BlockFields | null {
-  if (!/^\s*block\s+"/i.test(content.trim())) return null;
-  const str = (key: string) =>
-    content.match(new RegExp(`\\b${key}\\s*=\\s*"([^"]*)"`, 'i'))?.[1] ?? '';
-  const name = content.match(/^\s*block\s+"([^"]+)"/i)?.[1] ?? '';
-  const tagsMatch = content.match(/\btags\s*=\s*\[([^\]]*)\]/i);
-  const tags = tagsMatch
-    ? (tagsMatch[1].match(/"([^"]*)"/g) ?? []).map((s: string) => s.slice(1, -1))
-    : [];
+  const parsed = parseBlockDocument(content);
+  if (!parsed) return null;
   return {
-    name,
-    domain: str('domain'),
-    owner: str('owner'),
-    description: str('description'),
-    blockType: str('type') || 'custom',
-    tags,
+    name: parsed.name,
+    domain: parsed.domain,
+    owner: parsed.owner,
+    description: parsed.description,
+    blockType: parsed.blockType,
+    tags: parsed.tags,
   };
 }
 
 export function setBlockStringField(content: string, key: string, value: string): string {
-  const escaped = value.replace(/"/g, '\\"');
-  const re = new RegExp(`(\\b${key}\\s*=\\s*)"[^"]*"`, 'i');
-  if (re.test(content)) {
-    return content.replace(re, `$1"${escaped}"`);
+  const parsed = parseBlockDocument(content);
+  if (!parsed) {
+    const escaped = value.replace(/"/g, '\\"');
+    const re = new RegExp(`(\\b${key}\\s*=\\s*)"[^"]*"`, 'i');
+    if (re.test(content)) {
+      return content.replace(re, `$1"${escaped}"`);
+    }
+    return insertBlockField(content, `  ${key} = "${escaped}"`);
   }
-  return insertBlockField(content, `  ${key} = "${escaped}"`);
+
+  const next = { ...parsed };
+  if (key === 'domain') next.domain = value;
+  if (key === 'owner') next.owner = value;
+  if (key === 'description') next.description = value;
+  if (key === 'type') next.blockType = value;
+  return normalizeBlockDocument(next);
 }
 
 export function setBlockName(content: string, value: string): string {
-  const escaped = value.replace(/"/g, '\\"');
-  return /^\s*block\s+"/i.test(content)
-    ? content.replace(/^(\s*block\s+)"[^"]+"/i, `$1"${escaped}"`)
-    : content;
+  const parsed = parseBlockDocument(content);
+  if (!parsed) {
+    const escaped = value.replace(/"/g, '\\"');
+    return /^\s*block\s+"/i.test(content)
+      ? content.replace(/^(\s*block\s+)"[^"]+"/i, `$1"${escaped}"`)
+      : content;
+  }
+  return normalizeBlockDocument({ ...parsed, name: value });
 }
 
 export function setBlockTags(content: string, tags: string[]): string {
-  const tagStr = tags.map((tag) => `"${tag.replace(/"/g, '\\"')}"`).join(', ');
-  const re = /(\btags\s*=\s*)\[[^\]]*\]/i;
-  if (re.test(content)) {
-    return content.replace(re, `$1[${tagStr}]`);
+  const parsed = parseBlockDocument(content);
+  if (!parsed) {
+    const tagStr = tags.map((tag) => `"${tag.replace(/"/g, '\\"')}"`).join(', ');
+    const re = /(\btags\s*=\s*)\[[^\]]*\]/i;
+    if (re.test(content)) {
+      return content.replace(re, `$1[${tagStr}]`);
+    }
+    return insertBlockField(content, `  tags = [${tagStr}]`);
   }
-  return insertBlockField(content, `  tags = [${tagStr}]`);
+  return normalizeBlockDocument({ ...parsed, tags });
 }
 
 export function upsertVisualizationConfig(content: string, chartConfig: CellChartConfig): string {
-  const lines: string[] = [];
-  lines.push('visualization {');
-  lines.push(`    chart = "${chartConfig.chart ?? 'table'}"`);
-  if (chartConfig.x) lines.push(`    x = ${chartConfig.x}`);
-  if (chartConfig.y) lines.push(`    y = ${chartConfig.y}`);
-  if (chartConfig.color) lines.push(`    color = ${chartConfig.color}`);
-  if (chartConfig.title) lines.push(`    title = "${chartConfig.title.replace(/"/g, '\\"')}"`);
-  lines.push('  }');
-  const block = lines.join('\n');
-  if (/visualization\s*\{[\s\S]*?\n\s*\}/i.test(content)) {
-    return content.replace(/visualization\s*\{[\s\S]*?\n\s*\}/i, block);
+  const parsed = parseBlockDocument(content);
+  const visualization = buildVisualizationSection(chartConfig);
+  if (!parsed) {
+    if (/visualization\s*\{[\s\S]*?\n\s*\}/i.test(content)) {
+      return content.replace(/visualization\s*\{[\s\S]*?\n\s*\}/i, visualization);
+    }
+    return insertBlockField(content, `  ${visualization.replace(/\n/g, '\n  ')}`, true);
   }
-  return insertBlockField(content, `  ${block.replace(/\n/g, '\n  ')}`, true);
+  return normalizeBlockDocument({ ...parsed, visualization });
 }
 
 export function buildSemanticRef(kind: 'metric' | 'dimension', name: string): string {
   return kind === 'metric' ? `@metric(${name})` : `@dim(${name})`;
+}
+
+export function upsertSemanticSelection(content: string, selection: SemanticSelection): string {
+  const parsed = parseBlockDocument(content);
+  if (!parsed || parsed.blockType !== 'semantic') return content;
+
+  const next: ParsedBlockDocument = {
+    ...parsed,
+    metrics: [...parsed.metrics],
+    dimensions: [...parsed.dimensions],
+  };
+
+  if (selection.kind === 'metric') {
+    const allMetrics = new Set<string>();
+    if (next.metric) allMetrics.add(next.metric);
+    for (const metric of next.metrics) allMetrics.add(metric);
+    allMetrics.add(selection.name);
+    const orderedMetrics = Array.from(allMetrics);
+    next.metric = orderedMetrics.length === 1 ? orderedMetrics[0] : '';
+    next.metrics = orderedMetrics.length > 1 ? orderedMetrics : [];
+  } else if (!next.dimensions.includes(selection.name)) {
+    next.dimensions = [...next.dimensions, selection.name];
+  }
+
+  return normalizeBlockDocument(next);
+}
+
+export function appendSemanticRefToQuery(content: string, reference: string): string {
+  const parsed = parseBlockDocument(content);
+  if (!parsed || parsed.blockType !== 'custom') {
+    return `${content.trimEnd()}\n${reference}\n`;
+  }
+  const query = parsed.query.trimEnd();
+  const nextQuery = query ? `${query}\n${reference}` : reference;
+  return normalizeBlockDocument({ ...parsed, query: nextQuery });
 }
 
 export function extractSemanticReferences(content: string): {
@@ -178,6 +237,137 @@ export function extractSemanticReferences(content: string): {
     dimensions: Array.from(dimensions),
     segments: Array.from(segments),
   };
+}
+
+function parseBlockDocument(content: string): ParsedBlockDocument | null {
+  if (!/^\s*block\s+"/i.test(content.trim())) return null;
+  const str = (key: string) =>
+    content.match(new RegExp(`\\b${key}\\s*=\\s*"([^"]*)"`, 'i'))?.[1] ?? '';
+  const name = content.match(/^\s*block\s+"([^"]+)"/i)?.[1] ?? '';
+  const tagsMatch = content.match(/\btags\s*=\s*\[([^\]]*)\]/i);
+  const queryMatch = content.match(/query\s*=\s*"""([\s\S]*?)"""/i);
+  return {
+    name,
+    domain: str('domain'),
+    owner: str('owner'),
+    description: str('description'),
+    blockType: (str('type') || 'custom').toLowerCase() === 'semantic' ? 'semantic' : 'custom',
+    tags: tagsMatch ? (tagsMatch[1].match(/"([^"]*)"/g) ?? []).map((value) => value.slice(1, -1)) : [],
+    metric: str('metric'),
+    metrics: parseArrayField(content, 'metrics'),
+    dimensions: parseArrayField(content, 'dimensions'),
+    timeDimension: str('time_dimension'),
+    granularity: str('granularity'),
+    query: queryMatch?.[1]?.trim() ?? '',
+    visualization: extractNamedBlock(content, 'visualization'),
+    tests: extractNamedBlock(content, 'tests'),
+  };
+}
+
+function parseArrayField(content: string, key: string): string[] {
+  const match = content.match(new RegExp(`\\b${key}\\s*=\\s*\\[([\\s\\S]*?)\\]`, 'i'));
+  if (!match) return [];
+  return (match[1].match(/"([^"]*)"/g) ?? []).map((value) => value.slice(1, -1)).filter(Boolean);
+}
+
+function extractNamedBlock(content: string, key: string): string {
+  const startMatch = new RegExp(`\\b${key}\\s*\\{`, 'i').exec(content);
+  if (!startMatch || startMatch.index == null) return '';
+  let depth = 0;
+  let start = -1;
+  for (let i = startMatch.index; i < content.length; i++) {
+    const ch = content[i];
+    if (ch === '{') {
+      if (depth === 0) start = i;
+      depth++;
+    } else if (ch === '}') {
+      depth--;
+      if (depth === 0 && start >= 0) {
+        return content.slice(startMatch.index, i + 1).trim();
+      }
+    }
+  }
+  return '';
+}
+
+function normalizeBlockDocument(doc: ParsedBlockDocument): string {
+  const lines = [
+    `block "${escapeDqlString(doc.name || 'New Block')}" {`,
+    `  domain = "${escapeDqlString(doc.domain || 'uncategorized')}"`,
+    `  type = "${doc.blockType}"`,
+    `  description = "${escapeDqlString(doc.description)}"`,
+    `  owner = "${escapeDqlString(doc.owner)}"`,
+    `  tags = [${doc.tags.map((tag) => `"${escapeDqlString(tag)}"`).join(', ')}]`,
+  ];
+
+  if (doc.blockType === 'semantic') {
+    const semanticMetrics = doc.metrics.length > 0
+      ? Array.from(new Set(doc.metrics))
+      : doc.metric
+        ? [doc.metric]
+        : [];
+    if (semanticMetrics.length === 1) {
+      lines.push(`  metric = "${escapeDqlString(semanticMetrics[0])}"`);
+    } else if (semanticMetrics.length > 1) {
+      lines.push(`  metrics = [${semanticMetrics.map((metric) => `"${escapeDqlString(metric)}"`).join(', ')}]`);
+    }
+    if (doc.dimensions.length > 0) {
+      lines.push(`  dimensions = [${Array.from(new Set(doc.dimensions)).map((dimension) => `"${escapeDqlString(dimension)}"`).join(', ')}]`);
+    }
+    if (doc.timeDimension) {
+      lines.push(`  time_dimension = "${escapeDqlString(doc.timeDimension)}"`);
+    }
+    if (doc.granularity) {
+      lines.push(`  granularity = "${escapeDqlString(doc.granularity)}"`);
+    }
+  }
+
+  if (doc.blockType === 'custom') {
+    lines.push('');
+    lines.push('  query = """');
+    lines.push(...indentBlock(doc.query.trim(), 4));
+    lines.push('  """');
+  }
+
+  if (doc.visualization) {
+    lines.push('');
+    lines.push(...indentExistingBlock(doc.visualization, 2));
+  }
+
+  if (doc.tests) {
+    lines.push('');
+    lines.push(...indentExistingBlock(doc.tests, 2));
+  }
+
+  lines.push('}');
+  return lines.join('\n') + '\n';
+}
+
+function buildVisualizationSection(chartConfig: CellChartConfig): string {
+  const lines: string[] = [];
+  lines.push('visualization {');
+  lines.push(`  chart = "${chartConfig.chart ?? 'table'}"`);
+  if (chartConfig.x) lines.push(`  x = ${chartConfig.x}`);
+  if (chartConfig.y) lines.push(`  y = ${chartConfig.y}`);
+  if (chartConfig.color) lines.push(`  color = ${chartConfig.color}`);
+  if (chartConfig.title) lines.push(`  title = "${escapeDqlString(chartConfig.title)}"`);
+  lines.push('}');
+  return lines.join('\n');
+}
+
+function indentBlock(value: string, spaces: number): string[] {
+  const indent = ' '.repeat(spaces);
+  const lines = value ? value.split('\n') : [''];
+  return lines.map((line) => `${indent}${line}`);
+}
+
+function indentExistingBlock(value: string, spaces: number): string[] {
+  const indent = ' '.repeat(spaces);
+  return value.split('\n').map((line) => `${indent}${line.trimEnd()}`);
+}
+
+function escapeDqlString(value: string): string {
+  return value.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
 }
 
 function insertBlockField(content: string, field: string, beforeClosingBrace: boolean = false): string {

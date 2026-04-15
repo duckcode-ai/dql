@@ -12,17 +12,19 @@ import type {
 import { themes } from '../../themes/notebook-theme';
 import type { Theme } from '../../themes/notebook-theme';
 import { SQLCellEditor } from '../cells/SQLCellEditor';
-import { ChartOutput, CHART_TYPE_OPTIONS } from '../output/ChartOutput';
+import { ChartOutput, CHART_TYPE_OPTIONS, resolveChartType } from '../output/ChartOutput';
 import { TableOutput } from '../output/TableOutput';
 import { MetricDetailPanel } from '../sidebar/MetricDetailPanel';
 import { SemanticSearchBar } from '../sidebar/SemanticSearchBar';
 import { SemanticTreeNode as TreeRow } from '../sidebar/SemanticTreeNode';
 import {
+  appendSemanticRefToQuery,
   buildSemanticRef,
   parseBlockFields,
   setBlockName,
   setBlockStringField,
   setBlockTags,
+  upsertSemanticSelection,
   upsertVisualizationConfig,
 } from '../../utils/block-studio';
 import { getTypeColor } from '../../utils/type-colors';
@@ -70,6 +72,10 @@ export function BlockStudio() {
   const [statusUpdating, setStatusUpdating] = useState(false);
   const [scrollTop, setScrollTop] = useState(0);
   const [viewportHeight, setViewportHeight] = useState(400);
+  const [leftPaneWidth, setLeftPaneWidth] = useState(360);
+  const [bottomPaneHeight, setBottomPaneHeight] = useState(280);
+  const [leftPaneCollapsed, setLeftPaneCollapsed] = useState(false);
+  const [bottomPaneCollapsed, setBottomPaneCollapsed] = useState(false);
   const semanticTreeRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
@@ -169,6 +175,11 @@ export function BlockStudio() {
     return () => observer.disconnect();
   }, []);
 
+  useEffect(() => {
+    setScrollTop(0);
+    if (semanticTreeRef.current) semanticTreeRef.current.scrollTop = 0;
+  }, [query, providerFilter, domainFilter, cubeFilter, ownerFilter, tagFilter, typeFilter]);
+
   const draftMetadata = useMemo(() => {
     const parsed = parseBlockFields(state.blockStudioDraft);
     if (!state.blockStudioMetadata) return parsed;
@@ -193,6 +204,24 @@ export function BlockStudio() {
       const preview = await api.runBlockStudio(state.blockStudioDraft, state.activeBlockPath);
       dispatch({ type: 'SET_BLOCK_STUDIO_PREVIEW', preview });
       setResultTab('results');
+    } catch (error) {
+      dispatch({
+        type: 'SET_BLOCK_STUDIO_VALIDATION',
+        validation: {
+          valid: false,
+          chartConfig: state.blockStudioValidation?.chartConfig,
+          executableSql: state.blockStudioValidation?.executableSql ?? null,
+          semanticRefs: state.blockStudioValidation?.semanticRefs ?? { metrics: [], dimensions: [], segments: [] },
+          diagnostics: [
+            {
+              severity: 'error',
+              code: 'block_run_failed',
+              message: error instanceof Error ? error.message : String(error),
+            },
+          ],
+        },
+      });
+      setResultTab('validate');
     } finally {
       setRunning(false);
     }
@@ -253,9 +282,16 @@ export function BlockStudio() {
   const handleSemanticInsert = (item: SemanticObjectDetail) => {
     if (item.kind === 'metric' || item.kind === 'dimension') {
       const ref = buildSemanticRef(item.kind === 'metric' ? 'metric' : 'dimension', item.name);
-      if (!insertSemanticReference(ref)) {
-        handleDraftChange(appendSnippetToDraft(state.blockStudioDraft, ref));
+      const blockType = parseBlockFields(state.blockStudioDraft)?.blockType ?? 'custom';
+      if (blockType === 'semantic') {
+        handleDraftChange(upsertSemanticSelection(state.blockStudioDraft, {
+          kind: item.kind === 'metric' ? 'metric' : 'dimension',
+          name: item.name,
+        }));
+      } else if (!insertSemanticReference(ref)) {
+        handleDraftChange(appendSemanticRefToQuery(state.blockStudioDraft, ref));
       }
+      dispatch({ type: 'ADD_SEMANTIC_RECENT', name: item.name });
       return;
     }
     if (item.kind === 'segment' && item.sql) {
@@ -302,10 +338,55 @@ export function BlockStudio() {
   }, [dispatch]);
 
   const currentChart = state.blockStudioValidation?.chartConfig ?? state.blockStudioPreview?.chartConfig ?? { chart: 'table' };
+  const activeResultChartType = state.blockStudioPreview
+    ? resolveChartType(state.blockStudioPreview.result, state.blockStudioPreview.chartConfig)
+    : 'table';
+
+  const startLeftResize = (event: React.MouseEvent<HTMLDivElement>) => {
+    event.preventDefault();
+    const startX = event.clientX;
+    const startWidth = leftPaneWidth;
+    const onMove = (moveEvent: MouseEvent) => {
+      const next = Math.min(520, Math.max(280, startWidth + moveEvent.clientX - startX));
+      setLeftPaneWidth(next);
+    };
+    const onUp = () => {
+      window.removeEventListener('mousemove', onMove);
+      window.removeEventListener('mouseup', onUp);
+    };
+    window.addEventListener('mousemove', onMove);
+    window.addEventListener('mouseup', onUp);
+  };
+
+  const startBottomResize = (event: React.MouseEvent<HTMLDivElement>) => {
+    event.preventDefault();
+    const startY = event.clientY;
+    const startHeight = bottomPaneHeight;
+    const onMove = (moveEvent: MouseEvent) => {
+      const next = Math.min(520, Math.max(180, startHeight - (moveEvent.clientY - startY)));
+      setBottomPaneHeight(next);
+    };
+    const onUp = () => {
+      window.removeEventListener('mousemove', onMove);
+      window.removeEventListener('mouseup', onUp);
+    };
+    window.addEventListener('mousemove', onMove);
+    window.addEventListener('mouseup', onUp);
+  };
 
   return (
-    <div style={{ flex: 1, display: 'grid', gridTemplateColumns: '360px minmax(0, 1fr) 340px', overflow: 'hidden', background: t.appBg }}>
-      <div style={{ borderRight: `1px solid ${t.headerBorder}`, display: 'flex', flexDirection: 'column', overflow: 'hidden', background: t.sidebarBg }}>
+    <div
+      style={{
+        flex: 1,
+        position: 'relative',
+        display: 'grid',
+        gridTemplateColumns: leftPaneCollapsed ? '0 0 minmax(0, 1fr)' : `${leftPaneWidth}px 6px minmax(0, 1fr)`,
+        gridTemplateRows: bottomPaneCollapsed ? 'minmax(0, 1fr) 0 0' : `minmax(0, 1fr) 6px ${bottomPaneHeight}px`,
+        overflow: 'hidden',
+        background: t.appBg,
+      }}
+    >
+      <div style={{ borderRight: leftPaneCollapsed ? 'none' : `1px solid ${t.headerBorder}`, display: leftPaneCollapsed ? 'none' : 'flex', flexDirection: 'column', overflow: 'hidden', background: t.sidebarBg, minWidth: 0 }}>
         <div style={{ padding: 14, display: 'grid', gap: 12, borderBottom: `1px solid ${t.headerBorder}` }}>
           <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10 }}>
             <div>
@@ -314,11 +395,20 @@ export function BlockStudio() {
                 Build DQL with semantic models and live database structure in one workspace.
               </div>
             </div>
-            {state.semanticLayer.provider && (
-              <span style={{ fontSize: 10, fontWeight: 700, color: t.accent, background: `${t.accent}18`, borderRadius: 999, padding: '5px 9px', textTransform: 'uppercase', letterSpacing: '0.04em' }}>
-                {state.semanticLayer.provider}
-              </span>
-            )}
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+              {state.semanticLayer.provider && (
+                <span style={{ fontSize: 10, fontWeight: 700, color: t.accent, background: `${t.accent}18`, borderRadius: 999, padding: '5px 9px', textTransform: 'uppercase', letterSpacing: '0.04em' }}>
+                  {state.semanticLayer.provider}
+                </span>
+              )}
+              <button
+                onClick={() => setLeftPaneCollapsed(true)}
+                style={{ background: t.btnBg, border: `1px solid ${t.btnBorder}`, borderRadius: 6, color: t.textSecondary, cursor: 'pointer', fontSize: 12, fontFamily: t.font, padding: '4px 8px' }}
+                title="Collapse explorer"
+              >
+                ‹
+              </button>
+            </div>
           </div>
           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, minmax(0, 1fr))', gap: 8 }}>
             <StudioStatCard label="Metrics" value={semanticStats.metrics} t={t} />
@@ -437,8 +527,26 @@ export function BlockStudio() {
         )}
       </div>
 
-      <div style={{ display: 'flex', flexDirection: 'column', minWidth: 0, overflow: 'hidden' }}>
+      <div
+        onMouseDown={leftPaneCollapsed ? undefined : startLeftResize}
+        style={{
+          display: leftPaneCollapsed ? 'none' : 'block',
+          cursor: 'col-resize',
+          background: t.headerBorder,
+        }}
+      />
+
+      <div style={{ display: 'flex', flexDirection: 'column', minWidth: 0, overflow: 'hidden', gridColumn: '3', gridRow: '1' }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '12px 14px', borderBottom: `1px solid ${t.headerBorder}`, background: t.cellBg }}>
+          {leftPaneCollapsed && (
+            <button
+              onClick={() => setLeftPaneCollapsed(false)}
+              style={{ background: t.btnBg, border: `1px solid ${t.btnBorder}`, borderRadius: 6, color: t.textSecondary, cursor: 'pointer', fontSize: 12, fontFamily: t.font, padding: '6px 10px' }}
+              title="Open explorer"
+            >
+              Explorer
+            </button>
+          )}
           <div>
             <div style={{ fontSize: 12, fontWeight: 700, color: t.textPrimary, fontFamily: t.font }}>DQL Source</div>
             <div style={{ fontSize: 11, color: t.textMuted, fontFamily: t.font }}>
@@ -468,7 +576,18 @@ export function BlockStudio() {
         </div>
       </div>
 
-      <div style={{ borderLeft: `1px solid ${t.headerBorder}`, display: 'flex', flexDirection: 'column', overflow: 'hidden', background: t.cellBg }}>
+      <div
+        onMouseDown={bottomPaneCollapsed ? undefined : startBottomResize}
+        style={{
+          gridColumn: '1 / -1',
+          gridRow: '2',
+          display: bottomPaneCollapsed ? 'none' : 'block',
+          cursor: 'row-resize',
+          background: t.headerBorder,
+        }}
+      />
+
+      <div style={{ gridColumn: '1 / -1', gridRow: '3', borderTop: bottomPaneCollapsed ? 'none' : `1px solid ${t.headerBorder}`, display: bottomPaneCollapsed ? 'none' : 'flex', flexDirection: 'column', overflow: 'hidden', background: t.cellBg }}>
         <div style={{ padding: '12px 14px', display: 'grid', gap: 10, borderBottom: `1px solid ${t.headerBorder}` }}>
           <div>
             <div style={{ fontSize: 12, fontWeight: 700, color: t.textPrimary, fontFamily: t.font }}>Preview & Governance</div>
@@ -476,35 +595,42 @@ export function BlockStudio() {
               Validate references, inspect results, tune visualization, and save companion metadata.
             </div>
           </div>
-          <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-          <ExplorerTabButton active={resultTab === 'validate'} onClick={() => setResultTab('validate')} label="Validate" />
-          <ExplorerTabButton active={resultTab === 'results'} onClick={() => setResultTab('results')} label="Results" />
-          <ExplorerTabButton active={resultTab === 'visualization'} onClick={() => setResultTab('visualization')} label="Visualization" />
-          <ExplorerTabButton active={resultTab === 'tests'} onClick={() => setResultTab('tests')} label="Tests" />
-          <ExplorerTabButton active={resultTab === 'history'} onClick={() => {
-            setResultTab('history');
-            if (!historyLoaded && state.activeBlockPath) {
-              api.getBlockHistory(state.activeBlockPath).then((r) => { setHistoryEntries(r.entries); setHistoryLoaded(true); });
-            }
-          }} label="History" />
-          <ExplorerTabButton active={resultTab === 'save'} onClick={() => setResultTab('save')} label="Save" />
+          <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
+            <ExplorerTabButton active={resultTab === 'results'} onClick={() => setResultTab('results')} label="Results" />
+            <ExplorerTabButton active={resultTab === 'visualization'} onClick={() => setResultTab('visualization')} label="Visualization" />
+            <ExplorerTabButton active={resultTab === 'validate'} onClick={() => setResultTab('validate')} label="Validate" />
+            <ExplorerTabButton active={resultTab === 'tests'} onClick={() => setResultTab('tests')} label="Tests" />
+            <ExplorerTabButton active={resultTab === 'history'} onClick={() => {
+              setResultTab('history');
+              if (!historyLoaded && state.activeBlockPath) {
+                api.getBlockHistory(state.activeBlockPath).then((r) => { setHistoryEntries(r.entries); setHistoryLoaded(true); });
+              }
+            }} label="History" />
+            <ExplorerTabButton active={resultTab === 'save'} onClick={() => setResultTab('save')} label="Save" />
+            <div style={{ flex: 1 }} />
+            <button
+              onClick={() => setBottomPaneCollapsed(true)}
+              style={{ background: t.btnBg, border: `1px solid ${t.btnBorder}`, borderRadius: 6, color: t.textSecondary, cursor: 'pointer', fontSize: 12, fontFamily: t.font, padding: '6px 10px' }}
+            >
+              Hide Pane
+            </button>
           </div>
         </div>
 
         <div style={{ flex: 1, overflow: 'auto' }}>
-          {resultTab === 'validate' && (
-            <DiagnosticsPanel diagnostics={state.blockStudioValidation?.diagnostics ?? []} t={t} />
-          )}
           {resultTab === 'results' && (
             state.blockStudioPreview ? (
               <div style={{ display: 'grid', gap: 12, padding: 12 }}>
                 <div style={{ fontSize: 11, color: t.textMuted, fontFamily: t.fontMono }}>{state.blockStudioPreview.sql}</div>
-                <ChartOutput
-                  result={state.blockStudioPreview.result}
-                  chartConfig={state.blockStudioPreview.chartConfig}
-                  themeMode={state.themeMode}
-                />
-                <TableOutput result={state.blockStudioPreview.result} themeMode={state.themeMode} />
+                {activeResultChartType === 'table' ? (
+                  <TableOutput result={state.blockStudioPreview.result} themeMode={state.themeMode} />
+                ) : (
+                  <ChartOutput
+                    result={state.blockStudioPreview.result}
+                    chartConfig={state.blockStudioPreview.chartConfig}
+                    themeMode={state.themeMode}
+                  />
+                )}
               </div>
             ) : (
               <EmptyPanel message="Run the block to preview results and visualization." />
@@ -534,6 +660,9 @@ export function BlockStudio() {
               }}
               t={t}
             />
+          )}
+          {resultTab === 'validate' && (
+            <DiagnosticsPanel diagnostics={state.blockStudioValidation?.diagnostics ?? []} t={t} />
           )}
           {resultTab === 'history' && (
             <HistoryPanel entries={historyEntries} t={t} />
@@ -576,6 +705,17 @@ export function BlockStudio() {
           )}
         </div>
       </div>
+
+      {bottomPaneCollapsed && (
+        <div style={{ position: 'absolute', right: 16, bottom: 16 }}>
+          <button
+            onClick={() => setBottomPaneCollapsed(false)}
+            style={{ background: t.btnBg, border: `1px solid ${t.btnBorder}`, borderRadius: 6, color: t.textSecondary, cursor: 'pointer', fontSize: 12, fontFamily: t.font, padding: '8px 12px' }}
+          >
+            Open Results
+          </button>
+        </div>
+      )}
     </div>
   );
 }

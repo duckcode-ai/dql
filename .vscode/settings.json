@@ -9,7 +9,7 @@
             "alias": "duckdb-demo",
             "type": "file",
             "path": "/Users/Kranthi/Downloads/duckdb-demo.duckdb",
-            "attached": true
+            "attached": false
         }
     ],
     "duckdb.defaultDatabase": "duckdb-demo"

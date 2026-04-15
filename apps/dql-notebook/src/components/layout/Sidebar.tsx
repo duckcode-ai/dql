@@ -3,7 +3,6 @@ import { useNotebook } from '../../store/NotebookStore';
 import { themes } from '../../themes/notebook-theme';
 import { FilesPanel } from '../sidebar/FilesPanel';
 import { SchemaPanel } from '../sidebar/SchemaPanel';
-import { OutlinePanel } from '../sidebar/OutlinePanel';
 import { ConnectionPanel } from '../sidebar/ConnectionPanel';
 import { ReferencePanel } from '../sidebar/ReferencePanel';
 import { SemanticPanel } from '../sidebar/SemanticPanel';
@@ -13,7 +12,6 @@ import type { NotebookFile } from '../../store/types';
 
 interface SidebarProps {
   onOpenFile: (file: NotebookFile) => void;
-  onNavigateToCell: (cellId: string) => void;
 }
 
 const PANEL_TITLES: Record<string, string> = {
@@ -21,18 +19,18 @@ const PANEL_TITLES: Record<string, string> = {
   schema: 'Schema',
   semantic: 'Semantic Layer',
   lineage: 'Lineage',
-  block_library: 'Block Library',
-  outline: 'Outline',
   connection: 'Connection',
   reference: 'Quick Reference',
 };
 
-export function Sidebar({ onOpenFile, onNavigateToCell }: SidebarProps) {
+export function Sidebar({ onOpenFile }: SidebarProps) {
   const { state, dispatch } = useNotebook();
   const t = themes[state.themeMode];
   const [collapseHover, setCollapseHover] = useState(false);
 
-  const panel = state.sidebarPanel;
+  const panel = state.mainView === 'block_studio' && state.sidebarPanel === 'semantic'
+    ? 'files'
+    : state.sidebarPanel;
 
   return (
     <div
@@ -99,8 +97,6 @@ export function Sidebar({ onOpenFile, onNavigateToCell }: SidebarProps) {
         {panel === 'schema' && <SchemaPanel />}
         {panel === 'semantic' && <SemanticPanel />}
         {panel === 'lineage' && <LineagePanel />}
-        {panel === 'block_library' && <BlockLibraryPanel />}
-        {panel === 'outline' && <OutlinePanel onNavigate={onNavigateToCell} />}
         {panel === 'connection' && <ConnectionPanel />}
         {panel === 'reference' && <ReferencePanel themeMode={state.themeMode} />}
       </div>

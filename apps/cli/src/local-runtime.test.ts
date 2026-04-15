@@ -7,11 +7,13 @@ import {
   prepareLocalExecution,
   resolveProjectRelativeSqlPaths,
   serializeJSON,
+  validateBlockStudioSource,
 } from './local-runtime.js';
 import { afterEach } from 'vitest';
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
+import { SemanticLayer } from '@duckcodeailabs/dql-core';
 
 const tempDirs: string[] = [];
 
@@ -145,5 +147,108 @@ describe('semantic block save artifacts', () => {
     expect(companion).toContain('semanticDimensions:');
     expect(companion).toContain('  - sales_channel');
     expect(companion).toContain('  - order_date');
+  });
+});
+
+describe('validateBlockStudioSource', () => {
+  const semanticLayer = new SemanticLayer({
+    metrics: [
+      {
+        name: 'total_revenue',
+        label: 'Total Revenue',
+        description: 'Revenue metric',
+        domain: 'finance',
+        sql: 'SUM(revenue)',
+        type: 'sum',
+        table: 'orders',
+        tags: [],
+      },
+    ],
+    dimensions: [
+      {
+        name: 'customer_type',
+        label: 'Customer Type',
+        description: 'Customer type dimension',
+        domain: 'finance',
+        sql: 'customer_type',
+        type: 'string',
+        table: 'orders',
+        tags: [],
+      },
+    ],
+    hierarchies: [],
+  });
+
+  it('composes executable SQL for semantic blocks with metric and dimensions', () => {
+    const source = `block "Revenue by Type" {
+  domain = "finance"
+  type = "semantic"
+  description = ""
+  owner = ""
+  tags = []
+  metric = "total_revenue"
+  dimensions = ["customer_type"]
+}`;
+
+    const validation = validateBlockStudioSource(source, semanticLayer);
+
+    expect(validation.valid).toBe(true);
+    expect(validation.executableSql).toContain('SUM(revenue) AS total_revenue');
+    expect(validation.executableSql).toContain('customer_type AS customer_type');
+    expect(validation.executableSql).toContain('GROUP BY customer_type');
+  });
+
+  it('returns an actionable diagnostic when a semantic block is missing a metric', () => {
+    const source = `block "Revenue by Type" {
+  domain = "finance"
+  type = "semantic"
+  description = ""
+  owner = ""
+  tags = []
+  dimensions = ["customer_type"]
+}`;
+
+    const validation = validateBlockStudioSource(source, semanticLayer);
+
+    expect(validation.valid).toBe(false);
+    expect(validation.executableSql).toBeNull();
+    expect(validation.diagnostics.some((item) => item.code === 'semantic_metric_missing')).toBe(true);
+  });
+
+  it('returns a semantic validation error for unknown dimensions', () => {
+    const source = `block "Revenue by Type" {
+  domain = "finance"
+  type = "semantic"
+  description = ""
+  owner = ""
+  tags = []
+  metric = "total_revenue"
+  dimensions = ["missing_dimension"]
+}`;
+
+    const validation = validateBlockStudioSource(source, semanticLayer);
+
+    expect(validation.valid).toBe(false);
+    expect(validation.diagnostics.some((item) => item.code === 'semantic_ref' && item.message.includes('missing_dimension'))).toBe(true);
+  });
+
+  it('keeps custom block validation behavior unchanged', () => {
+    const source = `block "Custom Revenue" {
+  domain = "finance"
+  type = "custom"
+  description = ""
+  owner = ""
+  tags = []
+
+  query = """
+SELECT revenue
+FROM orders
+"""
+}`;
+
+    const validation = validateBlockStudioSource(source, semanticLayer);
+
+    expect(validation.valid).toBe(true);
+    expect(validation.executableSql).toContain('SELECT revenue');
   });
 });

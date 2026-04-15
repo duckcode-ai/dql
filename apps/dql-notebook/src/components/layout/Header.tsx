@@ -54,6 +54,12 @@ export function Header() {
   const exportDropdownRef = useRef<HTMLDivElement>(null);
   const titleInputRef = useRef<HTMLInputElement>(null);
   const currentDirty = state.mainView === 'block_studio' ? state.blockStudioDirty : state.notebookDirty;
+  const inNotebookExecutionView = state.mainView === 'notebook';
+  const headerTitle = state.mainView === 'connection'
+    ? 'Connections'
+    : state.mainView === 'reference'
+      ? 'Quick Reference'
+      : state.notebookTitle || 'Untitled';
 
   useEffect(() => {
     if (editingTitle && titleInputRef.current) {
@@ -248,7 +254,7 @@ export function Header() {
             {state.activeFile.type}
           </span>
         )}
-        {state.activeFile ? (
+        {state.activeFile && state.mainView !== 'connection' && state.mainView !== 'reference' ? (
           editingTitle ? (
             <input
               ref={titleInputRef}
@@ -292,7 +298,7 @@ export function Header() {
                 border: '1px solid transparent',
               }}
             >
-              {state.notebookTitle || 'Untitled'}
+              {headerTitle}
               {currentDirty && (
                 <span style={{ color: t.textMuted, marginLeft: 4 }}>●</span>
               )}
@@ -307,7 +313,7 @@ export function Header() {
               padding: '2px 4px',
             }}
           >
-            DQL Notebook
+            {headerTitle || 'DQL Notebook'}
           </span>
         )}
       </div>
@@ -319,8 +325,8 @@ export function Header() {
       <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
         {/* Run All */}
         <button
-          onClick={state.mainView === 'block_studio' ? undefined : executeAll}
-          disabled={!state.activeFile || state.mainView === 'block_studio'}
+          onClick={inNotebookExecutionView ? executeAll : undefined}
+          disabled={!state.activeFile || !inNotebookExecutionView}
           onMouseEnter={() => setRunHover(true)}
           onMouseLeave={() => setRunHover(false)}
           style={{
@@ -328,7 +334,7 @@ export function Header() {
             background: runHover && state.activeFile ? t.accent : t.accent,
             color: '#ffffff',
             border: `1px solid ${t.accent}`,
-            opacity: !state.activeFile || state.mainView === 'block_studio' ? 0.4 : runHover ? 0.9 : 1,
+            opacity: !state.activeFile || !inNotebookExecutionView ? 0.4 : runHover ? 0.9 : 1,
           }}
         >
           <svg width="10" height="10" viewBox="0 0 10 10" fill="currentColor">

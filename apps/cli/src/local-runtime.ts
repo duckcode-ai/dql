@@ -665,17 +665,39 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
       try {
         const body = await readJSON(req);
         const source = typeof body.source === 'string' ? body.source : '';
+        const targetConnection = isConnectionConfig(body.connection) ? body.connection : connection;
+        let tableMapping: Record<string, string> | undefined;
+        if (semanticLayer) {
+          try {
+            const tablesResult = await executor.executeQuery(
+              `SELECT table_schema, table_name
+               FROM information_schema.tables
+               WHERE table_schema NOT IN ('information_schema', 'pg_catalog')`,
+              [], {}, targetConnection,
+            );
+            tableMapping = buildSemanticTableMapping(semanticLayer, tablesResult.rows);
+          } catch {
+            tableMapping = undefined;
+          }
+        }
+        const semanticCompose = semanticLayer
+          ? composeSemanticBlockSql(source, semanticLayer, { driver: targetConnection.driver, tableMapping })
+          : null;
         const validation = validateBlockStudioSource(source, semanticLayer);
-        if (!validation.executableSql) {
+        const executableSql = semanticCompose?.sql ?? validation.executableSql;
+        if (!executableSql) {
           res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
-          res.end(serializeJSON({ error: 'No executable SQL found in block source.' }));
+          const message = semanticCompose?.diagnostics.find((item) => item.severity === 'error')?.message
+            ?? validation.diagnostics.find((item) => item.severity === 'error')?.message
+            ?? 'No executable SQL found in block source.';
+          res.end(serializeJSON({ error: message, diagnostics: validation.diagnostics }));
           return;
         }
-        const sql = resolveProjectRelativeSqlPaths(validation.executableSql, projectRoot, projectConfig.dataDir);
-        const result = await executor.executeQuery(sql, [], {}, connection);
+        const sql = resolveProjectRelativeSqlPaths(executableSql, projectRoot, projectConfig.dataDir);
+        const result = await executor.executeQuery(sql, [], {}, targetConnection);
         res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
         res.end(serializeJSON({
-          sql: validation.executableSql,
+          sql: executableSql,
           result: normalizeQueryResult(result),
           chartConfig: validation.chartConfig ?? null,
         }));
@@ -2397,17 +2419,166 @@ function openBlockStudioDocument(
   };
 }
 
-function validateBlockStudioSource(
+type BlockStudioDiagnostic = { severity: 'error' | 'warning' | 'info'; message: string; code?: string };
+
+interface ParsedSemanticBlockConfig {
+  blockType: 'semantic' | 'custom';
+  metric?: string;
+  metrics: string[];
+  dimensions: string[];
+  timeDimension?: string;
+  granularity?: string;
+  limit?: number;
+}
+
+function parseBlockStudioArrayField(source: string, key: string): string[] {
+  const match = source.match(new RegExp(`\\b${key}\\s*=\\s*\\[([\\s\\S]*?)\\]`, 'i'));
+  if (!match) return [];
+  return (match[1].match(/"([^"]*)"/g) ?? []).map((value) => value.slice(1, -1)).filter(Boolean);
+}
+
+function parseBlockStudioStringField(source: string, key: string): string | undefined {
+  return source.match(new RegExp(`\\b${key}\\s*=\\s*"([^"]*)"`, 'i'))?.[1] ?? undefined;
+}
+
+function parseSemanticBlockConfig(source: string): ParsedSemanticBlockConfig {
+  const blockType = (parseBlockStudioStringField(source, 'type') ?? 'custom').toLowerCase() === 'semantic'
+    ? 'semantic'
+    : 'custom';
+  const metric = parseBlockStudioStringField(source, 'metric');
+  const metrics = parseBlockStudioArrayField(source, 'metrics');
+  const dimensions = parseBlockStudioArrayField(source, 'dimensions');
+  const timeDimension = parseBlockStudioStringField(source, 'time_dimension');
+  const granularity = parseBlockStudioStringField(source, 'granularity');
+  const limitMatch = source.match(/\blimit\s*=\s*(\d+)/i);
+  return {
+    blockType,
+    metric,
+    metrics,
+    dimensions,
+    timeDimension,
+    granularity,
+    limit: limitMatch ? Number.parseInt(limitMatch[1], 10) : undefined,
+  };
+}
+
+function buildSemanticTableMapping(
+  semanticLayer: SemanticLayer,
+  rows: Array<Record<string, unknown>>,
+): Record<string, string> | undefined {
+  const dbTableNames = new Set<string>();
+  const schemaQualified = new Map<string, string>();
+  for (const row of rows) {
+    const schema = String(row['table_schema'] ?? '');
+    const name = String(row['table_name'] ?? '');
+    if (!name) continue;
+    dbTableNames.add(name);
+    schemaQualified.set(name, schema ? `${schema}.${name}` : name);
+  }
+
+  const tableMapping: Record<string, string> = {};
+  const allSemanticTables = new Set<string>();
+  for (const metric of semanticLayer.listMetrics()) allSemanticTables.add(metric.table);
+  for (const dimension of semanticLayer.listDimensions()) allSemanticTables.add(dimension.table);
+  for (const semTable of allSemanticTables) {
+    if (dbTableNames.has(semTable) && schemaQualified.has(semTable)) {
+      tableMapping[semTable] = schemaQualified.get(semTable)!;
+    }
+  }
+  return Object.keys(tableMapping).length > 0 ? tableMapping : undefined;
+}
+
+function composeSemanticBlockSql(
+  source: string,
+  semanticLayer: SemanticLayer,
+  options?: {
+    driver?: ConnectionConfig['driver'];
+    tableMapping?: Record<string, string>;
+  },
+): { sql: string | null; diagnostics: BlockStudioDiagnostic[]; semanticRefs: { metrics: string[]; dimensions: string[]; segments: string[] } } {
+  const config = parseSemanticBlockConfig(source);
+  const metrics = config.metrics.length > 0
+    ? config.metrics
+    : config.metric
+      ? [config.metric]
+      : [];
+  const semanticRefs = {
+    metrics,
+    dimensions: config.dimensions,
+    segments: [] as string[],
+  };
+  const diagnostics: BlockStudioDiagnostic[] = [];
+
+  if (config.blockType !== 'semantic') {
+    return { sql: null, diagnostics, semanticRefs };
+  }
+
+  if (metrics.length === 0) {
+    diagnostics.push({
+      severity: 'error',
+      code: 'semantic_metric_missing',
+      message: 'Semantic block is missing a metric. Add metric = "metric_name" or metrics = ["metric_name"].',
+    });
+    return { sql: null, diagnostics, semanticRefs };
+  }
+
+  if (config.timeDimension && !config.granularity) {
+    diagnostics.push({
+      severity: 'error',
+      code: 'semantic_granularity_missing',
+      message: `Semantic block selects time_dimension = "${config.timeDimension}" but is missing granularity.`,
+    });
+  }
+
+  const refValidation = semanticLayer.validateReferences([...metrics, ...config.dimensions]);
+  for (const unknown of refValidation.unknown) {
+    diagnostics.push({
+      severity: 'error',
+      code: 'semantic_ref',
+      message: `Unknown semantic reference: ${unknown}`,
+    });
+  }
+  if (diagnostics.some((diagnostic) => diagnostic.severity === 'error')) {
+    return { sql: null, diagnostics, semanticRefs };
+  }
+
+  const composed = semanticLayer.composeQuery({
+    metrics,
+    dimensions: config.dimensions,
+    timeDimension: config.timeDimension && config.granularity
+      ? { name: config.timeDimension, granularity: config.granularity }
+      : undefined,
+    limit: config.limit,
+    driver: options?.driver,
+    tableMapping: options?.tableMapping,
+  });
+  if (!composed) {
+    diagnostics.push({
+      severity: 'error',
+      code: 'semantic_compose_failed',
+      message: `Could not compose SQL for semantic block metrics: [${metrics.join(', ')}].`,
+    });
+    return { sql: null, diagnostics, semanticRefs };
+  }
+
+  return {
+    sql: composed.sql,
+    diagnostics,
+    semanticRefs,
+  };
+}
+
+export function validateBlockStudioSource(
   source: string,
   semanticLayer?: SemanticLayer,
 ): {
   valid: boolean;
-  diagnostics: Array<{ severity: 'error' | 'warning' | 'info'; message: string; code?: string }>;
+  diagnostics: BlockStudioDiagnostic[];
   semanticRefs: { metrics: string[]; dimensions: string[]; segments: string[] };
   chartConfig?: { chart?: string; x?: string; y?: string; color?: string; title?: string };
   executableSql?: string | null;
 } {
-  const diagnostics: Array<{ severity: 'error' | 'warning' | 'info'; message: string; code?: string }> = [];
+  const diagnostics: BlockStudioDiagnostic[] = [];
   try {
     const parser = new Parser(source, '<block-studio>');
     parser.parse();
@@ -2419,8 +2590,37 @@ function validateBlockStudioSource(
     });
   }
 
-  const semanticRefs = extractBlockStudioSemanticReferences(source);
-  if (semanticLayer) {
+  let semanticRefs = extractBlockStudioSemanticReferences(source);
+  const semanticConfig = parseSemanticBlockConfig(source);
+  if (semanticConfig.blockType === 'semantic') {
+    const selectedMetrics = semanticConfig.metrics.length > 0
+      ? semanticConfig.metrics
+      : semanticConfig.metric
+        ? [semanticConfig.metric]
+        : [];
+    semanticRefs = {
+      metrics: selectedMetrics,
+      dimensions: semanticConfig.dimensions,
+      segments: semanticRefs.segments,
+    };
+  }
+
+  let executableSql = extractBlockStudioSql(source);
+  if (semanticConfig.blockType === 'semantic') {
+    if (semanticLayer) {
+      const semanticCompose = composeSemanticBlockSql(source, semanticLayer);
+      semanticRefs = semanticCompose.semanticRefs;
+      diagnostics.push(...semanticCompose.diagnostics);
+      executableSql = semanticCompose.sql;
+    } else {
+      diagnostics.push({
+        severity: 'error',
+        code: 'semantic_layer_missing',
+        message: 'Semantic block cannot run because no semantic layer is configured.',
+      });
+      executableSql = null;
+    }
+  } else if (semanticLayer) {
     const refValidation = semanticLayer.validateReferences([
       ...semanticRefs.metrics,
       ...semanticRefs.dimensions,
@@ -2444,13 +2644,18 @@ function validateBlockStudioSource(
     });
   }
 
-  const executableSql = extractBlockStudioSql(source);
   if (!executableSql) {
-    diagnostics.push({
-      severity: 'warning',
-      code: 'sql_missing',
-      message: 'No executable SQL found in the block source.',
-    });
+    diagnostics.push(semanticConfig.blockType === 'semantic'
+      ? {
+          severity: 'warning',
+          code: 'semantic_not_runnable',
+          message: 'Semantic block is not runnable yet. Select a metric and complete any required time settings.',
+        }
+      : {
+          severity: 'warning',
+          code: 'sql_missing',
+          message: 'No executable SQL found in the block source.',
+        });
   }
 
   return {
