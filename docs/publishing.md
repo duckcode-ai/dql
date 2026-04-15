@@ -180,7 +180,7 @@ Published packages:
 - Do not publish packages from the closed DuckCode product from this repository.
 - `@duckcodeailabs/dql-cli` registers a `dql` binary on install.
 - `dql-language-support` is packaged separately through `vsce`, not `npm publish`.
-- `v0.8.6` is the current release. All packages use unified versioning — bump all together.
+- `v0.8.7` is the current release. All packages use unified versioning — bump all together.
 
 ---
 

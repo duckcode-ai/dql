@@ -61,7 +61,7 @@ The repo includes a `profiles.yml` that configures DuckDB as the target. After `
 
 ```bash
 npm install -g @duckcodeailabs/dql-cli
-dql --version    # verify install (should print 0.8.6 or later)
+dql --version    # verify install (should print 0.8.7 or later)
 ```
 
 ---

@@ -6,7 +6,7 @@ For completed changes, see [CHANGELOG.md](./CHANGELOG.md).
 
 ---
 
-## Current State (v0.8.6)
+## Current State (v0.8.7)
 
 DQL is **production-usable** for:
 - Authoring and validating `.dql` blocks with SQL, tests, and governance metadata
