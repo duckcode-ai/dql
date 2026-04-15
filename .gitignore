@@ -11,3 +11,4 @@ dist
 npm-debug.log*
 pnpm-debug.log*
 jaffle-shop/
+.claude/worktrees/
