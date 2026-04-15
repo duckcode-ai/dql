@@ -38,7 +38,7 @@ describe('runBuild', () => {
       template: 'starter',
       connection: '',
       verbose: false,
-      skipTests: false,
+      skipTests: false, version: false,
     });
 
     expect(readFileSync(join(outDir, 'index.html'), 'utf-8')).toContain('Revenue Preview');

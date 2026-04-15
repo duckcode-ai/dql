@@ -75,8 +75,31 @@ export function deserializeNotebook(raw: string): NotebookDocument {
   };
 }
 
-export function createWelcomeNotebook(template: string, projectTitle: string): NotebookDocument {
+function listTablesSQL(driver?: string): string {
+  switch (driver) {
+    case 'duckdb':
+    case 'sqlite':
+    case 'file':
+      return `SHOW TABLES;`;
+    case 'postgresql':
+    case 'redshift':
+      return `SELECT table_schema, table_name FROM information_schema.tables\nWHERE table_schema NOT IN ('information_schema', 'pg_catalog')\nORDER BY table_schema, table_name LIMIT 20;`;
+    case 'mysql':
+      return `SELECT table_schema, table_name FROM information_schema.tables\nWHERE table_schema NOT IN ('information_schema', 'mysql', 'performance_schema', 'sys')\nORDER BY table_schema, table_name LIMIT 20;`;
+    case 'snowflake':
+    case 'mssql':
+    case 'databricks':
+    case 'trino':
+    case 'fabric':
+      return `SELECT table_schema, table_name FROM information_schema.tables\nWHERE table_schema NOT IN ('INFORMATION_SCHEMA')\nORDER BY table_schema, table_name LIMIT 20;`;
+    default:
+      return `SELECT table_schema, table_name FROM information_schema.tables\nLIMIT 20;`;
+  }
+}
+
+export function createWelcomeNotebook(template: string, projectTitle: string, driver?: string): NotebookDocument {
   const normalized = template.toLowerCase();
+  const showTablesQuery = listTablesSQL(driver);
 
   if (normalized === 'dbt') {
     return createNotebookDocument(`${projectTitle} — DQL Notebook`, [
@@ -84,39 +107,33 @@ export function createWelcomeNotebook(template: string, projectTitle: string): N
         id: 'intro',
         type: 'markdown',
         title: 'Welcome',
-        source: `# ${projectTitle}\n\nThis notebook connects to your dbt project's DuckDB database. Run the cells below to explore the mart tables built by dbt.\n\n> DQL is the **answer layer** on top of dbt. dbt transforms your data — DQL turns it into trusted, governed analytics answers.`,
+        source: `# ${projectTitle}\n\nThis notebook connects to your dbt project's database. Run the cells below to explore the tables built by dbt.\n\n> DQL is the **answer layer** on top of dbt. dbt transforms your data — DQL turns it into trusted, governed analytics answers.`,
       },
       {
         id: 'sql-tables',
         type: 'sql',
         title: 'Available Tables',
-        source: `-- List all tables in your DuckDB database\nSHOW TABLES;`,
+        source: `-- List tables in your database\n${showTablesQuery}`,
       },
       {
-        id: 'sql-customers',
+        id: 'sql-explore',
         type: 'sql',
-        title: 'Customer Overview',
-        source: `SELECT\n  customer_type,\n  COUNT(*) AS customers,\n  ROUND(AVG(count_lifetime_orders), 1) AS avg_orders,\n  ROUND(AVG(lifetime_spend), 2) AS avg_spend\nFROM dim_customers\nGROUP BY customer_type\nORDER BY customers DESC;`,
+        title: 'Explore Your Data',
+        source: `-- Replace 'your_table' with a table name from the results above\n-- SELECT * FROM your_table LIMIT 20;`,
       },
       {
-        id: 'dql-revenue',
+        id: 'dql-example',
         type: 'dql',
-        title: 'Order Revenue',
-        source: `block "Order Revenue" {\n    domain = "finance"\n    type   = "custom"\n    owner  = "data-team"\n    description = "Total order revenue over time"\n\n    query = """\n        SELECT\n            DATE_TRUNC('month', ordered_at) AS month,\n            COUNT(*) AS orders,\n            ROUND(SUM(order_total), 2) AS revenue\n        FROM fct_orders\n        GROUP BY 1\n        ORDER BY 1\n    """\n\n    visualization {\n        chart = "bar"\n        x     = month\n        y     = revenue\n    }\n\n    tests {\n        assert row_count > 0\n    }\n}`,
-      },
-      {
-        id: 'sql-items',
-        type: 'sql',
-        title: 'Top Products',
-        source: `SELECT\n  p.product_name,\n  COUNT(*) AS items_sold,\n  ROUND(SUM(oi.product_price), 2) AS total_revenue\nFROM order_items oi\nJOIN stg_products p ON oi.product_id = p.product_id\nGROUP BY p.product_name\nORDER BY total_revenue DESC\nLIMIT 10;`,
+        title: 'Example DQL Block',
+        source: `block "Example Block" {\n    domain = "analytics"\n    type   = "custom"\n    owner  = "data-team"\n    description = "An example governed analytics block"\n\n    query = """\n        -- Replace with your own query\n        ${showTablesQuery.replace(/\n/g, '\n        ')}\n    """\n\n    tests {\n        assert row_count > 0\n    }\n}`,
       },
       {
         id: 'next-steps',
         type: 'markdown',
         title: 'Next Steps',
-        source: `## Next steps\n\n1. **Add SQL cells** — query any table from your dbt project\n2. **Create DQL blocks** — wrap queries with governance (owner, domain, tests)\n3. **Import lineage** — run \`dql compile --dbt-manifest target/manifest.json\`\n4. **View lineage** — run \`dql lineage\` to see the full data flow\n5. **Export** — save as \`.dqlnb\` for git-trackable analytics`,
+        source: `## Next steps\n\n1. **Add SQL cells** — query any table from your dbt project\n2. **Create DQL blocks** — wrap queries with governance (owner, domain, tests)\n3. **Open Block Studio** — use the sidebar to browse tables and semantic metrics\n4. **View lineage** — run \`dql lineage\` to see the full data flow\n5. **Export** — save as \`.dqlnb\` for git-trackable analytics`,
       },
-    ], { description: 'DQL notebook for exploring a dbt project with DuckDB.', template: 'dbt' });
+    ], { description: 'DQL notebook for exploring a dbt project.', template: 'dbt' });
   }
 
   // Default notebook for non-dbt projects
@@ -128,10 +145,16 @@ export function createWelcomeNotebook(template: string, projectTitle: string): N
       source: `# ${projectTitle}\n\nWelcome to the DQL notebook. Use this notebook to write SQL, create governed DQL blocks, and build analytics answers — all tracked in Git.`,
     },
     {
+      id: 'sql-tables',
+      type: 'sql',
+      title: 'Available Tables',
+      source: `-- List tables in your database\n${showTablesQuery}`,
+    },
+    {
       id: 'sql-starter',
       type: 'sql',
       title: 'Starter Query',
-      source: `-- Write your SQL here\n-- DQL uses DuckDB — you can query local CSV, Parquet, and JSON files directly\n-- Example: SELECT * FROM read_csv_auto('./data/my_file.csv') LIMIT 10;`,
+      source: `-- Write your SQL here\n-- If using DuckDB, you can query local CSV, Parquet, and JSON files directly\n-- Example: SELECT * FROM read_csv_auto('./data/my_file.csv') LIMIT 10;`,
     },
     {
       id: 'next-steps',

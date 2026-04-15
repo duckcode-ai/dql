@@ -24,38 +24,65 @@ Requires Node 18, 20, or 22 (active LTS).
 
 ```bash
 npm install -g @duckcodeailabs/dql-cli
+dql --version
+```
+
+### Path A: DQL-Only (no dbt required)
+
+The fastest path — local project, local notebook, zero dependencies beyond Node.
+
+```bash
 dql init my-dql-project
 cd my-dql-project
 dql doctor
 dql notebook
 ```
 
-This is the fastest DQL-only path: local project, local notebook, no dbt repo required.
+Your browser opens with a notebook connected to DuckDB in-memory. Write SQL cells, query local CSV/Parquet files, and create governed DQL blocks — all tracked in Git.
 
-If you want the dbt-integrated walkthrough, use the Jaffle Shop semantic-layer course project:
+→ **[Quickstart — zero to running notebook in 2 minutes](./docs/quickstart.md)**
 
-→ **[Full getting started guide with the Jaffle Shop dbt project](./docs/getting-started.md)**
+### Path B: dbt + Jaffle Shop (5 minutes)
 
-### 5-Minute Start with dbt + Jaffle Shop
+Use the Jaffle Shop dbt project to see DQL's full power — semantic metrics, lineage, and Block Studio.
+
+> **Note:** You must clone the dbt repo yourself. `dql init` does not download it automatically.
 
 ```bash
+# 1. Clone and build the dbt project
 git clone https://github.com/dbt-labs/Semantic-Layer-Online-Course.git jaffle-shop
 cd jaffle-shop
 pip install dbt-duckdb && dbt deps && dbt build --profiles-dir .
+
+# 2. Initialize DQL (auto-detects dbt + DuckDB + semantic definitions)
 npm install -g @duckcodeailabs/dql-cli
 dql init .
-dql semantic import dbt .
+dql doctor
 dql notebook
 ```
 
-We use `dbt-labs/Semantic-Layer-Online-Course` for the dbt walkthrough because it already includes the dbt semantic models and metrics DQL can normalize into local `semantic-layer/` YAML. After `dql semantic import dbt .`, DQL switches to canonical local semantic mode and Block Studio reads from that imported catalog.
+`dql init .` auto-detects the dbt project, finds `jaffle_shop.duckdb`, and imports semantic metrics/dimensions from the dbt YAML files — all in one step.
 
-→ **[Quickstart — zero to running notebook in 5 minutes](./docs/quickstart.md)**
+→ **[Full getting started guide with Jaffle Shop](./docs/getting-started.md)**
+
+### Path C: Enterprise — Your dbt Repo + Your Database
+
+Already have a dbt project and a Snowflake/Postgres/BigQuery warehouse? DQL layers on top.
+
+```bash
+cd your-dbt-project
+dql init .
+dql notebook
+# → Use the Connection Panel in the notebook to configure your database
+# → Import semantic metrics from the notebook UI or CLI
+```
+
+→ **[Enterprise getting started — connect your database, import metrics, build blocks](./docs/enterprise-getting-started.md)**
 
 ### Library packages (for embedding in your app)
 
 ```bash
-npm install @duckcodeailabs/dql-core@0.8.2 @duckcodeailabs/dql-compiler@0.8.2 @duckcodeailabs/dql-notebook@0.8.2
+npm install @duckcodeailabs/dql-core@0.8.5 @duckcodeailabs/dql-compiler@0.8.5 @duckcodeailabs/dql-notebook@0.8.5
 ```
 
 ---
@@ -77,6 +104,21 @@ dql new notebook "Revenue Analysis"  # scaffold a new .dqlnb file
 ```
 
 → **[Notebook guide — cells, param widgets, variable substitution, export](./docs/notebook.md)**
+
+---
+
+## Block Studio
+
+Block Studio is the notebook's built-in IDE for creating governed DQL blocks. Open it from the sidebar or by clicking any `.dql` file.
+
+- **Database explorer** — browse your tables and columns, click to insert into SQL
+- **Semantic panel** — browse imported metrics and dimensions, click to insert references
+- **Live validation** — syntax and semantic errors as you type
+- **Run** — execute SQL against your connected database, see results in a table or chart
+- **Test** — run block assertions (e.g., `assert row_count > 0`) and see pass/fail
+- **Save** — write the block to `blocks/` with governance metadata (owner, domain, tags)
+
+→ **[Authoring blocks — create, test, certify, and commit custom and semantic blocks](./docs/authoring-blocks.md)**
 
 ---
 
@@ -134,8 +176,6 @@ dql parse blocks/pipeline_health.dql
 dql preview blocks/pipeline_health.dql --open
 dql build blocks/pipeline_health.dql
 ```
-
-→ **[Authoring blocks — create, test, certify, and commit custom and semantic blocks](./docs/authoring-blocks.md)**
 
 → **[Full language reference — block syntax, chart types, params, tests, workbooks](./docs/dql-language-spec.md)**
 
@@ -210,22 +250,22 @@ The notebook sidebar shows your semantic layer live — browse metrics, dimensio
 
 ## Data Sources
 
-DQL works without a cloud warehouse. The default runtime uses DuckDB to query local CSV and Parquet files directly.
+DQL supports **14 database connectors** out of the box. The default runtime uses DuckDB to query local CSV and Parquet files directly — no cloud warehouse needed to get started.
 
 ```json
 {
   "connections": {
     "default": {
       "driver": "duckdb",
-      "path": ":memory:"
+      "filepath": ":memory:"
     }
   }
 }
 ```
 
-Connect to Postgres, BigQuery, or Snowflake the same way — swap the driver in `dql.config.json`.
+Connect to Postgres, Snowflake, BigQuery, or any of the 14 supported databases — either edit `dql.config.json` directly or use the **Connection Panel** in the notebook UI to configure and hot-swap connections at runtime.
 
-→ **[Data sources guide — local files, DuckDB, Postgres, and remote connectors](./docs/data-sources.md)**
+→ **[Data sources guide — all 14 connectors with config fields](./docs/data-sources.md)**
 
 ---
 
@@ -236,6 +276,7 @@ DQL is the **answer layer for dbt**. The recommended getting-started path uses t
 `dql init` auto-detects dbt projects and DuckDB files, scaffolding a minimal DQL project on top of your existing data.
 
 → **[Getting started — full walkthrough with Jaffle Shop](./docs/getting-started.md)**
+→ **[Enterprise getting started — your own dbt repo + database](./docs/enterprise-getting-started.md)**
 
 ---
 
@@ -258,6 +299,7 @@ Every command has a clear job:
 | `dql lineage` | Show data lineage, trust chains, impact analysis, cross-domain flows |
 | `dql fmt` | Format a `.dql` file in place |
 | `dql doctor` | Diagnose project setup, config, and runtime readiness |
+| `dql --version` | Show CLI version |
 
 → **[Full CLI reference — all commands, flags, and exit codes](./docs/cli-reference.md)**
 
@@ -297,6 +339,7 @@ Not sure where to start? Pick your goal:
 - **Author a reusable block** → `dql new block` + `dql preview`
 - **Build a shareable dashboard** → `dql build` + `dql serve`
 - **Migrate from raw SQL or dbt** → `dql migrate`
+- **Connect enterprise database** → `dql notebook` + Connection Panel
 - **Embed the parser in Node.js** → `@duckcodeailabs/dql-core`
 
 → **[Use cases — recommended paths by goal](./docs/use-cases.md)**
@@ -309,8 +352,9 @@ Not sure where to start? Pick your goal:
 
 | Guide | What it covers |
 |---|---|
-| [Quickstart](./docs/quickstart.md) | 5-minute path from install to running notebook |
+| [Quickstart](./docs/quickstart.md) | 2-minute path from install to running notebook (DQL-only or dbt) |
 | [Getting Started](./docs/getting-started.md) | Full walkthrough with Jaffle Shop dbt project |
+| [Enterprise Getting Started](./docs/enterprise-getting-started.md) | Your own dbt repo + Snowflake/Postgres/BigQuery |
 
 ### Core Workflows
 
@@ -352,11 +396,11 @@ Not sure where to start? Pick your goal:
 
 ## Package Reference
 
-All packages share a unified version number (`0.8.2`).
+All packages share a unified version number (`0.8.5`).
 
 | Package | Description |
 |---|---|
-| `@duckcodeailabs/dql-cli` | Public CLI — `dql init`, `dql notebook`, `dql lineage`, `dql preview`, `dql parse`, … |
+| `@duckcodeailabs/dql-cli` | Public CLI — `dql init`, `dql notebook`, `dql lineage`, `dql preview`, `dql parse`, ... |
 | `@duckcodeailabs/dql-core` | Lexer, parser, AST, semantic analysis, semantic layer, lineage engine, formatter |
 | `@duckcodeailabs/dql-compiler` | IR lowering, ref() resolution, HTML/React/runtime code generation |
 | `@duckcodeailabs/dql-governance` | Certification rules, cost estimation |
@@ -365,7 +409,7 @@ All packages share a unified version number (`0.8.2`).
 | `@duckcodeailabs/dql-lsp` | Language Server Protocol implementation |
 | `@duckcodeailabs/dql-runtime` | Browser runtime: data fetching, hot-reload |
 | `@duckcodeailabs/dql-charts` | React SVG chart components |
-| `@duckcodeailabs/dql-connectors` | Database connector layer |
+| `@duckcodeailabs/dql-connectors` | Database connector layer (14 drivers) |
 
 ---
 

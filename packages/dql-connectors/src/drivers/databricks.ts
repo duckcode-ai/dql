@@ -1,4 +1,4 @@
-import type { DatabaseConnector, ConnectionConfig } from '../connector.js';
+import type { DatabaseConnector, ConnectionConfig, TableInfo, ColumnInfo } from '../connector.js';
 import type { QueryResult, ColumnMeta, ColumnType, Row } from '../result-types.js';
 
 interface DatabricksStatementResponse {
@@ -106,6 +106,41 @@ export class DatabricksConnector implements DatabaseConnector {
     } catch {
       return false;
     }
+  }
+
+  async listTables(): Promise<TableInfo[]> {
+    const result = await this.execute(
+      `SELECT table_schema, table_name, table_type
+       FROM information_schema.tables
+       WHERE table_schema NOT IN ('information_schema')
+       ORDER BY table_schema, table_name`,
+    );
+    return result.rows.map((row) => ({
+      schema: String(row['table_schema'] ?? ''),
+      name: String(row['table_name'] ?? ''),
+      type: String(row['table_type'] ?? ''),
+    }));
+  }
+
+  async listColumns(schema?: string, table?: string): Promise<ColumnInfo[]> {
+    let sql = `SELECT table_schema, table_name, column_name, data_type, ordinal_position
+       FROM information_schema.columns
+       WHERE table_schema NOT IN ('information_schema')`;
+    if (schema) {
+      sql += ` AND table_schema = '${schema.replace(/'/g, "''")}'`;
+    }
+    if (table) {
+      sql += ` AND table_name = '${table.replace(/'/g, "''")}'`;
+    }
+    sql += ` ORDER BY table_schema, table_name, ordinal_position`;
+    const result = await this.execute(sql);
+    return result.rows.map((row) => ({
+      schema: String(row['table_schema'] ?? ''),
+      table: String(row['table_name'] ?? ''),
+      name: String(row['column_name'] ?? ''),
+      dataType: String(row['data_type'] ?? ''),
+      ordinalPosition: Number(row['ordinal_position'] ?? 0),
+    }));
   }
 }
 

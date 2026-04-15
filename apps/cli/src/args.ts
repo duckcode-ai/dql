@@ -2,6 +2,7 @@ export interface CLIFlags {
   format: 'text' | 'json';
   verbose: boolean;
   help: boolean;
+  version: boolean;
   check: boolean;
   open: boolean | null;
   input: string;
@@ -28,6 +29,7 @@ export function parseArgs(argv: string[]): ParsedArgs {
     format: 'text',
     verbose: false,
     help: false,
+    version: false,
     check: false,
     open: null,
     input: '',
@@ -50,6 +52,8 @@ export function parseArgs(argv: string[]): ParsedArgs {
     const arg = argv[i];
     if (arg === '--help' || arg === '-h') {
       flags.help = true;
+    } else if (arg === '--version' || arg === '-V') {
+      flags.version = true;
     } else if (arg === '--verbose' || arg === '-v') {
       flags.verbose = true;
     } else if (arg === '--open') {

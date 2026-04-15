@@ -1,5 +1,8 @@
 #!/usr/bin/env node
 
+import { readFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { parseArgs } from './args.js';
 import { runInit } from './commands/init.js';
 import { runNew } from './commands/new.js';
@@ -40,6 +43,7 @@ const HELP = `
     dql semantic <sub> [path]       Semantic layer: list, validate, query, pull
     dql compile [path]              Generate project manifest (dql-manifest.json)
     dql lineage [block] [path]      Answer-layer lineage analysis
+    dql --version                    Show version
     dql --help                      Show this help
 
   Options:
@@ -58,8 +62,23 @@ const HELP = `
     --connection <driver|path>      Database connection for certify/test (e.g. duckdb, path/to/db)
 `;
 
+function getVersion(): string {
+  try {
+    const cliDir = dirname(fileURLToPath(import.meta.url));
+    const pkg = JSON.parse(readFileSync(join(cliDir, '../package.json'), 'utf-8'));
+    return pkg.version ?? 'unknown';
+  } catch {
+    return 'unknown';
+  }
+}
+
 async function main() {
   const { command, file, rest, flags } = parseArgs(process.argv.slice(2));
+
+  if (flags.version) {
+    console.log(`dql ${getVersion()}`);
+    process.exit(0);
+  }
 
   if (flags.help || !command) {
     console.log(HELP.trim());

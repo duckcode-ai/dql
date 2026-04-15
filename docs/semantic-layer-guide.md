@@ -10,7 +10,7 @@ The semantic layer lets you define reusable metrics, dimensions, and hierarchies
 dql init .
 ```
 
-This creates a DQL project. If a dbt project is detected, the semantic layer provider is set to `dbt` automatically.
+This creates a DQL project. If a dbt project is detected, the semantic layer provider is set to `dbt` automatically and semantic definitions are auto-imported.
 
 ### 2. Open the notebook
 
@@ -20,19 +20,22 @@ dql notebook
 
 ### 3. Click the Semantic Layer icon in the left sidebar (3rd icon from top)
 
-You'll see your metrics, dimensions, and hierarchies.
+You'll see your metrics, dimensions, and hierarchies. Click any metric to see its details (SQL, type, table, tags). Click to insert a reference into your SQL.
+
+> **Full walkthrough:** [Enterprise Getting Started](./enterprise-getting-started.md) covers importing semantic metrics from the notebook UI step by step.
 
 ---
 
 ## How It Works
 
-DQL reads semantic definitions from YAML files and exposes them in the notebook UI. There are **3 providers** — pick the one that matches your setup:
+DQL reads semantic definitions from YAML files and exposes them in the notebook UI. There are **4 providers** — pick the one that matches your setup:
 
 | Provider | Source | Best for |
 |----------|--------|----------|
 | `dql` | YAML files in `semantic-layer/` | New projects, standalone analytics |
 | `dbt` | Your existing dbt project | Teams already using dbt semantic models |
 | `cubejs` | Your existing Cube.js project | Teams already using Cube.js |
+| `snowflake` | Snowflake semantic views (live) | Teams using Snowflake as semantic layer |
 
 ---
 
@@ -307,6 +310,44 @@ cubes:
         sql: "{CUBE}.user_id = {Users}.id"
         relationship: many_to_one
 ```
+
+---
+
+## Option D: Snowflake Semantic Views (Live Connection)
+
+If your team uses Snowflake's native semantic views, DQL can query them directly through your live Snowflake connection.
+
+### dql.config.json
+
+```json
+{
+  "project": "my-project",
+  "defaultConnection": {
+    "driver": "snowflake",
+    "account": "your-account.snowflakecomputing.com",
+    "username": "your_user",
+    "password": "${SNOWFLAKE_PASSWORD}",
+    "database": "ANALYTICS",
+    "schema": "PUBLIC",
+    "warehouse": "COMPUTE_WH"
+  },
+  "semanticLayer": {
+    "provider": "snowflake"
+  }
+}
+```
+
+DQL queries the Snowflake connection at startup to discover semantic views, metrics, and dimensions. This requires a working Snowflake connection.
+
+### Import from the Notebook UI
+
+1. Open `dql notebook`
+2. Click the **Semantic** sidebar icon
+3. Select **Snowflake** as the provider
+4. Click **Import** — DQL queries your Snowflake connection to discover semantic views
+5. Imported definitions are written to `semantic-layer/` as YAML files for offline use
+
+> **Tip:** After initial import, DQL reads from the local `semantic-layer/` YAML files. Run a sync from the notebook UI to pull updated definitions from Snowflake.
 
 ---
 

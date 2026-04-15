@@ -2,13 +2,16 @@
 
 DQL supports **14 database connectors** out of the box. Start with local file mode (no database needed), then connect to your warehouse when ready.
 
+> **Step-by-step walkthrough:** [Enterprise Getting Started](./enterprise-getting-started.md) shows how to configure your database connection, browse schema, and build blocks — all from the notebook UI.
+
 ---
 
 ## Quick Start (No Database)
 
 ```bash
-npx @duckcodeailabs/dql-cli init .
-npx @duckcodeailabs/dql-cli notebook
+npm install -g @duckcodeailabs/dql-cli
+dql init my-project && cd my-project
+dql notebook
 ```
 
 The default `driver: "file"` uses DuckDB in-memory. Query local CSV, Parquet, and JSON files:
@@ -466,21 +469,33 @@ Uses `defaultConnection` automatically. Override with a `"connection": { ... }` 
 ### From the CLI
 
 ```bash
-npx @duckcodeailabs/dql-cli doctor
+dql doctor
 ```
 
 Look for:
 ```
- Default connection    driver=postgres
- Local query runtime   driver=postgres is available
+  ✓ Default connection    driver=postgres
+  ✓ Local query runtime   driver=postgres is available
 ```
 
-### From the Notebook
+### From the Notebook Connection Panel
 
-1. Launch: `npx @duckcodeailabs/dql-cli notebook`
-2. Click the **Connection** panel (plug icon) in the sidebar
-3. Click **Test Connection**
-4. See "Connected to postgres successfully" (or your driver)
+1. Launch: `dql notebook`
+2. Click the **Connection** icon (plug icon) in the left sidebar
+3. You'll see the current connection config and a status indicator
+4. Click **Test Connection** to verify
+5. See "Connected to postgres successfully" (or your driver)
+
+### Change connections at runtime
+
+The Connection Panel lets you switch databases without restarting:
+
+1. Select a **Quick Connect** preset (DuckDB, PostgreSQL, Snowflake) or fill in fields manually
+2. Click **Save** — DQL hot-swaps the connection immediately
+3. The Schema sidebar refreshes with the new database's tables
+4. All subsequent queries run against the new connection
+
+> You can also edit `dql.config.json` directly and restart `dql notebook`.
 
 ---
 

@@ -1,6 +1,6 @@
 // @dql/connectors - DQL Database Connectors
 
-export type { DatabaseConnector, ConnectionConfig, TableInfo } from './connector.js';
+export type { DatabaseConnector, ConnectionConfig, TableInfo, ColumnInfo } from './connector.js';
 export type { QueryResult, ColumnMeta, ColumnType, Row } from './result-types.js';
 export { ConnectionPoolManager } from './connection-pool.js';
 export { QueryExecutor } from './query-executor.js';

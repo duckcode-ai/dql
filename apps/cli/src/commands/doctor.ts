@@ -1,5 +1,6 @@
 import { existsSync, readFileSync } from 'node:fs';
-import { join, resolve } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { QueryExecutor } from '@duckcodeailabs/dql-connectors';
 import { resolveSemanticLayerWithDiagnostics } from '@duckcodeailabs/dql-core';
 import type { CLIFlags } from '../args.js';
@@ -66,6 +67,8 @@ export async function runDoctor(targetPath: string | null, flags: CLIFlags): Pro
     },
     checkSemanticLayer(config.semanticLayer, projectRoot),
   ];
+
+  checks.push(checkNotebookAssets());
 
   if (defaultConnection?.driver === 'file' || defaultConnection?.driver === 'duckdb') {
     checks.push(checkDuckDBDependency(projectRoot));
@@ -175,6 +178,21 @@ function checkSemanticLayer(semanticConfig: unknown, projectRoot: string): Check
       detail: err instanceof Error ? err.message : String(err),
     };
   }
+}
+
+function checkNotebookAssets(): Check {
+  const commandDir = dirname(fileURLToPath(import.meta.url));
+  const reactAppDir = resolve(commandDir, '../assets/dql-notebook');
+  const legacyAppDir = resolve(commandDir, '../assets/notebook-browser');
+  const hasReact = existsSync(join(reactAppDir, 'index.html'));
+  const hasLegacy = existsSync(join(legacyAppDir, 'index.html'));
+  return {
+    name: 'Notebook app assets',
+    ok: hasReact || hasLegacy,
+    detail: hasReact || hasLegacy
+      ? 'found'
+      : 'missing — try reinstalling: npm i -g @duckcodeailabs/dql-cli',
+  };
 }
 
 async function checkLocalQueryRuntime(projectRoot: string, connection: NonNullable<ReturnType<typeof loadProjectConfig>['defaultConnection']>): Promise<Check> {

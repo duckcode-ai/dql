@@ -1,4 +1,4 @@
-import type { DatabaseConnector, ConnectionConfig } from '../connector.js';
+import type { DatabaseConnector, ConnectionConfig, TableInfo, ColumnInfo } from '../connector.js';
 import type { QueryResult, ColumnMeta, ColumnType, Row } from '../result-types.js';
 
 export class BigQueryConnector implements DatabaseConnector {
@@ -98,6 +98,52 @@ export class BigQueryConnector implements DatabaseConnector {
     } catch {
       return false;
     }
+  }
+
+  async listTables(): Promise<TableInfo[]> {
+    if (!this.client) throw new Error('BigQuery connector not connected.');
+    const [datasets] = await this.client.getDatasets();
+    const tables: TableInfo[] = [];
+    for (const ds of datasets ?? []) {
+      const [dsTables] = await ds.getTables();
+      for (const t of dsTables ?? []) {
+        tables.push({
+          schema: ds.id ?? '',
+          name: t.id ?? '',
+          type: (t.metadata?.type ?? 'TABLE') === 'VIEW' ? 'VIEW' : 'BASE TABLE',
+        });
+      }
+    }
+    return tables;
+  }
+
+  async listColumns(schema?: string, table?: string): Promise<ColumnInfo[]> {
+    if (!this.client) throw new Error('BigQuery connector not connected.');
+    const [datasets] = await this.client.getDatasets();
+    const filtered = schema ? (datasets ?? []).filter((ds: any) => ds.id === schema) : (datasets ?? []);
+    const columns: ColumnInfo[] = [];
+    for (const ds of filtered) {
+      let sql = `SELECT table_name, column_name, data_type, ordinal_position FROM \`${ds.id}\`.INFORMATION_SCHEMA.COLUMNS`;
+      if (table) {
+        sql += ` WHERE table_name = '${table.replace(/'/g, "''")}'`;
+      }
+      sql += ` ORDER BY table_name, ordinal_position`;
+      try {
+        const result = await this.execute(sql);
+        for (const row of result.rows) {
+          columns.push({
+            schema: ds.id ?? '',
+            table: String(row['table_name'] ?? ''),
+            name: String(row['column_name'] ?? ''),
+            dataType: String(row['data_type'] ?? ''),
+            ordinalPosition: Number(row['ordinal_position'] ?? 0),
+          });
+        }
+      } catch {
+        // Dataset may not support INFORMATION_SCHEMA — skip
+      }
+    }
+    return columns;
   }
 }
 
