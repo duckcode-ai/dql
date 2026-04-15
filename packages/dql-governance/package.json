@@ -1,6 +1,6 @@
 {
   "name": "@duckcodeailabs/dql-governance",
-  "version": "0.8.8",
+  "version": "0.8.9",
   "description": "DQL Governance: block testing, certification, cost estimation, and access policies",
   "license": "Apache-2.0",
   "type": "module",
@@ -16,7 +16,7 @@
     "build": "rm -rf dist tsconfig.tsbuildinfo && tsc -b",
     "test": "vitest run --passWithNoTests",
     "clean": "rm -rf dist tsconfig.tsbuildinfo",
-    "prepublishOnly": "pnpm run build"
+    "prepublishOnly": "node ../../scripts/check-no-workspace-deps.mjs && pnpm run build"
   },
   "files": [
     "dist"

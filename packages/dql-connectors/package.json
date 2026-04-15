@@ -1,6 +1,6 @@
 {
   "name": "@duckcodeailabs/dql-connectors",
-  "version": "0.8.8",
+  "version": "0.8.9",
   "description": "DQL database connectors for local files, SQL warehouses, and lakehouse engines",
   "license": "Apache-2.0",
   "type": "module",
@@ -15,7 +15,8 @@
   "scripts": {
     "build": "rm -rf dist tsconfig.tsbuildinfo && tsc",
     "test": "vitest run --passWithNoTests",
-    "clean": "rm -rf dist tsconfig.tsbuildinfo"
+    "clean": "rm -rf dist tsconfig.tsbuildinfo",
+    "prepublishOnly": "node ../../scripts/check-no-workspace-deps.mjs && pnpm run build"
   },
   "files": [
     "dist"

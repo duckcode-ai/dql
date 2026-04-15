@@ -1,6 +1,6 @@
 {
   "name": "@duckcodeailabs/dql-core",
-  "version": "0.8.8",
+  "version": "0.8.9",
   "description": "DQL language core: lexer, parser, AST, semantic analysis",
   "license": "Apache-2.0",
   "type": "module",
@@ -17,7 +17,7 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "clean": "rm -rf dist tsconfig.tsbuildinfo",
-    "prepublishOnly": "pnpm run build"
+    "prepublishOnly": "node ../../scripts/check-no-workspace-deps.mjs && pnpm run build"
   },
   "files": [
     "dist"
