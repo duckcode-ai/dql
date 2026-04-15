@@ -36,6 +36,7 @@ const initialState: NotebookState = {
   executionCounter: 0,
   savingFile: false,
   lineageFullscreen: false,
+  lineageFocusNodeId: null,
   dashboardMode: false,
   activeBlockPath: null,
   blockStudioDraft: '',
@@ -50,7 +51,7 @@ const initialState: NotebookState = {
 function notebookReducer(state: NotebookState, action: NotebookAction): NotebookState {
   switch (action.type) {
     case 'SET_MAIN_VIEW':
-      return { ...state, mainView: action.view, lineageFullscreen: false };
+      return { ...state, mainView: action.view, lineageFullscreen: false, lineageFocusNodeId: null };
 
     case 'SET_THEME':
       return { ...state, themeMode: action.mode };
@@ -61,6 +62,7 @@ function notebookReducer(state: NotebookState, action: NotebookAction): Notebook
         sidebarPanel: action.panel,
         sidebarOpen: action.panel !== null && action.panel !== 'connection' && action.panel !== 'reference',
         lineageFullscreen: false,
+        lineageFocusNodeId: null,
         mainView:
           action.panel === 'connection'
             ? 'connection'
@@ -95,6 +97,7 @@ function notebookReducer(state: NotebookState, action: NotebookAction): Notebook
         blockStudioValidation: action.file.type === 'block' ? state.blockStudioValidation : null,
         blockStudioMetadata: action.file.type === 'block' ? state.blockStudioMetadata : null,
         lineageFullscreen: false,
+        lineageFocusNodeId: null,
       };
 
     case 'OPEN_BLOCK_STUDIO':
@@ -114,6 +117,7 @@ function notebookReducer(state: NotebookState, action: NotebookAction): Notebook
         blockStudioValidation: action.payload.validation,
         blockStudioMetadata: action.payload.metadata,
         lineageFullscreen: false,
+        lineageFocusNodeId: action.payload.metadata?.name ? `block:${action.payload.metadata.name}` : null,
       };
 
     case 'SET_CELLS':
@@ -275,6 +279,9 @@ function notebookReducer(state: NotebookState, action: NotebookAction): Notebook
 
     case 'TOGGLE_LINEAGE_FULLSCREEN':
       return { ...state, lineageFullscreen: !state.lineageFullscreen };
+
+    case 'SET_LINEAGE_FOCUS':
+      return { ...state, lineageFocusNodeId: action.nodeId };
 
     case 'TOGGLE_DASHBOARD_MODE':
       return { ...state, dashboardMode: !state.dashboardMode };

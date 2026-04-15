@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { LineageGraph } from './lineage-graph.js';
 import { buildLineageGraph } from './builder.js';
+import { queryLineage } from './query.js';
 import {
   buildTrustChain,
   analyzeImpact,
@@ -172,6 +173,70 @@ describe('buildLineageGraph', () => {
     const dashEdges = graph.getIncomingEdges('block:arr_dashboard');
     expect(dashEdges.some((e) => e.source === 'metric:arr_growth')).toBe(true);
   });
+
+  it('bridges blocks to dbt models and adds dashboard containers', () => {
+    const graph = buildLineageGraph(
+      [
+        {
+          name: 'customer_summary',
+          sql: 'SELECT * FROM dim_customers',
+          domain: 'customer',
+          chartType: 'table',
+        },
+      ],
+      [],
+      [],
+      {
+        dbtModels: [
+          {
+            name: 'raw_customers',
+            uniqueId: 'source.jaffle_shop.raw_customers',
+            type: 'source',
+            dependsOn: [],
+          },
+          {
+            name: 'stg_customers',
+            uniqueId: 'model.jaffle_shop.stg_customers',
+            type: 'model',
+            dependsOn: ['source.jaffle_shop.raw_customers'],
+          },
+          {
+            name: 'dim_customers',
+            uniqueId: 'model.jaffle_shop.dim_customers',
+            type: 'model',
+            dependsOn: ['model.jaffle_shop.stg_customers'],
+            columns: [{ name: 'customer_id', type: 'integer' }],
+          },
+        ],
+        dashboards: [
+          {
+            name: 'Customer Notebook',
+            blocks: ['customer_summary'],
+            charts: ['customer_summary'],
+          },
+        ],
+      },
+    );
+
+    expect(graph.getNode('dbt_model:dim_customers')?.columns).toEqual([
+      { name: 'customer_id', type: 'integer' },
+    ]);
+    expect(
+      graph.getIncomingEdges('block:customer_summary').some(
+        (edge) => edge.source === 'dbt_model:dim_customers' && edge.type === 'reads_from',
+      ),
+    ).toBe(true);
+    expect(
+      graph.getIncomingEdges('dbt_model:dim_customers').some(
+        (edge) => edge.source === 'dbt_model:stg_customers' && edge.type === 'depends_on',
+      ),
+    ).toBe(true);
+    expect(
+      graph.getOutgoingEdges('dashboard:Customer Notebook').some(
+        (edge) => edge.target === 'block:customer_summary' && edge.type === 'contains',
+      ),
+    ).toBe(true);
+  });
 });
 
 describe('Domain Lineage', () => {
@@ -315,5 +380,48 @@ describe('buildLineageGraph — normalizeTableName', () => {
     );
     const tables = graph.getNodesByType('source_table');
     expect(tables[0].name).toBe('fct_orders');
+  });
+});
+
+describe('queryLineage', () => {
+  it('returns a focused subgraph with depth limits', () => {
+    const graph = buildLineageGraph(
+      [
+        { name: 'base_orders', sql: 'SELECT * FROM orders', domain: 'finance' },
+        { name: 'monthly_revenue', sql: 'SELECT * FROM ref("base_orders")', domain: 'finance' },
+      ],
+      [{ name: 'revenue', table: 'orders', domain: 'finance', type: 'sum' }],
+      [],
+      {
+        dashboards: [{ name: 'Revenue Dashboard', blocks: ['monthly_revenue'], charts: [] }],
+      },
+    );
+
+    const result = queryLineage(graph, { focus: 'monthly_revenue', upstreamDepth: 1, downstreamDepth: 1 });
+    const ids = new Set(result.graph.nodes.map((node) => node.id));
+    expect(ids.has('block:monthly_revenue')).toBe(true);
+    expect(ids.has('block:base_orders')).toBe(true);
+    expect(ids.has('dashboard:Revenue Dashboard')).toBe(true);
+    expect(ids.has('table:orders')).toBe(false);
+  });
+
+  it('searches and filters lineage nodes', () => {
+    const graph = buildLineageGraph(
+      [{ name: 'revenue_by_region', sql: 'SELECT * FROM orders', domain: 'finance' }],
+      [{ name: 'revenue', table: 'orders', domain: 'finance', type: 'sum' }],
+      [{ name: 'region', table: 'orders' }],
+    );
+
+    const result = queryLineage(graph, {
+      search: 'revenue',
+      types: ['block', 'metric'],
+      domain: 'finance',
+    });
+
+    expect(result.matches?.map((match) => match.node.id)).toEqual([
+      'metric:revenue',
+      'block:revenue_by_region',
+    ]);
+    expect(result.graph.nodes.every((node) => ['block', 'metric'].includes(node.type))).toBe(true);
   });
 });

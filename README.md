@@ -191,12 +191,16 @@ dql build blocks/pipeline_health.dql
 
 ## Lineage & Trust Chains
 
-DQL tracks how data flows from source tables through blocks, semantic metrics, business domains, and charts — the full "trust chain" from raw data to rendered answer.
+DQL tracks how data flows from source tables through dbt models, DQL blocks, business domains, and notebooks — the full open-source trust chain from raw data to analytics consumption.
 
 ```bash
 dql compile                                          # generate dql-manifest.json
 dql compile --dbt-manifest path/to/manifest.json     # import dbt lineage as upstream
 dql lineage                                          # full project lineage with data flow DAG
+dql lineage --search revenue                         # search lineage nodes by name
+dql lineage --focus revenue_by_customer_type         # focused subgraph around a node
+dql lineage --dashboard "Jaffle Shop Lineage Demo"   # what feeds a notebook/dashboard?
+dql lineage --dbt                                    # dbt-only graph slice
 dql lineage raw_orders                               # upstream/downstream for a block
 dql lineage orders                                   # smart lookup: resolves to table:orders
 dql lineage --table orders                           # explicit table lookup
@@ -207,7 +211,13 @@ dql lineage --trust-chain raw_orders exec_dashboard  # certification at every ho
 dql lineage --format json                            # export for CI/integrations
 ```
 
-Cross-domain flow detection is built in — DQL shows when data crosses team boundaries:
+In the notebook UI, users can:
+
+- search lineage from the sidebar and open a focused graph instead of scanning the full project
+- open a block in Block Studio and use the `Lineage` tab for upstream provenance and downstream notebook usage
+- inspect dbt sources/models, DQL blocks, domains, and notebooks in one graph
+
+Cross-domain flow detection is built in, so DQL also shows when data crosses team boundaries:
 
 ```
   Cross-Domain Flows:
@@ -215,7 +225,22 @@ Cross-domain flow detection is built in — DQL shows when data crosses team bou
     finance -> executive (1 edge(s))
 ```
 
+For a concrete end-to-end demo, copy the ready-made notebook asset:
+
+```bash
+mkdir -p notebooks
+cp docs/examples/jaffle-shop-lineage-demo.dqlnb notebooks/
+```
+
+That demo is designed to show this OSS path clearly:
+
+```text
+dbt source -> dbt model -> DQL block -> notebook
+```
+
 → **[Lineage guide — ref(), trust chains, impact analysis, cross-domain flows](./docs/lineage.md)**
+→ **[Lineage workflow — focused UI flow, CLI commands, Block Studio lineage](./docs/02-core-workflows/lineage-workflow.md)**
+→ **[Demo assets — copyable Jaffle Shop lineage notebook](./docs/examples/README.md)**
 
 ---
 

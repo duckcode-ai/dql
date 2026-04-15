@@ -491,6 +491,50 @@ export const api = {
     }
   },
 
+  async searchLineage(query: string): Promise<{ matches: Array<{ node: any; score: number }> }> {
+    try {
+      return await request<{ matches: Array<{ node: any; score: number }> }>(
+        `/api/lineage/search?q=${encodeURIComponent(query)}`,
+      );
+    } catch {
+      return { matches: [] };
+    }
+  },
+
+  async queryLineage(params: {
+    focus?: string;
+    search?: string;
+    types?: string[];
+    domain?: string;
+    upstreamDepth?: number;
+    downstreamDepth?: number;
+  }): Promise<{ graph: { nodes: any[]; edges: any[] }; focalNode?: any; matches?: Array<{ node: any; score: number }> }> {
+    const searchParams = new URLSearchParams();
+    if (params.focus) searchParams.set('focus', params.focus);
+    if (params.search) searchParams.set('search', params.search);
+    if (params.types?.length) searchParams.set('types', params.types.join(','));
+    if (params.domain) searchParams.set('domain', params.domain);
+    if (params.upstreamDepth !== undefined) searchParams.set('upstreamDepth', String(params.upstreamDepth));
+    if (params.downstreamDepth !== undefined) searchParams.set('downstreamDepth', String(params.downstreamDepth));
+    try {
+      return await request<{ graph: { nodes: any[]; edges: any[] }; focalNode?: any; matches?: Array<{ node: any; score: number }> }>(
+        `/api/lineage/query?${searchParams.toString()}`,
+      );
+    } catch {
+      return { graph: { nodes: [], edges: [] }, matches: [] };
+    }
+  },
+
+  async fetchLineageNode(nodeId: string): Promise<{ node: any; incoming: any[]; outgoing: any[] } | null> {
+    try {
+      return await request<{ node: any; incoming: any[]; outgoing: any[] }>(
+        `/api/lineage/node/${encodeURIComponent(nodeId)}`,
+      );
+    } catch {
+      return null;
+    }
+  },
+
   async fetchBlockLineage(blockName: string): Promise<{ node: any; ancestors: any[]; descendants: any[] } | null> {
     try {
       return await request<{ node: any; ancestors: any[]; descendants: any[] }>(

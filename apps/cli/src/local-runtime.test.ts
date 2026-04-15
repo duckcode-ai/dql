@@ -251,4 +251,48 @@ FROM orders
     expect(validation.valid).toBe(true);
     expect(validation.executableSql).toContain('SELECT revenue');
   });
+
+  it('resolves semantic refs inside custom block SQL before execution', () => {
+    const source = `block "Revenue Query" {
+  domain = "finance"
+  type = "custom"
+  description = ""
+  owner = ""
+  tags = []
+
+  query = """
+SELECT
+  @metric(total_revenue),
+  @dim(customer_type)
+FROM orders
+GROUP BY @dim(customer_type)
+"""
+}`;
+
+    const validation = validateBlockStudioSource(source, semanticLayer);
+
+    expect(validation.valid).toBe(true);
+    expect(validation.executableSql).toContain('SUM(revenue) AS total_revenue');
+    expect(validation.executableSql).toContain('customer_type AS customer_type');
+    expect(validation.executableSql).toContain('GROUP BY customer_type');
+  });
+
+  it('returns a semantic validation error for unresolved refs in custom SQL', () => {
+    const source = `block "Broken Revenue Query" {
+  domain = "finance"
+  type = "custom"
+  description = ""
+  owner = ""
+  tags = []
+
+  query = """
+SELECT @metric(missing_metric)
+"""
+}`;
+
+    const validation = validateBlockStudioSource(source, semanticLayer);
+
+    expect(validation.valid).toBe(false);
+    expect(validation.diagnostics.some((item) => item.code === 'semantic_ref' && item.message.includes('missing_metric'))).toBe(true);
+  });
 });

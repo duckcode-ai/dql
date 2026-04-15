@@ -12,6 +12,10 @@
  *   dql lineage --domain <name> [path]    Show lineage within a domain
  *   dql lineage --impact <name> [path]    Impact analysis: what breaks if this node changes?
  *   dql lineage --trust-chain <from> <to> Show trust chain between two blocks
+ *   dql lineage --search <term> [path]    Search lineage nodes by name
+ *   dql lineage --focus <name> [path]     Show a focused lineage subgraph
+ *   dql lineage --dashboard <name> [path] Show lineage for a dashboard/notebook
+ *   dql lineage --dbt [path]              Show the dbt portion of lineage
  *   dql lineage --export [path]           Export lineage as JSON
  *   dql lineage --no-manifest             Force live scan (skip dql-manifest.json)
  */
@@ -22,11 +26,13 @@ import {
   Parser,
   loadSemanticLayerFromDir,
   buildLineageGraph,
+  buildManifest,
   analyzeImpact,
   buildTrustChain,
   detectDomainFlows,
   getDomainTrustOverview,
   LineageGraph,
+  queryLineage,
   type LineageBlockInput,
   type LineageMetricInput,
   type LineageDimensionInput,
@@ -99,6 +105,27 @@ export async function runLineage(
     return printTrustChain(graph, allArgs[trustIdx + 1], allArgs[trustIdx + 2], flags);
   }
 
+  const searchIdx = allArgs.indexOf('--search');
+  if (searchIdx >= 0 && allArgs[searchIdx + 1]) {
+    return printSearchResults(graph, allArgs[searchIdx + 1]);
+  }
+
+  const focusIdx = allArgs.indexOf('--focus');
+  if (focusIdx >= 0 && allArgs[focusIdx + 1]) {
+    return printFocusedLineage(graph, allArgs[focusIdx + 1]);
+  }
+
+  const dashboardIdx = allArgs.indexOf('--dashboard');
+  if (dashboardIdx >= 0 && allArgs[dashboardIdx + 1]) {
+    return printFocusedLineage(graph, `dashboard:${allArgs[dashboardIdx + 1]}`);
+  }
+
+  if (allArgs.includes('--dbt')) {
+    const result = queryLineage(graph, { types: ['dbt_model', 'dbt_source'] });
+    console.log(JSON.stringify(result.graph, null, 2));
+    return;
+  }
+
   // --domain <name>
   if (flags.domain) {
     return printDomainLineage(graph, flags.domain, flags);
@@ -153,71 +180,83 @@ function loadFromManifestOrScan(projectRoot: string): LineageGraph {
 
 /** Discover all blocks and semantic layer definitions and build the lineage graph. */
 function buildProjectLineage(projectRoot: string): LineageGraph {
-  const blocks: LineageBlockInput[] = [];
-  const metrics: LineageMetricInput[] = [];
-  const dimensions: LineageDimensionInput[] = [];
+  const dbtManifestPath = resolveDbtManifestPath(projectRoot);
+  try {
+    const manifest = buildManifest({ projectRoot, dbtManifestPath });
+    return LineageGraph.fromJSON({
+      nodes: manifest.lineage.nodes as any,
+      edges: manifest.lineage.edges as any,
+    });
+  } catch {
+    const blocks: LineageBlockInput[] = [];
+    const metrics: LineageMetricInput[] = [];
+    const dimensions: LineageDimensionInput[] = [];
 
-  // Scan .dql files
-  const dirs = ['blocks', 'dashboards', 'workbooks'];
-  for (const dir of dirs) {
-    const dirPath = join(projectRoot, dir);
-    if (!existsSync(dirPath)) continue;
+    const dirs = ['blocks', 'dashboards', 'workbooks'];
+    for (const dir of dirs) {
+      const dirPath = join(projectRoot, dir);
+      if (!existsSync(dirPath)) continue;
 
-    for (const entry of readdirSync(dirPath, { withFileTypes: true })) {
-      if (!entry.isFile() || extname(entry.name) !== '.dql') continue;
-      const filePath = join(dirPath, entry.name);
+      for (const entry of readdirSync(dirPath, { withFileTypes: true })) {
+        if (!entry.isFile() || extname(entry.name) !== '.dql') continue;
+        const filePath = join(dirPath, entry.name);
 
+        try {
+          const source = readFileSync(filePath, 'utf-8');
+          const parser = new Parser(source, `${dir}/${entry.name}`);
+          const ast = parser.parse();
+
+          for (const stmt of ast.statements) {
+            const block = stmt as any;
+            if (block.kind !== 'BlockDecl') continue;
+
+            blocks.push({
+              name: block.name,
+              sql: block.query?.rawSQL ?? '',
+              domain: extractBlockProperty(block, 'domain'),
+              owner: extractBlockProperty(block, 'owner'),
+              status: extractBlockProperty(block, 'status') as any,
+              blockType: block.blockType,
+              metricRef: block.metricRef,
+              chartType: extractVisualizationChart(block),
+            });
+          }
+        } catch {
+          // Skip unparseable files
+        }
+      }
+    }
+
+    const semanticDir = join(projectRoot, 'semantic-layer');
+    if (existsSync(semanticDir)) {
       try {
-        const source = readFileSync(filePath, 'utf-8');
-        const parser = new Parser(source, `${dir}/${entry.name}`);
-        const ast = parser.parse();
-
-        for (const stmt of ast.statements) {
-          const block = stmt as any;
-          if (block.kind !== 'BlockDecl') continue;
-
-          blocks.push({
-            name: block.name,
-            sql: block.query?.rawSQL ?? '',
-            domain: extractBlockProperty(block, 'domain'),
-            owner: extractBlockProperty(block, 'owner'),
-            status: extractBlockProperty(block, 'status') as any,
-            blockType: block.blockType,
-            metricRef: block.metricRef,
-            chartType: extractVisualizationChart(block),
+        const layer = loadSemanticLayerFromDir(semanticDir);
+        for (const metric of layer.listMetrics()) {
+          metrics.push({
+            name: metric.name,
+            table: metric.table,
+            domain: metric.domain,
+            type: metric.type,
+          });
+        }
+        for (const dim of layer.listDimensions()) {
+          dimensions.push({
+            name: dim.name,
+            table: dim.table,
           });
         }
       } catch {
-        // Skip unparseable files
+        // Non-fatal
       }
     }
-  }
 
-  // Load semantic layer
-  const semanticDir = join(projectRoot, 'semantic-layer');
-  if (existsSync(semanticDir)) {
-    try {
-      const layer = loadSemanticLayerFromDir(semanticDir);
-      for (const metric of layer.listMetrics()) {
-        metrics.push({
-          name: metric.name,
-          table: metric.table,
-          domain: metric.domain,
-          type: metric.type,
-        });
-      }
-      for (const dim of layer.listDimensions()) {
-        dimensions.push({
-          name: dim.name,
-          table: dim.table,
-        });
-      }
-    } catch {
-      // Non-fatal
-    }
+    return buildLineageGraph(blocks, metrics, dimensions);
   }
+}
 
-  return buildLineageGraph(blocks, metrics, dimensions);
+function resolveDbtManifestPath(projectRoot: string): string | undefined {
+  const candidate = join(projectRoot, 'target', 'manifest.json');
+  return existsSync(candidate) ? candidate : undefined;
 }
 
 /** Extract a property value from a block — checks direct AST fields first, then properties array. */
@@ -435,7 +474,7 @@ function resolveNodeId(graph: LineageGraph, name: string): string | null {
   if (name.includes(':') && graph.getNode(name)) return name;
 
   // Try common type prefixes in priority order
-  const prefixes = ['block', 'table', 'metric', 'dimension', 'chart', 'domain'];
+  const prefixes = ['block', 'dashboard', 'dbt_model', 'dbt_source', 'table', 'metric', 'dimension', 'chart', 'domain'];
   for (const prefix of prefixes) {
     const id = `${prefix}:${name}`;
     if (graph.getNode(id)) return id;
@@ -447,6 +486,43 @@ function resolveNodeId(graph: LineageGraph, name: string): string | null {
   }
 
   return null;
+}
+
+function printSearchResults(graph: LineageGraph, term: string): void {
+  const result = queryLineage(graph, { search: term });
+  console.log(`\n  Search: ${term}`);
+  console.log('  ' + '='.repeat(50));
+  if (!result.matches?.length) {
+    console.log('  No lineage nodes matched.\n');
+    return;
+  }
+  for (const match of result.matches) {
+    const node = match.node;
+    console.log(`  ${node.id}${node.domain ? ` [${node.domain}]` : ''}`);
+  }
+  console.log('');
+}
+
+function printFocusedLineage(graph: LineageGraph, focus: string): void {
+  const result = queryLineage(graph, { focus });
+  if (!result.focalNode) {
+    console.error(`"${focus}" not found in lineage graph.`);
+    process.exitCode = 1;
+    return;
+  }
+
+  console.log(`\n  Focused Lineage: ${result.focalNode.name}`);
+  console.log('  ' + '='.repeat(50));
+  for (const node of result.graph.nodes.sort((a, b) => a.id.localeCompare(b.id))) {
+    console.log(`  ${node.id}${node.domain ? ` [${node.domain}]` : ''}`);
+  }
+  if (result.graph.edges.length > 0) {
+    console.log('\n  Edges:');
+    for (const edge of result.graph.edges) {
+      console.log(`    ${edge.source} -${edge.type}-> ${edge.target}`);
+    }
+  }
+  console.log('');
 }
 
 function printNodeLineage(graph: LineageGraph, nodeId: string, _flags: CLIFlags): void {

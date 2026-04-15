@@ -11,7 +11,7 @@
 
 export interface DQLManifest {
   /** Manifest schema version */
-  manifestVersion: 1;
+  manifestVersion: 1 | 2;
   /** DQL CLI version that generated this manifest */
   dqlVersion: string;
   /** ISO 8601 timestamp */
@@ -161,6 +161,7 @@ export interface ManifestLineageNode {
   owner?: string;
   status?: string;
   filePath?: string;
+  columns?: Array<{ name: string; type?: string; description?: string }>;
 }
 
 export interface ManifestLineageEdge {
@@ -184,4 +185,19 @@ export interface ManifestDbtImport {
   sourcesImported: number;
   /** Timestamp of import */
   importedAt: string;
+  /** Imported dbt DAG metadata */
+  dbtDag?: {
+    models: Array<{
+      uniqueId: string;
+      name: string;
+      type: 'model' | 'source';
+      dependsOn: string[];
+      columns?: Array<{ name: string; type?: string; description?: string }>;
+      schema?: string;
+      database?: string;
+      materialized?: string;
+      description?: string;
+    }>;
+    edges: Array<{ source: string; target: string }>;
+  };
 }

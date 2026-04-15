@@ -76,12 +76,35 @@ dql doctor
 dql notebook
 ```
 
-## Step 9: Import dbt Lineage
+## Step 9: Copy The Demo Lineage Notebook
+
+From the DQL repo, copy the demo notebook into your dbt project:
+
+```bash
+mkdir -p notebooks
+cp /path/to/DQL/dql/docs/examples/jaffle-shop-lineage-demo.dqlnb notebooks/
+```
+
+This notebook is designed to show:
+
+- dbt model lineage upstream
+- DQL block lineage in the middle
+- notebook consumption downstream
+- domain boundaries across customer, finance, and executive flows
+
+## Step 10: Import dbt Lineage
 
 ```bash
 dql compile --dbt-manifest target/manifest.json
 dql lineage
 ```
+
+## Step 11: Verify In The UI
+
+1. Open the `Lineage` sidebar and search for `revenue_by_customer_type`
+2. Open `executive_revenue_rollup` in Block Studio
+3. Use the `Lineage` tab in Block Studio to inspect the path summary
+4. Open the fullscreen graph to inspect the broader dbt + DQL + notebook flow
 
 ## What To Read Next
 

@@ -30,7 +30,7 @@ import {
 import { getTypeColor } from '../../utils/type-colors';
 
 type ExplorerTab = 'semantic' | 'database';
-type ResultTab = 'validate' | 'results' | 'visualization' | 'save' | 'history' | 'tests';
+type ResultTab = 'validate' | 'results' | 'visualization' | 'lineage' | 'save' | 'history' | 'tests';
 
 interface FlatSemanticRow {
   node: SemanticTreeNode;
@@ -69,6 +69,13 @@ export function BlockStudio() {
   const [historyLoaded, setHistoryLoaded] = useState(false);
   const [testResults, setTestResults] = useState<Array<{ field: string; operator: string; expected: string; passed: boolean; actual?: string }> | null>(null);
   const [testRunning, setTestRunning] = useState(false);
+  const [lineageLoading, setLineageLoading] = useState(false);
+  const [lineageDetail, setLineageDetail] = useState<{
+    node: { id: string; type: string; name: string; domain?: string } | null;
+    incoming: Array<{ edge: { type: string }; node?: { id: string; type: string; name: string; domain?: string } }>;
+    outgoing: Array<{ edge: { type: string }; node?: { id: string; type: string; name: string; domain?: string } }>;
+  } | null>(null);
+  const [lineageGraph, setLineageGraph] = useState<{ nodes: Array<{ id: string; type: string; name: string; domain?: string }>; edges: Array<{ source: string; target: string; type: string }> } | null>(null);
   const [statusUpdating, setStatusUpdating] = useState(false);
   const [scrollTop, setScrollTop] = useState(0);
   const [viewportHeight, setViewportHeight] = useState(400);
@@ -193,6 +200,27 @@ export function BlockStudio() {
       blockType: parsed?.blockType || 'custom',
     };
   }, [state.blockStudioDraft, state.blockStudioMetadata]);
+  const activeBlockName = draftMetadata?.name ?? state.blockStudioMetadata?.name ?? null;
+
+  useEffect(() => {
+    if (!activeBlockName) return;
+    const nodeId = `block:${activeBlockName}`;
+    dispatch({ type: 'SET_LINEAGE_FOCUS', nodeId });
+    setLineageLoading(true);
+    void Promise.all([
+      api.fetchLineageNode(nodeId),
+      api.queryLineage({ focus: nodeId }),
+    ])
+      .then(([detail, focused]) => {
+        setLineageDetail(detail);
+        setLineageGraph(focused.graph ?? null);
+      })
+      .catch(() => {
+        setLineageDetail(null);
+        setLineageGraph(null);
+      })
+      .finally(() => setLineageLoading(false));
+  }, [activeBlockName, dispatch]);
 
   const handleDraftChange = (draft: string) => {
     dispatch({ type: 'SET_BLOCK_STUDIO_DRAFT', draft });
@@ -341,6 +369,14 @@ export function BlockStudio() {
   const activeResultChartType = state.blockStudioPreview
     ? resolveChartType(state.blockStudioPreview.result, state.blockStudioPreview.chartConfig)
     : 'table';
+  const incomingLineage = useMemo(
+    () => (lineageDetail?.incoming ?? []).filter((entry) => entry.node),
+    [lineageDetail],
+  );
+  const outgoingLineage = useMemo(
+    () => (lineageDetail?.outgoing ?? []).filter((entry) => entry.node),
+    [lineageDetail],
+  );
 
   const startLeftResize = (event: React.MouseEvent<HTMLDivElement>) => {
     event.preventDefault();
@@ -556,6 +592,7 @@ export function BlockStudio() {
           <div style={{ flex: 1 }} />
           <TemplateButton label="Semantic Skeleton" onClick={() => handleDraftChange(buildSemanticSkeleton(state.blockStudioMetadata?.name ?? 'New Block'))} />
           <TemplateButton label="Custom Skeleton" onClick={() => handleDraftChange(buildCustomSkeleton(state.blockStudioMetadata?.name ?? 'New Block'))} />
+          <TemplateButton label="Lineage" onClick={() => setResultTab('lineage')} />
           <TemplateButton label="Run" onClick={() => void handleRun()} busy={running} />
           <TemplateButton label="Save" onClick={() => void handleSave()} busy={saving} />
           {saveError && (
@@ -563,6 +600,30 @@ export function BlockStudio() {
               {saveError}
             </span>
           )}
+        </div>
+        <div style={{ padding: '10px 14px', display: 'flex', gap: 10, alignItems: 'center', borderBottom: `1px solid ${t.headerBorder}`, background: `${t.pillBg}66`, flexWrap: 'wrap' }}>
+          <div style={{ fontSize: 11, color: t.textMuted, fontFamily: t.font, textTransform: 'uppercase', letterSpacing: '0.04em' }}>
+            Active lineage
+          </div>
+          <LineageSummaryPill label="Upstream" count={incomingLineage.length} t={t} />
+          <LineageSummaryPill label="Downstream" count={outgoingLineage.length} t={t} />
+          {lineageDetail?.node?.domain && (
+            <span style={{ fontSize: 11, color: t.textSecondary, fontFamily: t.font }}>
+              Domain: {lineageDetail.node.domain}
+            </span>
+          )}
+          <div style={{ flex: 1 }} />
+          <button
+            onClick={() => {
+              if (activeBlockName) {
+                dispatch({ type: 'SET_LINEAGE_FOCUS', nodeId: `block:${activeBlockName}` });
+                if (!state.lineageFullscreen) dispatch({ type: 'TOGGLE_LINEAGE_FULLSCREEN' });
+              }
+            }}
+            style={{ background: t.btnBg, border: `1px solid ${t.btnBorder}`, borderRadius: 6, color: t.textPrimary, cursor: 'pointer', fontSize: 11, fontFamily: t.font, padding: '6px 10px' }}
+          >
+            Open Full Lineage
+          </button>
         </div>
         <div style={{ flex: 1, overflow: 'hidden' }}>
           <SQLCellEditor
@@ -598,6 +659,7 @@ export function BlockStudio() {
           <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
             <ExplorerTabButton active={resultTab === 'results'} onClick={() => setResultTab('results')} label="Results" />
             <ExplorerTabButton active={resultTab === 'visualization'} onClick={() => setResultTab('visualization')} label="Visualization" />
+            <ExplorerTabButton active={resultTab === 'lineage'} onClick={() => setResultTab('lineage')} label="Lineage" />
             <ExplorerTabButton active={resultTab === 'validate'} onClick={() => setResultTab('validate')} label="Validate" />
             <ExplorerTabButton active={resultTab === 'tests'} onClick={() => setResultTab('tests')} label="Tests" />
             <ExplorerTabButton active={resultTab === 'history'} onClick={() => {
@@ -640,6 +702,25 @@ export function BlockStudio() {
             <VisualizationPanel
               chartConfig={currentChart}
               onChange={(next) => handleDraftChange(upsertVisualizationConfig(state.blockStudioDraft, next))}
+              t={t}
+            />
+          )}
+          {resultTab === 'lineage' && (
+            <BlockLineagePanel
+              blockName={activeBlockName}
+              loading={lineageLoading}
+              detail={lineageDetail}
+              graph={lineageGraph}
+              onSelectNode={(nodeId) => {
+                dispatch({ type: 'SET_LINEAGE_FOCUS', nodeId });
+                if (!state.lineageFullscreen) dispatch({ type: 'TOGGLE_LINEAGE_FULLSCREEN' });
+              }}
+              onOpenFull={() => {
+                if (activeBlockName) {
+                  dispatch({ type: 'SET_LINEAGE_FOCUS', nodeId: `block:${activeBlockName}` });
+                  if (!state.lineageFullscreen) dispatch({ type: 'TOGGLE_LINEAGE_FULLSCREEN' });
+                }
+              }}
               t={t}
             />
           )}
@@ -828,6 +909,344 @@ function VisualizationPanel({
       <input value={chartConfig.title ?? ''} onChange={(event) => onChange({ ...chartConfig, title: event.target.value })} placeholder="title" style={inputStyle} />
     </div>
   );
+}
+
+function LineageSummaryPill({ label, count, t }: { label: string; count: number; t: Theme }) {
+  return (
+    <span
+      style={{
+        fontSize: 11,
+        fontWeight: 600,
+        color: t.textPrimary,
+        background: t.pillBg,
+        border: `1px solid ${t.cellBorder}`,
+        borderRadius: 999,
+        padding: '4px 10px',
+        fontFamily: t.font,
+      }}
+    >
+      {label}: {count}
+    </span>
+  );
+}
+
+function BlockLineagePanel({
+  blockName,
+  loading,
+  detail,
+  graph,
+  onSelectNode,
+  onOpenFull,
+  t,
+}: {
+  blockName: string | null;
+  loading: boolean;
+  detail: {
+    node: { id: string; type: string; name: string; domain?: string } | null;
+    incoming: Array<{ edge: { type: string }; node?: { id: string; type: string; name: string; domain?: string } }>;
+    outgoing: Array<{ edge: { type: string }; node?: { id: string; type: string; name: string; domain?: string } }>;
+  } | null;
+  graph: {
+    nodes: Array<{ id: string; type: string; name: string; domain?: string }>;
+    edges: Array<{ source: string; target: string; type: string }>;
+  } | null;
+  onSelectNode: (nodeId: string) => void;
+  onOpenFull: () => void;
+  t: Theme;
+}) {
+  if (!blockName) {
+    return <EmptyPanel message="Lineage will appear once the block has a name." />;
+  }
+
+  if (loading) {
+    return <EmptyPanel message="Loading block lineage…" />;
+  }
+
+  if (!detail?.node) {
+    return (
+      <div style={{ padding: 12, display: 'grid', gap: 12 }}>
+        <div style={{ fontSize: 12, color: t.textMuted, fontFamily: t.font }}>
+          No lineage node was found for this block yet. Save the block or compile the project if you expect it to appear in the graph.
+        </div>
+        <div>
+          <button
+            onClick={onOpenFull}
+            style={{ background: t.btnBg, border: `1px solid ${t.btnBorder}`, borderRadius: 6, color: t.textPrimary, cursor: 'pointer', fontSize: 11, fontFamily: t.font, padding: '6px 10px' }}
+          >
+            Open Full Lineage
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  const pathSummary = graph ? buildLineagePathSummary(graph, detail.node.id) : null;
+
+  return (
+    <div style={{ padding: 12, display: 'grid', gap: 12 }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
+        <div>
+          <div style={{ fontSize: 12, fontWeight: 700, color: t.textPrimary, fontFamily: t.font }}>
+            {detail.node.name}
+          </div>
+          <div style={{ fontSize: 11, color: t.textMuted, fontFamily: t.font }}>
+            {detail.node.domain ? `Domain: ${detail.node.domain}` : 'Block lineage focus'}
+          </div>
+        </div>
+        <div style={{ flex: 1 }} />
+        <button
+          onClick={onOpenFull}
+          style={{ background: t.btnBg, border: `1px solid ${t.btnBorder}`, borderRadius: 6, color: t.textPrimary, cursor: 'pointer', fontSize: 11, fontFamily: t.font, padding: '6px 10px' }}
+        >
+          Open Full Lineage
+        </button>
+      </div>
+
+      {pathSummary && (pathSummary.upstreamPaths.length > 0 || pathSummary.downstreamPaths.length > 0) && (
+        <div style={{ display: 'grid', gap: 12 }}>
+          <div style={{ fontSize: 11, fontWeight: 700, color: t.textMuted, fontFamily: t.font, textTransform: 'uppercase', letterSpacing: '0.04em' }}>
+            Path Summary
+          </div>
+          <div style={{ fontSize: 12, color: t.textMuted, fontFamily: t.font, lineHeight: 1.5 }}>
+            Read this as provenance and consumption: raw source tables and dbt models flow into the current DQL block, and downstream paths show which notebooks or analytics objects use the block.
+          </div>
+          {pathSummary.upstreamPaths.length > 0 && (
+            <LineagePathSection
+              title="Source to Block"
+              paths={pathSummary.upstreamPaths}
+              onSelectNode={onSelectNode}
+              t={t}
+            />
+          )}
+          {pathSummary.downstreamPaths.length > 0 && (
+            <LineagePathSection
+              title="Block to Consumption"
+              paths={pathSummary.downstreamPaths}
+              onSelectNode={onSelectNode}
+              t={t}
+            />
+          )}
+        </div>
+      )}
+
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, minmax(0, 1fr))', gap: 12 }}>
+        <LineageList
+          title="Upstream"
+          entries={detail.incoming}
+          emptyMessage="No upstream dependencies yet."
+          onSelectNode={onSelectNode}
+          t={t}
+        />
+        <LineageList
+          title="Downstream"
+          entries={detail.outgoing}
+          emptyMessage="No downstream dependencies yet."
+          onSelectNode={onSelectNode}
+          t={t}
+        />
+      </div>
+    </div>
+  );
+}
+
+function LineagePathSection({
+  title,
+  paths,
+  onSelectNode,
+  t,
+}: {
+  title: string;
+  paths: Array<Array<{ id: string; type: string; name: string; domain?: string }>>;
+  onSelectNode: (nodeId: string) => void;
+  t: Theme;
+}) {
+  return (
+    <div style={{ border: `1px solid ${t.cellBorder}`, borderRadius: 10, overflow: 'hidden', background: t.inputBg }}>
+      <div style={{ padding: '10px 12px', borderBottom: `1px solid ${t.cellBorder}`, fontSize: 11, fontWeight: 700, color: t.textMuted, fontFamily: t.font, textTransform: 'uppercase', letterSpacing: '0.04em' }}>
+        {title}
+      </div>
+      <div style={{ display: 'grid', gap: 8, padding: 12 }}>
+        {paths.slice(0, 4).map((path, index) => (
+          <div key={`${title}-${index}`} style={{ display: 'flex', flexWrap: 'wrap', gap: 6, alignItems: 'center' }}>
+            {path.map((node, nodeIndex) => (
+              <React.Fragment key={node.id}>
+                <button
+                  onClick={() => onSelectNode(node.id)}
+                  style={{
+                    background: t.pillBg,
+                    border: `1px solid ${t.cellBorder}`,
+                    borderRadius: 999,
+                    color: t.textPrimary,
+                    cursor: 'pointer',
+                    fontSize: 11,
+                    fontFamily: t.font,
+                    padding: '5px 10px',
+                  }}
+                  title={node.domain ? `${node.type} · ${node.domain}` : node.type}
+                >
+                  {formatLineageNodeLabel(node)}
+                </button>
+                {nodeIndex < path.length - 1 && (
+                  <span style={{ color: t.textMuted, fontSize: 11, fontFamily: t.font }}>→</span>
+                )}
+              </React.Fragment>
+            ))}
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function LineageList({
+  title,
+  entries,
+  emptyMessage,
+  onSelectNode,
+  t,
+}: {
+  title: string;
+  entries: Array<{ edge: { type: string }; node?: { id: string; type: string; name: string; domain?: string } }>;
+  emptyMessage: string;
+  onSelectNode: (nodeId: string) => void;
+  t: Theme;
+}) {
+  const validEntries = entries.filter((entry) => entry.node);
+  return (
+    <div style={{ border: `1px solid ${t.cellBorder}`, borderRadius: 10, overflow: 'hidden', background: t.inputBg }}>
+      <div style={{ padding: '10px 12px', borderBottom: `1px solid ${t.cellBorder}`, fontSize: 11, fontWeight: 700, color: t.textMuted, fontFamily: t.font, textTransform: 'uppercase', letterSpacing: '0.04em' }}>
+        {title} ({validEntries.length})
+      </div>
+      {validEntries.length === 0 ? (
+        <div style={{ padding: 12, fontSize: 12, color: t.textMuted, fontFamily: t.font }}>{emptyMessage}</div>
+      ) : (
+        <div style={{ display: 'grid' }}>
+          {validEntries.map((entry) => (
+            <button
+              key={`${entry.node!.id}-${entry.edge.type}`}
+              onClick={() => onSelectNode(entry.node!.id)}
+              style={{
+                background: 'transparent',
+                border: 'none',
+                borderTop: `1px solid ${t.cellBorder}`,
+                padding: '10px 12px',
+                textAlign: 'left',
+                cursor: 'pointer',
+              }}
+            >
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                <span style={{ fontSize: 10, fontWeight: 700, color: t.accent, fontFamily: t.font, textTransform: 'uppercase' }}>
+                  {entry.node!.type.replace('_', ' ')}
+                </span>
+                <span style={{ fontSize: 12, color: t.textPrimary, fontFamily: t.font, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                  {entry.node!.name}
+                </span>
+              </div>
+              <div style={{ marginTop: 3, fontSize: 11, color: t.textMuted, fontFamily: t.font }}>
+                via {entry.edge.type}{entry.node!.domain ? ` · ${entry.node!.domain}` : ''}
+              </div>
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function buildLineagePathSummary(
+  graph: {
+    nodes: Array<{ id: string; type: string; name: string; domain?: string }>;
+    edges: Array<{ source: string; target: string; type: string }>;
+  },
+  focalNodeId: string,
+) {
+  const nodeMap = new Map(graph.nodes.map((node) => [node.id, node]));
+  const incoming = new Map<string, string[]>();
+  const outgoing = new Map<string, string[]>();
+
+  for (const edge of graph.edges) {
+    if (!incoming.has(edge.target)) incoming.set(edge.target, []);
+    if (!outgoing.has(edge.source)) outgoing.set(edge.source, []);
+    incoming.get(edge.target)!.push(edge.source);
+    outgoing.get(edge.source)!.push(edge.target);
+  }
+
+  const upstreamPaths = collectPathsToRoots(focalNodeId, incoming, nodeMap, new Set<string>());
+  const downstreamPaths = collectPathsToLeaves(focalNodeId, outgoing, nodeMap, new Set<string>());
+
+  return {
+    upstreamPaths: dedupeLineagePaths(upstreamPaths),
+    downstreamPaths: dedupeLineagePaths(downstreamPaths),
+  };
+}
+
+function collectPathsToRoots(
+  nodeId: string,
+  incoming: Map<string, string[]>,
+  nodeMap: Map<string, { id: string; type: string; name: string; domain?: string }>,
+  visiting: Set<string>,
+): Array<Array<{ id: string; type: string; name: string; domain?: string }>> {
+  const node = nodeMap.get(nodeId);
+  if (!node) return [];
+  if (visiting.has(nodeId)) return [[node]];
+  const parents = incoming.get(nodeId) ?? [];
+  if (parents.length === 0) return [[node]];
+
+  visiting.add(nodeId);
+  const paths = parents.flatMap((parentId) =>
+    collectPathsToRoots(parentId, incoming, nodeMap, visiting).map((path) => [...path, node]),
+  );
+  visiting.delete(nodeId);
+  return paths;
+}
+
+function collectPathsToLeaves(
+  nodeId: string,
+  outgoing: Map<string, string[]>,
+  nodeMap: Map<string, { id: string; type: string; name: string; domain?: string }>,
+  visiting: Set<string>,
+): Array<Array<{ id: string; type: string; name: string; domain?: string }>> {
+  const node = nodeMap.get(nodeId);
+  if (!node) return [];
+  if (visiting.has(nodeId)) return [[node]];
+  const children = outgoing.get(nodeId) ?? [];
+  if (children.length === 0) return [[node]];
+
+  visiting.add(nodeId);
+  const paths = children.flatMap((childId) =>
+    collectPathsToLeaves(childId, outgoing, nodeMap, visiting).map((path) => [node, ...path]),
+  );
+  visiting.delete(nodeId);
+  return paths;
+}
+
+function dedupeLineagePaths(paths: Array<Array<{ id: string; type: string; name: string; domain?: string }>>) {
+  const seen = new Set<string>();
+  return paths.filter((path) => {
+    const key = path.map((node) => node.id).join('>');
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+function formatLineageNodeLabel(node: { type: string; name: string }) {
+  const typeLabel = node.type === 'dbt_model'
+    ? 'DBT'
+    : node.type === 'dbt_source'
+      ? 'SRC'
+      : node.type === 'dashboard'
+        ? 'NB'
+        : node.type === 'source_table'
+          ? 'TBL'
+          : node.type === 'block'
+            ? 'BLK'
+            : node.type === 'metric'
+              ? 'MET'
+              : node.type === 'dimension'
+                ? 'DIM'
+                : node.type.toUpperCase();
+  return `${typeLabel} ${node.name}`;
 }
 
 function SavePanel({

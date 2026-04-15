@@ -23,7 +23,7 @@ export interface ParamConfig {
   defaultValue: string;
   options?: string[];
 }
-export type SidebarPanel = 'files' | 'schema' | 'connection' | 'reference' | 'semantic' | 'lineage' | null;
+export type SidebarPanel = 'files' | 'schema' | 'block_library' | 'connection' | 'reference' | 'semantic' | 'lineage' | null;
 export type DevPanelTab = 'logs' | 'errors';
 export type MainView = 'notebook' | 'block_studio' | 'connection' | 'reference';
 
@@ -259,6 +259,7 @@ export interface NotebookState {
   executionCounter: number;
   savingFile: boolean;
   lineageFullscreen: boolean;
+  lineageFocusNodeId: string | null;
   dashboardMode: boolean;
   activeBlockPath: string | null;
   blockStudioDraft: string;
@@ -305,6 +306,7 @@ export type NotebookAction =
   | { type: 'ADD_SEMANTIC_RECENT'; name: string }
   | { type: 'SET_SEMANTIC_DOMAINS'; domains: string[]; tags: string[]; lastSyncTime?: string | null }
   | { type: 'TOGGLE_LINEAGE_FULLSCREEN' }
+  | { type: 'SET_LINEAGE_FOCUS'; nodeId: string | null }
   | { type: 'REORDER_CELL'; fromIndex: number; toIndex: number }
   | { type: 'TOGGLE_DASHBOARD_MODE' }
   | { type: 'OPEN_BLOCK_STUDIO'; file: NotebookFile; payload: BlockStudioOpenPayload }

@@ -13,7 +13,13 @@ import { extractTablesFromSql } from '../lineage/sql-parser.js';
 import { buildLineageGraph } from '../lineage/builder.js';
 import { detectDomainFlows, getDomainTrustOverview } from '../lineage/domain-lineage.js';
 import { loadSemanticLayerFromDir } from '../semantic/index.js';
-import type { LineageBlockInput, LineageMetricInput, LineageDimensionInput } from '../lineage/builder.js';
+import type {
+  LineageBlockInput,
+  LineageMetricInput,
+  LineageDimensionInput,
+  LineageDbtModelInput,
+  LineageDashboardInput,
+} from '../lineage/builder.js';
 import type {
   DQLManifest,
   ManifestBlock,
@@ -76,10 +82,10 @@ export function buildManifest(options: ManifestBuildOptions): DQLManifest {
   }
 
   // Build lineage
-  const lineage = buildManifestLineage(blocks, metrics, dimensions);
+  const lineage = buildManifestLineage(blocks, metrics, dimensions, notebooks, dbtImport);
 
   return {
-    manifestVersion: 1,
+    manifestVersion: 2,
     dqlVersion,
     generatedAt: new Date().toISOString(),
     project: projectName,
@@ -447,6 +453,8 @@ function importDbtManifest(
   let modelsImported = 0;
   let sourcesImported = 0;
   const projectName = manifest.metadata?.project_name;
+  const dbtDagModels: NonNullable<ManifestDbtImport['dbtDag']>['models'] = [];
+  const dbtDagEdges: NonNullable<ManifestDbtImport['dbtDag']>['edges'] = [];
 
   // Import models as source tables
   const nodes = manifest.nodes ?? {};
@@ -457,6 +465,14 @@ function importDbtManifest(
     if (!tableName) continue;
 
     // Create or update source entry
+    const columns = node.columns
+      ? Object.values(node.columns as Record<string, any>).map((value: any) => ({
+          name: value.name,
+          description: value.description,
+          type: value.data_type,
+        }))
+      : undefined;
+
     if (!sources[tableName]) {
       sources[tableName] = {
         name: tableName,
@@ -485,6 +501,21 @@ function importDbtManifest(
       sources[tableName].origin = 'dbt';
     }
     modelsImported++;
+    const dependsOn = Array.isArray(node.depends_on?.nodes) ? node.depends_on.nodes : [];
+    dbtDagModels.push({
+      uniqueId,
+      name: tableName,
+      type: 'model',
+      dependsOn,
+      columns,
+      schema: node.schema,
+      database: node.database,
+      materialized: node.config?.materialized,
+      description: node.description,
+    });
+    for (const dependency of dependsOn) {
+      dbtDagEdges.push({ source: dependency, target: uniqueId });
+    }
   }
 
   // Import dbt sources
@@ -507,6 +538,15 @@ function importDbtManifest(
       description: src.description,
     };
     sourcesImported++;
+    dbtDagModels.push({
+      uniqueId,
+      name: tableName,
+      type: 'source',
+      dependsOn: [],
+      schema: src.schema,
+      database: src.database,
+      description: src.description,
+    });
   }
 
   return {
@@ -515,6 +555,10 @@ function importDbtManifest(
     modelsImported,
     sourcesImported,
     importedAt: new Date().toISOString(),
+    dbtDag: {
+      models: dbtDagModels,
+      edges: dbtDagEdges,
+    },
   };
 }
 
@@ -524,6 +568,8 @@ function buildManifestLineage(
   blocks: Record<string, ManifestBlock>,
   metrics: Record<string, ManifestMetric>,
   dimensions: Record<string, ManifestDimension>,
+  notebooks?: Record<string, ManifestNotebook>,
+  dbtImport?: ManifestDbtImport,
 ): ManifestLineage {
   // Convert to lineage builder input format
   const lineageBlocks: LineageBlockInput[] = Object.values(blocks).map((b) => ({
@@ -549,7 +595,33 @@ function buildManifestLineage(
     table: d.table,
   }));
 
-  const graph = buildLineageGraph(lineageBlocks, lineageMetrics, lineageDimensions);
+  const dashboards: LineageDashboardInput[] = Object.values(notebooks ?? {}).map((notebook) => ({
+    name: notebook.title,
+    blocks: notebook.cells
+      .map((cell) => cell.blockName)
+      .filter((name): name is string => Boolean(name)),
+    charts: notebook.cells
+      .filter((cell) => cell.chartType && cell.blockName)
+      .map((cell) => cell.blockName!)
+      .filter(Boolean),
+  }));
+
+  const dbtModels: LineageDbtModelInput[] = (dbtImport?.dbtDag?.models ?? []).map((model) => ({
+    name: model.name,
+    uniqueId: model.uniqueId,
+    type: model.type,
+    dependsOn: model.dependsOn,
+    columns: model.columns,
+    schema: model.schema,
+    database: model.database,
+    materialized: model.materialized,
+    description: model.description,
+  }));
+
+  const graph = buildLineageGraph(lineageBlocks, lineageMetrics, lineageDimensions, {
+    dbtModels,
+    dashboards,
+  });
 
   // Serialize to manifest format
   const graphJson = graph.toJSON();
@@ -575,6 +647,7 @@ function buildManifestLineage(
       owner: n.owner,
       status: n.status,
       filePath: blocks[n.name]?.filePath,
+      columns: n.columns,
     })),
     edges: graphJson.edges.map((e) => ({
       source: e.source,

@@ -8,6 +8,7 @@ After installation, these are the main workflows a user needs to understand.
 2. [Block Authoring Workflow](./block-authoring-workflow.md)
 3. [Semantic Layer Workflow](./semantic-layer-workflow.md)
 4. [Lineage Workflow](./lineage-workflow.md)
+5. [Demo Assets](../examples/README.md)
 
 ## Goal Of This Section
 

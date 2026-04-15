@@ -347,7 +347,9 @@ export class Parser {
       || type === TokenType.LayoutKeyword
       || type === TokenType.RowKeyword
       || type === TokenType.UseKeyword
-      || type === TokenType.ImportKeyword;
+      || type === TokenType.ImportKeyword
+      || type === TokenType.MetricKeyword
+      || type === TokenType.MetricsKeyword;
   }
 
   private parseVariableDecl(): VariableDeclNode {

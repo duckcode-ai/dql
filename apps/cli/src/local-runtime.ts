@@ -8,6 +8,8 @@ import {
   createWelcomeNotebook,
   deserializeNotebook,
   getConnectorFormSchemas,
+  hasSemanticRefs,
+  resolveSemanticRefs,
   type NotebookCell,
 } from '@duckcodeailabs/dql-notebook';
 import {
@@ -16,10 +18,13 @@ import {
   getDialect,
   Parser,
   buildLineageGraph,
+  buildManifest,
   analyzeImpact,
   buildTrustChain,
   detectDomainFlows,
   getDomainTrustOverview,
+  queryLineage,
+  LineageGraph,
   type SemanticLayer,
   type SemanticLayerProviderConfig,
   type SemanticLayerResult,
@@ -1583,6 +1588,75 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
       return;
     }
 
+    if (req.method === 'GET' && path === '/api/lineage/search') {
+      const term = url.searchParams.get('q') ?? '';
+      try {
+        const graph = buildProjectLineageGraph(projectRoot, semanticLayer);
+        const result = queryLineage(graph, { search: term });
+        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({ matches: result.matches ?? [] }));
+      } catch (error) {
+        res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({ error: error instanceof Error ? error.message : String(error) }));
+      }
+      return;
+    }
+
+    if (req.method === 'GET' && path === '/api/lineage/query') {
+      try {
+        const graph = buildProjectLineageGraph(projectRoot, semanticLayer);
+        const types = url.searchParams.get('types')
+          ?.split(',')
+          .map((value) => value.trim())
+          .filter(Boolean) as any[] | undefined;
+        const upstreamDepthParam = url.searchParams.get('upstreamDepth');
+        const downstreamDepthParam = url.searchParams.get('downstreamDepth');
+        const result = queryLineage(graph, {
+          focus: url.searchParams.get('focus') ?? undefined,
+          search: url.searchParams.get('search') ?? undefined,
+          types,
+          domain: url.searchParams.get('domain') ?? undefined,
+          upstreamDepth: upstreamDepthParam ? Number(upstreamDepthParam) : undefined,
+          downstreamDepth: downstreamDepthParam ? Number(downstreamDepthParam) : undefined,
+        });
+        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON(result));
+      } catch (error) {
+        res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({ error: error instanceof Error ? error.message : String(error) }));
+      }
+      return;
+    }
+
+    if (req.method === 'GET' && path.startsWith('/api/lineage/node/')) {
+      const rawNodeId = decodeURIComponent(path.slice('/api/lineage/node/'.length));
+      try {
+        const graph = buildProjectLineageGraph(projectRoot, semanticLayer);
+        const node = resolveLineageNode(graph, rawNodeId);
+        if (!node) {
+          res.writeHead(404, { 'Content-Type': 'application/json; charset=utf-8' });
+          res.end(serializeJSON({ error: `Lineage node "${rawNodeId}" not found` }));
+          return;
+        }
+        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({
+          node,
+          incoming: graph.getIncomingEdges(node.id).map((edge) => ({
+            edge,
+            node: graph.getNode(edge.source),
+          })),
+          outgoing: graph.getOutgoingEdges(node.id).map((edge) => ({
+            edge,
+            node: graph.getNode(edge.target),
+          })),
+        }));
+      } catch (error) {
+        res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({ error: error instanceof Error ? error.message : String(error) }));
+      }
+      return;
+    }
+
     if (req.method === 'GET' && path.startsWith('/api/lineage/domain/')) {
       const domain = decodeURIComponent(path.slice('/api/lineage/domain/'.length));
       try {
@@ -2568,6 +2642,51 @@ function composeSemanticBlockSql(
   };
 }
 
+function resolveCustomBlockSql(
+  sql: string | null,
+  semanticLayer?: SemanticLayer,
+): {
+  sql: string | null;
+  diagnostics: BlockStudioDiagnostic[];
+  semanticRefs: { metrics: string[]; dimensions: string[]; segments: string[] };
+} {
+  if (!sql) {
+    return {
+      sql: null,
+      diagnostics: [],
+      semanticRefs: { metrics: [], dimensions: [], segments: [] },
+    };
+  }
+
+  const semanticRefs = extractBlockStudioSemanticReferences(sql);
+  if (!hasSemanticRefs(sql)) {
+    return { sql, diagnostics: [], semanticRefs };
+  }
+
+  const resolution = resolveSemanticRefs(sql, semanticLayer);
+  if (resolution.unresolvedRefs.length > 0) {
+    return {
+      sql: null,
+      diagnostics: resolution.unresolvedRefs.map((unresolved) => ({
+        severity: 'error' as const,
+        code: 'semantic_ref',
+        message: `Unknown semantic reference: ${unresolved}`,
+      })),
+      semanticRefs,
+    };
+  }
+
+  return {
+    sql: resolution.resolvedSql,
+    diagnostics: [],
+    semanticRefs: {
+      metrics: resolution.resolvedMetrics,
+      dimensions: resolution.resolvedDimensions,
+      segments: semanticRefs.segments,
+    },
+  };
+}
+
 export function validateBlockStudioSource(
   source: string,
   semanticLayer?: SemanticLayer,
@@ -2579,19 +2698,31 @@ export function validateBlockStudioSource(
   executableSql?: string | null;
 } {
   const diagnostics: BlockStudioDiagnostic[] = [];
-  try {
-    const parser = new Parser(source, '<block-studio>');
-    parser.parse();
-  } catch (error) {
-    diagnostics.push({
-      severity: 'error',
-      code: 'syntax',
-      message: error instanceof Error ? error.message : String(error),
-    });
+  const semanticConfig = parseSemanticBlockConfig(source);
+  if (semanticConfig.blockType !== 'semantic') {
+    try {
+      const parser = new Parser(source, '<block-studio>');
+      parser.parse();
+    } catch (error) {
+      diagnostics.push({
+        severity: 'error',
+        code: 'syntax',
+        message: error instanceof Error ? error.message : String(error),
+      });
+    }
+  } else {
+    const hasBlockHeader = /\bblock\s+"[^"]+"\s*\{/i.test(source);
+    const hasClosingBrace = /\}\s*$/m.test(source);
+    if (!hasBlockHeader || !hasClosingBrace) {
+      diagnostics.push({
+        severity: 'error',
+        code: 'semantic_shape',
+        message: 'Semantic block must use block "Name" { ... } structure.',
+      });
+    }
   }
 
   let semanticRefs = extractBlockStudioSemanticReferences(source);
-  const semanticConfig = parseSemanticBlockConfig(source);
   if (semanticConfig.blockType === 'semantic') {
     const selectedMetrics = semanticConfig.metrics.length > 0
       ? semanticConfig.metrics
@@ -2621,18 +2752,10 @@ export function validateBlockStudioSource(
       executableSql = null;
     }
   } else if (semanticLayer) {
-    const refValidation = semanticLayer.validateReferences([
-      ...semanticRefs.metrics,
-      ...semanticRefs.dimensions,
-      ...semanticRefs.segments,
-    ]);
-    for (const unknown of refValidation.unknown) {
-      diagnostics.push({
-        severity: 'error',
-        code: 'semantic_ref',
-        message: `Unknown semantic reference: ${unknown}`,
-      });
-    }
+    const resolvedCustomSql = resolveCustomBlockSql(executableSql, semanticLayer);
+    semanticRefs = resolvedCustomSql.semanticRefs;
+    diagnostics.push(...resolvedCustomSql.diagnostics);
+    executableSql = resolvedCustomSql.sql;
   }
 
   const chartConfig = extractBlockStudioChartConfig(source);
@@ -3251,50 +3374,86 @@ function buildNotebookTemplate(title: string, template: string): string {
 
 /** Build a lineage graph from the project's blocks and semantic layer. */
 function buildProjectLineageGraph(projectRoot: string, semanticLayer: SemanticLayer | null | undefined) {
-  const blocks: LineageBlockInput[] = [];
-  const metrics: LineageMetricInput[] = [];
-  const dimensions: LineageDimensionInput[] = [];
-
-  // Scan .dql files
-  const dirs = ['blocks', 'dashboards', 'workbooks'];
-  for (const dir of dirs) {
-    const dirPath = join(projectRoot, dir);
-    if (!existsSync(dirPath)) continue;
-    for (const entry of readdirSync(dirPath, { withFileTypes: true })) {
-      if (!entry.isFile() || extname(entry.name) !== '.dql') continue;
-      try {
-        const source = readFileSync(join(dirPath, entry.name), 'utf-8');
-        const parser = new Parser(source, `${dir}/${entry.name}`);
-        const ast = parser.parse();
-        for (const stmt of ast.statements) {
-          const block = stmt as any;
-          if (block.kind !== 'BlockDecl') continue;
-          blocks.push({
-            name: block.name,
-            sql: block.query?.rawSQL ?? '',
-            domain: extractProp(block, 'domain'),
-            owner: extractProp(block, 'owner'),
-            status: extractProp(block, 'status') as any,
-            blockType: block.blockType,
-            metricRef: block.metricRef,
-            chartType: extractVizChart(block),
-          });
-        }
-      } catch { /* skip unparseable */ }
+  const manifestPath = join(projectRoot, 'dql-manifest.json');
+  if (existsSync(manifestPath)) {
+    try {
+      const manifest = JSON.parse(readFileSync(manifestPath, 'utf-8'));
+      if (manifest.lineage?.nodes && manifest.lineage?.edges) {
+        return LineageGraph.fromJSON({
+          nodes: manifest.lineage.nodes,
+          edges: manifest.lineage.edges,
+        });
+      }
+    } catch {
+      // Fall back to a live build.
     }
   }
 
-  // Load from semantic layer
-  if (semanticLayer) {
-    for (const m of semanticLayer.listMetrics()) {
-      metrics.push({ name: m.name, table: m.table, domain: m.domain, type: m.type });
-    }
-    for (const d of semanticLayer.listDimensions()) {
-      dimensions.push({ name: d.name, table: d.table });
-    }
-  }
+  const dbtManifestPath = resolveDbtManifestPath(projectRoot);
+  try {
+    const manifest = buildManifest({
+      projectRoot,
+      dbtManifestPath,
+    });
+    return LineageGraph.fromJSON({
+      nodes: manifest.lineage.nodes as any,
+      edges: manifest.lineage.edges as any,
+    });
+  } catch {
+    const blocks: LineageBlockInput[] = [];
+    const metrics: LineageMetricInput[] = [];
+    const dimensions: LineageDimensionInput[] = [];
 
-  return buildLineageGraph(blocks, metrics, dimensions);
+    const dirs = ['blocks', 'dashboards', 'workbooks'];
+    for (const dir of dirs) {
+      const dirPath = join(projectRoot, dir);
+      if (!existsSync(dirPath)) continue;
+      for (const entry of readdirSync(dirPath, { withFileTypes: true })) {
+        if (!entry.isFile() || extname(entry.name) !== '.dql') continue;
+        try {
+          const source = readFileSync(join(dirPath, entry.name), 'utf-8');
+          const parser = new Parser(source, `${dir}/${entry.name}`);
+          const ast = parser.parse();
+          for (const stmt of ast.statements) {
+            const block = stmt as any;
+            if (block.kind !== 'BlockDecl') continue;
+            blocks.push({
+              name: block.name,
+              sql: block.query?.rawSQL ?? '',
+              domain: extractProp(block, 'domain'),
+              owner: extractProp(block, 'owner'),
+              status: extractProp(block, 'status') as any,
+              blockType: block.blockType,
+              metricRef: block.metricRef,
+              chartType: extractVizChart(block),
+            });
+          }
+        } catch { /* skip unparseable */ }
+      }
+    }
+
+    if (semanticLayer) {
+      for (const m of semanticLayer.listMetrics()) {
+        metrics.push({ name: m.name, table: m.table, domain: m.domain, type: m.type });
+      }
+      for (const d of semanticLayer.listDimensions()) {
+        dimensions.push({ name: d.name, table: d.table });
+      }
+    }
+
+    return buildLineageGraph(blocks, metrics, dimensions);
+  }
+}
+
+function resolveDbtManifestPath(projectRoot: string): string | undefined {
+  const candidate = join(projectRoot, 'target', 'manifest.json');
+  return existsSync(candidate) ? candidate : undefined;
+}
+
+function resolveLineageNode(graph: LineageGraph, rawNodeId: string) {
+  if (graph.getNode(rawNodeId)) return graph.getNode(rawNodeId);
+  const result = queryLineage(graph, { focus: rawNodeId });
+  return result.focalNode;
 }
 
 function extractProp(block: any, key: string): string | undefined {

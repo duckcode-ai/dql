@@ -43,6 +43,26 @@ export interface LineageDimensionInput {
 export interface LineageBuilderOptions {
   /** Known block names for implicit dependency resolution */
   blockNames?: Set<string>;
+  dbtModels?: LineageDbtModelInput[];
+  dashboards?: LineageDashboardInput[];
+}
+
+export interface LineageDbtModelInput {
+  name: string;
+  uniqueId: string;
+  type: 'model' | 'source';
+  dependsOn: string[];
+  columns?: Array<{ name: string; type?: string; description?: string }>;
+  schema?: string;
+  database?: string;
+  materialized?: string;
+  description?: string;
+}
+
+export interface LineageDashboardInput {
+  name: string;
+  blocks: string[];
+  charts: string[];
 }
 
 /**
@@ -57,9 +77,44 @@ export function buildLineageGraph(
   const graph = new LineageGraph();
   const blockNames = options.blockNames ?? new Set(blocks.map((b) => b.name));
   const materializedMap = new Map<string, string>();
+  const dbtNodeMap = new Map<string, string>();
+  const dbtUniqueIdMap = new Map<string, string>();
 
   for (const block of blocks) {
     materializedMap.set((block.materializedAs ?? block.name).toLowerCase(), block.name);
+  }
+
+  for (const dbtModel of options.dbtModels ?? []) {
+    const nodeId = `${dbtModel.type === 'model' ? 'dbt_model' : 'dbt_source'}:${dbtModel.name}`;
+    dbtNodeMap.set(dbtModel.name.toLowerCase(), nodeId);
+    dbtUniqueIdMap.set(dbtModel.uniqueId, nodeId);
+    graph.addNode({
+      id: nodeId,
+      type: dbtModel.type === 'model' ? 'dbt_model' : 'dbt_source',
+      name: dbtModel.name,
+      metadata: {
+        uniqueId: dbtModel.uniqueId,
+        schema: dbtModel.schema,
+        database: dbtModel.database,
+        materialized: dbtModel.materialized,
+        description: dbtModel.description,
+      },
+      columns: dbtModel.columns,
+    });
+  }
+
+  for (const dbtModel of options.dbtModels ?? []) {
+    const targetId = dbtUniqueIdMap.get(dbtModel.uniqueId);
+    if (!targetId) continue;
+    for (const dependency of dbtModel.dependsOn) {
+      const sourceId = dbtUniqueIdMap.get(dependency);
+      if (!sourceId) continue;
+      graph.addEdge({
+        source: sourceId,
+        target: targetId,
+        type: 'depends_on',
+      });
+    }
   }
 
   // 1. Add block nodes
@@ -89,7 +144,7 @@ export function buildLineageGraph(
     });
 
     // Metric → source table edge
-    const tableNodeId = ensureTableNode(graph, metric.table);
+    const tableNodeId = ensureTableNode(graph, metric.table, dbtNodeMap);
     graph.addEdge({
       source: tableNodeId,
       target: `metric:${metric.name}`,
@@ -105,7 +160,7 @@ export function buildLineageGraph(
       name: dim.name,
     });
 
-    const tableNodeId = ensureTableNode(graph, dim.table);
+    const tableNodeId = ensureTableNode(graph, dim.table, dbtNodeMap);
     graph.addEdge({
       source: tableNodeId,
       target: `dimension:${dim.name}`,
@@ -133,7 +188,14 @@ export function buildLineageGraph(
     // SQL table references
     for (const table of parseResult.tables) {
       const resolved = materializedMap.get(table.toLowerCase());
-      if (resolved && resolved !== block.name) {
+      const dbtResolved = dbtNodeMap.get(normalizeTableName(table).toLowerCase());
+      if (dbtResolved) {
+        graph.addEdge({
+          source: dbtResolved,
+          target: blockNodeId,
+          type: 'reads_from',
+        });
+      } else if (resolved && resolved !== block.name) {
         // Table matches another block's materialized name
         graph.addEdge({
           source: `block:${resolved}`,
@@ -143,7 +205,7 @@ export function buildLineageGraph(
         addCrossDomainEdgeIfNeeded(graph, `block:${resolved}`, blockNodeId);
       } else if (!resolved) {
         // External table dependency
-        const tableNodeId = ensureTableNode(graph, table);
+        const tableNodeId = ensureTableNode(graph, table, dbtNodeMap);
         graph.addEdge({
           source: tableNodeId,
           target: blockNodeId,
@@ -211,6 +273,31 @@ export function buildLineageGraph(
     // Self-loops would confuse graph traversal without adding lineage value.
   }
 
+  for (const dashboard of options.dashboards ?? []) {
+    const dashboardId = `dashboard:${dashboard.name}`;
+    graph.addNode({
+      id: dashboardId,
+      type: 'dashboard',
+      name: dashboard.name,
+    });
+    for (const blockName of dashboard.blocks) {
+      if (!graph.getNode(`block:${blockName}`)) continue;
+      graph.addEdge({
+        source: dashboardId,
+        target: `block:${blockName}`,
+        type: 'contains',
+      });
+    }
+    for (const chartName of dashboard.charts) {
+      if (!graph.getNode(`chart:${chartName}`)) continue;
+      graph.addEdge({
+        source: dashboardId,
+        target: `chart:${chartName}`,
+        type: 'contains',
+      });
+    }
+  }
+
   // 5. Add domain nodes and connect
   addDomainNodes(graph);
 
@@ -218,8 +305,14 @@ export function buildLineageGraph(
 }
 
 /** Ensure a source_table node exists and return its ID. */
-function ensureTableNode(graph: LineageGraph, rawTableName: string): string {
+function ensureTableNode(
+  graph: LineageGraph,
+  rawTableName: string,
+  dbtNodeMap?: Map<string, string>,
+): string {
   const tableName = normalizeTableName(rawTableName);
+  const dbtNodeId = dbtNodeMap?.get(tableName.toLowerCase());
+  if (dbtNodeId) return dbtNodeId;
   const nodeId = `table:${tableName}`;
   if (!graph.getNode(nodeId)) {
     graph.addNode({

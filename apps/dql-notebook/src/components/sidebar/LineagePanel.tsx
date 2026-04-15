@@ -1,8 +1,8 @@
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import type { Theme } from '../../themes/notebook-theme';
-import React, { useState, useEffect, useCallback } from 'react';
+import { api } from '../../api/client';
 import { useNotebook } from '../../store/NotebookStore';
 import { themes } from '../../themes/notebook-theme';
-import { api } from '../../api/client';
 
 interface LineageNode {
   id: string;
@@ -10,129 +10,175 @@ interface LineageNode {
   name: string;
   domain?: string;
   status?: string;
-  owner?: string;
-  metadata?: Record<string, unknown>;
 }
 
 interface LineageEdge {
   source: string;
   target: string;
   type: string;
-  sourceDomain?: string;
-  targetDomain?: string;
 }
 
 const NODE_TYPE_COLORS: Record<string, string> = {
   source_table: '#8b949e',
+  dbt_model: '#ff7b72',
+  dbt_source: '#79c0ff',
   block: '#56d364',
   metric: '#388bfd',
   dimension: '#e3b341',
   domain: '#d2a8ff',
   chart: '#f778ba',
+  dashboard: '#d2a8ff',
 };
 
-const STATUS_BADGES: Record<string, { label: string; color: string }> = {
-  certified: { label: 'CERTIFIED', color: '#56d364' },
-  draft: { label: 'DRAFT', color: '#8b949e' },
-  review: { label: 'REVIEW', color: '#e3b341' },
-  deprecated: { label: 'DEPRECATED', color: '#f85149' },
-  pending_recertification: { label: 'PENDING', color: '#d29922' },
+const TYPE_LABELS: Record<string, string> = {
+  source_table: 'TBL',
+  dbt_model: 'DBT',
+  dbt_source: 'SRC',
+  block: 'BLK',
+  metric: 'MET',
+  dimension: 'DIM',
+  domain: 'DOM',
+  chart: 'CHT',
+  dashboard: 'DASH',
 };
 
-function NodeTypeIcon({ type }: { type: string }) {
+const TYPE_TITLES: Record<string, string> = {
+  source_table: 'Source Table',
+  dbt_model: 'dbt Model',
+  dbt_source: 'dbt Source',
+  block: 'DQL Block',
+  metric: 'Metric',
+  dimension: 'Dimension',
+  domain: 'Domain',
+  chart: 'Chart',
+  dashboard: 'Notebook',
+};
+
+function NodeTypeBadge({ type }: { type: string }) {
   const color = NODE_TYPE_COLORS[type] ?? '#8b949e';
   return (
-    <span style={{ color, fontSize: 10, fontWeight: 600, textTransform: 'uppercase', marginRight: 4 }}>
-      {type === 'source_table' ? 'TBL' : type === 'block' ? 'BLK' : type === 'metric' ? 'MET' : type === 'dimension' ? 'DIM' : type === 'chart' ? 'CHT' : type.slice(0, 3).toUpperCase()}
+    <span
+      style={{
+        color,
+        fontSize: 10,
+        fontWeight: 700,
+        textTransform: 'uppercase',
+        minWidth: 34,
+      }}
+      title={TYPE_TITLES[type] ?? type}
+    >
+      {TYPE_LABELS[type] ?? type.slice(0, 4).toUpperCase()}
     </span>
   );
 }
 
-function StatusBadge({ status }: { status?: string }) {
-  if (!status) return null;
-  const badge = STATUS_BADGES[status];
-  if (!badge) return null;
-  return (
-    <span style={{
-      fontSize: 9,
-      fontWeight: 600,
-      color: badge.color,
-      border: `1px solid ${badge.color}`,
-      borderRadius: 3,
-      padding: '0 3px',
-      marginLeft: 4,
-    }}>
-      {badge.label}
-    </span>
-  );
-}
-
-function SectionHeader({
-  label,
-  count,
-  expanded,
-  onToggle,
+function SearchInput({
+  value,
+  onChange,
+  placeholder,
   t,
 }: {
-  label: string;
-  count: number;
-  expanded: boolean;
-  onToggle: () => void;
+  value: string;
+  onChange: (value: string) => void;
+  placeholder: string;
   t: Theme;
 }) {
-  const [hovered, setHovered] = useState(false);
   return (
-    <button
-      onClick={onToggle}
-      onMouseEnter={() => setHovered(true)}
-      onMouseLeave={() => setHovered(false)}
+    <input
+      value={value}
+      onChange={(event) => onChange(event.target.value)}
+      placeholder={placeholder}
       style={{
         width: '100%',
-        display: 'flex',
-        alignItems: 'center',
-        gap: 4,
-        padding: '6px 8px',
-        background: hovered ? t.sidebarItemHover : 'transparent',
+        padding: '8px 10px',
+        borderRadius: 6,
+        border: `1px solid ${t.headerBorder}`,
+        background: t.sidebarBg,
+        color: t.textPrimary,
+        fontSize: 12,
+        outline: 'none',
+      }}
+    />
+  );
+}
+
+function NodeRow({
+  node,
+  t,
+  onClick,
+  secondary,
+}: {
+  node: LineageNode;
+  t: Theme;
+  onClick: () => void;
+  secondary?: string;
+}) {
+  return (
+    <button
+      onClick={onClick}
+      style={{
+        width: '100%',
+        textAlign: 'left',
+        background: 'transparent',
         border: 'none',
+        borderRadius: 6,
+        padding: '6px 8px',
         cursor: 'pointer',
         color: t.textPrimary,
-        fontSize: 11,
-        fontWeight: 600,
-        textTransform: 'uppercase',
-        letterSpacing: '0.5px',
-        textAlign: 'left',
       }}
     >
-      <span style={{ fontSize: 10 }}>{expanded ? '\u25BC' : '\u25B6'}</span>
-      <span style={{ flex: 1 }}>{label}</span>
-      <span style={{ color: t.textMuted, fontWeight: 400 }}>{count}</span>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+        <NodeTypeBadge type={node.type} />
+        <span
+          style={{
+            flex: 1,
+            overflow: 'hidden',
+            textOverflow: 'ellipsis',
+            whiteSpace: 'nowrap',
+            fontSize: 12,
+          }}
+          title={node.name}
+        >
+          {node.name}
+        </span>
+      </div>
+      {(secondary || node.domain) && (
+        <div style={{ marginLeft: 40, marginTop: 2, color: t.textMuted, fontSize: 11 }}>
+          {secondary ?? node.domain}
+        </div>
+      )}
     </button>
   );
 }
 
-function NodeRow({ node, t, onClick }: { node: LineageNode; t: Theme; onClick?: () => void }) {
-  const [hovered, setHovered] = useState(false);
+function Section({
+  title,
+  nodes,
+  t,
+  onSelect,
+}: {
+  title: string;
+  nodes: LineageNode[];
+  t: Theme;
+  onSelect: (node: LineageNode) => void;
+}) {
+  if (nodes.length === 0) return null;
   return (
-    <div
-      onClick={onClick}
-      onMouseEnter={() => setHovered(true)}
-      onMouseLeave={() => setHovered(false)}
-      style={{
-        padding: '3px 8px 3px 20px',
-        cursor: onClick ? 'pointer' : 'default',
-        background: hovered ? t.sidebarItemHover : 'transparent',
-        display: 'flex',
-        alignItems: 'center',
-        gap: 2,
-        fontSize: 12,
-        color: t.textPrimary,
-      }}
-    >
-      <NodeTypeIcon type={node.type} />
-      <span style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-        {node.name}
-      </span>
-      <StatusBadge status={node.status} />
+    <div style={{ padding: '8px 0', borderTop: `1px solid ${t.headerBorder}` }}>
+      <div
+        style={{
+          padding: '0 8px 6px',
+          color: t.textMuted,
+          fontSize: 11,
+          fontWeight: 700,
+          textTransform: 'uppercase',
+        }}
+      >
+        {title} ({nodes.length})
+      </div>
+      {nodes.map((node) => (
+        <NodeRow key={node.id} node={node} t={t} onClick={() => onSelect(node)} />
+      ))}
     </div>
   );
 }
@@ -142,205 +188,193 @@ export function LineagePanel() {
   const t = themes[state.themeMode];
 
   const [loading, setLoading] = useState(true);
-  const [nodes, setNodes] = useState<LineageNode[]>([]);
-  const [edges, setEdges] = useState<LineageEdge[]>([]);
-  const [selectedBlock, setSelectedBlock] = useState<string | null>(null);
-  const [blockDetail, setBlockDetail] = useState<{ ancestors: LineageNode[]; descendants: LineageNode[] } | null>(null);
-
-  const [showBlocks, setShowBlocks] = useState(true);
-  const [showMetrics, setShowMetrics] = useState(true);
-  const [showTables, setShowTables] = useState(true);
-  const [showDomains, setShowDomains] = useState(true);
+  const [allNodes, setAllNodes] = useState<LineageNode[]>([]);
+  const [allEdges, setAllEdges] = useState<LineageEdge[]>([]);
+  const [search, setSearch] = useState('');
+  const [matches, setMatches] = useState<Array<{ node: LineageNode; score: number }>>([]);
+  const [focusedNode, setFocusedNode] = useState<LineageNode | null>(null);
+  const [focusedGraph, setFocusedGraph] = useState<{ nodes: LineageNode[]; edges: LineageEdge[] } | null>(null);
 
   const loadLineage = useCallback(async () => {
     setLoading(true);
     const data = await api.fetchLineage();
-    setNodes(data.nodes);
-    setEdges(data.edges);
+    setAllNodes(data.nodes ?? []);
+    setAllEdges(data.edges ?? []);
     setLoading(false);
   }, []);
 
-  useEffect(() => { loadLineage(); }, [loadLineage]);
+  useEffect(() => {
+    loadLineage();
+  }, [loadLineage]);
 
-  const handleBlockClick = useCallback(async (blockName: string) => {
-    if (selectedBlock === blockName) {
-      setSelectedBlock(null);
-      setBlockDetail(null);
+  useEffect(() => {
+    let cancelled = false;
+    if (search.trim().length < 2) {
+      setMatches([]);
       return;
     }
-    setSelectedBlock(blockName);
-    const detail = await api.fetchBlockLineage(blockName);
-    if (detail) {
-      setBlockDetail({ ancestors: detail.ancestors, descendants: detail.descendants });
-    }
-  }, [selectedBlock]);
+    void api.searchLineage(search.trim()).then((result) => {
+      if (!cancelled) setMatches(result.matches ?? []);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [search]);
 
-  const blocks = nodes.filter((n) => n.type === 'block');
-  const metrics = nodes.filter((n) => n.type === 'metric');
-  const tables = nodes.filter((n) => n.type === 'source_table');
-  const domains = [...new Set(nodes.map((n) => n.domain).filter(Boolean))] as string[];
-  const crossDomainEdges = edges.filter((e) => e.type === 'crosses_domain');
+  const handleSelectNode = useCallback(async (node: LineageNode) => {
+    const result = await api.queryLineage({ focus: node.id });
+    setFocusedNode(result.focalNode ?? node);
+    setFocusedGraph(result.graph ?? { nodes: [], edges: [] });
+    dispatch({ type: 'SET_LINEAGE_FOCUS', nodeId: node.id });
+    if (!state.lineageFullscreen) {
+      dispatch({ type: 'TOGGLE_LINEAGE_FULLSCREEN' });
+    }
+  }, [dispatch, state.lineageFullscreen]);
+
+  const handleReset = useCallback(() => {
+    setFocusedNode(null);
+    setFocusedGraph(null);
+    setSearch('');
+    setMatches([]);
+    dispatch({ type: 'SET_LINEAGE_FOCUS', nodeId: null });
+  }, [dispatch]);
+
+  const grouped = useMemo(() => ({
+    dashboards: allNodes.filter((node) => node.type === 'dashboard'),
+    blocks: allNodes.filter((node) => node.type === 'block'),
+    dbtModels: allNodes.filter((node) => node.type === 'dbt_model'),
+    dbtSources: allNodes.filter((node) => node.type === 'dbt_source'),
+    tables: allNodes.filter((node) => node.type === 'source_table'),
+    domains: allNodes.filter((node) => node.type === 'domain'),
+  }), [allNodes]);
+
+  const focusedRelatedNodes = useMemo(() => {
+    if (!focusedNode || !focusedGraph) {
+      return { upstream: [] as LineageNode[], downstream: [] as LineageNode[] };
+    }
+    const incomingIds = new Set(
+      focusedGraph.edges.filter((edge) => edge.target === focusedNode.id).map((edge) => edge.source),
+    );
+    const outgoingIds = new Set(
+      focusedGraph.edges.filter((edge) => edge.source === focusedNode.id).map((edge) => edge.target),
+    );
+    return {
+      upstream: focusedGraph.nodes.filter((node) => incomingIds.has(node.id)),
+      downstream: focusedGraph.nodes.filter((node) => outgoingIds.has(node.id)),
+    };
+  }, [focusedGraph, focusedNode]);
 
   if (loading) {
-    return (
-      <div style={{ padding: 16, color: t.textMuted, fontSize: 12 }}>
-        Loading lineage...
-      </div>
-    );
+    return <div style={{ padding: 16, color: t.textMuted, fontSize: 12 }}>Loading lineage...</div>;
   }
 
-  if (nodes.length === 0) {
+  if (allNodes.length === 0) {
     return (
       <div style={{ padding: 16, color: t.textMuted, fontSize: 12 }}>
-        No lineage data found. Add blocks and semantic layer definitions to see the lineage graph.
+        No lineage data found yet. Run `dql compile` or add notebooks/blocks first.
       </div>
     );
   }
 
   return (
-    <div style={{ overflow: 'auto', flex: 1, fontSize: 12 }}>
-      {/* Graph view button + Summary bar */}
-      <div style={{
-        padding: '6px 8px',
-        borderBottom: `1px solid ${t.headerBorder}`,
-      }}>
+    <div style={{ display: 'flex', flexDirection: 'column', height: '100%', overflow: 'hidden' }}>
+      <div style={{ padding: 8, borderBottom: `1px solid ${t.headerBorder}` }}>
         <button
           onClick={() => dispatch({ type: 'TOGGLE_LINEAGE_FULLSCREEN' })}
           style={{
             width: '100%',
-            padding: '6px 10px',
-            marginBottom: 6,
+            padding: '8px 10px',
+            borderRadius: 6,
+            border: `1px solid ${state.lineageFullscreen ? '#388bfd' : t.headerBorder}`,
             background: state.lineageFullscreen ? '#388bfd' : 'transparent',
-            border: `1px solid ${state.lineageFullscreen ? '#388bfd' : '#30363d'}`,
-            borderRadius: 5,
             color: state.lineageFullscreen ? '#fff' : t.textPrimary,
-            fontSize: 11,
+            fontSize: 12,
             fontWeight: 600,
             cursor: 'pointer',
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'center',
-            gap: 6,
-            transition: 'all 0.15s',
+            marginBottom: 8,
           }}
         >
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-            <circle cx="6" cy="6" r="3" />
-            <circle cx="18" cy="6" r="3" />
-            <circle cx="18" cy="18" r="3" />
-            <line x1="8.6" y1="7.4" x2="15.4" y2="16.6" />
-            <line x1="9" y1="6" x2="15" y2="6" />
-          </svg>
           {state.lineageFullscreen ? 'Close Graph View' : 'Open Graph View'}
         </button>
-        <div style={{
-          display: 'flex',
-          gap: 8,
-          flexWrap: 'wrap',
-          fontSize: 11,
-          color: t.textMuted,
-        }}>
-          <span>{blocks.length} blocks</span>
-          <span>{metrics.length} metrics</span>
-          <span>{tables.length} tables</span>
-          {crossDomainEdges.length > 0 && (
-            <span style={{ color: '#d2a8ff' }}>{crossDomainEdges.length} cross-domain</span>
-          )}
+
+        <SearchInput
+          value={search}
+          onChange={setSearch}
+          placeholder="Search blocks, tables, dbt models, notebooks..."
+          t={t}
+        />
+        <div style={{ marginTop: 8, color: t.textMuted, fontSize: 11, lineHeight: 1.5 }}>
+          Search across source tables, dbt sources/models, DQL blocks, metrics, and notebooks. Selecting any item opens a focused lineage path instead of the full graph.
         </div>
       </div>
 
-      {/* Block detail view */}
-      {selectedBlock && blockDetail && (
-        <div style={{ padding: 8, borderBottom: `1px solid ${t.headerBorder}` }}>
-          <div style={{ fontWeight: 600, color: t.textPrimary, marginBottom: 4, display: 'flex', alignItems: 'center', gap: 4 }}>
-            <NodeTypeIcon type="block" />
-            {selectedBlock}
-            <button
-              onClick={() => { setSelectedBlock(null); setBlockDetail(null); }}
-              style={{
-                marginLeft: 'auto', background: 'transparent', border: 'none',
-                color: t.textMuted, cursor: 'pointer', fontSize: 14,
-              }}
-            >
-              ×
-            </button>
+      <div style={{ flex: 1, overflow: 'auto' }}>
+        {search.trim().length >= 2 && matches.length > 0 && (
+          <div style={{ padding: 8, borderBottom: `1px solid ${t.headerBorder}` }}>
+            <div style={{ color: t.textMuted, fontSize: 11, fontWeight: 700, textTransform: 'uppercase', marginBottom: 6 }}>
+              Search Results
+            </div>
+            {matches.slice(0, 8).map((match) => (
+              <NodeRow
+                key={match.node.id}
+                node={match.node}
+                t={t}
+                onClick={() => handleSelectNode(match.node)}
+                secondary={match.node.domain}
+              />
+            ))}
           </div>
-          {blockDetail.ancestors.length > 0 && (
-            <div style={{ marginTop: 4 }}>
-              <div style={{ color: t.textMuted, fontSize: 10, fontWeight: 600, textTransform: 'uppercase', marginBottom: 2 }}>
-                Upstream ({blockDetail.ancestors.length})
+        )}
+
+        {focusedNode && focusedGraph && (
+          <div style={{ padding: 8, borderBottom: `1px solid ${t.headerBorder}` }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8 }}>
+              <NodeTypeBadge type={focusedNode.type} />
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <div style={{ color: t.textPrimary, fontSize: 13, fontWeight: 700 }}>{focusedNode.name}</div>
+                <div style={{ color: t.textMuted, fontSize: 11 }}>
+                  {focusedNode.domain ?? TYPE_TITLES[focusedNode.type] ?? focusedNode.type}
+                </div>
               </div>
-              {blockDetail.ancestors.map((n) => (
-                <NodeRow key={n.id} node={n} t={t} />
-              ))}
+              <button
+                onClick={handleReset}
+                style={{
+                  border: `1px solid ${t.headerBorder}`,
+                  background: 'transparent',
+                  color: t.textPrimary,
+                  borderRadius: 6,
+                  padding: '6px 8px',
+                  cursor: 'pointer',
+                  fontSize: 11,
+                }}
+              >
+                Show All
+              </button>
             </div>
-          )}
-          {blockDetail.descendants.length > 0 && (
-            <div style={{ marginTop: 4 }}>
-              <div style={{ color: t.textMuted, fontSize: 10, fontWeight: 600, textTransform: 'uppercase', marginBottom: 2 }}>
-                Downstream ({blockDetail.descendants.length})
-              </div>
-              {blockDetail.descendants.map((n) => (
-                <NodeRow key={n.id} node={n} t={t} />
-              ))}
+
+            <div style={{ color: t.textMuted, fontSize: 11, marginBottom: 6 }}>
+              {focusedGraph.nodes.length} node(s), {focusedGraph.edges.length} edge(s)
             </div>
-          )}
-        </div>
-      )}
+            <div style={{ color: t.textMuted, fontSize: 11, marginBottom: 6, lineHeight: 1.5 }}>
+              Focused lineage shows the path into this item from raw tables/dbt and the downstream notebooks or analytics objects that consume it.
+            </div>
 
-      {/* Blocks section */}
-      <SectionHeader label="Blocks" count={blocks.length} expanded={showBlocks} onToggle={() => setShowBlocks(!showBlocks)} t={t} />
-      {showBlocks && blocks.map((node) => (
-        <NodeRow
-          key={node.id}
-          node={node}
-          t={t}
-          onClick={() => handleBlockClick(node.name)}
-        />
-      ))}
-
-      {/* Metrics section */}
-      <SectionHeader label="Metrics" count={metrics.length} expanded={showMetrics} onToggle={() => setShowMetrics(!showMetrics)} t={t} />
-      {showMetrics && metrics.map((node) => (
-        <NodeRow key={node.id} node={node} t={t} />
-      ))}
-
-      {/* Source Tables section */}
-      <SectionHeader label="Source Tables" count={tables.length} expanded={showTables} onToggle={() => setShowTables(!showTables)} t={t} />
-      {showTables && tables.map((node) => (
-        <NodeRow key={node.id} node={node} t={t} />
-      ))}
-
-      {/* Domain Trust section */}
-      <SectionHeader label="Domains" count={domains.length} expanded={showDomains} onToggle={() => setShowDomains(!showDomains)} t={t} />
-      {showDomains && domains.map((domain) => {
-        const domainBlocks = blocks.filter((b) => b.domain === domain);
-        const certified = domainBlocks.filter((b) => b.status === 'certified').length;
-        const trustPct = domainBlocks.length > 0 ? Math.round((certified / domainBlocks.length) * 100) : 0;
-        return (
-          <div key={domain} style={{ padding: '3px 8px 3px 20px', fontSize: 12, color: t.textPrimary, display: 'flex', gap: 4, alignItems: 'center' }}>
-            <span style={{ color: NODE_TYPE_COLORS.domain, fontSize: 10, fontWeight: 600 }}>DOM</span>
-            <span style={{ flex: 1 }}>{domain}</span>
-            <span style={{ color: t.textMuted, fontSize: 10 }}>
-              {certified}/{domainBlocks.length} ({trustPct}%)
-            </span>
+            <Section title="Upstream" nodes={focusedRelatedNodes.upstream} t={t} onSelect={handleSelectNode} />
+            <Section title="Downstream" nodes={focusedRelatedNodes.downstream} t={t} onSelect={handleSelectNode} />
           </div>
-        );
-      })}
+        )}
 
-      {/* Cross-domain flows */}
-      {crossDomainEdges.length > 0 && (
-        <>
-          <div style={{ padding: '6px 8px', fontSize: 11, fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.5px', color: t.textPrimary }}>
-            Cross-Domain Flows
-          </div>
-          {crossDomainEdges.map((edge, i) => (
-            <div key={i} style={{ padding: '2px 8px 2px 20px', fontSize: 11, color: t.textMuted }}>
-              {edge.sourceDomain} → {edge.targetDomain}
-            </div>
-          ))}
-        </>
-      )}
+        {!focusedNode && (
+          <>
+            <Section title="Notebooks" nodes={grouped.dashboards} t={t} onSelect={handleSelectNode} />
+            <Section title="DQL Blocks" nodes={grouped.blocks} t={t} onSelect={handleSelectNode} />
+            <Section title="dbt Models" nodes={grouped.dbtModels} t={t} onSelect={handleSelectNode} />
+            <Section title="dbt Sources" nodes={grouped.dbtSources} t={t} onSelect={handleSelectNode} />
+            <Section title="Source Tables" nodes={grouped.tables} t={t} onSelect={handleSelectNode} />
+            <Section title="Business Domains" nodes={grouped.domains} t={t} onSelect={handleSelectNode} />
+          </>
+        )}
+      </div>
     </div>
   );
 }

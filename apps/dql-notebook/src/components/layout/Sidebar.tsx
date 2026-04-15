@@ -17,6 +17,7 @@ interface SidebarProps {
 const PANEL_TITLES: Record<string, string> = {
   files: 'Explorer',
   schema: 'Schema',
+  block_library: 'Block Library',
   semantic: 'Semantic Layer',
   lineage: 'Lineage',
   connection: 'Connection',
@@ -95,6 +96,7 @@ export function Sidebar({ onOpenFile }: SidebarProps) {
       <div style={{ flex: 1, overflow: 'hidden', display: 'flex', flexDirection: 'column' }}>
         {panel === 'files' && <FilesPanel onOpenFile={onOpenFile} />}
         {panel === 'schema' && <SchemaPanel />}
+        {panel === 'block_library' && <BlockLibraryPanel />}
         {panel === 'semantic' && <SemanticPanel />}
         {panel === 'lineage' && <LineagePanel />}
         {panel === 'connection' && <ConnectionPanel />}

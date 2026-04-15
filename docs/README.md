@@ -25,6 +25,7 @@ If you are new to DQL, follow these sections in order.
 ## 3. Guides
 
 - [Guides Overview](./03-guides/README.md)
+- [Demo Assets](./examples/README.md)
 - [Data Sources Guide](./data-sources.md)
 - [Project Structure](./project-structure.md)
 - [Project Config](./project-config.md)
