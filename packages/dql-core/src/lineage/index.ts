@@ -27,8 +27,17 @@ export {
   type LineageBlockInput,
   type LineageMetricInput,
   type LineageDimensionInput,
+  type LineageDbtModelInput,
+  type LineageDashboardInput,
   type LineageBuilderOptions,
 } from './builder.js';
+
+export {
+  queryLineage,
+  searchNodes,
+  type LineageQuery,
+  type LineageQueryResult,
+} from './query.js';
 
 export {
   buildTrustChain,

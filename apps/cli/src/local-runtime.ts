@@ -23,9 +23,12 @@ import {
   type SemanticLayer,
   type SemanticLayerProviderConfig,
   type SemanticLayerResult,
+  queryLineage,
+  searchNodes,
   type LineageBlockInput,
   type LineageMetricInput,
   type LineageDimensionInput,
+  type LineageNodeType,
 } from '@duckcodeailabs/dql-core';
 import { listBlockTemplates } from './block-templates.js';
 import {
@@ -1638,6 +1641,87 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
         const chain = buildTrustChain(graph, `block:${from}`, `block:${to}`);
         res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
         res.end(serializeJSON(chain ?? { error: 'No path found' }));
+      } catch (error) {
+        res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({ error: error instanceof Error ? error.message : String(error) }));
+      }
+      return;
+    }
+
+    // ---- Lineage Query API (focused/searchable views) ----
+
+    if (req.method === 'GET' && path === '/api/lineage/query') {
+      try {
+        const graph = buildProjectLineageGraph(projectRoot, semanticLayer);
+        const focus = url.searchParams.get('focus') ?? undefined;
+        const search = url.searchParams.get('search') ?? undefined;
+        const typesParam = url.searchParams.get('types');
+        const domain = url.searchParams.get('domain') ?? undefined;
+        const upstreamDepth = url.searchParams.has('upstreamDepth')
+          ? Number(url.searchParams.get('upstreamDepth'))
+          : undefined;
+        const downstreamDepth = url.searchParams.has('downstreamDepth')
+          ? Number(url.searchParams.get('downstreamDepth'))
+          : undefined;
+
+        const types = typesParam
+          ? typesParam.split(',').map((t) => t.trim()) as LineageNodeType[]
+          : undefined;
+
+        const result = queryLineage(graph, {
+          focus,
+          search,
+          types,
+          domain,
+          upstreamDepth,
+          downstreamDepth,
+        });
+
+        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON(result));
+      } catch (error) {
+        res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({ error: error instanceof Error ? error.message : String(error) }));
+      }
+      return;
+    }
+
+    if (req.method === 'GET' && path === '/api/lineage/search') {
+      const q = url.searchParams.get('q') ?? '';
+      if (!q) {
+        res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({ error: 'Missing "q" query parameter' }));
+        return;
+      }
+      try {
+        const graph = buildProjectLineageGraph(projectRoot, semanticLayer);
+        const limit = url.searchParams.has('limit') ? Number(url.searchParams.get('limit')) : 20;
+        const matches = searchNodes(graph, q, limit);
+        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({ matches }));
+      } catch (error) {
+        res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({ error: error instanceof Error ? error.message : String(error) }));
+      }
+      return;
+    }
+
+    if (req.method === 'GET' && path.startsWith('/api/lineage/node/')) {
+      const nodeId = decodeURIComponent(path.slice('/api/lineage/node/'.length));
+      try {
+        const graph = buildProjectLineageGraph(projectRoot, semanticLayer);
+        const node = graph.getNode(nodeId);
+        if (!node) {
+          res.writeHead(404, { 'Content-Type': 'application/json; charset=utf-8' });
+          res.end(serializeJSON({ error: `Node "${nodeId}" not found` }));
+          return;
+        }
+        const ancestors = graph.ancestors(nodeId);
+        const descendants = graph.descendants(nodeId);
+        const incoming = graph.getIncomingEdges(nodeId);
+        const outgoing = graph.getOutgoingEdges(nodeId);
+        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({ node, ancestors, descendants, incoming, outgoing }));
       } catch (error) {
         res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' });
         res.end(serializeJSON({ error: error instanceof Error ? error.message : String(error) }));

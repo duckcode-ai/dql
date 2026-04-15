@@ -13,20 +13,26 @@ interface LineageNode {
 
 const NODE_TYPE_COLORS: Record<string, string> = {
   source_table: '#8b949e',
+  dbt_model: '#ff7b72',
+  dbt_source: '#79c0ff',
   block: '#56d364',
   metric: '#388bfd',
   dimension: '#e3b341',
   domain: '#d2a8ff',
   chart: '#f778ba',
+  dashboard: '#d2a8ff',
 };
 
 const TYPE_LABELS: Record<string, string> = {
   source_table: 'TBL',
+  dbt_model: 'DBT',
+  dbt_source: 'SRC',
   block: 'BLK',
   metric: 'MET',
   dimension: 'DIM',
   chart: 'CHT',
   domain: 'DOM',
+  dashboard: 'DASH',
 };
 
 const STATUS_COLORS: Record<string, string> = {

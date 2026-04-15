@@ -13,7 +13,7 @@ import { extractTablesFromSql } from '../lineage/sql-parser.js';
 import { buildLineageGraph } from '../lineage/builder.js';
 import { detectDomainFlows, getDomainTrustOverview } from '../lineage/domain-lineage.js';
 import { loadSemanticLayerFromDir } from '../semantic/index.js';
-import type { LineageBlockInput, LineageMetricInput, LineageDimensionInput } from '../lineage/builder.js';
+import type { LineageBlockInput, LineageMetricInput, LineageDimensionInput, LineageDbtModelInput, LineageDashboardInput } from '../lineage/builder.js';
 import type {
   DQLManifest,
   ManifestBlock,
@@ -75,11 +75,11 @@ export function buildManifest(options: ManifestBuildOptions): DQLManifest {
     dbtImport = importDbtManifest(options.dbtManifestPath, sources);
   }
 
-  // Build lineage
-  const lineage = buildManifestLineage(blocks, metrics, dimensions);
+  // Build lineage (with dbt DAG and dashboard nodes)
+  const lineage = buildManifestLineage(blocks, metrics, dimensions, dbtImport, notebooks);
 
   return {
-    manifestVersion: 1,
+    manifestVersion: 2,
     dqlVersion,
     generatedAt: new Date().toISOString(),
     project: projectName,
@@ -448,13 +448,68 @@ function importDbtManifest(
   let sourcesImported = 0;
   const projectName = manifest.metadata?.project_name;
 
-  // Import models as source tables
+  // Maps for resolving dbt uniqueId → table name (for depends_on edge resolution)
+  const uniqueIdToName = new Map<string, string>();
+  const dbtDagModels: Array<{
+    uniqueId: string;
+    name: string;
+    type: 'model' | 'source';
+    dependsOn: string[];
+    columns?: Array<{ name: string; type?: string; description?: string }>;
+  }> = [];
+  const dbtDagEdges: Array<{ source: string; target: string }> = [];
+
+  // Pass 1: Import dbt sources first (they are upstream of models)
+  const dbtSources = manifest.sources ?? {};
+  for (const [uniqueId, src] of Object.entries(dbtSources) as [string, any][]) {
+    const tableName = src.identifier ?? src.name;
+    if (!tableName) continue;
+
+    uniqueIdToName.set(uniqueId, tableName);
+
+    if (!sources[tableName]) {
+      sources[tableName] = {
+        name: tableName,
+        origin: 'dbt',
+        referencedBy: [],
+      };
+    }
+    sources[tableName].dbtModel = {
+      uniqueId,
+      database: src.database,
+      schema: src.schema,
+      description: src.description,
+    };
+    // Mark as dbt_source type for lineage
+    sources[tableName].dbtNodeType = 'source';
+    sourcesImported++;
+
+    dbtDagModels.push({
+      uniqueId,
+      name: tableName,
+      type: 'source',
+      dependsOn: [],
+    });
+  }
+
+  // Pass 2: Import models with dependency tracking
   const nodes = manifest.nodes ?? {};
   for (const [uniqueId, node] of Object.entries(nodes) as [string, any][]) {
     if (node.resource_type !== 'model') continue;
 
     const tableName = node.alias ?? node.name;
     if (!tableName) continue;
+
+    uniqueIdToName.set(uniqueId, tableName);
+
+    // Extract column metadata
+    const columns = node.columns
+      ? Object.entries(node.columns as Record<string, any>).map(([_k, v]: [string, any]) => ({
+          name: v.name,
+          type: v.data_type,
+          description: v.description,
+        }))
+      : undefined;
 
     // Create or update source entry
     if (!sources[tableName]) {
@@ -472,41 +527,42 @@ function importDbtManifest(
       schema: node.schema,
       materializedAs: node.config?.materialized,
       description: node.description,
-      columns: node.columns
-        ? Object.fromEntries(
-            Object.entries(node.columns as Record<string, any>).map(([k, v]: [string, any]) => [
-              k,
-              { name: v.name, description: v.description, type: v.data_type },
-            ]),
-          )
+      columns: columns
+        ? Object.fromEntries(columns.map((c) => [c.name, c]))
         : undefined,
     };
+    // Mark as dbt_model type for lineage
+    sources[tableName].dbtNodeType = 'model';
     if (sources[tableName].origin === 'sql') {
       sources[tableName].origin = 'dbt';
     }
     modelsImported++;
+
+    // Extract depends_on for DAG reconstruction
+    const dependsOnIds: string[] = node.depends_on?.nodes ?? [];
+
+    dbtDagModels.push({
+      uniqueId,
+      name: tableName,
+      type: 'model',
+      dependsOn: dependsOnIds,
+      columns,
+    });
   }
 
-  // Import dbt sources
-  const dbtSources = manifest.sources ?? {};
-  for (const [uniqueId, src] of Object.entries(dbtSources) as [string, any][]) {
-    const tableName = src.identifier ?? src.name;
-    if (!tableName) continue;
+  // Pass 3: Resolve depends_on uniqueIds to table names and build edges
+  for (const model of dbtDagModels) {
+    if (model.type === 'source') continue; // sources have no upstream deps
 
-    if (!sources[tableName]) {
-      sources[tableName] = {
-        name: tableName,
-        origin: 'dbt',
-        referencedBy: [],
-      };
+    const resolvedDeps: string[] = [];
+    for (const depId of model.dependsOn) {
+      const depName = uniqueIdToName.get(depId);
+      if (depName) {
+        resolvedDeps.push(depName);
+        dbtDagEdges.push({ source: depName, target: model.name });
+      }
     }
-    sources[tableName].dbtModel = {
-      uniqueId,
-      database: src.database,
-      schema: src.schema,
-      description: src.description,
-    };
-    sourcesImported++;
+    model.dependsOn = resolvedDeps;
   }
 
   return {
@@ -515,6 +571,10 @@ function importDbtManifest(
     modelsImported,
     sourcesImported,
     importedAt: new Date().toISOString(),
+    dbtDag: {
+      models: dbtDagModels,
+      edges: dbtDagEdges,
+    },
   };
 }
 
@@ -524,6 +584,8 @@ function buildManifestLineage(
   blocks: Record<string, ManifestBlock>,
   metrics: Record<string, ManifestMetric>,
   dimensions: Record<string, ManifestDimension>,
+  dbtImport?: ManifestDbtImport,
+  notebooks?: Record<string, ManifestNotebook>,
 ): ManifestLineage {
   // Convert to lineage builder input format
   const lineageBlocks: LineageBlockInput[] = Object.values(blocks).map((b) => ({
@@ -549,7 +611,32 @@ function buildManifestLineage(
     table: d.table,
   }));
 
-  const graph = buildLineageGraph(lineageBlocks, lineageMetrics, lineageDimensions);
+  // Convert dbt DAG to lineage builder input
+  const dbtModels: LineageDbtModelInput[] = dbtImport?.dbtDag?.models?.map((m) => ({
+    name: m.name,
+    uniqueId: m.uniqueId,
+    type: m.type,
+    dependsOn: m.dependsOn,
+    columns: m.columns,
+  })) ?? [];
+
+  // Convert notebooks to dashboard inputs
+  const dashboards: LineageDashboardInput[] = notebooks
+    ? Object.values(notebooks).map((nb) => ({
+        name: nb.title || nb.filePath.replace(/\.dqlnb$/, '').split('/').pop() || 'untitled',
+        blocks: nb.cells
+          .filter((c) => c.blockName)
+          .map((c) => c.blockName!),
+        charts: nb.cells
+          .filter((c) => c.chartType)
+          .map((c) => c.blockName ?? c.id),
+      }))
+    : [];
+
+  const graph = buildLineageGraph(lineageBlocks, lineageMetrics, lineageDimensions, {
+    dbtModels,
+    dashboards,
+  });
 
   // Serialize to manifest format
   const graphJson = graph.toJSON();
@@ -575,6 +662,7 @@ function buildManifestLineage(
       owner: n.owner,
       status: n.status,
       filePath: blocks[n.name]?.filePath,
+      columns: n.columns,
     })),
     edges: graphJson.edges.map((e) => ({
       source: e.source,

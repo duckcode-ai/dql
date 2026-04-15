@@ -24,20 +24,26 @@ import { api } from '../../api/client';
 
 const NODE_TYPE_COLORS: Record<string, string> = {
   source_table: '#8b949e',
+  dbt_model: '#ff7b72',
+  dbt_source: '#79c0ff',
   block: '#56d364',
   metric: '#388bfd',
   dimension: '#e3b341',
   domain: '#d2a8ff',
   chart: '#f778ba',
+  dashboard: '#d2a8ff',
 };
 
 const TYPE_LABELS: Record<string, string> = {
   source_table: 'TABLE',
+  dbt_model: 'DBT',
+  dbt_source: 'SRC',
   block: 'BLOCK',
   metric: 'METRIC',
   dimension: 'DIM',
   domain: 'DOMAIN',
   chart: 'CHART',
+  dashboard: 'DASH',
 };
 
 const STATUS_COLORS: Record<string, string> = {
@@ -54,6 +60,8 @@ const EDGE_TYPE_COLORS: Record<string, string> = {
   aggregates: '#388bfd',
   visualizes: '#f778ba',
   crosses_domain: '#d2a8ff',
+  depends_on: '#ff7b72',
+  contains: '#d2a8ff',
 };
 
 /* ── API types ────────────────────────────────────────────────────── */
@@ -255,10 +263,12 @@ export function LineageDAG() {
 
   /* Filters */
   const [showTables, setShowTables] = useState(true);
+  const [showDbtModels, setShowDbtModels] = useState(true);
   const [showBlocks, setShowBlocks] = useState(true);
   const [showMetrics, setShowMetrics] = useState(true);
   const [showDimensions, setShowDimensions] = useState(true);
   const [showCharts, setShowCharts] = useState(true);
+  const [showDashboards, setShowDashboards] = useState(true);
 
   /* Selection & highlight */
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
@@ -286,13 +296,15 @@ export function LineageDAG() {
   const typeFilter = useMemo(() => {
     const s = new Set<string>();
     if (showTables) s.add('source_table');
+    if (showDbtModels) { s.add('dbt_model'); s.add('dbt_source'); }
     if (showBlocks) s.add('block');
     if (showMetrics) s.add('metric');
     if (showDimensions) s.add('dimension');
     if (showCharts) s.add('chart');
+    if (showDashboards) s.add('dashboard');
     s.add('domain'); // always show domains
     return s;
-  }, [showTables, showBlocks, showMetrics, showDimensions, showCharts]);
+  }, [showTables, showDbtModels, showBlocks, showMetrics, showDimensions, showCharts, showDashboards]);
 
   /* Build React Flow nodes & edges when data or filters change */
   useEffect(() => {
@@ -464,10 +476,16 @@ export function LineageDAG() {
         }}
       >
         <FilterChip label="Tables" color={NODE_TYPE_COLORS.source_table} active={showTables} count={counts.source_table ?? 0} onClick={() => setShowTables(!showTables)} />
+        {((counts.dbt_model ?? 0) + (counts.dbt_source ?? 0)) > 0 && (
+          <FilterChip label="dbt" color={NODE_TYPE_COLORS.dbt_model} active={showDbtModels} count={(counts.dbt_model ?? 0) + (counts.dbt_source ?? 0)} onClick={() => setShowDbtModels(!showDbtModels)} />
+        )}
         <FilterChip label="Blocks" color={NODE_TYPE_COLORS.block} active={showBlocks} count={counts.block ?? 0} onClick={() => setShowBlocks(!showBlocks)} />
         <FilterChip label="Metrics" color={NODE_TYPE_COLORS.metric} active={showMetrics} count={counts.metric ?? 0} onClick={() => setShowMetrics(!showMetrics)} />
         <FilterChip label="Dims" color={NODE_TYPE_COLORS.dimension} active={showDimensions} count={counts.dimension ?? 0} onClick={() => setShowDimensions(!showDimensions)} />
         <FilterChip label="Charts" color={NODE_TYPE_COLORS.chart} active={showCharts} count={counts.chart ?? 0} onClick={() => setShowCharts(!showCharts)} />
+        {(counts.dashboard ?? 0) > 0 && (
+          <FilterChip label="Dash" color={NODE_TYPE_COLORS.dashboard} active={showDashboards} count={counts.dashboard ?? 0} onClick={() => setShowDashboards(!showDashboards)} />
+        )}
       </div>
 
       {/* Graph */}

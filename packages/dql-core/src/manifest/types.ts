@@ -10,8 +10,8 @@
 // ---- Top-level manifest ----
 
 export interface DQLManifest {
-  /** Manifest schema version */
-  manifestVersion: 1;
+  /** Manifest schema version (2 = dbt DAG + dashboard lineage; reader accepts 1 too) */
+  manifestVersion: 1 | 2;
   /** DQL CLI version that generated this manifest */
   dqlVersion: string;
   /** ISO 8601 timestamp */
@@ -132,6 +132,8 @@ export interface ManifestSource {
   origin: 'sql' | 'semantic' | 'dbt';
   /** Which blocks/cells reference this source */
   referencedBy: string[];
+  /** dbt node type for lineage graph construction */
+  dbtNodeType?: 'model' | 'source';
   /** dbt model metadata (if imported from dbt manifest) */
   dbtModel?: {
     uniqueId: string;
@@ -161,6 +163,8 @@ export interface ManifestLineageNode {
   owner?: string;
   status?: string;
   filePath?: string;
+  /** Column metadata for tables/models (table-level info, not column-level lineage) */
+  columns?: Array<{ name: string; type?: string; description?: string }>;
 }
 
 export interface ManifestLineageEdge {
@@ -184,4 +188,15 @@ export interface ManifestDbtImport {
   sourcesImported: number;
   /** Timestamp of import */
   importedAt: string;
+  /** Reconstructed dbt model dependency graph */
+  dbtDag?: {
+    models: Array<{
+      uniqueId: string;
+      name: string;
+      type: 'model' | 'source';
+      dependsOn: string[];
+      columns?: Array<{ name: string; type?: string; description?: string }>;
+    }>;
+    edges: Array<{ source: string; target: string }>;
+  };
 }

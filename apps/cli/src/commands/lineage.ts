@@ -7,6 +7,10 @@
  * Usage:
  *   dql lineage [path]                    Show full lineage graph summary
  *   dql lineage <name> [path]             Show upstream/downstream for a block, table, or metric
+ *   dql lineage --search <term>           Search all nodes by name
+ *   dql lineage --focus <name> [--depth N] Focused subgraph centered on a node
+ *   dql lineage --dashboard <name>        Show what feeds a dashboard/notebook
+ *   dql lineage --dbt                     Show the dbt model DAG portion
  *   dql lineage --table <name> [path]     Show lineage for a specific source table
  *   dql lineage --metric <name> [path]    Show lineage for a specific metric
  *   dql lineage --domain <name> [path]    Show lineage within a domain
@@ -26,6 +30,8 @@ import {
   buildTrustChain,
   detectDomainFlows,
   getDomainTrustOverview,
+  queryLineage,
+  searchNodes,
   LineageGraph,
   type LineageBlockInput,
   type LineageMetricInput,
@@ -79,6 +85,32 @@ export async function runLineage(
   if (flags.format === 'json' || allArgs.includes('--export')) {
     console.log(JSON.stringify(graph.toJSON(), null, 2));
     return;
+  }
+
+  // --search <term>
+  const searchIdx = allArgs.indexOf('--search');
+  if (searchIdx >= 0 && allArgs[searchIdx + 1]) {
+    return printSearch(graph, allArgs[searchIdx + 1]);
+  }
+
+  // --focus <name> [--depth N]
+  const focusIdx = allArgs.indexOf('--focus');
+  if (focusIdx >= 0 && allArgs[focusIdx + 1]) {
+    const depthIdx = allArgs.indexOf('--depth');
+    const depth = depthIdx >= 0 && allArgs[depthIdx + 1] ? Number(allArgs[depthIdx + 1]) : undefined;
+    return printFocused(graph, allArgs[focusIdx + 1], depth);
+  }
+
+  // --dashboard <name>
+  const dashIdx = allArgs.indexOf('--dashboard');
+  if (dashIdx >= 0 && allArgs[dashIdx + 1]) {
+    const nodeId = resolveNodeId(graph, allArgs[dashIdx + 1]) ?? `dashboard:${allArgs[dashIdx + 1]}`;
+    return printNodeLineage(graph, nodeId, flags);
+  }
+
+  // --dbt (show dbt model DAG)
+  if (allArgs.includes('--dbt')) {
+    return printDbtDAG(graph);
   }
 
   // --impact <name>
@@ -255,16 +287,25 @@ function printSummary(graph: LineageGraph, _flags: CLIFlags): void {
   const domains = graph.getDomains();
 
   const sourceTables = graph.getNodesByType('source_table');
+  const dbtModels = graph.getNodesByType('dbt_model');
+  const dbtSources = graph.getNodesByType('dbt_source');
   const blocks = graph.getNodesByType('block');
   const metrics = graph.getNodesByType('metric');
   const dimensions = graph.getNodesByType('dimension');
   const charts = graph.getNodesByType('chart');
+  const dashboards = graph.getNodesByType('dashboard');
 
   console.log('\n  DQL Lineage Summary');
   console.log('  ' + '='.repeat(50));
 
   // Overview counts
   console.log(`\n  ${nodes.length} nodes, ${edges.length} edges, ${domains.length} domain(s)`);
+  if (dbtModels.length > 0 || dbtSources.length > 0) {
+    console.log(`  dbt: ${dbtSources.length} source(s), ${dbtModels.length} model(s)`);
+  }
+  if (dashboards.length > 0) {
+    console.log(`  ${dashboards.length} dashboard(s)`);
+  }
 
   // Source Tables
   if (sourceTables.length > 0) {
@@ -410,7 +451,10 @@ function printDAGNode(graph: LineageGraph, node: LineageNode, depth: number, pri
 
   const indent = '    ' + '  '.repeat(depth);
   const prefix = depth === 0 ? '' : '└── ';
-  const typeLabel = node.type === 'source_table' ? 'table' : node.type;
+  const typeLabel = node.type === 'source_table' ? 'table'
+    : node.type === 'dbt_model' ? 'dbt_model'
+    : node.type === 'dbt_source' ? 'dbt_source'
+    : node.type;
   const badge = node.status === 'certified' ? ' ✓' : '';
   const domain = node.domain ? ` [${node.domain}]` : '';
   console.log(`${indent}${prefix}${typeLabel}:${node.name}${domain}${badge}`);
@@ -435,7 +479,7 @@ function resolveNodeId(graph: LineageGraph, name: string): string | null {
   if (name.includes(':') && graph.getNode(name)) return name;
 
   // Try common type prefixes in priority order
-  const prefixes = ['block', 'table', 'metric', 'dimension', 'chart', 'domain'];
+  const prefixes = ['block', 'table', 'dbt_model', 'dbt_source', 'metric', 'dimension', 'chart', 'dashboard', 'domain'];
   for (const prefix of prefixes) {
     const id = `${prefix}:${name}`;
     if (graph.getNode(id)) return id;
@@ -458,7 +502,10 @@ function printNodeLineage(graph: LineageGraph, nodeId: string, _flags: CLIFlags)
     return;
   }
 
-  const typeLabel = node.type === 'source_table' ? 'Table' : node.type.charAt(0).toUpperCase() + node.type.slice(1);
+  const typeLabel = node.type === 'source_table' ? 'Table'
+    : node.type === 'dbt_model' ? 'dbt Model'
+    : node.type === 'dbt_source' ? 'dbt Source'
+    : node.type.charAt(0).toUpperCase() + node.type.slice(1);
   const ancestors = graph.ancestors(nodeId);
   const descendants = graph.descendants(nodeId);
 
@@ -467,7 +514,7 @@ function printNodeLineage(graph: LineageGraph, nodeId: string, _flags: CLIFlags)
 
   // Metadata
   const meta: string[] = [];
-  if (node.type !== 'source_table') meta.push(`Type: ${node.type}`);
+  if (!['source_table', 'dbt_model', 'dbt_source'].includes(node.type)) meta.push(`Type: ${node.type}`);
   if (node.domain) meta.push(`Domain: ${node.domain}`);
   if (node.status) meta.push(`Status: ${node.status}`);
   if (node.owner) meta.push(`Owner: ${node.owner}`);
@@ -615,6 +662,176 @@ function printImpactAnalysis(graph: LineageGraph, nodeId: string, _flags: CLIFla
   }
 
   console.log('');
+}
+
+function printSearch(graph: LineageGraph, term: string): void {
+  const matches = searchNodes(graph, term, 30);
+
+  if (matches.length === 0) {
+    console.log(`\n  No nodes found matching "${term}".\n`);
+    return;
+  }
+
+  console.log(`\n  Search Results for "${term}" (${matches.length} match${matches.length === 1 ? '' : 'es'}):`);
+  console.log('  ' + '='.repeat(50));
+
+  for (const { node, score } of matches) {
+    const typeLabel = nodeTypeLabel(node.type);
+    const domain = node.domain ? ` [${node.domain}]` : '';
+    const status = node.status ? ` (${node.status})` : '';
+    console.log(`    ${typeLabel}  ${node.name}${domain}${status}`);
+  }
+
+  console.log('\n  Use `dql lineage --focus <name>` to see focused lineage for a specific node.\n');
+}
+
+function printFocused(graph: LineageGraph, name: string, depth?: number): void {
+  const result = queryLineage(graph, {
+    focus: name,
+    upstreamDepth: depth,
+    downstreamDepth: depth,
+  });
+
+  if (!result.focalNode) {
+    console.error(`"${name}" not found in lineage graph.`);
+    process.exitCode = 1;
+    return;
+  }
+
+  const focal = result.focalNode;
+  const subNodes = result.graph.nodes;
+  const subEdges = result.graph.edges;
+
+  const typeLabel = nodeTypeLabel(focal.type);
+  console.log(`\n  Focused Lineage: ${focal.name} (${typeLabel})`);
+  console.log('  ' + '='.repeat(50));
+  if (depth !== undefined) console.log(`  Depth: ${depth} hop(s)`);
+  console.log(`  Subgraph: ${subNodes.length} nodes, ${subEdges.length} edges`);
+
+  // Separate upstream vs downstream relative to focal
+  const focusGraph = LineageGraph.fromJSON(result.graph);
+  const upstream = focusGraph.ancestors(focal.id).filter((n) => n.type !== 'domain');
+  const downstream = focusGraph.descendants(focal.id).filter((n) => n.type !== 'domain');
+
+  if (upstream.length > 0) {
+    console.log(`\n  Upstream (${upstream.length}):`);
+    for (const n of upstream) {
+      const label = nodeTypeLabel(n.type);
+      const badge = n.status === 'certified' ? ' [certified]' : '';
+      console.log(`    ${label}  ${n.name}${badge}${n.domain ? ` [${n.domain}]` : ''}`);
+    }
+  }
+
+  console.log(`\n  >>> ${typeLabel}  ${focal.name} ${focal.status ? `(${focal.status})` : ''} <<<`);
+
+  if (downstream.length > 0) {
+    console.log(`\n  Downstream (${downstream.length}):`);
+    for (const n of downstream) {
+      const label = nodeTypeLabel(n.type);
+      const badge = n.status === 'certified' ? ' [certified]' : '';
+      console.log(`    ${label}  ${n.name}${badge}${n.domain ? ` [${n.domain}]` : ''}`);
+    }
+  }
+
+  // Show data flow tree
+  console.log('\n  Data Flow:');
+  console.log('  ' + '-'.repeat(50));
+  const printed = new Set<string>();
+  const roots = subNodes.filter(
+    (n) => n.type !== 'domain' && focusGraph.getIncomingEdges(n.id).length === 0,
+  );
+  for (const root of roots.sort((a, b) => a.name.localeCompare(b.name))) {
+    const rootNode = focusGraph.getNode(root.id);
+    if (rootNode) printDAGNode(focusGraph, rootNode, 0, printed);
+  }
+
+  console.log('');
+}
+
+function printDbtDAG(graph: LineageGraph): void {
+  const dbtModels = graph.getNodesByType('dbt_model');
+  const dbtSources = graph.getNodesByType('dbt_source');
+
+  if (dbtModels.length === 0 && dbtSources.length === 0) {
+    console.log('\n  No dbt models found in lineage.');
+    console.log('  Run `dql compile --dbt-manifest target/manifest.json` to import dbt lineage.\n');
+    return;
+  }
+
+  console.log('\n  dbt Model DAG');
+  console.log('  ' + '='.repeat(50));
+  console.log(`\n  ${dbtSources.length} source(s), ${dbtModels.length} model(s)`);
+
+  if (dbtSources.length > 0) {
+    console.log(`\n  Sources:`);
+    for (const src of dbtSources.sort((a, b) => a.name.localeCompare(b.name))) {
+      const downstream = graph.getOutgoingEdges(src.id)
+        .map((e) => graph.getNode(e.target))
+        .filter((n): n is LineageNode => n !== undefined)
+        .map((n) => n.name);
+      const arrow = downstream.length > 0 ? ` -> ${downstream.join(', ')}` : '';
+      console.log(`    SRC  ${src.name}${arrow}`);
+    }
+  }
+
+  if (dbtModels.length > 0) {
+    console.log(`\n  Models:`);
+    for (const model of dbtModels.sort((a, b) => a.name.localeCompare(b.name))) {
+      const upstream = graph.getIncomingEdges(model.id)
+        .filter((e) => e.type === 'depends_on')
+        .map((e) => graph.getNode(e.source))
+        .filter((n): n is LineageNode => n !== undefined)
+        .map((n) => n.name);
+      const downstream = graph.getOutgoingEdges(model.id)
+        .map((e) => graph.getNode(e.target))
+        .filter((n): n is LineageNode => n !== undefined)
+        .map((n) => `${nodeTypeLabel(n.type)} ${n.name}`);
+
+      const from = upstream.length > 0 ? `  <- ${upstream.join(', ')}` : '';
+      console.log(`    DBT  ${model.name}${from}`);
+      if (downstream.length > 0) {
+        console.log(`           -> ${downstream.join(', ')}`);
+      }
+      // Show columns if available
+      if (model.columns && model.columns.length > 0) {
+        const colNames = model.columns.slice(0, 8).map((c) => c.name);
+        const more = model.columns.length > 8 ? ` +${model.columns.length - 8} more` : '';
+        console.log(`           columns: ${colNames.join(', ')}${more}`);
+      }
+    }
+  }
+
+  // Show data flow tree
+  console.log('\n  dbt Data Flow:');
+  console.log('  ' + '-'.repeat(50));
+  const printed = new Set<string>();
+  for (const src of dbtSources.sort((a, b) => a.name.localeCompare(b.name))) {
+    printDAGNode(graph, src, 0, printed);
+  }
+  // Print models not reachable from sources
+  for (const model of dbtModels) {
+    if (!printed.has(model.id)) {
+      printDAGNode(graph, model, 0, printed);
+    }
+  }
+
+  console.log('');
+}
+
+/** Short type label for display */
+function nodeTypeLabel(type: string): string {
+  switch (type) {
+    case 'source_table': return 'TBL ';
+    case 'dbt_model': return 'DBT ';
+    case 'dbt_source': return 'SRC ';
+    case 'block': return 'BLK ';
+    case 'metric': return 'MET ';
+    case 'dimension': return 'DIM ';
+    case 'chart': return 'CHT ';
+    case 'dashboard': return 'DASH';
+    case 'domain': return 'DOM ';
+    default: return type.toUpperCase().padEnd(4);
+  }
 }
 
 function printTrustChain(graph: LineageGraph, fromBlock: string, toBlock: string, _flags: CLIFlags): void {

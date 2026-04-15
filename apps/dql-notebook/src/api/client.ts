@@ -508,4 +508,44 @@ export const api = {
       return null;
     }
   },
+
+  async searchLineage(q: string, limit = 20): Promise<{ matches: Array<{ node: any; score: number }> }> {
+    try {
+      return await request<{ matches: Array<{ node: any; score: number }> }>(
+        `/api/lineage/search?q=${encodeURIComponent(q)}&limit=${limit}`,
+      );
+    } catch {
+      return { matches: [] };
+    }
+  },
+
+  async queryLineage(params: {
+    focus?: string;
+    search?: string;
+    types?: string;
+    domain?: string;
+    upstreamDepth?: number;
+    downstreamDepth?: number;
+  }): Promise<{ graph: { nodes: any[]; edges: any[] }; focalNode?: any; matches?: any[] }> {
+    try {
+      const qs = new URLSearchParams();
+      if (params.focus) qs.set('focus', params.focus);
+      if (params.search) qs.set('search', params.search);
+      if (params.types) qs.set('types', params.types);
+      if (params.domain) qs.set('domain', params.domain);
+      if (params.upstreamDepth !== undefined) qs.set('upstreamDepth', String(params.upstreamDepth));
+      if (params.downstreamDepth !== undefined) qs.set('downstreamDepth', String(params.downstreamDepth));
+      return await request<any>(`/api/lineage/query?${qs.toString()}`);
+    } catch {
+      return { graph: { nodes: [], edges: [] } };
+    }
+  },
+
+  async fetchNodeLineage(nodeId: string): Promise<{ node: any; ancestors: any[]; descendants: any[]; incoming: any[]; outgoing: any[] } | null> {
+    try {
+      return await request<any>(`/api/lineage/node/${encodeURIComponent(nodeId)}`);
+    } catch {
+      return null;
+    }
+  },
 };

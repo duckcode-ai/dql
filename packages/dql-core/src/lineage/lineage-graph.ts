@@ -9,11 +9,14 @@
 
 export type LineageNodeType =
   | 'source_table'
+  | 'dbt_model'       // dbt-managed model (transformed table)
+  | 'dbt_source'      // dbt source definition (raw table dbt reads from)
   | 'block'
   | 'metric'
   | 'dimension'
   | 'domain'
-  | 'chart';
+  | 'chart'
+  | 'dashboard';      // notebook/dashboard container
 
 export interface LineageNode {
   /** Unique identifier (e.g., "block:revenue_by_segment", "metric:total_revenue") */
@@ -28,6 +31,8 @@ export interface LineageNode {
   owner?: string;
   /** Additional metadata */
   metadata?: Record<string, unknown>;
+  /** Column metadata for tables/models/blocks (table-level info, not column-level lineage) */
+  columns?: Array<{ name: string; type?: string; description?: string }>;
 }
 
 // ---- Edge Types ----
@@ -38,7 +43,9 @@ export type LineageEdgeType =
   | 'aggregates'       // metric aggregates from a table/block
   | 'visualizes'       // chart visualizes a block/metric
   | 'crosses_domain'   // data crosses a domain boundary
-  | 'certified_by';    // block certified by a person/process
+  | 'certified_by'     // block certified by a person/process
+  | 'depends_on'       // dbt model depends on another dbt model/source
+  | 'contains';        // dashboard contains blocks/charts
 
 export interface LineageEdge {
   source: string; // node id
