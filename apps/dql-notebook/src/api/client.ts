@@ -470,26 +470,14 @@ export const api = {
   },
 
   async describeTable(tablePath: string): Promise<SchemaColumn[]> {
-    // Determine if this is a data file or a database table
-    const isFile = /\.(csv|parquet|json)$/i.test(tablePath) || tablePath.startsWith('data/');
-    const safePath = tablePath.replace(/'/g, "''");
-    const qualifiedIdentifier = tablePath
-      .split('.')
-      .map((part) => `"${part.replace(/"/g, '""')}"`)
-      .join('.');
-    const sql = isFile
-      ? `DESCRIBE SELECT * FROM read_csv_auto('${safePath}') LIMIT 0`
-      : `DESCRIBE ${qualifiedIdentifier}`;
+    // Extract schema from qualified path (e.g. "public.orders" → schema=public, table=orders)
+    const parts = tablePath.split('.');
+    const table = parts.length > 1 ? parts[parts.length - 1] : tablePath;
+    const schema = parts.length > 1 ? parts.slice(0, -1).join('.') : '';
+    const params = new URLSearchParams({ table });
+    if (schema) params.set('schema', schema);
     try {
-      const result = await request<QueryResult>('/api/query', {
-        method: 'POST',
-        body: JSON.stringify({ sql }),
-      });
-      // DuckDB DESCRIBE returns rows with column_name and column_type fields
-      return result.rows.map((row) => ({
-        name: String(row['column_name'] ?? row['Field'] ?? ''),
-        type: String(row['column_type'] ?? row['Type'] ?? ''),
-      }));
+      return await request<SchemaColumn[]>(`/api/describe-table?${params.toString()}`);
     } catch {
       return [];
     }

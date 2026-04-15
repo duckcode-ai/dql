@@ -1,4 +1,4 @@
-import type { DatabaseConnector, ConnectionConfig, DriverName } from '../connector.js';
+import type { DatabaseConnector, ConnectionConfig, DriverName, TableInfo, ColumnInfo } from '../connector.js';
 import type { QueryResult, ColumnMeta, ColumnType, Row } from '../result-types.js';
 
 export class MSSQLConnector implements DatabaseConnector {
@@ -108,6 +108,42 @@ export class MSSQLConnector implements DatabaseConnector {
     } catch {
       return false;
     }
+  }
+
+  async listTables(): Promise<TableInfo[]> {
+    const result = await this.execute(
+      `SELECT TABLE_SCHEMA AS table_schema, TABLE_NAME AS table_name, TABLE_TYPE AS table_type
+       FROM INFORMATION_SCHEMA.TABLES
+       WHERE TABLE_SCHEMA NOT IN ('INFORMATION_SCHEMA', 'sys')
+       ORDER BY TABLE_SCHEMA, TABLE_NAME`,
+    );
+    return result.rows.map((row) => ({
+      schema: String(row['table_schema'] ?? ''),
+      name: String(row['table_name'] ?? ''),
+      type: String(row['table_type'] ?? ''),
+    }));
+  }
+
+  async listColumns(schema?: string, table?: string): Promise<ColumnInfo[]> {
+    let sql = `SELECT TABLE_SCHEMA AS table_schema, TABLE_NAME AS table_name,
+       COLUMN_NAME AS column_name, DATA_TYPE AS data_type, ORDINAL_POSITION AS ordinal_position
+       FROM INFORMATION_SCHEMA.COLUMNS
+       WHERE TABLE_SCHEMA NOT IN ('INFORMATION_SCHEMA', 'sys')`;
+    if (schema) {
+      sql += ` AND TABLE_SCHEMA = '${schema.replace(/'/g, "''")}'`;
+    }
+    if (table) {
+      sql += ` AND TABLE_NAME = '${table.replace(/'/g, "''")}'`;
+    }
+    sql += ` ORDER BY TABLE_SCHEMA, TABLE_NAME, ORDINAL_POSITION`;
+    const result = await this.execute(sql);
+    return result.rows.map((row) => ({
+      schema: String(row['table_schema'] ?? ''),
+      table: String(row['table_name'] ?? ''),
+      name: String(row['column_name'] ?? ''),
+      dataType: String(row['data_type'] ?? ''),
+      ordinalPosition: Number(row['ordinal_position'] ?? 0),
+    }));
   }
 }
 

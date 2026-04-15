@@ -60,8 +60,8 @@ export interface LocalServerOptions {
 
 export async function startLocalServer(opts: LocalServerOptions): Promise<number> {
   const { rootDir, executor, connection: rawConnection, preferredPort, projectRoot = process.cwd() } = opts;
-  const connection = normalizeProjectConnection(rawConnection, projectRoot);
-  const projectConfig = loadProjectConfig(projectRoot);
+  let connection = normalizeProjectConnection(rawConnection, projectRoot);
+  let projectConfig = loadProjectConfig(projectRoot);
 
   // Load semantic layer via provider system (dql native, dbt, cubejs, etc.)
   let semanticLayer: SemanticLayer | undefined;
@@ -277,69 +277,14 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
     if (req.method === 'GET' && path === '/api/schema') {
       try {
         const dataFiles = scanDataFiles(projectRoot);
-        // Also query database tables from the connected database
-        let dbTables: { name: string; path: string; columns: Array<{ name: string; type: string }>; source: string; objectType?: string }[] = [];
-        try {
-          const tablesResult = await executor.executeQuery(
-            `SELECT table_schema, table_name, table_type
-             FROM information_schema.tables
-             WHERE table_schema NOT IN ('information_schema', 'pg_catalog')
-             ORDER BY table_schema, table_name`,
-            [], {}, connection,
-          );
-          const columnsResult = await executor.executeQuery(
-            `SELECT table_schema, table_name, column_name, data_type
-             FROM information_schema.columns
-             WHERE table_schema NOT IN ('information_schema', 'pg_catalog')
-             ORDER BY table_schema, table_name, ordinal_position`,
-            [], {}, connection,
-          );
-          const columnsByPath = columnsResult.rows.reduce((map, row) => {
-            const schema = String(row['table_schema'] ?? '');
-            const name = String(row['table_name'] ?? '');
-            const qualifiedName = schema ? `${schema}.${name}` : name;
-            const next = map.get(qualifiedName) ?? [];
-            next.push({
-              name: String(row['column_name'] ?? ''),
-              type: String(row['data_type'] ?? ''),
-            });
-            map.set(qualifiedName, next);
-            return map;
-          }, new Map<string, Array<{ name: string; type: string }>>());
-
-          dbTables = tablesResult.rows.map((row) => {
-            const schema = String(row['table_schema'] ?? '');
-            const name = String(row['table_name'] ?? '');
-            const qualifiedName = schema ? `${schema}.${name}` : name;
-            return {
-              name: qualifiedName,
-              path: qualifiedName,
-              columns: columnsByPath.get(qualifiedName) ?? [],
-              source: 'database',
-              objectType: String(row['table_type'] ?? ''),
-            };
-          });
-        } catch {
-          try {
-            const connector = await executor.getConnector(connection);
-            if (typeof connector.listTables === 'function') {
-              const tables = await connector.listTables();
-              dbTables = tables.map((t) => {
-                const qualifiedName = t.schema ? `${t.schema}.${t.name}` : t.name;
-                return {
-                  name: qualifiedName,
-                  path: qualifiedName,
-                  columns: [],
-                  source: 'database',
-                  objectType: t.type,
-                };
-              });
-            }
-          } catch {
-            // Non-fatal: schema discovery from DB may fail if not connected
-          }
-        }
-        // Merge: data files first, then db tables (dedup by name)
+        const { tables, columnsByPath } = await introspectSchema(executor, connection);
+        const dbTables = tables.map((t) => ({
+          name: t.path,
+          path: t.path,
+          columns: columnsByPath.get(t.path) ?? [],
+          source: 'database',
+          objectType: t.type,
+        }));
         const seen = new Set(dataFiles.map((f) => f.name));
         const merged = [
           ...dataFiles.map((f) => ({ ...f, source: 'file' })),
@@ -816,6 +761,33 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           raw.connections = body.connections;
         }
         writeFileSync(configPath, JSON.stringify(raw, null, 2) + '\n', 'utf-8');
+
+        // Hot-swap: re-read the config and re-initialize the active connection
+        projectConfig = loadProjectConfig(projectRoot);
+        const newDefault = projectConfig.defaultConnection;
+        if (newDefault) {
+          connection = normalizeProjectConnection(newDefault, projectRoot);
+          // Auto-register data files if DuckDB/file driver
+          if (connection.driver === 'file' || connection.driver === 'duckdb') {
+            const dataDir = projectConfig.dataDir
+              ? resolve(projectRoot, projectConfig.dataDir)
+              : join(projectRoot, 'data');
+            if (existsSync(dataDir)) {
+              try {
+                const files = readdirSync(dataDir, { withFileTypes: true })
+                  .filter((e) => e.isFile() && /\.(csv|parquet)$/i.test(e.name));
+                for (const file of files) {
+                  const tableName = file.name.replace(/\.(csv|parquet)$/i, '');
+                  const absPath = join(dataDir, file.name).replaceAll('\\', '/');
+                  const reader = file.name.endsWith('.parquet') ? 'read_parquet' : 'read_csv_auto';
+                  const ddl = `CREATE OR REPLACE VIEW "${tableName}" AS SELECT * FROM ${reader}('${absPath}')`;
+                  try { await executor.executeQuery(ddl, [], {}, connection); } catch { /* non-fatal */ }
+                }
+              } catch { /* non-fatal */ }
+            }
+          }
+        }
+
         res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
         res.end(serializeJSON({ ok: true }));
       } catch (error) {
@@ -964,7 +936,9 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           sourceConfig,
           executeQuery,
         });
-        const refreshed = await resolveSemanticLayerAsync({ provider: 'dql', path: './semantic-layer' }, projectRoot);
+        // Re-resolve using project's actual semantic config (not hardcoded 'dql')
+        const projSemConfig = loadProjectConfig(projectRoot)?.semanticLayer ?? { provider: 'dql', path: './semantic-layer' };
+        const refreshed = await resolveSemanticLayerAsync(projSemConfig, projectRoot);
         semanticLayer = refreshed.layer;
         semanticLayerErrors = refreshed.errors;
         semanticDetectedProvider = refreshed.detectedProvider ?? 'dql';
@@ -998,7 +972,9 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           targetProjectRoot: projectRoot,
           executeQuery,
         });
-        const refreshed = await resolveSemanticLayerAsync({ provider: 'dql', path: './semantic-layer' }, projectRoot);
+        // Re-resolve using project's actual semantic config (not hardcoded 'dql')
+        const projSemConfig = loadProjectConfig(projectRoot)?.semanticLayer ?? { provider: 'dql', path: './semantic-layer' };
+        const refreshed = await resolveSemanticLayerAsync(projSemConfig, projectRoot);
         semanticLayer = refreshed.layer;
         semanticLayerErrors = refreshed.errors;
         semanticDetectedProvider = refreshed.detectedProvider ?? 'dql';
@@ -1245,6 +1221,54 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
       return;
     }
     // ── end dql-notebook API ──────────────────────────────────────────────────
+
+    // GET /api/describe-table?table=schema.table — returns columns for a specific table
+    if (req.method === 'GET' && path === '/api/describe-table') {
+      try {
+        const tablePath = url.searchParams.get('table') ?? '';
+        const schemaName = url.searchParams.get('schema') ?? undefined;
+        if (!tablePath) {
+          res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
+          res.end(serializeJSON({ error: 'Missing table parameter' }));
+          return;
+        }
+        // Try connector.listColumns() first
+        let columns: Array<{ name: string; type: string }> = [];
+        try {
+          const connector = await executor.getConnector(connection);
+          if (typeof connector.listColumns === 'function') {
+            const rawCols = await connector.listColumns(schemaName, tablePath);
+            columns = rawCols.map((c) => ({ name: c.name, type: c.dataType }));
+          }
+        } catch {
+          // fallback below
+        }
+        // Fallback: DESCRIBE via SQL (works for DuckDB, PG)
+        if (columns.length === 0) {
+          try {
+            const isFile = /\.(csv|parquet|json)$/i.test(tablePath) || tablePath.startsWith('data/');
+            const safePath = tablePath.replace(/'/g, "''");
+            const qualifiedIdentifier = tablePath.split('.').map((p) => `"${p.replace(/"/g, '""')}"`).join('.');
+            const sql = isFile
+              ? `DESCRIBE SELECT * FROM read_csv_auto('${safePath}') LIMIT 0`
+              : `DESCRIBE ${qualifiedIdentifier}`;
+            const result = await executor.executeQuery(sql, [], {}, connection);
+            columns = result.rows.map((row) => ({
+              name: String(row['column_name'] ?? row['Field'] ?? ''),
+              type: String(row['column_type'] ?? row['Type'] ?? ''),
+            }));
+          } catch {
+            // empty columns
+          }
+        }
+        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON(columns));
+      } catch (error) {
+        res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({ error: String(error) }));
+      }
+      return;
+    }
 
     if (req.method === 'POST' && path === '/api/query') {
       try {
@@ -2149,6 +2173,86 @@ function writeUserPrefs(userPrefsPath: string, prefs: UserPrefs): void {
   writeFileSync(userPrefsPath, JSON.stringify(prefs, null, 2) + '\n', 'utf-8');
 }
 
+async function introspectSchema(
+  executor: QueryExecutor,
+  connection: ConnectionConfig,
+): Promise<{
+  tables: Array<{ schema: string; name: string; path: string; type?: string }>;
+  columnsByPath: Map<string, Array<{ name: string; type: string }>>;
+}> {
+  let tables: Array<{ schema: string; name: string; path: string; type?: string }> = [];
+  let columnsByPath = new Map<string, Array<{ name: string; type: string }>>();
+
+  // Tier 1: information_schema (PG, MySQL, Snowflake, MSSQL, DuckDB, Redshift, Fabric, Databricks)
+  try {
+    const catalogRows = await executor.executeQuery(
+      `SELECT table_schema, table_name, table_type
+       FROM information_schema.tables
+       WHERE table_schema NOT IN ('information_schema', 'pg_catalog')
+       ORDER BY table_schema, table_name`,
+      [], {}, connection,
+    );
+    tables = catalogRows.rows.map((row) => {
+      const schema = String(row['table_schema'] ?? row['TABLE_SCHEMA'] ?? 'default');
+      const name = String(row['table_name'] ?? row['TABLE_NAME'] ?? '');
+      const type = String(row['table_type'] ?? row['TABLE_TYPE'] ?? 'TABLE');
+      const path = schema ? `${schema}.${name}` : name;
+      return { schema, name, path, type };
+    });
+
+    const columnRows = await executor.executeQuery(
+      `SELECT table_schema, table_name, column_name, data_type
+       FROM information_schema.columns
+       WHERE table_schema NOT IN ('information_schema', 'pg_catalog')
+       ORDER BY table_schema, table_name, ordinal_position`,
+      [], {}, connection,
+    );
+    columnsByPath = columnRows.rows.reduce((map, row) => {
+      const schema = String(row['table_schema'] ?? row['TABLE_SCHEMA'] ?? 'default');
+      const tableName = String(row['table_name'] ?? row['TABLE_NAME'] ?? '');
+      const path = schema ? `${schema}.${tableName}` : tableName;
+      const next = map.get(path) ?? [];
+      next.push({
+        name: String(row['column_name'] ?? row['COLUMN_NAME'] ?? ''),
+        type: String(row['data_type'] ?? row['DATA_TYPE'] ?? ''),
+      });
+      map.set(path, next);
+      return map;
+    }, new Map<string, Array<{ name: string; type: string }>>());
+    return { tables, columnsByPath };
+  } catch {
+    // Tier 1 failed — try connector methods
+  }
+
+  // Tier 2: connector.listTables() + connector.listColumns() (SQLite, BigQuery, Athena, ClickHouse, Trino)
+  try {
+    const connector = await executor.getConnector(connection);
+    if (typeof connector.listTables === 'function') {
+      const rawTables = await connector.listTables();
+      tables = rawTables.map((t) => {
+        const schema = t.schema || 'default';
+        const path = t.schema ? `${t.schema}.${t.name}` : t.name;
+        return { schema, name: t.name, path, type: t.type };
+      });
+    }
+    if (typeof connector.listColumns === 'function') {
+      const rawColumns = await connector.listColumns();
+      columnsByPath = rawColumns.reduce((map, col) => {
+        const schema = col.schema || 'default';
+        const path = schema ? `${schema}.${col.table}` : col.table;
+        const next = map.get(path) ?? [];
+        next.push({ name: col.name, type: col.dataType });
+        map.set(path, next);
+        return map;
+      }, new Map<string, Array<{ name: string; type: string }>>());
+    }
+  } catch {
+    // Tier 3: tables only, no columns — already have what we have
+  }
+
+  return { tables, columnsByPath };
+}
+
 function buildDatabaseSchemaTree(
   projectRoot: string,
   executor: QueryExecutor,
@@ -2163,65 +2267,13 @@ function buildDatabaseSchemaTree(
 }>> {
   return (async () => {
     const dataFiles = scanDataFiles(projectRoot);
-    let dbTables: Array<{ schema: string; name: string; path: string; type?: string }> = [];
-    let dbColumnsByPath = new Map<string, Array<{ name: string; type: string }>>();
-    try {
-      const catalogRows = await executor.executeQuery(
-        `SELECT table_schema, table_name, table_type
-         FROM information_schema.tables
-         WHERE table_schema NOT IN ('information_schema', 'pg_catalog')
-         ORDER BY table_schema, table_name`,
-        [], {}, connection,
-      );
-      dbTables = catalogRows.rows.map((row) => {
-        const schema = String(row['table_schema'] ?? 'default');
-        const name = String(row['table_name'] ?? '');
-        const type = String(row['table_type'] ?? 'TABLE');
-        const path = schema ? `${schema}.${name}` : name;
-        return { schema, name, path, type };
-      });
-
-      const columnRows = await executor.executeQuery(
-        `SELECT table_schema, table_name, column_name, data_type
-         FROM information_schema.columns
-         WHERE table_schema NOT IN ('information_schema', 'pg_catalog')
-         ORDER BY table_schema, table_name, ordinal_position`,
-        [], {}, connection,
-      );
-      dbColumnsByPath = columnRows.rows.reduce((map, row) => {
-        const schema = String(row['table_schema'] ?? 'default');
-        const tableName = String(row['table_name'] ?? '');
-        const path = schema ? `${schema}.${tableName}` : tableName;
-        const next = map.get(path) ?? [];
-        next.push({
-          name: String(row['column_name'] ?? ''),
-          type: String(row['data_type'] ?? ''),
-        });
-        map.set(path, next);
-        return map;
-      }, new Map<string, Array<{ name: string; type: string }>>());
-    } catch {
-      try {
-        const connector = await executor.getConnector(connection);
-        if (typeof connector.listTables === 'function') {
-          const tables = await connector.listTables();
-          dbTables = tables.map((table) => {
-            const schema = table.schema || 'default';
-            const path = table.schema ? `${table.schema}.${table.name}` : table.name;
-            return { schema, name: table.name, path, type: table.type };
-          });
-        }
-      } catch {
-        // fall through and return what we have
-      }
-    }
+    const { tables: dbTables, columnsByPath: dbColumnsByPath } = await introspectSchema(executor, connection);
 
     const schemaMap = new Map<string, Array<{ name: string; path: string; type?: string }>>();
     for (const table of dbTables) {
       const schemaName = table.schema || 'default';
-      const tableName = table.name;
       const existing = schemaMap.get(schemaName) ?? [];
-      existing.push({ name: tableName, path: table.path, type: table.type });
+      existing.push({ name: table.name, path: table.path, type: table.type });
       schemaMap.set(schemaName, existing);
     }
 
@@ -2249,19 +2301,45 @@ function buildDatabaseSchemaTree(
           })),
       }));
 
+    // Eagerly resolve file columns via DuckDB DESCRIBE
     if (dataFiles.length > 0) {
-      databaseNodes.unshift({
-        id: 'db-schema:files',
-        label: 'files',
-        kind: 'schema',
-        children: dataFiles.map((file) => ({
+      const fileChildren: Array<{
+        id: string; label: string; kind: 'table'; path: string; type: string;
+        children: Array<{ id: string; label: string; kind: 'column'; path: string; type: string }>;
+      }> = [];
+      for (const file of dataFiles) {
+        let columns: Array<{ id: string; label: string; kind: 'column'; path: string; type: string }> = [];
+        try {
+          const ext = file.name.split('.').pop()?.toLowerCase();
+          const readFn = ext === 'parquet' ? 'read_parquet' : ext === 'json' ? 'read_json_auto' : 'read_csv_auto';
+          const descResult = await executor.executeQuery(
+            `DESCRIBE SELECT * FROM ${readFn}('${file.path.replace(/'/g, "''")}') LIMIT 0`,
+            [], {}, connection,
+          );
+          columns = descResult.rows.map((row) => ({
+            id: `db-column:${file.path}:${String(row['column_name'] ?? '')}`,
+            label: String(row['column_name'] ?? ''),
+            kind: 'column' as const,
+            path: file.path,
+            type: String(row['column_type'] ?? ''),
+          }));
+        } catch {
+          // file column discovery failed — empty children is fine
+        }
+        fileChildren.push({
           id: `db-table:${file.path}`,
           label: file.name,
           kind: 'table',
           path: file.path,
           type: 'FILE',
-          children: [],
-        })),
+          children: columns,
+        });
+      }
+      databaseNodes.unshift({
+        id: 'db-schema:files',
+        label: 'files',
+        kind: 'schema' as const,
+        children: fileChildren,
       });
     }
 

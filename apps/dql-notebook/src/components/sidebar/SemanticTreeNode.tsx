@@ -5,6 +5,7 @@ interface SemanticTreeNodeProps {
   label: string;
   depth?: number;
   badge?: string;
+  badgeColor?: string;
   count?: number;
   expanded?: boolean;
   favorite?: boolean;
@@ -23,6 +24,7 @@ export function SemanticTreeNode({
   label,
   depth = 0,
   badge,
+  badgeColor,
   count,
   expanded,
   favorite,
@@ -88,8 +90,8 @@ export function SemanticTreeNode({
           style={{
             fontSize: 9,
             fontFamily: t.fontMono,
-            color: t.accent,
-            background: `${t.accent}18`,
+            color: badgeColor ?? t.accent,
+            background: `${badgeColor ?? t.accent}18`,
             borderRadius: 4,
             padding: '1px 4px',
             flexShrink: 0,

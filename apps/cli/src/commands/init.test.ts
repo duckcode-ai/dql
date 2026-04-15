@@ -24,7 +24,7 @@ describe('runInit', () => {
       template: '',
       connection: '',
       verbose: false,
-      skipTests: false,
+      skipTests: false, version: false,
     });
 
     const contents = readdirSync(projectDir);
@@ -60,7 +60,7 @@ describe('runInit', () => {
       template: '',
       connection: '',
       verbose: false,
-      skipTests: false,
+      skipTests: false, version: false,
     });
 
     const config = JSON.parse(readFileSync(join(projectDir, 'dql.config.json'), 'utf-8')) as {
@@ -124,7 +124,7 @@ metrics:
       template: '',
       connection: '',
       verbose: false,
-      skipTests: false,
+      skipTests: false, version: false,
     });
 
     const config = JSON.parse(readFileSync(join(projectDir, 'dql.config.json'), 'utf-8')) as {

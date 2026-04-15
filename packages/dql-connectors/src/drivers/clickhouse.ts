@@ -1,4 +1,4 @@
-import type { DatabaseConnector, ConnectionConfig } from '../connector.js';
+import type { DatabaseConnector, ConnectionConfig, TableInfo, ColumnInfo } from '../connector.js';
 import type { QueryResult, ColumnMeta, ColumnType, Row } from '../result-types.js';
 
 export class ClickHouseConnector implements DatabaseConnector {
@@ -69,6 +69,36 @@ export class ClickHouseConnector implements DatabaseConnector {
     } catch {
       return false;
     }
+  }
+
+  async listTables(): Promise<TableInfo[]> {
+    const result = await this.execute(
+      `SELECT database, name, engine FROM system.tables WHERE database NOT IN ('system', 'information_schema', 'INFORMATION_SCHEMA') ORDER BY database, name`,
+    );
+    return result.rows.map((row) => ({
+      schema: String(row['database'] ?? ''),
+      name: String(row['name'] ?? ''),
+      type: String(row['engine'] ?? '') === 'View' ? 'VIEW' : 'BASE TABLE',
+    }));
+  }
+
+  async listColumns(schema?: string, table?: string): Promise<ColumnInfo[]> {
+    let sql = `SELECT database, table, name, type, position FROM system.columns WHERE database NOT IN ('system', 'information_schema', 'INFORMATION_SCHEMA')`;
+    if (schema) {
+      sql += ` AND database = '${schema.replace(/'/g, "''")}'`;
+    }
+    if (table) {
+      sql += ` AND table = '${table.replace(/'/g, "''")}'`;
+    }
+    sql += ` ORDER BY database, table, position`;
+    const result = await this.execute(sql);
+    return result.rows.map((row) => ({
+      schema: String(row['database'] ?? ''),
+      table: String(row['table'] ?? ''),
+      name: String(row['name'] ?? ''),
+      dataType: String(row['type'] ?? ''),
+      ordinalPosition: Number(row['position'] ?? 0),
+    }));
   }
 }
 

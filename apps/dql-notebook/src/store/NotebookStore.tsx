@@ -91,7 +91,6 @@ function notebookReducer(state: NotebookState, action: NotebookAction): Notebook
         notebookTitle: action.payload.metadata.name,
         notebookDirty: false,
         mainView: 'block_studio',
-        sidebarOpen: false,
         dashboardMode: false,
         activeBlockPath: action.payload.path,
         blockStudioDraft: action.payload.source,

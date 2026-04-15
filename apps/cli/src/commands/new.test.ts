@@ -26,7 +26,7 @@ describe('runNew', () => {
       template: '',
       connection: '',
       verbose: false,
-      skipTests: false,
+      skipTests: false, version: false,
     });
 
     try {
@@ -46,7 +46,7 @@ describe('runNew', () => {
         template: '',
         connection: '',
         verbose: false,
-        skipTests: false,
+        skipTests: false, version: false,
       });
 
       const blockPath = join(projectDir, 'blocks', 'pipeline_health.dql');
@@ -83,7 +83,7 @@ describe('runNew', () => {
       template: '',
       connection: '',
       verbose: false,
-      skipTests: false,
+      skipTests: false, version: false,
     });
 
     try {
@@ -104,7 +104,7 @@ describe('runNew', () => {
         template: '',
         connection: '',
         verbose: false,
-        skipTests: false,
+        skipTests: false, version: false,
       });
 
       await runNew('workbook', ['Quarterly Review'], {
@@ -122,7 +122,7 @@ describe('runNew', () => {
         template: '',
         connection: '',
         verbose: false,
-        skipTests: false,
+        skipTests: false, version: false,
       });
 
       const dashboardPath = join(projectDir, 'dashboards', 'revenue_overview.dql');
@@ -163,7 +163,7 @@ describe('runNew', () => {
       template: '',
       connection: '',
       verbose: false,
-      skipTests: false,
+      skipTests: false, version: false,
     });
 
     try {
@@ -184,7 +184,7 @@ describe('runNew', () => {
         template: '',
         connection: '',
         verbose: false,
-        skipTests: false,
+        skipTests: false, version: false,
       });
 
       const blockPath = join(projectDir, 'blocks', 'arr_growth.dql');

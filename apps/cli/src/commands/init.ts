@@ -52,10 +52,12 @@ export async function runInit(targetArg: string | null, flags: CLIFlags): Promis
     writeFileSync(gitignorePath, 'node_modules/\n' + dqlIgnoreEntries);
   }
 
-  // Create welcome notebook
+  // Create welcome notebook with driver-aware SQL
   const notebookPath = join(targetDir, 'notebooks', 'welcome.dqlnb');
   if (!existsSync(notebookPath)) {
-    const nb = createWelcomeNotebook(isDbt ? 'dbt' : 'default', projectName);
+    const configJson = existsSync(configPath) ? JSON.parse(readFileSync(configPath, 'utf-8')) : {};
+    const driver = configJson?.connections?.default?.driver ?? 'duckdb';
+    const nb = createWelcomeNotebook(isDbt ? 'dbt' : 'default', projectName, driver);
     writeFileSync(notebookPath, serializeNotebook(nb), 'utf-8');
   }
 

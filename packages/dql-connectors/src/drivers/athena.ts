@@ -1,4 +1,4 @@
-import type { DatabaseConnector, ConnectionConfig } from '../connector.js';
+import type { DatabaseConnector, ConnectionConfig, TableInfo, ColumnInfo } from '../connector.js';
 import type { QueryResult, ColumnMeta, ColumnType, Row } from '../result-types.js';
 
 export class AthenaConnector implements DatabaseConnector {
@@ -106,6 +106,39 @@ export class AthenaConnector implements DatabaseConnector {
     } catch {
       return false;
     }
+  }
+
+  async listTables(): Promise<TableInfo[]> {
+    const db = this.database ?? 'default';
+    const result = await this.execute(`SHOW TABLES IN \`${db}\``);
+    return result.rows.map((row) => {
+      const name = String(Object.values(row)[0] ?? '');
+      return { schema: db, name, type: 'BASE TABLE' };
+    });
+  }
+
+  async listColumns(schema?: string, table?: string): Promise<ColumnInfo[]> {
+    const db = schema ?? this.database ?? 'default';
+    const tables = table
+      ? [{ schema: db, name: table, type: 'BASE TABLE' }]
+      : await this.listTables();
+    const columns: ColumnInfo[] = [];
+    for (const t of tables) {
+      try {
+        const result = await this.execute(`DESCRIBE \`${db}\`.\`${t.name}\``);
+        let pos = 1;
+        for (const row of result.rows) {
+          const colName = String(row['col_name'] ?? Object.values(row)[0] ?? '');
+          const dataType = String(row['data_type'] ?? Object.values(row)[1] ?? '');
+          if (colName && !colName.startsWith('#')) {
+            columns.push({ schema: db, table: t.name, name: colName, dataType, ordinalPosition: pos++ });
+          }
+        }
+      } catch {
+        // table may not be describable — skip
+      }
+    }
+    return columns;
   }
 }
 

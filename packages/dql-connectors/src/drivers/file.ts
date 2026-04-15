@@ -1,4 +1,4 @@
-import type { DatabaseConnector, ConnectionConfig } from '../connector.js';
+import type { DatabaseConnector, ConnectionConfig, TableInfo, ColumnInfo } from '../connector.js';
 import type { QueryResult } from '../result-types.js';
 import { DuckDBConnector } from './duckdb.js';
 
@@ -41,5 +41,13 @@ export class FileConnector implements DatabaseConnector {
 
   async ping(): Promise<boolean> {
     return this.duckdb.ping();
+  }
+
+  async listTables(): Promise<TableInfo[]> {
+    return this.duckdb.listTables();
+  }
+
+  async listColumns(schema?: string, table?: string): Promise<ColumnInfo[]> {
+    return this.duckdb.listColumns(schema, table);
   }
 }

@@ -46,6 +46,14 @@ export interface TableInfo {
   type: string; // 'BASE TABLE' | 'VIEW' | etc.
 }
 
+export interface ColumnInfo {
+  schema: string;
+  table: string;
+  name: string;
+  dataType: string;
+  ordinalPosition: number;
+}
+
 export interface DatabaseConnector {
   readonly driverName: DriverName;
   connect(config: ConnectionConfig): Promise<void>;
@@ -53,4 +61,5 @@ export interface DatabaseConnector {
   disconnect(): Promise<void>;
   ping(): Promise<boolean>;
   listTables?(): Promise<TableInfo[]>;
+  listColumns?(schema?: string, table?: string): Promise<ColumnInfo[]>;
 }

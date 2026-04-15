@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { api } from '../../api/client';
 import { insertSemanticReference } from '../../editor/semantic-completions';
 import { useNotebook } from '../../store/NotebookStore';
@@ -25,6 +25,7 @@ import {
   setBlockTags,
   upsertVisualizationConfig,
 } from '../../utils/block-studio';
+import { getTypeColor } from '../../utils/type-colors';
 
 type ExplorerTab = 'semantic' | 'database';
 type ResultTab = 'validate' | 'results' | 'visualization' | 'save' | 'history' | 'tests';
@@ -57,8 +58,11 @@ export function BlockStudio() {
   const [databaseTree, setDatabaseTree] = useState<DatabaseSchemaNode[]>([]);
   const [expandedDbNodes, setExpandedDbNodes] = useState<Record<string, boolean>>({});
   const [databaseQuery, setDatabaseQuery] = useState('');
+  const [loadingDbNodes, setLoadingDbNodes] = useState<Set<string>>(new Set());
   const [running, setRunning] = useState(false);
   const [saving, setSaving] = useState(false);
+  const [saveError, setSaveError] = useState<string | null>(null);
+  const [catalogError, setCatalogError] = useState<string | null>(null);
   const [historyEntries, setHistoryEntries] = useState<Array<{ hash: string; date: string; author: string; message: string }>>([]);
   const [historyLoaded, setHistoryLoaded] = useState(false);
   const [testResults, setTestResults] = useState<Array<{ field: string; operator: string; expected: string; passed: boolean; actual?: string }> | null>(null);
@@ -70,10 +74,14 @@ export function BlockStudio() {
 
   useEffect(() => {
     dispatch({ type: 'SET_BLOCK_STUDIO_CATALOG_LOADING', loading: true });
+    setCatalogError(null);
     void api.getBlockStudioCatalog()
       .then((catalog) => {
         dispatch({ type: 'SET_BLOCK_STUDIO_CATALOG', catalog });
         setDatabaseTree(catalog.databaseTree);
+      })
+      .catch(() => {
+        setCatalogError('Failed to load schema. Check your connection and try refreshing.');
       })
       .finally(() => dispatch({ type: 'SET_BLOCK_STUDIO_CATALOG_LOADING', loading: false }));
   }, [dispatch]);
@@ -191,8 +199,13 @@ export function BlockStudio() {
   };
 
   const handleSave = async () => {
-    if (!state.blockStudioMetadata) return;
+    // If no metadata yet (new block), open the New Block modal to collect a name
+    if (!state.blockStudioMetadata) {
+      dispatch({ type: 'OPEN_NEW_BLOCK_MODAL' });
+      return;
+    }
     setSaving(true);
+    setSaveError(null);
     try {
       const payload = await api.saveBlockStudio({
         path: state.activeBlockPath,
@@ -228,6 +241,10 @@ export function BlockStudio() {
         });
       }
       setResultTab('save');
+    } catch (err: any) {
+      const msg = err?.message ?? 'Save failed';
+      setSaveError(msg.includes('409') || msg.includes('BLOCK_EXISTS') ? 'A block with this name already exists. Rename and try again.' : msg);
+      setTimeout(() => setSaveError(null), 5000);
     } finally {
       setSaving(false);
     }
@@ -256,18 +273,33 @@ export function BlockStudio() {
 
   const ensureDbColumns = async (node: DatabaseSchemaNode) => {
     if (!node.path || node.kind !== 'table' || (node.children && node.children.length > 0)) return;
-    const columns = await api.describeTable(node.path);
-    setDatabaseTree((prev) => updateDatabaseTree(prev, node.id, {
-      ...node,
-      children: columns.map((column) => ({
-        id: `db-column:${node.path}:${column.name}`,
-        label: column.name,
-        kind: 'column' as const,
-        path: node.path,
-        type: column.type,
-      })),
-    }));
+    setLoadingDbNodes((prev) => new Set(prev).add(node.id));
+    try {
+      const columns = await api.describeTable(node.path);
+      setDatabaseTree((prev) => updateDatabaseTree(prev, node.id, {
+        ...node,
+        children: columns.map((column) => ({
+          id: `db-column:${node.path}:${column.name}`,
+          label: column.name,
+          kind: 'column' as const,
+          path: node.path,
+          type: column.type,
+        })),
+      }));
+    } finally {
+      setLoadingDbNodes((prev) => { const next = new Set(prev); next.delete(node.id); return next; });
+    }
   };
+
+  const refreshDatabaseTree = useCallback(async () => {
+    try {
+      const catalog = await api.getBlockStudioCatalog();
+      if (catalog?.databaseTree) {
+        setDatabaseTree(catalog.databaseTree);
+      }
+      dispatch({ type: 'SET_BLOCK_STUDIO_CATALOG', catalog });
+    } catch { /* non-fatal */ }
+  }, [dispatch]);
 
   const currentChart = state.blockStudioValidation?.chartConfig ?? state.blockStudioPreview?.chartConfig ?? { chart: 'table' };
 
@@ -331,7 +363,17 @@ export function BlockStudio() {
               onScroll={(event) => setScrollTop(event.currentTarget.scrollTop)}
               style={{ flex: 1, overflowY: 'auto', borderBottom: `1px solid ${t.headerBorder}`, background: t.cellBg }}
             >
-              {state.blockStudioCatalogLoading ? (
+              {catalogError ? (
+                <div style={{ padding: 16, display: 'grid', gap: 8, textAlign: 'center' }}>
+                  <div style={{ fontSize: 12, color: '#f85149', fontFamily: t.font }}>{catalogError}</div>
+                  <button
+                    onClick={() => { setCatalogError(null); void refreshDatabaseTree(); }}
+                    style={{ fontSize: 11, color: t.accent, background: `${t.accent}18`, border: 'none', borderRadius: 6, padding: '6px 12px', cursor: 'pointer', fontFamily: t.font }}
+                  >
+                    Retry
+                  </button>
+                </div>
+              ) : state.blockStudioCatalogLoading ? (
                 <EmptyPanel message="Loading semantic catalog…" />
               ) : flatSemanticRows.length === 0 ? (
                 <EmptyPanel message="No semantic objects match the current filters." />
@@ -388,6 +430,8 @@ export function BlockStudio() {
             onQueryChange={setDatabaseQuery}
             stats={databaseStats}
             connectionName={state.blockStudioCatalog?.connection.current ?? 'default'}
+            loadingNodes={loadingDbNodes}
+            onRefresh={refreshDatabaseTree}
             t={t}
           />
         )}
@@ -406,6 +450,11 @@ export function BlockStudio() {
           <TemplateButton label="Custom Skeleton" onClick={() => handleDraftChange(buildCustomSkeleton(state.blockStudioMetadata?.name ?? 'New Block'))} />
           <TemplateButton label="Run" onClick={() => void handleRun()} busy={running} />
           <TemplateButton label="Save" onClick={() => void handleSave()} busy={saving} />
+          {saveError && (
+            <span style={{ fontSize: 11, color: '#f85149', fontFamily: t.font, padding: '4px 8px', background: '#f8514918', borderRadius: 6 }}>
+              {saveError}
+            </span>
+          )}
         </div>
         <div style={{ flex: 1, overflow: 'hidden' }}>
           <SQLCellEditor
@@ -927,6 +976,8 @@ function DatabaseExplorer({
   onQueryChange,
   stats,
   connectionName,
+  loadingNodes,
+  onRefresh,
   t,
 }: {
   tree: DatabaseSchemaNode[];
@@ -939,6 +990,8 @@ function DatabaseExplorer({
   onQueryChange: (value: string) => void;
   stats: { schemas: number; tables: number; columns: number };
   connectionName: string;
+  loadingNodes: Set<string>;
+  onRefresh: () => void;
   t: Theme;
 }) {
   const inputStyle: React.CSSProperties = {
@@ -957,15 +1010,21 @@ function DatabaseExplorer({
   const renderNode = (node: DatabaseSchemaNode, depth: number = 0): React.ReactNode => {
     const hasChildren = node.kind !== 'column';
     const isExpanded = expanded[node.id] ?? depth < 1;
+    const isLoading = loadingNodes.has(node.id);
     const childCount = node.kind === 'schema'
       ? node.children?.length
       : node.kind === 'table'
         ? node.children?.length
         : undefined;
+
+    // Color-coded badge for column types
+    const badgeText = node.kind === 'column' ? node.type : node.kind;
+    const badgeColor = node.kind === 'column' && node.type ? getTypeColor(node.type, t.accent) : undefined;
+
     return (
       <div key={node.id}>
         <TreeRow
-          label={node.label}
+          label={isLoading ? `${node.label} …` : node.label}
           depth={depth}
           count={childCount}
           expanded={hasChildren ? isExpanded : undefined}
@@ -973,10 +1032,15 @@ function DatabaseExplorer({
             setExpanded((prev) => ({ ...prev, [node.id]: !isExpanded }));
             if (!isExpanded) void onEnsureColumns(node);
           } : undefined}
-          badge={node.kind === 'column' ? node.type : node.kind}
+          badge={badgeText}
+          badgeColor={badgeColor}
           onClick={() => {
             if (node.kind === 'table' && node.path) onInsert(node.path);
-            if (node.kind === 'column') onInsert(node.label);
+            // Qualified column insert: table.column instead of bare column
+            if (node.kind === 'column') {
+              const tableName = node.path ? node.path.split('.').pop() : '';
+              onInsert(tableName ? `${tableName}.${node.label}` : node.label);
+            }
           }}
           onDoubleClick={() => {
             if (node.kind === 'table' && node.path) onInsert(`SELECT *\nFROM ${node.path}\nLIMIT 100`);
@@ -998,9 +1062,21 @@ function DatabaseExplorer({
               Browse the active connection, inspect schemas and columns, then insert tables or starter queries into the block.
             </div>
           </div>
-          <span style={{ fontSize: 10, fontWeight: 700, color: t.accent, background: `${t.accent}18`, borderRadius: 999, padding: '5px 9px', textTransform: 'uppercase', letterSpacing: '0.04em' }}>
-            {connectionName}
-          </span>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+            <button
+              onClick={onRefresh}
+              title="Refresh schema"
+              style={{
+                background: 'none', border: 'none', cursor: 'pointer', padding: 4, borderRadius: 6,
+                color: t.textMuted, fontSize: 14, lineHeight: 1,
+              }}
+            >
+              ↻
+            </button>
+            <span style={{ fontSize: 10, fontWeight: 700, color: t.accent, background: `${t.accent}18`, borderRadius: 999, padding: '5px 9px', textTransform: 'uppercase', letterSpacing: '0.04em' }}>
+              {connectionName}
+            </span>
+          </div>
         </div>
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, minmax(0, 1fr))', gap: 8 }}>
           <StudioStatCard label="Schemas" value={stats.schemas} t={t} />

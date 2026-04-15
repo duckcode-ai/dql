@@ -169,6 +169,13 @@ export function ConnectionPanel() {
       setTimeout(() => setSaveMsg(null), 2000);
       setEditing(null);
       setAddingNew(false);
+      // Re-test the hot-swapped connection and refresh schema
+      try {
+        setTesting(true);
+        const result = await api.testConnection();
+        setTestResult(result);
+      } catch { /* non-fatal */ }
+      finally { setTesting(false); }
     } catch (e: any) {
       setSaveMsg(`Error: ${e.message}`);
     } finally {
