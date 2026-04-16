@@ -718,38 +718,60 @@ function buildManifestLineage(
     table: d.table,
   }));
 
+  // Pre-build a map of table name → block names that query that table.
+  // Used to resolve "which blocks feed into a notebook" when a notebook
+  // references a table directly rather than via ref().
+  const tableToBlocks = new Map<string, string[]>();
+  for (const block of Object.values(blocks)) {
+    for (const table of block.tableDependencies) {
+      const key = table.toLowerCase();
+      if (!tableToBlocks.has(key)) tableToBlocks.set(key, []);
+      tableToBlocks.get(key)!.push(block.name);
+    }
+  }
+
   const dashboards: LineageDashboardInput[] = Object.values(notebooks ?? {}).map((notebook) => {
-    const blockNames = notebook.cells
+    // Blocks declared inline inside this notebook (DQL cells with block declarations)
+    const inlineBlockNames = notebook.cells
       .map((cell) => cell.blockName)
       .filter((name): name is string => Boolean(name));
-    const blockNameSet = new Set(blockNames);
+    const inlineBlockSet = new Set(inlineBlockNames);
 
-    // Collect ref() dependencies from all cells (not just block-declaring cells)
+    // Blocks explicitly ref()-ed from notebook SQL cells
     const refDeps = new Set<string>();
-    const tableDeps = new Set<string>();
     for (const cell of notebook.cells) {
       for (const ref of cell.refDependencies ?? []) {
-        if (!blockNameSet.has(ref)) refDeps.add(ref);
+        if (!inlineBlockSet.has(ref) && blocks[ref]) refDeps.add(ref);
       }
-      // Only collect table deps from cells that don't declare a block
-      // (block-declaring cells have their own lineage edges)
-      if (!cell.blockName) {
-        for (const table of cell.tableDependencies ?? []) {
-          tableDeps.add(table);
+    }
+
+    // Blocks whose output tables are directly queried by this notebook's SQL cells.
+    // e.g. a notebook queries fct_orders and there is a block "Monthly Revenue" that
+    // also queries fct_orders — link them so the flow is block → dashboard not
+    // dbt_model → dashboard.
+    const tableMatchedBlocks = new Set<string>();
+    for (const cell of notebook.cells) {
+      if (cell.blockName) continue; // skip block-declaring cells (already handled above)
+      for (const table of cell.tableDependencies ?? []) {
+        for (const blockName of tableToBlocks.get(table.toLowerCase()) ?? []) {
+          if (!inlineBlockSet.has(blockName)) tableMatchedBlocks.add(blockName);
         }
       }
     }
 
+    // Combine: inline declarations + explicit refs + table-matched standalone blocks
+    const allBlocks = [...inlineBlockNames, ...refDeps, ...tableMatchedBlocks];
+
     return {
       name: notebook.title,
       filePath: notebook.filePath,
-      blocks: blockNames,
+      blocks: allBlocks,
       charts: notebook.cells
         .filter((cell) => cell.chartType && cell.blockName)
         .map((cell) => cell.blockName!)
         .filter(Boolean),
-      refDependencies: [...refDeps],
-      tableDependencies: [...tableDeps],
+      refDependencies: [],       // already merged into blocks above
+      tableDependencies: [],     // intentionally empty — no dbt_model → dashboard shortcuts
     };
   });
 
