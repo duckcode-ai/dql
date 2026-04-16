@@ -181,10 +181,16 @@ export interface ManifestDbtImport {
   manifestPath: string;
   /** dbt project name */
   projectName?: string;
-  /** Number of models imported */
+  /** Number of models imported (in the selected subgraph) */
   modelsImported: number;
-  /** Number of sources imported */
+  /** Number of sources imported (in the selected subgraph) */
   sourcesImported: number;
+  /** Total models in the dbt manifest (before selective filtering) */
+  totalDbtModels?: number;
+  /** Whether selective import was applied (only relevant upstream subgraph imported) */
+  selective?: boolean;
+  /** Max upstream hops used for selective import (undefined = unlimited) */
+  maxHops?: number;
   /** Timestamp of import */
   importedAt: string;
   /** Imported dbt DAG metadata */

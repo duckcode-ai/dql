@@ -41,6 +41,18 @@ export interface ManifestBuildOptions {
   dqlVersion?: string;
   /** Path to dbt manifest.json for import */
   dbtManifestPath?: string;
+  /**
+   * Max upstream hops to follow through the dbt DAG from DQL anchor tables.
+   * undefined = follow all the way to raw sources (default).
+   * 3 = stop 3 hops above the anchor tables.
+   * Useful for very large dbt projects to limit imported node count.
+   */
+  maxDbtHops?: number;
+  /**
+   * Total model threshold above which selective import is always used.
+   * Defaults to 200. Projects with fewer models import everything.
+   */
+  selectiveDbtThreshold?: number;
   /** Additional directories to scan for .dql files */
   extraBlockDirs?: string[];
   /** Additional directories to scan for .dqlnb files */
@@ -75,10 +87,27 @@ export function buildManifest(options: ManifestBuildOptions): DQLManifest {
   // Collect all source tables
   const sources = collectSources(blocks, notebooks, metrics, dimensions);
 
+  // Collect all table names DQL actually references — these are the "anchors"
+  // from which we walk upstream through the dbt DAG.
+  const referencedTables = new Set<string>();
+  for (const block of Object.values(blocks)) {
+    for (const t of block.tableDependencies) referencedTables.add(t.toLowerCase());
+  }
+  for (const nb of Object.values(notebooks)) {
+    for (const cell of nb.cells) {
+      for (const t of cell.tableDependencies) referencedTables.add(t.toLowerCase());
+    }
+  }
+  for (const m of Object.values(metrics)) referencedTables.add(m.table.toLowerCase());
+  for (const d of Object.values(dimensions)) referencedTables.add(d.table.toLowerCase());
+
   // Import dbt manifest if provided
   let dbtImport: ManifestDbtImport | undefined;
   if (options.dbtManifestPath) {
-    dbtImport = importDbtManifest(options.dbtManifestPath, sources);
+    dbtImport = importDbtManifest(options.dbtManifestPath, sources, referencedTables, {
+      maxHops: options.maxDbtHops,
+      selectiveThreshold: options.selectiveDbtThreshold ?? 200,
+    });
   }
 
   // Build lineage
@@ -443,110 +472,195 @@ function collectSources(
 
 // ---- dbt Manifest Import ----
 
+interface DbtImportOptions {
+  /** Max upstream hops from anchor tables. undefined = unlimited (follow to raw sources). */
+  maxHops?: number;
+  /** Auto-enable selective import when total model count exceeds this. Default: 200. */
+  selectiveThreshold?: number;
+}
+
+/**
+ * Lightweight index entry built from the raw dbt manifest.
+ * Kept small — only the fields needed for the BFS traversal and final import.
+ */
+interface DbtIndexEntry {
+  uniqueId: string;
+  name: string;          // alias ?? name
+  type: 'model' | 'source';
+  schema?: string;
+  database?: string;
+  dependsOn: string[];   // upstream uniqueIds
+  /** Normalised lookup names (name, schema.name, db.schema.name) */
+  lookupKeys: string[];
+  raw: any;              // reference to the original manifest node
+}
+
 function importDbtManifest(
   manifestPath: string,
   sources: Record<string, ManifestSource>,
+  referencedTables: Set<string>,
+  opts: DbtImportOptions = {},
 ): ManifestDbtImport {
   const raw = readFileSync(manifestPath, 'utf-8');
   const manifest = JSON.parse(raw);
-
-  let modelsImported = 0;
-  let sourcesImported = 0;
   const projectName = manifest.metadata?.project_name;
-  const dbtDagModels: NonNullable<ManifestDbtImport['dbtDag']>['models'] = [];
-  const dbtDagEdges: NonNullable<ManifestDbtImport['dbtDag']>['edges'] = [];
 
-  // Import models as source tables
-  const nodes = manifest.nodes ?? {};
-  for (const [uniqueId, node] of Object.entries(nodes) as [string, any][]) {
+  // ── Step 1: Build a lightweight index of every model + source ──────────────
+  const index = new Map<string, DbtIndexEntry>();
+
+  const rawNodes: Record<string, any> = manifest.nodes ?? {};
+  for (const [uniqueId, node] of Object.entries(rawNodes)) {
     if (node.resource_type !== 'model') continue;
+    const name = (node.alias ?? node.name) as string;
+    if (!name) continue;
+    const schema: string | undefined = node.schema;
+    const database: string | undefined = node.database;
+    const dependsOn: string[] = Array.isArray(node.depends_on?.nodes) ? node.depends_on.nodes : [];
+    const lookupKeys = buildLookupKeys(name, schema, database);
+    index.set(uniqueId, { uniqueId, name, type: 'model', schema, database, dependsOn, lookupKeys, raw: node });
+  }
 
-    const tableName = node.alias ?? node.name;
-    if (!tableName) continue;
+  const rawSources: Record<string, any> = manifest.sources ?? {};
+  for (const [uniqueId, src] of Object.entries(rawSources)) {
+    const name = (src.identifier ?? src.name) as string;
+    if (!name) continue;
+    const schema: string | undefined = src.schema;
+    const database: string | undefined = src.database;
+    const lookupKeys = buildLookupKeys(name, schema, database);
+    index.set(uniqueId, { uniqueId, name, type: 'source', schema, database, dependsOn: [], lookupKeys, raw: src });
+  }
 
-    // Create or update source entry
-    const columns = node.columns
-      ? Object.values(node.columns as Record<string, any>).map((value: any) => ({
-          name: value.name,
-          description: value.description,
-          type: value.data_type,
-        }))
-      : undefined;
+  const totalDbtModels = [...index.values()].filter((e) => e.type === 'model').length;
+  const useSelective = totalDbtModels > (opts.selectiveThreshold ?? 200) || referencedTables.size > 0;
 
-    if (!sources[tableName]) {
-      sources[tableName] = {
-        name: tableName,
-        origin: 'dbt',
-        referencedBy: [],
-      };
-      sourcesImported++;
+  // ── Step 2: Determine which nodes to import ────────────────────────────────
+  let selectedIds: Set<string>;
+
+  if (!useSelective) {
+    // Small project: import everything (original behaviour)
+    selectedIds = new Set(index.keys());
+  } else {
+    // Large project or explicit references: selective BFS upstream from anchors
+
+    // Build reverse lookup: normalised name → uniqueId
+    const nameToId = new Map<string, string>();
+    for (const entry of index.values()) {
+      for (const key of entry.lookupKeys) {
+        nameToId.set(key, entry.uniqueId);
+      }
     }
 
-    sources[tableName].dbtModel = {
-      uniqueId,
-      database: node.database,
-      schema: node.schema,
-      materializedAs: node.config?.materialized,
-      description: node.description,
-      columns: node.columns
-        ? Object.fromEntries(
-            Object.entries(node.columns as Record<string, any>).map(([k, v]: [string, any]) => [
-              k,
-              { name: v.name, description: v.description, type: v.data_type },
-            ]),
-          )
-        : undefined,
-    };
-    if (sources[tableName].origin === 'sql') {
-      sources[tableName].origin = 'dbt';
+    // Find anchor uniqueIds — dbt models whose name matches a DQL-referenced table
+    const anchors = new Set<string>();
+    for (const tableName of referencedTables) {
+      const uid = nameToId.get(tableName);
+      if (uid) anchors.add(uid);
     }
-    modelsImported++;
-    const dependsOn = Array.isArray(node.depends_on?.nodes) ? node.depends_on.nodes : [];
-    dbtDagModels.push({
-      uniqueId,
-      name: tableName,
-      type: 'model',
-      dependsOn,
-      columns,
-      schema: node.schema,
-      database: node.database,
-      materialized: node.config?.materialized,
-      description: node.description,
-    });
-    for (const dependency of dependsOn) {
-      dbtDagEdges.push({ source: dependency, target: uniqueId });
+
+    // BFS upstream through depends_on edges
+    selectedIds = new Set<string>(anchors);
+    let frontier = [...anchors];
+    let hop = 0;
+
+    while (frontier.length > 0 && (opts.maxHops === undefined || hop < opts.maxHops)) {
+      const next: string[] = [];
+      for (const uid of frontier) {
+        const entry = index.get(uid);
+        for (const dep of entry?.dependsOn ?? []) {
+          if (!selectedIds.has(dep) && index.has(dep)) {
+            selectedIds.add(dep);
+            next.push(dep);
+          }
+        }
+      }
+      frontier = next;
+      hop++;
     }
   }
 
-  // Import dbt sources
-  const dbtSources = manifest.sources ?? {};
-  for (const [uniqueId, src] of Object.entries(dbtSources) as [string, any][]) {
-    const tableName = src.identifier ?? src.name;
-    if (!tableName) continue;
+  // ── Step 3: Emit only selected nodes ──────────────────────────────────────
+  let modelsImported = 0;
+  let sourcesImported = 0;
+  const dbtDagModels: NonNullable<ManifestDbtImport['dbtDag']>['models'] = [];
+  const dbtDagEdges: NonNullable<ManifestDbtImport['dbtDag']>['edges'] = [];
 
-    if (!sources[tableName]) {
-      sources[tableName] = {
-        name: tableName,
-        origin: 'dbt',
-        referencedBy: [],
+  for (const uid of selectedIds) {
+    const entry = index.get(uid);
+    if (!entry) continue;
+
+    if (entry.type === 'model') {
+      const node = entry.raw;
+      const tableName = entry.name;
+      const columns = node.columns
+        ? Object.values(node.columns as Record<string, any>).map((v: any) => ({
+            name: v.name,
+            description: v.description,
+            type: v.data_type,
+          }))
+        : undefined;
+
+      if (!sources[tableName]) {
+        sources[tableName] = { name: tableName, origin: 'dbt', referencedBy: [] };
+      }
+      sources[tableName].dbtModel = {
+        uniqueId: uid,
+        database: entry.database,
+        schema: entry.schema,
+        materializedAs: node.config?.materialized,
+        description: node.description,
+        columns: node.columns
+          ? Object.fromEntries(
+              Object.entries(node.columns as Record<string, any>).map(([k, v]: [string, any]) => [
+                k,
+                { name: v.name, description: v.description, type: v.data_type },
+              ]),
+            )
+          : undefined,
       };
+      if (sources[tableName].origin === 'sql') sources[tableName].origin = 'dbt';
+
+      // Only include edges where both endpoints are in the selected set
+      const selectedDeps = entry.dependsOn.filter((dep) => selectedIds.has(dep));
+      dbtDagModels.push({
+        uniqueId: uid,
+        name: tableName,
+        type: 'model',
+        dependsOn: selectedDeps,
+        columns,
+        schema: entry.schema,
+        database: entry.database,
+        materialized: node.config?.materialized,
+        description: node.description,
+      });
+      for (const dep of selectedDeps) {
+        dbtDagEdges.push({ source: dep, target: uid });
+      }
+      modelsImported++;
+
+    } else {
+      // source
+      const src = entry.raw;
+      const tableName = entry.name;
+      if (!sources[tableName]) {
+        sources[tableName] = { name: tableName, origin: 'dbt', referencedBy: [] };
+      }
+      sources[tableName].dbtModel = {
+        uniqueId: uid,
+        database: entry.database,
+        schema: entry.schema,
+        description: src.description,
+      };
+      dbtDagModels.push({
+        uniqueId: uid,
+        name: tableName,
+        type: 'source',
+        dependsOn: [],
+        schema: entry.schema,
+        database: entry.database,
+        description: src.description,
+      });
+      sourcesImported++;
     }
-    sources[tableName].dbtModel = {
-      uniqueId,
-      database: src.database,
-      schema: src.schema,
-      description: src.description,
-    };
-    sourcesImported++;
-    dbtDagModels.push({
-      uniqueId,
-      name: tableName,
-      type: 'source',
-      dependsOn: [],
-      schema: src.schema,
-      database: src.database,
-      description: src.description,
-    });
   }
 
   return {
@@ -554,12 +668,20 @@ function importDbtManifest(
     projectName,
     modelsImported,
     sourcesImported,
+    totalDbtModels,
+    selective: useSelective,
+    maxHops: opts.maxHops,
     importedAt: new Date().toISOString(),
-    dbtDag: {
-      models: dbtDagModels,
-      edges: dbtDagEdges,
-    },
+    dbtDag: { models: dbtDagModels, edges: dbtDagEdges },
   };
+}
+
+/** Build all normalised lookup keys for a dbt node name. */
+function buildLookupKeys(name: string, schema?: string, database?: string): string[] {
+  const keys = [name.toLowerCase()];
+  if (schema) keys.push(`${schema}.${name}`.toLowerCase());
+  if (schema && database) keys.push(`${database}.${schema}.${name}`.toLowerCase());
+  return keys;
 }
 
 // ---- Lineage Builder ----
