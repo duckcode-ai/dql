@@ -333,15 +333,11 @@ export function buildLineageGraph(
         type: 'contains',
       });
     }
-    // Add edges for tables referenced in notebook SQL cells
-    for (const table of dashboard.tableDependencies ?? []) {
-      const tableNodeId = ensureTableNode(graph, table, dbtNodeMap);
-      graph.addEdge({
-        source: tableNodeId,
-        target: dashboardId,
-        type: 'reads_from',
-      });
-    }
+    // NOTE: We intentionally do NOT create table/dbt_model → dashboard edges
+    // from raw notebook SQL cells. The correct flow is always:
+    //   dbt_source → dbt_model → block → dashboard
+    // Raw SQL in notebook cells that aren't block declarations are exploratory
+    // queries — they don't represent a formal lineage path.
   }
 
   // 5. Add domain nodes and connect
