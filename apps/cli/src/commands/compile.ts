@@ -7,8 +7,14 @@
  * Usage:
  *   dql compile [path]                        Compile project at path (default: .)
  *   dql compile --dbt-manifest <path>         Import dbt manifest.json as upstream
+ *   dql compile --dbt-hops <n>               Limit upstream dbt hops (default: unlimited)
  *   dql compile --out-dir <dir>               Write manifest to a specific directory
  *   dql compile --format json                 Output manifest to stdout (no file write)
+ *
+ * Selective dbt import (automatic for projects > 200 models):
+ *   Only imports the dbt models/sources that are reachable upstream from the
+ *   tables your DQL blocks actually reference. This keeps dql-manifest.json
+ *   small and fast even in 4000+ model repos.
  */
 
 import { writeFileSync, existsSync, readFileSync } from 'node:fs';
@@ -34,6 +40,14 @@ export async function runCompile(
       process.exitCode = 1;
       return;
     }
+  }
+
+  // Parse --dbt-hops flag (max upstream hops for selective import)
+  let maxDbtHops: number | undefined;
+  const hopsIdx = allArgs.indexOf('--dbt-hops');
+  if (hopsIdx >= 0 && allArgs[hopsIdx + 1]) {
+    const parsed = parseInt(allArgs[hopsIdx + 1], 10);
+    if (!isNaN(parsed) && parsed > 0) maxDbtHops = parsed;
   }
 
   // Determine project root — first non-flag positional arg, or cwd
@@ -76,6 +90,7 @@ export async function runCompile(
       projectRoot,
       dqlVersion,
       dbtManifestPath,
+      maxDbtHops,
     });
   } catch (err) {
     console.error(`Failed to compile project: ${err instanceof Error ? err.message : String(err)}`);
@@ -123,9 +138,17 @@ export async function runCompile(
   }
 
   if (manifest.dbtImport) {
+    const dbt = manifest.dbtImport;
     console.log(`\n  dbt Import:`);
-    console.log(`    ${manifest.dbtImport.modelsImported} model(s), ${manifest.dbtImport.sourcesImported} source(s)`);
-    console.log(`    from: ${manifest.dbtImport.manifestPath}`);
+    if (dbt.selective && dbt.totalDbtModels !== undefined && dbt.totalDbtModels > dbt.modelsImported) {
+      console.log(`    ${dbt.modelsImported} of ${dbt.totalDbtModels} model(s) (selective — upstream of DQL blocks only)`);
+      if (dbt.maxHops !== undefined) {
+        console.log(`    depth: ${dbt.maxHops} hop(s) upstream`);
+      }
+    } else {
+      console.log(`    ${dbt.modelsImported} model(s), ${dbt.sourcesImported} source(s)`);
+    }
+    console.log(`    from: ${dbt.manifestPath}`);
   }
 
   console.log(`\n  Manifest written to: ${manifestPath}`);
