@@ -59,6 +59,14 @@ export async function runCompile(
     }
   } catch { /* use default */ }
 
+  // Auto-detect dbt manifest if not explicitly provided
+  if (!dbtManifestPath) {
+    const defaultDbtPath = join(projectRoot, 'target', 'manifest.json');
+    if (existsSync(defaultDbtPath)) {
+      dbtManifestPath = defaultDbtPath;
+    }
+  }
+
   // Build manifest
   const startTime = Date.now();
   let manifest: DQLManifest;

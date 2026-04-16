@@ -157,11 +157,13 @@ export interface ManifestLineageNode {
   id: string;
   type: string;
   name: string;
+  layer?: string;
   domain?: string;
   owner?: string;
   status?: string;
   filePath?: string;
   columns?: Array<{ name: string; type?: string; description?: string }>;
+  metadata?: Record<string, unknown>;
 }
 
 export interface ManifestLineageEdge {
