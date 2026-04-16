@@ -9,7 +9,7 @@ import {
   hoverTooltip,
 } from '@codemirror/view';
 import { EditorState, Compartment, StateField, StateEffect } from '@codemirror/state';
-import { defaultKeymap, indentWithTab, toggleComment, historyKeymap } from '@codemirror/commands';
+import { defaultKeymap, indentWithTab, toggleComment, historyKeymap, history, undo, redo } from '@codemirror/commands';
 import { sql } from '@codemirror/lang-sql';
 import { oneDark } from '@codemirror/theme-one-dark';
 import {
@@ -38,6 +38,12 @@ import {
 } from '../../editor/semantic-completions';
 import { api } from '../../api/client';
 
+export interface SQLCellEditorHandle {
+  undo: () => void;
+  redo: () => void;
+  resetTo: (value: string) => void;
+}
+
 interface SQLCellEditorProps {
   value: string;
   onChange: (value: string) => void;
@@ -46,6 +52,7 @@ interface SQLCellEditorProps {
   autoFocus?: boolean;
   schema?: Record<string, string[]>;
   errorMessage?: string;
+  editorRef?: React.RefObject<SQLCellEditorHandle | null>;
 }
 
 /**
@@ -222,6 +229,7 @@ export function SQLCellEditor({
   autoFocus,
   schema,
   errorMessage,
+  editorRef,
 }: SQLCellEditorProps) {
   const t = themes[themeMode];
   const containerRef = useRef<HTMLDivElement>(null);
@@ -233,6 +241,22 @@ export function SQLCellEditor({
   const schemaCompartment = useRef(new Compartment());
   onRunRef.current = onRun;
   onChangeRef.current = onChange;
+
+  // Expose imperative handle for undo/redo/reset
+  useEffect(() => {
+    if (!editorRef) return;
+    (editorRef as React.MutableRefObject<SQLCellEditorHandle | null>).current = {
+      undo: () => { if (viewRef.current) undo(viewRef.current); },
+      redo: () => { if (viewRef.current) redo(viewRef.current); },
+      resetTo: (newValue: string) => {
+        const view = viewRef.current;
+        if (!view) return;
+        view.dispatch({
+          changes: { from: 0, to: view.state.doc.length, insert: newValue },
+        });
+      },
+    };
+  });
 
   // Create editor once per themeMode change only (NOT when schema changes)
   useEffect(() => {
@@ -307,6 +331,8 @@ export function SQLCellEditor({
       // Language wrapped in compartment for hot-swapping schema
       schemaCompartment.current.of(initialSqlLang),
       autocompletion({ closeOnBlur: false, override: [semanticCompletionSource] }),
+      // Undo/redo history — history() provides the state machine, historyKeymap binds Cmd+Z / Cmd+Shift+Z
+      history(),
       // Developer experience extensions
       bracketMatching(),
       closeBrackets(),
