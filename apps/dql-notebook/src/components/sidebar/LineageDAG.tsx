@@ -46,10 +46,18 @@ const TYPE_LABELS: Record<string, string> = {
 };
 
 type LayoutMode = 'flow' | 'layered';
+type Direction = 'LR' | 'TB';
 
-function layoutGraph(nodes: Node[], edges: Edge[], mode: LayoutMode = 'flow') {
+function layoutGraph(nodes: Node[], edges: Edge[], mode: LayoutMode = 'flow', direction: Direction = 'LR') {
   const graph = new Dagre.graphlib.Graph().setDefaultEdgeLabel(() => ({}));
-  graph.setGraph({ rankdir: 'LR', ranksep: mode === 'layered' ? 100 : 80, nodesep: 40, marginx: 32, marginy: 32 });
+  const isHorizontal = direction === 'LR';
+  graph.setGraph({
+    rankdir: direction,
+    ranksep: mode === 'layered' ? 120 : (isHorizontal ? 80 : 60),
+    nodesep: isHorizontal ? 40 : 50,
+    marginx: 32,
+    marginy: 32,
+  });
 
   for (const node of nodes) {
     const opts: Record<string, unknown> = { width: 190, height: 58 };
@@ -71,6 +79,7 @@ function layoutGraph(nodes: Node[], edges: Edge[], mode: LayoutMode = 'flow') {
     return {
       ...node,
       position: { x: position.x - 95, y: position.y - 29 },
+      data: { ...node.data, direction },
     };
   });
 }
@@ -79,6 +88,9 @@ function DagNode({ data, selected }: NodeProps) {
   const nodeType = data.nodeType as string;
   const color = NODE_TYPE_COLORS[nodeType] ?? '#8b949e';
   const label = TYPE_LABELS[nodeType] ?? nodeType.toUpperCase();
+  const direction = (data.direction as Direction) ?? 'LR';
+  const targetPos = direction === 'LR' ? Position.Left : Position.Top;
+  const sourcePos = direction === 'LR' ? Position.Right : Position.Bottom;
   return (
     <div
       style={{
@@ -91,9 +103,9 @@ function DagNode({ data, selected }: NodeProps) {
         boxShadow: selected ? '0 0 0 1px rgba(88, 166, 255, 0.2)' : 'none',
       }}
     >
-      <Handle type="target" position={Position.Left} style={{ width: 7, height: 7, background: color, border: 'none' }} />
-        <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 4 }}>
-          <span
+      <Handle type="target" position={targetPos} style={{ width: 7, height: 7, background: color, border: 'none' }} />
+      <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 4 }}>
+        <span
           style={{
             fontSize: 9,
             fontWeight: 700,
@@ -128,7 +140,7 @@ function DagNode({ data, selected }: NodeProps) {
       <div style={{ color: '#8b949e', fontSize: 10, marginTop: 3 }}>
         {TYPE_TITLES[nodeType] ?? nodeType}
       </div>
-      <Handle type="source" position={Position.Right} style={{ width: 7, height: 7, background: color, border: 'none' }} />
+      <Handle type="source" position={sourcePos} style={{ width: 7, height: 7, background: color, border: 'none' }} />
     </div>
   );
 }
@@ -185,6 +197,7 @@ export function LineageDAG() {
     domain: true,
   });
   const [layoutMode, setLayoutMode] = useState<LayoutMode>('flow');
+  const [direction, setDirection] = useState<Direction>('LR');
 
   const [rfNodes, setRfNodes, onNodesChange] = useNodesState<Node>([]);
   const [rfEdges, setRfEdges, onEdgesChange] = useEdgesState<Edge>([]);
@@ -257,9 +270,9 @@ export function LineageDAG() {
       },
     }));
 
-    setRfNodes(layoutGraph(nodes, edges, layoutMode));
+    setRfNodes(layoutGraph(nodes, edges, layoutMode, direction));
     setRfEdges(edges);
-  }, [filteredGraph, layoutMode, setRfEdges, setRfNodes]);
+  }, [filteredGraph, layoutMode, direction, setRfEdges, setRfNodes]);
 
   const focusNode = useCallback(async (nodeId: string) => {
     const result = await api.queryLineage({ focus: nodeId });
@@ -307,7 +320,8 @@ export function LineageDAG() {
       <div style={{ padding: 8, borderBottom: `1px solid ${t.headerBorder}`, background: t.sidebarBg }}>
         {/* Layout toggle + type filters */}
         <div style={{ display: 'flex', gap: 6, marginBottom: 8, flexWrap: 'wrap', alignItems: 'center' }}>
-          <div style={{ display: 'flex', borderRadius: 6, border: `1px solid ${t.headerBorder}`, overflow: 'hidden', marginRight: 4 }}>
+          {/* Layout mode toggle */}
+          <div style={{ display: 'flex', borderRadius: 6, border: `1px solid ${t.headerBorder}`, overflow: 'hidden' }}>
             <button
               onClick={() => setLayoutMode('flow')}
               style={{
@@ -336,6 +350,60 @@ export function LineageDAG() {
               }}
             >
               Layered
+            </button>
+          </div>
+          {/* Direction toggle — Horizontal (LR) vs Vertical (TB) */}
+          <div style={{ display: 'flex', borderRadius: 6, border: `1px solid ${t.headerBorder}`, overflow: 'hidden', marginRight: 4 }}>
+            <button
+              title="Horizontal layout (left → right)"
+              onClick={() => setDirection('LR')}
+              style={{
+                padding: '4px 8px',
+                fontSize: 10,
+                fontWeight: 700,
+                border: 'none',
+                cursor: 'pointer',
+                background: direction === 'LR' ? '#30363d' : 'transparent',
+                color: direction === 'LR' ? '#e6edf3' : '#8b949e',
+                display: 'flex',
+                alignItems: 'center',
+                gap: 3,
+              }}
+            >
+              {/* →→ horizontal icon */}
+              <svg width="14" height="10" viewBox="0 0 14 10" fill="none">
+                <rect x="0" y="2" width="4" height="6" rx="1" fill="currentColor" opacity="0.7"/>
+                <line x1="4" y1="5" x2="10" y2="5" stroke="currentColor" strokeWidth="1.2"/>
+                <path d="M9 3l2 2-2 2" stroke="currentColor" strokeWidth="1.2" fill="none"/>
+                <rect x="10" y="2" width="4" height="6" rx="1" fill="currentColor"/>
+              </svg>
+              LR
+            </button>
+            <button
+              title="Vertical layout (top → bottom)"
+              onClick={() => setDirection('TB')}
+              style={{
+                padding: '4px 8px',
+                fontSize: 10,
+                fontWeight: 700,
+                border: 'none',
+                borderLeft: `1px solid ${t.headerBorder}`,
+                cursor: 'pointer',
+                background: direction === 'TB' ? '#30363d' : 'transparent',
+                color: direction === 'TB' ? '#e6edf3' : '#8b949e',
+                display: 'flex',
+                alignItems: 'center',
+                gap: 3,
+              }}
+            >
+              {/* ↓ vertical icon */}
+              <svg width="10" height="14" viewBox="0 0 10 14" fill="none">
+                <rect x="2" y="0" width="6" height="4" rx="1" fill="currentColor" opacity="0.7"/>
+                <line x1="5" y1="4" x2="5" y2="10" stroke="currentColor" strokeWidth="1.2"/>
+                <path d="M3 9l2 2 2-2" stroke="currentColor" strokeWidth="1.2" fill="none"/>
+                <rect x="2" y="10" width="6" height="4" rx="1" fill="currentColor"/>
+              </svg>
+              TB
             </button>
           </div>
           <FilterChip label="Tables" active={visibleTypes.source_table} color={NODE_TYPE_COLORS.source_table} onClick={() => setVisibleTypes((current) => ({ ...current, source_table: !current.source_table }))} />

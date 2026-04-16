@@ -10,6 +10,7 @@ import {
   type CompletePathResult,
 } from '../lineage/lineage-constants';
 import { LineagePathBreadcrumb } from '../lineage/LineagePathBreadcrumb';
+import { MiniLineageGraph } from '../lineage/MiniLineageGraph';
 
 /** Extract a block name from DQL cell content: block "name" { ... } */
 function extractBlockName(content: string): string | null {
@@ -90,8 +91,9 @@ interface CellLineageProps {
 export function CellLineage({ cellContent, cellType, cellName, themeMode, t, onFocusNode }: CellLineageProps) {
   const [expanded, setExpanded] = useState(false);
   const [loading, setLoading] = useState(false);
-  const [ancestors, setAncestors] = useState<LineageNode[]>([]);
-  const [descendants, setDescendants] = useState<LineageNode[]>([]);
+  const [graphNodes, setGraphNodes] = useState<LineageNode[]>([]);
+  const [graphEdges, setGraphEdges] = useState<any[]>([]);
+  const [focalNodeId, setFocalNodeId] = useState<string | undefined>();
   const [tables, setTables] = useState<string[]>([]);
   const [semanticRefs, setSemanticRefs] = useState<{ metrics: string[]; dimensions: string[] }>({ metrics: [], dimensions: [] });
   const [pathResult, setPathResult] = useState<CompletePathResult | null>(null);
@@ -112,27 +114,32 @@ export function CellLineage({ cellContent, cellType, cellName, themeMode, t, onF
       setTables(sqlTables);
       setSemanticRefs(extractSemanticRefs(cellContent));
 
-      // Fetch block-level lineage from API
       if (lookupName) {
-        const [data, paths] = await Promise.all([
-          api.fetchBlockLineage(lookupName),
-          api.fetchLineagePaths(`block:${lookupName}`),
+        const nodeId = `block:${lookupName}`;
+        setFocalNodeId(nodeId);
+
+        // Parallel fetch: focused subgraph + complete paths
+        const [graphResult, paths] = await Promise.all([
+          api.queryLineage({ focus: nodeId }),
+          api.fetchLineagePaths(nodeId),
         ]);
-        if (data) {
-          setAncestors(data.ancestors ?? []);
-          setDescendants(data.descendants ?? []);
+
+        if (graphResult?.graph) {
+          setGraphNodes(graphResult.graph.nodes ?? []);
+          setGraphEdges(graphResult.graph.edges ?? []);
         }
         if (paths) {
           setPathResult(paths);
         }
       } else {
-        // For unnamed SQL cells, fetch full lineage and find matching tables
+        // Unnamed SQL cell: show matching table nodes from full graph
+        setFocalNodeId(undefined);
         const fullLineage = await api.fetchLineage();
-        const matchingNodes = fullLineage.nodes.filter(
-          (n: LineageNode) => sqlTables.some((tbl) => n.name === tbl || n.id === `table:${tbl}` || n.id === `block:${tbl}`)
+        const matchingNodes = (fullLineage.nodes ?? []).filter(
+          (n: LineageNode) => sqlTables.some((tbl) => n.name === tbl || n.id === `table:${tbl}`)
         );
-        setAncestors(matchingNodes);
-        setDescendants([]);
+        setGraphNodes(matchingNodes);
+        setGraphEdges([]);
       }
     } catch {
       setError('Failed to load lineage');
@@ -185,7 +192,7 @@ export function CellLineage({ cellContent, cellType, cellName, themeMode, t, onF
         >
           <path d="M1 3l4 4 4-4" stroke="currentColor" fill="none" strokeWidth="1.5" />
         </svg>
-        {/* View in DAG button (shown when expanded and a node exists) */}
+        {/* View in DAG button */}
         {expanded && lookupName && onFocusNode && (
           <span
             onClick={(e) => {
@@ -207,116 +214,109 @@ export function CellLineage({ cellContent, cellType, cellName, themeMode, t, onF
 
       {/* Lineage content */}
       {expanded && (
-        <div style={{ padding: '6px 12px 8px', fontSize: 11 }}>
+        <div style={{ fontSize: 11 }}>
           {loading ? (
-            <div style={{ color: t.textMuted, padding: '4px 0' }}>Loading lineage...</div>
+            <div style={{ color: t.textMuted, padding: '8px 12px' }}>Loading lineage...</div>
           ) : error ? (
-            <div style={{ color: t.error, padding: '4px 0' }}>{error}</div>
+            <div style={{ color: t.error, padding: '8px 12px' }}>{error}</div>
           ) : (
             <>
-              {/* Complete Paths (from API) */}
-              {pathResult && (pathResult.upstreamPaths.length > 0 || pathResult.downstreamPaths.length > 0) && (
-                <div style={{ marginBottom: 8 }}>
-                  <div style={{ fontSize: 9, fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.5px', color: t.textMuted, marginBottom: 4 }}>
-                    Complete Paths
+              {/* Mini graph — same view as Block Studio, powered by queryLineage */}
+              {graphNodes.length > 0 && focalNodeId && (
+                <div style={{ borderBottom: `1px solid ${t.cellBorder}` }}>
+                  <MiniLineageGraph
+                    nodes={graphNodes}
+                    edges={graphEdges}
+                    focalNodeId={focalNodeId}
+                    height={200}
+                    onNodeClick={onFocusNode}
+                    interactive={true}
+                    layoutMode="flow"
+                  />
+                </div>
+              )}
+
+              <div style={{ padding: '6px 12px 8px' }}>
+                {/* Complete Paths */}
+                {pathResult && (pathResult.upstreamPaths.length > 0 || pathResult.downstreamPaths.length > 0) && (
+                  <div style={{ marginBottom: 8 }}>
+                    <div style={{ fontSize: 9, fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.5px', color: t.textMuted, marginBottom: 4 }}>
+                      Complete Paths
+                    </div>
+                    <div style={{ display: 'grid', gap: 6 }}>
+                      {pathResult.upstreamPaths.slice(0, 3).map((path: LineagePath, i: number) => (
+                        <LineagePathBreadcrumb
+                          key={`up-${i}`}
+                          path={path}
+                          onNodeClick={onFocusNode}
+                          focalNodeId={focalNodeId}
+                          t={t}
+                        />
+                      ))}
+                      {pathResult.downstreamPaths.slice(0, 2).map((path: LineagePath, i: number) => (
+                        <LineagePathBreadcrumb
+                          key={`down-${i}`}
+                          path={path}
+                          onNodeClick={onFocusNode}
+                          focalNodeId={focalNodeId}
+                          t={t}
+                        />
+                      ))}
+                    </div>
                   </div>
-                  <div style={{ display: 'grid', gap: 6 }}>
-                    {pathResult.upstreamPaths.slice(0, 3).map((path, i) => (
-                      <LineagePathBreadcrumb
-                        key={`up-${i}`}
-                        path={path}
-                        onNodeClick={onFocusNode}
-                        focalNodeId={lookupName ? `block:${lookupName}` : undefined}
-                        t={t}
-                      />
+                )}
+
+                {/* SQL Dependencies */}
+                {tables.length > 0 && (
+                  <div style={{ marginBottom: 6 }}>
+                    <div style={{ fontSize: 9, fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.5px', color: t.textMuted, marginBottom: 3 }}>
+                      Reads From ({tables.length})
+                    </div>
+                    {tables.map((table) => (
+                      <div key={table} style={{ display: 'flex', alignItems: 'center', gap: 4, padding: '1px 0', fontSize: 11, color: t.textPrimary }}>
+                        <span style={{ color: NODE_TYPE_COLORS.source_table, fontSize: 9, fontWeight: 700, width: 26 }}>TBL</span>
+                        <span>{table}</span>
+                      </div>
                     ))}
-                    {pathResult.downstreamPaths.slice(0, 2).map((path, i) => (
-                      <LineagePathBreadcrumb
-                        key={`down-${i}`}
-                        path={path}
-                        onNodeClick={onFocusNode}
-                        focalNodeId={lookupName ? `block:${lookupName}` : undefined}
-                        t={t}
-                      />
+                  </div>
+                )}
+
+                {/* Semantic References */}
+                {semanticRefs.metrics.length > 0 && (
+                  <div style={{ marginBottom: 6 }}>
+                    <div style={{ fontSize: 9, fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.5px', color: t.textMuted, marginBottom: 3 }}>
+                      Metrics ({semanticRefs.metrics.length})
+                    </div>
+                    {semanticRefs.metrics.map((m) => (
+                      <div key={m} style={{ display: 'flex', alignItems: 'center', gap: 4, padding: '1px 0', fontSize: 11, color: t.textPrimary }}>
+                        <span style={{ color: NODE_TYPE_COLORS.metric, fontSize: 9, fontWeight: 700, width: 26 }}>MET</span>
+                        <span>{m}</span>
+                      </div>
                     ))}
                   </div>
-                </div>
-              )}
+                )}
 
-              {/* SQL Dependencies */}
-              {tables.length > 0 && (
-                <div style={{ marginBottom: 6 }}>
-                  <div style={{ fontSize: 9, fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.5px', color: t.textMuted, marginBottom: 3 }}>
-                    Reads From ({tables.length})
-                  </div>
-                  {tables.map((table) => (
-                    <div key={table} style={{ display: 'flex', alignItems: 'center', gap: 4, padding: '1px 0', fontSize: 11, color: t.textPrimary }}>
-                      <span style={{ color: NODE_TYPE_COLORS.source_table, fontSize: 9, fontWeight: 700, width: 26 }}>TBL</span>
-                      <span>{table}</span>
+                {semanticRefs.dimensions.length > 0 && (
+                  <div style={{ marginBottom: 6 }}>
+                    <div style={{ fontSize: 9, fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.5px', color: t.textMuted, marginBottom: 3 }}>
+                      Dimensions ({semanticRefs.dimensions.length})
                     </div>
-                  ))}
-                </div>
-              )}
-
-              {/* Semantic References */}
-              {semanticRefs.metrics.length > 0 && (
-                <div style={{ marginBottom: 6 }}>
-                  <div style={{ fontSize: 9, fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.5px', color: t.textMuted, marginBottom: 3 }}>
-                    Metrics ({semanticRefs.metrics.length})
+                    {semanticRefs.dimensions.map((d) => (
+                      <div key={d} style={{ display: 'flex', alignItems: 'center', gap: 4, padding: '1px 0', fontSize: 11, color: t.textPrimary }}>
+                        <span style={{ color: NODE_TYPE_COLORS.dimension, fontSize: 9, fontWeight: 700, width: 26 }}>DIM</span>
+                        <span>{d}</span>
+                      </div>
+                    ))}
                   </div>
-                  {semanticRefs.metrics.map((m) => (
-                    <div key={m} style={{ display: 'flex', alignItems: 'center', gap: 4, padding: '1px 0', fontSize: 11, color: t.textPrimary }}>
-                      <span style={{ color: NODE_TYPE_COLORS.metric, fontSize: 9, fontWeight: 700, width: 26 }}>MET</span>
-                      <span>{m}</span>
-                    </div>
-                  ))}
-                </div>
-              )}
+                )}
 
-              {semanticRefs.dimensions.length > 0 && (
-                <div style={{ marginBottom: 6 }}>
-                  <div style={{ fontSize: 9, fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.5px', color: t.textMuted, marginBottom: 3 }}>
-                    Dimensions ({semanticRefs.dimensions.length})
+                {/* No lineage found */}
+                {!hasContent && graphNodes.length === 0 && !pathResult && (
+                  <div style={{ color: t.textMuted, padding: '2px 0' }}>
+                    No lineage dependencies detected for this cell.
                   </div>
-                  {semanticRefs.dimensions.map((d) => (
-                    <div key={d} style={{ display: 'flex', alignItems: 'center', gap: 4, padding: '1px 0', fontSize: 11, color: t.textPrimary }}>
-                      <span style={{ color: NODE_TYPE_COLORS.dimension, fontSize: 9, fontWeight: 700, width: 26 }}>DIM</span>
-                      <span>{d}</span>
-                    </div>
-                  ))}
-                </div>
-              )}
-
-              {/* Upstream (from API) */}
-              {ancestors.length > 0 && (
-                <div style={{ marginBottom: 6 }}>
-                  <div style={{ fontSize: 9, fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.5px', color: t.textMuted, marginBottom: 3 }}>
-                    Upstream ({ancestors.length})
-                  </div>
-                  {ancestors.map((n) => (
-                    <MiniNode key={n.id} node={n} t={t} />
-                  ))}
-                </div>
-              )}
-
-              {/* Downstream (from API) */}
-              {descendants.length > 0 && (
-                <div style={{ marginBottom: 6 }}>
-                  <div style={{ fontSize: 9, fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.5px', color: t.textMuted, marginBottom: 3 }}>
-                    Downstream ({descendants.length})
-                  </div>
-                  {descendants.map((n) => (
-                    <MiniNode key={n.id} node={n} t={t} />
-                  ))}
-                </div>
-              )}
-
-              {/* No lineage found */}
-              {!hasContent && ancestors.length === 0 && descendants.length === 0 && !pathResult && (
-                <div style={{ color: t.textMuted, padding: '2px 0' }}>
-                  No lineage dependencies detected for this cell.
-                </div>
-              )}
+                )}
+              </div>
             </>
           )}
         </div>

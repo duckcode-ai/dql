@@ -1,9 +1,9 @@
 import type { Theme } from '../../themes/notebook-theme';
-import React, { useState, useCallback, useEffect, useMemo } from 'react';
+import React, { useState, useCallback, useEffect, useMemo, useRef } from 'react';
 import { useNotebook } from '../../store/NotebookStore';
 import { themes } from '../../themes/notebook-theme';
 import { useQueryExecution } from '../../hooks/useQueryExecution';
-import { SQLCellEditor } from './SQLCellEditor';
+import { SQLCellEditor, type SQLCellEditorHandle } from './SQLCellEditor';
 import { MarkdownCellEditor } from './MarkdownCellEditor';
 import { ParamCell } from './ParamCell';
 import { SnippetPicker } from './SnippetPicker';
@@ -259,6 +259,12 @@ export function CellComponent({ cell, index }: CellProps) {
   const borderColor = getCellBorderColor(cell, t);
   const isExecutable = cell.type !== 'markdown' && cell.type !== 'param';
 
+  // Editor ref for imperative undo/reset
+  const editorRef = useRef<SQLCellEditorHandle | null>(null);
+  // Track the last-saved content for "Reset to saved" functionality
+  const savedContentRef = useRef<string>(cell.content);
+  const [isDirty, setIsDirty] = useState(false);
+
   // Build schema map for SQL autocomplete: { tableName: ['col1', 'col2'] }
   // useMemo ensures stable reference — only changes when schemaTables content changes
   const editorSchema = useMemo(
@@ -306,9 +312,17 @@ export function CellComponent({ cell, index }: CellProps) {
   const handleContentChange = useCallback(
     (content: string) => {
       dispatch({ type: 'UPDATE_CELL', id: cell.id, updates: { content } });
+      setIsDirty(content !== savedContentRef.current);
     },
     [cell.id, dispatch]
   );
+
+  const handleReset = useCallback(() => {
+    const original = savedContentRef.current;
+    dispatch({ type: 'UPDATE_CELL', id: cell.id, updates: { content: original } });
+    editorRef.current?.resetTo(original);
+    setIsDirty(false);
+  }, [cell.id, dispatch]);
 
   const handleFormat = useCallback(() => {
     if (!cell.content.trim()) return;
@@ -473,6 +487,35 @@ export function CellComponent({ cell, index }: CellProps) {
                 </button>
               )}
 
+              {/* Reset button — shown when cell content has unsaved changes */}
+              {isDirty && (cell.type === 'sql' || cell.type === 'dql') && (
+                <button
+                  title="Reset to last saved version (discard changes)"
+                  onClick={handleReset}
+                  style={{
+                    background: 'transparent',
+                    border: `1px solid ${t.btnBorder}`,
+                    borderRadius: 4,
+                    color: '#f85149',
+                    fontSize: 10,
+                    fontFamily: t.font,
+                    fontWeight: 600,
+                    letterSpacing: '0.04em',
+                    padding: '1px 7px',
+                    cursor: 'pointer',
+                    transition: 'color 0.15s, border-color 0.15s',
+                  }}
+                  onMouseEnter={(e) => {
+                    (e.currentTarget as HTMLButtonElement).style.borderColor = '#f85149';
+                  }}
+                  onMouseLeave={(e) => {
+                    (e.currentTarget as HTMLButtonElement).style.borderColor = t.btnBorder;
+                  }}
+                >
+                  ↺ Reset
+                </button>
+              )}
+
               {cellHovered && (cell.type === 'sql' || cell.type === 'dql') && (
                 <button
                   title="Save this cell as a reusable block"
@@ -634,6 +677,7 @@ export function CellComponent({ cell, index }: CellProps) {
             themeMode={state.themeMode}
             schema={editorSchema}
             errorMessage={cell.status === 'error' ? cell.error : undefined}
+            editorRef={editorRef}
           />
         )}
 
