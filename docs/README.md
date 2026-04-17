@@ -1,53 +1,30 @@
-# DQL Docs
+# docs/
 
-This docs folder is organized for two audiences:
+**The user-facing docs have moved to [`apps/docs/`](../apps/docs/) (Nextra).
+Site: [docs.duckcode.ai](https://docs.duckcode.ai).**
 
-- new users who need a clear start-to-finish path
-- contributors and maintainers who need source-testing and release guidance
+This folder now holds only:
 
-If you are new to DQL, follow these sections in order.
+- **Long-form references** not yet ported — e.g. [`dql-language-spec.md`](./dql-language-spec.md)
+- **Maintainer / internal docs** — [`publishing.md`](./publishing.md), [`repo-testing.md`](./repo-testing.md), [`oss-readiness-checklist.md`](./oss-readiness-checklist.md), [`v1-support-scope.md`](./v1-support-scope.md)
+- **Migration notes** — [`migration-guides/`](./migration-guides/)
+- **Example notebooks** — [`examples/`](./examples/)
 
-## 1. Start Here
+New documentation goes in `apps/docs/pages/`, not here.
 
-- [Start Here Overview](./01-start-here/README.md)
-- [Install and First Project](./01-start-here/install-and-first-project.md)
-- [Run From Source](./01-start-here/run-from-source.md)
-- [dbt + Jaffle Shop Walkthrough](./01-start-here/dbt-jaffle-shop.md)
+## Canonical IA (in `apps/docs`)
 
-## 2. Learn The Product
+```
+Get Started    /get-started/       install · quickstart · concepts
+Guides         /guides/            task-oriented walkthroughs
+Reference      /reference/         CLI · language · connectors · file formats · semantic layer
+Architecture   /architecture/      overview · dbt-integration · lineage-model · plugin-api · openlineage
+Contribute     /contribute/        repo-layout · testing · releasing
+```
 
-- [Core Workflows Overview](./02-core-workflows/README.md)
-- [Notebook Workflow](./02-core-workflows/notebook-workflow.md)
-- [Block Authoring Workflow](./02-core-workflows/block-authoring-workflow.md)
-- [Semantic Layer Workflow](./02-core-workflows/semantic-layer-workflow.md)
-- [Lineage Workflow](./02-core-workflows/lineage-workflow.md)
+## Running the site locally
 
-## 3. Guides
-
-- [Guides Overview](./03-guides/README.md)
-- [Demo Assets](./examples/README.md)
-- [Data Sources Guide](./data-sources.md)
-- [Project Structure](./project-structure.md)
-- [Project Config](./project-config.md)
-- [Examples and Use Cases](./examples.md)
-- [FAQ](./faq.md)
-
-## 4. Reference
-
-- [Reference Overview](./04-reference/README.md)
-- [CLI Reference](./cli-reference.md)
-- [DQL Language Spec](./dql-language-spec.md)
-- [Compatibility](./compatibility.md)
-- [V1 Support Scope](./v1-support-scope.md)
-
-## 5. Migration And Maintainers
-
-- [Migration Guides](./migration-guides/README.md)
-- [Maintainer Docs Overview](./05-maintainers/README.md)
-- [Repo Testing](./repo-testing.md)
-- [Publishing](./publishing.md)
-- [OSS Readiness Checklist](./oss-readiness-checklist.md)
-
-## Existing Detailed Docs
-
-The original top-level docs remain in place so current links in the repo continue to work. The new ordered sections above are the recommended reading path.
+```bash
+pnpm -F @duckcodeailabs/docs dev
+# http://localhost:3030
+```
