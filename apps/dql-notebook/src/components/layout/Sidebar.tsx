@@ -5,7 +5,6 @@ import { FilesPanel } from '../sidebar/FilesPanel';
 import { SchemaPanel } from '../sidebar/SchemaPanel';
 import { ConnectionPanel } from '../sidebar/ConnectionPanel';
 import { ReferencePanel } from '../sidebar/ReferencePanel';
-import { SemanticPanel } from '../sidebar/SemanticPanel';
 import { LineagePanel } from '../sidebar/LineagePanel';
 import { BlockLibraryPanel } from '../sidebar/BlockLibraryPanel';
 import type { NotebookFile } from '../../store/types';
@@ -18,7 +17,6 @@ const PANEL_TITLES: Record<string, string> = {
   files: 'Explorer',
   schema: 'Schema',
   block_library: 'Block Library',
-  semantic: 'Semantic Layer',
   lineage: 'Lineage',
   connection: 'Connection',
   reference: 'Quick Reference',
@@ -29,9 +27,7 @@ export function Sidebar({ onOpenFile }: SidebarProps) {
   const t = themes[state.themeMode];
   const [collapseHover, setCollapseHover] = useState(false);
 
-  const panel = state.mainView === 'block_studio' && state.sidebarPanel === 'semantic'
-    ? 'files'
-    : state.sidebarPanel;
+  const panel = state.sidebarPanel;
 
   return (
     <div
@@ -97,7 +93,6 @@ export function Sidebar({ onOpenFile }: SidebarProps) {
         {panel === 'files' && <FilesPanel onOpenFile={onOpenFile} />}
         {panel === 'schema' && <SchemaPanel />}
         {panel === 'block_library' && <BlockLibraryPanel />}
-        {panel === 'semantic' && <SemanticPanel />}
         {panel === 'lineage' && <LineagePanel />}
         {panel === 'connection' && <ConnectionPanel />}
         {panel === 'reference' && <ReferencePanel themeMode={state.themeMode} />}

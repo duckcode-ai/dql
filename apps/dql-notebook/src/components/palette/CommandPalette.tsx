@@ -55,7 +55,6 @@ export function CommandPalette({
     const panels: Array<[string, NonNullable<typeof state.sidebarPanel>]> = [
       ['Files', 'files'],
       ['Schema', 'schema'],
-      ['Semantic Layer', 'semantic'],
       ['Lineage', 'lineage'],
       ['Block Library', 'block_library'],
       ['Connections', 'connection'],
