@@ -1,6 +1,7 @@
-import React from 'react';
+import React, { useEffect, useState } from 'react';
 import { cssVar, space, fontSize, fontWeight, radius } from '@duckcodeailabs/dql-ui';
 import { useNotebook } from '../../store/NotebookStore';
+import { api } from '../../api/client';
 
 /**
  * Right-rail inspector. A scaffold for v0.10 — surfaces context-sensitive
@@ -106,15 +107,56 @@ function CellInspector({ cellId }: { cellId: string }) {
 }
 
 function LineageNodeInspector({ nodeId }: { nodeId: string }) {
+  const [data, setData] = useState<{ node: any; incoming: any[]; outgoing: any[] } | null>(null);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    let cancelled = false;
+    setLoading(true);
+    api
+      .fetchLineageNode(nodeId)
+      .then((result) => {
+        if (!cancelled) {
+          setData(result);
+          setLoading(false);
+        }
+      })
+      .catch(() => {
+        if (!cancelled) setLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [nodeId]);
+
+  if (loading) return <Hint>Loading node…</Hint>;
+  if (!data || !data.node) {
+    return (
+      <div style={{ display: 'flex', flexDirection: 'column', gap: space[3] }}>
+        <Field label="Node ID">
+          <code style={{ fontFamily: 'var(--dql-font-mono, monospace)' }}>{nodeId}</code>
+        </Field>
+        <Hint>No metadata available for this node.</Hint>
+      </div>
+    );
+  }
+
+  const n = data.node;
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: space[3] }}>
-      <Field label="Node ID">
-        <code style={{ fontFamily: 'var(--dql-font-mono, monospace)' }}>{nodeId}</code>
-      </Field>
-      <Hint>
-        Detailed node metadata, upstream/downstream peek, and open-in-graph action land here as the
-        inspector API stabilizes.
-      </Hint>
+      <Field label="Name">{n.name ?? nodeId}</Field>
+      <Field label="Type">{n.type}</Field>
+      {n.domain && <Field label="Domain">{n.domain}</Field>}
+      {n.layer && <Field label="Layer">{n.layer}</Field>}
+      <Field label="Upstream">{data.incoming.length}</Field>
+      <Field label="Downstream">{data.outgoing.length}</Field>
+      {n.path && (
+        <Field label="Path">
+          <code style={{ fontFamily: 'var(--dql-font-mono, monospace)', fontSize: fontSize.xs }}>
+            {n.path}
+          </code>
+        </Field>
+      )}
     </div>
   );
 }

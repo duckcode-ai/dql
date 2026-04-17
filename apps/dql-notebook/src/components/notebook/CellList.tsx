@@ -28,6 +28,12 @@ export function CellList({ registerCellRef }: CellListProps) {
     setFocusedCellId(cellId);
   }, []);
 
+  useEffect(() => {
+    if (focusedCellId && state.inspectorOpen) {
+      dispatch({ type: 'SET_INSPECTOR_CONTEXT', context: { kind: 'cell', cellId: focusedCellId } });
+    }
+  }, [focusedCellId, state.inspectorOpen, dispatch]);
+
   // Global keyboard handler for command mode shortcuts
   useEffect(() => {
     function onKeyDown(e: KeyboardEvent) {

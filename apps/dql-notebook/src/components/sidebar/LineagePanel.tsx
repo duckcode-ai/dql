@@ -231,6 +231,10 @@ export function LineagePanel() {
     setFocusedNode(result.focalNode ?? node);
     setFocusedGraph(result.graph ?? { nodes: [], edges: [] });
     dispatch({ type: 'SET_LINEAGE_FOCUS', nodeId: node.id });
+    dispatch({
+      type: 'SET_INSPECTOR_CONTEXT',
+      context: { kind: 'lineage-node', nodeId: node.id },
+    });
     if (!state.lineageFullscreen) {
       dispatch({ type: 'TOGGLE_LINEAGE_FULLSCREEN' });
     }
