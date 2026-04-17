@@ -267,11 +267,16 @@ function formatBlock(node: BlockDeclNode, level: number, state: FormatState): st
 }
 
 function formatSQLQuery(query: SQLQueryNode, level: number, state: FormatState): string[] {
-  const sql = query.rawSQL.trim();
-  if (!sql) return [`${indent(level, state)}SELECT 1`];
-  return sql
-    .split('\n')
-    .map((line) => `${indent(level, state)}${line.trimEnd()}`);
+  const sql = query.rawSQL.replace(/^\n+|\s+$/g, '');
+  if (!sql.trim()) return [`${indent(level, state)}SELECT 1`];
+  const rawLines = sql.split('\n').map((line) => line.trimEnd());
+  const nonEmpty = rawLines.filter((l) => l.length > 0);
+  const minLeading = nonEmpty.length
+    ? Math.min(...nonEmpty.map((l) => l.match(/^[ \t]*/)![0].length))
+    : 0;
+  return rawLines.map((line) =>
+    line.length === 0 ? '' : `${indent(level, state)}${line.slice(minLeading)}`,
+  );
 }
 
 function formatNamedArg(arg: NamedArgNode): string {
