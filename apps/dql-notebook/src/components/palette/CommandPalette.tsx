@@ -79,6 +79,13 @@ export function CommandPalette({
         ),
       },
       {
+        id: 'inspector.toggle',
+        label: state.inspectorOpen ? 'Hide inspector' : 'Show inspector',
+        group: 'View',
+        shortcut: '⌘⇧I',
+        run: wrap(() => d({ type: 'TOGGLE_INSPECTOR' })),
+      },
+      {
         id: 'dashboard.toggle',
         label: state.dashboardMode ? 'Exit dashboard mode' : 'Enter dashboard mode',
         group: 'View',
@@ -124,7 +131,7 @@ export function CommandPalette({
       },
     ];
     return result;
-  }, [state.sidebarOpen, state.themeMode, state.dashboardMode, state.lineageFullscreen, dispatch, onClose]);
+  }, [state.sidebarOpen, state.themeMode, state.dashboardMode, state.lineageFullscreen, state.inspectorOpen, dispatch, onClose]);
 
   const filtered = useMemo(() => {
     const scored = actions

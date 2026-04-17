@@ -63,6 +63,8 @@ const initialState: NotebookState = {
   blockStudioMetadata: null,
   blockStudioCatalog: null,
   blockStudioCatalogLoading: false,
+  inspectorOpen: false,
+  inspectorContext: null,
 };
 
 /**
@@ -332,6 +334,23 @@ function notebookReducer(state: NotebookState, action: NotebookAction): Notebook
 
     case 'SET_BLOCK_STUDIO_CATALOG_LOADING':
       return { ...state, blockStudioCatalogLoading: action.loading };
+
+    case 'TOGGLE_INSPECTOR':
+      return { ...state, inspectorOpen: !state.inspectorOpen };
+
+    case 'SET_INSPECTOR':
+      return {
+        ...state,
+        inspectorOpen: action.open,
+        inspectorContext: action.context === undefined ? state.inspectorContext : action.context,
+      };
+
+    case 'SET_INSPECTOR_CONTEXT':
+      return {
+        ...state,
+        inspectorContext: action.context,
+        inspectorOpen: action.context !== null ? true : state.inspectorOpen,
+      };
 
     default:
       return state;

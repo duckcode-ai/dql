@@ -269,7 +269,14 @@ export interface NotebookState {
   blockStudioMetadata: BlockStudioMetadata | null;
   blockStudioCatalog: BlockStudioCatalog | null;
   blockStudioCatalogLoading: boolean;
+  inspectorOpen: boolean;
+  inspectorContext: InspectorContext | null;
 }
+
+export type InspectorContext =
+  | { kind: 'cell'; cellId: string }
+  | { kind: 'lineage-node'; nodeId: string }
+  | { kind: 'metric'; name: string };
 
 export type NotebookAction =
   | { type: 'SET_MAIN_VIEW'; view: MainView }
@@ -316,4 +323,7 @@ export type NotebookAction =
   | { type: 'SET_BLOCK_STUDIO_VALIDATION'; validation: BlockStudioValidation | null }
   | { type: 'SET_BLOCK_STUDIO_METADATA'; metadata: BlockStudioMetadata }
   | { type: 'SET_BLOCK_STUDIO_CATALOG'; catalog: BlockStudioCatalog | null }
-  | { type: 'SET_BLOCK_STUDIO_CATALOG_LOADING'; loading: boolean };
+  | { type: 'SET_BLOCK_STUDIO_CATALOG_LOADING'; loading: boolean }
+  | { type: 'TOGGLE_INSPECTOR' }
+  | { type: 'SET_INSPECTOR'; open: boolean; context?: InspectorContext | null }
+  | { type: 'SET_INSPECTOR_CONTEXT'; context: InspectorContext | null };

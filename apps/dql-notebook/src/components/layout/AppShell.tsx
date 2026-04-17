@@ -1,5 +1,6 @@
 import React, { useCallback, useRef, useState, useEffect } from 'react';
 import { CommandPalette } from '../palette/CommandPalette';
+import { InspectorPanel } from './InspectorPanel';
 import { useNotebook } from '../../store/NotebookStore';
 import { themes } from '../../themes/notebook-theme';
 import { ActivityBar } from './ActivityBar';
@@ -35,10 +36,14 @@ export function AppShell() {
         e.preventDefault();
         setPaletteOpen((v) => !v);
       }
+      if ((e.metaKey || e.ctrlKey) && e.shiftKey && e.key.toLowerCase() === 'i') {
+        e.preventDefault();
+        dispatch({ type: 'TOGGLE_INSPECTOR' });
+      }
     };
     document.addEventListener('keydown', handler);
     return () => document.removeEventListener('keydown', handler);
-  }, []);
+  }, [dispatch]);
 
   const handleOpenFile = useCallback(
     async (file: NotebookFile) => {
@@ -182,6 +187,10 @@ export function AppShell() {
             </>
           )}
         </div>
+
+        {state.inspectorOpen && !state.lineageFullscreen && !state.dashboardMode && (
+          <InspectorPanel />
+        )}
       </div>
 
       {/* Modals */}
