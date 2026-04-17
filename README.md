@@ -5,483 +5,52 @@
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue)](./LICENSE)
 [![Node](https://img.shields.io/badge/node-18%20%7C%2020%20%7C%2022-green)](https://nodejs.org)
 
-- Your team copy-pastes the same query into 12 dashboards. They drift. Nobody knows which is right.
-- Someone changes the SQL. The chart breaks. There was no review.
-- AI generated a perfect query last Tuesday. It's gone now.
-- "Is this metric still correct?" — nobody can answer that.
+**Analytics notebooks on your dbt models.** Git-native. Local-first. Open source.
 
-**DQL fixes that.**
+DQL sits between **dbt** (modeling) and your BI tool (reporting). Every analytics answer — SQL, chart, params, tests, owner — lives in a single `.dql` file tracked in git. No more query sprawl, no more broken charts, no more lost work.
 
-**DQL is an open-source analytics language, CLI, and notebook UI** — each analytics answer lives in a single `.dql` file: SQL + visualization config + owner + tests + parameters, all Git-trackable. No more query sprawl. No more broken charts. No more lost work.
-
-→ **[Start with the docs hub](./docs/README.md)**
-
-→ **[Why DQL exists and what problem it solves](./docs/why-dql.md)**
-
----
-
-## Install
-
-Requires Node 18, 20, or 22 (active LTS).
+## Get started — under 2 minutes
 
 ```bash
-npm install -g @duckcodeailabs/dql-cli
-dql --version
+npx create-dql-app my-project
+cd my-project
+npm install
+npm run notebook
 ```
 
-### Path A: DQL-Only (no dbt required)
+Your browser opens a notebook at `http://localhost:5173`. DuckDB is running in-memory. Drop a CSV into `data/`, query it, save a block, commit.
 
-The fastest path — local project, local notebook, zero dependencies beyond Node.
-
-```bash
-dql init my-dql-project
-cd my-dql-project
-dql doctor
-dql notebook
-```
-
-Your browser opens with a notebook connected to DuckDB in-memory. Write SQL cells, query local CSV/Parquet files, and create governed DQL blocks — all tracked in Git.
-
-→ **[Quickstart — zero to running notebook in 2 minutes](./docs/quickstart.md)**
-
-→ **[Install and first project](./docs/01-start-here/install-and-first-project.md)**
-
-→ **[Full getting started guide with the Jaffle Shop dbt project](./docs/01-start-here/dbt-jaffle-shop.md)**
-
-### Path B: dbt + Jaffle Shop (5 minutes)
-
-Use the Jaffle Shop dbt project to see DQL's full power — semantic metrics, lineage, and Block Studio.
-
-> **Note:** You must clone the dbt repo yourself. `dql init` does not download it automatically.
-
-```bash
-# 1. Clone and build the dbt project
-git clone https://github.com/dbt-labs/Semantic-Layer-Online-Course.git jaffle-shop
-cd jaffle-shop
-pip install dbt-duckdb && dbt deps && dbt build --profiles-dir .
-
-# 2. Initialize DQL (auto-detects dbt + DuckDB + semantic definitions)
-npm install -g @duckcodeailabs/dql-cli
-dql init .
-dql doctor
-dql notebook
-```
-
-`dql init .` auto-detects the dbt project, finds `jaffle_shop.duckdb`, and imports semantic metrics/dimensions from the dbt YAML files — all in one step.
-
-→ **[Full getting started guide with Jaffle Shop](./docs/getting-started.md)**
-
-→ **[Quickstart — zero to running notebook in 5 minutes](./docs/01-start-here/dbt-jaffle-shop.md)**
-
-### Path C: Enterprise — Your dbt Repo + Your Database
-
-Already have a dbt project and a Snowflake/Postgres/BigQuery warehouse? DQL layers on top.
-
-```bash
-cd your-dbt-project
-dql init .
-dql notebook
-# → Use the Connection Panel in the notebook to configure your database
-# → Import semantic metrics from the notebook UI or CLI
-```
-
-→ **[Enterprise getting started — connect your database, import metrics, build blocks](./docs/enterprise-getting-started.md)**
-
-### Library packages (for embedding in your app)
-
-```bash
-npm install @duckcodeailabs/dql-core@0.8.7 @duckcodeailabs/dql-compiler@0.8.7 @duckcodeailabs/dql-notebook@0.8.7
-```
-
----
-
-## The Notebook
-
-`dql notebook` opens a local browser UI — no cloud, no Python, no setup beyond the CLI.
-
-- **SQL cells** — write and run SQL against local files, powered by DuckDB
-- **Param cells** — live widgets (text, number, date, select) wired to `{{variable}}` references in SQL
-- **Markdown cells** — annotate your analysis
-- **Auto-charting** — bar and line charts detected from query shape, table/chart toggle
-- **Export** — standalone HTML dashboard or `.dql` workbook file
-
-```bash
-dql notebook                      # open notebook for current project
-dql notebook ./my-dql-project     # specify project path
-dql new notebook "Revenue Analysis"  # scaffold a new .dqlnb file
-```
-
-→ **[Notebook guide — cells, param widgets, variable substitution, export](./docs/notebook.md)**
-
----
-
-## Block Studio
-
-Block Studio is the notebook's built-in IDE for creating governed DQL blocks. Open it from the sidebar or by clicking any `.dql` file.
-
-- **Database explorer** — browse your tables and columns, click to insert into SQL
-- **Semantic panel** — browse imported metrics and dimensions, click to insert references
-- **Live validation** — syntax and semantic errors as you type
-- **Run** — execute SQL against your connected database, see results in a table or chart
-- **Test** — run block assertions (e.g., `assert row_count > 0`) and see pass/fail
-- **Save** — write the block to `blocks/` with governance metadata (owner, domain, tags)
-
-→ **[Authoring blocks — create, test, certify, and commit custom and semantic blocks](./docs/authoring-blocks.md)**
-
----
-
-## DQL Blocks
-
-A DQL block is the core reusable unit — one file that holds everything needed to produce a trusted analytics answer.
-
-```dql
-block "Revenue by Segment" {
-    domain      = "revenue"
-    owner       = "data-team"
-    tags        = ["revenue", "segment", "quarterly"]
-
-    params {
-        period = "current_quarter"
-    }
-
-    query = """
-        SELECT segment_tier AS segment, SUM(amount) AS revenue
-        FROM fct_revenue
-        WHERE fiscal_period = ${period}
-        GROUP BY segment_tier
-        ORDER BY revenue DESC
-    """
-
-    visualization {
-        chart = "bar"
-        x     = segment
-        y     = revenue
-    }
-
-    tests {
-        assert row_count > 0
-    }
-}
-```
-
-Use `ref("block_name")` to declare explicit dependencies between blocks:
-
-```dql
-block "Executive Summary" {
-    domain = "executive"
-    query  = """
-        SELECT * FROM ref("revenue_by_segment")
-        WHERE revenue > 10000
-    """
-}
-```
-
-Scaffold, validate, preview, and build blocks with the CLI:
-
-```bash
-dql new block "Pipeline Health"
-dql parse blocks/pipeline_health.dql
-dql preview blocks/pipeline_health.dql --open
-dql build blocks/pipeline_health.dql
-```
-
-→ **[Full language reference — block syntax, chart types, params, tests, workbooks](./docs/dql-language-spec.md)**
-
----
-
-## Lineage & Trust Chains
-
-DQL tracks how data flows from source tables through dbt models, DQL blocks, business domains, and notebooks — the full open-source trust chain from raw data to analytics consumption.
-
-```bash
-dql compile                                          # generate dql-manifest.json
-dql compile --dbt-manifest path/to/manifest.json     # import dbt lineage as upstream
-dql lineage                                          # full project lineage with data flow DAG
-dql lineage --search revenue                         # search lineage nodes by name
-dql lineage --focus revenue_by_customer_type         # focused subgraph around a node
-dql lineage --dashboard "Jaffle Shop Lineage Demo"   # what feeds a notebook/dashboard?
-dql lineage --dbt                                    # dbt-only graph slice
-dql lineage raw_orders                               # upstream/downstream for a block
-dql lineage orders                                   # smart lookup: resolves to table:orders
-dql lineage --table orders                           # explicit table lookup
-dql lineage --metric total_revenue                   # explicit metric lookup
-dql lineage --domain finance                         # domain-scoped view
-dql lineage --impact orders                          # what breaks if this table changes?
-dql lineage --trust-chain raw_orders exec_dashboard  # certification at every hop
-dql lineage --format json                            # export for CI/integrations
-```
-
-In the notebook UI, users can:
-
-- search lineage from the sidebar and open a focused graph instead of scanning the full project
-- open a block in Block Studio and use the `Lineage` tab for upstream provenance and downstream notebook usage
-- inspect dbt sources/models, DQL blocks, domains, and notebooks in one graph
-
-Cross-domain flow detection is built in, so DQL also shows when data crosses team boundaries:
-
-```
-  Cross-Domain Flows:
-    data -> finance (1 edge(s))
-    finance -> executive (1 edge(s))
-```
-
-For a concrete end-to-end demo, copy the ready-made notebook asset:
-
-```bash
-mkdir -p notebooks
-cp docs/examples/jaffle-shop-lineage-demo.dqlnb notebooks/
-```
-
-That demo is designed to show this OSS path clearly:
-
-```text
-dbt source -> dbt model -> DQL block -> notebook
-```
-
-→ **[Lineage guide — ref(), trust chains, impact analysis, cross-domain flows](./docs/lineage.md)**
-→ **[Lineage workflow — focused UI flow, CLI commands, Block Studio lineage](./docs/02-core-workflows/lineage-workflow.md)**
-→ **[Demo assets — copyable Jaffle Shop lineage notebook](./docs/examples/README.md)**
-
----
-
-## Semantic Layer
-
-DQL includes a built-in semantic layer — define metrics, dimensions, hierarchies, and cubes in YAML files, then reference them in your notebooks and blocks.
-
-```
-semantic-layer/
-  metrics/revenue.yaml
-  dimensions/segment.yaml
-  hierarchies/revenue_time.yaml
-  cubes/revenue_cube.yaml
-```
-
-Four provider modes are supported:
-
-| Provider | Source | Use when |
-|---|---|---|
-| `dql` (default) | Local `semantic-layer/` YAML files | Standalone projects, getting started |
-| `dbt` | dbt `models/**/*.yml` semantic models | You already use dbt for transformations |
-| `cubejs` | Cube.js `model/` or `schema/` definitions | You already use Cube for your semantic layer |
-| `snowflake` | Snowflake semantic views (live connection) | You use Snowflake as your semantic layer |
-
-Configure in `dql.config.json`:
-
-```json
-{
-  "semanticLayer": {
-    "provider": "dql"
-  }
-}
-```
-
-The notebook sidebar shows your semantic layer live — browse metrics, dimensions, and hierarchies, click to insert into SQL cells.
-
-→ **[Semantic layer guide — setup, providers, YAML format, notebook integration](./docs/semantic-layer-guide.md)**
-
----
-
-## Data Sources
-
-DQL supports **14 database connectors** out of the box. The default runtime uses DuckDB to query local CSV and Parquet files directly — no cloud warehouse needed to get started.
-
-```json
-{
-  "connections": {
-    "default": {
-      "driver": "duckdb",
-      "filepath": ":memory:"
-    }
-  }
-}
-```
-
-Connect to Postgres, Snowflake, BigQuery, or any of the 14 supported databases — either edit `dql.config.json` directly or use the **Connection Panel** in the notebook UI to configure and hot-swap connections at runtime.
-
-→ **[Data sources guide — all 14 connectors with config fields](./docs/data-sources.md)**
-
----
-
-## Getting Started with dbt
-
-DQL is the **answer layer for dbt**. The recommended getting-started path uses the [Jaffle Shop semantic-layer course repo](https://github.com/dbt-labs/Semantic-Layer-Online-Course) — a real dataset with models, metrics, and semantic definitions that DQL can read directly.
-
-`dql init` auto-detects dbt projects and DuckDB files, scaffolding a minimal DQL project on top of your existing data.
-
-→ **[Getting started — full walkthrough with Jaffle Shop](./docs/getting-started.md)**
-→ **[Enterprise getting started — your own dbt repo + database](./docs/enterprise-getting-started.md)**
-
----
-
-## CLI Reference
-
-Every command has a clear job:
-
-| Command | What it does |
-|---|---|
-| `dql init` | Initialize DQL in a project (auto-detects dbt) |
-| `dql notebook` | Open the browser notebook for interactive SQL exploration |
-| `dql new block` | Create a new `.dql` block file |
-| `dql new notebook` | Create a new `.dqlnb` notebook file |
-| `dql parse` | Validate syntax and run semantic analysis |
-| `dql preview` | Compile and serve a block locally with live data |
-| `dql build` | Compile to a static HTML bundle |
-| `dql serve` | Serve a built bundle locally |
-| `dql certify` | Check governance rules (owner, description, tags, domain) |
-| `dql compile` | Generate project manifest (`dql-manifest.json`) with lineage and dependencies |
-| `dql lineage` | Show data lineage, trust chains, impact analysis, cross-domain flows |
-| `dql fmt` | Format a `.dql` file in place |
-| `dql doctor` | Diagnose project setup, config, and runtime readiness |
-| `dql --version` | Show CLI version |
-
-→ **[Full CLI reference — all commands, flags, and exit codes](./docs/cli-reference.md)**
-
----
-
-## Migration
-
-Coming from raw SQL, dbt, or a saved BI query?
-
-```bash
-dql migrate raw-sql
-dql migrate dbt
-dql migrate looker
-```
-
-→ **[Migration guides — from raw SQL, dbt, and BI tools](./docs/migration-guides/README.md)**
-
----
-
-## VS Code Extension
-
-Search **DQL Language Support** in the Extensions panel, or:
-
-```bash
-code --install-extension dql.dql-language-support
-```
-
-Provides syntax highlighting, snippets, format-on-save, and LSP support (completions, hover, diagnostics).
-
----
-
-## Use Cases
-
-Not sure where to start? Pick your goal:
-
-- **Explore a dbt project interactively** → `dql init` + `dql notebook`
-- **Author a reusable block** → `dql new block` + `dql preview`
-- **Build a shareable dashboard** → `dql build` + `dql serve`
-- **Migrate from raw SQL or dbt** → `dql migrate`
-- **Connect enterprise database** → `dql notebook` + Connection Panel
-- **Embed the parser in Node.js** → `@duckcodeailabs/dql-core`
-
-→ **[Use cases — recommended paths by goal](./docs/use-cases.md)**
-
----
+Already have a **dbt project**? Run `create-dql-app` next to it — the scaffolder auto-detects `dbt_project.yml` as a sibling and wires `dql.config.json` accordingly. Then `dql sync dbt` imports your manifest.
 
 ## Documentation
 
-### Start Here
+**📘 [docs.duckcode.ai](https://docs.duckcode.ai)** — the single source of truth.
 
-| Guide | What it covers |
-|---|---|
-| [Docs Hub](./docs/README.md) | Ordered documentation index for new users and contributors |
-| [Install and First Project](./docs/01-start-here/install-and-first-project.md) | Clean first-time-user setup path |
-| [Run From Source](./docs/01-start-here/run-from-source.md) | Clone, install, build, test, and smoke-test locally |
-| [dbt + Jaffle Shop Walkthrough](./docs/01-start-here/dbt-jaffle-shop.md) | Step-by-step dbt-backed semantic-layer setup |
-| [Quickstart](./docs/quickstart.md) | Short dbt-based path from setup to notebook |
-| [Getting Started](./docs/getting-started.md) | Detailed walkthrough with Jaffle Shop dbt project |
-| [Enterprise Getting Started](./docs/enterprise-getting-started.md) | Your own dbt repo + Snowflake/Postgres/BigQuery |
+Quick links:
 
-### Core Workflows
+- [Install](https://docs.duckcode.ai/get-started/install) · [Quickstart](https://docs.duckcode.ai/get-started/quickstart) · [Concepts](https://docs.duckcode.ai/get-started/concepts)
+- [Jaffle Shop walkthrough](https://docs.duckcode.ai/guides/jaffle-shop) · [Import dbt](https://docs.duckcode.ai/guides/import-dbt) · [Author a block](https://docs.duckcode.ai/guides/authoring-blocks)
+- [CLI reference](https://docs.duckcode.ai/reference/cli) · [Language reference](https://docs.duckcode.ai/reference/language) · [Connectors](https://docs.duckcode.ai/reference/connectors)
+- [Architecture](https://docs.duckcode.ai/architecture/overview) · [Contributing](https://docs.duckcode.ai/contribute/repo-layout)
 
-| Guide | What it covers |
-|---|---|
-| [Notebook Guide](./docs/notebook.md) | Cell types, param widgets, variable refs, export |
-| [Authoring Blocks](./docs/authoring-blocks.md) | Create, test, certify, and commit .dql blocks (custom + semantic) |
-| [Lineage & Trust Chains](./docs/lineage.md) | ref() system, cross-domain flows, impact analysis, trust chains |
-| [Semantic Layer](./docs/semantic-layer-guide.md) | Metrics, dimensions, cubes, dbt/Cube.js providers |
+## What's in the box
 
-### Reference
+- **Notebook** — SQL + DQL cells with live results, charts, and params
+- **Block Studio** — governed, versioned analytics blocks with lint + certify
+- **Semantic layer** — import dbt metrics/dimensions; author your own
+- **Lineage DAG** — table · block · notebook granularity with impact analysis
+- **Git-native format** — canonical `.dql` serialization, `dql diff`, in-app git panel
+- **15 connectors** — Postgres, DuckDB, Snowflake, BigQuery, Redshift, MySQL, and more
+- **VS Code extension** — syntax, snippets, LSP (`code --install-extension dql.dql-language-support`)
 
-| Guide | What it covers |
-|---|---|
-| [CLI Reference](./docs/cli-reference.md) | Every command, flag, and exit code |
-| [Data Sources](./docs/data-sources.md) | All 14 database drivers with config fields |
-| [Language Spec](./docs/dql-language-spec.md) | Full .dql syntax: blocks, charts, params, workbooks |
-| [Project Config](./docs/project-config.md) | dql.config.json — connections, ports, defaults |
+## What this repo does **not** include
 
-### Migrate & Examples
-
-| Guide | What it covers |
-|---|---|
-| [Migration Guides](./docs/migration-guides/README.md) | From raw SQL, dbt, Looker, Tableau |
-| [Use Cases](./docs/use-cases.md) | Recommended paths by goal |
-| [Examples](./docs/examples.md) | Suggested learning path and block examples |
-| [Why DQL](./docs/why-dql.md) | The problem, before/after, personas, DQL vs alternatives |
-
-### Help & Compatibility
-
-| Guide | What it covers |
-|---|---|
-| [FAQ](./docs/faq.md) | Common questions about scope, notebook, and compatibility |
-| [Compatibility](./docs/compatibility.md) | Runtime, connector, and workflow support matrix |
-| [Roadmap](./ROADMAP.md) | Planned features and known limitations |
-| [Security](./SECURITY.md) | Vulnerability reporting and credential handling |
-
----
-
-## Package Reference
-
-All packages share a unified version number (`0.8.7`).
-
-| Package | Description |
-|---|---|
-| `@duckcodeailabs/dql-cli` | Public CLI — `dql init`, `dql notebook`, `dql lineage`, `dql preview`, `dql parse`, ... |
-| `@duckcodeailabs/dql-core` | Lexer, parser, AST, semantic analysis, semantic layer, lineage engine, formatter |
-| `@duckcodeailabs/dql-compiler` | IR lowering, ref() resolution, HTML/React/runtime code generation |
-| `@duckcodeailabs/dql-governance` | Certification rules, cost estimation |
-| `@duckcodeailabs/dql-project` | Git-backed block registry and project primitives |
-| `@duckcodeailabs/dql-notebook` | Notebook document model and execution helpers |
-| `@duckcodeailabs/dql-lsp` | Language Server Protocol implementation |
-| `@duckcodeailabs/dql-runtime` | Browser runtime: data fetching, hot-reload |
-| `@duckcodeailabs/dql-charts` | React SVG chart components |
-| `@duckcodeailabs/dql-connectors` | Database connector layer (14 drivers) |
-
----
-
-## What This Repo Does Not Include
-
-- Natural-language / agentic block generation
-- MCP runtime
-- Approvals, run history, or product orchestration
-
-Those remain part of the closed DuckCode product.
-
----
+Natural-language / agentic block generation, MCP runtime, hosted workspaces, RBAC, scheduled runs, and alerting all live in the closed DuckCode Cloud product.
 
 ## Contributing
 
-Contributions are welcome. See [CONTRIBUTING.md](./CONTRIBUTING.md) for setup, code style, and PR guidelines.
-
-Areas where help is most useful:
-- New database connector drivers
-- Additional semantic layer providers
-- Language spec improvements and test coverage
-- Documentation and examples
-
----
-
-## Community and Support
-
-- **Bugs and feature requests** — [open a GitHub issue](https://github.com/duckcode-ai/dql/issues)
-- **Questions and discussion** — [GitHub Discussions](https://github.com/duckcode-ai/dql/discussions)
-- **Roadmap** — see [ROADMAP.md](./ROADMAP.md) for planned work and known limitations
-
-This project follows standard GitHub community norms. Please be respectful in all interactions.
-
----
+See [CONTRIBUTING.md](./CONTRIBUTING.md) and the [contribute section](https://docs.duckcode.ai/contribute/repo-layout) of the docs site. Bugs and feature requests: [open an issue](https://github.com/duckcode-ai/dql/issues).
 
 ## License
 
-Apache-2.0 — see [LICENSE](./LICENSE).
+[Apache-2.0](./LICENSE).

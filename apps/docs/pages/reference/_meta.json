@@ -3,5 +3,7 @@
   "language": "DQL language",
   "connectors": "Connectors",
   "semantic-layer": "Semantic layer",
-  "file-formats": "File formats"
+  "file-formats": "File formats",
+  "project-layout": "Project layout",
+  "compatibility": "Compatibility"
 }
