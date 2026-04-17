@@ -32,6 +32,7 @@ import {
   type LineageBlockInput,
   type LineageMetricInput,
   type LineageDimensionInput,
+  canonicalize,
 } from '@duckcodeailabs/dql-core';
 import { listBlockTemplates } from './block-templates.js';
 import {
@@ -270,7 +271,8 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           return;
         }
         mkdirSync(dirname(absPath), { recursive: true });
-        writeFileSync(absPath, content, 'utf-8');
+        const toWrite = absPath.endsWith('.dql') ? canonicalizeSafe(content) : content;
+        writeFileSync(absPath, toWrite, 'utf-8');
         res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
         res.end(serializeJSON({ ok: true }));
       } catch (error) {
@@ -2994,6 +2996,17 @@ function extractBlockStudioSemanticReferences(source: string): { metrics: string
   };
 }
 
+function canonicalizeSafe(source: string): string {
+  try {
+    return canonicalize(source);
+  } catch {
+    // If the block body has content the parser rejects (e.g. unsupported
+    // syntax in a user-provided template), keep the original bytes rather
+    // than fail the write — format header gets added next time it passes fmt.
+    return source;
+  }
+}
+
 export function createBlockArtifacts(
   projectRoot: string,
   options: {
@@ -3022,13 +3035,13 @@ export function createBlockArtifacts(
   const templateContent = options.template
     ? listBlockTemplates().find((template) => template.id === options.template)?.content
     : undefined;
-  const fileContent = normalizeBlockStudioContent({
+  const fileContent = canonicalizeSafe(normalizeBlockStudioContent({
     name: options.name,
     domain: safeDomain || 'uncategorized',
     description: options.description,
     tags: options.tags,
     content: options.content?.trim() || templateContent,
-  });
+  }));
 
   writeFileSync(blockPath, fileContent, 'utf-8');
   const relativePath = safeDomain ? `blocks/${safeDomain}/${slug}.dql` : `blocks/${slug}.dql`;
@@ -3079,9 +3092,11 @@ export function createSemanticBuilderBlock(
     throw new Error('BLOCK_EXISTS');
   }
 
-  const content = options.blockType === 'custom'
-    ? buildCustomSemanticBlockContent(options)
-    : buildSemanticBlockContent(options);
+  const content = canonicalizeSafe(
+    options.blockType === 'custom'
+      ? buildCustomSemanticBlockContent(options)
+      : buildSemanticBlockContent(options),
+  );
   writeFileSync(blockPath, content, 'utf-8');
 
   const companionPath = writeBlockCompanionFile(projectRoot, {
