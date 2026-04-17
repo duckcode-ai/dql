@@ -1,0 +1,20 @@
+{
+  "project": "{{PROJECT_NAME}}",
+  "connections": {
+    "default": {
+      "driver": "duckdb",
+      "filepath": ":memory:"
+    }
+  },
+  "semanticLayer": {
+    "provider": "dql",
+    "path": "semantic-layer"
+  },
+  "dbt": {
+    "projectDir": "{{DBT_PROJECT_DIR}}",
+    "manifestPath": "target/manifest.json"
+  },
+  "governance": {
+    "required_fields": ["domain", "owner", "description"]
+  }
+}

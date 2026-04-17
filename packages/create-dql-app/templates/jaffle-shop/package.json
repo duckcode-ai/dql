@@ -1,0 +1,16 @@
+{
+  "name": "{{PROJECT_NAME}}",
+  "version": "0.1.0",
+  "private": true,
+  "description": "DQL analytics project.",
+  "scripts": {
+    "notebook": "dql notebook",
+    "compile": "dql compile",
+    "sync": "dql sync dbt",
+    "doctor": "dql doctor",
+    "test": "dql test"
+  },
+  "devDependencies": {
+    "@duckcodeailabs/dql-cli": "^1.0.0"
+  }
+}

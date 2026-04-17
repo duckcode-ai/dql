@@ -36,6 +36,23 @@ export interface DQLManifest {
 
   /** dbt manifest import metadata (if --dbt-manifest was used) */
   dbtImport?: ManifestDbtImport;
+
+  /**
+   * Non-fatal problems encountered during the build — files that failed to
+   * parse, references that could not be resolved, etc. Empty array on a
+   * clean build. `dql compile` prints these as warnings; `dql doctor`
+   * surfaces them as diagnostics.
+   */
+  diagnostics?: ManifestDiagnostic[];
+}
+
+export interface ManifestDiagnostic {
+  /** 'parse' | 'resolve' | 'dbt' | 'semantic' | 'config' */
+  kind: string;
+  /** Relative path to the offending file, if any */
+  filePath?: string;
+  severity: 'error' | 'warning';
+  message: string;
 }
 
 // ---- Blocks ----

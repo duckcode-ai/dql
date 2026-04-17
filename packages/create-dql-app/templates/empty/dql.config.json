@@ -1,0 +1,13 @@
+{
+  "project": "{{PROJECT_NAME}}",
+  "connections": {
+    "default": {
+      "driver": "duckdb",
+      "filepath": ":memory:"
+    }
+  },
+  "semanticLayer": {
+    "provider": "dql",
+    "path": "semantic-layer"
+  }
+}

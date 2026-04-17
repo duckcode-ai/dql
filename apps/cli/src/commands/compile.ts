@@ -19,7 +19,7 @@
 
 import { writeFileSync, existsSync, readFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
-import { buildManifest, collectInputFiles, type DQLManifest } from '@duckcodeailabs/dql-core';
+import { buildManifest, collectInputFiles, resolveDbtManifestPath, type DQLManifest } from '@duckcodeailabs/dql-core';
 import { ManifestCache } from '@duckcodeailabs/dql-project';
 import type { CLIFlags } from '../args.js';
 
@@ -74,13 +74,9 @@ export async function runCompile(
     }
   } catch { /* use default */ }
 
-  // Auto-detect dbt manifest if not explicitly provided
-  if (!dbtManifestPath) {
-    const defaultDbtPath = join(projectRoot, 'target', 'manifest.json');
-    if (existsSync(defaultDbtPath)) {
-      dbtManifestPath = defaultDbtPath;
-    }
-  }
+  // Resolve via explicit flag → dql.config.json `dbt:` → target/manifest.json
+  const resolvedDbt = resolveDbtManifestPath(projectRoot, dbtManifestPath);
+  if (resolvedDbt) dbtManifestPath = resolvedDbt;
 
   const noCache = allArgs.includes('--no-cache');
 
@@ -172,7 +168,31 @@ export async function runCompile(
   }
 
   console.log(`\n  Manifest written to: ${manifestPath}`);
-  console.log(`  ${cacheHit ? 'Served from cache' : 'Compiled'} in ${elapsed}ms\n`);
+  console.log(`  ${cacheHit ? 'Served from cache' : 'Compiled'} in ${elapsed}ms`);
+
+  // Surface non-fatal problems — a silent "0 blocks" should never happen again.
+  const diagnostics = manifest.diagnostics ?? [];
+  const errs = diagnostics.filter((d) => d.severity === 'error');
+  const warns = diagnostics.filter((d) => d.severity === 'warning');
+  if (diagnostics.length > 0) {
+    console.log('');
+    if (errs.length > 0) {
+      console.log(`  ${errs.length} error(s):`);
+      for (const d of errs) {
+        const where = d.filePath ? `${d.filePath}: ` : '';
+        console.log(`    ✗ ${where}${d.message}`);
+      }
+    }
+    if (warns.length > 0) {
+      console.log(`  ${warns.length} warning(s):`);
+      for (const d of warns) {
+        const where = d.filePath ? `${d.filePath}: ` : '';
+        console.log(`    ⚠ ${where}${d.message}`);
+      }
+    }
+    if (errs.length > 0) process.exitCode = 1;
+  }
+  console.log('');
 
   if (flags.verbose) {
     // Show block details

@@ -12,10 +12,10 @@
 
 import { spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
-import { dirname, join, resolve, basename } from 'node:path';
+import { dirname, join, resolve, basename, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-const VERSION = '0.11.0';
+const VERSION = '1.0.1';
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const TEMPLATES_DIR = resolve(__dirname, '..', 'templates');
 
@@ -100,6 +100,13 @@ function detectDbtSibling(target) {
   return null;
 }
 
+function detectPackageManager() {
+  const ua = process.env.npm_config_user_agent ?? '';
+  if (ua.startsWith('pnpm/')) return 'pnpm';
+  if (ua.startsWith('yarn/')) return 'yarn';
+  return 'npm';
+}
+
 async function main() {
   const args = parseArgs(process.argv.slice(2));
   if (!args.dir) {
@@ -129,28 +136,38 @@ async function main() {
   copyDir(tplDir, target);
 
   const dbtSibling = detectDbtSibling(target);
+  // Store dbt path as relative-to-project — keeps dql.config.json portable.
+  const dbtRel = dbtSibling ? (relative(target, dbtSibling) || '.') : '../my-dbt-project';
   const vars = {
     PROJECT_NAME: projectName,
     YEAR: String(new Date().getFullYear()),
-    DBT_PROJECT_DIR: dbtSibling ? resolve(dbtSibling) : '../my-dbt-project',
+    DBT_PROJECT_DIR: dbtRel,
     DBT_DETECTED: dbtSibling ? 'true' : 'false',
   };
   for (const f of walk(target)) substitute(f, vars);
 
   if (dbtSibling) {
     console.log(c.dim(`  detected sibling dbt project at ${dbtSibling}`));
-    console.log(c.dim(`  wired into cdql.yaml — run 'dql sync dbt' to import\n`));
+    console.log(c.dim(`  wired into dql.config.json — run 'dql sync dbt' to import\n`));
   }
 
   // Best-effort: try to run `git init` so users get a clean first commit.
   const gitResult = spawnSync('git', ['init', '-q'], { cwd: target });
   if (gitResult.status === 0) console.log(c.dim('  initialized git repo'));
 
+  const pm = detectPackageManager();
+  const installCmd = pm === 'npm' ? 'npm install' : `${pm} install`;
+  const runCmd = pm === 'npm' ? 'npm run notebook' : `${pm} notebook`;
+  const dbtTip = dbtSibling
+    ? `\n\n${c.dim('Tip:')} run ${c.bold('dbt parse')} inside ${c.dim(dbtSibling)}\n     first, then ${c.bold(pm === 'npm' ? 'npm run sync' : `${pm} sync`)} to import the dbt DAG.`
+    : '';
+
   console.log(`
 ${c.green('✓ Ready.')} Next steps:
 
   ${c.bold(`cd ${args.dir}`)}
-  ${c.bold('npx @duckcodeailabs/dql-cli notebook')}
+  ${c.bold(installCmd)}
+  ${c.bold(runCmd)}${dbtTip}
 
 Your notebook will open at ${c.cyan('http://localhost:5173')}.
 

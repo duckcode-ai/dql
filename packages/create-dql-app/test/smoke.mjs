@@ -46,20 +46,22 @@ function runTest(template, name, expected, placeholderFile) {
 }
 
 runTest('jaffle-shop', 'smoke-jaffle', [
-  'cdql.yaml',
+  'dql.config.json',
+  'package.json',
   'README.md',
-  'notebooks/welcome.dql',
-  'blocks/finance/revenue_by_segment.dql',
+  'notebooks/welcome.dqlnb',
+  'blocks/revenue_by_segment.dql',
   'semantic-layer/metrics/revenue.yaml',
   'dashboards/overview.dql',
   '.gitignore',
-], 'cdql.yaml');
+], 'dql.config.json');
 
 runTest('empty', 'smoke-empty', [
-  'cdql.yaml',
+  'dql.config.json',
+  'package.json',
   'README.md',
-  'notebooks/welcome.dql',
+  'notebooks/welcome.dqlnb',
   '.gitignore',
-], 'cdql.yaml');
+], 'dql.config.json');
 
 console.log('\n✓ all smoke tests passed');

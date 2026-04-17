@@ -1,0 +1,29 @@
+// dql-format: 1
+
+block "Revenue by segment" {
+  domain = "finance"
+  type = "custom"
+  description = "Gross revenue grouped by customer segment."
+  tags = ["revenue", "sample"]
+
+  query = """
+    SELECT
+      c.customer_segment AS segment,
+      SUM(o.amount) AS revenue,
+      COUNT(DISTINCT o.customer_id) AS customers
+    FROM orders o
+    JOIN customers c ON c.customer_id = o.customer_id
+    GROUP BY 1
+    ORDER BY revenue DESC
+  """
+
+  visualization {
+    chart = "bar"
+    x = segment
+    y = revenue
+  }
+
+  tests {
+    assert row_count > 0
+  }
+}

@@ -21,7 +21,7 @@
  */
 import { existsSync, readFileSync, statSync } from 'node:fs';
 import { join, resolve, relative } from 'node:path';
-import { collectInputFiles } from '@duckcodeailabs/dql-core';
+import { collectInputFiles, loadProjectConfig, resolveDbtManifestPath } from '@duckcodeailabs/dql-core';
 import { ManifestCache } from '@duckcodeailabs/dql-project';
 import type { CLIFlags } from '../args.js';
 
@@ -77,17 +77,35 @@ export async function runSync(
     return;
   }
 
-  // Auto-detect dbt manifest
-  if (!dbtManifestPath) {
-    const defaultPath = join(projectRoot, 'target', 'manifest.json');
-    if (existsSync(defaultPath)) dbtManifestPath = defaultPath;
-  }
-
-  if (!dbtManifestPath || !existsSync(dbtManifestPath)) {
-    console.error('No dbt manifest found. Expected target/manifest.json or pass --dbt-manifest <path>.');
+  // Resolution order: explicit --dbt-manifest flag → `dbt:` section in
+  // dql.config.json → <projectRoot>/target/manifest.json.
+  const resolved = resolveDbtManifestPath(projectRoot, dbtManifestPath);
+  if (!resolved) {
+    const cfg = loadProjectConfig(projectRoot);
+    const hintedDir = cfg.dbt?.projectDir
+      ? resolve(projectRoot, cfg.dbt.projectDir)
+      : undefined;
+    console.error('✗ No dbt manifest found.');
+    console.error('');
+    if (hintedDir) {
+      console.error(`  dql.config.json points at: ${hintedDir}`);
+      console.error(`  but no manifest.json exists at ${join(hintedDir, cfg.dbt?.manifestPath ?? 'target/manifest.json')}.`);
+      console.error('');
+      console.error(`  Run \`dbt parse\` (or \`dbt compile\`) inside ${hintedDir} first,`);
+      console.error('  or pass an explicit --dbt-manifest <path>.');
+    } else {
+      console.error('  No `dbt` section in dql.config.json and no ./target/manifest.json in sight.');
+      console.error('');
+      console.error('  Fix one of:');
+      console.error('    1. Add to dql.config.json:');
+      console.error('         "dbt": { "projectDir": "../dbt" }');
+      console.error('    2. Pass --dbt-manifest <path> to this command.');
+      console.error('    3. Run this from a directory with ./target/manifest.json.');
+    }
     process.exitCode = 1;
     return;
   }
+  dbtManifestPath = resolved;
 
   const cachePath = join(projectRoot, '.dql', 'cache', 'manifest.sqlite');
 
