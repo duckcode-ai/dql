@@ -34,6 +34,22 @@ export interface QueryResult {
   rowCount?: number;
 }
 
+export interface RunSnapshotCell {
+  cellId: string;
+  status: CellStatus;
+  result?: QueryResult;
+  error?: string;
+  executionCount?: number;
+  executedAt?: string;
+}
+
+export interface RunSnapshot {
+  version: 1;
+  notebookPath: string;
+  capturedAt: string;
+  cells: RunSnapshotCell[];
+}
+
 export interface Cell {
   id: string;
   type: CellType;

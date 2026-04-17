@@ -1,6 +1,7 @@
 import type {
   NotebookFile,
   QueryResult,
+  RunSnapshot,
   SchemaTable,
   SchemaColumn,
   SemanticLayerState,
@@ -597,6 +598,21 @@ export const api = {
     } catch {
       return { inRepo: false, commits: [] };
     }
+  },
+
+  async fetchRunSnapshot(path: string): Promise<{ found: boolean; snapshot: RunSnapshot | null }> {
+    try {
+      return await request<any>(`/api/run-snapshot?path=${encodeURIComponent(path)}`);
+    } catch {
+      return { found: false, snapshot: null };
+    }
+  },
+
+  async saveRunSnapshot(path: string, snapshot: RunSnapshot): Promise<void> {
+    await request<void>('/api/run-snapshot', {
+      method: 'PUT',
+      body: JSON.stringify({ path, snapshot }),
+    });
   },
 
   async fetchGitDiff(path?: string): Promise<{ inRepo: boolean; diff: string }> {

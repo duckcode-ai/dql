@@ -282,6 +282,34 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
       return;
     }
 
+    // ── run snapshots (v0.11) ───────────────────────────────────────────────
+    // Captures executed notebook state (query results + timings) in a
+    // sibling `.run.json` so notebooks can show last-run output without
+    // re-executing after a reload. Snapshots are git-ignored by default.
+    if (req.method === 'GET' && path === '/api/run-snapshot') {
+      const notebookPath = url.searchParams.get('path') ?? '';
+      res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+      res.end(serializeJSON(readRunSnapshot(projectRoot, notebookPath)));
+      return;
+    }
+    if (req.method === 'PUT' && path === '/api/run-snapshot') {
+      try {
+        const body = await readJSON(req) as { path: string; snapshot: unknown };
+        if (!body.path || typeof body.path !== 'string' || !body.snapshot) {
+          res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
+          res.end(serializeJSON({ error: 'Missing path or snapshot' }));
+          return;
+        }
+        writeRunSnapshot(projectRoot, body.path, body.snapshot);
+        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({ ok: true }));
+      } catch (err) {
+        res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({ error: err instanceof Error ? err.message : String(err) }));
+      }
+      return;
+    }
+
     // ── git read-only API (v0.11) ───────────────────────────────────────────
     // GET /api/git/status  — branch, clean, changed files
     // GET /api/git/log     — last N commits (?limit=20)
@@ -3627,6 +3655,52 @@ async function readGitLog(cwd: string, limit: number): Promise<{ inRepo: boolean
     if (hash) commits.push({ hash, author, date, subject });
   }
   return { inRepo: true, commits };
+}
+
+function snapshotPathFor(projectRoot: string, notebookPath: string): string | null {
+  const abs = safeJoin(projectRoot, notebookPath);
+  if (!abs) return null;
+  // Strip extension and append `.run.json` so `foo.dqlnb` → `foo.run.json`
+  // and `bar.dql` → `bar.run.json`. Keeps the sibling file next to source.
+  const dot = abs.lastIndexOf('.');
+  const base = dot > abs.lastIndexOf('/') ? abs.slice(0, dot) : abs;
+  return `${base}.run.json`;
+}
+
+function readRunSnapshot(projectRoot: string, notebookPath: string): { found: boolean; snapshot: unknown | null } {
+  const p = snapshotPathFor(projectRoot, notebookPath);
+  if (!p || !existsSync(p)) return { found: false, snapshot: null };
+  try {
+    const raw = readFileSync(p, 'utf-8');
+    return { found: true, snapshot: JSON.parse(raw) };
+  } catch {
+    return { found: false, snapshot: null };
+  }
+}
+
+function writeRunSnapshot(projectRoot: string, notebookPath: string, snapshot: unknown): void {
+  const p = snapshotPathFor(projectRoot, notebookPath);
+  if (!p) throw new Error('Invalid path');
+  mkdirSync(dirname(p), { recursive: true });
+  writeFileSync(p, JSON.stringify(snapshot, null, 2), 'utf-8');
+  // Append `*.run.json` to .gitignore once, so snapshots don't pollute git
+  // history unless the user deliberately un-ignores them.
+  ensureGitignoreEntry(projectRoot, '*.run.json');
+}
+
+function ensureGitignoreEntry(projectRoot: string, pattern: string): void {
+  try {
+    const gitignorePath = join(projectRoot, '.gitignore');
+    const existing = existsSync(gitignorePath) ? readFileSync(gitignorePath, 'utf-8') : '';
+    const lines = existing.split('\n').map((l) => l.trim());
+    if (lines.includes(pattern)) return;
+    const next = existing.endsWith('\n') || existing === ''
+      ? `${existing}${pattern}\n`
+      : `${existing}\n${pattern}\n`;
+    writeFileSync(gitignorePath, next, 'utf-8');
+  } catch {
+    // Best-effort; failure to write .gitignore shouldn't fail the snapshot.
+  }
 }
 
 async function readGitDiff(cwd: string, filePath: string): Promise<{ inRepo: boolean; diff: string }> {
