@@ -1,0 +1,26 @@
+{
+  "name": "@duckcodeailabs/dql-plugin-api",
+  "version": "0.11.0",
+  "description": "Stable plugin contracts for DQL — connectors, chart renderers, governance rule packs. Frozen at v1.0.",
+  "license": "MIT",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": { "types": "./dist/index.d.ts", "import": "./dist/index.js" },
+    "./connector": { "types": "./dist/connector.d.ts", "import": "./dist/connector.js" },
+    "./chart": { "types": "./dist/chart.d.ts", "import": "./dist/chart.js" },
+    "./governance": { "types": "./dist/governance.d.ts", "import": "./dist/governance.js" }
+  },
+  "files": ["dist", "README.md"],
+  "scripts": {
+    "build": "rm -rf dist tsconfig.tsbuildinfo && tsc",
+    "test": "vitest run"
+  },
+  "devDependencies": {
+    "@types/node": "^20.11.0",
+    "typescript": "^5.4.0",
+    "vitest": "^1.6.0"
+  },
+  "publishConfig": { "access": "public" }
+}
