@@ -1,4 +1,5 @@
-import React, { useCallback, useRef } from 'react';
+import React, { useCallback, useRef, useState, useEffect } from 'react';
+import { CommandPalette } from '../palette/CommandPalette';
 import { useNotebook } from '../../store/NotebookStore';
 import { themes } from '../../themes/notebook-theme';
 import { ActivityBar } from './ActivityBar';
@@ -23,8 +24,21 @@ export function AppShell() {
   const t = themes[state.themeMode];
   const cellRefs = useRef<Record<string, HTMLDivElement>>({});
 
+  const [paletteOpen, setPaletteOpen] = useState(false);
+
   // Global keyboard shortcuts
   useKeyboardShortcuts();
+
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => {
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k' && !e.shiftKey) {
+        e.preventDefault();
+        setPaletteOpen((v) => !v);
+      }
+    };
+    document.addEventListener('keydown', handler);
+    return () => document.removeEventListener('keydown', handler);
+  }, []);
 
   const handleOpenFile = useCallback(
     async (file: NotebookFile) => {
@@ -173,6 +187,7 @@ export function AppShell() {
       {/* Modals */}
       {state.newNotebookModalOpen && <NewNotebookModal onFileOpened={handleOpenFile} />}
       {state.newBlockModalOpen && <NewBlockModal onFileOpened={handleOpenFile} />}
+      <CommandPalette open={paletteOpen} onClose={() => setPaletteOpen(false)} />
     </div>
   );
 }

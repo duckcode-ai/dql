@@ -113,6 +113,9 @@ function NodeRow({
   );
 }
 
+const SECTION_COLLAPSE_THRESHOLD = 30;
+const SECTION_EXPAND_CHUNK = 200;
+
 function Section({
   title,
   nodes,
@@ -124,23 +127,63 @@ function Section({
   t: Theme;
   onSelect: (node: LineageNode) => void;
 }) {
+  const large = nodes.length > SECTION_COLLAPSE_THRESHOLD;
+  const [expanded, setExpanded] = useState(!large);
+  const [visibleCount, setVisibleCount] = useState(SECTION_EXPAND_CHUNK);
+
   if (nodes.length === 0) return null;
+  const shown = !expanded ? 0 : Math.min(visibleCount, nodes.length);
+  const remaining = Math.max(0, nodes.length - shown);
+
   return (
     <div style={{ padding: '8px 0', borderTop: `1px solid ${t.headerBorder}` }}>
-      <div
+      <button
+        onClick={() => setExpanded((v) => !v)}
+        aria-expanded={expanded}
         style={{
+          width: '100%',
+          display: 'flex',
+          alignItems: 'center',
+          gap: 6,
           padding: '0 8px 6px',
           color: t.textMuted,
           fontSize: 11,
           fontWeight: 700,
           textTransform: 'uppercase',
+          background: 'transparent',
+          border: 'none',
+          cursor: 'pointer',
+          textAlign: 'left',
         }}
       >
-        {title} ({nodes.length})
-      </div>
-      {nodes.map((node) => (
-        <NodeRow key={node.id} node={node} t={t} onClick={() => onSelect(node)} />
-      ))}
+        <span style={{ display: 'inline-block', width: 10 }}>{expanded ? '▾' : '▸'}</span>
+        <span>{title}</span>
+        <span style={{ marginLeft: 'auto', fontWeight: 500 }}>{nodes.length}</span>
+      </button>
+      {expanded &&
+        nodes
+          .slice(0, shown)
+          .map((node) => (
+            <NodeRow key={node.id} node={node} t={t} onClick={() => onSelect(node)} />
+          ))}
+      {expanded && remaining > 0 && (
+        <button
+          onClick={() => setVisibleCount((c) => c + SECTION_EXPAND_CHUNK)}
+          style={{
+            width: '100%',
+            margin: '4px 0 0',
+            padding: '6px 8px',
+            background: 'transparent',
+            border: 'none',
+            color: t.textMuted,
+            fontSize: 11,
+            cursor: 'pointer',
+            textAlign: 'left',
+          }}
+        >
+          Show {Math.min(SECTION_EXPAND_CHUNK, remaining)} more ({remaining} hidden)
+        </button>
+      )}
     </div>
   );
 }
