@@ -34,6 +34,25 @@ import type {
 
 // ---- Public API ----
 
+/**
+ * Filters applied to dbt manifest import to keep only the subgraph relevant
+ * to this DQL project. Each entry is either a plain model name, `tag:<name>`,
+ * or `path:<prefix>` (matched against the node's `path` / `original_file_path`).
+ *
+ * Semantics
+ * - `anchors` extend the DQL-referenced tables set — upstream BFS will follow
+ *   from these as if DQL had queried them directly.
+ * - `include` (if non-empty) narrows the considered set to models matching at
+ *   least one entry; upstream deps of those are still walked.
+ * - `exclude` removes matching models from the final import even if they are
+ *   upstream of an anchor.
+ */
+export interface DbtImportFilters {
+  anchors?: string[];
+  include?: string[];
+  exclude?: string[];
+}
+
 export interface ManifestBuildOptions {
   /** Project root directory (must contain dql.config.json) */
   projectRoot: string;
@@ -53,10 +72,55 @@ export interface ManifestBuildOptions {
    * Defaults to 200. Projects with fewer models import everything.
    */
   selectiveDbtThreshold?: number;
+  /**
+   * Selective dbt import filters. When omitted, falls back to `dbtImport` in
+   * `dql.config.json`. Caller-supplied filters take precedence over config.
+   */
+  dbtImportFilters?: DbtImportFilters;
   /** Additional directories to scan for .dql files */
   extraBlockDirs?: string[];
   /** Additional directories to scan for .dqlnb files */
   extraNotebookDirs?: string[];
+}
+
+/**
+ * Enumerate every file whose contents could change the manifest output.
+ *
+ * Used by the cache layer to compute a fingerprint without building. Stays in
+ * sync with `buildManifest`'s scan set: blocks, notebooks, semantic YAML,
+ * `dql.config.json`, and (if present) the dbt `manifest.json`.
+ *
+ * Returns absolute paths, sorted. Does not read file contents.
+ */
+export function collectInputFiles(options: ManifestBuildOptions): string[] {
+  const { projectRoot } = options;
+  const files = new Set<string>();
+
+  const configPath = join(projectRoot, 'dql.config.json');
+  if (existsSync(configPath)) files.add(configPath);
+
+  const config = loadProjectConfig(projectRoot);
+
+  const blockDirs = ['blocks', 'dashboards', 'workbooks', ...(options.extraBlockDirs ?? [])];
+  for (const dir of blockDirs) {
+    for (const f of scanFilesRecursive(join(projectRoot, dir), ['.dql'])) files.add(f);
+  }
+
+  const notebookDirs = ['notebooks', 'blocks', 'dashboards', 'workbooks', ...(options.extraNotebookDirs ?? [])];
+  for (const dir of notebookDirs) {
+    for (const f of scanFilesRecursive(join(projectRoot, dir), ['.dqlnb'])) files.add(f);
+  }
+
+  const semanticDir = resolveSemanticPath(projectRoot, config);
+  if (existsSync(semanticDir)) {
+    for (const f of scanFilesRecursive(semanticDir, ['.yaml', '.yml'])) files.add(f);
+  }
+
+  if (options.dbtManifestPath && existsSync(options.dbtManifestPath)) {
+    files.add(options.dbtManifestPath);
+  }
+
+  return [...files].sort();
 }
 
 export function buildManifest(options: ManifestBuildOptions): DQLManifest {
@@ -101,12 +165,15 @@ export function buildManifest(options: ManifestBuildOptions): DQLManifest {
   for (const m of Object.values(metrics)) referencedTables.add(m.table.toLowerCase());
   for (const d of Object.values(dimensions)) referencedTables.add(d.table.toLowerCase());
 
-  // Import dbt manifest if provided
+  // Import dbt manifest if provided. Filters come from options or config
+  // (options win when both are present).
   let dbtImport: ManifestDbtImport | undefined;
   if (options.dbtManifestPath) {
+    const filters = options.dbtImportFilters ?? config.dbtImport;
     dbtImport = importDbtManifest(options.dbtManifestPath, sources, referencedTables, {
       maxHops: options.maxDbtHops,
       selectiveThreshold: options.selectiveDbtThreshold ?? 200,
+      filters,
     });
   }
 
@@ -135,6 +202,8 @@ interface ProjectConfig {
   project?: string;
   semanticLayer?: { provider?: string; path?: string; projectPath?: string };
   dataDir?: string;
+  /** Selective dbt import filters; merged into buildManifest options. */
+  dbtImport?: DbtImportFilters;
 }
 
 function loadProjectConfig(projectRoot: string): ProjectConfig {
@@ -477,6 +546,8 @@ interface DbtImportOptions {
   maxHops?: number;
   /** Auto-enable selective import when total model count exceeds this. Default: 200. */
   selectiveThreshold?: number;
+  /** Tag/path/name filters for selective import. */
+  filters?: DbtImportFilters;
 }
 
 /**
@@ -492,7 +563,32 @@ interface DbtIndexEntry {
   dependsOn: string[];   // upstream uniqueIds
   /** Normalised lookup names (name, schema.name, db.schema.name) */
   lookupKeys: string[];
+  /** dbt tags (for `tag:<name>` filters) */
+  tags: string[];
+  /** File path relative to dbt project root (for `path:<prefix>` filters) */
+  path?: string;
   raw: any;              // reference to the original manifest node
+}
+
+/** Parse a filter expression into a matcher function. */
+function compileFilter(expr: string): (entry: DbtIndexEntry) => boolean {
+  if (expr.startsWith('tag:')) {
+    const tag = expr.slice(4);
+    return (e) => e.tags.includes(tag);
+  }
+  if (expr.startsWith('path:')) {
+    const prefix = expr.slice(5);
+    return (e) => !!e.path && e.path.startsWith(prefix);
+  }
+  // Bare name — match against the model name (case-insensitive)
+  const lower = expr.toLowerCase();
+  return (e) => e.name.toLowerCase() === lower;
+}
+
+function compileFilters(exprs: string[] | undefined): ((e: DbtIndexEntry) => boolean) | null {
+  if (!exprs || exprs.length === 0) return null;
+  const matchers = exprs.map(compileFilter);
+  return (entry) => matchers.some((m) => m(entry));
 }
 
 function importDbtManifest(
@@ -517,7 +613,9 @@ function importDbtManifest(
     const database: string | undefined = node.database;
     const dependsOn: string[] = Array.isArray(node.depends_on?.nodes) ? node.depends_on.nodes : [];
     const lookupKeys = buildLookupKeys(name, schema, database);
-    index.set(uniqueId, { uniqueId, name, type: 'model', schema, database, dependsOn, lookupKeys, raw: node });
+    const tags = Array.isArray(node.tags) ? (node.tags as string[]) : [];
+    const path = (node.original_file_path ?? node.path) as string | undefined;
+    index.set(uniqueId, { uniqueId, name, type: 'model', schema, database, dependsOn, lookupKeys, tags, path, raw: node });
   }
 
   const rawSources: Record<string, any> = manifest.sources ?? {};
@@ -527,11 +625,17 @@ function importDbtManifest(
     const schema: string | undefined = src.schema;
     const database: string | undefined = src.database;
     const lookupKeys = buildLookupKeys(name, schema, database);
-    index.set(uniqueId, { uniqueId, name, type: 'source', schema, database, dependsOn: [], lookupKeys, raw: src });
+    const tags = Array.isArray(src.tags) ? (src.tags as string[]) : [];
+    const path = (src.original_file_path ?? src.path) as string | undefined;
+    index.set(uniqueId, { uniqueId, name, type: 'source', schema, database, dependsOn: [], lookupKeys, tags, path, raw: src });
   }
 
   const totalDbtModels = [...index.values()].filter((e) => e.type === 'model').length;
-  const useSelective = totalDbtModels > (opts.selectiveThreshold ?? 200) || referencedTables.size > 0;
+  const filters = opts.filters;
+  const hasFilterConfig = !!(filters && (filters.anchors?.length || filters.include?.length || filters.exclude?.length));
+  const useSelective = totalDbtModels > (opts.selectiveThreshold ?? 200)
+    || referencedTables.size > 0
+    || hasFilterConfig;
 
   // ── Step 2: Determine which nodes to import ────────────────────────────────
   let selectedIds: Set<string>;
@@ -550,11 +654,23 @@ function importDbtManifest(
       }
     }
 
-    // Find anchor uniqueIds — dbt models whose name matches a DQL-referenced table
+    // Anchors = DQL-referenced tables ∪ user-declared `dbtImport.anchors`
     const anchors = new Set<string>();
     for (const tableName of referencedTables) {
       const uid = nameToId.get(tableName);
       if (uid) anchors.add(uid);
+    }
+    for (const anchorExpr of filters?.anchors ?? []) {
+      // anchors may be plain names, `tag:...`, or `path:...`
+      if (anchorExpr.includes(':')) {
+        const match = compileFilter(anchorExpr);
+        for (const entry of index.values()) {
+          if (match(entry)) anchors.add(entry.uniqueId);
+        }
+      } else {
+        const uid = nameToId.get(anchorExpr.toLowerCase());
+        if (uid) anchors.add(uid);
+      }
     }
 
     // BFS upstream through depends_on edges
@@ -575,6 +691,21 @@ function importDbtManifest(
       }
       frontier = next;
       hop++;
+    }
+
+    // Apply include/exclude filters. Include narrows the set; exclude removes
+    // matching entries. Anchor nodes are always preserved even if include
+    // would filter them out — they are the reason we're here.
+    const includeMatch = compileFilters(filters?.include);
+    const excludeMatch = compileFilters(filters?.exclude);
+    if (includeMatch || excludeMatch) {
+      for (const uid of [...selectedIds]) {
+        if (anchors.has(uid)) continue;
+        const entry = index.get(uid);
+        if (!entry) continue;
+        if (includeMatch && !includeMatch(entry)) selectedIds.delete(uid);
+        else if (excludeMatch && excludeMatch(entry)) selectedIds.delete(uid);
+      }
     }
   }
 

@@ -74,11 +74,21 @@ export class DbtProvider implements SemanticLayerProvider {
   readonly name = 'dbt';
 
   load(config: SemanticLayerProviderConfig, projectRoot: string): SemanticLayer {
-    const layer = new SemanticLayer();
     const dbtRoot = config.projectPath
       ? join(projectRoot, config.projectPath)
       : projectRoot;
 
+    // Prefer target/manifest.json when available: it is the authoritative,
+    // fully-resolved view of the dbt project (including semantic_models and
+    // metrics). Walking models/**/*.yml is kept as a fallback for projects
+    // that haven't run `dbt parse` / `dbt compile` yet.
+    const manifestPath = join(dbtRoot, 'target', 'manifest.json');
+    if (existsSync(manifestPath)) {
+      const layer = loadFromManifestJson(manifestPath);
+      if (layer) return layer;
+    }
+
+    const layer = new SemanticLayer();
     const modelsDir = join(dbtRoot, 'models');
     if (!existsSync(modelsDir)) return layer;
 
@@ -146,6 +156,95 @@ export class DbtProvider implements SemanticLayerProvider {
 
     return layer;
   }
+}
+
+/**
+ * Load semantic_models and metrics from a dbt `target/manifest.json`.
+ *
+ * dbt's manifest stores these as objects keyed by unique_id
+ * (e.g. `semantic_model.jaffle_shop.orders`) with the same field shape as the
+ * source YAML — so we can feed them through the existing converters directly.
+ *
+ * Returns `null` if the manifest is unreadable or contains no semantic nodes,
+ * signalling the caller to fall back to the YAML walker.
+ */
+function loadFromManifestJson(manifestPath: string): SemanticLayer | null {
+  let manifest: Record<string, unknown>;
+  try {
+    manifest = JSON.parse(readFileSync(manifestPath, 'utf-8')) as Record<string, unknown>;
+  } catch {
+    return null;
+  }
+
+  const semanticModelsRaw = (manifest.semantic_models ?? {}) as Record<string, DbtManifestSemanticModel>;
+  const metricsRaw = (manifest.metrics ?? {}) as Record<string, DbtManifestMetric>;
+
+  const models: DbtSemanticModel[] = [];
+  for (const node of Object.values(semanticModelsRaw)) {
+    if (!node || typeof node !== 'object' || !node.name) continue;
+    models.push({
+      name: node.name,
+      // node.model is already a string like "ref('stg_orders')" in manifests
+      model: typeof node.model === 'string' ? node.model : undefined,
+      defaults: node.defaults,
+      entities: node.entities,
+      dimensions: node.dimensions,
+      measures: node.measures,
+    });
+  }
+
+  const dbtMetrics: DbtMetric[] = [];
+  for (const node of Object.values(metricsRaw)) {
+    if (!node || typeof node !== 'object' || !node.name) continue;
+    dbtMetrics.push({
+      name: node.name,
+      label: node.label,
+      description: node.description,
+      type: node.type ?? 'simple',
+      type_params: node.type_params,
+    });
+  }
+
+  if (models.length === 0 && dbtMetrics.length === 0) {
+    // No semantic content — let the caller try the YAML fallback.
+    return null;
+  }
+
+  const layer = new SemanticLayer();
+
+  // Build measure lookup first (identical logic to the YAML path).
+  const measureLookup = new Map<string, { sql: string; agg: string; modelName: string; table: string }>();
+  for (const model of models) {
+    const tableName = resolveTableName(model);
+    for (const measure of model.measures ?? []) {
+      measureLookup.set(measure.name, {
+        sql: measure.expr ?? measure.name,
+        agg: measure.agg,
+        modelName: model.name,
+        table: tableName,
+      });
+    }
+  }
+
+  for (const model of models) {
+    layer.addCube(convertSemanticModel(model));
+  }
+  for (const dbtMetric of dbtMetrics) {
+    const metric = convertDbtMetric(dbtMetric, measureLookup);
+    if (metric) layer.addMetric(metric);
+  }
+
+  return layer;
+}
+
+/** Shape of a `semantic_models.*` entry in dbt's manifest.json. */
+interface DbtManifestSemanticModel extends DbtSemanticModel {
+  // dbt adds unique_id, package_name, etc. — we only care about the DbtSemanticModel fields.
+}
+
+/** Shape of a `metrics.*` entry in dbt's manifest.json. */
+interface DbtManifestMetric extends DbtMetric {
+  // Same story — manifest.json has extra metadata we don't consume.
 }
 
 /** Recursively collect all .yml/.yaml files in a directory. */

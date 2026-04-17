@@ -1,6 +1,11 @@
 // Manifest — DQL project compilation artifact
 
-export { buildManifest, type ManifestBuildOptions } from './builder.js';
+export {
+  buildManifest,
+  collectInputFiles,
+  type ManifestBuildOptions,
+  type DbtImportFilters,
+} from './builder.js';
 
 export type {
   DQLManifest,

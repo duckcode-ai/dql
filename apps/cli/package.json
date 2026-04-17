@@ -11,6 +11,7 @@
     "build": "rm -rf dist tsconfig.tsbuildinfo && tsc -b && node ./scripts/copy-runtime-assets.mjs",
     "dev": "tsx src/index.ts",
     "test": "vitest run --passWithNoTests",
+    "bench:manifest": "tsx bench/manifest-bench.ts",
     "clean": "rm -rf dist tsconfig.tsbuildinfo",
     "prepublishOnly": "pnpm run build"
   },

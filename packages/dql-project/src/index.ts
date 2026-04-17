@@ -17,3 +17,11 @@ export { RegistrySync } from './sync.js';
 export type { SyncResult, SyncOptions, ParsedBlock } from './sync.js';
 export { MemoryStorage } from './memory-storage.js';
 export { SQLiteStorage } from './sqlite-storage.js';
+export { ManifestCache } from './manifest-cache.js';
+export type {
+  TrackedFile,
+  CacheHit,
+  CacheMiss,
+  CacheLookup,
+  ManifestCacheOptions,
+} from './manifest-cache.js';

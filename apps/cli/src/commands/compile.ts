@@ -19,7 +19,8 @@
 
 import { writeFileSync, existsSync, readFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
-import { buildManifest, type DQLManifest } from '@duckcodeailabs/dql-core';
+import { buildManifest, collectInputFiles, type DQLManifest } from '@duckcodeailabs/dql-core';
+import { ManifestCache } from '@duckcodeailabs/dql-project';
 import type { CLIFlags } from '../args.js';
 
 export async function runCompile(
@@ -81,17 +82,36 @@ export async function runCompile(
     }
   }
 
-  // Build manifest
+  const noCache = allArgs.includes('--no-cache');
+
+  // Build manifest (with cache when possible)
   const startTime = Date.now();
   let manifest: DQLManifest;
+  let cacheHit = false;
+
+  const buildOptions = { projectRoot, dqlVersion, dbtManifestPath, maxDbtHops };
 
   try {
-    manifest = buildManifest({
-      projectRoot,
-      dqlVersion,
-      dbtManifestPath,
-      maxDbtHops,
-    });
+    if (noCache) {
+      manifest = buildManifest(buildOptions);
+    } else {
+      const cachePath = join(projectRoot, '.dql', 'cache', 'manifest.sqlite');
+      const cache = new ManifestCache({ path: cachePath });
+      try {
+        const files = collectInputFiles(buildOptions).map((path) => ({ path }));
+        const fingerprint = cache.fingerprint(files);
+        const lookup = cache.lookup<DQLManifest>(fingerprint, files);
+        if (lookup.hit) {
+          manifest = lookup.value;
+          cacheHit = true;
+        } else {
+          manifest = buildManifest(buildOptions);
+          cache.put(fingerprint, manifest, files);
+        }
+      } finally {
+        cache.close();
+      }
+    }
   } catch (err) {
     console.error(`Failed to compile project: ${err instanceof Error ? err.message : String(err)}`);
     process.exitCode = 1;
@@ -152,7 +172,7 @@ export async function runCompile(
   }
 
   console.log(`\n  Manifest written to: ${manifestPath}`);
-  console.log(`  Compiled in ${elapsed}ms\n`);
+  console.log(`  ${cacheHit ? 'Served from cache' : 'Compiled'} in ${elapsed}ms\n`);
 
   if (flags.verbose) {
     // Show block details
