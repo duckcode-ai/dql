@@ -41,20 +41,17 @@ jobs:
           node-version: 20
       - run: node packages/create-dql-app/test/smoke.mjs
 
-  # --- docs build + internal link check ---
+  # --- docs: verify every relative markdown link under docs/ resolves ---
   docs:
-    name: docs build + link check
+    name: docs link check
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: pnpm/action-setup@v4
       - uses: actions/setup-node@v4
         with:
           node-version: 20
-          cache: pnpm
-      - run: pnpm install --frozen-lockfile
-      - run: node apps/docs/scripts/link-check.mjs
-      - run: pnpm -F @duckcodeailabs/docs build
+      - name: check relative links in docs/
+        run: node scripts/check-doc-links.mjs
 
   # --- dql fmt --check across the repo ---
   # Gates canonical .dql serialization — catches whitespace churn before
@@ -70,7 +67,7 @@ jobs:
           node-version: 20
           cache: pnpm
       - run: pnpm install --frozen-lockfile
-      - run: pnpm -F @duckcodeailabs/dql-cli build
+      - run: pnpm build
       - name: dql fmt --check
         run: |
           set -e

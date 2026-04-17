@@ -5,8 +5,12 @@
   "description": "Tauri desktop wrapper for the DQL notebook + CLI sidecar.",
   "scripts": {
     "dev": "tauri dev",
-    "build": "tauri build",
+    "build": "echo 'skipping tauri build — use release-desktop workflow'",
+    "build:tauri": "tauri build",
     "tauri": "tauri"
+  },
+  "dependencies": {
+    "@duckcodeailabs/dql-notebook-app": "workspace:*"
   },
   "devDependencies": {
     "@tauri-apps/cli": "2.1.0"
