@@ -5,7 +5,7 @@ An empty DQL project, scaffolded by `create-dql-app --template empty`.
 ## Connect your warehouse
 
 Edit `cdql.yaml` — DQL ships 15 drivers out of the box:
-[docs.duckcode.ai/reference/connectors](https://docs.duckcode.ai/reference/connectors/).
+[docs/reference/connectors.md](https://github.com/duckcode-ai/dql/blob/main/docs/reference/connectors.md).
 
 ```bash
 npx @duckcodeailabs/dql-cli test-connection

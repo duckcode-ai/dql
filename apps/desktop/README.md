@@ -34,4 +34,4 @@ pnpm -F @duckcodeailabs/desktop build
 | Linux | `.deb`, `.AppImage`, `.rpm` |
 | Windows | `.msi`, `.exe` (code-signed) |
 
-See [docs.duckcode.ai/get-started/install](https://docs.duckcode.ai/get-started/install/).
+See [docs/03-install.md](../../docs/03-install.md).

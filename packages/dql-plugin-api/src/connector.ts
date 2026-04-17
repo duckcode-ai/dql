@@ -2,7 +2,7 @@
  * Warehouse connector contract.
  *
  * FROZEN at v1.0 — any breaking change requires a major version bump and a
- * 6-month deprecation window. See docs.duckcode.ai/architecture/plugin-api.
+ * 6-month deprecation window. See docs/architecture/plugin-api.md.
  */
 
 export interface ColumnSchema {

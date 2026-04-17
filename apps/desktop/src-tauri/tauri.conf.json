@@ -5,7 +5,7 @@
   "identifier": "ai.duckcode.dql",
   "build": {
     "beforeDevCommand": "pnpm -F @duckcodeailabs/dql-notebook-app dev",
-    "beforeBuildCommand": "pnpm -F @duckcodeailabs/dql-notebook-app build",
+    "beforeBuildCommand": "",
     "devUrl": "http://localhost:5173",
     "frontendDist": "../../dql-notebook/dist"
   },

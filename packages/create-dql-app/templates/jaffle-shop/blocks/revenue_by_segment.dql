@@ -5,7 +5,6 @@ block "Revenue by segment" {
   type = "custom"
   description = "Gross revenue grouped by customer segment."
   tags = ["revenue", "sample"]
-
   query = """
     SELECT
       c.customer_segment AS segment,
@@ -16,13 +15,11 @@ block "Revenue by segment" {
     GROUP BY 1
     ORDER BY revenue DESC
   """
-
   visualization {
     chart = "bar"
     x = segment
     y = revenue
   }
-
   tests {
     assert row_count > 0
   }

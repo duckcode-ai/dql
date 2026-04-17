@@ -47,4 +47,4 @@ node scripts/bench/gen-dbt-project.mjs --models 4000 --out /tmp/stress
 node scripts/bench/run-bench.mjs /tmp/stress
 ```
 
-See [docs.duckcode.ai/contribute/testing](https://docs.duckcode.ai/contribute/testing/).
+See [docs/contribute/testing.md](../../docs/contribute/testing.md).
