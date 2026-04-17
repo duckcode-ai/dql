@@ -1,0 +1,13 @@
+{
+  "name": "{{PROJECT_NAME}}",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "notebook": "dql notebook",
+    "compile": "dql compile",
+    "doctor": "dql doctor"
+  },
+  "devDependencies": {
+    "@duckcodeailabs/dql-cli": "^1.0.0"
+  }
+}

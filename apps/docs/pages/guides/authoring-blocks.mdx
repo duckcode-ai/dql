@@ -1,0 +1,80 @@
+---
+title: Author a certified block
+description: Build, lint, and promote a governed analytics block in Block Studio.
+---
+
+# Author a certified block
+
+> ~6 minutes · ends with a certified block linked from a notebook
+
+A **block** is a named, versioned analytics artifact with SQL, a chart
+spec, and governance metadata. Blocks are the unit of reuse in DQL — and
+the thing reviewers actually review.
+
+## 1. Open Block Studio
+
+From the notebook, click **Blocks** in the left rail → **New Block**, or:
+
+```bash
+dql block new revenue_by_segment --domain finance
+```
+
+Block Studio opens with a three-pane layout: SQL editor · live result ·
+governance form.
+
+## 2. Write the SQL
+
+```sql
+select
+  segment,
+  sum(amount) as revenue,
+  count(distinct customer_id) as customers
+from @table("orders")
+group by 1
+order by revenue desc
+```
+
+`@table("orders")` resolves via the semantic layer (dbt or DQL-local). The
+editor shows lint warnings from `dql-governance` as you type.
+
+## 3. Fill in governance
+
+| Field | Example | Why it matters |
+| --- | --- | --- |
+| `domain` | `finance` | Lineage cross-domain detection |
+| `owner` | `analytics@company.com` | Who answers questions |
+| `tags` | `revenue`, `certified` | Discovery & filtering |
+| `description` | "Revenue by customer segment…" | Shows in hover cards |
+| `tests` | `row_count > 0` | Blocks the certify step if failing |
+
+## 4. Preview
+
+**⌘↵** runs the query. Results render inline; the chart spec auto-picks bar
+for categorical-x/numeric-y. Override in the visualization panel.
+
+## 5. Promote to certified
+
+Click **Promote → Certified**. DQL:
+
+- runs tests (`tests:` block)
+- diffs SQL against the previous certified version
+- bumps the block version
+- writes the new version to git via a canonical `.dql` serialization
+
+The certified tag appears in the block library; downstream notebooks see
+the new version on next open.
+
+## 6. Use it in a notebook
+
+```dql
+-- Notebook cell
+@block("revenue_by_segment")
+```
+
+DQL inlines the compiled SQL, runs it, and renders the block's chart spec.
+
+## Verify it worked
+
+- Block appears in the **Block Library** sidebar with a green "certified" badge
+- `git log -- blocks/finance/revenue_by_segment.dql` shows a clean commit
+- Notebook cell referencing the block renders a bar chart with your data

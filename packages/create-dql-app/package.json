@@ -1,0 +1,40 @@
+{
+  "name": "create-dql-app",
+  "version": "1.0.1",
+  "description": "Scaffold a new DQL project. Run with: npx create-dql-app <name>",
+  "license": "MIT",
+  "author": "DuckCode AI Labs",
+  "homepage": "https://docs.duckcode.ai",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/duckcode-ai/dql.git",
+    "directory": "packages/create-dql-app"
+  },
+  "keywords": [
+    "dql",
+    "dbt",
+    "analytics",
+    "notebook",
+    "semantic-layer",
+    "lineage"
+  ],
+  "bin": {
+    "create-dql-app": "./bin/create-dql-app.mjs"
+  },
+  "files": [
+    "bin",
+    "templates",
+    "README.md"
+  ],
+  "type": "module",
+  "scripts": {
+    "test": "node test/smoke.mjs",
+    "build": "echo 'no build step — pure JS'"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "publishConfig": {
+    "access": "public"
+  }
+}

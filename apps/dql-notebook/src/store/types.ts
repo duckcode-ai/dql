@@ -23,7 +23,7 @@ export interface ParamConfig {
   defaultValue: string;
   options?: string[];
 }
-export type SidebarPanel = 'files' | 'schema' | 'block_library' | 'connection' | 'reference' | 'semantic' | 'lineage' | null;
+export type SidebarPanel = 'files' | 'schema' | 'block_library' | 'connection' | 'reference' | 'lineage' | 'git' | null;
 export type DevPanelTab = 'logs' | 'errors';
 export type MainView = 'notebook' | 'block_studio' | 'connection' | 'reference';
 
@@ -32,6 +32,22 @@ export interface QueryResult {
   rows: Record<string, unknown>[];
   executionTime?: number;
   rowCount?: number;
+}
+
+export interface RunSnapshotCell {
+  cellId: string;
+  status: CellStatus;
+  result?: QueryResult;
+  error?: string;
+  executionCount?: number;
+  executedAt?: string;
+}
+
+export interface RunSnapshot {
+  version: 1;
+  notebookPath: string;
+  capturedAt: string;
+  cells: RunSnapshotCell[];
 }
 
 export interface Cell {

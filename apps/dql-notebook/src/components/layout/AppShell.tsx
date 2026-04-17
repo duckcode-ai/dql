@@ -18,6 +18,7 @@ import { api } from '../../api/client';
 import { parseNotebookFile } from '../../utils/parse-workbook';
 import { makeCell } from '../../store/NotebookStore';
 import { useKeyboardShortcuts } from '../../hooks/useKeyboardShortcuts';
+import { useRunSnapshotAutosave } from '../../hooks/useRunSnapshotAutosave';
 import type { NotebookFile } from '../../store/types';
 
 export function AppShell() {
@@ -29,6 +30,8 @@ export function AppShell() {
 
   // Global keyboard shortcuts
   useKeyboardShortcuts();
+  // Debounced autosave of cell results to <notebook>.run.json
+  useRunSnapshotAutosave();
 
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
@@ -55,7 +58,25 @@ export function AppShell() {
         }
         const { content } = await api.readNotebook(file.path);
         const { title, cells } = parseNotebookFile(file.path, content);
-        dispatch({ type: 'OPEN_FILE', file, cells, title });
+
+        // Hydrate last-run results from sibling .run.json so the notebook
+        // shows executed output without forcing a re-run on open.
+        const snap = await api.fetchRunSnapshot(file.path);
+        const hydrated = snap.found && snap.snapshot
+          ? cells.map((c) => {
+              const entry = snap.snapshot!.cells.find((e) => e.cellId === c.id);
+              if (!entry) return c;
+              return {
+                ...c,
+                status: entry.status ?? c.status,
+                result: entry.result ?? c.result,
+                error: entry.error ?? c.error,
+                executionCount: entry.executionCount ?? c.executionCount,
+              };
+            })
+          : cells;
+
+        dispatch({ type: 'OPEN_FILE', file, cells: hydrated, title });
         // Ensure files panel is visible
         if (state.sidebarPanel !== 'files') {
           dispatch({ type: 'SET_SIDEBAR_PANEL', panel: 'files' });

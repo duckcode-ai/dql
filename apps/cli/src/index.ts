@@ -22,6 +22,7 @@ import { runSemantic } from './commands/semantic.js';
 import { runLineage } from './commands/lineage.js';
 import { runCompile } from './commands/compile.js';
 import { runSync } from './commands/sync.js';
+import { runDiff } from './commands/diff.js';
 
 const HELP = `
   dql — DQL CLI
@@ -40,6 +41,7 @@ const HELP = `
     dql info <file.dql>             Show block metadata
     dql migrate <source>            Scaffold migration from looker/tableau/dbt/metabase/raw-sql
     dql fmt <file.dql>              Format DQL file in place
+    dql diff <before> <after>       Semantic diff between two .dql files
     dql notebook [path]             Launch the browser-first notebook for a project
     dql semantic <sub> [path]       Semantic layer: list, validate, query, pull
     dql compile [path]              Generate project manifest (dql-manifest.json)
@@ -147,6 +149,9 @@ async function main() {
         break;
       case 'lineage':
         await runLineage(file, rest, flags);
+        break;
+      case 'diff':
+        await runDiff(file, rest, flags);
         break;
       default:
         console.error(`Unknown command: ${command}. Run "dql --help" for usage.`);

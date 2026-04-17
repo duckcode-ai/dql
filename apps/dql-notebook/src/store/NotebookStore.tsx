@@ -132,7 +132,6 @@ function notebookReducer(state: NotebookState, action: NotebookAction): Notebook
         notebookTitle: action.payload.metadata.name,
         notebookDirty: false,
         mainView: 'block_studio',
-        sidebarPanel: state.sidebarPanel === 'semantic' ? 'files' : state.sidebarPanel,
         dashboardMode: false,
         activeBlockPath: action.payload.path,
         blockStudioDraft: action.payload.source,

@@ -1,0 +1,49 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "DQL",
+  "version": "0.11.0",
+  "identifier": "ai.duckcode.dql",
+  "build": {
+    "beforeDevCommand": "pnpm -F @duckcodeailabs/dql-notebook-app dev",
+    "beforeBuildCommand": "pnpm -F @duckcodeailabs/dql-notebook-app build",
+    "devUrl": "http://localhost:5173",
+    "frontendDist": "../../dql-notebook/dist"
+  },
+  "app": {
+    "windows": [
+      {
+        "title": "DQL",
+        "width": 1440,
+        "height": 900,
+        "minWidth": 1024,
+        "minHeight": 640,
+        "decorations": true,
+        "fullscreen": false,
+        "resizable": true
+      }
+    ],
+    "security": {
+      "csp": null
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["dmg", "app", "deb", "appimage", "rpm", "msi", "nsis"],
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ],
+    "resources": [],
+    "category": "DeveloperTool",
+    "shortDescription": "Analytics notebooks on your dbt models.",
+    "longDescription": "DQL is a git-native, local-first analytics notebook + block studio that sits on top of dbt's semantic layer. Open source, MIT-licensed.",
+    "copyright": "© 2026 DuckCode AI Labs",
+    "publisher": "DuckCode AI Labs",
+    "macOS": {
+      "minimumSystemVersion": "11.0"
+    }
+  }
+}

@@ -1,0 +1,20 @@
+{
+  "version": 1,
+  "metadata": {
+    "title": "{{PROJECT_NAME}} — Welcome",
+    "description": "Replace this cell with your first query."
+  },
+  "cells": [
+    {
+      "id": "intro",
+      "type": "markdown",
+      "source": "# {{PROJECT_NAME}}\n\nWelcome to DQL. Connect a warehouse in `dql.config.json`, then edit the cell below."
+    },
+    {
+      "id": "first_query",
+      "type": "sql",
+      "title": "First query",
+      "source": "select 1 as hello"
+    }
+  ]
+}

@@ -1,0 +1,29 @@
+// dql-format: 1
+
+dashboard "{{PROJECT_NAME}} — Overview" {
+  chart.kpi(
+    SELECT SUM(amount) as revenue FROM orders,
+    metrics = ["revenue"]
+  )
+
+  chart.bar(
+    SELECT customer_id, SUM(amount) as spend
+    FROM orders
+    GROUP BY customer_id
+    ORDER BY spend DESC
+    LIMIT 10,
+    x = customer_id,
+    y = spend,
+    title = "Top 10 customers by spend"
+  )
+
+  chart.line(
+    SELECT order_date, SUM(amount) as revenue
+    FROM orders
+    GROUP BY order_date
+    ORDER BY order_date,
+    x = order_date,
+    y = revenue,
+    title = "Daily revenue"
+  )
+}

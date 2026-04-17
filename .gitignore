@@ -11,4 +11,5 @@ dist
 npm-debug.log*
 pnpm-debug.log*
 jaffle-shop/
+!packages/create-dql-app/templates/jaffle-shop/
 .claude/worktrees/

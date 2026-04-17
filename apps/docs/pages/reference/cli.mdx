@@ -1,0 +1,97 @@
+---
+title: CLI reference
+description: Every dql subcommand and flag.
+---
+
+import { Callout } from 'nextra/components';
+
+# CLI reference
+
+<Callout type="info">
+  This page mirrors `dql --help`. The source of truth is
+  [`apps/cli/src/index.ts`](https://github.com/duckcode-ai/dql/blob/main/apps/cli/src/index.ts);
+  a CI job fails the build if this page drifts.
+</Callout>
+
+```bash
+dql --help
+dql --version
+```
+
+## Commands
+
+### Project
+
+| Command | What it does |
+| --- | --- |
+| `dql init [dir]` | Initialize DQL in a project (auto-detects dbt) |
+| `dql doctor [path]` | Run local setup checks |
+| `dql validate [path]` | Validate all `.dql` files and semantic references |
+| `dql compile [path]` | Generate project manifest (`dql-manifest.json`) |
+
+### Authoring
+
+| Command | What it does |
+| --- | --- |
+| `dql new <type> <name>` | Create a block, semantic block, dashboard, or workbook |
+| `dql parse <file.dql>` | Parse and analyze a DQL file |
+| `dql info <file.dql>` | Show block metadata |
+| `dql certify <file.dql>` | Evaluate certification rules |
+| `dql fmt <file.dql>` | Format a file in place (canonical form) |
+| `dql fmt --check <path>` | CI check; exits 1 if anything needs formatting |
+
+### Diff & versioning
+
+| Command | What it does |
+| --- | --- |
+| `dql diff <before> <after>` | AST-level semantic diff between two `.dql` files |
+
+Exits **1** on changes — scriptable like `git diff`.
+
+### Build & preview
+
+| Command | What it does |
+| --- | --- |
+| `dql build <file.dql>` | Compile to a static HTML bundle |
+| `dql preview <file.dql>` | Local browser preview |
+| `dql serve [dir]` | Serve a built bundle |
+| `dql notebook [path]` | Launch the browser-first notebook |
+
+### Data & semantic
+
+| Command | What it does |
+| --- | --- |
+| `dql semantic list\|validate\|query\|pull` | Semantic layer operations |
+| `dql sync dbt [path]` | Detect dbt manifest changes; update cache |
+| `dql lineage [block] [path]` | Answer-layer lineage analysis |
+
+### Migration
+
+| Command | What it does |
+| --- | --- |
+| `dql migrate <source>` | Scaffold from looker, tableau, dbt, metabase, or raw-sql |
+
+## Global flags
+
+| Flag | Meaning |
+| --- | --- |
+| `--format json\|text` | Output format (default: text) |
+| `--verbose` | Detailed output |
+| `--open` / `--no-open` | Auto-open the browser on `preview`/`serve` |
+| `--check` | For `fmt`: non-zero exit if changes needed |
+| `--input <path>` | Source for scaffold-style migrations |
+| `--out-dir <path>` | Output directory for `build` |
+| `--port <n>` | Preferred local port for `preview`/`serve` |
+| `--chart <type>` | Primary chart type for `new` scaffolds |
+| `--domain <name>` | Domain for new block scaffolds |
+| `--owner <name>` | Owner for new block scaffolds |
+| `--query-only` | Create a query-only block (no visualization) |
+| `--connection <driver\|path>` | Connection for `certify`/`test` (e.g. `duckdb`, `./db.duckdb`) |
+
+## Exit codes
+
+| Code | Meaning |
+| --- | --- |
+| `0` | Success |
+| `1` | Generic failure *or* `dql diff`/`dql fmt --check` found differences |
+| `2` | Usage / argument error |

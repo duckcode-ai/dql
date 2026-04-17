@@ -3,6 +3,8 @@
 export {
   buildManifest,
   collectInputFiles,
+  loadProjectConfig,
+  resolveDbtManifestPath,
   type ManifestBuildOptions,
   type DbtImportFilters,
 } from './builder.js';
@@ -19,4 +21,5 @@ export type {
   ManifestLineageNode,
   ManifestLineageEdge,
   ManifestDbtImport,
+  ManifestDiagnostic,
 } from './types.js';

@@ -30,6 +30,7 @@ import type {
   ManifestSource,
   ManifestLineage,
   ManifestDbtImport,
+  ManifestDiagnostic,
 } from './types.js';
 
 // ---- Public API ----
@@ -126,17 +127,19 @@ export function collectInputFiles(options: ManifestBuildOptions): string[] {
 export function buildManifest(options: ManifestBuildOptions): DQLManifest {
   const { projectRoot, dqlVersion = '0.6.0' } = options;
 
+  const diagnostics: ManifestDiagnostic[] = [];
+
   // Load project config
   const config = loadProjectConfig(projectRoot);
   const projectName = config.project ?? 'dql-project';
 
   // Scan blocks
   const blockDirs = ['blocks', 'dashboards', 'workbooks', ...(options.extraBlockDirs ?? [])];
-  const blocks = scanBlocks(projectRoot, blockDirs);
+  const blocks = scanBlocks(projectRoot, blockDirs, diagnostics);
 
   // Scan notebooks
   const notebookDirs = ['notebooks', 'blocks', 'dashboards', 'workbooks', ...(options.extraNotebookDirs ?? [])];
-  const notebooks = scanNotebooks(projectRoot, notebookDirs);
+  const notebooks = scanNotebooks(projectRoot, notebookDirs, diagnostics);
 
   // Extract blocks declared inside notebook DQL cells
   const notebookBlocks = extractNotebookBlocks(notebooks, projectRoot);
@@ -193,6 +196,7 @@ export function buildManifest(options: ManifestBuildOptions): DQLManifest {
     sources,
     lineage,
     dbtImport,
+    diagnostics,
   };
 }
 
@@ -204,9 +208,23 @@ interface ProjectConfig {
   dataDir?: string;
   /** Selective dbt import filters; merged into buildManifest options. */
   dbtImport?: DbtImportFilters;
+  /**
+   * dbt integration — so commands can default to the right manifest path
+   * without the user re-typing `--dbt-manifest` on every invocation.
+   */
+  dbt?: {
+    /** Path to the dbt project root (absolute, or relative to projectRoot) */
+    projectDir?: string;
+    /** Path to the dbt manifest.json, relative to `projectDir`. Default: target/manifest.json */
+    manifestPath?: string;
+  };
 }
 
-function loadProjectConfig(projectRoot: string): ProjectConfig {
+/**
+ * Load `dql.config.json`. Exposed so CLI commands can read the same config
+ * the manifest builder uses — no need for each command to re-implement parse.
+ */
+export function loadProjectConfig(projectRoot: string): ProjectConfig {
   const configPath = join(projectRoot, 'dql.config.json');
   if (!existsSync(configPath)) return {};
   try {
@@ -214,6 +232,37 @@ function loadProjectConfig(projectRoot: string): ProjectConfig {
   } catch {
     return {};
   }
+}
+
+/**
+ * Resolve the absolute path to the configured dbt manifest.json (if any).
+ * Honors explicit CLI flag first, then `dbt.projectDir + dbt.manifestPath` from
+ * config, then the conventional `target/manifest.json` inside the project root.
+ * Returns `null` if none of those exist.
+ */
+export function resolveDbtManifestPath(
+  projectRoot: string,
+  explicit?: string,
+): string | null {
+  if (explicit) {
+    return isAbsPath(explicit) ? explicit : join(projectRoot, explicit);
+  }
+  const config = loadProjectConfig(projectRoot);
+  if (config.dbt?.projectDir) {
+    const dbtRoot = isAbsPath(config.dbt.projectDir)
+      ? config.dbt.projectDir
+      : join(projectRoot, config.dbt.projectDir);
+    const rel = config.dbt.manifestPath ?? 'target/manifest.json';
+    const abs = isAbsPath(rel) ? rel : join(dbtRoot, rel);
+    if (existsSync(abs)) return abs;
+  }
+  const fallback = join(projectRoot, 'target', 'manifest.json');
+  if (existsSync(fallback)) return fallback;
+  return null;
+}
+
+function isAbsPath(p: string): boolean {
+  return p.startsWith('/') || /^[A-Za-z]:[\\/]/.test(p);
 }
 
 function resolveSemanticPath(projectRoot: string, config: ProjectConfig): string {
@@ -244,7 +293,11 @@ function scanFilesRecursive(dir: string, extensions: string[]): string[] {
 
 // ---- Block Scanning ----
 
-function scanBlocks(projectRoot: string, dirs: string[]): Record<string, ManifestBlock> {
+function scanBlocks(
+  projectRoot: string,
+  dirs: string[],
+  diagnostics?: ManifestDiagnostic[],
+): Record<string, ManifestBlock> {
   const blocks: Record<string, ManifestBlock> = {};
 
   for (const dir of dirs) {
@@ -252,9 +305,9 @@ function scanBlocks(projectRoot: string, dirs: string[]): Record<string, Manifes
     const files = scanFilesRecursive(dirPath, ['.dql']);
 
     for (const filePath of files) {
+      const relPath = relative(projectRoot, filePath);
       try {
         const source = readFileSync(filePath, 'utf-8');
-        const relPath = relative(projectRoot, filePath);
         const parser = new Parser(source, relPath);
         const ast = parser.parse();
 
@@ -296,8 +349,16 @@ function scanBlocks(projectRoot: string, dirs: string[]): Record<string, Manifes
             description,
           };
         }
-      } catch {
-        // Skip unparseable files
+      } catch (err) {
+        // Surface parse failures as diagnostics instead of silently dropping
+        // the file. Users see a concrete error + path; `dql doctor` picks it up.
+        const msg = err instanceof Error ? err.message : String(err);
+        diagnostics?.push({
+          kind: 'parse',
+          filePath: relPath,
+          severity: 'error',
+          message: `Failed to parse block file: ${msg}`,
+        });
       }
     }
   }
@@ -307,7 +368,11 @@ function scanBlocks(projectRoot: string, dirs: string[]): Record<string, Manifes
 
 // ---- Notebook Scanning ----
 
-function scanNotebooks(projectRoot: string, dirs: string[]): Record<string, ManifestNotebook> {
+function scanNotebooks(
+  projectRoot: string,
+  dirs: string[],
+  diagnostics?: ManifestDiagnostic[],
+): Record<string, ManifestNotebook> {
   const notebooks: Record<string, ManifestNotebook> = {};
   const seen = new Set<string>();
 
@@ -381,8 +446,14 @@ function scanNotebooks(projectRoot: string, dirs: string[]): Record<string, Mani
             cells,
           };
         }
-      } catch {
-        // Skip invalid notebooks
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        diagnostics?.push({
+          kind: 'parse',
+          filePath: relative(projectRoot, filePath),
+          severity: 'error',
+          message: `Failed to parse notebook: ${msg}`,
+        });
       }
     }
   }

@@ -32,6 +32,7 @@ import {
   type LineageBlockInput,
   type LineageMetricInput,
   type LineageDimensionInput,
+  canonicalize,
 } from '@duckcodeailabs/dql-core';
 import { listBlockTemplates } from './block-templates.js';
 import {
@@ -270,13 +271,64 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           return;
         }
         mkdirSync(dirname(absPath), { recursive: true });
-        writeFileSync(absPath, content, 'utf-8');
+        const toWrite = absPath.endsWith('.dql') ? canonicalizeSafe(content) : content;
+        writeFileSync(absPath, toWrite, 'utf-8');
         res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
         res.end(serializeJSON({ ok: true }));
       } catch (error) {
         res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' });
         res.end(serializeJSON({ error: error instanceof Error ? error.message : String(error) }));
       }
+      return;
+    }
+
+    // ── run snapshots (v0.11) ───────────────────────────────────────────────
+    // Captures executed notebook state (query results + timings) in a
+    // sibling `.run.json` so notebooks can show last-run output without
+    // re-executing after a reload. Snapshots are git-ignored by default.
+    if (req.method === 'GET' && path === '/api/run-snapshot') {
+      const notebookPath = url.searchParams.get('path') ?? '';
+      res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+      res.end(serializeJSON(readRunSnapshot(projectRoot, notebookPath)));
+      return;
+    }
+    if (req.method === 'PUT' && path === '/api/run-snapshot') {
+      try {
+        const body = await readJSON(req) as { path: string; snapshot: unknown };
+        if (!body.path || typeof body.path !== 'string' || !body.snapshot) {
+          res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
+          res.end(serializeJSON({ error: 'Missing path or snapshot' }));
+          return;
+        }
+        writeRunSnapshot(projectRoot, body.path, body.snapshot);
+        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({ ok: true }));
+      } catch (err) {
+        res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({ error: err instanceof Error ? err.message : String(err) }));
+      }
+      return;
+    }
+
+    // ── git read-only API (v0.11) ───────────────────────────────────────────
+    // GET /api/git/status  — branch, clean, changed files
+    // GET /api/git/log     — last N commits (?limit=20)
+    // GET /api/git/diff    — unified diff for a single file (?path=relative/path)
+    if (req.method === 'GET' && path === '/api/git/status') {
+      res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+      res.end(serializeJSON(await readGitStatus(projectRoot)));
+      return;
+    }
+    if (req.method === 'GET' && path === '/api/git/log') {
+      const limit = Math.min(Number(url.searchParams.get('limit') ?? 20), 200);
+      res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+      res.end(serializeJSON(await readGitLog(projectRoot, limit)));
+      return;
+    }
+    if (req.method === 'GET' && path === '/api/git/diff') {
+      const filePath = url.searchParams.get('path') ?? '';
+      res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+      res.end(serializeJSON(await readGitDiff(projectRoot, filePath)));
       return;
     }
 
@@ -2994,6 +3046,17 @@ function extractBlockStudioSemanticReferences(source: string): { metrics: string
   };
 }
 
+function canonicalizeSafe(source: string): string {
+  try {
+    return canonicalize(source);
+  } catch {
+    // If the block body has content the parser rejects (e.g. unsupported
+    // syntax in a user-provided template), keep the original bytes rather
+    // than fail the write — format header gets added next time it passes fmt.
+    return source;
+  }
+}
+
 export function createBlockArtifacts(
   projectRoot: string,
   options: {
@@ -3022,13 +3085,13 @@ export function createBlockArtifacts(
   const templateContent = options.template
     ? listBlockTemplates().find((template) => template.id === options.template)?.content
     : undefined;
-  const fileContent = normalizeBlockStudioContent({
+  const fileContent = canonicalizeSafe(normalizeBlockStudioContent({
     name: options.name,
     domain: safeDomain || 'uncategorized',
     description: options.description,
     tags: options.tags,
     content: options.content?.trim() || templateContent,
-  });
+  }));
 
   writeFileSync(blockPath, fileContent, 'utf-8');
   const relativePath = safeDomain ? `blocks/${safeDomain}/${slug}.dql` : `blocks/${slug}.dql`;
@@ -3079,9 +3142,11 @@ export function createSemanticBuilderBlock(
     throw new Error('BLOCK_EXISTS');
   }
 
-  const content = options.blockType === 'custom'
-    ? buildCustomSemanticBlockContent(options)
-    : buildSemanticBlockContent(options);
+  const content = canonicalizeSafe(
+    options.blockType === 'custom'
+      ? buildCustomSemanticBlockContent(options)
+      : buildSemanticBlockContent(options),
+  );
   writeFileSync(blockPath, content, 'utf-8');
 
   const companionPath = writeBlockCompanionFile(projectRoot, {
@@ -3505,4 +3570,146 @@ function extractVizChart(block: any): string | undefined {
     if (prop.key === 'chart' && prop.value?.kind === 'Literal') return String(prop.value.value);
   }
   return undefined;
+}
+
+// ── Git read-only helpers (v0.11) ──────────────────────────────────────────
+// Shell out to the system `git` binary rather than embed isomorphic-git.
+// Users already have git installed to be in a git repo; shelling out keeps
+// the notebook bundle lean and avoids re-implementing what `git` already
+// does perfectly. All commands run with `cwd = projectRoot` and never take
+// user-controlled args (only fixed subcommands + the file path, which we
+// pass as a separate execFile arg so it's never interpreted as shell).
+
+export interface GitStatusResult {
+  inRepo: boolean;
+  branch: string | null;
+  ahead: number;
+  behind: number;
+  changes: Array<{ path: string; status: string }>;
+  error?: string;
+}
+
+async function execGit(cwd: string, args: string[]): Promise<{ stdout: string; stderr: string; code: number }> {
+  const { execFile } = await import('node:child_process');
+  return new Promise((resolve) => {
+    execFile('git', args, { cwd, maxBuffer: 8 * 1024 * 1024 }, (err, stdout, stderr) => {
+      resolve({
+        stdout: String(stdout ?? ''),
+        stderr: String(stderr ?? ''),
+        code: err ? ((err as NodeJS.ErrnoException).code ? 1 : (err as any).code ?? 1) : 0,
+      });
+    });
+  });
+}
+
+async function readGitStatus(cwd: string): Promise<GitStatusResult> {
+  const isRepo = await execGit(cwd, ['rev-parse', '--is-inside-work-tree']);
+  if (isRepo.code !== 0 || isRepo.stdout.trim() !== 'true') {
+    return { inRepo: false, branch: null, ahead: 0, behind: 0, changes: [] };
+  }
+  const branchRes = await execGit(cwd, ['rev-parse', '--abbrev-ref', 'HEAD']);
+  const branch = branchRes.code === 0 ? branchRes.stdout.trim() : null;
+
+  const trackRes = await execGit(cwd, ['rev-list', '--left-right', '--count', '@{u}...HEAD']);
+  let ahead = 0;
+  let behind = 0;
+  if (trackRes.code === 0) {
+    const match = trackRes.stdout.trim().split(/\s+/);
+    behind = Number(match[0] ?? 0);
+    ahead = Number(match[1] ?? 0);
+  }
+
+  const statusRes = await execGit(cwd, ['status', '--porcelain=v1', '--untracked-files=normal']);
+  const changes: Array<{ path: string; status: string }> = [];
+  if (statusRes.code === 0) {
+    for (const line of statusRes.stdout.split('\n')) {
+      if (!line) continue;
+      const code = line.slice(0, 2);
+      const p = line.slice(3);
+      changes.push({ path: p, status: code });
+    }
+  }
+  return { inRepo: true, branch, ahead, behind, changes };
+}
+
+export interface GitCommit {
+  hash: string;
+  author: string;
+  date: string;
+  subject: string;
+}
+
+async function readGitLog(cwd: string, limit: number): Promise<{ inRepo: boolean; commits: GitCommit[] }> {
+  const isRepo = await execGit(cwd, ['rev-parse', '--is-inside-work-tree']);
+  if (isRepo.code !== 0) return { inRepo: false, commits: [] };
+  const sep = '\x1f';
+  const end = '\x1e';
+  const fmt = ['%H', '%an', '%ad', '%s'].join(sep) + end;
+  const res = await execGit(cwd, ['log', `-${limit}`, `--pretty=format:${fmt}`, '--date=short']);
+  if (res.code !== 0) return { inRepo: true, commits: [] };
+  const commits: GitCommit[] = [];
+  for (const entry of res.stdout.split(end)) {
+    const trimmed = entry.replace(/^\n/, '');
+    if (!trimmed) continue;
+    const [hash, author, date, subject] = trimmed.split(sep);
+    if (hash) commits.push({ hash, author, date, subject });
+  }
+  return { inRepo: true, commits };
+}
+
+function snapshotPathFor(projectRoot: string, notebookPath: string): string | null {
+  const abs = safeJoin(projectRoot, notebookPath);
+  if (!abs) return null;
+  // Strip extension and append `.run.json` so `foo.dqlnb` → `foo.run.json`
+  // and `bar.dql` → `bar.run.json`. Keeps the sibling file next to source.
+  const dot = abs.lastIndexOf('.');
+  const base = dot > abs.lastIndexOf('/') ? abs.slice(0, dot) : abs;
+  return `${base}.run.json`;
+}
+
+function readRunSnapshot(projectRoot: string, notebookPath: string): { found: boolean; snapshot: unknown | null } {
+  const p = snapshotPathFor(projectRoot, notebookPath);
+  if (!p || !existsSync(p)) return { found: false, snapshot: null };
+  try {
+    const raw = readFileSync(p, 'utf-8');
+    return { found: true, snapshot: JSON.parse(raw) };
+  } catch {
+    return { found: false, snapshot: null };
+  }
+}
+
+function writeRunSnapshot(projectRoot: string, notebookPath: string, snapshot: unknown): void {
+  const p = snapshotPathFor(projectRoot, notebookPath);
+  if (!p) throw new Error('Invalid path');
+  mkdirSync(dirname(p), { recursive: true });
+  writeFileSync(p, JSON.stringify(snapshot, null, 2), 'utf-8');
+  // Append `*.run.json` to .gitignore once, so snapshots don't pollute git
+  // history unless the user deliberately un-ignores them.
+  ensureGitignoreEntry(projectRoot, '*.run.json');
+}
+
+function ensureGitignoreEntry(projectRoot: string, pattern: string): void {
+  try {
+    const gitignorePath = join(projectRoot, '.gitignore');
+    const existing = existsSync(gitignorePath) ? readFileSync(gitignorePath, 'utf-8') : '';
+    const lines = existing.split('\n').map((l) => l.trim());
+    if (lines.includes(pattern)) return;
+    const next = existing.endsWith('\n') || existing === ''
+      ? `${existing}${pattern}\n`
+      : `${existing}\n${pattern}\n`;
+    writeFileSync(gitignorePath, next, 'utf-8');
+  } catch {
+    // Best-effort; failure to write .gitignore shouldn't fail the snapshot.
+  }
+}
+
+async function readGitDiff(cwd: string, filePath: string): Promise<{ inRepo: boolean; diff: string }> {
+  const isRepo = await execGit(cwd, ['rev-parse', '--is-inside-work-tree']);
+  if (isRepo.code !== 0) return { inRepo: false, diff: '' };
+  if (!filePath) {
+    const res = await execGit(cwd, ['diff', '--no-color']);
+    return { inRepo: true, diff: res.stdout };
+  }
+  const res = await execGit(cwd, ['diff', '--no-color', '--', filePath]);
+  return { inRepo: true, diff: res.stdout };
 }

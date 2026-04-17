@@ -1,5 +1,5 @@
 import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs';
-import { basename, join, resolve } from 'node:path';
+import { basename, join, relative, resolve } from 'node:path';
 import { createWelcomeNotebook, serializeNotebook } from '@duckcodeailabs/dql-notebook';
 import type { CLIFlags } from '../args.js';
 import { performSemanticImport } from '../semantic-import.js';
@@ -14,9 +14,34 @@ export async function runInit(targetArg: string | null, flags: CLIFlags): Promis
     mkdirSync(targetDir, { recursive: true });
   }
 
-  // Detect if this is a dbt project
-  const isDbt = existsSync(join(targetDir, 'dbt_project.yml'));
-  const hasDbtSemanticDefinitions = isDbt && containsDbtSemanticDefinitions(join(targetDir, 'models'));
+  // Refuse to clobber a project that's already been initialized. `--force`
+  // lets us patch missing dirs; it still won't overwrite config/notebooks.
+  const alreadyInitialized =
+    existsSync(join(targetDir, 'dql.config.json')) || existsSync(join(targetDir, 'cdql.yaml'));
+  if (alreadyInitialized && !flags.force) {
+    console.error('✗ This directory already has a DQL project (dql.config.json exists).');
+    console.error('  Re-run with --force to patch missing dirs without overwriting config.');
+    process.exitCode = 1;
+    return;
+  }
+
+  // Detect if this is a dbt project — either *in* this directory, or as a
+  // sibling (the canonical `acme/dbt/` + `acme/analytics/` layout).
+  let isDbt = existsSync(join(targetDir, 'dbt_project.yml'));
+  let dbtProjectDir: string | null = isDbt ? targetDir : null;
+  if (!dbtProjectDir) {
+    for (const rel of ['..', '../..', '../dbt', '../../dbt']) {
+      const probe = join(targetDir, rel, 'dbt_project.yml');
+      if (existsSync(probe)) {
+        dbtProjectDir = resolve(targetDir, rel);
+        isDbt = true;
+        break;
+      }
+    }
+  }
+  const hasDbtSemanticDefinitions = dbtProjectDir
+    ? containsDbtSemanticDefinitions(join(dbtProjectDir, 'models'))
+    : false;
 
   // Detect DuckDB file in the directory
   const duckdbPath = detectDuckDBFile(targetDir);
@@ -24,7 +49,7 @@ export async function runInit(targetArg: string | null, flags: CLIFlags): Promis
   // Don't overwrite existing dql.config.json
   const configPath = join(targetDir, 'dql.config.json');
   if (!existsSync(configPath)) {
-    const config = buildConfig(projectName, isDbt, duckdbPath);
+    const config = buildConfig(projectName, isDbt, duckdbPath, dbtProjectDir, targetDir);
     writeFileSync(configPath, JSON.stringify(config, null, 2) + '\n');
   }
 
@@ -90,7 +115,11 @@ export async function runInit(targetArg: string | null, flags: CLIFlags): Promis
   console.log(`    Path: ${targetDir}`);
   console.log('');
   console.log('  Detected:');
-  console.log(`    dbt project: ${isDbt ? 'yes (dbt_project.yml found)' : 'no'}`);
+  if (isDbt && dbtProjectDir && dbtProjectDir !== targetDir) {
+    console.log(`    dbt project: sibling at ${dbtProjectDir}`);
+  } else {
+    console.log(`    dbt project: ${isDbt ? 'yes (dbt_project.yml found)' : 'no'}`);
+  }
   console.log(`    DuckDB file: ${duckdbPath ?? 'none (using :memory:)'}`);
   if (isDbt) {
     console.log(`    Semantic layer: ${importedSemanticCatalog ? 'imported dbt catalog into semantic-layer/' : hasDbtSemanticDefinitions ? 'dbt project with semantic definitions detected' : 'dbt project detected (no semantic definitions imported)'}`);
@@ -199,6 +228,8 @@ function buildConfig(
   projectName: string,
   isDbt: boolean,
   duckdbPath: string | null,
+  dbtProjectDir: string | null,
+  projectRoot: string,
 ): Record<string, unknown> {
   const config: Record<string, unknown> = {
     project: projectName,
@@ -211,9 +242,21 @@ function buildConfig(
   };
 
   if (isDbt) {
+    // Normalize dbt path to a repo-relative form if possible — makes
+    // dql.config.json portable across machines.
+    const projectPath =
+      dbtProjectDir && dbtProjectDir !== projectRoot
+        ? relativePath(projectRoot, dbtProjectDir)
+        : '.';
     config.semanticLayer = {
       provider: 'dbt',
-      projectPath: '.',
+      projectPath,
+    };
+    // Tell `dql sync dbt` and `dql compile` where to find target/manifest.json
+    // without requiring --dbt-manifest on every invocation.
+    config.dbt = {
+      projectDir: projectPath,
+      manifestPath: 'target/manifest.json',
     };
   } else {
     config.semanticLayer = {
@@ -222,4 +265,8 @@ function buildConfig(
   }
 
   return config;
+}
+
+function relativePath(from: string, to: string): string {
+  return relative(from, to) || '.';
 }

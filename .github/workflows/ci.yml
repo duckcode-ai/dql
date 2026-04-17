@@ -2,22 +2,134 @@ name: CI
 
 on:
   push:
+    branches: [main]
   pull_request:
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
+  # --- primary build + unit/golden tests ---
   build-and-test:
+    name: build + test (node ${{ matrix.node }})
     runs-on: ubuntu-latest
     strategy:
+      fail-fast: false
       matrix:
-        node-version: [20, 22]
-    name: Node ${{ matrix.node-version }}
+        node: [20, 22]
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: ${{ matrix.node-version }}
+          node-version: ${{ matrix.node }}
           cache: pnpm
       - run: pnpm install --frozen-lockfile
       - run: pnpm build
       - run: pnpm test
+
+  # --- create-dql-app smoke test ---
+  # Guards the "5 minutes to first dashboard" demo gate.
+  scaffold-smoke:
+    name: create-dql-app smoke
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: node packages/create-dql-app/test/smoke.mjs
+
+  # --- docs build + internal link check ---
+  docs:
+    name: docs build + link check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: node apps/docs/scripts/link-check.mjs
+      - run: pnpm -F @duckcodeailabs/docs build
+
+  # --- dql fmt --check across the repo ---
+  # Gates canonical .dql serialization — catches whitespace churn before
+  # it reaches main.
+  format-check:
+    name: dql fmt --check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm -F @duckcodeailabs/dql-cli build
+      - name: dql fmt --check
+        run: |
+          set -e
+          shopt -s globstar nullglob
+          files=(packages/create-dql-app/templates/**/*.dql)
+          if [ ${#files[@]} -eq 0 ]; then
+            echo "no .dql files to check — skipping"
+            exit 0
+          fi
+          for f in "${files[@]}"; do
+            node apps/cli/dist/index.js fmt --check "$f"
+          done
+
+  # --- 4,000-model stress test (perf gate) ---
+  # Gates: cold <30s, warm <2s. See docs.duckcode.ai/contribute/testing.
+  stress-test:
+    name: stress (4k-model synthetic project)
+    runs-on: ubuntu-latest
+    # Only run on main branch pushes — expensive.
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm build
+      - name: generate 4,000-model synthetic dbt project
+        run: node scripts/bench/gen-dbt-project.mjs --models 4000 --out /tmp/stress
+      - name: run benchmark (gates cold <30s, warm <2s)
+        run: DQL_CLI="node $PWD/apps/cli/dist/index.js" node scripts/bench/run-bench.mjs /tmp/stress
+
+  # --- E2E Playwright (notebook happy path) ---
+  # Runs the Jaffle Shop path in a headless browser. On PRs that don't
+  # touch the notebook app, we skip to keep CI fast.
+  e2e:
+    name: playwright e2e
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' || contains(github.event.pull_request.changed_files, 'apps/dql-notebook')
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm build
+      - run: pnpm -F @duckcodeailabs/dql-notebook-app exec playwright install --with-deps chromium
+        continue-on-error: true
+      - run: pnpm -F @duckcodeailabs/dql-notebook-app test:e2e
+        continue-on-error: true  # gate hardens to `false` once the suite lands
+
+  # --- summary gate for branch protection ---
+  ci-ok:
+    name: ci-ok
+    runs-on: ubuntu-latest
+    needs: [build-and-test, scaffold-smoke, docs, format-check]
+    steps:
+      - run: echo "All required CI gates passed."

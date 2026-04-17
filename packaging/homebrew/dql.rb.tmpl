@@ -1,0 +1,25 @@
+# Homebrew formula template. CI substitutes {{VERSION}} and {{SHA}} per
+# release and commits the result to github.com/duckcode-ai/homebrew-dql.
+#
+# Users install with:
+#   brew tap duckcode-ai/dql
+#   brew install dql
+
+class Dql < Formula
+  desc "Git-native analytics notebooks on your dbt models"
+  homepage "https://docs.duckcode.ai"
+  url "https://registry.npmjs.org/@duckcodeailabs/dql-cli/-/dql-cli-{{VERSION}}.tgz"
+  sha256 "{{SHA}}"
+  license "MIT"
+
+  depends_on "node@20"
+
+  def install
+    system "npm", "install", *Language::Node.std_npm_install_args(libexec)
+    bin.install_symlink Dir["#{libexec}/bin/*"]
+  end
+
+  test do
+    assert_match "dql", shell_output("#{bin}/dql --version")
+  end
+end

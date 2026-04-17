@@ -1,0 +1,21 @@
+[package]
+name = "dql-desktop"
+version = "0.11.0"
+edition = "2021"
+description = "Tauri wrapper for the DQL notebook."
+license = "MIT"
+
+[build-dependencies]
+tauri-build = { version = "2.0", features = [] }
+
+[dependencies]
+tauri = { version = "2.0", features = [] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[profile.release]
+panic = "abort"
+codegen-units = 1
+lto = true
+opt-level = "s"
+strip = true
