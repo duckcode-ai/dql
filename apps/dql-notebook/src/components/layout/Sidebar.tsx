@@ -7,6 +7,7 @@ import { ConnectionPanel } from '../sidebar/ConnectionPanel';
 import { ReferencePanel } from '../sidebar/ReferencePanel';
 import { LineagePanel } from '../sidebar/LineagePanel';
 import { BlockLibraryPanel } from '../sidebar/BlockLibraryPanel';
+import { GitPanel } from '../sidebar/GitPanel';
 import type { NotebookFile } from '../../store/types';
 
 interface SidebarProps {
@@ -20,6 +21,7 @@ const PANEL_TITLES: Record<string, string> = {
   lineage: 'Lineage',
   connection: 'Connection',
   reference: 'Quick Reference',
+  git: 'Git',
 };
 
 export function Sidebar({ onOpenFile }: SidebarProps) {
@@ -96,6 +98,7 @@ export function Sidebar({ onOpenFile }: SidebarProps) {
         {panel === 'lineage' && <LineagePanel />}
         {panel === 'connection' && <ConnectionPanel />}
         {panel === 'reference' && <ReferencePanel themeMode={state.themeMode} />}
+        {panel === 'git' && <GitPanel />}
       </div>
     </div>
   );

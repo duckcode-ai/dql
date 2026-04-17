@@ -573,4 +573,38 @@ export const api = {
       return null;
     }
   },
+
+  async fetchGitStatus(): Promise<{
+    inRepo: boolean;
+    branch: string | null;
+    ahead: number;
+    behind: number;
+    changes: Array<{ path: string; status: string }>;
+  }> {
+    try {
+      return await request<any>('/api/git/status');
+    } catch {
+      return { inRepo: false, branch: null, ahead: 0, behind: 0, changes: [] };
+    }
+  },
+
+  async fetchGitLog(limit = 20): Promise<{
+    inRepo: boolean;
+    commits: Array<{ hash: string; author: string; date: string; subject: string }>;
+  }> {
+    try {
+      return await request<any>(`/api/git/log?limit=${limit}`);
+    } catch {
+      return { inRepo: false, commits: [] };
+    }
+  },
+
+  async fetchGitDiff(path?: string): Promise<{ inRepo: boolean; diff: string }> {
+    try {
+      const qs = path ? `?path=${encodeURIComponent(path)}` : '';
+      return await request<any>(`/api/git/diff${qs}`);
+    } catch {
+      return { inRepo: false, diff: '' };
+    }
+  },
 };

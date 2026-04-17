@@ -56,6 +56,7 @@ export function CommandPalette({
       ['Files', 'files'],
       ['Schema', 'schema'],
       ['Lineage', 'lineage'],
+      ['Git', 'git'],
       ['Block Library', 'block_library'],
       ['Connections', 'connection'],
       ['Reference', 'reference'],
