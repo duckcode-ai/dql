@@ -15,21 +15,16 @@ we treat the quickstart as a contract.
 
 <Steps>
 
-### Install the CLI
-
-```bash
-npm i -g @duckcodeailabs/dql-cli
-dql --version
-```
-
-See [Install](/get-started/install/) for alternatives.
-
 ### Scaffold a project with Jaffle Shop seed data
 
 ```bash
-dql init jaffle-demo --template jaffle-shop
+npx create-dql-app jaffle-demo
 cd jaffle-demo
 ```
+
+No global install required — `create-dql-app` scaffolds the project,
+`npx @duckcodeailabs/dql-cli` runs the notebook. See
+[Install](/get-started/install/) if you prefer a global `dql` binary.
 
 You now have a DQL project wired to a DuckDB-backed Jaffle Shop — the same
 demo dataset dbt ships. No external warehouse needed.

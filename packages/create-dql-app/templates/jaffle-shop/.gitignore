@@ -1,0 +1,20 @@
+# DQL
+.dql/
+dql-manifest.json
+*.run.json
+
+# Warehouses
+*.duckdb
+*.duckdb.wal
+
+# Build output
+build/
+dist/
+out/
+
+# Node
+node_modules/
+
+# OS
+.DS_Store
+Thumbs.db

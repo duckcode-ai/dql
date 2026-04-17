@@ -1,0 +1,17 @@
+// dql-format: 1
+
+---
+type: markdown
+---
+
+# {{PROJECT_NAME}}
+
+Welcome to DQL. Start by connecting a warehouse (`cdql.yaml`), then replace
+this cell with your first query.
+
+---
+type: sql
+name: first_query
+---
+
+select 1 as hello;

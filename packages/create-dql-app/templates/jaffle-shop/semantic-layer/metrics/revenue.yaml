@@ -1,0 +1,9 @@
+metrics:
+  - name: revenue
+    label: Revenue
+    description: Gross revenue across all orders
+    type: sum
+    sql: order_total
+    table: orders
+    domain: finance
+    tags: [revenue, core]

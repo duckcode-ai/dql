@@ -1,0 +1,44 @@
+// dql-format: 1
+
+// Welcome to DQL. This notebook runs against a DuckDB-backed Jaffle Shop
+// dataset — the same demo data dbt ships. Press ⌘↵ on each cell.
+
+---
+type: markdown
+---
+
+# {{PROJECT_NAME}}
+
+A tour of DQL in four cells. Run them top-to-bottom.
+
+---
+type: sql
+name: orders_overview
+---
+
+select
+  count(*)                  as total_orders,
+  count(distinct customer_id) as unique_customers,
+  sum(order_total)          as lifetime_revenue
+from orders;
+
+---
+type: sql
+name: daily_revenue
+---
+
+select
+  order_date,
+  sum(order_total) as revenue
+from orders
+group by 1
+order by 1;
+
+---
+type: dql
+name: revenue_by_segment
+---
+
+// Reference a certified block. The block lives in blocks/finance/ and can
+// be reused across notebooks, dashboards, and other blocks.
+@block("revenue_by_segment")

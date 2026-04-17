@@ -1,0 +1,17 @@
+project:
+  name: {{PROJECT_NAME}}
+  version: 1
+
+connections:
+  default:
+    driver: duckdb
+    path: ./warehouse.duckdb
+
+# Remove this block if you aren't using dbt. DQL reads target/manifest.json
+# directly — see https://docs.duckcode.ai/guides/import-dbt/
+dbt:
+  projectDir: {{DBT_PROJECT_DIR}}
+  manifestPath: target/manifest.json
+
+governance:
+  required_fields: [domain, owner, description]

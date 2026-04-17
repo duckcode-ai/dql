@@ -1,0 +1,14 @@
+dimensions:
+  - name: segment
+    label: Customer segment
+    type: string
+    sql: segment
+    table: customers
+    domain: finance
+
+  - name: region
+    label: Region
+    type: string
+    sql: region
+    table: customers
+    domain: finance
