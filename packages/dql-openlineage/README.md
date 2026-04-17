@@ -54,4 +54,4 @@ surface to end users. Wrap-mode re-throws *handler* errors after emitting
 ## Compatible receivers
 
 Marquez · DataHub · Atlan · Monte Carlo — anything that speaks the OL spec.
-See [docs.duckcode.ai/architecture/openlineage](https://docs.duckcode.ai/architecture/openlineage/).
+See [docs/architecture/openlineage.md](../../docs/architecture/openlineage.md).

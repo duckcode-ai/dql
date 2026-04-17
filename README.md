@@ -24,14 +24,15 @@ Already have a **dbt project**? Run `create-dql-app` next to it — the scaffold
 
 ## Documentation
 
-**📘 [docs.duckcode.ai](https://docs.duckcode.ai)** — the single source of truth.
+All docs live in [`docs/`](./docs/) — plain markdown, rendered on github.com.
+Start with [docs/README.md](./docs/README.md).
 
 Quick links:
 
-- [Install](https://docs.duckcode.ai/get-started/install) · [Quickstart](https://docs.duckcode.ai/get-started/quickstart) · [Concepts](https://docs.duckcode.ai/get-started/concepts)
-- [Jaffle Shop walkthrough](https://docs.duckcode.ai/guides/jaffle-shop) · [Import dbt](https://docs.duckcode.ai/guides/import-dbt) · [Author a block](https://docs.duckcode.ai/guides/authoring-blocks)
-- [CLI reference](https://docs.duckcode.ai/reference/cli) · [Language reference](https://docs.duckcode.ai/reference/language) · [Connectors](https://docs.duckcode.ai/reference/connectors)
-- [Architecture](https://docs.duckcode.ai/architecture/overview) · [Contributing](https://docs.duckcode.ai/contribute/repo-layout)
+- [Quickstart](./docs/01-quickstart.md) · [Concepts](./docs/02-concepts.md) · [Install](./docs/03-install.md)
+- [Jaffle Shop walkthrough](./docs/guides/jaffle-shop.md) · [Import dbt](./docs/guides/import-dbt.md) · [Author a block](./docs/guides/authoring-blocks.md)
+- [CLI reference](./docs/reference/cli.md) · [Language reference](./docs/reference/language.md) · [Connectors](./docs/reference/connectors.md)
+- [Architecture](./docs/architecture/overview.md) · [Contributing](./docs/contribute/repo-layout.md)
 
 ## What's in the box
 
@@ -49,7 +50,7 @@ Natural-language / agentic block generation, MCP runtime, hosted workspaces, RBA
 
 ## Contributing
 
-See [CONTRIBUTING.md](./CONTRIBUTING.md) and the [contribute section](https://docs.duckcode.ai/contribute/repo-layout) of the docs site. Bugs and feature requests: [open an issue](https://github.com/duckcode-ai/dql/issues).
+See [CONTRIBUTING.md](./CONTRIBUTING.md) and [docs/contribute/repo-layout.md](./docs/contribute/repo-layout.md). Bugs and feature requests: [open an issue](https://github.com/duckcode-ai/dql/issues).
 
 ## License
 

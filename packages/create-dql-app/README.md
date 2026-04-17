@@ -31,9 +31,9 @@ npx create-dql-app finance-reports --template empty
 
 ## Docs
 
-- [Quickstart](https://docs.duckcode.ai/get-started/quickstart/)
-- [Concepts](https://docs.duckcode.ai/get-started/concepts/)
-- [Connect your own warehouse](https://docs.duckcode.ai/guides/connect-warehouse/)
+- [Quickstart](https://github.com/duckcode-ai/dql/blob/main/docs/01-quickstart.md)
+- [Concepts](https://github.com/duckcode-ai/dql/blob/main/docs/02-concepts.md)
+- [Connect your own warehouse](https://github.com/duckcode-ai/dql/blob/main/docs/guides/connect-warehouse.md)
 
 ## License
 

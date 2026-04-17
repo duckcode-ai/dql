@@ -1,7 +1,0 @@
-{
-  "overview": "Overview",
-  "dbt-integration": "How DQL fits with dbt",
-  "lineage-model": "Lineage model",
-  "plugin-api": "Plugin API",
-  "openlineage": "OpenLineage export"
-}

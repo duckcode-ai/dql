@@ -4,7 +4,7 @@
   "description": "Scaffold a new DQL project. Run with: npx create-dql-app <name>",
   "license": "MIT",
   "author": "DuckCode AI Labs",
-  "homepage": "https://docs.duckcode.ai",
+  "homepage": "https://github.com/duckcode-ai/dql",
   "repository": {
     "type": "git",
     "url": "https://github.com/duckcode-ai/dql.git",

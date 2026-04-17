@@ -85,7 +85,7 @@ jobs:
           done
 
   # --- 4,000-model stress test (perf gate) ---
-  # Gates: cold <30s, warm <2s. See docs.duckcode.ai/contribute/testing.
+  # Gates: cold <30s, warm <2s. See docs/contribute/testing.md.
   stress-test:
     name: stress (4k-model synthetic project)
     runs-on: ubuntu-latest

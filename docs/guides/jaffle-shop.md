@@ -1,0 +1,24 @@
+# Jaffle Shop walkthrough
+
+> ~12 minutes · end-to-end tour covering every DQL feature
+
+The [Quickstart](../01-quickstart.md) got you to a compiled dashboard in
+five minutes. This walkthrough goes slower and hits every surface: dbt
+import, notebook authoring, block certification, lineage, dashboards, git
+versioning.
+
+{/* TODO: port content from docs/01-start-here/dbt-jaffle-shop.md once the
+     canonical demo repo at github.com/duckcode-ai/jaffle-demo is published. */}
+
+## Sections
+
+1. Set up the dbt Jaffle Shop repo
+2. Run `dql init` and point it at dbt
+3. Build the `orders` notebook
+4. Author a certified `revenue_by_segment` block
+5. Trace lineage from raw tables to the dashboard
+6. Compile and host the dashboard
+7. Review the PR with `dql diff`
+
+See the legacy [dbt Jaffle Shop walkthrough](https://github.com/duckcode-ai/dql/blob/main/docs/01-start-here/dbt-jaffle-shop.md)
+for the current long-form content while this page is being rewritten.

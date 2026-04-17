@@ -37,12 +37,12 @@ npm run compile            # builds dql-manifest.json with lineage
 ## Next steps
 
 1. **Run the welcome notebook** — `notebooks/welcome.dqlnb`
-2. **Connect your warehouse** — [docs.duckcode.ai/guides/connect-warehouse](https://docs.duckcode.ai/guides/connect-warehouse/)
-3. **Import your dbt project** — [docs.duckcode.ai/guides/import-dbt](https://docs.duckcode.ai/guides/import-dbt/)
-4. **Author a certified block** — [docs.duckcode.ai/guides/authoring-blocks](https://docs.duckcode.ai/guides/authoring-blocks/)
+2. **Connect your warehouse** — [docs/guides/connect-warehouse.md](https://github.com/duckcode-ai/dql/blob/main/docs/guides/connect-warehouse.md)
+3. **Import your dbt project** — [docs/guides/import-dbt.md](https://github.com/duckcode-ai/dql/blob/main/docs/guides/import-dbt.md)
+4. **Author a certified block** — [docs/guides/authoring-blocks.md](https://github.com/duckcode-ai/dql/blob/main/docs/guides/authoring-blocks.md)
 
 ## Learn
 
-- [Quickstart](https://docs.duckcode.ai/get-started/quickstart/)
-- [Concepts](https://docs.duckcode.ai/get-started/concepts/)
-- [CLI reference](https://docs.duckcode.ai/reference/cli/)
+- [Quickstart](https://github.com/duckcode-ai/dql/blob/main/docs/01-quickstart.md)
+- [Concepts](https://github.com/duckcode-ai/dql/blob/main/docs/02-concepts.md)
+- [CLI reference](https://github.com/duckcode-ai/dql/blob/main/docs/reference/cli.md)
