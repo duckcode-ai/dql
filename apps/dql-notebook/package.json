@@ -19,6 +19,8 @@
     "@codemirror/theme-one-dark": "^6.1.2",
     "@codemirror/view": "^6.36.3",
     "@dagrejs/dagre": "^3.0.0",
+    "@duckcodeailabs/dql-ui": "workspace:*",
+    "zustand": "^5.0.0",
     "@xyflow/react": "^12.10.1",
     "react": "^18.3.0",
     "react-dom": "^18.3.0",

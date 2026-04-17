@@ -1,4 +1,21 @@
-import React, { createContext, useContext, useReducer, type ReactNode } from 'react';
+/**
+ * Notebook store — Zustand-backed, API-compatible with the previous reducer.
+ *
+ * Migration strategy
+ * - Internal: Zustand store holds state + a `dispatch(action)` method that
+ *   runs the original pure reducer. This keeps every existing
+ *   `dispatch({...})` call site working unchanged.
+ * - External: `useNotebook()` still returns `{ state, dispatch }`. Existing
+ *   38 consumers stay put.
+ * - New perf win: `useNotebookStore(selector)` subscribes to a slice with
+ *   shallow equality — use this for hot paths (lineage, schema tree,
+ *   semantic tree). Replaces unnecessary re-renders from full Context changes.
+ * - Convenience hooks (`useCells`, `useFiles`, `useSemantic`, `useActiveFile`,
+ *   `useInspector`) cover the common slicing patterns.
+ */
+import React, { createContext, useContext, type ReactNode } from 'react';
+import { create, type StoreApi, type UseBoundStore } from 'zustand';
+import { useShallow } from 'zustand/react/shallow';
 import type { NotebookState, NotebookAction, Cell } from './types';
 
 const initialState: NotebookState = {
@@ -48,6 +65,11 @@ const initialState: NotebookState = {
   blockStudioCatalogLoading: false,
 };
 
+/**
+ * Pure reducer — identical semantics to the previous useReducer version.
+ * Kept as a free function so the action surface stays declarative and the
+ * store definition below is tiny.
+ */
 function notebookReducer(state: NotebookState, action: NotebookAction): NotebookState {
   switch (action.type) {
     case 'SET_MAIN_VIEW':
@@ -140,7 +162,6 @@ function notebookReducer(state: NotebookState, action: NotebookAction): Notebook
       const cells = state.cells.map((c) =>
         c.id === action.id ? { ...c, ...action.updates } : c
       );
-      // Increment executionCounter when a cell completes
       const executionCounter =
         action.updates.executionCount !== undefined
           ? state.executionCounter + 1
@@ -317,34 +338,139 @@ function notebookReducer(state: NotebookState, action: NotebookAction): Notebook
   }
 }
 
+/** Zustand store shape: flat state + a single dispatch(action) method. */
+interface StoreShape extends NotebookState {
+  dispatch: (action: NotebookAction) => void;
+}
+
+/**
+ * The singleton store. Exported for tests and rare cross-component access
+ * (e.g. event handlers outside React). Components should prefer the hooks
+ * below so subscriptions are tracked.
+ */
+export const useNotebookStore: UseBoundStore<StoreApi<StoreShape>> = create<StoreShape>((set, get) => ({
+  ...initialState,
+  dispatch: (action: NotebookAction) => {
+    const next = notebookReducer(get(), action);
+    // Drop the dispatch fn from the reducer's returned state — reducer only
+    // sees NotebookState, so we preserve dispatch ourselves.
+    set(next);
+  },
+}));
+
+/** Direct store handle (non-reactive). Use sparingly. */
+export const notebookStoreApi = useNotebookStore;
+
+// --- compat layer ---------------------------------------------------------
+
 interface NotebookContextValue {
   state: NotebookState;
   dispatch: React.Dispatch<NotebookAction>;
 }
 
+/**
+ * Compatibility context — retained only so tests that wrapped with a custom
+ * Provider still work. Production code bypasses this and reads from the
+ * Zustand store directly via `useNotebook()`.
+ */
 const NotebookContext = createContext<NotebookContextValue | null>(null);
 
 export function NotebookProvider({ children }: { children: ReactNode }) {
-  const [state, dispatch] = useReducer(notebookReducer, initialState);
-  return (
-    <NotebookContext.Provider value={{ state, dispatch }}>
-      {children}
-    </NotebookContext.Provider>
+  // No-op provider: the Zustand store is app-global. We keep the wrapper so
+  // the existing App.tsx call site (and any test harness) is unchanged.
+  return <>{children}</>;
+}
+
+/**
+ * Compat hook with the same `{ state, dispatch }` shape as the old reducer
+ * version. Every existing consumer keeps working unchanged. Re-renders on
+ * *any* state change — for fine-grained subscriptions, use the slice hooks
+ * below or call `useNotebookStore(selector)` directly.
+ */
+export function useNotebook(): NotebookContextValue {
+  // Pull the whole state (minus dispatch) as one snapshot. useShallow keeps
+  // this from triggering a re-render when unrelated refs change identity
+  // via a new object literal — but any field mutation still re-renders,
+  // preserving the old behavior for consumers that read arbitrary fields.
+  const state = useNotebookStore(
+    useShallow((s) => {
+      const { dispatch: _d, ...rest } = s;
+      return rest as NotebookState;
+    }),
+  );
+  const dispatch = useNotebookStore((s) => s.dispatch);
+  // Honor a test-supplied context if present.
+  const ctx = useContext(NotebookContext);
+  return ctx ?? { state, dispatch };
+}
+
+// --- slice hooks (use these for new or refactored components) ------------
+
+/** Files + loading + active file */
+export function useFiles() {
+  return useNotebookStore(
+    useShallow((s) => ({
+      files: s.files,
+      filesLoading: s.filesLoading,
+      activeFile: s.activeFile,
+      notebookTitle: s.notebookTitle,
+      notebookDirty: s.notebookDirty,
+      savingFile: s.savingFile,
+    })),
   );
 }
 
-export function useNotebook(): NotebookContextValue {
-  const ctx = useContext(NotebookContext);
-  if (!ctx) throw new Error('useNotebook must be used within NotebookProvider');
-  return ctx;
+/** Just the cells array + execution counter (notebook body) */
+export function useCells() {
+  return useNotebookStore(
+    useShallow((s) => ({
+      cells: s.cells,
+      executionCounter: s.executionCounter,
+    })),
+  );
 }
 
-// Helper to generate a unique cell ID
+/** Semantic layer slice */
+export function useSemantic() {
+  return useNotebookStore((s) => s.semanticLayer);
+}
+
+/** Schema panel slice */
+export function useSchema() {
+  return useNotebookStore(
+    useShallow((s) => ({
+      schemaTables: s.schemaTables,
+      schemaLoading: s.schemaLoading,
+    })),
+  );
+}
+
+/** Inspector / shell slice (sidebar, main view, panels, modals, lineage focus) */
+export function useInspector() {
+  return useNotebookStore(
+    useShallow((s) => ({
+      mainView: s.mainView,
+      sidebarPanel: s.sidebarPanel,
+      sidebarOpen: s.sidebarOpen,
+      themeMode: s.themeMode,
+      lineageFullscreen: s.lineageFullscreen,
+      lineageFocusNodeId: s.lineageFocusNodeId,
+      dashboardMode: s.dashboardMode,
+    })),
+  );
+}
+
+/** Get the dispatch function without subscribing to any state */
+export function useDispatch(): React.Dispatch<NotebookAction> {
+  return useNotebookStore((s) => s.dispatch);
+}
+
+// --- helpers (unchanged) -------------------------------------------------
+
 export function makeCellId(): string {
   return `cell_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
 }
 
-// Helper to create a blank cell
 export function makeCell(type: Cell['type'], content = ''): Cell {
   const base: Cell = {
     id: makeCellId(),

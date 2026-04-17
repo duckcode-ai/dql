@@ -1,4 +1,5 @@
 import React, { useState } from 'react';
+import { Tooltip } from '@duckcodeailabs/dql-ui';
 import { useNotebook } from '../../store/NotebookStore';
 import { themes } from '../../themes/notebook-theme';
 import type { SidebarPanel } from '../../store/types';
@@ -14,29 +15,31 @@ interface IconButtonProps {
 function IconButton({ title, active, onClick, children, t }: IconButtonProps) {
   const [hovered, setHovered] = useState(false);
   return (
-    <button
-      title={title}
-      onClick={onClick}
-      onMouseEnter={() => setHovered(true)}
-      onMouseLeave={() => setHovered(false)}
-      style={{
-        width: 32,
-        height: 32,
-        display: 'flex',
-        alignItems: 'center',
-        justifyContent: 'center',
-        background: 'transparent',
-        border: 'none',
-        borderLeft: active ? `2px solid ${t.accent}` : '2px solid transparent',
-        cursor: 'pointer',
-        color: active ? t.textPrimary : hovered ? t.textSecondary : t.textMuted,
-        transition: 'color 0.15s, border-color 0.15s',
-        padding: 0,
-        flexShrink: 0,
-      }}
-    >
-      {children}
-    </button>
+    <Tooltip content={title} side="right">
+      <button
+        aria-label={title}
+        onClick={onClick}
+        onMouseEnter={() => setHovered(true)}
+        onMouseLeave={() => setHovered(false)}
+        style={{
+          width: 32,
+          height: 32,
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          background: 'transparent',
+          border: 'none',
+          borderLeft: active ? `2px solid ${t.accent}` : '2px solid transparent',
+          cursor: 'pointer',
+          color: active ? t.textPrimary : hovered ? t.textSecondary : t.textMuted,
+          transition: 'color 0.15s, border-color 0.15s',
+          padding: 0,
+          flexShrink: 0,
+        }}
+      >
+        {children}
+      </button>
+    </Tooltip>
   );
 }
 

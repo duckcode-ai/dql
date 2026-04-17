@@ -13,7 +13,8 @@
       "@duckcodeailabs/dql-connectors": ["packages/dql-connectors/src/index.ts"],
       "@duckcodeailabs/dql-governance": ["packages/dql-governance/src/index.ts"],
       "@duckcodeailabs/dql-project": ["packages/dql-project/src/index.ts"],
-      "@duckcodeailabs/dql-notebook": ["packages/dql-notebook/src/index.ts"]
+      "@duckcodeailabs/dql-notebook": ["packages/dql-notebook/src/index.ts"],
+      "@duckcodeailabs/dql-ui": ["packages/dql-ui/src/index.ts"]
     },
     "declaration": true,
     "declarationMap": true,

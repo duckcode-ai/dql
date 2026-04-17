@@ -1,4 +1,5 @@
 import React, { useEffect } from 'react';
+import { ThemeProvider, TooltipProvider } from '@duckcodeailabs/dql-ui';
 import { NotebookProvider, useNotebook } from './store/NotebookStore';
 import { AppShell } from './components/layout/AppShell';
 import { themes } from './themes/notebook-theme';
@@ -63,7 +64,13 @@ function AppInner() {
   // Hot reload — watches project files via SSE and refreshes state
   useHotReload();
 
-  return <AppShell />;
+  return (
+    <ThemeProvider theme={state.themeMode} applyGlobal>
+      <TooltipProvider delayDuration={200} skipDelayDuration={400}>
+        <AppShell />
+      </TooltipProvider>
+    </ThemeProvider>
+  );
 }
 
 export function App() {
