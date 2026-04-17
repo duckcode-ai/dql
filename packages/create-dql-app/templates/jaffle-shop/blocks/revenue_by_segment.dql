@@ -7,13 +7,13 @@ block "Revenue by segment" {
   tags = ["revenue", "sample"]
   query = """
     SELECT
-          c.customer_segment AS segment,
-          SUM(o.amount) AS revenue,
-          COUNT(DISTINCT o.customer_id) AS customers
-        FROM orders o
-        JOIN customers c ON c.customer_id = o.customer_id
-        GROUP BY 1
-        ORDER BY revenue DESC
+      c.customer_segment AS segment,
+      SUM(o.amount) AS revenue,
+      COUNT(DISTINCT o.customer_id) AS customers
+    FROM orders o
+    JOIN customers c ON c.customer_id = o.customer_id
+    GROUP BY 1
+    ORDER BY revenue DESC
   """
   visualization {
     chart = "bar"

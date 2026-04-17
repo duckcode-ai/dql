@@ -5,7 +5,6 @@ dashboard "{{PROJECT_NAME}} — Overview" {
     SELECT SUM(amount) as revenue FROM orders,
     metrics = ["revenue"]
   )
-
   chart.bar(
     SELECT customer_id, SUM(amount) as spend
     FROM orders
@@ -16,7 +15,6 @@ dashboard "{{PROJECT_NAME}} — Overview" {
     y = spend,
     title = "Top 10 customers by spend"
   )
-
   chart.line(
     SELECT order_date, SUM(amount) as revenue
     FROM orders

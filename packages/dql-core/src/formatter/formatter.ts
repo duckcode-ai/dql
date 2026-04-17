@@ -169,16 +169,20 @@ function formatCall(
   lines.push(...formatDecorators(decorators, level, state));
   lines.push(`${indent(level, state)}${callName}(`);
 
-  const bodyLines: string[] = [];
+  const parts: string[][] = [];
   if (query) {
-    bodyLines.push(...formatSQLQuery(query, level + 1, state));
+    parts.push(formatSQLQuery(query, level + 1, state));
   }
-  bodyLines.push(...args.map((arg) => `${indent(level + 1, state)}${formatNamedArg(arg)}`));
+  for (const arg of args) {
+    parts.push([`${indent(level + 1, state)}${formatNamedArg(arg)}`]);
+  }
 
-  if (bodyLines.length > 0) {
-    for (let i = 0; i < bodyLines.length; i++) {
-      const isLast = i === bodyLines.length - 1;
-      lines.push(isLast ? bodyLines[i] : `${bodyLines[i]},`);
+  for (let i = 0; i < parts.length; i++) {
+    const isLast = i === parts.length - 1;
+    const chunk = parts[i];
+    for (let j = 0; j < chunk.length; j++) {
+      const lastInChunk = j === chunk.length - 1;
+      lines.push(lastInChunk && !isLast ? `${chunk[j]},` : chunk[j]);
     }
   }
 
@@ -270,13 +274,22 @@ function formatSQLQuery(query: SQLQueryNode, level: number, state: FormatState):
   const sql = query.rawSQL.replace(/^\n+|\s+$/g, '');
   if (!sql.trim()) return [`${indent(level, state)}SELECT 1`];
   const rawLines = sql.split('\n').map((line) => line.trimEnd());
-  const nonEmpty = rawLines.filter((l) => l.length > 0);
-  const minLeading = nonEmpty.length
-    ? Math.min(...nonEmpty.map((l) => l.match(/^[ \t]*/)![0].length))
+  // The first line is often on the same line as the opening delimiter
+  // (e.g. `chart.bar(SELECT ...`) and so has no meaningful leading
+  // indent. Use indentation from subsequent non-empty lines as the
+  // dedent baseline; fall back to the first line only if that's all we have.
+  const tail = rawLines.slice(1).filter((l) => l.length > 0);
+  const sample = tail.length ? tail : rawLines.filter((l) => l.length > 0);
+  const minLeading = sample.length
+    ? Math.min(...sample.map((l) => l.match(/^[ \t]*/)![0].length))
     : 0;
-  return rawLines.map((line) =>
-    line.length === 0 ? '' : `${indent(level, state)}${line.slice(minLeading)}`,
-  );
+  return rawLines.map((line) => {
+    if (line.length === 0) return '';
+    const stripped = line.startsWith(' '.repeat(minLeading)) || line.startsWith('\t'.repeat(minLeading))
+      ? line.slice(minLeading)
+      : line.trimStart();
+    return `${indent(level, state)}${stripped}`;
+  });
 }
 
 function formatNamedArg(arg: NamedArgNode): string {
