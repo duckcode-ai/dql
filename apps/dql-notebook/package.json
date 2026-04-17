@@ -1,6 +1,6 @@
 {
   "name": "@duckcodeailabs/dql-notebook-app",
-  "version": "0.8.16",
+  "version": "0.9.0",
   "private": true,
   "type": "module",
   "scripts": {
