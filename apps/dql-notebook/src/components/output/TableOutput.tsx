@@ -1,6 +1,7 @@
 import React, { useState, useMemo, useCallback } from 'react';
-import { themes } from '../../themes/notebook-theme';
+import { themes, type Theme } from '../../themes/notebook-theme';
 import type { QueryResult } from '../../store/types';
+import { inferColumnKind, type ColumnKind } from '../../utils/column-kind';
 
 interface TableOutputProps {
   result: QueryResult;
@@ -15,6 +16,17 @@ function isNumeric(value: unknown): boolean {
   if (typeof value === 'number') return true;
   if (typeof value === 'string') return !isNaN(Number(value)) && value.trim() !== '';
   return false;
+}
+
+function columnKindBadge(kind: ColumnKind): { icon: string; color: string } {
+  switch (kind) {
+    case 'numeric': return { icon: '#', color: '#79c0ff' };
+    case 'date': return { icon: '📅', color: '#e3b341' };
+    case 'bool': return { icon: 'T/F', color: '#a371f7' };
+    case 'json': return { icon: '{}', color: '#ff7b72' };
+    case 'string':
+    default: return { icon: 'A', color: '#56d364' };
+  }
 }
 
 function formatCell(value: unknown): string {
@@ -127,6 +139,13 @@ export function TableOutput({ result, themeMode }: TableOutputProps) {
     return sorted;
   }, [filteredRows, sortCol, sortDir]);
 
+  // Infer column types for typed header icons
+  const columnKinds = useMemo(() => {
+    const map = new Map<string, ColumnKind>();
+    for (const col of result.columns) map.set(col, inferColumnKind(col, result.rows));
+    return map;
+  }, [result.columns, result.rows]);
+
   // Paginate
   const totalPages = Math.max(1, Math.ceil(sortedRows.length / pageSize));
   const safePage = Math.min(page, totalPages - 1);
@@ -232,8 +251,32 @@ export function TableOutput({ result, themeMode }: TableOutputProps) {
                     transition: 'background 0.1s',
                   }}
                 >
-                  <span style={{ display: 'flex', alignItems: 'center' }}>
-                    {col}
+                  <span style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                    {(() => {
+                      const badge = columnKindBadge(columnKinds.get(col) ?? 'string');
+                      return (
+                        <span
+                          title={columnKinds.get(col) ?? 'string'}
+                          style={{
+                            fontSize: 9,
+                            fontFamily: t.fontMono,
+                            fontWeight: 700,
+                            color: badge.color,
+                            background: `${badge.color}15`,
+                            border: `1px solid ${badge.color}40`,
+                            borderRadius: 3,
+                            padding: '0 4px',
+                            minWidth: 14,
+                            textAlign: 'center',
+                            lineHeight: '14px',
+                            flexShrink: 0,
+                          }}
+                        >
+                          {badge.icon}
+                        </span>
+                      );
+                    })()}
+                    <span style={{ overflow: 'hidden', textOverflow: 'ellipsis' }}>{col}</span>
                     <SortArrow dir={sortCol === col ? sortDir : null} color={sortCol === col ? t.accent : t.textMuted} />
                   </span>
                 </th>
@@ -279,25 +322,109 @@ export function TableOutput({ result, themeMode }: TableOutputProps) {
         </table>
       </div>
 
-      {/* Footer */}
-      {(filterText || sortedRows.length > pageSize) && (
-        <div style={{
-          padding: '4px 12px', color: t.textMuted, fontSize: 10, fontFamily: t.font,
-          borderTop: `1px solid ${t.tableBorder}`, background: `${t.tableHeaderBg}60`,
-          display: 'flex', justifyContent: 'space-between',
-        }}>
-          <span>
-            Showing {safePage * pageSize + 1}–{Math.min((safePage + 1) * pageSize, sortedRows.length)} of {sortedRows.length}
-            {filterText && ` (filtered from ${result.rows.length})`}
-          </span>
-          {sortCol && <span>Sorted by {sortCol} {sortDir}</span>}
-        </div>
-      )}
+      {/* Hex-style footer: page picker · View · Format · Columns · Totals · row count */}
+      <div
+        style={{
+          padding: '5px 10px',
+          color: t.textMuted,
+          fontSize: 10,
+          fontFamily: t.font,
+          borderTop: `1px solid ${t.tableBorder}`,
+          background: `${t.tableHeaderBg}60`,
+          display: 'flex',
+          alignItems: 'center',
+          gap: 4,
+        }}
+      >
+        {totalPages > 1 && (
+          <div style={{ display: 'flex', alignItems: 'center', gap: 2 }}>
+            <PagBtn disabled={safePage === 0} onClick={() => setPage(safePage - 1)} t={t}>‹</PagBtn>
+            {renderPageLinks(totalPages, safePage).map((p, i) =>
+              p === '…' ? (
+                <span key={`gap-${i}`} style={{ color: t.textMuted, fontSize: 10, padding: '0 2px' }}>…</span>
+              ) : (
+                <button
+                  key={p}
+                  onClick={() => setPage(p - 1)}
+                  style={{
+                    background: p - 1 === safePage ? `${t.accent}20` : 'transparent',
+                    border: 'none',
+                    color: p - 1 === safePage ? t.accent : t.textSecondary,
+                    fontSize: 10,
+                    fontFamily: t.font,
+                    fontWeight: p - 1 === safePage ? 700 : 400,
+                    padding: '1px 6px',
+                    borderRadius: 3,
+                    cursor: 'pointer',
+                    minWidth: 20,
+                  }}
+                >
+                  {p}
+                </button>
+              ),
+            )}
+            <PagBtn disabled={safePage >= totalPages - 1} onClick={() => setPage(safePage + 1)} t={t}>›</PagBtn>
+          </div>
+        )}
+        <div style={{ flex: 1 }} />
+        <FooterPill label="View" t={t} />
+        <FooterPill label="Format" t={t} />
+        <FooterPill label="Columns" t={t} />
+        <FooterPill label="Totals" t={t} />
+        <span
+          style={{
+            fontSize: 10,
+            color: t.textSecondary,
+            fontFamily: t.font,
+            marginLeft: 6,
+            whiteSpace: 'nowrap',
+          }}
+        >
+          {sortedRows.length.toLocaleString()} {sortedRows.length === 1 ? 'row' : 'rows'}
+          {filterText && result.rows.length !== sortedRows.length && ` of ${result.rows.length.toLocaleString()}`}
+        </span>
+      </div>
     </div>
   );
 }
 
-function ExportBtn({ label, onClick, t }: { label: string; onClick: () => void; t: typeof themes['dark'] }) {
+function renderPageLinks(total: number, current: number): Array<number | '…'> {
+  if (total <= 7) return Array.from({ length: total }, (_, i) => i + 1);
+  const cur = current + 1;
+  const pages: Array<number | '…'> = [1];
+  if (cur > 3) pages.push('…');
+  for (let p = Math.max(2, cur - 1); p <= Math.min(total - 1, cur + 1); p++) pages.push(p);
+  if (cur < total - 2) pages.push('…');
+  pages.push(total);
+  return pages;
+}
+
+function FooterPill({ label, t }: { label: string; t: Theme }) {
+  const [hovered, setHovered] = useState(false);
+  return (
+    <button
+      onMouseEnter={() => setHovered(true)}
+      onMouseLeave={() => setHovered(false)}
+      title={`${label} (coming in v0.11)`}
+      style={{
+        background: hovered ? t.btnHover : 'transparent',
+        border: `1px solid ${hovered ? t.btnBorder : 'transparent'}`,
+        borderRadius: 3,
+        color: hovered ? t.textSecondary : t.textMuted,
+        fontSize: 10,
+        fontFamily: t.font,
+        fontWeight: 600,
+        padding: '2px 8px',
+        cursor: 'pointer',
+        transition: 'all 0.15s',
+      }}
+    >
+      {label}
+    </button>
+  );
+}
+
+function ExportBtn({ label, onClick, t }: { label: string; onClick: () => void; t: Theme }) {
   const [hovered, setHovered] = useState(false);
   return (
     <button
@@ -323,7 +450,7 @@ function ExportBtn({ label, onClick, t }: { label: string; onClick: () => void; 
   );
 }
 
-function PagBtn({ disabled, onClick, children, t }: { disabled: boolean; onClick: () => void; children: React.ReactNode; t: typeof themes['dark'] }) {
+function PagBtn({ disabled, onClick, children, t }: { disabled: boolean; onClick: () => void; children: React.ReactNode; t: Theme }) {
   return (
     <button
       disabled={disabled}

@@ -40,6 +40,10 @@ function AppInner() {
         background: ${t.accent}40;
         color: ${t.textPrimary};
       }
+      .dql-meta-pill:hover {
+        background: var(--dql-pill-hover-bg) !important;
+        border-color: var(--dql-pill-hover-border) !important;
+      }
     `;
   }, [t]);
 

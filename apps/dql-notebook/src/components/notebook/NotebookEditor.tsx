@@ -5,6 +5,7 @@ import { themes } from '../../themes/notebook-theme';
 import { WelcomeScreen } from './WelcomeScreen';
 import { CellList } from './CellList';
 import { DashboardView } from './DashboardView';
+import { DocumentMetadataRow } from './DocumentMetadataRow';
 import type { NotebookFile } from '../../store/types';
 
 interface NotebookEditorProps {
@@ -43,9 +44,10 @@ export function NotebookEditor({ onOpenFile, registerCellRef }: NotebookEditorPr
         style={{
           flex: 1,
           overflow: 'auto',
-          padding: '24px 0 40px',
+          padding: '0 0 40px',
         }}
       >
+        <DocumentMetadataRow />
         <CellList registerCellRef={registerCellRef} />
       </div>
     </div>

@@ -8,6 +8,11 @@ interface SaveAsBlockModalProps {
   cell: Cell;
   onClose: () => void;
   onSaved?: (result: { path: string; content: string; name: string }) => void;
+  /** Override the starting block source (required for cell types that compute their output). */
+  initialContent?: string;
+  initialName?: string;
+  initialDescription?: string;
+  initialTags?: string[];
 }
 
 function slugify(value: string): string {
@@ -28,16 +33,24 @@ function extractSemanticRefs(content: string): string[] {
   return Array.from(refs);
 }
 
-export function SaveAsBlockModal({ cell, onClose, onSaved }: SaveAsBlockModalProps) {
+export function SaveAsBlockModal({
+  cell,
+  onClose,
+  onSaved,
+  initialContent,
+  initialName,
+  initialDescription,
+  initialTags,
+}: SaveAsBlockModalProps) {
   const { state, dispatch } = useNotebook();
   const t = themes[state.themeMode];
   const nameRef = useRef<HTMLInputElement>(null);
 
-  const [name, setName] = useState(cell.name || 'new_block');
+  const [name, setName] = useState(initialName || cell.name || 'new_block');
   const [domain, setDomain] = useState('');
-  const [description, setDescription] = useState('');
-  const [tags, setTags] = useState('');
-  const [content, setContent] = useState(cell.content);
+  const [description, setDescription] = useState(initialDescription ?? state.notebookMetadata.description ?? '');
+  const [tags, setTags] = useState((initialTags ?? state.notebookMetadata.categories ?? []).join(', '));
+  const [content, setContent] = useState(initialContent ?? cell.content);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
 

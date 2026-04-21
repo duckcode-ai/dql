@@ -1,5 +1,29 @@
 export type ThemeMode = 'dark' | 'light';
-export type CellType = 'sql' | 'markdown' | 'dql' | 'param';
+
+export interface NotebookDocMetadata {
+  status?: string;
+  categories?: string[];
+  description?: string;
+  projectFilter?: string;
+  author?: string;
+  createdAt?: string;
+  modifiedAt?: string;
+}
+
+export type CellType =
+  | 'sql'
+  | 'markdown'
+  | 'dql'
+  | 'param'
+  | 'chart'
+  | 'pivot'
+  | 'single_value'
+  | 'filter'
+  | 'table'
+  | 'map'
+  | 'writeback'
+  | 'python';
+
 export type CellStatus = 'idle' | 'running' | 'success' | 'error';
 
 export interface CellChartConfig {
@@ -7,12 +31,60 @@ export interface CellChartConfig {
   x?: string;       // X-axis column
   y?: string;       // Y-axis column
   color?: string;   // Color-by column
+  facet?: string;   // Faceting column (horizontal/vertical split)
+  size?: string;    // Size-by column (scatter/bubble)
   title?: string;
   xLabel?: string;
   yLabel?: string;
   legendPosition?: 'top' | 'bottom' | 'left' | 'right' | 'none';
   colorPalette?: 'default' | 'warm' | 'cool' | 'mono' | 'pastel';
   maxItems?: number;
+}
+
+export type FilterOperation =
+  | 'eq' | 'neq' | 'gt' | 'gte' | 'lt' | 'lte'
+  | 'contains' | 'not_contains' | 'starts_with' | 'ends_with'
+  | 'is_null' | 'is_not_null' | 'in' | 'not_in' | 'between';
+
+export interface FilterRule {
+  id: string;
+  column: string;
+  operation: FilterOperation;
+  value: string;
+}
+
+export interface FilterGroup {
+  id: string;
+  combinator: 'and' | 'or';
+  rules: FilterRule[];
+}
+
+export interface FilterCellConfig {
+  mode: 'keep' | 'drop';
+  groups: FilterGroup[];
+  upstream?: string;   // dataframe handle
+}
+
+export interface PivotCellConfig {
+  rows: string[];
+  columns: string[];
+  values: Array<{ column: string; aggregation: 'sum' | 'avg' | 'count' | 'min' | 'max' | 'count_distinct' }>;
+  upstream?: string;
+}
+
+export interface SingleValueCellConfig {
+  metric?: string;       // column name to aggregate
+  aggregation?: 'sum' | 'avg' | 'count' | 'min' | 'max' | 'last';
+  format?: 'number' | 'currency' | 'percent' | 'duration';
+  label?: string;
+  comparison?: { column?: string; mode?: 'previous' | 'baseline' };
+  upstream?: string;
+}
+
+export interface TableCellConfig {
+  upstream?: string;       // dataframe handle to render
+  visibleColumns?: string[];
+  pinnedColumns?: string[];
 }
 
 export type ParamType = 'text' | 'select' | 'date' | 'number';
@@ -61,7 +133,12 @@ export interface Cell {
   executionCount?: number;
   paramConfig?: ParamConfig;
   paramValue?: string;
-  chartConfig?: CellChartConfig;  // Explicit chart config from DQL visualization block
+  chartConfig?: CellChartConfig;      // Chart cell binding (also used for SQL-cell chart view)
+  filterConfig?: FilterCellConfig;    // Filter cell
+  pivotConfig?: PivotCellConfig;      // Pivot cell
+  singleValueConfig?: SingleValueCellConfig;  // Single-value cell
+  tableConfig?: TableCellConfig;      // Table cell
+  upstream?: string;                   // Dataframe handle this cell consumes
 }
 
 export interface NotebookFile {
@@ -262,6 +339,7 @@ export interface NotebookState {
   activeFile: NotebookFile | null;
   cells: Cell[];
   notebookTitle: string;
+  notebookMetadata: NotebookDocMetadata;
   notebookDirty: boolean;
   schemaTables: SchemaTable[];
   schemaLoading: boolean;
@@ -301,7 +379,8 @@ export type NotebookAction =
   | { type: 'TOGGLE_SIDEBAR' }
   | { type: 'SET_FILES'; files: NotebookFile[] }
   | { type: 'SET_FILES_LOADING'; loading: boolean }
-  | { type: 'OPEN_FILE'; file: NotebookFile; cells: Cell[]; title: string }
+  | { type: 'OPEN_FILE'; file: NotebookFile; cells: Cell[]; title: string; metadata?: NotebookDocMetadata }
+  | { type: 'UPDATE_NOTEBOOK_METADATA'; updates: Partial<NotebookDocMetadata> }
   | { type: 'SET_CELLS'; cells: Cell[] }
   | { type: 'ADD_CELL'; cell: Cell; afterId?: string }
   | { type: 'UPDATE_CELL'; id: string; updates: Partial<Cell> }

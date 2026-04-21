@@ -28,6 +28,7 @@ const initialState: NotebookState = {
   activeFile: null,
   cells: [],
   notebookTitle: '',
+  notebookMetadata: {},
   notebookDirty: false,
   schemaTables: [],
   schemaLoading: false,
@@ -112,6 +113,7 @@ function notebookReducer(state: NotebookState, action: NotebookAction): Notebook
         activeFile: action.file,
         cells: action.cells,
         notebookTitle: action.title,
+        notebookMetadata: action.metadata ?? {},
         notebookDirty: false,
         mainView: action.file.type === 'block' ? 'block_studio' : 'notebook',
         activeBlockPath: action.file.type === 'block' ? action.file.path : null,
@@ -145,6 +147,23 @@ function notebookReducer(state: NotebookState, action: NotebookAction): Notebook
 
     case 'SET_CELLS':
       return { ...state, cells: action.cells, notebookDirty: true };
+
+    case 'UPDATE_NOTEBOOK_METADATA': {
+      const current = state.notebookMetadata;
+      let changed = false;
+      for (const key of Object.keys(action.updates) as Array<keyof typeof action.updates>) {
+        if (current[key] !== action.updates[key]) {
+          changed = true;
+          break;
+        }
+      }
+      if (!changed) return state;
+      return {
+        ...state,
+        notebookMetadata: { ...current, ...action.updates },
+        notebookDirty: true,
+      };
+    }
 
     case 'ADD_CELL': {
       if (!action.afterId) {
@@ -504,6 +523,24 @@ export function makeCell(type: Cell['type'], content = ''): Cell {
       defaultValue: '',
       options: [],
     };
+  }
+  if (type === 'chart') {
+    base.chartConfig = { chart: 'bar' };
+  }
+  if (type === 'filter') {
+    base.filterConfig = {
+      mode: 'keep',
+      groups: [{ id: `g_${Math.random().toString(36).slice(2, 8)}`, combinator: 'and', rules: [] }],
+    };
+  }
+  if (type === 'pivot') {
+    base.pivotConfig = { rows: [], columns: [], values: [] };
+  }
+  if (type === 'single_value') {
+    base.singleValueConfig = { aggregation: 'count', format: 'number' };
+  }
+  if (type === 'table') {
+    base.tableConfig = {};
   }
   return base;
 }
