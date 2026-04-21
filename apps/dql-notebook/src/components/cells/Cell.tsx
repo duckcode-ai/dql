@@ -6,8 +6,15 @@ import { useQueryExecution } from '../../hooks/useQueryExecution';
 import { SQLCellEditor, type SQLCellEditorHandle } from './SQLCellEditor';
 import { MarkdownCellEditor } from './MarkdownCellEditor';
 import { ParamCell } from './ParamCell';
+import { PlaceholderCell } from './PlaceholderCell';
+import { DataframeChip } from './DataframeChip';
+import { ChartCell } from './ChartCell';
+import { FilterCell } from './FilterCell';
+import { SingleValueCell } from './SingleValueCell';
+import { PivotCell } from './PivotCell';
 import { SnippetPicker } from './SnippetPicker';
 import { SaveAsBlockModal } from '../modals/SaveAsBlockModal';
+import { deriveBlockSource } from '../../utils/derive-block-source';
 import { TableOutput } from '../output/TableOutput';
 import { ChartOutput, detectChartType, resolveChartType, renderChart, CHART_TYPE_OPTIONS } from '../output/ChartOutput';
 import type { ChartType } from '../output/ChartOutput';
@@ -21,11 +28,28 @@ interface CellProps {
   index: number;
 }
 
+function GutterWrap({ children }: { children: React.ReactNode }) {
+  return (
+    <div style={{ display: 'flex', gap: 0, marginBottom: 2 }}>
+      <div style={{ width: 40, flexShrink: 0 }} />
+      <div style={{ flex: 1, minWidth: 0 }}>{children}</div>
+    </div>
+  );
+}
+
 const TYPE_LABELS: Record<string, string> = {
   sql: 'SQL',
   markdown: 'MD',
   dql: 'DQL',
   param: 'PARAM',
+  chart: 'CHART',
+  pivot: 'PIVOT',
+  single_value: 'SINGLE VALUE',
+  filter: 'FILTER',
+  table: 'TABLE',
+  map: 'MAP',
+  writeback: 'WRITEBACK',
+  python: 'PYTHON',
 };
 
 const TYPE_COLORS: Record<string, string> = {
@@ -33,6 +57,47 @@ const TYPE_COLORS: Record<string, string> = {
   markdown: '#56d364',
   dql: '#e3b341',
   param: '#e3b341',
+  chart: '#a371f7',
+  pivot: '#a371f7',
+  single_value: '#a371f7',
+  filter: '#ff7b72',
+  table: '#79c0ff',
+  map: '#7ce38b',
+  writeback: '#d2a8ff',
+  python: '#3572a5',
+};
+
+interface PlaceholderMeta {
+  title: string;
+  subtitle: string;
+  color: string;
+  badge?: string;
+}
+
+const PLACEHOLDER_META: Partial<Record<string, PlaceholderMeta>> = {
+  table: {
+    title: 'Table',
+    subtitle: 'Render an upstream dataframe as a table with typed columns.',
+    color: '#79c0ff',
+  },
+  map: {
+    title: 'Map',
+    subtitle: 'Geospatial visualization — lat/lon points and choropleths from an upstream dataframe. Lands in v0.11 on the dql-compiler geo pipeline.',
+    color: '#7ce38b',
+    badge: 'v0.11',
+  },
+  writeback: {
+    title: 'Writeback',
+    subtitle: 'Governed output sink — writes a dataframe back to your warehouse with block tests gating the commit. Lands in v0.11.',
+    color: '#d2a8ff',
+    badge: 'v0.11',
+  },
+  python: {
+    title: 'Python',
+    subtitle: 'Python cell via Pyodide sidecar.',
+    color: '#3572a5',
+    badge: 'v0.11',
+  },
 };
 
 function getCellBorderColor(cell: Cell, t: Theme): string {
@@ -256,6 +321,15 @@ export function CellComponent({ cell, index }: CellProps) {
   const [chartConfigOpen, setChartConfigOpen] = useState(false);
   const [saveAsBlockOpen, setSaveAsBlockOpen] = useState(false);
 
+  const derivedBlock = useMemo(
+    () => (saveAsBlockOpen ? deriveBlockSource(cell, state.cells) : null),
+    [saveAsBlockOpen, cell, state.cells]
+  );
+  const canSaveAsBlock =
+    cell.type === 'sql' || cell.type === 'dql' || cell.type === 'chart'
+    || cell.type === 'pivot' || cell.type === 'single_value'
+    || cell.type === 'filter' || cell.type === 'table';
+
   const borderColor = getCellBorderColor(cell, t);
   const isExecutable = cell.type !== 'markdown' && cell.type !== 'param';
 
@@ -277,24 +351,6 @@ export function CellComponent({ cell, index }: CellProps) {
     [state.schemaTables]
   );
 
-  // Param cells get their own fully self-contained rendering
-  if (cell.type === 'param') {
-    return (
-      <div
-        onMouseEnter={() => setCellHovered(true)}
-        onMouseLeave={() => setCellHovered(false)}
-        style={{ display: 'flex', gap: 0, marginBottom: 2 }}
-      >
-        {/* Gutter placeholder */}
-        <div style={{ width: 40, flexShrink: 0 }} />
-        <div style={{ flex: 1, minWidth: 0 }}>
-          <ParamCell cell={cell} themeMode={state.themeMode} onApplyParam={executeDependents} />
-        </div>
-      </div>
-    );
-  }
-
-  // When result first arrives (status → success), resolve chart type (explicit config > heuristic)
   useEffect(() => {
     if (cell.status === 'success' && cell.result) {
       const chartType = resolveChartType(cell.result, cell.chartConfig);
@@ -341,9 +397,65 @@ export function CellComponent({ cell, index }: CellProps) {
 
   const handleFixAndRun = useCallback(() => {
     handleFormat();
-    // Small delay so the formatted content propagates before running
     setTimeout(() => executeCell(cell.id), 80);
   }, [handleFormat, executeCell, cell.id]);
+
+  const onCellUpdate = useCallback(
+    (updates: Partial<Cell>) => dispatch({ type: 'UPDATE_CELL', id: cell.id, updates }),
+    [dispatch, cell.id]
+  );
+
+  if (cell.type === 'param') {
+    return (
+      <GutterWrap>
+        <ParamCell cell={cell} themeMode={state.themeMode} onApplyParam={executeDependents} />
+      </GutterWrap>
+    );
+  }
+  if (cell.type === 'pivot') {
+    return (
+      <GutterWrap>
+        <PivotCell cell={cell} cells={state.cells} index={index} themeMode={state.themeMode} onUpdate={onCellUpdate} />
+      </GutterWrap>
+    );
+  }
+  if (cell.type === 'single_value') {
+    return (
+      <GutterWrap>
+        <SingleValueCell cell={cell} cells={state.cells} index={index} themeMode={state.themeMode} onUpdate={onCellUpdate} />
+      </GutterWrap>
+    );
+  }
+  if (cell.type === 'filter') {
+    return (
+      <GutterWrap>
+        <FilterCell cell={cell} cells={state.cells} index={index} themeMode={state.themeMode} onUpdate={onCellUpdate} />
+      </GutterWrap>
+    );
+  }
+  if (cell.type === 'chart') {
+    return (
+      <GutterWrap>
+        <ChartCell cell={cell} cells={state.cells} index={index} themeMode={state.themeMode} onUpdate={onCellUpdate} />
+      </GutterWrap>
+    );
+  }
+
+  const placeholder = PLACEHOLDER_META[cell.type];
+  if (placeholder) {
+    return (
+      <GutterWrap>
+        <PlaceholderCell
+          cell={cell}
+          themeMode={state.themeMode}
+          title={placeholder.title}
+          subtitle={placeholder.subtitle}
+          color={placeholder.color}
+          badge={placeholder.badge}
+        />
+      </GutterWrap>
+    );
+  }
 
   const handleDelete = () => {
     dispatch({ type: 'DELETE_CELL', id: cell.id });
@@ -382,9 +494,12 @@ export function CellComponent({ cell, index }: CellProps) {
         marginBottom: 2,
       }}
     >
-      {saveAsBlockOpen && (
+      {saveAsBlockOpen && derivedBlock && (
         <SaveAsBlockModal
           cell={cell}
+          initialContent={derivedBlock.derivedFromUpstream ? derivedBlock.content : undefined}
+          initialName={derivedBlock.suggestedName}
+          initialDescription={derivedBlock.suggestedDescription}
           onClose={() => setSaveAsBlockOpen(false)}
           onSaved={({ path, name }) => {
             dispatch({
@@ -516,7 +631,7 @@ export function CellComponent({ cell, index }: CellProps) {
                 </button>
               )}
 
-              {cellHovered && (cell.type === 'sql' || cell.type === 'dql') && (
+              {cellHovered && canSaveAsBlock && (
                 <button
                   title="Save this cell as a reusable block"
                   onClick={() => setSaveAsBlockOpen(true)}
@@ -545,6 +660,24 @@ export function CellComponent({ cell, index }: CellProps) {
                   Save as Block
                 </button>
               )}
+
+          {(cell.type === 'sql' || cell.type === 'dql') && (
+            <DataframeChip
+              cells={state.cells}
+              index={index}
+              content={cell.content}
+              themeMode={state.themeMode}
+              onInsertHandle={(name) => {
+                const token = `{{${name}}}`;
+                const current = cell.content ?? '';
+                if (current.includes(token)) return;
+                const next = current.trim().length === 0
+                  ? `SELECT * FROM ${token}`
+                  : `${current.replace(/\s*$/, '')} ${token}`;
+                handleContentChange(next);
+              }}
+            />
+          )}
 
           {/* Cell name */}
           {nameEditing ? (

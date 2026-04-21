@@ -1,9 +1,19 @@
-import type { Cell, ParamConfig, CellChartConfig } from '../store/types';
+import type {
+  Cell,
+  CellType,
+  ParamConfig,
+  CellChartConfig,
+  FilterCellConfig,
+  PivotCellConfig,
+  SingleValueCellConfig,
+  TableCellConfig,
+} from '../store/types';
 import { makeCellId } from '../store/NotebookStore';
 
 export interface ParsedWorkbook {
   title: string;
   cells: Cell[];
+  metadata?: NotebookMetadata;
 }
 
 /**
@@ -63,7 +73,8 @@ export function parseDqlWorkbook(content: string): ParsedWorkbook {
     }
 
     return { title, cells };
-  } catch {
+  } catch (err) {
+    console.warn('parse-workbook: falling back after error', err);
     // Fallback: single DQL cell
     return {
       title: 'Untitled Workbook',
@@ -86,41 +97,57 @@ export interface NotebookMetadata {
   author?: string;
   createdAt?: string;
   modifiedAt?: string;
+  status?: string;           // e.g. 'draft' | 'in_review' | 'certified'
+  categories?: string[];
+  description?: string;
+  projectFilter?: string;
 }
 
 export interface DqlNotebookFile {
   version: number;
   title: string;
-  metadata?: NotebookMetadata;
+  metadata?: NotebookMetadata & { title?: string };
   cells: Array<{
     id: string;
-    type: 'sql' | 'markdown' | 'dql' | 'param';
+    type: CellType;
     content: string;
+    source?: string;
     name?: string;
+    title?: string;
     paramConfig?: ParamConfig;
     paramValue?: string;
     chartConfig?: CellChartConfig;
+    filterConfig?: FilterCellConfig;
+    pivotConfig?: PivotCellConfig;
+    singleValueConfig?: SingleValueCellConfig;
+    tableConfig?: TableCellConfig;
+    upstream?: string;
   }>;
 }
 
 export function parseDqlNotebook(content: string): ParsedWorkbook {
   try {
     const data = JSON.parse(content) as DqlNotebookFile;
-    // Support both "title" (our format) and "metadata.title" (legacy format)
-    const title = data.title || (data as any).metadata?.title || 'Untitled';
+    const title = data.title || data.metadata?.title || 'Untitled';
     const cells: Cell[] = (data.cells || []).map((c) => ({
       id: c.id || makeCellId(),
       type: c.type || 'sql',
-      // Support both "content" (our format) and "source" (legacy format)
-      content: c.content ?? (c as any).source ?? '',
-      name: c.name || (c as any).title,
+      content: c.content ?? c.source ?? '',
+      name: c.name || c.title,
       status: 'idle' as const,
       ...(c.paramConfig ? { paramConfig: c.paramConfig } : {}),
       ...(c.paramValue !== undefined ? { paramValue: c.paramValue } : {}),
       ...(c.chartConfig ? { chartConfig: c.chartConfig } : {}),
+      ...(c.filterConfig ? { filterConfig: c.filterConfig } : {}),
+      ...(c.pivotConfig ? { pivotConfig: c.pivotConfig } : {}),
+      ...(c.singleValueConfig ? { singleValueConfig: c.singleValueConfig } : {}),
+      ...(c.tableConfig ? { tableConfig: c.tableConfig } : {}),
+      ...(c.upstream ? { upstream: c.upstream } : {}),
     }));
-    return { title, cells };
-  } catch {
+    const { title: _metaTitle, ...restMeta } = data.metadata ?? {};
+    return { title, cells, metadata: restMeta };
+  } catch (err) {
+    console.warn('parse-workbook: falling back after error', err);
     return {
       title: 'Untitled',
       cells: [
@@ -155,6 +182,11 @@ export function serializeDqlNotebook(title: string, cells: Cell[], existingMetad
       ...(c.paramConfig ? { paramConfig: c.paramConfig } : {}),
       ...(c.paramValue !== undefined ? { paramValue: c.paramValue } : {}),
       ...(c.chartConfig ? { chartConfig: c.chartConfig } : {}),
+      ...(c.filterConfig ? { filterConfig: c.filterConfig } : {}),
+      ...(c.pivotConfig ? { pivotConfig: c.pivotConfig } : {}),
+      ...(c.singleValueConfig ? { singleValueConfig: c.singleValueConfig } : {}),
+      ...(c.tableConfig ? { tableConfig: c.tableConfig } : {}),
+      ...(c.upstream ? { upstream: c.upstream } : {}),
     })),
   };
   return JSON.stringify(data, null, 2);

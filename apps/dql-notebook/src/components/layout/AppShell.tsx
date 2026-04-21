@@ -57,7 +57,7 @@ export function AppShell() {
           return;
         }
         const { content } = await api.readNotebook(file.path);
-        const { title, cells } = parseNotebookFile(file.path, content);
+        const { title, cells, metadata } = parseNotebookFile(file.path, content);
 
         // Hydrate last-run results from sibling .run.json so the notebook
         // shows executed output without forcing a re-run on open.
@@ -76,7 +76,7 @@ export function AppShell() {
             })
           : cells;
 
-        dispatch({ type: 'OPEN_FILE', file, cells: hydrated, title });
+        dispatch({ type: 'OPEN_FILE', file, cells: hydrated, title, metadata });
         // Ensure files panel is visible
         if (state.sidebarPanel !== 'files') {
           dispatch({ type: 'SET_SIDEBAR_PANEL', panel: 'files' });

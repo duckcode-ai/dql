@@ -1,6 +1,7 @@
 import { useCallback } from 'react';
 import { useNotebook } from '../store/NotebookStore';
 import type { Cell, ParamType, QueryResult } from '../store/types';
+import { HANDLE_RE } from '../utils/handles';
 
 /**
  * Builds a WITH clause from a named cell's result, so that
@@ -60,8 +61,7 @@ export function useVariableSubstitution() {
 
   const substituteVariables = useCallback(
     (sql: string): { sql: string; substituted: string[] } => {
-      const pattern = /\{\{([a-zA-Z_][a-zA-Z0-9_]*)\}\}/g;
-      const matches = [...sql.matchAll(pattern)];
+      const matches = [...sql.matchAll(HANDLE_RE)];
 
       if (matches.length === 0) return { sql, substituted: [] };
 

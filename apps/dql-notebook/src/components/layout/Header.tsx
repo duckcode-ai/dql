@@ -147,7 +147,7 @@ export function Header() {
       } else {
         const content = state.activeFile.type === 'block'
           ? (state.cells[0]?.content ?? '')
-          : serializeDqlNotebook(state.notebookTitle, state.cells);
+          : serializeDqlNotebook(state.notebookTitle, state.cells, state.notebookMetadata);
         await api.saveNotebook(state.activeFile.path, content);
         dispatch({ type: 'SET_NOTEBOOK_DIRTY', dirty: false });
       }
@@ -166,6 +166,7 @@ export function Header() {
     state.files,
     state.mainView,
     state.notebookTitle,
+    state.notebookMetadata,
     state.cells,
     dispatch,
   ]);
