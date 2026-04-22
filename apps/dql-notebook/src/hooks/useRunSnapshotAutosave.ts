@@ -56,19 +56,22 @@ export function useRunSnapshotAutosave(): void {
     }
 
     const sig = snapshotSignature(state.cells);
-    if (sig === lastSignature.current) return;
-    lastSignature.current = sig;
-
-    if (timer.current) clearTimeout(timer.current);
-    timer.current = setTimeout(() => {
-      const snapshot = buildSnapshot(path, state.cells);
-      void api.saveRunSnapshot(path, snapshot).catch(() => {
-        // Best-effort; snapshot saves should never surface errors to the user.
-      });
-    }, DEBOUNCE_MS);
+    if (sig !== lastSignature.current) {
+      lastSignature.current = sig;
+      if (timer.current) clearTimeout(timer.current);
+      timer.current = setTimeout(() => {
+        const snapshot = buildSnapshot(path, state.cells);
+        void api.saveRunSnapshot(path, snapshot).catch(() => {
+          // Best-effort; snapshot saves should never surface errors to the user.
+        });
+      }, DEBOUNCE_MS);
+    }
 
     return () => {
-      if (timer.current) clearTimeout(timer.current);
+      if (timer.current) {
+        clearTimeout(timer.current);
+        timer.current = null;
+      }
     };
   }, [state.cells, state.activeFile?.path]);
 }

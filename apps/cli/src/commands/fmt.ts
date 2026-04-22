@@ -1,10 +1,12 @@
 import { readFileSync, writeFileSync } from 'node:fs';
-import { canonicalize } from '@duckcodeailabs/dql-core';
+import { canonicalize, canonicalizeNotebook } from '@duckcodeailabs/dql-core';
 import type { CLIFlags } from '../args.js';
 
 export async function runFmt(filePath: string, flags: CLIFlags): Promise<void> {
   const source = readFileSync(filePath, 'utf-8');
-  const formatted = canonicalize(source);
+  const formatted = filePath.endsWith('.dqlnb')
+    ? canonicalizeNotebook(source)
+    : canonicalize(source);
   const changed = source !== formatted;
 
   if (flags.check) {

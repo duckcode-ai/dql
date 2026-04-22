@@ -34,6 +34,10 @@ import {
   type LineageMetricInput,
   type LineageDimensionInput,
   canonicalize,
+  canonicalizeNotebook,
+  diffDQL,
+  diffNotebook,
+  type DiffReport,
 } from '@duckcodeailabs/dql-core';
 import { listBlockTemplates } from './block-templates.js';
 import {
@@ -272,7 +276,11 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           return;
         }
         mkdirSync(dirname(absPath), { recursive: true });
-        const toWrite = absPath.endsWith('.dql') ? canonicalizeSafe(content) : content;
+        const toWrite = absPath.endsWith('.dql')
+          ? canonicalizeSafe(content)
+          : absPath.endsWith('.dqlnb')
+            ? canonicalizeNotebookSafe(content)
+            : content;
         writeFileSync(absPath, toWrite, 'utf-8');
         res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
         res.end(serializeJSON({ ok: true }));
@@ -3121,6 +3129,14 @@ function canonicalizeSafe(source: string): string {
   }
 }
 
+function canonicalizeNotebookSafe(source: string): string {
+  try {
+    return canonicalizeNotebook(source);
+  } catch {
+    return source;
+  }
+}
+
 export interface BlockGitMetadata {
   commitSha: string;
   repo: string | null;
@@ -3806,13 +3822,62 @@ function ensureGitignoreEntry(projectRoot: string, pattern: string): void {
   }
 }
 
-async function readGitDiff(cwd: string, filePath: string): Promise<{ inRepo: boolean; diff: string }> {
+async function readGitDiff(
+  cwd: string,
+  filePath: string,
+): Promise<{
+  inRepo: boolean;
+  diff: string;
+  before: string | null;
+  after: string | null;
+  diffReport: DiffReport | null;
+}> {
   const isRepo = await execGit(cwd, ['rev-parse', '--is-inside-work-tree']);
-  if (isRepo.code !== 0) return { inRepo: false, diff: '' };
+  if (isRepo.code !== 0) {
+    return { inRepo: false, diff: '', before: null, after: null, diffReport: null };
+  }
   if (!filePath) {
     const res = await execGit(cwd, ['diff', '--no-color']);
-    return { inRepo: true, diff: res.stdout };
+    return { inRepo: true, diff: res.stdout, before: null, after: null, diffReport: null };
   }
-  const res = await execGit(cwd, ['diff', '--no-color', '--', filePath]);
-  return { inRepo: true, diff: res.stdout };
+  const isSemantic = filePath.endsWith('.dql') || filePath.endsWith('.dqlnb');
+  const [diffRes, before, after] = await Promise.all([
+    execGit(cwd, ['diff', '--no-color', '--', filePath]),
+    isSemantic ? readHeadBlob(cwd, filePath) : Promise.resolve<string | null>(null),
+    isSemantic ? readWorkingCopy(join(cwd, filePath)) : Promise.resolve<string | null>(null),
+  ]);
+  const diffReport = isSemantic ? computeSemanticDiff(filePath, before, after) : null;
+  return { inRepo: true, diff: diffRes.stdout, before, after, diffReport };
+}
+
+async function readHeadBlob(cwd: string, filePath: string): Promise<string | null> {
+  try {
+    const res = await execGit(cwd, ['show', `HEAD:${filePath}`]);
+    return res.code === 0 ? res.stdout : null;
+  } catch {
+    return null;
+  }
+}
+
+async function readWorkingCopy(absPath: string): Promise<string | null> {
+  try {
+    return readFileSync(absPath, 'utf-8');
+  } catch {
+    return null;
+  }
+}
+
+function computeSemanticDiff(
+  filePath: string,
+  before: string | null,
+  after: string | null,
+): DiffReport | null {
+  if (before === after) return null;
+  try {
+    return filePath.endsWith('.dqlnb')
+      ? diffNotebook(before, after)
+      : diffDQL(before ?? '', after ?? '');
+  } catch {
+    return null;
+  }
 }

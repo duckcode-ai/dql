@@ -1,4 +1,5 @@
 {
+  "dqlnbVersion": 1,
   "version": 1,
   "metadata": {
     "title": "{{PROJECT_NAME}} — Welcome",
@@ -11,21 +12,21 @@
       "source": "# Welcome to {{PROJECT_NAME}}\n\nThis notebook runs against a DuckDB-backed Jaffle Shop dataset — the same demo data dbt ships.\n\n- Run each cell with `Cmd/Ctrl + Enter`.\n- Charts render inline from SQL results.\n- The certified block in cell 4 lives in `blocks/revenue_by_segment.dql` and can be reused across notebooks and dashboards."
     },
     {
+      "title": "Orders overview",
       "id": "orders_overview",
       "type": "sql",
-      "title": "Orders overview",
       "source": "select\n  count(*) as total_orders,\n  count(distinct customer_id) as unique_customers,\n  sum(amount) as lifetime_revenue\nfrom orders"
     },
     {
+      "title": "Daily revenue",
       "id": "daily_revenue",
       "type": "sql",
-      "title": "Daily revenue",
       "source": "select\n  order_date,\n  sum(amount) as revenue\nfrom orders\ngroup by 1\norder by 1"
     },
     {
+      "title": "Revenue by segment (certified block)",
       "id": "revenue_by_segment",
       "type": "dql",
-      "title": "Revenue by segment (certified block)",
       "source": "@block(\"Revenue by segment\")"
     }
   ]

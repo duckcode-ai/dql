@@ -1,6 +1,6 @@
 {
   "name": "@duckcodeailabs/dql-core",
-  "version": "1.0.3",
+  "version": "1.0.4",
   "description": "DQL language core: lexer, parser, AST, semantic analysis",
   "license": "Apache-2.0",
   "type": "module",
@@ -10,6 +10,10 @@
     ".": {
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js"
+    },
+    "./format": {
+      "types": "./dist/format/index.d.ts",
+      "import": "./dist/format/index.js"
     }
   },
   "scripts": {

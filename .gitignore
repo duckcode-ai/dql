@@ -12,4 +12,6 @@ npm-debug.log*
 pnpm-debug.log*
 jaffle-shop/
 !packages/create-dql-app/templates/jaffle-shop/
-.claude/worktrees/
+.claude/
+*.dqlnb.run.json
+*.dql.run.json

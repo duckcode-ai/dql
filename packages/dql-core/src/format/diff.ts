@@ -33,7 +33,11 @@ export type DiffChange =
   | { kind: 'dashboard-changed'; title: string; fields: FieldChange[] }
   | { kind: 'workbook-added'; title: string }
   | { kind: 'workbook-removed'; title: string }
-  | { kind: 'workbook-changed'; title: string; fields: FieldChange[] };
+  | { kind: 'workbook-changed'; title: string; fields: FieldChange[] }
+  | { kind: 'cell-added'; id: string; cellType: string; name?: string }
+  | { kind: 'cell-removed'; id: string; cellType: string; name?: string }
+  | { kind: 'cell-changed'; id: string; name?: string; fields: FieldChange[] }
+  | { kind: 'notebook-changed'; fields: FieldChange[] };
 
 export interface FieldChange {
   path: string;
@@ -49,6 +53,128 @@ export interface DiffReport {
 
 export function diffDQL(beforeSource: string, afterSource: string): DiffReport {
   return diffProgram(parse(beforeSource), parse(afterSource));
+}
+
+// ---- Notebook (.dqlnb) ----
+// Compares by cell id so renaming a cell is one `cell-changed` with a
+// `name` field change, not an add + remove. `null` before/after represent
+// a new or deleted file — every entity becomes `*-added` / `*-removed`.
+
+interface NotebookCellShape {
+  id?: string;
+  type?: string;
+  name?: string;
+  title?: string;
+  content?: string;
+  source?: string;
+  [key: string]: unknown;
+}
+
+interface NotebookShape {
+  title?: string;
+  cells?: NotebookCellShape[];
+  metadata?: Record<string, unknown>;
+  [key: string]: unknown;
+}
+
+export function diffNotebook(beforeSource: string | null, afterSource: string | null): DiffReport {
+  const before = parseNotebookSafe(beforeSource);
+  const after = parseNotebookSafe(afterSource);
+  const changes: DiffChange[] = [];
+
+  const topFields: FieldChange[] = [];
+  scalar(topFields, 'title', before?.title, after?.title);
+  if (topFields.length > 0) changes.push({ kind: 'notebook-changed', fields: topFields });
+
+  const beforeCells = indexByCellId(before?.cells);
+  const afterCells = indexByCellId(after?.cells);
+
+  for (const [id, cell] of beforeCells) {
+    if (!afterCells.has(id)) {
+      changes.push({
+        kind: 'cell-removed',
+        id,
+        cellType: cell.type ?? 'unknown',
+        ...(cellLabel(cell) ? { name: cellLabel(cell)! } : {}),
+      });
+    }
+  }
+  for (const [id, cell] of afterCells) {
+    const prev = beforeCells.get(id);
+    if (!prev) {
+      changes.push({
+        kind: 'cell-added',
+        id,
+        cellType: cell.type ?? 'unknown',
+        ...(cellLabel(cell) ? { name: cellLabel(cell)! } : {}),
+      });
+      continue;
+    }
+    const fields = diffCell(prev, cell);
+    if (fields.length > 0) {
+      changes.push({
+        kind: 'cell-changed',
+        id,
+        ...(cellLabel(cell) ? { name: cellLabel(cell)! } : {}),
+        fields,
+      });
+    }
+  }
+
+  return { changes, identical: changes.length === 0 };
+}
+
+function parseNotebookSafe(source: string | null): NotebookShape | null {
+  if (source === null) return null;
+  try {
+    return JSON.parse(source) as NotebookShape;
+  } catch {
+    return null;
+  }
+}
+
+function indexByCellId(cells: NotebookCellShape[] | undefined): Map<string, NotebookCellShape> {
+  const out = new Map<string, NotebookCellShape>();
+  for (const cell of cells ?? []) {
+    if (typeof cell.id === 'string' && cell.id.length > 0) out.set(cell.id, cell);
+  }
+  return out;
+}
+
+function cellLabel(cell: NotebookCellShape): string | undefined {
+  return cell.name ?? cell.title;
+}
+
+const CELL_CONFIG_KEYS = [
+  'paramConfig',
+  'paramValue',
+  'chartConfig',
+  'filterConfig',
+  'pivotConfig',
+  'singleValueConfig',
+  'tableConfig',
+  'upstream',
+  'blockBinding',
+] as const;
+
+function diffCell(a: NotebookCellShape, b: NotebookCellShape): FieldChange[] {
+  const out: FieldChange[] = [];
+  scalar(out, 'type', a.type, b.type);
+  scalar(out, 'name', cellLabel(a), cellLabel(b));
+  scalar(out, 'content', a.content ?? a.source, b.content ?? b.source);
+  for (const key of CELL_CONFIG_KEYS) {
+    scalar(out, key, stringifyConfig(a[key]), stringifyConfig(b[key]));
+  }
+  return out;
+}
+
+function stringifyConfig(value: unknown): string | undefined {
+  if (value === undefined) return undefined;
+  try {
+    return JSON.stringify(value);
+  } catch {
+    return String(value);
+  }
 }
 
 export function diffProgram(before: ProgramNode, after: ProgramNode): DiffReport {
@@ -278,9 +404,31 @@ export function renderDiffText(report: DiffReport): string {
       case 'workbook-changed':
         lines.push(`~ workbook "${c.title}" (body changed)`);
         break;
+      case 'cell-added':
+        lines.push(`+ cell [${c.cellType}] ${cellRefLabel(c.id, c.name)}`);
+        break;
+      case 'cell-removed':
+        lines.push(`- cell [${c.cellType}] ${cellRefLabel(c.id, c.name)}`);
+        break;
+      case 'cell-changed':
+        lines.push(`~ cell ${cellRefLabel(c.id, c.name)}`);
+        for (const f of c.fields) {
+          lines.push(`    ${f.path}: ${fmtVal(f.before)} → ${fmtVal(f.after)}`);
+        }
+        break;
+      case 'notebook-changed':
+        lines.push(`~ notebook`);
+        for (const f of c.fields) {
+          lines.push(`    ${f.path}: ${fmtVal(f.before)} → ${fmtVal(f.after)}`);
+        }
+        break;
     }
   }
   return lines.join('\n');
+}
+
+function cellRefLabel(id: string, name?: string): string {
+  return name ? `"${name}" (${id})` : id;
 }
 
 function fmtVal(v: string | null): string {

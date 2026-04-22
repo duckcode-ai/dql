@@ -1,3 +1,4 @@
+import { canonicalizeNotebook, NOTEBOOK_FORMAT_VERSION } from '@duckcodeailabs/dql-core/format';
 import type {
   Cell,
   CellType,
@@ -105,6 +106,8 @@ export interface NotebookMetadata {
 }
 
 export interface DqlNotebookFile {
+  /** Canonical on-disk format version (v0.12+). Missing => legacy v0 file. */
+  dqlnbVersion?: number;
   version: number;
   title: string;
   metadata?: NotebookMetadata & { title?: string };
@@ -170,6 +173,7 @@ export function parseDqlNotebook(content: string): ParsedWorkbook {
  */
 export function serializeDqlNotebook(title: string, cells: Cell[], existingMetadata?: NotebookMetadata): string {
   const data: DqlNotebookFile = {
+    dqlnbVersion: NOTEBOOK_FORMAT_VERSION,
     version: 1,
     title,
     metadata: {
@@ -193,7 +197,7 @@ export function serializeDqlNotebook(title: string, cells: Cell[], existingMetad
       ...(c.blockBinding ? { blockBinding: c.blockBinding } : {}),
     })),
   };
-  return JSON.stringify(data, null, 2);
+  return canonicalizeNotebook(JSON.stringify(data));
 }
 
 /**

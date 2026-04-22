@@ -59,22 +59,23 @@ export function AppShell() {
         const { content } = await api.readNotebook(file.path);
         const { title, cells, metadata } = parseNotebookFile(file.path, content);
 
-        // Hydrate last-run results from sibling .run.json so the notebook
-        // shows executed output without forcing a re-run on open.
-        const snap = await api.fetchRunSnapshot(file.path);
-        const hydrated = snap.found && snap.snapshot
-          ? cells.map((c) => {
-              const entry = snap.snapshot!.cells.find((e) => e.cellId === c.id);
-              if (!entry) return c;
-              return {
-                ...c,
-                status: entry.status ?? c.status,
-                result: entry.result ?? c.result,
-                error: entry.error ?? c.error,
-                executionCount: entry.executionCount ?? c.executionCount,
-              };
-            })
-          : cells;
+        const snap = file.path.endsWith('.dqlnb') ? await api.fetchRunSnapshot(file.path) : null;
+        let hydrated = cells;
+        if (snap?.found && snap.snapshot) {
+          const byId = new Map(snap.snapshot.cells.map((e) => [e.cellId, e]));
+          hydrated = cells.map((c) => {
+            const entry = byId.get(c.id);
+            if (!entry) return c;
+            return {
+              ...c,
+              status: entry.status ?? c.status,
+              result: entry.result ?? c.result,
+              error: entry.error ?? c.error,
+              executionCount: entry.executionCount ?? c.executionCount,
+              fromSnapshot: entry.result != null,
+            };
+          });
+        }
 
         dispatch({ type: 'OPEN_FILE', file, cells: hydrated, title, metadata });
         // Ensure files panel is visible

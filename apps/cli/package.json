@@ -1,6 +1,6 @@
 {
   "name": "@duckcodeailabs/dql-cli",
-  "version": "1.0.3",
+  "version": "1.0.4",
   "description": "Public CLI for parsing, formatting, testing, and certifying DQL blocks",
   "license": "Apache-2.0",
   "type": "module",
@@ -27,17 +27,18 @@
     "directory": "apps/cli"
   },
   "dependencies": {
+    "@duckcodeailabs/dql-compiler": "workspace:*",
     "@duckcodeailabs/dql-connectors": "workspace:*",
     "@duckcodeailabs/dql-core": "workspace:*",
-    "@duckcodeailabs/dql-compiler": "workspace:*",
-    "@duckcodeailabs/dql-project": "workspace:*",
     "@duckcodeailabs/dql-governance": "workspace:*",
-    "@duckcodeailabs/dql-notebook": "workspace:*"
+    "@duckcodeailabs/dql-notebook": "workspace:*",
+    "@duckcodeailabs/dql-project": "workspace:*",
+    "isomorphic-git": "^1.27.0"
   },
   "devDependencies": {
     "@duckcodeailabs/dql-notebook-app": "workspace:*",
-    "typescript": "^5.7.0",
     "tsx": "^4.19.0",
+    "typescript": "^5.7.0",
     "vitest": "^3.0.0"
   },
   "engines": {

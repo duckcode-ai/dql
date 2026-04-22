@@ -15,6 +15,7 @@
 import { formatDQL, type FormatOptions } from '../formatter/index.js';
 
 export * from './diff.js';
+export * from './notebook.js';
 
 export const FORMAT_VERSION = 1;
 export const FORMAT_HEADER_PREFIX = '// dql-format:';

@@ -160,6 +160,7 @@ export interface Cell {
   tableConfig?: TableCellConfig;      // Table cell
   upstream?: string;                   // Dataframe handle this cell consumes
   blockBinding?: BlockBinding;         // Present when cell references a .dql block file
+  fromSnapshot?: boolean;              // Result was hydrated from .run.json, not executed this session
 }
 
 export interface NotebookFile {

@@ -984,6 +984,22 @@ export function CellComponent({ cell, index }: CellProps) {
                   )}
                 </span>
               )}
+              {cell.fromSnapshot && cell.result && (
+                <span
+                  title="Result loaded from the last saved run; re-run to refresh."
+                  style={{
+                    fontSize: 10,
+                    fontFamily: t.font,
+                    color: t.textMuted,
+                    border: `1px solid ${t.btnBorder}`,
+                    borderRadius: 3,
+                    padding: '0 6px',
+                    lineHeight: '16px',
+                  }}
+                >
+                  cached
+                </span>
+              )}
               {cell.error && (
                 <span style={{ fontSize: 11, fontFamily: t.font, color: t.error }}>
                   Error

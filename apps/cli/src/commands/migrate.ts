@@ -1,3 +1,6 @@
+import { readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import { join, relative } from 'node:path';
+import { canonicalize, canonicalizeNotebook } from '@duckcodeailabs/dql-core';
 import type { CLIFlags } from '../args.js';
 
 export type MigrationSource = 'looker' | 'tableau' | 'dbt' | 'metabase' | 'raw-sql';
@@ -48,6 +51,10 @@ function generateBlockDQL(opts: {
 }
 
 export async function runMigrate(file: string, flags: CLIFlags): Promise<void> {
+  if (file === 'format') {
+    await runFormatMigrate(flags.input || '.', flags);
+    return;
+  }
   // file is used as the source type for migration
   const source = file as MigrationSource;
   const validSources: MigrationSource[] = ['looker', 'tableau', 'dbt', 'metabase', 'raw-sql'];
@@ -55,6 +62,7 @@ export async function runMigrate(file: string, flags: CLIFlags): Promise<void> {
   if (!validSources.includes(source)) {
     console.error(`\n  ✗ Unknown migration source: "${source}"`);
     console.error(`    Valid sources: ${validSources.join(', ')}`);
+    console.error(`    Or: "format" to upgrade .dql/.dqlnb files to the canonical on-disk format`);
     console.error('');
     process.exit(1);
   }
@@ -129,4 +137,86 @@ export async function runMigrate(file: string, flags: CLIFlags): Promise<void> {
   console.log('    3. Run: dql test blocks/migrated/example.dql');
   console.log('    4. Commit and push for certification');
   console.log('');
+}
+
+interface FormatMigrateReport {
+  scanned: number;
+  alreadyCanonical: number;
+  upgraded: number;
+  failed: Array<{ path: string; error: string }>;
+  dryRun: boolean;
+}
+
+export async function runFormatMigrate(root: string, flags: CLIFlags): Promise<void> {
+  const dryRun = flags.check === true;
+  const report: FormatMigrateReport = {
+    scanned: 0,
+    alreadyCanonical: 0,
+    upgraded: 0,
+    failed: [],
+    dryRun,
+  };
+
+  for (const absPath of walkDqlFiles(root)) {
+    report.scanned += 1;
+    const rel = relative(root, absPath) || absPath;
+    const source = readFileSync(absPath, 'utf-8');
+    let canonical: string;
+    try {
+      canonical = absPath.endsWith('.dqlnb') ? canonicalizeNotebook(source) : canonicalize(source);
+    } catch (error) {
+      report.failed.push({ path: rel, error: error instanceof Error ? error.message : String(error) });
+      continue;
+    }
+    if (canonical === source) {
+      report.alreadyCanonical += 1;
+      continue;
+    }
+    if (!dryRun) writeFileSync(absPath, canonical, 'utf-8');
+    report.upgraded += 1;
+  }
+
+  if (flags.format === 'json') {
+    console.log(JSON.stringify(report, null, 2));
+    if (report.failed.length > 0) process.exit(1);
+    return;
+  }
+
+  console.log(`\n  DQL format migration${dryRun ? ' (dry run)' : ''}`);
+  console.log('  ─────────────────────────────');
+  console.log(`  Scanned:            ${report.scanned}`);
+  console.log(`  Already canonical:  ${report.alreadyCanonical}`);
+  console.log(`  ${dryRun ? 'Would upgrade' : 'Upgraded'}:     ${report.upgraded}`);
+  if (report.failed.length > 0) {
+    console.log(`  Failed:             ${report.failed.length}`);
+    for (const f of report.failed) console.log(`    ✗ ${f.path}: ${f.error}`);
+    process.exit(1);
+  }
+  console.log('');
+}
+
+function* walkDqlFiles(root: string): Generator<string> {
+  const stack: string[] = [root];
+  while (stack.length > 0) {
+    const dir = stack.pop()!;
+    let entries;
+    try {
+      entries = readdirSync(dir, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+    for (const entry of entries) {
+      if (entry.name === 'node_modules' || entry.name === '.git' || entry.name === 'dist' || entry.name === 'target') continue;
+      const full = join(dir, entry.name);
+      if (entry.isDirectory()) {
+        stack.push(full);
+      } else if (entry.isFile() && (entry.name.endsWith('.dql') || entry.name.endsWith('.dqlnb'))) {
+        try {
+          if (statSync(full).size > 0) yield full;
+        } catch {
+          // skip unreadable
+        }
+      }
+    }
+  }
 }

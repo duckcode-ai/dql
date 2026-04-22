@@ -1,53 +1,54 @@
 {
+  "dqlnbVersion": 1,
   "version": 1,
   "metadata": {
     "title": "Jaffle Shop Lineage Demo",
-    "description": "Open-source lineage demo connecting dbt models, DQL blocks, domains, and notebook consumption.",
     "createdWith": "dql",
+    "description": "Open-source lineage demo connecting dbt models, DQL blocks, domains, and notebook consumption.",
     "template": "dbt"
   },
   "cells": [
     {
+      "title": "Overview",
       "id": "intro",
       "type": "markdown",
-      "title": "Overview",
       "source": "# Jaffle Shop Lineage Demo\n\nThis notebook is designed to show the open-source lineage story end to end:\n\n- raw/source tables and dbt models upstream\n- DQL blocks in the middle\n- notebook usage and chart consumption downstream\n- domain boundaries across customer, finance, and executive layers\n\nUse the Lineage sidebar or open any block in Block Studio to inspect the focused graph."
     },
     {
+      "title": "Customer Segments Block",
       "id": "customer-segments",
       "type": "dql",
-      "title": "Customer Segments Block",
       "source": "block \"customer_segments\" {\n  domain = \"customer\"\n  type = \"custom\"\n  owner = \"data-team\"\n  description = \"Customer-level segment summary sourced from the dbt customer dimension.\"\n  tags = [\"demo\", \"lineage\", \"customer\"]\n\n  query = \"\"\"\n    SELECT\n      customer_type,\n      COUNT(*) AS customers,\n      ROUND(AVG(lifetime_spend), 2) AS avg_lifetime_spend\n    FROM dim_customers\n    GROUP BY customer_type\n    ORDER BY customers DESC\n  \"\"\"\n\n  visualization {\n    chart = \"table\"\n  }\n\n  tests {\n    assert row_count > 0\n  }\n}"
     },
     {
+      "title": "Revenue By Customer Type",
       "id": "revenue-by-customer-type",
       "type": "dql",
-      "title": "Revenue By Customer Type",
       "source": "block \"revenue_by_customer_type\" {\n  domain = \"finance\"\n  type = \"custom\"\n  owner = \"finance-team\"\n  description = \"Revenue rollup by customer type using dbt mart models.\"\n  tags = [\"demo\", \"lineage\", \"finance\"]\n\n  query = \"\"\"\n    SELECT\n      c.customer_type,\n      ROUND(SUM(o.order_total), 2) AS revenue,\n      COUNT(*) AS orders\n    FROM fct_orders o\n    JOIN dim_customers c\n      ON o.customer_id = c.customer_id\n    GROUP BY c.customer_type\n    ORDER BY revenue DESC\n  \"\"\"\n\n  visualization {\n    chart = \"bar\"\n    x = \"customer_type\"\n    y = \"revenue\"\n    title = \"Revenue By Customer Type\"\n  }\n\n  tests {\n    assert row_count > 0\n  }\n}"
     },
     {
+      "title": "Revenue Chart",
       "id": "revenue-by-customer-type-chart",
       "type": "chart",
-      "title": "Revenue Chart",
-      "source": "",
       "config": {
-        "sourceCellId": "revenue-by-customer-type",
+        "title": "Revenue By Customer Type",
         "chart": "bar",
+        "sourceCellId": "revenue-by-customer-type",
         "x": "customer_type",
-        "y": "revenue",
-        "title": "Revenue By Customer Type"
-      }
+        "y": "revenue"
+      },
+      "source": ""
     },
     {
+      "title": "Executive Revenue Rollup",
       "id": "executive-rollup",
       "type": "dql",
-      "title": "Executive Revenue Rollup",
       "source": "block \"executive_revenue_rollup\" {\n  domain = \"executive\"\n  type = \"custom\"\n  owner = \"exec-analytics\"\n  description = \"Executive summary block that depends on the finance revenue block.\"\n  tags = [\"demo\", \"lineage\", \"executive\"]\n\n  query = \"\"\"\n    SELECT\n      customer_type,\n      revenue,\n      orders,\n      ROUND(revenue / NULLIF(orders, 0), 2) AS revenue_per_order\n    FROM ref(\"revenue_by_customer_type\")\n    ORDER BY revenue DESC\n  \"\"\"\n\n  visualization {\n    chart = \"table\"\n  }\n\n  tests {\n    assert row_count > 0\n  }\n}"
     },
     {
+      "title": "How To Verify",
       "id": "usage-notes",
       "type": "markdown",
-      "title": "How To Verify",
       "source": "## Suggested verification flow\n\n1. Open the Lineage sidebar and search for `revenue_by_customer_type`\n2. Focus that node and confirm the path includes dbt models like `fct_orders` and `dim_customers`\n3. Open `executive_revenue_rollup` in Block Studio and use the `Lineage` tab\n4. Confirm the path summary shows upstream provenance and downstream notebook consumption\n5. Run `dql lineage --focus revenue_by_customer_type` or `dql lineage --dashboard \"Jaffle Shop Lineage Demo\"` for the CLI view"
     }
   ]

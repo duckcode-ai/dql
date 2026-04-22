@@ -40,8 +40,10 @@ const HELP = `
     dql certify <file.dql>          Evaluate certification rules
     dql info <file.dql>             Show block metadata
     dql migrate <source>            Scaffold migration from looker/tableau/dbt/metabase/raw-sql
-    dql fmt <file.dql>              Format DQL file in place
-    dql diff <before> <after>       Semantic diff between two .dql files
+    dql migrate format [--check]    Upgrade all .dql/.dqlnb files to canonical format
+    dql fmt <file.dql|.dqlnb>       Format DQL/notebook file in place
+    dql diff <path>                 Diff a .dql/.dqlnb file vs HEAD
+    dql diff <before> <after>       Semantic diff between two files
     dql notebook [path]             Launch the browser-first notebook for a project
     dql semantic <sub> [path]       Semantic layer: list, validate, query, pull
     dql compile [path]              Generate project manifest (dql-manifest.json)
