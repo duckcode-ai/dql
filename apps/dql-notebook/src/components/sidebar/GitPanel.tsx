@@ -2,11 +2,15 @@ import React, { useEffect, useState, useCallback } from 'react';
 import { useNotebook } from '../../store/NotebookStore';
 import { themes } from '../../themes/notebook-theme';
 import { api } from '../../api/client';
+import type { DiffReport } from '@duckcodeailabs/dql-core/format';
+import { GitDiffView } from './GitDiffView';
 
 type Status = Awaited<ReturnType<typeof api.fetchGitStatus>>;
 type LogResult = Awaited<ReturnType<typeof api.fetchGitLog>>;
 
 type Tab = 'status' | 'log' | 'diff';
+
+const STATUS_POLL_MS = 2000;
 
 export function GitPanel() {
   const { state } = useNotebook();
@@ -16,6 +20,7 @@ export function GitPanel() {
   const [status, setStatus] = useState<Status | null>(null);
   const [log, setLog] = useState<LogResult | null>(null);
   const [diff, setDiff] = useState<string>('');
+  const [diffReport, setDiffReport] = useState<DiffReport | null>(null);
   const [diffPath, setDiffPath] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
 
@@ -29,6 +34,7 @@ export function GitPanel() {
       } else {
         const result = await api.fetchGitDiff(diffPath ?? undefined);
         setDiff(result.diff);
+        setDiffReport(result.diffReport);
       }
     } finally {
       setLoading(false);
@@ -38,6 +44,18 @@ export function GitPanel() {
   useEffect(() => {
     void refresh();
   }, [refresh]);
+
+  // Quiet poll on the status tab so the file list reflects terminal-side
+  // edits within 2s without the user clicking refresh.
+  useEffect(() => {
+    if (tab !== 'status') return;
+    const id = window.setInterval(() => {
+      void api.fetchGitStatus().then((next) => {
+        setStatus((prev) => (statusEqual(prev, next) ? prev : next));
+      });
+    }, STATUS_POLL_MS);
+    return () => window.clearInterval(id);
+  }, [tab]);
 
   const activeFilePath = state.activeFile?.path ?? null;
 
@@ -61,19 +79,20 @@ export function GitPanel() {
       </div>
 
       <div style={{ flex: 1, overflow: 'auto', padding: 10, fontSize: 12 }}>
-        {loading && <div style={{ color: t.textMuted }}>Loading…</div>}
+        {loading && !status && !log && <div style={{ color: t.textMuted }}>Loading…</div>}
 
-        {!loading && tab === 'status' && status && (
+        {tab === 'status' && status && (
           <StatusView status={status} t={t} />
         )}
 
-        {!loading && tab === 'log' && log && (
+        {tab === 'log' && log && (
           <LogView log={log} t={t} />
         )}
 
-        {!loading && tab === 'diff' && (
-          <DiffView
+        {tab === 'diff' && (
+          <GitDiffView
             diff={diff}
+            diffReport={diffReport}
             activeFilePath={activeFilePath}
             diffPath={diffPath}
             onScopeToFile={() => setDiffPath(activeFilePath)}
@@ -86,7 +105,17 @@ export function GitPanel() {
   );
 }
 
-function StatusView({ status, t }: { status: Status; t: ReturnType<typeof themes.dark extends any ? any : any> }) {
+function statusEqual(a: Status | null, b: Status): boolean {
+  if (!a) return false;
+  if (a.inRepo !== b.inRepo || a.branch !== b.branch || a.ahead !== b.ahead || a.behind !== b.behind) return false;
+  if (a.changes.length !== b.changes.length) return false;
+  const ak = a.changes.map((c) => `${c.path}\0${c.status}`).sort();
+  const bk = b.changes.map((c) => `${c.path}\0${c.status}`).sort();
+  for (let i = 0; i < ak.length; i++) if (ak[i] !== bk[i]) return false;
+  return true;
+}
+
+function StatusView({ status, t }: { status: Status; t: any }) {
   if (!status.inRepo) {
     return <div style={{ color: t.textMuted }}>Not a git repository.</div>;
   }
@@ -137,53 +166,6 @@ function LogView({ log, t }: { log: LogResult; t: any }) {
   );
 }
 
-function DiffView({
-  diff, activeFilePath, diffPath, onScopeToFile, onClearScope, t,
-}: {
-  diff: string; activeFilePath: string | null; diffPath: string | null;
-  onScopeToFile: () => void; onClearScope: () => void; t: any;
-}) {
-  return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-      <div style={{ display: 'flex', gap: 6, fontSize: 11 }}>
-        <button onClick={onClearScope} style={scopeBtn(diffPath == null, t)}>All</button>
-        {activeFilePath && (
-          <button onClick={onScopeToFile} style={scopeBtn(diffPath === activeFilePath, t)}>
-            Active file
-          </button>
-        )}
-        {diffPath && (
-          <span style={{ color: t.textMuted, fontSize: 10, alignSelf: 'center', fontFamily: t.fontMono }}>
-            {diffPath}
-          </span>
-        )}
-      </div>
-      {diff.trim() === '' ? (
-        <div style={{ color: t.textMuted }}>No unstaged changes.</div>
-      ) : (
-        <pre
-          style={{
-            fontFamily: t.fontMono,
-            fontSize: 11,
-            margin: 0,
-            padding: 8,
-            background: t.editorBg,
-            border: `1px solid ${t.editorBorder}`,
-            borderRadius: 6,
-            overflow: 'auto',
-            whiteSpace: 'pre',
-            color: t.textPrimary,
-          }}
-        >
-          {diff.split('\n').map((line, i) => (
-            <div key={i} style={{ color: diffLineColor(line, t) }}>{line || ' '}</div>
-          ))}
-        </pre>
-      )}
-    </div>
-  );
-}
-
 function TabButton({ active, onClick, children, t }: { active: boolean; onClick: () => void; children: React.ReactNode; t: any }) {
   return (
     <button
@@ -204,18 +186,6 @@ function TabButton({ active, onClick, children, t }: { active: boolean; onClick:
   );
 }
 
-function scopeBtn(active: boolean, t: any): React.CSSProperties {
-  return {
-    background: active ? t.btnHover : 'transparent',
-    color: active ? t.textPrimary : t.textMuted,
-    border: `1px solid ${t.headerBorder}`,
-    padding: '2px 8px',
-    borderRadius: 4,
-    fontSize: 11,
-    cursor: 'pointer',
-  };
-}
-
 function statusColor(code: string, t: any): string {
   const c = code.trim();
   if (c === 'M' || c === 'MM') return t.warning;
@@ -223,12 +193,4 @@ function statusColor(code: string, t: any): string {
   if (c === 'D') return t.error;
   if (c.startsWith('R')) return t.accent;
   return t.textMuted;
-}
-
-function diffLineColor(line: string, t: any): string {
-  if (line.startsWith('+++') || line.startsWith('---')) return t.textMuted;
-  if (line.startsWith('+')) return t.success;
-  if (line.startsWith('-')) return t.error;
-  if (line.startsWith('@@')) return t.accent;
-  return t.textPrimary;
 }

@@ -1,4 +1,5 @@
 {
+  "dqlnbVersion": 1,
   "version": 1,
   "metadata": {
     "title": "{{PROJECT_NAME}} — Welcome",
@@ -11,9 +12,9 @@
       "source": "# {{PROJECT_NAME}}\n\nWelcome to DQL. Connect a warehouse in `dql.config.json`, then edit the cell below."
     },
     {
+      "title": "First query",
       "id": "first_query",
       "type": "sql",
-      "title": "First query",
       "source": "select 1 as hello"
     }
   ]

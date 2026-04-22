@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { diffDQL, renderDiffText } from './diff.js';
+import { diffDQL, diffNotebook, renderDiffText } from './diff.js';
 
 const BEFORE = `block "rev" {
   domain = "sales"
@@ -56,5 +56,97 @@ describe('diffDQL', () => {
     const after = BEFORE.replace(/SELECT SUM\(revenue\) as rev FROM orders/, 'SELECT  SUM(revenue)   as rev   FROM orders');
     const r = diffDQL(BEFORE, after);
     expect(r.identical).toBe(true);
+  });
+});
+
+// ---- Notebook ----
+
+const NB_BEFORE = JSON.stringify({
+  title: 'Revenue',
+  cells: [
+    { id: 'c1', type: 'sql', content: 'SELECT 1', name: 'first' },
+    { id: 'c2', type: 'markdown', content: '# hi' },
+  ],
+});
+
+describe('diffNotebook', () => {
+  it('reports identical when sources match', () => {
+    const r = diffNotebook(NB_BEFORE, NB_BEFORE);
+    expect(r.identical).toBe(true);
+  });
+
+  it('detects a changed cell content', () => {
+    const after = JSON.stringify({
+      title: 'Revenue',
+      cells: [
+        { id: 'c1', type: 'sql', content: 'SELECT 2', name: 'first' },
+        { id: 'c2', type: 'markdown', content: '# hi' },
+      ],
+    });
+    const r = diffNotebook(NB_BEFORE, after);
+    expect(r.changes).toHaveLength(1);
+    expect(r.changes[0].kind).toBe('cell-changed');
+    if (r.changes[0].kind === 'cell-changed') {
+      expect(r.changes[0].id).toBe('c1');
+      expect(r.changes[0].fields.map((f) => f.path)).toEqual(['content']);
+    }
+  });
+
+  it('reports a renamed cell as one cell-changed, not add+remove', () => {
+    const after = JSON.stringify({
+      title: 'Revenue',
+      cells: [
+        { id: 'c1', type: 'sql', content: 'SELECT 1', name: 'renamed' },
+        { id: 'c2', type: 'markdown', content: '# hi' },
+      ],
+    });
+    const r = diffNotebook(NB_BEFORE, after);
+    expect(r.changes).toHaveLength(1);
+    expect(r.changes[0].kind).toBe('cell-changed');
+    if (r.changes[0].kind === 'cell-changed') {
+      expect(r.changes[0].fields.map((f) => f.path)).toEqual(['name']);
+    }
+  });
+
+  it('detects added and removed cells', () => {
+    const after = JSON.stringify({
+      title: 'Revenue',
+      cells: [
+        { id: 'c1', type: 'sql', content: 'SELECT 1', name: 'first' },
+        { id: 'c3', type: 'chart', content: '' },
+      ],
+    });
+    const r = diffNotebook(NB_BEFORE, after);
+    const kinds = r.changes.map((c) => c.kind).sort();
+    expect(kinds).toEqual(['cell-added', 'cell-removed']);
+  });
+
+  it('detects a title change on the notebook itself', () => {
+    const after = JSON.stringify({ title: 'Revenue Q2', cells: JSON.parse(NB_BEFORE).cells });
+    const r = diffNotebook(NB_BEFORE, after);
+    const notebookChange = r.changes.find((c) => c.kind === 'notebook-changed');
+    expect(notebookChange).toBeDefined();
+  });
+
+  it('treats null before as every cell added (new file)', () => {
+    const r = diffNotebook(null, NB_BEFORE);
+    const kinds = r.changes.map((c) => c.kind);
+    expect(kinds.filter((k) => k === 'cell-added')).toHaveLength(2);
+  });
+
+  it('detects a blockBinding state transition', () => {
+    const before = JSON.stringify({
+      title: 't',
+      cells: [{ id: 'c1', type: 'sql', content: 'SELECT 1', blockBinding: { path: 'blocks/foo.dql', state: 'bound' } }],
+    });
+    const after = JSON.stringify({
+      title: 't',
+      cells: [{ id: 'c1', type: 'sql', content: 'SELECT 1', blockBinding: { path: 'blocks/foo.dql', state: 'forked' } }],
+    });
+    const r = diffNotebook(before, after);
+    expect(r.changes).toHaveLength(1);
+    if (r.changes[0].kind === 'cell-changed') {
+      expect(r.changes[0].fields.map((f) => f.path)).toEqual(['blockBinding']);
+    }
   });
 });

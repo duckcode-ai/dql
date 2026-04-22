@@ -1,3 +1,4 @@
+import type { DiffReport } from '@duckcodeailabs/dql-core/format';
 import type {
   NotebookFile,
   QueryResult,
@@ -623,12 +624,18 @@ export const api = {
     });
   },
 
-  async fetchGitDiff(path?: string): Promise<{ inRepo: boolean; diff: string }> {
+  async fetchGitDiff(path?: string): Promise<{
+    inRepo: boolean;
+    diff: string;
+    before: string | null;
+    after: string | null;
+    diffReport: DiffReport | null;
+  }> {
     try {
       const qs = path ? `?path=${encodeURIComponent(path)}` : '';
       return await request<any>(`/api/git/diff${qs}`);
     } catch {
-      return { inRepo: false, diff: '' };
+      return { inRepo: false, diff: '', before: null, after: null, diffReport: null };
     }
   },
 };

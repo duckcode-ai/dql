@@ -60,7 +60,7 @@ export function useQueryExecution() {
       dispatch({
         type: 'UPDATE_CELL',
         id: cellId,
-        updates: { status: 'running', error: undefined, result: undefined },
+        updates: { status: 'running', error: undefined, result: undefined, fromSnapshot: false },
       });
 
       try {
