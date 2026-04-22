@@ -46,7 +46,13 @@ function orderForKind(classified: ClassifiedColumns, preferred: FieldKind): { na
 /** Hex-style Pivot cell — drop zones for Rows, Columns, Values with per-value aggregation. */
 export function PivotCell({ cell, cells, index, themeMode, onUpdate }: PivotCellProps) {
   const t: Theme = themes[themeMode];
-  const config: PivotCellConfig = cell.pivotConfig ?? DEFAULT_PIVOT_CONFIG;
+  const rawConfig = cell.pivotConfig ?? DEFAULT_PIVOT_CONFIG;
+  const config: PivotCellConfig = {
+    upstream: rawConfig.upstream,
+    rows: rawConfig.rows ?? [],
+    columns: rawConfig.columns ?? [],
+    values: rawConfig.values ?? [],
+  };
 
   const upstream = useMemo(() => {
     const name = cell.upstream ?? config.upstream;

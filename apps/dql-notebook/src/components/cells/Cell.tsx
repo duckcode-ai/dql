@@ -12,6 +12,7 @@ import { ChartCell } from './ChartCell';
 import { FilterCell } from './FilterCell';
 import { SingleValueCell } from './SingleValueCell';
 import { PivotCell } from './PivotCell';
+import { TableCell } from './TableCell';
 import { SnippetPicker } from './SnippetPicker';
 import { SaveAsBlockModal } from '../modals/SaveAsBlockModal';
 import { deriveBlockSource } from '../../utils/derive-block-source';
@@ -77,11 +78,6 @@ interface PlaceholderMeta {
 }
 
 const PLACEHOLDER_META: Partial<Record<string, PlaceholderMeta>> = {
-  table: {
-    title: 'Table',
-    subtitle: 'Render an upstream dataframe as a table with typed columns.',
-    color: '#79c0ff',
-  },
   map: {
     title: 'Map',
     subtitle: 'Geospatial visualization — lat/lon points and choropleths from an upstream dataframe. Lands in v0.11 on the dql-compiler geo pipeline.',
@@ -542,6 +538,13 @@ export function CellComponent({ cell, index }: CellProps) {
     return (
       <GutterWrap>
         <ChartCell cell={cell} cells={state.cells} index={index} themeMode={state.themeMode} onUpdate={onCellUpdate} />
+      </GutterWrap>
+    );
+  }
+  if (cell.type === 'table') {
+    return (
+      <GutterWrap>
+        <TableCell cell={cell} cells={state.cells} index={index} themeMode={state.themeMode} onUpdate={onCellUpdate} />
       </GutterWrap>
     );
   }
