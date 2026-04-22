@@ -7,7 +7,7 @@ reads on github.com, in your editor, or in a terminal.
 
 1. [Quickstart](./01-quickstart.md) — Jaffle Shop dashboard in under 5 minutes
 2. [Concepts](./02-concepts.md) — the five primitives (notebook, block, semantic layer, lineage, dashboard)
-3. [Install](./03-install.md) — npm, Homebrew, or prebuilt binary
+3. [Install](./03-install.md) — npm (one path, every platform)
 
 ## Guides
 
