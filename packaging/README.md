@@ -25,5 +25,9 @@ Both workflows need these secrets:
 
 - `NPM_TOKEN` — npm publish auth
 - `HOMEBREW_TAP_GITHUB_TOKEN` — PR into the tap repo
-- `APPLE_*` (signing + notarization) — macOS-only, `release-desktop.yml`
-- `WINDOWS_CERT_BASE64`, `WINDOWS_CERT_PASSWORD` — Windows code signing
+- `APPLE_CERTIFICATE`, `APPLE_CERTIFICATE_PASSWORD`, `APPLE_SIGNING_IDENTITY`,
+  `APPLE_ID`, `APPLE_PASSWORD`, `APPLE_TEAM_ID` — macOS signing + notarization,
+  `release-desktop.yml`. Missing secrets produce unsigned builds (users see a
+  Gatekeeper warning on first open).
+
+Windows bundles are currently unsigned; adding code-signing is a post-GA item.

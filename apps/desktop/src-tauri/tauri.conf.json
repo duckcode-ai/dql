@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "DQL",
-  "version": "0.11.0",
+  "version": "1.0.4",
   "identifier": "ai.duckcode.dql",
   "build": {
     "beforeDevCommand": "pnpm -F @duckcodeailabs/dql-notebook-app dev",
@@ -39,7 +39,7 @@
     "resources": [],
     "category": "DeveloperTool",
     "shortDescription": "Analytics notebooks on your dbt models.",
-    "longDescription": "DQL is a git-native, local-first analytics notebook + block studio that sits on top of dbt's semantic layer. Open source, MIT-licensed.",
+    "longDescription": "DQL is a git-native, local-first analytics notebook + block studio that sits on top of dbt's semantic layer. Open source, Apache-2.0-licensed.",
     "copyright": "© 2026 DuckCode AI Labs",
     "publisher": "DuckCode AI Labs",
     "macOS": {

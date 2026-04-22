@@ -18,7 +18,10 @@ concurrency:
 
 jobs:
   publish-packages:
-    if: github.repository == 'duckcode-ai/dql' && secrets.NPM_TOKEN != ''
+    # `secrets` context isn't allowed in job-level `if:` expressions, so we
+    # gate on the repository only. Forks re-using the workflow will hit an
+    # auth error at the publish step, which is the right behavior.
+    if: github.repository == 'duckcode-ai/dql'
     runs-on: ubuntu-latest
     permissions:
       contents: read

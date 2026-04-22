@@ -30,9 +30,12 @@ dql fmt --check .                  # CI: non-zero exit if anything drifts
 
 `git diff` works fine, but it's character-level. `dql diff` is
 **AST-level** — it tells you *what changed semantically*, not *which bytes*.
+Works for both `.dql` blocks and `.dqlnb` notebooks.
 
 ```bash
-dql diff blocks/finance/revenue_by_segment.dql@HEAD~1 blocks/finance/revenue_by_segment.dql
+dql diff blocks/finance/revenue_by_segment.dql             # vs. HEAD (inside a git repo)
+dql diff notebooks/overview.dqlnb                          # notebook vs. HEAD
+dql diff before.dql after.dql                              # two files directly
 ```
 
 Output:
@@ -56,17 +59,30 @@ Open the notebook sidebar → **Git** (⌘⇧G). You get three tabs:
 - **Log** — last 30 commits on this branch, click to diff
 - **Diff** — full or scoped to the active file
 
-Read-only in v0.11; stage/commit/push lands in v0.12.
+Read-only in v1.0 (the panel shipped in the v0.12 milestone). Stage / commit /
+push are planned for the v0.13 milestone.
 
 ## Run snapshots
 
 Executing cells writes a sibling `<notebook>.run.json` with the last
 results. On re-open, DQL rehydrates status/result/error without re-running
-queries.
+queries, and each rehydrated cell shows a subtle `cached` chip above its
+output until you re-run it.
 
-Snapshots are **git-ignored by default** — `*.run.json` is appended to
-`.gitignore` on first write. Un-ignore deliberately if you want to ship
-executed state in git.
+Snapshots are **git-ignored by default** — the first snapshot write appends
+`*.run.json` to the project's `.gitignore`. Un-ignore deliberately if you
+want to ship executed state in git.
+
+## Upgrading existing projects
+
+Files created before the canonical format can be upgraded in place:
+
+```bash
+dql migrate format            # upgrade every .dql/.dqlnb in the project
+dql migrate format --check    # dry run; exits 1 if anything would change
+```
+
+Safe to re-run — files that are already canonical are skipped.
 
 ## Verify it worked
 
