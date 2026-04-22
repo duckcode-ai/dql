@@ -1,9 +1,9 @@
 [package]
 name = "dql-desktop"
-version = "0.11.0"
+version = "1.0.4"
 edition = "2021"
 description = "Tauri wrapper for the DQL notebook."
-license = "MIT"
+license = "Apache-2.0"
 
 [build-dependencies]
 tauri-build = { version = "2.0", features = [] }

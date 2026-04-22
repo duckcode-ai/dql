@@ -35,7 +35,8 @@ dql --version
 
 | Command | What it does |
 | --- | --- |
-| `dql diff <before> <after>` | AST-level semantic diff between two `.dql` files |
+| `dql diff <path>` | Semantic diff of a `.dql` or `.dqlnb` against git HEAD |
+| `dql diff <before> <after>` | Semantic diff between two files on disk |
 
 Exits **1** on changes — scriptable like `git diff`.
 
@@ -61,6 +62,8 @@ Exits **1** on changes — scriptable like `git diff`.
 | Command | What it does |
 | --- | --- |
 | `dql migrate <source>` | Scaffold from looker, tableau, dbt, metabase, or raw-sql |
+| `dql migrate format` | Rewrite every `.dql` and `.dqlnb` in the project in canonical form |
+| `dql migrate format --check` | Dry run; exits 1 if anything would change |
 
 ## Global flags
 
