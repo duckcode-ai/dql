@@ -436,6 +436,7 @@ function scanNotebooks(
             refDependencies: parseResult.refs,
             blockName,
             chartType: chartCell?.config?.chart,
+            bindingPath: typeof cell.blockBinding?.path === 'string' ? cell.blockBinding.path : undefined,
           });
         }
 
@@ -924,12 +925,14 @@ function buildManifestLineage(
   // Used to resolve "which blocks feed into a notebook" when a notebook
   // references a table directly rather than via ref().
   const tableToBlocks = new Map<string, string[]>();
+  const pathToBlockName = new Map<string, string>();
   for (const block of Object.values(blocks)) {
     for (const table of block.tableDependencies) {
       const key = table.toLowerCase();
       if (!tableToBlocks.has(key)) tableToBlocks.set(key, []);
       tableToBlocks.get(key)!.push(block.name);
     }
+    if (block.filePath) pathToBlockName.set(block.filePath, block.name);
   }
 
   const dashboards: LineageDashboardInput[] = Object.values(notebooks ?? {}).map((notebook) => {
@@ -939,11 +942,16 @@ function buildManifestLineage(
       .filter((name): name is string => Boolean(name));
     const inlineBlockSet = new Set(inlineBlockNames);
 
-    // Blocks explicitly ref()-ed from notebook SQL cells
+    // Blocks explicitly ref()-ed from notebook SQL cells, plus bound cells
+    // (Track 5): a bound cell points at a `.dql` block file by path.
     const refDeps = new Set<string>();
     for (const cell of notebook.cells) {
       for (const ref of cell.refDependencies ?? []) {
         if (!inlineBlockSet.has(ref) && blocks[ref]) refDeps.add(ref);
+      }
+      if (cell.bindingPath) {
+        const bound = pathToBlockName.get(cell.bindingPath);
+        if (bound && !inlineBlockSet.has(bound)) refDeps.add(bound);
       }
     }
 

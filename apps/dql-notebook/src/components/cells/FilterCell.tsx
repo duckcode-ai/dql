@@ -9,6 +9,9 @@ import type {
   QueryResult,
   ThemeMode,
 } from '../../store/types';
+import { classifyColumns } from '../../utils/semantic-fields';
+import { SemanticFieldPicker, NoSemanticBindingNote } from './SemanticFieldPicker';
+import { CellEmptyState } from './CellEmptyState';
 
 interface FilterCellProps {
   cell: Cell;
@@ -69,11 +72,12 @@ export function FilterCell({ cell, cells, index, themeMode, onUpdate }: FilterCe
   const upstreamOptions = useMemo(() => {
     return cells
       .slice(0, index)
-      .filter((c) => c.name && c.status === 'success' && c.result);
+      .filter((c) => c.name && c.result);
   }, [cells, index]);
 
   const result: QueryResult | undefined = upstream?.result;
   const columns = result?.columns ?? [];
+  const classified = useMemo(() => classifyColumns(result), [result]);
 
   const updateConfig = (next: FilterCellConfig) => {
     onUpdate({ filterConfig: next });
@@ -133,64 +137,15 @@ export function FilterCell({ cell, cells, index, themeMode, onUpdate }: FilterCe
 
   if (!upstream || !result) {
     return (
-      <div
-        style={{
-          background: t.cellBg,
-          border: `1px solid ${t.cellBorder}`,
-          borderLeft: `3px solid #ff7b72`,
-          borderRadius: 6,
-          padding: '18px 20px',
-          fontFamily: t.font,
-        }}
-      >
-        <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 10 }}>
-          <span
-            style={{
-              fontSize: 10,
-              fontFamily: t.fontMono,
-              fontWeight: 700,
-              letterSpacing: '0.08em',
-              color: '#ff7b72',
-              background: '#ff7b7218',
-              padding: '2px 6px',
-              borderRadius: 3,
-              textTransform: 'uppercase',
-            }}
-          >
-            Filter
-          </span>
-          {cell.name && (
-            <span style={{ fontSize: 12, fontFamily: t.fontMono, color: t.textSecondary }}>{cell.name}</span>
-          )}
-        </div>
-        <div style={{ fontSize: 12, color: t.textSecondary, marginBottom: 10 }}>Pick an upstream dataframe to filter.</div>
-        {upstreamOptions.length === 0 ? (
-          <div style={{ fontSize: 11, color: t.textMuted }}>
-            No successful upstream cells yet. Run a SQL/DQL cell above and name it, then come back.
-          </div>
-        ) : (
-          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
-            {upstreamOptions.map((c) => (
-              <button
-                key={c.id}
-                onClick={() => onUpdate({ upstream: c.name })}
-                style={{
-                  fontSize: 11,
-                  fontFamily: t.fontMono,
-                  color: '#ff7b72',
-                  background: '#ff7b7214',
-                  border: `1px solid #ff7b7255`,
-                  borderRadius: 4,
-                  padding: '3px 10px',
-                  cursor: 'pointer',
-                }}
-              >
-                {c.name}
-              </button>
-            ))}
-          </div>
-        )}
-      </div>
+      <CellEmptyState
+        theme={t}
+        accentColor="#ff7b72"
+        cellLabel="Filter"
+        cellName={cell.name}
+        description="Filter cells keep or drop rows from an upstream dataframe using column-by-column rules — no SQL needed."
+        upstreamOptions={upstreamOptions}
+        onPick={(name) => onUpdate({ upstream: name })}
+      />
     );
   }
 
@@ -286,6 +241,7 @@ export function FilterCell({ cell, cells, index, themeMode, onUpdate }: FilterCe
 
       {/* Groups */}
       <div style={{ padding: 12, display: 'flex', flexDirection: 'column', gap: 10 }}>
+        {!classified.hasSemanticBinding && <NoSemanticBindingNote theme={t} />}
         {config.groups.map((group, gi) => (
           <div
             key={group.id}
@@ -370,16 +326,14 @@ export function FilterCell({ cell, cells, index, themeMode, onUpdate }: FilterCe
               const op = OPERATIONS.find((o) => o.value === rule.operation) ?? OPERATIONS[0];
               return (
                 <div key={rule.id} style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-                  <select
-                    value={rule.column}
-                    onChange={(e) => updateRule(group.id, rule.id, { column: e.target.value })}
-                    style={{ ...inputStyle, minWidth: 140 }}
-                  >
-                    <option value="">Select column</option>
-                    {columns.map((c) => (
-                      <option key={c} value={c}>{c}</option>
-                    ))}
-                  </select>
+                  <SemanticFieldPicker
+                    theme={t}
+                    value={rule.column || undefined}
+                    fields={classified.fields}
+                    placeholder="Select field"
+                    minWidth={180}
+                    onChange={(name) => updateRule(group.id, rule.id, { column: name ?? '' })}
+                  />
                   <select
                     value={rule.operation}
                     onChange={(e) => updateRule(group.id, rule.id, { operation: e.target.value as FilterOperation })}

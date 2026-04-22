@@ -7,6 +7,7 @@ import type {
   PivotCellConfig,
   SingleValueCellConfig,
   TableCellConfig,
+  BlockBinding,
 } from '../store/types';
 import { makeCellId } from '../store/NotebookStore';
 
@@ -122,6 +123,7 @@ export interface DqlNotebookFile {
     singleValueConfig?: SingleValueCellConfig;
     tableConfig?: TableCellConfig;
     upstream?: string;
+    blockBinding?: BlockBinding;
   }>;
 }
 
@@ -143,6 +145,7 @@ export function parseDqlNotebook(content: string): ParsedWorkbook {
       ...(c.singleValueConfig ? { singleValueConfig: c.singleValueConfig } : {}),
       ...(c.tableConfig ? { tableConfig: c.tableConfig } : {}),
       ...(c.upstream ? { upstream: c.upstream } : {}),
+      ...(c.blockBinding ? { blockBinding: c.blockBinding } : {}),
     }));
     const { title: _metaTitle, ...restMeta } = data.metadata ?? {};
     return { title, cells, metadata: restMeta };
@@ -187,6 +190,7 @@ export function serializeDqlNotebook(title: string, cells: Cell[], existingMetad
       ...(c.singleValueConfig ? { singleValueConfig: c.singleValueConfig } : {}),
       ...(c.tableConfig ? { tableConfig: c.tableConfig } : {}),
       ...(c.upstream ? { upstream: c.upstream } : {}),
+      ...(c.blockBinding ? { blockBinding: c.blockBinding } : {}),
     })),
   };
   return JSON.stringify(data, null, 2);

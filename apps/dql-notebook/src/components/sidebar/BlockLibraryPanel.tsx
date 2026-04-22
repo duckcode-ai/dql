@@ -2,25 +2,7 @@ import React, { useEffect, useState } from 'react';
 import { api } from '../../api/client';
 import { useNotebook } from '../../store/NotebookStore';
 import { themes } from '../../themes/notebook-theme';
-
-interface BlockEntry {
-  name: string;
-  domain: string;
-  status: string;
-  owner: string | null;
-  tags: string[];
-  path: string;
-  lastModified: string;
-  description: string;
-}
-
-const STATUS_COLORS: Record<string, string> = {
-  draft: '#8b949e',
-  review: '#d29922',
-  certified: '#3fb950',
-  deprecated: '#f85149',
-  pending_recertification: '#db6d28',
-};
+import { STATUS_COLORS, type BlockEntry } from '../blocks/block-types';
 
 export function BlockLibraryPanel() {
   const { state, dispatch } = useNotebook();

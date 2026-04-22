@@ -30,7 +30,9 @@ export interface SemanticRefResolution {
  * Check if a SQL string contains any semantic references.
  */
 export function hasSemanticRefs(sql: string): boolean {
-  return SEMANTIC_REF_PATTERN.test(sql);
+  // New regex each call — the module-level /g pattern carries lastIndex state
+  // across calls and would return false on every second call for the same SQL.
+  return /@(metric|dim|dimension)\(\s*[a-zA-Z_][a-zA-Z0-9_.]*\s*\)/.test(sql);
 }
 
 /**

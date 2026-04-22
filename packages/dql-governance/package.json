@@ -1,6 +1,6 @@
 {
   "name": "@duckcodeailabs/dql-governance",
-  "version": "1.0.2",
+  "version": "1.0.3",
   "description": "DQL Governance: block testing, certification, cost estimation, and access policies",
   "license": "Apache-2.0",
   "type": "module",

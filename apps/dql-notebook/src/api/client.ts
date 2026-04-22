@@ -152,6 +152,7 @@ export const api = {
     notebookPath?: string | null;
     name: string;
     domain?: string;
+    owner?: string;
     content: string;
     description?: string;
     tags?: string[];
@@ -197,18 +198,25 @@ export const api = {
       body: JSON.stringify({ sql }),
       signal,
     });
-    // Normalize: older server versions return columns as ColumnMeta[] ({name,type,driverType}).
-    // Always coerce to string[] so React never tries to render objects as children.
+    // Older server versions return columns as ColumnMeta[] ({name,type,driverType});
+    // coerce to string[] so React never tries to render objects as children.
     const columns: string[] = Array.isArray(raw?.columns)
       ? raw.columns.map((c: unknown) =>
           typeof c === 'string' ? c : typeof (c as any)?.name === 'string' ? (c as any).name : String(c)
         )
       : [];
+    const semanticRefs = raw?.semanticRefs && typeof raw.semanticRefs === 'object'
+      ? {
+          metrics: Array.isArray(raw.semanticRefs.metrics) ? raw.semanticRefs.metrics.map(String) : [],
+          dimensions: Array.isArray(raw.semanticRefs.dimensions) ? raw.semanticRefs.dimensions.map(String) : [],
+        }
+      : undefined;
     return {
       columns,
       rows: Array.isArray(raw?.rows) ? raw.rows : [],
       rowCount: raw?.rowCount ?? raw?.rows?.length ?? 0,
       executionTime: raw?.executionTime ?? raw?.executionTimeMs ?? 0,
+      ...(semanticRefs ? { semanticRefs } : {}),
     };
   },
 

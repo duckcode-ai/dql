@@ -1,3 +1,4 @@
+import { execSync } from 'node:child_process';
 import { createServer } from 'node:http';
 import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, watch, writeFileSync } from 'node:fs';
 import { dirname, extname, join, normalize, relative, resolve } from 'node:path';
@@ -411,6 +412,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
         const {
           name,
           domain,
+          owner,
           content,
           description,
           tags,
@@ -419,6 +421,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
         } = body as {
           name: string;
           domain?: string;
+          owner?: string;
           content: string;
           description?: string;
           tags?: string[];
@@ -430,14 +433,28 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           res.end(serializeJSON({ error: 'name and content are required' }));
           return;
         }
+        const missing: string[] = [];
+        if (!owner || !owner.trim()) missing.push('owner');
+        if (!domain || !domain.trim()) missing.push('domain');
+        if (!description || !description.trim()) missing.push('description');
+        if (missing.length > 0) {
+          res.writeHead(422, { 'Content-Type': 'application/json; charset=utf-8' });
+          res.end(serializeJSON({
+            error: `Block is missing required governance fields: ${missing.join(', ')}`,
+            missing,
+          }));
+          return;
+        }
         const created = createBlockArtifacts(projectRoot, {
           name,
           domain,
+          owner,
           content,
           description,
           tags,
           metricRefs,
           template,
+          gitMetadata: readGitMetadata(projectRoot),
         });
         res.writeHead(201, { 'Content-Type': 'application/json; charset=utf-8' });
         res.end(serializeJSON(created));
@@ -1358,8 +1375,20 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           res.end(serializeJSON({ columns: [], rows: [], error: 'Missing SQL in request body.' }));
           return;
         }
+        const semantic = prepareSemanticSql(body.sql, semanticLayer);
+        if (semantic.unresolvedRefs.length > 0) {
+          res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
+          res.end(serializeJSON({
+            columns: [],
+            rows: [],
+            error: `Unknown semantic reference${semantic.unresolvedRefs.length > 1 ? 's' : ''}: ${semantic.unresolvedRefs.join(', ')}`,
+            code: 'semantic_ref',
+            unresolvedRefs: semantic.unresolvedRefs,
+          }));
+          return;
+        }
         const prepared = prepareLocalExecution(
-          typeof body.sql === 'string' ? body.sql : '',
+          semantic.sql,
           isConnectionConfig(body.connection) ? body.connection : connection,
           projectRoot,
           projectConfig,
@@ -1370,7 +1399,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           body.variables && typeof body.variables === 'object' ? body.variables : {},
           prepared.connection,
         );
-        const payload = serializeJSON(normalizeQueryResult(result));
+        const payload = serializeJSON(normalizeQueryResult(result, semantic.semanticRefs));
         res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
         res.end(payload);
       } catch (error) {
@@ -2007,16 +2036,21 @@ export function formatLocalQueryRuntimeError(
  * Connector returns columns as ColumnMeta[] ({name,type,driverType}).
  * The notebook SPA expects columns as string[] (just names).
  */
-function normalizeQueryResult(result: any): {
+function normalizeQueryResult(
+  result: any,
+  semanticRefs?: { metrics: string[]; dimensions: string[] },
+): {
   columns: string[];
   rows: Record<string, unknown>[];
   rowCount: number;
   executionTime: number;
+  semanticRefs?: { metrics: string[]; dimensions: string[] };
 } {
   const rawCols: unknown[] = Array.isArray(result?.columns) ? result.columns : [];
   const columns = rawCols.map((c) =>
     typeof c === 'string' ? c : typeof (c as any)?.name === 'string' ? (c as any).name : String(c)
   );
+  const hasRefs = semanticRefs && (semanticRefs.metrics.length > 0 || semanticRefs.dimensions.length > 0);
   return {
     columns,
     rows: Array.isArray(result?.rows) ? result.rows : [],
@@ -2026,6 +2060,7 @@ function normalizeQueryResult(result: any): {
       : typeof result?.executionTime === 'number'
         ? result.executionTime
         : 0,
+    ...(hasRefs ? { semanticRefs } : {}),
   };
 }
 
@@ -2119,6 +2154,35 @@ export function prepareLocalExecution(
       ? resolveProjectRelativeSqlPaths(sql, projectRoot, projectConfig.dataDir)
       : sql,
     connection: normalizedConnection,
+  };
+}
+
+export interface PreparedSemanticSql {
+  sql: string;
+  semanticRefs: { metrics: string[]; dimensions: string[] };
+  unresolvedRefs: string[];
+}
+
+/**
+ * Shared resolver for `@metric(name)` / `@dim(name)` refs in raw SQL.
+ * Used by notebook SQL execution and Block Studio validation so both paths
+ * behave identically. If the SQL has no refs, returns it unchanged.
+ */
+export function prepareSemanticSql(
+  sql: string,
+  semanticLayer: SemanticLayer | undefined,
+): PreparedSemanticSql {
+  if (!hasSemanticRefs(sql)) {
+    return { sql, semanticRefs: { metrics: [], dimensions: [] }, unresolvedRefs: [] };
+  }
+  const resolution = resolveSemanticRefs(sql, semanticLayer);
+  return {
+    sql: resolution.resolvedSql,
+    semanticRefs: {
+      metrics: resolution.resolvedMetrics,
+      dimensions: resolution.resolvedDimensions,
+    },
+    unresolvedRefs: resolution.unresolvedRefs,
   };
 }
 
@@ -3057,16 +3121,39 @@ function canonicalizeSafe(source: string): string {
   }
 }
 
+export interface BlockGitMetadata {
+  commitSha: string;
+  repo: string | null;
+  branch: string | null;
+}
+
+export function readGitMetadata(projectRoot: string): BlockGitMetadata | null {
+  const run = (cmd: string): string =>
+    execSync(cmd, { cwd: projectRoot, encoding: 'utf-8', timeout: 5000, stdio: ['ignore', 'pipe', 'ignore'] }).toString().trim();
+  try {
+    const commitSha = run('git rev-parse HEAD');
+    let repo: string | null = null;
+    let branch: string | null = null;
+    try { repo = run('git config --get remote.origin.url') || null; } catch { /* no remote */ }
+    try { branch = run('git rev-parse --abbrev-ref HEAD') || null; } catch { /* detached */ }
+    return { commitSha, repo, branch };
+  } catch {
+    return null;
+  }
+}
+
 export function createBlockArtifacts(
   projectRoot: string,
   options: {
     name: string;
     domain?: string;
+    owner?: string;
     content?: string;
     description?: string;
     tags?: string[];
     metricRefs?: string[];
     template?: string;
+    gitMetadata?: BlockGitMetadata | null;
   },
 ): { path: string; content: string; companionPath: string } {
   const slug = options.name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '') || 'block';
@@ -3085,24 +3172,28 @@ export function createBlockArtifacts(
   const templateContent = options.template
     ? listBlockTemplates().find((template) => template.id === options.template)?.content
     : undefined;
+  const relativePath = safeDomain ? `blocks/${safeDomain}/${slug}.dql` : `blocks/${slug}.dql`;
   const fileContent = canonicalizeSafe(normalizeBlockStudioContent({
     name: options.name,
     domain: safeDomain || 'uncategorized',
+    owner: options.owner,
     description: options.description,
     tags: options.tags,
     content: options.content?.trim() || templateContent,
   }));
 
   writeFileSync(blockPath, fileContent, 'utf-8');
-  const relativePath = safeDomain ? `blocks/${safeDomain}/${slug}.dql` : `blocks/${slug}.dql`;
   const companionPath = writeBlockCompanionFile(projectRoot, {
     slug,
     name: options.name,
     domain: safeDomain || 'uncategorized',
+    owner: options.owner,
     description: options.description,
     tags: options.tags,
     provider: 'dql',
     content: fileContent,
+    gitMetadata: options.gitMetadata,
+    gitPath: relativePath,
   });
   return {
     path: relativePath,
@@ -3288,6 +3379,8 @@ function writeBlockCompanionFile(
     lineage?: string[];
     semanticMetrics?: string[];
     semanticDimensions?: string[];
+    gitMetadata?: BlockGitMetadata | null;
+    gitPath?: string;
   },
 ): string {
   const extractedRefs = extractSemanticReferenceNames(options.content);
@@ -3335,6 +3428,13 @@ function writeBlockCompanionFile(
     lines.push('lineage:');
     for (const table of options.lineage) lines.push(`  - ${yamlScalar(table)}`);
   }
+  if (options.gitMetadata || options.gitPath) {
+    lines.push('git:');
+    if (options.gitMetadata?.commitSha) lines.push(`  commitSha: ${yamlScalar(options.gitMetadata.commitSha)}`);
+    if (options.gitMetadata?.repo) lines.push(`  repo: ${yamlScalar(options.gitMetadata.repo)}`);
+    if (options.gitMetadata?.branch) lines.push(`  branch: ${yamlScalar(options.gitMetadata.branch)}`);
+    if (options.gitPath) lines.push(`  path: ${yamlScalar(options.gitPath)}`);
+  }
   lines.push('reviewStatus: draft');
   writeFileSync(companionPath, lines.join('\n') + '\n', 'utf-8');
   return relative(projectRoot, companionPath).replaceAll('\\', '/');
@@ -3372,6 +3472,7 @@ function indentBlock(value: string, spaces: number): string {
 function normalizeBlockStudioContent(options: {
   name: string;
   domain: string;
+  owner?: string;
   description?: string;
   tags?: string[];
   content?: string;
@@ -3384,6 +3485,7 @@ function normalizeBlockStudioContent(options: {
   return buildBlankBlockContent({
     name: options.name,
     domain: options.domain,
+    owner: options.owner,
     description: options.description,
     tags: options.tags,
     sql: content || 'SELECT 1 AS value',
@@ -3393,6 +3495,7 @@ function normalizeBlockStudioContent(options: {
 function buildBlankBlockContent(options: {
   name: string;
   domain: string;
+  owner?: string;
   description?: string;
   tags?: string[];
   sql: string;
@@ -3402,7 +3505,7 @@ function buildBlankBlockContent(options: {
     `    domain = "${escapeDqlString(options.domain)}"`,
     '    type = "custom"',
     `    description = "${escapeDqlString(options.description?.trim() || options.name)}"`,
-    '    owner = ""',
+    `    owner = "${escapeDqlString(options.owner?.trim() ?? '')}"`,
   ];
   lines.push(`    tags = [${(options.tags ?? []).map((tag) => `"${escapeDqlString(tag)}"`).join(', ')}]`);
   lines.push('');

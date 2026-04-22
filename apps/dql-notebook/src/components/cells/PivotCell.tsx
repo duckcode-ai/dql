@@ -2,6 +2,15 @@ import React, { useMemo, useState, useRef, useEffect } from 'react';
 import { themes, type Theme } from '../../themes/notebook-theme';
 import type { Cell, PivotCellConfig, QueryResult, ThemeMode } from '../../store/types';
 import { aggregate, type Aggregation as SharedAggregation } from '../../utils/aggregate';
+import {
+  classifyColumns,
+  fieldKindColor,
+  fieldKindIcon,
+  type ClassifiedColumns,
+  type FieldKind,
+} from '../../utils/semantic-fields';
+import { NoSemanticBindingNote } from './SemanticFieldPicker';
+import { CellEmptyState } from './CellEmptyState';
 
 interface PivotCellProps {
   cell: Cell;
@@ -21,6 +30,19 @@ function rowKey(row: Record<string, unknown>, cols: string[]): string {
   return cols.map((c) => String(row[c] ?? '')).join('|');
 }
 
+function kindFor(classified: ClassifiedColumns, col: string): FieldKind {
+  if (classified.metrics.includes(col)) return 'metric';
+  if (classified.dimensions.includes(col)) return 'dimension';
+  return 'column';
+}
+
+/** Return fields with the preferred kind first, then the rest. */
+function orderForKind(classified: ClassifiedColumns, preferred: FieldKind): { name: string; kind: FieldKind }[] {
+  const preferredFields = classified.fields.filter((f) => f.kind === preferred);
+  const rest = classified.fields.filter((f) => f.kind !== preferred);
+  return [...preferredFields, ...rest].map((f) => ({ name: f.name, kind: f.kind }));
+}
+
 /** Hex-style Pivot cell — drop zones for Rows, Columns, Values with per-value aggregation. */
 export function PivotCell({ cell, cells, index, themeMode, onUpdate }: PivotCellProps) {
   const t: Theme = themes[themeMode];
@@ -33,11 +55,15 @@ export function PivotCell({ cell, cells, index, themeMode, onUpdate }: PivotCell
   }, [cell.upstream, config.upstream, cells]);
 
   const upstreamOptions = useMemo(() => {
-    return cells.slice(0, index).filter((c) => c.name && c.status === 'success' && c.result);
+    return cells.slice(0, index).filter((c) => c.name && c.result);
   }, [cells, index]);
 
   const result: QueryResult | undefined = upstream?.result;
   const columns = result?.columns ?? [];
+  const classified = useMemo(() => classifyColumns(result), [result]);
+
+  const dimensionFirst = useMemo(() => orderForKind(classified, 'dimension'), [classified]);
+  const metricFirst = useMemo(() => orderForKind(classified, 'metric'), [classified]);
 
   const updateConfig = (next: PivotCellConfig) => onUpdate({ pivotConfig: next });
 
@@ -88,60 +114,15 @@ export function PivotCell({ cell, cells, index, themeMode, onUpdate }: PivotCell
 
   if (!upstream || !result) {
     return (
-      <div
-        style={{
-          background: t.cellBg,
-          border: `1px solid ${t.cellBorder}`,
-          borderLeft: `3px solid #a371f7`,
-          borderRadius: 6,
-          padding: '18px 20px',
-          fontFamily: t.font,
-        }}
-      >
-        <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 10 }}>
-          <span
-            style={{
-              fontSize: 10,
-              fontFamily: t.fontMono,
-              fontWeight: 700,
-              letterSpacing: '0.08em',
-              color: '#a371f7',
-              background: '#a371f718',
-              padding: '2px 6px',
-              borderRadius: 3,
-              textTransform: 'uppercase',
-            }}
-          >
-            Pivot
-          </span>
-          {cell.name && <span style={{ fontSize: 12, fontFamily: t.fontMono, color: t.textSecondary }}>{cell.name}</span>}
-        </div>
-        <div style={{ fontSize: 12, color: t.textSecondary, marginBottom: 10 }}>Pick an upstream dataframe to pivot.</div>
-        {upstreamOptions.length === 0 ? (
-          <div style={{ fontSize: 11, color: t.textMuted }}>No successful upstream cells yet.</div>
-        ) : (
-          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
-            {upstreamOptions.map((c) => (
-              <button
-                key={c.id}
-                onClick={() => onUpdate({ upstream: c.name })}
-                style={{
-                  fontSize: 11,
-                  fontFamily: t.fontMono,
-                  color: '#a371f7',
-                  background: '#a371f714',
-                  border: `1px solid #a371f755`,
-                  borderRadius: 4,
-                  padding: '3px 10px',
-                  cursor: 'pointer',
-                }}
-              >
-                {c.name}
-              </button>
-            ))}
-          </div>
-        )}
-      </div>
+      <CellEmptyState
+        theme={t}
+        accentColor="#a371f7"
+        cellLabel="Pivot"
+        cellName={cell.name}
+        description="Pivots reshape an upstream dataframe into a rows × columns grid. Pick dimensions for rows/columns and a metric for values."
+        upstreamOptions={upstreamOptions}
+        onPick={(name) => onUpdate({ upstream: name })}
+      />
     );
   }
 
@@ -201,11 +182,17 @@ export function PivotCell({ cell, cells, index, themeMode, onUpdate }: PivotCell
       </div>
 
       {/* Config zones */}
+      {!classified.hasSemanticBinding && (
+        <div style={{ padding: '8px 12px 0' }}>
+          <NoSemanticBindingNote theme={t} />
+        </div>
+      )}
       <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', padding: 12, gap: 10, borderBottom: `1px solid ${t.cellBorder}` }}>
         <DropZone
           label="Rows"
           selected={config.rows}
-          availableColumns={columns}
+          availableFields={dimensionFirst.filter((f) => !config.rows.includes(f.name))}
+          kindFor={(c) => kindFor(classified, c)}
           theme={t}
           onAdd={(col) => updateConfig({ ...config, rows: [...config.rows, col] })}
           onRemove={(col) => updateConfig({ ...config, rows: config.rows.filter((c) => c !== col) })}
@@ -213,14 +200,16 @@ export function PivotCell({ cell, cells, index, themeMode, onUpdate }: PivotCell
         <DropZone
           label="Columns"
           selected={config.columns}
-          availableColumns={columns}
+          availableFields={dimensionFirst.filter((f) => !config.columns.includes(f.name))}
+          kindFor={(c) => kindFor(classified, c)}
           theme={t}
           onAdd={(col) => updateConfig({ ...config, columns: [...config.columns, col] })}
           onRemove={(col) => updateConfig({ ...config, columns: config.columns.filter((c) => c !== col) })}
         />
         <ValueZone
           values={config.values}
-          availableColumns={columns}
+          availableFields={metricFirst}
+          kindFor={(c) => kindFor(classified, c)}
           theme={t}
           onAdd={(col) => updateConfig({ ...config, values: [...config.values, { column: col, aggregation: 'sum' }] })}
           onUpdate={(idx, patch) =>
@@ -298,93 +287,30 @@ export function PivotCell({ cell, cells, index, themeMode, onUpdate }: PivotCell
 function DropZone({
   label,
   selected,
-  availableColumns,
+  availableFields,
+  kindFor,
   theme,
   onAdd,
   onRemove,
 }: {
   label: string;
   selected: string[];
-  availableColumns: string[];
+  availableFields: { name: string; kind: FieldKind }[];
+  kindFor: (col: string) => FieldKind;
   theme: Theme;
   onAdd: (col: string) => void;
   onRemove: (col: string) => void;
 }) {
   return (
-    <ZoneBase label={label} theme={theme} availableColumns={availableColumns.filter((c) => !selected.includes(c))} onAdd={onAdd}>
+    <ZoneBase label={label} theme={theme} availableFields={availableFields} onAdd={onAdd}>
       {selected.length === 0 ? (
-        <span style={{ fontSize: 11, color: theme.textMuted, fontFamily: theme.font }}>+ add column</span>
+        <span style={{ fontSize: 11, color: theme.textMuted, fontFamily: theme.font }}>+ add field</span>
       ) : (
-        selected.map((col) => (
-          <div
-            key={col}
-            style={{
-              display: 'inline-flex',
-              alignItems: 'center',
-              gap: 4,
-              padding: '2px 6px',
-              background: `${theme.accent}14`,
-              border: `1px solid ${theme.accent}55`,
-              borderRadius: 3,
-              fontSize: 11,
-              fontFamily: theme.fontMono,
-              color: theme.textPrimary,
-              margin: 2,
-            }}
-          >
-            {col}
-            <span
-              onClick={() => onRemove(col)}
-              style={{ cursor: 'pointer', color: theme.textMuted, fontSize: 10 }}
-              title="Remove"
-            >
-              ✕
-            </span>
-          </div>
-        ))
-      )}
-    </ZoneBase>
-  );
-}
-
-function ValueZone({
-  values,
-  availableColumns,
-  theme,
-  onAdd,
-  onUpdate,
-  onRemove,
-}: {
-  values: PivotCellConfig['values'];
-  availableColumns: string[];
-  theme: Theme;
-  onAdd: (col: string) => void;
-  onUpdate: (idx: number, patch: Partial<PivotCellConfig['values'][number]>) => void;
-  onRemove: (idx: number) => void;
-}) {
-  return (
-    <ZoneBase label="Values" theme={theme} availableColumns={availableColumns} onAdd={onAdd}>
-      {values.length === 0 ? (
-        <span style={{ fontSize: 11, color: theme.textMuted, fontFamily: theme.font }}>+ add value</span>
-      ) : (
-        values.map((v, i) => (
-          <div key={i} style={{ display: 'flex', alignItems: 'center', gap: 4, margin: 2 }}>
-            <select
-              value={v.aggregation}
-              onChange={(e) => onUpdate(i, { aggregation: e.target.value as Aggregation })}
-              style={{
-                background: theme.editorBg,
-                border: `1px solid ${theme.cellBorder}`,
-                borderRadius: 3,
-                color: theme.textSecondary,
-                fontSize: 10,
-                fontFamily: theme.fontMono,
-                padding: '1px 4px',
-              }}
-            >
-              {AGGREGATIONS.map((a) => <option key={a} value={a}>{a}</option>)}
-            </select>
-            <span
+        selected.map((col) => {
+          const kind = kindFor(col);
+          return (
+            <div
+              key={col}
               style={{
                 display: 'inline-flex',
                 alignItems: 'center',
@@ -396,13 +322,92 @@ function ValueZone({
                 fontSize: 11,
                 fontFamily: theme.fontMono,
                 color: theme.textPrimary,
+                margin: 2,
               }}
             >
-              {v.column}
-              <span onClick={() => onRemove(i)} style={{ cursor: 'pointer', color: theme.textMuted, fontSize: 10 }}>✕</span>
-            </span>
-          </div>
-        ))
+              <span style={{ color: fieldKindColor(kind, theme.accent), fontWeight: 700 }}>
+                {fieldKindIcon(kind)}
+              </span>
+              {col}
+              <span
+                onClick={() => onRemove(col)}
+                style={{ cursor: 'pointer', color: theme.textMuted, fontSize: 10 }}
+                title="Remove"
+              >
+                ✕
+              </span>
+            </div>
+          );
+        })
+      )}
+    </ZoneBase>
+  );
+}
+
+function ValueZone({
+  values,
+  availableFields,
+  kindFor,
+  theme,
+  onAdd,
+  onUpdate,
+  onRemove,
+}: {
+  values: PivotCellConfig['values'];
+  availableFields: { name: string; kind: FieldKind }[];
+  kindFor: (col: string) => FieldKind;
+  theme: Theme;
+  onAdd: (col: string) => void;
+  onUpdate: (idx: number, patch: Partial<PivotCellConfig['values'][number]>) => void;
+  onRemove: (idx: number) => void;
+}) {
+  return (
+    <ZoneBase label="Values" theme={theme} availableFields={availableFields} onAdd={onAdd}>
+      {values.length === 0 ? (
+        <span style={{ fontSize: 11, color: theme.textMuted, fontFamily: theme.font }}>+ add value</span>
+      ) : (
+        values.map((v, i) => {
+          const kind = kindFor(v.column);
+          return (
+            <div key={i} style={{ display: 'flex', alignItems: 'center', gap: 4, margin: 2 }}>
+              <select
+                value={v.aggregation}
+                onChange={(e) => onUpdate(i, { aggregation: e.target.value as Aggregation })}
+                style={{
+                  background: theme.editorBg,
+                  border: `1px solid ${theme.cellBorder}`,
+                  borderRadius: 3,
+                  color: theme.textSecondary,
+                  fontSize: 10,
+                  fontFamily: theme.fontMono,
+                  padding: '1px 4px',
+                }}
+              >
+                {AGGREGATIONS.map((a) => <option key={a} value={a}>{a}</option>)}
+              </select>
+              <span
+                style={{
+                  display: 'inline-flex',
+                  alignItems: 'center',
+                  gap: 4,
+                  padding: '2px 6px',
+                  background: `${theme.accent}14`,
+                  border: `1px solid ${theme.accent}55`,
+                  borderRadius: 3,
+                  fontSize: 11,
+                  fontFamily: theme.fontMono,
+                  color: theme.textPrimary,
+                }}
+              >
+                <span style={{ color: fieldKindColor(kind, theme.accent), fontWeight: 700 }}>
+                  {fieldKindIcon(kind)}
+                </span>
+                {v.column}
+                <span onClick={() => onRemove(i)} style={{ cursor: 'pointer', color: theme.textMuted, fontSize: 10 }}>✕</span>
+              </span>
+            </div>
+          );
+        })
       )}
     </ZoneBase>
   );
@@ -411,13 +416,13 @@ function ValueZone({
 function ZoneBase({
   label,
   theme,
-  availableColumns,
+  availableFields,
   onAdd,
   children,
 }: {
   label: string;
   theme: Theme;
-  availableColumns: string[];
+  availableFields: { name: string; kind: FieldKind }[];
   onAdd: (col: string) => void;
   children: React.ReactNode;
 }) {
@@ -462,7 +467,7 @@ function ZoneBase({
       >
         {children}
       </div>
-      {open && availableColumns.length > 0 && (
+      {open && availableFields.length > 0 && (
         <div
           style={{
             position: 'absolute',
@@ -479,15 +484,18 @@ function ZoneBase({
             overflow: 'auto',
           }}
         >
-          {availableColumns.map((col) => (
+          {availableFields.map((field) => (
             <button
-              key={col}
+              key={field.name}
               onClick={() => {
-                onAdd(col);
+                onAdd(field.name);
                 setOpen(false);
               }}
               style={{
                 width: '100%',
+                display: 'flex',
+                alignItems: 'center',
+                gap: 6,
                 padding: '4px 8px',
                 background: 'transparent',
                 border: 'none',
@@ -505,7 +513,10 @@ function ZoneBase({
                 (e.currentTarget as HTMLButtonElement).style.background = 'transparent';
               }}
             >
-              {col}
+              <span style={{ color: fieldKindColor(field.kind, theme.accent), fontWeight: 700, width: 12 }}>
+                {fieldKindIcon(field.kind)}
+              </span>
+              <span>{field.name}</span>
             </button>
           ))}
         </div>

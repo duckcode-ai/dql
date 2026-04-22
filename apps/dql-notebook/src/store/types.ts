@@ -104,6 +104,10 @@ export interface QueryResult {
   rows: Record<string, unknown>[];
   executionTime?: number;
   rowCount?: number;
+  semanticRefs?: {
+    metrics: string[];
+    dimensions: string[];
+  };
 }
 
 export interface RunSnapshotCell {
@@ -120,6 +124,22 @@ export interface RunSnapshot {
   notebookPath: string;
   capturedAt: string;
   cells: RunSnapshotCell[];
+}
+
+/**
+ * A bound cell is a live reference to a `.dql` block file.
+ * - `bound`: content matches the block file
+ * - `forked`: user edited locally, diverged from file
+ *
+ * `originalContent` is the canonical cell body derived from the block on bind/revert;
+ * divergence is detected by comparing `cell.content` to this.
+ */
+export interface BlockBinding {
+  path: string;
+  commitSha?: string;
+  version?: string;
+  state: 'bound' | 'forked';
+  originalContent?: string;
 }
 
 export interface Cell {
@@ -139,6 +159,7 @@ export interface Cell {
   singleValueConfig?: SingleValueCellConfig;  // Single-value cell
   tableConfig?: TableCellConfig;      // Table cell
   upstream?: string;                   // Dataframe handle this cell consumes
+  blockBinding?: BlockBinding;         // Present when cell references a .dql block file
 }
 
 export interface NotebookFile {

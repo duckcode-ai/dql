@@ -15,6 +15,10 @@ interface SaveAsBlockModalProps {
   initialTags?: string[];
 }
 
+function RequiredMark() {
+  return <span style={{ color: '#ff7b72', marginLeft: 2 }}>*</span>;
+}
+
 function slugify(value: string): string {
   return value
     .trim()
@@ -48,6 +52,7 @@ export function SaveAsBlockModal({
 
   const [name, setName] = useState(initialName || cell.name || 'new_block');
   const [domain, setDomain] = useState('');
+  const [owner, setOwner] = useState('');
   const [description, setDescription] = useState(initialDescription ?? state.notebookMetadata.description ?? '');
   const [tags, setTags] = useState((initialTags ?? state.notebookMetadata.categories ?? []).join(', '));
   const [content, setContent] = useState(initialContent ?? cell.content);
@@ -55,6 +60,17 @@ export function SaveAsBlockModal({
   const [error, setError] = useState<string | null>(null);
 
   const semanticRefs = useMemo(() => extractSemanticRefs(content), [content]);
+  const tagList = useMemo(() => tags.split(',').map((s) => s.trim()).filter(Boolean), [tags]);
+
+  const ruleResults: { id: string; label: string; severity: 'error' | 'warning'; passed: boolean }[] = [
+    { id: 'has-name', label: 'Block has name', severity: 'error', passed: !!name.trim() },
+    { id: 'has-description', label: 'Block has description', severity: 'error', passed: !!description.trim() },
+    { id: 'has-owner', label: 'Block has owner', severity: 'error', passed: !!owner.trim() },
+    { id: 'has-domain', label: 'Block has domain', severity: 'error', passed: !!domain.trim() },
+    { id: 'has-tags', label: 'Has at least one tag', severity: 'warning', passed: tagList.length > 0 },
+  ];
+
+  const hasErrors = ruleResults.some((r) => r.severity === 'error' && !r.passed);
 
   useEffect(() => {
     nameRef.current?.focus();
@@ -72,8 +88,8 @@ export function SaveAsBlockModal({
   const blockPath = `${domain.trim() ? `blocks/${slugify(domain)}/` : 'blocks/'}${slugify(name) || 'new-block'}.dql`;
 
   const handleSave = async () => {
-    if (!name.trim()) {
-      setError('Block name is required.');
+    if (hasErrors) {
+      setError('Fix the required governance fields before saving.');
       return;
     }
     if (!content.trim()) {
@@ -89,9 +105,10 @@ export function SaveAsBlockModal({
         notebookPath: state.activeFile?.path ?? null,
         name: name.trim(),
         domain: domain.trim() || undefined,
+        owner: owner.trim() || undefined,
         content,
         description: description.trim() || undefined,
-        tags: tags.split(',').map((tag) => tag.trim()).filter(Boolean),
+        tags: tagList,
         metricRefs: semanticRefs,
       });
       const file = {
@@ -177,11 +194,15 @@ export function SaveAsBlockModal({
         <div style={{ padding: '20px 24px 24px', display: 'flex', flexDirection: 'column', gap: 16 }}>
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
             <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-              <label style={{ fontSize: 12, color: t.textSecondary, fontFamily: t.font }}>Block Name</label>
+              <label style={{ fontSize: 12, color: t.textSecondary, fontFamily: t.font }}>
+                Block Name <RequiredMark />
+              </label>
               <input ref={nameRef} value={name} onChange={(e) => setName(e.target.value)} style={inputStyle} />
             </div>
             <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-              <label style={{ fontSize: 12, color: t.textSecondary, fontFamily: t.font }}>Domain</label>
+              <label style={{ fontSize: 12, color: t.textSecondary, fontFamily: t.font }}>
+                Domain <RequiredMark />
+              </label>
               <input
                 value={domain}
                 onChange={(e) => setDomain(e.target.value)}
@@ -197,12 +218,69 @@ export function SaveAsBlockModal({
 
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
             <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-              <label style={{ fontSize: 12, color: t.textSecondary, fontFamily: t.font }}>Description</label>
-              <input value={description} onChange={(e) => setDescription(e.target.value)} style={inputStyle} />
+              <label style={{ fontSize: 12, color: t.textSecondary, fontFamily: t.font }}>
+                Owner <RequiredMark />
+              </label>
+              <input
+                value={owner}
+                onChange={(e) => setOwner(e.target.value)}
+                style={inputStyle}
+                placeholder="data-platform@company.com"
+              />
             </div>
             <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
               <label style={{ fontSize: 12, color: t.textSecondary, fontFamily: t.font }}>Tags</label>
               <input value={tags} onChange={(e) => setTags(e.target.value)} style={inputStyle} placeholder="revenue, dashboard" />
+            </div>
+          </div>
+
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+            <label style={{ fontSize: 12, color: t.textSecondary, fontFamily: t.font }}>
+              Description <RequiredMark />
+            </label>
+            <input value={description} onChange={(e) => setDescription(e.target.value)} style={inputStyle} />
+          </div>
+
+          <div
+            style={{
+              display: 'flex',
+              flexDirection: 'column',
+              gap: 6,
+              padding: '10px 12px',
+              background: t.pillBg,
+              borderRadius: 6,
+              border: `1px solid ${t.cellBorder}`,
+            }}
+          >
+            <div style={{ fontSize: 11, fontWeight: 700, color: t.textSecondary, fontFamily: t.font, letterSpacing: '0.06em', textTransform: 'uppercase' }}>
+              Governance checks
+            </div>
+            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+              {ruleResults.map((rule) => {
+                const color = rule.passed ? '#3fb950' : rule.severity === 'error' ? '#ff7b72' : '#e3b341';
+                const glyph = rule.passed ? '✓' : rule.severity === 'error' ? '✕' : '!';
+                return (
+                  <span
+                    key={rule.id}
+                    title={rule.passed ? `${rule.label} — passed` : `${rule.label} — ${rule.severity}`}
+                    style={{
+                      display: 'inline-flex',
+                      alignItems: 'center',
+                      gap: 4,
+                      fontSize: 11,
+                      fontFamily: t.font,
+                      color,
+                      background: `${color}18`,
+                      border: `1px solid ${color}55`,
+                      borderRadius: 999,
+                      padding: '2px 10px',
+                    }}
+                  >
+                    <span style={{ fontWeight: 700 }}>{glyph}</span>
+                    {rule.label}
+                  </span>
+                );
+              })}
             </div>
           </div>
 
@@ -293,17 +371,18 @@ export function SaveAsBlockModal({
           </button>
           <button
             onClick={handleSave}
-            disabled={saving}
+            disabled={saving || hasErrors}
+            title={hasErrors ? 'Fix governance errors to enable Save' : undefined}
             style={{
               background: t.accent,
               border: `1px solid ${t.accent}`,
               borderRadius: 6,
               color: '#fff',
-              cursor: saving ? 'not-allowed' : 'pointer',
+              cursor: saving || hasErrors ? 'not-allowed' : 'pointer',
               fontSize: 13,
               fontFamily: t.font,
               padding: '7px 20px',
-              opacity: saving ? 0.6 : 1,
+              opacity: saving || hasErrors ? 0.5 : 1,
             }}
           >
             {saving ? 'Saving...' : 'Save Block'}

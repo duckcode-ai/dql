@@ -3,6 +3,9 @@ import { themes, type Theme } from '../../themes/notebook-theme';
 import type { Cell, CellChartConfig, QueryResult, ThemeMode } from '../../store/types';
 import { renderChart, CHART_TYPE_OPTIONS, type ChartType } from '../output/ChartOutput';
 import { inferColumnKind, columnKindToChartRole, type ChartColumnRole } from '../../utils/column-kind';
+import { classifyColumns } from '../../utils/semantic-fields';
+import { NoSemanticBindingNote } from './SemanticFieldPicker';
+import { CellEmptyState } from './CellEmptyState';
 
 interface ChartCellProps {
   cell: Cell;
@@ -74,19 +77,27 @@ export function ChartCell({ cell, cells, index, themeMode, onUpdate }: ChartCell
   const upstreamOptions = useMemo(() => {
     return cells
       .slice(0, index)
-      .filter((c) => c.name && c.status === 'success' && c.result);
+      .filter((c) => c.name && c.result);
   }, [cells, index]);
 
   const result: QueryResult | undefined = upstream?.result;
 
+  const classified = useMemo(() => classifyColumns(result), [result]);
+
+  // Semantic refs win: @metric → measure, @dim → dimension. Raw columns keep
+  // the inferred role so the chart builder still works pre-semantic-binding.
   const columnKinds = useMemo(() => {
     if (!result) return new Map<string, ColumnKind>();
     const map = new Map<string, ColumnKind>();
+    const metricSet = new Set(classified.metrics);
+    const dimSet = new Set(classified.dimensions);
     for (const col of result.columns) {
-      map.set(col, columnKindToChartRole(inferColumnKind(col, result.rows)));
+      if (metricSet.has(col)) map.set(col, 'measure');
+      else if (dimSet.has(col)) map.set(col, 'dimension');
+      else map.set(col, columnKindToChartRole(inferColumnKind(col, result.rows)));
     }
     return map;
-  }, [result]);
+  }, [result, classified]);
 
   const measures = useMemo(() => {
     if (!result) return [] as string[];
@@ -104,69 +115,15 @@ export function ChartCell({ cell, cells, index, themeMode, onUpdate }: ChartCell
 
   if (!cell.upstream || !result) {
     return (
-      <div
-        style={{
-          display: 'flex',
-          flexDirection: 'column',
-          background: t.cellBg,
-          border: `1px solid ${t.cellBorder}`,
-          borderLeft: `3px solid #a371f7`,
-          borderRadius: 6,
-          padding: '18px 20px',
-          gap: 12,
-          fontFamily: t.font,
-        }}
-      >
-        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-          <span
-            style={{
-              fontSize: 10,
-              fontFamily: t.fontMono,
-              fontWeight: 700,
-              letterSpacing: '0.08em',
-              color: '#a371f7',
-              background: '#a371f718',
-              padding: '2px 6px',
-              borderRadius: 3,
-              textTransform: 'uppercase',
-            }}
-          >
-            Chart
-          </span>
-          {cell.name && (
-            <span style={{ fontSize: 12, fontFamily: t.fontMono, color: t.textSecondary }}>{cell.name}</span>
-          )}
-        </div>
-        <div style={{ fontSize: 12, color: t.textSecondary }}>
-          Pick an upstream dataframe to chart.
-        </div>
-        {upstreamOptions.length === 0 ? (
-          <div style={{ fontSize: 11, color: t.textMuted }}>
-            No successful upstream cells yet. Run a SQL/DQL cell above and name it, then come back.
-          </div>
-        ) : (
-          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
-            {upstreamOptions.map((c) => (
-              <button
-                key={c.id}
-                onClick={() => onUpdate({ upstream: c.name })}
-                style={{
-                  fontSize: 11,
-                  fontFamily: t.fontMono,
-                  color: t.accent,
-                  background: `${t.accent}14`,
-                  border: `1px solid ${t.accent}55`,
-                  borderRadius: 4,
-                  padding: '3px 10px',
-                  cursor: 'pointer',
-                }}
-              >
-                {c.name}
-              </button>
-            ))}
-          </div>
-        )}
-      </div>
+      <CellEmptyState
+        theme={t}
+        accentColor="#a371f7"
+        cellLabel="Chart"
+        cellName={cell.name}
+        description="Charts render from an upstream dataframe — the rows of a named SQL, DQL, or Block cell above. Drag measures to Y, dimensions to X."
+        upstreamOptions={upstreamOptions}
+        onPick={(name) => onUpdate({ upstream: name })}
+      />
     );
   }
 
@@ -265,6 +222,7 @@ export function ChartCell({ cell, cells, index, themeMode, onUpdate }: ChartCell
             overflow: 'auto',
           }}
         >
+          {!classified.hasSemanticBinding && <NoSemanticBindingNote theme={t} />}
           <ColumnGroup
             label="Measures"
             columns={measures}

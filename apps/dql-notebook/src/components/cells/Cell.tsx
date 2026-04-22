@@ -20,8 +20,10 @@ import { ChartOutput, detectChartType, resolveChartType, renderChart, CHART_TYPE
 import type { ChartType } from '../output/ChartOutput';
 import { ErrorOutput } from '../output/ErrorOutput';
 import { CellLineage } from './CellLineage';
-import type { Cell } from '../../store/types';
+import type { Cell, BlockBinding } from '../../store/types';
 import { format as formatSQL } from 'sql-formatter';
+import { api } from '../../api/client';
+import { extractSqlFromText } from '../../utils/block-studio';
 
 interface CellProps {
   cell: Cell;
@@ -100,7 +102,13 @@ const PLACEHOLDER_META: Partial<Record<string, PlaceholderMeta>> = {
   },
 };
 
+const BOUND_ACCENT = '#56d364';
+const FORKED_ACCENT = '#e3b341';
+
 function getCellBorderColor(cell: Cell, t: Theme): string {
+  if (cell.blockBinding) {
+    return cell.blockBinding.state === 'forked' ? FORKED_ACCENT : BOUND_ACCENT;
+  }
   switch (cell.status) {
     case 'running':
       return t.cellBorderRunning;
@@ -210,6 +218,94 @@ function setBlockTags(content: string, tags: string[]): string {
   const tagStr = tags.map((t: string) => `"${t}"`).join(', ');
   const re = /(\btags\s*=\s*)\[[^\]]*\]/i;
   return re.test(content) ? content.replace(re, `$1[${tagStr}]`) : content;
+}
+
+function BlockBindingChip({
+  binding,
+  t,
+  onRevert,
+  onUnbind,
+}: {
+  binding: BlockBinding;
+  t: Theme;
+  onRevert: () => void | Promise<void>;
+  onUnbind: () => void;
+}) {
+  const isForked = binding.state === 'forked';
+  const accent = isForked ? FORKED_ACCENT : BOUND_ACCENT;
+  const label = isForked ? 'FORKED' : 'BOUND';
+  const helpText = isForked
+    ? 'Local edits have diverged from the block file — Revert to discard, or Save as Block to promote as a new version.'
+    : 'This cell mirrors the block file. Edit to fork locally.';
+  return (
+    <div
+      title={helpText}
+      style={{
+        display: 'flex',
+        alignItems: 'center',
+        gap: 8,
+        padding: '4px 10px',
+        borderBottom: `1px solid ${t.cellBorder}`,
+        background: `${accent}10`,
+        fontFamily: t.fontMono,
+        fontSize: 11,
+      }}
+    >
+      <span
+        style={{
+          fontSize: 9,
+          fontWeight: 700,
+          letterSpacing: '0.08em',
+          color: accent,
+          background: `${accent}24`,
+          border: `1px solid ${accent}55`,
+          borderRadius: 3,
+          padding: '1px 5px',
+        }}
+      >
+        {label}
+      </span>
+      <span style={{ color: t.textSecondary }}>{binding.path}</span>
+      {binding.version && <span style={{ color: t.textMuted }}>· v{binding.version}</span>}
+      {!isForked && (
+        <span title="Bound cells track the block file — edits fork locally" style={{ color: t.textMuted }}>
+          🔒
+        </span>
+      )}
+      <div style={{ flex: 1 }} />
+      {isForked && (
+        <button
+          onClick={onRevert}
+          title="Discard local edits and restore the block file body"
+          style={binderBtnStyle(t, accent)}
+        >
+          Revert
+        </button>
+      )}
+      <button
+        onClick={onUnbind}
+        title="Detach this cell from the block file"
+        style={binderBtnStyle(t, t.btnBorder)}
+      >
+        Unbind
+      </button>
+    </div>
+  );
+}
+
+function binderBtnStyle(t: Theme, border: string): React.CSSProperties {
+  return {
+    background: 'transparent',
+    border: `1px solid ${border}`,
+    borderRadius: 4,
+    color: t.textSecondary,
+    fontSize: 10,
+    fontFamily: t.font,
+    fontWeight: 600,
+    letterSpacing: '0.04em',
+    padding: '1px 7px',
+    cursor: 'pointer',
+  };
 }
 
 function BlockGovernanceBar({
@@ -367,10 +463,19 @@ export function CellComponent({ cell, index }: CellProps) {
 
   const handleContentChange = useCallback(
     (content: string) => {
-      dispatch({ type: 'UPDATE_CELL', id: cell.id, updates: { content } });
+      const updates: Partial<Cell> = { content };
+      const binding = cell.blockBinding;
+      if (binding?.originalContent !== undefined) {
+        const diverged = content.trim() !== binding.originalContent.trim();
+        const nextState = diverged ? 'forked' : 'bound';
+        if (nextState !== binding.state) {
+          updates.blockBinding = { ...binding, state: nextState };
+        }
+      }
+      dispatch({ type: 'UPDATE_CELL', id: cell.id, updates });
       setIsDirty(content !== savedContentRef.current);
     },
-    [cell.id, dispatch]
+    [cell.id, cell.blockBinding, dispatch]
   );
 
   const handleReset = useCallback(() => {
@@ -792,6 +897,35 @@ export function CellComponent({ cell, index }: CellProps) {
             content={cell.content}
             onChange={handleContentChange}
             t={t}
+          />
+        )}
+
+        {cell.blockBinding && (
+          <BlockBindingChip
+            binding={cell.blockBinding}
+            t={t}
+            onRevert={async () => {
+              const binding = cell.blockBinding;
+              if (!binding) return;
+              try {
+                const payload = await api.openBlockStudio(binding.path);
+                const sqlBody = extractSqlFromText(payload.source) ?? payload.source;
+                dispatch({
+                  type: 'UPDATE_CELL',
+                  id: cell.id,
+                  updates: {
+                    content: sqlBody,
+                    blockBinding: { ...binding, state: 'bound', originalContent: sqlBody },
+                  },
+                });
+                editorRef.current?.resetTo(sqlBody);
+              } catch (error) {
+                console.error('Failed to revert bound cell', error);
+              }
+            }}
+            onUnbind={() => {
+              dispatch({ type: 'UPDATE_CELL', id: cell.id, updates: { blockBinding: undefined } });
+            }}
           />
         )}
 

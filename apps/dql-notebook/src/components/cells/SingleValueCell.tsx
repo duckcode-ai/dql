@@ -2,6 +2,9 @@ import React, { useMemo } from 'react';
 import { themes, type Theme } from '../../themes/notebook-theme';
 import type { Cell, QueryResult, SingleValueCellConfig, ThemeMode } from '../../store/types';
 import { aggregate } from '../../utils/aggregate';
+import { classifyColumns } from '../../utils/semantic-fields';
+import { SemanticFieldPicker, NoSemanticBindingNote } from './SemanticFieldPicker';
+import { CellEmptyState } from './CellEmptyState';
 
 interface SingleValueCellProps {
   cell: Cell;
@@ -72,11 +75,11 @@ export function SingleValueCell({ cell, cells, index, themeMode, onUpdate }: Sin
   }, [cell.upstream, config.upstream, cells]);
 
   const upstreamOptions = useMemo(() => {
-    return cells.slice(0, index).filter((c) => c.name && c.status === 'success' && c.result);
+    return cells.slice(0, index).filter((c) => c.name && c.result);
   }, [cells, index]);
 
   const result: QueryResult | undefined = upstream?.result;
-  const columns = result?.columns ?? [];
+  const classified = useMemo(() => classifyColumns(result), [result]);
 
   const value = useMemo(
     () => (result ? computeAggregate(result, config.metric, aggregation) : null),
@@ -89,64 +92,15 @@ export function SingleValueCell({ cell, cells, index, themeMode, onUpdate }: Sin
 
   if (!upstream || !result) {
     return (
-      <div
-        style={{
-          background: t.cellBg,
-          border: `1px solid ${t.cellBorder}`,
-          borderLeft: `3px solid #a371f7`,
-          borderRadius: 6,
-          padding: '18px 20px',
-          fontFamily: t.font,
-        }}
-      >
-        <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 10 }}>
-          <span
-            style={{
-              fontSize: 10,
-              fontFamily: t.fontMono,
-              fontWeight: 700,
-              letterSpacing: '0.08em',
-              color: '#a371f7',
-              background: '#a371f718',
-              padding: '2px 6px',
-              borderRadius: 3,
-              textTransform: 'uppercase',
-            }}
-          >
-            Single value
-          </span>
-          {cell.name && (
-            <span style={{ fontSize: 12, fontFamily: t.fontMono, color: t.textSecondary }}>{cell.name}</span>
-          )}
-        </div>
-        <div style={{ fontSize: 12, color: t.textSecondary, marginBottom: 10 }}>Pick an upstream dataframe to compute a single value.</div>
-        {upstreamOptions.length === 0 ? (
-          <div style={{ fontSize: 11, color: t.textMuted }}>
-            No successful upstream cells yet.
-          </div>
-        ) : (
-          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
-            {upstreamOptions.map((c) => (
-              <button
-                key={c.id}
-                onClick={() => onUpdate({ upstream: c.name })}
-                style={{
-                  fontSize: 11,
-                  fontFamily: t.fontMono,
-                  color: '#a371f7',
-                  background: '#a371f714',
-                  border: `1px solid #a371f755`,
-                  borderRadius: 4,
-                  padding: '3px 10px',
-                  cursor: 'pointer',
-                }}
-              >
-                {c.name}
-              </button>
-            ))}
-          </div>
-        )}
-      </div>
+      <CellEmptyState
+        theme={t}
+        accentColor="#a371f7"
+        cellLabel="Single value"
+        cellName={cell.name}
+        description="Single-value cards render one KPI from an upstream dataframe — sum, avg, count, min, max, or last — with a format of your choice."
+        upstreamOptions={upstreamOptions}
+        onPick={(name) => onUpdate({ upstream: name })}
+      />
     );
   }
 
@@ -231,15 +185,16 @@ export function SingleValueCell({ cell, cells, index, themeMode, onUpdate }: Sin
             </select>
           </ConfigRow>
           {aggregation !== 'count' && (
-            <ConfigRow label="Metric column" theme={t}>
-              <select
-                value={config.metric ?? ''}
-                onChange={(e) => updateConfig({ metric: e.target.value || undefined })}
-                style={{ ...inputStyle, width: '100%' }}
-              >
-                <option value="">Select column</option>
-                {columns.map((c) => <option key={c} value={c}>{c}</option>)}
-              </select>
+            <ConfigRow label="Metric field" theme={t}>
+              <SemanticFieldPicker
+                theme={t}
+                value={config.metric}
+                fields={classified.fields}
+                placeholder="Select metric or column"
+                minWidth={240}
+                onChange={(name) => updateConfig({ metric: name })}
+              />
+              {!classified.hasSemanticBinding && <NoSemanticBindingNote theme={t} />}
             </ConfigRow>
           )}
           <ConfigRow label="Format" theme={t}>
