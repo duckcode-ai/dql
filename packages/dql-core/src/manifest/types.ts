@@ -115,6 +115,8 @@ export interface ManifestNotebookCell {
   blockName?: string;
   /** Chart config (if a chart cell references this cell) */
   chartType?: string;
+  /** Path of a `.dql` block file this cell is bound to (Track 5 block-first cells) */
+  bindingPath?: string;
 }
 
 // ---- Semantic Layer ----

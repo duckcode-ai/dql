@@ -334,10 +334,11 @@ export function buildLineageGraph(
       });
     }
     // NOTE: We intentionally do NOT create table/dbt_model → dashboard edges
-    // from raw notebook SQL cells. The correct flow is always:
+    // from raw draft SQL cells. The correct flow is always:
     //   dbt_source → dbt_model → block → dashboard
-    // Raw SQL in notebook cells that aren't block declarations are exploratory
-    // queries — they don't represent a formal lineage path.
+    // Draft cells (unbound, no inline block declaration) are exploratory queries
+    // and don't represent a formal lineage path. Bound cells (Track 5) DO appear
+    // — their block binding flows in via `dashboard.blocks` upstream.
   }
 
   // 5. Add domain nodes and connect

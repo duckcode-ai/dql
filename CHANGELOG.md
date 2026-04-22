@@ -6,6 +6,31 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 
 ---
 
+## v1.0.3 — 2026-04-21
+
+### v0.11 — Block-First Notebook (Tracks 1–6)
+
+Collapses three authoring paths (notebook SQL, notebook DQL, Block Studio) into one mental model: **every notebook cell is a draft block; blocks are live-referenced with `bound` / `forked` state; promotion is certification-gated**.
+
+### Added
+- **Unified `@metric()` / `@dim()` resolver** — notebook SQL cells now resolve semantic refs the same way Block Studio does. `SELECT @metric(revenue) FROM @dim(date)` runs against the warehouse instead of throwing.
+- **Block Picker as primary palette tile** — `Block` is the left-most tile in the Add-Cell palette; picking a block drops a **bound cell** (live reference, not `@include` SQL).
+- **Semantic-aware cell pickers** — Chart / Pivot / SingleValue / Filter pickers read `QueryResult.semanticRefs` and show typed icons (`# metric`, `∴ dimension`, `abc column`); falls back to inference with a "no semantic binding" nag strip.
+- **Save-as-Block governance gate** — `SaveAsBlockModal` runs `BUILTIN_RULES` inline; missing owner / domain / description blocks the save. Git metadata (commit SHA, repo, branch) auto-captured and written to the companion YAML.
+- **Bound-cell state model** — `BlockBinding { path, commitSha?, version?, state, originalContent? }` on each cell. Green chrome for `bound`, yellow for `forked` after a local edit. Inline chip with path · 🔒 · Revert (forked only) · Unbind.
+- **Bound cells in lineage** — bound cells flow into the lineage graph as `block:<name> → dashboard:<notebook>` edges. Draft SQL cells stay excluded (design preserved).
+
+### Changed
+- Palette surface: dropped `Python` / `Map` / `Writeback` "coming soon" tiles and the legacy `DQL block` entry; single row, block-first ordering.
+- `SingleValueCell` / `ChartCell` / `PivotCell` / `FilterCell` empty states rewritten to guide the user toward the upstream cell.
+- Git metadata moved from `.dql` block body into companion YAML (DQL parser drops unknown tokens; body now only carries parser-known keys).
+
+### Fixed
+- Notebook SQL cells containing `@metric()` / `@dim()` previously failed with a raw warehouse error. Resolver is now shared between the notebook path and the Block Studio path.
+- `workspace:*` dependency resolution (retained from v0.8.2): release script rewrites to real `^x.y.z` before publish.
+
+---
+
 ## v0.8.7 — 2026-04-14
 
 ### Added
