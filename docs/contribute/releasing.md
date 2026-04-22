@@ -35,15 +35,18 @@ gh release create v0.12.0 --title "v0.12.0" --notes-from-tag
   the resolved version at publish time; npm doesn't, and the published
   tarball fails with `EUNSUPPORTEDPROTOCOL`.
 - **The notebook app and VS Code extension aren't published to npm** —
-  they ship as prebuilt binaries. The `--filter '!…'` exclusions above
-  enforce that.
+  the notebook is a private workspace artifact served by the CLI, and the
+  VS Code extension ships via the Marketplace. The `--filter '!…'`
+  exclusions above enforce that.
 
 ## What ships in a release
 
 | Artifact | Where |
 | --- | --- |
 | npm packages (11) | `npmjs.com/org/duckcodeailabs` |
-| CLI Homebrew tap | `github.com/duckcode-ai/homebrew-dql` |
 | VS Code extension | Marketplace |
-| Desktop notebook binaries | GitHub release assets (macOS/Linux/Windows) |
 | Docs | `docs/` in this repo (rendered on github.com) |
+
+Homebrew tap and desktop/Tauri binaries are not on the release path — the
+scaffolds in [`apps/desktop/`](../../apps/desktop/) are kept for future use
+but aren't exercised by CI. See [Install](../03-install.md#homebrew--desktop-bundles).

@@ -1,42 +1,17 @@
 # Install
 
-> ~2 minutes · requires Node 20+ or a prebuilt binary
+> ~2 minutes · requires Node 20+
 
-Pick the path that fits your setup.
+DQL ships as an npm package. One path, every platform.
 
-## Option A — npm (recommended)
-
-Works on macOS, Linux, and Windows. No global install required.
+## Install
 
 ```bash
-npx @duckcodeailabs/dql-cli --version
+npx @duckcodeailabs/dql-cli --version                 # zero-install
+npm i -g @duckcodeailabs/dql-cli && dql --version     # global
 ```
 
-To make `dql` a global command:
-
-```bash
-npm i -g @duckcodeailabs/dql-cli
-dql --version
-```
-
-## Option B — Homebrew (macOS / Linux) · *planned for GA*
-
-> **Roadmap.** The `duckcode-ai/dql` tap is on the v1.0 GA checklist and is
-> not published yet. Use Option A for now.
-
-```bash
-brew tap duckcode-ai/dql
-brew install dql
-```
-
-## Option C — Prebuilt binary · *planned for GA*
-
-> **Roadmap.** Prebuilt Tauri binaries ship with v1.0 GA. Check the
-> [releases page](https://github.com/duckcode-ai/dql/releases) — if binaries
-> aren't attached yet, use Option A.
-
-When available, each release ships macOS (arm64/x64), Linux (arm64/x64), and
-Windows (x64) binaries built with Tauri.
+Works on macOS, Linux, and Windows.
 
 ## Verify it worked
 
@@ -53,4 +28,12 @@ If you see the version number, you're ready for the [Quickstart →](01-quicksta
   add your global npm bin (`npm prefix -g`/bin) to `$PATH`.
 - **Node version errors** — DQL requires Node 20+. Install via
   [nvm](https://github.com/nvm-sh/nvm) or [fnm](https://github.com/Schniz/fnm).
-- **Windows + npm + path too long** — prefer the prebuilt binary.
+
+## Homebrew / desktop bundles
+
+Not shipped. If you'd use them, [open an issue](https://github.com/duckcode-ai/dql/issues)
+and we'll scope them in. The packaging scaffolds live in
+[`packaging/`](https://github.com/duckcode-ai/dql/tree/main/packaging) and
+[`apps/desktop/`](https://github.com/duckcode-ai/dql/tree/main/apps/desktop) —
+they're wired up but intentionally not on the release path until there's real
+demand.

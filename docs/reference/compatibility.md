@@ -4,7 +4,7 @@
 
 - **Node.js** — 18, 20, or 22 (active LTS)
 - **Package managers** — npm, pnpm, yarn all work for consuming published packages
-- **OS** — macOS, Linux, Windows (WSL recommended on Windows for the Tauri desktop build)
+- **OS** — macOS, Linux, Windows
 
 ## Connectors
 
