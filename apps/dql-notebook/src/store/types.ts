@@ -22,7 +22,8 @@ export type CellType =
   | 'table'
   | 'map'
   | 'writeback'
-  | 'python';
+  | 'python'
+  | 'chat';
 
 export type CellStatus = 'idle' | 'running' | 'success' | 'error';
 
@@ -85,6 +86,35 @@ export interface TableCellConfig {
   upstream?: string;       // dataframe handle to render
   visibleColumns?: string[];
   pinnedColumns?: string[];
+}
+
+export type ChatProviderId = 'claude-agent-sdk' | 'claude-code';
+
+export interface ChatMessage {
+  id: string;
+  role: 'user' | 'assistant';
+  content: string;
+  events?: Array<{ kind: string; payload: unknown }>;
+}
+
+export interface ChatBlockProposalSnapshot {
+  name: string;
+  domain: string;
+  owner: string;
+  description: string;
+  sql: string;
+  tags?: string[];
+  chartType?: string;
+  certified: boolean;
+  errors: string[];
+  warnings: string[];
+}
+
+export interface ChatCellConfig {
+  provider: ChatProviderId;
+  history: ChatMessage[];
+  upstream?: string;
+  lastProposal?: ChatBlockProposalSnapshot;
 }
 
 export type ParamType = 'text' | 'select' | 'date' | 'number';
@@ -158,6 +188,7 @@ export interface Cell {
   pivotConfig?: PivotCellConfig;      // Pivot cell
   singleValueConfig?: SingleValueCellConfig;  // Single-value cell
   tableConfig?: TableCellConfig;      // Table cell
+  chatConfig?: ChatCellConfig;        // Chat cell (v1.2 Track C)
   upstream?: string;                   // Dataframe handle this cell consumes
   blockBinding?: BlockBinding;         // Present when cell references a .dql block file
   fromSnapshot?: boolean;              // Result was hydrated from .run.json, not executed this session

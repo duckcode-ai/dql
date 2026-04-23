@@ -542,5 +542,8 @@ export function makeCell(type: Cell['type'], content = ''): Cell {
   if (type === 'table') {
     base.tableConfig = {};
   }
+  if (type === 'chat') {
+    base.chatConfig = { provider: 'claude-agent-sdk', history: [] };
+  }
   return base;
 }
