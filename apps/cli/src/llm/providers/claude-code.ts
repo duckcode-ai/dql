@@ -2,7 +2,7 @@ import { spawn } from 'node:child_process';
 import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import type { AgentRunRequest, AgentRunner, AgentTurn, BlockProposal } from './types.js';
+import type { AgentRunRequest, AgentRunner, AgentTurn, BlockProposal } from '../types.js';
 
 /**
  * `claude-code` provider: spawns the `claude` CLI in headless print mode and

@@ -36,8 +36,9 @@ export function listRunRecords(projectRoot: string, limit = 20): RunRecord[] {
     try {
       const raw = readFileSync(join(dir, f), 'utf-8');
       records.push(JSON.parse(raw) as RunRecord);
-    } catch {
-      /* skip malformed */
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      console.warn(`[dql schedule] skipping malformed run record ${f}: ${msg}`);
     }
   }
   return records;

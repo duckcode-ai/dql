@@ -37,7 +37,7 @@ export function emitRuntimeJS(): string {
             for (var si = 0; si < el.selectedOptions.length; si++) {
               selected.push(el.selectedOptions[si].value);
             }
-          } catch (_) {}
+          } catch (e) { console.warn('[dql] filter selectedOptions iteration failed for', f.id, e); }
           vars[f.param] = selected;
         } else if (el && 'value' in el) {
           vars[f.param] = el.value;
@@ -54,7 +54,7 @@ export function emitRuntimeJS(): string {
       Object.keys(filterState || {}).forEach(function(k) {
         if (vars[k] === undefined) vars[k] = filterState[k];
       });
-    } catch (_) {}
+    } catch (e) { console.warn('[dql] filterState merge failed', e); }
 
     // Merge dashboard params (URL/default-driven)
     if (DQL_CONFIG.params) {
@@ -71,7 +71,7 @@ export function emitRuntimeJS(): string {
       Object.keys(paramActionState || {}).forEach(function(key) {
         vars[key] = paramActionState[key];
       });
-    } catch (_) {}
+    } catch (e) { console.warn('[dql] paramActionState merge failed', e); }
 
     // Merge URL params (lowest precedence; ignore breadcrumb/system params)
     urlParams.forEach(function(value, key) {
@@ -1105,7 +1105,7 @@ export function emitRuntimeJS(): string {
     try {
       var state = encodeURIComponent(JSON.stringify(captureStateSnapshot()));
       url += '&dqlState=' + state;
-    } catch (_) {}
+    } catch (e) { console.warn('[dql] dqlState capture failed', e); }
 
     window.location.href = url;
   }
@@ -1266,7 +1266,7 @@ export function emitRuntimeJS(): string {
           for (var s = 0; s < el.selectedOptions.length; s++) {
             selected.push(el.selectedOptions[s].value);
           }
-        } catch (_) {}
+        } catch (e) { console.warn('[dql] captureFilters selectedOptions failed for', filter.id, e); }
         if (selected.length > 0) {
           filterState[filter.param] = selected;
         }

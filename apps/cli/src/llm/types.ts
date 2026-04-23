@@ -39,3 +39,10 @@ export interface AgentRunRequest {
 export interface AgentRunner {
   run(req: AgentRunRequest, emit: (turn: AgentTurn) => void, signal: AbortSignal): Promise<void>;
 }
+
+/**
+ * Public-facing name for the adapter contract a provider must implement.
+ * `AgentRunner` is the internal call site; `LLMProvider` is what community
+ * authors target when they add a new `providers/<name>.ts`. Keep in sync.
+ */
+export type LLMProvider = AgentRunner;

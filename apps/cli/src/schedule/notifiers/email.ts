@@ -22,7 +22,7 @@ export function createEmailNotifier(): Notifier {
         console.log(`  subject: ${subject}`);
         if (htmlBody) console.log(`  html: ${htmlBody.length} chars`);
         console.log(textBody);
-        return { delivered: true };
+        return { delivered: false, error: 'DQL_SMTP_URL not set (stub mode)' };
       }
 
       try {

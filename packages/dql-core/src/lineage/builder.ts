@@ -337,8 +337,11 @@ export function buildLineageGraph(
     // from raw draft SQL cells. The correct flow is always:
     //   dbt_source → dbt_model → block → dashboard
     // Draft cells (unbound, no inline block declaration) are exploratory queries
-    // and don't represent a formal lineage path. Bound cells (Track 5) DO appear
-    // — their block binding flows in via `dashboard.blocks` upstream.
+    // and don't represent a formal lineage path. Bound cells (v0.11 Track 5) DO
+    // appear: the manifest builder resolves each cell's `blockBinding.path`
+    // against `pathToBlockName` and merges the resulting block name into
+    // `dashboard.blocks`, so the `block:<name> → dashboard:<name>` edge above
+    // (line ~310) covers bound cells without a separate code path here.
   }
 
   // 5. Add domain nodes and connect

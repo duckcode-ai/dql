@@ -15,3 +15,5 @@ jaffle-shop/
 .claude/
 *.dqlnb.run.json
 *.dql.run.json
+.dql/runs/
+.dql/cache/

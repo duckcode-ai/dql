@@ -68,7 +68,7 @@ export async function runInit(targetArg: string | null, flags: CLIFlags): Promis
   // Create .gitignore for DQL artifacts
   const gitignorePath = join(targetDir, '.gitignore');
   const dqlIgnoreEntries =
-    '\n# DQL\ndql-manifest.json\n*.duckdb\n*.duckdb.wal\n.dql/runs/\n*.dqlnb.run.json\n*.dql.run.json\n';
+    '\n# DQL\ndql-manifest.json\n*.duckdb\n*.duckdb.wal\n.dql/runs/\n.dql/cache/\n*.dqlnb.run.json\n*.dql.run.json\n';
   if (existsSync(gitignorePath)) {
     const existing = readFileSync(gitignorePath, 'utf-8');
     if (!existing.includes('dql-manifest.json')) {

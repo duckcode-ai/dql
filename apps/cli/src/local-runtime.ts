@@ -362,8 +362,11 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
         res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
         res.end(serializeJSON(merged));
       } catch (error) {
-        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
-        res.end(serializeJSON(scanDataFiles(projectRoot)));
+        const message = error instanceof Error ? error.message : String(error);
+        console.warn(`[dql] /api/schema introspection failed: ${message}`);
+        const fallback = scanDataFiles(projectRoot).map((f) => ({ ...f, source: 'file' }));
+        res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({ error: message, fallback }));
       }
       return;
     }
@@ -678,6 +681,50 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
       } catch (error) {
         res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
         res.end(serializeJSON({ entries: [] }));
+      }
+      return;
+    }
+
+    // ── Block body (re-read from disk, used by bound-cell refresh) ──────
+    if (req.method === 'GET' && path === '/api/blocks/body') {
+      try {
+        const blockPath = url.searchParams.get('path');
+        if (!blockPath) {
+          res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
+          res.end(serializeJSON({ error: 'path parameter is required' }));
+          return;
+        }
+        const absolutePath = resolve(projectRoot, blockPath);
+        if (!absolutePath.startsWith(projectRoot + '/') && absolutePath !== projectRoot) {
+          res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
+          res.end(serializeJSON({ error: 'path escapes project root' }));
+          return;
+        }
+        if (!existsSync(absolutePath)) {
+          res.writeHead(404, { 'Content-Type': 'application/json; charset=utf-8' });
+          res.end(serializeJSON({ error: 'block not found' }));
+          return;
+        }
+        const body = readFileSync(absolutePath, 'utf-8');
+        let commitSha: string | null = null;
+        try {
+          const { execSync } = await import('node:child_process');
+          const sha = execSync(`git log -1 --format=%H -- "${blockPath}"`, {
+            cwd: projectRoot,
+            encoding: 'utf-8',
+            stdio: ['ignore', 'pipe', 'ignore'],
+            timeout: 5000,
+          }).trim();
+          commitSha = sha.length > 0 ? sha : null;
+        } catch {
+          commitSha = null;
+        }
+        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({ path: blockPath, body, commitSha }));
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({ error: message }));
       }
       return;
     }

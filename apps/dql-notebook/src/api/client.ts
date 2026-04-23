@@ -142,6 +142,12 @@ export const api = {
     return request<BlockStudioOpenPayload>(`/api/block-studio/open?path=${encodeURIComponent(path)}`);
   },
 
+  async getBlockBody(path: string): Promise<{ path: string; body: string; commitSha: string | null }> {
+    return request<{ path: string; body: string; commitSha: string | null }>(
+      `/api/blocks/body?path=${encodeURIComponent(path)}`,
+    );
+  },
+
   async validateBlockStudio(source: string, path?: string | null): Promise<BlockStudioValidation> {
     return request<BlockStudioValidation>('/api/block-studio/validate', {
       method: 'POST',
@@ -251,8 +257,20 @@ export const api = {
 
   async getSchema(): Promise<SchemaTable[]> {
     try {
-      return await request<SchemaTable[]>('/api/schema');
-    } catch {
+      const res = await fetch(`${BASE}/api/schema`);
+      if (res.ok) {
+        return (await res.json()) as SchemaTable[];
+      }
+      // Server returns 500 with { error, fallback } when introspection fails.
+      const body = (await res.json().catch(() => null)) as
+        | { error?: string; fallback?: SchemaTable[] }
+        | null;
+      if (body?.error) {
+        console.warn(`[dql] schema introspection failed: ${body.error}`);
+      }
+      return body?.fallback ?? [];
+    } catch (err) {
+      console.warn('[dql] getSchema request failed', err);
       return [];
     }
   },

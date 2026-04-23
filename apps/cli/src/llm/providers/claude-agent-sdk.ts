@@ -2,8 +2,8 @@ import { homedir } from 'node:os';
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { DQLContext, findProjectRoot } from '@duckcodeailabs/dql-mcp';
-import type { AgentRunRequest, AgentRunner, AgentTurn, BlockProposal } from './types.js';
-import { buildAgentTools, type AgentTool } from './tools.js';
+import type { AgentRunRequest, AgentRunner, AgentTurn, BlockProposal } from '../types.js';
+import { buildAgentTools, type AgentTool } from '../tools.js';
 
 const MODEL = 'claude-opus-4-7';
 const MAX_TOOL_ITERATIONS = 16;
