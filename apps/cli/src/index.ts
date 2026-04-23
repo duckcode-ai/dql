@@ -23,6 +23,8 @@ import { runLineage } from './commands/lineage.js';
 import { runCompile } from './commands/compile.js';
 import { runSync } from './commands/sync.js';
 import { runDiff } from './commands/diff.js';
+import { runMcp } from './commands/mcp.js';
+import { runApp } from './commands/app.js';
 
 const HELP = `
   dql — DQL CLI
@@ -49,6 +51,8 @@ const HELP = `
     dql compile [path]              Generate project manifest (dql-manifest.json)
     dql sync dbt [path]             Detect dbt manifest changes; report DQL cache status
     dql lineage [block] [path]      Answer-layer lineage analysis
+    dql mcp [--http]                Run the DQL MCP server (stdio by default; --http = loopback)
+    dql app new|ls|show <name>      Manage App artifacts (domain-scoped notebook + dashboard bundles)
     dql --version                    Show version
     dql --help                      Show this help
 
@@ -91,7 +95,7 @@ async function main() {
     process.exit(0);
   }
 
-  if (!file && command !== 'init' && command !== 'serve' && command !== 'doctor' && command !== 'notebook' && command !== 'validate' && command !== 'semantic' && command !== 'lineage' && command !== 'compile' && command !== 'sync') {
+  if (!file && command !== 'init' && command !== 'serve' && command !== 'doctor' && command !== 'notebook' && command !== 'validate' && command !== 'semantic' && command !== 'lineage' && command !== 'compile' && command !== 'sync' && command !== 'mcp' && command !== 'app') {
     console.error('Error: No file/argument specified. Run "dql --help" for usage.');
     process.exit(1);
   }
@@ -154,6 +158,12 @@ async function main() {
         break;
       case 'diff':
         await runDiff(file, rest, flags);
+        break;
+      case 'mcp':
+        await runMcp(file, flags);
+        break;
+      case 'app':
+        await runApp(file, rest, flags);
         break;
       default:
         console.error(`Unknown command: ${command}. Run "dql --help" for usage.`);

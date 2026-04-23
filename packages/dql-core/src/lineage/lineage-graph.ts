@@ -16,7 +16,8 @@ export type LineageNodeType =
   | 'dimension'
   | 'domain'
   | 'chart'
-  | 'dashboard';
+  | 'dashboard'
+  | 'app';
 
 /** Conceptual layer a node belongs to in the lineage flow. */
 export type LineageLayer = 'source' | 'transform' | 'answer' | 'consumption';
@@ -32,6 +33,7 @@ const NODE_TYPE_TO_LAYER: Record<LineageNodeType, LineageLayer> = {
   domain: 'answer',
   chart: 'consumption',
   dashboard: 'consumption',
+  app: 'consumption',
 };
 
 /** Get the default layer for a node type. */

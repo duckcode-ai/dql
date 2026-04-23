@@ -11,6 +11,7 @@
     { "path": "../../packages/dql-compiler" },
     { "path": "../../packages/dql-project" },
     { "path": "../../packages/dql-governance" },
+    { "path": "../../packages/dql-mcp" },
     { "path": "../../packages/dql-notebook" }
   ]
 }

@@ -16,6 +16,7 @@ export interface LineageQueryResult {
 }
 
 const NODE_PREFIXES: LineageNodeType[] = [
+  'app',
   'block',
   'dashboard',
   'dbt_model',

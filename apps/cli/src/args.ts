@@ -16,6 +16,7 @@ export interface CLIFlags {
   connection: string;
   skipTests: boolean;
   force?: boolean;
+  http?: boolean;
 }
 
 export interface ParsedArgs {
@@ -44,6 +45,7 @@ export function parseArgs(argv: string[]): ParsedArgs {
     connection: '',
     skipTests: false,
     force: false,
+    http: false,
   };
 
   let command: string | null = null;
@@ -92,6 +94,8 @@ export function parseArgs(argv: string[]): ParsedArgs {
       flags.skipTests = true;
     } else if (arg === '--force' || arg === '-f') {
       flags.force = true;
+    } else if (arg === '--http') {
+      flags.http = true;
     } else if (!command) {
       command = arg;
     } else if (!file) {
