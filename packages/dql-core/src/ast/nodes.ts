@@ -288,6 +288,15 @@ export interface BlockDeclNode extends BaseNode {
   visualization?: BlockVisualizationNode;
   tests?: BlockTestNode[];
   decorators: DecoratorNode[];
+  /**
+   * v1.2 Track G — agent-facing metadata. All optional, additive.
+   * `llmContext` is a one-paragraph NL description MCP surfaces to agents;
+   * `examples` are sample (question, sql) pairs chat cells can few-shot on;
+   * `invariants` are free-form assertions a block's result should hold.
+   */
+  llmContext?: string;
+  invariants?: string[];
+  examples?: Array<{ question: string; sql?: string }>;
 }
 
 export interface BlockParamsNode extends BaseNode {

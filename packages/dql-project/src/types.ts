@@ -27,6 +27,16 @@ export interface BlockRecord {
   avgRuntimeMs?: number;
   createdAt: Date;
   updatedAt: Date;
+  /**
+   * v1.2 Track G — agent-facing metadata. All optional, additive.
+   * `llmContext` is a one-paragraph NL description MCP tools surface to
+   * agents; `examples` are sample (question, sql) pairs the chat cell can
+   * few-shot on; `invariants` are free-form assertions that must hold for
+   * the block's result (used as prompt grounding, not as executable tests).
+   */
+  llmContext?: string;
+  examples?: Array<{ question: string; sql?: string }>;
+  invariants?: string[];
 }
 
 export interface BlockVersion {

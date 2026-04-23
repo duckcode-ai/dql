@@ -19,6 +19,10 @@ export async function runBuild(filePath: string, flags: CLIFlags): Promise<void>
     throw new Error(`Build failed:\n${result.errors.map((e) => `- ${e}`).join('\n')}`);
   }
 
+  for (const w of result.warnings) {
+    console.error(`  ⚠ ${w}`);
+  }
+
   if (result.dashboards.length === 0) {
     throw new Error('Build requires a charted block, dashboard, or workbook that compiles to HTML output.');
   }
