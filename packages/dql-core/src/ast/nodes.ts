@@ -31,6 +31,8 @@ export enum NodeKind {
   BlockParams = 'BlockParams',
   BlockVisualization = 'BlockVisualization',
   BlockTest = 'BlockTest',
+  Digest = 'Digest',
+  Narrative = 'Narrative',
 }
 
 // ---- Base ----
@@ -73,7 +75,7 @@ export interface ProgramNode extends BaseNode {
   statements: StatementNode[];
 }
 
-export type StatementNode = DashboardNode | ChartCallNode | WorkbookNode | ImportDeclNode | BlockDeclNode;
+export type StatementNode = DashboardNode | ChartCallNode | WorkbookNode | ImportDeclNode | BlockDeclNode | DigestNode;
 
 // ---- Dashboard ----
 
@@ -85,6 +87,24 @@ export interface DashboardNode extends BaseNode {
 }
 
 export type DashboardBodyItem = VariableDeclNode | ParamDeclNode | ChartCallNode | FilterCallNode | UseDeclNode | LayoutBlockNode;
+
+// ---- Digest ----
+//
+// `digest "Title" { @schedule(...) narrative { prompt: "..." sources: [ref("…")] } chart.line(...) }`
+// Parses exactly like a dashboard, with one extra optional child: a single narrative block.
+
+export interface DigestNode extends BaseNode {
+  kind: NodeKind.Digest;
+  title: string;
+  decorators: DecoratorNode[];
+  narrative?: NarrativeNode;
+  body: DashboardBodyItem[];
+}
+
+export interface NarrativeNode extends BaseNode {
+  kind: NodeKind.Narrative;
+  properties: NamedArgNode[];
+}
 
 // ---- Chart ----
 

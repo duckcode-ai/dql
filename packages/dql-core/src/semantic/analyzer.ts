@@ -311,6 +311,10 @@ export class SemanticAnalyzer {
         case NodeKind.BlockDecl:
           this.analyzeBlockDecl(stmt);
           break;
+        case NodeKind.Digest:
+          // Digest shares dashboard semantics; treat body identically.
+          this.analyzeDashboard(stmt as unknown as DashboardNode);
+          break;
       }
     }
 

@@ -2,11 +2,12 @@ import { readFileSync } from 'node:fs';
 import { compile } from '@duckcodeailabs/dql-compiler';
 import type { QueryExecutor, ConnectionConfig } from '@duckcodeailabs/dql-connectors';
 import { findProjectRoot, loadProjectConfig, prepareLocalExecution } from '../local-runtime.js';
+import { isDigestOutput, runDigestBuild } from '../digest.js';
 import { evaluateAlerts } from './alerts.js';
 import { deriveBlockName } from './discovery.js';
 import { dispatchNotifications } from './notifiers/index.js';
 import { writeRunRecord } from './runs.js';
-import type { QueryRunResult, RunRecord } from './types.js';
+import type { NotifierPayload, QueryRunResult, RunRecord } from './types.js';
 
 export interface RunOptions {
   executor: QueryExecutor;
@@ -85,16 +86,35 @@ export async function runBlock(absPath: string, options: RunOptions): Promise<Ru
       const shouldNotify = anyBreached || !hasAlerts;
 
       if (shouldNotify && (dashboard.metadata.notifications?.length ?? 0) > 0) {
+        const payload: NotifierPayload = {
+          block,
+          path: absPath,
+          startedAt,
+          alerts: alertResults,
+          queries,
+          trigger,
+        };
+
+        if (isDigestOutput(dashboard)) {
+          try {
+            const digest = await runDigestBuild(dashboard, projectRoot);
+            payload.html = digest.html;
+            payload.markdown = digest.markdown;
+            payload.digestTitle = dashboard.metadata.title ?? block;
+            payload.digestDiagnostics = digest.diagnostics;
+          } catch (err) {
+            payload.digestDiagnostics = [
+              {
+                level: 'warning',
+                message: `digest build failed: ${err instanceof Error ? err.message : String(err)}`,
+              },
+            ];
+          }
+        }
+
         notifications = await dispatchNotifications(
           dashboard.metadata.notifications ?? [],
-          {
-            block,
-            path: absPath,
-            startedAt,
-            alerts: alertResults,
-            queries,
-            trigger,
-          },
+          payload,
           projectRoot,
         );
       }

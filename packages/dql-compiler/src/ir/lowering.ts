@@ -14,6 +14,8 @@ import {
   type LayoutBlockNode,
   type LayoutRowNode,
   type DashboardBodyItem,
+  type DigestNode,
+  type NarrativeNode,
   type SemanticLayer,
 } from '@duckcodeailabs/dql-core';
 import type {
@@ -21,6 +23,8 @@ import type {
   PageIR,
   ParamIR,
   DashboardIR,
+  DigestIR,
+  NarrativeIR,
   ChartIR,
   ChartConfig,
   InteractionConfig,
@@ -124,6 +128,9 @@ export function lowerProgram(program: ProgramNode, options: LoweringOptions = {}
         if (lowered) dashboards.push(lowered);
         break;
       }
+      case NodeKind.Digest:
+        dashboards.push(lowerDigest(stmt, options));
+        break;
       case NodeKind.ImportDecl:
         // Import declarations are resolved at compile time, not at IR level
         break;
@@ -131,6 +138,47 @@ export function lowerProgram(program: ProgramNode, options: LoweringOptions = {}
   }
 
   return dashboards;
+}
+
+function lowerDigest(node: DigestNode, options: LoweringOptions): DigestIR {
+  // Digest parses like a dashboard; reuse dashboard lowering for body/charts/layout.
+  const dashboardShape = lowerDashboard(
+    {
+      kind: NodeKind.Dashboard,
+      title: node.title,
+      decorators: node.decorators,
+      body: node.body,
+      span: node.span,
+    } as DashboardNode,
+    options,
+  );
+
+  const narrative = node.narrative ? lowerNarrative(node.narrative) : undefined;
+  return { ...dashboardShape, narrative };
+}
+
+function lowerNarrative(node: NarrativeNode): NarrativeIR {
+  let prompt = '';
+  const sources: string[] = [];
+  for (const prop of node.properties) {
+    if (prop.name === 'prompt') {
+      const v = evaluateExpression(prop.value);
+      if (typeof v === 'string') prompt = v;
+    } else if (prop.name === 'sources') {
+      // Accept either an array of ref("…") function calls, or an array of strings.
+      if (prop.value.kind === NodeKind.ArrayLiteral) {
+        for (const el of prop.value.elements) {
+          if (el.kind === NodeKind.FunctionCall && el.callee === 'ref' && el.arguments.length > 0) {
+            const arg = el.arguments[0];
+            if (arg.kind === NodeKind.StringLiteral) sources.push(arg.value);
+          } else if (el.kind === NodeKind.StringLiteral) {
+            sources.push(el.value);
+          }
+        }
+      }
+    }
+  }
+  return { prompt, sources };
 }
 
 export function lowerWorkbookProgram(program: ProgramNode, options: LoweringOptions = {}): WorkbookIR | null {
