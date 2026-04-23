@@ -32,6 +32,8 @@ import {
   type BlockParamEntry,
   type BlockVisualizationNode,
   type BlockTestNode,
+  type DigestNode,
+  type NarrativeNode,
 } from '../ast/nodes.js';
 
 export class Parser {
@@ -92,6 +94,10 @@ export class Parser {
       return this.parseDashboard(decorators);
     }
 
+    if (this.check(TokenType.DigestKeyword)) {
+      return this.parseDigest(decorators);
+    }
+
     if (this.check(TokenType.ChartKeyword)) {
       return this.parseChartCall(decorators);
     }
@@ -111,7 +117,7 @@ export class Parser {
       return null;
     }
 
-    this.error(`Unexpected token '${this.current().value}'. Expected 'dashboard', 'workbook', 'chart', 'block', or 'import'.`);
+    this.error(`Unexpected token '${this.current().value}'. Expected 'dashboard', 'digest', 'workbook', 'chart', 'block', or 'import'.`);
     return null;
   }
 
@@ -218,6 +224,95 @@ export class Parser {
       title: titleToken.value,
       decorators,
       body,
+      span: this.makeSpan(start, this.previousSpan()),
+    };
+  }
+
+  private parseDigest(decorators: DecoratorNode[]): DigestNode {
+    const start = decorators.length > 0 ? decorators[0].span : this.currentSpan();
+    this.expect(TokenType.DigestKeyword);
+
+    const titleToken = this.expect(TokenType.StringLiteral);
+    this.expect(TokenType.LeftBrace);
+
+    const body: DashboardBodyItem[] = [];
+    let narrative: NarrativeNode | undefined;
+
+    while (!this.check(TokenType.RightBrace) && !this.isAtEnd()) {
+      const itemDecorators = this.parseDecoratorList();
+
+      if (this.check(TokenType.NarrativeKeyword)) {
+        if (itemDecorators.length > 0) {
+          this.error('Decorators cannot be applied to narrative blocks.');
+        }
+        if (narrative) {
+          this.error('A digest can only contain one narrative block.');
+        }
+        narrative = this.parseNarrative();
+      } else if (this.check(TokenType.LetKeyword)) {
+        if (itemDecorators.length > 0) {
+          this.error('Decorators cannot be applied to variable declarations.');
+        }
+        body.push(this.parseVariableDecl());
+      } else if (this.check(TokenType.ParamKeyword)) {
+        if (itemDecorators.length > 0) {
+          this.error('Decorators cannot be applied to param declarations.');
+        }
+        body.push(this.parseParamDecl());
+      } else if (this.check(TokenType.ChartKeyword)) {
+        body.push(this.parseChartCall(itemDecorators));
+      } else if (this.check(TokenType.FilterKeyword)) {
+        if (itemDecorators.length > 0) {
+          this.error('Decorators cannot be applied to filter declarations.');
+        }
+        body.push(this.parseFilterCall());
+      } else if (this.check(TokenType.UseKeyword)) {
+        if (itemDecorators.length > 0) {
+          this.error('Decorators cannot be applied to use declarations.');
+        }
+        body.push(this.parseUseDecl());
+      } else if (this.check(TokenType.LayoutKeyword)) {
+        if (itemDecorators.length > 0) {
+          this.error('Decorators cannot be applied to layout blocks.');
+        }
+        body.push(this.parseLayoutBlock());
+      } else if (this.check(TokenType.RightBrace)) {
+        break;
+      } else {
+        this.error(
+          `Unexpected token '${this.current().value}' inside digest. Expected 'narrative', 'let', 'param', 'chart', 'filter', 'use', 'layout', or '}'.`,
+        );
+        this.advance();
+      }
+    }
+
+    this.expect(TokenType.RightBrace);
+
+    return {
+      kind: NodeKind.Digest,
+      title: titleToken.value,
+      decorators,
+      narrative,
+      body,
+      span: this.makeSpan(start, this.previousSpan()),
+    };
+  }
+
+  private parseNarrative(): NarrativeNode {
+    const start = this.currentSpan();
+    this.expect(TokenType.NarrativeKeyword);
+    this.expect(TokenType.LeftBrace);
+
+    const properties: NamedArgNode[] = [];
+    while (!this.check(TokenType.RightBrace) && !this.isAtEnd()) {
+      properties.push(this.parseNamedArg());
+    }
+
+    this.expect(TokenType.RightBrace);
+
+    return {
+      kind: NodeKind.Narrative,
+      properties,
       span: this.makeSpan(start, this.previousSpan()),
     };
   }

@@ -1,7 +1,7 @@
 import { writeFileSync, mkdirSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 import type { ChartSpec } from './vega-lite-emitter.js';
-import type { DashboardIR, ScheduleIR, NotificationIR, AlertIR } from '../ir/ir-nodes.js';
+import type { DashboardIR, ScheduleIR, NotificationIR, AlertIR, NarrativeIR } from '../ir/ir-nodes.js';
 
 export interface CompilationOutput {
   html: string;
@@ -19,7 +19,16 @@ export interface CompilationOutput {
       row?: number;
       chartId?: string;
     }>;
+    /** Present when the source compiled a `digest { }` statement. */
+    narrative?: NarrativeIR;
+    /** Block names referenced via ref()/sources= in the dashboard or narrative. */
+    dependencies?: string[];
   };
+  /**
+   * Markdown rendering of a digest (narrative + source manifest).
+   * Only set for digest outputs; used as email body alongside html.
+   */
+  markdown?: string;
 }
 
 export function writeBundle(output: CompilationOutput, outDir: string): void {
@@ -50,4 +59,9 @@ export function writeBundle(output: CompilationOutput, outDir: string): void {
     JSON.stringify(output.metadata, null, 2),
     'utf-8',
   );
+
+  // Digest sidecar: markdown body for email delivery.
+  if (output.markdown !== undefined) {
+    writeFileSync(join(outDir, 'index.md'), output.markdown, 'utf-8');
+  }
 }

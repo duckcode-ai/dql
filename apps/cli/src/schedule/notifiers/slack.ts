@@ -13,19 +13,29 @@ export function createSlackNotifier(): Notifier {
       }
 
       const breached = payload.alerts.filter((a) => a.breached);
-      if (breached.length === 0) {
+      const hasDigest = Boolean(payload.markdown);
+
+      // Skip noise: no digest to deliver AND no alert breached.
+      if (!hasDigest && breached.length === 0) {
         return { delivered: true };
       }
 
       const channels = recipients.length > 0 ? recipients : ['#default'];
-      const text = [
-        `*[DQL] ${payload.block}* — ${breached.length} alert(s) breached`,
-        `Triggered: ${payload.trigger} at ${payload.startedAt}`,
-        ...breached.map(
-          (a) =>
-            `• \`${a.alert.conditionSQL}\` ${a.alert.operator ?? '>'} ${a.alert.threshold ?? 0} — observed \`${a.observedValue}\`${a.alert.message ? ` — ${a.alert.message}` : ''}`,
-        ),
-      ].join('\n');
+      const text = hasDigest
+        ? [
+            `*[DQL Digest] ${payload.digestTitle ?? payload.block}*`,
+            `Generated: ${payload.startedAt} (${payload.trigger})`,
+            '',
+            truncateMarkdown(payload.markdown as string, 2500),
+          ].join('\n')
+        : [
+            `*[DQL] ${payload.block}* — ${breached.length} alert(s) breached`,
+            `Triggered: ${payload.trigger} at ${payload.startedAt}`,
+            ...breached.map(
+              (a) =>
+                `• \`${a.alert.conditionSQL}\` ${a.alert.operator ?? '>'} ${a.alert.threshold ?? 0} — observed \`${a.observedValue}\`${a.alert.message ? ` — ${a.alert.message}` : ''}`,
+            ),
+          ].join('\n');
 
       try {
         for (const channel of channels) {
@@ -47,4 +57,9 @@ export function createSlackNotifier(): Notifier {
       }
     },
   };
+}
+
+function truncateMarkdown(md: string, limit: number): string {
+  if (md.length <= limit) return md;
+  return md.slice(0, limit).trimEnd() + '\n…';
 }

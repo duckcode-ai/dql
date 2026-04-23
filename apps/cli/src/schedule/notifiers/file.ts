@@ -37,5 +37,14 @@ function formatLine(payload: NotifierPayload): string {
       breached: a.breached,
       message: a.alert.message,
     })),
+    ...(payload.markdown !== undefined
+      ? {
+          digest: {
+            title: payload.digestTitle ?? payload.block,
+            markdown: payload.markdown,
+            diagnostics: payload.digestDiagnostics ?? [],
+          },
+        }
+      : {}),
   });
 }

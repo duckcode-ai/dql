@@ -14,6 +14,8 @@ export type {
   FilterOptionConfig,
   LayoutIR,
   LayoutItemIR,
+  DigestIR,
+  NarrativeIR,
 } from './ir-nodes.js';
 
 export { lowerProgram, lowerWorkbookProgram, resolveRefs, type RefResolutionResult, type LoweringOptions } from './lowering.js';

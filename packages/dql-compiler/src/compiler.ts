@@ -8,7 +8,7 @@ import { getTheme } from './themes/index.js';
 import { ModuleResolver } from './modules/resolver.js';
 import { expandUseDeclarations } from './modules/use-expander.js';
 import type { CompilationOutput } from './codegen/bundle.js';
-import type { DashboardIR } from './ir/ir-nodes.js';
+import type { DashboardIR, DigestIR } from './ir/ir-nodes.js';
 import { dirname } from 'node:path';
 
 // Ensure chart emitters are registered
@@ -118,6 +118,8 @@ export function compile(source: string, options: CompileOptions = {}): CompileRe
       vegaBasePath: options.vegaBasePath,
     });
 
+    const narrative = (ir as DigestIR).narrative;
+
     return {
       html,
       chartSpecs,
@@ -129,6 +131,8 @@ export function compile(source: string, options: CompileOptions = {}): CompileRe
         alerts: ir.alerts,
         queries: ir.charts.map((c) => ({ id: c.id, sql: c.sql })),
         layoutDiagnostics: ir.layoutDiagnostics,
+        narrative,
+        dependencies: ir.dependencies,
       },
     };
   });
