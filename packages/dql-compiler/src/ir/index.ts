@@ -9,6 +9,7 @@ export type {
   SQLParam,
   ScheduleIR,
   NotificationIR,
+  AlertIR,
   FilterIR,
   FilterOptionConfig,
   LayoutIR,

@@ -35,11 +35,15 @@
     "@duckcodeailabs/dql-notebook": "workspace:*",
     "@duckcodeailabs/dql-project": "workspace:*",
     "isomorphic-git": "^1.27.0",
-    "js-yaml": "^4.1.0"
+    "js-yaml": "^4.1.0",
+    "node-cron": "^3.0.3",
+    "nodemailer": "^6.9.16"
   },
   "devDependencies": {
     "@duckcodeailabs/dql-notebook-app": "workspace:*",
     "@types/js-yaml": "^4.0.9",
+    "@types/node-cron": "^3.0.11",
+    "@types/nodemailer": "^6.4.17",
     "tsx": "^4.19.0",
     "typescript": "^5.7.0",
     "vitest": "^3.0.0"
