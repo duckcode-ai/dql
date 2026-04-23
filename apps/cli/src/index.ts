@@ -25,6 +25,7 @@ import { runSync } from './commands/sync.js';
 import { runDiff } from './commands/diff.js';
 import { runMcp } from './commands/mcp.js';
 import { runApp } from './commands/app.js';
+import { runSchedule } from './commands/schedule.js';
 
 const HELP = `
   dql — DQL CLI
@@ -53,6 +54,7 @@ const HELP = `
     dql lineage [block] [path]      Answer-layer lineage analysis
     dql mcp [--http]                Run the DQL MCP server (stdio by default; --http = loopback)
     dql app new|ls|show <name>      Manage App artifacts (domain-scoped notebook + dashboard bundles)
+    dql schedule list|run|start|status  Local scheduler for @schedule'd blocks (alerts + notifications)
     dql --version                    Show version
     dql --help                      Show this help
 
@@ -95,7 +97,7 @@ async function main() {
     process.exit(0);
   }
 
-  if (!file && command !== 'init' && command !== 'serve' && command !== 'doctor' && command !== 'notebook' && command !== 'validate' && command !== 'semantic' && command !== 'lineage' && command !== 'compile' && command !== 'sync' && command !== 'mcp' && command !== 'app') {
+  if (!file && command !== 'init' && command !== 'serve' && command !== 'doctor' && command !== 'notebook' && command !== 'validate' && command !== 'semantic' && command !== 'lineage' && command !== 'compile' && command !== 'sync' && command !== 'mcp' && command !== 'app' && command !== 'schedule') {
     console.error('Error: No file/argument specified. Run "dql --help" for usage.');
     process.exit(1);
   }
@@ -164,6 +166,9 @@ async function main() {
         break;
       case 'app':
         await runApp(file, rest, flags);
+        break;
+      case 'schedule':
+        await runSchedule(file, rest, flags);
         break;
       default:
         console.error(`Unknown command: ${command}. Run "dql --help" for usage.`);
