@@ -25,11 +25,18 @@ export interface CompileOptions {
 export interface CompileResult {
   dashboards: CompilationOutput[];
   errors: string[];
+  /**
+   * Non-fatal warnings from the compile pass. Includes feature-deprecation
+   * notices (e.g. `workbook` slated for removal in v1.3). Callers should
+   * print these to stderr but must not fail the build on them.
+   */
+  warnings: string[];
   isWorkbook: boolean;
 }
 
 export function compile(source: string, options: CompileOptions = {}): CompileResult {
   const errors: string[] = [];
+  const warnings: string[] = [];
 
   // 1. Parse
   const ast = parse(source, options.file);
@@ -60,6 +67,14 @@ export function compile(source: string, options: CompileOptions = {}): CompileRe
   const hasWorkbook = ast.statements.some((s) => s.kind === NodeKind.Workbook);
   const themeName = options.theme ?? 'light';
   const theme = getTheme(themeName);
+
+  if (hasWorkbook) {
+    // v1.2 deprecation: workbook compiles to a tabbed dashboard. Removal
+    // planned for v1.3 — see docs/migrations/workbook-to-dashboard.md.
+    warnings.push(
+      'workbook { } is deprecated and will be removed in v1.3. Replace with dashboard { tabs: [...] }. See docs/migrations/workbook-to-dashboard.md.',
+    );
+  }
 
   if (hasWorkbook) {
     // Workbook mode: emit tabbed page HTML
@@ -95,7 +110,7 @@ export function compile(source: string, options: CompileOptions = {}): CompileRe
         },
       };
 
-      return { dashboards: [output], errors, isWorkbook: true };
+      return { dashboards: [output], errors, warnings, isWorkbook: true };
     }
   }
 
@@ -137,5 +152,5 @@ export function compile(source: string, options: CompileOptions = {}): CompileRe
     };
   });
 
-  return { dashboards, errors, isWorkbook: false };
+  return { dashboards, errors, warnings, isWorkbook: false };
 }

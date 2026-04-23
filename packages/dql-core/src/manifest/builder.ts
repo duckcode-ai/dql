@@ -322,6 +322,7 @@ function scanBlocks(
           const description = extractProp(block, 'description');
           const tags = extractTags(block);
           const tests = extractTests(block);
+          const agent = extractAgentMetadata(block);
 
           blocks[block.name] = {
             name: block.name,
@@ -347,6 +348,9 @@ function scanBlocks(
             tests,
             tags,
             description,
+            llmContext: agent.llmContext,
+            examples: agent.examples,
+            invariants: agent.invariants,
           };
         }
       } catch (err) {
@@ -1083,6 +1087,24 @@ function extractTags(block: any): string[] | undefined {
     }
   }
   return undefined;
+}
+
+/**
+ * v1.2 Track G — agent-facing metadata.
+ * Pulls `llmContext`, `invariants`, `examples` directly from the parsed block
+ * node. All three are optional; absent values return undefined so the MCP
+ * layer can omit them.
+ */
+function extractAgentMetadata(block: any): {
+  llmContext?: string;
+  examples?: Array<{ question: string; sql?: string }>;
+  invariants?: string[];
+} {
+  return {
+    llmContext: typeof block.llmContext === 'string' ? block.llmContext : undefined,
+    invariants: Array.isArray(block.invariants) ? block.invariants : undefined,
+    examples: Array.isArray(block.examples) ? block.examples : undefined,
+  };
 }
 
 function extractTests(block: any): string[] {

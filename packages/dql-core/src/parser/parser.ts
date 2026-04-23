@@ -728,6 +728,10 @@ export class Parser {
     let query: SQLQueryNode | undefined;
     let visualization: BlockVisualizationNode | undefined;
     let tests: BlockTestNode[] | undefined;
+    // v1.2 Track G — agent-facing metadata.
+    let llmContext: string | undefined;
+    let invariants: string[] | undefined;
+    let examples: Array<{ question: string; sql?: string }> | undefined;
 
     while (!this.check(TokenType.RightBrace) && !this.isAtEnd()) {
       if (this.check(TokenType.DomainKeyword)) {
@@ -805,9 +809,58 @@ export class Parser {
         tests = this.parseBlockTests();
       } else if (this.check(TokenType.RightBrace)) {
         break;
+      } else if (
+        this.check(TokenType.Identifier)
+        && (this.current().value === 'llmContext'
+          || this.current().value === 'invariants'
+          || this.current().value === 'examples')
+      ) {
+        // v1.2 Track G — agent-facing metadata. Identifier-keyed to avoid
+        // new lexer keywords. All three are optional and additive.
+        const keyToken = this.advance();
+        this.expect(TokenType.Equals);
+        if (keyToken.value === 'llmContext') {
+          const val = this.expect(TokenType.StringLiteral);
+          llmContext = val.value;
+        } else if (keyToken.value === 'invariants') {
+          const arrExpr = this.parseArrayLiteral();
+          if (arrExpr.kind === NodeKind.ArrayLiteral) {
+            invariants = arrExpr.elements
+              .filter((e): e is import('../ast/nodes.js').StringLiteralNode => e.kind === NodeKind.StringLiteral)
+              .map((e) => e.value);
+          }
+        } else {
+          // examples: [ { question = "...", sql = "..." }, ... ]
+          this.expect(TokenType.LeftBracket);
+          const items: Array<{ question: string; sql?: string }> = [];
+          while (!this.check(TokenType.RightBracket) && !this.isAtEnd()) {
+            this.expect(TokenType.LeftBrace);
+            let question: string | undefined;
+            let sql: string | undefined;
+            while (!this.check(TokenType.RightBrace) && !this.isAtEnd()) {
+              const propToken = this.current();
+              if (propToken.type !== TokenType.Identifier) {
+                this.error(`Expected 'question' or 'sql' in example entry, got '${propToken.value}'.`);
+                this.advance();
+                continue;
+              }
+              this.advance();
+              this.expect(TokenType.Equals);
+              const val = this.expect(TokenType.StringLiteral);
+              if (propToken.value === 'question') question = val.value;
+              else if (propToken.value === 'sql') sql = val.value;
+              if (this.check(TokenType.Comma)) this.advance();
+            }
+            this.expect(TokenType.RightBrace);
+            if (question) items.push(sql ? { question, sql } : { question });
+            if (this.check(TokenType.Comma)) this.advance();
+          }
+          this.expect(TokenType.RightBracket);
+          if (items.length > 0) examples = items;
+        }
       } else {
         this.error(
-          `Unexpected token '${this.current().value}' inside block. Expected 'domain', 'type', 'metric', 'metrics', 'description', 'tags', 'owner', 'params', 'query', 'visualization', 'tests', or '}'.`,
+          `Unexpected token '${this.current().value}' inside block. Expected 'domain', 'type', 'metric', 'metrics', 'description', 'tags', 'owner', 'params', 'query', 'visualization', 'tests', 'llmContext', 'invariants', 'examples', or '}'.`,
         );
         this.advance();
       }
@@ -837,6 +890,9 @@ export class Parser {
       visualization,
       tests,
       decorators,
+      llmContext,
+      invariants,
+      examples,
       span: this.makeSpan(start, this.previousSpan()),
     };
   }

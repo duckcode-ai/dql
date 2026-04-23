@@ -159,6 +159,9 @@ export const api = {
     tags?: string[];
     metricRefs?: string[];
     template?: string;
+    llmContext?: string;
+    examples?: Array<{ question: string; sql?: string }>;
+    invariants?: string[];
   }): Promise<{ path: string; content: string }> {
     return request<{ path: string; content: string }>('/api/blocks/save-from-cell', {
       method: 'POST',
