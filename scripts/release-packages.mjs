@@ -22,8 +22,10 @@ const packages = [
   'packages/dql-governance',
   'packages/dql-connectors',
   'packages/dql-notebook',
+  'packages/dql-mcp',
   'packages/dql-lsp',
   'apps/cli',
+  'packages/create-dql-app',
 ];
 
 const artifactsDir = path.join(root, '.release-artifacts');

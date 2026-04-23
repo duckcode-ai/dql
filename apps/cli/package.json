@@ -40,7 +40,6 @@
     "nodemailer": "^6.9.16"
   },
   "devDependencies": {
-    "@duckcodeailabs/dql-notebook-app": "workspace:*",
     "@types/js-yaml": "^4.0.9",
     "@types/node-cron": "^3.0.11",
     "@types/nodemailer": "^6.4.17",

@@ -15,8 +15,8 @@ import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSy
 import { dirname, join, resolve, basename, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-const VERSION = '1.0.1';
 const __dirname = dirname(fileURLToPath(import.meta.url));
+const VERSION = JSON.parse(readFileSync(resolve(__dirname, '..', 'package.json'), 'utf-8')).version;
 const TEMPLATES_DIR = resolve(__dirname, '..', 'templates');
 
 // Tiny ANSI helpers — no dep on chalk/kleur so the bin runs before
