@@ -88,6 +88,13 @@ export interface ManifestBlock {
   /** Tags from block metadata */
   tags?: string[];
   description?: string;
+  /**
+   * v1.2 Track G — agent-facing metadata surfaced to MCP tools.
+   * Kept optional and additive; adoption is organic (has-llm-context is a warning rule).
+   */
+  llmContext?: string;
+  examples?: Array<{ question: string; sql?: string }>;
+  invariants?: string[];
 }
 
 // ---- Notebooks ----

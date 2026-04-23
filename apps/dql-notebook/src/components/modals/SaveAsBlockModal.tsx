@@ -56,6 +56,10 @@ export function SaveAsBlockModal({
   const [description, setDescription] = useState(initialDescription ?? state.notebookMetadata.description ?? '');
   const [tags, setTags] = useState((initialTags ?? state.notebookMetadata.categories ?? []).join(', '));
   const [content, setContent] = useState(initialContent ?? cell.content);
+  // v1.2 Track G — optional agent-facing metadata. Blank values are not written.
+  const [llmContext, setLlmContext] = useState('');
+  const [invariantsText, setInvariantsText] = useState('');
+  const [examples, setExamples] = useState<Array<{ question: string; sql: string }>>([]);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -68,6 +72,7 @@ export function SaveAsBlockModal({
     { id: 'has-owner', label: 'Block has owner', severity: 'error', passed: !!owner.trim() },
     { id: 'has-domain', label: 'Block has domain', severity: 'error', passed: !!domain.trim() },
     { id: 'has-tags', label: 'Has at least one tag', severity: 'warning', passed: tagList.length > 0 },
+    { id: 'has-llm-context', label: 'Has LLM context (for agents)', severity: 'warning', passed: !!llmContext.trim() },
   ];
 
   const hasErrors = ruleResults.some((r) => r.severity === 'error' && !r.passed);
@@ -100,6 +105,16 @@ export function SaveAsBlockModal({
     setSaving(true);
     setError(null);
     try {
+      const invariantsList = invariantsText
+        .split('\n')
+        .map((line) => line.trim())
+        .filter(Boolean);
+      const exampleList = examples
+        .map((ex) => ({
+          question: ex.question.trim(),
+          sql: ex.sql.trim() || undefined,
+        }))
+        .filter((ex) => ex.question);
       const result = await api.saveAsBlock({
         cellId: cell.id,
         notebookPath: state.activeFile?.path ?? null,
@@ -110,6 +125,9 @@ export function SaveAsBlockModal({
         description: description.trim() || undefined,
         tags: tagList,
         metricRefs: semanticRefs,
+        llmContext: llmContext.trim() || undefined,
+        examples: exampleList.length > 0 ? exampleList : undefined,
+        invariants: invariantsList.length > 0 ? invariantsList : undefined,
       });
       const file = {
         name: `${slugify(name) || 'new-block'}.dql`,
@@ -240,6 +258,101 @@ export function SaveAsBlockModal({
             </label>
             <input value={description} onChange={(e) => setDescription(e.target.value)} style={inputStyle} />
           </div>
+
+          <details style={{ border: `1px solid ${t.cellBorder}`, borderRadius: 6, padding: '8px 12px' }}>
+            <summary style={{ fontSize: 12, fontWeight: 600, color: t.textSecondary, fontFamily: t.font, cursor: 'pointer' }}>
+              Agent-facing metadata (optional — helps AI tools ground answers on this block)
+            </summary>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 10, paddingTop: 10 }}>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                <label style={{ fontSize: 12, color: t.textSecondary, fontFamily: t.font }}>
+                  How should an AI describe this block?
+                </label>
+                <textarea
+                  value={llmContext}
+                  onChange={(e) => setLlmContext(e.target.value)}
+                  rows={3}
+                  placeholder="One paragraph. E.g. &quot;Monthly revenue recognized from closed-won deals, grouped by billing month. Excludes refunds.&quot;"
+                  style={{ ...inputStyle, fontFamily: t.font, lineHeight: 1.5, resize: 'vertical' }}
+                />
+              </div>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                <label style={{ fontSize: 12, color: t.textSecondary, fontFamily: t.font }}>
+                  Invariants (one per line)
+                </label>
+                <textarea
+                  value={invariantsText}
+                  onChange={(e) => setInvariantsText(e.target.value)}
+                  rows={2}
+                  placeholder="Revenue is never negative&#10;Each row is a unique month"
+                  style={{ ...inputStyle, fontFamily: t.fontMono, lineHeight: 1.5, resize: 'vertical' }}
+                />
+              </div>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                <label style={{ fontSize: 12, color: t.textSecondary, fontFamily: t.font }}>
+                  Example questions (grounding for chat cells)
+                </label>
+                {examples.map((ex, i) => (
+                  <div key={i} style={{ display: 'grid', gridTemplateColumns: '1fr auto', gap: 6 }}>
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+                      <input
+                        value={ex.question}
+                        onChange={(e) => {
+                          const next = [...examples];
+                          next[i] = { ...next[i], question: e.target.value };
+                          setExamples(next);
+                        }}
+                        placeholder="What was revenue last month?"
+                        style={inputStyle}
+                      />
+                      <input
+                        value={ex.sql}
+                        onChange={(e) => {
+                          const next = [...examples];
+                          next[i] = { ...next[i], sql: e.target.value };
+                          setExamples(next);
+                        }}
+                        placeholder="Optional SQL snippet"
+                        style={{ ...inputStyle, fontFamily: t.fontMono, fontSize: 12 }}
+                      />
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => setExamples(examples.filter((_, idx) => idx !== i))}
+                      style={{
+                        background: 'transparent',
+                        border: `1px solid ${t.cellBorder}`,
+                        borderRadius: 6,
+                        color: t.textMuted,
+                        cursor: 'pointer',
+                        fontSize: 12,
+                        padding: '0 10px',
+                      }}
+                    >
+                      ×
+                    </button>
+                  </div>
+                ))}
+                <button
+                  type="button"
+                  onClick={() => setExamples([...examples, { question: '', sql: '' }])}
+                  style={{
+                    alignSelf: 'flex-start',
+                    background: t.btnBg,
+                    border: `1px solid ${t.btnBorder}`,
+                    borderRadius: 6,
+                    color: t.textSecondary,
+                    cursor: 'pointer',
+                    fontSize: 12,
+                    fontFamily: t.font,
+                    padding: '4px 10px',
+                  }}
+                >
+                  + Add example
+                </button>
+              </div>
+            </div>
+          </details>
 
           <div
             style={{

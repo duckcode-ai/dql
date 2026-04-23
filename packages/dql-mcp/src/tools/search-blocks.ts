@@ -55,5 +55,10 @@ function summarize(block: ManifestBlock) {
     tags: block.tags ?? [],
     dependencies: block.allDependencies,
     chartType: block.chartType ?? null,
+    // v1.2 Track G — agent-facing metadata. Surfaced so agents can prefer
+    // blocks with richer grounding without a second tool round-trip.
+    llmContext: block.llmContext ?? null,
+    hasExamples: !!(block.examples && block.examples.length > 0),
+    hasInvariants: !!(block.invariants && block.invariants.length > 0),
   };
 }

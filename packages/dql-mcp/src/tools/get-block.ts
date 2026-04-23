@@ -43,6 +43,11 @@ export function getBlock(
       dimensions: block.dimensionRefs ?? [],
     },
     tests: block.tests,
+    // v1.2 Track G — agent-facing metadata. Full payload on get_block so
+    // chat cells can few-shot on `examples` and cite `invariants`.
+    llmContext: block.llmContext ?? null,
+    examples: block.examples ?? [],
+    invariants: block.invariants ?? [],
     sql: block.sql,
     source,
   };

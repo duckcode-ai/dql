@@ -70,6 +70,20 @@ export const BUILTIN_RULES: CertificationRule[] = [
     }),
   },
   {
+    id: 'has-llm-context',
+    name: 'Block has LLM context',
+    description:
+      'Blocks should carry a one-paragraph NL description so agents can ground answers on them. Adoption is organic — warning only.',
+    severity: 'warning',
+    check: (block) => {
+      const ctx = block.llmContext?.trim();
+      return {
+        passed: !!ctx && ctx.length > 0,
+        message: ctx && ctx.length > 0 ? undefined : 'No llmContext set — agents will fall back to description/SQL',
+      };
+    },
+  },
+  {
     id: 'tests-pass',
     name: 'All tests pass',
     description: 'Block tests must all pass for certification',

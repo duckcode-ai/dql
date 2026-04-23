@@ -426,6 +426,9 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           tags,
           metricRefs,
           template,
+          llmContext,
+          examples,
+          invariants,
         } = body as {
           name: string;
           domain?: string;
@@ -435,6 +438,9 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           tags?: string[];
           metricRefs?: string[];
           template?: string;
+          llmContext?: string;
+          examples?: Array<{ question: string; sql?: string }>;
+          invariants?: string[];
         };
         if (!name || typeof name !== 'string' || !content || typeof content !== 'string') {
           res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
@@ -462,6 +468,9 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           tags,
           metricRefs,
           template,
+          llmContext,
+          examples,
+          invariants,
           gitMetadata: readGitMetadata(projectRoot),
         });
         res.writeHead(201, { 'Content-Type': 'application/json; charset=utf-8' });
@@ -3169,6 +3178,9 @@ export function createBlockArtifacts(
     tags?: string[];
     metricRefs?: string[];
     template?: string;
+    llmContext?: string;
+    examples?: Array<{ question: string; sql?: string }>;
+    invariants?: string[];
     gitMetadata?: BlockGitMetadata | null;
   },
 ): { path: string; content: string; companionPath: string } {
@@ -3195,6 +3207,9 @@ export function createBlockArtifacts(
     owner: options.owner,
     description: options.description,
     tags: options.tags,
+    llmContext: options.llmContext,
+    examples: options.examples,
+    invariants: options.invariants,
     content: options.content?.trim() || templateContent,
   }));
 
@@ -3491,6 +3506,9 @@ function normalizeBlockStudioContent(options: {
   owner?: string;
   description?: string;
   tags?: string[];
+  llmContext?: string;
+  examples?: Array<{ question: string; sql?: string }>;
+  invariants?: string[];
   content?: string;
 }): string {
   const content = options.content?.trim();
@@ -3504,6 +3522,9 @@ function normalizeBlockStudioContent(options: {
     owner: options.owner,
     description: options.description,
     tags: options.tags,
+    llmContext: options.llmContext,
+    examples: options.examples,
+    invariants: options.invariants,
     sql: content || 'SELECT 1 AS value',
   });
 }
@@ -3514,6 +3535,9 @@ function buildBlankBlockContent(options: {
   owner?: string;
   description?: string;
   tags?: string[];
+  llmContext?: string;
+  examples?: Array<{ question: string; sql?: string }>;
+  invariants?: string[];
   sql: string;
 }): string {
   const lines = [
@@ -3524,6 +3548,29 @@ function buildBlankBlockContent(options: {
     `    owner = "${escapeDqlString(options.owner?.trim() ?? '')}"`,
   ];
   lines.push(`    tags = [${(options.tags ?? []).map((tag) => `"${escapeDqlString(tag)}"`).join(', ')}]`);
+  if (options.llmContext && options.llmContext.trim()) {
+    lines.push(`    llmContext = "${escapeDqlString(options.llmContext.trim())}"`);
+  }
+  if (options.invariants && options.invariants.length > 0) {
+    lines.push(
+      `    invariants = [${options.invariants
+        .filter((inv) => inv && inv.trim())
+        .map((inv) => `"${escapeDqlString(inv.trim())}"`)
+        .join(', ')}]`,
+    );
+  }
+  if (options.examples && options.examples.length > 0) {
+    const items = options.examples.filter((ex) => ex.question && ex.question.trim());
+    if (items.length > 0) {
+      lines.push('    examples = [');
+      for (const ex of items) {
+        const parts = [`question = "${escapeDqlString(ex.question.trim())}"`];
+        if (ex.sql && ex.sql.trim()) parts.push(`sql = "${escapeDqlString(ex.sql.trim())}"`);
+        lines.push(`        { ${parts.join(', ')} },`);
+      }
+      lines.push('    ]');
+    }
+  }
   lines.push('');
   lines.push('    query = """');
   lines.push(...indentBlock(options.sql.trim(), 8).split('\n'));
