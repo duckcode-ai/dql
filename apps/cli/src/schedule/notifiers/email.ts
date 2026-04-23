@@ -11,13 +11,17 @@ export function createEmailNotifier(): Notifier {
       const from = process.env.DQL_SMTP_FROM ?? 'dql@localhost';
 
       const subject = buildSubject(payload);
-      const body = buildBody(payload);
+      // Digest runs deliver the rendered HTML + markdown sibling as the email
+      // body; non-digest runs fall back to the legacy alert/query summary.
+      const textBody = payload.markdown ?? buildBody(payload);
+      const htmlBody = payload.html;
 
       if (!smtpUrl) {
         console.log(`[dql schedule] email stub — no DQL_SMTP_URL set`);
         console.log(`  to: ${recipients.join(', ')}`);
         console.log(`  subject: ${subject}`);
-        console.log(body);
+        if (htmlBody) console.log(`  html: ${htmlBody.length} chars`);
+        console.log(textBody);
         return { delivered: true };
       }
 
@@ -29,7 +33,8 @@ export function createEmailNotifier(): Notifier {
           from,
           to: recipients.join(', '),
           subject,
-          text: body,
+          text: textBody,
+          ...(htmlBody ? { html: htmlBody } : {}),
         });
         return { delivered: true };
       } catch (err) {
@@ -41,6 +46,9 @@ export function createEmailNotifier(): Notifier {
 
 function buildSubject(payload: NotifierPayload): string {
   const breached = payload.alerts.filter((a) => a.breached).length;
+  if (payload.markdown) {
+    return `[DQL Digest] ${payload.digestTitle ?? payload.block}`;
+  }
   const prefix = breached > 0 ? `[DQL ALERT]` : `[DQL]`;
   return `${prefix} ${payload.block} — ${payload.trigger} run`;
 }

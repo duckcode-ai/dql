@@ -1,4 +1,4 @@
-import type { ScheduleIR, NotificationIR, AlertIR } from '@duckcodeailabs/dql-compiler';
+import type { ScheduleIR, NotificationIR, AlertIR, DigestDiagnostic } from '@duckcodeailabs/dql-compiler';
 
 export interface ScheduledBlock {
   /** Absolute path to the .dql file. */
@@ -46,6 +46,13 @@ export interface NotifierPayload {
   alerts: AlertEvaluation[];
   queries: QueryRunResult[];
   trigger: 'manual' | 'cron';
+  /** Rendered digest HTML (present when the block is a digest). */
+  html?: string;
+  /** Digest markdown sibling — preferred as an email/slack preview body. */
+  markdown?: string;
+  /** Title/name shown in digest headers, defaults to `block` when absent. */
+  digestTitle?: string;
+  digestDiagnostics?: DigestDiagnostic[];
 }
 
 export interface Notifier {

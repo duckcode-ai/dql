@@ -3,6 +3,7 @@ import { basename, dirname, extname, join, resolve } from 'node:path';
 import { compile, writeBundle } from '@duckcodeailabs/dql-compiler';
 import type { CLIFlags } from '../args.js';
 import { findProjectRoot, loadProjectConfig } from '../local-runtime.js';
+import { isDigestOutput, runDigestBuild } from '../digest.js';
 
 export async function runBuild(filePath: string, flags: CLIFlags): Promise<void> {
   const absoluteFile = resolve(filePath);
@@ -25,14 +26,31 @@ export async function runBuild(filePath: string, flags: CLIFlags): Promise<void>
   const name = basename(absoluteFile, extname(absoluteFile));
   const outDir = resolve(flags.outDir || join(projectRoot, 'dist', name));
   mkdirSync(outDir, { recursive: true });
-  writeBundle(result.dashboards[0], outDir);
+
+  const primary = result.dashboards[0];
+
+  // Digest post-processing: load block SHAs, generate narrative, citation-gate,
+  // and splice the narrative into the dashboard HTML + emit a markdown sibling.
+  let digestDiagnostics: Array<{ level: string; message: string }> = [];
+  if (isDigestOutput(primary)) {
+    const digest = await runDigestBuild(primary, projectRoot);
+    primary.html = digest.html;
+    primary.markdown = digest.markdown;
+    digestDiagnostics = digest.diagnostics;
+  }
+
+  writeBundle(primary, outDir);
 
   if (flags.format === 'json') {
     console.log(JSON.stringify({
       source: absoluteFile,
       outDir,
       built: true,
-      files: ['index.html', 'dql-metadata.json', 'specs/'],
+      digest: isDigestOutput(primary),
+      diagnostics: digestDiagnostics,
+      files: isDigestOutput(primary)
+        ? ['index.html', 'index.md', 'dql-metadata.json', 'specs/']
+        : ['index.html', 'dql-metadata.json', 'specs/'],
     }, null, 2));
     return;
   }
@@ -40,6 +58,16 @@ export async function runBuild(filePath: string, flags: CLIFlags): Promise<void>
   console.log(`\n  ✓ Built DQL bundle`);
   console.log(`    Source: ${absoluteFile}`);
   console.log(`    Output: ${outDir}`);
+  if (isDigestOutput(primary)) {
+    console.log(`    Digest: narrative + markdown sibling (index.md) written`);
+    const warn = digestDiagnostics.filter((d) => d.level === 'warning').length;
+    if (warn > 0) {
+      console.log(`    Citation gate: ${warn} warning(s)`);
+      for (const d of digestDiagnostics.filter((d) => d.level === 'warning')) {
+        console.log(`      ⚠ ${d.message}`);
+      }
+    }
+  }
   console.log('');
   console.log('  Next step:');
   console.log(`    dql serve ${outDir}`);

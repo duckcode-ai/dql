@@ -147,6 +147,17 @@ export interface NotificationIR {
   recipients: string[];
 }
 
+export interface NarrativeIR {
+  /** User-supplied prompt describing what the narrative should cover. */
+  prompt: string;
+  /** Block names referenced via `sources = [ref("…")]`. Supplies the allow-list of citable sources. */
+  sources: string[];
+}
+
+export interface DigestIR extends DashboardIR {
+  narrative?: NarrativeIR;
+}
+
 export interface AlertIR {
   conditionSQL: string;
   threshold?: number;

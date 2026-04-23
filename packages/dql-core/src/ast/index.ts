@@ -38,6 +38,8 @@ export {
   type BlockParamEntry,
   type BlockVisualizationNode,
   type BlockTestNode,
+  type DigestNode,
+  type NarrativeNode,
 } from './nodes.js';
 
 export { type ASTVisitor, BaseVisitor } from './visitor.js';
