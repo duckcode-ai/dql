@@ -107,6 +107,14 @@ function restoreOriginals(originals) {
 
 await mkdir(artifactsDir, { recursive: true });
 
+// Build everything first so the CLI tarball picks up a fresh notebook UI
+// bundle. The CLI's own `prepublishOnly` rebuilds `apps/cli` but not
+// `apps/dql-notebook`, whose `dist/` gets copied into the CLI's
+// `dist/assets/dql-notebook/` by copy-runtime-assets.mjs. Past releases
+// shipped a stale React build because that app wasn't rebuilt.
+console.log('\nBuilding all packages (so CLI ships fresh notebook UI)...');
+await run('pnpm', ['-w', 'build'], root);
+
 // Replace workspace:* with real versions before pack/publish
 console.log('\nResolving workspace:* dependencies...');
 const originals = resolveWorkspaceDeps();
