@@ -1,6 +1,6 @@
 {
   "name": "@duckcodeailabs/dql-connectors",
-  "version": "1.0.4",
+  "version": "1.2.0",
   "description": "DQL database connectors for local files, SQL warehouses, and lakehouse engines",
   "license": "Apache-2.0",
   "type": "module",
