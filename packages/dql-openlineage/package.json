@@ -1,6 +1,6 @@
 {
   "name": "@duckcodeailabs/dql-openlineage",
-  "version": "1.2.0",
+  "version": "1.2.1",
   "description": "OpenLineage event emitter for DQL block and notebook runs.",
   "license": "MIT",
   "type": "module",

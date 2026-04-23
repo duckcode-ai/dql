@@ -1,6 +1,6 @@
 {
   "name": "@duckcodeailabs/dql-charts",
-  "version": "1.2.0",
+  "version": "1.2.1",
   "description": "DQL chart library: visx-powered React SVG components for reusable analytics blocks",
   "license": "Apache-2.0",
   "type": "module",

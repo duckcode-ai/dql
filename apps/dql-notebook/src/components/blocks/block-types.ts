@@ -14,6 +14,7 @@ export interface BlockEntry {
   path: string;
   lastModified: string;
   description: string;
+  llmContext?: string | null;
 }
 
 export const STATUS_COLORS: Record<string, string> = {

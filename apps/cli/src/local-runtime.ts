@@ -39,6 +39,7 @@ import {
   diffNotebook,
   type DiffReport,
 } from '@duckcodeailabs/dql-core';
+import { load as loadYaml } from 'js-yaml';
 import { listBlockTemplates } from './block-templates.js';
 import { getRunner as getLLMRunner } from './llm/index.js';
 import {
@@ -502,6 +503,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           name: string; domain: string; status: string;
           owner: string | null; tags: string[]; path: string;
           lastModified: string; description: string;
+          llmContext: string | null;
         }> = [];
         if (existsSync(blocksDir)) {
           const scanDir = (dir: string) => {
@@ -524,6 +526,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
                   const parsedTags = tagsMatch
                     ? tagsMatch[1].split(',').map((tag) => tag.trim().replace(/^"|"$/g, '')).filter(Boolean)
                     : [];
+                  const llmMatch = /llmContext\s*=\s*"((?:[^"\\]|\\.)*)"/.exec(source);
                   blocks.push({
                     name: nameMatch?.[1] ?? entry.name.replace('.dql', ''),
                     domain: domainMatch?.[1] ?? 'uncategorized',
@@ -533,6 +536,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
                     path: relPath,
                     lastModified: stat.mtime.toISOString(),
                     description: descMatch?.[1] ?? '',
+                    llmContext: llmMatch?.[1] ?? null,
                   });
                 } catch { /* skip unreadable files */ }
               }
@@ -543,6 +547,69 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
         blocks.sort((a, b) => new Date(b.lastModified).getTime() - new Date(a.lastModified).getTime());
         res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
         res.end(serializeJSON({ blocks }));
+      } catch (error) {
+        res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({ error: error instanceof Error ? error.message : String(error) }));
+      }
+      return;
+    }
+
+    // ── Apps (App artifact listing for notebook AppsPanel) ────────────────
+    if (req.method === 'GET' && path === '/api/apps') {
+      try {
+        const appsRoot = join(projectRoot, 'apps');
+        type AppManifest = {
+          name: string;
+          domain: string;
+          owner?: string;
+          description?: string;
+          cadence?: string;
+          consumers?: string[];
+          entryPoints?: string[];
+        };
+        type DiscoveredApp = {
+          path: string;
+          manifest: AppManifest;
+          notebooks: string[];
+          dashboards: string[];
+          hasDigest: boolean;
+        };
+        const apps: DiscoveredApp[] = [];
+        const listFilesByExt = (dir: string, ext: string): string[] => {
+          const out: string[] = [];
+          try {
+            for (const entry of readdirSync(dir, { withFileTypes: true })) {
+              const full = join(dir, entry.name);
+              if (entry.isDirectory()) {
+                out.push(...listFilesByExt(full, ext).map((n) => `${entry.name}/${n}`));
+              } else if (entry.isFile() && entry.name.endsWith(ext)) {
+                out.push(entry.name);
+              }
+            }
+          } catch { /* dir missing; return [] */ }
+          return out;
+        };
+        if (existsSync(appsRoot)) {
+          for (const entry of readdirSync(appsRoot, { withFileTypes: true })) {
+            if (!entry.isDirectory() || !entry.name.endsWith('.dql-app')) continue;
+            const appDir = join(appsRoot, entry.name);
+            try {
+              const raw = readFileSync(join(appDir, 'app.yml'), 'utf-8');
+              const manifest = loadYaml(raw) as AppManifest | null;
+              if (!manifest || !manifest.name || !manifest.domain) continue;
+              apps.push({
+                path: relative(projectRoot, appDir),
+                manifest,
+                notebooks: listFilesByExt(join(appDir, 'notebooks'), '.dqlnb'),
+                dashboards: listFilesByExt(join(appDir, 'dashboards'), '.dql'),
+                hasDigest: existsSync(join(appDir, 'digest.dql')),
+              });
+            } catch { /* skip unreadable apps */ }
+          }
+        }
+        apps.sort((a, b) => a.manifest.name.localeCompare(b.manifest.name));
+        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({ apps }));
       } catch (error) {
         res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' });
         res.end(serializeJSON({ error: error instanceof Error ? error.message : String(error) }));

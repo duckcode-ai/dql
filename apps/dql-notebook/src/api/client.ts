@@ -71,12 +71,37 @@ export const api = {
       name: string; domain: string; status: string;
       owner: string | null; tags: string[]; path: string;
       lastModified: string; description: string;
+      llmContext?: string | null;
     }>;
   }> {
     try {
       return await request('/api/blocks/library');
     } catch {
       return { blocks: [] };
+    }
+  },
+
+  async getApps(): Promise<{
+    apps: Array<{
+      path: string;
+      manifest: {
+        name: string;
+        domain: string;
+        owner?: string;
+        description?: string;
+        cadence?: string;
+        consumers?: string[];
+        entryPoints?: string[];
+      };
+      notebooks: string[];
+      dashboards: string[];
+      hasDigest: boolean;
+    }>;
+  }> {
+    try {
+      return await request('/api/apps');
+    } catch {
+      return { apps: [] };
     }
   },
 

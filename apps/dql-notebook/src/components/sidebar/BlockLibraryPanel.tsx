@@ -163,6 +163,18 @@ export function BlockLibraryPanel() {
                   background: t.pillBg, padding: '1px 6px', borderRadius: 4,
                 }}>{block.domain}</span>
                 {block.owner && <span>by {block.owner}</span>}
+                {block.llmContext && (
+                  <span
+                    title={block.llmContext}
+                    style={{
+                      color: t.accent,
+                      fontWeight: 600,
+                      letterSpacing: '0.04em',
+                    }}
+                  >
+                    AI
+                  </span>
+                )}
                 <span style={{ marginLeft: 'auto' }}>
                   {new Date(block.lastModified).toLocaleDateString()}
                 </span>

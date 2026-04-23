@@ -125,7 +125,7 @@ export interface ParamConfig {
   defaultValue: string;
   options?: string[];
 }
-export type SidebarPanel = 'files' | 'schema' | 'block_library' | 'connection' | 'reference' | 'lineage' | 'git' | null;
+export type SidebarPanel = 'files' | 'schema' | 'block_library' | 'connection' | 'reference' | 'lineage' | 'git' | 'apps' | null;
 export type DevPanelTab = 'logs' | 'errors';
 export type MainView = 'notebook' | 'block_studio' | 'connection' | 'reference';
 

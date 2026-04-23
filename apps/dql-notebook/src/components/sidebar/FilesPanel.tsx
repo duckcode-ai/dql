@@ -157,6 +157,8 @@ export function FilesPanel({ onOpenFile }: FilesPanelProps) {
               expanded={expanded}
               onToggle={() => toggleFolder(key)}
               onAdd={onAdd}
+              deprecated={key === 'workbooks'}
+              deprecationTitle={key === 'workbooks' ? 'Workbook is deprecated — will be removed in v1.3. Use dashboard with tabs. See docs/migrations/workbook-to-dashboard.md' : undefined}
               t={t}
             />
             {expanded && (
@@ -199,6 +201,8 @@ function FolderHeader({
   expanded,
   onToggle,
   onAdd,
+  deprecated,
+  deprecationTitle,
   t,
 }: {
   label: string;
@@ -206,6 +210,8 @@ function FolderHeader({
   expanded: boolean;
   onToggle: () => void;
   onAdd?: () => void;
+  deprecated?: boolean;
+  deprecationTitle?: string;
   t: Theme;
 }) {
   const [hovered, setHovered] = useState(false);
@@ -256,6 +262,24 @@ function FolderHeader({
         </svg>
         <FolderIcon expanded={expanded} />
         <span style={{ flex: 1 }}>{label}</span>
+        {deprecated && (
+          <span
+            title={deprecationTitle}
+            style={{
+              background: '#d29922',
+              color: '#1c1d20',
+              borderRadius: 10,
+              padding: '0 6px',
+              fontSize: 9,
+              fontWeight: 600,
+              letterSpacing: '0.04em',
+              marginRight: 4,
+              textTransform: 'uppercase' as const,
+            }}
+          >
+            deprecated
+          </span>
+        )}
         {count > 0 && (
           <span
             style={{
