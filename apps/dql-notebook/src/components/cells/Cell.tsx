@@ -13,6 +13,7 @@ import { FilterCell } from './FilterCell';
 import { SingleValueCell } from './SingleValueCell';
 import { PivotCell } from './PivotCell';
 import { TableCell } from './TableCell';
+import { ChatCell } from './ChatCell';
 import { SnippetPicker } from './SnippetPicker';
 import { SaveAsBlockModal } from '../modals/SaveAsBlockModal';
 import { deriveBlockSource } from '../../utils/derive-block-source';
@@ -53,6 +54,7 @@ const TYPE_LABELS: Record<string, string> = {
   map: 'MAP',
   writeback: 'WRITEBACK',
   python: 'PYTHON',
+  chat: 'CHAT',
 };
 
 const TYPE_COLORS: Record<string, string> = {
@@ -68,6 +70,7 @@ const TYPE_COLORS: Record<string, string> = {
   map: '#7ce38b',
   writeback: '#d2a8ff',
   python: '#3572a5',
+  chat: '#f0883e',
 };
 
 interface PlaceholderMeta {
@@ -545,6 +548,13 @@ export function CellComponent({ cell, index }: CellProps) {
     return (
       <GutterWrap>
         <TableCell cell={cell} cells={state.cells} index={index} themeMode={state.themeMode} onUpdate={onCellUpdate} />
+      </GutterWrap>
+    );
+  }
+  if (cell.type === 'chat') {
+    return (
+      <GutterWrap>
+        <ChatCell cell={cell} cells={state.cells} index={index} themeMode={state.themeMode} onUpdate={onCellUpdate} />
       </GutterWrap>
     );
   }

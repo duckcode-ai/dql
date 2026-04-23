@@ -22,6 +22,7 @@ type PaletteEntry = {
 
 const PALETTE: PaletteEntry[] = [
   { type: 'block', label: 'Block', icon: '◆', color: '#3fb950', group: 'library' },
+  { type: 'chat', label: 'Chat', icon: '✶', color: '#f0883e', group: 'compute' },
   { type: 'sql', label: 'SQL', icon: 'SQL', color: '#388bfd', group: 'compute' },
   { type: 'markdown', label: 'Text', icon: 'Tt', color: '#56d364', group: 'compute' },
   { type: 'chart', label: 'Chart', icon: '📊', color: '#a371f7', group: 'viz' },

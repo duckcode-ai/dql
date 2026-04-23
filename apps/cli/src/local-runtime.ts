@@ -40,6 +40,7 @@ import {
   type DiffReport,
 } from '@duckcodeailabs/dql-core';
 import { listBlockTemplates } from './block-templates.js';
+import { getRunner as getLLMRunner } from './llm/index.js';
 import {
   buildSemanticObjectDetail,
   buildSemanticTree,
@@ -1372,6 +1373,52 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
         res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' });
         res.end(serializeJSON({ error: String(error) }));
       }
+      return;
+    }
+
+    if (req.method === 'POST' && path === '/api/llm/run') {
+      const body = await readJSON(req).catch(() => null);
+      if (!body || typeof body !== 'object') {
+        res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({ error: 'Invalid JSON body' }));
+        return;
+      }
+      const { provider, messages, upstream } = body as {
+        provider?: string;
+        messages?: Array<{ role: 'user' | 'assistant'; content: string }>;
+        upstream?: { cellId?: string; sql?: string };
+      };
+      const runner = provider === 'claude-agent-sdk' || provider === 'claude-code' ? getLLMRunner(provider) : null;
+      if (!runner) {
+        res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({ error: `Unknown provider: ${provider}` }));
+        return;
+      }
+      if (!Array.isArray(messages) || messages.length === 0) {
+        res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({ error: 'messages[] required' }));
+        return;
+      }
+
+      res.writeHead(200, {
+        'Content-Type': 'text/event-stream',
+        'Cache-Control': 'no-cache, no-transform',
+        Connection: 'keep-alive',
+      });
+
+      const controller = new AbortController();
+      req.on('close', () => controller.abort());
+      const emit = (turn: unknown) => { res.write(`data: ${JSON.stringify(turn)}\n\n`); };
+      try {
+        await runner.run(
+          { provider: provider as 'claude-agent-sdk' | 'claude-code', messages, upstream, projectRoot },
+          emit,
+          controller.signal,
+        );
+      } catch (err) {
+        emit({ kind: 'error', message: err instanceof Error ? err.message : String(err) });
+      }
+      res.end();
       return;
     }
 
