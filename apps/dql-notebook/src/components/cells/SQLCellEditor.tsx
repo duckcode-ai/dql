@@ -11,15 +11,15 @@ import {
 import { EditorState, Compartment, StateField, StateEffect } from '@codemirror/state';
 import { defaultKeymap, indentWithTab, toggleComment, historyKeymap, history, undo, redo } from '@codemirror/commands';
 import { sql } from '@codemirror/lang-sql';
-import { oneDark } from '@codemirror/theme-one-dark';
 import {
   bracketMatching,
   foldGutter,
   foldKeymap,
   indentOnInput,
   syntaxHighlighting,
-  defaultHighlightStyle,
+  HighlightStyle,
 } from '@codemirror/language';
+import { tags as t_ } from '@lezer/highlight';
 import {
   closeBrackets,
   closeBracketsKeymap,
@@ -53,6 +53,10 @@ interface SQLCellEditorProps {
   schema?: Record<string, string[]>;
   errorMessage?: string;
   editorRef?: React.RefObject<SQLCellEditorHandle | null>;
+  // When false, lines don't wrap — the editor gains a horizontal scrollbar.
+  // Block Studio passes false so long queries aren't char-wrapped when the
+  // pane is narrow.
+  wrap?: boolean;
 }
 
 /**
@@ -110,6 +114,27 @@ const errorDecoField = StateField.define({
   },
   provide: (f) => EditorView.decorations.from(f),
 });
+
+// Luna-token syntax palette. Colors resolve from CSS vars on the active
+// data-theme, so the same HighlightStyle re-skins for obsidian/paper/white
+// instead of leaking oneDark's neon palette into light themes (which made
+// strings render as `#ee4400` orange against a paper background).
+const lunaHighlightStyle = HighlightStyle.define([
+  { tag: t_.keyword, color: 'var(--sql-keyword)', fontWeight: '600' },
+  { tag: [t_.controlKeyword, t_.moduleKeyword], color: 'var(--sql-keyword)', fontWeight: '600' },
+  { tag: [t_.string, t_.special(t_.string)], color: 'var(--sql-string)' },
+  { tag: t_.number, color: 'var(--sql-number)' },
+  { tag: t_.bool, color: 'var(--sql-number)', fontWeight: '600' },
+  { tag: t_.null, color: 'var(--sql-number)', fontWeight: '600' },
+  { tag: [t_.comment, t_.lineComment, t_.blockComment, t_.docComment], color: 'var(--sql-comment)', fontStyle: 'italic' },
+  { tag: [t_.function(t_.variableName), t_.function(t_.propertyName)], color: 'var(--sql-function)' },
+  { tag: [t_.typeName, t_.className], color: 'var(--sql-type)' },
+  { tag: t_.operator, color: 'var(--sql-punctuation)' },
+  { tag: t_.punctuation, color: 'var(--sql-punctuation)' },
+  { tag: t_.bracket, color: 'var(--sql-punctuation)' },
+  { tag: [t_.variableName, t_.name, t_.propertyName, t_.attributeName], color: 'var(--sql-ident)' },
+  { tag: t_.invalid, color: 'var(--color-status-error)' },
+]);
 
 const errorTheme = EditorView.baseTheme({
   '.cm-sql-error': {
@@ -221,6 +246,7 @@ export function SQLCellEditor({
   schema,
   errorMessage,
   editorRef,
+  wrap = true,
 }: SQLCellEditorProps) {
   const t = themes[themeMode];
   const containerRef = useRef<HTMLDivElement>(null);
@@ -333,19 +359,18 @@ export function SQLCellEditor({
       lineNumbers(),
       highlightActiveLine(),
       highlightActiveLineGutter(),
-      EditorView.lineWrapping,
+      ...(wrap ? [EditorView.lineWrapping] : []),
       // Search
       search({ top: true }),
       // Error decoration support
       errorDecoField,
       errorTheme,
-      // Theme — dark families get oneDark's syntax palette layered with
-      // Luna chrome; light families get the default highlight style plus
-      // the same Luna chrome (panels, gutters, tooltips resolve via CSS
-      // vars, so they re-skin on data-theme switch).
-      ...(isDarkFamily(themeMode)
-        ? [oneDark, darkPanelTheme]
-        : [syntaxHighlighting(defaultHighlightStyle), lightPanelTheme]),
+      // Theme — single Luna palette for both dark and light. Syntax colors
+      // are CSS vars so paper/obsidian/white re-skin without rebuilding.
+      // Dark/light flag is passed to the chrome theme so CodeMirror knows
+      // which selection palette to mix.
+      syntaxHighlighting(lunaHighlightStyle),
+      isDarkFamily(themeMode) ? darkPanelTheme : lightPanelTheme,
     ];
 
     const state = EditorState.create({ doc: value, extensions });

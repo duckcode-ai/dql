@@ -174,6 +174,12 @@ export function FilesPanel({ onOpenFile }: FilesPanelProps) {
                       file={file}
                       active={state.activeFile?.path === file.path}
                       onClick={() => onOpenFile(file)}
+                      onShowLineage={() =>
+                        dispatch({
+                          type: 'OPEN_LINEAGE_DRAWER',
+                          nodeId: displayName(file),
+                        })
+                      }
                       t={t}
                     />
                   ))
@@ -296,65 +302,118 @@ function FileRow({
   file,
   active,
   onClick,
+  onShowLineage,
   t,
 }: {
   file: NotebookFile;
   active: boolean;
   onClick: () => void;
+  onShowLineage?: () => void;
   t: Theme;
 }) {
   const [hovered, setHovered] = useState(false);
+  const [lineageHover, setLineageHover] = useState(false);
+  // Lineage button only makes sense for things the lineage graph indexes:
+  // notebooks (dashboard nodes) and DQL blocks (block nodes).
+  const lineageEligible = file.type === 'notebook' || file.type === 'block' || file.type === 'dashboard';
   return (
-    <button
-      onClick={onClick}
+    <div
       onMouseEnter={() => setHovered(true)}
       onMouseLeave={() => setHovered(false)}
       style={{
-        width: '100%',
+        position: 'relative',
         display: 'flex',
         alignItems: 'center',
-        gap: 6,
-        padding: '4px 8px 4px 26px',
         background: active ? t.sidebarItemActive : hovered ? t.sidebarItemHover : 'transparent',
-        border: 'none',
         borderLeft: active ? `2px solid ${t.accent}` : '2px solid transparent',
-        cursor: 'pointer',
-        color: active ? t.textPrimary : hovered ? t.textPrimary : t.textSecondary,
-        fontSize: 13,
-        fontFamily: t.font,
-        textAlign: 'left' as const,
-        transition: 'background 0.1s, color 0.1s',
-        overflow: 'hidden',
+        transition: 'background 0.1s',
       }}
     >
-      <span style={{ flexShrink: 0, color: active ? t.accent : t.textMuted }}>
-        <FileTypeIcon type={file.type} />
-      </span>
-      <span
+      <button
+        onClick={onClick}
         style={{
-          overflow: 'hidden',
-          textOverflow: 'ellipsis',
-          whiteSpace: 'nowrap',
           flex: 1,
+          minWidth: 0,
+          display: 'flex',
+          alignItems: 'center',
+          gap: 6,
+          padding: '4px 8px 4px 24px',
+          background: 'transparent',
+          border: 'none',
+          cursor: 'pointer',
+          color: active ? t.textPrimary : hovered ? t.textPrimary : t.textSecondary,
+          fontSize: 13,
+          fontFamily: t.font,
+          textAlign: 'left' as const,
+          transition: 'color 0.1s',
+          overflow: 'hidden',
         }}
       >
-        {displayName(file)}
-      </span>
-      {file.isNew && (
+        <span style={{ flexShrink: 0, color: active ? t.accent : t.textMuted }}>
+          <FileTypeIcon type={file.type} />
+        </span>
         <span
           style={{
-            fontSize: 9,
-            fontWeight: 600,
-            color: t.accent,
-            background: t.sidebarItemActive,
-            borderRadius: 4,
-            padding: '1px 4px',
-            flexShrink: 0,
+            overflow: 'hidden',
+            textOverflow: 'ellipsis',
+            whiteSpace: 'nowrap',
+            flex: 1,
           }}
         >
-          NEW
+          {displayName(file)}
         </span>
+        {file.isNew && (
+          <span
+            style={{
+              fontSize: 9,
+              fontWeight: 600,
+              color: t.accent,
+              background: t.sidebarItemActive,
+              borderRadius: 4,
+              padding: '1px 4px',
+              flexShrink: 0,
+            }}
+          >
+            NEW
+          </span>
+        )}
+      </button>
+      {hovered && lineageEligible && onShowLineage && (
+        <button
+          onClick={(e) => {
+            e.stopPropagation();
+            onShowLineage();
+          }}
+          onMouseEnter={() => setLineageHover(true)}
+          onMouseLeave={() => setLineageHover(false)}
+          aria-label={`Show lineage for ${displayName(file)}`}
+          title="Show lineage"
+          style={{
+            position: 'absolute',
+            right: 6,
+            top: '50%',
+            transform: 'translateY(-50%)',
+            width: 22,
+            height: 22,
+            display: 'inline-flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            background: lineageHover ? t.btnHover : 'transparent',
+            border: 'none',
+            borderRadius: 4,
+            color: lineageHover ? t.accent : t.textMuted,
+            cursor: 'pointer',
+          }}
+        >
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+            <circle cx="6" cy="6" r="2.5" />
+            <circle cx="18" cy="6" r="2.5" />
+            <circle cx="12" cy="18" r="2.5" />
+            <path d="M6 8.5v2A2.5 2.5 0 0 0 8.5 13h7A2.5 2.5 0 0 0 18 10.5v-2" />
+            <path d="M12 13v2.5" />
+          </svg>
+        </button>
       )}
-    </button>
+    </div>
   );
 }

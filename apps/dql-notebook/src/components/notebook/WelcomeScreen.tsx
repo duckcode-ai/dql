@@ -43,11 +43,11 @@ export function WelcomeScreen({ onOpenFile }: WelcomeScreenProps) {
               width: 72,
               height: 72,
               borderRadius: 16,
-              background: 'linear-gradient(135deg, #388bfd 0%, #1f6feb 60%, #0d419d 100%)',
+              background: 'linear-gradient(135deg, #5b8cff 0%, #7c5cff 60%, #4a34a8 100%)',
               display: 'flex',
               alignItems: 'center',
               justifyContent: 'center',
-              boxShadow: '0 8px 32px rgba(56,139,253,0.3)',
+              boxShadow: '0 8px 32px rgba(91,140,255,0.28)',
             }}
           >
             <span
@@ -116,7 +116,7 @@ export function WelcomeScreen({ onOpenFile }: WelcomeScreenProps) {
             title="New Block"
             description="Create a reusable SQL block file."
             icon={<BlockIcon />}
-            accent="#e3b341"
+            accent="#ffc857"
             onClick={() => dispatch({ type: 'OPEN_NEW_BLOCK_MODAL' })}
             t={t}
           />

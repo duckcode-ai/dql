@@ -112,15 +112,19 @@ export function CommandPalette({
 
     const result: PaletteAction[] = [];
 
-    // App mode toggle — surfaces first result when in App mode per v1.3 spec.
+    // Mode cycler — Notebook → App → Reader → Notebook. v1.3.3 Hex handoff.
+    const nextMode: AppMode =
+      state.appMode === 'studio' ? 'app' : state.appMode === 'app' ? 'reader' : 'studio';
+    const nextLabel =
+      nextMode === 'studio' ? 'Switch to Notebook' : nextMode === 'app' ? 'Switch to App' : 'Switch to Reader';
     result.push({
       id: 'mode.toggle',
-      label: state.appMode === 'studio' ? 'Switch to App mode' : 'Switch to Studio',
+      label: nextLabel,
       group: 'Mode',
       icon: state.appMode === 'studio' ? EyeIcon : Wrench,
-      keywords: 'studio app preview publish read-only editor',
+      keywords: 'studio notebook app reader preview publish read-only editor',
       shortcut: '⌘⇧M',
-      run: wrap(() => d({ type: 'SET_APP_MODE', mode: state.appMode === 'studio' ? 'app' : 'studio' })),
+      run: wrap(() => d({ type: 'SET_APP_MODE', mode: nextMode })),
     });
 
     result.push(

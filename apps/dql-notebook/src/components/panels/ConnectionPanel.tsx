@@ -4,6 +4,7 @@ import { themes } from '../../themes/notebook-theme';
 import type { Theme } from '../../themes/notebook-theme';
 import { api } from '../../api/client';
 import { PanelFrame } from '@duckcodeailabs/dql-ui';
+import { DriverLogo } from './DriverLogo';
 
 interface ConnectionInfo {
   default: string;
@@ -42,6 +43,28 @@ const DRIVER_COLORS: Record<string, string> = {
   athena: '#ff9900',
   trino: '#dd00a1',
   fabric: '#0078d4',
+};
+
+// v1.3.3 Hex handoff — drivers with a TRENDING badge in the catalog grid.
+// These are the warehouses teams adopt most in our handoff deck.
+const TRENDING_DRIVERS = new Set(['snowflake', 'bigquery', 'databricks', 'postgres']);
+
+// Short one-line blurbs for the driver cards.
+const DRIVER_TAGLINES: Record<string, string> = {
+  duckdb: 'In-process analytical database',
+  file: 'Local CSV / Parquet via DuckDB',
+  postgres: 'Open-source relational warehouse',
+  bigquery: 'Google Cloud serverless warehouse',
+  snowflake: 'Cloud data platform',
+  sqlite: 'Embedded SQL database',
+  mysql: 'Open-source relational database',
+  mssql: 'Microsoft SQL Server',
+  redshift: 'AWS cloud data warehouse',
+  databricks: 'Lakehouse platform',
+  clickhouse: 'Columnar OLAP database',
+  athena: 'AWS serverless S3 query engine',
+  trino: 'Distributed SQL query engine',
+  fabric: 'Microsoft unified analytics',
 };
 
 const DRIVER_FIELDS: Record<string, string[]> = {
@@ -223,25 +246,6 @@ export function ConnectionPanel() {
   return (
     <PanelFrame title="Connections" bodyPadding={12}>
 
-      {/* Connection status indicator */}
-      {testResult && (
-        <div style={{
-          display: 'flex', alignItems: 'center', gap: 6,
-          padding: '6px 10px', marginBottom: 10, borderRadius: 6,
-          background: testResult.ok ? `${t.success}12` : `${t.error}12`,
-          border: `1px solid ${testResult.ok ? t.success : t.error}30`,
-        }}>
-          <span style={{
-            width: 8, height: 8, borderRadius: '50%',
-            background: testResult.ok ? t.success : t.error,
-            flexShrink: 0,
-          }} />
-          <span style={{ fontSize: 11, fontFamily: t.font, color: testResult.ok ? t.success : t.error }}>
-            {testResult.ok ? 'Connected' : 'Disconnected'}
-          </span>
-        </div>
-      )}
-
       {/* Connection list */}
       <div style={sectionLabel}>Connections</div>
       {info === null ? (
@@ -268,21 +272,37 @@ export function ConnectionPanel() {
               }}
             >
               <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 6 }}>
-                <span
-                  style={{
-                    fontSize: 10, fontWeight: 700, fontFamily: t.fontMono, color,
-                    background: `${color}18`, border: `1px solid ${color}40`,
-                    borderRadius: 4, padding: '1px 6px', letterSpacing: '0.05em',
-                    textTransform: 'uppercase' as const,
-                  }}
-                >
+                <DriverLogo driver={driver} size={18} fallbackColor={color} />
+                <span style={{ fontSize: 12, fontWeight: 600, color: t.textPrimary, fontFamily: t.font }}>
                   {DRIVER_LABELS[driver] ?? driver}
                 </span>
-                <span style={{ fontSize: 11, fontFamily: t.fontMono, color: t.textSecondary, fontWeight: 500 }}>
+                <span style={{ fontSize: 11, fontFamily: t.fontMono, color: t.textMuted }}>
                   {key}
                 </span>
+                {isDefault && testResult?.ok && (
+                  <span
+                    title="Connected"
+                    aria-label="Connected"
+                    style={{
+                      width: 7, height: 7, borderRadius: '50%',
+                      background: t.success, flexShrink: 0,
+                      boxShadow: `0 0 0 2px ${t.success}25`,
+                    }}
+                  />
+                )}
+                {isDefault && testResult && !testResult.ok && (
+                  <span
+                    title={testResult.message}
+                    aria-label="Disconnected"
+                    style={{
+                      width: 7, height: 7, borderRadius: '50%',
+                      background: t.error, flexShrink: 0,
+                      boxShadow: `0 0 0 2px ${t.error}25`,
+                    }}
+                  />
+                )}
                 {isDefault && (
-                  <span style={{ fontSize: 9, color: t.accent, fontFamily: t.font, fontWeight: 600 }}>DEFAULT</span>
+                  <span style={{ fontSize: 9, color: t.accent, fontFamily: t.font, fontWeight: 600, letterSpacing: '0.05em' }}>DEFAULT</span>
                 )}
                 <div style={{ flex: 1 }} />
                 <button
@@ -345,11 +365,7 @@ export function ConnectionPanel() {
                   transition: 'border-color 0.15s',
                 }}
               >
-                <span style={{
-                  width: 8, height: 8, borderRadius: '50%',
-                  background: DRIVER_COLORS[preset.config.driver] ?? t.accent,
-                  flexShrink: 0,
-                }} />
+                <DriverLogo driver={preset.config.driver} size={18} />
                 <div>
                   <div style={{ fontSize: 12, fontWeight: 600, color: t.textPrimary, fontFamily: t.font }}>
                     {preset.label}
@@ -425,17 +441,79 @@ export function ConnectionPanel() {
         </div>
       )}
 
-      {/* Supported drivers */}
-      <div style={{ ...sectionLabel, marginTop: 4 }}>Supported Drivers</div>
-      <div style={{ ...card, display: 'flex', flexDirection: 'column', gap: 4 }}>
-        {Object.entries(DRIVER_LABELS).map(([driver, label]) => (
-          <div key={driver} style={{ display: 'flex', gap: 8, alignItems: 'baseline' }}>
-            <code style={{ fontSize: 10, fontFamily: t.fontMono, color: DRIVER_COLORS[driver] ?? t.textMuted, minWidth: 80, flexShrink: 0 }}>
-              {driver}
-            </code>
-            <span style={{ fontSize: 11, color: t.textMuted, fontFamily: t.font }}>{label}</span>
-          </div>
-        ))}
+      {/* v1.3.3 Hex handoff — catalog grid of available drivers.
+          Cards use the per-driver accent color and flag trending picks. */}
+      <div style={{ ...sectionLabel, marginTop: 4 }}>Catalog</div>
+      <div
+        style={{
+          display: 'grid',
+          gridTemplateColumns: 'repeat(auto-fill, minmax(160px, 1fr))',
+          gap: 8,
+          marginBottom: 12,
+        }}
+      >
+        {Object.entries(DRIVER_LABELS).map(([driver, label]) => {
+          const color = DRIVER_COLORS[driver] ?? t.accent;
+          const trending = TRENDING_DRIVERS.has(driver);
+          const tagline = DRIVER_TAGLINES[driver] ?? '';
+          return (
+            <div
+              key={driver}
+              style={{
+                background: t.cellBg,
+                border: `1px solid ${t.cellBorder}`,
+                borderRadius: 8,
+                padding: '10px 12px',
+                display: 'flex',
+                flexDirection: 'column',
+                gap: 4,
+                minHeight: 76,
+                position: 'relative',
+                transition: 'border-color 0.15s',
+              }}
+            >
+              {trending && (
+                <span
+                  style={{
+                    position: 'absolute',
+                    top: 8,
+                    right: 8,
+                    fontSize: 8,
+                    fontWeight: 700,
+                    letterSpacing: '0.06em',
+                    color: t.accent,
+                    background: `${t.accent}18`,
+                    border: `1px solid ${t.accent}40`,
+                    borderRadius: 999,
+                    padding: '1px 6px',
+                  }}
+                >
+                  TRENDING
+                </span>
+              )}
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                <DriverLogo driver={driver} size={18} fallbackColor={color} />
+                <span style={{ fontSize: 12, fontWeight: 600, color: t.textPrimary, fontFamily: t.font }}>
+                  {label}
+                </span>
+              </div>
+              <div
+                style={{
+                  fontSize: 10,
+                  color: t.textMuted,
+                  fontFamily: t.font,
+                  lineHeight: 1.35,
+                  paddingRight: trending ? 56 : 0,
+                }}
+              >
+                {tagline}
+              </div>
+              <code style={{ fontSize: 9, color: t.textMuted, fontFamily: t.fontMono, marginTop: 'auto' }}>
+                {driver}
+              </code>
+            </div>
+          );
+        })}
       </div>
     </PanelFrame>
   );

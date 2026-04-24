@@ -6,9 +6,11 @@
    ============================================================ */
 
 :root {
-  /* Typography (shared) */
-  --font-ui: "Plus Jakarta Sans", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-  --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+  /* Typography (shared) — Hex handoff: Inter UI + JetBrains Mono code. */
+  --font-ui: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  --font-hand: "Caveat", cursive;
+  --font-sketch: "Kalam", "Caveat", cursive;
 
   /* Density (default: comfortable) */
   --row-h: 26px;
@@ -26,29 +28,32 @@
      Overridden by [data-theme="paper"|"white"] blocks below.
      ================================================================ */
   color-scheme: dark;
-  --bg-0: #08090b;
-  --bg-1: #0d0e11;
-  --bg-2: #141518;
-  --bg-3: #1c1d21;
-  --bg-4: #26272c;
-  --bg-canvas: #0a0b0d;
+  /* v1.4 obsidian palette — ported from DQL New-UI handoff. Deeper
+     charcoal canvas, slightly warmer card surfaces, hairline borders
+     that read on the #0b0d12 base without muddying code. */
+  --bg-0: #0b0d12;
+  --bg-1: #11141b;
+  --bg-2: #161a23;
+  --bg-3: #1c212d;
+  --bg-4: #242938;
+  --bg-canvas: #0b0d12;
   --bg-grid: rgba(255,255,255,0.025);
 
-  --border-subtle: rgba(255, 255, 255, 0.04);
-  --border-default: rgba(255, 255, 255, 0.07);
-  --border-strong: rgba(255, 255, 255, 0.13);
-  --border-focus: #4f8bff;
+  --border-subtle: #1b1f28;
+  --border-default: #232833;
+  --border-strong: #2c3240;
+  --border-focus: #5b8cff;
 
-  --text-primary: #ededee;
-  --text-secondary: #a1a1a6;
-  --text-tertiary: #6e6e73;
-  --text-muted: #48484d;
+  --text-primary: #e6e8ee;
+  --text-secondary: #9aa0ae;
+  --text-tertiary: #626878;
+  --text-muted: #4a5060;
 
-  --accent: #4f8bff;
-  --accent-hover: #6fa3ff;
-  --accent-dim: rgba(79, 139, 255, 0.14);
-  --accent-fg: #0a0b0d;
-  --accent-on: #0a0b0d; /* legacy alias — prefer --accent-fg */
+  --accent: #5b8cff;
+  --accent-hover: #7aa2ff;
+  --accent-dim: rgba(91, 140, 255, 0.14);
+  --accent-fg: #0b0d12;
+  --accent-on: #0b0d12; /* legacy alias — prefer --accent-fg */
 
   /* Neutral hover (generic surface hover — lists, menu items, small buttons) */
   --bg-hover: rgba(255, 255, 255, 0.045);
@@ -108,6 +113,31 @@
   --shadow-card: 0 1px 0 rgba(255,255,255,0.04) inset, 0 8px 24px rgba(0,0,0,0.35);
   --shadow-pop: 0 20px 50px rgba(0,0,0,0.5);
   --scrim: rgba(0,0,0,0.5);
+
+  /* ============================================================
+     Cell-type accent palette (DQL New-UI handoff)
+     Each cell type has a tone color used for: pill badge text,
+     pill badge background (12% alpha), pill border (50% alpha),
+     and the left-edge focus ring when the cell is selected.
+     ============================================================ */
+  --cell-md:       #2fb97a;
+  --cell-sql:      #3b8ef0;
+  --cell-chart:    #b067f7;
+  --cell-filter:   #f26a6a;
+  --cell-pivot:    #e5a84d;
+  --cell-table:    #5dd1c8;
+  --cell-text:     #4a8aef;
+  --cell-chat:     #8a8f9b;
+  --cell-single:   #b067f7;
+  --cell-kpi:      #b067f7;
+  --cell-insight:  #ffc857;
+  --cell-callout:  #ff7ac6;
+  --cell-goal:     #61d095;
+  --cell-compare:  #7fd4ff;
+  --cell-heatmap:  #ff9966;
+  --cell-narrative:#ffc857;
+  --cell-inputs:   #9aa0ae;
+  --cell-block:    #6b8afd;
 }
 
 /* Explicit obsidian alias (same as :root default) */
@@ -122,87 +152,103 @@
    ================================================================ */
 [data-theme="paper"] {
   color-scheme: light;
-  --bg-0: #efebe2;
-  --bg-1: #f7f4ed;
-  --bg-2: #fdfbf5;
-  --bg-3: #e9e4d8;
-  --bg-4: #ddd6c6;
-  --bg-canvas: #eae5d8;
-  --bg-grid: rgba(40, 30, 15, 0.05);
+  /* Hex notebook palette — warm off-white canvas, white surfaces */
+  --bg-0: #f3f0ea;       /* gutters, chip bg, activity rail inset */
+  --bg-1: #fbfaf7;       /* app canvas (Hex --bg) */
+  --bg-2: #ffffff;       /* cards / cells / modals (Hex --surface) */
+  --bg-3: #f3f0ea;       /* hover / pill bg */
+  --bg-4: #e9e6e0;       /* subdued elevated */
+  --bg-canvas: #fbfaf7;
+  --bg-grid: rgba(26, 26, 26, 0.04);
 
-  --border-subtle: rgba(40, 30, 15, 0.10);
-  --border-default: rgba(40, 30, 15, 0.18);
-  --border-strong: rgba(40, 30, 15, 0.28);
-  --border-focus: #2541b2;
+  --border-subtle: #f0eee9;
+  --border-default: #e9e6e0;
+  --border-strong: #d9d5cc;
+  --border-focus: #6b5dd3;
 
-  --text-primary: #15120c;
-  --text-secondary: #463f33;
-  --text-tertiary: #6b6253;
-  --text-muted: #938a78;
+  --text-primary: #1a1a1a;
+  --text-secondary: #4a4a52;
+  --text-tertiary: #8a8d96;
+  --text-muted: #b0b2ba;
 
-  --accent: #2541b2;
-  --accent-hover: #1a318f;
-  --accent-dim: rgba(37, 65, 178, 0.10);
+  --accent: #6b5dd3;            /* Hex purple */
+  --accent-hover: #5c4fc2;
+  --accent-dim: #f3f0fb;         /* Hex --accent-wash */
   --accent-fg: #ffffff;
   --accent-on: #ffffff;
 
-  /* Paper uses DARK hover tint (light theme) — bg is off-white, so we
-     want a faint smoke, not the dark-theme's white-overlay. */
-  --bg-hover: rgba(40, 30, 15, 0.06);
+  --bg-hover: rgba(107, 93, 211, 0.06);
 
-  /* Paper tunes to print-house reds/golds/greens — deeper, saturated,
-     readable on warm off-white. */
-  --status-error:        #b71c1c;
-  --status-error-bg:     rgba(183, 28, 28, 0.08);
-  --status-error-border: rgba(183, 28, 28, 0.34);
-  --status-warning:        #9a6a00;
-  --status-warning-bg:     rgba(154, 106, 0, 0.10);
-  --status-warning-border: rgba(154, 106, 0, 0.34);
-  --status-success:        #0a7a50;
-  --status-success-bg:     rgba(10, 122, 80, 0.09);
-  --status-success-border: rgba(10, 122, 80, 0.32);
+  --status-error:        #c14545;
+  --status-error-bg:     #fbf2f2;
+  --status-error-border: rgba(193, 69, 69, 0.30);
+  --status-warning:        #b26b1f;
+  --status-warning-bg:     #fdf6e6;
+  --status-warning-border: rgba(178, 107, 31, 0.28);
+  --status-success:        #2e8b57;
+  --status-success-bg:     #e8f4ee;
+  --status-success-border: rgba(46, 139, 87, 0.30);
   --status-info:        var(--accent);
   --status-info-bg:     var(--accent-dim);
-  --status-info-border: rgba(37, 65, 178, 0.32);
+  --status-info-border: rgba(107, 93, 211, 0.30);
 
-  --pk: #9a6a00;
-  --fk: #4a3ba8;
-  --idx: #0a7a6b;
-  --nn: #6b6253;
-  --nullable: #4a3ba8;
+  --pk: #b26b1f;
+  --fk: #6b5dd3;
+  --idx: #2e8b57;
+  --nn: #8a8d96;
+  --nullable: #6b5dd3;
 
-  --cat-users: #4a3ba8;
-  --cat-users-soft: rgba(74, 59, 168, 0.10);
-  --cat-billing: #0a7a50;
-  --cat-billing-soft: rgba(10, 122, 80, 0.10);
-  --cat-product: #ad5600;
-  --cat-product-soft: rgba(173, 86, 0, 0.10);
-  --cat-system: #5a5244;
-  --cat-system-soft: rgba(90, 82, 68, 0.10);
-  --cat-access: #a81d64;
-  --cat-access-soft: rgba(168, 29, 100, 0.10);
-  --cat-audit: #056d87;
-  --cat-audit-soft: rgba(5, 109, 135, 0.10);
+  --cat-users: #6b5dd3;
+  --cat-users-soft: #f3f0fb;
+  --cat-billing: #2e8b57;
+  --cat-billing-soft: #e8f4ee;
+  --cat-product: #f0a04b;
+  --cat-product-soft: rgba(240, 160, 75, 0.14);
+  --cat-system: #4a4a52;
+  --cat-system-soft: #f3f0ea;
+  --cat-access: #c14590;
+  --cat-access-soft: rgba(193, 69, 144, 0.10);
+  --cat-audit: #4a74c9;
+  --cat-audit-soft: #eef3fc;
 
-  --rel-line: #a8a091;
-  --rel-line-strong: #6b6253;
-  --rel-line-active: #2541b2;
-  --rel-line-dim: rgba(168, 160, 145, 0.5);
+  --rel-line: #e9e6e0;
+  --rel-line-strong: #b0b2ba;
+  --rel-line-active: #6b5dd3;
+  --rel-line-dim: rgba(233, 230, 224, 0.5);
 
-  /* SQL syntax palette (paper) — deep inked tones that stay legible on
-     cream bg with strong contrast, no muddy mid-values. */
-  --sql-keyword:     #1e3f8c;  /* deep indigo */
-  --sql-type:        #0a6b5e;  /* forest teal */
-  --sql-string:      #0a5e30;  /* forest green */
-  --sql-number:      #8a3810;  /* burnt sienna */
-  --sql-function:    #6b4f1a;  /* deep amber ink */
-  --sql-punctuation: #5a5244;
+  /* SQL syntax palette (Hex light — purple kw, amber strings, etc.) */
+  --sql-keyword:     #6b5dd3;
+  --sql-type:        #2e8b57;
+  --sql-string:      #b26b1f;
+  --sql-number:      #0a6b5e;
+  --sql-function:    #f0a04b;
+  --sql-punctuation: #4a4a52;
   --sql-ident:       var(--text-primary);
-  --sql-comment:     #8a8070;
+  --sql-comment:     #8a8d96;
 
-  --shadow-card: 0 1px 0 rgba(255,255,255,0.9) inset, 0 1px 2px rgba(40,30,15,0.06), 0 8px 24px rgba(60,50,30,0.10);
-  --shadow-pop: 0 20px 50px rgba(60,50,30,0.20);
-  --scrim: rgba(40,35,25,0.38);
+  --shadow-card: 0 1px 2px rgba(0,0,0,0.02);
+  --shadow-pop: 0 10px 30px rgba(26,26,26,0.12);
+  --scrim: rgba(26,26,26,0.40);
+
+  /* Per-cell-kind accent dots (ported verbatim from hex-cells.jsx) */
+  --cell-md:       #4a4a52;
+  --cell-sql:      #3b8ef0;
+  --cell-chart:    #6b5dd3;
+  --cell-filter:   #c14545;
+  --cell-pivot:    #e5a84d;
+  --cell-table:    #5dd1c8;
+  --cell-text:     #4a4a52;
+  --cell-chat:     #c14590;
+  --cell-single:   #6b5dd3;
+  --cell-kpi:      #6b5dd3;
+  --cell-insight:  #f0a04b;
+  --cell-callout:  #c14590;
+  --cell-goal:     #2e8b57;
+  --cell-compare:  #4a74c9;
+  --cell-heatmap:  #f0a04b;
+  --cell-narrative:#f0a04b;
+  --cell-inputs:   #d4a14a;
+  --cell-block:    #6b5dd3;
 }
 
 /* ================================================================
@@ -292,6 +338,26 @@
   --shadow-card: 0 1px 0 rgba(255,255,255,1) inset, 0 1px 2px rgba(15,23,42,0.04), 0 8px 24px rgba(15,23,42,0.06);
   --shadow-pop: 0 20px 50px rgba(15,23,42,0.14);
   --scrim: rgba(15,23,42,0.30);
+
+  /* Cell-type palette — white (crisp report tones on #ffffff) */
+  --cell-md:       #15803d;
+  --cell-sql:      #1d4ed8;
+  --cell-chart:    #7c3aed;
+  --cell-filter:   #dc2626;
+  --cell-pivot:    #ca8a04;
+  --cell-table:    #0891b2;
+  --cell-text:     #1d4ed8;
+  --cell-chat:     #64748b;
+  --cell-single:   #7c3aed;
+  --cell-kpi:      #7c3aed;
+  --cell-insight:  #ca8a04;
+  --cell-callout:  #db2777;
+  --cell-goal:     #16a34a;
+  --cell-compare:  #0891b2;
+  --cell-heatmap:  #ea580c;
+  --cell-narrative:#ca8a04;
+  --cell-inputs:   #64748b;
+  --cell-block:    #2563eb;
 }
 
 [data-density="compact"] {

@@ -17,7 +17,7 @@ function DQLLogo({ t }: { t: Theme }) {
         width: 28,
         height: 28,
         borderRadius: 6,
-        background: 'linear-gradient(135deg, #388bfd 0%, #1f6feb 100%)',
+        background: 'linear-gradient(135deg, #5b8cff 0%, #7c5cff 100%)',
         display: 'flex',
         alignItems: 'center',
         justifyContent: 'center',
@@ -358,11 +358,13 @@ export function Header() {
       {/* Spacer */}
       <div style={{ flex: 1 }} />
 
-      {/* v1.3 Track 5 — Studio / App mode toggle (shell-level audience split) */}
+      {/* v1.3.3 Hex handoff — Notebook / App / Reader mode toggle.
+          Internal 'studio' value surfaces as "Notebook" in the UI. */}
       <SegmentedControl<AppMode>
         options={[
-          { value: 'studio', label: 'Studio' },
+          { value: 'studio', label: 'Notebook' },
           { value: 'app', label: 'App' },
+          { value: 'reader', label: 'Reader' },
         ]}
         value={state.appMode}
         onChange={(mode) => dispatch({ type: 'SET_APP_MODE', mode })}
@@ -377,7 +379,7 @@ export function Header() {
       <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
         {state.appMode === 'studio' && (
           <>
-            {/* Run All */}
+            {/* v1.3.3 Hex handoff — Run all pill. Accent purple primary CTA. */}
             <button
               onClick={inNotebookExecutionView ? executeAll : undefined}
               disabled={!state.activeFile || !inNotebookExecutionView}
@@ -385,20 +387,22 @@ export function Header() {
               onMouseLeave={() => setRunHover(false)}
               style={{
                 ...btnBase,
-                background: runHover && state.activeFile ? t.accent : t.accent,
+                height: 30,
+                padding: '0 14px',
+                borderRadius: 999,
+                background: t.accent,
                 color: '#ffffff',
                 border: `1px solid ${t.accent}`,
                 opacity: !state.activeFile || !inNotebookExecutionView ? 0.4 : runHover ? 0.9 : 1,
+                boxShadow: '0 1px 2px rgba(107,93,211,0.25)',
+                gap: 6,
               }}
             >
               <svg width="10" height="10" viewBox="0 0 10 10" fill="currentColor">
                 <path d="M1.5 1.5l7 3.5-7 3.5V1.5Z" />
               </svg>
-              Run All
+              Run all
             </button>
-
-            {/* Separator */}
-            <div style={{ width: 1, height: 20, background: t.headerBorder }} />
           </>
         )}
 
@@ -607,8 +611,11 @@ export function Header() {
 
         {/* Separator */}
         <div style={{ width: 1, height: 20, background: t.headerBorder }} />
+          </>
+        )}
 
-        {/* Export dropdown */}
+        {/* v1.3.3 Hex handoff — Share pill (dark ink). Visible in all modes;
+            opens the same export menu the old "Export" button used. */}
         <div ref={exportDropdownRef} style={{ position: 'relative' }}>
           <button
             onClick={() => {
@@ -617,20 +624,24 @@ export function Header() {
             disabled={!state.activeFile}
             onMouseEnter={() => setExportHover(true)}
             onMouseLeave={() => setExportHover(false)}
-            title="Export options"
+            title="Share / export"
             style={{
               ...btnBase,
-              background: (exportHover || exportDropdownOpen) && state.activeFile ? t.btnHover : t.btnBg,
-              color: t.textSecondary,
+              height: 30,
+              padding: '0 14px',
+              borderRadius: 999,
+              background: (exportHover || exportDropdownOpen) && state.activeFile ? '#2a2a30' : '#1a1a1a',
+              color: '#ffffff',
+              border: '1px solid #1a1a1a',
               opacity: !state.activeFile ? 0.4 : 1,
+              gap: 6,
             }}
           >
             <svg width="11" height="11" viewBox="0 0 16 16" fill="currentColor">
-              <path d="M2.75 14A1.75 1.75 0 0 1 1 12.25v-2.5a.75.75 0 0 1 1.5 0v2.5c0 .138.112.25.25.25h10.5a.25.25 0 0 0 .25-.25v-2.5a.75.75 0 0 1 1.5 0v2.5A1.75 1.75 0 0 1 13.25 14Z" />
-              <path d="M7.25 7.689V2a.75.75 0 0 1 1.5 0v5.689l1.97-1.97a.749.749 0 1 1 1.06 1.06l-3.25 3.25a.749.749 0 0 1-1.06 0L4.22 6.779a.749.749 0 1 1 1.06-1.06l1.97 1.97Z" />
+              <path d="M5.5 10.75a.75.75 0 0 1 .75-.75h3.5a.75.75 0 0 1 0 1.5h-3.5a.75.75 0 0 1-.75-.75Zm0-3a.75.75 0 0 1 .75-.75h3.5a.75.75 0 0 1 0 1.5h-3.5a.75.75 0 0 1-.75-.75ZM3 3.75A1.75 1.75 0 0 1 4.75 2h6.586c.464 0 .909.184 1.237.513l1.914 1.914c.329.328.513.773.513 1.237v6.586A1.75 1.75 0 0 1 13.25 14h-8.5A1.75 1.75 0 0 1 3 12.25Z" />
             </svg>
-            Export
-            <svg width="8" height="8" viewBox="0 0 8 8" fill="currentColor" style={{ marginLeft: 1 }}>
+            Share
+            <svg width="8" height="8" viewBox="0 0 8 8" fill="currentColor" style={{ marginLeft: 1, opacity: 0.7 }}>
               <path d="M1 2.5l3 3 3-3" stroke="currentColor" fill="none" strokeWidth="1.2" strokeLinecap="round" />
             </svg>
           </button>
@@ -665,8 +676,6 @@ export function Header() {
             </div>
           )}
         </div>
-          </>
-        )}
       </div>
     </div>
   );

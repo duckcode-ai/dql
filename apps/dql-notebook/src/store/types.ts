@@ -7,8 +7,10 @@ export type ThemeMode = 'obsidian' | 'paper' | 'white' | 'dark' | 'light' | 'mid
  * v1.3 Track 5 — shell-level audience split.
  * - `studio`: full authoring surface (activity bar, sidebar, cell toolbars, all cell types visible)
  * - `app`: stakeholder read-mostly view (output-only cells + interactive filters; SQL/param/writeback/chat collapse)
+ * - `reader`: presentation view — narrative-only, no run controls, no studio chrome.
+ *   v1.3.3 Hex-handoff alignment; reader visibility behaves like `app` for now.
  */
-export type AppMode = 'studio' | 'app';
+export type AppMode = 'studio' | 'app' | 'reader';
 
 export interface NotebookDocMetadata {
   status?: string;
@@ -137,7 +139,7 @@ export interface ParamConfig {
 }
 export type SidebarPanel = 'files' | 'schema' | 'block_library' | 'connection' | 'reference' | 'lineage' | 'git' | 'apps' | null;
 export type DevPanelTab = 'logs' | 'errors';
-export type MainView = 'notebook' | 'block_studio' | 'connection' | 'reference';
+export type MainView = 'notebook' | 'block_studio' | 'connection' | 'reference' | 'git';
 
 export interface QueryResult {
   columns: string[];
@@ -418,6 +420,8 @@ export interface NotebookState {
   savingFile: boolean;
   lineageFullscreen: boolean;
   lineageFocusNodeId: string | null;
+  lineageDrawerOpen: boolean;
+  lineageDrawerNodeId: string | null;
   dashboardMode: boolean;
   activeBlockPath: string | null;
   blockStudioDraft: string;
@@ -474,6 +478,8 @@ export type NotebookAction =
   | { type: 'SET_SEMANTIC_DOMAINS'; domains: string[]; tags: string[]; lastSyncTime?: string | null }
   | { type: 'TOGGLE_LINEAGE_FULLSCREEN' }
   | { type: 'SET_LINEAGE_FOCUS'; nodeId: string | null }
+  | { type: 'OPEN_LINEAGE_DRAWER'; nodeId: string }
+  | { type: 'CLOSE_LINEAGE_DRAWER' }
   | { type: 'REORDER_CELL'; fromIndex: number; toIndex: number }
   | { type: 'TOGGLE_DASHBOARD_MODE' }
   | { type: 'OPEN_BLOCK_STUDIO'; file: NotebookFile; payload: BlockStudioOpenPayload }

@@ -27,17 +27,15 @@ function readInitialAppMode(): 'studio' | 'app' {
   return stored === 'app' ? 'app' : 'studio';
 }
 
-// v1.3.2 — persisted Luna theme. Default obsidian so a first-load user
-// gets DQL's neutral dark surface; honor persisted choice across reloads/tabs.
-// Legacy values (midnight/arctic/dark/light) alias onto the 3-theme set.
+// Hex-handoff default: paper (warm off-white). Honors persisted choice.
 function readInitialThemeMode(): 'obsidian' | 'paper' | 'white' {
-  if (typeof window === 'undefined') return 'obsidian';
+  if (typeof window === 'undefined') return 'paper';
   const stored = window.localStorage?.getItem('dql-theme');
   if (stored === 'obsidian' || stored === 'paper' || stored === 'white') return stored;
   if (stored === 'midnight' || stored === 'dark') return 'obsidian';
   if (stored === 'arctic') return 'white';
   if (stored === 'light') return 'paper';
-  return 'obsidian';
+  return 'paper';
 }
 
 const initialState: NotebookState = {
@@ -78,6 +76,8 @@ const initialState: NotebookState = {
   savingFile: false,
   lineageFullscreen: false,
   lineageFocusNodeId: null,
+  lineageDrawerOpen: false,
+  lineageDrawerNodeId: null,
   dashboardMode: false,
   activeBlockPath: null,
   blockStudioDraft: '',
@@ -133,11 +133,14 @@ function notebookReducer(state: NotebookState, action: NotebookAction): Notebook
       return { ...state, appMode: action.mode };
     }
 
-    case 'SET_SIDEBAR_PANEL':
+    case 'SET_SIDEBAR_PANEL': {
+      const fullPagePanels = ['connection', 'reference', 'git'] as const;
+      const isFullPage = (action.panel as string | null) !== null
+        && (fullPagePanels as readonly string[]).includes(action.panel as string);
       return {
         ...state,
         sidebarPanel: action.panel,
-        sidebarOpen: action.panel !== null && action.panel !== 'connection' && action.panel !== 'reference',
+        sidebarOpen: action.panel !== null && !isFullPage,
         lineageFullscreen: false,
         lineageFocusNodeId: null,
         mainView:
@@ -145,10 +148,13 @@ function notebookReducer(state: NotebookState, action: NotebookAction): Notebook
             ? 'connection'
             : action.panel === 'reference'
               ? 'reference'
-              : state.activeFile?.type === 'block'
-                ? 'block_studio'
-                : 'notebook',
+              : action.panel === 'git'
+                ? 'git'
+                : state.activeFile?.type === 'block'
+                  ? 'block_studio'
+                  : 'notebook',
       };
+    }
 
     case 'TOGGLE_SIDEBAR':
       return { ...state, sidebarOpen: !state.sidebarOpen };
@@ -375,6 +381,12 @@ function notebookReducer(state: NotebookState, action: NotebookAction): Notebook
 
     case 'SET_LINEAGE_FOCUS':
       return { ...state, lineageFocusNodeId: action.nodeId };
+
+    case 'OPEN_LINEAGE_DRAWER':
+      return { ...state, lineageDrawerOpen: true, lineageDrawerNodeId: action.nodeId };
+
+    case 'CLOSE_LINEAGE_DRAWER':
+      return { ...state, lineageDrawerOpen: false, lineageDrawerNodeId: null };
 
     case 'TOGGLE_DASHBOARD_MODE':
       return { ...state, dashboardMode: !state.dashboardMode };

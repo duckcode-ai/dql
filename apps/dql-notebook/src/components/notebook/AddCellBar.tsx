@@ -32,17 +32,18 @@ type PaletteEntry = {
   group: 'compute' | 'viz' | 'transform' | 'io' | 'library';
 };
 
+// v1.4 pill-menu — color aligned to DQL cell-type palette (New-UI handoff)
 const PALETTE: PaletteEntry[] = [
-  { type: 'block', label: 'Block', Icon: BlockIcon, color: '#3fb950', group: 'library' },
-  { type: 'chat', label: 'Chat', Icon: ChatCellIcon, color: '#f0883e', group: 'compute' },
-  { type: 'sql', label: 'SQL', Icon: SQLCellIcon, color: '#388bfd', group: 'compute' },
-  { type: 'markdown', label: 'Text', Icon: FileText, color: '#56d364', group: 'compute' },
-  { type: 'chart', label: 'Chart', Icon: ChartCellIcon, color: '#a371f7', group: 'viz' },
-  { type: 'pivot', label: 'Pivot', Icon: PivotCellIcon, color: '#a371f7', group: 'viz' },
-  { type: 'single_value', label: 'Single value', Icon: SingleValueCellIcon, color: '#a371f7', group: 'viz' },
-  { type: 'table', label: 'Table', Icon: Table, color: '#79c0ff', group: 'viz' },
-  { type: 'param', label: 'Inputs', Icon: ParamCellIcon, color: '#e3b341', group: 'io' },
-  { type: 'filter', label: 'Filter', Icon: FilterCellIcon, color: '#ff7b72', group: 'transform' },
+  { type: 'block', label: 'Block', Icon: BlockIcon, color: '#6b8afd', group: 'library' },
+  { type: 'chat', label: 'Chat', Icon: ChatCellIcon, color: '#8a8f9b', group: 'compute' },
+  { type: 'sql', label: 'SQL', Icon: SQLCellIcon, color: '#3b8ef0', group: 'compute' },
+  { type: 'markdown', label: 'Text', Icon: FileText, color: '#2fb97a', group: 'compute' },
+  { type: 'chart', label: 'Chart', Icon: ChartCellIcon, color: '#b067f7', group: 'viz' },
+  { type: 'pivot', label: 'Pivot', Icon: PivotCellIcon, color: '#e5a84d', group: 'viz' },
+  { type: 'single_value', label: 'Single value', Icon: SingleValueCellIcon, color: '#b067f7', group: 'viz' },
+  { type: 'table', label: 'Table', Icon: Table, color: '#5dd1c8', group: 'viz' },
+  { type: 'param', label: 'Inputs', Icon: ParamCellIcon, color: '#9aa0ae', group: 'io' },
+  { type: 'filter', label: 'Filter', Icon: FilterCellIcon, color: '#f26a6a', group: 'transform' },
 ];
 
 export function AddCellBar({ afterId }: AddCellBarProps) {

@@ -62,4 +62,6 @@ export {
   Sliders,
   MessageSquare,
   Package,
+  Maximize2,
+  ExternalLink,
 } from 'lucide-react';

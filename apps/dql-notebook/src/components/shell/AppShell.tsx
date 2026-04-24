@@ -14,6 +14,8 @@ import { BlockStudio } from '../block-studio/BlockStudio';
 import { LineageDAG } from '../panels/LineageDAG';
 import { ConnectionPanel } from '../panels/ConnectionPanel';
 import { ReferencePanel } from '../panels/ReferencePanel';
+import { GitPage } from '../git/GitPage';
+import { LineageDrawer } from '../lineage/LineageDrawer';
 import { api } from '../../api/client';
 import { parseNotebookFile } from '../../utils/parse-workbook';
 import { makeCell } from '../../store/NotebookStore';
@@ -194,6 +196,8 @@ export function AppShell() {
             >
               <ReferencePanel themeMode={state.themeMode} />
             </FullPageSection>
+          ) : state.mainView === 'git' ? (
+            <GitPage />
           ) : (
             <>
               {state.mainView === 'block_studio' ? (
@@ -211,7 +215,11 @@ export function AppShell() {
           )}
         </div>
 
-        {state.appMode === 'studio' && state.inspectorOpen && !state.lineageFullscreen && !state.dashboardMode && (
+        {state.appMode === 'studio' && state.lineageDrawerOpen && !state.lineageFullscreen && !state.dashboardMode && (
+          <LineageDrawer />
+        )}
+
+        {state.appMode === 'studio' && state.inspectorOpen && !state.lineageFullscreen && !state.lineageDrawerOpen && !state.dashboardMode && (
           <InspectorPanel />
         )}
       </div>

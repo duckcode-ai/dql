@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useRef, useState } from 'react';
 import { useNotebook } from '../../store/NotebookStore';
 import { themes } from '../../themes/notebook-theme';
 import { FilesPanel } from '../panels/FilesPanel';
@@ -30,19 +30,42 @@ export function Sidebar({ onOpenFile }: SidebarProps) {
   const { state, dispatch } = useNotebook();
   const t = themes[state.themeMode];
   const [collapseHover, setCollapseHover] = useState(false);
+  const [sidebarWidth, setSidebarWidth] = useState(240);
+  const [resizing, setResizing] = useState(false);
+  const widthRef = useRef(sidebarWidth);
 
   const panel = state.sidebarPanel;
+
+  const startResize = (e: React.MouseEvent) => {
+    e.preventDefault();
+    const startX = e.clientX;
+    const startW = widthRef.current;
+    setResizing(true);
+    const onMove = (ev: MouseEvent) => {
+      const next = Math.min(560, Math.max(180, startW + (ev.clientX - startX)));
+      widthRef.current = next;
+      setSidebarWidth(next);
+    };
+    const onUp = () => {
+      setResizing(false);
+      window.removeEventListener('mousemove', onMove);
+      window.removeEventListener('mouseup', onUp);
+    };
+    window.addEventListener('mousemove', onMove);
+    window.addEventListener('mouseup', onUp);
+  };
 
   return (
     <div
       style={{
-        width: 240,
+        width: sidebarWidth,
         flexShrink: 0,
         background: t.sidebarBg,
         borderRight: `1px solid ${t.headerBorder}`,
         display: 'flex',
         flexDirection: 'column',
         overflow: 'hidden',
+        position: 'relative',
       }}
     >
       {/* Panel header */}
@@ -103,6 +126,25 @@ export function Sidebar({ onOpenFile }: SidebarProps) {
         {panel === 'git' && <GitPanel />}
         {panel === 'apps' && <AppsPanel onOpenFile={onOpenFile} />}
       </div>
+
+      {/* Resize handle on right edge */}
+      <div
+        onMouseDown={startResize}
+        title="Drag to resize"
+        style={{
+          position: 'absolute',
+          top: 0,
+          right: -3,
+          width: 6,
+          height: '100%',
+          cursor: 'col-resize',
+          background: resizing ? t.accent : 'transparent',
+          zIndex: 10,
+          transition: resizing ? 'none' : 'background 0.15s',
+        }}
+        onMouseEnter={(e) => { if (!resizing) (e.currentTarget as HTMLElement).style.background = `${t.accent}40`; }}
+        onMouseLeave={(e) => { if (!resizing) (e.currentTarget as HTMLElement).style.background = 'transparent'; }}
+      />
     </div>
   );
 }

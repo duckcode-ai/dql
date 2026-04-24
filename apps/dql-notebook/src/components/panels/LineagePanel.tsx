@@ -195,11 +195,9 @@ export function LineagePanel() {
 
   const [loading, setLoading] = useState(true);
   const [allNodes, setAllNodes] = useState<LineageNode[]>([]);
-  const [allEdges, setAllEdges] = useState<LineageEdge[]>([]);
+  const [, setAllEdges] = useState<LineageEdge[]>([]);
   const [search, setSearch] = useState('');
   const [matches, setMatches] = useState<Array<{ node: LineageNode; score: number }>>([]);
-  const [focusedNode, setFocusedNode] = useState<LineageNode | null>(null);
-  const [focusedGraph, setFocusedGraph] = useState<{ nodes: LineageNode[]; edges: LineageEdge[] } | null>(null);
 
   const loadLineage = useCallback(async () => {
     setLoading(true);
@@ -227,26 +225,10 @@ export function LineagePanel() {
     };
   }, [search]);
 
-  const handleSelectNode = useCallback(async (node: LineageNode) => {
-    const result = await api.queryLineage({ focus: node.id });
-    setFocusedNode(result.focalNode ?? node);
-    setFocusedGraph(result.graph ?? { nodes: [], edges: [] });
+  const handleSelectNode = useCallback((node: LineageNode) => {
+    // Open the right-side drawer — no in-panel focused-view, no fullscreen takeover.
     dispatch({ type: 'SET_LINEAGE_FOCUS', nodeId: node.id });
-    dispatch({
-      type: 'SET_INSPECTOR_CONTEXT',
-      context: { kind: 'lineage-node', nodeId: node.id },
-    });
-    if (!state.lineageFullscreen) {
-      dispatch({ type: 'TOGGLE_LINEAGE_FULLSCREEN' });
-    }
-  }, [dispatch, state.lineageFullscreen]);
-
-  const handleReset = useCallback(() => {
-    setFocusedNode(null);
-    setFocusedGraph(null);
-    setSearch('');
-    setMatches([]);
-    dispatch({ type: 'SET_LINEAGE_FOCUS', nodeId: null });
+    dispatch({ type: 'OPEN_LINEAGE_DRAWER', nodeId: node.id });
   }, [dispatch]);
 
   const [groupBy, setGroupBy] = useState<'type' | 'layer'>('type');
@@ -270,22 +252,6 @@ export function LineagePanel() {
     }
     return groups;
   }, [allNodes]);
-
-  const focusedRelatedNodes = useMemo(() => {
-    if (!focusedNode || !focusedGraph) {
-      return { upstream: [] as LineageNode[], downstream: [] as LineageNode[] };
-    }
-    const incomingIds = new Set(
-      focusedGraph.edges.filter((edge) => edge.target === focusedNode.id).map((edge) => edge.source),
-    );
-    const outgoingIds = new Set(
-      focusedGraph.edges.filter((edge) => edge.source === focusedNode.id).map((edge) => edge.target),
-    );
-    return {
-      upstream: focusedGraph.nodes.filter((node) => incomingIds.has(node.id)),
-      downstream: focusedGraph.nodes.filter((node) => outgoingIds.has(node.id)),
-    };
-  }, [focusedGraph, focusedNode]);
 
   if (loading) {
     return <div style={{ padding: 16, color: t.textMuted, fontSize: 12 }}>Loading lineage...</div>;
@@ -355,103 +321,61 @@ export function LineagePanel() {
           </div>
         )}
 
-        {focusedNode && focusedGraph && (
-          <div style={{ padding: 8, borderBottom: `1px solid ${t.headerBorder}` }}>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8 }}>
-              <NodeTypeBadge type={focusedNode.type} />
-              <div style={{ flex: 1, minWidth: 0 }}>
-                <div style={{ color: t.textPrimary, fontSize: 13, fontWeight: 700 }}>{focusedNode.name}</div>
-                <div style={{ color: t.textMuted, fontSize: 11 }}>
-                  {focusedNode.domain ?? TYPE_TITLES[focusedNode.type] ?? focusedNode.type}
-                </div>
-              </div>
-              <button
-                onClick={handleReset}
-                style={{
-                  border: `1px solid ${t.headerBorder}`,
-                  background: 'transparent',
-                  color: t.textPrimary,
-                  borderRadius: 6,
-                  padding: '6px 8px',
-                  cursor: 'pointer',
-                  fontSize: 11,
-                }}
-              >
-                Show All
-              </button>
-            </div>
-
-            <div style={{ color: t.textMuted, fontSize: 11, marginBottom: 6 }}>
-              {focusedGraph.nodes.length} node(s), {focusedGraph.edges.length} edge(s)
-            </div>
-            <div style={{ color: t.textMuted, fontSize: 11, marginBottom: 6, lineHeight: 1.5 }}>
-              Focused lineage shows the path into this item from raw tables/dbt and the downstream notebooks or analytics objects that consume it.
-            </div>
-
-            <Section title="Upstream" nodes={focusedRelatedNodes.upstream} t={t} onSelect={handleSelectNode} />
-            <Section title="Downstream" nodes={focusedRelatedNodes.downstream} t={t} onSelect={handleSelectNode} />
+        {/* Layer summary bar */}
+        <div style={{ padding: '6px 8px', display: 'flex', gap: 8, flexWrap: 'wrap', borderBottom: `1px solid ${t.headerBorder}` }}>
+          {LAYER_ORDER.map((layer) => {
+            const count = layerGrouped[layer].length;
+            if (count === 0) return null;
+            return (
+              <span key={layer} style={{ display: 'inline-flex', alignItems: 'center', gap: 3, fontSize: 10, color: t.textMuted }}>
+                <span style={{ width: 8, height: 8, borderRadius: 2, background: LAYER_COLORS[layer], display: 'inline-block' }} />
+                {LAYER_LABELS[layer]}: {count}
+              </span>
+            );
+          })}
+          <span style={{ flex: 1 }} />
+          {/* Group by toggle */}
+          <div style={{ display: 'flex', borderRadius: 4, border: `1px solid ${t.headerBorder}`, overflow: 'hidden' }}>
+            <button
+              onClick={() => setGroupBy('type')}
+              style={{
+                padding: '2px 6px', fontSize: 9, fontWeight: 700, border: 'none', cursor: 'pointer',
+                background: groupBy === 'type' ? `${t.headerBorder}` : 'transparent',
+                color: groupBy === 'type' ? t.textPrimary : t.textMuted,
+              }}
+            >Type</button>
+            <button
+              onClick={() => setGroupBy('layer')}
+              style={{
+                padding: '2px 6px', fontSize: 9, fontWeight: 700, border: 'none', cursor: 'pointer',
+                borderLeft: `1px solid ${t.headerBorder}`,
+                background: groupBy === 'layer' ? `${t.headerBorder}` : 'transparent',
+                color: groupBy === 'layer' ? t.textPrimary : t.textMuted,
+              }}
+            >Layer</button>
           </div>
-        )}
+        </div>
 
-        {!focusedNode && (
+        {groupBy === 'type' ? (
           <>
-            {/* Layer summary bar */}
-            <div style={{ padding: '6px 8px', display: 'flex', gap: 8, flexWrap: 'wrap', borderBottom: `1px solid ${t.headerBorder}` }}>
-              {LAYER_ORDER.map((layer) => {
-                const count = layerGrouped[layer].length;
-                if (count === 0) return null;
-                return (
-                  <span key={layer} style={{ display: 'inline-flex', alignItems: 'center', gap: 3, fontSize: 10, color: t.textMuted }}>
-                    <span style={{ width: 8, height: 8, borderRadius: 2, background: LAYER_COLORS[layer], display: 'inline-block' }} />
-                    {LAYER_LABELS[layer]}: {count}
-                  </span>
-                );
-              })}
-              <span style={{ flex: 1 }} />
-              {/* Group by toggle */}
-              <div style={{ display: 'flex', borderRadius: 4, border: `1px solid ${t.headerBorder}`, overflow: 'hidden' }}>
-                <button
-                  onClick={() => setGroupBy('type')}
-                  style={{
-                    padding: '2px 6px', fontSize: 9, fontWeight: 700, border: 'none', cursor: 'pointer',
-                    background: groupBy === 'type' ? `${t.headerBorder}` : 'transparent',
-                    color: groupBy === 'type' ? t.textPrimary : t.textMuted,
-                  }}
-                >Type</button>
-                <button
-                  onClick={() => setGroupBy('layer')}
-                  style={{
-                    padding: '2px 6px', fontSize: 9, fontWeight: 700, border: 'none', cursor: 'pointer',
-                    borderLeft: `1px solid ${t.headerBorder}`,
-                    background: groupBy === 'layer' ? `${t.headerBorder}` : 'transparent',
-                    color: groupBy === 'layer' ? t.textPrimary : t.textMuted,
-                  }}
-                >Layer</button>
-              </div>
-            </div>
-
-            {groupBy === 'type' ? (
-              <>
-                <Section title="Notebooks" nodes={grouped.dashboards} t={t} onSelect={handleSelectNode} />
-                <Section title="DQL Blocks" nodes={grouped.blocks} t={t} onSelect={handleSelectNode} />
-                <Section title="dbt Models" nodes={grouped.dbtModels} t={t} onSelect={handleSelectNode} />
-                <Section title="dbt Sources" nodes={grouped.dbtSources} t={t} onSelect={handleSelectNode} />
-                <Section title="Source Tables" nodes={grouped.tables} t={t} onSelect={handleSelectNode} />
-                <Section title="Business Domains" nodes={grouped.domains} t={t} onSelect={handleSelectNode} />
-              </>
-            ) : (
-              <>
-                {LAYER_ORDER.map((layer) => (
-                  <Section
-                    key={layer}
-                    title={LAYER_LABELS[layer]}
-                    nodes={layerGrouped[layer]}
-                    t={t}
-                    onSelect={handleSelectNode}
-                  />
-                ))}
-              </>
-            )}
+            <Section title="Notebooks" nodes={grouped.dashboards} t={t} onSelect={handleSelectNode} />
+            <Section title="DQL Blocks" nodes={grouped.blocks} t={t} onSelect={handleSelectNode} />
+            <Section title="dbt Models" nodes={grouped.dbtModels} t={t} onSelect={handleSelectNode} />
+            <Section title="dbt Sources" nodes={grouped.dbtSources} t={t} onSelect={handleSelectNode} />
+            <Section title="Source Tables" nodes={grouped.tables} t={t} onSelect={handleSelectNode} />
+            <Section title="Business Domains" nodes={grouped.domains} t={t} onSelect={handleSelectNode} />
+          </>
+        ) : (
+          <>
+            {LAYER_ORDER.map((layer) => (
+              <Section
+                key={layer}
+                title={LAYER_LABELS[layer]}
+                nodes={layerGrouped[layer]}
+                t={t}
+                onSelect={handleSelectNode}
+              />
+            ))}
           </>
         )}
       </div>
