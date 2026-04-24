@@ -121,7 +121,7 @@ const errorTheme = EditorView.baseTheme({
 
 // Luna-token chrome used for every theme. Panel backgrounds, tooltips,
 // gutters resolve against the active `data-theme` at paint time, so the
-// same theme instance works for midnight/obsidian/paper/arctic.
+// same theme instance works for obsidian/paper/white.
 function makePanelTheme(isDark: boolean) {
   return EditorView.theme(
     {

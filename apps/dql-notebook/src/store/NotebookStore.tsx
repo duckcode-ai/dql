@@ -27,15 +27,17 @@ function readInitialAppMode(): 'studio' | 'app' {
   return stored === 'app' ? 'app' : 'studio';
 }
 
-// v1.3 Track 9 — persisted Luna theme. Default midnight so a first-load user
-// gets DQL's darkest surface; honor persisted choice across reloads/tabs.
-function readInitialThemeMode(): 'midnight' | 'obsidian' | 'paper' | 'arctic' {
-  if (typeof window === 'undefined') return 'midnight';
+// v1.3.2 — persisted Luna theme. Default obsidian so a first-load user
+// gets DQL's neutral dark surface; honor persisted choice across reloads/tabs.
+// Legacy values (midnight/arctic/dark/light) alias onto the 3-theme set.
+function readInitialThemeMode(): 'obsidian' | 'paper' | 'white' {
+  if (typeof window === 'undefined') return 'obsidian';
   const stored = window.localStorage?.getItem('dql-theme');
-  if (stored === 'obsidian' || stored === 'paper' || stored === 'arctic' || stored === 'midnight') return stored;
-  if (stored === 'dark') return 'midnight';
+  if (stored === 'obsidian' || stored === 'paper' || stored === 'white') return stored;
+  if (stored === 'midnight' || stored === 'dark') return 'obsidian';
+  if (stored === 'arctic') return 'white';
   if (stored === 'light') return 'paper';
-  return 'midnight';
+  return 'obsidian';
 }
 
 const initialState: NotebookState = {
@@ -106,8 +108,9 @@ function notebookReducer(state: NotebookState, action: NotebookAction): Notebook
       // paint one frame of stale colors (v1.3 Track 9 — four-theme switch).
       if (typeof document !== 'undefined') {
         const luna =
-          action.mode === 'dark' ? 'midnight'
+          action.mode === 'dark' || action.mode === 'midnight' ? 'obsidian'
           : action.mode === 'light' ? 'paper'
+          : action.mode === 'arctic' ? 'white'
           : action.mode;
         document.documentElement.setAttribute('data-theme', luna);
         try {
@@ -467,7 +470,7 @@ export function NotebookProvider({ children }: { children: ReactNode }) {
     const handler = (e: StorageEvent) => {
       if (e.key !== 'dql-theme' || !e.newValue) return;
       const mode = e.newValue;
-      if (mode === 'midnight' || mode === 'obsidian' || mode === 'paper' || mode === 'arctic' || mode === 'dark' || mode === 'light') {
+      if (mode === 'obsidian' || mode === 'paper' || mode === 'white' || mode === 'midnight' || mode === 'arctic' || mode === 'dark' || mode === 'light') {
         useNotebookStore.getState().dispatch({ type: 'SET_THEME', mode: mode as any });
       }
     };

@@ -100,7 +100,7 @@ const VAR_FOR: Record<keyof Theme, string> = {
 };
 
 // Fallback values used for SSR / build-time access where `document` is
-// not available. Mirror midnight theme so server-rendered output does
+// not available. Mirror obsidian theme so server-rendered output does
 // not flash a wrong-color frame.
 const FALLBACK: Record<keyof Theme, string> = {
   appBg: '#0f1219',
@@ -168,18 +168,20 @@ function makeThemeProxy(): Theme {
   });
 }
 
-// One proxy — every consumer reads from the same document root. `dark`/`light`
-// are kept as aliases so v1.2 persisted state ('dark'/'light') still resolves,
-// while the canonical Luna names (midnight/obsidian/paper/arctic) land here too.
+// One proxy — every consumer reads from the same document root. v1.3.2
+// consolidated the Luna set down to three themes (obsidian / paper / white).
+// Legacy names (`dark`/`light`/`midnight`/`arctic`) stay in the union so
+// persisted state from v1.2 and early v1.3 releases still resolves cleanly.
 const PROXY: Theme = makeThemeProxy();
 export const DARK: Theme = PROXY;
 export const LIGHT: Theme = PROXY;
-export type ThemeMode = 'dark' | 'light' | 'midnight' | 'obsidian' | 'paper' | 'arctic';
+export type ThemeMode = 'obsidian' | 'paper' | 'white' | 'dark' | 'light' | 'midnight' | 'arctic';
 export const themes: Record<ThemeMode, Theme> = {
+  obsidian: PROXY,
+  paper: PROXY,
+  white: PROXY,
   dark: PROXY,
   light: PROXY,
   midnight: PROXY,
-  obsidian: PROXY,
-  paper: PROXY,
   arctic: PROXY,
 };

@@ -231,15 +231,18 @@ export const lightTokens: ThemeTokens = {
   shadowLg: '0 12px 28px rgba(31,35,40,0.15)',
 };
 
-// v1.3 — four Luna themes. Tokens here drive the JS/TS Proxy shim only;
-// actual colors are sourced from tokens.css via `[data-theme="..."]`.
-// Midnight/obsidian share the dark palette; paper/arctic share light.
+// v1.3.2 — three Luna themes (obsidian dark, paper warm light, white plain
+// light). Tokens here drive the JS/TS Proxy shim only; actual colors are
+// sourced from tokens.css via `[data-theme="..."]`. Legacy aliases
+// (midnight/arctic/dark/light) remain so persisted state from v1.2 and
+// early v1.3 releases still resolves.
 export const themes = {
+  obsidian: darkTokens,
+  paper: lightTokens,
+  white: lightTokens,
   dark: darkTokens,
   light: lightTokens,
   midnight: darkTokens,
-  obsidian: darkTokens,
-  paper: lightTokens,
   arctic: lightTokens,
 } as const;
 export type ThemeName = keyof typeof themes;

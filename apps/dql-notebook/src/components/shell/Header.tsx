@@ -195,22 +195,22 @@ export function Header() {
     return () => clearTimeout(timer);
   }, [state.autoSave, currentDirty, state.activeFile, state.cells, state.blockStudioDraft, handleSave]);
 
-  // v1.3 Track 9 — four Luna themes with a swatch dropdown (replaces cycler).
+  // v1.3.2 — three Luna themes (obsidian dark, paper warm light, white plain light).
   const THEMES: ReadonlyArray<{
-    mode: 'midnight' | 'obsidian' | 'paper' | 'arctic';
+    mode: 'obsidian' | 'paper' | 'white';
     label: string;
     glyph: string;
     swatch: string;
   }> = [
-    { mode: 'midnight', label: 'Midnight', glyph: '☾', swatch: '#0d1117' },
-    { mode: 'obsidian', label: 'Obsidian', glyph: '●', swatch: '#000000' },
-    { mode: 'paper', label: 'Paper', glyph: '☼', swatch: '#faf8f3' },
-    { mode: 'arctic', label: 'Arctic', glyph: '❄', swatch: '#e8eef4' },
+    { mode: 'obsidian', label: 'Obsidian', glyph: '●', swatch: '#0d0e11' },
+    { mode: 'paper', label: 'Paper', glyph: '☼', swatch: '#f7f4ed' },
+    { mode: 'white', label: 'White', glyph: '○', swatch: '#ffffff' },
   ] as const;
-  const currentThemeKey =
-    state.themeMode === 'dark' ? 'midnight'
+  const currentThemeKey: 'obsidian' | 'paper' | 'white' =
+    state.themeMode === 'dark' || state.themeMode === 'midnight' ? 'obsidian'
     : state.themeMode === 'light' ? 'paper'
-    : state.themeMode;
+    : state.themeMode === 'arctic' ? 'white'
+    : (state.themeMode as 'obsidian' | 'paper' | 'white');
   const currentTheme = THEMES.find((t) => t.mode === currentThemeKey) ?? THEMES[0];
 
   // Close theme menu on outside click / Escape
@@ -429,7 +429,7 @@ export function Header() {
           </>
         )}
 
-        {/* Theme dropdown — pick Midnight / Obsidian / Paper / Arctic */}
+        {/* Theme dropdown — pick Obsidian / Paper / White */}
         <div ref={themeMenuRef} style={{ position: 'relative' }}>
           <button
             onClick={() => setThemeMenuOpen((o) => !o)}

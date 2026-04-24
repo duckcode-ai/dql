@@ -1,6 +1,7 @@
-// v1.3 Track 9 — four Luna themes. `dark`/`light` kept as aliases so persisted
-// state from v1.2 still loads; normalize in the reducer on SET_THEME / load.
-export type ThemeMode = 'midnight' | 'obsidian' | 'paper' | 'arctic' | 'dark' | 'light';
+// v1.3.2 — three Luna themes (obsidian dark, paper warm light, white plain light).
+// `dark`/`light`/`midnight`/`arctic` kept as aliases so persisted state from
+// earlier v1.3 releases still loads; normalize in the reducer / App effect.
+export type ThemeMode = 'obsidian' | 'paper' | 'white' | 'dark' | 'light' | 'midnight' | 'arctic';
 
 /**
  * v1.3 Track 5 — shell-level audience split.

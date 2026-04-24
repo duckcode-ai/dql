@@ -104,11 +104,10 @@ export function CommandPalette({
       ['Connections', 'connection', Plug],
       ['Reference', 'reference', BookOpen],
     ];
-    const themeOptions: Array<{ mode: 'midnight' | 'obsidian' | 'paper' | 'arctic'; label: string }> = [
-      { mode: 'midnight', label: 'Midnight' },
+    const themeOptions: Array<{ mode: 'obsidian' | 'paper' | 'white'; label: string }> = [
       { mode: 'obsidian', label: 'Obsidian' },
       { mode: 'paper', label: 'Paper' },
-      { mode: 'arctic', label: 'Arctic' },
+      { mode: 'white', label: 'White' },
     ];
 
     const result: PaletteAction[] = [];
@@ -205,11 +204,12 @@ export function CommandPalette({
       },
     );
 
-    // Theme — four explicit entries per v1.3 Track 9/10 spec.
-    const currentThemeKey =
-      state.themeMode === 'dark' ? 'midnight'
+    // Theme — three explicit entries (v1.3.2 consolidation).
+    const currentThemeKey: 'obsidian' | 'paper' | 'white' =
+      state.themeMode === 'dark' || state.themeMode === 'midnight' ? 'obsidian'
       : state.themeMode === 'light' ? 'paper'
-      : state.themeMode;
+      : state.themeMode === 'arctic' ? 'white'
+      : (state.themeMode as 'obsidian' | 'paper' | 'white');
     for (const th of themeOptions) {
       if (th.mode === currentThemeKey) continue;
       result.push({
