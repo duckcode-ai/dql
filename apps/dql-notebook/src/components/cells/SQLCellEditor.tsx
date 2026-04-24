@@ -113,113 +113,104 @@ const errorDecoField = StateField.define({
 
 const errorTheme = EditorView.baseTheme({
   '.cm-sql-error': {
-    textDecoration: 'underline wavy #f85149',
+    textDecoration: 'underline wavy var(--color-status-error)',
     textUnderlineOffset: '3px',
-    background: 'rgba(248, 81, 73, 0.08)',
+    background: 'color-mix(in srgb, var(--color-status-error) 10%, transparent)',
   },
 });
 
-// Light theme for CodeMirror — GitHub-inspired
-const lightTheme = EditorView.theme(
-  {
-    '&': { background: '#f6f8fa', color: '#1f2328' },
-    '.cm-content': { caretColor: '#1f2328' },
-    '.cm-cursor': { borderLeftColor: '#1f2328' },
-    '.cm-selectionBackground': { background: '#b3d4fc' },
-    '&.cm-focused .cm-selectionBackground': { background: '#b3d4fc' },
-    '.cm-gutters': {
-      background: '#f0f2f5',
-      color: '#8c959f',
-      border: 'none',
-      borderRight: '1px solid #d0d7de',
+// Luna-token chrome used for every theme. Panel backgrounds, tooltips,
+// gutters resolve against the active `data-theme` at paint time, so the
+// same theme instance works for midnight/obsidian/paper/arctic.
+function makePanelTheme(isDark: boolean) {
+  return EditorView.theme(
+    {
+      '&': {
+        background: 'var(--color-bg-sunken)',
+        color: 'var(--color-text-primary)',
+      },
+      '.cm-content': { caretColor: 'var(--color-text-primary)' },
+      '.cm-cursor': { borderLeftColor: 'var(--color-text-primary)' },
+      '.cm-selectionBackground': {
+        background: 'color-mix(in srgb, var(--color-accent-blue) 30%, transparent)',
+      },
+      '&.cm-focused .cm-selectionBackground': {
+        background: 'color-mix(in srgb, var(--color-accent-blue) 30%, transparent)',
+      },
+      '.cm-gutters': {
+        background: 'var(--color-bg-sunken)',
+        color: 'var(--color-text-tertiary)',
+        border: 'none',
+        borderRight: '1px solid var(--color-border-subtle)',
+      },
+      '.cm-activeLineGutter': { background: 'var(--color-bg-hover)' },
+      '.cm-activeLine': { background: 'var(--color-bg-hover)' },
+      '.cm-matchingBracket': {
+        background: 'color-mix(in srgb, var(--color-accent-blue) 18%, transparent)',
+        outline: '1px solid var(--color-accent-blue)',
+      },
+      '.cm-foldPlaceholder': {
+        background: 'var(--color-bg-tertiary)',
+        border: '1px solid var(--color-border-subtle)',
+        color: 'var(--color-text-secondary)',
+        borderRadius: 3,
+        padding: '0 4px',
+      },
+      '.cm-tooltip': {
+        background: 'var(--color-bg-card)',
+        border: '1px solid var(--color-border-primary)',
+        color: 'var(--color-text-primary)',
+        borderRadius: 6,
+        boxShadow: '0 4px 12px color-mix(in srgb, var(--color-bg-primary) 40%, transparent)',
+      },
+      '.cm-tooltip.cm-tooltip-autocomplete': {
+        '& > ul > li': { padding: '3px 8px' },
+        '& > ul > li[aria-selected]': {
+          background: 'color-mix(in srgb, var(--color-accent-blue) 20%, transparent)',
+          color: 'var(--color-accent-blue)',
+        },
+      },
+      '.cm-searchMatch': {
+        background: 'color-mix(in srgb, var(--color-status-warning) 25%, transparent)',
+        outline: '1px solid var(--color-status-warning)',
+      },
+      '.cm-searchMatch.cm-searchMatch-selected': {
+        background: 'color-mix(in srgb, var(--color-status-warning) 50%, transparent)',
+      },
+      '.cm-panels': {
+        background: 'var(--color-bg-secondary)',
+        borderTop: '1px solid var(--color-border-subtle)',
+      },
+      '.cm-panel': { padding: '6px 8px' },
+      '.cm-panel input': {
+        background: 'var(--color-bg-sunken)',
+        border: '1px solid var(--color-border-subtle)',
+        color: 'var(--color-text-primary)',
+        borderRadius: 4,
+        padding: '2px 6px',
+        fontSize: 12,
+      },
+      '.cm-panel button': {
+        background: 'var(--color-bg-tertiary)',
+        border: '1px solid var(--color-border-subtle)',
+        color: 'var(--color-text-primary)',
+        borderRadius: 4,
+        padding: '2px 8px',
+        cursor: 'pointer',
+        fontSize: 12,
+        marginLeft: 4,
+      },
     },
-    '.cm-activeLineGutter': { background: '#e8f0fe' },
-    '.cm-activeLine': { background: '#eaf0fb' },
-    '.cm-matchingBracket': {
-      background: '#c8e6c9',
-      outline: '1px solid #66bb6a',
-    },
-    '.cm-foldPlaceholder': {
-      background: '#eaeef2',
-      border: '1px solid #d0d7de',
-      color: '#57606a',
-      borderRadius: 3,
-      padding: '0 4px',
-    },
-    '.cm-tooltip': {
-      background: '#ffffff',
-      border: '1px solid #d0d7de',
-      borderRadius: 6,
-      boxShadow: '0 4px 12px rgba(0,0,0,0.12)',
-    },
-    '.cm-tooltip.cm-tooltip-autocomplete': {
-      '& > ul > li': { padding: '3px 8px' },
-      '& > ul > li[aria-selected]': { background: '#dbeafe', color: '#0550ae' },
-    },
-    '.cm-searchMatch': { background: '#fff3b0', outline: '1px solid #f5c518' },
-    '.cm-searchMatch.cm-searchMatch-selected': { background: '#f5c518' },
-    '.cm-panels': { background: '#f0f2f5', borderTop: '1px solid #d0d7de' },
-    '.cm-panel': { padding: '6px 8px' },
-    '.cm-panel input': {
-      background: '#fff',
-      border: '1px solid #d0d7de',
-      borderRadius: 4,
-      padding: '2px 6px',
-      fontSize: 12,
-    },
-    '.cm-panel button': {
-      background: '#f6f8fa',
-      border: '1px solid #d0d7de',
-      borderRadius: 4,
-      padding: '2px 8px',
-      cursor: 'pointer',
-      fontSize: 12,
-      marginLeft: 4,
-    },
-  },
-  { dark: false }
-);
+    { dark: isDark }
+  );
+}
 
-// Dark theme overrides for search/autocomplete panels
-const darkPanelTheme = EditorView.theme(
-  {
-    '.cm-panels': { background: '#161b22', borderTop: '1px solid #30363d' },
-    '.cm-panel input': {
-      background: '#0d1117',
-      border: '1px solid #30363d',
-      color: '#e6edf3',
-      borderRadius: 4,
-      padding: '2px 6px',
-      fontSize: 12,
-    },
-    '.cm-panel button': {
-      background: '#21262d',
-      border: '1px solid #30363d',
-      color: '#e6edf3',
-      borderRadius: 4,
-      padding: '2px 8px',
-      cursor: 'pointer',
-      fontSize: 12,
-      marginLeft: 4,
-    },
-    '.cm-tooltip': {
-      background: '#1c2128',
-      border: '1px solid #30363d',
-      borderRadius: 6,
-      boxShadow: '0 4px 12px rgba(0,0,0,0.4)',
-    },
-    '.cm-tooltip.cm-tooltip-autocomplete': {
-      '& > ul > li[aria-selected]': { background: '#1f3858', color: '#58a6ff' },
-    },
-    '.cm-matchingBracket': {
-      background: '#1f3858',
-      outline: '1px solid #388bfd',
-    },
-    '.cm-searchMatch': { background: '#3d3000', outline: '1px solid #e3b341' },
-    '.cm-searchMatch.cm-searchMatch-selected': { background: '#6a4e00' },
-  },
-  { dark: true }
-);
+const darkPanelTheme = makePanelTheme(true);
+const lightPanelTheme = makePanelTheme(false);
+
+function isDarkFamily(mode: ThemeMode): boolean {
+  return mode === 'midnight' || mode === 'obsidian' || mode === 'dark';
+}
 
 export function SQLCellEditor({
   value,
@@ -348,10 +339,13 @@ export function SQLCellEditor({
       // Error decoration support
       errorDecoField,
       errorTheme,
-      // Theme
-      ...(themeMode === 'dark'
+      // Theme — dark families get oneDark's syntax palette layered with
+      // Luna chrome; light families get the default highlight style plus
+      // the same Luna chrome (panels, gutters, tooltips resolve via CSS
+      // vars, so they re-skin on data-theme switch).
+      ...(isDarkFamily(themeMode)
         ? [oneDark, darkPanelTheme]
-        : [lightTheme, syntaxHighlighting(defaultHighlightStyle)]),
+        : [syntaxHighlighting(defaultHighlightStyle), lightPanelTheme]),
     ];
 
     const state = EditorState.create({ doc: value, extensions });

@@ -86,7 +86,7 @@ function layoutGraph(nodes: Node[], edges: Edge[], mode: LayoutMode = 'flow', di
 
 function DagNode({ data, selected }: NodeProps) {
   const nodeType = data.nodeType as string;
-  const color = NODE_TYPE_COLORS[nodeType] ?? '#8b949e';
+  const color = NODE_TYPE_COLORS[nodeType] ?? 'var(--color-text-tertiary)';
   const label = TYPE_LABELS[nodeType] ?? nodeType.toUpperCase();
   const direction = (data.direction as Direction) ?? 'LR';
   const targetPos = direction === 'LR' ? Position.Left : Position.Top;
@@ -96,11 +96,13 @@ function DagNode({ data, selected }: NodeProps) {
       style={{
         minWidth: 156,
         maxWidth: 220,
-        background: '#161b22',
-        border: `2px solid ${selected ? '#58a6ff' : color}`,
+        background: 'var(--color-bg-card)',
+        border: `2px solid ${selected ? 'var(--color-accent-blue)' : color}`,
         borderRadius: 10,
         padding: '8px 10px',
-        boxShadow: selected ? '0 0 0 1px rgba(88, 166, 255, 0.2)' : 'none',
+        boxShadow: selected
+          ? '0 0 0 1px color-mix(in srgb, var(--color-accent-blue) 25%, transparent)'
+          : 'none',
       }}
     >
       <Handle type="target" position={targetPos} style={{ width: 7, height: 7, background: color, border: 'none' }} />
@@ -110,7 +112,7 @@ function DagNode({ data, selected }: NodeProps) {
             fontSize: 9,
             fontWeight: 700,
             letterSpacing: '0.04em',
-            color: '#0d1117',
+            color: 'var(--color-bg-primary)',
             background: color,
             borderRadius: 4,
             padding: '2px 6px',
@@ -119,14 +121,14 @@ function DagNode({ data, selected }: NodeProps) {
           {label}
         </span>
         {(data.domain as string | undefined) && (
-          <span style={{ color: '#8b949e', fontSize: 10 }}>
+          <span style={{ color: 'var(--color-text-tertiary)', fontSize: 10 }}>
             {data.domain as string}
           </span>
         )}
       </div>
       <div
         style={{
-          color: '#e6edf3',
+          color: 'var(--color-text-primary)',
           fontSize: 11,
           fontWeight: 600,
           overflow: 'hidden',
@@ -137,7 +139,7 @@ function DagNode({ data, selected }: NodeProps) {
       >
         {data.label as string}
       </div>
-      <div style={{ color: '#8b949e', fontSize: 10, marginTop: 3 }}>
+      <div style={{ color: 'var(--color-text-tertiary)', fontSize: 10, marginTop: 3 }}>
         {TYPE_TITLES[nodeType] ?? nodeType}
       </div>
       <Handle type="source" position={sourcePos} style={{ width: 7, height: 7, background: color, border: 'none' }} />
@@ -163,9 +165,11 @@ function FilterChip({
       onClick={onClick}
       style={{
         borderRadius: 999,
-        border: `1px solid ${active ? color : '#30363d'}`,
-        background: active ? `${color}22` : 'transparent',
-        color: active ? color : '#8b949e',
+        border: `1px solid ${active ? color : 'var(--color-border-primary)'}`,
+        background: active
+          ? `color-mix(in srgb, ${color} 13%, transparent)`
+          : 'transparent',
+        color: active ? color : 'var(--color-text-tertiary)',
         fontSize: 10,
         fontWeight: 700,
         padding: '4px 8px',
@@ -259,12 +263,12 @@ export function LineageDAG() {
       source: edge.source,
       target: edge.target,
       style: {
-        stroke: EDGE_TYPE_COLORS[edge.type] ?? '#8b949e',
+        stroke: EDGE_TYPE_COLORS[edge.type] ?? 'var(--color-text-tertiary)',
         strokeWidth: 1.6,
       },
       markerEnd: {
         type: MarkerType.ArrowClosed,
-        color: EDGE_TYPE_COLORS[edge.type] ?? '#8b949e',
+        color: EDGE_TYPE_COLORS[edge.type] ?? 'var(--color-text-tertiary)',
         width: 12,
         height: 12,
       },
@@ -316,7 +320,7 @@ export function LineageDAG() {
   }
 
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', height: '100%', background: '#0d1117' }}>
+    <div style={{ display: 'flex', flexDirection: 'column', height: '100%', background: 'var(--color-bg-primary)' }}>
       <div style={{ padding: 8, borderBottom: `1px solid ${t.headerBorder}`, background: t.sidebarBg }}>
         {/* Layout toggle + type filters */}
         <div style={{ display: 'flex', gap: 6, marginBottom: 8, flexWrap: 'wrap', alignItems: 'center' }}>
@@ -330,8 +334,8 @@ export function LineageDAG() {
                 fontWeight: 700,
                 border: 'none',
                 cursor: 'pointer',
-                background: layoutMode === 'flow' ? '#30363d' : 'transparent',
-                color: layoutMode === 'flow' ? '#e6edf3' : '#8b949e',
+                background: layoutMode === 'flow' ? 'var(--color-bg-tertiary)' : 'transparent',
+                color: layoutMode === 'flow' ? 'var(--color-text-primary)' : 'var(--color-text-tertiary)',
               }}
             >
               Flow
@@ -345,8 +349,8 @@ export function LineageDAG() {
                 border: 'none',
                 borderLeft: `1px solid ${t.headerBorder}`,
                 cursor: 'pointer',
-                background: layoutMode === 'layered' ? '#30363d' : 'transparent',
-                color: layoutMode === 'layered' ? '#e6edf3' : '#8b949e',
+                background: layoutMode === 'layered' ? 'var(--color-bg-tertiary)' : 'transparent',
+                color: layoutMode === 'layered' ? 'var(--color-text-primary)' : 'var(--color-text-tertiary)',
               }}
             >
               Layered
@@ -363,8 +367,8 @@ export function LineageDAG() {
                 fontWeight: 700,
                 border: 'none',
                 cursor: 'pointer',
-                background: direction === 'LR' ? '#30363d' : 'transparent',
-                color: direction === 'LR' ? '#e6edf3' : '#8b949e',
+                background: direction === 'LR' ? 'var(--color-bg-tertiary)' : 'transparent',
+                color: direction === 'LR' ? 'var(--color-text-primary)' : 'var(--color-text-tertiary)',
                 display: 'flex',
                 alignItems: 'center',
                 gap: 3,
@@ -389,8 +393,8 @@ export function LineageDAG() {
                 border: 'none',
                 borderLeft: `1px solid ${t.headerBorder}`,
                 cursor: 'pointer',
-                background: direction === 'TB' ? '#30363d' : 'transparent',
-                color: direction === 'TB' ? '#e6edf3' : '#8b949e',
+                background: direction === 'TB' ? 'var(--color-bg-tertiary)' : 'transparent',
+                color: direction === 'TB' ? 'var(--color-text-primary)' : 'var(--color-text-tertiary)',
                 display: 'flex',
                 alignItems: 'center',
                 gap: 3,
@@ -424,7 +428,7 @@ export function LineageDAG() {
               padding: '8px 10px',
               borderRadius: 6,
               border: `1px solid ${t.headerBorder}`,
-              background: '#0d1117',
+              background: 'var(--color-bg-sunken)',
               color: t.textPrimary,
               fontSize: 12,
               outline: 'none',
@@ -469,7 +473,7 @@ export function LineageDAG() {
                   cursor: 'pointer',
                 }}
               >
-                <span style={{ color: NODE_TYPE_COLORS[match.node.type] ?? '#8b949e', fontSize: 10, fontWeight: 700, marginRight: 8 }}>
+                <span style={{ color: NODE_TYPE_COLORS[match.node.type] ?? 'var(--color-text-tertiary)', fontSize: 10, fontWeight: 700, marginRight: 8 }}>
                   {TYPE_LABELS[match.node.type] ?? match.node.type.toUpperCase()}
                 </span>
                 {match.node.name}
@@ -490,41 +494,41 @@ export function LineageDAG() {
           fitView
           fitViewOptions={{ padding: 0.18 }}
           proOptions={{ hideAttribution: true }}
-          style={{ background: '#0d1117' }}
+          style={{ background: 'var(--color-bg-primary)' }}
         >
-          <Background color="#21262d" gap={24} size={1} />
+          <Background color="var(--color-border-secondary)" gap={24} size={1} />
           <Controls showInteractive={false} />
           <MiniMap
-            nodeColor={(node) => NODE_TYPE_COLORS[(node.data?.nodeType as string) ?? 'source_table'] ?? '#8b949e'}
-            maskColor="rgba(0,0,0,0.55)"
-            style={{ background: '#0d1117', border: '1px solid #30363d' }}
+            nodeColor={(node) => NODE_TYPE_COLORS[(node.data?.nodeType as string) ?? 'source_table'] ?? 'var(--color-text-tertiary)'}
+            maskColor="color-mix(in srgb, var(--color-bg-primary) 55%, transparent)"
+            style={{ background: 'var(--color-bg-sunken)', border: '1px solid var(--color-border-primary)' }}
           />
 
           <Panel position="top-left">
             <div
               style={{
-                background: 'rgba(13, 17, 23, 0.9)',
-                border: '1px solid #30363d',
+                background: 'color-mix(in srgb, var(--color-bg-card) 92%, transparent)',
+                border: '1px solid var(--color-border-primary)',
                 borderRadius: 8,
                 padding: '8px 10px',
                 minWidth: 220,
-                color: '#e6edf3',
+                color: 'var(--color-text-primary)',
                 fontSize: 12,
               }}
             >
               <div style={{ fontWeight: 700, marginBottom: 4 }}>
                 {focalNode ? focalNode.name : 'Full Lineage View'}
               </div>
-              <div style={{ color: '#8b949e', fontSize: 11 }}>
+              <div style={{ color: 'var(--color-text-tertiary)', fontSize: 11 }}>
                 {graphData.nodes.length} node(s), {graphData.edges.length} edge(s)
               </div>
-              <div style={{ color: '#8b949e', fontSize: 11, marginTop: 6, lineHeight: 1.5 }}>
+              <div style={{ color: 'var(--color-text-tertiary)', fontSize: 11, marginTop: 6, lineHeight: 1.5 }}>
                 {focalNode
                   ? `Focused on ${TYPE_TITLES[focalNode.type] ?? focalNode.type}. Upstream shows provenance from tables/dbt; downstream shows DQL and notebook consumption.`
                   : 'Full project lineage across source tables, dbt, DQL blocks, and notebooks.'}
               </div>
               {selectedNode && selectedSummary && (
-                <div style={{ marginTop: 8, color: '#8b949e', fontSize: 11 }}>
+                <div style={{ marginTop: 8, color: 'var(--color-text-tertiary)', fontSize: 11 }}>
                   {selectedSummary.incoming} upstream, {selectedSummary.outgoing} downstream
                 </div>
               )}
@@ -536,11 +540,11 @@ export function LineageDAG() {
               style={{
                 display: 'flex',
                 gap: 10,
-                background: 'rgba(13, 17, 23, 0.9)',
-                border: '1px solid #30363d',
+                background: 'color-mix(in srgb, var(--color-bg-card) 92%, transparent)',
+                border: '1px solid var(--color-border-primary)',
                 borderRadius: 8,
                 padding: '6px 10px',
-                color: '#8b949e',
+                color: 'var(--color-text-tertiary)',
                 fontSize: 10,
               }}
             >

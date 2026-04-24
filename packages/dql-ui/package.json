@@ -1,6 +1,6 @@
 {
   "name": "@duckcodeailabs/dql-ui",
-  "version": "1.3.0",
+  "version": "1.3.1",
   "description": "Design tokens, theme provider, and headless primitives for the DQL notebook + dashboard shell",
   "license": "Apache-2.0",
   "type": "module",
