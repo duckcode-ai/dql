@@ -26,6 +26,7 @@ import type { Cell, BlockBinding } from '../../store/types';
 import { format as formatSQL } from 'sql-formatter';
 import { api } from '../../api/client';
 import { extractSqlFromText } from '../../utils/block-studio';
+import { CellChrome } from '@duckcodeailabs/dql-ui';
 
 interface CellProps {
   cell: Cell;
@@ -38,6 +39,87 @@ function GutterWrap({ children }: { children: React.ReactNode }) {
       <div style={{ width: 40, flexShrink: 0 }} />
       <div style={{ flex: 1, minWidth: 0 }}>{children}</div>
     </div>
+  );
+}
+
+function CellToolbarWrap({
+  cell,
+  t,
+  onRun,
+  onMoveUp,
+  onMoveDown,
+  onDelete,
+  children,
+}: {
+  cell: Cell;
+  t: Theme;
+  onRun?: () => void;
+  onMoveUp: () => void;
+  onMoveDown: () => void;
+  onDelete: () => void;
+  children: React.ReactNode;
+}) {
+  const [hovered, setHovered] = useState(false);
+  const borderColor = getCellBorderColor(cell, t);
+  const typeColor = TYPE_COLORS[cell.type] ?? t.accent;
+  const title = cell.name ? (
+    <span
+      style={{
+        color: t.textSecondary,
+        fontSize: 12,
+        fontFamily: t.fontMono,
+        overflow: 'hidden',
+        textOverflow: 'ellipsis',
+        whiteSpace: 'nowrap' as const,
+        maxWidth: 200,
+      }}
+    >
+      {cell.name}
+    </span>
+  ) : undefined;
+  const actions = hovered ? (
+    <div style={{ display: 'flex', alignItems: 'center', gap: 2 }}>
+      {onRun && (
+        <HeaderActionBtn title="Run cell (Shift+Enter)" onClick={onRun} t={t} accent>
+          <svg width="11" height="11" viewBox="0 0 10 10" fill="currentColor">
+            <path d="M1.5 1.5l7 3.5-7 3.5V1.5Z" />
+          </svg>
+        </HeaderActionBtn>
+      )}
+      <HeaderActionBtn title="Move up" onClick={onMoveUp} t={t}>
+        <svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor">
+          <path d="M3.47 7.78a.75.75 0 0 1 0-1.06l4.25-4.25a.75.75 0 0 1 1.06 0l4.25 4.25a.75.75 0 0 1-1.06 1.06L8.75 4.81v7.44a.75.75 0 0 1-1.5 0V4.81L4.53 7.78a.75.75 0 0 1-1.06 0Z" />
+        </svg>
+      </HeaderActionBtn>
+      <HeaderActionBtn title="Move down" onClick={onMoveDown} t={t}>
+        <svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor">
+          <path d="M12.53 8.22a.75.75 0 0 1 0 1.06l-4.25 4.25a.75.75 0 0 1-1.06 0L2.97 9.28a.75.75 0 0 1 1.06-1.06l2.72 2.97V3.75a.75.75 0 0 1 1.5 0v7.44l2.72-2.97a.75.75 0 0 1 1.06 0Z" />
+        </svg>
+      </HeaderActionBtn>
+      <HeaderActionBtn title="Delete cell" onClick={onDelete} t={t} danger>
+        <svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor">
+          <path d="M11 1.75V3h2.25a.75.75 0 0 1 0 1.5H2.75a.75.75 0 0 1 0-1.5H5V1.75C5 .784 5.784 0 6.75 0h2.5C10.216 0 11 .784 11 1.75ZM4.496 6.675l.66 6.6a.25.25 0 0 0 .249.225h5.19a.25.25 0 0 0 .249-.225l.66-6.6a.75.75 0 0 1 1.492.149l-.66 6.6A1.748 1.748 0 0 1 10.595 15h-5.19a1.75 1.75 0 0 1-1.741-1.575l-.66-6.6a.75.75 0 1 1 1.492-.15ZM6.5 1.75V3h3V1.75a.25.25 0 0 0-.25-.25h-2.5a.25.25 0 0 0-.25.25Z" />
+        </svg>
+      </HeaderActionBtn>
+    </div>
+  ) : undefined;
+  return (
+    <CellChrome
+      typeLabel={TYPE_LABELS[cell.type] ?? cell.type.toUpperCase()}
+      typeColor={typeColor}
+      accent={borderColor}
+      idleBorder={t.cellBorder}
+      background={t.cellBg}
+      headerBackground={`${t.tableHeaderBg}80`}
+      active={hovered || cell.status !== 'idle'}
+      title={title}
+      actions={actions}
+      gutter={<ExecutionBadge cell={cell} t={t} />}
+      onMouseEnter={() => setHovered(true)}
+      onMouseLeave={() => setHovered(false)}
+    >
+      {children}
+    </CellChrome>
   );
 }
 
@@ -101,12 +183,9 @@ const PLACEHOLDER_META: Partial<Record<string, PlaceholderMeta>> = {
   },
 };
 
-const BOUND_ACCENT = '#56d364';
-const FORKED_ACCENT = '#e3b341';
-
 function getCellBorderColor(cell: Cell, t: Theme): string {
   if (cell.blockBinding) {
-    return cell.blockBinding.state === 'forked' ? FORKED_ACCENT : BOUND_ACCENT;
+    return cell.blockBinding.state === 'forked' ? t.warning : t.success;
   }
   switch (cell.status) {
     case 'running':
@@ -231,7 +310,7 @@ function BlockBindingChip({
   onUnbind: () => void;
 }) {
   const isForked = binding.state === 'forked';
-  const accent = isForked ? FORKED_ACCENT : BOUND_ACCENT;
+  const accent = isForked ? t.warning : t.success;
   const label = isForked ? 'FORKED' : 'BOUND';
   const helpText = isForked
     ? 'Local edits have diverged from the block file — Revert to discard, or Save as Block to promote as a new version.'
@@ -401,6 +480,19 @@ function BlockGovernanceBar({
   );
 }
 
+// v1.3 Track 5 — cell types that are "developer affordances" and collapse
+// to a one-line strip in App mode. Viewer types (markdown, chart, single_value,
+// pivot, table, map, filter) render as today. The plan's full per-type chrome
+// stripping lands in Track 6 along with CellChrome.
+const APP_MODE_HIDDEN_CELL_TYPES = new Set<string>([
+  'sql',
+  'dql',
+  'param',
+  'writeback',
+  'python',
+  'chat',
+]);
+
 export function CellComponent({ cell, index }: CellProps) {
   const { state, dispatch } = useNotebook();
   const t = themes[state.themeMode];
@@ -509,72 +601,6 @@ export function CellComponent({ cell, index }: CellProps) {
     [dispatch, cell.id]
   );
 
-  if (cell.type === 'param') {
-    return (
-      <GutterWrap>
-        <ParamCell cell={cell} themeMode={state.themeMode} onApplyParam={executeDependents} />
-      </GutterWrap>
-    );
-  }
-  if (cell.type === 'pivot') {
-    return (
-      <GutterWrap>
-        <PivotCell cell={cell} cells={state.cells} index={index} themeMode={state.themeMode} onUpdate={onCellUpdate} />
-      </GutterWrap>
-    );
-  }
-  if (cell.type === 'single_value') {
-    return (
-      <GutterWrap>
-        <SingleValueCell cell={cell} cells={state.cells} index={index} themeMode={state.themeMode} onUpdate={onCellUpdate} />
-      </GutterWrap>
-    );
-  }
-  if (cell.type === 'filter') {
-    return (
-      <GutterWrap>
-        <FilterCell cell={cell} cells={state.cells} index={index} themeMode={state.themeMode} onUpdate={onCellUpdate} />
-      </GutterWrap>
-    );
-  }
-  if (cell.type === 'chart') {
-    return (
-      <GutterWrap>
-        <ChartCell cell={cell} cells={state.cells} index={index} themeMode={state.themeMode} onUpdate={onCellUpdate} />
-      </GutterWrap>
-    );
-  }
-  if (cell.type === 'table') {
-    return (
-      <GutterWrap>
-        <TableCell cell={cell} cells={state.cells} index={index} themeMode={state.themeMode} onUpdate={onCellUpdate} />
-      </GutterWrap>
-    );
-  }
-  if (cell.type === 'chat') {
-    return (
-      <GutterWrap>
-        <ChatCell cell={cell} cells={state.cells} index={index} themeMode={state.themeMode} onUpdate={onCellUpdate} />
-      </GutterWrap>
-    );
-  }
-
-  const placeholder = PLACEHOLDER_META[cell.type];
-  if (placeholder) {
-    return (
-      <GutterWrap>
-        <PlaceholderCell
-          cell={cell}
-          themeMode={state.themeMode}
-          title={placeholder.title}
-          subtitle={placeholder.subtitle}
-          color={placeholder.color}
-          badge={placeholder.badge}
-        />
-      </GutterWrap>
-    );
-  }
-
   const handleDelete = () => {
     dispatch({ type: 'DELETE_CELL', id: cell.id });
   };
@@ -586,6 +612,109 @@ export function CellComponent({ cell, index }: CellProps) {
   const handleMoveDown = () => {
     dispatch({ type: 'MOVE_CELL', id: cell.id, direction: 'down' });
   };
+
+  const toolbarProps = {
+    cell,
+    t,
+    onMoveUp: handleMoveUp,
+    onMoveDown: handleMoveDown,
+    onDelete: handleDelete,
+  };
+
+  // v1.3 Track 5 — hidden-in-App-view strip. Placed after all hooks to honor
+  // Rules of Hooks; flipping appMode must not change the hook count.
+  if (state.appMode === 'app' && APP_MODE_HIDDEN_CELL_TYPES.has(cell.type)) {
+    return (
+      <div
+        style={{
+          marginTop: 8,
+          marginBottom: 8,
+          padding: '6px 10px',
+          borderRadius: 6,
+          border: `1px dashed ${t.cellBorder}`,
+          background: t.cellBg,
+          color: t.textMuted,
+          fontSize: 11,
+          fontFamily: t.font,
+          display: 'flex',
+          alignItems: 'center',
+          gap: 8,
+        }}
+      >
+        <span style={{ opacity: 0.7 }}>◎</span>
+        <span>
+          {cell.type.toUpperCase()} cell hidden in App view
+          {cell.name ? ` · ${cell.name}` : ''}
+        </span>
+      </div>
+    );
+  }
+
+  if (cell.type === 'param') {
+    return (
+      <CellToolbarWrap {...toolbarProps} onRun={() => executeDependents(cell.id)}>
+        <ParamCell cell={cell} themeMode={state.themeMode} onApplyParam={executeDependents} />
+      </CellToolbarWrap>
+    );
+  }
+  if (cell.type === 'pivot') {
+    return (
+      <CellToolbarWrap {...toolbarProps}>
+        <PivotCell cell={cell} cells={state.cells} index={index} themeMode={state.themeMode} onUpdate={onCellUpdate} />
+      </CellToolbarWrap>
+    );
+  }
+  if (cell.type === 'single_value') {
+    return (
+      <CellToolbarWrap {...toolbarProps}>
+        <SingleValueCell cell={cell} cells={state.cells} index={index} themeMode={state.themeMode} onUpdate={onCellUpdate} />
+      </CellToolbarWrap>
+    );
+  }
+  if (cell.type === 'filter') {
+    return (
+      <CellToolbarWrap {...toolbarProps}>
+        <FilterCell cell={cell} cells={state.cells} index={index} themeMode={state.themeMode} onUpdate={onCellUpdate} />
+      </CellToolbarWrap>
+    );
+  }
+  if (cell.type === 'chart') {
+    return (
+      <CellToolbarWrap {...toolbarProps}>
+        <ChartCell cell={cell} cells={state.cells} index={index} themeMode={state.themeMode} onUpdate={onCellUpdate} />
+      </CellToolbarWrap>
+    );
+  }
+  if (cell.type === 'table') {
+    return (
+      <CellToolbarWrap {...toolbarProps}>
+        <TableCell cell={cell} cells={state.cells} index={index} themeMode={state.themeMode} onUpdate={onCellUpdate} />
+      </CellToolbarWrap>
+    );
+  }
+  if (cell.type === 'chat') {
+    return (
+      <CellToolbarWrap {...toolbarProps}>
+        <ChatCell cell={cell} cells={state.cells} index={index} themeMode={state.themeMode} onUpdate={onCellUpdate} />
+      </CellToolbarWrap>
+    );
+  }
+
+  const placeholder = PLACEHOLDER_META[cell.type];
+  if (placeholder) {
+    return (
+      <CellToolbarWrap {...toolbarProps}>
+        <PlaceholderCell
+          cell={cell}
+          themeMode={state.themeMode}
+          title={placeholder.title}
+          subtitle={placeholder.subtitle}
+          color={placeholder.color}
+          badge={placeholder.badge}
+        />
+      </CellToolbarWrap>
+    );
+  }
 
   const commitName = () => {
     setNameEditing(false);
@@ -729,7 +858,7 @@ export function CellComponent({ cell, index }: CellProps) {
                     background: 'transparent',
                     border: `1px solid ${t.btnBorder}`,
                     borderRadius: 4,
-                    color: '#f85149',
+                    color: t.error,
                     fontSize: 10,
                     fontFamily: t.font,
                     fontWeight: 600,
@@ -739,7 +868,7 @@ export function CellComponent({ cell, index }: CellProps) {
                     transition: 'color 0.15s, border-color 0.15s',
                   }}
                   onMouseEnter={(e) => {
-                    (e.currentTarget as HTMLButtonElement).style.borderColor = '#f85149';
+                    (e.currentTarget as HTMLButtonElement).style.borderColor = t.error;
                   }}
                   onMouseLeave={(e) => {
                     (e.currentTarget as HTMLButtonElement).style.borderColor = t.btnBorder;

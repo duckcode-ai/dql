@@ -1,4 +1,5 @@
 import React, { useState, useRef, useEffect, useCallback } from 'react';
+import { SegmentedControl } from '@duckcodeailabs/dql-ui';
 import { useNotebook } from '../../store/NotebookStore';
 import { themes } from '../../themes/notebook-theme';
 import type { Theme } from '../../themes/notebook-theme';
@@ -6,8 +7,8 @@ import { api } from '../../api/client';
 import { serializeDqlNotebook } from '../../utils/parse-workbook';
 import { useQueryExecution } from '../../hooks/useQueryExecution';
 import { downloadDashboard } from '../../utils/export-dashboard';
-import { downloadWorkbookDql } from '../../utils/export-workbook-dql';
 import { setBlockName } from '../../utils/block-studio';
+import type { AppMode } from '../../store/types';
 
 function DQLLogo({ t }: { t: Theme }) {
   return (
@@ -49,6 +50,8 @@ export function Header() {
   const [runHover, setRunHover] = useState(false);
   const [saveHover, setSaveHover] = useState(false);
   const [themeHover, setThemeHover] = useState(false);
+  const [themeMenuOpen, setThemeMenuOpen] = useState(false);
+  const themeMenuRef = useRef<HTMLDivElement>(null);
   const [exportHover, setExportHover] = useState(false);
   const [exportDropdownOpen, setExportDropdownOpen] = useState(false);
   const exportDropdownRef = useRef<HTMLDivElement>(null);
@@ -192,9 +195,42 @@ export function Header() {
     return () => clearTimeout(timer);
   }, [state.autoSave, currentDirty, state.activeFile, state.cells, state.blockStudioDraft, handleSave]);
 
-  const toggleTheme = () => {
-    dispatch({ type: 'SET_THEME', mode: state.themeMode === 'dark' ? 'light' : 'dark' });
-  };
+  // v1.3 Track 9 — four Luna themes with a swatch dropdown (replaces cycler).
+  const THEMES: ReadonlyArray<{
+    mode: 'midnight' | 'obsidian' | 'paper' | 'arctic';
+    label: string;
+    glyph: string;
+    swatch: string;
+  }> = [
+    { mode: 'midnight', label: 'Midnight', glyph: '☾', swatch: '#0d1117' },
+    { mode: 'obsidian', label: 'Obsidian', glyph: '●', swatch: '#000000' },
+    { mode: 'paper', label: 'Paper', glyph: '☼', swatch: '#faf8f3' },
+    { mode: 'arctic', label: 'Arctic', glyph: '❄', swatch: '#e8eef4' },
+  ] as const;
+  const currentThemeKey =
+    state.themeMode === 'dark' ? 'midnight'
+    : state.themeMode === 'light' ? 'paper'
+    : state.themeMode;
+  const currentTheme = THEMES.find((t) => t.mode === currentThemeKey) ?? THEMES[0];
+
+  // Close theme menu on outside click / Escape
+  useEffect(() => {
+    if (!themeMenuOpen) return;
+    const onDown = (e: MouseEvent) => {
+      if (themeMenuRef.current && !themeMenuRef.current.contains(e.target as Node)) {
+        setThemeMenuOpen(false);
+      }
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setThemeMenuOpen(false);
+    };
+    document.addEventListener('mousedown', onDown);
+    document.addEventListener('keydown', onKey);
+    return () => {
+      document.removeEventListener('mousedown', onDown);
+      document.removeEventListener('keydown', onKey);
+    };
+  }, [themeMenuOpen]);
 
   const btnBase = {
     height: 28,
@@ -322,48 +358,185 @@ export function Header() {
       {/* Spacer */}
       <div style={{ flex: 1 }} />
 
-      {/* Right: actions */}
+      {/* v1.3 Track 5 — Studio / App mode toggle (shell-level audience split) */}
+      <SegmentedControl<AppMode>
+        options={[
+          { value: 'studio', label: 'Studio' },
+          { value: 'app', label: 'App' },
+        ]}
+        value={state.appMode}
+        onChange={(mode) => dispatch({ type: 'SET_APP_MODE', mode })}
+        size="sm"
+        ariaLabel="View mode"
+      />
+
+      {/* Spacer */}
+      <div style={{ flex: 1 }} />
+
+      {/* Right: actions. v1.3 Track 5 — Run All hidden in App mode. */}
       <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-        {/* Run All */}
-        <button
-          onClick={inNotebookExecutionView ? executeAll : undefined}
-          disabled={!state.activeFile || !inNotebookExecutionView}
-          onMouseEnter={() => setRunHover(true)}
-          onMouseLeave={() => setRunHover(false)}
-          style={{
-            ...btnBase,
-            background: runHover && state.activeFile ? t.accent : t.accent,
-            color: '#ffffff',
-            border: `1px solid ${t.accent}`,
-            opacity: !state.activeFile || !inNotebookExecutionView ? 0.4 : runHover ? 0.9 : 1,
-          }}
-        >
-          <svg width="10" height="10" viewBox="0 0 10 10" fill="currentColor">
-            <path d="M1.5 1.5l7 3.5-7 3.5V1.5Z" />
-          </svg>
-          Run All
-        </button>
+        {state.appMode === 'studio' && (
+          <>
+            {/* Run All */}
+            <button
+              onClick={inNotebookExecutionView ? executeAll : undefined}
+              disabled={!state.activeFile || !inNotebookExecutionView}
+              onMouseEnter={() => setRunHover(true)}
+              onMouseLeave={() => setRunHover(false)}
+              style={{
+                ...btnBase,
+                background: runHover && state.activeFile ? t.accent : t.accent,
+                color: '#ffffff',
+                border: `1px solid ${t.accent}`,
+                opacity: !state.activeFile || !inNotebookExecutionView ? 0.4 : runHover ? 0.9 : 1,
+              }}
+            >
+              <svg width="10" height="10" viewBox="0 0 10 10" fill="currentColor">
+                <path d="M1.5 1.5l7 3.5-7 3.5V1.5Z" />
+              </svg>
+              Run All
+            </button>
 
-        {/* Separator */}
-        <div style={{ width: 1, height: 20, background: t.headerBorder }} />
+            {/* Separator */}
+            <div style={{ width: 1, height: 20, background: t.headerBorder }} />
+          </>
+        )}
 
-        {/* Theme toggle */}
-        <button
-          onClick={toggleTheme}
-          onMouseEnter={() => setThemeHover(true)}
-          onMouseLeave={() => setThemeHover(false)}
-          title={state.themeMode === 'dark' ? 'Switch to light mode' : 'Switch to dark mode'}
-          style={{
-            ...btnBase,
-            background: themeHover ? t.btnHover : t.btnBg,
-            color: t.textSecondary,
-            padding: '0 8px',
-            fontSize: 14,
-          }}
-        >
-          {state.themeMode === 'dark' ? '☀' : '☾'}
-        </button>
+        {/* v1.3 Track 11 — Publish dashboard (App mode only). Emits the same
+            standalone HTML the Studio Export dropdown produces; pairs with the
+            Luna-token parity shipped in the html-emitter. */}
+        {state.appMode === 'app' && (
+          <>
+            <button
+              onClick={() => downloadDashboard(state.notebookTitle || 'dashboard', state.cells)}
+              disabled={!state.activeFile}
+              title="Publish dashboard (standalone HTML)"
+              style={{
+                ...btnBase,
+                background: t.accent,
+                color: '#ffffff',
+                border: `1px solid ${t.accent}`,
+                opacity: !state.activeFile ? 0.4 : 1,
+              }}
+            >
+              <svg width="11" height="11" viewBox="0 0 16 16" fill="currentColor">
+                <path d="M2.75 14A1.75 1.75 0 0 1 1 12.25v-2.5a.75.75 0 0 1 1.5 0v2.5c0 .138.112.25.25.25h10.5a.25.25 0 0 0 .25-.25v-2.5a.75.75 0 0 1 1.5 0v2.5A1.75 1.75 0 0 1 13.25 14Z" />
+                <path d="M7.25 7.689V2a.75.75 0 0 1 1.5 0v5.689l1.97-1.97a.749.749 0 1 1 1.06 1.06l-3.25 3.25a.749.749 0 0 1-1.06 0L4.22 6.779a.749.749 0 1 1 1.06-1.06l1.97 1.97Z" />
+              </svg>
+              Publish
+            </button>
+            <div style={{ width: 1, height: 20, background: t.headerBorder }} />
+          </>
+        )}
 
+        {/* Theme dropdown — pick Midnight / Obsidian / Paper / Arctic */}
+        <div ref={themeMenuRef} style={{ position: 'relative' }}>
+          <button
+            onClick={() => setThemeMenuOpen((o) => !o)}
+            onMouseEnter={() => setThemeHover(true)}
+            onMouseLeave={() => setThemeHover(false)}
+            title={`Theme: ${currentTheme.label}`}
+            aria-haspopup="true"
+            aria-expanded={themeMenuOpen}
+            style={{
+              ...btnBase,
+              background: themeHover || themeMenuOpen ? t.btnHover : t.btnBg,
+              color: t.textSecondary,
+              padding: '0 10px',
+              fontSize: 12,
+              display: 'flex',
+              alignItems: 'center',
+              gap: 6,
+            }}
+          >
+            <span
+              style={{
+                width: 12,
+                height: 12,
+                borderRadius: 3,
+                background: currentTheme.swatch,
+                border: `1px solid ${t.headerBorder}`,
+                flexShrink: 0,
+              }}
+            />
+            <span style={{ fontFamily: t.fontMono, fontSize: 10, letterSpacing: '0.04em' }}>
+              {currentTheme.label}
+            </span>
+            <span style={{ fontSize: 8, color: t.textMuted }}>▾</span>
+          </button>
+          {themeMenuOpen && (
+            <div
+              role="menu"
+              style={{
+                position: 'absolute',
+                top: '100%',
+                right: 0,
+                marginTop: 4,
+                minWidth: 160,
+                background: t.headerBg,
+                border: `1px solid ${t.headerBorder}`,
+                borderRadius: 6,
+                boxShadow: '0 8px 24px rgba(0,0,0,0.32)',
+                padding: 4,
+                zIndex: 1000,
+                display: 'flex',
+                flexDirection: 'column',
+                gap: 1,
+              }}
+            >
+              {THEMES.map((th) => {
+                const active = th.mode === currentThemeKey;
+                return (
+                  <button
+                    key={th.mode}
+                    role="menuitemradio"
+                    aria-checked={active}
+                    onClick={() => {
+                      dispatch({ type: 'SET_THEME', mode: th.mode });
+                      setThemeMenuOpen(false);
+                    }}
+                    style={{
+                      display: 'flex',
+                      alignItems: 'center',
+                      gap: 8,
+                      padding: '6px 8px',
+                      border: 'none',
+                      background: active ? t.btnHover : 'transparent',
+                      color: t.textPrimary,
+                      cursor: 'pointer',
+                      borderRadius: 4,
+                      fontSize: 12,
+                      fontFamily: t.font,
+                      textAlign: 'left',
+                    }}
+                    onMouseEnter={(e) => {
+                      if (!active) (e.currentTarget as HTMLButtonElement).style.background = t.btnHover;
+                    }}
+                    onMouseLeave={(e) => {
+                      if (!active) (e.currentTarget as HTMLButtonElement).style.background = 'transparent';
+                    }}
+                  >
+                    <span
+                      style={{
+                        width: 14,
+                        height: 14,
+                        borderRadius: 3,
+                        background: th.swatch,
+                        border: `1px solid ${t.headerBorder}`,
+                        flexShrink: 0,
+                      }}
+                    />
+                    <span style={{ flex: 1 }}>{th.label}</span>
+                    {active && <span style={{ color: t.accent, fontSize: 11 }}>✓</span>}
+                  </button>
+                );
+              })}
+            </div>
+          )}
+        </div>
+
+        {state.appMode === 'studio' && (
+          <>
         {/* Save */}
         <button
           onClick={handleSave}
@@ -489,18 +662,11 @@ export function Header() {
                   setExportDropdownOpen(false);
                 }}
               />
-              <ExportMenuItem
-                label="Export .dql"
-                description="DQL workbook file"
-                t={t}
-                onClick={() => {
-                  downloadWorkbookDql(state.notebookTitle || 'notebook', state.cells);
-                  setExportDropdownOpen(false);
-                }}
-              />
             </div>
           )}
         </div>
+          </>
+        )}
       </div>
     </div>
   );

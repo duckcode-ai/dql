@@ -1,5 +1,6 @@
 import type { Theme } from '../../themes/notebook-theme';
 import React, { useMemo, useState } from 'react';
+import { PanelFrame, PanelToolbar, PanelEmpty } from '@duckcodeailabs/dql-ui';
 import { useNotebook } from '../../store/NotebookStore';
 import { themes } from '../../themes/notebook-theme';
 import { api } from '../../api/client';
@@ -87,101 +88,68 @@ export function SchemaPanel() {
     boxSizing: 'border-box',
   };
 
-  return (
-    <div
+  const refreshAction = (
+    <button
+      onClick={handleRefresh}
+      onMouseEnter={() => setRefreshHover(true)}
+      onMouseLeave={() => setRefreshHover(false)}
+      title="Refresh schema"
       style={{
-        flex: 1,
-        overflow: 'auto',
+        background: refreshHover ? t.btnHover : 'transparent',
+        border: `1px solid ${t.btnBorder}`,
+        borderRadius: 6,
+        cursor: 'pointer',
+        color: refreshHover ? t.textSecondary : t.textMuted,
+        fontSize: 11,
+        fontFamily: t.font,
+        padding: '6px 8px',
         display: 'flex',
-        flexDirection: 'column',
+        alignItems: 'center',
+        gap: 4,
+        transition: 'all 0.15s',
       }}
     >
-      {/* Toolbar */}
-      <div
-        style={{
-          padding: '10px',
-          display: 'grid',
-          gap: 10,
-          borderBottom: `1px solid ${t.headerBorder}`,
-        }}
-      >
-        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8 }}>
-          <div>
-            <div style={{ fontSize: 12, fontWeight: 700, color: t.textPrimary, fontFamily: t.font }}>Database Catalog</div>
-            <div style={{ fontSize: 11, color: t.textMuted, fontFamily: t.font }}>
-              Browse schemas, tables, views, and loaded columns from the active connection.
-            </div>
-          </div>
-          <button
-            onClick={handleRefresh}
-            onMouseEnter={() => setRefreshHover(true)}
-            onMouseLeave={() => setRefreshHover(false)}
-            title="Refresh schema"
-            style={{
-              background: refreshHover ? t.btnHover : 'transparent',
-              border: `1px solid ${refreshHover ? t.btnBorder : t.btnBorder}`,
-              borderRadius: 6,
-              cursor: 'pointer',
-              color: refreshHover ? t.textSecondary : t.textMuted,
-              fontSize: 11,
-              fontFamily: t.font,
-              padding: '6px 8px',
-              display: 'flex',
-              alignItems: 'center',
-              gap: 4,
-              transition: 'all 0.15s',
-            }}
-          >
-            <svg width="11" height="11" viewBox="0 0 16 16" fill="currentColor">
-              <path d="M1.705 8.005a.75.75 0 0 1 .834.656 5.5 5.5 0 0 0 9.592 2.97l-1.204-1.204a.25.25 0 0 1 .177-.427h3.646a.25.25 0 0 1 .25.25v3.646a.25.25 0 0 1-.427.177l-1.38-1.38A7.002 7.002 0 0 1 1.05 8.84a.75.75 0 0 1 .656-.834ZM8 2.5a5.487 5.487 0 0 0-4.131 1.869l1.204 1.204A.25.25 0 0 1 4.896 6H1.25A.25.25 0 0 1 1 5.75V2.104a.25.25 0 0 1 .427-.177l1.38 1.38A7.002 7.002 0 0 1 14.95 7.16a.75.75 0 0 1-1.49.178A5.5 5.5 0 0 0 8 2.5Z" />
-            </svg>
-            Refresh
-          </button>
-        </div>
-        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, minmax(0, 1fr))', gap: 8 }}>
-          <CatalogStat label="Schemas" value={stats.schemas} t={t} />
-          <CatalogStat label="Tables" value={stats.tables} t={t} />
-          <CatalogStat label="Columns" value={stats.columns} t={t} />
-        </div>
-        <input
-          value={query}
-          onChange={(event) => setQuery(event.target.value)}
-          placeholder="Search schemas, tables, columns..."
-          style={inputStyle}
-        />
+      <svg width="11" height="11" viewBox="0 0 16 16" fill="currentColor">
+        <path d="M1.705 8.005a.75.75 0 0 1 .834.656 5.5 5.5 0 0 0 9.592 2.97l-1.204-1.204a.25.25 0 0 1 .177-.427h3.646a.25.25 0 0 1 .25.25v3.646a.25.25 0 0 1-.427.177l-1.38-1.38A7.002 7.002 0 0 1 1.05 8.84a.75.75 0 0 1 .656-.834ZM8 2.5a5.487 5.487 0 0 0-4.131 1.869l1.204 1.204A.25.25 0 0 1 4.896 6H1.25A.25.25 0 0 1 1 5.75V2.104a.25.25 0 0 1 .427-.177l1.38 1.38A7.002 7.002 0 0 1 14.95 7.16a.75.75 0 0 1-1.49.178A5.5 5.5 0 0 0 8 2.5Z" />
+      </svg>
+      Refresh
+    </button>
+  );
+
+  const toolbar = (
+    <PanelToolbar>
+      <input
+        value={query}
+        onChange={(event) => setQuery(event.target.value)}
+        placeholder="Search schemas, tables, columns..."
+        style={{ ...inputStyle, flex: 1, minWidth: 100 }}
+      />
+    </PanelToolbar>
+  );
+
+  return (
+    <PanelFrame
+      title="Database Catalog"
+      subtitle="Schemas, tables, views, and columns from the active connection."
+      actions={refreshAction}
+      toolbar={toolbar}
+      bodyPadding={0}
+    >
+      <div style={{ padding: 10, borderBottom: `1px solid ${t.headerBorder}`, display: 'grid', gridTemplateColumns: 'repeat(3, minmax(0, 1fr))', gap: 8 }}>
+        <CatalogStat label="Schemas" value={stats.schemas} t={t} />
+        <CatalogStat label="Tables" value={stats.tables} t={t} />
+        <CatalogStat label="Columns" value={stats.columns} t={t} />
       </div>
 
-      {/* Content */}
       {state.schemaLoading ? (
         <Skeleton t={t} />
       ) : state.schemaTables.length === 0 ? (
-        <div
-          style={{
-            padding: '24px 14px',
-            color: t.textMuted,
-            fontSize: 12,
-            fontFamily: t.font,
-            textAlign: 'center',
-            fontStyle: 'italic',
-          }}
-        >
-          No tables found.
-          <br />
-          Connect a data source to explore schema.
-        </div>
+        <PanelEmpty
+          title="No tables found"
+          description="Connect a data source to explore schema."
+        />
       ) : filteredTables.length === 0 ? (
-        <div
-          style={{
-            padding: '24px 14px',
-            color: t.textMuted,
-            fontSize: 12,
-            fontFamily: t.font,
-            textAlign: 'center',
-            fontStyle: 'italic',
-          }}
-        >
-          No database objects match the current search.
-        </div>
+        <PanelEmpty title="No matches" description="No database objects match the current search." />
       ) : (
         <div style={{ overflow: 'auto', flex: 1 }}>
           {groupedTables.map(([schemaName, tables]) => (
@@ -206,7 +174,7 @@ export function SchemaPanel() {
           ))}
         </div>
       )}
-    </div>
+    </PanelFrame>
   );
 }
 

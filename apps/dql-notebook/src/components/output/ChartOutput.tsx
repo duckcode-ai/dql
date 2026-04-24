@@ -1,11 +1,12 @@
 import React, { useState } from 'react';
 import { themes } from '../../themes/notebook-theme';
+import type { ThemeMode } from '../../themes/notebook-theme';
 import { TableOutput } from './TableOutput';
 import type { QueryResult, CellChartConfig } from '../../store/types';
 
 interface ChartOutputProps {
   result: QueryResult;
-  themeMode: 'dark' | 'light';
+  themeMode: ThemeMode;
   chartConfig?: CellChartConfig;  // Explicit config from DQL visualization block
 }
 
@@ -173,7 +174,7 @@ type ThemeRef = ReturnType<typeof themes['dark'] extends infer T ? () => T : nev
 
 const DEFAULT_MAX_ITEMS = 20;
 
-function BarChart({ result, themeMode, chartConfig }: { result: QueryResult; themeMode: 'dark' | 'light'; chartConfig?: CellChartConfig }) {
+function BarChart({ result, themeMode, chartConfig }: { result: QueryResult; themeMode: ThemeMode; chartConfig?: CellChartConfig }) {
   const t = themes[themeMode];
   const [hoveredIdx, setHoveredIdx] = useState<number | null>(null);
   const { labelCol, valueCol } = pickColumns(result, chartConfig);
@@ -222,7 +223,7 @@ function BarChart({ result, themeMode, chartConfig }: { result: QueryResult; the
 
 // ─── Grouped Bar Chart ───────────────────────────────────────────────────────
 
-function GroupedBarChart({ result, themeMode, chartConfig }: { result: QueryResult; themeMode: 'dark' | 'light'; chartConfig?: CellChartConfig }) {
+function GroupedBarChart({ result, themeMode, chartConfig }: { result: QueryResult; themeMode: ThemeMode; chartConfig?: CellChartConfig }) {
   const t = themes[themeMode];
   const [hoveredIdx, setHoveredIdx] = useState<string | null>(null);
 
@@ -288,7 +289,7 @@ function GroupedBarChart({ result, themeMode, chartConfig }: { result: QueryResu
 
 // ─── Stacked Bar Chart ───────────────────────────────────────────────────────
 
-function StackedBarChart({ result, themeMode, chartConfig }: { result: QueryResult; themeMode: 'dark' | 'light'; chartConfig?: CellChartConfig }) {
+function StackedBarChart({ result, themeMode, chartConfig }: { result: QueryResult; themeMode: ThemeMode; chartConfig?: CellChartConfig }) {
   const t = themes[themeMode];
   const [hoveredIdx, setHoveredIdx] = useState<string | null>(null);
 
@@ -355,7 +356,7 @@ function StackedBarChart({ result, themeMode, chartConfig }: { result: QueryResu
 
 // ─── Line Chart ───────────────────────────────────────────────────────────────
 
-function LineChart({ result, themeMode, showArea }: { result: QueryResult; themeMode: 'dark' | 'light'; showArea?: boolean }) {
+function LineChart({ result, themeMode, showArea }: { result: QueryResult; themeMode: ThemeMode; showArea?: boolean }) {
   const t = themes[themeMode];
   const [tooltip, setTooltip] = useState<{ x: number; y: number; label: string; value: number } | null>(null);
 
@@ -438,7 +439,7 @@ function LineChart({ result, themeMode, showArea }: { result: QueryResult; theme
 
 // ─── Scatter Plot ─────────────────────────────────────────────────────────────
 
-function ScatterChart({ result, themeMode, chartConfig }: { result: QueryResult; themeMode: 'dark' | 'light'; chartConfig?: CellChartConfig }) {
+function ScatterChart({ result, themeMode, chartConfig }: { result: QueryResult; themeMode: ThemeMode; chartConfig?: CellChartConfig }) {
   const t = themes[themeMode];
   const [hoveredIdx, setHoveredIdx] = useState<number | null>(null);
 
@@ -534,7 +535,7 @@ function ScatterChart({ result, themeMode, chartConfig }: { result: QueryResult;
 
 const MAX_PIE_SLICES = 12;
 
-function PieDonutChart({ result, themeMode, chartConfig, isDonut }: { result: QueryResult; themeMode: 'dark' | 'light'; chartConfig?: CellChartConfig; isDonut: boolean }) {
+function PieDonutChart({ result, themeMode, chartConfig, isDonut }: { result: QueryResult; themeMode: ThemeMode; chartConfig?: CellChartConfig; isDonut: boolean }) {
   const t = themes[themeMode];
   const [hoveredIdx, setHoveredIdx] = useState<number | null>(null);
   const { labelCol, valueCol } = pickColumns(result, chartConfig);
@@ -603,7 +604,7 @@ function PieDonutChart({ result, themeMode, chartConfig, isDonut }: { result: Qu
 
 // ─── Heatmap ──────────────────────────────────────────────────────────────────
 
-function HeatmapChart({ result, themeMode }: { result: QueryResult; themeMode: 'dark' | 'light' }) {
+function HeatmapChart({ result, themeMode }: { result: QueryResult; themeMode: ThemeMode }) {
   const t = themes[themeMode];
   const [hovered, setHovered] = useState<{ r: number; c: number } | null>(null);
 
@@ -676,7 +677,7 @@ function HeatmapChart({ result, themeMode }: { result: QueryResult; themeMode: '
 
 // ─── Histogram ────────────────────────────────────────────────────────────────
 
-function HistogramChart({ result, themeMode, chartConfig }: { result: QueryResult; themeMode: 'dark' | 'light'; chartConfig?: CellChartConfig }) {
+function HistogramChart({ result, themeMode, chartConfig }: { result: QueryResult; themeMode: ThemeMode; chartConfig?: CellChartConfig }) {
   const t = themes[themeMode];
   const [hoveredIdx, setHoveredIdx] = useState<number | null>(null);
 
@@ -762,7 +763,7 @@ function HistogramChart({ result, themeMode, chartConfig }: { result: QueryResul
 
 // ─── Funnel Chart ─────────────────────────────────────────────────────────────
 
-function FunnelChart({ result, themeMode, chartConfig }: { result: QueryResult; themeMode: 'dark' | 'light'; chartConfig?: CellChartConfig }) {
+function FunnelChart({ result, themeMode, chartConfig }: { result: QueryResult; themeMode: ThemeMode; chartConfig?: CellChartConfig }) {
   const t = themes[themeMode];
   const [hoveredIdx, setHoveredIdx] = useState<number | null>(null);
   const { labelCol, valueCol } = pickColumns(result, chartConfig);
@@ -812,7 +813,7 @@ function FunnelChart({ result, themeMode, chartConfig }: { result: QueryResult; 
 
 // ─── Waterfall Chart ──────────────────────────────────────────────────────────
 
-function WaterfallChart({ result, themeMode, chartConfig }: { result: QueryResult; themeMode: 'dark' | 'light'; chartConfig?: CellChartConfig }) {
+function WaterfallChart({ result, themeMode, chartConfig }: { result: QueryResult; themeMode: ThemeMode; chartConfig?: CellChartConfig }) {
   const t = themes[themeMode];
   const [hoveredIdx, setHoveredIdx] = useState<number | null>(null);
   const { labelCol, valueCol } = pickColumns(result, chartConfig);
@@ -901,7 +902,7 @@ function WaterfallChart({ result, themeMode, chartConfig }: { result: QueryResul
 
 // ─── Gauge Chart ──────────────────────────────────────────────────────────────
 
-function GaugeChart({ result, themeMode, chartConfig }: { result: QueryResult; themeMode: 'dark' | 'light'; chartConfig?: CellChartConfig }) {
+function GaugeChart({ result, themeMode, chartConfig }: { result: QueryResult; themeMode: ThemeMode; chartConfig?: CellChartConfig }) {
   const t = themes[themeMode];
 
   const row = result.rows[0];
@@ -960,7 +961,7 @@ function GaugeChart({ result, themeMode, chartConfig }: { result: QueryResult; t
 
 // ─── KPI Card ─────────────────────────────────────────────────────────────────
 
-function KpiCard({ result, themeMode, chartConfig }: { result: QueryResult; themeMode: 'dark' | 'light'; chartConfig?: CellChartConfig }) {
+function KpiCard({ result, themeMode, chartConfig }: { result: QueryResult; themeMode: ThemeMode; chartConfig?: CellChartConfig }) {
   const t = themes[themeMode];
   const row = result.rows[0];
   if (!row) return null;
@@ -1123,7 +1124,7 @@ export function ChartOutput({ result, themeMode, chartConfig, onConfigChange }: 
   );
 }
 
-export function renderChart(chartType: ChartType, result: QueryResult, themeMode: 'dark' | 'light', chartConfig?: CellChartConfig): React.ReactElement | null {
+export function renderChart(chartType: ChartType, result: QueryResult, themeMode: ThemeMode, chartConfig?: CellChartConfig): React.ReactElement | null {
   // Reorder columns based on explicit config
   const xCol = chartConfig?.x && result.columns.includes(chartConfig.x) ? chartConfig.x : undefined;
   const yCol = chartConfig?.y && result.columns.includes(chartConfig.y) ? chartConfig.y : undefined;

@@ -1,11 +1,11 @@
 import React from 'react';
-import { themes } from '../../themes/notebook-theme';
+import { themes, type ThemeMode } from '../../themes/notebook-theme';
 import { parseQueryError } from '../../utils/parse-error';
 import type { SchemaTable } from '../../store/types';
 
 interface ErrorOutputProps {
   message: string;
-  themeMode: 'dark' | 'light';
+  themeMode: ThemeMode;
   onFix?: () => void;
   schemaTables?: SchemaTable[];
 }

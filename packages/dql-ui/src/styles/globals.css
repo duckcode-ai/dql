@@ -1,0 +1,508 @@
+@import "tailwindcss";
+@import "./tokens.css";
+@import "./panel.css";
+
+/* ──────────────────────────────────────────────────────────────────────────
+   DQL — Luna-class design tokens (ported from DataLex).
+   Organized by role, not value. Components reference tokens, not literals.
+   Luna CSS vars are declared in tokens.css under [data-theme="…"]. The
+   @theme block below bridges them into Tailwind 4 utilities so every
+   utility class (`bg-bg-primary`, `text-text-secondary`, `border-border-subtle`,
+   `bg-accent-blue`) resolves to a Luna var at runtime — switching
+   [data-theme] on <html> re-skins every surface simultaneously.
+   ────────────────────────────────────────────────────────────────────────── */
+
+@theme {
+  /* ──────────────────────────────────────────────────────────────────
+     Semantic tokens bridge to Luna CSS vars (declared in
+     datalex-design.css under [data-theme="…"]). This means every
+     Tailwind utility like `bg-bg-secondary`, `text-text-primary`,
+     `border-border-primary`, `bg-accent-blue` resolves to a Luna
+     variable at runtime — so switching theme updates ALL surfaces
+     (panels, dialogs, legacy components) live, not just the root shell.
+     ────────────────────────────────────────────────────────────────── */
+
+  /* Surfaces */
+  --color-bg-primary:   var(--bg-1);
+  --color-bg-secondary: var(--bg-2);
+  --color-bg-tertiary:  var(--bg-3);
+  --color-bg-surface:   var(--bg-2);
+  --color-bg-elevated:  var(--bg-3);
+  --color-bg-sunken:    var(--bg-0);
+  --color-bg-hover:     var(--bg-3);
+  --color-bg-active:    var(--accent-dim);
+  --color-bg-card:      var(--bg-2);
+  --color-bg-toolbar:   var(--bg-1);
+  --color-bg-canvas:    var(--bg-canvas);
+  --color-bg-overlay:   var(--scrim);
+
+  /* Borders */
+  --color-border-primary:   var(--border-default);
+  --color-border-secondary: var(--border-strong);
+  --color-border-subtle:    var(--border-subtle);
+  --color-border-strong:    var(--border-strong);
+  --color-border-accent:    var(--accent);
+  --color-border-focus:     var(--border-focus);
+
+  /* Text */
+  --color-text-primary:   var(--text-primary);
+  --color-text-secondary: var(--text-secondary);
+  --color-text-tertiary:  var(--text-tertiary);
+  --color-text-muted:     var(--text-muted);
+  --color-text-subtle:    var(--text-muted);
+  --color-text-accent:    var(--accent);
+  --color-text-on-accent: var(--accent-fg);
+
+  /* Accents */
+  --color-accent-blue:        var(--accent);
+  --color-accent-blue-soft:   var(--accent-dim);
+  --color-accent-green:       var(--cat-billing);
+  --color-accent-green-soft:  var(--cat-billing-soft);
+  --color-accent-yellow:      var(--pk);
+  --color-accent-yellow-soft: rgba(245, 181, 68, 0.14);
+  --color-accent-red:         #ef4444;
+  --color-accent-red-soft:    rgba(239, 68, 68, 0.14);
+  --color-accent-purple:      var(--cat-users);
+  --color-accent-purple-soft: var(--cat-users-soft);
+  --color-accent-orange:      var(--cat-product);
+  --color-accent-orange-soft: var(--cat-product-soft);
+  --color-accent-cyan:        var(--cat-audit);
+  --color-accent-cyan-soft:   var(--cat-audit-soft);
+  --color-accent-pink:        var(--cat-access);
+  --color-accent-pink-soft:   var(--cat-access-soft);
+  --color-accent-teal:        var(--idx);
+  --color-accent-teal-soft:   rgba(78, 201, 176, 0.14);
+
+  /* Status — resolve to per-theme --status-* vars from tokens.css so paper/arctic
+     surface their tuned print-house tones instead of dark-theme defaults. */
+  --color-status-success: var(--status-success);
+  --color-status-warning: var(--status-warning);
+  --color-status-error:   var(--status-error);
+  --color-status-info:    var(--accent);
+
+  /* Cardinality (edge colors) */
+  --color-cardinality-one-one: #16a34a;
+  --color-cardinality-one-many: #2563eb;
+  --color-cardinality-many-one: #9333ea;
+  --color-cardinality-many-many: #ea580c;
+
+  /* Object-type glyph colors (left tree icons + node headers) */
+  --color-ot-table: #3b82f6;
+  --color-ot-view: #8b5cf6;
+  --color-ot-enum: #d946ef;
+  --color-ot-function: #14b8a6;
+  --color-ot-procedure: #0891b2;
+  --color-ot-domain: #7c3aed;
+  --color-ot-sequence: #f59e0b;
+  --color-ot-trigger: #ef4444;
+  --color-ot-policy: #64748b;
+  --color-ot-rule: #0ea5e9;
+  --color-ot-fact: #2563eb;
+  --color-ot-dimension: #7c3aed;
+  --color-ot-bridge: #db2777;
+  --color-ot-hub: #059669;
+  --color-ot-link: #f59e0b;
+  --color-ot-satellite: #0891b2;
+
+  /* Shadows */
+  --shadow-xs: 0 1px 0 rgba(15, 23, 42, 0.04);
+  --shadow-sm: 0 1px 2px rgba(15, 23, 42, 0.06), 0 1px 1px rgba(15, 23, 42, 0.04);
+  --shadow-md: 0 4px 8px -2px rgba(15, 23, 42, 0.06), 0 2px 4px -1px rgba(15, 23, 42, 0.04);
+  --shadow-lg: 0 10px 20px -4px rgba(15, 23, 42, 0.08), 0 4px 8px -2px rgba(15, 23, 42, 0.04);
+  --shadow-xl: 0 20px 40px -8px rgba(15, 23, 42, 0.12);
+  --shadow-focus: 0 0 0 2px rgba(59, 130, 246, 0.35);
+
+  /* Radii (8px grid) */
+  --radius-xs: 4px;
+  --radius-sm: 6px;
+  --radius-md: 8px;
+  --radius-lg: 12px;
+  --radius-xl: 16px;
+  --radius-pill: 999px;
+
+  /* Spacing (8 px grid) */
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 20px;
+  --space-6: 24px;
+  --space-8: 32px;
+  --space-10: 40px;
+  --space-12: 48px;
+
+  /* Type scale */
+  --text-2xs: 10px;
+  --text-xs: 11px;
+  --text-sm: 12px;
+  --text-base: 13px;
+  --text-md: 14px;
+  --text-lg: 16px;
+  --text-xl: 18px;
+  --text-2xl: 22px;
+
+  /* Font weights */
+  --weight-regular: 400;
+  --weight-medium: 500;
+  --weight-semibold: 600;
+  --weight-bold: 700;
+
+  /* Line heights */
+  --leading-tight: 1.2;
+  --leading-snug: 1.35;
+  --leading-normal: 1.5;
+  --leading-relaxed: 1.7;
+}
+
+/* ──────────────────────────────────────────────────────────────────────────
+   Legacy dark theme — retained for back-compat. Luna themes
+   (midnight/obsidian/paper/arctic) live in datalex-design.css and drive
+   all semantic tokens via var() bridges above.
+   ────────────────────────────────────────────────────────────────────────── */
+
+/* ──────────────────────────────────────────────────────────────────────────
+   Base
+   ────────────────────────────────────────────────────────────────────────── */
+
+@layer base {
+  * {
+    box-sizing: border-box;
+  }
+
+  html {
+    font-size: 14px;
+  }
+
+  body {
+    margin: 0;
+    font-family: 'Plus Jakarta Sans', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+    font-size: var(--text-base);
+    font-weight: var(--weight-regular);
+    line-height: var(--leading-normal);
+    letter-spacing: -0.005em;
+    background: var(--color-bg-primary);
+    color: var(--color-text-primary);
+    min-height: 100vh;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    text-rendering: optimizeLegibility;
+    font-feature-settings: "cv01", "cv02", "cv03", "ss01";
+  }
+
+  [data-theme="light"] body,
+  body:not([data-theme]) {
+    background:
+      radial-gradient(circle at 0% 0%, rgba(148, 200, 255, 0.14) 0%, transparent 28%),
+      radial-gradient(circle at 100% 0%, rgba(176, 237, 255, 0.16) 0%, transparent 34%),
+      var(--color-bg-primary);
+  }
+
+  [data-theme="dark"] body {
+    background: var(--color-bg-primary);
+  }
+
+  #root {
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+  }
+
+  code,
+  pre,
+  .font-mono {
+    font-family: 'JetBrains Mono', 'SFMono-Regular', Menlo, Monaco, Consolas, monospace;
+    font-feature-settings: "liga" 0, "calt" 1;
+  }
+
+  ::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+  }
+
+  ::-webkit-scrollbar-track {
+    background: transparent;
+  }
+
+  ::-webkit-scrollbar-thumb {
+    background: var(--color-border-secondary);
+    border-radius: 5px;
+    border: 2px solid transparent;
+    background-clip: padding-box;
+  }
+
+  ::-webkit-scrollbar-thumb:hover {
+    background: var(--color-border-strong);
+    background-clip: padding-box;
+    border: 2px solid transparent;
+  }
+
+  ::selection {
+    background: rgba(59, 130, 246, 0.22);
+    color: var(--color-text-primary);
+  }
+
+  *:focus-visible {
+    outline: none;
+    box-shadow: var(--shadow-focus);
+    border-radius: 4px;
+  }
+
+  /* Remove default focus for buttons that set their own ring */
+  button:focus:not(:focus-visible) {
+    outline: none;
+  }
+}
+
+/* ──────────────────────────────────────────────────────────────────────────
+   Typography utilities (semantic roles)
+   ────────────────────────────────────────────────────────────────────────── */
+
+.t-display {
+  font-size: var(--text-2xl);
+  line-height: var(--leading-tight);
+  font-weight: var(--weight-semibold);
+  letter-spacing: -0.02em;
+  color: var(--color-text-primary);
+}
+
+.t-title {
+  font-size: var(--text-lg);
+  line-height: var(--leading-snug);
+  font-weight: var(--weight-semibold);
+  letter-spacing: -0.01em;
+  color: var(--color-text-primary);
+}
+
+.t-subtitle {
+  font-size: var(--text-md);
+  line-height: var(--leading-snug);
+  font-weight: var(--weight-semibold);
+  color: var(--color-text-primary);
+}
+
+.t-body {
+  font-size: var(--text-base);
+  line-height: var(--leading-normal);
+  font-weight: var(--weight-regular);
+  color: var(--color-text-secondary);
+}
+
+.t-label {
+  font-size: var(--text-sm);
+  line-height: var(--leading-snug);
+  font-weight: var(--weight-medium);
+  color: var(--color-text-primary);
+}
+
+.t-caption {
+  font-size: var(--text-xs);
+  line-height: var(--leading-snug);
+  font-weight: var(--weight-regular);
+  color: var(--color-text-muted);
+}
+
+.t-overline {
+  font-size: var(--text-2xs);
+  line-height: var(--leading-tight);
+  font-weight: var(--weight-semibold);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--color-text-muted);
+}
+
+.t-mono {
+  font-family: 'JetBrains Mono', 'SFMono-Regular', Menlo, Monaco, Consolas, monospace;
+  font-size: var(--text-sm);
+  color: var(--color-text-secondary);
+}
+
+/* ──────────────────────────────────────────────────────────────────────────
+   Reusable primitives
+   ────────────────────────────────────────────────────────────────────────── */
+
+/* Toolbar button — low-contrast icon button used in TopBar groups */
+.dl-toolbar-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 28px;
+  padding: 0 8px;
+  border-radius: var(--radius-sm);
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--color-text-secondary);
+  font-size: var(--text-sm);
+  font-weight: var(--weight-medium);
+  line-height: 1;
+  cursor: pointer;
+  transition: background 120ms ease, color 120ms ease, border-color 120ms ease;
+  user-select: none;
+}
+
+.dl-toolbar-btn:hover {
+  background: var(--color-bg-hover);
+  color: var(--color-text-primary);
+}
+
+.dl-toolbar-btn:active {
+  background: var(--color-bg-active);
+}
+
+.dl-toolbar-btn[disabled],
+.dl-toolbar-btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.dl-toolbar-btn--primary {
+  background: var(--color-accent-blue);
+  color: var(--color-text-on-accent);
+  border-color: var(--color-accent-blue);
+}
+
+.dl-toolbar-btn--primary:hover {
+  background: #2563eb;
+  color: var(--color-text-on-accent);
+}
+
+.dl-toolbar-btn--ghost-icon {
+  padding: 0;
+  width: 28px;
+  justify-content: center;
+}
+
+/* Toolbar group divider */
+.dl-toolbar-divider {
+  width: 1px;
+  height: 18px;
+  background: var(--color-border-primary);
+  margin: 0 4px;
+  flex-shrink: 0;
+}
+
+/* Chip — small pill for status/meta */
+.dl-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  height: 22px;
+  padding: 0 8px;
+  border-radius: var(--radius-pill);
+  font-size: var(--text-xs);
+  font-weight: var(--weight-medium);
+  line-height: 1;
+  background: var(--color-bg-tertiary);
+  color: var(--color-text-secondary);
+  border: 1px solid var(--color-border-subtle);
+}
+
+.dl-chip--accent {
+  background: var(--color-accent-blue-soft);
+  color: var(--color-accent-blue);
+  border-color: transparent;
+}
+
+/* Tree row (ObjectList) */
+.dl-tree-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  height: 26px;
+  padding: 0 8px 0 6px;
+  border-radius: var(--radius-xs);
+  font-size: var(--text-sm);
+  color: var(--color-text-secondary);
+  cursor: pointer;
+  user-select: none;
+  transition: background 80ms ease, color 80ms ease;
+}
+
+.dl-tree-row:hover {
+  background: var(--color-bg-hover);
+  color: var(--color-text-primary);
+}
+
+.dl-tree-row--active {
+  background: var(--color-bg-active);
+  color: var(--color-text-accent);
+  font-weight: var(--weight-medium);
+}
+
+.dl-tree-section {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  height: 28px;
+  padding: 0 8px 0 4px;
+  font-size: var(--text-xs);
+  font-weight: var(--weight-semibold);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--color-text-muted);
+  cursor: pointer;
+  user-select: none;
+}
+
+.dl-tree-section:hover {
+  color: var(--color-text-secondary);
+}
+
+/* ──────────────────────────────────────────────────────────────────────────
+   CodeMirror + React Flow adapters
+
+   The YAML editor owns its own theme via EditorView.theme() in
+   YamlEditor.jsx and swaps between a light and dark palette based on the
+   current Luna theme (midnight/obsidian → dark, paper/arctic → light). We
+   only set sizing here — colors, selection, gutters, and cursor are all
+   handled in the editor theme so they can vary per Luna theme.
+   ────────────────────────────────────────────────────────────────────────── */
+
+.cm-editor {
+  height: 100% !important;
+  font-size: 13px;
+}
+
+.react-flow__background {
+  background: var(--color-bg-canvas) !important;
+}
+
+.react-flow__minimap {
+  background: var(--color-bg-surface) !important;
+  border: 1px solid var(--color-border-primary) !important;
+  border-radius: var(--radius-md) !important;
+  box-shadow: var(--shadow-sm);
+}
+
+.react-flow__controls {
+  border: 1px solid var(--color-border-primary) !important;
+  border-radius: var(--radius-md) !important;
+  overflow: hidden;
+  box-shadow: var(--shadow-sm);
+}
+
+.react-flow__controls-button {
+  background: var(--color-bg-surface) !important;
+  border-bottom: 1px solid var(--color-border-primary) !important;
+  fill: var(--color-text-secondary) !important;
+}
+
+.react-flow__controls-button:hover {
+  background: var(--color-bg-hover) !important;
+}
+
+[data-theme="dark"] .react-flow__node {
+  color: var(--color-text-primary);
+}
+
+[data-theme="dark"] .react-flow__edge-text {
+  fill: var(--color-text-secondary) !important;
+}
+
+/* Allotment sash colors */
+.sash-container .sash {
+  background: var(--color-border-primary) !important;
+}
+
+.sash-container .sash:hover {
+  background: var(--color-accent-blue) !important;
+}

@@ -1,5 +1,6 @@
 import type { Theme } from '../../themes/notebook-theme';
 import React, { useState } from 'react';
+import { PanelFrame } from '@duckcodeailabs/dql-ui';
 import { useNotebook } from '../../store/NotebookStore';
 import { themes } from '../../themes/notebook-theme';
 import type { NotebookFile } from '../../store/types';
@@ -8,13 +9,20 @@ interface FilesPanelProps {
   onOpenFile: (file: NotebookFile) => void;
 }
 
-type FolderKey = 'notebooks' | 'workbooks' | 'blocks' | 'dashboards';
+type FolderKey = 'notebooks' | 'blocks' | 'dashboards';
 
 const FOLDER_LABELS: Record<FolderKey, string> = {
   notebooks: 'Notebooks',
-  workbooks: 'Workbooks',
   blocks: 'Blocks',
   dashboards: 'Dashboards',
+};
+
+// Dashboards section is hidden when empty — keeps the UI clean on projects
+// that haven't authored a dashboard yet, without removing the artifact type.
+const HIDE_WHEN_EMPTY: Record<FolderKey, boolean> = {
+  notebooks: false,
+  blocks: false,
+  dashboards: true,
 };
 
 function FileTypeIcon({ type }: { type: NotebookFile['type'] }) {
@@ -23,12 +31,6 @@ function FileTypeIcon({ type }: { type: NotebookFile['type'] }) {
       return (
         <svg width="13" height="13" viewBox="0 0 16 16" fill="currentColor">
           <path d="M0 1.75A.75.75 0 0 1 .75 1h4.253c1.227 0 2.317.59 3 1.501A3.743 3.743 0 0 1 11.006 1h4.245a.75.75 0 0 1 .75.75v10.5a.75.75 0 0 1-.75.75h-4.507a2.25 2.25 0 0 0-1.591.659l-.622.621a.75.75 0 0 1-1.063 0L7.597 13.66A2.25 2.25 0 0 0 6.007 13H.75a.75.75 0 0 1-.75-.75Zm7.251 10.324.004-5.073-.002-2.253A2.25 2.25 0 0 0 5.003 2.5H1.5v9h4.507c.656 0 1.287.169 1.744.324Zm1.499.004c.457-.155 1.088-.324 1.744-.324H15v-9h-3.495a2.25 2.25 0 0 0-2.252 2.247l-.002 9.077Z" />
-        </svg>
-      );
-    case 'workbook':
-      return (
-        <svg width="13" height="13" viewBox="0 0 16 16" fill="currentColor">
-          <path d="M2 1.75C2 .784 2.784 0 3.75 0h8.5C13.216 0 14 .784 14 1.75v12.5A1.75 1.75 0 0 1 12.25 16h-8.5A1.75 1.75 0 0 1 2 14.25Zm1.75-.25a.25.25 0 0 0-.25.25v12.5c0 .138.112.25.25.25h8.5a.25.25 0 0 0 .25-.25V1.75a.25.25 0 0 0-.25-.25Zm2 3.5a.75.75 0 0 1 .75-.75h3a.75.75 0 0 1 0 1.5h-3a.75.75 0 0 1-.75-.75ZM6.5 7.25a.75.75 0 0 0 0 1.5h3a.75.75 0 0 0 0-1.5Zm-.75 3.5a.75.75 0 0 1 .75-.75h3a.75.75 0 0 1 0 1.5h-3a.75.75 0 0 1-.75-.75Z" />
         </svg>
       );
     case 'block':
@@ -68,7 +70,6 @@ export function FilesPanel({ onOpenFile }: FilesPanelProps) {
 
   const [expandedFolders, setExpandedFolders] = useState<Record<string, boolean>>({
     notebooks: true,
-    workbooks: true,
     blocks: false,
     dashboards: false,
   });
@@ -76,7 +77,6 @@ export function FilesPanel({ onOpenFile }: FilesPanelProps) {
 
   const grouped: Record<FolderKey, NotebookFile[]> = {
     notebooks: [],
-    workbooks: [],
     blocks: [],
     dashboards: [],
   };
@@ -92,47 +92,40 @@ export function FilesPanel({ onOpenFile }: FilesPanelProps) {
     setExpandedFolders((prev) => ({ ...prev, [key]: !prev[key] }));
   };
 
-  return (
-    <div
-      style={{
-        flex: 1,
-        overflow: 'auto',
-        padding: '8px 0',
-        display: 'flex',
-        flexDirection: 'column',
-        gap: 0,
-      }}
-    >
-      {/* New Notebook button */}
-      <div style={{ padding: '0 8px 8px' }}>
-        <button
-          onClick={() => dispatch({ type: 'OPEN_NEW_NOTEBOOK_MODAL' })}
-          onMouseEnter={() => setNewBtnHover(true)}
-          onMouseLeave={() => setNewBtnHover(false)}
-          style={{
-            width: '100%',
-            height: 30,
-            background: 'transparent',
-            border: `1px dashed ${newBtnHover ? t.accent : t.cellBorder}`,
-            borderRadius: 6,
-            color: newBtnHover ? t.accent : t.textSecondary,
-            cursor: 'pointer',
-            fontSize: 12,
-            fontFamily: t.font,
-            fontWeight: 500,
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'center',
-            gap: 6,
-            transition: 'border-color 0.15s, color 0.15s',
-          }}
-        >
-          <span style={{ fontSize: 16, lineHeight: 1 }}>+</span>
-          New Notebook
-        </button>
-      </div>
+  const newNotebookButton = (
+    <div style={{ padding: '0 8px 8px' }}>
+      <button
+        onClick={() => dispatch({ type: 'OPEN_NEW_NOTEBOOK_MODAL' })}
+        onMouseEnter={() => setNewBtnHover(true)}
+        onMouseLeave={() => setNewBtnHover(false)}
+        style={{
+          width: '100%',
+          height: 30,
+          background: 'transparent',
+          border: `1px dashed ${newBtnHover ? t.accent : t.cellBorder}`,
+          borderRadius: 6,
+          color: newBtnHover ? t.accent : t.textSecondary,
+          cursor: 'pointer',
+          fontSize: 12,
+          fontFamily: t.font,
+          fontWeight: 500,
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          gap: 6,
+          transition: 'border-color 0.15s, color 0.15s',
+        }}
+      >
+        <span style={{ fontSize: 16, lineHeight: 1 }}>+</span>
+        New Notebook
+      </button>
+    </div>
+  );
 
-      {/* Loading state */}
+  return (
+    <PanelFrame title="Files" bodyPadding={0}>
+      {newNotebookButton}
+
       {state.filesLoading && (
         <div style={{ padding: '8px 14px', color: t.textMuted, fontSize: 12, fontFamily: t.font }}>
           Loading files…
@@ -142,6 +135,7 @@ export function FilesPanel({ onOpenFile }: FilesPanelProps) {
       {/* Folder groups */}
       {(Object.keys(FOLDER_LABELS) as FolderKey[]).map((key) => {
         const files = grouped[key];
+        if (HIDE_WHEN_EMPTY[key] && files.length === 0) return null;
         const expanded = expandedFolders[key];
         const onAdd = key === 'notebooks'
           ? () => dispatch({ type: 'OPEN_NEW_NOTEBOOK_MODAL' })
@@ -157,8 +151,6 @@ export function FilesPanel({ onOpenFile }: FilesPanelProps) {
               expanded={expanded}
               onToggle={() => toggleFolder(key)}
               onAdd={onAdd}
-              deprecated={key === 'workbooks'}
-              deprecationTitle={key === 'workbooks' ? 'Workbook is deprecated — will be removed in v1.3. Use dashboard with tabs. See docs/migrations/workbook-to-dashboard.md' : undefined}
               t={t}
             />
             {expanded && (
@@ -191,7 +183,7 @@ export function FilesPanel({ onOpenFile }: FilesPanelProps) {
           </div>
         );
       })}
-    </div>
+    </PanelFrame>
   );
 }
 
@@ -201,8 +193,6 @@ function FolderHeader({
   expanded,
   onToggle,
   onAdd,
-  deprecated,
-  deprecationTitle,
   t,
 }: {
   label: string;
@@ -210,8 +200,6 @@ function FolderHeader({
   expanded: boolean;
   onToggle: () => void;
   onAdd?: () => void;
-  deprecated?: boolean;
-  deprecationTitle?: string;
   t: Theme;
 }) {
   const [hovered, setHovered] = useState(false);
@@ -262,24 +250,6 @@ function FolderHeader({
         </svg>
         <FolderIcon expanded={expanded} />
         <span style={{ flex: 1 }}>{label}</span>
-        {deprecated && (
-          <span
-            title={deprecationTitle}
-            style={{
-              background: '#d29922',
-              color: '#1c1d20',
-              borderRadius: 10,
-              padding: '0 6px',
-              fontSize: 9,
-              fontWeight: 600,
-              letterSpacing: '0.04em',
-              marginRight: 4,
-              textTransform: 'uppercase' as const,
-            }}
-          >
-            deprecated
-          </span>
-        )}
         {count > 0 && (
           <span
             style={{

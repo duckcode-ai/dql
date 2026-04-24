@@ -1,4 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import { PanelFrame, PanelToolbar, PanelEmpty } from '@duckcodeailabs/dql-ui';
 import type { Theme } from '../../themes/notebook-theme';
 import { api } from '../../api/client';
 import { useNotebook } from '../../store/NotebookStore';
@@ -292,14 +293,28 @@ export function LineagePanel() {
 
   if (allNodes.length === 0) {
     return (
-      <div style={{ padding: 16, color: t.textMuted, fontSize: 12 }}>
-        No lineage data found yet. Run `dql compile` or add notebooks/blocks first.
-      </div>
+      <PanelFrame title="Lineage" bodyPadding={0}>
+        <PanelEmpty
+          title="No lineage data"
+          description="Run `dql compile` or add notebooks/blocks first."
+        />
+      </PanelFrame>
     );
   }
 
+  const toolbar = (
+    <PanelToolbar>
+      <SearchInput
+        value={search}
+        onChange={setSearch}
+        placeholder="Search blocks, tables, dbt models, notebooks..."
+        t={t}
+      />
+    </PanelToolbar>
+  );
+
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', height: '100%', overflow: 'hidden' }}>
+    <PanelFrame title="Lineage" toolbar={toolbar} bodyPadding={0}>
       <div style={{ padding: 8, borderBottom: `1px solid ${t.headerBorder}` }}>
         <button
           onClick={() => dispatch({ type: 'TOGGLE_LINEAGE_FULLSCREEN' })}
@@ -313,18 +328,10 @@ export function LineagePanel() {
             fontSize: 12,
             fontWeight: 600,
             cursor: 'pointer',
-            marginBottom: 8,
           }}
         >
           {state.lineageFullscreen ? 'Close Graph View' : 'Open Graph View'}
         </button>
-
-        <SearchInput
-          value={search}
-          onChange={setSearch}
-          placeholder="Search blocks, tables, dbt models, notebooks..."
-          t={t}
-        />
         <div style={{ marginTop: 8, color: t.textMuted, fontSize: 11, lineHeight: 1.5 }}>
           Search across source tables, dbt sources/models, DQL blocks, metrics, and notebooks. Selecting any item opens a focused lineage path instead of the full graph.
         </div>
@@ -448,6 +455,6 @@ export function LineagePanel() {
           </>
         )}
       </div>
-    </div>
+    </PanelFrame>
   );
 }

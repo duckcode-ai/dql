@@ -27,7 +27,7 @@ import {
   completionKeymap,
 } from '@codemirror/autocomplete';
 import { search, searchKeymap } from '@codemirror/search';
-import { themes } from '../../themes/notebook-theme';
+import { themes, type ThemeMode } from '../../themes/notebook-theme';
 import {
   SEMANTIC_REF_MIME,
   clearActiveSemanticEditor,
@@ -48,7 +48,7 @@ interface SQLCellEditorProps {
   value: string;
   onChange: (value: string) => void;
   onRun: () => void;
-  themeMode: 'dark' | 'light';
+  themeMode: ThemeMode;
   autoFocus?: boolean;
   schema?: Record<string, string[]>;
   errorMessage?: string;

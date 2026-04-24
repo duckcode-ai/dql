@@ -25,8 +25,8 @@ function kindIcon(kind: ColumnKind): string {
 
 function kindColor(kind: ColumnKind, t: Theme): string {
   if (kind === 'measure') return t.accent;
-  if (kind === 'temporal') return '#e3b341';
-  return '#56d364';
+  if (kind === 'temporal') return t.warning;
+  return t.success;
 }
 
 interface SlotKey {
@@ -133,7 +133,9 @@ export function ChartCell({ cell, cells, index, themeMode, onUpdate }: ChartCell
         display: 'flex',
         flexDirection: 'column',
         background: t.cellBg,
-        border: `1px solid ${t.cellBorder}`,
+        borderTop: `1px solid ${t.cellBorder}`,
+        borderRight: `1px solid ${t.cellBorder}`,
+        borderBottom: `1px solid ${t.cellBorder}`,
         borderLeft: `3px solid #a371f7`,
         borderRadius: 6,
         overflow: 'hidden',

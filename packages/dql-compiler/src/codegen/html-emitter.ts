@@ -55,7 +55,7 @@ export function emitDashboardHTML(
   const filterBar = emitFilterBar(dashboard.filters, theme);
 
   return `<!DOCTYPE html>
-<html lang="en">
+<html lang="en" data-theme="midnight">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
@@ -73,6 +73,65 @@ export function emitDashboardHTML(
       --dql-grid-color: ${theme.gridColor};
       --dql-axis-color: ${theme.axisColor};
       --dql-accent: ${theme.colors[0]};
+    }
+
+    /* Luna tokens — parity with notebook App mode (v1.3 Track 11).
+       Available to cards/chrome alongside the legacy --dql-* variables. */
+    [data-theme="midnight"] {
+      --color-bg-0: #0d1117;
+      --color-bg-1: #161b22;
+      --color-bg-2: #1c232d;
+      --color-border-subtle: rgba(148, 163, 184, 0.18);
+      --color-border-default: rgba(148, 163, 184, 0.28);
+      --color-text-primary: #e6edf3;
+      --color-text-secondary: #b8c2cc;
+      --color-text-muted: #9aa4b2;
+      --color-accent-blue: #58a6ff;
+      --color-accent-green: #3fb950;
+      --color-accent-yellow: #e3b341;
+      --color-accent-red: #f85149;
+    }
+    [data-theme="obsidian"] {
+      --color-bg-0: #000000;
+      --color-bg-1: #0a0a0a;
+      --color-bg-2: #141414;
+      --color-border-subtle: rgba(212, 180, 130, 0.15);
+      --color-border-default: rgba(212, 180, 130, 0.25);
+      --color-text-primary: #f5f0e8;
+      --color-text-secondary: #d4c8b8;
+      --color-text-muted: #8a8070;
+      --color-accent-blue: #d4a574;
+      --color-accent-green: #94c973;
+      --color-accent-yellow: #e0b960;
+      --color-accent-red: #e07b7b;
+    }
+    [data-theme="paper"] {
+      --color-bg-0: #faf8f3;
+      --color-bg-1: #ffffff;
+      --color-bg-2: #f2eee7;
+      --color-border-subtle: rgba(51, 65, 85, 0.12);
+      --color-border-default: rgba(51, 65, 85, 0.22);
+      --color-text-primary: #1e293b;
+      --color-text-secondary: #475569;
+      --color-text-muted: #64748b;
+      --color-accent-blue: #2563eb;
+      --color-accent-green: #16a34a;
+      --color-accent-yellow: #ca8a04;
+      --color-accent-red: #dc2626;
+    }
+    [data-theme="arctic"] {
+      --color-bg-0: #e8eef4;
+      --color-bg-1: #ffffff;
+      --color-bg-2: #dde5ee;
+      --color-border-subtle: rgba(30, 58, 95, 0.14);
+      --color-border-default: rgba(30, 58, 95, 0.24);
+      --color-text-primary: #0f2942;
+      --color-text-secondary: #3d5871;
+      --color-text-muted: #627a91;
+      --color-accent-blue: #1d4ed8;
+      --color-accent-green: #15803d;
+      --color-accent-yellow: #a16207;
+      --color-accent-red: #b91c1c;
     }
 
     * { margin: 0; padding: 0; box-sizing: border-box; }
@@ -554,21 +613,21 @@ export function emitDashboardHTML(
 
     // Dashboard Shell UI
     (function() {
-      // Theme toggle
+      // Theme toggle — cycles Luna themes in sync with the notebook (v1.3 Track 11).
+      var THEMES = ['midnight', 'obsidian', 'paper', 'arctic'];
+      var saved = null;
+      try { saved = localStorage.getItem('dql-theme'); } catch (_) {}
+      if (saved && THEMES.indexOf(saved) >= 0) {
+        document.documentElement.setAttribute('data-theme', saved);
+      }
       var themeBtn = document.getElementById('dql-theme-toggle');
       if (themeBtn) {
         themeBtn.addEventListener('click', function() {
-          var body = document.body;
-          var isDark = body.getAttribute('data-theme') === 'dark';
-          if (isDark) {
-            body.removeAttribute('data-theme');
-            body.style.background = '';
-            body.style.color = '';
-          } else {
-            body.setAttribute('data-theme', 'dark');
-            body.style.background = '#1a1a2e';
-            body.style.color = '#e2e8f0';
-          }
+          var html = document.documentElement;
+          var current = html.getAttribute('data-theme') || 'midnight';
+          var next = THEMES[(THEMES.indexOf(current) + 1) % THEMES.length];
+          html.setAttribute('data-theme', next);
+          try { localStorage.setItem('dql-theme', next); } catch (_) {}
         });
       }
 

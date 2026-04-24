@@ -11,9 +11,9 @@ import { NotebookEditor } from '../notebook/NotebookEditor';
 import { NewNotebookModal } from '../modals/NewNotebookModal';
 import { NewBlockModal } from '../modals/NewBlockModal';
 import { BlockStudio } from '../block-studio/BlockStudio';
-import { LineageDAG } from '../sidebar/LineageDAG';
-import { ConnectionPanel } from '../sidebar/ConnectionPanel';
-import { ReferencePanel } from '../sidebar/ReferencePanel';
+import { LineageDAG } from '../panels/LineageDAG';
+import { ConnectionPanel } from '../panels/ConnectionPanel';
+import { ReferencePanel } from '../panels/ReferencePanel';
 import { api } from '../../api/client';
 import { parseNotebookFile } from '../../utils/parse-workbook';
 import { makeCell } from '../../store/NotebookStore';
@@ -157,11 +157,12 @@ export function AppShell() {
       {/* Header spans full width */}
       <Header />
 
-      {/* Body row: ActivityBar + Sidebar + Main */}
+      {/* Body row: ActivityBar + Sidebar + Main.
+          v1.3 Track 5 — ActivityBar + Sidebar hidden in App mode. */}
       <div style={{ flex: 1, display: 'flex', overflow: 'hidden' }}>
-        <ActivityBar />
+        {state.appMode === 'studio' && <ActivityBar />}
 
-        {state.sidebarOpen && (
+        {state.appMode === 'studio' && state.sidebarOpen && (
           <Sidebar
             onOpenFile={handleOpenFile}
           />
@@ -203,14 +204,14 @@ export function AppShell() {
                     onOpenFile={handleOpenFile}
                     registerCellRef={registerCellRef}
                   />
-                  <DevPanel />
+                  {state.appMode === 'studio' && <DevPanel />}
                 </>
               )}
             </>
           )}
         </div>
 
-        {state.inspectorOpen && !state.lineageFullscreen && !state.dashboardMode && (
+        {state.appMode === 'studio' && state.inspectorOpen && !state.lineageFullscreen && !state.dashboardMode && (
           <InspectorPanel />
         )}
       </div>

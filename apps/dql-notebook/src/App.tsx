@@ -1,7 +1,7 @@
 import React, { useEffect } from 'react';
 import { ThemeProvider, TooltipProvider } from '@duckcodeailabs/dql-ui';
 import { NotebookProvider, useNotebook } from './store/NotebookStore';
-import { AppShell } from './components/layout/AppShell';
+import { AppShell } from './components/shell/AppShell';
 import { themes } from './themes/notebook-theme';
 import { api } from './api/client';
 import { useHotReload } from './hooks/useHotReload';
@@ -10,7 +10,8 @@ function AppInner() {
   const { state, dispatch } = useNotebook();
   const t = themes[state.themeMode];
 
-  // Inject global CSS reset and scrollbar styles
+  // Inject global CSS reset and scrollbar styles. Resolve against Luna CSS
+  // vars so switching `data-theme` re-skins the body without a re-inject.
   useEffect(() => {
     const id = 'dql-global-styles';
     let el = document.getElementById(id) as HTMLStyleElement | null;
@@ -22,23 +23,23 @@ function AppInner() {
     el.textContent = `
       * { margin: 0; padding: 0; box-sizing: border-box; }
       body {
-        font-family: ${t.font};
+        font-family: var(--font-ui, ${t.font});
         overflow: hidden;
-        background: ${t.appBg};
-        color: ${t.textPrimary};
+        background: var(--color-bg-primary);
+        color: var(--color-text-primary);
       }
       ::-webkit-scrollbar { width: 6px; height: 6px; }
       ::-webkit-scrollbar-track { background: transparent; }
       ::-webkit-scrollbar-thumb {
-        background: ${t.scrollbarThumb};
+        background: var(--color-border-secondary);
         border-radius: 3px;
       }
       ::-webkit-scrollbar-thumb:hover {
-        background: ${t.textMuted};
+        background: var(--color-text-tertiary);
       }
       ::selection {
-        background: ${t.accent}40;
-        color: ${t.textPrimary};
+        background: color-mix(in srgb, var(--color-accent-blue) 25%, transparent);
+        color: var(--color-text-primary);
       }
       .dql-meta-pill:hover {
         background: var(--dql-pill-hover-bg) !important;
@@ -46,6 +47,16 @@ function AppInner() {
       }
     `;
   }, [t]);
+
+  // v1.3 Track 9 — full four-theme union. Legacy 'dark'/'light' alias to
+  // midnight/paper so persisted v1.2 state still loads.
+  useEffect(() => {
+    const luna =
+      state.themeMode === 'dark' ? 'midnight'
+      : state.themeMode === 'light' ? 'paper'
+      : state.themeMode;
+    document.documentElement.setAttribute('data-theme', luna);
+  }, [state.themeMode]);
 
   // Load notebooks on mount
   useEffect(() => {

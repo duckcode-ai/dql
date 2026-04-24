@@ -46,7 +46,7 @@ export function ParamCell({ cell, themeMode, onApplyParam }: ParamCellProps) {
       style={{
         background: t.cellBg,
         border: `1px solid ${t.cellBorder}`,
-        borderLeft: '3px solid #e3b341',
+        borderLeft: `3px solid ${t.warning}`,
         borderRadius: 8,
         overflow: 'hidden',
       }}
@@ -76,7 +76,7 @@ export function ParamCell({ cell, themeMode, onApplyParam }: ParamCellProps) {
                 fontSize: 11,
                 fontWeight: 600,
                 letterSpacing: '0.06em',
-                color: '#e3b341',
+                color: t.warning,
                 fontFamily: t.fontMono,
                 textTransform: 'uppercase',
               }}
@@ -87,7 +87,7 @@ export function ParamCell({ cell, themeMode, onApplyParam }: ParamCellProps) {
               onClick={() => setConfigOpen(false)}
               title="Done"
               style={{
-                background: '#e3b341',
+                background: t.warning,
                 border: 'none',
                 borderRadius: 5,
                 cursor: 'pointer',
@@ -250,11 +250,11 @@ export function ParamCell({ cell, themeMode, onApplyParam }: ParamCellProps) {
           onClick={() => setConfigOpen((o) => !o)}
           title={configOpen ? 'Close config' : 'Configure parameter'}
           style={{
-            background: configOpen ? '#e3b34118' : 'transparent',
-            border: `1px solid ${configOpen ? '#e3b341' : t.cellBorder}`,
+            background: configOpen ? `${t.warning}18` : 'transparent',
+            border: `1px solid ${configOpen ? t.warning : t.cellBorder}`,
             borderRadius: 5,
             cursor: 'pointer',
-            color: configOpen ? '#e3b341' : t.textMuted,
+            color: configOpen ? t.warning : t.textMuted,
             width: 26,
             height: 26,
             display: 'flex',
@@ -340,7 +340,7 @@ export function ParamCell({ cell, themeMode, onApplyParam }: ParamCellProps) {
               style={{
                 fontSize: 10,
                 fontFamily: t.fontMono,
-                color: '#e3b341',
+                color: t.warning,
                 opacity: 0.8,
               }}
             >
@@ -356,8 +356,8 @@ export function ParamCell({ cell, themeMode, onApplyParam }: ParamCellProps) {
               fontSize: 12,
               fontFamily: t.fontMono,
               color: t.textPrimary,
-              background: `#e3b34118`,
-              border: `1px solid #e3b34140`,
+              background: `${t.warning}18`,
+              border: `1px solid ${t.warning}40`,
               borderRadius: 4,
               padding: '2px 8px',
               flexShrink: 0,
@@ -373,7 +373,7 @@ export function ParamCell({ cell, themeMode, onApplyParam }: ParamCellProps) {
             onClick={() => onApplyParam(cell.name!)}
             title={`Re-run cells that use {{${cell.name}}}`}
             style={{
-              background: '#e3b341',
+              background: t.warning,
               border: 'none',
               borderRadius: 5,
               cursor: 'pointer',

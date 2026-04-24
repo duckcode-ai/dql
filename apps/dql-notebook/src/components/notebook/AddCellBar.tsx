@@ -7,6 +7,18 @@ import { parseSemanticDragRef, SEMANTIC_REF_MIME } from '../../editor/semantic-c
 import { api } from '../../api/client';
 import { BlockPicker, type BlockEntry } from '../blocks/BlockPicker';
 import { extractSqlFromText } from '../../utils/block-studio';
+import {
+  BlockIcon,
+  SQLCellIcon,
+  ChartCellIcon,
+  PivotCellIcon,
+  SingleValueCellIcon,
+  ParamCellIcon,
+  FilterCellIcon,
+  ChatCellIcon,
+  FileText,
+  Table,
+} from '@duckcodeailabs/dql-ui/icons';
 
 interface AddCellBarProps {
   afterId?: string;
@@ -15,22 +27,22 @@ interface AddCellBarProps {
 type PaletteEntry = {
   type: CellType | 'block';
   label: string;
-  icon: string;
+  Icon: React.ComponentType<any>;
   color: string;
   group: 'compute' | 'viz' | 'transform' | 'io' | 'library';
 };
 
 const PALETTE: PaletteEntry[] = [
-  { type: 'block', label: 'Block', icon: '◆', color: '#3fb950', group: 'library' },
-  { type: 'chat', label: 'Chat', icon: '✶', color: '#f0883e', group: 'compute' },
-  { type: 'sql', label: 'SQL', icon: 'SQL', color: '#388bfd', group: 'compute' },
-  { type: 'markdown', label: 'Text', icon: 'Tt', color: '#56d364', group: 'compute' },
-  { type: 'chart', label: 'Chart', icon: '📊', color: '#a371f7', group: 'viz' },
-  { type: 'pivot', label: 'Pivot', icon: '▦', color: '#a371f7', group: 'viz' },
-  { type: 'single_value', label: 'Single value', icon: '123', color: '#a371f7', group: 'viz' },
-  { type: 'table', label: 'Table', icon: '⊞', color: '#79c0ff', group: 'viz' },
-  { type: 'param', label: 'Inputs', icon: '⌸', color: '#e3b341', group: 'io' },
-  { type: 'filter', label: 'Filter', icon: '⟲', color: '#ff7b72', group: 'transform' },
+  { type: 'block', label: 'Block', Icon: BlockIcon, color: '#3fb950', group: 'library' },
+  { type: 'chat', label: 'Chat', Icon: ChatCellIcon, color: '#f0883e', group: 'compute' },
+  { type: 'sql', label: 'SQL', Icon: SQLCellIcon, color: '#388bfd', group: 'compute' },
+  { type: 'markdown', label: 'Text', Icon: FileText, color: '#56d364', group: 'compute' },
+  { type: 'chart', label: 'Chart', Icon: ChartCellIcon, color: '#a371f7', group: 'viz' },
+  { type: 'pivot', label: 'Pivot', Icon: PivotCellIcon, color: '#a371f7', group: 'viz' },
+  { type: 'single_value', label: 'Single value', Icon: SingleValueCellIcon, color: '#a371f7', group: 'viz' },
+  { type: 'table', label: 'Table', Icon: Table, color: '#79c0ff', group: 'viz' },
+  { type: 'param', label: 'Inputs', Icon: ParamCellIcon, color: '#e3b341', group: 'io' },
+  { type: 'filter', label: 'Filter', Icon: FilterCellIcon, color: '#ff7b72', group: 'transform' },
 ];
 
 export function AddCellBar({ afterId }: AddCellBarProps) {
@@ -118,17 +130,6 @@ export function AddCellBar({ afterId }: AddCellBarProps) {
         cursor: 'default',
       }}
     >
-      <div
-        style={{
-          position: 'absolute',
-          left: 0,
-          right: 0,
-          height: 1,
-          background: dropActive ? t.accent : hovered || popoverOpen ? t.cellBorderActive : 'transparent',
-          transition: 'background 0.15s',
-        }}
-      />
-
       {(hovered || popoverOpen || dropActive) && (
         <button
           onClick={() => setPopoverOpen((p) => !p)}
@@ -234,6 +235,7 @@ function PaletteTile({
 }) {
   const [hovered, setHovered] = useState(false);
   const highlighted = active || hovered;
+  const Icon = entry.Icon;
   return (
     <button
       onClick={onClick}
@@ -249,26 +251,18 @@ function PaletteTile({
         fontSize: 11,
         fontFamily: t.font,
         fontWeight: 500,
-        padding: '8px 6px',
+        padding: '10px 6px',
         minWidth: 76,
         display: 'flex',
         flexDirection: 'column',
         alignItems: 'center',
         justifyContent: 'center',
-        gap: 4,
+        gap: 6,
         transition: 'all 0.12s',
       }}
     >
-      <span
-        style={{
-          fontSize: 14,
-          fontFamily: t.fontMono,
-          fontWeight: 700,
-          color: entry.color,
-          letterSpacing: '0.02em',
-        }}
-      >
-        {entry.icon}
+      <span style={{ color: entry.color, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+        <Icon size={18} strokeWidth={1.75} />
       </span>
       <span style={{ letterSpacing: '0.02em' }}>{entry.label}</span>
     </button>

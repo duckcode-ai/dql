@@ -18,9 +18,30 @@ import { create, type StoreApi, type UseBoundStore } from 'zustand';
 import { useShallow } from 'zustand/react/shallow';
 import type { NotebookState, NotebookAction, Cell } from './types';
 
+// Persisted shell preference — defaults to 'studio' so the full authoring
+// surface shows on first load. Reading localStorage synchronously so the
+// initial render doesn't flash the wrong mode.
+function readInitialAppMode(): 'studio' | 'app' {
+  if (typeof window === 'undefined') return 'studio';
+  const stored = window.localStorage?.getItem('dql-app-mode');
+  return stored === 'app' ? 'app' : 'studio';
+}
+
+// v1.3 Track 9 — persisted Luna theme. Default midnight so a first-load user
+// gets DQL's darkest surface; honor persisted choice across reloads/tabs.
+function readInitialThemeMode(): 'midnight' | 'obsidian' | 'paper' | 'arctic' {
+  if (typeof window === 'undefined') return 'midnight';
+  const stored = window.localStorage?.getItem('dql-theme');
+  if (stored === 'obsidian' || stored === 'paper' || stored === 'arctic' || stored === 'midnight') return stored;
+  if (stored === 'dark') return 'midnight';
+  if (stored === 'light') return 'paper';
+  return 'midnight';
+}
+
 const initialState: NotebookState = {
   mainView: 'notebook',
-  themeMode: 'dark',
+  themeMode: readInitialThemeMode(),
+  appMode: readInitialAppMode(),
   sidebarPanel: 'files',
   sidebarOpen: true,
   files: [],
@@ -78,8 +99,36 @@ function notebookReducer(state: NotebookState, action: NotebookAction): Notebook
     case 'SET_MAIN_VIEW':
       return { ...state, mainView: action.view, lineageFullscreen: false, lineageFocusNodeId: null };
 
-    case 'SET_THEME':
+    case 'SET_THEME': {
+      // Sync the data-theme attribute BEFORE React re-renders. Inline-style
+      // reads like `t.activityBarBg` resolve the Luna CSS var at render time;
+      // if we wait for a post-render useEffect to flip data-theme, children
+      // paint one frame of stale colors (v1.3 Track 9 — four-theme switch).
+      if (typeof document !== 'undefined') {
+        const luna =
+          action.mode === 'dark' ? 'midnight'
+          : action.mode === 'light' ? 'paper'
+          : action.mode;
+        document.documentElement.setAttribute('data-theme', luna);
+        try {
+          window.localStorage?.setItem('dql-theme', action.mode);
+        } catch {
+          // ignore quota / privacy-mode failures
+        }
+      }
       return { ...state, themeMode: action.mode };
+    }
+
+    case 'SET_APP_MODE': {
+      if (typeof window !== 'undefined') {
+        try {
+          window.localStorage?.setItem('dql-app-mode', action.mode);
+        } catch {
+          // ignore quota / privacy-mode failures — it's a preference
+        }
+      }
+      return { ...state, appMode: action.mode };
+    }
 
     case 'SET_SIDEBAR_PANEL':
       return {
@@ -413,8 +462,18 @@ interface NotebookContextValue {
 const NotebookContext = createContext<NotebookContextValue | null>(null);
 
 export function NotebookProvider({ children }: { children: ReactNode }) {
-  // No-op provider: the Zustand store is app-global. We keep the wrapper so
-  // the existing App.tsx call site (and any test harness) is unchanged.
+  // Cross-tab theme sync: if a sibling tab changes `dql-theme`, mirror it here.
+  React.useEffect(() => {
+    const handler = (e: StorageEvent) => {
+      if (e.key !== 'dql-theme' || !e.newValue) return;
+      const mode = e.newValue;
+      if (mode === 'midnight' || mode === 'obsidian' || mode === 'paper' || mode === 'arctic' || mode === 'dark' || mode === 'light') {
+        useNotebookStore.getState().dispatch({ type: 'SET_THEME', mode: mode as any });
+      }
+    };
+    window.addEventListener('storage', handler);
+    return () => window.removeEventListener('storage', handler);
+  }, []);
   return <>{children}</>;
 }
 

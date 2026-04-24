@@ -1,11 +1,11 @@
 import React, { useState, useMemo, useCallback } from 'react';
-import { themes, type Theme } from '../../themes/notebook-theme';
+import { themes, type Theme, type ThemeMode } from '../../themes/notebook-theme';
 import type { QueryResult } from '../../store/types';
 import { inferColumnKind, type ColumnKind } from '../../utils/column-kind';
 
 interface TableOutputProps {
   result: QueryResult;
-  themeMode: 'dark' | 'light';
+  themeMode: ThemeMode;
 }
 
 const PAGE_SIZES = [25, 50, 100, 500] as const;

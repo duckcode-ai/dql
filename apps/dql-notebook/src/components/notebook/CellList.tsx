@@ -174,7 +174,7 @@ export function CellList({ registerCellRef }: CellListProps) {
           flexDirection: 'column',
         }}
       >
-        <AddCellBar />
+        {state.appMode === 'studio' && <AddCellBar />}
         <EmptyState t={t} />
       </div>
     );
@@ -190,18 +190,18 @@ export function CellList({ registerCellRef }: CellListProps) {
         flexDirection: 'column',
       }}
     >
-      <AddCellBar afterId={undefined} />
+      {state.appMode === 'studio' && <AddCellBar afterId={undefined} />}
 
       {state.cells.map((cell, index) => (
         <React.Fragment key={cell.id}>
           <div
             ref={(el) => registerCellRef(cell.id, el)}
             data-cell-id={cell.id}
-            draggable
-            onDragStart={(e) => handleDragStart(e, index)}
-            onDragEnd={handleDragEnd}
-            onDragOver={(e) => handleDragOver(e, index)}
-            onDrop={(e) => handleDrop(e, index)}
+            draggable={state.appMode === 'studio'}
+            onDragStart={state.appMode === 'studio' ? (e) => handleDragStart(e, index) : undefined}
+            onDragEnd={state.appMode === 'studio' ? handleDragEnd : undefined}
+            onDragOver={state.appMode === 'studio' ? (e) => handleDragOver(e, index) : undefined}
+            onDrop={state.appMode === 'studio' ? (e) => handleDrop(e, index) : undefined}
             onClick={(e) => {
               // Select cell on gutter/header click but not editor area
               const target = e.target as HTMLElement;
@@ -255,7 +255,7 @@ export function CellList({ registerCellRef }: CellListProps) {
             </div>
             <CellComponent cell={cell} index={index} />
           </div>
-          <AddCellBar afterId={cell.id} />
+          {state.appMode === 'studio' && <AddCellBar afterId={cell.id} />}
         </React.Fragment>
       ))}
 

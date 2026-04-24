@@ -1,4 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
+import { PanelFrame } from '@duckcodeailabs/dql-ui';
 import { api } from '../../api/client';
 import { insertSemanticReference, serializeSemanticDragRef } from '../../editor/semantic-completions';
 import { makeCell, useNotebook } from '../../store/NotebookStore';
@@ -796,7 +797,7 @@ export function SemanticPanel() {
   const treeLeafCount = filteredTree ? countTreeLeaves(filteredTree) : 0;
 
   return (
-    <div style={{ flex: 1, overflow: 'hidden', display: 'flex', flexDirection: 'column', position: 'relative' }}>
+    <PanelFrame title="Semantic Layer" bodyPadding={0}>
       {builderOpen && (
         <GuidedBuilderPanel
           t={t}
@@ -973,6 +974,6 @@ export function SemanticPanel() {
           </button>
         </div>
       )}
-    </div>
+    </PanelFrame>
   );
 }

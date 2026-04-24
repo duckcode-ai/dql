@@ -3,6 +3,7 @@ import { useNotebook } from '../../store/NotebookStore';
 import { themes } from '../../themes/notebook-theme';
 import type { Theme } from '../../themes/notebook-theme';
 import { api } from '../../api/client';
+import { PanelFrame } from '@duckcodeailabs/dql-ui';
 
 interface ConnectionInfo {
   default: string;
@@ -220,7 +221,7 @@ export function ConnectionPanel() {
   const defaultKey = info?.default ?? '';
 
   return (
-    <div style={{ flex: 1, overflow: 'auto', padding: '12px 12px 20px' }}>
+    <PanelFrame title="Connections" bodyPadding={12}>
 
       {/* Connection status indicator */}
       {testResult && (
@@ -436,7 +437,7 @@ export function ConnectionPanel() {
           </div>
         ))}
       </div>
-    </div>
+    </PanelFrame>
   );
 }
 

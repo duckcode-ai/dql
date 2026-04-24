@@ -1,4 +1,4 @@
-import type { Theme } from '../../themes/notebook-theme';
+import type { Theme, ThemeMode } from '../../themes/notebook-theme';
 import React, { useState, useRef, useEffect } from 'react';
 import { themes } from '../../themes/notebook-theme';
 
@@ -6,7 +6,7 @@ interface MarkdownCellEditorProps {
   value: string;
   onChange: (value: string) => void;
   onRun?: () => void;
-  themeMode: 'dark' | 'light';
+  themeMode: ThemeMode;
 }
 
 /**
@@ -114,13 +114,14 @@ function renderMarkdown(text: string, t: Theme): React.ReactNode[] {
 
     // Unordered list
     if (/^[-*+]\s/.test(line)) {
+      const startI = i;
       const items: string[] = [];
       while (i < lines.length && /^[-*+]\s/.test(lines[i])) {
         items.push(lines[i].replace(/^[-*+]\s/, ''));
         i++;
       }
       nodes.push(
-        <ul key={i} style={{ paddingLeft: 20, marginBottom: 8, color: t.textSecondary }}>
+        <ul key={`ul-${startI}`} style={{ paddingLeft: 20, marginBottom: 8, color: t.textSecondary }}>
           {items.map((item, j) => (
             <li key={j} style={{ fontSize: 14, fontFamily: t.font, lineHeight: 1.6, marginBottom: 2 }}>
               {inlineMarkdown(item, t)}
@@ -133,13 +134,14 @@ function renderMarkdown(text: string, t: Theme): React.ReactNode[] {
 
     // Ordered list
     if (/^\d+\.\s/.test(line)) {
+      const startI = i;
       const items: string[] = [];
       while (i < lines.length && /^\d+\.\s/.test(lines[i])) {
         items.push(lines[i].replace(/^\d+\.\s/, ''));
         i++;
       }
       nodes.push(
-        <ol key={i} style={{ paddingLeft: 20, marginBottom: 8, color: t.textSecondary }}>
+        <ol key={`ol-${startI}`} style={{ paddingLeft: 20, marginBottom: 8, color: t.textSecondary }}>
           {items.map((item, j) => (
             <li key={j} style={{ fontSize: 14, fontFamily: t.font, lineHeight: 1.6, marginBottom: 2 }}>
               {inlineMarkdown(item, t)}

@@ -74,7 +74,10 @@ export function DevPanel() {
               title="Clear logs"
               style={{
                 background: 'transparent',
-                border: 'none',
+                borderTop: 'none',
+                borderLeft: 'none',
+                borderRight: 'none',
+                borderBottom: 'none',
                 cursor: 'pointer',
                 color: t.textMuted,
                 fontSize: 11,
@@ -129,8 +132,10 @@ export function DevPanel() {
           height: 22,
           padding: '0 8px',
           borderRadius: '4px 4px 0 0',
-          border: `1px solid ${t.headerBorder}`,
-          borderBottom: state.devPanelOpen ? `1px solid ${t.sidebarBg}` : undefined,
+          borderTop: `1px solid ${t.headerBorder}`,
+          borderLeft: `1px solid ${t.headerBorder}`,
+          borderRight: `1px solid ${t.headerBorder}`,
+          borderBottom: state.devPanelOpen ? `1px solid ${t.sidebarBg}` : `1px solid ${t.headerBorder}`,
           background: toggleHover ? t.btnHover : t.sidebarBg,
           color: t.textMuted,
           cursor: 'pointer',
@@ -168,7 +173,9 @@ function TabButton({ label, active, onClick, t }: TabButtonProps) {
       onMouseLeave={() => setHovered(false)}
       style={{
         background: 'transparent',
-        border: 'none',
+        borderTop: 'none',
+        borderLeft: 'none',
+        borderRight: 'none',
         borderBottom: active ? `2px solid ${t.accent}` : '2px solid transparent',
         cursor: 'pointer',
         color: active ? t.textPrimary : hovered ? t.textSecondary : t.textMuted,

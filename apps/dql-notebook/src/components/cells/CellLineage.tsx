@@ -1,4 +1,4 @@
-import type { Theme } from '../../themes/notebook-theme';
+import type { Theme, ThemeMode } from '../../themes/notebook-theme';
 import React, { useState, useEffect, useCallback } from 'react';
 import { api } from '../../api/client';
 import {
@@ -82,7 +82,7 @@ interface CellLineageProps {
   cellContent: string;
   cellType: 'sql' | 'dql';
   cellName?: string;
-  themeMode: 'dark' | 'light';
+  themeMode: ThemeMode;
   t: Theme;
   /** Called when a node is clicked to focus the full lineage DAG */
   onFocusNode?: (nodeId: string) => void;

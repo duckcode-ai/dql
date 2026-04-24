@@ -17,9 +17,9 @@ import { MiniLineageGraph } from '../lineage/MiniLineageGraph';
 import { LineagePathSection, LayerSummary } from '../lineage/LineagePathBreadcrumb';
 import type { CompletePathResult } from '../lineage/lineage-constants';
 import { TableOutput } from '../output/TableOutput';
-import { MetricDetailPanel } from '../sidebar/MetricDetailPanel';
-import { SemanticSearchBar } from '../sidebar/SemanticSearchBar';
-import { SemanticTreeNode as TreeRow } from '../sidebar/SemanticTreeNode';
+import { MetricDetailPanel } from '../panels/MetricDetailPanel';
+import { SemanticSearchBar } from '../panels/SemanticSearchBar';
+import { SemanticTreeNode as TreeRow } from '../panels/SemanticTreeNode';
 import {
   appendSemanticRefToQuery,
   buildSemanticRef,
@@ -84,7 +84,7 @@ export function BlockStudio() {
   const [scrollTop, setScrollTop] = useState(0);
   const [viewportHeight, setViewportHeight] = useState(400);
   const [leftPaneWidth, setLeftPaneWidth] = useState(360);
-  const [bottomPaneHeight, setBottomPaneHeight] = useState(280);
+  const [bottomPaneHeight, setBottomPaneHeight] = useState(420);
   const [leftPaneCollapsed, setLeftPaneCollapsed] = useState(false);
   const [bottomPaneCollapsed, setBottomPaneCollapsed] = useState(false);
   const semanticTreeRef = useRef<HTMLDivElement | null>(null);
@@ -376,15 +376,6 @@ export function BlockStudio() {
   const activeResultChartType = state.blockStudioPreview
     ? resolveChartType(state.blockStudioPreview.result, state.blockStudioPreview.chartConfig)
     : 'table';
-  const incomingLineage = useMemo(
-    () => (lineageDetail?.incoming ?? []).filter((entry) => entry.node),
-    [lineageDetail],
-  );
-  const outgoingLineage = useMemo(
-    () => (lineageDetail?.outgoing ?? []).filter((entry) => entry.node),
-    [lineageDetail],
-  );
-
   const startLeftResize = (event: React.MouseEvent<HTMLDivElement>) => {
     event.preventDefault();
     const startX = event.clientX;
@@ -599,7 +590,6 @@ export function BlockStudio() {
           <div style={{ flex: 1 }} />
           <TemplateButton label="Semantic Skeleton" onClick={() => handleDraftChange(buildSemanticSkeleton(state.blockStudioMetadata?.name ?? 'New Block'))} />
           <TemplateButton label="Custom Skeleton" onClick={() => handleDraftChange(buildCustomSkeleton(state.blockStudioMetadata?.name ?? 'New Block'))} />
-          <TemplateButton label="Lineage" onClick={() => setResultTab('lineage')} />
           <TemplateButton label="Run" onClick={() => void handleRun()} busy={running} />
           <TemplateButton label="Save" onClick={() => void handleSave()} busy={saving} />
           {saveError && (
@@ -607,30 +597,6 @@ export function BlockStudio() {
               {saveError}
             </span>
           )}
-        </div>
-        <div style={{ padding: '10px 14px', display: 'flex', gap: 10, alignItems: 'center', borderBottom: `1px solid ${t.headerBorder}`, background: `${t.pillBg}66`, flexWrap: 'wrap' }}>
-          <div style={{ fontSize: 11, color: t.textMuted, fontFamily: t.font, textTransform: 'uppercase', letterSpacing: '0.04em' }}>
-            Active lineage
-          </div>
-          <LineageSummaryPill label="Upstream" count={incomingLineage.length} t={t} />
-          <LineageSummaryPill label="Downstream" count={outgoingLineage.length} t={t} />
-          {lineageDetail?.node?.domain && (
-            <span style={{ fontSize: 11, color: t.textSecondary, fontFamily: t.font }}>
-              Domain: {lineageDetail.node.domain}
-            </span>
-          )}
-          <div style={{ flex: 1 }} />
-          <button
-            onClick={() => {
-              if (activeBlockName) {
-                dispatch({ type: 'SET_LINEAGE_FOCUS', nodeId: `block:${activeBlockName}` });
-                if (!state.lineageFullscreen) dispatch({ type: 'TOGGLE_LINEAGE_FULLSCREEN' });
-              }
-            }}
-            style={{ background: t.btnBg, border: `1px solid ${t.btnBorder}`, borderRadius: 6, color: t.textPrimary, cursor: 'pointer', fontSize: 11, fontFamily: t.font, padding: '6px 10px' }}
-          >
-            Open Full Lineage
-          </button>
         </div>
         <div style={{ flex: 1, overflow: 'hidden' }}>
           <SQLCellEditor
@@ -919,24 +885,6 @@ function VisualizationPanel({
   );
 }
 
-function LineageSummaryPill({ label, count, t }: { label: string; count: number; t: Theme }) {
-  return (
-    <span
-      style={{
-        fontSize: 11,
-        fontWeight: 600,
-        color: t.textPrimary,
-        background: t.pillBg,
-        border: `1px solid ${t.cellBorder}`,
-        borderRadius: 999,
-        padding: '4px 10px',
-        fontFamily: t.font,
-      }}
-    >
-      {label}: {count}
-    </span>
-  );
-}
 
 function BlockLineagePanel({
   blockName,
@@ -1024,7 +972,7 @@ function BlockLineagePanel({
           nodes={graph.nodes}
           edges={graph.edges}
           focalNodeId={focalNodeId}
-          height={220}
+          height={360}
           onNodeClick={onSelectNode}
           layoutMode="flow"
         />
@@ -1033,9 +981,6 @@ function BlockLineagePanel({
       {/* Complete Paths (from API) */}
       {paths && (paths.upstreamPaths.length > 0 || paths.downstreamPaths.length > 0) && (
         <div style={{ display: 'grid', gap: 10 }}>
-          <div style={{ fontSize: 12, color: t.textMuted, fontFamily: t.font, lineHeight: 1.5 }}>
-            Source tables and dbt models flow into this block. Downstream paths show notebooks and charts that consume it.
-          </div>
           {paths.upstreamPaths.length > 0 && (
             <LineagePathSection
               title="Source to Block"

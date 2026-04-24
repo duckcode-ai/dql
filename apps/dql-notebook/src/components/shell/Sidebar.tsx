@@ -1,14 +1,14 @@
 import React, { useState } from 'react';
 import { useNotebook } from '../../store/NotebookStore';
 import { themes } from '../../themes/notebook-theme';
-import { FilesPanel } from '../sidebar/FilesPanel';
-import { SchemaPanel } from '../sidebar/SchemaPanel';
-import { ConnectionPanel } from '../sidebar/ConnectionPanel';
-import { ReferencePanel } from '../sidebar/ReferencePanel';
-import { LineagePanel } from '../sidebar/LineagePanel';
-import { BlockLibraryPanel } from '../sidebar/BlockLibraryPanel';
-import { GitPanel } from '../sidebar/GitPanel';
-import { AppsPanel } from '../sidebar/AppsPanel';
+import { FilesPanel } from '../panels/FilesPanel';
+import { SchemaPanel } from '../panels/SchemaPanel';
+import { ConnectionPanel } from '../panels/ConnectionPanel';
+import { ReferencePanel } from '../panels/ReferencePanel';
+import { LineagePanel } from '../panels/LineagePanel';
+import { BlockLibraryPanel } from '../panels/BlockLibraryPanel';
+import { GitPanel } from '../panels/GitPanel';
+import { AppsPanel } from '../panels/AppsPanel';
 import type { NotebookFile } from '../../store/types';
 
 interface SidebarProps {

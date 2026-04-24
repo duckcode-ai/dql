@@ -1,4 +1,5 @@
 import React, { useEffect, useState, useCallback } from 'react';
+import { PanelFrame, PanelToolbar, PanelEmpty } from '@duckcodeailabs/dql-ui';
 import { useNotebook } from '../../store/NotebookStore';
 import { themes } from '../../themes/notebook-theme';
 import { api } from '../../api/client';
@@ -59,49 +60,51 @@ export function GitPanel() {
 
   const activeFilePath = state.activeFile?.path ?? null;
 
+  const actions = (
+    <button
+      onClick={() => void refresh()}
+      title="Refresh"
+      style={{
+        background: 'transparent', border: 'none', cursor: 'pointer',
+        color: t.textMuted, padding: '2px 6px', borderRadius: 4, fontSize: 12,
+      }}
+    >
+      ↻
+    </button>
+  );
+
+  const toolbar = (
+    <PanelToolbar>
+      <TabButton t={t} active={tab === 'status'} onClick={() => setTab('status')}>Status</TabButton>
+      <TabButton t={t} active={tab === 'log'} onClick={() => setTab('log')}>Log</TabButton>
+      <TabButton t={t} active={tab === 'diff'} onClick={() => setTab('diff')}>Diff</TabButton>
+    </PanelToolbar>
+  );
+
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', height: '100%', color: t.textPrimary, fontFamily: t.font }}>
-      <div style={{ display: 'flex', gap: 4, padding: '8px 10px', borderBottom: `1px solid ${t.headerBorder}` }}>
-        <TabButton t={t} active={tab === 'status'} onClick={() => setTab('status')}>Status</TabButton>
-        <TabButton t={t} active={tab === 'log'} onClick={() => setTab('log')}>Log</TabButton>
-        <TabButton t={t} active={tab === 'diff'} onClick={() => setTab('diff')}>Diff</TabButton>
-        <div style={{ flex: 1 }} />
-        <button
-          onClick={() => void refresh()}
-          title="Refresh"
-          style={{
-            background: 'transparent', border: 'none', cursor: 'pointer',
-            color: t.textMuted, padding: '2px 6px', borderRadius: 4, fontSize: 12,
-          }}
-        >
-          ↻
-        </button>
-      </div>
+    <PanelFrame title="Git" actions={actions} toolbar={toolbar} bodyPadding={10}>
+      {loading && !status && !log && <PanelEmpty title="Loading…" />}
 
-      <div style={{ flex: 1, overflow: 'auto', padding: 10, fontSize: 12 }}>
-        {loading && !status && !log && <div style={{ color: t.textMuted }}>Loading…</div>}
+      {tab === 'status' && status && (
+        <StatusView status={status} t={t} />
+      )}
 
-        {tab === 'status' && status && (
-          <StatusView status={status} t={t} />
-        )}
+      {tab === 'log' && log && (
+        <LogView log={log} t={t} />
+      )}
 
-        {tab === 'log' && log && (
-          <LogView log={log} t={t} />
-        )}
-
-        {tab === 'diff' && (
-          <GitDiffView
-            diff={diff}
-            diffReport={diffReport}
-            activeFilePath={activeFilePath}
-            diffPath={diffPath}
-            onScopeToFile={() => setDiffPath(activeFilePath)}
-            onClearScope={() => setDiffPath(null)}
-            t={t}
-          />
-        )}
-      </div>
-    </div>
+      {tab === 'diff' && (
+        <GitDiffView
+          diff={diff}
+          diffReport={diffReport}
+          activeFilePath={activeFilePath}
+          diffPath={diffPath}
+          onScopeToFile={() => setDiffPath(activeFilePath)}
+          onClearScope={() => setDiffPath(null)}
+          t={t}
+        />
+      )}
+    </PanelFrame>
   );
 }
 

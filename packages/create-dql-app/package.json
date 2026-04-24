@@ -1,6 +1,6 @@
 {
   "name": "create-dql-app",
-  "version": "1.2.2",
+  "version": "1.3.0",
   "description": "Scaffold a new DQL project. Run with: npx create-dql-app <name>",
   "license": "MIT",
   "author": "DuckCode AI Labs",

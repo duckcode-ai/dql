@@ -231,7 +231,17 @@ export const lightTokens: ThemeTokens = {
   shadowLg: '0 12px 28px rgba(31,35,40,0.15)',
 };
 
-export const themes = { dark: darkTokens, light: lightTokens } as const;
+// v1.3 — four Luna themes. Tokens here drive the JS/TS Proxy shim only;
+// actual colors are sourced from tokens.css via `[data-theme="..."]`.
+// Midnight/obsidian share the dark palette; paper/arctic share light.
+export const themes = {
+  dark: darkTokens,
+  light: lightTokens,
+  midnight: darkTokens,
+  obsidian: darkTokens,
+  paper: lightTokens,
+  arctic: lightTokens,
+} as const;
 export type ThemeName = keyof typeof themes;
 
 /** camelCase token key → CSS custom property name (`--dql-surface-base`) */

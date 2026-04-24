@@ -1,6 +1,6 @@
 {
   "name": "@duckcodeailabs/dql-notebook-app",
-  "version": "1.2.2",
+  "version": "1.3.0",
   "private": true,
   "type": "module",
   "scripts": {
@@ -26,9 +26,12 @@
     "@xyflow/react": "^12.10.1",
     "react": "^18.3.0",
     "react-dom": "^18.3.0",
-    "sql-formatter": "^15.7.2"
+    "sql-formatter": "^15.7.2",
+    "tailwindcss": "^4.0.0",
+    "lucide-react": "^0.563.0"
   },
   "devDependencies": {
+    "@tailwindcss/vite": "^4.0.0",
     "@types/react": "^18.3.0",
     "@types/react-dom": "^18.3.0",
     "@vitejs/plugin-react": "^4.3.0",

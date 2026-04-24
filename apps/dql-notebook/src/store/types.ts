@@ -1,4 +1,13 @@
-export type ThemeMode = 'dark' | 'light';
+// v1.3 Track 9 — four Luna themes. `dark`/`light` kept as aliases so persisted
+// state from v1.2 still loads; normalize in the reducer on SET_THEME / load.
+export type ThemeMode = 'midnight' | 'obsidian' | 'paper' | 'arctic' | 'dark' | 'light';
+
+/**
+ * v1.3 Track 5 — shell-level audience split.
+ * - `studio`: full authoring surface (activity bar, sidebar, cell toolbars, all cell types visible)
+ * - `app`: stakeholder read-mostly view (output-only cells + interactive filters; SQL/param/writeback/chat collapse)
+ */
+export type AppMode = 'studio' | 'app';
 
 export interface NotebookDocMetadata {
   status?: string;
@@ -385,6 +394,7 @@ export interface BlockStudioOpenPayload {
 export interface NotebookState {
   mainView: MainView;
   themeMode: ThemeMode;
+  appMode: AppMode;
   sidebarPanel: SidebarPanel;
   sidebarOpen: boolean;
   files: NotebookFile[];
@@ -428,6 +438,7 @@ export type InspectorContext =
 export type NotebookAction =
   | { type: 'SET_MAIN_VIEW'; view: MainView }
   | { type: 'SET_THEME'; mode: ThemeMode }
+  | { type: 'SET_APP_MODE'; mode: AppMode }
   | { type: 'SET_SIDEBAR_PANEL'; panel: SidebarPanel }
   | { type: 'TOGGLE_SIDEBAR' }
   | { type: 'SET_FILES'; files: NotebookFile[] }

@@ -2,6 +2,7 @@ import React, { useState } from 'react';
 import { themes } from '../../themes/notebook-theme';
 import type { Theme } from '../../themes/notebook-theme';
 import type { ThemeMode } from '../../store/types';
+import { PanelFrame } from '@duckcodeailabs/dql-ui';
 
 interface ReferencePanelProps {
   themeMode: ThemeMode;
@@ -378,12 +379,10 @@ export function ReferencePanel({ themeMode }: ReferencePanelProps) {
   const t = themes[themeMode];
 
   return (
-    <div
-      style={{
-        flex: 1,
-        overflowY: 'auto',
-        fontFamily: t.font,
-      }}
+    <PanelFrame
+      title="Reference"
+      subtitle="Quick syntax, operators, and cell reference."
+      bodyPadding={0}
     >
       {/* 1. SQL Essentials */}
       <Section title="SQL Essentials" defaultOpen={true} t={t}>
@@ -647,6 +646,6 @@ FROM {{base_query}}
 GROUP BY segment`}
         />
       </Section>
-    </div>
+    </PanelFrame>
   );
 }
