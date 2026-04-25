@@ -63,15 +63,31 @@ export function BlockLibraryPanel() {
       .finally(() => setLoading(false));
   };
 
-  const selectStyle: React.CSSProperties = {
+  const inputStyle: React.CSSProperties = {
     background: t.inputBg,
     border: `1px solid ${t.inputBorder}`,
-    borderRadius: 4,
+    borderRadius: 6,
     color: t.textPrimary,
     fontSize: 11,
     fontFamily: t.font,
-    padding: '4px 6px',
+    padding: '6px 10px',
     outline: 'none',
+  };
+  // Custom select with embedded SVG chevron — replaces the native dropdown
+  // arrow which doesn't honor the theme.
+  const chevronSvg = `data:image/svg+xml;utf8,${encodeURIComponent(
+    `<svg xmlns='http://www.w3.org/2000/svg' width='10' height='10' viewBox='0 0 10 10'><path fill='none' stroke='${t.textMuted}' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round' d='M2 4l3 3 3-3'/></svg>`
+  )}`;
+  const selectStyle: React.CSSProperties = {
+    ...inputStyle,
+    appearance: 'none' as const,
+    WebkitAppearance: 'none' as const,
+    MozAppearance: 'none' as const,
+    backgroundImage: `url("${chevronSvg}")`,
+    backgroundRepeat: 'no-repeat',
+    backgroundPosition: 'right 8px center',
+    paddingRight: 24,
+    cursor: 'pointer',
   };
 
   const actions = (
@@ -104,7 +120,7 @@ export function BlockLibraryPanel() {
         value={search}
         onChange={(e) => setSearch(e.target.value)}
         placeholder="Search blocks..."
-        style={{ ...selectStyle, flex: 1, minWidth: 100 }}
+        style={{ ...inputStyle, flex: 1, minWidth: 100 }}
       />
       <select value={domainFilter} onChange={(e) => setDomainFilter(e.target.value)} style={selectStyle}>
         <option value="">All domains</option>

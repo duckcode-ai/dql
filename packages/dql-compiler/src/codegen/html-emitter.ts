@@ -55,7 +55,7 @@ export function emitDashboardHTML(
   const filterBar = emitFilterBar(dashboard.filters, theme);
 
   return `<!DOCTYPE html>
-<html lang="en" data-theme="midnight">
+<html lang="en" data-theme="obsidian">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
@@ -75,63 +75,50 @@ export function emitDashboardHTML(
       --dql-accent: ${theme.colors[0]};
     }
 
-    /* Luna tokens — parity with notebook App mode (v1.3 Track 11).
+    /* Luna tokens — parity with notebook App mode (v1.3.2).
+       Three themes: obsidian (dark), paper (warm light), white (plain light).
        Available to cards/chrome alongside the legacy --dql-* variables. */
-    [data-theme="midnight"] {
-      --color-bg-0: #0d1117;
-      --color-bg-1: #161b22;
-      --color-bg-2: #1c232d;
-      --color-border-subtle: rgba(148, 163, 184, 0.18);
-      --color-border-default: rgba(148, 163, 184, 0.28);
-      --color-text-primary: #e6edf3;
-      --color-text-secondary: #b8c2cc;
-      --color-text-muted: #9aa4b2;
-      --color-accent-blue: #58a6ff;
+    [data-theme="obsidian"] {
+      --color-bg-0: #08090b;
+      --color-bg-1: #0d0e11;
+      --color-bg-2: #16181c;
+      --color-border-subtle: rgba(255, 255, 255, 0.07);
+      --color-border-default: rgba(255, 255, 255, 0.13);
+      --color-text-primary: #e6e8ec;
+      --color-text-secondary: #a8adb8;
+      --color-text-muted: #6d7380;
+      --color-accent-blue: #4f8bff;
       --color-accent-green: #3fb950;
       --color-accent-yellow: #e3b341;
       --color-accent-red: #f85149;
     }
-    [data-theme="obsidian"] {
-      --color-bg-0: #000000;
-      --color-bg-1: #0a0a0a;
-      --color-bg-2: #141414;
-      --color-border-subtle: rgba(212, 180, 130, 0.15);
-      --color-border-default: rgba(212, 180, 130, 0.25);
-      --color-text-primary: #f5f0e8;
-      --color-text-secondary: #d4c8b8;
-      --color-text-muted: #8a8070;
-      --color-accent-blue: #d4a574;
-      --color-accent-green: #94c973;
-      --color-accent-yellow: #e0b960;
-      --color-accent-red: #e07b7b;
-    }
     [data-theme="paper"] {
-      --color-bg-0: #faf8f3;
+      --color-bg-0: #efebe2;
+      --color-bg-1: #f7f4ed;
+      --color-bg-2: #e9e4d8;
+      --color-border-subtle: rgba(40, 30, 15, 0.10);
+      --color-border-default: rgba(40, 30, 15, 0.20);
+      --color-text-primary: #15120c;
+      --color-text-secondary: #4a4336;
+      --color-text-muted: #8a8070;
+      --color-accent-blue: #2541b2;
+      --color-accent-green: #0a5e30;
+      --color-accent-yellow: #8a5a10;
+      --color-accent-red: #a32020;
+    }
+    [data-theme="white"] {
+      --color-bg-0: #f5f6f8;
       --color-bg-1: #ffffff;
-      --color-bg-2: #f2eee7;
-      --color-border-subtle: rgba(51, 65, 85, 0.12);
-      --color-border-default: rgba(51, 65, 85, 0.22);
-      --color-text-primary: #1e293b;
+      --color-bg-2: #ffffff;
+      --color-border-subtle: rgba(15, 23, 42, 0.08);
+      --color-border-default: rgba(15, 23, 42, 0.16);
+      --color-text-primary: #0f172a;
       --color-text-secondary: #475569;
       --color-text-muted: #64748b;
       --color-accent-blue: #2563eb;
       --color-accent-green: #16a34a;
       --color-accent-yellow: #ca8a04;
       --color-accent-red: #dc2626;
-    }
-    [data-theme="arctic"] {
-      --color-bg-0: #e8eef4;
-      --color-bg-1: #ffffff;
-      --color-bg-2: #dde5ee;
-      --color-border-subtle: rgba(30, 58, 95, 0.14);
-      --color-border-default: rgba(30, 58, 95, 0.24);
-      --color-text-primary: #0f2942;
-      --color-text-secondary: #3d5871;
-      --color-text-muted: #627a91;
-      --color-accent-blue: #1d4ed8;
-      --color-accent-green: #15803d;
-      --color-accent-yellow: #a16207;
-      --color-accent-red: #b91c1c;
     }
 
     * { margin: 0; padding: 0; box-sizing: border-box; }
@@ -613,10 +600,12 @@ export function emitDashboardHTML(
 
     // Dashboard Shell UI
     (function() {
-      // Theme toggle — cycles Luna themes in sync with the notebook (v1.3 Track 11).
-      var THEMES = ['midnight', 'obsidian', 'paper', 'arctic'];
+      // Theme toggle — cycles Luna themes in sync with the notebook (v1.3.2).
+      var THEMES = ['obsidian', 'paper', 'white'];
+      var ALIAS = { midnight: 'obsidian', dark: 'obsidian', light: 'paper', arctic: 'white' };
       var saved = null;
       try { saved = localStorage.getItem('dql-theme'); } catch (_) {}
+      if (saved && ALIAS[saved]) saved = ALIAS[saved];
       if (saved && THEMES.indexOf(saved) >= 0) {
         document.documentElement.setAttribute('data-theme', saved);
       }
@@ -624,7 +613,8 @@ export function emitDashboardHTML(
       if (themeBtn) {
         themeBtn.addEventListener('click', function() {
           var html = document.documentElement;
-          var current = html.getAttribute('data-theme') || 'midnight';
+          var current = html.getAttribute('data-theme') || 'obsidian';
+          if (ALIAS[current]) current = ALIAS[current];
           var next = THEMES[(THEMES.indexOf(current) + 1) % THEMES.length];
           html.setAttribute('data-theme', next);
           try { localStorage.setItem('dql-theme', next); } catch (_) {}

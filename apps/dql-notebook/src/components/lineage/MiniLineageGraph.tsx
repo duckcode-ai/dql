@@ -5,15 +5,17 @@
  * Does NOT include MiniMap, Controls, or filter chips — those are in the fullscreen LineageDAG.
  */
 
-import React, { useEffect, useMemo } from 'react';
+import React, { useEffect, useMemo, useRef } from 'react';
 import {
   Background,
   Handle,
   MarkerType,
   Position,
   ReactFlow,
+  ReactFlowProvider,
   useEdgesState,
   useNodesState,
+  useReactFlow,
   type Edge,
   type Node,
   type NodeProps,
@@ -75,7 +77,7 @@ function layoutGraph(nodes: Node[], edges: Edge[], options: LayoutOptions = {}):
 function MiniDagNode({ data, selected }: NodeProps) {
   const nodeType = data.nodeType as string;
   const isFocal = data.isFocal as boolean;
-  const color = NODE_TYPE_COLORS[nodeType] ?? '#8b949e';
+  const color = NODE_TYPE_COLORS[nodeType] ?? 'var(--color-text-tertiary)';
   const label = TYPE_LABELS[nodeType] ?? nodeType.toUpperCase();
 
   return (
@@ -83,11 +85,11 @@ function MiniDagNode({ data, selected }: NodeProps) {
       style={{
         minWidth: 140,
         maxWidth: 190,
-        background: '#161b22',
-        border: `2px solid ${isFocal ? '#58a6ff' : selected ? '#58a6ff' : color}`,
+        background: 'var(--color-bg-card)',
+        border: `2px solid ${isFocal || selected ? 'var(--color-accent-blue)' : color}`,
         borderRadius: 8,
         padding: '6px 8px',
-        boxShadow: isFocal ? '0 0 0 2px rgba(88, 166, 255, 0.25)' : 'none',
+        boxShadow: isFocal ? '0 0 0 2px color-mix(in srgb, var(--color-accent-blue) 25%, transparent)' : 'none',
       }}
     >
       <Handle type="target" position={Position.Left} style={{ width: 6, height: 6, background: color, border: 'none' }} />
@@ -97,7 +99,7 @@ function MiniDagNode({ data, selected }: NodeProps) {
             fontSize: 8,
             fontWeight: 700,
             letterSpacing: '0.04em',
-            color: '#0d1117',
+            color: 'var(--color-bg-card)',
             background: color,
             borderRadius: 3,
             padding: '1px 4px',
@@ -106,12 +108,12 @@ function MiniDagNode({ data, selected }: NodeProps) {
           {label}
         </span>
         {(data.domain as string | undefined) && (
-          <span style={{ color: '#8b949e', fontSize: 9 }}>{data.domain as string}</span>
+          <span style={{ color: 'var(--color-text-tertiary)', fontSize: 9 }}>{data.domain as string}</span>
         )}
       </div>
       <div
         style={{
-          color: '#e6edf3',
+          color: 'var(--color-text-primary)',
           fontSize: 10,
           fontWeight: 600,
           overflow: 'hidden',
@@ -198,8 +200,8 @@ export interface MiniLineageGraphProps {
   edges: LineageEdge[];
   /** Node ID to highlight as the focal point */
   focalNodeId?: string;
-  /** Height in pixels (default 250) */
-  height?: number;
+  /** Height in pixels, or any CSS length (default 250) */
+  height?: number | string;
   /** Called when a node is clicked */
   onNodeClick?: (nodeId: string) => void;
   /** Whether the graph is interactive (pan/zoom). Default true */
@@ -208,7 +210,7 @@ export interface MiniLineageGraphProps {
   layoutMode?: 'flow' | 'layered';
 }
 
-export function MiniLineageGraph({
+function MiniLineageGraphInner({
   nodes: inputNodes,
   edges: inputEdges,
   focalNodeId,
@@ -219,6 +221,8 @@ export function MiniLineageGraph({
 }: MiniLineageGraphProps) {
   const [rfNodes, setRfNodes, onNodesChange] = useNodesState<Node>([]);
   const [rfEdges, setRfEdges, onEdgesChange] = useEdgesState<Edge>([]);
+  const { fitView } = useReactFlow();
+  const containerRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     const flowNodes: Node[] = inputNodes.map((node) => ({
@@ -252,18 +256,35 @@ export function MiniLineageGraph({
 
     setRfNodes(layoutGraph(flowNodes, flowEdges, { mode: layoutMode }));
     setRfEdges(flowEdges);
-  }, [inputNodes, inputEdges, focalNodeId, layoutMode, setRfNodes, setRfEdges]);
+
+    // Re-fit after nodes are positioned. fitView prop only runs once on mount,
+    // so we re-fit on every input change.
+    requestAnimationFrame(() => {
+      fitView({ padding: 0.15, duration: 200 });
+    });
+  }, [inputNodes, inputEdges, focalNodeId, layoutMode, setRfNodes, setRfEdges, fitView]);
+
+  // Re-fit when the container is resized (e.g. user drags the resize handle).
+  useEffect(() => {
+    if (!containerRef.current) return;
+    const el = containerRef.current;
+    const obs = new ResizeObserver(() => {
+      fitView({ padding: 0.15, duration: 0 });
+    });
+    obs.observe(el);
+    return () => obs.disconnect();
+  }, [fitView]);
 
   if (inputNodes.length === 0) {
     return (
-      <div style={{ height, display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#8b949e', fontSize: 11 }}>
+      <div style={{ height, display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'var(--color-text-tertiary)', fontSize: 11 }}>
         No lineage nodes to display
       </div>
     );
   }
 
   return (
-    <div style={{ height, width: '100%', borderRadius: 8, overflow: 'hidden', border: '1px solid #30363d' }}>
+    <div ref={containerRef} style={{ height, width: '100%', borderRadius: 8, overflow: 'hidden', border: '1px solid var(--color-border-subtle)' }}>
       <ReactFlow
         nodes={rfNodes}
         edges={rfEdges}
@@ -273,15 +294,24 @@ export function MiniLineageGraph({
         nodeTypes={nodeTypes}
         fitView
         fitViewOptions={{ padding: 0.15 }}
+        minZoom={0.25}
         proOptions={{ hideAttribution: true }}
         nodesDraggable={interactive}
         nodesConnectable={false}
         zoomOnScroll={interactive}
         panOnDrag={interactive}
-        style={{ background: '#0d1117' }}
+        style={{ background: 'var(--color-bg-sunken)' }}
       >
-        <Background color="#21262d" gap={20} size={1} />
+        <Background color="var(--color-border-subtle)" gap={20} size={1} />
       </ReactFlow>
     </div>
+  );
+}
+
+export function MiniLineageGraph(props: MiniLineageGraphProps) {
+  return (
+    <ReactFlowProvider>
+      <MiniLineageGraphInner {...props} />
+    </ReactFlowProvider>
   );
 }

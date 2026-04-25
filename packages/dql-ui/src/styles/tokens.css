@@ -1,14 +1,16 @@
 /* ============================================================
    DQL — Luna design tokens (ported from DataLex).
-   Four themes under [data-theme="midnight"|"obsidian"|"paper"|"arctic"].
+   Three themes under [data-theme="obsidian"|"paper"|"white"].
    Consumed via the @theme bridge in globals.css, so switching the
    data-theme attribute on <html> re-skins every Tailwind utility.
    ============================================================ */
 
 :root {
-  /* Typography (shared) */
-  --font-ui: "Plus Jakarta Sans", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-  --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+  /* Typography (shared) — Hex handoff: Inter UI + JetBrains Mono code. */
+  --font-ui: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  --font-hand: "Caveat", cursive;
+  --font-sketch: "Kalam", "Caveat", cursive;
 
   /* Density (default: comfortable) */
   --row-h: 26px;
@@ -22,131 +24,44 @@
   --ease: cubic-bezier(0.2, 0.8, 0.2, 1);
 
   /* ================================================================
-     DEFAULT THEME = Midnight (deep navy enterprise dark)
-     Overridden by [data-theme="..."] blocks below.
+     DEFAULT THEME = Obsidian (neutral dark, Linear / Vercel style)
+     Overridden by [data-theme="paper"|"white"] blocks below.
      ================================================================ */
-  --bg-0: #0a0c11;
-  --bg-1: #0f1219;
-  --bg-2: #151922;
+  color-scheme: dark;
+  /* v1.4 obsidian palette — ported from DQL New-UI handoff. Deeper
+     charcoal canvas, slightly warmer card surfaces, hairline borders
+     that read on the #0b0d12 base without muddying code. */
+  --bg-0: #0b0d12;
+  --bg-1: #11141b;
+  --bg-2: #161a23;
   --bg-3: #1c212d;
-  --bg-4: #252b39;
-  --bg-canvas: #0c0f15;
-  --bg-grid: rgba(255,255,255,0.03);
+  --bg-4: #242938;
+  --bg-canvas: #0b0d12;
+  --bg-grid: rgba(255,255,255,0.025);
 
-  --border-subtle: rgba(255, 255, 255, 0.05);
-  --border-default: rgba(255, 255, 255, 0.08);
-  --border-strong: rgba(255, 255, 255, 0.14);
+  --border-subtle: #1b1f28;
+  --border-default: #232833;
+  --border-strong: #2c3240;
   --border-focus: #5b8cff;
 
-  --text-primary: #e7ebf2;
-  --text-secondary: #9aa3b4;
-  --text-tertiary: #6b7385;
-  --text-muted: #4e5563;
+  --text-primary: #e6e8ee;
+  --text-secondary: #9aa0ae;
+  --text-tertiary: #626878;
+  --text-muted: #4a5060;
 
   --accent: #5b8cff;
-  --accent-hover: #7aa3ff;
+  --accent-hover: #7aa2ff;
   --accent-dim: rgba(91, 140, 255, 0.14);
-  --accent-fg: #ffffff;
-  --accent-on: #ffffff; /* legacy alias — prefer --accent-fg */
+  --accent-fg: #0b0d12;
+  --accent-on: #0b0d12; /* legacy alias — prefer --accent-fg */
 
   /* Neutral hover (generic surface hover — lists, menu items, small buttons) */
-  --bg-hover: rgba(255, 255, 255, 0.05);
+  --bg-hover: rgba(255, 255, 255, 0.045);
 
   /* Status semantics (error / warning / success / info) — each theme
      supplies a tuned hue + 0.10-0.14 background + 0.30-0.40 border so
-     alerts read clean on every surface. */
-  --status-error:        #ef4444;
-  --status-error-bg:     rgba(239, 68, 68, 0.12);
-  --status-error-border: rgba(239, 68, 68, 0.32);
-  --status-warning:        #f5b544;
-  --status-warning-bg:     rgba(245, 181, 68, 0.12);
-  --status-warning-border: rgba(245, 181, 68, 0.34);
-  --status-success:        #10b981;
-  --status-success-bg:     rgba(16, 185, 129, 0.12);
-  --status-success-border: rgba(16, 185, 129, 0.32);
-  --status-info:        var(--accent);
-  --status-info-bg:     var(--accent-dim);
-  --status-info-border: rgba(91, 140, 255, 0.32);
-
-  --pk: #f5b544;
-  --fk: #8b7fff;
-  --idx: #4ec9b0;
-  --nn: #6b7385;
-  --nullable: #8b7fff;
-
-  --cat-users: #7c5cff;
-  --cat-users-soft: rgba(124, 92, 255, 0.12);
-  --cat-billing: #10b981;
-  --cat-billing-soft: rgba(16, 185, 129, 0.12);
-  --cat-product: #f59e0b;
-  --cat-product-soft: rgba(245, 158, 11, 0.12);
-  --cat-system: #64748b;
-  --cat-system-soft: rgba(100, 116, 139, 0.14);
-  --cat-access: #ec4899;
-  --cat-access-soft: rgba(236, 72, 153, 0.12);
-  --cat-audit: #06b6d4;
-  --cat-audit-soft: rgba(6, 182, 212, 0.12);
-
-  --rel-line: #4a5060;
-  --rel-line-strong: #6b7385;
-  --rel-line-active: #7aa3ff;
-  --rel-line-dim: rgba(74,80,96,0.35);
-
-  /* SQL syntax palette (midnight) — mirrors the YAML dark palette so
-     both readouts feel like the same editor surface. Tuned to read on
-     --bg-0 at AA contrast. */
-  --sql-keyword:     #7db7ff;  /* CREATE, SELECT, JOIN — sky blue */
-  --sql-type:        #4ec9b0;  /* INT, VARCHAR, etc — teal */
-  --sql-string:      #8ee1a7;  /* 'abc' — soft green */
-  --sql-number:      #ffb87a;  /* 42, 3.14 — warm amber */
-  --sql-function:    #dcdcaa;  /* now(), count() — soft yellow */
-  --sql-punctuation: #9aa3b4;  /* commas, parens */
-  --sql-ident:       var(--text-primary);
-  --sql-comment:     var(--text-tertiary);
-
-  --shadow-card: 0 1px 0 rgba(255,255,255,0.04) inset, 0 8px 24px rgba(0,0,0,0.35);
-  --shadow-pop: 0 20px 50px rgba(0,0,0,0.5);
-  --scrim: rgba(0,0,0,0.5);
-}
-
-/* Explicit midnight (same as default) */
-[data-theme="midnight"] {
-  color-scheme: dark;
-}
-
-/* ================================================================
-   OBSIDIAN — neutral dark (Linear / Vercel style, pure grayscale)
-   ================================================================ */
-[data-theme="obsidian"] {
-  color-scheme: dark;
-  --bg-0: #08090b;
-  --bg-1: #0d0e11;
-  --bg-2: #141518;
-  --bg-3: #1c1d21;
-  --bg-4: #26272c;
-  --bg-canvas: #0a0b0d;
-  --bg-grid: rgba(255,255,255,0.025);
-
-  --border-subtle: rgba(255, 255, 255, 0.04);
-  --border-default: rgba(255, 255, 255, 0.07);
-  --border-strong: rgba(255, 255, 255, 0.13);
-  --border-focus: #e6e7ea;
-
-  --text-primary: #ededee;
-  --text-secondary: #a1a1a6;
-  --text-tertiary: #6e6e73;
-  --text-muted: #48484d;
-
-  --accent: #e6e7ea;
-  --accent-hover: #ffffff;
-  --accent-dim: rgba(230, 231, 234, 0.10);
-  --accent-fg: #0a0b0d;
-  --accent-on: #0a0b0d;
-
-  --bg-hover: rgba(255, 255, 255, 0.045);
-
-  /* Obsidian keeps saturation low so semantic colors read as "muted" —
-     red/amber/green still clearly distinct but never shouty. */
+     alerts read clean on every surface. Obsidian keeps saturation low
+     so semantic colors read as "muted" — distinct but never shouty. */
   --status-error:        #f87171;
   --status-error-bg:     rgba(248, 113, 113, 0.10);
   --status-error-border: rgba(248, 113, 113, 0.30);
@@ -158,11 +73,13 @@
   --status-success-border: rgba(74, 222, 128, 0.30);
   --status-info:        var(--accent);
   --status-info-bg:     var(--accent-dim);
-  --status-info-border: rgba(230, 231, 234, 0.30);
+  --status-info-border: rgba(79, 139, 255, 0.30);
 
   --pk: #e3b341;
   --fk: #a29bff;
   --idx: #6fd0bb;
+  --nn: #6e6e73;
+  --nullable: #a29bff;
 
   --cat-users: #a29bff;
   --cat-users-soft: rgba(162, 155, 255, 0.10);
@@ -182,189 +99,265 @@
   --rel-line-active: #ededee;
   --rel-line-dim: rgba(58,59,64,0.5);
 
-  /* SQL syntax palette (obsidian) — lower-saturation than midnight so
-     the pane reads as calm neutral instead of party-colored. */
-  --sql-keyword:     #9cc7ff;
-  --sql-type:        #7fd4bf;
-  --sql-string:      #7fd49c;
-  --sql-number:      #ffc48c;
-  --sql-function:    #e0d89c;
+  /* SQL syntax palette (obsidian) — calm, lower-saturation tones so
+     the pane reads as neutral instead of party-colored. */
+  --sql-keyword:     #9cc7ff;  /* CREATE, SELECT, JOIN — sky blue */
+  --sql-type:        #7fd4bf;  /* INT, VARCHAR, etc — teal */
+  --sql-string:      #7fd49c;  /* 'abc' — soft green */
+  --sql-number:      #ffc48c;  /* 42, 3.14 — warm amber */
+  --sql-function:    #e0d89c;  /* now(), count() — soft yellow */
   --sql-punctuation: #8b8b92;
   --sql-ident:       var(--text-primary);
   --sql-comment:     var(--text-tertiary);
+
+  --shadow-card: 0 1px 0 rgba(255,255,255,0.04) inset, 0 8px 24px rgba(0,0,0,0.35);
+  --shadow-pop: 0 20px 50px rgba(0,0,0,0.5);
+  --scrim: rgba(0,0,0,0.5);
+
+  /* ============================================================
+     Cell-type accent palette (DQL New-UI handoff)
+     Each cell type has a tone color used for: pill badge text,
+     pill badge background (12% alpha), pill border (50% alpha),
+     and the left-edge focus ring when the cell is selected.
+     ============================================================ */
+  --cell-md:       #2fb97a;
+  --cell-sql:      #3b8ef0;
+  --cell-chart:    #b067f7;
+  --cell-filter:   #f26a6a;
+  --cell-pivot:    #e5a84d;
+  --cell-table:    #5dd1c8;
+  --cell-text:     #4a8aef;
+  --cell-chat:     #8a8f9b;
+  --cell-single:   #b067f7;
+  --cell-kpi:      #b067f7;
+  --cell-insight:  #ffc857;
+  --cell-callout:  #ff7ac6;
+  --cell-goal:     #61d095;
+  --cell-compare:  #7fd4ff;
+  --cell-heatmap:  #ff9966;
+  --cell-narrative:#ffc857;
+  --cell-inputs:   #9aa0ae;
+  --cell-block:    #6b8afd;
+}
+
+/* Explicit obsidian alias (same as :root default) */
+[data-theme="obsidian"] {
+  color-scheme: dark;
 }
 
 /* ================================================================
-   PAPER — warm light (off-white, stone accents, print-like)
+   PAPER — warm light (off-white, print-like, deep ink palette)
+   Retuned v1.3.2: crisper gutters, stronger editor borders, inked
+   syntax palette — eliminates the washed-out bleed on code surfaces.
    ================================================================ */
 [data-theme="paper"] {
   color-scheme: light;
-  --bg-0: #f6f4ef;
-  --bg-1: #faf8f3;
-  --bg-2: #ffffff;
-  --bg-3: #f1eee6;
-  --bg-4: #e7e3d8;
-  --bg-canvas: #f2efe8;
-  --bg-grid: rgba(0,0,0,0.035);
+  /* Hex notebook palette — warm off-white canvas, white surfaces */
+  --bg-0: #f3f0ea;       /* gutters, chip bg, activity rail inset */
+  --bg-1: #fbfaf7;       /* app canvas (Hex --bg) */
+  --bg-2: #ffffff;       /* cards / cells / modals (Hex --surface) */
+  --bg-3: #f3f0ea;       /* hover / pill bg */
+  --bg-4: #e9e6e0;       /* subdued elevated */
+  --bg-canvas: #fbfaf7;
+  --bg-grid: rgba(26, 26, 26, 0.04);
 
-  --border-subtle: rgba(0, 0, 0, 0.05);
-  --border-default: rgba(0, 0, 0, 0.09);
-  --border-strong: rgba(0, 0, 0, 0.16);
-  --border-focus: #3558d6;
+  --border-subtle: #f0eee9;
+  --border-default: #e9e6e0;
+  --border-strong: #d9d5cc;
+  --border-focus: #6b5dd3;
 
   --text-primary: #1a1a1a;
-  --text-secondary: #545454;
-  --text-tertiary: #7a7468;
-  --text-muted: #a59f92;
+  --text-secondary: #4a4a52;
+  --text-tertiary: #8a8d96;
+  --text-muted: #b0b2ba;
 
-  --accent: #3558d6;
-  --accent-hover: #2341b8;
-  --accent-dim: rgba(53, 88, 214, 0.09);
+  --accent: #6b5dd3;            /* Hex purple */
+  --accent-hover: #5c4fc2;
+  --accent-dim: #f3f0fb;         /* Hex --accent-wash */
   --accent-fg: #ffffff;
   --accent-on: #ffffff;
 
-  /* Paper uses DARK hover tint (light theme) — bg is off-white, so we
-     want a faint smoke, not the dark-theme's white-overlay. */
-  --bg-hover: rgba(40, 30, 20, 0.05);
+  --bg-hover: rgba(107, 93, 211, 0.06);
 
-  /* Paper tunes to print-house reds/golds/greens — deeper, saturated,
-     readable on warm off-white. */
-  --status-error:        #c62828;
-  --status-error-bg:     rgba(198, 40, 40, 0.08);
-  --status-error-border: rgba(198, 40, 40, 0.32);
-  --status-warning:        #b8860b;
-  --status-warning-bg:     rgba(184, 134, 11, 0.10);
-  --status-warning-border: rgba(184, 134, 11, 0.32);
-  --status-success:        #0d8b5e;
-  --status-success-bg:     rgba(13, 139, 94, 0.09);
-  --status-success-border: rgba(13, 139, 94, 0.30);
+  --status-error:        #c14545;
+  --status-error-bg:     #fbf2f2;
+  --status-error-border: rgba(193, 69, 69, 0.30);
+  --status-warning:        #b26b1f;
+  --status-warning-bg:     #fdf6e6;
+  --status-warning-border: rgba(178, 107, 31, 0.28);
+  --status-success:        #2e8b57;
+  --status-success-bg:     #e8f4ee;
+  --status-success-border: rgba(46, 139, 87, 0.30);
   --status-info:        var(--accent);
   --status-info-bg:     var(--accent-dim);
-  --status-info-border: rgba(53, 88, 214, 0.30);
+  --status-info-border: rgba(107, 93, 211, 0.30);
 
-  --pk: #b8860b;
-  --fk: #5b4ac4;
-  --idx: #0d8b7a;
-  --nn: #7a7468;
-  --nullable: #5b4ac4;
+  --pk: #b26b1f;
+  --fk: #6b5dd3;
+  --idx: #2e8b57;
+  --nn: #8a8d96;
+  --nullable: #6b5dd3;
 
-  --cat-users: #5b4ac4;
-  --cat-users-soft: rgba(91, 74, 196, 0.10);
-  --cat-billing: #0d8b5e;
-  --cat-billing-soft: rgba(13, 139, 94, 0.10);
-  --cat-product: #c96d00;
-  --cat-product-soft: rgba(201, 109, 0, 0.10);
-  --cat-system: #6b6356;
-  --cat-system-soft: rgba(107, 99, 86, 0.10);
-  --cat-access: #c4287a;
-  --cat-access-soft: rgba(196, 40, 122, 0.10);
-  --cat-audit: #0680a0;
-  --cat-audit-soft: rgba(6, 128, 160, 0.10);
+  --cat-users: #6b5dd3;
+  --cat-users-soft: #f3f0fb;
+  --cat-billing: #2e8b57;
+  --cat-billing-soft: #e8f4ee;
+  --cat-product: #f0a04b;
+  --cat-product-soft: rgba(240, 160, 75, 0.14);
+  --cat-system: #4a4a52;
+  --cat-system-soft: #f3f0ea;
+  --cat-access: #c14590;
+  --cat-access-soft: rgba(193, 69, 144, 0.10);
+  --cat-audit: #4a74c9;
+  --cat-audit-soft: #eef3fc;
 
-  --rel-line: #b8b0a1;
-  --rel-line-strong: #7a7468;
-  --rel-line-active: #3558d6;
-  --rel-line-dim: rgba(184, 176, 161, 0.45);
+  --rel-line: #e9e6e0;
+  --rel-line-strong: #b0b2ba;
+  --rel-line-active: #6b5dd3;
+  --rel-line-dim: rgba(233, 230, 224, 0.5);
 
-  /* SQL syntax palette (paper) — deep, print-house tones that stay
-     legible on cream bg without flattening. */
-  --sql-keyword:     #2c5ba8;  /* deep blue */
-  --sql-type:        #0d8b7a;  /* teal */
-  --sql-string:      #0b7a3e;  /* forest green */
-  --sql-number:      #a04b1a;  /* burnt orange */
-  --sql-function:    #8a6d3b;  /* amber ink */
-  --sql-punctuation: #6b6356;
+  /* SQL syntax palette (Hex light — purple kw, amber strings, etc.) */
+  --sql-keyword:     #6b5dd3;
+  --sql-type:        #2e8b57;
+  --sql-string:      #b26b1f;
+  --sql-number:      #0a6b5e;
+  --sql-function:    #f0a04b;
+  --sql-punctuation: #4a4a52;
   --sql-ident:       var(--text-primary);
-  --sql-comment:     var(--text-tertiary);
+  --sql-comment:     #8a8d96;
 
-  --shadow-card: 0 1px 0 rgba(255,255,255,0.9) inset, 0 1px 2px rgba(0,0,0,0.04), 0 8px 24px rgba(60,50,30,0.08);
-  --shadow-pop: 0 20px 50px rgba(60,50,30,0.18);
-  --scrim: rgba(40,35,25,0.35);
+  --shadow-card: 0 1px 2px rgba(0,0,0,0.02);
+  --shadow-pop: 0 10px 30px rgba(26,26,26,0.12);
+  --scrim: rgba(26,26,26,0.40);
+
+  /* Per-cell-kind accent dots (ported verbatim from hex-cells.jsx) */
+  --cell-md:       #4a4a52;
+  --cell-sql:      #3b8ef0;
+  --cell-chart:    #6b5dd3;
+  --cell-filter:   #c14545;
+  --cell-pivot:    #e5a84d;
+  --cell-table:    #5dd1c8;
+  --cell-text:     #4a4a52;
+  --cell-chat:     #c14590;
+  --cell-single:   #6b5dd3;
+  --cell-kpi:      #6b5dd3;
+  --cell-insight:  #f0a04b;
+  --cell-callout:  #c14590;
+  --cell-goal:     #2e8b57;
+  --cell-compare:  #4a74c9;
+  --cell-heatmap:  #f0a04b;
+  --cell-narrative:#f0a04b;
+  --cell-inputs:   #d4a14a;
+  --cell-block:    #6b5dd3;
 }
 
 /* ================================================================
-   ARCTIC — cool light (IBM Carbon / crisp blue-white enterprise)
+   WHITE — plain analyst-report white (Metabase / Hex / Notion feel)
+   Clean #ffffff surfaces, cool-grey structure, blue brand accent.
+   Purpose-built for printable reports and exec-facing digests.
    ================================================================ */
-[data-theme="arctic"] {
+[data-theme="white"] {
   color-scheme: light;
-  --bg-0: #eef2f7;
-  --bg-1: #f6f8fb;
+  --bg-0: #f5f6f8;
+  --bg-1: #ffffff;
   --bg-2: #ffffff;
-  --bg-3: #eaeff5;
-  --bg-4: #dce3ec;
-  --bg-canvas: #f1f4f9;
-  --bg-grid: rgba(15,40,80,0.04);
+  --bg-3: #eef0f3;
+  --bg-4: #e1e4e9;
+  --bg-canvas: #f7f8fa;
+  --bg-grid: rgba(15, 23, 42, 0.04);
 
-  --border-subtle: rgba(15, 40, 80, 0.05);
-  --border-default: rgba(15, 40, 80, 0.10);
-  --border-strong: rgba(15, 40, 80, 0.18);
-  --border-focus: #0f62fe;
+  --border-subtle: rgba(15, 23, 42, 0.08);
+  --border-default: rgba(15, 23, 42, 0.14);
+  --border-strong: rgba(15, 23, 42, 0.22);
+  --border-focus: #2563eb;
 
-  --text-primary: #0f1a2b;
-  --text-secondary: #4a5b73;
-  --text-tertiary: #6a7a92;
-  --text-muted: #98a4b7;
+  --text-primary: #0f172a;
+  --text-secondary: #475569;
+  --text-tertiary: #64748b;
+  --text-muted: #94a3b8;
 
-  --accent: #0f62fe;
-  --accent-hover: #0043ce;
-  --accent-dim: rgba(15, 98, 254, 0.09);
+  --accent: #2563eb;
+  --accent-hover: #1d4ed8;
+  --accent-dim: rgba(37, 99, 235, 0.10);
   --accent-fg: #ffffff;
   --accent-on: #ffffff;
 
-  --bg-hover: rgba(15, 40, 80, 0.05);
+  --bg-hover: rgba(15, 23, 42, 0.045);
 
-  /* Arctic uses IBM Carbon semantic palette. */
-  --status-error:        #da1e28;
-  --status-error-bg:     rgba(218, 30, 40, 0.08);
-  --status-error-border: rgba(218, 30, 40, 0.28);
-  --status-warning:        #b06a00;
-  --status-warning-bg:     rgba(176, 106, 0, 0.10);
-  --status-warning-border: rgba(176, 106, 0, 0.32);
-  --status-success:        #198038;
-  --status-success-bg:     rgba(25, 128, 56, 0.08);
-  --status-success-border: rgba(25, 128, 56, 0.30);
+  /* White uses crisp, high-contrast semantic tones — a report should
+     make a red cell *read* as alarm at a glance. */
+  --status-error:        #dc2626;
+  --status-error-bg:     rgba(220, 38, 38, 0.08);
+  --status-error-border: rgba(220, 38, 38, 0.30);
+  --status-warning:        #ca8a04;
+  --status-warning-bg:     rgba(202, 138, 4, 0.10);
+  --status-warning-border: rgba(202, 138, 4, 0.32);
+  --status-success:        #16a34a;
+  --status-success-bg:     rgba(22, 163, 74, 0.08);
+  --status-success-border: rgba(22, 163, 74, 0.30);
   --status-info:        var(--accent);
   --status-info-bg:     var(--accent-dim);
-  --status-info-border: rgba(15, 98, 254, 0.30);
+  --status-info-border: rgba(37, 99, 235, 0.30);
 
-  --pk: #b78000;
-  --fk: #6929c4;
-  --idx: #007d79;
-  --nn: #6a7a92;
-  --nullable: #6929c4;
+  --pk: #ca8a04;
+  --fk: #7c3aed;
+  --idx: #0891b2;
+  --nn: #64748b;
+  --nullable: #7c3aed;
 
-  --cat-users: #6929c4;
-  --cat-users-soft: rgba(105, 41, 196, 0.09);
-  --cat-billing: #0e7c58;
-  --cat-billing-soft: rgba(14, 124, 88, 0.09);
-  --cat-product: #b06a00;
-  --cat-product-soft: rgba(176, 106, 0, 0.09);
-  --cat-system: #586878;
-  --cat-system-soft: rgba(88, 104, 120, 0.10);
-  --cat-access: #d02670;
-  --cat-access-soft: rgba(208, 38, 112, 0.09);
-  --cat-audit: #0b7a93;
-  --cat-audit-soft: rgba(11, 122, 147, 0.09);
+  --cat-users: #7c3aed;
+  --cat-users-soft: rgba(124, 58, 237, 0.09);
+  --cat-billing: #16a34a;
+  --cat-billing-soft: rgba(22, 163, 74, 0.09);
+  --cat-product: #ea580c;
+  --cat-product-soft: rgba(234, 88, 12, 0.09);
+  --cat-system: #64748b;
+  --cat-system-soft: rgba(100, 116, 139, 0.10);
+  --cat-access: #db2777;
+  --cat-access-soft: rgba(219, 39, 119, 0.09);
+  --cat-audit: #0891b2;
+  --cat-audit-soft: rgba(8, 145, 178, 0.09);
 
-  --rel-line: #a9b5c4;
-  --rel-line-strong: #6a7a92;
-  --rel-line-active: #0f62fe;
-  --rel-line-dim: rgba(169, 181, 196, 0.5);
+  --rel-line: #cbd5e1;
+  --rel-line-strong: #64748b;
+  --rel-line-active: #2563eb;
+  --rel-line-dim: rgba(203, 213, 225, 0.5);
 
-  /* SQL syntax palette (arctic) — IBM Carbon-ish crisp blues and teals
-     on near-white bg. */
-  --sql-keyword:     #0043ce;
-  --sql-type:        #007d79;
-  --sql-string:      #0e6027;
-  --sql-number:      #b06a00;
-  --sql-function:    #8a3ffc;
-  --sql-punctuation: #586878;
+  /* SQL syntax palette (white) — crisp, modern IDE tones on pure white.
+     Tuned for Metabase/Hex-style report surfaces: high-contrast and
+     easy to scan. */
+  --sql-keyword:     #1d4ed8;  /* crisp blue */
+  --sql-type:        #0891b2;  /* cyan */
+  --sql-string:      #15803d;  /* emerald */
+  --sql-number:      #c2410c;  /* orange */
+  --sql-function:    #7c3aed;  /* violet */
+  --sql-punctuation: #475569;
   --sql-ident:       var(--text-primary);
-  --sql-comment:     var(--text-tertiary);
+  --sql-comment:     #94a3b8;
 
-  --shadow-card: 0 1px 0 rgba(255,255,255,1) inset, 0 1px 2px rgba(15,40,80,0.04), 0 8px 24px rgba(15,40,80,0.08);
-  --shadow-pop: 0 20px 50px rgba(15,40,80,0.18);
-  --scrim: rgba(15,40,80,0.35);
+  --shadow-card: 0 1px 0 rgba(255,255,255,1) inset, 0 1px 2px rgba(15,23,42,0.04), 0 8px 24px rgba(15,23,42,0.06);
+  --shadow-pop: 0 20px 50px rgba(15,23,42,0.14);
+  --scrim: rgba(15,23,42,0.30);
+
+  /* Cell-type palette — white (crisp report tones on #ffffff) */
+  --cell-md:       #15803d;
+  --cell-sql:      #1d4ed8;
+  --cell-chart:    #7c3aed;
+  --cell-filter:   #dc2626;
+  --cell-pivot:    #ca8a04;
+  --cell-table:    #0891b2;
+  --cell-text:     #1d4ed8;
+  --cell-chat:     #64748b;
+  --cell-single:   #7c3aed;
+  --cell-kpi:      #7c3aed;
+  --cell-insight:  #ca8a04;
+  --cell-callout:  #db2777;
+  --cell-goal:     #16a34a;
+  --cell-compare:  #0891b2;
+  --cell-heatmap:  #ea580c;
+  --cell-narrative:#ca8a04;
+  --cell-inputs:   #64748b;
+  --cell-block:    #2563eb;
 }
 
 [data-density="compact"] {
@@ -1412,7 +1405,7 @@ input { font: inherit; color: inherit; }
 /* Live-SQL preview container. Uses monospace + subtle background so it
    visually separates from surrounding PanelCards. All syntax colours
    come from the --sql-* palette defined per Luna theme so the preview
-   reads well on midnight, obsidian, paper, and arctic. */
+   reads well on obsidian, paper, and white. */
 .inspector-sql-pre {
   margin: 0;
   padding: 12px;

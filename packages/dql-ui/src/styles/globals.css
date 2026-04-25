@@ -73,8 +73,8 @@
   --color-accent-teal:        var(--idx);
   --color-accent-teal-soft:   rgba(78, 201, 176, 0.14);
 
-  /* Status — resolve to per-theme --status-* vars from tokens.css so paper/arctic
-     surface their tuned print-house tones instead of dark-theme defaults. */
+  /* Status — resolve to per-theme --status-* vars from tokens.css so paper/white
+     surface their tuned tones instead of dark-theme defaults. */
   --color-status-success: var(--status-success);
   --color-status-warning: var(--status-warning);
   --color-status-error:   var(--status-error);
@@ -156,8 +156,8 @@
 
 /* ──────────────────────────────────────────────────────────────────────────
    Legacy dark theme — retained for back-compat. Luna themes
-   (midnight/obsidian/paper/arctic) live in datalex-design.css and drive
-   all semantic tokens via var() bridges above.
+   (obsidian/paper/white) live in tokens.css and drive all semantic tokens
+   via the var() bridges above.
    ────────────────────────────────────────────────────────────────────────── */
 
 /* ──────────────────────────────────────────────────────────────────────────
@@ -175,7 +175,7 @@
 
   body {
     margin: 0;
-    font-family: 'Plus Jakarta Sans', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+    font-family: var(--font-ui);
     font-size: var(--text-base);
     font-weight: var(--weight-regular);
     line-height: var(--leading-normal);
@@ -452,7 +452,7 @@
 
    The YAML editor owns its own theme via EditorView.theme() in
    YamlEditor.jsx and swaps between a light and dark palette based on the
-   current Luna theme (midnight/obsidian → dark, paper/arctic → light). We
+   current Luna theme (obsidian → dark, paper/white → light). We
    only set sizing here — colors, selection, gutters, and cursor are all
    handled in the editor theme so they can vary per Luna theme.
    ────────────────────────────────────────────────────────────────────────── */

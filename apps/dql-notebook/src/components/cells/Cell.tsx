@@ -114,7 +114,7 @@ function CellToolbarWrap({
       active={hovered || cell.status !== 'idle'}
       title={title}
       actions={actions}
-      gutter={<ExecutionBadge cell={cell} t={t} />}
+      status={<InlineStatus cell={cell} t={t} />}
       onMouseEnter={() => setHovered(true)}
       onMouseLeave={() => setHovered(false)}
     >
@@ -139,21 +139,39 @@ const TYPE_LABELS: Record<string, string> = {
   chat: 'CHAT',
 };
 
-const TYPE_COLORS: Record<string, string> = {
-  sql: '#388bfd',
-  markdown: '#56d364',
-  dql: '#e3b341',
-  param: '#e3b341',
-  chart: '#a371f7',
-  pivot: '#a371f7',
-  single_value: '#a371f7',
-  filter: '#ff7b72',
-  table: '#79c0ff',
-  map: '#7ce38b',
-  writeback: '#d2a8ff',
-  python: '#3572a5',
-  chat: '#f0883e',
-};
+// v1.4 cell-type palette — ported from DQL New-UI handoff
+// (dql-primitives.jsx). Each key resolves to a per-theme --cell-*
+// token declared in packages/dql-ui/src/styles/tokens.css so paper
+// and white themes pick up their own tuned ink.
+function cssVar(name: string, fallback: string): string {
+  if (typeof window === 'undefined') return fallback;
+  const v = getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+  return v || fallback;
+}
+
+function makeTypeColors(): Record<string, string> {
+  return {
+    sql: cssVar('--cell-sql', '#3b8ef0'),
+    markdown: cssVar('--cell-md', '#2fb97a'),
+    dql: cssVar('--cell-insight', '#ffc857'),
+    param: cssVar('--cell-inputs', '#9aa0ae'),
+    chart: cssVar('--cell-chart', '#b067f7'),
+    pivot: cssVar('--cell-pivot', '#e5a84d'),
+    single_value: cssVar('--cell-single', '#b067f7'),
+    filter: cssVar('--cell-filter', '#f26a6a'),
+    table: cssVar('--cell-table', '#5dd1c8'),
+    map: cssVar('--cell-goal', '#61d095'),
+    writeback: cssVar('--cell-callout', '#ff7ac6'),
+    python: cssVar('--cell-sql', '#3b8ef0'),
+    chat: cssVar('--cell-chat', '#8a8f9b'),
+  };
+}
+
+const TYPE_COLORS: Record<string, string> = new Proxy({} as Record<string, string>, {
+  get(_, key: string) {
+    return makeTypeColors()[key];
+  },
+});
 
 interface PlaceholderMeta {
   title: string;
@@ -197,6 +215,61 @@ function getCellBorderColor(cell: Cell, t: Theme): string {
     default:
       return t.cellBorder;
   }
+}
+
+// v1.3.3 Hex handoff — inline status chip that lives in the cell-header row
+// (replaces the legacy `[1]` left-gutter badge). Shows a compact dot +
+// optional duration. Running uses a subtle pulsing ring.
+function InlineStatus({ cell, t }: { cell: Cell; t: Theme }) {
+  const { status } = cell;
+  if (status === 'idle' && cell.executionCount === undefined) return null;
+
+  let dotColor = t.textMuted;
+  let text = '';
+  if (status === 'running') {
+    dotColor = t.cellBorderRunning;
+    text = 'Running…';
+  } else if (status === 'error') {
+    dotColor = t.error;
+    text = 'Error';
+  } else if (cell.executionCount !== undefined) {
+    dotColor = t.success;
+    if (cell.result?.executionTime !== undefined) {
+      const ms = cell.result.executionTime;
+      text = ms < 1000 ? `${Math.max(1, Math.round(ms))}ms` : `${(ms / 1000).toFixed(1)}s`;
+    } else {
+      text = `[${cell.executionCount}]`;
+    }
+  }
+
+  return (
+    <span
+      style={{
+        display: 'inline-flex',
+        alignItems: 'center',
+        gap: 5,
+        fontSize: 10,
+        fontFamily: t.font,
+        color: t.textMuted,
+        flexShrink: 0,
+      }}
+    >
+      <span
+        aria-hidden
+        style={{
+          width: 6,
+          height: 6,
+          borderRadius: 999,
+          background: dotColor,
+          boxShadow: status === 'running' ? `0 0 0 3px ${dotColor}33` : undefined,
+          animation: status === 'running' ? 'pulse 1.2s ease-in-out infinite' : undefined,
+          flexShrink: 0,
+        }}
+      />
+      {text}
+      <style>{`@keyframes pulse { 0%,100%{opacity:1} 50%{opacity:0.5} }`}</style>
+    </span>
+  );
 }
 
 function ExecutionBadge({ cell, t }: { cell: Cell; t: Theme }) {
@@ -623,7 +696,8 @@ export function CellComponent({ cell, index }: CellProps) {
 
   // v1.3 Track 5 — hidden-in-App-view strip. Placed after all hooks to honor
   // Rules of Hooks; flipping appMode must not change the hook count.
-  if (state.appMode === 'app' && APP_MODE_HIDDEN_CELL_TYPES.has(cell.type)) {
+  // v1.3.3: Reader mode reuses the App hide-list (same stakeholder visibility).
+  if (state.appMode !== 'studio' && APP_MODE_HIDDEN_CELL_TYPES.has(cell.type)) {
     return (
       <div
         style={{
@@ -761,8 +835,8 @@ export function CellComponent({ cell, index }: CellProps) {
           }}
         />
       )}
-      {/* Gutter */}
-      <ExecutionBadge cell={cell} t={t} />
+      {/* v1.3.3 Hex handoff — left gutter removed; status moved inline
+          into the cell header via <InlineStatus />. */}
 
       {/* Cell body */}
       <div
@@ -771,8 +845,10 @@ export function CellComponent({ cell, index }: CellProps) {
           minWidth: 0,
           borderRadius: 8,
           border: `1px solid ${cellHovered || cell.status !== 'idle' ? borderColor : t.cellBorder}`,
-          borderLeft: `2px solid ${borderColor}`,
           background: t.cellBg,
+          boxShadow: cell.status !== 'idle'
+            ? `0 0 0 3px ${borderColor}14, 0 1px 2px rgba(0,0,0,0.04)`
+            : '0 1px 2px rgba(0,0,0,0.02)',
           overflow: 'hidden',
           transition: 'border-color 0.2s',
         }}
@@ -780,30 +856,34 @@ export function CellComponent({ cell, index }: CellProps) {
         {/* Cell header */}
         <div
           style={{
-            height: 32,
+            minHeight: 32,
             display: 'flex',
             alignItems: 'center',
-            padding: '0 8px 0 10px',
+            padding: '8px 14px',
             gap: 8,
-            borderBottom: `1px solid ${t.cellBorder}`,
-            background: `${t.tableHeaderBg}80`,
+            background: 'transparent',
           }}
         >
-          {/* Type badge */}
+          {/* Type dot + label (Hex style: no pill) */}
+          <span
+            aria-hidden
+            style={{
+              width: 6,
+              height: 6,
+              borderRadius: 999,
+              background: TYPE_COLORS[cell.type] ?? t.accent,
+              flexShrink: 0,
+            }}
+          />
           <span
             title={cell.type === 'dql' ? 'DQL cell — write a governed block (type, owner, description, tests) or use @metric()/@dim() refs' : cell.type === 'sql' ? 'SQL cell — write raw SQL, reference other cells with {{name}}' : undefined}
             style={{
-              fontSize: 10,
-              fontWeight: 700,
-              fontFamily: t.fontMono,
-              letterSpacing: '0.08em',
-              color: TYPE_COLORS[cell.type] ?? t.accent,
-              background: `${TYPE_COLORS[cell.type] ?? t.accent}18`,
-              border: `1px solid ${TYPE_COLORS[cell.type] ?? t.accent}40`,
-              borderRadius: 4,
-              padding: '1px 6px',
+              fontSize: 11,
+              fontWeight: 500,
+              letterSpacing: '0.2px',
+              color: t.textSecondary,
               flexShrink: 0,
-              textTransform: 'uppercase' as const,
+              whiteSpace: 'nowrap' as const,
             }}
           >
             {TYPE_LABELS[cell.type]}
@@ -974,6 +1054,9 @@ export function CellComponent({ cell, index }: CellProps) {
           )}
 
           <div style={{ flex: 1 }} />
+
+          {/* v1.3.3 Hex handoff — inline status chip replaces the left `[N]` gutter. */}
+          <InlineStatus cell={cell} t={t} />
 
           {/* Action buttons — shown on hover */}
           {cellHovered && (

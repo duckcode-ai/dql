@@ -73,7 +73,7 @@ const VAR_FOR: Record<keyof Theme, string> = {
   textPrimary: '--color-text-primary',
   textSecondary: '--color-text-secondary',
   textMuted: '--color-text-tertiary',
-  editorBg: '--color-bg-sunken',
+  editorBg: '--color-bg-surface',
   editorBorder: '--color-border-subtle',
   tableBorder: '--color-border-subtle',
   tableHeaderBg: '--color-bg-secondary',
@@ -100,45 +100,44 @@ const VAR_FOR: Record<keyof Theme, string> = {
 };
 
 // Fallback values used for SSR / build-time access where `document` is
-// not available. Mirror midnight theme so server-rendered output does
-// not flash a wrong-color frame.
+// not available. Mirror the default (Hex-paper) theme so SSR doesn't flash.
 const FALLBACK: Record<keyof Theme, string> = {
-  appBg: '#0f1219',
-  sidebarBg: '#151922',
-  activityBarBg: '#0a0c11',
-  headerBg: '#0f1219',
-  headerBorder: 'rgba(255,255,255,0.08)',
-  cellBg: '#151922',
-  cellBorder: 'rgba(255,255,255,0.05)',
-  cellBorderActive: '#5b8cff',
-  cellBorderRunning: '#10b981',
-  textPrimary: '#e7ebf2',
-  textSecondary: '#9aa3b4',
-  textMuted: '#6b7385',
-  editorBg: '#0a0c11',
-  editorBorder: 'rgba(255,255,255,0.05)',
-  tableBorder: 'rgba(255,255,255,0.05)',
-  tableHeaderBg: '#151922',
-  tableRowHover: '#1c212d',
-  accent: '#5b8cff',
-  accentHover: '#5b8cff',
-  success: '#10b981',
-  error: '#ef4444',
-  warning: '#f5b544',
-  btnBg: '#1c212d',
-  btnBorder: 'rgba(255,255,255,0.08)',
-  btnHover: '#1c212d',
-  sidebarItemHover: '#1c212d',
-  sidebarItemActive: 'rgba(91,140,255,0.14)',
-  scrollbarThumb: 'rgba(255,255,255,0.14)',
-  modalBg: '#151922',
-  modalOverlay: 'rgba(0,0,0,0.5)',
-  inputBg: '#0a0c11',
-  inputBorder: 'rgba(255,255,255,0.05)',
-  pillBg: '#1c212d',
-  font: "'Plus Jakarta Sans', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif",
-  fontMono: "'JetBrains Mono', 'SFMono-Regular', Menlo, Monaco, Consolas, monospace",
-  fontSerif: "'Plus Jakarta Sans', -apple-system, BlinkMacSystemFont, sans-serif",
+  appBg: '#fbfaf7',
+  sidebarBg: '#fbfaf7',
+  activityBarBg: '#ffffff',
+  headerBg: '#ffffff',
+  headerBorder: '#e9e6e0',
+  cellBg: '#ffffff',
+  cellBorder: '#e9e6e0',
+  cellBorderActive: '#6b5dd3',
+  cellBorderRunning: '#2e8b57',
+  textPrimary: '#1a1a1a',
+  textSecondary: '#4a4a52',
+  textMuted: '#8a8d96',
+  editorBg: '#fbfaf7',
+  editorBorder: '#e9e6e0',
+  tableBorder: '#f0eee9',
+  tableHeaderBg: '#faf9f7',
+  tableRowHover: '#f3f0ea',
+  accent: '#6b5dd3',
+  accentHover: '#5c4fc2',
+  success: '#2e8b57',
+  error: '#c14545',
+  warning: '#b26b1f',
+  btnBg: '#ffffff',
+  btnBorder: '#e9e6e0',
+  btnHover: '#f3f0ea',
+  sidebarItemHover: '#f3f0ea',
+  sidebarItemActive: '#f3f0fb',
+  scrollbarThumb: '#d9d5cc',
+  modalBg: '#ffffff',
+  modalOverlay: 'rgba(26,26,26,0.40)',
+  inputBg: '#fbfaf7',
+  inputBorder: '#e9e6e0',
+  pillBg: '#f3f0ea',
+  font: "'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif",
+  fontMono: "'JetBrains Mono', ui-monospace, 'SFMono-Regular', Menlo, Monaco, Consolas, monospace",
+  fontSerif: "'Inter', -apple-system, BlinkMacSystemFont, sans-serif",
 };
 
 function resolveVar(key: keyof Theme): string {
@@ -168,18 +167,20 @@ function makeThemeProxy(): Theme {
   });
 }
 
-// One proxy — every consumer reads from the same document root. `dark`/`light`
-// are kept as aliases so v1.2 persisted state ('dark'/'light') still resolves,
-// while the canonical Luna names (midnight/obsidian/paper/arctic) land here too.
+// One proxy — every consumer reads from the same document root. v1.3.2
+// consolidated the Luna set down to three themes (obsidian / paper / white).
+// Legacy names (`dark`/`light`/`midnight`/`arctic`) stay in the union so
+// persisted state from v1.2 and early v1.3 releases still resolves cleanly.
 const PROXY: Theme = makeThemeProxy();
 export const DARK: Theme = PROXY;
 export const LIGHT: Theme = PROXY;
-export type ThemeMode = 'dark' | 'light' | 'midnight' | 'obsidian' | 'paper' | 'arctic';
+export type ThemeMode = 'obsidian' | 'paper' | 'white' | 'dark' | 'light' | 'midnight' | 'arctic';
 export const themes: Record<ThemeMode, Theme> = {
+  obsidian: PROXY,
+  paper: PROXY,
+  white: PROXY,
   dark: PROXY,
   light: PROXY,
   midnight: PROXY,
-  obsidian: PROXY,
-  paper: PROXY,
   arctic: PROXY,
 };

@@ -670,7 +670,7 @@ export const api = {
     });
   },
 
-  async fetchGitDiff(path?: string): Promise<{
+  async fetchGitDiff(path?: string, staged?: boolean): Promise<{
     inRepo: boolean;
     diff: string;
     before: string | null;
@@ -678,10 +678,102 @@ export const api = {
     diffReport: DiffReport | null;
   }> {
     try {
-      const qs = path ? `?path=${encodeURIComponent(path)}` : '';
-      return await request<any>(`/api/git/diff${qs}`);
+      const params = new URLSearchParams();
+      if (path) params.set('path', path);
+      if (staged) params.set('staged', 'true');
+      const qs = params.toString();
+      return await request<any>(`/api/git/diff${qs ? `?${qs}` : ''}`);
     } catch {
       return { inRepo: false, diff: '', before: null, after: null, diffReport: null };
+    }
+  },
+
+  async fetchGitBranches(): Promise<{ inRepo: boolean; current: string | null; branches: string[] }> {
+    try {
+      return await request<any>('/api/git/branches');
+    } catch {
+      return { inRepo: false, current: null, branches: [] };
+    }
+  },
+
+  async fetchGitRemote(): Promise<{ inRepo: boolean; url: string | null; name: string | null }> {
+    try {
+      return await request<any>('/api/git/remote');
+    } catch {
+      return { inRepo: false, url: null, name: null };
+    }
+  },
+
+  async gitStage(paths: string[]): Promise<{ ok: boolean; error?: string }> {
+    try {
+      return await request<any>('/api/git/stage', { method: 'POST', body: JSON.stringify({ paths }) });
+    } catch (e) {
+      return { ok: false, error: e instanceof Error ? e.message : String(e) };
+    }
+  },
+
+  async gitUnstage(paths: string[]): Promise<{ ok: boolean; error?: string }> {
+    try {
+      return await request<any>('/api/git/unstage', { method: 'POST', body: JSON.stringify({ paths }) });
+    } catch (e) {
+      return { ok: false, error: e instanceof Error ? e.message : String(e) };
+    }
+  },
+
+  async gitDiscard(paths: string[]): Promise<{ ok: boolean; error?: string }> {
+    try {
+      return await request<any>('/api/git/discard', { method: 'POST', body: JSON.stringify({ paths }) });
+    } catch (e) {
+      return { ok: false, error: e instanceof Error ? e.message : String(e) };
+    }
+  },
+
+  async gitCommit(message: string, stageAll = false): Promise<{ ok: boolean; error?: string; hash?: string }> {
+    try {
+      return await request<any>('/api/git/commit', {
+        method: 'POST',
+        body: JSON.stringify({ message, stageAll }),
+      });
+    } catch (e) {
+      return { ok: false, error: e instanceof Error ? e.message : String(e) };
+    }
+  },
+
+  async gitPush(): Promise<{ ok: boolean; error?: string; output?: string }> {
+    try {
+      return await request<any>('/api/git/push', { method: 'POST', body: '{}' });
+    } catch (e) {
+      return { ok: false, error: e instanceof Error ? e.message : String(e) };
+    }
+  },
+
+  async gitPull(): Promise<{ ok: boolean; error?: string; output?: string }> {
+    try {
+      return await request<any>('/api/git/pull', { method: 'POST', body: '{}' });
+    } catch (e) {
+      return { ok: false, error: e instanceof Error ? e.message : String(e) };
+    }
+  },
+
+  async gitCreateBranch(name: string, checkout = true): Promise<{ ok: boolean; error?: string }> {
+    try {
+      return await request<any>('/api/git/branch', {
+        method: 'POST',
+        body: JSON.stringify({ name, checkout }),
+      });
+    } catch (e) {
+      return { ok: false, error: e instanceof Error ? e.message : String(e) };
+    }
+  },
+
+  async gitCheckout(name: string): Promise<{ ok: boolean; error?: string }> {
+    try {
+      return await request<any>('/api/git/checkout', {
+        method: 'POST',
+        body: JSON.stringify({ name }),
+      });
+    } catch (e) {
+      return { ok: false, error: e instanceof Error ? e.message : String(e) };
     }
   },
 };

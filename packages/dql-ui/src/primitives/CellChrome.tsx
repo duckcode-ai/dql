@@ -119,42 +119,52 @@ export function CellChrome({
           minWidth: 0,
           borderRadius: 8,
           border: `1px solid ${active ? edge : idle}`,
-          borderLeft: `2px solid ${edge}`,
           background: bg,
           overflow: 'hidden',
-          transition: 'border-color 0.2s',
+          transition: 'border-color 0.2s, box-shadow 0.2s',
+          boxShadow: active
+            ? `0 0 0 3px ${pillColor}14, 0 1px 2px rgba(0,0,0,0.04)`
+            : '0 1px 2px rgba(0,0,0,0.02)',
         }}
       >
         <div
           style={{
-            height: 32,
+            minHeight: 32,
             display: 'flex',
             alignItems: 'center',
-            padding: '0 8px 0 10px',
+            padding: '8px 14px',
             gap: 8,
-            borderBottom: `1px solid ${idle}`,
             background: headerBg,
           }}
         >
           <span
+            aria-hidden
             style={{
-              fontSize: 10,
-              fontWeight: 700,
-              fontFamily:
-                'var(--font-mono, "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace)',
-              letterSpacing: '0.08em',
-              color: pillColor,
-              background: `${pillColor}18`,
-              border: `1px solid ${pillColor}40`,
-              borderRadius: 4,
-              padding: '1px 6px',
+              width: 6,
+              height: 6,
+              borderRadius: 999,
+              background: pillColor,
               flexShrink: 0,
-              textTransform: 'uppercase',
+            }}
+          />
+          <span
+            style={{
+              fontSize: 11,
+              fontWeight: 500,
+              letterSpacing: '0.2px',
+              color: 'var(--color-text-secondary, #4a4a52)',
+              flexShrink: 0,
+              whiteSpace: 'nowrap',
             }}
           >
             {typeLabel}
           </span>
-          {title !== undefined && title}
+          {title !== undefined && (
+            <>
+              <span style={{ color: 'var(--color-text-tertiary, #8a8d96)', fontSize: 11 }}>·</span>
+              {title}
+            </>
+          )}
           {toolbar !== undefined && toolbar}
           <span style={{ flex: 1 }} />
           {status !== undefined && status}

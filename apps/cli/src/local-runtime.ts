@@ -338,8 +338,113 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
     }
     if (req.method === 'GET' && path === '/api/git/diff') {
       const filePath = url.searchParams.get('path') ?? '';
+      const staged = url.searchParams.get('staged') === 'true';
       res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
-      res.end(serializeJSON(await readGitDiff(projectRoot, filePath)));
+      res.end(serializeJSON(await readGitDiff(projectRoot, filePath, staged)));
+      return;
+    }
+    if (req.method === 'GET' && path === '/api/git/branches') {
+      res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+      res.end(serializeJSON(await readGitBranches(projectRoot)));
+      return;
+    }
+    if (req.method === 'GET' && path === '/api/git/remote') {
+      res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+      res.end(serializeJSON(await readGitRemote(projectRoot)));
+      return;
+    }
+    if (req.method === 'POST' && path === '/api/git/stage') {
+      try {
+        const body = (await readJSON(req)) as { paths?: string[] };
+        const result = await gitStage(projectRoot, body.paths ?? []);
+        res.writeHead(result.ok ? 200 : 400, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON(result));
+      } catch (e) {
+        res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({ ok: false, error: e instanceof Error ? e.message : String(e) }));
+      }
+      return;
+    }
+    if (req.method === 'POST' && path === '/api/git/unstage') {
+      try {
+        const body = (await readJSON(req)) as { paths?: string[] };
+        const result = await gitUnstage(projectRoot, body.paths ?? []);
+        res.writeHead(result.ok ? 200 : 400, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON(result));
+      } catch (e) {
+        res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({ ok: false, error: e instanceof Error ? e.message : String(e) }));
+      }
+      return;
+    }
+    if (req.method === 'POST' && path === '/api/git/discard') {
+      try {
+        const body = (await readJSON(req)) as { paths?: string[] };
+        const result = await gitDiscard(projectRoot, body.paths ?? []);
+        res.writeHead(result.ok ? 200 : 400, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON(result));
+      } catch (e) {
+        res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({ ok: false, error: e instanceof Error ? e.message : String(e) }));
+      }
+      return;
+    }
+    if (req.method === 'POST' && path === '/api/git/commit') {
+      try {
+        const body = (await readJSON(req)) as { message?: string; stageAll?: boolean };
+        const result = await gitCommit(projectRoot, body.message ?? '', body.stageAll === true);
+        res.writeHead(result.ok ? 200 : 400, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON(result));
+      } catch (e) {
+        res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({ ok: false, error: e instanceof Error ? e.message : String(e) }));
+      }
+      return;
+    }
+    if (req.method === 'POST' && path === '/api/git/push') {
+      try {
+        const result = await gitPush(projectRoot);
+        res.writeHead(result.ok ? 200 : 400, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON(result));
+      } catch (e) {
+        res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({ ok: false, error: e instanceof Error ? e.message : String(e) }));
+      }
+      return;
+    }
+    if (req.method === 'POST' && path === '/api/git/pull') {
+      try {
+        const result = await gitPull(projectRoot);
+        res.writeHead(result.ok ? 200 : 400, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON(result));
+      } catch (e) {
+        res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({ ok: false, error: e instanceof Error ? e.message : String(e) }));
+      }
+      return;
+    }
+    if (req.method === 'POST' && path === '/api/git/branch') {
+      try {
+        const body = (await readJSON(req)) as { name?: string; checkout?: boolean };
+        const result = await gitCreateBranch(projectRoot, body.name ?? '', body.checkout !== false);
+        res.writeHead(result.ok ? 200 : 400, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON(result));
+      } catch (e) {
+        res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({ ok: false, error: e instanceof Error ? e.message : String(e) }));
+      }
+      return;
+    }
+    if (req.method === 'POST' && path === '/api/git/checkout') {
+      try {
+        const body = (await readJSON(req)) as { name?: string };
+        const result = await gitCheckout(projectRoot, body.name ?? '');
+        res.writeHead(result.ok ? 200 : 400, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON(result));
+      } catch (e) {
+        res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({ ok: false, error: e instanceof Error ? e.message : String(e) }));
+      }
       return;
     }
 
@@ -4033,6 +4138,7 @@ function ensureGitignoreEntry(projectRoot: string, pattern: string): void {
 async function readGitDiff(
   cwd: string,
   filePath: string,
+  staged = false,
 ): Promise<{
   inRepo: boolean;
   diff: string;
@@ -4044,18 +4150,147 @@ async function readGitDiff(
   if (isRepo.code !== 0) {
     return { inRepo: false, diff: '', before: null, after: null, diffReport: null };
   }
+  const baseArgs = staged ? ['diff', '--cached', '--no-color'] : ['diff', '--no-color'];
   if (!filePath) {
-    const res = await execGit(cwd, ['diff', '--no-color']);
+    const res = await execGit(cwd, baseArgs);
     return { inRepo: true, diff: res.stdout, before: null, after: null, diffReport: null };
   }
   const isSemantic = filePath.endsWith('.dql') || filePath.endsWith('.dqlnb');
   const [diffRes, before, after] = await Promise.all([
-    execGit(cwd, ['diff', '--no-color', '--', filePath]),
+    execGit(cwd, [...baseArgs, '--', filePath]),
     isSemantic ? readHeadBlob(cwd, filePath) : Promise.resolve<string | null>(null),
     isSemantic ? readWorkingCopy(join(cwd, filePath)) : Promise.resolve<string | null>(null),
   ]);
   const diffReport = isSemantic ? computeSemanticDiff(filePath, before, after) : null;
   return { inRepo: true, diff: diffRes.stdout, before, after, diffReport };
+}
+
+// ── git write operations ──────────────────────────────────────────────────
+// Each helper validates inputs, shells out via execFile (no shell expansion),
+// then reports the trimmed stderr on failure so the UI can surface it. We
+// never accept absolute paths or paths containing `..` — staged paths must
+// stay inside the project root.
+
+function validatePaths(cwd: string, paths: string[]): { ok: true; paths: string[] } | { ok: false; error: string } {
+  if (!Array.isArray(paths) || paths.length === 0) {
+    return { ok: false, error: 'No paths provided' };
+  }
+  const cleaned: string[] = [];
+  for (const p of paths) {
+    if (typeof p !== 'string' || p.length === 0) return { ok: false, error: 'Invalid path' };
+    if (p.startsWith('/')) return { ok: false, error: `Absolute path not allowed: ${p}` };
+    if (p.split('/').includes('..')) return { ok: false, error: `Path escape not allowed: ${p}` };
+    const resolved = join(cwd, p);
+    if (!resolved.startsWith(cwd)) return { ok: false, error: `Path outside project: ${p}` };
+    cleaned.push(p);
+  }
+  return { ok: true, paths: cleaned };
+}
+
+function gitErrorOutput(res: { stdout: string; stderr: string }): string {
+  return (res.stderr || res.stdout || '').trim();
+}
+
+async function gitStage(cwd: string, paths: string[]): Promise<{ ok: boolean; error?: string }> {
+  const v = validatePaths(cwd, paths);
+  if (!v.ok) return { ok: false, error: v.error };
+  const res = await execGit(cwd, ['add', '--', ...v.paths]);
+  return res.code === 0 ? { ok: true } : { ok: false, error: gitErrorOutput(res) };
+}
+
+async function gitUnstage(cwd: string, paths: string[]): Promise<{ ok: boolean; error?: string }> {
+  const v = validatePaths(cwd, paths);
+  if (!v.ok) return { ok: false, error: v.error };
+  // `restore --staged` works with or without HEAD; for an initial commit (no
+  // HEAD yet) git's `rm --cached` is the fallback. Try restore first.
+  const res = await execGit(cwd, ['restore', '--staged', '--', ...v.paths]);
+  if (res.code === 0) return { ok: true };
+  const fallback = await execGit(cwd, ['rm', '--cached', '-r', '--', ...v.paths]);
+  return fallback.code === 0 ? { ok: true } : { ok: false, error: gitErrorOutput(fallback) };
+}
+
+async function gitDiscard(cwd: string, paths: string[]): Promise<{ ok: boolean; error?: string }> {
+  const v = validatePaths(cwd, paths);
+  if (!v.ok) return { ok: false, error: v.error };
+  // For tracked files: `restore --worktree` reverts to HEAD. For untracked
+  // files: that's a no-op and we delete them via `clean -f`. Run both so
+  // the caller doesn't have to know which list each path is in.
+  const restore = await execGit(cwd, ['restore', '--worktree', '--', ...v.paths]);
+  const clean = await execGit(cwd, ['clean', '-f', '--', ...v.paths]);
+  if (restore.code !== 0 && clean.code !== 0) {
+    return { ok: false, error: gitErrorOutput(restore) || gitErrorOutput(clean) };
+  }
+  return { ok: true };
+}
+
+async function gitCommit(cwd: string, message: string, stageAll: boolean): Promise<{ ok: boolean; error?: string; hash?: string }> {
+  const trimmed = message.trim();
+  if (!trimmed) return { ok: false, error: 'Commit message required' };
+  if (stageAll) {
+    const add = await execGit(cwd, ['add', '-A']);
+    if (add.code !== 0) return { ok: false, error: gitErrorOutput(add) };
+  }
+  const res = await execGit(cwd, ['commit', '-m', trimmed]);
+  if (res.code !== 0) return { ok: false, error: gitErrorOutput(res) };
+  const hashRes = await execGit(cwd, ['rev-parse', 'HEAD']);
+  return { ok: true, hash: hashRes.code === 0 ? hashRes.stdout.trim() : undefined };
+}
+
+async function gitPush(cwd: string): Promise<{ ok: boolean; error?: string; output?: string }> {
+  const res = await execGit(cwd, ['push']);
+  return res.code === 0
+    ? { ok: true, output: gitErrorOutput(res) }
+    : { ok: false, error: gitErrorOutput(res) };
+}
+
+async function gitPull(cwd: string): Promise<{ ok: boolean; error?: string; output?: string }> {
+  // `--ff-only` keeps the operation non-destructive: if the local branch has
+  // diverged from upstream, we surface the error rather than auto-merging.
+  // The user can resolve via the terminal or a future merge UI.
+  const res = await execGit(cwd, ['pull', '--ff-only']);
+  return res.code === 0
+    ? { ok: true, output: gitErrorOutput(res) }
+    : { ok: false, error: gitErrorOutput(res) };
+}
+
+async function readGitBranches(cwd: string): Promise<{ inRepo: boolean; current: string | null; branches: string[] }> {
+  const isRepo = await execGit(cwd, ['rev-parse', '--is-inside-work-tree']);
+  if (isRepo.code !== 0) return { inRepo: false, current: null, branches: [] };
+  const cur = await execGit(cwd, ['rev-parse', '--abbrev-ref', 'HEAD']);
+  const list = await execGit(cwd, ['branch', '--list', '--format=%(refname:short)']);
+  const branches = list.code === 0
+    ? list.stdout.split('\n').map((s) => s.trim()).filter(Boolean)
+    : [];
+  return { inRepo: true, current: cur.code === 0 ? cur.stdout.trim() : null, branches };
+}
+
+async function readGitRemote(cwd: string): Promise<{ inRepo: boolean; url: string | null; name: string | null }> {
+  const isRepo = await execGit(cwd, ['rev-parse', '--is-inside-work-tree']);
+  if (isRepo.code !== 0) return { inRepo: false, url: null, name: null };
+  const remoteName = await execGit(cwd, ['config', '--get', 'remote.pushDefault']);
+  const name = remoteName.code === 0 && remoteName.stdout.trim() ? remoteName.stdout.trim() : 'origin';
+  const url = await execGit(cwd, ['remote', 'get-url', name]);
+  return { inRepo: true, url: url.code === 0 ? url.stdout.trim() : null, name };
+}
+
+async function gitCreateBranch(cwd: string, name: string, checkout: boolean): Promise<{ ok: boolean; error?: string }> {
+  const trimmed = name.trim();
+  // Branch names can't start with `-` (would be parsed as a flag) and must be
+  // non-empty. git itself enforces the rest of the ref-name rules.
+  if (!trimmed) return { ok: false, error: 'Branch name required' };
+  if (trimmed.startsWith('-')) return { ok: false, error: 'Invalid branch name' };
+  const res = checkout
+    ? await execGit(cwd, ['checkout', '-b', trimmed])
+    : await execGit(cwd, ['branch', trimmed]);
+  return res.code === 0 ? { ok: true } : { ok: false, error: gitErrorOutput(res) };
+}
+
+async function gitCheckout(cwd: string, name: string): Promise<{ ok: boolean; error?: string }> {
+  const trimmed = name.trim();
+  if (!trimmed) return { ok: false, error: 'Branch name required' };
+  if (trimmed.startsWith('-')) return { ok: false, error: 'Invalid branch name' };
+  const res = await execGit(cwd, ['checkout', trimmed]);
+  return res.code === 0 ? { ok: true } : { ok: false, error: gitErrorOutput(res) };
 }
 
 async function readHeadBlob(cwd: string, filePath: string): Promise<string | null> {

@@ -83,7 +83,7 @@ export function BlockStudio() {
   const [statusUpdating, setStatusUpdating] = useState(false);
   const [scrollTop, setScrollTop] = useState(0);
   const [viewportHeight, setViewportHeight] = useState(400);
-  const [leftPaneWidth, setLeftPaneWidth] = useState(360);
+  const [leftPaneWidth, setLeftPaneWidth] = useState(300);
   const [bottomPaneHeight, setBottomPaneHeight] = useState(420);
   const [leftPaneCollapsed, setLeftPaneCollapsed] = useState(false);
   const [bottomPaneCollapsed, setBottomPaneCollapsed] = useState(false);
@@ -421,39 +421,36 @@ export function BlockStudio() {
       }}
     >
       <div style={{ borderRight: leftPaneCollapsed ? 'none' : `1px solid ${t.headerBorder}`, display: leftPaneCollapsed ? 'none' : 'flex', flexDirection: 'column', overflow: 'hidden', background: t.sidebarBg, minWidth: 0 }}>
-        <div style={{ padding: 14, display: 'grid', gap: 12, borderBottom: `1px solid ${t.headerBorder}` }}>
-          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10 }}>
-            <div>
-              <div style={{ fontSize: 12, fontWeight: 700, color: t.textPrimary, fontFamily: t.font }}>Block Studio</div>
-              <div style={{ fontSize: 11, color: t.textMuted, fontFamily: t.font }}>
-                Build DQL with semantic models and live database structure in one workspace.
-              </div>
-            </div>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-              {state.semanticLayer.provider && (
-                <span style={{ fontSize: 10, fontWeight: 700, color: t.accent, background: `${t.accent}18`, borderRadius: 999, padding: '5px 9px', textTransform: 'uppercase', letterSpacing: '0.04em' }}>
-                  {state.semanticLayer.provider}
-                </span>
-              )}
-              <button
-                onClick={() => setLeftPaneCollapsed(true)}
-                style={{ background: t.btnBg, border: `1px solid ${t.btnBorder}`, borderRadius: 6, color: t.textSecondary, cursor: 'pointer', fontSize: 12, fontFamily: t.font, padding: '4px 8px' }}
-                title="Collapse explorer"
-              >
-                ‹
-              </button>
-            </div>
-          </div>
-          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, minmax(0, 1fr))', gap: 8 }}>
-            <StudioStatCard label="Metrics" value={semanticStats.metrics} t={t} />
-            <StudioStatCard label="Dimensions" value={semanticStats.dimensions} t={t} />
-            <StudioStatCard label="Hierarchies" value={semanticStats.hierarchies} t={t} />
-          </div>
+        {/* v1.3.3 Hex cleanup — single compact header row; drop wordy
+            description and the empty 3-up stat cards in favor of an
+            inline count chip. */}
+        <div style={{ padding: '10px 14px', display: 'flex', alignItems: 'center', gap: 10, borderBottom: `1px solid ${t.headerBorder}` }}>
+          <span style={{ fontSize: 10, fontWeight: 600, letterSpacing: '0.06em', color: t.textMuted, textTransform: 'uppercase' as const, fontFamily: t.font }}>
+            Explorer
+          </span>
+          <span style={{ fontSize: 11, color: t.textMuted, fontFamily: t.font }}>
+            {semanticStats.metrics} metrics · {semanticStats.dimensions} dims · {semanticStats.hierarchies} hier
+          </span>
+          <div style={{ flex: 1 }} />
+          {state.semanticLayer.provider && (
+            <span style={{ fontSize: 9, fontWeight: 700, color: t.accent, background: `${t.accent}18`, borderRadius: 999, padding: '2px 7px', textTransform: 'uppercase', letterSpacing: '0.04em' }}>
+              {state.semanticLayer.provider}
+            </span>
+          )}
+          <button
+            onClick={() => setLeftPaneCollapsed(true)}
+            style={{ background: 'transparent', border: 'none', color: t.textMuted, cursor: 'pointer', fontSize: 14, fontFamily: t.font, padding: 0, lineHeight: 1 }}
+            title="Collapse explorer"
+          >
+            ‹
+          </button>
         </div>
 
-        <div style={{ display: 'flex', padding: '10px 12px', gap: 8, borderBottom: `1px solid ${t.headerBorder}` }}>
-          <ExplorerTabButton active={explorerTab === 'semantic'} onClick={() => setExplorerTab('semantic')} label="Semantic Layer" />
-          <ExplorerTabButton active={explorerTab === 'database'} onClick={() => setExplorerTab('database')} label="Database" />
+        {/* v1.3.3 Hex cleanup — Semantic/Database as compact segmented
+            pair with inline underline (no bordered button boxes). */}
+        <div style={{ display: 'flex', padding: '0 14px', gap: 16, borderBottom: `1px solid ${t.headerBorder}` }}>
+          <SegmentedTab active={explorerTab === 'semantic'} onClick={() => setExplorerTab('semantic')} label="Semantic" t={t} />
+          <SegmentedTab active={explorerTab === 'database'} onClick={() => setExplorerTab('database')} label="Database" t={t} />
         </div>
 
         {explorerTab === 'semantic' ? (
@@ -571,25 +568,22 @@ export function BlockStudio() {
       />
 
       <div style={{ display: 'flex', flexDirection: 'column', minWidth: 0, overflow: 'hidden', gridColumn: '3', gridRow: '1' }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '12px 14px', borderBottom: `1px solid ${t.headerBorder}`, background: t.cellBg }}>
+        {/* v1.3.3 Hex cleanup — tight single-row editor toolbar to match
+            the explorer header; drop wordy subtitle. */}
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '10px 14px', borderBottom: `1px solid ${t.headerBorder}`, background: t.cellBg }}>
           {leftPaneCollapsed && (
             <button
               onClick={() => setLeftPaneCollapsed(false)}
-              style={{ background: t.btnBg, border: `1px solid ${t.btnBorder}`, borderRadius: 6, color: t.textSecondary, cursor: 'pointer', fontSize: 12, fontFamily: t.font, padding: '6px 10px' }}
+              style={{ background: 'transparent', border: 'none', color: t.textMuted, cursor: 'pointer', fontSize: 14, fontFamily: t.font, padding: 0, lineHeight: 1 }}
               title="Open explorer"
             >
-              Explorer
+              ›
             </button>
           )}
-          <div>
-            <div style={{ fontSize: 12, fontWeight: 700, color: t.textPrimary, fontFamily: t.font }}>DQL Source</div>
-            <div style={{ fontSize: 11, color: t.textMuted, fontFamily: t.font }}>
-              Use templates, insert semantic refs, run, validate, and save from one editor.
-            </div>
-          </div>
+          <span style={{ fontSize: 10, fontWeight: 600, letterSpacing: '0.06em', color: t.textMuted, textTransform: 'uppercase' as const, fontFamily: t.font }}>
+            Source
+          </span>
           <div style={{ flex: 1 }} />
-          <TemplateButton label="Semantic Skeleton" onClick={() => handleDraftChange(buildSemanticSkeleton(state.blockStudioMetadata?.name ?? 'New Block'))} />
-          <TemplateButton label="Custom Skeleton" onClick={() => handleDraftChange(buildCustomSkeleton(state.blockStudioMetadata?.name ?? 'New Block'))} />
           <TemplateButton label="Run" onClick={() => void handleRun()} busy={running} />
           <TemplateButton label="Save" onClick={() => void handleSave()} busy={saving} />
           {saveError && (
@@ -605,6 +599,7 @@ export function BlockStudio() {
             onRun={() => void handleRun()}
             themeMode={state.themeMode}
             autoFocus
+            wrap={false}
             errorMessage={state.blockStudioValidation?.diagnostics.find((item) => item.severity === 'error')?.message}
           />
         </div>
@@ -622,34 +617,39 @@ export function BlockStudio() {
       />
 
       <div style={{ gridColumn: '1 / -1', gridRow: '3', borderTop: bottomPaneCollapsed ? 'none' : `1px solid ${t.headerBorder}`, display: bottomPaneCollapsed ? 'none' : 'flex', flexDirection: 'column', overflow: 'hidden', background: t.cellBg }}>
-        <div style={{ padding: '12px 14px', display: 'grid', gap: 10, borderBottom: `1px solid ${t.headerBorder}` }}>
-          <div>
-            <div style={{ fontSize: 12, fontWeight: 700, color: t.textPrimary, fontFamily: t.font }}>Preview & Governance</div>
-            <div style={{ fontSize: 11, color: t.textMuted, fontFamily: t.font }}>
-              Validate references, inspect results, tune visualization, and save companion metadata.
-            </div>
-          </div>
-          <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
-            <ExplorerTabButton active={resultTab === 'results'} onClick={() => setResultTab('results')} label="Results" />
-            <ExplorerTabButton active={resultTab === 'visualization'} onClick={() => setResultTab('visualization')} label="Visualization" />
-            <ExplorerTabButton active={resultTab === 'lineage'} onClick={() => setResultTab('lineage')} label="Lineage" />
-            <ExplorerTabButton active={resultTab === 'validate'} onClick={() => setResultTab('validate')} label="Validate" />
-            <ExplorerTabButton active={resultTab === 'tests'} onClick={() => setResultTab('tests')} label="Tests" />
-            <ExplorerTabButton active={resultTab === 'history'} onClick={() => {
-              setResultTab('history');
-              if (!historyLoaded && state.activeBlockPath) {
-                api.getBlockHistory(state.activeBlockPath).then((r) => { setHistoryEntries(r.entries); setHistoryLoaded(true); });
-              }
-            }} label="History" />
-            <ExplorerTabButton active={resultTab === 'save'} onClick={() => setResultTab('save')} label="Save" />
-            <div style={{ flex: 1 }} />
-            <button
-              onClick={() => setBottomPaneCollapsed(true)}
-              style={{ background: t.btnBg, border: `1px solid ${t.btnBorder}`, borderRadius: 6, color: t.textSecondary, cursor: 'pointer', fontSize: 12, fontFamily: t.font, padding: '6px 10px' }}
-            >
-              Hide Pane
-            </button>
-          </div>
+        {/* v1.3.3 Hex handoff — compact tab row grouping Output tabs
+            (Results/Viz/Lineage) on the left and Governance tabs
+            (Validate/Tests/History/Save) on the right, separated by a
+            subtle divider. Replaces the bulky "Preview & Governance"
+            title block. */}
+        <div style={{ padding: '10px 14px', display: 'flex', gap: 6, alignItems: 'center', borderBottom: `1px solid ${t.headerBorder}`, flexWrap: 'wrap' }}>
+          <span style={{ fontSize: 10, fontWeight: 600, letterSpacing: '0.06em', color: t.textMuted, textTransform: 'uppercase' as const, fontFamily: t.font, marginRight: 4 }}>
+            Output
+          </span>
+          <ExplorerTabButton active={resultTab === 'results'} onClick={() => setResultTab('results')} label="Results" />
+          <ExplorerTabButton active={resultTab === 'visualization'} onClick={() => setResultTab('visualization')} label="Visualization" />
+          <ExplorerTabButton active={resultTab === 'lineage'} onClick={() => setResultTab('lineage')} label="Lineage" />
+          <span style={{ width: 1, height: 18, background: t.headerBorder, margin: '0 6px' }} />
+          <span style={{ fontSize: 10, fontWeight: 600, letterSpacing: '0.06em', color: t.textMuted, textTransform: 'uppercase' as const, fontFamily: t.font, marginRight: 4 }}>
+            Governance
+          </span>
+          <ExplorerTabButton active={resultTab === 'validate'} onClick={() => setResultTab('validate')} label="Validate" />
+          <ExplorerTabButton active={resultTab === 'tests'} onClick={() => setResultTab('tests')} label="Tests" />
+          <ExplorerTabButton active={resultTab === 'history'} onClick={() => {
+            setResultTab('history');
+            if (!historyLoaded && state.activeBlockPath) {
+              api.getBlockHistory(state.activeBlockPath).then((r) => { setHistoryEntries(r.entries); setHistoryLoaded(true); });
+            }
+          }} label="History" />
+          <ExplorerTabButton active={resultTab === 'save'} onClick={() => setResultTab('save')} label="Metadata" />
+          <div style={{ flex: 1 }} />
+          <button
+            onClick={() => setBottomPaneCollapsed(true)}
+            style={{ background: 'transparent', border: `1px solid ${t.btnBorder}`, borderRadius: 6, color: t.textMuted, cursor: 'pointer', fontSize: 11, fontFamily: t.font, padding: '4px 8px' }}
+            title="Hide pane"
+          >
+            ▾ Hide
+          </button>
         </div>
 
         <div style={{ flex: 1, overflow: 'auto' }}>
@@ -752,8 +752,6 @@ export function BlockStudio() {
                   if (next.tags) draft = setBlockTags(draft, next.tags);
                   handleDraftChange(draft);
                 }}
-                onSave={() => void handleSave()}
-                saving={saving}
                 t={t}
               />
             </div>
@@ -800,6 +798,28 @@ function ExplorerTabButton({ active, onClick, label, busy }: { active: boolean; 
 
 function TemplateButton(props: { label: string; onClick: () => void; busy?: boolean }) {
   return <ExplorerTabButton active={false} {...props} />;
+}
+
+function SegmentedTab({ active, onClick, label, t }: { active: boolean; onClick: () => void; label: string; t: Theme }) {
+  return (
+    <button
+      onClick={onClick}
+      style={{
+        background: 'transparent',
+        border: 'none',
+        borderBottom: `2px solid ${active ? t.accent : 'transparent'}`,
+        color: active ? t.textPrimary : t.textMuted,
+        cursor: 'pointer',
+        fontSize: 12,
+        fontWeight: active ? 600 : 500,
+        fontFamily: t.font,
+        padding: '10px 2px',
+        marginBottom: -1,
+      }}
+    >
+      {label}
+    </button>
+  );
 }
 
 function StudioStatCard({ label, value, t }: { label: string; value: number; t: Theme }) {
@@ -912,8 +932,6 @@ function BlockLineagePanel({
   onOpenFull: () => void;
   t: Theme;
 }) {
-  const [detailsExpanded, setDetailsExpanded] = useState(false);
-
   if (!blockName) {
     return <EmptyPanel message="Lineage will appear once the block has a name." />;
   }
@@ -1002,114 +1020,23 @@ function BlockLineagePanel({
         </div>
       )}
 
-      {/* Collapsible Upstream/Downstream Details */}
-      <button
-        onClick={() => setDetailsExpanded((e) => !e)}
-        style={{
-          background: 'none',
-          border: `1px solid ${t.cellBorder}`,
-          borderRadius: 6,
-          padding: '6px 10px',
-          color: t.textMuted,
-          cursor: 'pointer',
-          fontSize: 11,
-          fontFamily: t.font,
-          textAlign: 'left',
-        }}
-      >
-        {detailsExpanded ? '▾' : '▸'} Upstream / Downstream Details
-      </button>
-      {detailsExpanded && (
-        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, minmax(0, 1fr))', gap: 12 }}>
-          <LineageList
-            title="Upstream"
-            entries={detail.incoming}
-            emptyMessage="No upstream dependencies yet."
-            onSelectNode={onSelectNode}
-            t={t}
-          />
-          <LineageList
-            title="Downstream"
-            entries={detail.outgoing}
-            emptyMessage="No downstream dependencies yet."
-            onSelectNode={onSelectNode}
-            t={t}
-          />
-        </div>
-      )}
+      {/* v1.3.3 Hex cleanup — dropped the collapsible Upstream/Downstream
+          1-hop list. The mini-graph (visual) and Source-to-Block /
+          Block-to-Consumption chains above already cover the same data;
+          the 1-hop list was a third duplicate view. */}
     </div>
   );
 }
-
-function LineageList({
-  title,
-  entries,
-  emptyMessage,
-  onSelectNode,
-  t,
-}: {
-  title: string;
-  entries: Array<{ edge: { type: string }; node?: { id: string; type: string; name: string; domain?: string } }>;
-  emptyMessage: string;
-  onSelectNode: (nodeId: string) => void;
-  t: Theme;
-}) {
-  const validEntries = entries.filter((entry) => entry.node);
-  return (
-    <div style={{ border: `1px solid ${t.cellBorder}`, borderRadius: 10, overflow: 'hidden', background: t.inputBg }}>
-      <div style={{ padding: '10px 12px', borderBottom: `1px solid ${t.cellBorder}`, fontSize: 11, fontWeight: 700, color: t.textMuted, fontFamily: t.font, textTransform: 'uppercase', letterSpacing: '0.04em' }}>
-        {title} ({validEntries.length})
-      </div>
-      {validEntries.length === 0 ? (
-        <div style={{ padding: 12, fontSize: 12, color: t.textMuted, fontFamily: t.font }}>{emptyMessage}</div>
-      ) : (
-        <div style={{ display: 'grid' }}>
-          {validEntries.map((entry) => (
-            <button
-              key={`${entry.node!.id}-${entry.edge.type}`}
-              onClick={() => onSelectNode(entry.node!.id)}
-              style={{
-                background: 'transparent',
-                border: 'none',
-                borderTop: `1px solid ${t.cellBorder}`,
-                padding: '10px 12px',
-                textAlign: 'left',
-                cursor: 'pointer',
-              }}
-            >
-              <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                <span style={{ fontSize: 10, fontWeight: 700, color: t.accent, fontFamily: t.font, textTransform: 'uppercase' }}>
-                  {entry.node!.type.replace('_', ' ')}
-                </span>
-                <span style={{ fontSize: 12, color: t.textPrimary, fontFamily: t.font, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                  {entry.node!.name}
-                </span>
-              </div>
-              <div style={{ marginTop: 3, fontSize: 11, color: t.textMuted, fontFamily: t.font }}>
-                via {entry.edge.type}{entry.node!.domain ? ` · ${entry.node!.domain}` : ''}
-              </div>
-            </button>
-          ))}
-        </div>
-      )}
-    </div>
-  );
-}
-
 
 function SavePanel({
   metadata,
   draftMetadata,
   onChange,
-  onSave,
-  saving,
   t,
 }: {
   metadata: { name: string; domain: string; description: string; owner: string; tags: string[] } | null;
   draftMetadata: ReturnType<typeof parseBlockFields> | null;
   onChange: (next: Partial<{ name: string; domain: string; description: string; owner: string; tags: string[] }>) => void;
-  onSave: () => void;
-  saving: boolean;
   t: Theme;
 }) {
   const inputStyle: React.CSSProperties = {
@@ -1139,21 +1066,6 @@ function SavePanel({
       <input value={values.owner} onChange={(event) => onChange({ owner: event.target.value })} placeholder="Owner" style={inputStyle} />
       <input value={values.description} onChange={(event) => onChange({ description: event.target.value })} placeholder="Description" style={inputStyle} />
       <input value={values.tags.join(', ')} onChange={(event) => onChange({ tags: event.target.value.split(',').map((tag) => tag.trim()).filter(Boolean) })} placeholder="Tags" style={inputStyle} />
-      <button
-        onClick={onSave}
-        style={{
-          background: t.accent,
-          border: `1px solid ${t.accent}`,
-          borderRadius: 6,
-          color: '#fff',
-          cursor: 'pointer',
-          fontSize: 12,
-          fontFamily: t.font,
-          padding: '8px 12px',
-        }}
-      >
-        {saving ? 'Saving…' : 'Save Block'}
-      </button>
     </div>
   );
 }

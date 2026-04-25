@@ -48,12 +48,14 @@ function AppInner() {
     `;
   }, [t]);
 
-  // v1.3 Track 9 — full four-theme union. Legacy 'dark'/'light' alias to
-  // midnight/paper so persisted v1.2 state still loads.
+  // v1.3.2 — three Luna themes (obsidian / paper / white). Legacy
+  // 'dark'/'light'/'midnight'/'arctic' alias onto the live set so persisted
+  // state from earlier v1.3 releases still loads.
   useEffect(() => {
     const luna =
-      state.themeMode === 'dark' ? 'midnight'
+      state.themeMode === 'dark' || state.themeMode === 'midnight' ? 'obsidian'
       : state.themeMode === 'light' ? 'paper'
+      : state.themeMode === 'arctic' ? 'white'
       : state.themeMode;
     document.documentElement.setAttribute('data-theme', luna);
   }, [state.themeMode]);

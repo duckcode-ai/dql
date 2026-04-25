@@ -129,17 +129,13 @@ export function SchemaPanel() {
 
   return (
     <PanelFrame
-      title="Database Catalog"
+      title="Data Catalog"
       subtitle="Schemas, tables, views, and columns from the active connection."
       actions={refreshAction}
       toolbar={toolbar}
       bodyPadding={0}
     >
-      <div style={{ padding: 10, borderBottom: `1px solid ${t.headerBorder}`, display: 'grid', gridTemplateColumns: 'repeat(3, minmax(0, 1fr))', gap: 8 }}>
-        <CatalogStat label="Schemas" value={stats.schemas} t={t} />
-        <CatalogStat label="Tables" value={stats.tables} t={t} />
-        <CatalogStat label="Columns" value={stats.columns} t={t} />
-      </div>
+      <CatalogStatsBar stats={stats} t={t} />
 
       {state.schemaLoading ? (
         <Skeleton t={t} />
@@ -153,24 +149,13 @@ export function SchemaPanel() {
       ) : (
         <div style={{ overflow: 'auto', flex: 1 }}>
           {groupedTables.map(([schemaName, tables]) => (
-            <div key={schemaName}>
-              <div
-                style={{
-                  padding: '8px 10px 4px',
-                  fontSize: 10,
-                  fontWeight: 700,
-                  color: t.textMuted,
-                  fontFamily: t.font,
-                  textTransform: 'uppercase',
-                  letterSpacing: '0.05em',
-                }}
-              >
-                {schemaName} · {tables.length}
-              </div>
-              {tables.map((table) => (
-                <TableRow key={table.name} table={table} t={t} />
-              ))}
-            </div>
+            <SchemaGroup
+              key={schemaName}
+              name={schemaName}
+              tables={tables}
+              defaultExpanded={groupedTables.length <= 2 || query.trim().length > 0}
+              t={t}
+            />
           ))}
         </div>
       )}
@@ -178,22 +163,120 @@ export function SchemaPanel() {
   );
 }
 
-function CatalogStat({ label, value, t }: { label: string; value: number; t: Theme }) {
+function CatalogStatsBar({
+  stats,
+  t,
+}: {
+  stats: { schemas: number; tables: number; columns: number };
+  t: Theme;
+}) {
   return (
     <div
       style={{
-        background: t.cellBg,
-        border: `1px solid ${t.headerBorder}`,
-        borderRadius: 8,
-        padding: '8px 10px',
+        display: 'flex',
+        alignItems: 'center',
+        gap: 14,
+        padding: '8px 12px',
+        borderBottom: `1px solid ${t.headerBorder}`,
+        fontSize: 11,
+        fontFamily: t.font,
+        color: t.textMuted,
       }}
     >
-      <div style={{ fontSize: 9, fontWeight: 700, color: t.textMuted, fontFamily: t.font, textTransform: 'uppercase', letterSpacing: '0.05em' }}>
-        {label}
-      </div>
-      <div style={{ fontSize: 18, fontWeight: 700, color: t.textPrimary, fontFamily: t.font, marginTop: 2 }}>
-        {value}
-      </div>
+      <StatPill label="schemas" value={stats.schemas} t={t} />
+      <span style={{ color: t.headerBorder }}>·</span>
+      <StatPill label="tables" value={stats.tables} t={t} />
+      <span style={{ color: t.headerBorder }}>·</span>
+      <StatPill label="columns" value={stats.columns} t={t} />
+    </div>
+  );
+}
+
+function StatPill({ label, value, t }: { label: string; value: number; t: Theme }) {
+  return (
+    <span style={{ display: 'inline-flex', alignItems: 'baseline', gap: 4 }}>
+      <span style={{ color: t.textPrimary, fontWeight: 600, fontSize: 12 }}>{value}</span>
+      <span>{label}</span>
+    </span>
+  );
+}
+
+function SchemaGroup({
+  name,
+  tables,
+  defaultExpanded,
+  t,
+}: {
+  name: string;
+  tables: Array<import('../../store/types').SchemaTable>;
+  defaultExpanded: boolean;
+  t: Theme;
+}) {
+  const [expanded, setExpanded] = useState(defaultExpanded);
+  const [hovered, setHovered] = useState(false);
+  return (
+    <div>
+      <button
+        onClick={() => setExpanded((v) => !v)}
+        onMouseEnter={() => setHovered(true)}
+        onMouseLeave={() => setHovered(false)}
+        aria-expanded={expanded}
+        style={{
+          width: '100%',
+          display: 'flex',
+          alignItems: 'center',
+          gap: 6,
+          padding: '6px 12px',
+          background: hovered ? t.sidebarItemHover : 'transparent',
+          border: 'none',
+          cursor: 'pointer',
+          color: t.textSecondary,
+          fontSize: 11,
+          fontWeight: 700,
+          fontFamily: t.font,
+          textTransform: 'uppercase',
+          letterSpacing: '0.05em',
+          textAlign: 'left' as const,
+          transition: 'background 0.1s',
+          position: 'sticky',
+          top: 0,
+          zIndex: 1,
+          backdropFilter: 'blur(6px)',
+        }}
+      >
+        <svg
+          width="9"
+          height="9"
+          viewBox="0 0 10 10"
+          fill="currentColor"
+          style={{
+            transform: expanded ? 'rotate(90deg)' : 'rotate(0deg)',
+            transition: 'transform 0.15s',
+            color: t.textMuted,
+            flexShrink: 0,
+          }}
+        >
+          <path d="M3 2l4 3-4 3V2Z" />
+        </svg>
+        <svg width="11" height="11" viewBox="0 0 16 16" fill="currentColor" style={{ color: t.textMuted, flexShrink: 0 }}>
+          <path d="M1 3.5c0-1.865 2.91-3 6-3s6 1.135 6 3v9c0 1.865-2.91 3-6 3s-6-1.135-6-3Zm1.5.5c.484.85 2.28 1.5 4.5 1.5s4.016-.65 4.5-1.5V6c-.484.85-2.28 1.5-4.5 1.5S2.984 6.85 2.5 6Zm0 4c.484.85 2.28 1.5 4.5 1.5s4.016-.65 4.5-1.5v2c-.484.85-2.28 1.5-4.5 1.5S2.984 10.85 2.5 10Z" />
+        </svg>
+        <span style={{ flex: 1 }}>{name}</span>
+        <span
+          style={{
+            background: t.pillBg,
+            color: t.textMuted,
+            borderRadius: 10,
+            padding: '0 6px',
+            fontSize: 10,
+            fontWeight: 500,
+          }}
+        >
+          {tables.length}
+        </span>
+      </button>
+      {expanded &&
+        tables.map((table) => <TableRow key={table.name} table={table} t={t} />)}
     </div>
   );
 }
@@ -228,6 +311,9 @@ function TableRow({
     }
   };
 
+  const isView = table.objectType?.toLowerCase().includes('view') ?? false;
+  const objectTypeLabel = isView ? 'view' : 'table';
+  const objectColor = isView ? '#d2a8ff' : t.accent;
   return (
     <div>
       <button
@@ -238,13 +324,13 @@ function TableRow({
           width: '100%',
           display: 'flex',
           alignItems: 'center',
-          gap: 6,
-          padding: '5px 10px',
+          gap: 7,
+          padding: '6px 12px 6px 22px',
           background: hovered ? t.sidebarItemHover : 'transparent',
           border: 'none',
           cursor: 'pointer',
           color: t.textPrimary,
-          fontSize: 12,
+          fontSize: 12.5,
           fontFamily: t.font,
           fontWeight: 500,
           textAlign: 'left' as const,
@@ -252,8 +338,8 @@ function TableRow({
         }}
       >
         <svg
-          width="10"
-          height="10"
+          width="9"
+          height="9"
           viewBox="0 0 10 10"
           fill="currentColor"
           style={{
@@ -265,33 +351,36 @@ function TableRow({
         >
           <path d="M3 2l4 3-4 3V2Z" />
         </svg>
-        {(table as any).source === 'database' ? (
-          <svg width="13" height="13" viewBox="0 0 16 16" fill="currentColor" style={{ color: '#56d364', flexShrink: 0 }}>
-            <path d="M1 3.5c0-1.865 2.91-3 6-3s6 1.135 6 3v9c0 1.865-2.91 3-6 3s-6-1.135-6-3Zm1.5.5c.484.85 2.28 1.5 4.5 1.5s4.016-.65 4.5-1.5V6c-.484.85-2.28 1.5-4.5 1.5S2.984 6.85 2.5 6Zm0 4c.484.85 2.28 1.5 4.5 1.5s4.016-.65 4.5-1.5v2c-.484.85-2.28 1.5-4.5 1.5S2.984 10.85 2.5 10Z" />
+        {isView ? (
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ color: objectColor, flexShrink: 0 }}>
+            <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8S1 12 1 12z" />
+            <circle cx="12" cy="12" r="3" />
           </svg>
         ) : (
-          <svg width="13" height="13" viewBox="0 0 16 16" fill="currentColor" style={{ color: t.accent, flexShrink: 0 }}>
-            <path d="M0 1.75C0 .784.784 0 1.75 0h12.5C15.216 0 16 .784 16 1.75v1.5A1.75 1.75 0 0 1 14.25 5H1.75A1.75 1.75 0 0 1 0 3.25Zm1.75-.25a.25.25 0 0 0-.25.25v1.5c0 .138.112.25.25.25h12.5a.25.25 0 0 0 .25-.25v-1.5a.25.25 0 0 0-.25-.25Zm-1.75 6C0 6.784.784 6 1.75 6h12.5c.966 0 1.75.784 1.75 1.75v1.5A1.75 1.75 0 0 1 14.25 11H1.75A1.75 1.75 0 0 1 0 9.25Zm1.75-.25a.25.25 0 0 0-.25.25v1.5c0 .138.112.25.25.25h12.5a.25.25 0 0 0 .25-.25v-1.5a.25.25 0 0 0-.25-.25Zm-1.75 6c0-.966.784-1.75 1.75-1.75h12.5c.966 0 1.75.784 1.75 1.75v1.5A1.75 1.75 0 0 1 14.25 16H1.75A1.75 1.75 0 0 1 0 14.25Zm1.75-.25a.25.25 0 0 0-.25.25v1.5c0 .138.112.25.25.25h12.5a.25.25 0 0 0 .25-.25v-1.5a.25.25 0 0 0-.25-.25Z" />
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ color: objectColor, flexShrink: 0 }}>
+            <ellipse cx="12" cy="5" rx="9" ry="3" />
+            <path d="M3 5v14a9 3 0 0 0 18 0V5" />
+            <path d="M3 12a9 3 0 0 0 18 0" />
           </svg>
         )}
         <span style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-          {table.name}
+          {table.name.includes('.') ? table.name.split('.').slice(1).join('.') : table.name}
         </span>
-        {table.objectType && (
-          <span
-            style={{
-              fontSize: 9,
-              fontFamily: t.fontMono,
-              color: t.accent,
-              background: `${t.accent}18`,
-              borderRadius: 4,
-              padding: '1px 4px',
-              flexShrink: 0,
-            }}
-          >
-            {table.objectType.toLowerCase().includes('view') ? 'view' : 'table'}
-          </span>
-        )}
+        <span
+          style={{
+            fontSize: 9,
+            fontFamily: t.fontMono,
+            color: objectColor,
+            background: `${objectColor}1f`,
+            borderRadius: 3,
+            padding: '1px 5px',
+            flexShrink: 0,
+            fontWeight: 600,
+            letterSpacing: '0.04em',
+          }}
+        >
+          {objectTypeLabel}
+        </span>
         {table.governance?.status && (
           <GovernanceBadge status={table.governance.status} t={t} />
         )}
@@ -302,9 +391,11 @@ function TableRow({
               color: t.textMuted,
               background: t.pillBg,
               borderRadius: 8,
-              padding: '1px 5px',
+              padding: '1px 6px',
               flexShrink: 0,
+              fontVariantNumeric: 'tabular-nums',
             }}
+            title={`${table.columns.length} columns`}
           >
             {table.columns.length}
           </span>
@@ -365,6 +456,20 @@ function TableRow({
 
 function ColumnRow({ col, t }: { col: SchemaColumn; t: Theme }) {
   const [hovered, setHovered] = useState(false);
+  const [copied, setCopied] = useState(false);
+  const typeColor = getTypeColor(col.type, t.accent);
+
+  const handleCopy = async (e: React.MouseEvent) => {
+    e.stopPropagation();
+    try {
+      await navigator.clipboard.writeText(col.name);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1200);
+    } catch {
+      // ignore — clipboard may be unavailable in some contexts
+    }
+  };
+
   return (
     <div
       onMouseEnter={() => setHovered(true)}
@@ -373,25 +478,44 @@ function ColumnRow({ col, t }: { col: SchemaColumn; t: Theme }) {
         display: 'flex',
         alignItems: 'center',
         gap: 8,
-        padding: '3px 10px 3px 8px',
+        padding: '4px 12px 4px 44px',
         background: hovered ? t.sidebarItemHover : 'transparent',
         cursor: 'default',
         transition: 'background 0.1s',
       }}
     >
-      <svg width="10" height="10" viewBox="0 0 16 16" fill="currentColor" style={{ color: t.textMuted, flexShrink: 0 }}>
-        <path d="M8 0a8 8 0 1 1 0 16A8 8 0 0 1 8 0ZM1.5 8a6.5 6.5 0 1 0 13 0 6.5 6.5 0 0 0-13 0Zm7-3.25v2.992l2.028.812a.75.75 0 0 1-.557 1.392l-2.5-1A.751.751 0 0 1 7 8.25v-3.5a.75.75 0 0 1 1.5 0Z" />
-      </svg>
+      <span
+        aria-hidden
+        style={{
+          flexShrink: 0,
+          width: 14,
+          height: 14,
+          display: 'inline-flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          borderRadius: 3,
+          background: `${typeColor}1a`,
+          color: typeColor,
+          fontFamily: t.fontMono,
+          fontSize: 9,
+          fontWeight: 700,
+          letterSpacing: 0,
+        }}
+        title={col.type}
+      >
+        {typeGlyph(col.type)}
+      </span>
       <span
         style={{
           flex: 1,
-          fontSize: 11,
+          fontSize: 11.5,
           fontFamily: t.fontMono,
           color: t.textSecondary,
           overflow: 'hidden',
           textOverflow: 'ellipsis',
           whiteSpace: 'nowrap',
         }}
+        title={col.name}
       >
         {col.name}
       </span>
@@ -399,17 +523,62 @@ function ColumnRow({ col, t }: { col: SchemaColumn; t: Theme }) {
         style={{
           fontSize: 10,
           fontFamily: t.fontMono,
-          color: getTypeColor(col.type, t.accent),
-          background: `${getTypeColor(col.type, t.accent)}18`,
-          borderRadius: 4,
+          color: typeColor,
+          background: `${typeColor}1a`,
+          borderRadius: 3,
           padding: '1px 5px',
           flexShrink: 0,
+          fontWeight: 500,
         }}
       >
         {col.type.toLowerCase()}
       </span>
+      {hovered && (
+        <button
+          onClick={handleCopy}
+          aria-label={`Copy column name ${col.name}`}
+          title={copied ? 'Copied!' : 'Copy column name'}
+          style={{
+            flexShrink: 0,
+            width: 20,
+            height: 20,
+            display: 'inline-flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            background: 'transparent',
+            border: 'none',
+            borderRadius: 3,
+            color: copied ? '#56d364' : t.textMuted,
+            cursor: 'pointer',
+          }}
+        >
+          {copied ? (
+            <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+              <polyline points="20 6 9 17 4 12" />
+            </svg>
+          ) : (
+            <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <rect x="9" y="9" width="13" height="13" rx="2" />
+              <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
+            </svg>
+          )}
+        </button>
+      )}
     </div>
   );
+}
+
+/** Single-letter glyph for the column-type chip — keeps the gutter scannable. */
+function typeGlyph(type: string): string {
+  const t = type.toLowerCase();
+  if (/(int|long|short|byte|number|numeric|decimal|float|double|real)/.test(t)) return '#';
+  if (/(bool)/.test(t)) return 'B';
+  if (/(date|time|timestamp)/.test(t)) return '⌚';
+  if (/(json|map|struct|object|variant)/.test(t)) return '{}';
+  if (/(array|list)/.test(t)) return '[]';
+  if (/(uuid|guid)/.test(t)) return 'U';
+  if (/(char|text|string|varchar)/.test(t)) return 'A';
+  return '·';
 }
 
 const GOVERNANCE_STYLES: Record<GovernanceStatus, { color: string; label: string; icon: string }> = {

@@ -1,5 +1,5 @@
 import type { Theme, ThemeMode } from '../../themes/notebook-theme';
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { api } from '../../api/client';
 import {
   NODE_TYPE_COLORS,
@@ -90,6 +90,10 @@ interface CellLineageProps {
 
 export function CellLineage({ cellContent, cellType, cellName, themeMode, t, onFocusNode }: CellLineageProps) {
   const [expanded, setExpanded] = useState(false);
+  const [graphHeight, setGraphHeight] = useState(380);
+  const graphHeightRef = useRef(graphHeight);
+  graphHeightRef.current = graphHeight;
+  const [resizing, setResizing] = useState(false);
   const [loading, setLoading] = useState(false);
   const [graphNodes, setGraphNodes] = useState<LineageNode[]>([]);
   const [graphEdges, setGraphEdges] = useState<any[]>([]);
@@ -118,9 +122,11 @@ export function CellLineage({ cellContent, cellType, cellName, themeMode, t, onF
         const nodeId = `block:${lookupName}`;
         setFocalNodeId(nodeId);
 
-        // Parallel fetch: focused subgraph + complete paths
+        // Parallel fetch: focused subgraph + complete paths.
+        // Cap depth so dense fan-outs stay legible inside the cell.
+        // Users can click "View in DAG" for the full graph.
         const [graphResult, paths] = await Promise.all([
-          api.queryLineage({ focus: nodeId }),
+          api.queryLineage({ focus: nodeId, upstreamDepth: 2, downstreamDepth: 2 }),
           api.fetchLineagePaths(nodeId),
         ]);
 
@@ -221,17 +227,49 @@ export function CellLineage({ cellContent, cellType, cellName, themeMode, t, onF
             <div style={{ color: t.error, padding: '8px 12px' }}>{error}</div>
           ) : (
             <>
-              {/* Mini graph — same view as Block Studio, powered by queryLineage */}
+              {/* Mini graph — same view as Block Studio, powered by queryLineage.
+                  Height is user-resizable via the bottom drag handle so dense
+                  DAGs aren't cropped inside the cell. */}
               {graphNodes.length > 0 && focalNodeId && (
-                <div style={{ borderBottom: `1px solid ${t.cellBorder}` }}>
+                <div style={{ borderBottom: `1px solid ${t.cellBorder}`, position: 'relative' }}>
                   <MiniLineageGraph
                     nodes={graphNodes}
                     edges={graphEdges}
                     focalNodeId={focalNodeId}
-                    height={200}
+                    height={graphHeight}
                     onNodeClick={onFocusNode}
                     interactive={true}
                     layoutMode="flow"
+                  />
+                  {/* Drag handle to resize graph height */}
+                  <div
+                    onMouseDown={(e) => {
+                      e.preventDefault();
+                      const startY = e.clientY;
+                      const startH = graphHeightRef.current;
+                      setResizing(true);
+                      const onMove = (ev: MouseEvent) => {
+                        const next = Math.min(800, Math.max(160, startH + (ev.clientY - startY)));
+                        graphHeightRef.current = next;
+                        setGraphHeight(next);
+                      };
+                      const onUp = () => {
+                        setResizing(false);
+                        window.removeEventListener('mousemove', onMove);
+                        window.removeEventListener('mouseup', onUp);
+                      };
+                      window.addEventListener('mousemove', onMove);
+                      window.addEventListener('mouseup', onUp);
+                    }}
+                    title="Drag to resize lineage view"
+                    style={{
+                      position: 'absolute', left: 0, right: 0, bottom: -3,
+                      height: 6, cursor: 'row-resize',
+                      background: resizing ? t.accent : 'transparent',
+                      transition: resizing ? 'none' : 'background 0.15s', zIndex: 5,
+                    }}
+                    onMouseEnter={(e) => { if (!resizing) (e.currentTarget as HTMLElement).style.background = `${t.accent}40`; }}
+                    onMouseLeave={(e) => { if (!resizing) (e.currentTarget as HTMLElement).style.background = 'transparent'; }}
                   />
                 </div>
               )}

@@ -27,15 +27,15 @@ function readInitialAppMode(): 'studio' | 'app' {
   return stored === 'app' ? 'app' : 'studio';
 }
 
-// v1.3 Track 9 — persisted Luna theme. Default midnight so a first-load user
-// gets DQL's darkest surface; honor persisted choice across reloads/tabs.
-function readInitialThemeMode(): 'midnight' | 'obsidian' | 'paper' | 'arctic' {
-  if (typeof window === 'undefined') return 'midnight';
+// Hex-handoff default: paper (warm off-white). Honors persisted choice.
+function readInitialThemeMode(): 'obsidian' | 'paper' | 'white' {
+  if (typeof window === 'undefined') return 'paper';
   const stored = window.localStorage?.getItem('dql-theme');
-  if (stored === 'obsidian' || stored === 'paper' || stored === 'arctic' || stored === 'midnight') return stored;
-  if (stored === 'dark') return 'midnight';
+  if (stored === 'obsidian' || stored === 'paper' || stored === 'white') return stored;
+  if (stored === 'midnight' || stored === 'dark') return 'obsidian';
+  if (stored === 'arctic') return 'white';
   if (stored === 'light') return 'paper';
-  return 'midnight';
+  return 'paper';
 }
 
 const initialState: NotebookState = {
@@ -76,6 +76,8 @@ const initialState: NotebookState = {
   savingFile: false,
   lineageFullscreen: false,
   lineageFocusNodeId: null,
+  lineageDrawerOpen: false,
+  lineageDrawerNodeId: null,
   dashboardMode: false,
   activeBlockPath: null,
   blockStudioDraft: '',
@@ -106,8 +108,9 @@ function notebookReducer(state: NotebookState, action: NotebookAction): Notebook
       // paint one frame of stale colors (v1.3 Track 9 — four-theme switch).
       if (typeof document !== 'undefined') {
         const luna =
-          action.mode === 'dark' ? 'midnight'
+          action.mode === 'dark' || action.mode === 'midnight' ? 'obsidian'
           : action.mode === 'light' ? 'paper'
+          : action.mode === 'arctic' ? 'white'
           : action.mode;
         document.documentElement.setAttribute('data-theme', luna);
         try {
@@ -130,11 +133,14 @@ function notebookReducer(state: NotebookState, action: NotebookAction): Notebook
       return { ...state, appMode: action.mode };
     }
 
-    case 'SET_SIDEBAR_PANEL':
+    case 'SET_SIDEBAR_PANEL': {
+      const fullPagePanels = ['connection', 'reference', 'git'] as const;
+      const isFullPage = (action.panel as string | null) !== null
+        && (fullPagePanels as readonly string[]).includes(action.panel as string);
       return {
         ...state,
         sidebarPanel: action.panel,
-        sidebarOpen: action.panel !== null && action.panel !== 'connection' && action.panel !== 'reference',
+        sidebarOpen: action.panel !== null && !isFullPage,
         lineageFullscreen: false,
         lineageFocusNodeId: null,
         mainView:
@@ -142,10 +148,13 @@ function notebookReducer(state: NotebookState, action: NotebookAction): Notebook
             ? 'connection'
             : action.panel === 'reference'
               ? 'reference'
-              : state.activeFile?.type === 'block'
-                ? 'block_studio'
-                : 'notebook',
+              : action.panel === 'git'
+                ? 'git'
+                : state.activeFile?.type === 'block'
+                  ? 'block_studio'
+                  : 'notebook',
       };
+    }
 
     case 'TOGGLE_SIDEBAR':
       return { ...state, sidebarOpen: !state.sidebarOpen };
@@ -373,6 +382,12 @@ function notebookReducer(state: NotebookState, action: NotebookAction): Notebook
     case 'SET_LINEAGE_FOCUS':
       return { ...state, lineageFocusNodeId: action.nodeId };
 
+    case 'OPEN_LINEAGE_DRAWER':
+      return { ...state, lineageDrawerOpen: true, lineageDrawerNodeId: action.nodeId };
+
+    case 'CLOSE_LINEAGE_DRAWER':
+      return { ...state, lineageDrawerOpen: false, lineageDrawerNodeId: null };
+
     case 'TOGGLE_DASHBOARD_MODE':
       return { ...state, dashboardMode: !state.dashboardMode };
 
@@ -467,7 +482,7 @@ export function NotebookProvider({ children }: { children: ReactNode }) {
     const handler = (e: StorageEvent) => {
       if (e.key !== 'dql-theme' || !e.newValue) return;
       const mode = e.newValue;
-      if (mode === 'midnight' || mode === 'obsidian' || mode === 'paper' || mode === 'arctic' || mode === 'dark' || mode === 'light') {
+      if (mode === 'obsidian' || mode === 'paper' || mode === 'white' || mode === 'midnight' || mode === 'arctic' || mode === 'dark' || mode === 'light') {
         useNotebookStore.getState().dispatch({ type: 'SET_THEME', mode: mode as any });
       }
     };

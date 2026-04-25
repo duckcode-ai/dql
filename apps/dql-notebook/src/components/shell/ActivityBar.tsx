@@ -120,7 +120,7 @@ export function ActivityBar() {
   }, [expanded]);
 
   function handlePanelClick(panel: SidebarPanel) {
-    const fullPagePanel = panel === 'connection' || panel === 'reference';
+    const fullPagePanel = panel === 'connection' || panel === 'reference' || panel === 'git';
     if (fullPagePanel) {
       dispatch({ type: 'SET_SIDEBAR_PANEL', panel });
       return;
@@ -170,9 +170,9 @@ export function ActivityBar() {
     },
     {
       key: 'git',
-      title: 'Git',
+      title: 'Source control',
       icon: <GitBranch size={16} strokeWidth={1.75} />,
-      active: state.sidebarPanel === 'git' && state.sidebarOpen,
+      active: state.mainView === 'git',
     },
     {
       key: 'connection',
