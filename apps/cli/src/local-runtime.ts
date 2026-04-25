@@ -42,6 +42,7 @@ import {
 import { load as loadYaml } from 'js-yaml';
 import { listBlockTemplates } from './block-templates.js';
 import { getRunner as getLLMRunner } from './llm/index.js';
+import { handleAppsApi } from './apps-api.js';
 import {
   buildSemanticObjectDetail,
   buildSemanticTree,
@@ -187,6 +188,20 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
       res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
       res.end(serializeJSON({ status: 'ok' }));
       return;
+    }
+
+    // Apps, dashboards, persona — see apps-api.ts. Returns true if handled.
+    if (path.startsWith('/api/apps') || path === '/api/persona') {
+      try {
+        const handled = await handleAppsApi({ req, res, url, path, projectRoot });
+        if (handled) return;
+      } catch (err) {
+        if (!res.headersSent) {
+          res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' });
+          res.end(serializeJSON({ error: (err as Error).message }));
+        }
+        return;
+      }
     }
 
     // SSE endpoint for hot-reload file watching

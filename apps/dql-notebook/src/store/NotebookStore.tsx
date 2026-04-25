@@ -89,6 +89,11 @@ const initialState: NotebookState = {
   blockStudioCatalogLoading: false,
   inspectorOpen: false,
   inspectorContext: null,
+  apps: [],
+  appsLoading: false,
+  activeAppId: null,
+  activeDashboardId: null,
+  activePersona: null,
 };
 
 /**
@@ -134,7 +139,7 @@ function notebookReducer(state: NotebookState, action: NotebookAction): Notebook
     }
 
     case 'SET_SIDEBAR_PANEL': {
-      const fullPagePanels = ['connection', 'reference', 'git'] as const;
+      const fullPagePanels = ['connection', 'reference', 'git', 'apps'] as const;
       const isFullPage = (action.panel as string | null) !== null
         && (fullPagePanels as readonly string[]).includes(action.panel as string);
       return {
@@ -150,9 +155,11 @@ function notebookReducer(state: NotebookState, action: NotebookAction): Notebook
               ? 'reference'
               : action.panel === 'git'
                 ? 'git'
-                : state.activeFile?.type === 'block'
-                  ? 'block_studio'
-                  : 'notebook',
+                : action.panel === 'apps'
+                  ? 'apps'
+                  : state.activeFile?.type === 'block'
+                    ? 'block_studio'
+                    : 'notebook',
       };
     }
 
@@ -433,6 +440,31 @@ function notebookReducer(state: NotebookState, action: NotebookAction): Notebook
         inspectorContext: action.context,
         inspectorOpen: action.context !== null ? true : state.inspectorOpen,
       };
+
+    case 'SET_APPS':
+      return { ...state, apps: action.apps };
+
+    case 'SET_APPS_LOADING':
+      return { ...state, appsLoading: action.loading };
+
+    case 'OPEN_APP': {
+      const app = state.apps.find((a) => a.id === action.appId) ?? null;
+      const dashboardId = action.dashboardId !== undefined
+        ? action.dashboardId
+        : (app?.homepage?.type === 'dashboard' ? app.homepage.id : (app?.dashboards[0]?.id ?? null));
+      return {
+        ...state,
+        mainView: 'apps',
+        activeAppId: action.appId,
+        activeDashboardId: dashboardId,
+      };
+    }
+
+    case 'OPEN_DASHBOARD':
+      return { ...state, activeDashboardId: action.dashboardId };
+
+    case 'SET_ACTIVE_PERSONA':
+      return { ...state, activePersona: action.persona };
 
     default:
       return state;

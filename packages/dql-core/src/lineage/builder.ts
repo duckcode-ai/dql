@@ -47,6 +47,22 @@ export interface LineageBuilderOptions {
   blockNames?: Set<string>;
   dbtModels?: LineageDbtModelInput[];
   dashboards?: LineageDashboardInput[];
+  /**
+   * Apps (consumption-layer artifacts) that contain dashboards. App nodes sit
+   * above the matching dashboard nodes in the graph and inherit the App's
+   * declared `domain` so cross-domain analysis remains accurate.
+   */
+  apps?: LineageAppInput[];
+}
+
+export interface LineageAppInput {
+  id: string;
+  name: string;
+  domain?: string;
+  owner?: string;
+  filePath?: string;
+  /** Dashboard ids contained by this App (matched against `dashboard:<id>` nodes). */
+  dashboards: string[];
 }
 
 export interface LineageDbtModelInput {
@@ -342,6 +358,31 @@ export function buildLineageGraph(
     // against `pathToBlockName` and merges the resulting block name into
     // `dashboard.blocks`, so the `block:<name> → dashboard:<name>` edge above
     // (line ~310) covers bound cells without a separate code path here.
+  }
+
+  // 4b. Add app nodes and connect to their dashboards.
+  for (const app of options.apps ?? []) {
+    const appId = `app:${app.id}`;
+    graph.addNode({
+      id: appId,
+      type: 'app',
+      layer: 'consumption',
+      name: app.name,
+      domain: app.domain,
+      owner: app.owner,
+      metadata: { filePath: app.filePath, appId: app.id },
+    });
+    for (const dashId of app.dashboards) {
+      const dashboardNodeId = `dashboard:${dashId}`;
+      if (!graph.getNode(dashboardNodeId)) continue;
+      // Data flow: dashboard → app (apps consume the dashboards they contain).
+      graph.addEdge({
+        source: dashboardNodeId,
+        target: appId,
+        type: 'contains',
+      });
+      addCrossDomainEdgeIfNeeded(graph, dashboardNodeId, appId);
+    }
   }
 
   // 5. Add domain nodes and connect

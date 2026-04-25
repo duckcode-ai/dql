@@ -30,6 +30,17 @@ export interface DQLManifest {
   dimensions: Record<string, ManifestDimension>;
   /** External source tables (from SQL extraction + dbt import) */
   sources: Record<string, ManifestSource>;
+  /**
+   * Consumption-layer artifacts: Apps bundle dashboards/notebooks for a domain
+   * or team with members, roles, policies, RLS bindings, and schedules.
+   * Empty record when no `apps/` directory exists.
+   */
+  apps?: Record<string, ManifestApp>;
+  /**
+   * First-class dashboards (`.dqld`) discovered under `apps/<id>/dashboards/`.
+   * Distinct from notebook-as-dashboard (which still ships under `notebooks`).
+   */
+  dashboards?: Record<string, ManifestDashboard>;
 
   /** Pre-computed lineage graph */
   lineage: ManifestLineage;
@@ -198,6 +209,86 @@ export interface ManifestLineageEdge {
   type: string;
   sourceDomain?: string;
   targetDomain?: string;
+}
+
+// ---- Apps & Dashboards (consumption layer) ----
+
+export interface ManifestApp {
+  id: string;
+  name: string;
+  description?: string;
+  domain: string;
+  owners: string[];
+  tags: string[];
+  /** Folder path relative to project root (e.g. "apps/growth-cxo"). */
+  filePath: string;
+  /** Member directory; empty for solo Apps. */
+  members: Array<{
+    userId: string;
+    displayName?: string;
+    roles: string[];
+    attributes?: Record<string, string | number | boolean>;
+  }>;
+  /** Roles declared by the App. */
+  roles: Array<{ id: string; displayName?: string; description?: string }>;
+  /** Access policies; reuses dql-governance shape. */
+  policies: Array<{
+    id: string;
+    description?: string;
+    domain: string;
+    minClassification: 'public' | 'internal' | 'confidential' | 'restricted';
+    allowedRoles: string[];
+    allowedUsers?: string[];
+    accessLevel: 'read' | 'write' | 'execute' | 'admin';
+    enabled: boolean;
+  }>;
+  /** RLS template variable bindings (role → variable ← member attribute). */
+  rlsBindings: Array<{ role: string; variable: string; from: string }>;
+  /** Cron-driven dashboard deliveries (Slack, email, webhook). */
+  schedules: Array<{
+    id: string;
+    cron: string;
+    dashboard: string;
+    deliver: Array<
+      | { kind: 'slack'; channel: string }
+      | { kind: 'email'; to: string[] }
+      | { kind: 'webhook'; url: string }
+    >;
+    description?: string;
+    enabled: boolean;
+  }>;
+  /** Dashboard ids declared inside this App. */
+  dashboards: string[];
+  /** Optional homepage shown when stakeholders open the App. */
+  homepage?:
+    | { type: 'dashboard'; id: string }
+    | { type: 'notebook'; path: string };
+  /** Non-fatal load problems for this App, if any. */
+  diagnostics?: ManifestDiagnostic[];
+}
+
+export interface ManifestDashboard {
+  id: string;
+  /** Owning App id. */
+  appId: string;
+  title: string;
+  description?: string;
+  domain?: string;
+  tags: string[];
+  /** Path relative to project root (e.g. "apps/growth-cxo/dashboards/weekly-overview.dqld"). */
+  filePath: string;
+  /** Block names referenced by id (already resolved against the manifest's blocks map). */
+  blockIds: string[];
+  /** Block names referenced by file path that resolved to a known block. */
+  blockPathRefs: string[];
+  /** Block names that could not be resolved — surfaced as diagnostics. */
+  unresolvedRefs: string[];
+  /** Param ids declared on the dashboard. */
+  params: string[];
+  /** Filter ids declared on the dashboard. */
+  filters: string[];
+  /** Layout summary; full grid lives on disk. */
+  layout: { kind: 'grid'; cols: number; rowHeight: number; itemCount: number };
 }
 
 // ---- dbt Import ----

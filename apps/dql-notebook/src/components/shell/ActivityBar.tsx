@@ -133,7 +133,7 @@ export function ActivityBar() {
       dispatch({ type: 'TOGGLE_LINEAGE_FULLSCREEN' });
       return;
     }
-    const fullPagePanel = panel === 'connection' || panel === 'reference' || panel === 'git';
+    const fullPagePanel = panel === 'connection' || panel === 'reference' || panel === 'git' || panel === 'apps';
     if (fullPagePanel) {
       dispatch({ type: 'SET_SIDEBAR_PANEL', panel });
       return;
@@ -173,7 +173,7 @@ export function ActivityBar() {
       key: 'apps',
       title: 'Apps',
       icon: <Package size={16} strokeWidth={1.75} />,
-      active: state.sidebarPanel === 'apps' && state.sidebarOpen,
+      active: state.mainView === 'apps',
     },
     {
       key: 'lineage',

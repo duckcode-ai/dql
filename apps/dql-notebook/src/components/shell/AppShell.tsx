@@ -15,6 +15,7 @@ import { LineageDAG } from '../panels/LineageDAG';
 import { ConnectionPanel } from '../panels/ConnectionPanel';
 import { ReferencePanel } from '../panels/ReferencePanel';
 import { GitPage } from '../git/GitPage';
+import { AppsView } from '../apps/AppsView';
 import { LineageDrawer } from '../lineage/LineageDrawer';
 import { api } from '../../api/client';
 import { parseNotebookFile } from '../../utils/parse-workbook';
@@ -198,6 +199,8 @@ export function AppShell() {
             </FullPageSection>
           ) : state.mainView === 'git' ? (
             <GitPage />
+          ) : state.mainView === 'apps' ? (
+            <AppsView />
           ) : (
             <>
               {state.mainView === 'block_studio' ? (
