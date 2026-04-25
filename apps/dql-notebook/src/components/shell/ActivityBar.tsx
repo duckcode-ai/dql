@@ -120,6 +120,19 @@ export function ActivityBar() {
   }, [expanded]);
 
   function handlePanelClick(panel: SidebarPanel) {
+    // Lineage: show the list panel on the left AND the full-page DAG in main.
+    // SET_SIDEBAR_PANEL resets lineageFullscreen to false, so we re-toggle it
+    // on after to keep the DAG mounted.
+    if (panel === 'lineage') {
+      if (state.lineageFullscreen && state.sidebarPanel === 'lineage' && state.sidebarOpen) {
+        dispatch({ type: 'TOGGLE_LINEAGE_FULLSCREEN' });
+        dispatch({ type: 'TOGGLE_SIDEBAR' });
+        return;
+      }
+      dispatch({ type: 'SET_SIDEBAR_PANEL', panel: 'lineage' });
+      dispatch({ type: 'TOGGLE_LINEAGE_FULLSCREEN' });
+      return;
+    }
     const fullPagePanel = panel === 'connection' || panel === 'reference' || panel === 'git';
     if (fullPagePanel) {
       dispatch({ type: 'SET_SIDEBAR_PANEL', panel });
@@ -166,7 +179,7 @@ export function ActivityBar() {
       key: 'lineage',
       title: 'Lineage',
       icon: <LineageNodeIcon size={16} />,
-      active: state.sidebarPanel === 'lineage' && state.sidebarOpen,
+      active: state.lineageFullscreen,
     },
     {
       key: 'git',

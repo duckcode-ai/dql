@@ -47,7 +47,6 @@ const DRIVER_COLORS: Record<string, string> = {
 
 // v1.3.3 Hex handoff — drivers with a TRENDING badge in the catalog grid.
 // These are the warehouses teams adopt most in our handoff deck.
-const TRENDING_DRIVERS = new Set(['snowflake', 'bigquery', 'databricks', 'postgres']);
 
 // Short one-line blurbs for the driver cards.
 const DRIVER_TAGLINES: Record<string, string> = {
@@ -441,8 +440,6 @@ export function ConnectionPanel() {
         </div>
       )}
 
-      {/* v1.3.3 Hex handoff — catalog grid of available drivers.
-          Cards use the per-driver accent color and flag trending picks. */}
       <div style={{ ...sectionLabel, marginTop: 4 }}>Catalog</div>
       <div
         style={{
@@ -454,7 +451,6 @@ export function ConnectionPanel() {
       >
         {Object.entries(DRIVER_LABELS).map(([driver, label]) => {
           const color = DRIVER_COLORS[driver] ?? t.accent;
-          const trending = TRENDING_DRIVERS.has(driver);
           const tagline = DRIVER_TAGLINES[driver] ?? '';
           return (
             <div
@@ -472,25 +468,6 @@ export function ConnectionPanel() {
                 transition: 'border-color 0.15s',
               }}
             >
-              {trending && (
-                <span
-                  style={{
-                    position: 'absolute',
-                    top: 8,
-                    right: 8,
-                    fontSize: 8,
-                    fontWeight: 700,
-                    letterSpacing: '0.06em',
-                    color: t.accent,
-                    background: `${t.accent}18`,
-                    border: `1px solid ${t.accent}40`,
-                    borderRadius: 999,
-                    padding: '1px 6px',
-                  }}
-                >
-                  TRENDING
-                </span>
-              )}
               <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
                 <DriverLogo driver={driver} size={18} fallbackColor={color} />
                 <span style={{ fontSize: 12, fontWeight: 600, color: t.textPrimary, fontFamily: t.font }}>
@@ -503,7 +480,6 @@ export function ConnectionPanel() {
                   color: t.textMuted,
                   fontFamily: t.font,
                   lineHeight: 1.35,
-                  paddingRight: trending ? 56 : 0,
                 }}
               >
                 {tagline}
