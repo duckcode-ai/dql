@@ -21,8 +21,8 @@ function isNumeric(value: unknown): boolean {
 function columnKindBadge(kind: ColumnKind): { icon: string; color: string } {
   switch (kind) {
     case 'numeric': return { icon: '#', color: '#79c0ff' };
-    case 'date': return { icon: '📅', color: '#e3b341' };
-    case 'bool': return { icon: 'T/F', color: '#a371f7' };
+    case 'date': return { icon: 'D', color: '#e3b341' };
+    case 'bool': return { icon: 'B', color: '#a371f7' };
     case 'json': return { icon: '{}', color: '#ff7b72' };
     case 'string':
     default: return { icon: 'A', color: '#56d364' };
@@ -146,6 +146,9 @@ export function TableOutput({ result, themeMode }: TableOutputProps) {
     return map;
   }, [result.columns, result.rows]);
 
+  // Track scroll to drop a soft shadow under the sticky header.
+  const [scrolled, setScrolled] = useState(false);
+
   // Paginate
   const totalPages = Math.max(1, Math.ceil(sortedRows.length / pageSize));
   const safePage = Math.min(page, totalPages - 1);
@@ -229,95 +232,107 @@ export function TableOutput({ result, themeMode }: TableOutputProps) {
       </div>
 
       {/* Table */}
-      <div style={{ maxHeight: 400, overflow: 'auto', position: 'relative' }}>
+      <div
+        style={{ maxHeight: 440, overflow: 'auto', position: 'relative' }}
+        onScroll={(e) => setScrolled((e.target as HTMLDivElement).scrollTop > 0)}
+      >
         <table style={{
-          width: '100%', borderCollapse: 'collapse', tableLayout: 'auto',
-          fontSize: 12, fontFamily: t.fontMono,
+          width: '100%', borderCollapse: 'separate', borderSpacing: 0, tableLayout: 'auto',
+          fontSize: 12.5, fontFamily: t.fontMono,
         }}>
           <thead>
             <tr>
-              {result.columns.map((col) => (
-                <th
-                  key={col}
-                  onClick={() => handleSort(col)}
-                  style={{
-                    background: t.tableHeaderBg, color: t.textSecondary, fontWeight: 600,
-                    fontSize: 11, textAlign: 'left', padding: '6px 12px',
-                    borderBottom: `1px solid ${t.tableBorder}`, borderRight: `1px solid ${t.tableBorder}`,
-                    minWidth: 80, maxWidth: 300, whiteSpace: 'nowrap',
-                    position: 'sticky', top: 0, zIndex: 1, fontFamily: t.font,
-                    letterSpacing: '0.03em', overflow: 'hidden', textOverflow: 'ellipsis',
-                    cursor: 'pointer', userSelect: 'none',
-                    transition: 'background 0.1s',
-                  }}
-                >
-                  <span style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-                    {(() => {
-                      const badge = columnKindBadge(columnKinds.get(col) ?? 'string');
-                      return (
-                        <span
-                          title={columnKinds.get(col) ?? 'string'}
-                          style={{
-                            fontSize: 9,
-                            fontFamily: t.fontMono,
-                            fontWeight: 700,
-                            color: badge.color,
-                            background: `${badge.color}15`,
-                            border: `1px solid ${badge.color}40`,
-                            borderRadius: 3,
-                            padding: '0 4px',
-                            minWidth: 14,
-                            textAlign: 'center',
-                            lineHeight: '14px',
-                            flexShrink: 0,
-                          }}
-                        >
-                          {badge.icon}
-                        </span>
-                      );
-                    })()}
-                    <span style={{ overflow: 'hidden', textOverflow: 'ellipsis' }}>{col}</span>
-                    <SortArrow dir={sortCol === col ? sortDir : null} color={sortCol === col ? t.accent : t.textMuted} />
-                  </span>
-                </th>
-              ))}
+              {result.columns.map((col) => {
+                const kind = columnKinds.get(col) ?? 'string';
+                const numericHeader = kind === 'numeric';
+                return (
+                  <th
+                    key={col}
+                    onClick={() => handleSort(col)}
+                    style={{
+                      background: t.tableHeaderBg, color: t.textSecondary, fontWeight: 600,
+                      fontSize: 11, textAlign: numericHeader ? 'right' : 'left', padding: '8px 14px',
+                      borderBottom: `1px solid ${t.tableBorder}`,
+                      minWidth: 80, maxWidth: 320, whiteSpace: 'nowrap',
+                      position: 'sticky', top: 0, zIndex: 1, fontFamily: t.font,
+                      letterSpacing: '0.03em', overflow: 'hidden', textOverflow: 'ellipsis',
+                      cursor: 'pointer', userSelect: 'none',
+                      boxShadow: scrolled ? `0 2px 4px -2px rgba(0,0,0,0.18)` : 'none',
+                      transition: 'background 0.1s, box-shadow 0.18s',
+                    }}
+                  >
+                    <span style={{ display: 'flex', alignItems: 'center', gap: 6, justifyContent: numericHeader ? 'flex-end' : 'flex-start' }}>
+                      {(() => {
+                        const badge = columnKindBadge(kind);
+                        return (
+                          <span
+                            title={kind}
+                            style={{
+                              fontSize: 9,
+                              fontFamily: t.fontMono,
+                              fontWeight: 700,
+                              color: badge.color,
+                              background: `${badge.color}15`,
+                              border: `1px solid ${badge.color}40`,
+                              borderRadius: 3,
+                              padding: '0 4px',
+                              minWidth: 14,
+                              textAlign: 'center',
+                              lineHeight: '14px',
+                              flexShrink: 0,
+                            }}
+                          >
+                            {badge.icon}
+                          </span>
+                        );
+                      })()}
+                      <span style={{ overflow: 'hidden', textOverflow: 'ellipsis' }}>{col}</span>
+                      <SortArrow dir={sortCol === col ? sortDir : null} color={sortCol === col ? t.accent : t.textMuted} />
+                    </span>
+                  </th>
+                );
+              })}
             </tr>
           </thead>
           <tbody>
-            {displayRows.map((row, rowIdx) => (
-              <tr
-                key={rowIdx}
-                onMouseEnter={() => setHoveredRow(rowIdx)}
-                onMouseLeave={() => setHoveredRow(null)}
-                style={{
-                  background: hoveredRow === rowIdx ? t.tableRowHover : 'transparent',
-                  transition: 'background 0.1s',
-                }}
-              >
-                {result.columns.map((col) => {
-                  const value = row[col];
-                  const isNull = value === null || value === undefined;
-                  const numericAlign = isNumeric(value);
-                  return (
-                    <td
-                      key={col}
-                      style={{
-                        padding: '5px 12px',
-                        borderBottom: `1px solid ${t.tableBorder}`,
-                        borderRight: `1px solid ${t.tableBorder}`,
-                        color: isNull ? t.textMuted : t.textPrimary,
-                        fontStyle: isNull ? 'italic' : 'normal',
-                        textAlign: numericAlign ? 'right' : 'left',
-                        whiteSpace: 'nowrap', maxWidth: 300,
-                        overflow: 'hidden', textOverflow: 'ellipsis',
-                      }}
-                    >
-                      {isNull ? '—' : formatCell(value)}
-                    </td>
-                  );
-                })}
-              </tr>
-            ))}
+            {displayRows.map((row, rowIdx) => {
+              const isHovered = hoveredRow === rowIdx;
+              const isOdd = rowIdx % 2 === 1;
+              const baseBg = isOdd ? t.tableHeaderBg : 'transparent';
+              return (
+                <tr
+                  key={rowIdx}
+                  onMouseEnter={() => setHoveredRow(rowIdx)}
+                  onMouseLeave={() => setHoveredRow(null)}
+                  style={{ transition: 'background 0.1s' }}
+                >
+                  {result.columns.map((col) => {
+                    const value = row[col];
+                    const isNull = value === null || value === undefined;
+                    const numericAlign = isNumeric(value);
+                    return (
+                      <td
+                        key={col}
+                        style={{
+                          padding: '7px 14px',
+                          borderBottom: `1px solid ${t.tableBorder}`,
+                          background: isHovered ? t.tableRowHover : baseBg,
+                          color: isNull ? t.textMuted : t.textPrimary,
+                          fontStyle: isNull ? 'italic' : 'normal',
+                          fontVariantNumeric: numericAlign ? 'tabular-nums' : 'normal',
+                          textAlign: numericAlign ? 'right' : 'left',
+                          whiteSpace: 'nowrap', maxWidth: 320,
+                          overflow: 'hidden', textOverflow: 'ellipsis',
+                          transition: 'background 0.1s',
+                        }}
+                      >
+                        {isNull ? '—' : formatCell(value)}
+                      </td>
+                    );
+                  })}
+                </tr>
+              );
+            })}
           </tbody>
         </table>
       </div>
@@ -367,10 +382,6 @@ export function TableOutput({ result, themeMode }: TableOutputProps) {
           </div>
         )}
         <div style={{ flex: 1 }} />
-        <FooterPill label="View" t={t} />
-        <FooterPill label="Format" t={t} />
-        <FooterPill label="Columns" t={t} />
-        <FooterPill label="Totals" t={t} />
         <span
           style={{
             fontSize: 10,
@@ -397,31 +408,6 @@ function renderPageLinks(total: number, current: number): Array<number | '…'> 
   if (cur < total - 2) pages.push('…');
   pages.push(total);
   return pages;
-}
-
-function FooterPill({ label, t }: { label: string; t: Theme }) {
-  const [hovered, setHovered] = useState(false);
-  return (
-    <button
-      onMouseEnter={() => setHovered(true)}
-      onMouseLeave={() => setHovered(false)}
-      title={`${label} (coming in v0.11)`}
-      style={{
-        background: hovered ? t.btnHover : 'transparent',
-        border: `1px solid ${hovered ? t.btnBorder : 'transparent'}`,
-        borderRadius: 3,
-        color: hovered ? t.textSecondary : t.textMuted,
-        fontSize: 10,
-        fontFamily: t.font,
-        fontWeight: 600,
-        padding: '2px 8px',
-        cursor: 'pointer',
-        transition: 'all 0.15s',
-      }}
-    >
-      {label}
-    </button>
-  );
 }
 
 function ExportBtn({ label, onClick, t }: { label: string; onClick: () => void; t: Theme }) {
