@@ -1,7 +1,7 @@
 {
-  "name": "@duckcodeailabs/dql-mcp",
+  "name": "@duckcodeailabs/dql-agent",
   "version": "1.3.6",
-  "description": "DQL MCP server: expose certified blocks, semantic layer, lineage, and governance to LLM agents via the Model Context Protocol",
+  "description": "DQL agent: knowledge graph, Skills, block-first answer loop, and pluggable LLM providers (Claude / OpenAI / Gemini / Ollama)",
   "license": "Apache-2.0",
   "type": "module",
   "main": "./dist/index.js",
@@ -24,20 +24,19 @@
   "repository": {
     "type": "git",
     "url": "https://github.com/duckcode-ai/dql.git",
-    "directory": "packages/dql-mcp"
+    "directory": "packages/dql-agent"
   },
   "publishConfig": {
     "access": "public"
   },
   "dependencies": {
-    "@duckcodeailabs/dql-agent": "workspace:*",
     "@duckcodeailabs/dql-core": "workspace:*",
     "@duckcodeailabs/dql-governance": "workspace:*",
     "@duckcodeailabs/dql-project": "workspace:*",
-    "@modelcontextprotocol/sdk": "^1.0.4",
-    "zod": "^3.25.0"
+    "better-sqlite3": "^11.7.0"
   },
   "devDependencies": {
+    "@types/better-sqlite3": "^7.6.0",
     "@types/node": "^20.0.0",
     "typescript": "^5.7.0",
     "vitest": "^3.0.0"
