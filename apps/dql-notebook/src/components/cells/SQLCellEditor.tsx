@@ -321,14 +321,15 @@ export function SQLCellEditor({
 
     const baseTheme = EditorView.theme({
       '&': {
-        background: t.editorBg,
-        fontFamily: t.fontMono,
+        background: 'var(--color-bg-surface)',
+        color: 'var(--color-text-primary)',
+        fontFamily: 'var(--font-mono)',
         fontSize: '13px',
         minHeight: '80px',
         maxHeight: '480px',
       },
       '.cm-scroller': { overflow: 'auto', fontFamily: 'inherit' },
-      '.cm-content': { padding: '10px 0', minHeight: '80px' },
+      '.cm-content': { padding: '10px 0', minHeight: '80px', color: 'var(--color-text-primary)' },
       '.cm-focused': { outline: 'none' },
       '.cm-editor': { border: 'none' },
       '.cm-gutters': { minWidth: 40 },
@@ -471,7 +472,7 @@ export function SQLCellEditor({
         window.dispatchEvent(new CustomEvent('dql:semantic-used', { detail: { name: payload.name } }));
       }}
       style={{
-        background: t.editorBg,
+        background: 'var(--color-bg-surface)',
         minHeight: 80,
         border: dragActive ? `1px solid ${t.accent}` : '1px solid transparent',
         borderRadius: 6,

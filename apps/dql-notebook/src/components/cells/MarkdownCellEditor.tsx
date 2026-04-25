@@ -93,13 +93,13 @@ function renderMarkdown(text: string, t: Theme): React.ReactNode[] {
         <pre
           key={i}
           style={{
-            background: t.editorBg,
-            border: `1px solid ${t.cellBorder}`,
+            background: 'var(--color-bg-surface)',
+            border: '1px solid var(--color-border-subtle)',
             borderRadius: 6,
             padding: '10px 12px',
             fontSize: 12,
-            fontFamily: t.fontMono,
-            color: t.textPrimary,
+            fontFamily: 'var(--font-mono)',
+            color: 'var(--color-text-primary)',
             overflow: 'auto',
             margin: '8px 0',
             lineHeight: 1.6,
@@ -238,13 +238,13 @@ function inlineMarkdown(text: string, t: Theme): React.ReactNode {
           <code
             key={key++}
             style={{
-              background: t.editorBg,
-              border: `1px solid ${t.cellBorder}`,
+              background: 'var(--color-bg-surface)',
+              border: '1px solid var(--color-border-subtle)',
               borderRadius: 4,
               padding: '1px 5px',
               fontSize: '0.9em',
-              fontFamily: t.fontMono,
-              color: t.accent,
+              fontFamily: 'var(--font-mono)',
+              color: 'var(--color-accent-blue)',
             }}
           >
             {first.match[1]}
