@@ -118,6 +118,7 @@ export function LineageDrawer() {
         display: 'flex',
         flexDirection: 'column',
         overflow: 'hidden',
+        animation: 'dql-drawer-slide-in 180ms cubic-bezier(0.22, 0.61, 0.36, 1)',
       }}
     >
       {/* Header */}
