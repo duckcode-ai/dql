@@ -62,7 +62,152 @@ export class SQLiteStorage implements RegistryStorage {
 
       CREATE INDEX IF NOT EXISTS idx_version_block ON block_versions(block_id);
       CREATE INDEX IF NOT EXISTS idx_version_active ON block_versions(block_id, is_active);
+
+      CREATE TABLE IF NOT EXISTS app_registry (
+        id              TEXT PRIMARY KEY,
+        name            TEXT NOT NULL,
+        domain          TEXT NOT NULL,
+        description     TEXT,
+        owners          TEXT NOT NULL DEFAULT '[]',
+        tags            TEXT NOT NULL DEFAULT '[]',
+        file_path       TEXT NOT NULL,
+        members         TEXT NOT NULL DEFAULT '[]',
+        roles           TEXT NOT NULL DEFAULT '[]',
+        policies        TEXT NOT NULL DEFAULT '[]',
+        rls_bindings    TEXT NOT NULL DEFAULT '[]',
+        schedules       TEXT NOT NULL DEFAULT '[]',
+        homepage        TEXT,
+        git_commit_sha  TEXT NOT NULL DEFAULT '',
+        updated_at      TEXT NOT NULL
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_app_domain ON app_registry(domain);
+
+      CREATE TABLE IF NOT EXISTS dashboard_registry (
+        id              TEXT PRIMARY KEY,
+        app_id          TEXT NOT NULL REFERENCES app_registry(id) ON DELETE CASCADE,
+        title           TEXT NOT NULL,
+        description     TEXT,
+        domain          TEXT,
+        tags            TEXT NOT NULL DEFAULT '[]',
+        file_path       TEXT NOT NULL,
+        block_ids       TEXT NOT NULL DEFAULT '[]',
+        block_path_refs TEXT NOT NULL DEFAULT '[]',
+        unresolved_refs TEXT NOT NULL DEFAULT '[]',
+        params          TEXT NOT NULL DEFAULT '[]',
+        filters         TEXT NOT NULL DEFAULT '[]',
+        layout          TEXT NOT NULL DEFAULT '{}',
+        git_commit_sha  TEXT NOT NULL DEFAULT '',
+        updated_at      TEXT NOT NULL
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_dashboard_app ON dashboard_registry(app_id);
+      CREATE INDEX IF NOT EXISTS idx_dashboard_domain ON dashboard_registry(domain);
     `);
+  }
+
+  /**
+   * Replace the persisted apps/dashboards rows with the contents of a
+   * compiled manifest. Idempotent: clears the registries and re-inserts.
+   * Apps and dashboards are file-format-first — the registries exist for
+   * fast queries from the UI/API surface, not as a source of truth.
+   */
+  upsertAppsAndDashboards(input: {
+    apps: Array<{
+      id: string;
+      name: string;
+      domain: string;
+      description?: string;
+      owners: string[];
+      tags: string[];
+      filePath: string;
+      members: unknown;
+      roles: unknown;
+      policies: unknown;
+      rlsBindings: unknown;
+      schedules: unknown;
+      homepage?: unknown;
+      gitCommitSha?: string;
+    }>;
+    dashboards: Array<{
+      id: string;
+      appId: string;
+      title: string;
+      description?: string;
+      domain?: string;
+      tags: string[];
+      filePath: string;
+      blockIds: string[];
+      blockPathRefs: string[];
+      unresolvedRefs: string[];
+      params: string[];
+      filters: string[];
+      layout: unknown;
+      gitCommitSha?: string;
+    }>;
+  }): void {
+    const now = new Date().toISOString();
+    const txn = this.db.transaction(() => {
+      this.db.prepare('DELETE FROM dashboard_registry').run();
+      this.db.prepare('DELETE FROM app_registry').run();
+      const insertApp = this.db.prepare(`
+        INSERT INTO app_registry (
+          id, name, domain, description, owners, tags, file_path,
+          members, roles, policies, rls_bindings, schedules, homepage,
+          git_commit_sha, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `);
+      for (const a of input.apps) {
+        insertApp.run(
+          a.id, a.name, a.domain, a.description ?? null,
+          JSON.stringify(a.owners), JSON.stringify(a.tags),
+          a.filePath,
+          JSON.stringify(a.members), JSON.stringify(a.roles),
+          JSON.stringify(a.policies), JSON.stringify(a.rlsBindings),
+          JSON.stringify(a.schedules),
+          a.homepage ? JSON.stringify(a.homepage) : null,
+          a.gitCommitSha ?? '', now,
+        );
+      }
+      const insertDashboard = this.db.prepare(`
+        INSERT INTO dashboard_registry (
+          id, app_id, title, description, domain, tags, file_path,
+          block_ids, block_path_refs, unresolved_refs,
+          params, filters, layout, git_commit_sha, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `);
+      for (const d of input.dashboards) {
+        insertDashboard.run(
+          d.id, d.appId, d.title, d.description ?? null,
+          d.domain ?? null, JSON.stringify(d.tags),
+          d.filePath,
+          JSON.stringify(d.blockIds), JSON.stringify(d.blockPathRefs),
+          JSON.stringify(d.unresolvedRefs),
+          JSON.stringify(d.params), JSON.stringify(d.filters),
+          JSON.stringify(d.layout),
+          d.gitCommitSha ?? '', now,
+        );
+      }
+    });
+    txn();
+  }
+
+  /** Read all apps from the registry, with their resolved dashboards joined. */
+  listAppsWithDashboards(): Array<{
+    app: Record<string, unknown>;
+    dashboards: Array<Record<string, unknown>>;
+  }> {
+    const apps = this.db.prepare('SELECT * FROM app_registry ORDER BY name').all() as any[];
+    const dashboards = this.db.prepare('SELECT * FROM dashboard_registry').all() as any[];
+    const byApp = new Map<string, any[]>();
+    for (const d of dashboards) {
+      if (!byApp.has(d.app_id)) byApp.set(d.app_id, []);
+      byApp.get(d.app_id)!.push(rowToDashboard(d));
+    }
+    return apps.map((a) => ({
+      app: rowToApp(a),
+      dashboards: byApp.get(a.id) ?? [],
+    }));
   }
 
   async getBlock(id: string): Promise<BlockRecord | null> {
@@ -302,4 +447,44 @@ function safeParseJSON<T>(value: string | null | undefined, fallback: T): T {
   } catch {
     return fallback;
   }
+}
+
+function rowToApp(row: any): Record<string, unknown> {
+  return {
+    id: row.id,
+    name: row.name,
+    domain: row.domain,
+    description: row.description ?? undefined,
+    owners: safeParseJSON(row.owners, [] as string[]),
+    tags: safeParseJSON(row.tags, [] as string[]),
+    filePath: row.file_path,
+    members: safeParseJSON(row.members, [] as unknown[]),
+    roles: safeParseJSON(row.roles, [] as unknown[]),
+    policies: safeParseJSON(row.policies, [] as unknown[]),
+    rlsBindings: safeParseJSON(row.rls_bindings, [] as unknown[]),
+    schedules: safeParseJSON(row.schedules, [] as unknown[]),
+    homepage: row.homepage ? safeParseJSON(row.homepage, null) : undefined,
+    gitCommitSha: row.git_commit_sha ?? '',
+    updatedAt: row.updated_at,
+  };
+}
+
+function rowToDashboard(row: any): Record<string, unknown> {
+  return {
+    id: row.id,
+    appId: row.app_id,
+    title: row.title,
+    description: row.description ?? undefined,
+    domain: row.domain ?? undefined,
+    tags: safeParseJSON(row.tags, [] as string[]),
+    filePath: row.file_path,
+    blockIds: safeParseJSON(row.block_ids, [] as string[]),
+    blockPathRefs: safeParseJSON(row.block_path_refs, [] as string[]),
+    unresolvedRefs: safeParseJSON(row.unresolved_refs, [] as string[]),
+    params: safeParseJSON(row.params, [] as string[]),
+    filters: safeParseJSON(row.filters, [] as string[]),
+    layout: safeParseJSON(row.layout, {} as Record<string, unknown>),
+    gitCommitSha: row.git_commit_sha ?? '',
+    updatedAt: row.updated_at,
+  };
 }

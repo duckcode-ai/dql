@@ -7,6 +7,7 @@
   "include": ["src/**/*"],
   "exclude": ["src/**/*.test.ts"],
   "references": [
+    { "path": "../dql-agent" },
     { "path": "../dql-core" },
     { "path": "../dql-governance" },
     { "path": "../dql-project" }

@@ -77,14 +77,48 @@ DQL is **production-usable** for:
 
 ---
 
+## In Progress (open source)
+
+A larger scope expansion landed in v1.4 (work-in-progress on the
+`claude/loving-volhard-a2d18e` branch):
+
+- **Apps** — first-class consumption-layer artifact (`apps/<id>/dql.app.json`)
+  bundling dashboards, members, roles, access policies, RLS bindings, and
+  schedules. CLI: `dql app new|ls|show|build|reindex`.
+- **Dashboards** — first-class `.dqld` grid-layout artifact distinct from the
+  existing notebook-as-dashboard mode.
+- **Programmable RBAC (single-user enforcement)** — App documents declare
+  members, roles, and `AccessPolicy` rules; PolicyEngine enforces them
+  through a runtime persona registry. Identity stays single-user OSS — the
+  local owner can switch personas to preview as a member.
+- **Deferred RLS** — `personaVariables()` builds the template-variable map
+  for `executor.executeQuery` so `@rls("col", "{user.var}")` decorators are
+  resolved at execution time from the active persona.
+- **Agent (`@duckcodeailabs/dql-agent`)** — local SQLite + FTS5 knowledge
+  graph built from the manifest + dbt + semantic layer + Skills. Block-first
+  answer loop: certified blocks first, otherwise the LLM proposes SQL marked
+  `Uncertified` and routed through analyst review.
+- **Pluggable LLM providers** — Claude Messages API, OpenAI / OpenAI-compatible
+  endpoints, Gemini, and local Ollama. `pickProvider()` falls back to the
+  first available, ending on Ollama for offline use.
+- **MCP tools** — `kg_search` and `feedback_record` join the existing 8 tools
+  (`search_blocks`, `get_block`, `query_via_block`, `list_metrics`,
+  `list_dimensions`, `lineage_impact`, `certify`, `suggest_block`).
+- **Self-learning** — feedback rows feed `getPromotionCandidates()`, surfacing
+  uncertified answers ready for analyst certification.
+- **Slack front-end (`@duckcodeailabs/dql-slack`)** — slash-command bot
+  (`/dql ask <q>`, `/dql block <id>`) + Block-Kit feedback buttons. Same
+  block-first loop, Slack signature verification.
+- **`dql verify`** — proves the on-disk `dql-manifest.json` is reproducible
+  from source. Used by CI to keep programmable artifacts in lock-step.
+
 ## Not Planned (Closed Product)
 
-The following are intentionally out of scope for this open-source repository:
+The following remain out of scope for this open-source repository:
 
-- Natural-language / agentic block generation
-- MCP runtime integration
-- Approval workflows, run history, or orchestration
-- Hosted cloud notebook or multi-user collaboration
+- Real authentication (login screens, OIDC, password storage, hosted SSO)
+- Hosted cloud notebook or multi-tenant deployment
+- Approval workflows, run history, or orchestration as a managed service
 
 These remain part of the closed DuckCode product.
 

@@ -30,6 +30,9 @@ importers:
 
   apps/cli:
     dependencies:
+      '@duckcodeailabs/dql-agent':
+        specifier: workspace:*
+        version: link:../../packages/dql-agent
       '@duckcodeailabs/dql-compiler':
         specifier: workspace:*
         version: link:../../packages/dql-compiler
@@ -51,6 +54,9 @@ importers:
       '@duckcodeailabs/dql-project':
         specifier: workspace:*
         version: link:../../packages/dql-project
+      '@duckcodeailabs/dql-slack':
+        specifier: workspace:*
+        version: link:../../packages/dql-slack
       isomorphic-git:
         specifier: ^1.27.0
         version: 1.37.5
@@ -197,6 +203,34 @@ importers:
         version: 9.0.1
 
   packages/create-dql-app: {}
+
+  packages/dql-agent:
+    dependencies:
+      '@duckcodeailabs/dql-core':
+        specifier: workspace:*
+        version: link:../dql-core
+      '@duckcodeailabs/dql-governance':
+        specifier: workspace:*
+        version: link:../dql-governance
+      '@duckcodeailabs/dql-project':
+        specifier: workspace:*
+        version: link:../dql-project
+      better-sqlite3:
+        specifier: ^11.7.0
+        version: 11.10.0
+    devDependencies:
+      '@types/better-sqlite3':
+        specifier: ^7.6.0
+        version: 7.6.13
+      '@types/node':
+        specifier: ^20.0.0
+        version: 20.14.10
+      typescript:
+        specifier: ^5.7.0
+        version: 5.9.3
+      vitest:
+        specifier: ^3.0.0
+        version: 3.2.4(@types/debug@4.1.12)(@types/node@20.14.10)(jiti@2.6.1)(lightningcss@1.32.0)(terser@5.46.0)(tsx@4.21.0)(yaml@2.8.2)
 
   packages/dql-charts:
     dependencies:
@@ -371,6 +405,9 @@ importers:
 
   packages/dql-mcp:
     dependencies:
+      '@duckcodeailabs/dql-agent':
+        specifier: workspace:*
+        version: link:../dql-agent
       '@duckcodeailabs/dql-core':
         specifier: workspace:*
         version: link:../dql-core
@@ -473,6 +510,28 @@ importers:
       vitest:
         specifier: ^3.0.0
         version: 3.2.4(@types/debug@4.1.12)(@types/node@22.19.11)(jiti@2.6.1)(lightningcss@1.32.0)(terser@5.46.0)(tsx@4.21.0)(yaml@2.8.2)
+
+  packages/dql-slack:
+    dependencies:
+      '@duckcodeailabs/dql-agent':
+        specifier: workspace:*
+        version: link:../dql-agent
+      '@duckcodeailabs/dql-core':
+        specifier: workspace:*
+        version: link:../dql-core
+      '@duckcodeailabs/dql-project':
+        specifier: workspace:*
+        version: link:../dql-project
+    devDependencies:
+      '@types/node':
+        specifier: ^20.0.0
+        version: 20.14.10
+      typescript:
+        specifier: ^5.7.0
+        version: 5.9.3
+      vitest:
+        specifier: ^3.0.0
+        version: 3.2.4(@types/debug@4.1.12)(@types/node@20.14.10)(jiti@2.6.1)(lightningcss@1.32.0)(terser@5.46.0)(tsx@4.21.0)(yaml@2.8.2)
 
   packages/dql-telemetry:
     devDependencies:

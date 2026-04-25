@@ -19,6 +19,7 @@ import type {
   LineageDimensionInput,
   LineageDbtModelInput,
   LineageDashboardInput,
+  LineageAppInput,
 } from '../lineage/builder.js';
 import type {
   DQLManifest,
@@ -31,7 +32,19 @@ import type {
   ManifestLineage,
   ManifestDbtImport,
   ManifestDiagnostic,
+  ManifestApp,
+  ManifestDashboard,
 } from './types.js';
+import {
+  loadAppDocument,
+  findAppDocuments,
+  findDashboardsForApp,
+  loadDashboardDocument,
+  extractDashboardBlockRefs,
+  appFolderRelPath,
+  type AppDocument,
+  type DashboardDocument,
+} from '../apps/index.js';
 
 // ---- Public API ----
 
@@ -121,6 +134,14 @@ export function collectInputFiles(options: ManifestBuildOptions): string[] {
     files.add(options.dbtManifestPath);
   }
 
+  // Apps & dashboards. Manifests live at apps/<id>/dql.app.json; dashboards
+  // live under apps/<id>/dashboards/*.dqld.
+  for (const appJson of findAppDocuments(projectRoot)) {
+    files.add(appJson);
+    const appDir = appJson.slice(0, -'/dql.app.json'.length);
+    for (const dqld of findDashboardsForApp(appDir)) files.add(dqld);
+  }
+
   return [...files].sort();
 }
 
@@ -180,8 +201,20 @@ export function buildManifest(options: ManifestBuildOptions): DQLManifest {
     });
   }
 
+  // Apps & dashboards (consumption layer). Scanned after blocks/notebooks
+  // because dashboard refs are resolved against the block path → name map.
+  const { apps, dashboards } = scanAppsAndDashboards(projectRoot, blocks, diagnostics);
+
   // Build lineage
-  const lineage = buildManifestLineage(blocks, metrics, dimensions, notebooks, dbtImport);
+  const lineage = buildManifestLineage(
+    blocks,
+    metrics,
+    dimensions,
+    notebooks,
+    dbtImport,
+    apps,
+    dashboards,
+  );
 
   return {
     manifestVersion: 2,
@@ -194,6 +227,8 @@ export function buildManifest(options: ManifestBuildOptions): DQLManifest {
     metrics,
     dimensions,
     sources,
+    apps: Object.keys(apps).length > 0 ? apps : undefined,
+    dashboards: Object.keys(dashboards).length > 0 ? dashboards : undefined,
     lineage,
     dbtImport,
     diagnostics,
@@ -891,6 +926,199 @@ function buildLookupKeys(name: string, schema?: string, database?: string): stri
   return keys;
 }
 
+// ---- Apps & Dashboards Scanning ----
+
+/**
+ * Discover Apps under `apps/<id>/dql.app.json` plus their dashboards under
+ * `apps/<id>/dashboards/*.dqld`. Returns the manifest views for both.
+ *
+ * Block refs declared in dashboards are resolved against the already-built
+ * blocks map: block-id refs map directly; path refs go through the
+ * file-path → block-name index. Unresolved refs are surfaced as diagnostics
+ * but do not fail the build — partial Apps are still useful in the UI.
+ */
+function scanAppsAndDashboards(
+  projectRoot: string,
+  blocks: Record<string, ManifestBlock>,
+  diagnostics: ManifestDiagnostic[],
+): { apps: Record<string, ManifestApp>; dashboards: Record<string, ManifestDashboard> } {
+  const apps: Record<string, ManifestApp> = {};
+  const dashboards: Record<string, ManifestDashboard> = {};
+
+  // Build block-path → block-name index once for all dashboards.
+  const blockPathToName = new Map<string, string>();
+  for (const block of Object.values(blocks)) {
+    if (block.filePath) blockPathToName.set(block.filePath, block.name);
+  }
+  const knownBlockNames = new Set(Object.keys(blocks));
+
+  const appJsonPaths = findAppDocuments(projectRoot);
+  for (const appJsonPath of appJsonPaths) {
+    const appRel = relative(projectRoot, appJsonPath);
+    const { document: app, errors } = loadAppDocument(appJsonPath);
+    if (errors.length > 0) {
+      for (const e of errors) {
+        diagnostics.push({
+          kind: 'config',
+          filePath: appRel,
+          severity: 'error',
+          message: e.message,
+        });
+      }
+    }
+    if (!app) continue;
+
+    const appDir = appJsonPath.slice(0, -'/dql.app.json'.length);
+    const appFolderRel = appFolderRelPath(projectRoot, appJsonPath);
+    const dashboardIds: string[] = [];
+
+    // Scan this App's dashboards.
+    for (const dqldPath of findDashboardsForApp(appDir)) {
+      const dqldRel = relative(projectRoot, dqldPath);
+      const { document: dashboard, errors: dErrs } = loadDashboardDocument(dqldPath);
+      if (dErrs.length > 0) {
+        for (const e of dErrs) {
+          diagnostics.push({
+            kind: 'config',
+            filePath: dqldRel,
+            severity: 'error',
+            message: e.message,
+          });
+        }
+      }
+      if (!dashboard) continue;
+
+      const refs = extractDashboardBlockRefs(dashboard);
+      const resolvedById: string[] = [];
+      const resolvedByPath: string[] = [];
+      const unresolved: string[] = [];
+      for (const id of refs.byId) {
+        if (knownBlockNames.has(id)) resolvedById.push(id);
+        else unresolved.push(id);
+      }
+      for (const refPath of refs.byPath) {
+        const resolved = blockPathToName.get(refPath);
+        if (resolved) resolvedByPath.push(resolved);
+        else unresolved.push(refPath);
+      }
+      if (unresolved.length > 0) {
+        diagnostics.push({
+          kind: 'resolve',
+          filePath: dqldRel,
+          severity: 'warning',
+          message: `dashboard "${dashboard.id}" has unresolved block refs: ${unresolved.join(', ')}`,
+        });
+      }
+
+      const dashRecord: ManifestDashboard = {
+        id: dashboard.id,
+        appId: app.id,
+        title: dashboard.metadata.title,
+        description: dashboard.metadata.description,
+        domain: dashboard.metadata.domain ?? app.domain,
+        tags: dashboard.metadata.tags ?? [],
+        filePath: dqldRel,
+        blockIds: resolvedById,
+        blockPathRefs: resolvedByPath,
+        unresolvedRefs: unresolved,
+        params: (dashboard.params ?? []).map((p) => p.id),
+        filters: (dashboard.filters ?? []).map((f) => f.id),
+        layout: {
+          kind: dashboard.layout.kind,
+          cols: dashboard.layout.cols,
+          rowHeight: dashboard.layout.rowHeight,
+          itemCount: dashboard.layout.items.length,
+        },
+      };
+      dashboards[dashboard.id] = dashRecord;
+      dashboardIds.push(dashboard.id);
+    }
+
+    // Cross-check homepage dashboard exists.
+    if (app.homepage?.type === 'dashboard') {
+      if (!dashboardIds.includes(app.homepage.id)) {
+        diagnostics.push({
+          kind: 'resolve',
+          filePath: appRel,
+          severity: 'warning',
+          message: `homepage references unknown dashboard "${app.homepage.id}"`,
+        });
+      }
+    }
+    // Cross-check schedule dashboards exist.
+    for (const sched of app.schedules ?? []) {
+      if (!dashboardIds.includes(sched.dashboard)) {
+        diagnostics.push({
+          kind: 'resolve',
+          filePath: appRel,
+          severity: 'warning',
+          message: `schedule "${sched.id}" references unknown dashboard "${sched.dashboard}"`,
+        });
+      }
+    }
+
+    apps[app.id] = appDocumentToManifest(app, appFolderRel, dashboardIds);
+  }
+
+  return { apps, dashboards };
+}
+
+function appDocumentToManifest(
+  app: AppDocument,
+  filePath: string,
+  dashboardIds: string[],
+): ManifestApp {
+  return {
+    id: app.id,
+    name: app.name,
+    description: app.description,
+    domain: app.domain,
+    owners: app.owners,
+    tags: app.tags ?? [],
+    filePath,
+    members: app.members.map((m) => ({
+      userId: m.userId,
+      displayName: m.displayName,
+      roles: m.roles,
+      attributes: m.attributes,
+    })),
+    roles: app.roles.map((r) => ({
+      id: r.id,
+      displayName: r.displayName,
+      description: r.description,
+    })),
+    policies: (app.policies ?? []).map((p) => ({
+      id: p.id,
+      description: p.description,
+      domain: p.domain,
+      minClassification: p.minClassification,
+      allowedRoles: p.allowedRoles,
+      allowedUsers: p.allowedUsers,
+      accessLevel: p.accessLevel,
+      enabled: p.enabled === undefined ? true : Boolean(p.enabled),
+    })),
+    rlsBindings: (app.rlsBindings ?? []).map((b) => ({
+      role: b.role,
+      variable: b.variable,
+      from: b.from,
+    })),
+    schedules: (app.schedules ?? []).map((s) => ({
+      id: s.id,
+      cron: s.cron,
+      dashboard: s.dashboard,
+      deliver: s.deliver.map((d) => {
+        if (d.kind === 'slack') return { kind: 'slack' as const, channel: d.channel };
+        if (d.kind === 'email') return { kind: 'email' as const, to: d.to };
+        return { kind: 'webhook' as const, url: d.url };
+      }),
+      description: s.description,
+      enabled: s.enabled === undefined ? true : Boolean(s.enabled),
+    })),
+    dashboards: dashboardIds,
+    homepage: app.homepage,
+  };
+}
+
 // ---- Lineage Builder ----
 
 function buildManifestLineage(
@@ -899,6 +1127,8 @@ function buildManifestLineage(
   dimensions: Record<string, ManifestDimension>,
   notebooks?: Record<string, ManifestNotebook>,
   dbtImport?: ManifestDbtImport,
+  apps?: Record<string, ManifestApp>,
+  appDashboards?: Record<string, ManifestDashboard>,
 ): ManifestLineage {
   // Convert to lineage builder input format
   const lineageBlocks: LineageBlockInput[] = Object.values(blocks).map((b) => ({
@@ -1001,9 +1231,30 @@ function buildManifestLineage(
     description: model.description,
   }));
 
+  // First-class dashboards from `.dqld` files. Keyed by dashboard id so
+  // they don't collide with notebook-based dashboards (which key by title).
+  const appDashboardInputs: LineageDashboardInput[] = Object.values(appDashboards ?? {}).map((d) => ({
+    name: d.id,
+    filePath: d.filePath,
+    blocks: [...d.blockIds, ...d.blockPathRefs],
+    charts: [],
+    refDependencies: [],
+    tableDependencies: [],
+  }));
+
+  const lineageApps: LineageAppInput[] = Object.values(apps ?? {}).map((a) => ({
+    id: a.id,
+    name: a.name,
+    domain: a.domain,
+    owner: a.owners[0],
+    filePath: a.filePath,
+    dashboards: a.dashboards,
+  }));
+
   const graph = buildLineageGraph(lineageBlocks, lineageMetrics, lineageDimensions, {
     dbtModels,
-    dashboards,
+    dashboards: [...dashboards, ...appDashboardInputs],
+    apps: lineageApps,
   });
 
   // Serialize to manifest format

@@ -30,6 +30,7 @@
     "access": "public"
   },
   "dependencies": {
+    "@duckcodeailabs/dql-agent": "workspace:*",
     "@duckcodeailabs/dql-core": "workspace:*",
     "@duckcodeailabs/dql-governance": "workspace:*",
     "@duckcodeailabs/dql-project": "workspace:*",

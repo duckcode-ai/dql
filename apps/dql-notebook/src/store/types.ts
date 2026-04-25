@@ -139,7 +139,36 @@ export interface ParamConfig {
 }
 export type SidebarPanel = 'files' | 'schema' | 'block_library' | 'connection' | 'reference' | 'lineage' | 'git' | 'apps' | null;
 export type DevPanelTab = 'logs' | 'errors';
-export type MainView = 'notebook' | 'block_studio' | 'connection' | 'reference' | 'git';
+export type MainView = 'notebook' | 'block_studio' | 'connection' | 'reference' | 'git' | 'apps';
+
+/**
+ * Apps consumption-layer surface — list of Apps + currently-open App.
+ * Source of truth lives on disk (`apps/<id>/dql.app.json`). The store caches
+ * a summarised view for the UI; full documents are lazy-loaded.
+ */
+export interface AppSummary {
+  id: string;
+  name: string;
+  domain: string;
+  description?: string;
+  owners: string[];
+  tags: string[];
+  members: number;
+  roles: number;
+  policies: number;
+  schedules: number;
+  dashboards: Array<{ id: string; title: string }>;
+  homepage?: { type: 'dashboard'; id: string } | { type: 'notebook'; path: string };
+}
+
+export interface ActivePersona {
+  userId: string;
+  displayName?: string;
+  roles: string[];
+  attributes: Record<string, string | number | boolean>;
+  rlsContext: Record<string, string | number | boolean>;
+  appId?: string;
+}
 
 export interface QueryResult {
   columns: string[];
@@ -433,6 +462,12 @@ export interface NotebookState {
   blockStudioCatalogLoading: boolean;
   inspectorOpen: boolean;
   inspectorContext: InspectorContext | null;
+  // Apps surface (Phase 1)
+  apps: AppSummary[];
+  appsLoading: boolean;
+  activeAppId: string | null;
+  activeDashboardId: string | null;
+  activePersona: ActivePersona | null;
 }
 
 export type InspectorContext =
@@ -492,4 +527,10 @@ export type NotebookAction =
   | { type: 'SET_BLOCK_STUDIO_CATALOG_LOADING'; loading: boolean }
   | { type: 'TOGGLE_INSPECTOR' }
   | { type: 'SET_INSPECTOR'; open: boolean; context?: InspectorContext | null }
-  | { type: 'SET_INSPECTOR_CONTEXT'; context: InspectorContext | null };
+  | { type: 'SET_INSPECTOR_CONTEXT'; context: InspectorContext | null }
+  // Apps surface (Phase 1)
+  | { type: 'SET_APPS'; apps: AppSummary[] }
+  | { type: 'SET_APPS_LOADING'; loading: boolean }
+  | { type: 'OPEN_APP'; appId: string; dashboardId?: string | null }
+  | { type: 'OPEN_DASHBOARD'; dashboardId: string }
+  | { type: 'SET_ACTIVE_PERSONA'; persona: ActivePersona | null };

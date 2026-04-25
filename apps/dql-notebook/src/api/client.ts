@@ -15,7 +15,75 @@ import type {
   BlockStudioOpenPayload,
   BlockStudioPreview,
   BlockStudioValidation,
+  AppSummary,
+  ActivePersona,
 } from '../store/types';
+
+// ── Apps API types ───────────────────────────────────────────────────────
+
+export interface AppDocumentSummary {
+  app: {
+    id: string;
+    name: string;
+    description?: string;
+    domain: string;
+    owners: string[];
+    tags?: string[];
+    members: Array<{
+      userId: string;
+      displayName?: string;
+      roles: string[];
+      attributes?: Record<string, string | number | boolean>;
+    }>;
+    roles: Array<{ id: string; displayName?: string; description?: string }>;
+    policies: Array<{
+      id: string;
+      domain: string;
+      minClassification: 'public' | 'internal' | 'confidential' | 'restricted';
+      allowedRoles: string[];
+      allowedUsers?: string[];
+      accessLevel: 'read' | 'write' | 'execute' | 'admin';
+      enabled?: boolean;
+    }>;
+    rlsBindings?: Array<{ role: string; variable: string; from: string }>;
+    schedules?: Array<{
+      id: string;
+      cron: string;
+      dashboard: string;
+      deliver: Array<
+        | { kind: 'slack'; channel: string }
+        | { kind: 'email'; to: string[] }
+        | { kind: 'webhook'; url: string }
+      >;
+      enabled?: boolean;
+    }>;
+    homepage?: { type: 'dashboard'; id: string } | { type: 'notebook'; path: string };
+  };
+  dashboards: Array<{ id: string; title: string; description?: string; itemCount: number }>;
+}
+
+export interface DashboardDocumentResponse {
+  app: AppDocumentSummary['app'];
+  dashboard: {
+    version: 1;
+    id: string;
+    metadata: { title: string; description?: string; domain?: string; tags?: string[] };
+    params?: Array<{ id: string; type: string; default?: unknown; description?: string }>;
+    filters?: Array<{ id: string; type: string; default?: unknown; options?: string[]; bindsTo?: string }>;
+    layout: {
+      kind: 'grid';
+      cols: number;
+      rowHeight: number;
+      items: Array<{
+        i: string;
+        x: number; y: number; w: number; h: number;
+        block: { blockId?: string; ref?: string; version?: string };
+        viz: { type: string; options?: Record<string, unknown> };
+        title?: string;
+      }>;
+    };
+  };
+}
 
 const BASE = window.location.origin;
 
@@ -774,6 +842,82 @@ export const api = {
       });
     } catch (e) {
       return { ok: false, error: e instanceof Error ? e.message : String(e) };
+    }
+  },
+
+  // ── Apps & Dashboards ───────────────────────────────────────────────────
+
+  async listApps(): Promise<AppSummary[]> {
+    try {
+      const { apps } = await request<{ apps: AppSummary[] }>('/api/apps');
+      return apps;
+    } catch {
+      return [];
+    }
+  },
+
+  async getApp(id: string): Promise<AppDocumentSummary | null> {
+    try {
+      return await request<AppDocumentSummary>(`/api/apps/${encodeURIComponent(id)}`);
+    } catch {
+      return null;
+    }
+  },
+
+  async getDashboard(appId: string, dashboardId: string): Promise<DashboardDocumentResponse | null> {
+    try {
+      return await request<DashboardDocumentResponse>(
+        `/api/apps/${encodeURIComponent(appId)}/dashboards/${encodeURIComponent(dashboardId)}`,
+      );
+    } catch {
+      return null;
+    }
+  },
+
+  async saveDashboard(
+    appId: string,
+    dashboardId: string,
+    body: DashboardDocumentResponse['dashboard'],
+  ): Promise<{ ok: true } | { ok: false; error: string }> {
+    try {
+      const result = await request<{ ok: true; path: string }>(
+        `/api/apps/${encodeURIComponent(appId)}/dashboards/${encodeURIComponent(dashboardId)}`,
+        { method: 'PUT', body: JSON.stringify(body) },
+      );
+      return { ok: !!result.ok };
+    } catch (e) {
+      return { ok: false, error: e instanceof Error ? e.message : String(e) };
+    }
+  },
+
+  // ── Persona ─────────────────────────────────────────────────────────────
+
+  async getPersona(): Promise<ActivePersona | null> {
+    try {
+      const { persona } = await request<{ persona: ActivePersona | null }>('/api/persona');
+      return persona;
+    } catch {
+      return null;
+    }
+  },
+
+  async setPersona(userId: string, appId?: string): Promise<ActivePersona | null> {
+    try {
+      const { persona } = await request<{ persona: ActivePersona | null }>('/api/persona', {
+        method: 'POST',
+        body: JSON.stringify({ userId, appId }),
+      });
+      return persona;
+    } catch {
+      return null;
+    }
+  },
+
+  async clearPersona(): Promise<void> {
+    try {
+      await request('/api/persona', { method: 'DELETE' });
+    } catch {
+      // best-effort; UI restores owner default on next refresh
     }
   },
 };

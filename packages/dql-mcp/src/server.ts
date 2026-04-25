@@ -7,6 +7,7 @@ import { listMetrics, listMetricsInput, listDimensions, listDimensionsInput } fr
 import { lineageImpact, lineageImpactInput } from './tools/lineage-impact.js';
 import { certify, certifyInput } from './tools/certify.js';
 import { suggestBlock, suggestBlockInput } from './tools/suggest-block.js';
+import { kgSearch, kgSearchInput, feedbackRecord, feedbackRecordInput } from './tools/kg.js';
 
 export interface CreateServerOptions {
   projectRoot?: string;
@@ -67,6 +68,16 @@ export function createDQLMCPServer(options: CreateServerOptions = {}): McpServer
     'suggest_block',
     { description: 'Write a proposed block to blocks/_drafts/ and return the governance gate result.', inputSchema: suggestBlockInput },
     async (args) => wrap(await suggestBlock(ctx, args)),
+  );
+  server.registerTool(
+    'kg_search',
+    { description: 'Search the agent knowledge graph (FTS5) over blocks, metrics, dimensions, dashboards, apps.', inputSchema: kgSearchInput },
+    async (args) => wrap(kgSearch(ctx, args)),
+  );
+  server.registerTool(
+    'feedback_record',
+    { description: 'Record thumbs-up/down feedback on an answer; feeds self-learning + promotion suggestions.', inputSchema: feedbackRecordInput },
+    async (args) => wrap(feedbackRecord(ctx, args)),
   );
 
   return server;

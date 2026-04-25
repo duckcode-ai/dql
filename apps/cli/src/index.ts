@@ -26,6 +26,9 @@ import { runDiff } from './commands/diff.js';
 import { runMcp } from './commands/mcp.js';
 import { runApp } from './commands/app.js';
 import { runSchedule } from './commands/schedule.js';
+import { runAgent } from './commands/agent.js';
+import { runSlack } from './commands/slack.js';
+import { runVerify } from './commands/verify.js';
 
 const HELP = `
   dql — DQL CLI
@@ -53,8 +56,14 @@ const HELP = `
     dql sync dbt [path]             Detect dbt manifest changes; report DQL cache status
     dql lineage [block] [path]      Answer-layer lineage analysis
     dql mcp [--http]                Run the DQL MCP server (stdio by default; --http = loopback)
-    dql app new|ls|show <name>      Manage App artifacts (domain-scoped notebook + dashboard bundles)
+    dql app new|ls|show|build|reindex <name>
+                                    Manage App artifacts (members, roles, RBAC, dashboards, schedules)
     dql schedule list|run|start|status  Local scheduler for @schedule'd blocks (alerts + notifications)
+    dql agent ask "<question>"      Block-first agent loop (certified blocks → fallback LLM SQL)
+    dql agent reindex               Rebuild .dql/cache/agent-kg.sqlite
+    dql agent feedback up|down      Record thumbs-up/down feedback for self-learning
+    dql slack serve                 Slack slash-command bot (forwards to the answer loop)
+    dql verify                      Verify dql-manifest.json is reproducible from source
     dql --version                    Show version
     dql --help                      Show this help
 
@@ -169,6 +178,15 @@ async function main() {
         break;
       case 'schedule':
         await runSchedule(file, rest, flags);
+        break;
+      case 'agent':
+        await runAgent(file, rest, flags);
+        break;
+      case 'slack':
+        await runSlack(file, rest, flags);
+        break;
+      case 'verify':
+        await runVerify(rest, flags);
         break;
       default:
         console.error(`Unknown command: ${command}. Run "dql --help" for usage.`);

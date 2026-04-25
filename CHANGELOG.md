@@ -6,6 +6,99 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 
 ---
 
+## v1.4.0 — 2026-04-25
+
+### Apps, Agentic Analytics, programmable end-to-end DQL
+
+A major scope expansion landing the consumption layer (Apps + first-class
+dashboards), an OSS block-first agent (knowledge graph + Skills + multi-provider),
+a Slack front-end, and CI-grade reproducibility. Identity stays single-user
+in OSS; RBAC declarations are programmable and enforced via persona switching.
+
+See `docs/tutorials/` for hands-on walkthroughs (Acme Bank scenario).
+
+### Added
+
+- **Apps** — first-class consumption-layer artifact at `apps/<id>/dql.app.json`.
+  Members + roles + access policies + RLS bindings + schedules + homepage,
+  validated by [`packages/dql-core/src/apps/app-document.ts`](packages/dql-core/src/apps/app-document.ts).
+- **Dashboards (`.dqld`)** — first-class grid-layout artifact distinct from
+  notebook-as-dashboard, validated by [`packages/dql-core/src/apps/dashboard-document.ts`](packages/dql-core/src/apps/dashboard-document.ts).
+  Block refs by id or path; viz config per tile; params + filters.
+- **Persona registry** — runtime active-user state in
+  [`packages/dql-project/src/persona.ts`](packages/dql-project/src/persona.ts).
+  Drives the existing PolicyEngine + a new
+  [`personaVariables()`](packages/dql-project/src/persona-variables.ts) helper
+  that supplies template values to `executor.executeQuery`'s `variables` map,
+  so `@rls("col", "{user.var}")` decorators resolve at execution time.
+- **Manifest extensions** — `apps[]`, `dashboards[]`, `ManifestApp`,
+  `ManifestDashboard` in [`packages/dql-core/src/manifest/types.ts`](packages/dql-core/src/manifest/types.ts).
+  Builder cross-checks homepage + schedule references and surfaces unresolved
+  block refs as diagnostics.
+- **Lineage** — populates the previously-reserved `app` node type and
+  `dashboard → app` `contains` edges, completing the chain
+  `Domain → App → Dashboard → Block → metric/dimension → dbt_model → source`.
+- **SQLite registries** — `app_registry` + `dashboard_registry` tables in
+  [`packages/dql-project/src/sqlite-storage.ts`](packages/dql-project/src/sqlite-storage.ts)
+  for fast queries from the API layer (file format remains source of truth).
+- **CLI: `dql app new|ls|show|build|reindex`** — see
+  [`apps/cli/src/commands/app.ts`](apps/cli/src/commands/app.ts).
+- **API endpoints** — `GET/POST /api/apps`, `/api/apps/:id`,
+  `/api/apps/:id/dashboards/:did`, `/api/persona` in
+  [`apps/cli/src/apps-api.ts`](apps/cli/src/apps-api.ts).
+- **Desktop UI** — new `mainView: 'apps'` with
+  [`AppsView`](apps/dql-notebook/src/components/apps/AppsView.tsx),
+  [`PersonaSwitcher`](apps/dql-notebook/src/components/apps/PersonaSwitcher.tsx),
+  and [`DashboardRenderer`](apps/dql-notebook/src/components/apps/DashboardRenderer.tsx)
+  wired into `AppShell` + the activity bar.
+- **`@duckcodeailabs/dql-agent`** — new package with:
+  - SQLite + FTS5 knowledge graph at `.dql/cache/agent-kg.sqlite`,
+    built from manifest + Skills.
+  - Skills loader for `.dql/skills/*.skill.md` (YAML frontmatter +
+    markdown body).
+  - Block-first answer loop: certified blocks first, otherwise LLM-proposed
+    SQL marked Uncertified and routed through analyst review.
+  - Provider abstractions for Claude, OpenAI / OpenAI-compatible, Gemini,
+    and local Ollama, with automatic `pickProvider()` fallback.
+  - `getPromotionCandidates()` — surface uncertified answers ready for
+    certification.
+- **MCP tools** — `kg_search` and `feedback_record` join the existing 8
+  tools (`search_blocks`, `get_block`, `query_via_block`, `list_metrics`,
+  `list_dimensions`, `lineage_impact`, `certify`, `suggest_block`) in
+  [`packages/dql-mcp/src/tools/kg.ts`](packages/dql-mcp/src/tools/kg.ts).
+- **CLI: `dql agent ask|reindex|feedback`** — block-first answer loop on the
+  command line, see [`apps/cli/src/commands/agent.ts`](apps/cli/src/commands/agent.ts).
+- **`@duckcodeailabs/dql-slack`** — new package with a slash-command bot,
+  Slack signature verification, Block-Kit reply formatting, and feedback
+  buttons.
+- **CLI: `dql slack serve`** — boots the bot.
+- **CLI: `dql verify`** — proves `dql-manifest.json` is reproducible from
+  source. Non-zero on drift; structured diagnostic; CI-ready.
+- **Tutorials** — full Acme Bank walkthrough at `docs/tutorials/` covering
+  setup, authoring, Apps + RBAC + personas, dashboards, schedules + Slack,
+  agentic analytics, end-to-end fraud spike, promoting AI to certified,
+  CI + verify, troubleshooting.
+- **Tests** — 31 new tests across the new code (12 app-document, 6 dashboard-
+  document, 6 persona, 3 manifest scan, 21 dql-agent, 8 dql-slack). All 489
+  workspace tests green.
+
+### Changed
+
+- `dql app new` now scaffolds the new programmable schema (`dql.app.json`
+  with members/roles/policies/RLS bindings/schedules) instead of the
+  earlier `app.yml`-based prototype.
+- `dql-mcp` now depends on `dql-agent` for the KG-backed tools.
+- `ROADMAP.md` updated — multi-user identity / hosted SSO remains closed
+  product; agent + apps + RBAC declarations are now OSS.
+
+### Out of scope (still closed product)
+
+- Real authentication (login screens, OIDC, password storage)
+- Hosted cloud / multi-tenant deployment
+- Approval workflows or run history as a managed service
+
+---
+
 ## v1.0.3 — 2026-04-21
 
 ### v0.11 — Block-First Notebook (Tracks 1–6)
