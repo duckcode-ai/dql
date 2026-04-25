@@ -6,6 +6,8 @@
   },
   "include": ["src/**/*"],
   "references": [
+    { "path": "../../packages/dql-agent" },
+    { "path": "../../packages/dql-slack" },
     { "path": "../../packages/dql-connectors" },
     { "path": "../../packages/dql-core" },
     { "path": "../../packages/dql-compiler" },
