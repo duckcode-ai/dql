@@ -1,0 +1,65 @@
+# Convenience compose file for running DQL in a container.
+#
+#   docker compose up                 # notebook on http://127.0.0.1:3474
+#   docker compose --profile slack up # also start the Slack bot on :3479
+#   docker compose --profile ollama up# also start a local Ollama daemon on :11434
+#
+# All ports are mapped to 127.0.0.1 on the host, so the security posture
+# matches the native `dql notebook` (loopback-only).
+#
+# The `./` mount at /workspace means everything you do inside the container
+# (saved blocks, KG cache, notebooks) lands in your local repo and is
+# trackable in git.
+
+services:
+  notebook:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: duckcodeailabs/dql:latest
+    container_name: dql-notebook
+    ports:
+      - "127.0.0.1:3474:3474"
+    volumes:
+      - ./:/workspace
+    environment:
+      DQL_HOST: 0.0.0.0
+      # Optional LLM credentials — uncomment whichever you use.
+      # ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
+      # OPENAI_API_KEY:    ${OPENAI_API_KEY}
+      # GEMINI_API_KEY:    ${GEMINI_API_KEY}
+      # OLLAMA_BASE_URL:   http://ollama:11434  # when using the ollama service below
+    command: ["dql", "notebook", "--host", "0.0.0.0", "--no-open"]
+
+  slack:
+    profiles: [slack]
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: duckcodeailabs/dql:latest
+    container_name: dql-slack
+    ports:
+      - "127.0.0.1:3479:3479"
+    volumes:
+      - ./:/workspace
+    environment:
+      SLACK_SIGNING_SECRET: ${SLACK_SIGNING_SECRET:?set SLACK_SIGNING_SECRET in your env}
+      SLACK_BOT_TOKEN: ${SLACK_BOT_TOKEN:?set SLACK_BOT_TOKEN in your env}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+    command: ["dql", "slack", "serve", "--port", "3479"]
+
+  ollama:
+    profiles: [ollama]
+    image: ollama/ollama:latest
+    container_name: dql-ollama
+    ports:
+      - "127.0.0.1:11434:11434"
+    volumes:
+      - ollama-data:/root/.ollama
+    # First run will be slow — the base model has to download.
+    command: ["serve"]
+
+volumes:
+  ollama-data:

@@ -15,7 +15,9 @@ cd jaffle-demo
 
 No global install required — `create-dql-app` scaffolds the project,
 `npx @duckcodeailabs/dql-cli` runs the notebook. See
-[Install](03-install.md) if you prefer a global `dql` binary.
+[Install](03-install.md) if you prefer a global `dql` binary or the
+[Docker option](03-install.md#option-a--docker-zero-local-toolchain--60-seconds)
+if you want zero local Node.
 
 You now have a DQL project wired to a DuckDB-backed Jaffle Shop — the same
 demo dataset dbt ships. No external warehouse needed.
@@ -26,8 +28,13 @@ demo dataset dbt ships. No external warehouse needed.
 dql notebook
 ```
 
-The CLI starts a local server on **http://localhost:5173** and opens it in
+The CLI starts a local server on **http://127.0.0.1:3474** and opens it in
 your browser.
+
+> **Running in Docker?** From the project root:
+> `docker run --rm -it -p 127.0.0.1:3474:3474 -v "$PWD":/workspace duckcodeailabs/dql:latest`
+> serves the same notebook without installing anything locally. See
+> [Install · Option A](03-install.md#option-a--docker-zero-local-toolchain--60-seconds).
 
 ### Run the example notebook
 
@@ -53,7 +60,7 @@ dependencies, ready to drop on any web host.
 
 You should have:
 
-- A running notebook at `http://localhost:5173`
+- A running notebook at `http://127.0.0.1:3474`
 - `build/overview.html` rendering three charts + a lineage panel
 - `git status` showing only the files you touched (no churn)
 

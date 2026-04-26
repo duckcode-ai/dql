@@ -35,17 +35,30 @@ export async function runNotebook(targetArg: string | null, flags: CLIFlags): Pr
 
   await assertLocalQueryRuntimeReady(executor, connection);
 
+  const host = flags.host ?? process.env.DQL_HOST ?? '127.0.0.1';
   const port = await startLocalServer({
     rootDir: NOTEBOOK_APP_DIR,
     projectRoot,
     executor,
     connection,
     preferredPort: flags.port ?? config.preview?.port ?? 3474,
+    host,
   });
 
-  const url = `http://127.0.0.1:${port}`;
-  maybeOpenBrowser(url, flags.open ?? config.preview?.open ?? true);
+  // When binding 0.0.0.0 (typical for Docker) the URL we print should be
+  // something the user can actually click. Show 127.0.0.1 in that case.
+  const printHost = host === '0.0.0.0' ? '127.0.0.1' : host;
+  const url = `http://${printHost}:${port}`;
+
+  // Auto-open only on loopback. In a container or on a remote host, opening
+  // the host's browser is either useless or wrong.
+  const shouldOpen = (flags.open ?? config.preview?.open ?? true) && host === '127.0.0.1';
+  maybeOpenBrowser(url, shouldOpen);
+
   console.log(`\n  ✓ Notebook ready: ${url}`);
+  if (host !== '127.0.0.1') {
+    console.log(`    Bound on ${host}:${port} — open the URL above from your host.`);
+  }
   console.log('    Press Ctrl+C to stop.');
   console.log('');
 }
