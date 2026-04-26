@@ -1,6 +1,6 @@
 {
   "name": "@duckcodeailabs/dql-agent",
-  "version": "1.4.0",
+  "version": "1.4.1",
   "description": "DQL agent: knowledge graph, Skills, block-first answer loop, and pluggable LLM providers (Claude / OpenAI / Gemini / Ollama)",
   "license": "Apache-2.0",
   "type": "module",

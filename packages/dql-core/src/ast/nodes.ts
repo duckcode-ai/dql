@@ -297,6 +297,13 @@ export interface BlockDeclNode extends BaseNode {
   llmContext?: string;
   invariants?: string[];
   examples?: Array<{ question: string; sql?: string }>;
+  /**
+   * v1.4 — block certification status declared in source. Recognised values
+   * are 'draft' | 'review' | 'certified' | 'deprecated' | 'pending_recertification'
+   * (BlockStatus from dql-project). The manifest builder, certifier, and
+   * agent's "block-first" matcher all read this.
+   */
+  status?: string;
 }
 
 export interface BlockParamsNode extends BaseNode {

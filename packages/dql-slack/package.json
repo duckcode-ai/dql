@@ -1,6 +1,6 @@
 {
   "name": "@duckcodeailabs/dql-slack",
-  "version": "1.4.0",
+  "version": "1.4.1",
   "description": "DQL Slack front-end: slash-command bot that answers via the block-first agent loop",
   "license": "Apache-2.0",
   "type": "module",

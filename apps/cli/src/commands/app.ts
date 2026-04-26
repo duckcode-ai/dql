@@ -16,6 +16,7 @@
 
 import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join, relative } from 'node:path';
+import { resolveDbtManifestPath } from '@duckcodeailabs/dql-core';
 import {
   buildManifest,
   loadAppDocument,
@@ -223,7 +224,16 @@ async function runAppShow(rest: string[], flags: CLIFlags): Promise<void> {
 
 async function runAppBuild(flags: CLIFlags): Promise<void> {
   const projectRoot = findProjectRoot(process.cwd());
-  const manifest = buildManifest({ projectRoot });
+  // Build the manifest with dbt import resolved the same way `dql compile`
+  // does, so `dql app build` produces an identical on-disk artifact.
+  const dbtManifestPath = resolveDbtManifestPath(projectRoot) ?? undefined;
+  const manifest = buildManifest({ projectRoot, dbtManifestPath });
+
+  // Persist the manifest to dql-manifest.json — without this the App + the
+  // dashboards never land in the on-disk artifact, so downstream consumers
+  // (KG reindex, lineage CLI, the desktop UI) keep reading the previous build.
+  const manifestPath = join(projectRoot, 'dql-manifest.json');
+  writeFileSync(manifestPath, JSON.stringify(manifest, null, 2) + '\n', 'utf-8');
 
   const json = (flags as { format?: string }).format === 'json';
   const apps = manifest.apps ?? {};
@@ -241,6 +251,7 @@ async function runAppBuild(flags: CLIFlags): Promise<void> {
         blockIds: d.blockIds,
         unresolvedRefs: d.unresolvedRefs,
       })),
+      manifestPath: relative(projectRoot, manifestPath),
       diagnostics,
     }, null, 2));
     return;
@@ -250,6 +261,7 @@ async function runAppBuild(flags: CLIFlags): Promise<void> {
   for (const a of Object.values(apps)) {
     console.log(`    - ${a.id}: ${a.dashboards.length} dashboard(s)`);
   }
+  console.log(`\n  Manifest written to: ${relative(projectRoot, manifestPath)}`);
   if (diagnostics.length > 0) {
     console.log('\n  Diagnostics:');
     for (const d of diagnostics) {
