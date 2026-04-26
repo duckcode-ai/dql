@@ -2,7 +2,7 @@
   "name": "dql-language-support",
   "displayName": "DQL Language Support",
   "description": "Syntax highlighting, snippets, formatting, and language server support for DQL.",
-  "version": "1.4.0",
+  "version": "1.4.1",
   "publisher": "dql",
   "license": "Apache-2.0",
   "repository": {

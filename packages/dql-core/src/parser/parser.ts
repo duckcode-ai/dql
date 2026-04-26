@@ -732,6 +732,11 @@ export class Parser {
     let llmContext: string | undefined;
     let invariants: string[] | undefined;
     let examples: Array<{ question: string; sql?: string }> | undefined;
+    // v1.4 — block certification status. Already surfaced by the manifest
+    // builder via extractProp, the certifier, and the agent's "block-first"
+    // matcher; the parser just needs to accept it as a valid top-level
+    // property. Recognised values: BlockStatus union from dql-project.
+    let status: string | undefined;
 
     while (!this.check(TokenType.RightBrace) && !this.isAtEnd()) {
       if (this.check(TokenType.DomainKeyword)) {
@@ -811,6 +816,17 @@ export class Parser {
         break;
       } else if (
         this.check(TokenType.Identifier)
+        && this.current().value === 'status'
+      ) {
+        // Block certification status. Recognised values come from BlockStatus
+        // ('draft' | 'review' | 'certified' | 'deprecated' | 'pending_recertification').
+        // Identifier-keyed to avoid a new lexer keyword.
+        this.advance();
+        this.expect(TokenType.Equals);
+        const val = this.expect(TokenType.StringLiteral);
+        status = val.value;
+      } else if (
+        this.check(TokenType.Identifier)
         && (this.current().value === 'llmContext'
           || this.current().value === 'invariants'
           || this.current().value === 'examples')
@@ -860,7 +876,7 @@ export class Parser {
         }
       } else {
         this.error(
-          `Unexpected token '${this.current().value}' inside block. Expected 'domain', 'type', 'metric', 'metrics', 'description', 'tags', 'owner', 'params', 'query', 'visualization', 'tests', 'llmContext', 'invariants', 'examples', or '}'.`,
+          `Unexpected token '${this.current().value}' inside block. Expected 'domain', 'type', 'status', 'metric', 'metrics', 'description', 'tags', 'owner', 'params', 'query', 'visualization', 'tests', 'llmContext', 'invariants', 'examples', or '}'.`,
         );
         this.advance();
       }
@@ -893,6 +909,7 @@ export class Parser {
       llmContext,
       invariants,
       examples,
+      status,
       span: this.makeSpan(start, this.previousSpan()),
     };
   }
