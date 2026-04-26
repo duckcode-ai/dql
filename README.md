@@ -9,6 +9,20 @@
 
 DQL sits between **dbt** (modeling) and your BI tool (reporting). Every analytics answer — SQL, chart, params, tests, owner — lives in a single `.dql` file tracked in git. No more query sprawl, no more broken charts, no more lost work.
 
+## Highlights
+
+**Apps + programmable RBAC + persona switching** *(v1.4)* — declare members, roles, access policies, and RLS bindings in `dql.app.json`; preview as any role from the persona switcher.
+
+![Apps + persona switching](./docs/media/apps.gif)
+
+**Block Studio with certified blocks** — every block carries owner / domain / tags / `llmContext` / tests, and shows its certification status inline.
+
+![Block Studio + certified flags](./docs/media/studio.gif)
+
+**Full-stack lineage** — `Domain → App → Dashboard → Block → metric → dbt model → source`, rendered as an interactive React Flow + dagre graph.
+
+![Lineage DAG](./docs/media/lineage.gif)
+
 ## Get started — under 2 minutes
 
 **Docker** *(recommended — zero local toolchain)*
