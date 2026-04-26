@@ -8,6 +8,8 @@ export interface CLIFlags {
   input: string;
   outDir: string;
   port: number | null;
+  /** HTTP bind host. Defaults to 127.0.0.1; set to 0.0.0.0 inside containers. */
+  host?: string | null;
   chart: string;
   domain: string;
   owner: string;
@@ -37,6 +39,7 @@ export function parseArgs(argv: string[]): ParsedArgs {
     input: '',
     outDir: '',
     port: null,
+    host: null,
     chart: '',
     domain: '',
     owner: '',
@@ -78,6 +81,8 @@ export function parseArgs(argv: string[]): ParsedArgs {
       if (Number.isFinite(value) && value > 0) {
         flags.port = value;
       }
+    } else if (arg === '--host' && i + 1 < argv.length) {
+      flags.host = argv[++i];
     } else if (arg === '--chart' && i + 1 < argv.length) {
       flags.chart = argv[++i];
     } else if (arg === '--domain' && i + 1 < argv.length) {

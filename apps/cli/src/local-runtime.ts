@@ -71,10 +71,17 @@ export interface LocalServerOptions {
   executor: QueryExecutor;
   connection: ConnectionConfig;
   preferredPort: number;
+  /**
+   * Host the HTTP server binds to. Defaults to `127.0.0.1` (loopback only)
+   * for security. Set to `0.0.0.0` when running inside a container so the
+   * port is reachable from the host. Honours `DQL_HOST` env var when unset.
+   */
+  host?: string;
 }
 
 export async function startLocalServer(opts: LocalServerOptions): Promise<number> {
   const { rootDir, executor, connection: rawConnection, preferredPort, projectRoot = process.cwd() } = opts;
+  const bindHost = opts.host ?? process.env.DQL_HOST ?? '127.0.0.1';
   let connection = normalizeProjectConnection(rawConnection, projectRoot);
   let projectConfig = loadProjectConfig(projectRoot);
 
@@ -2279,13 +2286,13 @@ table: ${table}${tagList}
     server.on('error', (error: NodeJS.ErrnoException) => {
       if (error.code === 'EADDRINUSE' && !retriedWithRandomPort) {
         retriedWithRandomPort = true;
-        server.listen(0, '127.0.0.1');
+        server.listen(0, bindHost);
         return;
       }
       reject(error);
     });
 
-    server.listen(preferredPort, '127.0.0.1', () => {
+    server.listen(preferredPort, bindHost, () => {
       const address = server.address();
       if (!address || typeof address === 'string') {
         reject(new Error('Failed to resolve local server address.'));

@@ -1,6 +1,9 @@
 .git
 .github
 .turbo
+.claude
+.vscode
+.idea
 **/node_modules
 **/dist
 **/.next
@@ -8,3 +11,8 @@
 **/.DS_Store
 pnpm-debug.log*
 *.tsbuildinfo
+**/tsconfig.tsbuildinfo
+**/*.test.ts
+docs/screenshots
+.env
+.env.*

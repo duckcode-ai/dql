@@ -11,6 +11,20 @@ DQL sits between **dbt** (modeling) and your BI tool (reporting). Every analytic
 
 ## Get started — under 2 minutes
 
+**Docker** *(recommended — zero local toolchain)*
+
+```bash
+git clone https://github.com/duckcode-ai/dql.git && cd dql
+docker compose up
+```
+
+Notebook on **http://127.0.0.1:3474**. The working directory is mounted at
+`/workspace` inside the container, so blocks, notebooks, and Apps you save
+land in your repo and stay in git. Add `--profile slack` for the Slack bot
+or `--profile ollama` for a local LLM daemon.
+
+**npm** *(Node 20+ already installed)*
+
 ```bash
 npx create-dql-app my-project
 cd my-project
@@ -18,9 +32,12 @@ npm install
 npm run notebook
 ```
 
-Your browser opens a notebook at `http://localhost:5173`. DuckDB is running in-memory. Drop a CSV into `data/`, query it, save a block, commit.
+Either way, DuckDB runs in-memory. Drop a CSV into `data/`, query it,
+save a block, commit.
 
-Already have a **dbt project**? Run `create-dql-app` next to it — the scaffolder auto-detects `dbt_project.yml` as a sibling and wires `dql.config.json` accordingly. Then `dql sync dbt` imports your manifest.
+Already have a **dbt project**? Run `create-dql-app` next to it — the
+scaffolder auto-detects `dbt_project.yml` as a sibling and wires
+`dql.config.json` accordingly. Then `dql sync dbt` imports your manifest.
 
 ## Documentation
 
