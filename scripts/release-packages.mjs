@@ -13,6 +13,8 @@ if (!dryRun && !publish) {
   process.exit(1);
 }
 
+// Order matters — leaf packages first, leaves of leaves before that. The
+// CLI is published last because it depends on every other workspace package.
 const packages = [
   'packages/dql-core',
   'packages/dql-compiler',
@@ -22,7 +24,9 @@ const packages = [
   'packages/dql-governance',
   'packages/dql-connectors',
   'packages/dql-notebook',
+  'packages/dql-agent',
   'packages/dql-mcp',
+  'packages/dql-slack',
   'packages/dql-lsp',
   'apps/cli',
   'packages/create-dql-app',
