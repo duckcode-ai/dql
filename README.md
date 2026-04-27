@@ -23,6 +23,10 @@ DQL sits between **dbt** (modeling) and your BI tool (reporting). Every analytic
 
 ![Lineage DAG](./docs/media/lineage.gif)
 
+**AI chat + provider setup** — configure Claude, OpenAI, Gemini, local Ollama, Slack, and schedule delivery keys from one Settings surface; missing keys stay optional until selected.
+
+![AI provider settings](./docs/media/agent.gif)
+
 ## Get started — under 2 minutes
 
 **Docker** *(recommended — zero local toolchain)*
