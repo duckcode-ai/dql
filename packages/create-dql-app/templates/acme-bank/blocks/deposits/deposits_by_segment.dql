@@ -1,0 +1,32 @@
+// dql-format: 1
+
+@rls("region", "{user.region}")
+block "deposits_by_segment" {
+  domain = "deposits"
+  type = "custom"
+  status = "certified"
+  description = "Current deposit balance and net-new deposits by customer segment."
+  tags = ["deposits", "retail", "segment", "balance"]
+  owner = "diego.ramos@acme-bank.com"
+  llmContext = "Use for deposit balances, net-new deposits, and segment mix questions in the retail deposits domain."
+  examples = [{ question = "Which customer segments hold the most deposits?" }, { question = "How much net-new deposit growth did we see?" }]
+  invariants = ["balance_usd >= 0"]
+  query = """
+    SELECT
+      segment,
+      ROUND(SUM(balance_usd), 2) AS balance_usd,
+      ROUND(SUM(net_new_usd), 2) AS net_new_usd
+    FROM read_csv_auto('./data/deposits.csv')
+    WHERE as_of_date = (SELECT MAX(as_of_date) FROM read_csv_auto('./data/deposits.csv'))
+    GROUP BY 1
+    ORDER BY balance_usd DESC
+  """
+  visualization {
+    chart = "bar"
+    x = "segment"
+    y = "balance_usd"
+  }
+  tests {
+    assert row_count > 0
+  }
+}

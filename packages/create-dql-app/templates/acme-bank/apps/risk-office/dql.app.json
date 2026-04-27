@@ -1,0 +1,57 @@
+{
+  "version": 1,
+  "id": "risk-office",
+  "name": "Risk Office",
+  "description": "Credit and fraud exposure App for risk management leaders.",
+  "domain": "lending",
+  "owners": ["anika.shah@acme-bank.com"],
+  "tags": ["risk", "lending", "fraud", "audience:risk-committee"],
+  "members": [
+    {
+      "userId": "anika.shah@acme-bank.com",
+      "displayName": "Anika Shah - Chief Risk Officer",
+      "roles": ["owner"],
+      "attributes": { "department": "risk" }
+    },
+    {
+      "userId": "omar.ali@acme-bank.com",
+      "displayName": "Omar Ali - Risk Analyst",
+      "roles": ["analyst"],
+      "attributes": { "department": "risk" }
+    }
+  ],
+  "roles": [
+    { "id": "owner", "displayName": "Owner", "description": "Full App configuration and execution." },
+    { "id": "analyst", "displayName": "Analyst", "description": "Can execute dashboards and review proposed blocks." },
+    { "id": "viewer", "displayName": "Viewer", "description": "Can view and run certified dashboard tiles." }
+  ],
+  "policies": [
+    {
+      "id": "risk-dashboard-execute",
+      "domain": "lending",
+      "minClassification": "internal",
+      "allowedRoles": ["viewer", "analyst", "owner"],
+      "accessLevel": "execute",
+      "enabled": true
+    },
+    {
+      "id": "risk-fraud-readthrough",
+      "domain": "cards",
+      "minClassification": "internal",
+      "allowedRoles": ["viewer", "analyst", "owner"],
+      "accessLevel": "execute",
+      "enabled": true
+    },
+    {
+      "id": "risk-admin",
+      "domain": "lending",
+      "minClassification": "restricted",
+      "allowedRoles": ["owner"],
+      "accessLevel": "admin",
+      "enabled": true
+    }
+  ],
+  "rlsBindings": [],
+  "schedules": [],
+  "homepage": { "type": "dashboard", "id": "credit-risk" }
+}

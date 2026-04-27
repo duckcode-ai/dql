@@ -1,7 +1,7 @@
 import { writeFileSync, mkdirSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 import type { ChartSpec } from './vega-lite-emitter.js';
-import type { DashboardIR, ScheduleIR, NotificationIR, AlertIR, NarrativeIR } from '../ir/ir-nodes.js';
+import type { DashboardIR, ScheduleIR, NotificationIR, AlertIR, NarrativeIR, SQLParam } from '../ir/ir-nodes.js';
 
 export interface CompilationOutput {
   html: string;
@@ -12,7 +12,7 @@ export interface CompilationOutput {
     schedule?: ScheduleIR;
     notifications: NotificationIR[];
     alerts: AlertIR[];
-    queries: Array<{ id: string; sql: string }>;
+    queries: Array<{ id: string; sql: string; sqlParams?: SQLParam[] }>;
     layoutDiagnostics?: Array<{
       level: 'warning' | 'error';
       message: string;

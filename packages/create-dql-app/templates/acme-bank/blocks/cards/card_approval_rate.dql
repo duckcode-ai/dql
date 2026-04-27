@@ -1,0 +1,24 @@
+// dql-format: 1
+
+block "card_approval_rate" {
+  domain = "cards"
+  type = "custom"
+  status = "certified"
+  description = "Card approval rate across the seeded card transaction stream."
+  tags = ["cards", "kpi", "approval-rate", "ops"]
+  owner = "mei.chen@acme-bank.com"
+  llmContext = "Use this single-value KPI when stakeholders ask about card approval rate or transaction decline pressure."
+  examples = [{ question = "What is our card approval rate?" }]
+  invariants = ["approval_rate_pct >= 0", "approval_rate_pct <= 100"]
+  query = """
+    SELECT
+      ROUND(100.0 * SUM(CASE WHEN status = 'approved' THEN 1 ELSE 0 END) / COUNT(*), 2) AS approval_rate_pct
+    FROM read_csv_auto('./data/transactions.csv')
+  """
+  visualization {
+    chart = "single_value"
+  }
+  tests {
+    assert row_count == 1
+  }
+}

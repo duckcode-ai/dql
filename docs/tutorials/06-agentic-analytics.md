@@ -46,12 +46,12 @@ dql agent reindex
 
 > **You should see**
 > ```text
->   ✓ Knowledge graph rebuilt — 12 nodes, 6 edges, 0 skill(s).
+>   ✓ KG rebuilt — 33 nodes, 21 edges, 2 skill(s).
 > ```
 
-Twelve nodes is correct: 4 blocks + 1 app + 2 dashboards + 0 metrics
-+ 0 dimensions + 0 dbt models + the source tables we read from + the
-domain `cards` itself.
+The exact count can drift as the manifest evolves, but the Acme template
+should include all four Apps, ten certified blocks, six source tables, semantic
+metrics/dimensions, and two Skills.
 
 Inspect:
 
@@ -60,19 +60,22 @@ sqlite3 .dql/cache/agent-kg.sqlite \
   "SELECT kind, name, status FROM kg_nodes ORDER BY kind, name;"
 ```
 
-> **You should see** something like
+> **You should see** rows like
 > ```text
 > app|cards-ops|
-> block|chargeback_rate|certified
+> app|executive-cockpit|
+> block|card_approval_rate|certified
 > block|daily_transaction_volume|certified
+> block|deposit_trend|certified
 > block|fraud_alerts_by_region|certified
-> block|fraud_by_merchant|certified
+> block|fraud_by_merchant_recent|certified
+> block|loan_delinquency_by_region|certified
 > dashboard|daily-ops|
-> dashboard|fraud-watch|
 > domain|cards|
 > dbt_source|fraud_alerts|
 > dbt_source|merchants|
 > dbt_source|transactions|
+> skill|cfo-weekly-bank-review|
 > ```
 
 ---
@@ -145,7 +148,7 @@ dql agent ask "fraud exposure by region in the last 24 hours" --format json | jq
 dql agent ask "which merchants are driving the biggest fraud exposure this morning?"
 ```
 
-> **You should see** — assuming `fraud_by_merchant` *isn't* a strong
+> **You should see** — assuming `fraud_by_merchant_recent` *isn't* a strong
 > match (it's not RLS-narrowed and the question is "this morning",
 > i.e. a different time window):
 >
@@ -167,7 +170,7 @@ dql agent ask "which merchants are driving the biggest fraud exposure this morni
 
 This is the **Stage 2** path. The loop:
 
-1. FTS5 hit `fraud_by_merchant`, but the certified-bar didn't clear (small
+1. FTS5 hit `fraud_by_merchant_recent`, but the certified-bar didn't clear (small
    KG; tweak `CERTIFIED_HIT_THRESHOLD` in
    [`answer-loop.ts`](../../packages/dql-agent/src/answer-loop.ts) to
    tune).

@@ -16,9 +16,11 @@ clean machine. No global install required.
 | Template | What you get |
 | --- | --- |
 | `jaffle-shop` *(default)* | DuckDB + the Jaffle Shop dataset + a sample notebook, certified block, and dashboard |
-| `empty` | Just a `cdql.yaml` and project layout — bring your own warehouse |
+| `acme-bank` | Banking OSS release walkthrough with sample data, certified blocks, Apps, dashboards, governance, schedules, and agent Skills |
+| `empty` | Just `dql.config.json` and project layout - bring your own warehouse |
 
 ```bash
+npx create-dql-app acme-bank --template acme-bank
 npx create-dql-app finance-reports --template empty
 ```
 
@@ -26,7 +28,7 @@ npx create-dql-app finance-reports --template empty
 
 | Flag | Default | Meaning |
 | --- | --- | --- |
-| `--template <name>` | `jaffle-shop` | Starter template |
+| `--template <name>` | `jaffle-shop` | Starter template: `jaffle-shop`, `acme-bank`, or `empty` |
 | `--no-install` | off | Skip downloading the Jaffle Shop seed data |
 
 ## Docs

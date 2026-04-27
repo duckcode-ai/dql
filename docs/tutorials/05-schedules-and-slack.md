@@ -103,9 +103,9 @@ dql schedule run daily-7am-digest --app cards-ops --dry-run
 > ```text
 >   ⏵ Rendering apps/cards-ops/dashboards/daily-ops.dqld …
 >     - daily_transaction_volume:  3 rows
->     - chargeback_rate:           1 row
+>     - card_approval_rate:           1 row
 >     - fraud_alerts_by_region:    3 rows  (owner persona — no RLS narrowing)
->     - fraud_by_merchant:         2 rows
+>     - fraud_by_merchant_recent:         2 rows
 >
 >   Would deliver to:
 >     slack:  #cards-ops

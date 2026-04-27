@@ -1,0 +1,36 @@
+dimensions:
+  - name: region
+    label: Region
+    type: string
+    sql: region
+    table: customers
+    domain: banking
+
+  - name: branch_id
+    label: Branch
+    type: string
+    sql: branch_id
+    table: customers
+    domain: banking
+
+  - name: customer_segment
+    label: Customer Segment
+    type: string
+    sql: segment
+    table: customers
+    domain: deposits
+
+  - name: merchant_category
+    label: Merchant Category
+    type: string
+    sql: merchant_category
+    table: merchants
+    domain: cards
+
+  - name: risk_grade
+    label: Loan Risk Grade
+    type: string
+    sql: risk_grade
+    table: loans
+    domain: lending
+

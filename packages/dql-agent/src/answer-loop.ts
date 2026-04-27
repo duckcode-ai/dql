@@ -35,8 +35,12 @@ export interface AgentAnswer {
   kind: AnswerKind;
   /** Final answer text (NL summary). */
   text: string;
-  /** Certified path: the matched block — caller runs its SQL. */
+  /** Certified path: the matched block. */
   block?: KGNode;
+  /** Certified path execution result, when a governed executor is supplied. */
+  result?: AgentResultPayload;
+  /** Certified path execution failure, if the block matched but execution failed. */
+  executionError?: string;
   /** Uncertified path: the LLM-proposed SQL the analyst should review. */
   proposedSql?: string;
   /** Suggested viz type for the proposed SQL (line/bar/single_value/...). */
@@ -46,6 +50,14 @@ export interface AgentAnswer {
   providerUsed?: string;
   /** Top KG hits the loop considered, useful for the UI's "we considered" panel. */
   considered: KGSearchHit[];
+}
+
+export interface AgentResultPayload {
+  columns: unknown[];
+  rows: unknown[];
+  rowCount: number;
+  executionTime?: number;
+  chartConfig?: unknown;
 }
 
 export interface AnswerLoopInput {
@@ -64,6 +76,12 @@ export interface AnswerLoopInput {
   blockHints?: string[];
   /** Optional AbortSignal forwarded to the provider. */
   signal?: AbortSignal;
+  /**
+   * Governed block executor supplied by the CLI/UI/Slack host. The answer loop
+   * keeps retrieval deterministic, while hosts enforce persona/RBAC/RLS in the
+   * runtime they already own.
+   */
+  executeCertifiedBlock?: (block: KGNode) => Promise<AgentResultPayload>;
 }
 
 const CERTIFIED_HIT_THRESHOLD = 0.18;
@@ -82,10 +100,21 @@ export async function answer(input: AnswerLoopInput): Promise<AgentAnswer> {
   const blockHits = considered.filter((h) => h.node.kind === 'block');
   const blockHit = pickCertifiedBlock(blockHits, blockHints, kg);
   if (blockHit) {
+    let result: AgentResultPayload | undefined;
+    let executionError: string | undefined;
+    if (input.executeCertifiedBlock) {
+      try {
+        result = await input.executeCertifiedBlock(blockHit.node);
+      } catch (err) {
+        executionError = err instanceof Error ? err.message : String(err);
+      }
+    }
     return {
       kind: 'certified',
-      text: composeCertifiedAnswer(blockHit.node, question),
+      text: composeCertifiedAnswer(blockHit.node, question, result, executionError),
       block: blockHit.node,
+      result,
+      executionError,
       citations: [
         {
           nodeId: blockHit.node.nodeId,
@@ -231,9 +260,19 @@ function pickCertifiedBlock(
   return null;
 }
 
-function composeCertifiedAnswer(block: KGNode, question: string): string {
+function composeCertifiedAnswer(
+  block: KGNode,
+  question: string,
+  result?: AgentResultPayload,
+  executionError?: string,
+): string {
   const desc = block.description ?? block.llmContext ?? '';
   const tag = block.gitSha ? ` · ${block.gitSha.slice(0, 8)}` : '';
-  return `Answered by certified block **${block.name}**${tag}.\n\n${desc || 'Run the block to see the result.'}`
+  const resultText = result
+    ? `Returned ${result.rowCount} row${result.rowCount === 1 ? '' : 's'}.`
+    : executionError
+      ? `The certified block matched, but governed execution failed: ${executionError}`
+      : 'Governed execution was not requested by this host.';
+  return `Answered by certified block **${block.name}**${tag}.\n\n${desc ? `${desc}\n\n${resultText}` : resultText}`
     + `\n\n_Question:_ ${question}`;
 }

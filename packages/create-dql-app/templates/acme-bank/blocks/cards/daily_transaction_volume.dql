@@ -1,0 +1,32 @@
+// dql-format: 1
+
+@rls("region", "{user.region}")
+@rls("branch_id", "{user.branch}")
+block "daily_transaction_volume" {
+  domain = "cards"
+  type = "custom"
+  status = "certified"
+  description = "Daily approved and declined card transaction volume."
+  tags = ["cards", "volume", "daily", "ops"]
+  owner = "mei.chen@acme-bank.com"
+  llmContext = "Use for daily card transaction count, card spend volume, and approval or decline trend questions."
+  examples = [{ question = "What was card volume this week?" }, { question = "Show transaction volume by day." }]
+  invariants = ["volume_usd >= 0", "txn_count >= 0"]
+  query = """
+    SELECT
+      CAST(txn_ts AS DATE) AS day,
+      COUNT(*) AS txn_count,
+      ROUND(SUM(amount_usd), 2) AS volume_usd
+    FROM read_csv_auto('./data/transactions.csv')
+    GROUP BY 1
+    ORDER BY 1
+  """
+  visualization {
+    chart = "line"
+    x = "day"
+    y = "volume_usd"
+  }
+  tests {
+    assert row_count > 0
+  }
+}

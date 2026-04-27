@@ -24,11 +24,19 @@ services:
       - ./:/workspace
     environment:
       DQL_HOST: 0.0.0.0
-      # Optional LLM credentials — uncomment whichever you use.
-      # ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
-      # OPENAI_API_KEY:    ${OPENAI_API_KEY}
-      # GEMINI_API_KEY:    ${GEMINI_API_KEY}
-      # OLLAMA_BASE_URL:   http://ollama:11434  # when using the ollama service below
+      # Optional credentials. Empty values keep Docker startup smooth; the UI
+      # Settings page shows what is configured and provider calls return clear
+      # setup errors when a selected provider is missing credentials.
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      OPENAI_MODEL: ${OPENAI_MODEL:-}
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+      GEMINI_MODEL: ${GEMINI_MODEL:-}
+      OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://ollama:11434}
+      OLLAMA_MODEL: ${OLLAMA_MODEL:-llama3.1}
+      DQL_SLACK_WEBHOOK: ${DQL_SLACK_WEBHOOK:-}
+      DQL_SMTP_URL: ${DQL_SMTP_URL:-}
+      DQL_SMTP_FROM: ${DQL_SMTP_FROM:-}
     command: ["dql", "notebook", "--host", "0.0.0.0", "--no-open"]
 
   slack:
@@ -43,11 +51,15 @@ services:
     volumes:
       - ./:/workspace
     environment:
-      SLACK_SIGNING_SECRET: ${SLACK_SIGNING_SECRET:?set SLACK_SIGNING_SECRET in your env}
-      SLACK_BOT_TOKEN: ${SLACK_BOT_TOKEN:?set SLACK_BOT_TOKEN in your env}
+      SLACK_SIGNING_SECRET: ${SLACK_SIGNING_SECRET:-}
+      SLACK_BOT_TOKEN: ${SLACK_BOT_TOKEN:-}
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      OPENAI_MODEL: ${OPENAI_MODEL:-}
       GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+      GEMINI_MODEL: ${GEMINI_MODEL:-}
+      OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://ollama:11434}
+      OLLAMA_MODEL: ${OLLAMA_MODEL:-llama3.1}
     command: ["dql", "slack", "serve", "--port", "3479"]
 
   ollama:

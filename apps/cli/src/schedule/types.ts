@@ -10,6 +10,13 @@ export interface ScheduledBlock {
   alerts: AlertIR[];
 }
 
+export interface ScheduledAppDashboard {
+  appId: string;
+  dashboardId: string;
+  scheduleId: string;
+  cron: string;
+}
+
 export interface AlertEvaluation {
   alert: AlertIR;
   breached: boolean;

@@ -1,0 +1,34 @@
+// dql-format: 1
+
+block "bank_health_scorecard" {
+  domain = "executive"
+  type = "custom"
+  status = "certified"
+  description = "Executive scorecard with cards volume, fraud exposure, deposits, and high-risk lending exposure."
+  tags = ["executive", "cxo", "scorecard", "bank-health"]
+  owner = "sara.fitch@acme-bank.com"
+  llmContext = "Use for CXO questions about overall Acme Bank health across cards, fraud, deposits, and lending risk."
+  examples = [{ question = "Give me the bank health scorecard." }, { question = "What should the CFO review this week?" }]
+  invariants = ["metric_value >= 0"]
+  query = """
+    SELECT 'card_volume_usd' AS metric, ROUND(SUM(amount_usd), 2) AS metric_value
+    FROM read_csv_auto('./data/transactions.csv')
+    UNION ALL
+    SELECT 'fraud_exposure_usd' AS metric, ROUND(SUM(amount_usd), 2) AS metric_value
+    FROM read_csv_auto('./data/fraud_alerts.csv')
+    UNION ALL
+    SELECT 'current_deposits_usd' AS metric, ROUND(SUM(balance_usd), 2) AS metric_value
+    FROM read_csv_auto('./data/deposits.csv')
+    WHERE as_of_date = (SELECT MAX(as_of_date) FROM read_csv_auto('./data/deposits.csv'))
+    UNION ALL
+    SELECT 'high_risk_loans_usd' AS metric, ROUND(SUM(outstanding_usd), 2) AS metric_value
+    FROM read_csv_auto('./data/loans.csv')
+    WHERE risk_grade IN ('C', 'D')
+  """
+  visualization {
+    chart = "table"
+  }
+  tests {
+    assert row_count == 4
+  }
+}

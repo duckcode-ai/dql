@@ -180,6 +180,28 @@ describe('lowerProgram — Phase A block IR', () => {
     expect(dashboards[0].charts[0].blockType).toBe('custom');
   });
 
+  it('lowers block-level @rls into SQL params for custom blocks', () => {
+    const source = `@rls("region", "{user.region}")
+    block "Regional Revenue" {
+      domain = "revenue"
+      type = "custom"
+      query = """SELECT region, SUM(amount) AS total FROM orders GROUP BY region"""
+      visualization {
+        chart = "bar"
+        x = region
+        y = total
+      }
+    }`;
+
+    const ast = parse(source);
+    const dashboards = lowerProgram(ast);
+    expect(dashboards).toHaveLength(1);
+    const chart = dashboards[0].charts[0];
+    expect(chart.sql).toContain('_dql_rls');
+    expect(chart.sql).toContain('region = COALESCE($1, region)');
+    expect(chart.sqlParams).toEqual([{ name: 'user.region', position: 1 }]);
+  });
+
   // A13b: semantic block without a query lowers to null (not included in output)
   it('A13b — semantic block without query lowers to null (not included in output)', () => {
     const source = `block "Revenue Metric" {
@@ -192,5 +214,35 @@ describe('lowerProgram — Phase A block IR', () => {
     const dashboards = lowerProgram(ast);
     // lowerBlockDecl returns null when there is no query — so no DashboardIR is produced
     expect(dashboards).toHaveLength(0);
+  });
+
+  it('lowers block-level @rls into SQL params for semantic blocks', () => {
+    const layer = new SemanticLayer();
+    layer.addMetric({
+      name: 'total_revenue',
+      label: 'Total Revenue',
+      description: 'Sum',
+      domain: 'revenue',
+      sql: 'SUM(amount)',
+      type: 'sum',
+      table: 'orders',
+    });
+    const source = `@rls("region", "{user.region}")
+    block "Regional Semantic Revenue" {
+      domain = "revenue"
+      type = "semantic"
+      metric = "total_revenue"
+      visualization {
+        chart = "single_value"
+      }
+    }`;
+
+    const ast = parse(source);
+    const dashboards = lowerProgram(ast, { semanticLayer: layer });
+    expect(dashboards).toHaveLength(1);
+    const chart = dashboards[0].charts[0];
+    expect(chart.sql).toContain('_dql_rls');
+    expect(chart.sql).toContain('region = COALESCE($1, region)');
+    expect(chart.sqlParams).toEqual([{ name: 'user.region', position: 1 }]);
   });
 });

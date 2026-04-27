@@ -1,11 +1,12 @@
 # DQL Example Gallery
 
-Three repositories showing DQL at three scales. Each is runnable in under
+Runnable examples showing DQL at several scales. Each is runnable in under
 5 minutes from a clean machine via `create-dql-app` or direct git clone.
 
 | Name | Scale | Dataset | What it demos |
 | --- | --- | --- | --- |
 | **jaffle-shop** | ~50 models | DuckDB seed | Quickstart, certified blocks, dashboard compile |
+| **acme-bank** | OSS single-user product sample | Banking CSVs | Domain Apps, certified blocks, governance, schedules, agent Skills |
 | **retail-mart** | ~500 models | Postgres | Multi-domain lineage, governance certification flow, impact analysis |
 | **saas-analytics** | ~2,000 models | BigQuery | Manifest cache performance, selective dbt import, cross-domain detection |
 
@@ -16,6 +17,21 @@ Ships as the default template.
 ```bash
 npx create-dql-app my-demo
 ```
+
+## acme-bank (bundled in create-dql-app)
+
+Ships as the end-to-end OSS single-user banking tutorial template.
+
+```bash
+npx create-dql-app acme-bank --template acme-bank
+cd acme-bank
+dql compile
+dql app build
+dql notebook
+```
+
+See [examples/acme-bank](../acme-bank/README.md) and
+[docs/tutorials](../../docs/tutorials/README.md).
 
 ## retail-mart
 

@@ -22,6 +22,12 @@ branch-manager dashboard later." Mei opens the desktop UI.
 
 ## Step 1 — Open Block Studio
 
+The `acme-bank` template already includes the finished
+`blocks/cards/fraud_alerts_by_region.dql` block so Apps work immediately.
+For this tutorial, either open that file and inspect it, or create
+`fraud_alerts_by_region_practice` if you want to rebuild the block without
+overwriting the packaged example.
+
 In the desktop UI:
 
 1. Click **Files** in the activity bar.
@@ -37,8 +43,9 @@ The file lives at `blocks/fraud_alerts_by_region.dql`.
 
 ## Step 2 — Write the SQL + metadata
 
-Replace the template with this full block. We'll walk through each section
-afterwards.
+If you created a practice file, replace the template with this full block.
+If you opened the packaged file, compare it with the source below. We'll walk
+through each section afterwards.
 
 ```dql
 // blocks/fraud_alerts_by_region.dql
@@ -207,8 +214,10 @@ interactive React Flow + dagre view.
 
 ## Step 6 — Add a couple more blocks for the rest of the tutorials
 
-Mei needs three more blocks so we have something to compose into a
-dashboard later. Use **Block Studio → + New → Block** for each.
+The `acme-bank` template already ships the dashboard-ready versions of these
+blocks under `blocks/cards/`. If you are learning the authoring flow, rebuild
+them as practice blocks; if you are following the Apps tutorial, just inspect
+the packaged files and continue.
 
 ```dql
 // blocks/daily_transaction_volume.dql
@@ -232,16 +241,19 @@ block "daily_transaction_volume" {
 ```
 
 ```dql
-// blocks/chargeback_rate.dql
-block "chargeback_rate" {
+// blocks/card_approval_rate.dql
+block "card_approval_rate" {
   domain = "cards"
   type   = "custom"
   owner  = "mei.chen@acme-bank.com"
-  description = "Chargeback rate (placeholder — replace with real charge_backs join)."
-  tags = ["cards", "kpi"]
-  llmContext = "Card chargeback rate as a percentage. Single-value KPI."
+  description = "Card approval rate across the seeded transaction stream."
+  tags = ["cards", "kpi", "approval-rate"]
+  llmContext = "Card approval rate as a percentage. Single-value KPI."
   query = """
-    SELECT 0.42 AS chargeback_rate_pct
+    SELECT
+      ROUND(100.0 * SUM(CASE WHEN status = 'approved' THEN 1 ELSE 0 END) / COUNT(*), 2)
+        AS approval_rate_pct
+    FROM read_csv_auto('./data/transactions.csv')
   """
   visualization { chart = "single_value" }
   tests { assert row_count == 1 }
@@ -249,8 +261,8 @@ block "chargeback_rate" {
 ```
 
 ```dql
-// blocks/fraud_by_merchant.dql  (start as DRAFT — Mei will certify after the agent tutorial)
-block "fraud_by_merchant" {
+// blocks/fraud_by_merchant_recent.dql  (start as DRAFT — Mei will certify after the agent tutorial)
+block "fraud_by_merchant_recent" {
   domain = "cards"
   type   = "custom"
   owner  = "mei.chen@acme-bank.com"
@@ -274,8 +286,8 @@ Certify all three:
 
 ```bash
 dql certify blocks/daily_transaction_volume.dql --connection duckdb
-dql certify blocks/chargeback_rate.dql           --connection duckdb
-dql certify blocks/fraud_by_merchant.dql         --connection duckdb
+dql certify blocks/card_approval_rate.dql           --connection duckdb
+dql certify blocks/fraud_by_merchant_recent.dql         --connection duckdb
 ```
 
 > **You should see** all three flip to `certified`. We now have **four**

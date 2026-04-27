@@ -10,12 +10,13 @@ workflows.
 
 | Stakeholder | Role | App they live in |
 |---|---|---|
-| **Sara Fitch**       | CFO                       | `cxo-board` |
+| **Sara Fitch**       | CFO                       | `executive-cockpit` |
 | **Raj Kumar**        | Head of Cards             | `cards-ops` (owner) |
 | **Mei Chen**         | Cards Analyst             | `cards-ops` (analyst) |
-| **Tom Ng**           | Compliance Officer        | `risk-compliance` (viewer) |
-| **Li Park**          | Branch Manager (NYC-042)  | `branch-managers` (RLS-scoped) |
-| **Anna Vasquez**     | Wealth Advisor            | `wealth-advisors` (RLS-scoped) |
+| **Li Park**          | Branch Manager (NYC-042)  | `cards-ops` (RLS-scoped) |
+| **Diego Ramos**      | Retail Analytics Lead     | `retail-deposits` |
+| **Anika Shah**       | Chief Risk Officer        | `risk-office` |
+| **Nora Evans**       | COO                       | `retail-deposits`, `executive-cockpit` |
 
 ## Reading order
 
@@ -29,6 +30,7 @@ workflows.
 8. **[08 — Promoting AI answers to certified blocks](./08-promoting-ai-blocks.md)** — the uncertified → certified loop.
 9. **[09 — CI, `dql verify`, and change management](./09-ci-and-verify.md)** — keep `dql-manifest.json` reproducible.
 10. **[10 — Troubleshooting + FAQ](./10-troubleshooting.md)** — common issues, debugging, where to look.
+11. **[11 — Acme Bank template reference](./11-acme-bank-template-reference.md)** — inventory of sample data, blocks, Apps, dashboards, schedules, and Skills.
 
 ## Mental model in one paragraph
 

@@ -104,7 +104,7 @@ export function compile(source: string, options: CompileOptions = {}): CompileRe
           notifications: workbookIR.notifications,
           alerts: workbookIR.alerts,
           queries: workbookIR.pages.flatMap((p) =>
-            p.charts.map((c) => ({ id: c.id, sql: c.sql })),
+            p.charts.map((c) => ({ id: c.id, sql: c.sql, sqlParams: c.sqlParams })),
           ),
           layoutDiagnostics: workbookIR.pages.flatMap((p) => p.layoutDiagnostics ?? []),
         },
@@ -144,7 +144,7 @@ export function compile(source: string, options: CompileOptions = {}): CompileRe
         schedule: ir.schedule,
         notifications: ir.notifications,
         alerts: ir.alerts,
-        queries: ir.charts.map((c) => ({ id: c.id, sql: c.sql })),
+        queries: ir.charts.map((c) => ({ id: c.id, sql: c.sql, sqlParams: c.sqlParams })),
         layoutDiagnostics: ir.layoutDiagnostics,
         narrative,
         dependencies: ir.dependencies,

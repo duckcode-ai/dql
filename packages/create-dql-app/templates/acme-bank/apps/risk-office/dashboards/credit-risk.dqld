@@ -1,0 +1,48 @@
+{
+  "version": 1,
+  "id": "credit-risk",
+  "metadata": {
+    "title": "Credit Risk",
+    "description": "Certified lending risk dashboard for delinquency and high-risk exposure.",
+    "domain": "lending",
+    "tags": ["risk", "lending", "credit-risk"]
+  },
+  "layout": {
+    "kind": "grid",
+    "cols": 12,
+    "rowHeight": 80,
+    "items": [
+      {
+        "i": "delinquency-region",
+        "x": 0,
+        "y": 0,
+        "w": 6,
+        "h": 3,
+        "block": { "blockId": "loan_delinquency_by_region" },
+        "viz": { "type": "bar" },
+        "title": "Delinquency by Region"
+      },
+      {
+        "i": "high-risk-exposure",
+        "x": 6,
+        "y": 0,
+        "w": 6,
+        "h": 4,
+        "block": { "blockId": "high_risk_loan_exposure" },
+        "viz": { "type": "table" },
+        "title": "High-Risk Loan Exposure"
+      },
+      {
+        "i": "merchant-fraud",
+        "x": 0,
+        "y": 4,
+        "w": 6,
+        "h": 3,
+        "block": { "blockId": "fraud_by_merchant_recent" },
+        "viz": { "type": "bar" },
+        "title": "Merchant Fraud Watch"
+      }
+    ]
+  }
+}
+

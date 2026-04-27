@@ -64,4 +64,28 @@ runTest('empty', 'smoke-empty', [
   '.gitignore',
 ], 'dql.config.json');
 
+runTest('acme-bank', 'smoke-acme-bank', [
+  'dql.config.json',
+  'package.json',
+  'README.md',
+  'data/transactions.csv',
+  'data/fraud_alerts.csv',
+  'data/deposits.csv',
+  'data/loans.csv',
+  'blocks/cards/fraud_alerts_by_region.dql',
+  'blocks/cards/card_approval_rate.dql',
+  'blocks/deposits/deposit_trend.dql',
+  'blocks/lending/loan_delinquency_by_region.dql',
+  'blocks/executive/bank_health_scorecard.dql',
+  'apps/cards-ops/dql.app.json',
+  'apps/cards-ops/dashboards/daily-ops.dqld',
+  'apps/cards-ops/dashboards/fraud-watch.dqld',
+  'apps/retail-deposits/dashboards/deposit-growth.dqld',
+  'apps/risk-office/dashboards/credit-risk.dqld',
+  'apps/executive-cockpit/dashboards/bank-overview.dqld',
+  '.dql/skills/mei.chen@acme-bank.com/cards-fraud.skill.md',
+  'semantic-layer/metrics/banking.yaml',
+  '.gitignore',
+], 'dql.config.json');
+
 console.log('\n✓ all smoke tests passed');

@@ -1,6 +1,6 @@
 {
   "name": "@duckcodeailabs/dql-cli",
-  "version": "1.4.1",
+  "version": "1.4.2",
   "description": "Public CLI for parsing, formatting, testing, and certifying DQL blocks",
   "license": "Apache-2.0",
   "type": "module",
@@ -42,6 +42,7 @@
     "nodemailer": "^6.9.16"
   },
   "devDependencies": {
+    "@duckcodeailabs/dql-notebook-app": "workspace:*",
     "@types/js-yaml": "^4.0.9",
     "@types/node-cron": "^3.0.11",
     "@types/nodemailer": "^6.4.17",

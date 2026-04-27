@@ -1,0 +1,10 @@
+merchant_id,merchant_name,merchant_category,mcc_code,risk_band
+M-amzn,Amazon Marketplace,ecommerce,5942,low
+M-walmart,Walmart Stores,grocery,5411,low
+M-target,Target Stores,grocery,5310,low
+M-apple,Apple Store,electronics,5732,low
+M-home,Home Depot,home_improvement,5200,medium
+M-travel,Global Travel Desk,travel,4722,medium
+M-grocery,Neighborhood Grocery,grocery,5411,low
+M-darknet1,Darknet Vendor 1,restricted,7995,critical
+

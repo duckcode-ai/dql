@@ -1,0 +1,30 @@
+// dql-format: 1
+
+block "deposit_trend" {
+  domain = "deposits"
+  type = "custom"
+  status = "certified"
+  description = "Total deposit balance trend by snapshot date."
+  tags = ["deposits", "trend", "growth", "retail"]
+  owner = "diego.ramos@acme-bank.com"
+  llmContext = "Use for total deposit trend, retail deposit growth, and balance movement over time."
+  examples = [{ question = "Are deposits growing?" }, { question = "Show deposit balance trend." }]
+  invariants = ["balance_usd >= 0"]
+  query = """
+    SELECT
+      as_of_date,
+      ROUND(SUM(balance_usd), 2) AS balance_usd,
+      ROUND(SUM(net_new_usd), 2) AS net_new_usd
+    FROM read_csv_auto('./data/deposits.csv')
+    GROUP BY 1
+    ORDER BY 1
+  """
+  visualization {
+    chart = "line"
+    x = "as_of_date"
+    y = "balance_usd"
+  }
+  tests {
+    assert row_count > 0
+  }
+}

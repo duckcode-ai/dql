@@ -4,7 +4,7 @@
  * dispatcher — returns `true` if the request was handled, `false` otherwise.
  */
 
-import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync, type Dirent, type Stats } from 'node:fs';
 import { join, dirname } from 'node:path';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import {
@@ -14,6 +14,7 @@ import {
   findDashboardsForApp,
   parseAppDocument,
   parseDashboardDocument,
+  suggestAppId,
   type AppDocument,
   type DashboardDocument,
 } from '@duckcodeailabs/dql-core';
@@ -39,6 +40,31 @@ export async function handleAppsApi(ctx: Ctx): Promise<boolean> {
   if (req.method === 'GET' && path === '/api/apps') {
     const apps = collectAppsList(projectRoot);
     sendJson(res, 200, { apps });
+    return true;
+  }
+
+  if (req.method === 'POST' && path === '/api/apps/recommend-blocks') {
+    try {
+      const body = await readJson<AppRecommendationRequest>(req);
+      sendJson(res, 200, { blocks: recommendBlocks(projectRoot, body) });
+    } catch (err) {
+      sendJson(res, 500, { error: (err as Error).message });
+    }
+    return true;
+  }
+
+  if (req.method === 'POST' && path === '/api/apps') {
+    try {
+      const body = await readJson<AppCreateRequest>(req);
+      const result = createAppPackage(projectRoot, body);
+      if (!result.ok) {
+        sendJson(res, 400, { error: result.error });
+        return true;
+      }
+      sendJson(res, 201, result);
+    } catch (err) {
+      sendJson(res, 500, { error: (err as Error).message });
+    }
     return true;
   }
 
@@ -142,6 +168,8 @@ function collectAppsList(projectRoot: string): Array<{
   name: string;
   domain: string;
   description?: string;
+  audience?: string;
+  status?: 'ready' | 'empty';
   owners: string[];
   tags: string[];
   members: number;
@@ -158,6 +186,8 @@ function collectAppsList(projectRoot: string): Array<{
     description?: string;
     owners: string[];
     tags: string[];
+    audience?: string;
+    status?: 'ready' | 'empty';
     members: number;
     roles: number;
     policies: number;
@@ -179,6 +209,8 @@ function collectAppsList(projectRoot: string): Array<{
       name: document.name,
       domain: document.domain,
       description: document.description,
+      audience: audienceFromTags(document.tags ?? []),
+      status: dashboards.length > 0 ? 'ready' : 'empty',
       owners: document.owners,
       tags: document.tags ?? [],
       members: document.members.length,
@@ -190,6 +222,381 @@ function collectAppsList(projectRoot: string): Array<{
     });
   }
   return out.sort((a, b) => a.name.localeCompare(b.name));
+}
+
+interface AppRecommendationRequest {
+  domain?: string;
+  tags?: string[];
+  purpose?: string;
+  audience?: string;
+  certifiedOnly?: boolean;
+}
+
+interface AppCreateRequest {
+  name?: string;
+  domain?: string;
+  purpose?: string;
+  audience?: string;
+  tags?: string[];
+  owners?: string[];
+  selectedBlockIds?: string[];
+}
+
+interface BlockCandidate {
+  id: string;
+  name: string;
+  domain: string;
+  status: string;
+  owner: string | null;
+  tags: string[];
+  path: string;
+  lastModified: string;
+  description: string;
+  llmContext: string | null;
+  chartType?: string;
+  score: number;
+  reasons: string[];
+}
+
+export function recommendBlocks(projectRoot: string, input: AppRecommendationRequest): BlockCandidate[] {
+  const domain = cleanString(input.domain).toLowerCase();
+  const tags = normalizeTags(input.tags ?? []);
+  const text = [input.purpose, input.audience, ...(input.tags ?? [])].map((v) => cleanString(v).toLowerCase()).filter(Boolean);
+  const certifiedOnly = input.certifiedOnly !== false;
+  const hasCriteria = Boolean(domain || tags.length > 0 || text.length > 0);
+
+  return collectBlockCandidates(projectRoot)
+    .map((block) => {
+      let score = 0;
+      let criteriaScore = 0;
+      const reasons: string[] = [];
+      if (domain && block.domain.toLowerCase() === domain) {
+        score += 100;
+        criteriaScore += 100;
+        reasons.push('domain match');
+      }
+      if (certifiedOnly && block.status !== 'certified') return null;
+      if (block.status === 'certified') {
+        score += 30;
+        reasons.push('certified');
+      }
+      const overlap = block.tags.filter((tag) => tags.includes(tag.toLowerCase()));
+      if (overlap.length > 0) {
+        score += overlap.length * 12;
+        criteriaScore += overlap.length * 12;
+        reasons.push(`tag match: ${overlap.join(', ')}`);
+      }
+      const haystack = [block.name, block.description, block.owner ?? '', block.llmContext ?? '', ...block.tags]
+        .join(' ')
+        .toLowerCase();
+      const textHits = text.filter((term) => term && haystack.includes(term));
+      if (textHits.length > 0) {
+        score += textHits.length * 6;
+        criteriaScore += textHits.length * 6;
+        reasons.push('context match');
+      }
+      if (score === 0 && !domain && tags.length === 0 && !certifiedOnly) score = 1;
+      if (hasCriteria && criteriaScore === 0) return null;
+      if (score === 0) return null;
+      return { ...block, score, reasons };
+    })
+    .filter((block): block is BlockCandidate => Boolean(block))
+    .sort((a, b) => b.score - a.score || new Date(b.lastModified).getTime() - new Date(a.lastModified).getTime())
+    .slice(0, 50);
+}
+
+export function createAppPackage(
+  projectRoot: string,
+  input: AppCreateRequest,
+): { ok: true; app: ReturnType<typeof collectAppsList>[number]; paths: string[]; dashboardId: string } | { ok: false; error: string } {
+  const name = cleanString(input.name);
+  const domain = cleanString(input.domain);
+  if (!name) return { ok: false, error: 'name is required' };
+  if (!domain) return { ok: false, error: 'domain is required' };
+
+  const id = suggestAppId(name);
+  const appDir = join(projectRoot, 'apps', id);
+  if (existsSync(appDir)) return { ok: false, error: `App already exists: ${id}` };
+
+  const owner = cleanString(input.owners?.[0]) || `${process.env.USER ?? 'owner'}@local`;
+  const audience = cleanString(input.audience);
+  const tags = normalizeTags([...(input.tags ?? []), audience ? `audience:${slugify(audience)}` : '']);
+  const selectedIds = Array.from(new Set((input.selectedBlockIds ?? []).map(cleanString).filter(Boolean)));
+  const blocks = collectBlockCandidates(projectRoot);
+  const selectedBlocks = selectedIds
+    .map((blockId) => blocks.find((block) => block.id === blockId || block.name === blockId))
+    .filter((block): block is BlockCandidate => Boolean(block));
+
+  const app: AppDocument = {
+    version: 1,
+    id,
+    name,
+    description: cleanString(input.purpose) || `${name} consumption surface for ${domain}`,
+    domain,
+    owners: [owner],
+    tags,
+    members: [
+      { userId: owner, displayName: owner, roles: ['owner', 'analyst'] },
+    ],
+    roles: [
+      { id: 'owner', displayName: 'Owner', description: 'Full access to dashboards and App configuration.' },
+      { id: 'analyst', displayName: 'Analyst', description: 'Can execute dashboards and review generated drafts.' },
+      { id: 'viewer', displayName: 'Viewer', description: 'Read-only access to certified dashboard consumption.' },
+    ],
+    policies: [
+      {
+        id: 'viewers-read',
+        domain,
+        minClassification: 'internal',
+        allowedRoles: ['viewer', 'analyst', 'owner'],
+        accessLevel: 'read',
+        enabled: true,
+      },
+      {
+        id: 'analyst-execute',
+        domain,
+        minClassification: 'internal',
+        allowedRoles: ['analyst', 'owner'],
+        accessLevel: 'execute',
+        enabled: true,
+      },
+      {
+        id: 'owner-admin',
+        domain,
+        minClassification: 'restricted',
+        allowedRoles: ['owner'],
+        accessLevel: 'admin',
+        enabled: true,
+      },
+    ],
+    rlsBindings: [],
+    schedules: [],
+    homepage: { type: 'dashboard', id: 'overview' },
+  };
+
+  const dashboard: DashboardDocument = {
+    version: 1,
+    id: 'overview',
+    metadata: {
+      title: `${name} Overview`,
+      description: cleanString(input.purpose) || `Starter dashboard for ${name}`,
+      domain,
+      tags,
+    },
+    layout: {
+      kind: 'grid',
+      cols: 12,
+      rowHeight: 80,
+      items: buildDashboardItems(selectedBlocks),
+    },
+  };
+
+  const paths = [
+    join(appDir, 'dql.app.json'),
+    join(appDir, 'README.md'),
+    join(appDir, 'dashboards', 'overview.dqld'),
+    join(appDir, 'notebooks'),
+    join(appDir, 'drafts'),
+  ];
+  mkdirSync(join(appDir, 'dashboards'), { recursive: true });
+  mkdirSync(join(appDir, 'notebooks'), { recursive: true });
+  mkdirSync(join(appDir, 'drafts'), { recursive: true });
+  writeFileSync(join(appDir, 'dql.app.json'), JSON.stringify(app, null, 2) + '\n', 'utf-8');
+  writeFileSync(join(appDir, 'dashboards', 'overview.dqld'), JSON.stringify(dashboard, null, 2) + '\n', 'utf-8');
+  writeFileSync(join(appDir, 'README.md'), appReadme(app, audience, selectedBlocks), 'utf-8');
+
+  const created = collectAppsList(projectRoot).find((entry) => entry.id === id);
+  if (!created) return { ok: false, error: `App was written but could not be reloaded: ${id}` };
+  return {
+    ok: true,
+    app: created,
+    paths: paths.map((path) => path.startsWith(projectRoot) ? path.slice(projectRoot.length + 1) : path),
+    dashboardId: 'overview',
+  };
+}
+
+function buildDashboardItems(blocks: BlockCandidate[]): DashboardDocument['layout']['items'] {
+  let x = 0;
+  let y = 0;
+  let rowH = 0;
+  return [...blocks]
+    .sort((a, b) => vizRank(a.chartType) - vizRank(b.chartType))
+    .map((block, index) => {
+      const chartType = normalizeVizType(block.chartType);
+      const size = tileSize(chartType);
+      if (x + size.w > 12) {
+        x = 0;
+        y += rowH || size.h;
+        rowH = 0;
+      }
+      const item = dashboardItemForBlock(block, chartType, x, y, size, index);
+      x += size.w;
+      rowH = Math.max(rowH, size.h);
+      return item;
+    });
+}
+
+function dashboardItemForBlock(
+  block: BlockCandidate,
+  chartType: ReturnType<typeof normalizeVizType>,
+  x: number,
+  y: number,
+  size: { w: number; h: number },
+  index: number,
+): DashboardDocument['layout']['items'][number] {
+  return {
+    i: slugify(block.name) || `tile-${index + 1}`,
+    x,
+    y,
+    w: size.w,
+    h: size.h,
+    block: { blockId: block.name },
+    viz: { type: chartType },
+    title: block.name,
+  };
+}
+
+function vizRank(chartType?: string): number {
+  const normalized = normalizeVizType(chartType);
+  if (normalized === 'single_value' || normalized === 'kpi') return 0;
+  if (normalized === 'line' || normalized === 'area') return 1;
+  if (normalized === 'bar' || normalized === 'pie' || normalized === 'funnel' || normalized === 'map') return 2;
+  return 3;
+}
+
+function tileSize(chartType: string): { w: number; h: number } {
+  if (chartType === 'single_value' || chartType === 'kpi') return { w: 3, h: 2 };
+  if (chartType === 'table' || chartType === 'pivot') return { w: 6, h: 4 };
+  return { w: 6, h: 3 };
+}
+
+function normalizeVizType(chartType?: string): 'single_value' | 'line' | 'bar' | 'area' | 'pie' | 'table' | 'pivot' | 'map' | 'funnel' | 'kpi' {
+  const normalized = (chartType ?? 'table').toLowerCase().replace(/-/g, '_');
+  if (normalized === 'single' || normalized === 'single_value') return 'single_value';
+  if (normalized === 'kpi') return 'kpi';
+  if (normalized === 'line') return 'line';
+  if (normalized === 'bar') return 'bar';
+  if (normalized === 'area') return 'area';
+  if (normalized === 'pie') return 'pie';
+  if (normalized === 'pivot') return 'pivot';
+  if (normalized === 'map') return 'map';
+  if (normalized === 'funnel') return 'funnel';
+  return 'table';
+}
+
+function appReadme(app: AppDocument, audience: string, blocks: BlockCandidate[]): string {
+  return [
+    `# ${app.name}`,
+    '',
+    app.description ?? '',
+    '',
+    `- Domain: ${app.domain}`,
+    `- Audience: ${audience || 'not specified'}`,
+    `- Owners: ${app.owners.join(', ')}`,
+    `- Starter dashboard: dashboards/overview.dqld`,
+    '',
+    '## Selected Certified Blocks',
+    '',
+    ...(blocks.length > 0
+      ? blocks.map((block) => `- ${block.name} (${block.domain}, ${block.status}) - ${block.path}`)
+      : ['No blocks selected yet. Add certified blocks from the Apps Command Center.']),
+    '',
+    '## Governance',
+    '',
+    'This OSS App uses local persona switching with owner, analyst, and viewer roles. Real authentication and SSO are intentionally outside OSS scope.',
+    '',
+  ].join('\n');
+}
+
+function collectBlockCandidates(projectRoot: string): BlockCandidate[] {
+  const blocksDir = join(projectRoot, 'blocks');
+  const blocks: BlockCandidate[] = [];
+  if (!existsSync(blocksDir)) return blocks;
+  const scanDir = (dir: string) => {
+    for (const entry of readdirSyncSafe(dir)) {
+      const filePath = join(dir, entry.name);
+      if (entry.isDirectory()) {
+        scanDir(filePath);
+      } else if (entry.isFile() && entry.name.endsWith('.dql')) {
+        try {
+          const source = readFileSync(filePath, 'utf-8');
+          const stat = statSyncSafe(filePath);
+          const name = matchString(source, /block\s+"([^"]+)"/) ?? entry.name.replace(/\.dql$/, '');
+          const tags = matchArray(source, /tags\s*=\s*\[([^\]]*)\]/);
+          blocks.push({
+            id: name,
+            name,
+            domain: matchString(source, /domain\s*=\s*"([^"]+)"/) ?? 'uncategorized',
+            status: matchString(source, /status\s*=\s*"([^"]+)"/) ?? 'draft',
+            owner: matchString(source, /owner\s*=\s*"([^"]+)"/),
+            tags,
+            path: filePath.slice(projectRoot.length + 1),
+            lastModified: stat?.mtime.toISOString() ?? new Date(0).toISOString(),
+            description: matchString(source, /description\s*=\s*"((?:[^"\\]|\\.)*)"/) ?? '',
+            llmContext: matchString(source, /llmContext\s*=\s*"((?:[^"\\]|\\.)*)"/),
+            chartType: matchString(source, /chart\s*=\s*"([^"]+)"/) ?? matchString(source, /chart\.(\w+)\s*\(/) ?? undefined,
+            score: 0,
+            reasons: [],
+          });
+        } catch {
+          // skip unreadable block
+        }
+      }
+    }
+  };
+  scanDir(blocksDir);
+  return blocks;
+}
+
+function readdirSyncSafe(dir: string): Dirent[] {
+  try {
+    return readdirSync(dir, { withFileTypes: true });
+  } catch {
+    return [];
+  }
+}
+
+function statSyncSafe(path: string): Stats | null {
+  try {
+    return statSync(path);
+  } catch {
+    return null;
+  }
+}
+
+function matchString(source: string, regex: RegExp): string | null {
+  const match = regex.exec(source);
+  return match?.[1]?.replace(/\\"/g, '"').trim() || null;
+}
+
+function matchArray(source: string, regex: RegExp): string[] {
+  const match = regex.exec(source);
+  if (!match) return [];
+  return match[1]
+    .split(',')
+    .map((item) => item.trim().replace(/^"|"$/g, ''))
+    .filter(Boolean);
+}
+
+function cleanString(value: unknown): string {
+  return typeof value === 'string' ? value.trim() : '';
+}
+
+function normalizeTags(values: string[]): string[] {
+  return Array.from(new Set(values.map((value) => cleanString(value)).filter(Boolean)));
+}
+
+function slugify(value: string): string {
+  return value
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '');
+}
+
+function audienceFromTags(tags: string[]): string | undefined {
+  const tag = tags.find((value) => value.startsWith('audience:'));
+  if (!tag) return undefined;
+  return tag.slice('audience:'.length).replace(/-/g, ' ');
 }
 
 function loadAppById(

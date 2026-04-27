@@ -23,7 +23,7 @@ export { buildKGFromManifest } from './kg/build.js';
 export { loadSkills, parseSkill, buildSkillsPrompt } from './skills/loader.js';
 export type { Skill, SkillLoadResult } from './skills/loader.js';
 export { answer, parseProposal } from './answer-loop.js';
-export type { AgentAnswer, AgentCitation, AnswerKind, AnswerLoopInput } from './answer-loop.js';
+export type { AgentAnswer, AgentCitation, AgentResultPayload, AnswerKind, AnswerLoopInput } from './answer-loop.js';
 export {
   ClaudeProvider, OpenAIProvider, GeminiProvider, OllamaProvider,
   pickProvider, buildProvider,

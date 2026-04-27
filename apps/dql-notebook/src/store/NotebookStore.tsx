@@ -139,7 +139,7 @@ function notebookReducer(state: NotebookState, action: NotebookAction): Notebook
     }
 
     case 'SET_SIDEBAR_PANEL': {
-      const fullPagePanels = ['connection', 'reference', 'git', 'apps'] as const;
+      const fullPagePanels = ['connection', 'reference', 'git', 'apps', 'settings'] as const;
       const isFullPage = (action.panel as string | null) !== null
         && (fullPagePanels as readonly string[]).includes(action.panel as string);
       return {
@@ -157,6 +157,8 @@ function notebookReducer(state: NotebookState, action: NotebookAction): Notebook
                 ? 'git'
                 : action.panel === 'apps'
                   ? 'apps'
+                  : action.panel === 'settings'
+                    ? 'settings'
                   : state.activeFile?.type === 'block'
                     ? 'block_studio'
                     : 'notebook',

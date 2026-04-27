@@ -970,7 +970,8 @@ function scanAppsAndDashboards(
 
     const appDir = appJsonPath.slice(0, -'/dql.app.json'.length);
     const appFolderRel = appFolderRelPath(projectRoot, appJsonPath);
-    const dashboardIds: string[] = [];
+    const localDashboardIds: string[] = [];
+    const qualifiedDashboardIds: string[] = [];
 
     // Scan this App's dashboards.
     for (const dqldPath of findDashboardsForApp(appDir)) {
@@ -1010,9 +1011,11 @@ function scanAppsAndDashboards(
         });
       }
 
+      const qualifiedId = `${app.id}/${dashboard.id}`;
       const dashRecord: ManifestDashboard = {
         id: dashboard.id,
         appId: app.id,
+        qualifiedId,
         title: dashboard.metadata.title,
         description: dashboard.metadata.description,
         domain: dashboard.metadata.domain ?? app.domain,
@@ -1030,13 +1033,14 @@ function scanAppsAndDashboards(
           itemCount: dashboard.layout.items.length,
         },
       };
-      dashboards[dashboard.id] = dashRecord;
-      dashboardIds.push(dashboard.id);
+      dashboards[qualifiedId] = dashRecord;
+      localDashboardIds.push(dashboard.id);
+      qualifiedDashboardIds.push(qualifiedId);
     }
 
     // Cross-check homepage dashboard exists.
     if (app.homepage?.type === 'dashboard') {
-      if (!dashboardIds.includes(app.homepage.id)) {
+      if (!localDashboardIds.includes(app.homepage.id)) {
         diagnostics.push({
           kind: 'resolve',
           filePath: appRel,
@@ -1047,7 +1051,7 @@ function scanAppsAndDashboards(
     }
     // Cross-check schedule dashboards exist.
     for (const sched of app.schedules ?? []) {
-      if (!dashboardIds.includes(sched.dashboard)) {
+      if (!localDashboardIds.includes(sched.dashboard)) {
         diagnostics.push({
           kind: 'resolve',
           filePath: appRel,
@@ -1057,7 +1061,7 @@ function scanAppsAndDashboards(
       }
     }
 
-    apps[app.id] = appDocumentToManifest(app, appFolderRel, dashboardIds);
+    apps[app.id] = appDocumentToManifest(app, appFolderRel, qualifiedDashboardIds);
   }
 
   return { apps, dashboards };
@@ -1231,10 +1235,10 @@ function buildManifestLineage(
     description: model.description,
   }));
 
-  // First-class dashboards from `.dqld` files. Keyed by dashboard id so
-  // they don't collide with notebook-based dashboards (which key by title).
+  // First-class dashboards from `.dqld` files. Keyed by qualified id so
+  // dashboards with the same local id can exist in different Apps.
   const appDashboardInputs: LineageDashboardInput[] = Object.values(appDashboards ?? {}).map((d) => ({
-    name: d.id,
+    name: d.qualifiedId,
     filePath: d.filePath,
     blocks: [...d.blockIds, ...d.blockPathRefs],
     charts: [],

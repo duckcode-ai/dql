@@ -100,7 +100,7 @@ export interface TableCellConfig {
   pinnedColumns?: string[];
 }
 
-export type ChatProviderId = 'claude-agent-sdk' | 'claude-code';
+export type ChatProviderId = 'claude-agent-sdk' | 'claude-code' | 'openai' | 'gemini' | 'ollama';
 
 export interface ChatMessage {
   id: string;
@@ -137,9 +137,9 @@ export interface ParamConfig {
   defaultValue: string;
   options?: string[];
 }
-export type SidebarPanel = 'files' | 'schema' | 'block_library' | 'connection' | 'reference' | 'lineage' | 'git' | 'apps' | null;
+export type SidebarPanel = 'files' | 'schema' | 'block_library' | 'connection' | 'reference' | 'lineage' | 'git' | 'apps' | 'settings' | null;
 export type DevPanelTab = 'logs' | 'errors';
-export type MainView = 'notebook' | 'block_studio' | 'connection' | 'reference' | 'git' | 'apps';
+export type MainView = 'notebook' | 'block_studio' | 'connection' | 'reference' | 'git' | 'apps' | 'settings';
 
 /**
  * Apps consumption-layer surface — list of Apps + currently-open App.
@@ -151,6 +151,8 @@ export interface AppSummary {
   name: string;
   domain: string;
   description?: string;
+  audience?: string;
+  status?: 'ready' | 'empty';
   owners: string[];
   tags: string[];
   members: number;

@@ -1,0 +1,76 @@
+{
+  "version": 1,
+  "id": "cards-ops",
+  "name": "Cards Operations",
+  "description": "Daily cards volume, approval health, and fraud monitoring for operations leaders.",
+  "domain": "cards",
+  "owners": ["raj.kumar@acme-bank.com"],
+  "tags": ["cards", "fraud", "daily", "ops", "audience:operations"],
+  "members": [
+    {
+      "userId": "raj.kumar@acme-bank.com",
+      "displayName": "Raj Kumar - Head of Cards",
+      "roles": ["owner"],
+      "attributes": { "department": "cards" }
+    },
+    {
+      "userId": "mei.chen@acme-bank.com",
+      "displayName": "Mei Chen - Cards Analyst",
+      "roles": ["analyst"],
+      "attributes": { "department": "cards" }
+    },
+    {
+      "userId": "li.park@acme-bank.com",
+      "displayName": "Li Park - NYC Branch Manager",
+      "roles": ["branch_viewer"],
+      "attributes": { "region": "NA-NE", "branch": "NYC-042", "department": "cards" }
+    }
+  ],
+  "roles": [
+    { "id": "owner", "displayName": "Owner", "description": "Full App configuration and execution." },
+    { "id": "analyst", "displayName": "Analyst", "description": "Can execute dashboards and review proposed blocks." },
+    { "id": "viewer", "displayName": "Viewer", "description": "Can view and run certified dashboard tiles." },
+    { "id": "branch_viewer", "displayName": "Branch Viewer", "description": "Dashboard execution narrowed to the member's region and branch." }
+  ],
+  "policies": [
+    {
+      "id": "cards-dashboard-view",
+      "domain": "cards",
+      "minClassification": "internal",
+      "allowedRoles": ["viewer", "branch_viewer", "analyst", "owner"],
+      "accessLevel": "execute",
+      "enabled": true
+    },
+    {
+      "id": "cards-config-owner",
+      "domain": "cards",
+      "minClassification": "restricted",
+      "allowedRoles": ["owner"],
+      "accessLevel": "admin",
+      "enabled": true
+    }
+  ],
+  "rlsBindings": [
+    { "role": "branch_viewer", "variable": "user.region", "from": "region" },
+    { "role": "branch_viewer", "variable": "user.branch", "from": "branch" }
+  ],
+  "schedules": [
+    {
+      "id": "daily-7am-digest",
+      "cron": "0 7 * * 1-5",
+      "dashboard": "daily-ops",
+      "deliver": [{ "kind": "slack", "channel": "#cards-ops" }],
+      "description": "Weekday cards operations digest.",
+      "enabled": true
+    },
+    {
+      "id": "fraud-spike-watch",
+      "cron": "*/15 * * * *",
+      "dashboard": "fraud-watch",
+      "deliver": [{ "kind": "slack", "channel": "#cards-fraud-alerts" }],
+      "description": "High-frequency fraud monitoring digest.",
+      "enabled": true
+    }
+  ],
+  "homepage": { "type": "dashboard", "id": "daily-ops" }
+}

@@ -1,4 +1,6 @@
 import { z } from 'zod';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import type { DQLContext } from '../context.js';
 
 export const queryViaBlockInput = {
@@ -30,7 +32,15 @@ export async function queryViaBlock(
   }
 
   const base = args.serverUrl ?? process.env.DQL_RUNTIME_URL ?? 'http://127.0.0.1:3474';
-  const url = `${base.replace(/\/$/, '')}/api/query`;
+  const url = `${base.replace(/\/$/, '')}/api/notebook/execute`;
+  let source: string;
+  try {
+    source = readFileSync(join(ctx.projectRoot, block.filePath), 'utf-8');
+  } catch (err) {
+    return {
+      error: `Could not read block source for "${args.name}" at ${block.filePath}: ${err instanceof Error ? err.message : String(err)}`,
+    };
+  }
 
   let response: Response;
   try {
@@ -38,9 +48,12 @@ export async function queryViaBlock(
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        sql: block.sql,
-        blockName: args.name,
-        limit: args.limit,
+        cell: {
+          id: `mcp-${args.name}`,
+          type: 'dql',
+          source,
+          title: args.name,
+        },
       }),
     });
   } catch (err) {
@@ -54,17 +67,22 @@ export async function queryViaBlock(
   }
 
   const payload = (await response.json()) as {
-    columns?: Array<{ name: string; type?: string }>;
-    rows?: unknown[][];
-    durationMs?: number;
+    result?: {
+      columns?: Array<{ name: string; type?: string }>;
+      rows?: unknown[];
+      executionTime?: number;
+    };
+    error?: string;
   };
+  if (payload.error) return { error: payload.error };
+  const rows = payload.result?.rows ?? [];
 
   return {
     block: args.name,
     blockPath: block.filePath,
-    rowCount: payload.rows?.length ?? 0,
-    durationMs: payload.durationMs ?? null,
-    columns: payload.columns ?? [],
-    rows: payload.rows ?? [],
+    rowCount: rows.length,
+    durationMs: payload.result?.executionTime ?? null,
+    columns: payload.result?.columns ?? [],
+    rows: args.limit ? rows.slice(0, args.limit) : rows,
   };
 }

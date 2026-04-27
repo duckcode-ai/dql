@@ -2,6 +2,7 @@ import {
   NodeKind,
   parse,
   type BlockDeclNode,
+  type DecoratorNode,
   type ExpressionNode,
   type NamedArgNode,
   type SemanticLayer,
@@ -75,7 +76,10 @@ export function buildExecutionPlan(
     throw new Error('DQL notebook block is missing a query field.');
   }
 
-  const processed = processSQL(block.query.rawSQL, block.query.interpolations);
+  const processed = applyRLSDecorators(
+    block.decorators,
+    processSQL(block.query.rawSQL, block.query.interpolations),
+  );
   const chartConfig = block.visualization ? lowerChartConfig(block.visualization.properties) : undefined;
   const variables = Object.fromEntries(
     (block.params?.params ?? []).map((param) => [param.name, evaluateExpression(param.initializer)]),
@@ -206,10 +210,12 @@ function buildSemanticPlan(
     (block.params?.params ?? []).map((param) => [param.name, evaluateExpression(param.initializer)]),
   );
 
+  const processed = applyRLSDecorators(block.decorators, { sql: composed.sql, params: [] });
+
   return {
     title: block.name,
-    sql: composed.sql,
-    sqlParams: [],
+    sql: processed.sql,
+    sqlParams: processed.params,
     variables,
     chartConfig,
     tests: (block.tests ?? []).map((test) => ({
@@ -218,6 +224,77 @@ function buildSemanticPlan(
       expected: evaluateExpression(test.expected),
     })),
   };
+}
+
+const SAFE_RLS_COLUMN = /^[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*$/;
+const RLS_TEMPLATE_VARIABLE = /^\{([A-Za-z_][A-Za-z0-9_.]*)\}$/;
+
+function applyRLSDecorators(
+  decorators: DecoratorNode[],
+  processed: { sql: string; params: SQLParamSpec[] },
+): { sql: string; params: SQLParamSpec[] } {
+  const rlsDecorators = decorators.filter((d) => d.name === 'rls');
+  if (rlsDecorators.length === 0) return processed;
+
+  const clauses: string[] = [];
+  const params = [...processed.params];
+  let nextPosition = params.reduce((max, p) => Math.max(max, p.position), 0);
+  let literalCounter = 0;
+
+  for (const rls of rlsDecorators) {
+    if (rls.arguments.length < 2) continue;
+    const column = normalizeRLSColumn(rls.arguments[0]);
+    if (!column) continue;
+    const binding = resolveRLSValueBinding(rls.arguments[1]);
+    if (!binding) continue;
+    nextPosition += 1;
+    if (binding.type === 'variable') {
+      params.push({ name: binding.variableName, position: nextPosition });
+    } else {
+      literalCounter += 1;
+      params.push({
+        name: `__rls_literal_${literalCounter}`,
+        position: nextPosition,
+        literalValue: binding.literalValue,
+      });
+    }
+    clauses.push(`${column} = COALESCE($${nextPosition}, ${column})`);
+  }
+
+  if (clauses.length === 0) return { sql: processed.sql, params };
+  return {
+    sql: `SELECT * FROM (${processed.sql}) _dql_rls WHERE ${clauses.join(' AND ')}`,
+    params,
+  };
+}
+
+function normalizeRLSColumn(arg: ExpressionNode): string | null {
+  const raw = arg.kind === NodeKind.StringLiteral
+    ? arg.value
+    : arg.kind === NodeKind.Identifier
+      ? arg.name
+      : evaluateExpression(arg);
+  if (typeof raw !== 'string') return null;
+  const trimmed = raw.trim();
+  return SAFE_RLS_COLUMN.test(trimmed) ? trimmed : null;
+}
+
+function resolveRLSValueBinding(
+  arg: ExpressionNode,
+): { type: 'variable'; variableName: string } | { type: 'literal'; literalValue: unknown } | null {
+  if (arg.kind === NodeKind.StringLiteral) {
+    const raw = String(arg.value ?? '');
+    const match = raw.trim().match(RLS_TEMPLATE_VARIABLE);
+    if (match) return { type: 'variable', variableName: match[1] };
+    return { type: 'literal', literalValue: raw };
+  }
+  if (arg.kind === NodeKind.Identifier) return { type: 'variable', variableName: arg.name };
+  if (arg.kind === NodeKind.NumberLiteral || arg.kind === NodeKind.BooleanLiteral) {
+    return { type: 'literal', literalValue: arg.value };
+  }
+  const value = evaluateExpression(arg);
+  if (value !== undefined) return { type: 'literal', literalValue: value };
+  return null;
 }
 
 function evaluateExpression(node: ExpressionNode): unknown {
