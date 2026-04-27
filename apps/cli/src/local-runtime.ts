@@ -70,6 +70,11 @@ import {
   previewSemanticImport,
   syncSemanticImport,
 } from './semantic-import.js';
+import {
+  MetricFlowUnavailableError,
+  compileMetricFlowQuery,
+  hasDbtSemanticManifest,
+} from './metricflow.js';
 
 export interface ProjectConfig {
   project?: string;
@@ -258,29 +263,37 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
             });
             const absBlockPath = join(projectRoot, block.filePath);
             const source = readFileSync(absBlockPath, 'utf-8');
+            const semanticCompose = semanticLayer
+              ? composeSemanticBlockSql(source, semanticLayer, {
+                  driver: connection.driver,
+                  projectRoot,
+                  projectConfig,
+                  detectedProvider: semanticDetectedProvider,
+                })
+              : null;
             const plan = buildExecutionPlan(
               { id: item.i, type: 'dql', source, title: item.title ?? block.name },
               { semanticLayer, driver: connection.driver },
             );
-            if (!plan) {
+            if (!plan && !semanticCompose?.sql) {
               tiles.push({
                 tileId: item.i,
                 status: 'error',
                 blockId: block.name,
-                error: 'Block produced no executable plan',
+                error: semanticCompose?.diagnostics.find((diagnostic) => diagnostic.severity === 'error')?.message ?? 'Block produced no executable plan',
               });
               continue;
             }
             const prepared = prepareLocalExecution(
-              plan.sql,
+              semanticCompose?.sql ?? plan!.sql,
               isConnectionConfig(body.connection) ? body.connection : connection,
               projectRoot,
               projectConfig,
             );
             const result = await executor.executeQuery(
               prepared.sql,
-              plan.sqlParams,
-              runtimeVariables({ ...plan.variables, ...variables }),
+              plan?.sqlParams ?? [],
+              runtimeVariables({ ...(plan?.variables ?? {}), ...variables }),
               prepared.connection,
             );
             tiles.push({
@@ -291,7 +304,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
               certificationStatus: block.status ?? null,
               title: item.title ?? block.name,
               viz: item.viz,
-              chartConfig: plan.chartConfig ?? { chart: item.viz.type },
+              chartConfig: plan?.chartConfig ?? { chart: item.viz.type },
               result: normalizeQueryResult(result),
               citation: {
                 kind: 'block',
@@ -1168,7 +1181,13 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           }
         }
         const semanticCompose = semanticLayer
-          ? composeSemanticBlockSql(source, semanticLayer, { driver: targetConnection.driver, tableMapping })
+          ? composeSemanticBlockSql(source, semanticLayer, {
+              driver: targetConnection.driver,
+              tableMapping,
+              projectRoot,
+              projectConfig,
+              detectedProvider: semanticDetectedProvider,
+            })
           : null;
         const validation = validateBlockStudioSource(source, semanticLayer);
         const executableSql = semanticCompose?.sql ?? validation.executableSql;
@@ -1184,7 +1203,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           { id: 'block-studio', type: 'dql', source, title: 'Block Studio' },
           { semanticLayer, driver: targetConnection.driver },
         );
-        const sql = resolveProjectRelativeSqlPaths(plan?.sql ?? executableSql, projectRoot, projectConfig.dataDir);
+        const sql = resolveProjectRelativeSqlPaths(semanticCompose?.sql ?? plan?.sql ?? executableSql, projectRoot, projectConfig.dataDir);
         const result = await executor.executeQuery(
           sql,
           plan?.sqlParams ?? [],
@@ -1325,8 +1344,13 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           provider: projectConfig.semanticLayer?.provider ?? semanticDetectedProvider ?? null,
           errors: semanticLayerErrors,
           metrics: [],
+          measures: [],
           dimensions: [],
+          timeDimensions: [],
+          entities: [],
           hierarchies: [],
+          semanticModels: [],
+          savedQueries: [],
           domains: [],
           tags: [],
           favorites: userPrefs.favorites,
@@ -1345,6 +1369,25 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
         table: m.table,
         tags: m.tags ?? [],
         owner: m.owner ?? null,
+        metricType: m.metricType ?? null,
+        typeParams: m.typeParams ?? null,
+        filter: m.filter ?? null,
+        source: m.source ?? null,
+      }));
+      const measures = semanticLayer.listMeasures().map((m) => ({
+        name: m.name,
+        label: m.label,
+        description: m.description,
+        domain: m.domain,
+        agg: m.agg,
+        expr: m.expr ?? null,
+        table: m.table,
+        cube: m.cube ?? null,
+        aggTimeDimension: m.aggTimeDimension ?? null,
+        nonAdditiveDimension: m.nonAdditiveDimension ?? null,
+        tags: m.tags ?? [],
+        owner: m.owner ?? null,
+        source: m.source ?? null,
       }));
       const dimensions = semanticLayer.listDimensions().map((d) => ({
         name: d.name,
@@ -1356,6 +1399,40 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
         table: d.table,
         tags: d.tags ?? [],
         owner: d.owner ?? null,
+        cube: d.cube ?? null,
+        isTimeDimension: d.isTimeDimension ?? false,
+        typeParams: d.typeParams ?? null,
+        source: d.source ?? null,
+      }));
+      const timeDimensions = semanticLayer.listTimeDimensions().map((d) => ({
+        name: d.name,
+        label: d.label,
+        description: d.description,
+        domain: d.domain,
+        sql: d.sql,
+        type: d.type,
+        table: d.table,
+        cube: d.cube ?? null,
+        granularities: d.granularities ?? [],
+        primaryTime: d.primaryTime ?? false,
+        tags: d.tags ?? [],
+        owner: d.owner ?? null,
+        typeParams: d.typeParams ?? null,
+        source: d.source ?? null,
+      }));
+      const entities = semanticLayer.listEntities().map((e) => ({
+        name: e.name,
+        label: e.label,
+        description: e.description,
+        domain: e.domain,
+        type: e.type,
+        expr: e.expr ?? null,
+        table: e.table,
+        cube: e.cube ?? null,
+        role: e.role ?? null,
+        tags: e.tags ?? [],
+        owner: e.owner ?? null,
+        source: e.source ?? null,
       }));
       const hierarchies = semanticLayer.listHierarchies().map((h) => ({
         name: h.name,
@@ -1364,14 +1441,61 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
         domain: h.domain,
         levels: h.levels.map((l) => ({ name: l.name, label: l.label })),
       }));
+      const semanticModels = semanticLayer.listSemanticModels().map((m) => ({
+        name: m.name,
+        label: m.label,
+        description: m.description,
+        domain: m.domain,
+        model: m.model ?? null,
+        table: m.table,
+        entities: m.entities,
+        measures: m.measures,
+        dimensions: m.dimensions,
+        timeDimensions: m.timeDimensions,
+        tags: m.tags ?? [],
+        owner: m.owner ?? null,
+        source: m.source ?? null,
+      }));
+      const savedQueries = semanticLayer.listSavedQueries().map((q) => ({
+        name: q.name,
+        label: q.label,
+        description: q.description,
+        domain: q.domain,
+        metrics: q.metrics,
+        dimensions: q.dimensions,
+        timeDimension: q.timeDimension ?? null,
+        granularity: q.granularity ?? null,
+        filters: q.filters ?? null,
+        tags: q.tags ?? [],
+        owner: q.owner ?? null,
+        source: q.source ?? null,
+      }));
+      const provider = projectConfig.semanticLayer?.provider ?? semanticDetectedProvider ?? 'dql';
+      const dbtExecutionReady = provider === 'dbt'
+        ? hasDbtSemanticManifest(projectRoot, projectConfig.semanticLayer?.projectPath)
+        : false;
       res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
       res.end(serializeJSON({
         available: true,
-        provider: projectConfig.semanticLayer?.provider ?? semanticDetectedProvider ?? 'dql',
+        provider,
+        execution: provider === 'dbt'
+          ? {
+              engine: 'metricflow',
+              ready: dbtExecutionReady,
+              setup: dbtExecutionReady
+                ? null
+                : 'Run `dbt parse` or `dbt build` so target/semantic_manifest.json exists, and install MetricFlow so `mf` is on PATH.',
+            }
+          : { engine: 'native', ready: true, setup: null },
         errors: semanticLayerErrors,
         metrics,
+        measures,
         dimensions,
+        timeDimensions,
+        entities,
         hierarchies,
+        semanticModels,
+        savedQueries,
         domains: semanticLayer.listDomains(),
         tags: semanticLayer.listTags(),
         favorites: userPrefs.favorites,
@@ -1590,7 +1714,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
     if (req.method === 'GET' && path === '/api/semantic-layer/search') {
       if (!semanticLayer) {
         res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
-        res.end(serializeJSON({ metrics: [], dimensions: [], hierarchies: [] }));
+        res.end(serializeJSON({ metrics: [], measures: [], dimensions: [], timeDimensions: [], entities: [], hierarchies: [], semanticModels: [], savedQueries: [] }));
         return;
       }
       const q = url.searchParams.get('q') ?? '';
@@ -1600,7 +1724,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
       const results = semanticLayer.searchAdvanced(q, {
         domains: domain ? [domain] : undefined,
         tags: tag ? [tag] : undefined,
-        types: type === 'metric' || type === 'dimension' || type === 'hierarchy' ? [type] : undefined,
+        types: ['metric', 'measure', 'dimension', 'hierarchy', 'entity', 'semantic_model', 'saved_query'].includes(type) ? [type as any] : undefined,
       });
       res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
       res.end(serializeJSON({
@@ -1615,6 +1739,18 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           tags: m.tags ?? [],
           owner: m.owner ?? null,
         })),
+        measures: results.measures.map((m) => ({
+          name: m.name,
+          label: m.label,
+          description: m.description,
+          domain: m.domain,
+          agg: m.agg,
+          expr: m.expr,
+          table: m.table,
+          cube: m.cube,
+          tags: m.tags ?? [],
+          owner: m.owner ?? null,
+        })),
         dimensions: results.dimensions.map((d) => ({
           name: d.name,
           label: d.label,
@@ -1626,12 +1762,51 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           tags: d.tags ?? [],
           owner: d.owner ?? null,
         })),
+        timeDimensions: semanticLayer.listTimeDimensions().filter((d) => results.dimensions.some((dim) => dim.name === d.name)).map((d) => ({
+          name: d.name,
+          label: d.label,
+          description: d.description,
+          domain: d.domain,
+          sql: d.sql,
+          type: d.type,
+          table: d.table,
+          tags: d.tags ?? [],
+          owner: d.owner ?? null,
+        })),
+        entities: results.entities.map((e) => ({
+          name: e.name,
+          label: e.label,
+          description: e.description,
+          domain: e.domain,
+          type: e.type,
+          table: e.table,
+          tags: e.tags ?? [],
+          owner: e.owner ?? null,
+        })),
         hierarchies: results.hierarchies.map((h) => ({
           name: h.name,
           label: h.label,
           description: h.description,
           domain: h.domain,
           levels: h.levels.map((l) => ({ name: l.name, label: l.label })),
+        })),
+        semanticModels: results.semanticModels.map((m) => ({
+          name: m.name,
+          label: m.label,
+          description: m.description,
+          domain: m.domain,
+          table: m.table,
+          measures: m.measures,
+          dimensions: m.dimensions,
+          timeDimensions: m.timeDimensions,
+        })),
+        savedQueries: results.savedQueries.map((q) => ({
+          name: q.name,
+          label: q.label,
+          description: q.description,
+          domain: q.domain,
+          metrics: q.metrics,
+          dimensions: q.dimensions,
         })),
       }));
       return;
@@ -1906,13 +2081,15 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           return;
         }
         const body = await readJSON(req);
-        const { metrics = [], dimensions = [], filters = [], limit, timeDimension, orderBy } = body as {
+        const { metrics = [], dimensions = [], filters = [], limit, timeDimension, orderBy, savedQuery, engine } = body as {
           metrics: string[];
           dimensions: string[];
-          filters?: Array<{ dimension: string; operator: string; values: string[] }>;
+          filters?: Array<{ dimension: string; operator: string; values: string[]; expression?: string }>;
           timeDimension?: { name: string; granularity: string };
           orderBy?: Array<{ name: string; direction: 'asc' | 'desc' }>;
           limit?: number;
+          savedQuery?: string;
+          engine?: 'native' | 'metricflow';
         };
         // Resolve which connection to use — request can override default
         const targetConnection = isConnectionConfig(body.connection) ? body.connection : connection;
@@ -1946,7 +2123,22 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
         } catch {
           // Non-fatal: proceed without table mapping
         }
-        const composed = semanticLayer.composeQuery({ metrics, dimensions, filters, limit, timeDimension, orderBy, driver, tableMapping });
+        const composed = composeRuntimeSemanticQuery({
+          metrics,
+          dimensions,
+          filters,
+          limit,
+          timeDimension,
+          orderBy,
+          savedQuery,
+          engine,
+        }, semanticLayer, {
+          projectRoot,
+          projectConfig,
+          detectedProvider: semanticDetectedProvider,
+          driver,
+          tableMapping,
+        });
         if (!composed) {
           res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
           res.end(serializeJSON({ error: `Could not compose query for metrics: [${metrics.join(', ')}]` }));
@@ -1960,6 +2152,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           sql: composed.sql,
           tables: composed.tables,
           joins: composed.joins,
+          engine: composed.engine,
           result: normalizeQueryResult(result),
         }));
       } catch (error) {
@@ -1968,8 +2161,15 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           res.end(serializeJSON({ error: error.message, code: 'unauthorized' }));
           return;
         }
-        res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' });
-        res.end(serializeJSON({ error: error instanceof Error ? error.message : String(error) }));
+        const status = error instanceof MetricFlowUnavailableError ? 400 : 500;
+        res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({
+          error: error instanceof Error ? error.message : String(error),
+          code: error instanceof MetricFlowUnavailableError ? 'metricflow_unavailable' : undefined,
+          hint: error instanceof MetricFlowUnavailableError
+            ? 'Install dbt Semantic Layer dependencies, run dbt parse/build to create target/semantic_manifest.json, then retry.'
+            : undefined,
+        }));
       }
       return;
     }
@@ -1982,13 +2182,15 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           return;
         }
         const body = await readJSON(req);
-        const { metrics = [], dimensions = [], filters = [], limit, timeDimension, orderBy } = body as {
+        const { metrics = [], dimensions = [], filters = [], limit, timeDimension, orderBy, savedQuery, engine } = body as {
           metrics: string[];
           dimensions: string[];
-          filters?: Array<{ dimension: string; operator: string; values: string[] }>;
+          filters?: Array<{ dimension: string; operator: string; values: string[]; expression?: string }>;
           timeDimension?: { name: string; granularity: string };
           orderBy?: Array<{ name: string; direction: 'asc' | 'desc' }>;
           limit?: number;
+          savedQuery?: string;
+          engine?: 'native' | 'metricflow';
         };
         const targetConnection = isConnectionConfig(body.connection) ? body.connection : connection;
         const driver = targetConnection.driver;
@@ -2015,7 +2217,22 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
         } catch {
           tableMapping = undefined;
         }
-        const composed = semanticLayer.composeQuery({ metrics, dimensions, filters, limit, timeDimension, orderBy, driver, tableMapping });
+        const composed = composeRuntimeSemanticQuery({
+          metrics,
+          dimensions,
+          filters,
+          limit,
+          timeDimension,
+          orderBy,
+          savedQuery,
+          engine,
+        }, semanticLayer, {
+          projectRoot,
+          projectConfig,
+          detectedProvider: semanticDetectedProvider,
+          driver,
+          tableMapping,
+        });
         if (!composed) {
           res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
           res.end(serializeJSON({ error: 'Could not compose semantic block preview SQL.' }));
@@ -2028,11 +2245,19 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           sql: composed.sql,
           joins: composed.joins,
           tables: composed.tables,
+          engine: composed.engine,
           result: normalizeQueryResult(result),
         }));
       } catch (error) {
-        res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' });
-        res.end(serializeJSON({ error: error instanceof Error ? error.message : String(error) }));
+        const status = error instanceof MetricFlowUnavailableError ? 400 : 500;
+        res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({
+          error: error instanceof Error ? error.message : String(error),
+          code: error instanceof MetricFlowUnavailableError ? 'metricflow_unavailable' : undefined,
+          hint: error instanceof MetricFlowUnavailableError
+            ? 'Install dbt Semantic Layer dependencies, run dbt parse/build to create target/semantic_manifest.json, then retry.'
+            : undefined,
+        }));
       }
       return;
     }
@@ -2057,6 +2282,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           filters = [],
           chart = 'table',
           blockType = 'semantic',
+          engine,
         } = body as {
           name: string;
           domain?: string;
@@ -2069,6 +2295,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           filters?: Array<{ dimension: string; operator: string; values: string[] }>;
           chart?: string;
           blockType?: 'semantic' | 'custom';
+          engine?: 'native' | 'metricflow';
         };
         if (!name || metrics.length === 0) {
           res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
@@ -2076,11 +2303,16 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           return;
         }
         const targetConnection = isConnectionConfig(body.connection) ? body.connection : connection;
-        const composed = semanticLayer.composeQuery({
+        const composed = composeRuntimeSemanticQuery({
           metrics,
           dimensions,
           filters,
           timeDimension,
+          engine,
+        }, semanticLayer, {
+          projectRoot,
+          projectConfig,
+          detectedProvider: semanticDetectedProvider,
           driver: targetConnection.driver,
         });
         if (!composed) {
@@ -2111,8 +2343,15 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           res.end(serializeJSON({ error: 'Block already exists' }));
           return;
         }
-        res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' });
-        res.end(serializeJSON({ error: error instanceof Error ? error.message : String(error) }));
+        const status = error instanceof MetricFlowUnavailableError ? 400 : 500;
+        res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({
+          error: error instanceof Error ? error.message : String(error),
+          code: error instanceof MetricFlowUnavailableError ? 'metricflow_unavailable' : undefined,
+          hint: error instanceof MetricFlowUnavailableError
+            ? 'Install dbt Semantic Layer dependencies, run dbt parse/build to create target/semantic_manifest.json, then retry.'
+            : undefined,
+        }));
       }
       return;
     }
@@ -3171,6 +3410,17 @@ interface ParsedSemanticBlockConfig {
   limit?: number;
 }
 
+interface RuntimeSemanticQueryRequest {
+  metrics: string[];
+  dimensions: string[];
+  filters?: Array<{ dimension?: string; operator?: string; values?: string[]; expression?: string }>;
+  timeDimension?: { name: string; granularity: string };
+  orderBy?: Array<{ name: string; direction: 'asc' | 'desc' }>;
+  limit?: number;
+  savedQuery?: string;
+  engine?: 'native' | 'metricflow';
+}
+
 function parseBlockStudioArrayField(source: string, key: string): string[] {
   const match = source.match(new RegExp(`\\b${key}\\s*=\\s*\\[([\\s\\S]*?)\\]`, 'i'));
   if (!match) return [];
@@ -3228,12 +3478,74 @@ function buildSemanticTableMapping(
   return Object.keys(tableMapping).length > 0 ? tableMapping : undefined;
 }
 
+function isDbtSemanticRuntime(
+  projectConfig: ProjectConfig,
+  detectedProvider: string | null | undefined,
+  semanticLayer?: SemanticLayer | null,
+): boolean {
+  if (projectConfig.semanticLayer?.provider === 'dbt' || detectedProvider === 'dbt') return true;
+  return Boolean(semanticLayer?.listMetrics().some((metric) => metric.source?.provider === 'dbt'));
+}
+
+function composeRuntimeSemanticQuery(
+  request: RuntimeSemanticQueryRequest,
+  semanticLayer: SemanticLayer,
+  context: {
+    projectRoot: string;
+    projectConfig: ProjectConfig;
+    detectedProvider: string | null | undefined;
+    driver?: ConnectionConfig['driver'];
+    tableMapping?: Record<string, string>;
+  },
+): { sql: string; joins: string[]; tables: string[]; engine: 'native' | 'metricflow' } | null {
+  const useMetricFlow = request.engine === 'metricflow' || (
+    request.engine !== 'native' &&
+    isDbtSemanticRuntime(context.projectConfig, context.detectedProvider, semanticLayer)
+  );
+
+  if (useMetricFlow) {
+    const dbtProjectPath = context.projectConfig.semanticLayer?.projectPath;
+    const compiled = compileMetricFlowQuery({
+      projectRoot: context.projectRoot,
+      dbtProjectPath,
+      metrics: request.metrics,
+      dimensions: request.dimensions,
+      filters: request.filters,
+      timeDimension: request.timeDimension,
+      orderBy: request.orderBy,
+      limit: request.limit,
+      savedQuery: request.savedQuery,
+    });
+    return {
+      sql: compiled.sql,
+      joins: [],
+      tables: [],
+      engine: 'metricflow',
+    };
+  }
+
+  const composed = semanticLayer.composeQuery({
+    metrics: request.metrics,
+    dimensions: request.dimensions,
+    filters: request.filters as Array<{ dimension: string; operator: string; values: string[] }> | undefined,
+    limit: request.limit,
+    timeDimension: request.timeDimension,
+    orderBy: request.orderBy,
+    driver: context.driver,
+    tableMapping: context.tableMapping,
+  });
+  return composed ? { ...composed, engine: 'native' } : null;
+}
+
 function composeSemanticBlockSql(
   source: string,
   semanticLayer: SemanticLayer,
   options?: {
     driver?: ConnectionConfig['driver'];
     tableMapping?: Record<string, string>;
+    projectRoot?: string;
+    projectConfig?: ProjectConfig;
+    detectedProvider?: string | null;
   },
 ): { sql: string | null; diagnostics: BlockStudioDiagnostic[]; semanticRefs: { metrics: string[]; dimensions: string[]; segments: string[] } } {
   const config = parseSemanticBlockConfig(source);
@@ -3282,16 +3594,41 @@ function composeSemanticBlockSql(
     return { sql: null, diagnostics, semanticRefs };
   }
 
-  const composed = semanticLayer.composeQuery({
-    metrics,
-    dimensions: config.dimensions,
-    timeDimension: config.timeDimension && config.granularity
-      ? { name: config.timeDimension, granularity: config.granularity }
-      : undefined,
-    limit: config.limit,
-    driver: options?.driver,
-    tableMapping: options?.tableMapping,
-  });
+  let composed: { sql: string; joins: string[]; tables: string[] } | null;
+  try {
+    composed = options?.projectRoot && options.projectConfig
+      ? composeRuntimeSemanticQuery({
+          metrics,
+          dimensions: config.dimensions,
+          timeDimension: config.timeDimension && config.granularity
+            ? { name: config.timeDimension, granularity: config.granularity }
+            : undefined,
+          limit: config.limit,
+        }, semanticLayer, {
+          projectRoot: options.projectRoot,
+          projectConfig: options.projectConfig,
+          detectedProvider: options.detectedProvider ?? null,
+          driver: options.driver,
+          tableMapping: options.tableMapping,
+        })
+      : semanticLayer.composeQuery({
+          metrics,
+          dimensions: config.dimensions,
+          timeDimension: config.timeDimension && config.granularity
+            ? { name: config.timeDimension, granularity: config.granularity }
+            : undefined,
+          limit: config.limit,
+          driver: options?.driver,
+          tableMapping: options?.tableMapping,
+        });
+  } catch (error) {
+    diagnostics.push({
+      severity: 'error',
+      code: error instanceof MetricFlowUnavailableError ? 'metricflow_unavailable' : 'semantic_compose_failed',
+      message: error instanceof Error ? error.message : String(error),
+    });
+    return { sql: null, diagnostics, semanticRefs };
+  }
   if (!composed) {
     diagnostics.push({
       severity: 'error',

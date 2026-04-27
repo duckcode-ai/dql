@@ -159,8 +159,12 @@ export function BlockStudio() {
   );
   const semanticStats = {
     metrics: state.semanticLayer.metrics.length,
+    measures: state.semanticLayer.measures.length,
     dimensions: state.semanticLayer.dimensions.length,
+    timeDimensions: state.semanticLayer.timeDimensions.length,
+    entities: state.semanticLayer.entities.length,
     hierarchies: state.semanticLayer.hierarchies.length,
+    savedQueries: state.semanticLayer.savedQueries.length,
   };
   const totalTreeHeight = flatSemanticRows.length * TREE_ROW_HEIGHT;
   const visibleRows = useMemo(() => {
@@ -429,7 +433,7 @@ export function BlockStudio() {
             Explorer
           </span>
           <span style={{ fontSize: 11, color: t.textMuted, fontFamily: t.font }}>
-            {semanticStats.metrics} metrics · {semanticStats.dimensions} dims · {semanticStats.hierarchies} hier
+              {semanticStats.metrics} metrics · {semanticStats.measures} measures · {semanticStats.dimensions + semanticStats.timeDimensions} dims · {semanticStats.entities} entities · {semanticStats.savedQueries} saved queries
           </span>
           <div style={{ flex: 1 }} />
           {state.semanticLayer.provider && (
@@ -1629,7 +1633,16 @@ function hasSemanticNodes(tree: SemanticTreeNode | null): boolean {
 }
 
 function buildFallbackSemanticTree(layer: SemanticLayerState): SemanticTreeNode | null {
-  if (layer.metrics.length === 0 && layer.dimensions.length === 0 && layer.hierarchies.length === 0) {
+  if (
+    layer.metrics.length === 0 &&
+    layer.measures.length === 0 &&
+    layer.dimensions.length === 0 &&
+    layer.timeDimensions.length === 0 &&
+    layer.entities.length === 0 &&
+    layer.hierarchies.length === 0 &&
+    layer.semanticModels.length === 0 &&
+    layer.savedQueries.length === 0
+  ) {
     return null;
   }
 
@@ -1658,6 +1671,16 @@ function buildFallbackSemanticTree(layer: SemanticLayerState): SemanticTreeNode 
     });
   }
 
+  for (const measure of layer.measures) {
+    const domain = measure.domain || 'uncategorized';
+    pushToDomain(domain, {
+      id: `measure:${measure.name}`,
+      label: measure.label || measure.name,
+      kind: 'measure',
+      meta: { provider, domain, cube: measure.cube ?? measure.table, owner: measure.owner ?? '', tags: measure.tags.join(','), agg: measure.agg },
+    });
+  }
+
   for (const dimension of layer.dimensions) {
     const domain = dimension.domain || 'uncategorized';
     pushToDomain(domain, {
@@ -1671,6 +1694,46 @@ function buildFallbackSemanticTree(layer: SemanticLayerState): SemanticTreeNode 
         owner: dimension.owner ?? '',
         tags: dimension.tags.join(','),
       },
+    });
+  }
+
+  for (const dimension of layer.timeDimensions) {
+    const domain = dimension.domain || 'uncategorized';
+    pushToDomain(domain, {
+      id: `time_dimension:${dimension.name}`,
+      label: dimension.label || dimension.name,
+      kind: 'time_dimension',
+      meta: { provider, domain, cube: dimension.cube ?? dimension.table, owner: dimension.owner ?? '', tags: dimension.tags.join(',') },
+    });
+  }
+
+  for (const entity of layer.entities) {
+    const domain = entity.domain || 'uncategorized';
+    pushToDomain(domain, {
+      id: `entity:${entity.name}`,
+      label: entity.label || entity.name,
+      kind: 'entity',
+      meta: { provider, domain, cube: entity.cube ?? entity.table, owner: entity.owner ?? '', tags: entity.tags.join(','), type: entity.type },
+    });
+  }
+
+  for (const model of layer.semanticModels) {
+    const domain = model.domain || 'uncategorized';
+    pushToDomain(domain, {
+      id: `semantic_model:${model.name}`,
+      label: model.label || model.name,
+      kind: 'semantic_model',
+      meta: { provider, domain, table: model.table, owner: model.owner ?? '', tags: model.tags.join(',') },
+    });
+  }
+
+  for (const savedQuery of layer.savedQueries) {
+    const domain = savedQuery.domain || 'uncategorized';
+    pushToDomain(domain, {
+      id: `saved_query:${savedQuery.name}`,
+      label: savedQuery.label || savedQuery.name,
+      kind: 'saved_query',
+      meta: { provider, domain, owner: savedQuery.owner ?? '', tags: savedQuery.tags.join(',') },
     });
   }
 
@@ -1691,39 +1754,39 @@ function buildFallbackSemanticTree(layer: SemanticLayerState): SemanticTreeNode 
     .sort((a, b) => a[0].localeCompare(b[0]))
     .map(([domain, items]) => {
       const metrics = items.filter((item) => item.kind === 'metric');
+      const measures = items.filter((item) => item.kind === 'measure');
       const dimensions = items.filter((item) => item.kind === 'dimension');
+      const timeDimensions = items.filter((item) => item.kind === 'time_dimension');
+      const entities = items.filter((item) => item.kind === 'entity');
       const hierarchies = items.filter((item) => item.kind === 'hierarchy');
+      const semanticModels = items.filter((item) => item.kind === 'semantic_model');
+      const savedQueries = items.filter((item) => item.kind === 'saved_query');
       const children: SemanticTreeNode[] = [];
+      const pushGroup = (kind: SemanticTreeNode['kind'], label: string, groupItems: SemanticTreeNode[]) => {
+        if (groupItems.length === 0) return;
+        children.push({
+          id: `group:${domain}:${label.toLowerCase().replace(/[^a-z0-9]+/g, '-')}`,
+          label,
+          kind: 'group',
+          count: groupItems.length,
+          meta: { provider, domain, objectKind: kind },
+          children: groupItems.sort((a, b) => a.label.localeCompare(b.label)),
+        });
+      };
       if (metrics.length > 0) {
-        children.push({
-          id: `group:${domain}:metrics`,
-          label: 'Metrics',
-          kind: 'group',
-          count: metrics.length,
-          meta: { provider, domain },
-          children: metrics.sort((a, b) => a.label.localeCompare(b.label)),
-        });
+        pushGroup('metric', 'Metrics', metrics);
       }
+      pushGroup('measure', 'Measures', measures);
       if (dimensions.length > 0) {
-        children.push({
-          id: `group:${domain}:dimensions`,
-          label: 'Dimensions',
-          kind: 'group',
-          count: dimensions.length,
-          meta: { provider, domain },
-          children: dimensions.sort((a, b) => a.label.localeCompare(b.label)),
-        });
+        pushGroup('dimension', 'Dimensions', dimensions);
       }
+      pushGroup('time_dimension', 'Time Dimensions', timeDimensions);
+      pushGroup('entity', 'Entities', entities);
       if (hierarchies.length > 0) {
-        children.push({
-          id: `group:${domain}:hierarchies`,
-          label: 'Hierarchies',
-          kind: 'group',
-          count: hierarchies.length,
-          meta: { provider, domain },
-          children: hierarchies.sort((a, b) => a.label.localeCompare(b.label)),
-        });
+        pushGroup('hierarchy', 'Hierarchies', hierarchies);
       }
+      pushGroup('semantic_model', 'Semantic Models', semanticModels);
+      pushGroup('saved_query', 'Saved Queries', savedQueries);
       return {
         id: `domain:${provider}:${domain}`,
         label: domain,

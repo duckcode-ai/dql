@@ -27,6 +27,10 @@ export interface MetricDefinition {
   owner?: string;
   cube?: string;
   aggregation?: string;
+  metricType?: string;
+  typeParams?: Record<string, unknown>;
+  filter?: string | Record<string, unknown> | Array<Record<string, unknown>>;
+  aggTimeDimension?: string;
   source?: SemanticSourceMetadata;
 }
 
@@ -41,6 +45,75 @@ export interface DimensionDefinition {
   tags?: string[];
   owner?: string;
   cube?: string;
+  expr?: string;
+  isTimeDimension?: boolean;
+  typeParams?: Record<string, unknown>;
+  source?: SemanticSourceMetadata;
+}
+
+export interface MeasureDefinition {
+  name: string;
+  label: string;
+  description: string;
+  domain?: string;
+  agg: string;
+  expr?: string;
+  table: string;
+  cube?: string;
+  aggTimeDimension?: string;
+  createMetric?: boolean;
+  nonAdditiveDimension?: Record<string, unknown>;
+  filter?: string | Record<string, unknown> | Array<Record<string, unknown>>;
+  tags?: string[];
+  owner?: string;
+  source?: SemanticSourceMetadata;
+}
+
+export interface EntityDefinition {
+  name: string;
+  label: string;
+  description: string;
+  domain?: string;
+  type: 'primary' | 'unique' | 'foreign' | 'natural' | string;
+  expr?: string;
+  table: string;
+  cube?: string;
+  role?: string;
+  tags?: string[];
+  owner?: string;
+  source?: SemanticSourceMetadata;
+}
+
+export interface SemanticModelDefinition {
+  name: string;
+  label: string;
+  description: string;
+  domain?: string;
+  model?: string;
+  table: string;
+  defaults?: Record<string, unknown>;
+  entities: string[];
+  measures: string[];
+  dimensions: string[];
+  timeDimensions: string[];
+  tags?: string[];
+  owner?: string;
+  source?: SemanticSourceMetadata;
+}
+
+export interface SavedQueryDefinition {
+  name: string;
+  label: string;
+  description: string;
+  domain?: string;
+  metrics: string[];
+  dimensions: string[];
+  timeDimension?: string;
+  granularity?: string;
+  filters?: Array<Record<string, unknown>> | Record<string, unknown> | string;
+  exports?: Array<Record<string, unknown>>;
+  tags?: string[];
+  owner?: string;
   source?: SemanticSourceMetadata;
 }
 
@@ -183,18 +256,26 @@ export interface SemanticLayerConfig {
   hierarchies?: HierarchyDefinition[];
   segments?: SegmentDefinition[];
   preAggregations?: PreAggregationDefinition[];
+  measures?: MeasureDefinition[];
+  entities?: EntityDefinition[];
+  semanticModels?: SemanticModelDefinition[];
+  savedQueries?: SavedQueryDefinition[];
 }
 
 export interface SemanticSearchOptions {
   domains?: string[];
   tags?: string[];
-  types?: Array<'metric' | 'dimension' | 'hierarchy'>;
+  types?: Array<'metric' | 'dimension' | 'hierarchy' | 'measure' | 'entity' | 'semantic_model' | 'saved_query'>;
 }
 
 export interface SemanticSearchResults {
   metrics: MetricDefinition[];
   dimensions: DimensionDefinition[];
   hierarchies: HierarchyDefinition[];
+  measures: MeasureDefinition[];
+  entities: EntityDefinition[];
+  semanticModels: SemanticModelDefinition[];
+  savedQueries: SavedQueryDefinition[];
 }
 
 /**
@@ -354,6 +435,10 @@ export class SemanticLayer {
   private segments: Map<string, SegmentDefinition> = new Map();
   private preAggregations: Map<string, PreAggregationDefinition> = new Map();
   private cubes: Map<string, CubeDefinition> = new Map();
+  private measures: Map<string, MeasureDefinition> = new Map();
+  private entities: Map<string, EntityDefinition> = new Map();
+  private semanticModels: Map<string, SemanticModelDefinition> = new Map();
+  private savedQueries: Map<string, SavedQueryDefinition> = new Map();
   // cube-name → list of joins for that cube (adjacency list)
   private joinGraph: Map<string, JoinDefinition[]> = new Map();
 
@@ -364,6 +449,10 @@ export class SemanticLayer {
       for (const h of config.hierarchies ?? []) this.addHierarchy(h);
       for (const s of config.segments ?? []) this.addSegment(s);
       for (const p of config.preAggregations ?? []) this.addPreAggregation(p);
+      for (const m of config.measures ?? []) this.addMeasure(m);
+      for (const e of config.entities ?? []) this.addEntity(e);
+      for (const sm of config.semanticModels ?? []) this.addSemanticModel(sm);
+      for (const sq of config.savedQueries ?? []) this.addSavedQuery(sq);
     }
   }
 
@@ -393,6 +482,22 @@ export class SemanticLayer {
       rev.push({ ...join, left: join.right, right: join.left });
       this.joinGraph.set(join.right, rev);
     }
+  }
+
+  addMeasure(measure: MeasureDefinition): void {
+    this.measures.set(measure.name, measure);
+  }
+
+  addEntity(entity: EntityDefinition): void {
+    this.entities.set(entity.name, entity);
+  }
+
+  addSemanticModel(model: SemanticModelDefinition): void {
+    this.semanticModels.set(model.name, model);
+  }
+
+  addSavedQuery(savedQuery: SavedQueryDefinition): void {
+    this.savedQueries.set(savedQuery.name, savedQuery);
   }
 
   getCube(name: string): CubeDefinition | undefined {
@@ -683,6 +788,22 @@ export class SemanticLayer {
     return this.hierarchies.get(name);
   }
 
+  getMeasure(name: string): MeasureDefinition | undefined {
+    return this.measures.get(name);
+  }
+
+  getEntity(name: string): EntityDefinition | undefined {
+    return this.entities.get(name);
+  }
+
+  getSemanticModel(name: string): SemanticModelDefinition | undefined {
+    return this.semanticModels.get(name);
+  }
+
+  getSavedQuery(name: string): SavedQueryDefinition | undefined {
+    return this.savedQueries.get(name);
+  }
+
   listMetrics(domain?: string): MetricDefinition[] {
     const all = Array.from(this.metrics.values());
     return domain ? all.filter((m) => m.domain === domain) : all;
@@ -696,6 +817,30 @@ export class SemanticLayer {
   listHierarchies(domain?: string): HierarchyDefinition[] {
     const all = Array.from(this.hierarchies.values());
     return domain ? all.filter((h) => h.domain === domain) : all;
+  }
+
+  listMeasures(domain?: string): MeasureDefinition[] {
+    const all = Array.from(this.measures.values());
+    return domain ? all.filter((m) => m.domain === domain) : all;
+  }
+
+  listEntities(domain?: string): EntityDefinition[] {
+    const all = Array.from(this.entities.values());
+    return domain ? all.filter((e) => e.domain === domain) : all;
+  }
+
+  listTimeDimensions(domain?: string): TimeDimensionDefinition[] {
+    return this.listDimensions(domain).filter((d): d is TimeDimensionDefinition => Boolean(d.isTimeDimension || d.source?.objectType === 'time_dimension'));
+  }
+
+  listSemanticModels(domain?: string): SemanticModelDefinition[] {
+    const all = Array.from(this.semanticModels.values());
+    return domain ? all.filter((m) => m.domain === domain) : all;
+  }
+
+  listSavedQueries(domain?: string): SavedQueryDefinition[] {
+    const all = Array.from(this.savedQueries.values());
+    return domain ? all.filter((q) => q.domain === domain) : all;
   }
 
   listDomains(): string[] {
@@ -718,6 +863,18 @@ export class SemanticLayer {
     for (const cube of this.cubes.values()) {
       if (cube.domain) domains.add(cube.domain);
     }
+    for (const measure of this.measures.values()) {
+      if (measure.domain) domains.add(measure.domain);
+    }
+    for (const entity of this.entities.values()) {
+      if (entity.domain) domains.add(entity.domain);
+    }
+    for (const model of this.semanticModels.values()) {
+      if (model.domain) domains.add(model.domain);
+    }
+    for (const query of this.savedQueries.values()) {
+      if (query.domain) domains.add(query.domain);
+    }
     return Array.from(domains).sort((a, b) => a.localeCompare(b));
   }
 
@@ -734,6 +891,10 @@ export class SemanticLayer {
     for (const segment of this.segments.values()) collect(segment.tags);
     for (const preAggregation of this.preAggregations.values()) collect(preAggregation.tags);
     for (const cube of this.cubes.values()) collect(cube.tags);
+    for (const measure of this.measures.values()) collect(measure.tags);
+    for (const entity of this.entities.values()) collect(entity.tags);
+    for (const model of this.semanticModels.values()) collect(model.tags);
+    for (const query of this.savedQueries.values()) collect(query.tags);
     return Array.from(tags).sort((a, b) => a.localeCompare(b));
   }
 
@@ -802,7 +963,7 @@ export class SemanticLayer {
     };
     const matchesDomain = (domain?: string): boolean => domainSet.size === 0 || (!!domain && domainSet.has(domain));
     const matchesTags = (tags?: string[]): boolean => tagSet.size === 0 || (tags ?? []).some((tag) => tagSet.has(tag));
-    const wantsType = (type: 'metric' | 'dimension' | 'hierarchy'): boolean => typeSet.size === 0 || typeSet.has(type);
+    const wantsType = (type: NonNullable<SemanticSearchOptions['types']>[number]): boolean => typeSet.size === 0 || typeSet.has(type);
 
     return {
       metrics: wantsType('metric')
@@ -824,6 +985,34 @@ export class SemanticLayer {
             matchesQuery([hierarchy.name, hierarchy.label, hierarchy.description, hierarchy.domain, ...(hierarchy.tags ?? [])]) &&
             matchesDomain(hierarchy.domain) &&
             matchesTags(hierarchy.tags),
+          )
+        : [],
+      measures: wantsType('measure')
+        ? Array.from(this.measures.values()).filter((measure) =>
+            matchesQuery([measure.name, measure.label, measure.description, measure.table, measure.domain, measure.agg, ...(measure.tags ?? [])]) &&
+            matchesDomain(measure.domain) &&
+            matchesTags(measure.tags),
+          )
+        : [],
+      entities: wantsType('entity')
+        ? Array.from(this.entities.values()).filter((entity) =>
+            matchesQuery([entity.name, entity.label, entity.description, entity.table, entity.domain, entity.type, ...(entity.tags ?? [])]) &&
+            matchesDomain(entity.domain) &&
+            matchesTags(entity.tags),
+          )
+        : [],
+      semanticModels: wantsType('semantic_model')
+        ? Array.from(this.semanticModels.values()).filter((model) =>
+            matchesQuery([model.name, model.label, model.description, model.table, model.domain, model.model, ...(model.tags ?? [])]) &&
+            matchesDomain(model.domain) &&
+            matchesTags(model.tags),
+          )
+        : [],
+      savedQueries: wantsType('saved_query')
+        ? Array.from(this.savedQueries.values()).filter((query) =>
+            matchesQuery([query.name, query.label, query.description, query.domain, ...(query.metrics ?? []), ...(query.dimensions ?? []), ...(query.tags ?? [])]) &&
+            matchesDomain(query.domain) &&
+            matchesTags(query.tags),
           )
         : [],
     };
@@ -879,7 +1068,16 @@ export class SemanticLayer {
       const knownLevel = Array.from(this.hierarchies.values()).some((h) =>
         h.levels.some((level) => level.name === ref),
       );
-      if (this.metrics.has(ref) || this.dimensions.has(ref) || this.hierarchies.has(ref) || knownLevel) {
+      if (
+        this.metrics.has(ref) ||
+        this.dimensions.has(ref) ||
+        this.hierarchies.has(ref) ||
+        this.measures.has(ref) ||
+        this.entities.has(ref) ||
+        this.semanticModels.has(ref) ||
+        this.savedQueries.has(ref) ||
+        knownLevel
+      ) {
         valid.push(ref);
       } else {
         unknown.push(ref);

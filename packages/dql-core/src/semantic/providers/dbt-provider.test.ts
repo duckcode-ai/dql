@@ -157,7 +157,7 @@ metrics:
     expect(metric.table).toBe('stg_orders');
   });
 
-  it('skips metrics whose measure is unknown', () => {
+  it('preserves metrics whose simple measure is unresolved so MetricFlow can compile them later', () => {
     writeManifest({
       semantic_models: {},
       metrics: {
@@ -171,7 +171,85 @@ metrics:
 
     const provider = new DbtProvider();
     const layer = provider.load({ provider: 'dbt' }, tmpDir);
-    expect(layer.listMetrics()).toHaveLength(0);
+    const metric = layer.getMetric('dangling');
+    expect(metric).toBeDefined();
+    expect(metric?.metricType).toBe('simple');
+    expect(metric?.typeParams?.measure).toBe('nowhere');
+    expect(metric?.table).toBe('');
+  });
+
+  it('prefers semantic_manifest.json and imports dbt semantic object groups', () => {
+    const targetDir = join(tmpDir, 'target');
+    mkdirSync(targetDir, { recursive: true });
+    writeFileSync(join(targetDir, 'semantic_manifest.json'), JSON.stringify({
+      semantic_models: {
+        'semantic_model.demo.orders': {
+          unique_id: 'semantic_model.demo.orders',
+          package_name: 'demo',
+          original_file_path: 'models/semantic.yml',
+          name: 'orders',
+          model: "ref('fct_orders')",
+          defaults: { agg_time_dimension: 'ordered_at' },
+          entities: [
+            { name: 'order_id', type: 'primary' },
+            { name: 'customer_id', type: 'foreign', expr: 'customer_id' },
+          ],
+          dimensions: [
+            { name: 'region', type: 'categorical', description: 'Customer region' },
+            { name: 'ordered_at', type: 'time', type_params: { time_granularity: 'day', validity_params: { is_start: true } } },
+          ],
+          measures: [
+            {
+              name: 'order_total',
+              agg: 'sum',
+              expr: 'amount',
+              agg_time_dimension: 'ordered_at',
+              non_additive_dimension: { name: 'account_id', window_choice: 'max' },
+            },
+          ],
+        },
+      },
+      metrics: {
+        'metric.demo.revenue': {
+          unique_id: 'metric.demo.revenue',
+          name: 'revenue',
+          type: 'simple',
+          type_params: { measure: 'order_total' },
+          filter: "{{ Dimension('region') }} = 'NA'",
+        },
+        'metric.demo.revenue_ratio': {
+          unique_id: 'metric.demo.revenue_ratio',
+          name: 'revenue_ratio',
+          type: 'ratio',
+          type_params: {
+            numerator: { name: 'revenue' },
+            denominator: { name: 'revenue' },
+          },
+        },
+      },
+      saved_queries: {
+        'saved_query.demo.revenue_by_region': {
+          unique_id: 'saved_query.demo.revenue_by_region',
+          name: 'revenue_by_region',
+          query_params: {
+            metrics: ['revenue'],
+            group_by: ['region', 'metric_time__month'],
+            where: "{{ Dimension('region') }} != 'test'",
+          },
+        },
+      },
+    }), 'utf-8');
+
+    const provider = new DbtProvider();
+    const layer = provider.load({ provider: 'dbt' }, tmpDir);
+
+    expect(layer.listSemanticModels().map((m) => m.name)).toContain('orders');
+    expect(layer.listMeasures().map((m) => m.name)).toContain('order_total');
+    expect(layer.listEntities().map((e) => e.name)).toEqual(expect.arrayContaining(['order_id', 'customer_id']));
+    expect(layer.listTimeDimensions().map((d) => d.name)).toContain('ordered_at');
+    expect(layer.getMetric('revenue')?.filter).toBe("{{ Dimension('region') }} = 'NA'");
+    expect(layer.getMetric('revenue_ratio')?.metricType).toBe('ratio');
+    expect(layer.getSavedQuery('revenue_by_region')?.granularity).toBe('month');
   });
 
   it('falls back to YAML walker when manifest.json is missing', () => {

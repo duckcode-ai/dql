@@ -8,6 +8,6 @@
     "doctor": "dql doctor"
   },
   "devDependencies": {
-    "@duckcodeailabs/dql-cli": "^1.4.2"
+    "@duckcodeailabs/dql-cli": "^1.4.3"
   }
 }

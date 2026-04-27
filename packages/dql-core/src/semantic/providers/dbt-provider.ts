@@ -11,6 +11,10 @@ import {
   SemanticLayer,
   type MetricDefinition,
   type DimensionDefinition,
+  type MeasureDefinition,
+  type EntityDefinition,
+  type SemanticModelDefinition,
+  type SavedQueryDefinition,
   type JoinDefinition,
   type CubeDefinition,
   type TimeDimensionDefinition,
@@ -38,25 +42,48 @@ const DIM_TYPE_MAP: Record<string, DimensionDefinition['type']> = {
 
 interface DbtSemanticModel {
   name: string;
+  label?: string;
+  description?: string;
   model?: string;
   defaults?: { agg_time_dimension?: string };
   entities?: Array<{
     name: string;
     type: string; // primary, foreign, unique, natural
     expr?: string;
+    label?: string;
+    description?: string;
+    role?: string;
+    config?: Record<string, unknown>;
+    meta?: Record<string, unknown>;
   }>;
   dimensions?: Array<{
     name: string;
     type: string;
     expr?: string;
-    type_params?: { time_granularity?: string };
+    label?: string;
+    description?: string;
+    type_params?: Record<string, unknown> & { time_granularity?: string; validity_params?: Record<string, unknown> };
+    config?: Record<string, unknown>;
+    meta?: Record<string, unknown>;
   }>;
   measures?: Array<{
     name: string;
     agg: string;
     expr?: string;
+    label?: string;
     description?: string;
+    agg_time_dimension?: string;
+    create_metric?: boolean;
+    non_additive_dimension?: Record<string, unknown>;
+    filter?: string | Record<string, unknown> | Array<Record<string, unknown>>;
+    config?: Record<string, unknown>;
+    meta?: Record<string, unknown>;
   }>;
+  config?: Record<string, unknown>;
+  meta?: Record<string, unknown>;
+  package_name?: string;
+  original_file_path?: string;
+  unique_id?: string;
 }
 
 interface DbtMetric {
@@ -64,10 +91,46 @@ interface DbtMetric {
   label?: string;
   description?: string;
   type: string; // simple, derived, cumulative, etc.
-  type_params?: {
+  type_params?: Record<string, unknown> & {
     measure?: string;
+    measure_name?: string;
     expr?: string;
+    metrics?: unknown[];
+    numerator?: unknown;
+    denominator?: unknown;
+    window?: string;
+    grain_to_date?: string;
+    conversion_type_params?: Record<string, unknown>;
+    cumulative_type_params?: Record<string, unknown>;
+    derived_type_params?: Record<string, unknown>;
+    ratio_type_params?: Record<string, unknown>;
   };
+  filter?: string | Record<string, unknown> | Array<Record<string, unknown>>;
+  filters?: Array<Record<string, unknown>>;
+  config?: Record<string, unknown>;
+  meta?: Record<string, unknown>;
+  package_name?: string;
+  original_file_path?: string;
+  unique_id?: string;
+}
+
+interface DbtSavedQuery {
+  name: string;
+  label?: string;
+  description?: string;
+  query_params?: {
+    metrics?: string[];
+    group_by?: string[];
+    where?: string | Array<Record<string, unknown>>;
+    order_by?: string[];
+    limit?: number;
+  };
+  exports?: Array<Record<string, unknown>>;
+  config?: Record<string, unknown>;
+  meta?: Record<string, unknown>;
+  package_name?: string;
+  original_file_path?: string;
+  unique_id?: string;
 }
 
 export class DbtProvider implements SemanticLayerProvider {
@@ -78,13 +141,19 @@ export class DbtProvider implements SemanticLayerProvider {
       ? join(projectRoot, config.projectPath)
       : projectRoot;
 
-    // Prefer target/manifest.json when available: it is the authoritative,
-    // fully-resolved view of the dbt project (including semantic_models and
-    // metrics). Walking models/**/*.yml is kept as a fallback for projects
-    // that haven't run `dbt parse` / `dbt compile` yet.
+    // Prefer target/semantic_manifest.json when available: it is the
+    // MetricFlow/dbt Semantic Layer compatibility artifact and includes saved
+    // queries plus resolved semantic metadata. Fall back to manifest.json and
+    // then source YAML for projects that have not parsed semantic artifacts yet.
+    const semanticManifestPath = join(dbtRoot, 'target', 'semantic_manifest.json');
+    if (existsSync(semanticManifestPath)) {
+      const layer = loadFromManifestJson(semanticManifestPath, 'semantic_manifest');
+      if (layer) return layer;
+    }
+
     const manifestPath = join(dbtRoot, 'target', 'manifest.json');
     if (existsSync(manifestPath)) {
-      const layer = loadFromManifestJson(manifestPath);
+      const layer = loadFromManifestJson(manifestPath, 'manifest');
       if (layer) return layer;
     }
 
@@ -126,7 +195,7 @@ export class DbtProvider implements SemanticLayerProvider {
     }
 
     // Build a measure lookup: measure_name -> { sql, agg, model_name }
-    const measureLookup = new Map<string, { sql: string; agg: string; modelName: string; table: string }>();
+    const measureLookup = new Map<string, { sql: string; agg: string; modelName: string; table: string; measure: NonNullable<DbtSemanticModel['measures']>[number] }>();
 
     for (const model of allModels) {
       const tableName = resolveTableName(model);
@@ -136,14 +205,14 @@ export class DbtProvider implements SemanticLayerProvider {
           agg: measure.agg,
           modelName: model.name,
           table: tableName,
+          measure,
         });
       }
     }
 
     // Convert each semantic model into a DQL CubeDefinition
     for (const model of allModels) {
-      const cube = convertSemanticModel(model);
-      layer.addCube(cube);
+      registerSemanticModel(layer, model);
     }
 
     // Convert dbt metrics (resolve measure references)
@@ -168,7 +237,7 @@ export class DbtProvider implements SemanticLayerProvider {
  * Returns `null` if the manifest is unreadable or contains no semantic nodes,
  * signalling the caller to fall back to the YAML walker.
  */
-function loadFromManifestJson(manifestPath: string): SemanticLayer | null {
+function loadFromManifestJson(manifestPath: string, artifactKind: 'manifest' | 'semantic_manifest'): SemanticLayer | null {
   let manifest: Record<string, unknown>;
   try {
     manifest = JSON.parse(readFileSync(manifestPath, 'utf-8')) as Record<string, unknown>;
@@ -176,36 +245,48 @@ function loadFromManifestJson(manifestPath: string): SemanticLayer | null {
     return null;
   }
 
-  const semanticModelsRaw = (manifest.semantic_models ?? {}) as Record<string, DbtManifestSemanticModel>;
-  const metricsRaw = (manifest.metrics ?? {}) as Record<string, DbtManifestMetric>;
+  const semanticModelsRaw = asRecord(manifest.semantic_models);
+  const metricsRaw = asRecord(manifest.metrics);
+  const savedQueriesRaw = asRecord(manifest.saved_queries ?? manifest.savedQueries);
 
   const models: DbtSemanticModel[] = [];
   for (const node of Object.values(semanticModelsRaw)) {
-    if (!node || typeof node !== 'object' || !node.name) continue;
+    if (!node || typeof node !== 'object' || Array.isArray(node) || !('name' in node)) continue;
+    const raw = node as DbtManifestSemanticModel;
     models.push({
-      name: node.name,
+      ...raw,
+      name: raw.name,
       // node.model is already a string like "ref('stg_orders')" in manifests
-      model: typeof node.model === 'string' ? node.model : undefined,
-      defaults: node.defaults,
-      entities: node.entities,
-      dimensions: node.dimensions,
-      measures: node.measures,
+      model: typeof raw.model === 'string' ? raw.model : undefined,
+      defaults: raw.defaults,
+      entities: raw.entities,
+      dimensions: raw.dimensions,
+      measures: raw.measures,
     });
   }
 
   const dbtMetrics: DbtMetric[] = [];
   for (const node of Object.values(metricsRaw)) {
-    if (!node || typeof node !== 'object' || !node.name) continue;
+    if (!node || typeof node !== 'object' || Array.isArray(node) || !('name' in node)) continue;
+    const raw = node as DbtManifestMetric;
     dbtMetrics.push({
-      name: node.name,
-      label: node.label,
-      description: node.description,
-      type: node.type ?? 'simple',
-      type_params: node.type_params,
+      ...raw,
+      name: raw.name,
+      label: raw.label,
+      description: raw.description,
+      type: raw.type ?? 'simple',
+      type_params: raw.type_params,
     });
   }
 
-  if (models.length === 0 && dbtMetrics.length === 0) {
+  const savedQueries: DbtSavedQuery[] = [];
+  for (const node of Object.values(savedQueriesRaw)) {
+    if (!node || typeof node !== 'object' || Array.isArray(node) || !('name' in node)) continue;
+    const raw = node as DbtSavedQuery;
+    savedQueries.push({ ...raw, name: raw.name });
+  }
+
+  if (models.length === 0 && dbtMetrics.length === 0 && savedQueries.length === 0) {
     // No semantic content — let the caller try the YAML fallback.
     return null;
   }
@@ -213,7 +294,7 @@ function loadFromManifestJson(manifestPath: string): SemanticLayer | null {
   const layer = new SemanticLayer();
 
   // Build measure lookup first (identical logic to the YAML path).
-  const measureLookup = new Map<string, { sql: string; agg: string; modelName: string; table: string }>();
+  const measureLookup = new Map<string, { sql: string; agg: string; modelName: string; table: string; measure: NonNullable<DbtSemanticModel['measures']>[number] }>();
   for (const model of models) {
     const tableName = resolveTableName(model);
     for (const measure of model.measures ?? []) {
@@ -222,16 +303,20 @@ function loadFromManifestJson(manifestPath: string): SemanticLayer | null {
         agg: measure.agg,
         modelName: model.name,
         table: tableName,
+        measure,
       });
     }
   }
 
   for (const model of models) {
-    layer.addCube(convertSemanticModel(model));
+    registerSemanticModel(layer, model, artifactKind);
   }
   for (const dbtMetric of dbtMetrics) {
     const metric = convertDbtMetric(dbtMetric, measureLookup);
     if (metric) layer.addMetric(metric);
+  }
+  for (const savedQuery of savedQueries) {
+    layer.addSavedQuery(convertSavedQuery(savedQuery));
   }
 
   return layer;
@@ -245,6 +330,11 @@ interface DbtManifestSemanticModel extends DbtSemanticModel {
 /** Shape of a `metrics.*` entry in dbt's manifest.json. */
 interface DbtManifestMetric extends DbtMetric {
   // Same story — manifest.json has extra metadata we don't consume.
+}
+
+function asRecord(value: unknown): Record<string, unknown> {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return {};
+  return value as Record<string, unknown>;
 }
 
 /** Recursively collect all .yml/.yaml files in a directory. */
@@ -282,13 +372,56 @@ function resolveTableName(model: DbtSemanticModel): string {
   return model.name;
 }
 
+function dbtSource(
+  objectType: string,
+  objectId: string,
+  objectName: string,
+  raw?: Record<string, unknown>,
+): MetricDefinition['source'] {
+  return {
+    provider: 'dbt',
+    objectType,
+    objectId,
+    objectName,
+    extra: raw
+      ? {
+          uniqueId: raw.unique_id,
+          packageName: raw.package_name,
+          path: raw.original_file_path ?? raw.path,
+          meta: raw.meta,
+          config: raw.config,
+          raw,
+        }
+      : undefined,
+  };
+}
+
+function registerSemanticModel(
+  layer: SemanticLayer,
+  model: DbtSemanticModel,
+  artifactKind: 'manifest' | 'semantic_manifest' | 'yaml' = 'yaml',
+): void {
+  const cube = convertSemanticModel(model, artifactKind);
+  layer.addCube(cube);
+  layer.addSemanticModel(convertSemanticModelDetail(model, cube));
+  for (const measure of model.measures ?? []) {
+    layer.addMeasure(convertMeasure(model, measure, cube));
+  }
+  for (const entity of model.entities ?? []) {
+    layer.addEntity(convertEntity(model, entity, cube));
+  }
+}
+
 /** Convert a dbt semantic model to a DQL CubeDefinition. */
-function convertSemanticModel(model: DbtSemanticModel): CubeDefinition {
+function convertSemanticModel(
+  model: DbtSemanticModel,
+  artifactKind: 'manifest' | 'semantic_manifest' | 'yaml' = 'yaml',
+): CubeDefinition {
   const tableName = resolveTableName(model);
 
   const measures: MetricDefinition[] = (model.measures ?? []).map((m) => ({
     name: m.name,
-    label: m.name,
+    label: m.label ?? m.name,
     description: m.description ?? '',
     domain: '',
     sql: buildAggSql(m.agg, m.expr ?? m.name),
@@ -296,12 +429,20 @@ function convertSemanticModel(model: DbtSemanticModel): CubeDefinition {
     table: tableName,
     cube: model.name,
     aggregation: m.agg,
-    source: {
-      provider: 'dbt',
-      objectType: 'measure',
-      objectId: `${model.name}.${m.name}`,
-      objectName: m.name,
+    filter: m.filter,
+    aggTimeDimension: m.agg_time_dimension,
+    typeParams: {
+      agg: m.agg,
+      expr: m.expr,
+      agg_time_dimension: m.agg_time_dimension,
+      create_metric: m.create_metric,
+      non_additive_dimension: m.non_additive_dimension,
     },
+    source: dbtSource('measure', `${model.name}.${m.name}`, m.name, {
+      ...m,
+      semantic_model: model.name,
+      artifactKind,
+    }),
   }));
 
   const dimensions: DimensionDefinition[] = [];
@@ -319,36 +460,39 @@ function convertSemanticModel(model: DbtSemanticModel): CubeDefinition {
 
       timeDimensions.push({
         name: dim.name,
-        label: dim.name,
-        description: '',
+        label: dim.label ?? dim.name,
+        description: dim.description ?? '',
         sql: sqlExpr,
         type: 'date',
         table: tableName,
         cube: model.name,
+        expr: dim.expr,
+        isTimeDimension: true,
+        typeParams: dim.type_params,
         granularities: defaultGrans,
         primaryTime: isPrimary,
-        source: {
-          provider: 'dbt',
-          objectType: 'time_dimension',
-          objectId: `${model.name}.${dim.name}`,
-          objectName: dim.name,
-        },
+        source: dbtSource('time_dimension', `${model.name}.${dim.name}`, dim.name, {
+          ...dim,
+          semantic_model: model.name,
+          artifactKind,
+        }),
       });
     } else {
       dimensions.push({
         name: dim.name,
-        label: dim.name,
-        description: '',
+        label: dim.label ?? dim.name,
+        description: dim.description ?? '',
         sql: sqlExpr,
         type: dqlType,
         table: tableName,
         cube: model.name,
-        source: {
-          provider: 'dbt',
-          objectType: 'dimension',
-          objectId: `${model.name}.${dim.name}`,
-          objectName: dim.name,
-        },
+        expr: dim.expr,
+        typeParams: dim.type_params,
+        source: dbtSource('dimension', `${model.name}.${dim.name}`, dim.name, {
+          ...dim,
+          semantic_model: model.name,
+          artifactKind,
+        }),
       });
     }
   }
@@ -369,8 +513,8 @@ function convertSemanticModel(model: DbtSemanticModel): CubeDefinition {
 
   return {
     name: model.name,
-    label: model.name,
-    description: '',
+    label: model.label ?? model.name,
+    description: model.description ?? '',
     sql: `SELECT * FROM ${tableName}`,
     table: tableName,
     domain: '',
@@ -381,12 +525,80 @@ function convertSemanticModel(model: DbtSemanticModel): CubeDefinition {
     segments: [],
     preAggregations: [],
     defaultTimeDimension: model.defaults?.agg_time_dimension,
-    source: {
-      provider: 'dbt',
-      objectType: 'semantic_model',
-      objectId: model.name,
-      objectName: model.name,
-    },
+    source: dbtSource('semantic_model', model.unique_id ?? model.name, model.name, {
+      ...model,
+      artifactKind,
+    }),
+  };
+}
+
+function convertSemanticModelDetail(model: DbtSemanticModel, cube: CubeDefinition): SemanticModelDefinition {
+  return {
+    name: model.name,
+    label: model.label ?? model.name,
+    description: model.description ?? '',
+    domain: cube.domain,
+    model: model.model,
+    table: cube.table,
+    defaults: model.defaults,
+    entities: (model.entities ?? []).map((entity) => entity.name),
+    measures: (model.measures ?? []).map((measure) => measure.name),
+    dimensions: cube.dimensions.map((dimension) => dimension.name),
+    timeDimensions: cube.timeDimensions.map((dimension) => dimension.name),
+    tags: cube.tags,
+    owner: cube.owner,
+    source: cube.source,
+  };
+}
+
+function convertMeasure(
+  model: DbtSemanticModel,
+  measure: NonNullable<DbtSemanticModel['measures']>[number],
+  cube: CubeDefinition,
+): MeasureDefinition {
+  return {
+    name: measure.name,
+    label: measure.label ?? measure.name,
+    description: measure.description ?? '',
+    domain: cube.domain,
+    agg: measure.agg,
+    expr: measure.expr,
+    table: cube.table,
+    cube: model.name,
+    aggTimeDimension: measure.agg_time_dimension ?? model.defaults?.agg_time_dimension,
+    createMetric: measure.create_metric,
+    nonAdditiveDimension: measure.non_additive_dimension,
+    filter: measure.filter,
+    owner: cube.owner,
+    tags: cube.tags,
+    source: dbtSource('measure', `${model.name}.${measure.name}`, measure.name, {
+      ...measure,
+      semantic_model: model.name,
+    }),
+  };
+}
+
+function convertEntity(
+  model: DbtSemanticModel,
+  entity: NonNullable<DbtSemanticModel['entities']>[number],
+  cube: CubeDefinition,
+): EntityDefinition {
+  return {
+    name: entity.name,
+    label: entity.label ?? entity.name,
+    description: entity.description ?? '',
+    domain: cube.domain,
+    type: entity.type,
+    expr: entity.expr,
+    table: cube.table,
+    cube: model.name,
+    role: entity.role,
+    owner: cube.owner,
+    tags: cube.tags,
+    source: dbtSource('entity', `${model.name}.${entity.name}`, entity.name, {
+      ...entity,
+      semantic_model: model.name,
+    }),
   };
 }
 
@@ -407,29 +619,83 @@ function buildAggSql(agg: string, expr: string): string {
 /** Convert a dbt metric definition to a DQL MetricDefinition. */
 function convertDbtMetric(
   dbtMetric: DbtMetric,
-  measureLookup: Map<string, { sql: string; agg: string; modelName: string; table: string }>,
+  measureLookup: Map<string, { sql: string; agg: string; modelName: string; table: string; measure: NonNullable<DbtSemanticModel['measures']>[number] }>,
 ): MetricDefinition | null {
-  const measureName = dbtMetric.type_params?.measure;
-  if (!measureName) return null;
-
-  const measureInfo = measureLookup.get(measureName);
-  if (!measureInfo) return null;
+  const measureName = firstString(dbtMetric.type_params?.measure, dbtMetric.type_params?.measure_name);
+  const measureInfo = measureName ? measureLookup.get(measureName) : undefined;
+  const metricRefs = collectMetricRefs(dbtMetric);
+  const fallbackMeasure = metricRefs.map((ref) => measureLookup.get(ref)).find(Boolean);
+  const resolvedMeasure = measureInfo ?? fallbackMeasure;
 
   return {
     name: dbtMetric.name,
     label: dbtMetric.label ?? dbtMetric.name,
     description: dbtMetric.description ?? '',
     domain: '',
-    sql: buildAggSql(measureInfo.agg, measureInfo.sql),
-    type: AGG_TYPE_MAP[measureInfo.agg] ?? 'custom',
-    table: measureInfo.table,
-    cube: measureInfo.modelName,
+    sql: resolvedMeasure
+      ? buildAggSql(resolvedMeasure.agg, resolvedMeasure.sql)
+      : String(dbtMetric.type_params?.expr ?? dbtMetric.name),
+    type: resolvedMeasure ? (AGG_TYPE_MAP[resolvedMeasure.agg] ?? 'custom') : 'custom',
+    table: resolvedMeasure?.table ?? '',
+    cube: resolvedMeasure?.modelName,
     aggregation: dbtMetric.type,
-    source: {
-      provider: 'dbt',
-      objectType: 'metric',
-      objectId: dbtMetric.name,
-      objectName: dbtMetric.name,
-    },
+    metricType: dbtMetric.type,
+    typeParams: dbtMetric.type_params,
+    filter: dbtMetric.filter ?? dbtMetric.filters,
+    aggTimeDimension: resolvedMeasure?.measure.agg_time_dimension,
+    source: dbtSource('metric', dbtMetric.unique_id ?? dbtMetric.name, dbtMetric.name, dbtMetric as unknown as Record<string, unknown>),
   };
+}
+
+function convertSavedQuery(savedQuery: DbtSavedQuery): SavedQueryDefinition {
+  const groupBy = savedQuery.query_params?.group_by ?? [];
+  const timeRef = groupBy.find((value) => value.includes('__')) ?? groupBy.find((value) => value.toLowerCase().includes('metric_time'));
+  const [timeDimension, granularity] = timeRef?.split('__') ?? [];
+  return {
+    name: savedQuery.name,
+    label: savedQuery.label ?? savedQuery.name,
+    description: savedQuery.description ?? '',
+    domain: '',
+    metrics: savedQuery.query_params?.metrics ?? [],
+    dimensions: groupBy.filter((value) => value !== timeRef),
+    timeDimension: timeDimension || undefined,
+    granularity,
+    filters: savedQuery.query_params?.where,
+    exports: savedQuery.exports,
+    tags: Array.isArray(savedQuery.config?.tags) ? savedQuery.config.tags.map(String) : undefined,
+    source: dbtSource('saved_query', savedQuery.unique_id ?? savedQuery.name, savedQuery.name, savedQuery as unknown as Record<string, unknown>),
+  };
+}
+
+function firstString(...values: unknown[]): string | undefined {
+  for (const value of values) {
+    if (typeof value === 'string' && value.trim()) return value.trim();
+  }
+  return undefined;
+}
+
+function collectMetricRefs(metric: DbtMetric): string[] {
+  const refs = new Set<string>();
+  const visit = (value: unknown): void => {
+    if (!value) return;
+    if (typeof value === 'string') {
+      refs.add(value);
+      return;
+    }
+    if (Array.isArray(value)) {
+      for (const item of value) visit(item);
+      return;
+    }
+    if (typeof value === 'object') {
+      const raw = value as Record<string, unknown>;
+      for (const key of ['name', 'metric', 'metric_name', 'measure', 'measure_name']) visit(raw[key]);
+      for (const nested of Object.values(raw)) {
+        if (typeof nested === 'object') visit(nested);
+      }
+    }
+  };
+  visit(metric.type_params?.metrics);
+  visit(metric.type_params?.numerator);
+  visit(metric.type_params?.denominator);
+  return Array.from(refs);
 }

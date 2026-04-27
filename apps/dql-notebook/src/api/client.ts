@@ -7,7 +7,11 @@ import type {
   SchemaColumn,
   SemanticLayerState,
   SemanticDimension,
+  SemanticEntity,
+  SemanticMeasure,
   SemanticMetric,
+  SemanticModel,
+  SemanticSavedQuery,
   SemanticHierarchy,
   SemanticTreeNode,
   SemanticObjectDetail,
@@ -452,8 +456,13 @@ export const api = {
         available: false,
         provider: null,
         metrics: [],
+        measures: [],
         dimensions: [],
+        timeDimensions: [],
+        entities: [],
         hierarchies: [],
+        semanticModels: [],
+        savedQueries: [],
         domains: [],
         tags: [],
         favorites: [],
@@ -529,19 +538,37 @@ export const api = {
     query?: string;
     domain?: string;
     tag?: string;
-    type?: 'metric' | 'dimension' | 'hierarchy';
-  }): Promise<{ metrics: SemanticMetric[]; dimensions: SemanticDimension[]; hierarchies: SemanticHierarchy[] }> {
+    type?: 'metric' | 'measure' | 'dimension' | 'time_dimension' | 'entity' | 'hierarchy' | 'semantic_model' | 'saved_query';
+  }): Promise<{
+    metrics: SemanticMetric[];
+    measures: SemanticMeasure[];
+    dimensions: SemanticDimension[];
+    timeDimensions: SemanticDimension[];
+    entities: SemanticEntity[];
+    hierarchies: SemanticHierarchy[];
+    semanticModels: SemanticModel[];
+    savedQueries: SemanticSavedQuery[];
+  }> {
     const search = new URLSearchParams();
     if (params.query) search.set('q', params.query);
     if (params.domain) search.set('domain', params.domain);
     if (params.tag) search.set('tag', params.tag);
     if (params.type) search.set('type', params.type);
     try {
-      return await request<{ metrics: SemanticMetric[]; dimensions: SemanticDimension[]; hierarchies: SemanticHierarchy[] }>(
+      return await request<{
+        metrics: SemanticMetric[];
+        measures: SemanticMeasure[];
+        dimensions: SemanticDimension[];
+        timeDimensions: SemanticDimension[];
+        entities: SemanticEntity[];
+        hierarchies: SemanticHierarchy[];
+        semanticModels: SemanticModel[];
+        savedQueries: SemanticSavedQuery[];
+      }>(
         `/api/semantic-layer/search?${search.toString()}`,
       );
     } catch {
-      return { metrics: [], dimensions: [], hierarchies: [] };
+      return { metrics: [], measures: [], dimensions: [], timeDimensions: [], entities: [], hierarchies: [], semanticModels: [], savedQueries: [] };
     }
   },
 

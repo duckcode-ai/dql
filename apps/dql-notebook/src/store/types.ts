@@ -276,6 +276,24 @@ export interface SemanticMetric {
   table: string;
   tags: string[];
   owner: string | null;
+  metricType?: string | null;
+  typeParams?: Record<string, unknown> | null;
+  filter?: unknown;
+  source?: Record<string, unknown> | null;
+}
+
+export interface SemanticMeasure {
+  name: string;
+  label: string;
+  description: string;
+  domain?: string;
+  agg: string;
+  expr?: string | null;
+  table: string;
+  cube?: string | null;
+  aggTimeDimension?: string | null;
+  tags: string[];
+  owner: string | null;
 }
 
 export interface SemanticDimension {
@@ -286,6 +304,52 @@ export interface SemanticDimension {
   sql: string;
   type: string;
   table: string;
+  tags: string[];
+  owner: string | null;
+  cube?: string | null;
+  isTimeDimension?: boolean;
+  typeParams?: Record<string, unknown> | null;
+}
+
+export interface SemanticEntity {
+  name: string;
+  label: string;
+  description: string;
+  domain?: string;
+  type: string;
+  expr?: string | null;
+  table: string;
+  cube?: string | null;
+  role?: string | null;
+  tags: string[];
+  owner: string | null;
+}
+
+export interface SemanticModel {
+  name: string;
+  label: string;
+  description: string;
+  domain?: string;
+  model?: string | null;
+  table: string;
+  entities: string[];
+  measures: string[];
+  dimensions: string[];
+  timeDimensions: string[];
+  tags: string[];
+  owner: string | null;
+}
+
+export interface SemanticSavedQuery {
+  name: string;
+  label: string;
+  description: string;
+  domain?: string;
+  metrics: string[];
+  dimensions: string[];
+  timeDimension?: string | null;
+  granularity?: string | null;
+  filters?: unknown;
   tags: string[];
   owner: string | null;
 }
@@ -301,7 +365,7 @@ export interface SemanticHierarchy {
 export interface SemanticTreeNode {
   id: string;
   label: string;
-  kind: 'provider' | 'domain' | 'cube' | 'group' | 'metric' | 'dimension' | 'hierarchy' | 'segment' | 'pre_aggregation';
+  kind: 'provider' | 'domain' | 'cube' | 'group' | 'metric' | 'measure' | 'dimension' | 'time_dimension' | 'entity' | 'hierarchy' | 'segment' | 'pre_aggregation' | 'semantic_model' | 'saved_query';
   count?: number;
   meta?: Record<string, string | number | boolean | null | undefined>;
   children?: SemanticTreeNode[];
@@ -309,7 +373,7 @@ export interface SemanticTreeNode {
 
 export interface SemanticObjectDetail {
   id: string;
-  kind: 'cube' | 'metric' | 'dimension' | 'hierarchy' | 'segment' | 'pre_aggregation';
+  kind: 'cube' | 'metric' | 'measure' | 'dimension' | 'time_dimension' | 'entity' | 'hierarchy' | 'segment' | 'pre_aggregation' | 'semantic_model' | 'saved_query';
   name: string;
   label: string;
   description: string;
@@ -337,14 +401,27 @@ export interface SemanticObjectDetail {
   timeDimension?: string;
   granularity?: string;
   refreshKey?: string;
+  agg?: string;
+  expr?: string;
+  metricType?: string;
+  typeParams?: Record<string, unknown>;
+  filter?: unknown;
+  entities?: string[];
+  savedQueryMetrics?: string[];
+  exports?: Array<Record<string, unknown>>;
 }
 
 export interface SemanticLayerState {
   available: boolean;
   provider: string | null;
   metrics: SemanticMetric[];
+  measures: SemanticMeasure[];
   dimensions: SemanticDimension[];
+  timeDimensions: SemanticDimension[];
+  entities: SemanticEntity[];
   hierarchies: SemanticHierarchy[];
+  semanticModels: SemanticModel[];
+  savedQueries: SemanticSavedQuery[];
   domains: string[];
   tags: string[];
   favorites: string[];
