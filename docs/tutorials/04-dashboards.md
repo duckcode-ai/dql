@@ -3,7 +3,7 @@
 **Who this is for:** App owners + analysts composing dashboards from
 certified blocks.
 
-**What you'll do:** build `apps/cards-ops/dashboards/daily-ops.dqld` — a
+**What you'll do:** inspect or rebuild `apps/cards-ops/dashboards/daily-ops.dqld` — a
 real grid layout with KPI tiles, a trend, and a drill-down — all referring
 to the certified blocks Mei wrote in tutorial 02.
 
@@ -24,6 +24,11 @@ do the work; the dashboard does the layout.
 
 ## Step 1 — Replace the auto-scaffolded dashboard
 
+The `acme-bank` template already includes the completed
+`apps/cards-ops/dashboards/daily-ops.dqld`. If you scaffolded from the
+template, inspect that file first. If you are practicing from a fresh App,
+rename the scaffolded dashboard and use the JSON below.
+
 The `dql app new` command in tutorial 03 created an empty `overview.dqld`.
 Rename it and fill it in:
 
@@ -40,7 +45,7 @@ Replace its contents with:
   "id": "daily-ops",
   "metadata": {
     "title": "Cards — Daily Operations",
-    "description": "Daily transaction volume, chargebacks, and fraud snapshots.",
+    "description": "Daily transaction volume, approval health, and fraud snapshots.",
     "domain": "cards",
     "tags": ["daily", "ops", "fraud"]
   },
@@ -63,9 +68,9 @@ Replace its contents with:
         "block": { "blockId": "daily_transaction_volume" },
         "viz":   { "type": "single_value", "options": { "format": "currency" } } },
 
-      { "i": "kpi-chargeback", "x": 3, "y": 0, "w": 3, "h": 2,
-        "title": "Chargeback Rate",
-        "block": { "blockId": "chargeback_rate" },
+      { "i": "kpi-approval-rate", "x": 3, "y": 0, "w": 3, "h": 2,
+        "title": "Approval Rate",
+        "block": { "blockId": "card_approval_rate" },
         "viz":   { "type": "kpi", "options": { "suffix": "%" } } },
 
       { "i": "kpi-fraud", "x": 6, "y": 0, "w": 6, "h": 2,
@@ -85,7 +90,7 @@ Replace its contents with:
 
       { "i": "fraud-merchants", "x": 6, "y": 6, "w": 6, "h": 4,
         "title": "Top merchants by exposure",
-        "block": { "blockId": "fraud_by_merchant" },
+        "block": { "blockId": "fraud_by_merchant_recent" },
         "viz":   { "type": "table" } }
     ]
   }
@@ -144,9 +149,9 @@ node -e "
 >   title: 'Cards — Daily Operations',
 >   blockIds: [
 >     'daily_transaction_volume',
->     'chargeback_rate',
+>     'card_approval_rate',
 >     'fraud_alerts_by_region',
->     'fraud_by_merchant'
+>     'fraud_by_merchant_recent'
 >   ],
 >   unresolved: [],
 >   items: 6
@@ -261,7 +266,7 @@ can wire two different schedules. Create
         "viz":   { "type": "bar" } },
       { "i": "by-merchant", "x": 0, "y": 4, "w": 12, "h": 4,
         "title": "Fraud exposure by merchant (24h)",
-        "block": { "blockId": "fraud_by_merchant" },
+        "block": { "blockId": "fraud_by_merchant_recent" },
         "viz":   { "type": "table" } }
     ]
   }

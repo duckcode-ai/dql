@@ -22,8 +22,11 @@ interface ChatCellProps {
 }
 
 const PROVIDERS: Array<{ id: ChatProviderId; label: string; hint: string }> = [
-  { id: 'claude-agent-sdk', label: 'Claude Agent SDK', hint: 'Uses ANTHROPIC_API_KEY / ~/.dql/credentials' },
-  { id: 'claude-code', label: 'Claude Code', hint: 'Spawns `claude -p` — uses your Claude Code auth' },
+  { id: 'claude-agent-sdk', label: 'Claude Agent SDK', hint: 'ANTHROPIC_API_KEY' },
+  { id: 'claude-code', label: 'Claude Code', hint: 'Local `claude` CLI' },
+  { id: 'openai', label: 'OpenAI', hint: 'OPENAI_API_KEY, optional OPENAI_MODEL' },
+  { id: 'gemini', label: 'Gemini', hint: 'GEMINI_API_KEY, optional GEMINI_MODEL' },
+  { id: 'ollama', label: 'Ollama', hint: 'OLLAMA_BASE_URL, optional OLLAMA_MODEL' },
 ];
 
 function genId(): string {

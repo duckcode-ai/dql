@@ -3,33 +3,17 @@ import { PanelFrame, PanelToolbar, PanelEmpty, StatusPill } from '@duckcodeailab
 import { api } from '../../api/client';
 import { useNotebook } from '../../store/NotebookStore';
 import { themes } from '../../themes/notebook-theme';
-import type { NotebookFile } from '../../store/types';
+import type { AppSummary, NotebookFile } from '../../store/types';
 
 interface AppsPanelProps {
   onOpenFile: (file: NotebookFile) => void;
 }
 
-interface AppEntry {
-  path: string;
-  manifest: {
-    name: string;
-    domain: string;
-    owner?: string;
-    description?: string;
-    cadence?: string;
-    consumers?: string[];
-    entryPoints?: string[];
-  };
-  notebooks: string[];
-  dashboards: string[];
-  hasDigest: boolean;
-}
-
-export function AppsPanel({ onOpenFile }: AppsPanelProps) {
-  const { state } = useNotebook();
+export function AppsPanel(_props: AppsPanelProps) {
+  const { state, dispatch } = useNotebook();
   const t = themes[state.themeMode];
 
-  const [apps, setApps] = useState<AppEntry[]>([]);
+  const [apps, setApps] = useState<AppSummary[]>([]);
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState('');
   const [domainFilter, setDomainFilter] = useState('');
@@ -37,18 +21,18 @@ export function AppsPanel({ onOpenFile }: AppsPanelProps) {
 
   const refresh = () => {
     setLoading(true);
-    api.getApps()
-      .then((r) => setApps(r.apps))
+    api.listApps()
+      .then((next) => setApps(next))
       .finally(() => setLoading(false));
   };
 
   useEffect(() => { refresh(); }, []);
 
-  const domains = [...new Set(apps.map((a) => a.manifest.domain))].sort();
+  const domains = [...new Set(apps.map((a) => a.domain))].sort();
   const filtered = apps.filter((a) => {
     const s = search.toLowerCase();
-    if (s && !a.manifest.name.toLowerCase().includes(s) && !(a.manifest.description ?? '').toLowerCase().includes(s)) return false;
-    if (domainFilter && a.manifest.domain !== domainFilter) return false;
+    if (s && !a.name.toLowerCase().includes(s) && !(a.description ?? '').toLowerCase().includes(s)) return false;
+    if (domainFilter && a.domain !== domainFilter) return false;
     return true;
   });
 
@@ -61,26 +45,8 @@ export function AppsPanel({ onOpenFile }: AppsPanelProps) {
     });
   };
 
-  const openNotebook = (app: AppEntry, notebook: string) => {
-    const fullPath = `${app.path}/notebooks/${notebook}`;
-    const file: NotebookFile = {
-      name: notebook,
-      path: fullPath,
-      type: 'notebook',
-      folder: 'notebooks',
-    };
-    onOpenFile(file);
-  };
-
-  const openDashboard = (app: AppEntry, dashboard: string) => {
-    const fullPath = `${app.path}/dashboards/${dashboard}`;
-    const file: NotebookFile = {
-      name: dashboard,
-      path: fullPath,
-      type: 'dashboard',
-      folder: 'dashboards',
-    };
-    onOpenFile(file);
+  const openDashboard = (app: AppSummary, dashboard: string) => {
+    dispatch({ type: 'OPEN_APP', appId: app.id, dashboardId: dashboard });
   };
 
   const selectStyle: React.CSSProperties = {
@@ -153,11 +119,11 @@ export function AppsPanel({ onOpenFile }: AppsPanelProps) {
         )
       ) : (
         filtered.map((app) => {
-          const isOpen = expanded.has(app.manifest.name);
+          const isOpen = expanded.has(app.id);
           return (
-            <div key={app.path} style={{ borderBottom: `1px solid ${t.cellBorder}` }}>
+            <div key={app.id} style={{ borderBottom: `1px solid ${t.cellBorder}` }}>
               <button
-                onClick={() => toggle(app.manifest.name)}
+                onClick={() => toggle(app.id)}
                 style={{
                   display: 'block', width: '100%', textAlign: 'left',
                   background: 'transparent', border: 'none',
@@ -172,50 +138,35 @@ export function AppsPanel({ onOpenFile }: AppsPanelProps) {
                     {isOpen ? '▾' : '▸'}
                   </span>
                   <span style={{ fontSize: 12, fontWeight: 600, color: t.textPrimary, fontFamily: t.font }}>
-                    {app.manifest.name}
+                    {app.name}
                   </span>
-                  <StatusPill tone="accent">{app.manifest.domain}</StatusPill>
+                  <StatusPill tone="accent">{app.domain}</StatusPill>
                 </div>
-                {app.manifest.description && (
+                {app.description && (
                   <div style={{
                     fontSize: 11, color: t.textMuted, fontFamily: t.font, lineHeight: 1.3,
                     marginBottom: 4, marginLeft: 16,
                   }}>
-                    {app.manifest.description}
+                    {app.description}
                   </div>
                 )}
                 <div style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 10, color: t.textMuted, fontFamily: t.font, marginLeft: 16 }}>
-                  {app.manifest.owner && <span>by {app.manifest.owner}</span>}
-                  <span>{app.notebooks.length} notebook{app.notebooks.length === 1 ? '' : 's'}</span>
+                  {app.owners[0] && <span>by {app.owners[0]}</span>}
                   <span>{app.dashboards.length} dashboard{app.dashboards.length === 1 ? '' : 's'}</span>
-                  {app.hasDigest && <span style={{ color: t.accent }}>digest</span>}
+                  <span>{app.members} member{app.members === 1 ? '' : 's'}</span>
                 </div>
               </button>
               {isOpen && (
                 <div style={{ padding: '4px 0 10px 28px', background: `${t.accent}04` }}>
-                  {app.notebooks.length === 0 && app.dashboards.length === 0 && !app.hasDigest && (
+                  {app.dashboards.length === 0 && (
                     <div style={{ fontSize: 11, color: t.textMuted, fontFamily: t.font, padding: '4px 0' }}>
                       (empty app scaffold)
                     </div>
                   )}
-                  {app.notebooks.map((nb) => (
-                    <button
-                      key={nb}
-                      onClick={() => openNotebook(app, nb)}
-                      style={{
-                        display: 'block', width: '100%', textAlign: 'left',
-                        background: 'transparent', border: 'none',
-                        padding: '3px 12px',
-                        cursor: 'pointer', fontSize: 11, color: t.textSecondary, fontFamily: t.font,
-                      }}
-                    >
-                      📓 {nb}
-                    </button>
-                  ))}
                   {app.dashboards.map((d) => (
                     <button
-                      key={d}
-                      onClick={() => openDashboard(app, d)}
+                      key={d.id}
+                      onClick={() => openDashboard(app, d.id)}
                       style={{
                         display: 'block', width: '100%', textAlign: 'left',
                         background: 'transparent', border: 'none',
@@ -223,14 +174,9 @@ export function AppsPanel({ onOpenFile }: AppsPanelProps) {
                         cursor: 'pointer', fontSize: 11, color: t.textSecondary, fontFamily: t.font,
                       }}
                     >
-                      📊 {d}
+                      {d.title}
                     </button>
                   ))}
-                  {app.hasDigest && (
-                    <div style={{ padding: '3px 12px', fontSize: 11, color: t.textMuted, fontFamily: t.font }}>
-                      📰 digest.dql
-                    </div>
-                  )}
                 </div>
               )}
             </div>

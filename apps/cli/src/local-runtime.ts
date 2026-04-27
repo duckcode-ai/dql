@@ -20,6 +20,11 @@ import {
   Parser,
   buildLineageGraph,
   buildManifest,
+  findAppDocuments,
+  findDashboardsForApp,
+  isBlockIdRef,
+  loadAppDocument,
+  loadDashboardDocument,
   analyzeImpact,
   buildTrustChain,
   detectDomainFlows,
@@ -33,6 +38,11 @@ import {
   type LineageBlockInput,
   type LineageMetricInput,
   type LineageDimensionInput,
+  type AppDocument,
+  type DashboardDocument,
+  type DashboardGridItem,
+  type DQLManifest,
+  type ManifestBlock,
   canonicalize,
   canonicalizeNotebook,
   diffDQL,
@@ -42,7 +52,15 @@ import {
 import { load as loadYaml } from 'js-yaml';
 import { listBlockTemplates } from './block-templates.js';
 import { getRunner as getLLMRunner } from './llm/index.js';
+import type { ProviderId } from './llm/types.js';
 import { handleAppsApi } from './apps-api.js';
+import {
+  DQLAccessDeniedError,
+  activePersonaAppId,
+  assertAppAccess,
+  loadRuntimeApp,
+  runtimeVariables,
+} from './governance-runtime.js';
 import {
   buildSemanticObjectDetail,
   buildSemanticTree,
@@ -197,6 +215,122 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
       return;
     }
 
+    if (req.method === 'GET' && path === '/api/settings/env-status') {
+      res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+      res.end(serializeJSON({ groups: collectSettingsEnvStatus() }));
+      return;
+    }
+
+    const appDashRun = path.match(/^\/api\/apps\/([^/]+)\/dashboards\/([^/]+)\/run$/);
+    if (req.method === 'POST' && appDashRun) {
+      try {
+        const appId = decodeURIComponent(appDashRun[1]);
+        const dashboardId = decodeURIComponent(appDashRun[2]);
+        const body = await readJSON(req).catch(() => ({}));
+        const loaded = loadAppDashboard(projectRoot, appId, dashboardId);
+        if (!loaded) {
+          res.writeHead(404, { 'Content-Type': 'application/json; charset=utf-8' });
+          res.end(serializeJSON({ error: `Dashboard "${dashboardId}" not found in app "${appId}"` }));
+          return;
+        }
+
+        const manifest = buildManifest({ projectRoot });
+        const variables = body.variables && typeof body.variables === 'object'
+          ? body.variables as Record<string, unknown>
+          : {};
+        const tiles = [];
+        for (const item of loaded.dashboard.layout.items) {
+          const block = resolveDashboardItemBlock(item, manifest);
+          if (!block) {
+            tiles.push({
+              tileId: item.i,
+              status: 'unresolved',
+              blockRef: isBlockIdRef(item.block) ? item.block.blockId : item.block.ref,
+              error: 'Block reference could not be resolved',
+            });
+            continue;
+          }
+          try {
+            assertAppAccess({
+              app: loaded.app,
+              domain: block.domain ?? loaded.dashboard.metadata.domain ?? loaded.app.domain,
+              level: 'execute',
+            });
+            const absBlockPath = join(projectRoot, block.filePath);
+            const source = readFileSync(absBlockPath, 'utf-8');
+            const plan = buildExecutionPlan(
+              { id: item.i, type: 'dql', source, title: item.title ?? block.name },
+              { semanticLayer, driver: connection.driver },
+            );
+            if (!plan) {
+              tiles.push({
+                tileId: item.i,
+                status: 'error',
+                blockId: block.name,
+                error: 'Block produced no executable plan',
+              });
+              continue;
+            }
+            const prepared = prepareLocalExecution(
+              plan.sql,
+              isConnectionConfig(body.connection) ? body.connection : connection,
+              projectRoot,
+              projectConfig,
+            );
+            const result = await executor.executeQuery(
+              prepared.sql,
+              plan.sqlParams,
+              runtimeVariables({ ...plan.variables, ...variables }),
+              prepared.connection,
+            );
+            tiles.push({
+              tileId: item.i,
+              status: 'ok',
+              blockId: block.name,
+              blockPath: block.filePath,
+              certificationStatus: block.status ?? null,
+              title: item.title ?? block.name,
+              viz: item.viz,
+              chartConfig: plan.chartConfig ?? { chart: item.viz.type },
+              result: normalizeQueryResult(result),
+              citation: {
+                kind: 'block',
+                name: block.name,
+                path: block.filePath,
+              },
+            });
+          } catch (err) {
+            if (err instanceof DQLAccessDeniedError) {
+              tiles.push({
+                tileId: item.i,
+                status: 'unauthorized',
+                blockId: block.name,
+                error: err.message,
+              });
+            } else {
+              tiles.push({
+                tileId: item.i,
+                status: 'error',
+                blockId: block.name,
+                error: err instanceof Error ? err.message : String(err),
+              });
+            }
+          }
+        }
+        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({
+          appId,
+          dashboardId,
+          persona: activePersonaAppId() ? { appId: activePersonaAppId() } : null,
+          tiles,
+        }));
+      } catch (err) {
+        res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({ error: err instanceof Error ? err.message : String(err) }));
+      }
+      return;
+    }
+
     // Apps, dashboards, persona — see apps-api.ts. Returns true if handled.
     if (path.startsWith('/api/apps') || path === '/api/persona') {
       try {
@@ -278,6 +412,11 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
         res.writeHead(201, { 'Content-Type': 'application/json; charset=utf-8' });
         res.end(serializeJSON({ path: `notebooks/${slug}.dqlnb`, content }));
       } catch (error) {
+        if (error instanceof DQLAccessDeniedError) {
+          res.writeHead(403, { 'Content-Type': 'application/json; charset=utf-8' });
+          res.end(serializeJSON({ error: error.message, code: 'unauthorized' }));
+          return;
+        }
         res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' });
         res.end(serializeJSON({ error: error instanceof Error ? error.message : String(error) }));
       }
@@ -309,6 +448,11 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
         res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
         res.end(serializeJSON({ ok: true }));
       } catch (error) {
+        if (error instanceof DQLAccessDeniedError) {
+          res.writeHead(403, { 'Content-Type': 'application/json; charset=utf-8' });
+          res.end(serializeJSON({ error: error.message, code: 'unauthorized' }));
+          return;
+        }
         res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' });
         res.end(serializeJSON({ error: error instanceof Error ? error.message : String(error) }));
       }
@@ -678,6 +822,11 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
         res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
         res.end(serializeJSON({ blocks }));
       } catch (error) {
+        if (error instanceof DQLAccessDeniedError) {
+          res.writeHead(403, { 'Content-Type': 'application/json; charset=utf-8' });
+          res.end(serializeJSON({ error: error.message, code: 'unauthorized' }));
+          return;
+        }
         res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' });
         res.end(serializeJSON({ error: error instanceof Error ? error.message : String(error) }));
       }
@@ -741,8 +890,12 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
         res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
         res.end(serializeJSON({ apps }));
       } catch (error) {
-        res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' });
-        res.end(serializeJSON({ error: error instanceof Error ? error.message : String(error) }));
+        const status = error instanceof DQLAccessDeniedError ? 403 : 500;
+        res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({
+          error: error instanceof Error ? error.message : String(error),
+          ...(status === 403 ? { code: 'unauthorized' } : {}),
+        }));
       }
       return;
     }
@@ -1027,13 +1180,22 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           res.end(serializeJSON({ error: message, diagnostics: validation.diagnostics }));
           return;
         }
-        const sql = resolveProjectRelativeSqlPaths(executableSql, projectRoot, projectConfig.dataDir);
-        const result = await executor.executeQuery(sql, [], {}, targetConnection);
+        const plan = buildExecutionPlan(
+          { id: 'block-studio', type: 'dql', source, title: 'Block Studio' },
+          { semanticLayer, driver: targetConnection.driver },
+        );
+        const sql = resolveProjectRelativeSqlPaths(plan?.sql ?? executableSql, projectRoot, projectConfig.dataDir);
+        const result = await executor.executeQuery(
+          sql,
+          plan?.sqlParams ?? [],
+          runtimeVariables(plan?.variables ?? {}),
+          targetConnection,
+        );
         res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
         res.end(serializeJSON({
-          sql: executableSql,
+          sql: plan?.sql ?? executableSql,
           result: normalizeQueryResult(result),
-          chartConfig: validation.chartConfig ?? null,
+          chartConfig: plan?.chartConfig ?? validation.chartConfig ?? null,
         }));
       } catch (error) {
         res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' });
@@ -1638,7 +1800,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
         messages?: Array<{ role: 'user' | 'assistant'; content: string }>;
         upstream?: { cellId?: string; sql?: string };
       };
-      const runner = provider === 'claude-agent-sdk' || provider === 'claude-code' ? getLLMRunner(provider) : null;
+      const runner = isLLMProviderId(provider) ? getLLMRunner(provider) : null;
       if (!runner) {
         res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
         res.end(serializeJSON({ error: `Unknown provider: ${provider}` }));
@@ -1661,7 +1823,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
       const emit = (turn: unknown) => { res.write(`data: ${JSON.stringify(turn)}\n\n`); };
       try {
         await runner.run(
-          { provider: provider as 'claude-agent-sdk' | 'claude-code', messages, upstream, projectRoot },
+          { provider: provider as ProviderId, messages, upstream, projectRoot },
           emit,
           controller.signal,
         );
@@ -1698,10 +1860,13 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           projectRoot,
           projectConfig,
         );
+        const app = loadRuntimeApp(projectRoot, typeof body.appId === 'string' ? body.appId : activePersonaAppId());
+        const domain = typeof body.domain === 'string' ? body.domain : app?.domain;
+        assertAppAccess({ app, domain, level: 'execute' });
         const result = await executor.executeQuery(
           prepared.sql,
           Array.isArray(body.sqlParams) ? body.sqlParams : [],
-          body.variables && typeof body.variables === 'object' ? body.variables : {},
+          runtimeVariables(body.variables && typeof body.variables === 'object' ? body.variables : {}),
           prepared.connection,
         );
         const payload = serializeJSON(normalizeQueryResult(result, semantic.semanticRefs));
@@ -1710,6 +1875,16 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
       } catch (error) {
         if (res.headersSent || res.writableEnded) {
           res.end();
+          return;
+        }
+        if (error instanceof DQLAccessDeniedError) {
+          res.writeHead(403, { 'Content-Type': 'application/json; charset=utf-8' });
+          res.end(serializeJSON({
+            columns: [],
+            rows: [],
+            error: error.message,
+            code: 'unauthorized',
+          }));
           return;
         }
         res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' });
@@ -1788,6 +1963,11 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           result: normalizeQueryResult(result),
         }));
       } catch (error) {
+        if (error instanceof DQLAccessDeniedError) {
+          res.writeHead(403, { 'Content-Type': 'application/json; charset=utf-8' });
+          res.end(serializeJSON({ error: error.message, code: 'unauthorized' }));
+          return;
+        }
         res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' });
         res.end(serializeJSON({ error: error instanceof Error ? error.message : String(error) }));
       }
@@ -2207,7 +2387,14 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           projectRoot,
           projectConfig,
         );
-        const rawResult = await executor.executeQuery(prepared.sql, plan.sqlParams, plan.variables, prepared.connection);
+        const app = loadRuntimeApp(projectRoot, typeof body.appId === 'string' ? body.appId : activePersonaAppId());
+        assertAppAccess({ app, domain: app?.domain, level: 'execute' });
+        const rawResult = await executor.executeQuery(
+          prepared.sql,
+          plan.sqlParams,
+          runtimeVariables(plan.variables),
+          prepared.connection,
+        );
         res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
         res.end(serializeJSON({
           cellType: cell.type,
@@ -2367,6 +2554,42 @@ function normalizeQueryResult(
         : 0,
     ...(hasRefs ? { semanticRefs } : {}),
   };
+}
+
+function isLLMProviderId(value: unknown): value is ProviderId {
+  return value === 'claude-agent-sdk'
+    || value === 'claude-code'
+    || value === 'openai'
+    || value === 'gemini'
+    || value === 'ollama';
+}
+
+function loadAppDashboard(
+  projectRoot: string,
+  appId: string,
+  dashboardId: string,
+): { app: AppDocument; dashboard: DashboardDocument } | null {
+  for (const p of findAppDocuments(projectRoot)) {
+    const { document: app } = loadAppDocument(p);
+    if (!app || app.id !== appId) continue;
+    const appDir = p.slice(0, -'/dql.app.json'.length);
+    for (const d of findDashboardsForApp(appDir)) {
+      const { document: dashboard } = loadDashboardDocument(d);
+      if (dashboard?.id === dashboardId) return { app, dashboard };
+    }
+  }
+  return null;
+}
+
+function resolveDashboardItemBlock(
+  item: DashboardGridItem,
+  manifest: DQLManifest,
+): ManifestBlock | null {
+  if (isBlockIdRef(item.block)) {
+    return manifest.blocks[item.block.blockId] ?? null;
+  }
+  const normalizedRef = normalize(item.block.ref).replaceAll('\\', '/');
+  return Object.values(manifest.blocks).find((b) => normalize(b.filePath).replaceAll('\\', '/') === normalizedRef) ?? null;
 }
 
 export function serializeJSON(value: unknown): string {
@@ -4345,4 +4568,75 @@ function computeSemanticDiff(
   } catch {
     return null;
   }
+}
+
+type SettingsEnvVar = {
+  key: string;
+  label: string;
+  present: boolean;
+  optional: boolean;
+  description: string;
+};
+
+type SettingsEnvGroup = {
+  id: string;
+  title: string;
+  description: string;
+  vars: SettingsEnvVar[];
+};
+
+function collectSettingsEnvStatus(): SettingsEnvGroup[] {
+  const v = (key: string, label: string, description: string, optional = true): SettingsEnvVar => ({
+    key,
+    label,
+    description,
+    optional,
+    present: typeof process.env[key] === 'string' && process.env[key]!.trim().length > 0,
+  });
+
+  return [
+    {
+      id: 'ai',
+      title: 'AI Chat Providers',
+      description: 'Configure one or more providers. Missing keys are only a problem when that provider is selected.',
+      vars: [
+        v('ANTHROPIC_API_KEY', 'Claude Agent SDK', 'Hosted Claude provider for notebook Chat and agent commands.'),
+        v('OPENAI_API_KEY', 'OpenAI', 'Hosted OpenAI provider for notebook Chat and agent commands.'),
+        v('OPENAI_MODEL', 'OpenAI model', 'Optional override such as gpt-4.1-mini or the model your account uses.'),
+        v('GEMINI_API_KEY', 'Gemini', 'Hosted Gemini provider for notebook Chat and agent commands.'),
+        v('GEMINI_MODEL', 'Gemini model', 'Optional Gemini model override.'),
+        v('OLLAMA_BASE_URL', 'Ollama base URL', 'Local Ollama HTTP endpoint. Docker defaults to http://ollama:11434.'),
+        v('OLLAMA_MODEL', 'Ollama model', 'Optional local model name such as llama3.1.'),
+      ],
+    },
+    {
+      id: 'slack',
+      title: 'Slack',
+      description: 'Use webhooks for scheduled App deliveries, or bot credentials for the Slack chat front-end.',
+      vars: [
+        v('DQL_SLACK_WEBHOOK', 'Schedule webhook', 'Incoming webhook used by App schedules that deliver to Slack.'),
+        v('SLACK_SIGNING_SECRET', 'Slack signing secret', 'Required only when running `dql slack serve`.'),
+        v('SLACK_BOT_TOKEN', 'Slack bot token', 'Bot token used by Slack chat commands when `dql slack serve` is enabled.'),
+      ],
+    },
+    {
+      id: 'email',
+      title: 'Email',
+      description: 'SMTP is optional. Without it, email schedules stay in stub mode with a clear delivery message.',
+      vars: [
+        v('DQL_SMTP_URL', 'SMTP URL', 'SMTP connection URL for email schedule delivery.'),
+        v('DQL_SMTP_FROM', 'SMTP sender', 'Optional sender address for scheduled emails.'),
+      ],
+    },
+    {
+      id: 'runtime',
+      title: 'Runtime',
+      description: 'Local server and runtime toggles used by Docker and native notebook sessions.',
+      vars: [
+        v('DQL_HOST', 'Notebook bind host', 'Host interface for the local notebook server. Docker uses 0.0.0.0 inside the container.'),
+        v('DQL_RUNTIME_URL', 'Runtime URL', 'Optional URL used by headless agent commands to call an existing runtime.'),
+        v('DQL_LLM_KEY', 'Legacy LLM key', 'Fallback key accepted by older Claude provider configurations.'),
+      ],
+    },
+  ];
 }

@@ -471,7 +471,7 @@ function applyRLSDecorators(
       });
     }
 
-    rlsClauses.push(`${column} = $${nextPosition}`);
+    rlsClauses.push(`${column} = COALESCE($${nextPosition}, ${column})`);
   }
 
   if (rlsClauses.length === 0) return { sql, params: nextParams };
@@ -838,13 +838,15 @@ function lowerBlockDecl(node: BlockDeclNode, _options: LoweringOptions): Dashboa
       variables[p.name] = evaluateExpression(p.initializer);
     }
 
+    const rlsApplied = applyRLSDecorators(node.decorators, composed.sql, []);
+
     return {
       title: node.name,
       charts: [{
         id: 'chart-0',
         chartType: normalizedChartType as ChartIR['chartType'],
-        sql: composed.sql,
-        sqlParams: [],
+        sql: rlsApplied.sql,
+        sqlParams: rlsApplied.params,
         config,
         title: node.description || node.name,
         blockType: node.blockType,
@@ -869,7 +871,10 @@ function lowerBlockDecl(node: BlockDeclNode, _options: LoweringOptions): Dashboa
   const config = lowerBlockVisualizationConfig(node);
   // Resolve ref() calls before processing interpolations
   const refResult = resolveRefs(node.query.rawSQL, _options.blockRegistry);
-  const { sql, params } = processSQL(refResult.sql, node.query.interpolations);
+  let { sql, params } = processSQL(refResult.sql, node.query.interpolations);
+  const rlsApplied = applyRLSDecorators(node.decorators, sql, params);
+  sql = rlsApplied.sql;
+  params = rlsApplied.params;
 
   const paramIRs: ParamIR[] = (node.params?.params ?? []).map((p) => ({
     name: p.name,

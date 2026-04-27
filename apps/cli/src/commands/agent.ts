@@ -15,7 +15,8 @@
  *     Records feedback into the KG. Used by clients without MCP access.
  */
 
-import { existsSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import {
   KGStore,
   defaultKgPath,
@@ -25,6 +26,7 @@ import {
   answer,
   type ProviderName,
 } from '@duckcodeailabs/dql-agent';
+import { buildManifest } from '@duckcodeailabs/dql-core';
 import type { CLIFlags } from '../args.js';
 import { findProjectRoot } from '../local-runtime.js';
 
@@ -72,7 +74,54 @@ async function runAsk(rest: string[], flags: CLIFlags): Promise<void> {
   const { skills } = loadSkills(projectRoot);
 
   try {
-    const result = await answer({ question, provider, kg, skills, userId, domain });
+    const manifest = buildManifest({ projectRoot });
+    const result = await answer({
+      question,
+      provider,
+      kg,
+      skills,
+      userId,
+      domain,
+      executeCertifiedBlock: async (node) => {
+        const block = manifest.blocks[node.name] ?? manifest.blocks[node.nodeId.replace(/^block:/, '')];
+        if (!block) throw new Error(`Matched block ${node.name} is not present in the manifest.`);
+        const base = (flags as { runtimeUrl?: string; runtime?: string }).runtimeUrl
+          ?? (flags as { runtime?: string }).runtime
+          ?? process.env.DQL_RUNTIME_URL
+          ?? 'http://127.0.0.1:3474';
+        const source = readFileSync(join(projectRoot, block.filePath), 'utf-8');
+        const response = await fetch(`${base.replace(/\/$/, '')}/api/notebook/execute`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            cell: {
+              id: `agent-${node.name}`,
+              type: 'dql',
+              source,
+              title: node.name,
+            },
+          }),
+        });
+        if (!response.ok) throw new Error(`Runtime returned ${response.status}: ${await response.text()}`);
+        const payload = (await response.json()) as {
+          result?: {
+            columns?: unknown[];
+            rows?: unknown[];
+            rowCount?: number;
+            executionTime?: number;
+          };
+          error?: string;
+        };
+        if (payload.error) throw new Error(payload.error);
+        const rows = Array.isArray(payload.result?.rows) ? payload.result.rows : [];
+        return {
+          columns: Array.isArray(payload.result?.columns) ? payload.result.columns : [],
+          rows,
+          rowCount: typeof payload.result?.rowCount === 'number' ? payload.result.rowCount : rows.length,
+          executionTime: payload.result?.executionTime,
+        };
+      },
+    });
 
     if (format === 'json') {
       console.log(JSON.stringify(result, null, 2));
@@ -88,6 +137,10 @@ async function runAsk(rest: string[], flags: CLIFlags): Promise<void> {
       ? '\n\nCitations:\n' + result.citations.map((c) => `  - ${c.kind} \`${c.name}\`${c.gitSha ? ` · ${c.gitSha.slice(0, 8)}` : ''}`).join('\n')
       : '';
     console.log(`${badge}\n\n${result.text}${cite}`);
+    if (result.result) {
+      console.log(`\nRows: ${result.result.rowCount}`);
+      console.log(JSON.stringify(result.result.rows.slice(0, 5), null, 2));
+    }
     if (result.proposedSql) {
       console.log(`\n--- Proposed SQL (review before saving as a block) ---\n${result.proposedSql}`);
       if (result.suggestedViz) console.log(`Viz: ${result.suggestedViz}`);

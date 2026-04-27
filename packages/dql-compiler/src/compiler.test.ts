@@ -486,7 +486,7 @@ describe('compile', () => {
     expect(result.errors).toHaveLength(0);
     const query = result.dashboards[0].metadata.queries[0];
     expect(query.sql).toContain('_dql_rls');
-    expect(query.sql).toContain('org_id = $1');
+    expect(query.sql).toContain('org_id = COALESCE($1, org_id)');
     expect(query.sql).not.toContain('{user.org}');
     expect(result.dashboards[0].html).toContain('"params":[{"name":"user.org","position":1}]');
   });
@@ -502,7 +502,7 @@ describe('compile', () => {
     const result = compile(source);
     expect(result.errors).toHaveLength(0);
     const query = result.dashboards[0].metadata.queries[0];
-    expect(query.sql).toContain('region = $1');
+    expect(query.sql).toContain('region = COALESCE($1, region)');
     expect(result.dashboards[0].html).toContain('"literalValue":"EMEA"');
   });
 

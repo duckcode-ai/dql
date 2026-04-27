@@ -16,7 +16,7 @@ export class GeminiProvider implements AgentProvider {
 
   constructor(opts: { apiKey?: string; model?: string } = {}) {
     this.apiKey = opts.apiKey ?? process.env.GEMINI_API_KEY ?? process.env.GOOGLE_API_KEY;
-    this.defaultModel = opts.model ?? 'gemini-2.5-pro';
+    this.defaultModel = opts.model ?? process.env.GEMINI_MODEL ?? 'gemini-2.5-pro';
   }
 
   async available(): Promise<boolean> {

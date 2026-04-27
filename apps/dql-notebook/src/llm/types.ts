@@ -1,4 +1,4 @@
-export type ProviderId = 'claude-agent-sdk' | 'claude-code';
+export type ProviderId = 'claude-agent-sdk' | 'claude-code' | 'openai' | 'gemini' | 'ollama';
 
 export interface ChatTurn {
   role: 'user' | 'assistant';

@@ -26,7 +26,7 @@ fires. The DQL scheduler:
    org-wide, never RLS-narrowed (the scheduler is the org's eyes, not a
    member's).
 4. Executes each block referenced by the dashboard (`fraud_alerts_by_region`,
-   `fraud_by_merchant`).
+   `fraud_by_merchant_recent`).
 5. Composes a Block-Kit message and POSTs it to `#cards-fraud-alerts`.
 
 In Slack:

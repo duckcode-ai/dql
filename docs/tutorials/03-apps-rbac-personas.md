@@ -37,6 +37,11 @@ without spinning up real authentication.
 
 ## Step 1 — Scaffold the App
 
+The `acme-bank` template already includes the completed `cards-ops` App at
+`apps/cards-ops/`. Run this step in a scratch project if you want to practice
+the CLI scaffolder, or inspect the packaged files directly if you are following
+the end-to-end sample.
+
 ```bash
 cd ~/acme-bank
 dql app new cards-ops --domain cards --owner raj.kumar@acme-bank.com

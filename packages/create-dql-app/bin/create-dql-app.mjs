@@ -37,12 +37,13 @@ Usage:
   npx create-dql-app <project-dir> [options]
 
 Options:
-  --template <name>   Starter template: jaffle-shop (default), empty
+  --template <name>   Starter template: jaffle-shop (default), acme-bank, empty
   --help, -h          Show this help
   --version, -v       Show version
 
 Examples:
   npx create-dql-app my-analytics
+  npx create-dql-app acme-bank --template acme-bank
   npx create-dql-app finance-reports --template empty
 `);
 }

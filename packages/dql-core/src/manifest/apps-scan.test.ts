@@ -78,30 +78,31 @@ describe('buildManifest with apps + dashboards', () => {
     expect(Object.keys(manifest.blocks)).toContain('revenue_total');
 
     expect(Object.keys(manifest.apps ?? {})).toEqual(['growth-cxo']);
-    expect(Object.keys(manifest.dashboards ?? {})).toEqual(['weekly-overview']);
+    expect(Object.keys(manifest.dashboards ?? {})).toEqual(['growth-cxo/weekly-overview']);
 
-    const dashboard = manifest.dashboards!['weekly-overview'];
+    const dashboard = manifest.dashboards!['growth-cxo/weekly-overview'];
     expect(dashboard.appId).toBe('growth-cxo');
+    expect(dashboard.qualifiedId).toBe('growth-cxo/weekly-overview');
     expect(dashboard.blockIds).toEqual(['revenue_total']);
     expect(dashboard.unresolvedRefs).toEqual([]);
 
     const app = manifest.apps!['growth-cxo'];
-    expect(app.dashboards).toEqual(['weekly-overview']);
+    expect(app.dashboards).toEqual(['growth-cxo/weekly-overview']);
     expect(app.homepage).toEqual({ type: 'dashboard', id: 'weekly-overview' });
 
-    // Lineage: app:growth-cxo node, dashboard:weekly-overview node, edge between.
+    // Lineage: app:growth-cxo node, dashboard:growth-cxo/weekly-overview node, edge between.
     const ids = new Set(manifest.lineage.nodes.map((n) => n.id));
     expect(ids.has('app:growth-cxo')).toBe(true);
-    expect(ids.has('dashboard:weekly-overview')).toBe(true);
+    expect(ids.has('dashboard:growth-cxo/weekly-overview')).toBe(true);
     expect(ids.has('block:revenue_total')).toBe(true);
 
     const edge = manifest.lineage.edges.find(
-      (e) => e.source === 'dashboard:weekly-overview' && e.target === 'app:growth-cxo',
+      (e) => e.source === 'dashboard:growth-cxo/weekly-overview' && e.target === 'app:growth-cxo',
     );
     expect(edge?.type).toBe('contains');
 
     const blockToDashboard = manifest.lineage.edges.find(
-      (e) => e.source === 'block:revenue_total' && e.target === 'dashboard:weekly-overview',
+      (e) => e.source === 'block:revenue_total' && e.target === 'dashboard:growth-cxo/weekly-overview',
     );
     expect(blockToDashboard?.type).toBe('contains');
   });

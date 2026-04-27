@@ -133,7 +133,7 @@ export function ActivityBar() {
       dispatch({ type: 'TOGGLE_LINEAGE_FULLSCREEN' });
       return;
     }
-    const fullPagePanel = panel === 'connection' || panel === 'reference' || panel === 'git' || panel === 'apps';
+    const fullPagePanel = panel === 'connection' || panel === 'reference' || panel === 'git' || panel === 'apps' || panel === 'settings';
     if (fullPagePanel) {
       dispatch({ type: 'SET_SIDEBAR_PANEL', panel });
       return;
@@ -220,8 +220,8 @@ export function ActivityBar() {
       key: 'settings',
       title: 'Settings',
       icon: <Settings size={16} strokeWidth={1.75} />,
-      active: false,
-      onClick: () => {},
+      active: state.mainView === 'settings',
+      onClick: () => handlePanelClick('settings' as SidebarPanel),
     },
   ];
 

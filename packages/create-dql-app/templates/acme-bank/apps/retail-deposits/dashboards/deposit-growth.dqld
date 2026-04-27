@@ -1,0 +1,48 @@
+{
+  "version": 1,
+  "id": "deposit-growth",
+  "metadata": {
+    "title": "Deposit Growth",
+    "description": "Certified deposit growth dashboard by segment, branch, and snapshot date.",
+    "domain": "deposits",
+    "tags": ["deposits", "growth", "retail"]
+  },
+  "layout": {
+    "kind": "grid",
+    "cols": 12,
+    "rowHeight": 80,
+    "items": [
+      {
+        "i": "deposit-trend",
+        "x": 0,
+        "y": 0,
+        "w": 12,
+        "h": 3,
+        "block": { "blockId": "deposit_trend" },
+        "viz": { "type": "line" },
+        "title": "Total Deposit Trend"
+      },
+      {
+        "i": "segment-balance",
+        "x": 0,
+        "y": 3,
+        "w": 6,
+        "h": 3,
+        "block": { "blockId": "deposits_by_segment" },
+        "viz": { "type": "bar" },
+        "title": "Deposits by Segment"
+      },
+      {
+        "i": "branch-leaders",
+        "x": 6,
+        "y": 3,
+        "w": 6,
+        "h": 4,
+        "block": { "blockId": "branch_deposit_leaders" },
+        "viz": { "type": "table" },
+        "title": "Branch Leaders"
+      }
+    ]
+  }
+}
+

@@ -85,6 +85,73 @@ export interface DashboardDocumentResponse {
   };
 }
 
+export interface DashboardRunResponse {
+  appId: string;
+  dashboardId: string;
+  persona: unknown;
+  tiles: Array<{
+    tileId: string;
+    status: 'ok' | 'unauthorized' | 'error' | 'unresolved';
+    blockId?: string;
+    blockPath?: string;
+    certificationStatus?: string | null;
+    title?: string;
+    viz?: { type: string; options?: Record<string, unknown> };
+    chartConfig?: Record<string, unknown>;
+    result?: QueryResult;
+    citation?: { kind: string; name: string; path?: string };
+    error?: string;
+  }>;
+}
+
+export interface AppBlockRecommendation {
+  id: string;
+  name: string;
+  domain: string;
+  status: string;
+  owner: string | null;
+  tags: string[];
+  path: string;
+  lastModified: string;
+  description: string;
+  llmContext?: string | null;
+  chartType?: string;
+  score: number;
+  reasons: string[];
+}
+
+export interface CreateAppRequest {
+  name: string;
+  domain: string;
+  purpose?: string;
+  audience?: string;
+  tags: string[];
+  owners: string[];
+  selectedBlockIds: string[];
+}
+
+export interface CreateAppResponse {
+  ok: true;
+  app: AppSummary;
+  paths: string[];
+  dashboardId: string;
+}
+
+export interface SettingsEnvVar {
+  key: string;
+  label: string;
+  present: boolean;
+  optional: boolean;
+  description: string;
+}
+
+export interface SettingsEnvGroup {
+  id: string;
+  title: string;
+  description: string;
+  vars: SettingsEnvVar[];
+}
+
 const BASE = window.location.origin;
 
 async function request<T>(path: string, options?: RequestInit): Promise<T> {
@@ -102,6 +169,14 @@ async function request<T>(path: string, options?: RequestInit): Promise<T> {
 }
 
 export const api = {
+  async getSettingsEnvStatus(): Promise<{ groups: SettingsEnvGroup[] }> {
+    try {
+      return await request<{ groups: SettingsEnvGroup[] }>('/api/settings/env-status');
+    } catch {
+      return { groups: [] };
+    }
+  },
+
   async listNotebooks(): Promise<NotebookFile[]> {
     try {
       return await request<NotebookFile[]>('/api/notebooks');
@@ -856,6 +931,31 @@ export const api = {
     }
   },
 
+  async recommendAppBlocks(input: {
+    domain?: string;
+    tags?: string[];
+    purpose?: string;
+    audience?: string;
+    certifiedOnly?: boolean;
+  }): Promise<AppBlockRecommendation[]> {
+    try {
+      const { blocks } = await request<{ blocks: AppBlockRecommendation[] }>('/api/apps/recommend-blocks', {
+        method: 'POST',
+        body: JSON.stringify(input),
+      });
+      return blocks;
+    } catch {
+      return [];
+    }
+  },
+
+  async createApp(input: CreateAppRequest): Promise<CreateAppResponse> {
+    return request<CreateAppResponse>('/api/apps', {
+      method: 'POST',
+      body: JSON.stringify(input),
+    });
+  },
+
   async getApp(id: string): Promise<AppDocumentSummary | null> {
     try {
       return await request<AppDocumentSummary>(`/api/apps/${encodeURIComponent(id)}`);
@@ -868,6 +968,17 @@ export const api = {
     try {
       return await request<DashboardDocumentResponse>(
         `/api/apps/${encodeURIComponent(appId)}/dashboards/${encodeURIComponent(dashboardId)}`,
+      );
+    } catch {
+      return null;
+    }
+  },
+
+  async runDashboard(appId: string, dashboardId: string, variables?: Record<string, unknown>): Promise<DashboardRunResponse | null> {
+    try {
+      return await request<DashboardRunResponse>(
+        `/api/apps/${encodeURIComponent(appId)}/dashboards/${encodeURIComponent(dashboardId)}/run`,
+        { method: 'POST', body: JSON.stringify({ variables: variables ?? {} }) },
       );
     } catch {
       return null;

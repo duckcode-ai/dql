@@ -77,7 +77,7 @@ export function buildKGFromManifest(manifest: DQLManifest): {
 
   // Dashboards
   for (const d of Object.values(manifest.dashboards ?? {})) {
-    const nodeId = `dashboard:${d.id}`;
+    const nodeId = `dashboard:${d.qualifiedId ?? `${d.appId}/${d.id}`}`;
     nodes.push({
       nodeId,
       kind: 'dashboard',

@@ -17,7 +17,7 @@ export class OpenAIProvider implements AgentProvider {
   constructor(opts: { apiKey?: string; baseUrl?: string; model?: string } = {}) {
     this.apiKey = opts.apiKey ?? process.env.OPENAI_API_KEY;
     this.baseUrl = (opts.baseUrl ?? process.env.OPENAI_BASE_URL ?? 'https://api.openai.com/v1').replace(/\/+$/, '');
-    this.defaultModel = opts.model ?? 'gpt-4.1-mini';
+    this.defaultModel = opts.model ?? process.env.OPENAI_MODEL ?? 'gpt-4.1-mini';
   }
 
   async available(): Promise<boolean> {

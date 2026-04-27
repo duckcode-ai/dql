@@ -333,7 +333,7 @@ export class SemanticAnalyzer {
   }
 
   private analyzeWorkbook(node: WorkbookNode): void {
-    this.validateDecorators(node.decorators, 'dashboard');
+    this.validateDecorators(node.decorators, 'block');
 
     if (node.pages.length === 0) {
       this.reporter.warning('Workbook has no pages.', node.span);
@@ -606,7 +606,7 @@ export class SemanticAnalyzer {
     }
   }
 
-  private validateDecorators(decorators: DecoratorNode[], context: 'dashboard' | 'chart'): void {
+  private validateDecorators(decorators: DecoratorNode[], context: 'dashboard' | 'chart' | 'block'): void {
     for (const dec of decorators) {
       switch (dec.name) {
         case 'schedule':
@@ -645,9 +645,9 @@ export class SemanticAnalyzer {
           }
           break;
         case 'rls':
-          if (context !== 'chart') {
+          if (context !== 'chart' && context !== 'block') {
             this.reporter.error(
-              '@rls can only be applied to chart declarations.',
+              '@rls can only be applied to chart or block declarations.',
               dec.span,
             );
           }

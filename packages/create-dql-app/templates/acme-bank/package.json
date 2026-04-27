@@ -1,0 +1,18 @@
+{
+  "name": "{{PROJECT_NAME}}",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Acme Bank DQL analytics project.",
+  "scripts": {
+    "notebook": "dql notebook",
+    "compile": "dql compile",
+    "app:build": "dql app build",
+    "agent:reindex": "dql agent reindex",
+    "verify": "dql verify .",
+    "doctor": "dql doctor",
+    "test": "dql test"
+  },
+  "devDependencies": {
+    "@duckcodeailabs/dql-cli": "^1.0.0"
+  }
+}

@@ -271,6 +271,8 @@ export interface ManifestDashboard {
   id: string;
   /** Owning App id. */
   appId: string;
+  /** Namespaced dashboard id used as the manifest key, e.g. "growth-cxo/overview". */
+  qualifiedId: string;
   title: string;
   description?: string;
   domain?: string;

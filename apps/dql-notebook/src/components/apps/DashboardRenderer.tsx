@@ -1,20 +1,50 @@
-import type { DashboardDocumentResponse } from '../../api/client';
+import { useEffect, useMemo, useState } from 'react';
+import { api, type DashboardDocumentResponse, type DashboardRunResponse } from '../../api/client';
+import { useNotebook } from '../../store/NotebookStore';
+import type { ThemeMode } from '../../store/types';
+import { ChartOutput } from '../output/ChartOutput';
+import { TableOutput } from '../output/TableOutput';
 
 /**
- * Minimal grid renderer for `.dqld` dashboards.
- *
- * Renders the layout as CSS-grid tiles. Each tile shows the block ref + viz
- * type as metadata; live block execution and chart rendering will be wired
- * in when the dashboard executor lands. This keeps the surface visible and
- * iterable without blocking the UI on the executor work.
+ * Grid renderer for `.dqld` dashboards backed by the live dashboard run API.
  */
 export function DashboardRenderer({
+  appId,
   dashboard,
 }: {
+  appId: string;
   dashboard: DashboardDocumentResponse['dashboard'];
 }): JSX.Element {
+  const { state } = useNotebook();
+  const [run, setRun] = useState<DashboardRunResponse | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
   const cols = dashboard.layout.cols;
   const rowHeight = dashboard.layout.rowHeight;
+  const tileResults = useMemo(() => {
+    const map = new Map<string, DashboardRunResponse['tiles'][number]>();
+    for (const tile of run?.tiles ?? []) map.set(tile.tileId, tile);
+    return map;
+  }, [run]);
+
+  useEffect(() => {
+    let cancelled = false;
+    setLoading(true);
+    setError(null);
+    void api.runDashboard(appId, dashboard.id).then((result) => {
+      if (cancelled) return;
+      setRun(result);
+      if (!result) setError('Dashboard run failed.');
+    }).catch((err) => {
+      if (!cancelled) setError(err instanceof Error ? err.message : String(err));
+    }).finally(() => {
+      if (!cancelled) setLoading(false);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [appId, dashboard.id, state.activePersona?.userId]);
+
   return (
     <div>
       <div style={{ marginBottom: 16 }}>
@@ -50,7 +80,14 @@ export function DashboardRenderer({
           }}
         >
           {dashboard.layout.items.map((item) => (
-            <DashboardTile key={item.i} item={item} />
+            <DashboardTile
+              key={item.i}
+              item={item}
+              tile={tileResults.get(item.i)}
+              loading={loading}
+              error={error}
+              themeMode={state.themeMode}
+            />
           ))}
         </div>
       )}
@@ -60,10 +97,18 @@ export function DashboardRenderer({
 
 function DashboardTile({
   item,
+  tile,
+  loading,
+  error,
+  themeMode,
 }: {
   item: DashboardDocumentResponse['dashboard']['layout']['items'][number];
+  tile?: DashboardRunResponse['tiles'][number];
+  loading: boolean;
+  error: string | null;
+  themeMode: ThemeMode;
 }): JSX.Element {
-  const blockRef = item.block.blockId
+  const blockRef = 'blockId' in item.block
     ? `block:${item.block.blockId}`
     : item.block.ref ?? '(unknown)';
   return (
@@ -105,12 +150,38 @@ function DashboardTile({
           alignItems: 'center',
           justifyContent: 'center',
           fontSize: 12,
-          opacity: 0.55,
-          fontStyle: 'italic',
+          opacity: tile?.status === 'ok' ? 1 : 0.7,
+          fontStyle: tile?.status === 'ok' ? 'normal' : 'italic',
         }}
       >
-        Live data preview lands when the dashboard executor ships.
+        <TileBody tile={tile} loading={loading} error={error} themeMode={themeMode} />
       </div>
     </div>
   );
+}
+
+function TileBody({
+  tile,
+  loading,
+  error,
+  themeMode,
+}: {
+  tile?: DashboardRunResponse['tiles'][number];
+  loading: boolean;
+  error: string | null;
+  themeMode: ThemeMode;
+}): JSX.Element {
+  if (loading && !tile) return <span>Loading data...</span>;
+  if (error && !tile) return <span>{error}</span>;
+  if (!tile) return <span>No run result.</span>;
+  if (tile.status === 'unauthorized') return <span>Not authorized.</span>;
+  if (tile.status === 'unresolved') return <span>{tile.error ?? 'Block reference unresolved.'}</span>;
+  if (tile.status === 'error') return <span>{tile.error ?? 'Tile failed.'}</span>;
+  if (!tile.result) return <span>No result.</span>;
+
+  const chart = String((tile.chartConfig as { chart?: unknown } | undefined)?.chart ?? tile.viz?.type ?? '').toLowerCase();
+  if (chart === 'table' || tile.viz?.type === 'table') {
+    return <div style={{ width: '100%', alignSelf: 'stretch' }}><TableOutput result={tile.result} themeMode={themeMode} /></div>;
+  }
+  return <div style={{ width: '100%', alignSelf: 'stretch' }}><ChartOutput result={tile.result} themeMode={themeMode} chartConfig={tile.chartConfig as any} /></div>;
 }
