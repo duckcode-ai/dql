@@ -16,7 +16,7 @@ export function buildParamValues(
       if (Object.prototype.hasOwnProperty.call(p, 'literalValue')) {
         return p.literalValue;
       }
-      return undefined;
+      return null;
     });
 }
 

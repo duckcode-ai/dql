@@ -18,4 +18,13 @@ describe('buildParamValues', () => {
     const values = buildParamValues(params, {});
     expect(values).toEqual(['EMEA']);
   });
+
+  it('binds missing optional variables as null', () => {
+    const params = [
+      { name: 'user.region', position: 1 },
+      { name: 'user.branch', position: 2 },
+    ];
+    const values = buildParamValues(params, {});
+    expect(values).toEqual([null, null]);
+  });
 });

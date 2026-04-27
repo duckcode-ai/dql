@@ -14,11 +14,12 @@ block "deposits_by_segment" {
   query = """
     SELECT
       segment,
+      region,
       ROUND(SUM(balance_usd), 2) AS balance_usd,
       ROUND(SUM(net_new_usd), 2) AS net_new_usd
     FROM read_csv_auto('./data/deposits.csv')
     WHERE as_of_date = (SELECT MAX(as_of_date) FROM read_csv_auto('./data/deposits.csv'))
-    GROUP BY 1
+    GROUP BY 1, 2
     ORDER BY balance_usd DESC
   """
   visualization {

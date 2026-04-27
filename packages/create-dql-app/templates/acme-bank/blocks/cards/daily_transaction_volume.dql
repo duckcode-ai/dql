@@ -15,11 +15,13 @@ block "daily_transaction_volume" {
   query = """
     SELECT
       CAST(txn_ts AS DATE) AS day,
+      region,
+      branch_id,
       COUNT(*) AS txn_count,
       ROUND(SUM(amount_usd), 2) AS volume_usd
     FROM read_csv_auto('./data/transactions.csv')
-    GROUP BY 1
-    ORDER BY 1
+    GROUP BY 1, 2, 3
+    ORDER BY 1, 2, 3
   """
   visualization {
     chart = "line"
