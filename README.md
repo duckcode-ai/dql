@@ -37,9 +37,11 @@ docker compose up
 ```
 
 Notebook on **http://127.0.0.1:3474**. The working directory is mounted at
-`/workspace` inside the container, so blocks, notebooks, and Apps you save
-land in your repo and stay in git. Add `--profile slack` for the Slack bot
-or `--profile ollama` for a local LLM daemon.
+`/workspace` inside the container. When you run this from the DQL framework
+repo, Docker automatically creates and opens the bundled Acme Bank starter at
+`.dql/docker-starter/acme-bank`; real DQL project folders with `dql.config.json`
+open directly. Add `--profile slack` for the Slack bot or `--profile ollama`
+for a local LLM daemon.
 
 **npm** *(Node 20+ already installed)*
 

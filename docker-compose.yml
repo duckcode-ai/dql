@@ -7,16 +7,16 @@
 # All ports are mapped to 127.0.0.1 on the host, so the security posture
 # matches the native `dql notebook` (loopback-only).
 #
-# The `./` mount at /workspace means everything you do inside the container
-# (saved blocks, KG cache, notebooks) lands in your local repo and is
-# trackable in git.
+# The `./` mount at /workspace lets this compose file serve either a real DQL
+# project (when dql.config.json is present) or this framework repo. In the
+# framework repo case, the container creates an ignored Acme Bank starter under
+# .dql/docker-starter/acme-bank and opens that project automatically.
 
 services:
   notebook:
     build:
       context: .
       dockerfile: Dockerfile
-    image: duckcodeailabs/dql:latest
     container_name: dql-notebook
     ports:
       - "127.0.0.1:3474:3474"
@@ -44,7 +44,6 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    image: duckcodeailabs/dql:latest
     container_name: dql-slack
     ports:
       - "127.0.0.1:3479:3479"

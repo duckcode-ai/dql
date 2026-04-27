@@ -52,10 +52,13 @@ RUN apt-get update \
 
 # Pull in the deployed CLI bundle (dist + node_modules).
 COPY --from=builder /tmp/deploy-cli /opt/dql
+COPY --from=builder /build/packages/create-dql-app/templates/acme-bank /opt/dql/templates/acme-bank
+COPY scripts/docker-entrypoint.sh /usr/local/bin/dql-docker-entrypoint
 
 # Make `dql` available on PATH via a tiny shim — `pnpm deploy` doesn't link bins.
 RUN printf '#!/bin/sh\nexec node /opt/dql/dist/index.js "$@"\n' > /usr/local/bin/dql \
- && chmod +x /usr/local/bin/dql
+ && chmod +x /usr/local/bin/dql \
+ && chmod +x /usr/local/bin/dql-docker-entrypoint
 
 # Project files live here at runtime — bind-mount your repo to /workspace.
 WORKDIR /workspace
@@ -64,4 +67,5 @@ EXPOSE 3474 3479
 
 # Bind 0.0.0.0 inside the container; map a single port from 127.0.0.1 on
 # the host with `-p 127.0.0.1:3474:3474` to keep loopback-only on the host.
+ENTRYPOINT ["dql-docker-entrypoint"]
 CMD ["dql", "notebook", "--host", "0.0.0.0", "--no-open"]

@@ -15,9 +15,10 @@ docker compose up
 > First build takes ~3 minutes (deps + workspace build). Subsequent runs
 > reuse cached layers and start in seconds.
 
-The notebook is now live at **http://127.0.0.1:3474** with the current
-working directory mounted as the project root, so anything you save lands
-in your repo.
+The notebook is now live at **http://127.0.0.1:3474**. If you run this from
+the DQL framework source repo, Docker creates and opens the bundled Acme Bank
+starter at `.dql/docker-starter/acme-bank`. If you run the same image from a
+folder that already has `dql.config.json`, that folder opens as the project.
 
 To run the Slack bot or a local Ollama daemon in the same compose stack:
 

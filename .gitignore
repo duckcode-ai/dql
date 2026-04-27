@@ -17,3 +17,4 @@ jaffle-shop/
 *.dql.run.json
 .dql/runs/
 .dql/cache/
+.dql/docker-starter/
