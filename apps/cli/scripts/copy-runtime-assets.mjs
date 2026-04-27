@@ -70,8 +70,9 @@ if (changed) {
       cliPkg.bin[cmd] = path.replace('./dist/', './');
     }
   }
-  // files: dist/* is already at the root when installing from dist/
-  cliPkg.files = ['.'];
+  // The generated package is published from dist/ itself. Let npm include the
+  // full compiled tree instead of carrying the source package's files allowlist.
+  delete cliPkg.files;
   // Published CLI artifacts should not carry workspace-only dev deps such as
   // the private notebook app package.
   delete cliPkg.devDependencies;
