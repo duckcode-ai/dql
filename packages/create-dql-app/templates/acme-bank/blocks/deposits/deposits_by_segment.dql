@@ -5,16 +5,12 @@ block "deposits_by_segment" {
   domain = "deposits"
   type = "custom"
   status = "certified"
-  owner = "diego.ramos@acme-bank.com"
   description = "Current deposit balance and net-new deposits by customer segment."
   tags = ["deposits", "retail", "segment", "balance"]
+  owner = "diego.ramos@acme-bank.com"
   llmContext = "Use for deposit balances, net-new deposits, and segment mix questions in the retail deposits domain."
-  examples = [
-    { question = "Which customer segments hold the most deposits?" },
-    { question = "How much net-new deposit growth did we see?" }
-  ]
+  examples = [{ question = "Which customer segments hold the most deposits?" }, { question = "How much net-new deposit growth did we see?" }]
   invariants = ["balance_usd >= 0"]
-
   query = """
     SELECT
       segment,
@@ -25,15 +21,12 @@ block "deposits_by_segment" {
     GROUP BY 1
     ORDER BY balance_usd DESC
   """
-
   visualization {
     chart = "bar"
     x = "segment"
     y = "balance_usd"
   }
-
   tests {
     assert row_count > 0
   }
 }
-

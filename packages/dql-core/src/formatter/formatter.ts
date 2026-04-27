@@ -228,11 +228,19 @@ function formatBlock(node: BlockDeclNode, level: number, state: FormatState): st
 
   if (node.domain) lines.push(`${indent(level + 1, state)}domain = ${quote(node.domain)}`);
   if (node.blockType) lines.push(`${indent(level + 1, state)}type = ${quote(node.blockType)}`);
+  if (node.status) lines.push(`${indent(level + 1, state)}status = ${quote(node.status)}`);
   if (node.description) lines.push(`${indent(level + 1, state)}description = ${quote(node.description)}`);
   if (node.tags && node.tags.length > 0) {
     lines.push(`${indent(level + 1, state)}tags = [${node.tags.map(quote).join(', ')}]`);
   }
   if (node.owner) lines.push(`${indent(level + 1, state)}owner = ${quote(node.owner)}`);
+  if (node.llmContext) lines.push(`${indent(level + 1, state)}llmContext = ${quote(node.llmContext)}`);
+  if (node.examples && node.examples.length > 0) {
+    lines.push(`${indent(level + 1, state)}examples = [${formatBlockExamples(node.examples)}]`);
+  }
+  if (node.invariants && node.invariants.length > 0) {
+    lines.push(`${indent(level + 1, state)}invariants = [${node.invariants.map(quote).join(', ')}]`);
+  }
 
   if (node.params) {
     lines.push(`${indent(level + 1, state)}params {`);
@@ -294,6 +302,16 @@ function formatSQLQuery(query: SQLQueryNode, level: number, state: FormatState):
 
 function formatNamedArg(arg: NamedArgNode): string {
   return `${arg.name} = ${formatExpression(arg.value)}`;
+}
+
+function formatBlockExamples(examples: Array<{ question: string; sql?: string }>): string {
+  return examples
+    .map((example) => {
+      const props = [`question = ${quote(example.question)}`];
+      if (example.sql) props.push(`sql = ${quote(example.sql)}`);
+      return `{ ${props.join(', ')} }`;
+    })
+    .join(', ');
 }
 
 function formatExpression(node: ExpressionNode): string {

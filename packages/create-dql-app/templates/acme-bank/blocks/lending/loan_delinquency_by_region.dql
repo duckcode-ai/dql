@@ -5,16 +5,12 @@ block "loan_delinquency_by_region" {
   domain = "lending"
   type = "custom"
   status = "certified"
-  owner = "anika.shah@acme-bank.com"
   description = "Loan delinquency exposure by region."
   tags = ["lending", "credit-risk", "delinquency", "risk"]
+  owner = "anika.shah@acme-bank.com"
   llmContext = "Use for delinquent loan exposure, days-past-due summaries, and regional lending risk questions."
-  examples = [
-    { question = "Which regions have the most delinquent loan exposure?" },
-    { question = "Show credit risk by region." }
-  ]
+  examples = [{ question = "Which regions have the most delinquent loan exposure?" }, { question = "Show credit risk by region." }]
   invariants = ["delinquent_balance_usd >= 0"]
-
   query = """
     SELECT
       region,
@@ -25,15 +21,12 @@ block "loan_delinquency_by_region" {
     GROUP BY 1
     ORDER BY delinquent_balance_usd DESC
   """
-
   visualization {
     chart = "bar"
     x = "region"
     y = "delinquent_balance_usd"
   }
-
   tests {
     assert row_count > 0
   }
 }
-

@@ -6,16 +6,12 @@ block "fraud_alerts_by_region" {
   domain = "cards"
   type = "custom"
   status = "certified"
-  owner = "mei.chen@acme-bank.com"
   description = "Confirmed and review fraud exposure by region and branch."
   tags = ["fraud", "cards", "ops", "risk"]
+  owner = "mei.chen@acme-bank.com"
   llmContext = "Use this block for card fraud exposure, fraud alert counts, and branch-level fraud monitoring. It supports persona RLS on region and branch_id."
-  examples = [
-    { question = "Which regions have the most card fraud exposure?" },
-    { question = "Show fraud alerts for my branch." }
-  ]
+  examples = [{ question = "Which regions have the most card fraud exposure?" }, { question = "Show fraud alerts for my branch." }]
   invariants = ["exposure_usd >= 0", "alert_count >= 0"]
-
   query = """
     SELECT
       region,
@@ -26,13 +22,11 @@ block "fraud_alerts_by_region" {
     GROUP BY 1, 2
     ORDER BY exposure_usd DESC
   """
-
   visualization {
     chart = "bar"
     x = "region"
     y = "exposure_usd"
   }
-
   tests {
     assert row_count >= 0
   }

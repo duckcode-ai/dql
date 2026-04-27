@@ -4,15 +4,12 @@ block "branch_deposit_leaders" {
   domain = "deposits"
   type = "custom"
   status = "certified"
-  owner = "diego.ramos@acme-bank.com"
   description = "Branches ranked by current deposit balance and weekly net-new deposits."
   tags = ["deposits", "branch", "leaderboard", "retail"]
+  owner = "diego.ramos@acme-bank.com"
   llmContext = "Use this block for branch deposit leaderboards, branch ranking, and regional retail growth conversations."
-  examples = [
-    { question = "Which branches lead deposits?" }
-  ]
+  examples = [{ question = "Which branches lead deposits?" }]
   invariants = ["balance_usd >= 0"]
-
   query = """
     SELECT
       region,
@@ -24,13 +21,10 @@ block "branch_deposit_leaders" {
     GROUP BY 1, 2
     ORDER BY balance_usd DESC
   """
-
   visualization {
     chart = "table"
   }
-
   tests {
     assert row_count > 0
   }
 }
-

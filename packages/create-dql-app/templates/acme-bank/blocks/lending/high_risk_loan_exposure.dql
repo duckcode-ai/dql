@@ -4,16 +4,12 @@ block "high_risk_loan_exposure" {
   domain = "lending"
   type = "custom"
   status = "certified"
-  owner = "anika.shah@acme-bank.com"
   description = "High-risk loan exposure for risk grades C and D."
   tags = ["lending", "credit-risk", "exposure", "risk"]
+  owner = "anika.shah@acme-bank.com"
   llmContext = "Use for high-risk loan exposure, watchlist balances, risk grades C and D, and credit-risk committee reviews."
-  examples = [
-    { question = "How much exposure is in high-risk loans?" },
-    { question = "Show the credit watchlist." }
-  ]
+  examples = [{ question = "How much exposure is in high-risk loans?" }, { question = "Show the credit watchlist." }]
   invariants = ["outstanding_usd >= 0"]
-
   query = """
     SELECT
       risk_grade,
@@ -26,13 +22,10 @@ block "high_risk_loan_exposure" {
     GROUP BY 1, 2
     ORDER BY outstanding_usd DESC
   """
-
   visualization {
     chart = "table"
   }
-
   tests {
     assert row_count > 0
   }
 }
-

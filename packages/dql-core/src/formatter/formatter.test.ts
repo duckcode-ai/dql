@@ -55,6 +55,34 @@ filter.dropdown(SELECT DISTINCT region FROM orders,label="Region",param="region"
     expect(formatted).toContain('assert segment IN ["Enterprise", "SMB"]');
   });
 
+  it('preserves block status and agent-facing metadata', () => {
+    const source = `block "fraud_by_region" {
+      domain = "cards"
+      type = "custom"
+      status = "certified"
+      description = "Fraud exposure by region"
+      tags = ["fraud", "cards"]
+      owner = "mei.chen@acme-bank.com"
+      llmContext = "Use for fraud monitoring questions."
+      examples = [{ question = "Where is fraud highest?", sql = "SELECT region FROM fraud" }]
+      invariants = ["exposure_usd >= 0"]
+      query = """
+        SELECT region, SUM(exposure_usd) AS exposure_usd
+        FROM fraud_alerts
+        GROUP BY 1
+      """
+    }`;
+
+    const formatted = formatDQL(source);
+
+    expect(formatted).toContain('status = "certified"');
+    expect(formatted).toContain('llmContext = "Use for fraud monitoring questions."');
+    expect(formatted).toContain(
+      'examples = [{ question = "Where is fraud highest?", sql = "SELECT region FROM fraud" }]',
+    );
+    expect(formatted).toContain('invariants = ["exposure_usd >= 0"]');
+  });
+
   it('is idempotent and parseable', () => {
     const source = `workbook "Ops Review" {
   page "Overview" {
