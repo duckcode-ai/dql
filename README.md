@@ -46,14 +46,18 @@ for a local LLM daemon.
 **npm** *(Node 20+ already installed)*
 
 ```bash
-npx create-dql-app my-project
+npx create-dql-app@latest my-project
 cd my-project
 npm install
 npm run notebook
 ```
 
-Either way, DuckDB runs in-memory. Drop a CSV into `data/`, query it,
-save a block, commit.
+The starter installs the DQL CLI locally as a dev dependency, so `npm run
+notebook`, `npm run compile`, and other scripts work without a global `dql`
+binary. Use `--template acme-bank` for the full Apps/RBAC/agent demo.
+
+Either way, DuckDB runs in-memory. Drop a CSV into `data/`, query it, save a
+block, commit.
 
 Already have a **dbt project**? Run `create-dql-app` next to it — the
 scaffolder auto-detects `dbt_project.yml` as a sibling and wires

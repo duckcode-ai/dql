@@ -29,10 +29,11 @@ pnpm exec dql --help
 These commands assume `dql` is installed globally. From a source checkout, use `pnpm exec dql` from the repo root or `../node_modules/.bin/dql` from the generated project.
 
 ```bash
-dql init my-dql-project
+npx create-dql-app@latest my-dql-project
 cd my-dql-project
-dql doctor
-dql notebook
+npm install
+npm run doctor
+npm run notebook
 ```
 
 If you want the dbt-integrated starter instead, use the Jaffle Shop semantic-layer course repo:
@@ -66,6 +67,6 @@ dql notebook
 ## Learn More
 
 - Root docs: [`../../README.md`](../../README.md)
-- Getting started: [`../../docs/getting-started.md`](../../docs/getting-started.md)
-- CLI reference: [`../../docs/cli-reference.md`](../../docs/cli-reference.md)
-- Project config: [`../../docs/project-config.md`](../../docs/project-config.md)
+- Quickstart: [`../../docs/01-quickstart.md`](../../docs/01-quickstart.md)
+- CLI reference: [`../../docs/reference/cli.md`](../../docs/reference/cli.md)
+- Project config: [`../../docs/reference/file-formats.md`](../../docs/reference/file-formats.md)

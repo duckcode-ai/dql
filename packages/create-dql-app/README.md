@@ -3,13 +3,15 @@
 The fastest way to start a DQL project.
 
 ```bash
-npx create-dql-app my-analytics
+npx create-dql-app@latest my-analytics
 cd my-analytics
-npx @duckcodeailabs/dql-cli notebook
+npm install
+npm run notebook
 ```
 
-Opens a running notebook at <http://localhost:5173> in under 5 minutes on a
-clean machine. No global install required.
+Opens a running notebook at <http://127.0.0.1:3474> in under 5 minutes on a
+clean machine. No global install required; the template installs
+`@duckcodeailabs/dql-cli` locally and exposes it through npm scripts.
 
 ## Templates
 
@@ -20,8 +22,8 @@ clean machine. No global install required.
 | `empty` | Just `dql.config.json` and project layout - bring your own warehouse |
 
 ```bash
-npx create-dql-app acme-bank --template acme-bank
-npx create-dql-app finance-reports --template empty
+npx create-dql-app@latest acme-bank --template acme-bank
+npx create-dql-app@latest finance-reports --template empty
 ```
 
 ## Flags

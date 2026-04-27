@@ -9,12 +9,13 @@ we treat the quickstart as a contract.
 ### Scaffold a project with Jaffle Shop seed data
 
 ```bash
-npx create-dql-app jaffle-demo
+npx create-dql-app@latest jaffle-demo
 cd jaffle-demo
+npm install
 ```
 
-No global install required — `create-dql-app` scaffolds the project,
-`npx @duckcodeailabs/dql-cli` runs the notebook. See
+No global install required — `create-dql-app` scaffolds the project and
+`npm install` installs the DQL CLI locally. See
 [Install](03-install.md) if you prefer a global `dql` binary or the
 [Docker option](03-install.md#option-a--docker-zero-local-toolchain--60-seconds)
 if you want zero local Node.
@@ -25,7 +26,7 @@ demo dataset dbt ships. No external warehouse needed.
 ### Start the notebook
 
 ```bash
-dql notebook
+npm run notebook
 ```
 
 The CLI starts a local server on **http://127.0.0.1:3474** and opens it in

@@ -9,7 +9,7 @@ npm install
 npm run notebook
 ```
 
-Opens the notebook at <http://localhost:5173>. (`pnpm install && pnpm notebook`
+Opens the notebook at <http://127.0.0.1:3474>. (`pnpm install && pnpm notebook`
 works too.)
 
 ## Layout

@@ -27,13 +27,44 @@ docker compose --profile slack  up   # adds the bot on :3479
 docker compose --profile ollama up   # adds local Ollama on :11434
 ```
 
-## Option B — npm (Node 20+) · 30 seconds
+## Option B — npm (Node 20+) · 2 minutes
 
-If you already have Node, the CLI publishes to npm:
+If you already have Node, scaffold a project and run the notebook with the
+project-local DQL CLI:
 
 ```bash
-npx @duckcodeailabs/dql-cli --version              # zero-install
-npm i -g @duckcodeailabs/dql-cli && dql --version  # global
+npx create-dql-app@latest my-analytics
+cd my-analytics
+npm install
+npm run doctor
+npm run notebook
+```
+
+Open **http://127.0.0.1:3474**. Use the Acme Bank template when you want the
+full Apps/RBAC/agent walkthrough:
+
+```bash
+npx create-dql-app@latest acme-bank --template acme-bank
+cd acme-bank
+npm install
+npm run compile
+npm run app:build
+npm run notebook
+```
+
+For an existing DQL project, install only the CLI:
+
+```bash
+npm i -D @duckcodeailabs/dql-cli
+npx @duckcodeailabs/dql-cli doctor
+npx @duckcodeailabs/dql-cli notebook
+```
+
+Global install is optional:
+
+```bash
+npm i -g @duckcodeailabs/dql-cli
+dql --version
 ```
 
 Works on macOS, Linux, and Windows.
@@ -49,8 +80,9 @@ If you see the version number, jump to the [Quickstart →](01-quickstart.md).
 
 ## Troubleshooting
 
-- **`command not found: dql`** — use `npx @duckcodeailabs/dql-cli` instead,
-  or add your global npm bin (`npm prefix -g`/bin) to `$PATH`.
+- **`command not found: dql`** — use `npm run notebook` inside a scaffolded
+  project, `npx dql ...` when the CLI is installed locally, or add your global
+  npm bin (`npm prefix -g`/bin) to `$PATH`.
 - **Node version errors** — DQL requires Node 20+. Install via
   [nvm](https://github.com/nvm-sh/nvm) or [fnm](https://github.com/Schniz/fnm).
 - **Port already in use** — edit `docker-compose.yml` and change

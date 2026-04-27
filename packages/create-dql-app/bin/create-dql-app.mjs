@@ -34,7 +34,7 @@ function usage() {
   console.log(`create-dql-app ${VERSION}
 
 Usage:
-  npx create-dql-app <project-dir> [options]
+  npx create-dql-app@latest <project-dir> [options]
 
 Options:
   --template <name>   Starter template: jaffle-shop (default), acme-bank, empty
@@ -42,9 +42,9 @@ Options:
   --version, -v       Show version
 
 Examples:
-  npx create-dql-app my-analytics
-  npx create-dql-app acme-bank --template acme-bank
-  npx create-dql-app finance-reports --template empty
+  npx create-dql-app@latest my-analytics
+  npx create-dql-app@latest acme-bank --template acme-bank
+  npx create-dql-app@latest finance-reports --template empty
 `);
 }
 
@@ -170,7 +170,7 @@ ${c.green('✓ Ready.')} Next steps:
   ${c.bold(installCmd)}
   ${c.bold(runCmd)}${dbtTip}
 
-Your notebook will open at ${c.cyan('http://localhost:5173')}.
+Your notebook will open at ${c.cyan('http://127.0.0.1:3474')}.
 
 Docs:   ${c.cyan('https://github.com/duckcode-ai/dql')}
 Issues: ${c.cyan('https://github.com/duckcode-ai/dql/issues')}
