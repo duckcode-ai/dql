@@ -72,5 +72,8 @@ if (changed) {
   }
   // files: dist/* is already at the root when installing from dist/
   cliPkg.files = ['.'];
+  // Published CLI artifacts should not carry workspace-only dev deps such as
+  // the private notebook app package.
+  delete cliPkg.devDependencies;
   writeFileSync(join(CLI_ROOT, 'dist', 'package.json'), JSON.stringify(cliPkg, null, 2) + '\n');
 }
