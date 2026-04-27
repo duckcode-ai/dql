@@ -18,7 +18,7 @@ clean machine. No global install required; the template installs
 | Template | What you get |
 | --- | --- |
 | `jaffle-shop` *(default)* | DuckDB + the Jaffle Shop dataset + a sample notebook, certified block, and dashboard |
-| `acme-bank` | Banking OSS release walkthrough with sample data, certified blocks, Apps, dashboards, governance, schedules, and agent Skills |
+| `acme-bank` | Banking OSS release walkthrough with sample data, certified blocks, sample notebooks, Apps, dashboards, governance, schedules, and agent Skills |
 | `empty` | Just `dql.config.json` and project layout - bring your own warehouse |
 
 ```bash

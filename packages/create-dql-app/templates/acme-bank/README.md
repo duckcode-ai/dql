@@ -49,6 +49,16 @@ Certified business logic stays in root `blocks/`. App folders contain
 governance, schedules, dashboards, optional notebooks, and `drafts/` for future
 AI-generated work waiting for analyst review.
 
+## Sample notebooks
+
+| Notebook | Use case |
+| --- | --- |
+| `notebooks/welcome.dqlnb` | Guided first run across raw SQL and certified blocks |
+| `notebooks/cards_fraud_ops.dqlnb` | Cards volume, approval rate, fraud exposure, merchant watchlist |
+| `notebooks/retail_deposits_review.dqlnb` | Deposit trend, segment balance, branch leaders |
+| `notebooks/credit_risk_review.dqlnb` | Delinquency, probability of default, high-risk exposure |
+| `notebooks/executive_weekly_review.dqlnb` | CXO weekly review across cards, deposits, and lending |
+
 ## Useful commands
 
 ```bash
@@ -63,4 +73,3 @@ npm run verify           # proves manifest output is reproducible
 Apps are single-user OSS artifacts. There is no login, SSO, or hosted
 multi-tenant behavior. Use the UI persona switcher to preview the real
 PolicyEngine and RLS paths declared in `dql.app.json`.
-

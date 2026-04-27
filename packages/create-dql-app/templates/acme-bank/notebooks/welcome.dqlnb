@@ -9,7 +9,7 @@
     {
       "id": "intro",
       "type": "markdown",
-      "source": "# Acme Bank\n\nThis notebook uses the packaged Acme Bank CSV warehouse and certified DQL blocks.\n\nRun the cells top-to-bottom, then click Apps in the left rail to open Cards Operations, Retail Deposits, Risk Office, and Executive Cockpit."
+      "source": "# Acme Bank\n\nThis notebook uses the packaged Acme Bank CSV warehouse and certified DQL blocks.\n\nRun the cells top-to-bottom, then click Apps in the left rail to open Cards Operations, Retail Deposits, Risk Office, and Executive Cockpit.\n\nAdditional sample notebooks are included for cards fraud operations, retail deposits, credit risk, and executive review."
     },
     {
       "title": "Raw transaction health",
@@ -34,7 +34,11 @@
       "id": "bank_health_scorecard",
       "type": "dql",
       "source": "@block(\"bank_health_scorecard\")"
+    },
+    {
+      "id": "next_notebooks",
+      "type": "markdown",
+      "source": "## Next sample notebooks\n\n- `notebooks/cards_fraud_ops.dqlnb` - branch-aware fraud monitoring\n- `notebooks/retail_deposits_review.dqlnb` - deposit growth and segment mix\n- `notebooks/credit_risk_review.dqlnb` - delinquency and high-risk exposure\n- `notebooks/executive_weekly_review.dqlnb` - CXO scorecard and cross-domain review"
     }
   ]
 }
-

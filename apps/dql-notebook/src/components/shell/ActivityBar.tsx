@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { Tooltip } from '@duckcodeailabs/dql-ui';
 import {
-  Files,
+  FileText,
   Database,
   GitBranch,
   Plug,
@@ -152,9 +152,15 @@ export function ActivityBar() {
     active: boolean;
   }> = [
     {
+      key: 'apps',
+      title: 'Apps',
+      icon: <Package size={16} strokeWidth={1.75} />,
+      active: state.mainView === 'apps',
+    },
+    {
       key: 'files',
-      title: 'Files',
-      icon: <Files size={16} strokeWidth={1.75} />,
+      title: 'Notebooks',
+      icon: <FileText size={16} strokeWidth={1.75} />,
       active: state.sidebarPanel === 'files' && state.sidebarOpen,
     },
     {
@@ -168,12 +174,6 @@ export function ActivityBar() {
       title: 'Block Library',
       icon: <BlockIcon size={16} />,
       active: state.sidebarPanel === 'block_library' && state.sidebarOpen,
-    },
-    {
-      key: 'apps',
-      title: 'Apps',
-      icon: <Package size={16} strokeWidth={1.75} />,
-      active: state.mainView === 'apps',
     },
     {
       key: 'lineage',
