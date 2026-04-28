@@ -8,9 +8,11 @@ import type { AgentProvider, AgentMessage } from './providers/types.js';
 
 class StubProvider implements AgentProvider {
   readonly name = 'claude' as const;
+  messages: AgentMessage[] = [];
   constructor(private readonly response: string) {}
   async available(): Promise<boolean> { return true; }
-  async generate(_messages: AgentMessage[]): Promise<string> {
+  async generate(messages: AgentMessage[]): Promise<string> {
+    this.messages = messages;
     return this.response;
   }
 }
@@ -32,6 +34,15 @@ beforeEach(() => {
       llmContext: 'Use this for revenue trends. Tracks ARR over time.',
       tags: ['revenue'],
       gitSha: 'abc12345',
+      sourceTier: 'certified_artifact',
+      certification: 'certified',
+      provenance: 'DQL block',
+      businessOutcome: 'Revenue leadership can monitor quarterly growth.',
+      businessOwner: 'revenue-ops',
+      decisionUse: 'Quarterly planning and forecast review',
+      reviewCadence: 'weekly',
+      businessRules: ['Revenue excludes test accounts.'],
+      caveats: ['Late-arriving invoices may restate current quarter revenue.'],
     },
     {
       nodeId: 'block:churn_logo',
@@ -67,6 +78,30 @@ describe('answer (block-first loop)', () => {
     expect(result.kind).toBe('certified');
     expect(result.block?.nodeId).toBe('block:revenue_total');
     expect(result.citations[0].gitSha).toBe('abc12345');
+    expect(result.evidence?.route[0].tool).toBe('search_certified_artifacts');
+    expect(result.evidence?.selectedAssets[0].nodeId).toBe('block:revenue_total');
+    expect(result.evidence?.outcome?.name).toContain('Revenue leadership');
+  });
+
+  it('executes a certified block when the host supplies an executor', async () => {
+    const provider = new StubProvider('should not be called');
+    const result = await answer({
+      question: 'What was revenue this quarter?',
+      provider,
+      kg,
+      executeCertifiedBlock: async () => ({
+        columns: ['revenue'],
+        rows: [{ revenue: 42 }],
+        rowCount: 1,
+        executionTime: 12,
+      }),
+    });
+    expect(result.kind).toBe('certified');
+    expect(result.result?.rowCount).toBe(1);
+    expect(result.text).toContain('Returned 1 row.');
+    expect(result.evidence?.execution?.status).toBe('executed');
+    expect(result.evidence?.execution?.rowCount).toBe(1);
+    expect(result.evidence?.validation?.status).toBe('passed');
   });
 
   it('returns Uncertified when no certified block matches and SQL is proposed', async () => {
@@ -83,6 +118,8 @@ describe('answer (block-first loop)', () => {
     expect(result.kind).toBe('uncertified');
     expect(result.proposedSql).toMatch(/SELECT region, MEDIAN/);
     expect(result.suggestedViz).toBe('bar');
+    expect(result.evidence?.validation?.status).toBe('warning');
+    expect(result.evidence?.route.map((step) => step.tool)).toContain('validate_sql');
     // Citations are best-effort — empty is acceptable when nothing in the KG matches.
     expect(Array.isArray(result.citations)).toBe(true);
   });
@@ -95,6 +132,20 @@ describe('answer (block-first loop)', () => {
       kg,
     });
     expect(result.kind).toBe('no_answer');
+    expect(result.evidence?.validation?.status).toBe('failed');
+  });
+
+  it('passes extra context to the model without using it for certified routing', async () => {
+    const provider = new StubProvider('Explanation draft.\n```sql\nSELECT 1\n```\nViz: table');
+    const result = await answer({
+      question: 'Explain this current query',
+      extraContext: 'Current upstream SQL:\nSELECT SUM(amount) AS revenue FROM orders',
+      provider,
+      kg,
+    });
+    expect(result.kind).toBe('uncertified');
+    expect(result.block).toBeUndefined();
+    expect(provider.messages.some((m) => m.content.includes('Current upstream SQL'))).toBe(true);
   });
 
   it('skips a certified block if downvotes dominate', async () => {

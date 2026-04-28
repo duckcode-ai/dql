@@ -49,7 +49,9 @@ export const NODE_TYPE_COLORS: Record<string, string> = {
   dimension: '#e3b341',
   domain: '#d2a8ff',
   chart: '#f778ba',
-  dashboard: '#d2a8ff',
+  notebook: '#bc8cff',
+  dashboard: '#a371f7',
+  app: '#db6d28',
 };
 
 // ---- Short type labels (for badges) ----
@@ -63,7 +65,9 @@ export const TYPE_LABELS: Record<string, string> = {
   dimension: 'DIM',
   domain: 'DOM',
   chart: 'CHT',
+  notebook: 'NB',
   dashboard: 'DASH',
+  app: 'APP',
 };
 
 // ---- Full type titles ----
@@ -77,7 +81,9 @@ export const TYPE_TITLES: Record<string, string> = {
   dimension: 'Dimension',
   domain: 'Domain',
   chart: 'Chart',
-  dashboard: 'Notebook',
+  notebook: 'Notebook',
+  dashboard: 'Dashboard',
+  app: 'App',
 };
 
 // ---- Edge type colors ----
@@ -150,7 +156,9 @@ export function getNodeLayer(node: LineageNode): LineageLayerName {
     case 'domain':
       return 'answer';
     case 'chart':
+    case 'notebook':
     case 'dashboard':
+    case 'app':
       return 'consumption';
     default:
       return 'answer';

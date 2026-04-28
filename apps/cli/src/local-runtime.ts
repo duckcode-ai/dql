@@ -53,7 +53,24 @@ import { load as loadYaml } from 'js-yaml';
 import { listBlockTemplates } from './block-templates.js';
 import { getRunner as getLLMRunner } from './llm/index.js';
 import type { ProviderId } from './llm/types.js';
+import {
+  ClaudeProvider,
+  GeminiProvider,
+  MemoryStore,
+  OllamaProvider,
+  OpenAIProvider,
+  defaultMemoryPath,
+  ensureDefaultMemoryFiles,
+  type AgentResultPayload,
+  type KGNode,
+} from '@duckcodeailabs/dql-agent';
 import { handleAppsApi } from './apps-api.js';
+import {
+  getEffectiveProviderConfig,
+  listProviderSettings,
+  saveProviderSettings,
+  type ProviderSettingsId,
+} from './settings/provider-settings.js';
 import {
   DQLAccessDeniedError,
   activePersonaAppId,
@@ -61,6 +78,7 @@ import {
   loadRuntimeApp,
   runtimeVariables,
 } from './governance-runtime.js';
+import { LocalAppStorage, defaultLocalAppsDbPath } from '@duckcodeailabs/dql-project';
 import {
   buildSemanticObjectDetail,
   buildSemanticTree,
@@ -157,6 +175,77 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
     }
   }
 
+  const executeLocalSqlForStoredResult = async (sql: string) => {
+    const semantic = prepareSemanticSql(sql, semanticLayer);
+    if (semantic.unresolvedRefs.length > 0) {
+      throw new Error(`Unknown semantic reference${semantic.unresolvedRefs.length > 1 ? 's' : ''}: ${semantic.unresolvedRefs.join(', ')}`);
+    }
+    const prepared = prepareLocalExecution(semantic.sql, connection, projectRoot, projectConfig);
+    const result = await executor.executeQuery(
+      prepared.sql,
+      [],
+      runtimeVariables({}),
+      prepared.connection,
+    );
+    return normalizeQueryResult(result, semantic.semanticRefs);
+  };
+
+  const executeCertifiedBlockForAgent = async (node: KGNode): Promise<AgentResultPayload> => {
+    if (node.kind !== 'block') {
+      throw new Error(`Certified ${node.kind} "${node.name}" is a navigation artifact and cannot be executed as a block.`);
+    }
+    const manifest = buildManifest({ projectRoot });
+    const block = manifest.blocks[node.name] ?? manifest.blocks[node.nodeId.replace(/^block:/, '')];
+    if (!block) {
+      throw new Error(`Matched block "${node.name}" is not present in the project manifest.`);
+    }
+
+    const absBlockPath = join(projectRoot, block.filePath);
+    const source = readFileSync(absBlockPath, 'utf-8');
+    const semanticCompose = semanticLayer
+      ? composeSemanticBlockSql(source, semanticLayer, {
+          driver: connection.driver,
+          projectRoot,
+          projectConfig,
+          detectedProvider: semanticDetectedProvider,
+        })
+      : null;
+    const plan = buildExecutionPlan(
+      { id: `agent-${block.name}`, type: 'dql', source, title: block.name },
+      { semanticLayer, driver: connection.driver },
+    );
+    if (!plan && !semanticCompose?.sql) {
+      const semanticError = semanticCompose?.diagnostics.find((diagnostic) => diagnostic.severity === 'error')?.message;
+      throw new Error(semanticError ?? `Block "${block.name}" produced no executable SQL.`);
+    }
+
+    const prepared = prepareLocalExecution(
+      semanticCompose?.sql ?? plan!.sql,
+      connection,
+      projectRoot,
+      projectConfig,
+    );
+    const app = loadRuntimeApp(projectRoot, activePersonaAppId());
+    assertAppAccess({ app, domain: block.domain ?? app?.domain, level: 'execute' });
+    const rawResult = await executor.executeQuery(
+      prepared.sql,
+      plan?.sqlParams ?? [],
+      runtimeVariables(plan?.variables ?? {}),
+      prepared.connection,
+    );
+    const normalized = normalizeQueryResult(rawResult);
+    return {
+      columns: normalized.columns,
+      rows: normalized.rows,
+      rowCount: normalized.rowCount,
+      executionTime: normalized.executionTime,
+      chartConfig: plan?.chartConfig ?? (block.chartType ? { chart: block.chartType } : undefined),
+      sql: prepared.sql,
+      blockName: block.name,
+      blockPath: block.filePath,
+    };
+  };
+
   // SSE clients for /api/watch hot-reload
   const sseClients = new Set<ServerResponse>();
 
@@ -206,7 +295,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
 
     // CORS — needed for dql-notebook SPA dev mode
     res.setHeader('Access-Control-Allow-Origin', '*');
-    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, OPTIONS');
+    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
     res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
     if (req.method === 'OPTIONS') {
       res.writeHead(204);
@@ -223,6 +312,123 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
     if (req.method === 'GET' && path === '/api/settings/env-status') {
       res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
       res.end(serializeJSON({ groups: collectSettingsEnvStatus() }));
+      return;
+    }
+
+    if (req.method === 'GET' && path === '/api/settings/providers') {
+      res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+      res.end(serializeJSON({ providers: listProviderSettings(projectRoot) }));
+      return;
+    }
+
+    if (req.method === 'POST' && path === '/api/settings/providers') {
+      try {
+        const body = await readJSON(req);
+        if (!isProviderSettingsId(body?.id)) {
+          res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
+          res.end(serializeJSON({ error: 'Unknown provider id.' }));
+          return;
+        }
+        const providers = saveProviderSettings(projectRoot, {
+          id: body.id,
+          enabled: typeof body.enabled === 'boolean' ? body.enabled : undefined,
+          apiKey: typeof body.apiKey === 'string' ? body.apiKey : undefined,
+          baseUrl: typeof body.baseUrl === 'string' ? body.baseUrl : undefined,
+          model: typeof body.model === 'string' ? body.model : undefined,
+        });
+        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({ ok: true, providers }));
+      } catch (error) {
+        res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({ error: error instanceof Error ? error.message : String(error) }));
+      }
+      return;
+    }
+
+    if (req.method === 'POST' && path === '/api/settings/providers/test') {
+      try {
+        const body = await readJSON(req);
+        if (!isProviderSettingsId(body?.id)) {
+          res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
+          res.end(serializeJSON({ ok: false, error: 'Unknown provider id.' }));
+          return;
+        }
+        const ok = await testProviderConfig(projectRoot, body.id);
+        res.writeHead(ok.ok ? 200 : 400, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON(ok));
+      } catch (error) {
+        res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({ ok: false, error: error instanceof Error ? error.message : String(error) }));
+      }
+      return;
+    }
+
+    if (req.method === 'GET' && path === '/api/agent/memory') {
+      const memory = new MemoryStore(defaultMemoryPath(projectRoot));
+      try {
+        const scope = url.searchParams.get('scope') ?? undefined;
+        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({ memories: memory.list(isMemoryScope(scope) ? scope : undefined) }));
+      } finally {
+        memory.close();
+      }
+      return;
+    }
+
+    if (req.method === 'POST' && path === '/api/agent/memory') {
+      const body = await readJSON(req).catch(() => null);
+      if (!body || !isMemoryScope(body.scope) || typeof body.title !== 'string' || typeof body.content !== 'string') {
+        res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({ error: 'scope, title, and content are required.' }));
+        return;
+      }
+      const memory = new MemoryStore(defaultMemoryPath(projectRoot));
+      try {
+        const saved = memory.upsert({
+          id: typeof body.id === 'string' ? body.id : undefined,
+          scope: body.scope,
+          scopeId: typeof body.scopeId === 'string' ? body.scopeId : undefined,
+          title: body.title,
+          content: body.content,
+          tags: Array.isArray(body.tags) ? body.tags.map(String) : undefined,
+          source: typeof body.source === 'string' ? body.source : 'settings-ui',
+          confidence: typeof body.confidence === 'number' ? body.confidence : undefined,
+          importance: typeof body.importance === 'number' ? body.importance : undefined,
+          validFrom: typeof body.validFrom === 'string' ? body.validFrom : undefined,
+          validTo: typeof body.validTo === 'string' ? body.validTo : undefined,
+          supersedes: typeof body.supersedes === 'string' ? body.supersedes : undefined,
+          enabled: typeof body.enabled === 'boolean' ? body.enabled : undefined,
+        });
+        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({ ok: true, memory: saved }));
+      } finally {
+        memory.close();
+      }
+      return;
+    }
+
+    if (req.method === 'DELETE' && path === '/api/agent/memory') {
+      const id = url.searchParams.get('id');
+      if (!id) {
+        res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({ error: 'id is required.' }));
+        return;
+      }
+      const memory = new MemoryStore(defaultMemoryPath(projectRoot));
+      try {
+        memory.delete(id);
+        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({ ok: true }));
+      } finally {
+        memory.close();
+      }
+      return;
+    }
+
+    if (req.method === 'POST' && path === '/api/agent/memory/default-files') {
+      const files = ensureDefaultMemoryFiles(projectRoot).map((p) => relative(projectRoot, p));
+      res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+      res.end(serializeJSON({ ok: true, files }));
       return;
     }
 
@@ -244,13 +450,64 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           ? body.variables as Record<string, unknown>
           : {};
         const tiles = [];
+        const localApps = new LocalAppStorage(defaultLocalAppsDbPath(projectRoot));
         for (const item of loaded.dashboard.layout.items) {
+          if (item.text) {
+            tiles.push({
+              tileId: item.i,
+              status: 'ok',
+              tileType: 'text',
+              title: item.title,
+              viz: item.viz,
+              text: item.text,
+            });
+            continue;
+          }
+          if (item.aiPin) {
+            let pin = localApps.getAiPin(item.aiPin.id);
+            if (!pin) {
+              tiles.push({
+                tileId: item.i,
+                status: 'unresolved',
+                tileType: 'aiPin',
+                error: `AI pin "${item.aiPin.id}" could not be found`,
+              });
+              continue;
+            }
+            if (pin.refreshCadence === 'daily' && pin.sql && isAiPinRefreshDue(pin.lastRefreshedAt)) {
+              try {
+                const refreshed = await executeLocalSqlForStoredResult(pin.sql);
+                pin = localApps.updateAiPinResult(pin.id, refreshed) ?? pin;
+              } catch (err) {
+                pin = localApps.updateAiPinResult(
+                  pin.id,
+                  pin.result,
+                  err instanceof Error ? err.message : String(err),
+                ) ?? pin;
+              }
+            }
+            tiles.push({
+              tileId: item.i,
+              status: 'ok',
+              tileType: 'aiPin',
+              title: item.title ?? pin.title,
+              viz: item.viz,
+              chartConfig: pin.chartConfig ?? { chart: item.viz.type },
+              result: pin.result,
+              aiPin: pin,
+              citation: {
+                kind: 'ai_pin',
+                name: pin.title,
+              },
+            });
+            continue;
+          }
           const block = resolveDashboardItemBlock(item, manifest);
           if (!block) {
             tiles.push({
               tileId: item.i,
               status: 'unresolved',
-              blockRef: isBlockIdRef(item.block) ? item.block.blockId : item.block.ref,
+              blockRef: item.block ? (isBlockIdRef(item.block) ? item.block.blockId : item.block.ref) : '(missing source)',
               error: 'Block reference could not be resolved',
             });
             continue;
@@ -330,6 +587,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
             }
           }
         }
+        localApps.close();
         res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
         res.end(serializeJSON({
           appId,
@@ -347,7 +605,14 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
     // Apps, dashboards, persona — see apps-api.ts. Returns true if handled.
     if (path.startsWith('/api/apps') || path === '/api/persona') {
       try {
-        const handled = await handleAppsApi({ req, res, url, path, projectRoot });
+        const handled = await handleAppsApi({
+          req,
+          res,
+          url,
+          path,
+          projectRoot,
+          executeSql: executeLocalSqlForStoredResult,
+        });
         if (handled) return;
       } catch (err) {
         if (!res.headersSent) {
@@ -1975,10 +2240,11 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
         messages?: Array<{ role: 'user' | 'assistant'; content: string }>;
         upstream?: { cellId?: string; sql?: string };
       };
-      const runner = isLLMProviderId(provider) ? getLLMRunner(provider) : null;
-      if (!runner) {
+      const resolvedProvider = isLLMProviderId(provider) ? provider : resolveDefaultLLMProvider(projectRoot);
+      const runner = resolvedProvider ? getLLMRunner(resolvedProvider) : null;
+      if (!resolvedProvider || !runner) {
         res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
-        res.end(serializeJSON({ error: `Unknown provider: ${provider}` }));
+        res.end(serializeJSON({ error: 'No AI provider is configured. Configure OpenAI, Gemini, Ollama, or a custom OpenAI-compatible endpoint in Settings.' }));
         return;
       }
       if (!Array.isArray(messages) || messages.length === 0) {
@@ -1998,7 +2264,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
       const emit = (turn: unknown) => { res.write(`data: ${JSON.stringify(turn)}\n\n`); };
       try {
         await runner.run(
-          { provider: provider as ProviderId, messages, upstream, projectRoot },
+          { provider: resolvedProvider, messages, upstream, projectRoot, executeCertifiedBlock: executeCertifiedBlockForAgent },
           emit,
           controller.signal,
         );
@@ -2408,6 +2674,24 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
       return;
     }
 
+    if (req.method === 'GET' && path === '/api/lineage/scope') {
+      try {
+        const graph = buildProjectLineageGraph(projectRoot, semanticLayer);
+        const result = buildScopedLineage(graph, {
+          domain: url.searchParams.get('domain') ?? undefined,
+          appId: url.searchParams.get('appId') ?? undefined,
+          dashboardId: url.searchParams.get('dashboardId') ?? undefined,
+          blockId: url.searchParams.get('blockId') ?? undefined,
+        });
+        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON(result));
+      } catch (error) {
+        res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({ error: error instanceof Error ? error.message : String(error) }));
+      }
+      return;
+    }
+
     if (req.method === 'GET' && path === '/api/lineage/query') {
       try {
         const graph = buildProjectLineageGraph(projectRoot, semanticLayer);
@@ -2612,8 +2896,10 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           return;
         }
 
+        const resolved = resolveNotebookBlockReferenceCell(cell, projectRoot);
+        const executableCell = resolved.cell;
         const cellConnection = isConnectionConfig(body.connection) ? body.connection : connection;
-        const plan = buildExecutionPlan(cell, { semanticLayer, driver: cellConnection.driver });
+        const plan = buildExecutionPlan(executableCell, { semanticLayer, driver: cellConnection.driver });
         if (!plan) {
           res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
           res.end(serializeJSON({ cellType: cell.type, result: null }));
@@ -2627,7 +2913,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           projectConfig,
         );
         const app = loadRuntimeApp(projectRoot, typeof body.appId === 'string' ? body.appId : activePersonaAppId());
-        assertAppAccess({ app, domain: app?.domain, level: 'execute' });
+        assertAppAccess({ app, domain: resolved.domain ?? app?.domain, level: 'execute' });
         const rawResult = await executor.executeQuery(
           prepared.sql,
           plan.sqlParams,
@@ -2638,6 +2924,8 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
         res.end(serializeJSON({
           cellType: cell.type,
           title: plan.title,
+          blockName: resolved.blockName,
+          blockPath: resolved.blockPath,
           chartConfig: plan.chartConfig,
           tests: plan.tests,
           result: normalizeQueryResult(rawResult),
@@ -2800,7 +3088,18 @@ function isLLMProviderId(value: unknown): value is ProviderId {
     || value === 'claude-code'
     || value === 'openai'
     || value === 'gemini'
-    || value === 'ollama';
+    || value === 'ollama'
+    || value === 'custom-openai';
+}
+
+function resolveDefaultLLMProvider(projectRoot: string): ProviderId | null {
+  const settings = listProviderSettings(projectRoot);
+  const preferred: ProviderId[] = ['openai', 'gemini', 'ollama', 'custom-openai'];
+  for (const id of preferred) {
+    const provider = settings.find((item) => item.id === id);
+    if (provider?.enabled && provider.hasApiKey) return id;
+  }
+  return null;
 }
 
 function loadAppDashboard(
@@ -2824,6 +3123,7 @@ function resolveDashboardItemBlock(
   item: DashboardGridItem,
   manifest: DQLManifest,
 ): ManifestBlock | null {
+  if (!item.block) return null;
   if (isBlockIdRef(item.block)) {
     return manifest.blocks[item.block.blockId] ?? null;
   }
@@ -3087,6 +3387,43 @@ function normalizeNotebookCell(value: unknown): NotebookCell | null {
     source: candidate.source,
     title: typeof candidate.title === 'string' ? candidate.title : undefined,
     config: candidate.config,
+  };
+}
+
+function resolveNotebookBlockReferenceCell(
+  cell: NotebookCell,
+  projectRoot: string,
+): {
+  cell: NotebookCell;
+  blockName?: string;
+  blockPath?: string;
+  domain?: string;
+} {
+  if (cell.type !== 'dql') return { cell };
+  const match = cell.source.trim().match(/^@block\(\s*["']([^"']+)["']\s*\)$/i);
+  if (!match) return { cell };
+
+  const ref = match[1].trim();
+  const manifest = buildManifest({ projectRoot });
+  const block = manifest.blocks[ref] ?? Object.values(manifest.blocks).find((candidate) => candidate.filePath === ref);
+  if (!block) {
+    throw new Error(`Block reference "${ref}" could not be resolved.`);
+  }
+
+  const blockPath = join(projectRoot, block.filePath);
+  if (!existsSync(blockPath)) {
+    throw new Error(`Block "${block.name}" file is missing: ${block.filePath}`);
+  }
+
+  return {
+    cell: {
+      ...cell,
+      title: cell.title ?? block.name,
+      source: readFileSync(blockPath, 'utf-8'),
+    },
+    blockName: block.name,
+    blockPath: block.filePath,
+    domain: block.domain,
   };
 }
 
@@ -4570,6 +4907,42 @@ function resolveLineageNode(graph: LineageGraph, rawNodeId: string) {
   return result.focalNode;
 }
 
+function buildScopedLineage(
+  graph: LineageGraph,
+  scope: { domain?: string; appId?: string; dashboardId?: string; blockId?: string },
+) {
+  const focus = scope.blockId
+    ? `block:${scope.blockId}`
+    : scope.dashboardId
+      ? `dashboard:${scope.appId ? `${scope.appId}/${scope.dashboardId}` : scope.dashboardId}`
+      : scope.appId
+        ? `app:${scope.appId}`
+        : undefined;
+  const result = queryLineage(graph, {
+    focus,
+    domain: focus ? undefined : scope.domain,
+    upstreamDepth: 8,
+    downstreamDepth: 4,
+  });
+  const graphJson = result.graph ?? graph.toJSON();
+  const breadcrumbs = [
+    scope.domain ? graph.getNode(`domain:${scope.domain}`) : null,
+    scope.appId ? graph.getNode(`app:${scope.appId}`) : null,
+    scope.dashboardId ? graph.getNode(`dashboard:${scope.appId ? `${scope.appId}/${scope.dashboardId}` : scope.dashboardId}`) : null,
+    scope.blockId ? graph.getNode(`block:${scope.blockId}`) : null,
+  ].filter(Boolean);
+  const paths = focus ? queryCompleteLineagePaths(graph, focus, { maxDepth: 12, maxPaths: 20 }) : null;
+  return {
+    scope,
+    focus,
+    graph: graphJson,
+    focalNode: result.focalNode,
+    breadcrumbs,
+    paths,
+    view: 'Domain > App > Dashboard tab > Tile > Block > Semantic/dbt/source',
+  };
+}
+
 function extractProp(block: any, key: string): string | undefined {
   // Check direct AST fields first (parser puts domain, owner, type directly on the node)
   if (block[key] !== undefined && block[key] !== null) return String(block[key]);
@@ -4976,4 +5349,57 @@ function collectSettingsEnvStatus(): SettingsEnvGroup[] {
       ],
     },
   ];
+}
+
+function isProviderSettingsId(value: unknown): value is ProviderSettingsId {
+  return value === 'anthropic'
+    || value === 'openai'
+    || value === 'gemini'
+    || value === 'ollama'
+    || value === 'custom-openai';
+}
+
+async function testProviderConfig(projectRoot: string, id: ProviderSettingsId): Promise<{ ok: boolean; message: string }> {
+  const config = getEffectiveProviderConfig(projectRoot, id);
+  let provider: { available(): Promise<boolean> };
+  switch (id) {
+    case 'anthropic':
+      provider = new ClaudeProvider({ apiKey: config.apiKey, model: config.model });
+      break;
+    case 'gemini':
+      provider = new GeminiProvider({ apiKey: config.apiKey, model: config.model });
+      break;
+    case 'ollama':
+      provider = new OllamaProvider({ baseUrl: config.baseUrl, model: config.model });
+      break;
+    case 'custom-openai':
+      provider = new OpenAIProvider({ apiKey: config.apiKey, baseUrl: config.baseUrl, model: config.model, allowNoApiKey: true });
+      break;
+    case 'openai':
+    default:
+      provider = new OpenAIProvider({ apiKey: config.apiKey, baseUrl: config.baseUrl, model: config.model });
+      break;
+  }
+  const ok = await provider.available();
+  return {
+    ok,
+    message: ok
+      ? `${id} is configured.`
+      : `${id} is not configured or not reachable. Check API key, base URL, and local service state.`,
+  };
+}
+
+function isAiPinRefreshDue(lastRefreshedAt?: string): boolean {
+  if (!lastRefreshedAt) return true;
+  const last = Date.parse(lastRefreshedAt);
+  if (!Number.isFinite(last)) return true;
+  return Date.now() - last >= 24 * 60 * 60 * 1000;
+}
+
+function isMemoryScope(value: unknown): value is 'thread' | 'notebook' | 'project' | 'user' | 'artifact' {
+  return value === 'thread'
+    || value === 'notebook'
+    || value === 'project'
+    || value === 'user'
+    || value === 'artifact';
 }

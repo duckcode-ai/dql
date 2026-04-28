@@ -1,69 +1,64 @@
-import { DQLContext, findProjectRoot } from '@duckcodeailabs/dql-mcp';
 import {
+  KGStore,
+  MemoryStore,
+  defaultKgPath,
+  defaultMemoryPath,
   GeminiProvider,
   OllamaProvider,
   OpenAIProvider,
-  type AgentMessage,
+  answer,
+  loadSkills,
+  reindexProject,
+  type AgentAnswer,
   type AgentProvider,
+  type AgentResultPayload,
 } from '@duckcodeailabs/dql-agent';
+import { existsSync } from 'node:fs';
 import type { AgentRunRequest, AgentRunner, AgentTurn, BlockProposal, ProviderId } from '../types.js';
+import { getEffectiveProviderConfig } from '../../settings/provider-settings.js';
 
-type SimpleProviderId = Extract<ProviderId, 'openai' | 'gemini' | 'ollama'>;
+type SimpleProviderId = Extract<ProviderId, 'openai' | 'gemini' | 'ollama' | 'custom-openai'>;
 
 interface ProviderSpec {
   label: string;
   setup: string;
-  create(): AgentProvider;
+  create(projectRoot: string): AgentProvider;
 }
 
 const SPECS: Record<SimpleProviderId, ProviderSpec> = {
   openai: {
     label: 'OpenAI',
-    setup: 'Set OPENAI_API_KEY. Optional: OPENAI_MODEL and OPENAI_BASE_URL.',
-    create: () => new OpenAIProvider({ model: process.env.OPENAI_MODEL }),
+    setup: 'Configure OpenAI in Settings or set OPENAI_API_KEY. Optional: OPENAI_MODEL and OPENAI_BASE_URL.',
+    create: (projectRoot) => {
+      const config = getEffectiveProviderConfig(projectRoot, 'openai');
+      return new OpenAIProvider({ apiKey: config.apiKey, model: config.model, baseUrl: config.baseUrl });
+    },
   },
   gemini: {
     label: 'Gemini',
-    setup: 'Set GEMINI_API_KEY. Optional: GEMINI_MODEL.',
-    create: () => new GeminiProvider({ model: process.env.GEMINI_MODEL }),
+    setup: 'Configure Gemini in Settings or set GEMINI_API_KEY. Optional: GEMINI_MODEL.',
+    create: (projectRoot) => {
+      const config = getEffectiveProviderConfig(projectRoot, 'gemini');
+      return new GeminiProvider({ apiKey: config.apiKey, model: config.model });
+    },
   },
   ollama: {
     label: 'Ollama',
-    setup: 'Start Ollama and set OLLAMA_MODEL if needed. Optional: OLLAMA_BASE_URL.',
-    create: () => new OllamaProvider({ model: process.env.OLLAMA_MODEL, baseUrl: process.env.OLLAMA_BASE_URL }),
+    setup: 'Start Ollama and configure OLLAMA_BASE_URL / OLLAMA_MODEL in Settings or env.',
+    create: (projectRoot) => {
+      const config = getEffectiveProviderConfig(projectRoot, 'ollama');
+      return new OllamaProvider({ model: config.model, baseUrl: config.baseUrl });
+    },
+  },
+  'custom-openai': {
+    label: 'Custom OpenAI-compatible',
+    setup: 'Configure a custom OpenAI-compatible endpoint in Settings with base URL, model, and optional API key.',
+    create: (projectRoot) => {
+      const config = getEffectiveProviderConfig(projectRoot, 'custom-openai');
+      return new OpenAIProvider({ apiKey: config.apiKey, model: config.model, baseUrl: config.baseUrl, allowNoApiKey: true });
+    },
   },
 };
-
-function systemPrompt(ctx: DQLContext, upstreamSql?: string): string {
-  const blocks = Object.values(ctx.manifest.blocks);
-  const domains = Array.from(new Set(blocks.map((b) => b.domain).filter(Boolean))).sort();
-  const blockSummary = Object.entries(ctx.manifest.blocks)
-    .slice(0, 40)
-    .map(([id, b]) => `- ${id} (${b.domain || 'unknown'}): ${b.description || b.name}`)
-    .join('\n');
-  const metrics = ctx.semanticLayer.listMetrics().slice(0, 40).map((m) => m.name).join(', ');
-  const dimensions = ctx.semanticLayer.listDimensions().slice(0, 40).map((d) => d.name).join(', ');
-
-  return [
-    'You are the DQL notebook AI Chat assistant.',
-    'Answer with concise analytical guidance grounded in existing DQL blocks and the semantic layer.',
-    'When a reusable governed block is appropriate, include a single DQL_BLOCK_PROPOSAL JSON object at the end with name, domain, owner, description, sql, tags, and chartType.',
-    'Do not claim a block is certified unless it exists in the project context.',
-    '',
-    `Project context: ${blocks.length} blocks. Domains: ${domains.join(', ') || '(none)'}.`,
-    blockSummary ? `Available blocks:\n${blockSummary}` : '',
-    metrics ? `Semantic metrics: ${metrics}` : '',
-    dimensions ? `Semantic dimensions: ${dimensions}` : '',
-    upstreamSql ? `Current upstream SQL:\n\`\`\`sql\n${upstreamSql}\n\`\`\`` : '',
-  ].filter(Boolean).join('\n');
-}
-
-function toProviderMessages(req: AgentRunRequest, ctx: DQLContext): AgentMessage[] {
-  return [
-    { role: 'system', content: systemPrompt(ctx, req.upstream?.sql) },
-    ...req.messages.map((m) => ({ role: m.role, content: m.content }) satisfies AgentMessage),
-  ];
-}
 
 function emitProposalFromText(text: string, emit: (turn: AgentTurn) => void): void {
   const match = text.match(/DQL_BLOCK_PROPOSAL\s*[:=]?\s*(\{[\s\S]*\})\s*$/);
@@ -93,7 +88,7 @@ export function createDqlAgentProviderRunner(id: SimpleProviderId): AgentRunner 
   return {
     async run(req, emit, signal) {
       const spec = SPECS[id];
-      const provider = spec.create();
+      const provider = spec.create(req.projectRoot);
       const available = await provider.available().catch(() => false);
       if (!available) {
         emit({ kind: 'error', message: `${spec.label} is not configured or reachable. ${spec.setup}` });
@@ -101,16 +96,218 @@ export function createDqlAgentProviderRunner(id: SimpleProviderId): AgentRunner 
       }
 
       try {
-        emit({ kind: 'thinking', text: `Using ${spec.label} for this turn.` });
-        const ctx = new DQLContext({ projectRoot: findProjectRoot(req.projectRoot) });
-        const text = await provider.generate(toProviderMessages(req, ctx), { signal, maxTokens: 2048 });
-        emit({ kind: 'text', text });
-        emitProposalFromText(text, emit);
+        emit({ kind: 'thinking', text: `Using ${spec.label} through the governed DQL agent.` });
+        const kgPath = defaultKgPath(req.projectRoot);
+        if (!existsSync(kgPath)) {
+          emit({ kind: 'thinking', text: 'Building the local agent knowledge graph from blocks, apps, dashboards, dbt, and semantic metadata.' });
+          await reindexProject(req.projectRoot, { kgPath });
+        }
+
+        const question = lastUserMessage(req);
+        if (!question) {
+          emit({ kind: 'error', message: 'No user question found.' });
+          return;
+        }
+
+        const memory = new MemoryStore(defaultMemoryPath(req.projectRoot));
+        const kg = new KGStore(kgPath);
+        try {
+          const memoryContext = memory.search({
+            query: question,
+            scopes: ['thread', 'notebook', 'project', 'user', 'artifact'],
+            scopeId: req.upstream?.cellId,
+            limit: 6,
+          });
+          const skills = loadSkills(req.projectRoot).skills;
+          const blockHints = inferFollowUpBlockHints(req, question);
+          const result = await answer({
+            question,
+            extraContext: renderExtraContext(req, blockHints),
+            provider,
+            kg,
+            skills,
+            blockHints,
+            memoryContext,
+            signal,
+            executeCertifiedBlock: req.executeCertifiedBlock,
+          });
+          emit({ kind: 'tool_result', id: 'governed_answer', output: result });
+          emit({ kind: 'text', text: formatAgentAnswer(result) });
+          if (result.proposedSql) {
+            emitDraftProposal(result, question, emit);
+          } else {
+            emitProposalFromText(result.text, emit);
+          }
+          persistThreadMemory(memory, req, question, result);
+        } finally {
+          kg.close();
+          memory.close();
+        }
         emit({ kind: 'done', stopReason: 'stop' });
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
-        emit({ kind: 'error', message: `${spec.label} failed: ${message}. ${spec.setup}` });
+        const setupHint = shouldShowProviderSetupHint(message) ? ` ${spec.setup}` : '';
+        emit({ kind: 'error', message: `${spec.label} failed: ${message}.${setupHint}` });
       }
     },
   };
+}
+
+function shouldShowProviderSetupHint(message: string): boolean {
+  return /api key|not configured|not reachable|connection refused|ECONNREFUSED|fetch failed|network error|model .*not found/i
+    .test(message);
+}
+
+function lastUserMessage(req: AgentRunRequest): string {
+  for (let i = req.messages.length - 1; i >= 0; i--) {
+    const msg = req.messages[i];
+    if (msg.role === 'user' && msg.content.trim()) return msg.content.trim();
+  }
+  return '';
+}
+
+function renderExtraContext(req: AgentRunRequest, blockHints: string[]): string | undefined {
+  const parts: string[] = [];
+  if (req.upstream?.sql) parts.push(`Current upstream SQL:\n${req.upstream.sql}`);
+  if (blockHints.length > 0) {
+    parts.push(`Follow-up context: the user is referring to certified block "${blockHints[0]}".`);
+  }
+  return parts.length > 0 ? parts.join('\n\n') : undefined;
+}
+
+function inferFollowUpBlockHints(req: AgentRunRequest, question: string): string[] {
+  if (!isGenericFollowUp(question)) return [];
+  for (let i = req.messages.length - 1; i >= 0; i--) {
+    const msg = req.messages[i];
+    if (msg.role !== 'assistant') continue;
+    const fromAnswer = msg.content.match(/Answered by certified block \*\*([^*]+)\*\*/i)?.[1];
+    const fromCitation = msg.content.match(/^- block:\s*([A-Za-z0-9_.-]+)/im)?.[1];
+    const block = fromAnswer ?? fromCitation;
+    if (block) return [block.trim()];
+  }
+  return [];
+}
+
+const GENERIC_FOLLOW_UP_WORDS = new Set([
+  'a', 'about', 'again', 'all', 'also', 'and', 'as', 'be', 'block', 'can', 'could', 'data', 'do',
+  'execute', 'for', 'from', 'get', 'give', 'import', 'it', 'its', 'let', 'lets', 'me', 'metrics',
+  'more', 'now', 'of', 'output', 'please', 'result', 'results', 'run', 'show', 'solution', 'summary',
+  'that', 'the', 'them', 'this', 'to', 'use', 'with', 'you',
+]);
+
+function isGenericFollowUp(question: string): boolean {
+  const lower = question.toLowerCase();
+  if (!/\b(block|data|execute|import|it|result|results|run|solution|that|this)\b/.test(lower)) return false;
+  const tokens = lower.match(/[a-z0-9_]+/g) ?? [];
+  const meaningful = tokens.filter((token) => token.length > 1 && !GENERIC_FOLLOW_UP_WORDS.has(token));
+  return meaningful.length === 0;
+}
+
+function formatAgentAnswer(result: AgentAnswer): string {
+  const badge = result.certification === 'certified'
+    ? 'Certified'
+    : result.sourceTier === 'semantic_layer'
+      ? 'AI generated from semantic layer - analyst review required'
+      : result.kind === 'no_answer'
+        ? 'No answer'
+        : 'AI generated from dbt manifest - analyst review required';
+  const citations = result.citations.length > 0
+    ? '\n\nCitations:\n' + result.citations.map((c) => `- ${c.kind}: ${c.name}${c.provenance ? ` (${c.provenance})` : ''}`).join('\n')
+    : '';
+  const resultPreview = formatResultPreview(result.result);
+  const sql = result.proposedSql ? `\n\nProposed SQL:\n\`\`\`sql\n${result.proposedSql}\n\`\`\`` : '';
+  return `[${badge}]\n\n${result.text}${resultPreview}${citations}${sql}`;
+}
+
+function formatResultPreview(result?: AgentResultPayload): string {
+  if (!result) return '';
+  const columns = normalizeColumns(result.columns).slice(0, 8);
+  const rows = Array.isArray(result.rows) ? result.rows.slice(0, 8) : [];
+  const shown = rows.length;
+  const timing = typeof result.executionTime === 'number' && result.executionTime > 0
+    ? ` in ${Math.round(result.executionTime)} ms`
+    : '';
+  if (columns.length === 0 || rows.length === 0) {
+    return `\n\nResults: ${result.rowCount} row${result.rowCount === 1 ? '' : 's'}${timing}.`;
+  }
+  const tableRows = rows.map((row) => {
+    const record = row && typeof row === 'object' ? row as Record<string, unknown> : {};
+    return `| ${columns.map((col) => formatCell(record[col])).join(' | ')} |`;
+  });
+  const omittedRows = result.rowCount > shown ? ` Showing first ${shown} rows.` : '';
+  return [
+    `\n\nResults: ${result.rowCount} row${result.rowCount === 1 ? '' : 's'}${timing}.${omittedRows}`,
+    `| ${columns.map(escapeMarkdownTable).join(' | ')} |`,
+    `| ${columns.map(() => '---').join(' | ')} |`,
+    ...tableRows,
+  ].join('\n');
+}
+
+function normalizeColumns(columns: unknown[]): string[] {
+  return columns.map((column) => {
+    if (typeof column === 'string') return column;
+    if (column && typeof column === 'object' && typeof (column as { name?: unknown }).name === 'string') {
+      return (column as { name: string }).name;
+    }
+    return String(column);
+  });
+}
+
+function formatCell(value: unknown): string {
+  if (value === null || typeof value === 'undefined') return '';
+  const raw = typeof value === 'object' ? JSON.stringify(value) : String(value);
+  return escapeMarkdownTable(raw.length > 80 ? `${raw.slice(0, 77)}...` : raw);
+}
+
+function escapeMarkdownTable(value: string): string {
+  return value.replace(/\|/g, '\\|').replace(/\r?\n/g, ' ');
+}
+
+function emitDraftProposal(result: AgentAnswer, question: string, emit: (turn: AgentTurn) => void): void {
+  const proposal: BlockProposal = {
+    name: slugify(question).slice(0, 56) || 'ai_generated_analysis',
+    domain: '',
+    owner: `${process.env.USER ?? 'analyst'}@local`,
+    description: result.text.slice(0, 240),
+    sql: result.proposedSql!,
+    tags: ['ai-generated', 'needs-review', result.sourceTier ?? 'dbt_manifest'],
+    chartType: result.suggestedViz,
+  };
+  emit({
+    kind: 'proposal',
+    proposal,
+    governance: {
+      certified: false,
+      errors: [],
+      warnings: ['AI generated. Analyst review and certification are required before reuse as governed content.'],
+    },
+  });
+}
+
+function persistThreadMemory(memory: MemoryStore, req: AgentRunRequest, question: string, result: AgentAnswer): void {
+  const cellId = req.upstream?.cellId;
+  if (!cellId) return;
+  memory.upsert({
+    id: `thread:${cellId}`,
+    scope: 'thread',
+    scopeId: cellId,
+    title: 'Notebook chat summary',
+    content: [
+      `Latest question: ${question}`,
+      `Latest route: ${result.sourceTier ?? 'unknown'} / ${result.certification ?? 'unknown'}`,
+      `Latest answer: ${result.text.slice(0, 500)}`,
+    ].join('\n'),
+    tags: ['chat', result.sourceTier ?? 'unknown', result.certification ?? 'unknown'],
+    source: 'notebook-chat',
+    confidence: result.confidence ?? 0.5,
+    importance: 0.45,
+  });
+}
+
+function slugify(input: string): string {
+  return input
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '_')
+    .replace(/^_+|_+$/g, '')
+    .replace(/_{2,}/g, '_');
 }

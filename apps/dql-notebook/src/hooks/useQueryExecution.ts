@@ -24,6 +24,18 @@ function extractSql(cell: Cell): string | null {
   return extractSqlFromText(dqlContent);
 }
 
+function normalizeServerChartConfig(value: unknown): Cell['chartConfig'] | undefined {
+  if (!value || typeof value !== 'object') return undefined;
+  const raw = value as Record<string, unknown>;
+  return {
+    ...(typeof raw.chart === 'string' ? { chart: raw.chart } : {}),
+    ...(typeof raw.x === 'string' ? { x: raw.x } : {}),
+    ...(typeof raw.y === 'string' ? { y: raw.y } : {}),
+    ...(typeof raw.color === 'string' ? { color: raw.color } : {}),
+    ...(typeof raw.title === 'string' ? { title: raw.title } : {}),
+  };
+}
+
 export function useQueryExecution() {
   const { state, dispatch } = useNotebook();
   const { substituteVariables } = useVariableSubstitution();
@@ -33,16 +45,102 @@ export function useQueryExecution() {
       const cell = state.cells.find((c) => c.id === cellId);
       if (!cell) return;
 
+      if (cell.type === 'dql') {
+        const start = Date.now();
+        const prev = runningControllers.get(cellId);
+        if (prev) prev.abort();
+
+        const controller = new AbortController();
+        runningControllers.set(cellId, controller);
+
+        dispatch({
+          type: 'UPDATE_CELL',
+          id: cellId,
+          updates: { status: 'running', error: undefined, result: undefined, fromSnapshot: false },
+        });
+
+        try {
+          const payload = await api.executeNotebookCell(cell, controller.signal);
+          if (!payload.result) {
+            throw new Error('DQL cell produced no executable result.');
+          }
+          const elapsed = Date.now() - start;
+          const nextCount = (cell.executionCount ?? 0) + 1;
+          const chartConfig = normalizeServerChartConfig(payload.chartConfig) ?? parseDqlChartConfig(cell.content);
+
+          dispatch({
+            type: 'UPDATE_CELL',
+            id: cellId,
+            updates: {
+              status: 'success',
+              result: {
+                ...payload.result,
+                executionTime: payload.result.executionTime ?? elapsed,
+                rowCount: payload.result.rowCount ?? payload.result.rows.length,
+              },
+              ...(chartConfig ? { chartConfig } : {}),
+              executionCount: nextCount,
+            },
+          });
+
+          dispatch({
+            type: 'APPEND_QUERY_LOG',
+            entry: {
+              id: makeCellId(),
+              cellName: payload.blockName ?? cell.name ?? cell.id,
+              rows: payload.result.rowCount ?? payload.result.rows.length,
+              time: payload.result.executionTime ?? elapsed,
+              ts: new Date(),
+            },
+          });
+
+          setTimeout(() => {
+            dispatch({
+              type: 'UPDATE_CELL',
+              id: cellId,
+              updates: { status: 'idle' },
+            });
+          }, 2000);
+        } catch (err) {
+          if (controller.signal.aborted) {
+            dispatch({
+              type: 'UPDATE_CELL',
+              id: cellId,
+              updates: { status: 'idle', error: undefined },
+            });
+            return;
+          }
+
+          const elapsed = Date.now() - start;
+          const message = err instanceof Error ? err.message : String(err);
+          dispatch({
+            type: 'UPDATE_CELL',
+            id: cellId,
+            updates: {
+              status: 'error',
+              error: message,
+              executionCount: (cell.executionCount ?? 0) + 1,
+            },
+          });
+          dispatch({
+            type: 'APPEND_QUERY_LOG',
+            entry: {
+              id: makeCellId(),
+              cellName: cell.name ?? cell.id,
+              rows: 0,
+              time: elapsed,
+              ts: new Date(),
+              error: message,
+            },
+          });
+        } finally {
+          runningControllers.delete(cellId);
+        }
+        return;
+      }
+
       const rawSql = extractSql(cell);
       if (!rawSql) return;
-
-      // For inline DQL cells, extract chart config from the visualization block
-      if (cell.type === 'dql') {
-        const dqlChartConfig = parseDqlChartConfig(cell.content);
-        if (dqlChartConfig && JSON.stringify(dqlChartConfig) !== JSON.stringify(cell.chartConfig)) {
-          dispatch({ type: 'UPDATE_CELL', id: cellId, updates: { chartConfig: dqlChartConfig } });
-        }
-      }
 
       // Substitute {{cell_name}} references with inline CTEs
       const { sql } = substituteVariables(rawSql);

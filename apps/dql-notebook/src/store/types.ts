@@ -100,7 +100,7 @@ export interface TableCellConfig {
   pinnedColumns?: string[];
 }
 
-export type ChatProviderId = 'claude-agent-sdk' | 'claude-code' | 'openai' | 'gemini' | 'ollama';
+export type ChatProviderId = 'claude-agent-sdk' | 'claude-code' | 'openai' | 'gemini' | 'ollama' | 'custom-openai';
 
 export interface ChatMessage {
   id: string;
@@ -153,6 +153,7 @@ export interface AppSummary {
   description?: string;
   audience?: string;
   status?: 'ready' | 'empty';
+  storage?: 'shared' | 'mine' | 'template';
   owners: string[];
   tags: string[];
   members: number;

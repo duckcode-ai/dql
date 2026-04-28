@@ -386,6 +386,12 @@ function scanBlocks(
             llmContext: agent.llmContext,
             examples: agent.examples,
             invariants: agent.invariants,
+            businessOutcome: agent.businessOutcome,
+            businessOwner: agent.businessOwner,
+            decisionUse: agent.decisionUse,
+            reviewCadence: agent.reviewCadence,
+            businessRules: agent.businessRules,
+            caveats: agent.caveats,
           };
         }
       } catch (err) {
@@ -1018,6 +1024,12 @@ function scanAppsAndDashboards(
         qualifiedId,
         title: dashboard.metadata.title,
         description: dashboard.metadata.description,
+        businessOutcome: dashboard.metadata.businessOutcome,
+        businessOwner: dashboard.metadata.businessOwner,
+        decisionUse: dashboard.metadata.decisionUse,
+        reviewCadence: dashboard.metadata.reviewCadence,
+        businessRules: dashboard.metadata.businessRules,
+        caveats: dashboard.metadata.caveats,
         domain: dashboard.metadata.domain ?? app.domain,
         tags: dashboard.metadata.tags ?? [],
         filePath: dqldRel,
@@ -1076,6 +1088,12 @@ function appDocumentToManifest(
     id: app.id,
     name: app.name,
     description: app.description,
+    businessOutcome: app.businessOutcome,
+    businessOwner: app.businessOwner,
+    decisionUse: app.decisionUse,
+    reviewCadence: app.reviewCadence,
+    businessRules: app.businessRules,
+    caveats: app.caveats,
     domain: app.domain,
     owners: app.owners,
     tags: app.tags ?? [],
@@ -1212,6 +1230,7 @@ function buildManifestLineage(
 
     return {
       name: notebook.title,
+      kind: 'notebook',
       filePath: notebook.filePath,
       blocks: allBlocks,
       charts: notebook.cells
@@ -1239,6 +1258,7 @@ function buildManifestLineage(
   // dashboards with the same local id can exist in different Apps.
   const appDashboardInputs: LineageDashboardInput[] = Object.values(appDashboards ?? {}).map((d) => ({
     name: d.qualifiedId,
+    kind: 'dashboard',
     filePath: d.filePath,
     blocks: [...d.blockIds, ...d.blockPathRefs],
     charts: [],
@@ -1354,11 +1374,23 @@ function extractAgentMetadata(block: any): {
   llmContext?: string;
   examples?: Array<{ question: string; sql?: string }>;
   invariants?: string[];
+  businessOutcome?: string;
+  businessOwner?: string;
+  decisionUse?: string;
+  reviewCadence?: string;
+  businessRules?: string[];
+  caveats?: string[];
 } {
   return {
     llmContext: typeof block.llmContext === 'string' ? block.llmContext : undefined,
     invariants: Array.isArray(block.invariants) ? block.invariants : undefined,
     examples: Array.isArray(block.examples) ? block.examples : undefined,
+    businessOutcome: typeof block.businessOutcome === 'string' ? block.businessOutcome : undefined,
+    businessOwner: typeof block.businessOwner === 'string' ? block.businessOwner : undefined,
+    decisionUse: typeof block.decisionUse === 'string' ? block.decisionUse : undefined,
+    reviewCadence: typeof block.reviewCadence === 'string' ? block.reviewCadence : undefined,
+    businessRules: Array.isArray(block.businessRules) ? block.businessRules : undefined,
+    caveats: Array.isArray(block.caveats) ? block.caveats : undefined,
   };
 }
 

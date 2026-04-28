@@ -19,6 +19,7 @@ const NODE_PREFIXES: LineageNodeType[] = [
   'app',
   'block',
   'dashboard',
+  'notebook',
   'dbt_model',
   'dbt_source',
   'source_table',

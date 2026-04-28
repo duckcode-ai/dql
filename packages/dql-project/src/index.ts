@@ -17,6 +17,17 @@ export { RegistrySync } from './sync.js';
 export type { SyncResult, SyncOptions, ParsedBlock } from './sync.js';
 export { MemoryStorage } from './memory-storage.js';
 export { SQLiteStorage } from './sqlite-storage.js';
+export {
+  LocalAppStorage,
+  defaultLocalAppsDbPath,
+} from './local-app-storage.js';
+export type {
+  LocalAiPin,
+  CreateLocalAiPinInput,
+  LocalAiPinRefreshCadence,
+  LocalAiPinReviewStatus,
+  LocalAppVisibility,
+} from './local-app-storage.js';
 export { ManifestCache } from './manifest-cache.js';
 export type {
   TrackedFile,

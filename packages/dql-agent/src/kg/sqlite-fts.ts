@@ -44,6 +44,7 @@ export class KGStore {
         llm_context  TEXT,
         tags_json    TEXT NOT NULL DEFAULT '[]',
         examples_json TEXT NOT NULL DEFAULT '[]',
+        metadata_json TEXT NOT NULL DEFAULT '{}',
         source_path  TEXT,
         git_sha      TEXT NOT NULL DEFAULT '',
         updated_at   TEXT NOT NULL
@@ -91,6 +92,14 @@ export class KGStore {
         value TEXT NOT NULL
       );
     `);
+    this.ensureColumn('kg_nodes', 'metadata_json', `TEXT NOT NULL DEFAULT '{}'`);
+  }
+
+  private ensureColumn(table: string, column: string, definition: string): void {
+    const rows = this.db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>;
+    if (!rows.some((row) => row.name === column)) {
+      this.db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
+    }
   }
 
   /**
@@ -102,8 +111,8 @@ export class KGStore {
     const insertNode = this.db.prepare(`
       INSERT INTO kg_nodes (
         node_id, kind, name, domain, status, owner, description, llm_context,
-        tags_json, examples_json, source_path, git_sha, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        tags_json, examples_json, metadata_json, source_path, git_sha, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
     const insertFts = this.db.prepare(`
       INSERT INTO kg_nodes_fts (node_id, name, description, llm_context, tags, kind, domain)
@@ -125,6 +134,7 @@ export class KGStore {
           n.description ?? null, n.llmContext ?? null,
           JSON.stringify(n.tags ?? []),
           JSON.stringify(n.examples ?? []),
+          JSON.stringify(nodeMetadata(n)),
           n.sourcePath ?? null, n.gitSha ?? '', now,
         );
         insertFts.run(
@@ -178,7 +188,7 @@ export class KGStore {
       node_id: string; kind: string; name: string; domain: string | null;
       status: string | null; owner: string | null; description: string | null;
       llm_context: string | null; tags_json: string; examples_json: string;
-      source_path: string | null; git_sha: string; rank: number; snip: string;
+      metadata_json?: string | null; source_path: string | null; git_sha: string; rank: number; snip: string;
     }>;
 
     return rows.map((r) => ({
@@ -192,7 +202,7 @@ export class KGStore {
     const row = this.db.prepare('SELECT * FROM kg_nodes WHERE node_id = ?').get(nodeId) as
       | { node_id: string; kind: string; name: string; domain: string | null;
           status: string | null; owner: string | null; description: string | null;
-          llm_context: string | null; tags_json: string; examples_json: string;
+          llm_context: string | null; tags_json: string; examples_json: string; metadata_json?: string | null;
           source_path: string | null; git_sha: string }
       | undefined;
     return row ? rowToNode(row) : null;
@@ -204,7 +214,7 @@ export class KGStore {
     ).all(kind, limit) as Array<{
       node_id: string; kind: string; name: string; domain: string | null;
       status: string | null; owner: string | null; description: string | null;
-      llm_context: string | null; tags_json: string; examples_json: string;
+      llm_context: string | null; tags_json: string; examples_json: string; metadata_json?: string | null;
       source_path: string | null; git_sha: string;
     }>;
     return rows.map((r) => rowToNode(r));
@@ -275,9 +285,11 @@ function rowToNode(row: {
   llm_context: string | null;
   tags_json: string;
   examples_json: string;
+  metadata_json?: string | null;
   source_path: string | null;
   git_sha: string;
 }): KGNode {
+  const metadata = safeJSON(row.metadata_json, {} as Partial<KGNode>);
   return {
     nodeId: row.node_id,
     kind: row.kind as KGNode['kind'],
@@ -291,7 +303,39 @@ function rowToNode(row: {
     examples: safeJSON(row.examples_json, [] as KGNode['examples'] extends infer T ? T : never) as KGNode['examples'],
     sourcePath: row.source_path ?? undefined,
     gitSha: row.git_sha ?? undefined,
+    sourceTier: metadata.sourceTier,
+    certification: metadata.certification,
+    provenance: metadata.provenance,
+    freshness: metadata.freshness,
+    businessOutcome: metadata.businessOutcome,
+    businessOwner: metadata.businessOwner,
+    decisionUse: metadata.decisionUse,
+    reviewCadence: metadata.reviewCadence,
+    businessRules: metadata.businessRules,
+    caveats: metadata.caveats,
   };
+}
+
+function nodeMetadata(node: KGNode): Partial<KGNode> {
+  const metadata: Partial<KGNode> = {};
+  for (const key of [
+    'sourceTier',
+    'certification',
+    'provenance',
+    'freshness',
+    'businessOutcome',
+    'businessOwner',
+    'decisionUse',
+    'reviewCadence',
+    'businessRules',
+    'caveats',
+  ] as const) {
+    const value = node[key];
+    if (value !== undefined) {
+      (metadata as Record<string, unknown>)[key] = value;
+    }
+  }
+  return metadata;
 }
 
 function safeJSON<T>(raw: string | null | undefined, fallback: T): T {
@@ -303,27 +347,42 @@ function safeJSON<T>(raw: string | null | undefined, fallback: T): T {
   }
 }
 
+const STOP_WORDS = new Set([
+  'a', 'about', 'above', 'after', 'again', 'against', 'all', 'am', 'an', 'and', 'any', 'are', 'as', 'at',
+  'be', 'because', 'been', 'before', 'being', 'below', 'between', 'both', 'but', 'by',
+  'can', 'could', 'current', 'did', 'do', 'does', 'doing', 'down', 'during',
+  'each', 'explain', 'few', 'find', 'for', 'from', 'further',
+  'get', 'give',
+  'had', 'has', 'have', 'having', 'he', 'her', 'here', 'hers', 'herself', 'him', 'himself', 'his', 'how',
+  'i', 'if', 'in', 'into', 'is', 'it', 'its', 'itself',
+  'just',
+  'me', 'more', 'most', 'my', 'myself',
+  'no', 'nor', 'not', 'now',
+  'of', 'off', 'on', 'once', 'only', 'or', 'other', 'our', 'ours', 'ourselves', 'out', 'over', 'own',
+  'please',
+  'query',
+  'same', 'she', 'should', 'show', 'so', 'some', 'sql', 'such',
+  'than', 'that', 'the', 'their', 'theirs', 'them', 'themselves', 'then', 'there', 'these', 'they', 'this', 'those', 'through', 'to', 'too',
+  'under', 'until', 'up', 'using',
+  'very',
+  'was', 'we', 'were', 'what', 'when', 'where', 'which', 'while', 'who', 'whom', 'why', 'will', 'with', 'would',
+  'you', 'your', 'yours', 'yourself', 'yourselves',
+]);
+
 /**
- * Defang FTS5 query syntax we don't trust from arbitrary user input.
- * Allows AND/OR/NOT/quotes/parens and column-prefix syntax (`name:foo`).
- * Strips anything else to whitespace, then collapses.
+ * Defang FTS5 query syntax from arbitrary user/chat input.
+ *
+ * FTS5 treats `foo:bar` as a column-scoped query. That is useful for hand
+ * written searches, but it is unsafe for notebook chat because upstream
+ * context often includes labels like `Current upstream SQL:`. Tokenize to
+ * quoted terms so SQL snippets, punctuation, and boolean words are plain text.
  */
 function sanitizeFtsQuery(raw: string): string {
-  // Drop characters FTS5 might interpret as operators we don't want exposed,
-  // except for quotes (allows phrase search) and a couple of column scopers.
-  const cleaned = raw
-    .replace(/[*]/g, ' ') // strip wildcard injection
-    .replace(/\s+/g, ' ')
-    .trim();
-  if (!cleaned) return '';
-  // If no quotes and no boolean keyword, fall back to a tokenized OR query
-  // for better recall — FTS5 default is implicit AND.
-  if (!/["()]|\b(AND|OR|NOT|NEAR)\b/.test(cleaned)) {
-    return cleaned
-      .split(/\s+/)
-      .map((t) => t.replace(/[^\w]/g, ''))
-      .filter(Boolean)
-      .join(' OR ');
-  }
-  return cleaned;
+  return raw
+    .split(/\s+/)
+    .map((t) => t.replace(/[^\p{L}\p{N}_]/gu, ''))
+    .filter((t) => t.length > 1 && !STOP_WORDS.has(t.toLowerCase()))
+    .slice(0, 48)
+    .map((t) => `"${t}"`)
+    .join(' OR ');
 }

@@ -1,10 +1,11 @@
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import {
   buildManifest,
+  loadProjectConfig,
   resolveDbtManifestPath,
   SemanticLayer,
-  loadSemanticLayerFromDir,
+  resolveSemanticLayerWithDiagnostics,
   LineageGraph,
   type DQLManifest,
   type LineageEdgeType,
@@ -58,10 +59,23 @@ export class DQLContext {
       dbtManifestPath,
     });
 
-    const semanticDir = resolveSemanticDir(this.projectRoot);
-    this._semanticLayer = existsSync(semanticDir)
-      ? loadSemanticLayerFromDir(semanticDir)
-      : new SemanticLayer();
+    const config = loadProjectConfig(this.projectRoot);
+    const semanticConfig = config.semanticLayer?.provider
+      ? config.semanticLayer as Parameters<typeof resolveSemanticLayerWithDiagnostics>[0]
+      : config.semanticLayer?.path
+        ? { provider: 'dql' as const, path: config.semanticLayer.path }
+        : undefined;
+    const resolved = resolveSemanticLayerWithDiagnostics(semanticConfig, this.projectRoot);
+    if (resolved.layer) {
+      this._semanticLayer = resolved.layer;
+    } else if (config.dbt?.projectDir) {
+      this._semanticLayer = resolveSemanticLayerWithDiagnostics({
+        provider: 'dbt',
+        projectPath: config.dbt.projectDir,
+      }, this.projectRoot).layer ?? new SemanticLayer();
+    } else {
+      this._semanticLayer = new SemanticLayer();
+    }
 
     this._lineage = null;
   }
@@ -92,23 +106,6 @@ function buildGraphFromManifest(manifest: DQLManifest): LineageGraph {
     });
   }
   return graph;
-}
-
-function resolveSemanticDir(projectRoot: string): string {
-  const configPath = join(projectRoot, 'dql.config.json');
-  if (existsSync(configPath)) {
-    try {
-      const config = JSON.parse(readFileSync(configPath, 'utf-8')) as {
-        semanticLayer?: { path?: string };
-      };
-      if (config.semanticLayer?.path) {
-        return join(projectRoot, config.semanticLayer.path);
-      }
-    } catch {
-      /* fall through */
-    }
-  }
-  return join(projectRoot, 'semantic-layer');
 }
 
 /** Walk up from `startDir` until a `dql.config.json` is found, else return `startDir`. */

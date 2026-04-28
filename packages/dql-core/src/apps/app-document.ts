@@ -81,6 +81,12 @@ export interface AppDocument {
   id: string;
   name: string;
   description?: string;
+  businessOutcome?: string;
+  businessOwner?: string;
+  decisionUse?: string;
+  reviewCadence?: string;
+  businessRules?: string[];
+  caveats?: string[];
   domain: string;
   owners: string[];
   tags?: string[];
@@ -223,6 +229,12 @@ function validateAppDocument(raw: unknown, path: string): AppDocumentLoadResult 
   if (owners.length === 0) err('at least one owner is required');
 
   const description = optionalString(obj, 'description', err);
+  const businessOutcome = optionalString(obj, 'businessOutcome', err);
+  const businessOwner = optionalString(obj, 'businessOwner', err);
+  const decisionUse = optionalString(obj, 'decisionUse', err);
+  const reviewCadence = optionalString(obj, 'reviewCadence', err);
+  const businessRules = obj.businessRules === undefined ? undefined : stringArray(obj, 'businessRules', err);
+  const caveats = obj.caveats === undefined ? undefined : stringArray(obj, 'caveats', err);
   const tags = obj.tags === undefined ? [] : stringArray(obj, 'tags', err);
 
   const members = readMembers(obj.members, err);
@@ -257,6 +269,12 @@ function validateAppDocument(raw: unknown, path: string): AppDocumentLoadResult 
     id,
     name,
     description,
+    businessOutcome,
+    businessOwner,
+    decisionUse,
+    reviewCadence,
+    businessRules,
+    caveats,
     domain,
     owners,
     tags,

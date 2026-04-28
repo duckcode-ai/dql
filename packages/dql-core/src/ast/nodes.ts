@@ -297,6 +297,13 @@ export interface BlockDeclNode extends BaseNode {
   llmContext?: string;
   invariants?: string[];
   examples?: Array<{ question: string; sql?: string }>;
+  /** Agent evidence metadata surfaced in governed analytics answers. */
+  businessOutcome?: string;
+  businessOwner?: string;
+  decisionUse?: string;
+  reviewCadence?: string;
+  businessRules?: string[];
+  caveats?: string[];
   /**
    * v1.4 — block certification status declared in source. Recognised values
    * are 'draft' | 'review' | 'certified' | 'deprecated' | 'pending_recertification'

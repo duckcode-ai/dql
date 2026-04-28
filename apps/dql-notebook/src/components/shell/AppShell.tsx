@@ -233,6 +233,7 @@ export function AppShell() {
         {state.appMode === 'studio' && state.inspectorOpen && !state.lineageFullscreen && !state.lineageDrawerOpen && !state.dashboardMode && (
           <InspectorPanel />
         )}
+
       </div>
 
       {/* Modals */}

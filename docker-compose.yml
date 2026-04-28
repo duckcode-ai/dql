@@ -2,7 +2,7 @@
 #
 #   docker compose up                 # notebook on http://127.0.0.1:3474
 #   docker compose --profile slack up # also start the Slack bot on :3479
-#   docker compose --profile ollama up# also start a local Ollama daemon on :11434
+#   docker compose --profile ollama up# also start an Ollama daemon on :11434
 #
 # All ports are mapped to 127.0.0.1 on the host, so the security posture
 # matches the native `dql notebook` (loopback-only).
@@ -32,7 +32,10 @@ services:
       OPENAI_MODEL: ${OPENAI_MODEL:-}
       GEMINI_API_KEY: ${GEMINI_API_KEY:-}
       GEMINI_MODEL: ${GEMINI_MODEL:-}
-      OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://ollama:11434}
+      # Default reaches a host-local Ollama daemon from Docker Desktop. If you
+      # use the Compose ollama profile, the provider also falls back to
+      # http://ollama:11434 automatically.
+      OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://host.docker.internal:11434}
       OLLAMA_MODEL: ${OLLAMA_MODEL:-llama3.1}
       DQL_SLACK_WEBHOOK: ${DQL_SLACK_WEBHOOK:-}
       DQL_SMTP_URL: ${DQL_SMTP_URL:-}

@@ -5,7 +5,7 @@
  */
 
 import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync, type Dirent, type Stats } from 'node:fs';
-import { join, dirname } from 'node:path';
+import { join, dirname, relative } from 'node:path';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import {
   loadAppDocument,
@@ -17,9 +17,12 @@ import {
   suggestAppId,
   type AppDocument,
   type DashboardDocument,
+  type DashboardGridItem,
 } from '@duckcodeailabs/dql-core';
 import {
   defaultPersonaRegistry,
+  defaultLocalAppsDbPath,
+  LocalAppStorage,
   personaFromMember,
   type ActivePersona,
 } from '@duckcodeailabs/dql-project';
@@ -30,6 +33,7 @@ interface Ctx {
   url: URL;
   path: string;
   projectRoot: string;
+  executeSql?: (sql: string) => Promise<unknown>;
 }
 
 export async function handleAppsApi(ctx: Ctx): Promise<boolean> {
@@ -68,8 +72,148 @@ export async function handleAppsApi(ctx: Ctx): Promise<boolean> {
     return true;
   }
 
+  let m = path.match(/^\/api\/apps\/([^/]+)\/editor\/catalog$/);
+  if (m && req.method === 'GET') {
+    const appId = decodeURIComponent(m[1]);
+    const app = loadAppById(projectRoot, appId)?.app;
+    if (!app) {
+      sendJson(res, 404, { error: `App "${appId}" not found` });
+      return true;
+    }
+    const domain = ctx.url.searchParams.get('domain') ?? app.domain;
+    const certifiedOnly = ctx.url.searchParams.get('certifiedOnly') !== 'false';
+    const blocks = collectBlockCandidates(projectRoot)
+      .filter((block) => !certifiedOnly || block.status === 'certified')
+      .filter((block) => !domain || block.domain === domain || appAllowsExecute(app, block.domain))
+      .sort((a, b) => {
+        const aDomain = a.domain === app.domain ? 0 : 1;
+        const bDomain = b.domain === app.domain ? 0 : 1;
+        return aDomain - bDomain || a.name.localeCompare(b.name);
+      });
+    sendJson(res, 200, {
+      appId,
+      defaultDomain: app.domain,
+      domains: unique(blocks.map((block) => block.domain)),
+      blocks,
+    });
+    return true;
+  }
+
+  m = path.match(/^\/api\/apps\/([^/]+)\/dashboards$/);
+  if (m && req.method === 'POST') {
+    const appId = decodeURIComponent(m[1]);
+    try {
+      const body = await readJson<{ id?: string; title?: string; description?: string }>(req);
+      const result = createDashboardForApp(projectRoot, appId, body);
+      if (!result.ok) {
+        sendJson(res, 400, { error: result.error });
+        return true;
+      }
+      sendJson(res, 201, result);
+    } catch (err) {
+      sendJson(res, 500, { error: (err as Error).message });
+    }
+    return true;
+  }
+
+  m = path.match(/^\/api\/apps\/([^/]+)\/ai-pins$/);
+  if (m) {
+    const appId = decodeURIComponent(m[1]);
+    if (req.method === 'GET') {
+      const dashboardId = ctx.url.searchParams.get('dashboardId') ?? undefined;
+      const storage = new LocalAppStorage(defaultLocalAppsDbPath(projectRoot));
+      try {
+        sendJson(res, 200, { pins: storage.listAiPins(appId, dashboardId) });
+      } finally {
+        storage.close();
+      }
+      return true;
+    }
+    if (req.method === 'POST') {
+      try {
+        const body = await readJson<AiPinCreateRequest>(req);
+        const created = createAiPinTile(projectRoot, appId, body);
+        if (!created.ok) {
+          sendJson(res, 400, { error: created.error });
+          return true;
+        }
+        sendJson(res, 201, created);
+      } catch (err) {
+        sendJson(res, 500, { error: (err as Error).message });
+      }
+      return true;
+    }
+  }
+
+  m = path.match(/^\/api\/apps\/([^/]+)\/ai-pins\/([^/]+)\/refresh$/);
+  if (m && req.method === 'POST') {
+    const pinId = decodeURIComponent(m[2]);
+    const storage = new LocalAppStorage(defaultLocalAppsDbPath(projectRoot));
+    try {
+      const pin = storage.getAiPin(pinId);
+      if (!pin) {
+        sendJson(res, 404, { error: `AI pin "${pinId}" not found` });
+        return true;
+      }
+      if (!pin.sql) {
+        const updated = storage.updateAiPinResult(pinId, pin.result, 'Pin has no SQL to refresh.');
+        sendJson(res, 400, { error: 'Pin has no SQL to refresh.', pin: updated });
+        return true;
+      }
+      if (!ctx.executeSql) {
+        const updated = storage.updateAiPinResult(pinId, pin.result, 'This host cannot execute AI pin SQL.');
+        sendJson(res, 400, { error: 'This host cannot execute AI pin SQL.', pin: updated });
+        return true;
+      }
+      const result = await ctx.executeSql(pin.sql);
+      const updated = storage.updateAiPinResult(pinId, result);
+      sendJson(res, 200, { ok: true, pin: updated });
+    } catch (err) {
+      const pin = storage.updateAiPinResult(pinId, undefined, err instanceof Error ? err.message : String(err));
+      sendJson(res, 500, { error: err instanceof Error ? err.message : String(err), pin });
+    } finally {
+      storage.close();
+    }
+    return true;
+  }
+
+  m = path.match(/^\/api\/apps\/([^/]+)\/ai-pins\/([^/]+)\/promote$/);
+  if (m && req.method === 'POST') {
+    const appId = decodeURIComponent(m[1]);
+    const pinId = decodeURIComponent(m[2]);
+    try {
+      const result = promoteAiPinToDraftBlock(projectRoot, appId, pinId);
+      if (!result.ok) {
+        sendJson(res, 400, { error: result.error });
+        return true;
+      }
+      sendJson(res, 200, result);
+    } catch (err) {
+      sendJson(res, 500, { error: (err as Error).message });
+    }
+    return true;
+  }
+
+  m = path.match(/^\/api\/apps\/([^/]+)\/dashboards\/([^/]+)\/layout$/);
+  if (m && req.method === 'PATCH') {
+    const appId = decodeURIComponent(m[1]);
+    const dashboardId = decodeURIComponent(m[2]);
+    try {
+      const body = await readJson<{ layout?: DashboardDocument['layout']; items?: DashboardGridItem[] }>(req);
+      const result = patchDashboardLayout(projectRoot, appId, dashboardId, body);
+      if (!result.ok) {
+        sendJson(res, 400, { error: result.error });
+        return true;
+      }
+      sendJson(res, 200, result);
+    } catch (err) {
+      sendJson(res, 500, { error: (err as Error).message });
+    }
+    return true;
+  }
+
   // /api/apps/:id  — single App with dashboards summary
-  let m = path.match(/^\/api\/apps\/([^/]+)$/);
+  m = path.match(/^\/api\/apps\/([^/]+)$/);
   if (m && req.method === 'GET') {
     const id = m[1];
     const result = loadAppById(projectRoot, id);
@@ -170,6 +314,7 @@ function collectAppsList(projectRoot: string): Array<{
   description?: string;
   audience?: string;
   status?: 'ready' | 'empty';
+  storage: 'shared';
   owners: string[];
   tags: string[];
   members: number;
@@ -188,6 +333,7 @@ function collectAppsList(projectRoot: string): Array<{
     tags: string[];
     audience?: string;
     status?: 'ready' | 'empty';
+    storage: 'shared';
     members: number;
     roles: number;
     policies: number;
@@ -211,6 +357,7 @@ function collectAppsList(projectRoot: string): Array<{
       description: document.description,
       audience: audienceFromTags(document.tags ?? []),
       status: dashboards.length > 0 ? 'ready' : 'empty',
+      storage: 'shared',
       owners: document.owners,
       tags: document.tags ?? [],
       members: document.members.length,
@@ -240,6 +387,21 @@ interface AppCreateRequest {
   tags?: string[];
   owners?: string[];
   selectedBlockIds?: string[];
+}
+
+interface AiPinCreateRequest {
+  dashboardId?: string;
+  tileId?: string;
+  title?: string;
+  answer?: string;
+  sql?: string;
+  sourceTier?: string;
+  certification?: 'certified' | 'ai_generated';
+  reviewStatus?: 'needs_review' | 'draft_created' | 'certified' | 'rejected';
+  refreshCadence?: 'none' | 'daily';
+  chartConfig?: Record<string, unknown>;
+  result?: unknown;
+  citations?: unknown[];
 }
 
 interface BlockCandidate {
@@ -586,6 +748,10 @@ function normalizeTags(values: string[]): string[] {
   return Array.from(new Set(values.map((value) => cleanString(value)).filter(Boolean)));
 }
 
+function unique(values: string[]): string[] {
+  return Array.from(new Set(values.filter(Boolean))).sort((a, b) => a.localeCompare(b));
+}
+
 function slugify(value: string): string {
   return value
     .toLowerCase()
@@ -597,6 +763,193 @@ function audienceFromTags(tags: string[]): string | undefined {
   const tag = tags.find((value) => value.startsWith('audience:'));
   if (!tag) return undefined;
   return tag.slice('audience:'.length).replace(/-/g, ' ');
+}
+
+function appAllowsExecute(app: AppDocument, domain: string): boolean {
+  return (app.policies ?? []).some((policy) => {
+    if (policy.enabled === false) return false;
+    if (policy.domain !== '*' && policy.domain !== domain) return false;
+    return policy.accessLevel === 'execute' || policy.accessLevel === 'admin';
+  });
+}
+
+function createDashboardForApp(
+  projectRoot: string,
+  appId: string,
+  input: { id?: string; title?: string; description?: string },
+): { ok: true; dashboard: DashboardDocument; path: string } | { ok: false; error: string } {
+  const loaded = loadAppById(projectRoot, appId);
+  if (!loaded) return { ok: false, error: `App "${appId}" not found` };
+  const title = cleanString(input.title) || 'New tab';
+  const id = slugify(cleanString(input.id) || title) || `tab-${Date.now()}`;
+  if (!/^[a-z0-9][a-z0-9_-]*$/i.test(id)) return { ok: false, error: 'dashboard id must be folder-safe' };
+  const appDir = join(projectRoot, 'apps', appId);
+  const dashboardPath = join(appDir, 'dashboards', `${id}.dqld`);
+  if (existsSync(dashboardPath)) return { ok: false, error: `Dashboard already exists: ${id}` };
+  const dashboard: DashboardDocument = {
+    version: 1,
+    id,
+    metadata: {
+      title,
+      description: cleanString(input.description) || `${title} dashboard tab`,
+      domain: loaded.app.domain,
+      tags: loaded.app.tags ?? [],
+    },
+    layout: {
+      kind: 'grid',
+      cols: 12,
+      rowHeight: 80,
+      items: [],
+    },
+  };
+  mkdirSync(dirname(dashboardPath), { recursive: true });
+  writeFileSync(dashboardPath, JSON.stringify(dashboard, null, 2) + '\n', 'utf-8');
+  return { ok: true, dashboard, path: relative(projectRoot, dashboardPath) };
+}
+
+function patchDashboardLayout(
+  projectRoot: string,
+  appId: string,
+  dashboardId: string,
+  input: { layout?: DashboardDocument['layout']; items?: DashboardGridItem[] },
+): { ok: true; dashboard: DashboardDocument; path: string } | { ok: false; error: string } {
+  const loaded = loadDashboardForApp(projectRoot, appId, dashboardId);
+  if (!loaded) return { ok: false, error: `Dashboard "${dashboardId}" not found in app "${appId}"` };
+  const next: DashboardDocument = {
+    ...loaded.dashboard,
+    layout: input.layout
+      ? input.layout
+      : {
+          ...loaded.dashboard.layout,
+          items: input.items ?? loaded.dashboard.layout.items,
+        },
+  };
+  const written = writeDashboard(projectRoot, appId, dashboardId, next);
+  if (!written.ok) return written;
+  return { ok: true, dashboard: next, path: relative(projectRoot, written.path) };
+}
+
+function createAiPinTile(
+  projectRoot: string,
+  appId: string,
+  input: AiPinCreateRequest,
+): { ok: true; pin: unknown; dashboard?: DashboardDocument; tile?: DashboardGridItem } | { ok: false; error: string } {
+  const dashboardId = cleanString(input.dashboardId);
+  if (!dashboardId) return { ok: false, error: 'dashboardId is required' };
+  const loaded = loadDashboardForApp(projectRoot, appId, dashboardId);
+  if (!loaded) return { ok: false, error: `Dashboard "${dashboardId}" not found in app "${appId}"` };
+  const title = cleanString(input.title) || 'AI result';
+  const tileId = cleanString(input.tileId) || nextTileId(loaded.dashboard, slugify(title) || 'ai-pin');
+  const storage = new LocalAppStorage(defaultLocalAppsDbPath(projectRoot));
+  try {
+    const pin = storage.createAiPin({
+      appId,
+      dashboardId,
+      tileId,
+      title,
+      answer: cleanString(input.answer) || title,
+      sql: cleanString(input.sql) || undefined,
+      sourceTier: cleanString(input.sourceTier) || undefined,
+      certification: input.certification === 'certified' ? 'certified' : 'ai_generated',
+      reviewStatus: input.reviewStatus,
+      refreshCadence: input.refreshCadence === 'daily' ? 'daily' : 'none',
+      chartConfig: input.chartConfig,
+      result: input.result,
+      citations: Array.isArray(input.citations) ? input.citations : [],
+    });
+    const tile: DashboardGridItem = {
+      i: tileId,
+      ...nextTilePosition(loaded.dashboard),
+      aiPin: { id: pin.id },
+      viz: { type: normalizeVizTypeFromChart(input.chartConfig) },
+      title,
+    };
+    const dashboard: DashboardDocument = {
+      ...loaded.dashboard,
+      layout: {
+        ...loaded.dashboard.layout,
+        items: [...loaded.dashboard.layout.items, tile],
+      },
+    };
+    const written = writeDashboard(projectRoot, appId, dashboardId, dashboard);
+    if (!written.ok) {
+      return { ok: false, error: written.error };
+    }
+    return { ok: true, pin, dashboard, tile };
+  } finally {
+    storage.close();
+  }
+}
+
+function promoteAiPinToDraftBlock(
+  projectRoot: string,
+  appId: string,
+  pinId: string,
+): { ok: true; pin: unknown; blockPath: string } | { ok: false; error: string } {
+  const loaded = loadAppById(projectRoot, appId);
+  if (!loaded) return { ok: false, error: `App "${appId}" not found` };
+  const storage = new LocalAppStorage(defaultLocalAppsDbPath(projectRoot));
+  try {
+    const pin = storage.getAiPin(pinId);
+    if (!pin) return { ok: false, error: `AI pin "${pinId}" not found` };
+    if (!pin.sql) return { ok: false, error: 'AI pin has no SQL to promote' };
+    const blockName = slugify(pin.title) || pin.id;
+    const draftDir = join(projectRoot, 'apps', appId, 'drafts');
+    const blockPath = join(draftDir, `${blockName}.dql`);
+    mkdirSync(draftDir, { recursive: true });
+    const source = [
+      `block "${blockName}" {`,
+      `  domain = "${escapeDqlString(loaded.app.domain)}"`,
+      '  type = "custom"',
+      '  status = "review"',
+      `  owner = "${escapeDqlString(loaded.app.owners[0] ?? `${process.env.USER ?? 'analyst'}@local`)}"`,
+      `  description = "${escapeDqlString(pin.answer.slice(0, 240))}"`,
+      '  tags = ["ai-generated", "needs-review"]',
+      '',
+      '  query = """',
+      pin.sql,
+      '  """',
+      '',
+      '  visualization {',
+      `    chart = "${escapeDqlString(String((pin.chartConfig as { chart?: unknown } | undefined)?.chart ?? 'table'))}"`,
+      '  }',
+      '}',
+      '',
+    ].join('\n');
+    writeFileSync(blockPath, source, 'utf-8');
+    const updated = storage.markAiPinPromoted(pinId, relative(projectRoot, blockPath));
+    return { ok: true, pin: updated, blockPath: relative(projectRoot, blockPath) };
+  } finally {
+    storage.close();
+  }
+}
+
+function nextTilePosition(dashboard: DashboardDocument): { x: number; y: number; w: number; h: number } {
+  const maxY = dashboard.layout.items.reduce((value, item) => Math.max(value, item.y + item.h), 0);
+  return { x: 0, y: maxY, w: 6, h: 3 };
+}
+
+function nextTileId(dashboard: DashboardDocument, base: string): string {
+  const used = new Set(dashboard.layout.items.map((item) => item.i));
+  if (!used.has(base)) return base;
+  for (let i = 2; i < 1000; i++) {
+    const candidate = `${base}-${i}`;
+    if (!used.has(candidate)) return candidate;
+  }
+  return `${base}-${Date.now()}`;
+}
+
+function normalizeVizTypeFromChart(chartConfig: Record<string, unknown> | undefined): DashboardGridItem['viz']['type'] {
+  const chart = String(chartConfig?.chart ?? '').toLowerCase().replace(/-/g, '_');
+  if (chart === 'single_value' || chart === 'kpi' || chart === 'line' || chart === 'bar' || chart === 'area'
+    || chart === 'pie' || chart === 'pivot' || chart === 'map' || chart === 'funnel') {
+    return chart;
+  }
+  return 'table';
+}
+
+function escapeDqlString(value: string): string {
+  return value.replace(/\\/g, '\\\\').replace(/"/g, '\\"').replace(/\r?\n/g, ' ');
 }
 
 function loadAppById(
@@ -651,12 +1004,12 @@ function loadDashboardForApp(
   return null;
 }
 
-async function writeDashboard(
+function writeDashboard(
   projectRoot: string,
   appId: string,
   dashboardId: string,
   payload: unknown,
-): Promise<{ ok: true; path: string } | { ok: false; error: string }> {
+): { ok: true; path: string } | { ok: false; error: string } {
   // Validate against the dashboard schema before touching disk.
   const { document, errors } = parseDashboardDocument(JSON.stringify(payload), '<incoming>');
   if (!document) {

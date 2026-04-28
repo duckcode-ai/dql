@@ -12,6 +12,7 @@ import type {
 import { runAgent } from '../../llm/client';
 import type { AgentTurn } from '../../llm/types';
 import { SaveAsBlockModal } from '../modals/SaveAsBlockModal';
+import { AgentAnswerCard, extractGovernedAnswer } from '../agent/AgentAnswerCard';
 
 interface ChatCellProps {
   cell: Cell;
@@ -27,6 +28,7 @@ const PROVIDERS: Array<{ id: ChatProviderId; label: string; hint: string }> = [
   { id: 'openai', label: 'OpenAI', hint: 'OPENAI_API_KEY, optional OPENAI_MODEL' },
   { id: 'gemini', label: 'Gemini', hint: 'GEMINI_API_KEY, optional GEMINI_MODEL' },
   { id: 'ollama', label: 'Ollama', hint: 'OLLAMA_BASE_URL, optional OLLAMA_MODEL' },
+  { id: 'custom-openai', label: 'Custom OpenAI', hint: 'Configure in Settings' },
 ];
 
 function genId(): string {
@@ -159,10 +161,10 @@ export function ChatCell({ cell, cells, index, themeMode, onUpdate }: ChatCellPr
 
       <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
         {config.history.map((msg) => (
-          <MessageBubble key={msg.id} msg={msg} t={t} />
+          <MessageBubble key={msg.id} msg={msg} t={t} themeMode={themeMode} />
         ))}
         {running && (
-          <LiveBubble streamingText={streamingText} events={pendingEvents} t={t} />
+          <LiveBubble streamingText={streamingText} events={pendingEvents} t={t} themeMode={themeMode} />
         )}
       </div>
 
@@ -282,9 +284,10 @@ function ChatHeader({
   );
 }
 
-function MessageBubble({ msg, t }: { msg: ChatMessage; t: Theme }) {
+function MessageBubble({ msg, t, themeMode }: { msg: ChatMessage; t: Theme; themeMode: ThemeMode }) {
   const isUser = msg.role === 'user';
   const events = (msg.events ?? []).map((e) => e.payload as AgentTurn);
+  const answer = !isUser ? extractGovernedAnswer(events) : null;
   return (
     <div
       style={{
@@ -301,7 +304,11 @@ function MessageBubble({ msg, t }: { msg: ChatMessage; t: Theme }) {
       <div style={{ fontSize: 10, fontFamily: t.fontMono, color: t.textMuted, marginBottom: 4, textTransform: 'uppercase', letterSpacing: '0.08em' }}>
         {isUser ? 'You' : 'Assistant'}
       </div>
-      {msg.content || (events.length > 0 ? <em style={{ color: t.textSecondary }}>(tool calls only)</em> : null)}
+      {answer ? (
+        <AgentAnswerCard answer={answer} themeMode={themeMode} />
+      ) : (
+        msg.content || (events.length > 0 ? <em style={{ color: t.textSecondary }}>(tool calls only)</em> : null)
+      )}
       {events.filter((e) => e.kind === 'tool_call').map((e) => (
         <ToolCallChip key={`tc-${(e as { id: string }).id}`} turn={e} t={t} />
       ))}
@@ -309,13 +316,14 @@ function MessageBubble({ msg, t }: { msg: ChatMessage; t: Theme }) {
   );
 }
 
-function LiveBubble({ streamingText, events, t }: { streamingText: string; events: AgentTurn[]; t: Theme }) {
+function LiveBubble({ streamingText, events, t, themeMode }: { streamingText: string; events: AgentTurn[]; t: Theme; themeMode: ThemeMode }) {
+  const answer = extractGovernedAnswer(events);
   return (
     <div style={{ padding: '8px 12px', borderRadius: 6, background: t.cellBg, border: `1px solid ${t.cellBorder}`, fontSize: 13, lineHeight: 1.5, color: t.textPrimary, whiteSpace: 'pre-wrap' }}>
       <div style={{ fontSize: 10, fontFamily: t.fontMono, color: t.textMuted, marginBottom: 4, textTransform: 'uppercase', letterSpacing: '0.08em' }}>
         Assistant <span style={{ color: t.accent }}>●</span>
       </div>
-      {streamingText || <em style={{ color: t.textSecondary }}>Thinking…</em>}
+      {answer ? <AgentAnswerCard answer={answer} themeMode={themeMode} /> : (streamingText || <em style={{ color: t.textSecondary }}>Thinking…</em>)}
       {events.filter((e) => e.kind === 'tool_call').map((e) => (
         <ToolCallChip key={`live-${(e as { id: string }).id}`} turn={e} t={t} />
       ))}

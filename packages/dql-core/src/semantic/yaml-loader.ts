@@ -32,16 +32,16 @@ import {
 export function loadSemanticLayerFromDir(semanticLayerDir: string): SemanticLayer {
   const layer = new SemanticLayer();
 
-  const subdirs: Array<{ folder: string; loader: (raw: Record<string, unknown>) => void }> = [
-    { folder: 'metrics', loader: (raw) => layer.addMetric(parseMetricDefinition(raw)) },
-    { folder: 'dimensions', loader: (raw) => layer.addDimension(parseDimensionDefinition(raw)) },
-    { folder: 'hierarchies', loader: (raw) => layer.addHierarchy(parseHierarchyDefinition(raw)) },
-    { folder: 'cubes', loader: (raw) => layer.addCube(parseCubeDefinition(raw)) },
-    { folder: 'segments', loader: (raw) => layer.addSegment(parseSegmentDefinition(raw)) },
-    { folder: 'pre_aggregations', loader: (raw) => layer.addPreAggregation(parsePreAggregationDefinition(raw)) },
+  const subdirs: Array<{ folder: string; keys: string[]; loader: (raw: Record<string, unknown>) => void }> = [
+    { folder: 'metrics', keys: ['metrics'], loader: (raw) => addIfNamed(parseMetricDefinition(raw), (item) => layer.addMetric(item)) },
+    { folder: 'dimensions', keys: ['dimensions'], loader: (raw) => addIfNamed(parseDimensionDefinition(raw), (item) => layer.addDimension(item)) },
+    { folder: 'hierarchies', keys: ['hierarchies'], loader: (raw) => addIfNamed(parseHierarchyDefinition(raw), (item) => layer.addHierarchy(item)) },
+    { folder: 'cubes', keys: ['cubes'], loader: (raw) => addIfNamed(parseCubeDefinition(raw), (item) => layer.addCube(item)) },
+    { folder: 'segments', keys: ['segments'], loader: (raw) => addIfNamed(parseSegmentDefinition(raw), (item) => layer.addSegment(item)) },
+    { folder: 'pre_aggregations', keys: ['pre_aggregations', 'preAggregations'], loader: (raw) => addIfNamed(parsePreAggregationDefinition(raw), (item) => layer.addPreAggregation(item)) },
   ];
 
-  for (const { folder, loader } of subdirs) {
+  for (const { folder, keys, loader } of subdirs) {
     const dir = join(semanticLayerDir, folder);
     if (!existsSync(dir)) continue;
     for (const filePath of collectYamlFiles(dir)) {
@@ -49,7 +49,7 @@ export function loadSemanticLayerFromDir(semanticLayerDir: string): SemanticLaye
         const content = readFileSync(filePath, 'utf-8');
         const raw = yaml.load(content) as Record<string, unknown>;
         if (raw && typeof raw === 'object') {
-          loader(raw);
+          for (const item of expandDefinitions(raw, keys)) loader(item);
         }
       } catch {
         // Skip malformed YAML files
@@ -76,17 +76,29 @@ export function loadSemanticLayerFromConfig(
 
       const pathLower = file.path.toLowerCase();
       if (pathLower.includes('/metrics/') || pathLower.includes('\\metrics\\')) {
-        layer.addMetric(parseMetricDefinition(raw));
+        for (const item of expandDefinitions(raw, ['metrics'])) {
+          addIfNamed(parseMetricDefinition(item), (parsed) => layer.addMetric(parsed));
+        }
       } else if (pathLower.includes('/dimensions/') || pathLower.includes('\\dimensions\\')) {
-        layer.addDimension(parseDimensionDefinition(raw));
+        for (const item of expandDefinitions(raw, ['dimensions'])) {
+          addIfNamed(parseDimensionDefinition(item), (parsed) => layer.addDimension(parsed));
+        }
       } else if (pathLower.includes('/hierarchies/') || pathLower.includes('\\hierarchies\\')) {
-        layer.addHierarchy(parseHierarchyDefinition(raw));
+        for (const item of expandDefinitions(raw, ['hierarchies'])) {
+          addIfNamed(parseHierarchyDefinition(item), (parsed) => layer.addHierarchy(parsed));
+        }
       } else if (pathLower.includes('/cubes/') || pathLower.includes('\\cubes\\')) {
-        layer.addCube(parseCubeDefinition(raw));
+        for (const item of expandDefinitions(raw, ['cubes'])) {
+          addIfNamed(parseCubeDefinition(item), (parsed) => layer.addCube(parsed));
+        }
       } else if (pathLower.includes('/segments/') || pathLower.includes('\\segments\\')) {
-        layer.addSegment(parseSegmentDefinition(raw));
+        for (const item of expandDefinitions(raw, ['segments'])) {
+          addIfNamed(parseSegmentDefinition(item), (parsed) => layer.addSegment(parsed));
+        }
       } else if (pathLower.includes('/pre_aggregations/') || pathLower.includes('\\pre_aggregations\\')) {
-        layer.addPreAggregation(parsePreAggregationDefinition(raw));
+        for (const item of expandDefinitions(raw, ['pre_aggregations', 'preAggregations'])) {
+          addIfNamed(parsePreAggregationDefinition(item), (parsed) => layer.addPreAggregation(parsed));
+        }
       }
     } catch {
       // Skip malformed files
@@ -94,6 +106,21 @@ export function loadSemanticLayerFromConfig(
   }
 
   return layer;
+}
+
+function expandDefinitions(raw: Record<string, unknown>, collectionKeys: string[]): Record<string, unknown>[] {
+  for (const key of collectionKeys) {
+    const collection = raw[key];
+    if (Array.isArray(collection)) {
+      return collection.filter((item): item is Record<string, unknown> => Boolean(item && typeof item === 'object' && !Array.isArray(item)));
+    }
+  }
+  if (typeof raw.name === 'string' && raw.name.trim().length > 0) return [raw];
+  return [];
+}
+
+function addIfNamed<T extends { name: string }>(item: T, add: (item: T) => void): void {
+  if (item.name.trim().length > 0) add(item);
 }
 
 function collectYamlFiles(dir: string): string[] {

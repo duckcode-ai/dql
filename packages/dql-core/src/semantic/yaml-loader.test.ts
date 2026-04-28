@@ -122,4 +122,53 @@ describe('loadSemanticLayerFromDir', () => {
     expect(layer.listDomains()).toEqual(['finance']);
     expect(layer.listTags()).toContain('finance');
   });
+
+  it('loads plural collection YAML files without creating blank wrapper definitions', () => {
+    const root = mkdtempSync(join(tmpdir(), 'dql-semantic-loader-'));
+    tempDirs.push(root);
+    const semanticDir = join(root, 'semantic-layer');
+
+    mkdirSync(join(semanticDir, 'metrics'), { recursive: true });
+    mkdirSync(join(semanticDir, 'dimensions'), { recursive: true });
+
+    writeFileSync(join(semanticDir, 'metrics', 'banking.yaml'), [
+      'metrics:',
+      '  - name: fraud_exposure',
+      '    label: Fraud Exposure',
+      '    description: Confirmed and review fraud exposure',
+      '    domain: risk',
+      '    sql: |',
+      '      SUM(fraud_amount)',
+      '    type: sum',
+      '    table: fraud_alerts',
+      '  - name: deposit_balance',
+      '    label: Deposit Balance',
+      '    description: Current deposit balances',
+      '    domain: deposits',
+      '    sql: |',
+      '      SUM(balance)',
+      '    type: sum',
+      '    table: deposits',
+      '',
+    ].join('\n'));
+
+    writeFileSync(join(semanticDir, 'dimensions', 'banking.yaml'), [
+      'dimensions:',
+      '  - name: region',
+      '    label: Region',
+      '    description: Bank operating region',
+      '    domain: banking',
+      '    sql: region',
+      '    type: string',
+      '    table: branches',
+      '',
+    ].join('\n'));
+
+    const layer = loadSemanticLayerFromDir(semanticDir);
+
+    expect(layer.listMetrics().map((metric) => metric.name).sort()).toEqual(['deposit_balance', 'fraud_exposure']);
+    expect(layer.listDimensions().map((dimension) => dimension.name)).toEqual(['region']);
+    expect(layer.getMetric('')).toBeUndefined();
+    expect(layer.getDimension('')).toBeUndefined();
+  });
 });

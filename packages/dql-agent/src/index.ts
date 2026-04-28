@@ -11,19 +11,36 @@
 import { join } from 'node:path';
 import { existsSync, readFileSync } from 'node:fs';
 import type { DQLManifest } from '@duckcodeailabs/dql-core';
-import { buildManifest } from '@duckcodeailabs/dql-core';
+import {
+  buildManifest,
+  loadProjectConfig,
+  resolveDbtManifestPath,
+  resolveSemanticLayerWithDiagnostics,
+} from '@duckcodeailabs/dql-core';
 import { KGStore } from './kg/sqlite-fts.js';
-import { buildKGFromManifest } from './kg/build.js';
+import { buildKGFromManifest, buildKGFromSemanticLayer } from './kg/build.js';
 import { loadSkills } from './skills/loader.js';
 import type { Skill } from './skills/loader.js';
+import type { KGEdge, KGNode } from './kg/types.js';
 
 export { KGStore } from './kg/sqlite-fts.js';
 export type { KGNode, KGEdge, KGNodeKind, KGSearchHit, KGFeedbackRow, KGSearchOptions } from './kg/types.js';
-export { buildKGFromManifest } from './kg/build.js';
+export { buildKGFromManifest, buildKGFromSemanticLayer } from './kg/build.js';
 export { loadSkills, parseSkill, buildSkillsPrompt } from './skills/loader.js';
 export type { Skill, SkillLoadResult } from './skills/loader.js';
 export { answer, parseProposal } from './answer-loop.js';
 export type { AgentAnswer, AgentCitation, AgentResultPayload, AnswerKind, AnswerLoopInput } from './answer-loop.js';
+export {
+  MemoryStore,
+  defaultMemoryPath,
+  ensureDefaultMemoryFiles,
+} from './memory/sqlite-memory.js';
+export type {
+  AgentMemory,
+  AgentMemoryInput,
+  AgentMemoryScope,
+  MemorySearchOptions,
+} from './memory/sqlite-memory.js';
 export {
   ClaudeProvider, OpenAIProvider, GeminiProvider, OllamaProvider,
   pickProvider, buildProvider,
@@ -56,7 +73,10 @@ export async function reindexProject(
   opts: ReindexOptions = {},
 ): Promise<{ nodes: number; edges: number; skills: number }> {
   const manifest = opts.manifest ?? loadManifest(projectRoot);
-  const { nodes, edges } = buildKGFromManifest(manifest);
+  const manifestGraph = buildKGFromManifest(manifest);
+  const semanticGraph = buildKGFromSemanticLayer(loadAgentSemanticLayer(projectRoot));
+  let nodes = [...manifestGraph.nodes, ...semanticGraph.nodes];
+  let edges = [...manifestGraph.edges, ...semanticGraph.edges];
 
   // Skills become KG nodes too so the agent can retrieve them.
   let skills: Skill[] = [];
@@ -74,6 +94,8 @@ export async function reindexProject(
       });
     }
   }
+
+  ({ nodes, edges } = dedupeGraph(nodes, edges));
 
   const kg = new KGStore(opts.kgPath ?? defaultKgPath(projectRoot));
   try {
@@ -109,5 +131,58 @@ function loadManifest(projectRoot: string): DQLManifest {
       // fall through
     }
   }
-  return buildManifest({ projectRoot });
+  return buildManifest({
+    projectRoot,
+    dbtManifestPath: resolveDbtManifestPath(projectRoot) ?? undefined,
+  });
+}
+
+function loadAgentSemanticLayer(projectRoot: string) {
+  const config = loadProjectConfig(projectRoot);
+  const semanticConfig = config.semanticLayer?.provider
+    ? config.semanticLayer as Parameters<typeof resolveSemanticLayerWithDiagnostics>[0]
+    : config.semanticLayer?.path
+      ? { provider: 'dql' as const, path: config.semanticLayer.path }
+      : undefined;
+  const configured = resolveSemanticLayerWithDiagnostics(semanticConfig, projectRoot).layer;
+  if (configured) return configured;
+
+  if (config.dbt?.projectDir) {
+    return resolveSemanticLayerWithDiagnostics({
+      provider: 'dbt',
+      projectPath: config.dbt.projectDir,
+    }, projectRoot).layer;
+  }
+  return undefined;
+}
+
+function dedupeGraph(nodes: KGNode[], edges: KGEdge[]): { nodes: KGNode[]; edges: KGEdge[] } {
+  const byId = new Map<string, KGNode>();
+  for (const node of nodes) {
+    const existing = byId.get(node.nodeId);
+    byId.set(node.nodeId, existing ? mergeNode(existing, node) : node);
+  }
+  const edgeKeys = new Set<string>();
+  const uniqueEdges: KGEdge[] = [];
+  for (const edge of edges) {
+    if (!byId.has(edge.src) || !byId.has(edge.dst)) continue;
+    const key = `${edge.src}\u0000${edge.dst}\u0000${edge.kind}`;
+    if (edgeKeys.has(key)) continue;
+    edgeKeys.add(key);
+    uniqueEdges.push(edge);
+  }
+  return { nodes: Array.from(byId.values()), edges: uniqueEdges };
+}
+
+function mergeNode(a: KGNode, b: KGNode): KGNode {
+  return {
+    ...a,
+    ...b,
+    description: b.description || a.description,
+    llmContext: [a.llmContext, b.llmContext].filter(Boolean).join('\n\n') || undefined,
+    tags: Array.from(new Set([...(a.tags ?? []), ...(b.tags ?? [])])),
+    examples: [...(a.examples ?? []), ...(b.examples ?? [])],
+    sourcePath: b.sourcePath ?? a.sourcePath,
+    gitSha: b.gitSha ?? a.gitSha,
+  };
 }

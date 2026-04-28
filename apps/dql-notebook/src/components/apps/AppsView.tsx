@@ -25,6 +25,8 @@ export function AppsView(): JSX.Element {
   const [ownerFilter, setOwnerFilter] = useState('');
   const [audienceFilter, setAudienceFilter] = useState('');
   const [statusFilter, setStatusFilter] = useState('');
+  const [storageFilter, setStorageFilter] = useState<'all' | 'mine' | 'shared' | 'template'>('all');
+  const [editMode, setEditMode] = useState(false);
 
   const refreshApps = async (openAppId?: string, dashboardId?: string | null) => {
     dispatch({ type: 'SET_APPS_LOADING', loading: true });
@@ -100,14 +102,31 @@ export function AppsView(): JSX.Element {
       if (ownerFilter && !(app.owners ?? []).includes(ownerFilter)) return false;
       if (audienceFilter && app.audience !== audienceFilter) return false;
       if (statusFilter && app.status !== statusFilter) return false;
+      if (storageFilter !== 'all' && (app.storage ?? 'shared') !== storageFilter) return false;
       return true;
     });
-  }, [state.apps, search, domainFilter, tagFilter, ownerFilter, audienceFilter, statusFilter]);
+  }, [state.apps, search, domainFilter, tagFilter, ownerFilter, audienceFilter, statusFilter, storageFilter]);
 
   const activeApp = useMemo(
     () => state.apps.find((a) => a.id === state.activeAppId) ?? null,
     [state.apps, state.activeAppId],
   );
+
+  const createDashboardTab = async () => {
+    if (!state.activeAppId) return;
+    const title = window.prompt('New App tab name');
+    if (!title?.trim()) return;
+    const result = await api.createAppDashboard(state.activeAppId, { title: title.trim() });
+    if (result.ok) {
+      setEditMode(true);
+      if (appDoc) setDashboardDoc({ app: appDoc.app, dashboard: result.dashboard });
+      dispatch({ type: 'OPEN_APP', appId: state.activeAppId, dashboardId: result.dashboard.id });
+      await refreshApps(state.activeAppId, result.dashboard.id);
+      dispatch({ type: 'OPEN_DASHBOARD', dashboardId: result.dashboard.id });
+    } else {
+      window.alert(result.error);
+    }
+  };
 
   if (state.appsLoading && state.apps.length === 0) {
     return <EmptyState message="Loading apps..." onCreate={() => setWizardOpen(true)} />;
@@ -161,6 +180,13 @@ export function AppsView(): JSX.Element {
                 <option value="empty">empty</option>
               </select>
             </div>
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 4 }}>
+              {(['all', 'mine', 'shared', 'template'] as const).map((value) => (
+                <button key={value} onClick={() => setStorageFilter(value)} style={filterButtonStyle(storageFilter === value)}>
+                  {value === 'all' ? 'All' : value === 'template' ? 'Templates' : value === 'mine' ? 'Mine' : 'Shared'}
+                </button>
+              ))}
+            </div>
           </div>
         </div>
         <div style={{ overflowY: 'auto', minHeight: 0, padding: '8px 0' }}>
@@ -188,6 +214,13 @@ export function AppsView(): JSX.Element {
             </div>
           </div>
           <PersonaSwitcher app={appDoc?.app ?? null} />
+          <div style={{ display: 'flex', border: '1px solid var(--border-color, rgba(0,0,0,0.12))', borderRadius: 6, overflow: 'hidden' }}>
+            <button onClick={() => setEditMode(false)} style={segmentButtonStyle(!editMode)}>View</button>
+            <button onClick={() => setEditMode(true)} style={segmentButtonStyle(editMode)}>Edit</button>
+          </div>
+          <button onClick={() => void createDashboardTab()} disabled={!state.activeAppId} style={ghostButtonStyle}>
+            + Add tab
+          </button>
         </header>
 
         {appDoc && appDoc.dashboards.length > 0 && (
@@ -205,7 +238,15 @@ export function AppsView(): JSX.Element {
           {loading ? (
             <EmptyState message="Loading dashboard..." />
           ) : dashboardDoc && state.activeAppId ? (
-            <DashboardRenderer appId={state.activeAppId} dashboard={dashboardDoc.dashboard} />
+            <DashboardRenderer
+              appId={state.activeAppId}
+              dashboard={dashboardDoc.dashboard}
+              editable={editMode || dashboardDoc.dashboard.layout.items.length === 0}
+              onDashboardChanged={(next) => {
+                setDashboardDoc((current) => current ? { ...current, dashboard: next } : current);
+                void refreshApps(state.activeAppId ?? undefined, next.id);
+              }}
+            />
           ) : appDoc && appDoc.dashboards.length === 0 ? (
             <EmptyState message="This App has no dashboards." hint="Create a dashboard from selected certified blocks." onCreate={() => setWizardOpen(true)} />
           ) : (
@@ -546,6 +587,31 @@ function tabStyle(active: boolean): CSSProperties {
     border: '1px solid var(--border-color, rgba(0,0,0,0.1))',
     borderRadius: 6,
     fontSize: 13,
+    cursor: 'pointer',
+  };
+}
+
+function segmentButtonStyle(active: boolean): CSSProperties {
+  return {
+    border: 'none',
+    borderRight: '1px solid var(--border-color, rgba(0,0,0,0.10))',
+    background: active ? 'var(--accent, #4f46e5)' : 'transparent',
+    color: active ? '#fff' : 'inherit',
+    padding: '6px 10px',
+    fontSize: 12,
+    fontWeight: active ? 700 : 500,
+    cursor: 'pointer',
+  };
+}
+
+function filterButtonStyle(active: boolean): CSSProperties {
+  return {
+    border: '1px solid var(--border-color, rgba(0,0,0,0.10))',
+    borderRadius: 5,
+    background: active ? 'var(--accent, #4f46e5)' : 'transparent',
+    color: active ? '#fff' : 'inherit',
+    padding: '5px 4px',
+    fontSize: 11,
     cursor: 'pointer',
   };
 }

@@ -197,7 +197,9 @@ export function LineageDAG() {
     dbt_model: true,
     dbt_source: true,
     block: true,
+    notebook: true,
     dashboard: true,
+    app: true,
     domain: true,
   });
   const [layoutMode, setLayoutMode] = useState<LayoutMode>('flow');
@@ -414,7 +416,9 @@ export function LineageDAG() {
           <FilterChip label="dbt Models" active={visibleTypes.dbt_model} color={NODE_TYPE_COLORS.dbt_model} onClick={() => setVisibleTypes((current) => ({ ...current, dbt_model: !current.dbt_model }))} />
           <FilterChip label="dbt Sources" active={visibleTypes.dbt_source} color={NODE_TYPE_COLORS.dbt_source} onClick={() => setVisibleTypes((current) => ({ ...current, dbt_source: !current.dbt_source }))} />
           <FilterChip label="DQL Blocks" active={visibleTypes.block} color={NODE_TYPE_COLORS.block} onClick={() => setVisibleTypes((current) => ({ ...current, block: !current.block }))} />
-          <FilterChip label="Notebooks" active={visibleTypes.dashboard} color={NODE_TYPE_COLORS.dashboard} onClick={() => setVisibleTypes((current) => ({ ...current, dashboard: !current.dashboard }))} />
+          <FilterChip label="Notebooks" active={visibleTypes.notebook} color={NODE_TYPE_COLORS.notebook} onClick={() => setVisibleTypes((current) => ({ ...current, notebook: !current.notebook }))} />
+          <FilterChip label="Dashboards" active={visibleTypes.dashboard} color={NODE_TYPE_COLORS.dashboard} onClick={() => setVisibleTypes((current) => ({ ...current, dashboard: !current.dashboard }))} />
+          <FilterChip label="Apps" active={visibleTypes.app} color={NODE_TYPE_COLORS.app} onClick={() => setVisibleTypes((current) => ({ ...current, app: !current.app }))} />
           <FilterChip label="Domains" active={visibleTypes.domain} color={NODE_TYPE_COLORS.domain} onClick={() => setVisibleTypes((current) => ({ ...current, domain: !current.domain }))} />
         </div>
 

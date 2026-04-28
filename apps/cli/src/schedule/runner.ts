@@ -181,6 +181,7 @@ export async function runAppDashboard(
     const semanticLayer = semantic.layer;
 
     for (const item of loadedDashboard.layout.items) {
+      if (!item.block) continue;
       const t0 = Date.now();
       const manifestBlock = resolveDashboardItemBlock(item, manifest.blocks);
       if (!manifestBlock) {
@@ -277,6 +278,7 @@ function resolveDashboardItemBlock(
   item: DashboardGridItem,
   blocks: Record<string, ManifestBlock>,
 ): ManifestBlock | null {
+  if (!item.block) return null;
   if (isBlockIdRef(item.block)) return blocks[item.block.blockId] ?? null;
   const normalized = item.block.ref.replace(/\\/g, '/');
   return Object.values(blocks).find((b) => b.filePath.replace(/\\/g, '/') === normalized) ?? null;

@@ -106,6 +106,12 @@ export interface ManifestBlock {
   llmContext?: string;
   examples?: Array<{ question: string; sql?: string }>;
   invariants?: string[];
+  businessOutcome?: string;
+  businessOwner?: string;
+  decisionUse?: string;
+  reviewCadence?: string;
+  businessRules?: string[];
+  caveats?: string[];
 }
 
 // ---- Notebooks ----
@@ -217,6 +223,12 @@ export interface ManifestApp {
   id: string;
   name: string;
   description?: string;
+  businessOutcome?: string;
+  businessOwner?: string;
+  decisionUse?: string;
+  reviewCadence?: string;
+  businessRules?: string[];
+  caveats?: string[];
   domain: string;
   owners: string[];
   tags: string[];
@@ -275,6 +287,12 @@ export interface ManifestDashboard {
   qualifiedId: string;
   title: string;
   description?: string;
+  businessOutcome?: string;
+  businessOwner?: string;
+  decisionUse?: string;
+  reviewCadence?: string;
+  businessRules?: string[];
+  caveats?: string[];
   domain?: string;
   tags: string[];
   /** Path relative to project root (e.g. "apps/growth-cxo/dashboards/weekly-overview.dqld"). */

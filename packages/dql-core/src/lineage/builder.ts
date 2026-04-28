@@ -79,6 +79,7 @@ export interface LineageDbtModelInput {
 
 export interface LineageDashboardInput {
   name: string;
+  kind?: 'dashboard' | 'notebook';
   blocks: string[];
   charts: string[];
   /** File path of the notebook */
@@ -316,12 +317,13 @@ export function buildLineageGraph(
 
   for (const dashboard of options.dashboards ?? []) {
     const dashboardId = `dashboard:${dashboard.name}`;
+    const nodeType = dashboard.kind ?? 'dashboard';
     graph.addNode({
       id: dashboardId,
-      type: 'dashboard',
+      type: nodeType,
       layer: 'consumption',
       name: dashboard.name,
-      metadata: { filePath: dashboard.filePath },
+      metadata: { filePath: dashboard.filePath, lineageKind: nodeType },
     });
     for (const blockName of dashboard.blocks) {
       if (!graph.getNode(`block:${blockName}`)) continue;
