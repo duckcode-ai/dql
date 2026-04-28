@@ -27,8 +27,8 @@ my-dql-project/
 - **`notebooks/`** — interactive analysis. Saved results live beside the
   notebook as `.run.json` (git-ignored).
 - **`semantic-layer/`** — metrics and dimensions authored locally. When you
-  run `dql sync dbt`, entries imported from a sibling dbt project are merged
-  here too.
+  configure dbt artifacts, DQL reads MetricFlow semantics from
+  `target/semantic_manifest.json` and keeps generated cache files under `.dql/`.
 - **`dashboards/`** — composed views that reference blocks.
 - **`data/`** — sample data for local exploration. Production projects usually
   query a warehouse instead.
@@ -46,7 +46,8 @@ my-team/
 ```
 
 `create-dql-app` and `dql init` both auto-detect the sibling and wire the
-config for you. Then `dql sync dbt` imports the manifest on demand.
+config for you. After `dbt build`, run `dql compile .`, `dql sync dbt .`, and
+`dql agent reindex` to refresh lineage, cache status, and the agent index.
 
 ## What gets committed
 

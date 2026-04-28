@@ -82,27 +82,30 @@ sqlite3 .dql/cache/agent-kg.sqlite \
 
 ## Step 2 — Pick (or stub) an LLM provider
 
-The agent supports four providers; pick whichever fits your security
-posture. **All four can coexist** — `pickProvider()` falls through in this
-order: `claude → openai → gemini → ollama`.
+Notebook and App chat use the provider configured in Settings. CLI agent
+commands can also read provider environment variables. Keep provider setup in
+one place for the UI; do not ask analysts to choose a model for every chat.
 
 | Provider | Env var(s) | Notes |
 |---|---|---|
-| Claude (Anthropic) | `ANTHROPIC_API_KEY` | Default model: `claude-opus-4-7`. |
 | OpenAI / compatible | `OPENAI_API_KEY`, optional `OPENAI_BASE_URL` | Default model: `gpt-4.1-mini`. Works with Azure OpenAI / vLLM by overriding `OPENAI_BASE_URL`. |
 | Gemini | `GEMINI_API_KEY` (or `GOOGLE_API_KEY`) | Default model: `gemini-2.5-pro`. System messages prepended to the first user turn. |
 | Ollama | `OLLAMA_BASE_URL` (default `http://127.0.0.1:11434`), `OLLAMA_MODEL` (default `llama3.1`) | Fully local; **prompts never leave the machine.** |
+| Custom OpenAI-compatible | `OPENAI_BASE_URL`, provider config in Settings | Use for Azure OpenAI, vLLM, LiteLLM, and compatible gateways. |
 
 For these tutorials, pick **one**:
 
 ```bash
-# Pick A: Claude
-export ANTHROPIC_API_KEY=sk-ant-…
+# Pick A: OpenAI-compatible
+export OPENAI_API_KEY=sk-...
 
 # Pick B: Local Ollama (no creds needed; install from https://ollama.com)
 ollama pull llama3.1
 # then `dql agent` calls go local automatically
 ```
+
+Claude Agent SDK and Claude Code are still available for MCP-oriented workflows
+and local experiments, but they are not the default notebook/App chat path.
 
 ---
 
@@ -294,11 +297,10 @@ That's how analysts find AI answers worth certifying — covered fully in
 Open `dql notebook`. Anywhere in a notebook, hit **+ Cell → Chat**. Type
 the same question:
 
-> **What you'll see (today):** the existing chat cell answers via the
-> Claude Agent SDK path that's been there since v1.0.3. Wiring the new
-> answer loop to also produce Certified/Uncertified badges in this cell
-> is a small follow-up — the engine is the same, the cell just doesn't
-> render the badge yet.
+> **What you'll see:** the chat cell uses the provider selected in Settings and
+> renders the same governed answer envelope as App and dashboard chat. Claude
+> Agent SDK / Claude Code remain MCP-oriented integration paths rather than the
+> default notebook provider picker.
 
 Tutorial 07 walks the full Slack experience where badges are visible.
 

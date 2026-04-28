@@ -54,13 +54,14 @@ Exits **1** on changes — scriptable like `git diff`.
 | Command | What it does |
 | --- | --- |
 | `dql semantic list\|validate\|query\|pull` | Semantic layer operations |
-| `dql sync dbt [path]` | Detect dbt manifest changes; update cache |
+| `dql sync dbt [path]` | Verify configured dbt artifacts and update local cache status |
 | `dql lineage [block] [path]` | Answer-layer lineage analysis |
 
 ### Migration
 
 | Command | What it does |
 | --- | --- |
+| `dql import sql <path>` | Preview SQL files/folders as draft Block Studio import candidates |
 | `dql migrate <source>` | Scaffold from looker, tableau, dbt, metabase, or raw-sql |
 | `dql migrate format` | Rewrite every `.dql` and `.dqlnb` in the project in canonical form |
 | `dql migrate format --check` | Dry run; exits 1 if anything would change |

@@ -14,8 +14,10 @@ query it immediately. No credentials, no configuration.
 ## Do I need dbt?
 
 No. DQL works standalone. But if you already use dbt, `create-dql-app`
-auto-detects a sibling dbt project and `dql sync dbt` imports your manifest,
-metrics, and lineage. See [Import a dbt project](./import-dbt.md).
+auto-detects a sibling dbt project. Run `dbt build`, then `dql compile .`,
+`dql sync dbt .`, and `dql agent reindex` to refresh manifest metadata,
+semantic metrics, lineage, and the agent index. See
+[Import a dbt project](./import-dbt.md).
 
 ## How is this different from a Jupyter notebook?
 
@@ -56,8 +58,9 @@ configured, `dql test` falls back to structural checks only.
 
 ## What's **not** in the open-source repo?
 
-Hosted workspaces, column-level lineage, scheduled runs, alerting, regulatory
-governance packs, and AI/agentic block generation. See [Compatibility](../reference/compatibility.md).
+Hosted multi-user workspaces, governed secrets, audit logs, organization
+memory, approval workflows, managed alerting, regulatory governance packs, and
+permissions-aware team retrieval. See [Compatibility](../reference/compatibility.md).
 
 ## Where do I report bugs or request features?
 

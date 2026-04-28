@@ -6,12 +6,14 @@ alongside dbt-level lineage.
 
 ## Enable
 
-```yaml
-# cdql.yaml
-openlineage:
-  enabled: true
-  url: http://marquez.internal:5000
-  namespace: analytics
+```json
+{
+  "openlineage": {
+    "enabled": true,
+    "url": "http://marquez.internal:5000",
+    "namespace": "analytics"
+  }
+}
 ```
 
 Or via environment:
@@ -53,7 +55,7 @@ Verified against:
 - Block runs
 - Notebook cell runs (one event per cell)
 - Dashboard compilations
-- `dql sync dbt` (with dbt's own OL output, so you get one graph)
+- dbt-backed DQL compile/sync metadata, when dbt artifacts are configured
 
 ## Schema version
 

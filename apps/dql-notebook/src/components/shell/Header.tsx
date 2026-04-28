@@ -1,5 +1,4 @@
 import React, { useState, useRef, useEffect, useCallback } from 'react';
-import { SegmentedControl } from '@duckcodeailabs/dql-ui';
 import { useNotebook } from '../../store/NotebookStore';
 import { themes } from '../../themes/notebook-theme';
 import type { Theme } from '../../themes/notebook-theme';
@@ -8,7 +7,6 @@ import { serializeDqlNotebook } from '../../utils/parse-workbook';
 import { useQueryExecution } from '../../hooks/useQueryExecution';
 import { downloadDashboard } from '../../utils/export-dashboard';
 import { setBlockName } from '../../utils/block-studio';
-import type { AppMode } from '../../store/types';
 
 function DQLLogo({ t }: { t: Theme }) {
   return (
@@ -358,24 +356,8 @@ export function Header() {
       {/* Spacer */}
       <div style={{ flex: 1 }} />
 
-      {/* v1.3.3 Hex handoff — Notebook / App / Reader mode toggle.
-          Internal 'studio' value surfaces as "Notebook" in the UI. */}
-      <SegmentedControl<AppMode>
-        options={[
-          { value: 'studio', label: 'Notebook' },
-          { value: 'app', label: 'App' },
-          { value: 'reader', label: 'Reader' },
-        ]}
-        value={state.appMode}
-        onChange={(mode) => dispatch({ type: 'SET_APP_MODE', mode })}
-        size="sm"
-        ariaLabel="View mode"
-      />
-
-      {/* Spacer */}
-      <div style={{ flex: 1 }} />
-
-      {/* Right: actions. v1.3 Track 5 — Run All hidden in App mode. */}
+      {/* Right: actions. Apps are opened from the sidebar, so the header stays
+          focused on the active authoring surface. */}
       <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
         {state.appMode === 'studio' && (
           <>
@@ -403,33 +385,6 @@ export function Header() {
               </svg>
               Run all
             </button>
-          </>
-        )}
-
-        {/* v1.3 Track 11 — Publish dashboard (App mode only). Emits the same
-            standalone HTML the Studio Export dropdown produces; pairs with the
-            Luna-token parity shipped in the html-emitter. */}
-        {state.appMode === 'app' && (
-          <>
-            <button
-              onClick={() => downloadDashboard(state.notebookTitle || 'dashboard', state.cells)}
-              disabled={!state.activeFile}
-              title="Publish dashboard (standalone HTML)"
-              style={{
-                ...btnBase,
-                background: t.accent,
-                color: '#ffffff',
-                border: `1px solid ${t.accent}`,
-                opacity: !state.activeFile ? 0.4 : 1,
-              }}
-            >
-              <svg width="11" height="11" viewBox="0 0 16 16" fill="currentColor">
-                <path d="M2.75 14A1.75 1.75 0 0 1 1 12.25v-2.5a.75.75 0 0 1 1.5 0v2.5c0 .138.112.25.25.25h10.5a.25.25 0 0 0 .25-.25v-2.5a.75.75 0 0 1 1.5 0v2.5A1.75 1.75 0 0 1 13.25 14Z" />
-                <path d="M7.25 7.689V2a.75.75 0 0 1 1.5 0v5.689l1.97-1.97a.749.749 0 1 1 1.06 1.06l-3.25 3.25a.749.749 0 0 1-1.06 0L4.22 6.779a.749.749 0 1 1 1.06-1.06l1.97 1.97Z" />
-              </svg>
-              Publish
-            </button>
-            <div style={{ width: 1, height: 20, background: t.headerBorder }} />
           </>
         )}
 

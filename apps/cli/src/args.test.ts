@@ -33,4 +33,13 @@ describe('parseArgs', () => {
     expect(parsed.file).toBe('demo');
     expect(parsed.flags.connection).toBe('duckdb');
   });
+
+  it('parses sql import command arguments', () => {
+    const parsed = parseArgs(['import', 'sql', './queries', '--domain', 'finance', '--owner', 'analytics']);
+    expect(parsed.command).toBe('import');
+    expect(parsed.file).toBe('sql');
+    expect(parsed.rest).toEqual(['./queries']);
+    expect(parsed.flags.domain).toBe('finance');
+    expect(parsed.flags.owner).toBe('analytics');
+  });
 });

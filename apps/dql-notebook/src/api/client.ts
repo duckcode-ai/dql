@@ -20,6 +20,8 @@ import type {
   BlockStudioOpenPayload,
   BlockStudioPreview,
   BlockStudioValidation,
+  BlockStudioImportSession,
+  BlockStudioImportCandidate,
   AppSummary,
   ActivePersona,
 } from '../store/types';
@@ -480,12 +482,59 @@ export const api = {
       description: string;
       owner: string;
       tags: string[];
+      sourceKind?: string;
+      sourcePath?: string;
+      importId?: string;
+      candidateId?: string;
+      lineage?: string[];
     };
   }): Promise<BlockStudioOpenPayload> {
     return request<BlockStudioOpenPayload>('/api/block-studio/save', {
       method: 'POST',
       body: JSON.stringify(payload),
     });
+  },
+
+  async previewBlockStudioImport(payload: {
+    path: string;
+    sourceKind?: 'raw-sql' | BlockStudioImportCandidate['sourceKind'];
+    domain?: string;
+    owner?: string;
+    tags?: string[];
+  }): Promise<BlockStudioImportSession> {
+    return request<BlockStudioImportSession>('/api/block-studio/import/preview', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    });
+  },
+
+  async getBlockStudioImport(importId: string): Promise<BlockStudioImportSession> {
+    return request<BlockStudioImportSession>(`/api/block-studio/imports/${encodeURIComponent(importId)}`);
+  },
+
+  async updateBlockStudioImportCandidate(
+    importId: string,
+    candidateId: string,
+    patch: Partial<Pick<BlockStudioImportCandidate, 'name' | 'domain' | 'description' | 'owner' | 'tags' | 'sql' | 'reviewStatus'>>,
+  ): Promise<BlockStudioImportCandidate> {
+    return request<BlockStudioImportCandidate>(
+      `/api/block-studio/imports/${encodeURIComponent(importId)}/candidates/${encodeURIComponent(candidateId)}`,
+      { method: 'PATCH', body: JSON.stringify(patch) },
+    );
+  },
+
+  async runBlockStudioImportCandidate(importId: string, candidateId: string): Promise<BlockStudioImportCandidate> {
+    return request<BlockStudioImportCandidate>(
+      `/api/block-studio/imports/${encodeURIComponent(importId)}/candidates/${encodeURIComponent(candidateId)}/run`,
+      { method: 'POST' },
+    );
+  },
+
+  async saveBlockStudioImportCandidate(importId: string, candidateId: string): Promise<{ candidate: BlockStudioImportCandidate; block: BlockStudioOpenPayload }> {
+    return request<{ candidate: BlockStudioImportCandidate; block: BlockStudioOpenPayload }>(
+      `/api/block-studio/imports/${encodeURIComponent(importId)}/candidates/${encodeURIComponent(candidateId)}/save`,
+      { method: 'POST' },
+    );
   },
 
   async saveAsBlock(payload: {

@@ -1,5 +1,5 @@
-import { readdirSync, readFileSync, existsSync } from 'node:fs';
-import { join, extname, resolve } from 'node:path';
+import { readdirSync, readFileSync, existsSync, statSync } from 'node:fs';
+import { dirname, extname, join, relative, resolve } from 'node:path';
 import { Parser, analyze, loadSemanticLayerFromDir, type SemanticLayer, type Diagnostic as CoreDiagnostic } from '@duckcodeailabs/dql-core';
 import type { CLIFlags } from '../args.js';
 
@@ -10,8 +10,78 @@ interface Diagnostic {
   line?: number;
 }
 
+interface ValidationFile {
+  filePath: string;
+  relativePath: string;
+}
+
+function normalizePath(path: string): string {
+  return path.replaceAll('\\', '/');
+}
+
+function findProjectRoot(startPath: string): string {
+  let current = existsSync(startPath) && statSync(startPath).isFile() ? dirname(startPath) : startPath;
+
+  while (true) {
+    if (existsSync(join(current, 'dql.config.json')) || existsSync(join(current, 'blocks')) || existsSync(join(current, 'semantic-layer'))) {
+      return current;
+    }
+    const parent = dirname(current);
+    if (parent === current) return startPath;
+    current = parent;
+  }
+}
+
+function collectDqlFilesFromDir(dirPath: string, projectRoot: string): ValidationFile[] {
+  if (!existsSync(dirPath)) return [];
+
+  const files: ValidationFile[] = [];
+  for (const entry of readdirSync(dirPath, { withFileTypes: true })) {
+    const entryPath = join(dirPath, entry.name);
+    if (entry.isDirectory()) {
+      files.push(...collectDqlFilesFromDir(entryPath, projectRoot));
+    } else if (entry.isFile() && extname(entry.name) === '.dql') {
+      files.push({
+        filePath: entryPath,
+        relativePath: normalizePath(relative(projectRoot, entryPath)),
+      });
+    }
+  }
+  return files;
+}
+
+function collectValidationFiles(targetPath: string | null): { projectRoot: string; files: ValidationFile[] } {
+  const target = resolve(targetPath ?? '.');
+  const projectRoot = findProjectRoot(target);
+
+  if (existsSync(target)) {
+    const targetStat = statSync(target);
+    if (targetStat.isFile()) {
+      return {
+        projectRoot,
+        files: extname(target) === '.dql'
+          ? [{ filePath: target, relativePath: normalizePath(relative(projectRoot, target)) }]
+          : [],
+      };
+    }
+
+    if (targetStat.isDirectory() && target !== projectRoot) {
+      return {
+        projectRoot,
+        files: collectDqlFilesFromDir(target, projectRoot),
+      };
+    }
+  }
+
+  const dirs = ['blocks', 'dashboards', 'workbooks'];
+  return {
+    projectRoot,
+    files: dirs.flatMap((dir) => collectDqlFilesFromDir(join(projectRoot, dir), projectRoot)),
+  };
+}
+
 export async function runValidate(path: string | null, flags: CLIFlags): Promise<void> {
-  const projectRoot = resolve(path ?? '.');
+  const { projectRoot, files } = collectValidationFiles(path);
   const diagnostics: Diagnostic[] = [];
 
   // Load semantic layer if present
@@ -29,75 +99,62 @@ export async function runValidate(path: string | null, flags: CLIFlags): Promise
     }
   }
 
-  // Scan all .dql files in known directories
-  const dirs = ['blocks', 'dashboards', 'workbooks'];
-  let fileCount = 0;
+  for (const { filePath, relativePath } of files) {
+    try {
+      const source = readFileSync(filePath, 'utf-8');
+      const parser = new Parser(source, relativePath);
+      const ast = parser.parse();
 
-  for (const dir of dirs) {
-    const dirPath = join(projectRoot, dir);
-    if (!existsSync(dirPath)) continue;
-
-    for (const entry of readdirSync(dirPath, { withFileTypes: true })) {
-      if (!entry.isFile() || extname(entry.name) !== '.dql') continue;
-      const filePath = join(dirPath, entry.name);
-      const relativePath = `${dir}/${entry.name}`;
-      fileCount++;
-
+      // Run semantic analysis
       try {
-        const source = readFileSync(filePath, 'utf-8');
-        const parser = new Parser(source, relativePath);
-        const ast = parser.parse();
-
-        // Run semantic analysis
-        try {
-          const diags: CoreDiagnostic[] = analyze(ast);
-          for (const diag of diags) {
-            diagnostics.push({
-              file: relativePath,
-              severity: diag.severity === 'error' ? 'error' : 'warning',
-              message: diag.message,
-              line: diag.span?.start?.line,
-            });
-          }
-        } catch {
-          // analyze may throw on some inputs
+        const diags: CoreDiagnostic[] = analyze(ast);
+        for (const diag of diags) {
+          diagnostics.push({
+            file: relativePath,
+            severity: diag.severity === 'error' ? 'error' : 'warning',
+            message: diag.message,
+            line: diag.span?.start?.line,
+          });
         }
+      } catch {
+        // analyze may throw on some inputs
+      }
 
-        // Check semantic block metric references
-        for (const stmt of ast.statements) {
-          if ((stmt as any).kind !== 'BlockDecl') continue;
-          const block = stmt as any;
-          if (block.blockType === 'semantic' && block.metricRef) {
-            if (semanticLayer) {
-              const composed = semanticLayer.composeQuery({
-                metrics: [block.metricRef],
-                dimensions: [],
-              });
-              if (!composed) {
-                diagnostics.push({
-                  file: relativePath,
-                  severity: 'error',
-                  message: `Metric "${block.metricRef}" referenced in block "${block.name}" not found in semantic layer`,
-                });
-              }
-            } else {
+      // Check semantic block metric references
+      for (const stmt of ast.statements) {
+        if ((stmt as any).kind !== 'BlockDecl') continue;
+        const block = stmt as any;
+        if (block.blockType === 'semantic' && block.metricRef) {
+          if (semanticLayer) {
+            const composed = semanticLayer.composeQuery({
+              metrics: [block.metricRef],
+              dimensions: [],
+            });
+            if (!composed) {
               diagnostics.push({
                 file: relativePath,
-                severity: 'warning',
-                message: `Semantic block "${block.name}" references metric "${block.metricRef}" but no semantic-layer/ directory exists`,
+                severity: 'error',
+                message: `Metric "${block.metricRef}" referenced in block "${block.name}" not found in semantic layer`,
               });
             }
+          } else {
+            diagnostics.push({
+              file: relativePath,
+              severity: 'warning',
+              message: `Semantic block "${block.name}" references metric "${block.metricRef}" but no semantic-layer/ directory exists`,
+            });
           }
         }
-      } catch (err) {
-        diagnostics.push({
-          file: relativePath,
-          severity: 'error',
-          message: `Parse error: ${err instanceof Error ? err.message : String(err)}`,
-        });
       }
+    } catch (err) {
+      diagnostics.push({
+        file: relativePath,
+        severity: 'error',
+        message: `Parse error: ${err instanceof Error ? err.message : String(err)}`,
+      });
     }
   }
+  const fileCount = files.length;
 
   // Output
   const errors = diagnostics.filter((d) => d.severity === 'error');

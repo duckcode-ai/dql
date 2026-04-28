@@ -89,6 +89,14 @@ import {
   syncSemanticImport,
 } from './semantic-import.js';
 import {
+  createBlockStudioImportSession,
+  loadBlockStudioImportSession,
+  readBlockStudioImportCandidate,
+  updateBlockStudioImportCandidate,
+  writeBlockStudioImportCandidate,
+  type BlockStudioImportCandidate,
+} from './block-studio-import.js';
+import {
   MetricFlowUnavailableError,
   compileMetricFlowQuery,
   hasDbtSemanticManifest,
@@ -287,6 +295,68 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
       } catch { /* dir not watchable */ }
     }
   }
+
+  const validateImportCandidate = (candidate: BlockStudioImportCandidate): BlockStudioImportCandidate => ({
+    ...candidate,
+    validation: validateBlockStudioSource(candidate.dqlSource, semanticLayer),
+  });
+
+  const runBlockStudioPreviewSource = async (
+    source: string,
+    targetConnection: ConnectionConfig = connection,
+  ): Promise<{
+    sql: string;
+    result: ReturnType<typeof normalizeQueryResult>;
+    chartConfig: { chart?: string; x?: string; y?: string; color?: string; title?: string } | null;
+  }> => {
+    let tableMapping: Record<string, string> | undefined;
+    if (semanticLayer) {
+      try {
+        const tablesResult = await executor.executeQuery(
+          `SELECT table_schema, table_name
+           FROM information_schema.tables
+           WHERE table_schema NOT IN ('information_schema', 'pg_catalog')`,
+          [], {}, targetConnection,
+        );
+        tableMapping = buildSemanticTableMapping(semanticLayer, tablesResult.rows);
+      } catch {
+        tableMapping = undefined;
+      }
+    }
+    const semanticCompose = semanticLayer
+      ? composeSemanticBlockSql(source, semanticLayer, {
+          driver: targetConnection.driver,
+          tableMapping,
+          projectRoot,
+          projectConfig,
+          detectedProvider: semanticDetectedProvider,
+        })
+      : null;
+    const validation = validateBlockStudioSource(source, semanticLayer);
+    const executableSql = semanticCompose?.sql ?? validation.executableSql;
+    if (!executableSql) {
+      const message = semanticCompose?.diagnostics.find((item) => item.severity === 'error')?.message
+        ?? validation.diagnostics.find((item) => item.severity === 'error')?.message
+        ?? 'No executable SQL found in block source.';
+      throw new Error(message);
+    }
+    const plan = buildExecutionPlan(
+      { id: 'block-studio', type: 'dql', source, title: 'Block Studio' },
+      { semanticLayer, driver: targetConnection.driver },
+    );
+    const sql = resolveProjectRelativeSqlPaths(semanticCompose?.sql ?? plan?.sql ?? executableSql, projectRoot, projectConfig.dataDir);
+    const result = await executor.executeQuery(
+      sql,
+      plan?.sqlParams ?? [],
+      runtimeVariables(plan?.variables ?? {}),
+      targetConnection,
+    );
+    return {
+      sql: plan?.sql ?? executableSql,
+      result: normalizeQueryResult(result),
+      chartConfig: plan?.chartConfig ?? validation.chartConfig ?? null,
+    };
+  };
 
   const server = createServer(async (req, res) => {
     const requestUrl = req.url || '/';
@@ -1366,6 +1436,114 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
       return;
     }
 
+    if (req.method === 'POST' && path === '/api/block-studio/import/preview') {
+      try {
+        const body = await readJSON(req);
+        const inputPath = typeof body.path === 'string' ? body.path : '';
+        const session = createBlockStudioImportSession(projectRoot, {
+          inputPath,
+          sourceKind: typeof body.sourceKind === 'string' ? body.sourceKind : 'raw-sql',
+          domain: typeof body.domain === 'string' ? body.domain : undefined,
+          owner: typeof body.owner === 'string' ? body.owner : undefined,
+          tags: Array.isArray(body.tags) ? body.tags.map(String) : undefined,
+        });
+        const candidates = session.candidates.map(validateImportCandidate);
+        const validatedSession = { ...session, candidates };
+        for (const candidate of candidates) {
+          writeBlockStudioImportCandidate(projectRoot, session.id, candidate);
+        }
+        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON(validatedSession));
+      } catch (error) {
+        res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({ error: error instanceof Error ? error.message : String(error) }));
+      }
+      return;
+    }
+
+    const importPathMatch = path.match(/^\/api\/block-studio\/imports\/([^/]+)(?:\/candidates\/([^/]+)(?:\/(run|save))?)?$/);
+    if (importPathMatch) {
+      const importId = decodeURIComponent(importPathMatch[1]);
+      const candidateId = importPathMatch[2] ? decodeURIComponent(importPathMatch[2]) : null;
+      const action = importPathMatch[3] ?? null;
+      try {
+        if (req.method === 'GET' && !candidateId) {
+          const session = loadBlockStudioImportSession(projectRoot, importId);
+          res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+          res.end(serializeJSON(session));
+          return;
+        }
+
+        if (req.method === 'PATCH' && candidateId && !action) {
+          const body = await readJSON(req);
+          const reviewStatus = typeof body.reviewStatus === 'string' && ['draft', 'saved', 'rejected'].includes(body.reviewStatus)
+            ? body.reviewStatus as BlockStudioImportCandidate['reviewStatus']
+            : undefined;
+          const candidate = updateBlockStudioImportCandidate(projectRoot, importId, candidateId, {
+            name: typeof body.name === 'string' ? body.name : undefined,
+            domain: typeof body.domain === 'string' ? body.domain : undefined,
+            description: typeof body.description === 'string' ? body.description : undefined,
+            owner: typeof body.owner === 'string' ? body.owner : undefined,
+            tags: Array.isArray(body.tags) ? body.tags.map(String) : undefined,
+            sql: typeof body.sql === 'string' ? body.sql : undefined,
+            reviewStatus,
+          });
+          const validated = validateImportCandidate(candidate);
+          writeBlockStudioImportCandidate(projectRoot, importId, validated);
+          res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+          res.end(serializeJSON(validated));
+          return;
+        }
+
+        if (req.method === 'POST' && candidateId && action === 'run') {
+          const candidate = readBlockStudioImportCandidate(projectRoot, importId, candidateId);
+          const preview = await runBlockStudioPreviewSource(candidate.dqlSource);
+          const next = { ...candidate, preview, validation: validateBlockStudioSource(candidate.dqlSource, semanticLayer) };
+          writeBlockStudioImportCandidate(projectRoot, importId, next);
+          res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+          res.end(serializeJSON(next));
+          return;
+        }
+
+        if (req.method === 'POST' && candidateId && action === 'save') {
+          const candidate = readBlockStudioImportCandidate(projectRoot, importId, candidateId);
+          const savedPath = saveBlockStudioArtifacts(projectRoot, {
+            source: candidate.dqlSource,
+            name: candidate.name,
+            domain: candidate.domain,
+            description: candidate.description,
+            owner: candidate.owner,
+            tags: candidate.tags,
+            lineage: candidate.lineage.sourceTables,
+            importMeta: {
+              importId,
+              candidateId,
+              sourceKind: candidate.sourceKind,
+              sourcePath: candidate.sourcePath,
+            },
+          });
+          const next = { ...candidate, reviewStatus: 'saved' as const, savedPath };
+          writeBlockStudioImportCandidate(projectRoot, importId, next);
+          const payload = openBlockStudioDocument(projectRoot, savedPath, semanticLayer);
+          res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+          res.end(serializeJSON({ candidate: next, block: payload }));
+          return;
+        }
+
+        res.writeHead(405, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({ error: 'Unsupported import operation.' }));
+      } catch (error) {
+        if (error instanceof Error && error.message === 'BLOCK_EXISTS') {
+          res.writeHead(409, { 'Content-Type': 'application/json; charset=utf-8' });
+          res.end(serializeJSON({ error: 'Block already exists' }));
+          return;
+        }
+        res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({ error: error instanceof Error ? error.message : String(error) }));
+      }
+      return;
+    }
+
     if (req.method === 'GET' && path === '/api/block-studio/catalog') {
       try {
         const cfg = loadProjectConfig(projectRoot) as any;
@@ -1431,56 +1609,9 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
         const body = await readJSON(req);
         const source = typeof body.source === 'string' ? body.source : '';
         const targetConnection = isConnectionConfig(body.connection) ? body.connection : connection;
-        let tableMapping: Record<string, string> | undefined;
-        if (semanticLayer) {
-          try {
-            const tablesResult = await executor.executeQuery(
-              `SELECT table_schema, table_name
-               FROM information_schema.tables
-               WHERE table_schema NOT IN ('information_schema', 'pg_catalog')`,
-              [], {}, targetConnection,
-            );
-            tableMapping = buildSemanticTableMapping(semanticLayer, tablesResult.rows);
-          } catch {
-            tableMapping = undefined;
-          }
-        }
-        const semanticCompose = semanticLayer
-          ? composeSemanticBlockSql(source, semanticLayer, {
-              driver: targetConnection.driver,
-              tableMapping,
-              projectRoot,
-              projectConfig,
-              detectedProvider: semanticDetectedProvider,
-            })
-          : null;
-        const validation = validateBlockStudioSource(source, semanticLayer);
-        const executableSql = semanticCompose?.sql ?? validation.executableSql;
-        if (!executableSql) {
-          res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
-          const message = semanticCompose?.diagnostics.find((item) => item.severity === 'error')?.message
-            ?? validation.diagnostics.find((item) => item.severity === 'error')?.message
-            ?? 'No executable SQL found in block source.';
-          res.end(serializeJSON({ error: message, diagnostics: validation.diagnostics }));
-          return;
-        }
-        const plan = buildExecutionPlan(
-          { id: 'block-studio', type: 'dql', source, title: 'Block Studio' },
-          { semanticLayer, driver: targetConnection.driver },
-        );
-        const sql = resolveProjectRelativeSqlPaths(semanticCompose?.sql ?? plan?.sql ?? executableSql, projectRoot, projectConfig.dataDir);
-        const result = await executor.executeQuery(
-          sql,
-          plan?.sqlParams ?? [],
-          runtimeVariables(plan?.variables ?? {}),
-          targetConnection,
-        );
+        const preview = await runBlockStudioPreviewSource(source, targetConnection);
         res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
-        res.end(serializeJSON({
-          sql: plan?.sql ?? executableSql,
-          result: normalizeQueryResult(result),
-          chartConfig: plan?.chartConfig ?? validation.chartConfig ?? null,
-        }));
+        res.end(serializeJSON(preview));
       } catch (error) {
         res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' });
         res.end(serializeJSON({ error: error instanceof Error ? error.message : String(error) }));
@@ -1495,11 +1626,16 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
         const metadata = body.metadata && typeof body.metadata === 'object'
           ? body.metadata as {
               name?: string;
-              domain?: string;
-              description?: string;
-              owner?: string;
-              tags?: string[];
-            }
+            domain?: string;
+            description?: string;
+            owner?: string;
+            tags?: string[];
+            sourceKind?: string;
+            sourcePath?: string;
+            importId?: string;
+            candidateId?: string;
+            lineage?: string[];
+          }
           : {};
         if (!source.trim()) {
           res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
@@ -1519,6 +1655,15 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           description: metadata.description,
           owner: metadata.owner,
           tags: Array.isArray(metadata.tags) ? metadata.tags.map(String) : [],
+          lineage: Array.isArray(metadata.lineage) ? metadata.lineage.map(String) : undefined,
+          importMeta: metadata.sourceKind || metadata.sourcePath || metadata.importId || metadata.candidateId
+            ? {
+                importId: metadata.importId,
+                candidateId: metadata.candidateId,
+                sourceKind: metadata.sourceKind,
+                sourcePath: metadata.sourcePath,
+              }
+            : undefined,
         });
         const payload = openBlockStudioDocument(projectRoot, savedPath, semanticLayer);
         res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
@@ -4140,6 +4285,13 @@ function saveBlockStudioArtifacts(
     description?: string;
     owner?: string;
     tags?: string[];
+    lineage?: string[];
+    importMeta?: {
+      importId?: string;
+      candidateId?: string;
+      sourceKind?: string;
+      sourcePath?: string;
+    };
   },
 ): string {
   const slug = options.name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '') || 'block';
@@ -4167,6 +4319,8 @@ function saveBlockStudioArtifacts(
     tags: options.tags,
     provider: 'dql',
     content: options.source,
+    lineage: options.lineage,
+    importMeta: options.importMeta,
   });
 
   if (previousPath && previousPath !== targetRelativePath) {
@@ -4597,6 +4751,12 @@ function writeBlockCompanionFile(
     semanticDimensions?: string[];
     gitMetadata?: BlockGitMetadata | null;
     gitPath?: string;
+    importMeta?: {
+      importId?: string;
+      candidateId?: string;
+      sourceKind?: string;
+      sourcePath?: string;
+    };
   },
 ): string {
   const extractedRefs = extractSemanticReferenceNames(options.content);
@@ -4650,6 +4810,13 @@ function writeBlockCompanionFile(
     if (options.gitMetadata?.repo) lines.push(`  repo: ${yamlScalar(options.gitMetadata.repo)}`);
     if (options.gitMetadata?.branch) lines.push(`  branch: ${yamlScalar(options.gitMetadata.branch)}`);
     if (options.gitPath) lines.push(`  path: ${yamlScalar(options.gitPath)}`);
+  }
+  if (options.importMeta) {
+    lines.push('import:');
+    if (options.importMeta.importId) lines.push(`  importId: ${yamlScalar(options.importMeta.importId)}`);
+    if (options.importMeta.candidateId) lines.push(`  candidateId: ${yamlScalar(options.importMeta.candidateId)}`);
+    if (options.importMeta.sourceKind) lines.push(`  sourceKind: ${yamlScalar(options.importMeta.sourceKind)}`);
+    if (options.importMeta.sourcePath) lines.push(`  sourcePath: ${yamlScalar(options.importMeta.sourcePath)}`);
   }
   lines.push('reviewStatus: draft');
   writeFileSync(companionPath, lines.join('\n') + '\n', 'utf-8');

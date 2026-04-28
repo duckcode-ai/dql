@@ -5,7 +5,8 @@
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue)](./LICENSE)
 [![Node](https://img.shields.io/badge/node-18%20%7C%2020%20%7C%2022-green)](https://nodejs.org)
 
-**Analytics notebooks on your dbt models.** Git-native. Local-first. Open source.
+**A local-first dbt analytics workspace.** Git-native. Certified blocks, Apps,
+lineage, and governed agent answers run on your laptop.
 
 DQL sits between **dbt** (modeling) and your BI tool (reporting). Every analytics answer — SQL, chart, params, tests, owner — lives in a single `.dql` file tracked in git. No more query sprawl, no more broken charts, no more lost work.
 
@@ -23,7 +24,7 @@ DQL sits between **dbt** (modeling) and your BI tool (reporting). Every analytic
 
 ![Lineage DAG](./docs/media/lineage.gif)
 
-**AI chat + provider setup** — configure Claude, OpenAI, Gemini, local Ollama, Slack, and schedule delivery keys from one Settings surface; missing keys stay optional until selected.
+**AI chat + provider setup** — configure OpenAI, Gemini, local Ollama, custom OpenAI-compatible endpoints, Slack, and schedule delivery keys from one Settings surface; missing keys stay optional until selected.
 
 ![AI provider settings](./docs/media/agent.gif)
 
@@ -61,7 +62,21 @@ block, commit.
 
 Already have a **dbt project**? Run `create-dql-app` next to it — the
 scaffolder auto-detects `dbt_project.yml` as a sibling and wires
-`dql.config.json` accordingly. Then `dql sync dbt` imports your manifest.
+`dql.config.json` accordingly. Run `dbt build`, then `dql compile` and
+`dql agent reindex`; `dql sync dbt` verifies the resolved dbt artifacts and
+cache status.
+
+## Official demos
+
+- **Acme Bank** — bundled governed workflow demo for Apps, personas, business
+  outcomes, agent answers, and local schedules.
+- **Jaffle Shop DQL** — dbt/MetricFlow demo for manifest ingestion, semantic
+  metrics, lineage, certified blocks, and agent routing:
+  [github.com/duckcode-ai/jaffle-shop-dql](https://github.com/duckcode-ai/jaffle-shop-dql).
+
+DQL OSS is a single-user local workspace. Hosted multi-user governance,
+managed secrets, audit logs, approval workflows, and permissions-aware team
+retrieval belong to the commercial product.
 
 ## Documentation
 

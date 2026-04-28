@@ -14,9 +14,9 @@ export {
 } from './types.js';
 
 /**
- * Registry of available LLM providers. Claude keeps the tool-use loop; the
- * OpenAI/Gemini/Ollama adapters reuse `@duckcodeailabs/dql-agent` providers
- * and emit the same AgentTurn SSE envelope for notebook Chat.
+ * Registry of available LLM providers. Notebook and App chat default to the
+ * Settings-resolved DQL agent providers. Claude Agent SDK / Claude Code remain
+ * explicit experimental runners for MCP-oriented workflows.
  */
 const RUNNERS: Record<ProviderId, AgentRunner> = {
   'claude-agent-sdk': claudeAgentSdkRunner,

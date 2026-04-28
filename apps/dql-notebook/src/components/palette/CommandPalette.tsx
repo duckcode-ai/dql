@@ -30,8 +30,6 @@ import {
   FilePlus,
   BoxSelect,
   Play,
-  Eye as EyeIcon,
-  Wrench,
 } from 'lucide-react';
 import { useNotebook } from '../../store/NotebookStore';
 import type { NotebookAction, AppMode } from '../../store/types';
@@ -111,21 +109,6 @@ export function CommandPalette({
     ];
 
     const result: PaletteAction[] = [];
-
-    // Mode cycler — Notebook → App → Reader → Notebook. v1.3.3 Hex handoff.
-    const nextMode: AppMode =
-      state.appMode === 'studio' ? 'app' : state.appMode === 'app' ? 'reader' : 'studio';
-    const nextLabel =
-      nextMode === 'studio' ? 'Switch to Notebook' : nextMode === 'app' ? 'Switch to App' : 'Switch to Reader';
-    result.push({
-      id: 'mode.toggle',
-      label: nextLabel,
-      group: 'Mode',
-      icon: state.appMode === 'studio' ? EyeIcon : Wrench,
-      keywords: 'studio notebook app reader preview publish read-only editor',
-      shortcut: '⌘⇧M',
-      run: wrap(() => d({ type: 'SET_APP_MODE', mode: nextMode })),
-    });
 
     result.push(
       {

@@ -18,13 +18,18 @@ import { create, type StoreApi, type UseBoundStore } from 'zustand';
 import { useShallow } from 'zustand/react/shallow';
 import type { NotebookState, NotebookAction, Cell } from './types';
 
-// Persisted shell preference — defaults to 'studio' so the full authoring
-// surface shows on first load. Reading localStorage synchronously so the
-// initial render doesn't flash the wrong mode.
-function readInitialAppMode(): 'studio' | 'app' {
-  if (typeof window === 'undefined') return 'studio';
-  const stored = window.localStorage?.getItem('dql-app-mode');
-  return stored === 'app' ? 'app' : 'studio';
+// Apps now live in the sidebar, so the notebook shell always starts in the
+// full authoring surface. Clear the legacy mode preference so users do not get
+// stuck in the old App/Reader chrome after the header tabs were removed.
+function readInitialAppMode(): 'studio' {
+  if (typeof window !== 'undefined') {
+    try {
+      window.localStorage?.removeItem('dql-app-mode');
+    } catch {
+      // ignore privacy-mode failures
+    }
+  }
+  return 'studio';
 }
 
 // Hex-handoff default: paper (warm off-white). Honors persisted choice.
@@ -135,12 +140,12 @@ function notebookReducer(state: NotebookState, action: NotebookAction): Notebook
     case 'SET_APP_MODE': {
       if (typeof window !== 'undefined') {
         try {
-          window.localStorage?.setItem('dql-app-mode', action.mode);
+          window.localStorage?.removeItem('dql-app-mode');
         } catch {
           // ignore quota / privacy-mode failures — it's a preference
         }
       }
-      return { ...state, appMode: action.mode };
+      return { ...state, appMode: 'studio' };
     }
 
     case 'SET_SIDEBAR_PANEL': {
@@ -656,7 +661,7 @@ export function makeCell(type: Cell['type'], content = ''): Cell {
     base.tableConfig = {};
   }
   if (type === 'chat') {
-    base.chatConfig = { provider: 'claude-agent-sdk', history: [] };
+    base.chatConfig = { history: [] };
   }
   return base;
 }

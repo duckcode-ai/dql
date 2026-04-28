@@ -1,72 +1,65 @@
 # Import a dbt project
 
-> ~4 minutes · ends with dbt models visible in the sidebar
+> ~4 minutes · ends with dbt models and semantic metrics available to DQL
 
-DQL reads dbt's `target/manifest.json` directly — no YAML walking, no
-duplicated metadata. At 4,000+ models, the warm rebuild is under 2s thanks
-to the SQLite cache (`v0.9` work).
+DQL reads dbt artifacts directly:
 
-## 1. Point DQL at your dbt project
+- `target/manifest.json` for models, sources, columns, lineage, exposures, and saved queries.
+- `target/semantic_manifest.json` for MetricFlow semantic models, metrics, measures, dimensions, and entities.
 
-```yaml
-# cdql.yaml
-dbt:
-  projectDir: ../my-dbt-project
-  profile: prod              # matches a profile in ~/.dbt/profiles.yml
-  manifestPath: target/manifest.json  # default; override if custom
+## 1. Point DQL at dbt
+
+Configure dbt in `dql.config.json`:
+
+```json
+{
+  "project": "my-dql-project",
+  "dbt": {
+    "projectDir": "../my-dbt-project",
+    "manifestPath": "target/manifest.json",
+    "semanticManifestPath": "target/semantic_manifest.json"
+  }
+}
 ```
 
-## 2. Generate the manifest (if you haven't)
+`create-dql-app` will create this wiring automatically when it detects a sibling
+`dbt_project.yml`.
+
+## 2. Generate dbt artifacts
 
 ```bash
 cd ../my-dbt-project
-dbt compile   # or dbt parse / dbt run — anything that writes manifest.json
+dbt build
 ```
 
-## 3. Sync
+`dbt parse` or `dbt compile` is enough for `manifest.json`; use `dbt build` for
+the cleanest demo path because it also proves the project runs.
+
+## 3. Rebuild DQL metadata
 
 ```bash
-dql sync dbt
-# ✓ read manifest.json (3,412 nodes)
-# ✓ imported 2,107 models, 41 sources, 18 metrics, 12 exposures
-# ✓ cache written to .dql/cache/manifest.sqlite
+cd ../my-dql-project
+dql compile .
+dql sync dbt .
+dql agent reindex
 ```
 
-## 4. Selective import (large projects)
+`dql compile` rebuilds `dql-manifest.json` and merges dbt lineage into the local
+DQL graph. `dql sync dbt` is a status/cache sync command: it verifies the
+resolved dbt artifact paths, reports model/source/metric counts, and updates the
+local cache when artifacts changed. `dql agent reindex` refreshes the local
+SQLite + FTS knowledge graph used by governed agent answers.
 
-For projects with thousands of models, anchor-driven BFS keeps the working
-set small:
+## 4. Verify it worked
 
-```yaml
-# cdql.yaml
-dbt:
-  projectDir: ../my-dbt-project
-  include:
-    anchors: ["tag:core", "mart.revenue.*"]
-    maxDbtHops: 3
-  exclude:
-    paths: ["models/staging/**"]
-```
-
-Re-sync is deterministic — the anchor set is persisted and teammates import
-the exact same subgraph.
-
-## 5. Watch mode
-
-```bash
-dql sync dbt --watch
-```
-
-Detects `target/manifest.json` changes in `<1s`; notebook schema panel live-updates.
-
-## Verify it worked
-
-- Notebook **Schema** panel shows your dbt models
-- Notebook **Semantic** panel shows your dbt metrics & dimensions
-- `dql lineage summary` prints node/edge counts matching your dbt project
+- Notebook Schema panel shows dbt models and sources.
+- Notebook Semantic panel shows dbt semantic models, metrics, measures, and dimensions.
+- `dql lineage` prints dbt source/model nodes connected to DQL blocks and Apps.
+- Agent answers cite certified blocks first, then semantic/dbt metadata when no certified asset exists.
 
 ## Troubleshooting
 
-- **`manifest.json not found`** — run `dbt parse` or `dbt compile` first.
-- **Import takes too long** — you're probably full-scanning. Add `include.anchors`.
-- **Metrics missing** — DQL reads dbt's [MetricFlow](https://docs.getdbt.com/docs/build/about-metricflow) semantic models. Older dbt metrics (v0.x) are still supported via the YAML fallback.
+- **`manifest.json not found`** — run `dbt build`, `dbt compile`, or `dbt parse` first.
+- **Semantic metrics missing** — confirm `target/semantic_manifest.json` exists and your dbt version emits MetricFlow artifacts.
+- **Lineage is stale** — rerun `dql compile .` and `dql agent reindex`.
+- **Too much dbt metadata** — keep certified DQL blocks and Apps domain-scoped; selective dbt subgraph import is planned but not the default OSS v1 path.

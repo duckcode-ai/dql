@@ -1,0 +1,126 @@
+import { describe, expect, it, afterEach } from 'vitest';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync, mkdirSync } from 'node:fs';
+import { join } from 'node:path';
+import { tmpdir } from 'node:os';
+import {
+  candidateToDqlSource,
+  createBlockStudioImportSession,
+  loadBlockStudioImportSession,
+  updateBlockStudioImportCandidate,
+} from './block-studio-import.js';
+
+const tempDirs: string[] = [];
+
+afterEach(() => {
+  while (tempDirs.length > 0) {
+    const dir = tempDirs.pop();
+    if (dir) rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+function tempProject(): string {
+  const dir = mkdtempSync(join(tmpdir(), 'dql-import-'));
+  tempDirs.push(dir);
+  return dir;
+}
+
+describe('Block Studio SQL import', () => {
+  it('previews a single SQL file as a draft block candidate', () => {
+    const root = tempProject();
+    writeFileSync(join(root, 'revenue.sql'), `-- name: revenue by region
+-- description: Revenue by region from legacy BI
+select region, sum(revenue) as total_revenue
+from marts.orders
+group by region;
+`);
+
+    const session = createBlockStudioImportSession(root, {
+      inputPath: 'revenue.sql',
+      domain: 'finance',
+      owner: 'analytics',
+    });
+
+    expect(session.candidates).toHaveLength(1);
+    const candidate = session.candidates[0];
+    expect(candidate.sourceKind).toBe('raw-sql-file');
+    expect(candidate.name).toBe('Revenue By Region');
+    expect(candidate.domain).toBe('finance');
+    expect(candidate.owner).toBe('analytics');
+    expect(candidate.description).toBe('Revenue by region from legacy BI');
+    expect(candidate.lineage.sourceTables).toEqual(['marts.orders']);
+    expect(candidate.dqlSource).toContain('block "Revenue By Region"');
+    expect(candidate.dqlSource).toContain('query = """');
+    expect(candidate.reviewStatus).toBe('draft');
+    expect(readFileSync(join(root, '.dql', 'imports', session.id, 'manifest.json'), 'utf-8')).toContain(candidate.id);
+  });
+
+  it('splits multi-statement SQL without breaking semicolons inside strings', () => {
+    const root = tempProject();
+    writeFileSync(join(root, 'legacy.sql'), `
+select 'a;b' as label, count(*) as n from raw.events;
+select region, count(*) as n from raw.accounts group by region;
+`);
+
+    const session = createBlockStudioImportSession(root, {
+      inputPath: 'legacy.sql',
+      domain: 'ops',
+    });
+
+    expect(session.candidates).toHaveLength(2);
+    expect(session.candidates[0].sql).toContain("'a;b'");
+    expect(session.candidates[0].lineage.sourceTables).toEqual(['raw.events']);
+    expect(session.candidates[1].lineage.sourceTables).toEqual(['raw.accounts']);
+    expect(session.candidates[0].lineage.totalStatements).toBe(2);
+  });
+
+  it('imports every SQL file in a folder and reloads the persisted session', () => {
+    const root = tempProject();
+    mkdirSync(join(root, 'queries'));
+    writeFileSync(join(root, 'queries', 'a.sql'), 'select * from source_a;');
+    writeFileSync(join(root, 'queries', 'b.sql'), 'select * from source_b;');
+
+    const session = createBlockStudioImportSession(root, {
+      inputPath: 'queries',
+      domain: 'shared reporting',
+    });
+    const reloaded = loadBlockStudioImportSession(root, session.id);
+
+    expect(reloaded.sourceKind).toBe('raw-sql-folder');
+    expect(reloaded.candidates.map((candidate) => candidate.lineage.sourceTables[0]).sort()).toEqual(['source_a', 'source_b']);
+    expect(reloaded.defaults.domain).toBe('shared-reporting');
+  });
+
+  it('detects parameters and refreshes generated DQL when a candidate is updated', () => {
+    const root = tempProject();
+    writeFileSync(join(root, 'parameterized.sql'), 'select * from orders where region = :region and dt >= {{ start_date }};');
+    const session = createBlockStudioImportSession(root, { inputPath: 'parameterized.sql' });
+
+    expect(session.candidates[0].lineage.parameters.sort()).toEqual(['region', 'start_date']);
+    const updated = updateBlockStudioImportCandidate(root, session.id, session.candidates[0].id, {
+      name: 'Orders Filtered',
+      domain: 'sales',
+      sql: 'select * from orders where region = :region;',
+    });
+
+    expect(updated.name).toBe('Orders Filtered');
+    expect(updated.domain).toBe('sales');
+    expect(updated.dqlSource).toContain('block "Orders Filtered"');
+    expect(updated.lineage.parameters).toEqual(['region']);
+  });
+
+  it('generates a valid DQL block shape from a candidate', () => {
+    const source = candidateToDqlSource({
+      name: 'Legacy Query',
+      domain: 'finance',
+      description: 'Imported legacy SQL',
+      owner: 'owner',
+      tags: ['imported', 'raw-sql'],
+      sql: 'select * from finance.orders',
+    });
+
+    expect(source).toContain('domain = "finance"');
+    expect(source).toContain('tags = ["imported", "raw-sql"]');
+    expect(source).toContain('visualization {');
+    expect(source).toContain('chart = "table"');
+  });
+});

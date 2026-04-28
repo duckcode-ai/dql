@@ -8,6 +8,9 @@ import type {
   SemanticLayerState,
   SemanticObjectDetail,
   SemanticTreeNode,
+  BlockStudioImportSession,
+  BlockStudioImportCandidate,
+  BlockStudioOpenPayload,
 } from '../../store/types';
 import { themes } from '../../themes/notebook-theme';
 import type { Theme } from '../../themes/notebook-theme';
@@ -87,6 +90,8 @@ export function BlockStudio() {
   const [bottomPaneHeight, setBottomPaneHeight] = useState(420);
   const [leftPaneCollapsed, setLeftPaneCollapsed] = useState(false);
   const [bottomPaneCollapsed, setBottomPaneCollapsed] = useState(false);
+  const [importOpen, setImportOpen] = useState(false);
+  const [importSession, setImportSession] = useState<BlockStudioImportSession | null>(null);
   const semanticTreeRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
@@ -284,6 +289,11 @@ export function BlockStudio() {
           description: state.blockStudioMetadata.description,
           owner: state.blockStudioMetadata.owner,
           tags: state.blockStudioMetadata.tags,
+          sourceKind: state.blockStudioMetadata.sourceKind,
+          sourcePath: state.blockStudioMetadata.sourcePath,
+          importId: state.blockStudioMetadata.importId,
+          candidateId: state.blockStudioMetadata.candidateId,
+          lineage: state.blockStudioMetadata.lineage,
         },
       });
       dispatch({
@@ -316,6 +326,81 @@ export function BlockStudio() {
     } finally {
       setSaving(false);
     }
+  };
+
+  const handleImportCandidateSelect = (candidate: BlockStudioImportCandidate) => {
+    const payload = {
+      path: '',
+      source: candidate.dqlSource,
+      metadata: {
+        name: candidate.name,
+        path: null,
+        domain: candidate.domain,
+        description: candidate.description,
+        owner: candidate.owner,
+        tags: candidate.tags,
+        reviewStatus: 'draft',
+        sourceKind: candidate.sourceKind,
+        sourcePath: candidate.sourcePath,
+        importId: importSession?.id,
+        candidateId: candidate.id,
+        lineage: candidate.lineage.sourceTables,
+      },
+      companionPath: null,
+      validation: candidate.validation ?? {
+        valid: true,
+        diagnostics: [],
+        semanticRefs: { metrics: [], dimensions: [], segments: [] },
+        executableSql: null,
+      },
+    };
+    dispatch({
+      type: 'OPEN_BLOCK_STUDIO',
+      file: {
+        name: `${candidate.name}.dql`,
+        path: '',
+        type: 'block',
+        folder: 'blocks',
+        isNew: true,
+      },
+      payload,
+    });
+    dispatch({ type: 'SET_BLOCK_STUDIO_PREVIEW', preview: candidate.preview });
+    setResultTab(candidate.validation?.diagnostics?.length ? 'validate' : 'results');
+    setImportOpen(false);
+  };
+
+  const handleImportCandidateSaved = (candidate: BlockStudioImportCandidate, block: BlockStudioOpenPayload) => {
+    dispatch({
+      type: 'OPEN_BLOCK_STUDIO',
+      file: {
+        name: `${block.metadata.name}.dql`,
+        path: block.path,
+        type: 'block',
+        folder: 'blocks',
+      },
+      payload: block,
+    });
+    const existing = state.files.some((file) => file.path === block.path);
+    if (!existing) {
+      dispatch({
+        type: 'FILE_ADDED',
+        file: {
+          name: `${block.metadata.name}.dql`,
+          path: block.path,
+          type: 'block',
+          folder: 'blocks',
+        },
+      });
+    }
+    if (importSession) {
+      setImportSession({
+        ...importSession,
+        candidates: importSession.candidates.map((item) => item.id === candidate.id ? candidate : item),
+      });
+    }
+    setResultTab('save');
+    setImportOpen(false);
   };
 
   const handleSemanticInsert = (item: SemanticObjectDetail) => {
@@ -588,6 +673,7 @@ export function BlockStudio() {
             Source
           </span>
           <div style={{ flex: 1 }} />
+          <TemplateButton label="Import" onClick={() => setImportOpen(true)} />
           <TemplateButton label="Run" onClick={() => void handleRun()} busy={running} />
           <TemplateButton label="Save" onClick={() => void handleSave()} busy={saving} />
           {saveError && (
@@ -763,6 +849,19 @@ export function BlockStudio() {
         </div>
       </div>
 
+      {importOpen && (
+        <BlockStudioImportModal
+          session={importSession}
+          onSessionChange={setImportSession}
+          onClose={() => setImportOpen(false)}
+          onSelectCandidate={handleImportCandidateSelect}
+          onSavedCandidate={handleImportCandidateSaved}
+          defaultDomain={draftMetadata?.domain || state.blockStudioMetadata?.domain || 'imported'}
+          defaultOwner={draftMetadata?.owner || state.blockStudioMetadata?.owner || ''}
+          t={t}
+        />
+      )}
+
       {bottomPaneCollapsed && (
         <div style={{ position: 'absolute', right: 16, bottom: 16 }}>
           <button
@@ -824,6 +923,419 @@ function SegmentedTab({ active, onClick, label, t }: { active: boolean; onClick:
       {label}
     </button>
   );
+}
+
+function BlockStudioImportModal({
+  session,
+  onSessionChange,
+  onClose,
+  onSelectCandidate,
+  onSavedCandidate,
+  defaultDomain,
+  defaultOwner,
+  t,
+}: {
+  session: BlockStudioImportSession | null;
+  onSessionChange: (session: BlockStudioImportSession | null) => void;
+  onClose: () => void;
+  onSelectCandidate: (candidate: BlockStudioImportCandidate) => void;
+  onSavedCandidate: (candidate: BlockStudioImportCandidate, block: BlockStudioOpenPayload) => void;
+  defaultDomain: string;
+  defaultOwner: string;
+  t: Theme;
+}) {
+  const [path, setPath] = useState('');
+  const [domain, setDomain] = useState(defaultDomain);
+  const [owner, setOwner] = useState(defaultOwner);
+  const [loading, setLoading] = useState(false);
+  const [runningId, setRunningId] = useState<string | null>(null);
+  const [savingId, setSavingId] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const readyCount = session?.candidates.filter((candidate) => candidate.validation?.valid !== false).length ?? 0;
+  const savedCount = session?.candidates.filter((candidate) => candidate.reviewStatus === 'saved').length ?? 0;
+  const activeStep = !session ? 1 : savedCount > 0 ? 3 : 2;
+
+  const updateCandidate = (candidate: BlockStudioImportCandidate) => {
+    if (!session) return;
+    onSessionChange({
+      ...session,
+      candidates: session.candidates.map((item) => item.id === candidate.id ? candidate : item),
+    });
+  };
+
+  const handlePreview = async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      const next = await api.previewBlockStudioImport({
+        path,
+        sourceKind: 'raw-sql',
+        domain,
+        owner,
+      });
+      onSessionChange(next);
+    } catch (err: any) {
+      setError(err?.message ?? 'Import preview failed.');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleRunCandidate = async (candidate: BlockStudioImportCandidate) => {
+    if (!session) return;
+    setRunningId(candidate.id);
+    setError(null);
+    try {
+      const next = await api.runBlockStudioImportCandidate(session.id, candidate.id);
+      updateCandidate(next);
+    } catch (err: any) {
+      setError(err?.message ?? 'Candidate run failed.');
+    } finally {
+      setRunningId(null);
+    }
+  };
+
+  const handleSaveCandidate = async (candidate: BlockStudioImportCandidate) => {
+    if (!session) return;
+    setSavingId(candidate.id);
+    setError(null);
+    try {
+      const result = await api.saveBlockStudioImportCandidate(session.id, candidate.id);
+      updateCandidate(result.candidate);
+      onSavedCandidate(result.candidate, result.block);
+    } catch (err: any) {
+      const message = err?.message ?? 'Candidate save failed.';
+      setError(message.includes('409') || message.includes('already exists')
+        ? 'A block with this name already exists. Use Review in editor to rename it, then save.'
+        : message);
+    } finally {
+      setSavingId(null);
+    }
+  };
+
+  return (
+    <div
+      style={{
+        position: 'absolute',
+        inset: 0,
+        zIndex: 30,
+        background: 'rgba(0,0,0,0.28)',
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        padding: 24,
+      }}
+    >
+      <div
+        style={{
+          width: 820,
+          maxWidth: 'calc(100vw - 48px)',
+          maxHeight: 'calc(100vh - 72px)',
+          background: t.cellBg,
+          border: `1px solid ${t.headerBorder}`,
+          borderRadius: 10,
+          boxShadow: '0 24px 70px rgba(0,0,0,0.35)',
+          display: 'flex',
+          flexDirection: 'column',
+          overflow: 'hidden',
+        }}
+      >
+        <div style={{ padding: '14px 16px', borderBottom: `1px solid ${t.headerBorder}`, display: 'flex', alignItems: 'center', gap: 12 }}>
+          <div>
+            <div style={{ fontSize: 14, fontWeight: 700, color: t.textPrimary, fontFamily: t.font }}>Import SQL into Block Studio</div>
+            <div style={{ fontSize: 11, color: t.textMuted, fontFamily: t.font, marginTop: 2 }}>Scan existing SQL, review candidates, then save draft DQL blocks.</div>
+          </div>
+          <div style={{ flex: 1 }} />
+          <button
+            onClick={onClose}
+            style={{ background: 'transparent', border: 'none', color: t.textMuted, cursor: 'pointer', fontSize: 18, lineHeight: 1 }}
+            title="Close import"
+          >
+            ×
+          </button>
+        </div>
+
+        <div style={{ padding: '12px 14px', borderBottom: `1px solid ${t.headerBorder}`, display: 'grid', gridTemplateColumns: 'repeat(3, minmax(0, 1fr))', gap: 8, background: `${t.appBg}99` }}>
+          <ImportStep index={1} active={activeStep === 1} complete={Boolean(session)} title="Choose source" detail="SQL file or folder" t={t} />
+          <ImportStep index={2} active={activeStep === 2} complete={savedCount > 0} title="Review candidates" detail={session ? `${session.candidates.length} found · ${readyCount} ready` : 'Validate metadata'} t={t} />
+          <ImportStep index={3} active={activeStep === 3} complete={savedCount > 0} title="Save drafts" detail={savedCount > 0 ? `${savedCount} saved` : 'Open or save as block'} t={t} />
+        </div>
+
+        <div style={{ padding: 14, borderBottom: `1px solid ${t.headerBorder}`, display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) 150px 150px auto', gap: 8, alignItems: 'end' }}>
+          <FieldLabel label="SQL file or folder" t={t}>
+            <input
+              value={path}
+              onChange={(event) => setPath(event.target.value)}
+              placeholder="/path/to/sql or ./queries"
+              style={importInputStyle(t)}
+            />
+          </FieldLabel>
+          <FieldLabel label="Domain" t={t}>
+            <input value={domain} onChange={(event) => setDomain(event.target.value)} placeholder="imported" style={importInputStyle(t)} />
+          </FieldLabel>
+          <FieldLabel label="Owner" t={t}>
+            <input value={owner} onChange={(event) => setOwner(event.target.value)} placeholder="analytics" style={importInputStyle(t)} />
+          </FieldLabel>
+          <button
+            onClick={() => void handlePreview()}
+            disabled={loading || !path.trim()}
+            style={{
+              background: t.accent,
+              border: `1px solid ${t.accent}`,
+              borderRadius: 6,
+              color: '#fff',
+              cursor: loading || !path.trim() ? 'not-allowed' : 'pointer',
+              fontSize: 12,
+              fontWeight: 700,
+              fontFamily: t.font,
+              padding: '8px 12px',
+              opacity: loading || !path.trim() ? 0.6 : 1,
+            }}
+          >
+            {loading ? 'Scanning…' : 'Preview'}
+          </button>
+        </div>
+
+        {error && (
+          <div style={{ padding: '10px 14px', color: '#f85149', background: '#f8514914', borderBottom: `1px solid ${t.headerBorder}`, fontSize: 12, fontFamily: t.font }}>
+            {error}
+          </div>
+        )}
+
+        <div style={{ flex: 1, overflow: 'auto', padding: 14 }}>
+          {!session ? (
+            <ImportGuide t={t} />
+          ) : session.candidates.length === 0 ? (
+            <EmptyPanel message="No import candidates found." />
+          ) : (
+            <div style={{ display: 'grid', gap: 10 }}>
+              <div style={{ border: `1px solid ${t.headerBorder}`, borderRadius: 8, padding: 12, display: 'grid', gap: 6, background: t.appBg }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+                  <span style={{ fontSize: 11, color: t.textMuted, fontFamily: t.fontMono }}>{session.id}</span>
+                  <ImportPill label={`${session.candidates.length} candidates`} tone="info" t={t} />
+                  <ImportPill label={`${readyCount} ready`} tone="ok" t={t} />
+                  {savedCount > 0 && <ImportPill label={`${savedCount} saved`} tone="ok" t={t} />}
+                </div>
+                <div style={{ fontSize: 11, color: t.textMuted, fontFamily: t.font }}>
+                  Source: <span style={{ fontFamily: t.fontMono }}>{session.inputPath}</span>
+                </div>
+              </div>
+              {session.candidates.map((candidate) => {
+                const valid = candidate.validation?.valid !== false;
+                const rowCount = candidate.preview?.result?.rowCount ?? candidate.preview?.result?.rows?.length;
+                return (
+                  <div
+                    key={candidate.id}
+                    style={{
+                      border: `1px solid ${t.headerBorder}`,
+                      borderRadius: 8,
+                      background: t.appBg,
+                      padding: 12,
+                      display: 'grid',
+                      gap: 10,
+                    }}
+                  >
+                    <div style={{ display: 'flex', alignItems: 'flex-start', gap: 10 }}>
+                      <div style={{ minWidth: 0, flex: 1 }}>
+                        <div style={{ fontSize: 13, fontWeight: 700, color: t.textPrimary, fontFamily: t.font }}>{candidate.name}</div>
+                        <div style={{ fontSize: 11, color: t.textMuted, fontFamily: t.fontMono, marginTop: 3 }}>{candidate.sourcePath}</div>
+                      </div>
+                      <ImportPill label={`${Math.round(candidate.confidence * 100)}%`} tone="info" t={t} />
+                      <ImportPill label={valid ? 'valid' : 'review'} tone={valid ? 'ok' : 'warn'} t={t} />
+                      <ImportPill label={candidate.reviewStatus} tone={candidate.reviewStatus === 'saved' ? 'ok' : 'info'} t={t} />
+                      {candidate.lineage.totalStatements > 1 && (
+                        <ImportPill label={`${candidate.lineage.statementIndex}/${candidate.lineage.totalStatements}`} tone="info" t={t} />
+                      )}
+                    </div>
+                    <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+                      {candidate.lineage.sourceTables.length > 0 ? candidate.lineage.sourceTables.map((table) => (
+                        <span key={table} style={{ fontSize: 11, color: t.textSecondary, background: t.pillBg, borderRadius: 999, padding: '3px 8px', fontFamily: t.fontMono }}>
+                          {table}
+                        </span>
+                      )) : (
+                        <span style={{ fontSize: 11, color: t.textMuted, fontFamily: t.font }}>No source tables detected</span>
+                      )}
+                    </div>
+                    {candidate.lineage.parameters.length > 0 && (
+                      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+                        <span style={{ fontSize: 11, color: t.textMuted, fontFamily: t.font }}>Parameters:</span>
+                        {candidate.lineage.parameters.map((param) => (
+                          <span key={param} style={{ fontSize: 11, color: '#d29922', background: '#d2992218', borderRadius: 999, padding: '3px 8px', fontFamily: t.fontMono }}>
+                            {param}
+                          </span>
+                        ))}
+                      </div>
+                    )}
+                    {candidate.lineage.warnings.length > 0 && (
+                      <div style={{ fontSize: 11, color: '#d29922', fontFamily: t.font }}>
+                        {candidate.lineage.warnings.join(' · ')}
+                      </div>
+                    )}
+                    {candidate.validation?.diagnostics?.some((diagnostic) => diagnostic.severity === 'error') && (
+                      <div style={{ fontSize: 11, color: '#f85149', fontFamily: t.font }}>
+                        {candidate.validation.diagnostics.filter((diagnostic) => diagnostic.severity === 'error').map((diagnostic) => diagnostic.message).join(' · ')}
+                      </div>
+                    )}
+                    {candidate.preview && (
+                      <div style={{ fontSize: 11, color: t.textMuted, fontFamily: t.font, display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+                        <span>Preview ready</span>
+                        {typeof rowCount === 'number' && <span>· {rowCount} rows</span>}
+                        <span>· Open it to inspect SQL, data, visualization, and metadata.</span>
+                      </div>
+                    )}
+                    <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8 }}>
+                      <button
+                        onClick={() => void handleRunCandidate(candidate)}
+                        disabled={runningId === candidate.id}
+                        style={secondaryImportButtonStyle(t)}
+                      >
+                        {runningId === candidate.id ? 'Running…' : 'Run preview'}
+                      </button>
+                      <button
+                        onClick={() => onSelectCandidate(candidate)}
+                        style={primaryImportButtonStyle(t)}
+                      >
+                        Review in editor
+                      </button>
+                      <button
+                        onClick={() => void handleSaveCandidate(candidate)}
+                        disabled={savingId === candidate.id || candidate.reviewStatus === 'saved'}
+                        style={{
+                          ...primaryImportButtonStyle(t),
+                          opacity: savingId === candidate.id || candidate.reviewStatus === 'saved' ? 0.55 : 1,
+                          cursor: savingId === candidate.id || candidate.reviewStatus === 'saved' ? 'not-allowed' : 'pointer',
+                        }}
+                      >
+                        {candidate.reviewStatus === 'saved' ? 'Saved' : savingId === candidate.id ? 'Saving…' : 'Save draft'}
+                      </button>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function ImportStep({ index, active, complete, title, detail, t }: { index: number; active: boolean; complete: boolean; title: string; detail: string; t: Theme }) {
+  const color = complete ? '#2ea043' : active ? t.accent : t.textMuted;
+  return (
+    <div
+      style={{
+        border: `1px solid ${active ? t.accent : t.headerBorder}`,
+        borderRadius: 8,
+        padding: '9px 10px',
+        display: 'grid',
+        gridTemplateColumns: '24px minmax(0, 1fr)',
+        gap: 8,
+        alignItems: 'center',
+        background: active ? `${t.accent}10` : t.cellBg,
+      }}
+    >
+      <span
+        style={{
+          width: 22,
+          height: 22,
+          borderRadius: 999,
+          display: 'inline-grid',
+          placeItems: 'center',
+          background: `${color}18`,
+          color,
+          fontSize: 11,
+          fontWeight: 800,
+          fontFamily: t.font,
+        }}
+      >
+        {complete ? '✓' : index}
+      </span>
+      <span style={{ minWidth: 0 }}>
+        <span style={{ display: 'block', fontSize: 12, fontWeight: 700, color: t.textPrimary, fontFamily: t.font }}>{title}</span>
+        <span style={{ display: 'block', fontSize: 10, color: t.textMuted, fontFamily: t.font, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{detail}</span>
+      </span>
+    </div>
+  );
+}
+
+function ImportGuide({ t }: { t: Theme }) {
+  const items = [
+    ['1', 'Choose source', 'Enter a local .sql file or a folder with SQL files.'],
+    ['2', 'Review candidates', 'DQL detects statements, tables, parameters, and draft metadata.'],
+    ['3', 'Save draft blocks', 'Open in Block Studio for edits or save directly as draft blocks.'],
+  ];
+  return (
+    <div style={{ display: 'grid', gap: 12 }}>
+      <EmptyPanel message="Choose a SQL file or folder to create import candidates." />
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, minmax(0, 1fr))', gap: 10 }}>
+        {items.map(([index, title, detail]) => (
+          <div key={title} style={{ border: `1px solid ${t.headerBorder}`, borderRadius: 8, background: t.appBg, padding: 12, display: 'grid', gap: 6 }}>
+            <span style={{ width: 22, height: 22, borderRadius: 999, display: 'inline-grid', placeItems: 'center', background: `${t.accent}18`, color: t.accent, fontSize: 11, fontWeight: 800, fontFamily: t.font }}>
+              {index}
+            </span>
+            <span style={{ fontSize: 12, fontWeight: 700, color: t.textPrimary, fontFamily: t.font }}>{title}</span>
+            <span style={{ fontSize: 11, color: t.textMuted, fontFamily: t.font, lineHeight: 1.4 }}>{detail}</span>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function FieldLabel({ label, children, t }: { label: string; children: React.ReactNode; t: Theme }) {
+  return (
+    <label style={{ display: 'grid', gap: 5 }}>
+      <span style={{ fontSize: 10, fontWeight: 700, color: t.textMuted, letterSpacing: '0.05em', textTransform: 'uppercase', fontFamily: t.font }}>{label}</span>
+      {children}
+    </label>
+  );
+}
+
+function ImportPill({ label, tone, t }: { label: string; tone: 'ok' | 'warn' | 'info'; t: Theme }) {
+  const color = tone === 'ok' ? '#2ea043' : tone === 'warn' ? '#d29922' : t.accent;
+  return (
+    <span style={{ fontSize: 10, fontWeight: 700, color, background: `${color}18`, borderRadius: 999, padding: '3px 7px', fontFamily: t.font, textTransform: 'uppercase' }}>
+      {label}
+    </span>
+  );
+}
+
+function importInputStyle(t: Theme): React.CSSProperties {
+  return {
+    background: t.inputBg,
+    border: `1px solid ${t.inputBorder}`,
+    borderRadius: 6,
+    color: t.textPrimary,
+    fontSize: 12,
+    fontFamily: t.font,
+    padding: '8px 10px',
+    outline: 'none',
+    minWidth: 0,
+  };
+}
+
+function secondaryImportButtonStyle(t: Theme): React.CSSProperties {
+  return {
+    background: t.btnBg,
+    border: `1px solid ${t.btnBorder}`,
+    borderRadius: 6,
+    color: t.textSecondary,
+    cursor: 'pointer',
+    fontSize: 11,
+    fontFamily: t.font,
+    padding: '6px 10px',
+  };
+}
+
+function primaryImportButtonStyle(t: Theme): React.CSSProperties {
+  return {
+    ...secondaryImportButtonStyle(t),
+    background: `${t.accent}18`,
+    border: `1px solid ${t.accent}`,
+    color: t.accent,
+    fontWeight: 700,
+  };
 }
 
 function StudioStatCard({ label, value, t }: { label: string; value: number; t: Theme }) {

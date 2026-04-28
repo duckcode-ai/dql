@@ -5,7 +5,6 @@ import type {
   Cell,
   ChatCellConfig,
   ChatMessage,
-  ChatProviderId,
   ChatBlockProposalSnapshot,
   ThemeMode,
 } from '../../store/types';
@@ -21,15 +20,6 @@ interface ChatCellProps {
   themeMode: ThemeMode;
   onUpdate: (updates: Partial<Cell>) => void;
 }
-
-const PROVIDERS: Array<{ id: ChatProviderId; label: string; hint: string }> = [
-  { id: 'claude-agent-sdk', label: 'Claude Agent SDK', hint: 'ANTHROPIC_API_KEY' },
-  { id: 'claude-code', label: 'Claude Code', hint: 'Local `claude` CLI' },
-  { id: 'openai', label: 'OpenAI', hint: 'OPENAI_API_KEY, optional OPENAI_MODEL' },
-  { id: 'gemini', label: 'Gemini', hint: 'GEMINI_API_KEY, optional GEMINI_MODEL' },
-  { id: 'ollama', label: 'Ollama', hint: 'OLLAMA_BASE_URL, optional OLLAMA_MODEL' },
-  { id: 'custom-openai', label: 'Custom OpenAI', hint: 'Configure in Settings' },
-];
 
 function genId(): string {
   return `m_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
@@ -50,7 +40,7 @@ function findUpstreamSql(cells: Cell[], index: number, handle?: string): string 
 export function ChatCell({ cell, cells, index, themeMode, onUpdate }: ChatCellProps) {
   const { dispatch } = useNotebook();
   const t = themes[themeMode];
-  const config: ChatCellConfig = cell.chatConfig ?? { provider: 'claude-agent-sdk', history: [] };
+  const config: ChatCellConfig = { history: [], ...cell.chatConfig };
 
   const [input, setInput] = useState('');
   const [running, setRunning] = useState(false);
@@ -87,7 +77,6 @@ export function ChatCell({ cell, cells, index, themeMode, onUpdate }: ChatCellPr
     try {
       await runAgent(
         {
-          provider: config.provider,
           messages: [...config.history, userMsg].map((m) => ({ role: m.role, content: m.content })),
           upstream: { cellId: cell.id, sql: findUpstreamSql(cells, index, config.upstream) },
           signal: controller.signal,
@@ -146,8 +135,6 @@ export function ChatCell({ cell, cells, index, themeMode, onUpdate }: ChatCellPr
     <div style={{ display: 'flex', flexDirection: 'column', gap: 10, padding: '14px 16px', background: t.cellBg, fontFamily: t.font }}>
       <ChatHeader
         cell={cell}
-        provider={config.provider}
-        onProviderChange={(p) => updateConfig({ provider: p })}
         onClear={config.history.length > 0 ? handleClear : undefined}
         t={t}
       />
@@ -216,14 +203,10 @@ export function ChatCell({ cell, cells, index, themeMode, onUpdate }: ChatCellPr
 
 function ChatHeader({
   cell,
-  provider,
-  onProviderChange,
   onClear,
   t,
 }: {
   cell: Cell;
-  provider: ChatProviderId;
-  onProviderChange: (p: ChatProviderId) => void;
   onClear?: () => void;
   t: Theme;
 }) {
@@ -245,25 +228,17 @@ function ChatHeader({
         Chat
       </span>
       {cell.name && <span style={{ fontSize: 12, fontFamily: t.fontMono, color: t.textSecondary }}>{cell.name}</span>}
-      <select
-        value={provider}
-        onChange={(e) => onProviderChange(e.target.value as ChatProviderId)}
-        title={PROVIDERS.find((p) => p.id === provider)?.hint}
+      <span
+        title="Configure the active AI provider in Settings"
         style={{
           marginLeft: 'auto',
           fontSize: 11,
           fontFamily: t.fontMono,
-          padding: '3px 6px',
-          background: t.cellBg,
-          color: t.textSecondary,
-          border: `1px solid ${t.cellBorder}`,
-          borderRadius: 4,
+          color: t.textMuted,
         }}
       >
-        {PROVIDERS.map((p) => (
-          <option key={p.id} value={p.id}>{p.label}</option>
-        ))}
-      </select>
+        Provider from Settings
+      </span>
       {onClear && (
         <button
           onClick={onClear}

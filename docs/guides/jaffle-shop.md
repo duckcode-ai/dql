@@ -1,24 +1,17 @@
-# Jaffle Shop walkthrough
+# Jaffle Shop DQL
 
-> ~12 minutes · end-to-end tour covering every DQL feature
+Jaffle Shop now lives in its own demo repository:
 
-The [Quickstart](../01-quickstart.md) got you to a compiled dashboard in
-five minutes. This walkthrough goes slower and hits every surface: dbt
-import, notebook authoring, block certification, lineage, dashboards, git
-versioning.
+[github.com/duckcode-ai/jaffle-shop-dql](https://github.com/duckcode-ai/jaffle-shop-dql)
 
-{/* TODO: port content from docs/01-start-here/dbt-jaffle-shop.md once the
-     canonical demo repo at github.com/duckcode-ai/jaffle-demo is published. */}
+Use that repo for the dbt enterprise-style proof path:
 
-## Sections
+1. dbt builds `target/manifest.json` and `target/semantic_manifest.json`.
+2. DQL imports dbt models, sources, semantic models, metrics, dimensions, and saved queries.
+3. Certified DQL blocks and Apps sit on top of the dbt semantic layer.
+4. The agent routes questions through certified assets first, semantic metrics second, and dbt manifest SQL fallback last.
+5. Lineage shows the full path from domain to App, dashboard, block, semantic object, dbt model, and source.
 
-1. Set up the dbt Jaffle Shop repo
-2. Run `dql init` and point it at dbt
-3. Build the `orders` notebook
-4. Author a certified `revenue_by_segment` block
-5. Trace lineage from raw tables to the dashboard
-6. Compile and host the dashboard
-7. Review the PR with `dql diff`
-
-See the legacy [dbt Jaffle Shop walkthrough](https://github.com/duckcode-ai/dql/blob/main/docs/01-start-here/dbt-jaffle-shop.md)
-for the current long-form content while this page is being rewritten.
+The bundled Acme Bank template remains the governed workflow demo for Apps,
+personas, business outcomes, schedules, and analyst review. Jaffle Shop DQL is
+the dbt metadata and semantic-layer demo.

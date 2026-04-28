@@ -29,6 +29,7 @@ import { runSchedule } from './commands/schedule.js';
 import { runAgent } from './commands/agent.js';
 import { runSlack } from './commands/slack.js';
 import { runVerify } from './commands/verify.js';
+import { runImport } from './commands/import.js';
 
 const HELP = `
   dql — DQL CLI
@@ -47,6 +48,7 @@ const HELP = `
     dql info <file.dql>             Show block metadata
     dql migrate <source>            Scaffold migration from looker/tableau/dbt/metabase/raw-sql
     dql migrate format [--check]    Upgrade all .dql/.dqlnb files to canonical format
+    dql import sql <path>           Preview SQL files/folders as draft Block Studio import candidates
     dql fmt <file.dql|.dqlnb>       Format DQL/notebook file in place
     dql diff <path>                 Diff a .dql/.dqlnb file vs HEAD
     dql diff <before> <after>       Semantic diff between two files
@@ -145,6 +147,9 @@ async function main() {
         break;
       case 'migrate':
         await runMigrate(file!, flags);
+        break;
+      case 'import':
+        await runImport(file!, rest, flags);
         break;
       case 'fmt':
         await runFmt(file!, flags);

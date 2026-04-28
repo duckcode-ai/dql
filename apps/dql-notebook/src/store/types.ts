@@ -123,7 +123,7 @@ export interface ChatBlockProposalSnapshot {
 }
 
 export interface ChatCellConfig {
-  provider: ChatProviderId;
+  provider?: ChatProviderId;
   history: ChatMessage[];
   upstream?: string;
   lastProposal?: ChatBlockProposalSnapshot;
@@ -472,6 +472,51 @@ export interface BlockStudioMetadata {
   owner: string;
   tags: string[];
   reviewStatus?: string;
+  sourceKind?: string;
+  sourcePath?: string;
+  importId?: string;
+  candidateId?: string;
+  lineage?: string[];
+}
+
+export interface BlockStudioImportCandidate {
+  id: string;
+  sourceKind: 'raw-sql-file' | 'raw-sql-folder' | 'tableau-workbook' | 'powerbi-project';
+  sourcePath: string;
+  name: string;
+  domain: string;
+  description: string;
+  owner: string;
+  tags: string[];
+  sql: string;
+  dqlSource: string;
+  validation: BlockStudioValidation | null;
+  preview: BlockStudioPreview | null;
+  lineage: {
+    sourceTables: string[];
+    parameters: string[];
+    warnings: string[];
+    statementIndex: number;
+    totalStatements: number;
+  };
+  confidence: number;
+  reviewStatus: 'draft' | 'saved' | 'rejected';
+  savedPath?: string;
+}
+
+export interface BlockStudioImportSession {
+  id: string;
+  sourceKind: BlockStudioImportCandidate['sourceKind'];
+  inputPath: string;
+  createdAt: string;
+  updatedAt: string;
+  defaults: {
+    domain: string;
+    owner: string;
+    tags: string[];
+  };
+  candidateIds: string[];
+  candidates: BlockStudioImportCandidate[];
 }
 
 export interface DatabaseSchemaNode {
