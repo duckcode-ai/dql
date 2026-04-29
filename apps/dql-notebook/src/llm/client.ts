@@ -1,7 +1,7 @@
 import type { AgentTurn, ChatTurn, ProviderId } from './types';
 
 export interface RunAgentOptions {
-  provider: ProviderId;
+  provider?: ProviderId;
   messages: ChatTurn[];
   upstream?: { cellId?: string; sql?: string };
   signal?: AbortSignal;

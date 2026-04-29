@@ -5,13 +5,14 @@
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue)](./LICENSE)
 [![Node](https://img.shields.io/badge/node-18%20%7C%2020%20%7C%2022-green)](https://nodejs.org)
 
-**Analytics notebooks on your dbt models.** Git-native. Local-first. Open source.
+**A local-first dbt analytics workspace.** Git-native. Certified blocks, Apps,
+lineage, and governed agent answers run on your laptop.
 
 DQL sits between **dbt** (modeling) and your BI tool (reporting). Every analytics answer — SQL, chart, params, tests, owner — lives in a single `.dql` file tracked in git. No more query sprawl, no more broken charts, no more lost work.
 
 ## Highlights
 
-**Apps + programmable RBAC + persona switching** *(v1.4)* — declare members, roles, access policies, and RLS bindings in `dql.app.json`; preview as any role from the persona switcher.
+**Apps + local persona/policy preview** *(v1.4)* — declare members, roles, access policies, and RLS bindings in `dql.app.json`; preview stakeholder views from the persona switcher.
 
 ![Apps + persona switching](./docs/media/apps.gif)
 
@@ -23,7 +24,7 @@ DQL sits between **dbt** (modeling) and your BI tool (reporting). Every analytic
 
 ![Lineage DAG](./docs/media/lineage.gif)
 
-**AI chat + provider setup** — configure Claude, OpenAI, Gemini, local Ollama, Slack, and schedule delivery keys from one Settings surface; missing keys stay optional until selected.
+**AI chat + provider setup** — configure OpenAI, Gemini, local Ollama, custom OpenAI-compatible endpoints, Slack, and schedule delivery keys from one Settings surface; missing keys stay optional until selected.
 
 ![AI provider settings](./docs/media/agent.gif)
 
@@ -54,14 +55,37 @@ npm run notebook
 
 The starter installs the DQL CLI locally as a dev dependency, so `npm run
 notebook`, `npm run compile`, and other scripts work without a global `dql`
-binary. Use `--template acme-bank` for the full Apps/RBAC/agent demo.
+binary. Use `--template acme-bank` for the full Apps/persona/agent demo.
 
 Either way, DuckDB runs in-memory. Drop a CSV into `data/`, query it, save a
 block, commit.
 
-Already have a **dbt project**? Run `create-dql-app` next to it — the
-scaffolder auto-detects `dbt_project.yml` as a sibling and wires
-`dql.config.json` accordingly. Then `dql sync dbt` imports your manifest.
+Already have a **dbt project**? Keep DQL isolated under `./dql` inside that
+repo:
+
+```bash
+npm i -D @duckcodeailabs/dql-cli
+npx dql init ./dql
+dbt build
+npx dql compile ./dql
+npx dql sync dbt ./dql
+npx dql notebook ./dql
+```
+
+The generated `dql/dql.config.json` points back to the parent dbt project, so
+lineage can connect dbt sources/models to DQL blocks, dashboards, and Apps.
+
+## Official demos
+
+- **Acme Bank** — bundled governed workflow demo for Apps, personas, business
+  outcomes, agent answers, and local schedules.
+- **Jaffle Shop DQL** — dbt/MetricFlow demo for manifest ingestion, semantic
+  metrics, lineage, certified blocks, and agent routing:
+  [github.com/duckcode-ai/jaffle-shop-dql](https://github.com/duckcode-ai/jaffle-shop-dql).
+
+DQL OSS is a single-user local workspace. Hosted multi-user governance,
+managed secrets, audit logs, approval workflows, and permissions-aware team
+retrieval belong to the commercial product.
 
 ## Documentation
 
@@ -70,7 +94,7 @@ Start with [docs/README.md](./docs/README.md).
 
 Quick links:
 
-- **[Tutorials — Acme Bank end-to-end](./docs/tutorials/README.md)** *(new in v1.4: Apps, RBAC, agentic analytics, Slack, fraud-spike walkthrough)*
+- **[Tutorials — Acme Bank end-to-end](./docs/tutorials/README.md)** *(new in v1.4: Apps, persona preview, agentic analytics, Slack, fraud-spike walkthrough)*
 - [Quickstart](./docs/01-quickstart.md) · [Concepts](./docs/02-concepts.md) · [Install](./docs/03-install.md)
 - [Jaffle Shop walkthrough](./docs/guides/jaffle-shop.md) · [Import dbt](./docs/guides/import-dbt.md) · [Author a block](./docs/guides/authoring-blocks.md)
 - [CLI reference](./docs/reference/cli.md) · [Language reference](./docs/reference/language.md) · [Connectors](./docs/reference/connectors.md)
@@ -81,11 +105,12 @@ Quick links:
 - **Notebook** — SQL + DQL cells with live results, charts, and params
 - **Block Studio** — governed, versioned analytics blocks with lint + certify
 - **Apps** *(new in v1.4)* — first-class consumption-layer artifact bundling
-  dashboards, members, roles, access policies, RLS bindings, and schedules
-  for a domain or team
-- **Programmable RBAC + RLS** *(new in v1.4)* — declared in `dql.app.json`,
-  enforced via the persona registry; `@rls("col", "{user.var}")` resolves
-  at execution time from the active persona
+  dashboards, notebooks, AI pins, drafts, local personas, policies, RLS
+  bindings, and schedules for a domain or use case
+- **Local policy + RLS preview** *(new in v1.4)* — declared in
+  `dql.app.json` and executed through the persona registry;
+  `@rls("col", "{user.var}")` resolves at execution time from the active
+  persona
 - **Agentic analytics** *(new in v1.4)* — `@duckcodeailabs/dql-agent` ships a
   local SQLite + FTS5 knowledge graph, Skills, a block-first answer loop, and
   pluggable LLM providers (Claude / OpenAI / Gemini / local Ollama)
@@ -106,10 +131,9 @@ Quick links:
 ## What this repo does **not** include
 
 Real authentication (login screens, OIDC, password storage), hosted/multi-tenant
-deployment, and approval workflows as a managed service live in the closed
-DuckCode Cloud product. *(Note: agentic block generation, MCP runtime, RBAC
-declarations, and scheduled runs were previously closed-product — they're now
-in OSS as of v1.4.)*
+deployment, enforced organization RBAC, governed secrets, audit logs, and
+managed approval workflows live outside OSS. Local persona/policy preview,
+agentic block generation, MCP runtime, and scheduled runs are included in OSS.
 
 ## Contributing
 

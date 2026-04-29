@@ -9,6 +9,7 @@ import {
   HelpCircle,
   Settings,
   Package,
+  Check,
   ChevronsLeft,
   ChevronsRight,
   BlockIcon,
@@ -119,7 +120,11 @@ export function ActivityBar() {
     persistExpanded(expanded);
   }, [expanded]);
 
-  function handlePanelClick(panel: SidebarPanel) {
+  function handlePanelClick(panel: SidebarPanel | 'block_studio' | 'review') {
+    if (panel === 'block_studio' || panel === 'review') {
+      dispatch({ type: 'SET_MAIN_VIEW', view: panel });
+      return;
+    }
     // Lineage: show the list panel on the left AND the full-page DAG in main.
     // SET_SIDEBAR_PANEL resets lineageFullscreen to false, so we re-toggle it
     // on after to keep the DAG mounted.
@@ -146,7 +151,7 @@ export function ActivityBar() {
   }
 
   const items: Array<{
-    key: SidebarPanel | 'connection' | 'reference';
+    key: SidebarPanel | 'block_studio' | 'review';
     title: string;
     icon: React.ReactNode;
     active: boolean;
@@ -164,16 +169,36 @@ export function ActivityBar() {
       active: state.sidebarPanel === 'files' && state.sidebarOpen,
     },
     {
+      key: 'block_library',
+      title: 'Blocks',
+      icon: <BlockIcon size={16} />,
+      active: state.sidebarPanel === 'block_library' && state.sidebarOpen,
+    },
+    {
+      key: 'block_studio',
+      title: 'Imports',
+      icon: <Plug size={16} strokeWidth={1.75} />,
+      active: state.mainView === 'block_studio',
+    },
+    {
+      key: 'review',
+      title: 'Review',
+      icon: <Check size={16} strokeWidth={1.75} />,
+      active: state.mainView === 'review',
+    },
+  ];
+
+  const secondaryItems: Array<{
+    key: SidebarPanel;
+    title: string;
+    icon: React.ReactNode;
+    active: boolean;
+  }> = [
+    {
       key: 'schema',
       title: 'Schema',
       icon: <Database size={16} strokeWidth={1.75} />,
       active: state.sidebarPanel === 'schema' && state.sidebarOpen,
-    },
-    {
-      key: 'block_library',
-      title: 'Block Library',
-      icon: <BlockIcon size={16} />,
-      active: state.sidebarPanel === 'block_library' && state.sidebarOpen,
     },
     {
       key: 'lineage',
@@ -190,7 +215,7 @@ export function ActivityBar() {
     {
       key: 'connection',
       title: 'Connections',
-      icon: <Plug size={16} strokeWidth={1.75} />,
+      icon: <Database size={16} strokeWidth={1.75} />,
       active: state.mainView === 'connection',
     },
   ];
@@ -290,7 +315,21 @@ export function ActivityBar() {
           icon={item.icon}
           active={item.active}
           expanded={expanded}
-          onClick={() => handlePanelClick(item.key as SidebarPanel)}
+          onClick={() => handlePanelClick(item.key)}
+          t={t}
+        />
+      ))}
+
+      <div style={{ height: 1, margin: expanded ? '6px 10px' : '6px 12px', background: t.headerBorder }} />
+
+      {secondaryItems.map((item) => (
+        <RailItem
+          key={item.key ?? item.title}
+          title={item.title}
+          icon={item.icon}
+          active={item.active}
+          expanded={expanded}
+          onClick={() => handlePanelClick(item.key)}
           t={t}
         />
       ))}

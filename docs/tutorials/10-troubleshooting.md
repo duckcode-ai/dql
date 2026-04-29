@@ -98,7 +98,7 @@ overwrites the first — but `dql validate` catches it as an error. Run
 
 ---
 
-## Apps + RBAC
+## Apps + Local Policies
 
 ### `dql app build` says "homepage references unknown dashboard"
 

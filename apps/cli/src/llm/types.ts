@@ -1,4 +1,6 @@
-export type ProviderId = 'claude-agent-sdk' | 'claude-code' | 'openai' | 'gemini' | 'ollama';
+import type { AgentResultPayload, KGNode } from '@duckcodeailabs/dql-agent';
+
+export type ProviderId = 'claude-agent-sdk' | 'claude-code' | 'openai' | 'gemini' | 'ollama' | 'custom-openai';
 
 export interface ChatTurn {
   role: 'user' | 'assistant';
@@ -34,6 +36,7 @@ export interface AgentRunRequest {
   messages: ChatTurn[];
   upstream?: { cellId?: string; sql?: string; preview?: unknown };
   projectRoot: string;
+  executeCertifiedBlock?: (block: KGNode) => Promise<AgentResultPayload>;
 }
 
 export interface AgentRunner {

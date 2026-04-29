@@ -100,7 +100,7 @@ export interface TableCellConfig {
   pinnedColumns?: string[];
 }
 
-export type ChatProviderId = 'claude-agent-sdk' | 'claude-code' | 'openai' | 'gemini' | 'ollama';
+export type ChatProviderId = 'claude-agent-sdk' | 'claude-code' | 'openai' | 'gemini' | 'ollama' | 'custom-openai';
 
 export interface ChatMessage {
   id: string;
@@ -123,7 +123,7 @@ export interface ChatBlockProposalSnapshot {
 }
 
 export interface ChatCellConfig {
-  provider: ChatProviderId;
+  provider?: ChatProviderId;
   history: ChatMessage[];
   upstream?: string;
   lastProposal?: ChatBlockProposalSnapshot;
@@ -139,7 +139,7 @@ export interface ParamConfig {
 }
 export type SidebarPanel = 'files' | 'schema' | 'block_library' | 'connection' | 'reference' | 'lineage' | 'git' | 'apps' | 'settings' | null;
 export type DevPanelTab = 'logs' | 'errors';
-export type MainView = 'notebook' | 'block_studio' | 'connection' | 'reference' | 'git' | 'apps' | 'settings';
+export type MainView = 'notebook' | 'block_studio' | 'connection' | 'reference' | 'git' | 'apps' | 'review' | 'settings';
 
 /**
  * Apps consumption-layer surface — list of Apps + currently-open App.
@@ -150,9 +150,15 @@ export interface AppSummary {
   id: string;
   name: string;
   domain: string;
+  subdomain?: string;
+  groups?: string[];
   description?: string;
   audience?: string;
-  status?: 'ready' | 'empty';
+  lifecycle?: 'draft' | 'review' | 'certified' | 'deprecated';
+  certification?: 'certified' | 'uncertified';
+  status?: 'ready' | 'empty' | 'review';
+  storage?: 'shared' | 'mine' | 'template';
+  visibility?: 'shared' | 'private' | 'template';
   owners: string[];
   tags: string[];
   members: number;
@@ -160,6 +166,9 @@ export interface AppSummary {
   policies: number;
   schedules: number;
   dashboards: Array<{ id: string; title: string }>;
+  notebooks?: Array<{ path: string; title?: string; role: 'source' | 'analysis' | 'supporting'; visibility: 'shared' | 'private' | 'template' }>;
+  drafts?: Array<{ path: string; name: string; reviewStatus?: string }>;
+  aiPins?: number;
   homepage?: { type: 'dashboard'; id: string } | { type: 'notebook'; path: string };
 }
 
@@ -471,6 +480,52 @@ export interface BlockStudioMetadata {
   owner: string;
   tags: string[];
   reviewStatus?: string;
+  sourceKind?: string;
+  sourcePath?: string;
+  importId?: string;
+  candidateId?: string;
+  lineage?: string[];
+}
+
+export interface BlockStudioImportCandidate {
+  id: string;
+  sourceKind: 'raw-sql-file' | 'raw-sql-folder' | 'tableau-workbook' | 'powerbi-project';
+  sourcePath: string;
+  name: string;
+  domain: string;
+  description: string;
+  owner: string;
+  tags: string[];
+  sql: string;
+  dqlSource: string;
+  validation: BlockStudioValidation | null;
+  preview: BlockStudioPreview | null;
+  lineage: {
+    sourceTables: string[];
+    parameters: string[];
+    warnings: string[];
+    statementIndex: number;
+    totalStatements: number;
+  };
+  confidence: number;
+  conversionNotes?: string[];
+  reviewStatus: 'draft' | 'review' | 'saved' | 'rejected';
+  savedPath?: string;
+}
+
+export interface BlockStudioImportSession {
+  id: string;
+  sourceKind: BlockStudioImportCandidate['sourceKind'];
+  inputPath: string;
+  createdAt: string;
+  updatedAt: string;
+  defaults: {
+    domain: string;
+    owner: string;
+    tags: string[];
+  };
+  candidateIds: string[];
+  candidates: BlockStudioImportCandidate[];
 }
 
 export interface DatabaseSchemaNode {

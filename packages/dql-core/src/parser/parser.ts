@@ -732,6 +732,12 @@ export class Parser {
     let llmContext: string | undefined;
     let invariants: string[] | undefined;
     let examples: Array<{ question: string; sql?: string }> | undefined;
+    let businessOutcome: string | undefined;
+    let businessOwner: string | undefined;
+    let decisionUse: string | undefined;
+    let reviewCadence: string | undefined;
+    let businessRules: string[] | undefined;
+    let caveats: string[] | undefined;
     // v1.4 — block certification status. Already surfaced by the manifest
     // builder via extractProp, the certifier, and the agent's "block-first"
     // matcher; the parser just needs to accept it as a valid top-level
@@ -829,10 +835,15 @@ export class Parser {
         this.check(TokenType.Identifier)
         && (this.current().value === 'llmContext'
           || this.current().value === 'invariants'
-          || this.current().value === 'examples')
+          || this.current().value === 'examples'
+          || this.current().value === 'businessOutcome'
+          || this.current().value === 'businessOwner'
+          || this.current().value === 'decisionUse'
+          || this.current().value === 'reviewCadence'
+          || this.current().value === 'businessRules'
+          || this.current().value === 'caveats')
       ) {
-        // v1.2 Track G — agent-facing metadata. Identifier-keyed to avoid
-        // new lexer keywords. All three are optional and additive.
+        // Agent-facing metadata. Identifier-keyed to avoid new lexer keywords.
         const keyToken = this.advance();
         this.expect(TokenType.Equals);
         if (keyToken.value === 'llmContext') {
@@ -845,7 +856,7 @@ export class Parser {
               .filter((e): e is import('../ast/nodes.js').StringLiteralNode => e.kind === NodeKind.StringLiteral)
               .map((e) => e.value);
           }
-        } else {
+        } else if (keyToken.value === 'examples') {
           // examples: [ { question = "...", sql = "..." }, ... ]
           this.expect(TokenType.LeftBracket);
           const items: Array<{ question: string; sql?: string }> = [];
@@ -873,10 +884,36 @@ export class Parser {
           }
           this.expect(TokenType.RightBracket);
           if (items.length > 0) examples = items;
+        } else if (keyToken.value === 'businessOutcome') {
+          const val = this.expect(TokenType.StringLiteral);
+          businessOutcome = val.value;
+        } else if (keyToken.value === 'businessOwner') {
+          const val = this.expect(TokenType.StringLiteral);
+          businessOwner = val.value;
+        } else if (keyToken.value === 'decisionUse') {
+          const val = this.expect(TokenType.StringLiteral);
+          decisionUse = val.value;
+        } else if (keyToken.value === 'reviewCadence') {
+          const val = this.expect(TokenType.StringLiteral);
+          reviewCadence = val.value;
+        } else if (keyToken.value === 'businessRules') {
+          const arrExpr = this.parseArrayLiteral();
+          if (arrExpr.kind === NodeKind.ArrayLiteral) {
+            businessRules = arrExpr.elements
+              .filter((e): e is import('../ast/nodes.js').StringLiteralNode => e.kind === NodeKind.StringLiteral)
+              .map((e) => e.value);
+          }
+        } else if (keyToken.value === 'caveats') {
+          const arrExpr = this.parseArrayLiteral();
+          if (arrExpr.kind === NodeKind.ArrayLiteral) {
+            caveats = arrExpr.elements
+              .filter((e): e is import('../ast/nodes.js').StringLiteralNode => e.kind === NodeKind.StringLiteral)
+              .map((e) => e.value);
+          }
         }
       } else {
         this.error(
-          `Unexpected token '${this.current().value}' inside block. Expected 'domain', 'type', 'status', 'metric', 'metrics', 'description', 'tags', 'owner', 'params', 'query', 'visualization', 'tests', 'llmContext', 'invariants', 'examples', or '}'.`,
+          `Unexpected token '${this.current().value}' inside block. Expected 'domain', 'type', 'status', 'metric', 'metrics', 'description', 'tags', 'owner', 'params', 'query', 'visualization', 'tests', 'llmContext', 'invariants', 'examples', 'businessOutcome', 'businessOwner', 'decisionUse', 'reviewCadence', 'businessRules', 'caveats', or '}'.`,
         );
         this.advance();
       }
@@ -909,6 +946,12 @@ export class Parser {
       llmContext,
       invariants,
       examples,
+      businessOutcome,
+      businessOwner,
+      decisionUse,
+      reviewCadence,
+      businessRules,
+      caveats,
       status,
       span: this.makeSpan(start, this.previousSpan()),
     };

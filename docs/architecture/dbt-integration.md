@@ -21,7 +21,9 @@ They share a single source of truth: `target/manifest.json`.
 ## The integration surface
 
 DQL reads `target/manifest.json`. That's it — no dbt-API calls, no YAML
-duplication, no "DQL's version of a model."
+duplication, no "DQL's version of a model." When present, DQL also reads
+`target/semantic_manifest.json` for MetricFlow semantic models, metrics,
+measures, dimensions, entities, and saved queries.
 
 ```
 dbt models     ─▶  target/manifest.json  ─▶  DQL semantic layer
@@ -39,11 +41,14 @@ dbt sources    ─┘                         ▼
 dbt build
 
 # In your DQL project:
-dql sync dbt
+dql compile .
+dql sync dbt .
+dql agent reindex
 ```
 
-Add `dql sync dbt` to your CI after `dbt build`, and DQL always reflects
-the latest manifest.
+Add these DQL commands to your CI after `dbt build`: `dql compile .` rebuilds
+the DQL manifest and lineage graph, `dql sync dbt .` verifies artifact paths and
+cache status, and `dql agent reindex` refreshes the governed answer index.
 
 ## What DQL does *not* do
 

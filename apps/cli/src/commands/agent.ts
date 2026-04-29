@@ -17,16 +17,19 @@
 
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { load as loadYaml } from 'js-yaml';
 import {
   KGStore,
+  MemoryStore,
   defaultKgPath,
+  defaultMemoryPath,
   reindexProject,
   loadSkills,
   pickProvider,
   answer,
   type ProviderName,
 } from '@duckcodeailabs/dql-agent';
-import { buildManifest } from '@duckcodeailabs/dql-core';
+import { buildManifest, resolveDbtManifestPath } from '@duckcodeailabs/dql-core';
 import type { CLIFlags } from '../args.js';
 import { findProjectRoot } from '../local-runtime.js';
 
@@ -42,12 +45,15 @@ export async function runAgent(
       return runReindex(flags);
     case 'feedback':
       return runFeedback(rest, flags);
+    case 'eval':
+      return runEval(rest, flags);
     default:
       throw new Error(
-        'Usage: dql agent <ask|reindex|feedback> [args]\n' +
+        'Usage: dql agent <ask|reindex|feedback|eval> [args]\n' +
           '  dql agent ask "<question>" [--provider claude|openai|gemini|ollama] [--user <id>] [--domain <d>]\n' +
           '  dql agent reindex\n' +
-          '  dql agent feedback up|down --block <id> --question "..."',
+          '  dql agent feedback up|down --block <id> --question "..."\n' +
+          '  dql agent eval agent-evals.yml [--provider claude|openai|gemini|ollama]',
       );
   }
 }
@@ -71,10 +77,16 @@ async function runAsk(rest: string[], flags: CLIFlags): Promise<void> {
 
   const provider = await pickProvider(providerName);
   const kg = new KGStore(kgPath);
+  const memory = new MemoryStore(defaultMemoryPath(projectRoot));
   const { skills } = loadSkills(projectRoot);
 
   try {
-    const manifest = buildManifest({ projectRoot });
+    const memoryContext = memory.search({
+      query: question,
+      scopes: ['project', 'user', 'artifact'],
+      limit: 6,
+    });
+    const manifest = buildManifest({ projectRoot, dbtManifestPath: resolveDbtManifestPath(projectRoot) ?? undefined });
     const result = await answer({
       question,
       provider,
@@ -82,6 +94,7 @@ async function runAsk(rest: string[], flags: CLIFlags): Promise<void> {
       skills,
       userId,
       domain,
+      memoryContext,
       executeCertifiedBlock: async (node) => {
         const block = manifest.blocks[node.name] ?? manifest.blocks[node.nodeId.replace(/^block:/, '')];
         if (!block) throw new Error(`Matched block ${node.name} is not present in the manifest.`);
@@ -119,6 +132,7 @@ async function runAsk(rest: string[], flags: CLIFlags): Promise<void> {
           rows,
           rowCount: typeof payload.result?.rowCount === 'number' ? payload.result.rowCount : rows.length,
           executionTime: payload.result?.executionTime,
+          blockName: node.name,
         };
       },
     });
@@ -147,6 +161,7 @@ async function runAsk(rest: string[], flags: CLIFlags): Promise<void> {
     }
   } finally {
     kg.close();
+    memory.close();
   }
 }
 
@@ -189,4 +204,96 @@ async function runFeedback(rest: string[], flags: CLIFlags): Promise<void> {
   } finally {
     kg.close();
   }
+}
+
+interface AgentEvalFile {
+  cases?: AgentEvalCase[];
+}
+
+interface AgentEvalCase {
+  name?: string;
+  question: string;
+  domain?: string;
+  expected?: {
+    sourceTier?: 'certified_artifact' | 'semantic_layer' | 'dbt_manifest' | 'no_answer';
+    certification?: 'certified' | 'ai_generated' | 'analyst_review_required';
+    kind?: 'certified' | 'uncertified' | 'no_answer';
+    sqlContains?: string;
+    citationKind?: string;
+    noHallucinatedColumns?: string[];
+  };
+}
+
+async function runEval(rest: string[], flags: CLIFlags): Promise<void> {
+  const projectRoot = findProjectRoot(process.cwd());
+  const evalPath = rest[0] ? join(projectRoot, rest[0]) : join(projectRoot, 'agent-evals.yml');
+  if (!existsSync(evalPath)) throw new Error(`Eval file not found: ${evalPath}`);
+
+  const raw = loadYaml(readFileSync(evalPath, 'utf-8')) as AgentEvalFile | AgentEvalCase[] | null;
+  const cases = Array.isArray(raw) ? raw : raw?.cases ?? [];
+  if (cases.length === 0) throw new Error('No eval cases found.');
+
+  const kgPath = defaultKgPath(projectRoot);
+  if (!existsSync(kgPath)) await reindexProject(projectRoot, { kgPath });
+
+  const providerName = (flags as { provider?: string }).provider as ProviderName | undefined;
+  const provider = await pickProvider(providerName);
+  const kg = new KGStore(kgPath);
+  const memory = new MemoryStore(defaultMemoryPath(projectRoot));
+  const { skills } = loadSkills(projectRoot);
+  const results: Array<{ name: string; passed: boolean; failures: string[] }> = [];
+
+  try {
+    for (const testCase of cases) {
+      const memoryContext = memory.search({
+        query: testCase.question,
+        scopes: ['project', 'user', 'artifact'],
+        limit: 6,
+      });
+      const result = await answer({
+        question: testCase.question,
+        domain: testCase.domain,
+        provider,
+        kg,
+        skills,
+        memoryContext,
+      });
+      const failures = evaluateCase(testCase, result);
+      results.push({
+        name: testCase.name ?? testCase.question,
+        passed: failures.length === 0,
+        failures,
+      });
+    }
+  } finally {
+    kg.close();
+    memory.close();
+  }
+
+  const passed = results.filter((r) => r.passed).length;
+  if ((flags as { format?: string }).format === 'json') {
+    console.log(JSON.stringify({ ok: passed === results.length, passed, total: results.length, results }, null, 2));
+    return;
+  }
+  for (const result of results) {
+    console.log(`${result.passed ? '✓' : '✕'} ${result.name}`);
+    for (const failure of result.failures) console.log(`  - ${failure}`);
+  }
+  console.log(`\n${passed}/${results.length} eval case(s) passed.`);
+  if (passed !== results.length) process.exitCode = 1;
+}
+
+function evaluateCase(testCase: AgentEvalCase, result: Awaited<ReturnType<typeof answer>>): string[] {
+  const expected = testCase.expected;
+  if (!expected) return [];
+  const failures: string[] = [];
+  if (expected.kind && result.kind !== expected.kind) failures.push(`kind expected ${expected.kind}, got ${result.kind}`);
+  if (expected.sourceTier && result.sourceTier !== expected.sourceTier) failures.push(`sourceTier expected ${expected.sourceTier}, got ${result.sourceTier}`);
+  if (expected.certification && result.certification !== expected.certification) failures.push(`certification expected ${expected.certification}, got ${result.certification}`);
+  if (expected.sqlContains && !result.proposedSql?.toLowerCase().includes(expected.sqlContains.toLowerCase())) failures.push(`SQL did not contain "${expected.sqlContains}"`);
+  if (expected.citationKind && !result.citations.some((c) => c.kind === expected.citationKind)) failures.push(`missing citation kind ${expected.citationKind}`);
+  for (const column of expected.noHallucinatedColumns ?? []) {
+    if (result.proposedSql?.toLowerCase().includes(column.toLowerCase())) failures.push(`hallucinated forbidden column "${column}"`);
+  }
+  return failures;
 }

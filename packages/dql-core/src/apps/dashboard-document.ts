@@ -43,17 +43,35 @@ export type DashboardVizConfig = {
   /** Chart kind. The renderer picks the matching @duckcodeailabs/dql-charts component. */
   type:
     | 'single_value'
+    | 'grouped_bar'
+    | 'stacked_bar'
     | 'line'
     | 'bar'
     | 'area'
     | 'pie'
+    | 'donut'
+    | 'scatter'
+    | 'heatmap'
+    | 'histogram'
+    | 'waterfall'
+    | 'gauge'
     | 'table'
     | 'pivot'
     | 'map'
     | 'funnel'
-    | 'kpi';
+    | 'kpi'
+    | 'text'
+    | 'heading';
   /** Free-form per-renderer options (axes, colors, etc.). */
   options?: Record<string, unknown>;
+};
+
+export type DashboardTextTile = {
+  markdown: string;
+};
+
+export type DashboardAiPinRef = {
+  id: string;
 };
 
 export type DashboardGridItem = {
@@ -63,7 +81,12 @@ export type DashboardGridItem = {
   y: number;
   w: number;
   h: number;
-  block: DashboardBlockRef;
+  /** Certified/shared block source. Existing dashboards use this shape. */
+  block?: DashboardBlockRef;
+  /** Local narrative/section text tile. */
+  text?: DashboardTextTile;
+  /** Local AI-generated answer pin stored in .dql/local/apps.sqlite. */
+  aiPin?: DashboardAiPinRef;
   viz: DashboardVizConfig;
   /** Optional human-readable title shown in the tile header. */
   title?: string;
@@ -76,7 +99,18 @@ export interface DashboardDocument {
     title: string;
     description?: string;
     domain?: string;
+    subdomain?: string;
+    groups?: string[];
+    audience?: string;
+    visibility?: 'shared' | 'private' | 'template';
+    lifecycle?: 'draft' | 'review' | 'certified' | 'deprecated';
     tags?: string[];
+    businessOutcome?: string;
+    businessOwner?: string;
+    decisionUse?: string;
+    reviewCadence?: string;
+    businessRules?: string[];
+    caveats?: string[];
   };
   params?: DashboardParam[];
   filters?: DashboardFilter[];
@@ -167,6 +201,7 @@ export function extractDashboardBlockRefs(doc: DashboardDocument): {
   const byId: string[] = [];
   const byPath: string[] = [];
   for (const item of doc.layout.items) {
+    if (!item.block) continue;
     if (isBlockIdRef(item.block)) byId.push(item.block.blockId);
     else byPath.push(item.block.ref);
   }
@@ -238,8 +273,28 @@ function readMetadata(raw: unknown, err: (m: string) => void): DashboardDocument
     title: o.title,
     description: typeof o.description === 'string' ? o.description : undefined,
     domain: typeof o.domain === 'string' ? o.domain : undefined,
+    subdomain: typeof o.subdomain === 'string' ? o.subdomain : undefined,
+    groups: stringArrayOrUndefined(o.groups, 'metadata.groups', err),
+    audience: typeof o.audience === 'string' ? o.audience : undefined,
+    visibility: enumOrUndefined(o.visibility, 'metadata.visibility', ['shared', 'private', 'template'] as const, err),
+    lifecycle: enumOrUndefined(o.lifecycle, 'metadata.lifecycle', ['draft', 'review', 'certified', 'deprecated'] as const, err),
     tags: tagsTyped,
+    businessOutcome: typeof o.businessOutcome === 'string' ? o.businessOutcome : undefined,
+    businessOwner: typeof o.businessOwner === 'string' ? o.businessOwner : undefined,
+    decisionUse: typeof o.decisionUse === 'string' ? o.decisionUse : undefined,
+    reviewCadence: typeof o.reviewCadence === 'string' ? o.reviewCadence : undefined,
+    businessRules: stringArrayOrUndefined(o.businessRules, 'metadata.businessRules', err),
+    caveats: stringArrayOrUndefined(o.caveats, 'metadata.caveats', err),
   };
+}
+
+function stringArrayOrUndefined(raw: unknown, field: string, err: (m: string) => void): string[] | undefined {
+  if (raw === undefined) return undefined;
+  if (!Array.isArray(raw) || !raw.every((x) => typeof x === 'string')) {
+    err(`${field} must be an array of strings`);
+    return undefined;
+  }
+  return raw as string[];
 }
 
 function readParams(raw: unknown, err: (m: string) => void): DashboardParam[] {
@@ -319,7 +374,8 @@ function readLayout(raw: unknown, err: (m: string) => void): DashboardDocument['
   }
 
   const allowedViz = [
-    'single_value', 'line', 'bar', 'area', 'pie', 'table', 'pivot', 'map', 'funnel', 'kpi',
+    'single_value', 'line', 'bar', 'grouped_bar', 'stacked_bar', 'area', 'pie', 'donut', 'scatter',
+    'heatmap', 'histogram', 'waterfall', 'gauge', 'table', 'pivot', 'map', 'funnel', 'kpi', 'text', 'heading',
   ] as const;
 
   const items: DashboardGridItem[] = [];
@@ -336,14 +392,22 @@ function readLayout(raw: unknown, err: (m: string) => void): DashboardDocument['
     }
 
     const blockRaw = it.block as Record<string, unknown> | undefined;
+    const textRaw = it.text as Record<string, unknown> | undefined;
+    const aiPinRaw = it.aiPin as Record<string, unknown> | undefined;
     let block: DashboardBlockRef | null = null;
     if (blockRaw && typeof blockRaw.blockId === 'string') {
       block = { blockId: blockRaw.blockId, version: typeof blockRaw.version === 'string' ? blockRaw.version : undefined };
     } else if (blockRaw && typeof blockRaw.ref === 'string') {
       block = { ref: blockRaw.ref, version: typeof blockRaw.version === 'string' ? blockRaw.version : undefined };
     }
-    if (!block) {
-      err(`layout.items[${i}].block must be { blockId } or { ref }`);
+    const text = textRaw && typeof textRaw.markdown === 'string'
+      ? { markdown: textRaw.markdown }
+      : null;
+    const aiPin = aiPinRaw && typeof aiPinRaw.id === 'string'
+      ? { id: aiPinRaw.id }
+      : null;
+    if (!block && !text && !aiPin) {
+      err(`layout.items[${i}].block must be { blockId } or { ref }, or item must have text or aiPin source`);
       continue;
     }
 
@@ -365,7 +429,9 @@ function readLayout(raw: unknown, err: (m: string) => void): DashboardDocument['
     items.push({
       i: it.i,
       x, y, w, h,
-      block,
+      ...(block ? { block } : {}),
+      ...(text ? { text } : {}),
+      ...(aiPin ? { aiPin } : {}),
       viz: { type: vizRaw.type as DashboardVizConfig['type'], options: opts },
       title: typeof it.title === 'string' ? it.title : undefined,
     });
@@ -376,4 +442,16 @@ function readLayout(raw: unknown, err: (m: string) => void): DashboardDocument['
 
 function num(v: unknown): number | null {
   return typeof v === 'number' && Number.isFinite(v) ? v : null;
+}
+
+function enumOrUndefined<T extends readonly string[]>(
+  raw: unknown,
+  field: string,
+  allowed: T,
+  err: (m: string) => void,
+): T[number] | undefined {
+  if (raw === undefined) return undefined;
+  if (typeof raw === 'string' && (allowed as readonly string[]).includes(raw)) return raw as T[number];
+  err(`${field} must be one of ${allowed.join('|')}`);
+  return undefined;
 }

@@ -16,6 +16,7 @@ export type LineageNodeType =
   | 'dimension'
   | 'domain'
   | 'chart'
+  | 'notebook'
   | 'dashboard'
   | 'app';
 
@@ -32,6 +33,7 @@ const NODE_TYPE_TO_LAYER: Record<LineageNodeType, LineageLayer> = {
   dimension: 'answer',
   domain: 'answer',
   chart: 'consumption',
+  notebook: 'consumption',
   dashboard: 'consumption',
   app: 'consumption',
 };

@@ -2,7 +2,7 @@
 
 DQL ships 15 drivers out of the box. Each supports **query execution** and
 **schema introspection** (tables, columns, types). Configure connections in
-`cdql.yaml`.
+`dql.config.json`.
 
 ## Driver matrix
 
@@ -26,50 +26,52 @@ DQL ships 15 drivers out of the box. Each supports **query execution** and
 
 ## Common options
 
-```yaml
-connections:
-  default:
-    driver: postgres
-    host: prod-db.internal
-    port: 5432
-    database: analytics
-    user: ${PGUSER}
-    password: ${PGPASSWORD}
-    schema: public
-    ssl: true             # optional; most drivers honor it
-    pool:
-      max: 10
-      idleTimeoutMs: 30000
+```json
+{
+  "connections": {
+    "default": {
+      "driver": "postgres",
+      "host": "prod-db.internal",
+      "port": 5432,
+      "database": "analytics",
+      "user": "${PGUSER}",
+      "password": "${PGPASSWORD}",
+      "schema": "public",
+      "ssl": true,
+      "pool": { "max": 10, "idleTimeoutMs": 30000 }
+    }
+  }
+}
 ```
 
 ## Per-driver specifics
 
 ### DuckDB
 
-```yaml
-driver: duckdb
-path: ./warehouse.duckdb    # or :memory:
+```json
+{ "driver": "duckdb", "path": "./warehouse.duckdb" }
 ```
 
 ### BigQuery
 
-```yaml
-driver: bigquery
-projectId: my-gcp-project
-location: US
-# GOOGLE_APPLICATION_CREDENTIALS env var is read automatically
+```json
+{ "driver": "bigquery", "projectId": "my-gcp-project", "location": "US" }
 ```
+
+`GOOGLE_APPLICATION_CREDENTIALS` is read automatically.
 
 ### Snowflake
 
-```yaml
-driver: snowflake
-account: xy12345.us-east-1
-user: ${SNOWFLAKE_USER}
-password: ${SNOWFLAKE_PASSWORD}
-warehouse: ANALYTICS_WH
-database: PROD
-role: ANALYST
+```json
+{
+  "driver": "snowflake",
+  "account": "xy12345.us-east-1",
+  "user": "${SNOWFLAKE_USER}",
+  "password": "${SNOWFLAKE_PASSWORD}",
+  "warehouse": "ANALYTICS_WH",
+  "database": "PROD",
+  "role": "ANALYST"
+}
 ```
 
 For the full per-driver option list, see each connector's README under

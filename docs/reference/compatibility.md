@@ -26,10 +26,13 @@ exploration, start with `duckdb` or `file`. See [Connectors](./connectors.md).
 
 - DQL language (parser, formatter, AST)
 - CLI (`init`, `notebook`, `compile`, `sync`, `diff`, `preview`, `serve`, `certify`, `test`, `fmt`, `doctor`)
-- Notebook UI (SQL + DQL cells, block studio, lineage panel, git panel)
-- Semantic layer (local YAML + dbt import)
-- Lineage DAG (table / block / notebook granularity)
+- Notebook UI (SQL + DQL cells, Block Studio, lineage panel, git panel, governed chat)
+- Apps, dashboard tabs, personal AI pins, and local persona/policy previews
+- Semantic layer (local YAML + dbt manifest and semantic manifest import)
+- Lineage DAG (Domain / App / Dashboard / Notebook / Block / semantic / dbt / source granularity)
 - 15 database connectors
+- Local agentic analytics with certified-first routing, draft block proposals, and BYO provider setup
+- Local schedules and Slack front-end
 - Plugin API (custom connectors, charts, governance rules)
 - OpenLineage export
 
@@ -37,10 +40,9 @@ exploration, start with `duckdb` or `file`. See [Connectors](./connectors.md).
 
 Lives in the closed DuckCode Cloud product:
 
-- Column-level lineage
-- Hosted multi-user workspace (SSO, RBAC, audit log)
-- Scheduled runs, alerting, orchestration
+- Hosted multi-user workspace with SSO, enforced RBAC, audit logs, and governed secrets
+- Organization memory, approval workflows, and permissions-aware team retrieval
+- Managed scheduled monitors, alerting, orchestration, and Slack/Teams delivery
 - Regulatory governance packs (SOX, HIPAA, GDPR)
-- AI / agentic block generation
 - Premium connectors (SAP, Oracle, mainframe)
 - Federated multi-warehouse blocks

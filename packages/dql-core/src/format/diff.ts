@@ -225,6 +225,12 @@ function diffBlock(a: BlockDeclNode, b: BlockDeclNode): FieldChange[] {
   scalar(out, 'description', a.description, b.description);
   scalar(out, 'owner', a.owner, b.owner);
   scalar(out, 'tags', a.tags?.join(', '), b.tags?.join(', '));
+  scalar(out, 'businessOutcome', a.businessOutcome, b.businessOutcome);
+  scalar(out, 'businessOwner', a.businessOwner, b.businessOwner);
+  scalar(out, 'decisionUse', a.decisionUse, b.decisionUse);
+  scalar(out, 'reviewCadence', a.reviewCadence, b.reviewCadence);
+  scalar(out, 'businessRules', a.businessRules?.join(', '), b.businessRules?.join(', '));
+  scalar(out, 'caveats', a.caveats?.join(', '), b.caveats?.join(', '));
   scalar(out, 'metricRef', a.metricRef, b.metricRef);
   scalar(out, 'metricsRef', a.metricsRef?.join(', '), b.metricsRef?.join(', '));
   scalar(out, 'query', normalizeSQL(a.query?.rawSQL), normalizeSQL(b.query?.rawSQL));

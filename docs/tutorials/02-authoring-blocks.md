@@ -302,4 +302,4 @@ dql certify blocks/fraud_by_merchant_recent.dql         --connection duckdb
 ✓ Three more certified blocks ready to compose into dashboards
 ✓ A `.dql/registry.sqlite` and `dql-manifest.json` populated with the cards domain
 
-[Continue to tutorial 03 — Apps, RBAC, and personas →](./03-apps-rbac-personas.md)
+[Continue to tutorial 03 — Apps, policies, and personas →](./03-apps-rbac-personas.md)

@@ -11,12 +11,27 @@ export type KGNodeKind =
   | 'block'
   | 'metric'
   | 'dimension'
+  | 'measure'
+  | 'entity'
+  | 'semantic_model'
+  | 'saved_query'
   | 'domain'
   | 'dbt_model'
   | 'dbt_source'
+  | 'notebook'
   | 'dashboard'
   | 'app'
   | 'skill';
+
+export type KGSourceTier =
+  | 'certified_artifact'
+  | 'semantic_layer'
+  | 'dbt_manifest'
+  | 'business_context'
+  | 'memory'
+  | 'project';
+
+export type KGCertification = 'certified' | 'ai_generated' | 'analyst_review_required' | 'uncertified';
 
 export interface KGNode {
   /** Stable identifier — `${kind}:${name}` (lower-cased). */
@@ -36,6 +51,26 @@ export interface KGNode {
   sourcePath?: string;
   /** Pinned git SHA at index time. */
   gitSha?: string;
+  /** Governing source tier used by the agent's precedence policy. */
+  sourceTier?: KGSourceTier;
+  /** Certification/review state. Kept advisory; block.status remains authoritative for blocks. */
+  certification?: KGCertification;
+  /** Human-readable provenance label, e.g. "dbt semantic_manifest.json". */
+  provenance?: string;
+  /** ISO timestamp or source freshness marker when available. */
+  freshness?: string;
+  /** Business outcome the artifact or semantic object is meant to support. */
+  businessOutcome?: string;
+  /** Business owner for the outcome, when distinct from the technical owner. */
+  businessOwner?: string;
+  /** Decision or workflow this asset is intended to inform. */
+  decisionUse?: string;
+  /** Expected review cadence for certification/freshness. */
+  reviewCadence?: string;
+  /** Business rules attached to this asset. */
+  businessRules?: string[];
+  /** Known caveats or interpretation constraints. */
+  caveats?: string[];
 }
 
 export interface KGEdge {

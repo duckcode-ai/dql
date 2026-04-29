@@ -106,6 +106,12 @@ export interface ManifestBlock {
   llmContext?: string;
   examples?: Array<{ question: string; sql?: string }>;
   invariants?: string[];
+  businessOutcome?: string;
+  businessOwner?: string;
+  decisionUse?: string;
+  reviewCadence?: string;
+  businessRules?: string[];
+  caveats?: string[];
 }
 
 // ---- Notebooks ----
@@ -217,7 +223,18 @@ export interface ManifestApp {
   id: string;
   name: string;
   description?: string;
+  businessOutcome?: string;
+  businessOwner?: string;
+  decisionUse?: string;
+  reviewCadence?: string;
+  businessRules?: string[];
+  caveats?: string[];
   domain: string;
+  subdomain?: string;
+  groups?: string[];
+  audience?: string;
+  visibility: 'shared' | 'private' | 'template';
+  lifecycle: 'draft' | 'review' | 'certified' | 'deprecated';
   owners: string[];
   tags: string[];
   /** Folder path relative to project root (e.g. "apps/growth-cxo"). */
@@ -259,6 +276,13 @@ export interface ManifestApp {
   }>;
   /** Dashboard ids declared inside this App. */
   dashboards: string[];
+  /** Notebook refs explicitly attached to this App. */
+  notebooks: Array<{
+    path: string;
+    title?: string;
+    role: 'source' | 'analysis' | 'supporting';
+    visibility: 'shared' | 'private' | 'template';
+  }>;
   /** Optional homepage shown when stakeholders open the App. */
   homepage?:
     | { type: 'dashboard'; id: string }
@@ -275,7 +299,18 @@ export interface ManifestDashboard {
   qualifiedId: string;
   title: string;
   description?: string;
+  businessOutcome?: string;
+  businessOwner?: string;
+  decisionUse?: string;
+  reviewCadence?: string;
+  businessRules?: string[];
+  caveats?: string[];
   domain?: string;
+  subdomain?: string;
+  groups?: string[];
+  audience?: string;
+  visibility?: 'shared' | 'private' | 'template';
+  lifecycle?: 'draft' | 'review' | 'certified' | 'deprecated';
   tags: string[];
   /** Path relative to project root (e.g. "apps/growth-cxo/dashboards/weekly-overview.dqld"). */
   filePath: string;

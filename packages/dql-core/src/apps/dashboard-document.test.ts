@@ -38,6 +38,37 @@ describe('parseDashboardDocument', () => {
     expect(document?.layout.items).toHaveLength(2);
   });
 
+  it('parses OSS metadata and notebook-style chart options', () => {
+    const doc = {
+      ...minimal,
+      metadata: {
+        title: 'Weekly Overview',
+        domain: 'cards',
+        subdomain: 'fraud',
+        groups: ['daily-ops'],
+        audience: 'ops',
+        visibility: 'shared',
+        lifecycle: 'review',
+      },
+      layout: {
+        ...minimal.layout,
+        items: [
+          {
+            i: 'scatter',
+            x: 0, y: 0, w: 6, h: 3,
+            block: { blockId: 'fraud_points' },
+            viz: { type: 'scatter', options: { chart: 'scatter', x: 'risk_score', y: 'amount', color: 'merchant' } },
+          },
+        ],
+      },
+    };
+    const { document, errors } = parseDashboardDocument(JSON.stringify(doc));
+    expect(errors).toEqual([]);
+    expect(document?.metadata.subdomain).toBe('fraud');
+    expect(document?.metadata.groups).toEqual(['daily-ops']);
+    expect(document?.layout.items[0].viz.options?.chart).toBe('scatter');
+  });
+
   it('errors on unknown viz type', () => {
     const bad = {
       ...minimal,

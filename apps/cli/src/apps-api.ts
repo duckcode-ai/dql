@@ -5,7 +5,7 @@
  */
 
 import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync, type Dirent, type Stats } from 'node:fs';
-import { join, dirname } from 'node:path';
+import { join, dirname, relative, basename } from 'node:path';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import {
   loadAppDocument,
@@ -17,9 +17,12 @@ import {
   suggestAppId,
   type AppDocument,
   type DashboardDocument,
+  type DashboardGridItem,
 } from '@duckcodeailabs/dql-core';
 import {
   defaultPersonaRegistry,
+  defaultLocalAppsDbPath,
+  LocalAppStorage,
   personaFromMember,
   type ActivePersona,
 } from '@duckcodeailabs/dql-project';
@@ -30,6 +33,7 @@ interface Ctx {
   url: URL;
   path: string;
   projectRoot: string;
+  executeSql?: (sql: string) => Promise<unknown>;
 }
 
 export async function handleAppsApi(ctx: Ctx): Promise<boolean> {
@@ -68,8 +72,165 @@ export async function handleAppsApi(ctx: Ctx): Promise<boolean> {
     return true;
   }
 
+  let m = path.match(/^\/api\/apps\/([^/]+)\/editor\/catalog$/);
+  if (m && req.method === 'GET') {
+    const appId = decodeURIComponent(m[1]);
+    const app = loadAppById(projectRoot, appId)?.app;
+    if (!app) {
+      sendJson(res, 404, { error: `App "${appId}" not found` });
+      return true;
+    }
+    const domain = ctx.url.searchParams.get('domain') ?? app.domain;
+    const certifiedOnly = ctx.url.searchParams.get('certifiedOnly') !== 'false';
+    const blocks = collectBlockCandidates(projectRoot)
+      .filter((block) => !certifiedOnly || block.status === 'certified')
+      .filter((block) => !domain || block.domain === domain || appAllowsExecute(app, block.domain))
+      .sort((a, b) => {
+        const aDomain = a.domain === app.domain ? 0 : 1;
+        const bDomain = b.domain === app.domain ? 0 : 1;
+        return aDomain - bDomain || a.name.localeCompare(b.name);
+      });
+    sendJson(res, 200, {
+      appId,
+      defaultDomain: app.domain,
+      domains: unique(blocks.map((block) => block.domain)),
+      blocks,
+    });
+    return true;
+  }
+
+  m = path.match(/^\/api\/apps\/([^/]+)\/dashboards$/);
+  if (m && req.method === 'POST') {
+    const appId = decodeURIComponent(m[1]);
+    try {
+      const body = await readJson<{ id?: string; title?: string; description?: string }>(req);
+      const result = createDashboardForApp(projectRoot, appId, body);
+      if (!result.ok) {
+        sendJson(res, 400, { error: result.error });
+        return true;
+      }
+      sendJson(res, 201, result);
+    } catch (err) {
+      sendJson(res, 500, { error: (err as Error).message });
+    }
+    return true;
+  }
+
+  m = path.match(/^\/api\/apps\/([^/]+)\/notebooks$/);
+  if (m && req.method === 'POST') {
+    const appId = decodeURIComponent(m[1]);
+    try {
+      const body = await readJson<{ path?: string; title?: string; role?: string; visibility?: string }>(req);
+      const result = attachNotebookToApp(projectRoot, appId, body);
+      if (!result.ok) {
+        sendJson(res, 400, { error: result.error });
+        return true;
+      }
+      sendJson(res, 200, loadAppById(projectRoot, appId) ?? result);
+    } catch (err) {
+      sendJson(res, 500, { error: (err as Error).message });
+    }
+    return true;
+  }
+
+  m = path.match(/^\/api\/apps\/([^/]+)\/ai-pins$/);
+  if (m) {
+    const appId = decodeURIComponent(m[1]);
+    if (req.method === 'GET') {
+      const dashboardId = ctx.url.searchParams.get('dashboardId') ?? undefined;
+      const storage = new LocalAppStorage(defaultLocalAppsDbPath(projectRoot));
+      try {
+        sendJson(res, 200, { pins: storage.listAiPins(appId, dashboardId) });
+      } finally {
+        storage.close();
+      }
+      return true;
+    }
+    if (req.method === 'POST') {
+      try {
+        const body = await readJson<AiPinCreateRequest>(req);
+        const created = createAiPinTile(projectRoot, appId, body);
+        if (!created.ok) {
+          sendJson(res, 400, { error: created.error });
+          return true;
+        }
+        sendJson(res, 201, created);
+      } catch (err) {
+        sendJson(res, 500, { error: (err as Error).message });
+      }
+      return true;
+    }
+  }
+
+  m = path.match(/^\/api\/apps\/([^/]+)\/ai-pins\/([^/]+)\/refresh$/);
+  if (m && req.method === 'POST') {
+    const pinId = decodeURIComponent(m[2]);
+    const storage = new LocalAppStorage(defaultLocalAppsDbPath(projectRoot));
+    try {
+      const pin = storage.getAiPin(pinId);
+      if (!pin) {
+        sendJson(res, 404, { error: `AI pin "${pinId}" not found` });
+        return true;
+      }
+      if (!pin.sql) {
+        const updated = storage.updateAiPinResult(pinId, pin.result, 'Pin has no SQL to refresh.');
+        sendJson(res, 400, { error: 'Pin has no SQL to refresh.', pin: updated });
+        return true;
+      }
+      if (!ctx.executeSql) {
+        const updated = storage.updateAiPinResult(pinId, pin.result, 'This host cannot execute AI pin SQL.');
+        sendJson(res, 400, { error: 'This host cannot execute AI pin SQL.', pin: updated });
+        return true;
+      }
+      const result = await ctx.executeSql(pin.sql);
+      const updated = storage.updateAiPinResult(pinId, result);
+      sendJson(res, 200, { ok: true, pin: updated });
+    } catch (err) {
+      const pin = storage.updateAiPinResult(pinId, undefined, err instanceof Error ? err.message : String(err));
+      sendJson(res, 500, { error: err instanceof Error ? err.message : String(err), pin });
+    } finally {
+      storage.close();
+    }
+    return true;
+  }
+
+  m = path.match(/^\/api\/apps\/([^/]+)\/ai-pins\/([^/]+)\/promote$/);
+  if (m && req.method === 'POST') {
+    const appId = decodeURIComponent(m[1]);
+    const pinId = decodeURIComponent(m[2]);
+    try {
+      const result = promoteAiPinToDraftBlock(projectRoot, appId, pinId);
+      if (!result.ok) {
+        sendJson(res, 400, { error: result.error });
+        return true;
+      }
+      sendJson(res, 200, result);
+    } catch (err) {
+      sendJson(res, 500, { error: (err as Error).message });
+    }
+    return true;
+  }
+
+  m = path.match(/^\/api\/apps\/([^/]+)\/dashboards\/([^/]+)\/layout$/);
+  if (m && req.method === 'PATCH') {
+    const appId = decodeURIComponent(m[1]);
+    const dashboardId = decodeURIComponent(m[2]);
+    try {
+      const body = await readJson<{ layout?: DashboardDocument['layout']; items?: DashboardGridItem[] }>(req);
+      const result = patchDashboardLayout(projectRoot, appId, dashboardId, body);
+      if (!result.ok) {
+        sendJson(res, 400, { error: result.error });
+        return true;
+      }
+      sendJson(res, 200, result);
+    } catch (err) {
+      sendJson(res, 500, { error: (err as Error).message });
+    }
+    return true;
+  }
+
   // /api/apps/:id  — single App with dashboards summary
-  let m = path.match(/^\/api\/apps\/([^/]+)$/);
+  m = path.match(/^\/api\/apps\/([^/]+)$/);
   if (m && req.method === 'GET') {
     const id = m[1];
     const result = loadAppById(projectRoot, id);
@@ -163,13 +324,19 @@ export async function handleAppsApi(ctx: Ctx): Promise<boolean> {
 
 // ---- Helpers ----
 
-function collectAppsList(projectRoot: string): Array<{
+type AppListEntry = {
   id: string;
   name: string;
   domain: string;
+  subdomain?: string;
+  groups: string[];
   description?: string;
   audience?: string;
-  status?: 'ready' | 'empty';
+  lifecycle: NonNullable<AppDocument['lifecycle']>;
+  certification: 'certified' | 'uncertified';
+  status?: 'ready' | 'empty' | 'review';
+  storage: 'shared' | 'mine' | 'template';
+  visibility: NonNullable<AppDocument['visibility']>;
   owners: string[];
   tags: string[];
   members: number;
@@ -177,24 +344,14 @@ function collectAppsList(projectRoot: string): Array<{
   policies: number;
   schedules: number;
   dashboards: Array<{ id: string; title: string }>;
+  notebooks: Array<{ path: string; title?: string; role: 'source' | 'analysis' | 'supporting'; visibility: NonNullable<AppDocument['visibility']> }>;
+  drafts: Array<{ path: string; name: string; reviewStatus?: string }>;
+  aiPins: number;
   homepage?: AppDocument['homepage'];
-}> {
-  const out: Array<{
-    id: string;
-    name: string;
-    domain: string;
-    description?: string;
-    owners: string[];
-    tags: string[];
-    audience?: string;
-    status?: 'ready' | 'empty';
-    members: number;
-    roles: number;
-    policies: number;
-    schedules: number;
-    dashboards: Array<{ id: string; title: string }>;
-    homepage?: AppDocument['homepage'];
-  }> = [];
+};
+
+function collectAppsList(projectRoot: string): AppListEntry[] {
+  const out: AppListEntry[] = [];
   for (const p of findAppDocuments(projectRoot)) {
     const { document } = loadAppDocument(p);
     if (!document) continue;
@@ -208,9 +365,15 @@ function collectAppsList(projectRoot: string): Array<{
       id: document.id,
       name: document.name,
       domain: document.domain,
+      subdomain: document.subdomain,
+      groups: document.groups ?? [],
       description: document.description,
-      audience: audienceFromTags(document.tags ?? []),
-      status: dashboards.length > 0 ? 'ready' : 'empty',
+      audience: document.audience ?? audienceFromTags(document.tags ?? []),
+      lifecycle: document.lifecycle ?? 'draft',
+      certification: document.lifecycle === 'certified' ? 'certified' : 'uncertified',
+      status: document.lifecycle === 'review' ? 'review' : dashboards.length > 0 ? 'ready' : 'empty',
+      storage: document.visibility === 'private' ? 'mine' : document.visibility === 'template' ? 'template' : 'shared',
+      visibility: document.visibility ?? 'shared',
       owners: document.owners,
       tags: document.tags ?? [],
       members: document.members.length,
@@ -218,6 +381,9 @@ function collectAppsList(projectRoot: string): Array<{
       policies: document.policies.length,
       schedules: (document.schedules ?? []).length,
       dashboards,
+      notebooks: listAppNotebookRefs(projectRoot, document, appDir),
+      drafts: listAppDrafts(projectRoot, appDir),
+      aiPins: countAiPins(projectRoot, document.id),
       homepage: document.homepage,
     });
   }
@@ -235,11 +401,30 @@ interface AppRecommendationRequest {
 interface AppCreateRequest {
   name?: string;
   domain?: string;
+  subdomain?: string;
+  groups?: string[];
   purpose?: string;
   audience?: string;
+  visibility?: 'shared' | 'private' | 'template';
+  lifecycle?: AppDocument['lifecycle'];
   tags?: string[];
   owners?: string[];
   selectedBlockIds?: string[];
+}
+
+interface AiPinCreateRequest {
+  dashboardId?: string;
+  tileId?: string;
+  title?: string;
+  answer?: string;
+  sql?: string;
+  sourceTier?: string;
+  certification?: 'certified' | 'ai_generated';
+  reviewStatus?: 'needs_review' | 'draft_created' | 'certified' | 'rejected';
+  refreshCadence?: 'none' | 'daily';
+  chartConfig?: Record<string, unknown>;
+  result?: unknown;
+  citations?: unknown[];
 }
 
 interface BlockCandidate {
@@ -320,6 +505,12 @@ export function createAppPackage(
 
   const owner = cleanString(input.owners?.[0]) || `${process.env.USER ?? 'owner'}@local`;
   const audience = cleanString(input.audience);
+  const subdomain = cleanString(input.subdomain);
+  const groups = normalizeTags(input.groups ?? []);
+  const visibility = input.visibility === 'private' || input.visibility === 'template' ? input.visibility : 'shared';
+  const lifecycle = input.lifecycle === 'certified' || input.lifecycle === 'review' || input.lifecycle === 'deprecated'
+    ? input.lifecycle
+    : 'draft';
   const tags = normalizeTags([...(input.tags ?? []), audience ? `audience:${slugify(audience)}` : '']);
   const selectedIds = Array.from(new Set((input.selectedBlockIds ?? []).map(cleanString).filter(Boolean)));
   const blocks = collectBlockCandidates(projectRoot);
@@ -332,7 +523,12 @@ export function createAppPackage(
     id,
     name,
     description: cleanString(input.purpose) || `${name} consumption surface for ${domain}`,
+    visibility,
     domain,
+    subdomain: subdomain || undefined,
+    groups,
+    audience: audience || undefined,
+    lifecycle,
     owners: [owner],
     tags,
     members: [
@@ -381,6 +577,11 @@ export function createAppPackage(
       title: `${name} Overview`,
       description: cleanString(input.purpose) || `Starter dashboard for ${name}`,
       domain,
+      subdomain: subdomain || undefined,
+      groups,
+      audience: audience || undefined,
+      visibility,
+      lifecycle,
       tags,
     },
     layout: {
@@ -470,14 +671,22 @@ function tileSize(chartType: string): { w: number; h: number } {
   return { w: 6, h: 3 };
 }
 
-function normalizeVizType(chartType?: string): 'single_value' | 'line' | 'bar' | 'area' | 'pie' | 'table' | 'pivot' | 'map' | 'funnel' | 'kpi' {
+function normalizeVizType(chartType?: string): DashboardGridItem['viz']['type'] {
   const normalized = (chartType ?? 'table').toLowerCase().replace(/-/g, '_');
   if (normalized === 'single' || normalized === 'single_value') return 'single_value';
   if (normalized === 'kpi') return 'kpi';
   if (normalized === 'line') return 'line';
   if (normalized === 'bar') return 'bar';
+  if (normalized === 'grouped_bar') return 'grouped_bar';
+  if (normalized === 'stacked_bar') return 'stacked_bar';
   if (normalized === 'area') return 'area';
   if (normalized === 'pie') return 'pie';
+  if (normalized === 'donut') return 'donut';
+  if (normalized === 'scatter') return 'scatter';
+  if (normalized === 'heatmap') return 'heatmap';
+  if (normalized === 'histogram') return 'histogram';
+  if (normalized === 'waterfall') return 'waterfall';
+  if (normalized === 'gauge') return 'gauge';
   if (normalized === 'pivot') return 'pivot';
   if (normalized === 'map') return 'map';
   if (normalized === 'funnel') return 'funnel';
@@ -491,9 +700,15 @@ function appReadme(app: AppDocument, audience: string, blocks: BlockCandidate[])
     app.description ?? '',
     '',
     `- Domain: ${app.domain}`,
+    ...(app.subdomain ? [`- Subdomain: ${app.subdomain}`] : []),
+    ...(app.groups?.length ? [`- Groups: ${app.groups.join(', ')}`] : []),
     `- Audience: ${audience || 'not specified'}`,
+    `- Visibility: ${app.visibility}`,
+    `- Lifecycle: ${app.lifecycle}`,
     `- Owners: ${app.owners.join(', ')}`,
     `- Starter dashboard: dashboards/overview.dqld`,
+    `- Supporting notebooks: notebooks/`,
+    `- Draft blocks: drafts/`,
     '',
     '## Selected Certified Blocks',
     '',
@@ -586,11 +801,24 @@ function normalizeTags(values: string[]): string[] {
   return Array.from(new Set(values.map((value) => cleanString(value)).filter(Boolean)));
 }
 
+function unique(values: string[]): string[] {
+  return Array.from(new Set(values.filter(Boolean))).sort((a, b) => a.localeCompare(b));
+}
+
 function slugify(value: string): string {
   return value
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, '-')
     .replace(/^-+|-+$/g, '');
+}
+
+function titleFromPath(path: string): string {
+  return basename(path)
+    .replace(/\.(dqlnb|dql)$/i, '')
+    .replace(/[_-]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .replace(/\b\w/g, (char) => char.toUpperCase()) || path;
 }
 
 function audienceFromTags(tags: string[]): string | undefined {
@@ -599,12 +827,209 @@ function audienceFromTags(tags: string[]): string | undefined {
   return tag.slice('audience:'.length).replace(/-/g, ' ');
 }
 
+function appAllowsExecute(app: AppDocument, domain: string): boolean {
+  return (app.policies ?? []).some((policy) => {
+    if (policy.enabled === false) return false;
+    if (policy.domain !== '*' && policy.domain !== domain) return false;
+    return policy.accessLevel === 'execute' || policy.accessLevel === 'admin';
+  });
+}
+
+function createDashboardForApp(
+  projectRoot: string,
+  appId: string,
+  input: { id?: string; title?: string; description?: string },
+): { ok: true; dashboard: DashboardDocument; path: string } | { ok: false; error: string } {
+  const loaded = loadAppById(projectRoot, appId);
+  if (!loaded) return { ok: false, error: `App "${appId}" not found` };
+  const title = cleanString(input.title) || 'New tab';
+  const id = slugify(cleanString(input.id) || title) || `tab-${Date.now()}`;
+  if (!/^[a-z0-9][a-z0-9_-]*$/i.test(id)) return { ok: false, error: 'dashboard id must be folder-safe' };
+  const appDir = join(projectRoot, 'apps', appId);
+  const dashboardPath = join(appDir, 'dashboards', `${id}.dqld`);
+  if (existsSync(dashboardPath)) return { ok: false, error: `Dashboard already exists: ${id}` };
+  const dashboard: DashboardDocument = {
+    version: 1,
+    id,
+    metadata: {
+      title,
+      description: cleanString(input.description) || `${title} dashboard tab`,
+      domain: loaded.app.domain,
+      subdomain: loaded.app.subdomain,
+      groups: loaded.app.groups ?? [],
+      audience: loaded.app.audience,
+      visibility: loaded.app.visibility ?? 'shared',
+      lifecycle: loaded.app.lifecycle ?? 'draft',
+      tags: loaded.app.tags ?? [],
+    },
+    layout: {
+      kind: 'grid',
+      cols: 12,
+      rowHeight: 80,
+      items: [],
+    },
+  };
+  mkdirSync(dirname(dashboardPath), { recursive: true });
+  writeFileSync(dashboardPath, JSON.stringify(dashboard, null, 2) + '\n', 'utf-8');
+  return { ok: true, dashboard, path: relative(projectRoot, dashboardPath) };
+}
+
+function patchDashboardLayout(
+  projectRoot: string,
+  appId: string,
+  dashboardId: string,
+  input: { layout?: DashboardDocument['layout']; items?: DashboardGridItem[] },
+): { ok: true; dashboard: DashboardDocument; path: string } | { ok: false; error: string } {
+  const loaded = loadDashboardForApp(projectRoot, appId, dashboardId);
+  if (!loaded) return { ok: false, error: `Dashboard "${dashboardId}" not found in app "${appId}"` };
+  const next: DashboardDocument = {
+    ...loaded.dashboard,
+    layout: input.layout
+      ? input.layout
+      : {
+          ...loaded.dashboard.layout,
+          items: input.items ?? loaded.dashboard.layout.items,
+        },
+  };
+  const written = writeDashboard(projectRoot, appId, dashboardId, next);
+  if (!written.ok) return written;
+  return { ok: true, dashboard: next, path: relative(projectRoot, written.path) };
+}
+
+function createAiPinTile(
+  projectRoot: string,
+  appId: string,
+  input: AiPinCreateRequest,
+): { ok: true; pin: unknown; dashboard?: DashboardDocument; tile?: DashboardGridItem } | { ok: false; error: string } {
+  const dashboardId = cleanString(input.dashboardId);
+  if (!dashboardId) return { ok: false, error: 'dashboardId is required' };
+  const loaded = loadDashboardForApp(projectRoot, appId, dashboardId);
+  if (!loaded) return { ok: false, error: `Dashboard "${dashboardId}" not found in app "${appId}"` };
+  const title = cleanString(input.title) || 'AI result';
+  const tileId = cleanString(input.tileId) || nextTileId(loaded.dashboard, slugify(title) || 'ai-pin');
+  const storage = new LocalAppStorage(defaultLocalAppsDbPath(projectRoot));
+  try {
+    const pin = storage.createAiPin({
+      appId,
+      dashboardId,
+      tileId,
+      title,
+      answer: cleanString(input.answer) || title,
+      sql: cleanString(input.sql) || undefined,
+      sourceTier: cleanString(input.sourceTier) || undefined,
+      certification: input.certification === 'certified' ? 'certified' : 'ai_generated',
+      reviewStatus: input.reviewStatus,
+      refreshCadence: input.refreshCadence === 'daily' ? 'daily' : 'none',
+      chartConfig: input.chartConfig,
+      result: input.result,
+      citations: Array.isArray(input.citations) ? input.citations : [],
+    });
+    const tile: DashboardGridItem = {
+      i: tileId,
+      ...nextTilePosition(loaded.dashboard),
+      aiPin: { id: pin.id },
+      viz: { type: normalizeVizTypeFromChart(input.chartConfig) },
+      title,
+    };
+    const dashboard: DashboardDocument = {
+      ...loaded.dashboard,
+      layout: {
+        ...loaded.dashboard.layout,
+        items: [...loaded.dashboard.layout.items, tile],
+      },
+    };
+    const written = writeDashboard(projectRoot, appId, dashboardId, dashboard);
+    if (!written.ok) {
+      return { ok: false, error: written.error };
+    }
+    return { ok: true, pin, dashboard, tile };
+  } finally {
+    storage.close();
+  }
+}
+
+function promoteAiPinToDraftBlock(
+  projectRoot: string,
+  appId: string,
+  pinId: string,
+): { ok: true; pin: unknown; blockPath: string } | { ok: false; error: string } {
+  const loaded = loadAppById(projectRoot, appId);
+  if (!loaded) return { ok: false, error: `App "${appId}" not found` };
+  const storage = new LocalAppStorage(defaultLocalAppsDbPath(projectRoot));
+  try {
+    const pin = storage.getAiPin(pinId);
+    if (!pin) return { ok: false, error: `AI pin "${pinId}" not found` };
+    if (!pin.sql) return { ok: false, error: 'AI pin has no SQL to promote' };
+    const blockName = slugify(pin.title) || pin.id;
+    const draftDir = join(projectRoot, 'apps', appId, 'drafts');
+    const blockPath = join(draftDir, `${blockName}.dql`);
+    mkdirSync(draftDir, { recursive: true });
+    const source = [
+      `block "${blockName}" {`,
+      `  domain = "${escapeDqlString(loaded.app.domain)}"`,
+      '  type = "custom"',
+      '  status = "review"',
+      `  owner = "${escapeDqlString(loaded.app.owners[0] ?? `${process.env.USER ?? 'analyst'}@local`)}"`,
+      `  description = "${escapeDqlString(pin.answer.slice(0, 240))}"`,
+      '  tags = ["ai-generated", "needs-review"]',
+      '',
+      '  query = """',
+      pin.sql,
+      '  """',
+      '',
+      '  visualization {',
+      `    chart = "${escapeDqlString(String((pin.chartConfig as { chart?: unknown } | undefined)?.chart ?? 'table'))}"`,
+      '  }',
+      '}',
+      '',
+    ].join('\n');
+    writeFileSync(blockPath, source, 'utf-8');
+    const updated = storage.markAiPinPromoted(pinId, relative(projectRoot, blockPath));
+    return { ok: true, pin: updated, blockPath: relative(projectRoot, blockPath) };
+  } finally {
+    storage.close();
+  }
+}
+
+function nextTilePosition(dashboard: DashboardDocument): { x: number; y: number; w: number; h: number } {
+  const maxY = dashboard.layout.items.reduce((value, item) => Math.max(value, item.y + item.h), 0);
+  return { x: 0, y: maxY, w: 6, h: 3 };
+}
+
+function nextTileId(dashboard: DashboardDocument, base: string): string {
+  const used = new Set(dashboard.layout.items.map((item) => item.i));
+  if (!used.has(base)) return base;
+  for (let i = 2; i < 1000; i++) {
+    const candidate = `${base}-${i}`;
+    if (!used.has(candidate)) return candidate;
+  }
+  return `${base}-${Date.now()}`;
+}
+
+function normalizeVizTypeFromChart(chartConfig: Record<string, unknown> | undefined): DashboardGridItem['viz']['type'] {
+  const chart = String(chartConfig?.chart ?? '').toLowerCase().replace(/-/g, '_');
+  if (chart === 'single_value' || chart === 'kpi' || chart === 'line' || chart === 'bar' || chart === 'area'
+    || chart === 'grouped_bar' || chart === 'stacked_bar' || chart === 'pie' || chart === 'donut'
+    || chart === 'scatter' || chart === 'heatmap' || chart === 'histogram' || chart === 'waterfall'
+    || chart === 'gauge' || chart === 'pivot' || chart === 'map' || chart === 'funnel') {
+    return chart;
+  }
+  return 'table';
+}
+
+function escapeDqlString(value: string): string {
+  return value.replace(/\\/g, '\\\\').replace(/"/g, '\\"').replace(/\r?\n/g, ' ');
+}
+
 function loadAppById(
   projectRoot: string,
   id: string,
 ): {
   app: AppDocument;
   dashboards: Array<{ id: string; title: string; description?: string; itemCount: number }>;
+  notebooks: AppListEntry['notebooks'];
+  drafts: AppListEntry['drafts'];
+  aiPins: unknown[];
 } | null {
   for (const p of findAppDocuments(projectRoot)) {
     const { document } = loadAppDocument(p);
@@ -622,9 +1047,119 @@ function loadAppById(
         });
       }
     }
-    return { app: document, dashboards };
+    return {
+      app: document,
+      dashboards,
+      notebooks: listAppNotebookRefs(projectRoot, document, appDir),
+      drafts: listAppDrafts(projectRoot, appDir),
+      aiPins: listAiPins(projectRoot, document.id),
+    };
   }
   return null;
+}
+
+function attachNotebookToApp(
+  projectRoot: string,
+  appId: string,
+  input: { path?: string; title?: string; role?: string; visibility?: string },
+): { ok: true; path: string } | { ok: false; error: string } {
+  const notebookPath = cleanString(input.path).replaceAll('\\', '/');
+  if (!notebookPath) return { ok: false, error: 'path is required' };
+  if (notebookPath.startsWith('/') || notebookPath.includes('..')) {
+    return { ok: false, error: 'notebook path must be project-relative' };
+  }
+  if (!existsSync(join(projectRoot, notebookPath))) {
+    return { ok: false, error: `Notebook not found: ${notebookPath}` };
+  }
+  for (const appJsonPath of findAppDocuments(projectRoot)) {
+    const { document } = loadAppDocument(appJsonPath);
+    if (!document || document.id !== appId) continue;
+    const role = input.role === 'source' || input.role === 'analysis' ? input.role : 'supporting';
+    const visibility = input.visibility === 'private' || input.visibility === 'template' ? input.visibility : 'shared';
+    const next: AppDocument = {
+      ...document,
+      notebooks: [
+        ...(document.notebooks ?? []).filter((notebook) => notebook.path !== notebookPath),
+        {
+          path: notebookPath,
+          title: cleanString(input.title) || titleFromPath(notebookPath),
+          role,
+          visibility,
+        },
+      ],
+    };
+    const { document: validated, errors } = parseAppDocument(JSON.stringify(next), appJsonPath);
+    if (!validated) return { ok: false, error: errors.map((e) => e.message).join('; ') };
+    writeFileSync(appJsonPath, JSON.stringify(validated, null, 2) + '\n', 'utf-8');
+    return { ok: true, path: relative(projectRoot, appJsonPath) };
+  }
+  return { ok: false, error: `App "${appId}" not found` };
+}
+
+function listAppNotebookRefs(
+  projectRoot: string,
+  app: AppDocument,
+  appDir: string,
+): AppListEntry['notebooks'] {
+  const byPath = new Map<string, AppListEntry['notebooks'][number]>();
+  for (const notebook of app.notebooks ?? []) {
+    byPath.set(notebook.path, {
+      path: notebook.path,
+      title: notebook.title,
+      role: notebook.role,
+      visibility: notebook.visibility ?? 'shared',
+    });
+  }
+  const notebooksDir = join(appDir, 'notebooks');
+  for (const file of scanFiles(notebooksDir, '.dqlnb')) {
+    const rel = relative(projectRoot, file).replaceAll('\\', '/');
+    if (byPath.has(rel)) continue;
+    byPath.set(rel, {
+      path: rel,
+      title: titleFromPath(rel),
+      role: 'supporting',
+      visibility: app.visibility ?? 'shared',
+    });
+  }
+  return Array.from(byPath.values()).sort((a, b) => (a.title ?? a.path).localeCompare(b.title ?? b.path));
+}
+
+function listAppDrafts(projectRoot: string, appDir: string): AppListEntry['drafts'] {
+  return scanFiles(join(appDir, 'drafts'), '.dql').map((file) => {
+    const source = readFileSync(file, 'utf-8');
+    const path = relative(projectRoot, file).replaceAll('\\', '/');
+    return {
+      path,
+      name: matchString(source, /block\s+"([^"]+)"/) ?? titleFromPath(path),
+      reviewStatus: matchString(source, /status\s*=\s*"([^"]+)"/) ?? 'review',
+    };
+  }).sort((a, b) => a.name.localeCompare(b.name));
+}
+
+function scanFiles(root: string, extension: string): string[] {
+  if (!existsSync(root)) return [];
+  const out: string[] = [];
+  for (const entry of readdirSyncSafe(root)) {
+    const full = join(root, entry.name);
+    if (entry.isDirectory()) out.push(...scanFiles(full, extension));
+    else if (entry.isFile() && entry.name.endsWith(extension)) out.push(full);
+  }
+  return out.sort();
+}
+
+function countAiPins(projectRoot: string, appId: string): number {
+  return listAiPins(projectRoot, appId).length;
+}
+
+function listAiPins(projectRoot: string, appId: string): unknown[] {
+  const dbPath = defaultLocalAppsDbPath(projectRoot);
+  if (!existsSync(dbPath)) return [];
+  const storage = new LocalAppStorage(dbPath);
+  try {
+    return storage.listAiPins(appId);
+  } finally {
+    storage.close();
+  }
 }
 
 function listDashboardsFor(projectRoot: string, id: string) {
@@ -651,12 +1186,12 @@ function loadDashboardForApp(
   return null;
 }
 
-async function writeDashboard(
+function writeDashboard(
   projectRoot: string,
   appId: string,
   dashboardId: string,
   payload: unknown,
-): Promise<{ ok: true; path: string } | { ok: false; error: string }> {
+): { ok: true; path: string } | { ok: false; error: string } {
   // Validate against the dashboard schema before touching disk.
   const { document, errors } = parseDashboardDocument(JSON.stringify(payload), '<incoming>');
   if (!document) {

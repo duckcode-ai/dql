@@ -6,6 +6,60 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 
 ---
 
+## v1.5.0 - 2026-04-27
+
+### Agentic analytics evidence, app builder, and local-first AI setup
+
+This release turns the first DQL agent surface into a governed analytics
+workflow: certified assets first, semantic/dbt fallback second, and generated
+answers clearly labeled for analyst review. It also makes Apps a stronger
+stakeholder surface with editable layouts, local AI pins, scoped lineage, and
+provider setup in Settings.
+
+### Added
+
+- Governed answer envelopes with source tier, certification state, SQL/result
+  metadata, citations, confidence, review state, and evidence tabs.
+- Evidence view for agent answers: Answer, Chart, Data, Lineage, Business
+  Context, SQL / Block, and Review.
+- Certified-first agent routing across certified blocks/dashboards/apps,
+  semantic/dbt metadata, and manifest-backed SQL fallback.
+- Local agent memory storage and Settings UI for scoped project/user/artifact
+  memory.
+- Provider setup cards for OpenAI, Gemini, Ollama, and custom OpenAI-compatible
+  endpoints, with local Settings-backed provider selection.
+- App Builder edit mode with Add tab, Add tile, text/summary tiles, section
+  headings, domain-scoped certified block catalog, drag handles, size presets,
+  and auto-packed layout movement.
+- Local AI pins for Apps with refresh cadence, citations, review status, and
+  promote-to-draft-block path.
+- Add-to-App choices for AI answers: Chart + data, Chart only, or Data table.
+- Scoped App lineage from Domain -> App -> Dashboard -> Tile -> Block ->
+  semantic/dbt/source nodes.
+- dbt semantic manifest and semantic YAML ingestion improvements.
+
+### Changed
+
+- Dashboard/App chat now uses the provider configured in Settings instead of
+  asking users to pick a provider in every chat surface.
+- App chat is a sticky, viewport-bounded side drawer with expand/collapse and
+  close controls so the input remains visible.
+- Chat answer cards are compact by default in App/Dashboard mode and keep route
+  details out of the primary answer tab.
+- Certified block answers can execute and return result data when the runtime
+  host provides governed execution.
+
+### Fixed
+
+- Ollama/provider configuration persistence and default provider resolution.
+- `@block("...")` execution path for block-backed notebook usage.
+- Duplicate Add menus in empty App tabs.
+- App dashboard AI pins previously added only chart views even when result rows
+  were available.
+- Lineage labels and notebook/dashboard node typing in scoped lineage views.
+
+---
+
 ## v1.4.0 — 2026-04-25
 
 ### Apps, Agentic Analytics, programmable end-to-end DQL

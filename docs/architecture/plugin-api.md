@@ -19,12 +19,14 @@ export const myConnector: Connector = {
 };
 ```
 
-Register via `cdql.yaml`:
+Register via `dql.config.json`:
 
-```yaml
-plugins:
-  connectors:
-    - my-company/dql-connector-exasol
+```json
+{
+  "plugins": {
+    "connectors": ["my-company/dql-connector-exasol"]
+  }
+}
 ```
 
 ## Custom chart types
@@ -56,11 +58,14 @@ export const hipaaPack: RulePack = {
 };
 ```
 
-Register in `cdql.yaml`:
+Register in `dql.config.json`:
 
-```yaml
-governance:
-  rule_packs: ['@my-company/dql-hipaa']
+```json
+{
+  "governance": {
+    "rule_packs": ["@my-company/dql-hipaa"]
+  }
+}
 ```
 
 ## Stability

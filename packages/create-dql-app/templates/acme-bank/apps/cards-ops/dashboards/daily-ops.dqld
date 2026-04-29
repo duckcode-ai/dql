@@ -5,6 +5,11 @@
     "title": "Cards Daily Ops",
     "description": "Certified cards operating dashboard for volume, approvals, and fraud exposure.",
     "domain": "cards",
+    "subdomain": "fraud",
+    "groups": ["daily-ops", "merchant-risk"],
+    "audience": "operations",
+    "visibility": "shared",
+    "lifecycle": "review",
     "tags": ["cards", "fraud", "ops"]
   },
   "filters": [
@@ -58,4 +63,3 @@
     ]
   }
 }
-

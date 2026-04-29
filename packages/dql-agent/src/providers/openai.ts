@@ -13,27 +13,28 @@ export class OpenAIProvider implements AgentProvider {
   private readonly apiKey?: string;
   private readonly baseUrl: string;
   private readonly defaultModel: string;
+  private readonly allowNoApiKey: boolean;
 
-  constructor(opts: { apiKey?: string; baseUrl?: string; model?: string } = {}) {
+  constructor(opts: { apiKey?: string; baseUrl?: string; model?: string; allowNoApiKey?: boolean } = {}) {
     this.apiKey = opts.apiKey ?? process.env.OPENAI_API_KEY;
     this.baseUrl = (opts.baseUrl ?? process.env.OPENAI_BASE_URL ?? 'https://api.openai.com/v1').replace(/\/+$/, '');
     this.defaultModel = opts.model ?? process.env.OPENAI_MODEL ?? 'gpt-4.1-mini';
+    this.allowNoApiKey = opts.allowNoApiKey ?? false;
   }
 
   async available(): Promise<boolean> {
-    return Boolean(this.apiKey);
+    return Boolean(this.apiKey) || this.allowNoApiKey;
   }
 
   async generate(messages: AgentMessage[], options: ProviderRunOptions = {}): Promise<string> {
-    if (!this.apiKey) {
+    if (!this.apiKey && !this.allowNoApiKey) {
       throw new Error('openai: OPENAI_API_KEY is not set');
     }
+    const headers: Record<string, string> = { 'content-type': 'application/json' };
+    if (this.apiKey) headers.Authorization = `Bearer ${this.apiKey}`;
     const res = await fetch(`${this.baseUrl}/chat/completions`, {
       method: 'POST',
-      headers: {
-        Authorization: `Bearer ${this.apiKey}`,
-        'content-type': 'application/json',
-      },
+      headers,
       body: JSON.stringify({
         model: options.model ?? this.defaultModel,
         messages: messages.map((m) => ({ role: m.role, content: m.content })),

@@ -134,4 +134,22 @@ describe('KGStore', () => {
     expect(hits.some((h) => h.node.name === 'revenue_total')).toBe(true);
     kg.close();
   });
+
+  it('treats upstream SQL labels as plain search text, not FTS columns', () => {
+    const kg = new KGStore(dbPath);
+    kg.rebuild(nodes(), []);
+    const hits = kg.search({
+      query: 'What changed?\n\nCurrent upstream SQL:\nSELECT COUNT(*) FROM orders WHERE status = \'paid\'',
+    });
+    expect(Array.isArray(hits)).toBe(true);
+    kg.close();
+  });
+
+  it('does not match certified artifacts from generic stop words alone', () => {
+    const kg = new KGStore(dbPath);
+    kg.rebuild(nodes(), []);
+    const hits = kg.search({ query: 'Explain this current query' });
+    expect(hits).toHaveLength(0);
+    kg.close();
+  });
 });

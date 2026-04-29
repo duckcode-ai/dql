@@ -197,7 +197,7 @@ Each tile shows:
 > **A note on data rendering.** Today the DashboardRenderer ships layout +
 > metadata with placeholder cells. The dashboard executor — which will
 > stream live block results into each tile — is the next slice. The
-> programmable model (RBAC, RLS, lineage, Apps) is fully in.
+> programmable model (local policies, RLS, lineage, Apps) is fully in.
 
 ---
 

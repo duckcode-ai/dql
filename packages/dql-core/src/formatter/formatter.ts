@@ -235,6 +235,16 @@ function formatBlock(node: BlockDeclNode, level: number, state: FormatState): st
   }
   if (node.owner) lines.push(`${indent(level + 1, state)}owner = ${quote(node.owner)}`);
   if (node.llmContext) lines.push(`${indent(level + 1, state)}llmContext = ${quote(node.llmContext)}`);
+  if (node.businessOutcome) lines.push(`${indent(level + 1, state)}businessOutcome = ${quote(node.businessOutcome)}`);
+  if (node.businessOwner) lines.push(`${indent(level + 1, state)}businessOwner = ${quote(node.businessOwner)}`);
+  if (node.decisionUse) lines.push(`${indent(level + 1, state)}decisionUse = ${quote(node.decisionUse)}`);
+  if (node.reviewCadence) lines.push(`${indent(level + 1, state)}reviewCadence = ${quote(node.reviewCadence)}`);
+  if (node.businessRules && node.businessRules.length > 0) {
+    lines.push(`${indent(level + 1, state)}businessRules = [${node.businessRules.map(quote).join(', ')}]`);
+  }
+  if (node.caveats && node.caveats.length > 0) {
+    lines.push(`${indent(level + 1, state)}caveats = [${node.caveats.map(quote).join(', ')}]`);
+  }
   if (node.examples && node.examples.length > 0) {
     lines.push(`${indent(level + 1, state)}examples = [${formatBlockExamples(node.examples)}]`);
   }

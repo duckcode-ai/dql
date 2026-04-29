@@ -1,5 +1,6 @@
 import type { DiffReport } from '@duckcodeailabs/dql-core/format';
 import type {
+  Cell,
   NotebookFile,
   QueryResult,
   RunSnapshot,
@@ -19,6 +20,8 @@ import type {
   BlockStudioOpenPayload,
   BlockStudioPreview,
   BlockStudioValidation,
+  BlockStudioImportSession,
+  BlockStudioImportCandidate,
   AppSummary,
   ActivePersona,
 } from '../store/types';
@@ -31,8 +34,19 @@ export interface AppDocumentSummary {
     name: string;
     description?: string;
     domain: string;
+    subdomain?: string;
+    groups?: string[];
+    visibility?: 'shared' | 'private' | 'template';
+    audience?: string;
+    lifecycle?: 'draft' | 'review' | 'certified' | 'deprecated';
     owners: string[];
     tags?: string[];
+    notebooks?: Array<{
+      path: string;
+      title?: string;
+      role: 'source' | 'analysis' | 'supporting';
+      visibility: 'shared' | 'private' | 'template';
+    }>;
     members: Array<{
       userId: string;
       displayName?: string;
@@ -64,6 +78,9 @@ export interface AppDocumentSummary {
     homepage?: { type: 'dashboard'; id: string } | { type: 'notebook'; path: string };
   };
   dashboards: Array<{ id: string; title: string; description?: string; itemCount: number }>;
+  notebooks?: Array<{ path: string; title?: string; role: 'source' | 'analysis' | 'supporting'; visibility: 'shared' | 'private' | 'template' }>;
+  drafts?: Array<{ path: string; name: string; reviewStatus?: string }>;
+  aiPins?: LocalAiPin[];
 }
 
 export interface DashboardDocumentResponse {
@@ -71,7 +88,23 @@ export interface DashboardDocumentResponse {
   dashboard: {
     version: 1;
     id: string;
-    metadata: { title: string; description?: string; domain?: string; tags?: string[] };
+    metadata: {
+      title: string;
+      description?: string;
+      domain?: string;
+      subdomain?: string;
+      groups?: string[];
+      audience?: string;
+      visibility?: 'shared' | 'private' | 'template';
+      lifecycle?: 'draft' | 'review' | 'certified' | 'deprecated';
+      tags?: string[];
+      businessOutcome?: string;
+      businessOwner?: string;
+      decisionUse?: string;
+      reviewCadence?: string;
+      businessRules?: string[];
+      caveats?: string[];
+    };
     params?: Array<{ id: string; type: string; default?: unknown; description?: string }>;
     filters?: Array<{ id: string; type: string; default?: unknown; options?: string[]; bindsTo?: string }>;
     layout: {
@@ -81,7 +114,9 @@ export interface DashboardDocumentResponse {
       items: Array<{
         i: string;
         x: number; y: number; w: number; h: number;
-        block: { blockId?: string; ref?: string; version?: string };
+        block?: { blockId?: string; ref?: string; version?: string };
+        text?: { markdown: string };
+        aiPin?: { id: string };
         viz: { type: string; options?: Record<string, unknown> };
         title?: string;
       }>;
@@ -96,6 +131,7 @@ export interface DashboardRunResponse {
   tiles: Array<{
     tileId: string;
     status: 'ok' | 'unauthorized' | 'error' | 'unresolved';
+    tileType?: 'block' | 'text' | 'aiPin';
     blockId?: string;
     blockPath?: string;
     certificationStatus?: string | null;
@@ -103,6 +139,8 @@ export interface DashboardRunResponse {
     viz?: { type: string; options?: Record<string, unknown> };
     chartConfig?: Record<string, unknown>;
     result?: QueryResult;
+    text?: { markdown: string };
+    aiPin?: LocalAiPin;
     citation?: { kind: string; name: string; path?: string };
     error?: string;
   }>;
@@ -127,8 +165,12 @@ export interface AppBlockRecommendation {
 export interface CreateAppRequest {
   name: string;
   domain: string;
+  subdomain?: string;
+  groups?: string[];
   purpose?: string;
   audience?: string;
+  visibility?: 'shared' | 'private' | 'template';
+  lifecycle?: 'draft' | 'review' | 'certified' | 'deprecated';
   tags: string[];
   owners: string[];
   selectedBlockIds: string[];
@@ -139,6 +181,35 @@ export interface CreateAppResponse {
   app: AppSummary;
   paths: string[];
   dashboardId: string;
+}
+
+export interface AppEditorCatalogResponse {
+  appId: string;
+  defaultDomain: string;
+  domains: string[];
+  blocks: AppBlockRecommendation[];
+}
+
+export interface LocalAiPin {
+  id: string;
+  appId: string;
+  dashboardId: string;
+  tileId?: string;
+  title: string;
+  answer: string;
+  sql?: string;
+  sourceTier?: string;
+  certification: 'certified' | 'ai_generated';
+  reviewStatus: 'needs_review' | 'draft_created' | 'certified' | 'rejected';
+  refreshCadence: 'none' | 'daily';
+  chartConfig?: Record<string, unknown>;
+  result?: QueryResult;
+  citations?: unknown[];
+  createdAt: string;
+  updatedAt: string;
+  lastRefreshedAt?: string;
+  lastRefreshError?: string;
+  promotedBlockPath?: string;
 }
 
 export interface SettingsEnvVar {
@@ -154,6 +225,39 @@ export interface SettingsEnvGroup {
   title: string;
   description: string;
   vars: SettingsEnvVar[];
+}
+
+export type ProviderSettingsId = 'anthropic' | 'openai' | 'gemini' | 'ollama' | 'custom-openai';
+
+export interface ProviderSettings {
+  id: ProviderSettingsId;
+  label: string;
+  enabled: boolean;
+  hasApiKey: boolean;
+  apiKeyPreview?: string;
+  baseUrl?: string;
+  model?: string;
+  source: 'local' | 'env' | 'none';
+  envVars: string[];
+}
+
+export interface AgentMemory {
+  id: string;
+  scope: 'thread' | 'notebook' | 'project' | 'user' | 'artifact';
+  scopeId?: string;
+  title: string;
+  content: string;
+  tags: string[];
+  source: string;
+  confidence: number;
+  importance: number;
+  validFrom?: string;
+  validTo?: string;
+  supersedes?: string;
+  lastUsed?: string;
+  createdAt: string;
+  updatedAt: string;
+  enabled: boolean;
 }
 
 const BASE = window.location.origin;
@@ -172,6 +276,37 @@ async function request<T>(path: string, options?: RequestInit): Promise<T> {
   return res.json() as Promise<T>;
 }
 
+function normalizeQueryResultPayload(raw: any): QueryResult {
+  const columns: string[] = Array.isArray(raw?.columns)
+    ? raw.columns.map((c: unknown) =>
+        typeof c === 'string' ? c : typeof (c as any)?.name === 'string' ? (c as any).name : String(c)
+      )
+    : [];
+  const semanticRefs = raw?.semanticRefs && typeof raw.semanticRefs === 'object'
+    ? {
+        metrics: Array.isArray(raw.semanticRefs.metrics) ? raw.semanticRefs.metrics.map(String) : [],
+        dimensions: Array.isArray(raw.semanticRefs.dimensions) ? raw.semanticRefs.dimensions.map(String) : [],
+      }
+    : undefined;
+  return {
+    columns,
+    rows: Array.isArray(raw?.rows) ? raw.rows : [],
+    rowCount: raw?.rowCount ?? raw?.rows?.length ?? 0,
+    executionTime: raw?.executionTime ?? raw?.executionTimeMs ?? 0,
+    ...(semanticRefs ? { semanticRefs } : {}),
+  };
+}
+
+export interface NotebookCellExecutionResponse {
+  cellType: string;
+  title?: string;
+  blockName?: string;
+  blockPath?: string;
+  chartConfig?: Record<string, unknown>;
+  tests?: Array<{ field: string; operator: string; expected: unknown }>;
+  result: QueryResult | null;
+}
+
 export const api = {
   async getSettingsEnvStatus(): Promise<{ groups: SettingsEnvGroup[] }> {
     try {
@@ -179,6 +314,58 @@ export const api = {
     } catch {
       return { groups: [] };
     }
+  },
+
+  async getProviderSettings(): Promise<{ providers: ProviderSettings[] }> {
+    try {
+      return await request<{ providers: ProviderSettings[] }>('/api/settings/providers');
+    } catch {
+      return { providers: [] };
+    }
+  },
+
+  async saveProviderSettings(input: {
+    id: ProviderSettingsId;
+    enabled?: boolean;
+    apiKey?: string;
+    baseUrl?: string;
+    model?: string;
+  }): Promise<{ ok: boolean; providers: ProviderSettings[] }> {
+    return request('/api/settings/providers', {
+      method: 'POST',
+      body: JSON.stringify(input),
+    });
+  },
+
+  async testProviderSettings(id: ProviderSettingsId): Promise<{ ok: boolean; message: string }> {
+    return request('/api/settings/providers/test', {
+      method: 'POST',
+      body: JSON.stringify({ id }),
+    });
+  },
+
+  async listAgentMemory(scope?: AgentMemory['scope']): Promise<{ memories: AgentMemory[] }> {
+    const suffix = scope ? `?scope=${encodeURIComponent(scope)}` : '';
+    try {
+      return await request<{ memories: AgentMemory[] }>(`/api/agent/memory${suffix}`);
+    } catch {
+      return { memories: [] };
+    }
+  },
+
+  async saveAgentMemory(input: Partial<AgentMemory> & Pick<AgentMemory, 'scope' | 'title' | 'content'>): Promise<{ ok: boolean; memory: AgentMemory }> {
+    return request('/api/agent/memory', {
+      method: 'POST',
+      body: JSON.stringify(input),
+    });
+  },
+
+  async deleteAgentMemory(id: string): Promise<{ ok: boolean }> {
+    return request(`/api/agent/memory?id=${encodeURIComponent(id)}`, { method: 'DELETE' });
+  },
+
+  async ensureAgentMemoryFiles(): Promise<{ ok: boolean; files: string[] }> {
+    return request('/api/agent/memory/default-files', { method: 'POST' });
   },
 
   async listNotebooks(): Promise<NotebookFile[]> {
@@ -318,12 +505,59 @@ export const api = {
       description: string;
       owner: string;
       tags: string[];
+      sourceKind?: string;
+      sourcePath?: string;
+      importId?: string;
+      candidateId?: string;
+      lineage?: string[];
     };
   }): Promise<BlockStudioOpenPayload> {
     return request<BlockStudioOpenPayload>('/api/block-studio/save', {
       method: 'POST',
       body: JSON.stringify(payload),
     });
+  },
+
+  async previewBlockStudioImport(payload: {
+    path: string;
+    sourceKind?: 'raw-sql' | BlockStudioImportCandidate['sourceKind'];
+    domain?: string;
+    owner?: string;
+    tags?: string[];
+  }): Promise<BlockStudioImportSession> {
+    return request<BlockStudioImportSession>('/api/block-studio/import/preview', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    });
+  },
+
+  async getBlockStudioImport(importId: string): Promise<BlockStudioImportSession> {
+    return request<BlockStudioImportSession>(`/api/block-studio/imports/${encodeURIComponent(importId)}`);
+  },
+
+  async updateBlockStudioImportCandidate(
+    importId: string,
+    candidateId: string,
+    patch: Partial<Pick<BlockStudioImportCandidate, 'name' | 'domain' | 'description' | 'owner' | 'tags' | 'sql' | 'reviewStatus'>>,
+  ): Promise<BlockStudioImportCandidate> {
+    return request<BlockStudioImportCandidate>(
+      `/api/block-studio/imports/${encodeURIComponent(importId)}/candidates/${encodeURIComponent(candidateId)}`,
+      { method: 'PATCH', body: JSON.stringify(patch) },
+    );
+  },
+
+  async runBlockStudioImportCandidate(importId: string, candidateId: string): Promise<BlockStudioImportCandidate> {
+    return request<BlockStudioImportCandidate>(
+      `/api/block-studio/imports/${encodeURIComponent(importId)}/candidates/${encodeURIComponent(candidateId)}/run`,
+      { method: 'POST' },
+    );
+  },
+
+  async saveBlockStudioImportCandidate(importId: string, candidateId: string): Promise<{ candidate: BlockStudioImportCandidate; block: BlockStudioOpenPayload }> {
+    return request<{ candidate: BlockStudioImportCandidate; block: BlockStudioOpenPayload }>(
+      `/api/block-studio/imports/${encodeURIComponent(importId)}/candidates/${encodeURIComponent(candidateId)}/save`,
+      { method: 'POST' },
+    );
   },
 
   async saveAsBlock(payload: {
@@ -380,25 +614,31 @@ export const api = {
       body: JSON.stringify({ sql }),
       signal,
     });
-    // Older server versions return columns as ColumnMeta[] ({name,type,driverType});
-    // coerce to string[] so React never tries to render objects as children.
-    const columns: string[] = Array.isArray(raw?.columns)
-      ? raw.columns.map((c: unknown) =>
-          typeof c === 'string' ? c : typeof (c as any)?.name === 'string' ? (c as any).name : String(c)
-        )
-      : [];
-    const semanticRefs = raw?.semanticRefs && typeof raw.semanticRefs === 'object'
-      ? {
-          metrics: Array.isArray(raw.semanticRefs.metrics) ? raw.semanticRefs.metrics.map(String) : [],
-          dimensions: Array.isArray(raw.semanticRefs.dimensions) ? raw.semanticRefs.dimensions.map(String) : [],
-        }
-      : undefined;
+    return normalizeQueryResultPayload(raw);
+  },
+
+  async executeNotebookCell(cell: Cell, signal?: AbortSignal): Promise<NotebookCellExecutionResponse> {
+    const raw = await request<any>('/api/notebook/execute', {
+      method: 'POST',
+      body: JSON.stringify({
+        cell: {
+          id: cell.id,
+          type: cell.type,
+          source: cell.content,
+          title: cell.name,
+          config: cell.chartConfig,
+        },
+      }),
+      signal,
+    });
     return {
-      columns,
-      rows: Array.isArray(raw?.rows) ? raw.rows : [],
-      rowCount: raw?.rowCount ?? raw?.rows?.length ?? 0,
-      executionTime: raw?.executionTime ?? raw?.executionTimeMs ?? 0,
-      ...(semanticRefs ? { semanticRefs } : {}),
+      cellType: String(raw?.cellType ?? cell.type),
+      title: typeof raw?.title === 'string' ? raw.title : undefined,
+      blockName: typeof raw?.blockName === 'string' ? raw.blockName : undefined,
+      blockPath: typeof raw?.blockPath === 'string' ? raw.blockPath : undefined,
+      chartConfig: raw?.chartConfig && typeof raw.chartConfig === 'object' ? raw.chartConfig : undefined,
+      tests: Array.isArray(raw?.tests) ? raw.tests : undefined,
+      result: raw?.result ? normalizeQueryResultPayload(raw.result) : null,
     };
   },
 
@@ -991,11 +1231,138 @@ export const api = {
     }
   },
 
+  async attachAppNotebook(appId: string, input: {
+    path: string;
+    title?: string;
+    role?: 'source' | 'analysis' | 'supporting';
+    visibility?: 'shared' | 'private' | 'template';
+  }): Promise<AppDocumentSummary | { ok: false; error: string }> {
+    try {
+      return await request<AppDocumentSummary>(
+        `/api/apps/${encodeURIComponent(appId)}/notebooks`,
+        { method: 'POST', body: JSON.stringify(input) },
+      );
+    } catch (e) {
+      return { ok: false, error: e instanceof Error ? e.message : String(e) };
+    }
+  },
+
   async getDashboard(appId: string, dashboardId: string): Promise<DashboardDocumentResponse | null> {
     try {
       return await request<DashboardDocumentResponse>(
         `/api/apps/${encodeURIComponent(appId)}/dashboards/${encodeURIComponent(dashboardId)}`,
       );
+    } catch {
+      return null;
+    }
+  },
+
+  async getAppEditorCatalog(appId: string, params?: { domain?: string; certifiedOnly?: boolean }): Promise<AppEditorCatalogResponse | null> {
+    try {
+      const search = new URLSearchParams();
+      if (params?.domain) search.set('domain', params.domain);
+      if (params?.certifiedOnly === false) search.set('certifiedOnly', 'false');
+      const qs = search.toString();
+      return await request<AppEditorCatalogResponse>(
+        `/api/apps/${encodeURIComponent(appId)}/editor/catalog${qs ? `?${qs}` : ''}`,
+      );
+    } catch {
+      return null;
+    }
+  },
+
+  async createAppDashboard(appId: string, input: { id?: string; title: string; description?: string }): Promise<{ ok: true; dashboard: DashboardDocumentResponse['dashboard']; path: string } | { ok: false; error: string }> {
+    try {
+      return await request(
+        `/api/apps/${encodeURIComponent(appId)}/dashboards`,
+        { method: 'POST', body: JSON.stringify(input) },
+      );
+    } catch (e) {
+      return { ok: false, error: e instanceof Error ? e.message : String(e) };
+    }
+  },
+
+  async patchDashboardLayout(
+    appId: string,
+    dashboardId: string,
+    layout: DashboardDocumentResponse['dashboard']['layout'],
+  ): Promise<{ ok: true; dashboard: DashboardDocumentResponse['dashboard']; path: string } | { ok: false; error: string }> {
+    try {
+      return await request(
+        `/api/apps/${encodeURIComponent(appId)}/dashboards/${encodeURIComponent(dashboardId)}/layout`,
+        { method: 'PATCH', body: JSON.stringify({ layout }) },
+      );
+    } catch (e) {
+      return { ok: false, error: e instanceof Error ? e.message : String(e) };
+    }
+  },
+
+  async createAiPin(appId: string, input: {
+    dashboardId: string;
+    title: string;
+    answer: string;
+    sql?: string;
+    sourceTier?: string;
+    certification?: 'certified' | 'ai_generated';
+    refreshCadence?: 'none' | 'daily';
+    chartConfig?: Record<string, unknown>;
+    result?: QueryResult;
+    citations?: unknown[];
+  }): Promise<{ ok: true; pin: LocalAiPin; dashboard?: DashboardDocumentResponse['dashboard']; tile?: DashboardDocumentResponse['dashboard']['layout']['items'][number] } | { ok: false; error: string }> {
+    try {
+      return await request(
+        `/api/apps/${encodeURIComponent(appId)}/ai-pins`,
+        { method: 'POST', body: JSON.stringify(input) },
+      );
+    } catch (e) {
+      return { ok: false, error: e instanceof Error ? e.message : String(e) };
+    }
+  },
+
+  async listAiPins(appId: string, dashboardId?: string): Promise<LocalAiPin[]> {
+    try {
+      const search = new URLSearchParams();
+      if (dashboardId) search.set('dashboardId', dashboardId);
+      const qs = search.toString();
+      const { pins } = await request<{ pins: LocalAiPin[] }>(
+        `/api/apps/${encodeURIComponent(appId)}/ai-pins${qs ? `?${qs}` : ''}`,
+      );
+      return pins;
+    } catch {
+      return [];
+    }
+  },
+
+  async refreshAiPin(appId: string, pinId: string): Promise<{ ok: boolean; pin?: LocalAiPin; error?: string }> {
+    try {
+      return await request(
+        `/api/apps/${encodeURIComponent(appId)}/ai-pins/${encodeURIComponent(pinId)}/refresh`,
+        { method: 'POST' },
+      );
+    } catch (e) {
+      return { ok: false, error: e instanceof Error ? e.message : String(e) };
+    }
+  },
+
+  async promoteAiPin(appId: string, pinId: string): Promise<{ ok: boolean; pin?: LocalAiPin; blockPath?: string; error?: string }> {
+    try {
+      return await request(
+        `/api/apps/${encodeURIComponent(appId)}/ai-pins/${encodeURIComponent(pinId)}/promote`,
+        { method: 'POST' },
+      );
+    } catch (e) {
+      return { ok: false, error: e instanceof Error ? e.message : String(e) };
+    }
+  },
+
+  async fetchScopedLineage(params: { domain?: string; appId?: string; dashboardId?: string; blockId?: string }): Promise<any | null> {
+    try {
+      const search = new URLSearchParams();
+      if (params.domain) search.set('domain', params.domain);
+      if (params.appId) search.set('appId', params.appId);
+      if (params.dashboardId) search.set('dashboardId', params.dashboardId);
+      if (params.blockId) search.set('blockId', params.blockId);
+      return await request<any>(`/api/lineage/scope?${search.toString()}`);
     } catch {
       return null;
     }

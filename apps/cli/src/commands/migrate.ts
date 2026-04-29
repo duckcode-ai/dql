@@ -2,6 +2,7 @@ import { readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { join, relative } from 'node:path';
 import { canonicalize, canonicalizeNotebook } from '@duckcodeailabs/dql-core';
 import type { CLIFlags } from '../args.js';
+import { runImport } from './import.js';
 
 export type MigrationSource = 'looker' | 'tableau' | 'dbt' | 'metabase' | 'raw-sql';
 
@@ -65,6 +66,11 @@ export async function runMigrate(file: string, flags: CLIFlags): Promise<void> {
     console.error(`    Or: "format" to upgrade .dql/.dqlnb files to the canonical on-disk format`);
     console.error('');
     process.exit(1);
+  }
+
+  if (source === 'raw-sql' && flags.input) {
+    await runImport('sql', [flags.input], flags);
+    return;
   }
 
   if (flags.format === 'json') {

@@ -1,72 +1,191 @@
 # Import a dbt project
 
-> ~4 minutes · ends with dbt models visible in the sidebar
+> ~4 minutes · ends with dbt models and semantic metrics available to DQL
 
-DQL reads dbt's `target/manifest.json` directly — no YAML walking, no
-duplicated metadata. At 4,000+ models, the warm rebuild is under 2s thanks
-to the SQLite cache (`v0.9` work).
+DQL reads dbt artifacts directly:
 
-## 1. Point DQL at your dbt project
+- `target/manifest.json` for models, sources, columns, lineage, exposures, and saved queries.
+- `target/semantic_manifest.json` for MetricFlow semantic models, metrics, measures, dimensions, and entities.
 
-```yaml
-# cdql.yaml
-dbt:
-  projectDir: ../my-dbt-project
-  profile: prod              # matches a profile in ~/.dbt/profiles.yml
-  manifestPath: target/manifest.json  # default; override if custom
+## Recommended layouts
+
+For an existing single dbt repo, keep DQL isolated under `dql/`:
+
+```text
+my-dbt-repo/
+├─ dbt_project.yml
+├─ models/
+├─ macros/
+├─ seeds/
+├─ target/
+│  ├─ manifest.json
+│  └─ semantic_manifest.json
+└─ dql/
+   ├─ dql.config.json
+   ├─ blocks/
+   ├─ notebooks/
+   ├─ apps/
+   │  └─ <app-id>/
+   │     ├─ dql.app.json
+   │     ├─ dashboards/*.dqld
+   │     ├─ notebooks/*.dqlnb
+   │     └─ drafts/*.dql
+   └─ .dql/
+      ├─ cache/
+      └─ local/apps.sqlite
 ```
 
-## 2. Generate the manifest (if you haven't)
+This is the recommended default. dbt remains clean, and all DQL blocks,
+notebooks, Apps, imports, local cache, and AI pins stay in one obvious folder.
+
+For a two-repo or two-folder workspace, keep dbt and DQL as siblings:
+
+```text
+analytics/
+├─ dbt/
+│  ├─ dbt_project.yml
+│  ├─ models/
+│  └─ target/manifest.json
+└─ dql/
+   ├─ dql.config.json
+   ├─ blocks/
+   ├─ notebooks/
+   └─ apps/
+```
+
+Use the sibling layout when DQL Apps have a different repo, ownership model, or
+release cadence from dbt.
+
+## 1. Add DQL to an existing dbt repo
+
+From the dbt repo root:
 
 ```bash
-cd ../my-dbt-project
-dbt compile   # or dbt parse / dbt run — anything that writes manifest.json
+npm i -D @duckcodeailabs/dql-cli
+npx dql init ./dql
 ```
 
-## 3. Sync
+`dql init ./dql` detects the parent `dbt_project.yml` and writes portable dbt
+wiring:
+
+```json
+{
+  "project": "dql",
+  "semanticLayer": {
+    "provider": "dbt",
+    "projectPath": ".."
+  },
+  "dbt": {
+    "projectDir": "..",
+    "manifestPath": "target/manifest.json"
+  }
+}
+```
+
+Add convenient scripts to `package.json` if your repo does not already have
+them:
+
+```json
+{
+  "scripts": {
+    "dql:doctor": "dql doctor ./dql",
+    "dql:compile": "dql compile ./dql",
+    "dql:sync": "dql sync dbt ./dql",
+    "dql:reindex": "cd dql && dql agent reindex",
+    "dql:notebook": "dql notebook ./dql"
+  }
+}
+```
+
+## 2. Or point a sibling DQL project at dbt
+
+Configure dbt in `dql.config.json`:
+
+```json
+{
+  "project": "my-dql-project",
+  "semanticLayer": {
+    "provider": "dbt",
+    "projectPath": "../my-dbt-project"
+  },
+  "dbt": {
+    "projectDir": "../my-dbt-project",
+    "manifestPath": "target/manifest.json"
+  }
+}
+```
+
+`create-dql-app` will create this wiring automatically when it detects a sibling
+`dbt_project.yml`.
+
+## 3. Generate dbt artifacts
 
 ```bash
-dql sync dbt
-# ✓ read manifest.json (3,412 nodes)
-# ✓ imported 2,107 models, 41 sources, 18 metrics, 12 exposures
-# ✓ cache written to .dql/cache/manifest.sqlite
+dbt build
 ```
 
-## 4. Selective import (large projects)
+`dbt parse` or `dbt compile` is enough for `manifest.json`; use `dbt build` for
+the cleanest demo path because it also proves the project runs.
 
-For projects with thousands of models, anchor-driven BFS keeps the working
-set small:
+## 4. Rebuild DQL metadata
 
-```yaml
-# cdql.yaml
-dbt:
-  projectDir: ../my-dbt-project
-  include:
-    anchors: ["tag:core", "mart.revenue.*"]
-    maxDbtHops: 3
-  exclude:
-    paths: ["models/staging/**"]
-```
-
-Re-sync is deterministic — the anchor set is persisted and teammates import
-the exact same subgraph.
-
-## 5. Watch mode
+Run from the dbt repo root:
 
 ```bash
-dql sync dbt --watch
+dql compile ./dql
+dql sync dbt ./dql
+cd dql && dql agent reindex
 ```
 
-Detects `target/manifest.json` changes in `<1s`; notebook schema panel live-updates.
+`dql compile` rebuilds `dql-manifest.json` and merges dbt lineage into the local
+DQL graph. `dql sync dbt` is a status/cache sync command: it verifies the
+resolved dbt artifact paths, reports model/source/metric counts, and updates the
+local cache when artifacts changed. `dql agent reindex` refreshes the local
+SQLite + FTS knowledge graph used by governed agent answers.
 
-## Verify it worked
+## 5. Verify it worked
 
-- Notebook **Schema** panel shows your dbt models
-- Notebook **Semantic** panel shows your dbt metrics & dimensions
-- `dql lineage summary` prints node/edge counts matching your dbt project
+- Notebook Schema panel shows dbt models and sources.
+- Notebook Semantic panel shows dbt semantic models, metrics, measures, and dimensions.
+- `dql lineage` prints dbt source/model nodes connected to DQL blocks and Apps.
+- Agent answers cite certified blocks first, then semantic/dbt metadata when no certified asset exists.
+
+## What lineage tracks
+
+After `dql compile .`, DQL builds a local `dql-manifest.json` from dbt and DQL
+artifacts:
+
+```text
+dbt source
+  -> dbt model
+  -> DQL block
+  -> chart
+  -> dashboard tab
+  -> App
+```
+
+DQL does not copy dbt models. It reads the dbt manifest, resolves SQL table
+references from `.dql` blocks and `.dqlnb` notebooks, and connects matching dbt
+models/sources into the lineage graph. App dashboards add the consumption layer
+above blocks.
+
+For large dbt projects, DQL imports the dbt subgraph anchored by DQL-referenced
+tables and optional `dbtImport` filters in `dql.config.json`:
+
+```json
+{
+  "dbtImport": {
+    "anchors": ["tag:cards", "fct_card_transactions"],
+    "include": ["path:models/marts/cards"],
+    "exclude": ["tag:deprecated"]
+  }
+}
+```
 
 ## Troubleshooting
 
-- **`manifest.json not found`** — run `dbt parse` or `dbt compile` first.
-- **Import takes too long** — you're probably full-scanning. Add `include.anchors`.
-- **Metrics missing** — DQL reads dbt's [MetricFlow](https://docs.getdbt.com/docs/build/about-metricflow) semantic models. Older dbt metrics (v0.x) are still supported via the YAML fallback.
+- **`manifest.json not found`** — run `dbt build`, `dbt compile`, or `dbt parse` first.
+- **Semantic metrics missing** — confirm `target/semantic_manifest.json` exists and your dbt version emits MetricFlow artifacts.
+- **Lineage is stale** — rerun `dql compile .` and `dql agent reindex`.
+- **Too much dbt metadata** — add `dbtImport` anchors/include/exclude filters
+  and rerun `dql compile .`.

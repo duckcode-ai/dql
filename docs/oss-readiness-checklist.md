@@ -34,7 +34,7 @@ It is written as a practical maintainer checklist, not a marketing document.
 - `[x]` `dql serve` exists for local serving of built output
 - `[x]` local CSV/file-first flow is documented
 - `[x]` DuckDB local example exists
-- `[~]` full validation of preview/build/serve is blocked until dependencies can be installed and build can run
+- `[~]` preview/serve browser smoke still needs a clean manual check before public announcement
 
 ---
 
@@ -54,7 +54,7 @@ It is written as a practical maintainer checklist, not a marketing document.
 - `[x]` package-level READMEs exist
 - `[x]` `why-dql.md` exists for positioning and differentiation
 - `[x]` authoring-blocks.md shows real `@metric()`/`@dim()` patterns (no `@import`)
-- `[~]` docs should be re-verified after the first successful full build and package publish
+- `[~]` docs were re-verified after full build/test; re-check package install docs after npm publication
 
 ---
 
@@ -90,8 +90,9 @@ It is written as a practical maintainer checklist, not a marketing document.
 - `[x]` `publishing.md` exists for maintainers
 - `[x]` CHANGELOG.md has proper version history
 - `[ ]` full workspace install needs validation in a network-enabled environment
-- `[ ]` full `pnpm build` needs to complete successfully in a dependency-available environment
-- `[ ]` full `pnpm test` needs to complete successfully in a dependency-available environment
+- `[x]` full `pnpm build` completes successfully
+- `[x]` full `pnpm test` completes successfully
+- `[x]` `pnpm release:dry-run` completes successfully
 - `[ ]` published package smoke test should be recorded after first successful npm release
 
 ---
@@ -120,29 +121,33 @@ It is written as a practical maintainer checklist, not a marketing document.
 ## 9. Final Pre-Launch Checks
 
 - `[ ]` run `pnpm install` in a network-enabled environment
-- `[ ]` run `pnpm build`
-- `[ ]` run `pnpm test`
-- `[ ]` verify `dql init` from a clean environment
+- `[x]` run `pnpm build`
+- `[x]` run `pnpm test`
+- `[x]` verify `dql init ./dql` from a clean dbt-style environment
 - `[ ]` verify `dql preview` from a clean environment
-- `[ ]` verify `dql new semantic-block` from a clean environment
+- `[x]` verify `dql new semantic-block` from a clean dbt-style environment
 - `[ ]` verify package publishing flow and `npx` usage
 
 ---
 
 ## Current Blocker
 
-The remaining pre-launch checks are environment-level, not repo-level:
+The remaining pre-launch checks are package-publication and clean-environment
+smoke tests:
 
-- The repo is fully authored and ready to open-source
-- Dependency installation requires npm registry access (`registry.npmjs.org`) to run `pnpm install`
-- Final build, test, and publish smoke tests should be run in a network-enabled environment before the first public release announcement
+- The repo builds and tests successfully from the current workspace.
+- `dql init ./dql`, `dql new semantic-block`, `dql compile ./dql`, and
+  `dql sync dbt ./dql` pass against a clean dbt-style repo using the built CLI.
+- A clean `pnpm install` should still be validated outside the existing
+  developer checkout.
+- Published package smoke tests should be run before the first public release
+  announcement.
 
 ## Recommended Next Actions
 
-1. Run `pnpm install` in a network-enabled environment.
-2. Run `pnpm build` and `pnpm test`.
-3. Fix any TypeScript or test regressions.
-4. Run `pnpm release:publish` to publish packages to npm.
-5. Validate the published CLI: `npx @duckcodeailabs/dql-cli@latest --help`.
-6. Mark the remaining checklist items complete.
-7. Open the GitHub repo to public.
+1. Run `pnpm install` from a fresh clone.
+2. Verify `dql preview` and `dql notebook ./dql` from a clean repo.
+3. Run `pnpm release:publish` to publish packages to npm.
+4. Validate the published CLI: `npx @duckcodeailabs/dql-cli@latest --help`.
+5. Mark the remaining checklist items complete.
+6. Open the GitHub repo to public.

@@ -2,25 +2,26 @@
 
 > ~3 minutes · ends with a successful `dql test-connection`
 
-DQL ships 15 drivers out of the box. Connections live in `cdql.yaml` at the
-project root — never committed with secrets (use `${ENV_VAR}` interpolation).
+DQL ships 15 drivers out of the box. Connections live in `dql.config.json` at
+the project root. Keep secrets in environment variables and reference them with
+`${ENV_VAR}` interpolation.
 
 ## 1. Pick your connector
 
-```yaml
-# cdql.yaml
-connections:
-  default:
-    driver: postgres           # one of: postgres, duckdb, snowflake, bigquery,
-                               # redshift, mysql, clickhouse, mssql, trino,
-                               # databricks, athena, sqlite, motherduck,
-                               # starrocks, oracle
-    host: ${PGHOST}
-    port: 5432
-    database: analytics
-    user: ${PGUSER}
-    password: ${PGPASSWORD}
-    schema: public
+```json
+{
+  "connections": {
+    "default": {
+      "driver": "postgres",
+      "host": "${PGHOST}",
+      "port": 5432,
+      "database": "analytics",
+      "user": "${PGUSER}",
+      "password": "${PGPASSWORD}",
+      "schema": "public"
+    }
+  }
+}
 ```
 
 Per-driver options live in the [Connector reference](../reference/connectors.md).
@@ -30,7 +31,7 @@ Per-driver options live in the [Connector reference](../reference/connectors.md)
 ```bash
 export PGHOST=prod-db.internal
 export PGUSER=analyst_ro
-export PGPASSWORD=…
+export PGPASSWORD=...
 ```
 
 ## 3. Verify
@@ -40,16 +41,19 @@ dql test-connection
 # ✓ default (postgres) — 14 schemas, 312 tables
 ```
 
-If that passes, the notebook and CLI will resolve `@table(...)` against
-this connection.
+If that passes, the notebook and CLI resolve table references against this
+connection.
 
 ## Multiple connections
 
-```yaml
-connections:
-  default: { driver: duckdb, path: ./warehouse.duckdb }
-  prod:    { driver: snowflake, account: ..., ... }
-  raw:     { driver: postgres, host: ..., ... }
+```json
+{
+  "connections": {
+    "default": { "driver": "duckdb", "path": "./warehouse.duckdb" },
+    "prod": { "driver": "snowflake", "account": "${SNOWFLAKE_ACCOUNT}" },
+    "raw": { "driver": "postgres", "host": "${RAW_PGHOST}" }
+  }
+}
 ```
 
 Reference a non-default connection from a cell:
@@ -61,9 +65,6 @@ select count(*) from analytics.orders
 
 ## Troubleshooting
 
-- **`connection refused`** — firewall / VPN / wrong port. `dql
-  test-connection --debug` prints the resolved DSN (redacted).
-- **`role does not have USAGE on schema`** — warehouse permissions. DQL
-  needs `USAGE` on the schema and `SELECT` on the objects you query.
-- **BigQuery service account** — set `GOOGLE_APPLICATION_CREDENTIALS` to the
-  key file path; the driver auto-picks it up.
+- **`connection refused`** — firewall, VPN, wrong host, or wrong port. `dql test-connection --debug` prints the resolved DSN with secrets redacted.
+- **`role does not have USAGE on schema`** — warehouse permissions. DQL needs `USAGE` on the schema and `SELECT` on queried objects.
+- **BigQuery service account** — set `GOOGLE_APPLICATION_CREDENTIALS` to the key file path; the driver auto-picks it up.

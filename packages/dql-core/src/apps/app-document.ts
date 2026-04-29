@@ -75,15 +75,38 @@ export type AppHomepage =
   | { type: 'dashboard'; id: string }
   | { type: 'notebook'; path: string };
 
+export type AppVisibility = 'shared' | 'private' | 'template';
+export type AppLifecycle = 'draft' | 'review' | 'certified' | 'deprecated';
+
+export type AppNotebookRef = {
+  path: string;
+  title?: string;
+  role: 'source' | 'analysis' | 'supporting';
+  visibility: AppVisibility;
+};
+
 export interface AppDocument {
   /** Schema version for forward compatibility. */
   version: 1;
   id: string;
   name: string;
   description?: string;
+  businessOutcome?: string;
+  businessOwner?: string;
+  decisionUse?: string;
+  reviewCadence?: string;
+  businessRules?: string[];
+  caveats?: string[];
+  /** OSS organization metadata. Not an access-control boundary. */
+  visibility?: AppVisibility;
   domain: string;
+  subdomain?: string;
+  groups?: string[];
+  audience?: string;
+  lifecycle?: AppLifecycle;
   owners: string[];
   tags?: string[];
+  notebooks?: AppNotebookRef[];
   members: AppMember[];
   roles: AppRole[];
   policies: AppPolicy[];
@@ -223,13 +246,25 @@ function validateAppDocument(raw: unknown, path: string): AppDocumentLoadResult 
   if (owners.length === 0) err('at least one owner is required');
 
   const description = optionalString(obj, 'description', err);
+  const businessOutcome = optionalString(obj, 'businessOutcome', err);
+  const businessOwner = optionalString(obj, 'businessOwner', err);
+  const decisionUse = optionalString(obj, 'decisionUse', err);
+  const reviewCadence = optionalString(obj, 'reviewCadence', err);
+  const businessRules = obj.businessRules === undefined ? undefined : stringArray(obj, 'businessRules', err);
+  const caveats = obj.caveats === undefined ? undefined : stringArray(obj, 'caveats', err);
   const tags = obj.tags === undefined ? [] : stringArray(obj, 'tags', err);
+  const visibility = enumField(obj, 'visibility', ['shared', 'private', 'template'] as const, err, 'shared');
+  const subdomain = optionalString(obj, 'subdomain', err);
+  const groups = obj.groups === undefined ? [] : stringArray(obj, 'groups', err);
+  const audience = optionalString(obj, 'audience', err);
+  const lifecycle = enumField(obj, 'lifecycle', ['draft', 'review', 'certified', 'deprecated'] as const, err, 'draft');
 
   const members = readMembers(obj.members, err);
   const roles = readRoles(obj.roles, err);
   const policies = readPolicies(obj.policies, err);
   const rlsBindings = readRlsBindings(obj.rlsBindings, err);
   const schedules = readSchedules(obj.schedules, err);
+  const notebooks = readNotebookRefs(obj.notebooks, err);
   const homepage = readHomepage(obj.homepage, err);
 
   // Cross-checks: every member role must be defined; every policy role must be defined
@@ -257,9 +292,21 @@ function validateAppDocument(raw: unknown, path: string): AppDocumentLoadResult 
     id,
     name,
     description,
+    businessOutcome,
+    businessOwner,
+    decisionUse,
+    reviewCadence,
+    businessRules,
+    caveats,
+    visibility,
     domain,
+    subdomain,
+    groups,
+    audience,
+    lifecycle,
     owners,
     tags,
+    notebooks: notebooks.length > 0 ? notebooks : undefined,
     members,
     roles,
     policies,
@@ -268,6 +315,20 @@ function validateAppDocument(raw: unknown, path: string): AppDocumentLoadResult 
     homepage,
   };
   return { document: doc, errors: [] };
+}
+
+function enumField<T extends readonly string[]>(
+  obj: Record<string, unknown>,
+  key: string,
+  allowed: T,
+  err: (m: string) => void,
+  fallback: T[number],
+): T[number] {
+  const v = obj[key];
+  if (v === undefined) return fallback;
+  if (typeof v === 'string' && (allowed as readonly string[]).includes(v)) return v as T[number];
+  err(`field "${key}" must be one of ${allowed.join('|')}`);
+  return fallback;
 }
 
 function stringField(
@@ -505,6 +566,44 @@ function readSchedules(raw: unknown, err: (m: string) => void): AppSchedule[] {
       deliver,
       description: typeof so.description === 'string' ? so.description : undefined,
       enabled: so.enabled === undefined ? true : Boolean(so.enabled),
+    });
+  }
+  return out;
+}
+
+function readNotebookRefs(raw: unknown, err: (m: string) => void): AppNotebookRef[] {
+  if (raw === undefined) return [];
+  if (!Array.isArray(raw)) {
+    err('notebooks must be an array');
+    return [];
+  }
+  const roles = ['source', 'analysis', 'supporting'] as const;
+  const visibilities = ['shared', 'private', 'template'] as const;
+  const out: AppNotebookRef[] = [];
+  for (let i = 0; i < raw.length; i++) {
+    const n = raw[i];
+    if (typeof n !== 'object' || n === null) {
+      err(`notebooks[${i}] must be an object`);
+      continue;
+    }
+    const no = n as Record<string, unknown>;
+    if (typeof no.path !== 'string' || no.path.length === 0) {
+      err(`notebooks[${i}].path must be a non-empty string`);
+      continue;
+    }
+    if (no.role !== undefined && (typeof no.role !== 'string' || !roles.includes(no.role as typeof roles[number]))) {
+      err(`notebooks[${i}].role must be one of ${roles.join('|')}`);
+      continue;
+    }
+    if (no.visibility !== undefined && (typeof no.visibility !== 'string' || !visibilities.includes(no.visibility as typeof visibilities[number]))) {
+      err(`notebooks[${i}].visibility must be one of ${visibilities.join('|')}`);
+      continue;
+    }
+    out.push({
+      path: no.path,
+      title: typeof no.title === 'string' ? no.title : undefined,
+      role: (no.role as AppNotebookRef['role'] | undefined) ?? 'supporting',
+      visibility: (no.visibility as AppNotebookRef['visibility'] | undefined) ?? 'shared',
     });
   }
   return out;
