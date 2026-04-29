@@ -339,7 +339,7 @@ export function BlockStudio() {
         description: candidate.description,
         owner: candidate.owner,
         tags: candidate.tags,
-        reviewStatus: 'draft',
+        reviewStatus: candidate.reviewStatus,
         sourceKind: candidate.sourceKind,
         sourcePath: candidate.sourcePath,
         importId: importSession?.id,

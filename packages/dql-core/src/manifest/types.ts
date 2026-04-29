@@ -230,6 +230,11 @@ export interface ManifestApp {
   businessRules?: string[];
   caveats?: string[];
   domain: string;
+  subdomain?: string;
+  groups?: string[];
+  audience?: string;
+  visibility: 'shared' | 'private' | 'template';
+  lifecycle: 'draft' | 'review' | 'certified' | 'deprecated';
   owners: string[];
   tags: string[];
   /** Folder path relative to project root (e.g. "apps/growth-cxo"). */
@@ -271,6 +276,13 @@ export interface ManifestApp {
   }>;
   /** Dashboard ids declared inside this App. */
   dashboards: string[];
+  /** Notebook refs explicitly attached to this App. */
+  notebooks: Array<{
+    path: string;
+    title?: string;
+    role: 'source' | 'analysis' | 'supporting';
+    visibility: 'shared' | 'private' | 'template';
+  }>;
   /** Optional homepage shown when stakeholders open the App. */
   homepage?:
     | { type: 'dashboard'; id: string }
@@ -294,6 +306,11 @@ export interface ManifestDashboard {
   businessRules?: string[];
   caveats?: string[];
   domain?: string;
+  subdomain?: string;
+  groups?: string[];
+  audience?: string;
+  visibility?: 'shared' | 'private' | 'template';
+  lifecycle?: 'draft' | 'review' | 'certified' | 'deprecated';
   tags: string[];
   /** Path relative to project root (e.g. "apps/growth-cxo/dashboards/weekly-overview.dqld"). */
   filePath: string;

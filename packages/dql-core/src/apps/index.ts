@@ -21,6 +21,9 @@ export type {
   AppSchedule,
   AppScheduleDelivery,
   AppHomepage,
+  AppVisibility,
+  AppLifecycle,
+  AppNotebookRef,
   AppDocumentParseError,
   AppDocumentLoadResult,
 } from './app-document.js';

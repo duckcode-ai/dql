@@ -88,7 +88,10 @@ async function runAppNew(rest: string[], flags: CLIFlags): Promise<void> {
     id,
     name: displayName,
     description: `${displayName} — consumption surface for ${domain}`,
+    visibility: 'shared',
     domain,
+    groups: [],
+    lifecycle: 'draft',
     owners: [owner],
     tags: [],
     members: [
@@ -129,6 +132,8 @@ async function runAppNew(rest: string[], flags: CLIFlags): Promise<void> {
       title: `${displayName} — Overview`,
       description: 'Default dashboard scaffolded by `dql app new`. Replace with your own blocks.',
       domain,
+      visibility: 'shared',
+      lifecycle: 'draft',
     },
     layout: {
       kind: 'grid',
@@ -140,6 +145,7 @@ async function runAppNew(rest: string[], flags: CLIFlags): Promise<void> {
 
   mkdirSync(join(appDir, 'dashboards'), { recursive: true });
   mkdirSync(join(appDir, 'notebooks'), { recursive: true });
+  mkdirSync(join(appDir, 'drafts'), { recursive: true });
   writeFileSync(
     join(appDir, 'dql.app.json'),
     JSON.stringify(appJson, null, 2) + '\n',

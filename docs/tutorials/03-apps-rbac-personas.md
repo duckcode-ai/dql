@@ -1,4 +1,4 @@
-# 03 — Apps, RBAC, and personas (Raj sets up cards-ops)
+# 03 — Apps, Policies, and Personas (Raj sets up cards-ops)
 
 **Who this is for:** App owners — typically domain heads or ops leads.
 
@@ -30,8 +30,8 @@ member sees.
 ```
 
 `personas` are **runtime activations of members**. The local owner can switch
-persona to preview what each member sees — that's how you test RBAC + RLS
-without spinning up real authentication.
+persona to preview what each member sees — that's how you test local policy and
+RLS behavior without spinning up real authentication.
 
 ---
 
@@ -221,7 +221,7 @@ That's correct — we haven't composed `daily-ops` yet. We'll do it in
 
 ---
 
-## Step 5 — Switch persona, observe RBAC + RLS
+## Step 5 — Switch Persona, Observe Policy + RLS
 
 This is the moment of truth.
 

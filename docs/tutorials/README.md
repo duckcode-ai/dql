@@ -1,8 +1,9 @@
 # DQL Tutorials — Acme Bank end-to-end
 
 Hands-on walkthroughs that take you from `git clone` to a fully-running
-domain-scoped analytics surface with RBAC, RLS, scheduled deliveries, and a
-block-first agent. Every tutorial is **scenario-based** — we use a single
+domain-scoped analytics surface with local persona/policy preview, RLS,
+scheduled deliveries, and a block-first agent. Every tutorial is
+**scenario-based** — we use a single
 fictional bank, **Acme Bank**, and follow real stakeholders through real
 workflows.
 
@@ -22,7 +23,7 @@ workflows.
 
 1. **[01 — Getting started](./01-getting-started.md)** — install, scaffold the Acme Bank project.
 2. **[02 — Authoring blocks](./02-authoring-blocks.md)** — Mei builds her first certified block (`fraud_alerts_by_region`).
-3. **[03 — Apps, RBAC, and personas](./03-apps-rbac-personas.md)** — Raj creates `cards-ops`, sets up roles + RLS, and Li sees only her branch.
+3. **[03 — Apps, policies, and personas](./03-apps-rbac-personas.md)** — Raj creates `cards-ops`, sets up local roles + RLS, and Li sees only her branch.
 4. **[04 — Dashboards](./04-dashboards.md)** — assemble `daily-ops.dqld` from certified blocks.
 5. **[05 — Schedules + Slack delivery](./05-schedules-and-slack.md)** — daily 7am digest into `#cards-ops`, fraud-spike alerts.
 6. **[06 — Agentic analytics](./06-agentic-analytics.md)** — knowledge graph, Skills, asking questions, multi-provider.
@@ -36,8 +37,8 @@ workflows.
 
 Domains author **certified `.dql` blocks** (SQL + governance metadata + tests).
 Apps bundle dashboards into a consumption surface for stakeholders, with
-declarative members, roles, access policies, RLS bindings, and schedules. The
-**persona registry** picks "who am I running as right now" and feeds RLS
+declarative members, roles, local access policies, RLS bindings, and schedules.
+The **persona registry** picks "who am I running as right now" and feeds RLS
 template variables into the SQL executor. The **agent** retrieves certified
 blocks first; if nothing matches, an LLM proposes SQL marked Uncertified that
 analysts review and certify back into blocks. **Slack** is the same answer

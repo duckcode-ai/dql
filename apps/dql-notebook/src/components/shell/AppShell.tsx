@@ -16,6 +16,7 @@ import { ConnectionPanel } from '../panels/ConnectionPanel';
 import { ReferencePanel } from '../panels/ReferencePanel';
 import { GitPage } from '../git/GitPage';
 import { AppsView } from '../apps/AppsView';
+import { ReviewPage } from '../review/ReviewPage';
 import { SettingsPage } from '../settings/SettingsPage';
 import { LineageDrawer } from '../lineage/LineageDrawer';
 import { api } from '../../api/client';
@@ -202,6 +203,13 @@ export function AppShell() {
             <GitPage />
           ) : state.mainView === 'apps' ? (
             <AppsView />
+          ) : state.mainView === 'review' ? (
+            <FullPageSection
+              title="Review"
+              description="Review Apps, AI pins, and draft DQL blocks before promoting them into trusted shared work."
+            >
+              <ReviewPage />
+            </FullPageSection>
           ) : state.mainView === 'settings' ? (
             <FullPageSection
               title="Settings"

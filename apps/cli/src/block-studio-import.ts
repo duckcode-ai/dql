@@ -8,7 +8,7 @@ export type BlockStudioImportSourceKind =
   | 'tableau-workbook'
   | 'powerbi-project';
 
-export type BlockStudioImportReviewStatus = 'draft' | 'saved' | 'rejected';
+export type BlockStudioImportReviewStatus = 'draft' | 'review' | 'saved' | 'rejected';
 
 export interface BlockStudioImportLineage {
   sourceTables: string[];
@@ -33,6 +33,7 @@ export interface BlockStudioImportCandidate {
   preview: unknown | null;
   lineage: BlockStudioImportLineage;
   confidence: number;
+  conversionNotes: string[];
   reviewStatus: BlockStudioImportReviewStatus;
   savedPath?: string;
 }
@@ -267,17 +268,22 @@ function buildSqlCandidate(options: {
     sourceKind: options.sourceKind,
     sourcePath,
     name: titleizeName(name),
-    domain: options.defaults.domain,
+    domain: metadata.domain ? sanitizeDomain(metadata.domain) : options.defaults.domain,
     description: metadata.description || `Imported from ${sourcePath}`,
     owner: options.defaults.owner,
-    tags: normalizeTags(options.defaults.tags),
+    tags: normalizeTags([...options.defaults.tags, ...metadata.tags]),
     sql: statement.sql.trim(),
     dqlSource: '',
     validation: null,
     preview: null,
     lineage,
     confidence: scoreSqlCandidate(statement.sql, lineage),
-    reviewStatus: 'draft',
+    conversionNotes: [
+      'Deterministic SQL extraction created this DQL draft locally.',
+      'Visualization defaults to table until a reviewer chooses a chart type.',
+      'Optional LLM enrichment can be applied per candidate after validation.',
+    ],
+    reviewStatus: 'review',
   };
   candidate.dqlSource = candidateToDqlSource(candidate);
   return candidate;
@@ -353,13 +359,16 @@ function splitSqlStatements(source: string): string[] {
   return statements;
 }
 
-function extractStatementMetadata(sql: string): { name: string; description: string } {
+function extractStatementMetadata(sql: string): { name: string; description: string; domain: string; tags: string[] } {
   const leading = sql.split(/\r?\n/).slice(0, 12).join('\n');
   const name = leading.match(/(?:--|\/\*)\s*(?:name|block)\s*:\s*([^*\n]+)/i)?.[1]?.trim() ?? '';
   const description = leading.match(/(?:--|\/\*)\s*(?:description|desc)\s*:\s*([^*\n]+)/i)?.[1]?.trim() ?? '';
-  if (description) return { name, description };
+  const domain = leading.match(/(?:--|\/\*)\s*domain\s*:\s*([^*\n]+)/i)?.[1]?.trim() ?? '';
+  const tagText = leading.match(/(?:--|\/\*)\s*tags?\s*:\s*([^*\n]+)/i)?.[1]?.trim() ?? '';
+  const tags = normalizeTags(tagText ? tagText.split(',') : []);
+  if (description) return { name, description, domain, tags };
   const firstComment = leading.match(/^\s*--\s*(?!name\s*:|block\s*:)(.+)$/im)?.[1]?.trim() ?? '';
-  return { name, description: firstComment };
+  return { name, description: firstComment, domain, tags };
 }
 
 function extractSourceTables(sql: string): string[] {

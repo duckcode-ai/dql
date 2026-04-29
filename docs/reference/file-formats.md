@@ -91,8 +91,8 @@ Fields:
 
 - **`project`** — human-readable project name
 - **`connections`** — named database connections. `default` is used unless a block overrides it
-- **`semanticLayer`** — `{ provider, path }`. Providers: `dql` (local YAML), `dbt`, `cubejs`, `snowflake`
-- **`dbt`** — `{ projectDir, manifestPath, semanticManifestPath }` for sibling dbt projects. `dql compile` and `dql sync dbt` read from here
+- **`semanticLayer`** — `{ provider, path, projectPath }`. Providers: `dql` (local YAML), `dbt`, `cubejs`, `snowflake`
+- **`dbt`** — `{ projectDir, manifestPath }` for in-place or sibling dbt projects. `dql compile` and `dql sync dbt` read from here
 - **`governance`** — required fields every block must declare to pass `dql certify`
 
 ## `dql-manifest.json` — build output

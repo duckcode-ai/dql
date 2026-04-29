@@ -41,7 +41,7 @@ npm run notebook
 ```
 
 Open **http://127.0.0.1:3474**. Use the Acme Bank template when you want the
-full Apps/RBAC/agent walkthrough:
+full Apps/persona/agent walkthrough:
 
 ```bash
 npx create-dql-app@latest acme-bank --template acme-bank
@@ -59,6 +59,48 @@ npm i -D @duckcodeailabs/dql-cli
 npx @duckcodeailabs/dql-cli doctor
 npx @duckcodeailabs/dql-cli notebook
 ```
+
+## Existing dbt repo
+
+If you already have one dbt repo, keep DQL isolated in a `dql/` folder inside
+that repo:
+
+```bash
+cd my-dbt-repo
+npm i -D @duckcodeailabs/dql-cli
+npx dql init ./dql
+dbt build
+npx dql compile ./dql
+npx dql sync dbt ./dql
+npx dql notebook ./dql
+```
+
+The resulting layout is:
+
+```text
+my-dbt-repo/
+├─ dbt_project.yml
+├─ models/
+├─ target/manifest.json
+└─ dql/
+   ├─ dql.config.json
+   ├─ blocks/
+   ├─ notebooks/
+   ├─ apps/
+   └─ .dql/
+```
+
+`dql.config.json` will point at the local dbt project:
+
+```json
+{
+  "semanticLayer": { "provider": "dbt", "projectPath": ".." },
+  "dbt": { "projectDir": "..", "manifestPath": "target/manifest.json" }
+}
+```
+
+Use the sibling layout instead when you want dbt and DQL in separate folders:
+`analytics/dbt/` plus `analytics/dql/`.
 
 Global install is optional:
 

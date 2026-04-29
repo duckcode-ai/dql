@@ -562,7 +562,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
               tileType: 'aiPin',
               title: item.title ?? pin.title,
               viz: item.viz,
-              chartConfig: pin.chartConfig ?? { chart: item.viz.type },
+              chartConfig: mergeDashboardChartConfig(pin.chartConfig as Record<string, unknown> | undefined, item),
               result: pin.result,
               aiPin: pin,
               citation: {
@@ -631,7 +631,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
               certificationStatus: block.status ?? null,
               title: item.title ?? block.name,
               viz: item.viz,
-              chartConfig: plan?.chartConfig ?? { chart: item.viz.type },
+              chartConfig: mergeDashboardChartConfig(plan?.chartConfig, item),
               result: normalizeQueryResult(result),
               citation: {
                 kind: 'block',
@@ -1476,7 +1476,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
 
         if (req.method === 'PATCH' && candidateId && !action) {
           const body = await readJSON(req);
-          const reviewStatus = typeof body.reviewStatus === 'string' && ['draft', 'saved', 'rejected'].includes(body.reviewStatus)
+          const reviewStatus = typeof body.reviewStatus === 'string' && ['draft', 'review', 'saved', 'rejected'].includes(body.reviewStatus)
             ? body.reviewStatus as BlockStudioImportCandidate['reviewStatus']
             : undefined;
           const candidate = updateBlockStudioImportCandidate(projectRoot, importId, candidateId, {
@@ -3274,6 +3274,25 @@ function resolveDashboardItemBlock(
   }
   const normalizedRef = normalize(item.block.ref).replaceAll('\\', '/');
   return Object.values(manifest.blocks).find((b) => normalize(b.filePath).replaceAll('\\', '/') === normalizedRef) ?? null;
+}
+
+function mergeDashboardChartConfig(
+  base: object | null | undefined,
+  item: DashboardGridItem,
+): Record<string, unknown> {
+  const options = item.viz.options ?? {};
+  const baseChart = (base as { chart?: unknown } | null | undefined)?.chart;
+  return {
+    ...(base ?? {}),
+    ...options,
+    chart: dashboardVizToChart(String(options.chart ?? baseChart ?? item.viz.type)),
+  };
+}
+
+function dashboardVizToChart(value: string): string {
+  const normalized = value.toLowerCase().replace(/_/g, '-');
+  if (normalized === 'single-value') return 'kpi';
+  return normalized;
 }
 
 export function serializeJSON(value: unknown): string {

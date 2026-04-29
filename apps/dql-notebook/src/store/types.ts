@@ -139,7 +139,7 @@ export interface ParamConfig {
 }
 export type SidebarPanel = 'files' | 'schema' | 'block_library' | 'connection' | 'reference' | 'lineage' | 'git' | 'apps' | 'settings' | null;
 export type DevPanelTab = 'logs' | 'errors';
-export type MainView = 'notebook' | 'block_studio' | 'connection' | 'reference' | 'git' | 'apps' | 'settings';
+export type MainView = 'notebook' | 'block_studio' | 'connection' | 'reference' | 'git' | 'apps' | 'review' | 'settings';
 
 /**
  * Apps consumption-layer surface — list of Apps + currently-open App.
@@ -150,10 +150,15 @@ export interface AppSummary {
   id: string;
   name: string;
   domain: string;
+  subdomain?: string;
+  groups?: string[];
   description?: string;
   audience?: string;
-  status?: 'ready' | 'empty';
+  lifecycle?: 'draft' | 'review' | 'certified' | 'deprecated';
+  certification?: 'certified' | 'uncertified';
+  status?: 'ready' | 'empty' | 'review';
   storage?: 'shared' | 'mine' | 'template';
+  visibility?: 'shared' | 'private' | 'template';
   owners: string[];
   tags: string[];
   members: number;
@@ -161,6 +166,9 @@ export interface AppSummary {
   policies: number;
   schedules: number;
   dashboards: Array<{ id: string; title: string }>;
+  notebooks?: Array<{ path: string; title?: string; role: 'source' | 'analysis' | 'supporting'; visibility: 'shared' | 'private' | 'template' }>;
+  drafts?: Array<{ path: string; name: string; reviewStatus?: string }>;
+  aiPins?: number;
   homepage?: { type: 'dashboard'; id: string } | { type: 'notebook'; path: string };
 }
 
@@ -500,7 +508,8 @@ export interface BlockStudioImportCandidate {
     totalStatements: number;
   };
   confidence: number;
-  reviewStatus: 'draft' | 'saved' | 'rejected';
+  conversionNotes?: string[];
+  reviewStatus: 'draft' | 'review' | 'saved' | 'rejected';
   savedPath?: string;
 }
 

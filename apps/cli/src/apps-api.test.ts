@@ -82,7 +82,14 @@ describe('Apps command center API helpers', () => {
     expect(existsSync(join(root, 'apps/growth-cxo/drafts'))).toBe(true);
     expect(existsSync(join(root, 'apps/growth-cxo/blocks'))).toBe(false);
 
+    const app = JSON.parse(readFileSync(join(root, 'apps/growth-cxo/dql.app.json'), 'utf-8'));
+    expect(app.visibility).toBe('shared');
+    expect(app.lifecycle).toBe('draft');
+    expect(app.audience).toBe('executive');
+
     const dashboard = JSON.parse(readFileSync(join(root, 'apps/growth-cxo/dashboards/overview.dqld'), 'utf-8'));
+    expect(dashboard.metadata.visibility).toBe('shared');
+    expect(dashboard.metadata.lifecycle).toBe('draft');
     expect(dashboard.layout.items[0].block).toEqual({ blockId: 'Revenue Total' });
     expect(result.app.dashboards).toEqual([{ id: 'overview', title: 'Growth CXO Overview' }]);
   });

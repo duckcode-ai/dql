@@ -29,6 +29,8 @@ describe('Block Studio SQL import', () => {
     const root = tempProject();
     writeFileSync(join(root, 'revenue.sql'), `-- name: revenue by region
 -- description: Revenue by region from legacy BI
+-- domain: finance
+-- tags: dashboard, migration
 select region, sum(revenue) as total_revenue
 from marts.orders
 group by region;
@@ -47,10 +49,12 @@ group by region;
     expect(candidate.domain).toBe('finance');
     expect(candidate.owner).toBe('analytics');
     expect(candidate.description).toBe('Revenue by region from legacy BI');
+    expect(candidate.tags).toEqual(['imported', 'raw-sql', 'dashboard', 'migration']);
     expect(candidate.lineage.sourceTables).toEqual(['marts.orders']);
     expect(candidate.dqlSource).toContain('block "Revenue By Region"');
     expect(candidate.dqlSource).toContain('query = """');
-    expect(candidate.reviewStatus).toBe('draft');
+    expect(candidate.reviewStatus).toBe('review');
+    expect(candidate.conversionNotes?.[0]).toMatch(/Deterministic SQL extraction/);
     expect(readFileSync(join(root, '.dql', 'imports', session.id, 'manifest.json'), 'utf-8')).toContain(candidate.id);
   });
 

@@ -1,16 +1,22 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { CSSProperties, PointerEvent as ReactPointerEvent } from 'react';
-import { GripVertical, Trash2 } from 'lucide-react';
+import { GripVertical, SlidersHorizontal, Trash2 } from 'lucide-react';
 import { api, type AppBlockRecommendation, type DashboardDocumentResponse, type DashboardRunResponse } from '../../api/client';
 import { useNotebook } from '../../store/NotebookStore';
-import type { ThemeMode } from '../../store/types';
-import { ChartOutput } from '../output/ChartOutput';
+import type { CellChartConfig, ThemeMode } from '../../store/types';
+import { ChartOutput, CHART_TYPE_OPTIONS, type ChartType } from '../output/ChartOutput';
 import { TableOutput } from '../output/TableOutput';
 import { AgentChatPanel } from '../agent/AgentChatPanel';
+import { inferColumnKind, columnKindToChartRole, type ChartColumnRole } from '../../utils/column-kind';
+import { classifyColumns } from '../../utils/semantic-fields';
 
 type DashboardLayoutItem = DashboardDocumentResponse['dashboard']['layout']['items'][number];
 
 const SIDE_PANEL_HEIGHT = 'clamp(320px, calc(100vh - 220px), 760px)';
+const APP_CHART_TYPE_OPTIONS: Array<{ value: ChartType; label: string }> = [
+  { value: 'table', label: 'Table' },
+  ...CHART_TYPE_OPTIONS,
+];
 
 /**
  * Grid renderer for `.dqld` dashboards backed by the live dashboard run API.
@@ -413,6 +419,7 @@ function DashboardTile({
 }): JSX.Element {
   const tileRef = useRef<HTMLDivElement | null>(null);
   const [dragOffset, setDragOffset] = useState<{ x: number; y: number } | null>(null);
+  const [settingsOpen, setSettingsOpen] = useState(false);
   const blockRef = item.block
     ? ('blockId' in item.block ? `block:${item.block.blockId}` : item.block.ref ?? '(unknown)')
     : item.aiPin
@@ -485,10 +492,27 @@ function DashboardTile({
           >
             {item.viz.type}
           </span>
-          {editable && <TileEditorControls item={item} cols={cols} onDragStart={startDrag} onPatch={onPatch} />}
+          {editable && (
+            <TileEditorControls
+              item={item}
+              cols={cols}
+              settingsOpen={settingsOpen}
+              onToggleSettings={() => setSettingsOpen((value) => !value)}
+              onDragStart={startDrag}
+              onPatch={onPatch}
+            />
+          )}
         </div>
       </div>
       <div style={{ fontSize: 11, opacity: 0.6, fontFamily: 'monospace' }}>{blockRef}</div>
+      {editable && settingsOpen ? (
+        <TileSettingsPanel
+          item={item}
+          tile={tile}
+          cols={cols}
+          onPatch={onPatch}
+        />
+      ) : null}
       <div
         style={{
           flex: 1,
@@ -501,18 +525,20 @@ function DashboardTile({
           fontStyle: tile?.status === 'ok' ? 'normal' : 'italic',
         }}
       >
-        <TileBody tile={tile} loading={loading} error={error} themeMode={themeMode} />
+        <TileBody item={item} tile={tile} loading={loading} error={error} themeMode={themeMode} />
       </div>
     </div>
   );
 }
 
 function TileBody({
+  item,
   tile,
   loading,
   error,
   themeMode,
 }: {
+  item: DashboardDocumentResponse['dashboard']['layout']['items'][number];
   tile?: DashboardRunResponse['tiles'][number];
   loading: boolean;
   error: string | null;
@@ -530,21 +556,26 @@ function TileBody({
   if (tile.status === 'error') return <span>{tile.error ?? 'Tile failed.'}</span>;
   if (!tile.result) return <span>No result.</span>;
 
-  const chart = String((tile.chartConfig as { chart?: unknown } | undefined)?.chart ?? tile.viz?.type ?? '').toLowerCase();
-  if (chart === 'table' || tile.viz?.type === 'table') {
+  const chartConfig = mergeTileChartConfig(item, tile.chartConfig as CellChartConfig | undefined);
+  const chart = String(chartConfig.chart ?? tile.viz?.type ?? '').toLowerCase();
+  if (chart === 'table' || item.viz.type === 'table') {
     return <div style={{ width: '100%', alignSelf: 'stretch' }}><TableOutput result={tile.result} themeMode={themeMode} /></div>;
   }
-  return <div style={{ width: '100%', alignSelf: 'stretch' }}><ChartOutput result={tile.result} themeMode={themeMode} chartConfig={tile.chartConfig as any} /></div>;
+  return <div style={{ width: '100%', alignSelf: 'stretch' }}><ChartOutput result={tile.result} themeMode={themeMode} chartConfig={chartConfig} /></div>;
 }
 
 function TileEditorControls({
   item,
   cols,
+  settingsOpen,
+  onToggleSettings,
   onDragStart,
   onPatch,
 }: {
   item: DashboardDocumentResponse['dashboard']['layout']['items'][number];
   cols: number;
+  settingsOpen: boolean;
+  onToggleSettings: () => void;
   onDragStart: (event: ReactPointerEvent<HTMLButtonElement>) => void;
   onPatch: (patch: Partial<DashboardDocumentResponse['dashboard']['layout']['items'][number]> | null) => void;
 }) {
@@ -555,6 +586,14 @@ function TileEditorControls({
   const applyHeight = (height: number) => onPatch({ h: height });
   return (
     <div style={{ display: 'flex', gap: 4, alignItems: 'center', flexWrap: 'wrap', justifyContent: 'flex-end' }}>
+      <button
+        type="button"
+        title="Tile settings"
+        onClick={onToggleSettings}
+        style={iconTileButtonStyle}
+      >
+        <SlidersHorizontal size={13} strokeWidth={2} color={settingsOpen ? 'var(--accent, #4f46e5)' : undefined} />
+      </button>
       <button
         type="button"
         title="Drag tile"
@@ -581,6 +620,164 @@ function TileEditorControls({
       >
         <Trash2 size={13} strokeWidth={2} />
       </button>
+    </div>
+  );
+}
+
+function TileSettingsPanel({
+  item,
+  tile,
+  cols,
+  onPatch,
+}: {
+  item: DashboardDocumentResponse['dashboard']['layout']['items'][number];
+  tile?: DashboardRunResponse['tiles'][number];
+  cols: number;
+  onPatch: (patch: Partial<DashboardDocumentResponse['dashboard']['layout']['items'][number]> | null) => void;
+}) {
+  const result = tile?.result;
+  const chartConfig = mergeTileChartConfig(item, tile?.chartConfig as CellChartConfig | undefined);
+  const chart = normalizeChartType(chartConfig.chart);
+  const classified = useMemo(() => classifyColumns(result), [result]);
+  const columnKinds = useMemo(() => {
+    const map = new Map<string, ChartColumnRole>();
+    if (!result) return map;
+    const metricSet = new Set(classified.metrics);
+    const dimSet = new Set(classified.dimensions);
+    for (const column of result.columns) {
+      if (metricSet.has(column)) map.set(column, 'measure');
+      else if (dimSet.has(column)) map.set(column, 'dimension');
+      else map.set(column, columnKindToChartRole(inferColumnKind(column, result.rows)));
+    }
+    return map;
+  }, [result, classified]);
+  const measures = result?.columns.filter((column) => columnKinds.get(column) === 'measure') ?? [];
+  const dimensions = result?.columns.filter((column) => columnKinds.get(column) !== 'measure') ?? [];
+
+  const patchConfig = (patch: Partial<CellChartConfig>) => {
+    const next = compactChartConfig({ ...chartConfig, ...patch });
+    onPatch({
+      title: next.title || item.title,
+      viz: {
+        ...item.viz,
+        type: chartToDashboardViz(next.chart),
+        options: next as Record<string, unknown>,
+      },
+    });
+  };
+
+  const patchSize = (patch: Partial<Pick<DashboardLayoutItem, 'w' | 'h'>>) => {
+    onPatch({
+      ...patch,
+      w: patch.w !== undefined ? clamp(Math.round(patch.w), 1, cols) : item.w,
+      h: patch.h !== undefined ? Math.max(1, Math.round(patch.h)) : item.h,
+      x: patch.w !== undefined ? clamp(item.x, 0, Math.max(0, cols - clamp(Math.round(patch.w), 1, cols))) : item.x,
+    });
+  };
+
+  return (
+    <div style={tileSettingsPanelStyle}>
+      <div style={tileSettingsGridStyle}>
+        <label style={tileSettingsLabelStyle}>
+          Title
+          <input
+            value={chartConfig.title ?? item.title ?? ''}
+            onChange={(event) => patchConfig({ title: event.target.value || undefined })}
+            style={tileSettingsInputStyle}
+          />
+        </label>
+        <label style={tileSettingsLabelStyle}>
+          Chart
+          <select
+            value={chart}
+            onChange={(event) => patchConfig({ chart: event.target.value as ChartType })}
+            style={tileSettingsInputStyle}
+          >
+            {APP_CHART_TYPE_OPTIONS.map((option) => (
+              <option key={option.value} value={option.value}>{option.label}</option>
+            ))}
+          </select>
+        </label>
+        <FieldSelect label="X" value={chartConfig.x} columns={result?.columns ?? []} onChange={(value) => patchConfig({ x: value })} />
+        <FieldSelect label="Y" value={chartConfig.y} columns={result?.columns ?? []} onChange={(value) => patchConfig({ y: value })} />
+        <FieldSelect label="Color" value={chartConfig.color} columns={result?.columns ?? []} onChange={(value) => patchConfig({ color: value })} />
+        <FieldSelect label="Facet" value={chartConfig.facet} columns={result?.columns ?? []} onChange={(value) => patchConfig({ facet: value })} />
+        <label style={tileSettingsLabelStyle}>
+          Width
+          <input
+            type="number"
+            min={1}
+            max={cols}
+            value={item.w}
+            onChange={(event) => patchSize({ w: Number(event.target.value) })}
+            style={tileSettingsInputStyle}
+          />
+        </label>
+        <label style={tileSettingsLabelStyle}>
+          Height
+          <input
+            type="number"
+            min={1}
+            max={12}
+            value={item.h}
+            onChange={(event) => patchSize({ h: Number(event.target.value) })}
+            style={tileSettingsInputStyle}
+          />
+        </label>
+      </div>
+      {result ? (
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
+          <ColumnPickList title="Measures" columns={measures} onPick={(column) => patchConfig({ y: column })} />
+          <ColumnPickList title="Dimensions" columns={dimensions} onPick={(column) => patchConfig({ x: column })} />
+        </div>
+      ) : (
+        <div style={{ fontSize: 11, opacity: 0.64 }}>Run results are needed before field slots can be inferred.</div>
+      )}
+    </div>
+  );
+}
+
+function FieldSelect({
+  label,
+  value,
+  columns,
+  onChange,
+}: {
+  label: string;
+  value?: string;
+  columns: string[];
+  onChange: (value: string | undefined) => void;
+}) {
+  return (
+    <label style={tileSettingsLabelStyle}>
+      {label}
+      <select value={value ?? ''} onChange={(event) => onChange(event.target.value || undefined)} style={tileSettingsInputStyle}>
+        <option value="">Auto</option>
+        {columns.map((column) => <option key={column} value={column}>{column}</option>)}
+      </select>
+    </label>
+  );
+}
+
+function ColumnPickList({
+  title,
+  columns,
+  onPick,
+}: {
+  title: string;
+  columns: string[];
+  onPick: (column: string) => void;
+}) {
+  return (
+    <div style={{ display: 'grid', gap: 4, minWidth: 0 }}>
+      <div style={{ fontSize: 10, fontWeight: 800, textTransform: 'uppercase', opacity: 0.58 }}>{title}</div>
+      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4 }}>
+        {columns.length === 0 ? <span style={{ fontSize: 11, opacity: 0.55 }}>None</span> : columns.slice(0, 10).map((column) => (
+          <button key={column} type="button" onClick={() => onPick(column)} style={fieldChipStyle}>
+            {column}
+          </button>
+        ))}
+      </div>
     </div>
   );
 }
@@ -810,6 +1007,42 @@ function LineageStat({ label, value }: { label: string; value: number }) {
   );
 }
 
+function mergeTileChartConfig(
+  item: DashboardDocumentResponse['dashboard']['layout']['items'][number],
+  base?: CellChartConfig,
+): CellChartConfig {
+  const options = (item.viz.options ?? {}) as Partial<CellChartConfig>;
+  return {
+    ...(base ?? {}),
+    ...options,
+    chart: normalizeChartType(String(options.chart ?? base?.chart ?? item.viz.type)),
+    title: options.title ?? base?.title ?? item.title,
+  };
+}
+
+function normalizeChartType(value: unknown): ChartType {
+  const normalized = String(value ?? 'table').toLowerCase().replace(/_/g, '-');
+  if (normalized === 'single-value') return 'kpi';
+  if (APP_CHART_TYPE_OPTIONS.some((option) => option.value === normalized)) return normalized as ChartType;
+  return 'table';
+}
+
+function chartToDashboardViz(value: unknown): string {
+  const chart = normalizeChartType(value);
+  if (chart === 'table') return 'table';
+  return chart.replace(/-/g, '_');
+}
+
+function compactChartConfig(config: CellChartConfig): CellChartConfig {
+  const out: CellChartConfig = {};
+  for (const [key, value] of Object.entries(config) as Array<[keyof CellChartConfig, unknown]>) {
+    if (value === undefined || value === '') continue;
+    (out as Record<string, unknown>)[key] = value;
+  }
+  if (!out.chart) out.chart = 'table';
+  return out;
+}
+
 function toolbarButtonStyle(active: boolean): CSSProperties {
   return {
     border: '1px solid var(--border-color, rgba(0,0,0,0.12))',
@@ -843,6 +1076,56 @@ const addMenuItemStyle: CSSProperties = {
   textAlign: 'left',
   display: 'grid',
   gap: 2,
+};
+
+const tileSettingsPanelStyle: CSSProperties = {
+  border: '1px solid var(--border-color, rgba(0,0,0,0.10))',
+  borderRadius: 6,
+  padding: 8,
+  background: 'var(--color-bg, rgba(255,255,255,0.72))',
+  display: 'grid',
+  gap: 8,
+  fontStyle: 'normal',
+};
+
+const tileSettingsGridStyle: CSSProperties = {
+  display: 'grid',
+  gridTemplateColumns: 'repeat(4, minmax(0, 1fr))',
+  gap: 6,
+};
+
+const tileSettingsLabelStyle: CSSProperties = {
+  display: 'grid',
+  gap: 3,
+  fontSize: 10,
+  fontWeight: 700,
+  opacity: 0.78,
+};
+
+const tileSettingsInputStyle: CSSProperties = {
+  width: '100%',
+  minWidth: 0,
+  boxSizing: 'border-box',
+  border: '1px solid var(--border-color, rgba(0,0,0,0.12))',
+  borderRadius: 5,
+  background: 'var(--surface, transparent)',
+  color: 'inherit',
+  padding: '5px 6px',
+  fontSize: 11,
+};
+
+const fieldChipStyle: CSSProperties = {
+  border: '1px solid var(--border-color, rgba(0,0,0,0.10))',
+  borderRadius: 4,
+  background: 'var(--surface, rgba(0,0,0,0.02))',
+  color: 'inherit',
+  padding: '2px 5px',
+  fontSize: 10,
+  cursor: 'pointer',
+  maxWidth: '100%',
+  overflow: 'hidden',
+  textOverflow: 'ellipsis',
+  whiteSpace: 'nowrap',
 };
 
 const iconTileButtonStyle: CSSProperties = {

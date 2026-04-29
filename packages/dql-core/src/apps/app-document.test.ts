@@ -41,8 +41,50 @@ describe('parseAppDocument', () => {
     expect(errors).toEqual([]);
     expect(document?.id).toBe('growth-cxo');
     expect(document?.members).toHaveLength(2);
+    expect(document?.visibility).toBe('shared');
+    expect(document?.lifecycle).toBe('draft');
     // enabled defaults to true when omitted
     expect(document?.policies[0].enabled).toBe(true);
+  });
+
+  it('parses OSS scope metadata and attached notebook refs', () => {
+    const app = {
+      ...minimalApp,
+      visibility: 'template',
+      subdomain: 'fraud',
+      groups: ['daily-ops', 'cards'],
+      audience: 'operations',
+      lifecycle: 'review',
+      notebooks: [
+        {
+          path: 'notebooks/cards_fraud_ops.dqlnb',
+          title: 'Cards Fraud Ops',
+          role: 'analysis',
+          visibility: 'shared',
+        },
+      ],
+    };
+    const { document, errors } = parseAppDocument(JSON.stringify(app));
+    expect(errors).toEqual([]);
+    expect(document?.subdomain).toBe('fraud');
+    expect(document?.groups).toEqual(['daily-ops', 'cards']);
+    expect(document?.audience).toBe('operations');
+    expect(document?.lifecycle).toBe('review');
+    expect(document?.notebooks?.[0]).toEqual(app.notebooks[0]);
+  });
+
+  it('rejects invalid OSS metadata enums', () => {
+    const bad = {
+      ...minimalApp,
+      visibility: 'workspace',
+      lifecycle: 'gold',
+      notebooks: [{ path: 'notebooks/a.dqlnb', role: 'owner' }],
+    };
+    const { document, errors } = parseAppDocument(JSON.stringify(bad));
+    expect(document).toBeNull();
+    expect(errors.some((e) => e.message.includes('"visibility"'))).toBe(true);
+    expect(errors.some((e) => e.message.includes('"lifecycle"'))).toBe(true);
+    expect(errors.some((e) => e.message.includes('notebooks[0].role'))).toBe(true);
   });
 
   it('rejects invalid JSON', () => {

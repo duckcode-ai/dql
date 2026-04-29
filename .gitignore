@@ -5,6 +5,7 @@ dist
 *.tsbuildinfo
 .DS_Store
 *.vsix
+COMMERCIAL-PLAN.md
 .env
 .env.*
 *.log

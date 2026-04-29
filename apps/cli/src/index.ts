@@ -59,7 +59,7 @@ const HELP = `
     dql lineage [block] [path]      Answer-layer lineage analysis
     dql mcp [--http]                Run the DQL MCP server (stdio by default; --http = loopback)
     dql app new|ls|show|build|reindex <name>
-                                    Manage App artifacts (members, roles, RBAC, dashboards, schedules)
+                                    Manage App artifacts (metadata, policies, dashboards, schedules)
     dql schedule list|run|start|status  Local scheduler for @schedule'd blocks (alerts + notifications)
     dql agent ask "<question>"      Block-first agent loop (certified blocks → fallback LLM SQL)
     dql agent reindex               Rebuild .dql/cache/agent-kg.sqlite

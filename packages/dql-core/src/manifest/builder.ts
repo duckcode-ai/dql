@@ -1031,6 +1031,11 @@ function scanAppsAndDashboards(
         businessRules: dashboard.metadata.businessRules,
         caveats: dashboard.metadata.caveats,
         domain: dashboard.metadata.domain ?? app.domain,
+        subdomain: dashboard.metadata.subdomain ?? app.subdomain,
+        groups: dashboard.metadata.groups ?? app.groups ?? [],
+        audience: dashboard.metadata.audience ?? app.audience,
+        visibility: dashboard.metadata.visibility ?? app.visibility ?? 'shared',
+        lifecycle: dashboard.metadata.lifecycle ?? app.lifecycle ?? 'draft',
         tags: dashboard.metadata.tags ?? [],
         filePath: dqldRel,
         blockIds: resolvedById,
@@ -1060,6 +1065,13 @@ function scanAppsAndDashboards(
           message: `homepage references unknown dashboard "${app.homepage.id}"`,
         });
       }
+    } else if (app.homepage?.type === 'notebook' && !existsSync(join(projectRoot, app.homepage.path))) {
+      diagnostics.push({
+        kind: 'resolve',
+        filePath: appRel,
+        severity: 'warning',
+        message: `homepage references unknown notebook "${app.homepage.path}"`,
+      });
     }
     // Cross-check schedule dashboards exist.
     for (const sched of app.schedules ?? []) {
@@ -1069,6 +1081,16 @@ function scanAppsAndDashboards(
           filePath: appRel,
           severity: 'warning',
           message: `schedule "${sched.id}" references unknown dashboard "${sched.dashboard}"`,
+        });
+      }
+    }
+    for (const notebook of app.notebooks ?? []) {
+      if (!existsSync(join(projectRoot, notebook.path))) {
+        diagnostics.push({
+          kind: 'resolve',
+          filePath: appRel,
+          severity: 'warning',
+          message: `notebook reference points to missing file "${notebook.path}"`,
         });
       }
     }
@@ -1095,6 +1117,11 @@ function appDocumentToManifest(
     businessRules: app.businessRules,
     caveats: app.caveats,
     domain: app.domain,
+    subdomain: app.subdomain,
+    groups: app.groups ?? [],
+    audience: app.audience,
+    visibility: app.visibility ?? 'shared',
+    lifecycle: app.lifecycle ?? 'draft',
     owners: app.owners,
     tags: app.tags ?? [],
     filePath,
@@ -1137,6 +1164,12 @@ function appDocumentToManifest(
       enabled: s.enabled === undefined ? true : Boolean(s.enabled),
     })),
     dashboards: dashboardIds,
+    notebooks: (app.notebooks ?? []).map((n) => ({
+      path: n.path,
+      title: n.title,
+      role: n.role,
+      visibility: n.visibility ?? 'shared',
+    })),
     homepage: app.homepage,
   };
 }

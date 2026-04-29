@@ -3,9 +3,22 @@
   "id": "cards-ops",
   "name": "Cards Operations",
   "description": "Daily cards volume, approval health, and fraud monitoring for operations leaders.",
+  "visibility": "shared",
   "domain": "cards",
+  "subdomain": "fraud",
+  "groups": ["daily-ops", "merchant-risk"],
+  "audience": "operations",
+  "lifecycle": "review",
   "owners": ["raj.kumar@acme-bank.com"],
   "tags": ["cards", "fraud", "daily", "ops", "audience:operations"],
+  "notebooks": [
+    {
+      "path": "notebooks/cards_fraud_ops.dqlnb",
+      "title": "Cards Fraud Ops Investigation",
+      "role": "analysis",
+      "visibility": "shared"
+    }
+  ],
   "members": [
     {
       "userId": "raj.kumar@acme-bank.com",

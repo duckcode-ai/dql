@@ -43,10 +43,18 @@ export type DashboardVizConfig = {
   /** Chart kind. The renderer picks the matching @duckcodeailabs/dql-charts component. */
   type:
     | 'single_value'
+    | 'grouped_bar'
+    | 'stacked_bar'
     | 'line'
     | 'bar'
     | 'area'
     | 'pie'
+    | 'donut'
+    | 'scatter'
+    | 'heatmap'
+    | 'histogram'
+    | 'waterfall'
+    | 'gauge'
     | 'table'
     | 'pivot'
     | 'map'
@@ -91,6 +99,11 @@ export interface DashboardDocument {
     title: string;
     description?: string;
     domain?: string;
+    subdomain?: string;
+    groups?: string[];
+    audience?: string;
+    visibility?: 'shared' | 'private' | 'template';
+    lifecycle?: 'draft' | 'review' | 'certified' | 'deprecated';
     tags?: string[];
     businessOutcome?: string;
     businessOwner?: string;
@@ -260,6 +273,11 @@ function readMetadata(raw: unknown, err: (m: string) => void): DashboardDocument
     title: o.title,
     description: typeof o.description === 'string' ? o.description : undefined,
     domain: typeof o.domain === 'string' ? o.domain : undefined,
+    subdomain: typeof o.subdomain === 'string' ? o.subdomain : undefined,
+    groups: stringArrayOrUndefined(o.groups, 'metadata.groups', err),
+    audience: typeof o.audience === 'string' ? o.audience : undefined,
+    visibility: enumOrUndefined(o.visibility, 'metadata.visibility', ['shared', 'private', 'template'] as const, err),
+    lifecycle: enumOrUndefined(o.lifecycle, 'metadata.lifecycle', ['draft', 'review', 'certified', 'deprecated'] as const, err),
     tags: tagsTyped,
     businessOutcome: typeof o.businessOutcome === 'string' ? o.businessOutcome : undefined,
     businessOwner: typeof o.businessOwner === 'string' ? o.businessOwner : undefined,
@@ -356,7 +374,8 @@ function readLayout(raw: unknown, err: (m: string) => void): DashboardDocument['
   }
 
   const allowedViz = [
-    'single_value', 'line', 'bar', 'area', 'pie', 'table', 'pivot', 'map', 'funnel', 'kpi', 'text', 'heading',
+    'single_value', 'line', 'bar', 'grouped_bar', 'stacked_bar', 'area', 'pie', 'donut', 'scatter',
+    'heatmap', 'histogram', 'waterfall', 'gauge', 'table', 'pivot', 'map', 'funnel', 'kpi', 'text', 'heading',
   ] as const;
 
   const items: DashboardGridItem[] = [];
@@ -423,4 +442,16 @@ function readLayout(raw: unknown, err: (m: string) => void): DashboardDocument['
 
 function num(v: unknown): number | null {
   return typeof v === 'number' && Number.isFinite(v) ? v : null;
+}
+
+function enumOrUndefined<T extends readonly string[]>(
+  raw: unknown,
+  field: string,
+  allowed: T,
+  err: (m: string) => void,
+): T[number] | undefined {
+  if (raw === undefined) return undefined;
+  if (typeof raw === 'string' && (allowed as readonly string[]).includes(raw)) return raw as T[number];
+  err(`${field} must be one of ${allowed.join('|')}`);
+  return undefined;
 }

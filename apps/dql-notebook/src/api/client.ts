@@ -34,8 +34,19 @@ export interface AppDocumentSummary {
     name: string;
     description?: string;
     domain: string;
+    subdomain?: string;
+    groups?: string[];
+    visibility?: 'shared' | 'private' | 'template';
+    audience?: string;
+    lifecycle?: 'draft' | 'review' | 'certified' | 'deprecated';
     owners: string[];
     tags?: string[];
+    notebooks?: Array<{
+      path: string;
+      title?: string;
+      role: 'source' | 'analysis' | 'supporting';
+      visibility: 'shared' | 'private' | 'template';
+    }>;
     members: Array<{
       userId: string;
       displayName?: string;
@@ -67,6 +78,9 @@ export interface AppDocumentSummary {
     homepage?: { type: 'dashboard'; id: string } | { type: 'notebook'; path: string };
   };
   dashboards: Array<{ id: string; title: string; description?: string; itemCount: number }>;
+  notebooks?: Array<{ path: string; title?: string; role: 'source' | 'analysis' | 'supporting'; visibility: 'shared' | 'private' | 'template' }>;
+  drafts?: Array<{ path: string; name: string; reviewStatus?: string }>;
+  aiPins?: LocalAiPin[];
 }
 
 export interface DashboardDocumentResponse {
@@ -78,6 +92,11 @@ export interface DashboardDocumentResponse {
       title: string;
       description?: string;
       domain?: string;
+      subdomain?: string;
+      groups?: string[];
+      audience?: string;
+      visibility?: 'shared' | 'private' | 'template';
+      lifecycle?: 'draft' | 'review' | 'certified' | 'deprecated';
       tags?: string[];
       businessOutcome?: string;
       businessOwner?: string;
@@ -146,8 +165,12 @@ export interface AppBlockRecommendation {
 export interface CreateAppRequest {
   name: string;
   domain: string;
+  subdomain?: string;
+  groups?: string[];
   purpose?: string;
   audience?: string;
+  visibility?: 'shared' | 'private' | 'template';
+  lifecycle?: 'draft' | 'review' | 'certified' | 'deprecated';
   tags: string[];
   owners: string[];
   selectedBlockIds: string[];
@@ -1208,6 +1231,22 @@ export const api = {
     }
   },
 
+  async attachAppNotebook(appId: string, input: {
+    path: string;
+    title?: string;
+    role?: 'source' | 'analysis' | 'supporting';
+    visibility?: 'shared' | 'private' | 'template';
+  }): Promise<AppDocumentSummary | { ok: false; error: string }> {
+    try {
+      return await request<AppDocumentSummary>(
+        `/api/apps/${encodeURIComponent(appId)}/notebooks`,
+        { method: 'POST', body: JSON.stringify(input) },
+      );
+    } catch (e) {
+      return { ok: false, error: e instanceof Error ? e.message : String(e) };
+    }
+  },
+
   async getDashboard(appId: string, dashboardId: string): Promise<DashboardDocumentResponse | null> {
     try {
       return await request<DashboardDocumentResponse>(
@@ -1277,6 +1316,20 @@ export const api = {
       );
     } catch (e) {
       return { ok: false, error: e instanceof Error ? e.message : String(e) };
+    }
+  },
+
+  async listAiPins(appId: string, dashboardId?: string): Promise<LocalAiPin[]> {
+    try {
+      const search = new URLSearchParams();
+      if (dashboardId) search.set('dashboardId', dashboardId);
+      const qs = search.toString();
+      const { pins } = await request<{ pins: LocalAiPin[] }>(
+        `/api/apps/${encodeURIComponent(appId)}/ai-pins${qs ? `?${qs}` : ''}`,
+      );
+      return pins;
+    } catch {
+      return [];
     }
   },
 

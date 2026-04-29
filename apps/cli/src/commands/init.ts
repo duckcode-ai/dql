@@ -54,7 +54,7 @@ export async function runInit(targetArg: string | null, flags: CLIFlags): Promis
   }
 
   // Create DQL directories
-  const dirs = ['blocks', 'notebooks'];
+  const dirs = ['blocks', 'notebooks', 'apps'];
   if (!isDbt) {
     dirs.push('semantic-layer', 'semantic-layer/metrics', 'semantic-layer/dimensions');
   }
@@ -68,7 +68,7 @@ export async function runInit(targetArg: string | null, flags: CLIFlags): Promis
   // Create .gitignore for DQL artifacts
   const gitignorePath = join(targetDir, '.gitignore');
   const dqlIgnoreEntries =
-    '\n# DQL\ndql-manifest.json\n*.duckdb\n*.duckdb.wal\n.dql/runs/\n.dql/cache/\n*.dqlnb.run.json\n*.dql.run.json\n';
+    '\n# DQL\ndql-manifest.json\n*.duckdb\n*.duckdb.wal\n.dql/runs/\n.dql/cache/\n.dql/imports/\n.dql/local/\n*.dqlnb.run.json\n*.dql.run.json\n';
   if (existsSync(gitignorePath)) {
     const existing = readFileSync(gitignorePath, 'utf-8');
     if (!existing.includes('dql-manifest.json')) {
@@ -94,7 +94,7 @@ export async function runInit(targetArg: string | null, flags: CLIFlags): Promis
       provider: 'dbt',
       sourceConfig: {
         provider: 'dbt',
-        projectPath: '.',
+        projectPath: dbtProjectDir ? relativePath(targetDir, dbtProjectDir) : '.',
       },
     });
     importedSemanticCatalog = true;
@@ -129,6 +129,7 @@ export async function runInit(targetArg: string | null, flags: CLIFlags): Promis
   console.log('  Created:');
   console.log('    dql.config.json');
   console.log('    blocks/');
+  console.log('    apps/');
   console.log('    notebooks/welcome.dqlnb');
   if (importedSemanticCatalog) {
     console.log('    semantic-layer/ (imported local semantic catalog)');
@@ -142,9 +143,11 @@ export async function runInit(targetArg: string | null, flags: CLIFlags): Promis
   if (isDbt) {
     if (!importedSemanticCatalog && hasDbtSemanticDefinitions) {
       console.log(`    ${step + 3}. dql semantic import dbt .`);
-      console.log(`    ${step + 4}. dql compile --dbt-manifest target/manifest.json`);
+      console.log(`    ${step + 4}. dql compile .`);
+      console.log(`    ${step + 5}. dql sync dbt .`);
     } else {
-      console.log(`    ${step + 3}. dql compile --dbt-manifest target/manifest.json`);
+      console.log(`    ${step + 3}. dql compile .`);
+      console.log(`    ${step + 4}. dql sync dbt .`);
     }
   }
   console.log('');
