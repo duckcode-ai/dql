@@ -4,11 +4,14 @@ import { runAgent } from '../../llm/client';
 import type { AgentTurn } from '../../llm/types';
 import { themes, type Theme } from '../../themes/notebook-theme';
 import { AgentAnswerCard, extractGovernedAnswer } from './AgentAnswerCard';
+import { api, type AppConversationMessage } from '../../api/client';
 
 interface LocalMessage {
+  id?: string;
   role: 'user' | 'assistant';
   content: string;
   events?: AgentTurn[];
+  createdAt?: string;
 }
 
 export function AgentChatPanel({
@@ -18,6 +21,8 @@ export function AgentChatPanel({
   themeMode,
   hideSqlByDefault = false,
   addToAppTarget,
+  conversationTarget,
+  onConversationUpdated,
   expanded = false,
   onToggleExpanded,
   onClose,
@@ -28,6 +33,8 @@ export function AgentChatPanel({
   themeMode: keyof typeof themes;
   hideSqlByDefault?: boolean;
   addToAppTarget?: { appId: string; dashboardId: string };
+  conversationTarget?: { appId: string; dashboardId?: string; notebookPath?: string };
+  onConversationUpdated?: () => void;
   expanded?: boolean;
   onToggleExpanded?: () => void;
   onClose?: () => void;
@@ -39,12 +46,14 @@ export function AgentChatPanel({
   const [liveText, setLiveText] = useState('');
   const [liveEvents, setLiveEvents] = useState<AgentTurn[]>([]);
   const [error, setError] = useState<string | null>(null);
+  const [conversationId, setConversationId] = useState<string | null>(null);
   const abortRef = useRef<AbortController | null>(null);
 
   const send = async () => {
     const text = input.trim();
     if (!text || running) return;
-    const next: LocalMessage[] = [...messages, { role: 'user', content: text }];
+    const userMessage: LocalMessage = { id: makeMessageId(), role: 'user', content: text, createdAt: new Date().toISOString() };
+    const next: LocalMessage[] = [...messages, userMessage];
     setMessages(next);
     setInput('');
     setError(null);
@@ -55,7 +64,21 @@ export function AgentChatPanel({
     abortRef.current = controller;
     let acc = '';
     const events: AgentTurn[] = [];
+    let activeConversationId = conversationId;
     try {
+      if (conversationTarget && !activeConversationId) {
+        const created = await api.createAppConversation(conversationTarget.appId, {
+          title: text.slice(0, 80),
+          dashboardId: conversationTarget.dashboardId,
+          notebookPath: conversationTarget.notebookPath,
+          messages: toConversationMessages(next),
+        });
+        if (created.ok) {
+          activeConversationId = created.conversation.id;
+          setConversationId(activeConversationId);
+          onConversationUpdated?.();
+        }
+      }
       await runAgent(
         {
           messages: next.map((m) => ({ role: m.role, content: m.content })),
@@ -72,7 +95,14 @@ export function AgentChatPanel({
           if (turn.kind === 'error') setError(turn.message);
         },
       );
-      setMessages([...next, { role: 'assistant', content: acc, events }]);
+      const finalMessages = [...next, { id: makeMessageId(), role: 'assistant' as const, content: acc, events, createdAt: new Date().toISOString() }];
+      setMessages(finalMessages);
+      if (conversationTarget && activeConversationId) {
+        await api.updateAppConversation(conversationTarget.appId, activeConversationId, {
+          messages: toConversationMessages(finalMessages),
+        });
+        onConversationUpdated?.();
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
@@ -156,6 +186,20 @@ export function AgentChatPanel({
       </div>
     </div>
   );
+}
+
+function makeMessageId(): string {
+  return `msg_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+}
+
+function toConversationMessages(messages: LocalMessage[]): AppConversationMessage[] {
+  return messages.map((message) => ({
+    id: message.id,
+    role: message.role,
+    content: message.content,
+    events: message.events as unknown[] | undefined,
+    createdAt: message.createdAt,
+  }));
 }
 
 function Bubble({

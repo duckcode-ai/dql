@@ -7,6 +7,7 @@ export interface BlockFields {
   tags: string[];
   blockType: string;
   name: string;
+  status: string;
 }
 
 interface ParsedBlockDocument extends BlockFields {
@@ -113,6 +114,7 @@ export function parseBlockFields(content: string): BlockFields | null {
     owner: parsed.owner,
     description: parsed.description,
     blockType: parsed.blockType,
+    status: parsed.status,
     tags: parsed.tags,
   };
 }
@@ -133,6 +135,7 @@ export function setBlockStringField(content: string, key: string, value: string)
   if (key === 'owner') next.owner = value;
   if (key === 'description') next.description = value;
   if (key === 'type') next.blockType = value;
+  if (key === 'status') next.status = value;
   return normalizeBlockDocument(next);
 }
 
@@ -251,6 +254,7 @@ function parseBlockDocument(content: string): ParsedBlockDocument | null {
     domain: str('domain'),
     owner: str('owner'),
     description: str('description'),
+    status: str('status') || 'draft',
     blockType: (str('type') || 'custom').toLowerCase() === 'semantic' ? 'semantic' : 'custom',
     tags: tagsMatch ? (tagsMatch[1].match(/"([^"]*)"/g) ?? []).map((value) => value.slice(1, -1)) : [],
     metric: str('metric'),
@@ -293,6 +297,7 @@ function extractNamedBlock(content: string, key: string): string {
 function normalizeBlockDocument(doc: ParsedBlockDocument): string {
   const lines = [
     `block "${escapeDqlString(doc.name || 'New Block')}" {`,
+    `  status = "${escapeDqlString(doc.status || 'draft')}"`,
     `  domain = "${escapeDqlString(doc.domain || 'uncategorized')}"`,
     `  type = "${doc.blockType}"`,
     `  description = "${escapeDqlString(doc.description)}"`,

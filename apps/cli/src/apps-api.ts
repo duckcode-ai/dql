@@ -34,6 +34,7 @@ interface Ctx {
   path: string;
   projectRoot: string;
   executeSql?: (sql: string) => Promise<unknown>;
+  runNotebook?: (appId: string, notebookPath: string) => Promise<void>;
 }
 
 export async function handleAppsApi(ctx: Ctx): Promise<boolean> {
@@ -116,6 +117,75 @@ export async function handleAppsApi(ctx: Ctx): Promise<boolean> {
     return true;
   }
 
+  m = path.match(/^\/api\/apps\/([^/]+)\/notebook-candidates$/);
+  if (m && req.method === 'GET') {
+    const appId = decodeURIComponent(m[1]);
+    const loaded = loadAppById(projectRoot, appId);
+    if (!loaded) {
+      sendJson(res, 404, { error: `App "${appId}" not found` });
+      return true;
+    }
+    sendJson(res, 200, { notebooks: listNotebookCandidates(projectRoot, loaded.app, join(projectRoot, 'apps', appId)) });
+    return true;
+  }
+
+  m = path.match(/^\/api\/apps\/([^/]+)\/notebooks\/create$/);
+  if (m && req.method === 'POST') {
+    const appId = decodeURIComponent(m[1]);
+    try {
+      const body = await readJson<{ name?: string; title?: string; role?: string; visibility?: string; template?: string }>(req);
+      const result = createNotebookForApp(projectRoot, appId, body);
+      if (!result.ok) {
+        sendJson(res, 400, { error: result.error });
+        return true;
+      }
+      sendJson(res, 201, result);
+    } catch (err) {
+      sendJson(res, 500, { error: (err as Error).message });
+    }
+    return true;
+  }
+
+  m = path.match(/^\/api\/apps\/([^/]+)\/notebooks\/preview$/);
+  if (m && req.method === 'GET') {
+    const appId = decodeURIComponent(m[1]);
+    const notebookPath = ctx.url.searchParams.get('path') ?? '';
+    const result = previewNotebookForApp(projectRoot, appId, notebookPath);
+    if (!result.ok) {
+      sendJson(res, result.status, { error: result.error });
+      return true;
+    }
+    sendJson(res, 200, result.preview);
+    return true;
+  }
+
+  m = path.match(/^\/api\/apps\/([^/]+)\/notebooks\/run$/);
+  if (m && req.method === 'POST') {
+    const appId = decodeURIComponent(m[1]);
+    try {
+      const body = await readJson<{ path?: string }>(req);
+      const notebookPath = cleanString(body.path);
+      if (!notebookPath) {
+        sendJson(res, 400, { error: 'path is required' });
+        return true;
+      }
+      if (!ctx.runNotebook) {
+        sendJson(res, 400, { error: 'Notebook run is unavailable in this host.' });
+        return true;
+      }
+      await ctx.runNotebook(appId, notebookPath);
+      const preview = previewNotebookForApp(projectRoot, appId, notebookPath);
+      if (!preview.ok) {
+        sendJson(res, preview.status, { error: preview.error });
+        return true;
+      }
+      sendJson(res, 200, { ok: true, preview: preview.preview });
+    } catch (err) {
+      sendJson(res, 500, { error: err instanceof Error ? err.message : String(err) });
+    }
+    return true;
+  }
+
   m = path.match(/^\/api\/apps\/([^/]+)\/notebooks$/);
   if (m && req.method === 'POST') {
     const appId = decodeURIComponent(m[1]);
@@ -131,6 +201,87 @@ export async function handleAppsApi(ctx: Ctx): Promise<boolean> {
       sendJson(res, 500, { error: (err as Error).message });
     }
     return true;
+  }
+
+  m = path.match(/^\/api\/apps\/([^/]+)\/conversations$/);
+  if (m) {
+    const appId = decodeURIComponent(m[1]);
+    if (!loadAppById(projectRoot, appId)) {
+      sendJson(res, 404, { error: `App "${appId}" not found` });
+      return true;
+    }
+    const storage = new LocalAppStorage(defaultLocalAppsDbPath(projectRoot));
+    try {
+      if (req.method === 'GET') {
+        sendJson(res, 200, { conversations: storage.listAppConversations(appId) });
+        return true;
+      }
+      if (req.method === 'POST') {
+        const body = await readJson<{
+          title?: string;
+          dashboardId?: string;
+          notebookPath?: string;
+          messages?: AppConversationMessageRequest[];
+        }>(req);
+        const conversation = storage.createAppConversation({
+          appId,
+          title: body.title,
+          dashboardId: body.dashboardId,
+          notebookPath: body.notebookPath,
+          messages: normalizeConversationMessages(body.messages),
+        });
+        sendJson(res, 201, { ok: true, conversation });
+        return true;
+      }
+    } catch (err) {
+      sendJson(res, 500, { error: (err as Error).message });
+      return true;
+    } finally {
+      storage.close();
+    }
+  }
+
+  m = path.match(/^\/api\/apps\/([^/]+)\/conversations\/([^/]+)$/);
+  if (m) {
+    const appId = decodeURIComponent(m[1]);
+    const conversationId = decodeURIComponent(m[2]);
+    const storage = new LocalAppStorage(defaultLocalAppsDbPath(projectRoot));
+    try {
+      const conversation = storage.getAppConversation(conversationId);
+      if (!conversation || conversation.appId !== appId) {
+        sendJson(res, 404, { error: `Conversation "${conversationId}" not found` });
+        return true;
+      }
+      if (req.method === 'GET') {
+        sendJson(res, 200, { conversation });
+        return true;
+      }
+      if (req.method === 'PATCH') {
+        const body = await readJson<{
+          title?: string;
+          dashboardId?: string;
+          notebookPath?: string;
+          messages?: AppConversationMessageRequest[];
+        }>(req);
+        const updated = storage.updateAppConversation(conversationId, {
+          title: body.title,
+          dashboardId: body.dashboardId,
+          notebookPath: body.notebookPath,
+          messages: body.messages ? normalizeConversationMessages(body.messages) : undefined,
+        });
+        sendJson(res, 200, { ok: true, conversation: updated });
+        return true;
+      }
+      if (req.method === 'DELETE') {
+        sendJson(res, 200, { ok: storage.deleteAppConversation(conversationId) });
+        return true;
+      }
+    } catch (err) {
+      sendJson(res, 500, { error: (err as Error).message });
+      return true;
+    } finally {
+      storage.close();
+    }
   }
 
   m = path.match(/^\/api\/apps\/([^/]+)\/ai-pins$/);
@@ -401,6 +552,7 @@ interface AppRecommendationRequest {
 interface AppCreateRequest {
   name?: string;
   domain?: string;
+  dashboardTitle?: string;
   subdomain?: string;
   groups?: string[];
   purpose?: string;
@@ -425,6 +577,14 @@ interface AiPinCreateRequest {
   chartConfig?: Record<string, unknown>;
   result?: unknown;
   citations?: unknown[];
+}
+
+interface AppConversationMessageRequest {
+  id?: string;
+  role?: 'user' | 'assistant';
+  content?: string;
+  events?: unknown[];
+  createdAt?: string;
 }
 
 interface BlockCandidate {
@@ -502,6 +662,8 @@ export function createAppPackage(
   const id = suggestAppId(name);
   const appDir = join(projectRoot, 'apps', id);
   if (existsSync(appDir)) return { ok: false, error: `App already exists: ${id}` };
+  const dashboardTitle = cleanString(input.dashboardTitle) || 'Overview';
+  const dashboardId = slugify(dashboardTitle) || 'overview';
 
   const owner = cleanString(input.owners?.[0]) || `${process.env.USER ?? 'owner'}@local`;
   const audience = cleanString(input.audience);
@@ -567,14 +729,14 @@ export function createAppPackage(
     ],
     rlsBindings: [],
     schedules: [],
-    homepage: { type: 'dashboard', id: 'overview' },
+    homepage: { type: 'dashboard', id: dashboardId },
   };
 
   const dashboard: DashboardDocument = {
     version: 1,
-    id: 'overview',
+    id: dashboardId,
     metadata: {
-      title: `${name} Overview`,
+      title: dashboardTitle,
       description: cleanString(input.purpose) || `Starter dashboard for ${name}`,
       domain,
       subdomain: subdomain || undefined,
@@ -595,7 +757,7 @@ export function createAppPackage(
   const paths = [
     join(appDir, 'dql.app.json'),
     join(appDir, 'README.md'),
-    join(appDir, 'dashboards', 'overview.dqld'),
+    join(appDir, 'dashboards', `${dashboardId}.dqld`),
     join(appDir, 'notebooks'),
     join(appDir, 'drafts'),
   ];
@@ -603,8 +765,8 @@ export function createAppPackage(
   mkdirSync(join(appDir, 'notebooks'), { recursive: true });
   mkdirSync(join(appDir, 'drafts'), { recursive: true });
   writeFileSync(join(appDir, 'dql.app.json'), JSON.stringify(app, null, 2) + '\n', 'utf-8');
-  writeFileSync(join(appDir, 'dashboards', 'overview.dqld'), JSON.stringify(dashboard, null, 2) + '\n', 'utf-8');
-  writeFileSync(join(appDir, 'README.md'), appReadme(app, audience, selectedBlocks), 'utf-8');
+  writeFileSync(join(appDir, 'dashboards', `${dashboardId}.dqld`), JSON.stringify(dashboard, null, 2) + '\n', 'utf-8');
+  writeFileSync(join(appDir, 'README.md'), appReadme(app, audience, selectedBlocks, dashboardId), 'utf-8');
 
   const created = collectAppsList(projectRoot).find((entry) => entry.id === id);
   if (!created) return { ok: false, error: `App was written but could not be reloaded: ${id}` };
@@ -612,7 +774,7 @@ export function createAppPackage(
     ok: true,
     app: created,
     paths: paths.map((path) => path.startsWith(projectRoot) ? path.slice(projectRoot.length + 1) : path),
-    dashboardId: 'overview',
+    dashboardId,
   };
 }
 
@@ -693,7 +855,7 @@ function normalizeVizType(chartType?: string): DashboardGridItem['viz']['type'] 
   return 'table';
 }
 
-function appReadme(app: AppDocument, audience: string, blocks: BlockCandidate[]): string {
+function appReadme(app: AppDocument, audience: string, blocks: BlockCandidate[], dashboardId = 'overview'): string {
   return [
     `# ${app.name}`,
     '',
@@ -706,7 +868,7 @@ function appReadme(app: AppDocument, audience: string, blocks: BlockCandidate[])
     `- Visibility: ${app.visibility}`,
     `- Lifecycle: ${app.lifecycle}`,
     `- Owners: ${app.owners.join(', ')}`,
-    `- Starter dashboard: dashboards/overview.dqld`,
+    `- Starter dashboard: dashboards/${dashboardId}.dqld`,
     `- Supporting notebooks: notebooks/`,
     `- Draft blocks: drafts/`,
     '',
@@ -793,6 +955,24 @@ function matchArray(source: string, regex: RegExp): string[] {
     .filter(Boolean);
 }
 
+function normalizeConversationMessages(messages: AppConversationMessageRequest[] | undefined): Array<{
+  id?: string;
+  role: 'user' | 'assistant';
+  content: string;
+  events?: unknown[];
+  createdAt?: string;
+}> {
+  return (messages ?? [])
+    .map((message) => ({
+      id: cleanString(message.id) || undefined,
+      role: message.role === 'assistant' ? 'assistant' as const : 'user' as const,
+      content: cleanString(message.content),
+      events: Array.isArray(message.events) ? message.events : [],
+      createdAt: cleanString(message.createdAt) || undefined,
+    }))
+    .filter((message) => message.content.length > 0);
+}
+
 function cleanString(value: unknown): string {
   return typeof value === 'string' ? value.trim() : '';
 }
@@ -842,8 +1022,8 @@ function createDashboardForApp(
 ): { ok: true; dashboard: DashboardDocument; path: string } | { ok: false; error: string } {
   const loaded = loadAppById(projectRoot, appId);
   if (!loaded) return { ok: false, error: `App "${appId}" not found` };
-  const title = cleanString(input.title) || 'New tab';
-  const id = slugify(cleanString(input.id) || title) || `tab-${Date.now()}`;
+  const title = cleanString(input.title) || 'New page';
+  const id = slugify(cleanString(input.id) || title) || `page-${Date.now()}`;
   if (!/^[a-z0-9][a-z0-9_-]*$/i.test(id)) return { ok: false, error: 'dashboard id must be folder-safe' };
   const appDir = join(projectRoot, 'apps', appId);
   const dashboardPath = join(appDir, 'dashboards', `${id}.dqld`);
@@ -853,7 +1033,7 @@ function createDashboardForApp(
     id,
     metadata: {
       title,
-      description: cleanString(input.description) || `${title} dashboard tab`,
+      description: cleanString(input.description) || `${title} dashboard page`,
       domain: loaded.app.domain,
       subdomain: loaded.app.subdomain,
       groups: loaded.app.groups ?? [],
@@ -1058,6 +1238,135 @@ function loadAppById(
   return null;
 }
 
+export function listNotebookCandidates(projectRoot: string, app: AppDocument, appDir: string): Array<{
+  path: string;
+  title: string;
+  attached: boolean;
+  role?: 'source' | 'analysis' | 'supporting';
+  visibility?: NonNullable<AppDocument['visibility']>;
+  lastModified?: string;
+}> {
+  const attached = new Map(listAppNotebookRefs(projectRoot, app, appDir).map((notebook) => [notebook.path, notebook]));
+  const files = new Map<string, string>();
+  for (const root of ['notebooks', 'workbooks', 'apps']) {
+    for (const file of scanFiles(join(projectRoot, root), '.dqlnb')) {
+      const rel = relative(projectRoot, file).replaceAll('\\', '/');
+      files.set(rel, file);
+    }
+  }
+  for (const notebook of attached.values()) {
+    const abs = join(projectRoot, notebook.path);
+    if (existsSync(abs)) files.set(notebook.path, abs);
+  }
+  return Array.from(files.entries())
+    .map(([path, abs]) => {
+      const ref = attached.get(path);
+      const stat = statSyncSafe(abs);
+      return {
+        path,
+        title: ref?.title ?? notebookTitleFromFile(abs) ?? titleFromPath(path),
+        attached: Boolean(ref),
+        role: ref?.role,
+        visibility: ref?.visibility,
+        lastModified: stat?.mtime.toISOString(),
+      };
+    })
+    .sort((a, b) => Number(b.attached) - Number(a.attached) || a.title.localeCompare(b.title));
+}
+
+export function createNotebookForApp(
+  projectRoot: string,
+  appId: string,
+  input: { name?: string; title?: string; role?: string; visibility?: string; template?: string },
+): { ok: true; path: string; app: ReturnType<typeof loadAppById>; preview: unknown } | { ok: false; error: string } {
+  const loaded = loadAppById(projectRoot, appId);
+  if (!loaded) return { ok: false, error: `App "${appId}" not found` };
+  const title = cleanString(input.title) || cleanString(input.name) || 'App analysis';
+  const slug = slugify(cleanString(input.name) || title) || `notebook-${Date.now()}`;
+  const appDir = join(projectRoot, 'apps', appId);
+  const relPath = `apps/${appId}/notebooks/${slug}.dqlnb`;
+  const absPath = join(projectRoot, relPath);
+  if (existsSync(absPath)) return { ok: false, error: `Notebook already exists: ${relPath}` };
+  mkdirSync(dirname(absPath), { recursive: true });
+  writeFileSync(absPath, buildAppNotebookTemplate(title, loaded.app, input.template), 'utf-8');
+  const attached = attachNotebookToApp(projectRoot, appId, {
+    path: relPath,
+    title,
+    role: normalizeNotebookRole(input.role),
+    visibility: input.visibility,
+  });
+  if (!attached.ok) return { ok: false, error: attached.error };
+  const preview = previewNotebookForApp(projectRoot, appId, relPath);
+  return {
+    ok: true,
+    path: relPath,
+    app: loadAppById(projectRoot, appId),
+    preview: preview.ok ? preview.preview : null,
+  };
+}
+
+export function previewNotebookForApp(
+  projectRoot: string,
+  appId: string,
+  notebookPath: string,
+): { ok: true; preview: unknown } | { ok: false; status: number; error: string } {
+  if (!loadAppById(projectRoot, appId)) return { ok: false, status: 404, error: `App "${appId}" not found` };
+  const rel = cleanString(notebookPath).replaceAll('\\', '/');
+  if (!rel || rel.startsWith('/') || rel.includes('..') || !rel.endsWith('.dqlnb')) {
+    return { ok: false, status: 400, error: 'notebook path must be a project-relative .dqlnb path' };
+  }
+  const abs = join(projectRoot, rel);
+  if (!existsSync(abs)) return { ok: false, status: 404, error: `Notebook not found: ${rel}` };
+  try {
+    const raw = readFileSync(abs, 'utf-8');
+    const parsed = JSON.parse(raw) as {
+      title?: string;
+      metadata?: { title?: string; description?: string; status?: string; categories?: string[] };
+      cells?: Array<Record<string, unknown>>;
+    };
+    const snapshot = readNotebookRunSnapshot(abs);
+    const snapshotByCell = new Map<string, Record<string, unknown>>();
+    for (const entry of snapshot?.cells ?? []) {
+      if (entry && typeof entry === 'object' && typeof (entry as { cellId?: unknown }).cellId === 'string') {
+        snapshotByCell.set(String((entry as { cellId: unknown }).cellId), entry as Record<string, unknown>);
+      }
+    }
+    const cells = (parsed.cells ?? []).map((cell, index) => {
+      const id = typeof cell.id === 'string' ? cell.id : `cell-${index + 1}`;
+      const snap = snapshotByCell.get(id);
+      return {
+        id,
+        type: typeof cell.type === 'string' ? cell.type : 'sql',
+        name: typeof cell.name === 'string' ? cell.name : typeof cell.title === 'string' ? cell.title : undefined,
+        content: typeof cell.content === 'string' ? cell.content : typeof cell.source === 'string' ? cell.source : '',
+        upstream: typeof cell.upstream === 'string' ? cell.upstream : undefined,
+        chartConfig: cell.chartConfig ?? cell.config,
+        tableConfig: cell.tableConfig,
+        singleValueConfig: cell.singleValueConfig,
+        pivotConfig: cell.pivotConfig,
+        status: snap?.status ?? 'idle',
+        result: snap?.result,
+        error: snap?.error,
+        executionCount: snap?.executionCount,
+        executedAt: snap?.executedAt,
+      };
+    });
+    return {
+      ok: true,
+      preview: {
+        path: rel,
+        title: parsed.title ?? parsed.metadata?.title ?? titleFromPath(rel),
+        metadata: parsed.metadata ?? {},
+        cells,
+        snapshotFound: Boolean(snapshot),
+        capturedAt: typeof snapshot?.capturedAt === 'string' ? snapshot.capturedAt : undefined,
+      },
+    };
+  } catch (err) {
+    return { ok: false, status: 400, error: err instanceof Error ? err.message : String(err) };
+  }
+}
+
 function attachNotebookToApp(
   projectRoot: string,
   appId: string,
@@ -1122,6 +1431,77 @@ function listAppNotebookRefs(
     });
   }
   return Array.from(byPath.values()).sort((a, b) => (a.title ?? a.path).localeCompare(b.title ?? b.path));
+}
+
+function buildAppNotebookTemplate(title: string, app: AppDocument, template?: string): string {
+  const normalizedTemplate = cleanString(template) || 'blank';
+  const cellId = (base: string) => `${slugify(base) || 'cell'}_${Math.random().toString(36).slice(2, 8)}`;
+  const intro = [
+    `# ${title}`,
+    '',
+    `App: ${app.name}`,
+    `Domain: ${[app.domain, app.subdomain, ...(app.groups ?? [])].filter(Boolean).join(' / ')}`,
+    '',
+    'Use this notebook for analysis that supports the App dashboard pages.',
+  ].join('\n');
+  const cells = [
+    {
+      id: cellId('intro'),
+      type: 'markdown',
+      content: intro,
+    },
+    {
+      id: cellId('starter-sql'),
+      type: 'sql',
+      name: 'starter_query',
+      content: '-- Write supporting SQL for this App here\nSELECT 1 AS value;',
+    },
+  ];
+  if (normalizedTemplate === 'summary') {
+    cells.push({
+      id: cellId('summary'),
+      type: 'markdown',
+      content: '## Notes\n\nAdd observations, assumptions, and follow-up questions here.',
+    });
+  }
+  return JSON.stringify({
+    dqlnbVersion: 1,
+    version: 1,
+    title,
+    metadata: {
+      description: `Supporting notebook for ${app.name}`,
+      status: 'draft',
+      categories: [app.domain, app.subdomain, ...(app.groups ?? [])].filter(Boolean),
+      createdAt: new Date().toISOString(),
+      modifiedAt: new Date().toISOString(),
+    },
+    cells,
+  }, null, 2) + '\n';
+}
+
+function notebookTitleFromFile(absPath: string): string | null {
+  try {
+    const parsed = JSON.parse(readFileSync(absPath, 'utf-8')) as { title?: unknown; metadata?: { title?: unknown } };
+    if (typeof parsed.title === 'string' && parsed.title.trim()) return parsed.title.trim();
+    if (typeof parsed.metadata?.title === 'string' && parsed.metadata.title.trim()) return parsed.metadata.title.trim();
+  } catch {
+    // fall back to path-derived title
+  }
+  return null;
+}
+
+function readNotebookRunSnapshot(absNotebookPath: string): { cells?: unknown[]; capturedAt?: unknown } | null {
+  const snapshotPath = absNotebookPath.replace(/\.dqlnb$/i, '.run.json');
+  if (!existsSync(snapshotPath)) return null;
+  try {
+    return JSON.parse(readFileSync(snapshotPath, 'utf-8')) as { cells?: unknown[] };
+  } catch {
+    return null;
+  }
+}
+
+function normalizeNotebookRole(value: unknown): 'source' | 'analysis' | 'supporting' {
+  return value === 'source' || value === 'analysis' ? value : 'supporting';
 }
 
 function listAppDrafts(projectRoot: string, appDir: string): AppListEntry['drafts'] {

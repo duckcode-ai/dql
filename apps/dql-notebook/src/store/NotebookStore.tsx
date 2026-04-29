@@ -169,9 +169,13 @@ function notebookReducer(state: NotebookState, action: NotebookAction): Notebook
                   ? 'apps'
                   : action.panel === 'settings'
                     ? 'settings'
-                  : state.activeFile?.type === 'block'
-                    ? 'block_studio'
-                    : 'notebook',
+                    : action.panel === 'files'
+                      ? 'notebook'
+                      : action.panel === 'block_library' && state.mainView === 'imports'
+                        ? 'notebook'
+                        : state.activeFile?.type === 'block'
+                          ? 'block_studio'
+                          : 'notebook',
       };
     }
 

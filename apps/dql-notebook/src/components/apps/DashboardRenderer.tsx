@@ -18,6 +18,17 @@ const APP_CHART_TYPE_OPTIONS: Array<{ value: ChartType; label: string }> = [
   ...CHART_TYPE_OPTIONS,
 ];
 
+type TileSizePresetId = 'auto' | 'compact' | 'standard' | 'wide' | 'tall' | 'full';
+
+const TILE_SIZE_PRESETS: Array<{ id: TileSizePresetId; label: string; description: string }> = [
+  { id: 'auto', label: 'Auto fit', description: 'Choose a practical size from the tile content' },
+  { id: 'compact', label: 'Compact', description: 'Small KPI or short summary' },
+  { id: 'standard', label: 'Standard', description: 'Default chart or table card' },
+  { id: 'wide', label: 'Wide', description: 'Full-row trend or comparison' },
+  { id: 'tall', label: 'Tall', description: 'More vertical room for tables and dense charts' },
+  { id: 'full', label: 'Full page', description: 'Large focused view across the page' },
+];
+
 /**
  * Grid renderer for `.dqld` dashboards backed by the live dashboard run API.
  */
@@ -45,6 +56,8 @@ export function DashboardRenderer({
   const [saving, setSaving] = useState(false);
   const [addMenuOpen, setAddMenuOpen] = useState(false);
   const [chatExpanded, setChatExpanded] = useState(false);
+  const [textDialogKind, setTextDialogKind] = useState<'text' | 'heading' | null>(null);
+  const [textDialogValue, setTextDialogValue] = useState('');
   const gridRef = useRef<HTMLDivElement | null>(null);
   const cols = dashboard.layout.cols;
   const rowHeight = dashboard.layout.rowHeight;
@@ -137,47 +150,59 @@ export function DashboardRenderer({
   }, [appId]);
 
   const addBlockTile = useCallback(async (block: AppBlockRecommendation) => {
+    const vizType = normalizeViz(block.chartType);
+    const size = autoTileSizeForViz(vizType, cols);
     const tile = {
       i: nextTileId(dashboard, block.name),
-      ...nextTilePosition(dashboard),
+      ...nextTilePosition(dashboard, size),
       block: { blockId: block.name },
-      viz: { type: normalizeViz(block.chartType) },
+      viz: { type: vizType },
       title: block.name,
     };
     await saveItems([...dashboard.layout.items, tile]);
     setCatalogOpen(false);
-  }, [dashboard, saveItems]);
+  }, [cols, dashboard, saveItems]);
 
   const addTextTile = useCallback(async () => {
-    const markdown = window.prompt('Text for this App tile');
-    if (!markdown?.trim()) return;
-    const title = markdown.trim().split(/\r?\n/)[0]?.slice(0, 60) || 'Summary';
-    await saveItems([
-      ...dashboard.layout.items,
-      {
-        i: nextTileId(dashboard, 'text'),
-        ...nextTilePosition(dashboard),
-        text: { markdown: markdown.trim() },
-        viz: { type: 'text' },
-        title,
-      },
-    ]);
-  }, [dashboard, saveItems]);
+    setTextDialogKind('text');
+    setTextDialogValue('');
+  }, []);
 
   const addHeadingTile = useCallback(async () => {
-    const title = window.prompt('Section heading');
-    if (!title?.trim()) return;
-    await saveItems([
-      ...dashboard.layout.items,
-      {
-        i: nextTileId(dashboard, 'section'),
-        ...nextTilePosition(dashboard, { w: 12, h: 1 }),
-        text: { markdown: title.trim() },
-        viz: { type: 'heading' },
-        title: title.trim(),
-      },
-    ]);
-  }, [dashboard, saveItems]);
+    setTextDialogKind('heading');
+    setTextDialogValue('');
+  }, []);
+
+  const saveTextTile = useCallback(async () => {
+    const value = textDialogValue.trim();
+    if (!value || !textDialogKind) return;
+    if (textDialogKind === 'heading') {
+      await saveItems([
+        ...dashboard.layout.items,
+        {
+          i: nextTileId(dashboard, 'section'),
+          ...nextTilePosition(dashboard, tileSizeForPreset('wide', cols, 'heading')),
+          text: { markdown: value },
+          viz: { type: 'heading' },
+          title: value,
+        },
+      ]);
+    } else {
+      const title = value.split(/\r?\n/)[0]?.slice(0, 60) || 'Summary';
+      await saveItems([
+        ...dashboard.layout.items,
+        {
+          i: nextTileId(dashboard, 'text'),
+          ...nextTilePosition(dashboard, tileSizeForPreset('standard', cols, 'text')),
+          text: { markdown: value },
+          viz: { type: 'text' },
+          title,
+        },
+      ]);
+    }
+    setTextDialogKind(null);
+    setTextDialogValue('');
+  }, [cols, dashboard, saveItems, textDialogKind, textDialogValue]);
 
   const patchTile = useCallback(async (tileId: string, patch: Partial<DashboardLayoutItem> | null) => {
     const items = patch === null
@@ -288,7 +313,7 @@ export function DashboardRenderer({
             justifyContent: 'center',
           }}
         >
-          <div style={{ fontSize: 16, fontWeight: 700, marginBottom: 6 }}>Build this App tab</div>
+          <div style={{ fontSize: 16, fontWeight: 700, marginBottom: 6 }}>Build this dashboard page</div>
           <div style={{ maxWidth: 520, opacity: 0.68, lineHeight: 1.45 }}>
             Add certified domain blocks, narrative text, or use the scoped AI drawer and pin an answer into this layout.
           </div>
@@ -373,6 +398,7 @@ export function DashboardRenderer({
             themeMode={state.themeMode}
             hideSqlByDefault
             addToAppTarget={{ appId, dashboardId: dashboard.id }}
+            conversationTarget={{ appId, dashboardId: dashboard.id }}
             expanded={chatExpanded}
             onToggleExpanded={() => setChatExpanded((value) => !value)}
             onClose={() => {
@@ -390,6 +416,18 @@ export function DashboardRenderer({
           onSearch={setCatalogSearch}
           onClose={() => setCatalogOpen(false)}
           onAdd={(block) => void addBlockTile(block)}
+        />
+      )}
+      {textDialogKind && (
+        <TextTileDialog
+          kind={textDialogKind}
+          value={textDialogValue}
+          onChange={setTextDialogValue}
+          onClose={() => {
+            setTextDialogKind(null);
+            setTextDialogValue('');
+          }}
+          onSave={() => void saveTextTile()}
         />
       )}
     </div>
@@ -425,7 +463,7 @@ function DashboardTile({
     : item.aiPin
       ? `aiPin:${item.aiPin.id}`
       : 'text';
-  const startDrag = (event: ReactPointerEvent<HTMLButtonElement>) => {
+  const startDrag = (event: ReactPointerEvent<HTMLElement>) => {
     const tileEl = tileRef.current;
     if (!tileEl) return;
     event.preventDefault();
@@ -475,11 +513,23 @@ function DashboardTile({
         flexDirection: 'column',
         gap: 6,
         minHeight: 0,
-        overflow: 'hidden',
+        overflow: 'auto',
       }}
     >
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8 }}>
-        <div style={{ fontSize: 13, fontWeight: 600 }}>{item.title ?? blockRef}</div>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 7, minWidth: 0 }}>
+          {editable ? (
+            <button
+              type="button"
+              title="Drag to move tile"
+              onPointerDown={startDrag}
+              style={dragHandleButtonStyle}
+            >
+              <GripVertical size={14} strokeWidth={2.2} />
+            </button>
+          ) : null}
+          <div style={{ fontSize: 13, fontWeight: 600, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{item.title ?? blockRef}</div>
+        </div>
         <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
           <span
             style={{
@@ -498,7 +548,6 @@ function DashboardTile({
               cols={cols}
               settingsOpen={settingsOpen}
               onToggleSettings={() => setSettingsOpen((value) => !value)}
-              onDragStart={startDrag}
               onPatch={onPatch}
             />
           )}
@@ -517,6 +566,7 @@ function DashboardTile({
         style={{
           flex: 1,
           minHeight: 0,
+          overflow: 'auto',
           display: 'flex',
           alignItems: 'center',
           justifyContent: 'center',
@@ -569,49 +619,45 @@ function TileEditorControls({
   cols,
   settingsOpen,
   onToggleSettings,
-  onDragStart,
   onPatch,
 }: {
   item: DashboardDocumentResponse['dashboard']['layout']['items'][number];
   cols: number;
   settingsOpen: boolean;
   onToggleSettings: () => void;
-  onDragStart: (event: ReactPointerEvent<HTMLButtonElement>) => void;
   onPatch: (patch: Partial<DashboardDocumentResponse['dashboard']['layout']['items'][number]> | null) => void;
 }) {
-  const applyColumns = (tilesPerRow: 1 | 2 | 3) => {
-    const width = Math.max(1, Math.floor(cols / tilesPerRow));
-    onPatch({ w: width, x: clamp(item.x, 0, Math.max(0, cols - width)) });
+  const [sizeMenuOpen, setSizeMenuOpen] = useState(false);
+  const applyPreset = (preset: TileSizePresetId) => {
+    setSizeMenuOpen(false);
+    onPatch(tileSizePatch(item, cols, preset));
   };
-  const applyHeight = (height: number) => onPatch({ h: height });
   return (
     <div style={{ display: 'flex', gap: 4, alignItems: 'center', flexWrap: 'wrap', justifyContent: 'flex-end' }}>
+      <div style={{ position: 'relative' }}>
+        <button
+          type="button"
+          title="Choose tile size"
+          onClick={() => setSizeMenuOpen((value) => !value)}
+          style={tileSizeButtonStyle}
+        >
+          Size
+        </button>
+        {sizeMenuOpen ? (
+          <TileSizeMenu
+            onPick={applyPreset}
+            onClose={() => setSizeMenuOpen(false)}
+          />
+        ) : null}
+      </div>
       <button
         type="button"
-        title="Tile settings"
+        title="Chart and field settings"
         onClick={onToggleSettings}
         style={iconTileButtonStyle}
       >
         <SlidersHorizontal size={13} strokeWidth={2} color={settingsOpen ? 'var(--accent, #4f46e5)' : undefined} />
       </button>
-      <button
-        type="button"
-        title="Drag tile"
-        onPointerDown={onDragStart}
-        style={iconTileButtonStyle}
-      >
-        <GripVertical size={13} strokeWidth={2} />
-      </button>
-      <div style={segmentedControlStyle} aria-label="Tile width">
-        <button type="button" title="One tile per row" onClick={() => applyColumns(1)} style={segmentPillStyle(item.w === cols)}>1</button>
-        <button type="button" title="Two tiles per row" onClick={() => applyColumns(2)} style={segmentPillStyle(item.w === Math.floor(cols / 2))}>2</button>
-        <button type="button" title="Three tiles per row" onClick={() => applyColumns(3)} style={segmentPillStyle(item.w === Math.floor(cols / 3))}>3</button>
-      </div>
-      <div style={segmentedControlStyle} aria-label="Tile height">
-        <button type="button" title="Compact height" onClick={() => applyHeight(2)} style={segmentPillStyle(item.h === 2)}>S</button>
-        <button type="button" title="Standard height" onClick={() => applyHeight(3)} style={segmentPillStyle(item.h === 3)}>M</button>
-        <button type="button" title="Large height" onClick={() => applyHeight(5)} style={segmentPillStyle(item.h >= 5)}>L</button>
-      </div>
       <button
         type="button"
         title="Remove tile"
@@ -620,6 +666,33 @@ function TileEditorControls({
       >
         <Trash2 size={13} strokeWidth={2} />
       </button>
+    </div>
+  );
+}
+
+function TileSizeMenu({
+  onPick,
+  onClose,
+}: {
+  onPick: (preset: TileSizePresetId) => void;
+  onClose: () => void;
+}) {
+  return (
+    <div
+      style={tileSizeMenuStyle}
+      onMouseLeave={onClose}
+    >
+      {TILE_SIZE_PRESETS.map((preset) => (
+        <button
+          key={preset.id}
+          type="button"
+          onClick={() => onPick(preset.id)}
+          style={tileSizeMenuItemStyle}
+        >
+          <span style={{ fontSize: 12, fontWeight: 750 }}>{preset.label}</span>
+          <span style={{ fontSize: 11, opacity: 0.66 }}>{preset.description}</span>
+        </button>
+      ))}
     </div>
   );
 }
@@ -666,17 +739,24 @@ function TileSettingsPanel({
     });
   };
 
-  const patchSize = (patch: Partial<Pick<DashboardLayoutItem, 'w' | 'h'>>) => {
-    onPatch({
-      ...patch,
-      w: patch.w !== undefined ? clamp(Math.round(patch.w), 1, cols) : item.w,
-      h: patch.h !== undefined ? Math.max(1, Math.round(patch.h)) : item.h,
-      x: patch.w !== undefined ? clamp(item.x, 0, Math.max(0, cols - clamp(Math.round(patch.w), 1, cols))) : item.x,
-    });
-  };
-
   return (
     <div style={tileSettingsPanelStyle}>
+      <div style={{ display: 'grid', gap: 6 }}>
+        <div style={{ fontSize: 10, fontWeight: 800, textTransform: 'uppercase', opacity: 0.58 }}>Tile size</div>
+        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+          {TILE_SIZE_PRESETS.map((preset) => (
+            <button
+              key={preset.id}
+              type="button"
+              title={preset.description}
+              onClick={() => onPatch(tileSizePatch(item, cols, preset.id))}
+              style={sizePresetChipStyle(presetMatches(item, cols, preset.id))}
+            >
+              {preset.label}
+            </button>
+          ))}
+        </div>
+      </div>
       <div style={tileSettingsGridStyle}>
         <label style={tileSettingsLabelStyle}>
           Title
@@ -702,28 +782,6 @@ function TileSettingsPanel({
         <FieldSelect label="Y" value={chartConfig.y} columns={result?.columns ?? []} onChange={(value) => patchConfig({ y: value })} />
         <FieldSelect label="Color" value={chartConfig.color} columns={result?.columns ?? []} onChange={(value) => patchConfig({ color: value })} />
         <FieldSelect label="Facet" value={chartConfig.facet} columns={result?.columns ?? []} onChange={(value) => patchConfig({ facet: value })} />
-        <label style={tileSettingsLabelStyle}>
-          Width
-          <input
-            type="number"
-            min={1}
-            max={cols}
-            value={item.w}
-            onChange={(event) => patchSize({ w: Number(event.target.value) })}
-            style={tileSettingsInputStyle}
-          />
-        </label>
-        <label style={tileSettingsLabelStyle}>
-          Height
-          <input
-            type="number"
-            min={1}
-            max={12}
-            value={item.h}
-            onChange={(event) => patchSize({ h: Number(event.target.value) })}
-            style={tileSettingsInputStyle}
-          />
-        </label>
       </div>
       {result ? (
         <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
@@ -904,6 +962,66 @@ function AiPinSummary({ pin }: { pin: NonNullable<DashboardRunResponse['tiles'][
   );
 }
 
+function TextTileDialog({
+  kind,
+  value,
+  onChange,
+  onClose,
+  onSave,
+}: {
+  kind: 'text' | 'heading';
+  value: string;
+  onChange: (value: string) => void;
+  onClose: () => void;
+  onSave: () => void;
+}) {
+  const isHeading = kind === 'heading';
+  return (
+    <div style={{ position: 'fixed', inset: 0, zIndex: 90, background: 'rgba(0,0,0,0.36)', display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 24 }}>
+      <div style={{ width: 'min(520px, 92vw)', display: 'grid', gap: 12, background: 'var(--color-bg, #fff)', color: 'inherit', borderRadius: 8, boxShadow: '0 18px 60px rgba(0,0,0,0.35)', padding: 16 }}>
+        <div>
+          <div style={{ fontSize: 16, fontWeight: 800 }}>{isHeading ? 'Add heading' : 'Add text tile'}</div>
+          <div style={{ fontSize: 12, opacity: 0.65, marginTop: 4 }}>
+            {isHeading ? 'Create a section heading on this dashboard page.' : 'Create a narrative text tile on this dashboard page.'}
+          </div>
+        </div>
+        {isHeading ? (
+          <input
+            value={value}
+            onChange={(event) => onChange(event.target.value)}
+            onKeyDown={(event) => {
+              if (event.key === 'Enter') onSave();
+              if (event.key === 'Escape') onClose();
+            }}
+            placeholder="Executive summary"
+            autoFocus
+            style={dialogInputStyle}
+          />
+        ) : (
+          <textarea
+            value={value}
+            onChange={(event) => onChange(event.target.value)}
+            onKeyDown={(event) => {
+              if (event.key === 'Escape') onClose();
+              if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) onSave();
+            }}
+            placeholder="Add context, assumptions, or decisions..."
+            rows={6}
+            autoFocus
+            style={{ ...dialogInputStyle, resize: 'vertical', lineHeight: 1.45 }}
+          />
+        )}
+        <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8 }}>
+          <button type="button" onClick={onClose} style={toolbarButtonStyle(false)}>Cancel</button>
+          <button type="button" onClick={onSave} disabled={!value.trim()} style={{ ...primaryBuilderButtonStyle, opacity: value.trim() ? 1 : 0.65 }}>
+            Add
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function BlockCatalogDialog({
   blocks,
   search,
@@ -970,7 +1088,7 @@ function ScopedLineagePanel({ lineage }: { lineage: any | null }) {
     <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
       <div>
         <div style={{ fontSize: 12, fontWeight: 800, textTransform: 'uppercase', opacity: 0.62, marginBottom: 6 }}>App Lineage</div>
-        <div style={{ fontSize: 12, opacity: 0.72 }}>Domain &gt; App &gt; Dashboard tab &gt; Tile &gt; Block &gt; dbt/source</div>
+        <div style={{ fontSize: 12, opacity: 0.72 }}>Domain &gt; App &gt; Dashboard page &gt; Tile &gt; Block &gt; dbt/source</div>
       </div>
       {breadcrumbs.length > 0 && (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
@@ -1055,6 +1173,17 @@ function toolbarButtonStyle(active: boolean): CSSProperties {
   };
 }
 
+const dialogInputStyle: CSSProperties = {
+  width: '100%',
+  boxSizing: 'border-box',
+  border: '1px solid var(--border-color, rgba(0,0,0,0.12))',
+  borderRadius: 6,
+  background: 'var(--surface, transparent)',
+  color: 'inherit',
+  fontSize: 12,
+  padding: '8px 10px',
+};
+
 const primaryBuilderButtonStyle: CSSProperties = {
   border: '1px solid var(--accent, #4f46e5)',
   borderRadius: 6,
@@ -1135,12 +1264,79 @@ const iconTileButtonStyle: CSSProperties = {
   border: '1px solid var(--border-color, rgba(0,0,0,0.12))',
   background: 'var(--surface, rgba(255,255,255,0.72))',
   color: 'inherit',
-  cursor: 'grab',
+  cursor: 'pointer',
   padding: 0,
   display: 'inline-flex',
   alignItems: 'center',
   justifyContent: 'center',
 };
+
+const dragHandleButtonStyle: CSSProperties = {
+  width: 26,
+  height: 26,
+  borderRadius: 6,
+  border: '1px solid var(--border-color, rgba(0,0,0,0.12))',
+  background: 'var(--surface, rgba(255,255,255,0.72))',
+  color: 'inherit',
+  cursor: 'grab',
+  padding: 0,
+  display: 'inline-flex',
+  alignItems: 'center',
+  justifyContent: 'center',
+  flexShrink: 0,
+};
+
+const tileSizeButtonStyle: CSSProperties = {
+  height: 24,
+  borderRadius: 5,
+  border: '1px solid var(--border-color, rgba(0,0,0,0.12))',
+  background: 'var(--surface, rgba(255,255,255,0.72))',
+  color: 'inherit',
+  cursor: 'pointer',
+  padding: '0 8px',
+  fontSize: 11,
+  fontWeight: 700,
+};
+
+const tileSizeMenuStyle: CSSProperties = {
+  position: 'absolute',
+  top: 'calc(100% + 6px)',
+  right: 0,
+  zIndex: 40,
+  width: 240,
+  border: '1px solid var(--border-color, rgba(0,0,0,0.12))',
+  borderRadius: 8,
+  background: 'var(--color-bg, #fff)',
+  boxShadow: '0 14px 38px rgba(0,0,0,0.16)',
+  padding: 6,
+  display: 'grid',
+  gap: 4,
+};
+
+const tileSizeMenuItemStyle: CSSProperties = {
+  border: 'none',
+  borderRadius: 6,
+  background: 'transparent',
+  color: 'inherit',
+  padding: '8px 9px',
+  cursor: 'pointer',
+  textAlign: 'left',
+  display: 'grid',
+  gap: 2,
+};
+
+function sizePresetChipStyle(active: boolean): CSSProperties {
+  return {
+    border: `1px solid ${active ? 'var(--accent, #4f46e5)' : 'var(--border-color, rgba(0,0,0,0.12))'}`,
+    borderRadius: 999,
+    background: active ? 'rgba(79,70,229,0.12)' : 'var(--surface, rgba(0,0,0,0.02))',
+    color: active ? 'var(--accent, #4f46e5)' : 'inherit',
+    padding: '4px 8px',
+    fontSize: 11,
+    fontWeight: active ? 750 : 600,
+    cursor: 'pointer',
+  };
+}
 
 const segmentedControlStyle: CSSProperties = {
   display: 'inline-flex',
@@ -1174,6 +1370,48 @@ const miniButtonStyle: CSSProperties = {
   cursor: 'pointer',
   fontSize: 11,
 };
+
+function autoTileSizeForViz(vizType: string, cols: number): { w: number; h: number } {
+  const normalized = normalizeViz(vizType);
+  if (normalized === 'heading') return tileSizeForPreset('wide', cols, 'heading');
+  if (normalized === 'text') return tileSizeForPreset('standard', cols, 'text');
+  if (normalized === 'single_value' || normalized === 'kpi' || normalized === 'gauge') {
+    return tileSizeForPreset('compact', cols, normalized);
+  }
+  if (normalized === 'table' || normalized === 'pivot') return tileSizeForPreset('tall', cols, normalized);
+  if (normalized === 'line' || normalized === 'area') return tileSizeForPreset('wide', cols, normalized);
+  return tileSizeForPreset('standard', cols, normalized);
+}
+
+function tileSizeForPreset(preset: TileSizePresetId, cols: number, vizType = 'table'): { w: number; h: number } {
+  const safeCols = Math.max(1, cols);
+  const half = Math.max(1, Math.ceil(safeCols / 2));
+  const third = Math.max(1, Math.ceil(safeCols / 3));
+  if (preset === 'auto') return autoTileSizeForViz(vizType, safeCols);
+  if (preset === 'compact') return { w: third, h: 2 };
+  if (preset === 'wide') return { w: safeCols, h: vizType === 'heading' ? 1 : 4 };
+  if (preset === 'tall') return { w: half, h: 6 };
+  if (preset === 'full') return { w: safeCols, h: 7 };
+  return { w: half, h: vizType === 'text' ? 2 : 4 };
+}
+
+function tileSizePatch(item: DashboardLayoutItem, cols: number, preset: TileSizePresetId): Partial<DashboardLayoutItem> {
+  const vizType = String(item.viz.type ?? 'table');
+  const size = preset === 'auto'
+    ? autoTileSizeForViz(vizType, cols)
+    : tileSizeForPreset(preset, cols, vizType);
+  return {
+    w: size.w,
+    h: size.h,
+    x: clamp(item.x, 0, Math.max(0, cols - size.w)),
+  };
+}
+
+function presetMatches(item: DashboardLayoutItem, cols: number, preset: TileSizePresetId): boolean {
+  if (preset === 'auto') return false;
+  const size = tileSizeForPreset(preset, cols, String(item.viz.type ?? 'table'));
+  return item.w === size.w && item.h === size.h;
+}
 
 function nextTilePosition(
   dashboard: DashboardDocumentResponse['dashboard'],
@@ -1239,8 +1477,8 @@ function layoutScore(item: DashboardLayoutItem, cols: number): number {
 
 function normalizeViz(chartType?: string): string {
   const value = (chartType ?? 'table').toLowerCase().replace(/-/g, '_');
-  if (value === 'single_value' || value === 'kpi' || value === 'line' || value === 'bar' || value === 'area'
-    || value === 'pie' || value === 'pivot' || value === 'map' || value === 'funnel') {
+  if (value === 'single_value' || value === 'kpi' || value === 'gauge' || value === 'line' || value === 'bar' || value === 'area'
+    || value === 'pie' || value === 'pivot' || value === 'map' || value === 'funnel' || value === 'heading' || value === 'text') {
     return value;
   }
   return 'table';

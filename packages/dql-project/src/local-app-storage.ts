@@ -5,6 +5,7 @@ import { mkdirSync } from 'node:fs';
 export type LocalAppVisibility = 'mine' | 'shared' | 'template';
 export type LocalAiPinRefreshCadence = 'none' | 'daily';
 export type LocalAiPinReviewStatus = 'needs_review' | 'draft_created' | 'certified' | 'rejected';
+export type LocalAppConversationRole = 'user' | 'assistant';
 
 export interface LocalAiPin {
   id: string;
@@ -43,6 +44,43 @@ export interface CreateLocalAiPinInput {
   chartConfig?: Record<string, unknown>;
   result?: unknown;
   citations?: unknown[];
+}
+
+export interface LocalAppConversationMessage {
+  id: string;
+  role: LocalAppConversationRole;
+  content: string;
+  events?: unknown[];
+  createdAt: string;
+}
+
+export interface LocalAppConversation {
+  id: string;
+  appId: string;
+  dashboardId?: string;
+  notebookPath?: string;
+  title: string;
+  createdAt: string;
+  updatedAt: string;
+  messageCount: number;
+  lastMessage?: string;
+  messages?: LocalAppConversationMessage[];
+}
+
+export interface CreateLocalAppConversationInput {
+  id?: string;
+  appId: string;
+  dashboardId?: string;
+  notebookPath?: string;
+  title?: string;
+  messages?: Array<Pick<LocalAppConversationMessage, 'role' | 'content'> & { id?: string; events?: unknown[]; createdAt?: string }>;
+}
+
+export interface UpdateLocalAppConversationInput {
+  title?: string;
+  dashboardId?: string;
+  notebookPath?: string;
+  messages?: Array<Pick<LocalAppConversationMessage, 'role' | 'content'> & { id?: string; events?: unknown[]; createdAt?: string }>;
 }
 
 export function defaultLocalAppsDbPath(projectRoot: string): string {
@@ -155,6 +193,82 @@ export class LocalAppStorage {
     return this.getAiPin(id);
   }
 
+  createAppConversation(input: CreateLocalAppConversationInput): LocalAppConversation {
+    const now = new Date().toISOString();
+    const conversation: LocalAppConversation = {
+      id: input.id ?? `conv_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+      appId: input.appId,
+      dashboardId: cleanOptionalString(input.dashboardId),
+      notebookPath: cleanOptionalString(input.notebookPath),
+      title: cleanOptionalString(input.title) ?? titleFromMessages(input.messages) ?? 'New conversation',
+      createdAt: now,
+      updatedAt: now,
+      messageCount: 0,
+    };
+    this.db.prepare(`
+      INSERT INTO app_conversations (
+        id, app_id, dashboard_id, notebook_path, title, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      conversation.id,
+      conversation.appId,
+      conversation.dashboardId ?? null,
+      conversation.notebookPath ?? null,
+      conversation.title,
+      conversation.createdAt,
+      conversation.updatedAt,
+    );
+    if (input.messages?.length) {
+      this.replaceAppConversationMessages(conversation.id, input.messages);
+    }
+    return this.getAppConversation(conversation.id) ?? conversation;
+  }
+
+  listAppConversations(appId: string): LocalAppConversation[] {
+    const rows = this.db.prepare(`
+      SELECT * FROM app_conversations
+      WHERE app_id = ?
+      ORDER BY updated_at DESC
+    `).all(appId) as Record<string, unknown>[];
+    return rows.map((row) => this.rowToConversation(row));
+  }
+
+  getAppConversation(id: string): LocalAppConversation | null {
+    const row = this.db.prepare('SELECT * FROM app_conversations WHERE id = ?').get(id) as Record<string, unknown> | undefined;
+    if (!row) return null;
+    return {
+      ...this.rowToConversation(row),
+      messages: this.listAppConversationMessages(id),
+    };
+  }
+
+  updateAppConversation(id: string, input: UpdateLocalAppConversationInput): LocalAppConversation | null {
+    const current = this.getAppConversation(id);
+    if (!current) return null;
+    const now = new Date().toISOString();
+    this.db.prepare(`
+      UPDATE app_conversations
+      SET title = ?, dashboard_id = ?, notebook_path = ?, updated_at = ?
+      WHERE id = ?
+    `).run(
+      cleanOptionalString(input.title) ?? current.title,
+      input.dashboardId === undefined ? (current.dashboardId ?? null) : (cleanOptionalString(input.dashboardId) ?? null),
+      input.notebookPath === undefined ? (current.notebookPath ?? null) : (cleanOptionalString(input.notebookPath) ?? null),
+      now,
+      id,
+    );
+    if (input.messages) {
+      this.replaceAppConversationMessages(id, input.messages);
+    }
+    return this.getAppConversation(id);
+  }
+
+  deleteAppConversation(id: string): boolean {
+    this.db.prepare('DELETE FROM app_conversation_messages WHERE conversation_id = ?').run(id);
+    const result = this.db.prepare('DELETE FROM app_conversations WHERE id = ?').run(id);
+    return result.changes > 0;
+  }
+
   private initSchema(): void {
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS personal_apps (
@@ -211,7 +325,91 @@ export class LocalAppStorage {
 
       CREATE INDEX IF NOT EXISTS idx_ai_pins_app_dashboard ON ai_pins(app_id, dashboard_id);
       CREATE INDEX IF NOT EXISTS idx_ai_pins_review ON ai_pins(review_status);
+
+      CREATE TABLE IF NOT EXISTS app_conversations (
+        id TEXT PRIMARY KEY,
+        app_id TEXT NOT NULL,
+        dashboard_id TEXT,
+        notebook_path TEXT,
+        title TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+
+      CREATE TABLE IF NOT EXISTS app_conversation_messages (
+        id TEXT PRIMARY KEY,
+        conversation_id TEXT NOT NULL,
+        position INTEGER NOT NULL,
+        role TEXT NOT NULL,
+        content TEXT NOT NULL,
+        events TEXT,
+        created_at TEXT NOT NULL
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_app_conversations_app ON app_conversations(app_id, updated_at);
+      CREATE INDEX IF NOT EXISTS idx_app_conversation_messages ON app_conversation_messages(conversation_id, position);
     `);
+  }
+
+  private replaceAppConversationMessages(
+    conversationId: string,
+    messages: Array<Pick<LocalAppConversationMessage, 'role' | 'content'> & { id?: string; events?: unknown[]; createdAt?: string }>,
+  ): void {
+    const now = new Date().toISOString();
+    this.db.prepare('DELETE FROM app_conversation_messages WHERE conversation_id = ?').run(conversationId);
+    const insert = this.db.prepare(`
+      INSERT INTO app_conversation_messages (
+        id, conversation_id, position, role, content, events, created_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?)
+    `);
+    messages.forEach((message, index) => {
+      insert.run(
+        message.id ?? `msg_${Date.now()}_${index}_${Math.random().toString(36).slice(2, 8)}`,
+        conversationId,
+        index,
+        message.role === 'assistant' ? 'assistant' : 'user',
+        message.content,
+        json(message.events ?? []),
+        message.createdAt ?? now,
+      );
+    });
+    this.db.prepare('UPDATE app_conversations SET updated_at = ? WHERE id = ?').run(now, conversationId);
+  }
+
+  private listAppConversationMessages(conversationId: string): LocalAppConversationMessage[] {
+    const rows = this.db.prepare(`
+      SELECT * FROM app_conversation_messages
+      WHERE conversation_id = ?
+      ORDER BY position ASC
+    `).all(conversationId) as Record<string, unknown>[];
+    return rows.map((row) => ({
+      id: String(row.id),
+      role: row.role === 'assistant' ? 'assistant' : 'user',
+      content: String(row.content),
+      events: (parseJson(row.events) as unknown[] | undefined) ?? [],
+      createdAt: String(row.created_at),
+    }));
+  }
+
+  private rowToConversation(row: Record<string, unknown>): LocalAppConversation {
+    const summary = this.db.prepare(`
+      SELECT
+        COUNT(*) AS message_count,
+        (SELECT content FROM app_conversation_messages WHERE conversation_id = ? ORDER BY position DESC LIMIT 1) AS last_message
+      FROM app_conversation_messages
+      WHERE conversation_id = ?
+    `).get(String(row.id), String(row.id)) as Record<string, unknown>;
+    return {
+      id: String(row.id),
+      appId: String(row.app_id),
+      dashboardId: optionalString(row.dashboard_id),
+      notebookPath: optionalString(row.notebook_path),
+      title: String(row.title),
+      createdAt: String(row.created_at),
+      updatedAt: String(row.updated_at),
+      messageCount: typeof summary.message_count === 'number' ? summary.message_count : Number(summary.message_count ?? 0),
+      lastMessage: optionalString(summary.last_message),
+    };
   }
 }
 
@@ -246,6 +444,16 @@ function parseReviewStatus(value: unknown): LocalAiPinReviewStatus {
 
 function optionalString(value: unknown): string | undefined {
   return typeof value === 'string' && value.length > 0 ? value : undefined;
+}
+
+function cleanOptionalString(value: unknown): string | undefined {
+  return typeof value === 'string' && value.trim().length > 0 ? value.trim() : undefined;
+}
+
+function titleFromMessages(messages: CreateLocalAppConversationInput['messages']): string | undefined {
+  const firstUserMessage = messages?.find((message) => message.role === 'user' && message.content.trim());
+  if (!firstUserMessage) return undefined;
+  return firstUserMessage.content.trim().replace(/\s+/g, ' ').slice(0, 80);
 }
 
 function json(value: unknown): string | null {

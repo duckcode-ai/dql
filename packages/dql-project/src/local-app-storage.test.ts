@@ -40,4 +40,32 @@ describe('LocalAppStorage', () => {
     expect(promoted?.reviewStatus).toBe('draft_created');
     expect(promoted?.promotedBlockPath).toBe('apps/executive-cockpit/drafts/ai_summary.dql');
   });
+
+  it('stores private App conversations locally', () => {
+    const created = store.createAppConversation({
+      appId: 'executive-cockpit',
+      dashboardId: 'bank-overview',
+      title: 'Weekly review',
+      messages: [
+        { role: 'user', content: 'What changed?' },
+        { role: 'assistant', content: 'Deposits grew.' },
+      ],
+    });
+
+    expect(created.messageCount).toBe(2);
+    expect(store.listAppConversations('executive-cockpit')).toHaveLength(1);
+
+    const updated = store.updateAppConversation(created.id, {
+      messages: [
+        { role: 'user', content: 'What changed?' },
+        { role: 'assistant', content: 'Deposits grew and card approvals softened.' },
+      ],
+    });
+    expect(updated?.lastMessage).toContain('card approvals');
+
+    const full = store.getAppConversation(created.id);
+    expect(full?.messages?.map((message) => message.role)).toEqual(['user', 'assistant']);
+    expect(store.deleteAppConversation(created.id)).toBe(true);
+    expect(store.listAppConversations('executive-cockpit')).toHaveLength(0);
+  });
 });

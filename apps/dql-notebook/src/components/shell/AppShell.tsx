@@ -219,8 +219,10 @@ export function AppShell() {
             </FullPageSection>
           ) : (
             <>
-              {state.mainView === 'block_studio' ? (
-                <BlockStudio />
+              {state.mainView === 'imports' ? (
+                <BlockStudio key="imports" initialMode="import" />
+              ) : state.mainView === 'block_studio' ? (
+                <BlockStudio key="block-editor" initialMode="editor" />
               ) : (
                 <>
                   <NotebookEditor
