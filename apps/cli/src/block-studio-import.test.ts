@@ -4,7 +4,10 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import {
   candidateToDqlSource,
+  clearBlockStudioImportSessions,
   createBlockStudioImportSession,
+  deleteBlockStudioImportSession,
+  listBlockStudioImportSessions,
   loadBlockStudioImportSession,
   updateBlockStudioImportCandidate,
 } from './block-studio-import.js';
@@ -52,6 +55,7 @@ group by region;
     expect(candidate.tags).toEqual(['imported', 'raw-sql', 'dashboard', 'migration']);
     expect(candidate.lineage.sourceTables).toEqual(['marts.orders']);
     expect(candidate.dqlSource).toContain('block "Revenue By Region"');
+    expect(candidate.dqlSource).toContain('status = "draft"');
     expect(candidate.dqlSource).toContain('query = """');
     expect(candidate.reviewStatus).toBe('review');
     expect(candidate.conversionNotes?.[0]).toMatch(/Deterministic SQL extraction/);
@@ -77,6 +81,39 @@ select region, count(*) as n from raw.accounts group by region;
     expect(session.candidates[0].lineage.totalStatements).toBe(2);
   });
 
+  it('splits SQL Server style GO batches', () => {
+    const root = tempProject();
+    writeFileSync(join(root, 'legacy-go.sql'), `
+select count(*) as n from raw.events
+GO
+select region, count(*) as n from raw.accounts group by region
+go
+`);
+
+    const session = createBlockStudioImportSession(root, {
+      inputPath: 'legacy-go.sql',
+      domain: 'ops',
+    });
+
+    expect(session.candidates).toHaveLength(2);
+    expect(session.candidates[0].lineage.sourceTables).toEqual(['raw.events']);
+    expect(session.candidates[1].lineage.sourceTables).toEqual(['raw.accounts']);
+    expect(session.candidates[0].splitStrategy).toBe('semicolon-go');
+  });
+
+  it('warns when one candidate likely contains several undelimited scripts', () => {
+    const root = tempProject();
+    writeFileSync(join(root, 'missing-delimiters.sql'), 'select * from raw.events select * from raw.accounts');
+
+    const session = createBlockStudioImportSession(root, {
+      inputPath: 'missing-delimiters.sql',
+      domain: 'ops',
+    });
+
+    expect(session.candidates).toHaveLength(1);
+    expect(session.candidates[0].warnings.join(' ')).toMatch(/multiple SELECT\/WITH clauses/i);
+  });
+
   it('imports every SQL file in a folder and reloads the persisted session', () => {
     const root = tempProject();
     mkdirSync(join(root, 'queries'));
@@ -92,6 +129,40 @@ select region, count(*) as n from raw.accounts group by region;
     expect(reloaded.sourceKind).toBe('raw-sql-folder');
     expect(reloaded.candidates.map((candidate) => candidate.lineage.sourceTables[0]).sort()).toEqual(['source_a', 'source_b']);
     expect(reloaded.defaults.domain).toBe('shared-reporting');
+  });
+
+  it('creates sessions from pasted or uploaded SQL sources and lists summaries', () => {
+    const root = tempProject();
+    const session = createBlockStudioImportSession(root, {
+      inputMode: 'paste',
+      sources: [{ path: 'manual.sql', content: 'select * from raw.events; select * from raw.accounts;' }],
+      domain: 'ops',
+    });
+    const summaries = listBlockStudioImportSessions(root);
+
+    expect(session.inputMode).toBe('paste');
+    expect(session.sourceFiles).toEqual(['manual.sql']);
+    expect(session.candidates).toHaveLength(2);
+    expect(summaries).toHaveLength(1);
+    expect(summaries[0].candidateCount).toBe(2);
+  });
+
+  it('deletes one import session or clears all import history', () => {
+    const root = tempProject();
+    const first = createBlockStudioImportSession(root, {
+      inputMode: 'paste',
+      sources: [{ path: 'first.sql', content: 'select * from first_table;' }],
+    });
+    createBlockStudioImportSession(root, {
+      inputMode: 'paste',
+      sources: [{ path: 'second.sql', content: 'select * from second_table;' }],
+    });
+
+    expect(listBlockStudioImportSessions(root)).toHaveLength(2);
+    deleteBlockStudioImportSession(root, first.id);
+    expect(listBlockStudioImportSessions(root)).toHaveLength(1);
+    expect(clearBlockStudioImportSessions(root)).toBe(1);
+    expect(listBlockStudioImportSessions(root)).toHaveLength(0);
   });
 
   it('detects parameters and refreshes generated DQL when a candidate is updated', () => {

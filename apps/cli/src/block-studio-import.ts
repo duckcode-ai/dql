@@ -1,5 +1,5 @@
-import { createHash } from 'node:crypto';
-import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import { createHash, randomUUID } from 'node:crypto';
+import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { basename, extname, join, relative, resolve } from 'node:path';
 
 export type BlockStudioImportSourceKind =
@@ -9,6 +9,13 @@ export type BlockStudioImportSourceKind =
   | 'powerbi-project';
 
 export type BlockStudioImportReviewStatus = 'draft' | 'review' | 'saved' | 'rejected';
+export type BlockStudioImportInputMode = 'path' | 'paste' | 'upload';
+export type BlockStudioImportSplitStrategy = 'semicolon-go' | 'manual';
+
+export interface BlockStudioImportSource {
+  path: string;
+  content: string;
+}
 
 export interface BlockStudioImportLineage {
   sourceTables: string[];
@@ -16,6 +23,27 @@ export interface BlockStudioImportLineage {
   warnings: string[];
   statementIndex: number;
   totalStatements: number;
+}
+
+export interface BlockStudioAiAssistance {
+  action: string;
+  summary: string;
+  createdAt: string;
+  status: 'suggested' | 'accepted' | 'rejected';
+  provider?: string;
+  patch?: Partial<Pick<BlockStudioImportCandidate, 'name' | 'domain' | 'description' | 'owner' | 'tags' | 'sql' | 'dqlSource'>>;
+}
+
+export interface BlockStudioCertificationChecklist {
+  metadata: boolean;
+  validation: boolean;
+  run: boolean;
+  tests: boolean;
+  chart: boolean;
+  lineage: boolean;
+  aiReviewed: boolean;
+  blockers: string[];
+  checkedAt?: string;
 }
 
 export interface BlockStudioImportCandidate {
@@ -33,7 +61,11 @@ export interface BlockStudioImportCandidate {
   preview: unknown | null;
   lineage: BlockStudioImportLineage;
   confidence: number;
+  splitStrategy: BlockStudioImportSplitStrategy;
+  warnings: string[];
   conversionNotes: string[];
+  aiAssistance: BlockStudioAiAssistance[];
+  certificationChecklist?: BlockStudioCertificationChecklist;
   reviewStatus: BlockStudioImportReviewStatus;
   savedPath?: string;
 }
@@ -44,6 +76,8 @@ export interface BlockStudioImportManifest {
   inputPath: string;
   createdAt: string;
   updatedAt: string;
+  inputMode: BlockStudioImportInputMode;
+  sourceFiles: string[];
   defaults: {
     domain: string;
     owner: string;
@@ -56,9 +90,26 @@ export interface BlockStudioImportSession extends BlockStudioImportManifest {
   candidates: BlockStudioImportCandidate[];
 }
 
+export interface BlockStudioImportSessionSummary {
+  id: string;
+  sourceKind: BlockStudioImportSourceKind;
+  inputMode: BlockStudioImportInputMode;
+  inputPath: string;
+  sourceFiles: string[];
+  createdAt: string;
+  updatedAt: string;
+  defaults: BlockStudioImportManifest['defaults'];
+  candidateCount: number;
+  savedCount: number;
+  rejectedCount: number;
+  warningCount: number;
+}
+
 export interface CreateBlockStudioImportOptions {
   sourceKind?: BlockStudioImportSourceKind | 'raw-sql';
-  inputPath: string;
+  inputPath?: string;
+  inputMode?: BlockStudioImportInputMode;
+  sources?: BlockStudioImportSource[];
   domain?: string;
   owner?: string;
   tags?: string[];
@@ -69,6 +120,13 @@ interface SqlStatementCandidate {
   sql: string;
   statementIndex: number;
   totalStatements: number;
+  splitStrategy: BlockStudioImportSplitStrategy;
+  warnings: string[];
+}
+
+interface SqlSource {
+  path: string;
+  content: string;
 }
 
 const SQL_EXTENSIONS = new Set(['.sql']);
@@ -78,8 +136,9 @@ export function createBlockStudioImportSession(
   projectRoot: string,
   options: CreateBlockStudioImportOptions,
 ): BlockStudioImportSession {
-  const inputPath = resolveInputPath(projectRoot, options.inputPath);
-  const sourceKind = resolveSourceKind(inputPath, options.sourceKind);
+  const inputMode = options.inputMode ?? (options.sources?.length ? 'upload' : 'path');
+  const sourceBundle = collectSqlSources(projectRoot, options);
+  const sourceKind = sourceBundle.sourceKind;
   if (!ACTIVE_IMPORT_KINDS.has(sourceKind)) {
     throw new Error(`${sourceKind} import is planned but not implemented in this build.`);
   }
@@ -90,8 +149,8 @@ export function createBlockStudioImportSession(
     owner: options.owner?.trim() ?? '',
     tags: normalizeTags(['imported', 'raw-sql', ...(options.tags ?? [])]),
   };
-  const statements = collectSqlStatements(inputPath);
-  const importId = buildImportId(sourceKind, inputPath, now);
+  const statements = collectSqlStatements(sourceBundle.sources);
+  const importId = buildImportId(sourceKind, sourceBundle.inputPath, now);
   const candidates = statements.map((statement) => buildSqlCandidate({
     importId,
     sourceKind,
@@ -102,7 +161,9 @@ export function createBlockStudioImportSession(
   const manifest: BlockStudioImportManifest = {
     id: importId,
     sourceKind,
-    inputPath: displayPath(projectRoot, inputPath),
+    inputPath: sourceBundle.inputPath,
+    inputMode,
+    sourceFiles: sourceBundle.sources.map((source) => source.path),
     createdAt: now,
     updatedAt: now,
     defaults,
@@ -122,6 +183,52 @@ export function loadBlockStudioImportSession(projectRoot: string, importId: stri
   return { ...manifest, candidates };
 }
 
+export function listBlockStudioImportSessions(projectRoot: string): BlockStudioImportSessionSummary[] {
+  const root = join(projectRoot, '.dql', 'imports');
+  if (!existsSync(root)) return [];
+  const summaries: BlockStudioImportSessionSummary[] = [];
+  for (const entry of readdirSync(root, { withFileTypes: true })) {
+    if (!entry.isDirectory()) continue;
+    try {
+      const session = loadBlockStudioImportSession(projectRoot, entry.name);
+      summaries.push({
+        id: session.id,
+        sourceKind: session.sourceKind,
+        inputMode: session.inputMode ?? 'path',
+        inputPath: session.inputPath,
+        sourceFiles: session.sourceFiles ?? [],
+        createdAt: session.createdAt,
+        updatedAt: session.updatedAt,
+        defaults: session.defaults,
+        candidateCount: session.candidates.length,
+        savedCount: session.candidates.filter((candidate) => candidate.reviewStatus === 'saved').length,
+        rejectedCount: session.candidates.filter((candidate) => candidate.reviewStatus === 'rejected').length,
+        warningCount: session.candidates.reduce((sum, candidate) => sum + (candidate.warnings?.length ?? candidate.lineage.warnings.length), 0),
+      });
+    } catch {
+      // Ignore partial sessions so one bad cache entry does not break Imports.
+    }
+  }
+  return summaries.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+}
+
+export function deleteBlockStudioImportSession(projectRoot: string, importId: string): void {
+  rmSync(importRoot(projectRoot, importId), { recursive: true, force: true });
+}
+
+export function clearBlockStudioImportSessions(projectRoot: string): number {
+  const root = join(projectRoot, '.dql', 'imports');
+  if (!existsSync(root)) return 0;
+  let removed = 0;
+  for (const entry of readdirSync(root, { withFileTypes: true })) {
+    if (!entry.isDirectory()) continue;
+    if (!/^imp_[A-Za-z0-9_-]+$/.test(entry.name)) continue;
+    rmSync(join(root, entry.name), { recursive: true, force: true });
+    removed += 1;
+  }
+  return removed;
+}
+
 export function writeBlockStudioImportSession(projectRoot: string, session: BlockStudioImportSession): void {
   const root = importRoot(projectRoot, session.id);
   const candidatesDir = join(root, 'candidates');
@@ -130,6 +237,8 @@ export function writeBlockStudioImportSession(projectRoot: string, session: Bloc
     id: session.id,
     sourceKind: session.sourceKind,
     inputPath: session.inputPath,
+    inputMode: session.inputMode ?? 'path',
+    sourceFiles: session.sourceFiles ?? [],
     createdAt: session.createdAt,
     updatedAt: new Date().toISOString(),
     defaults: session.defaults,
@@ -182,7 +291,9 @@ export function updateBlockStudioImportCandidate(
       ...next.lineage,
       sourceTables: extractSourceTables(next.sql),
       parameters: extractSqlParameters(next.sql),
+      warnings: analyzeSqlWarnings(next.sql, next.lineage.totalStatements),
     };
+    next.warnings = next.lineage.warnings;
     next.confidence = scoreSqlCandidate(next.sql, next.lineage);
   }
   writeBlockStudioImportCandidate(projectRoot, importId, next);
@@ -193,6 +304,7 @@ export function candidateToDqlSource(candidate: Pick<BlockStudioImportCandidate,
   const tags = normalizeTags(candidate.tags).map((tag) => dqlString(tag)).join(', ');
   const sql = candidate.sql.trim().replace(/"""/g, '\\"\\"\\"');
   return `block ${dqlString(candidate.name)} {
+    status = "draft"
     domain = ${dqlString(sanitizeDomain(candidate.domain))}
     type = "custom"
     description = ${dqlString(candidate.description)}
@@ -214,21 +326,19 @@ ${sql}
 `;
 }
 
-function collectSqlStatements(inputPath: string): SqlStatementCandidate[] {
-  const stats = statSync(inputPath);
-  const files = stats.isDirectory() ? walkSqlFiles(inputPath) : [inputPath];
-  if (files.length === 0) throw new Error('No .sql files found to import.');
-
+function collectSqlStatements(sources: SqlSource[]): SqlStatementCandidate[] {
   const statements: SqlStatementCandidate[] = [];
-  for (const file of files) {
-    const source = readFileSync(file, 'utf-8');
-    const split = splitSqlStatements(source);
+  for (const source of sources) {
+    const split = splitSqlStatements(source.content);
+    const sharedWarnings = split.length === 1 ? analyzeSqlWarnings(split[0], split.length) : [];
     split.forEach((sql, index) => {
       statements.push({
-        sourcePath: file,
+        sourcePath: source.path,
         sql,
         statementIndex: index + 1,
         totalStatements: split.length,
+        splitStrategy: 'semicolon-go',
+        warnings: index === 0 ? sharedWarnings : [],
       });
     });
   }
@@ -255,6 +365,7 @@ function buildSqlCandidate(options: {
   const warnings = [
     ...(parameters.length > 0 ? [`Contains parameters: ${parameters.join(', ')}`] : []),
     ...(statement.sql.includes('"""') ? ['SQL contains triple quotes that were escaped in the DQL draft.'] : []),
+    ...statement.warnings,
   ];
   const lineage: BlockStudioImportLineage = {
     sourceTables,
@@ -278,11 +389,17 @@ function buildSqlCandidate(options: {
     preview: null,
     lineage,
     confidence: scoreSqlCandidate(statement.sql, lineage),
+    splitStrategy: statement.splitStrategy,
+    warnings,
     conversionNotes: [
       'Deterministic SQL extraction created this DQL draft locally.',
+      'Name, description, domain, and tags come from leading SQL comments when present; otherwise DQL uses the source path and import defaults.',
+      'The SQL statement is wrapped into query = """ ... """ without LLM rewriting.',
       'Visualization defaults to table until a reviewer chooses a chart type.',
-      'Optional LLM enrichment can be applied per candidate after validation.',
+      'The default test is assert row_count > 0.',
+      'Optional AI assist is review-gated and only receives this candidate context.',
     ],
+    aiAssistance: [],
     reviewStatus: 'review',
   };
   candidate.dqlSource = candidateToDqlSource(candidate);
@@ -347,6 +464,17 @@ function splitSqlStatements(source: string): string[] {
     else if (!single && !backtick && char === '"' && source[i - 1] !== '\\') double = !double;
     else if (!single && !double && char === '`') backtick = !backtick;
 
+    if (!single && !double && !backtick) {
+      const goMatch = matchGoBatchSeparator(source, i);
+      if (goMatch) {
+        const statement = source.slice(start, i).trim();
+        if (statement) statements.push(statement);
+        start = goMatch.end;
+        i = goMatch.end - 1;
+        continue;
+      }
+    }
+
     if (!single && !double && !backtick && char === ';') {
       const statement = source.slice(start, i).trim();
       if (statement) statements.push(statement);
@@ -357,6 +485,29 @@ function splitSqlStatements(source: string): string[] {
   const trailing = source.slice(start).trim();
   if (trailing) statements.push(trailing);
   return statements;
+}
+
+function matchGoBatchSeparator(source: string, index: number): { end: number } | null {
+  const char = source[index];
+  if (char !== 'g' && char !== 'G') return null;
+  const lineStart = Math.max(source.lastIndexOf('\n', index - 1) + 1, 0);
+  if (source.slice(lineStart, index).trim()) return null;
+  const rest = source.slice(index);
+  const match = rest.match(/^go(?:\s+\d+)?\s*(?:--[^\r\n]*)?(?:\r?\n|$)/i);
+  if (!match) return null;
+  return { end: index + match[0].length };
+}
+
+function analyzeSqlWarnings(sql: string, totalStatements: number): string[] {
+  const warnings: string[] = [];
+  if (totalStatements === 1) {
+    const cleaned = stripSqlComments(sql);
+    const starts = cleaned.match(/\b(?:select|with)\b/gi) ?? [];
+    if (starts.length > 1) {
+      warnings.push('Only one candidate was created, but multiple SELECT/WITH clauses were detected. Add semicolons, GO batch separators, or split manually if this file contains multiple scripts.');
+    }
+  }
+  return warnings;
 }
 
 function extractStatementMetadata(sql: string): { name: string; description: string; domain: string; tags: string[] } {
@@ -428,6 +579,46 @@ function walkSqlFiles(root: string): string[] {
   return files.sort();
 }
 
+function collectSqlSources(projectRoot: string, options: CreateBlockStudioImportOptions): {
+  sourceKind: BlockStudioImportSourceKind;
+  inputPath: string;
+  sources: SqlSource[];
+} {
+  if (options.sources?.length) {
+    const sources = options.sources
+      .map((source, index) => ({
+        path: sanitizeSourcePath(source.path || `pasted-${index + 1}.sql`),
+        content: source.content ?? '',
+      }))
+      .filter((source) => source.content.trim().length > 0);
+    if (sources.length === 0) throw new Error('No SQL content was provided.');
+    return {
+      sourceKind: sources.length > 1 ? 'raw-sql-folder' : 'raw-sql-file',
+      inputPath: options.inputMode === 'paste' ? 'pasted SQL' : `${sources.length} uploaded SQL file(s)`,
+      sources,
+    };
+  }
+
+  const inputPath = resolveInputPath(projectRoot, options.inputPath ?? '');
+  const sourceKind = resolveSourceKind(inputPath, options.sourceKind);
+  const stats = statSync(inputPath);
+  const files = stats.isDirectory() ? walkSqlFiles(inputPath) : [inputPath];
+  if (files.length === 0) throw new Error('No .sql files found to import.');
+  return {
+    sourceKind,
+    inputPath: displayPath(projectRoot, inputPath),
+    sources: files.map((file) => ({
+      path: displayPath(projectRoot, file),
+      content: readFileSync(file, 'utf-8'),
+    })),
+  };
+}
+
+function sanitizeSourcePath(path: string): string {
+  const clean = path.replaceAll('\\', '/').replace(/^\/+/, '').trim();
+  return clean.endsWith('.sql') ? clean : `${clean || 'pasted'}.sql`;
+}
+
 function resolveInputPath(projectRoot: string, inputPath: string): string {
   if (!inputPath.trim()) throw new Error('Import path is required.');
   const resolved = resolve(projectRoot, inputPath);
@@ -444,11 +635,14 @@ function resolveSourceKind(inputPath: string, requested?: CreateBlockStudioImpor
 }
 
 function importRoot(projectRoot: string, importId: string): string {
+  if (!/^imp_[A-Za-z0-9_-]+$/.test(importId)) {
+    throw new Error(`Invalid import session id: ${importId}`);
+  }
   return join(projectRoot, '.dql', 'imports', importId);
 }
 
 function buildImportId(sourceKind: string, inputPath: string, createdAt: string): string {
-  const hash = createHash('sha1').update(`${sourceKind}:${inputPath}:${createdAt}`).digest('hex').slice(0, 10);
+  const hash = createHash('sha1').update(`${sourceKind}:${inputPath}:${createdAt}:${randomUUID()}`).digest('hex').slice(0, 10);
   return `imp_${hash}`;
 }
 

@@ -60,6 +60,8 @@ export function Header() {
     ? 'Connections'
     : state.mainView === 'reference'
       ? 'Quick Reference'
+      : state.mainView === 'imports'
+        ? 'SQL Import'
       : state.notebookTitle || 'Untitled';
 
   useEffect(() => {

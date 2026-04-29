@@ -62,6 +62,7 @@ import {
   defaultMemoryPath,
   ensureDefaultMemoryFiles,
   type AgentResultPayload,
+  type AgentProvider,
   type KGNode,
 } from '@duckcodeailabs/dql-agent';
 import { handleAppsApi } from './apps-api.js';
@@ -79,6 +80,8 @@ import {
   runtimeVariables,
 } from './governance-runtime.js';
 import { LocalAppStorage, defaultLocalAppsDbPath } from '@duckcodeailabs/dql-project';
+import type { BlockRecord, TestAssertionResult, TestResultSummary } from '@duckcodeailabs/dql-project';
+import { Certifier } from '@duckcodeailabs/dql-governance';
 import {
   buildSemanticObjectDetail,
   buildSemanticTree,
@@ -89,10 +92,14 @@ import {
   syncSemanticImport,
 } from './semantic-import.js';
 import {
+  clearBlockStudioImportSessions,
   createBlockStudioImportSession,
+  deleteBlockStudioImportSession,
+  listBlockStudioImportSessions,
   loadBlockStudioImportSession,
   readBlockStudioImportCandidate,
   updateBlockStudioImportCandidate,
+  writeBlockStudioImportSession,
   writeBlockStudioImportCandidate,
   type BlockStudioImportCandidate,
 } from './block-studio-import.js';
@@ -196,6 +203,111 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
       prepared.connection,
     );
     return normalizeQueryResult(result, semantic.semanticRefs);
+  };
+
+  const runNotebookForApp = async (appId: string, notebookPath: string): Promise<void> => {
+    const absPath = safeJoin(projectRoot, notebookPath);
+    if (!absPath || !existsSync(absPath) || statSync(absPath).isDirectory() || !absPath.endsWith('.dqlnb')) {
+      throw new Error(`Notebook not found: ${notebookPath}`);
+    }
+    const app = loadRuntimeApp(projectRoot, appId);
+    if (!app) throw new Error(`App "${appId}" not found`);
+
+    const raw = readFileSync(absPath, 'utf-8');
+    const parsed = JSON.parse(raw) as {
+      cells?: Array<Record<string, unknown>>;
+    };
+    const sourceCells = parsed.cells ?? [];
+    const resultByName = new Map<string, ReturnType<typeof normalizeQueryResult>>();
+    const resultById = new Map<string, ReturnType<typeof normalizeQueryResult>>();
+    const snapshotCells: Array<{
+      cellId: string;
+      status: 'idle' | 'running' | 'success' | 'error';
+      result?: ReturnType<typeof normalizeQueryResult>;
+      error?: string;
+      executionCount?: number;
+      executedAt?: string;
+    }> = [];
+
+    for (let index = 0; index < sourceCells.length; index++) {
+      const sourceCell = sourceCells[index];
+      const cellId = typeof sourceCell.id === 'string' ? sourceCell.id : `cell-${index + 1}`;
+      const type = typeof sourceCell.type === 'string' ? sourceCell.type : 'sql';
+      const title = typeof sourceCell.name === 'string'
+        ? sourceCell.name
+        : typeof sourceCell.title === 'string'
+          ? sourceCell.title
+          : undefined;
+      const executedAt = new Date().toISOString();
+
+      if (type === 'sql' || type === 'dql') {
+        try {
+          const cell: NotebookCell = {
+            id: cellId,
+            type: type as NotebookCell['type'],
+            source: typeof sourceCell.content === 'string'
+              ? sourceCell.content
+              : typeof sourceCell.source === 'string'
+                ? sourceCell.source
+                : '',
+            title,
+            config: (sourceCell.chartConfig ?? sourceCell.config) as NotebookCell['config'],
+          };
+          const resolved = resolveNotebookBlockReferenceCell(cell, projectRoot);
+          const plan = buildExecutionPlan(resolved.cell, { semanticLayer, driver: connection.driver });
+          if (!plan) {
+            snapshotCells.push({ cellId, status: 'idle', executionCount: 0, executedAt });
+            continue;
+          }
+          const prepared = prepareLocalExecution(plan.sql, connection, projectRoot, projectConfig);
+          assertAppAccess({ app, domain: resolved.domain ?? app.domain, level: 'execute' });
+          const rawResult = await executor.executeQuery(
+            prepared.sql,
+            plan.sqlParams,
+            runtimeVariables(plan.variables),
+            prepared.connection,
+          );
+          const result = normalizeQueryResult(rawResult);
+          snapshotCells.push({
+            cellId,
+            status: 'success',
+            result,
+            executionCount: 1,
+            executedAt,
+          });
+          resultById.set(cellId, result);
+          if (title) resultByName.set(title, result);
+        } catch (err) {
+          snapshotCells.push({
+            cellId,
+            status: 'error',
+            error: err instanceof Error ? err.message : String(err),
+            executionCount: 1,
+            executedAt,
+          });
+        }
+        continue;
+      }
+
+      const upstream = typeof sourceCell.upstream === 'string' ? sourceCell.upstream : undefined;
+      const upstreamResult = upstream ? resultByName.get(upstream) ?? resultById.get(upstream) : undefined;
+      if (upstreamResult && (type === 'chart' || type === 'table' || type === 'pivot' || type === 'single_value' || type === 'filter')) {
+        snapshotCells.push({
+          cellId,
+          status: 'success',
+          result: upstreamResult,
+          executionCount: 1,
+          executedAt,
+        });
+      }
+    }
+
+    writeRunSnapshot(projectRoot, notebookPath, {
+      version: 1,
+      notebookPath,
+      capturedAt: new Date().toISOString(),
+      cells: snapshotCells,
+    });
   };
 
   const executeCertifiedBlockForAgent = async (node: KGNode): Promise<AgentResultPayload> => {
@@ -356,6 +468,137 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
       result: normalizeQueryResult(result),
       chartConfig: plan?.chartConfig ?? validation.chartConfig ?? null,
     };
+  };
+
+  const runBlockStudioTestSummary = async (
+    source: string,
+    targetConnection: ConnectionConfig = connection,
+  ): Promise<TestResultSummary> => {
+    const start = Date.now();
+    const plan = buildExecutionPlan(
+      { id: 'block-studio-tests', type: 'dql', source, title: 'Block Studio' },
+      { semanticLayer, driver: targetConnection.driver },
+    );
+    const tests = plan?.tests ?? [];
+    if (!plan || !plan.sql) {
+      return {
+        passed: 0,
+        failed: Math.max(tests.length, 1),
+        skipped: 0,
+        duration: Date.now() - start,
+        assertions: [{
+          name: 'build execution plan',
+          passed: false,
+          error: 'Could not build an execution plan for this block.',
+        }],
+        runAt: new Date(),
+      };
+    }
+    if (tests.length === 0) {
+      return { passed: 0, failed: 0, skipped: 0, duration: Date.now() - start, assertions: [], runAt: new Date() };
+    }
+
+    const prepared = prepareLocalExecution(plan.sql, targetConnection, projectRoot, projectConfig);
+    const rawResult = await executor.executeQuery(
+      prepared.sql,
+      plan.sqlParams ?? [],
+      runtimeVariables(plan.variables ?? {}),
+      prepared.connection,
+    );
+    const rows = Array.isArray(rawResult?.rows) ? rawResult.rows : [];
+    const columns = Array.isArray(rawResult?.columns)
+      ? rawResult.columns.map((column: any) => typeof column === 'string' ? column : column?.name ?? String(column))
+      : [];
+    const assertions: TestAssertionResult[] = [];
+    let passed = 0;
+    let failed = 0;
+
+    for (const test of tests) {
+      const name = `assert ${test.field} ${test.operator} ${formatBlockStudioExpected(test.expected)}`;
+      let actual: unknown;
+      if (test.field === 'row_count') {
+        actual = rows.length;
+      } else if (!columns.includes(test.field)) {
+        assertions.push({ name, passed: false, expected: test.expected, error: `Column '${test.field}' not found in results` });
+        failed += 1;
+        continue;
+      } else {
+        actual = rows[0]?.[test.field];
+      }
+
+      const ok = compareBlockStudioValues(actual, test.operator, test.expected);
+      if (ok) {
+        assertions.push({ name, passed: true, actual, expected: test.expected });
+        passed += 1;
+      } else {
+        assertions.push({
+          name,
+          passed: false,
+          actual,
+          expected: test.expected,
+          error: `${String(actual)} ${test.operator} ${formatBlockStudioExpected(test.expected)} is false`,
+        });
+        failed += 1;
+      }
+    }
+
+    return { passed, failed, skipped: 0, duration: Date.now() - start, assertions, runAt: new Date() };
+  };
+
+  const certifyBlockStudioSource = async (source: string, blockPath?: string | null) => {
+    const validation = validateBlockStudioSource(source, semanticLayer);
+    let preview: Awaited<ReturnType<typeof runBlockStudioPreviewSource>> | null = null;
+    let testResults: TestResultSummary | null = null;
+    const blockers: string[] = [];
+
+    try {
+      preview = await runBlockStudioPreviewSource(source);
+    } catch (error) {
+      blockers.push(error instanceof Error ? error.message : String(error));
+    }
+
+    try {
+      testResults = await runBlockStudioTestSummary(source);
+    } catch (error) {
+      testResults = {
+        passed: 0,
+        failed: 1,
+        skipped: 0,
+        duration: 0,
+        assertions: [{ name: 'run tests', passed: false, error: error instanceof Error ? error.message : String(error) }],
+        runAt: new Date(),
+      };
+    }
+
+    const parsed = parseBlockSourceMetadata(source);
+    const record: BlockRecord = {
+      id: parsed.name || 'local',
+      name: parsed.name || 'unnamed',
+      domain: parsed.domain,
+      type: parsed.blockType || 'custom',
+      version: '0.0.0',
+      status: 'draft',
+      gitRepo: '',
+      gitPath: blockPath ?? '',
+      gitCommitSha: '',
+      description: parsed.description,
+      owner: parsed.owner,
+      tags: parsed.tags,
+      dependencies: [],
+      usedInCount: 0,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    };
+    const certification = new Certifier().evaluate(record, testResults ?? undefined);
+    const checklist = buildBlockStudioCertificationChecklist({
+      source,
+      validation,
+      previewSucceeded: Boolean(preview),
+      testResults,
+      certificationErrors: certification.errors,
+      extraBlockers: blockers,
+    });
+    return { certification, checklist, validation, preview, testResults };
   };
 
   const server = createServer(async (req, res) => {
@@ -682,6 +925,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           path,
           projectRoot,
           executeSql: executeLocalSqlForStoredResult,
+          runNotebook: (appId, notebookPath) => runNotebookForApp(appId, notebookPath),
         });
         if (handled) return;
       } catch (err) {
@@ -1260,21 +1504,12 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           res.end(serializeJSON({ error: `Status must be one of: ${validStatuses.join(', ')}` }));
           return;
         }
-        const absPath = resolve(projectRoot, blockPath);
-        if (!existsSync(absPath)) {
-          res.writeHead(404, { 'Content-Type': 'application/json; charset=utf-8' });
-          res.end(serializeJSON({ error: 'Block file not found' }));
+        if (newStatus === 'certified') {
+          res.writeHead(409, { 'Content-Type': 'application/json; charset=utf-8' });
+          res.end(serializeJSON({ error: 'Use /api/block-studio/certify so validation, run, and tests gate certification.' }));
           return;
         }
-        let source = readFileSync(absPath, 'utf-8');
-        // Update or insert status field
-        if (/status\s*=\s*"[^"]*"/.test(source)) {
-          source = source.replace(/status\s*=\s*"[^"]*"/, `status = "${newStatus}"`);
-        } else {
-          // Insert after first { in block declaration
-          source = source.replace(/block\s+"[^"]*"\s*\{/, (match) => `${match}\n  status = "${newStatus}"`);
-        }
-        writeFileSync(absPath, source, 'utf-8');
+        setBlockStudioStatus(projectRoot, blockPath, newStatus);
         res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
         res.end(serializeJSON({ ok: true, status: newStatus }));
       } catch (error) {
@@ -1367,68 +1602,17 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           res.end(serializeJSON({ error: 'source is required' }));
           return;
         }
-        // Parse the block to extract tests and query SQL
-        const parser = new Parser(source, '<run-tests>');
-        const ast = parser.parse();
-        const blockNode = ast.statements.find((n: any) => n.kind === 'BlockDecl') as any;
-        if (!blockNode) {
-          res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
-          res.end(serializeJSON({ error: 'No block declaration found in source' }));
-          return;
-        }
-        const testNodes: Array<{ field: string; operator: string; expected: any }> = blockNode.tests ?? [];
-        if (testNodes.length === 0) {
-          res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
-          res.end(serializeJSON({ assertions: [], passed: 0, failed: 0, duration: 0 }));
-          return;
-        }
-        // Get the block's base SQL
-        const baseSql = blockNode.query?.rawSQL?.trim() ?? '';
-        if (!baseSql) {
-          res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
-          res.end(serializeJSON({ error: 'Block has no query SQL to test against' }));
-          return;
-        }
-        const resolvedSql = resolveProjectRelativeSqlPaths(baseSql, projectRoot, projectConfig.dataDir);
-
-        // Build and run assertions
-        const start = Date.now();
-        const results: Array<{ field: string; operator: string; expected: string; passed: boolean; actual?: string }> = [];
-        for (const test of testNodes) {
-          const field = test.field;
-          const op = test.operator;
-          const expected = test.expected;
-          // Extract the expected value from the AST node
-          const expectedValue = typeof expected === 'object' && expected !== null
-            ? (expected.value ?? String(expected))
-            : expected;
-          // Build a SQL query that computes the aggregate for this assertion
-          const testSql = `SELECT ${field} AS test_value FROM (${resolvedSql}) AS __test_block`;
-          try {
-            const result = await executor.executeQuery(testSql, [], {}, connection);
-            const actualRaw = result.rows?.[0];
-            const actual = actualRaw ? Object.values(actualRaw)[0] : undefined;
-            const actualNum = Number(actual);
-            const expectedNum = Number(expectedValue);
-            let passed = false;
-            switch (op) {
-              case '>': passed = actualNum > expectedNum; break;
-              case '<': passed = actualNum < expectedNum; break;
-              case '>=': passed = actualNum >= expectedNum; break;
-              case '<=': passed = actualNum <= expectedNum; break;
-              case '==': passed = String(actual) === String(expectedValue); break;
-              case '!=': passed = String(actual) !== String(expectedValue); break;
-              default: passed = false;
-            }
-            results.push({ field, operator: op, expected: String(expectedValue), passed, actual: String(actual ?? '') });
-          } catch (err) {
-            results.push({ field, operator: op, expected: String(expectedValue), passed: false, actual: `Error: ${err instanceof Error ? err.message : String(err)}` });
-          }
-        }
-        const duration = Date.now() - start;
-        const passed = results.filter((r) => r.passed).length;
+        const summary = await runBlockStudioTestSummary(source);
+        const results = summary.assertions.map((assertion) => ({
+          name: assertion.name,
+          field: assertion.name.match(/^assert\s+(\S+)/)?.[1] ?? assertion.name,
+          operator: assertion.name.match(/^assert\s+\S+\s+(\S+)/)?.[1] ?? '',
+          expected: assertion.expected !== undefined ? String(assertion.expected) : assertion.name.replace(/^assert\s+\S+\s+\S+\s*/, ''),
+          passed: assertion.passed,
+          actual: assertion.error ?? (assertion.actual !== undefined ? String(assertion.actual) : undefined),
+        }));
         res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
-        res.end(serializeJSON({ assertions: results, passed, failed: results.length - passed, duration }));
+        res.end(serializeJSON({ assertions: results, passed: summary.passed, failed: summary.failed, duration: summary.duration }));
       } catch (error) {
         res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' });
         res.end(serializeJSON({ error: error instanceof Error ? error.message : String(error) }));
@@ -1436,12 +1620,67 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
       return;
     }
 
-    if (req.method === 'POST' && path === '/api/block-studio/import/preview') {
+    if (req.method === 'POST' && path === '/api/block-studio/certify') {
+      try {
+        const body = await readJSON(req);
+        const source = typeof body.source === 'string' ? body.source : '';
+        const blockPath = typeof body.path === 'string' ? body.path : null;
+        if (!source.trim()) {
+          res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
+          res.end(serializeJSON({ error: 'source is required' }));
+          return;
+        }
+        const result = await certifyBlockStudioSource(source, blockPath);
+        const blockers = [
+          ...result.checklist.blockers,
+          ...result.certification.errors.map((error) => `${error.rule}: ${error.message}`),
+        ];
+        if (!result.certification.certified || blockers.length > 0) {
+          res.writeHead(422, { 'Content-Type': 'application/json; charset=utf-8' });
+          res.end(serializeJSON({ ok: false, ...result, blockers }));
+          return;
+        }
+        if (blockPath) setBlockStudioStatus(projectRoot, blockPath, 'certified');
+        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({ ok: true, status: 'certified', ...result }));
+      } catch (error) {
+        res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({ error: error instanceof Error ? error.message : String(error) }));
+      }
+      return;
+    }
+
+    if (req.method === 'GET' && path === '/api/block-studio/imports') {
+      res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+      res.end(serializeJSON({ sessions: listBlockStudioImportSessions(projectRoot) }));
+      return;
+    }
+
+    if (req.method === 'DELETE' && path === '/api/block-studio/imports') {
+      try {
+        const removed = clearBlockStudioImportSessions(projectRoot);
+        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({ ok: true, removed }));
+      } catch (error) {
+        res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({ error: error instanceof Error ? error.message : String(error) }));
+      }
+      return;
+    }
+
+    if (req.method === 'POST' && (path === '/api/block-studio/import/preview' || path === '/api/block-studio/imports')) {
       try {
         const body = await readJSON(req);
         const inputPath = typeof body.path === 'string' ? body.path : '';
         const session = createBlockStudioImportSession(projectRoot, {
           inputPath,
+          inputMode: body.inputMode === 'paste' || body.inputMode === 'upload' || body.inputMode === 'path' ? body.inputMode : undefined,
+          sources: Array.isArray(body.sources)
+            ? body.sources.map((source: any, index: number) => ({
+                path: typeof source?.path === 'string' ? source.path : `source-${index + 1}.sql`,
+                content: typeof source?.content === 'string' ? source.content : '',
+              }))
+            : undefined,
           sourceKind: typeof body.sourceKind === 'string' ? body.sourceKind : 'raw-sql',
           domain: typeof body.domain === 'string' ? body.domain : undefined,
           owner: typeof body.owner === 'string' ? body.owner : undefined,
@@ -1461,12 +1700,64 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
       return;
     }
 
-    const importPathMatch = path.match(/^\/api\/block-studio\/imports\/([^/]+)(?:\/candidates\/([^/]+)(?:\/(run|save))?)?$/);
+    const importSaveAllMatch = path.match(/^\/api\/block-studio\/imports\/([^/]+)\/save-all$/);
+    if (importSaveAllMatch && req.method === 'POST') {
+      const importId = decodeURIComponent(importSaveAllMatch[1]);
+      try {
+        const session = loadBlockStudioImportSession(projectRoot, importId);
+        const saved: Array<{ candidateId: string; path: string }> = [];
+        const errors: Array<{ candidateId: string; error: string }> = [];
+        const nextCandidates = [...session.candidates];
+        for (let i = 0; i < nextCandidates.length; i += 1) {
+          const candidate = nextCandidates[i];
+          if (candidate.reviewStatus === 'saved' || candidate.reviewStatus === 'rejected' || (candidate.validation as any)?.valid === false) continue;
+          try {
+            const savedPath = saveBlockStudioArtifacts(projectRoot, {
+              source: candidate.dqlSource,
+              name: candidate.name,
+              domain: candidate.domain,
+              description: candidate.description,
+              owner: candidate.owner,
+              tags: candidate.tags,
+              lineage: candidate.lineage.sourceTables,
+              importMeta: {
+                importId,
+                candidateId: candidate.id,
+                sourceKind: candidate.sourceKind,
+                sourcePath: candidate.sourcePath,
+              },
+            });
+            nextCandidates[i] = { ...candidate, reviewStatus: 'saved', savedPath };
+            writeBlockStudioImportCandidate(projectRoot, importId, nextCandidates[i]);
+            saved.push({ candidateId: candidate.id, path: savedPath });
+          } catch (error) {
+            errors.push({ candidateId: candidate.id, error: error instanceof Error ? error.message : String(error) });
+          }
+        }
+        const nextSession = { ...session, candidates: nextCandidates, updatedAt: new Date().toISOString() };
+        writeBlockStudioImportSession(projectRoot, nextSession);
+        res.writeHead(errors.length > 0 ? 207 : 200, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({ ok: errors.length === 0, session: nextSession, saved, errors }));
+      } catch (error) {
+        res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({ error: error instanceof Error ? error.message : String(error) }));
+      }
+      return;
+    }
+
+    const importPathMatch = path.match(/^\/api\/block-studio\/imports\/([^/]+)(?:\/candidates\/([^/]+)(?:\/(run|save|ai-assist))?)?$/);
     if (importPathMatch) {
       const importId = decodeURIComponent(importPathMatch[1]);
       const candidateId = importPathMatch[2] ? decodeURIComponent(importPathMatch[2]) : null;
       const action = importPathMatch[3] ?? null;
       try {
+        if (req.method === 'DELETE' && !candidateId) {
+          deleteBlockStudioImportSession(projectRoot, importId);
+          res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+          res.end(serializeJSON({ ok: true }));
+          return;
+        }
+
         if (req.method === 'GET' && !candidateId) {
           const session = loadBlockStudioImportSession(projectRoot, importId);
           res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
@@ -1499,6 +1790,38 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           const candidate = readBlockStudioImportCandidate(projectRoot, importId, candidateId);
           const preview = await runBlockStudioPreviewSource(candidate.dqlSource);
           const next = { ...candidate, preview, validation: validateBlockStudioSource(candidate.dqlSource, semanticLayer) };
+          writeBlockStudioImportCandidate(projectRoot, importId, next);
+          res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+          res.end(serializeJSON(next));
+          return;
+        }
+
+        if (req.method === 'POST' && candidateId && action === 'ai-assist') {
+          const body = await readJSON(req).catch(() => ({}));
+          const candidate = readBlockStudioImportCandidate(projectRoot, importId, candidateId);
+          const actionName = typeof body.action === 'string' ? body.action : 'explain';
+          const validation = validateBlockStudioSource(candidate.dqlSource, semanticLayer);
+          const assist = await buildBlockStudioAiAssistSummary(
+            projectRoot,
+            actionName,
+            candidate,
+            validation,
+            isProviderSettingsId(body.provider) ? body.provider : undefined,
+          );
+          const next: BlockStudioImportCandidate = {
+            ...candidate,
+            validation,
+            aiAssistance: [
+              ...(candidate.aiAssistance ?? []),
+              {
+                action: actionName,
+                summary: assist.summary,
+                createdAt: new Date().toISOString(),
+                status: 'suggested',
+                provider: assist.provider,
+              },
+            ],
+          };
           writeBlockStudioImportCandidate(projectRoot, importId, next);
           res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
           res.end(serializeJSON(next));
@@ -3888,7 +4211,7 @@ function openBlockStudioDocument(
     description: parsedMetadata.description || companion?.description || '',
     owner: parsedMetadata.owner || companion?.owner || '',
     tags: parsedMetadata.tags.length > 0 ? parsedMetadata.tags : companion?.tags ?? [],
-    reviewStatus: companion?.reviewStatus,
+    reviewStatus: parsedMetadata.status || companion?.reviewStatus || 'draft',
   };
   return {
     path: normalizedPath,
@@ -4417,6 +4740,8 @@ function parseBlockSourceMetadata(source: string): {
   description: string;
   owner: string;
   tags: string[];
+  status: string;
+  blockType: string;
 } {
   const name = source.match(/^\s*block\s+"([^"]+)"/i)?.[1] ?? '';
   const extractString = (key: string) => source.match(new RegExp(`\\b${key}\\s*=\\s*"([^"]*)"`, 'i'))?.[1] ?? '';
@@ -4427,7 +4752,233 @@ function parseBlockSourceMetadata(source: string): {
     description: extractString('description'),
     owner: extractString('owner'),
     tags: tags ? (tags[1].match(/"([^"]*)"/g) ?? []).map((value) => value.slice(1, -1)) : [],
+    status: extractString('status') || 'draft',
+    blockType: extractString('type') || 'custom',
   };
+}
+
+function compareBlockStudioValues(actual: unknown, operator: string, expected: unknown): boolean {
+  const expectedValue = normalizeBlockStudioExpected(expected);
+  if (operator === '==' || operator === '=') return String(actual) === String(expectedValue);
+  if (operator === '!=') return String(actual) !== String(expectedValue);
+  const actualNumber = Number(actual);
+  const expectedNumber = Number(expectedValue);
+  switch (operator) {
+    case '>': return actualNumber > expectedNumber;
+    case '>=': return actualNumber >= expectedNumber;
+    case '<': return actualNumber < expectedNumber;
+    case '<=': return actualNumber <= expectedNumber;
+    default: return false;
+  }
+}
+
+function normalizeBlockStudioExpected(expected: unknown): unknown {
+  if (expected && typeof expected === 'object' && Object.prototype.hasOwnProperty.call(expected, 'value')) {
+    return (expected as { value: unknown }).value;
+  }
+  if (expected && typeof expected === 'object' && Object.prototype.hasOwnProperty.call(expected, 'name')) {
+    return (expected as { name: unknown }).name;
+  }
+  return expected;
+}
+
+function formatBlockStudioExpected(expected: unknown): string {
+  const normalized = normalizeBlockStudioExpected(expected);
+  if (normalized === null || normalized === undefined) return 'null';
+  if (typeof normalized === 'string' || typeof normalized === 'number' || typeof normalized === 'boolean') return String(normalized);
+  return JSON.stringify(normalized);
+}
+
+function buildBlockStudioCertificationChecklist(input: {
+  source: string;
+  validation: ReturnType<typeof validateBlockStudioSource>;
+  previewSucceeded: boolean;
+  testResults: TestResultSummary | null;
+  certificationErrors: Array<{ rule: string; message: string }>;
+  extraBlockers?: string[];
+}) {
+  const parsed = parseBlockSourceMetadata(input.source);
+  const sql = extractBlockStudioSql(input.source) ?? '';
+  const blockers = new Set<string>();
+  for (const diagnostic of input.validation.diagnostics) {
+    if (diagnostic.severity === 'error') blockers.add(diagnostic.message);
+  }
+  for (const error of input.certificationErrors) blockers.add(`${error.rule}: ${error.message}`);
+  for (const blocker of input.extraBlockers ?? []) blockers.add(blocker);
+  if (!parsed.domain.trim()) blockers.add('Missing domain');
+  if (!parsed.owner.trim()) blockers.add('Missing owner');
+  if (!parsed.description.trim()) blockers.add('Missing description');
+  if (!input.previewSucceeded) blockers.add('Block has not run successfully');
+  if (!input.testResults || input.testResults.failed > 0) blockers.add('Tests must pass before certification');
+  if (!input.testResults || input.testResults.assertions.length === 0) blockers.add('At least one test assertion is required before certification');
+  if (!input.validation.chartConfig?.chart) blockers.add('Visualization config is missing');
+
+  return {
+    metadata: Boolean(parsed.domain.trim() && parsed.owner.trim() && parsed.description.trim()),
+    validation: input.validation.diagnostics.every((diagnostic) => diagnostic.severity !== 'error'),
+    run: input.previewSucceeded,
+    tests: Boolean(input.testResults && input.testResults.failed === 0 && input.testResults.assertions.length > 0),
+    chart: Boolean(input.validation.chartConfig?.chart),
+    lineage: extractSqlTablesLight(sql).length > 0 || input.validation.semanticRefs.metrics.length > 0,
+    aiReviewed: true,
+    blockers: Array.from(blockers),
+    checkedAt: new Date().toISOString(),
+  };
+}
+
+function extractSqlTablesLight(sql: string): string[] {
+  const tables = new Set<string>();
+  const cleaned = sql.replace(/\/\*[\s\S]*?\*\//g, ' ').replace(/--[^\n\r]*/g, ' ');
+  const regex = /\b(?:from|join|update|into)\s+([`"[]?[A-Za-z0-9_./:-]+(?:\.[A-Za-z0-9_./:-]+)*[`"\]]?)/gi;
+  let match: RegExpExecArray | null;
+  while ((match = regex.exec(cleaned))) {
+    const raw = match[1].replace(/^[`"[]|[`"\]]$/g, '');
+    if (raw && !raw.startsWith('(') && !/^(select|values|unnest|lateral)$/i.test(raw)) tables.add(raw);
+  }
+  return Array.from(tables);
+}
+
+function setBlockStudioStatus(projectRoot: string, blockPath: string, newStatus: string): void {
+  const normalizedPath = normalize(blockPath).replace(/^\/+/, '');
+  if (!normalizedPath.startsWith('blocks/')) throw new Error('Invalid block path');
+  const absPath = join(projectRoot, normalizedPath);
+  if (!existsSync(absPath)) throw new Error('Block file not found');
+  let source = readFileSync(absPath, 'utf-8');
+  if (/status\s*=\s*"[^"]*"/.test(source)) {
+    source = source.replace(/status\s*=\s*"[^"]*"/, `status = "${newStatus}"`);
+  } else {
+    source = source.replace(/block\s+"[^"]*"\s*\{/, (match) => `${match}\n  status = "${newStatus}"`);
+  }
+  writeFileSync(absPath, source, 'utf-8');
+
+  const companionPath = blockCompanionRelativePath(normalizedPath);
+  if (!companionPath) return;
+  const absCompanionPath = join(projectRoot, companionPath);
+  if (!existsSync(absCompanionPath)) return;
+  let companion = readFileSync(absCompanionPath, 'utf-8');
+  if (/^reviewStatus:\s*.+$/m.test(companion)) {
+    companion = companion.replace(/^reviewStatus:\s*.+$/m, `reviewStatus: ${newStatus}`);
+  } else {
+    companion = `${companion.trimEnd()}\nreviewStatus: ${newStatus}\n`;
+  }
+  writeFileSync(absCompanionPath, companion, 'utf-8');
+}
+
+async function buildBlockStudioAiAssistSummary(
+  projectRoot: string,
+  action: string,
+  candidate: BlockStudioImportCandidate,
+  validation: ReturnType<typeof validateBlockStudioSource>,
+  requestedProvider?: ProviderSettingsId,
+): Promise<{ summary: string; provider: string }> {
+  const fallback = buildDeterministicAiAssistSummary(action, candidate, validation);
+  const provider = await createBlockStudioAssistProvider(projectRoot, requestedProvider);
+  if (!provider) return { summary: fallback, provider: 'review-gated-local' };
+
+  const messages = [
+    {
+      role: 'system' as const,
+      content: [
+        'You are DQL Block Studio AI Assist.',
+        'Return concise review notes only. Do not claim the block is certified.',
+        'Do not rewrite source unless the user explicitly applies a later patch.',
+        'Focus on DQL custom block structure, metadata, tests, chart hints, and validation errors.',
+      ].join('\n'),
+    },
+    {
+      role: 'user' as const,
+      content: JSON.stringify({
+        action,
+        candidate: {
+          name: candidate.name,
+          domain: candidate.domain,
+          description: candidate.description,
+          owner: candidate.owner,
+          tags: candidate.tags,
+          sourcePath: candidate.sourcePath,
+          sql: candidate.sql,
+          dqlSource: candidate.dqlSource,
+          detectedTables: candidate.lineage.sourceTables,
+          parameters: candidate.lineage.parameters,
+          warnings: candidate.warnings ?? candidate.lineage.warnings,
+        },
+        validation: {
+          valid: validation.valid,
+          diagnostics: validation.diagnostics,
+          chartConfig: validation.chartConfig,
+          semanticRefs: validation.semanticRefs,
+        },
+      }, null, 2),
+    },
+  ];
+
+  try {
+    const summary = await provider.generate(messages, { maxTokens: 700, temperature: 0.1 });
+    return {
+      summary: summary.trim() || fallback,
+      provider: provider.name,
+    };
+  } catch (error) {
+    return {
+      summary: `${fallback}\n\nConfigured provider failed: ${error instanceof Error ? error.message : String(error)}`,
+      provider: provider.name,
+    };
+  }
+}
+
+async function createBlockStudioAssistProvider(
+  projectRoot: string,
+  requestedProvider?: ProviderSettingsId,
+): Promise<AgentProvider | null> {
+  const settings = listProviderSettings(projectRoot);
+  const selected = requestedProvider
+    ? settings.find((provider) => provider.id === requestedProvider && provider.enabled && provider.hasApiKey)
+    : settings.find((provider) => provider.enabled && provider.hasApiKey);
+  if (!selected) return null;
+  const config = getEffectiveProviderConfig(projectRoot, selected.id);
+  let provider: AgentProvider;
+  switch (selected.id) {
+    case 'anthropic':
+      provider = new ClaudeProvider({ apiKey: config.apiKey, model: config.model });
+      break;
+    case 'openai':
+      provider = new OpenAIProvider({ apiKey: config.apiKey, baseUrl: config.baseUrl, model: config.model });
+      break;
+    case 'gemini':
+      provider = new GeminiProvider({ apiKey: config.apiKey, model: config.model });
+      break;
+    case 'ollama':
+      provider = new OllamaProvider({ baseUrl: config.baseUrl, model: config.model });
+      break;
+    case 'custom-openai':
+      provider = new OpenAIProvider({ apiKey: config.apiKey, baseUrl: config.baseUrl, model: config.model, allowNoApiKey: true });
+      break;
+    default:
+      return null;
+  }
+  return await provider.available() ? provider : null;
+}
+
+function buildDeterministicAiAssistSummary(
+  action: string,
+  candidate: BlockStudioImportCandidate,
+  validation: ReturnType<typeof validateBlockStudioSource>,
+): string {
+  const tables = candidate.lineage.sourceTables.length > 0 ? candidate.lineage.sourceTables.join(', ') : 'no source tables detected';
+  const params = candidate.lineage.parameters.length > 0 ? candidate.lineage.parameters.join(', ') : 'no parameters detected';
+  const errors = validation.diagnostics.filter((diagnostic) => diagnostic.severity === 'error').map((diagnostic) => diagnostic.message);
+  if (action === 'fix-validation') {
+    return errors.length > 0
+      ? `Review-gated AI assist would focus on these validation errors: ${errors.join(' | ')}. No source was changed automatically.`
+      : 'No validation errors were found. No source was changed automatically.';
+  }
+  if (action === 'infer-chart') {
+    return `Candidate uses ${tables}. Keep table as the safe default, then choose a chart after previewing result columns. No chart was changed automatically.`;
+  }
+  if (action === 'propose-tests') {
+    return `Default test is row_count > 0. Consider adding assertions for key measures after previewing this candidate. Parameters: ${params}.`;
+  }
+  return `This is a deterministic review note for ${candidate.name}. Tables: ${tables}. Parameters: ${params}. DQL wraps the SQL into a custom block and defaults visualization to table.`;
 }
 
 function extractBlockStudioChartConfig(source: string): { chart?: string; x?: string; y?: string; color?: string; title?: string } | null {

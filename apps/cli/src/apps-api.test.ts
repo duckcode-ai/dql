@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { createAppPackage, recommendBlocks } from './apps-api.js';
+import { createAppPackage, createNotebookForApp, previewNotebookForApp, recommendBlocks } from './apps-api.js';
 
 const tempDirs: string[] = [];
 
@@ -91,7 +91,45 @@ describe('Apps command center API helpers', () => {
     expect(dashboard.metadata.visibility).toBe('shared');
     expect(dashboard.metadata.lifecycle).toBe('draft');
     expect(dashboard.layout.items[0].block).toEqual({ blockId: 'Revenue Total' });
-    expect(result.app.dashboards).toEqual([{ id: 'overview', title: 'Growth CXO Overview' }]);
+    expect(result.app.dashboards).toEqual([{ id: 'overview', title: 'Overview' }]);
+  });
+
+  it('creates and previews App-owned notebooks', () => {
+    const root = createProject();
+    const appResult = createAppPackage(root, {
+      name: 'Fraud Ops',
+      domain: 'cards',
+      dashboardTitle: 'Daily Review',
+      owners: ['owner@local'],
+      tags: [],
+      selectedBlockIds: [],
+    });
+    expect(appResult.ok).toBe(true);
+    if (!appResult.ok) return;
+    expect(existsSync(join(root, 'apps/fraud-ops/dashboards/daily-review.dqld'))).toBe(true);
+
+    const notebook = createNotebookForApp(root, 'fraud-ops', {
+      name: 'Investigation Notes',
+      role: 'analysis',
+      visibility: 'shared',
+    });
+    expect(notebook.ok).toBe(true);
+    if (!notebook.ok) return;
+    expect(notebook.path).toBe('apps/fraud-ops/notebooks/investigation-notes.dqlnb');
+    expect(existsSync(join(root, notebook.path))).toBe(true);
+
+    const app = JSON.parse(readFileSync(join(root, 'apps/fraud-ops/dql.app.json'), 'utf-8'));
+    expect(app.notebooks[0]).toMatchObject({
+      path: notebook.path,
+      role: 'analysis',
+      visibility: 'shared',
+    });
+
+    const preview = previewNotebookForApp(root, 'fraud-ops', notebook.path);
+    expect(preview.ok).toBe(true);
+    if (!preview.ok) return;
+    expect((preview.preview as { title?: string; cells?: unknown[] }).title).toBe('Investigation Notes');
+    expect((preview.preview as { cells: unknown[] }).cells.length).toBeGreaterThan(0);
   });
 });
 

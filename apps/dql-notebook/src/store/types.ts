@@ -139,7 +139,7 @@ export interface ParamConfig {
 }
 export type SidebarPanel = 'files' | 'schema' | 'block_library' | 'connection' | 'reference' | 'lineage' | 'git' | 'apps' | 'settings' | null;
 export type DevPanelTab = 'logs' | 'errors';
-export type MainView = 'notebook' | 'block_studio' | 'connection' | 'reference' | 'git' | 'apps' | 'review' | 'settings';
+export type MainView = 'notebook' | 'block_studio' | 'imports' | 'connection' | 'reference' | 'git' | 'apps' | 'review' | 'settings';
 
 /**
  * Apps consumption-layer surface — list of Apps + currently-open App.
@@ -508,7 +508,28 @@ export interface BlockStudioImportCandidate {
     totalStatements: number;
   };
   confidence: number;
+  splitStrategy?: 'semicolon-go' | 'manual';
+  warnings?: string[];
   conversionNotes?: string[];
+  aiAssistance?: Array<{
+    action: string;
+    summary: string;
+    createdAt: string;
+    status: 'suggested' | 'accepted' | 'rejected';
+    provider?: string;
+    patch?: Partial<Pick<BlockStudioImportCandidate, 'name' | 'domain' | 'description' | 'owner' | 'tags' | 'sql' | 'dqlSource'>>;
+  }>;
+  certificationChecklist?: {
+    metadata: boolean;
+    validation: boolean;
+    run: boolean;
+    tests: boolean;
+    chart: boolean;
+    lineage: boolean;
+    aiReviewed: boolean;
+    blockers: string[];
+    checkedAt?: string;
+  };
   reviewStatus: 'draft' | 'review' | 'saved' | 'rejected';
   savedPath?: string;
 }
@@ -517,6 +538,8 @@ export interface BlockStudioImportSession {
   id: string;
   sourceKind: BlockStudioImportCandidate['sourceKind'];
   inputPath: string;
+  inputMode?: 'path' | 'paste' | 'upload';
+  sourceFiles?: string[];
   createdAt: string;
   updatedAt: string;
   defaults: {
@@ -526,6 +549,25 @@ export interface BlockStudioImportSession {
   };
   candidateIds: string[];
   candidates: BlockStudioImportCandidate[];
+}
+
+export interface BlockStudioImportSessionSummary {
+  id: string;
+  sourceKind: BlockStudioImportCandidate['sourceKind'];
+  inputMode: 'path' | 'paste' | 'upload';
+  inputPath: string;
+  sourceFiles: string[];
+  createdAt: string;
+  updatedAt: string;
+  defaults: {
+    domain: string;
+    owner: string;
+    tags: string[];
+  };
+  candidateCount: number;
+  savedCount: number;
+  rejectedCount: number;
+  warningCount: number;
 }
 
 export interface DatabaseSchemaNode {

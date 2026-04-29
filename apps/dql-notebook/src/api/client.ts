@@ -21,6 +21,7 @@ import type {
   BlockStudioPreview,
   BlockStudioValidation,
   BlockStudioImportSession,
+  BlockStudioImportSessionSummary,
   BlockStudioImportCandidate,
   AppSummary,
   ActivePersona,
@@ -165,6 +166,7 @@ export interface AppBlockRecommendation {
 export interface CreateAppRequest {
   name: string;
   domain: string;
+  dashboardTitle?: string;
   subdomain?: string;
   groups?: string[];
   purpose?: string;
@@ -210,6 +212,62 @@ export interface LocalAiPin {
   lastRefreshedAt?: string;
   lastRefreshError?: string;
   promotedBlockPath?: string;
+}
+
+export interface AppNotebookCandidate {
+  path: string;
+  title: string;
+  attached: boolean;
+  role?: 'source' | 'analysis' | 'supporting';
+  visibility?: 'shared' | 'private' | 'template';
+  lastModified?: string;
+}
+
+export interface AppNotebookPreviewCell {
+  id: string;
+  type: string;
+  name?: string;
+  content: string;
+  upstream?: string;
+  chartConfig?: Record<string, unknown>;
+  tableConfig?: Record<string, unknown>;
+  singleValueConfig?: Record<string, unknown>;
+  pivotConfig?: Record<string, unknown>;
+  status?: string;
+  result?: QueryResult;
+  error?: string;
+  executionCount?: number;
+  executedAt?: string;
+}
+
+export interface AppNotebookPreview {
+  path: string;
+  title: string;
+  metadata?: Record<string, unknown>;
+  cells: AppNotebookPreviewCell[];
+  snapshotFound?: boolean;
+  capturedAt?: string;
+}
+
+export interface AppConversationMessage {
+  id?: string;
+  role: 'user' | 'assistant';
+  content: string;
+  events?: unknown[];
+  createdAt?: string;
+}
+
+export interface AppConversation {
+  id: string;
+  appId: string;
+  dashboardId?: string;
+  notebookPath?: string;
+  title: string;
+  createdAt: string;
+  updatedAt: string;
+  messageCount: number;
+  lastMessage?: string;
+  messages?: AppConversationMessage[];
 }
 
 export interface SettingsEnvVar {
@@ -521,6 +579,8 @@ export const api = {
   async previewBlockStudioImport(payload: {
     path: string;
     sourceKind?: 'raw-sql' | BlockStudioImportCandidate['sourceKind'];
+    inputMode?: 'path' | 'paste' | 'upload';
+    sources?: Array<{ path: string; content: string }>;
     domain?: string;
     owner?: string;
     tags?: string[];
@@ -531,8 +591,38 @@ export const api = {
     });
   },
 
+  async listBlockStudioImports(): Promise<{ sessions: BlockStudioImportSessionSummary[] }> {
+    return request<{ sessions: BlockStudioImportSessionSummary[] }>('/api/block-studio/imports');
+  },
+
+  async createBlockStudioImport(payload: {
+    path?: string;
+    sourceKind?: 'raw-sql' | BlockStudioImportCandidate['sourceKind'];
+    inputMode?: 'path' | 'paste' | 'upload';
+    sources?: Array<{ path: string; content: string }>;
+    domain?: string;
+    owner?: string;
+    tags?: string[];
+  }): Promise<BlockStudioImportSession> {
+    return request<BlockStudioImportSession>('/api/block-studio/imports', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    });
+  },
+
   async getBlockStudioImport(importId: string): Promise<BlockStudioImportSession> {
     return request<BlockStudioImportSession>(`/api/block-studio/imports/${encodeURIComponent(importId)}`);
+  },
+
+  async deleteBlockStudioImport(importId: string): Promise<{ ok: boolean }> {
+    return request<{ ok: boolean }>(
+      `/api/block-studio/imports/${encodeURIComponent(importId)}`,
+      { method: 'DELETE' },
+    );
+  },
+
+  async clearBlockStudioImports(): Promise<{ ok: boolean; removed: number }> {
+    return request<{ ok: boolean; removed: number }>('/api/block-studio/imports', { method: 'DELETE' });
   },
 
   async updateBlockStudioImportCandidate(
@@ -558,6 +648,58 @@ export const api = {
       `/api/block-studio/imports/${encodeURIComponent(importId)}/candidates/${encodeURIComponent(candidateId)}/save`,
       { method: 'POST' },
     );
+  },
+
+  async saveAllBlockStudioImportCandidates(importId: string): Promise<{
+    ok: boolean;
+    session: BlockStudioImportSession;
+    saved: Array<{ candidateId: string; path: string }>;
+    errors: Array<{ candidateId: string; error: string }>;
+  }> {
+    return request(
+      `/api/block-studio/imports/${encodeURIComponent(importId)}/save-all`,
+      { method: 'POST' },
+    );
+  },
+
+  async assistBlockStudioImportCandidate(importId: string, candidateId: string, action: string): Promise<BlockStudioImportCandidate> {
+    return request<BlockStudioImportCandidate>(
+      `/api/block-studio/imports/${encodeURIComponent(importId)}/candidates/${encodeURIComponent(candidateId)}/ai-assist`,
+      { method: 'POST', body: JSON.stringify({ action }) },
+    );
+  },
+
+  async certifyBlockStudio(payload: { source: string; path?: string | null }): Promise<{
+    ok: boolean;
+    status?: string;
+    certification: {
+      certified: boolean;
+      errors: Array<{ rule: string; message: string }>;
+      warnings: Array<{ rule: string; message: string }>;
+    };
+    checklist: {
+      metadata: boolean;
+      validation: boolean;
+      run: boolean;
+      tests: boolean;
+      chart: boolean;
+      lineage: boolean;
+      aiReviewed: boolean;
+      blockers: string[];
+      checkedAt?: string;
+    };
+    blockers?: string[];
+  }> {
+    const res = await fetch(`${BASE}/api/block-studio/certify`, {
+      headers: { 'Content-Type': 'application/json' },
+      method: 'POST',
+      body: JSON.stringify(payload),
+    });
+    const body = await res.json().catch(() => ({ ok: false, error: res.statusText }));
+    if (!res.ok && res.status !== 422) {
+      throw new Error(JSON.stringify(body));
+    }
+    return body;
   },
 
   async saveAsBlock(payload: {
@@ -1241,6 +1383,120 @@ export const api = {
       return await request<AppDocumentSummary>(
         `/api/apps/${encodeURIComponent(appId)}/notebooks`,
         { method: 'POST', body: JSON.stringify(input) },
+      );
+    } catch (e) {
+      return { ok: false, error: e instanceof Error ? e.message : String(e) };
+    }
+  },
+
+  async listAppNotebookCandidates(appId: string): Promise<AppNotebookCandidate[]> {
+    try {
+      const { notebooks } = await request<{ notebooks: AppNotebookCandidate[] }>(
+        `/api/apps/${encodeURIComponent(appId)}/notebook-candidates`,
+      );
+      return notebooks;
+    } catch {
+      return [];
+    }
+  },
+
+  async createAppNotebook(appId: string, input: {
+    name: string;
+    title?: string;
+    role?: 'source' | 'analysis' | 'supporting';
+    visibility?: 'shared' | 'private' | 'template';
+    template?: string;
+  }): Promise<{ ok: true; path: string; app: AppDocumentSummary; preview?: AppNotebookPreview } | { ok: false; error: string }> {
+    try {
+      return await request(
+        `/api/apps/${encodeURIComponent(appId)}/notebooks/create`,
+        { method: 'POST', body: JSON.stringify(input) },
+      );
+    } catch (e) {
+      return { ok: false, error: e instanceof Error ? e.message : String(e) };
+    }
+  },
+
+  async previewAppNotebook(appId: string, path: string): Promise<AppNotebookPreview | null> {
+    try {
+      return await request<AppNotebookPreview>(
+        `/api/apps/${encodeURIComponent(appId)}/notebooks/preview?path=${encodeURIComponent(path)}`,
+      );
+    } catch {
+      return null;
+    }
+  },
+
+  async runAppNotebook(appId: string, path: string): Promise<{ ok: true; preview: AppNotebookPreview } | { ok: false; error: string }> {
+    try {
+      return await request(
+        `/api/apps/${encodeURIComponent(appId)}/notebooks/run`,
+        { method: 'POST', body: JSON.stringify({ path }) },
+      );
+    } catch (e) {
+      return { ok: false, error: e instanceof Error ? e.message : String(e) };
+    }
+  },
+
+  async listAppConversations(appId: string): Promise<AppConversation[]> {
+    try {
+      const { conversations } = await request<{ conversations: AppConversation[] }>(
+        `/api/apps/${encodeURIComponent(appId)}/conversations`,
+      );
+      return conversations;
+    } catch {
+      return [];
+    }
+  },
+
+  async createAppConversation(appId: string, input: {
+    title?: string;
+    dashboardId?: string;
+    notebookPath?: string;
+    messages?: AppConversationMessage[];
+  }): Promise<{ ok: true; conversation: AppConversation } | { ok: false; error: string }> {
+    try {
+      return await request(
+        `/api/apps/${encodeURIComponent(appId)}/conversations`,
+        { method: 'POST', body: JSON.stringify(input) },
+      );
+    } catch (e) {
+      return { ok: false, error: e instanceof Error ? e.message : String(e) };
+    }
+  },
+
+  async getAppConversation(appId: string, conversationId: string): Promise<AppConversation | null> {
+    try {
+      const { conversation } = await request<{ conversation: AppConversation }>(
+        `/api/apps/${encodeURIComponent(appId)}/conversations/${encodeURIComponent(conversationId)}`,
+      );
+      return conversation;
+    } catch {
+      return null;
+    }
+  },
+
+  async updateAppConversation(appId: string, conversationId: string, input: {
+    title?: string;
+    dashboardId?: string;
+    notebookPath?: string;
+    messages?: AppConversationMessage[];
+  }): Promise<{ ok: true; conversation: AppConversation } | { ok: false; error: string }> {
+    try {
+      return await request(
+        `/api/apps/${encodeURIComponent(appId)}/conversations/${encodeURIComponent(conversationId)}`,
+        { method: 'PATCH', body: JSON.stringify(input) },
+      );
+    } catch (e) {
+      return { ok: false, error: e instanceof Error ? e.message : String(e) };
+    }
+  },
+
+  async deleteAppConversation(appId: string, conversationId: string): Promise<{ ok: boolean; error?: string }> {
+    try {
+      return await request(
+        `/api/apps/${encodeURIComponent(appId)}/conversations/${encodeURIComponent(conversationId)}`,
+        { method: 'DELETE' },
       );
     } catch (e) {
       return { ok: false, error: e instanceof Error ? e.message : String(e) };

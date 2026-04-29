@@ -13,7 +13,7 @@ interface MarkdownCellEditorProps {
  * Simple inline markdown renderer — no external dependencies.
  * Handles headings, bold, italic, code spans, horizontal rules, and line breaks.
  */
-function renderMarkdown(text: string, t: Theme): React.ReactNode[] {
+export function renderMarkdown(text: string, t: Theme): React.ReactNode[] {
   const lines = text.split('\n');
   const nodes: React.ReactNode[] = [];
   let i = 0;
