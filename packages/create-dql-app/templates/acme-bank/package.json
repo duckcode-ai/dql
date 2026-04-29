@@ -13,6 +13,6 @@
     "test": "dql test"
   },
   "devDependencies": {
-    "@duckcodeailabs/dql-cli": "^1.5.0"
+    "@duckcodeailabs/dql-cli": "^1.5.1"
   }
 }

@@ -6,6 +6,25 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 
 ---
 
+## v1.5.1 - 2026-04-29
+
+### OSS app workspace structure and dbt repo onboarding
+
+This patch publishes the OSS single-user App workspace flow on top of the
+1.5.0 agentic Apps release.
+
+### Changed
+
+- Clarified OSS product language around local Apps, policies, personas, and
+  commercial boundaries.
+- Updated docs for the recommended isolated `./dql` folder inside existing dbt
+  repositories.
+- Added clean dbt-style init/compile/sync readiness coverage and release
+  checklist updates.
+- Bumped starter templates to use `@duckcodeailabs/dql-cli@^1.5.1`.
+
+---
+
 ## v1.5.0 - 2026-04-27
 
 ### Agentic analytics evidence, app builder, and local-first AI setup
