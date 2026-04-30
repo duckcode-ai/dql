@@ -591,6 +591,35 @@ export interface BlockStudioCatalog {
   recentlyUsed: string[];
 }
 
+export interface DbtArtifactStatus {
+  path: string;
+  exists: boolean;
+  count?: number;
+  generatedAt?: string | null;
+}
+
+export interface BlockStudioDbtStatus {
+  configured: boolean;
+  provider: string | null;
+  projectPath: string | null;
+  projectName?: string | null;
+  artifacts: {
+    manifest: DbtArtifactStatus;
+    catalog: DbtArtifactStatus;
+    semanticManifest: DbtArtifactStatus;
+    runResults: DbtArtifactStatus;
+  };
+  counts: {
+    models: number;
+    sources: number;
+    metrics: number;
+    semanticModels: number;
+    savedQueries: number;
+  };
+  lastSyncTime?: string | null;
+  setupHint: string;
+}
+
 export interface BlockStudioOpenPayload {
   path: string;
   source: string;
@@ -620,6 +649,7 @@ export interface NotebookState {
   queryLog: QueryLogEntry[];
   newNotebookModalOpen: boolean;
   newBlockModalOpen: boolean;
+  newBlockModalDefaultType: 'custom' | 'semantic';
   autoSave: boolean;
   executionCounter: number;
   savingFile: boolean;
@@ -636,6 +666,8 @@ export interface NotebookState {
   blockStudioMetadata: BlockStudioMetadata | null;
   blockStudioCatalog: BlockStudioCatalog | null;
   blockStudioCatalogLoading: boolean;
+  blockStudioImportOpen: boolean;
+  blockStudioDbtStatus: BlockStudioDbtStatus | null;
   inspectorOpen: boolean;
   inspectorContext: InspectorContext | null;
   // Apps surface (Phase 1)
@@ -674,7 +706,7 @@ export type NotebookAction =
   | { type: 'APPEND_QUERY_LOG'; entry: QueryLogEntry }
   | { type: 'OPEN_NEW_NOTEBOOK_MODAL' }
   | { type: 'CLOSE_NEW_NOTEBOOK_MODAL' }
-  | { type: 'OPEN_NEW_BLOCK_MODAL' }
+  | { type: 'OPEN_NEW_BLOCK_MODAL'; blockType?: 'custom' | 'semantic' }
   | { type: 'CLOSE_NEW_BLOCK_MODAL' }
   | { type: 'SET_AUTO_SAVE'; enabled: boolean }
   | { type: 'SET_NOTEBOOK_DIRTY'; dirty: boolean }
@@ -701,6 +733,9 @@ export type NotebookAction =
   | { type: 'SET_BLOCK_STUDIO_METADATA'; metadata: BlockStudioMetadata }
   | { type: 'SET_BLOCK_STUDIO_CATALOG'; catalog: BlockStudioCatalog | null }
   | { type: 'SET_BLOCK_STUDIO_CATALOG_LOADING'; loading: boolean }
+  | { type: 'OPEN_BLOCK_IMPORT' }
+  | { type: 'CLOSE_BLOCK_IMPORT' }
+  | { type: 'SET_BLOCK_STUDIO_DBT_STATUS'; status: BlockStudioDbtStatus | null }
   | { type: 'TOGGLE_INSPECTOR' }
   | { type: 'SET_INSPECTOR'; open: boolean; context?: InspectorContext | null }
   | { type: 'SET_INSPECTOR_CONTEXT'; context: InspectorContext | null }

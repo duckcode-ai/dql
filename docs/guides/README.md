@@ -7,11 +7,12 @@ end. If a guide doesn't work verbatim on a clean machine, it's a bug.
 
 - [Connect a warehouse](connect-warehouse.md) — Postgres, DuckDB, Snowflake, BigQuery, Redshift, and more
 - [Import a dbt project](import-dbt.md) — bring your `manifest.json`
+- [Block Studio dbt-first workflow](block-studio.md) — model/metric to trusted block
 - [Jaffle Shop walkthrough](jaffle-shop.md) — the end-to-end reference tour
 
 ## Author & ship
 
-- [Author a certified block](authoring-blocks.md) — governance form, lint, promote
+- [Author a certified block](authoring-blocks.md) — SQL and semantic block certification
 - [Build a dashboard](dashboards.md) — compile notebooks to static HTML
 - [Version & diff notebooks](versioning.md) — canonical `.dql`, `dql diff`, in-app git panel
 

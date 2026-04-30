@@ -114,6 +114,10 @@ export interface ProjectConfig {
   defaultConnection?: ConnectionConfig;
   dataDir?: string;
   semanticLayer?: SemanticLayerProviderConfig;
+  dbt?: {
+    projectDir?: string;
+    manifestPath?: string;
+  };
   preview?: {
     port?: number;
     theme?: string;
@@ -1245,6 +1249,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           tags,
           metricRefs,
           template,
+          blockType,
         } = body as {
           name: string;
           domain?: string;
@@ -1253,6 +1258,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           tags?: string[];
           metricRefs?: string[];
           template?: string;
+          blockType?: 'custom' | 'semantic';
         };
         if (!name || typeof name !== 'string') {
           res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
@@ -1267,6 +1273,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           tags,
           metricRefs,
           template,
+          blockType,
         });
         res.writeHead(201, { 'Content-Type': 'application/json; charset=utf-8' });
         res.end(serializeJSON(created));
@@ -1888,6 +1895,18 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           favorites: userPrefs.favorites,
           recentlyUsed: userPrefs.recentlyUsed,
         }));
+      } catch (error) {
+        res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({ error: error instanceof Error ? error.message : String(error) }));
+      }
+      return;
+    }
+
+    if (req.method === 'GET' && path === '/api/block-studio/dbt-status') {
+      try {
+        const status = buildDbtStatus(projectRoot, projectConfig, semanticLastSyncTime);
+        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON(status));
       } catch (error) {
         res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' });
         res.end(serializeJSON({ error: error instanceof Error ? error.message : String(error) }));
@@ -5087,6 +5106,7 @@ export function createBlockArtifacts(
     tags?: string[];
     metricRefs?: string[];
     template?: string;
+    blockType?: 'custom' | 'semantic';
     llmContext?: string;
     examples?: Array<{ question: string; sql?: string }>;
     invariants?: string[];
@@ -5110,17 +5130,25 @@ export function createBlockArtifacts(
     ? listBlockTemplates().find((template) => template.id === options.template)?.content
     : undefined;
   const relativePath = safeDomain ? `blocks/${safeDomain}/${slug}.dql` : `blocks/${slug}.dql`;
-  const fileContent = canonicalizeSafe(normalizeBlockStudioContent({
-    name: options.name,
-    domain: safeDomain || 'uncategorized',
-    owner: options.owner,
-    description: options.description,
-    tags: options.tags,
-    llmContext: options.llmContext,
-    examples: options.examples,
-    invariants: options.invariants,
-    content: options.content?.trim() || templateContent,
-  }));
+  const fileContent = canonicalizeSafe(options.blockType === 'semantic' && !options.content?.trim() && !templateContent
+    ? buildBlankSemanticBlockContent({
+        name: options.name,
+        domain: safeDomain || 'uncategorized',
+        owner: options.owner,
+        description: options.description,
+        tags: options.tags,
+      })
+    : normalizeBlockStudioContent({
+        name: options.name,
+        domain: safeDomain || 'uncategorized',
+        owner: options.owner,
+        description: options.description,
+        tags: options.tags,
+        llmContext: options.llmContext,
+        examples: options.examples,
+        invariants: options.invariants,
+        content: options.content?.trim() || templateContent,
+      }));
 
   writeFileSync(blockPath, fileContent, 'utf-8');
   const companionPath = writeBlockCompanionFile(projectRoot, {
@@ -5505,6 +5533,32 @@ function buildBlankBlockContent(options: {
   return lines.join('\n') + '\n';
 }
 
+function buildBlankSemanticBlockContent(options: {
+  name: string;
+  domain: string;
+  owner?: string;
+  description?: string;
+  tags?: string[];
+}): string {
+  const lines = [
+    `block "${escapeDqlString(options.name)}" {`,
+    `    domain = "${escapeDqlString(options.domain)}"`,
+    '    type = "semantic"',
+    '    status = "draft"',
+    `    description = "${escapeDqlString(options.description?.trim() || options.name)}"`,
+    `    owner = "${escapeDqlString(options.owner?.trim() ?? '')}"`,
+    `    tags = [${(options.tags ?? []).map((tag) => `"${escapeDqlString(tag)}"`).join(', ')}]`,
+    '    metric = ""',
+    '    dimensions = []',
+    '',
+    '    visualization {',
+    '        chart = "table"',
+    '    }',
+    '}',
+  ];
+  return lines.join('\n') + '\n';
+}
+
 function parseYamlScalar(value: string): string {
   const trimmed = value.trim();
   if (!trimmed) return '';
@@ -5636,6 +5690,104 @@ function buildProjectLineageGraphUncached(projectRoot: string, semanticLayer: Se
 function resolveDbtManifestPath(projectRoot: string): string | undefined {
   const candidate = join(projectRoot, 'target', 'manifest.json');
   return existsSync(candidate) ? candidate : undefined;
+}
+
+export function buildDbtStatus(projectRoot: string, projectConfig: ProjectConfig, lastSyncTime: string | null) {
+  const configuredDbtDir = projectConfig.dbt?.projectDir
+    ? resolve(projectRoot, projectConfig.dbt.projectDir)
+    : undefined;
+  const semanticDbtDir = projectConfig.semanticLayer?.provider === 'dbt' && projectConfig.semanticLayer.projectPath
+    ? resolve(projectRoot, projectConfig.semanticLayer.projectPath)
+    : undefined;
+  const candidateDirs = [
+    configuredDbtDir,
+    semanticDbtDir,
+    projectRoot,
+    resolve(projectRoot, '..'),
+    resolve(projectRoot, '../dbt'),
+    resolve(projectRoot, '../../dbt'),
+  ].filter((value): value is string => Boolean(value));
+  const dbtProjectPath = candidateDirs.find((dir, index, list) => list.indexOf(dir) === index && existsSync(join(dir, 'dbt_project.yml'))) ?? configuredDbtDir ?? semanticDbtDir ?? projectRoot;
+  const configuredManifest = projectConfig.dbt?.manifestPath ?? 'target/manifest.json';
+  const manifestPath = resolve(dbtProjectPath, configuredManifest);
+  const catalogPath = resolve(dbtProjectPath, 'target/catalog.json');
+  const semanticManifestPath = resolve(dbtProjectPath, 'target/semantic_manifest.json');
+  const runResultsPath = resolve(dbtProjectPath, 'target/run_results.json');
+
+  const manifest = readJsonFile(manifestPath);
+  const semanticManifest = readJsonFile(semanticManifestPath);
+  const projectName = typeof manifest?.metadata?.project_name === 'string'
+    ? manifest.metadata.project_name
+    : null;
+  const nodes = manifest && typeof manifest === 'object' && manifest.nodes && typeof manifest.nodes === 'object'
+    ? Object.values(manifest.nodes as Record<string, any>)
+    : [];
+  const modelCount = nodes.filter((node: any) => node?.resource_type === 'model').length;
+  const sourceCount = manifest?.sources && typeof manifest.sources === 'object'
+    ? Object.keys(manifest.sources).length
+    : 0;
+  const manifestMetricCount = manifest?.metrics && typeof manifest.metrics === 'object'
+    ? Object.keys(manifest.metrics).length
+    : 0;
+  const semanticMetricCount = Array.isArray(semanticManifest?.metrics)
+    ? semanticManifest.metrics.length
+    : manifestMetricCount;
+  const semanticModelCount = Array.isArray(semanticManifest?.semantic_models)
+    ? semanticManifest.semantic_models.length
+    : 0;
+  const savedQueryCount = Array.isArray(semanticManifest?.saved_queries)
+    ? semanticManifest.saved_queries.length
+    : 0;
+  const configured = existsSync(join(dbtProjectPath, 'dbt_project.yml')) || Boolean(configuredDbtDir || semanticDbtDir);
+  const manifestExists = existsSync(manifestPath);
+  const semanticExists = existsSync(semanticManifestPath);
+  const setupHint = !configured
+    ? 'No dbt project detected. Start without dbt or run DQL from a repo with dbt_project.yml.'
+    : !manifestExists
+      ? 'Run `dbt parse`, `dbt compile`, or `dbt build`, then run `dql sync dbt`.'
+      : !semanticExists
+        ? 'dbt manifest is ready. Run `dbt parse` or `dbt build` if you use dbt Semantic Layer metrics.'
+        : 'dbt artifacts are ready. Build SQL blocks from models or semantic blocks from metrics.';
+
+  return {
+    configured,
+    provider: projectConfig.semanticLayer?.provider ?? null,
+    projectPath: dbtProjectPath,
+    projectName,
+    artifacts: {
+      manifest: describeArtifact(manifestPath, modelCount + sourceCount, manifest?.metadata?.generated_at),
+      catalog: describeArtifact(catalogPath),
+      semanticManifest: describeArtifact(semanticManifestPath, semanticMetricCount + semanticModelCount + savedQueryCount, semanticManifest?.metadata?.generated_at),
+      runResults: describeArtifact(runResultsPath),
+    },
+    counts: {
+      models: modelCount,
+      sources: sourceCount,
+      metrics: semanticMetricCount,
+      semanticModels: semanticModelCount,
+      savedQueries: savedQueryCount,
+    },
+    lastSyncTime,
+    setupHint,
+  };
+}
+
+function describeArtifact(path: string, count?: number, generatedAt?: string | null) {
+  return {
+    path,
+    exists: existsSync(path),
+    count,
+    generatedAt: generatedAt ?? null,
+  };
+}
+
+function readJsonFile(path: string): any | null {
+  if (!existsSync(path)) return null;
+  try {
+    return JSON.parse(readFileSync(path, 'utf-8'));
+  } catch {
+    return null;
+  }
 }
 
 function resolveLineageNode(graph: LineageGraph, rawNodeId: string) {

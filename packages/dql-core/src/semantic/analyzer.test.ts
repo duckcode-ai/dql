@@ -406,6 +406,24 @@ describe('SemanticAnalyzer', () => {
     expect(warnings.some((w) => w.message.includes("Unknown decorator '@rls'"))).toBe(false);
   });
 
+  it('accepts @rls decorator on block declarations', () => {
+    const source = `@rls("region", "{user.region}")
+    @rls("branch_id", "{user.branch}")
+    block "Daily Volume" {
+      domain = "cards"
+      type = "custom"
+      query = """SELECT region, branch_id, COUNT(*) AS txn_count FROM transactions GROUP BY 1, 2"""
+      visualization {
+        chart = "table"
+      }
+    }`;
+
+    const ast = parse(source);
+    const diagnostics = analyze(ast);
+    const errors = diagnostics.filter((d) => d.severity === 'error');
+    expect(errors).toHaveLength(0);
+  });
+
   it('reports error when @rls has fewer than 2 arguments', () => {
     const source = `dashboard "Test" {
       @rls("org_id")

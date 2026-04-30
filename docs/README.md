@@ -16,6 +16,7 @@ Task-oriented walkthroughs.
 - [Jaffle Shop end-to-end](./guides/jaffle-shop.md)
 - [Connect your warehouse](./guides/connect-warehouse.md)
 - [Import a dbt project](./guides/import-dbt.md)
+- [Block Studio dbt-first workflow](./guides/block-studio.md)
 - [Author a certified block](./guides/authoring-blocks.md)
 - [Build a dashboard](./guides/dashboards.md)
 - [Versioning & git workflow](./guides/versioning.md)

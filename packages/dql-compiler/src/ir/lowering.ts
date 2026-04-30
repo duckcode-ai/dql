@@ -977,6 +977,9 @@ function inferParamType(expr: ExpressionNode): ParamIR['paramType'] {
 
 function normalizeChartTypeAlias(chartType: string): string {
   switch (chartType) {
+    case 'single_value':
+    case 'single-value':
+      return 'kpi';
     case 'grouped-bar':
       return 'grouped_bar';
     case 'stacked-bar':

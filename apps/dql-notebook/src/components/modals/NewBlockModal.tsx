@@ -28,6 +28,7 @@ export function NewBlockModal({ onFileOpened }: NewBlockModalProps) {
   const t = themes[state.themeMode];
 
   const [name, setName] = useState('');
+  const [blockType, setBlockType] = useState<'custom' | 'semantic'>(state.newBlockModalDefaultType);
   const [error, setError] = useState<string | null>(null);
   const [creating, setCreating] = useState(false);
   const nameRef = useRef<HTMLInputElement>(null);
@@ -35,6 +36,10 @@ export function NewBlockModal({ onFileOpened }: NewBlockModalProps) {
   useEffect(() => {
     nameRef.current?.focus();
   }, []);
+
+  useEffect(() => {
+    setBlockType(state.newBlockModalDefaultType);
+  }, [state.newBlockModalDefaultType]);
 
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
@@ -57,7 +62,7 @@ export function NewBlockModal({ onFileOpened }: NewBlockModalProps) {
     const slug = slugify(name);
 
     try {
-      const result = await api.createBlock(name.trim());
+      const result = await api.createBlock(name.trim(), { blockType });
       const file: NotebookFile = {
         name: `${slug}.dql`,
         path: result.path,
@@ -149,6 +154,51 @@ export function NewBlockModal({ onFileOpened }: NewBlockModalProps) {
 
         {/* Body */}
         <div style={{ padding: '20px 24px 24px', display: 'flex', flexDirection: 'column', gap: 16 }}>
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
+            <button
+              type="button"
+              onClick={() => setBlockType('custom')}
+              style={{
+                background: blockType === 'custom' ? `${t.accent}18` : t.btnBg,
+                border: `1px solid ${blockType === 'custom' ? t.accent : t.btnBorder}`,
+                borderRadius: 8,
+                color: blockType === 'custom' ? t.accent : t.textSecondary,
+                cursor: 'pointer',
+                fontSize: 12,
+                fontWeight: 700,
+                fontFamily: t.font,
+                padding: '10px 12px',
+                textAlign: 'left',
+              }}
+            >
+              SQL Block
+              <span style={{ display: 'block', marginTop: 3, color: t.textMuted, fontWeight: 400, fontSize: 11 }}>
+                Build from dbt models, tables, and SELECT queries.
+              </span>
+            </button>
+            <button
+              type="button"
+              onClick={() => setBlockType('semantic')}
+              style={{
+                background: blockType === 'semantic' ? `${t.accent}18` : t.btnBg,
+                border: `1px solid ${blockType === 'semantic' ? t.accent : t.btnBorder}`,
+                borderRadius: 8,
+                color: blockType === 'semantic' ? t.accent : t.textSecondary,
+                cursor: 'pointer',
+                fontSize: 12,
+                fontWeight: 700,
+                fontFamily: t.font,
+                padding: '10px 12px',
+                textAlign: 'left',
+              }}
+            >
+              Semantic Block
+              <span style={{ display: 'block', marginTop: 3, color: t.textMuted, fontWeight: 400, fontSize: 11 }}>
+                Build from dbt/DQL metrics and dimensions.
+              </span>
+            </button>
+          </div>
+
           <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
             <label
               style={{
@@ -206,8 +256,9 @@ export function NewBlockModal({ onFileOpened }: NewBlockModalProps) {
               borderRadius: 6,
             }}
           >
-            Blocks are reusable SQL queries stored in the <code style={{ fontFamily: t.fontMono, fontSize: 11 }}>blocks/</code> folder.
-            They can be referenced from notebooks and other blocks.
+            {blockType === 'semantic'
+              ? 'Semantic blocks use governed metrics, dimensions, and chart intent. They do not start with raw SQL.'
+              : 'SQL blocks are reusable SELECT queries stored in the blocks/ folder. Use them for dbt models, tables, and imported SQL.'}
           </div>
         </div>
 

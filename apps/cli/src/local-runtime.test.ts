@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
+  buildDbtStatus,
   createBlockArtifacts,
   createSemanticBuilderBlock,
   formatLocalQueryRuntimeError,
@@ -10,7 +11,7 @@ import {
   validateBlockStudioSource,
 } from './local-runtime.js';
 import { afterEach } from 'vitest';
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { SemanticLayer } from '@duckcodeailabs/dql-core';
@@ -147,6 +148,71 @@ describe('semantic block save artifacts', () => {
     expect(companion).toContain('semanticDimensions:');
     expect(companion).toContain('  - sales_channel');
     expect(companion).toContain('  - order_date');
+  });
+
+  it('writes a blank semantic block when created from the Semantic Block path', () => {
+    const projectRoot = mkdtempSync(join(tmpdir(), 'dql-blank-semantic-block-'));
+    tempDirs.push(projectRoot);
+    writeFileSync(join(projectRoot, 'dql.config.json'), '{}\n');
+
+    const created = createBlockArtifacts(projectRoot, {
+      name: 'Approval Rate',
+      domain: 'cards',
+      blockType: 'semantic',
+      owner: 'cards-analytics',
+      description: 'Semantic metric starter',
+      tags: ['cards'],
+    });
+
+    expect(created.path).toBe('blocks/cards/approval-rate.dql');
+    expect(created.content).toContain('type = "semantic"');
+    expect(created.content).toContain('metric = ""');
+    expect(created.content).toContain('dimensions = []');
+    expect(created.content).not.toContain('query = """');
+  });
+});
+
+describe('buildDbtStatus', () => {
+  it('reports configured dbt artifacts and counts for the Block Studio start page', () => {
+    const projectRoot = mkdtempSync(join(tmpdir(), 'dql-dbt-status-'));
+    tempDirs.push(projectRoot);
+    const dbtRoot = join(projectRoot, 'dbt');
+    const targetDir = join(dbtRoot, 'target');
+    mkdirSync(targetDir, { recursive: true });
+    writeFileSync(join(dbtRoot, 'dbt_project.yml'), 'name: banking\nversion: 1.0\n', 'utf-8');
+    writeFileSync(join(targetDir, 'manifest.json'), JSON.stringify({
+      metadata: { project_name: 'banking', generated_at: '2026-04-30T12:00:00Z' },
+      nodes: {
+        'model.banking.fct_cards': { resource_type: 'model' },
+        'test.banking.not_null': { resource_type: 'test' },
+      },
+      sources: {
+        'source.banking.raw.cards': {},
+      },
+    }), 'utf-8');
+    writeFileSync(join(targetDir, 'semantic_manifest.json'), JSON.stringify({
+      metadata: { generated_at: '2026-04-30T12:01:00Z' },
+      metrics: [{ name: 'approval_rate' }],
+      semantic_models: [{ name: 'cards' }],
+      saved_queries: [{ name: 'daily_cards' }],
+    }), 'utf-8');
+
+    const status = buildDbtStatus(projectRoot, {
+      semanticLayer: { provider: 'dbt', projectPath: './dbt' },
+      dbt: { projectDir: './dbt', manifestPath: 'target/manifest.json' },
+    }, '2026-04-30T12:02:00Z');
+
+    expect(status.configured).toBe(true);
+    expect(status.projectName).toBe('banking');
+    expect(status.artifacts.manifest.exists).toBe(true);
+    expect(status.artifacts.semanticManifest.exists).toBe(true);
+    expect(status.counts.models).toBe(1);
+    expect(status.counts.sources).toBe(1);
+    expect(status.counts.metrics).toBe(1);
+    expect(status.counts.semanticModels).toBe(1);
+    expect(status.counts.savedQueries).toBe(1);
+    expect(status.lastSyncTime).toBe('2026-04-30T12:02:00Z');
+    expect(status.setupHint).toContain('dbt artifacts are ready');
   });
 });
 

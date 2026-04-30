@@ -147,8 +147,26 @@ SQLite + FTS knowledge graph used by governed agent answers.
 
 - Notebook Schema panel shows dbt models and sources.
 - Notebook Semantic panel shows dbt semantic models, metrics, measures, and dimensions.
+- Block Studio start page shows dbt artifact status and the model/metric block
+  creation paths.
 - `dql lineage` prints dbt source/model nodes connected to DQL blocks and Apps.
 - Agent answers cite certified blocks first, then semantic/dbt metadata when no certified asset exists.
+
+## 6. Build blocks from dbt
+
+Open **Blocks** in the notebook UI.
+
+- Use **Create SQL Block from dbt Model** when you need explicit SQL against a
+  dbt-built table/view or warehouse table.
+- Use **Create Semantic Block from dbt Metric** when the business logic already
+  lives in `target/semantic_manifest.json`.
+- Use **Import SQL** only for one-time migration of existing queries. Review and
+  save the generated draft blocks before adding them to Apps.
+
+SQL blocks and semantic blocks are intentionally separate. Selecting a semantic
+metric while editing a SQL block prompts you to create a Semantic Block or
+explicitly insert an advanced semantic reference; DQL does not silently mix
+semantic metrics into raw SQL.
 
 ## What lineage tracks
 
@@ -158,9 +176,10 @@ artifacts:
 ```text
 dbt source
   -> dbt model
+  -> semantic metric
   -> DQL block
   -> chart
-  -> dashboard tab
+  -> dashboard page
   -> App
 ```
 

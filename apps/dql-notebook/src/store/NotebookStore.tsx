@@ -81,6 +81,7 @@ const initialState: NotebookState = {
   queryLog: [],
   newNotebookModalOpen: false,
   newBlockModalOpen: false,
+  newBlockModalDefaultType: 'custom',
   autoSave: false,
   executionCounter: 0,
   savingFile: false,
@@ -97,6 +98,8 @@ const initialState: NotebookState = {
   blockStudioMetadata: null,
   blockStudioCatalog: null,
   blockStudioCatalogLoading: false,
+  blockStudioImportOpen: false,
+  blockStudioDbtStatus: null,
   inspectorOpen: false,
   inspectorContext: null,
   apps: [],
@@ -114,6 +117,17 @@ const initialState: NotebookState = {
 function notebookReducer(state: NotebookState, action: NotebookAction): NotebookState {
   switch (action.type) {
     case 'SET_MAIN_VIEW':
+      if (action.view === 'imports') {
+        return {
+          ...state,
+          mainView: 'block_studio',
+          sidebarPanel: 'block_library',
+          sidebarOpen: true,
+          blockStudioImportOpen: true,
+          lineageFullscreen: false,
+          lineageFocusNodeId: null,
+        };
+      }
       return { ...state, mainView: action.view, lineageFullscreen: false, lineageFocusNodeId: null };
 
     case 'SET_THEME': {
@@ -167,12 +181,12 @@ function notebookReducer(state: NotebookState, action: NotebookAction): Notebook
                 ? 'git'
                 : action.panel === 'apps'
                   ? 'apps'
-                  : action.panel === 'settings'
+                    : action.panel === 'settings'
                     ? 'settings'
                     : action.panel === 'files'
                       ? 'notebook'
-                      : action.panel === 'block_library' && state.mainView === 'imports'
-                        ? 'notebook'
+                      : action.panel === 'block_library'
+                        ? 'block_studio'
                         : state.activeFile?.type === 'block'
                           ? 'block_studio'
                           : 'notebook',
@@ -222,6 +236,7 @@ function notebookReducer(state: NotebookState, action: NotebookAction): Notebook
         blockStudioPreview: null,
         blockStudioValidation: action.payload.validation,
         blockStudioMetadata: action.payload.metadata,
+        blockStudioImportOpen: false,
         lineageFullscreen: false,
         lineageFocusNodeId: action.payload.metadata?.name ? `block:${action.payload.metadata.name}` : null,
       };
@@ -328,7 +343,7 @@ function notebookReducer(state: NotebookState, action: NotebookAction): Notebook
       return { ...state, newNotebookModalOpen: false };
 
     case 'OPEN_NEW_BLOCK_MODAL':
-      return { ...state, newBlockModalOpen: true };
+      return { ...state, newBlockModalOpen: true, newBlockModalDefaultType: action.blockType ?? 'custom' };
 
     case 'CLOSE_NEW_BLOCK_MODAL':
       return { ...state, newBlockModalOpen: false };
@@ -439,6 +454,23 @@ function notebookReducer(state: NotebookState, action: NotebookAction): Notebook
 
     case 'SET_BLOCK_STUDIO_CATALOG_LOADING':
       return { ...state, blockStudioCatalogLoading: action.loading };
+
+    case 'OPEN_BLOCK_IMPORT':
+      return {
+        ...state,
+        mainView: 'block_studio',
+        sidebarPanel: 'block_library',
+        sidebarOpen: true,
+        blockStudioImportOpen: true,
+        lineageFullscreen: false,
+        lineageFocusNodeId: null,
+      };
+
+    case 'CLOSE_BLOCK_IMPORT':
+      return { ...state, blockStudioImportOpen: false };
+
+    case 'SET_BLOCK_STUDIO_DBT_STATUS':
+      return { ...state, blockStudioDbtStatus: action.status };
 
     case 'TOGGLE_INSPECTOR':
       return { ...state, inspectorOpen: !state.inspectorOpen };

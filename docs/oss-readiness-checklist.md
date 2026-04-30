@@ -21,8 +21,8 @@ It is written as a practical maintainer checklist, not a marketing document.
 - `[x]` users can create new assets with `dql new block`
 - `[x]` users can create dashboards and workbooks with `dql new dashboard` and `dql new workbook`
 - `[x]` users can create semantic scaffolds with `dql new semantic-block`
-- `[ ]` published npm install path needs final validation in a network-enabled environment
-- `[ ]` `npx @duckcodeailabs/dql-cli --help` needs end-to-end validation after package publication
+- `[x]` published npm install path validated in a network-enabled environment
+- `[x]` `npx @duckcodeailabs/dql-cli --help` validated against the published latest package
 
 ---
 
@@ -34,7 +34,7 @@ It is written as a practical maintainer checklist, not a marketing document.
 - `[x]` `dql serve` exists for local serving of built output
 - `[x]` local CSV/file-first flow is documented
 - `[x]` DuckDB local example exists
-- `[~]` preview/serve browser smoke still needs a clean manual check before public announcement
+- `[x]` preview/serve browser smoke passed against the Acme Bank template from a clean copy
 
 ---
 
@@ -54,7 +54,34 @@ It is written as a practical maintainer checklist, not a marketing document.
 - `[x]` package-level READMEs exist
 - `[x]` `why-dql.md` exists for positioning and differentiation
 - `[x]` authoring-blocks.md shows real `@metric()`/`@dim()` patterns (no `@import`)
-- `[~]` docs were re-verified after full build/test; re-check package install docs after npm publication
+- `[x]` dbt-first Block Studio guide explains SQL blocks, semantic blocks, import, certification, and lineage
+- `[x]` project layout docs reflect Apps as View/Build with dashboard pages, notebooks, AI pins, and drafts
+- `[x]` docs were re-verified after full build/test and package smoke checks
+
+---
+
+## 3a. dbt-First Block Studio
+
+- `[x]` left navigation focuses on Blocks / Block Studio; Import SQL is a top action, not a separate main surface
+- `[x]` compatibility redirect opens Block Studio with the import wizard for older `imports` routes
+- `[x]` empty Block Studio state shows dbt status and four start paths
+- `[x]` SQL Block and Semantic Block creation paths are separate
+- `[x]` SQL blocks do not silently mix selected semantic metrics into raw SQL
+- `[x]` Semantic Block builder updates metric/dimension/time/chart fields without raw SELECT editing
+- `[x]` Import SQL wizard supports paste, file path, folder path, split preview, review, save, and session resume
+- `[x]` Tableau and Power BI helpers remain collapsed planned migration helpers
+- `[~]` AI Assist is review-gated, but richer patch/diff presentation still needs polish
+
+---
+
+## 3b. Apps OSS UX
+
+- `[x]` Apps use View / Build language instead of Stakeholder / Analyst Studio in the main UI
+- `[x]` dashboard tabs are treated as dashboard pages in product docs
+- `[x]` App creation starts from empty, notebook, template, or import
+- `[x]` notebooks can be attached to Apps and previewed read-only
+- `[x]` local AI pins and promoted draft blocks remain private/review-first
+- `[~]` dashboard tile drag/resize works, but one final manual desktop/mobile polish pass is still recommended
 
 ---
 
@@ -89,11 +116,11 @@ It is written as a practical maintainer checklist, not a marketing document.
 - `[x]` public package manifests are present
 - `[x]` `publishing.md` exists for maintainers
 - `[x]` CHANGELOG.md has proper version history
-- `[ ]` full workspace install needs validation in a network-enabled environment
+- `[x]` full workspace install validated in a network-enabled environment
 - `[x]` full `pnpm build` completes successfully
 - `[x]` full `pnpm test` completes successfully
 - `[x]` `pnpm release:dry-run` completes successfully
-- `[ ]` published package smoke test should be recorded after first successful npm release
+- `[x]` published package smoke test recorded against npm latest
 
 ---
 
@@ -120,34 +147,35 @@ It is written as a practical maintainer checklist, not a marketing document.
 
 ## 9. Final Pre-Launch Checks
 
-- `[ ]` run `pnpm install` in a network-enabled environment
+- `[x]` run `pnpm install` in a network-enabled environment
 - `[x]` run `pnpm build`
 - `[x]` run `pnpm test`
 - `[x]` verify `dql init ./dql` from a clean dbt-style environment
-- `[ ]` verify `dql preview` from a clean environment
+- `[x]` verify `dql preview` from a clean environment
 - `[x]` verify `dql new semantic-block` from a clean dbt-style environment
-- `[ ]` verify package publishing flow and `npx` usage
+- `[x]` verify package publishing flow and `npx` usage
 
 ---
 
-## Current Blocker
+## Current Release Decision
 
-The remaining pre-launch checks are package-publication and clean-environment
-smoke tests:
+The OSS release gates pass locally and against the published npm packages. npm
+latest is published and validated at `1.5.3`.
 
-- The repo builds and tests successfully from the current workspace.
-- `dql init ./dql`, `dql new semantic-block`, `dql compile ./dql`, and
-  `dql sync dbt ./dql` pass against a clean dbt-style repo using the built CLI.
-- A clean `pnpm install` should still be validated outside the existing
-  developer checkout.
-- Published package smoke tests should be run before the first public release
-  announcement.
+Validated release gates:
+
+- Clean copy install, build, and test pass.
+- `dql notebook` launches the Acme Bank template; Block Studio, Import SQL, and
+  Apps dashboard/notebook smoke checks pass in the browser.
+- `dql preview` works for KPI, line chart, and RLS-decorated block examples.
+- `pnpm release:dry-run` completes successfully.
+- Published `npx @duckcodeailabs/dql-cli@latest --help` and
+  `npx create-dql-app@latest --help` resolve successfully.
+- Published `npx @duckcodeailabs/dql-cli@latest --version` reports `dql 1.5.3`
+  and `npx create-dql-app@latest --help` reports `create-dql-app 1.5.3`.
 
 ## Recommended Next Actions
 
-1. Run `pnpm install` from a fresh clone.
-2. Verify `dql preview` and `dql notebook ./dql` from a clean repo.
-3. Run `pnpm release:publish` to publish packages to npm.
-4. Validate the published CLI: `npx @duckcodeailabs/dql-cli@latest --help`.
-5. Mark the remaining checklist items complete.
-6. Open the GitHub repo to public.
+1. Commit the OSS release candidate changes.
+2. Push `main` with the `1.5.3` release state.
+3. Tag the release and open the GitHub repo to public.

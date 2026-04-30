@@ -12,7 +12,8 @@ DQL sits between **dbt** (modeling) and your BI tool (reporting). Every analytic
 
 ## Highlights
 
-**Apps + local persona/policy preview** *(v1.4)* — declare members, roles, access policies, and RLS bindings in `dql.app.json`; preview stakeholder views from the persona switcher.
+**OSS Apps for decision work** — package dashboard pages, notebooks, AI pins,
+drafts, and certified blocks into local-first App folders that stay in git.
 
 ![Apps + persona switching](./docs/media/apps.gif)
 
@@ -55,13 +56,13 @@ npm run notebook
 
 The starter installs the DQL CLI locally as a dev dependency, so `npm run
 notebook`, `npm run compile`, and other scripts work without a global `dql`
-binary. Use `--template acme-bank` for the full Apps/persona/agent demo.
+binary. Use `--template acme-bank` for the full Apps, lineage, and agent demo.
 
 Either way, DuckDB runs in-memory. Drop a CSV into `data/`, query it, save a
 block, commit.
 
-Already have a **dbt project**? Keep DQL isolated under `./dql` inside that
-repo:
+Already have a **dbt project**? Keep dbt as the modeling source of truth and
+keep DQL isolated under `./dql` inside that repo:
 
 ```bash
 npm i -D @duckcodeailabs/dql-cli
@@ -74,11 +75,13 @@ npx dql notebook ./dql
 
 The generated `dql/dql.config.json` points back to the parent dbt project, so
 lineage can connect dbt sources/models to DQL blocks, dashboards, and Apps.
+In Block Studio, start from a dbt model for SQL blocks, a dbt semantic metric
+for semantic blocks, or a one-time SQL import wizard for legacy queries.
 
 ## Official demos
 
-- **Acme Bank** — bundled governed workflow demo for Apps, personas, business
-  outcomes, agent answers, and local schedules.
+- **Acme Bank** — bundled OSS workflow demo for certified blocks, Apps,
+  dashboard pages, notebooks, lineage, agent answers, and local schedules.
 - **Jaffle Shop DQL** — dbt/MetricFlow demo for manifest ingestion, semantic
   metrics, lineage, certified blocks, and agent routing:
   [github.com/duckcode-ai/jaffle-shop-dql](https://github.com/duckcode-ai/jaffle-shop-dql).
@@ -94,9 +97,9 @@ Start with [docs/README.md](./docs/README.md).
 
 Quick links:
 
-- **[Tutorials — Acme Bank end-to-end](./docs/tutorials/README.md)** *(new in v1.4: Apps, persona preview, agentic analytics, Slack, fraud-spike walkthrough)*
+- **[Tutorials — Acme Bank end-to-end](./docs/tutorials/README.md)** *(Apps, certified blocks, agentic analytics, Slack, fraud-spike walkthrough)*
 - [Quickstart](./docs/01-quickstart.md) · [Concepts](./docs/02-concepts.md) · [Install](./docs/03-install.md)
-- [Jaffle Shop walkthrough](./docs/guides/jaffle-shop.md) · [Import dbt](./docs/guides/import-dbt.md) · [Author a block](./docs/guides/authoring-blocks.md)
+- [Jaffle Shop walkthrough](./docs/guides/jaffle-shop.md) · [Import dbt](./docs/guides/import-dbt.md) · [Block Studio](./docs/guides/block-studio.md) · [Author a block](./docs/guides/authoring-blocks.md)
 - [CLI reference](./docs/reference/cli.md) · [Language reference](./docs/reference/language.md) · [Connectors](./docs/reference/connectors.md)
 - [Architecture](./docs/architecture/overview.md) · [Contributing](./docs/contribute/repo-layout.md)
 
@@ -104,13 +107,12 @@ Quick links:
 
 - **Notebook** — SQL + DQL cells with live results, charts, and params
 - **Block Studio** — governed, versioned analytics blocks with lint + certify
-- **Apps** *(new in v1.4)* — first-class consumption-layer artifact bundling
-  dashboards, notebooks, AI pins, drafts, local personas, policies, RLS
-  bindings, and schedules for a domain or use case
-- **Local policy + RLS preview** *(new in v1.4)* — declared in
-  `dql.app.json` and executed through the persona registry;
-  `@rls("col", "{user.var}")` resolves at execution time from the active
-  persona
+- **Apps** — first-class consumption-layer artifact bundling dashboard pages,
+  notebooks, AI pins, drafts, local metadata, and schedules for a domain or use
+  case
+- **Local policy + RLS preview** — optional single-user preview path for
+  commercial governance patterns; `@rls("col", "{user.var}")` resolves at
+  execution time from the active local persona when configured
 - **Agentic analytics** *(new in v1.4)* — `@duckcodeailabs/dql-agent` ships a
   local SQLite + FTS5 knowledge graph, Skills, a block-first answer loop, and
   pluggable LLM providers (Claude / OpenAI / Gemini / local Ollama)

@@ -58,6 +58,16 @@
   /* Neutral hover (generic surface hover — lists, menu items, small buttons) */
   --bg-hover: rgba(255, 255, 255, 0.045);
 
+  /* Legacy component aliases. Several OSS surfaces still use these names in
+     inline styles; keep them mapped to the active Luna theme instead of
+     allowing light fallbacks like #fff inside dark themes. */
+  --color-bg: var(--bg-1);
+  --surface: var(--bg-2);
+  --surface-subtle: var(--bg-0);
+  --surface-hover: var(--bg-3);
+  --surface-elevated: var(--bg-3);
+  --border-color: var(--border-subtle);
+
   /* Status semantics (error / warning / success / info) — each theme
      supplies a tuned hue + 0.10-0.14 background + 0.30-0.40 border so
      alerts read clean on every surface. Obsidian keeps saturation low

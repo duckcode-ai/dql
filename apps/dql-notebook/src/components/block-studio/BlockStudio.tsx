@@ -1,6 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { api } from '../../api/client';
-import { insertSemanticReference } from '../../editor/semantic-completions';
 import { useNotebook } from '../../store/NotebookStore';
 import type {
   BlockStudioDiagnostic,
@@ -12,6 +11,7 @@ import type {
   BlockStudioImportSessionSummary,
   BlockStudioImportCandidate,
   BlockStudioOpenPayload,
+  BlockStudioDbtStatus,
 } from '../../store/types';
 import { themes } from '../../themes/notebook-theme';
 import type { Theme } from '../../themes/notebook-theme';
@@ -49,7 +49,7 @@ interface FlatSemanticRow {
 const TREE_ROW_HEIGHT = 31;
 const TREE_OVERSCAN = 10;
 
-export function BlockStudio({ initialMode = 'editor' }: { initialMode?: 'editor' | 'import' }) {
+export function BlockStudio() {
   const { state, dispatch } = useNotebook();
   const t = themes[state.themeMode];
   const [explorerTab, setExplorerTab] = useState<ExplorerTab>('semantic');
@@ -91,10 +91,11 @@ export function BlockStudio({ initialMode = 'editor' }: { initialMode?: 'editor'
   const [bottomPaneHeight, setBottomPaneHeight] = useState(420);
   const [leftPaneCollapsed, setLeftPaneCollapsed] = useState(false);
   const [bottomPaneCollapsed, setBottomPaneCollapsed] = useState(false);
-  const [importOpen, setImportOpen] = useState(initialMode === 'import');
   const [importSession, setImportSession] = useState<BlockStudioImportSession | null>(null);
   const [importSessions, setImportSessions] = useState<BlockStudioImportSessionSummary[]>([]);
   const [importSessionsLoading, setImportSessionsLoading] = useState(false);
+  const [semanticInsertChoice, setSemanticInsertChoice] = useState<SemanticObjectDetail | null>(null);
+  const [databaseInsertWarning, setDatabaseInsertWarning] = useState<string | null>(null);
   const [certifying, setCertifying] = useState(false);
   const [certificationResult, setCertificationResult] = useState<{
     ok?: boolean;
@@ -122,13 +123,21 @@ export function BlockStudio({ initialMode = 'editor' }: { initialMode?: 'editor'
   useEffect(() => {
     dispatch({ type: 'SET_BLOCK_STUDIO_CATALOG_LOADING', loading: true });
     setCatalogError(null);
-    void api.getBlockStudioCatalog()
-      .then((catalog) => {
-        dispatch({ type: 'SET_BLOCK_STUDIO_CATALOG', catalog });
-        setDatabaseTree(catalog.databaseTree);
-      })
-      .catch(() => {
-        setCatalogError('Failed to load schema. Check your connection and try refreshing.');
+    void Promise.allSettled([
+      api.getBlockStudioCatalog(),
+      api.getBlockStudioDbtStatus(),
+    ])
+      .then(([catalogResult, dbtResult]) => {
+        if (catalogResult.status === 'fulfilled') {
+          dispatch({ type: 'SET_BLOCK_STUDIO_CATALOG', catalog: catalogResult.value });
+          setDatabaseTree(catalogResult.value.databaseTree);
+        } else {
+          setCatalogError('Failed to load schema. Check your connection and try refreshing.');
+        }
+        dispatch({
+          type: 'SET_BLOCK_STUDIO_DBT_STATUS',
+          status: dbtResult.status === 'fulfilled' ? dbtResult.value : null,
+        });
       })
       .finally(() => dispatch({ type: 'SET_BLOCK_STUDIO_CATALOG_LOADING', loading: false }));
   }, [dispatch]);
@@ -150,17 +159,13 @@ export function BlockStudio({ initialMode = 'editor' }: { initialMode?: 'editor'
   }, [refreshImportSessions]);
 
   useEffect(() => {
-    setImportOpen(initialMode === 'import');
-  }, [initialMode]);
-
-  useEffect(() => {
     const previous = lastActiveBlockPathRef.current;
     const current = state.activeBlockPath;
     if (current && current !== previous) {
-      setImportOpen(false);
+      dispatch({ type: 'CLOSE_BLOCK_IMPORT' });
     }
     lastActiveBlockPathRef.current = current;
-  }, [state.activeBlockPath]);
+  }, [state.activeBlockPath, dispatch]);
 
   useEffect(() => {
     if (!selectedSemanticId || selectedSemanticId.startsWith('provider:') || selectedSemanticId.startsWith('domain:') || selectedSemanticId.startsWith('group:')) {
@@ -269,6 +274,9 @@ export function BlockStudio({ initialMode = 'editor' }: { initialMode?: 'editor'
     };
   }, [state.blockStudioDraft, state.blockStudioMetadata]);
   const activeBlockName = draftMetadata?.name ?? state.blockStudioMetadata?.name ?? null;
+  const blockType = draftMetadata?.blockType ?? 'custom';
+  const isSemanticBlock = blockType === 'semantic';
+  const hasActiveDraft = Boolean(state.blockStudioDraft.trim() || state.blockStudioMetadata || state.activeBlockPath);
 
   useEffect(() => {
     if (!activeBlockName) return;
@@ -458,20 +466,10 @@ export function BlockStudio({ initialMode = 'editor' }: { initialMode?: 'editor'
     });
     dispatch({ type: 'SET_BLOCK_STUDIO_PREVIEW', preview: candidate.preview });
     setResultTab(candidate.validation?.diagnostics?.length ? 'validate' : 'results');
-    setImportOpen(false);
+    dispatch({ type: 'CLOSE_BLOCK_IMPORT' });
   };
 
   const handleImportCandidateSaved = (candidate: BlockStudioImportCandidate, block: BlockStudioOpenPayload) => {
-    dispatch({
-      type: 'OPEN_BLOCK_STUDIO',
-      file: {
-        name: `${block.metadata.name}.dql`,
-        path: block.path,
-        type: 'block',
-        folder: 'blocks',
-      },
-      payload: block,
-    });
     const existing = state.files.some((file) => file.path === block.path);
     if (!existing) {
       dispatch({
@@ -490,23 +488,26 @@ export function BlockStudio({ initialMode = 'editor' }: { initialMode?: 'editor'
         candidates: importSession.candidates.map((item) => item.id === candidate.id ? candidate : item),
       });
     }
-    setResultTab('save');
     void refreshImportSessions();
   };
 
   const handleSemanticInsert = (item: SemanticObjectDetail) => {
+    setDatabaseInsertWarning(null);
     if (item.kind === 'metric' || item.kind === 'dimension') {
-      const ref = buildSemanticRef(item.kind === 'metric' ? 'metric' : 'dimension', item.name);
-      const blockType = parseBlockFields(state.blockStudioDraft)?.blockType ?? 'custom';
-      if (blockType === 'semantic') {
+      if (isSemanticBlock) {
         handleDraftChange(upsertSemanticSelection(state.blockStudioDraft, {
           kind: item.kind === 'metric' ? 'metric' : 'dimension',
           name: item.name,
         }));
-      } else if (!insertSemanticReference(ref)) {
-        handleDraftChange(appendSemanticRefToQuery(state.blockStudioDraft, ref));
+        setSemanticInsertChoice(null);
+      } else {
+        setSemanticInsertChoice(item);
       }
       dispatch({ type: 'ADD_SEMANTIC_RECENT', name: item.name });
+      return;
+    }
+    if (!isSemanticBlock) {
+      setSemanticInsertChoice(item);
       return;
     }
     if (item.kind === 'segment' && item.sql) {
@@ -519,6 +520,11 @@ export function BlockStudio({ initialMode = 'editor' }: { initialMode?: 'editor'
   };
 
   const handleDatabaseInsert = (snippet: string) => {
+    setSemanticInsertChoice(null);
+    if (isSemanticBlock) {
+      setDatabaseInsertWarning('Database tables and SELECT snippets belong in SQL blocks. Use a SQL Block for raw SELECT work, or keep this Semantic Block on metrics and dimensions.');
+      return;
+    }
     handleDraftChange(appendSnippetToDraft(state.blockStudioDraft, snippet));
   };
 
@@ -761,7 +767,19 @@ export function BlockStudio({ initialMode = 'editor' }: { initialMode?: 'editor'
             </button>
           )}
           <span style={{ fontSize: 10, fontWeight: 600, letterSpacing: '0.06em', color: t.textMuted, textTransform: 'uppercase' as const, fontFamily: t.font }}>
-            {importOpen ? 'SQL Import' : 'Block Editor'}
+            {isSemanticBlock ? 'Semantic Builder' : 'SQL Builder'}
+          </span>
+          <span style={{
+            fontSize: 10,
+            fontWeight: 700,
+            color: isSemanticBlock ? '#2ea043' : t.accent,
+            background: `${isSemanticBlock ? '#2ea043' : t.accent}18`,
+            borderRadius: 999,
+            padding: '3px 8px',
+            textTransform: 'uppercase',
+            letterSpacing: '0.04em',
+          }}>
+            {isSemanticBlock ? 'metric block' : 'sql block'}
           </span>
           {state.blockStudioMetadata?.reviewStatus && (
             <span style={{
@@ -778,7 +796,7 @@ export function BlockStudio({ initialMode = 'editor' }: { initialMode?: 'editor'
             </span>
           )}
           <div style={{ flex: 1 }} />
-          <TemplateButton label={importOpen ? 'Block Editor' : 'SQL Import'} onClick={() => setImportOpen((open) => !open)} />
+          <TemplateButton label="Import SQL" onClick={() => dispatch({ type: 'OPEN_BLOCK_IMPORT' })} />
           <TemplateButton label="Run" onClick={() => void handleRun()} busy={running} />
           <TemplateButton label="Save Draft" onClick={() => void handleSave()} busy={saving} />
           {state.activeBlockPath && (
@@ -794,30 +812,65 @@ export function BlockStudio({ initialMode = 'editor' }: { initialMode?: 'editor'
           )}
         </div>
         <div style={{ flex: 1, overflow: 'hidden' }}>
-          {importOpen ? (
-            <BlockStudioImportWorkspace
-              session={importSession}
-              sessions={importSessions}
-              sessionsLoading={importSessionsLoading}
-              onSessionChange={setImportSession}
-              onRefreshSessions={refreshImportSessions}
-              onClose={() => setImportOpen(false)}
-              onSelectCandidate={handleImportCandidateSelect}
-              onSavedCandidate={handleImportCandidateSaved}
-              defaultDomain={draftMetadata?.domain || state.blockStudioMetadata?.domain || 'imported'}
-              defaultOwner={draftMetadata?.owner || state.blockStudioMetadata?.owner || ''}
+          {!hasActiveDraft ? (
+            <BlockStudioStartPage
+              dbtStatus={state.blockStudioDbtStatus}
+              semanticStats={semanticStats}
+              databaseStats={databaseStats}
+              onCreateSql={() => dispatch({ type: 'OPEN_NEW_BLOCK_MODAL', blockType: 'custom' })}
+              onCreateSemantic={() => dispatch({ type: 'OPEN_NEW_BLOCK_MODAL', blockType: 'semantic' })}
+              onImport={() => dispatch({ type: 'OPEN_BLOCK_IMPORT' })}
+              onAskAi={() => {
+                setResultTab('validate');
+                dispatch({
+                  type: 'SET_BLOCK_STUDIO_VALIDATION',
+                  validation: {
+                    valid: true,
+                    diagnostics: [{ severity: 'info', message: 'AI block generation will use the selected dbt model, semantic metric, or current prompt context when provider settings are configured.' }],
+                    semanticRefs: { metrics: [], dimensions: [], segments: [] },
+                    executableSql: null,
+                  },
+                });
+              }}
+              t={t}
+            />
+          ) : isSemanticBlock ? (
+            <SemanticBlockBuilder
+              source={state.blockStudioDraft}
+              semanticLayer={state.semanticLayer}
+              chartConfig={currentChart}
+              onChange={handleDraftChange}
               t={t}
             />
           ) : (
-            <SQLCellEditor
-              value={state.blockStudioDraft}
-              onChange={handleDraftChange}
-              onRun={() => void handleRun()}
-              themeMode={state.themeMode}
-              autoFocus
-              wrap={false}
-              errorMessage={state.blockStudioValidation?.diagnostics.find((item) => item.severity === 'error')?.message}
-            />
+            <div style={{ height: '100%', display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
+              {(semanticInsertChoice || databaseInsertWarning) && (
+                <BuilderNotice
+                  semanticChoice={semanticInsertChoice}
+                  databaseWarning={databaseInsertWarning}
+                  onDismiss={() => { setSemanticInsertChoice(null); setDatabaseInsertWarning(null); }}
+                  onInsertAdvanced={() => {
+                    if (!semanticInsertChoice) return;
+                    const ref = buildSemanticRef(semanticInsertChoice.kind === 'metric' ? 'metric' : 'dimension', semanticInsertChoice.name);
+                    handleDraftChange(appendSemanticRefToQuery(state.blockStudioDraft, ref));
+                    setSemanticInsertChoice(null);
+                  }}
+                  onCreateSemantic={() => dispatch({ type: 'OPEN_NEW_BLOCK_MODAL', blockType: 'semantic' })}
+                  t={t}
+                />
+              )}
+              <div style={{ flex: 1, minHeight: 0 }}>
+                <SQLCellEditor
+                  value={state.blockStudioDraft}
+                  onChange={handleDraftChange}
+                  onRun={() => void handleRun()}
+                  themeMode={state.themeMode}
+                  autoFocus
+                  wrap={false}
+                  errorMessage={state.blockStudioValidation?.diagnostics.find((item) => item.severity === 'error')?.message}
+                />
+              </div>
+            </div>
           )}
         </div>
       </div>
@@ -990,6 +1043,27 @@ export function BlockStudio({ initialMode = 'editor' }: { initialMode?: 'editor'
           </button>
         </div>
       )}
+
+      {state.blockStudioImportOpen && (
+        <BlockStudioImportOverlay
+          t={t}
+          onClose={() => dispatch({ type: 'CLOSE_BLOCK_IMPORT' })}
+        >
+          <BlockStudioImportWorkspace
+            session={importSession}
+            sessions={importSessions}
+            sessionsLoading={importSessionsLoading}
+            onSessionChange={setImportSession}
+            onRefreshSessions={refreshImportSessions}
+            onClose={() => dispatch({ type: 'CLOSE_BLOCK_IMPORT' })}
+            onSelectCandidate={handleImportCandidateSelect}
+            onSavedCandidate={handleImportCandidateSaved}
+            defaultDomain={draftMetadata?.domain || state.blockStudioMetadata?.domain || 'imported'}
+            defaultOwner={draftMetadata?.owner || state.blockStudioMetadata?.owner || ''}
+            t={t}
+          />
+        </BlockStudioImportOverlay>
+      )}
     </div>
   );
 }
@@ -1019,6 +1093,346 @@ function ExplorerTabButton({ active, onClick, label, busy }: { active: boolean; 
 
 function TemplateButton(props: { label: string; onClick: () => void; busy?: boolean }) {
   return <ExplorerTabButton active={false} {...props} />;
+}
+
+function BlockStudioImportOverlay({
+  children,
+  onClose,
+  t,
+}: {
+  children: React.ReactNode;
+  onClose: () => void;
+  t: Theme;
+}) {
+  return (
+    <div
+      style={{
+        position: 'absolute',
+        inset: 0,
+        zIndex: 40,
+        background: 'rgba(0, 0, 0, 0.28)',
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        padding: 24,
+      }}
+    >
+      <div
+        style={{
+          width: 'min(1180px, calc(100vw - 64px))',
+          height: 'min(760px, calc(100vh - 96px))',
+          background: t.appBg,
+          border: `1px solid ${t.headerBorder}`,
+          borderRadius: 10,
+          boxShadow: '0 24px 80px rgba(0,0,0,0.36)',
+          overflow: 'hidden',
+          position: 'relative',
+        }}
+      >
+        <button
+          onClick={onClose}
+          title="Close import"
+          style={{
+            position: 'absolute',
+            top: 10,
+            right: 12,
+            zIndex: 4,
+            background: t.btnBg,
+            border: `1px solid ${t.btnBorder}`,
+            borderRadius: 6,
+            color: t.textSecondary,
+            cursor: 'pointer',
+            fontSize: 16,
+            lineHeight: 1,
+            width: 30,
+            height: 30,
+          }}
+        >
+          ×
+        </button>
+        {children}
+      </div>
+    </div>
+  );
+}
+
+function BlockStudioStartPage({
+  dbtStatus,
+  semanticStats,
+  databaseStats,
+  onCreateSql,
+  onCreateSemantic,
+  onImport,
+  onAskAi,
+  t,
+}: {
+  dbtStatus: BlockStudioDbtStatus | null;
+  semanticStats: {
+    metrics: number;
+    measures: number;
+    dimensions: number;
+    timeDimensions: number;
+    entities: number;
+    hierarchies: number;
+    savedQueries: number;
+  };
+  databaseStats: { schemas: number; tables: number; columns: number };
+  onCreateSql: () => void;
+  onCreateSemantic: () => void;
+  onImport: () => void;
+  onAskAi: () => void;
+  t: Theme;
+}) {
+  const cards = [
+    {
+      title: 'Create SQL Block from dbt Model',
+      detail: 'Pick dbt models or database tables, then author a SELECT block with validation, tests, and chart intent.',
+      action: onCreateSql,
+      label: 'Create SQL Block',
+    },
+    {
+      title: 'Create Semantic Block from dbt Metric',
+      detail: 'Use governed metrics, dimensions, time grain, filters, and chart intent without raw SELECT editing.',
+      action: onCreateSemantic,
+      label: 'Create Semantic Block',
+    },
+    {
+      title: 'Import SQL',
+      detail: 'One-time SQL migration flow: split, review, run, save drafts, then certify useful blocks.',
+      action: onImport,
+      label: 'Import SQL',
+    },
+    {
+      title: 'Ask AI to Generate Block',
+      detail: 'Generate or fix a block from bounded dbt/model context. Suggestions stay review-gated.',
+      action: onAskAi,
+      label: 'Ask AI',
+    },
+  ];
+  return (
+    <div style={{ height: '100%', overflow: 'auto', padding: 24, display: 'grid', gap: 18, alignContent: 'start', background: t.appBg }}>
+      <div>
+        <div style={{ fontSize: 22, fontWeight: 800, color: t.textPrimary, fontFamily: t.font }}>Build trusted DQL blocks from dbt</div>
+        <div style={{ fontSize: 13, color: t.textMuted, lineHeight: 1.5, marginTop: 6, maxWidth: 900, fontFamily: t.font }}>
+          dbt remains the source of truth for models and semantic metrics. DQL turns those assets into reusable answer blocks, visualizations, notebooks, Apps, and certification labels.
+        </div>
+      </div>
+
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, minmax(0, 1fr))', gap: 12 }}>
+        {cards.map((card) => (
+          <button
+            key={card.title}
+            onClick={card.action}
+            style={{
+              textAlign: 'left',
+              background: t.cellBg,
+              border: `1px solid ${t.headerBorder}`,
+              borderRadius: 8,
+              padding: 14,
+              cursor: 'pointer',
+              color: t.textPrimary,
+              display: 'grid',
+              gap: 9,
+              minHeight: 160,
+              fontFamily: t.font,
+            }}
+          >
+            <span style={{ fontSize: 14, fontWeight: 800 }}>{card.title}</span>
+            <span style={{ fontSize: 12, color: t.textMuted, lineHeight: 1.45 }}>{card.detail}</span>
+            <span style={{ marginTop: 'auto', color: t.accent, fontSize: 12, fontWeight: 800 }}>{card.label}</span>
+          </button>
+        ))}
+      </div>
+
+      <section style={{ display: 'grid', gridTemplateColumns: 'minmax(0, 1.3fr) minmax(300px, 0.7fr)', gap: 12 }}>
+        <PanelBox title="dbt connection" t={t}>
+          <DbtStatusRows status={dbtStatus} t={t} />
+        </PanelBox>
+        <PanelBox title="DQL basics" t={t}>
+          <InfoLine label="SQL Block" value={'type = "custom" + query = """ SELECT ... """'} t={t} />
+          <InfoLine label="Semantic Block" value="metric, dimensions, time_dimension, granularity" t={t} />
+          <InfoLine label="Schema" value={`${databaseStats.tables} database tables available for SQL blocks`} t={t} />
+          <InfoLine label="Metrics" value={`${semanticStats.metrics} metrics and ${semanticStats.dimensions + semanticStats.timeDimensions} dimensions available for semantic blocks`} t={t} />
+          <InfoLine label="Certify" value="Run, validate, test, review lineage, then certify." t={t} />
+        </PanelBox>
+      </section>
+    </div>
+  );
+}
+
+function DbtStatusRows({ status, t }: { status: BlockStudioDbtStatus | null; t: Theme }) {
+  if (!status) {
+    return <div style={{ fontSize: 12, color: t.textMuted, fontFamily: t.font }}>Checking dbt project status…</div>;
+  }
+  const artifactRows = [
+    ['manifest.json', status.artifacts.manifest],
+    ['catalog.json', status.artifacts.catalog],
+    ['semantic_manifest.json', status.artifacts.semanticManifest],
+    ['run_results.json', status.artifacts.runResults],
+  ] as const;
+  return (
+    <div style={{ display: 'grid', gap: 9 }}>
+      <InfoLine label="Project" value={status.projectName || status.projectPath || 'not detected'} t={t} />
+      <InfoLine label="Provider" value={status.provider || 'none'} t={t} />
+      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+        <ImportPill label={`${status.counts.models} models`} tone="info" t={t} />
+        <ImportPill label={`${status.counts.sources} sources`} tone="info" t={t} />
+        <ImportPill label={`${status.counts.metrics} metrics`} tone="info" t={t} />
+        <ImportPill label={`${status.counts.savedQueries} saved queries`} tone="info" t={t} />
+      </div>
+      <div style={{ display: 'grid', gap: 6 }}>
+        {artifactRows.map(([label, artifact]) => (
+          <div key={label} style={{ display: 'grid', gridTemplateColumns: '180px 70px minmax(0, 1fr)', gap: 8, alignItems: 'center', fontSize: 12, fontFamily: t.font }}>
+            <span style={{ color: t.textSecondary }}>{label}</span>
+            <span style={{ color: artifact.exists ? '#2ea043' : '#d29922', fontWeight: 800 }}>{artifact.exists ? 'ready' : 'missing'}</span>
+            <span style={{ color: t.textMuted, fontFamily: t.fontMono, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{artifact.path}</span>
+          </div>
+        ))}
+      </div>
+      <div style={{ fontSize: 12, color: status.artifacts.manifest.exists ? t.textMuted : '#d29922', lineHeight: 1.45, fontFamily: t.font }}>
+        {status.setupHint}
+      </div>
+    </div>
+  );
+}
+
+function SemanticBlockBuilder({
+  source,
+  semanticLayer,
+  chartConfig,
+  onChange,
+  t,
+}: {
+  source: string;
+  semanticLayer: SemanticLayerState;
+  chartConfig: { chart?: string; x?: string; y?: string; color?: string; title?: string };
+  onChange: (next: string) => void;
+  t: Theme;
+}) {
+  const values = parseSemanticBlockValues(source);
+  const allDimensions = [...semanticLayer.dimensions, ...semanticLayer.timeDimensions];
+  const inputStyle = importInputStyle(t);
+  const setMetric = (metric: string) => onChange(setSemanticMetricField(source, metric));
+  const setDimensions = (dimensions: string[]) => onChange(setDqlArrayField(source, 'dimensions', dimensions));
+  const toggleDimension = (dimension: string) => {
+    const next = values.dimensions.includes(dimension)
+      ? values.dimensions.filter((item) => item !== dimension)
+      : [...values.dimensions, dimension];
+    setDimensions(next);
+  };
+  return (
+    <div style={{ height: '100%', overflow: 'auto', padding: 16, display: 'grid', gap: 14, alignContent: 'start', background: t.appBg }}>
+      <div style={{ display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) minmax(280px, 0.6fr)', gap: 12 }}>
+        <PanelBox title="Metric and grain" t={t}>
+          <FieldLabel label="Metric" t={t}>
+            <select value={values.metric} onChange={(event) => setMetric(event.target.value)} style={inputStyle}>
+              <option value="">Select a governed metric…</option>
+              {semanticLayer.metrics.map((metric) => (
+                <option key={metric.name} value={metric.name}>{metric.label || metric.name}</option>
+              ))}
+            </select>
+          </FieldLabel>
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 150px', gap: 8 }}>
+            <FieldLabel label="Time dimension" t={t}>
+              <select value={values.timeDimension} onChange={(event) => onChange(setSemanticScalarField(source, 'time_dimension', event.target.value))} style={inputStyle}>
+                <option value="">None</option>
+                {semanticLayer.timeDimensions.map((dimension) => (
+                  <option key={dimension.name} value={dimension.name}>{dimension.label || dimension.name}</option>
+                ))}
+              </select>
+            </FieldLabel>
+            <FieldLabel label="Grain" t={t}>
+              <select value={values.granularity} onChange={(event) => onChange(setSemanticScalarField(source, 'granularity', event.target.value))} style={inputStyle}>
+                <option value="">None</option>
+                {['day', 'week', 'month', 'quarter', 'year'].map((grain) => <option key={grain} value={grain}>{grain}</option>)}
+              </select>
+            </FieldLabel>
+          </div>
+          {semanticLayer.metrics.length === 0 && (
+            <div style={{ fontSize: 12, color: '#d29922', lineHeight: 1.45 }}>No semantic metrics are loaded. Run `dbt parse` or import a semantic layer, then refresh Block Studio.</div>
+          )}
+        </PanelBox>
+
+        <PanelBox title="Chart intent" t={t}>
+          <FieldLabel label="Chart type" t={t}>
+            <select value={chartConfig.chart ?? 'table'} onChange={(event) => onChange(upsertVisualizationConfig(source, { ...chartConfig, chart: event.target.value }))} style={inputStyle}>
+              <option value="table">Table</option>
+              {CHART_TYPE_OPTIONS.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
+            </select>
+          </FieldLabel>
+          <FieldLabel label="Title" t={t}>
+            <input value={chartConfig.title ?? ''} onChange={(event) => onChange(upsertVisualizationConfig(source, { ...chartConfig, title: event.target.value }))} placeholder="Chart title" style={inputStyle} />
+          </FieldLabel>
+        </PanelBox>
+      </div>
+
+      <PanelBox title="Dimensions" t={t}>
+        {allDimensions.length === 0 ? (
+          <div style={{ fontSize: 12, color: t.textMuted }}>No dimensions are loaded yet.</div>
+        ) : (
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 7 }}>
+            {allDimensions.slice(0, 80).map((dimension) => {
+              const selected = values.dimensions.includes(dimension.name);
+              return (
+                <button
+                  key={dimension.name}
+                  onClick={() => toggleDimension(dimension.name)}
+                  style={{
+                    background: selected ? `${t.accent}18` : t.btnBg,
+                    border: `1px solid ${selected ? t.accent : t.btnBorder}`,
+                    borderRadius: 999,
+                    color: selected ? t.accent : t.textSecondary,
+                    cursor: 'pointer',
+                    fontSize: 11,
+                    fontFamily: t.font,
+                    padding: '5px 9px',
+                  }}
+                >
+                  {dimension.label || dimension.name}
+                </button>
+              );
+            })}
+          </div>
+        )}
+      </PanelBox>
+
+      <PanelBox title="Generated DQL" t={t}>
+        <pre style={{ margin: 0, whiteSpace: 'pre-wrap', color: t.textSecondary, fontSize: 11, lineHeight: 1.45, fontFamily: t.fontMono }}>{source}</pre>
+      </PanelBox>
+    </div>
+  );
+}
+
+function BuilderNotice({
+  semanticChoice,
+  databaseWarning,
+  onDismiss,
+  onInsertAdvanced,
+  onCreateSemantic,
+  t,
+}: {
+  semanticChoice: SemanticObjectDetail | null;
+  databaseWarning: string | null;
+  onDismiss: () => void;
+  onInsertAdvanced: () => void;
+  onCreateSemantic: () => void;
+  t: Theme;
+}) {
+  const message = semanticChoice
+    ? `${semanticChoice.kind === 'metric' ? 'Metric' : 'Dimension'} "${semanticChoice.name}" belongs in a Semantic Block. SQL Blocks can still use advanced @metric/@dim refs when you choose that explicitly.`
+    : databaseWarning ?? '';
+  return (
+    <div style={{ padding: '10px 12px', borderBottom: `1px solid ${t.headerBorder}`, background: `${t.accent}10`, display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+      <span style={{ fontSize: 12, color: t.textSecondary, lineHeight: 1.4, flex: 1, minWidth: 260 }}>{message}</span>
+      {semanticChoice && (
+        <>
+          <button onClick={onCreateSemantic} style={secondaryImportButtonStyle(t)}>Create Semantic Block</button>
+          <button onClick={onInsertAdvanced} style={primaryImportButtonStyle(t)}>Insert advanced ref</button>
+        </>
+      )}
+      <button onClick={onDismiss} style={secondaryImportButtonStyle(t)}>Dismiss</button>
+    </div>
+  );
 }
 
 function SegmentedTab({ active, onClick, label, t }: { active: boolean; onClick: () => void; label: string; t: Theme }) {
@@ -1081,6 +1495,9 @@ function BlockStudioImportWorkspace({
   const [savingAll, setSavingAll] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [pendingDelete, setPendingDelete] = useState<{ kind: 'one'; id: string } | { kind: 'all' } | null>(null);
+  const [historyOpen, setHistoryOpen] = useState(false);
+  const [candidateSearch, setCandidateSearch] = useState('');
+  const [showAllCandidates, setShowAllCandidates] = useState(false);
 
   const selectedCandidate = useMemo(() => {
     if (!session) return null;
@@ -1100,6 +1517,21 @@ function BlockStudioImportWorkspace({
   const readyCount = session?.candidates.filter((candidate) => candidate.validation?.valid !== false && candidate.reviewStatus !== 'rejected').length ?? 0;
   const savedCount = session?.candidates.filter((candidate) => candidate.reviewStatus === 'saved').length ?? 0;
   const warningCount = session?.candidates.reduce((sum, candidate) => sum + ((candidate.warnings ?? candidate.lineage.warnings).length), 0) ?? 0;
+  const candidateMatches = useMemo(() => {
+    const normalized = candidateSearch.trim().toLowerCase();
+    const source = session?.candidates ?? [];
+    if (!normalized) return source;
+    return source.filter((candidate) => [
+      candidate.name,
+      candidate.domain,
+      candidate.sourcePath,
+      candidate.description,
+      ...candidate.lineage.sourceTables,
+    ].some((value) => value.toLowerCase().includes(normalized)));
+  }, [candidateSearch, session]);
+  const visibleCandidates = showAllCandidates || candidateSearch.trim()
+    ? candidateMatches
+    : candidateMatches.slice(0, 10);
 
   const createSession = async () => {
     setLoading(true);
@@ -1263,14 +1695,14 @@ function BlockStudioImportWorkspace({
   return (
     <div style={{ position: 'relative', height: '100%', display: 'grid', gridTemplateColumns: '320px minmax(0, 1fr)', minHeight: 0, background: t.appBg }}>
       <aside style={{ borderRight: `1px solid ${t.headerBorder}`, display: 'flex', flexDirection: 'column', minHeight: 0, background: t.cellBg }}>
-        <div style={{ padding: 12, borderBottom: `1px solid ${t.headerBorder}`, display: 'grid', gap: 10 }}>
+        <div style={{ padding: 16, borderBottom: `1px solid ${t.headerBorder}`, display: 'grid', gap: 10 }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-            <span style={{ fontSize: 12, fontWeight: 800, color: t.textPrimary, fontFamily: t.font }}>Start From SQL</span>
+            <span style={{ fontSize: 14, fontWeight: 800, color: t.textPrimary, fontFamily: t.font }}>Import SQL</span>
             <span style={{ flex: 1 }} />
-            <button onClick={onClose} style={secondaryImportButtonStyle(t)}>Block editor</button>
+            <button onClick={onClose} style={secondaryImportButtonStyle(t)}>Close</button>
           </div>
           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, minmax(0, 1fr))', gap: 4 }}>
-            {(['path', 'paste', 'upload', 'tableau', 'powerbi'] as const).map((value) => (
+            {(['path', 'paste', 'upload'] as const).map((value) => (
               <button
                 key={value}
                 onClick={() => setMode(value)}
@@ -1282,7 +1714,7 @@ function BlockStudioImportWorkspace({
                   background: mode === value ? `${t.accent}14` : t.btnBg,
                 }}
               >
-                {value === 'powerbi' ? 'Power BI planned' : value === 'tableau' ? 'Tableau planned' : value[0].toUpperCase() + value.slice(1)}
+                {value === 'path' ? 'File / folder' : value[0].toUpperCase() + value.slice(1)}
               </button>
             ))}
           </div>
@@ -1302,14 +1734,6 @@ function BlockStudioImportWorkspace({
               <span style={{ fontSize: 11, color: t.textMuted, fontFamily: t.font }}>{uploadSources.length} SQL file(s) ready</span>
             </FieldLabel>
           )}
-          {(mode === 'tableau' || mode === 'powerbi') && (
-            <div style={{ fontSize: 12, color: t.textMuted, lineHeight: 1.45, fontFamily: t.font, border: `1px dashed ${t.headerBorder}`, borderRadius: 8, padding: 10 }}>
-              <strong style={{ display: 'block', color: t.textSecondary, marginBottom: 4 }}>Planned local file import, no connector required</strong>
-              {mode === 'tableau'
-                ? 'Tableau .twb/.twbx import will read uploaded/exported files and extract custom SQL, sheets, dashboards, parameters, and warnings in a future migration helper.'
-                : 'Power BI PBIP/PBIR/TMDL import will read local project folders and preserve unsupported DAX/M as warnings in a future migration helper.'}
-            </div>
-          )}
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
             <FieldLabel label="Domain" t={t}>
               <input value={domain} onChange={(event) => setDomain(event.target.value)} placeholder="imported" style={importInputStyle(t)} />
@@ -1328,16 +1752,24 @@ function BlockStudioImportWorkspace({
           <div style={{ fontSize: 11, color: t.textMuted, fontFamily: t.font, lineHeight: 1.45 }}>
             Flow: choose SQL, review each detected query, then save draft blocks. Split uses semicolon and GO batch separators.
           </div>
+          <details style={{ fontSize: 11, color: t.textMuted, fontFamily: t.font, border: `1px dashed ${t.headerBorder}`, borderRadius: 8, padding: '8px 10px' }}>
+            <summary style={{ cursor: 'pointer', color: t.textSecondary, fontWeight: 700 }}>Tableau / Power BI migration helpers</summary>
+            <div style={{ marginTop: 8, lineHeight: 1.45 }}>
+              Local Tableau `.twb/.twbx` and Power BI PBIP/PBIR/TMDL import are planned. OSS v1 keeps SQL import active first and preserves unsupported BI formulas as future warnings.
+            </div>
+          </details>
         </div>
 
         <div style={{ padding: 12, borderBottom: `1px solid ${t.headerBorder}`, display: 'grid', gap: 8 }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-            <span style={{ fontSize: 11, fontWeight: 800, color: t.textMuted, textTransform: 'uppercase', fontFamily: t.font }}>Import history</span>
+            <button onClick={() => setHistoryOpen((open) => !open)} style={{ ...secondaryImportButtonStyle(t), padding: '5px 8px' }}>
+              {historyOpen ? 'Hide recent imports' : 'Recent imports'}
+            </button>
             <span style={{ flex: 1 }} />
-            <button onClick={() => void onRefreshSessions()} style={secondaryImportButtonStyle(t)}>Refresh</button>
-            {sessions.length > 0 && <button onClick={() => void clearSessions()} style={secondaryImportButtonStyle(t)}>Clear all</button>}
+            {historyOpen && <button onClick={() => void onRefreshSessions()} style={secondaryImportButtonStyle(t)}>Refresh</button>}
+            {historyOpen && sessions.length > 0 && <button onClick={() => void clearSessions()} style={secondaryImportButtonStyle(t)}>Clear all</button>}
           </div>
-          {sessionsLoading ? (
+          {historyOpen && (sessionsLoading ? (
             <div style={{ fontSize: 12, color: t.textMuted }}>Loading sessions...</div>
           ) : sessions.length === 0 ? (
             <div style={{ fontSize: 12, color: t.textMuted }}>No saved import previews yet.</div>
@@ -1389,7 +1821,7 @@ function BlockStudioImportWorkspace({
                 </div>
               ))}
             </div>
-          )}
+          ))}
         </div>
 
         <div style={{ flex: 1, minHeight: 0, overflow: 'auto', padding: 12, display: 'grid', alignContent: 'start', gap: 8 }}>
@@ -1407,7 +1839,13 @@ function BlockStudioImportWorkspace({
                 <button onClick={selectNextUnsaved} style={secondaryImportButtonStyle(t)}>Open next unsaved</button>
                 <button onClick={() => void saveAll()} disabled={savingAll} style={primaryImportButtonStyle(t)}>{savingAll ? 'Saving...' : 'Save all valid'}</button>
               </div>
-              {session.candidates.map((candidate) => {
+              <input
+                value={candidateSearch}
+                onChange={(event) => setCandidateSearch(event.target.value)}
+                placeholder="Search candidates, tables, files..."
+                style={importInputStyle(t)}
+              />
+              {visibleCandidates.map((candidate) => {
                 const selected = candidate.id === selectedCandidate?.id;
                 const warnings = candidate.warnings ?? candidate.lineage.warnings;
                 return (
@@ -1439,6 +1877,11 @@ function BlockStudioImportWorkspace({
                   </button>
                 );
               })}
+              {!showAllCandidates && !candidateSearch.trim() && candidateMatches.length > 10 && (
+                <button onClick={() => setShowAllCandidates(true)} style={secondaryImportButtonStyle(t)}>
+                  Show all {candidateMatches.length} candidates
+                </button>
+              )}
             </>
           )}
         </div>
@@ -2882,6 +3325,53 @@ function appendSnippetToDraft(source: string, snippet: string): string {
     return source.replace(/\n\}\s*$/, `\n\n  query = """\n${snippet}\n  """\n}\n`);
   }
   return `${source.trimEnd()}\n${snippet}\n`;
+}
+
+function parseSemanticBlockValues(source: string): { metric: string; dimensions: string[]; timeDimension: string; granularity: string } {
+  const str = (key: string) => source.match(new RegExp(`\\b${key}\\s*=\\s*"([^"]*)"`, 'i'))?.[1] ?? '';
+  return {
+    metric: str('metric') || parseDqlArrayField(source, 'metrics')[0] || '',
+    dimensions: parseDqlArrayField(source, 'dimensions'),
+    timeDimension: str('time_dimension'),
+    granularity: str('granularity'),
+  };
+}
+
+function parseDqlArrayField(source: string, key: string): string[] {
+  const match = source.match(new RegExp(`\\b${key}\\s*=\\s*\\[([\\s\\S]*?)\\]`, 'i'));
+  if (!match) return [];
+  return (match[1].match(/"([^"]*)"/g) ?? []).map((value) => value.slice(1, -1)).filter(Boolean);
+}
+
+function setSemanticMetricField(source: string, metric: string): string {
+  let next = source.replace(/\n\s*metrics\s*=\s*\[[\s\S]*?\]/i, '');
+  return setSemanticScalarField(next, 'metric', metric);
+}
+
+function setSemanticScalarField(source: string, key: string, value: string): string {
+  const escaped = value.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+  const re = new RegExp(`(\\b${key}\\s*=\\s*)"[^"]*"`, 'i');
+  if (re.test(source)) {
+    return source.replace(re, `$1"${escaped}"`);
+  }
+  return insertSemanticField(source, `  ${key} = "${escaped}"`);
+}
+
+function setDqlArrayField(source: string, key: string, values: string[]): string {
+  const unique = Array.from(new Set(values.filter(Boolean)));
+  const rendered = `${key} = [${unique.map((value) => `"${value.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`).join(', ')}]`;
+  const re = new RegExp(`\\b${key}\\s*=\\s*\\[[\\s\\S]*?\\]`, 'i');
+  if (re.test(source)) {
+    return source.replace(re, rendered);
+  }
+  return insertSemanticField(source, `  ${rendered}`);
+}
+
+function insertSemanticField(source: string, field: string): string {
+  if (/visualization\s*\{/i.test(source)) {
+    return source.replace(/\n\s*visualization\s*\{/i, `\n${field}\n\n  visualization {`);
+  }
+  return source.replace(/\n\}\s*$/, `\n${field}\n}\n`);
 }
 
 function buildSemanticSkeleton(name: string): string {

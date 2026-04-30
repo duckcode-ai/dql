@@ -2,15 +2,16 @@
 
 > ~4 minutes · the mental model behind every feature
 
-DQL has five primitives. Once these click, the rest of the docs read like
+DQL has six primitives. Once these click, the rest of the docs read like
 reference material.
 
 ## 1. Notebook
 
-A `.dql` file containing an ordered list of cells. Cells can be:
+A `.dqlnb` file containing an ordered list of cells. Cells can be:
 
 - **SQL** — free-form queries against any connected warehouse
-- **DQL** — reference semantic objects via `@metric(name)` / `@dim(name)`
+- **DQL** — reference blocks or semantic objects via `@block(name)`,
+  `@metric(name)`, and `@dim(name)`
 - **Markdown** — commentary, docs, dashboards-as-code
 - **Param** — text/select/date/number inputs wired into downstream cells
 
@@ -20,27 +21,35 @@ Notebooks live in git. Results never do (they go in a sibling
 ## 2. Block
 
 A **named, versioned, governed** analytics artifact. Think of a block as a
-dbt model that ships with a chart spec and governance metadata (owner,
-certification status, tags).
+trusted answer unit that ships with SQL or semantic intent, a chart spec, tests,
+lineage, and governance metadata.
 
 ```dql
-block revenue_by_segment {
-  domain: "finance"
-  owner:  "analytics@company.com"
-  tags:   ["revenue", "certified"]
+block "Revenue by Segment" {
+  domain = "finance"
+  owner = "analytics@company.com"
+  tags = ["revenue", "certified"]
+  type = "custom"
 
-  query: |
-    select segment, sum(amount) as revenue
-    from @table("orders")
-    group by 1
+  query = """
+SELECT segment, SUM(amount) AS revenue
+FROM analytics.orders
+GROUP BY 1
+"""
 
-  visualization: bar(x: "segment", y: "revenue")
+  visualization = {
+    type = "bar"
+    x = "segment"
+    y = "revenue"
+  }
 }
 ```
 
-Blocks are authored in **Block Studio** (an editor with lint, preview,
-lineage, and a promote-to-certified flow). They compile to SQL + a chart
-spec and are embeddable in notebooks, dashboards, or other blocks.
+Blocks are authored in **Block Studio**. Use a **SQL Block** when you want raw
+SQL against dbt models or database tables. Use a **Semantic Block** when you
+want a dbt/DQL metric plus dimensions, filters, grain, and chart intent. Both
+compile to executable SQL + a chart spec and are embeddable in notebooks,
+dashboard pages, Apps, or other blocks.
 
 ## 3. Semantic layer
 
@@ -54,10 +63,10 @@ against the semantic layer — no hand-written joins.
 
 ## 4. Lineage
 
-A graph of every **table → block → notebook → dashboard** edge in the
-project, built from AST-level SQL parsing (not regex). The lineage panel
-renders it with React Flow; the CLI exposes it via
-`dql lineage impact <name>` and friends.
+A graph of every **dbt/source/table -> semantic metric -> block -> notebook ->
+dashboard page -> App** edge in the project, built from AST-level SQL parsing
+and dbt artifacts. The lineage panel renders it with React Flow; the CLI
+exposes it via `dql lineage impact <name>` and friends.
 
 Lineage answers three questions:
 
@@ -65,22 +74,41 @@ Lineage answers three questions:
 - *Where did this number come from?* (trust chain)
 - *What's shared across teams?* (cross-domain detection)
 
-## 5. Dashboard
+## 5. App
 
-A compiled, static HTML artifact built from one or more blocks + markdown +
-params. Dashboards are **files on disk**, not rows in a SaaS DB — you host
-them on anything that serves HTML.
+An App is the decision-facing package. In OSS it is a local file-backed folder
+under `apps/<app-id>/` with dashboard pages, attached notebooks, AI pins, and
+draft blocks. App metadata such as domain, subdomain, group, audience,
+visibility, and lifecycle is for organization and future upgrade paths; it is
+not enforced RBAC in OSS.
+
+The UI has two modes:
+
+- **View** — clean consumer surface for dashboard pages, notebook previews, AI
+  conversations, and pinned summaries.
+- **Build** — creation surface for adding pages, blocks, notebooks, text tiles,
+  drafts, and settings.
+
+## 6. Dashboard Page
+
+A dashboard page is a curated grid inside an App, backed by `.dqld`. It composes
+block tiles, text tiles, KPI cards, charts, and table outputs. Older standalone
+notebook dashboards can still compile to static HTML, but Apps are the primary
+OSS consumption surface.
 
 ---
 
 ## How they fit
 
 ```
-dbt models ──┐
-             ├─▶ semantic layer ──▶ blocks ──▶ notebooks ──▶ dashboards
-warehouse ───┘                        │
-                                      ▼
-                                   lineage DAG
+dbt sources/models ──┐
+                     ├─▶ semantic layer ──▶ DQL blocks ──▶ notebooks
+warehouse tables ────┘                         │             │
+                                               ▼             ▼
+                                         dashboard pages ──▶ Apps
+                                               │
+                                               ▼
+                                          lineage DAG
 ```
 
 With that mental model loaded, [the guides](guides/README.md) all make sense.

@@ -13,15 +13,15 @@ npm run app:build
 npm run notebook
 ```
 
-The notebook opens the local desktop UI. Click **Apps** to see the packaged
-stakeholder surfaces.
+The notebook opens the local desktop UI. Click **Apps** to see packaged
+dashboard pages, attached notebooks, and AI-ready certified blocks.
 
 ## What is included
 
 ```
 data/                    small DuckDB-readable CSV warehouse
 blocks/                  certified reusable DQL blocks by domain
-apps/                    stakeholder Apps with dql.app.json + .dqld dashboards
+apps/                    OSS Apps with dql.app.json + .dqld dashboard pages
 notebooks/               analyst notebook walkthrough
 semantic-layer/          starter metric and dimension metadata
 .dql/skills/             agent skills for banking personas
@@ -45,9 +45,9 @@ semantic-layer/          starter metric and dimension metadata
 | `risk-office` | Credit and fraud risk committee | `credit-risk` |
 | `executive-cockpit` | CFO/COO weekly review | `bank-overview` |
 
-Certified business logic stays in root `blocks/`. App folders contain
-governance, schedules, dashboards, optional notebooks, and `drafts/` for future
-AI-generated work waiting for analyst review.
+Certified business logic stays in root `blocks/`. App folders contain metadata,
+schedules, dashboard pages, optional notebooks, and `drafts/` for future
+AI-generated work waiting for review.
 
 ## Sample notebooks
 
@@ -68,7 +68,7 @@ npm run agent:reindex    # builds the local SQLite/FTS agent knowledge graph
 npm run verify           # proves manifest output is reproducible
 ```
 
-## Persona preview
+## Local persona preview
 
 Apps are single-user OSS artifacts. There is no login, SSO, or hosted
 multi-tenant behavior. Use the UI persona switcher to preview the real

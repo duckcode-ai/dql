@@ -211,7 +211,7 @@ In the activity bar (left), click **Apps** (Package icon).
 > - The **Apps panel** opens. Left column lists `Cards — Operations`.
 > - Top of the right pane shows the App name + domain + the
 >   **persona switcher**: a button labelled `View as: Owner ▾`.
-> - A row of dashboard tabs (currently just one: `overview`).
+> - A row of dashboard pages (currently just one: `overview`).
 > - The dashboard area says
 >   _"This dashboard has no blocks yet. Edit the .dqld file or use the
 >    upcoming DashboardEditor to add tiles."_

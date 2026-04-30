@@ -4,7 +4,6 @@ import {
   FileText,
   Database,
   GitBranch,
-  Plug,
   BookOpen,
   HelpCircle,
   Settings,
@@ -120,8 +119,8 @@ export function ActivityBar() {
     persistExpanded(expanded);
   }, [expanded]);
 
-  function handlePanelClick(panel: SidebarPanel | 'imports' | 'review') {
-    if (panel === 'imports' || panel === 'review') {
+  function handlePanelClick(panel: SidebarPanel | 'review') {
+    if (panel === 'review') {
       dispatch({ type: 'SET_MAIN_VIEW', view: panel });
       return;
     }
@@ -143,10 +142,6 @@ export function ActivityBar() {
       dispatch({ type: 'SET_SIDEBAR_PANEL', panel });
       return;
     }
-    if (state.mainView === 'imports' && (panel === 'files' || panel === 'block_library')) {
-      dispatch({ type: 'SET_SIDEBAR_PANEL', panel });
-      return;
-    }
     if (state.sidebarPanel === panel && state.sidebarOpen) {
       dispatch({ type: 'TOGGLE_SIDEBAR' });
     } else {
@@ -155,7 +150,7 @@ export function ActivityBar() {
   }
 
   const items: Array<{
-    key: SidebarPanel | 'imports' | 'review';
+    key: SidebarPanel | 'review';
     title: string;
     icon: React.ReactNode;
     active: boolean;
@@ -170,19 +165,13 @@ export function ActivityBar() {
       key: 'files',
       title: 'Notebooks',
       icon: <FileText size={16} strokeWidth={1.75} />,
-      active: state.mainView !== 'imports' && state.sidebarPanel === 'files' && state.sidebarOpen,
+      active: state.sidebarPanel === 'files' && state.sidebarOpen,
     },
     {
       key: 'block_library',
       title: 'Blocks',
       icon: <BlockIcon size={16} />,
-      active: state.mainView !== 'imports' && state.sidebarPanel === 'block_library' && state.sidebarOpen,
-    },
-    {
-      key: 'imports',
-      title: 'Imports',
-      icon: <Plug size={16} strokeWidth={1.75} />,
-      active: state.mainView === 'imports',
+      active: state.sidebarPanel === 'block_library' && state.sidebarOpen,
     },
     {
       key: 'review',

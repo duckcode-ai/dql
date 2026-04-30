@@ -6,6 +6,35 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 
 ---
 
+## v1.5.3 - 2026-04-30
+
+### OSS release candidate polish
+
+### Added
+
+- dbt-first Block Studio guide covering SQL blocks, semantic blocks, SQL import,
+  certification, and lineage.
+- OSS readiness checklist sections for Block Studio and Apps UX release gates.
+
+### Changed
+
+- Updated README and docs to position DQL as a local-first dbt companion where
+  dbt owns models/semantics and DQL owns certified blocks, Apps, notebooks,
+  AI pins, and answer-level lineage.
+- Updated project layout docs to describe Apps as View/Build surfaces with
+  dashboard pages, attached notebooks, AI conversations, pins, and drafts.
+- Clarified that Import SQL is a Block Studio wizard, not a separate primary
+  navigation area.
+
+### Fixed
+
+- Fixed standalone preview for `single_value` block visualizations by lowering
+  them to KPI output.
+- Fixed semantic analyzer validation so `@rls` decorators on block declarations
+  pass the same way they do in notebook/App execution.
+
+---
+
 ## v1.5.1 - 2026-04-29
 
 ### OSS app workspace structure and dbt repo onboarding

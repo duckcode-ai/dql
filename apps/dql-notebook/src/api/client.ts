@@ -23,6 +23,7 @@ import type {
   BlockStudioImportSession,
   BlockStudioImportSessionSummary,
   BlockStudioImportCandidate,
+  BlockStudioDbtStatus,
   AppSummary,
   ActivePersona,
 } from '../store/types';
@@ -451,10 +452,19 @@ export const api = {
     });
   },
 
-  async createBlock(name: string): Promise<{ path: string; content: string }> {
+  async createBlock(
+    name: string,
+    options?: {
+      blockType?: 'custom' | 'semantic';
+      domain?: string;
+      description?: string;
+      owner?: string;
+      tags?: string[];
+    },
+  ): Promise<{ path: string; content: string }> {
     return request<{ path: string; content: string }>('/api/blocks', {
       method: 'POST',
-      body: JSON.stringify({ name }),
+      body: JSON.stringify({ name, ...options }),
     });
   },
 
@@ -528,6 +538,10 @@ export const api = {
 
   async getBlockStudioCatalog(): Promise<BlockStudioCatalog> {
     return request<BlockStudioCatalog>('/api/block-studio/catalog');
+  },
+
+  async getBlockStudioDbtStatus(): Promise<BlockStudioDbtStatus> {
+    return request<BlockStudioDbtStatus>('/api/block-studio/dbt-status');
   },
 
   async openBlockStudio(path: string): Promise<BlockStudioOpenPayload> {

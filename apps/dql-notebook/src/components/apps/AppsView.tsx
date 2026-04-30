@@ -340,8 +340,8 @@ export function AppsView(): JSX.Element {
   }
 
   return (
-    <div style={{ display: 'flex', height: '100%', minHeight: 0 }}>
-      <aside style={{ width: 292, borderRight: '1px solid var(--border-color, rgba(0,0,0,0.08))', display: 'flex', flexDirection: 'column', minHeight: 0 }}>
+    <div style={{ display: 'flex', height: '100%', minHeight: 0, background: 'var(--color-bg-primary)', color: 'var(--color-text-primary)' }}>
+      <aside style={{ width: 292, borderRight: '1px solid var(--border-color, rgba(0,0,0,0.08))', background: 'var(--color-bg-secondary)', display: 'flex', flexDirection: 'column', minHeight: 0 }}>
         <div style={{ padding: 12, borderBottom: '1px solid var(--border-color, rgba(0,0,0,0.06))' }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 10 }}>
             <div style={{ fontSize: 11, fontWeight: 700, opacity: 0.65, textTransform: 'uppercase', letterSpacing: 0.5, flex: 1 }}>
@@ -425,7 +425,7 @@ export function AppsView(): JSX.Element {
         </div>
       </aside>
 
-      <main style={{ flex: 1, display: 'flex', flexDirection: 'column', minWidth: 0, overflow: 'hidden', background: 'var(--color-bg, #fff)' }}>
+      <main style={{ flex: 1, display: 'flex', flexDirection: 'column', minWidth: 0, overflow: 'hidden', background: 'var(--color-bg)' }}>
         <AppWorkspaceHeader
           activeApp={activeApp}
           appDoc={appDoc}
@@ -748,7 +748,7 @@ function AttachNotebookDialog({
                     ...panelCardStyle,
                     textAlign: 'left',
                     borderColor: candidate.path === path ? 'var(--accent, #4f46e5)' : 'var(--border-color, rgba(0,0,0,0.10))',
-                    background: candidate.path === path ? 'rgba(79,70,229,0.08)' : panelCardStyle.background,
+                    background: candidate.path === path ? 'var(--color-bg-active, rgba(79,70,229,0.08))' : panelCardStyle.background,
                     cursor: 'pointer',
                   }}
                 >
@@ -1297,7 +1297,7 @@ function renderNotebookVisualizationOutput(cell: AppNotebookPreview['cells'][num
   const result = cell.result;
   if (!result) return null;
   if (vizChoice === 'pivot' && cell.type === 'pivot') {
-    return <PivotPreview result={result} config={cell.pivotConfig} />;
+    return <PivotPreview result={result} config={cell.pivotConfig} themeMode={themeMode} />;
   }
   if (vizChoice === 'kpi' && cell.type === 'single_value') {
     return <SingleValuePreview result={result} config={cell.singleValueConfig} />;
@@ -1402,7 +1402,7 @@ function SingleValuePreview({ result, config }: { result: QueryResult; config?: 
   );
 }
 
-function PivotPreview({ result, config }: { result: QueryResult; config?: Record<string, unknown> }) {
+function PivotPreview({ result, config, themeMode }: { result: QueryResult; config?: Record<string, unknown>; themeMode: ThemeMode }) {
   const rows = stringArray(config?.rows).filter((column) => result.columns.includes(column));
   const columns = stringArray(config?.columns).filter((column) => result.columns.includes(column));
   const values = Array.isArray(config?.values)
@@ -1418,7 +1418,7 @@ function PivotPreview({ result, config }: { result: QueryResult; config?: Record
     : [];
 
   if ((rows.length === 0 && columns.length === 0) || values.length === 0) {
-    return <TableOutput result={result} themeMode="paper" />;
+    return <TableOutput result={result} themeMode={themeMode} />;
   }
 
   const colKeys = new Set<string>();
@@ -1599,7 +1599,7 @@ function AiSummariesPanel({ appDoc, editable, onPromoted }: { appDoc: AppDocumen
                     border: '1px solid var(--border-color, rgba(0,0,0,0.08))',
                     borderRadius: 6,
                     padding: 10,
-                    background: message.role === 'user' ? 'rgba(79,70,229,0.08)' : 'var(--surface, rgba(0,0,0,0.02))',
+                    background: message.role === 'user' ? 'var(--color-bg-active, rgba(79,70,229,0.08))' : 'var(--surface, rgba(0,0,0,0.02))',
                   }}
                 >
                   <div style={{ fontSize: 10, textTransform: 'uppercase', fontWeight: 800, opacity: 0.62, marginBottom: 4 }}>{message.role === 'user' ? 'You' : 'DQL Agent'}</div>
@@ -1871,11 +1871,11 @@ function CreateAppWizard({
               type="button"
               onClick={() => {
                 onClose();
-                dispatch({ type: 'SET_MAIN_VIEW', view: 'imports' });
+                dispatch({ type: 'OPEN_BLOCK_IMPORT' });
               }}
               style={primaryButtonStyle}
             >
-              Open Imports
+              Open Import
             </button>
           ) : (
             <button onClick={create} disabled={loading || !canCreate} style={{ ...primaryButtonStyle, opacity: loading || !canCreate ? 0.65 : 1 }}>
@@ -1909,7 +1909,7 @@ function AppListItem({ app, active, onClick }: { app: AppSummary; active: boolea
 
 function BlockRecommendationRow({ block, selected, onToggle }: { block: AppBlockRecommendation; selected: boolean; onToggle: () => void }): JSX.Element {
   return (
-    <button onClick={onToggle} style={{ display: 'grid', gridTemplateColumns: '24px 1fr auto', gap: 10, alignItems: 'start', textAlign: 'left', border: '1px solid var(--border-color, rgba(0,0,0,0.12))', background: selected ? 'rgba(79,70,229,0.10)' : 'transparent', borderRadius: 6, padding: 10, color: 'inherit' }}>
+    <button onClick={onToggle} style={{ display: 'grid', gridTemplateColumns: '24px 1fr auto', gap: 10, alignItems: 'start', textAlign: 'left', border: '1px solid var(--border-color, rgba(0,0,0,0.12))', background: selected ? 'var(--color-bg-active, rgba(79,70,229,0.10))' : 'transparent', borderRadius: 6, padding: 10, color: 'inherit' }}>
       <input type="checkbox" checked={selected} onChange={onToggle} onClick={(event) => event.stopPropagation()} />
       <div>
         <div style={{ fontSize: 13, fontWeight: 700 }}>{block.name}</div>
@@ -2072,7 +2072,7 @@ const inputStyle: CSSProperties = {
 const primaryButtonStyle: CSSProperties = {
   border: '1px solid var(--accent, #4f46e5)',
   background: 'var(--accent, #4f46e5)',
-  color: '#fff',
+  color: 'var(--color-text-on-accent, #fff)',
   borderRadius: 5,
   padding: '6px 10px',
   fontSize: 12,
@@ -2120,7 +2120,7 @@ function wizardStepStyle(active: boolean): CSSProperties {
     alignItems: 'center',
     border: 'none',
     borderRadius: 5,
-    background: active ? 'rgba(79,70,229,0.12)' : 'transparent',
+    background: active ? 'var(--color-bg-active, rgba(79,70,229,0.12))' : 'transparent',
     color: 'inherit',
     padding: '8px 9px',
     textAlign: 'left',
@@ -2133,7 +2133,7 @@ function tabStyle(active: boolean): CSSProperties {
   return {
     padding: '6px 12px',
     background: active ? 'var(--accent, #4f46e5)' : 'transparent',
-    color: active ? '#fff' : 'inherit',
+    color: active ? 'var(--color-text-on-accent, #fff)' : 'inherit',
     border: '1px solid var(--border-color, rgba(0,0,0,0.1))',
     borderRadius: 6,
     fontSize: 13,
@@ -2146,7 +2146,7 @@ function appSectionTabStyle(active: boolean): CSSProperties {
     padding: '8px 13px',
     marginBottom: -1,
     background: active ? 'var(--accent, #4f46e5)' : 'transparent',
-    color: active ? '#fff' : 'var(--color-text-secondary, rgba(0,0,0,0.72))',
+    color: active ? 'var(--color-text-on-accent, #fff)' : 'var(--color-text-secondary, rgba(0,0,0,0.72))',
     border: active ? '1px solid var(--accent, #4f46e5)' : '1px solid transparent',
     borderRadius: '6px 6px 0 0',
     fontSize: 13,
@@ -2159,7 +2159,7 @@ function dashboardPageTabStyle(active: boolean): CSSProperties {
   return {
     padding: '6px 12px',
     background: active ? 'var(--accent, #4f46e5)' : 'var(--surface, rgba(0,0,0,0.015))',
-    color: active ? '#fff' : 'inherit',
+    color: active ? 'var(--color-text-on-accent, #fff)' : 'inherit',
     border: `1px solid ${active ? 'var(--accent, #4f46e5)' : 'var(--border-color, rgba(0,0,0,0.12))'}`,
     borderRadius: 6,
     fontSize: 13,
@@ -2195,7 +2195,7 @@ function workspaceModeButtonStyle(active: boolean): CSSProperties {
     border: 'none',
     borderRadius: 5,
     background: active ? 'var(--accent, #4f46e5)' : 'transparent',
-    color: active ? '#fff' : 'var(--color-text-secondary, rgba(0,0,0,0.66))',
+    color: active ? 'var(--color-text-on-accent, #fff)' : 'var(--color-text-secondary, rgba(0,0,0,0.66))',
     padding: '5px 11px',
     fontSize: 12,
     fontWeight: active ? 700 : 500,
@@ -2208,7 +2208,7 @@ function segmentButtonStyle(active: boolean): CSSProperties {
     border: 'none',
     borderRight: '1px solid var(--border-color, rgba(0,0,0,0.10))',
     background: active ? 'var(--accent, #4f46e5)' : 'transparent',
-    color: active ? '#fff' : 'inherit',
+    color: active ? 'var(--color-text-on-accent, #fff)' : 'inherit',
     padding: '6px 10px',
     fontSize: 12,
     fontWeight: active ? 700 : 500,
@@ -2221,7 +2221,7 @@ function filterButtonStyle(active: boolean): CSSProperties {
     border: '1px solid var(--border-color, rgba(0,0,0,0.10))',
     borderRadius: 5,
     background: active ? 'var(--accent, #4f46e5)' : 'transparent',
-    color: active ? '#fff' : 'inherit',
+    color: active ? 'var(--color-text-on-accent, #fff)' : 'inherit',
     padding: '5px 4px',
     fontSize: 11,
     cursor: 'pointer',
@@ -2234,7 +2234,7 @@ function sourceButtonStyle(active: boolean): CSSProperties {
     border: '1px solid var(--border-color, rgba(0,0,0,0.12))',
     borderRadius: 6,
     background: active ? 'var(--accent, #4f46e5)' : 'var(--surface, transparent)',
-    color: active ? '#fff' : 'inherit',
+    color: active ? 'var(--color-text-on-accent, #fff)' : 'inherit',
     padding: '7px 8px',
     fontSize: 12,
     fontWeight: active ? 700 : 600,

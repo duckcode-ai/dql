@@ -23,6 +23,7 @@ export function BlockLibraryPanel() {
   const [search, setSearch] = useState('');
   const [domainFilter, setDomainFilter] = useState('');
   const [statusFilter, setStatusFilter] = useState('');
+  const [showAll, setShowAll] = useState(false);
 
   useEffect(() => {
     setLoading(true);
@@ -40,6 +41,7 @@ export function BlockLibraryPanel() {
     if (statusFilter && b.status !== statusFilter) return false;
     return true;
   });
+  const visibleBlocks = showAll || search || domainFilter || statusFilter ? filtered : filtered.slice(0, 10);
 
   const handleOpen = (block: BlockEntry) => {
     const file = {
@@ -92,6 +94,16 @@ export function BlockLibraryPanel() {
 
   const actions = (
     <>
+      <button
+        onClick={() => dispatch({ type: 'OPEN_BLOCK_IMPORT' })}
+        style={{
+          background: `${t.accent}18`, border: `1px solid ${t.accent}`, borderRadius: 4,
+          color: t.accent, cursor: 'pointer', fontSize: 10, fontWeight: 600,
+          fontFamily: t.font, padding: '3px 10px',
+        }}
+      >
+        Import SQL
+      </button>
       <button
         onClick={() => dispatch({ type: 'OPEN_NEW_BLOCK_MODAL' })}
         style={{
@@ -153,54 +165,75 @@ export function BlockLibraryPanel() {
           }
         />
       ) : (
-        filtered.map((block) => (
-          <button
-            key={block.path}
-            onClick={() => handleOpen(block)}
-            style={{
-              display: 'block', width: '100%', textAlign: 'left',
-              background: 'transparent', border: 'none', borderBottom: `1px solid ${t.cellBorder}`,
-              cursor: 'pointer', padding: '10px 12px',
-              transition: 'background 0.1s',
-            }}
-            onMouseEnter={(e) => { (e.currentTarget as HTMLElement).style.background = `${t.accent}0a`; }}
-            onMouseLeave={(e) => { (e.currentTarget as HTMLElement).style.background = 'transparent'; }}
-          >
-            <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 4 }}>
-              <span style={{ fontSize: 12, fontWeight: 600, color: t.textPrimary, fontFamily: t.font }}>
-                {block.name}
-              </span>
-              <StatusPill tone={STATUS_TONE[block.status] ?? 'neutral'}>
-                {block.status}
-              </StatusPill>
-            </div>
-            {block.description && (
-              <div style={{
-                fontSize: 11, color: t.textMuted, fontFamily: t.font, lineHeight: 1.3,
-                marginBottom: 4, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
-              }}>
-                {block.description}
-              </div>
-            )}
-            <div style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 10, color: t.textMuted, fontFamily: t.font }}>
-              <span style={{ background: t.pillBg, padding: '1px 6px', borderRadius: 4 }}>
-                {block.domain}
-              </span>
-              {block.owner && <span>by {block.owner}</span>}
-              {block.llmContext && (
-                <span
-                  title={block.llmContext}
-                  style={{ color: t.accent, fontWeight: 600, letterSpacing: '0.04em' }}
-                >
-                  AI
+        <>
+          {visibleBlocks.map((block) => (
+            <button
+              key={block.path}
+              onClick={() => handleOpen(block)}
+              style={{
+                display: 'block', width: '100%', textAlign: 'left',
+                background: 'transparent', border: 'none', borderBottom: `1px solid ${t.cellBorder}`,
+                cursor: 'pointer', padding: '10px 12px',
+                transition: 'background 0.1s',
+              }}
+              onMouseEnter={(e) => { (e.currentTarget as HTMLElement).style.background = `${t.accent}0a`; }}
+              onMouseLeave={(e) => { (e.currentTarget as HTMLElement).style.background = 'transparent'; }}
+            >
+              <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 4 }}>
+                <span style={{ fontSize: 12, fontWeight: 600, color: t.textPrimary, fontFamily: t.font }}>
+                  {block.name}
                 </span>
+                <StatusPill tone={STATUS_TONE[block.status] ?? 'neutral'}>
+                  {block.status}
+                </StatusPill>
+              </div>
+              {block.description && (
+                <div style={{
+                  fontSize: 11, color: t.textMuted, fontFamily: t.font, lineHeight: 1.3,
+                  marginBottom: 4, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+                }}>
+                  {block.description}
+                </div>
               )}
-              <span style={{ marginLeft: 'auto' }}>
-                {new Date(block.lastModified).toLocaleDateString()}
-              </span>
-            </div>
-          </button>
-        ))
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 10, color: t.textMuted, fontFamily: t.font }}>
+                <span style={{ background: t.pillBg, padding: '1px 6px', borderRadius: 4 }}>
+                  {block.domain}
+                </span>
+                {block.owner && <span>by {block.owner}</span>}
+                {block.llmContext && (
+                  <span
+                    title={block.llmContext}
+                    style={{ color: t.accent, fontWeight: 600, letterSpacing: '0.04em' }}
+                  >
+                    AI
+                  </span>
+                )}
+                <span style={{ marginLeft: 'auto' }}>
+                  {new Date(block.lastModified).toLocaleDateString()}
+                </span>
+              </div>
+            </button>
+          ))}
+          {!showAll && !search && !domainFilter && !statusFilter && filtered.length > 10 && (
+            <button
+              onClick={() => setShowAll(true)}
+              style={{
+                width: '100%',
+                background: t.btnBg,
+                border: 'none',
+                borderBottom: `1px solid ${t.cellBorder}`,
+                color: t.accent,
+                cursor: 'pointer',
+                fontSize: 11,
+                fontWeight: 700,
+                fontFamily: t.font,
+                padding: '10px 12px',
+              }}
+            >
+              Show all {filtered.length} blocks
+            </button>
+          )}
+        </>
       )}
     </PanelFrame>
   );

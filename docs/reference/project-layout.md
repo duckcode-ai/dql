@@ -37,8 +37,8 @@ my-dql-project/
   `owner`) are required by default; the certification check runs on CI.
 - **`notebooks/`** — interactive analysis. Saved results live beside the
   notebook as `.run.json` (git-ignored).
-- **`apps/`** — decision-facing packages. An App can have dashboard tabs,
-  attached notebooks, AI summaries, and draft DQL blocks. In OSS, `domain`,
+- **`apps/`** — decision-facing packages. An App can have dashboard pages,
+  attached notebooks, AI conversations and pins, and draft DQL blocks. In OSS, `domain`,
   `subdomain`, `groups`, `audience`, `visibility`, and `lifecycle` are
   organization metadata, not enterprise access-control boundaries.
 - **`semantic-layer/`** — metrics and dimensions authored locally. When you
@@ -58,9 +58,9 @@ Use one library model:
 
 ```text
 Domain -> Subdomain -> Group / Use Case -> App
-  -> Dashboard tabs
+  -> Dashboard pages
   -> Supporting notebooks
-  -> AI summaries and pins
+  -> AI conversations and pinned summaries
   -> Draft blocks
 ```
 
@@ -68,7 +68,7 @@ Domain -> Subdomain -> Group / Use Case -> App
 - **Subdomain** is the narrower area, such as Fraud or Merchant Risk.
 - **Group** is a local use-case/team label in OSS.
 - **App** is the main user-facing package.
-- **Dashboard** is a curated grid tab inside an App.
+- **Dashboard page** is a curated grid inside an App.
 - **Notebook** is the analysis workbench attached to an App.
 - **AI Pin** is local output that can be promoted to a review draft.
 
@@ -81,23 +81,23 @@ The OSS notebook UI is organized around the work a single user does most often:
 - **Apps** — browse My Local, Shared, Templates, and Review App views by
   domain, subdomain, group, owner, lifecycle, certification, and tags.
 - **Notebooks** — open and edit `.dqlnb` analysis files.
-- **Blocks** — browse reusable `.dql` blocks.
-- **Imports** — convert SQL files/folders into reviewable draft block
-  candidates.
+- **Blocks** — browse reusable `.dql` blocks and open the dbt-first Block
+  Studio. Import SQL is a top action inside this surface, not a separate left
+  navigation item.
 - **Review** — inspect Apps in review, AI pins, draft blocks, and certified
   App counts before promoting work.
 - **Settings** — local provider keys and runtime settings.
 
 Inside an App, the UI has two modes:
 
-- **Stakeholder** shows dashboard tabs, attached notebooks, and AI summaries.
-  It hides builder controls, drafts, and settings.
-- **Analyst Studio** exposes dashboard tab creation, chart tile editing,
-  notebook attachment, AI pin promotion, draft blocks, and App settings.
+- **View** shows dashboard pages, attached notebook previews, AI conversations,
+  and pinned summaries. It hides builder controls, drafts, and settings.
+- **Build** exposes dashboard page creation, chart tile editing, notebook
+  attachment, AI pin promotion, draft blocks, and App settings.
 
-The create-App wizard starts from one of four sources: blank App, notebook,
-SQL import, or template. Notebook-sourced Apps attach the notebook as
-supporting analysis; SQL import remains local and review-first.
+The create-App flow starts from one of four sources: empty App, notebook,
+template, or import. Import opens Block Studio's SQL import wizard first, then
+you add the saved draft/certified blocks from the App Build catalog.
 
 ## Working with dbt
 
@@ -141,7 +141,7 @@ index.
 The lineage flow is:
 
 ```text
-dbt source -> dbt model -> DQL block -> chart -> dashboard tab -> App
+dbt source -> dbt model -> semantic metric -> DQL block -> dashboard page -> App
 ```
 
 ## What gets committed

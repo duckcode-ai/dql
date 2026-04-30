@@ -27,7 +27,7 @@ exploration, start with `duckdb` or `file`. See [Connectors](./connectors.md).
 - DQL language (parser, formatter, AST)
 - CLI (`init`, `notebook`, `compile`, `sync`, `diff`, `preview`, `serve`, `certify`, `test`, `fmt`, `doctor`)
 - Notebook UI (SQL + DQL cells, Block Studio, lineage panel, git panel, governed chat)
-- Apps, dashboard tabs, personal AI pins, and local persona/policy previews
+- Apps, dashboard pages, attached notebooks, personal AI pins, and optional local persona/policy previews
 - Semantic layer (local YAML + dbt manifest and semantic manifest import)
 - Lineage DAG (Domain / App / Dashboard / Notebook / Block / semantic / dbt / source granularity)
 - 15 database connectors

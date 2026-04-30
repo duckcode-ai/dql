@@ -351,7 +351,7 @@ export class SemanticAnalyzer {
   }
 
   private analyzeBlockDecl(node: BlockDeclNode): void {
-    this.validateDecorators(node.decorators, 'dashboard');
+    this.validateDecorators(node.decorators, 'block');
 
     if (!node.name || node.name.trim().length === 0) {
       this.reporter.error('Block must have a non-empty name.', node.span);

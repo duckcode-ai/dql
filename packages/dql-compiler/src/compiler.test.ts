@@ -126,6 +126,22 @@ describe('compile', () => {
     expect(spec.kind).toBe('kpi');
   });
 
+  it('treats single_value block visualization as KPI output', () => {
+    const source = `block "Approval Rate" {
+      domain = "cards"
+      type = "custom"
+      query = """SELECT 77.78 AS approval_rate"""
+      visualization {
+        chart = "single_value"
+      }
+    }`;
+
+    const result = compile(source);
+    expect(result.errors).toHaveLength(0);
+    const spec = result.dashboards[0].chartSpecs[0];
+    expect(spec.kind).toBe('kpi');
+  });
+
   it('handles SQL with template variables', () => {
     const source = `dashboard "Test" {
       let today = CURRENT_DATE

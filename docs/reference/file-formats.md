@@ -7,17 +7,23 @@ Canonical, git-friendly, version-headered.
 ```dql
 // dql-format: 1
 
-block revenue_by_segment {
-  domain: "finance"
-  owner:  "analytics@company.com"
-  tags:   ["revenue"]
+block "Revenue by Segment" {
+  domain = "finance"
+  owner = "analytics@company.com"
+  tags = ["revenue"]
+  type = "custom"
 
-  query: |
-    select segment, sum(amount) as revenue
-    from @table("orders")
-    group by 1
+  query = """
+SELECT segment, SUM(amount) AS revenue
+FROM analytics.orders
+GROUP BY 1
+"""
 
-  visualization: bar(x: "segment", y: "revenue")
+  visualization = {
+    type = "bar"
+    x = "segment"
+    y = "revenue"
+  }
 }
 ```
 
@@ -65,6 +71,69 @@ Sibling file next to a notebook holding the last execution's results:
 - **Git-ignored by default** — DQL auto-appends `*.run.json` to `.gitignore` on first write
 - **Used for rehydration** — re-opening a notebook loads results without re-running queries
 - **Save trigger** — debounced 600ms after a cell's execution count / row count changes
+
+## `.dqld` — App dashboard page
+
+JSON document for one dashboard page inside an App. It stores grid layout,
+block refs, text tiles, per-tile visualization options, filters, and page
+metadata.
+
+```json
+{
+  "version": 1,
+  "id": "daily-ops",
+  "title": "Daily Ops",
+  "layout": {
+    "type": "grid",
+    "columns": 12
+  },
+  "tiles": [
+    {
+      "id": "approval-rate",
+      "type": "block",
+      "blockRef": "card_approval_rate",
+      "title": "Approval Rate",
+      "layout": { "x": 0, "y": 0, "w": 4, "h": 3 },
+      "viz": { "type": "kpi", "options": { "valueField": "approval_rate" } }
+    }
+  ]
+}
+```
+
+Dashboard pages are committed under `apps/<app-id>/dashboards/*.dqld`.
+Private layout overrides and saved views stay local under `.dql/local/`.
+
+## `dql.app.json` — App manifest
+
+JSON document for a local-first App package.
+
+```json
+{
+  "version": 1,
+  "id": "cards-ops",
+  "title": "Cards Operations",
+  "domain": "cards",
+  "subdomain": "fraud",
+  "groups": ["daily-ops"],
+  "visibility": "shared",
+  "lifecycle": "draft",
+  "dashboards": [
+    { "id": "daily-ops", "path": "dashboards/daily-ops.dqld", "title": "Daily Ops" }
+  ],
+  "notebooks": [
+    {
+      "path": "notebooks/investigation.dqlnb",
+      "title": "Investigation Notebook",
+      "role": "analysis",
+      "visibility": "shared"
+    }
+  ]
+}
+```
+
+In OSS, `visibility`, `domain`, `subdomain`, `groups`, `audience`, and
+`lifecycle` are organization metadata and trust labels. They are not hosted
+permissions or RBAC enforcement.
 
 ## `dql.config.json` — project config
 
