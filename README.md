@@ -82,8 +82,9 @@ for semantic blocks, or a one-time SQL import wizard for legacy queries.
 
 - **Acme Bank** — bundled OSS workflow demo for certified blocks, Apps,
   dashboard pages, notebooks, lineage, agent answers, and local schedules.
-- **Jaffle Shop DQL** — dbt/MetricFlow demo for manifest ingestion, semantic
-  metrics, lineage, certified blocks, and agent routing:
+- **Jaffle Shop DQL** — step-by-step dbt/MetricFlow demo for manifest
+  ingestion, semantic metrics, lineage, certified blocks, Apps, tutorials, and
+  agent routing:
   [github.com/duckcode-ai/jaffle-shop-dql](https://github.com/duckcode-ai/jaffle-shop-dql).
 
 DQL OSS is a single-user local workspace. Hosted multi-user governance,

@@ -1,6 +1,8 @@
 # Jaffle Shop DQL
 
-Jaffle Shop now lives in its own demo repository:
+Jaffle Shop now lives in its own demo repository with Docker setup,
+source-backed Apps, certified blocks, dbt semantic examples, and step-by-step
+use-case tutorials:
 
 [github.com/duckcode-ai/jaffle-shop-dql](https://github.com/duckcode-ai/jaffle-shop-dql)
 
@@ -14,4 +16,4 @@ Use that repo for the dbt enterprise-style proof path:
 
 The bundled Acme Bank template remains the governed workflow demo for Apps,
 personas, business outcomes, schedules, and analyst review. Jaffle Shop DQL is
-the dbt metadata and semantic-layer demo.
+the dbt metadata, semantic-layer, and tutorial demo.
