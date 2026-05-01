@@ -207,6 +207,34 @@ importers:
 
   packages/create-dql-app: {}
 
+  packages/datalex-lsp:
+    dependencies:
+      ajv:
+        specifier: ^8.12.0
+        version: 8.18.0
+      js-yaml:
+        specifier: ^4.1.0
+        version: 4.1.1
+      vscode-languageserver:
+        specifier: ^9.0.1
+        version: 9.0.1
+      vscode-languageserver-textdocument:
+        specifier: ^1.0.11
+        version: 1.0.12
+    devDependencies:
+      '@types/js-yaml':
+        specifier: ^4.0.9
+        version: 4.0.9
+      '@types/node':
+        specifier: ^20.0.0
+        version: 20.14.10
+      typescript:
+        specifier: ^5.7.0
+        version: 5.9.3
+      vitest:
+        specifier: ^3.0.0
+        version: 3.2.4(@types/debug@4.1.12)(@types/node@20.14.10)(jiti@2.6.1)(lightningcss@1.32.0)(terser@5.46.0)(tsx@4.21.0)(yaml@2.8.2)
+
   packages/dql-agent:
     dependencies:
       '@duckcodeailabs/dql-core':
