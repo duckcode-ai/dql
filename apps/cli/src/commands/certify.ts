@@ -7,6 +7,7 @@ import { buildExecutionPlan, type NotebookCell } from '@duckcodeailabs/dql-noteb
 import { loadProjectConfig, prepareLocalExecution } from '../local-runtime.js';
 import type { ProjectConfig } from '../local-runtime.js';
 import type { CLIFlags } from '../args.js';
+import { promoteFromDraft } from '../promote-from-draft.js';
 
 function resolveConnection(flags: CLIFlags, projectConfig: ProjectConfig): ConnectionConfig {
   const conn = flags.connection;
@@ -145,6 +146,26 @@ async function runBlockTests(
 }
 
 export async function runCertify(filePath: string, flags: CLIFlags): Promise<void> {
+  // Tier-2 promotion: `dql certify --from-draft <path>` moves a draft to its
+  // canonical certified location and surfaces the datalex-manifest.json patch.
+  if (flags.fromDraft) {
+    const result = promoteFromDraft(process.cwd(), flags);
+    if (!result.ok) {
+      console.error(`\n  ✗ ${result.message}\n`);
+      process.exitCode = 1;
+      return;
+    }
+    console.log(`\n  ✓ ${result.message}`);
+    if (result.certifiedPath) {
+      console.log(`    Run \`dql compile\` to refresh dql-manifest.json.`);
+    }
+    if (result.datalexManifestDiff) {
+      console.log(`\n  Next: apply this patch to datalex-manifest.json:\n`);
+      console.log(result.datalexManifestDiff);
+    }
+    return;
+  }
+
   const projectConfig = loadProjectConfig(process.cwd());
   const source = readFileSync(filePath, 'utf-8');
   const parser = new Parser(source, filePath);

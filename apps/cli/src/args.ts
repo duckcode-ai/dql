@@ -19,6 +19,12 @@ export interface CLIFlags {
   skipTests: boolean;
   force?: boolean;
   http?: boolean;
+  /** `dql certify --from-draft <path>` — promote a Tier-2 draft to certified. */
+  fromDraft?: string;
+  /** `--contract <id@version>` — DataLex contract id to bind during certify. */
+  contract?: string;
+  /** `--open-pr` — push a branch + open a GitHub PR with the promotion diff. */
+  openPr?: boolean;
 }
 
 export interface ParsedArgs {
@@ -101,6 +107,12 @@ export function parseArgs(argv: string[]): ParsedArgs {
       flags.force = true;
     } else if (arg === '--http') {
       flags.http = true;
+    } else if (arg === '--from-draft' && i + 1 < argv.length) {
+      flags.fromDraft = argv[++i];
+    } else if (arg === '--contract' && i + 1 < argv.length) {
+      flags.contract = argv[++i];
+    } else if (arg === '--open-pr') {
+      flags.openPr = true;
     } else if (!command) {
       command = arg;
     } else if (!file) {
