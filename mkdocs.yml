@@ -1,0 +1,125 @@
+site_name: DQL
+site_description: Analytics-as-code with certified blocks, AI-grade lineage, and an MCP server for AI agents.
+site_url: https://dql.duckcode.ai
+repo_url: https://github.com/duckcode-ai/dql
+repo_name: duckcode-ai/dql
+edit_uri: edit/main/docs/
+
+theme:
+  name: material
+  language: en
+  features:
+    - navigation.tabs
+    - navigation.tabs.sticky
+    - navigation.sections
+    - navigation.indexes
+    - navigation.top
+    - navigation.footer
+    - search.suggest
+    - search.highlight
+    - search.share
+    - content.code.copy
+    - content.code.annotate
+    - content.action.edit
+    - content.tabs.link
+    - toc.follow
+  palette:
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: green
+      accent: green
+      toggle:
+        icon: material/brightness-7
+        name: Switch to dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: green
+      accent: green
+      toggle:
+        icon: material/brightness-4
+        name: Switch to light mode
+
+markdown_extensions:
+  - admonition
+  - attr_list
+  - def_list
+  - footnotes
+  - md_in_html
+  - tables
+  - toc:
+      permalink: true
+  - pymdownx.details
+  - pymdownx.superfences
+  - pymdownx.tabbed:
+      alternate_style: true
+  - pymdownx.tasklist:
+      custom_checkbox: true
+  - pymdownx.snippets
+
+plugins:
+  - search
+
+extra:
+  social:
+    - icon: fontawesome/brands/github
+      link: https://github.com/duckcode-ai/dql
+    - icon: fontawesome/brands/discord
+      link: https://discord.gg/Dnm6bUvk
+
+# Internal artifacts kept out of the published site.
+exclude_docs: |
+  oss-readiness-checklist.md
+  rfcs/0000-template.md
+  contribute/
+
+nav:
+  - Home: index.md
+  - Getting started:
+      - Quickstart: 01-quickstart.md
+      - Install: 03-install.md
+      - Concepts: 02-concepts.md
+      - The DataLex + DQL stack: datalex-and-dql.md
+  - Tutorials:
+      - tutorials/README.md
+      - 01 Getting started: tutorials/01-getting-started.md
+      - 02 Authoring blocks: tutorials/02-authoring-blocks.md
+      - 03 Apps, RBAC, personas: tutorials/03-apps-rbac-personas.md
+      - 04 Dashboards: tutorials/04-dashboards.md
+      - 05 Schedules and Slack: tutorials/05-schedules-and-slack.md
+      - 06 Agentic analytics: tutorials/06-agentic-analytics.md
+      - 07 Fraud spike walkthrough: tutorials/07-fraud-spike-walkthrough.md
+      - 08 Promoting AI blocks: tutorials/08-promoting-ai-blocks.md
+      - 09 CI and verify: tutorials/09-ci-and-verify.md
+      - 10 Troubleshooting: tutorials/10-troubleshooting.md
+      - 11 Acme Bank template: tutorials/11-acme-bank-template-reference.md
+  - Guides:
+      - guides/README.md
+      - Jaffle Shop walkthrough: guides/jaffle-shop.md
+      - Authoring blocks: guides/authoring-blocks.md
+      - Block Studio: guides/block-studio.md
+      - Dashboards: guides/dashboards.md
+      - Import dbt: guides/import-dbt.md
+      - Connect a warehouse: guides/connect-warehouse.md
+      - Migrate from earlier versions: guides/migrate.md
+      - Versioning policy: guides/versioning.md
+      - FAQ: guides/faq.md
+  - Architecture:
+      - Overview: architecture/overview.md
+      - Lineage model: architecture/lineage-model.md
+      - OpenLineage integration: architecture/openlineage.md
+      - dbt integration: architecture/dbt-integration.md
+      - Plugin API: architecture/plugin-api.md
+  - Reference:
+      - Language: reference/language.md
+      - CLI: reference/cli.md
+      - Project layout: reference/project-layout.md
+      - File formats: reference/file-formats.md
+      - Semantic layer: reference/semantic-layer.md
+      - Connectors: reference/connectors.md
+      - Compatibility: reference/compatibility.md
+  - Community:
+      - Contributing: https://github.com/duckcode-ai/dql/blob/main/CONTRIBUTING.md
+      - Roadmap: https://github.com/duckcode-ai/dql/blob/main/ROADMAP.md
+      - Support & triage: https://github.com/duckcode-ai/dql/blob/main/SUPPORT.md
+      - Manifest spec: https://github.com/duckcode-ai/manifest-spec
+      - DataLex (sister repo): https://github.com/duckcode-ai/DataLex
