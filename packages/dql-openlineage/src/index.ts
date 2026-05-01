@@ -131,3 +131,15 @@ export class OpenLineageEmitter {
 export function createEmitter(cfg: EmitterConfig = {}): OpenLineageEmitter {
   return new OpenLineageEmitter(resolveConfig(cfg));
 }
+
+export {
+  buildEventsFromManifest,
+  datasetNames,
+  emitProjectSnapshot,
+  jobNames,
+  type BuildEventsOptions,
+  type ManifestBlockProjection,
+  type ManifestDataLexContractProjection,
+  type ManifestDbtModelProjection,
+  type ManifestProjection,
+} from './manifest-events.js';
