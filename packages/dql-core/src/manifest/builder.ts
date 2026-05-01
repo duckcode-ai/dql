@@ -10,6 +10,7 @@ import { readdirSync, readFileSync, existsSync, statSync } from 'node:fs';
 import { join, extname, relative } from 'node:path';
 import { Parser } from '../parser/index.js';
 import { extractTablesFromSql } from '../lineage/sql-parser.js';
+import { extractColumnLineage } from '../lineage/column-lineage.js';
 import { buildLineageGraph } from '../lineage/builder.js';
 import { detectDomainFlows, getDomainTrustOverview } from '../lineage/domain-lineage.js';
 import { loadSemanticLayerFromDir } from '../semantic/index.js';
@@ -352,6 +353,7 @@ function scanBlocks(
 
           const sql = block.query?.rawSQL ?? '';
           const parseResult = extractTablesFromSql(sql);
+          const columnLineage = sql ? extractColumnLineage(sql) : null;
           const domain = extractProp(block, 'domain');
           const owner = extractProp(block, 'owner');
           const description = extractProp(block, 'description');
@@ -393,6 +395,15 @@ function scanBlocks(
             businessRules: agent.businessRules,
             caveats: agent.caveats,
             datalexContract: typeof block.datalexContract === 'string' ? block.datalexContract : undefined,
+            outputs: columnLineage?.parsed && columnLineage.columns.length > 0
+              ? columnLineage.columns.map((c) => ({
+                  name: c.name,
+                  isAggregate: c.isAggregate,
+                  aggregateFn: c.aggregateFn,
+                  sources: c.sources,
+                  unresolved: c.unresolved,
+                }))
+              : undefined,
           };
         }
       } catch (err) {
