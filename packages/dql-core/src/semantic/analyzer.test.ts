@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { parse } from '../parser/parser.js';
 import { analyze } from './analyzer.js';
+import { DataLexContractRegistry } from '../contracts/index.js';
 
 describe('SemanticAnalyzer', () => {
   it('reports no errors for valid chart with required args', () => {
@@ -755,5 +756,130 @@ describe('BlockDecl — blockType validation', () => {
       parseErrors = 1;
     }
     expect(parseErrors).toBeGreaterThanOrEqual(1);
+  });
+});
+
+describe('SemanticAnalyzer — datalex_contract resolution (Phase 2.1)', () => {
+  const buildRegistry = () => {
+    return new DataLexContractRegistry({
+      manifest: {
+        manifestSpecVersion: '1.0.0',
+        datalexVersion: '1.8.2',
+        generatedAt: '2026-05-01T12:00:00Z',
+        project: { name: 'test_project', dialect: 'duckdb' },
+        domains: [
+          {
+            name: 'commerce',
+            entities: [
+              {
+                name: 'Customer',
+                contracts: [
+                  {
+                    id: 'commerce.Customer.monthly_active_customers',
+                    name: 'monthly_active_customers',
+                    version: 1,
+                  },
+                  {
+                    id: 'commerce.Customer.monthly_active_customers',
+                    name: 'monthly_active_customers',
+                    version: 2,
+                  },
+                ],
+              },
+            ],
+          },
+        ],
+      },
+    });
+  };
+
+  const certifiedBlockSource = (datalexContract: string) => `
+    block "Monthly Active Customers" {
+      domain = "customer"
+      type = "custom"
+      status = "certified"
+      datalex_contract = "${datalexContract}"
+      owner = "growth@example.com"
+      query = """SELECT 1"""
+    }
+  `;
+
+  it('parses datalex_contract as a first-class block field', () => {
+    const ast = parse(certifiedBlockSource('commerce.Customer.monthly_active_customers'));
+    const block = ast.statements.find((s) => s.kind === 'BlockDecl') as any;
+    expect(block.datalexContract).toBe('commerce.Customer.monthly_active_customers');
+  });
+
+  it('warns once when no DataLex registry is loaded', () => {
+    const ast = parse(certifiedBlockSource('commerce.Customer.monthly_active_customers'));
+    const diagnostics = analyze(ast);
+    const warnings = diagnostics.filter((d) => d.severity === 'warning');
+    expect(warnings.some((w) => w.message.includes('no DataLex manifest is loaded'))).toBe(true);
+  });
+
+  it('passes when a certified block references a known contract', () => {
+    const ast = parse(certifiedBlockSource('commerce.Customer.monthly_active_customers@2'));
+    const diagnostics = analyze(ast, { datalexRegistry: buildRegistry() });
+    const errors = diagnostics.filter((d) => d.severity === 'error');
+    expect(errors.filter((e) => e.message.includes('datalex_contract'))).toEqual([]);
+  });
+
+  it('errors when a certified block references an unknown contract id', () => {
+    const ast = parse(certifiedBlockSource('commerce.Customer.does_not_exist'));
+    const diagnostics = analyze(ast, { datalexRegistry: buildRegistry() });
+    const errors = diagnostics.filter((d) => d.severity === 'error');
+    expect(errors.some((e) => e.message.includes('not found'))).toBe(true);
+  });
+
+  it('errors when a certified block pins a missing version', () => {
+    const ast = parse(certifiedBlockSource('commerce.Customer.monthly_active_customers@99'));
+    const diagnostics = analyze(ast, { datalexRegistry: buildRegistry() });
+    const errors = diagnostics.filter((d) => d.severity === 'error');
+    expect(errors.some((e) => e.message.includes('pinned version is missing'))).toBe(true);
+    expect(errors.some((e) => e.message.includes('available'))).toBe(true);
+  });
+
+  it('errors when the contract reference syntax is malformed (certified block)', () => {
+    const ast = parse(certifiedBlockSource('not-a-valid-ref'));
+    const diagnostics = analyze(ast, { datalexRegistry: buildRegistry() });
+    const errors = diagnostics.filter((d) => d.severity === 'error');
+    expect(errors.some((e) => e.message.includes('not a valid contract reference'))).toBe(true);
+  });
+
+  it('downgrades to warning for draft blocks (work-in-progress is fine)', () => {
+    const draftSource = `
+      block "Draft Block" {
+        domain = "customer"
+        type = "custom"
+        status = "draft"
+        datalex_contract = "commerce.Customer.does_not_exist"
+        owner = "growth@example.com"
+        query = """SELECT 1"""
+      }
+    `;
+    const ast = parse(draftSource);
+    const diagnostics = analyze(ast, { datalexRegistry: buildRegistry() });
+    const errors = diagnostics.filter((d) => d.severity === 'error');
+    const warnings = diagnostics.filter((d) => d.severity === 'warning');
+    expect(errors.filter((e) => e.message.includes('datalex_contract'))).toEqual([]);
+    expect(warnings.some((w) => w.message.includes('not found'))).toBe(true);
+  });
+
+  it('produces no contract diagnostics when the block omits datalex_contract', () => {
+    const source = `
+      block "Plain Certified Block" {
+        domain = "customer"
+        type = "custom"
+        status = "certified"
+        owner = "growth@example.com"
+        query = """SELECT 1"""
+      }
+    `;
+    const ast = parse(source);
+    const diagnostics = analyze(ast, { datalexRegistry: buildRegistry() });
+    const contractDiagnostics = diagnostics.filter((d) =>
+      d.message.includes('datalex_contract'),
+    );
+    expect(contractDiagnostics).toEqual([]);
   });
 });

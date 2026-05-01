@@ -31,6 +31,22 @@ export async function queryViaBlock(
     };
   }
 
+  // v1.6 — DataLex contract enforcement (the wedge).
+  // When a certified block declares datalex_contract, refuse the call if
+  // the reference doesn't resolve in the project's loaded DataLex
+  // manifest. We do NOT fail when no manifest is loaded — projects that
+  // haven't adopted DataLex still work; the analyzer separately surfaces a
+  // warning at compile time so the user is aware.
+  const datalexContract = (block as { datalexContract?: string }).datalexContract;
+  if (datalexContract && ctx.datalexRegistry.isLoaded()) {
+    const resolution = ctx.datalexRegistry.resolve(datalexContract);
+    if (!resolution.ok) {
+      return {
+        error: `Block "${args.name}" references DataLex contract "${datalexContract}" which ${resolution.reason === 'not_found' ? 'is not in the loaded DataLex manifest' : resolution.reason === 'version_mismatch' ? `pins a version that does not exist (available: ${(resolution.availableVersions ?? []).join(', ')})` : `is malformed (${resolution.message})`}. Refusing to serve until the contract resolves.`,
+      };
+    }
+  }
+
   const base = args.serverUrl ?? process.env.DQL_RUNTIME_URL ?? 'http://127.0.0.1:3474';
   const url = `${base.replace(/\/$/, '')}/api/notebook/execute`;
   let source: string;

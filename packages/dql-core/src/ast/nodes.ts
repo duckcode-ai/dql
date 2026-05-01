@@ -311,6 +311,15 @@ export interface BlockDeclNode extends BaseNode {
    * agent's "block-first" matcher all read this.
    */
   status?: string;
+  /**
+   * v1.6 — DataLex contract reference. Format:
+   * `<domain>.<Entity>.<contract_name>` with optional `@<version>` suffix.
+   * The compile-time check resolves this against the project's DataLex
+   * manifest (see contracts/registry.ts) and emits diagnostics for
+   * not_found / version_mismatch / malformed_ref. Required link to the
+   * manifest-spec interop pattern; see docs/interop.md.
+   */
+  datalexContract?: string;
 }
 
 export interface BlockParamsNode extends BaseNode {

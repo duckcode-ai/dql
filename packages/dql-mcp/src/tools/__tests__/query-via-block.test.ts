@@ -125,3 +125,124 @@ describe('queryViaBlock — certified-only enforcement (the wedge)', () => {
     delete process.env.DQL_RUNTIME_URL;
   });
 });
+
+describe('queryViaBlock — DataLex contract enforcement (Phase 2.1 wedge)', () => {
+  let originalFetch: typeof globalThis.fetch;
+
+  beforeEach(() => {
+    originalFetch = globalThis.fetch;
+  });
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
+    vi.clearAllMocks();
+  });
+
+  // A registry shape sufficient for the tool — we stub it directly here
+  // so the test doesn't depend on the dql-core class wiring.
+  function fakeRegistry(behavior: 'ok' | 'not_found' | 'version_mismatch' | 'malformed') {
+    return {
+      isLoaded: () => true,
+      resolve: () => {
+        if (behavior === 'ok') {
+          return {
+            ok: true,
+            contract: { id: 'commerce.Customer.mau', name: 'mau', version: 1 },
+            domain: 'commerce',
+            entity: 'Customer',
+          };
+        }
+        if (behavior === 'not_found') {
+          return {
+            ok: false,
+            reason: 'not_found',
+            message: 'No such contract.',
+            requestedRef: 'commerce.Customer.unknown',
+          };
+        }
+        if (behavior === 'version_mismatch') {
+          return {
+            ok: false,
+            reason: 'version_mismatch',
+            message: 'Pinned version missing.',
+            requestedRef: 'commerce.Customer.mau@99',
+            availableVersions: [1, 2],
+          };
+        }
+        return {
+          ok: false,
+          reason: 'malformed_ref',
+          message: 'invalid syntax',
+          requestedRef: 'bad-ref',
+        };
+      },
+      list: () => [],
+      reload: () => undefined,
+      loadDiagnostics: () => [],
+    };
+  }
+
+  it('serves the block when datalex_contract resolves cleanly', async () => {
+    const ctx = makeCtx(
+      {
+        'My Block': makeManifestBlock({ datalexContract: 'commerce.Customer.mau' }),
+      },
+      { datalexRegistry: fakeRegistry('ok') as never },
+    );
+    globalThis.fetch = vi.fn(async () => ({
+      ok: true,
+      json: async () => ({ result: { columns: [], rows: [{ x: 1 }], executionTime: 1 } }),
+    } as unknown as Response)) as unknown as typeof fetch;
+
+    const result = await queryViaBlock(ctx, { name: 'My Block' });
+    expect(result).toMatchObject({ block: 'My Block', rowCount: 1 });
+  });
+
+  it('refuses the block when the contract id is not found', async () => {
+    const ctx = makeCtx(
+      {
+        'My Block': makeManifestBlock({ datalexContract: 'commerce.Customer.unknown' }),
+      },
+      { datalexRegistry: fakeRegistry('not_found') as never },
+    );
+    const result = await queryViaBlock(ctx, { name: 'My Block' });
+    expect((result as { error: string }).error).toContain('not in the loaded DataLex manifest');
+    expect((result as { error: string }).error).toContain('Refusing to serve');
+  });
+
+  it('refuses the block when a pinned version is missing and surfaces availability', async () => {
+    const ctx = makeCtx(
+      {
+        'My Block': makeManifestBlock({ datalexContract: 'commerce.Customer.mau@99' }),
+      },
+      { datalexRegistry: fakeRegistry('version_mismatch') as never },
+    );
+    const result = await queryViaBlock(ctx, { name: 'My Block' });
+    expect((result as { error: string }).error).toContain('pins a version that does not exist');
+    expect((result as { error: string }).error).toContain('available: 1, 2');
+  });
+
+  it('refuses the block when the contract reference is malformed', async () => {
+    const ctx = makeCtx(
+      {
+        'My Block': makeManifestBlock({ datalexContract: 'bad-ref' }),
+      },
+      { datalexRegistry: fakeRegistry('malformed') as never },
+    );
+    const result = await queryViaBlock(ctx, { name: 'My Block' });
+    expect((result as { error: string }).error).toContain('malformed');
+  });
+
+  it('serves the block when no DataLex registry is loaded (project hasn\'t adopted DataLex)', async () => {
+    // makeCtx's default registry returns isLoaded() === false.
+    const ctx = makeCtx({
+      'My Block': makeManifestBlock({ datalexContract: 'commerce.Customer.mau' }),
+    });
+    globalThis.fetch = vi.fn(async () => ({
+      ok: true,
+      json: async () => ({ result: { columns: [], rows: [], executionTime: 0 } }),
+    } as unknown as Response)) as unknown as typeof fetch;
+
+    const result = await queryViaBlock(ctx, { name: 'My Block' });
+    expect((result as { block?: string }).block).toBe('My Block');
+  });
+});

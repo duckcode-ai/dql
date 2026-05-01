@@ -2,6 +2,7 @@ import { existsSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import {
   buildManifest,
+  DataLexContractRegistry,
   loadProjectConfig,
   resolveDbtManifestPath,
   SemanticLayer,
@@ -16,6 +17,12 @@ import {
 export interface DQLContextOptions {
   projectRoot: string;
   dqlVersion?: string;
+  /**
+   * Optional override for the DataLex manifest path. Defaults to
+   * `<projectRoot>/datalex-manifest.json`. The registry is consulted by
+   * tools that enforce datalex_contract bindings (e.g. query-via-block).
+   */
+  datalexManifestPath?: string;
 }
 
 /**
@@ -27,13 +34,17 @@ export interface DQLContextOptions {
 export class DQLContext {
   readonly projectRoot: string;
   private readonly dqlVersion: string;
+  private readonly datalexManifestPath: string;
   private _manifest: DQLManifest | null = null;
   private _semanticLayer: SemanticLayer | null = null;
   private _lineage: LineageGraph | null = null;
+  private _datalexRegistry: DataLexContractRegistry | null = null;
 
   constructor(options: DQLContextOptions) {
     this.projectRoot = options.projectRoot;
     this.dqlVersion = options.dqlVersion ?? 'mcp';
+    this.datalexManifestPath =
+      options.datalexManifestPath ?? join(options.projectRoot, 'datalex-manifest.json');
   }
 
   get manifest(): DQLManifest {
@@ -49,6 +60,22 @@ export class DQLContext {
   get lineageGraph(): LineageGraph {
     if (!this._lineage) this._lineage = buildGraphFromManifest(this.manifest);
     return this._lineage;
+  }
+
+  /**
+   * Lazily-loaded registry of DataLex contracts for enforcing
+   * `datalex_contract` references on certified blocks. Tools call
+   * `registry.isLoaded()` to check whether a manifest was found before
+   * gating on resolution; that lets MCP work in projects that haven't
+   * adopted DataLex yet.
+   */
+  get datalexRegistry(): DataLexContractRegistry {
+    if (!this._datalexRegistry) {
+      this._datalexRegistry = new DataLexContractRegistry({
+        manifestPath: this.datalexManifestPath,
+      });
+    }
+    return this._datalexRegistry;
   }
 
   refresh(): void {
@@ -78,6 +105,7 @@ export class DQLContext {
     }
 
     this._lineage = null;
+    this._datalexRegistry?.reload();
   }
 }
 

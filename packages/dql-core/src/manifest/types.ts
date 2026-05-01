@@ -112,6 +112,14 @@ export interface ManifestBlock {
   reviewCadence?: string;
   businessRules?: string[];
   caveats?: string[];
+  /**
+   * v1.6 — DataLex contract reference (`<domain>.<Entity>.<contract_name>`
+   * with optional `@<version>` suffix). When present, the compiler
+   * resolved it against the project's DataLex manifest. Unresolved or
+   * malformed references surface as analyzer diagnostics; see
+   * contracts/registry.ts.
+   */
+  datalexContract?: string;
 }
 
 // ---- Notebooks ----

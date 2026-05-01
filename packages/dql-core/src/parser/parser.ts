@@ -743,6 +743,11 @@ export class Parser {
     // matcher; the parser just needs to accept it as a valid top-level
     // property. Recognised values: BlockStatus union from dql-project.
     let status: string | undefined;
+    // v1.6 — DataLex contract reference. Identifier-keyed (no new lexer
+    // keyword needed). The semantic analyzer resolves the value against
+    // the project's DataLex manifest and emits diagnostics for unresolved
+    // / malformed references. See contracts/registry.ts.
+    let datalexContract: string | undefined;
 
     while (!this.check(TokenType.RightBrace) && !this.isAtEnd()) {
       if (this.check(TokenType.DomainKeyword)) {
@@ -833,6 +838,17 @@ export class Parser {
         status = val.value;
       } else if (
         this.check(TokenType.Identifier)
+        && this.current().value === 'datalex_contract'
+      ) {
+        // DataLex contract reference: <domain>.<Entity>.<contract_name>[@version].
+        // Resolved by the semantic analyzer against the project's DataLex
+        // manifest. Identifier-keyed to avoid a new lexer keyword.
+        this.advance();
+        this.expect(TokenType.Equals);
+        const val = this.expect(TokenType.StringLiteral);
+        datalexContract = val.value;
+      } else if (
+        this.check(TokenType.Identifier)
         && (this.current().value === 'llmContext'
           || this.current().value === 'invariants'
           || this.current().value === 'examples'
@@ -913,7 +929,7 @@ export class Parser {
         }
       } else {
         this.error(
-          `Unexpected token '${this.current().value}' inside block. Expected 'domain', 'type', 'status', 'metric', 'metrics', 'description', 'tags', 'owner', 'params', 'query', 'visualization', 'tests', 'llmContext', 'invariants', 'examples', 'businessOutcome', 'businessOwner', 'decisionUse', 'reviewCadence', 'businessRules', 'caveats', or '}'.`,
+          `Unexpected token '${this.current().value}' inside block. Expected 'domain', 'type', 'status', 'datalex_contract', 'metric', 'metrics', 'description', 'tags', 'owner', 'params', 'query', 'visualization', 'tests', 'llmContext', 'invariants', 'examples', 'businessOutcome', 'businessOwner', 'decisionUse', 'reviewCadence', 'businessRules', 'caveats', or '}'.`,
         );
         this.advance();
       }
@@ -953,6 +969,7 @@ export class Parser {
       businessRules,
       caveats,
       status,
+      datalexContract,
       span: this.makeSpan(start, this.previousSpan()),
     };
   }

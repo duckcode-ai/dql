@@ -392,6 +392,7 @@ function scanBlocks(
             reviewCadence: agent.reviewCadence,
             businessRules: agent.businessRules,
             caveats: agent.caveats,
+            datalexContract: typeof block.datalexContract === 'string' ? block.datalexContract : undefined,
           };
         }
       } catch (err) {
