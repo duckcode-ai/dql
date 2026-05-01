@@ -7,6 +7,8 @@ import { listMetrics, listMetricsInput, listDimensions, listDimensionsInput } fr
 import { lineageImpact, lineageImpactInput } from './tools/lineage-impact.js';
 import { certify, certifyInput } from './tools/certify.js';
 import { suggestBlock, suggestBlockInput } from './tools/suggest-block.js';
+import { queryViaMetadata, queryViaMetadataInput } from './tools/query-via-metadata.js';
+import { listProposals, listProposalsInput } from './tools/list-proposals.js';
 import { kgSearch, kgSearchInput, feedbackRecord, feedbackRecordInput } from './tools/kg.js';
 
 export interface CreateServerOptions {
@@ -22,10 +24,22 @@ export function createDQLMCPServer(options: CreateServerOptions = {}): McpServer
     { name: 'dql-mcp', version: options.version ?? '0.1.0' },
     {
       instructions:
-        'DQL exposes certified, git-versioned analytics blocks. Every answer you build ' +
-        'should be grounded in a block returned by search_blocks / get_block. Use ' +
-        'query_via_block to execute — never fabricate SQL. Use suggest_block when a ' +
-        'new question needs a new block; the governance gate returns which rules pass.',
+        'DQL exposes certified, git-versioned analytics blocks under graduated trust:\n' +
+        ' Tier 1 — Always try `query_via_block` first. It only serves blocks that are ' +
+        '`status = "certified"` AND have a resolved `datalex_contract`. The answer is ' +
+        'safe to ship to dashboards.\n' +
+        ' Tier 2 — When no certified block matches, call `query_via_metadata` with the ' +
+        'SQL you inferred from the manifest + dbt schema. The result is returned with ' +
+        '`uncertified: true` — surface that flag to the user verbatim. The proposal is ' +
+        'auto-saved as a draft block under blocks/_drafts/ for human certification.\n' +
+        ' Tier 3 — If the question is unanswerable from the available data, refuse and ' +
+        'tell the user why.\n' +
+        'Other tools support the loop: `search_blocks` / `get_block` to discover Tier-1 ' +
+        'matches, `list_proposals` to see the review queue, `suggest_block` to propose ' +
+        'a new block source-of-truth, `certify` to evaluate governance rules, ' +
+        '`lineage_impact` to trace upstream/downstream, `list_metrics` / ' +
+        '`list_dimensions` for the semantic layer. Never fabricate SQL outside ' +
+        '`query_via_metadata` — it captures provenance the human needs to certify.',
     },
   );
 
@@ -41,8 +55,30 @@ export function createDQLMCPServer(options: CreateServerOptions = {}): McpServer
   );
   server.registerTool(
     'query_via_block',
-    { description: 'Execute a certified block against the local DQL runtime.', inputSchema: queryViaBlockInput },
+    {
+      description:
+        'Tier-1 of graduated trust. Execute a certified block against the local DQL runtime. Refuses non-certified blocks AND certified blocks whose datalex_contract reference is unresolved. Always try this first; fall back to query_via_metadata only when this returns "no block named".',
+      inputSchema: queryViaBlockInput,
+    },
     async (args) => wrap(await queryViaBlock(ctx, args)),
+  );
+  server.registerTool(
+    'query_via_metadata',
+    {
+      description:
+        'Tier-2 of graduated trust. Use ONLY when query_via_block has no matching certified block. Provide the SQL you inferred from the manifest + dbt schema; the runtime executes it and returns the result with `uncertified: true`. The proposal is auto-saved as a draft block under blocks/_drafts/. Surface the `uncertified` flag verbatim and tell the user about the `dql certify --from-draft` command if they want the answer certified for next time.',
+      inputSchema: queryViaMetadataInput,
+    },
+    async (args) => wrap(await queryViaMetadata(ctx, args)),
+  );
+  server.registerTool(
+    'list_proposals',
+    {
+      description:
+        'List Tier-2 draft proposals from blocks/_drafts/ ordered by askedTimes DESC. Filter with askedAtLeastTimes / since. Use this to surface "questions that get asked repeatedly are good certify candidates" — the prioritization signal for the human review queue.',
+      inputSchema: listProposalsInput,
+    },
+    async (args) => wrap(listProposals(ctx, args)),
   );
   server.registerTool(
     'list_metrics',
@@ -66,7 +102,11 @@ export function createDQLMCPServer(options: CreateServerOptions = {}): McpServer
   );
   server.registerTool(
     'suggest_block',
-    { description: 'Write a proposed block to blocks/_drafts/ and return the governance gate result.', inputSchema: suggestBlockInput },
+    {
+      description:
+        'Write a curated proposed block to blocks/_drafts/ with a hand-shaped name + structure, plus the governance gate result. Use when proposing a SHARED building block on top of multiple Tier-2 proposals. For one-shot ad-hoc Tier-2 captures, use `query_via_metadata` instead — it auto-saves the draft.',
+      inputSchema: suggestBlockInput,
+    },
     async (args) => wrap(await suggestBlock(ctx, args)),
   );
   server.registerTool(

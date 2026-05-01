@@ -45,6 +45,9 @@ const HELP = `
     dql test <file.dql>             [deprecated] Use dql certify --connection instead
     dql validate [path]             Validate all DQL files and semantic references
     dql certify <file.dql>          Evaluate certification rules
+    dql certify --from-draft <path> Promote a Tier-2 draft block to certified
+                                    (auto-flips status, sets datalex_contract,
+                                     surfaces datalex-manifest.json patch)
     dql info <file.dql>             Show block metadata
     dql migrate <source>            Scaffold migration from looker/tableau/dbt/metabase/raw-sql
     dql migrate format [--check]    Upgrade all .dql/.dqlnb files to canonical format
@@ -83,6 +86,10 @@ const HELP = `
     --owner <name>                  Owner for new block scaffolds (default: current user)
     --query-only                    Create a query-only block without visualization
     --connection <driver|path>      Database connection for certify/test (e.g. duckdb, path/to/db)
+    --from-draft <path>             For "certify": promote a Tier-2 draft block to certified
+    --contract <id@version>         For "certify --from-draft": DataLex contract id (e.g. commerce.Customer.foo@1)
+    --open-pr                       For "certify --from-draft": push branch + open GitHub PR with the diff
+    --force                         For "certify --from-draft": overwrite an existing certified block
 `;
 
 function getVersion(): string {

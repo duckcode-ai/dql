@@ -105,6 +105,7 @@ nav:
       - FAQ: guides/faq.md
   - Architecture:
       - Overview: architecture/overview.md
+      - Graduated trust + promotion loop: architecture/graduated-trust.md
       - Lineage model: architecture/lineage-model.md
       - OpenLineage integration: architecture/openlineage.md
       - dbt integration: architecture/dbt-integration.md
