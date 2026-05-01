@@ -52,10 +52,11 @@ It's the consumption layer that pairs with [DataLex](datalex-and-dql.md): DataLe
 
 ## Five-minute path
 
-1. **[Quickstart](01-quickstart.md)** — the minimal happy path, runnable in <5 minutes.
-2. **[Concepts](02-concepts.md)** — blocks, apps, notebooks, certification, lineage.
-3. **[The DataLex + DQL stack](datalex-and-dql.md)** — how the wedge works end to end.
-4. **[Authoring blocks (guide)](guides/authoring-blocks.md)** — the patterns that make blocks LLM-friendly and certifiable.
+1. **[End-to-end DataLex + DQL tutorial](https://datalex.duckcode.ai/tutorials/datalex-plus-dql-end-to-end/)** — feel the wedge in 5 minutes using both example repos. The fastest way to understand the product.
+2. **[Quickstart](01-quickstart.md)** — the minimal DQL happy path, runnable in <5 minutes.
+3. **[Concepts](02-concepts.md)** — blocks, apps, notebooks, certification, lineage.
+4. **[The DataLex + DQL stack](datalex-and-dql.md)** — how the wedge works end to end.
+5. **[Authoring blocks (guide)](guides/authoring-blocks.md)** — the patterns that make blocks LLM-friendly and certifiable.
 
 ---
 
