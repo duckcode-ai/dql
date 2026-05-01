@@ -112,6 +112,28 @@ export interface ManifestBlock {
   reviewCadence?: string;
   businessRules?: string[];
   caveats?: string[];
+  /**
+   * v1.6 — DataLex contract reference (`<domain>.<Entity>.<contract_name>`
+   * with optional `@<version>` suffix). When present, the compiler
+   * resolved it against the project's DataLex manifest. Unresolved or
+   * malformed references surface as analyzer diagnostics; see
+   * contracts/registry.ts.
+   */
+  datalexContract?: string;
+  /**
+   * v1.6 — Column-level lineage for the block's SELECT output. Each entry
+   * names an output column and the source table.column refs it depends on
+   * (extracted via node-sql-parser). Unresolved entries (star expansion,
+   * complex expressions, etc.) are flagged so consumers can fall back to
+   * table-level lineage. See lineage/column-lineage.ts.
+   */
+  outputs?: Array<{
+    name: string;
+    isAggregate?: boolean;
+    aggregateFn?: string;
+    sources: Array<{ table: string; column: string }>;
+    unresolved?: boolean;
+  }>;
 }
 
 // ---- Notebooks ----

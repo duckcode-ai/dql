@@ -282,12 +282,26 @@ interface Scope {
 
 // ---- Analyzer ----
 
+export interface SemanticAnalyzerOptions {
+  /**
+   * Optional DataLex contract registry for resolving `datalex_contract`
+   * references on blocks. When omitted, the analyzer accepts any contract
+   * reference syntactically but emits a single project-level warning
+   * suggesting the user load a DataLex manifest. When provided, unresolved
+   * references on certified blocks become errors; on draft/review blocks
+   * they become warnings (per manifest-spec/docs/interop.md rule 5).
+   */
+  datalexRegistry?: import('../contracts/index.js').DataLexContractRegistry;
+}
+
 export class SemanticAnalyzer {
   private reporter: DiagnosticReporter;
   private scopes: Scope[] = [];
+  private datalexRegistry?: import('../contracts/index.js').DataLexContractRegistry;
 
-  constructor() {
+  constructor(options: SemanticAnalyzerOptions = {}) {
     this.reporter = new DiagnosticReporter();
+    this.datalexRegistry = options.datalexRegistry;
   }
 
   analyze(program: ProgramNode): Diagnostic[] {
@@ -410,6 +424,39 @@ export class SemanticAnalyzer {
       }
       this.validateSQLInterpolations(node.query);
       this.popScope();
+    }
+
+    // v1.6 — DataLex contract reference resolution.
+    // Resolution rules per manifest-spec/docs/interop.md:
+    //   - Malformed / unknown / version_mismatch refs are ERRORS for
+    //     certified blocks (the wedge requires this) and WARNINGS for
+    //     draft/review blocks (work-in-progress is fine).
+    //   - When no registry is configured, we don't fail compilation but
+    //     surface a single project-level warning so the user knows the
+    //     check was skipped.
+    if (node.datalexContract) {
+      const isCertified = node.status === 'certified';
+      if (!this.datalexRegistry || !this.datalexRegistry.isLoaded()) {
+        this.reporter.warning(
+          `Block "${node.name}" declares datalex_contract = "${node.datalexContract}", but no DataLex manifest is loaded — the contract reference cannot be verified. Load a DataLex manifest into the analyzer to enforce the binding.`,
+          node.span,
+        );
+      } else {
+        const result = this.datalexRegistry.resolve(node.datalexContract);
+        if (!result.ok) {
+          const severity = isCertified ? 'error' : 'warning';
+          const detail =
+            result.reason === 'not_found'
+              ? `not found in the loaded DataLex manifest`
+              : result.reason === 'version_mismatch'
+                ? `pinned version is missing (available: ${(result.availableVersions ?? []).join(', ')})`
+                : `is not a valid contract reference (${result.message})`;
+          this.reporter[severity](
+            `Block "${node.name}" datalex_contract = "${node.datalexContract}" ${detail}.`,
+            node.span,
+          );
+        }
+      }
     }
   }
 
@@ -738,7 +785,7 @@ export class SemanticAnalyzer {
   }
 }
 
-export function analyze(program: ProgramNode): Diagnostic[] {
-  const analyzer = new SemanticAnalyzer();
+export function analyze(program: ProgramNode, options: SemanticAnalyzerOptions = {}): Diagnostic[] {
+  const analyzer = new SemanticAnalyzer(options);
   return analyzer.analyze(program);
 }

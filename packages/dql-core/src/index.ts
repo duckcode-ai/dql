@@ -11,3 +11,4 @@ export * from './format/index.js';
 export * from './lineage/index.js';
 export * from './manifest/index.js';
 export * from './apps/index.js';
+export * from './contracts/index.js';

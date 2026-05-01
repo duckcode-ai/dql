@@ -6,6 +6,13 @@ export {
 } from './sql-parser.js';
 
 export {
+  extractColumnLineage,
+  type ColumnLineageEntry,
+  type ColumnLineageResult,
+  type ColumnSource,
+} from './column-lineage.js';
+
+export {
   resolveDependencies,
   getUpstream,
   getDownstream,
