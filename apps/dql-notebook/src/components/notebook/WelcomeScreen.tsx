@@ -1,8 +1,11 @@
 import type { Theme } from '../../themes/notebook-theme';
 import React, { useState } from 'react';
-import { useNotebook } from '../../store/NotebookStore';
+import { makeCell, useNotebook } from '../../store/NotebookStore';
 import { themes } from '../../themes/notebook-theme';
 import type { NotebookFile } from '../../store/types';
+import { isDqlCloudBuildMode } from '../../cloud/cloud-mode';
+import { api } from '../../api/client';
+import { parseNotebookFile } from '../../utils/parse-workbook';
 
 interface WelcomeScreenProps {
   onOpenFile: (file: NotebookFile) => void;
@@ -11,8 +14,31 @@ interface WelcomeScreenProps {
 export function WelcomeScreen({ onOpenFile }: WelcomeScreenProps) {
   const { state, dispatch } = useNotebook();
   const t = themes[state.themeMode];
+  const cloudBuildMode = isDqlCloudBuildMode();
 
   const recentFiles = state.files.slice(0, 3);
+
+  const createCloudNotebook = async () => {
+    const stamp = new Date().toISOString().slice(0, 19).replace(/[-T:]/g, '');
+    const name = `analysis-${stamp}`;
+    const result = await api.createNotebook(name, 'blank');
+    const file: NotebookFile = {
+      name: `${name}.dqlnb`,
+      path: result.path,
+      type: 'notebook',
+      folder: 'notebooks',
+      isNew: true,
+    };
+    const parsed = parseNotebookFile(result.path, result.content);
+    dispatch({ type: 'FILE_ADDED', file });
+    dispatch({
+      type: 'OPEN_FILE',
+      file,
+      cells: parsed.cells.length > 0 ? parsed.cells : [makeCell('sql')],
+      title: parsed.title || name,
+      metadata: parsed.metadata,
+    });
+  };
 
   return (
     <div
@@ -74,6 +100,7 @@ export function WelcomeScreen({ onOpenFile }: WelcomeScreenProps) {
               }}
             >
               DQL Notebook
+              {cloudBuildMode ? ' Workbench' : ''}
             </h1>
             <p
               style={{
@@ -83,7 +110,7 @@ export function WelcomeScreen({ onOpenFile }: WelcomeScreenProps) {
                 letterSpacing: '0.02em',
               }}
             >
-              Analytics as Code
+              {cloudBuildMode ? 'Governed analysis, validation, lineage, and certification' : 'Analytics as Code'}
             </p>
           </div>
         </div>
@@ -92,7 +119,7 @@ export function WelcomeScreen({ onOpenFile }: WelcomeScreenProps) {
         <div
           style={{
             display: 'grid',
-            gridTemplateColumns: 'repeat(3, 1fr)',
+            gridTemplateColumns: cloudBuildMode ? 'repeat(2, minmax(0, 1fr))' : 'repeat(3, 1fr)',
             gap: 16,
             width: '100%',
           }}
@@ -102,7 +129,10 @@ export function WelcomeScreen({ onOpenFile }: WelcomeScreenProps) {
             description="Start a fresh analysis with an empty notebook."
             icon={<NewIcon />}
             accent={t.accent}
-            onClick={() => dispatch({ type: 'OPEN_NEW_NOTEBOOK_MODAL' })}
+            onClick={() => {
+              if (cloudBuildMode) void createCloudNotebook();
+              else dispatch({ type: 'OPEN_NEW_NOTEBOOK_MODAL' });
+            }}
             t={t}
           />
 
@@ -112,18 +142,20 @@ export function WelcomeScreen({ onOpenFile }: WelcomeScreenProps) {
             t={t}
           />
 
-          <ActionCard
-            title="New Block"
-            description="Create a reusable SQL block file."
-            icon={<BlockIcon />}
-            accent="#ffc857"
-            onClick={() => dispatch({ type: 'OPEN_NEW_BLOCK_MODAL' })}
-            t={t}
-          />
+          {!cloudBuildMode && (
+            <ActionCard
+              title="New Block"
+              description="Create a reusable SQL block file."
+              icon={<BlockIcon />}
+              accent="#ffc857"
+              onClick={() => dispatch({ type: 'OPEN_NEW_BLOCK_MODAL' })}
+              t={t}
+            />
+          )}
         </div>
 
         {/* Quick tips */}
-        <div
+        {!cloudBuildMode && <div
           style={{
             width: '100%',
             borderRadius: 10,
@@ -181,7 +213,7 @@ export function WelcomeScreen({ onOpenFile }: WelcomeScreenProps) {
               </div>
             ))}
           </div>
-        </div>
+        </div>}
       </div>
     </div>
   );

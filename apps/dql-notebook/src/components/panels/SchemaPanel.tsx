@@ -6,6 +6,7 @@ import { themes } from '../../themes/notebook-theme';
 import { api } from '../../api/client';
 import type { SchemaColumn, GovernanceStatus } from '../../store/types';
 import { getTypeColor } from '../../utils/type-colors';
+import { isDqlCloudMode, openCloudObjectDetail } from '../../cloud/cloud-mode';
 
 function Skeleton({ t }: { t: Theme }) {
   return (
@@ -291,6 +292,7 @@ function TableRow({
   const { dispatch } = useNotebook();
   const [hovered, setHovered] = useState(false);
   const [loadingColumns, setLoadingColumns] = useState(false);
+  const cloudMode = isDqlCloudMode();
 
   const handleToggle = async () => {
     dispatch({ type: 'TOGGLE_SCHEMA_TABLE', tableName: table.name });
@@ -400,6 +402,27 @@ function TableRow({
             {table.columns.length}
           </span>
         )}
+        {cloudMode && (
+          <span
+            role="button"
+            tabIndex={0}
+            onClick={(event) => {
+              event.stopPropagation();
+              openCloudObjectDetail({ objectType: 'dbt_model', objectKey: table.name, label: table.name });
+            }}
+            title="Open table detail"
+            style={{
+              border: 'none',
+              background: 'transparent',
+              color: hovered ? t.accent : t.textMuted,
+              cursor: 'pointer',
+              fontSize: 11,
+              padding: '1px 4px',
+            }}
+          >
+            Detail
+          </span>
+        )}
       </button>
 
       {table.expanded && (
@@ -458,6 +481,7 @@ function ColumnRow({ col, t }: { col: SchemaColumn; t: Theme }) {
   const [hovered, setHovered] = useState(false);
   const [copied, setCopied] = useState(false);
   const typeColor = getTypeColor(col.type, t.accent);
+  const cloudMode = isDqlCloudMode();
 
   const handleCopy = async (e: React.MouseEvent) => {
     e.stopPropagation();
@@ -474,13 +498,16 @@ function ColumnRow({ col, t }: { col: SchemaColumn; t: Theme }) {
     <div
       onMouseEnter={() => setHovered(true)}
       onMouseLeave={() => setHovered(false)}
+      onClick={() => {
+        if (cloudMode) openCloudObjectDetail({ objectType: 'dbt_column', objectKey: col.name, label: col.name });
+      }}
       style={{
         display: 'flex',
         alignItems: 'center',
         gap: 8,
         padding: '4px 12px 4px 44px',
         background: hovered ? t.sidebarItemHover : 'transparent',
-        cursor: 'default',
+        cursor: cloudMode ? 'pointer' : 'default',
         transition: 'background 0.1s',
       }}
     >

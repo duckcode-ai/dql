@@ -13,6 +13,7 @@ import type { NotebookFile } from '../../store/types';
 
 interface SidebarProps {
   onOpenFile: (file: NotebookFile) => void;
+  fixed?: boolean;
 }
 
 const PANEL_TITLES: Record<string, string> = {
@@ -26,7 +27,7 @@ const PANEL_TITLES: Record<string, string> = {
   apps: 'Apps',
 };
 
-export function Sidebar({ onOpenFile }: SidebarProps) {
+export function Sidebar({ onOpenFile, fixed = false }: SidebarProps) {
   const { state, dispatch } = useNotebook();
   const t = themes[state.themeMode];
   const [collapseHover, setCollapseHover] = useState(false);
@@ -92,27 +93,29 @@ export function Sidebar({ onOpenFile }: SidebarProps) {
         >
           {PANEL_TITLES[panel ?? ''] ?? ''}
         </span>
-        <button
-          title="Collapse sidebar"
-          onClick={() => dispatch({ type: 'TOGGLE_SIDEBAR' })}
-          onMouseEnter={() => setCollapseHover(true)}
-          onMouseLeave={() => setCollapseHover(false)}
-          style={{
-            background: 'transparent',
-            border: 'none',
-            cursor: 'pointer',
-            color: collapseHover ? t.textPrimary : t.textMuted,
-            padding: '2px 4px',
-            borderRadius: 4,
-            fontSize: 14,
-            lineHeight: 1,
-            transition: 'color 0.15s',
-            display: 'flex',
-            alignItems: 'center',
-          }}
-        >
-          ‹
-        </button>
+        {!fixed && (
+          <button
+            title="Collapse sidebar"
+            onClick={() => dispatch({ type: 'TOGGLE_SIDEBAR' })}
+            onMouseEnter={() => setCollapseHover(true)}
+            onMouseLeave={() => setCollapseHover(false)}
+            style={{
+              background: 'transparent',
+              border: 'none',
+              cursor: 'pointer',
+              color: collapseHover ? t.textPrimary : t.textMuted,
+              padding: '2px 4px',
+              borderRadius: 4,
+              fontSize: 14,
+              lineHeight: 1,
+              transition: 'color 0.15s',
+              display: 'flex',
+              alignItems: 'center',
+            }}
+          >
+            ‹
+          </button>
+        )}
       </div>
 
       {/* Panel content */}

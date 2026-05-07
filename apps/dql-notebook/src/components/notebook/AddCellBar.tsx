@@ -19,6 +19,7 @@ import {
   FileText,
   Table,
 } from '@duckcodeailabs/dql-ui/icons';
+import { isDqlCloudBuildMode } from '../../cloud/cloud-mode';
 
 interface AddCellBarProps {
   afterId?: string;
@@ -76,7 +77,7 @@ export function AddCellBar({ afterId }: AddCellBarProps) {
     const cell = makeCell(type);
     dispatch({ type: 'ADD_CELL', cell, afterId });
     // SQL authors need the schema catalog visible to pick tables/columns.
-    if (type === 'sql') dispatch({ type: 'SET_SIDEBAR_PANEL', panel: 'schema' });
+    if (type === 'sql' && !isDqlCloudBuildMode()) dispatch({ type: 'SET_SIDEBAR_PANEL', panel: 'schema' });
     closeAll();
   };
 
@@ -269,4 +270,3 @@ function PaletteTile({
     </button>
   );
 }
-

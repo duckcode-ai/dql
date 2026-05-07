@@ -30,6 +30,7 @@ import { runAgent } from './commands/agent.js';
 import { runSlack } from './commands/slack.js';
 import { runVerify } from './commands/verify.js';
 import { runImport } from './commands/import.js';
+import { runCloud } from './commands/cloud.js';
 
 const HELP = `
   dql — DQL CLI
@@ -58,6 +59,12 @@ const HELP = `
     dql sync dbt [path]             Detect dbt manifest changes; report DQL cache status
     dql lineage [block] [path]      Answer-layer lineage analysis
     dql mcp [--http]                Run the DQL MCP server (stdio by default; --http = loopback)
+    dql cloud login <url>           Sign in to Datalex-Cloud and store a dlx_ token
+    dql cloud link <slug> <name>    Link the current project to a Cloud workspace + project
+    dql cloud push block <file>     Push a .dql block to Datalex-Cloud
+    dql cloud push manifest <file>  Push the dbt manifest.json to Datalex-Cloud
+    dql cloud push notebook <file>  Push a .dqlnb notebook to Datalex-Cloud
+    dql cloud whoami                Show current Cloud login
     dql app new|ls|show|build|reindex <name>
                                     Manage App artifacts (metadata, policies, dashboards, schedules)
     dql schedule list|run|start|status  Local scheduler for @schedule'd blocks (alerts + notifications)
@@ -192,6 +199,11 @@ async function main() {
         break;
       case 'verify':
         await runVerify(rest, flags);
+        break;
+      case 'cloud':
+        // First positional after `cloud` is the subcommand; pass the
+        // file (if any) and the rest through.
+        await runCloud(file ? [file, ...rest] : rest, flags);
         break;
       default:
         console.error(`Unknown command: ${command}. Run "dql --help" for usage.`);

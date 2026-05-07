@@ -1,6 +1,7 @@
 import { useEffect } from 'react';
 import { useNotebook } from '../store/NotebookStore';
 import { useQueryExecution } from './useQueryExecution';
+import { isDqlCloudBuildMode } from '../cloud/cloud-mode';
 
 /**
  * Global keyboard shortcuts for the notebook.
@@ -18,10 +19,12 @@ export function useKeyboardShortcuts() {
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
       const isMod = e.metaKey || e.ctrlKey;
+      const cloudBuildMode = isDqlCloudBuildMode();
 
       // Cmd/Ctrl+B: Toggle sidebar
       if (isMod && e.key === 'b' && !e.shiftKey) {
         e.preventDefault();
+        if (cloudBuildMode) return;
         dispatch({ type: 'TOGGLE_SIDEBAR' });
         return;
       }
@@ -38,6 +41,7 @@ export function useKeyboardShortcuts() {
       // Cmd/Ctrl+J: Toggle dev panel
       if (isMod && e.key === 'j' && !e.shiftKey) {
         e.preventDefault();
+        if (cloudBuildMode) return;
         dispatch({ type: 'TOGGLE_DEV_PANEL' });
         return;
       }
@@ -45,6 +49,7 @@ export function useKeyboardShortcuts() {
       // Cmd/Ctrl+D: Toggle dashboard mode
       if (isMod && e.key === 'd' && !e.shiftKey) {
         e.preventDefault();
+        if (cloudBuildMode) return;
         if (state.activeFile) {
           dispatch({ type: 'TOGGLE_DASHBOARD_MODE' });
         }

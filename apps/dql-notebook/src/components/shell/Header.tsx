@@ -7,6 +7,7 @@ import { serializeDqlNotebook } from '../../utils/parse-workbook';
 import { useQueryExecution } from '../../hooks/useQueryExecution';
 import { downloadDashboard } from '../../utils/export-dashboard';
 import { setBlockName } from '../../utils/block-studio';
+import { postDqlCloudEvent } from '../../cloud/cloud-mode';
 
 function DQLLogo({ t }: { t: Theme }) {
   return (
@@ -53,6 +54,7 @@ export function Header() {
   const [exportHover, setExportHover] = useState(false);
   const [exportDropdownOpen, setExportDropdownOpen] = useState(false);
   const exportDropdownRef = useRef<HTMLDivElement>(null);
+  const [sharedFlash, setSharedFlash] = useState(false);
   const titleInputRef = useRef<HTMLInputElement>(null);
   const currentDirty = state.mainView === 'block_studio' ? state.blockStudioDirty : state.notebookDirty;
   const inNotebookExecutionView = state.mainView === 'notebook';
@@ -151,6 +153,15 @@ export function Header() {
           : serializeDqlNotebook(state.notebookTitle, state.cells, state.notebookMetadata);
         await api.saveNotebook(state.activeFile.path, content);
         dispatch({ type: 'SET_NOTEBOOK_DIRTY', dirty: false });
+        if (state.activeFile.type === 'notebook') {
+          postDqlCloudEvent('dql.notebook.saved', {
+            name: state.notebookTitle || state.activeFile.name,
+            path: state.activeFile.path,
+            content,
+            visibility: 'private',
+            description: state.notebookMetadata.description,
+          });
+        }
       }
       setSavedFlash(true);
       setTimeout(() => setSavedFlash(false), 2000);
@@ -170,6 +181,40 @@ export function Header() {
     state.notebookMetadata,
     state.cells,
     dispatch,
+  ]);
+
+  const handleShareWithProject = useCallback(async () => {
+    if (!state.activeFile || state.activeFile.type !== 'notebook') return;
+    dispatch({ type: 'SET_SAVING', saving: true });
+    try {
+      const content = serializeDqlNotebook(state.notebookTitle, state.cells, state.notebookMetadata);
+      await api.saveNotebook(state.activeFile.path, content);
+      dispatch({ type: 'SET_NOTEBOOK_DIRTY', dirty: false });
+      const requestId = typeof crypto !== 'undefined' && 'randomUUID' in crypto
+        ? crypto.randomUUID()
+        : `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+      postDqlCloudEvent('dql.notebook.share', {
+        request_id: requestId,
+        name: state.notebookTitle || state.activeFile.name,
+        path: state.activeFile.path,
+        content,
+        visibility: 'shared',
+        description: state.notebookMetadata.description,
+      });
+      setSharedFlash(true);
+      setTimeout(() => setSharedFlash(false), 2200);
+    } catch (err) {
+      console.error('Share notebook failed:', err);
+    } finally {
+      dispatch({ type: 'SET_SAVING', saving: false });
+      setExportDropdownOpen(false);
+    }
+  }, [
+    dispatch,
+    state.activeFile,
+    state.cells,
+    state.notebookMetadata,
+    state.notebookTitle,
   ]);
 
   // Cmd/Ctrl+S keyboard shortcut
@@ -287,6 +332,26 @@ export function Header() {
             }}
           >
             {state.activeFile.type}
+          </span>
+        )}
+        {state.activeFile?.type === 'notebook' && (
+          <span
+            title="Save keeps this notebook private. Share with project makes it visible in Cloud shared notebooks and App notebook pickers."
+            style={{
+              fontSize: 10,
+              fontWeight: 700,
+              color: sharedFlash ? '#047857' : t.textMuted,
+              background: sharedFlash ? '#d1fae5' : t.btnBg,
+              border: `1px solid ${sharedFlash ? '#6ee7b7' : t.btnBorder}`,
+              borderRadius: 999,
+              padding: '2px 7px',
+              fontFamily: t.font,
+              textTransform: 'uppercase',
+              letterSpacing: '0.04em',
+              flexShrink: 0,
+            }}
+          >
+            {sharedFlash ? 'Shared' : 'Private draft'}
           </span>
         )}
         {state.activeFile && state.mainView !== 'connection' && state.mainView !== 'reference' ? (
@@ -619,6 +684,28 @@ export function Header() {
                 gap: 2,
               }}
             >
+              {state.activeFile?.type === 'notebook' && (
+                <>
+                  <ExportMenuItem
+                    label="Save private notebook"
+                    description="Keep research visible only to you and admins"
+                    t={t}
+                    onClick={() => {
+                      void handleSave();
+                      setExportDropdownOpen(false);
+                    }}
+                  />
+                  <ExportMenuItem
+                    label="Share with project"
+                    description="Make read-only evidence available for Apps"
+                    t={t}
+                    onClick={() => {
+                      void handleShareWithProject();
+                    }}
+                  />
+                  <div style={{ height: 1, background: t.headerBorder, margin: '3px 4px' }} />
+                </>
+              )}
               <ExportMenuItem
                 label="Export HTML"
                 description="Standalone dashboard"
