@@ -12,8 +12,11 @@ Every `.dql` file starts with a version header:
 ```dql
 // dql-format: 1
 
-block revenue_by_segment {
-  …
+block "Revenue by segment" {
+  domain = "finance"
+  type = "custom"
+  status = "draft"
+  query = """SELECT 1 AS revenue"""
 }
 ```
 
@@ -41,12 +44,12 @@ dql diff before.dql after.dql                              # two files directly
 Output:
 
 ```
-~ block revenue_by_segment
-    tags: ["revenue"] → ["revenue", "certified"]
+~ block "Revenue by segment"
+    tags: ["revenue"] -> ["revenue", "certified"]
     query:
       - group by segment
       + group by segment, region
-    visualization: bar → stacked-bar
+    visualization: bar -> stacked-bar
 ```
 
 Exits **1** on differences (scriptable like `git diff`).

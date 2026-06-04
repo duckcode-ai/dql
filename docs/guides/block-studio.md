@@ -50,7 +50,7 @@ Example:
 block "Daily Transaction Volume" {
   domain = "cards"
   type = "custom"
-  lifecycle = "draft"
+  status = "draft"
   description = "Daily card transaction volume."
   owner = "analytics"
   tags = ["cards", "daily"]
@@ -64,10 +64,10 @@ GROUP BY transaction_date
 ORDER BY transaction_date
 """
 
-  visualization = {
-    type = "line"
-    x = "transaction_date"
-    y = "transaction_volume"
+  visualization {
+    chart = "line"
+    x = transaction_date
+    y = transaction_volume
   }
 }
 ```
@@ -93,21 +93,16 @@ Example:
 block "Approval Rate by Region" {
   domain = "cards"
   type = "semantic"
-  lifecycle = "draft"
+  status = "draft"
   description = "Approval rate by region from the dbt semantic layer."
   owner = "analytics"
   tags = ["cards", "approval"]
 
   metric = "approval_rate"
-  dimensions = ["region"]
-  time_dimension = "transaction_date"
-  granularity = "day"
 
-  visualization = {
-    type = "line"
-    x = "transaction_date"
-    y = "approval_rate"
-    color = "region"
+  visualization {
+    chart = "single_value"
+    y = approval_rate
   }
 }
 ```

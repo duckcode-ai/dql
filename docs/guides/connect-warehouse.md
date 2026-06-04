@@ -1,6 +1,6 @@
-# Connect a warehouse
+# Connect a Warehouse
 
-> ~3 minutes · ends with a successful `dql test-connection`
+> ~3 minutes · ends with `dql doctor` confirming the configured connection
 
 DQL ships 15 drivers out of the box. Connections live in `dql.config.json` at
 the project root. Keep secrets in environment variables and reference them with
@@ -37,8 +37,9 @@ export PGPASSWORD=...
 ## 3. Verify
 
 ```bash
-dql test-connection
-# ✓ default (postgres) — 14 schemas, 312 tables
+dql doctor
+# Local query runtime
+# driver=postgres is available
 ```
 
 If that passes, the notebook and CLI resolve table references against this
@@ -65,6 +66,6 @@ select count(*) from analytics.orders
 
 ## Troubleshooting
 
-- **`connection refused`** — firewall, VPN, wrong host, or wrong port. `dql test-connection --debug` prints the resolved DSN with secrets redacted.
+- **`connection refused`** — firewall, VPN, wrong host, or wrong port. Run `dql doctor` after checking the resolved environment variables.
 - **`role does not have USAGE on schema`** — warehouse permissions. DQL needs `USAGE` on the schema and `SELECT` on queried objects.
 - **BigQuery service account** — set `GOOGLE_APPLICATION_CREDENTIALS` to the key file path; the driver auto-picks it up.

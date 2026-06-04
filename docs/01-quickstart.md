@@ -1,72 +1,82 @@
 # Quickstart
 
-> ~5 minutes · end with a working dashboard on the Jaffle Shop dataset
+> ~10 minutes · ends with a local App, certified blocks, a manifest, and lineage
 
-This is the demo gate for DQL. If anything below takes longer than expected or
-doesn't work verbatim, [open an issue](https://github.com/duckcode-ai/dql/issues/new) —
-we treat the quickstart as a contract.
+This is the OSS adoption path for DQL. It uses the Acme Bank template because it
+shows the complete local-first workflow: sample data, certified blocks, Apps,
+notebooks, `dql-manifest.json`, and lineage. No external warehouse, hosted
+account, SSO, or team RBAC is required.
 
-### Scaffold a project with Jaffle Shop seed data
+## 1. Scaffold Acme Bank
 
 ```bash
-npx create-dql-app@latest jaffle-demo
-cd jaffle-demo
+npx create-dql-app@latest acme-bank --template acme-bank
+cd acme-bank
 npm install
 ```
 
-No global install required — `create-dql-app` scaffolds the project and
-`npm install` installs the DQL CLI locally. See
-[Install](03-install.md) if you prefer a global `dql` binary or the
-[Docker option](03-install.md#option-a--docker-zero-local-toolchain--60-seconds)
-if you want zero local Node.
+The generated project installs the DQL CLI locally. You can use `npm run ...`
+without installing a global `dql` binary.
 
-You now have a DQL project wired to a DuckDB-backed Jaffle Shop — the same
-demo dataset dbt ships. No external warehouse needed.
+## 2. Check the local project
 
-### Start the notebook
+```bash
+npm run doctor
+```
+
+`dql doctor` verifies the local project shape, notebook assets, semantic layer,
+and default connection. It also prints the next commands for the local OSS
+workflow.
+
+## 3. Start the notebook
 
 ```bash
 npm run notebook
 ```
 
-The CLI starts a local server on **http://127.0.0.1:3474** and opens it in
-your browser.
+The CLI starts a local server on **http://127.0.0.1:3474** and opens the
+browser UI. Open **Apps** to inspect Acme's packaged dashboard pages, then open
+**Blocks** to inspect certified reusable blocks.
 
-> **Running in Docker?** From the project root:
-> `docker run --rm -it -p 127.0.0.1:3474:3474 -v "$PWD":/workspace duckcodeailabs/dql:latest`
-> serves the same notebook without installing anything locally. See
-> [Install · Option A](03-install.md#option-a--docker-zero-local-toolchain--60-seconds).
+## 4. Inspect and certify a block
 
-### Run the example notebook
-
-In the left sidebar, open `notebooks/jaffle-overview.dql`. Press **⌘↵** (or
-**Ctrl+Enter**) on each cell, top to bottom. You'll see:
-
-- a table of orders per customer
-- a line chart of daily revenue
-- a certified `revenue_by_segment` block
-- the lineage DAG, showing how those artifacts connect
-
-### Publish the dashboard
+The template ships with certified example blocks. To run the local certification
+gate for the cards KPI:
 
 ```bash
-dql compile dashboards/overview.dql --out build/
+npm run certify:cards
 ```
 
-Open `build/overview.html` — a fully static HTML dashboard, zero runtime
-dependencies, ready to drop on any web host.
+Certification in OSS is a local trust label. It checks required metadata, query
+execution, and test assertions, then marks blocks as reusable for local Apps,
+notebooks, and agent answers.
 
+## 5. Compile the manifest and view lineage
+
+```bash
+npm run compile
+npm run lineage
+```
+
+`dql compile` writes `dql-manifest.json`, the dbt-like artifact for this DQL
+project. It records blocks, notebooks, Apps, dashboard pages, semantic objects,
+sources, dbt imports when present, and lineage edges.
+
+`npm run lineage` summarizes how data flows from source CSV tables into certified
+blocks, dashboard pages, and Apps.
 
 ## Verify it worked
 
 You should have:
 
-- A running notebook at `http://127.0.0.1:3474`
-- `build/overview.html` rendering three charts + a lineage panel
-- `git status` showing only the files you touched (no churn)
+- A running local notebook at `http://127.0.0.1:3474`
+- Certified Acme blocks visible in Block Studio
+- `dql-manifest.json` written in the project root
+- Lineage showing source tables, blocks, dashboards, and Apps
 
 ## Where to go next
 
-- [Concepts](02-concepts.md) — the five words to understand DQL
-- [Connect your own warehouse](guides/connect-warehouse.md) — swap DuckDB for Postgres/Snowflake/BigQuery
-- [Import your dbt project](guides/import-dbt.md) — bring your existing manifest
+- [DQL in 5 concepts](04-dql-in-5-concepts.md)
+- [Block Studio dbt-first workflow](guides/block-studio.md)
+- [Import your dbt project](guides/import-dbt.md)
+- [Jaffle Shop walkthrough](guides/jaffle-shop.md)

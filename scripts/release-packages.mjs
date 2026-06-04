@@ -1,4 +1,4 @@
-import { readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { mkdir } from 'node:fs/promises';
 import { spawn } from 'node:child_process';
 import path from 'node:path';
@@ -109,6 +109,31 @@ function restoreOriginals(originals) {
   }
 }
 
+function pruneDistTestArtifacts(packageDir) {
+  const distDir = path.join(packageDir, 'dist');
+  if (!existsSync(distDir)) return;
+
+  const walk = (dir) => {
+    for (const entry of readdirSync(dir)) {
+      const abs = path.join(dir, entry);
+      const stat = statSync(abs);
+      if (stat.isDirectory()) {
+        if (entry === '__tests__') {
+          rmSync(abs, { recursive: true, force: true });
+          continue;
+        }
+        walk(abs);
+        continue;
+      }
+      if (/\.(test|spec)\.(js|js\.map|d\.ts|d\.ts\.map)$/.test(entry)) {
+        rmSync(abs, { force: true });
+      }
+    }
+  };
+
+  walk(distDir);
+}
+
 await mkdir(artifactsDir, { recursive: true });
 
 // Build everything first so the CLI tarball picks up a fresh notebook UI
@@ -127,6 +152,7 @@ let exitCode = 0;
 try {
   for (const relPath of packages) {
     const cwd = path.join(root, relPath);
+    pruneDistTestArtifacts(cwd);
     if (dryRun) {
       console.log(`\n==> Packing ${relPath}`);
       await run('pnpm', ['pack', '--pack-destination', artifactsDir], cwd);

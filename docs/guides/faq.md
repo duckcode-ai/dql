@@ -51,10 +51,11 @@ Yes. The useful entry points:
 - `@duckcodeailabs/dql-runtime` — browser runtime
 - `@duckcodeailabs/dql-connectors` — database drivers
 
-## Does `dql test` hit a real database?
+## Does certification hit a real database?
 
-Yes — assertions run against the configured connection. With no connection
-configured, `dql test` falls back to structural checks only.
+Yes. `dql certify <file.dql> --connection <driver>` runs block assertions
+against the configured connection. In generated OSS projects, prefer
+`dql validate` for structural checks and `dql certify` for the local trust gate.
 
 ## What's **not** in the open-source repo?
 

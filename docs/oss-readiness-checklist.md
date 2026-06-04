@@ -159,8 +159,9 @@ It is written as a practical maintainer checklist, not a marketing document.
 
 ## Current Release Decision
 
-The OSS release gates pass locally and against the published npm packages. npm
-latest is published and validated at `1.5.3`.
+The OSS release candidate gates pass locally for `1.6.1`. Re-run the published
+package smoke checks after publishing so `latest` is validated against the same
+version as the repo.
 
 Validated release gates:
 
@@ -169,13 +170,14 @@ Validated release gates:
   Apps dashboard/notebook smoke checks pass in the browser.
 - `dql preview` works for KPI, line chart, and RLS-decorated block examples.
 - `pnpm release:dry-run` completes successfully.
-- Published `npx @duckcodeailabs/dql-cli@latest --help` and
-  `npx create-dql-app@latest --help` resolve successfully.
-- Published `npx @duckcodeailabs/dql-cli@latest --version` reports `dql 1.5.3`
-  and `npx create-dql-app@latest --help` reports `create-dql-app 1.5.3`.
+- Local `node apps/cli/dist/index.js --help` and
+  `node apps/cli/dist/index.js --version` resolve successfully.
+- After publishing, verify `npx @duckcodeailabs/dql-cli@latest --version`
+  reports `dql 1.6.1` and `npx create-dql-app@latest --help` reports
+  `create-dql-app 1.6.1`.
 
 ## Recommended Next Actions
 
 1. Commit the OSS release candidate changes.
-2. Push `main` with the `1.5.3` release state.
-3. Tag the release and open the GitHub repo to public.
+2. Push `main` with the `1.6.1` release state.
+3. Publish/tag the release, smoke `latest`, then open the GitHub repo to public.

@@ -5,9 +5,10 @@ reads on github.com, in your editor, or in a terminal.
 
 ## New here? Read in order
 
-1. [Quickstart](./01-quickstart.md) — Jaffle Shop dashboard in under 5 minutes
-2. [Concepts](./02-concepts.md) — the five primitives (notebook, block, semantic layer, lineage, dashboard)
-3. [Install](./03-install.md) — npm (one path, every platform)
+1. [Quickstart](./01-quickstart.md) — Acme Bank local-first OSS workflow
+2. [DQL in 5 concepts](./04-dql-in-5-concepts.md) — Block, Certified Block, App, Manifest, Lineage
+3. [Concepts](./02-concepts.md) — the broader mental model
+4. [Install](./03-install.md) — npm and Docker paths
 
 ## Guides
 

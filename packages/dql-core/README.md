@@ -16,15 +16,17 @@ pnpm add @duckcodeailabs/dql-core
 import { parse, analyze } from '@duckcodeailabs/dql-core';
 
 const source = `
-block revenue_by_segment {
+block "Revenue by segment" {
+  domain = "finance"
   type = "custom"
-  title = "Revenue by Segment"
+  status = "draft"
+  description = "Revenue by segment."
 
-  query = <<SQL
+  query = """
     select segment, sum(revenue) as revenue
     from revenue
     group by 1
-  SQL
+  """
 }
 `;
 
@@ -43,5 +45,5 @@ console.log(diagnostics);
 
 ## Learn More
 
-- Language spec: [`../../docs/dql-language-spec.md`](../../docs/dql-language-spec.md)
+- Language reference: [`../../docs/reference/language.md`](../../docs/reference/language.md)
 - Root docs: [`../../README.md`](../../README.md)

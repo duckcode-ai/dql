@@ -139,6 +139,9 @@ export async function runCompile(
 
   console.log(`\n  DQL Compile — ${manifest.project}`);
   console.log('  ' + '='.repeat(50));
+  console.log('\n  Manifest:');
+  console.log('    dql-manifest.json is the dbt-like compiled artifact for this DQL project.');
+  console.log('    It records blocks, notebooks, Apps, dashboards, semantic objects, sources, dbt imports, and lineage.');
   console.log(`\n  Scanned:`);
   console.log(`    ${blockCount} block(s)`);
   console.log(`    ${notebookCount} notebook(s)`);

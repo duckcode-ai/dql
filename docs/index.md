@@ -6,86 +6,78 @@ hide:
 
 # DQL
 
-> **Analytics as code, with certification AI agents can't bypass.**
+> **Analytics as code for certified reusable blocks, Apps, and dbt-aware lineage.**
 
-DQL is a YAML-first analytics language. You write **blocks** (a single SQL or semantic query plus its metadata), compose them into **apps** and **notebooks**, and serve only **certified** answers to AI agents through the bundled **MCP server**. Every output column traces back to its source via column-level lineage.
+DQL OSS is a local-first, single-user workspace for turning analytics work into
+git-backed source artifacts. Blocks carry SQL or semantic intent, owner, domain,
+description, tests, chart config, and agent context. Apps package certified
+blocks into decision-facing dashboard pages and notebooks. `dql compile`
+generates a dbt-like manifest with lineage from sources and dbt models through
+blocks and Apps.
 
-It's the consumption layer that pairs with [DataLex](datalex-and-dql.md): DataLex defines business contracts above dbt, dbt transforms, DQL produces certified blocks below dbt, and AI tools query through the chain.
+No hosted account is required. Certification is a local trust label. Personas
+and policies are local previews, not hosted RBAC.
 
----
+## Start Here
+
+```bash
+npx create-dql-app@latest acme-bank --template acme-bank
+cd acme-bank
+npm install
+npm run doctor
+npm run notebook
+```
+
+Then run:
+
+```bash
+npm run certify:cards
+npm run compile
+npm run lineage
+```
 
 ## Why DQL
 
-- **Certification with teeth.** Every certified block can pin a `datalex_contract = "<id>@<version>"`; the compiler resolves it against your DataLex manifest at compile time and the MCP refuses to serve uncertified or contract-broken blocks at runtime.
-- **Column-level lineage out of the box.** Each block's compiled manifest shows every output column with its source `dbt.<model>.<column>` — feeds Marquez / DataHub / Atlan via OpenLineage with [one snapshot call](architecture/openlineage.md).
-- **Built for AI agents.** The MCP server (Anthropic Model Context Protocol) exposes search, query, suggest, certify, and lineage-impact tools. Cursor, Claude Code, Copilot — they call DQL directly.
-- **Apache 2.0 forever.** No closed-source language features. Hosting and multi-tenant come later in a separate commercial product; the language stays OSS.
+- **Certified blocks.** Save reusable answer units with metadata, tests, and
+  local trust status.
+- **Apps in git.** Package dashboard pages, notebooks, text, AI pins, and draft
+  blocks in local App folders.
+- **dbt-aware lineage.** Connect sources, dbt models, semantic metrics, DQL
+  blocks, dashboard pages, and Apps in `dql-manifest.json`.
+- **Agent-safe defaults.** Local agent and MCP tools prefer certified blocks and
+  label fallback generated SQL as uncertified.
+- **OSS boundary clarity.** Local single-user workflows are open source; hosted
+  auth, managed secrets, audit logs, organization RBAC, and approval workflows
+  are outside OSS.
 
----
+## Learn
 
-## Install
+1. [Quickstart](01-quickstart.md) — Acme Bank local-first workflow
+2. [DQL in 5 concepts](04-dql-in-5-concepts.md)
+3. [Block Studio](guides/block-studio.md)
+4. [Author a certified block](guides/authoring-blocks.md)
+5. [Import dbt](guides/import-dbt.md)
+6. [Jaffle Shop walkthrough](guides/jaffle-shop.md)
 
-=== "npm (CLI)"
-
-    ```bash
-    npm install -g @duckcodeailabs/dql-cli
-    dql --help
-    ```
-
-=== "Docker quickstart"
-
-    ```bash
-    git clone https://github.com/duckcode-ai/jaffle-shop-dql.git
-    cd jaffle-shop-dql
-    docker compose up
-    ```
-
-=== "MCP for AI agents"
-
-    Run the MCP server alongside your AI tool (Cursor, Claude Desktop, etc.):
-
-    ```bash
-    dql mcp serve --project /path/to/your/dql/project
-    ```
-
----
-
-## Five-minute path
-
-1. **[End-to-end DataLex + DQL tutorial](https://datalex.duckcode.ai/tutorials/datalex-plus-dql-end-to-end/)** — feel the wedge in 5 minutes using both example repos. The fastest way to understand the product.
-2. **[Quickstart](01-quickstart.md)** — the minimal DQL happy path, runnable in <5 minutes.
-3. **[Concepts](02-concepts.md)** — blocks, apps, notebooks, certification, lineage.
-4. **[The DataLex + DQL stack](datalex-and-dql.md)** — how the wedge works end to end.
-5. **[Authoring blocks (guide)](guides/authoring-blocks.md)** — the patterns that make blocks LLM-friendly and certifiable.
-
----
-
-## What ships in the box
+## What Ships
 
 ```mermaid
 flowchart LR
-    Project[".dql project"] --> Compiler[dql compile]
-    Compiler --> Manifest[dql-manifest.json]
-    Manifest --> MCP[dql-mcp server]
-    Manifest --> Apps[dql notebook + Apps]
-    Manifest --> OpenLineage[dql-openlineage emitter]
-    MCP --> Agents[Cursor / Claude Code / Copilot]
-    Apps --> Browser[Web UI]
-    OpenLineage --> Catalogs[Marquez / DataHub / Atlan]
+    Project["DQL project"] --> Compiler["dql compile"]
+    Compiler --> Manifest["dql-manifest.json"]
+    Manifest --> Lineage["dql lineage"]
+    Manifest --> MCP["dql mcp"]
+    Manifest --> Notebook["dql notebook + Apps"]
+    Blocks["Certified blocks"] --> Apps["Apps"]
+    Apps --> Notebook
 ```
 
 | Package | What it does |
 |---|---|
-| [`@duckcodeailabs/dql-cli`](https://www.npmjs.com/package/@duckcodeailabs/dql-cli) | The `dql` binary: compile, serve, mcp, lint, fmt |
-| [`@duckcodeailabs/dql-core`](https://www.npmjs.com/package/@duckcodeailabs/dql-core) | Lexer, parser, AST, semantic analyzer, manifest builder, contract registry, column-level lineage |
-| [`@duckcodeailabs/dql-mcp`](https://www.npmjs.com/package/@duckcodeailabs/dql-mcp) | MCP server with 9 tools (query-via-block, search-blocks, certify, lineage-impact, …) |
-| [`@duckcodeailabs/dql-lsp`](https://www.npmjs.com/package/@duckcodeailabs/dql-lsp) | LSP for `.dql` files — VS Code, Neovim, Helix |
-| [`@duckcodeailabs/dql-openlineage`](https://www.npmjs.com/package/@duckcodeailabs/dql-openlineage) | Emitter for OpenLineage events; one-shot project snapshot to Marquez |
+| [`@duckcodeailabs/dql-cli`](https://www.npmjs.com/package/@duckcodeailabs/dql-cli) | The `dql` binary: notebook, compile, validate, certify, lineage, MCP |
+| [`@duckcodeailabs/dql-core`](https://www.npmjs.com/package/@duckcodeailabs/dql-core) | Parser, formatter, semantic analyzer, manifest builder, lineage |
+| [`@duckcodeailabs/dql-mcp`](https://www.npmjs.com/package/@duckcodeailabs/dql-mcp) | MCP tools for certified block search, query, certification, and lineage |
+| [`@duckcodeailabs/dql-lsp`](https://www.npmjs.com/package/@duckcodeailabs/dql-lsp) | LSP for `.dql` files |
+| [`@duckcodeailabs/dql-openlineage`](https://www.npmjs.com/package/@duckcodeailabs/dql-openlineage) | OpenLineage project snapshot events |
 
----
-
-## Open source, in the open
-
-[GitHub](https://github.com/duckcode-ai/dql) · [Discord](https://discord.gg/Dnm6bUvk) · [Roadmap](https://github.com/duckcode-ai/dql/blob/main/ROADMAP.md) · [Manifest spec](https://github.com/duckcode-ai/manifest-spec)
-
-For the broader plan — DataLex pairing, the launch checklist, the federation architecture — see the [DataLex docs](https://datalex.duckcode.ai).
+[GitHub](https://github.com/duckcode-ai/dql) · [Roadmap](https://github.com/duckcode-ai/dql/blob/main/ROADMAP.md) · [Support](https://github.com/duckcode-ai/dql/blob/main/SUPPORT.md)

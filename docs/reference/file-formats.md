@@ -9,9 +9,11 @@ Canonical, git-friendly, version-headered.
 
 block "Revenue by Segment" {
   domain = "finance"
+  type = "custom"
+  status = "draft"
+  description = "Revenue by customer segment."
   owner = "analytics@company.com"
   tags = ["revenue"]
-  type = "custom"
 
   query = """
 SELECT segment, SUM(amount) AS revenue
@@ -19,10 +21,10 @@ FROM analytics.orders
 GROUP BY 1
 """
 
-  visualization = {
-    type = "bar"
-    x = "segment"
-    y = "revenue"
+  visualization {
+    chart = "bar"
+    x = segment
+    y = revenue
   }
 }
 ```

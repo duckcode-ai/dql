@@ -76,6 +76,7 @@ nav:
   - Home: index.md
   - Getting started:
       - Quickstart: 01-quickstart.md
+      - DQL in 5 concepts: 04-dql-in-5-concepts.md
       - Install: 03-install.md
       - Concepts: 02-concepts.md
       - The DataLex + DQL stack: datalex-and-dql.md

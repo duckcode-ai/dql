@@ -33,22 +33,22 @@ If you already have Node, scaffold a project and run the notebook with the
 project-local DQL CLI:
 
 ```bash
-npx create-dql-app@latest my-analytics
-cd my-analytics
+npx create-dql-app@latest acme-bank --template acme-bank
+cd acme-bank
 npm install
 npm run doctor
 npm run notebook
 ```
 
-Open **http://127.0.0.1:3474**. Use the Acme Bank template when you want the
-full Apps/persona/agent walkthrough:
+Open **http://127.0.0.1:3474**. Acme Bank is the flagship OSS walkthrough for
+certified blocks, Apps, notebooks, local personas, and lineage.
+
+Use the empty template when you want a blank project:
 
 ```bash
-npx create-dql-app@latest acme-bank --template acme-bank
-cd acme-bank
+npx create-dql-app@latest my-analytics --template empty
+cd my-analytics
 npm install
-npm run compile
-npm run app:build
 npm run notebook
 ```
 
@@ -115,7 +115,7 @@ Works on macOS, Linux, and Windows.
 
 ```bash
 dql --version
-# DQL 1.4.0 or later
+# dql 1.6.1 or later
 ```
 
 If you see the version number, jump to the [Quickstart →](01-quickstart.md).

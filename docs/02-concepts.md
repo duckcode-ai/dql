@@ -27,9 +27,10 @@ lineage, and governance metadata.
 ```dql
 block "Revenue by Segment" {
   domain = "finance"
+  type = "custom"
+  status = "draft"
   owner = "analytics@company.com"
   tags = ["revenue", "certified"]
-  type = "custom"
 
   query = """
 SELECT segment, SUM(amount) AS revenue
@@ -37,10 +38,10 @@ FROM analytics.orders
 GROUP BY 1
 """
 
-  visualization = {
-    type = "bar"
-    x = "segment"
-    y = "revenue"
+  visualization {
+    chart = "bar"
+    x = segment
+    y = revenue
   }
 }
 ```

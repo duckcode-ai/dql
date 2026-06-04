@@ -48,15 +48,17 @@ for a local LLM daemon.
 **npm** *(Node 20+ already installed)*
 
 ```bash
-npx create-dql-app@latest my-project
-cd my-project
+npx create-dql-app@latest acme-bank --template acme-bank
+cd acme-bank
 npm install
+npm run doctor
 npm run notebook
 ```
 
 The starter installs the DQL CLI locally as a dev dependency, so `npm run
 notebook`, `npm run compile`, and other scripts work without a global `dql`
-binary. Use `--template acme-bank` for the full Apps, lineage, and agent demo.
+binary. Acme Bank is the flagship OSS demo for certified blocks, Apps,
+notebooks, lineage, schedules, and local agent context.
 
 Either way, DuckDB runs in-memory. Drop a CSV into `data/`, query it, save a
 block, commit.
@@ -114,16 +116,16 @@ Quick links:
 - **Local policy + RLS preview** — optional single-user preview path for
   commercial governance patterns; `@rls("col", "{user.var}")` resolves at
   execution time from the active local persona when configured
-- **Agentic analytics** *(new in v1.4)* — `@duckcodeailabs/dql-agent` ships a
+- **Agentic analytics** — `@duckcodeailabs/dql-agent` ships a
   local SQLite + FTS5 knowledge graph, Skills, a block-first answer loop, and
   pluggable LLM providers (Claude / OpenAI / Gemini / local Ollama)
 - **MCP server** — 10 tools (`search_blocks`, `get_block`, `query_via_block`,
   `list_metrics`, `list_dimensions`, `lineage_impact`, `certify`,
   `suggest_block`, `kg_search`, `feedback_record`)
-- **Slack front-end** *(new in v1.4)* — `dql slack serve` runs a slash-command
+- **Slack front-end** — `dql slack serve` runs a slash-command
   bot answering via the same block-first loop, with feedback buttons that
   feed self-learning
-- **`dql verify`** *(new in v1.4)* — proves `dql-manifest.json` is reproducible
+- **`dql verify`** — proves `dql-manifest.json` is reproducible
   from source for CI gates
 - **Semantic layer** — import dbt metrics/dimensions; author your own
 - **Lineage DAG** — Domain · App · Dashboard · Block · metric · dbt model · source granularity with impact analysis

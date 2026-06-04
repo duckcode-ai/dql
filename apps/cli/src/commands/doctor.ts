@@ -78,12 +78,19 @@ export async function runDoctor(targetPath: string | null, flags: CLIFlags): Pro
   }
 
   const passed = checks.filter((check) => check.ok).length;
+  const nextSteps = [
+    'npm run notebook    # open the local DQL workspace',
+    'npm run validate    # check DQL files and semantic references',
+    'npm run compile     # write dql-manifest.json',
+    'npm run lineage     # inspect source -> block -> dashboard -> App lineage',
+  ];
 
   if (flags.format === 'json') {
     console.log(JSON.stringify({
       ok: passed === checks.length,
       projectRoot,
       checks,
+      nextSteps,
     }, null, 2));
     return;
   }
@@ -97,6 +104,13 @@ export async function runDoctor(targetPath: string | null, flags: CLIFlags): Pro
   }
   console.log('');
   console.log(`  Summary: ${passed}/${checks.length} checks passed`);
+  console.log('');
+  console.log('  Next local-first steps:');
+  for (const step of nextSteps) {
+    console.log(`    ${step}`);
+  }
+  console.log('');
+  console.log('  OSS note: certification, personas, and policies are local single-user trust previews.');
   console.log('');
 }
 
@@ -128,8 +142,10 @@ function checkDuckDBDependency(projectRoot: string): Check {
     const hasDuckDB = Boolean(pkg.dependencies?.duckdb || pkg.devDependencies?.duckdb);
     return {
       name: 'duckdb dependency',
-      ok: hasDuckDB,
-      detail: hasDuckDB ? 'duckdb listed in package.json' : 'add duckdb for file/duckdb local preview support',
+      ok: true,
+      detail: hasDuckDB
+        ? 'duckdb listed in package.json'
+        : 'provided by installed DQL CLI; runtime check below verifies availability',
     };
   } catch {
     return {

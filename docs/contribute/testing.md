@@ -1,53 +1,66 @@
 # Testing
 
-```bash
-pnpm test                   # everything
-pnpm -F @duckcodeailabs/dql-core test
-pnpm -F @duckcodeailabs/dql-compiler test
-```
-
-## Unit tests (Vitest)
-
-Every package has co-located `*.test.ts` files. Target is ≥80% coverage on
-`dql-core`, `dql-compiler`, `dql-governance`.
-
-## Golden-file tests
-
-Parser and lineage extractor run against a corpus of real-world SQL samples
-(CTEs, lateral joins, `QUALIFY`, dialect quirks). Snapshots live at
-`packages/dql-core/test/golden/`.
-
-Update snapshots deliberately:
+Run the same gates maintainers use for an OSS release candidate:
 
 ```bash
-pnpm -F @duckcodeailabs/dql-core test -- -u
+pnpm install --frozen-lockfile
+pnpm build
+pnpm test
+node scripts/check-doc-links.mjs
+pnpm release:dry-run
 ```
 
-## Connector cassettes
+## Unit and Package Tests
 
-Integration tests for each connector record real query/response pairs
-(sanitized) and replay them in CI. Live connectivity tests run nightly
-against an internal fixture warehouse.
+`pnpm test` runs the workspace package tests through Turbo. Coverage is focused
+on the surfaces that make DQL adoptable:
 
-## E2E (Playwright)
+- parser, formatter, semantic analysis, manifest, and lineage in `dql-core`
+- compiler/chart lowering in `dql-compiler`
+- certification and governance rules in `dql-governance`
+- project storage, manifest cache, persona preview, MCP tools, local agent, and
+  Slack formatting
+- CLI commands and local runtime helpers
+- `create-dql-app` scaffold smoke checks
 
-Runs the full Jaffle Shop happy path in a headless browser:
+## Template Adoption Checks
+
+The test suite verifies adoption-critical templates:
+
+- generated projects use the current `@duckcodeailabs/dql-cli` version
+- generated scripts avoid deprecated `dql test`
+- template `.dql` files use canonical syntax
+- Acme Bank compiles source-table -> block -> dashboard -> App lineage
+- an Acme certified block passes the local certifier with passing test results
+
+## Docs and Release Checks
+
+`node scripts/check-doc-links.mjs` validates relative markdown links under
+`docs/`.
+
+`pnpm release:dry-run` builds, tests, and packs every publishable package into
+`.release-artifacts/` without publishing.
+
+## Stress Test
+
+The synthetic dbt stress scripts are available for scale checks:
 
 ```bash
-pnpm -F @duckcodeailabs/dql-notebook-app test:e2e
+node scripts/bench/gen-dbt-project.mjs --models 4000 --out /tmp/stress
+DQL_CLI="node $PWD/apps/cli/dist/index.js" node scripts/bench/run-bench.mjs /tmp/stress
 ```
 
-## Stress test
+CI runs this on pushes to `main`, not on every PR.
 
-Synthetic 4,000-model dbt project generated in CI to catch scale regressions:
+## Browser E2E
 
-```bash
-pnpm bench:manifest
-```
-
-Gates: cold build `<30s`, warm rebuild `<2s`, lineage panel FPS `≥50`.
+A hard-gated Playwright happy path for notebook, Block Studio, certification,
+compile, and lineage is still a GA hardening item. Until it lands, public
+release language should say “release candidate” or “public beta,” not imply
+browser E2E coverage blocks merges.
 
 ## CI
 
-Every PR to `main` runs: lint + unit + golden + connector cassettes + E2E
-+ 4,000-model stress + docs link-check. Merges blocked on any failure.
+Required PR gates are build/test, scaffold smoke, docs link check, and DQL
+format check. Optional or future-hardening jobs must not be described as
+required until they are part of the `ci-ok` dependency chain.

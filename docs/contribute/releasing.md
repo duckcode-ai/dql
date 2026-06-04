@@ -1,52 +1,63 @@
 # Release process
 
-DQL uses a **single version across all publishable packages**. Dev
-convenience trumps the complexity of independent semver per package.
+DQL uses one version across OSS publishable packages. The current release path
+uses `scripts/release-packages.mjs`, which builds the workspace, rewrites
+`workspace:*` dependencies to concrete versions for packing/publishing, and
+restores the repo manifests afterward.
 
-## Cut a release
+## Cut a Release
+
+1. Update package versions and template CLI ranges to the target version.
+2. Update `CHANGELOG.md`, `ROADMAP.md`, and `docs/oss-readiness-checklist.md`.
+3. Run the release candidate gates:
 
 ```bash
-# 1. Bump every package.json in one go
-./scripts/bump-version.sh 0.12.0
-
-# 2. Build everything (tests run as part of `prepublishOnly`)
-pnpm -r --filter '@duckcodeailabs/*' \
-       --filter '!@duckcodeailabs/dql-notebook-app' \
-       --filter '!@duckcodeailabs/vscode-extension' build
-
-# 3. Publish (pnpm rewrites workspace:* specifiers — don't use npm publish)
-pnpm -r --filter '@duckcodeailabs/*' \
-       --filter '!@duckcodeailabs/dql-notebook-app' \
-       --filter '!@duckcodeailabs/vscode-extension' \
-       publish --access public --no-git-checks
-
-# 4. Commit + tag
-git commit -am "v0.12.0: release"
-git tag v0.12.0
-git push && git push --tags
-
-# 5. Draft GitHub release with CHANGELOG.md excerpt
-gh release create v0.12.0 --title "v0.12.0" --notes-from-tag
+pnpm install --frozen-lockfile
+pnpm build
+pnpm test
+node scripts/check-doc-links.mjs
+pnpm release:dry-run
 ```
 
-## Publishing gotchas
+4. Publish from a clean working tree:
 
-- **Use `pnpm publish`, not `npm publish`.** pnpm rewrites `workspace:*` to
-  the resolved version at publish time; npm doesn't, and the published
-  tarball fails with `EUNSUPPORTEDPROTOCOL`.
-- **The notebook app and VS Code extension aren't published to npm** —
-  the notebook is a private workspace artifact served by the CLI, and the
-  VS Code extension ships via the Marketplace. The `--filter '!…'`
-  exclusions above enforce that.
+```bash
+pnpm release:publish
+```
 
-## What ships in a release
+5. Tag and push:
+
+```bash
+git tag v1.6.1
+git push origin main
+git push origin v1.6.1
+```
+
+6. Smoke the published packages:
+
+```bash
+npx @duckcodeailabs/dql-cli@latest --version
+npx @duckcodeailabs/dql-cli@latest --help
+npx create-dql-app@latest --help
+```
+
+## Publishing Gotchas
+
+- Use the release script or `pnpm publish`, not raw `npm publish`; workspace
+  dependencies must be rewritten to concrete versions.
+- Keep generated templates on the same CLI range as the release.
+- The notebook React app is served by the CLI; the release script builds the
+  workspace before packing so the CLI ships fresh notebook assets.
+- The VS Code extension ships separately through the Marketplace.
+
+## What Ships
 
 | Artifact | Where |
 | --- | --- |
-| npm packages (11) | `npmjs.com/org/duckcodeailabs` |
+| npm packages | `npmjs.com/org/duckcodeailabs` |
+| `create-dql-app` templates | npm tarball |
+| Notebook app assets | bundled inside `@duckcodeailabs/dql-cli` |
 | VS Code extension | Marketplace |
-| Docs | `docs/` in this repo (rendered on github.com) |
+| Docs | `docs/` in this repo |
 
-Homebrew tap and desktop/Tauri binaries are not on the release path — the
-scaffolds in [`apps/desktop/`](../../apps/desktop/) are kept for future use
-but aren't exercised by CI. See [Install](../03-install.md#homebrew--desktop-bundles).
+Homebrew tap and desktop/Tauri binaries are not part of the OSS release path.

@@ -6,13 +6,15 @@
   "scripts": {
     "notebook": "dql notebook",
     "compile": "dql compile",
+    "lineage": "dql lineage",
     "app:build": "dql app build",
     "agent:reindex": "dql agent reindex",
     "verify": "dql verify .",
     "doctor": "dql doctor",
-    "test": "dql test"
+    "validate": "dql validate",
+    "certify:cards": "dql certify blocks/cards/card_approval_rate.dql --connection duckdb"
   },
   "devDependencies": {
-    "@duckcodeailabs/dql-cli": "^1.5.3"
+    "@duckcodeailabs/dql-cli": "^1.6.1"
   }
 }

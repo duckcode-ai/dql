@@ -5,9 +5,11 @@
   "scripts": {
     "notebook": "dql notebook",
     "compile": "dql compile",
-    "doctor": "dql doctor"
+    "lineage": "dql lineage",
+    "doctor": "dql doctor",
+    "validate": "dql validate"
   },
   "devDependencies": {
-    "@duckcodeailabs/dql-cli": "^1.5.3"
+    "@duckcodeailabs/dql-cli": "^1.6.1"
   }
 }

@@ -8,6 +8,7 @@ keeping all source artifacts in git.
 
 ```bash
 npm install
+npm run doctor
 npm run compile
 npm run app:build
 npm run notebook
@@ -62,7 +63,11 @@ AI-generated work waiting for review.
 ## Useful commands
 
 ```bash
+npm run doctor           # checks local project health and next steps
+npm run validate         # validates DQL files and semantic references
+npm run certify:cards    # runs local certification for the cards KPI block
 npm run compile          # writes dql-manifest.json
+npm run lineage          # summarizes source -> block -> dashboard -> App lineage
 npm run app:build        # validates Apps and dashboard references
 npm run agent:reindex    # builds the local SQLite/FTS agent knowledge graph
 npm run verify           # proves manifest output is reproducible

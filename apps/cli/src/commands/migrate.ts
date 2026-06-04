@@ -140,7 +140,8 @@ export async function runMigrate(file: string, flags: CLIFlags): Promise<void> {
   console.log('  Next steps:');
   console.log(`    1. Provide source files: dql migrate ${source} --input <path>`);
   console.log('    2. Review generated blocks in blocks/migrated/');
-  console.log('    3. Run: dql test blocks/migrated/example.dql');
+  console.log('    3. Run: dql validate blocks/migrated/example.dql');
+  console.log('    4. Run: dql certify blocks/migrated/example.dql --connection <driver>');
   console.log('    4. Commit and push for certification');
   console.log('');
 }
