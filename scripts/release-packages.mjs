@@ -7,9 +7,15 @@ import process from 'node:process';
 const root = process.cwd();
 const dryRun = process.argv.includes('--dry-run');
 const publish = process.argv.includes('--publish');
+const otpArgIndex = process.argv.findIndex((arg) => arg === '--otp');
+const otpEqualsArg = process.argv.find((arg) => arg.startsWith('--otp='));
+const otp = process.env.NPM_CONFIG_OTP
+  ?? process.env.npm_config_otp
+  ?? (otpArgIndex >= 0 ? process.argv[otpArgIndex + 1] : undefined)
+  ?? (otpEqualsArg ? otpEqualsArg.slice('--otp='.length) : undefined);
 
 if (!dryRun && !publish) {
-  console.error('Usage: node scripts/release-packages.mjs --dry-run | --publish');
+  console.error('Usage: node scripts/release-packages.mjs --dry-run | --publish [--otp <code>]');
   process.exit(1);
 }
 
@@ -158,7 +164,13 @@ try {
       await run('pnpm', ['pack', '--pack-destination', artifactsDir], cwd);
     } else {
       console.log(`\n==> Publishing ${relPath}`);
-      await run('pnpm', ['publish', '--access', 'public', '--no-git-checks'], cwd);
+      await run('pnpm', [
+        'publish',
+        '--access',
+        'public',
+        '--no-git-checks',
+        ...(otp ? ['--otp', otp] : []),
+      ], cwd);
     }
   }
 } catch (err) {
