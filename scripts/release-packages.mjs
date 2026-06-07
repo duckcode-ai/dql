@@ -41,6 +41,12 @@ const packages = [
 const artifactsDir = path.join(root, '.release-artifacts');
 
 async function run(command, args, cwd) {
+  const redactedArgs = args.map((arg, index) => {
+    if (arg === '--otp') return arg;
+    if (args[index - 1] === '--otp') return '***';
+    if (arg.startsWith('--otp=')) return '--otp=***';
+    return arg;
+  });
   await new Promise((resolve, reject) => {
     const child = spawn(command, args, {
       cwd,
@@ -50,7 +56,7 @@ async function run(command, args, cwd) {
     });
     child.on('exit', (code) => {
       if (code === 0) resolve();
-      else reject(new Error(`${command} ${args.join(' ')} failed in ${cwd} with exit code ${code}`));
+      else reject(new Error(`${command} ${redactedArgs.join(' ')} failed in ${cwd} with exit code ${code}`));
     });
     child.on('error', reject);
   });
