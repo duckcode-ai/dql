@@ -56,6 +56,19 @@ async function run(command, args, cwd) {
   });
 }
 
+async function packageVersionExists(packageName, version) {
+  return await new Promise((resolve) => {
+    const child = spawn('npm', ['view', `${packageName}@${version}`, 'version', '--silent'], {
+      cwd: root,
+      env: process.env,
+      stdio: ['ignore', 'ignore', 'ignore'],
+      shell: false,
+    });
+    child.on('exit', (code) => resolve(code === 0));
+    child.on('error', () => resolve(false));
+  });
+}
+
 /**
  * Replace all "workspace:*" dependency versions with the actual package version.
  * pnpm publish is supposed to do this automatically, but it doesn't always work
@@ -163,6 +176,11 @@ try {
       console.log(`\n==> Packing ${relPath}`);
       await run('pnpm', ['pack', '--pack-destination', artifactsDir], cwd);
     } else {
+      const pkg = JSON.parse(readFileSync(path.join(cwd, 'package.json'), 'utf-8'));
+      if (await packageVersionExists(pkg.name, pkg.version)) {
+        console.log(`\n==> Skipping ${relPath} (${pkg.name}@${pkg.version} already exists)`);
+        continue;
+      }
       console.log(`\n==> Publishing ${relPath}`);
       await run('pnpm', [
         'publish',
