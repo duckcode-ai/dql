@@ -41,8 +41,17 @@
         "block": { "blockId": "branch_deposit_leaders" },
         "viz": { "type": "table" },
         "title": "Branch Leaders"
+      },
+      {
+        "i": "semantic-deposit-segment",
+        "x": 0,
+        "y": 7,
+        "w": 6,
+        "h": 3,
+        "block": { "blockId": "deposit_balance_by_segment_semantic" },
+        "viz": { "type": "bar" },
+        "title": "Semantic Balance by Segment"
       }
     ]
   }
 }
-

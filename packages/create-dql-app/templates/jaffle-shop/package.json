@@ -13,5 +13,8 @@
   },
   "devDependencies": {
     "@duckcodeailabs/dql-cli": "^1.6.1"
+  },
+  "engines": {
+    "node": ">=20 <23"
   }
 }

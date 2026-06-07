@@ -251,6 +251,16 @@ function formatBlock(node: BlockDeclNode, level: number, state: FormatState): st
   if (node.invariants && node.invariants.length > 0) {
     lines.push(`${indent(level + 1, state)}invariants = [${node.invariants.map(quote).join(', ')}]`);
   }
+  if (node.blockType === 'semantic') {
+    if (node.metricsRef && node.metricsRef.length > 0) {
+      lines.push(`${indent(level + 1, state)}metrics = [${node.metricsRef.map(quote).join(', ')}]`);
+    } else if (node.metricRef !== undefined) {
+      lines.push(`${indent(level + 1, state)}metric = ${quote(node.metricRef)}`);
+    }
+    if (node.dimensionsRef !== undefined) {
+      lines.push(`${indent(level + 1, state)}dimensions = [${node.dimensionsRef.map(quote).join(', ')}]`);
+    }
+  }
 
   if (node.params) {
     lines.push(`${indent(level + 1, state)}params {`);

@@ -11,10 +11,19 @@
  * incremental rebuilders) can detect *which* files changed since last build
  * without reading every file's contents.
  */
-import Database from 'better-sqlite3';
 import { createHash } from 'node:crypto';
 import { readFileSync, statSync, mkdirSync, existsSync } from 'node:fs';
 import { dirname } from 'node:path';
+import { createRequire } from 'node:module';
+import type Database from 'better-sqlite3';
+
+const require = createRequire(import.meta.url);
+let databaseCtor: typeof Database | null = null;
+
+function loadDatabase(): typeof Database {
+  databaseCtor ??= require('better-sqlite3') as typeof Database;
+  return databaseCtor;
+}
 
 /** A tracked input file — the cache hashes its mtime+size cheaply, content on demand. */
 export interface TrackedFile {
@@ -61,6 +70,7 @@ export class ManifestCache {
 
   constructor(options: ManifestCacheOptions) {
     ensureDirExists(options.path);
+    const Database = loadDatabase();
     this.db = new Database(options.path);
     this.db.pragma('journal_mode = WAL');
     this.initSchema();

@@ -88,12 +88,16 @@ export interface ManifestBlock {
   metricRefs?: string[];
   /** @dim() references in SQL */
   dimensionRefs?: string[];
+  /** Semantic dimension references declared by a semantic block */
+  dimensionsRef?: string[];
   /** All upstream dependencies (tables + refs + semantic refs combined) */
   allDependencies: string[];
   /** Visualization chart type */
   chartType?: string;
   /** Metric reference for semantic blocks */
   metricRef?: string;
+  /** Metric references for semantic blocks */
+  metricsRef?: string[];
   /** Test assertions defined in the block */
   tests: string[];
   /** Tags from block metadata */

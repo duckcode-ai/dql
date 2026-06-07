@@ -24,6 +24,8 @@ export interface BuildExecutionPlanOptions {
   semanticLayer?: SemanticLayer;
   /** Driver name for SQL dialect selection (e.g. 'snowflake', 'bigquery'). */
   driver?: string;
+  /** Maps semantic table names to actual database table names, e.g. order_items -> dev.order_items. */
+  tableMapping?: Record<string, string>;
 }
 
 export function buildExecutionPlan(
@@ -66,7 +68,7 @@ export function buildExecutionPlan(
 
   // Semantic blocks: compose SQL from the semantic layer
   if (block.blockType === 'semantic') {
-    return buildSemanticPlan(block, options?.semanticLayer, options?.driver);
+    return buildSemanticPlan(block, options?.semanticLayer, options?.driver, options?.tableMapping);
   }
 
   if (block.blockType !== 'custom') {
@@ -162,6 +164,7 @@ function buildSemanticPlan(
   block: BlockDeclNode,
   semanticLayer?: SemanticLayer,
   driver?: string,
+  tableMapping?: Record<string, string>,
 ): NotebookExecutionPlan {
   if (!semanticLayer) {
     throw new Error(
@@ -178,6 +181,9 @@ function buildSemanticPlan(
     metrics.push(...block.metricsRef);
   } else if (block.metricRef) {
     metrics.push(block.metricRef);
+  }
+  if (block.dimensionsRef && block.dimensionsRef.length > 0) {
+    dimensions.push(...block.dimensionsRef);
   }
 
   // Also extract dimensions/metrics from block params if they reference names
@@ -197,7 +203,7 @@ function buildSemanticPlan(
     );
   }
 
-  const composed = semanticLayer.composeQuery({ metrics, dimensions, driver });
+  const composed = semanticLayer.composeQuery({ metrics, dimensions, driver, tableMapping });
   if (!composed) {
     throw new Error(
       `Could not compose SQL for semantic block "${block.name}". ` +

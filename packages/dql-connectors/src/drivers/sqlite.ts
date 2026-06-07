@@ -1,6 +1,15 @@
-import Database from 'better-sqlite3';
+import { createRequire } from 'node:module';
+import type Database from 'better-sqlite3';
 import type { DatabaseConnector, ConnectionConfig, TableInfo, ColumnInfo } from '../connector.js';
 import type { QueryResult, ColumnMeta, Row } from '../result-types.js';
+
+const require = createRequire(import.meta.url);
+let databaseCtor: typeof Database | null = null;
+
+function loadDatabase(): typeof Database {
+  databaseCtor ??= require('better-sqlite3') as typeof Database;
+  return databaseCtor;
+}
 
 export class SQLiteConnector implements DatabaseConnector {
   readonly driverName = 'sqlite';
@@ -8,6 +17,7 @@ export class SQLiteConnector implements DatabaseConnector {
 
   async connect(config: ConnectionConfig): Promise<void> {
     const filepath = config.filepath ?? config.database ?? ':memory:';
+    const Database = loadDatabase();
     this.db = new Database(filepath);
     this.db.pragma('journal_mode = WAL');
   }

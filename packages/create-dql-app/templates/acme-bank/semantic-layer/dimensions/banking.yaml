@@ -20,6 +20,20 @@ dimensions:
     table: customers
     domain: deposits
 
+  - name: deposit_segment
+    label: Deposit Segment
+    type: string
+    sql: segment
+    table: deposits
+    domain: deposits
+
+  - name: transaction_status
+    label: Transaction Status
+    type: string
+    sql: status
+    table: transactions
+    domain: cards
+
   - name: merchant_category
     label: Merchant Category
     type: string
@@ -33,4 +47,3 @@ dimensions:
     sql: risk_grade
     table: loans
     domain: lending
-

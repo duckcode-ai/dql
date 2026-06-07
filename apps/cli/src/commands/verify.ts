@@ -8,20 +8,55 @@
  */
 
 import { existsSync, readFileSync } from 'node:fs';
-import { join } from 'node:path';
-import { buildManifest, type DQLManifest } from '@duckcodeailabs/dql-core';
+import { join, resolve } from 'node:path';
+import { buildManifest, resolveDbtManifestPath, type DQLManifest } from '@duckcodeailabs/dql-core';
 import type { CLIFlags } from '../args.js';
-import { findProjectRoot } from '../local-runtime.js';
 
-export async function runVerify(_rest: string[], flags: CLIFlags): Promise<void> {
-  const projectRoot = findProjectRoot(process.cwd());
+export async function runVerify(
+  pathArg: string | null,
+  rest: string[],
+  flags: CLIFlags,
+): Promise<void> {
+  const allArgs = [...(pathArg ? [pathArg] : []), ...rest];
+  let dbtManifestPath: string | undefined;
+  const dbtIdx = allArgs.indexOf('--dbt-manifest');
+  if (dbtIdx >= 0 && allArgs[dbtIdx + 1]) {
+    dbtManifestPath = resolve(allArgs[dbtIdx + 1]);
+    if (!existsSync(dbtManifestPath)) {
+      throw new Error(`dbt manifest not found: ${dbtManifestPath}`);
+    }
+  }
+
+  let maxDbtHops: number | undefined;
+  const hopsIdx = allArgs.indexOf('--dbt-hops');
+  if (hopsIdx >= 0 && allArgs[hopsIdx + 1]) {
+    const parsed = Number.parseInt(allArgs[hopsIdx + 1], 10);
+    if (Number.isFinite(parsed) && parsed > 0) maxDbtHops = parsed;
+  }
+
+  const pathCandidates = allArgs.filter((a) => !a.startsWith('-'));
+  const filteredCandidates = pathCandidates
+    .filter((c) => dbtIdx < 0 || c !== allArgs[dbtIdx + 1])
+    .filter((c) => hopsIdx < 0 || c !== allArgs[hopsIdx + 1]);
+  const projectRoot = resolve(filteredCandidates[0] ?? '.');
   const manifestPath = join(projectRoot, 'dql-manifest.json');
   if (!existsSync(manifestPath)) {
     throw new Error(`dql-manifest.json not found at ${manifestPath}. Run \`dql compile\` first.`);
   }
 
+  let dqlVersion = '0.6.0';
+  try {
+    const pkgPath = join(import.meta.dirname ?? __dirname, '..', '..', 'package.json');
+    if (existsSync(pkgPath)) {
+      dqlVersion = JSON.parse(readFileSync(pkgPath, 'utf-8')).version ?? dqlVersion;
+    }
+  } catch { /* use default */ }
+
+  const resolvedDbt = resolveDbtManifestPath(projectRoot, dbtManifestPath);
+  if (resolvedDbt) dbtManifestPath = resolvedDbt;
+
   const onDisk = JSON.parse(readFileSync(manifestPath, 'utf-8')) as DQLManifest;
-  const fresh = buildManifest({ projectRoot });
+  const fresh = buildManifest({ projectRoot, dqlVersion, dbtManifestPath, maxDbtHops });
 
   const drift = diffManifest(onDisk, fresh);
   const json = (flags as { format?: string }).format === 'json';

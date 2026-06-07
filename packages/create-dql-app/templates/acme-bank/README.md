@@ -37,6 +37,12 @@ semantic-layer/          starter metric and dimension metadata
 | `lending` | Where is credit risk concentrated? | `loan_delinquency_by_region`, `high_risk_loan_exposure` |
 | `executive` | What should CXO leaders review this week? | `bank_health_scorecard` plus cited domain blocks |
 
+Semantic examples are included as runnable blocks:
+
+- `card_volume_by_status` uses `metric = "card_volume"` and `dimensions = ["transaction_status"]`.
+- `deposit_balance_by_segment_semantic` uses `metric = "deposit_balance"` and `dimensions = ["deposit_segment"]`.
+- `loan_outstanding_by_risk_grade` uses `metric = "loan_outstanding"` and `dimensions = ["risk_grade"]`.
+
 ## Apps
 
 | App | Audience | Homepage dashboard |

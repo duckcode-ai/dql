@@ -59,6 +59,16 @@
         "block": { "blockId": "fraud_by_merchant_recent" },
         "viz": { "type": "bar" },
         "title": "Fraud by Merchant"
+      },
+      {
+        "i": "semantic-volume-status",
+        "x": 0,
+        "y": 6,
+        "w": 6,
+        "h": 3,
+        "block": { "blockId": "card_volume_by_status" },
+        "viz": { "type": "bar" },
+        "title": "Semantic Card Volume by Status"
       }
     ]
   }

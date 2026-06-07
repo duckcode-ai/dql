@@ -106,13 +106,19 @@ block "Approval rate by region" {
   tags = ["cards", "approval"]
 
   metric = "approval_rate"
+  dimensions = ["region"]
 
   visualization {
-    chart = "single_value"
+    chart = "bar"
+    x = region
     y = approval_rate
   }
 }
 ```
+
+Use `metric = "name"` for one metric, or `metrics = ["metric_a", "metric_b"]`
+for a multi-metric semantic block. `dimensions = [...]` groups the semantic
+query by one or more semantic dimensions.
 
 ## References
 

@@ -1,0 +1,25 @@
+// dql-format: 1
+
+block "card_volume_by_status" {
+  domain = "cards"
+  type = "semantic"
+  status = "draft"
+  description = "Card transaction volume grouped by transaction status from the local semantic layer."
+  tags = ["cards", "semantic", "volume"]
+  owner = "mei.chen@acme-bank.com"
+  llmContext = "Use this semantic block when users ask for card volume split by approved versus declined transactions."
+  businessOutcome = "Show operational card volume distribution using a certified metric definition."
+  businessOwner = "Head of Cards"
+  decisionUse = "Use for daily operating review and decline-pressure triage."
+  reviewCadence = "monthly"
+  metric = "card_volume"
+  dimensions = ["transaction_status"]
+  visualization {
+    chart = "bar"
+    x = transaction_status
+    y = card_volume
+  }
+  tests {
+    assert row_count > 0
+  }
+}

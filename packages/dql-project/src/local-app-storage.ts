@@ -1,6 +1,15 @@
-import Database from 'better-sqlite3';
+import { createRequire } from 'node:module';
 import { dirname } from 'node:path';
 import { mkdirSync } from 'node:fs';
+import type Database from 'better-sqlite3';
+
+const require = createRequire(import.meta.url);
+let databaseCtor: typeof Database | null = null;
+
+function loadDatabase(): typeof Database {
+  databaseCtor ??= require('better-sqlite3') as typeof Database;
+  return databaseCtor;
+}
 
 export type LocalAppVisibility = 'mine' | 'shared' | 'template';
 export type LocalAiPinRefreshCadence = 'none' | 'daily';
@@ -96,6 +105,7 @@ export class LocalAppStorage {
 
   constructor(dbPath: string) {
     mkdirSync(dirname(dbPath), { recursive: true });
+    const Database = loadDatabase();
     this.db = new Database(dbPath);
     this.db.pragma('journal_mode = WAL');
     this.initSchema();

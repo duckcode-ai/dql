@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { SemanticLayer } from '@duckcodeailabs/dql-core';
 import { buildExecutionPlan } from './execute.js';
 
 describe('buildExecutionPlan', () => {
@@ -20,5 +21,49 @@ describe('buildExecutionPlan', () => {
     const plan = buildExecutionPlan({ id: 'cell-2', type: 'sql', title: 'Ad hoc', source: 'SELECT 1 AS ok' });
     expect(plan?.sql).toBe('SELECT 1 AS ok');
     expect(plan?.sqlParams).toEqual([]);
+  });
+
+  it('applies semantic table mapping when composing semantic block SQL', () => {
+    const semanticLayer = new SemanticLayer({
+      metrics: [{
+        name: 'revenue',
+        label: 'Revenue',
+        description: '',
+        domain: 'revenue',
+        sql: 'product_price',
+        type: 'sum',
+        table: 'order_items',
+      }],
+      dimensions: [{
+        name: 'item_food_flag',
+        label: 'Item food flag',
+        description: '',
+        domain: 'revenue',
+        sql: 'is_food_item',
+        type: 'boolean',
+        table: 'order_items',
+      }],
+    });
+
+    const plan = buildExecutionPlan({
+      id: 'cell-3',
+      type: 'dql',
+      title: 'Semantic revenue',
+      source: `block "Semantic Revenue" {
+  domain = "semantic"
+  type = "semantic"
+  status = "draft"
+  metric = "revenue"
+  dimensions = ["item_food_flag"]
+}`,
+    }, {
+      semanticLayer,
+      driver: 'duckdb',
+      tableMapping: { order_items: 'dev.order_items' },
+    });
+
+    expect(plan?.sql).toContain('FROM dev.order_items');
+    expect(plan?.sql).toContain('SUM(product_price) AS revenue');
+    expect(plan?.sql).toContain('is_food_item AS item_food_flag');
   });
 });

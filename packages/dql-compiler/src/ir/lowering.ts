@@ -815,11 +815,12 @@ function processSQL(
 
 function lowerBlockDecl(node: BlockDeclNode, _options: LoweringOptions): DashboardIR | null {
   // Semantic blocks: compose SQL from the semantic layer
-  if (!node.query && node.blockType === 'semantic' && node.metricRef) {
+  const metricRefs = node.metricsRef?.length ? node.metricsRef : (node.metricRef ? [node.metricRef] : []);
+  if (!node.query && node.blockType === 'semantic' && metricRefs.length > 0) {
     if (!_options.semanticLayer) return null;
     const composed = _options.semanticLayer.composeQuery({
-      metrics: [node.metricRef],
-      dimensions: [],
+      metrics: metricRefs,
+      dimensions: node.dimensionsRef ?? [],
       driver: _options.driver,
     });
     if (!composed) return null;

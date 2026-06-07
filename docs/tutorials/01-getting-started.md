@@ -12,7 +12,7 @@ certified banking blocks.
 
 ## Prerequisites
 
-- **Node.js** >= 18.19 (check: `node --version`)
+- **Node.js** 20 or 22 LTS (check: `node --version`)
 - **pnpm** >= 9 (`npm i -g pnpm` if you do not have it)
 - **git** (any modern version)
 - Optional for agent tutorials: `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`,

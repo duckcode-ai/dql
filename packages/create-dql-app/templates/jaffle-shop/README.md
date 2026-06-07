@@ -23,6 +23,12 @@ semantic-layer/        metrics + dimensions authored locally
 dashboards/            compiled static HTML dashboards (git-ignored)
 ```
 
+The starter includes both a custom SQL block and a semantic block:
+
+- `blocks/revenue_by_segment.dql` — custom SQL block.
+- `blocks/revenue_by_order_date_semantic.dql` — semantic metric block using
+  `metric = "revenue"` and `dimensions = ["order_date"]`.
+
 ## Using with dbt
 
 If your dbt project is a sibling (e.g. `../dbt`), it was auto-wired into

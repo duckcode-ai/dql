@@ -5,9 +5,18 @@
  * certified artifacts, semantic metadata, and dbt manifest facts above memory.
  */
 
-import Database from 'better-sqlite3';
 import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
+import { createRequire } from 'node:module';
+import type Database from 'better-sqlite3';
+
+const require = createRequire(import.meta.url);
+let databaseCtor: typeof Database | null = null;
+
+function loadDatabase(): typeof Database {
+  databaseCtor ??= require('better-sqlite3') as typeof Database;
+  return databaseCtor;
+}
 
 export type AgentMemoryScope = 'thread' | 'notebook' | 'project' | 'user' | 'artifact';
 
@@ -81,6 +90,7 @@ export class MemoryStore {
 
   constructor(dbPath: string) {
     mkdirSync(dirname(dbPath), { recursive: true });
+    const Database = loadDatabase();
     this.db = new Database(dbPath);
     this.db.pragma('journal_mode = WAL');
     this.initSchema();

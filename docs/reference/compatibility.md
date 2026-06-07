@@ -2,7 +2,7 @@
 
 ## Runtime
 
-- **Node.js** — 18, 20, or 22 (active LTS)
+- **Node.js** — 20 or 22 LTS. Node 23 is not supported for native local drivers.
 - **Package managers** — npm, pnpm, yarn all work for consuming published packages
 - **OS** — macOS, Linux, Windows
 
@@ -25,7 +25,7 @@ exploration, start with `duckdb` or `file`. See [Connectors](./connectors.md).
 ## What's in this repo
 
 - DQL language (parser, formatter, AST)
-- CLI (`init`, `notebook`, `compile`, `sync`, `diff`, `preview`, `serve`, `certify`, `test`, `fmt`, `doctor`)
+- CLI (`init`, `notebook`, `compile`, `sync`, `diff`, `preview`, `serve`, `certify`, `validate`, `fmt`, `doctor`)
 - Notebook UI (SQL + DQL cells, Block Studio, lineage panel, git panel, governed chat)
 - Apps, dashboard pages, attached notebooks, personal AI pins, and optional local persona/policy previews
 - Semantic layer (local YAML + dbt manifest and semantic manifest import)

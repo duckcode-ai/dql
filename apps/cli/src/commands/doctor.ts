@@ -35,6 +35,7 @@ export async function runDoctor(targetPath: string | null, flags: CLIFlags): Pro
 
   const checks: Check[] = [
     checkNodeVersion(),
+    checkProjectCliVersion(projectRoot),
     {
       name: 'Project root',
       ok: existsSync(projectRoot),
@@ -119,9 +120,85 @@ function checkNodeVersion(): Check {
   const major = match ? Number(match[1]) : 0;
   return {
     name: 'Node.js',
-    ok: major >= 18,
-    detail: `version=${process.versions.node} (requires >= 18)` ,
+    ok: major >= 20 && major < 23,
+    detail: `version=${process.versions.node} (requires Node 20 or 22 LTS; Node 23 is not supported for native local drivers)`,
   };
+}
+
+function checkProjectCliVersion(projectRoot: string): Check {
+  const packageJsonPath = join(projectRoot, 'package.json');
+  if (!existsSync(packageJsonPath)) {
+    return {
+      name: 'Project-local DQL CLI',
+      ok: true,
+      detail: 'no project package.json; skipping local CLI check',
+    };
+  }
+
+  let declared: string | undefined;
+  try {
+    const pkg = JSON.parse(readFileSync(packageJsonPath, 'utf-8')) as {
+      dependencies?: Record<string, string>;
+      devDependencies?: Record<string, string>;
+    };
+    declared = pkg.devDependencies?.['@duckcodeailabs/dql-cli'] ?? pkg.dependencies?.['@duckcodeailabs/dql-cli'];
+  } catch {
+    return {
+      name: 'Project-local DQL CLI',
+      ok: false,
+      detail: 'failed to parse package.json',
+    };
+  }
+
+  if (!declared) {
+    return {
+      name: 'Project-local DQL CLI',
+      ok: true,
+      detail: 'not declared in package.json (optional for non-scaffolded projects)',
+    };
+  }
+
+  const runningVersion = readRunningCliVersion();
+  const installedPackage = join(projectRoot, 'node_modules', '@duckcodeailabs', 'dql-cli', 'package.json');
+  if (!existsSync(installedPackage)) {
+    return {
+      name: 'Project-local DQL CLI',
+      ok: false,
+      detail: `package.json declares @duckcodeailabs/dql-cli ${declared}, but node_modules is missing. Run npm install, then npm run notebook or npx dql.`,
+    };
+  }
+
+  try {
+    const installed = JSON.parse(readFileSync(installedPackage, 'utf-8')) as { version?: string };
+    if (installed.version && runningVersion !== 'unknown' && installed.version !== runningVersion) {
+      return {
+        name: 'Project-local DQL CLI',
+        ok: false,
+        detail: `running dql ${runningVersion}, but project-local @duckcodeailabs/dql-cli is ${installed.version}. Use npm run notebook, npm run compile, or ./node_modules/.bin/dql.`,
+      };
+    }
+    return {
+      name: 'Project-local DQL CLI',
+      ok: true,
+      detail: `declared=${declared}, installed=${installed.version ?? 'unknown'}, running=${runningVersion}`,
+    };
+  } catch {
+    return {
+      name: 'Project-local DQL CLI',
+      ok: false,
+      detail: 'failed to parse project-local @duckcodeailabs/dql-cli/package.json',
+    };
+  }
+}
+
+function readRunningCliVersion(): string {
+  try {
+    const commandDir = dirname(fileURLToPath(import.meta.url));
+    const pkg = JSON.parse(readFileSync(join(commandDir, '../package.json'), 'utf-8')) as { version?: string };
+    return pkg.version ?? 'unknown';
+  } catch {
+    return 'unknown';
+  }
 }
 
 function checkDuckDBDependency(projectRoot: string): Check {

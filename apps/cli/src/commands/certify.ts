@@ -1,10 +1,11 @@
-import { readFileSync } from 'node:fs';
-import { Parser } from '@duckcodeailabs/dql-core';
+import { existsSync, readFileSync, readdirSync } from 'node:fs';
+import { join, resolve } from 'node:path';
+import { Parser, resolveSemanticLayerWithDiagnostics } from '@duckcodeailabs/dql-core';
 import { Certifier } from '@duckcodeailabs/dql-governance';
 import type { BlockRecord, TestResultSummary, TestAssertionResult } from '@duckcodeailabs/dql-project';
 import { QueryExecutor, type ConnectionConfig } from '@duckcodeailabs/dql-connectors';
 import { buildExecutionPlan, type NotebookCell } from '@duckcodeailabs/dql-notebook';
-import { loadProjectConfig, prepareLocalExecution } from '../local-runtime.js';
+import { loadProjectConfig, prepareLocalExecution, normalizeProjectConnection, resolveSemanticTableMapping } from '../local-runtime.js';
 import type { ProjectConfig } from '../local-runtime.js';
 import type { CLIFlags } from '../args.js';
 import { promoteFromDraft } from '../promote-from-draft.js';
@@ -67,7 +68,14 @@ async function runBlockTests(
 
   try {
     const cell: NotebookCell = { id: b.name, type: 'dql', source, title: b.name };
-    const plan = buildExecutionPlan(cell);
+    let semanticLayer = undefined;
+    const semanticResult = resolveSemanticLayerWithDiagnostics(projectConfig.semanticLayer, projectRoot);
+    if (semanticResult.errors.length === 0) {
+      semanticLayer = semanticResult.layer;
+    }
+    await registerDataViews(executor, connection, projectRoot, projectConfig);
+    const tableMapping = await resolveSemanticTableMapping(executor, connection, semanticLayer);
+    const plan = buildExecutionPlan(cell, { semanticLayer, driver: connection.driver, tableMapping });
     if (!plan) {
       return {
         passed: 0,
@@ -145,6 +153,30 @@ async function runBlockTests(
   };
 }
 
+async function registerDataViews(
+  executor: QueryExecutor,
+  connection: ConnectionConfig,
+  projectRoot: string,
+  projectConfig: ProjectConfig,
+): Promise<void> {
+  const normalized = normalizeProjectConnection(connection, projectRoot);
+  if (normalized.driver !== 'file' && normalized.driver !== 'duckdb') return;
+
+  const dataDir = projectConfig.dataDir
+    ? resolve(projectRoot, projectConfig.dataDir)
+    : join(projectRoot, 'data');
+  if (!existsSync(dataDir)) return;
+
+  for (const file of readdirSync(dataDir, { withFileTypes: true })) {
+    if (!file.isFile() || !/\.(csv|parquet)$/i.test(file.name)) continue;
+    const tableName = file.name.replace(/\.(csv|parquet)$/i, '');
+    const absPath = join(dataDir, file.name).replaceAll('\\', '/').replace(/'/g, "''");
+    const reader = file.name.endsWith('.parquet') ? 'read_parquet' : 'read_csv_auto';
+    const ddl = `CREATE OR REPLACE VIEW "${tableName}" AS SELECT * FROM ${reader}('${absPath}')`;
+    await executor.executeQuery(ddl, [], {}, normalized);
+  }
+}
+
 export async function runCertify(filePath: string, flags: CLIFlags): Promise<void> {
   // Tier-2 promotion: `dql certify --from-draft <path>` moves a draft to its
   // canonical certified location and surfaces the datalex-manifest.json patch.
@@ -188,7 +220,7 @@ export async function runCertify(filePath: string, flags: CLIFlags): Promise<voi
       id: 'local',
       name: b.name ?? 'unnamed',
       domain: b.domain ?? '',
-      type: b.type ?? '',
+      type: b.blockType ?? b.type ?? '',
       version: '0.0.0',
       status: 'draft',
       gitRepo: '',
@@ -201,6 +233,9 @@ export async function runCertify(filePath: string, flags: CLIFlags): Promise<voi
       usedInCount: 0,
       createdAt: new Date(),
       updatedAt: new Date(),
+      llmContext: b.llmContext,
+      examples: b.examples,
+      invariants: b.invariants,
     };
 
     // Run tests unless --skip-tests is set

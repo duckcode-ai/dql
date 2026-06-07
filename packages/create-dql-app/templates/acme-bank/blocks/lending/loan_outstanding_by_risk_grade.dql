@@ -1,0 +1,25 @@
+// dql-format: 1
+
+block "loan_outstanding_by_risk_grade" {
+  domain = "lending"
+  type = "semantic"
+  status = "draft"
+  description = "Outstanding loan balance grouped by risk grade from the local semantic layer."
+  tags = ["lending", "semantic", "risk"]
+  owner = "risk.analytics@acme-bank.com"
+  llmContext = "Use this semantic block when users ask for outstanding exposure by loan risk grade."
+  businessOutcome = "Reuse the certified loan outstanding metric for credit-risk segmentation."
+  businessOwner = "Credit Risk Committee"
+  decisionUse = "Use for risk office exposure review and risk-grade concentration analysis."
+  reviewCadence = "monthly"
+  metric = "loan_outstanding"
+  dimensions = ["risk_grade"]
+  visualization {
+    chart = "bar"
+    x = risk_grade
+    y = loan_outstanding
+  }
+  tests {
+    assert row_count > 0
+  }
+}

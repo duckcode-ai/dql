@@ -3,7 +3,7 @@
 [![CI](https://github.com/duckcode-ai/dql/actions/workflows/ci.yml/badge.svg)](https://github.com/duckcode-ai/dql/actions/workflows/ci.yml)
 [![npm](https://img.shields.io/npm/v/@duckcodeailabs/dql-cli?label=dql-cli)](https://www.npmjs.com/package/@duckcodeailabs/dql-cli)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue)](./LICENSE)
-[![Node](https://img.shields.io/badge/node-18%20%7C%2020%20%7C%2022-green)](https://nodejs.org)
+[![Node](https://img.shields.io/badge/node-20%20%7C%2022%20LTS-green)](https://nodejs.org)
 
 **A local-first dbt analytics workspace.** Git-native. Certified blocks, Apps,
 lineage, and governed agent answers run on your laptop.
@@ -45,7 +45,7 @@ repo, Docker automatically creates and opens the bundled Acme Bank starter at
 open directly. Add `--profile slack` for the Slack bot or `--profile ollama`
 for a local LLM daemon.
 
-**npm** *(Node 20+ already installed)*
+**npm** *(Node 20 or 22 LTS already installed)*
 
 ```bash
 npx create-dql-app@latest acme-bank --template acme-bank

@@ -721,6 +721,7 @@ export class Parser {
     let blockType: 'semantic' | 'custom' | undefined;
     let metricRef: string | undefined;
     let metricsRef: string[] | undefined;
+    let dimensionsRef: string[] | undefined;
     let description: string | undefined;
     let tags: string[] | undefined;
     let owner: string | undefined;
@@ -779,6 +780,15 @@ export class Parser {
         const arrExpr = this.parseArrayLiteral();
         if (arrExpr.kind === NodeKind.ArrayLiteral) {
           metricsRef = arrExpr.elements
+            .filter((e): e is import('../ast/nodes.js').StringLiteralNode => e.kind === NodeKind.StringLiteral)
+            .map((e) => e.value);
+        }
+      } else if (this.check(TokenType.DimensionsKeyword)) {
+        this.advance();
+        this.expect(TokenType.Equals);
+        const arrExpr = this.parseArrayLiteral();
+        if (arrExpr.kind === NodeKind.ArrayLiteral) {
+          dimensionsRef = arrExpr.elements
             .filter((e): e is import('../ast/nodes.js').StringLiteralNode => e.kind === NodeKind.StringLiteral)
             .map((e) => e.value);
         }
@@ -929,7 +939,7 @@ export class Parser {
         }
       } else {
         this.error(
-          `Unexpected token '${this.current().value}' inside block. Expected 'domain', 'type', 'status', 'datalex_contract', 'metric', 'metrics', 'description', 'tags', 'owner', 'params', 'query', 'visualization', 'tests', 'llmContext', 'invariants', 'examples', 'businessOutcome', 'businessOwner', 'decisionUse', 'reviewCadence', 'businessRules', 'caveats', or '}'.`,
+          `Unexpected token '${this.current().value}' inside block. Expected 'domain', 'type', 'status', 'datalex_contract', 'metric', 'metrics', 'dimensions', 'description', 'tags', 'owner', 'params', 'query', 'visualization', 'tests', 'llmContext', 'invariants', 'examples', 'businessOutcome', 'businessOwner', 'decisionUse', 'reviewCadence', 'businessRules', 'caveats', or '}'.`,
         );
         this.advance();
       }
@@ -951,6 +961,7 @@ export class Parser {
       blockType,
       metricRef,
       metricsRef,
+      dimensionsRef,
       description,
       tags,
       owner,

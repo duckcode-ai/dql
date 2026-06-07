@@ -41,8 +41,17 @@
         "block": { "blockId": "fraud_by_merchant_recent" },
         "viz": { "type": "bar" },
         "title": "Merchant Fraud Watch"
+      },
+      {
+        "i": "semantic-risk-grade",
+        "x": 6,
+        "y": 4,
+        "w": 6,
+        "h": 3,
+        "block": { "blockId": "loan_outstanding_by_risk_grade" },
+        "viz": { "type": "bar" },
+        "title": "Semantic Exposure by Risk Grade"
       }
     ]
   }
 }
-

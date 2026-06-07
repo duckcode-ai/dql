@@ -124,24 +124,25 @@ export async function runValidate(path: string | null, flags: CLIFlags): Promise
       for (const stmt of ast.statements) {
         if ((stmt as any).kind !== 'BlockDecl') continue;
         const block = stmt as any;
-        if (block.blockType === 'semantic' && block.metricRef) {
+        const semanticMetrics = block.metricsRef?.length ? block.metricsRef : (block.metricRef ? [block.metricRef] : []);
+        if (block.blockType === 'semantic' && semanticMetrics.length > 0) {
           if (semanticLayer) {
             const composed = semanticLayer.composeQuery({
-              metrics: [block.metricRef],
-              dimensions: [],
+              metrics: semanticMetrics,
+              dimensions: block.dimensionsRef ?? [],
             });
             if (!composed) {
               diagnostics.push({
                 file: relativePath,
                 severity: 'error',
-                message: `Metric "${block.metricRef}" referenced in block "${block.name}" not found in semantic layer`,
+                message: `Semantic references in block "${block.name}" could not be composed. Check metrics [${semanticMetrics.join(', ')}] and dimensions [${(block.dimensionsRef ?? []).join(', ')}].`,
               });
             }
           } else {
             diagnostics.push({
               file: relativePath,
               severity: 'warning',
-              message: `Semantic block "${block.name}" references metric "${block.metricRef}" but no semantic-layer/ directory exists`,
+              message: `Semantic block "${block.name}" references metrics [${semanticMetrics.join(', ')}] but no semantic-layer/ directory exists`,
             });
           }
         }

@@ -137,6 +137,9 @@ function printBlockDecl(node: BlockDeclNode, indent: number): string {
   if (node.blockType) result += `${prefix}  type = "${node.blockType}"\n`;
   if (node.description) result += `${prefix}  description = "${node.description}"\n`;
   if (node.tags) result += `${prefix}  tags = [${node.tags.map(t => `"${t}"`).join(', ')}]\n`;
+  if (node.metricRef !== undefined) result += `${prefix}  metric = "${node.metricRef}"\n`;
+  if (node.metricsRef) result += `${prefix}  metrics = [${node.metricsRef.map(t => `"${t}"`).join(', ')}]\n`;
+  if (node.dimensionsRef) result += `${prefix}  dimensions = [${node.dimensionsRef.map(t => `"${t}"`).join(', ')}]\n`;
   if (node.query) result += `${prefix}  SQL: ${node.query.rawSQL.substring(0, 60)}...\n`;
   if (node.visualization) {
     result += `${prefix}  visualization\n`;

@@ -258,7 +258,8 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
             config: (sourceCell.chartConfig ?? sourceCell.config) as NotebookCell['config'],
           };
           const resolved = resolveNotebookBlockReferenceCell(cell, projectRoot);
-          const plan = buildExecutionPlan(resolved.cell, { semanticLayer, driver: connection.driver });
+          const tableMapping = await resolveSemanticTableMapping(executor, connection, semanticLayer);
+          const plan = buildExecutionPlan(resolved.cell, { semanticLayer, driver: connection.driver, tableMapping });
           if (!plan) {
             snapshotCells.push({ cellId, status: 'idle', executionCount: 0, executedAt });
             continue;
@@ -326,9 +327,11 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
 
     const absBlockPath = join(projectRoot, block.filePath);
     const source = readFileSync(absBlockPath, 'utf-8');
+    const tableMapping = await resolveSemanticTableMapping(executor, connection, semanticLayer);
     const semanticCompose = semanticLayer
       ? composeSemanticBlockSql(source, semanticLayer, {
           driver: connection.driver,
+          tableMapping,
           projectRoot,
           projectConfig,
           detectedProvider: semanticDetectedProvider,
@@ -336,7 +339,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
       : null;
     const plan = buildExecutionPlan(
       { id: `agent-${block.name}`, type: 'dql', source, title: block.name },
-      { semanticLayer, driver: connection.driver },
+      { semanticLayer, driver: connection.driver, tableMapping },
     );
     if (!plan && !semanticCompose?.sql) {
       const semanticError = semanticCompose?.diagnostics.find((diagnostic) => diagnostic.severity === 'error')?.message;
@@ -458,7 +461,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
     }
     const plan = buildExecutionPlan(
       { id: 'block-studio', type: 'dql', source, title: 'Block Studio' },
-      { semanticLayer, driver: targetConnection.driver },
+      { semanticLayer, driver: targetConnection.driver, tableMapping },
     );
     const sql = resolveProjectRelativeSqlPaths(semanticCompose?.sql ?? plan?.sql ?? executableSql, projectRoot, projectConfig.dataDir);
     const result = await executor.executeQuery(
@@ -479,9 +482,10 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
     targetConnection: ConnectionConfig = connection,
   ): Promise<TestResultSummary> => {
     const start = Date.now();
+    const tableMapping = await resolveSemanticTableMapping(executor, targetConnection, semanticLayer);
     const plan = buildExecutionPlan(
       { id: 'block-studio-tests', type: 'dql', source, title: 'Block Studio' },
-      { semanticLayer, driver: targetConnection.driver },
+      { semanticLayer, driver: targetConnection.driver, tableMapping },
     );
     const tests = plan?.tests ?? [];
     if (!plan || !plan.sql) {
@@ -767,7 +771,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           ? body.variables as Record<string, unknown>
           : {};
         const tiles = [];
-        const localApps = new LocalAppStorage(defaultLocalAppsDbPath(projectRoot));
+        let localApps: LocalAppStorage | null = null;
         for (const item of loaded.dashboard.layout.items) {
           if (item.text) {
             tiles.push({
@@ -781,6 +785,17 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
             continue;
           }
           if (item.aiPin) {
+            try {
+              localApps ??= new LocalAppStorage(defaultLocalAppsDbPath(projectRoot));
+            } catch (err) {
+              tiles.push({
+                tileId: item.i,
+                status: 'error',
+                tileType: 'aiPin',
+                error: err instanceof Error ? err.message : String(err),
+              });
+              continue;
+            }
             let pin = localApps.getAiPin(item.aiPin.id);
             if (!pin) {
               tiles.push({
@@ -837,9 +852,12 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
             });
             const absBlockPath = join(projectRoot, block.filePath);
             const source = readFileSync(absBlockPath, 'utf-8');
+            const targetConnection = isConnectionConfig(body.connection) ? body.connection : connection;
+            const tableMapping = await resolveSemanticTableMapping(executor, targetConnection, semanticLayer);
             const semanticCompose = semanticLayer
               ? composeSemanticBlockSql(source, semanticLayer, {
-                  driver: connection.driver,
+                  driver: targetConnection.driver,
+                  tableMapping,
                   projectRoot,
                   projectConfig,
                   detectedProvider: semanticDetectedProvider,
@@ -847,7 +865,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
               : null;
             const plan = buildExecutionPlan(
               { id: item.i, type: 'dql', source, title: item.title ?? block.name },
-              { semanticLayer, driver: connection.driver },
+              { semanticLayer, driver: targetConnection.driver, tableMapping },
             );
             if (!plan && !semanticCompose?.sql) {
               tiles.push({
@@ -860,7 +878,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
             }
             const prepared = prepareLocalExecution(
               semanticCompose?.sql ?? plan!.sql,
-              isConnectionConfig(body.connection) ? body.connection : connection,
+              targetConnection,
               projectRoot,
               projectConfig,
             );
@@ -904,7 +922,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
             }
           }
         }
-        localApps.close();
+        localApps?.close();
         res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
         res.end(serializeJSON({
           appId,
@@ -3386,7 +3404,8 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
         const resolved = resolveNotebookBlockReferenceCell(cell, projectRoot);
         const executableCell = resolved.cell;
         const cellConnection = isConnectionConfig(body.connection) ? body.connection : connection;
-        const plan = buildExecutionPlan(executableCell, { semanticLayer, driver: cellConnection.driver });
+        const tableMapping = await resolveSemanticTableMapping(executor, cellConnection, semanticLayer);
+        const plan = buildExecutionPlan(executableCell, { semanticLayer, driver: cellConnection.driver, tableMapping });
         if (!plan) {
           res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
           res.end(serializeJSON({ cellType: cell.type, result: null }));
@@ -4295,7 +4314,26 @@ function parseSemanticBlockConfig(source: string): ParsedSemanticBlockConfig {
   };
 }
 
-function buildSemanticTableMapping(
+export async function resolveSemanticTableMapping(
+  executor: QueryExecutor,
+  connection: ConnectionConfig,
+  semanticLayer?: SemanticLayer,
+): Promise<Record<string, string> | undefined> {
+  if (!semanticLayer) return undefined;
+  try {
+    const tablesResult = await executor.executeQuery(
+      `SELECT table_schema, table_name
+       FROM information_schema.tables
+       WHERE table_schema NOT IN ('information_schema', 'pg_catalog')`,
+      [], {}, connection,
+    );
+    return buildSemanticTableMapping(semanticLayer, tablesResult.rows);
+  } catch {
+    return undefined;
+  }
+}
+
+export function buildSemanticTableMapping(
   semanticLayer: SemanticLayer,
   rows: Array<Record<string, unknown>>,
 ): Record<string, string> | undefined {
@@ -5253,13 +5291,17 @@ function buildSemanticBlockContent(options: {
   if (options.tags && options.tags.length > 0) {
     lines.push(`    tags = [${options.tags.map((tag) => `"${escapeDqlString(tag)}"`).join(', ')}]`);
   }
-  if (options.metrics.length === 1) {
+  if (options.metrics.length === 0) {
+    lines.push('    metric = ""');
+  } else if (options.metrics.length === 1) {
     lines.push(`    metric = "${escapeDqlString(options.metrics[0])}"`);
   } else {
     lines.push(`    metrics = [${options.metrics.map((metric) => `"${escapeDqlString(metric)}"`).join(', ')}]`);
   }
   if (options.dimensions.length > 0) {
     lines.push(`    dimensions = [${options.dimensions.map((dimension) => `"${escapeDqlString(dimension)}"`).join(', ')}]`);
+  } else {
+    lines.push('    dimensions = []');
   }
   if (options.timeDimension) {
     lines.push(`    time_dimension = "${escapeDqlString(options.timeDimension.name)}"`);

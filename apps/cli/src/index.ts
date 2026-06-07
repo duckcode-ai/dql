@@ -92,6 +92,63 @@ const HELP = `
     --force                         For "certify --from-draft": overwrite an existing certified block
 `;
 
+const COMMAND_HELP: Record<string, string> = {
+  certify: `
+  dql certify — Evaluate local certification rules
+
+  Usage:
+    dql certify <file.dql> [--connection <driver|path>] [--skip-tests]
+    dql certify --from-draft <path> [--contract <id@version>] [--force]
+
+  Notes:
+    Certification is a local OSS trust label. Use status = "certified" for
+    blocks that pass metadata, lineage, and test checks.
+  `,
+  app: `
+  dql app — Manage local App artifacts
+
+  Usage:
+    dql app new <name>
+    dql app ls
+    dql app show <name>
+    dql app build <name>
+    dql app reindex
+  `,
+  compile: `
+  dql compile — Generate dql-manifest.json
+
+  Usage:
+    dql compile [path] [--dbt-manifest <path>] [--dbt-hops <n>] [--no-cache]
+
+  dql-manifest.json is the dbt-like compiled artifact for blocks, notebooks,
+  Apps, dashboards, semantic objects, sources, dbt imports, and lineage.
+  `,
+  doctor: `
+  dql doctor — Check a local DQL project
+
+  Usage:
+    dql doctor [path] [--format json]
+
+  Prints setup checks and the next local-first commands to run.
+  `,
+  semantic: `
+  dql semantic — Work with the local semantic layer
+
+  Usage:
+    dql semantic list [path]
+    dql semantic validate [path]
+    dql semantic query <metrics> [dimensions]
+  `,
+  verify: `
+  dql verify — Verify dql-manifest.json is reproducible
+
+  Usage:
+    dql verify [path] [--dbt-manifest <path>] [--dbt-hops <n>] [--format json]
+
+  Run after dql compile in CI or before release commits.
+  `,
+};
+
 function getVersion(): string {
   try {
     const cliDir = dirname(fileURLToPath(import.meta.url));
@@ -111,11 +168,16 @@ async function main() {
   }
 
   if (flags.help || !command) {
-    console.log(HELP.trim());
+    console.log((command && COMMAND_HELP[command] ? COMMAND_HELP[command] : HELP).trim());
     process.exit(0);
   }
 
-  if (!file && command !== 'init' && command !== 'serve' && command !== 'doctor' && command !== 'notebook' && command !== 'validate' && command !== 'semantic' && command !== 'lineage' && command !== 'compile' && command !== 'sync' && command !== 'mcp' && command !== 'app' && command !== 'schedule') {
+  const commandAllowsNoFile = command === 'init' || command === 'serve' || command === 'doctor'
+    || command === 'notebook' || command === 'validate' || command === 'semantic'
+    || command === 'lineage' || command === 'compile' || command === 'sync'
+    || command === 'mcp' || command === 'app' || command === 'schedule'
+    || command === 'verify' || (command === 'certify' && Boolean(flags.fromDraft));
+  if (!file && !commandAllowsNoFile) {
     console.error('Error: No file/argument specified. Run "dql --help" for usage.');
     process.exit(1);
   }
@@ -147,7 +209,7 @@ async function main() {
         await runTest(file!, flags);
         break;
       case 'certify':
-        await runCertify(file!, flags);
+        await runCertify(file ?? '', flags);
         break;
       case 'info':
         await runInfo(file!, flags);
@@ -198,7 +260,7 @@ async function main() {
         await runSlack(file, rest, flags);
         break;
       case 'verify':
-        await runVerify(rest, flags);
+        await runVerify(file, rest, flags);
         break;
       default:
         console.error(`Unknown command: ${command}. Run "dql --help" for usage.`);

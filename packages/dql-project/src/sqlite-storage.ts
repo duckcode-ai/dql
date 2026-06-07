@@ -1,4 +1,5 @@
-import Database from 'better-sqlite3';
+import { createRequire } from 'node:module';
+import type Database from 'better-sqlite3';
 import type {
   BlockRecord,
   BlockVersion,
@@ -8,10 +9,19 @@ import type {
   TestResultSummary,
 } from './types.js';
 
+const require = createRequire(import.meta.url);
+let databaseCtor: typeof Database | null = null;
+
+function loadDatabase(): typeof Database {
+  databaseCtor ??= require('better-sqlite3') as typeof Database;
+  return databaseCtor;
+}
+
 export class SQLiteStorage implements RegistryStorage {
   private db: Database.Database;
 
   constructor(dbPath: string) {
+    const Database = loadDatabase();
     this.db = new Database(dbPath);
     this.db.pragma('journal_mode = WAL');
     this.db.pragma('foreign_keys = ON');

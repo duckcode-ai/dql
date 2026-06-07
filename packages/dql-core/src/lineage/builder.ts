@@ -22,6 +22,10 @@ export interface LineageBlockInput {
   blockType?: string;
   /** Metric reference for semantic blocks */
   metricRef?: string;
+  /** Metric references for semantic blocks */
+  metricsRef?: string[];
+  /** Dimension references for semantic blocks */
+  dimensionsRef?: string[];
   /** Chart type from visualization config */
   chartType?: string;
   /** Materialized table/view name */
@@ -280,16 +284,29 @@ export function buildLineageGraph(
       }
     }
 
-    // Semantic block → metric edge
-    if (block.blockType === 'semantic' && block.metricRef) {
-      const metricNodeId = `metric:${block.metricRef}`;
-      if (graph.getNode(metricNodeId)) {
-        graph.addEdge({
-          source: metricNodeId,
-          target: blockNodeId,
-          type: 'aggregates',
-        });
-        addCrossDomainEdgeIfNeeded(graph, metricNodeId, blockNodeId);
+    // Semantic block → metric/dimension edges
+    if (block.blockType === 'semantic') {
+      const metricRefs = block.metricsRef?.length ? block.metricsRef : (block.metricRef ? [block.metricRef] : []);
+      for (const metricRef of metricRefs) {
+        const metricNodeId = `metric:${metricRef}`;
+        if (graph.getNode(metricNodeId)) {
+          graph.addEdge({
+            source: metricNodeId,
+            target: blockNodeId,
+            type: 'aggregates',
+          });
+          addCrossDomainEdgeIfNeeded(graph, metricNodeId, blockNodeId);
+        }
+      }
+      for (const dimensionRef of block.dimensionsRef ?? []) {
+        const dimNodeId = `dimension:${dimensionRef}`;
+        if (graph.getNode(dimNodeId)) {
+          graph.addEdge({
+            source: dimNodeId,
+            target: blockNodeId,
+            type: 'reads_from',
+          });
+        }
       }
     }
 

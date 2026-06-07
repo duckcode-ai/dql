@@ -9,9 +9,10 @@
  *   kg_meta        — last-build timestamp + manifest fingerprint
  */
 
-import Database from 'better-sqlite3';
 import { dirname } from 'node:path';
 import { mkdirSync } from 'node:fs';
+import { createRequire } from 'node:module';
+import type Database from 'better-sqlite3';
 import type {
   KGNode,
   KGEdge,
@@ -20,11 +21,20 @@ import type {
   KGFeedbackRow,
 } from './types.js';
 
+const require = createRequire(import.meta.url);
+let databaseCtor: typeof Database | null = null;
+
+function loadDatabase(): typeof Database {
+  databaseCtor ??= require('better-sqlite3') as typeof Database;
+  return databaseCtor;
+}
+
 export class KGStore {
   private db: Database.Database;
 
   constructor(dbPath: string) {
     mkdirSync(dirname(dbPath), { recursive: true });
+    const Database = loadDatabase();
     this.db = new Database(dbPath);
     this.db.pragma('journal_mode = WAL');
     this.db.pragma('foreign_keys = ON');

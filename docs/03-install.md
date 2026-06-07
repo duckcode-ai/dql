@@ -27,7 +27,7 @@ docker compose --profile slack  up   # adds the bot on :3479
 docker compose --profile ollama up   # adds local Ollama on :11434
 ```
 
-## Option B — npm (Node 20+) · 2 minutes
+## Option B — npm (Node 20 or 22 LTS) · 2 minutes
 
 If you already have Node, scaffold a project and run the notebook with the
 project-local DQL CLI:
@@ -102,7 +102,7 @@ my-dbt-repo/
 Use the sibling layout instead when you want dbt and DQL in separate folders:
 `analytics/dbt/` plus `analytics/dql/`.
 
-Global install is optional:
+Global install is optional, but project-local scripts avoid stale global CLIs:
 
 ```bash
 npm i -g @duckcodeailabs/dql-cli
@@ -125,7 +125,8 @@ If you see the version number, jump to the [Quickstart →](01-quickstart.md).
 - **`command not found: dql`** — use `npm run notebook` inside a scaffolded
   project, `npx dql ...` when the CLI is installed locally, or add your global
   npm bin (`npm prefix -g`/bin) to `$PATH`.
-- **Node version errors** — DQL requires Node 20+. Install via
+- **Node version errors** — DQL requires Node 20 or 22 LTS. Node 23 is not
+  supported for native local drivers. Install via
   [nvm](https://github.com/nvm-sh/nvm) or [fnm](https://github.com/Schniz/fnm).
 - **Port already in use** — edit `docker-compose.yml` and change
   `127.0.0.1:3474:3474` to map a different host port (e.g. `:3475:3474`).

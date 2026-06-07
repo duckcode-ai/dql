@@ -1534,11 +1534,17 @@ function countAiPins(projectRoot: string, appId: string): number {
 function listAiPins(projectRoot: string, appId: string): unknown[] {
   const dbPath = defaultLocalAppsDbPath(projectRoot);
   if (!existsSync(dbPath)) return [];
-  const storage = new LocalAppStorage(dbPath);
   try {
-    return storage.listAiPins(appId);
-  } finally {
-    storage.close();
+    const storage = new LocalAppStorage(dbPath);
+    try {
+      return storage.listAiPins(appId);
+    } finally {
+      storage.close();
+    }
+  } catch {
+    // AI pins are optional local overlays. Do not hide file-backed Apps when
+    // the native SQLite module is unavailable for the current Node runtime.
+    return [];
   }
 }
 

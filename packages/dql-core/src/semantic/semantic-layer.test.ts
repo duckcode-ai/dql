@@ -76,6 +76,18 @@ describe('SemanticLayer', () => {
     expect(sql).toContain('GROUP BY');
   });
 
+  it('wraps raw metric columns with the declared aggregation when composing SQL', () => {
+    const layer = new SemanticLayer({
+      metrics: [{ name: 'card_volume', label: 'Card Volume', description: '', domain: 'cards', sql: 'amount_usd', type: 'sum', table: 'transactions' }],
+      dimensions: [{ name: 'transaction_status', label: 'Status', description: '', sql: 'status', type: 'string', table: 'transactions' }],
+    });
+
+    const result = layer.composeQuery({ metrics: ['card_volume'], dimensions: ['transaction_status'], driver: 'duckdb' });
+    expect(result?.sql).toContain('SUM(amount_usd) AS card_volume');
+    expect(result?.sql).toContain('status AS transaction_status');
+    expect(result?.sql).toContain('GROUP BY status');
+  });
+
   it('supports hierarchy registration and drill-path resolution', () => {
     const layer = new SemanticLayer({
       metrics: [],

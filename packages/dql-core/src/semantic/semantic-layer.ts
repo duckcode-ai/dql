@@ -636,7 +636,7 @@ export class SemanticLayer {
 
     // Add metrics
     for (const m of resolvedMetrics) {
-      selectParts.push(`${m.sql} AS ${m.name}`);
+      selectParts.push(`${renderMetricExpression(m)} AS ${m.name}`);
     }
 
     // Build FROM + JOINs (apply tableMapping for actual DB table names)
@@ -1107,7 +1107,7 @@ export class SemanticLayer {
 
     const selectParts = [
       ...dims.map((d) => `${d.sql} AS ${d.name}`),
-      `${metric.sql} AS ${metric.name}`,
+      `${renderMetricExpression(metric)} AS ${metric.name}`,
     ];
 
     const groupByParts = dims.map((d) => d.sql);
@@ -1117,6 +1117,29 @@ export class SemanticLayer {
       sql += `\nGROUP BY ${groupByParts.join(', ')}`;
     }
     return sql;
+  }
+}
+
+function renderMetricExpression(metric: MetricDefinition): string {
+  const sql = metric.sql.trim();
+  if (/^(sum|count|count_distinct|avg|min|max)\s*\(/i.test(sql)) return sql;
+
+  switch (metric.type) {
+    case 'sum':
+      return `SUM(${sql})`;
+    case 'count':
+      return sql === '*' ? 'COUNT(*)' : `COUNT(${sql})`;
+    case 'count_distinct':
+      return `COUNT(DISTINCT ${sql})`;
+    case 'avg':
+      return `AVG(${sql})`;
+    case 'min':
+      return `MIN(${sql})`;
+    case 'max':
+      return `MAX(${sql})`;
+    case 'custom':
+    default:
+      return sql;
   }
 }
 

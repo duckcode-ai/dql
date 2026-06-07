@@ -670,6 +670,25 @@ describe('Block declarations — Phase A schema enforcement', () => {
     }
   });
 
+  it('accepts semantic block with metrics and dimensions', () => {
+    const source = `block "Revenue by Segment" {
+      domain = "revenue"
+      type = "semantic"
+      metrics = ["total_revenue", "order_count"]
+      dimensions = ["customer_segment"]
+    }`;
+    const ast = parse(source);
+    const diagnostics = analyze(ast);
+    expect(diagnostics.filter((d) => d.severity === 'error')).toHaveLength(0);
+
+    const block = ast.statements[0];
+    expect(block.kind).toBe(NodeKind.BlockDecl);
+    if (block.kind === NodeKind.BlockDecl) {
+      expect(block.metricsRef).toEqual(['total_revenue', 'order_count']);
+      expect(block.dimensionsRef).toEqual(['customer_segment']);
+    }
+  });
+
   // A12: accepts custom block with SQL
   it('A12 — accepts custom block with SQL query', () => {
     const source = `block "Revenue Custom" {

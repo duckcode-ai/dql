@@ -36,6 +36,7 @@ export enum TokenType {
   DefaultKeyword = 'DefaultKeyword',
   MetricKeyword = 'MetricKeyword',
   MetricsKeyword = 'MetricsKeyword',
+  DimensionsKeyword = 'DimensionsKeyword',
   DigestKeyword = 'DigestKeyword',
   NarrativeKeyword = 'NarrativeKeyword',
   ColonToken = 'ColonToken',
@@ -112,6 +113,7 @@ const KEYWORDS: Record<string, TokenType> = {
   IN: TokenType.InKeyword,
   metric: TokenType.MetricKeyword,
   metrics: TokenType.MetricsKeyword,
+  dimensions: TokenType.DimensionsKeyword,
   digest: TokenType.DigestKeyword,
   narrative: TokenType.NarrativeKeyword,
 };

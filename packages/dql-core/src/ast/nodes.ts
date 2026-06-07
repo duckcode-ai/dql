@@ -279,6 +279,8 @@ export interface BlockDeclNode extends BaseNode {
   metricRef?: string;
   /** For blockType 'semantic': multiple metric references. Takes precedence over metricRef when present. */
   metricsRef?: string[];
+  /** For blockType 'semantic': semantic dimension references used to group the metric query. */
+  dimensionsRef?: string[];
   description?: string;
   tags?: string[];
   owner?: string;

@@ -12,3 +12,10 @@ dimensions:
     sql: region
     table: customers
     domain: finance
+
+  - name: order_date
+    label: Order date
+    type: date
+    sql: order_date
+    table: orders
+    domain: finance
