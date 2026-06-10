@@ -52,6 +52,7 @@ export interface CellChartConfig {
   legendPosition?: 'top' | 'bottom' | 'left' | 'right' | 'none';
   colorPalette?: 'default' | 'warm' | 'cool' | 'mono' | 'pastel';
   maxItems?: number;
+  format?: 'number' | 'currency' | 'percent' | 'duration';  // KPI/single-value display format
 }
 
 export type FilterOperation =

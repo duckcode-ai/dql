@@ -971,6 +971,31 @@ function GaugeChart({ result, themeMode, chartConfig }: { result: QueryResult; t
 
 // ─── KPI Card ─────────────────────────────────────────────────────────────────
 
+// Format a KPI value honoring the tile's `format` option. Large numbers use
+// compact notation ($1.4M, 62K) so the hero figure never overflows a narrow
+// KPI tile.
+function formatKpiValue(raw: unknown, format?: CellChartConfig['format']): string {
+  const num = Number(raw);
+  if (raw === null || raw === undefined || (typeof raw !== 'number' && isNaN(num))) {
+    return raw === null || raw === undefined ? '—' : String(raw);
+  }
+  const compact = Math.abs(num) >= 100_000;
+  if (format === 'currency') {
+    return num.toLocaleString(undefined, {
+      style: 'currency', currency: 'USD',
+      notation: compact ? 'compact' : 'standard',
+      maximumFractionDigits: compact ? 1 : 2,
+    });
+  }
+  if (format === 'percent') {
+    return num.toLocaleString(undefined, { style: 'percent', maximumFractionDigits: 1 });
+  }
+  return num.toLocaleString(undefined, {
+    notation: compact ? 'compact' : 'standard',
+    maximumFractionDigits: compact ? 1 : 2,
+  });
+}
+
 function KpiCard({ result, themeMode, chartConfig }: { result: QueryResult; themeMode: ThemeMode; chartConfig?: CellChartConfig }) {
   const t = themes[themeMode];
   const row = result.rows[0];
@@ -979,16 +1004,19 @@ function KpiCard({ result, themeMode, chartConfig }: { result: QueryResult; them
   const yCol = chartConfig?.y && result.columns.includes(chartConfig.y) ? chartConfig.y
     : result.columns.find((c) => isNumericValue(row[c])) ?? result.columns[0];
 
-  const rawVal = row[yCol];
-  const numVal = Number(rawVal);
-  const displayVal = isNaN(numVal) ? String(rawVal) : numVal.toLocaleString(undefined, { maximumFractionDigits: 2 });
-
-  const label = chartConfig?.title ?? (chartConfig?.x && row[chartConfig.x] ? String(row[chartConfig.x]) : yCol);
+  const displayVal = formatKpiValue(row[yCol], chartConfig?.format);
 
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', padding: '32px 24px', gap: 8 }}>
-      <span style={{ fontSize: 40, fontWeight: 700, fontFamily: t.fontMono, color: t.accent, lineHeight: 1.1 }}>{displayVal}</span>
-      <span style={{ fontSize: 13, fontFamily: t.font, color: t.textMuted, textTransform: 'uppercase', letterSpacing: '0.08em', fontWeight: 500 }}>{label}</span>
+    <div style={{ containerType: 'inline-size', display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', width: '100%', height: '100%', padding: '12px 14px', boxSizing: 'border-box', minWidth: 0 }}>
+      <span
+        title={String(row[yCol])}
+        style={{
+          // Scale the hero figure to the tile width so it never clips: ~16% of
+          // container width, clamped to a sensible min/max.
+          fontSize: 'clamp(18px, 15cqw, 40px)', fontWeight: 750, fontFamily: t.fontMono, color: t.accent,
+          lineHeight: 1.1, maxWidth: '100%', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+        }}
+      >{displayVal}</span>
     </div>
   );
 }

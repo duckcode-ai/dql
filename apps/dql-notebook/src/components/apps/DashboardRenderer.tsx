@@ -530,19 +530,19 @@ function DashboardTile({
           ) : null}
           <div style={{ fontSize: 13, fontWeight: 600, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{item.title ?? blockRef}</div>
         </div>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
-          <span
-            style={{
-              fontSize: 10,
-              padding: '2px 8px',
-              borderRadius: 999,
-              background: 'var(--surface-hover, rgba(0,0,0,0.06))',
-              opacity: 0.85,
-            }}
-          >
-            {item.viz.type}
-          </span>
-          {editable && (
+        {editable && (
+          <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+            <span
+              style={{
+                fontSize: 10,
+                padding: '2px 8px',
+                borderRadius: 999,
+                background: 'var(--surface-hover, rgba(0,0,0,0.06))',
+                opacity: 0.85,
+              }}
+            >
+              {item.viz.type}
+            </span>
             <TileEditorControls
               item={item}
               cols={cols}
@@ -550,8 +550,8 @@ function DashboardTile({
               onToggleSettings={() => setSettingsOpen((value) => !value)}
               onPatch={onPatch}
             />
-          )}
-        </div>
+          </div>
+        )}
       </div>
       <div style={{ fontSize: 11, opacity: 0.6, fontFamily: 'monospace' }}>{blockRef}</div>
       {editable && settingsOpen ? (
