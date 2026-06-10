@@ -40,22 +40,26 @@ your warehouse, your git workflow.
 
 ## Highlights
 
-**OSS Apps for decision work** — package dashboard pages, notebooks, AI pins,
-drafts, and certified blocks into local-first App folders that stay in git.
+*Screenshots below are from the [jaffle-shop-duckdb](https://github.com/duckcode-ai/jaffle-shop-duckdb)
+example — a real dbt project with a DQL workspace built on top.*
 
-![Apps + persona switching](./docs/media/apps.gif)
+**Apps for decision work** — package certified blocks into a local-first App
+with an executive dashboard. Every tile cites the certified block behind it; no
+SQL lives in the dashboard.
 
-**Block Studio with certified blocks** — every block carries owner / domain / tags / `llmContext` / tests, and shows its certification status inline.
+![Jaffle Analytics executive dashboard](./docs/media/apps.png)
 
-![Block Studio + certified flags](./docs/media/studio.gif)
+**Block Studio with certified blocks** — every block carries owner / domain / tags / `llmContext` / tests, shows its certification status inline, and runs live against your warehouse.
 
-**Full-stack lineage** — `Domain → App → Dashboard → Block → metric → dbt model → source`, rendered as an interactive React Flow + dagre graph.
+![Block Studio with a certified block and live result](./docs/media/studio.png)
 
-![Lineage DAG](./docs/media/lineage.gif)
+**Full-stack lineage** — `raw source → dbt model → certified block → dashboard → App`, rendered as an interactive graph. See exactly where every number comes from.
 
-**AI chat + provider setup** — configure OpenAI, Gemini, local Ollama, custom OpenAI-compatible endpoints, Slack, and schedule delivery keys from one Settings surface; missing keys stay optional until selected.
+![Full-stack lineage graph](./docs/media/lineage.png)
 
-![AI provider settings](./docs/media/agent.gif)
+**Notebooks — analysis as code** — SQL + DQL cells with live results and charts, tracked in git, sitting right next to the blocks and Apps they feed.
+
+![Notebook with live query results and a chart](./docs/media/notebook.png)
 
 ## Get started
 
