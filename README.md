@@ -96,6 +96,13 @@ see `source → dbt model → block → dashboard → App` end to end. No dbt at
 The scaffold also works standalone — DuckDB runs in-memory, so drop a CSV next
 to your blocks and query it with `read_csv_auto()`.
 
+> **Want to see the finished result first?** The example repo's
+> [`with-dql` branch](https://github.com/duckcode-ai/jaffle-shop-duckdb/tree/with-dql)
+> ships a ready-built DQL workspace — 10 certified blocks, an executive App
+> dashboard, and full lineage. `git checkout with-dql`, then
+> `cd dql && npm install && npm run notebook`. A hands-on `dql/TUTORIAL.md`
+> walks you through adding your own block.
+
 **Docker** *(zero local toolchain)*
 
 ```bash

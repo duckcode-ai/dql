@@ -25,6 +25,11 @@ cd jaffle-shop-duckdb
 ./setup.sh       # venv + dbt seed + dbt build, fully local
 ```
 
+> Prefer to see a finished workspace before building one? The example's
+> [`with-dql` branch](https://github.com/duckcode-ai/jaffle-shop-duckdb/tree/with-dql)
+> ships 10 certified blocks and an executive App dashboard — `git checkout
+> with-dql`, then `cd dql && npm install && npm run notebook`.
+
 ## 2. Scaffold the DQL workspace
 
 From the dbt repo root:
