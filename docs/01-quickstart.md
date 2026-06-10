@@ -5,30 +5,22 @@
 
 DQL adds an analytics layer on top of a dbt project: certified blocks,
 dashboards in Apps, notebooks, and governed agent answers — all as files in
-git. This quickstart works on **your own dbt repo**; if you don't have one
-handy, use the example repo and treat it exactly the same way. No external
-warehouse, hosted account, SSO, or team RBAC is required.
+git. This quickstart adds DQL to **your own dbt repo**. No external warehouse,
+hosted account, SSO, or team RBAC is required.
 
-## 1. Pick your dbt repo
+> **Just want to see it running?** The
+> [jaffle-shop-duckdb](https://github.com/duckcode-ai/jaffle-shop-duckdb) repo
+> ships a complete, ready-built DQL workspace (10 certified blocks + an
+> executive App dashboard). Clone it, `./setup.sh`, then
+> `cd dql && npm install && npm run notebook`. The rest of this page builds the
+> same thing from scratch on your repo.
 
-**Your own repo:** make sure the manifest is fresh, then skip to step 2:
+## 1. Make your dbt manifest fresh
 
 ```bash
+cd your-dbt-repo
 dbt parse        # or dbt build — either writes target/manifest.json
 ```
-
-**No repo handy?** Clone the example — a standard dbt + DuckDB project:
-
-```bash
-git clone https://github.com/duckcode-ai/jaffle-shop-duckdb.git
-cd jaffle-shop-duckdb
-./setup.sh       # venv + dbt seed + dbt build, fully local
-```
-
-> Prefer to see a finished workspace before building one? The example's
-> [`with-dql` branch](https://github.com/duckcode-ai/jaffle-shop-duckdb/tree/with-dql)
-> ships 10 certified blocks and an executive App dashboard — `git checkout
-> with-dql`, then `cd dql && npm install && npm run notebook`.
 
 ## 2. Scaffold the DQL workspace
 
@@ -45,15 +37,16 @@ The scaffolder detects the parent dbt project and wires it into
 untouched. The generated project installs the DQL CLI locally, so `npm run
 ...` works without a global `dql` binary.
 
-Point the default connection at the dbt warehouse — for the example repo:
+Point the default connection at your dbt warehouse in `dql.config.json`. For a
+local DuckDB file that's:
 
 ```json
 "connections": {
-  "default": { "driver": "duckdb", "filepath": "../jaffle_shop.duckdb" }
+  "default": { "driver": "duckdb", "filepath": "../my_warehouse.duckdb" }
 }
 ```
 
-(Your own repo: use your warehouse driver — see
+(Postgres, Snowflake, BigQuery, etc. — see
 [connectors](reference/connectors.md).)
 
 ## 3. Check the setup and sync dbt

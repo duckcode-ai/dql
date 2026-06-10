@@ -59,10 +59,29 @@ drafts, and certified blocks into local-first App folders that stay in git.
 
 ## Get started
 
-DQL adds an analytics layer on top of a dbt project. Two ways in — both end
-at the same place. *(Node 20 or 22 LTS.)*
+*(Node 20 or 22 LTS.)*
 
-**1 · Start from your own dbt repo**
+**Option A · See the finished example run**
+
+[duckcode-ai/jaffle-shop-duckdb](https://github.com/duckcode-ai/jaffle-shop-duckdb)
+is the Jaffle Shop dbt project with a complete DQL workspace already built in —
+10 certified blocks, an executive App dashboard, and full lineage:
+
+```bash
+git clone https://github.com/duckcode-ai/jaffle-shop-duckdb.git
+cd jaffle-shop-duckdb
+./setup.sh                       # venv + dbt seed + dbt build, fully local
+cd dql
+npm install
+npm run notebook                 # opens http://127.0.0.1:3474
+```
+
+Open **Apps → Jaffle Analytics** for the dashboard, **Blocks** for the
+certified blocks, and **Lineage** for `source → dbt model → block → dashboard
+→ App`. The repo's [`dql/TUTORIAL.md`](https://github.com/duckcode-ai/jaffle-shop-duckdb/blob/main/dql/TUTORIAL.md)
+is a guided tour plus a hands-on "build your own block" walkthrough.
+
+**Option B · Add DQL to your own dbt repo**
 
 ```bash
 cd your-dbt-repo
@@ -74,34 +93,10 @@ npm run sync                     # import dbt models + lineage
 npm run notebook                 # opens http://127.0.0.1:3474
 ```
 
-**2 · No dbt repo handy? Clone the example**
-
-[duckcode-ai/jaffle-shop-duckdb](https://github.com/duckcode-ai/jaffle-shop-duckdb)
-is a standard dbt + DuckDB project — treat it exactly like your own repo:
-
-```bash
-git clone https://github.com/duckcode-ai/jaffle-shop-duckdb.git
-cd jaffle-shop-duckdb
-./setup.sh                       # venv + dbt seed + dbt build, fully local
-npx create-dql-app@latest dql
-cd dql
-npm install
-npm run sync
-npm run notebook
-```
-
-From the notebook: open **Block Studio** to create a certified block from a
-dbt model, add it to a dashboard page in an **App**, then open **Lineage** to
-see `source → dbt model → block → dashboard → App` end to end. No dbt at all?
-The scaffold also works standalone — DuckDB runs in-memory, so drop a CSV next
-to your blocks and query it with `read_csv_auto()`.
-
-> **Want to see the finished result first?** The example repo's
-> [`with-dql` branch](https://github.com/duckcode-ai/jaffle-shop-duckdb/tree/with-dql)
-> ships a ready-built DQL workspace — 10 certified blocks, an executive App
-> dashboard, and full lineage. `git checkout with-dql`, then
-> `cd dql && npm install && npm run notebook`. A hands-on `dql/TUTORIAL.md`
-> walks you through adding your own block.
+Then open **Block Studio** to create a certified block from a dbt model, add it
+to a dashboard page in an **App**, and watch it appear in **Lineage**. No dbt at
+all? The scaffold also works standalone — DuckDB runs in-memory, so drop a CSV
+next to your blocks and query it with `read_csv_auto()`.
 
 **Docker** *(zero local toolchain)*
 

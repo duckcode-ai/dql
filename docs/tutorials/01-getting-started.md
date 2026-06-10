@@ -21,10 +21,15 @@ open the notebook, and see end-to-end lineage.
 
 ## Step 1 — Pick your dbt repo
 
-**Your own repo:** skip ahead to Step 2 — the steps are identical.
+**Your own repo:** make sure the manifest is fresh, then continue to Step 2:
 
-**No repo handy?** Clone the example. It's a standard dbt + DuckDB project
-(the classic Jaffle Shop), fully local:
+```bash
+cd your-dbt-repo
+dbt parse         # or dbt build — either writes target/manifest.json
+```
+
+**No repo handy?** Clone the example — a standard dbt + DuckDB project (the
+classic Jaffle Shop), fully local:
 
 ```bash
 git clone https://github.com/duckcode-ai/jaffle-shop-duckdb.git
@@ -35,27 +40,27 @@ cd jaffle-shop-duckdb
 > **You should see** dbt build all models into `jaffle_shop.duckdb` at the
 > repo root, and `target/manifest.json` written.
 
-If you're on your own repo, make sure the manifest is fresh:
-
-```bash
-dbt parse         # or dbt build — either writes target/manifest.json
-```
+> **Note:** the example repo already ships a finished DQL workspace in `dql/`.
+> To follow this tutorial and build one from scratch, scaffold into a *new*
+> folder (the commands below use `dql-tutorial` so it won't collide), or just
+> explore the existing `dql/` and its `dql/TUTORIAL.md` instead.
 
 ---
 
 ## Step 2 — Scaffold the DQL workspace
 
-From the dbt repo root:
+From the dbt repo root (use `dql` on your own repo; on the example repo use
+`dql-tutorial` to avoid the shipped `dql/` folder):
 
 ```bash
-npx create-dql-app@latest dql
-cd dql
+npx create-dql-app@latest dql-tutorial
+cd dql-tutorial
 npm install
 ```
 
 > **You should see** `detected sibling dbt project at …` during scaffolding —
 > the generated `dql.config.json` is wired back to the parent dbt project.
-> DQL stays isolated under `./dql`; your dbt files are untouched.
+> DQL stays isolated under its own folder; your dbt files are untouched.
 
 Point the default connection at the dbt warehouse. For the example repo,
 edit `dql.config.json`:

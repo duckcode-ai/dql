@@ -3,13 +3,12 @@
 Hands-on walkthroughs that take you from a plain dbt project to certified
 blocks, dashboards in an App, agent answers, and a CI gate.
 
-Every tutorial works on **your own dbt repo**. If you don't have one handy,
-use the example repo —
-[duckcode-ai/jaffle-shop-duckdb](https://github.com/duckcode-ai/jaffle-shop-duckdb),
-a standard dbt + DuckDB project — and treat it exactly like your own. Its
-[`with-dql` branch](https://github.com/duckcode-ai/jaffle-shop-duckdb/tree/with-dql)
-has a fully-built workspace (10 certified blocks + an executive App dashboard)
-if you'd rather explore a finished result first.
+Every tutorial works on **your own dbt repo**. If you don't have one handy, the
+[duckcode-ai/jaffle-shop-duckdb](https://github.com/duckcode-ai/jaffle-shop-duckdb)
+repo is a Jaffle Shop dbt + DuckDB project that already ships a fully-built DQL
+workspace (10 certified blocks + an executive App dashboard) — clone it,
+`./setup.sh`, then `cd dql && npm install && npm run notebook` to explore a
+finished result, and follow its `dql/TUTORIAL.md` for a guided tour.
 
 ## Reading order
 
