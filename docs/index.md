@@ -6,12 +6,12 @@ hide:
 
 # DQL
 
-> **Governed analytics for the agentic era — the answer layer where dbt stops.**
+> **Bringing dbt's discipline to the analytics layer — built on top of dbt.**
 
-dbt governs your models; nothing governs your *answers*. The query behind a
+dbt governs your models; the *answers* built on them — the query behind a
 dashboard tile, the metric pasted into Slack, the SQL an AI assistant just
-improvised against your warehouse — none of it is reviewed, tested, or owned.
-DQL extends the dbt discipline to that last mile: every answer becomes a
+improvised against your warehouse — usually aren't reviewed, tested, or owned.
+DQL carries that same discipline downstream: every answer becomes a
 **certified block** (SQL + owner, domain, tests, chart intent, and LLM
 context) in a git-tracked `.dql` file. Apps package certified blocks into
 decision-facing dashboard pages and notebooks. `dql compile` generates a

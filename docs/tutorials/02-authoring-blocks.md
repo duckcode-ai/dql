@@ -17,12 +17,12 @@ context, and tests, then walk it through the certification gate.
 
 ## The idea
 
-dbt stops at modeled tables. The questions stakeholders actually ask —
-"what's monthly revenue?", "what's our average order value?" — live in
-ad-hoc queries, BI tiles, and pasted SQL. A **block** captures one answer as
-code: the SQL, who owns it, what it means, how it's tested, and how an AI
-agent should use it. Certified blocks become the only thing dashboards and
-agents are allowed to trust.
+dbt gives you clean, tested, modeled tables. The questions stakeholders
+actually ask on top of them — "what's monthly revenue?", "what's our average
+order value?" — usually live in ad-hoc queries, BI tiles, and pasted SQL. A
+**block** captures one of those answers as code: the SQL, who owns it, what it
+means, how it's tested, and how an AI agent should use it. Certified blocks
+become the only thing dashboards and agents are allowed to trust.
 
 ---
 

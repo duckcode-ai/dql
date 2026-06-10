@@ -5,20 +5,22 @@
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue)](./LICENSE)
 [![Node](https://img.shields.io/badge/node-20%20%7C%2022%20LTS-green)](https://nodejs.org)
 
-**Governed analytics for the agentic era — the answer layer where dbt stops.**
-Certified blocks, Apps, end-to-end lineage, and AI answers that cite their
-sources. Git-native, local-first, on your laptop.
+**Bringing dbt's discipline to the analytics layer.** Certified blocks, Apps,
+end-to-end lineage, and AI answers that cite their sources — built on top of
+dbt. Git-native, local-first, on your laptop.
 
 ## Why we built DQL
 
-dbt solved governance for **models**: transformations are code-reviewed,
-tested, versioned, and owned. But the place where data actually meets a
-decision — the query behind a dashboard tile, the metric pasted into Slack,
-the SQL an AI assistant just improvised against your warehouse — has none of
-that discipline. Every data team lives with query sprawl, dashboards nobody
-fully trusts, and now agents confidently generating SQL no one reviewed.
+dbt brought engineering discipline to **models**: transformations are
+code-reviewed, tested, versioned, and owned. But once that clean data lands,
+the place where it meets a decision — the query behind a dashboard tile, the
+metric pasted into Slack, the SQL an AI assistant just improvised against your
+warehouse — picks up none of that discipline. Every data team lives with query
+sprawl, dashboards nobody fully trusts, and now agents confidently generating
+SQL no one reviewed.
 
-DQL extends the dbt discipline to that last mile. An analytics answer becomes
+DQL carries that same discipline downstream, into the analytics layer. An
+analytics answer becomes
 a **certified block**: one `.dql` file holding the SQL, owner, domain,
 description, tests, chart intent, and the context an LLM needs to use it
 correctly — tracked in git, certified by a local gate, and connected to
