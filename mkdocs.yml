@@ -84,18 +84,11 @@ nav:
       - tutorials/README.md
       - 01 Getting started: tutorials/01-getting-started.md
       - 02 Authoring blocks: tutorials/02-authoring-blocks.md
-      - 03 Apps, RBAC, personas: tutorials/03-apps-rbac-personas.md
-      - 04 Dashboards: tutorials/04-dashboards.md
-      - 05 Schedules and Slack: tutorials/05-schedules-and-slack.md
-      - 06 Agentic analytics: tutorials/06-agentic-analytics.md
-      - 07 Fraud spike walkthrough: tutorials/07-fraud-spike-walkthrough.md
-      - 08 Promoting AI blocks: tutorials/08-promoting-ai-blocks.md
-      - 09 CI and verify: tutorials/09-ci-and-verify.md
-      - 10 Troubleshooting: tutorials/10-troubleshooting.md
-      - 11 Acme Bank template: tutorials/11-acme-bank-template-reference.md
+      - 03 Dashboards & Apps: tutorials/03-dashboards-and-apps.md
+      - 04 Agentic analytics: tutorials/04-agentic-analytics.md
+      - 05 CI and verify: tutorials/05-ci-and-verify.md
   - Guides:
       - guides/README.md
-      - Jaffle Shop walkthrough: guides/jaffle-shop.md
       - Authoring blocks: guides/authoring-blocks.md
       - Block Studio: guides/block-studio.md
       - Dashboards: guides/dashboards.md
@@ -103,6 +96,7 @@ nav:
       - Connect a warehouse: guides/connect-warehouse.md
       - Migrate from earlier versions: guides/migrate.md
       - Versioning policy: guides/versioning.md
+      - Troubleshooting: guides/troubleshooting.md
       - FAQ: guides/faq.md
   - Architecture:
       - Overview: architecture/overview.md

@@ -1,9 +1,0 @@
-alert_id,txn_id,merchant_id,customer_id,amount_usd,region,branch_id,alert_ts,reason,status
-F001,T003,M-amzn,C001,4900.00,NA-NE,NYC-042,2026-04-20T22:12:00Z,velocity,review
-F002,T004,M-darknet1,C004,2700.00,EMEA,LON-018,2026-04-20T22:15:00Z,merchant_blocklist,confirmed
-F003,T005,M-darknet1,C008,3200.00,EMEA,LON-018,2026-04-20T22:19:00Z,merchant_blocklist,confirmed
-F004,T010,M-travel,C004,5200.00,EMEA,LON-018,2026-04-22T14:20:00Z,geo_anomaly,review
-F005,T012,M-darknet1,C008,4100.00,EMEA,LON-018,2026-04-23T23:10:00Z,merchant_blocklist,confirmed
-F006,T013,M-travel,C001,2200.00,NA-NE,NYC-042,2026-04-24T18:23:00Z,amount_outlier,review
-F007,T016,M-darknet1,C005,1800.00,NA-SE,ATL-011,2026-04-25T23:24:00Z,merchant_blocklist,confirmed
-

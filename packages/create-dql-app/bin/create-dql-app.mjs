@@ -37,19 +37,21 @@ Usage:
   npx create-dql-app@latest <project-dir> [options]
 
 Options:
-  --template <name>   Starter template: jaffle-shop (default), acme-bank, empty
+  --template <name>   Starter template (default: starter)
   --help, -h          Show this help
   --version, -v       Show version
 
 Examples:
   npx create-dql-app@latest my-analytics
-  npx create-dql-app@latest acme-bank --template acme-bank
-  npx create-dql-app@latest finance-reports --template empty
+  npx create-dql-app@latest dql --template starter   # inside your dbt repo
+
+Want a ready-made dbt project to try DQL on?
+  git clone https://github.com/duckcode-ai/jaffle-shop-duckdb
 `);
 }
 
 function parseArgs(argv) {
-  const args = { dir: null, template: 'jaffle-shop' };
+  const args = { dir: null, template: 'starter' };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === '--help' || a === '-h') { usage(); process.exit(0); }
@@ -152,9 +154,13 @@ async function main() {
     console.log(c.dim(`  wired into dql.config.json — run 'dql sync dbt' to import\n`));
   }
 
-  // Best-effort: try to run `git init` so users get a clean first commit.
-  const gitResult = spawnSync('git', ['init', '-q'], { cwd: target });
-  if (gitResult.status === 0) console.log(c.dim('  initialized git repo'));
+  // Best-effort: `git init` for a clean first commit — but never nest a
+  // repo inside an existing one (e.g. scaffolding ./dql inside a dbt repo).
+  const inRepo = spawnSync('git', ['rev-parse', '--is-inside-work-tree'], { cwd: target });
+  if (inRepo.status !== 0) {
+    const gitResult = spawnSync('git', ['init', '-q'], { cwd: target });
+    if (gitResult.status === 0) console.log(c.dim('  initialized git repo'));
+  }
 
   const pm = detectPackageManager();
   const installCmd = pm === 'npm' ? 'npm install' : `${pm} install`;

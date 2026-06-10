@@ -4,8 +4,9 @@
 
 | Version | Supported |
 |---|---|
-| 0.5.x | Yes — active development |
-| 0.4.x and earlier | No — please upgrade |
+| 1.6.x | Yes — current release |
+| 1.5.x | Yes — active support |
+| 1.4.x and earlier | No — please upgrade |
 
 ---
 

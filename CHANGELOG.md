@@ -6,6 +6,77 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 
 ---
 
+## v1.6.1 - 2026-06-10
+
+### OSS release: clean foundation, external example, UI polish
+
+### Changed
+
+- **Repo restructured dbt-core style — no bundled example projects.**
+  Removed `examples/` and the `acme-bank` / `jaffle-shop` templates;
+  `create-dql-app` now ships a single `starter` template (the default) that
+  auto-wires a detected dbt project. The example dbt project lives in its own
+  repo: [jaffle-shop-duckdb](https://github.com/duckcode-ai/jaffle-shop-duckdb).
+- Quickstart and README rewritten around two entry points with identical
+  steps: your own dbt repo, or the cloned example repo
+  (`create-dql-app` → `dql sync dbt` → `dql notebook`).
+- Tutorials condensed from 11 to 5 (getting started, authoring blocks,
+  dashboards & Apps, agentic analytics, CI & verify) and re-based on the
+  example repo; troubleshooting moved to `docs/guides/troubleshooting.md`.
+- Docker starter now scaffolds the minimal starter project instead of the
+  removed Acme Bank template.
+
+### Fixed
+
+- `create-dql-app` no longer runs `git init` inside an existing git repo
+  (previously nested a repo when scaffolding `./dql` inside a dbt project).
+- Results table renders DATE values as `YYYY-MM-DD` instead of raw ISO
+  timestamps; timestamps render as `YYYY-MM-DD HH:MM:SS` (exports keep raw
+  values).
+- Chart x-axis date labels are formatted in UTC — month boundaries no longer
+  shift a day backwards in western timezones; line/area charts gained axis
+  titles and date-aware tooltips.
+- Notebook cell editor no longer paints a tinted slab behind the code: the
+  always-on active-line highlight is now focus-scoped and the editor inherits
+  the cell surface.
+- Header is view-aware: static titles for Apps/Review/Settings/Source control
+  and editor-only actions (Run all, Save, Share) hidden outside editor views.
+- Sidebar panel headers wrap instead of overlapping their action buttons;
+  Block Studio start cards and dbt-status panels reflow at narrow widths.
+- Lineage side panel groups dashboards under "Dashboards" (was "Notebooks");
+  row/duration counters use correct pluralization and rounded timings.
+- Tutorial sample code used an inline `visualization { ...; ... }` form the
+  parser rejects; corrected to the canonical multi-line form.
+- `SECURITY.md` supported-versions table updated to 1.6.x/1.5.x.
+
+### Added
+
+- Privacy & telemetry disclosure in the README (off by default, no PII,
+  `DO_NOT_TRACK` honored).
+- Lineage fixture (`apps/cli/test/fixtures/lineage-app`) preserving
+  source → block → dashboard → App compile coverage after the template
+  removal.
+
+## v1.6.0 - 2026-05-01
+
+### Graduated trust + contracts
+
+### Added
+
+- **Graduated trust + Tier-2 promotion loop**: agent answers route through
+  certified blocks first (Tier 1); LLM proposals are flagged *Uncertified*,
+  saved as drafts under `blocks/_drafts/`, and promoted via
+  `dql certify --from-draft` (optionally `--open-pr`).
+- DataLex contracts end-to-end: certified blocks can cite a contract id;
+  `--contract <id@version>` binding on certification.
+- Column-level lineage extraction with honest `unresolved` marking.
+- MCP server test coverage and tool hardening.
+- `datalex-lsp`: schema-aware language server for `.model.yaml` semantic
+  definitions.
+- OpenLineage event emission for project snapshots.
+- mkdocs-material public docs site.
+- Community files: issue templates, PR template, support/triage policy.
+
 ## v1.5.3 - 2026-04-30
 
 ### OSS release candidate polish

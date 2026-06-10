@@ -8,7 +8,8 @@ end. If a guide doesn't work verbatim on a clean machine, it's a bug.
 - [Connect a warehouse](connect-warehouse.md) — Postgres, DuckDB, Snowflake, BigQuery, Redshift, and more
 - [Import a dbt project](import-dbt.md) — bring your `manifest.json`
 - [Block Studio dbt-first workflow](block-studio.md) — model/metric to trusted block
-- [Jaffle Shop walkthrough](jaffle-shop.md) — the end-to-end reference tour
+- [Tutorials](../tutorials/README.md) — the end-to-end reference tour (works on
+  your dbt repo, or the [example repo](https://github.com/duckcode-ai/jaffle-shop-duckdb))
 
 ## Author & ship
 
@@ -19,3 +20,7 @@ end. If a guide doesn't work verbatim on a clean machine, it's a bug.
 ## Migrate
 
 - [Migrate from Metabase / Looker / Hex](migrate.md)
+
+## Fix
+
+- [Troubleshooting + FAQ](troubleshooting.md)

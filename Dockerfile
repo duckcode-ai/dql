@@ -52,7 +52,7 @@ RUN apt-get update \
 
 # Pull in the deployed CLI bundle (dist + node_modules).
 COPY --from=builder /tmp/deploy-cli /opt/dql
-COPY --from=builder /build/packages/create-dql-app/templates/acme-bank /opt/dql/templates/acme-bank
+COPY --from=builder /build/packages/create-dql-app/templates/starter /opt/dql/templates/starter
 COPY scripts/docker-entrypoint.sh /usr/local/bin/dql-docker-entrypoint
 
 # Make `dql` available on PATH via a tiny shim — `pnpm deploy` doesn't link bins.

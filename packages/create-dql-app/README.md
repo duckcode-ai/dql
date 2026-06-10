@@ -13,25 +13,21 @@ Opens a running notebook at <http://127.0.0.1:3474> in under 5 minutes on a
 clean machine. No global install required; the template installs
 `@duckcodeailabs/dql-cli` locally and exposes it through npm scripts.
 
-## Templates
+The scaffolded project is a clean starter: `dql.config.json` (DuckDB
+in-memory by default — bring your own warehouse), a welcome notebook, and npm
+scripts for `notebook`, `compile`, `lineage`, `doctor`, and `validate`. If a
+sibling dbt project is detected, it is wired into `dql.config.json`
+automatically so `dql sync dbt` works out of the box.
 
-| Template | What you get |
-| --- | --- |
-| `jaffle-shop` *(default)* | DuckDB + the Jaffle Shop dataset + a sample notebook, certified block, and dashboard |
-| `acme-bank` | Banking OSS release walkthrough with sample data, certified blocks, sample notebooks, Apps, dashboards, governance, schedules, and agent Skills |
-| `empty` | Just `dql.config.json` and project layout - bring your own warehouse |
-
-```bash
-npx create-dql-app@latest acme-bank --template acme-bank
-npx create-dql-app@latest finance-reports --template empty
-```
+Want a ready-made dbt project to try DQL on? Clone the example repo and add
+DQL to it — the same steps you'd use on your own dbt repo:
+[github.com/duckcode-ai/jaffle-shop-duckdb](https://github.com/duckcode-ai/jaffle-shop-duckdb).
 
 ## Flags
 
 | Flag | Default | Meaning |
 | --- | --- | --- |
-| `--template <name>` | `jaffle-shop` | Starter template: `jaffle-shop`, `acme-bank`, or `empty` |
-| `--no-install` | off | Skip downloading the Jaffle Shop seed data |
+| `--template <name>` | `starter` | Starter template |
 
 ## Docs
 

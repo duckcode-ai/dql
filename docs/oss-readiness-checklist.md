@@ -34,7 +34,8 @@ It is written as a practical maintainer checklist, not a marketing document.
 - `[x]` `dql serve` exists for local serving of built output
 - `[x]` local CSV/file-first flow is documented
 - `[x]` DuckDB local example exists
-- `[x]` preview/serve browser smoke passed against the Acme Bank template from a clean copy
+- `[~]` preview/serve browser smoke — re-run against the starter template and
+  the jaffle-shop-duckdb flow after the examples restructure
 
 ---
 
@@ -87,14 +88,15 @@ It is written as a practical maintainer checklist, not a marketing document.
 
 ## 4. Examples and Templates
 
-- `[x]` starter template exists
-- `[x]` starter template now includes `dashboards/` and `workbooks/`
-- `[x]` finance KPI example exists
-- `[x]` local dashboard example exists
-- `[x]` local workbook example exists
-- `[x]` DuckDB local example exists
-- `[x]` semantic block example exists
-- `[ ]` add one more polished business-facing example set if community feedback asks for it
+The repo ships **no bundled example projects** (dbt-core style). One starter
+template lives in `create-dql-app`; the example dbt project is external.
+
+- `[x]` single `starter` template scaffolds config, welcome notebook, and npm scripts
+- `[x]` starter auto-wires a detected sibling/parent dbt project
+- `[x]` external example dbt repo exists:
+  [jaffle-shop-duckdb](https://github.com/duckcode-ai/jaffle-shop-duckdb)
+- `[x]` tutorials work on either the user's dbt repo or the example repo
+- `[ ]` add a polished business-facing example repo if community feedback asks for it
 
 ---
 
@@ -163,10 +165,12 @@ The OSS release candidate gates pass locally for `1.6.1`. Re-run the published
 package smoke checks after publishing so `latest` is validated against the same
 version as the repo.
 
-Validated release gates:
+Validated release gates (re-run the browser smoke after the examples
+restructure — bundled examples were removed in favor of the external
+jaffle-shop-duckdb repo):
 
 - Clean copy install, build, and test pass.
-- `dql notebook` launches the Acme Bank template; Block Studio, Import SQL, and
+- `dql notebook` launches the starter template; Block Studio, Import SQL, and
   Apps dashboard/notebook smoke checks pass in the browser.
 - `dql preview` works for KPI, line chart, and RLS-decorated block examples.
 - `pnpm release:dry-run` completes successfully.

@@ -24,8 +24,9 @@ DQL OSS is ready for local-first use cases:
   lineage.
 - View answer-layer lineage across source tables, dbt models, semantic metrics,
   DQL blocks, dashboard pages, and Apps.
-- Use Acme Bank as the flagship OSS demo and Jaffle Shop as the dbt-first
-  integration path.
+- Adopt on an existing dbt repo as the primary path, with
+  [jaffle-shop-duckdb](https://github.com/duckcode-ai/jaffle-shop-duckdb) as
+  the example dbt project for users without one.
 - Use local agent/MCP/Slack surfaces that prefer certified blocks and label
   fallback generated SQL as uncertified.
 
@@ -59,7 +60,7 @@ The OSS release is intentionally local and single-user:
 ## Next Priorities
 
 - First-run polish: keep `create-dql-app`, `dql doctor`, Block Studio, compile,
-  certify, and lineage flows aligned around the 10-minute Acme Bank path.
+  certify, and lineage flows aligned around the 10-minute dbt-repo path.
 - Documentation accuracy: keep every code sample parser-valid and keep release,
   testing, and OSS boundary docs in sync with CI.
 - Browser E2E: add a required notebook/Block Studio/lineage happy-path test for

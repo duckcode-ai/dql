@@ -29,9 +29,46 @@ drafts, and certified blocks into local-first App folders that stay in git.
 
 ![AI provider settings](./docs/media/agent.gif)
 
-## Get started — under 2 minutes
+## Get started
 
-**Docker** *(recommended — zero local toolchain)*
+DQL adds an analytics layer on top of a dbt project. Two ways in — both end
+at the same place. *(Node 20 or 22 LTS.)*
+
+**1 · Start from your own dbt repo**
+
+```bash
+cd your-dbt-repo
+dbt parse                        # make sure target/manifest.json exists
+npx create-dql-app@latest dql    # scaffolds ./dql, auto-wires the dbt project
+cd dql
+npm install
+npm run sync                     # import dbt models + lineage
+npm run notebook                 # opens http://127.0.0.1:3474
+```
+
+**2 · No dbt repo handy? Clone the example**
+
+[duckcode-ai/jaffle-shop-duckdb](https://github.com/duckcode-ai/jaffle-shop-duckdb)
+is a standard dbt + DuckDB project — treat it exactly like your own repo:
+
+```bash
+git clone https://github.com/duckcode-ai/jaffle-shop-duckdb.git
+cd jaffle-shop-duckdb
+./setup.sh                       # venv + dbt seed + dbt build, fully local
+npx create-dql-app@latest dql
+cd dql
+npm install
+npm run sync
+npm run notebook
+```
+
+From the notebook: open **Block Studio** to create a certified block from a
+dbt model, add it to a dashboard page in an **App**, then open **Lineage** to
+see `source → dbt model → block → dashboard → App` end to end. No dbt at all?
+The scaffold also works standalone — DuckDB runs in-memory, so drop a CSV next
+to your blocks and query it with `read_csv_auto()`.
+
+**Docker** *(zero local toolchain)*
 
 ```bash
 git clone https://github.com/duckcode-ai/dql.git && cd dql
@@ -39,55 +76,10 @@ docker compose up
 ```
 
 Notebook on **http://127.0.0.1:3474**. The working directory is mounted at
-`/workspace` inside the container. When you run this from the DQL framework
-repo, Docker automatically creates and opens the bundled Acme Bank starter at
-`.dql/docker-starter/acme-bank`; real DQL project folders with `dql.config.json`
-open directly. Add `--profile slack` for the Slack bot or `--profile ollama`
-for a local LLM daemon.
-
-**npm** *(Node 20 or 22 LTS already installed)*
-
-```bash
-npx create-dql-app@latest acme-bank --template acme-bank
-cd acme-bank
-npm install
-npm run doctor
-npm run notebook
-```
-
-The starter installs the DQL CLI locally as a dev dependency, so `npm run
-notebook`, `npm run compile`, and other scripts work without a global `dql`
-binary. Acme Bank is the flagship OSS demo for certified blocks, Apps,
-notebooks, lineage, schedules, and local agent context.
-
-Either way, DuckDB runs in-memory. Drop a CSV into `data/`, query it, save a
-block, commit.
-
-Already have a **dbt project**? Keep dbt as the modeling source of truth and
-keep DQL isolated under `./dql` inside that repo:
-
-```bash
-npm i -D @duckcodeailabs/dql-cli
-npx dql init ./dql
-dbt build
-npx dql compile ./dql
-npx dql sync dbt ./dql
-npx dql notebook ./dql
-```
-
-The generated `dql/dql.config.json` points back to the parent dbt project, so
-lineage can connect dbt sources/models to DQL blocks, dashboards, and Apps.
-In Block Studio, start from a dbt model for SQL blocks, a dbt semantic metric
-for semantic blocks, or a one-time SQL import wizard for legacy queries.
-
-## Official demos
-
-- **Acme Bank** — bundled OSS workflow demo for certified blocks, Apps,
-  dashboard pages, notebooks, lineage, agent answers, and local schedules.
-- **Jaffle Shop DQL** — step-by-step dbt/MetricFlow demo for manifest
-  ingestion, semantic metrics, lineage, certified blocks, Apps, tutorials, and
-  agent routing:
-  [github.com/duckcode-ai/jaffle-shop-dql](https://github.com/duckcode-ai/jaffle-shop-dql).
+`/workspace`; folders with a `dql.config.json` open directly, anything else
+gets an ignored starter project under `.dql/docker-starter/`. Add
+`--profile slack` for the Slack bot or `--profile ollama` for a local LLM
+daemon.
 
 DQL OSS is a single-user local workspace. Hosted multi-user governance,
 managed secrets, audit logs, approval workflows, and permissions-aware team
@@ -100,9 +92,9 @@ Start with [docs/README.md](./docs/README.md).
 
 Quick links:
 
-- **[Tutorials — Acme Bank end-to-end](./docs/tutorials/README.md)** *(Apps, certified blocks, agentic analytics, Slack, fraud-spike walkthrough)*
+- **[Tutorials — end to end](./docs/tutorials/README.md)** *(getting started, certified blocks, dashboards & Apps, agentic analytics, CI)*
 - [Quickstart](./docs/01-quickstart.md) · [Concepts](./docs/02-concepts.md) · [Install](./docs/03-install.md)
-- [Jaffle Shop walkthrough](./docs/guides/jaffle-shop.md) · [Import dbt](./docs/guides/import-dbt.md) · [Block Studio](./docs/guides/block-studio.md) · [Author a block](./docs/guides/authoring-blocks.md)
+- [Import dbt](./docs/guides/import-dbt.md) · [Block Studio](./docs/guides/block-studio.md) · [Author a block](./docs/guides/authoring-blocks.md) · [Troubleshooting](./docs/guides/troubleshooting.md)
 - [CLI reference](./docs/reference/cli.md) · [Language reference](./docs/reference/language.md) · [Connectors](./docs/reference/connectors.md)
 - [Architecture](./docs/architecture/overview.md) · [Contributing](./docs/contribute/repo-layout.md)
 
@@ -139,6 +131,15 @@ Real authentication (login screens, OIDC, password storage), hosted/multi-tenant
 deployment, enforced organization RBAC, governed secrets, audit logs, and
 managed approval workflows live outside OSS. Local persona/policy preview,
 agentic block generation, MCP runtime, and scheduled runs are included in OSS.
+
+## Privacy & telemetry
+
+Telemetry is **off by default** and collects **no PII** — no file names, query
+contents, warehouse URLs, or block names, ever. If you enable it with
+`dql telemetry on`, DQL sends only anonymized event names, enum-valued
+counters, and durations. Opt out anytime with `dql telemetry off`,
+`DO_NOT_TRACK=1`, or `DQL_TELEMETRY_DISABLED=1`. The full event schema is
+documented in the [dql-telemetry README](./packages/dql-telemetry/README.md).
 
 ## Contributing
 

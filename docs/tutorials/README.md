@@ -1,53 +1,43 @@
-# DQL Tutorials — Acme Bank end-to-end
+# DQL Tutorials
 
-Hands-on walkthroughs that take you from `git clone` to a fully-running
-domain-scoped analytics surface with local persona/policy preview, RLS,
-scheduled deliveries, and a block-first agent. Every tutorial is
-**scenario-based** — we use a single
-fictional bank, **Acme Bank**, and follow real users through real workflows.
+Hands-on walkthroughs that take you from a plain dbt project to certified
+blocks, dashboards in an App, agent answers, and a CI gate.
 
-## The cast
-
-| User | Role | App they live in |
-|---|---|---|
-| **Sara Fitch**       | CFO                       | `executive-cockpit` |
-| **Raj Kumar**        | Head of Cards             | `cards-ops` (owner) |
-| **Mei Chen**         | Cards Analyst             | `cards-ops` (analyst) |
-| **Li Park**          | Branch Manager (NYC-042)  | `cards-ops` (RLS-scoped) |
-| **Diego Ramos**      | Retail Analytics Lead     | `retail-deposits` |
-| **Anika Shah**       | Chief Risk Officer        | `risk-office` |
-| **Nora Evans**       | COO                       | `retail-deposits`, `executive-cockpit` |
+Every tutorial works on **your own dbt repo**. If you don't have one handy,
+use the example repo —
+[duckcode-ai/jaffle-shop-duckdb](https://github.com/duckcode-ai/jaffle-shop-duckdb),
+a standard dbt + DuckDB project — and treat it exactly like your own.
 
 ## Reading order
 
-1. **[01 — Getting started](./01-getting-started.md)** — install, scaffold the Acme Bank project.
-2. **[02 — Authoring blocks](./02-authoring-blocks.md)** — Mei builds her first certified block (`fraud_alerts_by_region`).
-3. **[03 — Apps, policies, and personas](./03-apps-rbac-personas.md)** — Raj creates `cards-ops`, sets up local preview roles + RLS, and Li sees only her branch.
-4. **[04 — Dashboard pages](./04-dashboards.md)** — assemble `daily-ops.dqld` from certified blocks.
-5. **[05 — Schedules + Slack delivery](./05-schedules-and-slack.md)** — daily 7am digest into `#cards-ops`, fraud-spike alerts.
-6. **[06 — Agentic analytics](./06-agentic-analytics.md)** — knowledge graph, Skills, asking questions, multi-provider.
-7. **[07 — End-to-end fraud spike](./07-fraud-spike-walkthrough.md)** — the full story: cron alert → Slack → ask → analyst review → certify.
-8. **[08 — Promoting AI answers to certified blocks](./08-promoting-ai-blocks.md)** — the uncertified → certified loop.
-9. **[09 — CI, `dql verify`, and change management](./09-ci-and-verify.md)** — keep `dql-manifest.json` reproducible.
-10. **[10 — Troubleshooting + FAQ](./10-troubleshooting.md)** — common issues, debugging, where to look.
-11. **[11 — Acme Bank template reference](./11-acme-bank-template-reference.md)** — inventory of sample data, blocks, Apps, dashboards, schedules, and Skills.
+1. **[01 — Getting started](./01-getting-started.md)** — add DQL to a dbt
+   repo, sync the dbt DAG, open the notebook.
+2. **[02 — Authoring blocks](./02-authoring-blocks.md)** — write a certified
+   block on top of a dbt model: SQL, metadata, tests, the certification gate.
+3. **[03 — Dashboards & Apps](./03-dashboards-and-apps.md)** — compose
+   certified blocks into a dashboard page inside an App.
+4. **[04 — Agentic analytics](./04-agentic-analytics.md)** — the knowledge
+   graph, governed agent answers, the uncertified → certified promotion loop,
+   and the MCP server.
+5. **[05 — CI and `dql verify`](./05-ci-and-verify.md)** — keep
+   `dql-manifest.json` reproducible and gate drift in CI.
+
+Stuck? See the [troubleshooting guide](../guides/troubleshooting.md).
 
 ## Mental model in one paragraph
 
-Domains author **certified `.dql` blocks** (SQL + governance metadata + tests).
-Apps bundle dashboard pages into a consumption surface for users, with
-declarative members, roles, local preview policies, RLS bindings, and schedules.
-The **persona registry** picks "who am I running as right now" and feeds RLS
-template variables into the SQL executor. The **agent** retrieves certified
-blocks first; if nothing matches, an LLM proposes SQL marked Uncertified that
-analysts review and certify back into blocks. **Slack** is the same answer
-loop, fronted by a slash command. **`dql verify`** keeps the on-disk manifest
-in lock-step with source so CI gates programmable artifacts.
+dbt models your warehouse; DQL governs what happens after. Analysts author
+**certified `.dql` blocks** (SQL + governance metadata + tests) on top of dbt
+models. **Apps** bundle dashboard pages and notebooks into a consumption
+surface for a domain. `dql compile` writes `dql-manifest.json`, which powers
+**lineage** (`source → dbt model → block → dashboard → App`), the local
+**knowledge graph**, and the **agent**: it retrieves certified blocks first;
+if nothing matches, an LLM proposes SQL marked *Uncertified* that analysts
+review and certify back into blocks. **`dql verify`** keeps the manifest in
+lock-step with source so CI can gate changes.
 
-If you'd rather skim the architecture before doing the tutorials, jump to
-[../architecture/overview.md](../architecture/overview.md). If you want a
-narrative tour of a real workday, start at
-[07 — End-to-end fraud spike](./07-fraud-spike-walkthrough.md).
+If you'd rather skim the architecture first, jump to
+[../architecture/overview.md](../architecture/overview.md).
 
 ## Conventions
 
@@ -56,7 +46,8 @@ narrative tour of a real workday, start at
 - Code blocks fenced with **`text`** are screen output you should see.
 - File-content blocks are labelled with their **path as a comment on the
   first line** so you can copy them as-is.
-- **"You should see"** boxes describe the expected outcome of a step. If
-  you don't see it, jump to [troubleshooting](./10-troubleshooting.md).
+- **"You should see"** boxes describe the expected outcome of a step. If you
+  don't see it, jump to the
+  [troubleshooting guide](../guides/troubleshooting.md).
 
 Ready? [Start with tutorial 01 →](./01-getting-started.md)

@@ -1,0 +1,12 @@
+{
+  "project": "lineage-app",
+  "connections": {
+    "default": {
+      "driver": "duckdb",
+      "filepath": ":memory:"
+    }
+  },
+  "governance": {
+    "required_fields": ["domain", "owner", "description"]
+  }
+}

@@ -72,7 +72,7 @@ jobs:
         run: |
           set -e
           shopt -s globstar nullglob
-          files=(packages/create-dql-app/templates/**/*.dql)
+          files=(packages/create-dql-app/templates/**/*.dql apps/cli/test/fixtures/**/*.dql)
           if [ ${#files[@]} -eq 0 ]; then
             echo "no .dql files to check — skipping"
             exit 0
@@ -103,7 +103,7 @@ jobs:
         run: DQL_CLI="node $PWD/apps/cli/dist/index.js" node scripts/bench/run-bench.mjs /tmp/stress
 
   # --- E2E Playwright (notebook happy path) ---
-  # Runs the Jaffle Shop path in a headless browser. On PRs that don't
+  # Runs the starter-project path in a headless browser. On PRs that don't
   # touch the notebook app, we skip to keep CI fast.
   e2e:
     name: playwright e2e

@@ -6,8 +6,8 @@ log() {
 }
 
 workspace="${DQL_PROJECT_ROOT:-${DQL_WORKSPACE:-/workspace}}"
-demo_root="${DQL_DEMO_ROOT:-$workspace/.dql/docker-starter/acme-bank}"
-template_root="/opt/dql/templates/acme-bank"
+demo_root="${DQL_DEMO_ROOT:-$workspace/.dql/docker-starter/dql-starter}"
+template_root="/opt/dql/templates/starter"
 
 is_dql_source_repo() {
   [ -f "$workspace/package.json" ] \
@@ -21,15 +21,25 @@ ensure_demo_project() {
   fi
 
   if [ ! -d "$template_root" ]; then
-    log "Bundled Acme Bank template not found at $template_root."
+    log "Bundled starter template not found at $template_root."
     log "Run from a folder with dql.config.json, or rebuild the image."
     exit 1
   fi
 
   log "No DQL project found at $workspace."
-  log "Creating Acme Bank starter project at $demo_root."
+  log "Creating a starter project at $demo_root."
+  log "Tip: to try DQL on a sample dbt project, clone"
+  log "  https://github.com/duckcode-ai/jaffle-shop-duckdb"
+  log "and run docker compose from inside it."
   mkdir -p "$demo_root"
   cp -R "$template_root/." "$demo_root/"
+  # Resolve scaffold placeholders the same way create-dql-app would.
+  find "$demo_root" -type f -exec sed -i \
+    -e 's/{{PROJECT_NAME}}/dql-starter/g' \
+    -e 's/{{DBT_DETECTED}}/false/g' \
+    -e 's|{{DBT_PROJECT_DIR}}|../my-dbt-project|g' \
+    -e "s/{{YEAR}}/$(date +%Y)/g" \
+    {} +
 }
 
 maybe_use_demo_project() {

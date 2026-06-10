@@ -16,9 +16,9 @@ docker compose up
 > reuse cached layers and start in seconds.
 
 The notebook is now live at **http://127.0.0.1:3474**. If you run this from
-the DQL framework source repo, Docker creates and opens the bundled Acme Bank
-starter at `.dql/docker-starter/acme-bank`. If you run the same image from a
-folder that already has `dql.config.json`, that folder opens as the project.
+the DQL framework source repo, Docker creates and opens an ignored starter
+project under `.dql/docker-starter/`. If you run the same image from a folder
+that already has `dql.config.json`, that folder opens as the project.
 
 To run the Slack bot or a local Ollama daemon in the same compose stack:
 
@@ -33,24 +33,18 @@ If you already have Node, scaffold a project and run the notebook with the
 project-local DQL CLI:
 
 ```bash
-npx create-dql-app@latest acme-bank --template acme-bank
-cd acme-bank
+npx create-dql-app@latest my-analytics
+cd my-analytics
 npm install
 npm run doctor
 npm run notebook
 ```
 
-Open **http://127.0.0.1:3474**. Acme Bank is the flagship OSS walkthrough for
-certified blocks, Apps, notebooks, local personas, and lineage.
-
-Use the empty template when you want a blank project:
-
-```bash
-npx create-dql-app@latest my-analytics --template empty
-cd my-analytics
-npm install
-npm run notebook
-```
+Open **http://127.0.0.1:3474**. The starter is a clean project: DuckDB
+in-memory connection, a welcome notebook, and npm scripts for the local
+workflow. Run it inside a dbt repo and the dbt project is wired in
+automatically (see below). To try DQL on a sample dbt project, clone
+[jaffle-shop-duckdb](https://github.com/duckcode-ai/jaffle-shop-duckdb).
 
 For an existing DQL project, install only the CLI:
 
@@ -62,18 +56,20 @@ npx @duckcodeailabs/dql-cli notebook
 
 ## Existing dbt repo
 
-If you already have one dbt repo, keep DQL isolated in a `dql/` folder inside
-that repo:
+If you already have a dbt repo, keep DQL isolated in a `dql/` folder inside
+that repo — this is the recommended path:
 
 ```bash
 cd my-dbt-repo
-npm i -D @duckcodeailabs/dql-cli
-npx dql init ./dql
-dbt build
-npx dql compile ./dql
-npx dql sync dbt ./dql
-npx dql notebook ./dql
+dbt parse                        # ensure target/manifest.json exists
+npx create-dql-app@latest dql    # detects the dbt project, wires the config
+cd dql
+npm install
+npm run sync                     # import dbt models + lineage
+npm run notebook
 ```
+
+(Equivalent manual path: `npm i -D @duckcodeailabs/dql-cli && npx dql init ./dql`.)
 
 The resulting layout is:
 

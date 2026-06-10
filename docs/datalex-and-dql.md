@@ -98,11 +98,11 @@ What happens at each stage:
 
 ## End-to-end tutorial (5 minutes)
 
-Both halves of the stack ship pre-built example projects backed by dbt + DuckDB. You don't need anything else installed.
+Both halves of the stack work against a plain dbt + DuckDB project. You don't need anything else installed.
 
 1. **Stage 1 — DataLex contracts.** [`jaffle-shop-DataLex`](https://github.com/duckcode-ai/jaffle-shop-DataLex) — clone, run `dbt build`, open in `datalex serve`, walk the diagrams, review the AI-drafted contract proposals.
-2. **Stage 2 — DQL certified blocks.** [`jaffle-shop-dql`](https://github.com/duckcode-ai/jaffle-shop-dql) — `docker compose up`, browse the certified blocks (each cites the DataLex contract it backs), open the Apps Command Center, ask the AI chat a question.
-3. **Stage 3 — AI agent integration.** Point Cursor or Claude Code at `dql mcp serve` running in the jaffle-shop project. Same question, same answer, every time — and the `query_via_block` audit log shows which contract version answered.
+2. **Stage 2 — DQL certified blocks.** [`jaffle-shop-duckdb`](https://github.com/duckcode-ai/jaffle-shop-duckdb) — clone, run `./setup.sh`, then add DQL with the [quickstart](01-quickstart.md): scaffold `./dql`, sync the dbt DAG, author and certify blocks.
+3. **Stage 3 — AI agent integration.** Point Cursor or Claude Code at `dql mcp` running in the project. Same question, same answer, every time — and the `query_via_block` audit log shows which contract version answered.
 
 ---
 

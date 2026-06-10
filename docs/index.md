@@ -20,18 +20,22 @@ and policies are local previews, not hosted RBAC.
 
 ## Start Here
 
+From your dbt repo (or clone
+[jaffle-shop-duckdb](https://github.com/duckcode-ai/jaffle-shop-duckdb)
+and run `./setup.sh` first):
+
 ```bash
-npx create-dql-app@latest acme-bank --template acme-bank
-cd acme-bank
+dbt parse                        # ensure target/manifest.json exists
+npx create-dql-app@latest dql    # scaffolds ./dql, auto-wires dbt
+cd dql
 npm install
-npm run doctor
-npm run notebook
+npm run sync                     # import dbt models + lineage
+npm run notebook                 # http://127.0.0.1:3474
 ```
 
 Then run:
 
 ```bash
-npm run certify:cards
 npm run compile
 npm run lineage
 ```
@@ -52,12 +56,12 @@ npm run lineage
 
 ## Learn
 
-1. [Quickstart](01-quickstart.md) — Acme Bank local-first workflow
+1. [Quickstart](01-quickstart.md) — add DQL to a dbt repo
 2. [DQL in 5 concepts](04-dql-in-5-concepts.md)
-3. [Block Studio](guides/block-studio.md)
-4. [Author a certified block](guides/authoring-blocks.md)
-5. [Import dbt](guides/import-dbt.md)
-6. [Jaffle Shop walkthrough](guides/jaffle-shop.md)
+3. [Tutorials](tutorials/README.md) — blocks → dashboards & Apps → agent → CI
+4. [Block Studio](guides/block-studio.md)
+5. [Author a certified block](guides/authoring-blocks.md)
+6. [Import dbt](guides/import-dbt.md)
 
 ## What Ships
 

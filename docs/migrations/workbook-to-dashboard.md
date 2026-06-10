@@ -65,8 +65,8 @@ dashboard "Q4 Finance" {
 ## Equivalence guarantees
 
 - Emitted HTML bytes match the v1.1 `workbook` output for the same tab
-  contents — the codegen path is shared. Verified in `examples/` as part of
-  the v1.2 release test.
+  contents — the codegen path is shared. Verified as part of the v1.2
+  release test.
 - Schedule (`@schedule`), notification (`@email_to`, `@slack_to`), and alert
   decorators move unchanged to the `dashboard` wrapper.
 - `ref()` / `@include` / semantic references resolve identically — the

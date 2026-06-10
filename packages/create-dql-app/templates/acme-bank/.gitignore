@@ -1,8 +1,0 @@
-node_modules/
-dist/
-.DS_Store
-.env
-.dql/cache/
-dql-manifest.json
-dashboards/*.html
-

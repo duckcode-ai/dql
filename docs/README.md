@@ -5,16 +5,17 @@ reads on github.com, in your editor, or in a terminal.
 
 ## New here? Read in order
 
-1. [Quickstart](./01-quickstart.md) — Acme Bank local-first OSS workflow
+1. [Quickstart](./01-quickstart.md) — add DQL to a dbt repo (yours, or the
+   [example repo](https://github.com/duckcode-ai/jaffle-shop-duckdb))
 2. [DQL in 5 concepts](./04-dql-in-5-concepts.md) — Block, Certified Block, App, Manifest, Lineage
-3. [Concepts](./02-concepts.md) — the broader mental model
-4. [Install](./03-install.md) — npm and Docker paths
+3. [Tutorials](./tutorials/README.md) — blocks → dashboards & Apps → agent → CI
+4. [Concepts](./02-concepts.md) — the broader mental model
+5. [Install](./03-install.md) — npm and Docker paths
 
 ## Guides
 
 Task-oriented walkthroughs.
 
-- [Jaffle Shop end-to-end](./guides/jaffle-shop.md)
 - [Connect your warehouse](./guides/connect-warehouse.md)
 - [Import a dbt project](./guides/import-dbt.md)
 - [Block Studio dbt-first workflow](./guides/block-studio.md)
@@ -22,6 +23,7 @@ Task-oriented walkthroughs.
 - [Build a dashboard](./guides/dashboards.md)
 - [Versioning & git workflow](./guides/versioning.md)
 - [Migrate from Looker / Metabase](./guides/migrate.md)
+- [Troubleshooting](./guides/troubleshooting.md)
 - [FAQ](./guides/faq.md)
 
 ## Reference

@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "id": "ops",
+  "name": "Card Operations",
+  "description": "Minimal fixture App used to verify source-to-block-to-dashboard-to-App lineage.",
+  "visibility": "shared",
+  "domain": "cards",
+  "lifecycle": "review",
+  "owners": ["fixture-owner@example.com"],
+  "tags": ["cards", "fixture"]
+}

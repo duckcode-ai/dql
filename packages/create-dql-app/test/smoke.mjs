@@ -1,7 +1,8 @@
 #!/usr/bin/env node
-// Smoke test: scaffold both templates into tmp dirs, assert the expected
-// files exist and placeholder substitution ran. Keeps us honest about the
-// 5-minute demo gate — if this test fails, create-dql-app is broken.
+// Smoke test: scaffold the starter template into a tmp dir, assert the
+// expected files exist and placeholder substitution ran. Keeps us honest
+// about the 5-minute demo gate — if this test fails, create-dql-app is
+// broken.
 import { spawnSync } from 'node:child_process';
 import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -77,19 +78,7 @@ function runTest(template, name, expected, placeholderFile) {
   }
 }
 
-runTest('jaffle-shop', 'smoke-jaffle', [
-  'dql.config.json',
-  'package.json',
-  'README.md',
-  'notebooks/welcome.dqlnb',
-  'blocks/revenue_by_segment.dql',
-  'blocks/revenue_by_order_date_semantic.dql',
-  'semantic-layer/metrics/revenue.yaml',
-  'dashboards/overview.dql',
-  '.gitignore',
-], 'dql.config.json');
-
-runTest('empty', 'smoke-empty', [
+runTest('starter', 'smoke-starter', [
   'dql.config.json',
   'package.json',
   'README.md',
@@ -97,35 +86,18 @@ runTest('empty', 'smoke-empty', [
   '.gitignore',
 ], 'dql.config.json');
 
-runTest('acme-bank', 'smoke-acme-bank', [
-  'dql.config.json',
-  'package.json',
-  'README.md',
-  'data/transactions.csv',
-  'data/fraud_alerts.csv',
-  'data/deposits.csv',
-  'data/loans.csv',
-  'blocks/cards/fraud_alerts_by_region.dql',
-  'blocks/cards/card_approval_rate.dql',
-  'blocks/cards/card_volume_by_status.dql',
-  'blocks/deposits/deposit_trend.dql',
-  'blocks/deposits/deposit_balance_by_segment_semantic.dql',
-  'blocks/lending/loan_delinquency_by_region.dql',
-  'blocks/lending/loan_outstanding_by_risk_grade.dql',
-  'blocks/executive/bank_health_scorecard.dql',
-  'apps/cards-ops/dql.app.json',
-  'apps/cards-ops/dashboards/daily-ops.dqld',
-  'apps/cards-ops/dashboards/fraud-watch.dqld',
-  'apps/retail-deposits/dashboards/deposit-growth.dqld',
-  'apps/risk-office/dashboards/credit-risk.dqld',
-  'apps/executive-cockpit/dashboards/bank-overview.dqld',
-  'notebooks/cards_fraud_ops.dqlnb',
-  'notebooks/retail_deposits_review.dqlnb',
-  'notebooks/credit_risk_review.dqlnb',
-  'notebooks/executive_weekly_review.dqlnb',
-  '.dql/skills/mei.chen@acme-bank.com/cards-fraud.skill.md',
-  'semantic-layer/metrics/banking.yaml',
-  '.gitignore',
-], 'dql.config.json');
+// The default template (no --template flag) must be the starter.
+console.log('\n▸ default template');
+{
+  const base = mkdtempSync(join(tmpdir(), 'create-dql-app-test-'));
+  const target = join(base, 'smoke-default');
+  const result = spawnSync('node', [BIN, target], { encoding: 'utf-8', env: { ...process.env, CI: '1' } });
+  try {
+    assert(result.status === 0, `scaffold exits 0 (got ${result.status})`);
+    assert(existsSync(join(target, 'dql.config.json')), 'default template emits dql.config.json');
+  } finally {
+    rmSync(base, { recursive: true, force: true });
+  }
+}
 
 console.log('\n✓ all smoke tests passed');

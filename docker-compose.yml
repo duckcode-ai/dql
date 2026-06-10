@@ -9,8 +9,12 @@
 #
 # The `./` mount at /workspace lets this compose file serve either a real DQL
 # project (when dql.config.json is present) or this framework repo. In the
-# framework repo case, the container creates an ignored Acme Bank starter under
-# .dql/docker-starter/acme-bank and opens that project automatically.
+# framework repo case, the container creates an ignored starter project under
+# .dql/docker-starter/dql-starter and opens that project automatically.
+#
+# To try DQL on a sample dbt project, clone
+# https://github.com/duckcode-ai/jaffle-shop-duckdb and run docker compose
+# from a DQL project folder inside it.
 
 services:
   notebook:

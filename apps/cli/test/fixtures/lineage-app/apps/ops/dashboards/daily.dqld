@@ -1,0 +1,29 @@
+{
+  "version": 1,
+  "id": "daily",
+  "metadata": {
+    "title": "Daily Ops",
+    "description": "Minimal fixture dashboard referencing one certified block.",
+    "domain": "cards",
+    "visibility": "shared",
+    "lifecycle": "review",
+    "tags": ["cards", "fixture"]
+  },
+  "layout": {
+    "kind": "grid",
+    "cols": 12,
+    "rowHeight": 80,
+    "items": [
+      {
+        "i": "approval-rate",
+        "x": 0,
+        "y": 0,
+        "w": 3,
+        "h": 2,
+        "block": { "blockId": "card_approval_rate" },
+        "viz": { "type": "single_value" },
+        "title": "Approval Rate"
+      }
+    ]
+  }
+}

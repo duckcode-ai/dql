@@ -29,9 +29,10 @@ The test suite verifies adoption-critical templates:
 
 - generated projects use the current `@duckcodeailabs/dql-cli` version
 - generated scripts avoid deprecated `dql test`
-- template `.dql` files use canonical syntax
-- Acme Bank compiles source-table -> block -> dashboard -> App lineage
-- an Acme certified block passes the local certifier with passing test results
+- template and fixture `.dql` files use canonical syntax
+- the `apps/cli/test/fixtures/lineage-app` fixture compiles
+  source-table -> block -> dashboard -> App lineage
+- a fixture certified block passes the local certifier with passing test results
 
 ## Docs and Release Checks
 

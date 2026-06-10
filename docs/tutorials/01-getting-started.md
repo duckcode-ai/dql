@@ -1,184 +1,142 @@
-# 01 - Getting started
+# 01 — Getting started
 
-**Who this is for:** anyone setting up DQL on their machine for the first time.
+**Who this is for:** anyone adding DQL to a dbt project for the first time.
 
-**What you'll do:** install the toolchain, scaffold the Acme Bank sample,
-compile the manifest, build Apps, open the desktop UI, and run the first
-certified banking blocks.
+**What you'll do:** add a DQL workspace to a dbt repo, sync the dbt DAG,
+open the notebook, and see end-to-end lineage.
 
-**Time:** 15 minutes.
+**Time:** 10 minutes.
 
 ---
 
 ## Prerequisites
 
 - **Node.js** 20 or 22 LTS (check: `node --version`)
-- **pnpm** >= 9 (`npm i -g pnpm` if you do not have it)
 - **git** (any modern version)
-- Optional for agent tutorials: `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`,
+- A dbt project — yours, or the example repo below
+- Optional for tutorial 04: `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`,
   `GEMINI_API_KEY`, or a local Ollama server.
 
 ---
 
-## Step 1 - Clone and install DQL
+## Step 1 — Pick your dbt repo
+
+**Your own repo:** skip ahead to Step 2 — the steps are identical.
+
+**No repo handy?** Clone the example. It's a standard dbt + DuckDB project
+(the classic Jaffle Shop), fully local:
 
 ```bash
-git clone https://github.com/duckcode-ai/dql.git
+git clone https://github.com/duckcode-ai/jaffle-shop-duckdb.git
+cd jaffle-shop-duckdb
+./setup.sh        # creates a venv, runs dbt seed + dbt build + docs generate
+```
+
+> **You should see** dbt build all models into `jaffle_shop.duckdb` at the
+> repo root, and `target/manifest.json` written.
+
+If you're on your own repo, make sure the manifest is fresh:
+
+```bash
+dbt parse         # or dbt build — either writes target/manifest.json
+```
+
+---
+
+## Step 2 — Scaffold the DQL workspace
+
+From the dbt repo root:
+
+```bash
+npx create-dql-app@latest dql
 cd dql
-pnpm install
-pnpm -r build
+npm install
 ```
 
-> **You should see** every package build cleanly. The CLI artifact lives at
-> `apps/cli/dist/index.js`.
+> **You should see** `detected sibling dbt project at …` during scaffolding —
+> the generated `dql.config.json` is wired back to the parent dbt project.
+> DQL stays isolated under `./dql`; your dbt files are untouched.
 
-For the tutorials, make the local CLI easy to call:
+Point the default connection at the dbt warehouse. For the example repo,
+edit `dql.config.json`:
 
-```bash
-alias dql="node $(pwd)/apps/cli/dist/index.js"
-dql --help
+```json
+"connections": {
+  "default": {
+    "driver": "duckdb",
+    "filepath": "../jaffle_shop.duckdb"
+  }
+}
 ```
+
+(On your own repo, use your warehouse driver instead — DQL ships 15
+connectors; see [connect-warehouse](../guides/connect-warehouse.md).)
 
 ---
 
-## Step 2 - Scaffold Acme Bank
-
-The Acme Bank template is a full OSS single-user banking project: sample CSV
-warehouse, certified blocks, domain Apps, dashboards, governance, schedules,
-and Skills.
+## Step 3 — Check the setup
 
 ```bash
-cd ~
-node /path/to/dql/packages/create-dql-app/bin/create-dql-app.mjs acme-bank --template acme-bank
-cd acme-bank
+npm run doctor
 ```
 
-If you installed the package from npm, use:
-
-```bash
-npx create-dql-app acme-bank --template acme-bank
-cd acme-bank
-```
-
-> **You should see** a project with `data/`, `blocks/`, `apps/`,
-> `notebooks/`, `semantic-layer/`, and `.dql/skills/`.
+> **You should see** green checks for Node version, project config,
+> directories, the default connection, and the dbt project, plus the next
+> commands for the local workflow.
 
 ---
 
-## Step 3 - Inspect the project shape
+## Step 4 — Sync the dbt DAG
 
 ```bash
-find . -maxdepth 3 -type f | sort | sed -n '1,80p'
+npm run sync
 ```
 
-Key folders:
-
-```text
-data/                    DuckDB-readable CSV banking warehouse
-blocks/cards/            card volume, approval, and fraud blocks
-blocks/deposits/         deposit growth and branch leaderboard blocks
-blocks/lending/          delinquency and high-risk exposure blocks
-blocks/executive/        CXO scorecard block
-apps/                    stakeholder App packages
-.dql/skills/             agent Skills for Acme personas
-```
-
-Certified blocks stay in root `blocks/`. Apps reference those blocks through
-`.dqld` dashboards instead of copying business logic.
+> **You should see** dbt sources and models imported into the DQL manifest —
+> for the example repo, the staging and marts models (`orders`, `customers`,
+> `products`, …) with their upstream edges.
 
 ---
 
-## Step 4 - Compile and build Apps
+## Step 5 — Open the notebook
 
 ```bash
-dql compile
-dql app build
+npm run notebook
 ```
 
-> **You should see** a manifest with four Apps and five dashboards:
->
-> - `cards-ops/daily-ops`
-> - `cards-ops/fraud-watch`
-> - `retail-deposits/deposit-growth`
-> - `risk-office/credit-risk`
-> - `executive-cockpit/bank-overview`
+The CLI starts a local server on **http://127.0.0.1:3474** and opens the
+browser UI. Open `notebooks/welcome.dqlnb` and run a cell against a dbt
+model:
 
-The dashboard IDs are local inside each App. The manifest keys are qualified
-as `appId/dashboardId`, so multiple Apps can safely have their own dashboard
-names.
+```sql
+SELECT date_trunc('month', ordered_at) AS month,
+       SUM(order_total)                AS revenue
+FROM dev.orders
+GROUP BY 1 ORDER BY 1
+```
+
+> **You should see** real rows from the dbt-built warehouse. (`dev` is the
+> schema the example repo's dbt profile writes to — substitute your own
+> schema on your repo.)
 
 ---
 
-## Step 5 - Run the welcome notebook
+## Step 6 — See the lineage
 
-```bash
-dql notebook
-```
+Click **Lineage** in the activity bar.
 
-Open `notebooks/welcome.dqlnb`.
-
-Run these cells:
-
-- raw transaction health
-- `@block("fraud_alerts_by_region")`
-- `@block("deposit_trend")`
-- `@block("bank_health_scorecard")`
-
-> **You should see** real rows from the packaged CSVs and certified block
-> citations in the notebook flow.
-
----
-
-## Step 6 - Open Apps Command Center
-
-In the desktop UI, click **Apps** in the left rail.
-
-Open each App:
-
-| App | What to inspect |
-| --- | --- |
-| `Cards Operations` | Approval rate, card volume, fraud by region, fraud by merchant |
-| `Retail Deposits` | Deposit trend, deposit balance by segment, branch leaders |
-| `Risk Office` | Delinquent exposure by region and high-risk loan watchlist |
-| `Executive Cockpit` | Cross-domain CXO scorecard with certified block citations |
-
-Use the persona switcher in `Cards Operations` and select
-`li.park@acme-bank.com`. The fraud blocks are decorated with:
-
-```dql
-@rls("region", "{user.region}")
-@rls("branch_id", "{user.branch}")
-```
-
-Li's member attributes in `apps/cards-ops/dql.app.json` narrow her view to
-`region = NA-NE` and `branch_id = NYC-042`.
-
----
-
-## Step 7 - Build the agent index
-
-```bash
-dql agent reindex
-```
-
-Ask the Chat cell or global agent drawer:
-
-```text
-Which merchants are driving card fraud?
-```
-
-The agent should retrieve the certified `fraud_by_merchant_recent` block
-before attempting generated SQL.
+> **You should see** the imported dbt DAG: seeds/sources flowing into staging
+> models into marts. As you add blocks, dashboards, and Apps in the next
+> tutorials, they appear downstream of the dbt models they read — the full
+> `source → dbt model → block → dashboard → App` graph.
 
 ---
 
 ## What you now have
 
-- A runnable Acme Bank OSS project
-- Banking sample data across cards, deposits, lending, and executive domains
-- Certified blocks with domain, owner, tags, descriptions, tests, and agent
-  context
-- Four stakeholder Apps with programmable governance and dashboards
-- A local agent knowledge base seeded from the same DQL source tree
+- A DQL workspace living inside a dbt repo (`./dql`), tracked in git
+- The dbt DAG imported into `dql-manifest.json`
+- A running local notebook querying the dbt warehouse
+- Lineage from sources through dbt models
 
-[Continue to tutorial 02 - Authoring blocks ->](./02-authoring-blocks.md)
+[Continue to tutorial 02 — Authoring blocks →](./02-authoring-blocks.md)

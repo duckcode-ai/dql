@@ -8,6 +8,8 @@ import type { BlockRecord, TestResultSummary } from '@duckcodeailabs/dql-project
 
 const repoRoot = resolve(process.cwd(), '../..');
 const templatesRoot = join(repoRoot, 'packages/create-dql-app/templates');
+const fixturesRoot = resolve(process.cwd(), 'test/fixtures');
+const lineageFixture = join(fixturesRoot, 'lineage-app');
 
 function collectFiles(dir: string, predicate: (path: string) => boolean, out: string[] = []): string[] {
   for (const entry of readdirSync(dir)) {
@@ -19,16 +21,19 @@ function collectFiles(dir: string, predicate: (path: string) => boolean, out: st
   return out;
 }
 
-function copyTemplate(name: string): { root: string; cleanup: () => void } {
-  const base = mkdtempSync(join(tmpdir(), `dql-${name}-template-`));
+function copyProject(src: string, name: string): { root: string; cleanup: () => void } {
+  const base = mkdtempSync(join(tmpdir(), `dql-${name}-`));
   const root = join(base, name);
-  cpSync(join(templatesRoot, name), root, { recursive: true });
+  cpSync(src, root, { recursive: true });
   return { root, cleanup: () => rmSync(base, { recursive: true, force: true }) };
 }
 
-describe('OSS adoption templates', () => {
-  it('all template .dql files parse and analyze with canonical block syntax', () => {
-    const dqlFiles = collectFiles(templatesRoot, (path) => path.endsWith('.dql'));
+describe('OSS adoption templates and fixtures', () => {
+  it('all template and fixture .dql files parse and analyze with canonical block syntax', () => {
+    const dqlFiles = [
+      ...collectFiles(templatesRoot, (path) => path.endsWith('.dql')),
+      ...collectFiles(fixturesRoot, (path) => path.endsWith('.dql')),
+    ];
     expect(dqlFiles.length).toBeGreaterThan(0);
 
     for (const filePath of dqlFiles) {
@@ -41,8 +46,8 @@ describe('OSS adoption templates', () => {
     }
   });
 
-  it('Acme Bank compiles source-to-block-to-dashboard-to-App lineage', () => {
-    const { root, cleanup } = copyTemplate('acme-bank');
+  it('fixture project compiles source-to-block-to-dashboard-to-App lineage', () => {
+    const { root, cleanup } = copyProject(lineageFixture, 'lineage-app');
     try {
       const manifest = buildManifest({ projectRoot: root, dqlVersion: '1.6.1' });
       const nodeTypes = new Set(manifest.lineage.nodes.map((node) => node.type));
@@ -63,8 +68,8 @@ describe('OSS adoption templates', () => {
     }
   });
 
-  it('Acme Bank card approval block is certifiable with passing local test results', () => {
-    const filePath = join(templatesRoot, 'acme-bank/blocks/cards/card_approval_rate.dql');
+  it('fixture card approval block is certifiable with passing local test results', () => {
+    const filePath = join(lineageFixture, 'blocks/card_approval_rate.dql');
     const source = readFileSync(filePath, 'utf-8');
     const ast = parse(source, filePath);
     const block = ast.statements.find((statement: any) => statement.kind === 'BlockDecl') as any;
@@ -78,7 +83,7 @@ describe('OSS adoption templates', () => {
       version: '1.0.0',
       status: block.status,
       gitRepo: '',
-      gitPath: 'blocks/cards/card_approval_rate.dql',
+      gitPath: 'blocks/card_approval_rate.dql',
       gitCommitSha: '',
       description: block.description,
       owner: block.owner,
