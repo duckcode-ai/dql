@@ -147,9 +147,12 @@ Quick links:
 - **Agentic analytics** — `@duckcodeailabs/dql-agent` ships a
   local SQLite + FTS5 knowledge graph, Skills, a block-first answer loop, and
   pluggable LLM providers (Claude / OpenAI / Gemini / local Ollama)
-- **MCP server** — 10 tools (`search_blocks`, `get_block`, `query_via_block`,
+- **MCP server** — 12 governed tools for Claude Code, Claude Desktop, Cursor,
+  Codex, and any MCP client: `query_via_block` (certified) + `query_via_metadata`
+  (flagged + drafted), `search_blocks`, `get_block`, `list_proposals`,
   `list_metrics`, `list_dimensions`, `lineage_impact`, `certify`,
-  `suggest_block`, `kg_search`, `feedback_record`)
+  `suggest_block`, `kg_search`, `feedback_record`. See
+  [connect an AI agent](./docs/guides/mcp.md).
 - **Slack front-end** — `dql slack serve` runs a slash-command
   bot answering via the same block-first loop, with feedback buttons that
   feed self-learning

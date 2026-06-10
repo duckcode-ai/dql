@@ -92,6 +92,7 @@ nav:
       - Authoring blocks: guides/authoring-blocks.md
       - Block Studio: guides/block-studio.md
       - Dashboards: guides/dashboards.md
+      - Connect an AI agent (MCP): guides/mcp.md
       - Import dbt: guides/import-dbt.md
       - Connect a warehouse: guides/connect-warehouse.md
       - Migrate from earlier versions: guides/migrate.md

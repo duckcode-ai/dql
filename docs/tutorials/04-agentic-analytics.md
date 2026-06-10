@@ -124,17 +124,20 @@ Claude Desktop, Cursor):
 dql mcp
 ```
 
-Register it with your client — e.g. for Claude Code:
+Register it with your client — e.g. for Claude Code, from your project folder:
 
 ```bash
-claude mcp add dql -- npx @duckcodeailabs/dql-cli mcp
+claude mcp add dql -- npx -y @duckcodeailabs/dql-cli mcp
 ```
 
-The server exposes tools like `search_blocks`, `query_via_block` (Tier 1,
+Claude Desktop, Cursor, and Codex use a config file instead — full copy-paste
+setup for each is in [Connect an AI agent (MCP)](../guides/mcp.md).
+
+The server exposes 12 tools — `search_blocks`, `query_via_block` (Tier 1,
 certified only), `query_via_metadata` (Tier 2, flagged + drafted),
-`list_metrics`, `lineage_impact`, and `suggest_block`. Ask your agent a
-revenue question and it will answer **from your certified blocks**, citing
-them — and file drafts when it has to improvise.
+`list_proposals`, `list_metrics`, `lineage_impact`, `suggest_block`, and more.
+Ask your agent a revenue question and it answers **from your certified
+blocks**, citing them — and files drafts when it has to improvise.
 
 ---
 

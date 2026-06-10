@@ -21,6 +21,7 @@ Task-oriented walkthroughs.
 - [Block Studio dbt-first workflow](./guides/block-studio.md)
 - [Author a certified block](./guides/authoring-blocks.md)
 - [Build a dashboard](./guides/dashboards.md)
+- [Connect an AI agent (MCP)](./guides/mcp.md) — Claude Code, Claude Desktop, Cursor, Codex
 - [Versioning & git workflow](./guides/versioning.md)
 - [Migrate from Looker / Metabase](./guides/migrate.md)
 - [Troubleshooting](./guides/troubleshooting.md)
