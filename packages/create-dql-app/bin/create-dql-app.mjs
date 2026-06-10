@@ -71,7 +71,9 @@ function copyDir(src, dst) {
   mkdirSync(dst, { recursive: true });
   for (const entry of readdirSync(src)) {
     const s = join(src, entry);
-    const d = join(dst, entry);
+    // npm strips .gitignore files from published tarballs, so templates ship
+    // it as "gitignore" and we restore the dot on scaffold.
+    const d = join(dst, entry === 'gitignore' ? '.gitignore' : entry);
     if (statSync(s).isDirectory()) copyDir(s, d);
     else writeFileSync(d, readFileSync(s));
   }
