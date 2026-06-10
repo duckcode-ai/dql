@@ -16,15 +16,18 @@
 }
 .panel-frame-header {
   display: flex;
+  /* Narrow sidebar panels: wrap actions below the title instead of letting
+     the heading flex to zero width and overflow onto the buttons. */
+  flex-wrap: wrap;
   align-items: flex-start;
   justify-content: space-between;
-  gap: 16px;
+  gap: 8px 16px;
   padding: 12px 16px;
   border-bottom: 1px solid var(--border-default);
   background: var(--bg-2);
   flex-shrink: 0;
 }
-.panel-frame-heading { display: flex; align-items: flex-start; gap: 10px; min-width: 0; }
+.panel-frame-heading { display: flex; align-items: flex-start; gap: 10px; min-width: 0; flex: 1 1 auto; }
 .panel-frame-icon {
   width: 26px; height: 26px;
   display: inline-flex; align-items: center; justify-content: center;
@@ -46,7 +49,7 @@
 }
 .panel-frame-status { display: inline-flex; align-items: center; }
 .panel-frame-subtitle { font-size: 11px; color: var(--text-tertiary); margin-top: 2px; }
-.panel-frame-actions { display: flex; align-items: center; gap: 6px; flex-shrink: 0; }
+.panel-frame-actions { display: flex; align-items: center; gap: 6px; flex-shrink: 0; flex-wrap: wrap; }
 .panel-frame-toolbar {
   display: flex; align-items: center; gap: 8px;
   padding: 8px 16px;

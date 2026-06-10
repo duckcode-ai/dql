@@ -56,11 +56,21 @@ export function Header() {
   const titleInputRef = useRef<HTMLInputElement>(null);
   const currentDirty = state.mainView === 'block_studio' ? state.blockStudioDirty : state.notebookDirty;
   const inNotebookExecutionView = state.mainView === 'notebook';
-  const headerTitle = state.mainView === 'connection'
-    ? 'Connections'
-    : state.mainView === 'reference'
-      ? 'Quick Reference'
-      : state.notebookTitle || 'Untitled';
+  // Only notebook/Block Studio are file-editing surfaces; every other view
+  // gets a static title and hides the file chip + editor actions.
+  const isEditorView = state.mainView === 'notebook' || state.mainView === 'block_studio';
+  const VIEW_TITLES: Partial<Record<typeof state.mainView, string>> = {
+    connection: 'Connections',
+    reference: 'Quick Reference',
+    apps: 'Apps',
+    git: 'Source control',
+    review: 'Review',
+    settings: 'Settings',
+    imports: 'Import SQL',
+  };
+  const headerTitle = isEditorView
+    ? state.notebookTitle || 'Untitled'
+    : VIEW_TITLES[state.mainView] ?? 'DQL Notebook';
 
   useEffect(() => {
     if (editingTitle && titleInputRef.current) {
@@ -271,7 +281,7 @@ export function Header() {
             flexShrink: 0,
           }}
         />
-        {state.activeFile && (
+        {state.activeFile && isEditorView && (
           <span
             style={{
               fontSize: 10,
@@ -289,7 +299,7 @@ export function Header() {
             {state.activeFile.type}
           </span>
         )}
-        {state.activeFile && state.mainView !== 'connection' && state.mainView !== 'reference' ? (
+        {state.activeFile && isEditorView ? (
           editingTitle ? (
             <input
               ref={titleInputRef}
@@ -359,7 +369,7 @@ export function Header() {
       {/* Right: actions. Apps are opened from the sidebar, so the header stays
           focused on the active authoring surface. */}
       <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-        {state.appMode === 'studio' && (
+        {state.appMode === 'studio' && isEditorView && (
           <>
             {/* v1.3.3 Hex handoff — Run all pill. Accent purple primary CTA. */}
             <button
@@ -494,7 +504,7 @@ export function Header() {
           )}
         </div>
 
-        {state.appMode === 'studio' && (
+        {state.appMode === 'studio' && isEditorView && (
           <>
         {/* Save */}
         <button
@@ -569,8 +579,9 @@ export function Header() {
           </>
         )}
 
-        {/* v1.3.3 Hex handoff — Share pill (dark ink). Visible in all modes;
+        {/* v1.3.3 Hex handoff — Share pill (dark ink). Editor views only;
             opens the same export menu the old "Export" button used. */}
+        {isEditorView && (
         <div ref={exportDropdownRef} style={{ position: 'relative' }}>
           <button
             onClick={() => {
@@ -631,6 +642,7 @@ export function Header() {
             </div>
           )}
         </div>
+        )}
       </div>
     </div>
   );

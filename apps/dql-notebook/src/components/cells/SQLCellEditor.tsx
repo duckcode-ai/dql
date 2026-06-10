@@ -151,7 +151,9 @@ function makePanelTheme(isDark: boolean) {
   return EditorView.theme(
     {
       '&': {
-        background: 'var(--color-bg-sunken)',
+        // Inherit the cell surface — a tinted slab behind the code reads as
+        // noise; the gutter border is enough to delimit the editor.
+        background: 'transparent',
         color: 'var(--color-text-primary)',
       },
       '.cm-content': { caretColor: 'var(--color-text-primary)' },
@@ -163,13 +165,18 @@ function makePanelTheme(isDark: boolean) {
         background: 'color-mix(in srgb, var(--color-accent-blue) 30%, transparent)',
       },
       '.cm-gutters': {
-        background: 'var(--color-bg-sunken)',
+        background: 'transparent',
         color: 'var(--color-text-tertiary)',
         border: 'none',
         borderRight: '1px solid var(--color-border-subtle)',
       },
-      '.cm-activeLineGutter': { background: 'var(--color-bg-hover)' },
-      '.cm-activeLine': { background: 'var(--color-bg-hover)' },
+      // Only highlight the active line while the editor has focus — single-
+      // statement cells are one logical line, so an always-on highlight
+      // paints the whole code area as a tinted slab.
+      '.cm-activeLineGutter': { background: 'transparent' },
+      '.cm-activeLine': { background: 'transparent' },
+      '&.cm-focused .cm-activeLineGutter': { background: 'var(--color-bg-hover)' },
+      '&.cm-focused .cm-activeLine': { background: 'var(--color-bg-hover)' },
       '.cm-matchingBracket': {
         background: 'color-mix(in srgb, var(--color-accent-blue) 18%, transparent)',
         outline: '1px solid var(--color-accent-blue)',

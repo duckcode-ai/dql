@@ -1218,7 +1218,7 @@ function BlockStudioStartPage({
         </div>
       </div>
 
-      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, minmax(0, 1fr))', gap: 12 }}>
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(190px, 1fr))', gap: 12 }}>
         {cards.map((card) => (
           <button
             key={card.title}
@@ -1244,7 +1244,7 @@ function BlockStudioStartPage({
         ))}
       </div>
 
-      <section style={{ display: 'grid', gridTemplateColumns: 'minmax(0, 1.3fr) minmax(300px, 0.7fr)', gap: 12 }}>
+      <section style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(300px, 1fr))', gap: 12 }}>
         <PanelBox title="dbt connection" t={t}>
           <DbtStatusRows status={dbtStatus} t={t} />
         </PanelBox>
@@ -1285,7 +1285,7 @@ function DbtStatusRows({ status, t }: { status: BlockStudioDbtStatus | null; t: 
           <div key={label} style={{ display: 'grid', gridTemplateColumns: '180px 70px minmax(0, 1fr)', gap: 8, alignItems: 'center', fontSize: 12, fontFamily: t.font }}>
             <span style={{ color: t.textSecondary }}>{label}</span>
             <span style={{ color: artifact.exists ? '#2ea043' : '#d29922', fontWeight: 800 }}>{artifact.exists ? 'ready' : 'missing'}</span>
-            <span style={{ color: t.textMuted, fontFamily: t.fontMono, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{artifact.path}</span>
+            <span title={artifact.path} style={{ color: t.textMuted, fontFamily: t.fontMono, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{artifact.path}</span>
           </div>
         ))}
       </div>
@@ -2540,7 +2540,7 @@ function InfoLine({ label, value, t }: { label: string; value: string; t: Theme 
   return (
     <div style={{ display: 'grid', gridTemplateColumns: '110px minmax(0, 1fr)', gap: 8, fontSize: 12, fontFamily: t.font }}>
       <span style={{ color: t.textMuted }}>{label}</span>
-      <span style={{ color: t.textSecondary, overflowWrap: 'anywhere' }}>{value}</span>
+      <span title={value} style={{ color: t.textSecondary, overflowWrap: 'anywhere' }}>{value}</span>
     </div>
   );
 }

@@ -35,6 +35,21 @@ function formatCell(value: unknown): string {
   return String(value);
 }
 
+// DATE columns arrive as midnight-UTC ISO timestamps; timestamps keep their
+// full ISO form. Display them readably — exports (CSV/JSON) keep raw values.
+const MIDNIGHT_UTC_RE = /^(\d{4}-\d{2}-\d{2})T00:00:00(\.0+)?(Z|\+00:00)$/;
+const ISO_TIMESTAMP_RE = /^(\d{4}-\d{2}-\d{2})T(\d{2}:\d{2}:\d{2})(\.\d+)?(Z|[+-]\d{2}:?\d{2})?$/;
+
+function formatCellDisplay(value: unknown): string {
+  if (typeof value === 'string') {
+    const midnight = MIDNIGHT_UTC_RE.exec(value);
+    if (midnight) return midnight[1];
+    const ts = ISO_TIMESTAMP_RE.exec(value);
+    if (ts) return `${ts[1]} ${ts[2]}`;
+  }
+  return formatCell(value);
+}
+
 function compareValues(a: unknown, b: unknown): number {
   if (a === null || a === undefined) return 1;
   if (b === null || b === undefined) return -1;
@@ -194,7 +209,7 @@ export function TableOutput({ result, themeMode }: TableOutputProps) {
 
         {/* Row count */}
         <span style={{ fontSize: 10, color: t.textMuted, fontFamily: t.font }}>
-          {filterText ? `${sortedRows.length} of ${result.rows.length}` : `${result.rows.length}`} rows
+          {filterText ? `${sortedRows.length} of ${result.rows.length}` : `${result.rows.length}`} {result.rows.length === 1 ? 'row' : 'rows'}
         </span>
 
         <div style={{ flex: 1 }} />
@@ -326,7 +341,7 @@ export function TableOutput({ result, themeMode }: TableOutputProps) {
                           transition: 'background 0.1s',
                         }}
                       >
-                        {isNull ? '—' : formatCell(value)}
+                        {isNull ? '—' : formatCellDisplay(value)}
                       </td>
                     );
                   })}

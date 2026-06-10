@@ -358,7 +358,7 @@ export function LineagePanel() {
 
         {groupBy === 'type' ? (
           <>
-            <Section title="Notebooks" nodes={grouped.dashboards} t={t} onSelect={handleSelectNode} />
+            <Section title="Dashboards" nodes={grouped.dashboards} t={t} onSelect={handleSelectNode} />
             <Section title="DQL Blocks" nodes={grouped.blocks} t={t} onSelect={handleSelectNode} />
             <Section title="dbt Models" nodes={grouped.dbtModels} t={t} onSelect={handleSelectNode} />
             <Section title="dbt Sources" nodes={grouped.dbtSources} t={t} onSelect={handleSelectNode} />

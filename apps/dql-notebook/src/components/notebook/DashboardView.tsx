@@ -188,10 +188,13 @@ function DashboardCard({ cell }: { cell: Cell }) {
             fontFamily: t.fontMono,
           }}
         >
-          {cell.result.rowCount ?? cell.result.rows.length} rows
+          {(() => {
+            const count = cell.result.rowCount ?? cell.result.rows.length;
+            return `${count} ${count === 1 ? 'row' : 'rows'}`;
+          })()}
           {cell.result.executionTime != null && (
             <> &middot; {cell.result.executionTime < 1000
-              ? `${cell.result.executionTime}ms`
+              ? `${Number(cell.result.executionTime.toFixed(1))}ms`
               : `${(cell.result.executionTime / 1000).toFixed(1)}s`
             }</>
           )}

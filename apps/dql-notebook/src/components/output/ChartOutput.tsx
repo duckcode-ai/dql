@@ -145,17 +145,20 @@ function abbreviate(n: number): string {
   return n.toLocaleString(undefined, { maximumFractionDigits: 2 });
 }
 
-function formatDateLabel(val: string): string {
-  const d = new Date(val);
-  if (!isNaN(d.getTime())) {
-    if (/^\d{4}-\d{2}-\d{2}/.test(val)) {
-      return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
-    }
-    if (/^\d{4}-\d{2}$/.test(val)) {
-      return d.toLocaleDateString('en-US', { year: 'numeric', month: 'short' });
+function formatDateLabel(val: string, maxLen = 8): string {
+  // DATE values arrive as midnight-UTC ISO timestamps. Format in UTC so
+  // "2026-01-01T00:00:00.000Z" doesn't render as "Dec 31" in western
+  // timezones (and "2026-01-01" doesn't render as the previous day).
+  if (/^\d{4}-\d{2}(-\d{2})?/.test(val)) {
+    const monthOnly = /^\d{4}-\d{2}$/.test(val);
+    const d = new Date(monthOnly ? `${val}-01T00:00:00Z` : val);
+    if (!isNaN(d.getTime())) {
+      return d.toLocaleDateString('en-US', monthOnly
+        ? { year: 'numeric', month: 'short', timeZone: 'UTC' }
+        : { month: 'short', day: 'numeric', timeZone: 'UTC' });
     }
   }
-  return String(val).length > 8 ? String(val).slice(0, 8) : String(val);
+  return String(val).length > maxLen ? String(val).slice(0, maxLen) : String(val);
 }
 
 function pickColumns(result: QueryResult, chartConfig?: CellChartConfig) {
@@ -365,8 +368,8 @@ function LineChart({ result, themeMode, showArea }: { result: QueryResult; theme
   const data = result.rows.map((row) => ({ label: String(row[xCol] ?? ''), value: Number(row[yCol] ?? 0) }));
   if (data.length < 2) return null;
 
-  const WIDTH = 560, HEIGHT = 200;
-  const PAD_L = 52, PAD_R = 16, PAD_T = 16, PAD_B = 36;
+  const WIDTH = 560, HEIGHT = 212;
+  const PAD_L = 56, PAD_R = 16, PAD_T = 16, PAD_B = 48;
   const chartW = WIDTH - PAD_L - PAD_R, chartH = HEIGHT - PAD_T - PAD_B;
 
   const minVal = Math.min(...data.map((d) => d.value));
@@ -421,11 +424,18 @@ function LineChart({ result, themeMode, showArea }: { result: QueryResult; theme
         })}
         <line x1={PAD_L} y1={PAD_T} x2={PAD_L} y2={PAD_T + chartH} stroke={t.tableBorder} strokeWidth={1} />
         <line x1={PAD_L} y1={PAD_T + chartH} x2={PAD_L + chartW} y2={PAD_T + chartH} stroke={t.tableBorder} strokeWidth={1} />
+        {/* Axis titles — muted column names so the chart reads standalone. */}
+        <text x={PAD_L + chartW / 2} y={HEIGHT - 4} textAnchor="middle" fontSize={10} fontWeight={600} fontFamily={t.font} fill={t.textMuted} letterSpacing="0.04em">
+          {xCol}
+        </text>
+        <text x={12} y={PAD_T + chartH / 2} textAnchor="middle" fontSize={10} fontWeight={600} fontFamily={t.font} fill={t.textMuted} letterSpacing="0.04em" transform={`rotate(-90, 12, ${PAD_T + chartH / 2})`}>
+          {yCol}
+        </text>
         {tooltip && (
           <g>
             <rect x={tooltip.x + 8} y={tooltip.y - 20} width={90} height={32} rx={4} fill={t.cellBg} stroke={t.cellBorder} strokeWidth={1} />
             <text x={tooltip.x + 13} y={tooltip.y - 8} fontSize={10} fontFamily={t.font} fill={t.textSecondary}>
-              {tooltip.label.length > 10 ? tooltip.label.slice(0, 10) + '…' : tooltip.label}
+              {formatDateLabel(tooltip.label, 12)}
             </text>
             <text x={tooltip.x + 13} y={tooltip.y + 6} fontSize={11} fontFamily={t.fontMono} fill={t.textPrimary} fontWeight={600}>
               {abbreviate(tooltip.value)}
