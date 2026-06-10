@@ -6,14 +6,18 @@ hide:
 
 # DQL
 
-> **Analytics as code for certified reusable blocks, Apps, and dbt-aware lineage.**
+> **Governed analytics for the agentic era — the answer layer where dbt stops.**
 
-DQL OSS is a local-first, single-user workspace for turning analytics work into
-git-backed source artifacts. Blocks carry SQL or semantic intent, owner, domain,
-description, tests, chart config, and agent context. Apps package certified
-blocks into decision-facing dashboard pages and notebooks. `dql compile`
-generates a dbt-like manifest with lineage from sources and dbt models through
-blocks and Apps.
+dbt governs your models; nothing governs your *answers*. The query behind a
+dashboard tile, the metric pasted into Slack, the SQL an AI assistant just
+improvised against your warehouse — none of it is reviewed, tested, or owned.
+DQL extends the dbt discipline to that last mile: every answer becomes a
+**certified block** (SQL + owner, domain, tests, chart intent, and LLM
+context) in a git-tracked `.dql` file. Apps package certified blocks into
+decision-facing dashboard pages and notebooks. `dql compile` generates a
+dbt-like manifest with lineage from sources and dbt models through blocks and
+Apps — and the agent/MCP server answers from certified blocks first, flagging
+anything improvised as *Uncertified*.
 
 No hosted account is required. Certification is a local trust label. Personas
 and policies are local previews, not hosted RBAC.

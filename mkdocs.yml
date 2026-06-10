@@ -1,5 +1,5 @@
 site_name: DQL
-site_description: Analytics-as-code with certified blocks, AI-grade lineage, and an MCP server for AI agents.
+site_description: Governed analytics for the agentic era — certified blocks, Apps, end-to-end lineage, and AI answers that cite their sources, on top of dbt.
 site_url: https://dql.duckcode.ai
 repo_url: https://github.com/duckcode-ai/dql
 repo_name: duckcode-ai/dql

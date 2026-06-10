@@ -5,10 +5,38 @@
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue)](./LICENSE)
 [![Node](https://img.shields.io/badge/node-20%20%7C%2022%20LTS-green)](https://nodejs.org)
 
-**A local-first dbt analytics workspace.** Git-native. Certified blocks, Apps,
-lineage, and governed agent answers run on your laptop.
+**Governed analytics for the agentic era — the answer layer where dbt stops.**
+Certified blocks, Apps, end-to-end lineage, and AI answers that cite their
+sources. Git-native, local-first, on your laptop.
 
-DQL sits between **dbt** (modeling) and your BI tool (reporting). Every analytics answer — SQL, chart, params, tests, owner — lives in a single `.dql` file tracked in git. No more query sprawl, no more broken charts, no more lost work.
+## Why we built DQL
+
+dbt solved governance for **models**: transformations are code-reviewed,
+tested, versioned, and owned. But the place where data actually meets a
+decision — the query behind a dashboard tile, the metric pasted into Slack,
+the SQL an AI assistant just improvised against your warehouse — has none of
+that discipline. Every data team lives with query sprawl, dashboards nobody
+fully trusts, and now agents confidently generating SQL no one reviewed.
+
+DQL extends the dbt discipline to that last mile. An analytics answer becomes
+a **certified block**: one `.dql` file holding the SQL, owner, domain,
+description, tests, chart intent, and the context an LLM needs to use it
+correctly — tracked in git, certified by a local gate, and connected to
+lineage that runs from the dashboard tile back through your dbt DAG to the
+source.
+
+When AI enters the picture, certification becomes the contract. DQL's agent
+and MCP server answer questions **from certified blocks first**, and cite
+them. When no block matches, the proposal is clearly flagged *Uncertified*
+and saved as a draft — so the questions your team actually asks become a
+review queue, and the good answers get promoted into governed, reusable
+blocks. Trusted answers compound; improvised SQL doesn't.
+
+**If you run dbt**, this will feel familiar by design: keep dbt as the source
+of truth for models and semantic metrics, add a `./dql` folder to the same
+repo, and the rest of your analytics — blocks, dashboards, notebooks, Apps,
+agent answers — becomes code too. No new platform, no lock-in: plain files,
+your warehouse, your git workflow.
 
 ## Highlights
 
