@@ -245,13 +245,15 @@ diff /tmp/old-manifest.json dql-manifest.json | head -80
 
 ### `dql certify` is non-deterministic in CI
 
-If a block test like `assert max(x) < some_value` flickers, the
-underlying data is non-deterministic. Either:
+If a block test like `assert row_count >= 100` flickers, the underlying data
+is non-deterministic. Either:
 
 1. Pin the test data (commit a small CSV that drives the test).
-2. Loosen the assertion (e.g. `< some_value * 1.1`).
-3. Move volatile assertions to `invariants` (which are documentation,
-   not executable).
+2. Loosen the assertion (a lower bound rather than an exact `==`).
+3. Move volatile expectations to `invariants` (which are documentation for the
+   agent, not executable). Note `assert` compares a single returned column to a
+   value (`assert <column> <op> <value>`) — wrap any aggregation in the block's
+   SQL and assert on the resulting column.
 
 ---
 

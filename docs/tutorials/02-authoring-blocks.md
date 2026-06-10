@@ -59,11 +59,9 @@ block "revenue_by_month" {
   tags        = ["revenue", "kpi", "monthly"]
 
   // ── Agent-facing metadata ────────────────────────────────────────────
-  llmContext = """
-    Use this block for questions about revenue over time, monthly revenue,
-    or revenue trend. Revenue is the sum of order_total from the dbt
-    orders mart — gross, before costs. One row per calendar month.
-  """
+  // llmContext is a single-line string — a block uses one triple-quoted
+  // ("""…""") string and we reserve it for `query` below.
+  llmContext = "Use this block for questions about revenue over time, monthly revenue, or revenue trend. Revenue is the sum of order_total from the dbt orders mart (gross, before costs). One row per calendar month."
   examples = [
     { question = "What is monthly revenue?" },
     { question = "How has revenue trended this year?" }
@@ -88,7 +86,6 @@ block "revenue_by_month" {
 
   tests {
     assert row_count >= 1
-    assert min(revenue) >= 0
   }
 }
 ```
