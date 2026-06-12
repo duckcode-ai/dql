@@ -441,6 +441,17 @@ function notebookReducer(state: NotebookState, action: NotebookAction): Notebook
     case 'SET_LINEAGE_FOCUS':
       return { ...state, lineageFocusNodeId: action.nodeId };
 
+    case 'OPEN_LINEAGE_DETAIL':
+      return {
+        ...state,
+        mainView: 'lineage_detail',
+        lineageFullscreen: false,
+        lineageFocusNodeId: action.nodeId,
+        lineageDrawerOpen: false,
+        lineageDrawerNodeId: null,
+        dashboardMode: false,
+      };
+
     case 'OPEN_LINEAGE_DRAWER':
       return { ...state, lineageDrawerOpen: true, lineageDrawerNodeId: action.nodeId };
 

@@ -273,9 +273,7 @@ export function LineagePanel() {
   }, [search]);
 
   const handleSelectNode = useCallback((node: LineageNode) => {
-    // Open the right-side drawer — no in-panel focused-view, no fullscreen takeover.
-    dispatch({ type: 'SET_LINEAGE_FOCUS', nodeId: node.id });
-    dispatch({ type: 'OPEN_LINEAGE_DRAWER', nodeId: node.id });
+    dispatch({ type: 'OPEN_LINEAGE_DETAIL', nodeId: node.id });
   }, [dispatch]);
 
   const [groupBy, setGroupBy] = useState<'type' | 'layer'>('type');

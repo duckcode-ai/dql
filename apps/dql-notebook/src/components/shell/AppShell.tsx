@@ -13,6 +13,7 @@ import { NewBlockModal } from '../modals/NewBlockModal';
 import { BlockStudio } from '../block-studio/BlockStudio';
 import { LineageDAG } from '../panels/LineageDAG';
 import { BusinessArtifactView } from '../panels/BusinessArtifactView';
+import { LineageDetailView } from '../panels/LineageDetailView';
 import { ConnectionPanel } from '../panels/ConnectionPanel';
 import { ReferencePanel } from '../panels/ReferencePanel';
 import { GitPage } from '../git/GitPage';
@@ -193,6 +194,8 @@ export function AppShell() {
             <LineageDAG />
           ) : state.mainView === 'business_artifact' ? (
             <BusinessArtifactView />
+          ) : state.mainView === 'lineage_detail' ? (
+            <LineageDetailView />
           ) : state.mainView === 'connection' ? (
             <FullPageSection
               title="Connections"

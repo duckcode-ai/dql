@@ -140,7 +140,7 @@ export interface ParamConfig {
 }
 export type SidebarPanel = 'files' | 'schema' | 'block_library' | 'connection' | 'reference' | 'lineage' | 'git' | 'apps' | 'settings' | null;
 export type DevPanelTab = 'logs' | 'errors';
-export type MainView = 'notebook' | 'business_artifact' | 'block_studio' | 'imports' | 'connection' | 'reference' | 'git' | 'apps' | 'review' | 'settings';
+export type MainView = 'notebook' | 'business_artifact' | 'lineage_detail' | 'block_studio' | 'imports' | 'connection' | 'reference' | 'git' | 'apps' | 'review' | 'settings';
 
 /**
  * Apps consumption-layer surface — list of Apps + currently-open App.
@@ -723,6 +723,7 @@ export type NotebookAction =
   | { type: 'SET_SEMANTIC_DOMAINS'; domains: string[]; tags: string[]; lastSyncTime?: string | null }
   | { type: 'TOGGLE_LINEAGE_FULLSCREEN' }
   | { type: 'SET_LINEAGE_FOCUS'; nodeId: string | null }
+  | { type: 'OPEN_LINEAGE_DETAIL'; nodeId: string }
   | { type: 'OPEN_LINEAGE_DRAWER'; nodeId: string }
   | { type: 'CLOSE_LINEAGE_DRAWER' }
   | { type: 'REORDER_CELL'; fromIndex: number; toIndex: number }
