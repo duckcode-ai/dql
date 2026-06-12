@@ -19,6 +19,11 @@ const FOLDER_LABELS: Record<FolderKey, string> = {
   dashboards: 'Dashboards',
 };
 
+const FOLDER_DESCRIPTIONS: Partial<Record<FolderKey, string>> = {
+  terms: 'Certified vocabulary linked to blocks and business views.',
+  'business-views': 'Business compositions built from blocks, terms, and other views.',
+};
+
 // Dashboards section is hidden when empty — keeps the UI clean on projects
 // that haven't authored a dashboard yet, without removing the artifact type.
 const HIDE_WHEN_EMPTY: Record<FolderKey, boolean> = {
@@ -106,8 +111,8 @@ export function FilesPanel({ onOpenFile }: FilesPanelProps) {
   const [expandedFolders, setExpandedFolders] = useState<Record<string, boolean>>({
     notebooks: true,
     blocks: false,
-    terms: false,
-    'business-views': false,
+    terms: true,
+    'business-views': true,
     dashboards: false,
   });
   const [newBtnHover, setNewBtnHover] = useState(false);
@@ -194,6 +199,19 @@ export function FilesPanel({ onOpenFile }: FilesPanelProps) {
             />
             {expanded && (
               <div>
+                {FOLDER_DESCRIPTIONS[key] && (
+                  <div
+                    style={{
+                      padding: '0 14px 5px 32px',
+                      color: t.textMuted,
+                      fontSize: 11,
+                      fontFamily: t.font,
+                      lineHeight: 1.35,
+                    }}
+                  >
+                    {FOLDER_DESCRIPTIONS[key]}
+                  </div>
+                )}
                 {files.length === 0 ? (
                   <div
                     style={{
