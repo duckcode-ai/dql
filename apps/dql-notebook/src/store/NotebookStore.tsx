@@ -44,11 +44,11 @@ function readInitialThemeMode(): 'obsidian' | 'paper' | 'white' {
 }
 
 const initialState: NotebookState = {
-  mainView: 'notebook',
+  mainView: 'home',
   themeMode: readInitialThemeMode(),
   appMode: readInitialAppMode(),
-  sidebarPanel: 'files',
-  sidebarOpen: true,
+  sidebarPanel: null,
+  sidebarOpen: false,
   files: [],
   filesLoading: false,
   activeFile: null,
@@ -126,6 +126,19 @@ function notebookReducer(state: NotebookState, action: NotebookAction): Notebook
           blockStudioImportOpen: true,
           lineageFullscreen: false,
           lineageFocusNodeId: null,
+        };
+      }
+      if (action.view === 'home') {
+        return {
+          ...state,
+          mainView: 'home',
+          sidebarPanel: null,
+          sidebarOpen: false,
+          lineageFullscreen: false,
+          lineageFocusNodeId: null,
+          lineageDrawerOpen: false,
+          lineageDrawerNodeId: null,
+          dashboardMode: false,
         };
       }
       return { ...state, mainView: action.view, lineageFullscreen: false, lineageFocusNodeId: null };

@@ -1,4 +1,5 @@
 import React, { useEffect, useState } from 'react';
+import { Home } from 'lucide-react';
 import { Tooltip } from '@duckcodeailabs/dql-ui';
 import {
   FileText,
@@ -119,8 +120,8 @@ export function ActivityBar() {
     persistExpanded(expanded);
   }, [expanded]);
 
-  function handlePanelClick(panel: SidebarPanel | 'review') {
-    if (panel === 'review') {
+  function handlePanelClick(panel: SidebarPanel | 'review' | 'home') {
+    if (panel === 'home' || panel === 'review') {
       dispatch({ type: 'SET_MAIN_VIEW', view: panel });
       return;
     }
@@ -143,11 +144,17 @@ export function ActivityBar() {
   }
 
   const items: Array<{
-    key: SidebarPanel | 'review';
+    key: SidebarPanel | 'review' | 'home';
     title: string;
     icon: React.ReactNode;
     active: boolean;
   }> = [
+    {
+      key: 'home',
+      title: 'Home',
+      icon: <Home size={16} strokeWidth={1.75} />,
+      active: state.mainView === 'home',
+    },
     {
       key: 'apps',
       title: 'Apps',

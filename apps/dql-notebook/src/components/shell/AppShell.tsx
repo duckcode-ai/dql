@@ -7,6 +7,7 @@ import { ActivityBar } from './ActivityBar';
 import { Sidebar } from './Sidebar';
 import { Header } from './Header';
 import { DevPanel } from './DevPanel';
+import { HomePage } from '../home/HomePage';
 import { NotebookEditor } from '../notebook/NotebookEditor';
 import { NewNotebookModal } from '../modals/NewNotebookModal';
 import { NewBlockModal } from '../modals/NewBlockModal';
@@ -192,6 +193,8 @@ export function AppShell() {
         >
           {state.lineageFullscreen ? (
             <LineageDAG />
+          ) : state.mainView === 'home' ? (
+            <HomePage />
           ) : state.mainView === 'business_artifact' ? (
             <BusinessArtifactView />
           ) : state.mainView === 'lineage_detail' ? (

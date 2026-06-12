@@ -61,6 +61,7 @@ export function Header() {
   const isEditorView = state.mainView === 'notebook' || state.mainView === 'block_studio';
   const hasActiveEditorFile = isEditorView && Boolean(state.activeFile);
   const VIEW_TITLES: Partial<Record<typeof state.mainView, string>> = {
+    home: 'Home',
     business_artifact: state.activeFile?.name.replace(/\.(dqlnb|dql)$/i, '') ?? 'Business Definition',
     lineage_detail: 'Lineage',
     connection: 'Connections',
@@ -74,7 +75,9 @@ export function Header() {
   const headerTitle = isEditorView
     ? state.activeFile
       ? state.notebookTitle || 'Untitled'
-      : 'DQL Workbench'
+      : state.mainView === 'block_studio'
+        ? 'Blocks'
+        : 'Notebooks'
     : VIEW_TITLES[state.mainView] ?? 'DQL Workbench';
 
   useEffect(() => {
