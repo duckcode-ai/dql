@@ -8,11 +8,19 @@
  *  - "View lineage" from the Files panel context menu
  *  - any other "show lineage for X" entry point
  *
- * Closes via the × button. Independent of `lineageFullscreen` (full-page DAG).
+ * Supports resizing, compact collapse, and full-page graph expansion.
  */
 
 import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { ExternalLink, Maximize2, X } from '@duckcodeailabs/dql-ui/icons';
+import {
+  ExternalLink,
+  GripVertical,
+  Maximize2,
+  Minimize2,
+  PanelRightOpen,
+  RotateCcw,
+  X,
+} from 'lucide-react';
 import { useNotebook } from '../../store/NotebookStore';
 import { themes, type Theme } from '../../themes/notebook-theme';
 import { api } from '../../api/client';
@@ -32,7 +40,22 @@ interface FocusedGraph {
   focalNode: LineageNode | null;
 }
 
-const DRAWER_WIDTH = 380;
+const MIN_DRAWER_WIDTH = 320;
+const COLLAPSED_DRAWER_WIDTH = 48;
+
+function defaultDrawerWidth(): number {
+  if (typeof window === 'undefined') return 380;
+  return Math.min(420, Math.max(MIN_DRAWER_WIDTH, Math.round(window.innerWidth * 0.42)));
+}
+
+function maxDrawerWidth(): number {
+  if (typeof window === 'undefined') return 760;
+  return Math.max(420, Math.min(880, Math.round(window.innerWidth * 0.72)));
+}
+
+function clampDrawerWidth(width: number): number {
+  return Math.min(maxDrawerWidth(), Math.max(MIN_DRAWER_WIDTH, width));
+}
 
 export function LineageDrawer() {
   const { state, dispatch } = useNotebook();
@@ -45,6 +68,10 @@ export function LineageDrawer() {
   // ensures the graph fills available space instead of collapsing to 0.
   const graphHostRef = useRef<HTMLDivElement>(null);
   const [graphHeight, setGraphHeight] = useState(360);
+  const [drawerWidth, setDrawerWidth] = useState(() => defaultDrawerWidth());
+  const [drawerCollapsed, setDrawerCollapsed] = useState(false);
+  const [resizing, setResizing] = useState(false);
+  const widthRef = useRef(drawerWidth);
 
   useEffect(() => {
     const el = graphHostRef.current;
@@ -123,11 +150,96 @@ export function LineageDrawer() {
     }
   };
 
+  const startResize = (event: React.MouseEvent) => {
+    event.preventDefault();
+    event.stopPropagation();
+    if (drawerCollapsed) setDrawerCollapsed(false);
+    const startX = event.clientX;
+    const startWidth = widthRef.current;
+    setResizing(true);
+
+    const onMove = (moveEvent: MouseEvent) => {
+      const next = clampDrawerWidth(startWidth + (startX - moveEvent.clientX));
+      widthRef.current = next;
+      setDrawerWidth(next);
+    };
+    const onUp = () => {
+      setResizing(false);
+      document.body.style.cursor = '';
+      document.body.style.userSelect = '';
+      window.removeEventListener('mousemove', onMove);
+      window.removeEventListener('mouseup', onUp);
+    };
+
+    document.body.style.cursor = 'col-resize';
+    document.body.style.userSelect = 'none';
+    window.addEventListener('mousemove', onMove);
+    window.addEventListener('mouseup', onUp);
+  };
+
+  const resetWidth = () => {
+    const next = defaultDrawerWidth();
+    widthRef.current = next;
+    setDrawerWidth(next);
+    setDrawerCollapsed(false);
+  };
+
+  const closeDrawer = () => dispatch({ type: 'CLOSE_LINEAGE_DRAWER' });
+
+  if (drawerCollapsed) {
+    return (
+      <aside
+        aria-label="Collapsed lineage drawer"
+        style={{
+          width: COLLAPSED_DRAWER_WIDTH,
+          flexShrink: 0,
+          borderLeft: `1px solid ${t.headerBorder}`,
+          background: t.appBg,
+          color: t.textPrimary,
+          display: 'flex',
+          flexDirection: 'column',
+          alignItems: 'center',
+          gap: 8,
+          padding: '10px 6px',
+          overflow: 'hidden',
+        }}
+      >
+        <IconButton title="Show lineage details" onClick={() => setDrawerCollapsed(false)} t={t}>
+          <PanelRightOpen size={15} strokeWidth={1.9} />
+        </IconButton>
+        <IconButton title="Open full graph" onClick={openFullscreen} t={t}>
+          <Maximize2 size={15} strokeWidth={1.8} />
+        </IconButton>
+        <IconButton title="Hide lineage drawer" onClick={closeDrawer} t={t}>
+          <X size={15} strokeWidth={2} />
+        </IconButton>
+        <div
+          title={focal?.name ?? nodeId}
+          style={{
+            writingMode: 'vertical-rl',
+            transform: 'rotate(180deg)',
+            color: t.textMuted,
+            fontSize: 11,
+            fontWeight: 700,
+            lineHeight: 1,
+            marginTop: 4,
+            maxHeight: 260,
+            overflow: 'hidden',
+            textOverflow: 'ellipsis',
+            whiteSpace: 'nowrap',
+          }}
+        >
+          {focal?.name ?? 'Lineage'}
+        </div>
+      </aside>
+    );
+  }
+
   return (
     <aside
       aria-label="Lineage drawer"
       style={{
-        width: DRAWER_WIDTH,
+        width: drawerWidth,
         flexShrink: 0,
         borderLeft: `1px solid ${t.headerBorder}`,
         background: t.appBg,
@@ -135,17 +247,56 @@ export function LineageDrawer() {
         display: 'flex',
         flexDirection: 'column',
         overflow: 'hidden',
+        position: 'relative',
         animation: 'dql-drawer-slide-in 180ms cubic-bezier(0.22, 0.61, 0.36, 1)',
       }}
     >
+      <div
+        onMouseDown={startResize}
+        onDoubleClick={resetWidth}
+        title="Drag to resize. Double-click to reset width."
+        style={{
+          position: 'absolute',
+          top: 0,
+          left: 0,
+          width: 8,
+          height: '100%',
+          cursor: 'col-resize',
+          zIndex: 20,
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          background: resizing ? `${t.accent}1f` : 'transparent',
+          transition: resizing ? 'none' : 'background 0.15s',
+        }}
+        onMouseEnter={(e) => {
+          if (!resizing) e.currentTarget.style.background = `${t.accent}14`;
+        }}
+        onMouseLeave={(e) => {
+          if (!resizing) e.currentTarget.style.background = 'transparent';
+        }}
+      >
+        <div
+          style={{
+            width: 3,
+            height: 44,
+            borderRadius: 999,
+            background: resizing ? t.accent : t.headerBorder,
+            boxShadow: resizing ? `0 0 0 3px ${t.accent}1f` : 'none',
+          }}
+        />
+      </div>
+
       {/* Header */}
       <div
         style={{
           display: 'flex',
           alignItems: 'center',
-          gap: 10,
-          padding: '12px 14px',
+          gap: 12,
+          padding: '12px 14px 11px',
           borderBottom: `1px solid ${t.headerBorder}`,
+          background: t.appBg,
+          flexShrink: 0,
         }}
       >
         <div
@@ -159,7 +310,7 @@ export function LineageDrawer() {
             color: t.appBg,
             fontSize: 10,
             fontWeight: 700,
-            letterSpacing: '0.04em',
+            letterSpacing: 0,
             borderRadius: 4,
           }}
           title={focal ? TYPE_TITLES[focal.type] ?? focal.type : ''}
@@ -167,10 +318,13 @@ export function LineageDrawer() {
           {focalLabel || 'NODE'}
         </div>
         <div style={{ flex: 1, minWidth: 0 }}>
+          <div style={{ color: t.textMuted, fontSize: 10, fontWeight: 800, marginBottom: 3 }}>
+            Lineage Inspector
+          </div>
           <div
             style={{
-              fontSize: 13,
-              fontWeight: 600,
+              fontSize: 14,
+              fontWeight: 700,
               color: t.textPrimary,
               overflow: 'hidden',
               textOverflow: 'ellipsis',
@@ -184,16 +338,41 @@ export function LineageDrawer() {
             Lineage · ↑ {upstreamCount} · ↓ {downstreamCount}
           </div>
         </div>
+        <IconButton title="Collapse drawer" onClick={() => setDrawerCollapsed(true)} t={t}>
+          <Minimize2 size={14} strokeWidth={1.8} />
+        </IconButton>
+        <IconButton title="Reset width" onClick={resetWidth} t={t}>
+          <RotateCcw size={14} strokeWidth={1.8} />
+        </IconButton>
         <IconButton title="Open full graph" onClick={openFullscreen} t={t}>
           <Maximize2 size={14} strokeWidth={1.75} />
         </IconButton>
         <IconButton
-          title="Close"
-          onClick={() => dispatch({ type: 'CLOSE_LINEAGE_DRAWER' })}
+          title="Hide lineage drawer"
+          onClick={closeDrawer}
           t={t}
         >
           <X size={14} strokeWidth={2} />
         </IconButton>
+      </div>
+
+      <div
+        style={{
+          height: 30,
+          padding: '0 14px',
+          borderBottom: `1px solid ${t.headerBorder}`,
+          display: 'flex',
+          alignItems: 'center',
+          gap: 8,
+          color: t.textMuted,
+          fontSize: 11,
+          flexShrink: 0,
+          background: t.sidebarBg,
+        }}
+      >
+        <GripVertical size={13} strokeWidth={1.8} />
+        <span>Drag the left edge to resize</span>
+        <span style={{ marginLeft: 'auto', color: t.textMuted }}>{drawerWidth}px</span>
       </div>
 
       {focal && <NodeMetadataSummary node={focal} t={t} />}
@@ -201,7 +380,14 @@ export function LineageDrawer() {
       {/* Graph */}
       <div
         ref={graphHostRef}
-        style={{ flex: 1, minHeight: 0, padding: 12, overflow: 'hidden', display: 'flex' }}
+        style={{
+          flex: 1,
+          minHeight: 220,
+          padding: 12,
+          overflow: 'hidden',
+          display: 'flex',
+          background: t.appBg,
+        }}
       >
         {loading ? (
           <div style={{ color: t.textMuted, fontSize: 12, padding: 8 }}>Loading lineage…</div>
@@ -224,7 +410,18 @@ export function LineageDrawer() {
       </div>
 
       {focal && (
-        <div style={{ borderTop: `1px solid ${t.headerBorder}`, padding: '10px 12px', display: 'grid', gap: 8 }}>
+        <div
+          style={{
+            borderTop: `1px solid ${t.headerBorder}`,
+            padding: '10px 12px',
+            display: 'grid',
+            gap: 10,
+            maxHeight: 280,
+            overflow: 'auto',
+            background: t.sidebarBg,
+            flexShrink: 0,
+          }}
+        >
           <ConnectionList title="Upstream" connections={upstreamConnections} t={t} />
           <ConnectionList title="Downstream" connections={downstreamConnections} t={t} />
         </div>
