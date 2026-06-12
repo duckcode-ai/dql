@@ -1,7 +1,7 @@
 /**
  * `dql compile` — Generate the DQL project manifest.
  *
- * Scans all blocks, notebooks, and semantic layer definitions,
+ * Scans all blocks, business views, notebooks, and semantic layer definitions,
  * resolves dependencies, builds lineage, and writes dql-manifest.json.
  *
  * Usage:
@@ -135,6 +135,8 @@ export async function runCompile(
 
   // Print summary
   const blockCount = Object.keys(manifest.blocks).length;
+  const businessViews = manifest.businessViews ?? {};
+  const businessViewCount = Object.keys(businessViews).length;
   const notebookCount = Object.keys(manifest.notebooks).length;
   const metricCount = Object.keys(manifest.metrics).length;
   const dimensionCount = Object.keys(manifest.dimensions).length;
@@ -147,9 +149,10 @@ export async function runCompile(
   console.log('  ' + '='.repeat(50));
   console.log('\n  Manifest:');
   console.log('    dql-manifest.json is the dbt-like compiled artifact for this DQL project.');
-  console.log('    It records blocks, notebooks, Apps, dashboards, semantic objects, sources, dbt imports, and lineage.');
+  console.log('    It records blocks, business views, notebooks, Apps, dashboards, semantic objects, sources, dbt imports, and lineage.');
   console.log(`\n  Scanned:`);
   console.log(`    ${blockCount} block(s)`);
+  console.log(`    ${businessViewCount} business view(s)`);
   console.log(`    ${notebookCount} notebook(s)`);
   console.log(`    ${metricCount} metric(s)`);
   console.log(`    ${dimensionCount} dimension(s)`);
@@ -212,6 +215,18 @@ export async function runCompile(
       console.log(`    ${block.name}${meta ? ` (${meta})` : ''}`);
       if (deps.length > 0) {
         console.log(`      depends on: ${deps.join(', ')}`);
+      }
+    }
+
+    if (businessViewCount > 0) {
+      console.log('\n  Business Views:');
+      for (const view of Object.values(businessViews)) {
+        const meta = [view.domain, view.owner].filter(Boolean).join(', ');
+        const refs = [...view.blockRefs.map((ref) => `block:${ref}`), ...view.businessViewRefs.map((ref) => `business_view:${ref}`)];
+        console.log(`    ${view.name}${meta ? ` (${meta})` : ''}`);
+        if (refs.length > 0) {
+          console.log(`      includes: ${refs.join(', ')}`);
+        }
       }
     }
 

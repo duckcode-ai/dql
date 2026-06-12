@@ -12,6 +12,7 @@ export type LineageNodeType =
   | 'dbt_model'
   | 'dbt_source'
   | 'block'
+  | 'business_view'
   | 'metric'
   | 'dimension'
   | 'domain'
@@ -29,6 +30,7 @@ const NODE_TYPE_TO_LAYER: Record<LineageNodeType, LineageLayer> = {
   dbt_source: 'source',
   dbt_model: 'transform',
   block: 'answer',
+  business_view: 'answer',
   metric: 'answer',
   dimension: 'answer',
   domain: 'answer',
@@ -67,6 +69,7 @@ export interface LineageNode {
 export type LineageEdgeType =
   | 'reads_from'       // block reads from a table
   | 'feeds_into'       // block's output feeds into another block
+  | 'composes'         // block/business view is composed into a business view
   | 'aggregates'       // metric aggregates from a table/block
   | 'visualizes'       // chart visualizes a block/metric
   | 'depends_on'       // dbt model/source dependency edge

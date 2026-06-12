@@ -104,4 +104,31 @@ describe('runValidate', () => {
     )).toBe(true);
     expect(process.exitCode).toBe(1);
   });
+
+  it('validates business-view references at the project level', async () => {
+    const root = tempProject();
+    mkdirSync(join(root, 'blocks'), { recursive: true });
+    mkdirSync(join(root, 'business-views'), { recursive: true });
+    writeValidBlock(join(root, 'blocks', 'monthly_revenue.dql'));
+    writeFileSync(join(root, 'business-views', 'customer_360.dql'), `business_view "Customer 360" {
+  domain = "Customer"
+  includes {
+    block "Missing Block"
+    business_view "Missing View"
+  }
+}`);
+    const log = vi.spyOn(console, 'log').mockImplementation(() => {});
+
+    await runValidate(root, { format: 'json' } as any);
+
+    const payload = JSON.parse(String(log.mock.calls.at(-1)?.[0]));
+    expect(payload.files).toBe(2);
+    expect(payload.diagnostics.some((d: any) =>
+      d.severity === 'error' && d.message.includes('unresolved block refs: Missing Block'),
+    )).toBe(true);
+    expect(payload.diagnostics.some((d: any) =>
+      d.severity === 'error' && d.message.includes('unresolved business_view refs: Missing View'),
+    )).toBe(true);
+    expect(process.exitCode).toBe(1);
+  });
 });

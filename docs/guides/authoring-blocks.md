@@ -20,6 +20,7 @@ Use the CLI when you want a file scaffold:
 
 ```bash
 dql new block revenue_by_segment --domain finance
+dql new business-view customer_360 --domain customer
 ```
 
 Block Studio keeps SQL blocks and semantic blocks separate so metric references
@@ -49,6 +50,22 @@ editor shows lint warnings from `dql-governance` as you type.
 
 For a semantic block, pick a metric and dimensions instead of editing a raw
 `SELECT` statement.
+
+To extend one trusted block with another, reference the upstream block from the
+new block's SQL instead of copying its query:
+
+```sql
+select
+  c.customer_id,
+  c.customer_name,
+  o.total_orders,
+  o.lifetime_revenue
+from @block("Customer Identity") c
+left join @block("Customer Orders Rollup") o
+  on c.customer_id = o.customer_id
+```
+
+DQL records this as block-to-block lineage.
 
 ## 4. Fill in governance
 
@@ -87,6 +104,32 @@ the new version on next open.
 ```
 
 DQL inlines the compiled SQL, runs it, and renders the block's chart spec.
+
+## 8. Compose a business view
+
+Use `business_view` when the value is no longer one SQL result, but a business
+capability made from multiple reusable blocks.
+
+```dql
+business_view "Customer 360" {
+  domain = "Customer"
+  status = "draft"
+  description = "Complete customer view for retention and account review."
+  owner = "customer-analytics"
+  businessOutcome = "Understand customer value, activity, and service risk."
+  decisionUse = "Account planning, churn review, and expansion targeting."
+  reviewCadence = "weekly"
+
+  includes {
+    block "Customer Identity"
+    block "Customer Orders Rollup"
+    block "Customer Service Summary"
+  }
+}
+```
+
+`dql compile` adds the view to `businessViews` in the manifest and creates
+lineage edges from each included block or business view into this view.
 
 ## Verify it worked
 

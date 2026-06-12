@@ -99,6 +99,27 @@ chart.line(SELECT week, revenue FROM weekly_revenue,x=week,y=revenue)
     expect(() => parse(formatted)).not.toThrow();
   });
 
+  it('formats business_view declarations with stable includes', () => {
+    const source = `business_view "Customer 360"{
+domain="Customer"
+status="draft"
+description="Complete customer view"
+owner="Customer Analytics"
+businessOutcome="Improve retention decisions"
+includes{block "Customer Identity" business_view "Customer Service Summary"}
+}`;
+
+    const formatted = formatDQL(source);
+
+    expect(formatted).toContain('business_view "Customer 360" {');
+    expect(formatted).toContain('domain = "Customer"');
+    expect(formatted).toContain('businessOutcome = "Improve retention decisions"');
+    expect(formatted).toContain('includes {');
+    expect(formatted).toContain('block "Customer Identity"');
+    expect(formatted).toContain('business_view "Customer Service Summary"');
+    expect(() => parse(formatted)).not.toThrow();
+  });
+
   it('is idempotent and parseable', () => {
     const source = `workbook "Ops Review" {
   page "Overview" {

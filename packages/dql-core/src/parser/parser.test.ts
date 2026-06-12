@@ -261,6 +261,42 @@ describe('Parser', () => {
     }
   });
 
+  it('parses business_view declarations with block and business_view includes', () => {
+    const source = `business_view "Customer 360" {
+      domain = "Customer"
+      status = "draft"
+      description = "Complete customer view for account review."
+      owner = "Customer Analytics"
+      tags = ["customer", "360"]
+      businessOutcome = "Understand customer value, activity, and service risk."
+      decisionUse = "Account planning and churn review"
+      reviewCadence = "weekly"
+
+      includes {
+        block "Customer Identity"
+        block "Customer Orders Rollup"
+        business_view "Customer Service Summary"
+      }
+    }`;
+
+    const ast = parse(source);
+    expect(ast.statements).toHaveLength(1);
+    const view = ast.statements[0];
+    expect(view.kind).toBe(NodeKind.BusinessViewDecl);
+    if (view.kind === NodeKind.BusinessViewDecl) {
+      expect(view.name).toBe('Customer 360');
+      expect(view.domain).toBe('Customer');
+      expect(view.status).toBe('draft');
+      expect(view.tags).toEqual(['customer', '360']);
+      expect(view.businessOutcome).toContain('Understand customer value');
+      expect(view.includes.map((ref) => `${ref.refType}:${ref.name}`)).toEqual([
+        'block:Customer Identity',
+        'block:Customer Orders Rollup',
+        'business_view:Customer Service Summary',
+      ]);
+    }
+  });
+
   it('parses flow alias and normalizes to sankey', () => {
     const source = `chart.flow(
       SELECT src, dst, val FROM flows,

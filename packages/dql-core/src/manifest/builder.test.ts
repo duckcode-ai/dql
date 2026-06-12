@@ -18,11 +18,13 @@ describe('collectInputFiles', () => {
 
   it('returns config + blocks + notebooks + semantic YAML + dbt manifest, sorted', () => {
     mkdirSync(join(tmpDir, 'blocks'), { recursive: true });
+    mkdirSync(join(tmpDir, 'business-views'), { recursive: true });
     mkdirSync(join(tmpDir, 'notebooks'), { recursive: true });
     mkdirSync(join(tmpDir, 'semantic-layer', 'metrics'), { recursive: true });
     mkdirSync(join(tmpDir, 'target'), { recursive: true });
 
     writeFileSync(join(tmpDir, 'blocks', 'a.dql'), 'block a {}');
+    writeFileSync(join(tmpDir, 'business-views', 'customer_360.dql'), 'business_view "Customer 360" { includes { block "Customer" } }');
     writeFileSync(join(tmpDir, 'notebooks', 'x.dqlnb'), '{"version":1,"cells":[]}');
     writeFileSync(join(tmpDir, 'semantic-layer', 'metrics', 'revenue.yaml'), 'name: revenue');
     writeFileSync(join(tmpDir, 'target', 'manifest.json'), '{}');
@@ -35,6 +37,7 @@ describe('collectInputFiles', () => {
     // All expected files appear
     expect(files).toContain(join(tmpDir, 'dql.config.json'));
     expect(files).toContain(join(tmpDir, 'blocks', 'a.dql'));
+    expect(files).toContain(join(tmpDir, 'business-views', 'customer_360.dql'));
     expect(files).toContain(join(tmpDir, 'notebooks', 'x.dqlnb'));
     expect(files).toContain(join(tmpDir, 'semantic-layer', 'metrics', 'revenue.yaml'));
     expect(files).toContain(join(tmpDir, 'target', 'manifest.json'));
@@ -299,5 +302,85 @@ describe('buildManifest block extraction', () => {
     expect(manifest.diagnostics?.some((d) =>
       d.severity === 'error' && d.message.includes('not found in the loaded DataLex manifest'),
     )).toBe(true);
+  });
+
+  it('compiles business views and validates included refs', () => {
+    mkdirSync(join(tmpDir, 'blocks'), { recursive: true });
+    mkdirSync(join(tmpDir, 'business-views'), { recursive: true });
+    writeFileSync(join(tmpDir, 'blocks', 'customer_identity.dql'), `block "Customer Identity" {
+  domain = "Customer"
+  type = "custom"
+  query = """
+    SELECT customer_id, customer_name FROM dim_customer
+  """
+}`);
+    writeFileSync(join(tmpDir, 'blocks', 'customer_orders.dql'), `block "Customer Orders Rollup" {
+  domain = "Customer"
+  type = "custom"
+  query = """
+    SELECT customer_id, COUNT(*) AS total_orders FROM fct_orders GROUP BY 1
+  """
+}`);
+    writeFileSync(join(tmpDir, 'business-views', 'customer_360.dql'), `business_view "Customer 360" {
+  domain = "Customer"
+  status = "draft"
+  description = "Complete customer view"
+  owner = "Customer Analytics"
+  businessOutcome = "Improve retention decisions"
+  decisionUse = "Account review"
+  reviewCadence = "weekly"
+  tags = ["customer", "360"]
+
+  includes {
+    block "Customer Identity"
+    block "Customer Orders Rollup"
+  }
+}`);
+
+    const manifest = buildManifest({ projectRoot: tmpDir, dqlVersion: 'test' });
+    const view = manifest.businessViews['Customer 360'];
+
+    expect(view).toBeDefined();
+    expect(view.domain).toBe('Customer');
+    expect(view.owner).toBe('Customer Analytics');
+    expect(view.blockRefs).toEqual(['Customer Identity', 'Customer Orders Rollup']);
+    expect(view.unresolvedBlockRefs).toEqual([]);
+    expect(manifest.diagnostics?.filter((diag) => diag.severity === 'error')).toEqual([]);
+  });
+
+  it('reports unresolved business view refs and cycles', () => {
+    mkdirSync(join(tmpDir, 'blocks'), { recursive: true });
+    mkdirSync(join(tmpDir, 'business-views'), { recursive: true });
+    writeFileSync(join(tmpDir, 'blocks', 'customer_identity.dql'), `block "Customer Identity" {
+  domain = "Customer"
+  type = "custom"
+  query = """
+    SELECT customer_id FROM dim_customer
+  """
+}`);
+    writeFileSync(join(tmpDir, 'business-views', 'customer_360.dql'), `business_view "Customer 360" {
+  domain = "Customer"
+  includes {
+    block "Missing Block"
+    business_view "Customer Health"
+    business_view "Missing View"
+  }
+}`);
+    writeFileSync(join(tmpDir, 'business-views', 'customer_health.dql'), `business_view "Customer Health" {
+  domain = "Customer"
+  includes {
+    block "Customer Identity"
+    business_view "Customer 360"
+  }
+}`);
+
+    const manifest = buildManifest({ projectRoot: tmpDir, dqlVersion: 'test' });
+    const messages = manifest.diagnostics?.map((diag) => diag.message) ?? [];
+
+    expect(manifest.businessViews['Customer 360'].unresolvedBlockRefs).toEqual(['Missing Block']);
+    expect(manifest.businessViews['Customer 360'].unresolvedBusinessViewRefs).toEqual(['Missing View']);
+    expect(messages.some((message) => message.includes('unresolved block refs: Missing Block'))).toBe(true);
+    expect(messages.some((message) => message.includes('unresolved business_view refs: Missing View'))).toBe(true);
+    expect(messages.some((message) => message.includes('business_view cycle detected'))).toBe(true);
   });
 });

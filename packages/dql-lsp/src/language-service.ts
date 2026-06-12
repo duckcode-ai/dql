@@ -32,7 +32,7 @@ const FILTER_TYPES = ['dropdown', 'date_range', 'text', 'multi_select', 'range']
 const KEYWORDS = [
   'dashboard', 'workbook', 'page', 'layout', 'row', 'span',
   'chart', 'filter', 'param', 'import', 'from', 'use', 'let',
-  'block', 'digest', 'narrative', 'visualization', 'tests', 'assert',
+  'block', 'business_view', 'includes', 'digest', 'narrative', 'visualization', 'tests', 'assert',
 ];
 
 const DECORATORS = [
@@ -55,6 +55,12 @@ const BLOCK_FIELDS = [
   'llmContext', 'businessOutcome', 'businessOwner', 'decisionUse',
   'reviewCadence', 'businessRules', 'caveats', 'datalex_contract',
   'metric', 'metrics', 'dimensions', 'params', 'query', 'visualization', 'tests',
+];
+
+const BUSINESS_VIEW_FIELDS = [
+  'domain', 'status', 'description', 'owner', 'tags',
+  'businessOutcome', 'businessOwner', 'decisionUse',
+  'reviewCadence', 'businessRules', 'caveats', 'includes',
 ];
 
 const BLOCK_STATUS_VALUES = [
@@ -162,6 +168,19 @@ export class DQLLanguageService {
     }
 
     const fullText = lines.slice(0, line + 1).join('\n');
+    if (isInsideBusinessViewIncludes(fullText) && (textBefore.match(/^\s*$/) || textBefore.match(/^\s*[A-Za-z_]*$/))) {
+      items.push({ label: 'block', kind: 14, detail: 'include a DQL block', insertText: 'block ""' });
+      items.push({ label: 'business_view', kind: 14, detail: 'include another business view', insertText: 'business_view ""' });
+      return items;
+    }
+
+    if (isInsideBusinessView(fullText) && (textBefore.match(/^\s*$/) || textBefore.match(/^\s*[A-Za-z_]*$/))) {
+      for (const field of BUSINESS_VIEW_FIELDS) {
+        items.push({ label: field, kind: 5, detail: `business_view field ${field}`, insertText: businessViewFieldInsertText(field) });
+      }
+      return items;
+    }
+
     if (isInsideBlock(fullText) && (textBefore.match(/^\s*$/) || textBefore.match(/^\s*[A-Za-z_]*$/))) {
       for (const field of BLOCK_FIELDS) {
         items.push({ label: field, kind: 5, detail: `block field ${field}`, insertText: blockFieldInsertText(field) });
@@ -227,6 +246,8 @@ export class DQLLanguageService {
       param: '`param name: type = default` — Dashboard parameter',
       import: '`import { name } from "./file.dql"` — Import components',
       use: '`use imported_name` — Use an imported component',
+      business_view: '`business_view "Name" { includes { ... } }` — Compose DQL blocks into business lineage',
+      includes: '`includes { block "Name"; business_view "Name" }` — Declare business-view composition references',
     };
 
     if (keywordDocs[word]) {
@@ -265,9 +286,40 @@ function isInsideBlock(text: string): boolean {
   return depth > 0;
 }
 
+function isInsideBusinessView(text: string): boolean {
+  const lastView = text.lastIndexOf('business_view ');
+  if (lastView < 0) return false;
+  const tail = text.slice(lastView);
+  let depth = 0;
+  for (const ch of tail) {
+    if (ch === '{') depth++;
+    else if (ch === '}') depth--;
+  }
+  return depth > 0;
+}
+
+function isInsideBusinessViewIncludes(text: string): boolean {
+  const lastView = text.lastIndexOf('business_view ');
+  const lastIncludes = text.lastIndexOf('includes');
+  if (lastView < 0 || lastIncludes < lastView) return false;
+  const tail = text.slice(lastIncludes);
+  let depth = 0;
+  for (const ch of tail) {
+    if (ch === '{') depth++;
+    else if (ch === '}') depth--;
+  }
+  return depth > 0;
+}
+
 function blockFieldInsertText(field: string): string {
   if (field === 'params' || field === 'visualization' || field === 'tests') return `${field} {\n  \n}`;
   if (field === 'tags' || field === 'metrics' || field === 'dimensions' || field === 'businessRules' || field === 'caveats') return `${field} = []`;
   if (field === 'query') return 'query = """\n  SELECT 1\n"""';
+  return `${field} = ""`;
+}
+
+function businessViewFieldInsertText(field: string): string {
+  if (field === 'includes') return 'includes {\n  block ""\n}';
+  if (field === 'tags' || field === 'businessRules' || field === 'caveats') return `${field} = []`;
   return `${field} = ""`;
 }

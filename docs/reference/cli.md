@@ -24,7 +24,7 @@ dql --version
 
 | Command | What it does |
 | --- | --- |
-| `dql new <type> <name>` | Create a block, semantic block, dashboard, or workbook |
+| `dql new <type> <name>` | Create a block, semantic block, business view, dashboard, workbook, or notebook |
 | `dql parse <file.dql>` | Parse and analyze a DQL file |
 | `dql info <file.dql>` | Show block metadata |
 | `dql certify <file.dql>` | Evaluate certification rules |

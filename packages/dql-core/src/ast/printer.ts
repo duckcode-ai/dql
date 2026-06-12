@@ -11,6 +11,7 @@ import type {
   StatementNode,
   WorkbookNode,
   BlockDeclNode,
+  BusinessViewDeclNode,
 } from './nodes.js';
 import { NodeKind } from './nodes.js';
 
@@ -34,6 +35,8 @@ function printStatement(node: StatementNode, indent: number): string {
       return `${'  '.repeat(indent)}Import [${node.names.join(', ')}] from "${node.path}"\n`;
     case NodeKind.BlockDecl:
       return printBlockDecl(node, indent);
+    case NodeKind.BusinessViewDecl:
+      return printBusinessViewDecl(node, indent);
     default:
       return '';
   }
@@ -149,6 +152,26 @@ function printBlockDecl(node: BlockDeclNode, indent: number): string {
   }
   if (node.tests) {
     result += `${prefix}  tests (${node.tests.length})\n`;
+  }
+  return result;
+}
+
+function printBusinessViewDecl(node: BusinessViewDeclNode, indent: number): string {
+  const prefix = '  '.repeat(indent);
+  let result = `${prefix}BusinessView "${node.name}"\n`;
+  for (const dec of node.decorators) {
+    result += printDecorator(dec, indent + 1);
+  }
+  if (node.domain) result += `${prefix}  domain = "${node.domain}"\n`;
+  if (node.status) result += `${prefix}  status = "${node.status}"\n`;
+  if (node.description) result += `${prefix}  description = "${node.description}"\n`;
+  if (node.tags) result += `${prefix}  tags = [${node.tags.map(t => `"${t}"`).join(', ')}]\n`;
+  if (node.owner) result += `${prefix}  owner = "${node.owner}"\n`;
+  if (node.includes.length > 0) {
+    result += `${prefix}  includes\n`;
+    for (const ref of node.includes) {
+      result += `${prefix}    ${ref.refType} "${ref.name}"\n`;
+    }
   }
   return result;
 }

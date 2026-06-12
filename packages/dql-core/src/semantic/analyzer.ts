@@ -17,6 +17,7 @@ import {
   type PageNode,
   type DashboardBodyItem,
   type BlockDeclNode,
+  type BusinessViewDeclNode,
 } from '../ast/nodes.js';
 
 // ---- Chart Argument Schemas ----
@@ -325,6 +326,9 @@ export class SemanticAnalyzer {
         case NodeKind.BlockDecl:
           this.analyzeBlockDecl(stmt);
           break;
+        case NodeKind.BusinessViewDecl:
+          this.analyzeBusinessViewDecl(stmt);
+          break;
         case NodeKind.Digest:
           // Digest shares dashboard semantics; treat body identically.
           this.analyzeDashboard(stmt as unknown as DashboardNode);
@@ -457,6 +461,20 @@ export class SemanticAnalyzer {
           );
         }
       }
+    }
+  }
+
+  private analyzeBusinessViewDecl(node: BusinessViewDeclNode): void {
+    if (!node.name || node.name.trim().length === 0) {
+      this.reporter.error('Business view must have a non-empty name.', node.span);
+    }
+
+    if (!node.domain) {
+      this.reporter.warning('Business view is missing a domain declaration.', node.span);
+    }
+
+    if (node.includes.length === 0) {
+      this.reporter.warning('Business view has no includes.', node.span);
     }
   }
 

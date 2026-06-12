@@ -206,4 +206,63 @@ describe('runNew', () => {
       process.chdir(originalCwd);
     }
   });
+
+  it('creates a business view scaffold in the business-views folder', async () => {
+    const originalCwd = process.cwd();
+    const targetDir = mkdtempSync(join(tmpdir(), 'dql-new-business-view-'));
+    const projectDir = join(targetDir, 'demo-project');
+
+    await runInit(projectDir, {
+      check: false,
+      chart: '',
+      domain: '',
+      format: 'json',
+      help: false,
+      open: null,
+      input: '',
+      outDir: '',
+      owner: '',
+      port: null,
+      queryOnly: false,
+      template: '',
+      connection: '',
+      verbose: false,
+      skipTests: false, version: false,
+    });
+
+    try {
+      process.chdir(projectDir);
+
+      await runNew('business-view', ['Customer 360'], {
+        check: false,
+        chart: 'bar',
+        domain: 'customer',
+        format: 'json',
+        help: false,
+        open: null,
+        input: '',
+        outDir: '',
+        owner: 'analytics',
+        port: null,
+        queryOnly: false,
+        template: '',
+        connection: '',
+        verbose: false,
+        skipTests: false, version: false,
+      });
+
+      const viewPath = join(projectDir, 'business-views', 'customer_360.dql');
+      expect(existsSync(viewPath)).toBe(true);
+
+      const view = readFileSync(viewPath, 'utf-8');
+      expect(view).toContain('business_view "Customer 360"');
+      expect(view).toContain('domain = "customer"');
+      expect(view).toContain('owner = "analytics"');
+      expect(view).toContain('includes {');
+      expect(view).toContain('block "Customer Identity"');
+      expect(view).toContain('business_view "Customer Service Summary"');
+    } finally {
+      process.chdir(originalCwd);
+    }
+  });
 });

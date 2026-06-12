@@ -3,7 +3,7 @@ import { basename, join, resolve } from 'node:path';
 import type { CLIFlags } from '../args.js';
 import { findProjectRoot } from '../local-runtime.js';
 
-type ScaffoldKind = 'block' | 'dashboard' | 'workbook' | 'semantic-block' | 'notebook';
+type ScaffoldKind = 'block' | 'dashboard' | 'workbook' | 'semantic-block' | 'notebook' | 'business-view';
 
 export async function runNew(subject: string | null, rest: string[], flags: CLIFlags): Promise<void> {
   const { kind, rawName } = resolveNewTarget(subject, rest);
@@ -81,10 +81,14 @@ export async function runNew(subject: string | null, rest: string[], flags: CLIF
 
 function resolveNewTarget(subject: string | null, rest: string[]): { kind: ScaffoldKind; rawName: string } {
   if (!subject) {
-    throw new Error('Usage: dql new <block|dashboard|workbook> <name>');
+    throw new Error('Usage: dql new <block|dashboard|workbook|semantic-block|notebook|business-view> <name>');
   }
 
-  if (subject === 'block' || subject === 'dashboard' || subject === 'workbook' || subject === 'semantic-block' || subject === 'notebook') {
+  if (subject === 'business_view') {
+    subject = 'business-view';
+  }
+
+  if (subject === 'block' || subject === 'dashboard' || subject === 'workbook' || subject === 'semantic-block' || subject === 'notebook' || subject === 'business-view') {
     const rawName = rest.join(' ').trim();
     if (!rawName) {
       throw new Error(`Missing ${subject} name. Usage: dql new ${subject} <name>`);
@@ -112,10 +116,36 @@ function buildTemplate(opts: {
       return buildWorkbookTemplate(opts);
     case 'semantic-block':
       return buildSemanticBlockTemplate(opts);
+    case 'business-view':
+      return buildBusinessViewTemplate(opts);
     case 'block':
     default:
       return buildBlockTemplate(opts);
   }
+}
+
+function buildBusinessViewTemplate(opts: {
+  title: string;
+  domain: string;
+  owner: string;
+}): string {
+  return `business_view "${opts.title}" {
+    domain = "${opts.domain}"
+    status = "draft"
+    description = "Business composition for ${opts.title.toLowerCase()}"
+    owner = "${opts.owner}"
+    tags = ["business-view", "${opts.domain}"]
+    businessOutcome = "Describe the business decision this view supports."
+    decisionUse = "Describe when teams should use this view."
+    reviewCadence = "weekly"
+
+    includes {
+        block "Customer Identity"
+        block "Customer Orders Rollup"
+        business_view "Customer Service Summary"
+    }
+}
+`;
 }
 
 function buildBlockTemplate(opts: {
@@ -357,6 +387,13 @@ function nextStepsFor(kind: ScaffoldKind, relativePath: string, usingStarterData
     ];
   }
 
+  if (kind === 'business-view') {
+    return [
+      `Edit ${relativePath} to point includes at existing blocks or business views`,
+      `dql compile`,
+    ];
+  }
+
   if (!usingStarterData) {
     return [
       `Edit ${relativePath} to replace the placeholder SQL`,
@@ -384,6 +421,8 @@ function defaultDirForKind(kind: ScaffoldKind, outDir: string): string {
       return 'workbooks';
     case 'notebook':
       return 'notebooks';
+    case 'business-view':
+      return 'business-views';
     case 'block':
     default:
       return 'blocks';

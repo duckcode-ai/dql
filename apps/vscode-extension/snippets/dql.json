@@ -40,6 +40,27 @@
     ],
     "description": "Create a reusable DQL block"
   },
+  "Business View": {
+    "prefix": "dql-business-view",
+    "body": [
+      "business_view \"${1:Customer 360}\" {",
+      "  domain = \"${2:Customer}\"",
+      "  status = \"${3:draft}\"",
+      "  description = \"${4:Complete customer view for retention and account review}\"",
+      "  owner = \"${5:customer-analytics}\"",
+      "  businessOutcome = \"${6:Understand customer value, activity, and service risk}\"",
+      "  decisionUse = \"${7:Account planning, churn review, expansion targeting}\"",
+      "  reviewCadence = \"${8:weekly}\"",
+      "",
+      "  includes {",
+      "    block \"${9:Customer Identity}\"",
+      "    block \"${10:Customer Orders Rollup}\"",
+      "    business_view \"${11:Customer Service Summary}\"",
+      "  }",
+      "}"
+    ],
+    "description": "Create a DQL business composition view"
+  },
   "Workbook": {
     "prefix": "dql-workbook",
     "body": [

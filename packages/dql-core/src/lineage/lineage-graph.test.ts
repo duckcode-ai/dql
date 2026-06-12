@@ -386,6 +386,57 @@ describe('buildLineageGraph — normalizeTableName', () => {
   });
 });
 
+describe('buildLineageGraph — business views', () => {
+  it('connects blocks and nested business views with composition edges', () => {
+    const graph = buildLineageGraph(
+      [
+        { name: 'Customer Identity', sql: 'SELECT customer_id FROM dim_customer', domain: 'Customer' },
+        { name: 'Customer Orders Rollup', sql: 'SELECT customer_id, COUNT(*) AS orders FROM fct_orders GROUP BY 1', domain: 'Customer' },
+      ],
+      [],
+      [],
+      {
+        businessViews: [
+          {
+            name: 'Customer 360',
+            domain: 'Customer',
+            owner: 'Customer Analytics',
+            blockRefs: ['Customer Identity', 'Customer Orders Rollup'],
+            businessViewRefs: [],
+          },
+          {
+            name: 'Customer Health Review',
+            domain: 'Customer Success',
+            blockRefs: [],
+            businessViewRefs: ['Customer 360'],
+          },
+        ],
+      },
+    );
+
+    expect(graph.getNode('business_view:Customer 360')?.type).toBe('business_view');
+    expect(graph.getNode('business_view:Customer 360')?.layer).toBe('answer');
+    expect(graph.getNode('business_view:Customer 360')?.owner).toBe('Customer Analytics');
+
+    expect(graph.getIncomingEdges('business_view:Customer 360')).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ source: 'block:Customer Identity', type: 'composes' }),
+        expect.objectContaining({ source: 'block:Customer Orders Rollup', type: 'composes' }),
+      ]),
+    );
+    expect(graph.getIncomingEdges('business_view:Customer Health Review')).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ source: 'business_view:Customer 360', type: 'composes' }),
+      ]),
+    );
+    expect(graph.getOutgoingEdges('business_view:Customer 360')).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ target: 'business_view:Customer Health Review', type: 'composes' }),
+      ]),
+    );
+  });
+});
+
 describe('queryLineage', () => {
   it('returns a focused subgraph with depth limits', () => {
     const graph = buildLineageGraph(
@@ -435,6 +486,7 @@ describe('LineageGraph layers', () => {
     expect(getLayerForNodeType('dbt_source')).toBe('source');
     expect(getLayerForNodeType('dbt_model')).toBe('transform');
     expect(getLayerForNodeType('block')).toBe('answer');
+    expect(getLayerForNodeType('business_view')).toBe('answer');
     expect(getLayerForNodeType('metric')).toBe('answer');
     expect(getLayerForNodeType('dashboard')).toBe('consumption');
     expect(getLayerForNodeType('chart')).toBe('consumption');
@@ -445,11 +497,12 @@ describe('LineageGraph layers', () => {
     graph.addNode({ id: 'table:a', type: 'source_table', layer: 'source', name: 'a' });
     graph.addNode({ id: 'dbt:b', type: 'dbt_model', layer: 'transform', name: 'b' });
     graph.addNode({ id: 'block:c', type: 'block', layer: 'answer', name: 'c' });
+    graph.addNode({ id: 'business_view:e', type: 'business_view', layer: 'answer', name: 'e' });
     graph.addNode({ id: 'dash:d', type: 'dashboard', layer: 'consumption', name: 'd' });
 
     expect(graph.getNodesByLayer('source')).toHaveLength(1);
     expect(graph.getNodesByLayer('transform')).toHaveLength(1);
-    expect(graph.getNodesByLayer('answer')).toHaveLength(1);
+    expect(graph.getNodesByLayer('answer')).toHaveLength(2);
     expect(graph.getNodesByLayer('consumption')).toHaveLength(1);
   });
 

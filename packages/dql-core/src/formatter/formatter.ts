@@ -9,6 +9,7 @@ import type {
   ImportDeclNode,
   LayoutBlockNode,
   LayoutRowNode,
+  BusinessViewDeclNode,
   NamedArgNode,
   DigestNode,
   NarrativeNode,
@@ -68,6 +69,8 @@ function formatStatement(node: StatementNode, level: number, state: FormatState)
       return formatImport(node, level, state);
     case NodeKind.BlockDecl:
       return formatBlock(node, level, state);
+    case NodeKind.BusinessViewDecl:
+      return formatBusinessView(node, level, state);
     case NodeKind.Digest:
       return formatDigest(node, level, state);
     default:
@@ -321,6 +324,39 @@ function formatBlock(node: BlockDeclNode, level: number, state: FormatState): st
     }
     lines.push(`${indent(level + 1, state)}}`);
   }
+
+  lines.push(`${indent(level, state)}}`);
+  return lines.join('\n');
+}
+
+function formatBusinessView(node: BusinessViewDeclNode, level: number, state: FormatState): string {
+  const lines: string[] = [];
+  lines.push(...formatDecorators(node.decorators, level, state));
+  lines.push(`${indent(level, state)}business_view ${quote(node.name)} {`);
+
+  if (node.domain) lines.push(`${indent(level + 1, state)}domain = ${quote(node.domain)}`);
+  if (node.status) lines.push(`${indent(level + 1, state)}status = ${quote(node.status)}`);
+  if (node.description) lines.push(`${indent(level + 1, state)}description = ${quote(node.description)}`);
+  if (node.tags && node.tags.length > 0) {
+    lines.push(`${indent(level + 1, state)}tags = [${node.tags.map(quote).join(', ')}]`);
+  }
+  if (node.owner) lines.push(`${indent(level + 1, state)}owner = ${quote(node.owner)}`);
+  if (node.businessOutcome) lines.push(`${indent(level + 1, state)}businessOutcome = ${quote(node.businessOutcome)}`);
+  if (node.businessOwner) lines.push(`${indent(level + 1, state)}businessOwner = ${quote(node.businessOwner)}`);
+  if (node.decisionUse) lines.push(`${indent(level + 1, state)}decisionUse = ${quote(node.decisionUse)}`);
+  if (node.reviewCadence) lines.push(`${indent(level + 1, state)}reviewCadence = ${quote(node.reviewCadence)}`);
+  if (node.businessRules && node.businessRules.length > 0) {
+    lines.push(`${indent(level + 1, state)}businessRules = [${node.businessRules.map(quote).join(', ')}]`);
+  }
+  if (node.caveats && node.caveats.length > 0) {
+    lines.push(`${indent(level + 1, state)}caveats = [${node.caveats.map(quote).join(', ')}]`);
+  }
+
+  lines.push(`${indent(level + 1, state)}includes {`);
+  for (const ref of node.includes) {
+    lines.push(`${indent(level + 2, state)}${ref.refType} ${quote(ref.name)}`);
+  }
+  lines.push(`${indent(level + 1, state)}}`);
 
   lines.push(`${indent(level, state)}}`);
   return lines.join('\n');

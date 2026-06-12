@@ -28,6 +28,8 @@ export enum NodeKind {
   FunctionCall = 'FunctionCall',
   TemplateString = 'TemplateString',
   BlockDecl = 'BlockDecl',
+  BusinessViewDecl = 'BusinessViewDecl',
+  BusinessViewInclude = 'BusinessViewInclude',
   BlockParams = 'BlockParams',
   BlockVisualization = 'BlockVisualization',
   BlockTest = 'BlockTest',
@@ -75,7 +77,14 @@ export interface ProgramNode extends BaseNode {
   statements: StatementNode[];
 }
 
-export type StatementNode = DashboardNode | ChartCallNode | WorkbookNode | ImportDeclNode | BlockDeclNode | DigestNode;
+export type StatementNode =
+  | DashboardNode
+  | ChartCallNode
+  | WorkbookNode
+  | ImportDeclNode
+  | BlockDeclNode
+  | BusinessViewDeclNode
+  | DigestNode;
 
 // ---- Dashboard ----
 
@@ -345,6 +354,32 @@ export interface BlockTestNode extends BaseNode {
   field: string;
   operator: '>' | '<' | '>=' | '<=' | '==' | '!=' | 'IN';
   expected: ExpressionNode;
+}
+
+// ---- Business View Declaration ----
+
+export interface BusinessViewDeclNode extends BaseNode {
+  kind: NodeKind.BusinessViewDecl;
+  name: string;
+  domain?: string;
+  status?: string;
+  description?: string;
+  tags?: string[];
+  owner?: string;
+  businessOutcome?: string;
+  businessOwner?: string;
+  decisionUse?: string;
+  reviewCadence?: string;
+  businessRules?: string[];
+  caveats?: string[];
+  includes: BusinessViewIncludeNode[];
+  decorators: DecoratorNode[];
+}
+
+export interface BusinessViewIncludeNode extends BaseNode {
+  kind: NodeKind.BusinessViewInclude;
+  refType: 'block' | 'business_view';
+  name: string;
 }
 
 // ---- Layout ----

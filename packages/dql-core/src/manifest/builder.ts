@@ -23,6 +23,7 @@ import type {
   LineageDbtModelInput,
   LineageDashboardInput,
   LineageAppInput,
+  LineageBusinessViewInput,
 } from '../lineage/builder.js';
 import type {
   DQLManifest,
@@ -37,6 +38,7 @@ import type {
   ManifestDiagnostic,
   ManifestApp,
   ManifestDashboard,
+  ManifestBusinessView,
 } from './types.js';
 import {
   loadAppDocument,
@@ -129,6 +131,11 @@ export function collectInputFiles(options: ManifestBuildOptions): string[] {
     for (const f of scanFilesRecursive(join(projectRoot, dir), ['.dql'])) files.add(f);
   }
 
+  const businessViewDirs = ['blocks', 'business-views', 'dashboards', 'workbooks', ...(options.extraBlockDirs ?? [])];
+  for (const dir of businessViewDirs) {
+    for (const f of scanFilesRecursive(join(projectRoot, dir), ['.dql'])) files.add(f);
+  }
+
   const notebookDirs = ['notebooks', 'blocks', 'dashboards', 'workbooks', ...(options.extraNotebookDirs ?? [])];
   for (const dir of notebookDirs) {
     for (const f of scanFilesRecursive(join(projectRoot, dir), ['.dqlnb'])) files.add(f);
@@ -179,6 +186,10 @@ export function buildManifest(options: ManifestBuildOptions): DQLManifest {
   const blockDirs = ['blocks', 'dashboards', 'workbooks', ...(options.extraBlockDirs ?? [])];
   const blocks = scanBlocks(projectRoot, blockDirs, diagnostics, datalexRegistry);
 
+  // Scan business composition views
+  const businessViewDirs = ['blocks', 'business-views', 'dashboards', 'workbooks', ...(options.extraBlockDirs ?? [])];
+  const businessViews = scanBusinessViews(projectRoot, businessViewDirs, diagnostics);
+
   // Scan notebooks
   const notebookDirs = ['notebooks', 'blocks', 'dashboards', 'workbooks', ...(options.extraNotebookDirs ?? [])];
   const notebooks = scanNotebooks(projectRoot, notebookDirs, diagnostics, datalexRegistry);
@@ -188,6 +199,8 @@ export function buildManifest(options: ManifestBuildOptions): DQLManifest {
   for (const [name, block] of Object.entries(notebookBlocks)) {
     if (!blocks[name]) blocks[name] = block;
   }
+
+  validateBusinessViews(businessViews, blocks, diagnostics);
 
   // Load semantic layer
   const semanticDir = resolveSemanticPath(projectRoot, config);
@@ -235,6 +248,7 @@ export function buildManifest(options: ManifestBuildOptions): DQLManifest {
     dbtImport,
     apps,
     dashboards,
+    businessViews,
   );
 
   return {
@@ -244,6 +258,7 @@ export function buildManifest(options: ManifestBuildOptions): DQLManifest {
     project: projectName,
     projectRoot,
     blocks,
+    businessViews,
     notebooks,
     metrics,
     dimensions,
@@ -412,6 +427,139 @@ function scanBlocks(
   }
 
   return blocks;
+}
+
+// ---- Business View Scanning ----
+
+function scanBusinessViews(
+  projectRoot: string,
+  dirs: string[],
+  diagnostics?: ManifestDiagnostic[],
+): Record<string, ManifestBusinessView> {
+  const views: Record<string, ManifestBusinessView> = {};
+  const seenFiles = new Set<string>();
+
+  for (const dir of dirs) {
+    const dirPath = join(projectRoot, dir);
+    const files = scanFilesRecursive(dirPath, ['.dql']);
+
+    for (const filePath of files) {
+      if (seenFiles.has(filePath)) continue;
+      seenFiles.add(filePath);
+      const relPath = relative(projectRoot, filePath);
+      try {
+        const source = readFileSync(filePath, 'utf-8');
+        if (!source.includes('business_view')) continue;
+        const parser = new Parser(source, relPath);
+        const ast = parser.parse();
+
+        for (const stmt of ast.statements) {
+          const view = stmt as any;
+          if (view.kind !== 'BusinessViewDecl') continue;
+
+          if (views[view.name]) {
+            diagnostics?.push({
+              kind: 'resolve',
+              filePath: relPath,
+              severity: 'error',
+              message: `duplicate business_view "${view.name}" also declared in ${views[view.name].filePath}`,
+            });
+            continue;
+          }
+
+          views[view.name] = businessViewDeclToManifestBusinessView(view, relPath);
+        }
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        diagnostics?.push({
+          kind: 'parse',
+          filePath: relPath,
+          severity: 'error',
+          message: `Failed to parse business view file: ${msg}`,
+        });
+      }
+    }
+  }
+
+  return views;
+}
+
+function validateBusinessViews(
+  views: Record<string, ManifestBusinessView>,
+  blocks: Record<string, ManifestBlock>,
+  diagnostics: ManifestDiagnostic[],
+): void {
+  const blockNames = new Set(Object.keys(blocks));
+  const viewNames = new Set(Object.keys(views));
+
+  for (const view of Object.values(views)) {
+    view.unresolvedBlockRefs = view.blockRefs.filter((ref) => !blockNames.has(ref));
+    view.blockRefs = view.blockRefs.filter((ref) => blockNames.has(ref));
+    view.unresolvedBusinessViewRefs = view.businessViewRefs.filter((ref) => !viewNames.has(ref));
+    view.businessViewRefs = view.businessViewRefs.filter((ref) => viewNames.has(ref));
+
+    if (view.unresolvedBlockRefs.length > 0) {
+      diagnostics.push({
+        kind: 'resolve',
+        filePath: view.filePath,
+        severity: 'error',
+        message: `business_view "${view.name}" has unresolved block refs: ${view.unresolvedBlockRefs.join(', ')}`,
+      });
+    }
+
+    if (view.unresolvedBusinessViewRefs.length > 0) {
+      diagnostics.push({
+        kind: 'resolve',
+        filePath: view.filePath,
+        severity: 'error',
+        message: `business_view "${view.name}" has unresolved business_view refs: ${view.unresolvedBusinessViewRefs.join(', ')}`,
+      });
+    }
+  }
+
+  detectBusinessViewCycles(views, diagnostics);
+}
+
+function detectBusinessViewCycles(
+  views: Record<string, ManifestBusinessView>,
+  diagnostics: ManifestDiagnostic[],
+): void {
+  const visiting = new Set<string>();
+  const visited = new Set<string>();
+  const stack: string[] = [];
+  const reported = new Set<string>();
+
+  const visit = (name: string): void => {
+    if (visited.has(name)) return;
+    if (visiting.has(name)) {
+      const cycleStart = stack.indexOf(name);
+      const cycle = [...stack.slice(cycleStart), name];
+      const key = cycle.join(' -> ');
+      if (!reported.has(key)) {
+        reported.add(key);
+        diagnostics.push({
+          kind: 'resolve',
+          filePath: views[name]?.filePath,
+          severity: 'error',
+          message: `business_view cycle detected: ${cycle.join(' -> ')}`,
+        });
+      }
+      return;
+    }
+
+    visiting.add(name);
+    stack.push(name);
+    for (const ref of views[name]?.businessViewRefs ?? []) {
+      visit(ref);
+    }
+    stack.pop();
+    visiting.delete(name);
+    visited.add(name);
+  };
+
+  for (const name of Object.keys(views)) {
+    visit(name);
+  }
 }
 
 // ---- Notebook Scanning ----
@@ -1194,6 +1342,7 @@ function buildManifestLineage(
   dbtImport?: ManifestDbtImport,
   apps?: Record<string, ManifestApp>,
   appDashboards?: Record<string, ManifestDashboard>,
+  businessViews?: Record<string, ManifestBusinessView>,
 ): ManifestLineage {
   // Convert to lineage builder input format
   const lineageBlocks: LineageBlockInput[] = Object.values(blocks).map((b) => ({
@@ -1220,6 +1369,18 @@ function buildManifestLineage(
   const lineageDimensions: LineageDimensionInput[] = Object.values(dimensions).map((d) => ({
     name: d.name,
     table: d.table,
+  }));
+
+  const lineageBusinessViews: LineageBusinessViewInput[] = Object.values(businessViews ?? {}).map((view) => ({
+    name: view.name,
+    domain: view.domain,
+    owner: view.owner,
+    status: view.status as any,
+    filePath: view.filePath,
+    description: view.description,
+    businessOutcome: view.businessOutcome,
+    blockRefs: view.blockRefs,
+    businessViewRefs: view.businessViewRefs,
   }));
 
   // Pre-build a map of table name → block names that query that table.
@@ -1324,6 +1485,7 @@ function buildManifestLineage(
     dbtModels,
     dashboards: [...dashboards, ...appDashboardInputs],
     apps: lineageApps,
+    businessViews: lineageBusinessViews,
   });
 
   // Serialize to manifest format
@@ -1350,7 +1512,7 @@ function buildManifestLineage(
       domain: n.domain,
       owner: n.owner,
       status: n.status,
-      filePath: blocks[n.name]?.filePath ?? n.metadata?.filePath,
+      filePath: blocks[n.name]?.filePath ?? businessViews?.[n.name]?.filePath ?? n.metadata?.filePath,
       columns: n.columns,
       metadata: n.metadata,
     })),
@@ -1431,6 +1593,35 @@ function blockDeclToManifestBlock(block: any, filePath: string): ManifestBlock {
           unresolved: c.unresolved,
         }))
       : undefined,
+  };
+}
+
+function businessViewDeclToManifestBusinessView(view: any, filePath: string): ManifestBusinessView {
+  const blockRefs: string[] = [];
+  const businessViewRefs: string[] = [];
+  for (const ref of view.includes ?? []) {
+    if (ref.refType === 'block') blockRefs.push(ref.name);
+    if (ref.refType === 'business_view') businessViewRefs.push(ref.name);
+  }
+
+  return {
+    name: view.name,
+    filePath,
+    domain: extractProp(view, 'domain'),
+    owner: extractProp(view, 'owner'),
+    status: extractProp(view, 'status'),
+    tags: extractTags(view),
+    description: extractProp(view, 'description'),
+    businessOutcome: typeof view.businessOutcome === 'string' ? view.businessOutcome : undefined,
+    businessOwner: typeof view.businessOwner === 'string' ? view.businessOwner : undefined,
+    decisionUse: typeof view.decisionUse === 'string' ? view.decisionUse : undefined,
+    reviewCadence: typeof view.reviewCadence === 'string' ? view.reviewCadence : undefined,
+    businessRules: Array.isArray(view.businessRules) ? view.businessRules : undefined,
+    caveats: Array.isArray(view.caveats) ? view.caveats : undefined,
+    blockRefs,
+    businessViewRefs,
+    unresolvedBlockRefs: [],
+    unresolvedBusinessViewRefs: [],
   };
 }
 

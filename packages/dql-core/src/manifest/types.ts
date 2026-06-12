@@ -23,6 +23,8 @@ export interface DQLManifest {
 
   /** All blocks discovered in the project */
   blocks: Record<string, ManifestBlock>;
+  /** Business composition views discovered in the project */
+  businessViews: Record<string, ManifestBusinessView>;
   /** All notebook SQL/DQL cells */
   notebooks: Record<string, ManifestNotebook>;
   /** Semantic layer definitions */
@@ -138,6 +140,33 @@ export interface ManifestBlock {
     sources: Array<{ table: string; column: string }>;
     unresolved?: boolean;
   }>;
+}
+
+// ---- Business Views ----
+
+export interface ManifestBusinessView {
+  name: string;
+  /** Relative path from project root */
+  filePath: string;
+  domain?: string;
+  owner?: string;
+  status?: string;
+  tags?: string[];
+  description?: string;
+  businessOutcome?: string;
+  businessOwner?: string;
+  decisionUse?: string;
+  reviewCadence?: string;
+  businessRules?: string[];
+  caveats?: string[];
+  /** Block names included by this business view and resolved in the manifest. */
+  blockRefs: string[];
+  /** Business view names included by this business view and resolved in the manifest. */
+  businessViewRefs: string[];
+  /** Referenced block names that were not found during compile. */
+  unresolvedBlockRefs: string[];
+  /** Referenced business view names that were not found during compile. */
+  unresolvedBusinessViewRefs: string[];
 }
 
 // ---- Notebooks ----

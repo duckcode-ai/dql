@@ -38,6 +38,7 @@ export {
   type LineageDimensionInput,
   type LineageDbtModelInput,
   type LineageDashboardInput,
+  type LineageBusinessViewInput,
   type LineageBuilderOptions,
 } from './builder.js';
 

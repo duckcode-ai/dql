@@ -13,6 +13,7 @@ DQL's lineage graph answers three questions:
 | `source` | dbt source or warehouse table |
 | `model` | dbt model |
 | `block` | DQL block |
+| `business_view` | DQL business composition view |
 | `notebook` | DQL notebook |
 | `dashboard` | DQL dashboard |
 | `metric` / `dimension` | Semantic layer object |
@@ -22,6 +23,7 @@ DQL's lineage graph answers three questions:
 | Kind | Meaning |
 | --- | --- |
 | `reads` | `A` queries from `B` |
+| `composes` | A block or business view is composed into a higher-level business view |
 | `contains` | `A` embeds `B` (e.g. notebook contains block) |
 | `materializes_to` | `A` is compiled into `B` (e.g. block → dashboard section) |
 
@@ -31,6 +33,16 @@ SQL-level refs are extracted with `node-sql-parser` (**not regex**), which
 correctly handles CTEs, subqueries, lateral joins, `QUALIFY`, and dialect
 quirks. Semantic refs (`@metric`, `@block`, `@table`) are extracted from
 the DQL AST directly.
+
+Business composition refs are extracted from `business_view` declarations:
+
+```text
+dbt source -> dbt model -> DQL block -> business_view -> dashboard/App
+```
+
+This separates technical data dependencies from business lineage. A SQL block
+answers "what query produces this reusable unit?" while a business view answers
+"what business capability does this set of blocks create?"
 
 ## Storage
 

@@ -20,6 +20,7 @@ import type {
   DashboardBodyItem,
   StatementNode,
   BlockDeclNode,
+  BusinessViewDeclNode,
 } from './nodes.js';
 import { NodeKind } from './nodes.js';
 
@@ -42,6 +43,7 @@ export interface ASTVisitor<T = void> {
   visitFunctionCall(node: FunctionCallNode): T;
   visitTemplateString(node: TemplateStringNode): T;
   visitBlockDecl(node: BlockDeclNode): T;
+  visitBusinessViewDecl(node: BusinessViewDeclNode): T;
 }
 
 export abstract class BaseVisitor<T = void> implements ASTVisitor<T> {
@@ -60,6 +62,8 @@ export abstract class BaseVisitor<T = void> implements ASTVisitor<T> {
         return this.visitChartCall(node);
       case NodeKind.BlockDecl:
         return this.visitBlockDecl(node);
+      case NodeKind.BusinessViewDecl:
+        return this.visitBusinessViewDecl(node);
       default:
         return undefined as T;
     }
@@ -213,6 +217,13 @@ export abstract class BaseVisitor<T = void> implements ASTVisitor<T> {
       for (const prop of node.visualization.properties) {
         this.visitNamedArg(prop);
       }
+    }
+    return undefined as T;
+  }
+
+  visitBusinessViewDecl(node: BusinessViewDeclNode): T {
+    for (const dec of node.decorators) {
+      this.visitDecorator(dec);
     }
     return undefined as T;
   }

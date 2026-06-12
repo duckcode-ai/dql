@@ -54,7 +54,7 @@ export async function runInit(targetArg: string | null, flags: CLIFlags): Promis
   }
 
   // Create DQL directories
-  const dirs = ['blocks', 'notebooks', 'apps'];
+  const dirs = ['blocks', 'business-views', 'notebooks', 'apps'];
   if (!isDbt) {
     dirs.push('semantic-layer', 'semantic-layer/metrics', 'semantic-layer/dimensions');
   }
@@ -129,6 +129,7 @@ export async function runInit(targetArg: string | null, flags: CLIFlags): Promis
   console.log('  Created:');
   console.log('    dql.config.json');
   console.log('    blocks/');
+  console.log('    business-views/');
   console.log('    apps/');
   console.log('    notebooks/welcome.dqlnb');
   if (importedSemanticCatalog) {

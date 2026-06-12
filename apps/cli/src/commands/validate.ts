@@ -4,6 +4,7 @@ import {
   DataLexContractRegistry,
   Parser,
   analyze,
+  buildManifest,
   loadSemanticLayerFromDir,
   resolveDataLexManifestPath,
   type SemanticLayer,
@@ -81,7 +82,7 @@ function collectValidationFiles(targetPath: string | null): { projectRoot: strin
     }
   }
 
-  const dirs = ['blocks', 'dashboards', 'workbooks'];
+  const dirs = ['blocks', 'business-views', 'dashboards', 'workbooks'];
   return {
     projectRoot,
     files: dirs.flatMap((dir) => collectDqlFilesFromDir(join(projectRoot, dir), projectRoot)),
@@ -91,6 +92,7 @@ function collectValidationFiles(targetPath: string | null): { projectRoot: strin
 export async function runValidate(path: string | null, flags: CLIFlags): Promise<void> {
   const { projectRoot, files } = collectValidationFiles(path);
   const diagnostics: Diagnostic[] = [];
+  const targetPath = resolve(path ?? '.');
 
   // Load semantic layer if present
   let semanticLayer: SemanticLayer | undefined;
@@ -179,6 +181,31 @@ export async function runValidate(path: string | null, flags: CLIFlags): Promise
         file: relativePath,
         severity: 'error',
         message: `Parse error: ${err instanceof Error ? err.message : String(err)}`,
+      });
+    }
+  }
+
+  const shouldRunProjectManifestValidation = existsSync(join(projectRoot, 'dql.config.json'))
+    && (!existsSync(targetPath) || statSync(targetPath).isDirectory());
+  if (shouldRunProjectManifestValidation) {
+    try {
+      const manifest = buildManifest({
+        projectRoot,
+        datalexManifestPath,
+      });
+      for (const diag of manifest.diagnostics ?? []) {
+        if (diag.kind !== 'resolve' || !diag.message.includes('business_view')) continue;
+        diagnostics.push({
+          file: diag.filePath ?? 'dql-manifest.json',
+          severity: diag.severity,
+          message: diag.message,
+        });
+      }
+    } catch (err) {
+      diagnostics.push({
+        file: 'dql-manifest.json',
+        severity: 'error',
+        message: `Manifest validation failed: ${err instanceof Error ? err.message : String(err)}`,
       });
     }
   }

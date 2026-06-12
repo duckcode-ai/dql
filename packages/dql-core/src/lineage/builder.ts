@@ -51,12 +51,25 @@ export interface LineageBuilderOptions {
   blockNames?: Set<string>;
   dbtModels?: LineageDbtModelInput[];
   dashboards?: LineageDashboardInput[];
+  businessViews?: LineageBusinessViewInput[];
   /**
    * Apps (consumption-layer artifacts) that contain dashboards. App nodes sit
    * above the matching dashboard nodes in the graph and inherit the App's
    * declared `domain` so cross-domain analysis remains accurate.
    */
   apps?: LineageAppInput[];
+}
+
+export interface LineageBusinessViewInput {
+  name: string;
+  domain?: string;
+  owner?: string;
+  status?: 'draft' | 'review' | 'certified' | 'deprecated' | 'pending_recertification';
+  filePath?: string;
+  description?: string;
+  businessOutcome?: string;
+  blockRefs: string[];
+  businessViewRefs: string[];
 }
 
 export interface LineageAppInput {
@@ -169,6 +182,24 @@ export function buildLineageGraph(
         blockType: block.blockType,
         materializedAs: block.materializedAs,
         filePath: block.filePath,
+      },
+    });
+  }
+
+  // 1b. Add business view nodes before edges so views can compose other views.
+  for (const view of options.businessViews ?? []) {
+    graph.addNode({
+      id: `business_view:${view.name}`,
+      type: 'business_view',
+      layer: 'answer',
+      name: view.name,
+      domain: view.domain,
+      owner: view.owner,
+      status: view.status,
+      metadata: {
+        filePath: view.filePath,
+        description: view.description,
+        businessOutcome: view.businessOutcome,
       },
     });
   }
@@ -330,6 +361,30 @@ export function buildLineageGraph(
 
     // Certification is stored as node metadata (status + certifiedBy), not as an edge.
     // Self-loops would confuse graph traversal without adding lineage value.
+  }
+
+  for (const view of options.businessViews ?? []) {
+    const viewNodeId = `business_view:${view.name}`;
+    for (const blockRef of view.blockRefs) {
+      const blockNodeId = `block:${blockRef}`;
+      if (!graph.getNode(blockNodeId)) continue;
+      graph.addEdge({
+        source: blockNodeId,
+        target: viewNodeId,
+        type: 'composes',
+      });
+      addCrossDomainEdgeIfNeeded(graph, blockNodeId, viewNodeId);
+    }
+    for (const viewRef of view.businessViewRefs) {
+      const refNodeId = `business_view:${viewRef}`;
+      if (!graph.getNode(refNodeId)) continue;
+      graph.addEdge({
+        source: refNodeId,
+        target: viewNodeId,
+        type: 'composes',
+      });
+      addCrossDomainEdgeIfNeeded(graph, refNodeId, viewNodeId);
+    }
   }
 
   for (const dashboard of options.dashboards ?? []) {
