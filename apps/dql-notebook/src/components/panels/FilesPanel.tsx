@@ -9,11 +9,13 @@ interface FilesPanelProps {
   onOpenFile: (file: NotebookFile) => void;
 }
 
-type FolderKey = 'notebooks' | 'blocks' | 'dashboards';
+type FolderKey = 'notebooks' | 'blocks' | 'terms' | 'business-views' | 'dashboards';
 
 const FOLDER_LABELS: Record<FolderKey, string> = {
   notebooks: 'Notebooks',
   blocks: 'Blocks',
+  terms: 'Business Terms',
+  'business-views': 'Business Views',
   dashboards: 'Dashboards',
 };
 
@@ -22,6 +24,8 @@ const FOLDER_LABELS: Record<FolderKey, string> = {
 const HIDE_WHEN_EMPTY: Record<FolderKey, boolean> = {
   notebooks: false,
   blocks: false,
+  terms: true,
+  'business-views': true,
   dashboards: true,
 };
 
@@ -37,6 +41,18 @@ function FileTypeIcon({ type }: { type: NotebookFile['type'] }) {
       return (
         <svg width="13" height="13" viewBox="0 0 16 16" fill="currentColor">
           <path d="M10.5 0l5.25 4-5.25 4V6H9.25A1.75 1.75 0 0 0 7.5 7.75v2.5A1.75 1.75 0 0 0 9.25 12h1.25v8H9v-6.5A3.25 3.25 0 0 1 5.75 10h-2A3.25 3.25 0 0 1 .5 6.75v-2.5A3.25 3.25 0 0 1 3.75 1h2A3.25 3.25 0 0 1 9 4.5V6h1.5V0z" />
+        </svg>
+      );
+    case 'term':
+      return (
+        <svg width="13" height="13" viewBox="0 0 16 16" fill="currentColor">
+          <path d="M2 2.75A1.75 1.75 0 0 1 3.75 1h8.5A1.75 1.75 0 0 1 14 2.75v10.5A1.75 1.75 0 0 1 12.25 15h-8.5A1.75 1.75 0 0 1 2 13.25Zm1.75-.25a.25.25 0 0 0-.25.25v10.5c0 .138.112.25.25.25h8.5a.25.25 0 0 0 .25-.25V2.75a.25.25 0 0 0-.25-.25Zm2 2h4.5a.75.75 0 0 1 0 1.5h-4.5a.75.75 0 0 1 0-1.5Zm0 3h4.5a.75.75 0 0 1 0 1.5h-4.5a.75.75 0 0 1 0-1.5Zm0 3h2.5a.75.75 0 0 1 0 1.5h-2.5a.75.75 0 0 1 0-1.5Z" />
+        </svg>
+      );
+    case 'business_view':
+      return (
+        <svg width="13" height="13" viewBox="0 0 16 16" fill="currentColor">
+          <path d="M2 2.75A1.75 1.75 0 0 1 3.75 1h2.5A1.75 1.75 0 0 1 8 2.75v2.5A1.75 1.75 0 0 1 6.25 7h-2.5A1.75 1.75 0 0 1 2 5.25Zm1.75-.25a.25.25 0 0 0-.25.25v2.5c0 .138.112.25.25.25h2.5a.25.25 0 0 0 .25-.25v-2.5a.25.25 0 0 0-.25-.25Zm4.25 8.25A1.75 1.75 0 0 1 9.75 9h2.5A1.75 1.75 0 0 1 14 10.75v2.5A1.75 1.75 0 0 1 12.25 15h-2.5A1.75 1.75 0 0 1 8 13.25Zm1.75-.25a.25.25 0 0 0-.25.25v2.5c0 .138.112.25.25.25h2.5a.25.25 0 0 0 .25-.25v-2.5a.25.25 0 0 0-.25-.25ZM7.5 4.25h1.75A2.75 2.75 0 0 1 12 7v2h-1.5V7a1.25 1.25 0 0 0-1.25-1.25H7.5Zm1 7.5H6.75A2.75 2.75 0 0 1 4 9V7h1.5v2a1.25 1.25 0 0 0 1.25 1.25H8.5Z" />
         </svg>
       );
     default:
@@ -64,6 +80,25 @@ function displayName(file: NotebookFile): string {
   return file.name.replace(/\.(dqlnb|dql)$/, '');
 }
 
+function lineageNodeIdForFile(file: NotebookFile): string {
+  const name = displayName(file);
+  switch (file.type) {
+    case 'block':
+      return `block:${name}`;
+    case 'dashboard':
+      return `dashboard:${name}`;
+    case 'notebook':
+    case 'workbook':
+      return `notebook:${name}`;
+    case 'term':
+      return `term:${name}`;
+    case 'business_view':
+      return `business_view:${name}`;
+    default:
+      return name;
+  }
+}
+
 export function FilesPanel({ onOpenFile }: FilesPanelProps) {
   const { state, dispatch } = useNotebook();
   const t = themes[state.themeMode];
@@ -71,6 +106,8 @@ export function FilesPanel({ onOpenFile }: FilesPanelProps) {
   const [expandedFolders, setExpandedFolders] = useState<Record<string, boolean>>({
     notebooks: true,
     blocks: false,
+    terms: false,
+    'business-views': false,
     dashboards: false,
   });
   const [newBtnHover, setNewBtnHover] = useState(false);
@@ -78,6 +115,8 @@ export function FilesPanel({ onOpenFile }: FilesPanelProps) {
   const grouped: Record<FolderKey, NotebookFile[]> = {
     notebooks: [],
     blocks: [],
+    terms: [],
+    'business-views': [],
     dashboards: [],
   };
 
@@ -174,12 +213,11 @@ export function FilesPanel({ onOpenFile }: FilesPanelProps) {
                       file={file}
                       active={state.activeFile?.path === file.path}
                       onClick={() => onOpenFile(file)}
-                      onShowLineage={() =>
-                        dispatch({
-                          type: 'OPEN_LINEAGE_DRAWER',
-                          nodeId: displayName(file),
-                        })
-                      }
+                      onShowLineage={() => {
+                        const nodeId = lineageNodeIdForFile(file);
+                        dispatch({ type: 'SET_LINEAGE_FOCUS', nodeId });
+                        dispatch({ type: 'OPEN_LINEAGE_DRAWER', nodeId });
+                      }}
                       t={t}
                     />
                   ))
@@ -315,7 +353,7 @@ function FileRow({
   const [lineageHover, setLineageHover] = useState(false);
   // Lineage button only makes sense for things the lineage graph indexes:
   // notebooks (dashboard nodes) and DQL blocks (block nodes).
-  const lineageEligible = file.type === 'notebook' || file.type === 'block' || file.type === 'dashboard';
+  const lineageEligible = file.type === 'notebook' || file.type === 'block' || file.type === 'dashboard' || file.type === 'term' || file.type === 'business_view';
   return (
     <div
       onMouseEnter={() => setHovered(true)}

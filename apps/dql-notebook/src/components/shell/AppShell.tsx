@@ -56,6 +56,15 @@ export function AppShell() {
   const handleOpenFile = useCallback(
     async (file: NotebookFile) => {
       try {
+        if (file.type === 'term' || file.type === 'business_view') {
+          const nodeId = `${file.type}:${file.name.replace(/\.(dqlnb|dql)$/i, '')}`;
+          dispatch({ type: 'SET_LINEAGE_FOCUS', nodeId });
+          dispatch({ type: 'OPEN_LINEAGE_DRAWER', nodeId });
+          if (state.sidebarPanel !== 'lineage') {
+            dispatch({ type: 'SET_SIDEBAR_PANEL', panel: 'lineage' });
+          }
+          return;
+        }
         if (file.type === 'block') {
           const payload = await api.openBlockStudio(file.path);
           dispatch({ type: 'OPEN_BLOCK_STUDIO', file, payload });

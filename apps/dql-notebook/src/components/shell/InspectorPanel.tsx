@@ -2,6 +2,7 @@ import React, { useEffect, useState } from 'react';
 import { cssVar, space, fontSize, fontWeight, radius } from '@duckcodeailabs/dql-ui';
 import { useNotebook } from '../../store/NotebookStore';
 import { api } from '../../api/client';
+import { TYPE_TITLES } from '../lineage/lineage-constants';
 
 /**
  * Right-rail inspector. A scaffold for v0.10 — surfaces context-sensitive
@@ -142,18 +143,30 @@ function LineageNodeInspector({ nodeId }: { nodeId: string }) {
   }
 
   const n = data.node;
+  const metadata = n.metadata ?? {};
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: space[3] }}>
       <Field label="Name">{n.name ?? nodeId}</Field>
-      <Field label="Type">{n.type}</Field>
+      <Field label="Type">{TYPE_TITLES[n.type] ?? n.type}</Field>
       {n.domain && <Field label="Domain">{n.domain}</Field>}
+      {n.owner && <Field label="Owner">{n.owner}</Field>}
+      {n.status && <Field label="Status">{n.status}</Field>}
+      {typeof metadata.termType === 'string' && <Field label="Term Type">{metadata.termType}</Field>}
+      {typeof metadata.description === 'string' && <Field label="Description">{metadata.description}</Field>}
+      {Array.isArray(metadata.identifiers) && metadata.identifiers.length > 0 && (
+        <Field label="Identifiers">{metadata.identifiers.map(String).join(', ')}</Field>
+      )}
+      {Array.isArray(metadata.synonyms) && metadata.synonyms.length > 0 && (
+        <Field label="Synonyms">{metadata.synonyms.map(String).join(', ')}</Field>
+      )}
+      {typeof metadata.businessOutcome === 'string' && <Field label="Business Outcome">{metadata.businessOutcome}</Field>}
       {n.layer && <Field label="Layer">{n.layer}</Field>}
       <Field label="Upstream">{data.incoming.length}</Field>
       <Field label="Downstream">{data.outgoing.length}</Field>
-      {n.path && (
+      {(n.path || metadata.filePath) && (
         <Field label="Path">
           <code style={{ fontFamily: 'var(--dql-font-mono, monospace)', fontSize: fontSize.xs }}>
-            {n.path}
+            {n.path ?? metadata.filePath}
           </code>
         </Field>
       )}

@@ -117,16 +117,60 @@ function NodeRow({
 const SECTION_COLLAPSE_THRESHOLD = 30;
 const SECTION_EXPAND_CHUNK = 200;
 
+function secondaryForNode(node: LineageNode): string | undefined {
+  const metadata = node.metadata ?? {};
+  const parts: string[] = [];
+  if (node.domain) parts.push(node.domain);
+  if (node.type === 'term' && typeof metadata.termType === 'string') parts.push(metadata.termType);
+  if (node.owner) parts.push(node.owner);
+  if (node.status) parts.push(node.status);
+  if (node.type === 'business_view' && typeof metadata.description === 'string') parts.push(metadata.description);
+  return parts.length > 0 ? parts.join(' · ') : undefined;
+}
+
+function SummaryCard({
+  label,
+  value,
+  detail,
+  t,
+}: {
+  label: string;
+  value: number;
+  detail: string;
+  t: Theme;
+}) {
+  return (
+    <div
+      style={{
+        flex: '1 1 120px',
+        border: `1px solid ${t.headerBorder}`,
+        borderRadius: 6,
+        padding: '7px 8px',
+        background: t.inputBg,
+        minWidth: 0,
+      }}
+    >
+      <div style={{ color: t.textMuted, fontSize: 10, fontWeight: 700, textTransform: 'uppercase' }}>{label}</div>
+      <div style={{ color: t.textPrimary, fontSize: 18, fontWeight: 800, lineHeight: 1.2 }}>{value}</div>
+      <div style={{ color: t.textMuted, fontSize: 10, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={detail}>
+        {detail}
+      </div>
+    </div>
+  );
+}
+
 function Section({
   title,
   nodes,
   t,
   onSelect,
+  secondaryFor,
 }: {
   title: string;
   nodes: LineageNode[];
   t: Theme;
   onSelect: (node: LineageNode) => void;
+  secondaryFor?: (node: LineageNode) => string | undefined;
 }) {
   const large = nodes.length > SECTION_COLLAPSE_THRESHOLD;
   const [expanded, setExpanded] = useState(!large);
@@ -165,7 +209,7 @@ function Section({
         nodes
           .slice(0, shown)
           .map((node) => (
-            <NodeRow key={node.id} node={node} t={t} onClick={() => onSelect(node)} />
+            <NodeRow key={node.id} node={node} t={t} onClick={() => onSelect(node)} secondary={secondaryFor?.(node)} />
           ))}
       {expanded && remaining > 0 && (
         <button
@@ -195,7 +239,7 @@ export function LineagePanel() {
 
   const [loading, setLoading] = useState(true);
   const [allNodes, setAllNodes] = useState<LineageNode[]>([]);
-  const [, setAllEdges] = useState<LineageEdge[]>([]);
+  const [allEdges, setAllEdges] = useState<LineageEdge[]>([]);
   const [search, setSearch] = useState('');
   const [matches, setMatches] = useState<Array<{ node: LineageNode; score: number }>>([]);
 
@@ -234,13 +278,27 @@ export function LineagePanel() {
   const [groupBy, setGroupBy] = useState<'type' | 'layer'>('type');
 
   const grouped = useMemo(() => ({
+    terms: allNodes.filter((node) => node.type === 'term'),
+    businessViews: allNodes.filter((node) => node.type === 'business_view'),
     dashboards: allNodes.filter((node) => node.type === 'dashboard'),
+    notebooks: allNodes.filter((node) => node.type === 'notebook'),
+    apps: allNodes.filter((node) => node.type === 'app'),
+    charts: allNodes.filter((node) => node.type === 'chart'),
     blocks: allNodes.filter((node) => node.type === 'block'),
+    metrics: allNodes.filter((node) => node.type === 'metric'),
+    dimensions: allNodes.filter((node) => node.type === 'dimension'),
     dbtModels: allNodes.filter((node) => node.type === 'dbt_model'),
     dbtSources: allNodes.filter((node) => node.type === 'dbt_source'),
     tables: allNodes.filter((node) => node.type === 'source_table'),
     domains: allNodes.filter((node) => node.type === 'domain'),
   }), [allNodes]);
+
+  const summary = useMemo(() => ({
+    businessNodes: grouped.terms.length + grouped.businessViews.length,
+    businessEdges: allEdges.filter((edge) => edge.type === 'defines' || edge.type === 'composes').length,
+    technicalNodes: grouped.tables.length + grouped.dbtSources.length + grouped.dbtModels.length + grouped.metrics.length + grouped.dimensions.length + grouped.blocks.length,
+    consumptionNodes: grouped.charts.length + grouped.notebooks.length + grouped.dashboards.length + grouped.apps.length,
+  }), [allEdges, grouped]);
 
   const layerGrouped = useMemo(() => {
     const groups: Record<LineageLayerName, LineageNode[]> = {
@@ -273,7 +331,7 @@ export function LineagePanel() {
       <SearchInput
         value={search}
         onChange={setSearch}
-        placeholder="Search blocks, tables, dbt models, notebooks..."
+        placeholder="Search terms, views, blocks, tables, dashboards..."
         t={t}
       />
     </PanelToolbar>
@@ -299,7 +357,7 @@ export function LineagePanel() {
           {state.lineageFullscreen ? 'Close Graph View' : 'Open Graph View'}
         </button>
         <div style={{ marginTop: 8, color: t.textMuted, fontSize: 11, lineHeight: 1.5 }}>
-          Search across source tables, dbt sources/models, DQL blocks, metrics, and notebooks. Selecting any item opens a focused lineage path instead of the full graph.
+          Search across business terms, business views, DQL blocks, source tables, dbt models, dashboards, notebooks, and Apps. Selecting an item opens its focused lineage path.
         </div>
       </div>
 
@@ -320,6 +378,27 @@ export function LineagePanel() {
             ))}
           </div>
         )}
+
+        <div style={{ padding: 8, display: 'flex', gap: 8, flexWrap: 'wrap', borderBottom: `1px solid ${t.headerBorder}` }}>
+          <SummaryCard
+            label="Business"
+            value={summary.businessNodes}
+            detail={`${grouped.terms.length} terms · ${grouped.businessViews.length} views · ${summary.businessEdges} business edges`}
+            t={t}
+          />
+          <SummaryCard
+            label="Technical"
+            value={summary.technicalNodes}
+            detail={`${grouped.tables.length} tables · ${grouped.dbtModels.length + grouped.dbtSources.length} dbt · ${grouped.blocks.length} blocks`}
+            t={t}
+          />
+          <SummaryCard
+            label="Consumption"
+            value={summary.consumptionNodes}
+            detail={`${grouped.dashboards.length} dashboards · ${grouped.notebooks.length} notebooks · ${grouped.apps.length} Apps`}
+            t={t}
+          />
+        </div>
 
         {/* Layer summary bar */}
         <div style={{ padding: '6px 8px', display: 'flex', gap: 8, flexWrap: 'wrap', borderBottom: `1px solid ${t.headerBorder}` }}>
@@ -358,12 +437,19 @@ export function LineagePanel() {
 
         {groupBy === 'type' ? (
           <>
-            <Section title="Dashboards" nodes={grouped.dashboards} t={t} onSelect={handleSelectNode} />
-            <Section title="DQL Blocks" nodes={grouped.blocks} t={t} onSelect={handleSelectNode} />
-            <Section title="dbt Models" nodes={grouped.dbtModels} t={t} onSelect={handleSelectNode} />
-            <Section title="dbt Sources" nodes={grouped.dbtSources} t={t} onSelect={handleSelectNode} />
-            <Section title="Source Tables" nodes={grouped.tables} t={t} onSelect={handleSelectNode} />
-            <Section title="Business Domains" nodes={grouped.domains} t={t} onSelect={handleSelectNode} />
+            <Section title="Business Terms" nodes={grouped.terms} t={t} onSelect={handleSelectNode} secondaryFor={secondaryForNode} />
+            <Section title="Business Views" nodes={grouped.businessViews} t={t} onSelect={handleSelectNode} secondaryFor={secondaryForNode} />
+            <Section title="DQL Blocks" nodes={grouped.blocks} t={t} onSelect={handleSelectNode} secondaryFor={secondaryForNode} />
+            <Section title="Metrics" nodes={grouped.metrics} t={t} onSelect={handleSelectNode} secondaryFor={secondaryForNode} />
+            <Section title="Dimensions" nodes={grouped.dimensions} t={t} onSelect={handleSelectNode} secondaryFor={secondaryForNode} />
+            <Section title="Dashboards" nodes={grouped.dashboards} t={t} onSelect={handleSelectNode} secondaryFor={secondaryForNode} />
+            <Section title="Notebooks" nodes={grouped.notebooks} t={t} onSelect={handleSelectNode} secondaryFor={secondaryForNode} />
+            <Section title="Apps" nodes={grouped.apps} t={t} onSelect={handleSelectNode} secondaryFor={secondaryForNode} />
+            <Section title="Charts" nodes={grouped.charts} t={t} onSelect={handleSelectNode} secondaryFor={secondaryForNode} />
+            <Section title="dbt Models" nodes={grouped.dbtModels} t={t} onSelect={handleSelectNode} secondaryFor={secondaryForNode} />
+            <Section title="dbt Sources" nodes={grouped.dbtSources} t={t} onSelect={handleSelectNode} secondaryFor={secondaryForNode} />
+            <Section title="Source Tables" nodes={grouped.tables} t={t} onSelect={handleSelectNode} secondaryFor={secondaryForNode} />
+            <Section title="Business Domains" nodes={grouped.domains} t={t} onSelect={handleSelectNode} secondaryFor={secondaryForNode} />
           </>
         ) : (
           <>

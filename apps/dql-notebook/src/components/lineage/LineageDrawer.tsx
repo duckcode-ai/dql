@@ -11,7 +11,7 @@
  * Closes via the × button. Independent of `lineageFullscreen` (full-page DAG).
  */
 
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { ExternalLink, Maximize2, X } from '@duckcodeailabs/dql-ui/icons';
 import { useNotebook } from '../../store/NotebookStore';
 import { themes, type Theme } from '../../themes/notebook-theme';
@@ -21,6 +21,7 @@ import {
   NODE_TYPE_COLORS,
   TYPE_LABELS,
   TYPE_TITLES,
+  EDGE_TITLES,
   type LineageNode,
   type LineageEdge,
 } from './lineage-constants';
@@ -81,8 +82,6 @@ export function LineageDrawer() {
     };
   }, [nodeId]);
 
-  if (!nodeId) return null;
-
   const focal = graph.focalNode;
   const upstreamCount = focal
     ? graph.edges.filter((e) => e.target === focal.id).length
@@ -92,6 +91,24 @@ export function LineageDrawer() {
     : 0;
   const focalColor = focal ? NODE_TYPE_COLORS[focal.type] ?? t.textSecondary : t.textSecondary;
   const focalLabel = focal ? TYPE_LABELS[focal.type] ?? focal.type.toUpperCase() : '';
+  const nodeById = useMemo(() => new Map(graph.nodes.map((node) => [node.id, node])), [graph.nodes]);
+  const upstreamConnections = useMemo(() => {
+    if (!focal) return [];
+    return graph.edges
+      .filter((edge) => edge.target === focal.id)
+      .map((edge) => ({ edge, node: nodeById.get(edge.source) }))
+      .filter((entry): entry is { edge: LineageEdge; node: LineageNode } => Boolean(entry.node));
+  }, [focal, graph.edges, nodeById]);
+  const downstreamConnections = useMemo(() => {
+    if (!focal) return [];
+    return graph.edges
+      .filter((edge) => edge.source === focal.id)
+      .map((edge) => ({ edge, node: nodeById.get(edge.target) }))
+      .filter((entry): entry is { edge: LineageEdge; node: LineageNode } => Boolean(entry.node));
+  }, [focal, graph.edges, nodeById]);
+  const filePath = focal?.metadata?.path ?? focal?.metadata?.filePath;
+
+  if (!nodeId) return null;
 
   const handleNodeClick = (clickedId: string) => {
     if (clickedId === nodeId) return;
@@ -179,6 +196,8 @@ export function LineageDrawer() {
         </IconButton>
       </div>
 
+      {focal && <NodeMetadataSummary node={focal} t={t} />}
+
       {/* Graph */}
       <div
         ref={graphHostRef}
@@ -204,8 +223,15 @@ export function LineageDrawer() {
         )}
       </div>
 
+      {focal && (
+        <div style={{ borderTop: `1px solid ${t.headerBorder}`, padding: '10px 12px', display: 'grid', gap: 8 }}>
+          <ConnectionList title="Upstream" connections={upstreamConnections} t={t} />
+          <ConnectionList title="Downstream" connections={downstreamConnections} t={t} />
+        </div>
+      )}
+
       {/* Footer hint */}
-      {focal?.metadata?.path != null && typeof focal.metadata.path === 'string' && (
+      {typeof filePath === 'string' && (
         <div
           style={{
             padding: '8px 14px',
@@ -225,13 +251,138 @@ export function LineageDrawer() {
               textOverflow: 'ellipsis',
               whiteSpace: 'nowrap',
             }}
-            title={focal.metadata.path as string}
+            title={filePath}
           >
-            {focal.metadata.path as string}
+            {filePath}
           </span>
         </div>
       )}
     </aside>
+  );
+}
+
+function NodeMetadataSummary({ node, t }: { node: LineageNode; t: Theme }) {
+  const metadata = node.metadata ?? {};
+  const rows: Array<{ label: string; value: string }> = [];
+
+  if (node.domain) rows.push({ label: 'Domain', value: node.domain });
+  if (node.owner) rows.push({ label: 'Owner', value: node.owner });
+  if (node.status) rows.push({ label: 'Status', value: node.status });
+  if (node.type === 'term' && typeof metadata.termType === 'string') rows.push({ label: 'Term Type', value: metadata.termType });
+  if (node.type === 'block' && typeof metadata.blockType === 'string') rows.push({ label: 'Block Type', value: metadata.blockType });
+  if (typeof metadata.materializedAs === 'string') rows.push({ label: 'Materialized As', value: metadata.materializedAs });
+  if (Array.isArray(metadata.identifiers) && metadata.identifiers.length > 0) {
+    rows.push({ label: 'Identifiers', value: metadata.identifiers.map(String).join(', ') });
+  }
+  if (Array.isArray(metadata.synonyms) && metadata.synonyms.length > 0) {
+    rows.push({ label: 'Synonyms', value: metadata.synonyms.map(String).join(', ') });
+  }
+  if (typeof metadata.description === 'string' && metadata.description.trim()) {
+    rows.push({ label: 'Description', value: metadata.description });
+  }
+  if (typeof metadata.businessOutcome === 'string' && metadata.businessOutcome.trim()) {
+    rows.push({ label: 'Business Outcome', value: metadata.businessOutcome });
+  }
+
+  if (rows.length === 0) return null;
+
+  return (
+    <div
+      style={{
+        padding: '10px 14px',
+        borderBottom: `1px solid ${t.headerBorder}`,
+        display: 'grid',
+        gap: 6,
+        background: t.sidebarBg,
+      }}
+    >
+      {rows.slice(0, 6).map((row) => (
+        <div key={row.label} style={{ display: 'grid', gridTemplateColumns: '92px 1fr', gap: 8, minWidth: 0 }}>
+          <span style={{ color: t.textMuted, fontSize: 10, fontWeight: 700, textTransform: 'uppercase' }}>{row.label}</span>
+          <span
+            style={{
+              color: t.textSecondary,
+              fontSize: 11,
+              overflow: 'hidden',
+              textOverflow: 'ellipsis',
+              whiteSpace: row.value.length > 90 ? 'normal' : 'nowrap',
+            }}
+            title={row.value}
+          >
+            {row.value}
+          </span>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function ConnectionList({
+  title,
+  connections,
+  t,
+}: {
+  title: string;
+  connections: Array<{ edge: LineageEdge; node: LineageNode }>;
+  t: Theme;
+}) {
+  if (connections.length === 0) {
+    return (
+      <div style={{ color: t.textMuted, fontSize: 11 }}>
+        {title}: none in this focused window
+      </div>
+    );
+  }
+
+  return (
+    <div>
+      <div style={{ color: t.textMuted, fontSize: 10, fontWeight: 700, textTransform: 'uppercase', marginBottom: 5 }}>
+        {title}
+      </div>
+      <div style={{ display: 'grid', gap: 4 }}>
+        {connections.slice(0, 5).map(({ edge, node }) => {
+          const color = NODE_TYPE_COLORS[node.type] ?? t.textMuted;
+          return (
+            <div
+              key={`${edge.source}-${edge.target}-${edge.type}`}
+              style={{
+                display: 'grid',
+                gridTemplateColumns: '76px 1fr',
+                gap: 8,
+                alignItems: 'center',
+                fontSize: 11,
+                minWidth: 0,
+              }}
+            >
+              <span style={{ color: t.textMuted }}>{EDGE_TITLES[edge.type] ?? edge.type}</span>
+              <span style={{ display: 'inline-flex', alignItems: 'center', gap: 5, minWidth: 0 }}>
+                <span
+                  style={{
+                    color: t.appBg,
+                    background: color,
+                    borderRadius: 3,
+                    padding: '1px 4px',
+                    fontSize: 8,
+                    fontWeight: 700,
+                    flexShrink: 0,
+                  }}
+                >
+                  {TYPE_LABELS[node.type] ?? node.type.slice(0, 4).toUpperCase()}
+                </span>
+                <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={node.name}>
+                  {node.name}
+                </span>
+              </span>
+            </div>
+          );
+        })}
+        {connections.length > 5 && (
+          <div style={{ color: t.textMuted, fontSize: 11 }}>
+            {connections.length - 5} more connection{connections.length - 5 === 1 ? '' : 's'} in the graph
+          </div>
+        )}
+      </div>
+    </div>
   );
 }
 

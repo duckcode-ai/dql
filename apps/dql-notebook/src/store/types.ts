@@ -250,7 +250,7 @@ export interface Cell {
 export interface NotebookFile {
   name: string;
   path: string;
-  type: 'notebook' | 'workbook' | 'block' | 'dashboard';
+  type: 'notebook' | 'workbook' | 'block' | 'dashboard' | 'term' | 'business_view';
   folder: string;
   isNew?: boolean;
 }
