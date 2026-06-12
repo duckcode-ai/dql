@@ -12,6 +12,7 @@ import { NewNotebookModal } from '../modals/NewNotebookModal';
 import { NewBlockModal } from '../modals/NewBlockModal';
 import { BlockStudio } from '../block-studio/BlockStudio';
 import { LineageDAG } from '../panels/LineageDAG';
+import { FileBrowserView } from '../panels/FileBrowserView';
 import { ConnectionPanel } from '../panels/ConnectionPanel';
 import { ReferencePanel } from '../panels/ReferencePanel';
 import { GitPage } from '../git/GitPage';
@@ -60,9 +61,6 @@ export function AppShell() {
           const nodeId = `${file.type}:${file.name.replace(/\.(dqlnb|dql)$/i, '')}`;
           dispatch({ type: 'SET_LINEAGE_FOCUS', nodeId });
           dispatch({ type: 'OPEN_LINEAGE_DRAWER', nodeId });
-          if (state.sidebarPanel !== 'lineage') {
-            dispatch({ type: 'SET_SIDEBAR_PANEL', panel: 'lineage' });
-          }
           return;
         }
         if (file.type === 'block') {
@@ -194,6 +192,8 @@ export function AppShell() {
         >
           {state.lineageFullscreen ? (
             <LineageDAG />
+          ) : state.mainView === 'file_browser' ? (
+            <FileBrowserView onOpenFile={handleOpenFile} />
           ) : state.mainView === 'connection' ? (
             <FullPageSection
               title="Connections"

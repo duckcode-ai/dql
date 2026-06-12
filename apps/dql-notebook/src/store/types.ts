@@ -140,7 +140,9 @@ export interface ParamConfig {
 }
 export type SidebarPanel = 'files' | 'schema' | 'block_library' | 'connection' | 'reference' | 'lineage' | 'git' | 'apps' | 'settings' | null;
 export type DevPanelTab = 'logs' | 'errors';
-export type MainView = 'notebook' | 'block_studio' | 'imports' | 'connection' | 'reference' | 'git' | 'apps' | 'review' | 'settings';
+export type MainView = 'notebook' | 'file_browser' | 'block_studio' | 'imports' | 'connection' | 'reference' | 'git' | 'apps' | 'review' | 'settings';
+
+export type NotebookFileFolder = 'all' | 'notebooks' | 'blocks' | 'terms' | 'business-views' | 'dashboards';
 
 /**
  * Apps consumption-layer surface — list of Apps + currently-open App.
@@ -637,6 +639,7 @@ export interface NotebookState {
   sidebarOpen: boolean;
   files: NotebookFile[];
   filesLoading: boolean;
+  activeFileFolder: NotebookFileFolder;
   activeFile: NotebookFile | null;
   cells: Cell[];
   notebookTitle: string;
@@ -692,6 +695,7 @@ export type NotebookAction =
   | { type: 'TOGGLE_SIDEBAR' }
   | { type: 'SET_FILES'; files: NotebookFile[] }
   | { type: 'SET_FILES_LOADING'; loading: boolean }
+  | { type: 'OPEN_FILE_FOLDER'; folder: NotebookFileFolder }
   | { type: 'OPEN_FILE'; file: NotebookFile; cells: Cell[]; title: string; metadata?: NotebookDocMetadata }
   | { type: 'UPDATE_NOTEBOOK_METADATA'; updates: Partial<NotebookDocMetadata> }
   | { type: 'SET_CELLS'; cells: Cell[] }
