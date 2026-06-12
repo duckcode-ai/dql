@@ -55,6 +55,8 @@ describe('runInit', () => {
     const contents = readdirSync(projectDir);
     expect(contents).toContain('apps');
     expect(contents).toContain('blocks');
+    expect(contents).toContain('terms');
+    expect(contents).toContain('business-views');
     expect(contents).toContain('dql.config.json');
     expect(contents).toContain('notebooks');
 
@@ -131,6 +133,8 @@ describe('runInit', () => {
 
     expect(contents).toContain('apps');
     expect(contents).toContain('blocks');
+    expect(contents).toContain('terms');
+    expect(contents).toContain('business-views');
     expect(contents).toContain('notebooks');
     expect(config.semanticLayer).toEqual({ provider: 'dbt', projectPath: '..' });
     expect(config.dbt).toEqual({ projectDir: '..', manifestPath: 'target/manifest.json' });

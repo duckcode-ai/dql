@@ -21,32 +21,46 @@ import { useNotebook } from '../../store/NotebookStore';
 import { themes } from '../../themes/notebook-theme';
 import {
   NODE_TYPE_COLORS,
+  TYPE_LABELS,
   TYPE_TITLES,
   EDGE_TYPE_COLORS,
   EDGE_TITLES,
-  LAYER_COLORS,
-  LAYER_LABELS,
   LAYER_ORDER,
+  LINEAGE_NODE_TYPE_ORDER,
+  TECHNICAL_LINEAGE_NODE_TYPES,
+  BUSINESS_LINEAGE_NODE_TYPES,
+  CONSUMPTION_LINEAGE_NODE_TYPES,
   getNodeLayer,
   type LineageNode,
   type LineageEdge,
   type LineageLayerName,
 } from '../lineage/lineage-constants';
 
-const TYPE_LABELS: Record<string, string> = {
-  source_table: 'TABLE',
-  dbt_model: 'DBT',
-  dbt_source: 'SOURCE',
-  block: 'BLOCK',
-  metric: 'METRIC',
-  dimension: 'DIM',
-  domain: 'DOMAIN',
-  chart: 'CHART',
-  dashboard: 'NOTEBOOK',
-};
-
 type LayoutMode = 'flow' | 'layered';
 type Direction = 'LR' | 'TB';
+
+const NODE_TYPE_FILTERS = [
+  { type: 'term', label: 'Terms' },
+  { type: 'business_view', label: 'Business Views' },
+  { type: 'block', label: 'DQL Blocks' },
+  { type: 'metric', label: 'Metrics' },
+  { type: 'dimension', label: 'Dimensions' },
+  { type: 'domain', label: 'Domains' },
+  { type: 'source_table', label: 'Tables' },
+  { type: 'dbt_source', label: 'dbt Sources' },
+  { type: 'dbt_model', label: 'dbt Models' },
+  { type: 'chart', label: 'Charts' },
+  { type: 'notebook', label: 'Notebooks' },
+  { type: 'dashboard', label: 'Dashboards' },
+  { type: 'app', label: 'Apps' },
+] as const;
+
+const LINEAGE_PRESETS = [
+  { key: 'all', label: 'All', types: LINEAGE_NODE_TYPE_ORDER },
+  { key: 'technical', label: 'Technical', types: TECHNICAL_LINEAGE_NODE_TYPES },
+  { key: 'business', label: 'Business', types: BUSINESS_LINEAGE_NODE_TYPES },
+  { key: 'consumption', label: 'Consumption', types: CONSUMPTION_LINEAGE_NODE_TYPES },
+] as const;
 
 function layoutGraph(nodes: Node[], edges: Edge[], mode: LayoutMode = 'flow', direction: Direction = 'LR') {
   const graph = new Dagre.graphlib.Graph().setDefaultEdgeLabel(() => ({}));
@@ -192,16 +206,9 @@ export function LineageDAG() {
   const [selectedNode, setSelectedNode] = useState<LineageNode | null>(null);
   const [search, setSearch] = useState('');
   const [matches, setMatches] = useState<Array<{ node: LineageNode; score: number }>>([]);
-  const [visibleTypes, setVisibleTypes] = useState<Record<string, boolean>>({
-    source_table: true,
-    dbt_model: true,
-    dbt_source: true,
-    block: true,
-    notebook: true,
-    dashboard: true,
-    app: true,
-    domain: true,
-  });
+  const [visibleTypes, setVisibleTypes] = useState<Record<string, boolean>>(
+    Object.fromEntries(LINEAGE_NODE_TYPE_ORDER.map((type) => [type, true])),
+  );
   const [layoutMode, setLayoutMode] = useState<LayoutMode>('flow');
   const [direction, setDirection] = useState<Direction>('LR');
 
@@ -238,7 +245,7 @@ export function LineageDAG() {
   const filteredGraph = useMemo(() => {
     const visibleNodeIds = new Set(
       graphData.nodes
-        .filter((node) => visibleTypes[node.type] ?? false)
+        .filter((node) => visibleTypes[node.type] ?? true)
         .map((node) => node.id),
     );
     return {
@@ -246,6 +253,24 @@ export function LineageDAG() {
       edges: graphData.edges.filter((edge) => visibleNodeIds.has(edge.source) && visibleNodeIds.has(edge.target)),
     };
   }, [graphData, visibleTypes]);
+
+  const activePreset = useMemo(() => {
+    for (const preset of LINEAGE_PRESETS) {
+      const allowed = new Set<string>(preset.types);
+      const matchesPreset = LINEAGE_NODE_TYPE_ORDER.every((type) => (visibleTypes[type] ?? true) === allowed.has(type));
+      if (matchesPreset) return preset.key;
+    }
+    return 'custom';
+  }, [visibleTypes]);
+
+  const applyPreset = useCallback((types: readonly string[]) => {
+    const allowed = new Set(types);
+    setVisibleTypes(Object.fromEntries(LINEAGE_NODE_TYPE_ORDER.map((type) => [type, allowed.has(type)])));
+  }, []);
+
+  const toggleType = useCallback((type: string) => {
+    setVisibleTypes((current) => ({ ...current, [type]: !(current[type] ?? true) }));
+  }, []);
 
   useEffect(() => {
     const nodes: Node[] = filteredGraph.nodes.map((node) => ({
@@ -412,14 +437,35 @@ export function LineageDAG() {
               TB
             </button>
           </div>
-          <FilterChip label="Tables" active={visibleTypes.source_table} color={NODE_TYPE_COLORS.source_table} onClick={() => setVisibleTypes((current) => ({ ...current, source_table: !current.source_table }))} />
-          <FilterChip label="dbt Models" active={visibleTypes.dbt_model} color={NODE_TYPE_COLORS.dbt_model} onClick={() => setVisibleTypes((current) => ({ ...current, dbt_model: !current.dbt_model }))} />
-          <FilterChip label="dbt Sources" active={visibleTypes.dbt_source} color={NODE_TYPE_COLORS.dbt_source} onClick={() => setVisibleTypes((current) => ({ ...current, dbt_source: !current.dbt_source }))} />
-          <FilterChip label="DQL Blocks" active={visibleTypes.block} color={NODE_TYPE_COLORS.block} onClick={() => setVisibleTypes((current) => ({ ...current, block: !current.block }))} />
-          <FilterChip label="Notebooks" active={visibleTypes.notebook} color={NODE_TYPE_COLORS.notebook} onClick={() => setVisibleTypes((current) => ({ ...current, notebook: !current.notebook }))} />
-          <FilterChip label="Dashboards" active={visibleTypes.dashboard} color={NODE_TYPE_COLORS.dashboard} onClick={() => setVisibleTypes((current) => ({ ...current, dashboard: !current.dashboard }))} />
-          <FilterChip label="Apps" active={visibleTypes.app} color={NODE_TYPE_COLORS.app} onClick={() => setVisibleTypes((current) => ({ ...current, app: !current.app }))} />
-          <FilterChip label="Domains" active={visibleTypes.domain} color={NODE_TYPE_COLORS.domain} onClick={() => setVisibleTypes((current) => ({ ...current, domain: !current.domain }))} />
+          <div style={{ display: 'flex', borderRadius: 6, border: `1px solid ${t.headerBorder}`, overflow: 'hidden', marginRight: 4 }}>
+            {LINEAGE_PRESETS.map((preset, index) => (
+              <button
+                key={preset.key}
+                onClick={() => applyPreset(preset.types)}
+                style={{
+                  padding: '4px 8px',
+                  fontSize: 10,
+                  fontWeight: 700,
+                  border: 'none',
+                  borderLeft: index === 0 ? 'none' : `1px solid ${t.headerBorder}`,
+                  cursor: 'pointer',
+                  background: activePreset === preset.key ? 'var(--color-bg-tertiary)' : 'transparent',
+                  color: activePreset === preset.key ? 'var(--color-text-primary)' : 'var(--color-text-tertiary)',
+                }}
+              >
+                {preset.label}
+              </button>
+            ))}
+          </div>
+          {NODE_TYPE_FILTERS.map((filter) => (
+            <FilterChip
+              key={filter.type}
+              label={filter.label}
+              active={visibleTypes[filter.type] ?? true}
+              color={NODE_TYPE_COLORS[filter.type]}
+              onClick={() => toggleType(filter.type)}
+            />
+          ))}
         </div>
 
         <div style={{ display: 'flex', gap: 8 }}>
@@ -457,7 +503,7 @@ export function LineageDAG() {
           )}
         </div>
         <div style={{ marginTop: 8, color: t.textMuted, fontSize: 11, lineHeight: 1.5 }}>
-          This graph connects raw source tables and dbt DAGs to DQL blocks and the notebooks that consume them. Search to focus on a single path instead of scanning the full project graph.
+          This graph joins technical and business lineage: source tables, dbt models, semantic objects, terms, DQL blocks, business views, dashboards, notebooks, and Apps. Search to focus one path, then switch filters to inspect either the business composition or the technical chain behind it.
         </div>
 
         {matches.length > 0 && (
@@ -528,8 +574,8 @@ export function LineageDAG() {
               </div>
               <div style={{ color: 'var(--color-text-tertiary)', fontSize: 11, marginTop: 6, lineHeight: 1.5 }}>
                 {focalNode
-                  ? `Focused on ${TYPE_TITLES[focalNode.type] ?? focalNode.type}. Upstream shows provenance from tables/dbt; downstream shows DQL and notebook consumption.`
-                  : 'Full project lineage across source tables, dbt, DQL blocks, and notebooks.'}
+                  ? `Focused on ${TYPE_TITLES[focalNode.type] ?? focalNode.type}. Upstream shows technical inputs and business definitions; downstream shows composition, dashboards, notebooks, and Apps.`
+                  : 'Full project lineage across source tables, dbt, semantic objects, terms, DQL blocks, business views, dashboards, notebooks, and Apps.'}
               </div>
               {selectedNode && selectedSummary && (
                 <div style={{ marginTop: 8, color: 'var(--color-text-tertiary)', fontSize: 11 }}>
@@ -544,6 +590,8 @@ export function LineageDAG() {
               style={{
                 display: 'flex',
                 gap: 10,
+                flexWrap: 'wrap',
+                maxWidth: 760,
                 background: 'color-mix(in srgb, var(--color-bg-card) 92%, transparent)',
                 border: '1px solid var(--color-border-primary)',
                 borderRadius: 8,

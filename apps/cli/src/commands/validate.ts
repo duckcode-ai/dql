@@ -1,6 +1,15 @@
 import { readdirSync, readFileSync, existsSync, statSync } from 'node:fs';
 import { dirname, extname, join, relative, resolve } from 'node:path';
-import { Parser, analyze, loadSemanticLayerFromDir, type SemanticLayer, type Diagnostic as CoreDiagnostic } from '@duckcodeailabs/dql-core';
+import {
+  DataLexContractRegistry,
+  Parser,
+  analyze,
+  buildManifest,
+  loadSemanticLayerFromDir,
+  resolveDataLexManifestPath,
+  type SemanticLayer,
+  type Diagnostic as CoreDiagnostic,
+} from '@duckcodeailabs/dql-core';
 import type { CLIFlags } from '../args.js';
 
 interface Diagnostic {
@@ -73,7 +82,7 @@ function collectValidationFiles(targetPath: string | null): { projectRoot: strin
     }
   }
 
-  const dirs = ['blocks', 'dashboards', 'workbooks'];
+  const dirs = ['blocks', 'terms', 'business-views', 'dashboards', 'workbooks'];
   return {
     projectRoot,
     files: dirs.flatMap((dir) => collectDqlFilesFromDir(join(projectRoot, dir), projectRoot)),
@@ -83,6 +92,7 @@ function collectValidationFiles(targetPath: string | null): { projectRoot: strin
 export async function runValidate(path: string | null, flags: CLIFlags): Promise<void> {
   const { projectRoot, files } = collectValidationFiles(path);
   const diagnostics: Diagnostic[] = [];
+  const targetPath = resolve(path ?? '.');
 
   // Load semantic layer if present
   let semanticLayer: SemanticLayer | undefined;
@@ -99,6 +109,25 @@ export async function runValidate(path: string | null, flags: CLIFlags): Promise
     }
   }
 
+  let datalexRegistry: DataLexContractRegistry | undefined;
+  const datalexManifestPath = resolveDataLexManifestPath(projectRoot, flags.datalexManifestPath || undefined) ?? undefined;
+  if (flags.datalexManifestPath && (!datalexManifestPath || !existsSync(datalexManifestPath))) {
+    diagnostics.push({
+      file: flags.datalexManifestPath,
+      severity: 'error',
+      message: `DataLex manifest not found: ${flags.datalexManifestPath}`,
+    });
+  } else if (datalexManifestPath) {
+    datalexRegistry = new DataLexContractRegistry({ manifestPath: datalexManifestPath });
+    for (const message of datalexRegistry.loadDiagnostics()) {
+      diagnostics.push({
+        file: relative(projectRoot, datalexManifestPath),
+        severity: 'warning',
+        message,
+      });
+    }
+  }
+
   for (const { filePath, relativePath } of files) {
     try {
       const source = readFileSync(filePath, 'utf-8');
@@ -107,7 +136,7 @@ export async function runValidate(path: string | null, flags: CLIFlags): Promise
 
       // Run semantic analysis
       try {
-        const diags: CoreDiagnostic[] = analyze(ast);
+        const diags: CoreDiagnostic[] = analyze(ast, { datalexRegistry });
         for (const diag of diags) {
           diagnostics.push({
             file: relativePath,
@@ -152,6 +181,31 @@ export async function runValidate(path: string | null, flags: CLIFlags): Promise
         file: relativePath,
         severity: 'error',
         message: `Parse error: ${err instanceof Error ? err.message : String(err)}`,
+      });
+    }
+  }
+
+  const shouldRunProjectManifestValidation = existsSync(join(projectRoot, 'dql.config.json'))
+    && (!existsSync(targetPath) || statSync(targetPath).isDirectory());
+  if (shouldRunProjectManifestValidation) {
+    try {
+      const manifest = buildManifest({
+        projectRoot,
+        datalexManifestPath,
+      });
+      for (const diag of manifest.diagnostics ?? []) {
+        if (diag.kind !== 'resolve' || (!diag.message.includes('business_view') && !diag.message.includes('term refs'))) continue;
+        diagnostics.push({
+          file: diag.filePath ?? 'dql-manifest.json',
+          severity: diag.severity,
+          message: diag.message,
+        });
+      }
+    } catch (err) {
+      diagnostics.push({
+        file: 'dql-manifest.json',
+        severity: 'error',
+        message: `Manifest validation failed: ${err instanceof Error ? err.message : String(err)}`,
       });
     }
   }

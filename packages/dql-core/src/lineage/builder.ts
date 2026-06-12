@@ -32,6 +32,8 @@ export interface LineageBlockInput {
   materializedAs?: string;
   /** File path of the block definition */
   filePath?: string;
+  /** Business glossary terms this block implements or depends on. */
+  termRefs?: string[];
 }
 
 export interface LineageMetricInput {
@@ -51,12 +53,41 @@ export interface LineageBuilderOptions {
   blockNames?: Set<string>;
   dbtModels?: LineageDbtModelInput[];
   dashboards?: LineageDashboardInput[];
+  businessViews?: LineageBusinessViewInput[];
+  terms?: LineageTermInput[];
   /**
    * Apps (consumption-layer artifacts) that contain dashboards. App nodes sit
    * above the matching dashboard nodes in the graph and inherit the App's
    * declared `domain` so cross-domain analysis remains accurate.
    */
   apps?: LineageAppInput[];
+}
+
+export interface LineageBusinessViewInput {
+  name: string;
+  domain?: string;
+  owner?: string;
+  status?: 'draft' | 'review' | 'certified' | 'deprecated' | 'pending_recertification';
+  filePath?: string;
+  description?: string;
+  businessOutcome?: string;
+  blockRefs: string[];
+  businessViewRefs: string[];
+  termRefs?: string[];
+  declaredTermRefs?: string[];
+}
+
+export interface LineageTermInput {
+  name: string;
+  domain?: string;
+  owner?: string;
+  status?: 'draft' | 'review' | 'certified' | 'deprecated' | 'pending_recertification';
+  termType?: string;
+  filePath?: string;
+  description?: string;
+  identifiers?: string[];
+  synonyms?: string[];
+  businessOutcome?: string;
 }
 
 export interface LineageAppInput {
@@ -155,7 +186,28 @@ export function buildLineageGraph(
     }
   }
 
-  // 1. Add block nodes
+  // 1. Add business term nodes before blocks/views so they can define them.
+  for (const term of options.terms ?? []) {
+    graph.addNode({
+      id: `term:${term.name}`,
+      type: 'term',
+      layer: 'answer',
+      name: term.name,
+      domain: term.domain,
+      owner: term.owner,
+      status: term.status,
+      metadata: {
+        termType: term.termType,
+        filePath: term.filePath,
+        description: term.description,
+        identifiers: term.identifiers,
+        synonyms: term.synonyms,
+        businessOutcome: term.businessOutcome,
+      },
+    });
+  }
+
+  // 2. Add block nodes
   for (const block of blocks) {
     graph.addNode({
       id: `block:${block.name}`,
@@ -173,7 +225,25 @@ export function buildLineageGraph(
     });
   }
 
-  // 2. Add metric nodes
+  // 2b. Add business view nodes before edges so views can compose other views.
+  for (const view of options.businessViews ?? []) {
+    graph.addNode({
+      id: `business_view:${view.name}`,
+      type: 'business_view',
+      layer: 'answer',
+      name: view.name,
+      domain: view.domain,
+      owner: view.owner,
+      status: view.status,
+      metadata: {
+        filePath: view.filePath,
+        description: view.description,
+        businessOutcome: view.businessOutcome,
+      },
+    });
+  }
+
+  // 3. Add metric nodes
   for (const metric of metrics) {
     graph.addNode({
       id: `metric:${metric.name}`,
@@ -193,7 +263,7 @@ export function buildLineageGraph(
     });
   }
 
-  // 3. Add dimension nodes
+  // 4. Add dimension nodes
   for (const dim of dimensions) {
     graph.addNode({
       id: `dimension:${dim.name}`,
@@ -210,7 +280,7 @@ export function buildLineageGraph(
     });
   }
 
-  // 4. Process each block's SQL for dependencies
+  // 5. Process each block's SQL for dependencies
   for (const block of blocks) {
     const blockNodeId = `block:${block.name}`;
     const parseResult = extractTablesFromSql(block.sql);
@@ -310,6 +380,18 @@ export function buildLineageGraph(
       }
     }
 
+    for (const termRef of block.termRefs ?? []) {
+      const termNodeId = `term:${termRef}`;
+      if (graph.getNode(termNodeId)) {
+        graph.addEdge({
+          source: termNodeId,
+          target: blockNodeId,
+          type: 'defines',
+        });
+        addCrossDomainEdgeIfNeeded(graph, termNodeId, blockNodeId);
+      }
+    }
+
     // Chart visualization edge
     if (block.chartType) {
       const chartNodeId = `chart:${block.name}`;
@@ -330,6 +412,40 @@ export function buildLineageGraph(
 
     // Certification is stored as node metadata (status + certifiedBy), not as an edge.
     // Self-loops would confuse graph traversal without adding lineage value.
+  }
+
+  for (const view of options.businessViews ?? []) {
+    const viewNodeId = `business_view:${view.name}`;
+    for (const termRef of view.declaredTermRefs ?? []) {
+      const termNodeId = `term:${termRef}`;
+      if (!graph.getNode(termNodeId)) continue;
+      graph.addEdge({
+        source: termNodeId,
+        target: viewNodeId,
+        type: 'defines',
+      });
+      addCrossDomainEdgeIfNeeded(graph, termNodeId, viewNodeId);
+    }
+    for (const blockRef of view.blockRefs) {
+      const blockNodeId = `block:${blockRef}`;
+      if (!graph.getNode(blockNodeId)) continue;
+      graph.addEdge({
+        source: blockNodeId,
+        target: viewNodeId,
+        type: 'composes',
+      });
+      addCrossDomainEdgeIfNeeded(graph, blockNodeId, viewNodeId);
+    }
+    for (const viewRef of view.businessViewRefs) {
+      const refNodeId = `business_view:${viewRef}`;
+      if (!graph.getNode(refNodeId)) continue;
+      graph.addEdge({
+        source: refNodeId,
+        target: viewNodeId,
+        type: 'composes',
+      });
+      addCrossDomainEdgeIfNeeded(graph, refNodeId, viewNodeId);
+    }
   }
 
   for (const dashboard of options.dashboards ?? []) {

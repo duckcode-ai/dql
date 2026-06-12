@@ -1,4 +1,4 @@
-import { parse, analyze, NodeKind, type SemanticLayer } from '@duckcodeailabs/dql-core';
+import { parse, analyze, NodeKind, type DataLexContractRegistry, type SemanticLayer } from '@duckcodeailabs/dql-core';
 import type { ProgramNode, DashboardBodyItem } from '@duckcodeailabs/dql-core';
 import { lowerProgram, lowerWorkbookProgram } from './ir/lowering.js';
 import { emitChartSpecs } from './codegen/vega-lite-emitter.js';
@@ -18,6 +18,7 @@ export interface CompileOptions {
   theme?: string;
   file?: string;
   semanticLayer?: SemanticLayer;
+  datalexRegistry?: DataLexContractRegistry;
   vegaAssets?: 'cdn' | 'local';
   vegaBasePath?: string;
 }
@@ -56,7 +57,7 @@ export function compile(source: string, options: CompileOptions = {}): CompileRe
   }
 
   // 3. Semantic analysis
-  const diagnostics = analyze(ast);
+  const diagnostics = analyze(ast, { datalexRegistry: options.datalexRegistry });
   for (const d of diagnostics) {
     if (d.severity === 'error') {
       errors.push(`${d.span.start.line}:${d.span.start.column}: ${d.message}`);

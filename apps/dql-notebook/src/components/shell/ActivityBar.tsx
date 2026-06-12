@@ -1,4 +1,5 @@
 import React, { useEffect, useState } from 'react';
+import { Home } from 'lucide-react';
 import { Tooltip } from '@duckcodeailabs/dql-ui';
 import {
   FileText,
@@ -119,22 +120,15 @@ export function ActivityBar() {
     persistExpanded(expanded);
   }, [expanded]);
 
-  function handlePanelClick(panel: SidebarPanel | 'review') {
-    if (panel === 'review') {
+  function handlePanelClick(panel: SidebarPanel | 'review' | 'home') {
+    if (panel === 'home' || panel === 'review') {
       dispatch({ type: 'SET_MAIN_VIEW', view: panel });
       return;
     }
-    // Lineage: show the list panel on the left AND the full-page DAG in main.
-    // SET_SIDEBAR_PANEL resets lineageFullscreen to false, so we re-toggle it
-    // on after to keep the DAG mounted.
+    // Lineage opens as an index list. Selecting a row opens a focused
+    // inspector; we avoid mounting the whole-project graph by default.
     if (panel === 'lineage') {
-      if (state.lineageFullscreen && state.sidebarPanel === 'lineage' && state.sidebarOpen) {
-        dispatch({ type: 'TOGGLE_LINEAGE_FULLSCREEN' });
-        dispatch({ type: 'TOGGLE_SIDEBAR' });
-        return;
-      }
       dispatch({ type: 'SET_SIDEBAR_PANEL', panel: 'lineage' });
-      dispatch({ type: 'TOGGLE_LINEAGE_FULLSCREEN' });
       return;
     }
     const fullPagePanel = panel === 'connection' || panel === 'reference' || panel === 'git' || panel === 'apps' || panel === 'settings';
@@ -150,11 +144,17 @@ export function ActivityBar() {
   }
 
   const items: Array<{
-    key: SidebarPanel | 'review';
+    key: SidebarPanel | 'review' | 'home';
     title: string;
     icon: React.ReactNode;
     active: boolean;
   }> = [
+    {
+      key: 'home',
+      title: 'Home',
+      icon: <Home size={16} strokeWidth={1.75} />,
+      active: state.mainView === 'home',
+    },
     {
       key: 'apps',
       title: 'Apps',
@@ -197,7 +197,7 @@ export function ActivityBar() {
       key: 'lineage',
       title: 'Lineage',
       icon: <LineageNodeIcon size={16} />,
-      active: state.lineageFullscreen,
+      active: state.mainView === 'lineage_detail' || (state.sidebarPanel === 'lineage' && state.sidebarOpen),
     },
     {
       key: 'git',

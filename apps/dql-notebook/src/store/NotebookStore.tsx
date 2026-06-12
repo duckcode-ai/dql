@@ -44,11 +44,11 @@ function readInitialThemeMode(): 'obsidian' | 'paper' | 'white' {
 }
 
 const initialState: NotebookState = {
-  mainView: 'notebook',
+  mainView: 'home',
   themeMode: readInitialThemeMode(),
   appMode: readInitialAppMode(),
-  sidebarPanel: 'files',
-  sidebarOpen: true,
+  sidebarPanel: null,
+  sidebarOpen: false,
   files: [],
   filesLoading: false,
   activeFile: null,
@@ -128,6 +128,19 @@ function notebookReducer(state: NotebookState, action: NotebookAction): Notebook
           lineageFocusNodeId: null,
         };
       }
+      if (action.view === 'home') {
+        return {
+          ...state,
+          mainView: 'home',
+          sidebarPanel: null,
+          sidebarOpen: false,
+          lineageFullscreen: false,
+          lineageFocusNodeId: null,
+          lineageDrawerOpen: false,
+          lineageDrawerNodeId: null,
+          dashboardMode: false,
+        };
+      }
       return { ...state, mainView: action.view, lineageFullscreen: false, lineageFocusNodeId: null };
 
     case 'SET_THEME': {
@@ -163,6 +176,15 @@ function notebookReducer(state: NotebookState, action: NotebookAction): Notebook
     }
 
     case 'SET_SIDEBAR_PANEL': {
+      if (action.panel === 'lineage') {
+        return {
+          ...state,
+          sidebarPanel: action.panel,
+          sidebarOpen: true,
+          lineageFullscreen: false,
+          mainView: state.mainView === 'lineage_detail' && state.lineageFocusNodeId ? 'lineage_detail' : state.mainView,
+        };
+      }
       const fullPagePanels = ['connection', 'reference', 'git', 'apps', 'settings'] as const;
       const isFullPage = (action.panel as string | null) !== null
         && (fullPagePanels as readonly string[]).includes(action.panel as string);
@@ -201,6 +223,27 @@ function notebookReducer(state: NotebookState, action: NotebookAction): Notebook
 
     case 'SET_FILES_LOADING':
       return { ...state, filesLoading: action.loading };
+
+    case 'OPEN_BUSINESS_ARTIFACT':
+      return {
+        ...state,
+        activeFile: action.file,
+        cells: [],
+        notebookTitle: action.file.name.replace(/\.(dqlnb|dql)$/i, ''),
+        notebookDirty: false,
+        mainView: 'business_artifact',
+        activeBlockPath: null,
+        blockStudioDraft: '',
+        blockStudioDirty: false,
+        blockStudioPreview: null,
+        blockStudioValidation: null,
+        blockStudioMetadata: null,
+        dashboardMode: false,
+        lineageFullscreen: false,
+        lineageDrawerOpen: false,
+        lineageDrawerNodeId: null,
+        lineageFocusNodeId: `${action.file.type}:${action.file.name.replace(/\.(dqlnb|dql)$/i, '')}`,
+      };
 
     case 'OPEN_FILE':
       return {
@@ -419,6 +462,17 @@ function notebookReducer(state: NotebookState, action: NotebookAction): Notebook
 
     case 'SET_LINEAGE_FOCUS':
       return { ...state, lineageFocusNodeId: action.nodeId };
+
+    case 'OPEN_LINEAGE_DETAIL':
+      return {
+        ...state,
+        mainView: 'lineage_detail',
+        lineageFullscreen: false,
+        lineageFocusNodeId: action.nodeId,
+        lineageDrawerOpen: false,
+        lineageDrawerNodeId: null,
+        dashboardMode: false,
+      };
 
     case 'OPEN_LINEAGE_DRAWER':
       return { ...state, lineageDrawerOpen: true, lineageDrawerNodeId: action.nodeId };

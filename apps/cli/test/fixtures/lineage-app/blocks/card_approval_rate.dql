@@ -7,6 +7,7 @@ block "card_approval_rate" {
   description = "Card approval rate across the seeded card transaction stream."
   tags = ["cards", "kpi", "approval-rate", "ops"]
   owner = "mei.chen@acme-bank.com"
+  terms = ["Card Approval Rate"]
   llmContext = "Use this single-value KPI when stakeholders ask about card approval rate or transaction decline pressure."
   examples = [{ question = "What is our card approval rate?" }]
   invariants = ["approval_rate_pct >= 0", "approval_rate_pct <= 100"]

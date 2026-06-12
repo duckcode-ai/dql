@@ -7,11 +7,14 @@ import { ActivityBar } from './ActivityBar';
 import { Sidebar } from './Sidebar';
 import { Header } from './Header';
 import { DevPanel } from './DevPanel';
+import { HomePage } from '../home/HomePage';
 import { NotebookEditor } from '../notebook/NotebookEditor';
 import { NewNotebookModal } from '../modals/NewNotebookModal';
 import { NewBlockModal } from '../modals/NewBlockModal';
 import { BlockStudio } from '../block-studio/BlockStudio';
 import { LineageDAG } from '../panels/LineageDAG';
+import { BusinessArtifactView } from '../panels/BusinessArtifactView';
+import { LineageDetailView } from '../panels/LineageDetailView';
 import { ConnectionPanel } from '../panels/ConnectionPanel';
 import { ReferencePanel } from '../panels/ReferencePanel';
 import { GitPage } from '../git/GitPage';
@@ -56,6 +59,11 @@ export function AppShell() {
   const handleOpenFile = useCallback(
     async (file: NotebookFile) => {
       try {
+        if (file.type === 'term' || file.type === 'business_view') {
+          if (state.sidebarPanel !== 'files') dispatch({ type: 'SET_SIDEBAR_PANEL', panel: 'files' });
+          dispatch({ type: 'OPEN_BUSINESS_ARTIFACT', file });
+          return;
+        }
         if (file.type === 'block') {
           const payload = await api.openBlockStudio(file.path);
           dispatch({ type: 'OPEN_BLOCK_STUDIO', file, payload });
@@ -185,6 +193,12 @@ export function AppShell() {
         >
           {state.lineageFullscreen ? (
             <LineageDAG />
+          ) : state.mainView === 'home' ? (
+            <HomePage />
+          ) : state.mainView === 'business_artifact' ? (
+            <BusinessArtifactView />
+          ) : state.mainView === 'lineage_detail' ? (
+            <LineageDetailView />
           ) : state.mainView === 'connection' ? (
             <FullPageSection
               title="Connections"

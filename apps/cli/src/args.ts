@@ -23,6 +23,8 @@ export interface CLIFlags {
   fromDraft?: string;
   /** `--contract <id@version>` — DataLex contract id to bind during certify. */
   contract?: string;
+  /** Optional path to datalex-manifest.json for datalex_contract validation. */
+  datalexManifestPath?: string;
   /** `--open-pr` — push a branch + open a GitHub PR with the promotion diff. */
   openPr?: boolean;
 }
@@ -111,6 +113,8 @@ export function parseArgs(argv: string[]): ParsedArgs {
       flags.fromDraft = argv[++i];
     } else if (arg === '--contract' && i + 1 < argv.length) {
       flags.contract = argv[++i];
+    } else if (arg === '--datalex-manifest' && i + 1 < argv.length) {
+      flags.datalexManifestPath = argv[++i];
     } else if (arg === '--open-pr') {
       flags.openPr = true;
     } else if (!command) {

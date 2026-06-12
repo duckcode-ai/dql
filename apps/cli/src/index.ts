@@ -88,6 +88,7 @@ const HELP = `
     --connection <driver|path>      Database connection for certify/test (e.g. duckdb, path/to/db)
     --from-draft <path>             For "certify": promote a Tier-2 draft block to certified
     --contract <id@version>         For "certify --from-draft": DataLex contract id (e.g. commerce.Customer.foo@1)
+    --datalex-manifest <path>       Optional DataLex manifest for datalex_contract validation
     --open-pr                       For "certify --from-draft": push branch + open GitHub PR with the diff
     --force                         For "certify --from-draft": overwrite an existing certified block
 `;
@@ -118,7 +119,7 @@ const COMMAND_HELP: Record<string, string> = {
   dql compile — Generate dql-manifest.json
 
   Usage:
-    dql compile [path] [--dbt-manifest <path>] [--dbt-hops <n>] [--no-cache]
+    dql compile [path] [--dbt-manifest <path>] [--dbt-hops <n>] [--datalex-manifest <path>] [--no-cache]
 
   dql-manifest.json is the dbt-like compiled artifact for blocks, notebooks,
   Apps, dashboards, semantic objects, sources, dbt imports, and lineage.
@@ -143,7 +144,7 @@ const COMMAND_HELP: Record<string, string> = {
   dql verify — Verify dql-manifest.json is reproducible
 
   Usage:
-    dql verify [path] [--dbt-manifest <path>] [--dbt-hops <n>] [--format json]
+    dql verify [path] [--dbt-manifest <path>] [--dbt-hops <n>] [--datalex-manifest <path>] [--format json]
 
   Run after dql compile in CI or before release commits.
   `,

@@ -56,10 +56,13 @@ describe('OSS adoption templates and fixtures', () => {
       expect(Object.keys(manifest.apps ?? {}).length).toBeGreaterThan(0);
       expect(Object.keys(manifest.dashboards ?? {}).length).toBeGreaterThan(0);
       expect(nodeTypes.has('source_table')).toBe(true);
+      expect(nodeTypes.has('term')).toBe(true);
       expect(nodeTypes.has('block')).toBe(true);
       expect(nodeTypes.has('dashboard')).toBe(true);
       expect(nodeTypes.has('app')).toBe(true);
 
+      expect(manifest.terms['Card Approval Rate']).toMatchObject({ domain: 'cards', termType: 'metric' });
+      expect(manifest.lineage.edges.some((edge) => edge.type === 'defines' && edge.source === 'term:Card Approval Rate' && edge.target === 'block:card_approval_rate')).toBe(true);
       expect(manifest.lineage.edges.some((edge) => edge.type === 'reads_from' && edge.target.startsWith('block:'))).toBe(true);
       expect(manifest.lineage.edges.some((edge) => edge.type === 'contains' && edge.source.startsWith('block:') && edge.target.startsWith('dashboard:'))).toBe(true);
       expect(manifest.lineage.edges.some((edge) => edge.type === 'contains' && edge.source.startsWith('dashboard:') && edge.target.startsWith('app:'))).toBe(true);

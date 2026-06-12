@@ -31,7 +31,7 @@
       "patterns": [
         {
           "name": "keyword.control.dql",
-          "match": "\\b(dashboard|workbook|page|layout|row|span|chart|filter|param|let|import|from|use|block|domain|type|description|tags|owner|params|query|visualization|tests|assert|IN)\\b"
+          "match": "\\b(dashboard|workbook|page|layout|row|span|chart|filter|param|let|import|from|use|block|term|terms|business_view|includes|domain|type|description|tags|owner|params|query|visualization|tests|assert|IN)\\b"
         }
       ]
     },

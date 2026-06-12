@@ -1,0 +1,13 @@
+// dql-format: 1
+
+term "Card Approval Rate" {
+  domain = "cards"
+  type = "metric"
+  status = "certified"
+  description = "Percentage of card authorization attempts approved by the issuer decision flow."
+  tags = ["cards", "kpi", "approval-rate"]
+  owner = "mei.chen@acme-bank.com"
+  businessOwner = "Card Operations"
+  businessRules = ["Approved authorizations divided by all authorization attempts."]
+  caveats = ["Seeded fixture data is for local lineage verification only."]
+}

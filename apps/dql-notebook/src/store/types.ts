@@ -140,7 +140,7 @@ export interface ParamConfig {
 }
 export type SidebarPanel = 'files' | 'schema' | 'block_library' | 'connection' | 'reference' | 'lineage' | 'git' | 'apps' | 'settings' | null;
 export type DevPanelTab = 'logs' | 'errors';
-export type MainView = 'notebook' | 'block_studio' | 'imports' | 'connection' | 'reference' | 'git' | 'apps' | 'review' | 'settings';
+export type MainView = 'home' | 'notebook' | 'business_artifact' | 'lineage_detail' | 'block_studio' | 'imports' | 'connection' | 'reference' | 'git' | 'apps' | 'review' | 'settings';
 
 /**
  * Apps consumption-layer surface — list of Apps + currently-open App.
@@ -250,7 +250,7 @@ export interface Cell {
 export interface NotebookFile {
   name: string;
   path: string;
-  type: 'notebook' | 'workbook' | 'block' | 'dashboard';
+  type: 'notebook' | 'workbook' | 'block' | 'dashboard' | 'term' | 'business_view';
   folder: string;
   isNew?: boolean;
 }
@@ -692,6 +692,7 @@ export type NotebookAction =
   | { type: 'TOGGLE_SIDEBAR' }
   | { type: 'SET_FILES'; files: NotebookFile[] }
   | { type: 'SET_FILES_LOADING'; loading: boolean }
+  | { type: 'OPEN_BUSINESS_ARTIFACT'; file: NotebookFile }
   | { type: 'OPEN_FILE'; file: NotebookFile; cells: Cell[]; title: string; metadata?: NotebookDocMetadata }
   | { type: 'UPDATE_NOTEBOOK_METADATA'; updates: Partial<NotebookDocMetadata> }
   | { type: 'SET_CELLS'; cells: Cell[] }
@@ -722,6 +723,7 @@ export type NotebookAction =
   | { type: 'SET_SEMANTIC_DOMAINS'; domains: string[]; tags: string[]; lastSyncTime?: string | null }
   | { type: 'TOGGLE_LINEAGE_FULLSCREEN' }
   | { type: 'SET_LINEAGE_FOCUS'; nodeId: string | null }
+  | { type: 'OPEN_LINEAGE_DETAIL'; nodeId: string }
   | { type: 'OPEN_LINEAGE_DRAWER'; nodeId: string }
   | { type: 'CLOSE_LINEAGE_DRAWER' }
   | { type: 'REORDER_CELL'; fromIndex: number; toIndex: number }

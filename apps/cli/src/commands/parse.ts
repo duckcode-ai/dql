@@ -1,9 +1,17 @@
-import { readFileSync } from 'node:fs';
-import { Parser, SemanticAnalyzer, printAST } from '@duckcodeailabs/dql-core';
+import { existsSync, readFileSync } from 'node:fs';
+import { dirname, resolve } from 'node:path';
+import { DataLexContractRegistry, Parser, SemanticAnalyzer, printAST, resolveDataLexManifestPath } from '@duckcodeailabs/dql-core';
 import type { CLIFlags } from '../args.js';
 
 export async function runParse(filePath: string, flags: CLIFlags): Promise<void> {
   const source = readFileSync(filePath, 'utf-8');
+  const projectRoot = dirname(resolve(filePath));
+  const datalexManifestPath = resolveDataLexManifestPath(projectRoot, flags.datalexManifestPath || undefined) ?? undefined;
+  if (flags.datalexManifestPath && (!datalexManifestPath || !existsSync(datalexManifestPath))) {
+    console.error(`\n  ✗ DataLex manifest not found: ${flags.datalexManifestPath}\n`);
+    process.exit(1);
+    return;
+  }
 
   let ast;
   try {
@@ -19,7 +27,9 @@ export async function runParse(filePath: string, flags: CLIFlags): Promise<void>
     return;
   }
 
-  const analyzer = new SemanticAnalyzer();
+  const analyzer = new SemanticAnalyzer({
+    datalexRegistry: datalexManifestPath ? new DataLexContractRegistry({ manifestPath: datalexManifestPath }) : undefined,
+  });
   const diagnostics = analyzer.analyze(ast);
 
   if (flags.format === 'json') {

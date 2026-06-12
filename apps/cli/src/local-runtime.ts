@@ -3961,7 +3961,7 @@ function isConnectionConfig(value: unknown): value is ConnectionConfig {
 type NotebookFileEntry = {
   name: string;
   path: string;
-  type: 'notebook' | 'workbook' | 'block' | 'dashboard';
+  type: 'notebook' | 'workbook' | 'block' | 'dashboard' | 'term' | 'business_view';
   folder: string;
 };
 
@@ -3972,6 +3972,8 @@ function scanNotebookFiles(projectRoot: string): NotebookFileEntry[] {
     workbooks: 'workbook',
     blocks: 'block',
     dashboards: 'dashboard',
+    terms: 'term',
+    'business-views': 'business_view',
   };
   for (const [folder, type] of Object.entries(folderMap)) {
     const dir = join(projectRoot, folder);
@@ -3991,14 +3993,34 @@ function scanNotebookFiles(projectRoot: string): NotebookFileEntry[] {
         }
         if (!entry.isFile()) continue;
         if (!entry.name.endsWith('.dql') && !entry.name.endsWith('.dqlnb')) continue;
+        const fallbackName = entry.name.replace(/\.(dql|dqlnb)$/, '');
         result.push({
-          name: entry.name.replace(/\.(dql|dqlnb)$/, ''),
+          name: inferDqlArtifactName(fullPath, type, fallbackName),
           path: relativePath,
           type,
           folder: relativeDir.split('/')[0] ?? relativeDir,
         });
       }
     } catch { /* skip unreadable dirs */ }
+  }
+}
+
+function inferDqlArtifactName(fullPath: string, type: NotebookFileEntry['type'], fallbackName: string): string {
+  if (!fullPath.endsWith('.dql')) return fallbackName;
+  const expectedKind: Record<string, string> = {
+    block: 'BlockDecl',
+    dashboard: 'Dashboard',
+    term: 'TermDecl',
+    business_view: 'BusinessViewDecl',
+  };
+  const kind = expectedKind[type];
+  if (!kind) return fallbackName;
+  try {
+    const ast = new Parser(readFileSync(fullPath, 'utf-8')).parse();
+    const statement = ast.statements.find((item: any) => item.kind === kind && typeof item.name === 'string') as any;
+    return statement?.name ?? fallbackName;
+  } catch {
+    return fallbackName;
   }
 }
 

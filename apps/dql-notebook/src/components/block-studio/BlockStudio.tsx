@@ -957,12 +957,13 @@ export function BlockStudio() {
               paths={lineagePaths}
               onSelectNode={(nodeId) => {
                 dispatch({ type: 'SET_LINEAGE_FOCUS', nodeId });
-                if (!state.lineageFullscreen) dispatch({ type: 'TOGGLE_LINEAGE_FULLSCREEN' });
+                dispatch({ type: 'OPEN_LINEAGE_DRAWER', nodeId });
               }}
-              onOpenFull={() => {
+              onOpenInspector={() => {
                 if (activeBlockName) {
-                  dispatch({ type: 'SET_LINEAGE_FOCUS', nodeId: `block:${activeBlockName}` });
-                  if (!state.lineageFullscreen) dispatch({ type: 'TOGGLE_LINEAGE_FULLSCREEN' });
+                  const nodeId = `block:${activeBlockName}`;
+                  dispatch({ type: 'SET_LINEAGE_FOCUS', nodeId });
+                  dispatch({ type: 'OPEN_LINEAGE_DRAWER', nodeId });
                 }
               }}
               t={t}
@@ -2682,7 +2683,7 @@ function BlockLineagePanel({
   graph,
   paths,
   onSelectNode,
-  onOpenFull,
+  onOpenInspector,
   t,
 }: {
   blockName: string | null;
@@ -2698,7 +2699,7 @@ function BlockLineagePanel({
   } | null;
   paths: CompletePathResult | null;
   onSelectNode: (nodeId: string) => void;
-  onOpenFull: () => void;
+  onOpenInspector: () => void;
   t: Theme;
 }) {
   if (!blockName) {
@@ -2717,10 +2718,10 @@ function BlockLineagePanel({
         </div>
         <div>
           <button
-            onClick={onOpenFull}
+            onClick={onOpenInspector}
             style={{ background: t.btnBg, border: `1px solid ${t.btnBorder}`, borderRadius: 6, color: t.textPrimary, cursor: 'pointer', fontSize: 11, fontFamily: t.font, padding: '6px 10px' }}
           >
-            Open Full Lineage
+            Open Focused Lineage
           </button>
         </div>
       </div>
@@ -2743,10 +2744,10 @@ function BlockLineagePanel({
         </div>
         <div style={{ flex: 1 }} />
         <button
-          onClick={onOpenFull}
+          onClick={onOpenInspector}
           style={{ background: t.btnBg, border: `1px solid ${t.btnBorder}`, borderRadius: 6, color: t.textPrimary, cursor: 'pointer', fontSize: 11, fontFamily: t.font, padding: '6px 10px' }}
         >
-          Open Full Lineage
+          Open Focused Lineage
         </button>
       </div>
 

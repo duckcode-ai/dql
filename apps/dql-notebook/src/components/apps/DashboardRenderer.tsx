@@ -9,6 +9,7 @@ import { TableOutput } from '../output/TableOutput';
 import { AgentChatPanel } from '../agent/AgentChatPanel';
 import { inferColumnKind, columnKindToChartRole, type ChartColumnRole } from '../../utils/column-kind';
 import { classifyColumns } from '../../utils/semantic-fields';
+import { NODE_TYPE_COLORS, TYPE_LABELS, TYPE_TITLES } from '../lineage/lineage-constants';
 
 type DashboardLayoutItem = DashboardDocumentResponse['dashboard']['layout']['items'][number];
 
@@ -1088,7 +1089,7 @@ function ScopedLineagePanel({ lineage }: { lineage: any | null }) {
     <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
       <div>
         <div style={{ fontSize: 12, fontWeight: 800, textTransform: 'uppercase', opacity: 0.62, marginBottom: 6 }}>App Lineage</div>
-        <div style={{ fontSize: 12, opacity: 0.72 }}>Domain &gt; App &gt; Dashboard page &gt; Tile &gt; Block &gt; dbt/source</div>
+        <div style={{ fontSize: 12, opacity: 0.72 }}>Terms and business views connect the App back to DQL blocks, dbt models, and source tables.</div>
       </div>
       {breadcrumbs.length > 0 && (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
@@ -1107,8 +1108,25 @@ function ScopedLineagePanel({ lineage }: { lineage: any | null }) {
       <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
         {nodes.slice(0, 18).map((node: any) => (
           <div key={node.id} style={{ border: '1px solid var(--border-color, rgba(0,0,0,0.08))', borderRadius: 6, padding: 8 }}>
-            <div style={{ fontSize: 12, fontWeight: 700 }}>{node.name}</div>
-            <div style={{ fontSize: 11, opacity: 0.62, fontFamily: 'monospace' }}>{node.type} · {node.id}</div>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 6, minWidth: 0 }}>
+              <span
+                style={{
+                  color: '#0d1117',
+                  background: NODE_TYPE_COLORS[node.type] ?? '#8b949e',
+                  borderRadius: 3,
+                  padding: '1px 4px',
+                  fontSize: 9,
+                  fontWeight: 800,
+                  flexShrink: 0,
+                }}
+              >
+                {TYPE_LABELS[node.type] ?? node.type.slice(0, 4).toUpperCase()}
+              </span>
+              <div style={{ fontSize: 12, fontWeight: 700, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{node.name}</div>
+            </div>
+            <div style={{ fontSize: 11, opacity: 0.62, fontFamily: 'monospace', marginTop: 4 }}>
+              {TYPE_TITLES[node.type] ?? node.type} · {node.id}
+            </div>
           </div>
         ))}
       </div>

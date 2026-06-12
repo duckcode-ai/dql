@@ -44,7 +44,9 @@ export const NODE_TYPE_COLORS: Record<string, string> = {
   source_table: '#8b949e',
   dbt_model: '#ff7b72',
   dbt_source: '#79c0ff',
+  term: '#39c5cf',
   block: '#56d364',
+  business_view: '#f2cc60',
   metric: '#388bfd',
   dimension: '#e3b341',
   domain: '#d2a8ff',
@@ -60,7 +62,9 @@ export const TYPE_LABELS: Record<string, string> = {
   source_table: 'TBL',
   dbt_model: 'DBT',
   dbt_source: 'SRC',
+  term: 'TERM',
   block: 'BLK',
+  business_view: 'VIEW',
   metric: 'MET',
   dimension: 'DIM',
   domain: 'DOM',
@@ -76,7 +80,9 @@ export const TYPE_TITLES: Record<string, string> = {
   source_table: 'Source Table',
   dbt_model: 'dbt Model',
   dbt_source: 'dbt Source',
+  term: 'Business Term',
   block: 'DQL Block',
+  business_view: 'Business View',
   metric: 'Metric',
   dimension: 'Dimension',
   domain: 'Domain',
@@ -91,11 +97,14 @@ export const TYPE_TITLES: Record<string, string> = {
 export const EDGE_TYPE_COLORS: Record<string, string> = {
   reads_from: '#8b949e',
   feeds_into: '#56d364',
+  defines: '#39c5cf',
+  composes: '#f2cc60',
   aggregates: '#388bfd',
   visualizes: '#f778ba',
   depends_on: '#ff7b72',
   contains: '#d2a8ff',
   crosses_domain: '#d2a8ff',
+  certified_by: '#56d364',
 };
 
 // ---- Edge type titles ----
@@ -103,11 +112,14 @@ export const EDGE_TYPE_COLORS: Record<string, string> = {
 export const EDGE_TITLES: Record<string, string> = {
   reads_from: 'reads from',
   feeds_into: 'feeds into',
+  defines: 'defines',
+  composes: 'composes into',
   aggregates: 'aggregates into',
   visualizes: 'visualizes',
   depends_on: 'dbt depends on',
   contains: 'contains',
   crosses_domain: 'crosses domain',
+  certified_by: 'certified by',
 };
 
 // ---- Lineage layer constants ----
@@ -130,6 +142,49 @@ export const LAYER_LABELS: Record<LineageLayerName, string> = {
 
 export const LAYER_ORDER: LineageLayerName[] = ['source', 'transform', 'answer', 'consumption'];
 
+// ---- Filter groups ----
+
+export const LINEAGE_NODE_TYPE_ORDER = [
+  'term',
+  'business_view',
+  'block',
+  'metric',
+  'dimension',
+  'domain',
+  'source_table',
+  'dbt_source',
+  'dbt_model',
+  'chart',
+  'notebook',
+  'dashboard',
+  'app',
+] as const;
+
+export const TECHNICAL_LINEAGE_NODE_TYPES = [
+  'source_table',
+  'dbt_source',
+  'dbt_model',
+  'metric',
+  'dimension',
+  'block',
+] as const;
+
+export const BUSINESS_LINEAGE_NODE_TYPES = [
+  'term',
+  'block',
+  'business_view',
+  'domain',
+] as const;
+
+export const CONSUMPTION_LINEAGE_NODE_TYPES = [
+  'block',
+  'business_view',
+  'chart',
+  'notebook',
+  'dashboard',
+  'app',
+] as const;
+
 // ---- Status colors ----
 
 export const STATUS_COLORS: Record<string, string> = {
@@ -150,7 +205,9 @@ export function getNodeLayer(node: LineageNode): LineageLayerName {
       return 'source';
     case 'dbt_model':
       return 'transform';
+    case 'term':
     case 'block':
+    case 'business_view':
     case 'metric':
     case 'dimension':
     case 'domain':

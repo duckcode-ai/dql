@@ -32,6 +32,7 @@ const FILTER_TYPES = ['dropdown', 'date_range', 'text', 'multi_select', 'range']
 const KEYWORDS = [
   'dashboard', 'workbook', 'page', 'layout', 'row', 'span',
   'chart', 'filter', 'param', 'import', 'from', 'use', 'let',
+  'block', 'term', 'terms', 'business_view', 'includes', 'digest', 'narrative', 'visualization', 'tests', 'assert',
 ];
 
 const DECORATORS = [
@@ -47,6 +48,31 @@ const CHART_ARGS = [
   'connection', 'pin_columns', 'row_color', 'topology_url',
   'drill_hierarchy', 'drill_path', 'drill_mode',
   'drill_down', 'link_to', 'on_click', 'filter_by',
+];
+
+const BLOCK_FIELDS = [
+  'domain', 'type', 'status', 'description', 'owner', 'tags',
+  'terms',
+  'llmContext', 'businessOutcome', 'businessOwner', 'decisionUse',
+  'reviewCadence', 'businessRules', 'caveats', 'datalex_contract',
+  'metric', 'metrics', 'dimensions', 'params', 'query', 'visualization', 'tests',
+];
+
+const BUSINESS_VIEW_FIELDS = [
+  'domain', 'status', 'description', 'owner', 'tags',
+  'terms',
+  'businessOutcome', 'businessOwner', 'decisionUse',
+  'reviewCadence', 'businessRules', 'caveats', 'includes',
+];
+
+const TERM_FIELDS = [
+  'domain', 'type', 'status', 'description', 'owner', 'tags',
+  'identifiers', 'synonyms', 'businessOutcome', 'businessOwner',
+  'decisionUse', 'reviewCadence', 'businessRules', 'caveats',
+];
+
+const BLOCK_STATUS_VALUES = [
+  'draft', 'review', 'certified', 'deprecated', 'pending_recertification',
 ];
 
 export class DQLLanguageService {
@@ -123,16 +149,65 @@ export class DQLLanguageService {
       return items;
     }
 
+    if (textBefore.match(/status\s*=\s*"[^"]*$/)) {
+      for (const status of BLOCK_STATUS_VALUES) {
+        items.push({ label: status, kind: 12, detail: `block status "${status}"`, insertText: status });
+      }
+      return items;
+    }
+
+    const fullText = lines.slice(0, line + 1).join('\n');
+
+    if (textBefore.match(/type\s*=\s*"[^"]*$/) && isInsideTerm(fullText)) {
+      for (const termType of ['entity', 'metric', 'dimension', 'process', 'policy', 'concept']) {
+        items.push({ label: termType, kind: 12, detail: `term type "${termType}"`, insertText: termType });
+      }
+      return items;
+    }
+
+    if (textBefore.match(/type\s*=\s*"[^"]*$/)) {
+      for (const blockType of ['custom', 'semantic']) {
+        items.push({ label: blockType, kind: 12, detail: `block type "${blockType}"`, insertText: blockType });
+      }
+      return items;
+    }
+
     // Inside chart args (after comma or opening paren) — suggest named args
     if (textBefore.match(/,\s*$/) || textBefore.match(/\(\s*$/)) {
       // Check if we're inside a chart call
-      const fullText = lines.slice(0, line + 1).join('\n');
       if (fullText.match(/chart\.\w+\([^)]*$/s)) {
         for (const arg of CHART_ARGS) {
           items.push({ label: arg, kind: 5, detail: `${arg} = ...`, insertText: `${arg} = ` });
         }
         return items;
       }
+    }
+
+    if (isInsideBusinessViewIncludes(fullText) && (textBefore.match(/^\s*$/) || textBefore.match(/^\s*[A-Za-z_]*$/))) {
+      items.push({ label: 'block', kind: 14, detail: 'include a DQL block', insertText: 'block ""' });
+      items.push({ label: 'business_view', kind: 14, detail: 'include another business view', insertText: 'business_view ""' });
+      return items;
+    }
+
+    if (isInsideTerm(fullText) && (textBefore.match(/^\s*$/) || textBefore.match(/^\s*[A-Za-z_]*$/))) {
+      for (const field of TERM_FIELDS) {
+        items.push({ label: field, kind: 5, detail: `term field ${field}`, insertText: termFieldInsertText(field) });
+      }
+      return items;
+    }
+
+    if (isInsideBusinessView(fullText) && (textBefore.match(/^\s*$/) || textBefore.match(/^\s*[A-Za-z_]*$/))) {
+      for (const field of BUSINESS_VIEW_FIELDS) {
+        items.push({ label: field, kind: 5, detail: `business_view field ${field}`, insertText: businessViewFieldInsertText(field) });
+      }
+      return items;
+    }
+
+    if (isInsideBlock(fullText) && (textBefore.match(/^\s*$/) || textBefore.match(/^\s*[A-Za-z_]*$/))) {
+      for (const field of BLOCK_FIELDS) {
+        items.push({ label: field, kind: 5, detail: `block field ${field}`, insertText: blockFieldInsertText(field) });
+      }
+      return items;
     }
 
     // Default: suggest keywords
@@ -193,6 +268,10 @@ export class DQLLanguageService {
       param: '`param name: type = default` — Dashboard parameter',
       import: '`import { name } from "./file.dql"` — Import components',
       use: '`use imported_name` — Use an imported component',
+      business_view: '`business_view "Name" { includes { ... } }` — Compose DQL blocks into business lineage',
+      term: '`term "Name" { ... }` — Define a business glossary term in DQL core',
+      terms: '`terms = ["Customer"]` — Attach business terms to a block or business view',
+      includes: '`includes { block "Name"; business_view "Name" }` — Declare business-view composition references',
     };
 
     if (keywordDocs[word]) {
@@ -217,4 +296,74 @@ export class DQLLanguageService {
 
     return null;
   }
+}
+
+function isInsideTerm(text: string): boolean {
+  const lastTerm = text.lastIndexOf('term ');
+  if (lastTerm < 0) return false;
+  const lastBlock = text.lastIndexOf('block ');
+  const lastView = text.lastIndexOf('business_view ');
+  if (lastTerm < lastBlock || lastTerm < lastView) return false;
+  const tail = text.slice(lastTerm);
+  let depth = 0;
+  for (const ch of tail) {
+    if (ch === '{') depth++;
+    else if (ch === '}') depth--;
+  }
+  return depth > 0;
+}
+
+function isInsideBlock(text: string): boolean {
+  const lastBlock = text.lastIndexOf('block ');
+  if (lastBlock < 0) return false;
+  const tail = text.slice(lastBlock);
+  let depth = 0;
+  for (const ch of tail) {
+    if (ch === '{') depth++;
+    else if (ch === '}') depth--;
+  }
+  return depth > 0;
+}
+
+function isInsideBusinessView(text: string): boolean {
+  const lastView = text.lastIndexOf('business_view ');
+  if (lastView < 0) return false;
+  const tail = text.slice(lastView);
+  let depth = 0;
+  for (const ch of tail) {
+    if (ch === '{') depth++;
+    else if (ch === '}') depth--;
+  }
+  return depth > 0;
+}
+
+function isInsideBusinessViewIncludes(text: string): boolean {
+  const lastView = text.lastIndexOf('business_view ');
+  const lastIncludes = text.lastIndexOf('includes');
+  if (lastView < 0 || lastIncludes < lastView) return false;
+  const tail = text.slice(lastIncludes);
+  let depth = 0;
+  for (const ch of tail) {
+    if (ch === '{') depth++;
+    else if (ch === '}') depth--;
+  }
+  return depth > 0;
+}
+
+function blockFieldInsertText(field: string): string {
+  if (field === 'params' || field === 'visualization' || field === 'tests') return `${field} {\n  \n}`;
+  if (field === 'tags' || field === 'terms' || field === 'metrics' || field === 'dimensions' || field === 'businessRules' || field === 'caveats') return `${field} = []`;
+  if (field === 'query') return 'query = """\n  SELECT 1\n"""';
+  return `${field} = ""`;
+}
+
+function businessViewFieldInsertText(field: string): string {
+  if (field === 'includes') return 'includes {\n  block ""\n}';
+  if (field === 'tags' || field === 'terms' || field === 'businessRules' || field === 'caveats') return `${field} = []`;
+  return `${field} = ""`;
+}
+
+function termFieldInsertText(field: string): string {
+  if (field === 'tags' || field === 'identifiers' || field === 'synonyms' || field === 'businessRules' || field === 'caveats') return `${field} = []`;
+  return `${field} = ""`;
 }

@@ -23,6 +23,10 @@ export interface DQLManifest {
 
   /** All blocks discovered in the project */
   blocks: Record<string, ManifestBlock>;
+  /** Business composition views discovered in the project */
+  businessViews: Record<string, ManifestBusinessView>;
+  /** Business glossary terms discovered in the project */
+  terms: Record<string, ManifestTerm>;
   /** All notebook SQL/DQL cells */
   notebooks: Record<string, ManifestNotebook>;
   /** Semantic layer definitions */
@@ -103,6 +107,10 @@ export interface ManifestBlock {
   /** Tags from block metadata */
   tags?: string[];
   description?: string;
+  /** Business term names declared by this block and resolved in the manifest. */
+  termRefs?: string[];
+  /** Business term names declared by this block that were not found during compile. */
+  unresolvedTermRefs?: string[];
   /**
    * v1.2 Track G — agent-facing metadata surfaced to MCP tools.
    * Kept optional and additive; adoption is organic (has-llm-context is a warning rule).
@@ -138,6 +146,63 @@ export interface ManifestBlock {
     sources: Array<{ table: string; column: string }>;
     unresolved?: boolean;
   }>;
+}
+
+// ---- Business Terms ----
+
+export interface ManifestTerm {
+  name: string;
+  /** Relative path from project root */
+  filePath: string;
+  domain?: string;
+  owner?: string;
+  status?: string;
+  termType?: string;
+  tags?: string[];
+  description?: string;
+  identifiers?: string[];
+  synonyms?: string[];
+  businessOutcome?: string;
+  businessOwner?: string;
+  decisionUse?: string;
+  reviewCadence?: string;
+  businessRules?: string[];
+  caveats?: string[];
+}
+
+// ---- Business Views ----
+
+export interface ManifestBusinessView {
+  name: string;
+  /** Relative path from project root */
+  filePath: string;
+  domain?: string;
+  owner?: string;
+  status?: string;
+  tags?: string[];
+  description?: string;
+  businessOutcome?: string;
+  businessOwner?: string;
+  decisionUse?: string;
+  reviewCadence?: string;
+  businessRules?: string[];
+  caveats?: string[];
+  /** Block names included by this business view and resolved in the manifest. */
+  blockRefs: string[];
+  /** Business view names included by this business view and resolved in the manifest. */
+  businessViewRefs: string[];
+  /** All business term refs represented by this view, including terms inherited from included blocks/views. */
+  termRefs: string[];
+  /** Business term names directly declared by this business view and resolved in the manifest. */
+  declaredTermRefs: string[];
+  /** Business term names inherited from included blocks and business views. */
+  inheritedTermRefs: string[];
+  /** Directly declared business term names that were not found during compile. */
+  unresolvedTermRefs: string[];
+  /** Referenced block names that were not found during compile. */
+  unresolvedBlockRefs: string[];
+  /** Referenced business view names that were not found during compile. */
+  unresolvedBusinessViewRefs: string[];
 }
 
 // ---- Notebooks ----

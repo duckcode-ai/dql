@@ -4,6 +4,7 @@ export {
   buildManifest,
   collectInputFiles,
   loadProjectConfig,
+  resolveDataLexManifestPath,
   resolveDbtManifestPath,
   type ManifestBuildOptions,
   type DbtImportFilters,
@@ -12,6 +13,8 @@ export {
 export type {
   DQLManifest,
   ManifestBlock,
+  ManifestTerm,
+  ManifestBusinessView,
   ManifestNotebook,
   ManifestNotebookCell,
   ManifestMetric,

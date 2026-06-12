@@ -28,6 +28,9 @@ import {
   type LayoutRowNode,
   type LayoutRowItem,
   type BlockDeclNode,
+  type TermDeclNode,
+  type BusinessViewDeclNode,
+  type BusinessViewIncludeNode,
   type BlockParamsNode,
   type BlockParamEntry,
   type BlockVisualizationNode,
@@ -106,6 +109,14 @@ export class Parser {
       return this.parseBlockDecl(decorators);
     }
 
+    if (this.check(TokenType.TermKeyword)) {
+      return this.parseTermDecl(decorators);
+    }
+
+    if (this.check(TokenType.BusinessViewKeyword)) {
+      return this.parseBusinessViewDecl(decorators);
+    }
+
     if (this.check(TokenType.ImportKeyword)) {
       if (decorators.length > 0) {
         this.error('Decorators cannot be applied to import statements.');
@@ -117,7 +128,7 @@ export class Parser {
       return null;
     }
 
-    this.error(`Unexpected token '${this.current().value}'. Expected 'dashboard', 'digest', 'workbook', 'chart', 'block', or 'import'.`);
+    this.error(`Unexpected token '${this.current().value}'. Expected 'dashboard', 'digest', 'workbook', 'chart', 'block', 'term', 'business_view', or 'import'.`);
     return null;
   }
 
@@ -444,7 +455,9 @@ export class Parser {
       || type === TokenType.UseKeyword
       || type === TokenType.ImportKeyword
       || type === TokenType.MetricKeyword
-      || type === TokenType.MetricsKeyword;
+      || type === TokenType.MetricsKeyword
+      || type === TokenType.TermsKeyword
+      || type === TokenType.IncludesKeyword;
   }
 
   private parseVariableDecl(): VariableDeclNode {
@@ -708,6 +721,288 @@ export class Parser {
     return { start: start.start, end: end.end };
   }
 
+  // ---- Business Term Declaration ----
+
+  private parseTermDecl(decorators: DecoratorNode[]): TermDeclNode {
+    const start = decorators.length > 0 ? decorators[0].span : this.currentSpan();
+    this.expect(TokenType.TermKeyword);
+
+    const nameToken = this.expect(TokenType.StringLiteral);
+    this.expect(TokenType.LeftBrace);
+
+    let domain: string | undefined;
+    let termType: string | undefined;
+    let status: string | undefined;
+    let description: string | undefined;
+    let tags: string[] | undefined;
+    let owner: string | undefined;
+    let identifiers: string[] | undefined;
+    let synonyms: string[] | undefined;
+    let businessOutcome: string | undefined;
+    let businessOwner: string | undefined;
+    let decisionUse: string | undefined;
+    let reviewCadence: string | undefined;
+    let businessRules: string[] | undefined;
+    let caveats: string[] | undefined;
+
+    while (!this.check(TokenType.RightBrace) && !this.isAtEnd()) {
+      if (this.check(TokenType.DomainKeyword)) {
+        this.advance();
+        this.expect(TokenType.Equals);
+        const val = this.expect(TokenType.StringLiteral);
+        domain = val.value;
+      } else if (this.check(TokenType.TypeKeyword)) {
+        this.advance();
+        this.expect(TokenType.Equals);
+        const val = this.expect(TokenType.StringLiteral);
+        termType = val.value;
+      } else if (this.check(TokenType.DescriptionKeyword)) {
+        this.advance();
+        this.expect(TokenType.Equals);
+        const val = this.expect(TokenType.StringLiteral);
+        description = val.value;
+      } else if (this.check(TokenType.TagsKeyword)) {
+        this.advance();
+        this.expect(TokenType.Equals);
+        tags = this.parseStringArrayValues();
+      } else if (this.check(TokenType.OwnerKeyword)) {
+        this.advance();
+        this.expect(TokenType.Equals);
+        const val = this.expect(TokenType.StringLiteral);
+        owner = val.value;
+      } else if (
+        this.check(TokenType.Identifier)
+        && (this.current().value === 'status'
+          || this.current().value === 'identifiers'
+          || this.current().value === 'synonyms'
+          || this.current().value === 'businessOutcome'
+          || this.current().value === 'businessOwner'
+          || this.current().value === 'decisionUse'
+          || this.current().value === 'reviewCadence'
+          || this.current().value === 'businessRules'
+          || this.current().value === 'caveats')
+      ) {
+        const keyToken = this.advance();
+        this.expect(TokenType.Equals);
+        if (keyToken.value === 'status') {
+          const val = this.expect(TokenType.StringLiteral);
+          status = val.value;
+        } else if (keyToken.value === 'identifiers') {
+          identifiers = this.parseStringArrayValues();
+        } else if (keyToken.value === 'synonyms') {
+          synonyms = this.parseStringArrayValues();
+        } else if (keyToken.value === 'businessOutcome') {
+          const val = this.expect(TokenType.StringLiteral);
+          businessOutcome = val.value;
+        } else if (keyToken.value === 'businessOwner') {
+          const val = this.expect(TokenType.StringLiteral);
+          businessOwner = val.value;
+        } else if (keyToken.value === 'decisionUse') {
+          const val = this.expect(TokenType.StringLiteral);
+          decisionUse = val.value;
+        } else if (keyToken.value === 'reviewCadence') {
+          const val = this.expect(TokenType.StringLiteral);
+          reviewCadence = val.value;
+        } else if (keyToken.value === 'businessRules') {
+          businessRules = this.parseStringArrayValues();
+        } else if (keyToken.value === 'caveats') {
+          caveats = this.parseStringArrayValues();
+        }
+      } else if (this.check(TokenType.RightBrace)) {
+        break;
+      } else {
+        this.error(
+          `Unexpected token '${this.current().value}' inside term. Expected 'domain', 'type', 'status', 'description', 'tags', 'owner', 'identifiers', 'synonyms', 'businessOutcome', 'businessOwner', 'decisionUse', 'reviewCadence', 'businessRules', 'caveats', or '}'.`,
+        );
+        this.advance();
+      }
+    }
+
+    this.expect(TokenType.RightBrace);
+
+    return {
+      kind: NodeKind.TermDecl,
+      name: nameToken.value,
+      domain,
+      termType,
+      status,
+      description,
+      tags,
+      owner,
+      identifiers,
+      synonyms,
+      businessOutcome,
+      businessOwner,
+      decisionUse,
+      reviewCadence,
+      businessRules,
+      caveats,
+      decorators,
+      span: this.makeSpan(start, this.previousSpan()),
+    };
+  }
+
+  // ---- Business View Declaration ----
+
+  private parseBusinessViewDecl(decorators: DecoratorNode[]): BusinessViewDeclNode {
+    const start = decorators.length > 0 ? decorators[0].span : this.currentSpan();
+    this.expect(TokenType.BusinessViewKeyword);
+
+    const nameToken = this.expect(TokenType.StringLiteral);
+    this.expect(TokenType.LeftBrace);
+
+    let domain: string | undefined;
+    let status: string | undefined;
+    let description: string | undefined;
+    let tags: string[] | undefined;
+    let owner: string | undefined;
+    let termRefs: string[] | undefined;
+    let businessOutcome: string | undefined;
+    let businessOwner: string | undefined;
+    let decisionUse: string | undefined;
+    let reviewCadence: string | undefined;
+    let businessRules: string[] | undefined;
+    let caveats: string[] | undefined;
+    let includes: BusinessViewIncludeNode[] = [];
+
+    while (!this.check(TokenType.RightBrace) && !this.isAtEnd()) {
+      if (this.check(TokenType.DomainKeyword)) {
+        this.advance();
+        this.expect(TokenType.Equals);
+        const val = this.expect(TokenType.StringLiteral);
+        domain = val.value;
+      } else if (this.check(TokenType.DescriptionKeyword)) {
+        this.advance();
+        this.expect(TokenType.Equals);
+        const val = this.expect(TokenType.StringLiteral);
+        description = val.value;
+      } else if (this.check(TokenType.TagsKeyword)) {
+        this.advance();
+        this.expect(TokenType.Equals);
+        tags = this.parseStringArrayValues();
+      } else if (this.check(TokenType.OwnerKeyword)) {
+        this.advance();
+        this.expect(TokenType.Equals);
+        const val = this.expect(TokenType.StringLiteral);
+        owner = val.value;
+      } else if (this.check(TokenType.TermsKeyword)) {
+        this.advance();
+        this.expect(TokenType.Equals);
+        termRefs = this.parseStringArrayValues();
+      } else if (this.check(TokenType.IncludesKeyword)) {
+        includes = this.parseBusinessViewIncludes();
+      } else if (
+        this.check(TokenType.Identifier)
+        && (this.current().value === 'status'
+          || this.current().value === 'businessOutcome'
+          || this.current().value === 'businessOwner'
+          || this.current().value === 'decisionUse'
+          || this.current().value === 'reviewCadence'
+          || this.current().value === 'businessRules'
+          || this.current().value === 'caveats')
+      ) {
+        const keyToken = this.advance();
+        this.expect(TokenType.Equals);
+        if (keyToken.value === 'status') {
+          const val = this.expect(TokenType.StringLiteral);
+          status = val.value;
+        } else if (keyToken.value === 'businessOutcome') {
+          const val = this.expect(TokenType.StringLiteral);
+          businessOutcome = val.value;
+        } else if (keyToken.value === 'businessOwner') {
+          const val = this.expect(TokenType.StringLiteral);
+          businessOwner = val.value;
+        } else if (keyToken.value === 'decisionUse') {
+          const val = this.expect(TokenType.StringLiteral);
+          decisionUse = val.value;
+        } else if (keyToken.value === 'reviewCadence') {
+          const val = this.expect(TokenType.StringLiteral);
+          reviewCadence = val.value;
+        } else if (keyToken.value === 'businessRules') {
+          businessRules = this.parseStringArrayValues();
+        } else if (keyToken.value === 'caveats') {
+          caveats = this.parseStringArrayValues();
+        }
+      } else if (this.check(TokenType.RightBrace)) {
+        break;
+      } else {
+        this.error(
+          `Unexpected token '${this.current().value}' inside business_view. Expected 'domain', 'status', 'description', 'tags', 'owner', 'terms', 'businessOutcome', 'businessOwner', 'decisionUse', 'reviewCadence', 'businessRules', 'caveats', 'includes', or '}'.`,
+        );
+        this.advance();
+      }
+    }
+
+    this.expect(TokenType.RightBrace);
+
+    return {
+      kind: NodeKind.BusinessViewDecl,
+      name: nameToken.value,
+      domain,
+      status,
+      description,
+      tags,
+      owner,
+      termRefs,
+      businessOutcome,
+      businessOwner,
+      decisionUse,
+      reviewCadence,
+      businessRules,
+      caveats,
+      includes,
+      decorators,
+      span: this.makeSpan(start, this.previousSpan()),
+    };
+  }
+
+  private parseBusinessViewIncludes(): BusinessViewIncludeNode[] {
+    this.expect(TokenType.IncludesKeyword);
+    this.expect(TokenType.LeftBrace);
+
+    const includes: BusinessViewIncludeNode[] = [];
+    while (!this.check(TokenType.RightBrace) && !this.isAtEnd()) {
+      const start = this.currentSpan();
+      if (this.check(TokenType.BlockKeyword)) {
+        this.advance();
+        const nameToken = this.expect(TokenType.StringLiteral);
+        includes.push({
+          kind: NodeKind.BusinessViewInclude,
+          refType: 'block',
+          name: nameToken.value,
+          span: this.makeSpan(start, this.previousSpan()),
+        });
+      } else if (this.check(TokenType.BusinessViewKeyword)) {
+        this.advance();
+        const nameToken = this.expect(TokenType.StringLiteral);
+        includes.push({
+          kind: NodeKind.BusinessViewInclude,
+          refType: 'business_view',
+          name: nameToken.value,
+          span: this.makeSpan(start, this.previousSpan()),
+        });
+      } else if (this.check(TokenType.RightBrace)) {
+        break;
+      } else {
+        this.error(
+          `Unexpected token '${this.current().value}' inside includes. Expected 'block', 'business_view', or '}'.`,
+        );
+        this.advance();
+      }
+    }
+
+    this.expect(TokenType.RightBrace);
+    return includes;
+  }
+
+  private parseStringArrayValues(): string[] {
+    const arrExpr = this.parseArrayLiteral();
+    if (arrExpr.kind !== NodeKind.ArrayLiteral) return [];
+    return arrExpr.elements
+      .filter((e): e is import('../ast/nodes.js').StringLiteralNode => e.kind === NodeKind.StringLiteral)
+      .map((e) => e.value);
+  }
+
   // ---- Block Declaration ----
 
   private parseBlockDecl(decorators: DecoratorNode[]): BlockDeclNode {
@@ -725,6 +1020,7 @@ export class Parser {
     let description: string | undefined;
     let tags: string[] | undefined;
     let owner: string | undefined;
+    let termRefs: string[] | undefined;
     let params: BlockParamsNode | undefined;
     let query: SQLQueryNode | undefined;
     let visualization: BlockVisualizationNode | undefined;
@@ -811,6 +1107,10 @@ export class Parser {
         this.expect(TokenType.Equals);
         const val = this.expect(TokenType.StringLiteral);
         owner = val.value;
+      } else if (this.check(TokenType.TermsKeyword)) {
+        this.advance();
+        this.expect(TokenType.Equals);
+        termRefs = this.parseStringArrayValues();
       } else if (this.check(TokenType.ParamsKeyword)) {
         params = this.parseBlockParams();
       } else if (this.check(TokenType.QueryKeyword)) {
@@ -939,7 +1239,7 @@ export class Parser {
         }
       } else {
         this.error(
-          `Unexpected token '${this.current().value}' inside block. Expected 'domain', 'type', 'status', 'datalex_contract', 'metric', 'metrics', 'dimensions', 'description', 'tags', 'owner', 'params', 'query', 'visualization', 'tests', 'llmContext', 'invariants', 'examples', 'businessOutcome', 'businessOwner', 'decisionUse', 'reviewCadence', 'businessRules', 'caveats', or '}'.`,
+          `Unexpected token '${this.current().value}' inside block. Expected 'domain', 'type', 'status', 'datalex_contract', 'metric', 'metrics', 'dimensions', 'description', 'tags', 'owner', 'terms', 'params', 'query', 'visualization', 'tests', 'llmContext', 'invariants', 'examples', 'businessOutcome', 'businessOwner', 'decisionUse', 'reviewCadence', 'businessRules', 'caveats', or '}'.`,
         );
         this.advance();
       }
@@ -965,6 +1265,7 @@ export class Parser {
       description,
       tags,
       owner,
+      termRefs,
       params,
       query,
       visualization,
@@ -1135,6 +1436,7 @@ export class Parser {
       || type === TokenType.DescriptionKeyword
       || type === TokenType.TagsKeyword
       || type === TokenType.OwnerKeyword
+      || type === TokenType.TermsKeyword
       || type === TokenType.ChartKeyword
       || type === TokenType.QueryKeyword
       || type === TokenType.DefaultKeyword
@@ -1439,6 +1741,8 @@ export class Parser {
         token.type === TokenType.FilterKeyword ||
         token.type === TokenType.ImportKeyword ||
         token.type === TokenType.BlockKeyword ||
+        token.type === TokenType.TermKeyword ||
+        token.type === TokenType.BusinessViewKeyword ||
         token.type === TokenType.AtSign ||
         token.type === TokenType.RightBrace
       ) {

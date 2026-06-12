@@ -9,7 +9,11 @@ import type {
   ImportDeclNode,
   LayoutBlockNode,
   LayoutRowNode,
+  BusinessViewDeclNode,
+  TermDeclNode,
   NamedArgNode,
+  DigestNode,
+  NarrativeNode,
   PageNode,
   ParamDeclNode,
   ProgramNode,
@@ -66,6 +70,12 @@ function formatStatement(node: StatementNode, level: number, state: FormatState)
       return formatImport(node, level, state);
     case NodeKind.BlockDecl:
       return formatBlock(node, level, state);
+    case NodeKind.TermDecl:
+      return formatTerm(node, level, state);
+    case NodeKind.BusinessViewDecl:
+      return formatBusinessView(node, level, state);
+    case NodeKind.Digest:
+      return formatDigest(node, level, state);
     default:
       return '';
   }
@@ -77,6 +87,30 @@ function formatDashboard(node: DashboardNode, level: number, state: FormatState)
   lines.push(`${indent(level, state)}dashboard ${quote(node.title)} {`);
   for (const item of node.body) {
     lines.push(formatDashboardBodyItem(item, level + 1, state));
+  }
+  lines.push(`${indent(level, state)}}`);
+  return lines.join('\n');
+}
+
+function formatDigest(node: DigestNode, level: number, state: FormatState): string {
+  const lines: string[] = [];
+  lines.push(...formatDecorators(node.decorators, level, state));
+  lines.push(`${indent(level, state)}digest ${quote(node.title)} {`);
+  if (node.narrative) {
+    lines.push(formatNarrative(node.narrative, level + 1, state));
+  }
+  for (const item of node.body) {
+    lines.push(formatDashboardBodyItem(item, level + 1, state));
+  }
+  lines.push(`${indent(level, state)}}`);
+  return lines.join('\n');
+}
+
+function formatNarrative(node: NarrativeNode, level: number, state: FormatState): string {
+  const lines: string[] = [];
+  lines.push(`${indent(level, state)}narrative {`);
+  for (const prop of node.properties) {
+    lines.push(`${indent(level + 1, state)}${formatNamedArg(prop)}`);
   }
   lines.push(`${indent(level, state)}}`);
   return lines.join('\n');
@@ -234,6 +268,9 @@ function formatBlock(node: BlockDeclNode, level: number, state: FormatState): st
     lines.push(`${indent(level + 1, state)}tags = [${node.tags.map(quote).join(', ')}]`);
   }
   if (node.owner) lines.push(`${indent(level + 1, state)}owner = ${quote(node.owner)}`);
+  if (node.termRefs && node.termRefs.length > 0) {
+    lines.push(`${indent(level + 1, state)}terms = [${node.termRefs.map(quote).join(', ')}]`);
+  }
   if (node.llmContext) lines.push(`${indent(level + 1, state)}llmContext = ${quote(node.llmContext)}`);
   if (node.businessOutcome) lines.push(`${indent(level + 1, state)}businessOutcome = ${quote(node.businessOutcome)}`);
   if (node.businessOwner) lines.push(`${indent(level + 1, state)}businessOwner = ${quote(node.businessOwner)}`);
@@ -293,6 +330,76 @@ function formatBlock(node: BlockDeclNode, level: number, state: FormatState): st
     }
     lines.push(`${indent(level + 1, state)}}`);
   }
+
+  lines.push(`${indent(level, state)}}`);
+  return lines.join('\n');
+}
+
+function formatTerm(node: TermDeclNode, level: number, state: FormatState): string {
+  const lines: string[] = [];
+  lines.push(...formatDecorators(node.decorators, level, state));
+  lines.push(`${indent(level, state)}term ${quote(node.name)} {`);
+
+  if (node.domain) lines.push(`${indent(level + 1, state)}domain = ${quote(node.domain)}`);
+  if (node.termType) lines.push(`${indent(level + 1, state)}type = ${quote(node.termType)}`);
+  if (node.status) lines.push(`${indent(level + 1, state)}status = ${quote(node.status)}`);
+  if (node.description) lines.push(`${indent(level + 1, state)}description = ${quote(node.description)}`);
+  if (node.tags && node.tags.length > 0) {
+    lines.push(`${indent(level + 1, state)}tags = [${node.tags.map(quote).join(', ')}]`);
+  }
+  if (node.owner) lines.push(`${indent(level + 1, state)}owner = ${quote(node.owner)}`);
+  if (node.identifiers && node.identifiers.length > 0) {
+    lines.push(`${indent(level + 1, state)}identifiers = [${node.identifiers.map(quote).join(', ')}]`);
+  }
+  if (node.synonyms && node.synonyms.length > 0) {
+    lines.push(`${indent(level + 1, state)}synonyms = [${node.synonyms.map(quote).join(', ')}]`);
+  }
+  if (node.businessOutcome) lines.push(`${indent(level + 1, state)}businessOutcome = ${quote(node.businessOutcome)}`);
+  if (node.businessOwner) lines.push(`${indent(level + 1, state)}businessOwner = ${quote(node.businessOwner)}`);
+  if (node.decisionUse) lines.push(`${indent(level + 1, state)}decisionUse = ${quote(node.decisionUse)}`);
+  if (node.reviewCadence) lines.push(`${indent(level + 1, state)}reviewCadence = ${quote(node.reviewCadence)}`);
+  if (node.businessRules && node.businessRules.length > 0) {
+    lines.push(`${indent(level + 1, state)}businessRules = [${node.businessRules.map(quote).join(', ')}]`);
+  }
+  if (node.caveats && node.caveats.length > 0) {
+    lines.push(`${indent(level + 1, state)}caveats = [${node.caveats.map(quote).join(', ')}]`);
+  }
+
+  lines.push(`${indent(level, state)}}`);
+  return lines.join('\n');
+}
+
+function formatBusinessView(node: BusinessViewDeclNode, level: number, state: FormatState): string {
+  const lines: string[] = [];
+  lines.push(...formatDecorators(node.decorators, level, state));
+  lines.push(`${indent(level, state)}business_view ${quote(node.name)} {`);
+
+  if (node.domain) lines.push(`${indent(level + 1, state)}domain = ${quote(node.domain)}`);
+  if (node.status) lines.push(`${indent(level + 1, state)}status = ${quote(node.status)}`);
+  if (node.description) lines.push(`${indent(level + 1, state)}description = ${quote(node.description)}`);
+  if (node.tags && node.tags.length > 0) {
+    lines.push(`${indent(level + 1, state)}tags = [${node.tags.map(quote).join(', ')}]`);
+  }
+  if (node.owner) lines.push(`${indent(level + 1, state)}owner = ${quote(node.owner)}`);
+  if (node.termRefs && node.termRefs.length > 0) {
+    lines.push(`${indent(level + 1, state)}terms = [${node.termRefs.map(quote).join(', ')}]`);
+  }
+  if (node.businessOutcome) lines.push(`${indent(level + 1, state)}businessOutcome = ${quote(node.businessOutcome)}`);
+  if (node.businessOwner) lines.push(`${indent(level + 1, state)}businessOwner = ${quote(node.businessOwner)}`);
+  if (node.decisionUse) lines.push(`${indent(level + 1, state)}decisionUse = ${quote(node.decisionUse)}`);
+  if (node.reviewCadence) lines.push(`${indent(level + 1, state)}reviewCadence = ${quote(node.reviewCadence)}`);
+  if (node.businessRules && node.businessRules.length > 0) {
+    lines.push(`${indent(level + 1, state)}businessRules = [${node.businessRules.map(quote).join(', ')}]`);
+  }
+  if (node.caveats && node.caveats.length > 0) {
+    lines.push(`${indent(level + 1, state)}caveats = [${node.caveats.map(quote).join(', ')}]`);
+  }
+
+  lines.push(`${indent(level + 1, state)}includes {`);
+  for (const ref of node.includes) {
+    lines.push(`${indent(level + 2, state)}${ref.refType} ${quote(ref.name)}`);
+  }
+  lines.push(`${indent(level + 1, state)}}`);
 
   lines.push(`${indent(level, state)}}`);
   return lines.join('\n');

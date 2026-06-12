@@ -208,6 +208,8 @@ export interface MiniLineageGraphProps {
   interactive?: boolean;
   /** Layout mode: 'flow' (default dagre LR) or 'layered' (grouped by lineage layer) */
   layoutMode?: 'flow' | 'layered';
+  /** ReactFlow fitView padding. Lower values let large detail views use more of the canvas. */
+  fitViewPadding?: number;
 }
 
 function MiniLineageGraphInner({
@@ -218,6 +220,7 @@ function MiniLineageGraphInner({
   onNodeClick,
   interactive = true,
   layoutMode = 'flow',
+  fitViewPadding = 0.15,
 }: MiniLineageGraphProps) {
   const [rfNodes, setRfNodes, onNodesChange] = useNodesState<Node>([]);
   const [rfEdges, setRfEdges, onEdgesChange] = useEdgesState<Edge>([]);
@@ -260,20 +263,20 @@ function MiniLineageGraphInner({
     // Re-fit after nodes are positioned. fitView prop only runs once on mount,
     // so we re-fit on every input change.
     requestAnimationFrame(() => {
-      fitView({ padding: 0.15, duration: 200 });
+      fitView({ padding: fitViewPadding, duration: 200 });
     });
-  }, [inputNodes, inputEdges, focalNodeId, layoutMode, setRfNodes, setRfEdges, fitView]);
+  }, [inputNodes, inputEdges, focalNodeId, layoutMode, fitViewPadding, setRfNodes, setRfEdges, fitView]);
 
   // Re-fit when the container is resized (e.g. user drags the resize handle).
   useEffect(() => {
     if (!containerRef.current) return;
     const el = containerRef.current;
     const obs = new ResizeObserver(() => {
-      fitView({ padding: 0.15, duration: 0 });
+      fitView({ padding: fitViewPadding, duration: 0 });
     });
     obs.observe(el);
     return () => obs.disconnect();
-  }, [fitView]);
+  }, [fitView, fitViewPadding]);
 
   if (inputNodes.length === 0) {
     return (
@@ -293,7 +296,7 @@ function MiniLineageGraphInner({
         onNodeClick={onNodeClick ? (_event, node) => onNodeClick(node.id) : undefined}
         nodeTypes={nodeTypes}
         fitView
-        fitViewOptions={{ padding: 0.15 }}
+        fitViewOptions={{ padding: fitViewPadding }}
         minZoom={0.25}
         proOptions={{ hideAttribution: true }}
         nodesDraggable={interactive}

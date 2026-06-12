@@ -28,6 +28,9 @@ export enum NodeKind {
   FunctionCall = 'FunctionCall',
   TemplateString = 'TemplateString',
   BlockDecl = 'BlockDecl',
+  TermDecl = 'TermDecl',
+  BusinessViewDecl = 'BusinessViewDecl',
+  BusinessViewInclude = 'BusinessViewInclude',
   BlockParams = 'BlockParams',
   BlockVisualization = 'BlockVisualization',
   BlockTest = 'BlockTest',
@@ -75,7 +78,15 @@ export interface ProgramNode extends BaseNode {
   statements: StatementNode[];
 }
 
-export type StatementNode = DashboardNode | ChartCallNode | WorkbookNode | ImportDeclNode | BlockDeclNode | DigestNode;
+export type StatementNode =
+  | DashboardNode
+  | ChartCallNode
+  | WorkbookNode
+  | ImportDeclNode
+  | BlockDeclNode
+  | TermDeclNode
+  | BusinessViewDeclNode
+  | DigestNode;
 
 // ---- Dashboard ----
 
@@ -284,6 +295,8 @@ export interface BlockDeclNode extends BaseNode {
   description?: string;
   tags?: string[];
   owner?: string;
+  /** Business glossary terms this block implements or depends on. */
+  termRefs?: string[];
   params?: BlockParamsNode;
   /** For blockType 'custom': the SQL query. Must not be present on 'semantic' blocks. */
   query?: SQLQueryNode;
@@ -324,6 +337,28 @@ export interface BlockDeclNode extends BaseNode {
   datalexContract?: string;
 }
 
+// ---- Business Term Declaration ----
+
+export interface TermDeclNode extends BaseNode {
+  kind: NodeKind.TermDecl;
+  name: string;
+  domain?: string;
+  termType?: string;
+  status?: string;
+  description?: string;
+  tags?: string[];
+  owner?: string;
+  identifiers?: string[];
+  synonyms?: string[];
+  businessOutcome?: string;
+  businessOwner?: string;
+  decisionUse?: string;
+  reviewCadence?: string;
+  businessRules?: string[];
+  caveats?: string[];
+  decorators: DecoratorNode[];
+}
+
 export interface BlockParamsNode extends BaseNode {
   kind: NodeKind.BlockParams;
   params: BlockParamEntry[];
@@ -345,6 +380,34 @@ export interface BlockTestNode extends BaseNode {
   field: string;
   operator: '>' | '<' | '>=' | '<=' | '==' | '!=' | 'IN';
   expected: ExpressionNode;
+}
+
+// ---- Business View Declaration ----
+
+export interface BusinessViewDeclNode extends BaseNode {
+  kind: NodeKind.BusinessViewDecl;
+  name: string;
+  domain?: string;
+  status?: string;
+  description?: string;
+  tags?: string[];
+  owner?: string;
+  /** Business glossary terms this composed view represents. */
+  termRefs?: string[];
+  businessOutcome?: string;
+  businessOwner?: string;
+  decisionUse?: string;
+  reviewCadence?: string;
+  businessRules?: string[];
+  caveats?: string[];
+  includes: BusinessViewIncludeNode[];
+  decorators: DecoratorNode[];
+}
+
+export interface BusinessViewIncludeNode extends BaseNode {
+  kind: NodeKind.BusinessViewInclude;
+  refType: 'block' | 'business_view';
+  name: string;
 }
 
 // ---- Layout ----

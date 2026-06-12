@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
-import { PanelFrame, PanelToolbar, PanelEmpty } from '@duckcodeailabs/dql-ui';
+import { PanelFrame, PanelEmpty } from '@duckcodeailabs/dql-ui';
 import type { Theme } from '../../themes/notebook-theme';
 import { api } from '../../api/client';
 import { useNotebook } from '../../store/NotebookStore';
@@ -53,7 +53,7 @@ function SearchInput({
       placeholder={placeholder}
       style={{
         width: '100%',
-        padding: '8px 10px',
+        padding: '7px 9px',
         borderRadius: 6,
         border: `1px solid ${t.headerBorder}`,
         background: t.sidebarBg,
@@ -117,16 +117,63 @@ function NodeRow({
 const SECTION_COLLAPSE_THRESHOLD = 30;
 const SECTION_EXPAND_CHUNK = 200;
 
+function secondaryForNode(node: LineageNode): string | undefined {
+  const metadata = node.metadata ?? {};
+  const parts: string[] = [];
+  if (node.domain) parts.push(node.domain);
+  if (node.type === 'term' && typeof metadata.termType === 'string') parts.push(metadata.termType);
+  if (node.owner) parts.push(node.owner);
+  if (node.status) parts.push(node.status);
+  if (node.type === 'business_view' && typeof metadata.description === 'string') parts.push(metadata.description);
+  return parts.length > 0 ? parts.join(' · ') : undefined;
+}
+
+function SummaryCard({
+  label,
+  value,
+  detail,
+  t,
+}: {
+  label: string;
+  value: number;
+  detail: string;
+  t: Theme;
+}) {
+  return (
+    <div
+      style={{
+        display: 'flex',
+        alignItems: 'baseline',
+        gap: 7,
+        border: `1px solid ${t.headerBorder}`,
+        borderRadius: 6,
+        padding: '6px 8px',
+        background: t.inputBg,
+        minWidth: 0,
+      }}
+      title={detail}
+    >
+      <div style={{ color: t.textMuted, fontSize: 10, fontWeight: 800, textTransform: 'uppercase', flexShrink: 0 }}>{label}</div>
+      <div style={{ color: t.textPrimary, fontSize: 16, fontWeight: 800, lineHeight: 1 }}>{value}</div>
+      <div style={{ color: t.textMuted, fontSize: 10, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', minWidth: 0 }}>
+        {detail}
+      </div>
+    </div>
+  );
+}
+
 function Section({
   title,
   nodes,
   t,
   onSelect,
+  secondaryFor,
 }: {
   title: string;
   nodes: LineageNode[];
   t: Theme;
   onSelect: (node: LineageNode) => void;
+  secondaryFor?: (node: LineageNode) => string | undefined;
 }) {
   const large = nodes.length > SECTION_COLLAPSE_THRESHOLD;
   const [expanded, setExpanded] = useState(!large);
@@ -165,7 +212,7 @@ function Section({
         nodes
           .slice(0, shown)
           .map((node) => (
-            <NodeRow key={node.id} node={node} t={t} onClick={() => onSelect(node)} />
+            <NodeRow key={node.id} node={node} t={t} onClick={() => onSelect(node)} secondary={secondaryFor?.(node)} />
           ))}
       {expanded && remaining > 0 && (
         <button
@@ -195,7 +242,7 @@ export function LineagePanel() {
 
   const [loading, setLoading] = useState(true);
   const [allNodes, setAllNodes] = useState<LineageNode[]>([]);
-  const [, setAllEdges] = useState<LineageEdge[]>([]);
+  const [allEdges, setAllEdges] = useState<LineageEdge[]>([]);
   const [search, setSearch] = useState('');
   const [matches, setMatches] = useState<Array<{ node: LineageNode; score: number }>>([]);
 
@@ -226,21 +273,33 @@ export function LineagePanel() {
   }, [search]);
 
   const handleSelectNode = useCallback((node: LineageNode) => {
-    // Open the right-side drawer — no in-panel focused-view, no fullscreen takeover.
-    dispatch({ type: 'SET_LINEAGE_FOCUS', nodeId: node.id });
-    dispatch({ type: 'OPEN_LINEAGE_DRAWER', nodeId: node.id });
+    dispatch({ type: 'OPEN_LINEAGE_DETAIL', nodeId: node.id });
   }, [dispatch]);
 
   const [groupBy, setGroupBy] = useState<'type' | 'layer'>('type');
 
   const grouped = useMemo(() => ({
+    terms: allNodes.filter((node) => node.type === 'term'),
+    businessViews: allNodes.filter((node) => node.type === 'business_view'),
     dashboards: allNodes.filter((node) => node.type === 'dashboard'),
+    notebooks: allNodes.filter((node) => node.type === 'notebook'),
+    apps: allNodes.filter((node) => node.type === 'app'),
+    charts: allNodes.filter((node) => node.type === 'chart'),
     blocks: allNodes.filter((node) => node.type === 'block'),
+    metrics: allNodes.filter((node) => node.type === 'metric'),
+    dimensions: allNodes.filter((node) => node.type === 'dimension'),
     dbtModels: allNodes.filter((node) => node.type === 'dbt_model'),
     dbtSources: allNodes.filter((node) => node.type === 'dbt_source'),
     tables: allNodes.filter((node) => node.type === 'source_table'),
     domains: allNodes.filter((node) => node.type === 'domain'),
   }), [allNodes]);
+
+  const summary = useMemo(() => ({
+    businessNodes: grouped.terms.length + grouped.businessViews.length,
+    businessEdges: allEdges.filter((edge) => edge.type === 'defines' || edge.type === 'composes').length,
+    technicalNodes: grouped.tables.length + grouped.dbtSources.length + grouped.dbtModels.length + grouped.metrics.length + grouped.dimensions.length + grouped.blocks.length,
+    consumptionNodes: grouped.charts.length + grouped.notebooks.length + grouped.dashboards.length + grouped.apps.length,
+  }), [allEdges, grouped]);
 
   const layerGrouped = useMemo(() => {
     const groups: Record<LineageLayerName, LineageNode[]> = {
@@ -268,38 +327,17 @@ export function LineagePanel() {
     );
   }
 
-  const toolbar = (
-    <PanelToolbar>
-      <SearchInput
-        value={search}
-        onChange={setSearch}
-        placeholder="Search blocks, tables, dbt models, notebooks..."
-        t={t}
-      />
-    </PanelToolbar>
-  );
-
   return (
-    <PanelFrame title="Lineage" toolbar={toolbar} bodyPadding={0}>
-      <div style={{ padding: 8, borderBottom: `1px solid ${t.headerBorder}` }}>
-        <button
-          onClick={() => dispatch({ type: 'TOGGLE_LINEAGE_FULLSCREEN' })}
-          style={{
-            width: '100%',
-            padding: '8px 10px',
-            borderRadius: 6,
-            border: `1px solid ${state.lineageFullscreen ? '#388bfd' : t.headerBorder}`,
-            background: state.lineageFullscreen ? '#388bfd' : 'transparent',
-            color: state.lineageFullscreen ? '#fff' : t.textPrimary,
-            fontSize: 12,
-            fontWeight: 600,
-            cursor: 'pointer',
-          }}
-        >
-          {state.lineageFullscreen ? 'Close Graph View' : 'Open Graph View'}
-        </button>
-        <div style={{ marginTop: 8, color: t.textMuted, fontSize: 11, lineHeight: 1.5 }}>
-          Search across source tables, dbt sources/models, DQL blocks, metrics, and notebooks. Selecting any item opens a focused lineage path instead of the full graph.
+    <PanelFrame title="Lineage" bodyPadding={0}>
+      <div style={{ padding: '10px 12px 8px', borderBottom: `1px solid ${t.headerBorder}` }}>
+        <SearchInput
+          value={search}
+          onChange={setSearch}
+          placeholder="Search lineage..."
+          t={t}
+        />
+        <div style={{ marginTop: 7, color: t.textMuted, fontSize: 11, lineHeight: 1.4 }}>
+          Select an item to open only its focused lineage path.
         </div>
       </div>
 
@@ -321,8 +359,37 @@ export function LineagePanel() {
           </div>
         )}
 
+        <div
+          style={{
+            padding: '8px 12px',
+            display: 'grid',
+            gridTemplateColumns: 'repeat(auto-fit, minmax(170px, 1fr))',
+            gap: 6,
+            borderBottom: `1px solid ${t.headerBorder}`,
+          }}
+        >
+          <SummaryCard
+            label="Business"
+            value={summary.businessNodes}
+            detail={`${grouped.terms.length} terms · ${grouped.businessViews.length} views · ${summary.businessEdges} business edges`}
+            t={t}
+          />
+          <SummaryCard
+            label="Technical"
+            value={summary.technicalNodes}
+            detail={`${grouped.tables.length} tables · ${grouped.dbtModels.length + grouped.dbtSources.length} dbt · ${grouped.blocks.length} blocks`}
+            t={t}
+          />
+          <SummaryCard
+            label="Consumption"
+            value={summary.consumptionNodes}
+            detail={`${grouped.dashboards.length} dashboards · ${grouped.notebooks.length} notebooks · ${grouped.apps.length} Apps`}
+            t={t}
+          />
+        </div>
+
         {/* Layer summary bar */}
-        <div style={{ padding: '6px 8px', display: 'flex', gap: 8, flexWrap: 'wrap', borderBottom: `1px solid ${t.headerBorder}` }}>
+        <div style={{ padding: '6px 12px', display: 'flex', alignItems: 'center', gap: 7, flexWrap: 'wrap', borderBottom: `1px solid ${t.headerBorder}` }}>
           {LAYER_ORDER.map((layer) => {
             const count = layerGrouped[layer].length;
             if (count === 0) return null;
@@ -358,12 +425,19 @@ export function LineagePanel() {
 
         {groupBy === 'type' ? (
           <>
-            <Section title="Dashboards" nodes={grouped.dashboards} t={t} onSelect={handleSelectNode} />
-            <Section title="DQL Blocks" nodes={grouped.blocks} t={t} onSelect={handleSelectNode} />
-            <Section title="dbt Models" nodes={grouped.dbtModels} t={t} onSelect={handleSelectNode} />
-            <Section title="dbt Sources" nodes={grouped.dbtSources} t={t} onSelect={handleSelectNode} />
-            <Section title="Source Tables" nodes={grouped.tables} t={t} onSelect={handleSelectNode} />
-            <Section title="Business Domains" nodes={grouped.domains} t={t} onSelect={handleSelectNode} />
+            <Section title="Business Terms" nodes={grouped.terms} t={t} onSelect={handleSelectNode} secondaryFor={secondaryForNode} />
+            <Section title="Business Views" nodes={grouped.businessViews} t={t} onSelect={handleSelectNode} secondaryFor={secondaryForNode} />
+            <Section title="DQL Blocks" nodes={grouped.blocks} t={t} onSelect={handleSelectNode} secondaryFor={secondaryForNode} />
+            <Section title="Metrics" nodes={grouped.metrics} t={t} onSelect={handleSelectNode} secondaryFor={secondaryForNode} />
+            <Section title="Dimensions" nodes={grouped.dimensions} t={t} onSelect={handleSelectNode} secondaryFor={secondaryForNode} />
+            <Section title="Dashboards" nodes={grouped.dashboards} t={t} onSelect={handleSelectNode} secondaryFor={secondaryForNode} />
+            <Section title="Notebooks" nodes={grouped.notebooks} t={t} onSelect={handleSelectNode} secondaryFor={secondaryForNode} />
+            <Section title="Apps" nodes={grouped.apps} t={t} onSelect={handleSelectNode} secondaryFor={secondaryForNode} />
+            <Section title="Charts" nodes={grouped.charts} t={t} onSelect={handleSelectNode} secondaryFor={secondaryForNode} />
+            <Section title="dbt Models" nodes={grouped.dbtModels} t={t} onSelect={handleSelectNode} secondaryFor={secondaryForNode} />
+            <Section title="dbt Sources" nodes={grouped.dbtSources} t={t} onSelect={handleSelectNode} secondaryFor={secondaryForNode} />
+            <Section title="Source Tables" nodes={grouped.tables} t={t} onSelect={handleSelectNode} secondaryFor={secondaryForNode} />
+            <Section title="Business Domains" nodes={grouped.domains} t={t} onSelect={handleSelectNode} secondaryFor={secondaryForNode} />
           </>
         ) : (
           <>
