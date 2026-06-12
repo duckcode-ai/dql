@@ -1,21 +1,35 @@
 {
   "dqlnbVersion": 1,
   "version": 1,
+  "title": "{{PROJECT_NAME}} - DQL Workbench",
   "metadata": {
-    "title": "{{PROJECT_NAME}} — Welcome",
-    "description": "Replace this cell with your first query."
+    "title": "{{PROJECT_NAME}} - DQL Workbench",
+    "description": "DQL starter workbench for building domain-first analytics."
   },
   "cells": [
     {
       "id": "intro",
       "type": "markdown",
-      "source": "# {{PROJECT_NAME}}\n\nWelcome to DQL. Connect a warehouse in `dql.config.json`, then edit the cell below."
+      "title": "Welcome",
+      "source": "# {{PROJECT_NAME}}\n\nDQL means **Domain Query Language**. It turns SQL, business terms, notebooks, dashboards, apps, and lineage into one trusted analytics project.\n\n**Core path:** source data -> DQL block -> business_view -> dashboard/app/AI answer.\n\nUse this notebook as your workbench: explore data, promote repeated SQL into reusable blocks, define business vocabulary, and compile the project manifest for lineage and AI-ready context."
     },
     {
-      "title": "First query",
-      "id": "first_query",
+      "id": "starter_query",
       "type": "sql",
-      "source": "select 1 as hello"
+      "title": "Starter Query",
+      "source": "-- If using DuckDB, local CSV, Parquet, and JSON files work with zero setup\n-- Example: SELECT * FROM read_csv_auto('./data/my_file.csv') LIMIT 10;\nselect 1 as customer_count"
+    },
+    {
+      "id": "domain_layer",
+      "type": "dql",
+      "title": "Example Domain Layer",
+      "source": "term \"Customer\" {\n  domain = \"Customer\"\n  type = \"entity\"\n  status = \"draft\"\n  description = \"A person or account that can place orders or receive service.\"\n  owner = \"customer-analytics\"\n  identifiers = [\"customer_id\"]\n}\n\nblock \"Example Customer Rollup\" {\n  domain = \"Customer\"\n  type = \"custom\"\n  status = \"draft\"\n  description = \"Starter customer summary block. Replace this query with your own source table.\"\n  owner = \"analytics\"\n  terms = [\"Customer\"]\n  businessOutcome = \"Understand customer value and activity.\"\n  decisionUse = \"Account planning and retention review.\"\n\n  query = \"\"\"\n    SELECT 1 AS customer_count\n  \"\"\"\n\n  tests {\n    assert row_count == 1\n  }\n}\n\nbusiness_view \"Customer 360\" {\n  domain = \"Customer\"\n  status = \"draft\"\n  description = \"Business composition for account review and customer health.\"\n  owner = \"customer-analytics\"\n  terms = [\"Customer\"]\n  businessOutcome = \"See customer identity, value, activity, and service risk in one lineage path.\"\n  decisionUse = \"Account planning, churn review, and expansion targeting.\"\n  reviewCadence = \"weekly\"\n\n  includes {\n    block \"Example Customer Rollup\"\n  }\n}"
+    },
+    {
+      "id": "next_steps",
+      "type": "markdown",
+      "title": "Next Steps",
+      "source": "## Next steps\n\n1. Connect a warehouse or query local files with DuckDB.\n2. Save repeated SQL as DQL blocks under `blocks/`.\n3. Add shared vocabulary under `terms/`.\n4. Compose business outcomes under `business-views/`.\n5. Run `dql compile .` and open Lineage to inspect technical and business paths."
     }
   ]
 }

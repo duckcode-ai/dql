@@ -1,6 +1,19 @@
 # {{PROJECT_NAME}}
 
-A DQL project, scaffolded by `create-dql-app`.
+A DQL project scaffolded by `create-dql-app`.
+
+DQL means **Domain Query Language**. It is the open-source analytics language
+for turning source data, SQL, dbt models, business terms, notebooks,
+dashboards, apps, and lineage into one Git-versioned project.
+
+The core path is:
+
+```text
+source data -> DQL block -> business_view -> dashboard/app/AI answer
+```
+
+Run `dql compile .` to produce `dql-manifest.json`, the local manifest that
+connects technical lineage with business lineage.
 
 ## Connect your warehouse
 
@@ -19,6 +32,14 @@ npm run doctor
 ```bash
 npm run notebook
 ```
+
+Open `notebooks/welcome.dqlnb` first. It shows the starter workflow:
+
+1. Explore data with SQL.
+2. Promote repeated logic into reusable DQL blocks under `blocks/`.
+3. Define shared vocabulary under `terms/`.
+4. Compose business outcomes under `business-views/`.
+5. Use Lineage to trace source data into business views and consumption.
 
 ## Have a dbt project?
 

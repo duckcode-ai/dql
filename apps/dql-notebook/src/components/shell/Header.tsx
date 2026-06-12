@@ -59,6 +59,7 @@ export function Header() {
   // Only notebook/Block Studio are file-editing surfaces; every other view
   // gets a static title and hides the file chip + editor actions.
   const isEditorView = state.mainView === 'notebook' || state.mainView === 'block_studio';
+  const hasActiveEditorFile = isEditorView && Boolean(state.activeFile);
   const VIEW_TITLES: Partial<Record<typeof state.mainView, string>> = {
     business_artifact: state.activeFile?.name.replace(/\.(dqlnb|dql)$/i, '') ?? 'Business Definition',
     lineage_detail: 'Lineage',
@@ -71,8 +72,10 @@ export function Header() {
     imports: 'Import SQL',
   };
   const headerTitle = isEditorView
-    ? state.notebookTitle || 'Untitled'
-    : VIEW_TITLES[state.mainView] ?? 'DQL Notebook';
+    ? state.activeFile
+      ? state.notebookTitle || 'Untitled'
+      : 'DQL Workbench'
+    : VIEW_TITLES[state.mainView] ?? 'DQL Workbench';
 
   useEffect(() => {
     if (editingTitle && titleInputRef.current) {
@@ -360,7 +363,7 @@ export function Header() {
               padding: '2px 4px',
             }}
           >
-            {headerTitle || 'DQL Notebook'}
+            {headerTitle || 'DQL Workbench'}
           </span>
         )}
       </div>
@@ -371,7 +374,7 @@ export function Header() {
       {/* Right: actions. Apps are opened from the sidebar, so the header stays
           focused on the active authoring surface. */}
       <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-        {state.appMode === 'studio' && isEditorView && (
+        {state.appMode === 'studio' && hasActiveEditorFile && (
           <>
             {/* v1.3.3 Hex handoff — Run all pill. Accent purple primary CTA. */}
             <button
@@ -506,7 +509,7 @@ export function Header() {
           )}
         </div>
 
-        {state.appMode === 'studio' && isEditorView && (
+        {state.appMode === 'studio' && hasActiveEditorFile && (
           <>
         {/* Save */}
         <button
@@ -583,7 +586,7 @@ export function Header() {
 
         {/* v1.3.3 Hex handoff — Share pill (dark ink). Editor views only;
             opens the same export menu the old "Export" button used. */}
-        {isEditorView && (
+        {hasActiveEditorFile && (
         <div ref={exportDropdownRef} style={{ position: 'relative' }}>
           <button
             onClick={() => {

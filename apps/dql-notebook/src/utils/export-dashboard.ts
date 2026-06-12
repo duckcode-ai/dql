@@ -231,7 +231,7 @@ export function exportDashboardHtml(title: string, cells: Cell[]): string {
   <div class="content">
     ${cellBlocks}
   </div>
-  <p class="exported-by">Built with DQL Notebook</p>
+  <p class="exported-by">Built with DQL Workbench</p>
 </body>
 </html>`;
 }
