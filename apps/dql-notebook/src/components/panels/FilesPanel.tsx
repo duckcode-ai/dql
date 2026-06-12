@@ -1,5 +1,18 @@
 import type { Theme } from '../../themes/notebook-theme';
 import React, { useState } from 'react';
+import {
+  Blocks,
+  BookOpenText,
+  ChartColumnBig,
+  ChevronRight,
+  FileText,
+  Folder,
+  FolderOpen,
+  Network,
+  Plus,
+  Workflow,
+  type LucideIcon,
+} from 'lucide-react';
 import { PanelFrame } from '@duckcodeailabs/dql-ui';
 import { useNotebook } from '../../store/NotebookStore';
 import { themes } from '../../themes/notebook-theme';
@@ -34,50 +47,61 @@ const HIDE_WHEN_EMPTY: Record<FolderKey, boolean> = {
   dashboards: true,
 };
 
-function FileTypeIcon({ type }: { type: NotebookFile['type'] }) {
-  switch (type) {
-    case 'notebook':
-      return (
-        <svg width="13" height="13" viewBox="0 0 16 16" fill="currentColor">
-          <path d="M0 1.75A.75.75 0 0 1 .75 1h4.253c1.227 0 2.317.59 3 1.501A3.743 3.743 0 0 1 11.006 1h4.245a.75.75 0 0 1 .75.75v10.5a.75.75 0 0 1-.75.75h-4.507a2.25 2.25 0 0 0-1.591.659l-.622.621a.75.75 0 0 1-1.063 0L7.597 13.66A2.25 2.25 0 0 0 6.007 13H.75a.75.75 0 0 1-.75-.75Zm7.251 10.324.004-5.073-.002-2.253A2.25 2.25 0 0 0 5.003 2.5H1.5v9h4.507c.656 0 1.287.169 1.744.324Zm1.499.004c.457-.155 1.088-.324 1.744-.324H15v-9h-3.495a2.25 2.25 0 0 0-2.252 2.247l-.002 9.077Z" />
-        </svg>
-      );
-    case 'block':
-      return (
-        <svg width="13" height="13" viewBox="0 0 16 16" fill="currentColor">
-          <path d="M10.5 0l5.25 4-5.25 4V6H9.25A1.75 1.75 0 0 0 7.5 7.75v2.5A1.75 1.75 0 0 0 9.25 12h1.25v8H9v-6.5A3.25 3.25 0 0 1 5.75 10h-2A3.25 3.25 0 0 1 .5 6.75v-2.5A3.25 3.25 0 0 1 3.75 1h2A3.25 3.25 0 0 1 9 4.5V6h1.5V0z" />
-        </svg>
-      );
-    case 'term':
-      return (
-        <svg width="13" height="13" viewBox="0 0 16 16" fill="currentColor">
-          <path d="M2 2.75A1.75 1.75 0 0 1 3.75 1h8.5A1.75 1.75 0 0 1 14 2.75v10.5A1.75 1.75 0 0 1 12.25 15h-8.5A1.75 1.75 0 0 1 2 13.25Zm1.75-.25a.25.25 0 0 0-.25.25v10.5c0 .138.112.25.25.25h8.5a.25.25 0 0 0 .25-.25V2.75a.25.25 0 0 0-.25-.25Zm2 2h4.5a.75.75 0 0 1 0 1.5h-4.5a.75.75 0 0 1 0-1.5Zm0 3h4.5a.75.75 0 0 1 0 1.5h-4.5a.75.75 0 0 1 0-1.5Zm0 3h2.5a.75.75 0 0 1 0 1.5h-2.5a.75.75 0 0 1 0-1.5Z" />
-        </svg>
-      );
-    case 'business_view':
-      return (
-        <svg width="13" height="13" viewBox="0 0 16 16" fill="currentColor">
-          <path d="M2 2.75A1.75 1.75 0 0 1 3.75 1h2.5A1.75 1.75 0 0 1 8 2.75v2.5A1.75 1.75 0 0 1 6.25 7h-2.5A1.75 1.75 0 0 1 2 5.25Zm1.75-.25a.25.25 0 0 0-.25.25v2.5c0 .138.112.25.25.25h2.5a.25.25 0 0 0 .25-.25v-2.5a.25.25 0 0 0-.25-.25Zm4.25 8.25A1.75 1.75 0 0 1 9.75 9h2.5A1.75 1.75 0 0 1 14 10.75v2.5A1.75 1.75 0 0 1 12.25 15h-2.5A1.75 1.75 0 0 1 8 13.25Zm1.75-.25a.25.25 0 0 0-.25.25v2.5c0 .138.112.25.25.25h2.5a.25.25 0 0 0 .25-.25v-2.5a.25.25 0 0 0-.25-.25ZM7.5 4.25h1.75A2.75 2.75 0 0 1 12 7v2h-1.5V7a1.25 1.25 0 0 0-1.25-1.25H7.5Zm1 7.5H6.75A2.75 2.75 0 0 1 4 9V7h1.5v2a1.25 1.25 0 0 0 1.25 1.25H8.5Z" />
-        </svg>
-      );
-    default:
-      return (
-        <svg width="13" height="13" viewBox="0 0 16 16" fill="currentColor">
-          <path d="M.24 2.375C.24 1.064 1.225.001 2.409.001h6.451a1.17 1.17 0 0 1 .828.344l3.311 3.312a1.17 1.17 0 0 1 .344.828v9.14c0 1.31-.985 2.374-2.169 2.374H2.41C1.225 16 .24 14.937.24 13.625Zm2.169-1a.846.846 0 0 0-.844.86v11.39c0 .47.38.86.844.86h8.774a.847.847 0 0 0 .844-.86V5.157L8.688 1.373H2.41Z" />
-        </svg>
-      );
-  }
+const FILE_ICON_META: Partial<Record<NotebookFile['type'], { Icon: LucideIcon; color: string }>> = {
+  notebook: { Icon: BookOpenText, color: 'var(--color-accent-purple)' },
+  workbook: { Icon: BookOpenText, color: 'var(--color-accent-purple)' },
+  block: { Icon: Blocks, color: 'var(--color-accent-green)' },
+  term: { Icon: FileText, color: 'var(--color-accent-cyan)' },
+  business_view: { Icon: Workflow, color: 'var(--color-accent-yellow)' },
+  dashboard: { Icon: ChartColumnBig, color: 'var(--color-accent-blue)' },
+};
+
+const FOLDER_ICON_COLORS: Record<FolderKey, string> = {
+  notebooks: 'var(--color-accent-purple)',
+  blocks: 'var(--color-accent-green)',
+  terms: 'var(--color-accent-cyan)',
+  'business-views': 'var(--color-accent-yellow)',
+  dashboards: 'var(--color-accent-blue)',
+};
+
+function FileTypeIcon({
+  type,
+  active,
+  hovered,
+}: {
+  type: NotebookFile['type'];
+  active: boolean;
+  hovered: boolean;
+}) {
+  const meta = FILE_ICON_META[type] ?? { Icon: FileText, color: 'var(--color-text-tertiary)' };
+  const Icon = meta.Icon;
+  return (
+    <Icon
+      size={15}
+      strokeWidth={1.9}
+      color={active || hovered ? meta.color : 'currentColor'}
+      aria-hidden="true"
+    />
+  );
 }
 
-function FolderIcon({ expanded }: { expanded: boolean }) {
+function FolderTypeIcon({
+  folderKey,
+  expanded,
+  hovered,
+}: {
+  folderKey: FolderKey;
+  expanded: boolean;
+  hovered: boolean;
+}) {
+  const Icon = expanded ? FolderOpen : Folder;
   return (
-    <svg width="13" height="13" viewBox="0 0 16 16" fill="currentColor">
-      {expanded ? (
-        <path d="M1.75 2.5a.25.25 0 0 0-.25.25v10.5c0 .138.112.25.25.25h12.5a.25.25 0 0 0 .25-.25V4.25a.25.25 0 0 0-.25-.25H7.5A1.75 1.75 0 0 1 5.75 2.5h-4ZM0 2.75C0 1.784.784 1 1.75 1h4c.966 0 1.75.784 1.75 1.75H14.25c.966 0 1.75.784 1.75 1.75v8.5A1.75 1.75 0 0 1 14.25 14H1.75A1.75 1.75 0 0 1 0 12.25Z" />
-      ) : (
-        <path d="M1.75 2.5a.25.25 0 0 0-.25.25v10.5c0 .138.112.25.25.25h12.5a.25.25 0 0 0 .25-.25V4.25a.25.25 0 0 0-.25-.25H7.5A1.75 1.75 0 0 1 5.75 2.5h-4ZM0 2.75C0 1.784.784 1 1.75 1h4c.966 0 1.75.784 1.75 1.75H14.25c.966 0 1.75.784 1.75 1.75v8.5A1.75 1.75 0 0 1 14.25 14H1.75A1.75 1.75 0 0 1 0 12.25Z" />
-      )}
-    </svg>
+    <Icon
+      size={15}
+      strokeWidth={1.9}
+      color={expanded || hovered ? FOLDER_ICON_COLORS[folderKey] : 'currentColor'}
+      aria-hidden="true"
+    />
   );
 }
 
@@ -160,7 +184,7 @@ export function FilesPanel({ onOpenFile }: FilesPanelProps) {
           transition: 'border-color 0.15s, color 0.15s',
         }}
       >
-        <span style={{ fontSize: 16, lineHeight: 1 }}>+</span>
+        <Plus size={15} strokeWidth={2} aria-hidden="true" />
         New Notebook
       </button>
     </div>
@@ -192,6 +216,7 @@ export function FilesPanel({ onOpenFile }: FilesPanelProps) {
             <FolderHeader
               label={FOLDER_LABELS[key]}
               count={files.length}
+              folderKey={key}
               expanded={expanded}
               onToggle={() => toggleFolder(key)}
               onAdd={onAdd}
@@ -252,6 +277,7 @@ export function FilesPanel({ onOpenFile }: FilesPanelProps) {
 function FolderHeader({
   label,
   count,
+  folderKey,
   expanded,
   onToggle,
   onAdd,
@@ -259,6 +285,7 @@ function FolderHeader({
 }: {
   label: string;
   count: number;
+  folderKey: FolderKey;
   expanded: boolean;
   onToggle: () => void;
   onAdd?: () => void;
@@ -292,25 +319,32 @@ function FolderHeader({
           fontSize: 11,
           fontWeight: 600,
           fontFamily: t.font,
-          letterSpacing: '0.04em',
+          letterSpacing: 0,
           textTransform: 'uppercase' as const,
           textAlign: 'left' as const,
         }}
       >
-        <svg
-          width="10"
-          height="10"
-          viewBox="0 0 10 10"
-          fill="currentColor"
+        <ChevronRight
+          size={12}
+          strokeWidth={2.2}
+          aria-hidden="true"
           style={{
             transform: expanded ? 'rotate(90deg)' : 'rotate(0deg)',
             transition: 'transform 0.15s',
             flexShrink: 0,
           }}
+        />
+        <span
+          style={{
+            display: 'inline-flex',
+            alignItems: 'center',
+            color: expanded || hovered ? FOLDER_ICON_COLORS[folderKey] : t.textMuted,
+            transition: 'color 0.12s',
+            flexShrink: 0,
+          }}
         >
-          <path d="M3 2l4 3-4 3V2Z" />
-        </svg>
-        <FolderIcon expanded={expanded} />
+          <FolderTypeIcon folderKey={folderKey} expanded={expanded} hovered={hovered} />
+        </span>
         <span style={{ flex: 1 }}>{label}</span>
         {count > 0 && (
           <span
@@ -347,7 +381,7 @@ function FolderHeader({
             transition: 'color 0.1s',
           }}
         >
-          +
+          <Plus size={14} strokeWidth={2.1} aria-hidden="true" />
         </button>
       )}
     </div>
@@ -369,8 +403,7 @@ function FileRow({
 }) {
   const [hovered, setHovered] = useState(false);
   const [lineageHover, setLineageHover] = useState(false);
-  // Lineage button only makes sense for things the lineage graph indexes:
-  // notebooks (dashboard nodes) and DQL blocks (block nodes).
+  // Lineage button only makes sense for artifacts the lineage graph indexes.
   const lineageEligible = file.type === 'notebook' || file.type === 'block' || file.type === 'dashboard' || file.type === 'term' || file.type === 'business_view';
   return (
     <div
@@ -405,8 +438,16 @@ function FileRow({
           overflow: 'hidden',
         }}
       >
-        <span style={{ flexShrink: 0, color: active ? t.accent : t.textMuted }}>
-          <FileTypeIcon type={file.type} />
+        <span
+          style={{
+            flexShrink: 0,
+            display: 'inline-flex',
+            alignItems: 'center',
+            color: active ? t.accent : t.textMuted,
+            transition: 'color 0.12s',
+          }}
+        >
+          <FileTypeIcon type={file.type} active={active} hovered={hovered} />
         </span>
         <span
           style={{
@@ -461,13 +502,7 @@ function FileRow({
             cursor: 'pointer',
           }}
         >
-          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-            <circle cx="6" cy="6" r="2.5" />
-            <circle cx="18" cy="6" r="2.5" />
-            <circle cx="12" cy="18" r="2.5" />
-            <path d="M6 8.5v2A2.5 2.5 0 0 0 8.5 13h7A2.5 2.5 0 0 0 18 10.5v-2" />
-            <path d="M12 13v2.5" />
-          </svg>
+          <Network size={14} strokeWidth={1.9} aria-hidden="true" />
         </button>
       )}
     </div>
