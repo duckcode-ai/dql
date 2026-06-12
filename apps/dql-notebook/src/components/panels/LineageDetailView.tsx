@@ -121,6 +121,7 @@ export function LineageDetailView() {
   const metadata = focal?.metadata ?? {};
   const filePath = metadata.path ?? metadata.filePath;
   const title = focal?.name ?? nodeId;
+  const lineageListOpen = state.sidebarOpen && state.sidebarPanel === 'lineage';
 
   return (
     <div style={{ flex: 1, minWidth: 0, overflow: 'auto', background: 'var(--color-bg-primary)' }}>
@@ -153,6 +154,29 @@ export function LineageDetailView() {
               {contextForNode(focal)}
             </div>
           </div>
+          <button
+            onClick={() => {
+              if (lineageListOpen) {
+                dispatch({ type: 'TOGGLE_SIDEBAR' });
+              } else {
+                dispatch({ type: 'SET_SIDEBAR_PANEL', panel: 'lineage' });
+              }
+            }}
+            style={{
+              border: `1px solid ${lineageListOpen ? t.accent : t.headerBorder}`,
+              background: lineageListOpen ? `${t.accent}1a` : t.sidebarBg,
+              color: lineageListOpen ? t.textPrimary : t.textSecondary,
+              borderRadius: 6,
+              padding: '7px 10px',
+              fontSize: 12,
+              fontWeight: 800,
+              cursor: 'pointer',
+              whiteSpace: 'nowrap',
+              flexShrink: 0,
+            }}
+          >
+            {lineageListOpen ? 'Hide list' : 'Browse lineage'}
+          </button>
         </div>
       </div>
 
