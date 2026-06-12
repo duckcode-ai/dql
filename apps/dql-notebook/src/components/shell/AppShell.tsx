@@ -12,6 +12,7 @@ import { NewNotebookModal } from '../modals/NewNotebookModal';
 import { NewBlockModal } from '../modals/NewBlockModal';
 import { BlockStudio } from '../block-studio/BlockStudio';
 import { LineageDAG } from '../panels/LineageDAG';
+import { BusinessArtifactView } from '../panels/BusinessArtifactView';
 import { ConnectionPanel } from '../panels/ConnectionPanel';
 import { ReferencePanel } from '../panels/ReferencePanel';
 import { GitPage } from '../git/GitPage';
@@ -57,12 +58,8 @@ export function AppShell() {
     async (file: NotebookFile) => {
       try {
         if (file.type === 'term' || file.type === 'business_view') {
-          const nodeId = `${file.type}:${file.name.replace(/\.(dqlnb|dql)$/i, '')}`;
-          dispatch({ type: 'SET_LINEAGE_FOCUS', nodeId });
-          dispatch({ type: 'OPEN_LINEAGE_DRAWER', nodeId });
-          if (state.sidebarPanel !== 'lineage') {
-            dispatch({ type: 'SET_SIDEBAR_PANEL', panel: 'lineage' });
-          }
+          if (state.sidebarPanel !== 'files') dispatch({ type: 'SET_SIDEBAR_PANEL', panel: 'files' });
+          dispatch({ type: 'OPEN_BUSINESS_ARTIFACT', file });
           return;
         }
         if (file.type === 'block') {
@@ -194,6 +191,8 @@ export function AppShell() {
         >
           {state.lineageFullscreen ? (
             <LineageDAG />
+          ) : state.mainView === 'business_artifact' ? (
+            <BusinessArtifactView />
           ) : state.mainView === 'connection' ? (
             <FullPageSection
               title="Connections"

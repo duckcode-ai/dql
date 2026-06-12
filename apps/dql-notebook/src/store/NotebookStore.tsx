@@ -202,6 +202,27 @@ function notebookReducer(state: NotebookState, action: NotebookAction): Notebook
     case 'SET_FILES_LOADING':
       return { ...state, filesLoading: action.loading };
 
+    case 'OPEN_BUSINESS_ARTIFACT':
+      return {
+        ...state,
+        activeFile: action.file,
+        cells: [],
+        notebookTitle: action.file.name.replace(/\.(dqlnb|dql)$/i, ''),
+        notebookDirty: false,
+        mainView: 'business_artifact',
+        activeBlockPath: null,
+        blockStudioDraft: '',
+        blockStudioDirty: false,
+        blockStudioPreview: null,
+        blockStudioValidation: null,
+        blockStudioMetadata: null,
+        dashboardMode: false,
+        lineageFullscreen: false,
+        lineageDrawerOpen: false,
+        lineageDrawerNodeId: null,
+        lineageFocusNodeId: `${action.file.type}:${action.file.name.replace(/\.(dqlnb|dql)$/i, '')}`,
+      };
+
     case 'OPEN_FILE':
       return {
         ...state,

@@ -60,6 +60,7 @@ export function Header() {
   // gets a static title and hides the file chip + editor actions.
   const isEditorView = state.mainView === 'notebook' || state.mainView === 'block_studio';
   const VIEW_TITLES: Partial<Record<typeof state.mainView, string>> = {
+    business_artifact: state.activeFile?.name.replace(/\.(dqlnb|dql)$/i, '') ?? 'Business Definition',
     connection: 'Connections',
     reference: 'Quick Reference',
     apps: 'Apps',
