@@ -83,6 +83,22 @@ filter.dropdown(SELECT DISTINCT region FROM orders,label="Region",param="region"
     expect(formatted).toContain('invariants = ["exposure_usd >= 0"]');
   });
 
+  it('formats digest declarations without dropping content', () => {
+    const source = `digest "Weekly Exec" {
+narrative { prompt = "Summarize the movement" sources = [ref("Revenue")] }
+chart.line(SELECT week, revenue FROM weekly_revenue,x=week,y=revenue)
+}`;
+
+    const formatted = formatDQL(source);
+
+    expect(formatted).toContain('digest "Weekly Exec" {');
+    expect(formatted).toContain('narrative {');
+    expect(formatted).toContain('prompt = "Summarize the movement"');
+    expect(formatted).toContain('sources = [ref("Revenue")]');
+    expect(formatted).toContain('chart.line(');
+    expect(() => parse(formatted)).not.toThrow();
+  });
+
   it('is idempotent and parseable', () => {
     const source = `workbook "Ops Review" {
   page "Overview" {

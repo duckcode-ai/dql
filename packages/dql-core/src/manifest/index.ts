@@ -4,6 +4,7 @@ export {
   buildManifest,
   collectInputFiles,
   loadProjectConfig,
+  resolveDataLexManifestPath,
   resolveDbtManifestPath,
   type ManifestBuildOptions,
   type DbtImportFilters,

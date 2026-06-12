@@ -202,3 +202,102 @@ describe('buildManifest dbt import filters', () => {
     expect(names).toEqual(['a']);
   });
 });
+
+describe('buildManifest block extraction', () => {
+  let tmpDir: string;
+
+  beforeEach(() => {
+    tmpDir = mkdtempSync(join(tmpdir(), 'dql-manifest-blocks-'));
+    writeFileSync(join(tmpDir, 'dql.config.json'), JSON.stringify({ project: 'demo' }));
+  });
+
+  afterEach(() => {
+    rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  it('extracts notebook DQL block SQL and metadata from the parsed block', () => {
+    mkdirSync(join(tmpDir, 'notebooks'), { recursive: true });
+    writeFileSync(join(tmpDir, 'notebooks', 'analysis.dqlnb'), JSON.stringify({
+      version: 1,
+      cells: [
+        {
+          id: 'cell-1',
+          type: 'dql',
+          source: `block "Notebook Revenue" {
+  domain = "finance"
+  type = "custom"
+  status = "certified"
+  owner = "analytics@example.com"
+  tags = ["finance", "notebook"]
+  query = """
+    SELECT segment, SUM(revenue) AS revenue
+    FROM orders
+    GROUP BY 1
+  """
+  visualization {
+    chart = "bar"
+    x = segment
+    y = revenue
+  }
+  tests {
+    assert row_count > 0
+  }
+}`,
+        },
+      ],
+    }));
+
+    const manifest = buildManifest({ projectRoot: tmpDir, dqlVersion: 'test' });
+    const block = manifest.blocks['Notebook Revenue'];
+
+    expect(block.sql).toContain('SELECT segment');
+    expect(block.sql).not.toContain('block "Notebook Revenue"');
+    expect(block.domain).toBe('finance');
+    expect(block.status).toBe('certified');
+    expect(block.owner).toBe('analytics@example.com');
+    expect(block.tags).toEqual(['finance', 'notebook']);
+    expect(block.chartType).toBe('bar');
+    expect(block.tests).toEqual(['row_count > 0']);
+    expect(block.tableDependencies).toEqual(['orders']);
+  });
+
+  it('validates datalex_contract references when configured with a DataLex manifest', () => {
+    mkdirSync(join(tmpDir, 'blocks'), { recursive: true });
+    writeFileSync(join(tmpDir, 'dql.config.json'), JSON.stringify({
+      project: 'demo',
+      datalex: { manifestPath: 'datalex-manifest.json' },
+    }));
+    writeFileSync(join(tmpDir, 'datalex-manifest.json'), JSON.stringify({
+      manifestSpecVersion: '1.0.0',
+      datalexVersion: '1.0.0',
+      generatedAt: '2026-01-01T00:00:00Z',
+      project: { name: 'demo' },
+      domains: [
+        {
+          name: 'commerce',
+          entities: [
+            {
+              name: 'Customer',
+              contracts: [
+                { id: 'commerce.Customer.monthly_active_customers', name: 'monthly_active_customers', version: 1 },
+              ],
+            },
+          ],
+        },
+      ],
+    }));
+    writeFileSync(join(tmpDir, 'blocks', 'bad.dql'), `block "Bad Contract" {
+  domain = "commerce"
+  type = "custom"
+  status = "certified"
+  datalex_contract = "commerce.Customer.unknown_contract@1"
+  query = """SELECT 1"""
+}`);
+
+    const manifest = buildManifest({ projectRoot: tmpDir, dqlVersion: 'test' });
+
+    expect(manifest.diagnostics?.some((d) =>
+      d.severity === 'error' && d.message.includes('not found in the loaded DataLex manifest'),
+    )).toBe(true);
+  });
+});

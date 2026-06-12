@@ -10,6 +10,8 @@ import type {
   LayoutBlockNode,
   LayoutRowNode,
   NamedArgNode,
+  DigestNode,
+  NarrativeNode,
   PageNode,
   ParamDeclNode,
   ProgramNode,
@@ -66,6 +68,8 @@ function formatStatement(node: StatementNode, level: number, state: FormatState)
       return formatImport(node, level, state);
     case NodeKind.BlockDecl:
       return formatBlock(node, level, state);
+    case NodeKind.Digest:
+      return formatDigest(node, level, state);
     default:
       return '';
   }
@@ -77,6 +81,30 @@ function formatDashboard(node: DashboardNode, level: number, state: FormatState)
   lines.push(`${indent(level, state)}dashboard ${quote(node.title)} {`);
   for (const item of node.body) {
     lines.push(formatDashboardBodyItem(item, level + 1, state));
+  }
+  lines.push(`${indent(level, state)}}`);
+  return lines.join('\n');
+}
+
+function formatDigest(node: DigestNode, level: number, state: FormatState): string {
+  const lines: string[] = [];
+  lines.push(...formatDecorators(node.decorators, level, state));
+  lines.push(`${indent(level, state)}digest ${quote(node.title)} {`);
+  if (node.narrative) {
+    lines.push(formatNarrative(node.narrative, level + 1, state));
+  }
+  for (const item of node.body) {
+    lines.push(formatDashboardBodyItem(item, level + 1, state));
+  }
+  lines.push(`${indent(level, state)}}`);
+  return lines.join('\n');
+}
+
+function formatNarrative(node: NarrativeNode, level: number, state: FormatState): string {
+  const lines: string[] = [];
+  lines.push(`${indent(level, state)}narrative {`);
+  for (const prop of node.properties) {
+    lines.push(`${indent(level + 1, state)}${formatNamedArg(prop)}`);
   }
   lines.push(`${indent(level, state)}}`);
   return lines.join('\n');

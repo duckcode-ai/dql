@@ -9,7 +9,7 @@
 
 import { existsSync, readFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
-import { buildManifest, resolveDbtManifestPath, type DQLManifest } from '@duckcodeailabs/dql-core';
+import { buildManifest, resolveDataLexManifestPath, resolveDbtManifestPath, type DQLManifest } from '@duckcodeailabs/dql-core';
 import type { CLIFlags } from '../args.js';
 
 export async function runVerify(
@@ -54,9 +54,13 @@ export async function runVerify(
 
   const resolvedDbt = resolveDbtManifestPath(projectRoot, dbtManifestPath);
   if (resolvedDbt) dbtManifestPath = resolvedDbt;
+  const datalexManifestPath = resolveDataLexManifestPath(projectRoot, flags.datalexManifestPath || undefined) ?? undefined;
+  if (flags.datalexManifestPath && (!datalexManifestPath || !existsSync(datalexManifestPath))) {
+    throw new Error(`DataLex manifest not found: ${flags.datalexManifestPath}`);
+  }
 
   const onDisk = JSON.parse(readFileSync(manifestPath, 'utf-8')) as DQLManifest;
-  const fresh = buildManifest({ projectRoot, dqlVersion, dbtManifestPath, maxDbtHops });
+  const fresh = buildManifest({ projectRoot, dqlVersion, dbtManifestPath, maxDbtHops, datalexManifestPath });
 
   const drift = diffManifest(onDisk, fresh);
   const json = (flags as { format?: string }).format === 'json';

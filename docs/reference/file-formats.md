@@ -152,6 +152,9 @@ Lives at the project root. Written by `dql init` and `create-dql-app`.
     "projectDir": "../dbt",
     "manifestPath": "target/manifest.json"
   },
+  "datalex": {
+    "manifestPath": "../datalex/datalex-manifest.json"
+  },
   "governance": {
     "required_fields": ["domain", "owner", "description"]
   }
@@ -164,6 +167,7 @@ Fields:
 - **`connections`** — named database connections. `default` is used unless a block overrides it
 - **`semanticLayer`** — `{ provider, path, projectPath }`. Providers: `dql` (local YAML), `dbt`, `cubejs`, `snowflake`
 - **`dbt`** — `{ projectDir, manifestPath }` for in-place or sibling dbt projects. `dql compile` and `dql sync dbt` read from here
+- **`datalex`** — optional `{ manifestPath }` for validating `datalex_contract` references. DQL works without DataLex; this only enables interop checks when a DataLex manifest exists
 - **`governance`** — required fields every block must declare to pass `dql certify`
 
 ## `dql-manifest.json` — build output

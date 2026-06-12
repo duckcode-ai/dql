@@ -19,7 +19,7 @@
 
 import { writeFileSync, existsSync, readFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
-import { buildManifest, collectInputFiles, resolveDbtManifestPath, type DQLManifest } from '@duckcodeailabs/dql-core';
+import { buildManifest, collectInputFiles, resolveDataLexManifestPath, resolveDbtManifestPath, type DQLManifest } from '@duckcodeailabs/dql-core';
 import { ManifestCache } from '@duckcodeailabs/dql-project';
 import type { CLIFlags } from '../args.js';
 
@@ -77,6 +77,12 @@ export async function runCompile(
   // Resolve via explicit flag → dql.config.json `dbt:` → target/manifest.json
   const resolvedDbt = resolveDbtManifestPath(projectRoot, dbtManifestPath);
   if (resolvedDbt) dbtManifestPath = resolvedDbt;
+  const datalexManifestPath = resolveDataLexManifestPath(projectRoot, flags.datalexManifestPath || undefined) ?? undefined;
+  if (flags.datalexManifestPath && (!datalexManifestPath || !existsSync(datalexManifestPath))) {
+    console.error(`DataLex manifest not found: ${datalexManifestPath ?? flags.datalexManifestPath}`);
+    process.exitCode = 1;
+    return;
+  }
 
   const noCache = allArgs.includes('--no-cache');
 
@@ -85,7 +91,7 @@ export async function runCompile(
   let manifest: DQLManifest;
   let cacheHit = false;
 
-  const buildOptions = { projectRoot, dqlVersion, dbtManifestPath, maxDbtHops };
+  const buildOptions = { projectRoot, dqlVersion, dbtManifestPath, maxDbtHops, datalexManifestPath };
 
   try {
     if (noCache) {

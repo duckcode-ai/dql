@@ -1,6 +1,7 @@
-import { mkdirSync, readFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync } from 'node:fs';
 import { basename, dirname, extname, join, resolve } from 'node:path';
 import { compile, writeBundle } from '@duckcodeailabs/dql-compiler';
+import { DataLexContractRegistry, resolveDataLexManifestPath } from '@duckcodeailabs/dql-core';
 import type { CLIFlags } from '../args.js';
 import { findProjectRoot, loadProjectConfig } from '../local-runtime.js';
 import { isDigestOutput, runDigestBuild } from '../digest.js';
@@ -10,9 +11,14 @@ export async function runBuild(filePath: string, flags: CLIFlags): Promise<void>
   const projectRoot = findProjectRoot(dirname(absoluteFile));
   const config = loadProjectConfig(projectRoot);
   const source = readFileSync(absoluteFile, 'utf-8');
+  const datalexManifestPath = resolveDataLexManifestPath(projectRoot, flags.datalexManifestPath || undefined) ?? undefined;
+  if (flags.datalexManifestPath && (!datalexManifestPath || !existsSync(datalexManifestPath))) {
+    throw new Error(`DataLex manifest not found: ${flags.datalexManifestPath}`);
+  }
   const result = compile(source, {
     file: absoluteFile,
     theme: config.preview?.theme ?? 'light',
+    datalexRegistry: datalexManifestPath ? new DataLexContractRegistry({ manifestPath: datalexManifestPath }) : undefined,
   });
 
   if (result.errors.length > 0) {

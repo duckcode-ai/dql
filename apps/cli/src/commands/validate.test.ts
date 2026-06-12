@@ -60,4 +60,48 @@ describe('runValidate', () => {
     expect(payload.files).toBe(1);
     expect(payload.diagnostics).toEqual([]);
   });
+
+  it('uses configured DataLex manifest for datalex_contract validation', async () => {
+    const root = tempProject();
+    mkdirSync(join(root, 'blocks'), { recursive: true });
+    writeFileSync(join(root, 'dql.config.json'), JSON.stringify({
+      project: 'validate-test',
+      datalex: { manifestPath: 'datalex-manifest.json' },
+    }));
+    writeFileSync(join(root, 'datalex-manifest.json'), JSON.stringify({
+      manifestSpecVersion: '1.0.0',
+      datalexVersion: '1.0.0',
+      generatedAt: '2026-01-01T00:00:00Z',
+      project: { name: 'validate-test' },
+      domains: [
+        {
+          name: 'commerce',
+          entities: [
+            {
+              name: 'Customer',
+              contracts: [
+                { id: 'commerce.Customer.monthly_active_customers', name: 'monthly_active_customers', version: 1 },
+              ],
+            },
+          ],
+        },
+      ],
+    }));
+    writeFileSync(join(root, 'blocks', 'bad_contract.dql'), `block "Bad Contract" {
+  domain = "commerce"
+  type = "custom"
+  status = "certified"
+  datalex_contract = "commerce.Customer.unknown_contract@1"
+  query = """SELECT 1"""
+}`);
+    const log = vi.spyOn(console, 'log').mockImplementation(() => {});
+
+    await runValidate(root, { format: 'json' } as any);
+
+    const payload = JSON.parse(String(log.mock.calls.at(-1)?.[0]));
+    expect(payload.diagnostics.some((d: any) =>
+      d.severity === 'error' && d.message.includes('not found in the loaded DataLex manifest'),
+    )).toBe(true);
+    expect(process.exitCode).toBe(1);
+  });
 });

@@ -32,6 +32,7 @@ const FILTER_TYPES = ['dropdown', 'date_range', 'text', 'multi_select', 'range']
 const KEYWORDS = [
   'dashboard', 'workbook', 'page', 'layout', 'row', 'span',
   'chart', 'filter', 'param', 'import', 'from', 'use', 'let',
+  'block', 'digest', 'narrative', 'visualization', 'tests', 'assert',
 ];
 
 const DECORATORS = [
@@ -47,6 +48,17 @@ const CHART_ARGS = [
   'connection', 'pin_columns', 'row_color', 'topology_url',
   'drill_hierarchy', 'drill_path', 'drill_mode',
   'drill_down', 'link_to', 'on_click', 'filter_by',
+];
+
+const BLOCK_FIELDS = [
+  'domain', 'type', 'status', 'description', 'owner', 'tags',
+  'llmContext', 'businessOutcome', 'businessOwner', 'decisionUse',
+  'reviewCadence', 'businessRules', 'caveats', 'datalex_contract',
+  'metric', 'metrics', 'dimensions', 'params', 'query', 'visualization', 'tests',
+];
+
+const BLOCK_STATUS_VALUES = [
+  'draft', 'review', 'certified', 'deprecated', 'pending_recertification',
 ];
 
 export class DQLLanguageService {
@@ -123,6 +135,20 @@ export class DQLLanguageService {
       return items;
     }
 
+    if (textBefore.match(/status\s*=\s*"[^"]*$/)) {
+      for (const status of BLOCK_STATUS_VALUES) {
+        items.push({ label: status, kind: 12, detail: `block status "${status}"`, insertText: status });
+      }
+      return items;
+    }
+
+    if (textBefore.match(/type\s*=\s*"[^"]*$/)) {
+      for (const blockType of ['custom', 'semantic']) {
+        items.push({ label: blockType, kind: 12, detail: `block type "${blockType}"`, insertText: blockType });
+      }
+      return items;
+    }
+
     // Inside chart args (after comma or opening paren) — suggest named args
     if (textBefore.match(/,\s*$/) || textBefore.match(/\(\s*$/)) {
       // Check if we're inside a chart call
@@ -133,6 +159,14 @@ export class DQLLanguageService {
         }
         return items;
       }
+    }
+
+    const fullText = lines.slice(0, line + 1).join('\n');
+    if (isInsideBlock(fullText) && (textBefore.match(/^\s*$/) || textBefore.match(/^\s*[A-Za-z_]*$/))) {
+      for (const field of BLOCK_FIELDS) {
+        items.push({ label: field, kind: 5, detail: `block field ${field}`, insertText: blockFieldInsertText(field) });
+      }
+      return items;
     }
 
     // Default: suggest keywords
@@ -217,4 +251,23 @@ export class DQLLanguageService {
 
     return null;
   }
+}
+
+function isInsideBlock(text: string): boolean {
+  const lastBlock = text.lastIndexOf('block ');
+  if (lastBlock < 0) return false;
+  const tail = text.slice(lastBlock);
+  let depth = 0;
+  for (const ch of tail) {
+    if (ch === '{') depth++;
+    else if (ch === '}') depth--;
+  }
+  return depth > 0;
+}
+
+function blockFieldInsertText(field: string): string {
+  if (field === 'params' || field === 'visualization' || field === 'tests') return `${field} {\n  \n}`;
+  if (field === 'tags' || field === 'metrics' || field === 'dimensions' || field === 'businessRules' || field === 'caveats') return `${field} = []`;
+  if (field === 'query') return 'query = """\n  SELECT 1\n"""';
+  return `${field} = ""`;
 }

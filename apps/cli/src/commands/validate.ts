@@ -1,6 +1,14 @@
 import { readdirSync, readFileSync, existsSync, statSync } from 'node:fs';
 import { dirname, extname, join, relative, resolve } from 'node:path';
-import { Parser, analyze, loadSemanticLayerFromDir, type SemanticLayer, type Diagnostic as CoreDiagnostic } from '@duckcodeailabs/dql-core';
+import {
+  DataLexContractRegistry,
+  Parser,
+  analyze,
+  loadSemanticLayerFromDir,
+  resolveDataLexManifestPath,
+  type SemanticLayer,
+  type Diagnostic as CoreDiagnostic,
+} from '@duckcodeailabs/dql-core';
 import type { CLIFlags } from '../args.js';
 
 interface Diagnostic {
@@ -99,6 +107,25 @@ export async function runValidate(path: string | null, flags: CLIFlags): Promise
     }
   }
 
+  let datalexRegistry: DataLexContractRegistry | undefined;
+  const datalexManifestPath = resolveDataLexManifestPath(projectRoot, flags.datalexManifestPath || undefined) ?? undefined;
+  if (flags.datalexManifestPath && (!datalexManifestPath || !existsSync(datalexManifestPath))) {
+    diagnostics.push({
+      file: flags.datalexManifestPath,
+      severity: 'error',
+      message: `DataLex manifest not found: ${flags.datalexManifestPath}`,
+    });
+  } else if (datalexManifestPath) {
+    datalexRegistry = new DataLexContractRegistry({ manifestPath: datalexManifestPath });
+    for (const message of datalexRegistry.loadDiagnostics()) {
+      diagnostics.push({
+        file: relative(projectRoot, datalexManifestPath),
+        severity: 'warning',
+        message,
+      });
+    }
+  }
+
   for (const { filePath, relativePath } of files) {
     try {
       const source = readFileSync(filePath, 'utf-8');
@@ -107,7 +134,7 @@ export async function runValidate(path: string | null, flags: CLIFlags): Promise
 
       // Run semantic analysis
       try {
-        const diags: CoreDiagnostic[] = analyze(ast);
+        const diags: CoreDiagnostic[] = analyze(ast, { datalexRegistry });
         for (const diag of diags) {
           diagnostics.push({
             file: relativePath,

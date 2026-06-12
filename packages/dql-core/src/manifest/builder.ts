@@ -9,11 +9,13 @@
 import { readdirSync, readFileSync, existsSync, statSync } from 'node:fs';
 import { join, extname, relative } from 'node:path';
 import { Parser } from '../parser/index.js';
+import { analyze } from '../semantic/index.js';
 import { extractTablesFromSql } from '../lineage/sql-parser.js';
 import { extractColumnLineage } from '../lineage/column-lineage.js';
 import { buildLineageGraph } from '../lineage/builder.js';
 import { detectDomainFlows, getDomainTrustOverview } from '../lineage/domain-lineage.js';
 import { loadSemanticLayerFromDir } from '../semantic/index.js';
+import { DataLexContractRegistry } from '../contracts/index.js';
 import type {
   LineageBlockInput,
   LineageMetricInput,
@@ -75,6 +77,8 @@ export interface ManifestBuildOptions {
   dqlVersion?: string;
   /** Path to dbt manifest.json for import */
   dbtManifestPath?: string;
+  /** Path to a DataLex manifest JSON for optional datalex_contract validation */
+  datalexManifestPath?: string;
   /**
    * Max upstream hops to follow through the dbt DAG from DQL anchor tables.
    * undefined = follow all the way to raw sources (default).
@@ -115,6 +119,10 @@ export function collectInputFiles(options: ManifestBuildOptions): string[] {
   if (existsSync(configPath)) files.add(configPath);
 
   const config = loadProjectConfig(projectRoot);
+  const datalexManifestPath = resolveDataLexManifestPath(projectRoot, options.datalexManifestPath, config);
+  if (datalexManifestPath && existsSync(datalexManifestPath)) {
+    files.add(datalexManifestPath);
+  }
 
   const blockDirs = ['blocks', 'dashboards', 'workbooks', ...(options.extraBlockDirs ?? [])];
   for (const dir of blockDirs) {
@@ -154,17 +162,29 @@ export function buildManifest(options: ManifestBuildOptions): DQLManifest {
   // Load project config
   const config = loadProjectConfig(projectRoot);
   const projectName = config.project ?? 'dql-project';
+  const datalexManifestPath = resolveDataLexManifestPath(projectRoot, options.datalexManifestPath, config);
+  const datalexRegistry = datalexManifestPath
+    ? new DataLexContractRegistry({ manifestPath: datalexManifestPath })
+    : undefined;
+  for (const message of datalexRegistry?.loadDiagnostics() ?? []) {
+    diagnostics.push({
+      kind: 'config',
+      filePath: datalexManifestPath ? relative(projectRoot, datalexManifestPath) : undefined,
+      severity: 'warning',
+      message,
+    });
+  }
 
   // Scan blocks
   const blockDirs = ['blocks', 'dashboards', 'workbooks', ...(options.extraBlockDirs ?? [])];
-  const blocks = scanBlocks(projectRoot, blockDirs, diagnostics);
+  const blocks = scanBlocks(projectRoot, blockDirs, diagnostics, datalexRegistry);
 
   // Scan notebooks
   const notebookDirs = ['notebooks', 'blocks', 'dashboards', 'workbooks', ...(options.extraNotebookDirs ?? [])];
-  const notebooks = scanNotebooks(projectRoot, notebookDirs, diagnostics);
+  const notebooks = scanNotebooks(projectRoot, notebookDirs, diagnostics, datalexRegistry);
 
   // Extract blocks declared inside notebook DQL cells
-  const notebookBlocks = extractNotebookBlocks(notebooks, projectRoot);
+  const notebookBlocks = extractNotebookBlocks(notebooks);
   for (const [name, block] of Object.entries(notebookBlocks)) {
     if (!blocks[name]) blocks[name] = block;
   }
@@ -254,6 +274,11 @@ interface ProjectConfig {
     /** Path to the dbt manifest.json, relative to `projectDir`. Default: target/manifest.json */
     manifestPath?: string;
   };
+  /** Optional interop path to a DataLex compiler manifest. DQL itself does not require DataLex. */
+  datalex?: {
+    /** Path to datalex-manifest.json, absolute or relative to projectRoot */
+    manifestPath?: string;
+  };
 }
 
 /**
@@ -297,6 +322,23 @@ export function resolveDbtManifestPath(
   return null;
 }
 
+export function resolveDataLexManifestPath(
+  projectRoot: string,
+  explicit?: string,
+  config: ProjectConfig = loadProjectConfig(projectRoot),
+): string | null {
+  if (explicit) {
+    return isAbsPath(explicit) ? explicit : join(projectRoot, explicit);
+  }
+  const configured = config.datalex?.manifestPath;
+  if (configured) {
+    return isAbsPath(configured) ? configured : join(projectRoot, configured);
+  }
+  const fallback = join(projectRoot, 'datalex-manifest.json');
+  if (existsSync(fallback)) return fallback;
+  return null;
+}
+
 function isAbsPath(p: string): boolean {
   return p.startsWith('/') || /^[A-Za-z]:[\\/]/.test(p);
 }
@@ -333,6 +375,7 @@ function scanBlocks(
   projectRoot: string,
   dirs: string[],
   diagnostics?: ManifestDiagnostic[],
+  datalexRegistry?: DataLexContractRegistry,
 ): Record<string, ManifestBlock> {
   const blocks: Record<string, ManifestBlock> = {};
 
@@ -346,69 +389,13 @@ function scanBlocks(
         const source = readFileSync(filePath, 'utf-8');
         const parser = new Parser(source, relPath);
         const ast = parser.parse();
+        collectContractDiagnostics(ast, relPath, diagnostics, datalexRegistry);
 
         for (const stmt of ast.statements) {
           const block = stmt as any;
           if (block.kind !== 'BlockDecl') continue;
 
-          const sql = block.query?.rawSQL ?? '';
-          const parseResult = extractTablesFromSql(sql);
-          const columnLineage = sql ? extractColumnLineage(sql) : null;
-          const domain = extractProp(block, 'domain');
-          const owner = extractProp(block, 'owner');
-          const description = extractProp(block, 'description');
-          const tags = extractTags(block);
-          const tests = extractTests(block);
-          const agent = extractAgentMetadata(block);
-
-          blocks[block.name] = {
-            name: block.name,
-            filePath: relPath,
-            domain,
-            owner,
-            status: extractProp(block, 'status'),
-            blockType: block.blockType,
-            sql,
-            rawTableRefs: parseResult.tables,
-            tableDependencies: parseResult.tables.map(normalizeTableName),
-            refDependencies: parseResult.refs,
-            metricRefs: parseResult.metricRefs,
-            dimensionRefs: parseResult.dimensionRefs,
-            dimensionsRef: block.dimensionsRef,
-            allDependencies: [
-              ...parseResult.refs,
-              ...parseResult.tables.map(normalizeTableName),
-              ...parseResult.metricRefs.map((m) => `@metric(${m})`),
-              ...parseResult.dimensionRefs.map((d) => `@dim(${d})`),
-              ...((block.metricsRef ?? (block.metricRef ? [block.metricRef] : [])).map((m: string) => `@metric(${m})`)),
-              ...((block.dimensionsRef ?? []).map((d: string) => `@dim(${d})`)),
-            ],
-            chartType: extractVisualizationChart(block),
-            metricRef: block.metricRef,
-            metricsRef: block.metricsRef,
-            tests,
-            tags,
-            description,
-            llmContext: agent.llmContext,
-            examples: agent.examples,
-            invariants: agent.invariants,
-            businessOutcome: agent.businessOutcome,
-            businessOwner: agent.businessOwner,
-            decisionUse: agent.decisionUse,
-            reviewCadence: agent.reviewCadence,
-            businessRules: agent.businessRules,
-            caveats: agent.caveats,
-            datalexContract: typeof block.datalexContract === 'string' ? block.datalexContract : undefined,
-            outputs: columnLineage?.parsed && columnLineage.columns.length > 0
-              ? columnLineage.columns.map((c) => ({
-                  name: c.name,
-                  isAggregate: c.isAggregate,
-                  aggregateFn: c.aggregateFn,
-                  sources: c.sources,
-                  unresolved: c.unresolved,
-                }))
-              : undefined,
-          };
+          blocks[block.name] = blockDeclToManifestBlock(block, relPath);
         }
       } catch (err) {
         // Surface parse failures as diagnostics instead of silently dropping
@@ -433,6 +420,7 @@ function scanNotebooks(
   projectRoot: string,
   dirs: string[],
   diagnostics?: ManifestDiagnostic[],
+  datalexRegistry?: DataLexContractRegistry,
 ): Record<string, ManifestNotebook> {
   const notebooks: Record<string, ManifestNotebook> = {};
   const seen = new Set<string>();
@@ -469,6 +457,7 @@ function scanNotebooks(
             try {
               const parser = new Parser(source, `${relPath}:${cell.id}`);
               const ast = parser.parse();
+              collectContractDiagnostics(ast, relPath, diagnostics, datalexRegistry);
               for (const stmt of ast.statements) {
                 if ((stmt as any).kind === 'BlockDecl') {
                   blockName = (stmt as any).name;
@@ -524,10 +513,7 @@ function scanNotebooks(
 }
 
 /** Extract blocks declared inside notebook DQL cells into the blocks map. */
-function extractNotebookBlocks(
-  notebooks: Record<string, ManifestNotebook>,
-  projectRoot: string,
-): Record<string, ManifestBlock> {
+function extractNotebookBlocks(notebooks: Record<string, ManifestNotebook>): Record<string, ManifestBlock> {
   const blocks: Record<string, ManifestBlock> = {};
 
   for (const [nbPath, nb] of Object.entries(notebooks)) {
@@ -536,17 +522,25 @@ function extractNotebookBlocks(
 
       // Only add if not already found as a standalone block file
       if (!blocks[cell.blockName]) {
-        const parseResult = extractTablesFromSql(cell.source);
-        blocks[cell.blockName] = {
-          name: cell.blockName,
-          filePath: `${nbPath}#${cell.id}`,
-          sql: cell.source,
-          rawTableRefs: parseResult.tables,
-          tableDependencies: parseResult.tables.map(normalizeTableName),
-          refDependencies: parseResult.refs,
-          allDependencies: [...parseResult.refs, ...parseResult.tables.map(normalizeTableName)],
-          tests: [],
-        };
+        try {
+          const ast = new Parser(cell.source, `${nbPath}:${cell.id}`).parse();
+          const block = ast.statements.find((stmt: any) => stmt.kind === 'BlockDecl' && stmt.name === cell.blockName);
+          if (block) {
+            blocks[cell.blockName] = blockDeclToManifestBlock(block, `${nbPath}#${cell.id}`);
+          }
+        } catch {
+          const parseResult = extractTablesFromSql(cell.source);
+          blocks[cell.blockName] = {
+            name: cell.blockName,
+            filePath: `${nbPath}#${cell.id}`,
+            sql: '',
+            rawTableRefs: parseResult.tables,
+            tableDependencies: parseResult.tables.map(normalizeTableName),
+            refDependencies: parseResult.refs,
+            allDependencies: [...parseResult.refs, ...parseResult.tables.map(normalizeTableName)],
+            tests: [],
+          };
+        }
       }
     }
   }
@@ -1379,6 +1373,89 @@ function buildManifestLineage(
 
 // ---- AST Helpers ----
 
+function blockDeclToManifestBlock(block: any, filePath: string): ManifestBlock {
+  const sql = block.query?.rawSQL ?? '';
+  const parseResult = extractTablesFromSql(sql);
+  const columnLineage = sql ? extractColumnLineage(sql) : null;
+  const domain = extractProp(block, 'domain');
+  const owner = extractProp(block, 'owner');
+  const description = extractProp(block, 'description');
+  const tags = extractTags(block);
+  const tests = extractTests(block);
+  const agent = extractAgentMetadata(block);
+
+  return {
+    name: block.name,
+    filePath,
+    domain,
+    owner,
+    status: extractProp(block, 'status'),
+    blockType: block.blockType,
+    sql,
+    rawTableRefs: parseResult.tables,
+    tableDependencies: parseResult.tables.map(normalizeTableName),
+    refDependencies: parseResult.refs,
+    metricRefs: parseResult.metricRefs,
+    dimensionRefs: parseResult.dimensionRefs,
+    dimensionsRef: block.dimensionsRef,
+    allDependencies: [
+      ...parseResult.refs,
+      ...parseResult.tables.map(normalizeTableName),
+      ...parseResult.metricRefs.map((m) => `@metric(${m})`),
+      ...parseResult.dimensionRefs.map((d) => `@dim(${d})`),
+      ...((block.metricsRef ?? (block.metricRef ? [block.metricRef] : [])).map((m: string) => `@metric(${m})`)),
+      ...((block.dimensionsRef ?? []).map((d: string) => `@dim(${d})`)),
+    ],
+    chartType: extractVisualizationChart(block),
+    metricRef: block.metricRef,
+    metricsRef: block.metricsRef,
+    tests,
+    tags,
+    description,
+    llmContext: agent.llmContext,
+    examples: agent.examples,
+    invariants: agent.invariants,
+    businessOutcome: agent.businessOutcome,
+    businessOwner: agent.businessOwner,
+    decisionUse: agent.decisionUse,
+    reviewCadence: agent.reviewCadence,
+    businessRules: agent.businessRules,
+    caveats: agent.caveats,
+    datalexContract: typeof block.datalexContract === 'string' ? block.datalexContract : undefined,
+    outputs: columnLineage?.parsed && columnLineage.columns.length > 0
+      ? columnLineage.columns.map((c) => ({
+          name: c.name,
+          isAggregate: c.isAggregate,
+          aggregateFn: c.aggregateFn,
+          sources: c.sources,
+          unresolved: c.unresolved,
+        }))
+      : undefined,
+  };
+}
+
+function collectContractDiagnostics(
+  ast: import('../ast/index.js').ProgramNode,
+  relPath: string,
+  diagnostics?: ManifestDiagnostic[],
+  datalexRegistry?: DataLexContractRegistry,
+): void {
+  if (!diagnostics) return;
+  const hasContractRef = ast.statements.some((stmt: any) => stmt.kind === 'BlockDecl' && typeof stmt.datalexContract === 'string' && stmt.datalexContract.trim() !== '');
+  if (!hasContractRef) return;
+
+  const semanticDiagnostics = analyze(ast, { datalexRegistry });
+  for (const diag of semanticDiagnostics) {
+    if (!diag.message.includes('datalex_contract') && !diag.message.includes('DataLex manifest')) continue;
+    diagnostics.push({
+      kind: 'semantic',
+      filePath: relPath,
+      severity: diag.severity === 'error' ? 'error' : 'warning',
+      message: diag.message,
+    });
+  }
+}
+
 function extractProp(block: any, propName: string): string | undefined {
   if (block[propName] !== undefined && block[propName] !== null) {
     return String(block[propName]);
@@ -1395,6 +1472,9 @@ function extractProp(block: any, propName: string): string | undefined {
 function extractVisualizationChart(block: any): string | undefined {
   if (!block.visualization) return undefined;
   for (const prop of block.visualization.properties ?? []) {
+    if (prop.name === 'chart' && prop.value?.kind === 'StringLiteral') {
+      return String(prop.value.value);
+    }
     if (prop.key === 'chart' && prop.value?.kind === 'Literal') {
       return String(prop.value.value);
     }
@@ -1446,11 +1526,35 @@ function extractAgentMetadata(block: any): {
 }
 
 function extractTests(block: any): string[] {
+  if (Array.isArray(block.tests)) {
+    return block.tests.map((a: any) => {
+      if (typeof a === 'string') return a;
+      const expected = formatManifestTestExpected(a.expected);
+      return `${a.field ?? ''} ${a.operator ?? ''} ${expected}`.trim();
+    });
+  }
   if (!block.tests?.assertions) return [];
   return block.tests.assertions.map((a: any) => {
     if (typeof a === 'string') return a;
     return `${a.field ?? ''} ${a.operator ?? ''} ${a.expected ?? ''}`.trim();
   });
+}
+
+function formatManifestTestExpected(node: any): string {
+  if (!node || typeof node !== 'object') return String(node ?? '');
+  switch (node.kind) {
+    case 'StringLiteral':
+      return JSON.stringify(node.value);
+    case 'NumberLiteral':
+    case 'BooleanLiteral':
+      return String(node.value);
+    case 'Identifier':
+      return node.name;
+    case 'ArrayLiteral':
+      return `[${(node.elements ?? []).map(formatManifestTestExpected).join(', ')}]`;
+    default:
+      return String(node.value ?? '');
+  }
 }
 
 /**
