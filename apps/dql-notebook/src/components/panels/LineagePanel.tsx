@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
-import { PanelFrame, PanelToolbar, PanelEmpty } from '@duckcodeailabs/dql-ui';
+import { PanelFrame, PanelEmpty } from '@duckcodeailabs/dql-ui';
 import type { Theme } from '../../themes/notebook-theme';
 import { api } from '../../api/client';
 import { useNotebook } from '../../store/NotebookStore';
@@ -53,7 +53,7 @@ function SearchInput({
       placeholder={placeholder}
       style={{
         width: '100%',
-        padding: '8px 10px',
+        padding: '7px 9px',
         borderRadius: 6,
         border: `1px solid ${t.headerBorder}`,
         background: t.sidebarBg,
@@ -142,17 +142,20 @@ function SummaryCard({
   return (
     <div
       style={{
-        flex: '1 1 120px',
+        display: 'flex',
+        alignItems: 'baseline',
+        gap: 7,
         border: `1px solid ${t.headerBorder}`,
         borderRadius: 6,
-        padding: '7px 8px',
+        padding: '6px 8px',
         background: t.inputBg,
         minWidth: 0,
       }}
+      title={detail}
     >
-      <div style={{ color: t.textMuted, fontSize: 10, fontWeight: 700, textTransform: 'uppercase' }}>{label}</div>
-      <div style={{ color: t.textPrimary, fontSize: 18, fontWeight: 800, lineHeight: 1.2 }}>{value}</div>
-      <div style={{ color: t.textMuted, fontSize: 10, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={detail}>
+      <div style={{ color: t.textMuted, fontSize: 10, fontWeight: 800, textTransform: 'uppercase', flexShrink: 0 }}>{label}</div>
+      <div style={{ color: t.textPrimary, fontSize: 16, fontWeight: 800, lineHeight: 1 }}>{value}</div>
+      <div style={{ color: t.textMuted, fontSize: 10, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', minWidth: 0 }}>
         {detail}
       </div>
     </div>
@@ -326,22 +329,17 @@ export function LineagePanel() {
     );
   }
 
-  const toolbar = (
-    <PanelToolbar>
-      <SearchInput
-        value={search}
-        onChange={setSearch}
-        placeholder="Search terms, views, blocks, tables, dashboards..."
-        t={t}
-      />
-    </PanelToolbar>
-  );
-
   return (
-    <PanelFrame title="Lineage" toolbar={toolbar} bodyPadding={0}>
-      <div style={{ padding: 8, borderBottom: `1px solid ${t.headerBorder}` }}>
-        <div style={{ color: t.textMuted, fontSize: 11, lineHeight: 1.5 }}>
-          Search or browse the lineage index. Selecting an item opens only its focused lineage path, keeping large projects fast and readable.
+    <PanelFrame title="Lineage" bodyPadding={0}>
+      <div style={{ padding: '10px 12px 8px', borderBottom: `1px solid ${t.headerBorder}` }}>
+        <SearchInput
+          value={search}
+          onChange={setSearch}
+          placeholder="Search lineage..."
+          t={t}
+        />
+        <div style={{ marginTop: 7, color: t.textMuted, fontSize: 11, lineHeight: 1.4 }}>
+          Select an item to open only its focused lineage path.
         </div>
       </div>
 
@@ -363,7 +361,15 @@ export function LineagePanel() {
           </div>
         )}
 
-        <div style={{ padding: 8, display: 'flex', gap: 8, flexWrap: 'wrap', borderBottom: `1px solid ${t.headerBorder}` }}>
+        <div
+          style={{
+            padding: '8px 12px',
+            display: 'grid',
+            gridTemplateColumns: 'repeat(auto-fit, minmax(170px, 1fr))',
+            gap: 6,
+            borderBottom: `1px solid ${t.headerBorder}`,
+          }}
+        >
           <SummaryCard
             label="Business"
             value={summary.businessNodes}
@@ -385,7 +391,7 @@ export function LineagePanel() {
         </div>
 
         {/* Layer summary bar */}
-        <div style={{ padding: '6px 8px', display: 'flex', gap: 8, flexWrap: 'wrap', borderBottom: `1px solid ${t.headerBorder}` }}>
+        <div style={{ padding: '6px 12px', display: 'flex', alignItems: 'center', gap: 7, flexWrap: 'wrap', borderBottom: `1px solid ${t.headerBorder}` }}>
           {LAYER_ORDER.map((layer) => {
             const count = layerGrouped[layer].length;
             if (count === 0) return null;
