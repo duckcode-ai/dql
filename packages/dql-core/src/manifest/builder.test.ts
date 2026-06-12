@@ -306,10 +306,27 @@ describe('buildManifest block extraction', () => {
 
   it('compiles business views and validates included refs', () => {
     mkdirSync(join(tmpDir, 'blocks'), { recursive: true });
+    mkdirSync(join(tmpDir, 'terms'), { recursive: true });
     mkdirSync(join(tmpDir, 'business-views'), { recursive: true });
+    writeFileSync(join(tmpDir, 'terms', 'customer.dql'), `term "Customer" {
+  domain = "Customer"
+  type = "entity"
+  status = "draft"
+  description = "A person or account."
+  owner = "Customer Analytics"
+  identifiers = ["customer_id"]
+}`);
+    writeFileSync(join(tmpDir, 'terms', 'customer_health.dql'), `term "Customer Health" {
+  domain = "Customer"
+  type = "concept"
+  status = "draft"
+  description = "Retention and service risk summary."
+  owner = "Customer Analytics"
+}`);
     writeFileSync(join(tmpDir, 'blocks', 'customer_identity.dql'), `block "Customer Identity" {
   domain = "Customer"
   type = "custom"
+  terms = ["Customer"]
   query = """
     SELECT customer_id, customer_name FROM dim_customer
   """
@@ -317,6 +334,7 @@ describe('buildManifest block extraction', () => {
     writeFileSync(join(tmpDir, 'blocks', 'customer_orders.dql'), `block "Customer Orders Rollup" {
   domain = "Customer"
   type = "custom"
+  terms = ["Customer"]
   query = """
     SELECT customer_id, COUNT(*) AS total_orders FROM fct_orders GROUP BY 1
   """
@@ -326,6 +344,7 @@ describe('buildManifest block extraction', () => {
   status = "draft"
   description = "Complete customer view"
   owner = "Customer Analytics"
+  terms = ["Customer Health"]
   businessOutcome = "Improve retention decisions"
   decisionUse = "Account review"
   reviewCadence = "weekly"
@@ -340,12 +359,59 @@ describe('buildManifest block extraction', () => {
     const manifest = buildManifest({ projectRoot: tmpDir, dqlVersion: 'test' });
     const view = manifest.businessViews['Customer 360'];
 
+    expect(manifest.terms['Customer']).toMatchObject({
+      domain: 'Customer',
+      termType: 'entity',
+      identifiers: ['customer_id'],
+    });
     expect(view).toBeDefined();
     expect(view.domain).toBe('Customer');
     expect(view.owner).toBe('Customer Analytics');
     expect(view.blockRefs).toEqual(['Customer Identity', 'Customer Orders Rollup']);
+    expect(view.declaredTermRefs).toEqual(['Customer Health']);
+    expect(view.inheritedTermRefs).toEqual(['Customer']);
+    expect(view.termRefs).toEqual(['Customer Health', 'Customer']);
     expect(view.unresolvedBlockRefs).toEqual([]);
     expect(manifest.diagnostics?.filter((diag) => diag.severity === 'error')).toEqual([]);
+  });
+
+  it('reports duplicate terms and unresolved term refs', () => {
+    mkdirSync(join(tmpDir, 'blocks'), { recursive: true });
+    mkdirSync(join(tmpDir, 'terms'), { recursive: true });
+    mkdirSync(join(tmpDir, 'business-views'), { recursive: true });
+    writeFileSync(join(tmpDir, 'terms', 'customer.dql'), `term "Customer" {
+  domain = "Customer"
+  type = "entity"
+}`);
+    writeFileSync(join(tmpDir, 'terms', 'customer_duplicate.dql'), `term "Customer" {
+  domain = "Customer"
+  type = "entity"
+}`);
+    writeFileSync(join(tmpDir, 'blocks', 'customer_identity.dql'), `block "Customer Identity" {
+  domain = "Customer"
+  type = "custom"
+  terms = ["Customer", "Missing Term"]
+  query = """
+    SELECT customer_id FROM dim_customer
+  """
+}`);
+    writeFileSync(join(tmpDir, 'business-views', 'customer_360.dql'), `business_view "Customer 360" {
+  domain = "Customer"
+  terms = ["Missing View Term"]
+  includes {
+    block "Customer Identity"
+  }
+}`);
+
+    const manifest = buildManifest({ projectRoot: tmpDir, dqlVersion: 'test' });
+    const messages = manifest.diagnostics?.map((diag) => diag.message) ?? [];
+
+    expect(manifest.blocks['Customer Identity'].termRefs).toEqual(['Customer']);
+    expect(manifest.blocks['Customer Identity'].unresolvedTermRefs).toEqual(['Missing Term']);
+    expect(manifest.businessViews['Customer 360'].unresolvedTermRefs).toEqual(['Missing View Term']);
+    expect(messages.some((message) => message.includes('duplicate term "Customer"'))).toBe(true);
+    expect(messages.some((message) => message.includes('block "Customer Identity" has unresolved term refs: Missing Term'))).toBe(true);
+    expect(messages.some((message) => message.includes('business_view "Customer 360" has unresolved term refs: Missing View Term'))).toBe(true);
   });
 
   it('reports unresolved business view refs and cycles', () => {

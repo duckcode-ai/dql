@@ -24,7 +24,7 @@ dql --version
 
 | Command | What it does |
 | --- | --- |
-| `dql new <type> <name>` | Create a block, semantic block, business view, dashboard, workbook, or notebook |
+| `dql new <type> <name>` | Create a block, semantic block, term, business view, dashboard, workbook, or notebook |
 | `dql parse <file.dql>` | Parse and analyze a DQL file |
 | `dql info <file.dql>` | Show block metadata |
 | `dql certify <file.dql>` | Evaluate certification rules |
@@ -56,6 +56,16 @@ Exits **1** on changes — scriptable like `git diff`.
 | `dql semantic list\|validate\|query\|pull` | Semantic layer operations |
 | `dql sync dbt [path]` | Verify configured dbt artifacts and update local cache status |
 | `dql lineage [block] [path]` | Answer-layer lineage analysis |
+
+Useful lineage flags:
+
+```bash
+dql lineage --term "Customer"          # business term to blocks/views/consumption
+dql lineage --business                 # business lineage summary
+dql lineage --business "Customer 360"  # focused business composition and backing sources
+dql lineage --table fct_orders         # technical source lineage
+dql lineage --dashboard daily_ops      # consumption lineage
+```
 
 ### Migration
 

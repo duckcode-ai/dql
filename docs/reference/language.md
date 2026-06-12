@@ -120,6 +120,44 @@ Use `metric = "name"` for one metric, or `metrics = ["metric_a", "metric_b"]`
 for a multi-metric semantic block. `dimensions = [...]` groups the semantic
 query by one or more semantic dimensions.
 
+## Business Term
+
+A `term` defines business vocabulary in DQL core. It does not require SQL.
+Blocks and business views reference terms with `terms = [...]` so lineage can
+connect business meaning to implementation and consumption.
+
+```dql
+term "Customer" {
+  domain = "Customer"
+  type = "entity"
+  status = "draft"
+  description = "A person or account that can place orders or receive service."
+  owner = "customer-analytics"
+  tags = ["customer", "glossary"]
+  identifiers = ["customer_id"]
+  synonyms = ["Account"]
+  businessOwner = "Customer Success"
+  businessRules = ["One row per customer_id"]
+  caveats = ["Merged accounts may appear under a surviving customer_id."]
+}
+```
+
+Attach terms to a block:
+
+```dql
+block "Customer Orders Rollup" {
+  domain = "Customer"
+  type = "custom"
+  terms = ["Customer", "Lifetime Revenue", "Total Orders"]
+
+  query = """
+    SELECT customer_id, COUNT(*) AS total_orders, SUM(amount) AS lifetime_revenue
+    FROM fct_orders
+    GROUP BY 1
+  """
+}
+```
+
 ## Business View
 
 A `business_view` composes trusted blocks and other business views into a
@@ -134,6 +172,7 @@ business_view "Customer 360" {
   description = "Complete customer view for retention and account review."
   owner = "customer-analytics"
   tags = ["customer", "360", "retention"]
+  terms = ["Customer", "Customer Health"]
   businessOutcome = "Understand customer value, activity, and service risk."
   decisionUse = "Account planning, churn review, and expansion targeting."
   reviewCadence = "weekly"
@@ -155,6 +194,7 @@ Canonical business-view fields:
 | `description` | Human-facing summary |
 | `owner` | Person or team responsible for the business view |
 | `tags` | Discovery and filtering labels |
+| `terms` | Business term references represented by this view |
 | `businessOutcome` | Outcome this view supports |
 | `businessOwner` | Business stakeholder for the decision |
 | `decisionUse` | How the view should be used in decisions |
@@ -163,8 +203,9 @@ Canonical business-view fields:
 | `caveats` | Known limitations or interpretation notes |
 | `includes` | `block` and `business_view` references composed into this view |
 
-Compile validates included refs and reports unresolved blocks, unresolved
-business views, and business-view cycles as manifest diagnostics.
+Compile validates term refs and included refs. It reports unresolved terms,
+unresolved blocks, unresolved business views, and business-view cycles as
+manifest diagnostics.
 
 ## References
 

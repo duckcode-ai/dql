@@ -268,6 +268,7 @@ describe('Parser', () => {
       description = "Complete customer view for account review."
       owner = "Customer Analytics"
       tags = ["customer", "360"]
+      terms = ["Customer", "Customer Health"]
       businessOutcome = "Understand customer value, activity, and service risk."
       decisionUse = "Account planning and churn review"
       reviewCadence = "weekly"
@@ -288,12 +289,55 @@ describe('Parser', () => {
       expect(view.domain).toBe('Customer');
       expect(view.status).toBe('draft');
       expect(view.tags).toEqual(['customer', '360']);
+      expect(view.termRefs).toEqual(['Customer', 'Customer Health']);
       expect(view.businessOutcome).toContain('Understand customer value');
       expect(view.includes.map((ref) => `${ref.refType}:${ref.name}`)).toEqual([
         'block:Customer Identity',
         'block:Customer Orders Rollup',
         'business_view:Customer Service Summary',
       ]);
+    }
+  });
+
+  it('parses term declarations and block term references', () => {
+    const source = `term "Customer" {
+      domain = "Customer"
+      type = "entity"
+      status = "draft"
+      description = "A person or account that can place orders."
+      owner = "Customer Analytics"
+      tags = ["customer", "glossary"]
+      identifiers = ["customer_id"]
+      synonyms = ["Account"]
+      businessOwner = "Customer Success"
+      businessRules = ["One row per customer_id"]
+      caveats = ["Merged accounts may appear under a surviving customer_id"]
+    }
+
+    block "Customer Identity" {
+      domain = "Customer"
+      type = "custom"
+      terms = ["Customer"]
+      query = """
+        SELECT customer_id, customer_name FROM dim_customer
+      """
+    }`;
+
+    const ast = parse(source);
+    expect(ast.statements).toHaveLength(2);
+    const term = ast.statements[0];
+    const block = ast.statements[1];
+    expect(term.kind).toBe(NodeKind.TermDecl);
+    if (term.kind === NodeKind.TermDecl) {
+      expect(term.name).toBe('Customer');
+      expect(term.termType).toBe('entity');
+      expect(term.identifiers).toEqual(['customer_id']);
+      expect(term.synonyms).toEqual(['Account']);
+      expect(term.businessRules).toEqual(['One row per customer_id']);
+    }
+    expect(block.kind).toBe(NodeKind.BlockDecl);
+    if (block.kind === NodeKind.BlockDecl) {
+      expect(block.termRefs).toEqual(['Customer']);
     }
   });
 

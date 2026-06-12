@@ -17,6 +17,7 @@ import {
   type PageNode,
   type DashboardBodyItem,
   type BlockDeclNode,
+  type TermDeclNode,
   type BusinessViewDeclNode,
 } from '../ast/nodes.js';
 
@@ -326,6 +327,9 @@ export class SemanticAnalyzer {
         case NodeKind.BlockDecl:
           this.analyzeBlockDecl(stmt);
           break;
+        case NodeKind.TermDecl:
+          this.analyzeTermDecl(stmt);
+          break;
         case NodeKind.BusinessViewDecl:
           this.analyzeBusinessViewDecl(stmt);
           break;
@@ -475,6 +479,20 @@ export class SemanticAnalyzer {
 
     if (node.includes.length === 0) {
       this.reporter.warning('Business view has no includes.', node.span);
+    }
+  }
+
+  private analyzeTermDecl(node: TermDeclNode): void {
+    if (!node.name || node.name.trim().length === 0) {
+      this.reporter.error('Term must have a non-empty name.', node.span);
+    }
+
+    if (!node.domain) {
+      this.reporter.warning('Term is missing a domain declaration.', node.span);
+    }
+
+    if (!node.termType) {
+      this.reporter.warning('Term is missing a type declaration.', node.span);
     }
   }
 

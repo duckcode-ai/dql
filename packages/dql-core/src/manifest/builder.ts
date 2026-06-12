@@ -24,6 +24,7 @@ import type {
   LineageDashboardInput,
   LineageAppInput,
   LineageBusinessViewInput,
+  LineageTermInput,
 } from '../lineage/builder.js';
 import type {
   DQLManifest,
@@ -39,6 +40,7 @@ import type {
   ManifestApp,
   ManifestDashboard,
   ManifestBusinessView,
+  ManifestTerm,
 } from './types.js';
 import {
   loadAppDocument,
@@ -136,6 +138,11 @@ export function collectInputFiles(options: ManifestBuildOptions): string[] {
     for (const f of scanFilesRecursive(join(projectRoot, dir), ['.dql'])) files.add(f);
   }
 
+  const termDirs = ['terms', 'blocks', 'business-views', 'dashboards', 'workbooks', ...(options.extraBlockDirs ?? [])];
+  for (const dir of termDirs) {
+    for (const f of scanFilesRecursive(join(projectRoot, dir), ['.dql'])) files.add(f);
+  }
+
   const notebookDirs = ['notebooks', 'blocks', 'dashboards', 'workbooks', ...(options.extraNotebookDirs ?? [])];
   for (const dir of notebookDirs) {
     for (const f of scanFilesRecursive(join(projectRoot, dir), ['.dqlnb'])) files.add(f);
@@ -190,6 +197,10 @@ export function buildManifest(options: ManifestBuildOptions): DQLManifest {
   const businessViewDirs = ['blocks', 'business-views', 'dashboards', 'workbooks', ...(options.extraBlockDirs ?? [])];
   const businessViews = scanBusinessViews(projectRoot, businessViewDirs, diagnostics);
 
+  // Scan business glossary terms
+  const termDirs = ['terms', 'blocks', 'business-views', 'dashboards', 'workbooks', ...(options.extraBlockDirs ?? [])];
+  const terms = scanTerms(projectRoot, termDirs, diagnostics);
+
   // Scan notebooks
   const notebookDirs = ['notebooks', 'blocks', 'dashboards', 'workbooks', ...(options.extraNotebookDirs ?? [])];
   const notebooks = scanNotebooks(projectRoot, notebookDirs, diagnostics, datalexRegistry);
@@ -201,6 +212,7 @@ export function buildManifest(options: ManifestBuildOptions): DQLManifest {
   }
 
   validateBusinessViews(businessViews, blocks, diagnostics);
+  validateTermRefs(terms, blocks, businessViews, diagnostics);
 
   // Load semantic layer
   const semanticDir = resolveSemanticPath(projectRoot, config);
@@ -249,6 +261,7 @@ export function buildManifest(options: ManifestBuildOptions): DQLManifest {
     apps,
     dashboards,
     businessViews,
+    terms,
   );
 
   return {
@@ -259,6 +272,7 @@ export function buildManifest(options: ManifestBuildOptions): DQLManifest {
     projectRoot,
     blocks,
     businessViews,
+    terms,
     notebooks,
     metrics,
     dimensions,
@@ -484,6 +498,61 @@ function scanBusinessViews(
   return views;
 }
 
+// ---- Business Term Scanning ----
+
+function scanTerms(
+  projectRoot: string,
+  dirs: string[],
+  diagnostics?: ManifestDiagnostic[],
+): Record<string, ManifestTerm> {
+  const terms: Record<string, ManifestTerm> = {};
+  const seenFiles = new Set<string>();
+
+  for (const dir of dirs) {
+    const dirPath = join(projectRoot, dir);
+    const files = scanFilesRecursive(dirPath, ['.dql']);
+
+    for (const filePath of files) {
+      if (seenFiles.has(filePath)) continue;
+      seenFiles.add(filePath);
+      const relPath = relative(projectRoot, filePath);
+      try {
+        const source = readFileSync(filePath, 'utf-8');
+        if (!source.includes('term')) continue;
+        const parser = new Parser(source, relPath);
+        const ast = parser.parse();
+
+        for (const stmt of ast.statements) {
+          const term = stmt as any;
+          if (term.kind !== 'TermDecl') continue;
+
+          if (terms[term.name]) {
+            diagnostics?.push({
+              kind: 'resolve',
+              filePath: relPath,
+              severity: 'error',
+              message: `duplicate term "${term.name}" also declared in ${terms[term.name].filePath}`,
+            });
+            continue;
+          }
+
+          terms[term.name] = termDeclToManifestTerm(term, relPath);
+        }
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        diagnostics?.push({
+          kind: 'parse',
+          filePath: relPath,
+          severity: 'error',
+          message: `Failed to parse term file: ${msg}`,
+        });
+      }
+    }
+  }
+
+  return terms;
+}
+
 function validateBusinessViews(
   views: Record<string, ManifestBusinessView>,
   blocks: Record<string, ManifestBlock>,
@@ -518,6 +587,64 @@ function validateBusinessViews(
   }
 
   detectBusinessViewCycles(views, diagnostics);
+}
+
+function validateTermRefs(
+  terms: Record<string, ManifestTerm>,
+  blocks: Record<string, ManifestBlock>,
+  views: Record<string, ManifestBusinessView>,
+  diagnostics: ManifestDiagnostic[],
+): void {
+  const termNames = new Set(Object.keys(terms));
+
+  for (const block of Object.values(blocks)) {
+    const declared = block.termRefs ?? [];
+    block.unresolvedTermRefs = declared.filter((ref) => !termNames.has(ref));
+    block.termRefs = declared.filter((ref) => termNames.has(ref));
+    if (block.unresolvedTermRefs.length > 0) {
+      diagnostics.push({
+        kind: 'resolve',
+        filePath: block.filePath,
+        severity: 'error',
+        message: `block "${block.name}" has unresolved term refs: ${block.unresolvedTermRefs.join(', ')}`,
+      });
+    }
+  }
+
+  for (const view of Object.values(views)) {
+    const declared = view.declaredTermRefs ?? [];
+    view.unresolvedTermRefs = declared.filter((ref) => !termNames.has(ref));
+    view.declaredTermRefs = declared.filter((ref) => termNames.has(ref));
+    if (view.unresolvedTermRefs.length > 0) {
+      diagnostics.push({
+        kind: 'resolve',
+        filePath: view.filePath,
+        severity: 'error',
+        message: `business_view "${view.name}" has unresolved term refs: ${view.unresolvedTermRefs.join(', ')}`,
+      });
+    }
+  }
+
+  const collectTermsForView = (viewName: string, seen = new Set<string>()): string[] => {
+    const view = views[viewName];
+    if (!view || seen.has(viewName)) return [];
+    seen.add(viewName);
+    const refs = new Set<string>(view.declaredTermRefs ?? []);
+    for (const blockRef of view.blockRefs) {
+      for (const termRef of blocks[blockRef]?.termRefs ?? []) refs.add(termRef);
+    }
+    for (const viewRef of view.businessViewRefs) {
+      for (const termRef of collectTermsForView(viewRef, seen)) refs.add(termRef);
+    }
+    return [...refs];
+  };
+
+  for (const view of Object.values(views)) {
+    const declaredSet = new Set(view.declaredTermRefs ?? []);
+    const allRefs = collectTermsForView(view.name);
+    view.termRefs = allRefs;
+    view.inheritedTermRefs = allRefs.filter((ref) => !declaredSet.has(ref));
+  }
 }
 
 function detectBusinessViewCycles(
@@ -1343,6 +1470,7 @@ function buildManifestLineage(
   apps?: Record<string, ManifestApp>,
   appDashboards?: Record<string, ManifestDashboard>,
   businessViews?: Record<string, ManifestBusinessView>,
+  terms?: Record<string, ManifestTerm>,
 ): ManifestLineage {
   // Convert to lineage builder input format
   const lineageBlocks: LineageBlockInput[] = Object.values(blocks).map((b) => ({
@@ -1357,6 +1485,20 @@ function buildManifestLineage(
     dimensionsRef: b.dimensionsRef,
     chartType: b.chartType,
     filePath: b.filePath,
+    termRefs: b.termRefs,
+  }));
+
+  const lineageTerms: LineageTermInput[] = Object.values(terms ?? {}).map((term) => ({
+    name: term.name,
+    domain: term.domain,
+    owner: term.owner,
+    status: term.status as any,
+    termType: term.termType,
+    filePath: term.filePath,
+    description: term.description,
+    identifiers: term.identifiers,
+    synonyms: term.synonyms,
+    businessOutcome: term.businessOutcome,
   }));
 
   const lineageMetrics: LineageMetricInput[] = Object.values(metrics).map((m) => ({
@@ -1381,6 +1523,8 @@ function buildManifestLineage(
     businessOutcome: view.businessOutcome,
     blockRefs: view.blockRefs,
     businessViewRefs: view.businessViewRefs,
+    termRefs: view.termRefs,
+    declaredTermRefs: view.declaredTermRefs,
   }));
 
   // Pre-build a map of table name → block names that query that table.
@@ -1486,6 +1630,7 @@ function buildManifestLineage(
     dashboards: [...dashboards, ...appDashboardInputs],
     apps: lineageApps,
     businessViews: lineageBusinessViews,
+    terms: lineageTerms,
   });
 
   // Serialize to manifest format
@@ -1512,7 +1657,7 @@ function buildManifestLineage(
       domain: n.domain,
       owner: n.owner,
       status: n.status,
-      filePath: blocks[n.name]?.filePath ?? businessViews?.[n.name]?.filePath ?? n.metadata?.filePath,
+      filePath: blocks[n.name]?.filePath ?? businessViews?.[n.name]?.filePath ?? terms?.[n.name]?.filePath ?? n.metadata?.filePath,
       columns: n.columns,
       metadata: n.metadata,
     })),
@@ -1574,6 +1719,8 @@ function blockDeclToManifestBlock(block: any, filePath: string): ManifestBlock {
     tests,
     tags,
     description,
+    termRefs: Array.isArray(block.termRefs) ? block.termRefs : undefined,
+    unresolvedTermRefs: [],
     llmContext: agent.llmContext,
     examples: agent.examples,
     invariants: agent.invariants,
@@ -1593,6 +1740,27 @@ function blockDeclToManifestBlock(block: any, filePath: string): ManifestBlock {
           unresolved: c.unresolved,
         }))
       : undefined,
+  };
+}
+
+function termDeclToManifestTerm(term: any, filePath: string): ManifestTerm {
+  return {
+    name: term.name,
+    filePath,
+    domain: extractProp(term, 'domain'),
+    owner: extractProp(term, 'owner'),
+    status: extractProp(term, 'status'),
+    termType: typeof term.termType === 'string' ? term.termType : undefined,
+    tags: extractTags(term),
+    description: extractProp(term, 'description'),
+    identifiers: Array.isArray(term.identifiers) ? term.identifiers : undefined,
+    synonyms: Array.isArray(term.synonyms) ? term.synonyms : undefined,
+    businessOutcome: typeof term.businessOutcome === 'string' ? term.businessOutcome : undefined,
+    businessOwner: typeof term.businessOwner === 'string' ? term.businessOwner : undefined,
+    decisionUse: typeof term.decisionUse === 'string' ? term.decisionUse : undefined,
+    reviewCadence: typeof term.reviewCadence === 'string' ? term.reviewCadence : undefined,
+    businessRules: Array.isArray(term.businessRules) ? term.businessRules : undefined,
+    caveats: Array.isArray(term.caveats) ? term.caveats : undefined,
   };
 }
 
@@ -1620,6 +1788,10 @@ function businessViewDeclToManifestBusinessView(view: any, filePath: string): Ma
     caveats: Array.isArray(view.caveats) ? view.caveats : undefined,
     blockRefs,
     businessViewRefs,
+    termRefs: Array.isArray(view.termRefs) ? view.termRefs : [],
+    declaredTermRefs: Array.isArray(view.termRefs) ? view.termRefs : [],
+    inheritedTermRefs: [],
+    unresolvedTermRefs: [],
     unresolvedBlockRefs: [],
     unresolvedBusinessViewRefs: [],
   };

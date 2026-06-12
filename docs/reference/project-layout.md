@@ -10,6 +10,8 @@ my-dql-project/
 ├─ package.json             # npm scripts: notebook, compile, sync, doctor
 ├─ blocks/                  # certified reusable .dql files
 │   └─ revenue_by_segment.dql
+├─ terms/                   # .dql business vocabulary terms
+│   └─ customer.dql
 ├─ business-views/          # .dql business composition views
 │   └─ customer_360.dql
 ├─ notebooks/               # .dqlnb interactive notebooks
@@ -37,6 +39,8 @@ my-dql-project/
 
 - **`blocks/`** — one `.dql` file per block. Governance fields (`domain`,
   `owner`) are required by default; the certification check runs on CI.
+- **`terms/`** — one `.dql` file per `term`. These define business vocabulary,
+  identifiers, synonyms, business rules, and caveats without requiring SQL.
 - **`business-views/`** — one `.dql` file per `business_view`. These compose
   blocks and other business views into business lineage, without running SQL.
 - **`notebooks/`** — interactive analysis. Saved results live beside the
@@ -117,6 +121,7 @@ my-dbt-repo/
 └─ dql/
     ├─ dql.config.json     # dbt.projectDir: ".."
     ├─ blocks/
+    ├─ terms/
     ├─ business-views/
     ├─ notebooks/
     ├─ apps/
@@ -146,13 +151,15 @@ index.
 The lineage flow is:
 
 ```text
+business term -> DQL block -> business_view -> dashboard page -> App
 dbt source -> dbt model -> semantic metric -> DQL block -> business_view -> dashboard page -> App
 ```
 
 ## What gets committed
 
-**Commit:** `dql/blocks/`, `dql/business-views/`, `dql/notebooks/`, `dql/apps/`,
-`dql/semantic-layer/`, `dql/dql.config.json`, `package.json`.
+**Commit:** `dql/blocks/`, `dql/terms/`, `dql/business-views/`,
+`dql/notebooks/`, `dql/apps/`, `dql/semantic-layer/`,
+`dql/dql.config.json`, `package.json`.
 
 **Don't commit:** `data/`, `.dql/`, `*.run.json`, `dql-manifest.json` (build
 output). The default `.gitignore` from the scaffolder handles this.

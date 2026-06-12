@@ -265,4 +265,61 @@ describe('runNew', () => {
       process.chdir(originalCwd);
     }
   });
+
+  it('creates a business term scaffold in the terms folder', async () => {
+    const originalCwd = process.cwd();
+    const targetDir = mkdtempSync(join(tmpdir(), 'dql-new-term-'));
+    const projectDir = join(targetDir, 'demo-project');
+
+    await runInit(projectDir, {
+      check: false,
+      chart: '',
+      domain: '',
+      format: 'json',
+      help: false,
+      open: null,
+      input: '',
+      outDir: '',
+      owner: '',
+      port: null,
+      queryOnly: false,
+      template: '',
+      connection: '',
+      verbose: false,
+      skipTests: false, version: false,
+    });
+
+    try {
+      process.chdir(projectDir);
+
+      await runNew('term', ['Customer'], {
+        check: false,
+        chart: 'bar',
+        domain: 'customer',
+        format: 'json',
+        help: false,
+        open: null,
+        input: '',
+        outDir: '',
+        owner: 'analytics',
+        port: null,
+        queryOnly: false,
+        template: '',
+        connection: '',
+        verbose: false,
+        skipTests: false, version: false,
+      });
+
+      const termPath = join(projectDir, 'terms', 'customer.dql');
+      expect(existsSync(termPath)).toBe(true);
+
+      const term = readFileSync(termPath, 'utf-8');
+      expect(term).toContain('term "Customer"');
+      expect(term).toContain('domain = "customer"');
+      expect(term).toContain('type = "entity"');
+      expect(term).toContain('identifiers = ["customer_id"]');
+    } finally {
+      process.chdir(originalCwd);
+    }
+  });
 });

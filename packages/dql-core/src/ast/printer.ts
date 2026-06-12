@@ -11,6 +11,7 @@ import type {
   StatementNode,
   WorkbookNode,
   BlockDeclNode,
+  TermDeclNode,
   BusinessViewDeclNode,
 } from './nodes.js';
 import { NodeKind } from './nodes.js';
@@ -35,6 +36,8 @@ function printStatement(node: StatementNode, indent: number): string {
       return `${'  '.repeat(indent)}Import [${node.names.join(', ')}] from "${node.path}"\n`;
     case NodeKind.BlockDecl:
       return printBlockDecl(node, indent);
+    case NodeKind.TermDecl:
+      return printTermDecl(node, indent);
     case NodeKind.BusinessViewDecl:
       return printBusinessViewDecl(node, indent);
     default:
@@ -140,6 +143,7 @@ function printBlockDecl(node: BlockDeclNode, indent: number): string {
   if (node.blockType) result += `${prefix}  type = "${node.blockType}"\n`;
   if (node.description) result += `${prefix}  description = "${node.description}"\n`;
   if (node.tags) result += `${prefix}  tags = [${node.tags.map(t => `"${t}"`).join(', ')}]\n`;
+  if (node.termRefs) result += `${prefix}  terms = [${node.termRefs.map(t => `"${t}"`).join(', ')}]\n`;
   if (node.metricRef !== undefined) result += `${prefix}  metric = "${node.metricRef}"\n`;
   if (node.metricsRef) result += `${prefix}  metrics = [${node.metricsRef.map(t => `"${t}"`).join(', ')}]\n`;
   if (node.dimensionsRef) result += `${prefix}  dimensions = [${node.dimensionsRef.map(t => `"${t}"`).join(', ')}]\n`;
@@ -156,6 +160,23 @@ function printBlockDecl(node: BlockDeclNode, indent: number): string {
   return result;
 }
 
+function printTermDecl(node: TermDeclNode, indent: number): string {
+  const prefix = '  '.repeat(indent);
+  let result = `${prefix}Term "${node.name}"\n`;
+  for (const dec of node.decorators) {
+    result += printDecorator(dec, indent + 1);
+  }
+  if (node.domain) result += `${prefix}  domain = "${node.domain}"\n`;
+  if (node.termType) result += `${prefix}  type = "${node.termType}"\n`;
+  if (node.status) result += `${prefix}  status = "${node.status}"\n`;
+  if (node.description) result += `${prefix}  description = "${node.description}"\n`;
+  if (node.tags) result += `${prefix}  tags = [${node.tags.map(t => `"${t}"`).join(', ')}]\n`;
+  if (node.owner) result += `${prefix}  owner = "${node.owner}"\n`;
+  if (node.identifiers) result += `${prefix}  identifiers = [${node.identifiers.map(t => `"${t}"`).join(', ')}]\n`;
+  if (node.synonyms) result += `${prefix}  synonyms = [${node.synonyms.map(t => `"${t}"`).join(', ')}]\n`;
+  return result;
+}
+
 function printBusinessViewDecl(node: BusinessViewDeclNode, indent: number): string {
   const prefix = '  '.repeat(indent);
   let result = `${prefix}BusinessView "${node.name}"\n`;
@@ -167,6 +188,7 @@ function printBusinessViewDecl(node: BusinessViewDeclNode, indent: number): stri
   if (node.description) result += `${prefix}  description = "${node.description}"\n`;
   if (node.tags) result += `${prefix}  tags = [${node.tags.map(t => `"${t}"`).join(', ')}]\n`;
   if (node.owner) result += `${prefix}  owner = "${node.owner}"\n`;
+  if (node.termRefs) result += `${prefix}  terms = [${node.termRefs.map(t => `"${t}"`).join(', ')}]\n`;
   if (node.includes.length > 0) {
     result += `${prefix}  includes\n`;
     for (const ref of node.includes) {

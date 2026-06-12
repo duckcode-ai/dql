@@ -105,6 +105,7 @@ domain="Customer"
 status="draft"
 description="Complete customer view"
 owner="Customer Analytics"
+terms=["Customer"]
 businessOutcome="Improve retention decisions"
 includes{block "Customer Identity" business_view "Customer Service Summary"}
 }`;
@@ -113,11 +114,41 @@ includes{block "Customer Identity" business_view "Customer Service Summary"}
 
     expect(formatted).toContain('business_view "Customer 360" {');
     expect(formatted).toContain('domain = "Customer"');
+    expect(formatted).toContain('terms = ["Customer"]');
     expect(formatted).toContain('businessOutcome = "Improve retention decisions"');
     expect(formatted).toContain('includes {');
     expect(formatted).toContain('block "Customer Identity"');
     expect(formatted).toContain('business_view "Customer Service Summary"');
     expect(() => parse(formatted)).not.toThrow();
+  });
+
+  it('formats term declarations and block term references', () => {
+    const source = `term "Customer"{
+domain="Customer"
+type="entity"
+status="draft"
+description="Customer definition"
+owner="Customer Analytics"
+identifiers=["customer_id"]
+synonyms=["Account"]
+businessRules=["One row per customer_id"]
+}
+
+block "Customer Identity"{
+domain="Customer"
+type="custom"
+terms=["Customer"]
+query="""SELECT customer_id FROM dim_customer"""
+}`;
+
+    const formatted = formatDQL(source);
+
+    expect(formatted).toContain('term "Customer" {');
+    expect(formatted).toContain('type = "entity"');
+    expect(formatted).toContain('identifiers = ["customer_id"]');
+    expect(formatted).toContain('terms = ["Customer"]');
+    expect(() => parse(formatted)).not.toThrow();
+    expect(formatDQL(formatted)).toBe(formatted);
   });
 
   it('is idempotent and parseable', () => {

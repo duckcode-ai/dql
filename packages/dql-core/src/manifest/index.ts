@@ -13,6 +13,7 @@ export {
 export type {
   DQLManifest,
   ManifestBlock,
+  ManifestTerm,
   ManifestBusinessView,
   ManifestNotebook,
   ManifestNotebookCell,

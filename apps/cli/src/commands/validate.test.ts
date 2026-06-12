@@ -131,4 +131,37 @@ describe('runValidate', () => {
     )).toBe(true);
     expect(process.exitCode).toBe(1);
   });
+
+  it('validates unresolved term references at the project level', async () => {
+    const root = tempProject();
+    mkdirSync(join(root, 'blocks'), { recursive: true });
+    mkdirSync(join(root, 'business-views'), { recursive: true });
+    writeFileSync(join(root, 'blocks', 'customer_identity.dql'), `block "Customer Identity" {
+  domain = "Customer"
+  type = "custom"
+  terms = ["Missing Term"]
+  query = """
+    SELECT 1 AS customer_id
+  """
+}`);
+    writeFileSync(join(root, 'business-views', 'customer_360.dql'), `business_view "Customer 360" {
+  domain = "Customer"
+  terms = ["Missing View Term"]
+  includes {
+    block "Customer Identity"
+  }
+}`);
+    const log = vi.spyOn(console, 'log').mockImplementation(() => {});
+
+    await runValidate(root, { format: 'json' } as any);
+
+    const payload = JSON.parse(String(log.mock.calls.at(-1)?.[0]));
+    expect(payload.diagnostics.some((d: any) =>
+      d.severity === 'error' && d.message.includes('block "Customer Identity" has unresolved term refs: Missing Term'),
+    )).toBe(true);
+    expect(payload.diagnostics.some((d: any) =>
+      d.severity === 'error' && d.message.includes('business_view "Customer 360" has unresolved term refs: Missing View Term'),
+    )).toBe(true);
+    expect(process.exitCode).toBe(1);
+  });
 });

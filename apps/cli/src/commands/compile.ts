@@ -137,6 +137,8 @@ export async function runCompile(
   const blockCount = Object.keys(manifest.blocks).length;
   const businessViews = manifest.businessViews ?? {};
   const businessViewCount = Object.keys(businessViews).length;
+  const terms = manifest.terms ?? {};
+  const termCount = Object.keys(terms).length;
   const notebookCount = Object.keys(manifest.notebooks).length;
   const metricCount = Object.keys(manifest.metrics).length;
   const dimensionCount = Object.keys(manifest.dimensions).length;
@@ -149,9 +151,10 @@ export async function runCompile(
   console.log('  ' + '='.repeat(50));
   console.log('\n  Manifest:');
   console.log('    dql-manifest.json is the dbt-like compiled artifact for this DQL project.');
-  console.log('    It records blocks, business views, notebooks, Apps, dashboards, semantic objects, sources, dbt imports, and lineage.');
+  console.log('    It records blocks, terms, business views, notebooks, Apps, dashboards, semantic objects, sources, dbt imports, and lineage.');
   console.log(`\n  Scanned:`);
   console.log(`    ${blockCount} block(s)`);
+  console.log(`    ${termCount} term(s)`);
   console.log(`    ${businessViewCount} business view(s)`);
   console.log(`    ${notebookCount} notebook(s)`);
   console.log(`    ${metricCount} metric(s)`);
@@ -218,6 +221,17 @@ export async function runCompile(
       }
     }
 
+    if (termCount > 0) {
+      console.log('\n  Terms:');
+      for (const term of Object.values(terms)) {
+        const meta = [term.domain, term.termType, term.owner].filter(Boolean).join(', ');
+        console.log(`    ${term.name}${meta ? ` (${meta})` : ''}`);
+        if (term.identifiers && term.identifiers.length > 0) {
+          console.log(`      identifiers: ${term.identifiers.join(', ')}`);
+        }
+      }
+    }
+
     if (businessViewCount > 0) {
       console.log('\n  Business Views:');
       for (const view of Object.values(businessViews)) {
@@ -226,6 +240,9 @@ export async function runCompile(
         console.log(`    ${view.name}${meta ? ` (${meta})` : ''}`);
         if (refs.length > 0) {
           console.log(`      includes: ${refs.join(', ')}`);
+        }
+        if (view.termRefs.length > 0) {
+          console.log(`      terms: ${view.termRefs.join(', ')}`);
         }
       }
     }

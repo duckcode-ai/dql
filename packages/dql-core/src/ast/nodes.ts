@@ -28,6 +28,7 @@ export enum NodeKind {
   FunctionCall = 'FunctionCall',
   TemplateString = 'TemplateString',
   BlockDecl = 'BlockDecl',
+  TermDecl = 'TermDecl',
   BusinessViewDecl = 'BusinessViewDecl',
   BusinessViewInclude = 'BusinessViewInclude',
   BlockParams = 'BlockParams',
@@ -83,6 +84,7 @@ export type StatementNode =
   | WorkbookNode
   | ImportDeclNode
   | BlockDeclNode
+  | TermDeclNode
   | BusinessViewDeclNode
   | DigestNode;
 
@@ -293,6 +295,8 @@ export interface BlockDeclNode extends BaseNode {
   description?: string;
   tags?: string[];
   owner?: string;
+  /** Business glossary terms this block implements or depends on. */
+  termRefs?: string[];
   params?: BlockParamsNode;
   /** For blockType 'custom': the SQL query. Must not be present on 'semantic' blocks. */
   query?: SQLQueryNode;
@@ -333,6 +337,28 @@ export interface BlockDeclNode extends BaseNode {
   datalexContract?: string;
 }
 
+// ---- Business Term Declaration ----
+
+export interface TermDeclNode extends BaseNode {
+  kind: NodeKind.TermDecl;
+  name: string;
+  domain?: string;
+  termType?: string;
+  status?: string;
+  description?: string;
+  tags?: string[];
+  owner?: string;
+  identifiers?: string[];
+  synonyms?: string[];
+  businessOutcome?: string;
+  businessOwner?: string;
+  decisionUse?: string;
+  reviewCadence?: string;
+  businessRules?: string[];
+  caveats?: string[];
+  decorators: DecoratorNode[];
+}
+
 export interface BlockParamsNode extends BaseNode {
   kind: NodeKind.BlockParams;
   params: BlockParamEntry[];
@@ -366,6 +392,8 @@ export interface BusinessViewDeclNode extends BaseNode {
   description?: string;
   tags?: string[];
   owner?: string;
+  /** Business glossary terms this composed view represents. */
+  termRefs?: string[];
   businessOutcome?: string;
   businessOwner?: string;
   decisionUse?: string;

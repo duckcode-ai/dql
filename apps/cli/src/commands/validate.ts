@@ -82,7 +82,7 @@ function collectValidationFiles(targetPath: string | null): { projectRoot: strin
     }
   }
 
-  const dirs = ['blocks', 'business-views', 'dashboards', 'workbooks'];
+  const dirs = ['blocks', 'terms', 'business-views', 'dashboards', 'workbooks'];
   return {
     projectRoot,
     files: dirs.flatMap((dir) => collectDqlFilesFromDir(join(projectRoot, dir), projectRoot)),
@@ -194,7 +194,7 @@ export async function runValidate(path: string | null, flags: CLIFlags): Promise
         datalexManifestPath,
       });
       for (const diag of manifest.diagnostics ?? []) {
-        if (diag.kind !== 'resolve' || !diag.message.includes('business_view')) continue;
+        if (diag.kind !== 'resolve' || (!diag.message.includes('business_view') && !diag.message.includes('term refs'))) continue;
         diagnostics.push({
           file: diag.filePath ?? 'dql-manifest.json',
           severity: diag.severity,

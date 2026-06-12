@@ -105,7 +105,37 @@ the new version on next open.
 
 DQL inlines the compiled SQL, runs it, and renders the block's chart spec.
 
-## 8. Compose a business view
+## 8. Add business terms
+
+Define business vocabulary once, then reference it from blocks and business
+views. This creates the business lineage layer that sits above SQL and dbt
+lineage.
+
+```dql
+term "Customer" {
+  domain = "Customer"
+  type = "entity"
+  status = "draft"
+  description = "A person or account that can place orders or receive service."
+  owner = "customer-analytics"
+  identifiers = ["customer_id"]
+  synonyms = ["Account"]
+}
+
+block "Customer Orders Rollup" {
+  domain = "Customer"
+  type = "custom"
+  terms = ["Customer"]
+
+  query = """
+    SELECT customer_id, COUNT(*) AS total_orders
+    FROM fct_orders
+    GROUP BY 1
+  """
+}
+```
+
+## 9. Compose a business view
 
 Use `business_view` when the value is no longer one SQL result, but a business
 capability made from multiple reusable blocks.
@@ -116,6 +146,7 @@ business_view "Customer 360" {
   status = "draft"
   description = "Complete customer view for retention and account review."
   owner = "customer-analytics"
+  terms = ["Customer"]
   businessOutcome = "Understand customer value, activity, and service risk."
   decisionUse = "Account planning, churn review, and expansion targeting."
   reviewCadence = "weekly"
@@ -129,7 +160,8 @@ business_view "Customer 360" {
 ```
 
 `dql compile` adds the view to `businessViews` in the manifest and creates
-lineage edges from each included block or business view into this view.
+lineage edges from each term, included block, or nested business view into this
+view.
 
 ## Verify it worked
 

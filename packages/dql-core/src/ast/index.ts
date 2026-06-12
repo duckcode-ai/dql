@@ -34,6 +34,7 @@ export {
   type LayoutRowNode,
   type LayoutRowItem,
   type BlockDeclNode,
+  type TermDeclNode,
   type BusinessViewDeclNode,
   type BusinessViewIncludeNode,
   type BlockParamsNode,

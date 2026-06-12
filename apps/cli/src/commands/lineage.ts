@@ -7,6 +7,8 @@
  * Usage:
  *   dql lineage [path]                    Show full lineage graph summary
  *   dql lineage <name> [path]             Show upstream/downstream for a block, table, or metric
+ *   dql lineage --term <name> [path]      Show lineage for a business term
+ *   dql lineage --business [name] [path]  Show business lineage, optionally focused on a view
  *   dql lineage --table <name> [path]     Show lineage for a specific source table
  *   dql lineage --metric <name> [path]    Show lineage for a specific metric
  *   dql lineage --domain <name> [path]    Show lineage within a domain
@@ -118,6 +120,21 @@ export async function runLineage(
   const dashboardIdx = allArgs.indexOf('--dashboard');
   if (dashboardIdx >= 0 && allArgs[dashboardIdx + 1]) {
     return printFocusedLineage(graph, `dashboard:${allArgs[dashboardIdx + 1]}`);
+  }
+
+  const termIdx = allArgs.indexOf('--term');
+  if (termIdx >= 0 && allArgs[termIdx + 1]) {
+    return printNodeLineage(graph, `term:${allArgs[termIdx + 1]}`, flags);
+  }
+
+  const businessIdx = allArgs.indexOf('--business');
+  if (businessIdx >= 0) {
+    const maybeName = allArgs[businessIdx + 1];
+    if (maybeName && !maybeName.startsWith('-')) {
+      const nodeId = resolveNodeId(graph, maybeName) ?? `business_view:${maybeName}`;
+      return printBusinessLineageFor(graph, nodeId);
+    }
+    return printBusinessLineage(graph);
   }
 
   if (allArgs.includes('--dbt')) {
@@ -297,6 +314,8 @@ function printSummary(graph: LineageGraph, _flags: CLIFlags): void {
   const blocks = graph.getNodesByType('block');
   const metrics = graph.getNodesByType('metric');
   const dimensions = graph.getNodesByType('dimension');
+  const terms = graph.getNodesByType('term');
+  const businessViews = graph.getNodesByType('business_view');
   const charts = graph.getNodesByType('chart');
 
   console.log('\n  DQL Lineage Summary');
@@ -350,6 +369,34 @@ function printSummary(graph: LineageGraph, _flags: CLIFlags): void {
       if (downstreamNames.length > 0) {
         console.log(`      feeds into: ${downstreamNames.join(', ')}`);
       }
+    }
+  }
+
+  // Business Terms
+  if (terms.length > 0) {
+    console.log(`\n  Business Terms (${terms.length}):`);
+    for (const term of terms.sort((a, b) => a.name.localeCompare(b.name))) {
+      const targets = graph.getOutgoingEdges(term.id)
+        .filter((e) => e.type === 'defines')
+        .map((e) => graph.getNode(e.target))
+        .filter((n): n is LineageNode => Boolean(n));
+      const targetNames = targets.map((n) => `${nodeTypeLabel(n)}:${n.name}`);
+      const domain = term.domain ? ` (${term.domain})` : '';
+      console.log(`    ${term.name}${domain}${targetNames.length > 0 ? ` -> ${targetNames.join(', ')}` : ''}`);
+    }
+  }
+
+  // Business Views
+  if (businessViews.length > 0) {
+    console.log(`\n  Business Views (${businessViews.length}):`);
+    for (const view of businessViews.sort((a, b) => a.name.localeCompare(b.name))) {
+      const upstream = graph.getIncomingEdges(view.id)
+        .filter((e) => e.type === 'composes' || e.type === 'defines')
+        .map((e) => graph.getNode(e.source))
+        .filter((n): n is LineageNode => Boolean(n));
+      const upstreamNames = upstream.map((n) => `${nodeTypeLabel(n)}:${n.name}`);
+      const domain = view.domain ? ` (${view.domain})` : '';
+      console.log(`    ${view.name}${domain}${upstreamNames.length > 0 ? ` <- ${upstreamNames.join(', ')}` : ''}`);
     }
   }
 
@@ -474,7 +521,7 @@ function resolveNodeId(graph: LineageGraph, name: string): string | null {
   if (name.includes(':') && graph.getNode(name)) return name;
 
   // Try common type prefixes in priority order
-  const prefixes = ['block', 'dashboard', 'dbt_model', 'dbt_source', 'table', 'metric', 'dimension', 'chart', 'domain'];
+  const prefixes = ['block', 'business_view', 'dashboard', 'notebook', 'app', 'dbt_model', 'dbt_source', 'table', 'term', 'metric', 'dimension', 'chart', 'domain'];
   for (const prefix of prefixes) {
     const id = `${prefix}:${name}`;
     if (graph.getNode(id)) return id;
@@ -486,6 +533,113 @@ function resolveNodeId(graph: LineageGraph, name: string): string | null {
   }
 
   return null;
+}
+
+function printBusinessLineage(graph: LineageGraph): void {
+  const terms = graph.getNodesByType('term').sort((a, b) => a.name.localeCompare(b.name));
+  const views = graph.getNodesByType('business_view').sort((a, b) => a.name.localeCompare(b.name));
+
+  console.log('\n  Business Lineage');
+  console.log('  ' + '='.repeat(50));
+  console.log(`\n  ${terms.length} term(s), ${views.length} business view(s)`);
+
+  if (terms.length > 0) {
+    console.log('\n  Terms:');
+    for (const term of terms) {
+      const targets = graph.getOutgoingEdges(term.id)
+        .filter((edge) => edge.type === 'defines')
+        .map((edge) => graph.getNode(edge.target))
+        .filter((node): node is LineageNode => Boolean(node));
+      console.log(`    ${term.name}${term.domain ? ` (${term.domain})` : ''}`);
+      if (targets.length > 0) {
+        console.log(`      defines: ${targets.map((node) => `${nodeTypeLabel(node)}:${node.name}`).join(', ')}`);
+      }
+    }
+  }
+
+  if (views.length > 0) {
+    console.log('\n  Business Views:');
+    for (const view of views) {
+      const composedFrom = graph.getIncomingEdges(view.id)
+        .filter((edge) => edge.type === 'composes')
+        .map((edge) => graph.getNode(edge.source))
+        .filter((node): node is LineageNode => Boolean(node));
+      const termsForView = graph.getIncomingEdges(view.id)
+        .filter((edge) => edge.type === 'defines')
+        .map((edge) => graph.getNode(edge.source))
+        .filter((node): node is LineageNode => Boolean(node));
+      const consumedBy = graph.descendants(view.id)
+        .filter((node) => node.type === 'dashboard' || node.type === 'notebook' || node.type === 'app');
+      console.log(`    ${view.name}${view.domain ? ` (${view.domain})` : ''}`);
+      if (termsForView.length > 0) {
+        console.log(`      terms: ${termsForView.map((node) => node.name).join(', ')}`);
+      }
+      if (composedFrom.length > 0) {
+        console.log(`      composed from: ${composedFrom.map((node) => `${nodeTypeLabel(node)}:${node.name}`).join(', ')}`);
+      }
+      if (consumedBy.length > 0) {
+        console.log(`      consumed by: ${consumedBy.map((node) => `${nodeTypeLabel(node)}:${node.name}`).join(', ')}`);
+      }
+    }
+  }
+
+  console.log('');
+}
+
+function printBusinessLineageFor(graph: LineageGraph, nodeId: string): void {
+  const node = graph.getNode(nodeId);
+  if (!node) {
+    console.error(`"${nodeId}" not found in lineage graph.`);
+    process.exitCode = 1;
+    return;
+  }
+
+  const upstream = graph.ancestors(node.id).filter((n) => n.type !== 'domain');
+  const downstream = graph.descendants(node.id).filter((n) => n.type !== 'domain');
+  const sourceBlocks = node.type === 'block'
+    ? [node]
+    : upstream.filter((n) => n.type === 'block');
+  const businessInputs = upstream.filter((n) => n.type === 'term' || n.type === 'business_view' || n.type === 'block');
+  const finalConsumption = downstream.filter((n) => n.type === 'dashboard' || n.type === 'notebook' || n.type === 'app');
+
+  console.log(`\n  Business Lineage: ${node.name}`);
+  console.log('  ' + '='.repeat(50));
+  console.log(`  Node: ${nodeTypeLabel(node)}:${node.name}${node.domain ? ` (${node.domain})` : ''}`);
+
+  if (businessInputs.length > 0) {
+    console.log('\n  Business Composition:');
+    for (const input of businessInputs.sort((a, b) => a.type.localeCompare(b.type) || a.name.localeCompare(b.name))) {
+      console.log(`    ${nodeTypeLabel(input)}:${input.name}${input.domain ? ` (${input.domain})` : ''}`);
+    }
+  }
+
+  if (sourceBlocks.length > 0) {
+    console.log('\n  Technical Behind Blocks:');
+    for (const block of sourceBlocks.sort((a, b) => a.name.localeCompare(b.name))) {
+      const sources = graph.getIncomingEdges(block.id)
+        .map((edge) => graph.getNode(edge.source))
+        .filter((n): n is LineageNode => Boolean(n))
+        .filter((n) => n.type === 'source_table' || n.type === 'dbt_model' || n.type === 'dbt_source' || n.type === 'metric' || n.type === 'dimension' || n.type === 'block');
+      console.log(`    block:${block.name}`);
+      if (sources.length > 0) {
+        console.log(`      backed by: ${sources.map((source) => `${nodeTypeLabel(source)}:${source.name}`).join(', ')}`);
+      }
+    }
+  }
+
+  if (finalConsumption.length > 0) {
+    console.log('\n  Final Consumption:');
+    for (const output of finalConsumption.sort((a, b) => a.type.localeCompare(b.type) || a.name.localeCompare(b.name))) {
+      console.log(`    ${nodeTypeLabel(output)}:${output.name}`);
+    }
+  }
+
+  console.log('');
+}
+
+function nodeTypeLabel(node: LineageNode): string {
+  if (node.type === 'source_table') return 'table';
+  return node.type;
 }
 
 function printSearchResults(graph: LineageGraph, term: string): void {

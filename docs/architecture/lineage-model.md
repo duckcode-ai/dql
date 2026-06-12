@@ -12,6 +12,7 @@ DQL's lineage graph answers three questions:
 | --- | --- |
 | `source` | dbt source or warehouse table |
 | `model` | dbt model |
+| `term` | DQL business vocabulary term |
 | `block` | DQL block |
 | `business_view` | DQL business composition view |
 | `notebook` | DQL notebook |
@@ -23,6 +24,7 @@ DQL's lineage graph answers three questions:
 | Kind | Meaning |
 | --- | --- |
 | `reads` | `A` queries from `B` |
+| `defines` | A business term defines the meaning of a block or business view |
 | `composes` | A block or business view is composed into a higher-level business view |
 | `contains` | `A` embeds `B` (e.g. notebook contains block) |
 | `materializes_to` | `A` is compiled into `B` (e.g. block → dashboard section) |
@@ -34,15 +36,19 @@ correctly handles CTEs, subqueries, lateral joins, `QUALIFY`, and dialect
 quirks. Semantic refs (`@metric`, `@block`, `@table`) are extracted from
 the DQL AST directly.
 
-Business composition refs are extracted from `business_view` declarations:
+Business terms are extracted from `term` declarations and `terms = [...]`
+references on blocks and business views. Business composition refs are
+extracted from `business_view` declarations:
 
 ```text
+term -> DQL block -> business_view -> dashboard/App
 dbt source -> dbt model -> DQL block -> business_view -> dashboard/App
 ```
 
-This separates technical data dependencies from business lineage. A SQL block
-answers "what query produces this reusable unit?" while a business view answers
-"what business capability does this set of blocks create?"
+This separates technical data dependencies from business lineage. The technical
+lineage answers "what source/model/query produced this block?" Business lineage
+answers "what term does this implement, where was it composed, and where is it
+consumed by dashboards, Apps, or notebooks?"
 
 ## Storage
 
@@ -54,6 +60,8 @@ Warm rebuild on a 4,000-model project is under 2s.
 
 ```bash
 dql lineage summary
+dql lineage --term Customer           # term -> block/view impact
+dql lineage --business "Customer 360" # business composition and technical backing
 dql lineage impact customers          # downstream of `customers`
 dql lineage trust-chain revenue_q4    # upstream of a block
 dql lineage cross-domain              # edges that cross domain boundaries
