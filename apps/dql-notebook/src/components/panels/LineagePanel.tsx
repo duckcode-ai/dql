@@ -340,24 +340,8 @@ export function LineagePanel() {
   return (
     <PanelFrame title="Lineage" toolbar={toolbar} bodyPadding={0}>
       <div style={{ padding: 8, borderBottom: `1px solid ${t.headerBorder}` }}>
-        <button
-          onClick={() => dispatch({ type: 'TOGGLE_LINEAGE_FULLSCREEN' })}
-          style={{
-            width: '100%',
-            padding: '8px 10px',
-            borderRadius: 6,
-            border: `1px solid ${state.lineageFullscreen ? '#388bfd' : t.headerBorder}`,
-            background: state.lineageFullscreen ? '#388bfd' : 'transparent',
-            color: state.lineageFullscreen ? '#fff' : t.textPrimary,
-            fontSize: 12,
-            fontWeight: 600,
-            cursor: 'pointer',
-          }}
-        >
-          {state.lineageFullscreen ? 'Close Graph View' : 'Open Graph View'}
-        </button>
-        <div style={{ marginTop: 8, color: t.textMuted, fontSize: 11, lineHeight: 1.5 }}>
-          Search across business terms, business views, DQL blocks, source tables, dbt models, dashboards, notebooks, and Apps. Selecting an item opens its focused lineage path.
+        <div style={{ color: t.textMuted, fontSize: 11, lineHeight: 1.5 }}>
+          Search or browse the lineage index. Selecting an item opens only its focused lineage path, keeping large projects fast and readable.
         </div>
       </div>
 

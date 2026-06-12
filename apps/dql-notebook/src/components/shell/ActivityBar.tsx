@@ -124,17 +124,14 @@ export function ActivityBar() {
       dispatch({ type: 'SET_MAIN_VIEW', view: panel });
       return;
     }
-    // Lineage: show the list panel on the left AND the full-page DAG in main.
-    // SET_SIDEBAR_PANEL resets lineageFullscreen to false, so we re-toggle it
-    // on after to keep the DAG mounted.
+    // Lineage opens as an index list. Selecting a row opens a focused
+    // inspector; we avoid mounting the whole-project graph by default.
     if (panel === 'lineage') {
-      if (state.lineageFullscreen && state.sidebarPanel === 'lineage' && state.sidebarOpen) {
-        dispatch({ type: 'TOGGLE_LINEAGE_FULLSCREEN' });
+      if (state.sidebarPanel === 'lineage' && state.sidebarOpen && !state.lineageFullscreen) {
         dispatch({ type: 'TOGGLE_SIDEBAR' });
-        return;
+      } else {
+        dispatch({ type: 'SET_SIDEBAR_PANEL', panel: 'lineage' });
       }
-      dispatch({ type: 'SET_SIDEBAR_PANEL', panel: 'lineage' });
-      dispatch({ type: 'TOGGLE_LINEAGE_FULLSCREEN' });
       return;
     }
     const fullPagePanel = panel === 'connection' || panel === 'reference' || panel === 'git' || panel === 'apps' || panel === 'settings';
@@ -197,7 +194,7 @@ export function ActivityBar() {
       key: 'lineage',
       title: 'Lineage',
       icon: <LineageNodeIcon size={16} />,
-      active: state.lineageFullscreen,
+      active: state.sidebarPanel === 'lineage' && state.sidebarOpen,
     },
     {
       key: 'git',

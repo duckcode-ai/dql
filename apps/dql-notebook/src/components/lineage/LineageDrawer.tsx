@@ -8,14 +8,13 @@
  *  - "View lineage" from the Files panel context menu
  *  - any other "show lineage for X" entry point
  *
- * Supports resizing, compact collapse, and full-page graph expansion.
+ * Supports resizing and compact collapse.
  */
 
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   ExternalLink,
   GripVertical,
-  Maximize2,
   Minimize2,
   PanelRightOpen,
   RotateCcw,
@@ -142,14 +141,6 @@ export function LineageDrawer() {
     dispatch({ type: 'OPEN_LINEAGE_DRAWER', nodeId: clickedId });
   };
 
-  const openFullscreen = () => {
-    dispatch({ type: 'SET_LINEAGE_FOCUS', nodeId });
-    dispatch({ type: 'CLOSE_LINEAGE_DRAWER' });
-    if (!state.lineageFullscreen) {
-      dispatch({ type: 'TOGGLE_LINEAGE_FULLSCREEN' });
-    }
-  };
-
   const startResize = (event: React.MouseEvent) => {
     event.preventDefault();
     event.stopPropagation();
@@ -206,9 +197,6 @@ export function LineageDrawer() {
       >
         <IconButton title="Show lineage details" onClick={() => setDrawerCollapsed(false)} t={t}>
           <PanelRightOpen size={15} strokeWidth={1.9} />
-        </IconButton>
-        <IconButton title="Open full graph" onClick={openFullscreen} t={t}>
-          <Maximize2 size={15} strokeWidth={1.8} />
         </IconButton>
         <IconButton title="Hide lineage drawer" onClick={closeDrawer} t={t}>
           <X size={15} strokeWidth={2} />
@@ -343,9 +331,6 @@ export function LineageDrawer() {
         </IconButton>
         <IconButton title="Reset width" onClick={resetWidth} t={t}>
           <RotateCcw size={14} strokeWidth={1.8} />
-        </IconButton>
-        <IconButton title="Open full graph" onClick={openFullscreen} t={t}>
-          <Maximize2 size={14} strokeWidth={1.75} />
         </IconButton>
         <IconButton
           title="Hide lineage drawer"

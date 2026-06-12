@@ -16,7 +16,6 @@ import {
   Palette,
   Command,
   PanelLeft,
-  Activity,
   LayoutDashboard,
   Terminal,
   GitFork,
@@ -146,14 +145,6 @@ export function CommandPalette({
         mode: 'studio',
         run: wrap(() => d({ type: 'TOGGLE_DEV_PANEL' })),
       },
-      {
-        id: 'lineage.fullscreen',
-        label: state.lineageFullscreen ? 'Exit full-screen lineage' : 'Open full-screen lineage',
-        group: 'Lineage',
-        icon: Activity,
-        keywords: 'graph dag',
-        run: wrap(() => d({ type: 'TOGGLE_LINEAGE_FULLSCREEN' })),
-      },
     );
 
     // Navigate — hidden in App mode.
@@ -215,7 +206,6 @@ export function CommandPalette({
     state.inspectorOpen,
     state.themeMode,
     state.dashboardMode,
-    state.lineageFullscreen,
     state.appMode,
     state.sidebarPanel,
     dispatch,

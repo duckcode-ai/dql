@@ -90,11 +90,6 @@ export function BusinessArtifactView() {
   const label = TYPE_LABELS[nodeType] ?? nodeType.toUpperCase();
   const filePath = focal?.metadata?.path ?? focal?.metadata?.filePath ?? file.path;
 
-  const openFullscreen = () => {
-    dispatch({ type: 'SET_LINEAGE_FOCUS', nodeId });
-    if (!state.lineageFullscreen) dispatch({ type: 'TOGGLE_LINEAGE_FULLSCREEN' });
-  };
-
   return (
     <div style={{ flex: 1, minWidth: 0, overflow: 'auto', background: 'var(--color-bg-primary)' }}>
       <div style={{ padding: '22px 28px 18px', borderBottom: `1px solid ${t.headerBorder}`, background: t.appBg }}>
@@ -128,22 +123,6 @@ export function BusinessArtifactView() {
                 : 'Business composition built from trusted terms, DQL blocks, and other business views.'}
             </div>
           </div>
-          <button
-            onClick={openFullscreen}
-            style={{
-              border: `1px solid ${t.headerBorder}`,
-              background: t.sidebarBg,
-              color: t.textPrimary,
-              borderRadius: 6,
-              padding: '8px 11px',
-              fontSize: 12,
-              fontWeight: 700,
-              cursor: 'pointer',
-              flexShrink: 0,
-            }}
-          >
-            Open Graph View
-          </button>
         </div>
       </div>
 
