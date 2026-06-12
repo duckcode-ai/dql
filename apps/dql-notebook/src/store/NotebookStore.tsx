@@ -44,14 +44,13 @@ function readInitialThemeMode(): 'obsidian' | 'paper' | 'white' {
 }
 
 const initialState: NotebookState = {
-  mainView: 'file_browser',
+  mainView: 'notebook',
   themeMode: readInitialThemeMode(),
   appMode: readInitialAppMode(),
   sidebarPanel: 'files',
   sidebarOpen: true,
   files: [],
   filesLoading: false,
-  activeFileFolder: 'all',
   activeFile: null,
   cells: [],
   notebookTitle: '',
@@ -185,7 +184,7 @@ function notebookReducer(state: NotebookState, action: NotebookAction): Notebook
                     : action.panel === 'settings'
                     ? 'settings'
                     : action.panel === 'files'
-                      ? 'file_browser'
+                      ? 'notebook'
                       : action.panel === 'block_library'
                         ? 'block_studio'
                         : state.activeFile?.type === 'block'
@@ -202,17 +201,6 @@ function notebookReducer(state: NotebookState, action: NotebookAction): Notebook
 
     case 'SET_FILES_LOADING':
       return { ...state, filesLoading: action.loading };
-
-    case 'OPEN_FILE_FOLDER':
-      return {
-        ...state,
-        activeFileFolder: action.folder,
-        mainView: 'file_browser',
-        sidebarPanel: 'files',
-        sidebarOpen: true,
-        lineageFullscreen: false,
-        lineageFocusNodeId: null,
-      };
 
     case 'OPEN_FILE':
       return {

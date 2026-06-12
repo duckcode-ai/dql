@@ -3,13 +3,13 @@ import React, { useState } from 'react';
 import { PanelFrame } from '@duckcodeailabs/dql-ui';
 import { useNotebook } from '../../store/NotebookStore';
 import { themes } from '../../themes/notebook-theme';
-import type { NotebookFile, NotebookFileFolder } from '../../store/types';
+import type { NotebookFile } from '../../store/types';
 
 interface FilesPanelProps {
   onOpenFile: (file: NotebookFile) => void;
 }
 
-type FolderKey = Exclude<NotebookFileFolder, 'all'>;
+type FolderKey = 'notebooks' | 'blocks' | 'terms' | 'business-views' | 'dashboards';
 
 const FOLDER_LABELS: Record<FolderKey, string> = {
   notebooks: 'Notebooks',
@@ -132,9 +132,8 @@ export function FilesPanel({ onOpenFile }: FilesPanelProps) {
     }
   }
 
-  const toggleFolder = (key: FolderKey) => {
+  const toggleFolder = (key: string) => {
     setExpandedFolders((prev) => ({ ...prev, [key]: !prev[key] }));
-    dispatch({ type: 'OPEN_FILE_FOLDER', folder: key });
   };
 
   const newNotebookButton = (

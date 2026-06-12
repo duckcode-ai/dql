@@ -60,13 +60,6 @@ export function Header() {
   // gets a static title and hides the file chip + editor actions.
   const isEditorView = state.mainView === 'notebook' || state.mainView === 'block_studio';
   const VIEW_TITLES: Partial<Record<typeof state.mainView, string>> = {
-    file_browser:
-      state.activeFileFolder === 'terms' ? 'Business Terms'
-      : state.activeFileFolder === 'business-views' ? 'Business Views'
-      : state.activeFileFolder === 'blocks' ? 'Blocks'
-      : state.activeFileFolder === 'dashboards' ? 'Dashboards'
-      : state.activeFileFolder === 'notebooks' ? 'Notebooks'
-      : 'Project Explorer',
     connection: 'Connections',
     reference: 'Quick Reference',
     apps: 'Apps',
