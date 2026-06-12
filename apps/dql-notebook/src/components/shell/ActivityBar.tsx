@@ -127,11 +127,7 @@ export function ActivityBar() {
     // Lineage opens as an index list. Selecting a row opens a focused
     // inspector; we avoid mounting the whole-project graph by default.
     if (panel === 'lineage') {
-      if (state.sidebarPanel === 'lineage' && state.sidebarOpen && !state.lineageFullscreen) {
-        dispatch({ type: 'TOGGLE_SIDEBAR' });
-      } else {
-        dispatch({ type: 'SET_SIDEBAR_PANEL', panel: 'lineage' });
-      }
+      dispatch({ type: 'SET_SIDEBAR_PANEL', panel: 'lineage' });
       return;
     }
     const fullPagePanel = panel === 'connection' || panel === 'reference' || panel === 'git' || panel === 'apps' || panel === 'settings';

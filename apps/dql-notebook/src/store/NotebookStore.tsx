@@ -459,7 +459,6 @@ function notebookReducer(state: NotebookState, action: NotebookAction): Notebook
         lineageDrawerOpen: false,
         lineageDrawerNodeId: null,
         dashboardMode: false,
-        sidebarOpen: false,
       };
 
     case 'OPEN_LINEAGE_DRAWER':
