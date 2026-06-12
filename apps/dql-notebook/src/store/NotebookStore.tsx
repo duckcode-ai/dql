@@ -163,6 +163,15 @@ function notebookReducer(state: NotebookState, action: NotebookAction): Notebook
     }
 
     case 'SET_SIDEBAR_PANEL': {
+      if (action.panel === 'lineage') {
+        return {
+          ...state,
+          sidebarPanel: action.panel,
+          sidebarOpen: true,
+          lineageFullscreen: false,
+          mainView: state.mainView === 'lineage_detail' && state.lineageFocusNodeId ? 'lineage_detail' : state.mainView,
+        };
+      }
       const fullPagePanels = ['connection', 'reference', 'git', 'apps', 'settings'] as const;
       const isFullPage = (action.panel as string | null) !== null
         && (fullPagePanels as readonly string[]).includes(action.panel as string);
@@ -450,6 +459,7 @@ function notebookReducer(state: NotebookState, action: NotebookAction): Notebook
         lineageDrawerOpen: false,
         lineageDrawerNodeId: null,
         dashboardMode: false,
+        sidebarOpen: false,
       };
 
     case 'OPEN_LINEAGE_DRAWER':

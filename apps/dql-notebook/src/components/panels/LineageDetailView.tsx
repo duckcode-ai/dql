@@ -18,6 +18,8 @@ interface FocusedGraph {
   focalNode: LineageNode | null;
 }
 
+type DetailTab = 'details' | 'upstream' | 'downstream' | 'source';
+
 function labelFromKey(key: string): string {
   return key
     .replace(/([a-z0-9])([A-Z])/g, '$1 $2')
@@ -63,6 +65,7 @@ export function LineageDetailView() {
 
   const [graph, setGraph] = useState<FocusedGraph>({ nodes: [], edges: [], focalNode: null });
   const [loading, setLoading] = useState(false);
+  const [activeTab, setActiveTab] = useState<DetailTab>('details');
 
   useEffect(() => {
     if (!nodeId) return;
@@ -155,28 +158,33 @@ export function LineageDetailView() {
 
       <div
         style={{
-          padding: 24,
+          padding: 16,
           display: 'grid',
-          gridTemplateColumns: 'repeat(auto-fit, minmax(340px, 1fr))',
-          gap: 18,
+          gridTemplateColumns: 'minmax(0, 1fr) clamp(190px, 26%, 280px)',
+          gap: 14,
+          minHeight: 'calc(100vh - 160px)',
+          minWidth: 0,
         }}
       >
         <section
           style={{
-            minHeight: 500,
             border: `1px solid ${t.headerBorder}`,
             borderRadius: 8,
             background: t.sidebarBg,
             overflow: 'hidden',
+            display: 'flex',
+            flexDirection: 'column',
+            minWidth: 0,
+            minHeight: 560,
           }}
         >
-          <div style={{ padding: '12px 14px', borderBottom: `1px solid ${t.headerBorder}` }}>
+          <div style={{ padding: '10px 12px', borderBottom: `1px solid ${t.headerBorder}`, flexShrink: 0 }}>
             <div style={{ fontWeight: 800, color: t.textPrimary, fontSize: 14 }}>Focused lineage</div>
             <div style={{ color: t.textMuted, fontSize: 12, marginTop: 3 }}>
               Technical chain, business concepts, and consumption endpoints for this item.
             </div>
           </div>
-          <div style={{ height: 450, padding: 12 }}>
+          <div style={{ flex: 1, minHeight: 490, padding: 12 }}>
             {loading ? (
               <div style={{ color: t.textMuted, fontSize: 12 }}>Loading lineage...</div>
             ) : graph.nodes.length === 0 ? (
@@ -187,6 +195,7 @@ export function LineageDetailView() {
                 edges={graph.edges}
                 focalNodeId={nodeId}
                 height="100%"
+                fitViewPadding={0.04}
                 onNodeClick={(clickedId) => {
                   dispatch({ type: 'OPEN_LINEAGE_DETAIL', nodeId: clickedId });
                 }}
@@ -196,18 +205,72 @@ export function LineageDetailView() {
           </div>
         </section>
 
-        {focal && <MetadataPanel node={focal} t={t} />}
-        <ConnectionPanel title="Upstream" connections={upstream} t={t} />
-        <ConnectionPanel title="Downstream" connections={downstream} t={t} />
-        {typeof filePath === 'string' && filePath.trim() && (
-          <div style={{ border: `1px solid ${t.headerBorder}`, borderRadius: 8, padding: 12, color: t.textMuted, fontSize: 12, background: t.sidebarBg }}>
-            <div style={{ fontWeight: 800, color: t.textSecondary, marginBottom: 6 }}>Source file</div>
-            <div style={{ overflowWrap: 'anywhere' }}>{filePath}</div>
+        <aside
+          aria-label="Lineage details"
+          style={{
+            border: `1px solid ${t.headerBorder}`,
+            borderRadius: 8,
+            background: t.sidebarBg,
+            minWidth: 0,
+            maxHeight: 'calc(100vh - 160px)',
+            overflow: 'hidden',
+            display: 'flex',
+            flexDirection: 'column',
+          }}
+        >
+          <div style={{ padding: 8, borderBottom: `1px solid ${t.headerBorder}`, display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 4 }}>
+            <TabButton label="Details" active={activeTab === 'details'} onClick={() => setActiveTab('details')} t={t} />
+            <TabButton label={`Up ${upstream.length}`} active={activeTab === 'upstream'} onClick={() => setActiveTab('upstream')} t={t} />
+            <TabButton label={`Down ${downstream.length}`} active={activeTab === 'downstream'} onClick={() => setActiveTab('downstream')} t={t} />
+            <TabButton label="Source" active={activeTab === 'source'} onClick={() => setActiveTab('source')} t={t} />
           </div>
-        )}
+          <div style={{ padding: 12, overflow: 'auto', flex: 1, minHeight: 0 }}>
+            {activeTab === 'details' && (focal ? <MetadataPanel node={focal} t={t} /> : <EmptyDetail t={t} label="No metadata available." />)}
+            {activeTab === 'upstream' && <ConnectionPanel title="Upstream" connections={upstream} t={t} />}
+            {activeTab === 'downstream' && <ConnectionPanel title="Downstream" connections={downstream} t={t} />}
+            {activeTab === 'source' && <SourcePanel filePath={typeof filePath === 'string' ? filePath : null} t={t} />}
+          </div>
+        </aside>
       </div>
     </div>
   );
+}
+
+function TabButton({
+  label,
+  active,
+  onClick,
+  t,
+}: {
+  label: string;
+  active: boolean;
+  onClick: () => void;
+  t: Theme;
+}) {
+  return (
+    <button
+      onClick={onClick}
+      style={{
+        border: `1px solid ${active ? t.accent : t.headerBorder}`,
+        background: active ? `${t.accent}1c` : 'transparent',
+        color: active ? t.textPrimary : t.textMuted,
+        borderRadius: 5,
+        padding: '5px 6px',
+        fontSize: 10,
+        fontWeight: 800,
+        cursor: 'pointer',
+        overflow: 'hidden',
+        textOverflow: 'ellipsis',
+        whiteSpace: 'nowrap',
+      }}
+    >
+      {label}
+    </button>
+  );
+}
+
+function EmptyDetail({ t, label }: { t: Theme; label: string }) {
+  return <div style={{ color: t.textMuted, fontSize: 12, lineHeight: 1.45 }}>{label}</div>;
 }
 
 function MetadataPanel({ node, t }: { node: LineageNode; t: Theme }) {
@@ -242,7 +305,7 @@ function MetadataPanel({ node, t }: { node: LineageNode; t: Theme }) {
   }
 
   return (
-    <div style={{ border: `1px solid ${t.headerBorder}`, borderRadius: 8, background: t.sidebarBg, padding: 12 }}>
+    <div>
       <div style={{ fontWeight: 800, color: t.textPrimary, marginBottom: 10 }}>Lineage metadata</div>
       {rows.length === 0 ? (
         <div style={{ color: t.textMuted, fontSize: 12 }}>No metadata available for this node.</div>
@@ -270,7 +333,7 @@ function ConnectionPanel({
   t: Theme;
 }) {
   return (
-    <div style={{ border: `1px solid ${t.headerBorder}`, borderRadius: 8, background: t.sidebarBg, padding: 12 }}>
+    <div>
       <div style={{ fontWeight: 800, color: t.textPrimary, marginBottom: 10 }}>{title}</div>
       {connections.length === 0 ? (
         <div style={{ color: t.textMuted, fontSize: 12 }}>No {title.toLowerCase()} connections in this focused window.</div>
@@ -308,6 +371,20 @@ function ConnectionPanel({
             </div>
           )}
         </div>
+      )}
+    </div>
+  );
+}
+
+function SourcePanel({ filePath, t }: { filePath: string | null; t: Theme }) {
+  const value = filePath?.trim();
+  return (
+    <div>
+      <div style={{ fontWeight: 800, color: t.textPrimary, marginBottom: 10 }}>Source file</div>
+      {value ? (
+        <div style={{ color: t.textMuted, fontSize: 12, lineHeight: 1.5, overflowWrap: 'anywhere' }}>{value}</div>
+      ) : (
+        <div style={{ color: t.textMuted, fontSize: 12 }}>No source file path available for this node.</div>
       )}
     </div>
   );

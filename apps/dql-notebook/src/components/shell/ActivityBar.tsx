@@ -194,7 +194,7 @@ export function ActivityBar() {
       key: 'lineage',
       title: 'Lineage',
       icon: <LineageNodeIcon size={16} />,
-      active: state.sidebarPanel === 'lineage' && state.sidebarOpen,
+      active: state.mainView === 'lineage_detail' || (state.sidebarPanel === 'lineage' && state.sidebarOpen),
     },
     {
       key: 'git',
