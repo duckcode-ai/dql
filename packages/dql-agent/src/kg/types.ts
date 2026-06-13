@@ -1,14 +1,17 @@
 /**
  * Knowledge graph node + edge shapes for the DQL agent.
  *
- * The KG is built from the compiled `dql-manifest.json` (blocks, dashboards,
- * apps, metrics, dimensions, sources) plus dbt manifest data and the project's
- * Skills folder. It is stored in SQLite at `.dql/cache/agent-kg.sqlite` with
- * an FTS5 index for keyword search and structured filters for domain/kind.
+ * The KG is built from the compiled `dql-manifest.json` (terms, business views,
+ * blocks, dashboards, apps, metrics, dimensions, sources) plus dbt manifest data
+ * and the project's Skills folder. It is stored in SQLite at
+ * `.dql/cache/agent-kg.sqlite` with an FTS5 index for keyword search and
+ * structured filters for domain/kind.
  */
 
 export type KGNodeKind =
   | 'block'
+  | 'term'
+  | 'business_view'
   | 'metric'
   | 'dimension'
   | 'measure'
@@ -76,7 +79,7 @@ export interface KGNode {
 export interface KGEdge {
   src: string;
   dst: string;
-  kind: 'feeds_into' | 'reads_from' | 'aggregates' | 'visualizes' | 'depends_on' | 'contains' | 'related_to';
+  kind: 'feeds_into' | 'reads_from' | 'aggregates' | 'visualizes' | 'depends_on' | 'contains' | 'related_to' | 'defines' | 'composes';
   weight?: number;
 }
 

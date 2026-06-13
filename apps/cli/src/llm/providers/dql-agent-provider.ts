@@ -99,7 +99,7 @@ export function createDqlAgentProviderRunner(id: SimpleProviderId): AgentRunner 
         emit({ kind: 'thinking', text: `Using ${spec.label} through the governed DQL agent.` });
         const kgPath = defaultKgPath(req.projectRoot);
         if (!existsSync(kgPath)) {
-          emit({ kind: 'thinking', text: 'Building the local agent knowledge graph from blocks, apps, dashboards, dbt, and semantic metadata.' });
+          emit({ kind: 'thinking', text: 'Building the local agent knowledge graph from terms, business views, blocks, apps, dashboards, dbt, and semantic metadata.' });
           await reindexProject(req.projectRoot, { kgPath });
         }
 

@@ -23,7 +23,7 @@ import { buildSkillsPrompt } from './skills/loader.js';
 import type { AgentMemory } from './memory/sqlite-memory.js';
 
 export type AnswerKind = 'certified' | 'uncertified' | 'no_answer';
-export type AnswerSourceTier = 'certified_artifact' | 'semantic_layer' | 'dbt_manifest' | 'no_answer';
+export type AnswerSourceTier = 'certified_artifact' | 'business_context' | 'semantic_layer' | 'dbt_manifest' | 'no_answer';
 export type AnswerCertification = 'certified' | 'ai_generated' | 'analyst_review_required';
 export type AnswerReviewStatus = 'none' | 'draft_ready' | 'analyst_review_required' | 'certified';
 
@@ -41,6 +41,7 @@ export type AgentEvidenceRouteStatus = 'selected' | 'checked' | 'skipped' | 'fai
 export type AgentEvidenceLineageRole =
   | 'question'
   | 'selected_asset'
+  | 'business_context'
   | 'semantic_object'
   | 'source_table'
   | 'consumer'
@@ -186,14 +187,18 @@ export interface AnswerLoopInput {
 
 const CERTIFIED_HIT_THRESHOLD = 0.18;
 const HARD_NEGATIVE_RATIO = 0.5;
-const ARTIFACT_KINDS: KGNodeKind[] = ['block', 'dashboard', 'app', 'notebook'];
+const EXECUTABLE_ARTIFACT_KINDS: KGNodeKind[] = ['block', 'dashboard', 'app', 'notebook'];
+const BUSINESS_CONTEXT_KINDS: KGNodeKind[] = ['term', 'business_view'];
+const ARTIFACT_KINDS: KGNodeKind[] = [...EXECUTABLE_ARTIFACT_KINDS, ...BUSINESS_CONTEXT_KINDS];
 const SEMANTIC_KINDS: KGNodeKind[] = ['metric', 'dimension', 'measure', 'entity', 'semantic_model', 'saved_query'];
 const MANIFEST_KINDS: KGNodeKind[] = ['dbt_model', 'dbt_source'];
 
 export async function answer(input: AnswerLoopInput): Promise<AgentAnswer> {
   const { question, userId, domain, provider, kg, skills = [], blockHints = [] } = input;
 
-  const artifactHits = kg.search({ query: question, domain, kinds: ARTIFACT_KINDS, limit: 10 });
+  const executableArtifactHits = kg.search({ query: question, domain, kinds: EXECUTABLE_ARTIFACT_KINDS, limit: 10 });
+  const businessHits = kg.search({ query: question, domain, kinds: BUSINESS_CONTEXT_KINDS, limit: 10 });
+  const artifactHits = mergeHits(executableArtifactHits, businessHits).slice(0, 12);
   const semanticHits = kg.search({ query: question, domain, kinds: SEMANTIC_KINDS, limit: 12 });
   const manifestHits = kg.search({ query: question, domain, kinds: MANIFEST_KINDS, limit: 12 });
   const considered = mergeHits(
@@ -205,7 +210,14 @@ export async function answer(input: AnswerLoopInput): Promise<AgentAnswer> {
 
   // Stage 1: certified artifact match. Blocks can be executed; dashboards,
   // Apps, and notebooks are returned as governed citations/navigation targets.
-  const artifactHit = pickCertifiedArtifact(artifactHits, blockHints, kg);
+  const artifactHit = pickCertifiedArtifact({
+    artifactHits,
+    executableArtifactHits,
+    businessHits,
+    question,
+    blockHints,
+    kg,
+  });
   if (artifactHit) {
     let result: AgentResultPayload | undefined;
     let executionError: string | undefined;
@@ -217,19 +229,22 @@ export async function answer(input: AnswerLoopInput): Promise<AgentAnswer> {
       }
     }
     const text = composeCertifiedAnswer(artifactHit.node, question, result, executionError);
+    const sourceTier: AnswerSourceTier = artifactHit.node.sourceTier === 'business_context'
+      ? 'business_context'
+      : 'certified_artifact';
     const citations: AgentCitation[] = [
       {
         nodeId: artifactHit.node.nodeId,
         kind: artifactHit.node.kind,
         name: artifactHit.node.name,
         gitSha: artifactHit.node.gitSha,
-        sourceTier: 'certified_artifact',
+        sourceTier,
         provenance: artifactHit.node.provenance,
       },
     ];
     return {
       kind: 'certified',
-      sourceTier: 'certified_artifact',
+      sourceTier,
       certification: 'certified',
       reviewStatus: 'certified',
       confidence: 0.95,
@@ -244,6 +259,7 @@ export async function answer(input: AnswerLoopInput): Promise<AgentAnswer> {
       evidence: buildCertifiedEvidence({
         question,
         artifact: artifactHit.node,
+        businessHits,
         semanticHits,
         manifestHits,
         considered,
@@ -266,11 +282,12 @@ export async function answer(input: AnswerLoopInput): Promise<AgentAnswer> {
       ? 'dbt_manifest'
       : 'dbt_manifest';
   const contextHits = activeTier === 'semantic_layer'
-    ? [...semanticHits, ...manifestHits].slice(0, 10)
-    : manifestHits.slice(0, 10);
+    ? [...businessHits.slice(0, 4), ...semanticHits, ...manifestHits].slice(0, 10)
+    : [...businessHits.slice(0, 4), ...manifestHits].slice(0, 10);
   const contextNodes = (contextHits.length > 0 ? contextHits : considered.slice(0, 6)).map((h) => h.node);
   const contextBlocks = contextNodes.filter((n) => n.kind === 'block');
-  const contextOther = contextNodes.filter((n) => n.kind !== 'block');
+  const contextBusiness = contextNodes.filter((n) => BUSINESS_CONTEXT_KINDS.includes(n.kind));
+  const contextOther = contextNodes.filter((n) => n.kind !== 'block' && !BUSINESS_CONTEXT_KINDS.includes(n.kind));
 
   const messages: AgentMessage[] = [
     { role: 'system', content: SYSTEM_PROMPT },
@@ -280,7 +297,7 @@ export async function answer(input: AnswerLoopInput): Promise<AgentAnswer> {
 
   messages.push({
     role: 'system',
-    content: renderContextPrompt(contextBlocks, contextOther, activeTier, input.memoryContext ?? [], input.extraContext),
+    content: renderContextPrompt(contextBlocks, contextBusiness, contextOther, activeTier, input.memoryContext ?? [], input.extraContext),
   });
   messages.push({ role: 'user', content: question });
 
@@ -303,6 +320,7 @@ export async function answer(input: AnswerLoopInput): Promise<AgentAnswer> {
         question,
         reason: text,
         artifactHits,
+        businessHits,
         semanticHits,
         manifestHits,
         considered,
@@ -330,6 +348,7 @@ export async function answer(input: AnswerLoopInput): Promise<AgentAnswer> {
         question,
         reason: text,
         artifactHits,
+        businessHits,
         semanticHits,
         manifestHits,
         considered,
@@ -346,7 +365,7 @@ export async function answer(input: AnswerLoopInput): Promise<AgentAnswer> {
       kind: n.kind,
       name: n.name,
       gitSha: n.gitSha,
-      sourceTier: activeTier,
+      sourceTier: citationSourceTier(n, activeTier),
       provenance: n.provenance,
     })),
     ...(input.memoryContext ?? []).slice(0, 2).map((m) => ({
@@ -374,6 +393,7 @@ export async function answer(input: AnswerLoopInput): Promise<AgentAnswer> {
       question,
       activeTier,
       contextNodes,
+      businessHits,
       semanticHits,
       manifestHits,
       considered,
@@ -399,6 +419,7 @@ Rules:
 
 function renderContextPrompt(
   blocks: KGNode[],
+  businessContext: KGNode[],
   others: KGNode[],
   activeTier: AnswerSourceTier,
   memoryContext: AgentMemory[],
@@ -409,6 +430,11 @@ function renderContextPrompt(
         .map((b) => `- \`${b.nodeId}\` (${b.domain ?? 'unscoped'}): ${b.description ?? b.llmContext ?? '(no description)'}`)
         .join('\n')}`
     : '## Certified blocks: (none matched)';
+  const businessSection = businessContext.length > 0
+    ? `\n\n## Business context from DQL terms and business views\n\n${businessContext
+        .map((n) => `- ${n.kind.replace('_', ' ')} \`${n.name}\`${n.domain ? ` (domain: ${n.domain})` : ''}${n.description ? ` — ${n.description}` : ''}${n.llmContext ? `\n  ${n.llmContext.replace(/\n/g, '\n  ')}` : ''}`)
+        .join('\n')}`
+    : '';
   const otherSection = others.length > 0
     ? `\n\n## Related ${activeTier === 'semantic_layer' ? 'semantic layer' : 'dbt manifest'} context\n\n${others
         .map((n) => `- ${n.kind} \`${n.name}\`${n.domain ? ` (domain: ${n.domain})` : ''}${n.description ? ` — ${n.description}` : ''}${n.llmContext ? `\n  ${n.llmContext.replace(/\n/g, '\n  ')}` : ''}`)
@@ -423,7 +449,7 @@ function renderContextPrompt(
   const extraSection = extraContext?.trim()
     ? `\n\n## Current notebook/app context\n\nThis context may help interpret the user's request, but it MUST NOT override certified artifacts, semantic metrics, dbt metadata, or generated SQL validation.\n\n${extraContext.trim()}`
     : '';
-  return `${blockSection}${otherSection}${memorySection}${extraSection}`;
+  return `${blockSection}${businessSection}${otherSection}${memorySection}${extraSection}`;
 }
 
 interface ParsedProposal {
@@ -449,34 +475,65 @@ export function parseProposal(raw: string): ParsedProposal {
   return { text, sql, viz };
 }
 
-function pickCertifiedArtifact(
-  artifactHits: KGSearchHit[],
-  blockHints: string[],
-  kg: KGStore,
-): KGSearchHit | null {
+function pickCertifiedArtifact(input: {
+  artifactHits: KGSearchHit[];
+  executableArtifactHits: KGSearchHit[];
+  businessHits: KGSearchHit[];
+  question: string;
+  blockHints: string[];
+  kg: KGStore;
+}): KGSearchHit | null {
   // Hint match wins immediately: the active Skill's vocabulary points the
   // user at a specific block. We still validate it's certified.
-  for (const hint of blockHints) {
-    const node = kg.getNode(`block:${hint}`);
+  for (const hint of input.blockHints) {
+    const node = input.kg.getNode(`block:${hint}`);
     if (node && node.status === 'certified') {
       return { node, score: 1, snippet: undefined };
     }
   }
-  // Otherwise: top FTS5 hit must be certified, exceed the score threshold,
-  // and not have a hard negative ratio in feedback.
-  for (const hit of artifactHits) {
+
+  if (isBusinessDefinitionQuestion(input.question)) {
+    const businessHit = pickFirstCertifiedHit(input.businessHits, input.kg);
+    if (businessHit) return businessHit;
+  }
+
+  const executableHit = pickFirstCertifiedHit(input.executableArtifactHits, input.kg);
+  if (executableHit) return executableHit;
+
+  const hasExecutableCandidate = input.executableArtifactHits.some((hit) => hit.score >= CERTIFIED_HIT_THRESHOLD);
+  if (!hasExecutableCandidate) {
+    const businessHit = pickFirstCertifiedHit(input.businessHits, input.kg);
+    if (businessHit) return businessHit;
+  }
+
+  return null;
+}
+
+function pickFirstCertifiedHit(hits: KGSearchHit[], kg: KGStore): KGSearchHit | null {
+  for (const hit of hits) {
     if (hit.score < CERTIFIED_HIT_THRESHOLD) break;
-    if (hit.node.kind === 'block') {
-      if (hit.node.status !== 'certified') continue;
-      const fb = kg.blockFeedbackScore(hit.node.nodeId);
-      const total = fb.up + fb.down;
-      if (total > 0 && fb.down / total > HARD_NEGATIVE_RATIO) continue;
-    } else if (hit.node.status !== 'certified' && hit.node.certification !== 'certified') {
-      continue;
-    }
+    if (!isCertifiedHit(hit, kg)) continue;
     return hit;
   }
   return null;
+}
+
+function isCertifiedHit(hit: KGSearchHit, kg: KGStore): boolean {
+  if (hit.node.kind === 'block') {
+    if (hit.node.status !== 'certified') return false;
+    const fb = kg.blockFeedbackScore(hit.node.nodeId);
+    const total = fb.up + fb.down;
+    return !(total > 0 && fb.down / total > HARD_NEGATIVE_RATIO);
+  }
+  return hit.node.status === 'certified' || hit.node.certification === 'certified';
+}
+
+function isBusinessDefinitionQuestion(question: string): boolean {
+  return /\b(what is|what are|define|definition|meaning of|what does .+ mean)\b/i.test(question);
+}
+
+function citationSourceTier(node: KGNode, fallback: AnswerSourceTier): AnswerSourceTier {
+  return node.sourceTier === 'business_context' ? 'business_context' : fallback;
 }
 
 function composeCertifiedAnswer(
@@ -512,6 +569,7 @@ function mergeHits(...groups: KGSearchHit[][]): KGSearchHit[] {
 function buildCertifiedEvidence(input: {
   question: string;
   artifact: KGNode;
+  businessHits: KGSearchHit[];
   semanticHits: KGSearchHit[];
   manifestHits: KGSearchHit[];
   considered: KGSearchHit[];
@@ -521,6 +579,12 @@ function buildCertifiedEvidence(input: {
   citations: AgentCitation[];
   memoryContext: AgentMemory[];
 }): AgentEvidence {
+  const businessContextAssets = uniqueAssets(
+    input.businessHits
+      .map((hit) => hit.node)
+      .filter((node) => node.nodeId !== input.artifact.nodeId)
+      .map(assetFromNode),
+  ).slice(0, 6);
   const semanticObjects = uniqueAssets(input.semanticHits.map((hit) => assetFromNode(hit.node))).slice(0, 6);
   const sourceTables = uniqueAssets(input.manifestHits.map((hit) => assetFromNode(hit.node))).slice(0, 6);
   const relatedConsumers = input.considered
@@ -548,6 +612,19 @@ function buildCertifiedEvidence(input: {
         detail: input.executionError ?? (input.result ? `${input.result.rowCount} rows` : undefined),
       },
       {
+        tool: 'search_business_context',
+        status: BUSINESS_CONTEXT_KINDS.includes(input.artifact.kind)
+          ? 'selected'
+          : input.businessHits.length > 0
+            ? 'checked'
+            : 'skipped',
+        label: BUSINESS_CONTEXT_KINDS.includes(input.artifact.kind)
+          ? `Selected ${input.artifact.kind.replace('_', ' ')}`
+          : input.businessHits.length > 0
+            ? 'Business context attached'
+            : 'No business context needed',
+      },
+      {
         tool: 'search_semantic_layer',
         status: input.semanticHits.length > 0 ? 'checked' : 'skipped',
         label: input.semanticHits.length > 0 ? 'Semantic context attached' : 'No semantic context needed',
@@ -561,6 +638,7 @@ function buildCertifiedEvidence(input: {
     lineage: [
       questionLineageNode(input.question),
       { ...assetFromNode(input.artifact), role: 'selected_asset' },
+      ...businessContextAssets.map((asset) => ({ ...asset, role: 'business_context' as const })),
       ...semanticObjects.map((asset) => ({ ...asset, role: 'semantic_object' as const })),
       ...sourceTables.map((asset) => ({ ...asset, role: 'source_table' as const })),
       ...relatedConsumers.map((node) => ({ ...assetFromNode(node), role: 'consumer' as const })),
@@ -592,6 +670,7 @@ function buildGeneratedEvidence(input: {
   question: string;
   activeTier: AnswerSourceTier;
   contextNodes: KGNode[];
+  businessHits: KGSearchHit[];
   semanticHits: KGSearchHit[];
   manifestHits: KGSearchHit[];
   considered: KGSearchHit[];
@@ -599,6 +678,11 @@ function buildGeneratedEvidence(input: {
   memoryContext: AgentMemory[];
 }): AgentEvidence {
   const selectedNodes = input.contextNodes.slice(0, 4);
+  const businessAssets = uniqueAssets(
+    [...input.contextNodes, ...input.businessHits.map((hit) => hit.node)]
+      .filter((node) => BUSINESS_CONTEXT_KINDS.includes(node.kind))
+      .map(assetFromNode),
+  ).slice(0, 6);
   const semanticObjects = uniqueAssets(
     [...input.contextNodes, ...input.semanticHits.map((hit) => hit.node)]
       .filter((node) => SEMANTIC_KINDS.includes(node.kind))
@@ -617,6 +701,11 @@ function buildGeneratedEvidence(input: {
         tool: 'search_certified_artifacts',
         status: 'checked',
         label: 'No certified artifact was strong enough for this question',
+      },
+      {
+        tool: 'search_business_context',
+        status: businessAssets.length > 0 ? 'checked' : 'skipped',
+        label: businessAssets.length > 0 ? 'Business context considered' : 'No business context match',
       },
       {
         tool: 'search_semantic_layer',
@@ -641,7 +730,10 @@ function buildGeneratedEvidence(input: {
     ],
     lineage: [
       questionLineageNode(input.question),
-      ...selectedAssets.map((asset) => ({ ...asset, role: selectedSemantic ? 'semantic_object' as const : 'source_table' as const })),
+      ...selectedAssets.map((asset) => ({ ...asset, role: selectedAssetRole(asset, selectedSemantic) })),
+      ...businessAssets
+        .filter((asset) => !selectedAssets.some((selected) => selected.nodeId === asset.nodeId))
+        .map((asset) => ({ ...asset, role: 'business_context' as const })),
       ...sourceTables.map((asset) => ({ ...asset, role: 'source_table' as const })),
       ...semanticObjects
         .filter((asset) => !selectedAssets.some((selected) => selected.nodeId === asset.nodeId))
@@ -675,6 +767,7 @@ function buildNoAnswerEvidence(input: {
   question: string;
   reason: string;
   artifactHits: KGSearchHit[];
+  businessHits: KGSearchHit[];
   semanticHits: KGSearchHit[];
   manifestHits: KGSearchHit[];
   considered: KGSearchHit[];
@@ -686,6 +779,11 @@ function buildNoAnswerEvidence(input: {
         tool: 'search_certified_artifacts',
         status: input.artifactHits.length > 0 ? 'checked' : 'skipped',
         label: input.artifactHits.length > 0 ? 'Certified artifacts considered but not selected' : 'No certified artifact match',
+      },
+      {
+        tool: 'search_business_context',
+        status: input.businessHits.length > 0 ? 'checked' : 'skipped',
+        label: input.businessHits.length > 0 ? 'Business context considered' : 'No business context match',
       },
       {
         tool: 'search_semantic_layer',
@@ -707,11 +805,14 @@ function buildNoAnswerEvidence(input: {
       questionLineageNode(input.question),
       ...input.considered.slice(0, 6).map((hit) => ({ ...assetFromNode(hit.node), role: 'selected_asset' as const })),
     ],
-    businessContext: input.memoryContext.slice(0, 3).map((memory) => ({
-      label: 'Memory advisory',
-      value: `${memory.title}: ${memory.content}`,
-      source: memory.source,
-    })),
+    businessContext: [
+      ...input.businessHits.slice(0, 4).flatMap((hit) => businessContextForNode(hit.node)),
+      ...input.memoryContext.slice(0, 3).map((memory) => ({
+        label: 'Memory advisory',
+        value: `${memory.title}: ${memory.content}`,
+        source: memory.source,
+      })),
+    ],
     selectedAssets: [],
     sourceTables: uniqueAssets(input.manifestHits.map((hit) => assetFromNode(hit.node))).slice(0, 6),
     semanticObjects: uniqueAssets(input.semanticHits.map((hit) => assetFromNode(hit.node))).slice(0, 6),
@@ -736,13 +837,20 @@ function questionLineageNode(question: string): AgentEvidenceLineageNode {
   };
 }
 
+function selectedAssetRole(asset: AgentEvidenceAsset, selectedSemantic: boolean): AgentEvidenceLineageRole {
+  if (asset.kind === 'term' || asset.kind === 'business_view') return 'business_context';
+  if (asset.kind && SEMANTIC_KINDS.includes(asset.kind as KGNodeKind)) return 'semantic_object';
+  if (asset.kind && MANIFEST_KINDS.includes(asset.kind as KGNodeKind)) return 'source_table';
+  return selectedSemantic ? 'semantic_object' : 'selected_asset';
+}
+
 function assetFromNode(node: KGNode): AgentEvidenceAsset {
   return {
     nodeId: node.nodeId,
     kind: node.kind,
     name: node.name,
     description: node.description,
-    sourceTier: node.sourceTier === 'business_context' ? 'project' : node.sourceTier,
+    sourceTier: node.sourceTier,
     certification: certificationForNode(node),
     provenance: node.provenance,
     sourcePath: node.sourcePath,

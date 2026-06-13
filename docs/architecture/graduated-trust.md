@@ -1,6 +1,8 @@
 # Graduated trust + the promotion loop
 
 DQL's wedge — *one question, one answer, fully traced* — depends on certified
+DQL artifacts. Blocks answer executable data questions; business terms and
+business views answer definition/context questions and help route to the right
 blocks. But real AI usage isn't strict-only: agents will ask questions for
 which no certified block exists yet, and refusing every such ask sends users
 to bypass the MCP and write SQL directly. That defeats the wedge.
@@ -11,7 +13,7 @@ priority order, with the trust label always visible to the human.
 ```mermaid
 flowchart TD
     Ask[User asks AI in plain English]
-    T1{certified block resolves?}
+    T1{certified DQL artifact resolves?}
     T1Tool[query_via_block]
     T1Out["✅ certified answer<br/>+ contract id"]
 
@@ -41,16 +43,18 @@ flowchart TD
     class Review,Promote,Done loop
 ```
 
-## Tier 1 — `query_via_block`
+## Tier 1 — certified DQL context
 
-The wedge proper. Refuses anything that isn't:
+For data answers, the wedge proper is `query_via_block`. It refuses anything that isn't:
 
 - `status = "certified"`, AND
 - `datalex_contract` resolves to a contract in the loaded `datalex-manifest.json`.
 
-Agents ALWAYS try this tool first. The answer is safe to ship to dashboards
-because every output column traces back through the contract → dbt model →
-source column.
+Agents ALWAYS try certified project context first. Business terms and
+business views can be selected as certified context for definition-style
+questions, and they also attach to block answers as evidence. For executable
+answers, the result is safe to ship to dashboards because every output column
+traces back through the contract → dbt model → source column.
 
 ## Tier 2 — `query_via_metadata`
 

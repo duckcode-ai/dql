@@ -7,4 +7,15 @@ describe('kg tool', () => {
     const exported = Object.values(kgModule).filter((v) => typeof v === 'function');
     expect(exported.length).toBeGreaterThan(0);
   });
+
+  it('accepts business context node kind filters', () => {
+    expect(() => kgModule.kgSearchInput.kinds.parse([
+      'term',
+      'business_view',
+      'measure',
+      'semantic_model',
+      'saved_query',
+      'notebook',
+    ])).not.toThrow();
+  });
 });

@@ -18,10 +18,11 @@ export const kgSearchInput = {
   query: z.string().describe('Natural-language or keyword query.'),
   kinds: z
     .array(
-      z.enum([
-        'block', 'metric', 'dimension', 'domain',
-        'dbt_model', 'dbt_source', 'dashboard', 'app', 'skill',
-      ]),
+	      z.enum([
+	        'block', 'term', 'business_view',
+	        'metric', 'dimension', 'measure', 'entity', 'semantic_model', 'saved_query', 'domain',
+	        'dbt_model', 'dbt_source', 'notebook', 'dashboard', 'app', 'skill',
+	      ]),
     )
     .optional()
     .describe('Optional filter: only return nodes of these kinds.'),
@@ -54,9 +55,16 @@ export function kgSearch(
         kind: h.node.kind,
         name: h.node.name,
         domain: h.node.domain,
-        status: h.node.status,
-        description: h.node.description,
-        score: h.score,
+	        status: h.node.status,
+	        owner: h.node.owner,
+	        description: h.node.description,
+	        sourceTier: h.node.sourceTier,
+	        certification: h.node.certification,
+	        provenance: h.node.provenance,
+	        businessOutcome: h.node.businessOutcome,
+	        decisionUse: h.node.decisionUse,
+	        reviewCadence: h.node.reviewCadence,
+	        score: h.score,
         snippet: h.snippet,
         sourcePath: h.node.sourcePath,
       })),

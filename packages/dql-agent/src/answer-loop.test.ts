@@ -44,17 +44,46 @@ beforeEach(() => {
       businessRules: ['Revenue excludes test accounts.'],
       caveats: ['Late-arriving invoices may restate current quarter revenue.'],
     },
-    {
-      nodeId: 'block:churn_logo',
-      kind: 'block',
-      name: 'churn_logo',
+	    {
+	      nodeId: 'block:churn_logo',
+	      kind: 'block',
+	      name: 'churn_logo',
       domain: 'retention',
       status: 'draft',
-      description: 'Logo churn',
-    },
-    {
-      nodeId: 'metric:arr',
-      kind: 'metric',
+	      description: 'Logo churn',
+	    },
+	    {
+	      nodeId: 'term:Net Revenue',
+	      kind: 'term',
+	      name: 'Net Revenue',
+	      domain: 'growth',
+	      status: 'certified',
+	      description: 'Recognized revenue after refunds and test-account exclusions.',
+	      llmContext: 'synonyms: revenue, recognized revenue',
+	      sourceTier: 'business_context',
+	      certification: 'certified',
+	      provenance: 'DQL business term',
+	      businessOwner: 'finance',
+	      decisionUse: 'Metric definition and stakeholder alignment',
+	    },
+	    {
+	      nodeId: 'business_view:Revenue Health',
+	      kind: 'business_view',
+	      name: 'Revenue Health',
+	      domain: 'growth',
+	      status: 'certified',
+	      description: 'Business view for leadership revenue health review.',
+	      llmContext: 'terms: Net Revenue\nblocks: revenue_total',
+	      sourceTier: 'business_context',
+	      certification: 'certified',
+	      provenance: 'DQL business view',
+	      businessOutcome: 'Revenue leadership can inspect growth, mix, and caveats in one place.',
+	      decisionUse: 'Weekly business review',
+	      reviewCadence: 'weekly',
+	    },
+	    {
+	      nodeId: 'metric:arr',
+	      kind: 'metric',
       name: 'arr',
       domain: 'growth',
       description: 'Annualized recurring revenue',
@@ -68,7 +97,7 @@ afterEach(() => {
 });
 
 describe('answer (block-first loop)', () => {
-  it('returns Certified when a certified block matches', async () => {
+	  it('returns Certified when a certified block matches', async () => {
     const provider = new StubProvider('should not be called');
     const result = await answer({
       question: 'What was revenue this quarter?',
@@ -80,8 +109,31 @@ describe('answer (block-first loop)', () => {
     expect(result.citations[0].gitSha).toBe('abc12345');
     expect(result.evidence?.route[0].tool).toBe('search_certified_artifacts');
     expect(result.evidence?.selectedAssets[0].nodeId).toBe('block:revenue_total');
-    expect(result.evidence?.outcome?.name).toContain('Revenue leadership');
-  });
+	    expect(result.evidence?.outcome?.name).toContain('Revenue leadership');
+	  });
+
+	  it('uses certified business context for definition questions', async () => {
+	    const provider = new StubProvider('should not be called');
+	    const result = await answer({
+	      question: 'What is revenue health?',
+	      provider,
+	      kg,
+	    });
+	    expect(result.kind).toBe('certified');
+	    expect(result.block).toBeUndefined();
+	    expect(result.sourceTier).toBe('business_context');
+	    expect(result.citations[0]).toMatchObject({
+	      kind: 'business_view',
+	      name: 'Revenue Health',
+	      sourceTier: 'business_context',
+	    });
+	    expect(result.evidence?.route).toEqual(
+	      expect.arrayContaining([
+	        expect.objectContaining({ tool: 'search_business_context', status: 'selected' }),
+	      ]),
+	    );
+	    expect(result.evidence?.businessContext.some((item) => item.value?.includes('Weekly business review'))).toBe(true);
+	  });
 
   it('executes a certified block when the host supplies an executor', async () => {
     const provider = new StubProvider('should not be called');

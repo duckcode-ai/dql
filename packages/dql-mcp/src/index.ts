@@ -21,3 +21,4 @@ export {
 export { lineageImpact, lineageImpactInput } from './tools/lineage-impact.js';
 export { certify, certifyInput } from './tools/certify.js';
 export { suggestBlock, suggestBlockInput } from './tools/suggest-block.js';
+export { kgSearch, kgSearchInput, feedbackRecord, feedbackRecordInput } from './tools/kg.js';

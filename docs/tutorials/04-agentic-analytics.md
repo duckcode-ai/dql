@@ -24,8 +24,8 @@ The agent never silently invents SQL. Every answer is routed through tiers:
 
 | Tier | Source | Label |
 |---|---|---|
-| 1 | A **certified block** matches the question | ✓ Certified |
-| 2 | No match — the LLM proposes SQL grounded in dbt + semantic metadata, saved as a **draft** | ⚠ Uncertified |
+| 1 | A **certified DQL artifact** matches the question: executable blocks for data answers, or business terms/views for definition and context answers | ✓ Certified |
+| 2 | No match — the LLM proposes SQL grounded in business context, dbt, and semantic metadata, saved as a **draft** | ⚠ Uncertified |
 | 3 | Not answerable from the project | Refusal, with what's missing |
 
 Tier-2 drafts land in `blocks/_drafts/` so popular questions become
@@ -39,8 +39,8 @@ candidates for certification — that's the promotion loop.
 dql agent reindex
 ```
 
-> **You should see** a node/edge count — your certified blocks, dbt models,
-> metrics, and dimensions indexed into a local SQLite FTS5 knowledge graph
+> **You should see** a node/edge count — your business terms, business views,
+> certified blocks, dbt models, metrics, and dimensions indexed into a local SQLite FTS5 knowledge graph
 > at `.dql/cache/agent-kg.sqlite`. Nothing leaves your machine except the
 > LLM calls you configure.
 
@@ -57,8 +57,8 @@ dql agent ask "how has revenue trended by month?"
 > ✓ Certified
 > Answered from block: revenue_by_month (revenue · certified)
 > ```
-> followed by the result rows. The `llmContext` and `examples` you wrote in
-> tutorial 02 are what made retrieval land.
+> followed by the result rows. The `llmContext`, `examples`, attached `terms`,
+> and related `business_view` context you wrote earlier are what made retrieval land.
 
 Inspect the routing decision:
 
