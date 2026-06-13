@@ -1,35 +1,35 @@
 #!/usr/bin/env node
 
-import { readFileSync } from 'node:fs';
-import { dirname, join } from 'node:path';
-import { fileURLToPath } from 'node:url';
-import { parseArgs } from './args.js';
-import { runInit } from './commands/init.js';
-import { runNew } from './commands/new.js';
-import { runBuild } from './commands/build.js';
-import { runDoctor } from './commands/doctor.js';
-import { runPreview } from './commands/preview.js';
-import { runServe } from './commands/serve.js';
-import { runParse } from './commands/parse.js';
-import { runTest } from './commands/test.js';
-import { runCertify } from './commands/certify.js';
-import { runInfo } from './commands/info.js';
-import { runMigrate } from './commands/migrate.js';
-import { runFmt } from './commands/fmt.js';
-import { runNotebook } from './commands/notebook.js';
-import { runValidate } from './commands/validate.js';
-import { runSemantic } from './commands/semantic.js';
-import { runLineage } from './commands/lineage.js';
-import { runCompile } from './commands/compile.js';
-import { runSync } from './commands/sync.js';
-import { runDiff } from './commands/diff.js';
-import { runMcp } from './commands/mcp.js';
-import { runApp } from './commands/app.js';
-import { runSchedule } from './commands/schedule.js';
-import { runAgent } from './commands/agent.js';
-import { runSlack } from './commands/slack.js';
-import { runVerify } from './commands/verify.js';
-import { runImport } from './commands/import.js';
+import { readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
+import { parseArgs } from "./args.js";
+import { runInit } from "./commands/init.js";
+import { runNew } from "./commands/new.js";
+import { runBuild } from "./commands/build.js";
+import { runDoctor } from "./commands/doctor.js";
+import { runPreview } from "./commands/preview.js";
+import { runServe } from "./commands/serve.js";
+import { runParse } from "./commands/parse.js";
+import { runTest } from "./commands/test.js";
+import { runCertify } from "./commands/certify.js";
+import { runInfo } from "./commands/info.js";
+import { runMigrate } from "./commands/migrate.js";
+import { runFmt } from "./commands/fmt.js";
+import { runNotebook } from "./commands/notebook.js";
+import { runValidate } from "./commands/validate.js";
+import { runSemantic } from "./commands/semantic.js";
+import { runLineage } from "./commands/lineage.js";
+import { runCompile } from "./commands/compile.js";
+import { runSync } from "./commands/sync.js";
+import { runDiff } from "./commands/diff.js";
+import { runMcp } from "./commands/mcp.js";
+import { runApp } from "./commands/app.js";
+import { runSchedule } from "./commands/schedule.js";
+import { runAgent } from "./commands/agent.js";
+import { runSlack } from "./commands/slack.js";
+import { runVerify } from "./commands/verify.js";
+import { runImport } from "./commands/import.js";
 
 const HELP = `
   dql — DQL CLI
@@ -61,7 +61,7 @@ const HELP = `
     dql sync dbt [path]             Detect dbt manifest changes; report DQL cache status
     dql lineage [block] [path]      Answer-layer lineage analysis
     dql mcp [--http]                Run the DQL MCP server (stdio by default; --http = loopback)
-    dql app new|ls|show|build|reindex <name>
+    dql app new|generate|ls|show|build|reindex <name>
                                     Manage App artifacts (metadata, policies, dashboards, schedules)
     dql schedule list|run|start|status  Local scheduler for @schedule'd blocks (alerts + notifications)
     dql agent ask "<question>"      Block-first agent loop (certified blocks → fallback LLM SQL)
@@ -110,6 +110,7 @@ const COMMAND_HELP: Record<string, string> = {
 
   Usage:
     dql app new <name>
+    dql app generate "<prompt>" [--domain <domain>] [--owner <user>] [--template <template>]
     dql app ls
     dql app show <name>
     dql app build <name>
@@ -153,10 +154,12 @@ const COMMAND_HELP: Record<string, string> = {
 function getVersion(): string {
   try {
     const cliDir = dirname(fileURLToPath(import.meta.url));
-    const pkg = JSON.parse(readFileSync(join(cliDir, '../package.json'), 'utf-8'));
-    return pkg.version ?? 'unknown';
+    const pkg = JSON.parse(
+      readFileSync(join(cliDir, "../package.json"), "utf-8"),
+    );
+    return pkg.version ?? "unknown";
   } catch {
-    return 'unknown';
+    return "unknown";
   }
 }
 
@@ -169,102 +172,118 @@ async function main() {
   }
 
   if (flags.help || !command) {
-    console.log((command && COMMAND_HELP[command] ? COMMAND_HELP[command] : HELP).trim());
+    console.log(
+      (command && COMMAND_HELP[command] ? COMMAND_HELP[command] : HELP).trim(),
+    );
     process.exit(0);
   }
 
-  const commandAllowsNoFile = command === 'init' || command === 'serve' || command === 'doctor'
-    || command === 'notebook' || command === 'validate' || command === 'semantic'
-    || command === 'lineage' || command === 'compile' || command === 'sync'
-    || command === 'mcp' || command === 'app' || command === 'schedule'
-    || command === 'verify' || (command === 'certify' && Boolean(flags.fromDraft));
+  const commandAllowsNoFile =
+    command === "init" ||
+    command === "serve" ||
+    command === "doctor" ||
+    command === "notebook" ||
+    command === "validate" ||
+    command === "semantic" ||
+    command === "lineage" ||
+    command === "compile" ||
+    command === "sync" ||
+    command === "mcp" ||
+    command === "app" ||
+    command === "schedule" ||
+    command === "verify" ||
+    (command === "certify" && Boolean(flags.fromDraft));
   if (!file && !commandAllowsNoFile) {
-    console.error('Error: No file/argument specified. Run "dql --help" for usage.');
+    console.error(
+      'Error: No file/argument specified. Run "dql --help" for usage.',
+    );
     process.exit(1);
   }
 
   try {
     switch (command) {
-      case 'init':
+      case "init":
         await runInit(file, flags);
         break;
-      case 'new':
+      case "new":
         await runNew(file, rest, flags);
         break;
-      case 'build':
+      case "build":
         await runBuild(file!, flags);
         break;
-      case 'doctor':
+      case "doctor":
         await runDoctor(file, flags);
         break;
-      case 'parse':
+      case "parse":
         await runParse(file!, flags);
         break;
-      case 'preview':
+      case "preview":
         await runPreview(file!, flags);
         break;
-      case 'serve':
+      case "serve":
         await runServe(file, flags);
         break;
-      case 'test':
+      case "test":
         await runTest(file!, flags);
         break;
-      case 'certify':
-        await runCertify(file ?? '', flags);
+      case "certify":
+        await runCertify(file ?? "", flags);
         break;
-      case 'info':
+      case "info":
         await runInfo(file!, flags);
         break;
-      case 'migrate':
+      case "migrate":
         await runMigrate(file!, flags);
         break;
-      case 'import':
+      case "import":
         await runImport(file!, rest, flags);
         break;
-      case 'fmt':
+      case "fmt":
         await runFmt(file!, flags);
         break;
-      case 'notebook':
+      case "notebook":
         await runNotebook(file, flags);
         break;
-      case 'validate':
+      case "validate":
         await runValidate(file, flags);
         break;
-      case 'semantic':
+      case "semantic":
         await runSemantic(file, rest, flags);
         break;
-      case 'compile':
+      case "compile":
         await runCompile(file, rest, flags);
         break;
-      case 'sync':
+      case "sync":
         await runSync(file, rest, flags);
         break;
-      case 'lineage':
+      case "lineage":
         await runLineage(file, rest, flags);
         break;
-      case 'diff':
+      case "diff":
         await runDiff(file, rest, flags);
         break;
-      case 'mcp':
+      case "mcp":
         await runMcp(file, flags);
         break;
-      case 'app':
+      case "app":
         await runApp(file, rest, flags);
         break;
-      case 'schedule':
+      case "schedule":
         await runSchedule(file, rest, flags);
         break;
-      case 'agent':
+      case "agent":
         await runAgent(file, rest, flags);
         break;
-      case 'slack':
+      case "slack":
         await runSlack(file, rest, flags);
         break;
-      case 'verify':
+      case "verify":
         await runVerify(file, rest, flags);
         break;
       default:
-        console.error(`Unknown command: ${command}. Run "dql --help" for usage.`);
+        console.error(
+          `Unknown command: ${command}. Run "dql --help" for usage.`,
+        );
         process.exit(1);
     }
   } catch (err) {

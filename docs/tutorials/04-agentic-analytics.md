@@ -5,10 +5,11 @@ governed blocks**, not from improvised SQL.
 
 **What you'll do:** build the local knowledge graph, ask questions through
 the agent, watch the graduated-trust model route between certified blocks
-and flagged proposals, promote a good proposal to a certified block, and
-connect the MCP server so Claude/Cursor can do the same.
+and flagged proposals, promote a good proposal to a certified block, generate
+a local App package from a prompt, and connect the MCP server so Claude/Cursor
+can do the same.
 
-**Time:** 20 minutes.
+**Time:** 25 minutes.
 
 > Setup: continues from [03 — Dashboards & Apps](./03-dashboards-and-apps.md).
 > You'll need one LLM provider: `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`,
@@ -133,7 +134,34 @@ dql agent ask "drill into Enterprise last week"
 
 ---
 
-## Step 5 — Connect the MCP server
+## Step 5 — Generate a local App from a prompt
+
+The OSS app builder writes reviewable files. It does not generate hidden React
+or bypass certification state:
+
+```bash
+dql app generate "Build a weekly revenue health app for the COO"
+```
+
+> **You should see** an `apps/<app-id>/` package with:
+>
+> - `dql.app.json`
+> - `dashboards/overview.dqld`
+> - `README.md`
+
+Certified blocks become certified dashboard tiles. Missing or AI-created
+sections become text/draft placeholders with review tasks, so the generated
+App is useful immediately but still safe for Git review.
+
+Build the App manifest after review:
+
+```bash
+dql app build
+```
+
+---
+
+## Step 6 — Connect the MCP server
 
 The same graduated-trust loop is exposed to any MCP client (Claude Code,
 Claude Desktop, Cursor):
@@ -164,6 +192,7 @@ blocks**, citing them — and files drafts when it has to improvise.
 ✓ A local knowledge graph over blocks, dbt models, and metrics
 ✓ Agent answers that are certified-first, flagged when improvised
 ✓ The promotion loop: draft → review → certify → re-ask → certified
+✓ A local generated App package with certified tiles and draft review tasks
 ✓ An MCP server giving Claude/Cursor governed access to your analytics
 
 [Continue to tutorial 05 — CI and `dql verify` →](./05-ci-and-verify.md)
