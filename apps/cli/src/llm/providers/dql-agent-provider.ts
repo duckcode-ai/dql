@@ -10,6 +10,7 @@ import {
   loadSkills,
   reindexProject,
   type AgentAnswer,
+  type AgentFollowUpContext,
   type AgentProvider,
   type AgentResultPayload,
 } from '@duckcodeailabs/dql-agent';
@@ -119,14 +120,16 @@ export function createDqlAgentProviderRunner(id: SimpleProviderId): AgentRunner 
             limit: 6,
           });
           const skills = loadSkills(req.projectRoot).skills;
-          const blockHints = inferFollowUpBlockHints(req, question);
+          const followUp = inferFollowUpContext(req, question);
+          const blockHints = followUp?.kind === 'generic' && followUp.sourceBlockName ? [followUp.sourceBlockName] : [];
           const result = await answer({
             question,
-            extraContext: renderExtraContext(req, blockHints),
+            extraContext: renderExtraContext(req, followUp),
             provider,
             kg,
             skills,
             blockHints,
+            followUp,
             memoryContext,
             signal,
             executeCertifiedBlock: req.executeCertifiedBlock,
@@ -166,26 +169,47 @@ function lastUserMessage(req: AgentRunRequest): string {
   return '';
 }
 
-function renderExtraContext(req: AgentRunRequest, blockHints: string[]): string | undefined {
+function renderExtraContext(req: AgentRunRequest, followUp?: AgentFollowUpContext): string | undefined {
   const parts: string[] = [];
   if (req.upstream?.sql) parts.push(`Current upstream SQL:\n${req.upstream.sql}`);
-  if (blockHints.length > 0) {
-    parts.push(`Follow-up context: the user is referring to certified block "${blockHints[0]}".`);
+  if (followUp?.sourceBlockName) {
+    const suffix = followUp.kind === 'drilldown'
+      ? 'Use it as source context, but prefer a distinct certified drilldown block or a review-required draft.'
+      : 'Reuse it for this generic follow-up.';
+    parts.push(`Follow-up context: the user is referring to certified block "${followUp.sourceBlockName}". ${suffix}`);
+  }
+  if (followUp?.filters?.length) {
+    parts.push(`Requested follow-up filters: ${followUp.filters.join(', ')}`);
+  }
+  if (followUp?.dimensions?.length) {
+    parts.push(`Requested follow-up dimensions: ${followUp.dimensions.join(', ')}`);
   }
   return parts.length > 0 ? parts.join('\n\n') : undefined;
 }
 
-function inferFollowUpBlockHints(req: AgentRunRequest, question: string): string[] {
-  if (!isGenericFollowUp(question)) return [];
+function inferFollowUpContext(req: AgentRunRequest, question: string): AgentFollowUpContext | undefined {
+  const kind = isGenericFollowUp(question) ? 'generic' : isDrilldownFollowUp(question) ? 'drilldown' : null;
+  if (!kind) return undefined;
   for (let i = req.messages.length - 1; i >= 0; i--) {
     const msg = req.messages[i];
     if (msg.role !== 'assistant') continue;
-    const fromAnswer = msg.content.match(/Answered by certified block \*\*([^*]+)\*\*/i)?.[1];
-    const fromCitation = msg.content.match(/^- block:\s*([A-Za-z0-9_.-]+)/im)?.[1];
-    const block = fromAnswer ?? fromCitation;
-    if (block) return [block.trim()];
+    const sourceBlockName = extractCertifiedBlockName(msg.content);
+    if (!sourceBlockName) continue;
+    return {
+      kind,
+      sourceBlockName,
+      sourceAnswer: msg.content.slice(0, 1200),
+      filters: kind === 'drilldown' ? extractDrilldownFilters(question) : undefined,
+      dimensions: kind === 'drilldown' ? extractDrilldownDimensions(question) : undefined,
+    };
   }
-  return [];
+  return undefined;
+}
+
+function extractCertifiedBlockName(content: string): string | undefined {
+  const fromAnswer = content.match(/Answered by certified block \*\*([^*]+)\*\*/i)?.[1];
+  const fromCitation = content.match(/^- block:\s*([A-Za-z0-9_.-]+)/im)?.[1];
+  return (fromAnswer ?? fromCitation)?.trim();
 }
 
 const GENERIC_FOLLOW_UP_WORDS = new Set([
@@ -201,6 +225,45 @@ function isGenericFollowUp(question: string): boolean {
   const tokens = lower.match(/[a-z0-9_]+/g) ?? [];
   const meaningful = tokens.filter((token) => token.length > 1 && !GENERIC_FOLLOW_UP_WORDS.has(token));
   return meaningful.length === 0;
+}
+
+function isDrilldownFollowUp(question: string): boolean {
+  const lower = question.toLowerCase();
+  return /\b(drill|break\s*down|slice|segment|filter|compare|split|by|for|only|where|last week|this week|last month|this month|enterprise|region|customer|channel|product)\b/.test(lower)
+    && !/\b(what is|what are|define|definition|meaning of)\b/.test(lower);
+}
+
+function extractDrilldownFilters(question: string): string[] {
+  const filters: string[] = [];
+  const quoted = [...question.matchAll(/["']([^"']+)["']/g)].map((match) => match[1].trim()).filter(Boolean);
+  filters.push(...quoted);
+  for (const pattern of [
+    /\benterprise\b/i,
+    /\bsmall business\b/i,
+    /\bmid[- ]market\b/i,
+    /\blast week\b/i,
+    /\bthis week\b/i,
+    /\blast month\b/i,
+    /\bthis month\b/i,
+    /\blast quarter\b/i,
+    /\bthis quarter\b/i,
+  ]) {
+    const match = question.match(pattern);
+    if (match) filters.push(match[0]);
+  }
+  return Array.from(new Set(filters));
+}
+
+function extractDrilldownDimensions(question: string): string[] {
+  const dims: string[] = [];
+  for (const match of question.matchAll(/\bby\s+([a-z][a-z0-9_ -]{1,40})/gi)) {
+    const value = match[1].replace(/\b(last|this|where|for|only|and|with)\b.*$/i, '').trim();
+    if (value) dims.push(value);
+  }
+  for (const dim of ['segment', 'region', 'customer', 'channel', 'product', 'week', 'month']) {
+    if (new RegExp(`\\b${dim}\\b`, 'i').test(question)) dims.push(dim);
+  }
+  return Array.from(new Set(dims));
 }
 
 function formatAgentAnswer(result: AgentAnswer): string {
@@ -264,13 +327,14 @@ function escapeMarkdownTable(value: string): string {
 }
 
 function emitDraftProposal(result: AgentAnswer, question: string, emit: (turn: AgentTurn) => void): void {
+  const isDrilldown = result.evidence?.route.some((step) => step.tool === 'propose_drilldown' && step.status === 'checked') ?? false;
   const proposal: BlockProposal = {
     name: slugify(question).slice(0, 56) || 'ai_generated_analysis',
     domain: '',
     owner: `${process.env.USER ?? 'analyst'}@local`,
     description: result.text.slice(0, 240),
     sql: result.proposedSql!,
-    tags: ['ai-generated', 'needs-review', result.sourceTier ?? 'dbt_manifest'],
+    tags: ['ai-generated', 'needs-review', result.sourceTier ?? 'dbt_manifest', ...(isDrilldown ? ['drilldown'] : [])],
     chartType: result.suggestedViz,
   };
   emit({
@@ -279,7 +343,11 @@ function emitDraftProposal(result: AgentAnswer, question: string, emit: (turn: A
     governance: {
       certified: false,
       errors: [],
-      warnings: ['AI generated. Analyst review and certification are required before reuse as governed content.'],
+      warnings: [
+        isDrilldown
+          ? 'AI generated drilldown. Validate filters, joins, and grain before certifying.'
+          : 'AI generated. Analyst review and certification are required before reuse as governed content.',
+      ],
     },
   });
 }

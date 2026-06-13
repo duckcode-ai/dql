@@ -22,14 +22,20 @@ connect the MCP server so Claude/Cursor can do the same.
 
 The agent never silently invents SQL. Every answer is routed through tiers:
 
-| Tier | Source | Label |
-|---|---|---|
-| 1 | A **certified DQL artifact** matches the question: executable blocks for data answers, or business terms/views for definition and context answers | ✓ Certified |
-| 2 | No match — the LLM proposes SQL grounded in business context, dbt, and semantic metadata, saved as a **draft** | ⚠ Uncertified |
-| 3 | Not answerable from the project | Refusal, with what's missing |
+| Tier | Source                                                                                                                                            | Label                        |
+| ---- | ------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------- |
+| 1    | A **certified DQL artifact** matches the question: executable blocks for data answers, or business terms/views for definition and context answers | ✓ Certified                  |
+| 2    | No match — the LLM proposes SQL grounded in business context, dbt, and semantic metadata, saved as a **draft**                                    | ⚠ Uncertified                |
+| 3    | Not answerable from the project                                                                                                                   | Refusal, with what's missing |
 
 Tier-2 drafts land in `blocks/_drafts/` so popular questions become
 candidates for certification — that's the promotion loop.
+
+Follow-up questions keep the same trust model. If a user asks "drill into
+Enterprise last week" after a certified revenue answer, the agent uses the
+prior answer as context, searches for a distinct certified drilldown block
+first, and only then creates a review-ready draft. It does not silently reuse
+the top-level block or mark generated drilldown SQL as certified.
 
 ---
 
@@ -53,10 +59,12 @@ dql agent ask "how has revenue trended by month?"
 ```
 
 > **You should see**
+>
 > ```text
 > ✓ Certified
 > Answered from block: revenue_by_month (revenue · certified)
 > ```
+>
 > followed by the result rows. The `llmContext`, `examples`, attached `terms`,
 > and related `business_view` context you wrote earlier are what made retrieval land.
 
@@ -112,6 +120,16 @@ Feedback tunes retrieval over time:
 ```bash
 dql agent feedback up --question "monthly revenue" --block "block:revenue_by_month"
 ```
+
+Follow-up drilldowns use the same loop:
+
+```bash
+dql agent ask "drill into Enterprise last week"
+```
+
+> **You should see** either a certified drilldown block, if one exists, or an
+> **Uncertified** draft proposal tagged for review. Repeated drilldown asks
+> make the draft a stronger certification candidate.
 
 ---
 

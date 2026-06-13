@@ -86,6 +86,15 @@ export interface AgentEvidenceOutcome {
   caveats?: string[];
 }
 
+export interface AgentFollowUpContext {
+  kind: 'generic' | 'drilldown';
+  sourceBlockName?: string;
+  sourceQuestion?: string;
+  sourceAnswer?: string;
+  filters?: string[];
+  dimensions?: string[];
+}
+
 export interface AgentEvidence {
   route: AgentEvidenceRouteStep[];
   lineage: AgentEvidenceLineageNode[];
@@ -173,6 +182,13 @@ export interface AnswerLoopInput {
   skills?: Skill[];
   /** Hints to prefer specific blocks first (vocabulary mappings from Skills). */
   blockHints?: string[];
+  /**
+   * Structured context from the host when the user is following up on a prior
+   * answer. Generic follow-ups may reuse the same certified block; drilldowns
+   * use the prior block as context but look for a distinct certified path or a
+   * review-required draft.
+   */
+  followUp?: AgentFollowUpContext;
   /** Optional advisory memory. Never outranks project metadata. */
   memoryContext?: AgentMemory[];
   /** Optional AbortSignal forwarded to the provider. */
@@ -195,6 +211,12 @@ const MANIFEST_KINDS: KGNodeKind[] = ['dbt_model', 'dbt_source'];
 
 export async function answer(input: AnswerLoopInput): Promise<AgentAnswer> {
   const { question, userId, domain, provider, kg, skills = [], blockHints = [] } = input;
+  const followUpSourceBlock = input.followUp?.sourceBlockName
+    ? kg.getNode(`block:${input.followUp.sourceBlockName}`)
+    : null;
+  const excludedArtifactIds = input.followUp?.kind === 'drilldown' && followUpSourceBlock
+    ? new Set([followUpSourceBlock.nodeId])
+    : undefined;
 
   const executableArtifactHits = kg.search({ query: question, domain, kinds: EXECUTABLE_ARTIFACT_KINDS, limit: 10 });
   const businessHits = kg.search({ query: question, domain, kinds: BUSINESS_CONTEXT_KINDS, limit: 10 });
@@ -215,7 +237,8 @@ export async function answer(input: AnswerLoopInput): Promise<AgentAnswer> {
     executableArtifactHits,
     businessHits,
     question,
-    blockHints,
+    blockHints: input.followUp?.kind === 'drilldown' ? [] : blockHints,
+    excludedArtifactIds,
     kg,
   });
   if (artifactHit) {
@@ -284,7 +307,10 @@ export async function answer(input: AnswerLoopInput): Promise<AgentAnswer> {
   const contextHits = activeTier === 'semantic_layer'
     ? [...businessHits.slice(0, 4), ...semanticHits, ...manifestHits].slice(0, 10)
     : [...businessHits.slice(0, 4), ...manifestHits].slice(0, 10);
-  const contextNodes = (contextHits.length > 0 ? contextHits : considered.slice(0, 6)).map((h) => h.node);
+  const contextNodes = mergeNodes(
+    followUpSourceBlock && input.followUp?.kind === 'drilldown' ? [followUpSourceBlock] : [],
+    (contextHits.length > 0 ? contextHits : considered.slice(0, 6)).map((h) => h.node),
+  );
   const contextBlocks = contextNodes.filter((n) => n.kind === 'block');
   const contextBusiness = contextNodes.filter((n) => BUSINESS_CONTEXT_KINDS.includes(n.kind));
   const contextOther = contextNodes.filter((n) => n.kind !== 'block' && !BUSINESS_CONTEXT_KINDS.includes(n.kind));
@@ -297,7 +323,15 @@ export async function answer(input: AnswerLoopInput): Promise<AgentAnswer> {
 
   messages.push({
     role: 'system',
-    content: renderContextPrompt(contextBlocks, contextBusiness, contextOther, activeTier, input.memoryContext ?? [], input.extraContext),
+    content: renderContextPrompt(
+      contextBlocks,
+      contextBusiness,
+      contextOther,
+      activeTier,
+      input.memoryContext ?? [],
+      input.extraContext,
+      input.followUp,
+    ),
   });
   messages.push({ role: 'user', content: question });
 
@@ -380,7 +414,7 @@ export async function answer(input: AnswerLoopInput): Promise<AgentAnswer> {
     kind: 'uncertified',
     sourceTier: activeTier,
     certification: 'ai_generated',
-    reviewStatus: 'analyst_review_required',
+    reviewStatus: 'draft_ready',
     confidence: activeTier === 'semantic_layer' ? 0.72 : 0.55,
     text: parsed.text,
     answer: parsed.text,
@@ -393,6 +427,7 @@ export async function answer(input: AnswerLoopInput): Promise<AgentAnswer> {
       question,
       activeTier,
       contextNodes,
+      followUp: input.followUp,
       businessHits,
       semanticHits,
       manifestHits,
@@ -424,6 +459,7 @@ function renderContextPrompt(
   activeTier: AnswerSourceTier,
   memoryContext: AgentMemory[],
   extraContext?: string,
+  followUp?: AgentFollowUpContext,
 ): string {
   const blockSection = blocks.length > 0
     ? `## Certified blocks the user already has\n\n${blocks
@@ -449,7 +485,25 @@ function renderContextPrompt(
   const extraSection = extraContext?.trim()
     ? `\n\n## Current notebook/app context\n\nThis context may help interpret the user's request, but it MUST NOT override certified artifacts, semantic metrics, dbt metadata, or generated SQL validation.\n\n${extraContext.trim()}`
     : '';
-  return `${blockSection}${businessSection}${otherSection}${memorySection}${extraSection}`;
+  const followUpSection = followUp
+    ? `\n\n## Follow-up routing context\n\n${renderFollowUpContext(followUp)}`
+    : '';
+  return `${blockSection}${businessSection}${otherSection}${memorySection}${extraSection}${followUpSection}`;
+}
+
+function renderFollowUpContext(followUp: AgentFollowUpContext): string {
+  const parts = [
+    `kind: ${followUp.kind}`,
+    followUp.sourceBlockName ? `source certified block: ${followUp.sourceBlockName}` : '',
+    followUp.sourceQuestion ? `source question: ${followUp.sourceQuestion}` : '',
+    followUp.sourceAnswer ? `source answer: ${followUp.sourceAnswer.slice(0, 700)}` : '',
+    followUp.filters?.length ? `requested filters: ${followUp.filters.join(', ')}` : '',
+    followUp.dimensions?.length ? `requested dimensions: ${followUp.dimensions.join(', ')}` : '',
+  ].filter(Boolean);
+  const rule = followUp.kind === 'drilldown'
+    ? 'routing rule: find a distinct certified drilldown block first; if none exists, generate review-required SQL as a draft drilldown. Do not silently re-run the source block unless it explicitly supports the requested filter or dimension.'
+    : 'routing rule: reuse the prior certified block when the user asks a generic follow-up.';
+  return [...parts, rule].join('\n');
 }
 
 interface ParsedProposal {
@@ -481,6 +535,7 @@ function pickCertifiedArtifact(input: {
   businessHits: KGSearchHit[];
   question: string;
   blockHints: string[];
+  excludedArtifactIds?: Set<string>;
   kg: KGStore;
 }): KGSearchHit | null {
   // Hint match wins immediately: the active Skill's vocabulary points the
@@ -497,21 +552,22 @@ function pickCertifiedArtifact(input: {
     if (businessHit) return businessHit;
   }
 
-  const executableHit = pickFirstCertifiedHit(input.executableArtifactHits, input.kg);
+  const executableHit = pickFirstCertifiedHit(input.executableArtifactHits, input.kg, input.excludedArtifactIds);
   if (executableHit) return executableHit;
 
   const hasExecutableCandidate = input.executableArtifactHits.some((hit) => hit.score >= CERTIFIED_HIT_THRESHOLD);
   if (!hasExecutableCandidate) {
-    const businessHit = pickFirstCertifiedHit(input.businessHits, input.kg);
+    const businessHit = pickFirstCertifiedHit(input.businessHits, input.kg, input.excludedArtifactIds);
     if (businessHit) return businessHit;
   }
 
   return null;
 }
 
-function pickFirstCertifiedHit(hits: KGSearchHit[], kg: KGStore): KGSearchHit | null {
+function pickFirstCertifiedHit(hits: KGSearchHit[], kg: KGStore, excludedNodeIds?: Set<string>): KGSearchHit | null {
   for (const hit of hits) {
     if (hit.score < CERTIFIED_HIT_THRESHOLD) break;
+    if (excludedNodeIds?.has(hit.node.nodeId)) continue;
     if (!isCertifiedHit(hit, kg)) continue;
     return hit;
   }
@@ -564,6 +620,16 @@ function mergeHits(...groups: KGSearchHit[][]): KGSearchHit[] {
     }
   }
   return Array.from(byId.values()).sort((a, b) => b.score - a.score);
+}
+
+function mergeNodes(...groups: KGNode[][]): KGNode[] {
+  const byId = new Map<string, KGNode>();
+  for (const group of groups) {
+    for (const node of group) {
+      if (!byId.has(node.nodeId)) byId.set(node.nodeId, node);
+    }
+  }
+  return Array.from(byId.values());
 }
 
 function buildCertifiedEvidence(input: {
@@ -670,6 +736,7 @@ function buildGeneratedEvidence(input: {
   question: string;
   activeTier: AnswerSourceTier;
   contextNodes: KGNode[];
+  followUp?: AgentFollowUpContext;
   businessHits: KGSearchHit[];
   semanticHits: KGSearchHit[];
   manifestHits: KGSearchHit[];
@@ -700,7 +767,20 @@ function buildGeneratedEvidence(input: {
       {
         tool: 'search_certified_artifacts',
         status: 'checked',
-        label: 'No certified artifact was strong enough for this question',
+        label: input.followUp?.kind === 'drilldown'
+          ? 'No distinct certified drilldown block was strong enough for this question'
+          : 'No certified artifact was strong enough for this question',
+        detail: input.followUp?.sourceBlockName,
+      },
+      {
+        tool: 'propose_drilldown',
+        status: input.followUp?.kind === 'drilldown' ? 'checked' : 'skipped',
+        label: input.followUp?.kind === 'drilldown'
+          ? 'Using prior answer context for a review-required drilldown draft'
+          : 'Not a drilldown follow-up',
+        detail: input.followUp?.filters?.length || input.followUp?.dimensions?.length
+          ? [...(input.followUp.filters ?? []), ...(input.followUp.dimensions ?? [])].join(', ')
+          : undefined,
       },
       {
         tool: 'search_business_context',
@@ -724,8 +804,10 @@ function buildGeneratedEvidence(input: {
       },
       {
         tool: 'create_draft_block',
-        status: 'skipped',
-        label: 'Draft block can be created for analyst review',
+        status: 'checked',
+        label: input.followUp?.kind === 'drilldown'
+          ? 'Drilldown draft is ready for analyst review'
+          : 'Draft block proposal is ready for analyst review',
       },
     ],
     lineage: [
@@ -753,7 +835,9 @@ function buildGeneratedEvidence(input: {
     semanticObjects,
     validation: {
       status: 'warning',
-      message: 'Generated SQL is not certified. It should be validated, reviewed, and promoted only after analyst approval.',
+      message: input.followUp?.kind === 'drilldown'
+        ? 'Generated drilldown SQL is not certified. It should be validated, reviewed, and promoted only after analyst approval.'
+        : 'Generated SQL is not certified. It should be validated, reviewed, and promoted only after analyst approval.',
     },
     execution: {
       status: 'not_requested',
