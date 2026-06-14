@@ -186,6 +186,71 @@ export interface CreateAppResponse {
   dashboardId: string;
 }
 
+export type AppPlanTemplateId =
+  | 'executive_kpi_review'
+  | 'revenue_health'
+  | 'customer_360'
+  | 'data_quality_monitor'
+  | 'experiment_readout';
+
+export interface GenerateAppRequest {
+  prompt: string;
+  domain?: string;
+  owner?: string;
+  template?: AppPlanTemplateId;
+  force?: boolean;
+}
+
+export interface GeneratedAppPlan {
+  version: 1;
+  appId: string;
+  name: string;
+  prompt: string;
+  template: AppPlanTemplateId;
+  domain: string;
+  audience: string;
+  businessGoal: string;
+  owner: string;
+  lifecycle: 'draft' | 'review';
+  tags: string[];
+  pages: Array<{
+    id: string;
+    title: string;
+    description?: string;
+    filters: Array<{ id: string; label: string; type: string; default?: unknown; bindsTo?: string }>;
+    tiles: Array<{
+      id: string;
+      title: string;
+      kind: 'certified_block' | 'draft_placeholder' | 'narrative';
+      description?: string;
+      blockId?: string;
+      sourceNodeId?: string;
+      viz: string;
+      certification: 'certified' | 'uncertified';
+      reviewStatus: 'certified' | 'draft_ready' | 'review_required';
+      rationale?: string;
+      caveats?: string[];
+      reviewTasks?: string[];
+    }>;
+  }>;
+  caveats: string[];
+  reviewTasks: string[];
+}
+
+export interface GenerateAppResponse {
+  ok: true;
+  plan: GeneratedAppPlan;
+  validation: {
+    ok: boolean;
+    issues: Array<{ level: 'error' | 'warning'; path: string; message: string }>;
+    certifiedTiles: number;
+    draftTiles: number;
+  };
+  generated: { paths: string[] };
+  app: AppSummary | null;
+  dashboardId: string | null;
+}
+
 export interface AppEditorCatalogResponse {
   appId: string;
   defaultDomain: string;
@@ -1377,6 +1442,17 @@ export const api = {
       method: 'POST',
       body: JSON.stringify(input),
     });
+  },
+
+  async generateApp(input: GenerateAppRequest): Promise<GenerateAppResponse | { ok: false; error: string }> {
+    try {
+      return await request<GenerateAppResponse>('/api/apps/generate', {
+        method: 'POST',
+        body: JSON.stringify(input),
+      });
+    } catch (e) {
+      return { ok: false, error: e instanceof Error ? e.message : String(e) };
+    }
   },
 
   async getApp(id: string): Promise<AppDocumentSummary | null> {

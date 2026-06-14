@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { createAppPackage, createNotebookForApp, previewNotebookForApp, recommendBlocks } from './apps-api.js';
+import { createAppPackage, createNotebookForApp, generateAppPackage, previewNotebookForApp, recommendBlocks } from './apps-api.js';
 
 const tempDirs: string[] = [];
 
@@ -92,6 +92,46 @@ describe('Apps command center API helpers', () => {
     expect(dashboard.metadata.lifecycle).toBe('draft');
     expect(dashboard.layout.items[0].block).toEqual({ blockId: 'Revenue Total' });
     expect(result.app.dashboards).toEqual([{ id: 'overview', title: 'Overview' }]);
+  });
+
+  it('generates an AppPlan-backed App package for the UI builder', async () => {
+    const root = createProject();
+    writeBlock(root, 'revenue/total_revenue.dql', {
+      name: 'Total Revenue',
+      domain: 'revenue',
+      status: 'certified',
+      tags: ['revenue', 'kpi'],
+      description: 'Executive revenue KPI',
+      chart: 'single_value',
+    });
+    writeBlock(root, 'revenue/revenue_by_month.dql', {
+      name: 'Revenue by Month',
+      domain: 'revenue',
+      status: 'certified',
+      tags: ['revenue', 'trend'],
+      description: 'Monthly revenue trend',
+      chart: 'line',
+    });
+
+    const result = await generateAppPackage(root, {
+      prompt: 'Build a weekly revenue health app with revenue KPI and monthly trend.',
+      domain: 'revenue',
+      owner: 'owner@local',
+      template: 'revenue_health',
+      force: true,
+    });
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const plan = result.plan as { appId: string };
+    const validation = result.validation as { certifiedTiles: number };
+    expect(result.app?.id).toBe(plan.appId);
+    expect(result.dashboardId).toBe('overview');
+    expect(validation.certifiedTiles).toBeGreaterThan(0);
+    expect(result.generated.paths).toContain(`apps/${plan.appId}/dql.app.json`);
+    expect(result.generated.paths).toContain(`apps/${plan.appId}/dashboards/overview.dqld`);
+    expect(existsSync(join(root, `apps/${plan.appId}/dql.app.json`))).toBe(true);
+    expect(existsSync(join(root, `apps/${plan.appId}/dashboards/overview.dqld`))).toBe(true);
   });
 
   it('creates and previews App-owned notebooks', () => {

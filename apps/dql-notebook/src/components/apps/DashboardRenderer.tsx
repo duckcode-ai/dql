@@ -36,11 +36,13 @@ const TILE_SIZE_PRESETS: Array<{ id: TileSizePresetId; label: string; descriptio
 export function DashboardRenderer({
   appId,
   dashboard,
+  variables,
   editable = false,
   onDashboardChanged,
 }: {
   appId: string;
   dashboard: DashboardDocumentResponse['dashboard'];
+  variables?: Record<string, unknown>;
   editable?: boolean;
   onDashboardChanged?: (dashboard: DashboardDocumentResponse['dashboard']) => void;
 }): JSX.Element {
@@ -62,6 +64,8 @@ export function DashboardRenderer({
   const gridRef = useRef<HTMLDivElement | null>(null);
   const cols = dashboard.layout.cols;
   const rowHeight = dashboard.layout.rowHeight;
+  const variablesKey = useMemo(() => JSON.stringify(variables ?? {}), [variables]);
+  const runVariables = useMemo<Record<string, unknown>>(() => JSON.parse(variablesKey), [variablesKey]);
   const tileResults = useMemo(() => {
     const map = new Map<string, DashboardRunResponse['tiles'][number]>();
     for (const tile of run?.tiles ?? []) map.set(tile.tileId, tile);
@@ -72,7 +76,7 @@ export function DashboardRenderer({
     let cancelled = false;
     setLoading(true);
     setError(null);
-    void api.runDashboard(appId, dashboard.id).then((result) => {
+    void api.runDashboard(appId, dashboard.id, runVariables).then((result) => {
       if (cancelled) return;
       setRun(result);
       if (!result) setError('Dashboard run failed.');
@@ -84,7 +88,7 @@ export function DashboardRenderer({
     return () => {
       cancelled = true;
     };
-  }, [appId, dashboard.id, dashboard.layout.items.length, state.activePersona?.userId]);
+  }, [appId, dashboard.id, dashboard.layout.items.length, runVariables, state.activePersona?.userId]);
 
   useEffect(() => {
     const handler = (event: Event) => {
@@ -93,13 +97,13 @@ export function DashboardRenderer({
       void api.getDashboard(appId, dashboard.id).then((next) => {
         if (next?.dashboard) onDashboardChanged?.(next.dashboard);
       });
-      void api.runDashboard(appId, dashboard.id).then((nextRun) => {
+      void api.runDashboard(appId, dashboard.id, runVariables).then((nextRun) => {
         if (nextRun) setRun(nextRun);
       });
     };
     window.addEventListener('dql-app-dashboard-updated', handler);
     return () => window.removeEventListener('dql-app-dashboard-updated', handler);
-  }, [appId, dashboard.id, onDashboardChanged]);
+  }, [appId, dashboard.id, onDashboardChanged, runVariables]);
 
   const chatContext = useMemo(() => {
     const tiles = dashboard.layout.items.map((item) => {
@@ -122,9 +126,10 @@ export function DashboardRenderer({
       description: dashboard.metadata.description,
       domain: dashboard.metadata.domain,
       filters: dashboard.filters,
+      variables: runVariables,
       tiles,
     }, null, 2);
-  }, [appId, dashboard, tileResults]);
+  }, [appId, dashboard, runVariables, tileResults]);
 
   const saveItems = useCallback(async (items: DashboardDocumentResponse['dashboard']['layout']['items']) => {
     setSaving(true);

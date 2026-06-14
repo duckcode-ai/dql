@@ -58,6 +58,21 @@ export async function handleAppsApi(ctx: Ctx): Promise<boolean> {
     return true;
   }
 
+  if (req.method === 'POST' && path === '/api/apps/generate') {
+    try {
+      const body = await readJson<AppGenerateRequest>(req);
+      const result = await generateAppPackage(projectRoot, body);
+      if (!result.ok) {
+        sendJson(res, 400, { error: result.error });
+        return true;
+      }
+      sendJson(res, 201, result);
+    } catch (err) {
+      sendJson(res, 500, { error: (err as Error).message });
+    }
+    return true;
+  }
+
   if (req.method === 'POST' && path === '/api/apps') {
     try {
       const body = await readJson<AppCreateRequest>(req);
@@ -564,6 +579,22 @@ interface AppCreateRequest {
   selectedBlockIds?: string[];
 }
 
+interface AppGenerateRequest {
+  prompt?: string;
+  domain?: string;
+  owner?: string;
+  template?: string;
+  force?: boolean;
+}
+
+const APP_PLAN_TEMPLATE_IDS = new Set([
+  'executive_kpi_review',
+  'revenue_health',
+  'customer_360',
+  'data_quality_monitor',
+  'experiment_readout',
+]);
+
 interface AiPinCreateRequest {
   dashboardId?: string;
   tileId?: string;
@@ -648,6 +679,64 @@ export function recommendBlocks(projectRoot: string, input: AppRecommendationReq
     .filter((block): block is BlockCandidate => Boolean(block))
     .sort((a, b) => b.score - a.score || new Date(b.lastModified).getTime() - new Date(a.lastModified).getTime())
     .slice(0, 50);
+}
+
+export async function generateAppPackage(
+  projectRoot: string,
+  input: AppGenerateRequest,
+): Promise<
+  | {
+      ok: true;
+      plan: unknown;
+      validation: unknown;
+      generated: { paths: string[] };
+      app: ReturnType<typeof collectAppsList>[number] | null;
+      dashboardId: string | null;
+    }
+  | { ok: false; error: string }
+> {
+  const prompt = cleanString(input.prompt);
+  if (!prompt) return { ok: false, error: 'prompt is required' };
+
+  const {
+    KGStore,
+    defaultKgPath,
+    generateAppFromPlan,
+    planAppFromPrompt,
+    reindexProject,
+    validateAppPlan,
+  } = await import('@duckcodeailabs/dql-agent');
+
+  const kgPath = defaultKgPath(projectRoot);
+  await reindexProject(projectRoot, { kgPath });
+  const kg = new KGStore(kgPath);
+  try {
+    const requestedTemplate = cleanString(input.template);
+    const plan = planAppFromPrompt({
+      prompt,
+      kg,
+      domain: cleanString(input.domain) || undefined,
+      owner: cleanString(input.owner) || undefined,
+      template: APP_PLAN_TEMPLATE_IDS.has(requestedTemplate) ? requestedTemplate as never : undefined,
+    });
+    const validation = validateAppPlan(plan, kg);
+    const generated = generateAppFromPlan(projectRoot, plan, kg, {
+      overwrite: Boolean(input.force),
+    });
+    const app = collectAppsList(projectRoot).find((entry) => entry.id === plan.appId) ?? null;
+    return {
+      ok: true,
+      plan,
+      validation,
+      generated: { paths: generated.paths },
+      app,
+      dashboardId: plan.pages[0]?.id ?? app?.dashboards[0]?.id ?? null,
+    };
+  } catch (err) {
+    return { ok: false, error: err instanceof Error ? err.message : String(err) };
+  } finally {
+    kg.close();
+  }
 }
 
 export function createAppPackage(
