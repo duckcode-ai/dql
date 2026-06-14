@@ -8,6 +8,8 @@ import {
   Bot,
   CheckCircle2,
   ChevronDown,
+  Download,
+  Eye,
   FileText,
   LayoutDashboard,
   LineChart,
@@ -16,6 +18,7 @@ import {
   ShieldCheck,
   Sparkles,
   Star,
+  Share2,
   Workflow,
 } from 'lucide-react';
 import { useNotebook } from '../../store/NotebookStore';
@@ -101,8 +104,15 @@ const FILTER_LABELS: Record<LibraryFilter, string> = {
   review: 'Review',
 };
 
+function normalizeAppTheme(themeMode: string): 'obsidian' | 'paper' | 'white' {
+  if (themeMode === 'obsidian' || themeMode === 'dark' || themeMode === 'midnight') return 'obsidian';
+  if (themeMode === 'white' || themeMode === 'arctic') return 'white';
+  return 'paper';
+}
+
 export function AppsView(): JSX.Element {
   const { state, dispatch } = useNotebook();
+  const appTheme = useMemo(() => normalizeAppTheme(state.themeMode), [state.themeMode]);
   const [surface, setSurface] = useState<AppSurface>('library');
   const [experience, setExperience] = useState<AppExperience>('view');
   const [section, setSection] = useState<AppSection>('dashboards');
@@ -375,7 +385,7 @@ export function AppsView(): JSX.Element {
   }), [period, region, segment, smartView]);
 
   return (
-    <div className="dql-apps-waterline">
+    <div className={`dql-apps-waterline dql-apps-theme-${appTheme}`}>
       <style>{APP_STYLES}</style>
       {surface === 'library' ? (
         <AppLibrarySurface
@@ -962,13 +972,21 @@ function AppWorkspaceSurface({
         <StatusSeal tone="certified">{certifiedCount} certified</StatusSeal>
         {draftCount > 0 ? <StatusSeal tone="draft">{draftCount} draft</StatusSeal> : null}
         <div className="dql-app-mode-seg">
-          <button type="button" className={experience === 'view' ? 'on' : ''} onClick={() => onExperienceChange('view')}>View</button>
-          <button type="button" className={experience === 'build' ? 'on' : ''} onClick={() => onExperienceChange('build')}>Build</button>
+          <button type="button" className={experience === 'view' ? 'on' : ''} onClick={() => onExperienceChange('view')}>
+            <Eye size={14} /> View
+          </button>
+          <button type="button" className={experience === 'build' ? 'on' : ''} onClick={() => onExperienceChange('build')}>
+            <Blocks size={14} /> Build
+          </button>
         </div>
         <div className="dql-app-view-actions">
           <PersonaSwitcher app={appDoc?.app ?? null} />
-          <button type="button" className="dql-apps-btn dql-apps-btn-line">Share</button>
-          <button type="button" className="dql-apps-btn dql-apps-btn-line">Export brief</button>
+          <button type="button" className="dql-apps-btn dql-apps-btn-line" title="Share app">
+            <Share2 size={14} /> Share
+          </button>
+          <button type="button" className="dql-apps-btn dql-apps-btn-line" title="Export app brief">
+            <Download size={14} /> Brief
+          </button>
         </div>
       </div>
 
@@ -992,16 +1010,23 @@ function AppWorkspaceSurface({
           ['east', 'East'],
           ['west', 'West'],
         ]} />
-        <span className="dql-app-filter-note">filters - certified params - re-runs blocks</span>
+        <span className="dql-app-filter-note" title="Certified dashboard parameters rerun local blocks">
+          <ShieldCheck size={14} /> Certified params
+        </span>
         <Toggle label="Smart view" checked={smartView} onChange={onSmartViewChange} />
         <Toggle label="Explain" checked={explainOpen} onChange={onExplainChange} />
       </div>
 
       <main className="dql-app-view-wrap">
         <div className="dql-app-title-row">
-          <h1>{app?.name ?? 'App'}</h1>
-          <StatusSeal tone="agentic">{experience === 'build' ? 'build mode' : 'composed by agent'}</StatusSeal>
-          <span>{app?.description ?? dashboardDoc?.dashboard.metadata.description ?? 'Local DQL App'}</span>
+          <div className="dql-app-title-copy">
+            <div className="dql-app-title-meta">
+              <span><LayoutDashboard size={14} /> {app?.domain ?? dashboardDoc?.dashboard.metadata.domain ?? 'DQL App'}</span>
+              <StatusSeal tone="agentic">{experience === 'build' ? 'build mode' : 'agent composed'}</StatusSeal>
+            </div>
+            <h1>{app?.name ?? 'App'}</h1>
+            <p>{app?.description ?? dashboardDoc?.dashboard.metadata.description ?? 'Local DQL App'}</p>
+          </div>
         </div>
 
         <AppWorkspaceTabs
@@ -1094,19 +1119,20 @@ function AppWorkspaceTabs({
   experience: AppExperience;
   onChange: (section: AppSection) => void;
 }) {
-  const tabs: Array<{ id: AppSection; label: string; count?: number }> = [
-    { id: 'dashboards', label: 'Dashboards', count: appDoc?.dashboards.length ?? 0 },
-    { id: 'notebooks', label: 'Notebooks', count: appDoc?.notebooks?.length ?? appDoc?.app.notebooks?.length ?? 0 },
-    { id: 'ai', label: 'AI', count: appDoc?.aiPins?.length ?? 0 },
+  const tabs: Array<{ id: AppSection; label: string; count?: number; icon: ReactNode }> = [
+    { id: 'dashboards', label: 'Dashboards', count: appDoc?.dashboards.length ?? 0, icon: <LayoutDashboard size={14} /> },
+    { id: 'notebooks', label: 'Notebooks', count: appDoc?.notebooks?.length ?? appDoc?.app.notebooks?.length ?? 0, icon: <BookOpenText size={14} /> },
+    { id: 'ai', label: 'AI', count: appDoc?.aiPins?.length ?? 0, icon: <Bot size={14} /> },
     ...(experience === 'build' ? [
-      { id: 'drafts' as const, label: 'Drafts', count: appDoc?.drafts?.length ?? 0 },
-      { id: 'settings' as const, label: 'Settings' },
+      { id: 'drafts' as const, label: 'Drafts', count: appDoc?.drafts?.length ?? 0, icon: <FileText size={14} /> },
+      { id: 'settings' as const, label: 'Settings', icon: <Workflow size={14} /> },
     ] : []),
   ];
   return (
     <nav className="dql-app-section-tabs">
       {tabs.map((tab) => (
         <button key={tab.id} className={section === tab.id ? 'on' : ''} onClick={() => onChange(tab.id)}>
+          {tab.icon}
           {tab.label}{tab.count !== undefined ? <span>{tab.count}</span> : null}
         </button>
       ))}
@@ -1131,6 +1157,7 @@ function DashboardTabs({
     <nav className="dql-app-dashboard-tabs">
       {dashboards.map((dashboard) => (
         <button key={dashboard.id} className={dashboard.id === activeDashboardId ? 'on' : ''} onClick={() => onOpen(dashboard.id)}>
+          <LineChart size={14} />
           {dashboard.title}<span>{dashboard.itemCount}</span>
         </button>
       ))}
@@ -1509,26 +1536,83 @@ function slugify(value: string): string {
 
 const APP_STYLES = `
 .dql-apps-waterline {
-  --dql-app-canvas: #f5f6f8;
-  --dql-app-surface: #ffffff;
-  --dql-app-line: rgba(15, 23, 42, 0.10);
-  --dql-app-line-2: rgba(15, 23, 42, 0.16);
-  --dql-app-ink: #0f172a;
-  --dql-app-muted: #64748b;
-  --dql-app-faint: #94a3b8;
-  --dql-app-accent: #2563eb;
+  --dql-app-canvas: var(--color-bg-primary, #f7f8fb);
+  --dql-app-surface: var(--color-bg-card, #ffffff);
+  --dql-app-surface-muted: var(--color-bg-secondary, #f8fafc);
+  --dql-app-control: var(--color-bg-sunken, #f4f6f9);
+  --dql-app-line: var(--color-border-subtle, rgba(15, 23, 42, 0.10));
+  --dql-app-line-2: var(--color-border-primary, rgba(15, 23, 42, 0.16));
+  --dql-app-ink: var(--color-text-primary, #0f172a);
+  --dql-app-muted: var(--color-text-secondary, #64748b);
+  --dql-app-faint: var(--color-text-tertiary, #94a3b8);
+  --dql-app-accent: var(--color-accent-blue, #2563eb);
   --dql-app-accent-soft: rgba(37, 99, 235, 0.10);
-  --dql-app-deep: #0e1118;
-  --dql-app-green: #16a34a;
+  --dql-app-deep: #111827;
+  --dql-app-green: var(--color-status-success, #16a34a);
   --dql-app-green-soft: rgba(22, 163, 74, 0.08);
-  --dql-app-orange: #ca8a04;
+  --dql-app-orange: var(--color-status-warning, #ca8a04);
   --dql-app-orange-soft: rgba(202, 138, 4, 0.10);
+  --dql-app-shadow: 0 1px 2px rgba(15, 23, 42, 0.04), 0 10px 28px rgba(15, 23, 42, 0.06);
+  --surface: var(--dql-app-surface);
+  --surface-hover: var(--dql-app-control);
+  --border-color: var(--dql-app-line);
   flex: 1;
   min-height: 0;
   overflow: auto;
   background: var(--dql-app-canvas);
   color: var(--dql-app-ink);
   font-family: var(--font-ui);
+  font-size: 14px;
+  line-height: 1.45;
+  text-rendering: geometricPrecision;
+}
+
+.dql-apps-waterline * {
+  letter-spacing: 0;
+}
+
+.dql-apps-theme-paper {
+  --dql-app-canvas: #f7f4ed;
+  --dql-app-surface: #fffefa;
+  --dql-app-surface-muted: #f3f0ea;
+  --dql-app-control: #f8f6f1;
+  --dql-app-line: rgba(57, 48, 36, 0.12);
+  --dql-app-line-2: rgba(57, 48, 36, 0.18);
+  --dql-app-ink: #171717;
+  --dql-app-muted: #5f636b;
+  --dql-app-faint: #8b909a;
+  --dql-app-accent: #4f63d7;
+  --dql-app-accent-soft: rgba(79, 99, 215, 0.11);
+}
+
+.dql-apps-theme-white {
+  --dql-app-canvas: #f7f8fb;
+  --dql-app-surface: #ffffff;
+  --dql-app-surface-muted: #f2f5f8;
+  --dql-app-control: #f7f9fc;
+  --dql-app-line: rgba(15, 23, 42, 0.10);
+  --dql-app-line-2: rgba(15, 23, 42, 0.16);
+  --dql-app-ink: #0f172a;
+  --dql-app-muted: #5d6878;
+  --dql-app-faint: #8a94a5;
+  --dql-app-accent: #2563eb;
+  --dql-app-accent-soft: rgba(37, 99, 235, 0.10);
+}
+
+.dql-apps-theme-obsidian {
+  --dql-app-canvas: #0f141c;
+  --dql-app-surface: #151b24;
+  --dql-app-surface-muted: #111720;
+  --dql-app-control: #1b2430;
+  --dql-app-line: rgba(226, 232, 240, 0.10);
+  --dql-app-line-2: rgba(226, 232, 240, 0.16);
+  --dql-app-ink: #eef3fb;
+  --dql-app-muted: #aab4c3;
+  --dql-app-faint: #7f8b9b;
+  --dql-app-accent: #84a5ff;
+  --dql-app-accent-soft: rgba(132, 165, 255, 0.16);
+  --dql-app-deep: #05070b;
+  --dql-app-shadow: none;
 }
 
 .dql-apps-wrap {
@@ -1562,7 +1646,7 @@ const APP_STYLES = `
   border: 1px solid var(--dql-app-line-2);
   border-radius: 10px;
   padding: 8px 9px 8px 16px;
-  box-shadow: 0 1px 2px rgba(15, 23, 42, 0.04), 0 8px 24px rgba(15, 23, 42, 0.06);
+  box-shadow: var(--dql-app-shadow);
 }
 
 .dql-apps-startbar svg { color: var(--dql-app-accent); flex: none; }
@@ -1577,15 +1661,15 @@ const APP_STYLES = `
 }
 
 .dql-apps-btn {
-  height: 34px;
-  border-radius: 6px;
+  height: 32px;
+  border-radius: 8px;
   border: 1px solid transparent;
-  padding: 0 14px;
+  padding: 0 12px;
   display: inline-flex;
   align-items: center;
   justify-content: center;
   gap: 7px;
-  font: 800 12px var(--font-ui);
+  font: 750 12px var(--font-ui);
   cursor: pointer;
   white-space: nowrap;
 }
@@ -1611,7 +1695,7 @@ const APP_STYLES = `
   border: 1px solid var(--dql-app-line);
   border-radius: 8px;
   background: var(--dql-app-surface);
-  box-shadow: 0 1px 2px rgba(15, 23, 42, 0.04), 0 8px 24px rgba(15, 23, 42, 0.05);
+  box-shadow: var(--dql-app-shadow);
   padding: 18px;
   cursor: pointer;
   color: var(--dql-app-ink);
@@ -1644,7 +1728,7 @@ const APP_STYLES = `
 .dql-apps-option-meta span {
   font-family: var(--font-mono);
   text-transform: uppercase;
-  letter-spacing: 0.1em;
+  letter-spacing: 0;
   font-size: 9px;
 }
 
@@ -1668,7 +1752,7 @@ const APP_STYLES = `
 .dql-app-eyebrow {
   font-family: var(--font-mono);
   font-size: 10px;
-  letter-spacing: 0.16em;
+  letter-spacing: 0;
   text-transform: uppercase;
 }
 
@@ -1687,7 +1771,7 @@ const APP_STYLES = `
   gap: 3px;
   border: 1px solid var(--dql-app-line);
   border-radius: 999px;
-  background: #eef1f5;
+  background: var(--dql-app-control);
   padding: 4px;
   flex-wrap: wrap;
 }
@@ -1741,7 +1825,7 @@ const APP_STYLES = `
   border-radius: 8px;
   background: var(--dql-app-surface);
   overflow: hidden;
-  box-shadow: 0 1px 2px rgba(15, 23, 42, 0.04), 0 8px 24px rgba(15, 23, 42, 0.05);
+  box-shadow: var(--dql-app-shadow);
 }
 
 .dql-app-card-body {
@@ -1783,7 +1867,7 @@ const APP_STYLES = `
 
 .dql-app-card-mini span {
   border-radius: 6px;
-  background: #f1f5f9;
+  background: var(--dql-app-control);
   padding: 7px 9px;
 }
 
@@ -1791,7 +1875,7 @@ const APP_STYLES = `
   display: block;
   font-family: var(--font-mono);
   font-size: 7.5px;
-  letter-spacing: 0.1em;
+  letter-spacing: 0;
   text-transform: uppercase;
   color: var(--dql-app-muted);
 }
@@ -1820,7 +1904,7 @@ const APP_STYLES = `
   gap: 8px;
   padding: 8px 16px;
   border-top: 1px solid var(--dql-app-line);
-  background: #f8fafc;
+  background: var(--dql-app-surface-muted);
   font-family: var(--font-mono);
   font-size: 10px;
   color: var(--dql-app-muted);
@@ -1871,15 +1955,16 @@ const APP_STYLES = `
   align-items: center;
   gap: 5px;
   border-radius: 999px;
+  min-height: 22px;
   padding: 2px 9px;
   width: fit-content;
   border: 1px solid rgba(22, 163, 74, 0.26);
   background: var(--dql-app-green-soft);
   color: var(--dql-app-green);
   font-family: var(--font-mono);
-  font-size: 10px;
+  font-size: 10.5px;
   font-weight: 700;
-  letter-spacing: 0.06em;
+  letter-spacing: 0;
   text-transform: uppercase;
 }
 
@@ -1937,19 +2022,19 @@ const APP_STYLES = `
   font: 800 16px var(--font-ui);
 }
 
-.dql-app-name-input input:focus { border-color: var(--dql-app-accent); background: #f8fafc; }
+.dql-app-name-input input:focus { border-color: var(--dql-app-accent); background: var(--dql-app-control); }
 .dql-app-mode-seg {
   margin: 0 auto;
   display: flex;
-  gap: 3px;
+  gap: 2px;
   border: 1px solid var(--dql-app-line);
   border-radius: 999px;
-  background: #eef1f5;
+  background: var(--dql-app-control);
   padding: 3px;
 }
 
 .dql-app-mode-seg button {
-  min-width: 82px;
+  min-width: 78px;
   border: 0;
   background: transparent;
   border-radius: 999px;
@@ -1957,10 +2042,11 @@ const APP_STYLES = `
   align-items: center;
   justify-content: center;
   gap: 6px;
-  padding: 7px 13px;
+  min-height: 30px;
+  padding: 6px 12px;
   color: var(--dql-app-muted);
   cursor: pointer;
-  font: 800 12px var(--font-ui);
+  font: 750 12px var(--font-ui);
 }
 
 .dql-app-mode-seg button.on { background: var(--dql-app-deep); color: #fff; }
@@ -2007,7 +2093,7 @@ const APP_STYLES = `
   display: flex;
   flex-direction: column;
   border-right: 1px solid var(--dql-app-line);
-  background: #f8fafc;
+  background: var(--dql-app-surface-muted);
 }
 
 .dql-app-panel:last-child { border-right: 0; }
@@ -2022,7 +2108,7 @@ const APP_STYLES = `
 }
 
 .dql-app-panel-head span { font-weight: 850; font-size: 14px; }
-.dql-app-panel-head b { margin-left: auto; color: var(--dql-app-faint); font: 500 10px var(--font-mono); text-transform: uppercase; letter-spacing: 0.08em; }
+.dql-app-panel-head b { margin-left: auto; color: var(--dql-app-faint); font: 500 10px var(--font-mono); text-transform: uppercase; letter-spacing: 0; }
 
 .dql-app-agent-scroll,
 .dql-app-plan-list {
@@ -2081,7 +2167,7 @@ const APP_STYLES = `
 .dql-app-suggests button {
   border: 1px solid var(--dql-app-line);
   border-radius: 999px;
-  background: #f8fafc;
+  background: var(--dql-app-control);
   color: var(--dql-app-muted);
   padding: 5px 9px;
   cursor: pointer;
@@ -2095,7 +2181,7 @@ const APP_STYLES = `
   width: 100%;
   border: 1px solid var(--dql-app-line);
   border-radius: 7px;
-  background: #f8fafc;
+  background: var(--dql-app-control);
   color: var(--dql-app-ink);
   outline: 0;
   padding: 8px 10px;
@@ -2112,7 +2198,7 @@ const APP_STYLES = `
   color: var(--dql-app-muted);
   font: 700 10px var(--font-mono);
   text-transform: uppercase;
-  letter-spacing: 0.1em;
+  letter-spacing: 0;
 }
 
 .dql-app-preview-panel { background: var(--dql-app-canvas); }
@@ -2139,7 +2225,7 @@ const APP_STYLES = `
   gap: 7px;
   padding: 10px 18px;
   border-bottom: 1px solid var(--dql-app-line);
-  background: #f8fafc;
+  background: var(--dql-app-surface-muted);
 }
 
 .dql-app-preview-filters span {
@@ -2202,7 +2288,7 @@ const APP_STYLES = `
   color: var(--dql-app-faint);
   font: 700 9px var(--font-mono);
   text-transform: uppercase;
-  letter-spacing: 0.08em;
+  letter-spacing: 0;
 }
 
 .dql-app-preview-tile-head span { margin-left: auto; }
@@ -2246,7 +2332,7 @@ const APP_STYLES = `
   margin-top: auto;
   padding: 14px;
   border-top: 2px solid var(--dql-app-accent);
-  background: #eff6ff;
+  background: var(--dql-app-accent-soft);
 }
 
 .dql-app-leader {
@@ -2322,35 +2408,41 @@ const APP_STYLES = `
 .dql-app-palette i { color: var(--dql-app-green); font: 700 9px var(--font-mono); text-transform: uppercase; font-style: normal; }
 
 .dql-app-view-topbar { position: sticky; top: 0; z-index: 4; }
-.dql-app-crumb { color: var(--dql-app-muted); font: 12px var(--font-mono); }
+.dql-app-view-topbar {
+  min-height: 48px;
+  padding: 7px 22px;
+  box-shadow: 0 1px 0 var(--dql-app-line);
+}
+
+.dql-app-crumb { color: var(--dql-app-muted); font: 700 11.5px var(--font-mono); }
 .dql-app-filterbar {
   position: relative;
   z-index: 3;
-  min-height: 64px;
+  min-height: 52px;
   display: flex;
   align-items: center;
-  gap: 9px;
-  padding: 11px 28px;
+  gap: 8px;
+  padding: 8px 26px;
   border-bottom: 1px solid var(--dql-app-line);
   background: var(--dql-app-surface);
   flex-wrap: wrap;
 }
 
 .dql-app-filter-select {
-  height: 36px;
+  height: 34px;
   display: inline-flex;
   align-items: center;
   gap: 8px;
   border: 1px solid var(--dql-app-line);
-  border-radius: 7px;
-  background: #f8fafc;
-  padding: 0 9px;
+  border-radius: 8px;
+  background: var(--dql-app-control);
+  padding: 0 10px;
 }
 
 .dql-app-filter-select span {
   color: var(--dql-app-faint);
   font: 700 9px var(--font-mono);
-  letter-spacing: 0.1em;
+  letter-spacing: 0;
   text-transform: uppercase;
 }
 
@@ -2359,13 +2451,16 @@ const APP_STYLES = `
   background: transparent;
   color: var(--dql-app-ink);
   outline: 0;
-  font: 800 12.5px var(--font-ui);
+  font: 750 12.5px var(--font-ui);
 }
 
 .dql-app-filter-note {
   margin-left: auto;
   color: var(--dql-app-faint);
-  font: 10px var(--font-mono);
+  font: 700 11px var(--font-ui);
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
 }
 
 .dql-app-toggle {
@@ -2405,47 +2500,76 @@ const APP_STYLES = `
 .dql-app-view-wrap {
   position: relative;
   z-index: 1;
-  width: min(1320px, calc(100% - 52px));
+  width: min(1280px, calc(100% - 48px));
   margin: 0 auto;
-  padding: 28px 0 72px;
+  padding: 20px 0 60px;
 }
 
 .dql-app-title-row {
   display: flex;
-  align-items: baseline;
+  align-items: flex-end;
   gap: 12px;
-  margin-bottom: 14px;
+  margin-bottom: 12px;
   flex-wrap: wrap;
+}
+
+.dql-app-title-copy {
+  flex: 1;
+  min-width: 0;
+}
+
+.dql-app-title-meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+
+.dql-app-title-meta > span {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--dql-app-muted);
+  font: 750 11.5px var(--font-ui);
+  text-transform: capitalize;
 }
 
 .dql-app-title-row h1 {
   margin: 0;
-  font-size: 28px;
+  font-size: 26px;
   line-height: 1.1;
-  font-weight: 850;
+  font-weight: 820;
 }
 
-.dql-app-title-row span:last-child { color: var(--dql-app-muted); font-size: 12.5px; }
+.dql-app-title-row p {
+  margin: 6px 0 0;
+  color: var(--dql-app-muted);
+  font-size: 13px;
+  line-height: 1.45;
+  max-width: 720px;
+}
+
 .dql-app-section-tabs,
 .dql-app-dashboard-tabs {
   display: flex;
-  gap: 7px;
-  margin-bottom: 12px;
+  gap: 8px;
+  margin-bottom: 10px;
   overflow-x: auto;
 }
 
 .dql-app-section-tabs button,
 .dql-app-dashboard-tabs button {
   border: 1px solid var(--dql-app-line);
-  border-radius: 7px;
+  border-radius: 8px;
   background: var(--dql-app-surface);
   color: var(--dql-app-muted);
-  padding: 7px 12px;
+  min-height: 34px;
+  padding: 7px 11px;
   display: inline-flex;
   align-items: center;
   gap: 6px;
   cursor: pointer;
-  font: 800 12px var(--font-ui);
+  font: 750 12px var(--font-ui);
 }
 
 .dql-app-section-tabs button.on,
@@ -2479,7 +2603,7 @@ const APP_STYLES = `
   border-radius: 8px;
   background: var(--dql-app-surface);
   overflow: hidden;
-  box-shadow: 0 1px 2px rgba(15, 23, 42, 0.04), 0 8px 24px rgba(15, 23, 42, 0.05);
+  box-shadow: var(--dql-app-shadow);
 }
 
 .dql-app-explain-head { padding: 14px 16px 12px; border-bottom: 1px solid var(--dql-app-line); }
@@ -2487,7 +2611,7 @@ const APP_STYLES = `
 .dql-app-ex-label {
   color: var(--dql-app-muted);
   font: 700 9px var(--font-mono);
-  letter-spacing: 0.14em;
+  letter-spacing: 0;
   text-transform: uppercase;
 }
 
@@ -2633,6 +2757,35 @@ const APP_STYLES = `
   .dql-apps-startgrid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .dql-app-create-workspace,
   .dql-app-create-workspace.classic { grid-template-columns: 1fr; }
+  .dql-app-filterbar {
+    flex-wrap: nowrap;
+    gap: 6px;
+    padding: 7px 22px;
+    overflow-x: auto;
+  }
+  .dql-app-filter-note {
+    width: 30px;
+    height: 30px;
+    justify-content: center;
+    gap: 0;
+    border: 1px solid var(--dql-app-line);
+    border-radius: 8px;
+    background: var(--dql-app-control);
+    font-size: 0;
+    flex: 0 0 auto;
+  }
+  .dql-app-filter-note svg {
+    width: 14px;
+    height: 14px;
+  }
+  .dql-app-filter-select,
+  .dql-app-toggle {
+    flex: 0 0 auto;
+  }
+  .dql-app-toggle {
+    gap: 6px;
+    font-weight: 750;
+  }
 }
 
 @media (max-width: 900px) {
@@ -2647,7 +2800,19 @@ const APP_STYLES = `
   .dql-apps-libbar,
   .dql-app-buildbar,
   .dql-app-view-topbar,
-  .dql-app-filterbar { align-items: stretch; flex-direction: column; }
+  .dql-app-filterbar {
+    align-items: stretch;
+    flex-direction: column;
+    overflow-x: visible;
+  }
+  .dql-app-filter-note {
+    width: auto;
+    height: auto;
+    margin-left: 0;
+    justify-content: flex-start;
+    gap: 6px;
+    font-size: 11px;
+  }
   .dql-apps-startgrid,
   .dql-apps-grid,
   .dql-app-form-grid.two,

@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { CSSProperties, PointerEvent as ReactPointerEvent } from 'react';
-import { GripVertical, SlidersHorizontal, Trash2 } from 'lucide-react';
+import { Bot, GitBranch, GripVertical, SlidersHorizontal, Trash2 } from 'lucide-react';
 import { api, type AppBlockRecommendation, type DashboardDocumentResponse, type DashboardRunResponse } from '../../api/client';
 import { useNotebook } from '../../store/NotebookStore';
 import type { CellChartConfig, ThemeMode } from '../../store/types';
@@ -254,9 +254,9 @@ export function DashboardRenderer({
       <div style={{ flex: 1, minWidth: 0 }}>
       <div style={{ display: 'flex', alignItems: 'flex-start', gap: 12, marginBottom: 16 }}>
         <div style={{ flex: 1, minWidth: 0 }}>
-          <h2 style={{ margin: 0, fontSize: 18 }}>{dashboard.metadata.title}</h2>
+          <h2 style={{ margin: 0, fontSize: 20, lineHeight: 1.18, fontWeight: 760 }}>{dashboard.metadata.title}</h2>
         {dashboard.metadata.description ? (
-          <div style={{ fontSize: 13, opacity: 0.7, marginTop: 4 }}>
+          <div style={{ fontSize: 13, opacity: 0.72, marginTop: 4, maxWidth: 680, lineHeight: 1.4 }}>
             {dashboard.metadata.description}
           </div>
         ) : null}
@@ -291,9 +291,11 @@ export function DashboardRenderer({
           }}
           style={toolbarButtonStyle(chatOpen)}
         >
+          <Bot size={14} strokeWidth={2} />
           {chatOpen ? 'Hide AI' : 'Ask AI'}
         </button>
         <button type="button" onClick={() => void loadLineage()} style={toolbarButtonStyle(lineageOpen)}>
+          <GitBranch size={14} strokeWidth={2} />
           Lineage
         </button>
       </div>
@@ -511,10 +513,10 @@ function DashboardTile({
         opacity: dragOffset ? 0.72 : 1,
         zIndex: dragOffset ? 20 : undefined,
         position: 'relative',
-        background: 'var(--surface, rgba(0,0,0,0.02))',
-        border: '1px solid var(--border-color, rgba(0,0,0,0.08))',
-        borderRadius: 8,
-        padding: 12,
+        background: 'var(--dql-app-surface, var(--surface, rgba(0,0,0,0.02)))',
+        border: '1px solid var(--dql-app-line, var(--border-color, rgba(0,0,0,0.08)))',
+        borderRadius: 10,
+        padding: 14,
         display: 'flex',
         flexDirection: 'column',
         gap: 6,
@@ -534,7 +536,7 @@ function DashboardTile({
               <GripVertical size={14} strokeWidth={2.2} />
             </button>
           ) : null}
-          <div style={{ fontSize: 13, fontWeight: 600, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{item.title ?? blockRef}</div>
+          <div style={{ fontSize: 13, fontWeight: 720, lineHeight: 1.25, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{item.title ?? blockRef}</div>
         </div>
         {editable && (
           <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
@@ -559,7 +561,7 @@ function DashboardTile({
           </div>
         )}
       </div>
-      <div style={{ fontSize: 11, opacity: 0.6, fontFamily: 'monospace' }}>{blockRef}</div>
+      <div style={{ fontSize: 10.5, opacity: 0.58, fontFamily: 'var(--font-mono, monospace)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{blockRef}</div>
       {editable && settingsOpen ? (
         <TileSettingsPanel
           item={item}
@@ -1186,13 +1188,18 @@ function compactChartConfig(config: CellChartConfig): CellChartConfig {
 
 function toolbarButtonStyle(active: boolean): CSSProperties {
   return {
-    border: '1px solid var(--border-color, rgba(0,0,0,0.12))',
-    borderRadius: 6,
-    background: active ? 'var(--surface-hover, rgba(0,0,0,0.06))' : 'var(--surface, rgba(0,0,0,0.02))',
+    border: '1px solid var(--dql-app-line, var(--border-color, rgba(0,0,0,0.12)))',
+    borderRadius: 8,
+    background: active ? 'var(--dql-app-accent-soft, var(--surface-hover, rgba(0,0,0,0.06)))' : 'var(--dql-app-surface, var(--surface, rgba(0,0,0,0.02)))',
     color: 'inherit',
     padding: '7px 10px',
     cursor: 'pointer',
     fontSize: 12,
+    fontWeight: 720,
+    display: 'inline-flex',
+    alignItems: 'center',
+    gap: 6,
+    minHeight: 32,
   };
 }
 
