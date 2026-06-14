@@ -1,4 +1,5 @@
 import React, { useEffect, useMemo, useState } from 'react';
+import { ArrowLeft, ListTree } from 'lucide-react';
 import { useNotebook } from '../../store/NotebookStore';
 import { themes, type Theme } from '../../themes/notebook-theme';
 import { api } from '../../api/client';
@@ -122,6 +123,8 @@ export function LineageDetailView() {
   const filePath = metadata.path ?? metadata.filePath;
   const title = focal?.name ?? nodeId;
   const lineageListOpen = state.sidebarOpen && state.sidebarPanel === 'lineage';
+  const returnTarget = state.lineageReturnTarget?.view === 'apps' ? state.lineageReturnTarget : null;
+  const returnLabel = returnTarget?.label ? `Back to ${returnTarget.label}` : 'Back to app';
 
   return (
     <div style={{ flex: 1, minWidth: 0, overflow: 'auto', background: 'var(--color-bg-primary)' }}>
@@ -154,29 +157,68 @@ export function LineageDetailView() {
               {contextForNode(focal)}
             </div>
           </div>
-          <button
-            onClick={() => {
-              if (lineageListOpen) {
-                dispatch({ type: 'TOGGLE_SIDEBAR' });
-              } else {
-                dispatch({ type: 'SET_SIDEBAR_PANEL', panel: 'lineage' });
-              }
-            }}
-            style={{
-              border: `1px solid ${lineageListOpen ? t.accent : t.headerBorder}`,
-              background: lineageListOpen ? `${t.accent}1a` : t.sidebarBg,
-              color: lineageListOpen ? t.textPrimary : t.textSecondary,
-              borderRadius: 6,
-              padding: '7px 10px',
-              fontSize: 12,
-              fontWeight: 800,
-              cursor: 'pointer',
-              whiteSpace: 'nowrap',
-              flexShrink: 0,
-            }}
-          >
-            {lineageListOpen ? 'Hide list' : 'Browse lineage'}
-          </button>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexShrink: 0 }}>
+            {returnTarget ? (
+              <button
+                type="button"
+                onClick={() => {
+                  dispatch({
+                    type: 'OPEN_APP',
+                    appId: returnTarget.appId,
+                    dashboardId: returnTarget.dashboardId ?? null,
+                  });
+                }}
+                title={returnLabel}
+                style={{
+                  display: 'inline-flex',
+                  alignItems: 'center',
+                  gap: 7,
+                  border: `1px solid ${t.headerBorder}`,
+                  background: t.sidebarBg,
+                  color: t.textPrimary,
+                  borderRadius: 6,
+                  padding: '7px 10px',
+                  fontSize: 12,
+                  fontWeight: 800,
+                  cursor: 'pointer',
+                  whiteSpace: 'nowrap',
+                  maxWidth: 220,
+                  overflow: 'hidden',
+                  textOverflow: 'ellipsis',
+                }}
+              >
+                <ArrowLeft size={14} />
+                <span style={{ overflow: 'hidden', textOverflow: 'ellipsis' }}>{returnLabel}</span>
+              </button>
+            ) : null}
+            <button
+              type="button"
+              onClick={() => {
+                if (lineageListOpen) {
+                  dispatch({ type: 'TOGGLE_SIDEBAR' });
+                } else {
+                  dispatch({ type: 'SET_SIDEBAR_PANEL', panel: 'lineage' });
+                }
+              }}
+              style={{
+                display: 'inline-flex',
+                alignItems: 'center',
+                gap: 7,
+                border: `1px solid ${lineageListOpen ? t.accent : t.headerBorder}`,
+                background: lineageListOpen ? `${t.accent}1a` : t.sidebarBg,
+                color: lineageListOpen ? t.textPrimary : t.textSecondary,
+                borderRadius: 6,
+                padding: '7px 10px',
+                fontSize: 12,
+                fontWeight: 800,
+                cursor: 'pointer',
+                whiteSpace: 'nowrap',
+              }}
+            >
+              <ListTree size={14} />
+              {lineageListOpen ? 'Hide list' : 'Browse lineage'}
+            </button>
+          </div>
         </div>
       </div>
 

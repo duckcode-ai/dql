@@ -141,6 +141,8 @@ export interface ParamConfig {
 export type SidebarPanel = 'files' | 'schema' | 'block_library' | 'connection' | 'reference' | 'lineage' | 'git' | 'apps' | 'settings' | null;
 export type DevPanelTab = 'logs' | 'errors';
 export type MainView = 'home' | 'notebook' | 'business_artifact' | 'lineage_detail' | 'block_studio' | 'imports' | 'connection' | 'reference' | 'git' | 'apps' | 'review' | 'settings';
+export type LineageReturnTarget =
+  | { view: 'apps'; appId: string; dashboardId?: string | null; label?: string };
 
 /**
  * Apps consumption-layer surface — list of Apps + currently-open App.
@@ -656,6 +658,7 @@ export interface NotebookState {
   savingFile: boolean;
   lineageFullscreen: boolean;
   lineageFocusNodeId: string | null;
+  lineageReturnTarget: LineageReturnTarget | null;
   lineageDrawerOpen: boolean;
   lineageDrawerNodeId: string | null;
   dashboardMode: boolean;
@@ -723,7 +726,7 @@ export type NotebookAction =
   | { type: 'SET_SEMANTIC_DOMAINS'; domains: string[]; tags: string[]; lastSyncTime?: string | null }
   | { type: 'TOGGLE_LINEAGE_FULLSCREEN' }
   | { type: 'SET_LINEAGE_FOCUS'; nodeId: string | null }
-  | { type: 'OPEN_LINEAGE_DETAIL'; nodeId: string }
+  | { type: 'OPEN_LINEAGE_DETAIL'; nodeId: string; returnTo?: LineageReturnTarget | null }
   | { type: 'OPEN_LINEAGE_DRAWER'; nodeId: string }
   | { type: 'CLOSE_LINEAGE_DRAWER' }
   | { type: 'REORDER_CELL'; fromIndex: number; toIndex: number }

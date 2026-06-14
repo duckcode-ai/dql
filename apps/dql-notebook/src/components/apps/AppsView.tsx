@@ -124,7 +124,7 @@ function normalizeAppTheme(themeMode: string): 'obsidian' | 'paper' | 'white' {
 export function AppsView(): JSX.Element {
   const { state, dispatch } = useNotebook();
   const appTheme = useMemo(() => normalizeAppTheme(state.themeMode), [state.themeMode]);
-  const [surface, setSurface] = useState<AppSurface>('library');
+  const [surface, setSurface] = useState<AppSurface>(() => state.activeAppId ? 'workspace' : 'library');
   const [experience, setExperience] = useState<AppExperience>('view');
   const [section, setSection] = useState<AppSection>('dashboards');
   const [search, setSearch] = useState('');
@@ -459,7 +459,20 @@ export function AppsView(): JSX.Element {
             setDashboardDoc((current) => current ? { ...current, dashboard } : current);
             void refreshApps(state.activeAppId, dashboard.id, 'workspace');
           }}
-          onOpenLineageNode={(nodeId) => dispatch({ type: 'OPEN_LINEAGE_DETAIL', nodeId })}
+          onOpenLineageNode={(nodeId) => {
+            dispatch({
+              type: 'OPEN_LINEAGE_DETAIL',
+              nodeId,
+              returnTo: state.activeAppId
+                ? {
+                    view: 'apps',
+                    appId: state.activeAppId,
+                    dashboardId: state.activeDashboardId,
+                    label: activeApp?.name,
+                  }
+                : null,
+            });
+          }}
         />
       )}
       {addPageOpen && (
