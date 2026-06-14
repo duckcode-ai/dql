@@ -15,6 +15,67 @@ export interface LineageQueryResult {
   matches?: Array<{ node: LineageNode; score: number }>;
 }
 
+export interface Business360Asset {
+  id: string;
+  name: string;
+  type: LineageNodeType;
+  layer: LineageLayer;
+  domain?: string;
+  status?: LineageNode['status'];
+  owner?: string;
+  metadata?: Record<string, unknown>;
+}
+
+export interface Business360Edge {
+  source: string;
+  target: string;
+  type: LineageEdge['type'];
+}
+
+export interface Business360Gap {
+  code: 'missing_definition' | 'missing_composition' | 'missing_sources' | 'missing_consumers';
+  severity: 'info' | 'warning';
+  message: string;
+}
+
+export interface Business360Result {
+  focus: Business360Asset;
+  businessDefinition: {
+    terms: Business360Asset[];
+    definedArtifacts: Business360Asset[];
+    definedByTerms: Business360Asset[];
+    metadata: Record<string, unknown>;
+  };
+  businessComposition: {
+    includedArtifacts: Business360Asset[];
+    parentViews: Business360Asset[];
+  };
+  technicalSources: {
+    sourceTables: Business360Asset[];
+    dbtModels: Business360Asset[];
+    dbtSources: Business360Asset[];
+    upstreamBlocks: Business360Asset[];
+    upstreamPathCount: number;
+  };
+  consumers: {
+    dashboards: Business360Asset[];
+    apps: Business360Asset[];
+    notebooks: Business360Asset[];
+    downstreamViews: Business360Asset[];
+    downstreamBlocks: Business360Asset[];
+  };
+  gaps: Business360Gap[];
+  evidence: {
+    nodes: Business360Asset[];
+    edges: Business360Edge[];
+  };
+}
+
+export interface Business360Options {
+  /** Maximum upstream/downstream traversal depth (default 12). */
+  maxDepth?: number;
+}
+
 const NODE_PREFIXES: LineageNodeType[] = [
   'app',
   'block',
@@ -66,6 +127,139 @@ export function queryLineage(graph: LineageGraph, query: LineageQuery): LineageQ
     graph: resultGraph.toJSON(),
     focalNode,
     matches,
+  };
+}
+
+/**
+ * Build a business-first 360 view around a term, block, business view,
+ * dashboard, app, or notebook.
+ *
+ * Terms expand through outgoing `defines` edges first, then technical sources
+ * and consuming artifacts are traced from the artifacts the term defines.
+ */
+export function queryBusiness360(
+  graph: LineageGraph,
+  focalNodeId: string,
+  options: Business360Options = {},
+): Business360Result | null {
+  const focus = resolveFocusNode(graph, focalNodeId);
+  if (!focus) return null;
+
+  const maxDepth = options.maxDepth ?? 12;
+  const seedIds = new Set<string>([focus.id]);
+  const definedArtifacts = focus.type === 'term'
+    ? targetsForEdges(graph.getOutgoingEdges(focus.id).filter((edge) => edge.type === 'defines'), graph)
+    : [];
+  for (const artifact of definedArtifacts) seedIds.add(artifact.id);
+  const directlyComposedArtifacts = focus.type === 'business_view'
+    ? incomingSourcesByType(graph, focus.id, 'composes', ['block', 'business_view'])
+    : [];
+  for (const artifact of directlyComposedArtifacts) seedIds.add(artifact.id);
+
+  const upstreamNodes = collectReachableNodes(graph, seedIds, 'upstream', maxDepth);
+  const downstreamNodes = collectReachableNodes(graph, seedIds, 'downstream', maxDepth);
+  const seedNodes = [...seedIds]
+    .map((id) => graph.getNode(id))
+    .filter((node): node is LineageNode => Boolean(node));
+
+  const definedByTerms = focus.type === 'term'
+    ? []
+    : incomingSourcesByType(graph, focus.id, 'defines', ['term']);
+  const terms = uniqueNodes([
+    ...(focus.type === 'term' ? [focus] : []),
+    ...definedByTerms,
+    ...upstreamNodes.filter((node) => node.type === 'term'),
+  ]);
+
+  const includedArtifacts = uniqueNodes([
+    ...directlyComposedArtifacts,
+    ...seedNodes.flatMap((node) => incomingSourcesByType(graph, node.id, 'composes', ['block', 'business_view'])),
+    ...upstreamNodes.filter((node) => node.type === 'block' || node.type === 'business_view'),
+  ]).filter((node) => node.id !== focus.id && !definedArtifacts.some((artifact) => artifact.id === node.id));
+
+  const parentViews = uniqueNodes(
+    seedNodes.flatMap((node) => outgoingTargetsByType(graph, node.id, 'composes', ['business_view'])),
+  );
+
+  const sourceTables = upstreamNodes.filter((node) => node.type === 'source_table');
+  const dbtModels = upstreamNodes.filter((node) => node.type === 'dbt_model');
+  const dbtSources = upstreamNodes.filter((node) => node.type === 'dbt_source');
+  const upstreamBlocks = upstreamNodes
+    .filter((node) => node.type === 'block')
+    .filter((node) => !seedIds.has(node.id));
+
+  const dashboards = downstreamNodes.filter((node) => node.type === 'dashboard');
+  const apps = downstreamNodes.filter((node) => node.type === 'app');
+  const notebooks = downstreamNodes.filter((node) => node.type === 'notebook');
+  const downstreamViews = downstreamNodes
+    .filter((node) => node.type === 'business_view')
+    .filter((node) => !seedIds.has(node.id));
+  const downstreamBlocks = downstreamNodes
+    .filter((node) => node.type === 'block')
+    .filter((node) => !seedIds.has(node.id));
+
+  const evidenceNodes = uniqueNodes([
+    focus,
+    ...seedNodes,
+    ...terms,
+    ...definedArtifacts,
+    ...definedByTerms,
+    ...includedArtifacts,
+    ...parentViews,
+    ...sourceTables,
+    ...dbtModels,
+    ...dbtSources,
+    ...upstreamBlocks,
+    ...dashboards,
+    ...apps,
+    ...notebooks,
+    ...downstreamViews,
+    ...downstreamBlocks,
+  ]);
+  const evidenceNodeIds = new Set(evidenceNodes.map((node) => node.id));
+  const evidenceEdges = graph.getAllEdges()
+    .filter((edge) => evidenceNodeIds.has(edge.source) && evidenceNodeIds.has(edge.target))
+    .map((edge) => ({ source: edge.source, target: edge.target, type: edge.type }));
+
+  const gaps = buildBusiness360Gaps({
+    focus,
+    definedArtifacts,
+    includedArtifacts,
+    sourceCount: sourceTables.length + dbtModels.length + dbtSources.length,
+    consumerCount: dashboards.length + apps.length + notebooks.length,
+  });
+
+  return {
+    focus: assetForNode(focus),
+    businessDefinition: {
+      terms: nodesToAssets(terms),
+      definedArtifacts: nodesToAssets(definedArtifacts),
+      definedByTerms: nodesToAssets(definedByTerms),
+      metadata: focus.metadata ?? {},
+    },
+    businessComposition: {
+      includedArtifacts: nodesToAssets(includedArtifacts),
+      parentViews: nodesToAssets(parentViews),
+    },
+    technicalSources: {
+      sourceTables: nodesToAssets(sourceTables),
+      dbtModels: nodesToAssets(dbtModels),
+      dbtSources: nodesToAssets(dbtSources),
+      upstreamBlocks: nodesToAssets(upstreamBlocks),
+      upstreamPathCount: countTechnicalUpstreamPaths(graph, seedIds, maxDepth),
+    },
+    consumers: {
+      dashboards: nodesToAssets(dashboards),
+      apps: nodesToAssets(apps),
+      notebooks: nodesToAssets(notebooks),
+      downstreamViews: nodesToAssets(downstreamViews),
+      downstreamBlocks: nodesToAssets(downstreamBlocks),
+    },
+    gaps,
+    evidence: {
+      nodes: nodesToAssets(evidenceNodes),
+      edges: evidenceEdges,
+    },
   };
 }
 
@@ -129,6 +323,201 @@ function resolveFocusNode(graph: LineageGraph, rawFocus: string): LineageNode | 
   return graph
     .getAllNodes()
     .find((node) => node.name.toLowerCase() === normalized);
+}
+
+function collectReachableNodes(
+  graph: LineageGraph,
+  startIds: Set<string>,
+  direction: 'upstream' | 'downstream',
+  maxDepth: number,
+): LineageNode[] {
+  const visited = new Set<string>();
+  const queue = [...startIds].map((id) => ({ id, depth: 0 }));
+
+  for (const id of startIds) visited.add(id);
+
+  while (queue.length > 0) {
+    const current = queue.shift()!;
+    if (current.depth >= maxDepth) continue;
+
+    const edges = direction === 'upstream'
+      ? graph.getIncomingEdges(current.id)
+      : graph.getOutgoingEdges(current.id);
+
+    for (const edge of edges) {
+      const nextId = direction === 'upstream' ? edge.source : edge.target;
+      if (visited.has(nextId)) continue;
+      visited.add(nextId);
+      queue.push({ id: nextId, depth: current.depth + 1 });
+    }
+  }
+
+  return sortNodes([...visited]
+    .filter((id) => !startIds.has(id))
+    .map((id) => graph.getNode(id))
+    .filter((node): node is LineageNode => Boolean(node))
+    .filter((node) => node.type !== 'domain'));
+}
+
+function incomingSourcesByType(
+  graph: LineageGraph,
+  nodeId: string,
+  edgeType: LineageEdge['type'],
+  nodeTypes: LineageNodeType[],
+): LineageNode[] {
+  const allowed = new Set(nodeTypes);
+  return sortNodes(targetsForEdges(
+    graph.getIncomingEdges(nodeId).filter((edge) => edge.type === edgeType),
+    graph,
+    'source',
+  ).filter((node) => allowed.has(node.type)));
+}
+
+function outgoingTargetsByType(
+  graph: LineageGraph,
+  nodeId: string,
+  edgeType: LineageEdge['type'],
+  nodeTypes: LineageNodeType[],
+): LineageNode[] {
+  const allowed = new Set(nodeTypes);
+  return sortNodes(targetsForEdges(
+    graph.getOutgoingEdges(nodeId).filter((edge) => edge.type === edgeType),
+    graph,
+  ).filter((node) => allowed.has(node.type)));
+}
+
+function targetsForEdges(
+  edges: LineageEdge[],
+  graph: LineageGraph,
+  endpoint: 'source' | 'target' = 'target',
+): LineageNode[] {
+  return uniqueNodes(edges
+    .map((edge) => graph.getNode(endpoint === 'source' ? edge.source : edge.target))
+    .filter((node): node is LineageNode => Boolean(node)));
+}
+
+function uniqueNodes(nodes: LineageNode[]): LineageNode[] {
+  const seen = new Set<string>();
+  const unique: LineageNode[] = [];
+  for (const node of nodes) {
+    if (node.type === 'domain' || seen.has(node.id)) continue;
+    seen.add(node.id);
+    unique.push(node);
+  }
+  return sortNodes(unique);
+}
+
+function sortNodes(nodes: LineageNode[]): LineageNode[] {
+  return [...nodes].sort((a, b) => a.type.localeCompare(b.type) || a.name.localeCompare(b.name));
+}
+
+function nodesToAssets(nodes: LineageNode[]): Business360Asset[] {
+  return sortNodes(nodes).map(assetForNode);
+}
+
+function assetForNode(node: LineageNode): Business360Asset {
+  return {
+    id: node.id,
+    name: node.name,
+    type: node.type,
+    layer: node.layer ?? getLayerForNodeType(node.type),
+    domain: node.domain,
+    status: node.status,
+    owner: node.owner,
+    metadata: node.metadata,
+  };
+}
+
+function countTechnicalUpstreamPaths(
+  graph: LineageGraph,
+  startIds: Set<string>,
+  maxDepth: number,
+): number {
+  let count = 0;
+  const visited = new Set<string>();
+
+  function walk(nodeId: string, depth: number): void {
+    const node = graph.getNode(nodeId);
+    if (!node || node.type === 'term' || node.type === 'domain') return;
+
+    if (depth >= maxDepth) return;
+
+    const nextIds = graph.getIncomingEdges(nodeId)
+      .filter((edge) => edge.type !== 'defines' && edge.type !== 'crosses_domain' && edge.type !== 'certified_by')
+      .map((edge) => edge.source)
+      .filter((id) => !visited.has(id))
+      .filter((id) => {
+        const source = graph.getNode(id);
+        return source !== undefined && source.type !== 'term' && source.type !== 'domain';
+      });
+
+    if (nextIds.length === 0) {
+      if (node.type === 'source_table' || node.type === 'dbt_source' || node.type === 'dbt_model') {
+        count++;
+      }
+      return;
+    }
+
+    for (const nextId of nextIds) {
+      visited.add(nextId);
+      walk(nextId, depth + 1);
+      visited.delete(nextId);
+    }
+  }
+
+  for (const startId of startIds) {
+    const start = graph.getNode(startId);
+    if (!start || start.type === 'term' || start.type === 'domain') continue;
+    visited.add(startId);
+    walk(startId, 0);
+    visited.delete(startId);
+  }
+
+  return count;
+}
+
+function buildBusiness360Gaps(input: {
+  focus: LineageNode;
+  definedArtifacts: LineageNode[];
+  includedArtifacts: LineageNode[];
+  sourceCount: number;
+  consumerCount: number;
+}): Business360Gap[] {
+  const gaps: Business360Gap[] = [];
+
+  if (input.focus.type === 'term' && input.definedArtifacts.length === 0) {
+    gaps.push({
+      code: 'missing_definition',
+      severity: 'warning',
+      message: 'This term is not connected to a block or business view yet.',
+    });
+  }
+
+  if (input.focus.type === 'business_view' && input.includedArtifacts.length === 0) {
+    gaps.push({
+      code: 'missing_composition',
+      severity: 'warning',
+      message: 'This business view does not include any blocks or nested business views.',
+    });
+  }
+
+  if (input.sourceCount === 0) {
+    gaps.push({
+      code: 'missing_sources',
+      severity: 'info',
+      message: 'No source tables, dbt sources, or dbt models were found upstream.',
+    });
+  }
+
+  if (input.consumerCount === 0) {
+    gaps.push({
+      code: 'missing_consumers',
+      severity: 'info',
+      message: 'No dashboards, apps, or notebooks were found downstream.',
+    });
+  }
+
+  return gaps;
 }
 
 function searchLineage(graph: LineageGraph, rawTerm: string): Array<{ node: LineageNode; score: number }> {
