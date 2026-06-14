@@ -1355,36 +1355,32 @@ function AppCopilotPanel({
       <div className="dql-app-explain-head">
         <span>AI Copilot</span>
         <h3>{selectedBlock?.title ?? 'Dashboard copilot'}</h3>
-        <p>{selectedBlock ? `Focused on ${selectedBlock.blockId}` : 'Select a block tile or ask for dashboard changes.'}</p>
+        <p>{selectedBlock ? `Focused on ${selectedBlock.blockId}` : 'Ask for dashboard changes or missing context.'}</p>
       </div>
-      <div className="dql-app-ex-section compact">
-        <div className="dql-app-ex-label">Block focus</div>
-        <div className="dql-app-focus-list">
-          {blockTiles.length ? blockTiles.map((block) => (
-            <button
-              key={block.tileId}
-              type="button"
-              className={block.blockId === selectedBlock?.blockId ? 'on' : ''}
-              onClick={() => onSelectBlock(block.blockId)}
-              title={block.blockId}
-            >
-              <LineChart size={13} />
-              <span>{block.title}</span>
-              <b>{block.viz}</b>
-            </button>
-          )) : <span>No block-backed tiles.</span>}
-        </div>
+      <div className="dql-app-copilot-controls">
+        <label className="dql-app-copilot-focus">
+          <span>Focus</span>
+          <select
+            value={selectedBlock?.blockId ?? ''}
+            onChange={(event) => onSelectBlock(event.target.value || null)}
+          >
+            <option value="">Dashboard</option>
+            {blockTiles.map((block) => (
+              <option key={block.tileId} value={block.blockId}>
+                {block.title}
+              </option>
+            ))}
+          </select>
+        </label>
+        {blockTiles.length === 0 ? <div className="dql-app-copilot-empty">No block-backed tiles yet.</div> : null}
       </div>
-      <div className="dql-app-ex-section">
-        <div className="dql-app-ex-label">Prompt starters</div>
-        <div className="dql-app-drilldown-grid">
-          {promptStarters.map((item) => (
-            <button key={item.label} type="button" onClick={() => setAskSeed(`${item.prompt} `)}>
-              {item.icon}
-              <span>{item.label}</span>
-            </button>
-          ))}
-        </div>
+      <div className="dql-app-copilot-prompts" aria-label="Prompt starters">
+        {promptStarters.map((item) => (
+          <button key={item.label} type="button" onClick={() => setAskSeed(`${item.prompt} `)}>
+            {item.icon}
+            <span>{item.label}</span>
+          </button>
+        ))}
       </div>
       <div className="dql-app-copilot-chat">
         <div className={`dql-app-rail-chat ${chatExpanded ? 'expanded' : ''}`}>
@@ -3086,7 +3082,8 @@ const APP_STYLES = `
   width: clamp(300px, 24vw, 420px);
   min-width: 280px;
   max-width: min(520px, 40vw);
-  max-height: calc(100vh - 132px);
+  height: min(680px, calc(100vh - 176px));
+  max-height: calc(100vh - 176px);
   resize: horizontal;
   border: 1px solid var(--dql-app-line);
   border-radius: 8px;
@@ -3104,7 +3101,7 @@ const APP_STYLES = `
 .dql-app-copilot-chat {
   flex: 1;
   min-height: 0;
-  padding: 12px;
+  padding: 0 12px 12px;
 }
 
 .dql-app-explain-head { padding: 14px 16px 12px; border-bottom: 1px solid var(--dql-app-line); }
@@ -3120,6 +3117,72 @@ const APP_STYLES = `
 .dql-app-explain-head p { margin: 5px 0 0; color: var(--dql-app-muted); font-size: 11.5px; line-height: 1.45; }
 .dql-app-ex-section { padding: 13px 16px; border-bottom: 1px solid var(--dql-app-line); }
 .dql-app-ex-section.compact { padding-top: 11px; padding-bottom: 11px; }
+.dql-app-copilot-controls {
+  padding: 10px 12px 8px;
+  border-bottom: 1px solid var(--dql-app-line);
+}
+
+.dql-app-copilot-focus {
+  display: grid;
+  gap: 5px;
+}
+
+.dql-app-copilot-focus span {
+  color: var(--dql-app-muted);
+  font: 700 9px var(--font-mono);
+  letter-spacing: 0;
+  text-transform: uppercase;
+}
+
+.dql-app-copilot-focus select {
+  width: 100%;
+  min-width: 0;
+  height: 34px;
+  border: 1px solid var(--dql-app-line-2);
+  border-radius: 7px;
+  background: var(--dql-app-control);
+  color: var(--dql-app-ink);
+  padding: 0 10px;
+  font: 800 12px var(--font-ui);
+}
+
+.dql-app-copilot-empty {
+  margin-top: 7px;
+  color: var(--dql-app-faint);
+  font-size: 11px;
+}
+
+.dql-app-copilot-prompts {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+  padding: 9px 12px 10px;
+}
+
+.dql-app-copilot-prompts button {
+  min-width: 0;
+  height: 30px;
+  border: 1px solid var(--dql-app-line);
+  border-radius: 999px;
+  background: var(--dql-app-surface);
+  color: var(--dql-app-muted);
+  padding: 0 9px;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  cursor: pointer;
+  font: 800 10.5px var(--font-ui);
+}
+
+.dql-app-copilot-prompts button:hover {
+  color: var(--dql-app-accent);
+  border-color: rgba(79, 99, 215, 0.34);
+  background: var(--dql-app-accent-soft);
+}
+
+.dql-app-copilot-prompts svg {
+  flex: 0 0 auto;
+}
 .dql-app-block-cite {
   display: flex;
   align-items: center;
@@ -3264,8 +3327,8 @@ const APP_STYLES = `
 }
 
 .dql-app-rail-chat {
-  height: min(520px, calc(100vh - 405px));
-  min-height: 330px;
+  height: 100%;
+  min-height: 0;
   border: 1px solid var(--dql-app-line-2);
   border-radius: 8px;
   overflow: hidden;
@@ -3412,6 +3475,7 @@ const APP_STYLES = `
     position: static;
     width: 100%;
     max-width: none;
+    height: min(680px, calc(100vh - 24px));
     resize: none;
     max-height: none;
   }
