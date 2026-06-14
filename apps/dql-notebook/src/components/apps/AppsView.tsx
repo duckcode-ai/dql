@@ -264,6 +264,7 @@ export function AppsView(): JSX.Element {
     setBuilderPrompt(prompt);
     setBuilderTemplate(template ?? builderTemplate);
     if (domain) setBuilderDomain(domain);
+    setSelectedBlocks(new Set());
     setBuilderError(null);
     setGenerated(null);
     setSurface('create');
@@ -429,7 +430,10 @@ export function AppsView(): JSX.Element {
           saving={builderSaving}
           error={builderError}
           onBack={() => setSurface('library')}
-          onModeChange={setBuilderMode}
+          onModeChange={(nextMode) => {
+            setBuilderMode(nextMode);
+            if (nextMode === 'ai') setSelectedBlocks(new Set());
+          }}
           onAppNameChange={setBuilderName}
           onPromptChange={setBuilderPrompt}
           onDomainChange={setBuilderDomain}
@@ -815,31 +819,22 @@ function AppCreateSurface({
       />
 
       <div className={`dql-app-create-workspace ${mode === 'classic' ? 'classic' : 'ai'}`}>
-        <section className="dql-app-panel dql-app-agent-panel">
+        <section className={`dql-app-panel dql-app-agent-panel ${mode === 'ai' ? 'ai-clean' : ''}`}>
           <PanelHead title={mode === 'ai' ? 'Build with the agent' : 'Palette'} meta={mode === 'ai' ? 'local ledger-grounded' : 'certified blocks'} />
           {mode === 'ai' ? (
             <>
-              <div className="dql-app-agent-scroll">
-                <AgentBubble>
-                  Ask for the app outcome, select any required governed blocks, then send it to create a local AppPlan and files.
-                </AgentBubble>
+              <div className="dql-app-ai-brief">
+                <span><Sparkles size={15} /> AI App Builder</span>
+                <p>Describe the business outcome. DQL will match certified blocks, terms, lineage, and app structure automatically.</p>
                 {generated ? (
-                  <AgentBubble tone="success">
+                  <div className="dql-app-ai-result">
                     Generated <b>{generated.plan.name}</b> with {generated.validation.certifiedTiles} certified tile
                     {generated.validation.certifiedTiles === 1 ? '' : 's'} and {generated.validation.draftTiles} draft tile
                     {generated.validation.draftTiles === 1 ? '' : 's'}.
-                  </AgentBubble>
+                  </div>
                 ) : null}
-                <BlockIndex
-                  title="Block index"
-                  subtitle={`${selectedBlocks.size} selected`}
-                  catalog={catalog}
-                  loading={catalogLoading}
-                  selectedBlocks={selectedBlocks}
-                  onToggleBlock={onToggleBlock}
-                />
               </div>
-              <div className="dql-app-composer">
+              <div className="dql-app-composer ai-clean">
                 <div className="dql-app-suggestions">
                   {templates.slice(1, 4).map((item) => (
                     <button key={item.id} type="button" onClick={() => {
@@ -864,7 +859,7 @@ function AppCreateSurface({
                   </select>
                 </label>
                 <div className="dql-app-ai-send-row">
-                  <span>{selectedBlocks.size ? `${selectedBlocks.size} governed blocks attached` : 'Auto-match governed blocks'}</span>
+                  <span>Auto-match certified context</span>
                   <button type="button" className="dql-apps-btn dql-apps-btn-primary" onClick={onBuild} disabled={saving}>
                     <Send size={13} /> {saving ? 'Building...' : 'Send to AI'}
                   </button>
@@ -1166,7 +1161,9 @@ function BuilderSteps({
 }) {
   const steps = [
     { label: mode === 'ai' ? 'Prompt' : 'Name app', done: true },
-    { label: 'Attach blocks', done: selectedCount > 0 },
+    mode === 'ai'
+      ? { label: 'Match context', done: generated, active: saving || !generated }
+      : { label: 'Pick blocks', done: selectedCount > 0 },
     { label: mode === 'ai' ? 'AppPlan' : 'Dashboard', done: generated, active: saving || (!generated && mode === 'ai') },
     { label: 'Open app', done: generated },
   ];
@@ -1463,15 +1460,6 @@ function PanelHead({ title, meta }: { title: string; meta?: string }) {
     <div className="dql-app-panel-head">
       <span>{title}</span>
       {meta ? <b>{meta}</b> : null}
-    </div>
-  );
-}
-
-function AgentBubble({ children, tone }: { children: ReactNode; tone?: 'success' }) {
-  return (
-    <div className={`dql-app-agent-bubble ${tone ?? ''}`}>
-      <span><Sparkles size={14} /></span>
-      <p>{children}</p>
     </div>
   );
 }
@@ -2406,36 +2394,39 @@ const APP_STYLES = `
   padding: 16px;
 }
 
-.dql-app-agent-bubble {
-  display: flex;
-  align-items: flex-start;
-  gap: 10px;
-  margin-bottom: 12px;
+.dql-app-agent-panel.ai-clean { background: var(--dql-app-surface); }
+.dql-app-ai-brief {
+  padding: 18px 16px 4px;
+  display: grid;
+  gap: 7px;
 }
 
-.dql-app-agent-bubble > span {
-  width: 26px;
-  height: 26px;
-  border-radius: 7px;
-  background: var(--dql-app-deep);
-  color: var(--dql-app-accent);
+.dql-app-ai-brief > span {
   display: inline-flex;
   align-items: center;
-  justify-content: center;
-  flex: none;
+  gap: 7px;
+  color: var(--dql-app-ink);
+  font: 850 13px var(--font-ui);
 }
 
-.dql-app-agent-bubble p {
+.dql-app-ai-brief > span svg { color: var(--dql-app-accent); }
+.dql-app-ai-brief p {
   margin: 0;
-  border: 1px solid var(--dql-app-line);
-  border-radius: 10px;
-  background: var(--dql-app-surface);
-  padding: 10px 12px;
-  font-size: 13px;
+  color: var(--dql-app-muted);
+  font-size: 12.5px;
   line-height: 1.5;
 }
 
-.dql-app-agent-bubble.success p { border-color: rgba(22, 163, 74, 0.30); background: var(--dql-app-green-soft); }
+.dql-app-ai-result {
+  margin-top: 5px;
+  border: 1px solid rgba(22, 163, 74, 0.26);
+  border-radius: 7px;
+  background: var(--dql-app-green-soft);
+  color: var(--dql-app-ink);
+  padding: 8px 10px;
+  font-size: 12px;
+  line-height: 1.45;
+}
 
 .dql-app-composer {
   border-top: 1px solid var(--dql-app-line);
@@ -2443,6 +2434,12 @@ const APP_STYLES = `
   padding: 12px;
   display: grid;
   gap: 9px;
+}
+
+.dql-app-composer.ai-clean {
+  border-top: 0;
+  padding: 12px 16px 16px;
+  gap: 10px;
 }
 
 .dql-app-suggestions {
@@ -2477,6 +2474,12 @@ const APP_STYLES = `
 }
 
 .dql-app-composer textarea { resize: vertical; min-height: 92px; line-height: 1.45; }
+.dql-app-composer.ai-clean textarea {
+  min-height: 138px;
+  background: var(--dql-app-surface);
+  border-color: var(--dql-app-line-2);
+  font-size: 13px;
+}
 .dql-app-form-grid.two { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
 .dql-app-form-grid label,
 .dql-app-select-label,
