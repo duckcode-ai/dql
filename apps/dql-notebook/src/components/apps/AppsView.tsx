@@ -775,7 +775,15 @@ function AppCreateSurface({
             <>
               <div className="dql-app-ai-brief">
                 <span><Sparkles size={15} /> AI App Builder</span>
-                <p>Describe the business outcome. DQL will dynamically match certified context, shape the story, and mark gaps for review.</p>
+                <p>Describe the app outcome. DQL finds certified context and drafts review gaps.</p>
+                <div className="dql-app-ai-skill-strip" aria-label="Agent skills">
+                  {agentSkills.map((skill) => (
+                    <span key={skill.id} title={skill.description}>
+                      <CheckCircle2 size={12} />
+                      <b>{skill.title}</b>
+                    </span>
+                  ))}
+                </div>
                 {generated ? (
                   <div className="dql-app-ai-result">
                     Generated <b>{generated.plan.name}</b> with {generated.validation.certifiedTiles} certified tile
@@ -785,15 +793,15 @@ function AppCreateSurface({
                 ) : null}
               </div>
               <div className="dql-app-composer ai-clean">
-                <div className="dql-app-ai-skill-strip" aria-label="Agent skills">
-                  {agentSkills.map((skill) => (
-                    <span key={skill.id} title={skill.description}>
-                      <CheckCircle2 size={13} />
-                      <b>{skill.title}</b>
-                    </span>
-                  ))}
-                </div>
-                <div className="dql-app-suggestions">
+                <textarea
+                  value={prompt}
+                  onChange={(event) => onPromptChange(event.target.value)}
+                  rows={4}
+                  aria-label="App request"
+                  placeholder="Ask DQL to build a stakeholder app from certified blocks and business context..."
+                />
+                <div className="dql-app-suggestions" aria-label="Prompt examples">
+                  <span>Examples</span>
                   {promptExamples.slice(0, 4).map((item) => (
                     <button key={item.title} type="button" onClick={() => {
                       onPromptChange(item.prompt);
@@ -803,7 +811,6 @@ function AppCreateSurface({
                     </button>
                   ))}
                 </div>
-                <textarea value={prompt} onChange={(event) => onPromptChange(event.target.value)} rows={4} />
                 <details className="dql-app-ai-context">
                   <summary>
                     <span>Context</span>
@@ -816,7 +823,7 @@ function AppCreateSurface({
                   </div>
                 </details>
                 <div className="dql-app-ai-send-row">
-                  <span>Dynamic story from certified context</span>
+                  <span><ShieldCheck size={13} /> Certified context first</span>
                   <button type="button" className="dql-apps-btn dql-apps-btn-primary" onClick={onBuild} disabled={saving}>
                     <Send size={13} /> {saving ? 'Building...' : 'Send to AI'}
                   </button>
@@ -2330,9 +2337,9 @@ const APP_STYLES = `
 
 .dql-app-agent-panel.ai-clean { background: var(--dql-app-surface); }
 .dql-app-ai-brief {
-  padding: 18px 16px 4px;
+  padding: 18px 16px 2px;
   display: grid;
-  gap: 7px;
+  gap: 8px;
 }
 
 .dql-app-ai-brief > span {
@@ -2347,7 +2354,7 @@ const APP_STYLES = `
 .dql-app-ai-brief p {
   margin: 0;
   color: var(--dql-app-muted);
-  font-size: 12.5px;
+  font-size: 12px;
   line-height: 1.5;
 }
 
@@ -2372,29 +2379,33 @@ const APP_STYLES = `
 
 .dql-app-composer.ai-clean {
   border-top: 0;
-  padding: 12px 16px 16px;
-  gap: 10px;
+  padding: 10px 16px 16px;
+  gap: 9px;
 }
 
 .dql-app-ai-skill-strip {
-  display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
-  gap: 6px;
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  flex-wrap: wrap;
 }
 
 .dql-app-ai-skill-strip span {
   min-width: 0;
-  min-height: 34px;
-  border: 1px solid var(--dql-app-line);
-  border-radius: 8px;
-  background: var(--dql-app-surface-muted);
   display: inline-flex;
   align-items: center;
-  justify-content: center;
   gap: 5px;
   color: var(--dql-app-muted);
   font: 750 10.5px var(--font-ui);
   white-space: nowrap;
+}
+
+.dql-app-ai-skill-strip span:not(:last-child)::after {
+  content: "";
+  width: 15px;
+  height: 1px;
+  margin-left: 4px;
+  background: var(--dql-app-line-2);
 }
 
 .dql-app-ai-skill-strip svg {
@@ -2410,19 +2421,31 @@ const APP_STYLES = `
 
 .dql-app-suggestions {
   display: flex;
-  gap: 6px;
+  align-items: center;
+  gap: 10px;
   flex-wrap: wrap;
+}
+
+.dql-app-suggestions > span {
+  color: var(--dql-app-faint);
+  font: 750 10px var(--font-mono);
+  text-transform: uppercase;
 }
 
 .dql-app-suggestions button,
 .dql-app-suggests button {
-  border: 1px solid var(--dql-app-line);
-  border-radius: 999px;
-  background: var(--dql-app-control);
+  border: 0;
+  border-radius: 0;
+  background: transparent;
   color: var(--dql-app-muted);
-  padding: 5px 9px;
+  padding: 2px 0;
   cursor: pointer;
-  font-size: 11px;
+  font: 750 11.5px var(--font-ui);
+}
+
+.dql-app-suggestions button:hover,
+.dql-app-suggests button:hover {
+  color: var(--dql-app-accent);
 }
 
 .dql-app-composer textarea,
@@ -2441,10 +2464,12 @@ const APP_STYLES = `
 
 .dql-app-composer textarea { resize: vertical; min-height: 92px; line-height: 1.45; }
 .dql-app-composer.ai-clean textarea {
-  min-height: 112px;
+  min-height: 130px;
   background: var(--dql-app-surface);
   border-color: var(--dql-app-line-2);
-  font-size: 13px;
+  border-radius: 10px;
+  padding: 11px 12px;
+  font-size: 13.5px;
 }
 .dql-app-form-grid.two { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
 .dql-app-form-grid label,
@@ -2459,18 +2484,17 @@ const APP_STYLES = `
 }
 
 .dql-app-ai-context {
-  border: 1px solid var(--dql-app-line);
-  border-radius: 8px;
-  background: var(--dql-app-surface-muted);
-  overflow: hidden;
+  border-top: 1px solid var(--dql-app-line);
+  border-bottom: 1px solid var(--dql-app-line);
+  background: transparent;
 }
 
 .dql-app-ai-context summary {
-  min-height: 36px;
+  min-height: 34px;
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 0 10px;
+  padding: 0 2px;
   cursor: pointer;
   list-style: none;
 }
@@ -2490,7 +2514,7 @@ const APP_STYLES = `
   text-overflow: ellipsis;
   white-space: nowrap;
   color: var(--dql-app-ink);
-  font: 750 11.5px var(--font-ui);
+  font: 750 11px var(--font-ui);
 }
 
 .dql-app-ai-context summary svg {
@@ -2505,7 +2529,7 @@ const APP_STYLES = `
   display: grid;
   grid-template-columns: 1fr;
   gap: 8px;
-  padding: 10px;
+  padding: 0 0 10px;
   border-top: 1px solid var(--dql-app-line);
 }
 
@@ -2523,7 +2547,7 @@ const APP_STYLES = `
   height: 34px;
   border: 1px solid var(--dql-app-line);
   border-radius: 7px;
-  background: var(--dql-app-surface);
+  background: var(--dql-app-surface-muted);
   color: var(--dql-app-ink);
   outline: 0;
   padding: 0 10px;
@@ -2535,13 +2559,19 @@ const APP_STYLES = `
   align-items: center;
   justify-content: space-between;
   gap: 10px;
-  border-top: 1px solid var(--dql-app-line);
-  padding-top: 9px;
+  padding-top: 3px;
 }
 
 .dql-app-ai-send-row span {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
   color: var(--dql-app-muted);
   font: 750 11px var(--font-ui);
+}
+
+.dql-app-ai-send-row span svg {
+  color: var(--dql-app-green);
 }
 
 .dql-app-preview-panel { background: var(--dql-app-canvas); }
