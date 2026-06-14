@@ -131,9 +131,12 @@ const COLOR_PALETTES: Record<string, string[]> = {
     '#a8e0e0', '#f8d8a0', '#f4b8b4', '#c0e8c0', '#e0d0f8',
     '#a8d8f8', '#b0e8b0',
   ],
+  corporate: [
+    '#2563eb', '#16a34a', '#7c3aed', '#0891b2', '#f59e0b',
+    '#dc2626', '#475569', '#0f766e', '#9333ea', '#0284c7',
+    '#65a30d', '#ea580c',
+  ],
 };
-
-const PIE_PALETTE = COLOR_PALETTES.default;
 
 function getPalette(name?: string): string[] {
   return COLOR_PALETTES[name ?? 'default'] ?? COLOR_PALETTES.default;
@@ -182,6 +185,7 @@ function BarChart({ result, themeMode, chartConfig }: { result: QueryResult; the
   const [hoveredIdx, setHoveredIdx] = useState<number | null>(null);
   const { labelCol, valueCol } = pickColumns(result, chartConfig);
   const maxItems = chartConfig?.maxItems ?? DEFAULT_MAX_ITEMS;
+  const palette = getPalette(chartConfig?.colorPalette);
 
   const data = result.rows.slice(0, maxItems).map((row) => ({
     label: String(row[labelCol] ?? ''),
@@ -202,12 +206,13 @@ function BarChart({ result, themeMode, chartConfig }: { result: QueryResult; the
           const barMaxW = 600 - LABEL_W - 84;
           const barW = Math.max((item.value / maxVal) * barMaxW, 2);
           const isHovered = hoveredIdx === i;
+          const color = palette[i % palette.length];
           return (
             <g key={i} onMouseEnter={() => setHoveredIdx(i)} onMouseLeave={() => setHoveredIdx(null)} style={{ cursor: 'default' }}>
               <text x={LABEL_W - 8} y={y + BAR_H / 2 + 4} textAnchor="end" fontSize={11} fontFamily={t.font} fill={t.textSecondary}>
                 {item.label.length > 16 ? item.label.slice(0, 15) + '…' : item.label}
               </text>
-              <rect x={LABEL_W} y={y} width={barW} height={BAR_H} rx={3} fill={isHovered ? t.accentHover : t.accent} style={{ transition: 'fill 0.15s' }} />
+              <rect x={LABEL_W} y={y} width={barW} height={BAR_H} rx={3} fill={color} opacity={isHovered ? 1 : 0.88} style={{ transition: 'opacity 0.15s' }} />
               <text x={LABEL_W + barW + 6} y={y + BAR_H / 2 + 4} textAnchor="start" fontSize={11} fontFamily={t.fontMono} fill={t.textMuted}>
                 {abbreviate(item.value)}
               </text>
@@ -229,6 +234,7 @@ function BarChart({ result, themeMode, chartConfig }: { result: QueryResult; the
 function GroupedBarChart({ result, themeMode, chartConfig }: { result: QueryResult; themeMode: ThemeMode; chartConfig?: CellChartConfig }) {
   const t = themes[themeMode];
   const [hoveredIdx, setHoveredIdx] = useState<string | null>(null);
+  const palette = getPalette(chartConfig?.colorPalette);
 
   const labelCol = chartConfig?.x && result.columns.includes(chartConfig.x) ? chartConfig.x : result.columns[0];
   // All numeric columns except the label column become groups
@@ -248,7 +254,7 @@ function GroupedBarChart({ result, themeMode, chartConfig }: { result: QueryResu
       <div style={{ display: 'flex', gap: 12, padding: '0 12px 6px', flexWrap: 'wrap' }}>
         {valueCols.map((col, ci) => (
           <div key={col} style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
-            <div style={{ width: 10, height: 10, borderRadius: 2, background: PIE_PALETTE[ci % PIE_PALETTE.length] }} />
+            <div style={{ width: 10, height: 10, borderRadius: 2, background: palette[ci % palette.length] }} />
             <span style={{ fontSize: 10, fontFamily: t.font, color: t.textSecondary }}>{col}</span>
           </div>
         ))}
@@ -271,7 +277,7 @@ function GroupedBarChart({ result, themeMode, chartConfig }: { result: QueryResu
                 return (
                   <g key={ci} onMouseEnter={() => setHoveredIdx(key)} onMouseLeave={() => setHoveredIdx(null)}>
                     <rect x={LABEL_W} y={by} width={barW} height={BAR_H - 1} rx={2}
-                      fill={PIE_PALETTE[ci % PIE_PALETTE.length]}
+                      fill={palette[ci % palette.length]}
                       opacity={hoveredIdx === key ? 1 : 0.85}
                       style={{ transition: 'opacity 0.15s' }} />
                     {hoveredIdx === key && (
@@ -295,6 +301,7 @@ function GroupedBarChart({ result, themeMode, chartConfig }: { result: QueryResu
 function StackedBarChart({ result, themeMode, chartConfig }: { result: QueryResult; themeMode: ThemeMode; chartConfig?: CellChartConfig }) {
   const t = themes[themeMode];
   const [hoveredIdx, setHoveredIdx] = useState<string | null>(null);
+  const palette = getPalette(chartConfig?.colorPalette);
 
   const labelCol = chartConfig?.x && result.columns.includes(chartConfig.x) ? chartConfig.x : result.columns[0];
   const sample = result.rows.slice(0, 5);
@@ -313,7 +320,7 @@ function StackedBarChart({ result, themeMode, chartConfig }: { result: QueryResu
       <div style={{ display: 'flex', gap: 12, padding: '0 12px 6px', flexWrap: 'wrap' }}>
         {valueCols.map((col, ci) => (
           <div key={col} style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
-            <div style={{ width: 10, height: 10, borderRadius: 2, background: PIE_PALETTE[ci % PIE_PALETTE.length] }} />
+            <div style={{ width: 10, height: 10, borderRadius: 2, background: palette[ci % palette.length] }} />
             <span style={{ fontSize: 10, fontFamily: t.font, color: t.textSecondary }}>{col}</span>
           </div>
         ))}
@@ -338,7 +345,7 @@ function StackedBarChart({ result, themeMode, chartConfig }: { result: QueryResu
                 return (
                   <g key={ci} onMouseEnter={() => setHoveredIdx(key)} onMouseLeave={() => setHoveredIdx(null)}>
                     <rect x={x} y={y} width={w} height={BAR_H} rx={ci === 0 ? 3 : 0}
-                      fill={PIE_PALETTE[ci % PIE_PALETTE.length]}
+                      fill={palette[ci % palette.length]}
                       opacity={hoveredIdx === key ? 1 : 0.85}
                       style={{ transition: 'opacity 0.15s' }} />
                     {hoveredIdx === key && w > 30 && (
@@ -359,9 +366,11 @@ function StackedBarChart({ result, themeMode, chartConfig }: { result: QueryResu
 
 // ─── Line Chart ───────────────────────────────────────────────────────────────
 
-function LineChart({ result, themeMode, showArea }: { result: QueryResult; themeMode: ThemeMode; showArea?: boolean }) {
+function LineChart({ result, themeMode, showArea, chartConfig }: { result: QueryResult; themeMode: ThemeMode; showArea?: boolean; chartConfig?: CellChartConfig }) {
   const t = themes[themeMode];
   const [tooltip, setTooltip] = useState<{ x: number; y: number; label: string; value: number } | null>(null);
+  const palette = getPalette(chartConfig?.colorPalette);
+  const lineColor = palette[0] ?? t.accent;
 
   const xCol = result.columns[0];
   const yCol = result.columns[1];
@@ -408,10 +417,10 @@ function LineChart({ result, themeMode, showArea }: { result: QueryResult; theme
             <text x={PAD_L - 6} y={tick.y + 4} textAnchor="end" fontSize={10} fontFamily={t.fontMono} fill={t.textMuted}>{abbreviate(tick.val)}</text>
           </g>
         ))}
-        <path d={areaD} fill={t.accent} opacity={showArea ? 0.3 : 0.15} />
-        <path d={pathD} fill="none" stroke={t.accent} strokeWidth={2} strokeLinejoin="round" />
+        <path d={areaD} fill={lineColor} opacity={showArea ? 0.3 : 0.15} />
+        <path d={pathD} fill="none" stroke={lineColor} strokeWidth={2} strokeLinejoin="round" />
         {points.map((pt, i) => (
-          <circle key={i} cx={pt.x} cy={pt.y} r={3} fill={t.accent} style={{ cursor: 'crosshair' }}
+          <circle key={i} cx={pt.x} cy={pt.y} r={3} fill={lineColor} style={{ cursor: 'crosshair' }}
             onMouseEnter={() => setTooltip({ x: pt.x, y: pt.y, label: data[i].label, value: data[i].value })} />
         ))}
         {xLabels.map((item, i) => {
@@ -452,6 +461,7 @@ function LineChart({ result, themeMode, showArea }: { result: QueryResult; theme
 function ScatterChart({ result, themeMode, chartConfig }: { result: QueryResult; themeMode: ThemeMode; chartConfig?: CellChartConfig }) {
   const t = themes[themeMode];
   const [hoveredIdx, setHoveredIdx] = useState<number | null>(null);
+  const palette = getPalette(chartConfig?.colorPalette);
 
   const xCol = chartConfig?.x && result.columns.includes(chartConfig.x) ? chartConfig.x : result.columns[0];
   const yCol = chartConfig?.y && result.columns.includes(chartConfig.y) ? chartConfig.y : result.columns[1];
@@ -486,7 +496,7 @@ function ScatterChart({ result, themeMode, chartConfig }: { result: QueryResult;
         <div style={{ display: 'flex', gap: 12, padding: '0 12px 6px', flexWrap: 'wrap' }}>
           {categories.slice(0, 12).map((cat, ci) => (
             <div key={cat} style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
-              <div style={{ width: 8, height: 8, borderRadius: '50%', background: PIE_PALETTE[ci % PIE_PALETTE.length] }} />
+              <div style={{ width: 8, height: 8, borderRadius: '50%', background: palette[ci % palette.length] }} />
               <span style={{ fontSize: 10, fontFamily: t.font, color: t.textSecondary }}>{cat}</span>
             </div>
           ))}
@@ -523,7 +533,7 @@ function ScatterChart({ result, themeMode, chartConfig }: { result: QueryResult;
           const ci = colorCol ? categories.indexOf(d.color!) : 0;
           return (
             <circle key={i} cx={toSX(d.x)} cy={toSY(d.y)} r={hoveredIdx === i ? 5 : 3.5}
-              fill={PIE_PALETTE[ci % PIE_PALETTE.length]} opacity={hoveredIdx === i ? 1 : 0.7}
+              fill={palette[ci % palette.length]} opacity={hoveredIdx === i ? 1 : 0.7}
               style={{ cursor: 'crosshair', transition: 'r 0.1s, opacity 0.1s' }}
               onMouseEnter={() => setHoveredIdx(i)} onMouseLeave={() => setHoveredIdx(null)} />
           );
@@ -549,6 +559,7 @@ function PieDonutChart({ result, themeMode, chartConfig, isDonut }: { result: Qu
   const t = themes[themeMode];
   const [hoveredIdx, setHoveredIdx] = useState<number | null>(null);
   const { labelCol, valueCol } = pickColumns(result, chartConfig);
+  const palette = getPalette(chartConfig?.colorPalette);
 
   const rawData = result.rows.slice(0, MAX_PIE_SLICES).map((row) => ({
     label: String(row[labelCol] ?? ''),
@@ -574,7 +585,7 @@ function PieDonutChart({ result, themeMode, chartConfig, isDonut }: { result: Qu
     } else {
       path = `M ${CX} ${CY} L ${lx1} ${ly1} A ${R} ${R} 0 ${large} 1 ${lx2} ${ly2} Z`;
     }
-    slices.push({ path, color: PIE_PALETTE[i % PIE_PALETTE.length], label: d.label, value: d.value, pct: (d.value / total) * 100 });
+    slices.push({ path, color: palette[i % palette.length], label: d.label, value: d.value, pct: (d.value / total) * 100 });
     angle = a2;
   });
 
@@ -690,6 +701,8 @@ function HeatmapChart({ result, themeMode }: { result: QueryResult; themeMode: T
 function HistogramChart({ result, themeMode, chartConfig }: { result: QueryResult; themeMode: ThemeMode; chartConfig?: CellChartConfig }) {
   const t = themes[themeMode];
   const [hoveredIdx, setHoveredIdx] = useState<number | null>(null);
+  const palette = getPalette(chartConfig?.colorPalette);
+  const barColor = palette[0] ?? t.accent;
 
   // Use first numeric column
   const numCol = (chartConfig?.x && result.columns.includes(chartConfig.x) ? chartConfig.x : undefined) ??
@@ -743,7 +756,7 @@ function HistogramChart({ result, themeMode, chartConfig }: { result: QueryResul
           return (
             <g key={i} onMouseEnter={() => setHoveredIdx(i)} onMouseLeave={() => setHoveredIdx(null)}>
               <rect x={x + 1} y={y} width={barW - 2} height={barH} rx={1}
-                fill={isH ? t.accentHover : t.accent} opacity={isH ? 1 : 0.85} style={{ transition: 'fill 0.1s' }} />
+                fill={barColor} opacity={isH ? 1 : 0.85} style={{ transition: 'opacity 0.1s' }} />
               {isH && (
                 <text x={x + barW / 2} y={y - 4} textAnchor="middle" fontSize={10} fontFamily={t.fontMono} fill={t.textPrimary}>
                   {bin.count}
@@ -777,6 +790,7 @@ function FunnelChart({ result, themeMode, chartConfig }: { result: QueryResult; 
   const t = themes[themeMode];
   const [hoveredIdx, setHoveredIdx] = useState<number | null>(null);
   const { labelCol, valueCol } = pickColumns(result, chartConfig);
+  const palette = getPalette(chartConfig?.colorPalette);
 
   const data = result.rows.slice(0, 10).map((row) => ({
     label: String(row[labelCol] ?? ''),
@@ -806,7 +820,7 @@ function FunnelChart({ result, themeMode, chartConfig }: { result: QueryResult; 
           const path = `M ${x1} ${y} L ${x2} ${y} L ${x3} ${y + ROW_H} L ${x4} ${y + ROW_H} Z`;
           return (
             <g key={i} onMouseEnter={() => setHoveredIdx(i)} onMouseLeave={() => setHoveredIdx(null)} style={{ cursor: 'default' }}>
-              <path d={path} fill={PIE_PALETTE[i % PIE_PALETTE.length]} opacity={isH ? 1 : 0.85} style={{ transition: 'opacity 0.15s' }} />
+              <path d={path} fill={palette[i % palette.length]} opacity={isH ? 1 : 0.85} style={{ transition: 'opacity 0.15s' }} />
               <text x={CENTER} y={y + ROW_H / 2 + 1} textAnchor="middle" fontSize={11} fontFamily={t.font} fill="#fff" fontWeight={500}>
                 {d.label}
               </text>
@@ -998,6 +1012,7 @@ function formatKpiValue(raw: unknown, format?: CellChartConfig['format']): strin
 
 function KpiCard({ result, themeMode, chartConfig }: { result: QueryResult; themeMode: ThemeMode; chartConfig?: CellChartConfig }) {
   const t = themes[themeMode];
+  const palette = getPalette(chartConfig?.colorPalette);
   const row = result.rows[0];
   if (!row) return null;
 
@@ -1013,7 +1028,7 @@ function KpiCard({ result, themeMode, chartConfig }: { result: QueryResult; them
         style={{
           // Scale the hero figure to the tile width so it never clips: ~16% of
           // container width, clamped to a sensible min/max.
-          fontSize: 'clamp(18px, 15cqw, 40px)', fontWeight: 750, fontFamily: t.fontMono, color: t.accent,
+          fontSize: 'clamp(18px, 15cqw, 40px)', fontWeight: 750, fontFamily: t.fontMono, color: palette[0] ?? t.accent,
           lineHeight: 1.1, maxWidth: '100%', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
         }}
       >{displayVal}</span>
@@ -1170,9 +1185,9 @@ export function renderChart(chartType: ChartType, result: QueryResult, themeMode
 
   switch (chartType) {
     case 'line':
-      return <LineChart result={configuredResult} themeMode={themeMode} />;
+      return <LineChart result={configuredResult} themeMode={themeMode} chartConfig={chartConfig} />;
     case 'area':
-      return <LineChart result={configuredResult} themeMode={themeMode} showArea />;
+      return <LineChart result={configuredResult} themeMode={themeMode} chartConfig={chartConfig} showArea />;
     case 'bar':
       return <BarChart result={configuredResult} themeMode={themeMode} chartConfig={chartConfig} />;
     case 'grouped-bar':

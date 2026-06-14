@@ -110,6 +110,24 @@ describe("planAppFromPrompt", () => {
         ]),
       );
     }));
+
+  it("prioritizes explicitly selected certified blocks in generated plans", () =>
+    withKg(revenueNodes, (kg) => {
+      const plan = planAppFromPrompt({
+        prompt: "Build a weekly operating app for the COO",
+        kg,
+        domain: "growth",
+        preferredBlockIds: ["revenue_by_segment"],
+      });
+
+      const certifiedTiles = plan.pages[0].tiles.filter(
+        (tile) => tile.kind === "certified_block",
+      );
+      expect(certifiedTiles[0]).toMatchObject({
+        blockId: "revenue_by_segment",
+        certification: "certified",
+      });
+    }));
 });
 
 describe("validateAppPlan", () => {

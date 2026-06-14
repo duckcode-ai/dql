@@ -1160,6 +1160,7 @@ function mergeTileChartConfig(
     ...options,
     chart: normalizeChartType(String(options.chart ?? base?.chart ?? item.viz.type)),
     title: options.title ?? base?.title ?? item.title,
+    colorPalette: options.colorPalette ?? base?.colorPalette ?? 'corporate',
   };
 }
 

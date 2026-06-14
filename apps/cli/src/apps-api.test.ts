@@ -119,6 +119,7 @@ describe('Apps command center API helpers', () => {
       owner: 'owner@local',
       template: 'revenue_health',
       force: true,
+      selectedBlockIds: ['Revenue by Month'],
     });
 
     expect(result.ok).toBe(true);
@@ -132,6 +133,12 @@ describe('Apps command center API helpers', () => {
     expect(result.generated.paths).toContain(`apps/${plan.appId}/dashboards/overview.dqld`);
     expect(existsSync(join(root, `apps/${plan.appId}/dql.app.json`))).toBe(true);
     expect(existsSync(join(root, `apps/${plan.appId}/dashboards/overview.dqld`))).toBe(true);
+    const dashboard = JSON.parse(readFileSync(join(root, `apps/${plan.appId}/dashboards/overview.dqld`), 'utf-8'));
+    expect(dashboard.layout.items).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ block: { blockId: 'Revenue by Month' } }),
+      ]),
+    );
   });
 
   it('creates and previews App-owned notebooks', () => {

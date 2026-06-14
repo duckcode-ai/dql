@@ -78,6 +78,7 @@ export interface PlanAppFromPromptInput {
   domain?: string;
   owner?: string;
   template?: AppPlanTemplateId;
+  preferredBlockIds?: string[];
   maxCertifiedTiles?: number;
 }
 
@@ -231,12 +232,21 @@ export function planAppFromPrompt(input: PlanAppFromPromptInput): AppPlan {
   const audience = inferAudience(prompt) ?? templateSpec.defaultAudience;
   const appName = titleForPrompt(prompt, templateSpec.name);
   const appId = suggestAppId(appName);
-  const certifiedNodes = findCertifiedBlockNodes(
+  const maxCertifiedTiles = input.maxCertifiedTiles ?? 4;
+  const preferredNodes = findPreferredCertifiedBlockNodes(
+    input.kg,
+    input.preferredBlockIds ?? [],
+  );
+  const matchedNodes = findCertifiedBlockNodes(
     input.kg,
     prompt,
     domain,
-    input.maxCertifiedTiles ?? 4,
+    Math.max(maxCertifiedTiles, preferredNodes.length),
   );
+  const certifiedNodes = mergeCertifiedBlockNodes(
+    preferredNodes,
+    matchedNodes,
+  ).slice(0, Math.max(maxCertifiedTiles, preferredNodes.length));
   const filters = inferFilters(prompt);
 
   const certifiedTiles = certifiedNodes.map((node, index) =>
@@ -612,6 +622,40 @@ function findCertifiedBlockNodes(
       return true;
     })
     .slice(0, limit);
+}
+
+function findPreferredCertifiedBlockNodes(
+  kg: KGStore,
+  blockIds: string[],
+): KGNode[] {
+  const seen = new Set<string>();
+  const nodes: KGNode[] = [];
+  for (const id of blockIds) {
+    const clean = id.trim();
+    if (!clean) continue;
+    const nodeId = clean.startsWith("block:") ? clean : `block:${clean}`;
+    if (seen.has(nodeId)) continue;
+    seen.add(nodeId);
+    const node = kg.getNode(nodeId);
+    if (node?.kind === "block" && node.status === "certified") {
+      nodes.push(node);
+    }
+  }
+  return nodes;
+}
+
+function mergeCertifiedBlockNodes(
+  preferredNodes: KGNode[],
+  matchedNodes: KGNode[],
+): KGNode[] {
+  const seen = new Set<string>();
+  const merged: KGNode[] = [];
+  for (const node of [...preferredNodes, ...matchedNodes]) {
+    if (seen.has(node.nodeId)) continue;
+    seen.add(node.nodeId);
+    merged.push(node);
+  }
+  return merged;
 }
 
 function tileFromCertifiedNode(node: KGNode, index: number): AppPlanTile {

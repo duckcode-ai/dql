@@ -15,6 +15,7 @@ import {
   LineChart,
   Plus,
   Search,
+  Send,
   ShieldCheck,
   Sparkles,
   Star,
@@ -168,7 +169,7 @@ export function AppsView(): JSX.Element {
       domain: builderDomain || undefined,
       purpose: builderPrompt,
       audience: 'stakeholder',
-      certifiedOnly: builderMode === 'classic',
+      certifiedOnly: true,
     }).then((blocks) => {
       if (!cancelled) setCatalog(blocks);
     }).finally(() => {
@@ -304,6 +305,7 @@ export function AppsView(): JSX.Element {
       owner: builderOwner.trim() || undefined,
       template: builderTemplate,
       force: false,
+      selectedBlockIds: Array.from(selectedBlocks),
     });
     setBuilderSaving(false);
     if (!result.ok) {
@@ -800,10 +802,17 @@ function AppCreateSurface({
           <span className="dql-app-persona"><b>CFO</b> CFO</span>
           {generated ? <button type="button" className="dql-apps-btn dql-apps-btn-line" onClick={onOpenGenerated}>Preview</button> : null}
           <button type="button" className="dql-apps-btn dql-apps-btn-primary" onClick={onBuild} disabled={saving}>
-            {saving ? 'Building...' : mode === 'ai' ? 'Generate app' : 'Create app'}
+            {saving ? 'Building...' : mode === 'ai' ? 'Send to AI' : 'Create app'}
           </button>
         </div>
       </div>
+
+      <BuilderSteps
+        mode={mode}
+        selectedCount={selectedBlocks.size}
+        generated={Boolean(generated)}
+        saving={saving}
+      />
 
       <div className={`dql-app-create-workspace ${mode === 'classic' ? 'classic' : 'ai'}`}>
         <section className="dql-app-panel dql-app-agent-panel">
@@ -812,8 +821,7 @@ function AppCreateSurface({
             <>
               <div className="dql-app-agent-scroll">
                 <AgentBubble>
-                  Describe the app you want. I will search certified blocks and business context first, generate an
-                  AppPlan, then write local files that stay reviewable in Git.
+                  Ask for the app outcome, select any required governed blocks, then send it to create a local AppPlan and files.
                 </AgentBubble>
                 {generated ? (
                   <AgentBubble tone="success">
@@ -822,6 +830,14 @@ function AppCreateSurface({
                     {generated.validation.draftTiles === 1 ? '' : 's'}.
                   </AgentBubble>
                 ) : null}
+                <BlockIndex
+                  title="Block index"
+                  subtitle={`${selectedBlocks.size} selected`}
+                  catalog={catalog}
+                  loading={catalogLoading}
+                  selectedBlocks={selectedBlocks}
+                  onToggleBlock={onToggleBlock}
+                />
               </div>
               <div className="dql-app-composer">
                 <div className="dql-app-suggestions">
@@ -847,10 +863,18 @@ function AppCreateSurface({
                     {templates.map((item) => <option key={item.id} value={item.id}>{item.title}</option>)}
                   </select>
                 </label>
+                <div className="dql-app-ai-send-row">
+                  <span>{selectedBlocks.size ? `${selectedBlocks.size} governed blocks attached` : 'Auto-match governed blocks'}</span>
+                  <button type="button" className="dql-apps-btn dql-apps-btn-primary" onClick={onBuild} disabled={saving}>
+                    <Send size={13} /> {saving ? 'Building...' : 'Send to AI'}
+                  </button>
+                </div>
               </div>
             </>
           ) : (
-            <ClassicPalette
+            <BlockIndex
+              title="Certified blocks"
+              subtitle={`${selectedBlocks.size} selected`}
               catalog={catalog}
               loading={catalogLoading}
               selectedBlocks={selectedBlocks}
@@ -878,7 +902,7 @@ function AppCreateSurface({
                 ) : (
                   <div className="dql-app-preview-empty">
                     <LayoutDashboard size={38} strokeWidth={1.4} />
-                    <div>Send a prompt or pick blocks. Tiles assemble here as DQL finds governed assets.</div>
+                    <div>Select blocks or send a prompt to compose the app.</div>
                   </div>
                 )}
               </div>
@@ -964,6 +988,50 @@ function AppWorkspaceSurface({
 }) {
   const certifiedCount = dashboardDoc?.dashboard.layout.items.filter((item) => Boolean(item.block)).length ?? 0;
   const draftCount = appDoc?.drafts?.length ?? 0;
+  const [shareStatus, setShareStatus] = useState<'idle' | 'copied' | 'downloaded' | 'ready'>('idle');
+  const [shareText, setShareText] = useState('');
+  const markAction = (status: 'copied' | 'downloaded' | 'ready') => {
+    setShareStatus(status);
+    if (status !== 'ready') window.setTimeout(() => setShareStatus('idle'), 1800);
+  };
+  const copyShareLink = async () => {
+    const text = buildAppShareText(app, appDoc, dashboardDoc);
+    setShareText(text);
+    let copied = false;
+    try {
+      if (typeof navigator !== 'undefined' && navigator.clipboard?.writeText) {
+        await navigator.clipboard.writeText(text);
+        copied = true;
+      }
+    } catch {
+      copied = false;
+    }
+    if (!copied) {
+      const area = document.createElement('textarea');
+      area.value = text;
+      area.style.position = 'fixed';
+      area.style.left = '-9999px';
+      document.body.appendChild(area);
+      area.focus();
+      area.select();
+      copied = document.execCommand('copy');
+      document.body.removeChild(area);
+    }
+    markAction(copied ? 'copied' : 'ready');
+  };
+  const downloadBrief = () => {
+    const markdown = buildAppBriefMarkdown(app, appDoc, dashboardDoc);
+    const blob = new Blob([markdown], { type: 'text/markdown;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement('a');
+    anchor.href = url;
+    anchor.download = `${app?.id ?? appDoc?.app.id ?? 'dql-app'}-brief.md`;
+    document.body.appendChild(anchor);
+    anchor.click();
+    document.body.removeChild(anchor);
+    URL.revokeObjectURL(url);
+    markAction('downloaded');
+  };
   return (
     <div className="dql-app-workspace">
       <div className="dql-app-view-topbar">
@@ -981,12 +1049,18 @@ function AppWorkspaceSurface({
         </div>
         <div className="dql-app-view-actions">
           <PersonaSwitcher app={appDoc?.app ?? null} />
-          <button type="button" className="dql-apps-btn dql-apps-btn-line" title="Share app">
-            <Share2 size={14} /> Share
+          <button type="button" className="dql-apps-btn dql-apps-btn-line" title="Copy local app handoff" onClick={() => void copyShareLink()}>
+            <Share2 size={14} /> {shareStatus === 'copied' ? 'Copied' : shareStatus === 'ready' ? 'Copy text' : 'Share'}
           </button>
-          <button type="button" className="dql-apps-btn dql-apps-btn-line" title="Export app brief">
-            <Download size={14} /> Brief
+          <button type="button" className="dql-apps-btn dql-apps-btn-line" title="Download app brief" onClick={downloadBrief}>
+            <Download size={14} /> {shareStatus === 'downloaded' ? 'Saved' : 'Brief'}
           </button>
+          {shareStatus === 'ready' ? (
+            <div className="dql-app-share-popover">
+              <b>Local handoff</b>
+              <textarea readOnly value={shareText} onFocus={(event) => event.currentTarget.select()} />
+            </div>
+          ) : null}
         </div>
       </div>
 
@@ -1079,31 +1153,93 @@ function AppWorkspaceSurface({
   );
 }
 
-function ClassicPalette({
+function BuilderSteps({
+  mode,
+  selectedCount,
+  generated,
+  saving,
+}: {
+  mode: BuilderMode;
+  selectedCount: number;
+  generated: boolean;
+  saving: boolean;
+}) {
+  const steps = [
+    { label: mode === 'ai' ? 'Prompt' : 'Name app', done: true },
+    { label: 'Attach blocks', done: selectedCount > 0 },
+    { label: mode === 'ai' ? 'AppPlan' : 'Dashboard', done: generated, active: saving || (!generated && mode === 'ai') },
+    { label: 'Open app', done: generated },
+  ];
+  return (
+    <div className="dql-app-builder-steps">
+      {steps.map((step, index) => (
+        <span key={step.label} className={`${step.done ? 'done' : ''} ${step.active ? 'active' : ''}`}>
+          <i>{index + 1}</i>
+          {step.label}
+        </span>
+      ))}
+    </div>
+  );
+}
+
+function BlockIndex({
+  title,
+  subtitle,
   catalog,
   loading,
   selectedBlocks,
   onToggleBlock,
 }: {
+  title: string;
+  subtitle: string;
   catalog: AppBlockRecommendation[];
   loading: boolean;
   selectedBlocks: Set<string>;
   onToggleBlock: (blockId: string) => void;
 }) {
+  const [query, setQuery] = useState('');
+  const blocks = useMemo(() => {
+    const needle = query.trim().toLowerCase();
+    if (!needle) return catalog;
+    return catalog.filter((block) => [
+      block.name,
+      block.domain,
+      block.status,
+      block.description,
+      block.owner ?? '',
+      ...(block.tags ?? []),
+    ].join(' ').toLowerCase().includes(needle));
+  }, [catalog, query]);
   return (
     <div className="dql-app-palette">
-      <div className="dql-app-palette-search"><Search size={14} /><span>Certified blocks</span></div>
+      <div className="dql-app-palette-title">
+        <span><Blocks size={14} /> {title}</span>
+        <b>{subtitle}</b>
+      </div>
+      <label className="dql-app-palette-search">
+        <Search size={14} />
+        <input
+          value={query}
+          onChange={(event) => setQuery(event.target.value)}
+          placeholder="Search blocks, domains, tags"
+        />
+      </label>
       {loading ? <EmptyPanel title="Loading blocks..." detail="Finding certified blocks for this domain." compact /> : null}
-      {catalog.slice(0, 18).map((block) => {
+      {!loading && blocks.length === 0 ? <EmptyPanel title="No blocks found." detail="Try another domain or search term." compact /> : null}
+      {blocks.slice(0, 24).map((block) => {
         const selected = selectedBlocks.has(block.id);
         return (
           <button key={block.id} type="button" className={selected ? 'selected' : ''} onClick={() => onToggleBlock(block.id)}>
             <span className="dql-app-palette-icon"><LineChart size={14} /></span>
-            <span><b>{block.name}</b><small>{block.domain} / {block.chartType ?? 'table'}</small></span>
-            <i>{selected ? 'added' : block.status}</i>
+            <span>
+              <b>{block.name}</b>
+              <small>{block.domain} / {block.chartType ?? 'table'}</small>
+            </span>
+            <i>{selected ? 'using' : block.status}</i>
           </button>
         );
       })}
+      {blocks.length > 24 ? <div className="dql-app-palette-more">{blocks.length - 24} more matches</div> : null}
     </div>
   );
 }
@@ -1405,6 +1541,70 @@ function Toggle({ label, checked, onChange }: { label: string; checked: boolean;
       <i /> {label}
     </button>
   );
+}
+
+function buildAppShareText(
+  app: AppSummary | null,
+  appDoc: AppDocumentSummary | null,
+  dashboardDoc: DashboardDocumentResponse | null,
+): string {
+  const appId = app?.id ?? appDoc?.app.id ?? 'app';
+  const appName = app?.name ?? appDoc?.app.name ?? 'DQL App';
+  const dashboard = dashboardDoc?.dashboard.metadata.title ?? appDoc?.dashboards[0]?.title ?? 'Overview';
+  const origin = typeof window !== 'undefined' ? window.location.origin : 'local DQL';
+  return [
+    appName,
+    `App ID: ${appId}`,
+    `Dashboard: ${dashboard}`,
+    `Domain: ${app?.domain ?? appDoc?.app.domain ?? dashboardDoc?.dashboard.metadata.domain ?? 'unknown'}`,
+    `Open locally: ${origin}`,
+  ].join('\n');
+}
+
+function buildAppBriefMarkdown(
+  app: AppSummary | null,
+  appDoc: AppDocumentSummary | null,
+  dashboardDoc: DashboardDocumentResponse | null,
+): string {
+  const appModel = appDoc?.app;
+  const title = app?.name ?? appModel?.name ?? 'DQL App';
+  const dashboards = appDoc?.dashboards ?? [];
+  const notebooks = appDoc?.notebooks ?? appModel?.notebooks ?? [];
+  const drafts = appDoc?.drafts ?? [];
+  const aiPins = appDoc?.aiPins ?? [];
+  const dashboard = dashboardDoc?.dashboard;
+  const blocks = dashboard?.layout.items
+    .map((item) => item.block ? (item.block.blockId ?? item.block.ref ?? item.title ?? item.i) : null)
+    .filter((value): value is string => Boolean(value)) ?? [];
+  const lines = [
+    `# ${title}`,
+    '',
+    app?.description ?? dashboard?.metadata.description ?? appModel?.description ?? 'Local DQL App brief.',
+    '',
+    '## App Metadata',
+    '',
+    `- App ID: ${app?.id ?? appModel?.id ?? 'unknown'}`,
+    `- Domain: ${app?.domain ?? appModel?.domain ?? dashboard?.metadata.domain ?? 'unknown'}`,
+    `- Lifecycle: ${app?.lifecycle ?? appModel?.lifecycle ?? dashboard?.metadata.lifecycle ?? 'draft'}`,
+    `- Audience: ${app?.audience ?? appModel?.audience ?? dashboard?.metadata.audience ?? 'stakeholder'}`,
+    `- Owners: ${(app?.owners ?? appModel?.owners ?? []).join(', ') || 'owner@local'}`,
+    '',
+    '## Pages',
+    '',
+    ...(dashboards.length ? dashboards.map((item) => `- ${item.title} (${item.itemCount} tiles)`) : ['- No dashboard pages found.']),
+    '',
+    '## Governed Blocks',
+    '',
+    ...(blocks.length ? blocks.map((name) => `- ${name}`) : ['- No block-backed tiles found.']),
+    '',
+    '## Supporting Assets',
+    '',
+    `- Notebooks: ${notebooks.length}`,
+    `- AI pins: ${aiPins.length}`,
+    `- Drafts needing review: ${drafts.length}`,
+    '',
+  ];
+  return `${lines.join('\n')}\n`;
 }
 
 function StatusSeal({ children, tone = 'certified' }: { children: ReactNode; tone?: 'certified' | 'draft' | 'agentic' }) {
@@ -1987,7 +2187,7 @@ const APP_STYLES = `
   grid-template-rows: auto auto 1fr;
 }
 
-.dql-app-create-shell { grid-template-rows: auto 1fr; overflow: hidden; }
+.dql-app-create-shell { grid-template-rows: auto auto 1fr; overflow: hidden; }
 
 .dql-app-buildbar,
 .dql-app-view-topbar {
@@ -2056,6 +2256,94 @@ const APP_STYLES = `
   display: flex;
   align-items: center;
   gap: 8px;
+}
+
+.dql-app-view-actions { position: relative; }
+
+.dql-app-share-popover {
+  position: absolute;
+  right: 0;
+  top: calc(100% + 8px);
+  z-index: 20;
+  width: min(340px, 80vw);
+  border: 1px solid var(--dql-app-line-2);
+  border-radius: 8px;
+  background: var(--dql-app-surface);
+  box-shadow: var(--dql-app-shadow);
+  padding: 10px;
+  display: grid;
+  gap: 7px;
+}
+
+.dql-app-share-popover b {
+  color: var(--dql-app-ink);
+  font: 850 12px var(--font-ui);
+}
+
+.dql-app-share-popover textarea {
+  width: 100%;
+  min-height: 92px;
+  resize: none;
+  border: 1px solid var(--dql-app-line);
+  border-radius: 7px;
+  background: var(--dql-app-control);
+  color: var(--dql-app-ink);
+  padding: 8px;
+  font: 11px/1.45 var(--font-mono);
+  box-sizing: border-box;
+}
+
+.dql-app-builder-steps {
+  min-height: 42px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 18px;
+  border-bottom: 1px solid var(--dql-app-line);
+  background: var(--dql-app-surface-muted);
+  overflow-x: auto;
+}
+
+.dql-app-builder-steps span {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  border: 1px solid var(--dql-app-line);
+  border-radius: 999px;
+  background: var(--dql-app-surface);
+  color: var(--dql-app-muted);
+  padding: 4px 10px 4px 5px;
+  white-space: nowrap;
+  font: 750 11px var(--font-ui);
+}
+
+.dql-app-builder-steps i {
+  width: 20px;
+  height: 20px;
+  border-radius: 999px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--dql-app-control);
+  color: var(--dql-app-faint);
+  font: 750 10px var(--font-mono);
+  font-style: normal;
+}
+
+.dql-app-builder-steps span.done {
+  color: var(--dql-app-ink);
+  border-color: rgba(22, 163, 74, 0.26);
+  background: var(--dql-app-green-soft);
+}
+
+.dql-app-builder-steps span.done i {
+  background: var(--dql-app-green);
+  color: #fff;
+}
+
+.dql-app-builder-steps span.active {
+  border-color: rgba(37, 99, 235, 0.34);
+  background: var(--dql-app-accent-soft);
 }
 
 .dql-app-persona {
@@ -2199,6 +2487,20 @@ const APP_STYLES = `
   font: 700 10px var(--font-mono);
   text-transform: uppercase;
   letter-spacing: 0;
+}
+
+.dql-app-ai-send-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  border-top: 1px solid var(--dql-app-line);
+  padding-top: 9px;
+}
+
+.dql-app-ai-send-row span {
+  color: var(--dql-app-muted);
+  font: 750 11px var(--font-ui);
 }
 
 .dql-app-preview-panel { background: var(--dql-app-canvas); }
@@ -2361,6 +2663,37 @@ const APP_STYLES = `
 }
 
 .dql-app-palette { flex: 1; min-height: 0; overflow: auto; padding: 12px; }
+.dql-app-agent-scroll .dql-app-palette {
+  margin-top: 12px;
+  border: 1px solid var(--dql-app-line);
+  border-radius: 8px;
+  background: var(--dql-app-surface-muted);
+  padding: 10px;
+  max-height: 360px;
+}
+
+.dql-app-palette-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.dql-app-palette-title span {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  color: var(--dql-app-ink);
+  font: 850 12px var(--font-ui);
+}
+
+.dql-app-palette-title b {
+  margin-left: auto;
+  color: var(--dql-app-faint);
+  font: 700 9.5px var(--font-mono);
+  text-transform: uppercase;
+}
+
 .dql-app-palette-search {
   display: flex;
   align-items: center;
@@ -2372,6 +2705,16 @@ const APP_STYLES = `
   padding: 8px 10px;
   margin-bottom: 10px;
   font-size: 12px;
+}
+
+.dql-app-palette-search input {
+  flex: 1;
+  min-width: 0;
+  border: 0;
+  outline: 0;
+  background: transparent;
+  color: var(--dql-app-ink);
+  font: 12px var(--font-ui);
 }
 
 .dql-app-palette button {
@@ -2406,6 +2749,12 @@ const APP_STYLES = `
 .dql-app-palette b { display: block; font: 700 11px var(--font-mono); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .dql-app-palette small { display: block; color: var(--dql-app-faint); font-size: 10px; }
 .dql-app-palette i { color: var(--dql-app-green); font: 700 9px var(--font-mono); text-transform: uppercase; font-style: normal; }
+.dql-app-palette-more {
+  color: var(--dql-app-faint);
+  text-align: center;
+  font: 700 10px var(--font-mono);
+  padding: 8px 0 2px;
+}
 
 .dql-app-view-topbar { position: sticky; top: 0; z-index: 4; }
 .dql-app-view-topbar {

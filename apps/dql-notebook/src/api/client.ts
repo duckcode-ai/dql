@@ -199,6 +199,7 @@ export interface GenerateAppRequest {
   owner?: string;
   template?: AppPlanTemplateId;
   force?: boolean;
+  selectedBlockIds?: string[];
 }
 
 export interface GeneratedAppPlan {

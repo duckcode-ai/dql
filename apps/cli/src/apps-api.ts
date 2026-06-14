@@ -585,6 +585,7 @@ interface AppGenerateRequest {
   owner?: string;
   template?: string;
   force?: boolean;
+  selectedBlockIds?: string[];
 }
 
 const APP_PLAN_TEMPLATE_IDS = new Set([
@@ -697,6 +698,7 @@ export async function generateAppPackage(
 > {
   const prompt = cleanString(input.prompt);
   if (!prompt) return { ok: false, error: 'prompt is required' };
+  const selectedBlockIds = unique((input.selectedBlockIds ?? []).map(cleanString).filter(Boolean));
 
   const {
     KGStore,
@@ -718,6 +720,7 @@ export async function generateAppPackage(
       domain: cleanString(input.domain) || undefined,
       owner: cleanString(input.owner) || undefined,
       template: APP_PLAN_TEMPLATE_IDS.has(requestedTemplate) ? requestedTemplate as never : undefined,
+      preferredBlockIds: selectedBlockIds,
     });
     const validation = validateAppPlan(plan, kg);
     const generated = generateAppFromPlan(projectRoot, plan, kg, {
