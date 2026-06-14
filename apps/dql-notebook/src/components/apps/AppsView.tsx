@@ -1071,36 +1071,24 @@ function AppWorkspaceSurface({
             <h1>{app?.name ?? 'App'}</h1>
             <p>{app?.description ?? dashboardDoc?.dashboard.metadata.description ?? 'Local DQL App'}</p>
           </div>
-          <div className="dql-app-title-actions">
-            {app ? (
-              <button type="button" onClick={() => onOpenLineageNode(`app:${app.id}`)} title="Open app lineage">
-                <GitBranch size={14} /> App
-              </button>
-            ) : null}
-            {app && dashboardDoc ? (
-              <button type="button" onClick={() => onOpenLineageNode(`dashboard:${app.id}/${dashboardDoc.dashboard.id}`)} title="Open dashboard lineage">
-                <Route size={14} /> Page
-              </button>
+          <div className="dql-app-nav-row">
+            <AppWorkspaceTabs
+              appDoc={appDoc}
+              section={section}
+              experience={experience}
+              onChange={onSectionChange}
+            />
+            {section === 'dashboards' && appDoc?.dashboards.length ? (
+              <DashboardPagePicker
+                dashboards={appDoc.dashboards}
+                activeDashboardId={dashboardDoc?.dashboard.id}
+                isBuild={experience === 'build'}
+                onOpen={onOpenDashboard}
+                onAdd={onAddPage}
+              />
             ) : null}
           </div>
         </div>
-
-        <AppWorkspaceTabs
-          appDoc={appDoc}
-          section={section}
-          experience={experience}
-          onChange={onSectionChange}
-        />
-
-        {section === 'dashboards' && appDoc?.dashboards.length ? (
-          <DashboardTabs
-            dashboards={appDoc.dashboards}
-            activeDashboardId={dashboardDoc?.dashboard.id}
-            isBuild={experience === 'build'}
-            onOpen={onOpenDashboard}
-            onAdd={onAddPage}
-          />
-        ) : null}
 
         <div className={`dql-app-view-layout ${explainOpen && section === 'dashboards' ? '' : 'no-explain'}`}>
           <div className="dql-app-main-column">
@@ -1247,7 +1235,7 @@ function AppWorkspaceTabs({
   );
 }
 
-function DashboardTabs({
+function DashboardPagePicker({
   dashboards,
   activeDashboardId,
   isBuild,
@@ -1260,22 +1248,27 @@ function DashboardTabs({
   onOpen: (dashboardId: string) => void;
   onAdd: () => void;
 }) {
+  const activeDashboard = dashboards.find((dashboard) => dashboard.id === activeDashboardId) ?? dashboards[0];
   return (
-    <nav className="dql-app-dashboard-tabs" aria-label="Dashboard pages">
-      {dashboards.map((dashboard) => (
-        <button
-          key={dashboard.id}
-          className={dashboard.id === activeDashboardId ? 'on' : ''}
-          onClick={() => onOpen(dashboard.id)}
-          title={dashboard.title}
-        >
-          <LineChart size={14} />
-          <span className="dql-app-dashboard-label">{dashboard.title}</span>
-          <b>{dashboard.itemCount}</b>
+    <div className="dql-app-page-picker" aria-label="Dashboard page">
+      <span><LineChart size={14} /> Page</span>
+      <select
+        value={activeDashboard?.id ?? ''}
+        onChange={(event) => onOpen(event.target.value)}
+        title={activeDashboard?.title ?? 'Dashboard page'}
+      >
+        {dashboards.map((dashboard) => (
+          <option key={dashboard.id} value={dashboard.id}>
+            {dashboard.title} ({dashboard.itemCount})
+          </option>
+        ))}
+      </select>
+      {isBuild ? (
+        <button type="button" onClick={onAdd} title="Add dashboard page">
+          <Plus size={14} />
         </button>
-      ))}
-      {isBuild ? <button type="button" className="add" onClick={onAdd}><Plus size={14} /></button> : null}
-    </nav>
+      ) : null}
+    </div>
   );
 }
 
@@ -2974,20 +2967,20 @@ const APP_STYLES = `
   z-index: 1;
   width: min(1560px, calc(100% - 40px));
   margin: 0 auto;
-  padding: 16px 0 60px;
+  padding: 12px 0 60px;
 }
 
 .dql-app-title-row {
   display: flex;
   align-items: flex-end;
   justify-content: space-between;
-  gap: 12px;
-  margin-bottom: 10px;
+  gap: 18px;
+  margin-bottom: 12px;
   flex-wrap: wrap;
 }
 
 .dql-app-title-copy {
-  flex: 1;
+  flex: 1 1 420px;
   min-width: 0;
 }
 
@@ -3009,7 +3002,7 @@ const APP_STYLES = `
 
 .dql-app-title-row h1 {
   margin: 0;
-  font-size: 28px;
+  font-size: 26px;
   line-height: 1.1;
   font-weight: 820;
 }
@@ -3022,47 +3015,46 @@ const APP_STYLES = `
   max-width: 720px;
 }
 
-.dql-app-title-actions {
-  display: inline-flex;
+.dql-app-nav-row {
+  display: flex;
   align-items: center;
-  gap: 6px;
+  justify-content: flex-end;
+  gap: 8px;
   flex-wrap: wrap;
-}
-
-.dql-app-title-actions button {
-  height: 30px;
-  border: 1px solid var(--dql-app-line);
-  border-radius: 8px;
-  background: var(--dql-app-surface);
-  color: var(--dql-app-muted);
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  padding: 0 9px;
-  cursor: pointer;
-  font: 800 11px var(--font-ui);
-}
-
-.dql-app-title-actions button:hover {
-  color: var(--dql-app-accent);
-  border-color: rgba(79, 99, 215, 0.34);
-  background: var(--dql-app-accent-soft);
+  min-width: 0;
 }
 
 .dql-app-section-tabs,
-.dql-app-dashboard-tabs {
+.dql-app-page-picker {
   display: flex;
   align-items: center;
   gap: 6px;
-  margin-bottom: 8px;
+}
+
+.dql-app-section-tabs {
   overflow-x: auto;
 }
 
 .dql-app-section-tabs button,
-.dql-app-dashboard-tabs button {
+.dql-app-page-picker {
   border: 1px solid var(--dql-app-line);
   border-radius: 8px;
   background: var(--dql-app-surface);
+  color: var(--dql-app-muted);
+  min-height: 32px;
+  display: inline-flex;
+  align-items: center;
+  font: 750 12px var(--font-ui);
+}
+
+.dql-app-section-tabs {
+  gap: 6px;
+}
+
+.dql-app-section-tabs button {
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
   color: var(--dql-app-muted);
   min-height: 32px;
   padding: 6px 9px;
@@ -3094,21 +3086,59 @@ const APP_STYLES = `
 }
 
 .dql-app-section-tabs button.on,
-.dql-app-dashboard-tabs button.on {
+.dql-app-section-tabs button:hover {
   color: var(--dql-app-ink);
-  border-color: var(--dql-app-accent);
   background: var(--dql-app-accent-soft);
 }
 
-.dql-app-section-tabs b,
-.dql-app-dashboard-tabs b {
+.dql-app-section-tabs button.on {
+  box-shadow: inset 0 0 0 1px var(--dql-app-accent);
+}
+
+.dql-app-section-tabs b {
   color: var(--dql-app-accent);
   font-family: var(--font-mono);
   font-size: 10px;
 }
 
-.dql-app-dashboard-tabs button {
-  max-width: 380px;
+.dql-app-page-picker {
+  padding: 0 5px 0 10px;
+  white-space: nowrap;
+  max-width: min(440px, 100%);
+}
+
+.dql-app-page-picker > span {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--dql-app-faint);
+  font: 800 10px var(--font-mono);
+  text-transform: uppercase;
+}
+
+.dql-app-page-picker select {
+  min-width: 210px;
+  max-width: 310px;
+  height: 30px;
+  border: 0;
+  outline: 0;
+  background: transparent;
+  color: var(--dql-app-ink);
+  font: 800 12px var(--font-ui);
+  text-overflow: ellipsis;
+}
+
+.dql-app-page-picker button {
+  width: 26px;
+  height: 26px;
+  border: 0;
+  border-radius: 6px;
+  background: var(--dql-app-accent-soft);
+  color: var(--dql-app-accent);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
 }
 
 .dql-app-dashboard-label {
@@ -3117,8 +3147,6 @@ const APP_STYLES = `
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-
-.dql-app-dashboard-tabs .add { width: 34px; justify-content: center; color: var(--dql-app-accent); }
 .dql-app-view-layout {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
@@ -3561,7 +3589,8 @@ const APP_STYLES = `
   .dql-app-mode-seg button { flex: 1; }
   .dql-app-build-actions,
   .dql-app-view-actions { margin-left: 0; width: 100%; flex-wrap: wrap; }
-  .dql-app-title-actions { width: 100%; }
+  .dql-app-nav-row { width: 100%; justify-content: flex-start; }
+  .dql-app-page-picker select { min-width: 0; max-width: 100%; }
   .dql-app-preview-tile,
   .dql-app-preview-tile.wide { grid-column: 1 / -1; }
   .dql-app-storyline {
