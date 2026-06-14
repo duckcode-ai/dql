@@ -777,6 +777,8 @@ function AppCreateSurface({
   onOpenGenerated: () => void;
 }) {
   const selected = catalog.filter((block) => selectedBlocks.has(block.id));
+  const contextTemplateLabel = templates.find((item) => item.id === template)?.title ?? 'Infer template';
+  const contextDomainLabel = domain.trim() || 'Auto domain';
   const plan = generated?.plan ?? planFromSelection(appName, prompt, domain, owner, template, selected);
   const validation = generated?.validation ?? {
     ok: selected.length > 0,
@@ -847,17 +849,24 @@ function AppCreateSurface({
                   ))}
                 </div>
                 <textarea value={prompt} onChange={(event) => onPromptChange(event.target.value)} rows={4} />
-                <div className="dql-app-form-grid two">
-                  <label>Domain<input value={domain} onChange={(event) => onDomainChange(event.target.value)} /></label>
-                  <label>Owner<input value={owner} onChange={(event) => onOwnerChange(event.target.value)} /></label>
-                </div>
-                <label className="dql-app-select-label">
-                  Template
-                  <select value={template ?? ''} onChange={(event) => onTemplateChange(event.target.value ? event.target.value as AppPlanTemplateId : undefined)}>
-                    <option value="">Infer from prompt</option>
-                    {templates.map((item) => <option key={item.id} value={item.id}>{item.title}</option>)}
-                  </select>
-                </label>
+                <details className="dql-app-ai-context">
+                  <summary>
+                    <span>Context</span>
+                    <b>{contextDomainLabel} / {contextTemplateLabel}</b>
+                    <ChevronDown size={14} />
+                  </summary>
+                  <div className="dql-app-ai-context-grid">
+                    <label>Domain<input value={domain} onChange={(event) => onDomainChange(event.target.value)} /></label>
+                    <label>
+                      Template
+                      <select value={template ?? ''} onChange={(event) => onTemplateChange(event.target.value ? event.target.value as AppPlanTemplateId : undefined)}>
+                        <option value="">Infer from prompt</option>
+                        {templates.map((item) => <option key={item.id} value={item.id}>{item.title}</option>)}
+                      </select>
+                    </label>
+                    <label>Owner<input value={owner} onChange={(event) => onOwnerChange(event.target.value)} /></label>
+                  </div>
+                </details>
                 <div className="dql-app-ai-send-row">
                   <span>Auto-match certified context</span>
                   <button type="button" className="dql-apps-btn dql-apps-btn-primary" onClick={onBuild} disabled={saving}>
@@ -897,7 +906,7 @@ function AppCreateSurface({
                 ) : (
                   <div className="dql-app-preview-empty">
                     <LayoutDashboard size={38} strokeWidth={1.4} />
-                    <div>Select blocks or send a prompt to compose the app.</div>
+                    <div>{mode === 'ai' ? 'Describe the app outcome, then send it to AI.' : 'Select blocks to compose the app.'}</div>
                   </div>
                 )}
               </div>
@@ -2475,7 +2484,7 @@ const APP_STYLES = `
 
 .dql-app-composer textarea { resize: vertical; min-height: 92px; line-height: 1.45; }
 .dql-app-composer.ai-clean textarea {
-  min-height: 138px;
+  min-height: 112px;
   background: var(--dql-app-surface);
   border-color: var(--dql-app-line-2);
   font-size: 13px;
@@ -2490,6 +2499,78 @@ const APP_STYLES = `
   font: 700 10px var(--font-mono);
   text-transform: uppercase;
   letter-spacing: 0;
+}
+
+.dql-app-ai-context {
+  border: 1px solid var(--dql-app-line);
+  border-radius: 8px;
+  background: var(--dql-app-surface-muted);
+  overflow: hidden;
+}
+
+.dql-app-ai-context summary {
+  min-height: 36px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 10px;
+  cursor: pointer;
+  list-style: none;
+}
+
+.dql-app-ai-context summary::-webkit-details-marker { display: none; }
+
+.dql-app-ai-context summary span {
+  color: var(--dql-app-muted);
+  font: 800 10px var(--font-mono);
+  text-transform: uppercase;
+}
+
+.dql-app-ai-context summary b {
+  margin-left: auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--dql-app-ink);
+  font: 750 11.5px var(--font-ui);
+}
+
+.dql-app-ai-context summary svg {
+  flex: 0 0 auto;
+  color: var(--dql-app-faint);
+  transition: transform 140ms ease;
+}
+
+.dql-app-ai-context[open] summary svg { transform: rotate(180deg); }
+
+.dql-app-ai-context-grid {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 8px;
+  padding: 10px;
+  border-top: 1px solid var(--dql-app-line);
+}
+
+.dql-app-ai-context-grid label {
+  display: grid;
+  gap: 5px;
+  color: var(--dql-app-muted);
+  font: 700 10px var(--font-mono);
+  text-transform: uppercase;
+}
+
+.dql-app-ai-context-grid input,
+.dql-app-ai-context-grid select {
+  width: 100%;
+  height: 34px;
+  border: 1px solid var(--dql-app-line);
+  border-radius: 7px;
+  background: var(--dql-app-surface);
+  color: var(--dql-app-ink);
+  outline: 0;
+  padding: 0 10px;
+  font: 12.5px var(--font-ui);
 }
 
 .dql-app-ai-send-row {
@@ -3108,7 +3189,16 @@ const APP_STYLES = `
   .dql-apps-grid,
   .dql-apps-startgrid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .dql-app-create-workspace,
-  .dql-app-create-workspace.classic { grid-template-columns: 1fr; }
+  .dql-app-create-workspace.classic {
+    grid-template-columns: 1fr;
+    align-content: start;
+    overflow: auto;
+  }
+  .dql-app-create-workspace .dql-app-panel {
+    min-height: auto;
+    border-right: 0;
+    border-bottom: 1px solid var(--dql-app-line);
+  }
   .dql-app-filterbar {
     flex-wrap: nowrap;
     gap: 6px;
