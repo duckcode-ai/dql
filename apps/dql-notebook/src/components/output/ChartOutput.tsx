@@ -1022,13 +1022,13 @@ function KpiCard({ result, themeMode, chartConfig }: { result: QueryResult; them
   const displayVal = formatKpiValue(row[yCol], chartConfig?.format);
 
   return (
-    <div style={{ containerType: 'inline-size', display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', width: '100%', height: '100%', padding: '12px 14px', boxSizing: 'border-box', minWidth: 0 }}>
+    <div style={{ containerType: 'inline-size', display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', width: '100%', height: '100%', padding: '8px 4px', boxSizing: 'border-box', minWidth: 0 }}>
       <span
         title={String(row[yCol])}
         style={{
-          // Scale the hero figure to the tile width so it never clips: ~16% of
-          // container width, clamped to a sensible min/max.
-          fontSize: 'clamp(18px, 15cqw, 40px)', fontWeight: 750, fontFamily: t.fontMono, color: palette[0] ?? t.accent,
+          // Scale the hero figure to the tile width so it stays readable in
+          // compact app-builder tiles.
+          fontSize: 'clamp(14px, 13cqw, 40px)', fontWeight: 750, fontFamily: t.fontMono, color: palette[0] ?? t.accent,
           lineHeight: 1.1, maxWidth: '100%', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
         }}
       >{displayVal}</span>

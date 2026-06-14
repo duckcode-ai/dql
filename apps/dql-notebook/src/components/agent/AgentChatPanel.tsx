@@ -23,6 +23,7 @@ export function AgentChatPanel({
   addToAppTarget,
   conversationTarget,
   onConversationUpdated,
+  initialInput,
   expanded = false,
   onToggleExpanded,
   onClose,
@@ -35,19 +36,25 @@ export function AgentChatPanel({
   addToAppTarget?: { appId: string; dashboardId: string };
   conversationTarget?: { appId: string; dashboardId?: string; notebookPath?: string };
   onConversationUpdated?: () => void;
+  initialInput?: string;
   expanded?: boolean;
   onToggleExpanded?: () => void;
   onClose?: () => void;
 }) {
   const t = themes[themeMode];
   const [messages, setMessages] = useState<LocalMessage[]>([]);
-  const [input, setInput] = useState('');
+  const [input, setInput] = useState(initialInput ?? '');
   const [running, setRunning] = useState(false);
   const [liveText, setLiveText] = useState('');
   const [liveEvents, setLiveEvents] = useState<AgentTurn[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [conversationId, setConversationId] = useState<string | null>(null);
   const abortRef = useRef<AbortController | null>(null);
+
+  React.useEffect(() => {
+    if (!initialInput || running) return;
+    setInput((current) => current || initialInput);
+  }, [initialInput, running]);
 
   const send = async () => {
     const text = input.trim();

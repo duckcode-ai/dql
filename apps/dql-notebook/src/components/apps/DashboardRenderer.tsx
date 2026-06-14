@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { CSSProperties, PointerEvent as ReactPointerEvent } from 'react';
-import { Bot, GitBranch, GripVertical, SlidersHorizontal, Trash2 } from 'lucide-react';
+import { Bot, GitBranch, GripVertical, Maximize2, Plus, SlidersHorizontal, Trash2 } from 'lucide-react';
 import { api, type AppBlockRecommendation, type DashboardDocumentResponse, type DashboardRunResponse } from '../../api/client';
 import { useNotebook } from '../../store/NotebookStore';
 import type { CellChartConfig, ThemeMode } from '../../store/types';
@@ -39,12 +39,18 @@ export function DashboardRenderer({
   variables,
   editable = false,
   onDashboardChanged,
+  selectedBlockId,
+  onBlockFocus,
+  onOpenLineageNode,
 }: {
   appId: string;
   dashboard: DashboardDocumentResponse['dashboard'];
   variables?: Record<string, unknown>;
   editable?: boolean;
   onDashboardChanged?: (dashboard: DashboardDocumentResponse['dashboard']) => void;
+  selectedBlockId?: string | null;
+  onBlockFocus?: (blockId: string) => void;
+  onOpenLineageNode?: (nodeId: string) => void;
 }): JSX.Element {
   const { state } = useNotebook();
   const [run, setRun] = useState<DashboardRunResponse | null>(null);
@@ -249,12 +255,20 @@ export function DashboardRenderer({
     }
   }, [appId, dashboard.id, dashboard.metadata.domain, lineage]);
 
+  const openLineage = useCallback(() => {
+    if (onOpenLineageNode) {
+      onOpenLineageNode(`dashboard:${appId}/${dashboard.id}`);
+      return;
+    }
+    void loadLineage();
+  }, [appId, dashboard.id, loadLineage, onOpenLineageNode]);
+
   return (
-    <div style={{ display: 'flex', gap: 16, minHeight: 0, alignItems: 'flex-start' }}>
+    <div style={{ display: 'block', minHeight: 0 }}>
       <div style={{ flex: 1, minWidth: 0 }}>
-      <div style={{ display: 'flex', alignItems: 'flex-start', gap: 12, marginBottom: 16 }}>
+      <div style={dashboardToolbarStyle}>
         <div style={{ flex: 1, minWidth: 0 }}>
-          <h2 style={{ margin: 0, fontSize: 20, lineHeight: 1.18, fontWeight: 760 }}>{dashboard.metadata.title}</h2>
+          <h2 style={{ margin: 0, fontSize: 20, lineHeight: 1.18, fontWeight: 780 }}>{dashboard.metadata.title}</h2>
         {dashboard.metadata.description ? (
           <div style={{ fontSize: 13, opacity: 0.72, marginTop: 4, maxWidth: 680, lineHeight: 1.4 }}>
             {dashboard.metadata.description}
@@ -265,6 +279,8 @@ export function DashboardRenderer({
           <AddTileMenu
             open={addMenuOpen}
             onToggle={() => setAddMenuOpen((value) => !value)}
+            buttonLabel="Add tile"
+            buttonStyle={primaryBuilderButtonStyle}
             onCertifiedBlock={() => {
               setAddMenuOpen(false);
               void openCatalog();
@@ -283,6 +299,9 @@ export function DashboardRenderer({
             }}
           />
         )}
+        {editable && dashboard.layout.items.length > 0 && (
+          <span style={dashboardEditStatusStyle}>{saving ? 'Saving...' : `${dashboard.layout.items.length} tiles`}</span>
+        )}
         <button
           type="button"
           onClick={() => {
@@ -294,17 +313,12 @@ export function DashboardRenderer({
           <Bot size={14} strokeWidth={2} />
           {chatOpen ? 'Hide AI' : 'Ask AI'}
         </button>
-        <button type="button" onClick={() => void loadLineage()} style={toolbarButtonStyle(lineageOpen)}>
+        <button type="button" onClick={openLineage} style={toolbarButtonStyle(false)} title="Open focused dashboard lineage">
           <GitBranch size={14} strokeWidth={2} />
           Lineage
         </button>
       </div>
-      {editable && (
-        <div style={{ marginBottom: 12, display: 'flex', gap: 8, alignItems: 'center', fontSize: 12, color: 'var(--color-text-secondary, rgba(0,0,0,0.64))' }}>
-          <span>{saving ? 'Saving layout...' : 'Edit layout'}</span>
-          <span>{dashboard.layout.items.length} tile{dashboard.layout.items.length === 1 ? '' : 's'}</span>
-        </div>
-      )}
+      {editable && <div style={dashboardEditHintStyle}>Drag tiles, select a block to research it, or use the tile controls for sizing and chart settings.</div>}
 
       {dashboard.layout.items.length === 0 ? (
         <div
@@ -370,6 +384,8 @@ export function DashboardRenderer({
               themeMode={state.themeMode}
               editable={editable}
               cols={cols}
+              selected={Boolean(getDashboardItemBlockId(item) && getDashboardItemBlockId(item) === selectedBlockId)}
+              onFocusBlock={onBlockFocus}
               onMove={(point) => void moveTileToPoint(item.i, point)}
               onPatch={(patch) => void patchTile(item.i, patch)}
             />
@@ -378,27 +394,14 @@ export function DashboardRenderer({
       )}
       </div>
 
-      {lineageOpen && (
+      {lineageOpen && !onOpenLineageNode && (
         <aside style={{ width: 340, minWidth: 300, maxWidth: '34vw', border: '1px solid var(--border-color, rgba(0,0,0,0.08))', borderRadius: 8, overflow: 'auto', alignSelf: 'flex-start', height: SIDE_PANEL_HEIGHT, position: 'sticky', top: 12, padding: 12 }}>
           <ScopedLineagePanel lineage={lineage} />
         </aside>
       )}
 
       {chatOpen && (
-        <aside
-          style={{
-            width: chatExpanded ? 'min(720px, 52vw)' : 390,
-            minWidth: chatExpanded ? 520 : 340,
-            maxWidth: chatExpanded ? '58vw' : '40vw',
-            border: '1px solid var(--border-color, rgba(0,0,0,0.08))',
-            borderRadius: 8,
-            overflow: 'hidden',
-            alignSelf: 'flex-start',
-            height: SIDE_PANEL_HEIGHT,
-            position: 'sticky',
-            top: 12,
-          }}
-        >
+        <aside style={dashboardChatDrawerStyle(chatExpanded)}>
           <AgentChatPanel
             title="Dashboard AI"
             scopeHint="Scoped to this App dashboard first"
@@ -450,6 +453,8 @@ function DashboardTile({
   themeMode,
   editable,
   cols,
+  selected,
+  onFocusBlock,
   onMove,
   onPatch,
 }: {
@@ -460,17 +465,24 @@ function DashboardTile({
   themeMode: ThemeMode;
   editable: boolean;
   cols: number;
+  selected?: boolean;
+  onFocusBlock?: (blockId: string) => void;
   onMove: (point: { clientX: number; clientY: number }) => void;
   onPatch: (patch: Partial<DashboardDocumentResponse['dashboard']['layout']['items'][number]> | null) => void;
 }): JSX.Element {
   const tileRef = useRef<HTMLDivElement | null>(null);
   const [dragOffset, setDragOffset] = useState<{ x: number; y: number } | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
-  const blockRef = item.block
-    ? ('blockId' in item.block ? `block:${item.block.blockId}` : item.block.ref ?? '(unknown)')
+  const blockId = getDashboardItemBlockId(item);
+  const blockRef = blockId
+    ? `block:${blockId}`
     : item.aiPin
       ? `aiPin:${item.aiPin.id}`
       : 'text';
+  const vizType = normalizeViz(String(item.viz.type ?? 'table'));
+  const isCompactMetric = item.h <= 2 && (vizType === 'single_value' || vizType === 'kpi' || vizType === 'gauge');
+  const [hovered, setHovered] = useState(false);
+  const showEditChrome = editable && (hovered || selected || settingsOpen);
   const startDrag = (event: ReactPointerEvent<HTMLElement>) => {
     const tileEl = tileRef.current;
     if (!tileEl) return;
@@ -506,6 +518,11 @@ function DashboardTile({
   return (
     <div
       ref={tileRef}
+      onMouseEnter={() => setHovered(true)}
+      onMouseLeave={() => setHovered(false)}
+      onClick={() => {
+        if (blockId) onFocusBlock?.(blockId);
+      }}
       style={{
         gridColumn: `${item.x + 1} / span ${item.w}`,
         gridRow: `${item.y + 1} / span ${item.h}`,
@@ -514,19 +531,32 @@ function DashboardTile({
         zIndex: dragOffset ? 20 : undefined,
         position: 'relative',
         background: 'var(--dql-app-surface, var(--surface, rgba(0,0,0,0.02)))',
-        border: '1px solid var(--dql-app-line, var(--border-color, rgba(0,0,0,0.08)))',
+        border: selected
+          ? '1.5px solid var(--dql-app-accent, var(--accent, #4f46e5))'
+          : '1px solid var(--dql-app-line, var(--border-color, rgba(0,0,0,0.08)))',
         borderRadius: 10,
-        padding: 14,
+        padding: isCompactMetric ? 12 : 14,
         display: 'flex',
         flexDirection: 'column',
-        gap: 6,
+        gap: isCompactMetric ? 4 : 6,
         minHeight: 0,
-        overflow: 'auto',
+        overflow: 'visible',
+        boxShadow: selected ? '0 0 0 3px var(--dql-app-accent-soft, rgba(79,70,229,0.12))' : undefined,
+        cursor: blockId ? 'pointer' : undefined,
       }}
     >
-      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8 }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 7, minWidth: 0 }}>
-          {editable ? (
+      {editable ? (
+        <div
+          style={{
+            position: 'absolute',
+            top: 10,
+            left: 10,
+            zIndex: 3,
+            opacity: showEditChrome ? 1 : 0,
+            pointerEvents: showEditChrome ? 'auto' : 'none',
+            transition: 'opacity 120ms ease',
+          }}
+        >
             <button
               type="button"
               title="Drag to move tile"
@@ -535,22 +565,36 @@ function DashboardTile({
             >
               <GripVertical size={14} strokeWidth={2.2} />
             </button>
-          ) : null}
-          <div style={{ fontSize: 13, fontWeight: 720, lineHeight: 1.25, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{item.title ?? blockRef}</div>
         </div>
-        {editable && (
-          <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
-            <span
-              style={{
-                fontSize: 10,
-                padding: '2px 8px',
-                borderRadius: 999,
-                background: 'var(--surface-hover, rgba(0,0,0,0.06))',
-                opacity: 0.85,
-              }}
-            >
-              {item.viz.type}
-            </span>
+      ) : null}
+      {editable ? (
+          <div
+            style={{
+              position: 'absolute',
+              top: 10,
+              right: 10,
+              zIndex: 4,
+              display: 'flex',
+              alignItems: 'center',
+              gap: 4,
+              opacity: showEditChrome ? 1 : 0,
+              pointerEvents: showEditChrome ? 'auto' : 'none',
+              transition: 'opacity 120ms ease',
+            }}
+          >
+            {!isCompactMetric ? (
+              <span
+                style={{
+                  fontSize: 10,
+                  padding: '2px 8px',
+                  borderRadius: 999,
+                  background: 'var(--surface-hover, rgba(0,0,0,0.06))',
+                  opacity: 0.85,
+                }}
+              >
+                {item.viz.type}
+              </span>
+            ) : null}
             <TileEditorControls
               item={item}
               cols={cols}
@@ -559,9 +603,22 @@ function DashboardTile({
               onPatch={onPatch}
             />
           </div>
-        )}
+        ) : null}
+      <div
+        style={{
+          minHeight: isCompactMetric ? 22 : 26,
+          paddingLeft: showEditChrome ? 30 : 0,
+          paddingRight: showEditChrome ? (isCompactMetric ? 82 : 134) : 0,
+          transition: 'padding 120ms ease',
+        }}
+      >
+        <div style={{ fontSize: isCompactMetric ? 12 : 13, fontWeight: 720, lineHeight: 1.25, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+          {item.title ?? blockRef}
+        </div>
+        {!isCompactMetric ? (
+          <div style={{ marginTop: 5, fontSize: 10.5, opacity: 0.58, fontFamily: 'var(--font-mono, monospace)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{blockRef}</div>
+        ) : null}
       </div>
-      <div style={{ fontSize: 10.5, opacity: 0.58, fontFamily: 'var(--font-mono, monospace)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{blockRef}</div>
       {editable && settingsOpen ? (
         <TileSettingsPanel
           item={item}
@@ -574,10 +631,11 @@ function DashboardTile({
         style={{
           flex: 1,
           minHeight: 0,
-          overflow: 'auto',
+          overflow: 'hidden',
           display: 'flex',
           alignItems: 'center',
           justifyContent: 'center',
+          marginTop: isCompactMetric ? 0 : 2,
           fontSize: 12,
           opacity: tile?.status === 'ok' ? 1 : 0.7,
           fontStyle: tile?.status === 'ok' ? 'normal' : 'italic',
@@ -647,9 +705,9 @@ function TileEditorControls({
           type="button"
           title="Choose tile size"
           onClick={() => setSizeMenuOpen((value) => !value)}
-          style={tileSizeButtonStyle}
+          style={iconTileButtonStyle}
         >
-          Size
+          <Maximize2 size={13} strokeWidth={2} />
         </button>
         {sizeMenuOpen ? (
           <TileSizeMenu
@@ -870,6 +928,7 @@ function AddTileMenu({
   return (
     <div style={{ position: 'relative', display: 'inline-flex' }}>
       <button type="button" onClick={onToggle} style={buttonStyle ?? toolbarButtonStyle(open)}>
+        {buttonLabel === 'Add tile' ? <Plus size={14} strokeWidth={2} /> : null}
         {buttonLabel}
       </button>
       {open && (
@@ -1150,6 +1209,11 @@ function LineageStat({ label, value }: { label: string; value: number }) {
   );
 }
 
+function getDashboardItemBlockId(item: DashboardLayoutItem): string | null {
+  if (!item.block) return null;
+  return 'blockId' in item.block ? item.block.blockId ?? null : item.block.ref ?? null;
+}
+
 function mergeTileChartConfig(
   item: DashboardDocumentResponse['dashboard']['layout']['items'][number],
   base?: CellChartConfig,
@@ -1201,6 +1265,53 @@ function toolbarButtonStyle(active: boolean): CSSProperties {
     alignItems: 'center',
     gap: 6,
     minHeight: 32,
+  };
+}
+
+const dashboardToolbarStyle: CSSProperties = {
+  display: 'flex',
+  alignItems: 'center',
+  gap: 8,
+  marginBottom: 10,
+  padding: '10px 12px',
+  border: '1px solid var(--dql-app-line, var(--border-color, rgba(0,0,0,0.08)))',
+  borderRadius: 10,
+  background: 'var(--dql-app-surface, var(--surface, rgba(255,255,255,0.82)))',
+  boxShadow: '0 1px 2px rgba(15,23,42,0.04)',
+};
+
+const dashboardEditStatusStyle: CSSProperties = {
+  border: '1px solid var(--dql-app-line, var(--border-color, rgba(0,0,0,0.1)))',
+  borderRadius: 999,
+  background: 'var(--dql-app-control, rgba(0,0,0,0.04))',
+  color: 'var(--dql-app-muted, rgba(0,0,0,0.62))',
+  padding: '5px 9px',
+  fontSize: 11,
+  fontWeight: 750,
+  whiteSpace: 'nowrap',
+};
+
+const dashboardEditHintStyle: CSSProperties = {
+  marginBottom: 12,
+  color: 'var(--dql-app-muted, var(--color-text-secondary, rgba(0,0,0,0.64)))',
+  fontSize: 12,
+  lineHeight: 1.45,
+};
+
+function dashboardChatDrawerStyle(expanded: boolean): CSSProperties {
+  return {
+    position: 'fixed',
+    right: 24,
+    top: 76,
+    bottom: 24,
+    zIndex: 70,
+    width: expanded ? 'min(760px, calc(100vw - 96px))' : 'min(420px, calc(100vw - 64px))',
+    minWidth: 0,
+    border: '1px solid var(--dql-app-line-2, var(--border-color, rgba(0,0,0,0.12)))',
+    borderRadius: 10,
+    overflow: 'hidden',
+    boxShadow: '0 18px 60px rgba(15,23,42,0.22)',
+    background: 'var(--dql-app-surface, var(--color-bg, #fff))',
   };
 }
 
@@ -1315,18 +1426,6 @@ const dragHandleButtonStyle: CSSProperties = {
   alignItems: 'center',
   justifyContent: 'center',
   flexShrink: 0,
-};
-
-const tileSizeButtonStyle: CSSProperties = {
-  height: 24,
-  borderRadius: 5,
-  border: '1px solid var(--border-color, rgba(0,0,0,0.12))',
-  background: 'var(--surface, rgba(255,255,255,0.72))',
-  color: 'inherit',
-  cursor: 'pointer',
-  padding: '0 8px',
-  fontSize: 11,
-  fontWeight: 700,
 };
 
 const tileSizeMenuStyle: CSSProperties = {

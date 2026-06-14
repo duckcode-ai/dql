@@ -10,9 +10,14 @@ import {
   Download,
   Eye,
   FileText,
+  ExternalLink,
+  GitBranch,
   LayoutDashboard,
   LineChart,
+  ListTree,
+  MessageSquare,
   Plus,
+  Route,
   Search,
   Send,
   ShieldCheck,
@@ -31,6 +36,8 @@ import {
   type GeneratedAppPlan,
 } from '../../api/client';
 import type { AppSummary } from '../../store/types';
+import type { ThemeMode } from '../../themes/notebook-theme';
+import { AgentChatPanel } from '../agent/AgentChatPanel';
 import { DashboardRenderer } from './DashboardRenderer';
 import { PersonaSwitcher } from './PersonaSwitcher';
 
@@ -436,6 +443,7 @@ export function AppsView(): JSX.Element {
           segment={segment}
           region={region}
           smartView={smartView}
+          themeMode={state.themeMode}
           variables={dashboardVariables}
           onBack={() => setSurface('library')}
           onExperienceChange={setExperience}
@@ -451,6 +459,7 @@ export function AppsView(): JSX.Element {
             setDashboardDoc((current) => current ? { ...current, dashboard } : current);
             void refreshApps(state.activeAppId, dashboard.id, 'workspace');
           }}
+          onOpenLineageNode={(nodeId) => dispatch({ type: 'OPEN_LINEAGE_DETAIL', nodeId })}
         />
       )}
       {addPageOpen && (
@@ -889,6 +898,7 @@ function AppWorkspaceSurface({
   segment,
   region,
   smartView,
+  themeMode,
   variables,
   onBack,
   onExperienceChange,
@@ -901,6 +911,7 @@ function AppWorkspaceSurface({
   onAddPage,
   onOpenDashboard,
   onDashboardChanged,
+  onOpenLineageNode,
 }: {
   app: AppSummary | null;
   appDoc: AppDocumentSummary | null;
@@ -913,6 +924,7 @@ function AppWorkspaceSurface({
   segment: string;
   region: string;
   smartView: boolean;
+  themeMode: ThemeMode;
   variables: Record<string, unknown>;
   onBack: () => void;
   onExperienceChange: (experience: AppExperience) => void;
@@ -925,11 +937,29 @@ function AppWorkspaceSurface({
   onAddPage: () => void;
   onOpenDashboard: (dashboardId: string) => void;
   onDashboardChanged: (dashboard: DashboardDocumentResponse['dashboard']) => void;
+  onOpenLineageNode: (nodeId: string) => void;
 }) {
   const certifiedCount = dashboardDoc?.dashboard.layout.items.filter((item) => Boolean(item.block)).length ?? 0;
   const draftCount = appDoc?.drafts?.length ?? 0;
+  const dashboardBlockIds = useMemo(() => {
+    return dashboardDoc?.dashboard.layout.items
+      .map((item) => getDashboardItemBlockId(item))
+      .filter((value): value is string => Boolean(value)) ?? [];
+  }, [dashboardDoc]);
+  const dashboardBlockKey = dashboardBlockIds.join('|');
+  const [selectedBlockId, setSelectedBlockId] = useState<string | null>(dashboardBlockIds[0] ?? null);
   const [shareStatus, setShareStatus] = useState<'idle' | 'copied' | 'downloaded' | 'ready'>('idle');
   const [shareText, setShareText] = useState('');
+
+  useEffect(() => {
+    if (dashboardBlockIds.length === 0) {
+      if (selectedBlockId !== null) setSelectedBlockId(null);
+      return;
+    }
+    if (!selectedBlockId || !dashboardBlockIds.includes(selectedBlockId)) {
+      setSelectedBlockId(dashboardBlockIds[0]);
+    }
+  }, [dashboardBlockIds, dashboardBlockKey, selectedBlockId]);
   const markAction = (status: 'copied' | 'downloaded' | 'ready') => {
     setShareStatus(status);
     if (status !== 'ready') window.setTimeout(() => setShareStatus('idle'), 1800);
@@ -1041,6 +1071,18 @@ function AppWorkspaceSurface({
             <h1>{app?.name ?? 'App'}</h1>
             <p>{app?.description ?? dashboardDoc?.dashboard.metadata.description ?? 'Local DQL App'}</p>
           </div>
+          <div className="dql-app-title-actions">
+            {app ? (
+              <button type="button" onClick={() => onOpenLineageNode(`app:${app.id}`)} title="Open app lineage">
+                <GitBranch size={14} /> App
+              </button>
+            ) : null}
+            {app && dashboardDoc ? (
+              <button type="button" onClick={() => onOpenLineageNode(`dashboard:${app.id}/${dashboardDoc.dashboard.id}`)} title="Open dashboard lineage">
+                <Route size={14} /> Page
+              </button>
+            ) : null}
+          </div>
         </div>
 
         <AppWorkspaceTabs
@@ -1070,6 +1112,9 @@ function AppWorkspaceSurface({
                 dashboard={dashboardDoc.dashboard}
                 editable={experience === 'build'}
                 variables={variables}
+                selectedBlockId={selectedBlockId}
+                onBlockFocus={setSelectedBlockId}
+                onOpenLineageNode={onOpenLineageNode}
                 onDashboardChanged={onDashboardChanged}
               />
             ) : section === 'notebooks' ? (
@@ -1085,7 +1130,15 @@ function AppWorkspaceSurface({
             )}
           </div>
           {explainOpen && section === 'dashboards' ? (
-            <AppExplainPanel app={app} appDoc={appDoc} dashboardDoc={dashboardDoc} />
+            <AppExplainPanel
+              app={app}
+              appDoc={appDoc}
+              dashboardDoc={dashboardDoc}
+              selectedBlockId={selectedBlockId}
+              themeMode={themeMode}
+              onSelectBlock={setSelectedBlockId}
+              onOpenLineageNode={onOpenLineageNode}
+            />
           ) : null}
         </div>
       </main>
@@ -1176,11 +1229,18 @@ function AppWorkspaceTabs({
     ] : []),
   ];
   return (
-    <nav className="dql-app-section-tabs">
+    <nav className="dql-app-section-tabs" aria-label="App sections">
       {tabs.map((tab) => (
-        <button key={tab.id} className={section === tab.id ? 'on' : ''} onClick={() => onChange(tab.id)}>
-          {tab.icon}
-          {tab.label}{tab.count !== undefined ? <span>{tab.count}</span> : null}
+        <button
+          key={tab.id}
+          className={section === tab.id ? 'on' : ''}
+          onClick={() => onChange(tab.id)}
+          title={tab.label}
+          aria-label={`${tab.label}${tab.count !== undefined ? ` ${tab.count}` : ''}`}
+        >
+          <i className="dql-app-tab-icon">{tab.icon}</i>
+          <span className="dql-app-tab-label">{tab.label}</span>
+          {tab.count !== undefined ? <b>{tab.count}</b> : null}
         </button>
       ))}
     </nav>
@@ -1201,11 +1261,17 @@ function DashboardTabs({
   onAdd: () => void;
 }) {
   return (
-    <nav className="dql-app-dashboard-tabs">
+    <nav className="dql-app-dashboard-tabs" aria-label="Dashboard pages">
       {dashboards.map((dashboard) => (
-        <button key={dashboard.id} className={dashboard.id === activeDashboardId ? 'on' : ''} onClick={() => onOpen(dashboard.id)}>
+        <button
+          key={dashboard.id}
+          className={dashboard.id === activeDashboardId ? 'on' : ''}
+          onClick={() => onOpen(dashboard.id)}
+          title={dashboard.title}
+        >
           <LineChart size={14} />
-          {dashboard.title}<span>{dashboard.itemCount}</span>
+          <span className="dql-app-dashboard-label">{dashboard.title}</span>
+          <b>{dashboard.itemCount}</b>
         </button>
       ))}
       {isBuild ? <button type="button" className="add" onClick={onAdd}><Plus size={14} /></button> : null}
@@ -1217,13 +1283,40 @@ function AppExplainPanel({
   app,
   appDoc,
   dashboardDoc,
+  selectedBlockId,
+  themeMode,
+  onSelectBlock,
+  onOpenLineageNode,
 }: {
   app: AppSummary | null;
   appDoc: AppDocumentSummary | null;
   dashboardDoc: DashboardDocumentResponse | null;
+  selectedBlockId: string | null;
+  themeMode: ThemeMode;
+  onSelectBlock: (blockId: string | null) => void;
+  onOpenLineageNode: (nodeId: string) => void;
 }) {
   const [lineage, setLineage] = useState<any | null>(null);
   const [question, setQuestion] = useState('');
+  const [chatOpen, setChatOpen] = useState(false);
+  const [chatExpanded, setChatExpanded] = useState(false);
+  const [askSeed, setAskSeed] = useState('');
+  const blockTiles = useMemo(() => {
+    return dashboardDoc?.dashboard.layout.items
+      .map((item) => {
+        const blockId = getDashboardItemBlockId(item);
+        if (!blockId) return null;
+        return {
+          blockId,
+          title: item.title ?? blockId,
+          viz: item.viz.type,
+          tileId: item.i,
+        };
+      })
+      .filter((item): item is { blockId: string; title: string; viz: string; tileId: string } => Boolean(item)) ?? [];
+  }, [dashboardDoc]);
+  const selectedBlock = blockTiles.find((item) => item.blockId === selectedBlockId) ?? blockTiles[0] ?? null;
+
   useEffect(() => {
     if (!app || !dashboardDoc) {
       setLineage(null);
@@ -1234,73 +1327,166 @@ function AppExplainPanel({
       domain: app.domain,
       appId: app.id,
       dashboardId: dashboardDoc.dashboard.id,
+      blockId: selectedBlock?.blockId,
     }).then((result) => {
       if (!cancelled) setLineage(result);
     });
     return () => {
       cancelled = true;
     };
-  }, [app, dashboardDoc]);
+  }, [app, dashboardDoc, selectedBlock?.blockId]);
 
-  const blockRefs = dashboardDoc?.dashboard.layout.items
-    .map((item) => item.block ? ('blockId' in item.block ? item.block.blockId : item.block.ref) : null)
-    .filter(Boolean) as string[] | undefined;
-  const flowNodes = lineage?.breadcrumbs?.slice(0, 7) ?? [];
+  const nodes = lineage?.graph?.nodes ?? [];
+  const edges = lineage?.graph?.edges ?? [];
+  const sourceCount = nodes.filter((node: any) => ['source', 'table'].includes(String(node.type))).length;
+  const modelCount = nodes.filter((node: any) => ['dbt_model', 'model'].includes(String(node.type))).length;
+  const businessCount = nodes.filter((node: any) => ['term', 'business_view', 'domain'].includes(String(node.type))).length;
+  const focusNodeId = selectedBlock
+    ? `block:${selectedBlock.blockId}`
+    : dashboardDoc && app
+      ? `dashboard:${app.id}/${dashboardDoc.dashboard.id}`
+      : null;
+  const contextJson = JSON.stringify({
+    scope: selectedBlock ? 'selected-dashboard-block' : 'dashboard',
+    appId: app?.id,
+    appName: app?.name,
+    dashboardId: dashboardDoc?.dashboard.id,
+    dashboardTitle: dashboardDoc?.dashboard.metadata.title,
+    domain: app?.domain ?? dashboardDoc?.dashboard.metadata.domain,
+    selectedBlock,
+    lineageFocus: lineage?.focus,
+    lineageView: lineage?.view,
+    breadcrumbs: lineage?.breadcrumbs,
+  }, null, 2);
+  const openAsk = (prompt?: string) => {
+    const next = prompt ?? question.trim() ?? '';
+    const fallback = selectedBlock
+      ? `Explain ${selectedBlock.blockId} and show the source path, consumers, and missing context.`
+      : 'Explain this dashboard and show the source path, consumers, and missing context.';
+    const seeded = next || fallback;
+    setQuestion(seeded);
+    setAskSeed(seeded);
+    setChatOpen(true);
+  };
+  const drilldowns = [
+    {
+      label: 'Source path',
+      icon: <Route size={14} />,
+      prompt: selectedBlock
+        ? `Trace ${selectedBlock.blockId} back to source tables and dbt models.`
+        : 'Trace this dashboard back to source tables and dbt models.',
+    },
+    {
+      label: 'Consumers',
+      icon: <ListTree size={14} />,
+      prompt: selectedBlock
+        ? `Who consumes ${selectedBlock.blockId}, and where does it appear in apps, dashboards, or notebooks?`
+        : 'Who consumes this dashboard, and where is it reused?',
+    },
+    {
+      label: 'Quality gaps',
+      icon: <ShieldCheck size={14} />,
+      prompt: selectedBlock
+        ? `What is missing or not certified for ${selectedBlock.blockId}?`
+        : 'What context, certification, or review gaps are missing for this app?',
+    },
+  ];
   return (
-    <aside className="dql-app-explain-panel">
+    <aside className="dql-app-explain-panel dql-app-research-panel">
       <div className="dql-app-explain-head">
-        <span>Explain / research</span>
-        <h3>Why these numbers</h3>
+        <span>Research</span>
+        <h3>{selectedBlock?.title ?? 'Dashboard context'}</h3>
+        <p>{selectedBlock ? `Focused on ${selectedBlock.blockId}` : 'Select a block tile to inspect lineage and ask AI.'}</p>
+      </div>
+      <div className="dql-app-ex-section compact">
+        <div className="dql-app-ex-label">Block focus</div>
+        <div className="dql-app-focus-list">
+          {blockTiles.length ? blockTiles.map((block) => (
+            <button
+              key={block.tileId}
+              type="button"
+              className={block.blockId === selectedBlock?.blockId ? 'on' : ''}
+              onClick={() => onSelectBlock(block.blockId)}
+              title={block.blockId}
+            >
+              <LineChart size={13} />
+              <span>{block.title}</span>
+              <b>{block.viz}</b>
+            </button>
+          )) : <span>No block-backed tiles.</span>}
+        </div>
       </div>
       <div className="dql-app-ex-section">
-        <div className="dql-app-ex-label">Blocks answering this App</div>
-        {(blockRefs?.length ? blockRefs : ['No block tiles yet']).map((block, index) => (
-          <div key={`${block}-${index}`} className="dql-app-block-cite">
-            <i className={String(block).includes('draft') ? 'draft' : ''} />
-            <span>{block}</span>
-            <b>{String(block).includes('draft') ? 'draft' : shortHash(String(block))}</b>
-          </div>
-        ))}
-        {(appDoc?.drafts ?? []).slice(0, 3).map((draft) => (
-          <div key={draft.path} className="dql-app-block-cite">
-            <i className="draft" />
-            <span>{draft.name}</span>
-            <b>draft</b>
-          </div>
-        ))}
+        <div className="dql-app-rail-title">
+          <span className="dql-app-ex-label">Lineage story</span>
+          {focusNodeId ? (
+            <button type="button" onClick={() => onOpenLineageNode(focusNodeId)} title="Open focused lineage">
+              <ExternalLink size={13} /> Open
+            </button>
+          ) : null}
+        </div>
+        <div className="dql-app-storyline">
+          <div><span>SRC</span><b>{sourceCount || 'source'}</b><small>tables</small></div>
+          <i />
+          <div><span>DBT</span><b>{modelCount || 'model'}</b><small>transform</small></div>
+          <i />
+          <div><span>BLK</span><b>{selectedBlock?.blockId ?? 'block'}</b><small>answer</small></div>
+          <i />
+          <div><span>APP</span><b>{app?.name ?? 'App'}</b><small>use</small></div>
+        </div>
+        <div className="dql-app-lineage-stats">
+          <Leader label="business context" value={String(businessCount)} />
+          <Leader label="lineage edges" value={String(edges.length)} />
+        </div>
       </div>
       <div className="dql-app-ex-section">
-        <div className="dql-app-ex-label">Lineage / technical to business to use</div>
-        <div className="dql-app-flow">
-          {flowNodes.length ? flowNodes.map((node: any, index: number) => (
-            <div key={`${node.id}-${index}`}>
-              <div className="dql-app-flow-node">
-                <span>{node.type?.slice(0, 4)?.toUpperCase() ?? 'NODE'}</span>
-                <b>{node.name ?? node.id}</b>
-                <small>{node.layer ?? node.type}</small>
-              </div>
-              {index < flowNodes.length - 1 ? <i /> : null}
-            </div>
-          )) : (
-            <>
-              <div className="dql-app-flow-node"><span>SRC</span><b>source tables</b><small>technical</small></div>
-              <i />
-              <div className="dql-app-flow-node"><span>BLK</span><b>DQL blocks</b><small>answer</small></div>
-              <i />
-              <div className="dql-app-flow-node"><span>APP</span><b>{app?.name ?? 'App'}</b><small>use</small></div>
-            </>
-          )}
+        <div className="dql-app-rail-title">
+          <span className="dql-app-ex-label">Drilldowns</span>
+          <button type="button" onClick={() => focusNodeId && onOpenLineageNode(focusNodeId)}>
+            <GitBranch size={13} /> Graph
+          </button>
+        </div>
+        <div className="dql-app-drilldown-grid">
+          {drilldowns.map((item) => (
+            <button key={item.label} type="button" onClick={() => openAsk(item.prompt)}>
+              {item.icon}
+              <span>{item.label}</span>
+            </button>
+          ))}
         </div>
       </div>
       <div className="dql-app-ex-section">
         <div className="dql-app-askbox">
-          <input value={question} onChange={(event) => setQuestion(event.target.value)} placeholder="Ask why this changed..." />
+          <MessageSquare size={14} />
+          <input
+            value={question}
+            onChange={(event) => setQuestion(event.target.value)}
+            placeholder={selectedBlock ? `Ask about ${selectedBlock.blockId}...` : 'Ask about this dashboard...'}
+          />
+          <button type="button" onClick={() => openAsk()}>
+            Ask
+          </button>
         </div>
-        <div className="dql-app-suggests">
-          {['Which source creates this?', 'Who consumes this?', 'What is missing?'].map((item) => (
-            <button key={item} onClick={() => setQuestion(item)}>{item}</button>
-          ))}
-        </div>
+        {chatOpen ? (
+          <div className={`dql-app-rail-chat ${chatExpanded ? 'expanded' : ''}`}>
+            <AgentChatPanel
+              title={selectedBlock ? `Ask: ${selectedBlock.blockId}` : 'Ask dashboard'}
+              scopeHint="Selected app block context"
+              upstreamContext={contextJson}
+              themeMode={themeMode}
+              hideSqlByDefault
+              initialInput={askSeed}
+              addToAppTarget={app && dashboardDoc ? { appId: app.id, dashboardId: dashboardDoc.dashboard.id } : undefined}
+              conversationTarget={app && dashboardDoc ? { appId: app.id, dashboardId: dashboardDoc.dashboard.id } : undefined}
+              expanded={chatExpanded}
+              onToggleExpanded={() => setChatExpanded((value) => !value)}
+              onClose={() => {
+                setChatOpen(false);
+                setChatExpanded(false);
+              }}
+            />
+          </div>
+        ) : null}
       </div>
       {(appDoc?.drafts?.length ?? 0) > 0 ? (
         <div className="dql-app-gapcard">
@@ -1443,6 +1629,11 @@ function Toggle({ label, checked, onChange }: { label: string; checked: boolean;
       <i /> {label}
     </button>
   );
+}
+
+function getDashboardItemBlockId(item: DashboardDocumentResponse['dashboard']['layout']['items'][number]): string | null {
+  if (!item.block) return null;
+  return 'blockId' in item.block ? item.block.blockId ?? null : item.block.ref ?? null;
 }
 
 function buildAppShareText(
@@ -2781,16 +2972,17 @@ const APP_STYLES = `
 .dql-app-view-wrap {
   position: relative;
   z-index: 1;
-  width: min(1280px, calc(100% - 48px));
+  width: min(1560px, calc(100% - 40px));
   margin: 0 auto;
-  padding: 20px 0 60px;
+  padding: 16px 0 60px;
 }
 
 .dql-app-title-row {
   display: flex;
   align-items: flex-end;
+  justify-content: space-between;
   gap: 12px;
-  margin-bottom: 12px;
+  margin-bottom: 10px;
   flex-wrap: wrap;
 }
 
@@ -2817,7 +3009,7 @@ const APP_STYLES = `
 
 .dql-app-title-row h1 {
   margin: 0;
-  font-size: 26px;
+  font-size: 28px;
   line-height: 1.1;
   font-weight: 820;
 }
@@ -2830,11 +3022,39 @@ const APP_STYLES = `
   max-width: 720px;
 }
 
+.dql-app-title-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.dql-app-title-actions button {
+  height: 30px;
+  border: 1px solid var(--dql-app-line);
+  border-radius: 8px;
+  background: var(--dql-app-surface);
+  color: var(--dql-app-muted);
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 9px;
+  cursor: pointer;
+  font: 800 11px var(--font-ui);
+}
+
+.dql-app-title-actions button:hover {
+  color: var(--dql-app-accent);
+  border-color: rgba(79, 99, 215, 0.34);
+  background: var(--dql-app-accent-soft);
+}
+
 .dql-app-section-tabs,
 .dql-app-dashboard-tabs {
   display: flex;
-  gap: 8px;
-  margin-bottom: 10px;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 8px;
   overflow-x: auto;
 }
 
@@ -2844,13 +3064,33 @@ const APP_STYLES = `
   border-radius: 8px;
   background: var(--dql-app-surface);
   color: var(--dql-app-muted);
-  min-height: 34px;
-  padding: 7px 11px;
+  min-height: 32px;
+  padding: 6px 9px;
   display: inline-flex;
   align-items: center;
   gap: 6px;
   cursor: pointer;
   font: 750 12px var(--font-ui);
+}
+
+.dql-app-section-tabs button {
+  min-width: 38px;
+  justify-content: center;
+}
+
+.dql-app-section-tabs .dql-app-tab-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-style: normal;
+}
+
+.dql-app-section-tabs .dql-app-tab-label {
+  display: none;
+}
+
+.dql-app-section-tabs button.on .dql-app-tab-label {
+  display: inline;
 }
 
 .dql-app-section-tabs button.on,
@@ -2860,17 +3100,29 @@ const APP_STYLES = `
   background: var(--dql-app-accent-soft);
 }
 
-.dql-app-section-tabs span,
-.dql-app-dashboard-tabs span {
+.dql-app-section-tabs b,
+.dql-app-dashboard-tabs b {
   color: var(--dql-app-accent);
   font-family: var(--font-mono);
+  font-size: 10px;
+}
+
+.dql-app-dashboard-tabs button {
+  max-width: 380px;
+}
+
+.dql-app-dashboard-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .dql-app-dashboard-tabs .add { width: 34px; justify-content: center; color: var(--dql-app-accent); }
 .dql-app-view-layout {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(260px, 288px);
-  gap: 20px;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 14px;
   align-items: start;
 }
 
@@ -2880,10 +3132,15 @@ const APP_STYLES = `
 .dql-app-explain-panel {
   position: sticky;
   top: 110px;
+  width: clamp(300px, 24vw, 420px);
+  min-width: 280px;
+  max-width: min(520px, 40vw);
+  max-height: calc(100vh - 132px);
+  resize: horizontal;
   border: 1px solid var(--dql-app-line);
   border-radius: 8px;
   background: var(--dql-app-surface);
-  overflow: hidden;
+  overflow: auto;
   box-shadow: var(--dql-app-shadow);
 }
 
@@ -2897,7 +3154,9 @@ const APP_STYLES = `
 }
 
 .dql-app-explain-head h3 { margin: 3px 0 0; font-size: 17px; }
+.dql-app-explain-head p { margin: 5px 0 0; color: var(--dql-app-muted); font-size: 11.5px; line-height: 1.45; }
 .dql-app-ex-section { padding: 13px 16px; border-bottom: 1px solid var(--dql-app-line); }
+.dql-app-ex-section.compact { padding-top: 11px; padding-bottom: 11px; }
 .dql-app-block-cite {
   display: flex;
   align-items: center;
@@ -2941,8 +3200,17 @@ const APP_STYLES = `
 
 .dql-app-askbox {
   border-radius: 7px;
-  background: var(--dql-app-deep);
-  padding: 10px 12px;
+  border: 1px solid var(--dql-app-line-2);
+  background: var(--dql-app-control);
+  padding: 6px 7px 6px 9px;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+
+.dql-app-askbox svg {
+  flex: 0 0 auto;
+  color: var(--dql-app-accent);
 }
 
 .dql-app-askbox input {
@@ -2950,11 +3218,187 @@ const APP_STYLES = `
   border: 0;
   outline: 0;
   background: transparent;
-  color: #fff;
+  color: var(--dql-app-ink);
   font: 12.5px var(--font-ui);
 }
 
+.dql-app-askbox button {
+  height: 26px;
+  border: 0;
+  border-radius: 6px;
+  background: var(--dql-app-deep);
+  color: #fff;
+  padding: 0 9px;
+  cursor: pointer;
+  font: 800 11px var(--font-ui);
+}
+
 .dql-app-suggests { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 9px; }
+.dql-app-focus-list {
+  display: grid;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.dql-app-focus-list > span {
+  color: var(--dql-app-faint);
+  font-size: 12px;
+}
+
+.dql-app-focus-list button {
+  min-width: 0;
+  min-height: 34px;
+  border: 1px solid var(--dql-app-line);
+  border-radius: 8px;
+  background: var(--dql-app-surface);
+  color: var(--dql-app-muted);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 8px;
+  cursor: pointer;
+  text-align: left;
+}
+
+.dql-app-focus-list button.on {
+  color: var(--dql-app-ink);
+  border-color: rgba(79, 99, 215, 0.42);
+  background: var(--dql-app-accent-soft);
+}
+
+.dql-app-focus-list button svg {
+  flex: 0 0 auto;
+  color: var(--dql-app-accent);
+}
+
+.dql-app-focus-list button span {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font: 800 11.5px var(--font-ui);
+}
+
+.dql-app-focus-list button b {
+  color: var(--dql-app-faint);
+  font: 700 8.5px var(--font-mono);
+  text-transform: uppercase;
+}
+
+.dql-app-rail-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.dql-app-rail-title > span { flex: 1; }
+
+.dql-app-rail-title button {
+  height: 26px;
+  border: 1px solid var(--dql-app-line);
+  border-radius: 6px;
+  background: var(--dql-app-surface);
+  color: var(--dql-app-muted);
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 0 8px;
+  cursor: pointer;
+  font: 800 10.5px var(--font-ui);
+}
+
+.dql-app-storyline {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 10px minmax(0, 1fr) 10px minmax(0, 1.2fr) 10px minmax(0, 1fr);
+  align-items: center;
+  gap: 4px;
+}
+
+.dql-app-storyline > div {
+  min-width: 0;
+  border: 1px solid var(--dql-app-line);
+  border-radius: 8px;
+  background: var(--dql-app-control);
+  padding: 7px;
+  display: grid;
+  gap: 2px;
+}
+
+.dql-app-storyline > i {
+  height: 1px;
+  background: var(--dql-app-line-2);
+}
+
+.dql-app-storyline span {
+  color: var(--dql-app-accent);
+  font: 900 8px var(--font-mono);
+}
+
+.dql-app-storyline b {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font: 850 11px var(--font-ui);
+}
+
+.dql-app-storyline small {
+  color: var(--dql-app-faint);
+  font: 700 8.5px var(--font-mono);
+}
+
+.dql-app-lineage-stats {
+  margin-top: 9px;
+}
+
+.dql-app-drilldown-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 7px;
+}
+
+.dql-app-drilldown-grid button {
+  min-width: 0;
+  border: 1px solid var(--dql-app-line);
+  border-radius: 8px;
+  background: var(--dql-app-surface);
+  color: var(--dql-app-muted);
+  padding: 8px 6px;
+  display: grid;
+  justify-items: center;
+  gap: 5px;
+  cursor: pointer;
+  font: 800 10.5px var(--font-ui);
+}
+
+.dql-app-drilldown-grid button:hover {
+  color: var(--dql-app-accent);
+  border-color: rgba(79, 99, 215, 0.34);
+  background: var(--dql-app-accent-soft);
+}
+
+.dql-app-rail-chat {
+  margin-top: 10px;
+  height: min(460px, 52vh);
+  border: 1px solid var(--dql-app-line-2);
+  border-radius: 8px;
+  overflow: hidden;
+  background: var(--dql-app-surface);
+}
+
+.dql-app-rail-chat.expanded {
+  position: fixed;
+  z-index: 80;
+  right: 24px;
+  top: 76px;
+  bottom: 24px;
+  width: min(760px, calc(100vw - 80px));
+  height: auto;
+  box-shadow: 0 18px 60px rgba(15, 23, 42, 0.24);
+}
+
 .dql-app-gapcard {
   margin: 12px;
   border-radius: 7px;
@@ -3080,7 +3524,13 @@ const APP_STYLES = `
 
 @media (max-width: 900px) {
   .dql-app-view-layout { grid-template-columns: 1fr; }
-  .dql-app-explain-panel { position: static; }
+  .dql-app-explain-panel {
+    position: static;
+    width: 100%;
+    max-width: none;
+    resize: none;
+    max-height: none;
+  }
 }
 
 @media (max-width: 760px) {
@@ -3111,7 +3561,19 @@ const APP_STYLES = `
   .dql-app-mode-seg button { flex: 1; }
   .dql-app-build-actions,
   .dql-app-view-actions { margin-left: 0; width: 100%; flex-wrap: wrap; }
+  .dql-app-title-actions { width: 100%; }
   .dql-app-preview-tile,
   .dql-app-preview-tile.wide { grid-column: 1 / -1; }
+  .dql-app-storyline {
+    grid-template-columns: 1fr;
+  }
+  .dql-app-storyline > i {
+    width: 1px;
+    height: 10px;
+    margin-left: 14px;
+  }
+  .dql-app-drilldown-grid {
+    grid-template-columns: 1fr;
+  }
 }
 `;
