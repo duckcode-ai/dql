@@ -6,7 +6,6 @@ import {
   Blocks,
   BookOpenText,
   Bot,
-  CheckCircle2,
   ChevronDown,
   Download,
   Eye,
@@ -405,7 +404,6 @@ export function AppsView(): JSX.Element {
           domain={builderDomain}
           owner={builderOwner}
           promptExamples={APP_PROMPT_EXAMPLES}
-          agentSkills={AGENT_SKILLS}
           catalog={catalog}
           catalogLoading={catalogLoading}
           selectedBlocks={selectedBlocks}
@@ -684,7 +682,6 @@ function AppCreateSurface({
   domain,
   owner,
   promptExamples,
-  agentSkills,
   catalog,
   catalogLoading,
   selectedBlocks,
@@ -707,7 +704,6 @@ function AppCreateSurface({
   domain: string;
   owner: string;
   promptExamples: AppPromptExample[];
-  agentSkills: AgentSkillCard[];
   catalog: AppBlockRecommendation[];
   catalogLoading: boolean;
   selectedBlocks: Set<string>;
@@ -761,13 +757,6 @@ function AppCreateSurface({
         </div>
       </div>
 
-      <BuilderSteps
-        mode={mode}
-        selectedCount={selectedBlocks.size}
-        generated={Boolean(generated)}
-        saving={saving}
-      />
-
       <div className={`dql-app-create-workspace ${mode === 'classic' ? 'classic' : 'ai'}`}>
         <section className={`dql-app-panel dql-app-agent-panel ${mode === 'ai' ? 'ai-clean' : ''}`}>
           <PanelHead title={mode === 'ai' ? 'Build with the agent' : 'Palette'} meta={mode === 'ai' ? 'local ledger-grounded' : 'certified blocks'} />
@@ -776,14 +765,6 @@ function AppCreateSurface({
               <div className="dql-app-ai-brief">
                 <span><Sparkles size={15} /> AI App Builder</span>
                 <p>Describe the app outcome. DQL finds certified context and drafts review gaps.</p>
-                <div className="dql-app-ai-skill-strip" aria-label="Agent skills">
-                  {agentSkills.map((skill) => (
-                    <span key={skill.id} title={skill.description}>
-                      <CheckCircle2 size={12} />
-                      <b>{skill.title}</b>
-                    </span>
-                  ))}
-                </div>
                 {generated ? (
                   <div className="dql-app-ai-result">
                     Generated <b>{generated.plan.name}</b> with {generated.validation.certifiedTiles} certified tile
@@ -886,7 +867,7 @@ function AppCreateSurface({
               </button>
             ) : (
               <button type="button" className="dql-apps-btn dql-apps-btn-dark" onClick={onBuild} disabled={saving}>
-                {saving ? 'Building...' : mode === 'ai' ? 'Generate AppPlan' : 'Create from selected blocks'}
+                {saving ? 'Building...' : mode === 'ai' ? 'Generate plan' : 'Create from selected blocks'}
               </button>
             )}
           </div>
@@ -1108,37 +1089,6 @@ function AppWorkspaceSurface({
           ) : null}
         </div>
       </main>
-    </div>
-  );
-}
-
-function BuilderSteps({
-  mode,
-  selectedCount,
-  generated,
-  saving,
-}: {
-  mode: BuilderMode;
-  selectedCount: number;
-  generated: boolean;
-  saving: boolean;
-}) {
-  const steps = [
-    { label: mode === 'ai' ? 'Prompt' : 'Name app', done: true },
-    mode === 'ai'
-      ? { label: 'Match context', done: generated, active: saving || !generated }
-      : { label: 'Pick blocks', done: selectedCount > 0 },
-    { label: mode === 'ai' ? 'AppPlan' : 'Dashboard', done: generated, active: saving || (!generated && mode === 'ai') },
-    { label: 'Open app', done: generated },
-  ];
-  return (
-    <div className="dql-app-builder-steps">
-      {steps.map((step, index) => (
-        <span key={step.label} className={`${step.done ? 'done' : ''} ${step.active ? 'active' : ''}`}>
-          <i>{index + 1}</i>
-          {step.label}
-        </span>
-      ))}
     </div>
   );
 }
@@ -2113,10 +2063,10 @@ const APP_STYLES = `
   height: 100%;
   min-height: 0;
   display: grid;
-  grid-template-rows: auto auto 1fr;
 }
 
-.dql-app-create-shell { grid-template-rows: auto auto 1fr; overflow: hidden; }
+.dql-app-create-shell { grid-template-rows: auto 1fr; overflow: hidden; }
+.dql-app-workspace { grid-template-rows: auto auto 1fr; }
 
 .dql-app-buildbar,
 .dql-app-view-topbar {
@@ -2220,59 +2170,6 @@ const APP_STYLES = `
   padding: 8px;
   font: 11px/1.45 var(--font-mono);
   box-sizing: border-box;
-}
-
-.dql-app-builder-steps {
-  min-height: 42px;
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 8px 18px;
-  border-bottom: 1px solid var(--dql-app-line);
-  background: var(--dql-app-surface-muted);
-  overflow-x: auto;
-}
-
-.dql-app-builder-steps span {
-  display: inline-flex;
-  align-items: center;
-  gap: 7px;
-  border: 1px solid var(--dql-app-line);
-  border-radius: 999px;
-  background: var(--dql-app-surface);
-  color: var(--dql-app-muted);
-  padding: 4px 10px 4px 5px;
-  white-space: nowrap;
-  font: 750 11px var(--font-ui);
-}
-
-.dql-app-builder-steps i {
-  width: 20px;
-  height: 20px;
-  border-radius: 999px;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  background: var(--dql-app-control);
-  color: var(--dql-app-faint);
-  font: 750 10px var(--font-mono);
-  font-style: normal;
-}
-
-.dql-app-builder-steps span.done {
-  color: var(--dql-app-ink);
-  border-color: rgba(22, 163, 74, 0.26);
-  background: var(--dql-app-green-soft);
-}
-
-.dql-app-builder-steps span.done i {
-  background: var(--dql-app-green);
-  color: #fff;
-}
-
-.dql-app-builder-steps span.active {
-  border-color: rgba(37, 99, 235, 0.34);
-  background: var(--dql-app-accent-soft);
 }
 
 .dql-app-persona {
@@ -2381,42 +2278,6 @@ const APP_STYLES = `
   border-top: 0;
   padding: 10px 16px 16px;
   gap: 9px;
-}
-
-.dql-app-ai-skill-strip {
-  display: flex;
-  align-items: center;
-  gap: 9px;
-  flex-wrap: wrap;
-}
-
-.dql-app-ai-skill-strip span {
-  min-width: 0;
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-  color: var(--dql-app-muted);
-  font: 750 10.5px var(--font-ui);
-  white-space: nowrap;
-}
-
-.dql-app-ai-skill-strip span:not(:last-child)::after {
-  content: "";
-  width: 15px;
-  height: 1px;
-  margin-left: 4px;
-  background: var(--dql-app-line-2);
-}
-
-.dql-app-ai-skill-strip svg {
-  flex: 0 0 auto;
-  color: var(--dql-app-green);
-}
-
-.dql-app-ai-skill-strip b {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
 }
 
 .dql-app-suggestions {
