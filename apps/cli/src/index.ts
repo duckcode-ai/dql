@@ -110,7 +110,7 @@ const COMMAND_HELP: Record<string, string> = {
 
   Usage:
     dql app new <name>
-    dql app generate "<prompt>" [--domain <domain>] [--owner <user>] [--template <template>]
+    dql app generate "<prompt>" [--domain <domain>] [--owner <user>]
     dql app ls
     dql app show <name>
     dql app build <name>

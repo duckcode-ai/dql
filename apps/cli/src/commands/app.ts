@@ -8,7 +8,7 @@
  *
  * Subcommands:
  *   dql app new <id> --domain <domain> [--owner <user>]
- *   dql app generate "<prompt>" [--domain <domain>] [--owner <user>] [--template <template>]
+ *   dql app generate "<prompt>" [--domain <domain>] [--owner <user>]
  *   dql app ls
  *   dql app show <id>
  *   dql app build [--app <id>]
@@ -63,7 +63,7 @@ export async function runApp(
       throw new Error(
         "Usage: dql app <new|ls|show|build|reindex> [args]\n" +
           "  dql app new <id> --domain <domain> [--owner <user>]\n" +
-          '  dql app generate "<prompt>" [--domain <domain>] [--owner <user>] [--template <template>]\n' +
+          '  dql app generate "<prompt>" [--domain <domain>] [--owner <user>]\n' +
           "  dql app ls\n" +
           "  dql app show <id>\n" +
           "  dql app build\n" +
@@ -210,7 +210,7 @@ async function runAppGenerate(rest: string[], flags: CLIFlags): Promise<void> {
   const prompt = await readPrompt(rest, flags);
   if (!prompt) {
     throw new Error(
-      'Usage: dql app generate "<prompt>" [--domain <domain>] [--owner <user>] [--template <template>]',
+      'Usage: dql app generate "<prompt>" [--domain <domain>] [--owner <user>]',
     );
   }
   const {
@@ -231,9 +231,6 @@ async function runAppGenerate(rest: string[], flags: CLIFlags): Promise<void> {
       kg,
       domain: cleanOptional((flags as { domain?: string }).domain),
       owner: cleanOptional((flags as { owner?: string }).owner),
-      template: normalizeTemplateId(
-        cleanOptional((flags as { template?: string }).template),
-      ),
     });
     const validation = validateAppPlan(plan, kg);
     const generated = generateAppFromPlan(projectRoot, plan, kg, {
@@ -249,7 +246,9 @@ async function runAppGenerate(rest: string[], flags: CLIFlags): Promise<void> {
 
     console.log(`\n  ✓ Generated local app package: ${plan.name}`);
     console.log(`    App id: ${plan.appId}`);
-    console.log(`    Template: ${plan.template}`);
+    console.log(
+      `    Agent skills: ${plan.skills.map((skill) => skill.title).join(", ")}`,
+    );
     console.log(`    Domain: ${plan.domain}   Audience: ${plan.audience}`);
     console.log(
       `    Certified tiles: ${validation.certifiedTiles}   Draft/review tiles: ${validation.draftTiles}`,
@@ -429,23 +428,6 @@ async function readPrompt(rest: string[], flags: CLIFlags): Promise<string> {
 function cleanOptional(value?: string): string | undefined {
   const cleaned = value?.trim();
   return cleaned || undefined;
-}
-
-function normalizeTemplateId(value?: string) {
-  if (!value) return undefined;
-  const normalized = value.toLowerCase().replace(/[-\s]+/g, "_");
-  if (
-    normalized === "executive_kpi_review" ||
-    normalized === "revenue_health" ||
-    normalized === "customer_360" ||
-    normalized === "data_quality_monitor" ||
-    normalized === "experiment_readout"
-  ) {
-    return normalized;
-  }
-  throw new Error(
-    `Unknown app template "${value}". Use one of: executive_kpi_review, revenue_health, customer_360, data_quality_monitor, experiment_readout`,
-  );
 }
 
 interface ResolvedApp extends Omit<ManifestApp, "dashboards"> {

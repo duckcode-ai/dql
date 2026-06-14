@@ -583,18 +583,9 @@ interface AppGenerateRequest {
   prompt?: string;
   domain?: string;
   owner?: string;
-  template?: string;
   force?: boolean;
   selectedBlockIds?: string[];
 }
-
-const APP_PLAN_TEMPLATE_IDS = new Set([
-  'executive_kpi_review',
-  'revenue_health',
-  'customer_360',
-  'data_quality_monitor',
-  'experiment_readout',
-]);
 
 interface AiPinCreateRequest {
   dashboardId?: string;
@@ -713,13 +704,11 @@ export async function generateAppPackage(
   await reindexProject(projectRoot, { kgPath });
   const kg = new KGStore(kgPath);
   try {
-    const requestedTemplate = cleanString(input.template);
     const plan = planAppFromPrompt({
       prompt,
       kg,
       domain: cleanString(input.domain) || undefined,
       owner: cleanString(input.owner) || undefined,
-      template: APP_PLAN_TEMPLATE_IDS.has(requestedTemplate) ? requestedTemplate as never : undefined,
       preferredBlockIds: selectedBlockIds,
     });
     const validation = validateAppPlan(plan, kg);

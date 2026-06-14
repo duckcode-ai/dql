@@ -186,18 +186,10 @@ export interface CreateAppResponse {
   dashboardId: string;
 }
 
-export type AppPlanTemplateId =
-  | 'executive_kpi_review'
-  | 'revenue_health'
-  | 'customer_360'
-  | 'data_quality_monitor'
-  | 'experiment_readout';
-
 export interface GenerateAppRequest {
   prompt: string;
   domain?: string;
   owner?: string;
-  template?: AppPlanTemplateId;
   force?: boolean;
   selectedBlockIds?: string[];
 }
@@ -207,7 +199,7 @@ export interface GeneratedAppPlan {
   appId: string;
   name: string;
   prompt: string;
-  template: AppPlanTemplateId;
+  skills: Array<{ id: string; title: string; description: string }>;
   domain: string;
   audience: string;
   businessGoal: string;

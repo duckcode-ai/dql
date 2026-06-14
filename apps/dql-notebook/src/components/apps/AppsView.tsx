@@ -27,7 +27,6 @@ import {
   api,
   type AppBlockRecommendation,
   type AppDocumentSummary,
-  type AppPlanTemplateId,
   type DashboardDocumentResponse,
   type GenerateAppResponse,
   type GeneratedAppPlan,
@@ -40,59 +39,65 @@ type AppSurface = 'library' | 'create' | 'workspace';
 type AppExperience = 'view' | 'build';
 type BuilderMode = 'ai' | 'classic';
 type AppSection = 'dashboards' | 'notebooks' | 'ai' | 'drafts' | 'settings';
-type LibraryFilter = 'all' | 'mine' | 'shared' | 'fav' | 'template' | 'review';
+type LibraryFilter = 'all' | 'mine' | 'shared' | 'fav' | 'review';
 
-interface AppTemplateCard {
-  id: AppPlanTemplateId;
+interface AppPromptExample {
   title: string;
   domain: string;
-  description: string;
   prompt: string;
-  tiles: Array<[string, string]>;
+}
+
+interface AgentSkillCard {
+  id: string;
+  title: string;
+  description: string;
 }
 
 const DEFAULT_PROMPT = 'Revenue overview for the cards team: monthly trend, top products, and how new vs returning customers contribute.';
 
-const APP_TEMPLATES: AppTemplateCard[] = [
+const APP_PROMPT_EXAMPLES: AppPromptExample[] = [
   {
-    id: 'executive_kpi_review',
-    title: 'Executive KPI Review',
-    domain: 'Cross-domain',
-    description: 'Headline KPI row, trend, narrative, and caveats for leadership review.',
-    prompt: 'Build an executive KPI review with headline metrics, quarterly trend, risks, and caveats.',
-    tiles: [['KPI row', 'kpi'], ['Trend', 'line'], ['Narrative', 'text']],
-  },
-  {
-    id: 'revenue_health',
-    title: 'Revenue Health',
+    title: 'Revenue story',
     domain: 'Revenue',
-    description: 'Revenue trend, AOV, ranked products, and risk flags for an operating cadence.',
     prompt: 'Build a weekly revenue health app for the COO with risk flags.',
-    tiles: [['Revenue', 'line'], ['Top products', 'bar'], ['Risk flags', 'table']],
   },
   {
-    id: 'customer_360',
     title: 'Customer 360',
     domain: 'Customer',
-    description: 'Customer value, engagement, retention, orders, and service risk by segment.',
     prompt: 'Customer 360: value, engagement, retention, orders, and service risk by segment.',
-    tiles: [['Value', 'bar'], ['Retention', 'line'], ['Risk', 'draft']],
   },
   {
-    id: 'data_quality_monitor',
-    title: 'Data Quality Monitor',
+    title: 'Quality monitor',
     domain: 'Platform',
-    description: 'Freshness, tests, null rates, failing models, and issue notes for data teams.',
     prompt: 'Build a data quality monitor with freshness, failing tests, null rates, and model risk notes.',
-    tiles: [['Freshness', 'kpi'], ['Tests', 'bar'], ['Incidents', 'table']],
   },
   {
-    id: 'experiment_readout',
     title: 'Experiment Readout',
     domain: 'Product',
-    description: 'Experiment outcome, guardrails, sample size, and decision checklist.',
     prompt: 'Create an experiment readout for product leadership with outcome, guardrails, and decision checklist.',
-    tiles: [['Outcome', 'kpi'], ['Guardrails', 'table'], ['Decision', 'text']],
+  },
+];
+
+const AGENT_SKILLS: AgentSkillCard[] = [
+  {
+    id: 'match',
+    title: 'Find blocks',
+    description: 'Search certified blocks, terms, views, and lineage.',
+  },
+  {
+    id: 'story',
+    title: 'Shape story',
+    description: 'Order the app around the business decision.',
+  },
+  {
+    id: 'draft',
+    title: 'Draft gaps',
+    description: 'Mark missing sections for review instead of hiding them.',
+  },
+  {
+    id: 'review',
+    title: 'Route review',
+    description: 'Keep generated parts visibly reviewable.',
   },
 ];
 
@@ -101,7 +106,6 @@ const FILTER_LABELS: Record<LibraryFilter, string> = {
   mine: 'Mine',
   shared: 'Shared',
   fav: 'Favourites',
-  template: 'Templates',
   review: 'Review',
 };
 
@@ -128,7 +132,6 @@ export function AppsView(): JSX.Element {
   const [builderName, setBuilderName] = useState('Jaffle Analytics');
   const [builderDomain, setBuilderDomain] = useState('Revenue');
   const [builderOwner, setBuilderOwner] = useState('analytics@jaffle.shop');
-  const [builderTemplate, setBuilderTemplate] = useState<AppPlanTemplateId | undefined>('revenue_health');
   const [catalog, setCatalog] = useState<AppBlockRecommendation[]>([]);
   const [catalogLoading, setCatalogLoading] = useState(false);
   const [selectedBlocks, setSelectedBlocks] = useState<Set<string>>(() => new Set());
@@ -222,7 +225,6 @@ export function AppsView(): JSX.Element {
       if (libraryFilter === 'shared' && (app.storage ?? 'shared') !== 'shared') return false;
       if (libraryFilter === 'review' && app.lifecycle !== 'review') return false;
       if (libraryFilter === 'fav' && !favorites.has(app.id)) return false;
-      if (libraryFilter === 'template') return false;
       if (!needle) return true;
       const haystack = [
         app.name,
@@ -238,15 +240,6 @@ export function AppsView(): JSX.Element {
     });
   }, [favorites, libraryFilter, search, state.apps]);
 
-  const filteredTemplates = useMemo(() => {
-    if (libraryFilter !== 'all' && libraryFilter !== 'template') return [];
-    const needle = search.trim().toLowerCase();
-    return APP_TEMPLATES.filter((template) => {
-      if (!needle) return true;
-      return [template.title, template.domain, template.description].join(' ').toLowerCase().includes(needle);
-    });
-  }, [libraryFilter, search]);
-
   const activeApp = useMemo(
     () => state.apps.find((app) => app.id === state.activeAppId) ?? null,
     [state.apps, state.activeAppId],
@@ -259,10 +252,9 @@ export function AppsView(): JSX.Element {
     setSurface('workspace');
   };
 
-  const startAiBuilder = (prompt = builderPrompt, template?: AppPlanTemplateId, domain?: string) => {
+  const startAiBuilder = (prompt = builderPrompt, domain?: string) => {
     setBuilderMode('ai');
     setBuilderPrompt(prompt);
-    setBuilderTemplate(template ?? builderTemplate);
     if (domain) setBuilderDomain(domain);
     setSelectedBlocks(new Set());
     setBuilderError(null);
@@ -272,15 +264,9 @@ export function AppsView(): JSX.Element {
 
   const startClassicBuilder = () => {
     setBuilderMode('classic');
-    setBuilderTemplate(undefined);
     setBuilderError(null);
     setGenerated(null);
     setSurface('create');
-  };
-
-  const startFromTemplate = (template: AppTemplateCard) => {
-    setBuilderName(template.title);
-    startAiBuilder(template.prompt, template.id, template.domain);
   };
 
   const toggleSelectedBlock = (blockId: string) => {
@@ -304,7 +290,6 @@ export function AppsView(): JSX.Element {
       prompt,
       domain: builderDomain.trim() || undefined,
       owner: builderOwner.trim() || undefined,
-      template: builderTemplate,
       force: false,
       selectedBlockIds: Array.from(selectedBlocks),
     });
@@ -393,7 +378,6 @@ export function AppsView(): JSX.Element {
       {surface === 'library' ? (
         <AppLibrarySurface
           apps={filteredApps}
-          templates={filteredTemplates}
           allApps={state.apps}
           loading={state.appsLoading}
           search={search}
@@ -411,7 +395,6 @@ export function AppsView(): JSX.Element {
           }}
           onStartAi={(prompt) => startAiBuilder(prompt)}
           onStartClassic={startClassicBuilder}
-          onStartTemplate={startFromTemplate}
           onOpenApp={openApp}
         />
       ) : surface === 'create' ? (
@@ -421,8 +404,8 @@ export function AppsView(): JSX.Element {
           prompt={builderPrompt}
           domain={builderDomain}
           owner={builderOwner}
-          template={builderTemplate}
-          templates={APP_TEMPLATES}
+          promptExamples={APP_PROMPT_EXAMPLES}
+          agentSkills={AGENT_SKILLS}
           catalog={catalog}
           catalogLoading={catalogLoading}
           selectedBlocks={selectedBlocks}
@@ -438,7 +421,6 @@ export function AppsView(): JSX.Element {
           onPromptChange={setBuilderPrompt}
           onDomainChange={setBuilderDomain}
           onOwnerChange={setBuilderOwner}
-          onTemplateChange={setBuilderTemplate}
           onToggleBlock={toggleSelectedBlock}
           onBuild={() => builderMode === 'ai' ? void runGenerate() : void runClassicCreate()}
           onOpenGenerated={openGeneratedWorkspace}
@@ -491,7 +473,6 @@ export function AppsView(): JSX.Element {
 
 function AppLibrarySurface({
   apps,
-  templates,
   allApps,
   loading,
   search,
@@ -502,11 +483,9 @@ function AppLibrarySurface({
   onToggleFavorite,
   onStartAi,
   onStartClassic,
-  onStartTemplate,
   onOpenApp,
 }: {
   apps: AppSummary[];
-  templates: AppTemplateCard[];
   allApps: AppSummary[];
   loading: boolean;
   search: string;
@@ -517,7 +496,6 @@ function AppLibrarySurface({
   onToggleFavorite: (appId: string) => void;
   onStartAi: (prompt: string) => void;
   onStartClassic: () => void;
-  onStartTemplate: (template: AppTemplateCard) => void;
   onOpenApp: (app: AppSummary, experience?: AppExperience) => void;
 }) {
   const [prompt, setPrompt] = useState(DEFAULT_PROMPT);
@@ -527,8 +505,8 @@ function AppLibrarySurface({
       <section className="dql-apps-createhead">
         <h1>Build an app</h1>
         <p>
-          Turn certified blocks, business views, notebooks, and lineage into a stakeholder-grade App. Start with AI,
-          compose by hand, or reuse a governed starter template.
+          Turn certified blocks, business views, notebooks, and lineage into a stakeholder-grade App. Ask AI to shape
+          the story dynamically or compose the canvas by hand.
         </p>
       </section>
 
@@ -552,7 +530,7 @@ function AppLibrarySurface({
         <StartOption
           icon={<Sparkles size={19} strokeWidth={1.9} />}
           title="Build with AI"
-          description="Describe it in a sentence. The agent searches the local ledger, creates an AppPlan, and writes reviewable files."
+          description="Describe the use case. The agent finds certified context, shapes the story, and writes reviewable files."
           meta="local agent"
           action="Open AI builder"
           onClick={() => onStartAi(prompt)}
@@ -566,24 +544,24 @@ function AppLibrarySurface({
           onClick={onStartClassic}
         />
         <StartOption
-          icon={<LayoutDashboard size={19} strokeWidth={1.9} />}
-          title="From a template"
-          description="Start from Revenue Health, Customer 360, Executive KPI Review, Data Quality, or Experiment Readout."
-          meta={`${APP_TEMPLATES.length} starters`}
-          action="Browse templates"
-          onClick={() => onFilter('template')}
+          icon={<Workflow size={19} strokeWidth={1.9} />}
+          title="Agent skills"
+          description="The builder matches blocks, orders the narrative, drafts missing sections, and routes review."
+          meta="dynamic plan"
+          action="Ask AI"
+          onClick={() => onStartAi(prompt)}
         />
       </div>
 
       <div className="dql-apps-sectionhead">
         <span>App library</span>
         <i />
-        <b>{allApps.length + APP_TEMPLATES.length} total</b>
+        <b>{allApps.length} total</b>
       </div>
 
       <div className="dql-apps-libbar">
         <div className="dql-apps-filter-tabs">
-          {(['all', 'mine', 'shared', 'fav', 'template', 'review'] as LibraryFilter[]).map((value) => (
+          {(['all', 'mine', 'shared', 'fav', 'review'] as LibraryFilter[]).map((value) => (
             <button key={value} className={filter === value ? 'on' : ''} onClick={() => onFilter(value)}>
               {FILTER_LABELS[value]} <span>{counts[value]}</span>
             </button>
@@ -597,7 +575,7 @@ function AppLibrarySurface({
 
       {loading && allApps.length === 0 ? (
         <EmptyPanel title="Loading Apps..." detail="Reading local app files from this DQL project." />
-      ) : apps.length === 0 && templates.length === 0 ? (
+      ) : apps.length === 0 ? (
         <EmptyPanel title="No Apps match this view." detail="Change the filter or start a new App above." />
       ) : (
         <div className="dql-apps-grid">
@@ -610,9 +588,6 @@ function AppLibrarySurface({
               onOpen={() => onOpenApp(app, 'view')}
               onBuild={() => onOpenApp(app, 'build')}
             />
-          ))}
-          {templates.map((template) => (
-            <TemplateCard key={template.id} template={template} onUse={() => onStartTemplate(template)} />
           ))}
         </div>
       )}
@@ -702,39 +677,14 @@ function AppCard({
   );
 }
 
-function TemplateCard({ template, onUse }: { template: AppTemplateCard; onUse: () => void }) {
-  return (
-    <article className="dql-app-card dql-app-template-card">
-      <div className="dql-app-card-body">
-        <div className="dql-app-card-top">
-          <span className="dql-app-eyebrow">Template / {template.domain}</span>
-          <span className="dql-app-template-chip">starter</span>
-        </div>
-        <StatusSeal tone="agentic">governed starter</StatusSeal>
-        <h3>{template.title}</h3>
-        <p>{template.description}</p>
-        <div className="dql-app-template-tiles">
-          {template.tiles.map(([name, type]) => (
-            <span key={`${name}-${type}`}><i className={type === 'draft' ? 'draft' : ''} />{name}<b>{type}</b></span>
-          ))}
-        </div>
-      </div>
-      <div className="dql-app-card-depth">
-        <span>{template.tiles.length} starter tiles</span>
-        <button type="button" onClick={onUse}>Use template</button>
-      </div>
-    </article>
-  );
-}
-
 function AppCreateSurface({
   mode,
   appName,
   prompt,
   domain,
   owner,
-  template,
-  templates,
+  promptExamples,
+  agentSkills,
   catalog,
   catalogLoading,
   selectedBlocks,
@@ -747,7 +697,6 @@ function AppCreateSurface({
   onPromptChange,
   onDomainChange,
   onOwnerChange,
-  onTemplateChange,
   onToggleBlock,
   onBuild,
   onOpenGenerated,
@@ -757,8 +706,8 @@ function AppCreateSurface({
   prompt: string;
   domain: string;
   owner: string;
-  template?: AppPlanTemplateId;
-  templates: AppTemplateCard[];
+  promptExamples: AppPromptExample[];
+  agentSkills: AgentSkillCard[];
   catalog: AppBlockRecommendation[];
   catalogLoading: boolean;
   selectedBlocks: Set<string>;
@@ -771,15 +720,14 @@ function AppCreateSurface({
   onPromptChange: (value: string) => void;
   onDomainChange: (value: string) => void;
   onOwnerChange: (value: string) => void;
-  onTemplateChange: (value: AppPlanTemplateId | undefined) => void;
   onToggleBlock: (blockId: string) => void;
   onBuild: () => void;
   onOpenGenerated: () => void;
 }) {
   const selected = catalog.filter((block) => selectedBlocks.has(block.id));
-  const contextTemplateLabel = templates.find((item) => item.id === template)?.title ?? 'Infer template';
   const contextDomainLabel = domain.trim() || 'Auto domain';
-  const plan = generated?.plan ?? planFromSelection(appName, prompt, domain, owner, template, selected);
+  const contextOwnerLabel = owner.trim() || 'Local owner';
+  const plan = generated?.plan ?? planFromSelection(appName, prompt, domain, owner, selected);
   const validation = generated?.validation ?? {
     ok: selected.length > 0,
     certifiedTiles: selected.length,
@@ -827,7 +775,7 @@ function AppCreateSurface({
             <>
               <div className="dql-app-ai-brief">
                 <span><Sparkles size={15} /> AI App Builder</span>
-                <p>Describe the business outcome. DQL will match certified blocks, terms, lineage, and app structure automatically.</p>
+                <p>Describe the business outcome. DQL will dynamically match certified context, shape the story, and mark gaps for review.</p>
                 {generated ? (
                   <div className="dql-app-ai-result">
                     Generated <b>{generated.plan.name}</b> with {generated.validation.certifiedTiles} certified tile
@@ -837,12 +785,19 @@ function AppCreateSurface({
                 ) : null}
               </div>
               <div className="dql-app-composer ai-clean">
+                <div className="dql-app-ai-skill-strip" aria-label="Agent skills">
+                  {agentSkills.map((skill) => (
+                    <span key={skill.id} title={skill.description}>
+                      <CheckCircle2 size={13} />
+                      <b>{skill.title}</b>
+                    </span>
+                  ))}
+                </div>
                 <div className="dql-app-suggestions">
-                  {templates.slice(1, 4).map((item) => (
-                    <button key={item.id} type="button" onClick={() => {
+                  {promptExamples.slice(0, 4).map((item) => (
+                    <button key={item.title} type="button" onClick={() => {
                       onPromptChange(item.prompt);
                       onDomainChange(item.domain);
-                      onTemplateChange(item.id);
                     }}>
                       {item.title}
                     </button>
@@ -852,23 +807,16 @@ function AppCreateSurface({
                 <details className="dql-app-ai-context">
                   <summary>
                     <span>Context</span>
-                    <b>{contextDomainLabel} / {contextTemplateLabel}</b>
+                    <b>{contextDomainLabel} / {contextOwnerLabel}</b>
                     <ChevronDown size={14} />
                   </summary>
                   <div className="dql-app-ai-context-grid">
                     <label>Domain<input value={domain} onChange={(event) => onDomainChange(event.target.value)} /></label>
-                    <label>
-                      Template
-                      <select value={template ?? ''} onChange={(event) => onTemplateChange(event.target.value ? event.target.value as AppPlanTemplateId : undefined)}>
-                        <option value="">Infer from prompt</option>
-                        {templates.map((item) => <option key={item.id} value={item.id}>{item.title}</option>)}
-                      </select>
-                    </label>
                     <label>Owner<input value={owner} onChange={(event) => onOwnerChange(event.target.value)} /></label>
                   </div>
                 </details>
                 <div className="dql-app-ai-send-row">
-                  <span>Auto-match certified context</span>
+                  <span>Dynamic story from certified context</span>
                   <button type="button" className="dql-apps-btn dql-apps-btn-primary" onClick={onBuild} disabled={saving}>
                     <Send size={13} /> {saving ? 'Building...' : 'Send to AI'}
                   </button>
@@ -1673,7 +1621,6 @@ function planFromSelection(
   prompt: string,
   domain: string,
   owner: string,
-  template: AppPlanTemplateId | undefined,
   selected: AppBlockRecommendation[],
 ): GeneratedAppPlan {
   const tiles = selected.map((block, index) => ({
@@ -1693,7 +1640,11 @@ function planFromSelection(
     appId: slugify(name) || 'new-app',
     name,
     prompt,
-    template: template ?? 'revenue_health',
+    skills: AGENT_SKILLS.map((skill) => ({
+      id: skill.id,
+      title: skill.title,
+      description: skill.description,
+    })),
     domain,
     audience: 'stakeholder',
     businessGoal: prompt,
@@ -1708,11 +1659,10 @@ function planFromSelection(
 
 function libraryCounts(apps: AppSummary[], favorites: Set<string>): Record<LibraryFilter, number> {
   return {
-    all: apps.length + APP_TEMPLATES.length,
+    all: apps.length,
     mine: apps.filter((app) => app.storage === 'mine').length,
     shared: apps.filter((app) => (app.storage ?? 'shared') === 'shared').length,
     fav: favorites.size,
-    template: APP_TEMPLATES.length,
     review: apps.filter((app) => app.lifecycle === 'review').length,
   };
 }
@@ -2110,29 +2060,6 @@ const APP_STYLES = `
 .dql-app-card-depth span { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .dql-app-card-depth button { border: 0; background: transparent; color: var(--dql-app-accent); cursor: pointer; font: 800 11px var(--font-ui); }
 
-.dql-app-template-chip {
-  border: 1px solid var(--dql-app-line);
-  border-radius: 999px;
-  padding: 2px 8px;
-  font-family: var(--font-mono);
-  font-size: 9px;
-  color: var(--dql-app-muted);
-}
-
-.dql-app-template-tiles {
-  display: grid;
-  gap: 6px;
-  margin-top: 13px;
-}
-
-.dql-app-template-tiles span {
-  display: flex;
-  align-items: center;
-  gap: 7px;
-  font-size: 11.5px;
-}
-
-.dql-app-template-tiles i,
 .dql-app-block-cite i,
 .dql-app-plan-item > i {
   width: 7px;
@@ -2142,10 +2069,8 @@ const APP_STYLES = `
   flex: none;
 }
 
-.dql-app-template-tiles i.draft,
 .dql-app-block-cite i.draft,
 .dql-app-plan-item > i.draft { background: var(--dql-app-orange); }
-.dql-app-template-tiles b { margin-left: auto; color: var(--dql-app-faint); font-family: var(--font-mono); font-size: 9px; }
 
 .dql-app-seal {
   display: inline-flex;
@@ -2449,6 +2374,38 @@ const APP_STYLES = `
   border-top: 0;
   padding: 12px 16px 16px;
   gap: 10px;
+}
+
+.dql-app-ai-skill-strip {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 6px;
+}
+
+.dql-app-ai-skill-strip span {
+  min-width: 0;
+  min-height: 34px;
+  border: 1px solid var(--dql-app-line);
+  border-radius: 8px;
+  background: var(--dql-app-surface-muted);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  color: var(--dql-app-muted);
+  font: 750 10.5px var(--font-ui);
+  white-space: nowrap;
+}
+
+.dql-app-ai-skill-strip svg {
+  flex: 0 0 auto;
+  color: var(--dql-app-green);
+}
+
+.dql-app-ai-skill-strip b {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .dql-app-suggestions {

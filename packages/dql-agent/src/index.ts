@@ -45,16 +45,17 @@ export type {
   AnswerLoopInput,
 } from "./answer-loop.js";
 export {
-  APP_PLAN_TEMPLATES,
+  APP_BUILDER_SKILLS,
   planAppFromPrompt,
   validateAppPlan,
   generateAppFromPlan,
 } from "./app-builder.js";
 export type {
+  AppBuilderSkill,
+  AppBuilderSkillId,
   AppPlan,
   AppPlanFilter,
   AppPlanPage,
-  AppPlanTemplateId,
   AppPlanTile,
   AppPlanTileKind,
   AppPlanValidationIssue,

@@ -84,11 +84,16 @@ describe("planAppFromPrompt", () => {
         prompt: "Build a weekly revenue health app for the COO",
         kg,
         owner: "ops@example.com",
-    });
+      });
 
-    expect(plan.template).toBe("revenue_health");
-    expect(plan.appId).toBe("weekly-revenue-health");
-    expect(plan.domain).toBe("growth");
+      expect(plan.skills.map((skill) => skill.id)).toEqual([
+        "match_certified_context",
+        "shape_business_story",
+        "draft_missing_sections",
+        "route_review",
+      ]);
+      expect(plan.appId).toBe("weekly-revenue-health");
+      expect(plan.domain).toBe("growth");
       expect(plan.audience).toBe("COO");
       expect(plan.lifecycle).toBe("draft");
       expect(plan.pages[0].filters.map((filter) => filter.id)).toContain(

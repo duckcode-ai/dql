@@ -117,7 +117,6 @@ describe('Apps command center API helpers', () => {
       prompt: 'Build a weekly revenue health app with revenue KPI and monthly trend.',
       domain: 'revenue',
       owner: 'owner@local',
-      template: 'revenue_health',
       force: true,
       selectedBlockIds: ['Revenue by Month'],
     });

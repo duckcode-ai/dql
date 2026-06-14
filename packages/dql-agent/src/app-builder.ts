@@ -12,12 +12,11 @@ import {
 import type { KGNode } from "./kg/types.js";
 import type { KGStore } from "./kg/sqlite-fts.js";
 
-export type AppPlanTemplateId =
-  | "executive_kpi_review"
-  | "revenue_health"
-  | "customer_360"
-  | "data_quality_monitor"
-  | "experiment_readout";
+export type AppBuilderSkillId =
+  | "match_certified_context"
+  | "shape_business_story"
+  | "draft_missing_sections"
+  | "route_review";
 
 export type AppPlanTileKind =
   | "certified_block"
@@ -55,12 +54,18 @@ export interface AppPlanPage {
   tiles: AppPlanTile[];
 }
 
+export interface AppBuilderSkill {
+  id: AppBuilderSkillId;
+  title: string;
+  description: string;
+}
+
 export interface AppPlan {
   version: 1;
   appId: string;
   name: string;
   prompt: string;
-  template: AppPlanTemplateId;
+  skills: AppBuilderSkill[];
   domain: string;
   audience: string;
   businessGoal: string;
@@ -77,7 +82,6 @@ export interface PlanAppFromPromptInput {
   kg: KGStore;
   domain?: string;
   owner?: string;
-  template?: AppPlanTemplateId;
   preferredBlockIds?: string[];
   maxCertifiedTiles?: number;
 }
@@ -105,132 +109,40 @@ export interface GeneratedAppPackage {
   paths: string[];
 }
 
-export const APP_PLAN_TEMPLATES: Record<
-  AppPlanTemplateId,
+export const APP_BUILDER_SKILLS: AppBuilderSkill[] = [
   {
-    id: AppPlanTemplateId;
-    name: string;
-    defaultAudience: string;
-    dashboardTitle: string;
-    tags: string[];
-    draftTiles: Array<{
-      title: string;
-      description: string;
-      viz: DashboardVizConfig["type"];
-    }>;
-  }
-> = {
-  executive_kpi_review: {
-    id: "executive_kpi_review",
-    name: "Executive KPI Review",
-    defaultAudience: "executive team",
-    dashboardTitle: "Executive Overview",
-    tags: ["executive", "kpi", "review"],
-    draftTiles: [
-      {
-        title: "Narrative summary",
-        description:
-          "AI-generated executive narrative awaiting analyst review.",
-        viz: "text",
-      },
-      {
-        title: "Key risks and caveats",
-        description:
-          "Open caveats and interpretation risks for stakeholder review.",
-        viz: "text",
-      },
-    ],
+    id: "match_certified_context",
+    title: "Match certified context",
+    description:
+      "Search the local DQL ledger for certified blocks, terms, business views, and lineage that fit the prompt.",
   },
-  revenue_health: {
-    id: "revenue_health",
-    name: "Revenue Health",
-    defaultAudience: "revenue leadership",
-    dashboardTitle: "Revenue Health",
-    tags: ["revenue", "health", "weekly-review"],
-    draftTiles: [
-      {
-        title: "Revenue drivers narrative",
-        description: "Draft explanation of movement drivers and caveats.",
-        viz: "text",
-      },
-      {
-        title: "Open drilldown gaps",
-        description:
-          "Certified blocks needed for missing segment, channel, or time drilldowns.",
-        viz: "table",
-      },
-    ],
+  {
+    id: "shape_business_story",
+    title: "Shape the story",
+    description:
+      "Turn matched blocks into a stakeholder flow with filters, page title, tile order, and decision framing.",
   },
-  customer_360: {
-    id: "customer_360",
-    name: "Customer 360",
-    defaultAudience: "customer success",
-    dashboardTitle: "Customer 360",
-    tags: ["customer", "360", "account-review"],
-    draftTiles: [
-      {
-        title: "Customer health narrative",
-        description: "Draft customer-health interpretation requiring review.",
-        viz: "text",
-      },
-      {
-        title: "Missing customer drilldowns",
-        description:
-          "Candidate certified blocks for account, cohort, and health slices.",
-        viz: "table",
-      },
-    ],
+  {
+    id: "draft_missing_sections",
+    title: "Draft missing sections",
+    description:
+      "Create clearly marked draft tiles when a needed explanation, drilldown, or metric is not certified yet.",
   },
-  data_quality_monitor: {
-    id: "data_quality_monitor",
-    name: "Data Quality Monitor",
-    defaultAudience: "data platform",
-    dashboardTitle: "Data Quality Monitor",
-    tags: ["data-quality", "monitoring"],
-    draftTiles: [
-      {
-        title: "Quality incident notes",
-        description: "Draft incident narrative and validation checklist.",
-        viz: "text",
-      },
-      {
-        title: "Coverage gaps",
-        description:
-          "Missing freshness, completeness, and anomaly blocks to certify.",
-        viz: "table",
-      },
-    ],
+  {
+    id: "route_review",
+    title: "Route review",
+    description:
+      "Keep generated sections uncertified and attach concrete review tasks before stakeholder use.",
   },
-  experiment_readout: {
-    id: "experiment_readout",
-    name: "Experiment Readout",
-    defaultAudience: "product team",
-    dashboardTitle: "Experiment Readout",
-    tags: ["experiment", "readout"],
-    draftTiles: [
-      {
-        title: "Experiment interpretation",
-        description: "Draft readout narrative requiring analyst approval.",
-        viz: "text",
-      },
-      {
-        title: "Decision checklist",
-        description: "Open guardrails, segments, and sample-size checks.",
-        viz: "table",
-      },
-    ],
-  },
-};
+];
 
 export function planAppFromPrompt(input: PlanAppFromPromptInput): AppPlan {
   const prompt = input.prompt.trim();
   if (!prompt) throw new Error("prompt is required");
-  const template = input.template ?? inferTemplate(prompt);
-  const templateSpec = APP_PLAN_TEMPLATES[template];
   const domain =
     normalizeToken(input.domain) ?? inferDomain(prompt) ?? "general";
-  const audience = inferAudience(prompt) ?? templateSpec.defaultAudience;
-  const appName = titleForPrompt(prompt, templateSpec.name);
+  const audience = inferAudience(prompt) ?? inferDefaultAudience(prompt);
+  const appName = titleForPrompt(prompt, inferFallbackName(prompt, domain));
   const appId = suggestAppId(appName);
   const maxCertifiedTiles = input.maxCertifiedTiles ?? 4;
   const preferredNodes = findPreferredCertifiedBlockNodes(
@@ -252,7 +164,7 @@ export function planAppFromPrompt(input: PlanAppFromPromptInput): AppPlan {
   const certifiedTiles = certifiedNodes.map((node, index) =>
     tileFromCertifiedNode(node, index),
   );
-  const draftTiles = templateSpec.draftTiles.map(
+  const draftTiles = inferDraftTiles(prompt, domain, certifiedNodes).map(
     (tile, index): AppPlanTile => ({
       id: slugify(tile.title) || `draft-${index + 1}`,
       title: tile.title,
@@ -290,7 +202,7 @@ export function planAppFromPrompt(input: PlanAppFromPromptInput): AppPlan {
     appId,
     name: appName,
     prompt,
-    template,
+    skills: APP_BUILDER_SKILLS,
     domain,
     audience,
     businessGoal: prompt,
@@ -299,15 +211,15 @@ export function planAppFromPrompt(input: PlanAppFromPromptInput): AppPlan {
     tags: Array.from(
       new Set([
         "ai-generated-app",
-        ...templateSpec.tags,
+        ...inferTags(prompt, domain),
         `audience:${slugify(audience)}`,
       ]),
     ),
     pages: [
       {
         id: "overview",
-        title: templateSpec.dashboardTitle,
-        description: `Generated ${templateSpec.name} dashboard for ${audience}.`,
+        title: inferDashboardTitle(prompt, domain, appName),
+        description: `Generated app story for ${audience}.`,
         filters,
         tiles: [narrativeTile, ...certifiedTiles, ...draftTiles],
       },
@@ -739,12 +651,15 @@ function appPlanReadme(
     plan.businessGoal,
     "",
     `- Generated from prompt: ${plan.prompt}`,
-    `- Template: ${APP_PLAN_TEMPLATES[plan.template].name}`,
     `- Domain: ${plan.domain}`,
     `- Audience: ${plan.audience}`,
     `- Lifecycle: ${plan.lifecycle}`,
     `- Certified tiles: ${validation.certifiedTiles}`,
     `- Draft/review tiles: ${validation.draftTiles}`,
+    "",
+    "## Agent skills applied",
+    "",
+    ...plan.skills.map((skill) => `- ${skill.title}: ${skill.description}`),
     "",
     "## Review tasks",
     "",
@@ -757,15 +672,120 @@ function appPlanReadme(
   ].join("\n");
 }
 
-function inferTemplate(prompt: string): AppPlanTemplateId {
+function inferFallbackName(prompt: string, domain: string): string {
   const lower = prompt.toLowerCase();
-  if (/\brevenue|arr|sales|pipeline\b/.test(lower)) return "revenue_health";
-  if (/\bcustomer|account|churn|retention\b/.test(lower)) return "customer_360";
+  if (/\brevenue|arr|sales|pipeline|growth\b/.test(lower))
+    return "Revenue Story";
+  if (/\bcustomer|account|churn|retention\b/.test(lower))
+    return "Customer Story";
   if (/\bquality|freshness|anomal|monitor\b/.test(lower))
-    return "data_quality_monitor";
+    return "Data Quality Story";
   if (/\bexperiment|ab test|a\/b|readout\b/.test(lower))
-    return "experiment_readout";
-  return "executive_kpi_review";
+    return "Experiment Story";
+  return `${titleCase(domain)} App`;
+}
+
+function inferDashboardTitle(
+  prompt: string,
+  domain: string,
+  appName: string,
+): string {
+  const lower = prompt.toLowerCase();
+  if (/\boverview|summary|360|review|readout|monitor\b/.test(lower)) {
+    return titleCase(
+      prompt
+        .split(/[.:;]/)[0]
+        .replace(/\b(build|create|generate|make|app|dashboard)\b/gi, "")
+        .trim(),
+    ).slice(0, 64) || "Overview";
+  }
+  if (domain !== "general") return `${titleCase(domain)} Overview`;
+  return appName || "Overview";
+}
+
+function inferDefaultAudience(prompt: string): string {
+  const lower = prompt.toLowerCase();
+  if (lower.includes("executive") || /\bcxo|ceo|cfo|coo|cro\b/.test(lower))
+    return "executive team";
+  if (lower.includes("sales") || lower.includes("revenue"))
+    return "revenue leadership";
+  if (lower.includes("customer")) return "customer team";
+  if (lower.includes("quality") || lower.includes("platform"))
+    return "data team";
+  if (lower.includes("product") || lower.includes("experiment"))
+    return "product team";
+  return "stakeholders";
+}
+
+function inferTags(prompt: string, domain: string): string[] {
+  const lower = prompt.toLowerCase();
+  const tags = new Set<string>(["agent-built", "reviewable", domain]);
+  if (/\brevenue|arr|sales|pipeline|growth\b/.test(lower)) tags.add("revenue");
+  if (/\bcustomer|account|churn|retention\b/.test(lower)) tags.add("customer");
+  if (/\bquality|freshness|anomal|monitor\b/.test(lower)) tags.add("quality");
+  if (/\bexperiment|ab test|a\/b|readout\b/.test(lower)) tags.add("experiment");
+  if (/\bweekly|week\b/.test(lower)) tags.add("weekly-review");
+  if (/\bmonthly|month\b/.test(lower)) tags.add("monthly-review");
+  return Array.from(tags).filter(Boolean);
+}
+
+function inferDraftTiles(
+  prompt: string,
+  domain: string,
+  certifiedNodes: KGNode[],
+): Array<{
+  title: string;
+  description: string;
+  viz: DashboardVizConfig["type"];
+}> {
+  const lower = prompt.toLowerCase();
+  const domainLabel = titleCase(domain);
+  const tiles: Array<{
+    title: string;
+    description: string;
+    viz: DashboardVizConfig["type"];
+  }> = [
+    {
+      title: `${domainLabel} decision narrative`,
+      description:
+        "Draft explanation of the business story, decision context, and caveats inferred from the prompt.",
+      viz: "text",
+    },
+  ];
+
+  if (/\brisk|caveat|issue|anomal|quality\b/.test(lower)) {
+    tiles.push({
+      title: "Open risks and caveats",
+      description:
+        "Generated review checklist for risks that need certified evidence before stakeholder use.",
+      viz: "table",
+    });
+  } else if (/\bsegment|cohort|region|location|product|channel|customer\b/.test(lower)) {
+    tiles.push({
+      title: "Missing drilldowns to certify",
+      description:
+        "Candidate slices and drilldowns the agent could not fully back with certified blocks yet.",
+      viz: "table",
+    });
+  } else {
+    tiles.push({
+      title: "Evidence gaps to certify",
+      description:
+        "Open sections where new or extended DQL blocks should be created before this app is governed.",
+      viz: "table",
+    });
+  }
+
+  if (certifiedNodes.length === 0) {
+    tiles.push({
+      title: "Certified block search",
+      description:
+        "No certified blocks matched strongly enough; review suggested sources and create certified blocks.",
+      viz: "table",
+    });
+  }
+
+  return tiles;
 }
 
 function inferDomain(prompt: string): string | undefined {
