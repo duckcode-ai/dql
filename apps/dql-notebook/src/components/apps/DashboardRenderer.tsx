@@ -42,6 +42,8 @@ export function DashboardRenderer({
   selectedBlockId,
   onBlockFocus,
   onOpenLineageNode,
+  copilotOpen,
+  onCopilotChange,
 }: {
   appId: string;
   dashboard: DashboardDocumentResponse['dashboard'];
@@ -51,6 +53,8 @@ export function DashboardRenderer({
   selectedBlockId?: string | null;
   onBlockFocus?: (blockId: string) => void;
   onOpenLineageNode?: (nodeId: string) => void;
+  copilotOpen?: boolean;
+  onCopilotChange?: (open: boolean) => void;
 }): JSX.Element {
   const { state } = useNotebook();
   const [run, setRun] = useState<DashboardRunResponse | null>(null);
@@ -263,6 +267,24 @@ export function DashboardRenderer({
     void loadLineage();
   }, [appId, dashboard.id, loadLineage, onOpenLineageNode]);
 
+  const effectiveCopilotOpen = onCopilotChange ? Boolean(copilotOpen) : chatOpen;
+  const openCopilot = useCallback(() => {
+    setAddMenuOpen(false);
+    if (onCopilotChange) {
+      onCopilotChange(true);
+      return;
+    }
+    setChatOpen(true);
+  }, [onCopilotChange]);
+  const toggleCopilot = useCallback(() => {
+    setAddMenuOpen(false);
+    if (onCopilotChange) {
+      onCopilotChange(!copilotOpen);
+      return;
+    }
+    setChatOpen((value) => !value);
+  }, [copilotOpen, onCopilotChange]);
+
   return (
     <div style={{ display: 'block', minHeight: 0 }}>
       <div style={{ flex: 1, minWidth: 0 }}>
@@ -293,10 +315,7 @@ export function DashboardRenderer({
               setAddMenuOpen(false);
               void addHeadingTile();
             }}
-            onAi={() => {
-              setAddMenuOpen(false);
-              setChatOpen(true);
-            }}
+            onAi={openCopilot}
           />
         )}
         {editable && dashboard.layout.items.length > 0 && (
@@ -304,14 +323,11 @@ export function DashboardRenderer({
         )}
         <button
           type="button"
-          onClick={() => {
-            setAddMenuOpen(false);
-            setChatOpen((v) => !v);
-          }}
-          style={toolbarButtonStyle(chatOpen)}
+          onClick={toggleCopilot}
+          style={toolbarButtonStyle(effectiveCopilotOpen)}
         >
           <Bot size={14} strokeWidth={2} />
-          {chatOpen ? 'Hide AI' : 'Ask AI'}
+          {effectiveCopilotOpen ? 'Hide copilot' : 'AI Copilot'}
         </button>
         <button type="button" onClick={openLineage} style={toolbarButtonStyle(false)} title="Open focused dashboard lineage">
           <GitBranch size={14} strokeWidth={2} />
@@ -357,10 +373,7 @@ export function DashboardRenderer({
                 setAddMenuOpen(false);
                 void addHeadingTile();
               }}
-              onAi={() => {
-                setAddMenuOpen(false);
-                setChatOpen(true);
-              }}
+              onAi={openCopilot}
             />
           </div>
         </div>
@@ -400,7 +413,7 @@ export function DashboardRenderer({
         </aside>
       )}
 
-      {chatOpen && (
+      {chatOpen && !onCopilotChange && (
         <aside style={dashboardChatDrawerStyle(chatExpanded)}>
           <AgentChatPanel
             title="Dashboard AI"

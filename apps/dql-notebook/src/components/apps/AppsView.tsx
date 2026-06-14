@@ -10,14 +10,9 @@ import {
   Download,
   Eye,
   FileText,
-  ExternalLink,
-  GitBranch,
   LayoutDashboard,
   LineChart,
-  ListTree,
-  MessageSquare,
   Plus,
-  Route,
   Search,
   Send,
   ShieldCheck,
@@ -1071,7 +1066,6 @@ function AppWorkspaceSurface({
           <ShieldCheck size={14} /> Certified params
         </span>
         <Toggle label="Smart view" checked={smartView} onChange={onSmartViewChange} />
-        <Toggle label="Explain" checked={explainOpen} onChange={onExplainChange} />
       </div>
 
       <main className="dql-app-view-wrap">
@@ -1116,6 +1110,8 @@ function AppWorkspaceSurface({
                 selectedBlockId={selectedBlockId}
                 onBlockFocus={setSelectedBlockId}
                 onOpenLineageNode={onOpenLineageNode}
+                copilotOpen={explainOpen}
+                onCopilotChange={onExplainChange}
                 onDashboardChanged={onDashboardChanged}
               />
             ) : section === 'notebooks' ? (
@@ -1131,14 +1127,13 @@ function AppWorkspaceSurface({
             )}
           </div>
           {explainOpen && section === 'dashboards' ? (
-            <AppExplainPanel
+            <AppCopilotPanel
               app={app}
               appDoc={appDoc}
               dashboardDoc={dashboardDoc}
               selectedBlockId={selectedBlockId}
               themeMode={themeMode}
               onSelectBlock={setSelectedBlockId}
-              onOpenLineageNode={onOpenLineageNode}
             />
           ) : null}
         </div>
@@ -1285,14 +1280,13 @@ function DashboardPagePicker({
   );
 }
 
-function AppExplainPanel({
+function AppCopilotPanel({
   app,
   appDoc,
   dashboardDoc,
   selectedBlockId,
   themeMode,
   onSelectBlock,
-  onOpenLineageNode,
 }: {
   app: AppSummary | null;
   appDoc: AppDocumentSummary | null;
@@ -1300,11 +1294,7 @@ function AppExplainPanel({
   selectedBlockId: string | null;
   themeMode: ThemeMode;
   onSelectBlock: (blockId: string | null) => void;
-  onOpenLineageNode: (nodeId: string) => void;
 }) {
-  const [lineage, setLineage] = useState<any | null>(null);
-  const [question, setQuestion] = useState('');
-  const [chatOpen, setChatOpen] = useState(false);
   const [chatExpanded, setChatExpanded] = useState(false);
   const [askSeed, setAskSeed] = useState('');
   const blockTiles = useMemo(() => {
@@ -1323,35 +1313,6 @@ function AppExplainPanel({
   }, [dashboardDoc]);
   const selectedBlock = blockTiles.find((item) => item.blockId === selectedBlockId) ?? blockTiles[0] ?? null;
 
-  useEffect(() => {
-    if (!app || !dashboardDoc) {
-      setLineage(null);
-      return;
-    }
-    let cancelled = false;
-    void api.fetchScopedLineage({
-      domain: app.domain,
-      appId: app.id,
-      dashboardId: dashboardDoc.dashboard.id,
-      blockId: selectedBlock?.blockId,
-    }).then((result) => {
-      if (!cancelled) setLineage(result);
-    });
-    return () => {
-      cancelled = true;
-    };
-  }, [app, dashboardDoc, selectedBlock?.blockId]);
-
-  const nodes = lineage?.graph?.nodes ?? [];
-  const edges = lineage?.graph?.edges ?? [];
-  const sourceCount = nodes.filter((node: any) => ['source', 'table'].includes(String(node.type))).length;
-  const modelCount = nodes.filter((node: any) => ['dbt_model', 'model'].includes(String(node.type))).length;
-  const businessCount = nodes.filter((node: any) => ['term', 'business_view', 'domain'].includes(String(node.type))).length;
-  const focusNodeId = selectedBlock
-    ? `block:${selectedBlock.blockId}`
-    : dashboardDoc && app
-      ? `dashboard:${app.id}/${dashboardDoc.dashboard.id}`
-      : null;
   const contextJson = JSON.stringify({
     scope: selectedBlock ? 'selected-dashboard-block' : 'dashboard',
     appId: app?.id,
@@ -1360,49 +1321,41 @@ function AppExplainPanel({
     dashboardTitle: dashboardDoc?.dashboard.metadata.title,
     domain: app?.domain ?? dashboardDoc?.dashboard.metadata.domain,
     selectedBlock,
-    lineageFocus: lineage?.focus,
-    lineageView: lineage?.view,
-    breadcrumbs: lineage?.breadcrumbs,
+    availableBlocks: blockTiles.map((block) => ({
+      blockId: block.blockId,
+      title: block.title,
+      viz: block.viz,
+    })),
   }, null, 2);
-  const openAsk = (prompt?: string) => {
-    const next = prompt ?? question.trim() ?? '';
-    const fallback = selectedBlock
-      ? `Explain ${selectedBlock.blockId} and show the source path, consumers, and missing context.`
-      : 'Explain this dashboard and show the source path, consumers, and missing context.';
-    const seeded = next || fallback;
-    setQuestion(seeded);
-    setAskSeed(seeded);
-    setChatOpen(true);
-  };
-  const drilldowns = [
+  const promptStarters = [
     {
-      label: 'Source path',
-      icon: <Route size={14} />,
+      label: 'Improve story',
+      icon: <Sparkles size={14} />,
       prompt: selectedBlock
-        ? `Trace ${selectedBlock.blockId} back to source tables and dbt models.`
-        : 'Trace this dashboard back to source tables and dbt models.',
+        ? `Suggest changes to make ${selectedBlock.title} clearer in this app story.`
+        : 'Suggest changes to make this dashboard tell a clearer business story.',
     },
     {
-      label: 'Consumers',
-      icon: <ListTree size={14} />,
+      label: 'Explain focus',
+      icon: <FileText size={14} />,
       prompt: selectedBlock
-        ? `Who consumes ${selectedBlock.blockId}, and where does it appear in apps, dashboards, or notebooks?`
-        : 'Who consumes this dashboard, and where is it reused?',
+        ? `Explain ${selectedBlock.blockId}, the metric logic, and what decision it supports.`
+        : 'Explain this dashboard and the decisions it supports.',
     },
     {
-      label: 'Quality gaps',
+      label: 'Review gaps',
       icon: <ShieldCheck size={14} />,
       prompt: selectedBlock
-        ? `What is missing or not certified for ${selectedBlock.blockId}?`
-        : 'What context, certification, or review gaps are missing for this app?',
+        ? `What context, certification, or review gaps should we fix for ${selectedBlock.blockId}?`
+        : 'What context, certification, or review gaps should we fix for this app?',
     },
   ];
   return (
-    <aside className="dql-app-explain-panel dql-app-research-panel">
+    <aside className="dql-app-explain-panel dql-app-copilot-panel">
       <div className="dql-app-explain-head">
-        <span>Research</span>
-        <h3>{selectedBlock?.title ?? 'Dashboard context'}</h3>
-        <p>{selectedBlock ? `Focused on ${selectedBlock.blockId}` : 'Select a block tile to inspect lineage and ask AI.'}</p>
+        <span>AI Copilot</span>
+        <h3>{selectedBlock?.title ?? 'Dashboard copilot'}</h3>
+        <p>{selectedBlock ? `Focused on ${selectedBlock.blockId}` : 'Select a block tile or ask for dashboard changes.'}</p>
       </div>
       <div className="dql-app-ex-section compact">
         <div className="dql-app-ex-label">Block focus</div>
@@ -1423,76 +1376,33 @@ function AppExplainPanel({
         </div>
       </div>
       <div className="dql-app-ex-section">
-        <div className="dql-app-rail-title">
-          <span className="dql-app-ex-label">Lineage story</span>
-          {focusNodeId ? (
-            <button type="button" onClick={() => onOpenLineageNode(focusNodeId)} title="Open focused lineage">
-              <ExternalLink size={13} /> Open
-            </button>
-          ) : null}
-        </div>
-        <div className="dql-app-storyline">
-          <div><span>SRC</span><b>{sourceCount || 'source'}</b><small>tables</small></div>
-          <i />
-          <div><span>DBT</span><b>{modelCount || 'model'}</b><small>transform</small></div>
-          <i />
-          <div><span>BLK</span><b>{selectedBlock?.blockId ?? 'block'}</b><small>answer</small></div>
-          <i />
-          <div><span>APP</span><b>{app?.name ?? 'App'}</b><small>use</small></div>
-        </div>
-        <div className="dql-app-lineage-stats">
-          <Leader label="business context" value={String(businessCount)} />
-          <Leader label="lineage edges" value={String(edges.length)} />
-        </div>
-      </div>
-      <div className="dql-app-ex-section">
-        <div className="dql-app-rail-title">
-          <span className="dql-app-ex-label">Drilldowns</span>
-          <button type="button" onClick={() => focusNodeId && onOpenLineageNode(focusNodeId)}>
-            <GitBranch size={13} /> Graph
-          </button>
-        </div>
+        <div className="dql-app-ex-label">Prompt starters</div>
         <div className="dql-app-drilldown-grid">
-          {drilldowns.map((item) => (
-            <button key={item.label} type="button" onClick={() => openAsk(item.prompt)}>
+          {promptStarters.map((item) => (
+            <button key={item.label} type="button" onClick={() => setAskSeed(`${item.prompt} `)}>
               {item.icon}
               <span>{item.label}</span>
             </button>
           ))}
         </div>
       </div>
-      <div className="dql-app-ex-section">
-        <div className="dql-app-askbox">
-          <MessageSquare size={14} />
-          <input
-            value={question}
-            onChange={(event) => setQuestion(event.target.value)}
-            placeholder={selectedBlock ? `Ask about ${selectedBlock.blockId}...` : 'Ask about this dashboard...'}
+      <div className="dql-app-copilot-chat">
+        <div className={`dql-app-rail-chat ${chatExpanded ? 'expanded' : ''}`}>
+          <AgentChatPanel
+            title={selectedBlock ? `Copilot: ${selectedBlock.title}` : 'App AI Copilot'}
+            scopeHint="App dashboard and selected block context"
+            upstreamContext={contextJson}
+            themeMode={themeMode}
+            hideSqlByDefault
+            initialInput={askSeed}
+            emptyHint="Ask for dashboard changes, block explanations, missing context, or what to add next."
+            addToAppTarget={app && dashboardDoc ? { appId: app.id, dashboardId: dashboardDoc.dashboard.id } : undefined}
+            conversationTarget={app && dashboardDoc ? { appId: app.id, dashboardId: dashboardDoc.dashboard.id } : undefined}
+            expanded={chatExpanded}
+            onToggleExpanded={() => setChatExpanded((value) => !value)}
+            onClose={chatExpanded ? () => setChatExpanded(false) : undefined}
           />
-          <button type="button" onClick={() => openAsk()}>
-            Ask
-          </button>
         </div>
-        {chatOpen ? (
-          <div className={`dql-app-rail-chat ${chatExpanded ? 'expanded' : ''}`}>
-            <AgentChatPanel
-              title={selectedBlock ? `Ask: ${selectedBlock.blockId}` : 'Ask dashboard'}
-              scopeHint="Selected app block context"
-              upstreamContext={contextJson}
-              themeMode={themeMode}
-              hideSqlByDefault
-              initialInput={askSeed}
-              addToAppTarget={app && dashboardDoc ? { appId: app.id, dashboardId: dashboardDoc.dashboard.id } : undefined}
-              conversationTarget={app && dashboardDoc ? { appId: app.id, dashboardId: dashboardDoc.dashboard.id } : undefined}
-              expanded={chatExpanded}
-              onToggleExpanded={() => setChatExpanded((value) => !value)}
-              onClose={() => {
-                setChatOpen(false);
-                setChatExpanded(false);
-              }}
-            />
-          </div>
-        ) : null}
       </div>
       {(appDoc?.drafts?.length ?? 0) > 0 ? (
         <div className="dql-app-gapcard">
@@ -3185,6 +3095,18 @@ const APP_STYLES = `
   box-shadow: var(--dql-app-shadow);
 }
 
+.dql-app-copilot-panel {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.dql-app-copilot-chat {
+  flex: 1;
+  min-height: 0;
+  padding: 12px;
+}
+
 .dql-app-explain-head { padding: 14px 16px 12px; border-bottom: 1px solid var(--dql-app-line); }
 .dql-app-explain-head span,
 .dql-app-ex-label {
@@ -3237,41 +3159,6 @@ const APP_STYLES = `
   height: 9px;
   background: var(--dql-app-accent);
   margin-left: 13px;
-}
-
-.dql-app-askbox {
-  border-radius: 7px;
-  border: 1px solid var(--dql-app-line-2);
-  background: var(--dql-app-control);
-  padding: 6px 7px 6px 9px;
-  display: flex;
-  align-items: center;
-  gap: 7px;
-}
-
-.dql-app-askbox svg {
-  flex: 0 0 auto;
-  color: var(--dql-app-accent);
-}
-
-.dql-app-askbox input {
-  width: 100%;
-  border: 0;
-  outline: 0;
-  background: transparent;
-  color: var(--dql-app-ink);
-  font: 12.5px var(--font-ui);
-}
-
-.dql-app-askbox button {
-  height: 26px;
-  border: 0;
-  border-radius: 6px;
-  background: var(--dql-app-deep);
-  color: #fff;
-  padding: 0 9px;
-  cursor: pointer;
-  font: 800 11px var(--font-ui);
 }
 
 .dql-app-suggests { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 9px; }
@@ -3350,50 +3237,6 @@ const APP_STYLES = `
   font: 800 10.5px var(--font-ui);
 }
 
-.dql-app-storyline {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) 10px minmax(0, 1fr) 10px minmax(0, 1.2fr) 10px minmax(0, 1fr);
-  align-items: center;
-  gap: 4px;
-}
-
-.dql-app-storyline > div {
-  min-width: 0;
-  border: 1px solid var(--dql-app-line);
-  border-radius: 8px;
-  background: var(--dql-app-control);
-  padding: 7px;
-  display: grid;
-  gap: 2px;
-}
-
-.dql-app-storyline > i {
-  height: 1px;
-  background: var(--dql-app-line-2);
-}
-
-.dql-app-storyline span {
-  color: var(--dql-app-accent);
-  font: 900 8px var(--font-mono);
-}
-
-.dql-app-storyline b {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  font: 850 11px var(--font-ui);
-}
-
-.dql-app-storyline small {
-  color: var(--dql-app-faint);
-  font: 700 8.5px var(--font-mono);
-}
-
-.dql-app-lineage-stats {
-  margin-top: 9px;
-}
-
 .dql-app-drilldown-grid {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
@@ -3421,8 +3264,8 @@ const APP_STYLES = `
 }
 
 .dql-app-rail-chat {
-  margin-top: 10px;
-  height: min(460px, 52vh);
+  height: min(520px, calc(100vh - 405px));
+  min-height: 330px;
   border: 1px solid var(--dql-app-line-2);
   border-radius: 8px;
   overflow: hidden;
@@ -3606,14 +3449,6 @@ const APP_STYLES = `
   .dql-app-page-picker select { min-width: 0; max-width: 100%; }
   .dql-app-preview-tile,
   .dql-app-preview-tile.wide { grid-column: 1 / -1; }
-  .dql-app-storyline {
-    grid-template-columns: 1fr;
-  }
-  .dql-app-storyline > i {
-    width: 1px;
-    height: 10px;
-    margin-left: 14px;
-  }
   .dql-app-drilldown-grid {
     grid-template-columns: 1fr;
   }

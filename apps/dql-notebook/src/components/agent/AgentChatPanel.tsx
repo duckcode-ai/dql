@@ -24,6 +24,7 @@ export function AgentChatPanel({
   conversationTarget,
   onConversationUpdated,
   initialInput,
+  emptyHint,
   expanded = false,
   onToggleExpanded,
   onClose,
@@ -37,6 +38,7 @@ export function AgentChatPanel({
   conversationTarget?: { appId: string; dashboardId?: string; notebookPath?: string };
   onConversationUpdated?: () => void;
   initialInput?: string;
+  emptyHint?: string;
   expanded?: boolean;
   onToggleExpanded?: () => void;
   onClose?: () => void;
@@ -50,10 +52,13 @@ export function AgentChatPanel({
   const [error, setError] = useState<string | null>(null);
   const [conversationId, setConversationId] = useState<string | null>(null);
   const abortRef = useRef<AbortController | null>(null);
+  const lastInitialInputRef = useRef(initialInput ?? '');
 
   React.useEffect(() => {
     if (!initialInput || running) return;
-    setInput((current) => current || initialInput);
+    if (initialInput === lastInitialInputRef.current) return;
+    lastInitialInputRef.current = initialInput;
+    setInput(initialInput);
   }, [initialInput, running]);
 
   const send = async () => {
@@ -144,7 +149,7 @@ export function AgentChatPanel({
       <div style={{ flex: 1, minHeight: 0, overflow: 'auto', padding: 12, display: 'flex', flexDirection: 'column', gap: 10 }}>
         {messages.length === 0 && !running ? (
           <div style={{ fontSize: 12, color: t.textSecondary, lineHeight: 1.45 }}>
-            Ask about metric definitions, filters, tile results, or where to find certified analysis.
+            {emptyHint ?? 'Ask about metric definitions, filters, tile results, or where to find certified analysis.'}
           </div>
         ) : null}
         {messages.map((m, index) => (
