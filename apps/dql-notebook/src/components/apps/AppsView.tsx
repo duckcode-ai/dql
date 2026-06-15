@@ -6,12 +6,14 @@ import {
   Blocks,
   BookOpenText,
   Bot,
+  CalendarDays,
   Check,
   ChevronDown,
   Download,
   FileText,
   LayoutDashboard,
   LineChart,
+  MapPin,
   MessageSquareText,
   Pencil,
   Plus,
@@ -21,6 +23,7 @@ import {
   Sparkles,
   Star,
   Share2,
+  Users,
   Workflow,
 } from 'lucide-react';
 import { useNotebook } from '../../store/NotebookStore';
@@ -1038,25 +1041,51 @@ function AppWorkspaceSurface({
   return (
     <div className="dql-app-workspace">
       <div className="dql-app-view-topbar">
-        <button type="button" className="dql-app-back" onClick={onBack}><ArrowLeft size={14} /> Apps</button>
-        <span className="dql-app-crumb">/ <b>{app?.id ?? 'app'}</b></span>
+        <button type="button" className="dql-app-back" onClick={onBack} title="Back to apps"><ArrowLeft size={16} /></button>
+        <span className="dql-app-crumb"><b>{app?.id ?? 'app'}</b></span>
         <StatusSeal tone="certified">{certifiedCount} certified</StatusSeal>
         {draftCount > 0 ? <StatusSeal tone="draft">{draftCount} draft</StatusSeal> : null}
-        <button
-          type="button"
-          className={`dql-app-customize-btn ${experience === 'build' ? 'on' : ''}`}
-          onClick={() => onExperienceChange(experience === 'build' ? 'view' : 'build')}
-          title={experience === 'build' ? 'Finish customizing and return to the clean view' : 'Rearrange tiles and edit this app'}
-        >
-          {experience === 'build' ? <><Check size={14} /> Done</> : <><Pencil size={14} /> Customize</>}
-        </button>
+
+        <span className="dql-app-topbar-divider" aria-hidden="true" />
+
+        <div className="dql-app-topbar-filters">
+          <FilterSelect icon={<CalendarDays size={13} />} label="Period" value={period} onChange={onPeriodChange} options={[
+            ['last_30_days', 'Last 30 days'],
+            ['last_quarter', 'Last quarter'],
+            ['last_12_months', 'Last 12 months'],
+            ['year_to_date', 'Year to date'],
+          ]} />
+          <FilterSelect icon={<Users size={13} />} label="Segment" value={segment} onChange={onSegmentChange} options={[
+            ['all_customers', 'All customers'],
+            ['new', 'New'],
+            ['returning', 'Returning'],
+            ['enterprise', 'Enterprise'],
+          ]} />
+          <FilterSelect icon={<MapPin size={13} />} label="Region" value={region} onChange={onRegionChange} options={[
+            ['all', 'All'],
+            ['north', 'North'],
+            ['south', 'South'],
+            ['east', 'East'],
+            ['west', 'West'],
+          ]} />
+          <Toggle label="Smart view" checked={smartView} onChange={onSmartViewChange} />
+        </div>
+
         <div className="dql-app-view-actions">
           <PersonaSwitcher app={appDoc?.app ?? null} />
-          <button type="button" className="dql-apps-btn dql-apps-btn-line" title="Copy local app handoff" onClick={() => void copyShareLink()}>
-            <Share2 size={14} /> {shareStatus === 'copied' ? 'Copied' : shareStatus === 'ready' ? 'Copy text' : 'Share'}
+          <button
+            type="button"
+            className={`dql-app-customize-btn ${experience === 'build' ? 'on' : ''}`}
+            onClick={() => onExperienceChange(experience === 'build' ? 'view' : 'build')}
+            title={experience === 'build' ? 'Finish customizing and return to the clean view' : 'Rearrange tiles and edit this app'}
+          >
+            {experience === 'build' ? <><Check size={14} /> Done</> : <><Pencil size={14} /> Customize</>}
           </button>
-          <button type="button" className="dql-apps-btn dql-apps-btn-line" title="Download app brief" onClick={downloadBrief}>
-            <Download size={14} /> {shareStatus === 'downloaded' ? 'Saved' : 'Brief'}
+          <button type="button" className="dql-apps-btn dql-apps-btn-line dql-apps-btn-icon" title={shareStatus === 'copied' ? 'Copied handoff' : 'Share local app handoff'} onClick={() => void copyShareLink()}>
+            {shareStatus === 'copied' ? <Check size={15} /> : <Share2 size={15} />}
+          </button>
+          <button type="button" className="dql-apps-btn dql-apps-btn-line dql-apps-btn-icon" title={shareStatus === 'downloaded' ? 'Brief saved' : 'Download app brief'} onClick={downloadBrief}>
+            {shareStatus === 'downloaded' ? <Check size={15} /> : <Download size={15} />}
           </button>
           {shareStatus === 'ready' ? (
             <div className="dql-app-share-popover">
@@ -1065,32 +1094,6 @@ function AppWorkspaceSurface({
             </div>
           ) : null}
         </div>
-      </div>
-
-      <div className="dql-app-filterbar">
-        <FilterSelect label="Period" value={period} onChange={onPeriodChange} options={[
-          ['last_30_days', 'Last 30 days'],
-          ['last_quarter', 'Last quarter'],
-          ['last_12_months', 'Last 12 months'],
-          ['year_to_date', 'Year to date'],
-        ]} />
-        <FilterSelect label="Segment" value={segment} onChange={onSegmentChange} options={[
-          ['all_customers', 'All customers'],
-          ['new', 'New'],
-          ['returning', 'Returning'],
-          ['enterprise', 'Enterprise'],
-        ]} />
-        <FilterSelect label="Region" value={region} onChange={onRegionChange} options={[
-          ['all', 'All'],
-          ['north', 'North'],
-          ['south', 'South'],
-          ['east', 'East'],
-          ['west', 'West'],
-        ]} />
-        <span className="dql-app-filter-note" title="Certified dashboard parameters rerun local blocks">
-          <ShieldCheck size={14} /> Certified params
-        </span>
-        <Toggle label="Smart view" checked={smartView} onChange={onSmartViewChange} />
       </div>
 
       <main className="dql-app-view-wrap">
@@ -1624,18 +1627,20 @@ function PlanItem({ tile }: { tile: GeneratedAppPlan['pages'][number]['tiles'][n
 
 function FilterSelect({
   label,
+  icon,
   value,
   options,
   onChange,
 }: {
   label: string;
+  icon?: ReactNode;
   value: string;
   options: Array<[string, string]>;
   onChange: (value: string) => void;
 }) {
   return (
-    <label className="dql-app-filter-select">
-      <span>{label}</span>
+    <label className="dql-app-filter-select" title={label} aria-label={label}>
+      {icon ? <span className="dql-app-filter-icon">{icon}</span> : <span>{label}</span>}
       <select value={value} onChange={(event) => onChange(event.target.value)}>
         {options.map(([id, name]) => <option key={id} value={id}>{name}</option>)}
       </select>
@@ -2020,6 +2025,8 @@ const APP_STYLES = `
 .dql-apps-btn:disabled { opacity: 0.62; cursor: not-allowed; }
 .dql-apps-btn-primary { background: var(--dql-app-accent); color: #fff; }
 .dql-apps-btn-line { background: var(--dql-app-surface); border-color: var(--dql-app-line-2); color: var(--dql-app-ink); }
+.dql-apps-btn-icon { width: 32px; padding: 0; flex: none; }
+.dql-apps-btn-icon:hover { color: var(--dql-app-accent); border-color: rgba(79, 99, 215, 0.34); background: var(--dql-app-accent-soft); }
 .dql-apps-btn-dark { width: 100%; background: var(--dql-app-deep); border-color: #1f2937; color: #fff; margin-top: 12px; }
 
 .dql-apps-startgrid {
@@ -2312,21 +2319,47 @@ const APP_STYLES = `
   min-height: 54px;
   display: flex;
   align-items: center;
-  gap: 12px;
+  gap: 10px;
   padding: 9px 18px;
   border-bottom: 1px solid var(--dql-app-line);
   background: var(--dql-app-surface);
+  flex-wrap: wrap;
 }
 
 .dql-app-back {
-  border: 0;
-  background: transparent;
+  width: 30px;
+  height: 30px;
+  border: 1px solid var(--dql-app-line);
+  border-radius: 8px;
+  background: var(--dql-app-control);
   display: inline-flex;
   align-items: center;
-  gap: 6px;
+  justify-content: center;
   color: var(--dql-app-muted);
   cursor: pointer;
-  font: 800 12px var(--font-ui);
+  flex: none;
+}
+
+.dql-app-back:hover { color: var(--dql-app-ink); border-color: var(--dql-app-line-2); }
+
+.dql-app-topbar-divider {
+  width: 1px;
+  height: 22px;
+  background: var(--dql-app-line);
+  flex: none;
+}
+
+.dql-app-topbar-filters {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.dql-app-filter-icon {
+  display: inline-flex;
+  align-items: center;
+  color: var(--dql-app-faint);
 }
 
 .dql-app-name-input input {
@@ -2370,7 +2403,6 @@ const APP_STYLES = `
 .dql-app-mode-seg button.on { background: var(--dql-app-deep); color: #fff; }
 
 .dql-app-customize-btn {
-  margin: 0 auto;
   display: inline-flex;
   align-items: center;
   justify-content: center;
