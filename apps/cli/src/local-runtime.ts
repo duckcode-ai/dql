@@ -373,6 +373,31 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
     };
   };
 
+  const executeGeneratedSqlForAgent = async (sql: string): Promise<AgentResultPayload> => {
+    const boundedSql = buildAgentPreviewSql(sql);
+    const semantic = prepareSemanticSql(boundedSql, semanticLayer);
+    if (semantic.unresolvedRefs.length > 0) {
+      throw new Error(`Unknown semantic reference${semantic.unresolvedRefs.length > 1 ? 's' : ''}: ${semantic.unresolvedRefs.join(', ')}`);
+    }
+    const prepared = prepareLocalExecution(semantic.sql, connection, projectRoot, projectConfig);
+    const app = loadRuntimeApp(projectRoot, activePersonaAppId());
+    assertAppAccess({ app, domain: app?.domain, level: 'execute' });
+    const rawResult = await executor.executeQuery(
+      prepared.sql,
+      [],
+      runtimeVariables({}),
+      prepared.connection,
+    );
+    const normalized = normalizeQueryResult(rawResult, semantic.semanticRefs);
+    return {
+      columns: normalized.columns,
+      rows: normalized.rows,
+      rowCount: normalized.rowCount,
+      executionTime: normalized.executionTime,
+      sql: prepared.sql,
+    };
+  };
+
   // SSE clients for /api/watch hot-reload
   const sseClients = new Set<ServerResponse>();
 
@@ -2769,7 +2794,14 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
       const emit = (turn: unknown) => { res.write(`data: ${JSON.stringify(turn)}\n\n`); };
       try {
         await runner.run(
-          { provider: resolvedProvider, messages, upstream, projectRoot, executeCertifiedBlock: executeCertifiedBlockForAgent },
+          {
+            provider: resolvedProvider,
+            messages,
+            upstream,
+            projectRoot,
+            executeCertifiedBlock: executeCertifiedBlockForAgent,
+            executeGeneratedSql: executeGeneratedSqlForAgent,
+          },
           emit,
           controller.signal,
         );
@@ -3747,6 +3779,101 @@ export function prepareLocalExecution(
       : sql,
     connection: normalizedConnection,
   };
+}
+
+const AGENT_PREVIEW_FORBIDDEN_SQL = [
+  'alter',
+  'analyze',
+  'attach',
+  'call',
+  'copy',
+  'create',
+  'delete',
+  'detach',
+  'drop',
+  'export',
+  'grant',
+  'import',
+  'insert',
+  'install',
+  'load',
+  'merge',
+  'pragma',
+  'reset',
+  'revoke',
+  'set',
+  'truncate',
+  'update',
+  'vacuum',
+];
+
+export function buildAgentPreviewSql(sql: string): string {
+  const trimmed = sql.trim();
+  if (!trimmed) throw new Error('Generated SQL preview is empty.');
+  const withoutTrailingSemicolon = trimmed.replace(/;\s*$/, '').trim();
+  const scanSql = stripSqlStringsAndComments(withoutTrailingSemicolon).trim();
+  if (!/^(select|with)\b/i.test(scanSql)) {
+    throw new Error('Generated SQL preview only supports read-only SELECT or WITH queries.');
+  }
+  if (scanSql.includes(';')) {
+    throw new Error('Generated SQL preview only supports one statement.');
+  }
+  const forbiddenPattern = new RegExp(`\\b(${AGENT_PREVIEW_FORBIDDEN_SQL.join('|')})\\b`, 'i');
+  const forbidden = scanSql.match(forbiddenPattern)?.[1];
+  if (forbidden) {
+    throw new Error(`Generated SQL preview rejected unsupported statement keyword: ${forbidden.toUpperCase()}.`);
+  }
+  return `SELECT * FROM (\n${withoutTrailingSemicolon}\n) AS dql_agent_preview LIMIT 200`;
+}
+
+function stripSqlStringsAndComments(sql: string): string {
+  let output = '';
+  for (let index = 0; index < sql.length; index += 1) {
+    const current = sql[index];
+    const next = sql[index + 1];
+    if (current === '-' && next === '-') {
+      output += '  ';
+      index += 2;
+      while (index < sql.length && sql[index] !== '\n') {
+        output += ' ';
+        index += 1;
+      }
+      if (index < sql.length) output += '\n';
+      continue;
+    }
+    if (current === '/' && next === '*') {
+      output += '  ';
+      index += 2;
+      while (index < sql.length && !(sql[index] === '*' && sql[index + 1] === '/')) {
+        output += sql[index] === '\n' ? '\n' : ' ';
+        index += 1;
+      }
+      if (index < sql.length) {
+        output += '  ';
+        index += 1;
+      }
+      continue;
+    }
+    if (current === "'" || current === '"') {
+      const quote = current;
+      output += ' ';
+      while (index + 1 < sql.length) {
+        index += 1;
+        output += sql[index] === '\n' ? '\n' : ' ';
+        if (sql[index] === quote) {
+          if (sql[index + 1] === quote) {
+            index += 1;
+            output += ' ';
+            continue;
+          }
+          break;
+        }
+      }
+      continue;
+    }
+    output += current;
+  }
+  return output;
 }
 
 export interface PreparedSemanticSql {

@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
+  buildAgentPreviewSql,
   buildDbtStatus,
   createBlockArtifacts,
   createSemanticBuilderBlock,
@@ -84,6 +85,19 @@ describe('prepareLocalExecution', () => {
 
     expect(prepared.connection).toEqual({ driver: 'file', filepath: ':memory:' });
     expect(prepared.sql).toBe("SELECT * FROM read_csv_auto('/tmp/demo-project/data/revenue.csv')");
+  });
+});
+
+describe('buildAgentPreviewSql', () => {
+  it('wraps read-only generated SQL in a bounded preview', () => {
+    expect(buildAgentPreviewSql('SELECT status, COUNT(*) AS n FROM orders GROUP BY status;')).toBe(
+      'SELECT * FROM (\nSELECT status, COUNT(*) AS n FROM orders GROUP BY status\n) AS dql_agent_preview LIMIT 200',
+    );
+  });
+
+  it('rejects generated SQL that is not a single read-only statement', () => {
+    expect(() => buildAgentPreviewSql('SELECT 1; DROP TABLE orders')).toThrow('one statement');
+    expect(() => buildAgentPreviewSql('DELETE FROM orders')).toThrow('read-only SELECT or WITH');
   });
 });
 

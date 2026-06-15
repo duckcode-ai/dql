@@ -199,6 +199,12 @@ export interface AnswerLoopInput {
    * runtime they already own.
    */
   executeCertifiedBlock?: (block: KGNode) => Promise<AgentResultPayload>;
+  /**
+   * Optional host-side generated SQL preview executor. Generated SQL remains
+   * AI-generated and review-required; this only lets local hosts show bounded
+   * data evidence before an analyst promotes the query into a certified block.
+   */
+  executeGeneratedSql?: (sql: string) => Promise<AgentResultPayload>;
 }
 
 const CERTIFIED_HIT_THRESHOLD = 0.18;
@@ -413,6 +419,15 @@ export async function answer(input: AnswerLoopInput): Promise<AgentAnswer> {
       provenance: m.source,
     })),
   ];
+  let result: AgentResultPayload | undefined;
+  let executionError: string | undefined;
+  if (input.executeGeneratedSql) {
+    try {
+      result = await input.executeGeneratedSql(parsed.sql);
+    } catch (err) {
+      executionError = err instanceof Error ? err.message : String(err);
+    }
+  }
   return {
     kind: 'uncertified',
     sourceTier: activeTier,
@@ -423,6 +438,8 @@ export async function answer(input: AnswerLoopInput): Promise<AgentAnswer> {
     answer: parsed.text,
     proposedSql: parsed.sql,
     sql: parsed.sql,
+    result,
+    executionError,
     suggestedViz: parsed.viz ?? 'table',
     citations: generatedCitations,
     memoryContext: input.memoryContext,
@@ -437,6 +454,9 @@ export async function answer(input: AnswerLoopInput): Promise<AgentAnswer> {
       considered,
       citations: generatedCitations,
       memoryContext: input.memoryContext ?? [],
+      result,
+      executionError,
+      executorWasAvailable: Boolean(input.executeGeneratedSql),
     }),
     considered,
     providerUsed: provider.name,
@@ -557,7 +577,7 @@ function pickCertifiedArtifact(input: {
     if (businessHit) return businessHit;
   }
 
-  const executableHit = pickFirstCertifiedHit(input.executableArtifactHits, input.kg, input.excludedArtifactIds);
+  const executableHit = pickFirstCertifiedHit(input.executableArtifactHits, input.kg, input.excludedArtifactIds, input.question);
   if (executableHit && shouldDeferCertifiedArtifactForReviewPath({
     hits: input.executableArtifactHits,
     selected: executableHit,
@@ -578,11 +598,17 @@ function pickCertifiedArtifact(input: {
   return null;
 }
 
-function pickFirstCertifiedHit(hits: KGSearchHit[], kg: KGStore, excludedNodeIds?: Set<string>): KGSearchHit | null {
+function pickFirstCertifiedHit(
+  hits: KGSearchHit[],
+  kg: KGStore,
+  excludedNodeIds?: Set<string>,
+  question?: string,
+): KGSearchHit | null {
   for (const hit of hits) {
     if (hit.score < CERTIFIED_HIT_THRESHOLD) break;
     if (excludedNodeIds?.has(hit.node.nodeId)) continue;
     if (!isCertifiedHit(hit, kg)) continue;
+    if (question && hit.node.kind === 'block' && !hasMeaningfulCertifiedBlockSignal(question, hit.node)) continue;
     return hit;
   }
   return null;
@@ -623,6 +649,72 @@ function isBusinessDefinitionQuestion(question: string): boolean {
 
 function isBreakdownOrDrilldownQuestion(question: string): boolean {
   return /\b(break\s*down|breakdown|drill\s*(?:down|into)|slice|segment|split|by\s+[a-z][\w\s-]{1,40})\b/i.test(question);
+}
+
+const GENERIC_ANALYTIC_TOKENS = new Set([
+  'all',
+  'and',
+  'average',
+  'avg',
+  'count',
+  'data',
+  'flag',
+  'for',
+  'from',
+  'group',
+  'how',
+  'include',
+  'list',
+  'many',
+  'metric',
+  'number',
+  'preview',
+  'record',
+  'records',
+  'show',
+  'sum',
+  'table',
+  'total',
+  'using',
+  'value',
+  'versus',
+  'with',
+]);
+
+function hasMeaningfulCertifiedBlockSignal(question: string, node: KGNode): boolean {
+  const questionTokens = meaningfulTokens(question);
+  if (questionTokens.size === 0) return true;
+  const nodeTokens = meaningfulTokens([
+    node.name,
+    node.domain ?? '',
+    ...(node.tags ?? []),
+  ].join(' '));
+  for (const token of questionTokens) {
+    if (nodeTokens.has(token)) return true;
+  }
+  return false;
+}
+
+function meaningfulTokens(value: string): Set<string> {
+  const tokens = new Set<string>();
+  for (const raw of value.toLowerCase().match(/[a-z0-9_]+/g) ?? []) {
+    for (const part of raw.split('_')) {
+      const normalized = normalizeToken(part);
+      if (!normalized || normalized.length < 3 || GENERIC_ANALYTIC_TOKENS.has(normalized)) continue;
+      tokens.add(normalized);
+    }
+  }
+  return tokens;
+}
+
+function normalizeToken(token: string): string {
+  if (token === 'skus') return 'sku';
+  if (token === 'orders') return 'order';
+  if (token === 'customers') return 'customer';
+  if (token === 'supplies') return 'supply';
+  if (token.endsWith('ies') && token.length > 4) return `${token.slice(0, -3)}y`;
+  if (token.endsWith('s') && token.length > 4) return token.slice(0, -1);
+  return token;
 }
 
 function citationSourceTier(node: KGNode, fallback: AnswerSourceTier): AnswerSourceTier {
@@ -780,6 +872,9 @@ function buildGeneratedEvidence(input: {
   considered: KGSearchHit[];
   citations: AgentCitation[];
   memoryContext: AgentMemory[];
+  result?: AgentResultPayload;
+  executionError?: string;
+  executorWasAvailable: boolean;
 }): AgentEvidence {
   const selectedNodes = input.contextNodes.slice(0, 4);
   const businessAssets = uniqueAssets(
@@ -840,6 +935,22 @@ function buildGeneratedEvidence(input: {
         label: 'SQL is generated and requires host validation before certification',
       },
       {
+        tool: 'execute_generated_sql',
+        status: input.executionError
+          ? 'failed'
+          : input.result
+            ? 'selected'
+            : input.executorWasAvailable
+              ? 'skipped'
+              : 'skipped',
+        label: input.executionError
+          ? 'Generated SQL preview failed'
+          : input.result
+            ? 'Executed generated SQL as bounded preview'
+            : 'Generated SQL preview not requested',
+        detail: input.executionError ?? (input.result ? `${input.result.rowCount} rows` : undefined),
+      },
+      {
         tool: 'create_draft_block',
         status: 'checked',
         label: input.followUp?.kind === 'drilldown'
@@ -877,8 +988,14 @@ function buildGeneratedEvidence(input: {
         : 'Generated SQL is not certified. It should be validated, reviewed, and promoted only after analyst approval.',
     },
     execution: {
-      status: 'not_requested',
-      message: 'Generated SQL was returned for review; execution is handled by the host after validation.',
+      status: input.executionError ? 'failed' : input.result ? 'executed' : 'not_requested',
+      message: input.executionError
+        ? input.executionError
+        : input.result
+          ? 'Executed generated SQL as an uncertified bounded preview.'
+          : 'Generated SQL was returned for review; execution is handled by the host after validation.',
+      rowCount: input.result?.rowCount,
+      executionTime: input.result?.executionTime,
     },
     citations: input.citations,
   };

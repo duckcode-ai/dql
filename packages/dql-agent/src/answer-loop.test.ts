@@ -214,6 +214,128 @@ describe("answer (block-first loop)", () => {
     expect(Array.isArray(result.citations)).toBe(true);
   });
 
+  it("executes generated SQL as an uncertified bounded preview when the host supplies an executor", async () => {
+    const llmReply =
+      "Median order value by region based on the available manifest context.\n\n" +
+      "```sql\nSELECT region, MEDIAN(amount) AS median_order_value FROM fct_orders GROUP BY region\n```\n\n" +
+      "Viz: bar";
+    const provider = new StubProvider(llmReply);
+    const result = await answer({
+      question: "What is the median order value by region?",
+      provider,
+      kg,
+      executeGeneratedSql: async (sql) => ({
+        columns: ["region", "median_order_value"],
+        rows: [{ region: "North", median_order_value: 120 }, { region: "South", median_order_value: 90 }],
+        rowCount: 2,
+        executionTime: 8,
+        sql: `SELECT * FROM (${sql}) AS dql_agent_preview LIMIT 200`,
+      }),
+    });
+    expect(result.kind).toBe("uncertified");
+    expect(result.reviewStatus).toBe("draft_ready");
+    expect(result.result?.rowCount).toBe(2);
+    expect(result.evidence?.execution?.status).toBe("executed");
+    expect(result.evidence?.execution?.message).toContain("uncertified bounded preview");
+    expect(result.evidence?.route).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          tool: "execute_generated_sql",
+          status: "selected",
+          detail: "2 rows",
+        }),
+        expect.objectContaining({
+          tool: "create_draft_block",
+          status: "checked",
+        }),
+      ]),
+    );
+    expect(result.evidence?.validation?.status).toBe("warning");
+  });
+
+  it("keeps generated answers reviewable when SQL preview execution fails", async () => {
+    const provider = new StubProvider(
+      "Unsafe generated SQL.\n\n```sql\nDELETE FROM orders\n```\n\nViz: table",
+    );
+    const result = await answer({
+      question: "Delete bad orders",
+      provider,
+      kg,
+      executeGeneratedSql: async () => {
+        throw new Error("Generated SQL preview only supports read-only SELECT or WITH queries.");
+      },
+    });
+    expect(result.kind).toBe("uncertified");
+    expect(result.result).toBeUndefined();
+    expect(result.executionError).toContain("read-only SELECT");
+    expect(result.evidence?.execution?.status).toBe("failed");
+    expect(result.evidence?.route).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          tool: "execute_generated_sql",
+          status: "failed",
+        }),
+      ]),
+    );
+    expect(result.evidence?.validation?.status).toBe("warning");
+  });
+
+  it("does not route an unmatched business object to a generic certified count block", async () => {
+    kg.rebuild(
+      [
+        {
+          nodeId: "block:total_customers",
+          kind: "block",
+          name: "total_customers",
+          domain: "customers",
+          status: "certified",
+          description: "Total number of distinct customers.",
+          tags: ["customers", "count"],
+          sourceTier: "certified_artifact",
+          certification: "certified",
+          provenance: "DQL block",
+        },
+        {
+          nodeId: "dbt_model:supplies",
+          kind: "dbt_model",
+          name: "supplies",
+          domain: "operations",
+          description: "Supply SKU table with perishable supply flags.",
+          tags: ["supplies", "sku", "perishable"],
+          provenance: "dbt manifest",
+        },
+      ],
+      [],
+    );
+    const provider = new StubProvider(
+      "Supply SKU counts by perishable flag.\n\n" +
+        "```sql\nSELECT is_perishable_supply, COUNT(*) AS sku_count FROM supplies GROUP BY is_perishable_supply\n```\n\n" +
+        "Viz: bar",
+    );
+    const result = await answer({
+      question: "How many supply SKUs are perishable versus not perishable?",
+      provider,
+      kg,
+      executeGeneratedSql: async () => ({
+        columns: ["is_perishable_supply", "sku_count"],
+        rows: [{ is_perishable_supply: true, sku_count: 8 }, { is_perishable_supply: false, sku_count: 12 }],
+        rowCount: 2,
+      }),
+    });
+    expect(result.kind).toBe("uncertified");
+    expect(result.block).toBeUndefined();
+    expect(result.proposedSql).toContain("supplies");
+    expect(result.result?.rowCount).toBe(2);
+    expect(result.evidence?.route).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          tool: "execute_generated_sql",
+          status: "selected",
+        }),
+      ]),
+    );
+  });
+
   it("does not certify a generic KPI when a stronger draft breakdown block matches", async () => {
     kg.rebuild(
       [

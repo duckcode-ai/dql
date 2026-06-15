@@ -37,6 +37,7 @@ export interface AgentRunRequest {
   upstream?: { cellId?: string; sql?: string; preview?: unknown };
   projectRoot: string;
   executeCertifiedBlock?: (block: KGNode) => Promise<AgentResultPayload>;
+  executeGeneratedSql?: (sql: string) => Promise<AgentResultPayload>;
 }
 
 export interface AgentRunner {

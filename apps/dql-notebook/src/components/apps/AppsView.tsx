@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import type { CSSProperties, ReactNode } from 'react';
 import {
   ArrowLeft,
@@ -27,6 +27,7 @@ import {
   type AppBlockRecommendation,
   type AppDocumentSummary,
   type DashboardDocumentResponse,
+  type DashboardRunResponse,
   type GenerateAppResponse,
   type GeneratedAppPlan,
 } from '../../api/client';
@@ -969,8 +970,12 @@ function AppWorkspaceSurface({
   }, [dashboardDoc]);
   const dashboardBlockKey = dashboardBlockIds.join('|');
   const [selectedBlockId, setSelectedBlockId] = useState<string | null>(dashboardBlockIds[0] ?? null);
+  const [dashboardRun, setDashboardRun] = useState<DashboardRunResponse | null>(null);
   const [shareStatus, setShareStatus] = useState<'idle' | 'copied' | 'downloaded' | 'ready'>('idle');
   const [shareText, setShareText] = useState('');
+  const handleDashboardRunChange = useCallback((run: DashboardRunResponse | null) => {
+    setDashboardRun(run);
+  }, []);
 
   useEffect(() => {
     if (dashboardBlockIds.length === 0) {
@@ -981,6 +986,9 @@ function AppWorkspaceSurface({
       setSelectedBlockId(dashboardBlockIds[0]);
     }
   }, [dashboardBlockIds, dashboardBlockKey, selectedBlockId]);
+  useEffect(() => {
+    setDashboardRun(null);
+  }, [app?.id, dashboardDoc?.dashboard.id]);
   const markAction = (status: 'copied' | 'downloaded' | 'ready') => {
     setShareStatus(status);
     if (status !== 'ready') window.setTimeout(() => setShareStatus('idle'), 1800);
@@ -1126,6 +1134,7 @@ function AppWorkspaceSurface({
                 copilotOpen={explainOpen}
                 onCopilotChange={onExplainChange}
                 onDashboardChanged={onDashboardChanged}
+                onRunChange={handleDashboardRunChange}
               />
             ) : section === 'notebooks' ? (
               <NotebookListPanel appDoc={appDoc} />
@@ -1144,6 +1153,7 @@ function AppWorkspaceSurface({
               app={app}
               appDoc={appDoc}
               dashboardDoc={dashboardDoc}
+              dashboardRun={dashboardRun}
               selectedBlockId={selectedBlockId}
               themeMode={themeMode}
               onSelectBlock={setSelectedBlockId}
@@ -1297,6 +1307,7 @@ function AppCopilotPanel({
   app,
   appDoc,
   dashboardDoc,
+  dashboardRun,
   selectedBlockId,
   themeMode,
   onSelectBlock,
@@ -1304,6 +1315,7 @@ function AppCopilotPanel({
   app: AppSummary | null;
   appDoc: AppDocumentSummary | null;
   dashboardDoc: DashboardDocumentResponse | null;
+  dashboardRun: DashboardRunResponse | null;
   selectedBlockId: string | null;
   themeMode: ThemeMode;
   onSelectBlock: (blockId: string | null) => void;
@@ -1325,22 +1337,44 @@ function AppCopilotPanel({
       .filter((item): item is { blockId: string; title: string; viz: string; tileId: string } => Boolean(item)) ?? [];
   }, [dashboardDoc]);
   const selectedBlock = blockTiles.find((item) => item.blockId === selectedBlockId) ?? blockTiles[0] ?? null;
+  const selectedTileRun = selectedBlock
+    ? dashboardRun?.tiles.find((tile) => tile.tileId === selectedBlock.tileId || tile.blockId === selectedBlock.blockId)
+    : null;
+  const selectedBlockContext = selectedBlock
+    ? {
+        ...selectedBlock,
+        status: selectedTileRun?.status,
+        certificationStatus: selectedTileRun?.certificationStatus,
+        rowCount: selectedTileRun?.result?.rowCount,
+        columns: selectedTileRun?.result?.columns?.slice(0, 8),
+        sampleRows: sampleDashboardRows(selectedTileRun?.result?.rows, selectedTileRun?.result?.columns),
+      }
+    : null;
 
   const contextJson = JSON.stringify({
-    scope: selectedBlock ? 'selected-dashboard-block' : 'dashboard',
+    scope: selectedBlockContext ? 'selected-dashboard-block' : 'dashboard',
     appId: app?.id,
     appName: app?.name,
     dashboardId: dashboardDoc?.dashboard.id,
     dashboardTitle: dashboardDoc?.dashboard.metadata.title,
     domain: app?.domain ?? dashboardDoc?.dashboard.metadata.domain,
-    selectedBlock,
+    selectedBlock: selectedBlockContext,
     availableBlocks: blockTiles.map((block) => ({
       blockId: block.blockId,
       title: block.title,
       viz: block.viz,
+      status: dashboardRun?.tiles.find((tile) => tile.tileId === block.tileId || tile.blockId === block.blockId)?.status,
+      rowCount: dashboardRun?.tiles.find((tile) => tile.tileId === block.tileId || tile.blockId === block.blockId)?.result?.rowCount,
     })),
   }, null, 2);
   const promptStarters = [
+    {
+      label: 'Drill through',
+      icon: <LineChart size={14} />,
+      prompt: selectedBlock
+        ? `Drill through ${selectedBlock.title}. Use the current result sample, find the best breakdown, and show the data that explains what changed.`
+        : 'Drill through this dashboard. Use current result samples, find the best breakdown, and show the data that explains the story.',
+    },
     {
       label: 'Improve story',
       icon: <Sparkles size={14} />,
@@ -1559,6 +1593,12 @@ function Toggle({ label, checked, onChange }: { label: string; checked: boolean;
 function getDashboardItemBlockId(item: DashboardDocumentResponse['dashboard']['layout']['items'][number]): string | null {
   if (!item.block) return null;
   return 'blockId' in item.block ? item.block.blockId ?? null : item.block.ref ?? null;
+}
+
+function sampleDashboardRows(rows?: Array<Record<string, unknown>>, columns?: string[]): Array<Record<string, unknown>> | undefined {
+  if (!Array.isArray(rows) || rows.length === 0) return undefined;
+  const selectedColumns = Array.isArray(columns) && columns.length > 0 ? columns.slice(0, 8) : Object.keys(rows[0] ?? {}).slice(0, 8);
+  return rows.slice(0, 5).map((row) => Object.fromEntries(selectedColumns.map((column) => [column, row[column]])));
 }
 
 function buildAppShareText(

@@ -133,6 +133,7 @@ export function createDqlAgentProviderRunner(id: SimpleProviderId): AgentRunner 
             memoryContext,
             signal,
             executeCertifiedBlock: req.executeCertifiedBlock,
+            executeGeneratedSql: req.executeGeneratedSql,
           });
           emit({ kind: 'tool_result', id: 'governed_answer', output: result });
           emit({ kind: 'text', text: formatAgentAnswer(result) });
@@ -171,7 +172,13 @@ function lastUserMessage(req: AgentRunRequest): string {
 
 function renderExtraContext(req: AgentRunRequest, followUp?: AgentFollowUpContext): string | undefined {
   const parts: string[] = [];
-  if (req.upstream?.sql) parts.push(`Current upstream SQL:\n${req.upstream.sql}`);
+  const upstream = req.upstream?.sql?.trim();
+  if (upstream) {
+    const label = upstream.startsWith('{') || upstream.startsWith('[')
+      ? 'Current app/drill context'
+      : 'Current upstream SQL';
+    parts.push(`${label}:\n${upstream}`);
+  }
   if (followUp?.sourceBlockName) {
     const suffix = followUp.kind === 'drilldown'
       ? 'Use it as source context, but prefer a distinct certified drilldown block or a review-required draft.'

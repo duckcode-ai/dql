@@ -19,6 +19,12 @@ const APP_CHART_TYPE_OPTIONS: Array<{ value: ChartType; label: string }> = [
   ...CHART_TYPE_OPTIONS,
 ];
 
+function sampleRows(rows?: Array<Record<string, unknown>>, columns?: string[]): Array<Record<string, unknown>> | undefined {
+  if (!Array.isArray(rows) || rows.length === 0) return undefined;
+  const selectedColumns = Array.isArray(columns) && columns.length > 0 ? columns.slice(0, 8) : Object.keys(rows[0] ?? {}).slice(0, 8);
+  return rows.slice(0, 5).map((row) => Object.fromEntries(selectedColumns.map((column) => [column, row[column]])));
+}
+
 type TileSizePresetId = 'auto' | 'compact' | 'standard' | 'wide' | 'tall' | 'full';
 
 const TILE_SIZE_PRESETS: Array<{ id: TileSizePresetId; label: string; description: string }> = [
@@ -44,6 +50,7 @@ export function DashboardRenderer({
   onOpenLineageNode,
   copilotOpen,
   onCopilotChange,
+  onRunChange,
 }: {
   appId: string;
   dashboard: DashboardDocumentResponse['dashboard'];
@@ -55,6 +62,7 @@ export function DashboardRenderer({
   onOpenLineageNode?: (nodeId: string) => void;
   copilotOpen?: boolean;
   onCopilotChange?: (open: boolean) => void;
+  onRunChange?: (run: DashboardRunResponse | null) => void;
 }): JSX.Element {
   const { state } = useNotebook();
   const [run, setRun] = useState<DashboardRunResponse | null>(null);
@@ -89,16 +97,20 @@ export function DashboardRenderer({
     void api.runDashboard(appId, dashboard.id, runVariables).then((result) => {
       if (cancelled) return;
       setRun(result);
+      onRunChange?.(result);
       if (!result) setError('Dashboard run failed.');
     }).catch((err) => {
-      if (!cancelled) setError(err instanceof Error ? err.message : String(err));
+      if (!cancelled) {
+        setError(err instanceof Error ? err.message : String(err));
+        onRunChange?.(null);
+      }
     }).finally(() => {
       if (!cancelled) setLoading(false);
     });
     return () => {
       cancelled = true;
     };
-  }, [appId, dashboard.id, dashboard.layout.items.length, runVariables, state.activePersona?.userId]);
+  }, [appId, dashboard.id, dashboard.layout.items.length, onRunChange, runVariables, state.activePersona?.userId]);
 
   useEffect(() => {
     const handler = (event: Event) => {
@@ -108,12 +120,15 @@ export function DashboardRenderer({
         if (next?.dashboard) onDashboardChanged?.(next.dashboard);
       });
       void api.runDashboard(appId, dashboard.id, runVariables).then((nextRun) => {
-        if (nextRun) setRun(nextRun);
+        if (nextRun) {
+          setRun(nextRun);
+          onRunChange?.(nextRun);
+        }
       });
     };
     window.addEventListener('dql-app-dashboard-updated', handler);
     return () => window.removeEventListener('dql-app-dashboard-updated', handler);
-  }, [appId, dashboard.id, onDashboardChanged, runVariables]);
+  }, [appId, dashboard.id, onDashboardChanged, onRunChange, runVariables]);
 
   const chatContext = useMemo(() => {
     const tiles = dashboard.layout.items.map((item) => {
@@ -126,6 +141,8 @@ export function DashboardRenderer({
         certificationStatus: tile?.certificationStatus,
         status: tile?.status,
         rowCount: tile?.result?.rowCount,
+        columns: tile?.result?.columns?.slice(0, 8),
+        sampleRows: sampleRows(tile?.result?.rows, tile?.result?.columns),
       };
     });
     return JSON.stringify({
