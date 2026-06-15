@@ -104,4 +104,64 @@ describe('buildKGFromManifest', () => {
       ]),
     );
   });
+
+  it('indexes dbt model runtime relation names for SQL generation', () => {
+    const manifest = {
+      manifestVersion: 2,
+      dqlVersion: 'test',
+      generatedAt: '2026-06-12T00:00:00.000Z',
+      project: 'test',
+      projectRoot: '/tmp/dql',
+      blocks: {},
+      businessViews: {},
+      terms: {},
+      notebooks: {},
+      metrics: {},
+      dimensions: {},
+      sources: {
+        customers: {
+          name: 'customers',
+          origin: 'dbt',
+          referencedBy: [],
+          dbtModel: {
+            uniqueId: 'model.jaffle_shop.customers',
+            database: 'jaffle_shop',
+            schema: 'dev',
+            materializedAs: 'table',
+            description: 'Customer mart.',
+            columns: {
+              customer_type: {
+                name: 'customer_type',
+                description: 'New or returning customer.',
+              },
+            },
+          },
+        },
+      },
+      apps: {},
+      dashboards: {},
+      lineage: { nodes: [], edges: [] },
+      diagnostics: [],
+    } as DQLManifest;
+
+    const graph = buildKGFromManifest(manifest);
+
+    expect(graph.nodes).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          nodeId: 'dbt_model:customers',
+          kind: 'dbt_model',
+          llmContext: expect.stringContaining('runtime relation: dev.customers'),
+        }),
+      ]),
+    );
+    expect(graph.nodes).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          nodeId: 'dbt_model:customers',
+          llmContext: expect.stringContaining('customer_type'),
+        }),
+      ]),
+    );
+  });
 });

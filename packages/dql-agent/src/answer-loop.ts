@@ -304,9 +304,12 @@ export async function answer(input: AnswerLoopInput): Promise<AgentAnswer> {
     : manifestHits.length > 0
       ? 'dbt_manifest'
       : 'dbt_manifest';
+  const reviewRequiredArtifactHits = artifactHits
+    .filter((hit) => hit.score >= CERTIFIED_HIT_THRESHOLD && !isCertifiedHit(hit, kg))
+    .slice(0, 4);
   const contextHits = activeTier === 'semantic_layer'
-    ? [...businessHits.slice(0, 4), ...semanticHits, ...manifestHits].slice(0, 10)
-    : [...businessHits.slice(0, 4), ...manifestHits].slice(0, 10);
+    ? [...reviewRequiredArtifactHits, ...businessHits.slice(0, 4), ...semanticHits, ...manifestHits].slice(0, 10)
+    : [...reviewRequiredArtifactHits, ...businessHits.slice(0, 4), ...manifestHits].slice(0, 10);
   const contextNodes = mergeNodes(
     followUpSourceBlock && input.followUp?.kind === 'drilldown' ? [followUpSourceBlock] : [],
     (contextHits.length > 0 ? contextHits : considered.slice(0, 6)).map((h) => h.node),
@@ -450,7 +453,9 @@ Rules:
 4. Suggest a visualization type from this list, on a line starting with "Viz:":
    line, bar, area, pie, single_value, table, pivot, kpi.
 5. NEVER fabricate column names that are not present in the supplied schema context.
-6. If the schema is insufficient to answer, say so explicitly and ask a clarifying question.`;
+6. Return runnable SQL for the local warehouse/runtime. Do NOT use dbt/Jinja
+   macros such as {{ ref(...) }} or {{ source(...) }} in proposed SQL.
+7. If the schema is insufficient to answer, say so explicitly and ask a clarifying question.`;
 
 function renderContextPrompt(
   blocks: KGNode[],
@@ -462,10 +467,10 @@ function renderContextPrompt(
   followUp?: AgentFollowUpContext,
 ): string {
   const blockSection = blocks.length > 0
-    ? `## Certified blocks the user already has\n\n${blocks
-        .map((b) => `- \`${b.nodeId}\` (${b.domain ?? 'unscoped'}): ${b.description ?? b.llmContext ?? '(no description)'}`)
+    ? `## Relevant DQL blocks\n\n${blocks
+        .map((b) => `- \`${b.nodeId}\` (${b.domain ?? 'unscoped'}, ${b.status ?? b.certification ?? 'review_required'}): ${b.description ?? b.llmContext ?? '(no description)'}`)
         .join('\n')}`
-    : '## Certified blocks: (none matched)';
+    : '## Relevant DQL blocks: (none matched)';
   const businessSection = businessContext.length > 0
     ? `\n\n## Business context from DQL terms and business views\n\n${businessContext
         .map((n) => `- ${n.kind.replace('_', ' ')} \`${n.name}\`${n.domain ? ` (domain: ${n.domain})` : ''}${n.description ? ` — ${n.description}` : ''}${n.llmContext ? `\n  ${n.llmContext.replace(/\n/g, '\n  ')}` : ''}`)
@@ -553,6 +558,15 @@ function pickCertifiedArtifact(input: {
   }
 
   const executableHit = pickFirstCertifiedHit(input.executableArtifactHits, input.kg, input.excludedArtifactIds);
+  if (executableHit && shouldDeferCertifiedArtifactForReviewPath({
+    hits: input.executableArtifactHits,
+    selected: executableHit,
+    question: input.question,
+    kg: input.kg,
+    excludedArtifactIds: input.excludedArtifactIds,
+  })) {
+    return null;
+  }
   if (executableHit) return executableHit;
 
   const hasExecutableCandidate = input.executableArtifactHits.some((hit) => hit.score >= CERTIFIED_HIT_THRESHOLD);
@@ -574,6 +588,25 @@ function pickFirstCertifiedHit(hits: KGSearchHit[], kg: KGStore, excludedNodeIds
   return null;
 }
 
+function shouldDeferCertifiedArtifactForReviewPath(input: {
+  hits: KGSearchHit[];
+  selected: KGSearchHit;
+  question: string;
+  kg: KGStore;
+  excludedArtifactIds?: Set<string>;
+}): boolean {
+  if (!isBreakdownOrDrilldownQuestion(input.question)) return false;
+  const selectedIndex = input.hits.findIndex((hit) => hit.node.nodeId === input.selected.node.nodeId);
+  if (selectedIndex <= 0) return false;
+  const strongerReviewHit = input.hits.slice(0, selectedIndex).find((hit) => {
+    if (hit.score < CERTIFIED_HIT_THRESHOLD) return false;
+    if (input.excludedArtifactIds?.has(hit.node.nodeId)) return false;
+    if (isCertifiedHit(hit, input.kg)) return false;
+    return hit.score >= input.selected.score * 0.9;
+  });
+  return Boolean(strongerReviewHit);
+}
+
 function isCertifiedHit(hit: KGSearchHit, kg: KGStore): boolean {
   if (hit.node.kind === 'block') {
     if (hit.node.status !== 'certified') return false;
@@ -586,6 +619,10 @@ function isCertifiedHit(hit: KGSearchHit, kg: KGStore): boolean {
 
 function isBusinessDefinitionQuestion(question: string): boolean {
   return /\b(what is|what are|define|definition|meaning of|what does .+ mean)\b/i.test(question);
+}
+
+function isBreakdownOrDrilldownQuestion(question: string): boolean {
+  return /\b(break\s*down|breakdown|drill\s*(?:down|into)|slice|segment|split|by\s+[a-z][\w\s-]{1,40})\b/i.test(question);
 }
 
 function citationSourceTier(node: KGNode, fallback: AnswerSourceTier): AnswerSourceTier {

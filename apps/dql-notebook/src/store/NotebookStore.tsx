@@ -107,6 +107,8 @@ const initialState: NotebookState = {
   appsLoading: false,
   activeAppId: null,
   activeDashboardId: null,
+  activeAppExperience: 'view',
+  activeAppSection: 'dashboards',
   activePersona: null,
 };
 
@@ -565,17 +567,27 @@ function notebookReducer(state: NotebookState, action: NotebookAction): Notebook
       const dashboardId = action.dashboardId !== undefined
         ? action.dashboardId
         : (app?.homepage?.type === 'dashboard' ? app.homepage.id : (app?.dashboards[0]?.id ?? null));
+      const sameApp = state.activeAppId === action.appId;
       return {
         ...state,
         mainView: 'apps',
         activeAppId: action.appId,
         activeDashboardId: dashboardId,
+        activeAppExperience: action.experience ?? (sameApp ? state.activeAppExperience : 'view'),
+        activeAppSection: action.section ?? (sameApp ? state.activeAppSection : 'dashboards'),
         lineageReturnTarget: null,
       };
     }
 
     case 'OPEN_DASHBOARD':
       return { ...state, activeDashboardId: action.dashboardId };
+
+    case 'SET_APP_WORKSPACE_STATE':
+      return {
+        ...state,
+        activeAppExperience: action.experience ?? state.activeAppExperience,
+        activeAppSection: action.section ?? state.activeAppSection,
+      };
 
     case 'SET_ACTIVE_PERSONA':
       return { ...state, activePersona: action.persona };

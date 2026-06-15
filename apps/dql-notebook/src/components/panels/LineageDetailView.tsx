@@ -166,6 +166,8 @@ export function LineageDetailView() {
                     type: 'OPEN_APP',
                     appId: returnTarget.appId,
                     dashboardId: returnTarget.dashboardId ?? null,
+                    experience: returnTarget.experience,
+                    section: returnTarget.section,
                   });
                 }}
                 title={returnLabel}

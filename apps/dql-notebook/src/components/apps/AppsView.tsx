@@ -30,16 +30,16 @@ import {
   type GenerateAppResponse,
   type GeneratedAppPlan,
 } from '../../api/client';
-import type { AppSummary } from '../../store/types';
+import type { AppSummary, AppWorkspaceExperience, AppWorkspaceSection } from '../../store/types';
 import type { ThemeMode } from '../../themes/notebook-theme';
 import { AgentChatPanel } from '../agent/AgentChatPanel';
 import { DashboardRenderer } from './DashboardRenderer';
 import { PersonaSwitcher } from './PersonaSwitcher';
 
 type AppSurface = 'library' | 'create' | 'workspace';
-type AppExperience = 'view' | 'build';
+type AppExperience = AppWorkspaceExperience;
 type BuilderMode = 'ai' | 'classic';
-type AppSection = 'dashboards' | 'notebooks' | 'ai' | 'drafts' | 'settings';
+type AppSection = AppWorkspaceSection;
 type LibraryFilter = 'all' | 'mine' | 'shared' | 'fav' | 'review';
 
 interface AppPromptExample {
@@ -120,8 +120,14 @@ export function AppsView(): JSX.Element {
   const { state, dispatch } = useNotebook();
   const appTheme = useMemo(() => normalizeAppTheme(state.themeMode), [state.themeMode]);
   const [surface, setSurface] = useState<AppSurface>(() => state.activeAppId ? 'workspace' : 'library');
-  const [experience, setExperience] = useState<AppExperience>('view');
-  const [section, setSection] = useState<AppSection>('dashboards');
+  const experience = state.activeAppExperience;
+  const section = state.activeAppSection;
+  const setExperience = (nextExperience: AppExperience) => {
+    dispatch({ type: 'SET_APP_WORKSPACE_STATE', experience: nextExperience });
+  };
+  const setSection = (nextSection: AppSection) => {
+    dispatch({ type: 'SET_APP_WORKSPACE_STATE', section: nextSection });
+  };
   const [search, setSearch] = useState('');
   const [libraryFilter, setLibraryFilter] = useState<LibraryFilter>('all');
   const [favorites, setFavorites] = useState<Set<string>>(() => new Set());
@@ -210,12 +216,17 @@ export function AppsView(): JSX.Element {
     };
   }, [state.activeAppId, state.activeDashboardId, surface]);
 
-  const refreshApps = async (openAppId?: string | null, dashboardId?: string | null, nextSurface?: AppSurface) => {
+  const refreshApps = async (
+    openAppId?: string | null,
+    dashboardId?: string | null,
+    nextSurface?: AppSurface,
+    workspaceState?: { experience?: AppExperience; section?: AppSection },
+  ) => {
     dispatch({ type: 'SET_APPS_LOADING', loading: true });
     const apps = await api.listApps();
     dispatch({ type: 'SET_APPS', apps });
     dispatch({ type: 'SET_APPS_LOADING', loading: false });
-    if (openAppId) dispatch({ type: 'OPEN_APP', appId: openAppId, dashboardId });
+    if (openAppId) dispatch({ type: 'OPEN_APP', appId: openAppId, dashboardId, ...workspaceState });
     if (nextSurface) setSurface(nextSurface);
   };
 
@@ -247,9 +258,7 @@ export function AppsView(): JSX.Element {
   );
 
   const openApp = (app: AppSummary, nextExperience: AppExperience = 'view') => {
-    dispatch({ type: 'OPEN_APP', appId: app.id });
-    setExperience(nextExperience);
-    setSection('dashboards');
+    dispatch({ type: 'OPEN_APP', appId: app.id, experience: nextExperience, section: 'dashboards' });
     setSurface('workspace');
   };
 
@@ -328,9 +337,7 @@ export function AppsView(): JSX.Element {
         owners: [builderOwner.trim() || 'owner@local'],
         selectedBlockIds: Array.from(selectedBlocks),
       });
-      await refreshApps(result.app.id, result.dashboardId, 'workspace');
-      setExperience('build');
-      setSection('dashboards');
+      await refreshApps(result.app.id, result.dashboardId, 'workspace', { experience: 'build', section: 'dashboards' });
     } catch (err) {
       setBuilderError(err instanceof Error ? err.message : String(err));
     } finally {
@@ -341,9 +348,7 @@ export function AppsView(): JSX.Element {
   const openGeneratedWorkspace = () => {
     const appId = generated?.app?.id ?? generated?.plan.appId;
     if (!appId) return;
-    dispatch({ type: 'OPEN_APP', appId, dashboardId: generated?.dashboardId ?? undefined });
-    setExperience('build');
-    setSection('dashboards');
+    dispatch({ type: 'OPEN_APP', appId, dashboardId: generated?.dashboardId ?? undefined, experience: 'build', section: 'dashboards' });
     setSurface('workspace');
   };
 
@@ -362,7 +367,13 @@ export function AppsView(): JSX.Element {
     }
     setAddPageOpen(false);
     setAddPageTitle('');
-    dispatch({ type: 'OPEN_APP', appId: state.activeAppId, dashboardId: result.dashboard.id });
+    dispatch({
+      type: 'OPEN_APP',
+      appId: state.activeAppId,
+      dashboardId: result.dashboard.id,
+      experience,
+      section,
+    });
     await refreshApps(state.activeAppId, result.dashboard.id, 'workspace');
   };
 
@@ -464,6 +475,8 @@ export function AppsView(): JSX.Element {
                     appId: state.activeAppId,
                     dashboardId: state.activeDashboardId,
                     label: activeApp?.name,
+                    experience,
+                    section,
                   }
                 : null,
             });

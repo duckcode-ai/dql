@@ -214,6 +214,61 @@ describe("answer (block-first loop)", () => {
     expect(Array.isArray(result.citations)).toBe(true);
   });
 
+  it("does not certify a generic KPI when a stronger draft breakdown block matches", async () => {
+    kg.rebuild(
+      [
+        {
+          nodeId: "block:revenue_by_customer_type",
+          kind: "block",
+          name: "revenue_by_customer_type",
+          domain: "growth",
+          status: "draft",
+          description: "Revenue broken down by customer type for new and returning customers.",
+          llmContext:
+            "Use this for revenue breakdowns by customer type, including new vs returning customers.",
+          tags: ["revenue", "customer", "type", "breakdown"],
+          sourceTier: "certified_artifact",
+          certification: "analyst_review_required",
+          provenance: "DQL block",
+        },
+        {
+          nodeId: "block:total_customers",
+          kind: "block",
+          name: "total_customers",
+          domain: "growth",
+          status: "certified",
+          description: "Total customer count.",
+          llmContext: "Use this for total customers.",
+          tags: ["customers", "kpi"],
+          sourceTier: "certified_artifact",
+          certification: "certified",
+          provenance: "DQL block",
+        },
+      ],
+      [],
+    );
+    const provider = new StubProvider(
+      "Draft customer type breakdown.\n\n" +
+        "```sql\nSELECT customer_type, SUM(revenue) AS revenue FROM customer_revenue GROUP BY customer_type\n```\n\n" +
+        "Viz: bar",
+    );
+    const result = await answer({
+      question: "Break total revenue down by customer type",
+      provider,
+      kg,
+    });
+    expect(result.kind).toBe("uncertified");
+    expect(result.reviewStatus).toBe("draft_ready");
+    expect(result.block).toBeUndefined();
+    expect(result.proposedSql).toContain("customer_type");
+    expect(
+      provider.messages.some((message) =>
+        message.content.includes("block:revenue_by_customer_type") &&
+        message.content.includes("draft"),
+      ),
+    ).toBe(true);
+  });
+
   it("returns no_answer when the model declines without SQL", async () => {
     const provider = new StubProvider(
       "I cannot answer this without more schema context.",

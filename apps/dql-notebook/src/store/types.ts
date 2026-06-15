@@ -141,8 +141,17 @@ export interface ParamConfig {
 export type SidebarPanel = 'files' | 'schema' | 'block_library' | 'connection' | 'reference' | 'lineage' | 'git' | 'apps' | 'settings' | null;
 export type DevPanelTab = 'logs' | 'errors';
 export type MainView = 'home' | 'notebook' | 'business_artifact' | 'lineage_detail' | 'block_studio' | 'imports' | 'connection' | 'reference' | 'git' | 'apps' | 'review' | 'settings';
+export type AppWorkspaceExperience = 'view' | 'build';
+export type AppWorkspaceSection = 'dashboards' | 'notebooks' | 'ai' | 'drafts' | 'settings';
 export type LineageReturnTarget =
-  | { view: 'apps'; appId: string; dashboardId?: string | null; label?: string };
+  | {
+      view: 'apps';
+      appId: string;
+      dashboardId?: string | null;
+      label?: string;
+      experience?: AppWorkspaceExperience;
+      section?: AppWorkspaceSection;
+    };
 
 /**
  * Apps consumption-layer surface — list of Apps + currently-open App.
@@ -679,6 +688,8 @@ export interface NotebookState {
   appsLoading: boolean;
   activeAppId: string | null;
   activeDashboardId: string | null;
+  activeAppExperience: AppWorkspaceExperience;
+  activeAppSection: AppWorkspaceSection;
   activePersona: ActivePersona | null;
 }
 
@@ -748,6 +759,13 @@ export type NotebookAction =
   // Apps surface (Phase 1)
   | { type: 'SET_APPS'; apps: AppSummary[] }
   | { type: 'SET_APPS_LOADING'; loading: boolean }
-  | { type: 'OPEN_APP'; appId: string; dashboardId?: string | null }
+  | {
+      type: 'OPEN_APP';
+      appId: string;
+      dashboardId?: string | null;
+      experience?: AppWorkspaceExperience;
+      section?: AppWorkspaceSection;
+    }
   | { type: 'OPEN_DASHBOARD'; dashboardId: string }
+  | { type: 'SET_APP_WORKSPACE_STATE'; experience?: AppWorkspaceExperience; section?: AppWorkspaceSection }
   | { type: 'SET_ACTIVE_PERSONA'; persona: ActivePersona | null };

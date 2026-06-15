@@ -12,6 +12,7 @@
 import type {
   DQLManifest,
   ManifestBusinessView,
+  ManifestSource,
   ManifestTerm,
   SemanticLayer,
 } from '@duckcodeailabs/dql-core';
@@ -182,9 +183,7 @@ export function buildKGFromManifest(manifest: DQLManifest): {
       kind,
       name: s.name,
       description: s.dbtModel?.description,
-      llmContext: s.dbtModel?.columns
-        ? renderColumnsContext(s.dbtModel.columns)
-        : undefined,
+      llmContext: renderSourceContext(s),
       sourceTier: isDbt ? 'dbt_manifest' : 'project',
       certification: 'ai_generated',
       provenance: isDbt ? 'dbt manifest.json' : 'SQL/table reference',
@@ -497,6 +496,23 @@ function renderColumnsContext(columns: Record<string, { name: string; descriptio
     .map((col) => `- ${col.name}${col.type ? ` (${col.type})` : ''}${col.description ? `: ${col.description}` : ''}`)
     .join('\n');
   return rendered ? `Columns:\n${rendered}` : '';
+}
+
+function renderSourceContext(source: ManifestSource): string | undefined {
+  const model = source.dbtModel;
+  if (!model) return undefined;
+  const schemaQualified = model.schema ? `${model.schema}.${source.name}` : source.name;
+  const databaseQualified = model.database && model.schema
+    ? `${model.database}.${model.schema}.${source.name}`
+    : undefined;
+  return [
+    `runtime relation: ${schemaQualified}`,
+    databaseQualified && databaseQualified !== schemaQualified
+      ? `dbt relation: ${databaseQualified}`
+      : '',
+    model.materializedAs ? `materialized as: ${model.materializedAs}` : '',
+    model.columns ? renderColumnsContext(model.columns) : '',
+  ].filter(Boolean).join('\n') || undefined;
 }
 
 function businessMetadataFromRaw(raw: unknown): Partial<KGNode> {
