@@ -273,9 +273,9 @@ export function AgentAnswerCard({
     { id: 'answer', label: compact ? 'Summary' : 'Answer', visible: true },
     { id: 'visual', label: compact ? 'Chart' : 'Visualization', visible: hasChart },
     { id: 'data', label: 'Data', visible: Boolean(result) },
+    { id: 'sql', label: 'SQL / Block', visible: showSql && hasSqlPanel },
     { id: 'lineage', label: compact ? 'Trace' : 'Lineage', visible: hasEvidence },
     { id: 'context', label: compact ? 'Context' : 'Business Context', visible: hasEvidence },
-    { id: 'sql', label: 'SQL / Block', visible: showSql && hasSqlPanel },
     { id: 'review', label: compact ? 'Trust' : 'Review', visible: hasEvidence || Boolean(answer.citations?.length) },
   ];
   const tabs = tabItems.filter((item) => item.visible);
@@ -362,7 +362,7 @@ export function AgentAnswerCard({
 
       <div style={{ border: `1px solid ${t.cellBorder}`, borderRadius: compact ? 10 : 6, overflow: 'hidden', background: t.cellBg }}>
         {!compact && (
-          <div style={{ display: 'flex', alignItems: 'center', gap: 4, padding: '6px 8px', borderBottom: `1px solid ${t.cellBorder}`, background: `${t.tableHeaderBg}70`, flexWrap: 'wrap' }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 14, padding: '4px 10px', borderBottom: `1px solid ${t.cellBorder}`, background: `${t.tableHeaderBg}70`, flexWrap: 'wrap' }}>
             {tabs.map((item) => (
               <SegmentButton key={item.id} active={activeTab === item.id} label={item.label} onClick={() => setTab(item.id)} t={t} />
             ))}
@@ -398,7 +398,7 @@ export function AgentAnswerCard({
             </button>
             {detailsOpen && (
               <div style={{ borderTop: `1px solid ${t.cellBorder}` }}>
-                <div style={{ display: 'flex', alignItems: 'center', gap: 4, padding: '7px 8px', flexWrap: 'wrap' }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 14, padding: '4px 12px', flexWrap: 'wrap' }}>
                   {detailTabs.map((item) => (
                     <SegmentButton key={item.id} active={activeDetailTab === item.id} label={item.label} onClick={() => setTab(item.id)} t={t} />
                   ))}
@@ -440,14 +440,30 @@ function AnswerPanel({
       ) : (
         <div style={{ fontSize: 12, color: t.textMuted }}>No summary text was returned.</div>
       )}
-      <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
-        {sourceTier && <Pill label={compact ? formatBusinessTier(sourceTier) : formatLabel(sourceTier)} t={t} />}
-        {result && <Pill label={`${(result.rowCount ?? result.rows.length).toLocaleString()} rows`} t={t} />}
-        {!compact && evidence?.validation?.status && <Pill label={`validation: ${evidence.validation.status}`} t={t} />}
-        {!compact && evidence?.execution?.status && <Pill label={`execution: ${evidence.execution.status}`} t={t} />}
-        {compact && evidence?.validation?.status === 'failed' && <Pill label="needs review" t={t} />}
-        {compact && evidence?.execution?.status === 'failed' && <Pill label="data check failed" t={t} />}
-      </div>
+      {compact ? (
+        <div style={{ fontSize: 11.5, color: t.textMuted, display: 'flex', flexWrap: 'wrap', gap: 6, alignItems: 'center' }}>
+          {[
+            sourceTier ? formatBusinessTier(sourceTier) : null,
+            result ? `${(result.rowCount ?? result.rows.length).toLocaleString()} rows` : null,
+            evidence?.validation?.status === 'failed' ? 'needs review' : null,
+            evidence?.execution?.status === 'failed' ? 'data check failed' : null,
+          ]
+            .filter(Boolean)
+            .map((label, idx) => (
+              <React.Fragment key={`${label}-${idx}`}>
+                {idx > 0 && <span style={{ color: t.cellBorder }}>·</span>}
+                <span>{label}</span>
+              </React.Fragment>
+            ))}
+        </div>
+      ) : (
+        <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+          {sourceTier && <Pill label={formatLabel(sourceTier)} t={t} />}
+          {result && <Pill label={`${(result.rowCount ?? result.rows.length).toLocaleString()} rows`} t={t} />}
+          {evidence?.validation?.status && <Pill label={`validation: ${evidence.validation.status}`} t={t} />}
+          {evidence?.execution?.status && <Pill label={`execution: ${evidence.execution.status}`} t={t} />}
+        </div>
+      )}
       {result && <ResultPreview result={result} t={t} compact={compact} />}
       {analysisPlan && (
         <div style={{
@@ -784,12 +800,14 @@ function SegmentButton({ active, label, onClick, t }: { active: boolean; label: 
     <button
       onClick={onClick}
       style={{
-        padding: '3px 8px',
-        fontSize: 11,
-        borderRadius: 4,
-        border: `1px solid ${active ? t.accent : t.btnBorder}`,
-        background: active ? `${t.accent}18` : 'transparent',
+        padding: '4px 2px',
+        fontSize: 11.5,
+        border: 0,
+        borderBottom: `2px solid ${active ? t.accent : 'transparent'}`,
+        borderRadius: 0,
+        background: 'transparent',
         color: active ? t.accent : t.textSecondary,
+        fontWeight: active ? 700 : 500,
         cursor: 'pointer',
       }}
     >

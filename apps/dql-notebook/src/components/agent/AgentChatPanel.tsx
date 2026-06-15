@@ -26,6 +26,7 @@ export function AgentChatPanel({
   initialInput,
   emptyHint,
   inputPlaceholder,
+  suggestions,
   variant = 'default',
   embedded = false,
   showHeader = true,
@@ -44,6 +45,7 @@ export function AgentChatPanel({
   initialInput?: string;
   emptyHint?: string;
   inputPlaceholder?: string;
+  suggestions?: Array<{ label: string; prompt: string; icon?: React.ReactNode }>;
   variant?: 'default' | 'executive';
   embedded?: boolean;
   showHeader?: boolean;
@@ -62,6 +64,7 @@ export function AgentChatPanel({
   const [error, setError] = useState<string | null>(null);
   const [conversationId, setConversationId] = useState<string | null>(null);
   const abortRef = useRef<AbortController | null>(null);
+  const inputRef = useRef<HTMLTextAreaElement | null>(null);
   const lastInitialInputRef = useRef(initialInput ?? '');
 
   React.useEffect(() => {
@@ -197,30 +200,47 @@ export function AgentChatPanel({
         {messages.length === 0 && !running ? (
           <div style={{
             display: 'flex',
-            gap: 9,
-            alignItems: 'flex-start',
-            color: t.textSecondary,
-            lineHeight: 1.45,
+            flexDirection: 'column',
+            gap: 14,
+            alignItems: 'center',
+            textAlign: 'center',
+            margin: 'auto 0',
+            padding: executive ? '8px 4px' : 0,
           }}>
-            {executive && (
-              <div style={{
-                width: 24,
-                height: 24,
-                borderRadius: 7,
-                background: `${t.accent}14`,
-                color: t.accent,
-                display: 'inline-flex',
-                alignItems: 'center',
-                justifyContent: 'center',
-                flex: '0 0 auto',
-                marginTop: 1,
-              }}>
-                <Bot size={13} />
-              </div>
-            )}
-            <div style={{ fontSize: executive ? 12.5 : 12 }}>
+            <div style={{
+              width: 40,
+              height: 40,
+              borderRadius: 12,
+              background: `${t.accent}14`,
+              border: `1px solid ${t.accent}2e`,
+              color: t.accent,
+              display: 'inline-flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+            }}>
+              <Bot size={20} />
+            </div>
+            <div style={{ fontSize: executive ? 13 : 12.5, color: t.textSecondary, lineHeight: 1.5, maxWidth: 340 }}>
               {emptyHint ?? 'Ask about metric definitions, filters, tile results, or where to find certified analysis.'}
             </div>
+            {suggestions && suggestions.length > 0 && (
+              <div style={{ display: 'flex', flexWrap: 'wrap', gap: 7, justifyContent: 'center', maxWidth: 360 }}>
+                {suggestions.map((suggestion) => (
+                  <button
+                    key={suggestion.label}
+                    type="button"
+                    onClick={() => {
+                      setInput(suggestion.prompt);
+                      requestAnimationFrame(() => inputRef.current?.focus());
+                    }}
+                    style={suggestionChipStyle(t)}
+                  >
+                    {suggestion.icon}
+                    <span>{suggestion.label}</span>
+                  </button>
+                ))}
+              </div>
+            )}
           </div>
         ) : null}
         {messages.map((m, index) => (
@@ -258,6 +278,7 @@ export function AgentChatPanel({
         background: embedded ? 'transparent' : executive ? t.appBg : undefined,
       }}>
         <textarea
+          ref={inputRef}
           value={input}
           onChange={(e) => setInput(e.target.value)}
           rows={executive ? 3 : 2}
@@ -369,6 +390,23 @@ function Bubble({
 
 function stripSqlBlocks(text: string): string {
   return text.replace(/Proposed SQL:\s*```sql[\s\S]*?```/gi, 'Proposed SQL hidden in dashboard mode. Send to analyst review to inspect.');
+}
+
+function suggestionChipStyle(t: Theme): React.CSSProperties {
+  return {
+    display: 'inline-flex',
+    alignItems: 'center',
+    gap: 6,
+    border: `1px solid ${t.headerBorder}`,
+    borderRadius: 999,
+    background: t.appBg,
+    color: t.textSecondary,
+    padding: '6px 11px',
+    fontSize: 12,
+    cursor: 'pointer',
+    lineHeight: 1.2,
+    fontFamily: t.font,
+  };
 }
 
 function selectStyle(t: Theme, executive = false): React.CSSProperties {

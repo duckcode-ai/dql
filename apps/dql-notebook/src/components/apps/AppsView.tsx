@@ -1321,7 +1321,6 @@ function AppCopilotPanel({
   themeMode: ThemeMode;
   onSelectBlock: (blockId: string | null) => void;
 }) {
-  const [askSeed, setAskSeed] = useState('');
   const [evidenceOpen, setEvidenceOpen] = useState(false);
   const blockTiles = useMemo(() => {
     return dashboardDoc?.dashboard.layout.items
@@ -1447,41 +1446,39 @@ function AppCopilotPanel({
   return (
     <aside className="dql-app-explain-panel dql-app-assistant-panel">
       <div className="dql-app-assistant-top">
-        <div className="dql-app-assistant-title">
-          <span><Bot size={14} /> AI assistant</span>
-          <h3>{focusTitle}</h3>
-          <p>{decisionUse}</p>
+        <div className="dql-app-assistant-icon"><Bot size={15} /></div>
+        <div className="dql-app-assistant-heading">
+          <span className="dql-app-assistant-kicker">AI assistant</span>
+          <h3 title={focusTitle}>{focusTitle}</h3>
         </div>
-        <button
-          type="button"
-          className={`dql-app-assistant-context-btn ${evidenceOpen ? 'on' : ''}`}
-          onClick={() => setEvidenceOpen((value) => !value)}
-        >
-          Context
-          <ChevronDown size={14} />
-        </button>
-      </div>
-
-      <div className="dql-app-assistant-focusbar">
-        <label>
-          <span>Focus</span>
+        <div className="dql-app-assistant-focus">
           <select
             value={selectedBlock?.blockId ?? ''}
             onChange={(event) => onSelectBlock(event.target.value || null)}
+            title="Choose what the copilot answers about"
           >
-            <option value="">Dashboard</option>
+            <option value="">Whole dashboard</option>
             {blockTiles.map((block) => (
               <option key={block.tileId} value={block.blockId}>
                 {formatBusinessLabel(block.title)}
               </option>
             ))}
           </select>
-        </label>
-        <span>{focusMetric}</span>
+        </div>
+        <button
+          type="button"
+          className={`dql-app-assistant-context-btn ${evidenceOpen ? 'on' : ''}`}
+          onClick={() => setEvidenceOpen((value) => !value)}
+          title="Show business context"
+        >
+          Context
+          <ChevronDown size={13} />
+        </button>
       </div>
 
       {evidenceOpen ? (
         <div className="dql-app-assistant-context">
+          <p>{decisionUse}</p>
           <p>{businessOutcome}</p>
           <div>
             {businessFacts.map((item) => <KeyValueInline key={item.label} label={item.label} value={item.value} />)}
@@ -1492,15 +1489,6 @@ function AppCopilotPanel({
         </div>
       ) : null}
 
-      <div className="dql-app-assistant-suggestions" aria-label="Prompt starters">
-        {promptStarters.map((item) => (
-          <button key={item.label} type="button" onClick={() => setAskSeed(`${item.prompt} `)}>
-            {item.icon}
-            <span>{item.label}</span>
-          </button>
-        ))}
-      </div>
-
       <div className="dql-app-assistant-chat">
         <AgentChatPanel
           title={selectedBlock ? selectedBlock.title : 'Ask the app copilot'}
@@ -1508,7 +1496,7 @@ function AppCopilotPanel({
           upstreamContext={contextJson}
           themeMode={themeMode}
           hideSqlByDefault
-          initialInput={askSeed}
+          suggestions={promptStarters}
           emptyHint="Ask what changed, why it matters, what action to take, or what evidence needs review."
           inputPlaceholder="Ask a business question..."
           variant="executive"
@@ -1868,7 +1856,7 @@ function libraryCounts(apps: AppSummary[], favorites: Set<string>): Record<Libra
 }
 
 function primaryOwner(app: AppSummary): string {
-  return app.owners[0] ?? 'owner@local';
+  return app.owners?.[0] ?? 'owner@local';
 }
 
 function shortHash(value: string): string {
@@ -3248,53 +3236,78 @@ const APP_STYLES = `
 
 .dql-app-assistant-top {
   display: flex;
-  align-items: flex-start;
-  gap: 12px;
-  padding: 16px 16px 12px;
+  align-items: center;
+  gap: 10px;
+  padding: 11px 14px;
   border-bottom: 1px solid var(--dql-app-line);
 }
 
-.dql-app-assistant-title {
-  flex: 1;
-  min-width: 0;
-}
-
-.dql-app-assistant-title > span {
+.dql-app-assistant-icon {
+  flex: none;
+  width: 30px;
+  height: 30px;
+  border-radius: 9px;
+  background: var(--dql-app-accent-soft);
+  border: 1px solid rgba(79, 99, 215, 0.28);
+  color: var(--dql-app-accent);
   display: inline-flex;
   align-items: center;
-  gap: 7px;
-  color: var(--dql-app-accent);
-  font: 800 10px var(--font-mono);
-  letter-spacing: 0;
+  justify-content: center;
+}
+
+.dql-app-assistant-heading {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.dql-app-assistant-kicker {
+  color: var(--dql-app-muted);
+  font: 800 9px var(--font-mono);
+  letter-spacing: 0.04em;
   text-transform: uppercase;
 }
 
-.dql-app-assistant-title h3 {
-  margin: 8px 0 0;
+.dql-app-assistant-heading h3 {
+  margin: 0;
   color: var(--dql-app-ink);
-  font-size: 22px;
-  line-height: 1.12;
+  font-size: 14px;
+  line-height: 1.2;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
-.dql-app-assistant-title p {
-  margin: 7px 0 0;
-  max-width: 38rem;
-  color: var(--dql-app-muted);
-  font-size: 12.5px;
-  line-height: 1.45;
+.dql-app-assistant-focus {
+  flex: none;
+  min-width: 0;
+}
+
+.dql-app-assistant-focus select {
+  max-width: 150px;
+  height: 30px;
+  border: 1px solid var(--dql-app-line-2);
+  border-radius: 8px;
+  background: var(--dql-app-surface);
+  color: var(--dql-app-ink);
+  padding: 0 8px;
+  font: 700 11.5px var(--font-ui);
+  cursor: pointer;
 }
 
 .dql-app-assistant-context-btn {
   flex: none;
-  height: 32px;
+  height: 30px;
   border: 1px solid var(--dql-app-line);
   border-radius: 8px;
   background: var(--dql-app-control);
   color: var(--dql-app-muted);
   display: inline-flex;
   align-items: center;
-  gap: 6px;
-  padding: 0 10px;
+  gap: 5px;
+  padding: 0 9px;
   cursor: pointer;
   font: 800 11px var(--font-ui);
 }
@@ -3308,59 +3321,12 @@ const APP_STYLES = `
 
 .dql-app-assistant-context-btn.on svg { transform: rotate(180deg); }
 
-.dql-app-assistant-focusbar {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  padding: 10px 16px;
-  border-bottom: 1px solid var(--dql-app-line);
-  background: var(--dql-app-surface-muted);
-}
-
-.dql-app-assistant-focusbar label {
-  flex: 1;
-  min-width: 0;
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-
-.dql-app-assistant-focusbar label > span {
-  color: var(--dql-app-muted);
-  font: 800 9px var(--font-mono);
-  text-transform: uppercase;
-}
-
-.dql-app-assistant-focusbar select {
-  min-width: 0;
-  flex: 1;
-  height: 34px;
-  border: 1px solid var(--dql-app-line-2);
-  border-radius: 8px;
-  background: var(--dql-app-surface);
-  color: var(--dql-app-ink);
-  padding: 0 10px;
-  font: 800 12px var(--font-ui);
-}
-
-.dql-app-assistant-focusbar > span {
-  flex: none;
-  color: var(--dql-app-green);
-  border: 1px solid rgba(22, 163, 74, 0.24);
-  background: var(--dql-app-green-soft);
-  border-radius: 999px;
-  padding: 4px 8px;
-  white-space: nowrap;
-  font: 800 10px var(--font-mono);
-  text-transform: uppercase;
-}
-
 .dql-app-assistant-context {
   display: grid;
-  gap: 10px;
-  padding: 12px 16px;
+  gap: 8px;
+  padding: 11px 14px;
   border-bottom: 1px solid var(--dql-app-line);
-  background: var(--dql-app-control);
+  background: var(--dql-app-surface-muted);
 }
 
 .dql-app-assistant-context p {
@@ -3373,35 +3339,6 @@ const APP_STYLES = `
 .dql-app-assistant-context > div {
   display: grid;
   gap: 6px;
-}
-
-.dql-app-assistant-suggestions {
-  display: flex;
-  gap: 7px;
-  flex-wrap: wrap;
-  padding: 10px 16px;
-  border-bottom: 1px solid var(--dql-app-line);
-}
-
-.dql-app-assistant-suggestions button {
-  min-width: 0;
-  height: 32px;
-  border: 1px solid var(--dql-app-line);
-  border-radius: 999px;
-  background: var(--dql-app-surface);
-  color: var(--dql-app-muted);
-  padding: 0 10px;
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  cursor: pointer;
-  font: 800 11px var(--font-ui);
-}
-
-.dql-app-assistant-suggestions button:hover {
-  color: var(--dql-app-accent);
-  border-color: rgba(79, 99, 215, 0.34);
-  background: var(--dql-app-accent-soft);
 }
 
 .dql-app-assistant-chat {
