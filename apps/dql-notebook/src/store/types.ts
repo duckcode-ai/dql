@@ -50,7 +50,7 @@ export interface CellChartConfig {
   xLabel?: string;
   yLabel?: string;
   legendPosition?: 'top' | 'bottom' | 'left' | 'right' | 'none';
-  colorPalette?: 'default' | 'warm' | 'cool' | 'mono' | 'pastel';
+  colorPalette?: 'default' | 'warm' | 'cool' | 'mono' | 'pastel' | 'corporate';
   maxItems?: number;
   format?: 'number' | 'currency' | 'percent' | 'duration';  // KPI/single-value display format
 }
@@ -141,6 +141,17 @@ export interface ParamConfig {
 export type SidebarPanel = 'files' | 'schema' | 'block_library' | 'connection' | 'reference' | 'lineage' | 'git' | 'apps' | 'settings' | null;
 export type DevPanelTab = 'logs' | 'errors';
 export type MainView = 'home' | 'notebook' | 'business_artifact' | 'lineage_detail' | 'block_studio' | 'imports' | 'connection' | 'reference' | 'git' | 'apps' | 'review' | 'settings';
+export type AppWorkspaceExperience = 'view' | 'build';
+export type AppWorkspaceSection = 'dashboards' | 'notebooks' | 'ai' | 'drafts' | 'settings';
+export type LineageReturnTarget =
+  | {
+      view: 'apps';
+      appId: string;
+      dashboardId?: string | null;
+      label?: string;
+      experience?: AppWorkspaceExperience;
+      section?: AppWorkspaceSection;
+    };
 
 /**
  * Apps consumption-layer surface — list of Apps + currently-open App.
@@ -656,6 +667,7 @@ export interface NotebookState {
   savingFile: boolean;
   lineageFullscreen: boolean;
   lineageFocusNodeId: string | null;
+  lineageReturnTarget: LineageReturnTarget | null;
   lineageDrawerOpen: boolean;
   lineageDrawerNodeId: string | null;
   dashboardMode: boolean;
@@ -676,6 +688,8 @@ export interface NotebookState {
   appsLoading: boolean;
   activeAppId: string | null;
   activeDashboardId: string | null;
+  activeAppExperience: AppWorkspaceExperience;
+  activeAppSection: AppWorkspaceSection;
   activePersona: ActivePersona | null;
 }
 
@@ -723,7 +737,7 @@ export type NotebookAction =
   | { type: 'SET_SEMANTIC_DOMAINS'; domains: string[]; tags: string[]; lastSyncTime?: string | null }
   | { type: 'TOGGLE_LINEAGE_FULLSCREEN' }
   | { type: 'SET_LINEAGE_FOCUS'; nodeId: string | null }
-  | { type: 'OPEN_LINEAGE_DETAIL'; nodeId: string }
+  | { type: 'OPEN_LINEAGE_DETAIL'; nodeId: string; returnTo?: LineageReturnTarget | null }
   | { type: 'OPEN_LINEAGE_DRAWER'; nodeId: string }
   | { type: 'CLOSE_LINEAGE_DRAWER' }
   | { type: 'REORDER_CELL'; fromIndex: number; toIndex: number }
@@ -745,6 +759,13 @@ export type NotebookAction =
   // Apps surface (Phase 1)
   | { type: 'SET_APPS'; apps: AppSummary[] }
   | { type: 'SET_APPS_LOADING'; loading: boolean }
-  | { type: 'OPEN_APP'; appId: string; dashboardId?: string | null }
+  | {
+      type: 'OPEN_APP';
+      appId: string;
+      dashboardId?: string | null;
+      experience?: AppWorkspaceExperience;
+      section?: AppWorkspaceSection;
+    }
   | { type: 'OPEN_DASHBOARD'; dashboardId: string }
+  | { type: 'SET_APP_WORKSPACE_STATE'; experience?: AppWorkspaceExperience; section?: AppWorkspaceSection }
   | { type: 'SET_ACTIVE_PERSONA'; persona: ActivePersona | null };

@@ -58,6 +58,21 @@ export async function handleAppsApi(ctx: Ctx): Promise<boolean> {
     return true;
   }
 
+  if (req.method === 'POST' && path === '/api/apps/generate') {
+    try {
+      const body = await readJson<AppGenerateRequest>(req);
+      const result = await generateAppPackage(projectRoot, body);
+      if (!result.ok) {
+        sendJson(res, 400, { error: result.error });
+        return true;
+      }
+      sendJson(res, 201, result);
+    } catch (err) {
+      sendJson(res, 500, { error: (err as Error).message });
+    }
+    return true;
+  }
+
   if (req.method === 'POST' && path === '/api/apps') {
     try {
       const body = await readJson<AppCreateRequest>(req);
@@ -564,11 +579,20 @@ interface AppCreateRequest {
   selectedBlockIds?: string[];
 }
 
+interface AppGenerateRequest {
+  prompt?: string;
+  domain?: string;
+  owner?: string;
+  force?: boolean;
+  selectedBlockIds?: string[];
+}
+
 interface AiPinCreateRequest {
   dashboardId?: string;
   tileId?: string;
   title?: string;
   answer?: string;
+  question?: string;
   sql?: string;
   sourceTier?: string;
   certification?: 'certified' | 'ai_generated';
@@ -577,6 +601,9 @@ interface AiPinCreateRequest {
   chartConfig?: Record<string, unknown>;
   result?: unknown;
   citations?: unknown[];
+  analysisPlan?: unknown;
+  evidence?: unknown;
+  followUps?: string[];
 }
 
 interface AppConversationMessageRequest {
@@ -648,6 +675,64 @@ export function recommendBlocks(projectRoot: string, input: AppRecommendationReq
     .filter((block): block is BlockCandidate => Boolean(block))
     .sort((a, b) => b.score - a.score || new Date(b.lastModified).getTime() - new Date(a.lastModified).getTime())
     .slice(0, 50);
+}
+
+export async function generateAppPackage(
+  projectRoot: string,
+  input: AppGenerateRequest,
+): Promise<
+  | {
+      ok: true;
+      plan: unknown;
+      validation: unknown;
+      generated: { paths: string[] };
+      app: ReturnType<typeof collectAppsList>[number] | null;
+      dashboardId: string | null;
+    }
+  | { ok: false; error: string }
+> {
+  const prompt = cleanString(input.prompt);
+  if (!prompt) return { ok: false, error: 'prompt is required' };
+  const selectedBlockIds = unique((input.selectedBlockIds ?? []).map(cleanString).filter(Boolean));
+
+  const {
+    KGStore,
+    defaultKgPath,
+    generateAppFromPlan,
+    planAppFromPrompt,
+    reindexProject,
+    validateAppPlan,
+  } = await import('@duckcodeailabs/dql-agent');
+
+  const kgPath = defaultKgPath(projectRoot);
+  await reindexProject(projectRoot, { kgPath });
+  const kg = new KGStore(kgPath);
+  try {
+    const plan = planAppFromPrompt({
+      prompt,
+      kg,
+      domain: cleanString(input.domain) || undefined,
+      owner: cleanString(input.owner) || undefined,
+      preferredBlockIds: selectedBlockIds,
+    });
+    const validation = validateAppPlan(plan, kg);
+    const generated = generateAppFromPlan(projectRoot, plan, kg, {
+      overwrite: Boolean(input.force),
+    });
+    const app = collectAppsList(projectRoot).find((entry) => entry.id === plan.appId) ?? null;
+    return {
+      ok: true,
+      plan,
+      validation,
+      generated: { paths: generated.paths },
+      app,
+      dashboardId: plan.pages[0]?.id ?? app?.dashboards[0]?.id ?? null,
+    };
+  } catch (err) {
+    return { ok: false, error: err instanceof Error ? err.message : String(err) };
+  } finally {
+    kg.close();
+  }
 }
 
 export function createAppPackage(
@@ -1095,6 +1180,7 @@ function createAiPinTile(
       tileId,
       title,
       answer: cleanString(input.answer) || title,
+      question: cleanString(input.question) || undefined,
       sql: cleanString(input.sql) || undefined,
       sourceTier: cleanString(input.sourceTier) || undefined,
       certification: input.certification === 'certified' ? 'certified' : 'ai_generated',
@@ -1103,6 +1189,9 @@ function createAiPinTile(
       chartConfig: input.chartConfig,
       result: input.result,
       citations: Array.isArray(input.citations) ? input.citations : [],
+      analysisPlan: input.analysisPlan,
+      evidence: input.evidence,
+      followUps: Array.isArray(input.followUps) ? input.followUps.filter((item): item is string => typeof item === 'string') : [],
     });
     const tile: DashboardGridItem = {
       i: tileId,
@@ -1141,6 +1230,17 @@ function promoteAiPinToDraftBlock(
     if (!pin) return { ok: false, error: `AI pin "${pinId}" not found` };
     if (!pin.sql) return { ok: false, error: 'AI pin has no SQL to promote' };
     const blockName = slugify(pin.title) || pin.id;
+    const analysisPlan = pin.analysisPlan && typeof pin.analysisPlan === 'object'
+      ? pin.analysisPlan as { candidateTables?: Array<{ relation?: string }>; dimensions?: string[]; measures?: string[] }
+      : null;
+    const sourceContext = [
+      pin.question ? `Question: ${pin.question}` : '',
+      analysisPlan?.candidateTables?.length
+        ? `Candidate tables: ${analysisPlan.candidateTables.map((table) => table.relation).filter(Boolean).join(', ')}`
+        : '',
+      analysisPlan?.dimensions?.length ? `Dimensions: ${analysisPlan.dimensions.join(', ')}` : '',
+      analysisPlan?.measures?.length ? `Measures: ${analysisPlan.measures.join(', ')}` : '',
+    ].filter(Boolean).join(' | ');
     const draftDir = join(projectRoot, 'apps', appId, 'drafts');
     const blockPath = join(draftDir, `${blockName}.dql`);
     mkdirSync(draftDir, { recursive: true });
@@ -1151,6 +1251,9 @@ function promoteAiPinToDraftBlock(
       '  status = "review"',
       `  owner = "${escapeDqlString(loaded.app.owners[0] ?? `${process.env.USER ?? 'analyst'}@local`)}"`,
       `  description = "${escapeDqlString(pin.answer.slice(0, 240))}"`,
+      sourceContext ? `  llmContext = "${escapeDqlString(sourceContext.slice(0, 800))}"` : '',
+      pin.question ? `  examples = [{ question = "${escapeDqlString(pin.question)}" }]` : '',
+      '  caveats = ["AI-generated draft. Validate joins, filters, grain, and business interpretation before certification."]',
       '  tags = ["ai-generated", "needs-review"]',
       '',
       '  query = """',

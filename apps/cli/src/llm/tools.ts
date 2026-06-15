@@ -7,6 +7,7 @@ import {
   lineageImpact,
   certify,
   suggestBlock,
+  kgSearch,
 } from '@duckcodeailabs/dql-mcp';
 
 export interface AgentTool {
@@ -85,8 +86,37 @@ const SUGGEST_BLOCK_SCHEMA = {
   },
 } as const;
 
+const KG_SEARCH_SCHEMA = {
+  type: 'object',
+  additionalProperties: false,
+  required: ['query'],
+  properties: {
+    query: { type: 'string', description: 'Natural-language or keyword query.' },
+    kinds: {
+      type: 'array',
+      items: {
+        type: 'string',
+        enum: [
+          'block', 'term', 'business_view',
+          'metric', 'dimension', 'measure', 'entity', 'semantic_model', 'saved_query', 'domain',
+          'dbt_model', 'dbt_source', 'notebook', 'dashboard', 'app', 'skill',
+        ],
+      },
+      description: 'Optional KG node-kind filter.',
+    },
+    domain: { type: 'string', description: 'Filter to a single business domain.' },
+    limit: { type: 'number', description: 'Max hits (default 10).' },
+  },
+} as const;
+
 export function buildAgentTools(ctx: DQLContext): AgentTool[] {
   return [
+    {
+      name: 'kg_search',
+      description: 'Search the DQL knowledge graph across business terms, business views, blocks, apps, dashboards, notebooks, semantic objects, and dbt/source metadata.',
+      inputSchema: KG_SEARCH_SCHEMA,
+      run: async (args) => kgSearch(ctx, args as Parameters<typeof kgSearch>[1]),
+    },
     {
       name: 'search_blocks',
       description: 'Find certified DQL blocks by keyword, domain, or status.',

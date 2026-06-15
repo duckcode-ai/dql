@@ -2,16 +2,21 @@
  * Build the KG node + edge arrays from a compiled DQL manifest.
  *
  * Inputs:
- *   - dql-manifest.json (blocks, dashboards, apps, metrics, dimensions, sources)
+ *   - dql-manifest.json (terms, business views, blocks, dashboards, apps, metrics, dimensions, sources)
  *   - dbt manifest (already merged into the DQL manifest's dbtImport.dbtDag)
  *   - project Skills folder (loaded separately by the Skills loader)
  *
  * The output is intentionally flat — caller passes it to `KGStore.rebuild()`.
  */
 
-import type { DQLManifest } from '@duckcodeailabs/dql-core';
-import type { SemanticLayer } from '@duckcodeailabs/dql-core';
-import type { KGNode, KGEdge, KGNodeKind } from './types.js';
+import type {
+  DQLManifest,
+  ManifestBusinessView,
+  ManifestSource,
+  ManifestTerm,
+  SemanticLayer,
+} from '@duckcodeailabs/dql-core';
+import type { KGNode, KGEdge, KGNodeKind, KGCertification } from './types.js';
 
 export function buildKGFromManifest(manifest: DQLManifest): {
   nodes: KGNode[];
@@ -19,6 +24,31 @@ export function buildKGFromManifest(manifest: DQLManifest): {
 } {
   const nodes: KGNode[] = [];
   const edges: KGEdge[] = [];
+
+  // Business terms
+  for (const term of Object.values(manifest.terms ?? {})) {
+    nodes.push({
+      nodeId: `term:${term.name}`,
+      kind: 'term',
+      name: term.name,
+      domain: term.domain,
+      status: term.status,
+      owner: term.owner,
+      description: term.description,
+      tags: termTags(term),
+      llmContext: renderTermContext(term),
+      businessOutcome: term.businessOutcome,
+      businessOwner: term.businessOwner,
+      decisionUse: term.decisionUse,
+      reviewCadence: term.reviewCadence,
+      businessRules: term.businessRules,
+      caveats: term.caveats,
+      sourcePath: term.filePath,
+      sourceTier: 'business_context',
+      certification: certificationFromStatus(term.status),
+      provenance: 'DQL business term',
+    });
+  }
 
   // Blocks
   for (const block of Object.values(manifest.blocks)) {
@@ -45,6 +75,44 @@ export function buildKGFromManifest(manifest: DQLManifest): {
       certification: block.status === 'certified' ? 'certified' : 'analyst_review_required',
       provenance: 'DQL block',
     });
+    for (const termRef of block.termRefs ?? []) {
+      edges.push({ src: `term:${termRef}`, dst: nodeId, kind: 'defines' });
+    }
+  }
+
+  // Business views
+  for (const view of Object.values(manifest.businessViews ?? {})) {
+    const nodeId = `business_view:${view.name}`;
+    nodes.push({
+      nodeId,
+      kind: 'business_view',
+      name: view.name,
+      domain: view.domain,
+      status: view.status,
+      owner: view.owner,
+      description: view.description,
+      tags: view.tags ?? [],
+      llmContext: renderBusinessViewContext(view),
+      businessOutcome: view.businessOutcome,
+      businessOwner: view.businessOwner,
+      decisionUse: view.decisionUse,
+      reviewCadence: view.reviewCadence,
+      businessRules: view.businessRules,
+      caveats: view.caveats,
+      sourcePath: view.filePath,
+      sourceTier: 'business_context',
+      certification: certificationFromStatus(view.status),
+      provenance: 'DQL business view',
+    });
+    for (const termRef of view.termRefs ?? []) {
+      edges.push({ src: `term:${termRef}`, dst: nodeId, kind: 'defines' });
+    }
+    for (const blockRef of view.blockRefs ?? []) {
+      edges.push({ src: `block:${blockRef}`, dst: nodeId, kind: 'composes' });
+    }
+    for (const viewRef of view.businessViewRefs ?? []) {
+      edges.push({ src: `business_view:${viewRef}`, dst: nodeId, kind: 'composes' });
+    }
   }
 
   // Notebooks become searchable governed workspaces. DQL cells that declare
@@ -115,9 +183,7 @@ export function buildKGFromManifest(manifest: DQLManifest): {
       kind,
       name: s.name,
       description: s.dbtModel?.description,
-      llmContext: s.dbtModel?.columns
-        ? renderColumnsContext(s.dbtModel.columns)
-        : undefined,
+      llmContext: renderSourceContext(s),
       sourceTier: isDbt ? 'dbt_manifest' : 'project',
       certification: 'ai_generated',
       provenance: isDbt ? 'dbt manifest.json' : 'SQL/table reference',
@@ -184,6 +250,8 @@ export function buildKGFromManifest(manifest: DQLManifest): {
 
   // Domains: derive a node per distinct domain seen across blocks/dashboards/apps.
   const domains = new Set<string>();
+  for (const term of Object.values(manifest.terms ?? {})) if (term.domain) domains.add(term.domain);
+  for (const view of Object.values(manifest.businessViews ?? {})) if (view.domain) domains.add(view.domain);
   for (const block of Object.values(manifest.blocks)) if (block.domain) domains.add(block.domain);
   for (const d of Object.values(manifest.dashboards ?? {})) if (d.domain) domains.add(d.domain);
   for (const a of Object.values(manifest.apps ?? {})) if (a.domain) domains.add(a.domain);
@@ -198,6 +266,39 @@ export function buildKGFromManifest(manifest: DQLManifest): {
   }
 
   return { nodes, edges };
+}
+
+function certificationFromStatus(status: string | undefined): KGCertification {
+  return status === 'certified' ? 'certified' : 'analyst_review_required';
+}
+
+function termTags(term: ManifestTerm): string[] {
+  return Array.from(new Set([
+    ...(term.tags ?? []),
+    term.termType,
+    ...(term.identifiers ?? []),
+    ...(term.synonyms ?? []),
+  ].filter((value): value is string => typeof value === 'string' && value.length > 0)));
+}
+
+function renderTermContext(term: ManifestTerm): string | undefined {
+  return [
+    term.termType ? `type: ${term.termType}` : '',
+    term.identifiers?.length ? `identifiers: ${term.identifiers.join(', ')}` : '',
+    term.synonyms?.length ? `synonyms: ${term.synonyms.join(', ')}` : '',
+    term.businessRules?.length ? `business rules: ${term.businessRules.join('; ')}` : '',
+    term.caveats?.length ? `caveats: ${term.caveats.join('; ')}` : '',
+  ].filter(Boolean).join('\n') || undefined;
+}
+
+function renderBusinessViewContext(view: ManifestBusinessView): string | undefined {
+  return [
+    view.termRefs?.length ? `terms: ${view.termRefs.join(', ')}` : '',
+    view.blockRefs?.length ? `blocks: ${view.blockRefs.join(', ')}` : '',
+    view.businessViewRefs?.length ? `business views: ${view.businessViewRefs.join(', ')}` : '',
+    view.businessRules?.length ? `business rules: ${view.businessRules.join('; ')}` : '',
+    view.caveats?.length ? `caveats: ${view.caveats.join('; ')}` : '',
+  ].filter(Boolean).join('\n') || undefined;
 }
 
 export function buildKGFromSemanticLayer(layer: SemanticLayer | undefined): {
@@ -395,6 +496,23 @@ function renderColumnsContext(columns: Record<string, { name: string; descriptio
     .map((col) => `- ${col.name}${col.type ? ` (${col.type})` : ''}${col.description ? `: ${col.description}` : ''}`)
     .join('\n');
   return rendered ? `Columns:\n${rendered}` : '';
+}
+
+function renderSourceContext(source: ManifestSource): string | undefined {
+  const model = source.dbtModel;
+  if (!model) return undefined;
+  const schemaQualified = model.schema ? `${model.schema}.${source.name}` : source.name;
+  const databaseQualified = model.database && model.schema
+    ? `${model.database}.${model.schema}.${source.name}`
+    : undefined;
+  return [
+    `runtime relation: ${schemaQualified}`,
+    databaseQualified && databaseQualified !== schemaQualified
+      ? `dbt relation: ${databaseQualified}`
+      : '',
+    model.materializedAs ? `materialized as: ${model.materializedAs}` : '',
+    model.columns ? renderColumnsContext(model.columns) : '',
+  ].filter(Boolean).join('\n') || undefined;
 }
 
 function businessMetadataFromRaw(raw: unknown): Partial<KGNode> {

@@ -87,6 +87,7 @@ const initialState: NotebookState = {
   savingFile: false,
   lineageFullscreen: false,
   lineageFocusNodeId: null,
+  lineageReturnTarget: null,
   lineageDrawerOpen: false,
   lineageDrawerNodeId: null,
   dashboardMode: false,
@@ -106,6 +107,8 @@ const initialState: NotebookState = {
   appsLoading: false,
   activeAppId: null,
   activeDashboardId: null,
+  activeAppExperience: 'view',
+  activeAppSection: 'dashboards',
   activePersona: null,
 };
 
@@ -126,6 +129,7 @@ function notebookReducer(state: NotebookState, action: NotebookAction): Notebook
           blockStudioImportOpen: true,
           lineageFullscreen: false,
           lineageFocusNodeId: null,
+          lineageReturnTarget: null,
         };
       }
       if (action.view === 'home') {
@@ -136,12 +140,13 @@ function notebookReducer(state: NotebookState, action: NotebookAction): Notebook
           sidebarOpen: false,
           lineageFullscreen: false,
           lineageFocusNodeId: null,
+          lineageReturnTarget: null,
           lineageDrawerOpen: false,
           lineageDrawerNodeId: null,
           dashboardMode: false,
         };
       }
-      return { ...state, mainView: action.view, lineageFullscreen: false, lineageFocusNodeId: null };
+      return { ...state, mainView: action.view, lineageFullscreen: false, lineageFocusNodeId: null, lineageReturnTarget: null };
 
     case 'SET_THEME': {
       // Sync the data-theme attribute BEFORE React re-renders. Inline-style
@@ -194,6 +199,7 @@ function notebookReducer(state: NotebookState, action: NotebookAction): Notebook
         sidebarOpen: action.panel !== null && !isFullPage,
         lineageFullscreen: false,
         lineageFocusNodeId: null,
+        lineageReturnTarget: null,
         mainView:
           action.panel === 'connection'
             ? 'connection'
@@ -463,16 +469,23 @@ function notebookReducer(state: NotebookState, action: NotebookAction): Notebook
     case 'SET_LINEAGE_FOCUS':
       return { ...state, lineageFocusNodeId: action.nodeId };
 
-    case 'OPEN_LINEAGE_DETAIL':
+    case 'OPEN_LINEAGE_DETAIL': {
+      const lineageReturnTarget = action.returnTo !== undefined
+        ? action.returnTo
+        : state.mainView === 'lineage_detail'
+          ? state.lineageReturnTarget
+          : null;
       return {
         ...state,
         mainView: 'lineage_detail',
         lineageFullscreen: false,
         lineageFocusNodeId: action.nodeId,
+        lineageReturnTarget,
         lineageDrawerOpen: false,
         lineageDrawerNodeId: null,
         dashboardMode: false,
       };
+    }
 
     case 'OPEN_LINEAGE_DRAWER':
       return { ...state, lineageDrawerOpen: true, lineageDrawerNodeId: action.nodeId };
@@ -554,16 +567,27 @@ function notebookReducer(state: NotebookState, action: NotebookAction): Notebook
       const dashboardId = action.dashboardId !== undefined
         ? action.dashboardId
         : (app?.homepage?.type === 'dashboard' ? app.homepage.id : (app?.dashboards[0]?.id ?? null));
+      const sameApp = state.activeAppId === action.appId;
       return {
         ...state,
         mainView: 'apps',
         activeAppId: action.appId,
         activeDashboardId: dashboardId,
+        activeAppExperience: action.experience ?? (sameApp ? state.activeAppExperience : 'view'),
+        activeAppSection: action.section ?? (sameApp ? state.activeAppSection : 'dashboards'),
+        lineageReturnTarget: null,
       };
     }
 
     case 'OPEN_DASHBOARD':
       return { ...state, activeDashboardId: action.dashboardId };
+
+    case 'SET_APP_WORKSPACE_STATE':
+      return {
+        ...state,
+        activeAppExperience: action.experience ?? state.activeAppExperience,
+        activeAppSection: action.section ?? state.activeAppSection,
+      };
 
     case 'SET_ACTIVE_PERSONA':
       return { ...state, activePersona: action.persona };

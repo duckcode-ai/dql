@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { LineageGraph, getLayerForNodeType, type LineageLayer } from './lineage-graph.js';
 import { buildLineageGraph } from './builder.js';
-import { queryLineage, queryCompleteLineagePaths } from './query.js';
+import { queryLineage, queryBusiness360, queryCompleteLineagePaths } from './query.js';
 import {
   buildTrustChain,
   analyzeImpact,
@@ -505,6 +505,135 @@ describe('queryLineage', () => {
       'block:revenue_by_region',
     ]);
     expect(result.graph.nodes.every((node) => ['block', 'metric'].includes(node.type))).toBe(true);
+  });
+});
+
+describe('queryBusiness360', () => {
+  it('expands terms through definitions before tracing sources and consumers', () => {
+    const graph = buildLineageGraph(
+      [
+        {
+          name: 'Customer Identity',
+          sql: 'SELECT customer_id FROM dim_customer',
+          domain: 'Customer',
+          status: 'certified',
+          termRefs: ['Customer'],
+        },
+        {
+          name: 'Customer Orders Rollup',
+          sql: 'SELECT customer_id, COUNT(*) AS orders FROM fct_orders GROUP BY 1',
+          domain: 'Customer',
+          termRefs: ['Customer'],
+        },
+      ],
+      [],
+      [],
+      {
+        terms: [
+          {
+            name: 'Customer',
+            domain: 'Customer',
+            termType: 'entity',
+            description: 'A person or business buying from the company.',
+          },
+        ],
+        businessViews: [
+          {
+            name: 'Customer 360',
+            domain: 'Customer',
+            blockRefs: ['Customer Identity', 'Customer Orders Rollup'],
+            businessViewRefs: [],
+            declaredTermRefs: ['Customer'],
+          },
+        ],
+        dashboards: [
+          {
+            name: 'Customer Health',
+            blocks: ['Customer Orders Rollup'],
+            charts: [],
+          },
+        ],
+        apps: [
+          {
+            id: 'customer-app',
+            name: 'Customer App',
+            dashboards: ['Customer Health'],
+          },
+        ],
+      },
+    );
+
+    const result = queryBusiness360(graph, 'Customer');
+    expect(result?.focus.id).toBe('term:Customer');
+    expect(result?.businessDefinition.definedArtifacts.map((asset) => asset.id)).toEqual([
+      'block:Customer Identity',
+      'block:Customer Orders Rollup',
+      'business_view:Customer 360',
+    ]);
+    expect(result?.technicalSources.sourceTables.map((asset) => asset.name)).toEqual([
+      'dim_customer',
+      'fct_orders',
+    ]);
+    expect(result?.consumers.dashboards.map((asset) => asset.id)).toEqual(['dashboard:Customer Health']);
+    expect(result?.consumers.apps.map((asset) => asset.id)).toEqual(['app:customer-app']);
+    expect(result?.gaps.map((gap) => gap.code)).not.toContain('missing_definition');
+  });
+
+  it('shows business view composition and downstream consumption through included blocks', () => {
+    const graph = buildLineageGraph(
+      [
+        {
+          name: 'Customer Identity',
+          sql: 'SELECT customer_id FROM dim_customer',
+          domain: 'Customer',
+        },
+      ],
+      [],
+      [],
+      {
+        businessViews: [
+          {
+            name: 'Customer 360',
+            domain: 'Customer',
+            blockRefs: ['Customer Identity'],
+            businessViewRefs: [],
+          },
+        ],
+        dashboards: [
+          {
+            name: 'Customer Overview',
+            blocks: ['Customer Identity'],
+            charts: [],
+          },
+        ],
+      },
+    );
+
+    const result = queryBusiness360(graph, 'Customer 360');
+    expect(result?.focus.id).toBe('business_view:Customer 360');
+    expect(result?.businessComposition.includedArtifacts.map((asset) => asset.id)).toEqual([
+      'block:Customer Identity',
+    ]);
+    expect(result?.technicalSources.sourceTables.map((asset) => asset.id)).toEqual(['table:dim_customer']);
+    expect(result?.consumers.dashboards.map((asset) => asset.id)).toEqual(['dashboard:Customer Overview']);
+  });
+
+  it('surfaces useful gaps for disconnected terms', () => {
+    const graph = buildLineageGraph(
+      [],
+      [],
+      [],
+      {
+        terms: [{ name: 'Churn Risk', domain: 'Customer' }],
+      },
+    );
+
+    const result = queryBusiness360(graph, 'Churn Risk');
+    expect(result?.gaps.map((gap) => gap.code)).toEqual([
+      'missing_definition',
+      'missing_sources',
+      'missing_consumers',
+    ]);
   });
 });
 

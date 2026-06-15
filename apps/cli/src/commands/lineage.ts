@@ -8,6 +8,7 @@
  *   dql lineage [path]                    Show full lineage graph summary
  *   dql lineage <name> [path]             Show upstream/downstream for a block, table, or metric
  *   dql lineage --term <name> [path]      Show lineage for a business term
+ *   dql lineage --business-360 <name>     Show business definition, sources, consumers, and gaps
  *   dql lineage --business [name] [path]  Show business lineage, optionally focused on a view
  *   dql lineage --table <name> [path]     Show lineage for a specific source table
  *   dql lineage --metric <name> [path]    Show lineage for a specific metric
@@ -35,10 +36,13 @@ import {
   getDomainTrustOverview,
   LineageGraph,
   queryLineage,
+  queryBusiness360,
   type LineageBlockInput,
   type LineageMetricInput,
   type LineageDimensionInput,
   type LineageNode,
+  type Business360Asset,
+  type Business360Result,
 } from '@duckcodeailabs/dql-core';
 import type { CLIFlags } from '../args.js';
 
@@ -84,6 +88,24 @@ export async function runLineage(
   }
 
   // Route to the right subcommand based on flags
+  const business360Idx = allArgs.indexOf('--business-360');
+  const business360AliasIdx = allArgs.indexOf('--360');
+  const effectiveBusiness360Idx = business360Idx >= 0 ? business360Idx : business360AliasIdx;
+  if (effectiveBusiness360Idx >= 0 && allArgs[effectiveBusiness360Idx + 1]) {
+    const focus = allArgs[effectiveBusiness360Idx + 1];
+    const result = queryBusiness360(graph, focus);
+    if (!result) {
+      console.error(`"${focus}" not found in lineage graph.`);
+      process.exitCode = 1;
+      return;
+    }
+    if (flags.format === 'json') {
+      console.log(JSON.stringify(result, null, 2));
+      return;
+    }
+    return printBusiness360(result);
+  }
+
   if (flags.format === 'json' || allArgs.includes('--export')) {
     console.log(JSON.stringify(graph.toJSON(), null, 2));
     return;
@@ -635,6 +657,87 @@ function printBusinessLineageFor(graph: LineageGraph, nodeId: string): void {
   }
 
   console.log('');
+}
+
+function printBusiness360(result: Business360Result): void {
+  const focus = result.focus;
+  console.log(`\n  Business 360: ${focus.name}`);
+  console.log('  ' + '='.repeat(50));
+  console.log(`  Node: ${assetLabel(focus)}${focus.domain ? ` (${focus.domain})` : ''}`);
+
+  const definitionItems = [
+    ...result.businessDefinition.terms.filter((asset) => asset.id !== focus.id),
+    ...result.businessDefinition.definedByTerms,
+  ];
+  if (definitionItems.length > 0 || result.businessDefinition.definedArtifacts.length > 0) {
+    console.log('\n  Business Definition:');
+    printAssetList('Terms', definitionItems);
+    printAssetList('Defines', result.businessDefinition.definedArtifacts);
+    printMetadataSummary(result.businessDefinition.metadata);
+  }
+
+  if (result.businessComposition.includedArtifacts.length > 0 || result.businessComposition.parentViews.length > 0) {
+    console.log('\n  Business Composition:');
+    printAssetList('Includes', result.businessComposition.includedArtifacts);
+    printAssetList('Rolls up to', result.businessComposition.parentViews);
+  }
+
+  const sourceCount = result.technicalSources.sourceTables.length
+    + result.technicalSources.dbtModels.length
+    + result.technicalSources.dbtSources.length
+    + result.technicalSources.upstreamBlocks.length;
+  if (sourceCount > 0) {
+    console.log('\n  Technical Sources:');
+    printAssetList('Tables', result.technicalSources.sourceTables);
+    printAssetList('dbt sources', result.technicalSources.dbtSources);
+    printAssetList('dbt models', result.technicalSources.dbtModels);
+    printAssetList('Upstream blocks', result.technicalSources.upstreamBlocks);
+    console.log(`    upstream paths: ${result.technicalSources.upstreamPathCount}`);
+  }
+
+  const consumerCount = result.consumers.dashboards.length
+    + result.consumers.apps.length
+    + result.consumers.notebooks.length
+    + result.consumers.downstreamViews.length
+    + result.consumers.downstreamBlocks.length;
+  if (consumerCount > 0) {
+    console.log('\n  Consumers:');
+    printAssetList('Dashboards', result.consumers.dashboards);
+    printAssetList('Apps', result.consumers.apps);
+    printAssetList('Notebooks', result.consumers.notebooks);
+    printAssetList('Business views', result.consumers.downstreamViews);
+    printAssetList('Blocks', result.consumers.downstreamBlocks);
+  }
+
+  if (result.gaps.length > 0) {
+    console.log('\n  Gaps:');
+    for (const gap of result.gaps) {
+      console.log(`    [${gap.severity}] ${gap.message}`);
+    }
+  }
+
+  console.log(`\n  Evidence: ${result.evidence.nodes.length} node(s), ${result.evidence.edges.length} edge(s)`);
+  console.log('');
+}
+
+function printAssetList(label: string, assets: Business360Asset[]): void {
+  if (assets.length === 0) return;
+  console.log(`    ${label}: ${assets.map(assetLabel).join(', ')}`);
+}
+
+function assetLabel(asset: Business360Asset): string {
+  const type = asset.type === 'source_table' ? 'table' : asset.type;
+  const status = asset.status === 'certified' ? ' [certified]' : '';
+  return `${type}:${asset.name}${status}`;
+}
+
+function printMetadataSummary(metadata: Record<string, unknown>): void {
+  const summary = ['description', 'businessOutcome', 'termType']
+    .map((key) => [key, metadata[key]] as const)
+    .filter((entry): entry is readonly [string, string] => typeof entry[1] === 'string' && entry[1].length > 0);
+  for (const [key, value] of summary) {
+    console.log(`    ${key}: ${value}`);
+  }
 }
 
 function nodeTypeLabel(node: LineageNode): string {

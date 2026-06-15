@@ -111,7 +111,7 @@ export function createDQLMCPServer(options: CreateServerOptions = {}): McpServer
   );
   server.registerTool(
     'kg_search',
-    { description: 'Search the agent knowledge graph (FTS5) over blocks, metrics, dimensions, dashboards, apps.', inputSchema: kgSearchInput },
+    { description: 'Search the agent knowledge graph (FTS5) over terms, business views, blocks, metrics, dimensions, dashboards, apps, notebooks, and dbt/source metadata.', inputSchema: kgSearchInput },
     async (args) => wrap(kgSearch(ctx, args)),
   );
   server.registerTool(

@@ -45,9 +45,15 @@ export {
 
 export {
   queryLineage,
+  queryBusiness360,
   queryCompleteLineagePaths,
   type LineageQuery,
   type LineageQueryResult,
+  type Business360Asset,
+  type Business360Edge,
+  type Business360Gap,
+  type Business360Options,
+  type Business360Result,
   type LineagePath,
   type CompletePathResult,
   type CompletePathOptions,

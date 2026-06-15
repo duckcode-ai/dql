@@ -1,65 +1,126 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { mkdtempSync, rmSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
-import { KGStore } from './kg/sqlite-fts.js';
-import { answer, parseProposal } from './answer-loop.js';
-import type { AgentProvider, AgentMessage } from './providers/types.js';
+import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { KGStore } from "./kg/sqlite-fts.js";
+import { answer, parseProposal } from "./answer-loop.js";
+import type { KGNode } from "./kg/types.js";
+import type { AgentProvider, AgentMessage } from "./providers/types.js";
 
 class StubProvider implements AgentProvider {
-  readonly name = 'claude' as const;
+  readonly name = "claude" as const;
   messages: AgentMessage[] = [];
-  constructor(private readonly response: string) {}
-  async available(): Promise<boolean> { return true; }
+  calls: AgentMessage[][] = [];
+  private readonly responses: string[];
+  constructor(response: string | string[]) {
+    this.responses = Array.isArray(response) ? response : [response];
+  }
+  async available(): Promise<boolean> {
+    return true;
+  }
   async generate(messages: AgentMessage[]): Promise<string> {
     this.messages = messages;
-    return this.response;
+    this.calls.push(messages);
+    return this.responses[Math.min(this.calls.length - 1, this.responses.length - 1)];
   }
 }
 
 let dir: string;
 let kg: KGStore;
 
+function revenueSegmentBlock(): KGNode {
+  return {
+    nodeId: "block:revenue_by_segment",
+    kind: "block",
+    name: "revenue_by_segment",
+    domain: "growth",
+    status: "certified",
+    description: "Revenue split by customer segment for drilldown analysis",
+    llmContext:
+      "Use this for revenue drilldowns by segment, including Enterprise, SMB, and Mid-Market.",
+    tags: ["revenue", "segment", "drilldown"],
+    sourceTier: "certified_artifact",
+    certification: "certified",
+    provenance: "DQL block",
+  };
+}
+
 beforeEach(() => {
-  dir = mkdtempSync(join(tmpdir(), 'kg-answer-'));
-  kg = new KGStore(join(dir, 'kg.sqlite'));
-  kg.rebuild([
-    {
-      nodeId: 'block:revenue_total',
-      kind: 'block',
-      name: 'revenue_total',
-      domain: 'growth',
-      status: 'certified',
-      description: 'Top-level revenue across customer segments',
-      llmContext: 'Use this for revenue trends. Tracks ARR over time.',
-      tags: ['revenue'],
-      gitSha: 'abc12345',
-      sourceTier: 'certified_artifact',
-      certification: 'certified',
-      provenance: 'DQL block',
-      businessOutcome: 'Revenue leadership can monitor quarterly growth.',
-      businessOwner: 'revenue-ops',
-      decisionUse: 'Quarterly planning and forecast review',
-      reviewCadence: 'weekly',
-      businessRules: ['Revenue excludes test accounts.'],
-      caveats: ['Late-arriving invoices may restate current quarter revenue.'],
-    },
-    {
-      nodeId: 'block:churn_logo',
-      kind: 'block',
-      name: 'churn_logo',
-      domain: 'retention',
-      status: 'draft',
-      description: 'Logo churn',
-    },
-    {
-      nodeId: 'metric:arr',
-      kind: 'metric',
-      name: 'arr',
-      domain: 'growth',
-      description: 'Annualized recurring revenue',
-    },
-  ], []);
+  dir = mkdtempSync(join(tmpdir(), "kg-answer-"));
+  kg = new KGStore(join(dir, "kg.sqlite"));
+  kg.rebuild(
+    [
+      {
+        nodeId: "block:revenue_total",
+        kind: "block",
+        name: "revenue_total",
+        domain: "growth",
+        status: "certified",
+        description: "Top-level revenue across customer segments",
+        llmContext: "Use this for revenue trends. Tracks ARR over time.",
+        tags: ["revenue"],
+        gitSha: "abc12345",
+        sourceTier: "certified_artifact",
+        certification: "certified",
+        provenance: "DQL block",
+        businessOutcome: "Revenue leadership can monitor quarterly growth.",
+        businessOwner: "revenue-ops",
+        decisionUse: "Quarterly planning and forecast review",
+        reviewCadence: "weekly",
+        businessRules: ["Revenue excludes test accounts."],
+        caveats: [
+          "Late-arriving invoices may restate current quarter revenue.",
+        ],
+      },
+      {
+        nodeId: "block:churn_logo",
+        kind: "block",
+        name: "churn_logo",
+        domain: "retention",
+        status: "draft",
+        description: "Logo churn",
+      },
+      {
+        nodeId: "term:Net Revenue",
+        kind: "term",
+        name: "Net Revenue",
+        domain: "growth",
+        status: "certified",
+        description:
+          "Recognized revenue after refunds and test-account exclusions.",
+        llmContext: "synonyms: revenue, recognized revenue",
+        sourceTier: "business_context",
+        certification: "certified",
+        provenance: "DQL business term",
+        businessOwner: "finance",
+        decisionUse: "Metric definition and stakeholder alignment",
+      },
+      {
+        nodeId: "business_view:Revenue Health",
+        kind: "business_view",
+        name: "Revenue Health",
+        domain: "growth",
+        status: "certified",
+        description: "Business view for leadership revenue health review.",
+        llmContext: "terms: Net Revenue\nblocks: revenue_total",
+        sourceTier: "business_context",
+        certification: "certified",
+        provenance: "DQL business view",
+        businessOutcome:
+          "Revenue leadership can inspect growth, mix, and caveats in one place.",
+        decisionUse: "Weekly business review",
+        reviewCadence: "weekly",
+      },
+      {
+        nodeId: "metric:arr",
+        kind: "metric",
+        name: "arr",
+        domain: "growth",
+        description: "Annualized recurring revenue",
+      },
+    ],
+    [],
+  );
 });
 
 afterEach(() => {
@@ -67,128 +128,703 @@ afterEach(() => {
   rmSync(dir, { recursive: true, force: true });
 });
 
-describe('answer (block-first loop)', () => {
-  it('returns Certified when a certified block matches', async () => {
-    const provider = new StubProvider('should not be called');
+describe("answer (block-first loop)", () => {
+  it("returns Certified when a certified block matches", async () => {
+    const provider = new StubProvider("should not be called");
     const result = await answer({
-      question: 'What was revenue this quarter?',
+      question: "What was revenue this quarter?",
       provider,
       kg,
     });
-    expect(result.kind).toBe('certified');
-    expect(result.block?.nodeId).toBe('block:revenue_total');
-    expect(result.citations[0].gitSha).toBe('abc12345');
-    expect(result.evidence?.route[0].tool).toBe('search_certified_artifacts');
-    expect(result.evidence?.selectedAssets[0].nodeId).toBe('block:revenue_total');
-    expect(result.evidence?.outcome?.name).toContain('Revenue leadership');
+    expect(result.kind).toBe("certified");
+    expect(result.block?.nodeId).toBe("block:revenue_total");
+    expect(result.citations[0].gitSha).toBe("abc12345");
+    expect(result.evidence?.route[0].tool).toBe("search_certified_artifacts");
+    expect(result.evidence?.selectedAssets[0].nodeId).toBe(
+      "block:revenue_total",
+    );
+    expect(result.evidence?.outcome?.name).toContain("Revenue leadership");
   });
 
-  it('executes a certified block when the host supplies an executor', async () => {
-    const provider = new StubProvider('should not be called');
+  it("uses certified business context for definition questions", async () => {
+    const provider = new StubProvider("should not be called");
     const result = await answer({
-      question: 'What was revenue this quarter?',
+      question: "What is revenue health?",
+      provider,
+      kg,
+    });
+    expect(result.kind).toBe("certified");
+    expect(result.block).toBeUndefined();
+    expect(result.sourceTier).toBe("business_context");
+    expect(result.citations[0]).toMatchObject({
+      kind: "business_view",
+      name: "Revenue Health",
+      sourceTier: "business_context",
+    });
+    expect(result.evidence?.route).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          tool: "search_business_context",
+          status: "selected",
+        }),
+      ]),
+    );
+    expect(
+      result.evidence?.businessContext.some((item) =>
+        item.value?.includes("Weekly business review"),
+      ),
+    ).toBe(true);
+  });
+
+  it("executes a certified block when the host supplies an executor", async () => {
+    const provider = new StubProvider("should not be called");
+    const result = await answer({
+      question: "What was revenue this quarter?",
       provider,
       kg,
       executeCertifiedBlock: async () => ({
-        columns: ['revenue'],
+        columns: ["revenue"],
         rows: [{ revenue: 42 }],
         rowCount: 1,
         executionTime: 12,
       }),
     });
-    expect(result.kind).toBe('certified');
+    expect(result.kind).toBe("certified");
     expect(result.result?.rowCount).toBe(1);
-    expect(result.text).toContain('Returned 1 row.');
-    expect(result.evidence?.execution?.status).toBe('executed');
+    expect(result.text).toContain("Returned 1 row.");
+    expect(result.evidence?.execution?.status).toBe("executed");
     expect(result.evidence?.execution?.rowCount).toBe(1);
-    expect(result.evidence?.validation?.status).toBe('passed');
+    expect(result.evidence?.validation?.status).toBe("passed");
   });
 
-  it('returns Uncertified when no certified block matches and SQL is proposed', async () => {
+  it("returns Uncertified when no certified block matches and SQL is proposed", async () => {
     const llmReply =
-      'Median order value by region — joins fct_orders with dim_customers.\n\n' +
-      '```sql\nSELECT region, MEDIAN(amount) FROM fct_orders GROUP BY region\n```\n\n' +
-      'Viz: bar';
+      "Median order value by region — joins fct_orders with dim_customers.\n\n" +
+      "```sql\nSELECT region, MEDIAN(amount) FROM fct_orders GROUP BY region\n```\n\n" +
+      "Viz: bar";
     const provider = new StubProvider(llmReply);
     const result = await answer({
-      question: 'What is the median order value by region?',
+      question: "What is the median order value by region?",
       provider,
       kg,
     });
-    expect(result.kind).toBe('uncertified');
+    expect(result.kind).toBe("uncertified");
     expect(result.proposedSql).toMatch(/SELECT region, MEDIAN/);
-    expect(result.suggestedViz).toBe('bar');
-    expect(result.evidence?.validation?.status).toBe('warning');
-    expect(result.evidence?.route.map((step) => step.tool)).toContain('validate_sql');
+    expect(result.suggestedViz).toBe("bar");
+    expect(result.evidence?.validation?.status).toBe("warning");
+    expect(result.evidence?.route.map((step) => step.tool)).toContain(
+      "validate_sql",
+    );
     // Citations are best-effort — empty is acceptable when nothing in the KG matches.
     expect(Array.isArray(result.citations)).toBe(true);
   });
 
-  it('returns no_answer when the model declines without SQL', async () => {
-    const provider = new StubProvider('I cannot answer this without more schema context.');
-    const result = await answer({
-      question: 'Tell me a joke',
-      provider,
-      kg,
-    });
-    expect(result.kind).toBe('no_answer');
-    expect(result.evidence?.validation?.status).toBe('failed');
-  });
-
-  it('passes extra context to the model without using it for certified routing', async () => {
-    const provider = new StubProvider('Explanation draft.\n```sql\nSELECT 1\n```\nViz: table');
-    const result = await answer({
-      question: 'Explain this current query',
-      extraContext: 'Current upstream SQL:\nSELECT SUM(amount) AS revenue FROM orders',
-      provider,
-      kg,
-    });
-    expect(result.kind).toBe('uncertified');
-    expect(result.block).toBeUndefined();
-    expect(provider.messages.some((m) => m.content.includes('Current upstream SQL'))).toBe(true);
-  });
-
-  it('skips a certified block if downvotes dominate', async () => {
-    for (const i of [1, 2, 3]) {
-      kg.recordFeedback({
-        id: `dn${i}`, ts: new Date().toISOString(), user: `u${i}`, question: 'q',
-        answerKind: 'certified', blockId: 'block:revenue_total', rating: 'down',
-      });
-    }
-    const llmReply = 'fallback text\n```sql\nSELECT 1\n```\nViz: table';
+  it("executes generated SQL as an uncertified bounded preview when the host supplies an executor", async () => {
+    const llmReply =
+      "Median order value by region based on the available manifest context.\n\n" +
+      "```sql\nSELECT region, MEDIAN(amount) AS median_order_value FROM fct_orders GROUP BY region\n```\n\n" +
+      "Viz: bar";
     const provider = new StubProvider(llmReply);
     const result = await answer({
-      question: 'Revenue trend',
+      question: "What is the median order value by region?",
+      provider,
+      kg,
+      executeGeneratedSql: async (sql) => ({
+        columns: ["region", "median_order_value"],
+        rows: [{ region: "North", median_order_value: 120 }, { region: "South", median_order_value: 90 }],
+        rowCount: 2,
+        executionTime: 8,
+        sql: `SELECT * FROM (${sql}) AS dql_agent_preview LIMIT 200`,
+      }),
+    });
+    expect(result.kind).toBe("uncertified");
+    expect(result.reviewStatus).toBe("draft_ready");
+    expect(result.result?.rowCount).toBe(2);
+    expect(result.evidence?.execution?.status).toBe("executed");
+    expect(result.evidence?.execution?.message).toContain("uncertified bounded preview");
+    expect(result.evidence?.route).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          tool: "execute_generated_sql",
+          status: "selected",
+          detail: "2 rows",
+        }),
+        expect.objectContaining({
+          tool: "create_draft_block",
+          status: "checked",
+        }),
+      ]),
+    );
+    expect(result.evidence?.validation?.status).toBe("warning");
+  });
+
+  it("keeps generated answers reviewable when SQL preview execution fails", async () => {
+    const provider = new StubProvider(
+      "Unsafe generated SQL.\n\n```sql\nDELETE FROM orders\n```\n\nViz: table",
+    );
+    const result = await answer({
+      question: "Show bad orders",
+      provider,
+      kg,
+      schemaContext: [
+        {
+          relation: "dev.orders",
+          schema: "dev",
+          name: "orders",
+          columns: [
+            { name: "order_id", type: "VARCHAR" },
+            { name: "order_total", type: "DECIMAL" },
+          ],
+        },
+      ],
+      executeGeneratedSql: async () => {
+        throw new Error("Generated SQL preview only supports read-only SELECT or WITH queries.");
+      },
+    });
+    expect(result.kind).toBe("uncertified");
+    expect(result.result).toBeUndefined();
+    expect(result.executionError).toContain("read-only SELECT");
+    expect(result.evidence?.execution?.status).toBe("failed");
+    expect(result.evidence?.route).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          tool: "execute_generated_sql",
+          status: "failed",
+        }),
+      ]),
+    );
+    expect(result.evidence?.validation?.status).toBe("warning");
+  });
+
+  it("does not route an unmatched business object to a generic certified count block", async () => {
+    kg.rebuild(
+      [
+        {
+          nodeId: "block:total_customers",
+          kind: "block",
+          name: "total_customers",
+          domain: "customers",
+          status: "certified",
+          description: "Total number of distinct customers.",
+          tags: ["customers", "count"],
+          sourceTier: "certified_artifact",
+          certification: "certified",
+          provenance: "DQL block",
+        },
+        {
+          nodeId: "dbt_model:supplies",
+          kind: "dbt_model",
+          name: "supplies",
+          domain: "operations",
+          description: "Supply SKU table with perishable supply flags.",
+          tags: ["supplies", "sku", "perishable"],
+          provenance: "dbt manifest",
+        },
+      ],
+      [],
+    );
+    const provider = new StubProvider(
+      "Supply SKU counts by perishable flag.\n\n" +
+        "```sql\nSELECT is_perishable_supply, COUNT(*) AS sku_count FROM supplies GROUP BY is_perishable_supply\n```\n\n" +
+        "Viz: bar",
+    );
+    const result = await answer({
+      question: "How many supply SKUs are perishable versus not perishable?",
+      provider,
+      kg,
+      executeGeneratedSql: async () => ({
+        columns: ["is_perishable_supply", "sku_count"],
+        rows: [{ is_perishable_supply: true, sku_count: 8 }, { is_perishable_supply: false, sku_count: 12 }],
+        rowCount: 2,
+      }),
+    });
+    expect(result.kind).toBe("uncertified");
+    expect(result.block).toBeUndefined();
+    expect(result.proposedSql).toContain("supplies");
+    expect(result.result?.rowCount).toBe(2);
+    expect(result.evidence?.route).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          tool: "execute_generated_sql",
+          status: "selected",
+        }),
+      ]),
+    );
+  });
+
+  it("uses a certified count block for a direct customer KPI question", async () => {
+    kg.rebuild(
+      [
+        {
+          nodeId: "block:total_customers",
+          kind: "block",
+          name: "total_customers",
+          domain: "customers",
+          status: "certified",
+          description: "Total number of distinct customers.",
+          llmContext: "Use for how many customers questions.",
+          tags: ["customers", "kpi"],
+          sourceTier: "certified_artifact",
+          certification: "certified",
+          provenance: "DQL block",
+        },
+      ],
+      [],
+    );
+    const provider = new StubProvider("should not be called");
+    const result = await answer({
+      question: "How many customers do we have?",
+      provider,
+      kg,
+      executeCertifiedBlock: async () => ({
+        columns: ["total_customers"],
+        rows: [{ total_customers: 100 }],
+        rowCount: 1,
+      }),
+    });
+    expect(result.kind).toBe("certified");
+    expect(result.block?.nodeId).toBe("block:total_customers");
+    expect(result.analysisPlan?.intent).toBe("exact_certified_lookup");
+    expect(provider.calls).toHaveLength(0);
+  });
+
+  it("allows an explicit saved top customers block request to stay certified", async () => {
+    kg.rebuild(
+      [
+        {
+          nodeId: "block:top_customers",
+          kind: "block",
+          name: "top_customers",
+          domain: "customers",
+          status: "certified",
+          description: "Top customers by lifetime spend.",
+          llmContext: "Use for the certified top customers block.",
+          tags: ["customers", "ranking"],
+          sourceTier: "certified_artifact",
+          certification: "certified",
+          provenance: "DQL block",
+        },
+      ],
+      [],
+    );
+    const provider = new StubProvider("should not be called");
+    const result = await answer({
+      question: "Run the certified block top_customers",
       provider,
       kg,
     });
-    expect(result.kind).toBe('uncertified');
+    expect(result.kind).toBe("certified");
+    expect(result.block?.nodeId).toBe("block:top_customers");
+    expect(provider.calls).toHaveLength(0);
+  });
+
+  it("generates dynamic customer ranking SQL instead of selecting total_customers for ad hoc performance questions", async () => {
+    kg.rebuild(
+      [
+        {
+          nodeId: "block:total_customers",
+          kind: "block",
+          name: "total_customers",
+          domain: "customers",
+          status: "certified",
+          description: "Total number of distinct customers.",
+          tags: ["customers", "kpi"],
+          sourceTier: "certified_artifact",
+          certification: "certified",
+          provenance: "DQL block",
+        },
+        {
+          nodeId: "block:top_customers",
+          kind: "block",
+          name: "top_customers",
+          domain: "customers",
+          status: "certified",
+          description: "Top 10 customers by lifetime spend, with order counts.",
+          llmContext: "Use for best customers and highest lifetime spend questions.",
+          tags: ["customers", "ranking", "orders"],
+          sourceTier: "certified_artifact",
+          certification: "certified",
+          provenance: "DQL block",
+        },
+        {
+          nodeId: "dbt_model:customers",
+          kind: "dbt_model",
+          name: "customers",
+          domain: "customers",
+          description: "Customer mart with lifetime spend and order counts.",
+          llmContext: "runtime relation: dev.customers\nColumns:\n- customer_name\n- count_lifetime_orders\n- lifetime_spend",
+          sourceTier: "dbt_manifest",
+          certification: "ai_generated",
+          provenance: "dbt manifest",
+        },
+      ],
+      [],
+    );
+    const provider = new StubProvider("should not be called");
+    const result = await answer({
+      question: "Can you show me the orders by customer who have performed better?",
+      provider,
+      kg,
+      schemaContext: [
+        {
+          relation: "dev.customers",
+          schema: "dev",
+          name: "customers",
+          columns: [
+            { name: "customer_name", type: "VARCHAR" },
+            { name: "count_lifetime_orders", type: "BIGINT" },
+            { name: "lifetime_spend", type: "DECIMAL" },
+          ],
+        },
+      ],
+      executeGeneratedSql: async (sql) => ({
+        columns: ["customer_name", "orders", "lifetime_spend"],
+        rows: [
+          { customer_name: "Mr. Matthew Meyer", orders: 33, lifetime_spend: 3089.8 },
+          { customer_name: "Aaron Gardner", orders: 31, lifetime_spend: 2880.99 },
+        ],
+        rowCount: 2,
+        sql,
+      }),
+    });
+    expect(result.kind).toBe("uncertified");
+    expect(result.block).toBeUndefined();
+    expect(result.proposedSql).toContain("dev.customers");
+    expect(result.proposedSql).toContain("count_lifetime_orders");
+    expect(result.proposedSql).not.toContain("total_customers");
+    expect(result.sql).toContain("lifetime_spend");
+    expect(result.result?.rowCount).toBe(2);
+    expect(result.analysisPlan?.intent).toBe("ad_hoc_analysis");
+    expect(result.analysisPlan?.assumptions).toEqual(
+      expect.arrayContaining([
+        expect.stringContaining("schema-aware local planner"),
+      ]),
+    );
+    expect(result.evidence?.selectedAssets.some((asset) => asset.name === "top_customers")).toBe(true);
+    expect(provider.calls).toHaveLength(0);
+  });
+
+  it("does not certify a generic KPI when a stronger draft breakdown block matches", async () => {
+    kg.rebuild(
+      [
+        {
+          nodeId: "block:revenue_by_customer_type",
+          kind: "block",
+          name: "revenue_by_customer_type",
+          domain: "growth",
+          status: "draft",
+          description: "Revenue broken down by customer type for new and returning customers.",
+          llmContext:
+            "Use this for revenue breakdowns by customer type, including new vs returning customers.",
+          tags: ["revenue", "customer", "type", "breakdown"],
+          sourceTier: "certified_artifact",
+          certification: "analyst_review_required",
+          provenance: "DQL block",
+        },
+        {
+          nodeId: "block:total_customers",
+          kind: "block",
+          name: "total_customers",
+          domain: "growth",
+          status: "certified",
+          description: "Total customer count.",
+          llmContext: "Use this for total customers.",
+          tags: ["customers", "kpi"],
+          sourceTier: "certified_artifact",
+          certification: "certified",
+          provenance: "DQL block",
+        },
+      ],
+      [],
+    );
+    const provider = new StubProvider(
+      "Draft customer type breakdown.\n\n" +
+        "```sql\nSELECT customer_type, SUM(revenue) AS revenue FROM customer_revenue GROUP BY customer_type\n```\n\n" +
+        "Viz: bar",
+    );
+    const result = await answer({
+      question: "Break total revenue down by customer type",
+      provider,
+      kg,
+    });
+    expect(result.kind).toBe("uncertified");
+    expect(result.reviewStatus).toBe("draft_ready");
+    expect(result.block).toBeUndefined();
+    expect(result.proposedSql).toContain("customer_type");
+    expect(
+      provider.messages.some((message) =>
+        message.content.includes("block:revenue_by_customer_type") &&
+        message.content.includes("draft"),
+      ),
+    ).toBe(true);
+  });
+
+  it("returns no_answer when the model declines without SQL", async () => {
+    const provider = new StubProvider(
+      "I cannot answer this without more schema context.",
+    );
+    const result = await answer({
+      question: "Tell me a joke",
+      provider,
+      kg,
+    });
+    expect(result.kind).toBe("no_answer");
+    expect(result.evidence?.validation?.status).toBe("failed");
+  });
+
+  it("passes extra context to the model without using it for certified routing", async () => {
+    const provider = new StubProvider(
+      "Explanation draft.\n```sql\nSELECT 1\n```\nViz: table",
+    );
+    const result = await answer({
+      question: "Explain this current query",
+      extraContext:
+        "Current upstream SQL:\nSELECT SUM(amount) AS revenue FROM orders",
+      provider,
+      kg,
+    });
+    expect(result.kind).toBe("uncertified");
+    expect(result.block).toBeUndefined();
+    expect(
+      provider.messages.some((m) => m.content.includes("Current upstream SQL")),
+    ).toBe(true);
+  });
+
+  it("skips a certified block if downvotes dominate", async () => {
+    for (const i of [1, 2, 3]) {
+      kg.recordFeedback({
+        id: `dn${i}`,
+        ts: new Date().toISOString(),
+        user: `u${i}`,
+        question: "q",
+        answerKind: "certified",
+        blockId: "block:revenue_total",
+        rating: "down",
+      });
+    }
+    const llmReply = "fallback text\n```sql\nSELECT 1\n```\nViz: table";
+    const provider = new StubProvider(llmReply);
+    const result = await answer({
+      question: "Revenue trend",
+      provider,
+      kg,
+    });
+    expect(result.kind).toBe("uncertified");
+  });
+
+  it("generates review-ready SQL for drillthrough follow-ups even when certified context exists", async () => {
+    kg.rebuild(
+      [
+        revenueSegmentBlock(),
+        {
+          nodeId: "block:revenue_total",
+          kind: "block",
+          name: "revenue_total",
+          domain: "growth",
+          status: "certified",
+          description: "Top-level revenue across customer segments",
+          tags: ["revenue"],
+          sourceTier: "certified_artifact",
+          certification: "certified",
+          provenance: "DQL block",
+        },
+      ],
+      [],
+    );
+    const provider = new StubProvider(
+      "Enterprise revenue by segment drillthrough draft.\n\n" +
+        "```sql\nSELECT segment, SUM(amount) AS revenue FROM fct_orders WHERE segment = 'Enterprise' GROUP BY segment\n```\n\n" +
+        "Viz: bar",
+    );
+    const result = await answer({
+      question: "Drill into revenue by segment for Enterprise",
+      provider,
+      kg,
+      followUp: {
+        kind: "drilldown",
+        sourceBlockName: "revenue_total",
+        filters: ["Enterprise"],
+        dimensions: ["segment"],
+      },
+    });
+    expect(result.kind).toBe("uncertified");
+    expect(result.block).toBeUndefined();
+    expect(result.proposedSql).toContain("Enterprise");
+    expect(result.analysisPlan?.intent).toBe("drillthrough");
+    expect(provider.calls.length).toBeGreaterThan(0);
+  });
+
+  it("uses prior certified block context for review-ready drilldown drafts when no certified drilldown exists", async () => {
+    const provider = new StubProvider(
+      "Enterprise revenue drilldown draft based on the prior revenue block.\n\n" +
+        "```sql\nSELECT week, SUM(amount) AS revenue FROM fct_orders WHERE segment = 'Enterprise' GROUP BY week\n```\n\n" +
+        "Viz: line",
+    );
+    const result = await answer({
+      question: "Drill into Enterprise last week",
+      provider,
+      kg,
+      followUp: {
+        kind: "drilldown",
+        sourceBlockName: "revenue_total",
+        filters: ["Enterprise", "last week"],
+      },
+    });
+    expect(result.kind).toBe("uncertified");
+    expect(result.reviewStatus).toBe("draft_ready");
+    expect(result.proposedSql).toContain("segment = 'Enterprise'");
+    expect(result.evidence?.route).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          tool: "propose_drilldown",
+          status: "checked",
+        }),
+        expect.objectContaining({
+          tool: "create_draft_block",
+          status: "checked",
+        }),
+      ]),
+    );
+    expect(
+      provider.messages.some((message) =>
+        message.content.includes("source certified block: revenue_total"),
+      ),
+    ).toBe(true);
+    expect(result.evidence?.validation?.message).toContain(
+      "drilldown SQL is not certified",
+    );
+  });
+
+  it("repairs generated SQL once after a retryable execution failure", async () => {
+    const provider = new StubProvider([
+      "Draft using the first guessed column.\n\n```sql\nSELECT customer, SUM(total) AS revenue FROM orders GROUP BY customer\n```\n\nViz: bar",
+      "Corrected draft using the available columns.\n\n```sql\nSELECT customer_name, SUM(order_total) AS revenue FROM dev.orders GROUP BY customer_name\n```\n\nViz: bar",
+    ]);
+    let attempts = 0;
+    const result = await answer({
+      question: "Show revenue by customer",
+      provider,
+      kg,
+      schemaContext: [
+        {
+          relation: "dev.orders",
+          schema: "dev",
+          name: "orders",
+          columns: [
+            { name: "customer_name", type: "VARCHAR" },
+            { name: "order_total", type: "DECIMAL" },
+          ],
+        },
+      ],
+      executeGeneratedSql: async (sql) => {
+        attempts += 1;
+        if (attempts === 1) throw new Error('Binder Error: Referenced column "customer" not found');
+        return {
+          columns: ["customer_name", "revenue"],
+          rows: [{ customer_name: "Acme", revenue: 10 }],
+          rowCount: 1,
+          sql,
+        };
+      },
+    });
+    expect(result.kind).toBe("uncertified");
+    expect(result.executionError).toBeUndefined();
+    expect(result.proposedSql).toContain("customer_name");
+    expect(result.analysisPlan?.repairAttempts).toBe(1);
+    expect(provider.calls).toHaveLength(2);
+  });
+
+  it("locally repairs generated SQL alias-column binder errors before retrying the model", async () => {
+    const provider = new StubProvider(
+      "Order detail for top customers.\n\n" +
+        "```sql\nWITH TopCustomers AS (SELECT customer_id, lifetime_spend FROM dev.customers ORDER BY lifetime_spend DESC LIMIT 10)\nSELECT t1.order_id, t2.customer_name, t1.order_total FROM dev.orders AS t1 INNER JOIN TopCustomers AS t2 ON t1.customer_id = t2.customer_id INNER JOIN dev.customers AS t3 ON t1.customer_id = t3.customer_id\n```\n\n" +
+        "Viz: table",
+    );
+    let attempts = 0;
+    const result = await answer({
+      question: "Show order details by top customer",
+      provider,
+      kg,
+      schemaContext: [
+        {
+          relation: "dev.customers",
+          schema: "dev",
+          name: "customers",
+          columns: [
+            { name: "customer_id", type: "VARCHAR" },
+            { name: "customer_name", type: "VARCHAR" },
+            { name: "lifetime_spend", type: "DECIMAL" },
+          ],
+        },
+        {
+          relation: "dev.orders",
+          schema: "dev",
+          name: "orders",
+          columns: [
+            { name: "order_id", type: "VARCHAR" },
+            { name: "customer_id", type: "VARCHAR" },
+            { name: "order_total", type: "DECIMAL" },
+          ],
+        },
+      ],
+      executeGeneratedSql: async (sql) => {
+        attempts += 1;
+        if (attempts === 1) {
+          throw new Error('DuckDB query failed: Binder Error: Values list "t2" does not have a column named "customer_name"');
+        }
+        return {
+          columns: ["order_id", "customer_name", "order_total"],
+          rows: [{ order_id: "1", customer_name: "Mr. Matthew Meyer", order_total: 10 }],
+          rowCount: 1,
+          sql,
+        };
+      },
+    });
+    expect(result.kind).toBe("uncertified");
+    expect(result.proposedSql).toContain("t3.customer_name");
+    expect(result.analysisPlan?.repairAttempts).toBe(1);
+    expect(provider.calls).toHaveLength(1);
+    expect(result.executionError).toBeUndefined();
+  });
+
+  it("asks for clarification when no metadata can ground an analytical question", async () => {
+    kg.rebuild([], []);
+    const provider = new StubProvider("should not be called");
+    const result = await answer({
+      question: "Which campaigns performed better?",
+      provider,
+      kg,
+    });
+    expect(result.kind).toBe("no_answer");
+    expect(result.analysisPlan?.intent).toBe("clarify");
+    expect(result.text).toContain("which metric or business object");
+    expect(provider.calls).toHaveLength(0);
   });
 });
 
-describe('parseProposal', () => {
-  it('extracts SQL block + viz line + summary text', () => {
-    const raw = 'Revenue summary.\n\n```sql\nSELECT 1\n```\n\nViz: line';
+describe("parseProposal", () => {
+  it("extracts SQL block + viz line + summary text", () => {
+    const raw = "Revenue summary.\n\n```sql\nSELECT 1\n```\n\nViz: line";
     expect(parseProposal(raw)).toEqual({
-      text: 'Revenue summary.',
-      sql: 'SELECT 1',
-      viz: 'line',
+      text: "Revenue summary.",
+      sql: "SELECT 1",
+      viz: "line",
     });
   });
 
-  it('handles missing viz line', () => {
-    const raw = 'No viz hint.\n\n```sql\nSELECT 2\n```';
+  it("handles missing viz line", () => {
+    const raw = "No viz hint.\n\n```sql\nSELECT 2\n```";
     expect(parseProposal(raw)).toEqual({
-      text: 'No viz hint.',
-      sql: 'SELECT 2',
+      text: "No viz hint.",
+      sql: "SELECT 2",
       viz: undefined,
     });
   });
 
-  it('returns sql=undefined when there is no fenced SQL block', () => {
-    const raw = 'I refuse';
+  it("returns sql=undefined when there is no fenced SQL block", () => {
+    const raw = "I refuse";
     const parsed = parseProposal(raw);
     expect(parsed.sql).toBeUndefined();
-    expect(parsed.text).toBe('I refuse');
+    expect(parsed.text).toBe("I refuse");
   });
 });

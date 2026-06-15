@@ -23,6 +23,7 @@ export interface LocalAiPin {
   tileId?: string;
   title: string;
   answer: string;
+  question?: string;
   sql?: string;
   sourceTier?: string;
   certification: 'certified' | 'ai_generated';
@@ -31,6 +32,9 @@ export interface LocalAiPin {
   chartConfig?: Record<string, unknown>;
   result?: unknown;
   citations?: unknown[];
+  analysisPlan?: unknown;
+  evidence?: unknown;
+  followUps?: string[];
   createdAt: string;
   updatedAt: string;
   lastRefreshedAt?: string;
@@ -45,6 +49,7 @@ export interface CreateLocalAiPinInput {
   tileId?: string;
   title: string;
   answer: string;
+  question?: string;
   sql?: string;
   sourceTier?: string;
   certification?: 'certified' | 'ai_generated';
@@ -53,6 +58,9 @@ export interface CreateLocalAiPinInput {
   chartConfig?: Record<string, unknown>;
   result?: unknown;
   citations?: unknown[];
+  analysisPlan?: unknown;
+  evidence?: unknown;
+  followUps?: string[];
 }
 
 export interface LocalAppConversationMessage {
@@ -124,6 +132,7 @@ export class LocalAppStorage {
       tileId: input.tileId,
       title: input.title,
       answer: input.answer,
+      question: input.question,
       sql: input.sql,
       sourceTier: input.sourceTier,
       certification: input.certification ?? 'ai_generated',
@@ -132,15 +141,18 @@ export class LocalAppStorage {
       chartConfig: input.chartConfig,
       result: input.result,
       citations: input.citations,
+      analysisPlan: input.analysisPlan,
+      evidence: input.evidence,
+      followUps: input.followUps,
       createdAt: now,
       updatedAt: now,
     };
     this.db.prepare(`
       INSERT INTO ai_pins (
-        id, app_id, dashboard_id, tile_id, title, answer, sql, source_tier,
+        id, app_id, dashboard_id, tile_id, title, answer, question, sql, source_tier,
         certification, review_status, refresh_cadence, chart_config, result,
-        citations, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        citations, analysis_plan, evidence, follow_ups, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       pin.id,
       pin.appId,
@@ -148,6 +160,7 @@ export class LocalAppStorage {
       pin.tileId ?? null,
       pin.title,
       pin.answer,
+      pin.question ?? null,
       pin.sql ?? null,
       pin.sourceTier ?? null,
       pin.certification,
@@ -156,6 +169,9 @@ export class LocalAppStorage {
       json(pin.chartConfig),
       json(pin.result),
       json(pin.citations ?? []),
+      json(pin.analysisPlan),
+      json(pin.evidence),
+      json(pin.followUps ?? []),
       pin.createdAt,
       pin.updatedAt,
     );
@@ -318,6 +334,7 @@ export class LocalAppStorage {
         tile_id TEXT,
         title TEXT NOT NULL,
         answer TEXT NOT NULL,
+        question TEXT,
         sql TEXT,
         source_tier TEXT,
         certification TEXT NOT NULL,
@@ -326,6 +343,9 @@ export class LocalAppStorage {
         chart_config TEXT,
         result TEXT,
         citations TEXT,
+        analysis_plan TEXT,
+        evidence TEXT,
+        follow_ups TEXT,
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL,
         last_refreshed_at TEXT,
@@ -359,6 +379,16 @@ export class LocalAppStorage {
       CREATE INDEX IF NOT EXISTS idx_app_conversations_app ON app_conversations(app_id, updated_at);
       CREATE INDEX IF NOT EXISTS idx_app_conversation_messages ON app_conversation_messages(conversation_id, position);
     `);
+    this.ensureColumn('ai_pins', 'question', 'TEXT');
+    this.ensureColumn('ai_pins', 'analysis_plan', 'TEXT');
+    this.ensureColumn('ai_pins', 'evidence', 'TEXT');
+    this.ensureColumn('ai_pins', 'follow_ups', 'TEXT');
+  }
+
+  private ensureColumn(table: string, column: string, type: string): void {
+    const rows = this.db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name?: unknown }>;
+    if (rows.some((row) => row.name === column)) return;
+    this.db.prepare(`ALTER TABLE ${table} ADD COLUMN ${column} ${type}`).run();
   }
 
   private replaceAppConversationMessages(
@@ -431,6 +461,7 @@ function rowToAiPin(row: Record<string, unknown>): LocalAiPin {
     tileId: optionalString(row.tile_id),
     title: String(row.title),
     answer: String(row.answer),
+    question: optionalString(row.question),
     sql: optionalString(row.sql),
     sourceTier: optionalString(row.source_tier),
     certification: row.certification === 'certified' ? 'certified' : 'ai_generated',
@@ -439,6 +470,9 @@ function rowToAiPin(row: Record<string, unknown>): LocalAiPin {
     chartConfig: parseJson(row.chart_config) as Record<string, unknown> | undefined,
     result: parseJson(row.result),
     citations: (parseJson(row.citations) as unknown[] | undefined) ?? [],
+    analysisPlan: parseJson(row.analysis_plan),
+    evidence: parseJson(row.evidence),
+    followUps: (parseJson(row.follow_ups) as string[] | undefined) ?? [],
     createdAt: String(row.created_at),
     updatedAt: String(row.updated_at),
     lastRefreshedAt: optionalString(row.last_refreshed_at),

@@ -1,107 +1,160 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import type { CSSProperties, ReactNode } from 'react';
+import {
+  ArrowLeft,
+  ArrowRight,
+  Blocks,
+  BookOpenText,
+  Bot,
+  ChevronDown,
+  Download,
+  Eye,
+  FileText,
+  LayoutDashboard,
+  LineChart,
+  MessageSquareText,
+  Plus,
+  Search,
+  Send,
+  ShieldCheck,
+  Sparkles,
+  Star,
+  Share2,
+  Workflow,
+} from 'lucide-react';
 import { useNotebook } from '../../store/NotebookStore';
 import {
   api,
-  type AppConversation,
   type AppBlockRecommendation,
   type AppDocumentSummary,
-  type AppNotebookCandidate,
-  type AppNotebookPreview,
   type DashboardDocumentResponse,
+  type DashboardRunResponse,
+  type GenerateAppResponse,
+  type GeneratedAppPlan,
 } from '../../api/client';
-import type { AppSummary, NotebookFile, QueryResult, ThemeMode } from '../../store/types';
-import { parseNotebookFile } from '../../utils/parse-workbook';
-import { aggregate, type Aggregation } from '../../utils/aggregate';
-import { themes, type Theme } from '../../themes/notebook-theme';
-import { PersonaSwitcher } from './PersonaSwitcher';
+import type { AppSummary, AppWorkspaceExperience, AppWorkspaceSection } from '../../store/types';
+import type { ThemeMode } from '../../themes/notebook-theme';
+import { AgentChatPanel } from '../agent/AgentChatPanel';
 import { DashboardRenderer } from './DashboardRenderer';
-import { TableOutput } from '../output/TableOutput';
-import { ChartOutput, CHART_TYPE_OPTIONS, resolveChartType, type ChartType } from '../output/ChartOutput';
-import { renderMarkdown } from '../cells/MarkdownCellEditor';
+import { PersonaSwitcher } from './PersonaSwitcher';
 
-type AppLibraryFilter = 'all' | 'mine' | 'shared' | 'template' | 'review';
-type AppSection = 'dashboards' | 'notebooks' | 'ai' | 'drafts' | 'settings';
-type AppExperience = 'view' | 'build';
-type AppStartSource = 'empty' | 'notebook' | 'template' | 'import';
-type NotebookAttachMode = 'existing' | 'new';
-type ReadOnlyVizChoice = Exclude<ChartType, 'table'> | 'pivot';
+type AppSurface = 'library' | 'create' | 'workspace';
+type AppExperience = AppWorkspaceExperience;
+type BuilderMode = 'ai' | 'classic';
+type AppSection = AppWorkspaceSection;
+type LibraryFilter = 'all' | 'mine' | 'shared' | 'fav' | 'review';
 
-const READONLY_TYPE_LABELS: Record<string, string> = {
-  sql: 'SQL',
-  dql: 'DQL',
-  markdown: 'Markdown',
-  chart: 'Chart',
-  table: 'Table',
-  pivot: 'Pivot',
-  single_value: 'Single value',
-  filter: 'Filter',
-  param: 'Parameter',
-  python: 'Python',
-  chat: 'Chat',
-  writeback: 'Writeback',
+interface AppPromptExample {
+  title: string;
+  domain: string;
+  prompt: string;
+}
+
+interface AgentSkillCard {
+  id: string;
+  title: string;
+  description: string;
+}
+
+const DEFAULT_PROMPT = 'Revenue overview for the cards team: monthly trend, top products, and how new vs returning customers contribute.';
+
+const APP_PROMPT_EXAMPLES: AppPromptExample[] = [
+  {
+    title: 'Revenue story',
+    domain: 'Revenue',
+    prompt: 'Build a weekly revenue health app for the COO with risk flags.',
+  },
+  {
+    title: 'Customer 360',
+    domain: 'Customer',
+    prompt: 'Customer 360: value, engagement, retention, orders, and service risk by segment.',
+  },
+  {
+    title: 'Quality monitor',
+    domain: 'Platform',
+    prompt: 'Build a data quality monitor with freshness, failing tests, null rates, and model risk notes.',
+  },
+  {
+    title: 'Experiment Readout',
+    domain: 'Product',
+    prompt: 'Create an experiment readout for product leadership with outcome, guardrails, and decision checklist.',
+  },
+];
+
+const AGENT_SKILLS: AgentSkillCard[] = [
+  {
+    id: 'match',
+    title: 'Find blocks',
+    description: 'Search certified blocks, terms, views, and lineage.',
+  },
+  {
+    id: 'story',
+    title: 'Shape story',
+    description: 'Order the app around the business decision.',
+  },
+  {
+    id: 'draft',
+    title: 'Draft gaps',
+    description: 'Mark missing sections for review instead of hiding them.',
+  },
+  {
+    id: 'review',
+    title: 'Route review',
+    description: 'Keep generated parts visibly reviewable.',
+  },
+];
+
+const FILTER_LABELS: Record<LibraryFilter, string> = {
+  all: 'All',
+  mine: 'Mine',
+  shared: 'Shared',
+  fav: 'Favourites',
+  review: 'Review',
 };
 
-const READONLY_TYPE_COLORS: Record<string, string> = {
-  sql: '#5b9cf6',
-  dql: '#4f46e5',
-  markdown: '#6f7785',
-  chart: '#b067f7',
-  table: '#79c0ff',
-  pivot: '#a371f7',
-  single_value: '#a371f7',
-  filter: '#39d353',
-  param: '#f0b429',
-  python: '#3572A5',
-  chat: '#f78166',
-  writeback: '#e36209',
-};
+function normalizeAppTheme(themeMode: string): 'obsidian' | 'paper' | 'white' {
+  if (themeMode === 'obsidian' || themeMode === 'dark' || themeMode === 'midnight') return 'obsidian';
+  if (themeMode === 'white' || themeMode === 'arctic') return 'white';
+  return 'paper';
+}
 
 export function AppsView(): JSX.Element {
   const { state, dispatch } = useNotebook();
+  const appTheme = useMemo(() => normalizeAppTheme(state.themeMode), [state.themeMode]);
+  const [surface, setSurface] = useState<AppSurface>(() => state.activeAppId ? 'workspace' : 'library');
+  const experience = state.activeAppExperience;
+  const section = state.activeAppSection;
+  const setExperience = (nextExperience: AppExperience) => {
+    dispatch({ type: 'SET_APP_WORKSPACE_STATE', experience: nextExperience });
+  };
+  const setSection = (nextSection: AppSection) => {
+    dispatch({ type: 'SET_APP_WORKSPACE_STATE', section: nextSection });
+  };
+  const [search, setSearch] = useState('');
+  const [libraryFilter, setLibraryFilter] = useState<LibraryFilter>('all');
+  const [favorites, setFavorites] = useState<Set<string>>(() => new Set());
   const [appDoc, setAppDoc] = useState<AppDocumentSummary | null>(null);
   const [dashboardDoc, setDashboardDoc] = useState<DashboardDocumentResponse | null>(null);
-  const [loading, setLoading] = useState(false);
-  const [wizardOpen, setWizardOpen] = useState(false);
-  const [search, setSearch] = useState('');
-  const [domainFilter, setDomainFilter] = useState('');
-  const [subdomainFilter, setSubdomainFilter] = useState('');
-  const [groupFilter, setGroupFilter] = useState('');
-  const [tagFilter, setTagFilter] = useState('');
-  const [ownerFilter, setOwnerFilter] = useState('');
-  const [audienceFilter, setAudienceFilter] = useState('');
-  const [lifecycleFilter, setLifecycleFilter] = useState('');
-  const [certificationFilter, setCertificationFilter] = useState('');
-  const [storageFilter, setStorageFilter] = useState<AppLibraryFilter>('all');
-  const [appSection, setAppSection] = useState<AppSection>('dashboards');
-  const [appExperience, setAppExperience] = useState<AppExperience>('view');
-  const [addTabOpen, setAddTabOpen] = useState(false);
-  const [addTabTitle, setAddTabTitle] = useState('');
-  const [addTabError, setAddTabError] = useState<string | null>(null);
-  const [addTabSaving, setAddTabSaving] = useState(false);
-  const [attachNotebookOpen, setAttachNotebookOpen] = useState(false);
-  const [attachMode, setAttachMode] = useState<NotebookAttachMode>('existing');
-  const [attachNotebookPath, setAttachNotebookPath] = useState('');
-  const [attachNotebookTitle, setAttachNotebookTitle] = useState('');
-  const [attachNotebookRole, setAttachNotebookRole] = useState<'source' | 'analysis' | 'supporting'>('supporting');
-  const [attachNotebookVisibility, setAttachNotebookVisibility] = useState<'shared' | 'private' | 'template'>('shared');
-  const [notebookCandidates, setNotebookCandidates] = useState<AppNotebookCandidate[]>([]);
-  const [notebookCandidateSearch, setNotebookCandidateSearch] = useState('');
-  const [newNotebookName, setNewNotebookName] = useState('');
-  const [attachNotebookError, setAttachNotebookError] = useState<string | null>(null);
-  const [attachNotebookSaving, setAttachNotebookSaving] = useState(false);
-
-  const refreshApps = async (openAppId?: string, dashboardId?: string | null) => {
-    dispatch({ type: 'SET_APPS_LOADING', loading: true });
-    const apps = await api.listApps();
-    dispatch({ type: 'SET_APPS', apps });
-    dispatch({ type: 'SET_APPS_LOADING', loading: false });
-    if (openAppId) {
-      dispatch({ type: 'OPEN_APP', appId: openAppId, dashboardId: dashboardId ?? undefined });
-    } else if (apps.length > 0 && !state.activeAppId) {
-      dispatch({ type: 'OPEN_APP', appId: apps[0].id });
-    }
-  };
+  const [appLoading, setAppLoading] = useState(false);
+  const [builderMode, setBuilderMode] = useState<BuilderMode>('ai');
+  const [builderPrompt, setBuilderPrompt] = useState(DEFAULT_PROMPT);
+  const [builderName, setBuilderName] = useState('Jaffle Analytics');
+  const [builderDomain, setBuilderDomain] = useState('Revenue');
+  const [builderOwner, setBuilderOwner] = useState('analytics@jaffle.shop');
+  const [catalog, setCatalog] = useState<AppBlockRecommendation[]>([]);
+  const [catalogLoading, setCatalogLoading] = useState(false);
+  const [selectedBlocks, setSelectedBlocks] = useState<Set<string>>(() => new Set());
+  const [generated, setGenerated] = useState<GenerateAppResponse | null>(null);
+  const [builderError, setBuilderError] = useState<string | null>(null);
+  const [builderSaving, setBuilderSaving] = useState(false);
+  const [addPageOpen, setAddPageOpen] = useState(false);
+  const [addPageTitle, setAddPageTitle] = useState('');
+  const [addPageError, setAddPageError] = useState<string | null>(null);
+  const [period, setPeriod] = useState('last_12_months');
+  const [segment, setSegment] = useState('all_customers');
+  const [region, setRegion] = useState('all');
+  const [smartView, setSmartView] = useState(false);
+  const [explainOpen, setExplainOpen] = useState(true);
 
   useEffect(() => {
     let cancelled = false;
@@ -110,2134 +163,3872 @@ export function AppsView(): JSX.Element {
       if (cancelled) return;
       dispatch({ type: 'SET_APPS', apps });
       dispatch({ type: 'SET_APPS_LOADING', loading: false });
-      if (apps.length > 0 && !state.activeAppId) dispatch({ type: 'OPEN_APP', appId: apps[0].id });
     });
-    return () => { cancelled = true; };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+    return () => {
+      cancelled = true;
+    };
+  }, [dispatch]);
 
   useEffect(() => {
-    if (!state.activeAppId) {
+    void api.getPersona().then((persona) => dispatch({ type: 'SET_ACTIVE_PERSONA', persona }));
+  }, [dispatch]);
+
+  useEffect(() => {
+    if (surface !== 'create') return;
+    let cancelled = false;
+    setCatalogLoading(true);
+    void api.recommendAppBlocks({
+      domain: builderDomain || undefined,
+      purpose: builderPrompt,
+      audience: 'stakeholder',
+      certifiedOnly: true,
+    }).then((blocks) => {
+      if (!cancelled) setCatalog(blocks);
+    }).finally(() => {
+      if (!cancelled) setCatalogLoading(false);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [surface, builderMode, builderDomain, builderPrompt]);
+
+  useEffect(() => {
+    if (!state.activeAppId || surface !== 'workspace') {
       setAppDoc(null);
       setDashboardDoc(null);
       return;
     }
     let cancelled = false;
-    setLoading(true);
+    setAppLoading(true);
     void api.getApp(state.activeAppId).then((doc) => {
       if (!cancelled) setAppDoc(doc);
     });
     if (state.activeDashboardId) {
-      void api.getDashboard(state.activeAppId, state.activeDashboardId).then((d) => {
-        if (!cancelled) {
-          setDashboardDoc(d);
-          setLoading(false);
-        }
+      void api.getDashboard(state.activeAppId, state.activeDashboardId).then((doc) => {
+        if (!cancelled) setDashboardDoc(doc);
+      }).finally(() => {
+        if (!cancelled) setAppLoading(false);
       });
     } else {
       setDashboardDoc(null);
-      setLoading(false);
+      setAppLoading(false);
     }
-    return () => { cancelled = true; };
-  }, [state.activeAppId, state.activeDashboardId]);
+    return () => {
+      cancelled = true;
+    };
+  }, [state.activeAppId, state.activeDashboardId, surface]);
 
-  useEffect(() => {
-    void api.getPersona().then((persona) => dispatch({ type: 'SET_ACTIVE_PERSONA', persona }));
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-
-  const facets = useMemo(() => ({
-    domains: unique(state.apps.map((app) => app.domain).filter(Boolean)),
-    subdomains: unique(state.apps.map((app) => app.subdomain).filter(Boolean) as string[]),
-    groups: unique(state.apps.flatMap((app) => app.groups ?? [])),
-    tags: unique(state.apps.flatMap((app) => app.tags ?? []).filter((tag) => !tag.startsWith('audience:'))),
-    owners: unique(state.apps.flatMap((app) => app.owners ?? [])),
-    audiences: unique(state.apps.map((app) => app.audience).filter(Boolean) as string[]),
-  }), [state.apps]);
+  const refreshApps = async (
+    openAppId?: string | null,
+    dashboardId?: string | null,
+    nextSurface?: AppSurface,
+    workspaceState?: { experience?: AppExperience; section?: AppSection },
+  ) => {
+    dispatch({ type: 'SET_APPS_LOADING', loading: true });
+    const apps = await api.listApps();
+    dispatch({ type: 'SET_APPS', apps });
+    dispatch({ type: 'SET_APPS_LOADING', loading: false });
+    if (openAppId) dispatch({ type: 'OPEN_APP', appId: openAppId, dashboardId, ...workspaceState });
+    if (nextSurface) setSurface(nextSurface);
+  };
 
   const filteredApps = useMemo(() => {
     const needle = search.trim().toLowerCase();
     return state.apps.filter((app) => {
-      if (needle) {
-        const haystack = [
-          app.name,
-          app.description ?? '',
-          app.domain,
-          app.subdomain ?? '',
-          ...(app.groups ?? []),
-          ...(app.tags ?? []),
-          ...(app.owners ?? []),
-          ...app.dashboards.map((dashboard) => dashboard.title),
-          ...(app.notebooks ?? []).flatMap((notebook) => [notebook.title ?? '', notebook.path]),
-          ...(app.drafts ?? []).flatMap((draft) => [draft.name, draft.path]),
-        ].join(' ').toLowerCase();
-        if (!haystack.includes(needle)) return false;
-      }
-      if (domainFilter && app.domain !== domainFilter) return false;
-      if (subdomainFilter && app.subdomain !== subdomainFilter) return false;
-      if (groupFilter && !(app.groups ?? []).includes(groupFilter)) return false;
-      if (tagFilter && !(app.tags ?? []).includes(tagFilter)) return false;
-      if (ownerFilter && !(app.owners ?? []).includes(ownerFilter)) return false;
-      if (audienceFilter && app.audience !== audienceFilter) return false;
-      if (lifecycleFilter && app.lifecycle !== lifecycleFilter) return false;
-      if (certificationFilter && app.certification !== certificationFilter) return false;
-      if (storageFilter === 'review' && app.lifecycle !== 'review') return false;
-      if (storageFilter !== 'all' && storageFilter !== 'review' && (app.storage ?? 'shared') !== storageFilter) return false;
-      return true;
+      if (libraryFilter === 'mine' && (app.storage ?? 'shared') !== 'mine') return false;
+      if (libraryFilter === 'shared' && (app.storage ?? 'shared') !== 'shared') return false;
+      if (libraryFilter === 'review' && app.lifecycle !== 'review') return false;
+      if (libraryFilter === 'fav' && !favorites.has(app.id)) return false;
+      if (!needle) return true;
+      const haystack = [
+        app.name,
+        app.description ?? '',
+        app.domain,
+        app.audience ?? '',
+        app.lifecycle ?? '',
+        ...(app.tags ?? []),
+        ...(app.owners ?? []),
+        ...app.dashboards.map((dashboard) => dashboard.title),
+      ].join(' ').toLowerCase();
+      return haystack.includes(needle);
     });
-  }, [state.apps, search, domainFilter, subdomainFilter, groupFilter, tagFilter, ownerFilter, audienceFilter, lifecycleFilter, certificationFilter, storageFilter]);
+  }, [favorites, libraryFilter, search, state.apps]);
 
   const activeApp = useMemo(
-    () => state.apps.find((a) => a.id === state.activeAppId) ?? null,
+    () => state.apps.find((app) => app.id === state.activeAppId) ?? null,
     [state.apps, state.activeAppId],
   );
-  const isBuild = appExperience === 'build';
 
-  const switchExperience = (next: AppExperience) => {
-    setAppExperience(next);
-    if (next === 'view' && (appSection === 'drafts' || appSection === 'settings')) {
-      setAppSection('dashboards');
+  const openApp = (app: AppSummary, nextExperience: AppExperience = 'view') => {
+    dispatch({ type: 'OPEN_APP', appId: app.id, experience: nextExperience, section: 'dashboards' });
+    setSurface('workspace');
+  };
+
+  const startAiBuilder = (prompt = builderPrompt, domain?: string) => {
+    setBuilderMode('ai');
+    setBuilderPrompt(prompt);
+    if (domain) setBuilderDomain(domain);
+    setSelectedBlocks(new Set());
+    setBuilderError(null);
+    setGenerated(null);
+    setSurface('create');
+  };
+
+  const startClassicBuilder = () => {
+    setBuilderMode('classic');
+    setBuilderError(null);
+    setGenerated(null);
+    setSurface('create');
+  };
+
+  const toggleSelectedBlock = (blockId: string) => {
+    setSelectedBlocks((current) => {
+      const next = new Set(current);
+      if (next.has(blockId)) next.delete(blockId);
+      else next.add(blockId);
+      return next;
+    });
+  };
+
+  const runGenerate = async () => {
+    const prompt = builderPrompt.trim();
+    if (!prompt) {
+      setBuilderError('Describe the app you want to build.');
+      return;
+    }
+    setBuilderSaving(true);
+    setBuilderError(null);
+    const result = await api.generateApp({
+      prompt,
+      domain: builderDomain.trim() || undefined,
+      owner: builderOwner.trim() || undefined,
+      force: false,
+      selectedBlockIds: Array.from(selectedBlocks),
+    });
+    setBuilderSaving(false);
+    if (!result.ok) {
+      setBuilderError(result.error);
+      return;
+    }
+    setGenerated(result);
+    setBuilderName(result.plan.name);
+    await refreshApps(result.app?.id ?? result.plan.appId, result.dashboardId, 'create');
+  };
+
+  const runClassicCreate = async () => {
+    if (!builderName.trim()) {
+      setBuilderError('Name the app before creating it.');
+      return;
+    }
+    if (!builderDomain.trim()) {
+      setBuilderError('Choose a domain before creating the app.');
+      return;
+    }
+    setBuilderSaving(true);
+    setBuilderError(null);
+    try {
+      const result = await api.createApp({
+        name: builderName.trim(),
+        domain: builderDomain.trim(),
+        dashboardTitle: 'Overview',
+        purpose: builderPrompt.trim(),
+        audience: 'stakeholder',
+        visibility: 'shared',
+        lifecycle: 'draft',
+        tags: ['app-builder', builderDomain.trim().toLowerCase()],
+        owners: [builderOwner.trim() || 'owner@local'],
+        selectedBlockIds: Array.from(selectedBlocks),
+      });
+      await refreshApps(result.app.id, result.dashboardId, 'workspace', { experience: 'build', section: 'dashboards' });
+    } catch (err) {
+      setBuilderError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setBuilderSaving(false);
     }
   };
 
-  const openAddDashboardDialog = () => {
-    setAddTabTitle('');
-    setAddTabError(null);
-    setAddTabOpen(true);
+  const openGeneratedWorkspace = () => {
+    const appId = generated?.app?.id ?? generated?.plan.appId;
+    if (!appId) return;
+    dispatch({ type: 'OPEN_APP', appId, dashboardId: generated?.dashboardId ?? undefined, experience: 'build', section: 'dashboards' });
+    setSurface('workspace');
   };
 
-  const createDashboardTab = async () => {
+  const createDashboardPage = async () => {
     if (!state.activeAppId) return;
-    const title = addTabTitle.trim();
+    const title = addPageTitle.trim();
     if (!title) {
-      setAddTabError('Enter a dashboard page name.');
+      setAddPageError('Enter a dashboard page name.');
       return;
     }
-    setAddTabSaving(true);
-    setAddTabError(null);
-    try {
-      const result = await api.createAppDashboard(state.activeAppId, { title });
-      if (result.ok) {
-        setAppExperience('build');
-        setAppSection('dashboards');
-        setAddTabOpen(false);
-        setAddTabTitle('');
-        if (appDoc) setDashboardDoc({ app: appDoc.app, dashboard: result.dashboard });
-        dispatch({ type: 'OPEN_APP', appId: state.activeAppId, dashboardId: result.dashboard.id });
-        await refreshApps(state.activeAppId, result.dashboard.id);
-        dispatch({ type: 'OPEN_DASHBOARD', dashboardId: result.dashboard.id });
-      } else {
-        setAddTabError(result.error ?? 'Could not create dashboard page.');
-      }
-    } catch (err) {
-      setAddTabError(err instanceof Error ? err.message : String(err));
-    } finally {
-      setAddTabSaving(false);
-    }
-  };
-
-  const openNotebookFile = async (path: string) => {
-    const name = path.split('/').pop() || path;
-    const file: NotebookFile = {
-      name,
-      path,
-      type: 'notebook',
-      folder: path.split('/').slice(0, -1).join('/') || 'notebooks',
-    };
-    const { content } = await api.readNotebook(path);
-    const { title, cells, metadata } = parseNotebookFile(path, content);
-    dispatch({ type: 'FILE_ADDED', file });
-    dispatch({ type: 'OPEN_FILE', file, cells, title, metadata });
-  };
-
-  const openAttachNotebookDialog = async () => {
-    if (!state.activeAppId) return;
-    setAttachMode('existing');
-    setAttachNotebookPath('');
-    setAttachNotebookTitle('');
-    setAttachNotebookRole('supporting');
-    setAttachNotebookVisibility('shared');
-    setNotebookCandidateSearch('');
-    setNewNotebookName('');
-    setAttachNotebookError(null);
-    setAttachNotebookOpen(true);
-    setNotebookCandidates(await api.listAppNotebookCandidates(state.activeAppId));
-  };
-
-  const attachNotebook = async () => {
-    if (!state.activeAppId) return;
-    const path = attachNotebookPath.trim();
-    const newName = newNotebookName.trim() || attachNotebookTitle.trim();
-    if (attachMode === 'existing' && !path) {
-      setAttachNotebookError('Choose a notebook or enter a project-relative path.');
+    setAddPageError(null);
+    const result = await api.createAppDashboard(state.activeAppId, { title });
+    if (!result.ok) {
+      setAddPageError(result.error);
       return;
     }
-    if (attachMode === 'new' && !newName) {
-      setAttachNotebookError('Enter a notebook name.');
-      return;
-    }
-    setAttachNotebookSaving(true);
-    setAttachNotebookError(null);
-    try {
-      if (attachMode === 'new') {
-        const created = await api.createAppNotebook(state.activeAppId, {
-          name: newName,
-          title: attachNotebookTitle.trim() || newName,
-          role: attachNotebookRole,
-          visibility: attachNotebookVisibility,
-        });
-        if (!created.ok) {
-          setAttachNotebookError(created.error ?? 'Could not create notebook.');
-          return;
-        }
-        await refreshApps(state.activeAppId, state.activeDashboardId);
-        setAppSection('notebooks');
-        setAttachNotebookOpen(false);
-        await openNotebookFile(created.path);
-        return;
-      } else {
-        const result = await api.attachAppNotebook(state.activeAppId, {
-          path,
-          title: attachNotebookTitle.trim() || undefined,
-          role: attachNotebookRole,
-          visibility: attachNotebookVisibility,
-        });
-        if ('ok' in result && result.ok === false) {
-          setAttachNotebookError(result.error ?? 'Could not attach notebook.');
-          return;
-        }
-      }
-      const doc = await api.getApp(state.activeAppId);
-      setAppDoc(doc);
-      await refreshApps(state.activeAppId, state.activeDashboardId);
-      setAppSection('notebooks');
-      setAttachNotebookOpen(false);
-      setAttachNotebookPath('');
-      setAttachNotebookTitle('');
-      setNewNotebookName('');
-    } catch (err) {
-      setAttachNotebookError(err instanceof Error ? err.message : String(err));
-    } finally {
-      setAttachNotebookSaving(false);
-    }
+    setAddPageOpen(false);
+    setAddPageTitle('');
+    dispatch({
+      type: 'OPEN_APP',
+      appId: state.activeAppId,
+      dashboardId: result.dashboard.id,
+      experience,
+      section,
+    });
+    await refreshApps(state.activeAppId, result.dashboard.id, 'workspace');
   };
 
-  if (state.appsLoading && state.apps.length === 0) {
-    return <EmptyState message="Loading apps..." onCreate={() => setWizardOpen(true)} />;
-  }
-
-  if (state.apps.length === 0) {
-    return (
-      <>
-        <EmptyState
-          message="Create your first local App."
-          hint="Package dashboard pages, notebooks, AI pins, and drafts into a single OSS App."
-          onCreate={() => setWizardOpen(true)}
-        />
-        {wizardOpen && <CreateAppWizard onClose={() => setWizardOpen(false)} onCreated={(appId, dashboardId) => void refreshApps(appId, dashboardId)} />}
-      </>
-    );
-  }
+  const dashboardVariables = useMemo(() => ({
+    period,
+    segment,
+    region,
+    smartView,
+  }), [period, region, segment, smartView]);
 
   return (
-    <div style={{ display: 'flex', height: '100%', minHeight: 0, background: 'var(--color-bg-primary)', color: 'var(--color-text-primary)' }}>
-      <aside style={{ width: 292, borderRight: '1px solid var(--border-color, rgba(0,0,0,0.08))', background: 'var(--color-bg-secondary)', display: 'flex', flexDirection: 'column', minHeight: 0 }}>
-        <div style={{ padding: 12, borderBottom: '1px solid var(--border-color, rgba(0,0,0,0.06))' }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 10 }}>
-            <div style={{ fontSize: 11, fontWeight: 700, opacity: 0.65, textTransform: 'uppercase', letterSpacing: 0.5, flex: 1 }}>
-              Apps Library
-            </div>
-            <button onClick={() => setWizardOpen(true)} style={primaryButtonStyle}>Create App</button>
-          </div>
-          <div style={{ display: 'grid', gap: 6 }}>
-            <input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Search apps, dashboard pages, notebooks..." style={inputStyle} />
-            <select value={domainFilter} onChange={(e) => setDomainFilter(e.target.value)} style={inputStyle}>
-              <option value="">All domains</option>
-              {facets.domains.map((value) => <option key={value} value={value}>{value}</option>)}
-            </select>
-            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 6 }}>
-              <select value={subdomainFilter} onChange={(e) => setSubdomainFilter(e.target.value)} style={inputStyle}>
-                <option value="">Subdomain</option>
-                {facets.subdomains.map((value) => <option key={value} value={value}>{value}</option>)}
-              </select>
-              <select value={groupFilter} onChange={(e) => setGroupFilter(e.target.value)} style={inputStyle}>
-                <option value="">Group</option>
-                {facets.groups.map((value) => <option key={value} value={value}>{value}</option>)}
-              </select>
-            </div>
-            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 6 }}>
-              <select value={tagFilter} onChange={(e) => setTagFilter(e.target.value)} style={inputStyle}>
-                <option value="">All tags</option>
-                {facets.tags.map((value) => <option key={value} value={value}>{value}</option>)}
-              </select>
-              <select value={ownerFilter} onChange={(e) => setOwnerFilter(e.target.value)} style={inputStyle}>
-                <option value="">All owners</option>
-                {facets.owners.map((value) => <option key={value} value={value}>{value}</option>)}
-              </select>
-            </div>
-            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 6 }}>
-              <select value={audienceFilter} onChange={(e) => setAudienceFilter(e.target.value)} style={inputStyle}>
-                <option value="">Audience</option>
-                {facets.audiences.map((value) => <option key={value} value={value}>{value}</option>)}
-              </select>
-              <select value={lifecycleFilter} onChange={(e) => setLifecycleFilter(e.target.value)} style={inputStyle}>
-                <option value="">Lifecycle</option>
-                <option value="draft">draft</option>
-                <option value="review">review</option>
-                <option value="certified">certified</option>
-                <option value="deprecated">deprecated</option>
-              </select>
-            </div>
-            <select value={certificationFilter} onChange={(e) => setCertificationFilter(e.target.value)} style={inputStyle}>
-              <option value="">All certification</option>
-              <option value="certified">certified</option>
-              <option value="uncertified">uncertified</option>
-            </select>
-            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(5, 1fr)', gap: 4 }}>
-              {(['all', 'mine', 'shared', 'template', 'review'] as const).map((value) => (
-                <button key={value} onClick={() => setStorageFilter(value)} style={filterButtonStyle(storageFilter === value)}>
-                  {value === 'all' ? 'All' : value === 'template' ? 'Templates' : value === 'mine' ? 'Local' : value === 'review' ? 'Review' : 'Shared'}
-                </button>
-              ))}
-            </div>
-            <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', fontSize: 10, opacity: 0.62 }}>
-              <span>My Local</span>
-              <span>Shared</span>
-              <span>Templates</span>
-              <span>Review Queue</span>
-            </div>
-          </div>
-        </div>
-        <div style={{ overflowY: 'auto', minHeight: 0, padding: '8px 0' }}>
-          {filteredApps.length === 0 ? (
-            <div style={{ padding: 16, fontSize: 12, opacity: 0.65 }}>No Apps match the current filters.</div>
-          ) : filteredApps.map((a) => (
-            <AppListItem
-              key={a.id}
-              app={a}
-              active={a.id === state.activeAppId}
-              onClick={() => {
-                setAppSection('dashboards');
-                dispatch({ type: 'OPEN_APP', appId: a.id });
-              }}
-            />
-          ))}
-        </div>
-      </aside>
-
-      <main style={{ flex: 1, display: 'flex', flexDirection: 'column', minWidth: 0, overflow: 'hidden', background: 'var(--color-bg)' }}>
-        <AppWorkspaceHeader
-          activeApp={activeApp}
-          appDoc={appDoc}
-          experience={appExperience}
-          isBuild={isBuild}
-          onExperienceChange={switchExperience}
-          onAddPage={openAddDashboardDialog}
-        />
-
-        {appDoc && (
-          <AppSectionTabs
-            section={appSection}
-            experience={appExperience}
-            dashboardCount={appDoc.dashboards.length}
-            notebookCount={appDoc.notebooks?.length ?? appDoc.app.notebooks?.length ?? 0}
-            aiCount={appDoc.aiPins?.length ?? 0}
-            draftCount={appDoc.drafts?.length ?? 0}
-            onChange={setAppSection}
-          />
-        )}
-
-        {appDoc && appSection === 'dashboards' && appDoc.dashboards.length > 0 && (
-          <DashboardPageTabs
-            dashboards={appDoc.dashboards}
-            activeDashboardId={state.activeDashboardId}
-            isBuild={isBuild}
-            onAddPage={openAddDashboardDialog}
-            onOpen={(dashboardId) => {
-              setAppSection('dashboards');
-              dispatch({ type: 'OPEN_DASHBOARD', dashboardId });
-            }}
-          />
-        )}
-
-        <div style={{ flex: 1, overflow: 'auto', padding: appSection === 'notebooks' ? '12px 16px 18px' : '14px 16px 18px', minHeight: 0 }}>
-          {loading ? (
-            <EmptyState message="Loading dashboard..." />
-          ) : appDoc && appSection === 'notebooks' ? (
-            <NotebookRefsPanel
-              appDoc={appDoc}
-              editable={isBuild}
-              onAttach={() => void openAttachNotebookDialog()}
-              onOpenNotebook={(path) => void openNotebookFile(path)}
-            />
-          ) : appDoc && appSection === 'ai' ? (
-            <AiSummariesPanel
-              appDoc={appDoc}
-              editable={isBuild}
-              onPromoted={async () => {
-                if (!state.activeAppId) return;
-                setAppDoc(await api.getApp(state.activeAppId));
-                await refreshApps(state.activeAppId, state.activeDashboardId);
-              }}
-            />
-          ) : appDoc && isBuild && appSection === 'drafts' ? (
-            <DraftsPanel drafts={appDoc.drafts ?? []} />
-          ) : appDoc && isBuild && appSection === 'settings' ? (
-            <AppSettingsPanel appDoc={appDoc} />
-          ) : dashboardDoc && state.activeAppId ? (
-            <DashboardRenderer
-              appId={state.activeAppId}
-              dashboard={dashboardDoc.dashboard}
-              editable={isBuild}
-              onDashboardChanged={(next) => {
-                setDashboardDoc((current) => current ? { ...current, dashboard: next } : current);
-                void refreshApps(state.activeAppId ?? undefined, next.id);
-              }}
-            />
-          ) : appDoc && appDoc.dashboards.length === 0 ? (
-            <EmptyState message="This App has no dashboard pages." hint={isBuild ? "Add a dashboard page from Build mode." : "No dashboard page has been published for this App."} />
-          ) : (
-            <EmptyState message="Select a dashboard." />
-          )}
-        </div>
-      </main>
-
-      {wizardOpen && <CreateAppWizard onClose={() => setWizardOpen(false)} onCreated={(appId, dashboardId) => void refreshApps(appId, dashboardId)} />}
-      {addTabOpen && (
-        <AddDashboardTabDialog
-          title={addTabTitle}
-          error={addTabError}
-          saving={addTabSaving}
-          appName={activeApp?.name ?? 'this App'}
-          onChange={setAddTabTitle}
-          onCancel={() => {
-            if (addTabSaving) return;
-            setAddTabOpen(false);
-            setAddTabError(null);
+    <div className={`dql-apps-waterline dql-apps-theme-${appTheme}`}>
+      <style>{APP_STYLES}</style>
+      {surface === 'library' ? (
+        <AppLibrarySurface
+          apps={filteredApps}
+          allApps={state.apps}
+          loading={state.appsLoading}
+          search={search}
+          filter={libraryFilter}
+          favorites={favorites}
+          onSearch={setSearch}
+          onFilter={setLibraryFilter}
+          onToggleFavorite={(appId) => {
+            setFavorites((current) => {
+              const next = new Set(current);
+              if (next.has(appId)) next.delete(appId);
+              else next.add(appId);
+              return next;
+            });
           }}
-          onCreate={() => void createDashboardTab()}
+          onStartAi={(prompt) => startAiBuilder(prompt)}
+          onStartClassic={startClassicBuilder}
+          onOpenApp={openApp}
+        />
+      ) : surface === 'create' ? (
+        <AppCreateSurface
+          mode={builderMode}
+          appName={builderName}
+          prompt={builderPrompt}
+          domain={builderDomain}
+          owner={builderOwner}
+          promptExamples={APP_PROMPT_EXAMPLES}
+          catalog={catalog}
+          catalogLoading={catalogLoading}
+          selectedBlocks={selectedBlocks}
+          generated={generated}
+          saving={builderSaving}
+          error={builderError}
+          onBack={() => setSurface('library')}
+          onModeChange={(nextMode) => {
+            setBuilderMode(nextMode);
+            if (nextMode === 'ai') setSelectedBlocks(new Set());
+          }}
+          onAppNameChange={setBuilderName}
+          onPromptChange={setBuilderPrompt}
+          onDomainChange={setBuilderDomain}
+          onOwnerChange={setBuilderOwner}
+          onToggleBlock={toggleSelectedBlock}
+          onBuild={() => builderMode === 'ai' ? void runGenerate() : void runClassicCreate()}
+          onOpenGenerated={openGeneratedWorkspace}
+        />
+      ) : (
+        <AppWorkspaceSurface
+          app={activeApp}
+          appDoc={appDoc}
+          dashboardDoc={dashboardDoc}
+          loading={appLoading}
+          experience={experience}
+          section={section}
+          explainOpen={explainOpen}
+          period={period}
+          segment={segment}
+          region={region}
+          smartView={smartView}
+          themeMode={state.themeMode}
+          variables={dashboardVariables}
+          onBack={() => setSurface('library')}
+          onExperienceChange={setExperience}
+          onSectionChange={setSection}
+          onPeriodChange={setPeriod}
+          onSegmentChange={setSegment}
+          onRegionChange={setRegion}
+          onSmartViewChange={setSmartView}
+          onExplainChange={setExplainOpen}
+          onAddPage={() => setAddPageOpen(true)}
+          onOpenDashboard={(dashboardId) => dispatch({ type: 'OPEN_DASHBOARD', dashboardId })}
+          onDashboardChanged={(dashboard) => {
+            setDashboardDoc((current) => current ? { ...current, dashboard } : current);
+            void refreshApps(state.activeAppId, dashboard.id, 'workspace');
+          }}
+          onOpenLineageNode={(nodeId) => {
+            dispatch({
+              type: 'OPEN_LINEAGE_DETAIL',
+              nodeId,
+              returnTo: state.activeAppId
+                ? {
+                    view: 'apps',
+                    appId: state.activeAppId,
+                    dashboardId: state.activeDashboardId,
+                    label: activeApp?.name,
+                    experience,
+                    section,
+                  }
+                : null,
+            });
+          }}
         />
       )}
-      {attachNotebookOpen && (
-        <AttachNotebookDialog
-          mode={attachMode}
-          path={attachNotebookPath}
-          title={attachNotebookTitle}
-          role={attachNotebookRole}
-          visibility={attachNotebookVisibility}
-          candidates={notebookCandidates}
-          search={notebookCandidateSearch}
-          newName={newNotebookName}
-          error={attachNotebookError}
-          saving={attachNotebookSaving}
-          onModeChange={setAttachMode}
-          onPathChange={setAttachNotebookPath}
-          onTitleChange={setAttachNotebookTitle}
-          onRoleChange={setAttachNotebookRole}
-          onVisibilityChange={setAttachNotebookVisibility}
-          onSearchChange={setNotebookCandidateSearch}
-          onNewNameChange={setNewNotebookName}
+      {addPageOpen && (
+        <AddPageDialog
+          title={addPageTitle}
+          error={addPageError}
+          onChange={setAddPageTitle}
           onCancel={() => {
-            if (attachNotebookSaving) return;
-            setAttachNotebookOpen(false);
-            setAttachNotebookError(null);
+            setAddPageOpen(false);
+            setAddPageError(null);
           }}
-          onAttach={() => void attachNotebook()}
+          onCreate={() => void createDashboardPage()}
         />
       )}
     </div>
   );
 }
 
-function AddDashboardTabDialog({
+function AppLibrarySurface({
+  apps,
+  allApps,
+  loading,
+  search,
+  filter,
+  favorites,
+  onSearch,
+  onFilter,
+  onToggleFavorite,
+  onStartAi,
+  onStartClassic,
+  onOpenApp,
+}: {
+  apps: AppSummary[];
+  allApps: AppSummary[];
+  loading: boolean;
+  search: string;
+  filter: LibraryFilter;
+  favorites: Set<string>;
+  onSearch: (value: string) => void;
+  onFilter: (value: LibraryFilter) => void;
+  onToggleFavorite: (appId: string) => void;
+  onStartAi: (prompt: string) => void;
+  onStartClassic: () => void;
+  onOpenApp: (app: AppSummary, experience?: AppExperience) => void;
+}) {
+  const [prompt, setPrompt] = useState(DEFAULT_PROMPT);
+  const counts = libraryCounts(allApps, favorites);
+  return (
+    <main className="dql-apps-wrap">
+      <section className="dql-apps-createhead">
+        <h1>Build an app</h1>
+        <p>
+          Turn certified blocks, business views, notebooks, and lineage into a stakeholder-grade App. Ask AI to shape
+          the story dynamically or compose the canvas by hand.
+        </p>
+      </section>
+
+      <form
+        className="dql-apps-startbar"
+        onSubmit={(event) => {
+          event.preventDefault();
+          onStartAi(prompt);
+        }}
+      >
+        <Sparkles size={19} strokeWidth={1.8} aria-hidden="true" />
+        <input
+          value={prompt}
+          onChange={(event) => setPrompt(event.target.value)}
+          placeholder="Describe the app you want: weekly revenue health for the COO with risk flags"
+        />
+        <button type="submit" className="dql-apps-btn dql-apps-btn-primary">Build with AI</button>
+      </form>
+
+      <div className="dql-apps-startgrid">
+        <StartOption
+          icon={<Sparkles size={19} strokeWidth={1.9} />}
+          title="Build with AI"
+          description="Describe the use case. The agent finds certified context, shapes the story, and writes reviewable files."
+          meta="local agent"
+          action="Open AI builder"
+          onClick={() => onStartAi(prompt)}
+        />
+        <StartOption
+          icon={<Blocks size={19} strokeWidth={1.9} />}
+          title="Classic builder"
+          description="Pick certified blocks and compose a 12-column dashboard canvas with the same governed app files."
+          meta="certified blocks"
+          action="Open canvas"
+          onClick={onStartClassic}
+        />
+        <StartOption
+          icon={<Workflow size={19} strokeWidth={1.9} />}
+          title="Agent skills"
+          description="The builder matches blocks, orders the narrative, drafts missing sections, and routes review."
+          meta="dynamic plan"
+          action="Ask AI"
+          onClick={() => onStartAi(prompt)}
+        />
+      </div>
+
+      <div className="dql-apps-sectionhead">
+        <span>App library</span>
+        <i />
+        <b>{allApps.length} total</b>
+      </div>
+
+      <div className="dql-apps-libbar">
+        <div className="dql-apps-filter-tabs">
+          {(['all', 'mine', 'shared', 'fav', 'review'] as LibraryFilter[]).map((value) => (
+            <button key={value} className={filter === value ? 'on' : ''} onClick={() => onFilter(value)}>
+              {FILTER_LABELS[value]} <span>{counts[value]}</span>
+            </button>
+          ))}
+        </div>
+        <label className="dql-apps-search">
+          <Search size={15} strokeWidth={2} aria-hidden="true" />
+          <input value={search} onChange={(event) => onSearch(event.target.value)} placeholder="Search apps, domains, owners..." />
+        </label>
+      </div>
+
+      {loading && allApps.length === 0 ? (
+        <EmptyPanel title="Loading Apps..." detail="Reading local app files from this DQL project." />
+      ) : apps.length === 0 ? (
+        <EmptyPanel title="No Apps match this view." detail="Change the filter or start a new App above." />
+      ) : (
+        <div className="dql-apps-grid">
+          {apps.map((app) => (
+            <AppCard
+              key={app.id}
+              app={app}
+              favorite={favorites.has(app.id)}
+              onToggleFavorite={() => onToggleFavorite(app.id)}
+              onOpen={() => onOpenApp(app, 'view')}
+              onBuild={() => onOpenApp(app, 'build')}
+            />
+          ))}
+        </div>
+      )}
+    </main>
+  );
+}
+
+function StartOption({
+  icon,
+  title,
+  description,
+  meta,
+  action,
+  onClick,
+}: {
+  icon: ReactNode;
+  title: string;
+  description: string;
+  meta: string;
+  action: string;
+  onClick: () => void;
+}) {
+  return (
+    <button type="button" className="dql-apps-start-option" onClick={onClick}>
+      <span className="dql-apps-option-icon">{icon}</span>
+      <strong>{title}</strong>
+      <p>{description}</p>
+      <span className="dql-apps-option-meta"><span>{meta}</span><b>{action} <ArrowRight size={13} /></b></span>
+    </button>
+  );
+}
+
+function AppCard({
+  app,
+  favorite,
+  onToggleFavorite,
+  onOpen,
+  onBuild,
+}: {
+  app: AppSummary;
+  favorite: boolean;
+  onToggleFavorite: () => void;
+  onOpen: () => void;
+  onBuild: () => void;
+}) {
+  const certified = app.certification === 'certified' || app.lifecycle === 'certified';
+  const draftCount = app.drafts?.length ?? 0;
+  return (
+    <article className="dql-app-card">
+      <div className="dql-app-card-body" onClick={onOpen} role="button" tabIndex={0}>
+        <div className="dql-app-card-top">
+          <span className="dql-app-eyebrow">{app.domain || 'Domain'}</span>
+          <button
+            type="button"
+            className={`dql-app-star ${favorite ? 'on' : ''}`}
+            onClick={(event) => {
+              event.stopPropagation();
+              onToggleFavorite();
+            }}
+            aria-label={favorite ? 'Remove favourite' : 'Add favourite'}
+          >
+            <Star size={14} strokeWidth={1.8} />
+          </button>
+        </div>
+        <StatusSeal tone={certified ? 'certified' : draftCount > 0 ? 'draft' : 'agentic'}>
+          {certified ? 'certified' : draftCount > 0 ? 'mixed' : app.lifecycle ?? 'draft'}
+        </StatusSeal>
+        <h3>{app.name}</h3>
+        <p>{app.description || `${app.name} consumption surface for ${app.domain}.`}</p>
+        <div className="dql-app-card-mini">
+          <MiniMetric label="Pages" value={String(app.dashboards.length)} />
+          <MiniMetric label="Books" value={String(app.notebooks?.length ?? 0)} />
+          <MiniMetric label="Drafts" value={String(draftCount)} />
+        </div>
+        <div className="dql-app-spark" aria-hidden="true">
+          {[28, 34, 32, 42, 38, 48, 54, 50, 59, 64].map((value, index) => (
+            <i key={index} style={{ height: `${value}%` }} />
+          ))}
+        </div>
+      </div>
+      <div className="dql-app-card-depth">
+        <span>{primaryOwner(app)}</span>
+        <button type="button" onClick={onBuild}>Build</button>
+        <button type="button" onClick={onOpen}>Open</button>
+      </div>
+    </article>
+  );
+}
+
+function AppCreateSurface({
+  mode,
+  appName,
+  prompt,
+  domain,
+  owner,
+  promptExamples,
+  catalog,
+  catalogLoading,
+  selectedBlocks,
+  generated,
+  saving,
+  error,
+  onBack,
+  onModeChange,
+  onAppNameChange,
+  onPromptChange,
+  onDomainChange,
+  onOwnerChange,
+  onToggleBlock,
+  onBuild,
+  onOpenGenerated,
+}: {
+  mode: BuilderMode;
+  appName: string;
+  prompt: string;
+  domain: string;
+  owner: string;
+  promptExamples: AppPromptExample[];
+  catalog: AppBlockRecommendation[];
+  catalogLoading: boolean;
+  selectedBlocks: Set<string>;
+  generated: GenerateAppResponse | null;
+  saving: boolean;
+  error: string | null;
+  onBack: () => void;
+  onModeChange: (mode: BuilderMode) => void;
+  onAppNameChange: (value: string) => void;
+  onPromptChange: (value: string) => void;
+  onDomainChange: (value: string) => void;
+  onOwnerChange: (value: string) => void;
+  onToggleBlock: (blockId: string) => void;
+  onBuild: () => void;
+  onOpenGenerated: () => void;
+}) {
+  const selected = catalog.filter((block) => selectedBlocks.has(block.id));
+  const contextDomainLabel = domain.trim() || 'Auto domain';
+  const contextOwnerLabel = owner.trim() || 'Local owner';
+  const plan = generated?.plan ?? planFromSelection(appName, prompt, domain, owner, selected);
+  const validation = generated?.validation ?? {
+    ok: selected.length > 0,
+    certifiedTiles: selected.length,
+    draftTiles: mode === 'ai' ? 2 : 0,
+    issues: [],
+  };
+  return (
+    <div className="dql-app-create-shell">
+      <div className="dql-app-buildbar">
+        <button type="button" className="dql-app-back" onClick={onBack}>
+          <ArrowLeft size={14} /> Apps
+        </button>
+        <span className="dql-app-name-input">
+          <input value={appName} onChange={(event) => onAppNameChange(event.target.value)} spellCheck={false} />
+        </span>
+        <StatusSeal tone={generated ? 'agentic' : 'draft'}>{generated ? 'generated' : 'draft'}</StatusSeal>
+        <div className="dql-app-mode-seg">
+          <button type="button" className={mode === 'ai' ? 'on' : ''} onClick={() => onModeChange('ai')}>
+            <Sparkles size={15} /> Ask AI
+          </button>
+          <button type="button" className={mode === 'classic' ? 'on' : ''} onClick={() => onModeChange('classic')}>
+            <Blocks size={15} /> Classic
+          </button>
+        </div>
+        <div className="dql-app-build-actions">
+          <span className="dql-app-persona"><b>CFO</b> CFO</span>
+          {generated ? <button type="button" className="dql-apps-btn dql-apps-btn-line" onClick={onOpenGenerated}>Preview</button> : null}
+          <button type="button" className="dql-apps-btn dql-apps-btn-primary" onClick={onBuild} disabled={saving}>
+            {saving ? 'Building...' : mode === 'ai' ? 'Send to AI' : 'Create app'}
+          </button>
+        </div>
+      </div>
+
+      <div className={`dql-app-create-workspace ${mode === 'classic' ? 'classic' : 'ai'}`}>
+        <section className={`dql-app-panel dql-app-agent-panel ${mode === 'ai' ? 'ai-clean' : ''}`}>
+          <PanelHead title={mode === 'ai' ? 'Build with the agent' : 'Palette'} meta={mode === 'ai' ? 'local ledger-grounded' : 'certified blocks'} />
+          {mode === 'ai' ? (
+            <>
+              <div className="dql-app-ai-brief">
+                <span><Sparkles size={15} /> AI App Builder</span>
+                <p>Describe the app outcome. DQL finds certified context and drafts review gaps.</p>
+                {generated ? (
+                  <div className="dql-app-ai-result">
+                    Generated <b>{generated.plan.name}</b> with {generated.validation.certifiedTiles} certified tile
+                    {generated.validation.certifiedTiles === 1 ? '' : 's'} and {generated.validation.draftTiles} draft tile
+                    {generated.validation.draftTiles === 1 ? '' : 's'}.
+                  </div>
+                ) : null}
+              </div>
+              <div className="dql-app-composer ai-clean">
+                <textarea
+                  value={prompt}
+                  onChange={(event) => onPromptChange(event.target.value)}
+                  rows={4}
+                  aria-label="App request"
+                  placeholder="Ask DQL to build a stakeholder app from certified blocks and business context..."
+                />
+                <div className="dql-app-suggestions" aria-label="Prompt examples">
+                  <span>Examples</span>
+                  {promptExamples.slice(0, 4).map((item) => (
+                    <button key={item.title} type="button" onClick={() => {
+                      onPromptChange(item.prompt);
+                      onDomainChange(item.domain);
+                    }}>
+                      {item.title}
+                    </button>
+                  ))}
+                </div>
+                <details className="dql-app-ai-context">
+                  <summary>
+                    <span>Context</span>
+                    <b>{contextDomainLabel} / {contextOwnerLabel}</b>
+                    <ChevronDown size={14} />
+                  </summary>
+                  <div className="dql-app-ai-context-grid">
+                    <label>Domain<input value={domain} onChange={(event) => onDomainChange(event.target.value)} /></label>
+                    <label>Owner<input value={owner} onChange={(event) => onOwnerChange(event.target.value)} /></label>
+                  </div>
+                </details>
+                <div className="dql-app-ai-send-row">
+                  <span><ShieldCheck size={13} /> Certified context first</span>
+                  <button type="button" className="dql-apps-btn dql-apps-btn-primary" onClick={onBuild} disabled={saving}>
+                    <Send size={13} /> {saving ? 'Building...' : 'Send to AI'}
+                  </button>
+                </div>
+              </div>
+            </>
+          ) : (
+            <BlockIndex
+              title="Certified blocks"
+              subtitle={`${selectedBlocks.size} selected`}
+              catalog={catalog}
+              loading={catalogLoading}
+              selectedBlocks={selectedBlocks}
+              onToggleBlock={onToggleBlock}
+            />
+          )}
+        </section>
+
+        <section className="dql-app-panel dql-app-preview-panel">
+          <PanelHead title={mode === 'ai' ? 'Live preview' : 'Canvas'} meta={generated ? 'generated' : selected.length ? `${selected.length} selected` : 'empty'} />
+          <div className="dql-app-preview-scroll">
+            <div className="dql-app-preview-card">
+              <div className="dql-app-preview-head">
+                <h2>{generated?.plan.name ?? appName}</h2>
+                <StatusSeal tone={generated ? 'agentic' : 'draft'}>{generated ? 'ready to refine' : 'ready when you are'}</StatusSeal>
+              </div>
+              <div className="dql-app-preview-filters">
+                <span>Last 12 months <ChevronDown size={12} /></span>
+                <span>All customers <ChevronDown size={12} /></span>
+                <span>All regions <ChevronDown size={12} /></span>
+              </div>
+              <div className="dql-app-preview-grid">
+                {plan.pages[0]?.tiles.length ? (
+                  plan.pages[0].tiles.map((tile, index) => <PreviewTile key={tile.id} tile={tile} index={index} />)
+                ) : (
+                  <div className="dql-app-preview-empty">
+                    <LayoutDashboard size={38} strokeWidth={1.4} />
+                    <div>{mode === 'ai' ? 'Describe the app outcome, then send it to AI.' : 'Select blocks to compose the app.'}</div>
+                  </div>
+                )}
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <section className="dql-app-panel dql-app-plan-panel">
+          <PanelHead title="Build plan" meta={generated ? generated.plan.appId : 'draft'} />
+          <div className="dql-app-plan-list">
+            {plan.pages[0]?.tiles.map((tile) => <PlanItem key={tile.id} tile={tile} />)}
+            {plan.pages[0]?.tiles.length === 0 ? <EmptyPanel title="No plan yet." detail="Run the builder to create a plan." compact /> : null}
+          </div>
+          <div className="dql-app-plan-foot">
+            <Leader label="tiles traced to ledger" value={`${validation.certifiedTiles} / ${(plan.pages[0]?.tiles.length ?? 0)}`} />
+            <Leader label="certified" value={String(validation.certifiedTiles)} tone="certified" />
+            <Leader label="drafted / routed" value={String(validation.draftTiles)} tone="draft" />
+            {error ? <div className="dql-app-error">{error}</div> : null}
+            {generated ? (
+              <button type="button" className="dql-apps-btn dql-apps-btn-dark" onClick={onOpenGenerated}>
+                Open and refine app
+              </button>
+            ) : (
+              <button type="button" className="dql-apps-btn dql-apps-btn-dark" onClick={onBuild} disabled={saving}>
+                {saving ? 'Building...' : mode === 'ai' ? 'Generate plan' : 'Create from selected blocks'}
+              </button>
+            )}
+          </div>
+        </section>
+      </div>
+    </div>
+  );
+}
+
+function AppWorkspaceSurface({
+  app,
+  appDoc,
+  dashboardDoc,
+  loading,
+  experience,
+  section,
+  explainOpen,
+  period,
+  segment,
+  region,
+  smartView,
+  themeMode,
+  variables,
+  onBack,
+  onExperienceChange,
+  onSectionChange,
+  onPeriodChange,
+  onSegmentChange,
+  onRegionChange,
+  onSmartViewChange,
+  onExplainChange,
+  onAddPage,
+  onOpenDashboard,
+  onDashboardChanged,
+  onOpenLineageNode,
+}: {
+  app: AppSummary | null;
+  appDoc: AppDocumentSummary | null;
+  dashboardDoc: DashboardDocumentResponse | null;
+  loading: boolean;
+  experience: AppExperience;
+  section: AppSection;
+  explainOpen: boolean;
+  period: string;
+  segment: string;
+  region: string;
+  smartView: boolean;
+  themeMode: ThemeMode;
+  variables: Record<string, unknown>;
+  onBack: () => void;
+  onExperienceChange: (experience: AppExperience) => void;
+  onSectionChange: (section: AppSection) => void;
+  onPeriodChange: (value: string) => void;
+  onSegmentChange: (value: string) => void;
+  onRegionChange: (value: string) => void;
+  onSmartViewChange: (value: boolean) => void;
+  onExplainChange: (value: boolean) => void;
+  onAddPage: () => void;
+  onOpenDashboard: (dashboardId: string) => void;
+  onDashboardChanged: (dashboard: DashboardDocumentResponse['dashboard']) => void;
+  onOpenLineageNode: (nodeId: string) => void;
+}) {
+  const certifiedCount = dashboardDoc?.dashboard.layout.items.filter((item) => Boolean(item.block)).length ?? 0;
+  const draftCount = appDoc?.drafts?.length ?? 0;
+  const dashboardBlockIds = useMemo(() => {
+    return dashboardDoc?.dashboard.layout.items
+      .map((item) => getDashboardItemBlockId(item))
+      .filter((value): value is string => Boolean(value)) ?? [];
+  }, [dashboardDoc]);
+  const dashboardBlockKey = dashboardBlockIds.join('|');
+  const [selectedBlockId, setSelectedBlockId] = useState<string | null>(dashboardBlockIds[0] ?? null);
+  const [dashboardRun, setDashboardRun] = useState<DashboardRunResponse | null>(null);
+  const [shareStatus, setShareStatus] = useState<'idle' | 'copied' | 'downloaded' | 'ready'>('idle');
+  const [shareText, setShareText] = useState('');
+  const handleDashboardRunChange = useCallback((run: DashboardRunResponse | null) => {
+    setDashboardRun(run);
+  }, []);
+
+  useEffect(() => {
+    if (dashboardBlockIds.length === 0) {
+      if (selectedBlockId !== null) setSelectedBlockId(null);
+      return;
+    }
+    if (!selectedBlockId || !dashboardBlockIds.includes(selectedBlockId)) {
+      setSelectedBlockId(dashboardBlockIds[0]);
+    }
+  }, [dashboardBlockIds, dashboardBlockKey, selectedBlockId]);
+  useEffect(() => {
+    setDashboardRun(null);
+  }, [app?.id, dashboardDoc?.dashboard.id]);
+  const markAction = (status: 'copied' | 'downloaded' | 'ready') => {
+    setShareStatus(status);
+    if (status !== 'ready') window.setTimeout(() => setShareStatus('idle'), 1800);
+  };
+  const copyShareLink = async () => {
+    const text = buildAppShareText(app, appDoc, dashboardDoc);
+    setShareText(text);
+    let copied = false;
+    try {
+      if (typeof navigator !== 'undefined' && navigator.clipboard?.writeText) {
+        await navigator.clipboard.writeText(text);
+        copied = true;
+      }
+    } catch {
+      copied = false;
+    }
+    if (!copied) {
+      const area = document.createElement('textarea');
+      area.value = text;
+      area.style.position = 'fixed';
+      area.style.left = '-9999px';
+      document.body.appendChild(area);
+      area.focus();
+      area.select();
+      copied = document.execCommand('copy');
+      document.body.removeChild(area);
+    }
+    markAction(copied ? 'copied' : 'ready');
+  };
+  const downloadBrief = () => {
+    const markdown = buildAppBriefMarkdown(app, appDoc, dashboardDoc);
+    const blob = new Blob([markdown], { type: 'text/markdown;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement('a');
+    anchor.href = url;
+    anchor.download = `${app?.id ?? appDoc?.app.id ?? 'dql-app'}-brief.md`;
+    document.body.appendChild(anchor);
+    anchor.click();
+    document.body.removeChild(anchor);
+    URL.revokeObjectURL(url);
+    markAction('downloaded');
+  };
+  return (
+    <div className="dql-app-workspace">
+      <div className="dql-app-view-topbar">
+        <button type="button" className="dql-app-back" onClick={onBack}><ArrowLeft size={14} /> Apps</button>
+        <span className="dql-app-crumb">/ <b>{app?.id ?? 'app'}</b></span>
+        <StatusSeal tone="certified">{certifiedCount} certified</StatusSeal>
+        {draftCount > 0 ? <StatusSeal tone="draft">{draftCount} draft</StatusSeal> : null}
+        <div className="dql-app-mode-seg">
+          <button type="button" className={experience === 'view' ? 'on' : ''} onClick={() => onExperienceChange('view')}>
+            <Eye size={14} /> View
+          </button>
+          <button type="button" className={experience === 'build' ? 'on' : ''} onClick={() => onExperienceChange('build')}>
+            <Blocks size={14} /> Build
+          </button>
+        </div>
+        <div className="dql-app-view-actions">
+          <PersonaSwitcher app={appDoc?.app ?? null} />
+          <button type="button" className="dql-apps-btn dql-apps-btn-line" title="Copy local app handoff" onClick={() => void copyShareLink()}>
+            <Share2 size={14} /> {shareStatus === 'copied' ? 'Copied' : shareStatus === 'ready' ? 'Copy text' : 'Share'}
+          </button>
+          <button type="button" className="dql-apps-btn dql-apps-btn-line" title="Download app brief" onClick={downloadBrief}>
+            <Download size={14} /> {shareStatus === 'downloaded' ? 'Saved' : 'Brief'}
+          </button>
+          {shareStatus === 'ready' ? (
+            <div className="dql-app-share-popover">
+              <b>Local handoff</b>
+              <textarea readOnly value={shareText} onFocus={(event) => event.currentTarget.select()} />
+            </div>
+          ) : null}
+        </div>
+      </div>
+
+      <div className="dql-app-filterbar">
+        <FilterSelect label="Period" value={period} onChange={onPeriodChange} options={[
+          ['last_30_days', 'Last 30 days'],
+          ['last_quarter', 'Last quarter'],
+          ['last_12_months', 'Last 12 months'],
+          ['year_to_date', 'Year to date'],
+        ]} />
+        <FilterSelect label="Segment" value={segment} onChange={onSegmentChange} options={[
+          ['all_customers', 'All customers'],
+          ['new', 'New'],
+          ['returning', 'Returning'],
+          ['enterprise', 'Enterprise'],
+        ]} />
+        <FilterSelect label="Region" value={region} onChange={onRegionChange} options={[
+          ['all', 'All'],
+          ['north', 'North'],
+          ['south', 'South'],
+          ['east', 'East'],
+          ['west', 'West'],
+        ]} />
+        <span className="dql-app-filter-note" title="Certified dashboard parameters rerun local blocks">
+          <ShieldCheck size={14} /> Certified params
+        </span>
+        <Toggle label="Smart view" checked={smartView} onChange={onSmartViewChange} />
+      </div>
+
+      <main className="dql-app-view-wrap">
+        <div className="dql-app-title-row">
+          <div className="dql-app-title-copy">
+            <div className="dql-app-title-meta">
+              <span><LayoutDashboard size={14} /> {app?.domain ?? dashboardDoc?.dashboard.metadata.domain ?? 'DQL App'}</span>
+              <StatusSeal tone="agentic">{experience === 'build' ? 'build mode' : 'agent composed'}</StatusSeal>
+            </div>
+            <h1>{app?.name ?? 'App'}</h1>
+            <p>{app?.description ?? dashboardDoc?.dashboard.metadata.description ?? 'Local DQL App'}</p>
+          </div>
+          <div className="dql-app-nav-row">
+            <AppWorkspaceTabs
+              appDoc={appDoc}
+              section={section}
+              experience={experience}
+              onChange={onSectionChange}
+            />
+            {section === 'dashboards' && appDoc?.dashboards.length ? (
+              <DashboardPagePicker
+                dashboards={appDoc.dashboards}
+                activeDashboardId={dashboardDoc?.dashboard.id}
+                isBuild={experience === 'build'}
+                onOpen={onOpenDashboard}
+                onAdd={onAddPage}
+              />
+            ) : null}
+          </div>
+        </div>
+
+        <div className={`dql-app-view-layout ${explainOpen && section === 'dashboards' ? '' : 'no-explain'}`}>
+          <div className="dql-app-main-column">
+            {loading ? (
+              <EmptyPanel title="Loading app..." detail="Reading dashboard files and running local blocks." />
+            ) : section === 'dashboards' && dashboardDoc && app ? (
+              <DashboardRenderer
+                appId={app.id}
+                dashboard={dashboardDoc.dashboard}
+                editable={experience === 'build'}
+                variables={variables}
+                selectedBlockId={selectedBlockId}
+                onBlockFocus={setSelectedBlockId}
+                onOpenLineageNode={onOpenLineageNode}
+                copilotOpen={explainOpen}
+                onCopilotChange={onExplainChange}
+                onDashboardChanged={onDashboardChanged}
+                onRunChange={handleDashboardRunChange}
+              />
+            ) : section === 'notebooks' ? (
+              <NotebookListPanel appDoc={appDoc} />
+            ) : section === 'ai' ? (
+              <AiPinsPanel appDoc={appDoc} />
+            ) : section === 'drafts' ? (
+              <DraftsPanel appDoc={appDoc} />
+            ) : section === 'settings' ? (
+              <SettingsPanel appDoc={appDoc} />
+            ) : (
+              <EmptyPanel title="No dashboard page selected." detail="Choose a dashboard page or add one in Build mode." />
+            )}
+          </div>
+          {explainOpen && section === 'dashboards' ? (
+            <AppCopilotPanel
+              app={app}
+              appDoc={appDoc}
+              dashboardDoc={dashboardDoc}
+              dashboardRun={dashboardRun}
+              selectedBlockId={selectedBlockId}
+              themeMode={themeMode}
+              onSelectBlock={setSelectedBlockId}
+            />
+          ) : null}
+        </div>
+      </main>
+    </div>
+  );
+}
+
+function BlockIndex({
+  title,
+  subtitle,
+  catalog,
+  loading,
+  selectedBlocks,
+  onToggleBlock,
+}: {
+  title: string;
+  subtitle: string;
+  catalog: AppBlockRecommendation[];
+  loading: boolean;
+  selectedBlocks: Set<string>;
+  onToggleBlock: (blockId: string) => void;
+}) {
+  const [query, setQuery] = useState('');
+  const blocks = useMemo(() => {
+    const needle = query.trim().toLowerCase();
+    if (!needle) return catalog;
+    return catalog.filter((block) => [
+      block.name,
+      block.domain,
+      block.status,
+      block.description,
+      block.owner ?? '',
+      ...(block.tags ?? []),
+    ].join(' ').toLowerCase().includes(needle));
+  }, [catalog, query]);
+  return (
+    <div className="dql-app-palette">
+      <div className="dql-app-palette-title">
+        <span><Blocks size={14} /> {title}</span>
+        <b>{subtitle}</b>
+      </div>
+      <label className="dql-app-palette-search">
+        <Search size={14} />
+        <input
+          value={query}
+          onChange={(event) => setQuery(event.target.value)}
+          placeholder="Search blocks, domains, tags"
+        />
+      </label>
+      {loading ? <EmptyPanel title="Loading blocks..." detail="Finding certified blocks for this domain." compact /> : null}
+      {!loading && blocks.length === 0 ? <EmptyPanel title="No blocks found." detail="Try another domain or search term." compact /> : null}
+      {blocks.slice(0, 24).map((block) => {
+        const selected = selectedBlocks.has(block.id);
+        return (
+          <button key={block.id} type="button" className={selected ? 'selected' : ''} onClick={() => onToggleBlock(block.id)}>
+            <span className="dql-app-palette-icon"><LineChart size={14} /></span>
+            <span>
+              <b>{block.name}</b>
+              <small>{block.domain} / {block.chartType ?? 'table'}</small>
+            </span>
+            <i>{selected ? 'using' : block.status}</i>
+          </button>
+        );
+      })}
+      {blocks.length > 24 ? <div className="dql-app-palette-more">{blocks.length - 24} more matches</div> : null}
+    </div>
+  );
+}
+
+function AppWorkspaceTabs({
+  appDoc,
+  section,
+  experience,
+  onChange,
+}: {
+  appDoc: AppDocumentSummary | null;
+  section: AppSection;
+  experience: AppExperience;
+  onChange: (section: AppSection) => void;
+}) {
+  const tabs: Array<{ id: AppSection; label: string; count?: number; icon: ReactNode }> = [
+    { id: 'dashboards', label: 'Dashboards', count: appDoc?.dashboards.length ?? 0, icon: <LayoutDashboard size={14} /> },
+    { id: 'notebooks', label: 'Notebooks', count: appDoc?.notebooks?.length ?? appDoc?.app.notebooks?.length ?? 0, icon: <BookOpenText size={14} /> },
+    { id: 'ai', label: 'AI', count: appDoc?.aiPins?.length ?? 0, icon: <Bot size={14} /> },
+    ...(experience === 'build' ? [
+      { id: 'drafts' as const, label: 'Drafts', count: appDoc?.drafts?.length ?? 0, icon: <FileText size={14} /> },
+      { id: 'settings' as const, label: 'Settings', icon: <Workflow size={14} /> },
+    ] : []),
+  ];
+  return (
+    <nav className="dql-app-section-tabs" aria-label="App sections">
+      {tabs.map((tab) => (
+        <button
+          key={tab.id}
+          className={section === tab.id ? 'on' : ''}
+          onClick={() => onChange(tab.id)}
+          title={tab.label}
+          aria-label={`${tab.label}${tab.count !== undefined ? ` ${tab.count}` : ''}`}
+        >
+          <i className="dql-app-tab-icon">{tab.icon}</i>
+          <span className="dql-app-tab-label">{tab.label}</span>
+          {tab.count !== undefined ? <b>{tab.count}</b> : null}
+        </button>
+      ))}
+    </nav>
+  );
+}
+
+function DashboardPagePicker({
+  dashboards,
+  activeDashboardId,
+  isBuild,
+  onOpen,
+  onAdd,
+}: {
+  dashboards: AppDocumentSummary['dashboards'];
+  activeDashboardId?: string | null;
+  isBuild: boolean;
+  onOpen: (dashboardId: string) => void;
+  onAdd: () => void;
+}) {
+  const activeDashboard = dashboards.find((dashboard) => dashboard.id === activeDashboardId) ?? dashboards[0];
+  return (
+    <div className="dql-app-page-picker" aria-label="Dashboard page">
+      <span><LineChart size={14} /> Page</span>
+      <select
+        value={activeDashboard?.id ?? ''}
+        onChange={(event) => onOpen(event.target.value)}
+        title={activeDashboard?.title ?? 'Dashboard page'}
+      >
+        {dashboards.map((dashboard) => (
+          <option key={dashboard.id} value={dashboard.id}>
+            {dashboard.title} ({dashboard.itemCount})
+          </option>
+        ))}
+      </select>
+      {isBuild ? (
+        <button type="button" onClick={onAdd} title="Add dashboard page">
+          <Plus size={14} />
+        </button>
+      ) : null}
+    </div>
+  );
+}
+
+function AppCopilotPanel({
+  app,
+  appDoc,
+  dashboardDoc,
+  dashboardRun,
+  selectedBlockId,
+  themeMode,
+  onSelectBlock,
+}: {
+  app: AppSummary | null;
+  appDoc: AppDocumentSummary | null;
+  dashboardDoc: DashboardDocumentResponse | null;
+  dashboardRun: DashboardRunResponse | null;
+  selectedBlockId: string | null;
+  themeMode: ThemeMode;
+  onSelectBlock: (blockId: string | null) => void;
+}) {
+  const [askSeed, setAskSeed] = useState('');
+  const [evidenceOpen, setEvidenceOpen] = useState(false);
+  const blockTiles = useMemo(() => {
+    return dashboardDoc?.dashboard.layout.items
+      .map((item) => {
+        const blockId = getDashboardItemBlockId(item);
+        if (!blockId) return null;
+        return {
+          blockId,
+          title: item.title ?? blockId,
+          viz: item.viz.type,
+          tileId: item.i,
+        };
+      })
+      .filter((item): item is { blockId: string; title: string; viz: string; tileId: string } => Boolean(item)) ?? [];
+  }, [dashboardDoc]);
+  const selectedBlock = blockTiles.find((item) => item.blockId === selectedBlockId) ?? blockTiles[0] ?? null;
+  const selectedTileRun = selectedBlock
+    ? dashboardRun?.tiles.find((tile) => tile.tileId === selectedBlock.tileId || tile.blockId === selectedBlock.blockId)
+    : null;
+  const selectedBlockContext = selectedBlock
+    ? {
+        ...selectedBlock,
+        status: selectedTileRun?.status,
+        certificationStatus: selectedTileRun?.certificationStatus,
+        rowCount: selectedTileRun?.result?.rowCount,
+        columns: selectedTileRun?.result?.columns?.slice(0, 8),
+        sampleRows: sampleDashboardRows(selectedTileRun?.result?.rows, selectedTileRun?.result?.columns),
+      }
+    : null;
+
+  const dashboardMeta = dashboardDoc?.dashboard.metadata;
+  const domainLabel = formatBusinessLabel(app?.domain ?? dashboardMeta?.domain ?? 'Business');
+  const focusTitle = formatBusinessLabel(selectedBlock?.title ?? dashboardMeta?.title ?? app?.name ?? 'Dashboard');
+  const businessOutcome = dashboardMeta?.businessOutcome
+    ?? app?.description
+    ?? dashboardMeta?.description
+    ?? 'Understand what is changing, why it matters, and what action should happen next.';
+  const decisionUse = dashboardMeta?.decisionUse
+    ?? 'Review performance, isolate drivers, and decide the next operating action.';
+  const audience = dashboardMeta?.audience ?? app?.audience ?? 'Leadership';
+  const owner = dashboardMeta?.businessOwner ?? app?.owners?.[0] ?? 'Local owner';
+  const cadence = dashboardMeta?.reviewCadence ?? 'On demand';
+  const selectedRows = selectedTileRun?.result?.rowCount ?? selectedTileRun?.result?.rows?.length;
+  const selectedColumns = selectedTileRun?.result?.columns?.length ?? 0;
+  const focusStatus = selectedTileRun?.status === 'ok'
+    ? 'Current result loaded'
+    : selectedTileRun?.status === 'error'
+      ? 'Needs attention'
+      : selectedTileRun?.status === 'unauthorized'
+        ? 'Access limited'
+        : dashboardRun
+          ? 'Waiting for result'
+          : 'Ready to ask';
+  const focusDetail = selectedBlock
+    ? 'Business answer first; data and lineage stay in evidence.'
+    : 'Ask across the dashboard. The copilot will answer in business language first, then expose evidence when you need the trace.';
+  const businessFacts = [
+    { label: 'Audience', value: audience },
+    { label: 'Owner', value: owner },
+    { label: 'Cadence', value: cadence },
+  ];
+  const draftCount = appDoc?.drafts?.length ?? 0;
+  const focusMetric = typeof selectedRows === 'number'
+    ? `${selectedRows.toLocaleString()} rows${selectedColumns ? ` / ${selectedColumns} fields` : ''}`
+    : focusStatus;
+
+  const contextJson = JSON.stringify({
+    scope: selectedBlockContext ? 'selected-dashboard-block' : 'dashboard',
+    responseStyle: {
+      audience: 'CXO and business stakeholder',
+      firstResponse: 'Start with a plain-language business answer and recommended action.',
+      evidenceRule: 'Keep block ids, SQL, lineage, and implementation details in evidence sections unless the user asks for them.',
+    },
+    appId: app?.id,
+    appName: app?.name,
+    dashboardId: dashboardDoc?.dashboard.id,
+    dashboardTitle: dashboardDoc?.dashboard.metadata.title,
+    domain: app?.domain ?? dashboardDoc?.dashboard.metadata.domain,
+    businessOutcome,
+    decisionUse,
+    audience,
+    owner,
+    reviewCadence: cadence,
+    selectedBlock: selectedBlockContext,
+    availableBlocks: blockTiles.map((block) => ({
+      blockId: block.blockId,
+      title: block.title,
+      viz: block.viz,
+      status: dashboardRun?.tiles.find((tile) => tile.tileId === block.tileId || tile.blockId === block.blockId)?.status,
+      rowCount: dashboardRun?.tiles.find((tile) => tile.tileId === block.tileId || tile.blockId === block.blockId)?.result?.rowCount,
+    })),
+  }, null, 2);
+  const promptStarters = [
+    {
+      label: 'Explain impact',
+      icon: <MessageSquareText size={14} />,
+      prompt: selectedBlock
+        ? `Explain ${selectedBlock.title} for an executive audience. Start with what it means for the business, why it matters, and what action to consider. Keep technical evidence secondary.`
+        : 'Explain this dashboard for an executive audience. Start with the business story, decision impact, and what action to consider. Keep technical evidence secondary.',
+    },
+    {
+      label: 'Drill into drivers',
+      icon: <LineChart size={14} />,
+      prompt: selectedBlock
+        ? `Drill into the main drivers behind ${selectedBlock.title}. Use the current result sample and return the clearest business breakdown before any technical details.`
+        : 'Drill into the main drivers behind this dashboard. Use current result samples and return the clearest business breakdown before any technical details.',
+    },
+    {
+      label: 'Improve story',
+      icon: <Sparkles size={14} />,
+      prompt: selectedBlock
+        ? `Suggest how to make ${selectedBlock.title} easier for leadership to read, decide from, and trust.`
+        : 'Suggest how to make this dashboard easier for leadership to read, decide from, and trust.',
+    },
+    {
+      label: 'Find trust gaps',
+      icon: <ShieldCheck size={14} />,
+      prompt: selectedBlock
+        ? `What business context, data quality, certification, or review gaps should we fix before leaders rely on ${selectedBlock.title}?`
+        : 'What business context, data quality, certification, or review gaps should we fix before leaders rely on this app?',
+    },
+  ];
+  return (
+    <aside className="dql-app-explain-panel dql-app-assistant-panel">
+      <div className="dql-app-assistant-top">
+        <div className="dql-app-assistant-title">
+          <span><Bot size={14} /> AI assistant</span>
+          <h3>{focusTitle}</h3>
+          <p>{decisionUse}</p>
+        </div>
+        <button
+          type="button"
+          className={`dql-app-assistant-context-btn ${evidenceOpen ? 'on' : ''}`}
+          onClick={() => setEvidenceOpen((value) => !value)}
+        >
+          Context
+          <ChevronDown size={14} />
+        </button>
+      </div>
+
+      <div className="dql-app-assistant-focusbar">
+        <label>
+          <span>Focus</span>
+          <select
+            value={selectedBlock?.blockId ?? ''}
+            onChange={(event) => onSelectBlock(event.target.value || null)}
+          >
+            <option value="">Dashboard</option>
+            {blockTiles.map((block) => (
+              <option key={block.tileId} value={block.blockId}>
+                {formatBusinessLabel(block.title)}
+              </option>
+            ))}
+          </select>
+        </label>
+        <span>{focusMetric}</span>
+      </div>
+
+      {evidenceOpen ? (
+        <div className="dql-app-assistant-context">
+          <p>{businessOutcome}</p>
+          <div>
+            {businessFacts.map((item) => <KeyValueInline key={item.label} label={item.label} value={item.value} />)}
+            <KeyValueInline label="Result" value={focusMetric} />
+            <KeyValueInline label="Evidence" value={focusDetail} />
+            <KeyValueInline label="Drafts" value={String(draftCount)} />
+          </div>
+        </div>
+      ) : null}
+
+      <div className="dql-app-assistant-suggestions" aria-label="Prompt starters">
+        {promptStarters.map((item) => (
+          <button key={item.label} type="button" onClick={() => setAskSeed(`${item.prompt} `)}>
+            {item.icon}
+            <span>{item.label}</span>
+          </button>
+        ))}
+      </div>
+
+      <div className="dql-app-assistant-chat">
+        <AgentChatPanel
+          title={selectedBlock ? selectedBlock.title : 'Ask the app copilot'}
+          scopeHint="Business answer first"
+          upstreamContext={contextJson}
+          themeMode={themeMode}
+          hideSqlByDefault
+          initialInput={askSeed}
+          emptyHint="Ask what changed, why it matters, what action to take, or what evidence needs review."
+          inputPlaceholder="Ask a business question..."
+          variant="executive"
+          embedded
+          showHeader={false}
+          addToAppTarget={app && dashboardDoc ? { appId: app.id, dashboardId: dashboardDoc.dashboard.id } : undefined}
+          conversationTarget={app && dashboardDoc ? { appId: app.id, dashboardId: dashboardDoc.dashboard.id } : undefined}
+        />
+      </div>
+    </aside>
+  );
+}
+
+function NotebookListPanel({ appDoc }: { appDoc: AppDocumentSummary | null }) {
+  const notebooks = appDoc?.notebooks ?? appDoc?.app.notebooks ?? [];
+  if (!notebooks.length) return <EmptyPanel title="No notebooks attached." detail="Attach analysis notebooks in Build mode when this App needs supporting research." />;
+  return (
+    <div className="dql-app-simple-list">
+      {notebooks.map((notebook) => (
+        <PanelCard key={notebook.path} icon={<BookOpenText size={16} />}>
+          <b>{notebook.title ?? notebook.path.split('/').pop()}</b>
+          <span>{notebook.role} / {notebook.visibility} / {notebook.path}</span>
+        </PanelCard>
+      ))}
+    </div>
+  );
+}
+
+function AiPinsPanel({ appDoc }: { appDoc: AppDocumentSummary | null }) {
+  const pins = appDoc?.aiPins ?? [];
+  if (!pins.length) return <EmptyPanel title="No AI pins yet." detail="Ask AI from a dashboard page and pin useful answers into this App." />;
+  return (
+    <div className="dql-app-simple-list">
+      {pins.map((pin) => (
+        <PanelCard key={pin.id} icon={<Bot size={16} />}>
+          <b>{pin.title}</b>
+          <span>{pin.certification} / {pin.reviewStatus}</span>
+        </PanelCard>
+      ))}
+    </div>
+  );
+}
+
+function DraftsPanel({ appDoc }: { appDoc: AppDocumentSummary | null }) {
+  const drafts = appDoc?.drafts ?? [];
+  if (!drafts.length) return <EmptyPanel title="No drafts." detail="Generated and promoted draft blocks will appear here for review." />;
+  return (
+    <div className="dql-app-simple-list">
+      {drafts.map((draft) => (
+        <PanelCard key={draft.path} icon={<FileText size={16} />}>
+          <b>{draft.name}</b>
+          <span>{draft.reviewStatus ?? 'needs review'} / {draft.path}</span>
+        </PanelCard>
+      ))}
+    </div>
+  );
+}
+
+function SettingsPanel({ appDoc }: { appDoc: AppDocumentSummary | null }) {
+  if (!appDoc) return <EmptyPanel title="No App selected." detail="Choose an App to inspect its settings." />;
+  return (
+    <div className="dql-app-settings-grid">
+      <PanelCard icon={<ShieldCheck size={16} />}><b>Owners</b><span>{appDoc.app.owners.join(', ')}</span></PanelCard>
+      <PanelCard icon={<Workflow size={16} />}><b>Lifecycle</b><span>{appDoc.app.lifecycle ?? 'draft'}</span></PanelCard>
+      <PanelCard icon={<Blocks size={16} />}><b>Policies</b><span>{appDoc.app.policies.length} local access policies</span></PanelCard>
+      <PanelCard icon={<LayoutDashboard size={16} />}><b>Homepage</b><span>{appDoc.app.homepage?.type ?? 'dashboard'}</span></PanelCard>
+    </div>
+  );
+}
+
+function PanelHead({ title, meta }: { title: string; meta?: string }) {
+  return (
+    <div className="dql-app-panel-head">
+      <span>{title}</span>
+      {meta ? <b>{meta}</b> : null}
+    </div>
+  );
+}
+
+function PreviewTile({ tile, index }: { tile: GeneratedAppPlan['pages'][number]['tiles'][number]; index: number }) {
+  const wide = tile.viz === 'line' || tile.viz === 'bar';
+  return (
+    <div className={`dql-app-preview-tile ${tile.certification === 'uncertified' ? 'draft' : ''} ${wide ? 'wide' : ''}`}>
+      <div className="dql-app-preview-tile-head">
+        <b>{tile.title}</b>
+        <span>{tile.viz}</span>
+      </div>
+      <div className="dql-app-preview-tile-body">
+        {tile.viz === 'single_value' || tile.viz === 'kpi' ? (
+          <>
+            <strong>{index % 2 === 0 ? '$48.2K' : '61.9K'}</strong>
+            <small>{tile.description ?? 'Certified KPI tile'}</small>
+          </>
+        ) : (
+          <div className="dql-app-mini-bars">
+            {[72, 42, 64, 36, 86].map((value, barIndex) => <i key={barIndex} style={{ width: `${value}%` }} />)}
+          </div>
+        )}
+      </div>
+      <div className="dql-app-preview-tile-foot">
+        <span>{tile.kind.replace(/_/g, ' ')}</span>
+        <b>{tile.certification === 'certified' ? 'certified' : 'draft'}</b>
+      </div>
+    </div>
+  );
+}
+
+function PlanItem({ tile }: { tile: GeneratedAppPlan['pages'][number]['tiles'][number] }) {
+  return (
+    <div className="dql-app-plan-item">
+      <i className={tile.certification === 'uncertified' ? 'draft' : ''} />
+      <span><b>{tile.title}</b><small>{tile.rationale ?? tile.description ?? tile.kind.replace(/_/g, ' ')}</small></span>
+      <em>{tile.viz}</em>
+    </div>
+  );
+}
+
+function FilterSelect({
+  label,
+  value,
+  options,
+  onChange,
+}: {
+  label: string;
+  value: string;
+  options: Array<[string, string]>;
+  onChange: (value: string) => void;
+}) {
+  return (
+    <label className="dql-app-filter-select">
+      <span>{label}</span>
+      <select value={value} onChange={(event) => onChange(event.target.value)}>
+        {options.map(([id, name]) => <option key={id} value={id}>{name}</option>)}
+      </select>
+    </label>
+  );
+}
+
+function Toggle({ label, checked, onChange }: { label: string; checked: boolean; onChange: (checked: boolean) => void }) {
+  return (
+    <button type="button" className={`dql-app-toggle ${checked ? 'on' : ''}`} onClick={() => onChange(!checked)}>
+      <i /> {label}
+    </button>
+  );
+}
+
+function getDashboardItemBlockId(item: DashboardDocumentResponse['dashboard']['layout']['items'][number]): string | null {
+  if (!item.block) return null;
+  return 'blockId' in item.block ? item.block.blockId ?? null : item.block.ref ?? null;
+}
+
+function sampleDashboardRows(rows?: Array<Record<string, unknown>>, columns?: string[]): Array<Record<string, unknown>> | undefined {
+  if (!Array.isArray(rows) || rows.length === 0) return undefined;
+  const selectedColumns = Array.isArray(columns) && columns.length > 0 ? columns.slice(0, 8) : Object.keys(rows[0] ?? {}).slice(0, 8);
+  return rows.slice(0, 5).map((row) => Object.fromEntries(selectedColumns.map((column) => [column, row[column]])));
+}
+
+function formatBusinessLabel(value?: string | null): string {
+  const clean = String(value ?? '').replace(/[_-]+/g, ' ').replace(/\s+/g, ' ').trim();
+  if (!clean) return 'Business';
+  return clean.split(' ').map((word) => {
+    const lower = word.toLowerCase();
+    if (lower === 'ai') return 'AI';
+    if (lower === 'cxo') return 'CXO';
+    if (lower === 'kpi') return 'KPI';
+    if (lower === 'vs' || lower === 'vs.') return 'vs.';
+    return `${word.charAt(0).toUpperCase()}${word.slice(1)}`;
+  }).join(' ');
+}
+
+function buildAppShareText(
+  app: AppSummary | null,
+  appDoc: AppDocumentSummary | null,
+  dashboardDoc: DashboardDocumentResponse | null,
+): string {
+  const appId = app?.id ?? appDoc?.app.id ?? 'app';
+  const appName = app?.name ?? appDoc?.app.name ?? 'DQL App';
+  const dashboard = dashboardDoc?.dashboard.metadata.title ?? appDoc?.dashboards[0]?.title ?? 'Overview';
+  const origin = typeof window !== 'undefined' ? window.location.origin : 'local DQL';
+  return [
+    appName,
+    `App ID: ${appId}`,
+    `Dashboard: ${dashboard}`,
+    `Domain: ${app?.domain ?? appDoc?.app.domain ?? dashboardDoc?.dashboard.metadata.domain ?? 'unknown'}`,
+    `Open locally: ${origin}`,
+  ].join('\n');
+}
+
+function buildAppBriefMarkdown(
+  app: AppSummary | null,
+  appDoc: AppDocumentSummary | null,
+  dashboardDoc: DashboardDocumentResponse | null,
+): string {
+  const appModel = appDoc?.app;
+  const title = app?.name ?? appModel?.name ?? 'DQL App';
+  const dashboards = appDoc?.dashboards ?? [];
+  const notebooks = appDoc?.notebooks ?? appModel?.notebooks ?? [];
+  const drafts = appDoc?.drafts ?? [];
+  const aiPins = appDoc?.aiPins ?? [];
+  const dashboard = dashboardDoc?.dashboard;
+  const blocks = dashboard?.layout.items
+    .map((item) => item.block ? (item.block.blockId ?? item.block.ref ?? item.title ?? item.i) : null)
+    .filter((value): value is string => Boolean(value)) ?? [];
+  const lines = [
+    `# ${title}`,
+    '',
+    app?.description ?? dashboard?.metadata.description ?? appModel?.description ?? 'Local DQL App brief.',
+    '',
+    '## App Metadata',
+    '',
+    `- App ID: ${app?.id ?? appModel?.id ?? 'unknown'}`,
+    `- Domain: ${app?.domain ?? appModel?.domain ?? dashboard?.metadata.domain ?? 'unknown'}`,
+    `- Lifecycle: ${app?.lifecycle ?? appModel?.lifecycle ?? dashboard?.metadata.lifecycle ?? 'draft'}`,
+    `- Audience: ${app?.audience ?? appModel?.audience ?? dashboard?.metadata.audience ?? 'stakeholder'}`,
+    `- Owners: ${(app?.owners ?? appModel?.owners ?? []).join(', ') || 'owner@local'}`,
+    '',
+    '## Pages',
+    '',
+    ...(dashboards.length ? dashboards.map((item) => `- ${item.title} (${item.itemCount} tiles)`) : ['- No dashboard pages found.']),
+    '',
+    '## Governed Blocks',
+    '',
+    ...(blocks.length ? blocks.map((name) => `- ${name}`) : ['- No block-backed tiles found.']),
+    '',
+    '## Supporting Assets',
+    '',
+    `- Notebooks: ${notebooks.length}`,
+    `- AI pins: ${aiPins.length}`,
+    `- Drafts needing review: ${drafts.length}`,
+    '',
+  ];
+  return `${lines.join('\n')}\n`;
+}
+
+function StatusSeal({ children, tone = 'certified' }: { children: ReactNode; tone?: 'certified' | 'draft' | 'agentic' }) {
+  return <span className={`dql-app-seal ${tone}`}>{children}</span>;
+}
+
+function MiniMetric({ label, value }: { label: string; value: string }) {
+  return <span><small>{label}</small><b>{value}</b></span>;
+}
+
+function Leader({ label, value, tone }: { label: string; value: string; tone?: 'certified' | 'draft' }) {
+  return (
+    <div className={`dql-app-leader ${tone ?? ''}`}>
+      <span>{label}</span><i /><b>{value}</b>
+    </div>
+  );
+}
+
+function KeyValueInline({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="dql-app-keyvalue-inline">
+      <span>{label}</span>
+      <b>{value}</b>
+    </div>
+  );
+}
+
+function PanelCard({ icon, children }: { icon: ReactNode; children: ReactNode }) {
+  return (
+    <div className="dql-app-panel-card">
+      <span>{icon}</span>
+      <div>{children}</div>
+    </div>
+  );
+}
+
+function EmptyPanel({ title, detail, compact = false }: { title: string; detail: string; compact?: boolean }) {
+  return (
+    <div className={`dql-app-empty ${compact ? 'compact' : ''}`}>
+      <LayoutDashboard size={compact ? 24 : 34} strokeWidth={1.5} />
+      <b>{title}</b>
+      <span>{detail}</span>
+    </div>
+  );
+}
+
+function AddPageDialog({
   title,
   error,
-  saving,
-  appName,
   onChange,
   onCancel,
   onCreate,
 }: {
   title: string;
   error: string | null;
-  saving: boolean;
-  appName: string;
   onChange: (value: string) => void;
   onCancel: () => void;
   onCreate: () => void;
 }) {
   return (
-    <div style={modalBackdropStyle}>
-      <div style={{ ...smallModalStyle, gap: 12 }}>
+    <div className="dql-app-modal-backdrop">
+      <div className="dql-app-modal">
+        <h3>Add dashboard page</h3>
+        <p>Create a new page inside this local App package.</p>
+        <label>Page name<input value={title} onChange={(event) => onChange(event.target.value)} autoFocus placeholder="Executive Overview" /></label>
+        {error ? <div className="dql-app-error">{error}</div> : null}
         <div>
-          <div style={{ fontSize: 16, fontWeight: 800 }}>Add dashboard page</div>
-          <div style={{ fontSize: 12, opacity: 0.65, marginTop: 4 }}>
-            Create a new dashboard page inside {appName}.
-          </div>
-        </div>
-        <Field label="Page name">
-          <input
-            value={title}
-            onChange={(event) => onChange(event.target.value)}
-            onKeyDown={(event) => {
-              if (event.key === 'Enter') onCreate();
-              if (event.key === 'Escape') onCancel();
-            }}
-            placeholder="Overview, Fraud Ops, Executive Summary"
-            autoFocus
-            style={inputStyle}
-          />
-        </Field>
-        {error ? <div style={{ color: '#f85149', fontSize: 12 }}>{error}</div> : null}
-        <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8 }}>
-          <button onClick={onCancel} disabled={saving} style={ghostButtonStyle}>Cancel</button>
-          <button onClick={onCreate} disabled={saving || !title.trim()} style={{ ...primaryButtonStyle, opacity: saving || !title.trim() ? 0.65 : 1 }}>
-            {saving ? 'Creating...' : 'Create page'}
-          </button>
+          <button type="button" className="dql-apps-btn dql-apps-btn-line" onClick={onCancel}>Cancel</button>
+          <button type="button" className="dql-apps-btn dql-apps-btn-primary" onClick={onCreate}>Create page</button>
         </div>
       </div>
     </div>
   );
 }
 
-function AppWorkspaceHeader({
-  activeApp,
-  appDoc,
-  experience,
-  isBuild,
-  onExperienceChange,
-  onAddPage,
-}: {
-  activeApp: AppSummary | null;
-  appDoc: AppDocumentSummary | null;
-  experience: AppExperience;
-  isBuild: boolean;
-  onExperienceChange: (experience: AppExperience) => void;
-  onAddPage: () => void;
-}) {
-  const dashboardCount = activeApp?.dashboards.length ?? 0;
-  const notebookCount = activeApp?.notebooks?.length ?? 0;
-  const tags = activeApp?.tags ?? [];
-  return (
-    <header
-      style={{
-        display: 'flex',
-        alignItems: 'flex-start',
-        gap: 16,
-        padding: '13px 16px 12px',
-        borderBottom: '1px solid var(--border-color, rgba(0,0,0,0.08))',
-        background: 'var(--color-bg, #fff)',
-      }}
-    >
-      <div style={{ flex: 1, minWidth: 0 }}>
-        <h1 style={{ margin: 0, fontSize: 20, lineHeight: 1.15, fontWeight: 750, letterSpacing: 0 }}>
-          {activeApp?.name ?? 'Apps'}
-        </h1>
-        <div style={{ marginTop: 5, fontSize: 12, lineHeight: 1.45, color: 'var(--color-text-secondary, rgba(0,0,0,0.62))' }}>
-          {activeApp ? domainPath(activeApp) : 'Select an App'}
-          {activeApp ? ` · ${dashboardCount} dashboard${dashboardCount === 1 ? '' : 's'}` : ''}
-          {activeApp ? ` · ${notebookCount} notebook${notebookCount === 1 ? '' : 's'}` : ''}
-          {activeApp?.description ? ` · ${activeApp.description}` : ''}
-        </div>
-        {tags.length ? (
-          <div style={{ display: 'flex', gap: 5, flexWrap: 'wrap', marginTop: 7 }}>
-            {tags.slice(0, 8).map((tag) => <Pill key={tag}>{tag}</Pill>)}
-          </div>
-        ) : null}
-      </div>
-      <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap', justifyContent: 'flex-end' }}>
-        <PersonaSwitcher app={appDoc?.app ?? null} />
-        <div style={{ display: 'flex', alignItems: 'center', background: 'var(--surface, rgba(0,0,0,0.04))', border: '1px solid var(--border-color, rgba(0,0,0,0.10))', borderRadius: 7, padding: 3, gap: 3 }}>
-          <button onClick={() => onExperienceChange('view')} style={workspaceModeButtonStyle(experience === 'view')}>View</button>
-          <button onClick={() => onExperienceChange('build')} style={workspaceModeButtonStyle(experience === 'build')}>Build</button>
-        </div>
-        {isBuild ? (
-          <button type="button" onClick={onAddPage} disabled={!activeApp} style={ghostButtonStyle}>
-            + Add page
-          </button>
-        ) : null}
-      </div>
-    </header>
-  );
-}
-
-function AttachNotebookDialog({
-  mode,
-  path,
-  title,
-  role,
-  visibility,
-  candidates,
-  search,
-  newName,
-  error,
-  saving,
-  onModeChange,
-  onPathChange,
-  onTitleChange,
-  onRoleChange,
-  onVisibilityChange,
-  onSearchChange,
-  onNewNameChange,
-  onCancel,
-  onAttach,
-}: {
-  mode: NotebookAttachMode;
-  path: string;
-  title: string;
-  role: 'source' | 'analysis' | 'supporting';
-  visibility: 'shared' | 'private' | 'template';
-  candidates: AppNotebookCandidate[];
-  search: string;
-  newName: string;
-  error: string | null;
-  saving: boolean;
-  onModeChange: (value: NotebookAttachMode) => void;
-  onPathChange: (value: string) => void;
-  onTitleChange: (value: string) => void;
-  onRoleChange: (value: 'source' | 'analysis' | 'supporting') => void;
-  onVisibilityChange: (value: 'shared' | 'private' | 'template') => void;
-  onSearchChange: (value: string) => void;
-  onNewNameChange: (value: string) => void;
-  onCancel: () => void;
-  onAttach: () => void;
-}) {
-  const filtered = candidates.filter((candidate) => {
-    const needle = search.trim().toLowerCase();
-    if (!needle) return true;
-    return [candidate.title, candidate.path, candidate.role ?? '', candidate.visibility ?? ''].join(' ').toLowerCase().includes(needle);
-  });
-  return (
-    <div style={modalBackdropStyle}>
-      <div style={{ ...smallModalStyle, width: 720, maxWidth: 'calc(100vw - 48px)', gap: 12 }}>
-        <div>
-          <div style={{ fontSize: 16, fontWeight: 800 }}>Add notebook</div>
-          <div style={{ fontSize: 12, opacity: 0.65, marginTop: 4 }}>
-            Attach an existing notebook or create a new App notebook.
-          </div>
-        </div>
-        <div style={{ display: 'flex', border: '1px solid var(--border-color, rgba(0,0,0,0.12))', borderRadius: 6, overflow: 'hidden', width: 'fit-content' }}>
-          <button type="button" onClick={() => onModeChange('existing')} style={segmentButtonStyle(mode === 'existing')}>Existing</button>
-          <button type="button" onClick={() => onModeChange('new')} style={segmentButtonStyle(mode === 'new')}>New notebook</button>
-        </div>
-        {mode === 'existing' ? (
-          <>
-            <Field label="Search notebooks">
-              <input
-                value={search}
-                onChange={(event) => onSearchChange(event.target.value)}
-                placeholder="Search by title or path"
-                autoFocus
-                style={inputStyle}
-              />
-            </Field>
-            <div style={{ display: 'grid', gap: 6, maxHeight: 220, overflow: 'auto', border: '1px solid var(--border-color, rgba(0,0,0,0.10))', borderRadius: 6, padding: 6 }}>
-              {filtered.length === 0 ? (
-                <div style={mutedStyle}>No notebooks found. Use the path field below or create a new notebook.</div>
-              ) : filtered.map((candidate) => (
-                <button
-                  key={candidate.path}
-                  type="button"
-                  onClick={() => {
-                    onPathChange(candidate.path);
-                    onTitleChange(candidate.title);
-                    if (candidate.role) onRoleChange(candidate.role);
-                    if (candidate.visibility) onVisibilityChange(candidate.visibility);
-                  }}
-                  style={{
-                    ...panelCardStyle,
-                    textAlign: 'left',
-                    borderColor: candidate.path === path ? 'var(--accent, #4f46e5)' : 'var(--border-color, rgba(0,0,0,0.10))',
-                    background: candidate.path === path ? 'var(--color-bg-active, rgba(79,70,229,0.08))' : panelCardStyle.background,
-                    cursor: 'pointer',
-                  }}
-                >
-                  <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                    <div style={{ fontWeight: 700, flex: 1 }}>{candidate.title}</div>
-                    {candidate.attached ? <Pill>attached</Pill> : null}
-                  </div>
-                  <div style={{ fontSize: 11, opacity: 0.68, marginTop: 4, fontFamily: 'monospace' }}>{candidate.path}</div>
-                </button>
-              ))}
-            </div>
-            <Field label="Advanced path">
-              <input
-                value={path}
-                onChange={(event) => onPathChange(event.target.value)}
-                onKeyDown={(event) => {
-                  if (event.key === 'Enter') onAttach();
-                  if (event.key === 'Escape') onCancel();
-                }}
-                placeholder="notebooks/cards_fraud_ops.dqlnb"
-                style={inputStyle}
-              />
-            </Field>
-          </>
-        ) : (
-          <Field label="New notebook name">
-            <input
-              value={newName}
-              onChange={(event) => onNewNameChange(event.target.value)}
-              onKeyDown={(event) => {
-                if (event.key === 'Enter') onAttach();
-                if (event.key === 'Escape') onCancel();
-              }}
-              placeholder="fraud investigation notes"
-              autoFocus
-              style={inputStyle}
-            />
-          </Field>
-        )}
-        <Field label="Optional title">
-          <input
-            value={title}
-            onChange={(event) => onTitleChange(event.target.value)}
-            placeholder="Fraud investigation notebook"
-            style={inputStyle}
-          />
-        </Field>
-        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
-          <Field label="Role">
-            <select value={role} onChange={(event) => onRoleChange(event.target.value as typeof role)} style={inputStyle}>
-              <option value="source">Source</option>
-              <option value="analysis">Analysis</option>
-              <option value="supporting">Supporting</option>
-            </select>
-          </Field>
-          <Field label="Visibility">
-            <select value={visibility} onChange={(event) => onVisibilityChange(event.target.value as typeof visibility)} style={inputStyle}>
-              <option value="shared">Shared</option>
-              <option value="private">Private</option>
-              <option value="template">Template</option>
-            </select>
-          </Field>
-        </div>
-        {error ? <div style={{ color: '#f85149', fontSize: 12 }}>{error}</div> : null}
-        <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8 }}>
-          <button onClick={onCancel} disabled={saving} style={ghostButtonStyle}>Cancel</button>
-          <button
-            onClick={onAttach}
-            disabled={saving || (mode === 'existing' ? !path.trim() : !newName.trim() && !title.trim())}
-            style={{ ...primaryButtonStyle, opacity: saving || (mode === 'existing' ? !path.trim() : !newName.trim() && !title.trim()) ? 0.65 : 1 }}
-          >
-            {saving ? 'Saving...' : mode === 'new' ? 'Create notebook' : 'Attach notebook'}
-          </button>
-        </div>
-      </div>
-    </div>
-  );
-}
-
-function AppSectionTabs({
-  section,
-  experience,
-  dashboardCount,
-  notebookCount,
-  aiCount,
-  draftCount,
-  onChange,
-}: {
-  section: AppSection;
-  experience: AppExperience;
-  dashboardCount: number;
-  notebookCount: number;
-  aiCount: number;
-  draftCount: number;
-  onChange: (section: AppSection) => void;
-}) {
-  const tabs: Array<{ id: AppSection; label: string; count?: number }> = [
-    { id: 'dashboards', label: 'Dashboards', count: dashboardCount },
-    { id: 'notebooks', label: 'Notebooks', count: notebookCount },
-    { id: 'ai', label: 'AI', count: aiCount },
-    ...(experience === 'build'
-      ? [
-          { id: 'drafts' as const, label: 'Drafts', count: draftCount },
-          { id: 'settings' as const, label: 'Settings' },
-        ]
-      : []),
-  ];
-  return (
-    <nav style={{ display: 'flex', gap: 8, padding: '12px 16px 0', borderBottom: '1px solid var(--border-color, rgba(0,0,0,0.08))', overflowX: 'auto', background: 'var(--color-bg, #fff)' }}>
-      {tabs.map((tab) => (
-        <button key={tab.id} onClick={() => onChange(tab.id)} style={appSectionTabStyle(section === tab.id)}>
-          {tab.label}
-          {tab.count !== undefined ? <span style={{ opacity: 0.65, marginLeft: 6 }}>{tab.count}</span> : null}
-        </button>
-      ))}
-    </nav>
-  );
-}
-
-function DashboardPageTabs({
-  dashboards,
-  activeDashboardId,
-  isBuild,
-  onOpen,
-  onAddPage,
-}: {
-  dashboards: AppDocumentSummary['dashboards'];
-  activeDashboardId?: string | null;
-  isBuild: boolean;
-  onOpen: (dashboardId: string) => void;
-  onAddPage: () => void;
-}) {
-  return (
-    <nav style={{ display: 'flex', gap: 8, padding: '12px 16px', borderBottom: '1px solid var(--border-color, rgba(0,0,0,0.06))', overflowX: 'auto', background: 'var(--color-bg, #fff)' }}>
-      {dashboards.map((dashboard) => (
-        <button
-          key={dashboard.id}
-          onClick={() => onOpen(dashboard.id)}
-          style={dashboardPageTabStyle(dashboard.id === activeDashboardId)}
-        >
-          {dashboard.title}
-          {dashboard.itemCount > 0 ? <span style={{ opacity: 0.72, marginLeft: 6 }}>· {dashboard.itemCount}</span> : null}
-        </button>
-      ))}
-      {isBuild ? (
-        <button type="button" onClick={onAddPage} style={addPageTabStyle}>
-          +
-        </button>
-      ) : null}
-    </nav>
-  );
-}
-
-function NotebookRefsPanel({
-  appDoc,
-  editable,
-  onAttach,
-  onOpenNotebook,
-}: {
-  appDoc: AppDocumentSummary;
-  editable: boolean;
-  onAttach: () => void;
-  onOpenNotebook: (path: string) => void;
-}) {
-  const notebooks = appDoc.notebooks ?? appDoc.app.notebooks ?? [];
-  const { state } = useNotebook();
-  const [activePath, setActivePath] = useState<string | null>(notebooks[0]?.path ?? null);
-  const [preview, setPreview] = useState<AppNotebookPreview | null>(null);
-  const [loading, setLoading] = useState(false);
-  const [running, setRunning] = useState(false);
-  const [runError, setRunError] = useState<string | null>(null);
-
-  useEffect(() => {
-    if (!activePath || !notebooks.some((notebook) => notebook.path === activePath)) {
-      setActivePath(notebooks[0]?.path ?? null);
-    }
-  }, [activePath, notebooks]);
-
-  useEffect(() => {
-    if (!activePath) {
-      setPreview(null);
-      return;
-    }
-    let cancelled = false;
-    setLoading(true);
-    void api.previewAppNotebook(appDoc.app.id, activePath).then((result) => {
-      if (!cancelled) setPreview(result);
-    }).finally(() => {
-      if (!cancelled) setLoading(false);
-    });
-    return () => {
-      cancelled = true;
-    };
-  }, [appDoc.app.id, activePath]);
-
-  const runActiveNotebook = async () => {
-    if (!activePath) return;
-    setRunning(true);
-    setRunError(null);
-    const result = await api.runAppNotebook(appDoc.app.id, activePath);
-    setRunning(false);
-    if (!result.ok) {
-      setRunError(result.error ?? 'Notebook run failed.');
-      return;
-    }
-    setPreview(result.preview);
-  };
-
-  return (
-    <section style={{ display: 'grid', gap: 12, width: '100%' }}>
-      <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-        <div style={{ minWidth: 0, flex: 1 }}>
-          <h2 style={{ margin: 0, fontSize: 18, lineHeight: 1.2 }}>Notebooks</h2>
-          <div style={{ fontSize: 12, opacity: 0.65, marginTop: 3 }}>
-            Attached analysis workbooks for this App.
-          </div>
-        </div>
-      </div>
-      {notebooks.length === 0 && !editable ? (
-        <div style={mutedStyle}>No notebooks are attached to this App yet.</div>
-      ) : (
-        <div style={{ display: 'grid', gap: 12 }}>
-          <div style={{ display: 'flex', gap: 8, overflowX: 'auto', paddingBottom: 2 }}>
-            {notebooks.map((notebook) => (
-              <button
-                key={notebook.path}
-                type="button"
-                onClick={() => setActivePath(notebook.path)}
-                title={notebook.path}
-                style={notebookPageTabStyle(notebook.path === activePath)}
-              >
-                <span>{notebook.title ?? notebook.path}</span>
-                {notebook.role ? <span style={{ opacity: 0.72, marginLeft: 6 }}>· {notebook.role}</span> : null}
-              </button>
-            ))}
-            {editable ? (
-              <button type="button" onClick={onAttach} title="Add notebook" style={addPageTabStyle}>
-                +
-              </button>
-            ) : null}
-          </div>
-          {notebooks.length === 0 ? (
-            <div style={mutedStyle}>No notebooks are attached yet. Use + to attach or create one.</div>
-          ) : (
-          <div>
-            {loading ? (
-              <NotebookReadOnlyShell
-                title="Loading notebook..."
-                path={activePath ?? ''}
-                themeMode={state.themeMode}
-                cellCount={0}
-                running={running}
-                error={runError}
-                onRun={() => void runActiveNotebook()}
-                onOpen={() => activePath ? onOpenNotebook(activePath) : undefined}
-              >
-                <div style={{ maxWidth: 1200, margin: '0 auto', padding: '32px 24px', color: themes[state.themeMode].textMuted }}>
-                  Loading notebook...
-                </div>
-              </NotebookReadOnlyShell>
-            ) : preview ? (
-              <NotebookPreview
-                preview={preview}
-                themeMode={state.themeMode}
-                running={running}
-                error={runError}
-                onRun={() => void runActiveNotebook()}
-                onOpen={() => onOpenNotebook(preview.path)}
-              />
-            ) : (
-              <div style={mutedStyle}>Select a notebook to view it.</div>
-            )}
-          </div>
-          )}
-        </div>
-      )}
-    </section>
-  );
-}
-
-function NotebookPreview({
-  preview,
-  themeMode,
-  running,
-  error,
-  onRun,
-  onOpen,
-}: {
-  preview: AppNotebookPreview;
-  themeMode: ThemeMode;
-  running: boolean;
-  error: string | null;
-  onRun: () => void;
-  onOpen: () => void;
-}) {
-  const t = themes[themeMode];
-  return (
-    <NotebookReadOnlyShell
-      title={preview.title}
-      path={preview.path}
-      themeMode={themeMode}
-      cellCount={preview.cells.length}
-      capturedAt={preview.capturedAt}
-      running={running}
-      error={error}
-      onRun={onRun}
-      onOpen={onOpen}
-    >
-      {error ? <div style={{ color: '#f85149', fontSize: 12 }}>{error}</div> : null}
-      {preview.metadata ? <ReadOnlyNotebookMetadata metadata={preview.metadata} theme={t} /> : null}
-      <div style={{ maxWidth: 1200, margin: '0 auto', padding: '0 24px 40px', display: 'flex', flexDirection: 'column', gap: 8 }}>
-        {preview.cells.length === 0 ? (
-          <div style={mutedStyle}>This notebook has no cells.</div>
-        ) : preview.cells.map((cell) => (
-          <NotebookPreviewCell key={cell.id} cell={cell} themeMode={themeMode} />
-        ))}
-      </div>
-    </NotebookReadOnlyShell>
-  );
-}
-
-function NotebookPreviewCell({ cell, themeMode }: { cell: AppNotebookPreview['cells'][number]; themeMode: ThemeMode }) {
-  const t = themes[themeMode];
-  const label = cell.name ?? READONLY_TYPE_LABELS[cell.type] ?? cell.type.toUpperCase();
-  const showSource = cell.type === 'sql' || cell.type === 'dql' || cell.type === 'python' || cell.type === 'param' || cell.type === 'writeback';
-  const color = READONLY_TYPE_COLORS[cell.type] ?? t.accent;
-  return (
-    <div
-      data-readonly-notebook-cell
-      style={{
-        borderRadius: 8,
-        border: `1px solid ${t.cellBorder}`,
-        background: t.cellBg,
-        boxShadow: '0 1px 2px rgba(0,0,0,0.02)',
-        overflow: 'hidden',
-      }}
-    >
-      <div style={{ minHeight: 32, display: 'flex', alignItems: 'center', gap: 8, padding: '8px 14px' }}>
-        <span aria-hidden style={{ width: 6, height: 6, borderRadius: 999, background: color, flexShrink: 0 }} />
-        <span style={{ fontSize: 11, fontWeight: 500, color: t.textSecondary, whiteSpace: 'nowrap' }}>{READONLY_TYPE_LABELS[cell.type] ?? cell.type}</span>
-        {cell.name ? <span style={{ color: t.textSecondary, fontSize: 12, fontFamily: t.fontMono, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: 260 }}>{cell.name}</span> : null}
-        <div style={{ flex: 1 }} />
-        <ReadOnlyInlineStatus cell={cell} theme={t} />
-      </div>
-      <div>
-        {cell.type === 'markdown' ? <MarkdownPreview source={cell.content} theme={t} /> : null}
-        {showSource ? <ReadOnlySourceBlock content={cell.content} theme={t} /> : null}
-        {cell.error ? <div style={{ borderTop: `1px solid ${t.cellBorder}`, padding: 12, color: t.error, fontSize: 12 }}>{cell.error}</div> : null}
-        {cell.result ? <ReadOnlyOutputFrame cell={cell} theme={t} themeMode={themeMode} /> : null}
-      </div>
-    </div>
-  );
-}
-
-function NotebookReadOnlyShell({
-  title,
-  path,
-  themeMode,
-  cellCount,
-  capturedAt,
-  running,
-  error,
-  onRun,
-  onOpen,
-  children,
-}: {
-  title: string;
-  path: string;
-  themeMode: ThemeMode;
-  cellCount: number;
-  capturedAt?: string;
-  running: boolean;
-  error: string | null;
-  onRun: () => void;
-  onOpen: () => void;
-  children: ReactNode;
-}) {
-  const t = themes[themeMode];
-  return (
-    <div style={{ border: `1px solid ${t.headerBorder}`, borderRadius: 8, overflow: 'hidden', background: t.appBg, minHeight: 520 }}>
-      <div
-        style={{
-          minHeight: 34,
-          borderBottom: `1px solid ${t.headerBorder}`,
-          background: t.cellBg,
-          display: 'flex',
-          alignItems: 'center',
-          padding: '0 12px 0 16px',
-          gap: 12,
-        }}
-      >
-        <NotebookBreadcrumb title={title} path={path} theme={t} />
-        <div style={{ flex: 1 }} />
-        <span style={{ fontSize: 11, color: t.textMuted, fontFamily: t.font, whiteSpace: 'nowrap' }}>
-          {cellCount} {cellCount === 1 ? 'cell' : 'cells'}
-          {capturedAt ? ` · Last run ${formatDate(capturedAt)}` : ' · No saved run yet'}
-        </span>
-        {error ? <span style={{ fontSize: 11, color: t.error }}>Run failed</span> : null}
-        <button type="button" onClick={onRun} disabled={running} style={{ ...primaryButtonStyle, padding: '5px 9px', opacity: running ? 0.65 : 1 }}>
-          {running ? 'Running...' : 'Run notebook'}
-        </button>
-        <button type="button" onClick={onOpen} style={{ ...ghostButtonStyle, padding: '5px 9px' }}>Open / Edit</button>
-      </div>
-      <div style={{ paddingTop: 14 }}>{children}</div>
-    </div>
-  );
-}
-
-function NotebookBreadcrumb({ title, path, theme }: { title: string; path: string; theme: Theme }) {
-  const parts = path.split('/').filter(Boolean);
-  return (
-    <div style={{ minWidth: 0, display: 'flex', alignItems: 'center', gap: 4, fontSize: 12, fontFamily: theme.fontMono, color: theme.textMuted, overflow: 'hidden' }}>
-      <span style={{ color: theme.textSecondary, fontWeight: 600, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', maxWidth: 220 }}>
-        {title}
-      </span>
-      {parts.length > 0 ? <span style={{ color: theme.textMuted, opacity: 0.45 }}>/</span> : null}
-      {parts.slice(-2).map((part, index, shown) => (
-        <span key={`${part}:${index}`} style={{ display: 'inline-flex', alignItems: 'center', gap: 4, minWidth: 0 }}>
-          {index > 0 ? <span style={{ color: theme.textMuted, opacity: 0.45 }}>/</span> : null}
-          <span style={{ whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', maxWidth: index === shown.length - 1 ? 220 : 120 }}>
-            {part}
-          </span>
-        </span>
-      ))}
-    </div>
-  );
-}
-
-function ReadOnlyNotebookMetadata({ metadata, theme }: { metadata: Record<string, unknown>; theme: Theme }) {
-  const rawItems: Array<[string, unknown]> = [
-    ['Status', metadata.status],
-    ['Owner', metadata.owner ?? metadata.author],
-    ['Description', metadata.description],
-    ['Categories', Array.isArray(metadata.categories) ? metadata.categories.join(', ') : metadata.categories],
-  ];
-  const items = rawItems.filter(([, value]) => value !== undefined && value !== null && String(value).trim() !== '');
-  if (items.length === 0) return null;
-  return (
-    <div style={{ maxWidth: 1200, margin: '0 auto', padding: '0 24px 12px' }}>
-      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, color: theme.textMuted }}>
-        {items.map(([label, value]) => (
-          <span key={label} style={{ fontSize: 11, fontFamily: theme.font, border: `1px solid ${theme.cellBorder}`, borderRadius: 4, padding: '3px 7px', background: theme.cellBg }}>
-            <strong style={{ color: theme.textSecondary }}>{label}:</strong> {String(value)}
-          </span>
-        ))}
-      </div>
-    </div>
-  );
-}
-
-function ReadOnlySourceBlock({ content, theme }: { content: string; theme: Theme }) {
-  return (
-    <pre
-      style={{
-        margin: 0,
-        padding: '10px 14px 12px',
-        borderTop: `1px solid ${theme.cellBorder}`,
-        background: theme.editorBg,
-        color: theme.textPrimary,
-        fontFamily: theme.fontMono,
-        fontSize: 12,
-        lineHeight: 1.55,
-        whiteSpace: 'pre-wrap',
-        overflowX: 'auto',
-      }}
-    >
-      {content}
-    </pre>
-  );
-}
-
-function ReadOnlyOutputFrame({ cell, theme, themeMode }: { cell: AppNotebookPreview['cells'][number]; theme: Theme; themeMode: ThemeMode }) {
-  const result = cell.result;
-  const [vizChoice, setVizChoice] = useState<ReadOnlyVizChoice>(() => initialReadOnlyVizChoice(cell));
-  const visualization = renderNotebookVisualizationOutput(cell, themeMode, vizChoice);
-  const [mode, setMode] = useState<'table' | 'visualization'>(() => defaultNotebookOutputMode(cell));
-  const tableResult = result && cell.type === 'table' ? projectTablePreview(result, cell.tableConfig) : result;
-  const vizChoices = readOnlyVisualizationChoices(cell);
-  return (
-    <div style={{ borderTop: `1px solid ${theme.cellBorder}` }}>
-      {result ? (
-        <div
-          style={{
-            minHeight: 28,
-            display: 'flex',
-            alignItems: 'center',
-            padding: '0 12px',
-            gap: 10,
-            borderBottom: `1px solid ${theme.cellBorder}`,
-            background: `${theme.tableHeaderBg}60`,
-          }}
-        >
-          <span style={{ fontSize: 11, fontFamily: theme.font, color: theme.textMuted }}>
-            {(result.rowCount ?? result.rows.length).toLocaleString()} rows
-            {result.executionTime !== undefined ? ` · ${formatExecutionTime(result.executionTime)}` : ''}
-          </span>
-          {cell.executedAt ? <span style={{ fontSize: 10, color: theme.textMuted }}>cached</span> : null}
-          <div style={{ flex: 1 }} />
-          <div style={{ display: 'flex', alignItems: 'center', gap: 3 }}>
-            <button
-              type="button"
-              onClick={() => setMode('table')}
-              style={readOnlyOutputTabStyle(mode === 'table', theme)}
-            >
-              Table
-            </button>
-            <select
-              value={vizChoice}
-              onChange={(event) => {
-                setVizChoice(event.target.value as ReadOnlyVizChoice);
-                setMode('visualization');
-              }}
-              onClick={() => setMode('visualization')}
-              title="Choose visualization type"
-              style={readOnlyOutputSelectStyle(mode === 'visualization', theme)}
-            >
-              {vizChoices.map((option) => (
-                <option key={option.value} value={option.value}>{option.label}</option>
-              ))}
-            </select>
-          </div>
-        </div>
-      ) : null}
-      <div>
-        {mode === 'visualization' && visualization ? (
-          visualization
-        ) : tableResult ? (
-          <TableOutput result={tableResult} themeMode={themeMode} />
-        ) : null}
-      </div>
-    </div>
-  );
-}
-
-function ReadOnlyInlineStatus({ cell, theme }: { cell: AppNotebookPreview['cells'][number]; theme: Theme }) {
-  if (!cell.status || cell.status === 'idle') return null;
-  const color = cell.status === 'success' ? theme.success : cell.status === 'error' ? theme.error : theme.warning;
-  return (
-    <span style={{ fontSize: 10, fontFamily: theme.font, color, border: `1px solid ${color}55`, borderRadius: 3, padding: '1px 6px', lineHeight: '16px' }}>
-      {cell.status}
-    </span>
-  );
-}
-
-function renderNotebookVisualizationOutput(cell: AppNotebookPreview['cells'][number], themeMode: ThemeMode, vizChoice: ReadOnlyVizChoice): ReactNode {
-  const result = cell.result;
-  if (!result) return null;
-  if (vizChoice === 'pivot' && cell.type === 'pivot') {
-    return <PivotPreview result={result} config={cell.pivotConfig} themeMode={themeMode} />;
-  }
-  if (vizChoice === 'kpi' && cell.type === 'single_value') {
-    return <SingleValuePreview result={result} config={cell.singleValueConfig} />;
-  }
-  return <ChartOutput result={result} themeMode={themeMode} chartConfig={{ ...(cell.chartConfig ?? {}), chart: vizChoice } as any} />;
-}
-
-function defaultNotebookOutputMode(cell: AppNotebookPreview['cells'][number]): 'table' | 'visualization' {
-  if (cell.type === 'chart' || cell.type === 'single_value' || cell.type === 'pivot') return 'visualization';
-  const chart = String(cell.chartConfig?.chart ?? '').toLowerCase();
-  return chart && chart !== 'table' ? 'visualization' : 'table';
-}
-
-function initialReadOnlyVizChoice(cell: AppNotebookPreview['cells'][number]): ReadOnlyVizChoice {
-  if (cell.type === 'pivot') return 'pivot';
-  if (cell.type === 'single_value') return 'kpi';
-  const configured = normalizeReadOnlyVizChoice(cell.chartConfig?.chart);
-  if (configured) return configured;
-  if (cell.result) {
-    const resolved = resolveChartType(cell.result, cell.chartConfig as any);
-    if (resolved !== 'table') return resolved;
-  }
-  return 'bar';
-}
-
-function normalizeReadOnlyVizChoice(value: unknown): ReadOnlyVizChoice | null {
-  if (typeof value !== 'string') return null;
-  const normalized = value.toLowerCase().replace(/_/g, '-') as ReadOnlyVizChoice;
-  if (normalized === 'pivot') return 'pivot';
-  return CHART_TYPE_OPTIONS.some((option) => option.value === normalized) ? normalized : null;
-}
-
-function readOnlyVisualizationChoices(cell: AppNotebookPreview['cells'][number]): Array<{ value: ReadOnlyVizChoice; label: string }> {
-  const choices = CHART_TYPE_OPTIONS.map((option) => ({ value: option.value as ReadOnlyVizChoice, label: option.label }));
-  return cell.type === 'pivot' ? [{ value: 'pivot', label: 'Pivot' }, ...choices] : choices;
-}
-
-function readOnlyOutputTabStyle(active: boolean, theme: Theme): CSSProperties {
+function planFromSelection(
+  name: string,
+  prompt: string,
+  domain: string,
+  owner: string,
+  selected: AppBlockRecommendation[],
+): GeneratedAppPlan {
+  const tiles = selected.map((block, index) => ({
+    id: block.id || `tile-${index + 1}`,
+    title: block.name,
+    kind: 'certified_block' as const,
+    description: block.description,
+    blockId: block.name,
+    sourceNodeId: block.id,
+    viz: block.chartType ?? 'table',
+    certification: 'certified' as const,
+    reviewStatus: 'certified' as const,
+    rationale: 'Selected from the certified block palette.',
+  }));
   return {
-    padding: '1px 7px',
-    fontSize: 10,
-    fontFamily: theme.font,
-    borderRadius: 3,
-    border: `1px solid ${active ? theme.accent : theme.btnBorder}`,
-    background: active ? `${theme.accent}20` : 'transparent',
-    color: active ? theme.accent : theme.textMuted,
-    cursor: 'pointer',
-    transition: 'all 0.15s',
+    version: 1,
+    appId: slugify(name) || 'new-app',
+    name,
+    prompt,
+    skills: AGENT_SKILLS.map((skill) => ({
+      id: skill.id,
+      title: skill.title,
+      description: skill.description,
+    })),
+    domain,
+    audience: 'stakeholder',
+    businessGoal: prompt,
+    owner,
+    lifecycle: 'draft',
+    tags: ['app-builder'],
+    pages: [{ id: 'overview', title: 'Overview', filters: [], tiles }],
+    caveats: [],
+    reviewTasks: [],
   };
 }
 
-function readOnlyOutputSelectStyle(active: boolean, theme: Theme): CSSProperties {
+function libraryCounts(apps: AppSummary[], favorites: Set<string>): Record<LibraryFilter, number> {
   return {
-    ...readOnlyOutputTabStyle(active, theme),
-    minWidth: 118,
-    padding: '1px 22px 1px 7px',
-    outline: 'none',
+    all: apps.length,
+    mine: apps.filter((app) => app.storage === 'mine').length,
+    shared: apps.filter((app) => (app.storage ?? 'shared') === 'shared').length,
+    fav: favorites.size,
+    review: apps.filter((app) => app.lifecycle === 'review').length,
   };
 }
 
-function projectTablePreview(result: QueryResult, rawConfig: Record<string, unknown> | undefined): QueryResult {
-  const visibleColumns = Array.isArray(rawConfig?.visibleColumns)
-    ? rawConfig.visibleColumns.filter((column): column is string => typeof column === 'string')
-    : [];
-  if (visibleColumns.length === 0) return result;
-  const available = new Set(result.columns);
-  const keep = visibleColumns.filter((column) => available.has(column));
-  if (keep.length === 0) return result;
-  return {
-    ...result,
-    columns: keep,
-    rows: result.rows.map((row) => Object.fromEntries(keep.map((column) => [column, row[column]]))),
-  };
+function primaryOwner(app: AppSummary): string {
+  return app.owners[0] ?? 'owner@local';
 }
 
-function SingleValuePreview({ result, config }: { result: QueryResult; config?: Record<string, unknown> }) {
-  const aggregation = normalizeAggregation(config?.aggregation, 'count');
-  const metric = typeof config?.metric === 'string' ? config.metric : undefined;
-  const label = typeof config?.label === 'string' && config.label.trim()
-    ? config.label
-    : `${aggregation.toUpperCase()}${metric ? ` · ${metric}` : ''}`;
-  const format = typeof config?.format === 'string' ? config.format : 'number';
-  const value = aggregation === 'count'
-    ? aggregate(result.rows, 'count')
-    : metric && result.columns.includes(metric)
-      ? aggregate(result.rows.map((row) => row[metric]), aggregation)
-      : null;
-
-  return (
-    <div style={{
-      border: '1px solid var(--border-color, rgba(0,0,0,0.08))',
-      borderRadius: 6,
-      padding: '18px 20px',
-      display: 'grid',
-      gap: 6,
-      background: 'var(--surface-subtle, rgba(0,0,0,0.02))',
-    }}>
-      <div style={{ fontSize: 11, opacity: 0.62, textTransform: 'uppercase', fontWeight: 700 }}>{label}</div>
-      <div style={{ fontSize: 34, lineHeight: 1.1, fontWeight: 800 }}>{formatPreviewNumber(value, format)}</div>
-      <div style={{ fontSize: 11, opacity: 0.6 }}>{result.rows.length.toLocaleString()} rows</div>
-    </div>
-  );
-}
-
-function PivotPreview({ result, config, themeMode }: { result: QueryResult; config?: Record<string, unknown>; themeMode: ThemeMode }) {
-  const rows = stringArray(config?.rows).filter((column) => result.columns.includes(column));
-  const columns = stringArray(config?.columns).filter((column) => result.columns.includes(column));
-  const values = Array.isArray(config?.values)
-    ? config.values
-      .map((value) => {
-        if (!value || typeof value !== 'object') return null;
-        const record = value as Record<string, unknown>;
-        const column = typeof record.column === 'string' ? record.column : '';
-        if (!result.columns.includes(column)) return null;
-        return { column, aggregation: normalizeAggregation(record.aggregation, 'sum') };
-      })
-      .filter((value): value is { column: string; aggregation: Aggregation } => Boolean(value))
-    : [];
-
-  if ((rows.length === 0 && columns.length === 0) || values.length === 0) {
-    return <TableOutput result={result} themeMode={themeMode} />;
-  }
-
-  const colKeys = new Set<string>();
-  const grouped = new Map<string, { rowDims: Record<string, unknown>; buckets: Map<string, Record<string, unknown>[]> }>();
-  for (const row of result.rows) {
-    const rowKey = keyFor(row, rows);
-    const colKey = keyFor(row, columns);
-    colKeys.add(colKey);
-    const existing = grouped.get(rowKey) ?? { rowDims: Object.fromEntries(rows.map((column) => [column, row[column]])), buckets: new Map() };
-    const bucket = existing.buckets.get(colKey) ?? [];
-    bucket.push(row);
-    existing.buckets.set(colKey, bucket);
-    grouped.set(rowKey, existing);
-  }
-
-  const sortedColKeys = [...colKeys].sort();
-  const headers = sortedColKeys.length > 0 ? sortedColKeys : [''];
-  return (
-    <div style={{ overflowX: 'auto' }}>
-      <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 11 }}>
-        <thead>
-          <tr>
-            {rows.map((row) => <th key={row} style={pivotHeadStyle('left')}>{row}</th>)}
-            {headers.map((header) => (
-              <th key={header || 'value'} style={pivotHeadStyle('right')}>
-                {header || 'value'}
-              </th>
-            ))}
-          </tr>
-        </thead>
-        <tbody>
-          {[...grouped.values()].slice(0, 50).map((entry, index) => (
-            <tr key={index}>
-              {rows.map((row) => <td key={row} style={pivotCellStyle('left')}>{String(entry.rowDims[row] ?? '')}</td>)}
-              {headers.map((header) => {
-                const bucket = entry.buckets.get(header) ?? [];
-                return (
-                  <td key={header || 'value'} style={pivotCellStyle('right')}>
-                    {values.map((value) => {
-                      const aggregated = aggregate(bucket.map((row) => row[value.column]), value.aggregation);
-                      return <div key={`${value.aggregation}:${value.column}`}>{formatPreviewNumber(aggregated, 'number')}</div>;
-                    })}
-                  </td>
-                );
-              })}
-            </tr>
-          ))}
-        </tbody>
-      </table>
-    </div>
-  );
-}
-
-function stringArray(value: unknown): string[] {
-  return Array.isArray(value) ? value.filter((item): item is string => typeof item === 'string') : [];
-}
-
-function normalizeAggregation(value: unknown, fallback: Aggregation): Aggregation {
-  if (value === 'sum' || value === 'avg' || value === 'count' || value === 'count_distinct' || value === 'min' || value === 'max' || value === 'last') {
-    return value;
-  }
-  return fallback;
-}
-
-function keyFor(row: Record<string, unknown>, columns: string[]): string {
-  return columns.map((column) => String(row[column] ?? '')).join('|');
-}
-
-function formatPreviewNumber(value: number | null, format: string): string {
-  if (value === null) return '-';
-  if (format === 'currency') return value.toLocaleString(undefined, { style: 'currency', currency: 'USD', maximumFractionDigits: 2 });
-  if (format === 'percent') return `${(value * 100).toFixed(1)}%`;
-  if (format === 'duration') {
-    if (value < 60) return `${value.toFixed(1)}s`;
-    if (value < 3600) return `${(value / 60).toFixed(1)}m`;
-    return `${(value / 3600).toFixed(1)}h`;
-  }
-  return value.toLocaleString(undefined, { maximumFractionDigits: 2 });
-}
-
-function formatExecutionTime(ms: number): string {
-  return ms < 1000 ? `${Math.round(ms)}ms` : `${(ms / 1000).toFixed(2)}s`;
-}
-
-function pivotHeadStyle(textAlign: 'left' | 'right'): CSSProperties {
-  return {
-    textAlign,
-    padding: '6px 8px',
-    borderBottom: '1px solid var(--border-color, rgba(0,0,0,0.1))',
-    opacity: 0.72,
-    fontWeight: 700,
-  };
-}
-
-function pivotCellStyle(textAlign: 'left' | 'right'): CSSProperties {
-  return {
-    textAlign,
-    padding: '5px 8px',
-    borderBottom: '1px solid var(--border-color, rgba(0,0,0,0.06))',
-  };
-}
-
-function MarkdownPreview({ source, theme }: { source: string; theme: Theme }) {
-  return (
-    <div style={{ padding: '10px 14px 14px', display: 'grid', gap: 6, lineHeight: 1.45, color: theme.textPrimary }}>
-      {renderMarkdown(source, theme)}
-    </div>
-  );
-}
-
-function AiSummariesPanel({ appDoc, editable, onPromoted }: { appDoc: AppDocumentSummary; editable: boolean; onPromoted: () => Promise<void> }) {
-  const pins = appDoc.aiPins ?? [];
-  const [tab, setTab] = useState<'conversations' | 'pins'>('conversations');
-  const [conversations, setConversations] = useState<AppConversation[]>([]);
-  const [activeConversation, setActiveConversation] = useState<AppConversation | null>(null);
-  const [busy, setBusy] = useState<string | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  useEffect(() => {
-    let cancelled = false;
-    void api.listAppConversations(appDoc.app.id).then((items) => {
-      if (!cancelled) setConversations(items);
-    });
-    setActiveConversation(null);
-    return () => {
-      cancelled = true;
-    };
-  }, [appDoc.app.id]);
-  const promote = async (pinId: string) => {
-    setError(null);
-    setBusy(pinId);
-    const result = await api.promoteAiPin(appDoc.app.id, pinId);
-    setBusy(null);
-    if (!result.ok) {
-      setError(result.error ?? 'Promotion failed.');
-      return;
-    }
-    await onPromoted();
-  };
-  const removeConversation = async (conversationId: string) => {
-    setBusy(conversationId);
-    const result = await api.deleteAppConversation(appDoc.app.id, conversationId);
-    setBusy(null);
-    if (!result.ok) {
-      setError(result.error ?? 'Could not delete conversation.');
-      return;
-    }
-    if (activeConversation?.id === conversationId) setActiveConversation(null);
-    setConversations((items) => items.filter((item) => item.id !== conversationId));
-  };
-  const openConversation = async (conversationId: string) => {
-    const full = await api.getAppConversation(appDoc.app.id, conversationId);
-    setActiveConversation(full);
-  };
-  return (
-    <PanelFrame title="AI">
-      <div style={{ display: 'flex', border: '1px solid var(--border-color, rgba(0,0,0,0.12))', borderRadius: 6, overflow: 'hidden', width: 'fit-content' }}>
-        <button type="button" onClick={() => setTab('conversations')} style={segmentButtonStyle(tab === 'conversations')}>
-          Conversations <span style={{ opacity: 0.65, marginLeft: 4 }}>{conversations.length}</span>
-        </button>
-        <button type="button" onClick={() => setTab('pins')} style={segmentButtonStyle(tab === 'pins')}>
-          Pinned summaries <span style={{ opacity: 0.65, marginLeft: 4 }}>{pins.length}</span>
-        </button>
-      </div>
-      {error ? <div style={{ color: '#f85149', fontSize: 12 }}>{error}</div> : null}
-      {tab === 'conversations' ? (
-        activeConversation ? (
-          <div style={panelCardStyle}>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-              <button type="button" onClick={() => setActiveConversation(null)} style={miniActionStyle}>Back</button>
-              <div style={{ fontWeight: 700, flex: 1 }}>{activeConversation.title}</div>
-              <Pill>{`${activeConversation.messages?.length ?? activeConversation.messageCount} messages`}</Pill>
-            </div>
-            <div style={{ display: 'grid', gap: 8, marginTop: 12 }}>
-              {(activeConversation.messages ?? []).map((message, index) => (
-                <div
-                  key={message.id ?? index}
-                  style={{
-                    border: '1px solid var(--border-color, rgba(0,0,0,0.08))',
-                    borderRadius: 6,
-                    padding: 10,
-                    background: message.role === 'user' ? 'var(--color-bg-active, rgba(79,70,229,0.08))' : 'var(--surface, rgba(0,0,0,0.02))',
-                  }}
-                >
-                  <div style={{ fontSize: 10, textTransform: 'uppercase', fontWeight: 800, opacity: 0.62, marginBottom: 4 }}>{message.role === 'user' ? 'You' : 'DQL Agent'}</div>
-                  <div style={{ whiteSpace: 'pre-wrap', fontSize: 12, lineHeight: 1.45 }}>{message.content}</div>
-                </div>
-              ))}
-            </div>
-          </div>
-        ) : conversations.length === 0 ? (
-          <div style={mutedStyle}>Dashboard AI conversations are saved locally and will appear here after you ask AI from a dashboard page.</div>
-        ) : conversations.map((conversation) => (
-          <div key={conversation.id} style={panelCardStyle}>
-            <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
-              <div style={{ fontWeight: 700, flex: 1 }}>{conversation.title}</div>
-              <Pill>{`${conversation.messageCount} messages`}</Pill>
-              {conversation.dashboardId ? <Pill>{conversation.dashboardId}</Pill> : null}
-            </div>
-            {conversation.lastMessage ? (
-              <div style={{ marginTop: 8, whiteSpace: 'pre-wrap', lineHeight: 1.45, fontSize: 12, opacity: 0.78 }}>{conversation.lastMessage}</div>
-            ) : null}
-            <div style={{ marginTop: 8, display: 'flex', alignItems: 'center', gap: 8 }}>
-              <span style={{ fontSize: 11, opacity: 0.64 }}>Private local history · {formatDate(conversation.updatedAt)}</span>
-              <div style={{ flex: 1 }} />
-              <button type="button" onClick={() => void openConversation(conversation.id)} style={miniActionStyle}>
-                Open
-              </button>
-              {editable ? (
-                <button type="button" onClick={() => void removeConversation(conversation.id)} style={miniActionStyle} disabled={busy === conversation.id}>
-                  {busy === conversation.id ? 'Deleting...' : 'Delete'}
-                </button>
-              ) : null}
-            </div>
-          </div>
-        ))
-      ) : pins.length === 0 ? (
-        <div style={mutedStyle}>Pinned AI summaries for this App will appear here.</div>
-      ) : pins.map((pin) => (
-        <div key={pin.id} style={panelCardStyle}>
-          <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
-            <div style={{ fontWeight: 700, flex: 1 }}>{pin.title}</div>
-            <Pill>{pin.reviewStatus}</Pill>
-            <Pill>{pin.certification}</Pill>
-          </div>
-          <div style={{ marginTop: 8, whiteSpace: 'pre-wrap', lineHeight: 1.45, fontSize: 12 }}>{pin.answer}</div>
-          <div style={{ marginTop: 8, display: 'flex', gap: 8, alignItems: 'center' }}>
-            <span style={{ fontSize: 11, opacity: 0.64 }}>{pin.dashboardId}{pin.tileId ? ` · ${pin.tileId}` : ''}</span>
-            <div style={{ flex: 1 }} />
-            {editable && pin.sql && pin.reviewStatus === 'needs_review' ? (
-              <button type="button" onClick={() => void promote(pin.id)} style={miniActionStyle} disabled={busy === pin.id}>
-                {busy === pin.id ? 'Promoting...' : 'Promote to draft'}
-              </button>
-            ) : null}
-          </div>
-        </div>
-      ))}
-    </PanelFrame>
-  );
-}
-
-function DraftsPanel({ drafts }: { drafts: NonNullable<AppDocumentSummary['drafts']> }) {
-  return (
-    <PanelFrame title="Draft Blocks">
-      {drafts.length === 0 ? (
-        <div style={mutedStyle}>AI-generated or imported DQL drafts promoted into this App appear here.</div>
-      ) : drafts.map((draft) => (
-        <InfoRow key={draft.path} title={draft.name} meta={draft.reviewStatus ?? 'review'} detail={draft.path} />
-      ))}
-    </PanelFrame>
-  );
-}
-
-function AppSettingsPanel({ appDoc }: { appDoc: AppDocumentSummary }) {
-  const rows = [
-    ['Domain path', domainPath(appDoc.app)],
-    ['Visibility', appDoc.app.visibility ?? 'shared'],
-    ['Lifecycle', appDoc.app.lifecycle ?? 'draft'],
-    ['Audience', appDoc.app.audience ?? '-'],
-    ['Owners', appDoc.app.owners.join(', ') || '-'],
-    ['Roles', String(appDoc.app.roles.length)],
-    ['Policies', String(appDoc.app.policies.length)],
-    ['Schedules', String(appDoc.app.schedules?.length ?? 0)],
-  ];
-  return (
-    <PanelFrame title="App Settings">
-      <div style={{ border: '1px solid var(--border-color, rgba(0,0,0,0.10))', borderRadius: 6, overflow: 'hidden' }}>
-        {rows.map(([label, value]) => (
-          <div key={label} style={{ display: 'grid', gridTemplateColumns: '160px 1fr', borderBottom: '1px solid var(--border-color, rgba(0,0,0,0.06))' }}>
-            <div style={{ padding: 9, fontSize: 11, opacity: 0.62 }}>{label}</div>
-            <div style={{ padding: 9, fontSize: 12 }}>{value}</div>
-          </div>
-        ))}
-      </div>
-    </PanelFrame>
-  );
-}
-
-function PanelFrame({ title, action, children }: { title: string; action?: JSX.Element; children: ReactNode }) {
-  return (
-    <section style={{ display: 'grid', gap: 12, maxWidth: 920 }}>
-      <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-        <h2 style={{ margin: 0, fontSize: 18 }}>{title}</h2>
-        <div style={{ flex: 1 }} />
-        {action}
-      </div>
-      {children}
-    </section>
-  );
-}
-
-function InfoRow({ title, meta, detail }: { title: string; meta: string; detail: string }) {
-  return (
-    <div style={panelCardStyle}>
-      <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
-        <div style={{ fontWeight: 700 }}>{title}</div>
-        <Pill>{meta}</Pill>
-      </div>
-      <div style={{ fontSize: 12, opacity: 0.7, marginTop: 5, fontFamily: 'monospace' }}>{detail}</div>
-    </div>
-  );
-}
-
-function CreateAppWizard({
-  onClose,
-  onCreated,
-}: {
-  onClose: () => void;
-  onCreated: (appId: string, dashboardId: string) => void;
-}): JSX.Element {
-  const { dispatch } = useNotebook();
-  const [startSource, setStartSource] = useState<AppStartSource>('empty');
-  const [name, setName] = useState('');
-  const [domain, setDomain] = useState('');
-  const [dashboardTitle, setDashboardTitle] = useState('Overview');
-  const [subdomain, setSubdomain] = useState('');
-  const [groups, setGroups] = useState('');
-  const [purpose, setPurpose] = useState('');
-  const [notebookPath, setNotebookPath] = useState('');
-  const [notebookTitle, setNotebookTitle] = useState('');
-  const [audience, setAudience] = useState('');
-  const [lifecycle, setLifecycle] = useState<'draft' | 'review' | 'certified' | 'deprecated'>('draft');
-  const [visibility, setVisibility] = useState<'shared' | 'private' | 'template'>('shared');
-  const [tags, setTags] = useState('');
-  const [owner, setOwner] = useState(`${(window as unknown as { DQL_USER?: string }).DQL_USER ?? 'owner'}@local`);
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-
-  const tagList = useMemo(() => tags.split(',').map((tag) => tag.trim()).filter(Boolean), [tags]);
-  const canCreate = Boolean(name.trim() && domain.trim() && dashboardTitle.trim() && (startSource !== 'notebook' || notebookPath.trim()));
-
-  const create = async () => {
-    if (!canCreate || startSource === 'import') return;
-    setLoading(true);
-    setError(null);
-    try {
-      const result = await api.createApp({
-        name,
-        domain,
-        dashboardTitle,
-        subdomain: subdomain.trim() || undefined,
-        groups: groups.split(',').map((group) => group.trim()).filter(Boolean),
-        purpose,
-        audience: audience.trim() || undefined,
-        visibility,
-        lifecycle,
-        tags: unique([...tagList, ...(startSource === 'empty' ? [] : [`source:${startSource}`])]),
-        owners: [owner],
-        selectedBlockIds: [],
-      });
-      if (startSource === 'notebook' && notebookPath.trim()) {
-        const attachResult = await api.attachAppNotebook(result.app.id, {
-          path: notebookPath.trim(),
-          title: notebookTitle.trim() || undefined,
-          role: 'analysis',
-          visibility: 'shared',
-        });
-        if ('ok' in attachResult && attachResult.ok === false) {
-          onCreated(result.app.id, result.dashboardId);
-          setError(`App created, but notebook attach failed: ${attachResult.error}`);
-          return;
-        }
-      }
-      onCreated(result.app.id, result.dashboardId);
-      onClose();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  return (
-    <div style={modalBackdropStyle}>
-      <div style={{ ...smallModalStyle, width: 760, maxWidth: 'calc(100vw - 48px)', maxHeight: 'calc(100vh - 48px)', overflow: 'auto' }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 12, borderBottom: '1px solid var(--border-color, rgba(0,0,0,0.08))', padding: 16 }}>
-          <div style={{ flex: 1 }}>
-            <div style={{ fontSize: 18, fontWeight: 700 }}>Create App</div>
-            <div style={{ fontSize: 12, opacity: 0.65 }}>Create one App with an Overview dashboard page. Add blocks, notebooks, AI pins, and drafts after creation.</div>
-          </div>
-          <button onClick={onClose} style={ghostButtonStyle}>Close</button>
-        </div>
-
-        <div style={{ padding: 16, display: 'grid', gap: 14 }}>
-          <div style={{ display: 'grid', gap: 6 }}>
-            <div style={{ fontSize: 12, fontWeight: 600 }}>Start from</div>
-            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, minmax(0, 1fr))', gap: 8 }}>
-              {([
-                ['empty', 'Empty App'],
-                ['notebook', 'From Notebook'],
-                ['template', 'From Template'],
-                ['import', 'From Import'],
-              ] as Array<[AppStartSource, string]>).map(([value, label]) => (
-                <button key={value} type="button" onClick={() => setStartSource(value)} style={sourceButtonStyle(startSource === value)}>
-                  {label}
-                </button>
-              ))}
-            </div>
-          </div>
-
-          {startSource === 'import' ? (
-            <InfoCard title="Use Block Studio Imports" text="Import SQL files in Block Studio first, review and save draft blocks, then return here to create an App and add those blocks from the Build catalog." />
-          ) : null}
-
-          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
-            <Field label="App name"><input value={name} onChange={(e) => setName(e.target.value)} placeholder="Daily Fraud Ops App" style={inputStyle} /></Field>
-            <Field label="First dashboard page"><input value={dashboardTitle} onChange={(e) => setDashboardTitle(e.target.value)} placeholder="Overview" style={inputStyle} /></Field>
-          </div>
-          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
-            <Field label="Domain"><input value={domain} onChange={(e) => setDomain(e.target.value)} placeholder="cards" style={inputStyle} /></Field>
-            <Field label="Subdomain"><input value={subdomain} onChange={(e) => setSubdomain(e.target.value)} placeholder="fraud" style={inputStyle} /></Field>
-          </div>
-          <Field label="Group / use case"><input value={groups} onChange={(e) => setGroups(e.target.value)} placeholder="daily-ops, executive-review" style={inputStyle} /></Field>
-          {startSource === 'notebook' ? (
-            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
-              <Field label="Notebook path"><input value={notebookPath} onChange={(e) => setNotebookPath(e.target.value)} placeholder="notebooks/cards_fraud_ops.dqlnb" style={inputStyle} /></Field>
-              <Field label="Notebook title"><input value={notebookTitle} onChange={(e) => setNotebookTitle(e.target.value)} placeholder="Fraud investigation notebook" style={inputStyle} /></Field>
-            </div>
-          ) : null}
-          <Field label="Purpose"><textarea value={purpose} onChange={(e) => setPurpose(e.target.value)} placeholder="Daily operating view for monitoring fraud risk, investigation queues, and trend movement." style={{ ...inputStyle, minHeight: 76, resize: 'vertical' }} /></Field>
-          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
-            <Field label="Audience"><input value={audience} onChange={(e) => setAudience(e.target.value)} placeholder="ops, executive, analyst" style={inputStyle} /></Field>
-            <Field label="Owner"><input value={owner} onChange={(e) => setOwner(e.target.value)} placeholder="owner@local" style={inputStyle} /></Field>
-          </div>
-          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
-            <Field label="Visibility">
-              <select value={visibility} onChange={(e) => setVisibility(e.target.value as typeof visibility)} style={inputStyle}>
-                <option value="shared">shared</option>
-                <option value="private">private</option>
-                <option value="template">template</option>
-              </select>
-            </Field>
-            <Field label="Lifecycle">
-              <select value={lifecycle} onChange={(e) => setLifecycle(e.target.value as typeof lifecycle)} style={inputStyle}>
-                <option value="draft">draft</option>
-                <option value="review">review</option>
-                <option value="certified">certified</option>
-                <option value="deprecated">deprecated</option>
-              </select>
-            </Field>
-          </div>
-          <Field label="Tags"><input value={tags} onChange={(e) => setTags(e.target.value)} placeholder="fraud, daily, ops" style={inputStyle} /></Field>
-          <InfoCard title="After create" text="Open Build mode to add blocks from the catalog, add more dashboard pages, attach notebooks, and pin AI answers." />
-          {error && <div style={{ color: '#f85149', fontSize: 12 }}>{error}</div>}
-        </div>
-
-        <footer style={{ display: 'flex', justifyContent: 'flex-end', gap: 8, padding: 16, borderTop: '1px solid var(--border-color, rgba(0,0,0,0.08))' }}>
-          <button onClick={onClose} disabled={loading} style={ghostButtonStyle}>Cancel</button>
-          {startSource === 'import' ? (
-            <button
-              type="button"
-              onClick={() => {
-                onClose();
-                dispatch({ type: 'OPEN_BLOCK_IMPORT' });
-              }}
-              style={primaryButtonStyle}
-            >
-              Open Import
-            </button>
-          ) : (
-            <button onClick={create} disabled={loading || !canCreate} style={{ ...primaryButtonStyle, opacity: loading || !canCreate ? 0.65 : 1 }}>
-              {loading ? 'Creating...' : 'Create App'}
-            </button>
-          )}
-        </footer>
-      </div>
-    </div>
-  );
-}
-
-function AppListItem({ app, active, onClick }: { app: AppSummary; active: boolean; onClick: () => void }): JSX.Element {
-  return (
-    <button onClick={onClick} style={{ display: 'block', width: '100%', textAlign: 'left', padding: '10px 14px', background: active ? 'var(--surface-hover, rgba(0,0,0,0.06))' : 'transparent', border: 'none', borderBottom: '1px solid var(--border-color, rgba(0,0,0,0.04))', cursor: 'pointer', color: 'inherit', fontSize: 13 }}>
-      <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-        <span style={{ fontWeight: active ? 700 : 600, flex: 1 }}>{app.name}</span>
-        <span style={{ fontSize: 10, opacity: 0.65 }}>{app.lifecycle ?? app.status ?? 'ready'}</span>
-      </div>
-      <div style={{ fontSize: 11, opacity: 0.65, marginTop: 3 }}>
-        {domainPath(app)} · {app.dashboards.length} dashboard{app.dashboards.length === 1 ? '' : 's'} · {(app.notebooks ?? []).length} notebook{(app.notebooks ?? []).length === 1 ? '' : 's'}
-      </div>
-      <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap', marginTop: 6 }}>
-        <Pill>{app.storage ?? 'shared'}</Pill>
-        <Pill>{app.certification ?? 'uncertified'}</Pill>
-        {(app.tags ?? []).filter((tag) => !tag.startsWith('audience:')).slice(0, 3).map((tag) => <Pill key={tag}>{tag}</Pill>)}
-      </div>
-    </button>
-  );
-}
-
-function BlockRecommendationRow({ block, selected, onToggle }: { block: AppBlockRecommendation; selected: boolean; onToggle: () => void }): JSX.Element {
-  return (
-    <button onClick={onToggle} style={{ display: 'grid', gridTemplateColumns: '24px 1fr auto', gap: 10, alignItems: 'start', textAlign: 'left', border: '1px solid var(--border-color, rgba(0,0,0,0.12))', background: selected ? 'var(--color-bg-active, rgba(79,70,229,0.10))' : 'transparent', borderRadius: 6, padding: 10, color: 'inherit' }}>
-      <input type="checkbox" checked={selected} onChange={onToggle} onClick={(event) => event.stopPropagation()} />
-      <div>
-        <div style={{ fontSize: 13, fontWeight: 700 }}>{block.name}</div>
-        <div style={{ fontSize: 11, opacity: 0.7, marginTop: 2 }}>{block.description || block.path}</div>
-        <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap', marginTop: 6 }}>
-          <Pill>{block.domain}</Pill>
-          <Pill>{block.status}</Pill>
-          {(block.tags ?? []).slice(0, 4).map((tag) => <Pill key={tag}>{tag}</Pill>)}
-        </div>
-      </div>
-      <div style={{ fontSize: 10, opacity: 0.7, maxWidth: 150 }}>{block.reasons.join(', ')}</div>
-    </button>
-  );
-}
-
-function EmptyState({ message, hint, onCreate }: { message: string; hint?: string; onCreate?: () => void }): JSX.Element {
-  return (
-    <div style={{ display: 'flex', flex: 1, minHeight: 260, alignItems: 'center', justifyContent: 'center', flexDirection: 'column', gap: 10, opacity: 0.8, fontSize: 14 }}>
-      <div>{message}</div>
-      {hint ? <div style={{ fontSize: 12, opacity: 0.7 }}>{hint}</div> : null}
-      {onCreate ? <button onClick={onCreate} style={primaryButtonStyle}>Create App</button> : null}
-    </div>
-  );
-}
-
-function Field({ label, children }: { label: string; children: JSX.Element }): JSX.Element {
-  return (
-    <label style={{ display: 'grid', gap: 5, fontSize: 12, fontWeight: 600 }}>
-      {label}
-      {children}
-    </label>
-  );
-}
-
-function InfoCard({ title, text }: { title: string; text: string }): JSX.Element {
-  return (
-    <div style={{ border: '1px solid var(--border-color, rgba(0,0,0,0.12))', borderRadius: 6, padding: 12 }}>
-      <div style={{ fontSize: 13, fontWeight: 700, marginBottom: 4 }}>{title}</div>
-      <div style={{ fontSize: 12, opacity: 0.72, lineHeight: 1.45 }}>{text}</div>
-    </div>
-  );
-}
-
-function RoleGrid(): JSX.Element {
-  return (
-    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, minmax(0, 1fr))', gap: 10 }}>
-      <InfoCard title="Owner" text="Full App configuration and execution access." />
-      <InfoCard title="Analyst" text="Can execute dashboards and review generated drafts." />
-      <InfoCard title="Viewer" text="Read-oriented persona for stakeholder preview." />
-    </div>
-  );
-}
-
-function ReviewTable({
-  source,
-  notebookPath,
-  importSourcePath,
-  name,
-  domain,
-  subdomain,
-  groups,
-  audience,
-  lifecycle,
-  owner,
-  tags,
-  selectedCount,
-}: {
-  source: AppStartSource;
-  notebookPath: string;
-  importSourcePath: string;
-  name: string;
-  domain: string;
-  subdomain: string;
-  groups: string;
-  audience: string;
-  lifecycle: string;
-  owner: string;
-  tags: string[];
-  selectedCount: number;
-}): JSX.Element {
-  const rows = [
-    ['Source', sourceLabel(source)],
-    ...(source === 'notebook' ? [['Notebook', notebookPath || '-']] : []),
-    ...(source === 'import' ? [['Import source', importSourcePath || 'Block Studio Imports']] : []),
-    ['Name', name || '-'],
-    ['Domain', domain || '-'],
-    ['Subdomain', subdomain || '-'],
-    ['Group', groups || '-'],
-    ['Audience', audience || '-'],
-    ['Lifecycle', lifecycle || 'draft'],
-    ['Owner', owner || '-'],
-    ['Tags', tags.join(', ') || '-'],
-    ['Selected blocks', String(selectedCount)],
-  ];
-  return (
-    <div style={{ border: '1px solid var(--border-color, rgba(0,0,0,0.12))', borderRadius: 6, overflow: 'hidden' }}>
-      {rows.map(([label, value]) => (
-        <div key={label} style={{ display: 'grid', gridTemplateColumns: '150px 1fr', borderBottom: '1px solid var(--border-color, rgba(0,0,0,0.06))' }}>
-          <div style={{ padding: 8, fontSize: 11, opacity: 0.65 }}>{label}</div>
-          <div style={{ padding: 8, fontSize: 12 }}>{value}</div>
-        </div>
-      ))}
-    </div>
-  );
-}
-
-function Pill({ children }: { children: string }): JSX.Element {
-  return <span style={{ fontSize: 10, padding: '1px 6px', borderRadius: 4, background: 'var(--surface-hover, rgba(0,0,0,0.06))', opacity: 0.82 }}>{children}</span>;
-}
-
-function toggleSet(current: Set<string>, value: string): Set<string> {
-  const next = new Set(current);
-  if (next.has(value)) next.delete(value);
-  else next.add(value);
-  return next;
-}
-
-function unique(values: string[]): string[] {
-  return Array.from(new Set(values.filter(Boolean))).sort((a, b) => a.localeCompare(b));
-}
-
-function domainPath(app: Pick<AppSummary, 'domain' | 'subdomain' | 'groups'>): string {
-  return [app.domain, app.subdomain, ...(app.groups ?? [])].filter(Boolean).join(' / ');
-}
-
-function formatDate(value: string): string {
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return value;
-  return date.toLocaleString(undefined, { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
+function shortHash(value: string): string {
+  let hash = 0;
+  for (let i = 0; i < value.length; i += 1) hash = Math.imul(31, hash) + value.charCodeAt(i) | 0;
+  return Math.abs(hash).toString(16).slice(0, 7).padStart(7, '0');
 }
 
 function slugify(value: string): string {
-  return value.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
+  return value.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, '');
 }
 
-function sourceLabel(source: AppStartSource): string {
-  switch (source) {
-    case 'notebook':
-      return 'From Notebook';
-    case 'import':
-      return 'From Import';
-    case 'template':
-      return 'From Template';
-    default:
-      return 'Empty App';
+const APP_STYLES = `
+.dql-apps-waterline {
+  --dql-app-canvas: var(--color-bg-primary, #f7f8fb);
+  --dql-app-surface: var(--color-bg-card, #ffffff);
+  --dql-app-surface-muted: var(--color-bg-secondary, #f8fafc);
+  --dql-app-control: var(--color-bg-sunken, #f4f6f9);
+  --dql-app-line: var(--color-border-subtle, rgba(15, 23, 42, 0.10));
+  --dql-app-line-2: var(--color-border-primary, rgba(15, 23, 42, 0.16));
+  --dql-app-ink: var(--color-text-primary, #0f172a);
+  --dql-app-muted: var(--color-text-secondary, #64748b);
+  --dql-app-faint: var(--color-text-tertiary, #94a3b8);
+  --dql-app-accent: var(--color-accent-blue, #2563eb);
+  --dql-app-accent-soft: rgba(37, 99, 235, 0.10);
+  --dql-app-deep: #111827;
+  --dql-app-green: var(--color-status-success, #16a34a);
+  --dql-app-green-soft: rgba(22, 163, 74, 0.08);
+  --dql-app-orange: var(--color-status-warning, #ca8a04);
+  --dql-app-orange-soft: rgba(202, 138, 4, 0.10);
+  --dql-app-shadow: 0 1px 2px rgba(15, 23, 42, 0.04), 0 10px 28px rgba(15, 23, 42, 0.06);
+  --surface: var(--dql-app-surface);
+  --surface-hover: var(--dql-app-control);
+  --border-color: var(--dql-app-line);
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  background: var(--dql-app-canvas);
+  color: var(--dql-app-ink);
+  font-family: var(--font-ui);
+  font-size: 14px;
+  line-height: 1.45;
+  text-rendering: geometricPrecision;
+}
+
+.dql-apps-waterline * {
+  letter-spacing: 0;
+}
+
+.dql-apps-theme-paper {
+  --dql-app-canvas: #f7f4ed;
+  --dql-app-surface: #fffefa;
+  --dql-app-surface-muted: #f3f0ea;
+  --dql-app-control: #f8f6f1;
+  --dql-app-line: rgba(57, 48, 36, 0.12);
+  --dql-app-line-2: rgba(57, 48, 36, 0.18);
+  --dql-app-ink: #171717;
+  --dql-app-muted: #5f636b;
+  --dql-app-faint: #8b909a;
+  --dql-app-accent: #4f63d7;
+  --dql-app-accent-soft: rgba(79, 99, 215, 0.11);
+}
+
+.dql-apps-theme-white {
+  --dql-app-canvas: #f7f8fb;
+  --dql-app-surface: #ffffff;
+  --dql-app-surface-muted: #f2f5f8;
+  --dql-app-control: #f7f9fc;
+  --dql-app-line: rgba(15, 23, 42, 0.10);
+  --dql-app-line-2: rgba(15, 23, 42, 0.16);
+  --dql-app-ink: #0f172a;
+  --dql-app-muted: #5d6878;
+  --dql-app-faint: #8a94a5;
+  --dql-app-accent: #2563eb;
+  --dql-app-accent-soft: rgba(37, 99, 235, 0.10);
+}
+
+.dql-apps-theme-obsidian {
+  --dql-app-canvas: #0f141c;
+  --dql-app-surface: #151b24;
+  --dql-app-surface-muted: #111720;
+  --dql-app-control: #1b2430;
+  --dql-app-line: rgba(226, 232, 240, 0.10);
+  --dql-app-line-2: rgba(226, 232, 240, 0.16);
+  --dql-app-ink: #eef3fb;
+  --dql-app-muted: #aab4c3;
+  --dql-app-faint: #7f8b9b;
+  --dql-app-accent: #84a5ff;
+  --dql-app-accent-soft: rgba(132, 165, 255, 0.16);
+  --dql-app-deep: #05070b;
+  --dql-app-shadow: none;
+}
+
+.dql-apps-wrap {
+  width: min(1240px, calc(100% - 52px));
+  margin: 0 auto;
+  padding: 30px 0 72px;
+}
+
+.dql-apps-createhead h1 {
+  margin: 0;
+  font-size: 32px;
+  line-height: 1.05;
+  font-weight: 850;
+}
+
+.dql-apps-createhead p {
+  margin: 10px 0 0;
+  color: var(--dql-app-muted);
+  font-size: 14px;
+  line-height: 1.55;
+  max-width: 720px;
+}
+
+.dql-apps-startbar {
+  margin-top: 18px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-height: 58px;
+  background: var(--dql-app-surface);
+  border: 1px solid var(--dql-app-line-2);
+  border-radius: 10px;
+  padding: 8px 9px 8px 16px;
+  box-shadow: var(--dql-app-shadow);
+}
+
+.dql-apps-startbar svg { color: var(--dql-app-accent); flex: none; }
+.dql-apps-startbar input {
+  flex: 1;
+  min-width: 0;
+  border: 0;
+  background: transparent;
+  color: var(--dql-app-ink);
+  font: 500 15px var(--font-ui);
+  outline: none;
+}
+
+.dql-apps-btn {
+  height: 32px;
+  border-radius: 8px;
+  border: 1px solid transparent;
+  padding: 0 12px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  font: 750 12px var(--font-ui);
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.dql-apps-btn:disabled { opacity: 0.62; cursor: not-allowed; }
+.dql-apps-btn-primary { background: var(--dql-app-accent); color: #fff; }
+.dql-apps-btn-line { background: var(--dql-app-surface); border-color: var(--dql-app-line-2); color: var(--dql-app-ink); }
+.dql-apps-btn-dark { width: 100%; background: var(--dql-app-deep); border-color: #1f2937; color: #fff; margin-top: 12px; }
+
+.dql-apps-startgrid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 14px;
+  margin-top: 14px;
+}
+
+.dql-apps-start-option {
+  min-height: 214px;
+  text-align: left;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  border: 1px solid var(--dql-app-line);
+  border-radius: 8px;
+  background: var(--dql-app-surface);
+  box-shadow: var(--dql-app-shadow);
+  padding: 18px;
+  cursor: pointer;
+  color: var(--dql-app-ink);
+}
+
+.dql-apps-start-option:hover { border-color: var(--dql-app-accent); transform: translateY(-1px); }
+.dql-apps-start-option strong { font-size: 16px; }
+.dql-apps-start-option p { margin: 0; color: var(--dql-app-muted); font-size: 12.5px; line-height: 1.55; }
+.dql-apps-option-icon {
+  width: 38px;
+  height: 38px;
+  border-radius: 8px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--dql-app-accent);
+  background: var(--dql-app-accent-soft);
+}
+
+.dql-apps-option-meta {
+  margin-top: auto;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  font-size: 11px;
+  color: var(--dql-app-faint);
+}
+
+.dql-apps-option-meta span {
+  font-family: var(--font-mono);
+  text-transform: uppercase;
+  letter-spacing: 0;
+  font-size: 9px;
+}
+
+.dql-apps-option-meta b {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--dql-app-accent);
+  font-size: 12px;
+}
+
+.dql-apps-sectionhead {
+  margin: 30px 0 14px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  color: var(--dql-app-muted);
+}
+
+.dql-apps-sectionhead span,
+.dql-app-eyebrow {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0;
+  text-transform: uppercase;
+}
+
+.dql-apps-sectionhead i { flex: 1; border-top: 1px solid var(--dql-app-line); }
+.dql-apps-sectionhead b { font-family: var(--font-mono); font-size: 10px; color: var(--dql-app-faint); }
+
+.dql-apps-libbar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 16px;
+}
+
+.dql-apps-filter-tabs {
+  display: flex;
+  gap: 3px;
+  border: 1px solid var(--dql-app-line);
+  border-radius: 999px;
+  background: var(--dql-app-control);
+  padding: 4px;
+  flex-wrap: wrap;
+}
+
+.dql-apps-filter-tabs button {
+  border: 0;
+  background: transparent;
+  border-radius: 999px;
+  padding: 6px 12px;
+  cursor: pointer;
+  color: var(--dql-app-muted);
+  font: 800 12px var(--font-ui);
+}
+
+.dql-apps-filter-tabs button.on { background: var(--dql-app-surface); color: var(--dql-app-ink); box-shadow: 0 1px 2px rgba(15, 23, 42, 0.08); }
+.dql-apps-filter-tabs span { margin-left: 5px; color: var(--dql-app-accent); font-family: var(--font-mono); font-size: 10px; }
+
+.dql-apps-search {
+  flex: 1;
+  min-width: 220px;
+  height: 38px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  background: var(--dql-app-surface);
+  border: 1px solid var(--dql-app-line);
+  border-radius: 7px;
+  padding: 0 12px;
+  color: var(--dql-app-faint);
+}
+
+.dql-apps-search input {
+  flex: 1;
+  min-width: 0;
+  border: 0;
+  outline: 0;
+  background: transparent;
+  color: var(--dql-app-ink);
+  font: 13px var(--font-ui);
+}
+
+.dql-apps-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 16px;
+}
+
+.dql-app-card {
+  min-width: 0;
+  border: 1px solid var(--dql-app-line);
+  border-radius: 8px;
+  background: var(--dql-app-surface);
+  overflow: hidden;
+  box-shadow: var(--dql-app-shadow);
+}
+
+.dql-app-card-body {
+  padding: 16px;
+  cursor: pointer;
+}
+
+.dql-app-card-top {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 9px;
+}
+
+.dql-app-star {
+  width: 28px;
+  height: 28px;
+  border-radius: 6px;
+  border: 1px solid var(--dql-app-line);
+  background: var(--dql-app-surface);
+  color: var(--dql-app-faint);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+}
+
+.dql-app-star.on { color: var(--dql-app-accent); background: var(--dql-app-accent-soft); border-color: rgba(37, 99, 235, 0.35); }
+.dql-app-card h3 { margin: 13px 0 0; font-size: 17px; line-height: 1.2; }
+.dql-app-card p { min-height: 54px; margin: 7px 0 0; color: var(--dql-app-muted); font-size: 12px; line-height: 1.5; }
+
+.dql-app-card-mini {
+  margin-top: 13px;
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 6px;
+}
+
+.dql-app-card-mini span {
+  border-radius: 6px;
+  background: var(--dql-app-control);
+  padding: 7px 9px;
+}
+
+.dql-app-card-mini small {
+  display: block;
+  font-family: var(--font-mono);
+  font-size: 7.5px;
+  letter-spacing: 0;
+  text-transform: uppercase;
+  color: var(--dql-app-muted);
+}
+
+.dql-app-card-mini b { display: block; margin-top: 1px; font-size: 15px; }
+
+.dql-app-spark {
+  height: 34px;
+  margin-top: 12px;
+  display: flex;
+  align-items: end;
+  gap: 4px;
+}
+
+.dql-app-spark i {
+  flex: 1;
+  min-width: 3px;
+  border-radius: 999px 999px 0 0;
+  background: linear-gradient(180deg, var(--dql-app-accent), rgba(37, 99, 235, 0.22));
+}
+
+.dql-app-card-depth {
+  min-height: 42px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 16px;
+  border-top: 1px solid var(--dql-app-line);
+  background: var(--dql-app-surface-muted);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--dql-app-muted);
+}
+
+.dql-app-card-depth span { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dql-app-card-depth button { border: 0; background: transparent; color: var(--dql-app-accent); cursor: pointer; font: 800 11px var(--font-ui); }
+
+.dql-app-block-cite i,
+.dql-app-plan-item > i {
+  width: 7px;
+  height: 7px;
+  border-radius: 999px;
+  background: var(--dql-app-green);
+  flex: none;
+}
+
+.dql-app-block-cite i.draft,
+.dql-app-plan-item > i.draft { background: var(--dql-app-orange); }
+
+.dql-app-seal {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  border-radius: 999px;
+  min-height: 22px;
+  padding: 2px 9px;
+  width: fit-content;
+  border: 1px solid rgba(22, 163, 74, 0.26);
+  background: var(--dql-app-green-soft);
+  color: var(--dql-app-green);
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  font-weight: 700;
+  letter-spacing: 0;
+  text-transform: uppercase;
+}
+
+.dql-app-seal::before {
+  content: "";
+  width: 6px;
+  height: 6px;
+  border-radius: 999px;
+  background: currentColor;
+}
+
+.dql-app-seal.draft { border-color: rgba(202, 138, 4, 0.30); background: var(--dql-app-orange-soft); color: var(--dql-app-orange); }
+.dql-app-seal.agentic { border-color: rgba(37, 99, 235, 0.32); background: var(--dql-app-accent-soft); color: var(--dql-app-accent); }
+
+.dql-app-create-shell,
+.dql-app-workspace {
+  height: 100%;
+  min-height: 0;
+  display: grid;
+}
+
+.dql-app-create-shell { grid-template-rows: auto 1fr; overflow: hidden; }
+.dql-app-workspace { grid-template-rows: auto auto 1fr; }
+
+.dql-app-buildbar,
+.dql-app-view-topbar {
+  min-height: 54px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 9px 18px;
+  border-bottom: 1px solid var(--dql-app-line);
+  background: var(--dql-app-surface);
+}
+
+.dql-app-back {
+  border: 0;
+  background: transparent;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--dql-app-muted);
+  cursor: pointer;
+  font: 800 12px var(--font-ui);
+}
+
+.dql-app-name-input input {
+  width: 240px;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  padding: 5px 8px;
+  outline: 0;
+  background: transparent;
+  color: var(--dql-app-ink);
+  font: 800 16px var(--font-ui);
+}
+
+.dql-app-name-input input:focus { border-color: var(--dql-app-accent); background: var(--dql-app-control); }
+.dql-app-mode-seg {
+  margin: 0 auto;
+  display: flex;
+  gap: 2px;
+  border: 1px solid var(--dql-app-line);
+  border-radius: 999px;
+  background: var(--dql-app-control);
+  padding: 3px;
+}
+
+.dql-app-mode-seg button {
+  min-width: 78px;
+  border: 0;
+  background: transparent;
+  border-radius: 999px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  min-height: 30px;
+  padding: 6px 12px;
+  color: var(--dql-app-muted);
+  cursor: pointer;
+  font: 750 12px var(--font-ui);
+}
+
+.dql-app-mode-seg button.on { background: var(--dql-app-deep); color: #fff; }
+.dql-app-build-actions,
+.dql-app-view-actions {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.dql-app-view-actions { position: relative; }
+
+.dql-app-share-popover {
+  position: absolute;
+  right: 0;
+  top: calc(100% + 8px);
+  z-index: 20;
+  width: min(340px, 80vw);
+  border: 1px solid var(--dql-app-line-2);
+  border-radius: 8px;
+  background: var(--dql-app-surface);
+  box-shadow: var(--dql-app-shadow);
+  padding: 10px;
+  display: grid;
+  gap: 7px;
+}
+
+.dql-app-share-popover b {
+  color: var(--dql-app-ink);
+  font: 850 12px var(--font-ui);
+}
+
+.dql-app-share-popover textarea {
+  width: 100%;
+  min-height: 92px;
+  resize: none;
+  border: 1px solid var(--dql-app-line);
+  border-radius: 7px;
+  background: var(--dql-app-control);
+  color: var(--dql-app-ink);
+  padding: 8px;
+  font: 11px/1.45 var(--font-mono);
+  box-sizing: border-box;
+}
+
+.dql-app-persona {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border: 1px solid var(--dql-app-line);
+  border-radius: 999px;
+  padding: 3px 9px 3px 4px;
+  color: var(--dql-app-muted);
+  font-size: 12px;
+}
+
+.dql-app-persona b {
+  width: 26px;
+  height: 26px;
+  border-radius: 999px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--dql-app-accent);
+  color: #fff;
+  font-size: 9px;
+}
+
+.dql-app-create-workspace {
+  min-height: 0;
+  display: grid;
+  grid-template-columns: 380px minmax(420px, 1fr) 300px;
+}
+
+.dql-app-create-workspace.classic { grid-template-columns: 286px minmax(420px, 1fr) 320px; }
+.dql-app-panel {
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  border-right: 1px solid var(--dql-app-line);
+  background: var(--dql-app-surface-muted);
+}
+
+.dql-app-panel:last-child { border-right: 0; }
+.dql-app-panel-head {
+  min-height: 48px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 12px 15px;
+  border-bottom: 1px solid var(--dql-app-line);
+  background: var(--dql-app-surface);
+}
+
+.dql-app-panel-head span { font-weight: 850; font-size: 14px; }
+.dql-app-panel-head b { margin-left: auto; color: var(--dql-app-faint); font: 500 10px var(--font-mono); text-transform: uppercase; letter-spacing: 0; }
+
+.dql-app-agent-scroll,
+.dql-app-plan-list {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: 16px;
+}
+
+.dql-app-agent-panel.ai-clean { background: var(--dql-app-surface); }
+.dql-app-ai-brief {
+  padding: 18px 16px 2px;
+  display: grid;
+  gap: 8px;
+}
+
+.dql-app-ai-brief > span {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  color: var(--dql-app-ink);
+  font: 850 13px var(--font-ui);
+}
+
+.dql-app-ai-brief > span svg { color: var(--dql-app-accent); }
+.dql-app-ai-brief p {
+  margin: 0;
+  color: var(--dql-app-muted);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.dql-app-ai-result {
+  margin-top: 5px;
+  border: 1px solid rgba(22, 163, 74, 0.26);
+  border-radius: 7px;
+  background: var(--dql-app-green-soft);
+  color: var(--dql-app-ink);
+  padding: 8px 10px;
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.dql-app-composer {
+  border-top: 1px solid var(--dql-app-line);
+  background: var(--dql-app-surface);
+  padding: 12px;
+  display: grid;
+  gap: 9px;
+}
+
+.dql-app-composer.ai-clean {
+  border-top: 0;
+  padding: 10px 16px 16px;
+  gap: 9px;
+}
+
+.dql-app-suggestions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.dql-app-suggestions > span {
+  color: var(--dql-app-faint);
+  font: 750 10px var(--font-mono);
+  text-transform: uppercase;
+}
+
+.dql-app-suggestions button,
+.dql-app-suggests button {
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  color: var(--dql-app-muted);
+  padding: 2px 0;
+  cursor: pointer;
+  font: 750 11.5px var(--font-ui);
+}
+
+.dql-app-suggestions button:hover,
+.dql-app-suggests button:hover {
+  color: var(--dql-app-accent);
+}
+
+.dql-app-composer textarea,
+.dql-app-form-grid input,
+.dql-app-select-label select,
+.dql-app-modal input {
+  width: 100%;
+  border: 1px solid var(--dql-app-line);
+  border-radius: 7px;
+  background: var(--dql-app-control);
+  color: var(--dql-app-ink);
+  outline: 0;
+  padding: 8px 10px;
+  font: 12.5px var(--font-ui);
+}
+
+.dql-app-composer textarea { resize: vertical; min-height: 92px; line-height: 1.45; }
+.dql-app-composer.ai-clean textarea {
+  min-height: 130px;
+  background: var(--dql-app-surface);
+  border-color: var(--dql-app-line-2);
+  border-radius: 10px;
+  padding: 11px 12px;
+  font-size: 13.5px;
+}
+.dql-app-form-grid.two { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+.dql-app-form-grid label,
+.dql-app-select-label,
+.dql-app-modal label {
+  display: grid;
+  gap: 5px;
+  color: var(--dql-app-muted);
+  font: 700 10px var(--font-mono);
+  text-transform: uppercase;
+  letter-spacing: 0;
+}
+
+.dql-app-ai-context {
+  border-top: 1px solid var(--dql-app-line);
+  border-bottom: 1px solid var(--dql-app-line);
+  background: transparent;
+}
+
+.dql-app-ai-context summary {
+  min-height: 34px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 2px;
+  cursor: pointer;
+  list-style: none;
+}
+
+.dql-app-ai-context summary::-webkit-details-marker { display: none; }
+
+.dql-app-ai-context summary span {
+  color: var(--dql-app-muted);
+  font: 800 10px var(--font-mono);
+  text-transform: uppercase;
+}
+
+.dql-app-ai-context summary b {
+  margin-left: auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--dql-app-ink);
+  font: 750 11px var(--font-ui);
+}
+
+.dql-app-ai-context summary svg {
+  flex: 0 0 auto;
+  color: var(--dql-app-faint);
+  transition: transform 140ms ease;
+}
+
+.dql-app-ai-context[open] summary svg { transform: rotate(180deg); }
+
+.dql-app-ai-context-grid {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 8px;
+  padding: 0 0 10px;
+  border-top: 1px solid var(--dql-app-line);
+}
+
+.dql-app-ai-context-grid label {
+  display: grid;
+  gap: 5px;
+  color: var(--dql-app-muted);
+  font: 700 10px var(--font-mono);
+  text-transform: uppercase;
+}
+
+.dql-app-ai-context-grid input,
+.dql-app-ai-context-grid select {
+  width: 100%;
+  height: 34px;
+  border: 1px solid var(--dql-app-line);
+  border-radius: 7px;
+  background: var(--dql-app-surface-muted);
+  color: var(--dql-app-ink);
+  outline: 0;
+  padding: 0 10px;
+  font: 12.5px var(--font-ui);
+}
+
+.dql-app-ai-send-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding-top: 3px;
+}
+
+.dql-app-ai-send-row span {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--dql-app-muted);
+  font: 750 11px var(--font-ui);
+}
+
+.dql-app-ai-send-row span svg {
+  color: var(--dql-app-green);
+}
+
+.dql-app-preview-panel { background: var(--dql-app-canvas); }
+.dql-app-preview-scroll { flex: 1; min-height: 0; overflow: auto; padding: 18px 20px 40px; }
+.dql-app-preview-card {
+  border: 1px solid var(--dql-app-line);
+  border-radius: 8px;
+  background: var(--dql-app-surface);
+  overflow: hidden;
+}
+
+.dql-app-preview-head {
+  min-height: 58px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 12px 18px;
+  border-bottom: 1px solid var(--dql-app-line);
+}
+
+.dql-app-preview-head h2 { margin: 0; font-size: 19px; }
+.dql-app-preview-filters {
+  display: flex;
+  gap: 7px;
+  padding: 10px 18px;
+  border-bottom: 1px solid var(--dql-app-line);
+  background: var(--dql-app-surface-muted);
+}
+
+.dql-app-preview-filters span {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border: 1px solid var(--dql-app-line);
+  border-radius: 6px;
+  background: var(--dql-app-surface);
+  color: var(--dql-app-muted);
+  padding: 4px 9px;
+  font-size: 11px;
+}
+
+.dql-app-preview-grid {
+  display: grid;
+  grid-template-columns: repeat(12, minmax(0, 1fr));
+  gap: 12px;
+  padding: 16px 18px;
+  min-height: 380px;
+}
+
+.dql-app-preview-empty {
+  grid-column: 1 / -1;
+  min-height: 260px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  color: var(--dql-app-faint);
+  text-align: center;
+}
+
+.dql-app-preview-tile {
+  grid-column: span 4;
+  min-height: 136px;
+  border: 1px solid var(--dql-app-line);
+  border-radius: 8px;
+  background: var(--dql-app-surface);
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+
+.dql-app-preview-tile.wide { grid-column: span 6; }
+.dql-app-preview-tile.draft { border-color: rgba(202, 138, 4, 0.34); }
+.dql-app-preview-tile-head,
+.dql-app-preview-tile-foot {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--dql-app-line);
+}
+
+.dql-app-preview-tile-head b { font-size: 12px; }
+.dql-app-preview-tile-head span,
+.dql-app-preview-tile-foot {
+  color: var(--dql-app-faint);
+  font: 700 9px var(--font-mono);
+  text-transform: uppercase;
+  letter-spacing: 0;
+}
+
+.dql-app-preview-tile-head span { margin-left: auto; }
+.dql-app-preview-tile-body {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  padding: 10px;
+}
+
+.dql-app-preview-tile-body strong { font-size: 26px; }
+.dql-app-preview-tile-body small { color: var(--dql-app-muted); }
+.dql-app-preview-tile-foot { border-bottom: 0; border-top: 1px solid var(--dql-app-line); }
+.dql-app-preview-tile-foot b { margin-left: auto; color: var(--dql-app-green); }
+.dql-app-preview-tile.draft .dql-app-preview-tile-foot b { color: var(--dql-app-orange); }
+
+.dql-app-mini-bars i {
+  display: block;
+  height: 8px;
+  border-radius: 999px;
+  background: var(--dql-app-accent);
+  margin: 6px 0;
+}
+
+.dql-app-preview-tile.draft .dql-app-mini-bars i { background: var(--dql-app-orange); }
+.dql-app-plan-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 0;
+  border-bottom: 1px solid var(--dql-app-line);
+}
+
+.dql-app-plan-item span { flex: 1; min-width: 0; }
+.dql-app-plan-item b { display: block; font: 700 11.5px var(--font-mono); }
+.dql-app-plan-item small { display: block; color: var(--dql-app-faint); font-size: 10px; margin-top: 1px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dql-app-plan-item em { color: var(--dql-app-faint); font: 700 9px var(--font-mono); text-transform: uppercase; font-style: normal; }
+
+.dql-app-plan-foot {
+  margin-top: auto;
+  padding: 14px;
+  border-top: 2px solid var(--dql-app-accent);
+  background: var(--dql-app-accent-soft);
+}
+
+.dql-app-leader {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  font-size: 11.5px;
+  color: var(--dql-app-muted);
+  margin: 5px 0;
+}
+
+.dql-app-leader i { flex: 1; border-bottom: 1.5px dotted var(--dql-app-line-2); transform: translateY(-3px); }
+.dql-app-leader b { font-family: var(--font-mono); color: var(--dql-app-ink); }
+.dql-app-leader.certified b { color: var(--dql-app-green); }
+.dql-app-leader.draft b { color: var(--dql-app-orange); }
+
+.dql-app-error {
+  border: 1px solid rgba(220, 38, 38, 0.24);
+  border-radius: 6px;
+  background: rgba(220, 38, 38, 0.06);
+  color: #b91c1c;
+  padding: 8px 10px;
+  font-size: 12px;
+  line-height: 1.45;
+  margin-top: 10px;
+}
+
+.dql-app-palette { flex: 1; min-height: 0; overflow: auto; padding: 12px; }
+.dql-app-agent-scroll .dql-app-palette {
+  margin-top: 12px;
+  border: 1px solid var(--dql-app-line);
+  border-radius: 8px;
+  background: var(--dql-app-surface-muted);
+  padding: 10px;
+  max-height: 360px;
+}
+
+.dql-app-palette-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.dql-app-palette-title span {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  color: var(--dql-app-ink);
+  font: 850 12px var(--font-ui);
+}
+
+.dql-app-palette-title b {
+  margin-left: auto;
+  color: var(--dql-app-faint);
+  font: 700 9.5px var(--font-mono);
+  text-transform: uppercase;
+}
+
+.dql-app-palette-search {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  border: 1px solid var(--dql-app-line);
+  border-radius: 7px;
+  background: var(--dql-app-surface);
+  color: var(--dql-app-muted);
+  padding: 8px 10px;
+  margin-bottom: 10px;
+  font-size: 12px;
+}
+
+.dql-app-palette-search input {
+  flex: 1;
+  min-width: 0;
+  border: 0;
+  outline: 0;
+  background: transparent;
+  color: var(--dql-app-ink);
+  font: 12px var(--font-ui);
+}
+
+.dql-app-palette button {
+  width: 100%;
+  border: 1px solid var(--dql-app-line);
+  border-radius: 7px;
+  background: var(--dql-app-surface);
+  color: var(--dql-app-ink);
+  padding: 9px 10px;
+  margin-bottom: 7px;
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.dql-app-palette button.selected { border-color: var(--dql-app-accent); background: var(--dql-app-accent-soft); }
+.dql-app-palette-icon {
+  width: 25px;
+  height: 25px;
+  border-radius: 6px;
+  background: #f1f5f9;
+  color: var(--dql-app-accent);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+}
+
+.dql-app-palette span:nth-child(2) { flex: 1; min-width: 0; }
+.dql-app-palette b { display: block; font: 700 11px var(--font-mono); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dql-app-palette small { display: block; color: var(--dql-app-faint); font-size: 10px; }
+.dql-app-palette i { color: var(--dql-app-green); font: 700 9px var(--font-mono); text-transform: uppercase; font-style: normal; }
+.dql-app-palette-more {
+  color: var(--dql-app-faint);
+  text-align: center;
+  font: 700 10px var(--font-mono);
+  padding: 8px 0 2px;
+}
+
+.dql-app-view-topbar { position: sticky; top: 0; z-index: 4; }
+.dql-app-view-topbar {
+  min-height: 48px;
+  padding: 7px 22px;
+  box-shadow: 0 1px 0 var(--dql-app-line);
+}
+
+.dql-app-crumb { color: var(--dql-app-muted); font: 700 11.5px var(--font-mono); }
+.dql-app-filterbar {
+  position: relative;
+  z-index: 3;
+  min-height: 52px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 26px;
+  border-bottom: 1px solid var(--dql-app-line);
+  background: var(--dql-app-surface);
+  flex-wrap: wrap;
+}
+
+.dql-app-filter-select {
+  height: 34px;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  border: 1px solid var(--dql-app-line);
+  border-radius: 8px;
+  background: var(--dql-app-control);
+  padding: 0 10px;
+}
+
+.dql-app-filter-select span {
+  color: var(--dql-app-faint);
+  font: 700 9px var(--font-mono);
+  letter-spacing: 0;
+  text-transform: uppercase;
+}
+
+.dql-app-filter-select select {
+  border: 0;
+  background: transparent;
+  color: var(--dql-app-ink);
+  outline: 0;
+  font: 750 12.5px var(--font-ui);
+}
+
+.dql-app-filter-note {
+  margin-left: auto;
+  color: var(--dql-app-faint);
+  font: 700 11px var(--font-ui);
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.dql-app-toggle {
+  border: 0;
+  background: transparent;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--dql-app-muted);
+  cursor: pointer;
+  font: 800 12px var(--font-ui);
+}
+
+.dql-app-toggle i {
+  width: 32px;
+  height: 18px;
+  border-radius: 999px;
+  background: #cbd5e1;
+  position: relative;
+}
+
+.dql-app-toggle i::after {
+  content: "";
+  width: 14px;
+  height: 14px;
+  border-radius: 999px;
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  background: #fff;
+  transition: transform 140ms ease;
+}
+
+.dql-app-toggle.on i { background: var(--dql-app-accent); }
+.dql-app-toggle.on i::after { transform: translateX(14px); }
+
+.dql-app-view-wrap {
+  position: relative;
+  z-index: 1;
+  width: min(1560px, calc(100% - 40px));
+  margin: 0 auto;
+  padding: 12px 0 60px;
+}
+
+.dql-app-title-row {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 18px;
+  margin-bottom: 12px;
+  flex-wrap: wrap;
+}
+
+.dql-app-title-copy {
+  flex: 1 1 420px;
+  min-width: 0;
+}
+
+.dql-app-title-meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+
+.dql-app-title-meta > span {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--dql-app-muted);
+  font: 750 11.5px var(--font-ui);
+  text-transform: capitalize;
+}
+
+.dql-app-title-row h1 {
+  margin: 0;
+  font-size: 26px;
+  line-height: 1.1;
+  font-weight: 820;
+}
+
+.dql-app-title-row p {
+  margin: 6px 0 0;
+  color: var(--dql-app-muted);
+  font-size: 13px;
+  line-height: 1.45;
+  max-width: 720px;
+}
+
+.dql-app-nav-row {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  flex-wrap: wrap;
+  min-width: 0;
+}
+
+.dql-app-section-tabs,
+.dql-app-page-picker {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.dql-app-section-tabs {
+  overflow-x: auto;
+}
+
+.dql-app-section-tabs button,
+.dql-app-page-picker {
+  border: 1px solid var(--dql-app-line);
+  border-radius: 8px;
+  background: var(--dql-app-surface);
+  color: var(--dql-app-muted);
+  min-height: 32px;
+  display: inline-flex;
+  align-items: center;
+  font: 750 12px var(--font-ui);
+}
+
+.dql-app-section-tabs {
+  gap: 6px;
+}
+
+.dql-app-section-tabs button {
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--dql-app-muted);
+  min-height: 32px;
+  padding: 6px 9px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+  font: 750 12px var(--font-ui);
+}
+
+.dql-app-section-tabs button {
+  min-width: 38px;
+  justify-content: center;
+}
+
+.dql-app-section-tabs .dql-app-tab-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-style: normal;
+}
+
+.dql-app-section-tabs .dql-app-tab-label {
+  display: none;
+}
+
+.dql-app-section-tabs button.on .dql-app-tab-label {
+  display: inline;
+}
+
+.dql-app-section-tabs button.on,
+.dql-app-section-tabs button:hover {
+  color: var(--dql-app-ink);
+  background: var(--dql-app-accent-soft);
+}
+
+.dql-app-section-tabs button.on {
+  box-shadow: inset 0 0 0 1px var(--dql-app-accent);
+}
+
+.dql-app-section-tabs b {
+  color: var(--dql-app-accent);
+  font-family: var(--font-mono);
+  font-size: 10px;
+}
+
+.dql-app-page-picker {
+  padding: 0 5px 0 10px;
+  white-space: nowrap;
+  max-width: min(440px, 100%);
+}
+
+.dql-app-page-picker > span {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--dql-app-faint);
+  font: 800 10px var(--font-mono);
+  text-transform: uppercase;
+}
+
+.dql-app-page-picker select {
+  min-width: 210px;
+  max-width: 310px;
+  height: 30px;
+  border: 0;
+  outline: 0;
+  background: transparent;
+  color: var(--dql-app-ink);
+  font: 800 12px var(--font-ui);
+  text-overflow: ellipsis;
+}
+
+.dql-app-page-picker button {
+  width: 26px;
+  height: 26px;
+  border: 0;
+  border-radius: 6px;
+  background: var(--dql-app-accent-soft);
+  color: var(--dql-app-accent);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+}
+
+.dql-app-dashboard-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.dql-app-view-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 14px;
+  align-items: start;
+}
+
+.dql-app-view-layout.no-explain { grid-template-columns: minmax(0, 1fr); }
+.dql-app-main-column { min-width: 0; }
+
+.dql-app-explain-panel {
+  position: sticky;
+  top: 110px;
+  width: clamp(340px, 27vw, 450px);
+  min-width: 320px;
+  max-width: min(540px, 42vw);
+  min-height: 520px;
+  height: min(680px, calc(100vh - 176px));
+  max-height: calc(100vh - 176px);
+  resize: both;
+  border: 1px solid var(--dql-app-line);
+  border-radius: 8px;
+  background: var(--dql-app-surface);
+  overflow: auto;
+  box-shadow: var(--dql-app-shadow);
+}
+
+.dql-app-copilot-panel {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.dql-app-assistant-panel {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  background: var(--dql-app-surface);
+}
+
+.dql-app-assistant-top {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 16px 16px 12px;
+  border-bottom: 1px solid var(--dql-app-line);
+}
+
+.dql-app-assistant-title {
+  flex: 1;
+  min-width: 0;
+}
+
+.dql-app-assistant-title > span {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  color: var(--dql-app-accent);
+  font: 800 10px var(--font-mono);
+  letter-spacing: 0;
+  text-transform: uppercase;
+}
+
+.dql-app-assistant-title h3 {
+  margin: 8px 0 0;
+  color: var(--dql-app-ink);
+  font-size: 22px;
+  line-height: 1.12;
+}
+
+.dql-app-assistant-title p {
+  margin: 7px 0 0;
+  max-width: 38rem;
+  color: var(--dql-app-muted);
+  font-size: 12.5px;
+  line-height: 1.45;
+}
+
+.dql-app-assistant-context-btn {
+  flex: none;
+  height: 32px;
+  border: 1px solid var(--dql-app-line);
+  border-radius: 8px;
+  background: var(--dql-app-control);
+  color: var(--dql-app-muted);
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 10px;
+  cursor: pointer;
+  font: 800 11px var(--font-ui);
+}
+
+.dql-app-assistant-context-btn.on,
+.dql-app-assistant-context-btn:hover {
+  color: var(--dql-app-accent);
+  border-color: rgba(79, 99, 215, 0.34);
+  background: var(--dql-app-accent-soft);
+}
+
+.dql-app-assistant-context-btn.on svg { transform: rotate(180deg); }
+
+.dql-app-assistant-focusbar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 16px;
+  border-bottom: 1px solid var(--dql-app-line);
+  background: var(--dql-app-surface-muted);
+}
+
+.dql-app-assistant-focusbar label {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.dql-app-assistant-focusbar label > span {
+  color: var(--dql-app-muted);
+  font: 800 9px var(--font-mono);
+  text-transform: uppercase;
+}
+
+.dql-app-assistant-focusbar select {
+  min-width: 0;
+  flex: 1;
+  height: 34px;
+  border: 1px solid var(--dql-app-line-2);
+  border-radius: 8px;
+  background: var(--dql-app-surface);
+  color: var(--dql-app-ink);
+  padding: 0 10px;
+  font: 800 12px var(--font-ui);
+}
+
+.dql-app-assistant-focusbar > span {
+  flex: none;
+  color: var(--dql-app-green);
+  border: 1px solid rgba(22, 163, 74, 0.24);
+  background: var(--dql-app-green-soft);
+  border-radius: 999px;
+  padding: 4px 8px;
+  white-space: nowrap;
+  font: 800 10px var(--font-mono);
+  text-transform: uppercase;
+}
+
+.dql-app-assistant-context {
+  display: grid;
+  gap: 10px;
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--dql-app-line);
+  background: var(--dql-app-control);
+}
+
+.dql-app-assistant-context p {
+  margin: 0;
+  color: var(--dql-app-muted);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.dql-app-assistant-context > div {
+  display: grid;
+  gap: 6px;
+}
+
+.dql-app-assistant-suggestions {
+  display: flex;
+  gap: 7px;
+  flex-wrap: wrap;
+  padding: 10px 16px;
+  border-bottom: 1px solid var(--dql-app-line);
+}
+
+.dql-app-assistant-suggestions button {
+  min-width: 0;
+  height: 32px;
+  border: 1px solid var(--dql-app-line);
+  border-radius: 999px;
+  background: var(--dql-app-surface);
+  color: var(--dql-app-muted);
+  padding: 0 10px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+  font: 800 11px var(--font-ui);
+}
+
+.dql-app-assistant-suggestions button:hover {
+  color: var(--dql-app-accent);
+  border-color: rgba(79, 99, 215, 0.34);
+  background: var(--dql-app-accent-soft);
+}
+
+.dql-app-assistant-chat {
+  flex: 1;
+  min-height: 260px;
+  display: flex;
+  flex-direction: column;
+  padding: 0 16px 14px;
+}
+
+.dql-app-assistant-chat > div {
+  flex: 1;
+  min-height: 0;
+}
+
+.dql-app-copilot-hero {
+  padding: 12px 14px 10px;
+  border-bottom: 1px solid var(--dql-app-line);
+  background: linear-gradient(180deg, var(--dql-app-surface), var(--dql-app-surface-muted));
+}
+
+.dql-app-copilot-kicker {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  color: var(--dql-app-muted);
+  font: 750 10px var(--font-mono);
+  letter-spacing: 0;
+  text-transform: uppercase;
+}
+
+.dql-app-copilot-kicker svg { color: var(--dql-app-accent); }
+.dql-app-copilot-hero h3 {
+  margin: 6px 0 0;
+  color: var(--dql-app-ink);
+  font-size: 19px;
+  line-height: 1.15;
+}
+
+.dql-app-copilot-hero p {
+  margin: 6px 0 0;
+  color: var(--dql-app-muted);
+  font-size: 11.5px;
+  line-height: 1.42;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.dql-app-copilot-decision {
+  margin-top: 8px;
+  border: 1px solid var(--dql-app-line);
+  border-radius: 7px;
+  background: var(--dql-app-surface);
+  padding: 7px 9px;
+}
+
+.dql-app-copilot-decision small,
+.dql-app-copilot-facts small {
+  display: block;
+  color: var(--dql-app-muted);
+  font: 750 9px var(--font-mono);
+  letter-spacing: 0;
+  text-transform: uppercase;
+}
+
+.dql-app-copilot-decision b {
+  display: block;
+  margin-top: 3px;
+  color: var(--dql-app-ink);
+  font-size: 11.5px;
+  line-height: 1.32;
+}
+
+.dql-app-copilot-facts {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 6px;
+  margin-top: 7px;
+}
+
+.dql-app-copilot-facts span {
+  min-width: 0;
+  border-radius: 7px;
+  background: var(--dql-app-control);
+  padding: 6px 8px;
+}
+
+.dql-app-copilot-facts b {
+  display: block;
+  margin-top: 2px;
+  color: var(--dql-app-ink);
+  font-size: 10.5px;
+  line-height: 1.25;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.dql-app-copilot-chat {
+  flex: 1;
+  min-height: 210px;
+  padding: 9px 12px 12px;
+}
+
+.dql-app-explain-head { padding: 14px 16px 12px; border-bottom: 1px solid var(--dql-app-line); }
+.dql-app-explain-head span,
+.dql-app-ex-label {
+  color: var(--dql-app-muted);
+  font: 700 9px var(--font-mono);
+  letter-spacing: 0;
+  text-transform: uppercase;
+}
+
+.dql-app-explain-head h3 { margin: 3px 0 0; font-size: 17px; }
+.dql-app-explain-head p { margin: 5px 0 0; color: var(--dql-app-muted); font-size: 11.5px; line-height: 1.45; }
+.dql-app-ex-section { padding: 13px 16px; border-bottom: 1px solid var(--dql-app-line); }
+.dql-app-ex-section.compact { padding-top: 11px; padding-bottom: 11px; }
+.dql-app-copilot-controls {
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--dql-app-line);
+}
+
+.dql-app-copilot-focus {
+  display: grid;
+  gap: 5px;
+}
+
+.dql-app-copilot-focus span {
+  color: var(--dql-app-muted);
+  font: 700 9px var(--font-mono);
+  letter-spacing: 0;
+  text-transform: uppercase;
+}
+
+.dql-app-copilot-focus select {
+  width: 100%;
+  min-width: 0;
+  height: 34px;
+  border: 1px solid var(--dql-app-line-2);
+  border-radius: 7px;
+  background: var(--dql-app-control);
+  color: var(--dql-app-ink);
+  padding: 0 10px;
+  font: 800 12px var(--font-ui);
+}
+
+.dql-app-copilot-empty {
+  margin-top: 7px;
+  color: var(--dql-app-faint);
+  font-size: 11px;
+}
+
+.dql-app-copilot-brief {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 9px 12px;
+  border-bottom: 1px solid var(--dql-app-line);
+}
+
+.dql-app-copilot-brief > div {
+  min-width: 0;
+  flex: 1;
+}
+
+.dql-app-copilot-brief span {
+  display: inline-flex;
+  color: var(--dql-app-green);
+  font: 750 9px var(--font-mono);
+  letter-spacing: 0;
+  text-transform: uppercase;
+}
+
+.dql-app-copilot-brief b {
+  display: block;
+  margin-top: 4px;
+  color: var(--dql-app-ink);
+  font-size: 13px;
+  line-height: 1.25;
+}
+
+.dql-app-copilot-brief p {
+  margin: 4px 0 0;
+  color: var(--dql-app-muted);
+  font-size: 11.5px;
+  line-height: 1.35;
+}
+
+.dql-app-copilot-result-pill {
+  flex: none;
+  border-radius: 999px;
+  border: 1px solid rgba(22, 163, 74, 0.24);
+  background: var(--dql-app-green-soft);
+  color: var(--dql-app-green) !important;
+  padding: 4px 8px;
+  white-space: nowrap;
+}
+
+.dql-app-copilot-prompts {
+  display: flex;
+  gap: 7px;
+  flex-wrap: wrap;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--dql-app-line);
+}
+
+.dql-app-copilot-prompts button {
+  min-width: 0;
+  height: 31px;
+  border: 1px solid var(--dql-app-line);
+  border-radius: 999px;
+  background: var(--dql-app-surface);
+  color: var(--dql-app-muted);
+  padding: 0 9px;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  cursor: pointer;
+  font: 800 10.5px var(--font-ui);
+}
+
+.dql-app-copilot-prompts button:hover {
+  color: var(--dql-app-accent);
+  border-color: rgba(79, 99, 215, 0.34);
+  background: var(--dql-app-accent-soft);
+}
+
+.dql-app-copilot-prompts svg {
+  flex: 0 0 auto;
+}
+
+.dql-app-copilot-evidence {
+  border-bottom: 1px solid var(--dql-app-line);
+}
+
+.dql-app-copilot-evidence summary {
+  min-height: 36px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 12px;
+  cursor: pointer;
+  color: var(--dql-app-muted);
+  font: 800 11px var(--font-ui);
+  list-style: none;
+}
+
+.dql-app-copilot-evidence summary::-webkit-details-marker { display: none; }
+.dql-app-copilot-evidence summary span {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.dql-app-copilot-evidence summary small {
+  margin-left: auto;
+  min-width: 0;
+  max-width: 160px;
+  color: var(--dql-app-faint);
+  font: 700 10px var(--font-mono);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.dql-app-copilot-evidence > div {
+  display: grid;
+  gap: 6px;
+  padding: 0 12px 11px;
+}
+
+.dql-app-keyvalue-inline {
+  display: grid;
+  grid-template-columns: 92px minmax(0, 1fr);
+  gap: 8px;
+  align-items: baseline;
+  font-size: 11px;
+}
+
+.dql-app-keyvalue-inline span {
+  color: var(--dql-app-faint);
+  font-family: var(--font-mono);
+}
+
+.dql-app-keyvalue-inline b {
+  min-width: 0;
+  color: var(--dql-app-muted);
+  font-weight: 700;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.dql-app-block-cite {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 5px 0;
+  font-size: 11.5px;
+}
+
+.dql-app-block-cite span { flex: 1; min-width: 0; font-family: var(--font-mono); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dql-app-block-cite b { color: var(--dql-app-faint); font: 10px var(--font-mono); }
+.dql-app-flow { margin-top: 8px; }
+.dql-app-flow-node {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 0;
+  font-size: 11.5px;
+}
+
+.dql-app-flow-node span {
+  width: 28px;
+  height: 23px;
+  border-radius: 6px;
+  background: var(--dql-app-accent-soft);
+  color: var(--dql-app-accent);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font: 700 8px var(--font-mono);
+}
+
+.dql-app-flow-node b { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dql-app-flow-node small { color: var(--dql-app-faint); font: 9px var(--font-mono); }
+.dql-app-flow i {
+  display: block;
+  width: 2px;
+  height: 9px;
+  background: var(--dql-app-accent);
+  margin-left: 13px;
+}
+
+.dql-app-suggests { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 9px; }
+.dql-app-focus-list {
+  display: grid;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.dql-app-focus-list > span {
+  color: var(--dql-app-faint);
+  font-size: 12px;
+}
+
+.dql-app-focus-list button {
+  min-width: 0;
+  min-height: 34px;
+  border: 1px solid var(--dql-app-line);
+  border-radius: 8px;
+  background: var(--dql-app-surface);
+  color: var(--dql-app-muted);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 8px;
+  cursor: pointer;
+  text-align: left;
+}
+
+.dql-app-focus-list button.on {
+  color: var(--dql-app-ink);
+  border-color: rgba(79, 99, 215, 0.42);
+  background: var(--dql-app-accent-soft);
+}
+
+.dql-app-focus-list button svg {
+  flex: 0 0 auto;
+  color: var(--dql-app-accent);
+}
+
+.dql-app-focus-list button span {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font: 800 11.5px var(--font-ui);
+}
+
+.dql-app-focus-list button b {
+  color: var(--dql-app-faint);
+  font: 700 8.5px var(--font-mono);
+  text-transform: uppercase;
+}
+
+.dql-app-rail-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.dql-app-rail-title > span { flex: 1; }
+
+.dql-app-rail-title button {
+  height: 26px;
+  border: 1px solid var(--dql-app-line);
+  border-radius: 6px;
+  background: var(--dql-app-surface);
+  color: var(--dql-app-muted);
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 0 8px;
+  cursor: pointer;
+  font: 800 10.5px var(--font-ui);
+}
+
+.dql-app-drilldown-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 7px;
+}
+
+.dql-app-drilldown-grid button {
+  min-width: 0;
+  border: 1px solid var(--dql-app-line);
+  border-radius: 8px;
+  background: var(--dql-app-surface);
+  color: var(--dql-app-muted);
+  padding: 8px 6px;
+  display: grid;
+  justify-items: center;
+  gap: 5px;
+  cursor: pointer;
+  font: 800 10.5px var(--font-ui);
+}
+
+.dql-app-drilldown-grid button:hover {
+  color: var(--dql-app-accent);
+  border-color: rgba(79, 99, 215, 0.34);
+  background: var(--dql-app-accent-soft);
+}
+
+.dql-app-rail-chat {
+  height: 100%;
+  min-height: 0;
+  border: 1px solid var(--dql-app-line-2);
+  border-radius: 8px;
+  overflow: hidden;
+  background: var(--dql-app-surface);
+}
+
+.dql-app-rail-chat.expanded {
+  position: fixed;
+  z-index: 80;
+  right: 24px;
+  top: 76px;
+  bottom: 24px;
+  width: min(760px, calc(100vw - 80px));
+  height: auto;
+  box-shadow: 0 18px 60px rgba(15, 23, 42, 0.24);
+}
+
+.dql-app-gapcard {
+  margin: 12px;
+  border-radius: 7px;
+  background: var(--dql-app-orange-soft);
+  padding: 11px 12px;
+}
+
+.dql-app-gapcard p { margin: 6px 0 0; color: var(--dql-app-muted); font-size: 11.5px; line-height: 1.45; }
+.dql-app-simple-list,
+.dql-app-settings-grid { display: grid; gap: 10px; }
+.dql-app-settings-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.dql-app-panel-card {
+  border: 1px solid var(--dql-app-line);
+  border-radius: 8px;
+  background: var(--dql-app-surface);
+  padding: 13px;
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+}
+
+.dql-app-panel-card > span {
+  width: 30px;
+  height: 30px;
+  border-radius: 7px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--dql-app-accent);
+  background: var(--dql-app-accent-soft);
+  flex: none;
+}
+
+.dql-app-panel-card b { display: block; }
+.dql-app-panel-card span:last-child { color: var(--dql-app-muted); font-size: 12px; }
+.dql-app-empty {
+  min-height: 260px;
+  border: 1px dashed var(--dql-app-line-2);
+  border-radius: 8px;
+  background: var(--dql-app-surface);
+  color: var(--dql-app-faint);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  gap: 8px;
+  padding: 28px;
+}
+
+.dql-app-empty.compact { min-height: 120px; padding: 18px; }
+.dql-app-empty b { color: var(--dql-app-ink); }
+.dql-app-empty span { max-width: 440px; font-size: 12px; line-height: 1.45; }
+.dql-app-modal-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 100;
+  background: rgba(15, 23, 42, 0.36);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+}
+
+.dql-app-modal {
+  width: min(480px, 94vw);
+  border-radius: 8px;
+  background: var(--dql-app-surface);
+  box-shadow: 0 18px 60px rgba(15, 23, 42, 0.28);
+  padding: 18px;
+  display: grid;
+  gap: 12px;
+}
+
+.dql-app-modal h3 { margin: 0; }
+.dql-app-modal p { margin: 0; color: var(--dql-app-muted); font-size: 12px; }
+.dql-app-modal > div:last-child { display: flex; justify-content: flex-end; gap: 8px; }
+
+@media (max-width: 1120px) {
+  .dql-apps-grid,
+  .dql-apps-startgrid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .dql-app-create-workspace,
+  .dql-app-create-workspace.classic {
+    grid-template-columns: 1fr;
+    align-content: start;
+    overflow: auto;
+  }
+  .dql-app-create-workspace .dql-app-panel {
+    min-height: auto;
+    border-right: 0;
+    border-bottom: 1px solid var(--dql-app-line);
+  }
+  .dql-app-filterbar {
+    flex-wrap: nowrap;
+    gap: 6px;
+    padding: 7px 22px;
+    overflow-x: auto;
+  }
+  .dql-app-filter-note {
+    width: 30px;
+    height: 30px;
+    justify-content: center;
+    gap: 0;
+    border: 1px solid var(--dql-app-line);
+    border-radius: 8px;
+    background: var(--dql-app-control);
+    font-size: 0;
+    flex: 0 0 auto;
+  }
+  .dql-app-filter-note svg {
+    width: 14px;
+    height: 14px;
+  }
+  .dql-app-filter-select,
+  .dql-app-toggle {
+    flex: 0 0 auto;
+  }
+  .dql-app-toggle {
+    gap: 6px;
+    font-weight: 750;
   }
 }
 
-const inputStyle: CSSProperties = {
-  width: '100%',
-  boxSizing: 'border-box',
-  border: '1px solid var(--border-color, rgba(0,0,0,0.12))',
-  borderRadius: 5,
-  background: 'var(--surface, transparent)',
-  color: 'inherit',
-  fontSize: 12,
-  padding: '7px 8px',
-};
-
-const primaryButtonStyle: CSSProperties = {
-  border: '1px solid var(--accent, #4f46e5)',
-  background: 'var(--accent, #4f46e5)',
-  color: 'var(--color-text-on-accent, #fff)',
-  borderRadius: 5,
-  padding: '6px 10px',
-  fontSize: 12,
-  fontWeight: 600,
-  cursor: 'pointer',
-};
-
-const ghostButtonStyle: CSSProperties = {
-  border: '1px solid var(--border-color, rgba(0,0,0,0.12))',
-  background: 'transparent',
-  color: 'inherit',
-  borderRadius: 5,
-  padding: '6px 10px',
-  fontSize: 12,
-  cursor: 'pointer',
-};
-
-const mutedStyle: CSSProperties = { fontSize: 12, opacity: 0.65, padding: 12 };
-const formGridStyle: CSSProperties = { display: 'grid', gap: 12, maxWidth: 680 };
-const modalBackdropStyle: CSSProperties = { position: 'fixed', inset: 0, zIndex: 80, background: 'rgba(0,0,0,0.36)', display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 24 };
-const modalStyle: CSSProperties = { width: 'min(980px, 96vw)', maxHeight: '92vh', overflow: 'hidden', display: 'flex', flexDirection: 'column', background: 'var(--color-bg, #fff)', color: 'inherit', borderRadius: 8, boxShadow: '0 18px 60px rgba(0,0,0,0.35)' };
-const smallModalStyle: CSSProperties = { width: 'min(420px, 92vw)', display: 'grid', background: 'var(--color-bg, #fff)', color: 'inherit', borderRadius: 8, boxShadow: '0 18px 60px rgba(0,0,0,0.35)', padding: 16 };
-const panelCardStyle: CSSProperties = {
-  border: '1px solid var(--border-color, rgba(0,0,0,0.10))',
-  borderRadius: 7,
-  background: 'var(--surface, rgba(0,0,0,0.02))',
-  padding: 12,
-};
-
-const miniActionStyle: CSSProperties = {
-  border: '1px solid var(--border-color, rgba(0,0,0,0.12))',
-  borderRadius: 5,
-  background: 'var(--surface, rgba(0,0,0,0.02))',
-  color: 'inherit',
-  padding: '4px 8px',
-  fontSize: 11,
-  cursor: 'pointer',
-};
-
-function wizardStepStyle(active: boolean): CSSProperties {
-  return {
-    width: '100%',
-    display: 'flex',
-    gap: 8,
-    alignItems: 'center',
-    border: 'none',
-    borderRadius: 5,
-    background: active ? 'var(--color-bg-active, rgba(79,70,229,0.12))' : 'transparent',
-    color: 'inherit',
-    padding: '8px 9px',
-    textAlign: 'left',
-    cursor: 'pointer',
-    fontSize: 12,
-  };
+@media (max-width: 900px) {
+  .dql-app-view-layout { grid-template-columns: 1fr; }
+  .dql-app-explain-panel {
+    position: static;
+    width: 100%;
+    max-width: none;
+    height: min(680px, calc(100vh - 24px));
+    resize: none;
+    max-height: none;
+  }
 }
 
-function tabStyle(active: boolean): CSSProperties {
-  return {
-    padding: '6px 12px',
-    background: active ? 'var(--accent, #4f46e5)' : 'transparent',
-    color: active ? 'var(--color-text-on-accent, #fff)' : 'inherit',
-    border: '1px solid var(--border-color, rgba(0,0,0,0.1))',
-    borderRadius: 6,
-    fontSize: 13,
-    cursor: 'pointer',
-  };
+@media (max-width: 760px) {
+  .dql-apps-wrap,
+  .dql-app-view-wrap { width: min(100% - 20px, 560px); }
+  .dql-apps-startbar,
+  .dql-apps-libbar,
+  .dql-app-buildbar,
+  .dql-app-view-topbar,
+  .dql-app-filterbar {
+    align-items: stretch;
+    flex-direction: column;
+    overflow-x: visible;
+  }
+  .dql-app-filter-note {
+    width: auto;
+    height: auto;
+    margin-left: 0;
+    justify-content: flex-start;
+    gap: 6px;
+    font-size: 11px;
+  }
+  .dql-apps-startgrid,
+  .dql-apps-grid,
+  .dql-app-form-grid.two,
+  .dql-app-settings-grid { grid-template-columns: 1fr; }
+  .dql-app-mode-seg { margin: 0; width: 100%; }
+  .dql-app-mode-seg button { flex: 1; }
+  .dql-app-build-actions,
+  .dql-app-view-actions { margin-left: 0; width: 100%; flex-wrap: wrap; }
+  .dql-app-nav-row { width: 100%; justify-content: flex-start; }
+  .dql-app-page-picker select { min-width: 0; max-width: 100%; }
+  .dql-app-preview-tile,
+  .dql-app-preview-tile.wide { grid-column: 1 / -1; }
+  .dql-app-drilldown-grid {
+    grid-template-columns: 1fr;
+  }
 }
-
-function appSectionTabStyle(active: boolean): CSSProperties {
-  return {
-    padding: '8px 13px',
-    marginBottom: -1,
-    background: active ? 'var(--accent, #4f46e5)' : 'transparent',
-    color: active ? 'var(--color-text-on-accent, #fff)' : 'var(--color-text-secondary, rgba(0,0,0,0.72))',
-    border: active ? '1px solid var(--accent, #4f46e5)' : '1px solid transparent',
-    borderRadius: '6px 6px 0 0',
-    fontSize: 13,
-    fontWeight: active ? 700 : 500,
-    cursor: 'pointer',
-  };
-}
-
-function dashboardPageTabStyle(active: boolean): CSSProperties {
-  return {
-    padding: '6px 12px',
-    background: active ? 'var(--accent, #4f46e5)' : 'var(--surface, rgba(0,0,0,0.015))',
-    color: active ? 'var(--color-text-on-accent, #fff)' : 'inherit',
-    border: `1px solid ${active ? 'var(--accent, #4f46e5)' : 'var(--border-color, rgba(0,0,0,0.12))'}`,
-    borderRadius: 6,
-    fontSize: 13,
-    fontWeight: active ? 700 : 500,
-    cursor: 'pointer',
-    whiteSpace: 'nowrap',
-  };
-}
-
-function notebookPageTabStyle(active: boolean): CSSProperties {
-  return {
-    ...dashboardPageTabStyle(active),
-    maxWidth: 340,
-    overflow: 'hidden',
-    textOverflow: 'ellipsis',
-  };
-}
-
-const addPageTabStyle: CSSProperties = {
-  padding: '5px 10px',
-  minWidth: 34,
-  background: 'transparent',
-  color: 'inherit',
-  border: '1px dashed var(--border-color, rgba(0,0,0,0.22))',
-  borderRadius: 6,
-  fontSize: 15,
-  lineHeight: 1,
-  cursor: 'pointer',
-};
-
-function workspaceModeButtonStyle(active: boolean): CSSProperties {
-  return {
-    border: 'none',
-    borderRadius: 5,
-    background: active ? 'var(--accent, #4f46e5)' : 'transparent',
-    color: active ? 'var(--color-text-on-accent, #fff)' : 'var(--color-text-secondary, rgba(0,0,0,0.66))',
-    padding: '5px 11px',
-    fontSize: 12,
-    fontWeight: active ? 700 : 500,
-    cursor: 'pointer',
-  };
-}
-
-function segmentButtonStyle(active: boolean): CSSProperties {
-  return {
-    border: 'none',
-    borderRight: '1px solid var(--border-color, rgba(0,0,0,0.10))',
-    background: active ? 'var(--accent, #4f46e5)' : 'transparent',
-    color: active ? 'var(--color-text-on-accent, #fff)' : 'inherit',
-    padding: '6px 10px',
-    fontSize: 12,
-    fontWeight: active ? 700 : 500,
-    cursor: 'pointer',
-  };
-}
-
-function filterButtonStyle(active: boolean): CSSProperties {
-  return {
-    border: '1px solid var(--border-color, rgba(0,0,0,0.10))',
-    borderRadius: 5,
-    background: active ? 'var(--accent, #4f46e5)' : 'transparent',
-    color: active ? 'var(--color-text-on-accent, #fff)' : 'inherit',
-    padding: '5px 4px',
-    fontSize: 11,
-    cursor: 'pointer',
-  };
-}
-
-function sourceButtonStyle(active: boolean): CSSProperties {
-  return {
-    minHeight: 38,
-    border: '1px solid var(--border-color, rgba(0,0,0,0.12))',
-    borderRadius: 6,
-    background: active ? 'var(--accent, #4f46e5)' : 'var(--surface, transparent)',
-    color: active ? 'var(--color-text-on-accent, #fff)' : 'inherit',
-    padding: '7px 8px',
-    fontSize: 12,
-    fontWeight: active ? 700 : 600,
-    cursor: 'pointer',
-  };
-}
+`;

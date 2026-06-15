@@ -5,10 +5,11 @@ governed blocks**, not from improvised SQL.
 
 **What you'll do:** build the local knowledge graph, ask questions through
 the agent, watch the graduated-trust model route between certified blocks
-and flagged proposals, promote a good proposal to a certified block, and
-connect the MCP server so Claude/Cursor can do the same.
+and flagged proposals, promote a good proposal to a certified block, generate
+a local App package from a prompt, and connect the MCP server so Claude/Cursor
+can do the same.
 
-**Time:** 20 minutes.
+**Time:** 25 minutes.
 
 > Setup: continues from [03 — Dashboards & Apps](./03-dashboards-and-apps.md).
 > You'll need one LLM provider: `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`,
@@ -22,14 +23,20 @@ connect the MCP server so Claude/Cursor can do the same.
 
 The agent never silently invents SQL. Every answer is routed through tiers:
 
-| Tier | Source | Label |
-|---|---|---|
-| 1 | A **certified block** matches the question | ✓ Certified |
-| 2 | No match — the LLM proposes SQL grounded in dbt + semantic metadata, saved as a **draft** | ⚠ Uncertified |
-| 3 | Not answerable from the project | Refusal, with what's missing |
+| Tier | Source                                                                                                                                            | Label                        |
+| ---- | ------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------- |
+| 1    | A **certified DQL artifact** matches the question: executable blocks for data answers, or business terms/views for definition and context answers | ✓ Certified                  |
+| 2    | No match — the LLM proposes SQL grounded in business context, dbt, and semantic metadata, saved as a **draft**                                    | ⚠ Uncertified                |
+| 3    | Not answerable from the project                                                                                                                   | Refusal, with what's missing |
 
 Tier-2 drafts land in `blocks/_drafts/` so popular questions become
 candidates for certification — that's the promotion loop.
+
+Follow-up questions keep the same trust model. If a user asks "drill into
+Enterprise last week" after a certified revenue answer, the agent uses the
+prior answer as context, searches for a distinct certified drilldown block
+first, and only then creates a review-ready draft. It does not silently reuse
+the top-level block or mark generated drilldown SQL as certified.
 
 ---
 
@@ -39,8 +46,8 @@ candidates for certification — that's the promotion loop.
 dql agent reindex
 ```
 
-> **You should see** a node/edge count — your certified blocks, dbt models,
-> metrics, and dimensions indexed into a local SQLite FTS5 knowledge graph
+> **You should see** a node/edge count — your business terms, business views,
+> certified blocks, dbt models, metrics, and dimensions indexed into a local SQLite FTS5 knowledge graph
 > at `.dql/cache/agent-kg.sqlite`. Nothing leaves your machine except the
 > LLM calls you configure.
 
@@ -53,12 +60,14 @@ dql agent ask "how has revenue trended by month?"
 ```
 
 > **You should see**
+>
 > ```text
 > ✓ Certified
 > Answered from block: revenue_by_month (revenue · certified)
 > ```
-> followed by the result rows. The `llmContext` and `examples` you wrote in
-> tutorial 02 are what made retrieval land.
+>
+> followed by the result rows. The `llmContext`, `examples`, attached `terms`,
+> and related `business_view` context you wrote earlier are what made retrieval land.
 
 Inspect the routing decision:
 
@@ -113,9 +122,46 @@ Feedback tunes retrieval over time:
 dql agent feedback up --question "monthly revenue" --block "block:revenue_by_month"
 ```
 
+Follow-up drilldowns use the same loop:
+
+```bash
+dql agent ask "drill into Enterprise last week"
+```
+
+> **You should see** either a certified drilldown block, if one exists, or an
+> **Uncertified** draft proposal tagged for review. Repeated drilldown asks
+> make the draft a stronger certification candidate.
+
 ---
 
-## Step 5 — Connect the MCP server
+## Step 5 — Generate a local App from a prompt
+
+The OSS app builder writes reviewable files. It does not generate hidden React
+or bypass certification state:
+
+```bash
+dql app generate "Build a weekly revenue health app for the COO"
+```
+
+> **You should see** an `apps/<app-id>/` package with:
+>
+> - `dql.app.json`
+> - `dashboards/overview.dqld`
+> - `README.md`
+
+Certified blocks become certified dashboard tiles. Missing or AI-created
+sections become text/draft placeholders with review tasks, so the generated
+App is useful immediately but still safe for Git review.
+
+Build the App manifest after review:
+
+```bash
+dql app build
+```
+
+---
+
+## Step 6 — Connect the MCP server
 
 The same graduated-trust loop is exposed to any MCP client (Claude Code,
 Claude Desktop, Cursor):
@@ -146,6 +192,7 @@ blocks**, citing them — and files drafts when it has to improvise.
 ✓ A local knowledge graph over blocks, dbt models, and metrics
 ✓ Agent answers that are certified-first, flagged when improvised
 ✓ The promotion loop: draft → review → certify → re-ask → certified
+✓ A local generated App package with certified tiles and draft review tasks
 ✓ An MCP server giving Claude/Cursor governed access to your analytics
 
 [Continue to tutorial 05 — CI and `dql verify` →](./05-ci-and-verify.md)

@@ -63,6 +63,7 @@ import {
   ensureDefaultMemoryFiles,
   type AgentResultPayload,
   type AgentProvider,
+  type AgentSchemaTable,
   type KGNode,
 } from '@duckcodeailabs/dql-agent';
 import { handleAppsApi } from './apps-api.js';
@@ -371,6 +372,48 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
       blockName: block.name,
       blockPath: block.filePath,
     };
+  };
+
+  const executeGeneratedSqlForAgent = async (sql: string): Promise<AgentResultPayload> => {
+    const boundedSql = buildAgentPreviewSql(sql);
+    const semantic = prepareSemanticSql(boundedSql, semanticLayer);
+    if (semantic.unresolvedRefs.length > 0) {
+      throw new Error(`Unknown semantic reference${semantic.unresolvedRefs.length > 1 ? 's' : ''}: ${semantic.unresolvedRefs.join(', ')}`);
+    }
+    const prepared = prepareLocalExecution(semantic.sql, connection, projectRoot, projectConfig);
+    const app = loadRuntimeApp(projectRoot, activePersonaAppId());
+    assertAppAccess({ app, domain: app?.domain, level: 'execute' });
+    const rawResult = await executor.executeQuery(
+      prepared.sql,
+      [],
+      runtimeVariables({}),
+      prepared.connection,
+    );
+    const normalized = normalizeQueryResult(rawResult, semantic.semanticRefs);
+    return {
+      columns: normalized.columns,
+      rows: normalized.rows,
+      rowCount: normalized.rowCount,
+      executionTime: normalized.executionTime,
+      sql: prepared.sql,
+    };
+  };
+
+  const getSchemaContextForAgent = async (question: string): Promise<AgentSchemaTable[]> => {
+    try {
+      const result = await executor.executeQuery(
+        `SELECT table_schema, table_name, column_name, data_type
+         FROM information_schema.columns
+         WHERE table_schema NOT IN ('information_schema', 'pg_catalog')
+         ORDER BY table_schema, table_name, ordinal_position`,
+        [],
+        runtimeVariables({}),
+        connection,
+      );
+      return buildAgentSchemaContext(question, result.rows);
+    } catch {
+      return [];
+    }
   };
 
   // SSE clients for /api/watch hot-reload
@@ -2769,7 +2812,15 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
       const emit = (turn: unknown) => { res.write(`data: ${JSON.stringify(turn)}\n\n`); };
       try {
         await runner.run(
-          { provider: resolvedProvider, messages, upstream, projectRoot, executeCertifiedBlock: executeCertifiedBlockForAgent },
+          {
+            provider: resolvedProvider,
+            messages,
+            upstream,
+            projectRoot,
+            executeCertifiedBlock: executeCertifiedBlockForAgent,
+            executeGeneratedSql: executeGeneratedSqlForAgent,
+            getSchemaContext: getSchemaContextForAgent,
+          },
           emit,
           controller.signal,
         );
@@ -3747,6 +3798,101 @@ export function prepareLocalExecution(
       : sql,
     connection: normalizedConnection,
   };
+}
+
+const AGENT_PREVIEW_FORBIDDEN_SQL = [
+  'alter',
+  'analyze',
+  'attach',
+  'call',
+  'copy',
+  'create',
+  'delete',
+  'detach',
+  'drop',
+  'export',
+  'grant',
+  'import',
+  'insert',
+  'install',
+  'load',
+  'merge',
+  'pragma',
+  'reset',
+  'revoke',
+  'set',
+  'truncate',
+  'update',
+  'vacuum',
+];
+
+export function buildAgentPreviewSql(sql: string): string {
+  const trimmed = sql.trim();
+  if (!trimmed) throw new Error('Generated SQL preview is empty.');
+  const withoutTrailingSemicolon = trimmed.replace(/;\s*$/, '').trim();
+  const scanSql = stripSqlStringsAndComments(withoutTrailingSemicolon).trim();
+  if (!/^(select|with)\b/i.test(scanSql)) {
+    throw new Error('Generated SQL preview only supports read-only SELECT or WITH queries.');
+  }
+  if (scanSql.includes(';')) {
+    throw new Error('Generated SQL preview only supports one statement.');
+  }
+  const forbiddenPattern = new RegExp(`\\b(${AGENT_PREVIEW_FORBIDDEN_SQL.join('|')})\\b`, 'i');
+  const forbidden = scanSql.match(forbiddenPattern)?.[1];
+  if (forbidden) {
+    throw new Error(`Generated SQL preview rejected unsupported statement keyword: ${forbidden.toUpperCase()}.`);
+  }
+  return `SELECT * FROM (\n${withoutTrailingSemicolon}\n) AS dql_agent_preview LIMIT 200`;
+}
+
+function stripSqlStringsAndComments(sql: string): string {
+  let output = '';
+  for (let index = 0; index < sql.length; index += 1) {
+    const current = sql[index];
+    const next = sql[index + 1];
+    if (current === '-' && next === '-') {
+      output += '  ';
+      index += 2;
+      while (index < sql.length && sql[index] !== '\n') {
+        output += ' ';
+        index += 1;
+      }
+      if (index < sql.length) output += '\n';
+      continue;
+    }
+    if (current === '/' && next === '*') {
+      output += '  ';
+      index += 2;
+      while (index < sql.length && !(sql[index] === '*' && sql[index + 1] === '/')) {
+        output += sql[index] === '\n' ? '\n' : ' ';
+        index += 1;
+      }
+      if (index < sql.length) {
+        output += '  ';
+        index += 1;
+      }
+      continue;
+    }
+    if (current === "'" || current === '"') {
+      const quote = current;
+      output += ' ';
+      while (index + 1 < sql.length) {
+        index += 1;
+        output += sql[index] === '\n' ? '\n' : ' ';
+        if (sql[index] === quote) {
+          if (sql[index + 1] === quote) {
+            index += 1;
+            output += ' ';
+            continue;
+          }
+          break;
+        }
+      }
+      continue;
+    }
+    output += current;
+  }
+  return output;
 }
 
 export interface PreparedSemanticSql {
@@ -6347,6 +6493,87 @@ function isAiPinRefreshDue(lastRefreshedAt?: string): boolean {
   const last = Date.parse(lastRefreshedAt);
   if (!Number.isFinite(last)) return true;
   return Date.now() - last >= 24 * 60 * 60 * 1000;
+}
+
+function buildAgentSchemaContext(question: string, rows: unknown[]): AgentSchemaTable[] {
+  const byRelation = new Map<string, AgentSchemaTable>();
+  for (const row of rows) {
+    if (!row || typeof row !== 'object') continue;
+    const record = row as Record<string, unknown>;
+    const schema = stringFromRecord(record, 'table_schema');
+    const table = stringFromRecord(record, 'table_name');
+    const column = stringFromRecord(record, 'column_name');
+    if (!schema || !table || !column) continue;
+    const relation = `${schema}.${table}`;
+    const current = byRelation.get(relation) ?? {
+      relation,
+      schema,
+      name: table,
+      source: 'runtime information_schema',
+      columns: [],
+    };
+    if (current.columns.length < 80) {
+      current.columns.push({
+        name: column,
+        type: stringFromRecord(record, 'data_type'),
+      });
+    }
+    byRelation.set(relation, current);
+  }
+  const tokens = agentSchemaTokens(question);
+  return Array.from(byRelation.values())
+    .map((table) => ({ table, score: scoreAgentSchemaTable(table, tokens) }))
+    .filter((entry) => entry.score > 0)
+    .sort((a, b) => b.score - a.score || a.table.relation.localeCompare(b.table.relation))
+    .slice(0, 12)
+    .map((entry) => entry.table);
+}
+
+function scoreAgentSchemaTable(table: AgentSchemaTable, tokens: Set<string>): number {
+  let score = 0;
+  const relationTokens = agentSchemaTokens(`${table.schema ?? ''} ${table.name} ${table.relation}`);
+  for (const token of tokens) {
+    if (relationTokens.has(token)) score += 8;
+  }
+  for (const column of table.columns) {
+    const columnTokens = agentSchemaTokens(column.name);
+    for (const token of tokens) {
+      if (columnTokens.has(token)) score += 3;
+    }
+  }
+  if (/(customer|order|revenue|product|location|date|month)/i.test(table.name)) score += 1;
+  return score;
+}
+
+function agentSchemaTokens(value: string): Set<string> {
+  const tokens = new Set<string>();
+  for (const raw of value.toLowerCase().match(/[a-z0-9_]+/g) ?? []) {
+    for (const part of raw.split('_')) {
+      const normalized = normalizeAgentSchemaToken(part);
+      if (!normalized || normalized.length < 3 || AGENT_SCHEMA_STOPWORDS.has(normalized)) continue;
+      tokens.add(normalized);
+    }
+  }
+  return tokens;
+}
+
+const AGENT_SCHEMA_STOPWORDS = new Set([
+  'all', 'and', 'are', 'can', 'data', 'for', 'from', 'have', 'how', 'many', 'me',
+  'show', 'the', 'this', 'who', 'with', 'value',
+]);
+
+function normalizeAgentSchemaToken(token: string): string {
+  if (token === 'orders') return 'order';
+  if (token === 'customers') return 'customer';
+  if (token === 'products') return 'product';
+  if (token.endsWith('ies') && token.length > 4) return `${token.slice(0, -3)}y`;
+  if (token.endsWith('s') && token.length > 4) return token.slice(0, -1);
+  return token;
+}
+
+function stringFromRecord(record: Record<string, unknown>, key: string): string | undefined {
+  const value = record[key];
+  return typeof value === 'string' && value.trim().length > 0 ? value.trim() : undefined;
 }
 
 function isMemoryScope(value: unknown): value is 'thread' | 'notebook' | 'project' | 'user' | 'artifact' {

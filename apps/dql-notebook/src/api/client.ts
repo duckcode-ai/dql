@@ -186,6 +186,64 @@ export interface CreateAppResponse {
   dashboardId: string;
 }
 
+export interface GenerateAppRequest {
+  prompt: string;
+  domain?: string;
+  owner?: string;
+  force?: boolean;
+  selectedBlockIds?: string[];
+}
+
+export interface GeneratedAppPlan {
+  version: 1;
+  appId: string;
+  name: string;
+  prompt: string;
+  skills: Array<{ id: string; title: string; description: string }>;
+  domain: string;
+  audience: string;
+  businessGoal: string;
+  owner: string;
+  lifecycle: 'draft' | 'review';
+  tags: string[];
+  pages: Array<{
+    id: string;
+    title: string;
+    description?: string;
+    filters: Array<{ id: string; label: string; type: string; default?: unknown; bindsTo?: string }>;
+    tiles: Array<{
+      id: string;
+      title: string;
+      kind: 'certified_block' | 'draft_placeholder' | 'narrative';
+      description?: string;
+      blockId?: string;
+      sourceNodeId?: string;
+      viz: string;
+      certification: 'certified' | 'uncertified';
+      reviewStatus: 'certified' | 'draft_ready' | 'review_required';
+      rationale?: string;
+      caveats?: string[];
+      reviewTasks?: string[];
+    }>;
+  }>;
+  caveats: string[];
+  reviewTasks: string[];
+}
+
+export interface GenerateAppResponse {
+  ok: true;
+  plan: GeneratedAppPlan;
+  validation: {
+    ok: boolean;
+    issues: Array<{ level: 'error' | 'warning'; path: string; message: string }>;
+    certifiedTiles: number;
+    draftTiles: number;
+  };
+  generated: { paths: string[] };
+  app: AppSummary | null;
+  dashboardId: string | null;
+}
+
 export interface AppEditorCatalogResponse {
   appId: string;
   defaultDomain: string;
@@ -200,6 +258,7 @@ export interface LocalAiPin {
   tileId?: string;
   title: string;
   answer: string;
+  question?: string;
   sql?: string;
   sourceTier?: string;
   certification: 'certified' | 'ai_generated';
@@ -208,6 +267,9 @@ export interface LocalAiPin {
   chartConfig?: Record<string, unknown>;
   result?: QueryResult;
   citations?: unknown[];
+  analysisPlan?: unknown;
+  evidence?: unknown;
+  followUps?: string[];
   createdAt: string;
   updatedAt: string;
   lastRefreshedAt?: string;
@@ -1379,6 +1441,17 @@ export const api = {
     });
   },
 
+  async generateApp(input: GenerateAppRequest): Promise<GenerateAppResponse | { ok: false; error: string }> {
+    try {
+      return await request<GenerateAppResponse>('/api/apps/generate', {
+        method: 'POST',
+        body: JSON.stringify(input),
+      });
+    } catch (e) {
+      return { ok: false, error: e instanceof Error ? e.message : String(e) };
+    }
+  },
+
   async getApp(id: string): Promise<AppDocumentSummary | null> {
     try {
       return await request<AppDocumentSummary>(`/api/apps/${encodeURIComponent(id)}`);
@@ -1567,10 +1640,11 @@ export const api = {
     }
   },
 
-  async createAiPin(appId: string, input: {
+ async createAiPin(appId: string, input: {
     dashboardId: string;
     title: string;
     answer: string;
+    question?: string;
     sql?: string;
     sourceTier?: string;
     certification?: 'certified' | 'ai_generated';
@@ -1578,6 +1652,9 @@ export const api = {
     chartConfig?: Record<string, unknown>;
     result?: QueryResult;
     citations?: unknown[];
+    analysisPlan?: unknown;
+    evidence?: unknown;
+    followUps?: string[];
   }): Promise<{ ok: true; pin: LocalAiPin; dashboard?: DashboardDocumentResponse['dashboard']; tile?: DashboardDocumentResponse['dashboard']['layout']['items'][number] } | { ok: false; error: string }> {
     try {
       return await request(

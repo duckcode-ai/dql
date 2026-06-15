@@ -41,6 +41,7 @@ interface AgentEvidence {
   route?: EvidenceRouteStep[];
   lineage?: EvidenceAsset[];
   businessContext?: EvidenceContextItem[];
+  analysisPlan?: AgentAnalysisPlan;
   outcome?: {
     name?: string;
     owner?: string;
@@ -62,6 +63,22 @@ interface AgentEvidence {
     executionTime?: number;
   };
   citations?: Array<{ kind?: string; name?: string; provenance?: string }>;
+}
+
+interface AgentAnalysisPlan {
+  question?: string;
+  intent?: string;
+  routeReason?: string;
+  grain?: string;
+  measures?: string[];
+  dimensions?: string[];
+  candidateTables?: Array<{ relation?: string; columns?: string[]; reason?: string }>;
+  trustedContext?: Array<{ kind?: string; name?: string; certification?: string; sourceTier?: string }>;
+  assumptions?: string[];
+  sql?: string;
+  suggestedViz?: string;
+  followUps?: string[];
+  repairAttempts?: number;
 }
 
 export interface AgentAnswerEnvelope {
@@ -88,6 +105,7 @@ export interface AgentAnswerEnvelope {
   };
   citations?: Array<{ kind?: string; name?: string; provenance?: string }>;
   evidence?: AgentEvidence;
+  analysisPlan?: AgentAnalysisPlan;
 }
 
 export function extractGovernedAnswer(events: AgentTurn[]): AgentAnswerEnvelope | null {
@@ -161,13 +179,15 @@ export function AgentAnswerCard({
   const hasEvidence = Boolean(answer.evidence);
   const [tab, setTab] = useState<AnswerTab>('answer');
   const [addMenuOpen, setAddMenuOpen] = useState(false);
+  const [detailsOpen, setDetailsOpen] = useState(false);
   const badge = answer.certification === 'certified'
     ? 'Certified'
     : answer.kind === 'no_answer'
       ? 'No answer'
-      : 'AI generated';
+      : 'AI generated / needs review';
   const badgeColor = answer.certification === 'certified' ? '#3fb950' : answer.kind === 'no_answer' ? '#ff7b72' : '#f0883e';
   const summary = (answer.answer ?? answer.text ?? '').replace(/\n\n_Question:_[\s\S]*$/m, '').trim();
+  const analysisPlan = answer.analysisPlan ?? answer.evidence?.analysisPlan;
   const blockName = answer.result?.blockName ?? answer.block?.name ?? answer.citations?.find((c) => c.kind === 'block')?.name;
   const [adding, setAdding] = useState(false);
   const [addMessage, setAddMessage] = useState<string | null>(null);
@@ -226,6 +246,7 @@ export function AgentAnswerCard({
             dashboardId: addToAppTarget.dashboardId,
             title: modesToAdd.length > 1 ? `${baseTitle} ${tileMode === 'data' ? 'data' : 'chart'}` : baseTitle,
             answer: summary || answer.answer || answer.text || 'AI generated answer',
+            question: analysisPlan?.question,
             sql,
             sourceTier: answer.sourceTier,
             certification: answer.certification === 'certified' ? 'certified' : 'ai_generated',
@@ -233,6 +254,9 @@ export function AgentAnswerCard({
             chartConfig: tileChartConfig,
             result: result ?? undefined,
             citations: answer.citations,
+            analysisPlan,
+            evidence: answer.evidence,
+            followUps: analysisPlan?.followUps,
           });
           if (!created.ok) throw new Error(created.error);
         }
@@ -246,16 +270,52 @@ export function AgentAnswerCard({
     }
   };
   const tabItems: Array<{ id: AnswerTab; label: string; visible: boolean }> = [
-    { id: 'answer', label: 'Answer', visible: true },
+    { id: 'answer', label: compact ? 'Summary' : 'Answer', visible: true },
     { id: 'visual', label: compact ? 'Chart' : 'Visualization', visible: hasChart },
     { id: 'data', label: 'Data', visible: Boolean(result) },
-    { id: 'lineage', label: 'Lineage', visible: hasEvidence },
+    { id: 'lineage', label: compact ? 'Trace' : 'Lineage', visible: hasEvidence },
     { id: 'context', label: compact ? 'Context' : 'Business Context', visible: hasEvidence },
     { id: 'sql', label: 'SQL / Block', visible: showSql && hasSqlPanel },
-    { id: 'review', label: 'Review', visible: hasEvidence || Boolean(answer.citations?.length) },
+    { id: 'review', label: compact ? 'Trust' : 'Review', visible: hasEvidence || Boolean(answer.citations?.length) },
   ];
   const tabs = tabItems.filter((item) => item.visible);
   const activeTab = tabs.some((item) => item.id === tab) ? tab : 'answer';
+  const detailTabs = tabs.filter((item) => item.id !== 'answer');
+  const activeDetailTab = detailTabs.some((item) => item.id === tab) ? tab : detailTabs[0]?.id;
+  const renderTabPanel = (targetTab: AnswerTab) => {
+    if (targetTab === 'answer') {
+      return (
+        <AnswerPanel
+          summary={summary}
+          evidence={answer.evidence}
+          analysisPlan={analysisPlan}
+          result={result}
+          sourceTier={answer.sourceTier}
+          compact={compact}
+          t={t}
+        />
+      );
+    }
+    if (targetTab === 'visual' && result && hasChart) {
+      return (
+        <div style={{ padding: compact ? '8px 10px' : '10px 12px', minHeight: compact ? 180 : 220 }}>
+          <ChartOutput result={result} themeMode={themeMode} chartConfig={chartConfig} />
+        </div>
+      );
+    }
+    if (targetTab === 'data' && result) {
+      return (
+        <div style={{ maxHeight: compact ? 320 : 420, overflow: 'auto' }}>
+          <TableOutput result={result} themeMode={themeMode} />
+        </div>
+      );
+    }
+    if (targetTab === 'lineage') return <LineagePanel evidence={answer.evidence} t={t} />;
+    if (targetTab === 'context') return <BusinessContextPanel evidence={answer.evidence} t={t} />;
+    if (targetTab === 'sql' && showSql && hasSqlPanel) return <SqlPanel sql={sql} blockPath={blockPath} t={t} />;
+    if (targetTab === 'review') return <ReviewPanel answer={answer} t={t} />;
+    return null;
+  };
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: compact ? 8 : 10, whiteSpace: 'normal' }}>
@@ -274,7 +334,7 @@ export function AgentAnswerCard({
         }}>
           {badge}
         </span>
-        {blockName && (
+        {!compact && blockName && (
           <span style={{ fontSize: 12, fontFamily: t.fontMono, color: t.textSecondary }}>
             block: {blockName}
           </span>
@@ -291,7 +351,7 @@ export function AgentAnswerCard({
             adding={adding}
             hasResult={Boolean(result)}
             hasChart={hasChart}
-            fallbackLabel={answer.certification === 'certified' && blockName ? 'Add block' : 'Add summary'}
+            fallbackLabel={answer.certification === 'certified' && blockName ? (compact ? 'Add' : 'Add block') : 'Pin answer'}
             open={addMenuOpen}
             onToggle={() => setAddMenuOpen((value) => !value)}
             onAdd={(mode) => void addToApp(mode)}
@@ -300,48 +360,53 @@ export function AgentAnswerCard({
       </div>
       {addMessage && <div style={{ fontSize: 11, color: addMessage.toLowerCase().includes('added') || addMessage.toLowerCase().includes('pinned') ? '#3fb950' : '#ff7b72' }}>{addMessage}</div>}
 
-      <div style={{ border: `1px solid ${t.cellBorder}`, borderRadius: 6, overflow: 'hidden', background: t.cellBg }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 4, padding: '6px 8px', borderBottom: `1px solid ${t.cellBorder}`, background: `${t.tableHeaderBg}70`, flexWrap: 'wrap' }}>
-          {tabs.map((item) => (
-            <SegmentButton key={item.id} active={activeTab === item.id} label={item.label} onClick={() => setTab(item.id)} t={t} />
-          ))}
-          {!showSql && blockPath && (
-            <span style={{ marginLeft: 'auto', minWidth: 0, fontSize: 11, fontFamily: t.fontMono, color: t.textMuted, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-              {blockPath}
-            </span>
-          )}
-        </div>
-        {activeTab === 'answer' && (
-        <AnswerPanel
-          summary={summary}
-          evidence={answer.evidence}
-          result={result}
-          sourceTier={answer.sourceTier}
-          compact={compact}
-          t={t}
-        />
-        )}
-        {activeTab === 'visual' && result && hasChart && (
-          <div style={{ padding: compact ? '8px 10px' : '10px 12px', minHeight: compact ? 180 : 220 }}>
-            <ChartOutput result={result} themeMode={themeMode} chartConfig={chartConfig} />
+      <div style={{ border: `1px solid ${t.cellBorder}`, borderRadius: compact ? 10 : 6, overflow: 'hidden', background: t.cellBg }}>
+        {!compact && (
+          <div style={{ display: 'flex', alignItems: 'center', gap: 4, padding: '6px 8px', borderBottom: `1px solid ${t.cellBorder}`, background: `${t.tableHeaderBg}70`, flexWrap: 'wrap' }}>
+            {tabs.map((item) => (
+              <SegmentButton key={item.id} active={activeTab === item.id} label={item.label} onClick={() => setTab(item.id)} t={t} />
+            ))}
+            {!showSql && blockPath && (
+              <span style={{ marginLeft: 'auto', minWidth: 0, fontSize: 11, fontFamily: t.fontMono, color: t.textMuted, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                {blockPath}
+              </span>
+            )}
           </div>
         )}
-        {activeTab === 'data' && result && (
-          <div style={{ maxHeight: compact ? 320 : 420, overflow: 'auto' }}>
-            <TableOutput result={result} themeMode={themeMode} />
+        {compact ? renderTabPanel('answer') : renderTabPanel(activeTab)}
+        {compact && detailTabs.length > 0 && (
+          <div style={{ borderTop: `1px solid ${t.cellBorder}`, background: `${t.tableHeaderBg}45` }}>
+            <button
+              type="button"
+              onClick={() => setDetailsOpen((value) => !value)}
+              style={{
+                width: '100%',
+                border: 0,
+                background: 'transparent',
+                color: t.textSecondary,
+                padding: '8px 12px',
+                display: 'flex',
+                justifyContent: 'space-between',
+                alignItems: 'center',
+                cursor: 'pointer',
+                fontSize: 11,
+                fontWeight: 800,
+              }}
+            >
+              <span>Details</span>
+              <span style={{ color: t.textMuted, fontFamily: t.fontMono }}>{detailsOpen ? 'hide' : 'show evidence'}</span>
+            </button>
+            {detailsOpen && (
+              <div style={{ borderTop: `1px solid ${t.cellBorder}` }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 4, padding: '7px 8px', flexWrap: 'wrap' }}>
+                  {detailTabs.map((item) => (
+                    <SegmentButton key={item.id} active={activeDetailTab === item.id} label={item.label} onClick={() => setTab(item.id)} t={t} />
+                  ))}
+                </div>
+                {activeDetailTab ? renderTabPanel(activeDetailTab) : null}
+              </div>
+            )}
           </div>
-        )}
-        {activeTab === 'lineage' && (
-          <LineagePanel evidence={answer.evidence} t={t} />
-        )}
-        {activeTab === 'context' && (
-          <BusinessContextPanel evidence={answer.evidence} t={t} />
-        )}
-        {activeTab === 'sql' && showSql && hasSqlPanel && (
-          <SqlPanel sql={sql} blockPath={blockPath} t={t} />
-        )}
-        {activeTab === 'review' && (
-          <ReviewPanel answer={answer} t={t} />
         )}
       </div>
     </div>
@@ -351,6 +416,7 @@ export function AgentAnswerCard({
 function AnswerPanel({
   summary,
   evidence,
+  analysisPlan,
   result,
   sourceTier,
   compact,
@@ -358,11 +424,13 @@ function AnswerPanel({
 }: {
   summary: string;
   evidence?: AgentEvidence;
+  analysisPlan?: AgentAnalysisPlan;
   result: QueryResult | null;
   sourceTier?: string;
   compact?: boolean;
   t: Theme;
 }) {
+  const nextAction = analysisPlan?.followUps?.[0];
   return (
     <div style={{ padding: compact ? 14 : 12, display: 'flex', flexDirection: 'column', gap: compact ? 10 : 12 }}>
       {summary ? (
@@ -373,28 +441,114 @@ function AnswerPanel({
         <div style={{ fontSize: 12, color: t.textMuted }}>No summary text was returned.</div>
       )}
       <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
-        {sourceTier && <Pill label={formatLabel(sourceTier)} t={t} />}
+        {sourceTier && <Pill label={compact ? formatBusinessTier(sourceTier) : formatLabel(sourceTier)} t={t} />}
         {result && <Pill label={`${(result.rowCount ?? result.rows.length).toLocaleString()} rows`} t={t} />}
-        {evidence?.validation?.status && <Pill label={`validation: ${evidence.validation.status}`} t={t} />}
-        {evidence?.execution?.status && <Pill label={`execution: ${evidence.execution.status}`} t={t} />}
+        {!compact && evidence?.validation?.status && <Pill label={`validation: ${evidence.validation.status}`} t={t} />}
+        {!compact && evidence?.execution?.status && <Pill label={`execution: ${evidence.execution.status}`} t={t} />}
+        {compact && evidence?.validation?.status === 'failed' && <Pill label="needs review" t={t} />}
+        {compact && evidence?.execution?.status === 'failed' && <Pill label="data check failed" t={t} />}
       </div>
-      {!compact && evidence?.route && evidence.route.length > 0 && (
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-          <SectionTitle t={t}>Route</SectionTitle>
-          {evidence.route.map((step, idx) => (
-            <div key={`${step.tool}-${idx}`} style={{ display: 'grid', gridTemplateColumns: '120px 1fr', gap: 10, fontSize: 12, alignItems: 'baseline' }}>
-              <span style={{ fontFamily: t.fontMono, color: statusColor(step.status), minWidth: 0 }}>{step.tool ?? 'step'}</span>
-              <span style={{ color: t.textSecondary }}>
-                {step.label ?? step.status}
-                {step.detail && <span style={{ color: t.textMuted }}> ({step.detail})</span>}
-              </span>
+      {result && <ResultPreview result={result} t={t} compact={compact} />}
+      {analysisPlan && (
+        <div style={{
+          display: 'grid',
+          gap: 7,
+          padding: compact ? '9px 10px' : 10,
+          border: `1px solid ${t.cellBorder}`,
+          borderRadius: 8,
+          background: `${t.tableHeaderBg}45`,
+        }}>
+          {analysisPlan.routeReason && (
+            <div style={{ fontSize: compact ? 12.5 : 12, lineHeight: 1.45, color: t.textSecondary }}>
+              {analysisPlan.routeReason}
             </div>
-          ))}
+          )}
+          {(analysisPlan.grain || analysisPlan.measures?.length || analysisPlan.dimensions?.length) && (
+            <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+              {analysisPlan.grain && <Pill label={`grain: ${analysisPlan.grain}`} t={t} />}
+              {analysisPlan.measures?.slice(0, 2).map((measure) => <Pill key={`measure-${measure}`} label={measure} t={t} />)}
+              {analysisPlan.dimensions?.slice(0, 2).map((dimension) => <Pill key={`dimension-${dimension}`} label={dimension} t={t} />)}
+            </div>
+          )}
+          {nextAction && (
+            <div style={{ fontSize: 12, color: t.textMuted }}>
+              Next: <span style={{ color: t.textSecondary }}>{nextAction}</span>
+            </div>
+          )}
         </div>
       )}
-      {evidence?.selectedAssets && evidence.selectedAssets.length > 0 && (
-        <AssetList title="Selected Assets" assets={evidence.selectedAssets} t={t} />
-      )}
+    </div>
+  );
+}
+
+function ResultPreview({ result, t, compact }: { result: QueryResult; t: Theme; compact?: boolean }) {
+  const columns = (result.columns.length > 0 ? result.columns : Object.keys(result.rows[0] ?? {})).slice(0, compact ? 3 : 4);
+  const rows = result.rows.slice(0, compact ? 4 : 5);
+  if (columns.length === 0 || rows.length === 0) return null;
+  return (
+    <div style={{
+      border: `1px solid ${t.cellBorder}`,
+      borderRadius: 8,
+      overflow: 'hidden',
+      background: t.editorBg,
+    }}>
+      <div style={{
+        display: 'flex',
+        justifyContent: 'space-between',
+        gap: 10,
+        padding: '7px 9px',
+        borderBottom: `1px solid ${t.cellBorder}`,
+        color: t.textMuted,
+        fontSize: 11,
+        fontFamily: t.fontMono,
+        textTransform: 'uppercase',
+        letterSpacing: '0.06em',
+      }}>
+        <span>Preview</span>
+        <span>{rows.length} of {(result.rowCount ?? result.rows.length).toLocaleString()} rows</span>
+      </div>
+      <div style={{ overflowX: 'auto' }}>
+        <table style={{ width: '100%', borderCollapse: 'collapse', tableLayout: 'fixed' }}>
+          <thead>
+            <tr>
+              {columns.map((column) => (
+                <th key={column} style={{
+                  textAlign: 'left',
+                  padding: '7px 9px',
+                  color: t.textMuted,
+                  fontSize: 11,
+                  fontFamily: t.fontMono,
+                  borderBottom: `1px solid ${t.cellBorder}`,
+                  whiteSpace: 'nowrap',
+                  overflow: 'hidden',
+                  textOverflow: 'ellipsis',
+                }}>
+                  {formatLabel(column)}
+                </th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((row, rowIndex) => (
+              <tr key={rowIndex}>
+                {columns.map((column) => (
+                  <td key={`${rowIndex}-${column}`} style={{
+                    padding: '7px 9px',
+                    color: t.textPrimary,
+                    fontSize: compact ? 12 : 12.5,
+                    borderBottom: rowIndex < rows.length - 1 ? `1px solid ${t.cellBorder}` : 0,
+                    whiteSpace: 'nowrap',
+                    overflow: 'hidden',
+                    textOverflow: 'ellipsis',
+                  }}>
+                    {formatPreviewValue(row[column])}
+                  </td>
+                ))}
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
     </div>
   );
 }
@@ -476,6 +630,7 @@ function BusinessContextPanel({ evidence, t }: { evidence?: AgentEvidence; t: Th
 
 function ReviewPanel({ answer, t }: { answer: AgentAnswerEnvelope; t: Theme }) {
   const evidence = answer.evidence;
+  const analysisPlan = answer.analysisPlan ?? evidence?.analysisPlan;
   const citations = evidence?.citations ?? answer.citations ?? [];
   return (
     <div style={{ padding: 12, display: 'flex', flexDirection: 'column', gap: 12 }}>
@@ -493,6 +648,27 @@ function ReviewPanel({ answer, t }: { answer: AgentAnswerEnvelope; t: Theme }) {
           <KeyValue label="Promotion Path" value="Create draft block, edit SQL, attach tests, then certify after analyst approval." t={t} />
         )}
       </div>
+      {analysisPlan && (
+        <div style={{ display: 'grid', gap: 6 }}>
+          <SectionTitle t={t}>Analysis Plan</SectionTitle>
+          {analysisPlan.question && <KeyValue label="Question" value={analysisPlan.question} t={t} />}
+          {analysisPlan.intent && <KeyValue label="Intent" value={formatLabel(analysisPlan.intent)} t={t} />}
+          {analysisPlan.grain && <KeyValue label="Grain" value={analysisPlan.grain} t={t} />}
+          {analysisPlan.candidateTables && analysisPlan.candidateTables.length > 0 && (
+            <KeyValue
+              label="Tables"
+              value={analysisPlan.candidateTables.slice(0, 5).map((table) => table.relation).filter(Boolean).join(', ')}
+              t={t}
+            />
+          )}
+          {analysisPlan.assumptions && analysisPlan.assumptions.length > 0 && (
+            <KeyValue label="Assumptions" value={analysisPlan.assumptions.join(' ')} t={t} />
+          )}
+          {typeof analysisPlan.repairAttempts === 'number' && analysisPlan.repairAttempts > 0 && (
+            <KeyValue label="SQL Repair" value={`${analysisPlan.repairAttempts} retry`} t={t} />
+          )}
+        </div>
+      )}
       {citations.length > 0 && (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
           <SectionTitle t={t}>Citations</SectionTitle>
@@ -730,6 +906,27 @@ function addButtonStyle(t: Theme, adding: boolean): React.CSSProperties {
 
 function formatLabel(value: string): string {
   return value.replace(/_/g, ' ');
+}
+
+function formatPreviewValue(value: unknown): string {
+  if (value === null || value === undefined) return '-';
+  if (typeof value === 'number') {
+    if (!Number.isFinite(value)) return String(value);
+    return Math.abs(value) >= 1000 || !Number.isInteger(value)
+      ? value.toLocaleString(undefined, { maximumFractionDigits: 2 })
+      : value.toLocaleString();
+  }
+  if (typeof value === 'boolean') return value ? 'true' : 'false';
+  if (typeof value === 'string') return value;
+  return JSON.stringify(value);
+}
+
+function formatBusinessTier(value: string): string {
+  const normalized = value.toLowerCase();
+  if (normalized.includes('certified')) return 'trusted business context';
+  if (normalized.includes('ai') || normalized.includes('generated')) return 'AI draft';
+  if (normalized.includes('no_answer')) return 'needs more context';
+  return formatLabel(value);
 }
 
 function statusColor(status?: string): string {

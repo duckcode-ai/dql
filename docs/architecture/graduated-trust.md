@@ -1,6 +1,8 @@
 # Graduated trust + the promotion loop
 
-DQL's wedge — *one question, one answer, fully traced* — depends on certified
+DQL's wedge — _one question, one answer, fully traced_ — depends on certified
+DQL artifacts. Blocks answer executable data questions; business terms and
+business views answer definition/context questions and help route to the right
 blocks. But real AI usage isn't strict-only: agents will ask questions for
 which no certified block exists yet, and refusing every such ask sends users
 to bypass the MCP and write SQL directly. That defeats the wedge.
@@ -11,7 +13,7 @@ priority order, with the trust label always visible to the human.
 ```mermaid
 flowchart TD
     Ask[User asks AI in plain English]
-    T1{certified block resolves?}
+    T1{certified DQL artifact resolves?}
     T1Tool[query_via_block]
     T1Out["✅ certified answer<br/>+ contract id"]
 
@@ -41,16 +43,18 @@ flowchart TD
     class Review,Promote,Done loop
 ```
 
-## Tier 1 — `query_via_block`
+## Tier 1 — certified DQL context
 
-The wedge proper. Refuses anything that isn't:
+For data answers, the wedge proper is `query_via_block`. It refuses anything that isn't:
 
 - `status = "certified"`, AND
 - `datalex_contract` resolves to a contract in the loaded `datalex-manifest.json`.
 
-Agents ALWAYS try this tool first. The answer is safe to ship to dashboards
-because every output column traces back through the contract → dbt model →
-source column.
+Agents ALWAYS try certified project context first. Business terms and
+business views can be selected as certified context for definition-style
+questions, and they also attach to block answers as evidence. For executable
+answers, the result is safe to ship to dashboards because every output column
+traces back through the contract → dbt model → source column.
 
 ## Tier 2 — `query_via_metadata`
 
@@ -62,6 +66,13 @@ asked again increments the `asked_times` counter on the existing draft —
 questions that get asked repeatedly are the strongest candidates for
 certification.
 
+For follow-up drilldowns, Tier 2 is also context-aware. A prior certified
+answer can seed the next request, but the agent must first search for a
+distinct certified drilldown block that matches the requested filter or
+dimension. If none exists, it emits a review-ready draft proposal with the
+requested filters/dimensions in the evidence route. Generated drilldown SQL
+stays uncertified until review and promotion.
+
 ```typescript
 queryViaMetadata({
   question: "How many active customers in Q1?",
@@ -69,7 +80,7 @@ queryViaMetadata({
   proposedDomain: "customer",
   proposedEntity: "Customer",
   upstreamRefs: ["fct_orders"],
-})
+});
 ```
 
 The agent contract: surface `uncertified: true` verbatim to the human, and
@@ -94,12 +105,12 @@ workflow that turns ad-hoc AI proposals into certified contracts.
 3. **Refine** — A human edits the SQL, names the contract, sets ownership.
    Standard git workflow — open a PR, request review.
 4. **Certify** — `dql certify --from-draft <path>` does the promotion:
-    - Moves `blocks/_drafts/<slug>.dql` → `blocks/<domain>/<slug>.dql`
-    - Flips `status = "draft"` to `"certified"`
-    - Sets `datalex_contract = "<id>@<version>"`
-    - Drops the `_proposed` provenance block
-    - Surfaces the patch the human still needs to apply to
-      `datalex-manifest.json` (so the contract id resolves)
+   - Moves `blocks/_drafts/<slug>.dql` → `blocks/<domain>/<slug>.dql`
+   - Flips `status = "draft"` to `"certified"`
+   - Sets `datalex_contract = "<id>@<version>"`
+   - Drops the `_proposed` provenance block
+   - Surfaces the patch the human still needs to apply to
+     `datalex-manifest.json` (so the contract id resolves)
 5. **Forever** — Next time the same question is asked, Tier 1 hits. Same
    answer, every time.
 
@@ -138,18 +149,18 @@ and audit logs, that's the day they pay.
 
 ## Tool-by-tool reference
 
-| Tool | Tier | When to use |
-|---|---|---|
-| `search_blocks`, `get_block` | discovery | Find Tier-1 candidates before deciding which tool to call |
-| `query_via_block` | Tier 1 | Always try first |
-| `query_via_metadata` | Tier 2 | Only after Tier 1 returns no match |
-| `list_proposals` | review | Surface the ranked draft queue for human triage |
-| `suggest_block` | curated draft | Hand-shape a proposal that aggregates over many Tier-2 captures |
-| `certify` | governance | Evaluate rules against a block (does NOT promote — see `dql certify --from-draft`) |
-| `lineage_impact` | reasoning | Trace upstream/downstream before changing a contract |
-| `list_metrics`, `list_dimensions` | semantic | List dbt-semantic metrics + dimensions |
-| `kg_search` | semantic | FTS5 search across blocks, metrics, dashboards, apps |
-| `feedback_record` | learning | Record thumbs-up/down on answers; feeds promotion priority |
+| Tool                              | Tier          | When to use                                                                        |
+| --------------------------------- | ------------- | ---------------------------------------------------------------------------------- |
+| `search_blocks`, `get_block`      | discovery     | Find Tier-1 candidates before deciding which tool to call                          |
+| `query_via_block`                 | Tier 1        | Always try first                                                                   |
+| `query_via_metadata`              | Tier 2        | Only after Tier 1 returns no match                                                 |
+| `list_proposals`                  | review        | Surface the ranked draft queue for human triage                                    |
+| `suggest_block`                   | curated draft | Hand-shape a proposal that aggregates over many Tier-2 captures                    |
+| `certify`                         | governance    | Evaluate rules against a block (does NOT promote — see `dql certify --from-draft`) |
+| `lineage_impact`                  | reasoning     | Trace upstream/downstream before changing a contract                               |
+| `list_metrics`, `list_dimensions` | semantic      | List dbt-semantic metrics + dimensions                                             |
+| `kg_search`                       | semantic      | FTS5 search across blocks, metrics, dashboards, apps                               |
+| `feedback_record`                 | learning      | Record thumbs-up/down on answers; feeds promotion priority                         |
 
 The agent's instructions on session init explicitly document the priority:
 "Always try `query_via_block` first. Fall back to `query_via_metadata`. Use

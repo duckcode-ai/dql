@@ -215,7 +215,7 @@ interface AgentEvalCase {
   question: string;
   domain?: string;
   expected?: {
-    sourceTier?: 'certified_artifact' | 'semantic_layer' | 'dbt_manifest' | 'no_answer';
+    sourceTier?: 'certified_artifact' | 'business_context' | 'semantic_layer' | 'dbt_manifest' | 'no_answer';
     certification?: 'certified' | 'ai_generated' | 'analyst_review_required';
     kind?: 'certified' | 'uncertified' | 'no_answer';
     sqlContains?: string;

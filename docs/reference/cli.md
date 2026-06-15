@@ -61,6 +61,7 @@ Useful lineage flags:
 
 ```bash
 dql lineage --term "Customer"          # business term to blocks/views/consumption
+dql lineage --business-360 "Customer"  # business definition, sources, consumers, and gaps
 dql lineage --business                 # business lineage summary
 dql lineage --business "Customer 360"  # focused business composition and backing sources
 dql lineage --table fct_orders         # technical source lineage
