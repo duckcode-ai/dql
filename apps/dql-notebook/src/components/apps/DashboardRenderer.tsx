@@ -1670,29 +1670,46 @@ function nextTileId(dashboard: DashboardDocumentResponse['dashboard'], raw: stri
   return `${base}-${Date.now()}`;
 }
 
+// Gap-free 2D first-fit packer: places each tile (in order) at the topmost,
+// then leftmost, free slot so later tiles backfill whitespace left by wider
+// tiles above them. Keeps a clean, dense enterprise grid.
 function packDashboardItems(items: DashboardLayoutItem[], cols: number): DashboardLayoutItem[] {
-  let x = 0;
-  let y = 0;
-  let rowHeight = 0;
-  return items
-    .map((item) => {
-      const w = clamp(Math.round(item.w || 1), 1, cols);
-      const h = Math.max(1, Math.round(item.h || 1));
-      if (x > 0 && x + w > cols) {
-        y += rowHeight;
-        x = 0;
-        rowHeight = 0;
+  const safeCols = Math.max(1, cols);
+  const occupied: boolean[][] = [];
+  const fits = (x: number, y: number, w: number, h: number): boolean => {
+    for (let dy = 0; dy < h; dy++) {
+      const row = occupied[y + dy];
+      if (!row) continue;
+      for (let dx = 0; dx < w; dx++) {
+        if (row[x + dx]) return false;
       }
-      const packed = { ...item, x, y, w, h };
-      x += w;
-      rowHeight = Math.max(rowHeight, h);
-      if (x >= cols) {
-        y += rowHeight;
-        x = 0;
-        rowHeight = 0;
+    }
+    return true;
+  };
+  const mark = (x: number, y: number, w: number, h: number): void => {
+    for (let dy = 0; dy < h; dy++) {
+      const yy = y + dy;
+      if (!occupied[yy]) occupied[yy] = new Array(safeCols).fill(false);
+      for (let dx = 0; dx < w; dx++) occupied[yy][x + dx] = true;
+    }
+  };
+  return items.map((item) => {
+    const w = clamp(Math.round(item.w || 1), 1, safeCols);
+    const h = Math.max(1, Math.round(item.h || 1));
+    let px = 0;
+    let py = 0;
+    outer: for (let y = 0; ; y++) {
+      for (let x = 0; x + w <= safeCols; x++) {
+        if (fits(x, y, w, h)) {
+          px = x;
+          py = y;
+          break outer;
+        }
       }
-      return packed;
-    });
+    }
+    mark(px, py, w, h);
+    return { ...item, x: px, y: py, w, h };
+  });
 }
 
 function reorderTileForDrop(items: DashboardLayoutItem[], moved: DashboardLayoutItem, cols: number): DashboardLayoutItem[] {
