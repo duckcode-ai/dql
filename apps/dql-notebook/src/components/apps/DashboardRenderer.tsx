@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { CSSProperties, PointerEvent as ReactPointerEvent } from 'react';
-import { Bot, GitBranch, GripVertical, Maximize2, Plus, SlidersHorizontal, Trash2, Wand2 } from 'lucide-react';
+import { Bot, GitBranch, GripVertical, Maximize2, Plus, SlidersHorizontal, Sparkles, Send, Trash2, Wand2, X } from 'lucide-react';
 import { api, type AppBlockRecommendation, type DashboardDocumentResponse, type DashboardRunResponse } from '../../api/client';
 import { useNotebook } from '../../store/NotebookStore';
 import type { CellChartConfig, ThemeMode } from '../../store/types';
@@ -47,6 +47,7 @@ export function DashboardRenderer({
   onDashboardChanged,
   selectedBlockId,
   onBlockFocus,
+  onAskBlock,
   onOpenLineageNode,
   copilotOpen,
   onCopilotChange,
@@ -59,6 +60,7 @@ export function DashboardRenderer({
   onDashboardChanged?: (dashboard: DashboardDocumentResponse['dashboard']) => void;
   selectedBlockId?: string | null;
   onBlockFocus?: (blockId: string) => void;
+  onAskBlock?: (blockId: string, question: string) => void;
   onOpenLineageNode?: (nodeId: string) => void;
   copilotOpen?: boolean;
   onCopilotChange?: (open: boolean) => void;
@@ -480,6 +482,7 @@ export function DashboardRenderer({
               cols={cols}
               selected={Boolean(getDashboardItemBlockId(item) && getDashboardItemBlockId(item) === selectedBlockId)}
               onFocusBlock={onBlockFocus}
+              onAskBlock={onAskBlock}
               onMove={(point) => void moveTileToPoint(item.i, point)}
               onDragMove={(point) => updateDragPreview(item.i, point)}
               onDragEnd={clearDragPreview}
@@ -551,6 +554,7 @@ function DashboardTile({
   cols,
   selected,
   onFocusBlock,
+  onAskBlock,
   onMove,
   onDragMove,
   onDragEnd,
@@ -565,6 +569,7 @@ function DashboardTile({
   cols: number;
   selected?: boolean;
   onFocusBlock?: (blockId: string) => void;
+  onAskBlock?: (blockId: string, question: string) => void;
   onMove: (point: { clientX: number; clientY: number }) => void;
   onDragMove?: (point: { clientX: number; clientY: number }) => void;
   onDragEnd?: () => void;
@@ -573,7 +578,9 @@ function DashboardTile({
   const tileRef = useRef<HTMLDivElement | null>(null);
   const [dragOffset, setDragOffset] = useState<{ x: number; y: number } | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [askOpen, setAskOpen] = useState(false);
   const blockId = getDashboardItemBlockId(item);
+  const canAsk = Boolean(!editable && blockId && onAskBlock);
   const blockRef = blockId
     ? `block:${blockId}`
     : item.aiPin
@@ -583,6 +590,21 @@ function DashboardTile({
   const isCompactMetric = item.h <= 2 && (vizType === 'single_value' || vizType === 'kpi' || vizType === 'gauge');
   const [hovered, setHovered] = useState(false);
   const showEditChrome = editable && (hovered || selected || settingsOpen);
+  useEffect(() => {
+    if (!askOpen) return;
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') setAskOpen(false);
+    };
+    const onPointerDown = (event: MouseEvent) => {
+      if (tileRef.current && !tileRef.current.contains(event.target as Node)) setAskOpen(false);
+    };
+    window.addEventListener('keydown', onKey);
+    document.addEventListener('mousedown', onPointerDown);
+    return () => {
+      window.removeEventListener('keydown', onKey);
+      document.removeEventListener('mousedown', onPointerDown);
+    };
+  }, [askOpen]);
   const startDrag = (event: ReactPointerEvent<HTMLElement>) => {
     const tileEl = tileRef.current;
     if (!tileEl) return;
@@ -627,6 +649,7 @@ function DashboardTile({
       onMouseLeave={() => setHovered(false)}
       onClick={() => {
         if (blockId) onFocusBlock?.(blockId);
+        if (canAsk) setAskOpen((value) => !value);
       }}
       style={{
         gridColumn: `${item.x + 1} / span ${item.w}`,
@@ -653,6 +676,21 @@ function DashboardTile({
         transition: dragOffset ? undefined : 'box-shadow 120ms ease, transform 120ms ease',
       }}
     >
+      {canAsk && hovered && !askOpen ? (
+        <div style={askHintStyle} aria-hidden="true">
+          <Sparkles size={11} strokeWidth={2} /> Ask AI
+        </div>
+      ) : null}
+      {askOpen && blockId ? (
+        <TileAskPopover
+          title={item.title ?? blockId}
+          onAsk={(question) => {
+            onAskBlock?.(blockId, question);
+            setAskOpen(false);
+          }}
+          onClose={() => setAskOpen(false)}
+        />
+      ) : null}
       {editable ? (
         <div
           style={{
@@ -753,6 +791,156 @@ function DashboardTile({
       </div>
     </div>
   );
+}
+
+const askHintStyle: CSSProperties = {
+  position: 'absolute',
+  bottom: 10,
+  right: 10,
+  zIndex: 5,
+  display: 'inline-flex',
+  alignItems: 'center',
+  gap: 4,
+  padding: '3px 8px',
+  borderRadius: 999,
+  fontSize: 10.5,
+  fontWeight: 700,
+  color: 'var(--dql-app-accent, var(--accent, #4f46e5))',
+  background: 'var(--dql-app-accent-soft, rgba(79,70,229,0.12))',
+  border: '1px solid var(--dql-app-accent, rgba(79,70,229,0.4))',
+  pointerEvents: 'none',
+};
+
+function TileAskPopover({
+  title,
+  onAsk,
+  onClose,
+}: {
+  title: string;
+  onAsk: (question: string) => void;
+  onClose: () => void;
+}): JSX.Element {
+  const [value, setValue] = useState('');
+  const suggestions = [
+    `What changed in ${title}?`,
+    `Why does ${title} matter?`,
+    `What should we do about ${title}?`,
+  ];
+  return (
+    <div
+      onClick={(event) => event.stopPropagation()}
+      style={{
+        position: 'absolute',
+        top: 12,
+        left: 12,
+        right: 12,
+        zIndex: 40,
+        maxWidth: 360,
+        background: 'var(--dql-app-surface, var(--surface, #fff))',
+        border: '1px solid var(--dql-app-line, var(--border-color, rgba(0,0,0,0.12)))',
+        borderRadius: 12,
+        boxShadow: '0 18px 48px rgba(0,0,0,0.24)',
+        padding: 12,
+        display: 'flex',
+        flexDirection: 'column',
+        gap: 8,
+        cursor: 'auto',
+      }}
+    >
+      <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+        <Sparkles size={13} strokeWidth={2} style={{ color: 'var(--dql-app-accent, #4f46e5)' }} />
+        <span style={{ fontSize: 12, fontWeight: 800, flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+          Ask about {title}
+        </span>
+        <button type="button" onClick={onClose} title="Close" style={askIconButtonStyle}>
+          <X size={13} />
+        </button>
+      </div>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 5 }}>
+        {suggestions.map((suggestion) => (
+          <button
+            key={suggestion}
+            type="button"
+            onClick={() => onAsk(suggestion)}
+            style={askSuggestionStyle}
+          >
+            {suggestion}
+          </button>
+        ))}
+      </div>
+      <form
+        onSubmit={(event) => {
+          event.preventDefault();
+          const text = value.trim();
+          if (text) onAsk(text);
+        }}
+        style={{ display: 'flex', gap: 6, alignItems: 'center' }}
+      >
+        <input
+          autoFocus
+          value={value}
+          onChange={(event) => setValue(event.target.value)}
+          placeholder="Ask your own question..."
+          style={{
+            flex: 1,
+            minWidth: 0,
+            height: 32,
+            border: '1px solid var(--dql-app-line, rgba(0,0,0,0.14))',
+            borderRadius: 8,
+            background: 'var(--dql-app-control, var(--surface, #fff))',
+            color: 'inherit',
+            padding: '0 9px',
+            fontSize: 12,
+          }}
+        />
+        <button type="submit" disabled={!value.trim()} title="Ask" style={askSubmitStyle(Boolean(value.trim()))}>
+          <Send size={13} />
+        </button>
+      </form>
+    </div>
+  );
+}
+
+const askIconButtonStyle: CSSProperties = {
+  width: 24,
+  height: 24,
+  border: 0,
+  borderRadius: 6,
+  background: 'transparent',
+  color: 'inherit',
+  cursor: 'pointer',
+  display: 'inline-flex',
+  alignItems: 'center',
+  justifyContent: 'center',
+  flexShrink: 0,
+};
+
+const askSuggestionStyle: CSSProperties = {
+  textAlign: 'left',
+  border: '1px solid var(--dql-app-line, rgba(0,0,0,0.1))',
+  borderRadius: 8,
+  background: 'var(--dql-app-control, rgba(0,0,0,0.02))',
+  color: 'inherit',
+  padding: '7px 9px',
+  fontSize: 12,
+  cursor: 'pointer',
+  lineHeight: 1.3,
+};
+
+function askSubmitStyle(active: boolean): CSSProperties {
+  return {
+    width: 32,
+    height: 32,
+    flexShrink: 0,
+    border: '1px solid var(--dql-app-accent, #4f46e5)',
+    borderRadius: 8,
+    background: active ? 'var(--dql-app-accent, #4f46e5)' : 'var(--dql-app-accent-soft, rgba(79,70,229,0.12))',
+    color: active ? '#fff' : 'var(--dql-app-accent, #4f46e5)',
+    cursor: active ? 'pointer' : 'default',
+    display: 'inline-flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+  };
 }
 
 function TileBody({

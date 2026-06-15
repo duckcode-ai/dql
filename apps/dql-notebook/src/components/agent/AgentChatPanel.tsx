@@ -24,6 +24,7 @@ export function AgentChatPanel({
   conversationTarget,
   onConversationUpdated,
   initialInput,
+  autoAsk,
   emptyHint,
   inputPlaceholder,
   suggestions,
@@ -43,6 +44,7 @@ export function AgentChatPanel({
   conversationTarget?: { appId: string; dashboardId?: string; notebookPath?: string };
   onConversationUpdated?: () => void;
   initialInput?: string;
+  autoAsk?: { text: string; nonce: number };
   emptyHint?: string;
   inputPlaceholder?: string;
   suggestions?: Array<{ label: string; prompt: string; icon?: React.ReactNode }>;
@@ -66,6 +68,7 @@ export function AgentChatPanel({
   const abortRef = useRef<AbortController | null>(null);
   const inputRef = useRef<HTMLTextAreaElement | null>(null);
   const lastInitialInputRef = useRef(initialInput ?? '');
+  const lastAskNonceRef = useRef<number | null>(null);
 
   React.useEffect(() => {
     if (!initialInput || running) return;
@@ -74,8 +77,19 @@ export function AgentChatPanel({
     setInput(initialInput);
   }, [initialInput, running]);
 
-  const send = async () => {
-    const text = input.trim();
+  React.useEffect(() => {
+    if (!autoAsk || running) return;
+    if (autoAsk.nonce === lastAskNonceRef.current) return;
+    lastAskNonceRef.current = autoAsk.nonce;
+    const text = autoAsk.text.trim();
+    if (!text) return;
+    setInput(text);
+    void send(text);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [autoAsk?.nonce]);
+
+  const send = async (textOverride?: string) => {
+    const text = (textOverride ?? input).trim();
     if (!text || running) return;
     const userMessage: LocalMessage = { id: makeMessageId(), role: 'user', content: text, createdAt: new Date().toISOString() };
     const next: LocalMessage[] = [...messages, userMessage];

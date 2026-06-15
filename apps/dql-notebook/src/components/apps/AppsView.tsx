@@ -969,11 +969,17 @@ function AppWorkspaceSurface({
   const dashboardBlockKey = dashboardBlockIds.join('|');
   const [selectedBlockId, setSelectedBlockId] = useState<string | null>(dashboardBlockIds[0] ?? null);
   const [dashboardRun, setDashboardRun] = useState<DashboardRunResponse | null>(null);
+  const [askSeed, setAskSeed] = useState<{ text: string; nonce: number } | null>(null);
   const [shareStatus, setShareStatus] = useState<'idle' | 'copied' | 'downloaded' | 'ready'>('idle');
   const [shareText, setShareText] = useState('');
   const handleDashboardRunChange = useCallback((run: DashboardRunResponse | null) => {
     setDashboardRun(run);
   }, []);
+  const handleAskBlock = useCallback((blockId: string, question: string) => {
+    setSelectedBlockId(blockId);
+    onExplainChange(true);
+    setAskSeed({ text: question, nonce: Date.now() });
+  }, [onExplainChange]);
 
   useEffect(() => {
     if (dashboardBlockIds.length === 0) {
@@ -1128,6 +1134,7 @@ function AppWorkspaceSurface({
                 variables={variables}
                 selectedBlockId={selectedBlockId}
                 onBlockFocus={setSelectedBlockId}
+                onAskBlock={handleAskBlock}
                 onOpenLineageNode={onOpenLineageNode}
                 copilotOpen={explainOpen}
                 onCopilotChange={onExplainChange}
@@ -1153,6 +1160,7 @@ function AppWorkspaceSurface({
               dashboardDoc={dashboardDoc}
               dashboardRun={dashboardRun}
               selectedBlockId={selectedBlockId}
+              askSeed={askSeed}
               themeMode={themeMode}
               onSelectBlock={setSelectedBlockId}
             />
@@ -1307,6 +1315,7 @@ function AppCopilotPanel({
   dashboardDoc,
   dashboardRun,
   selectedBlockId,
+  askSeed,
   themeMode,
   onSelectBlock,
 }: {
@@ -1315,6 +1324,7 @@ function AppCopilotPanel({
   dashboardDoc: DashboardDocumentResponse | null;
   dashboardRun: DashboardRunResponse | null;
   selectedBlockId: string | null;
+  askSeed?: { text: string; nonce: number } | null;
   themeMode: ThemeMode;
   onSelectBlock: (blockId: string | null) => void;
 }) {
@@ -1494,6 +1504,7 @@ function AppCopilotPanel({
           themeMode={themeMode}
           hideSqlByDefault
           suggestions={promptStarters}
+          autoAsk={askSeed ?? undefined}
           emptyHint="Ask what changed, why it matters, what action to take, or what evidence needs review."
           inputPlaceholder="Ask a business question..."
           variant="executive"
