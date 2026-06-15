@@ -6,13 +6,14 @@ import {
   Blocks,
   BookOpenText,
   Bot,
+  Check,
   ChevronDown,
   Download,
-  Eye,
   FileText,
   LayoutDashboard,
   LineChart,
   MessageSquareText,
+  Pencil,
   Plus,
   Search,
   Send,
@@ -616,7 +617,6 @@ function AppLibrarySurface({
               favorite={favorites.has(app.id)}
               onToggleFavorite={() => onToggleFavorite(app.id)}
               onOpen={() => onOpenApp(app, 'view')}
-              onBuild={() => onOpenApp(app, 'build')}
             />
           ))}
         </div>
@@ -655,13 +655,11 @@ function AppCard({
   favorite,
   onToggleFavorite,
   onOpen,
-  onBuild,
 }: {
   app: AppSummary;
   favorite: boolean;
   onToggleFavorite: () => void;
   onOpen: () => void;
-  onBuild: () => void;
 }) {
   const certified = app.certification === 'certified' || app.lifecycle === 'certified';
   const draftCount = app.drafts?.length ?? 0;
@@ -700,7 +698,6 @@ function AppCard({
       </div>
       <div className="dql-app-card-depth">
         <span>{primaryOwner(app)}</span>
-        <button type="button" onClick={onBuild}>Build</button>
         <button type="button" onClick={onOpen}>Open</button>
       </div>
     </article>
@@ -1039,14 +1036,14 @@ function AppWorkspaceSurface({
         <span className="dql-app-crumb">/ <b>{app?.id ?? 'app'}</b></span>
         <StatusSeal tone="certified">{certifiedCount} certified</StatusSeal>
         {draftCount > 0 ? <StatusSeal tone="draft">{draftCount} draft</StatusSeal> : null}
-        <div className="dql-app-mode-seg">
-          <button type="button" className={experience === 'view' ? 'on' : ''} onClick={() => onExperienceChange('view')}>
-            <Eye size={14} /> View
-          </button>
-          <button type="button" className={experience === 'build' ? 'on' : ''} onClick={() => onExperienceChange('build')}>
-            <Blocks size={14} /> Build
-          </button>
-        </div>
+        <button
+          type="button"
+          className={`dql-app-customize-btn ${experience === 'build' ? 'on' : ''}`}
+          onClick={() => onExperienceChange(experience === 'build' ? 'view' : 'build')}
+          title={experience === 'build' ? 'Finish customizing and return to the clean view' : 'Rearrange tiles and edit this app'}
+        >
+          {experience === 'build' ? <><Check size={14} /> Done</> : <><Pencil size={14} /> Customize</>}
+        </button>
         <div className="dql-app-view-actions">
           <PersonaSwitcher app={appDoc?.app ?? null} />
           <button type="button" className="dql-apps-btn dql-apps-btn-line" title="Copy local app handoff" onClick={() => void copyShareLink()}>
@@ -1095,7 +1092,7 @@ function AppWorkspaceSurface({
           <div className="dql-app-title-copy">
             <div className="dql-app-title-meta">
               <span><LayoutDashboard size={14} /> {app?.domain ?? dashboardDoc?.dashboard.metadata.domain ?? 'DQL App'}</span>
-              <StatusSeal tone="agentic">{experience === 'build' ? 'build mode' : 'agent composed'}</StatusSeal>
+              {experience === 'build' ? <StatusSeal tone="draft">Customizing</StatusSeal> : null}
             </div>
             <h1>{app?.name ?? 'App'}</h1>
             <p>{app?.description ?? dashboardDoc?.dashboard.metadata.description ?? 'Local DQL App'}</p>
@@ -2360,6 +2357,34 @@ const APP_STYLES = `
 }
 
 .dql-app-mode-seg button.on { background: var(--dql-app-deep); color: #fff; }
+
+.dql-app-customize-btn {
+  margin: 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  min-height: 32px;
+  padding: 6px 14px;
+  border: 1px solid var(--dql-app-line);
+  border-radius: 999px;
+  background: var(--dql-app-control);
+  color: var(--dql-app-ink);
+  cursor: pointer;
+  font: 750 12px var(--font-ui);
+}
+
+.dql-app-customize-btn:hover {
+  border-color: rgba(79, 99, 215, 0.34);
+  background: var(--dql-app-accent-soft);
+  color: var(--dql-app-accent);
+}
+
+.dql-app-customize-btn.on {
+  border-color: var(--dql-app-deep);
+  background: var(--dql-app-deep);
+  color: #fff;
+}
 .dql-app-build-actions,
 .dql-app-view-actions {
   margin-left: auto;
