@@ -44,6 +44,7 @@ export function DashboardRenderer({
   dashboard,
   variables,
   editable = false,
+  embeddedHeader = false,
   onDashboardChanged,
   selectedBlockId,
   onBlockFocus,
@@ -57,6 +58,7 @@ export function DashboardRenderer({
   dashboard: DashboardDocumentResponse['dashboard'];
   variables?: Record<string, unknown>;
   editable?: boolean;
+  embeddedHeader?: boolean;
   onDashboardChanged?: (dashboard: DashboardDocumentResponse['dashboard']) => void;
   selectedBlockId?: string | null;
   onBlockFocus?: (blockId: string) => void;
@@ -347,12 +349,16 @@ export function DashboardRenderer({
       <div style={{ flex: 1, minWidth: 0 }}>
       <div style={dashboardToolbarStyle}>
         <div style={{ flex: 1, minWidth: 0 }}>
-          <h2 style={{ margin: 0, fontSize: 20, lineHeight: 1.18, fontWeight: 780 }}>{dashboard.metadata.title}</h2>
-        {dashboard.metadata.description ? (
-          <div style={{ fontSize: 13, opacity: 0.72, marginTop: 4, maxWidth: 680, lineHeight: 1.4 }}>
-            {dashboard.metadata.description}
-          </div>
-        ) : null}
+        {embeddedHeader ? null : (
+          <>
+            <h2 style={{ margin: 0, fontSize: 20, lineHeight: 1.18, fontWeight: 780 }}>{dashboard.metadata.title}</h2>
+            {dashboard.metadata.description ? (
+              <div style={{ fontSize: 13, opacity: 0.72, marginTop: 4, maxWidth: 680, lineHeight: 1.4 }}>
+                {dashboard.metadata.description}
+              </div>
+            ) : null}
+          </>
+        )}
         </div>
         {editable && dashboard.layout.items.length > 0 && (
           <AddTileMenu

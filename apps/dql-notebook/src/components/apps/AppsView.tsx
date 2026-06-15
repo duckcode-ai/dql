@@ -1038,6 +1038,7 @@ function AppWorkspaceSurface({
     URL.revokeObjectURL(url);
     markAction('downloaded');
   };
+  const onDashboards = section === 'dashboards' && Boolean(dashboardDoc);
   return (
     <div className="dql-app-workspace">
       <div className="dql-app-view-topbar">
@@ -1101,10 +1102,11 @@ function AppWorkspaceSurface({
           <div className="dql-app-title-copy">
             <div className="dql-app-title-meta">
               <span><LayoutDashboard size={14} /> {app?.domain ?? dashboardDoc?.dashboard.metadata.domain ?? 'DQL App'}</span>
+              {onDashboards ? <span className="dql-app-title-context">{tidyTitle(app?.name) || 'App'}</span> : null}
               {experience === 'build' ? <StatusSeal tone="draft">Customizing</StatusSeal> : null}
             </div>
-            <h1>{app?.name ?? 'App'}</h1>
-            <p>{app?.description ?? dashboardDoc?.dashboard.metadata.description ?? 'Local DQL App'}</p>
+            <h1>{tidyTitle(onDashboards ? dashboardDoc?.dashboard.metadata.title : app?.name) || 'App'}</h1>
+            <p>{(onDashboards ? dashboardDoc?.dashboard.metadata.description : app?.description) ?? 'Local DQL App'}</p>
           </div>
           <div className="dql-app-nav-row">
             <AppWorkspaceTabs
@@ -1134,6 +1136,7 @@ function AppWorkspaceSurface({
                 appId={app.id}
                 dashboard={dashboardDoc.dashboard}
                 editable={experience === 'build'}
+                embeddedHeader
                 variables={variables}
                 selectedBlockId={selectedBlockId}
                 onBlockFocus={setSelectedBlockId}
@@ -1665,6 +1668,13 @@ function sampleDashboardRows(rows?: Array<Record<string, unknown>>, columns?: st
   if (!Array.isArray(rows) || rows.length === 0) return undefined;
   const selectedColumns = Array.isArray(columns) && columns.length > 0 ? columns.slice(0, 8) : Object.keys(rows[0] ?? {}).slice(0, 8);
   return rows.slice(0, 5).map((row) => Object.fromEntries(selectedColumns.map((column) => [column, row[column]])));
+}
+
+function tidyTitle(value?: string | null): string {
+  return String(value ?? '')
+    .replace(/\s+/g, ' ')
+    .replace(/[\s,;:.–—-]+$/, '')
+    .trim();
 }
 
 function formatBusinessLabel(value?: string | null): string {
@@ -3128,7 +3138,19 @@ const APP_STYLES = `
   font-size: 13px;
   line-height: 1.45;
   max-width: 720px;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
 }
+
+.dql-app-title-context {
+  display: inline-flex;
+  align-items: center;
+  color: var(--dql-app-faint);
+  font: 700 11.5px var(--font-mono);
+}
+.dql-app-title-context::before { content: "·"; margin-right: 8px; color: var(--dql-app-line-2); }
 
 .dql-app-nav-row {
   display: flex;
