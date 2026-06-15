@@ -10,13 +10,18 @@ import type { AgentProvider, AgentMessage } from "./providers/types.js";
 class StubProvider implements AgentProvider {
   readonly name = "claude" as const;
   messages: AgentMessage[] = [];
-  constructor(private readonly response: string) {}
+  calls: AgentMessage[][] = [];
+  private readonly responses: string[];
+  constructor(response: string | string[]) {
+    this.responses = Array.isArray(response) ? response : [response];
+  }
   async available(): Promise<boolean> {
     return true;
   }
   async generate(messages: AgentMessage[]): Promise<string> {
     this.messages = messages;
-    return this.response;
+    this.calls.push(messages);
+    return this.responses[Math.min(this.calls.length - 1, this.responses.length - 1)];
   }
 }
 
@@ -258,9 +263,20 @@ describe("answer (block-first loop)", () => {
       "Unsafe generated SQL.\n\n```sql\nDELETE FROM orders\n```\n\nViz: table",
     );
     const result = await answer({
-      question: "Delete bad orders",
+      question: "Show bad orders",
       provider,
       kg,
+      schemaContext: [
+        {
+          relation: "dev.orders",
+          schema: "dev",
+          name: "orders",
+          columns: [
+            { name: "order_id", type: "VARCHAR" },
+            { name: "order_total", type: "DECIMAL" },
+          ],
+        },
+      ],
       executeGeneratedSql: async () => {
         throw new Error("Generated SQL preview only supports read-only SELECT or WITH queries.");
       },
@@ -334,6 +350,158 @@ describe("answer (block-first loop)", () => {
         }),
       ]),
     );
+  });
+
+  it("uses a certified count block for a direct customer KPI question", async () => {
+    kg.rebuild(
+      [
+        {
+          nodeId: "block:total_customers",
+          kind: "block",
+          name: "total_customers",
+          domain: "customers",
+          status: "certified",
+          description: "Total number of distinct customers.",
+          llmContext: "Use for how many customers questions.",
+          tags: ["customers", "kpi"],
+          sourceTier: "certified_artifact",
+          certification: "certified",
+          provenance: "DQL block",
+        },
+      ],
+      [],
+    );
+    const provider = new StubProvider("should not be called");
+    const result = await answer({
+      question: "How many customers do we have?",
+      provider,
+      kg,
+      executeCertifiedBlock: async () => ({
+        columns: ["total_customers"],
+        rows: [{ total_customers: 100 }],
+        rowCount: 1,
+      }),
+    });
+    expect(result.kind).toBe("certified");
+    expect(result.block?.nodeId).toBe("block:total_customers");
+    expect(result.analysisPlan?.intent).toBe("exact_certified_lookup");
+    expect(provider.calls).toHaveLength(0);
+  });
+
+  it("allows an explicit saved top customers block request to stay certified", async () => {
+    kg.rebuild(
+      [
+        {
+          nodeId: "block:top_customers",
+          kind: "block",
+          name: "top_customers",
+          domain: "customers",
+          status: "certified",
+          description: "Top customers by lifetime spend.",
+          llmContext: "Use for the certified top customers block.",
+          tags: ["customers", "ranking"],
+          sourceTier: "certified_artifact",
+          certification: "certified",
+          provenance: "DQL block",
+        },
+      ],
+      [],
+    );
+    const provider = new StubProvider("should not be called");
+    const result = await answer({
+      question: "Run the certified block top_customers",
+      provider,
+      kg,
+    });
+    expect(result.kind).toBe("certified");
+    expect(result.block?.nodeId).toBe("block:top_customers");
+    expect(provider.calls).toHaveLength(0);
+  });
+
+  it("generates dynamic customer ranking SQL instead of selecting total_customers for ad hoc performance questions", async () => {
+    kg.rebuild(
+      [
+        {
+          nodeId: "block:total_customers",
+          kind: "block",
+          name: "total_customers",
+          domain: "customers",
+          status: "certified",
+          description: "Total number of distinct customers.",
+          tags: ["customers", "kpi"],
+          sourceTier: "certified_artifact",
+          certification: "certified",
+          provenance: "DQL block",
+        },
+        {
+          nodeId: "block:top_customers",
+          kind: "block",
+          name: "top_customers",
+          domain: "customers",
+          status: "certified",
+          description: "Top 10 customers by lifetime spend, with order counts.",
+          llmContext: "Use for best customers and highest lifetime spend questions.",
+          tags: ["customers", "ranking", "orders"],
+          sourceTier: "certified_artifact",
+          certification: "certified",
+          provenance: "DQL block",
+        },
+        {
+          nodeId: "dbt_model:customers",
+          kind: "dbt_model",
+          name: "customers",
+          domain: "customers",
+          description: "Customer mart with lifetime spend and order counts.",
+          llmContext: "runtime relation: dev.customers\nColumns:\n- customer_name\n- count_lifetime_orders\n- lifetime_spend",
+          sourceTier: "dbt_manifest",
+          certification: "ai_generated",
+          provenance: "dbt manifest",
+        },
+      ],
+      [],
+    );
+    const provider = new StubProvider("should not be called");
+    const result = await answer({
+      question: "Can you show me the orders by customer who have performed better?",
+      provider,
+      kg,
+      schemaContext: [
+        {
+          relation: "dev.customers",
+          schema: "dev",
+          name: "customers",
+          columns: [
+            { name: "customer_name", type: "VARCHAR" },
+            { name: "count_lifetime_orders", type: "BIGINT" },
+            { name: "lifetime_spend", type: "DECIMAL" },
+          ],
+        },
+      ],
+      executeGeneratedSql: async (sql) => ({
+        columns: ["customer_name", "orders", "lifetime_spend"],
+        rows: [
+          { customer_name: "Mr. Matthew Meyer", orders: 33, lifetime_spend: 3089.8 },
+          { customer_name: "Aaron Gardner", orders: 31, lifetime_spend: 2880.99 },
+        ],
+        rowCount: 2,
+        sql,
+      }),
+    });
+    expect(result.kind).toBe("uncertified");
+    expect(result.block).toBeUndefined();
+    expect(result.proposedSql).toContain("dev.customers");
+    expect(result.proposedSql).toContain("count_lifetime_orders");
+    expect(result.proposedSql).not.toContain("total_customers");
+    expect(result.sql).toContain("lifetime_spend");
+    expect(result.result?.rowCount).toBe(2);
+    expect(result.analysisPlan?.intent).toBe("ad_hoc_analysis");
+    expect(result.analysisPlan?.assumptions).toEqual(
+      expect.arrayContaining([
+        expect.stringContaining("schema-aware local planner"),
+      ]),
+    );
+    expect(result.evidence?.selectedAssets.some((asset) => asset.name === "top_customers")).toBe(true);
+    expect(provider.calls).toHaveLength(0);
   });
 
   it("does not certify a generic KPI when a stronger draft breakdown block matches", async () => {
@@ -444,7 +612,7 @@ describe("answer (block-first loop)", () => {
     expect(result.kind).toBe("uncertified");
   });
 
-  it("routes drilldown follow-ups to a distinct certified drilldown block when one exists", async () => {
+  it("generates review-ready SQL for drillthrough follow-ups even when certified context exists", async () => {
     kg.rebuild(
       [
         revenueSegmentBlock(),
@@ -463,7 +631,11 @@ describe("answer (block-first loop)", () => {
       ],
       [],
     );
-    const provider = new StubProvider("should not be called");
+    const provider = new StubProvider(
+      "Enterprise revenue by segment drillthrough draft.\n\n" +
+        "```sql\nSELECT segment, SUM(amount) AS revenue FROM fct_orders WHERE segment = 'Enterprise' GROUP BY segment\n```\n\n" +
+        "Viz: bar",
+    );
     const result = await answer({
       question: "Drill into revenue by segment for Enterprise",
       provider,
@@ -475,9 +647,11 @@ describe("answer (block-first loop)", () => {
         dimensions: ["segment"],
       },
     });
-    expect(result.kind).toBe("certified");
-    expect(result.block?.nodeId).toBe("block:revenue_by_segment");
-    expect(provider.messages).toHaveLength(0);
+    expect(result.kind).toBe("uncertified");
+    expect(result.block).toBeUndefined();
+    expect(result.proposedSql).toContain("Enterprise");
+    expect(result.analysisPlan?.intent).toBe("drillthrough");
+    expect(provider.calls.length).toBeGreaterThan(0);
   });
 
   it("uses prior certified block context for review-ready drilldown drafts when no certified drilldown exists", async () => {
@@ -519,6 +693,112 @@ describe("answer (block-first loop)", () => {
     expect(result.evidence?.validation?.message).toContain(
       "drilldown SQL is not certified",
     );
+  });
+
+  it("repairs generated SQL once after a retryable execution failure", async () => {
+    const provider = new StubProvider([
+      "Draft using the first guessed column.\n\n```sql\nSELECT customer, SUM(total) AS revenue FROM orders GROUP BY customer\n```\n\nViz: bar",
+      "Corrected draft using the available columns.\n\n```sql\nSELECT customer_name, SUM(order_total) AS revenue FROM dev.orders GROUP BY customer_name\n```\n\nViz: bar",
+    ]);
+    let attempts = 0;
+    const result = await answer({
+      question: "Show revenue by customer",
+      provider,
+      kg,
+      schemaContext: [
+        {
+          relation: "dev.orders",
+          schema: "dev",
+          name: "orders",
+          columns: [
+            { name: "customer_name", type: "VARCHAR" },
+            { name: "order_total", type: "DECIMAL" },
+          ],
+        },
+      ],
+      executeGeneratedSql: async (sql) => {
+        attempts += 1;
+        if (attempts === 1) throw new Error('Binder Error: Referenced column "customer" not found');
+        return {
+          columns: ["customer_name", "revenue"],
+          rows: [{ customer_name: "Acme", revenue: 10 }],
+          rowCount: 1,
+          sql,
+        };
+      },
+    });
+    expect(result.kind).toBe("uncertified");
+    expect(result.executionError).toBeUndefined();
+    expect(result.proposedSql).toContain("customer_name");
+    expect(result.analysisPlan?.repairAttempts).toBe(1);
+    expect(provider.calls).toHaveLength(2);
+  });
+
+  it("locally repairs generated SQL alias-column binder errors before retrying the model", async () => {
+    const provider = new StubProvider(
+      "Order detail for top customers.\n\n" +
+        "```sql\nWITH TopCustomers AS (SELECT customer_id, lifetime_spend FROM dev.customers ORDER BY lifetime_spend DESC LIMIT 10)\nSELECT t1.order_id, t2.customer_name, t1.order_total FROM dev.orders AS t1 INNER JOIN TopCustomers AS t2 ON t1.customer_id = t2.customer_id INNER JOIN dev.customers AS t3 ON t1.customer_id = t3.customer_id\n```\n\n" +
+        "Viz: table",
+    );
+    let attempts = 0;
+    const result = await answer({
+      question: "Show order details by top customer",
+      provider,
+      kg,
+      schemaContext: [
+        {
+          relation: "dev.customers",
+          schema: "dev",
+          name: "customers",
+          columns: [
+            { name: "customer_id", type: "VARCHAR" },
+            { name: "customer_name", type: "VARCHAR" },
+            { name: "lifetime_spend", type: "DECIMAL" },
+          ],
+        },
+        {
+          relation: "dev.orders",
+          schema: "dev",
+          name: "orders",
+          columns: [
+            { name: "order_id", type: "VARCHAR" },
+            { name: "customer_id", type: "VARCHAR" },
+            { name: "order_total", type: "DECIMAL" },
+          ],
+        },
+      ],
+      executeGeneratedSql: async (sql) => {
+        attempts += 1;
+        if (attempts === 1) {
+          throw new Error('DuckDB query failed: Binder Error: Values list "t2" does not have a column named "customer_name"');
+        }
+        return {
+          columns: ["order_id", "customer_name", "order_total"],
+          rows: [{ order_id: "1", customer_name: "Mr. Matthew Meyer", order_total: 10 }],
+          rowCount: 1,
+          sql,
+        };
+      },
+    });
+    expect(result.kind).toBe("uncertified");
+    expect(result.proposedSql).toContain("t3.customer_name");
+    expect(result.analysisPlan?.repairAttempts).toBe(1);
+    expect(provider.calls).toHaveLength(1);
+    expect(result.executionError).toBeUndefined();
+  });
+
+  it("asks for clarification when no metadata can ground an analytical question", async () => {
+    kg.rebuild([], []);
+    const provider = new StubProvider("should not be called");
+    const result = await answer({
+      question: "Which campaigns performed better?",
+      provider,
+      kg,
+    });
+    expect(result.kind).toBe("no_answer");
+    expect(result.analysisPlan?.intent).toBe("clarify");
+    expect(result.text).toContain("which metric or business object");
+    expect(provider.calls).toHaveLength(0);
   });
 });
 

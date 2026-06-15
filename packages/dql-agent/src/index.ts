@@ -37,10 +37,14 @@ export { loadSkills, parseSkill, buildSkillsPrompt } from "./skills/loader.js";
 export type { Skill, SkillLoadResult } from "./skills/loader.js";
 export { answer, parseProposal } from "./answer-loop.js";
 export type {
+  AgentAnalysisPlan,
   AgentAnswer,
   AgentCitation,
   AgentFollowUpContext,
+  AgentIntent,
   AgentResultPayload,
+  AgentSchemaColumn,
+  AgentSchemaTable,
   AnswerKind,
   AnswerLoopInput,
 } from "./answer-loop.js";

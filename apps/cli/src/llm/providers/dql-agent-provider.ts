@@ -119,6 +119,9 @@ export function createDqlAgentProviderRunner(id: SimpleProviderId): AgentRunner 
             scopeId: req.upstream?.cellId,
             limit: 6,
           });
+          const schemaContext = req.getSchemaContext
+            ? await req.getSchemaContext(question).catch(() => [])
+            : [];
           const skills = loadSkills(req.projectRoot).skills;
           const followUp = inferFollowUpContext(req, question);
           const blockHints = followUp?.kind === 'generic' && followUp.sourceBlockName ? [followUp.sourceBlockName] : [];
@@ -131,6 +134,7 @@ export function createDqlAgentProviderRunner(id: SimpleProviderId): AgentRunner 
             blockHints,
             followUp,
             memoryContext,
+            schemaContext,
             signal,
             executeCertifiedBlock: req.executeCertifiedBlock,
             executeGeneratedSql: req.executeGeneratedSql,

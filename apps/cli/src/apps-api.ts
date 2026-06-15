@@ -592,6 +592,7 @@ interface AiPinCreateRequest {
   tileId?: string;
   title?: string;
   answer?: string;
+  question?: string;
   sql?: string;
   sourceTier?: string;
   certification?: 'certified' | 'ai_generated';
@@ -600,6 +601,9 @@ interface AiPinCreateRequest {
   chartConfig?: Record<string, unknown>;
   result?: unknown;
   citations?: unknown[];
+  analysisPlan?: unknown;
+  evidence?: unknown;
+  followUps?: string[];
 }
 
 interface AppConversationMessageRequest {
@@ -1176,6 +1180,7 @@ function createAiPinTile(
       tileId,
       title,
       answer: cleanString(input.answer) || title,
+      question: cleanString(input.question) || undefined,
       sql: cleanString(input.sql) || undefined,
       sourceTier: cleanString(input.sourceTier) || undefined,
       certification: input.certification === 'certified' ? 'certified' : 'ai_generated',
@@ -1184,6 +1189,9 @@ function createAiPinTile(
       chartConfig: input.chartConfig,
       result: input.result,
       citations: Array.isArray(input.citations) ? input.citations : [],
+      analysisPlan: input.analysisPlan,
+      evidence: input.evidence,
+      followUps: Array.isArray(input.followUps) ? input.followUps.filter((item): item is string => typeof item === 'string') : [],
     });
     const tile: DashboardGridItem = {
       i: tileId,
@@ -1222,6 +1230,17 @@ function promoteAiPinToDraftBlock(
     if (!pin) return { ok: false, error: `AI pin "${pinId}" not found` };
     if (!pin.sql) return { ok: false, error: 'AI pin has no SQL to promote' };
     const blockName = slugify(pin.title) || pin.id;
+    const analysisPlan = pin.analysisPlan && typeof pin.analysisPlan === 'object'
+      ? pin.analysisPlan as { candidateTables?: Array<{ relation?: string }>; dimensions?: string[]; measures?: string[] }
+      : null;
+    const sourceContext = [
+      pin.question ? `Question: ${pin.question}` : '',
+      analysisPlan?.candidateTables?.length
+        ? `Candidate tables: ${analysisPlan.candidateTables.map((table) => table.relation).filter(Boolean).join(', ')}`
+        : '',
+      analysisPlan?.dimensions?.length ? `Dimensions: ${analysisPlan.dimensions.join(', ')}` : '',
+      analysisPlan?.measures?.length ? `Measures: ${analysisPlan.measures.join(', ')}` : '',
+    ].filter(Boolean).join(' | ');
     const draftDir = join(projectRoot, 'apps', appId, 'drafts');
     const blockPath = join(draftDir, `${blockName}.dql`);
     mkdirSync(draftDir, { recursive: true });
@@ -1232,6 +1251,9 @@ function promoteAiPinToDraftBlock(
       '  status = "review"',
       `  owner = "${escapeDqlString(loaded.app.owners[0] ?? `${process.env.USER ?? 'analyst'}@local`)}"`,
       `  description = "${escapeDqlString(pin.answer.slice(0, 240))}"`,
+      sourceContext ? `  llmContext = "${escapeDqlString(sourceContext.slice(0, 800))}"` : '',
+      pin.question ? `  examples = [{ question = "${escapeDqlString(pin.question)}" }]` : '',
+      '  caveats = ["AI-generated draft. Validate joins, filters, grain, and business interpretation before certification."]',
       '  tags = ["ai-generated", "needs-review"]',
       '',
       '  query = """',

@@ -1,5 +1,5 @@
 import React, { useRef, useState } from 'react';
-import { Maximize2, Minimize2, X } from 'lucide-react';
+import { Bot, Maximize2, Minimize2, Send, X } from 'lucide-react';
 import { runAgent } from '../../llm/client';
 import type { AgentTurn } from '../../llm/types';
 import { themes, type Theme } from '../../themes/notebook-theme';
@@ -25,6 +25,10 @@ export function AgentChatPanel({
   onConversationUpdated,
   initialInput,
   emptyHint,
+  inputPlaceholder,
+  variant = 'default',
+  embedded = false,
+  showHeader = true,
   expanded = false,
   onToggleExpanded,
   onClose,
@@ -39,11 +43,17 @@ export function AgentChatPanel({
   onConversationUpdated?: () => void;
   initialInput?: string;
   emptyHint?: string;
+  inputPlaceholder?: string;
+  variant?: 'default' | 'executive';
+  embedded?: boolean;
+  showHeader?: boolean;
   expanded?: boolean;
   onToggleExpanded?: () => void;
   onClose?: () => void;
 }) {
   const t = themes[themeMode];
+  const executive = variant === 'executive';
+  const framed = executive && !embedded;
   const [messages, setMessages] = useState<LocalMessage[]>([]);
   const [input, setInput] = useState(initialInput ?? '');
   const [running, setRunning] = useState(false);
@@ -126,12 +136,40 @@ export function AgentChatPanel({
   };
 
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0, background: t.cellBg }}>
-      <div style={{ padding: 12, borderBottom: `1px solid ${t.headerBorder}` }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+    <div style={{
+      display: 'flex',
+      flexDirection: 'column',
+      height: '100%',
+      minHeight: 0,
+      background: embedded ? 'transparent' : t.cellBg,
+      border: framed ? `1px solid ${t.headerBorder}` : undefined,
+      borderRadius: framed ? 8 : undefined,
+      overflow: framed ? 'hidden' : undefined,
+    }}>
+      {showHeader && (
+      <div style={{ padding: executive ? '10px 12px' : 12, borderBottom: `1px solid ${t.headerBorder}` }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: executive ? 10 : 8 }}>
+          {executive && (
+            <div style={{
+              width: 30,
+              height: 30,
+              borderRadius: 8,
+              background: `${t.accent}16`,
+              border: `1px solid ${t.accent}36`,
+              color: t.accent,
+              display: 'inline-flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              flex: '0 0 auto',
+            }}>
+              <Bot size={16} />
+            </div>
+          )}
           <div style={{ flex: 1, minWidth: 0 }}>
-            <div style={{ fontSize: 13, fontWeight: 700 }}>{title}</div>
-            <div style={{ fontSize: 11, color: t.textSecondary, marginTop: 2 }}>{scopeHint} · Provider from Settings</div>
+            <div style={{ fontSize: executive ? 12.5 : 13, fontWeight: 800, lineHeight: 1.25 }}>{title}</div>
+            <div style={{ fontSize: 11, color: t.textSecondary, marginTop: 2 }}>
+              {scopeHint}{executive ? ' · evidence available on demand' : ' · Provider from Settings'}
+            </div>
           </div>
           {onToggleExpanded && (
             <button type="button" onClick={onToggleExpanded} title={expanded ? 'Collapse chat' : 'Expand chat'} style={iconButtonStyle(t)}>
@@ -145,11 +183,44 @@ export function AgentChatPanel({
           )}
         </div>
       </div>
+      )}
 
-      <div style={{ flex: 1, minHeight: 0, overflow: 'auto', padding: 12, display: 'flex', flexDirection: 'column', gap: 10 }}>
+      <div style={{
+        flex: 1,
+        minHeight: 0,
+        overflow: 'auto',
+        padding: embedded ? '10px 0' : 12,
+        display: 'flex',
+        flexDirection: 'column',
+        gap: executive ? 12 : 10,
+      }}>
         {messages.length === 0 && !running ? (
-          <div style={{ fontSize: 12, color: t.textSecondary, lineHeight: 1.45 }}>
-            {emptyHint ?? 'Ask about metric definitions, filters, tile results, or where to find certified analysis.'}
+          <div style={{
+            display: 'flex',
+            gap: 9,
+            alignItems: 'flex-start',
+            color: t.textSecondary,
+            lineHeight: 1.45,
+          }}>
+            {executive && (
+              <div style={{
+                width: 24,
+                height: 24,
+                borderRadius: 7,
+                background: `${t.accent}14`,
+                color: t.accent,
+                display: 'inline-flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                flex: '0 0 auto',
+                marginTop: 1,
+              }}>
+                <Bot size={13} />
+              </div>
+            )}
+            <div style={{ fontSize: executive ? 12.5 : 12 }}>
+              {emptyHint ?? 'Ask about metric definitions, filters, tile results, or where to find certified analysis.'}
+            </div>
           </div>
         ) : null}
         {messages.map((m, index) => (
@@ -160,6 +231,7 @@ export function AgentChatPanel({
             themeMode={themeMode}
             hideSqlByDefault={hideSqlByDefault}
             addToAppTarget={addToAppTarget}
+            executive={executive}
           />
         ))}
         {running && (
@@ -170,30 +242,47 @@ export function AgentChatPanel({
             themeMode={themeMode}
             hideSqlByDefault={hideSqlByDefault}
             addToAppTarget={addToAppTarget}
+            executive={executive}
           />
         )}
       </div>
 
       {error && <div style={{ margin: '0 12px 8px', color: '#ff7b72', fontSize: 12 }}>{error}</div>}
 
-      <div style={{ padding: 12, borderTop: `1px solid ${t.headerBorder}`, display: 'flex', gap: 8, alignItems: 'flex-end' }}>
+      <div style={{
+        padding: executive ? 10 : 12,
+        borderTop: `1px solid ${t.headerBorder}`,
+        display: 'flex',
+        gap: 8,
+        alignItems: 'flex-end',
+        background: embedded ? 'transparent' : executive ? t.appBg : undefined,
+      }}>
         <textarea
           value={input}
           onChange={(e) => setInput(e.target.value)}
-          rows={2}
-          placeholder="Ask this context..."
+          rows={executive ? 3 : 2}
+          placeholder={inputPlaceholder ?? 'Ask this context...'}
           onKeyDown={(e) => {
             if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
               e.preventDefault();
               void send();
             }
           }}
-          style={{ flex: 1, resize: 'vertical', minHeight: 42, ...selectStyle(t) }}
+          style={{
+            flex: 1,
+            resize: 'vertical',
+            minHeight: executive ? 54 : 42,
+            maxHeight: 140,
+            ...selectStyle(t, executive),
+          }}
         />
         {running ? (
-          <button type="button" onClick={() => abortRef.current?.abort()} style={buttonStyle(t, false)}>Stop</button>
+          <button type="button" onClick={() => abortRef.current?.abort()} style={buttonStyle(t, false, executive)}>Stop</button>
         ) : (
-          <button type="button" onClick={() => void send()} disabled={!input.trim()} style={buttonStyle(t, true)}>Ask</button>
+          <button type="button" onClick={() => void send()} disabled={!input.trim()} style={buttonStyle(t, true, executive)}>
+            {executive && <Send size={14} />}
+            <span>Ask</span>
+          </button>
         )}
       </div>
     </div>
@@ -221,6 +310,7 @@ function Bubble({
   themeMode,
   hideSqlByDefault,
   addToAppTarget,
+  executive,
 }: {
   message: LocalMessage;
   t: Theme;
@@ -228,14 +318,24 @@ function Bubble({
   themeMode: keyof typeof themes;
   hideSqlByDefault: boolean;
   addToAppTarget?: { appId: string; dashboardId: string };
+  executive?: boolean;
 }) {
   const isUser = message.role === 'user';
   const answer = !isUser ? extractGovernedAnswer(message.events ?? []) : null;
   if (answer) {
     return (
       <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-        <div style={{ fontSize: 10, color: live ? t.accent : t.textMuted, textTransform: 'uppercase', fontWeight: 700 }}>
-          DQL Agent
+        <div style={{
+          display: 'inline-flex',
+          alignItems: 'center',
+          gap: 6,
+          fontSize: 10,
+          color: live ? t.accent : t.textMuted,
+          textTransform: 'uppercase',
+          fontWeight: 800,
+        }}>
+          {executive && <Bot size={12} />}
+          Copilot
         </div>
         <AgentAnswerCard
           answer={answer}
@@ -248,9 +348,19 @@ function Bubble({
     );
   }
   return (
-    <div style={{ border: `1px solid ${isUser ? `${t.accent}55` : t.headerBorder}`, borderRadius: 8, padding: 10, background: isUser ? `${t.accent}12` : t.appBg, whiteSpace: answer ? 'normal' : 'pre-wrap', fontSize: 12, lineHeight: 1.5 }}>
-      <div style={{ fontSize: 10, color: live ? t.accent : t.textMuted, textTransform: 'uppercase', fontWeight: 700, marginBottom: 4 }}>
-        {isUser ? 'You' : 'DQL Agent'}
+    <div style={{
+      alignSelf: isUser && executive ? 'flex-end' : 'stretch',
+      maxWidth: isUser && executive ? '88%' : undefined,
+      border: `1px solid ${isUser ? `${t.accent}55` : t.headerBorder}`,
+      borderRadius: executive ? 12 : 8,
+      padding: executive ? '9px 11px' : 10,
+      background: isUser ? `${t.accent}12` : t.appBg,
+      whiteSpace: answer ? 'normal' : 'pre-wrap',
+      fontSize: executive ? 12.5 : 12,
+      lineHeight: 1.5,
+    }}>
+      <div style={{ fontSize: 10, color: live ? t.accent : t.textMuted, textTransform: 'uppercase', fontWeight: 800, marginBottom: 4 }}>
+        {isUser ? 'You' : 'Copilot'}
       </div>
       {message.content}
     </div>
@@ -261,14 +371,15 @@ function stripSqlBlocks(text: string): string {
   return text.replace(/Proposed SQL:\s*```sql[\s\S]*?```/gi, 'Proposed SQL hidden in dashboard mode. Send to analyst review to inspect.');
 }
 
-function selectStyle(t: Theme): React.CSSProperties {
+function selectStyle(t: Theme, executive = false): React.CSSProperties {
   return {
     border: `1px solid ${t.headerBorder}`,
-    borderRadius: 6,
-    background: t.appBg,
+    borderRadius: executive ? 10 : 6,
+    background: executive ? t.cellBg : t.appBg,
     color: t.textPrimary,
-    fontSize: 12,
-    padding: '7px 8px',
+    fontSize: executive ? 12.5 : 12,
+    lineHeight: 1.45,
+    padding: executive ? '10px 11px' : '7px 8px',
     fontFamily: t.font,
   };
 }
@@ -289,14 +400,19 @@ function iconButtonStyle(t: Theme): React.CSSProperties {
   };
 }
 
-function buttonStyle(t: Theme, primary: boolean): React.CSSProperties {
+function buttonStyle(t: Theme, primary: boolean, executive = false): React.CSSProperties {
   return {
     border: `1px solid ${primary ? t.accent : t.headerBorder}`,
-    borderRadius: 6,
+    borderRadius: executive ? 10 : 6,
     background: primary ? `${t.accent}22` : t.appBg,
     color: primary ? t.accent : t.textPrimary,
-    padding: '8px 12px',
+    padding: executive ? '0 13px' : '8px 12px',
+    minHeight: executive ? 42 : undefined,
     cursor: 'pointer',
     fontSize: 12,
+    fontWeight: executive ? 800 : undefined,
+    display: executive ? 'inline-flex' : undefined,
+    alignItems: executive ? 'center' : undefined,
+    gap: executive ? 6 : undefined,
   };
 }

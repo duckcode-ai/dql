@@ -12,6 +12,7 @@ import {
   FileText,
   LayoutDashboard,
   LineChart,
+  MessageSquareText,
   Plus,
   Search,
   Send,
@@ -1320,8 +1321,8 @@ function AppCopilotPanel({
   themeMode: ThemeMode;
   onSelectBlock: (blockId: string | null) => void;
 }) {
-  const [chatExpanded, setChatExpanded] = useState(false);
   const [askSeed, setAskSeed] = useState('');
+  const [evidenceOpen, setEvidenceOpen] = useState(false);
   const blockTiles = useMemo(() => {
     return dashboardDoc?.dashboard.layout.items
       .map((item) => {
@@ -1351,13 +1352,59 @@ function AppCopilotPanel({
       }
     : null;
 
+  const dashboardMeta = dashboardDoc?.dashboard.metadata;
+  const domainLabel = formatBusinessLabel(app?.domain ?? dashboardMeta?.domain ?? 'Business');
+  const focusTitle = formatBusinessLabel(selectedBlock?.title ?? dashboardMeta?.title ?? app?.name ?? 'Dashboard');
+  const businessOutcome = dashboardMeta?.businessOutcome
+    ?? app?.description
+    ?? dashboardMeta?.description
+    ?? 'Understand what is changing, why it matters, and what action should happen next.';
+  const decisionUse = dashboardMeta?.decisionUse
+    ?? 'Review performance, isolate drivers, and decide the next operating action.';
+  const audience = dashboardMeta?.audience ?? app?.audience ?? 'Leadership';
+  const owner = dashboardMeta?.businessOwner ?? app?.owners?.[0] ?? 'Local owner';
+  const cadence = dashboardMeta?.reviewCadence ?? 'On demand';
+  const selectedRows = selectedTileRun?.result?.rowCount ?? selectedTileRun?.result?.rows?.length;
+  const selectedColumns = selectedTileRun?.result?.columns?.length ?? 0;
+  const focusStatus = selectedTileRun?.status === 'ok'
+    ? 'Current result loaded'
+    : selectedTileRun?.status === 'error'
+      ? 'Needs attention'
+      : selectedTileRun?.status === 'unauthorized'
+        ? 'Access limited'
+        : dashboardRun
+          ? 'Waiting for result'
+          : 'Ready to ask';
+  const focusDetail = selectedBlock
+    ? 'Business answer first; data and lineage stay in evidence.'
+    : 'Ask across the dashboard. The copilot will answer in business language first, then expose evidence when you need the trace.';
+  const businessFacts = [
+    { label: 'Audience', value: audience },
+    { label: 'Owner', value: owner },
+    { label: 'Cadence', value: cadence },
+  ];
+  const draftCount = appDoc?.drafts?.length ?? 0;
+  const focusMetric = typeof selectedRows === 'number'
+    ? `${selectedRows.toLocaleString()} rows${selectedColumns ? ` / ${selectedColumns} fields` : ''}`
+    : focusStatus;
+
   const contextJson = JSON.stringify({
     scope: selectedBlockContext ? 'selected-dashboard-block' : 'dashboard',
+    responseStyle: {
+      audience: 'CXO and business stakeholder',
+      firstResponse: 'Start with a plain-language business answer and recommended action.',
+      evidenceRule: 'Keep block ids, SQL, lineage, and implementation details in evidence sections unless the user asks for them.',
+    },
     appId: app?.id,
     appName: app?.name,
     dashboardId: dashboardDoc?.dashboard.id,
     dashboardTitle: dashboardDoc?.dashboard.metadata.title,
     domain: app?.domain ?? dashboardDoc?.dashboard.metadata.domain,
+    businessOutcome,
+    decisionUse,
+    audience,
+    owner,
+    reviewCadence: cadence,
     selectedBlock: selectedBlockContext,
     availableBlocks: blockTiles.map((block) => ({
       blockId: block.blockId,
@@ -1369,43 +1416,54 @@ function AppCopilotPanel({
   }, null, 2);
   const promptStarters = [
     {
-      label: 'Drill through',
+      label: 'Explain impact',
+      icon: <MessageSquareText size={14} />,
+      prompt: selectedBlock
+        ? `Explain ${selectedBlock.title} for an executive audience. Start with what it means for the business, why it matters, and what action to consider. Keep technical evidence secondary.`
+        : 'Explain this dashboard for an executive audience. Start with the business story, decision impact, and what action to consider. Keep technical evidence secondary.',
+    },
+    {
+      label: 'Drill into drivers',
       icon: <LineChart size={14} />,
       prompt: selectedBlock
-        ? `Drill through ${selectedBlock.title}. Use the current result sample, find the best breakdown, and show the data that explains what changed.`
-        : 'Drill through this dashboard. Use current result samples, find the best breakdown, and show the data that explains the story.',
+        ? `Drill into the main drivers behind ${selectedBlock.title}. Use the current result sample and return the clearest business breakdown before any technical details.`
+        : 'Drill into the main drivers behind this dashboard. Use current result samples and return the clearest business breakdown before any technical details.',
     },
     {
       label: 'Improve story',
       icon: <Sparkles size={14} />,
       prompt: selectedBlock
-        ? `Suggest changes to make ${selectedBlock.title} clearer in this app story.`
-        : 'Suggest changes to make this dashboard tell a clearer business story.',
+        ? `Suggest how to make ${selectedBlock.title} easier for leadership to read, decide from, and trust.`
+        : 'Suggest how to make this dashboard easier for leadership to read, decide from, and trust.',
     },
     {
-      label: 'Explain focus',
-      icon: <FileText size={14} />,
-      prompt: selectedBlock
-        ? `Explain ${selectedBlock.blockId}, the metric logic, and what decision it supports.`
-        : 'Explain this dashboard and the decisions it supports.',
-    },
-    {
-      label: 'Review gaps',
+      label: 'Find trust gaps',
       icon: <ShieldCheck size={14} />,
       prompt: selectedBlock
-        ? `What context, certification, or review gaps should we fix for ${selectedBlock.blockId}?`
-        : 'What context, certification, or review gaps should we fix for this app?',
+        ? `What business context, data quality, certification, or review gaps should we fix before leaders rely on ${selectedBlock.title}?`
+        : 'What business context, data quality, certification, or review gaps should we fix before leaders rely on this app?',
     },
   ];
   return (
-    <aside className="dql-app-explain-panel dql-app-copilot-panel">
-      <div className="dql-app-explain-head">
-        <span>AI Copilot</span>
-        <h3>{selectedBlock?.title ?? 'Dashboard copilot'}</h3>
-        <p>{selectedBlock ? `Focused on ${selectedBlock.blockId}` : 'Ask for dashboard changes or missing context.'}</p>
+    <aside className="dql-app-explain-panel dql-app-assistant-panel">
+      <div className="dql-app-assistant-top">
+        <div className="dql-app-assistant-title">
+          <span><Bot size={14} /> AI assistant</span>
+          <h3>{focusTitle}</h3>
+          <p>{decisionUse}</p>
+        </div>
+        <button
+          type="button"
+          className={`dql-app-assistant-context-btn ${evidenceOpen ? 'on' : ''}`}
+          onClick={() => setEvidenceOpen((value) => !value)}
+        >
+          Context
+          <ChevronDown size={14} />
+        </button>
       </div>
-      <div className="dql-app-copilot-controls">
-        <label className="dql-app-copilot-focus">
+
+      <div className="dql-app-assistant-focusbar">
+        <label>
           <span>Focus</span>
           <select
             value={selectedBlock?.blockId ?? ''}
@@ -1414,14 +1472,27 @@ function AppCopilotPanel({
             <option value="">Dashboard</option>
             {blockTiles.map((block) => (
               <option key={block.tileId} value={block.blockId}>
-                {block.title}
+                {formatBusinessLabel(block.title)}
               </option>
             ))}
           </select>
         </label>
-        {blockTiles.length === 0 ? <div className="dql-app-copilot-empty">No block-backed tiles yet.</div> : null}
+        <span>{focusMetric}</span>
       </div>
-      <div className="dql-app-copilot-prompts" aria-label="Prompt starters">
+
+      {evidenceOpen ? (
+        <div className="dql-app-assistant-context">
+          <p>{businessOutcome}</p>
+          <div>
+            {businessFacts.map((item) => <KeyValueInline key={item.label} label={item.label} value={item.value} />)}
+            <KeyValueInline label="Result" value={focusMetric} />
+            <KeyValueInline label="Evidence" value={focusDetail} />
+            <KeyValueInline label="Drafts" value={String(draftCount)} />
+          </div>
+        </div>
+      ) : null}
+
+      <div className="dql-app-assistant-suggestions" aria-label="Prompt starters">
         {promptStarters.map((item) => (
           <button key={item.label} type="button" onClick={() => setAskSeed(`${item.prompt} `)}>
             {item.icon}
@@ -1429,30 +1500,24 @@ function AppCopilotPanel({
           </button>
         ))}
       </div>
-      <div className="dql-app-copilot-chat">
-        <div className={`dql-app-rail-chat ${chatExpanded ? 'expanded' : ''}`}>
-          <AgentChatPanel
-            title={selectedBlock ? `Copilot: ${selectedBlock.title}` : 'App AI Copilot'}
-            scopeHint="App dashboard and selected block context"
-            upstreamContext={contextJson}
-            themeMode={themeMode}
-            hideSqlByDefault
-            initialInput={askSeed}
-            emptyHint="Ask for dashboard changes, block explanations, missing context, or what to add next."
-            addToAppTarget={app && dashboardDoc ? { appId: app.id, dashboardId: dashboardDoc.dashboard.id } : undefined}
-            conversationTarget={app && dashboardDoc ? { appId: app.id, dashboardId: dashboardDoc.dashboard.id } : undefined}
-            expanded={chatExpanded}
-            onToggleExpanded={() => setChatExpanded((value) => !value)}
-            onClose={chatExpanded ? () => setChatExpanded(false) : undefined}
-          />
-        </div>
+
+      <div className="dql-app-assistant-chat">
+        <AgentChatPanel
+          title={selectedBlock ? selectedBlock.title : 'Ask the app copilot'}
+          scopeHint="Business answer first"
+          upstreamContext={contextJson}
+          themeMode={themeMode}
+          hideSqlByDefault
+          initialInput={askSeed}
+          emptyHint="Ask what changed, why it matters, what action to take, or what evidence needs review."
+          inputPlaceholder="Ask a business question..."
+          variant="executive"
+          embedded
+          showHeader={false}
+          addToAppTarget={app && dashboardDoc ? { appId: app.id, dashboardId: dashboardDoc.dashboard.id } : undefined}
+          conversationTarget={app && dashboardDoc ? { appId: app.id, dashboardId: dashboardDoc.dashboard.id } : undefined}
+        />
       </div>
-      {(appDoc?.drafts?.length ?? 0) > 0 ? (
-        <div className="dql-app-gapcard">
-          <Leader label="drafts needing review" value={String(appDoc?.drafts?.length ?? 0)} tone="draft" />
-          <p>Drafts are visible in Build mode so they can be reviewed and promoted into certified blocks.</p>
-        </div>
-      ) : null}
     </aside>
   );
 }
@@ -1601,6 +1666,19 @@ function sampleDashboardRows(rows?: Array<Record<string, unknown>>, columns?: st
   return rows.slice(0, 5).map((row) => Object.fromEntries(selectedColumns.map((column) => [column, row[column]])));
 }
 
+function formatBusinessLabel(value?: string | null): string {
+  const clean = String(value ?? '').replace(/[_-]+/g, ' ').replace(/\s+/g, ' ').trim();
+  if (!clean) return 'Business';
+  return clean.split(' ').map((word) => {
+    const lower = word.toLowerCase();
+    if (lower === 'ai') return 'AI';
+    if (lower === 'cxo') return 'CXO';
+    if (lower === 'kpi') return 'KPI';
+    if (lower === 'vs' || lower === 'vs.') return 'vs.';
+    return `${word.charAt(0).toUpperCase()}${word.slice(1)}`;
+  }).join(' ');
+}
+
 function buildAppShareText(
   app: AppSummary | null,
   appDoc: AppDocumentSummary | null,
@@ -1677,6 +1755,15 @@ function Leader({ label, value, tone }: { label: string; value: string; tone?: '
   return (
     <div className={`dql-app-leader ${tone ?? ''}`}>
       <span>{label}</span><i /><b>{value}</b>
+    </div>
+  );
+}
+
+function KeyValueInline({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="dql-app-keyvalue-inline">
+      <span>{label}</span>
+      <b>{value}</b>
     </div>
   );
 }
@@ -3132,12 +3219,13 @@ const APP_STYLES = `
 .dql-app-explain-panel {
   position: sticky;
   top: 110px;
-  width: clamp(300px, 24vw, 420px);
-  min-width: 280px;
-  max-width: min(520px, 40vw);
+  width: clamp(340px, 27vw, 450px);
+  min-width: 320px;
+  max-width: min(540px, 42vw);
+  min-height: 520px;
   height: min(680px, calc(100vh - 176px));
   max-height: calc(100vh - 176px);
-  resize: horizontal;
+  resize: both;
   border: 1px solid var(--dql-app-line);
   border-radius: 8px;
   background: var(--dql-app-surface);
@@ -3151,10 +3239,273 @@ const APP_STYLES = `
   overflow: hidden;
 }
 
-.dql-app-copilot-chat {
+.dql-app-assistant-panel {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  background: var(--dql-app-surface);
+}
+
+.dql-app-assistant-top {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 16px 16px 12px;
+  border-bottom: 1px solid var(--dql-app-line);
+}
+
+.dql-app-assistant-title {
+  flex: 1;
+  min-width: 0;
+}
+
+.dql-app-assistant-title > span {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  color: var(--dql-app-accent);
+  font: 800 10px var(--font-mono);
+  letter-spacing: 0;
+  text-transform: uppercase;
+}
+
+.dql-app-assistant-title h3 {
+  margin: 8px 0 0;
+  color: var(--dql-app-ink);
+  font-size: 22px;
+  line-height: 1.12;
+}
+
+.dql-app-assistant-title p {
+  margin: 7px 0 0;
+  max-width: 38rem;
+  color: var(--dql-app-muted);
+  font-size: 12.5px;
+  line-height: 1.45;
+}
+
+.dql-app-assistant-context-btn {
+  flex: none;
+  height: 32px;
+  border: 1px solid var(--dql-app-line);
+  border-radius: 8px;
+  background: var(--dql-app-control);
+  color: var(--dql-app-muted);
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 10px;
+  cursor: pointer;
+  font: 800 11px var(--font-ui);
+}
+
+.dql-app-assistant-context-btn.on,
+.dql-app-assistant-context-btn:hover {
+  color: var(--dql-app-accent);
+  border-color: rgba(79, 99, 215, 0.34);
+  background: var(--dql-app-accent-soft);
+}
+
+.dql-app-assistant-context-btn.on svg { transform: rotate(180deg); }
+
+.dql-app-assistant-focusbar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 16px;
+  border-bottom: 1px solid var(--dql-app-line);
+  background: var(--dql-app-surface-muted);
+}
+
+.dql-app-assistant-focusbar label {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.dql-app-assistant-focusbar label > span {
+  color: var(--dql-app-muted);
+  font: 800 9px var(--font-mono);
+  text-transform: uppercase;
+}
+
+.dql-app-assistant-focusbar select {
+  min-width: 0;
+  flex: 1;
+  height: 34px;
+  border: 1px solid var(--dql-app-line-2);
+  border-radius: 8px;
+  background: var(--dql-app-surface);
+  color: var(--dql-app-ink);
+  padding: 0 10px;
+  font: 800 12px var(--font-ui);
+}
+
+.dql-app-assistant-focusbar > span {
+  flex: none;
+  color: var(--dql-app-green);
+  border: 1px solid rgba(22, 163, 74, 0.24);
+  background: var(--dql-app-green-soft);
+  border-radius: 999px;
+  padding: 4px 8px;
+  white-space: nowrap;
+  font: 800 10px var(--font-mono);
+  text-transform: uppercase;
+}
+
+.dql-app-assistant-context {
+  display: grid;
+  gap: 10px;
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--dql-app-line);
+  background: var(--dql-app-control);
+}
+
+.dql-app-assistant-context p {
+  margin: 0;
+  color: var(--dql-app-muted);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.dql-app-assistant-context > div {
+  display: grid;
+  gap: 6px;
+}
+
+.dql-app-assistant-suggestions {
+  display: flex;
+  gap: 7px;
+  flex-wrap: wrap;
+  padding: 10px 16px;
+  border-bottom: 1px solid var(--dql-app-line);
+}
+
+.dql-app-assistant-suggestions button {
+  min-width: 0;
+  height: 32px;
+  border: 1px solid var(--dql-app-line);
+  border-radius: 999px;
+  background: var(--dql-app-surface);
+  color: var(--dql-app-muted);
+  padding: 0 10px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+  font: 800 11px var(--font-ui);
+}
+
+.dql-app-assistant-suggestions button:hover {
+  color: var(--dql-app-accent);
+  border-color: rgba(79, 99, 215, 0.34);
+  background: var(--dql-app-accent-soft);
+}
+
+.dql-app-assistant-chat {
+  flex: 1;
+  min-height: 260px;
+  display: flex;
+  flex-direction: column;
+  padding: 0 16px 14px;
+}
+
+.dql-app-assistant-chat > div {
   flex: 1;
   min-height: 0;
-  padding: 0 12px 12px;
+}
+
+.dql-app-copilot-hero {
+  padding: 12px 14px 10px;
+  border-bottom: 1px solid var(--dql-app-line);
+  background: linear-gradient(180deg, var(--dql-app-surface), var(--dql-app-surface-muted));
+}
+
+.dql-app-copilot-kicker {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  color: var(--dql-app-muted);
+  font: 750 10px var(--font-mono);
+  letter-spacing: 0;
+  text-transform: uppercase;
+}
+
+.dql-app-copilot-kicker svg { color: var(--dql-app-accent); }
+.dql-app-copilot-hero h3 {
+  margin: 6px 0 0;
+  color: var(--dql-app-ink);
+  font-size: 19px;
+  line-height: 1.15;
+}
+
+.dql-app-copilot-hero p {
+  margin: 6px 0 0;
+  color: var(--dql-app-muted);
+  font-size: 11.5px;
+  line-height: 1.42;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.dql-app-copilot-decision {
+  margin-top: 8px;
+  border: 1px solid var(--dql-app-line);
+  border-radius: 7px;
+  background: var(--dql-app-surface);
+  padding: 7px 9px;
+}
+
+.dql-app-copilot-decision small,
+.dql-app-copilot-facts small {
+  display: block;
+  color: var(--dql-app-muted);
+  font: 750 9px var(--font-mono);
+  letter-spacing: 0;
+  text-transform: uppercase;
+}
+
+.dql-app-copilot-decision b {
+  display: block;
+  margin-top: 3px;
+  color: var(--dql-app-ink);
+  font-size: 11.5px;
+  line-height: 1.32;
+}
+
+.dql-app-copilot-facts {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 6px;
+  margin-top: 7px;
+}
+
+.dql-app-copilot-facts span {
+  min-width: 0;
+  border-radius: 7px;
+  background: var(--dql-app-control);
+  padding: 6px 8px;
+}
+
+.dql-app-copilot-facts b {
+  display: block;
+  margin-top: 2px;
+  color: var(--dql-app-ink);
+  font-size: 10.5px;
+  line-height: 1.25;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.dql-app-copilot-chat {
+  flex: 1;
+  min-height: 210px;
+  padding: 9px 12px 12px;
 }
 
 .dql-app-explain-head { padding: 14px 16px 12px; border-bottom: 1px solid var(--dql-app-line); }
@@ -3171,7 +3522,7 @@ const APP_STYLES = `
 .dql-app-ex-section { padding: 13px 16px; border-bottom: 1px solid var(--dql-app-line); }
 .dql-app-ex-section.compact { padding-top: 11px; padding-bottom: 11px; }
 .dql-app-copilot-controls {
-  padding: 10px 12px 8px;
+  padding: 8px 12px;
   border-bottom: 1px solid var(--dql-app-line);
 }
 
@@ -3205,16 +3556,63 @@ const APP_STYLES = `
   font-size: 11px;
 }
 
+.dql-app-copilot-brief {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 9px 12px;
+  border-bottom: 1px solid var(--dql-app-line);
+}
+
+.dql-app-copilot-brief > div {
+  min-width: 0;
+  flex: 1;
+}
+
+.dql-app-copilot-brief span {
+  display: inline-flex;
+  color: var(--dql-app-green);
+  font: 750 9px var(--font-mono);
+  letter-spacing: 0;
+  text-transform: uppercase;
+}
+
+.dql-app-copilot-brief b {
+  display: block;
+  margin-top: 4px;
+  color: var(--dql-app-ink);
+  font-size: 13px;
+  line-height: 1.25;
+}
+
+.dql-app-copilot-brief p {
+  margin: 4px 0 0;
+  color: var(--dql-app-muted);
+  font-size: 11.5px;
+  line-height: 1.35;
+}
+
+.dql-app-copilot-result-pill {
+  flex: none;
+  border-radius: 999px;
+  border: 1px solid rgba(22, 163, 74, 0.24);
+  background: var(--dql-app-green-soft);
+  color: var(--dql-app-green) !important;
+  padding: 4px 8px;
+  white-space: nowrap;
+}
+
 .dql-app-copilot-prompts {
   display: flex;
-  gap: 6px;
+  gap: 7px;
   flex-wrap: wrap;
-  padding: 9px 12px 10px;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--dql-app-line);
 }
 
 .dql-app-copilot-prompts button {
   min-width: 0;
-  height: 30px;
+  height: 31px;
   border: 1px solid var(--dql-app-line);
   border-radius: 999px;
   background: var(--dql-app-surface);
@@ -3235,6 +3633,69 @@ const APP_STYLES = `
 
 .dql-app-copilot-prompts svg {
   flex: 0 0 auto;
+}
+
+.dql-app-copilot-evidence {
+  border-bottom: 1px solid var(--dql-app-line);
+}
+
+.dql-app-copilot-evidence summary {
+  min-height: 36px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 12px;
+  cursor: pointer;
+  color: var(--dql-app-muted);
+  font: 800 11px var(--font-ui);
+  list-style: none;
+}
+
+.dql-app-copilot-evidence summary::-webkit-details-marker { display: none; }
+.dql-app-copilot-evidence summary span {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.dql-app-copilot-evidence summary small {
+  margin-left: auto;
+  min-width: 0;
+  max-width: 160px;
+  color: var(--dql-app-faint);
+  font: 700 10px var(--font-mono);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.dql-app-copilot-evidence > div {
+  display: grid;
+  gap: 6px;
+  padding: 0 12px 11px;
+}
+
+.dql-app-keyvalue-inline {
+  display: grid;
+  grid-template-columns: 92px minmax(0, 1fr);
+  gap: 8px;
+  align-items: baseline;
+  font-size: 11px;
+}
+
+.dql-app-keyvalue-inline span {
+  color: var(--dql-app-faint);
+  font-family: var(--font-mono);
+}
+
+.dql-app-keyvalue-inline b {
+  min-width: 0;
+  color: var(--dql-app-muted);
+  font-weight: 700;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .dql-app-block-cite {
   display: flex;

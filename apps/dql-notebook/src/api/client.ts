@@ -258,6 +258,7 @@ export interface LocalAiPin {
   tileId?: string;
   title: string;
   answer: string;
+  question?: string;
   sql?: string;
   sourceTier?: string;
   certification: 'certified' | 'ai_generated';
@@ -266,6 +267,9 @@ export interface LocalAiPin {
   chartConfig?: Record<string, unknown>;
   result?: QueryResult;
   citations?: unknown[];
+  analysisPlan?: unknown;
+  evidence?: unknown;
+  followUps?: string[];
   createdAt: string;
   updatedAt: string;
   lastRefreshedAt?: string;
@@ -1636,10 +1640,11 @@ export const api = {
     }
   },
 
-  async createAiPin(appId: string, input: {
+ async createAiPin(appId: string, input: {
     dashboardId: string;
     title: string;
     answer: string;
+    question?: string;
     sql?: string;
     sourceTier?: string;
     certification?: 'certified' | 'ai_generated';
@@ -1647,6 +1652,9 @@ export const api = {
     chartConfig?: Record<string, unknown>;
     result?: QueryResult;
     citations?: unknown[];
+    analysisPlan?: unknown;
+    evidence?: unknown;
+    followUps?: string[];
   }): Promise<{ ok: true; pin: LocalAiPin; dashboard?: DashboardDocumentResponse['dashboard']; tile?: DashboardDocumentResponse['dashboard']['layout']['items'][number] } | { ok: false; error: string }> {
     try {
       return await request(

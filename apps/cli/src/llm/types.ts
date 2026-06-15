@@ -1,4 +1,4 @@
-import type { AgentResultPayload, KGNode } from '@duckcodeailabs/dql-agent';
+import type { AgentResultPayload, AgentSchemaTable, KGNode } from '@duckcodeailabs/dql-agent';
 
 export type ProviderId = 'claude-agent-sdk' | 'claude-code' | 'openai' | 'gemini' | 'ollama' | 'custom-openai';
 
@@ -38,6 +38,7 @@ export interface AgentRunRequest {
   projectRoot: string;
   executeCertifiedBlock?: (block: KGNode) => Promise<AgentResultPayload>;
   executeGeneratedSql?: (sql: string) => Promise<AgentResultPayload>;
+  getSchemaContext?: (question: string) => Promise<AgentSchemaTable[]>;
 }
 
 export interface AgentRunner {

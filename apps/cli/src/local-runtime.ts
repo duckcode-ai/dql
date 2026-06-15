@@ -63,6 +63,7 @@ import {
   ensureDefaultMemoryFiles,
   type AgentResultPayload,
   type AgentProvider,
+  type AgentSchemaTable,
   type KGNode,
 } from '@duckcodeailabs/dql-agent';
 import { handleAppsApi } from './apps-api.js';
@@ -396,6 +397,23 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
       executionTime: normalized.executionTime,
       sql: prepared.sql,
     };
+  };
+
+  const getSchemaContextForAgent = async (question: string): Promise<AgentSchemaTable[]> => {
+    try {
+      const result = await executor.executeQuery(
+        `SELECT table_schema, table_name, column_name, data_type
+         FROM information_schema.columns
+         WHERE table_schema NOT IN ('information_schema', 'pg_catalog')
+         ORDER BY table_schema, table_name, ordinal_position`,
+        [],
+        runtimeVariables({}),
+        connection,
+      );
+      return buildAgentSchemaContext(question, result.rows);
+    } catch {
+      return [];
+    }
   };
 
   // SSE clients for /api/watch hot-reload
@@ -2801,6 +2819,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
             projectRoot,
             executeCertifiedBlock: executeCertifiedBlockForAgent,
             executeGeneratedSql: executeGeneratedSqlForAgent,
+            getSchemaContext: getSchemaContextForAgent,
           },
           emit,
           controller.signal,
@@ -6474,6 +6493,87 @@ function isAiPinRefreshDue(lastRefreshedAt?: string): boolean {
   const last = Date.parse(lastRefreshedAt);
   if (!Number.isFinite(last)) return true;
   return Date.now() - last >= 24 * 60 * 60 * 1000;
+}
+
+function buildAgentSchemaContext(question: string, rows: unknown[]): AgentSchemaTable[] {
+  const byRelation = new Map<string, AgentSchemaTable>();
+  for (const row of rows) {
+    if (!row || typeof row !== 'object') continue;
+    const record = row as Record<string, unknown>;
+    const schema = stringFromRecord(record, 'table_schema');
+    const table = stringFromRecord(record, 'table_name');
+    const column = stringFromRecord(record, 'column_name');
+    if (!schema || !table || !column) continue;
+    const relation = `${schema}.${table}`;
+    const current = byRelation.get(relation) ?? {
+      relation,
+      schema,
+      name: table,
+      source: 'runtime information_schema',
+      columns: [],
+    };
+    if (current.columns.length < 80) {
+      current.columns.push({
+        name: column,
+        type: stringFromRecord(record, 'data_type'),
+      });
+    }
+    byRelation.set(relation, current);
+  }
+  const tokens = agentSchemaTokens(question);
+  return Array.from(byRelation.values())
+    .map((table) => ({ table, score: scoreAgentSchemaTable(table, tokens) }))
+    .filter((entry) => entry.score > 0)
+    .sort((a, b) => b.score - a.score || a.table.relation.localeCompare(b.table.relation))
+    .slice(0, 12)
+    .map((entry) => entry.table);
+}
+
+function scoreAgentSchemaTable(table: AgentSchemaTable, tokens: Set<string>): number {
+  let score = 0;
+  const relationTokens = agentSchemaTokens(`${table.schema ?? ''} ${table.name} ${table.relation}`);
+  for (const token of tokens) {
+    if (relationTokens.has(token)) score += 8;
+  }
+  for (const column of table.columns) {
+    const columnTokens = agentSchemaTokens(column.name);
+    for (const token of tokens) {
+      if (columnTokens.has(token)) score += 3;
+    }
+  }
+  if (/(customer|order|revenue|product|location|date|month)/i.test(table.name)) score += 1;
+  return score;
+}
+
+function agentSchemaTokens(value: string): Set<string> {
+  const tokens = new Set<string>();
+  for (const raw of value.toLowerCase().match(/[a-z0-9_]+/g) ?? []) {
+    for (const part of raw.split('_')) {
+      const normalized = normalizeAgentSchemaToken(part);
+      if (!normalized || normalized.length < 3 || AGENT_SCHEMA_STOPWORDS.has(normalized)) continue;
+      tokens.add(normalized);
+    }
+  }
+  return tokens;
+}
+
+const AGENT_SCHEMA_STOPWORDS = new Set([
+  'all', 'and', 'are', 'can', 'data', 'for', 'from', 'have', 'how', 'many', 'me',
+  'show', 'the', 'this', 'who', 'with', 'value',
+]);
+
+function normalizeAgentSchemaToken(token: string): string {
+  if (token === 'orders') return 'order';
+  if (token === 'customers') return 'customer';
+  if (token === 'products') return 'product';
+  if (token.endsWith('ies') && token.length > 4) return `${token.slice(0, -3)}y`;
+  if (token.endsWith('s') && token.length > 4) return token.slice(0, -1);
+  return token;
+}
+
+function stringFromRecord(record: Record<string, unknown>, key: string): string | undefined {
+  const value = record[key];
+  return typeof value === 'string' && value.trim().length > 0 ? value.trim() : undefined;
 }
 
 function isMemoryScope(value: unknown): value is 'thread' | 'notebook' | 'project' | 'user' | 'artifact' {

@@ -24,13 +24,21 @@ describe('LocalAppStorage', () => {
       dashboardId: 'bank-overview',
       title: 'AI summary',
       answer: 'Deposits are growing.',
+      question: 'Why did deposits grow?',
       sql: 'SELECT 1 AS value',
       chartConfig: { chart: 'single_value' },
       result: { columns: ['value'], rows: [{ value: 1 }], rowCount: 1 },
+      analysisPlan: { intent: 'ad_hoc_analysis', candidateTables: [{ relation: 'dev.deposits' }] },
+      evidence: { validation: { status: 'warning' } },
+      followUps: ['Show deposits by segment'],
     });
 
     expect(pin.reviewStatus).toBe('needs_review');
-    expect(store.listAiPins('executive-cockpit', 'bank-overview')).toHaveLength(1);
+    const listed = store.listAiPins('executive-cockpit', 'bank-overview');
+    expect(listed).toHaveLength(1);
+    expect(listed[0].question).toBe('Why did deposits grow?');
+    expect(listed[0].analysisPlan).toMatchObject({ intent: 'ad_hoc_analysis' });
+    expect(listed[0].followUps).toEqual(['Show deposits by segment']);
 
     const refreshed = store.updateAiPinResult(pin.id, { columns: ['value'], rows: [{ value: 2 }], rowCount: 1 });
     expect(refreshed?.lastRefreshedAt).toBeTruthy();
