@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { CSSProperties, PointerEvent as ReactPointerEvent } from 'react';
-import { Bot, GitBranch, GripVertical, Maximize2, Plus, SlidersHorizontal, Trash2 } from 'lucide-react';
+import { Bot, GitBranch, GripVertical, Maximize2, Plus, SlidersHorizontal, Trash2, Wand2 } from 'lucide-react';
 import { api, type AppBlockRecommendation, type DashboardDocumentResponse, type DashboardRunResponse } from '../../api/client';
 import { useNotebook } from '../../store/NotebookStore';
 import type { CellChartConfig, ThemeMode } from '../../store/types';
@@ -79,6 +79,7 @@ export function DashboardRenderer({
   const [chatExpanded, setChatExpanded] = useState(false);
   const [textDialogKind, setTextDialogKind] = useState<'text' | 'heading' | null>(null);
   const [textDialogValue, setTextDialogValue] = useState('');
+  const [dragPreview, setDragPreview] = useState<{ tileId: string; x: number; y: number; w: number; h: number } | null>(null);
   const gridRef = useRef<HTMLDivElement | null>(null);
   const cols = dashboard.layout.cols;
   const rowHeight = dashboard.layout.rowHeight;
@@ -260,9 +261,46 @@ export function DashboardRenderer({
       x: clamp(rawX, 0, Math.max(0, cols - item.w)),
       y: Math.max(0, rawY),
     };
+    setDragPreview(null);
     const ordered = reorderTileForDrop(dashboard.layout.items, moved, cols);
     await saveItems(packDashboardItems(ordered, cols));
   }, [cols, dashboard.layout.items, rowHeight, saveItems]);
+
+  const updateDragPreview = useCallback((tileId: string, point: { clientX: number; clientY: number }) => {
+    const grid = gridRef.current;
+    const item = dashboard.layout.items.find((candidate) => candidate.i === tileId);
+    if (!grid || !item) return;
+    const rect = grid.getBoundingClientRect();
+    const gap = 12;
+    const colWidth = (rect.width - gap * (cols - 1)) / cols;
+    const rawX = Math.round((point.clientX - rect.left) / (colWidth + gap));
+    const rawY = Math.round((point.clientY - rect.top) / (rowHeight + gap));
+    setDragPreview({
+      tileId,
+      x: clamp(rawX, 0, Math.max(0, cols - item.w)),
+      y: Math.max(0, rawY),
+      w: item.w,
+      h: item.h,
+    });
+  }, [cols, dashboard.layout.items, rowHeight]);
+
+  const clearDragPreview = useCallback(() => setDragPreview(null), []);
+
+  const autoLayout = useCallback(async () => {
+    const items = dashboard.layout.items;
+    if (items.length === 0) return;
+    const ordered = [...items]
+      .map((item, index) => ({ item, index }))
+      .sort((a, b) => {
+        const rank = autoLayoutRank(a.item) - autoLayoutRank(b.item);
+        return rank !== 0 ? rank : a.index - b.index;
+      })
+      .map(({ item }) => {
+        const size = autoTileSizeForViz(normalizeViz(String(item.viz.type ?? 'table')), cols);
+        return { ...item, w: size.w, h: size.h };
+      });
+    await saveItems(packDashboardItems(ordered, cols));
+  }, [cols, dashboard.layout.items, saveItems]);
 
   const loadLineage = useCallback(async () => {
     setLineageOpen((value) => !value);
@@ -335,6 +373,18 @@ export function DashboardRenderer({
             onAi={openCopilot}
           />
         )}
+        {editable && dashboard.layout.items.length > 1 && (
+          <button
+            type="button"
+            onClick={() => void autoLayout()}
+            disabled={saving}
+            style={toolbarButtonStyle(false)}
+            title="Auto-arrange every tile into a clean, gap-free grid"
+          >
+            <Wand2 size={14} strokeWidth={2} />
+            Auto layout
+          </button>
+        )}
         {editable && dashboard.layout.items.length > 0 && (
           <span style={dashboardEditStatusStyle}>{saving ? 'Saving...' : `${dashboard.layout.items.length} tiles`}</span>
         )}
@@ -404,6 +454,20 @@ export function DashboardRenderer({
             gap: 12,
           }}
         >
+          {dragPreview && (
+            <div
+              aria-hidden="true"
+              style={{
+                gridColumn: `${dragPreview.x + 1} / span ${dragPreview.w}`,
+                gridRow: `${dragPreview.y + 1} / span ${dragPreview.h}`,
+                border: '2px dashed var(--dql-app-accent, var(--accent, #4f46e5))',
+                background: 'var(--dql-app-accent-soft, rgba(79,70,229,0.10))',
+                borderRadius: 10,
+                pointerEvents: 'none',
+                zIndex: 10,
+              }}
+            />
+          )}
           {dashboard.layout.items.map((item) => (
             <DashboardTile
               key={item.i}
@@ -417,6 +481,8 @@ export function DashboardRenderer({
               selected={Boolean(getDashboardItemBlockId(item) && getDashboardItemBlockId(item) === selectedBlockId)}
               onFocusBlock={onBlockFocus}
               onMove={(point) => void moveTileToPoint(item.i, point)}
+              onDragMove={(point) => updateDragPreview(item.i, point)}
+              onDragEnd={clearDragPreview}
               onPatch={(patch) => void patchTile(item.i, patch)}
             />
           ))}
@@ -486,6 +552,8 @@ function DashboardTile({
   selected,
   onFocusBlock,
   onMove,
+  onDragMove,
+  onDragEnd,
   onPatch,
 }: {
   item: DashboardDocumentResponse['dashboard']['layout']['items'][number];
@@ -498,6 +566,8 @@ function DashboardTile({
   selected?: boolean;
   onFocusBlock?: (blockId: string) => void;
   onMove: (point: { clientX: number; clientY: number }) => void;
+  onDragMove?: (point: { clientX: number; clientY: number }) => void;
+  onDragEnd?: () => void;
   onPatch: (patch: Partial<DashboardDocumentResponse['dashboard']['layout']['items'][number]> | null) => void;
 }): JSX.Element {
   const tileRef = useRef<HTMLDivElement | null>(null);
@@ -532,11 +602,16 @@ function DashboardTile({
         x: moveEvent.clientX - start.x,
         y: moveEvent.clientY - start.y,
       });
+      onDragMove?.({
+        clientX: moveEvent.clientX - grabOffset.x,
+        clientY: moveEvent.clientY - grabOffset.y,
+      });
     };
     const onPointerUp = (upEvent: PointerEvent) => {
       window.removeEventListener('pointermove', onPointerMove);
       window.removeEventListener('pointerup', onPointerUp);
       setDragOffset(null);
+      onDragEnd?.();
       onMove({
         clientX: upEvent.clientX - grabOffset.x,
         clientY: upEvent.clientY - grabOffset.y,
@@ -556,12 +631,12 @@ function DashboardTile({
       style={{
         gridColumn: `${item.x + 1} / span ${item.w}`,
         gridRow: `${item.y + 1} / span ${item.h}`,
-        transform: dragOffset ? `translate(${dragOffset.x}px, ${dragOffset.y}px)` : undefined,
-        opacity: dragOffset ? 0.72 : 1,
-        zIndex: dragOffset ? 20 : undefined,
+        transform: dragOffset ? `translate(${dragOffset.x}px, ${dragOffset.y}px) scale(1.02)` : undefined,
+        opacity: dragOffset ? 0.92 : 1,
+        zIndex: dragOffset ? 30 : undefined,
         position: 'relative',
         background: 'var(--dql-app-surface, var(--surface, rgba(0,0,0,0.02)))',
-        border: selected
+        border: selected || dragOffset
           ? '1.5px solid var(--dql-app-accent, var(--accent, #4f46e5))'
           : '1px solid var(--dql-app-line, var(--border-color, rgba(0,0,0,0.08)))',
         borderRadius: 10,
@@ -571,8 +646,11 @@ function DashboardTile({
         gap: isCompactMetric ? 4 : 6,
         minHeight: 0,
         overflow: 'visible',
-        boxShadow: selected ? '0 0 0 3px var(--dql-app-accent-soft, rgba(79,70,229,0.12))' : undefined,
-        cursor: blockId ? 'pointer' : undefined,
+        boxShadow: dragOffset
+          ? '0 16px 40px rgba(0,0,0,0.22)'
+          : selected ? '0 0 0 3px var(--dql-app-accent-soft, rgba(79,70,229,0.12))' : undefined,
+        cursor: dragOffset ? 'grabbing' : blockId ? 'pointer' : undefined,
+        transition: dragOffset ? undefined : 'box-shadow 120ms ease, transform 120ms ease',
       }}
     >
       {editable ? (
@@ -1633,6 +1711,18 @@ function reorderTileForDrop(items: DashboardLayoutItem[], moved: DashboardLayout
 
 function layoutScore(item: DashboardLayoutItem, cols: number): number {
   return item.y * cols + item.x;
+}
+
+// Clean enterprise reading order for Auto layout:
+// headings → KPIs → charts → tables/pivots → text.
+function autoLayoutRank(item: DashboardLayoutItem): number {
+  const viz = normalizeViz(String(item.viz.type ?? 'table'));
+  if (viz === 'heading') return 0;
+  if (viz === 'single_value' || viz === 'kpi' || viz === 'gauge') return 1;
+  if (viz === 'line' || viz === 'area' || viz === 'bar' || viz === 'pie' || viz === 'funnel' || viz === 'map') return 2;
+  if (viz === 'table' || viz === 'pivot') return 3;
+  if (viz === 'text') return 4;
+  return 2;
 }
 
 function normalizeViz(chartType?: string): string {
