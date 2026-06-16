@@ -343,6 +343,44 @@ function isSensitiveField(field: string): boolean {
   );
 }
 
+function isPlaceholderLocalConnection(cfg: any): boolean {
+  const driver = normalizeDriverName(String(cfg?.driver ?? cfg?.type ?? ''));
+  if (driver !== 'duckdb' && driver !== 'file') return false;
+  const filepath = cfg?.filepath ?? cfg?.path;
+  return !filepath || filepath === ':memory:';
+}
+
+function chooseDefaultAfterSave(
+  connections: Record<string, any>,
+  previousDefault: string,
+  savedName: string,
+  previousName: string | null,
+): string {
+  const savedWasDefault = previousName !== null && previousName === previousDefault;
+  const defaultStillExists = Boolean(previousDefault && connections[previousDefault]);
+  const savedConnection = connections[savedName];
+
+  if (
+    previousName === null ||
+    savedWasDefault ||
+    !defaultStillExists ||
+    (
+      previousDefault === 'default' &&
+      isPlaceholderLocalConnection(connections.default) &&
+      !isPlaceholderLocalConnection(savedConnection)
+    )
+  ) {
+    return savedName;
+  }
+
+  return previousDefault;
+}
+
+function chooseFallbackDefault(connections: Record<string, any>): string | undefined {
+  const keys = Object.keys(connections);
+  return keys.find((key) => !isPlaceholderLocalConnection(connections[key])) ?? keys[0];
+}
+
 export function ConnectionPanel({ variant = 'panel' }: { variant?: 'panel' | 'page' } = {}) {
   const { state } = useNotebook();
   const t = themes[state.themeMode];
@@ -445,9 +483,10 @@ export function ConnectionPanel({ variant = 'panel' }: { variant?: 'panel' | 'pa
     // If renaming, remove old key
     if (editing && editing !== name) delete connections[editing];
     connections[name] = newConn;
+    const nextDefault = chooseDefaultAfterSave(connections, info.default, name, editing);
 
     try {
-      await api.saveConnections(connections);
+      await api.saveConnections(connections, nextDefault);
       // Refresh
       const refreshed = await api.getConnections();
       setInfo(refreshed);
@@ -473,13 +512,35 @@ export function ConnectionPanel({ variant = 'panel' }: { variant?: 'panel' | 'pa
     if (!info) return;
     const connections = { ...info.connections };
     delete connections[key];
+    const nextDefault = key === info.default ? chooseFallbackDefault(connections) : info.default;
     setSaving(true);
     try {
-      await api.saveConnections(connections);
+      await api.saveConnections(connections, nextDefault);
       const refreshed = await api.getConnections();
       setInfo(refreshed);
       setEditing(null);
     } finally {
+      setSaving(false);
+    }
+  };
+
+  const handleMakeDefault = async (key: string) => {
+    if (!info) return;
+    setSaving(true);
+    setSaveMsg(null);
+    try {
+      await api.saveConnections(info.connections, key);
+      const refreshed = await api.getConnections();
+      setInfo(refreshed);
+      setSaveMsg('Default updated');
+      setTimeout(() => setSaveMsg(null), 2000);
+      setTesting(true);
+      const result = await api.testConnection();
+      setTestResult(result);
+    } catch (e: any) {
+      setSaveMsg(`Error: ${e.message}`);
+    } finally {
+      setTesting(false);
       setSaving(false);
     }
   };
@@ -515,7 +576,7 @@ export function ConnectionPanel({ variant = 'panel' }: { variant?: 'panel' | 'pa
       ) : (
         Object.entries(connections).map(([key, cfg]: [string, any]) => {
           const driver: string = cfg?.driver ?? cfg?.type ?? 'unknown';
-          const isDefault = key === defaultKey || Object.keys(connections).length === 1;
+          const isDefault = key === defaultKey;
           const color = DRIVER_COLORS[driver] ?? t.accent;
 
           if (editing === key) {
@@ -567,6 +628,19 @@ export function ConnectionPanel({ variant = 'panel' }: { variant?: 'panel' | 'pa
                   <span style={{ fontSize: 9, color: t.accent, fontFamily: t.font, fontWeight: 600, letterSpacing: '0.05em' }}>DEFAULT</span>
                 )}
                 <div style={{ flex: 1 }} />
+                {!isDefault && (
+                  <button
+                    onClick={() => handleMakeDefault(key)}
+                    disabled={saving}
+                    style={{
+                      background: 'transparent', border: `1px solid ${t.btnBorder}`,
+                      borderRadius: 3, cursor: saving ? 'not-allowed' : 'pointer', color: t.textMuted,
+                      fontSize: 10, fontFamily: t.font, padding: '1px 6px', transition: 'all 0.15s',
+                    }}
+                  >
+                    Use
+                  </button>
+                )}
                 <button
                   onClick={() => startEdit(key, cfg)}
                   style={{
@@ -688,7 +762,7 @@ export function ConnectionPanel({ variant = 'panel' }: { variant?: 'panel' | 'pa
                   setSaving(true);
                   try {
                     const conns = { ...connections, [preset.name]: preset.config };
-                    await api.saveConnections(conns);
+                    await api.saveConnections(conns, preset.name);
                     const refreshed = await api.getConnections();
                     setInfo(refreshed);
                     // Auto-test

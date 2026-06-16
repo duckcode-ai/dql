@@ -25,6 +25,8 @@ dql --version
 | Command | What it does |
 | --- | --- |
 | `dql new <type> <name>` | Create a block, semantic block, term, business view, dashboard, workbook, or notebook |
+| `dql import sql <path>` | Preview existing SQL files or folders as Block Studio import candidates |
+| `dql import sql <path> --save` | Save valid SQL import candidates as draft DQL blocks |
 | `dql parse <file.dql>` | Parse and analyze a DQL file |
 | `dql info <file.dql>` | Show block metadata |
 | `dql certify <file.dql>` | Evaluate certification rules |

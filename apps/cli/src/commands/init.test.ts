@@ -60,9 +60,12 @@ describe('runInit', () => {
     expect(contents).toContain('dql.config.json');
     expect(contents).toContain('notebooks');
 
-    const config = readFileSync(join(projectDir, 'dql.config.json'), 'utf-8');
-    expect(config).toContain('demo-project');
-    expect(config).toContain('duckdb');
+    const config = JSON.parse(readFileSync(join(projectDir, 'dql.config.json'), 'utf-8')) as {
+      project: string;
+      connections?: Record<string, unknown>;
+    };
+    expect(config.project).toBe('demo-project');
+    expect(config.connections).toBeUndefined();
 
     const notebook = readFileSync(join(projectDir, 'notebooks', 'welcome.dqlnb'), 'utf-8');
     expect(notebook).toContain('DQL');
@@ -92,10 +95,12 @@ describe('runInit', () => {
     });
 
     const config = JSON.parse(readFileSync(join(projectDir, 'dql.config.json'), 'utf-8')) as {
+      defaultConnectionName: string;
       connections: { default: { filepath: string } };
       semanticLayer: { provider: string; projectPath: string };
     };
 
+    expect(config.defaultConnectionName).toBe('default');
     expect(config.connections.default.filepath).toBe('jaffle_shop.duckdb');
     expect(config.semanticLayer.provider).toBe('dbt');
     expect(config.semanticLayer.projectPath).toBe('.');

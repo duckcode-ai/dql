@@ -115,6 +115,8 @@ import {
 export interface ProjectConfig {
   project?: string;
   defaultConnection?: ConnectionConfig;
+  defaultConnectionName?: string;
+  connections?: Record<string, ConnectionConfig & { path?: string; type?: string }>;
   dataDir?: string;
   semanticLayer?: SemanticLayerProviderConfig;
   dbt?: {
@@ -557,6 +559,21 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
     ...candidate,
     validation: validateBlockStudioSource(candidate.dqlSource, semanticLayer),
   });
+
+  const validateImportCandidateForSave = (candidate: BlockStudioImportCandidate): {
+    candidate: BlockStudioImportCandidate;
+    errors: string[];
+  } => {
+    const validated = validateImportCandidate(candidate);
+    const diagnostics = ((validated.validation as any)?.diagnostics ?? []) as Array<{ severity?: string; message?: string }>;
+    const errors = diagnostics
+      .filter((diagnostic) => diagnostic.severity === 'error')
+      .map((diagnostic) => diagnostic.message || 'Candidate validation failed.');
+    if (validated.reviewStatus === 'rejected') {
+      errors.unshift('Candidate was rejected.');
+    }
+    return { candidate: validated, errors };
+  };
 
   const runBlockStudioPreviewSource = async (
     source: string,
@@ -1874,24 +1891,31 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
         const nextCandidates = [...session.candidates];
         for (let i = 0; i < nextCandidates.length; i += 1) {
           const candidate = nextCandidates[i];
-          if (candidate.reviewStatus === 'saved' || candidate.reviewStatus === 'rejected' || (candidate.validation as any)?.valid === false) continue;
+          if (candidate.reviewStatus === 'saved' || candidate.reviewStatus === 'rejected') continue;
+          const readiness = validateImportCandidateForSave(candidate);
+          nextCandidates[i] = readiness.candidate;
+          writeBlockStudioImportCandidate(projectRoot, importId, readiness.candidate);
+          if (readiness.errors.length > 0) {
+            errors.push({ candidateId: candidate.id, error: readiness.errors.join(' ') });
+            continue;
+          }
           try {
             const savedPath = saveBlockStudioArtifacts(projectRoot, {
-              source: candidate.dqlSource,
-              name: candidate.name,
-              domain: candidate.domain,
-              description: candidate.description,
-              owner: candidate.owner,
-              tags: candidate.tags,
-              lineage: candidate.lineage.sourceTables,
+              source: readiness.candidate.dqlSource,
+              name: readiness.candidate.name,
+              domain: readiness.candidate.domain,
+              description: readiness.candidate.description,
+              owner: readiness.candidate.owner,
+              tags: readiness.candidate.tags,
+              lineage: readiness.candidate.lineage.sourceTables,
               importMeta: {
                 importId,
-                candidateId: candidate.id,
-                sourceKind: candidate.sourceKind,
-                sourcePath: candidate.sourcePath,
+                candidateId: readiness.candidate.id,
+                sourceKind: readiness.candidate.sourceKind,
+                sourcePath: readiness.candidate.sourcePath,
               },
             });
-            nextCandidates[i] = { ...candidate, reviewStatus: 'saved', savedPath };
+            nextCandidates[i] = { ...readiness.candidate, reviewStatus: 'saved', savedPath };
             writeBlockStudioImportCandidate(projectRoot, importId, nextCandidates[i]);
             saved.push({ candidateId: candidate.id, path: savedPath });
           } catch (error) {
@@ -1994,22 +2018,39 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
 
         if (req.method === 'POST' && candidateId && action === 'save') {
           const candidate = readBlockStudioImportCandidate(projectRoot, importId, candidateId);
+          if (candidate.reviewStatus === 'saved' && candidate.savedPath) {
+            const payload = openBlockStudioDocument(projectRoot, candidate.savedPath, semanticLayer);
+            res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+            res.end(serializeJSON({ candidate, block: payload }));
+            return;
+          }
+          const readiness = validateImportCandidateForSave(candidate);
+          if (readiness.errors.length > 0) {
+            writeBlockStudioImportCandidate(projectRoot, importId, readiness.candidate);
+            res.writeHead(422, { 'Content-Type': 'application/json; charset=utf-8' });
+            res.end(serializeJSON({
+              error: readiness.errors.join(' '),
+              candidate: readiness.candidate,
+              diagnostics: (readiness.candidate.validation as any)?.diagnostics ?? [],
+            }));
+            return;
+          }
           const savedPath = saveBlockStudioArtifacts(projectRoot, {
-            source: candidate.dqlSource,
-            name: candidate.name,
-            domain: candidate.domain,
-            description: candidate.description,
-            owner: candidate.owner,
-            tags: candidate.tags,
-            lineage: candidate.lineage.sourceTables,
+            source: readiness.candidate.dqlSource,
+            name: readiness.candidate.name,
+            domain: readiness.candidate.domain,
+            description: readiness.candidate.description,
+            owner: readiness.candidate.owner,
+            tags: readiness.candidate.tags,
+            lineage: readiness.candidate.lineage.sourceTables,
             importMeta: {
               importId,
               candidateId,
-              sourceKind: candidate.sourceKind,
-              sourcePath: candidate.sourcePath,
+              sourceKind: readiness.candidate.sourceKind,
+              sourcePath: readiness.candidate.sourcePath,
             },
           });
-          const next = { ...candidate, reviewStatus: 'saved' as const, savedPath };
+          const next = { ...readiness.candidate, reviewStatus: 'saved' as const, savedPath };
           writeBlockStudioImportCandidate(projectRoot, importId, next);
           const payload = openBlockStudioDocument(projectRoot, savedPath, semanticLayer);
           res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
@@ -2034,11 +2075,8 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
     if (req.method === 'GET' && path === '/api/block-studio/catalog') {
       try {
         const cfg = loadProjectConfig(projectRoot) as any;
-        const connections: Record<string, unknown> = cfg.connections ?? {};
-        if (Object.keys(connections).length === 0 && cfg.defaultConnection) {
-          connections.default = cfg.defaultConnection;
-        }
-        const defaultKey = cfg.defaultConnection ? 'default' : Object.keys(connections)[0] ?? 'default';
+        const connections = getProjectConnectionsForApi(cfg);
+        const defaultKey = resolveDefaultConnectionKey(cfg, connections) ?? Object.keys(connections)[0] ?? 'default';
         const userPrefs = readUserPrefs(userPrefsPath);
         res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
         res.end(serializeJSON({
@@ -2181,15 +2219,10 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
 
     if (req.method === 'GET' && path === '/api/connections') {
       const cfg = loadProjectConfig(projectRoot);
-      const raw = cfg as any;
-      const connections: Record<string, unknown> = raw.connections ?? {};
-      // If no explicit connections map, surface the defaultConnection as "default"
-      if (Object.keys(connections).length === 0 && cfg.defaultConnection) {
-        connections['default'] = cfg.defaultConnection;
-      }
-      const defaultKey = raw.defaultConnection
-        ? 'default'
-        : Object.keys(connections)[0] ?? 'default';
+      const connections = getProjectConnectionsForApi(cfg);
+      const defaultKey = resolveDefaultConnectionKey(cfg as unknown as Record<string, unknown>, connections)
+        ?? Object.keys(connections)[0]
+        ?? 'default';
       const dbtProfiles = discoverDbtProfileConnections(projectRoot, cfg);
       res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
       res.end(serializeJSON({ default: defaultKey, connections, dbtProfiles }));
@@ -2206,6 +2239,24 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
         }
         if (body.connections && typeof body.connections === 'object') {
           raw.connections = body.connections;
+        }
+        const connections = getStoredConnections(raw);
+        if (body.connections && typeof body.connections === 'object') {
+          const requestedDefault = typeof body.defaultConnectionName === 'string'
+            ? body.defaultConnectionName
+            : typeof body.default === 'string'
+              ? body.default
+              : undefined;
+          const defaultConnectionName = resolveDefaultConnectionKey(
+            requestedDefault ? { ...raw, defaultConnectionName: requestedDefault } : raw,
+            connections,
+          );
+          delete raw.defaultConnection;
+          if (defaultConnectionName) {
+            raw.defaultConnectionName = defaultConnectionName;
+          } else {
+            delete raw.defaultConnectionName;
+          }
         }
         writeFileSync(configPath, JSON.stringify(raw, null, 2) + '\n', 'utf-8');
 
@@ -3865,22 +3916,104 @@ export function loadProjectConfig(projectRoot: string): ProjectConfig {
   const raw = JSON.parse(readFileSync(configPath, 'utf-8')) as Record<string, unknown>;
   const config = raw as unknown as ProjectConfig;
 
-  // Normalize modern `connections.default` format to `defaultConnection`
-  if (!config.defaultConnection && raw.connections) {
-    const connections = raw.connections as Record<string, ConnectionConfig & { path?: string }>;
-    const defaultConn = connections.default;
-    if (defaultConn?.driver) {
-      // Support both `filepath` (correct) and `path` (legacy/init compat)
-      const filepath = (defaultConn.filepath ?? defaultConn.path) as string | undefined;
-      config.defaultConnection = {
-        ...defaultConn,
-        driver: defaultConn.driver,
-        ...(filepath ? { filepath } : {}),
-      };
+  const connections = getStoredConnections(raw);
+  const defaultConnectionName = resolveDefaultConnectionKey(raw, connections);
+  if (defaultConnectionName) {
+    const selected = normalizeStoredConnection(connections[defaultConnectionName]);
+    if (selected) {
+      config.defaultConnection = selected;
+      config.defaultConnectionName = defaultConnectionName;
+    }
+  } else if (config.defaultConnection) {
+    const normalized = normalizeStoredConnection(config.defaultConnection as ConnectionConfig & { path?: string; type?: string });
+    if (normalized) {
+      config.defaultConnection = normalized;
     }
   }
 
   return config;
+}
+
+function getProjectConnectionsForApi(config: ProjectConfig | Record<string, unknown>): Record<string, unknown> {
+  const connections = getStoredConnections(config as Record<string, unknown>);
+  if (Object.keys(connections).length === 0 && isConnectionLike((config as ProjectConfig).defaultConnection)) {
+    return { default: (config as ProjectConfig).defaultConnection };
+  }
+  return connections;
+}
+
+function getStoredConnections(raw: Record<string, unknown>): Record<string, unknown> {
+  const value = raw.connections;
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return {};
+  }
+  return { ...(value as Record<string, unknown>) };
+}
+
+function resolveDefaultConnectionKey(
+  raw: Record<string, unknown>,
+  connections: Record<string, unknown>,
+): string | undefined {
+  const keys = Object.keys(connections).filter((key) => isConnectionLike(connections[key]));
+  if (keys.length === 0) return undefined;
+
+  const configured = readConfiguredDefaultConnectionName(raw);
+  if (configured && keys.includes(configured)) {
+    return configured;
+  }
+
+  if (keys.includes('default') && !isPlaceholderLocalConnection(connections.default)) {
+    return 'default';
+  }
+
+  const realConnections = keys.filter((key) => !isPlaceholderLocalConnection(connections[key]));
+  if (keys.includes('default') && isPlaceholderLocalConnection(connections.default) && realConnections.length === 1) {
+    return realConnections[0];
+  }
+
+  if (keys.length === 1) {
+    return keys[0];
+  }
+
+  return keys.includes('default') ? 'default' : keys[0];
+}
+
+function readConfiguredDefaultConnectionName(raw: Record<string, unknown>): string | undefined {
+  for (const key of ['defaultConnectionName', 'defaultConnectionKey', 'currentConnection']) {
+    const value = raw[key];
+    if (typeof value === 'string' && value.trim()) return value.trim();
+  }
+  return typeof raw.default === 'string' && raw.default.trim() ? raw.default.trim() : undefined;
+}
+
+function normalizeStoredConnection(value: unknown): ConnectionConfig | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  const raw = value as Record<string, unknown>;
+  const driver = raw.driver ?? raw.type;
+  if (typeof driver !== 'string' || !driver.trim()) return null;
+
+  const { path: legacyPath, type: _type, ...rest } = raw;
+  const filepath = typeof raw.filepath === 'string'
+    ? raw.filepath
+    : typeof legacyPath === 'string'
+      ? legacyPath
+      : undefined;
+  return {
+    ...rest,
+    driver: driver.trim(),
+    ...(filepath ? { filepath } : {}),
+  } as unknown as ConnectionConfig;
+}
+
+function isConnectionLike(value: unknown): boolean {
+  return normalizeStoredConnection(value) !== null;
+}
+
+function isPlaceholderLocalConnection(value: unknown): boolean {
+  const connection = normalizeStoredConnection(value);
+  if (!connection) return false;
+  if (connection.driver !== 'duckdb' && connection.driver !== 'file') return false;
+  return !connection.filepath || connection.filepath === ':memory:';
 }
 
 export function prepareLocalExecution(
@@ -3928,19 +4061,25 @@ export function buildAgentPreviewSql(sql: string): string {
   const trimmed = sql.trim();
   if (!trimmed) throw new Error('Generated SQL preview is empty.');
   const withoutTrailingSemicolon = trimmed.replace(/;\s*$/, '').trim();
-  const scanSql = stripSqlStringsAndComments(withoutTrailingSemicolon).trim();
+  const readOnlyError = readOnlySqlValidationError(withoutTrailingSemicolon, 'Generated SQL preview');
+  if (readOnlyError) throw new Error(readOnlyError);
+  return `SELECT * FROM (\n${withoutTrailingSemicolon}\n) AS dql_agent_preview LIMIT 200`;
+}
+
+function readOnlySqlValidationError(sql: string, subject: string): string | null {
+  const scanSql = stripSqlStringsAndComments(sql).trim();
   if (!/^(select|with)\b/i.test(scanSql)) {
-    throw new Error('Generated SQL preview only supports read-only SELECT or WITH queries.');
+    return `${subject} only supports read-only SELECT or WITH queries.`;
   }
   if (scanSql.includes(';')) {
-    throw new Error('Generated SQL preview only supports one statement.');
+    return `${subject} only supports one statement.`;
   }
   const forbiddenPattern = new RegExp(`\\b(${AGENT_PREVIEW_FORBIDDEN_SQL.join('|')})\\b`, 'i');
   const forbidden = scanSql.match(forbiddenPattern)?.[1];
   if (forbidden) {
-    throw new Error(`Generated SQL preview rejected unsupported statement keyword: ${forbidden.toUpperCase()}.`);
+    return `${subject} rejected unsupported statement keyword: ${forbidden.toUpperCase()}.`;
   }
-  return `SELECT * FROM (\n${withoutTrailingSemicolon}\n) AS dql_agent_preview LIMIT 200`;
+  return null;
 }
 
 function stripSqlStringsAndComments(sql: string): string {
@@ -4918,6 +5057,17 @@ export function validateBlockStudioSource(
     executableSql = resolvedCustomSql.sql;
   }
 
+  if (executableSql && semanticConfig.blockType !== 'semantic') {
+    const readOnlyError = readOnlySqlValidationError(executableSql.trim().replace(/;\s*$/, '').trim(), 'Block SQL');
+    if (readOnlyError) {
+      diagnostics.push({
+        severity: 'error',
+        code: 'sql_read_only',
+        message: readOnlyError,
+      });
+    }
+  }
+
   const chartConfig = extractBlockStudioChartConfig(source);
   if (!chartConfig) {
     diagnostics.push({
@@ -4950,7 +5100,7 @@ export function validateBlockStudioSource(
   };
 }
 
-function saveBlockStudioArtifacts(
+export function saveBlockStudioArtifacts(
   projectRoot: string,
   options: {
     currentPath?: string;

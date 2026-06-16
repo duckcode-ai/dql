@@ -19,8 +19,9 @@ connects technical lineage with business lineage.
 
 Edit `dql.config.json` — DQL ships 15 drivers out of the box:
 [docs/reference/connectors.md](https://github.com/duckcode-ai/dql/blob/main/docs/reference/connectors.md).
-The default connection is in-memory DuckDB, so dropping a CSV into the project
-and querying it with `read_csv_auto('./file.csv')` works with zero setup.
+Add your warehouse connection in the notebook or config. For local files, add a
+DuckDB/file connection and query CSV or Parquet data with functions such as
+`read_csv_auto('./file.csv')`.
 
 ```bash
 npm install

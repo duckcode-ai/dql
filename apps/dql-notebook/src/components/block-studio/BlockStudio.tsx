@@ -1835,7 +1835,7 @@ function BlockStudioImportWorkspace({
             {loading ? 'Working...' : 'Preview SQL'}
           </button>
           <div style={{ fontSize: 11, color: t.textMuted, fontFamily: t.font, lineHeight: 1.45 }}>
-            Flow: choose SQL, review each detected query, then save draft blocks. Split uses semicolon and GO batch separators.
+            Flow: choose SQL, review each detected query, then save draft blocks. Split uses semicolons, GO batches, and repeated name/title comments.
           </div>
           <details style={{ fontSize: 11, color: t.textMuted, fontFamily: t.font, border: `1px dashed ${t.headerBorder}`, borderRadius: 8, padding: '8px 10px' }}>
             <summary style={{ cursor: 'pointer', color: t.textSecondary, fontWeight: 700 }}>Tableau / Power BI migration helpers</summary>
@@ -1922,7 +1922,7 @@ function BlockStudioImportWorkspace({
               </div>
               <div style={{ display: 'flex', gap: 6 }}>
                 <button onClick={selectNextUnsaved} style={secondaryImportButtonStyle(t)}>Open next unsaved</button>
-                <button onClick={() => void saveAll()} disabled={savingAll} style={primaryImportButtonStyle(t)}>{savingAll ? 'Saving...' : 'Save all valid'}</button>
+                <button onClick={() => void saveAll()} disabled={savingAll} style={primaryImportButtonStyle(t)}>{savingAll ? 'Saving...' : 'Save valid drafts'}</button>
               </div>
               <input
                 value={candidateSearch}

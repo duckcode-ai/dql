@@ -101,6 +101,31 @@ go
     expect(session.candidates[0].splitStrategy).toBe('semicolon-go');
   });
 
+  it('splits named query sections without semicolons', () => {
+    const root = tempProject();
+    writeFileSync(join(root, 'named-sections.sql'), `
+-- name: active customers
+select * from raw.customers
+-- title: account revenue
+with account_revenue as (
+  select account_id, sum(amount) as revenue from raw.orders group by account_id
+)
+select * from account_revenue
+`);
+
+    const session = createBlockStudioImportSession(root, {
+      inputPath: 'named-sections.sql',
+      domain: 'customer',
+    });
+
+    expect(session.candidates).toHaveLength(2);
+    expect(session.candidates[0].name).toBe('Active Customers');
+    expect(session.candidates[1].name).toBe('Account Revenue');
+    expect(session.candidates[0].splitStrategy).toBe('metadata-comment');
+    expect(session.candidates[0].lineage.totalStatements).toBe(2);
+    expect(session.candidates[0].lineage.sourceTables).toEqual(['raw.customers']);
+  });
+
   it('warns when one candidate likely contains several undelimited scripts', () => {
     const root = tempProject();
     writeFileSync(join(root, 'missing-delimiters.sql'), 'select * from raw.events select * from raw.accounts');
@@ -167,7 +192,7 @@ go
 
   it('detects parameters and refreshes generated DQL when a candidate is updated', () => {
     const root = tempProject();
-    writeFileSync(join(root, 'parameterized.sql'), 'select * from orders where region = :region and dt >= {{ start_date }};');
+    writeFileSync(join(root, 'parameterized.sql'), "select ':not_a_param' as label, * from orders where region = :region and dt >= {{ start_date }};");
     const session = createBlockStudioImportSession(root, { inputPath: 'parameterized.sql' });
 
     expect(session.candidates[0].lineage.parameters.sort()).toEqual(['region', 'start_date']);

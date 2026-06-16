@@ -76,7 +76,11 @@ export function deserializeNotebook(raw: string): NotebookDocument {
 }
 
 function listTablesSQL(driver?: string): string {
-  switch (driver) {
+  if (!driver) {
+    return `SELECT 1 AS ready;`;
+  }
+
+  switch (driver.toLowerCase()) {
     case 'duckdb':
     case 'sqlite':
     case 'file':
@@ -154,7 +158,7 @@ export function createWelcomeNotebook(template: string, projectTitle: string, dr
       id: 'sql-starter',
       type: 'sql',
       title: 'Starter Query',
-      source: `-- Write your SQL here\n-- If using DuckDB, you can query local CSV, Parquet, and JSON files directly\n-- Example: SELECT * FROM read_csv_auto('./data/my_file.csv') LIMIT 10;`,
+      source: `-- Write your SQL here after connecting a warehouse or local DuckDB/file source\n-- Example: SELECT * FROM analytics.customers LIMIT 10;`,
     },
     {
       id: 'dql-example',
@@ -166,7 +170,7 @@ export function createWelcomeNotebook(template: string, projectTitle: string, dr
       id: 'next-steps',
       type: 'markdown',
       title: 'Next Steps',
-      source: `## Next steps\n\n1. Add data by connecting a warehouse or querying local CSV/Parquet files with DuckDB.\n2. Save repeated SQL as DQL blocks under \`blocks/\`.\n3. Add business terms under \`terms/\` for shared vocabulary.\n4. Compose blocks into \`business_view\` files under \`business-views/\`.\n5. Run \`dql compile .\` and open Lineage to inspect the business and technical path.`,
+      source: `## Next steps\n\n1. Add data by connecting a warehouse or adding a local DuckDB/file source.\n2. Save repeated SQL as DQL blocks under \`blocks/\`.\n3. Add business terms under \`terms/\` for shared vocabulary.\n4. Compose blocks into \`business_view\` files under \`business-views/\`.\n5. Run \`dql compile .\` and open Lineage to inspect the business and technical path.`,
     },
   ], { description: 'DQL workbench for building a domain-first analytics project.', template: 'default' });
 }

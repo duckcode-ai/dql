@@ -521,7 +521,7 @@ export interface BlockStudioImportCandidate {
     totalStatements: number;
   };
   confidence: number;
-  splitStrategy?: 'semicolon-go' | 'manual';
+  splitStrategy?: 'semicolon-go' | 'metadata-comment' | 'manual';
   warnings?: string[];
   conversionNotes?: string[];
   aiAssistance?: Array<{
