@@ -5,6 +5,7 @@ import { themes, type Theme, type ThemeMode } from '../../themes/notebook-theme'
 import { api } from '../../api/client';
 import { ChartOutput, resolveChartType } from '../output/ChartOutput';
 import { TableOutput } from '../output/TableOutput';
+import { TrustBadge, type TrustState } from '@duckcodeailabs/dql-ui';
 
 type AnswerTab = 'answer' | 'visual' | 'data' | 'lineage' | 'context' | 'sql' | 'review';
 type AddToAppMode = 'auto' | 'chart' | 'data' | 'both';
@@ -180,15 +181,12 @@ export function AgentAnswerCard({
   const [tab, setTab] = useState<AnswerTab>('answer');
   const [addMenuOpen, setAddMenuOpen] = useState(false);
   const [detailsOpen, setDetailsOpen] = useState(false);
-  const badge = answer.certification === 'certified'
-    ? 'Certified'
-    : answer.kind === 'no_answer'
-      ? 'No answer'
-      : 'AI generated / needs review';
-  const badgeColor = answer.certification === 'certified' ? '#3fb950' : answer.kind === 'no_answer' ? '#ff7b72' : '#f0883e';
+  const trustState = resolveAnswerTrustState(answer);
+  const trustAccent = trustStateColor(trustState, t);
   const summary = (answer.answer ?? answer.text ?? '').replace(/\n\n_Question:_[\s\S]*$/m, '').trim();
   const analysisPlan = answer.analysisPlan ?? answer.evidence?.analysisPlan;
   const blockName = answer.result?.blockName ?? answer.block?.name ?? answer.citations?.find((c) => c.kind === 'block')?.name;
+  const provenance = buildAnswerProvenance(answer, result, blockName, blockPath);
   const [adding, setAdding] = useState(false);
   const [addMessage, setAddMessage] = useState<string | null>(null);
   const canAddToApp = Boolean(addToAppTarget && (result || sql || summary || blockName));
@@ -320,20 +318,7 @@ export function AgentAnswerCard({
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: compact ? 8 : 10, whiteSpace: 'normal' }}>
       <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
-        <span style={{
-          fontSize: 10,
-          fontFamily: t.fontMono,
-          fontWeight: 700,
-          letterSpacing: '0.08em',
-          color: badgeColor,
-          textTransform: 'uppercase',
-          padding: '2px 6px',
-          borderRadius: 3,
-          background: `${badgeColor}18`,
-          border: `1px solid ${badgeColor}40`,
-        }}>
-          {badge}
-        </span>
+        <TrustBadge state={trustState} />
         {!compact && blockName && (
           <span style={{ fontSize: 12, fontFamily: t.fontMono, color: t.textSecondary }}>
             block: {blockName}
@@ -360,7 +345,7 @@ export function AgentAnswerCard({
       </div>
       {addMessage && <div style={{ fontSize: 11, color: addMessage.toLowerCase().includes('added') || addMessage.toLowerCase().includes('pinned') ? '#3fb950' : '#ff7b72' }}>{addMessage}</div>}
 
-      <div style={{ border: `1px solid ${t.cellBorder}`, borderRadius: compact ? 10 : 6, overflow: 'hidden', background: t.cellBg }}>
+      <div style={{ border: `1px solid ${t.cellBorder}`, borderTop: `2px solid ${trustAccent}`, borderRadius: compact ? 10 : 6, overflow: 'hidden', background: t.cellBg }}>
         {!compact && (
           <div style={{ display: 'flex', alignItems: 'center', gap: 14, padding: '4px 10px', borderBottom: `1px solid ${t.cellBorder}`, background: `${t.tableHeaderBg}70`, flexWrap: 'wrap' }}>
             {tabs.map((item) => (
@@ -408,6 +393,7 @@ export function AgentAnswerCard({
             )}
           </div>
         )}
+        <ProvenanceFooter items={provenance} t={t} accent={trustAccent} />
       </div>
     </div>
   );
@@ -795,6 +781,39 @@ function Pill({ label, t }: { label: string; t: Theme }) {
   );
 }
 
+interface ProvenanceItem {
+  label: string;
+  value: string;
+}
+
+function ProvenanceFooter({ items, t, accent }: { items: ProvenanceItem[]; t: Theme; accent: string }) {
+  if (items.length === 0) return null;
+  return (
+    <div
+      style={{
+        display: 'flex',
+        flexWrap: 'wrap',
+        gap: '6px 16px',
+        alignItems: 'center',
+        padding: '7px 10px',
+        borderTop: `1px solid ${t.cellBorder}`,
+        boxShadow: `inset 0 2px 0 ${accent}`,
+        background: t.editorBg,
+        color: t.textMuted,
+        fontFamily: t.fontMono,
+        fontSize: 10.5,
+      }}
+    >
+      {items.map((item) => (
+        <span key={`${item.label}-${item.value}`} style={{ minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+          <span style={{ color: t.textMuted }}>{item.label}</span>{' '}
+          <strong style={{ color: t.textSecondary, fontWeight: 600 }}>{item.value}</strong>
+        </span>
+      ))}
+    </div>
+  );
+}
+
 function SegmentButton({ active, label, onClick, t }: { active: boolean; label: string; onClick: () => void; t: Theme }) {
   return (
     <button
@@ -945,6 +964,59 @@ function formatBusinessTier(value: string): string {
   if (normalized.includes('ai') || normalized.includes('generated')) return 'AI draft';
   if (normalized.includes('no_answer')) return 'needs more context';
   return formatLabel(value);
+}
+
+function resolveAnswerTrustState(answer: AgentAnswerEnvelope): TrustState {
+  if (answer.kind === 'no_answer') return 'no_answer';
+  if (answer.certification === 'certified' || answer.reviewStatus === 'certified') return 'certified';
+  if (answer.reviewStatus === 'draft_ready' || answer.reviewStatus === 'analyst_review_required') return 'review';
+  if (answer.certification === 'ai_generated') return 'ai_generated';
+  if (answer.certification === 'analyst_review_required' || answer.certification === 'uncertified') return 'uncertified';
+  return answer.kind === 'certified' ? 'certified' : 'draft';
+}
+
+function trustStateColor(state: TrustState, t: Theme): string {
+  if (state === 'certified') return t.success;
+  if (state === 'no_answer') return t.error;
+  if (state === 'deprecated') return t.textMuted;
+  return t.warning;
+}
+
+function buildAnswerProvenance(
+  answer: AgentAnswerEnvelope,
+  result: QueryResult | null,
+  blockName?: string,
+  blockPath?: string,
+): ProvenanceItem[] {
+  const items: ProvenanceItem[] = [];
+  const firstAsset = answer.evidence?.selectedAssets?.[0] ?? answer.evidence?.lineage?.find((asset) => asset.owner || asset.domain || asset.sourcePath);
+  const sourceName = blockName ?? firstAsset?.name;
+  const sourcePath = blockPath ?? firstAsset?.sourcePath ?? firstAsset?.provenance;
+
+  if (sourceName) items.push({ label: answer.kind === 'certified' ? 'source' : 'draft source', value: sourceName });
+  if (firstAsset?.owner ?? answer.evidence?.outcome?.owner) items.push({ label: 'owner', value: firstAsset?.owner ?? answer.evidence?.outcome?.owner ?? '' });
+  if (sourcePath) items.push({ label: 'path', value: sourcePath });
+  if (answer.sourceTier) items.push({ label: 'tier', value: formatLabel(answer.sourceTier) });
+  if (result) {
+    const rows = result.rowCount ?? result.rows.length;
+    const timing = result.executionTime !== undefined ? ` - ${Math.round(result.executionTime)}ms` : '';
+    items.push({ label: 'run', value: `${rows.toLocaleString()} rows${timing}` });
+  }
+  if (answer.reviewStatus && answer.reviewStatus !== 'certified') items.push({ label: 'next', value: formatLabel(answer.reviewStatus) });
+
+  return dedupeProvenanceItems(items).slice(0, 5);
+}
+
+function dedupeProvenanceItems(items: ProvenanceItem[]): ProvenanceItem[] {
+  const seen = new Set<string>();
+  return items.filter((item) => {
+    const value = item.value.trim();
+    if (!value) return false;
+    const key = `${item.label}:${value}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
 }
 
 function statusColor(status?: string): string {

@@ -29,8 +29,12 @@ export interface PublishedCellChromeProps {
 const TRUST_DOT: Record<NonNullable<TrustState>, string> = {
   draft: 'var(--color-text-muted, #9aa4b2)',
   pending: 'var(--color-accent-yellow, #e3b341)',
+  review: 'var(--color-accent-yellow, #e3b341)',
   certified: 'var(--color-accent-green, #3fb950)',
+  ai_generated: 'var(--color-accent-yellow, #e3b341)',
+  uncertified: 'var(--color-accent-yellow, #e3b341)',
   deprecated: 'var(--color-accent-red, #f85149)',
+  no_answer: 'var(--color-accent-red, #f85149)',
 };
 
 export function PublishedCellChrome({

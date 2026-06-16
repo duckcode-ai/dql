@@ -3,6 +3,7 @@ import type { CSSProperties } from 'react';
 import { api } from '../../api/client';
 import { useNotebook } from '../../store/NotebookStore';
 import type { AppSummary } from '../../store/types';
+import { TrustBadge, type TrustState } from '@duckcodeailabs/dql-ui';
 
 export function ReviewPage(): JSX.Element {
   const { state, dispatch } = useNotebook();
@@ -28,10 +29,10 @@ export function ReviewPage(): JSX.Element {
   return (
     <div style={{ padding: 20, display: 'grid', gap: 14 }}>
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, minmax(0, 1fr))', gap: 10 }}>
-        <ReviewStat label="Apps in review" value={state.apps.filter((app) => app.lifecycle === 'review').length} />
-        <ReviewStat label="Draft blocks" value={state.apps.reduce((sum, app) => sum + (app.drafts?.length ?? 0), 0)} />
-        <ReviewStat label="AI pins" value={state.apps.reduce((sum, app) => sum + (app.aiPins ?? 0), 0)} />
-        <ReviewStat label="Certified Apps" value={state.apps.filter((app) => app.lifecycle === 'certified').length} />
+        <ReviewStat label="Apps in review" value={state.apps.filter((app) => app.lifecycle === 'review').length} tone="review" />
+        <ReviewStat label="Draft blocks" value={state.apps.reduce((sum, app) => sum + (app.drafts?.length ?? 0), 0)} tone="draft" />
+        <ReviewStat label="AI pins" value={state.apps.reduce((sum, app) => sum + (app.aiPins ?? 0), 0)} tone="ai_generated" />
+        <ReviewStat label="Certified Apps" value={state.apps.filter((app) => app.lifecycle === 'certified').length} tone="certified" />
       </div>
 
       <div style={{ display: 'grid', gap: 8 }}>
@@ -52,18 +53,27 @@ export function ReviewPage(): JSX.Element {
 }
 
 function ReviewAppRow({ app, onOpen }: { app: AppSummary; onOpen: () => void }) {
+  const trustState = app.certification === 'certified' ? 'certified' : app.lifecycle === 'review' ? 'review' : 'draft';
+  const draftCount = app.drafts?.length ?? 0;
+  const aiCount = app.aiPins ?? 0;
   return (
-    <button type="button" onClick={onOpen} style={rowStyle}>
+    <button type="button" onClick={onOpen} style={{ ...rowStyle, borderLeftColor: trustAccent(trustState), borderLeftWidth: 3 }}>
       <div style={{ display: 'grid', gap: 5, minWidth: 0 }}>
         <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
           <span style={{ fontSize: 14, fontWeight: 750 }}>{app.name}</span>
-          <Pill>{app.lifecycle ?? 'draft'}</Pill>
+          <TrustBadge state={trustState} />
           <Pill>{app.visibility ?? app.storage ?? 'shared'}</Pill>
         </div>
         <div style={{ fontSize: 12, opacity: 0.68 }}>
           {[app.domain, app.subdomain, ...(app.groups ?? [])].filter(Boolean).join(' / ')}
           {app.audience ? ` · ${app.audience}` : ''}
         </div>
+        {(draftCount > 0 || aiCount > 0) && (
+          <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', fontSize: 11, opacity: 0.72 }}>
+            {draftCount > 0 ? <span>{draftCount} draft{draftCount === 1 ? '' : 's'} need review</span> : null}
+            {aiCount > 0 ? <span>{aiCount} AI pin{aiCount === 1 ? '' : 's'} need promotion</span> : null}
+          </div>
+        )}
       </div>
       <div style={{ display: 'flex', gap: 8, alignItems: 'center', justifyContent: 'flex-end', flexWrap: 'wrap' }}>
         <Metric label="dashboards" value={app.dashboards.length} />
@@ -75,9 +85,9 @@ function ReviewAppRow({ app, onOpen }: { app: AppSummary; onOpen: () => void }) 
   );
 }
 
-function ReviewStat({ label, value }: { label: string; value: number }) {
+function ReviewStat({ label, value, tone }: { label: string; value: number; tone: TrustState }) {
   return (
-    <div style={statStyle}>
+    <div style={{ ...statStyle, borderTop: `2px solid ${trustAccent(tone)}` }}>
       <div style={{ fontSize: 11, opacity: 0.62 }}>{label}</div>
       <div style={{ fontSize: 24, fontWeight: 800 }}>{value}</div>
     </div>
@@ -98,6 +108,13 @@ function Pill({ children }: { children: string }) {
 
 function reviewWeight(app: AppSummary): number {
   return (app.lifecycle === 'review' ? 100 : 0) + (app.drafts?.length ?? 0) * 10 + (app.aiPins ?? 0);
+}
+
+function trustAccent(state: TrustState): string {
+  if (state === 'certified') return 'var(--status-success, #1f883d)';
+  if (state === 'no_answer') return 'var(--status-error, #cf222e)';
+  if (state === 'deprecated') return 'var(--text-tertiary, #8a8d96)';
+  return 'var(--status-warning, #9a6700)';
 }
 
 const rowStyle: CSSProperties = {

@@ -1,15 +1,17 @@
-// v1.3 Track 4 — TrustBadge primitive (v1.4 plug slot).
-//
-// Ships as an empty-by-default slot so CellChrome (Track 6) has a stable
-// DOM hook for v1.4's trust-state feature (draft/pending/certified/
-// deprecated). In v1.3, only `certified` renders — matching current
-// behavior where bound blocks show "certified" chrome. `undefined` and
-// `draft`/`pending`/`deprecated` return null.
+// Shared trust-state badge for notebook, App, and review surfaces.
 
 import React from 'react';
 import { StatusPill } from './PanelFrame.js';
 
-export type TrustState = 'draft' | 'pending' | 'certified' | 'deprecated';
+export type TrustState =
+  | 'draft'
+  | 'pending'
+  | 'review'
+  | 'certified'
+  | 'deprecated'
+  | 'ai_generated'
+  | 'uncertified'
+  | 'no_answer';
 
 export interface TrustBadgeProps {
   state?: TrustState;
@@ -19,11 +21,17 @@ export interface TrustBadgeProps {
 export function TrustBadge({ state, label }: TrustBadgeProps) {
   if (!state) return null;
 
-  if (state === 'certified') {
-    return <StatusPill tone="success">{label ?? 'Certified'}</StatusPill>;
-  }
-
-  // v1.4 will light these up. v1.3 keeps them null so the slot exists
-  // structurally without implying a feature we haven't shipped yet.
-  return null;
+  const config = TRUST_BADGE_CONFIG[state] ?? TRUST_BADGE_CONFIG.draft;
+  return <StatusPill tone={config.tone}>{label ?? config.label}</StatusPill>;
 }
+
+const TRUST_BADGE_CONFIG: Record<TrustState, { tone: React.ComponentProps<typeof StatusPill>['tone']; label: string }> = {
+  certified: { tone: 'success', label: 'Certified' },
+  draft: { tone: 'warning', label: 'Draft' },
+  pending: { tone: 'warning', label: 'Pending review' },
+  review: { tone: 'warning', label: 'Review' },
+  ai_generated: { tone: 'warning', label: 'AI draft' },
+  uncertified: { tone: 'warning', label: 'Uncertified' },
+  deprecated: { tone: 'neutral', label: 'Deprecated' },
+  no_answer: { tone: 'error', label: 'No answer' },
+};
