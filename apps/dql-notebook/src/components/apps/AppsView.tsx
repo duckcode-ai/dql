@@ -533,58 +533,28 @@ function AppLibrarySurface({
   onStartClassic: () => void;
   onOpenApp: (app: AppSummary, experience?: AppExperience) => void;
 }) {
-  const [prompt, setPrompt] = useState(DEFAULT_PROMPT);
   const counts = libraryCounts(allApps, favorites);
   return (
     <main className="dql-apps-wrap">
       <section className="dql-apps-createhead">
         <h1>Build an app</h1>
-        <p>
-          Turn certified blocks, business views, notebooks, and lineage into a stakeholder-grade App. Ask AI to shape
-          the story dynamically or compose the canvas by hand.
-        </p>
+        <p>Create governed analytics apps from certified DQL assets.</p>
       </section>
-
-      <form
-        className="dql-apps-startbar"
-        onSubmit={(event) => {
-          event.preventDefault();
-          onStartAi(prompt);
-        }}
-      >
-        <Sparkles size={19} strokeWidth={1.8} aria-hidden="true" />
-        <input
-          value={prompt}
-          onChange={(event) => setPrompt(event.target.value)}
-          placeholder="Describe the app you want: weekly revenue health for the COO with risk flags"
-        />
-        <button type="submit" className="dql-apps-btn dql-apps-btn-primary">Build with AI</button>
-      </form>
 
       <div className="dql-apps-startgrid">
         <StartOption
-          icon={<Sparkles size={19} strokeWidth={1.9} />}
+          icon={<Sparkles size={17} strokeWidth={1.9} />}
           title="Build with AI"
-          description="Describe the use case. The agent finds certified context, shapes the story, and writes reviewable files."
-          meta="local agent"
-          action="Open AI builder"
-          onClick={() => onStartAi(prompt)}
+          description="Let AI draft the app."
+          action="Start"
+          onClick={() => onStartAi(DEFAULT_PROMPT)}
         />
         <StartOption
-          icon={<Blocks size={19} strokeWidth={1.9} />}
-          title="Classic builder"
-          description="Pick certified blocks and compose a 12-column dashboard canvas with the same governed app files."
-          meta="certified blocks"
-          action="Open canvas"
+          icon={<LayoutDashboard size={17} strokeWidth={1.9} />}
+          title="Classic APP"
+          description="Build from certified blocks."
+          action="Open"
           onClick={onStartClassic}
-        />
-        <StartOption
-          icon={<Workflow size={19} strokeWidth={1.9} />}
-          title="Agent skills"
-          description="The builder matches blocks, orders the narrative, drafts missing sections, and routes review."
-          meta="dynamic plan"
-          action="Ask AI"
-          onClick={() => onStartAi(prompt)}
         />
       </div>
 
@@ -633,23 +603,23 @@ function StartOption({
   icon,
   title,
   description,
-  meta,
   action,
   onClick,
 }: {
   icon: ReactNode;
   title: string;
   description: string;
-  meta: string;
   action: string;
   onClick: () => void;
 }) {
   return (
     <button type="button" className="dql-apps-start-option" onClick={onClick}>
       <span className="dql-apps-option-icon">{icon}</span>
-      <strong>{title}</strong>
-      <p>{description}</p>
-      <span className="dql-apps-option-meta"><span>{meta}</span><b>{action} <ArrowRight size={13} /></b></span>
+      <span className="dql-apps-option-copy">
+        <strong>{title}</strong>
+        <p>{description}</p>
+      </span>
+      <span className="dql-apps-option-meta"><b>{action} <ArrowRight size={13} /></b></span>
     </button>
   );
 }
@@ -766,8 +736,9 @@ function AppCreateSurface({
   return (
     <div className="dql-app-create-shell">
       <div className="dql-app-buildbar">
-        <button type="button" className="dql-app-back" onClick={onBack}>
-          <ArrowLeft size={14} /> Apps
+        <button type="button" className="dql-app-back dql-app-back-label" onClick={onBack}>
+          <ArrowLeft size={14} />
+          <span>Apps</span>
         </button>
         <span className="dql-app-name-input">
           <input value={appName} onChange={(event) => onAppNameChange(event.target.value)} spellCheck={false} />
@@ -2015,30 +1986,6 @@ const APP_STYLES = `
   max-width: 720px;
 }
 
-.dql-apps-startbar {
-  margin-top: 18px;
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  min-height: 58px;
-  background: var(--dql-app-surface);
-  border: 1px solid var(--dql-app-line-2);
-  border-radius: 10px;
-  padding: 8px 9px 8px 16px;
-  box-shadow: var(--dql-app-shadow);
-}
-
-.dql-apps-startbar svg { color: var(--dql-app-accent); flex: none; }
-.dql-apps-startbar input {
-  flex: 1;
-  min-width: 0;
-  border: 0;
-  background: transparent;
-  color: var(--dql-app-ink);
-  font: 500 15px var(--font-ui);
-  outline: none;
-}
-
 .dql-apps-btn {
   height: 32px;
   border-radius: 8px;
@@ -2063,33 +2010,34 @@ const APP_STYLES = `
 
 .dql-apps-startgrid {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 14px;
-  margin-top: 14px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+  margin-top: 16px;
 }
 
 .dql-apps-start-option {
-  min-height: 214px;
+  min-height: 72px;
   text-align: left;
-  display: flex;
-  flex-direction: column;
-  gap: 12px;
+  display: grid;
+  grid-template-columns: 34px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
   border: 1px solid var(--dql-app-line);
   border-radius: 8px;
   background: var(--dql-app-surface);
   box-shadow: var(--dql-app-shadow);
-  padding: 18px;
+  padding: 12px;
   cursor: pointer;
   color: var(--dql-app-ink);
 }
 
 .dql-apps-start-option:hover { border-color: var(--dql-app-accent); transform: translateY(-1px); }
-.dql-apps-start-option strong { font-size: 16px; }
-.dql-apps-start-option p { margin: 0; color: var(--dql-app-muted); font-size: 12.5px; line-height: 1.55; }
+.dql-apps-start-option strong { display: block; font-size: 13px; line-height: 1.2; }
+.dql-apps-start-option p { margin: 3px 0 0; color: var(--dql-app-muted); font-size: 11.5px; line-height: 1.35; }
 .dql-apps-option-icon {
-  width: 38px;
-  height: 38px;
-  border-radius: 8px;
+  width: 34px;
+  height: 34px;
+  border-radius: 7px;
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -2097,21 +2045,17 @@ const APP_STYLES = `
   background: var(--dql-app-accent-soft);
 }
 
-.dql-apps-option-meta {
-  margin-top: auto;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  font-size: 11px;
-  color: var(--dql-app-faint);
+.dql-apps-option-copy {
+  min-width: 0;
 }
 
-.dql-apps-option-meta span {
-  font-family: var(--font-mono);
-  text-transform: uppercase;
-  letter-spacing: 0;
-  font-size: 9px;
+.dql-apps-option-meta {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 6px;
+  font-size: 11px;
+  color: var(--dql-app-faint);
 }
 
 .dql-apps-option-meta b {
@@ -2119,7 +2063,8 @@ const APP_STYLES = `
   align-items: center;
   gap: 4px;
   color: var(--dql-app-accent);
-  font-size: 12px;
+  font-size: 11.5px;
+  white-space: nowrap;
 }
 
 .dql-apps-sectionhead {
@@ -2373,6 +2318,20 @@ const APP_STYLES = `
 }
 
 .dql-app-back:hover { color: var(--dql-app-ink); border-color: var(--dql-app-line-2); }
+
+.dql-app-back-label {
+  width: auto;
+  min-width: 72px;
+  padding: 0 11px 0 9px;
+  gap: 6px;
+  justify-content: flex-start;
+  color: var(--dql-app-ink);
+  font: 750 12px var(--font-ui);
+}
+
+.dql-app-back-label span {
+  line-height: 1;
+}
 
 .dql-app-topbar-divider {
   width: 1px;
@@ -4047,7 +4006,6 @@ const APP_STYLES = `
 @media (max-width: 760px) {
   .dql-apps-wrap,
   .dql-app-view-wrap { width: min(100% - 20px, 560px); }
-  .dql-apps-startbar,
   .dql-apps-libbar,
   .dql-app-buildbar,
   .dql-app-view-topbar,
