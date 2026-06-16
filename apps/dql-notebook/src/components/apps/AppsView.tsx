@@ -11,6 +11,7 @@ import {
   ChevronDown,
   Download,
   FileText,
+  GitBranch,
   LayoutDashboard,
   LineChart,
   MapPin,
@@ -1124,6 +1125,26 @@ function AppWorkspaceSurface({
                 onAdd={onAddPage}
               />
             ) : null}
+            {onDashboards ? (
+              <>
+                <button
+                  type="button"
+                  className={`dql-apps-btn dql-apps-btn-line dql-apps-btn-icon ${explainOpen ? 'on' : ''}`}
+                  title={explainOpen ? 'Hide AI copilot' : 'Show AI copilot'}
+                  onClick={() => onExplainChange(!explainOpen)}
+                >
+                  <Bot size={15} />
+                </button>
+                <button
+                  type="button"
+                  className="dql-apps-btn dql-apps-btn-line dql-apps-btn-icon"
+                  title="Open dashboard lineage"
+                  onClick={() => { if (app && dashboardDoc) onOpenLineageNode(`dashboard:${app.id}/${dashboardDoc.dashboard.id}`); }}
+                >
+                  <GitBranch size={15} />
+                </button>
+              </>
+            ) : null}
           </div>
         </div>
 
@@ -2036,7 +2057,8 @@ const APP_STYLES = `
 .dql-apps-btn-primary { background: var(--dql-app-accent); color: #fff; }
 .dql-apps-btn-line { background: var(--dql-app-surface); border-color: var(--dql-app-line-2); color: var(--dql-app-ink); }
 .dql-apps-btn-icon { width: 32px; padding: 0; flex: none; }
-.dql-apps-btn-icon:hover { color: var(--dql-app-accent); border-color: rgba(79, 99, 215, 0.34); background: var(--dql-app-accent-soft); }
+.dql-apps-btn-icon:hover,
+.dql-apps-btn-icon.on { color: var(--dql-app-accent); border-color: rgba(79, 99, 215, 0.34); background: var(--dql-app-accent-soft); }
 .dql-apps-btn-dark { width: 100%; background: var(--dql-app-deep); border-color: #1f2937; color: #fff; margin-top: 12px; }
 
 .dql-apps-startgrid {

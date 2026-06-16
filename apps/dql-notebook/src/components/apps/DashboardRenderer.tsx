@@ -347,6 +347,7 @@ export function DashboardRenderer({
   return (
     <div style={{ display: 'block', minHeight: 0 }}>
       <div style={{ flex: 1, minWidth: 0 }}>
+      {(!embeddedHeader || editable) && (
       <div style={dashboardToolbarStyle}>
         <div style={{ flex: 1, minWidth: 0 }}>
         {embeddedHeader ? null : (
@@ -364,8 +365,7 @@ export function DashboardRenderer({
           <AddTileMenu
             open={addMenuOpen}
             onToggle={() => setAddMenuOpen((value) => !value)}
-            buttonLabel="Add tile"
-            buttonStyle={primaryBuilderButtonStyle}
+            buttonStyle={addTileIconButtonStyle}
             onCertifiedBlock={() => {
               setAddMenuOpen(false);
               void openCatalog();
@@ -386,29 +386,30 @@ export function DashboardRenderer({
             type="button"
             onClick={() => void autoLayout()}
             disabled={saving}
-            style={toolbarButtonStyle(false)}
+            style={toolbarIconButtonStyle(false)}
             title="Auto-arrange every tile into a clean, gap-free grid"
           >
-            <Wand2 size={14} strokeWidth={2} />
-            Auto layout
+            <Wand2 size={15} strokeWidth={2} />
           </button>
         )}
-        {editable && dashboard.layout.items.length > 0 && (
-          <span style={dashboardEditStatusStyle}>{saving ? 'Saving...' : `${dashboard.layout.items.length} tiles`}</span>
+        {!embeddedHeader && (
+          <>
+            <button
+              type="button"
+              onClick={toggleCopilot}
+              style={toolbarButtonStyle(effectiveCopilotOpen)}
+            >
+              <Bot size={14} strokeWidth={2} />
+              {effectiveCopilotOpen ? 'Hide copilot' : 'AI Copilot'}
+            </button>
+            <button type="button" onClick={openLineage} style={toolbarButtonStyle(false)} title="Open focused dashboard lineage">
+              <GitBranch size={14} strokeWidth={2} />
+              Lineage
+            </button>
+          </>
         )}
-        <button
-          type="button"
-          onClick={toggleCopilot}
-          style={toolbarButtonStyle(effectiveCopilotOpen)}
-        >
-          <Bot size={14} strokeWidth={2} />
-          {effectiveCopilotOpen ? 'Hide copilot' : 'AI Copilot'}
-        </button>
-        <button type="button" onClick={openLineage} style={toolbarButtonStyle(false)} title="Open focused dashboard lineage">
-          <GitBranch size={14} strokeWidth={2} />
-          Lineage
-        </button>
       </div>
+      )}
       {editable && <div style={dashboardEditHintStyle}>Drag tiles, select a block to research it, or use the tile controls for sizing and chart settings.</div>}
 
       {dashboard.layout.items.length === 0 ? (
@@ -434,7 +435,7 @@ export function DashboardRenderer({
             <AddTileMenu
               open={addMenuOpen}
               onToggle={() => setAddMenuOpen((value) => !value)}
-              buttonLabel="+ Add"
+              buttonLabel="Add tile"
               buttonStyle={primaryBuilderButtonStyle}
               onCertifiedBlock={() => {
                 setAddMenuOpen(false);
@@ -1215,7 +1216,7 @@ function AddTileMenu({
   onText,
   onHeading,
   onAi,
-  buttonLabel = '+ Add',
+  buttonLabel,
   buttonStyle,
 }: {
   open: boolean;
@@ -1229,9 +1230,9 @@ function AddTileMenu({
 }) {
   return (
     <div style={{ position: 'relative', display: 'inline-flex' }}>
-      <button type="button" onClick={onToggle} style={buttonStyle ?? toolbarButtonStyle(open)}>
-        {buttonLabel === 'Add tile' ? <Plus size={14} strokeWidth={2} /> : null}
-        {buttonLabel}
+      <button type="button" onClick={onToggle} title="Add tile" style={buttonStyle ?? toolbarButtonStyle(open)}>
+        <Plus size={15} strokeWidth={2.2} />
+        {buttonLabel ? <span>{buttonLabel}</span> : null}
       </button>
       {open && (
         <div
@@ -1570,27 +1571,28 @@ function toolbarButtonStyle(active: boolean): CSSProperties {
   };
 }
 
+function toolbarIconButtonStyle(active: boolean): CSSProperties {
+  return { ...toolbarButtonStyle(active), width: 34, height: 34, padding: 0, justifyContent: 'center' };
+}
+
+const addTileIconButtonStyle: CSSProperties = {
+  width: 34,
+  height: 34,
+  border: '1px solid var(--dql-app-accent, #4f46e5)',
+  borderRadius: 8,
+  background: 'var(--dql-app-accent-soft, rgba(79,70,229,0.12))',
+  color: 'var(--dql-app-accent, #4f46e5)',
+  cursor: 'pointer',
+  display: 'inline-flex',
+  alignItems: 'center',
+  justifyContent: 'center',
+};
+
 const dashboardToolbarStyle: CSSProperties = {
   display: 'flex',
   alignItems: 'center',
-  gap: 8,
+  gap: 6,
   marginBottom: 10,
-  padding: '10px 12px',
-  border: '1px solid var(--dql-app-line, var(--border-color, rgba(0,0,0,0.08)))',
-  borderRadius: 10,
-  background: 'var(--dql-app-surface, var(--surface, rgba(255,255,255,0.82)))',
-  boxShadow: '0 1px 2px rgba(15,23,42,0.04)',
-};
-
-const dashboardEditStatusStyle: CSSProperties = {
-  border: '1px solid var(--dql-app-line, var(--border-color, rgba(0,0,0,0.1)))',
-  borderRadius: 999,
-  background: 'var(--dql-app-control, rgba(0,0,0,0.04))',
-  color: 'var(--dql-app-muted, rgba(0,0,0,0.62))',
-  padding: '5px 9px',
-  fontSize: 11,
-  fontWeight: 750,
-  whiteSpace: 'nowrap',
 };
 
 const dashboardEditHintStyle: CSSProperties = {
