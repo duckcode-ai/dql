@@ -69,7 +69,6 @@ export function Header() {
     reference: 'Quick Reference',
     apps: 'Apps',
     git: 'Source control',
-    review: 'Review',
     settings: 'Settings',
     imports: 'Import SQL',
   };

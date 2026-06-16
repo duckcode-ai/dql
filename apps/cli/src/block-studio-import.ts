@@ -330,13 +330,14 @@ function collectSqlStatements(sources: SqlSource[]): SqlStatementCandidate[] {
   const statements: SqlStatementCandidate[] = [];
   for (const source of sources) {
     const split = splitSqlStatements(source.content);
-    const sharedWarnings = split.statements.length === 1 ? analyzeSqlWarnings(split.statements[0], split.statements.length) : [];
-    split.statements.forEach((sql, index) => {
+    const executableStatements = split.statements.filter(hasExecutableSql);
+    const sharedWarnings = executableStatements.length === 1 ? analyzeSqlWarnings(executableStatements[0], executableStatements.length) : [];
+    executableStatements.forEach((sql, index) => {
       statements.push({
         sourcePath: source.path,
         sql,
         statementIndex: index + 1,
-        totalStatements: split.statements.length,
+        totalStatements: executableStatements.length,
         splitStrategy: split.strategy,
         warnings: index === 0 ? sharedWarnings : [],
       });
@@ -401,7 +402,7 @@ function buildSqlCandidate(options: {
       'Optional AI assist is review-gated and only receives this candidate context.',
     ],
     aiAssistance: [],
-    reviewStatus: 'review',
+    reviewStatus: 'draft',
   };
   candidate.dqlSource = candidateToDqlSource(candidate);
   return candidate;
@@ -559,15 +560,32 @@ function extractStatementMetadata(sql: string): { name: string; description: str
 function extractSourceTables(sql: string): string[] {
   const tables = new Set<string>();
   const cleaned = stripSqlComments(sql);
+  const cteNames = extractCteNames(cleaned);
   const regex = /\b(?:from|join|update|into)\s+([`"[]?[A-Za-z0-9_./:-]+(?:\.[A-Za-z0-9_./:-]+)*[`"\]]?)/gi;
   let match: RegExpExecArray | null;
   while ((match = regex.exec(cleaned))) {
     const raw = match[1].replace(/^[`"[]|[`"\]]$/g, '');
     if (!raw || raw.startsWith('(')) continue;
     if (/^(select|values|unnest|lateral)$/i.test(raw)) continue;
+    if (cteNames.has(raw.toLowerCase())) continue;
     tables.add(raw);
   }
   return Array.from(tables);
+}
+
+function extractCteNames(sql: string): Set<string> {
+  const names = new Set<string>();
+  const withIndex = sql.search(/\bwith\b/i);
+  if (withIndex < 0) return names;
+  const prefix = sql.slice(withIndex);
+  const regex = /(?:\bwith\b|,)\s+([A-Za-z_][A-Za-z0-9_$]*)\s+as\s*\(/gi;
+  let match: RegExpExecArray | null;
+  while ((match = regex.exec(prefix))) names.add(match[1].toLowerCase());
+  return names;
+}
+
+function hasExecutableSql(sql: string): boolean {
+  return stripSqlComments(sql).trim().length > 0;
 }
 
 function extractSqlParameters(sql: string): string[] {

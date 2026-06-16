@@ -1,6 +1,6 @@
 import React, { useRef, useState } from 'react';
 import { themes, type Theme } from '../../themes/notebook-theme';
-import { useNotebook } from '../../store/NotebookStore';
+import { makeCell, useNotebook } from '../../store/NotebookStore';
 import type {
   Cell,
   ChatCellConfig,
@@ -37,6 +37,31 @@ function findUpstreamSql(cells: Cell[], index: number, handle?: string): string 
   return undefined;
 }
 
+function uniqueSqlCellName(title: string | undefined, cells: Cell[]): string {
+  const fallback = 'ai_sql_draft';
+  const base = (title || fallback)
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '_')
+    .replace(/^_+|_+$/g, '')
+    .slice(0, 48) || fallback;
+  const taken = new Set(cells.map((item) => item.name).filter(Boolean));
+  let candidate = base;
+  let index = 2;
+  while (taken.has(candidate)) {
+    candidate = `${base}_${index}`;
+    index += 1;
+  }
+  return candidate;
+}
+
+function inferDomainFromText(value?: string): string {
+  const lower = (value ?? '').toLowerCase();
+  if (/\b(player|goal|assist|defense|nba|game|team|scoring)\b/.test(lower)) return 'nba';
+  if (/\b(customer|account|segment)\b/.test(lower)) return 'customer';
+  if (/\b(revenue|sales|arr|booking)\b/.test(lower)) return 'revenue';
+  return 'analytics';
+}
+
 export function ChatCell({ cell, cells, index, themeMode, onUpdate }: ChatCellProps) {
   const { dispatch } = useNotebook();
   const t = themes[themeMode];
@@ -48,6 +73,12 @@ export function ChatCell({ cell, cells, index, themeMode, onUpdate }: ChatCellPr
   const [pendingEvents, setPendingEvents] = useState<AgentTurn[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [proposalOpen, setProposalOpen] = useState(false);
+  const [aiBlockDraft, setAiBlockDraft] = useState<{
+    cell: Cell;
+    title?: string;
+    description?: string;
+    tags?: string[];
+  } | null>(null);
   const abortRef = useRef<AbortController | null>(null);
 
   const updateConfig = (patch: Partial<ChatCellConfig>) => {
@@ -129,6 +160,22 @@ export function ChatCell({ cell, cells, index, themeMode, onUpdate }: ChatCellPr
     updateConfig({ history: [], lastProposal: undefined });
   };
 
+  const insertGeneratedSqlCell = (sql: string, title?: string) => {
+    const trimmed = sql.trim();
+    if (!trimmed) return;
+    const sqlCell = makeCell('sql', trimmed);
+    sqlCell.name = uniqueSqlCellName(title, cells);
+    dispatch({ type: 'ADD_CELL', cell: sqlCell, afterId: cell.id });
+  };
+
+  const createGeneratedBlock = (sql: string, meta: { title?: string; description?: string; tags?: string[] }) => {
+    const trimmed = sql.trim();
+    if (!trimmed) return;
+    const sqlCell = makeCell('sql', trimmed);
+    sqlCell.name = uniqueSqlCellName(meta.title, cells);
+    setAiBlockDraft({ cell: sqlCell, ...meta });
+  };
+
   const proposal = config.lastProposal;
 
   return (
@@ -141,17 +188,31 @@ export function ChatCell({ cell, cells, index, themeMode, onUpdate }: ChatCellPr
 
       {config.history.length === 0 && !running && (
         <div style={{ fontSize: 12, color: t.textSecondary, lineHeight: 1.5 }}>
-          Ask for a metric, a comparison, or a dashboard. The agent searches blocks, checks the semantic
-          layer, and proposes a governed block when you're ready.
+          Ask for a metric, SQL draft, comparison, or dashboard. The agent searches blocks, checks the semantic
+          layer, runs safe previews when possible, and can insert generated SQL as a review-required cell.
         </div>
       )}
 
       <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
         {config.history.map((msg) => (
-          <MessageBubble key={msg.id} msg={msg} t={t} themeMode={themeMode} />
+          <MessageBubble
+            key={msg.id}
+            msg={msg}
+            t={t}
+            themeMode={themeMode}
+            onInsertSql={insertGeneratedSqlCell}
+            onCreateBlock={createGeneratedBlock}
+          />
         ))}
         {running && (
-          <LiveBubble streamingText={streamingText} events={pendingEvents} t={t} themeMode={themeMode} />
+          <LiveBubble
+            streamingText={streamingText}
+            events={pendingEvents}
+            t={t}
+            themeMode={themeMode}
+            onInsertSql={insertGeneratedSqlCell}
+            onCreateBlock={createGeneratedBlock}
+          />
         )}
       </div>
 
@@ -190,6 +251,26 @@ export function ChatCell({ cell, cells, index, themeMode, onUpdate }: ChatCellPr
           onSaved={({ path, name }) => {
             setProposalOpen(false);
             updateConfig({ lastProposal: undefined });
+            dispatch({
+              type: 'FILE_ADDED',
+              file: { name, path, type: 'block', folder: 'blocks' },
+            });
+          }}
+        />
+      )}
+
+      {aiBlockDraft && (
+        <SaveAsBlockModal
+          cell={aiBlockDraft.cell}
+          initialContent={aiBlockDraft.cell.content}
+          initialName={aiBlockDraft.title}
+          initialDescription={aiBlockDraft.description}
+          initialDomain={inferDomainFromText(aiBlockDraft.title)}
+          initialOwner="analytics"
+          initialTags={aiBlockDraft.tags}
+          onClose={() => setAiBlockDraft(null)}
+          onSaved={({ path, name }) => {
+            setAiBlockDraft(null);
             dispatch({
               type: 'FILE_ADDED',
               file: { name, path, type: 'block', folder: 'blocks' },
@@ -259,7 +340,19 @@ function ChatHeader({
   );
 }
 
-function MessageBubble({ msg, t, themeMode }: { msg: ChatMessage; t: Theme; themeMode: ThemeMode }) {
+function MessageBubble({
+  msg,
+  t,
+  themeMode,
+  onInsertSql,
+  onCreateBlock,
+}: {
+  msg: ChatMessage;
+  t: Theme;
+  themeMode: ThemeMode;
+  onInsertSql: (sql: string, title?: string) => void;
+  onCreateBlock: (sql: string, meta: { title?: string; description?: string; tags?: string[] }) => void;
+}) {
   const isUser = msg.role === 'user';
   const events = (msg.events ?? []).map((e) => e.payload as AgentTurn);
   const answer = !isUser ? extractGovernedAnswer(events) : null;
@@ -280,7 +373,7 @@ function MessageBubble({ msg, t, themeMode }: { msg: ChatMessage; t: Theme; them
         {isUser ? 'You' : 'Assistant'}
       </div>
       {answer ? (
-        <AgentAnswerCard answer={answer} themeMode={themeMode} />
+        <AgentAnswerCard answer={answer} themeMode={themeMode} onInsertSql={onInsertSql} onCreateBlock={onCreateBlock} />
       ) : (
         msg.content || (events.length > 0 ? <em style={{ color: t.textSecondary }}>(tool calls only)</em> : null)
       )}
@@ -291,14 +384,28 @@ function MessageBubble({ msg, t, themeMode }: { msg: ChatMessage; t: Theme; them
   );
 }
 
-function LiveBubble({ streamingText, events, t, themeMode }: { streamingText: string; events: AgentTurn[]; t: Theme; themeMode: ThemeMode }) {
+function LiveBubble({
+  streamingText,
+  events,
+  t,
+  themeMode,
+  onInsertSql,
+  onCreateBlock,
+}: {
+  streamingText: string;
+  events: AgentTurn[];
+  t: Theme;
+  themeMode: ThemeMode;
+  onInsertSql: (sql: string, title?: string) => void;
+  onCreateBlock: (sql: string, meta: { title?: string; description?: string; tags?: string[] }) => void;
+}) {
   const answer = extractGovernedAnswer(events);
   return (
     <div style={{ padding: '8px 12px', borderRadius: 6, background: t.cellBg, border: `1px solid ${t.cellBorder}`, fontSize: 13, lineHeight: 1.5, color: t.textPrimary, whiteSpace: 'pre-wrap' }}>
       <div style={{ fontSize: 10, fontFamily: t.fontMono, color: t.textMuted, marginBottom: 4, textTransform: 'uppercase', letterSpacing: '0.08em' }}>
         Assistant <span style={{ color: t.accent }}>●</span>
       </div>
-      {answer ? <AgentAnswerCard answer={answer} themeMode={themeMode} /> : (streamingText || <em style={{ color: t.textSecondary }}>Thinking…</em>)}
+      {answer ? <AgentAnswerCard answer={answer} themeMode={themeMode} onInsertSql={onInsertSql} onCreateBlock={onCreateBlock} /> : (streamingText || <em style={{ color: t.textSecondary }}>Thinking…</em>)}
       {events.filter((e) => e.kind === 'tool_call').map((e) => (
         <ToolCallChip key={`live-${(e as { id: string }).id}`} turn={e} t={t} />
       ))}
@@ -341,7 +448,7 @@ function ChatInput({
             onSend();
           }
         }}
-        placeholder="Ask for a metric or dashboard — ⌘↵ to send"
+        placeholder="Ask for a metric, SQL draft, or dashboard — ⌘↵ to send"
         rows={2}
         style={{
           flex: 1,

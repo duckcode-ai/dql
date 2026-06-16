@@ -163,18 +163,23 @@ export function AgentAnswerCard({
   showSql = true,
   compact = false,
   addToAppTarget,
+  onInsertSql,
+  onCreateBlock,
 }: {
   answer: AgentAnswerEnvelope;
   themeMode: ThemeMode;
   showSql?: boolean;
   compact?: boolean;
   addToAppTarget?: { appId: string; dashboardId: string };
+  onInsertSql?: (sql: string, title?: string) => void;
+  onCreateBlock?: (sql: string, meta: { title?: string; description?: string; tags?: string[] }) => void;
 }) {
   const t = themes[themeMode];
   const result = normalizeAgentResult(answer);
   const chartConfig = normalizeChartConfig(answer.result?.chartConfig, answer);
   const hasChart = Boolean(result && resolveChartType(result, chartConfig) !== 'table');
-  const sql = showSql ? answer.sql ?? answer.result?.sql ?? answer.proposedSql : undefined;
+  const analysisPlan = answer.analysisPlan ?? answer.evidence?.analysisPlan;
+  const sql = showSql ? answer.sql ?? answer.result?.sql ?? answer.proposedSql ?? analysisPlan?.sql : undefined;
   const blockPath = answer.result?.blockPath ?? answer.block?.sourcePath;
   const hasSqlPanel = Boolean(sql || (showSql && blockPath));
   const hasEvidence = Boolean(answer.evidence);
@@ -184,12 +189,27 @@ export function AgentAnswerCard({
   const trustState = resolveAnswerTrustState(answer);
   const trustAccent = trustStateColor(trustState, t);
   const summary = (answer.answer ?? answer.text ?? '').replace(/\n\n_Question:_[\s\S]*$/m, '').trim();
-  const analysisPlan = answer.analysisPlan ?? answer.evidence?.analysisPlan;
   const blockName = answer.result?.blockName ?? answer.block?.name ?? answer.citations?.find((c) => c.kind === 'block')?.name;
   const provenance = buildAnswerProvenance(answer, result, blockName, blockPath);
   const [adding, setAdding] = useState(false);
   const [addMessage, setAddMessage] = useState<string | null>(null);
+  const [insertMessage, setInsertMessage] = useState<string | null>(null);
   const canAddToApp = Boolean(addToAppTarget && (result || sql || summary || blockName));
+  const canInsertSql = Boolean(onInsertSql && sql);
+  const canCreateBlock = Boolean(onCreateBlock && sql);
+  const insertSql = () => {
+    if (!onInsertSql || !sql) return;
+    onInsertSql(sql, blockName ?? analysisPlan?.question ?? 'AI SQL draft');
+    setInsertMessage('Inserted SQL cell for review.');
+  };
+  const createBlock = () => {
+    if (!onCreateBlock || !sql) return;
+    onCreateBlock(sql, {
+      title: blockName ?? analysisPlan?.question ?? 'AI SQL draft',
+      description: summary || analysisPlan?.routeReason || 'AI generated SQL draft.',
+      tags: ['ai-generated', 'review-required'],
+    });
+  };
   const addToApp = async (mode: AddToAppMode = 'auto') => {
     if (!addToAppTarget) return;
     const selectedModes: Array<'chart' | 'data'> = mode === 'both'
@@ -342,8 +362,47 @@ export function AgentAnswerCard({
             onAdd={(mode) => void addToApp(mode)}
           />
         )}
+        {canInsertSql && (
+          <button
+            type="button"
+            onClick={insertSql}
+            style={{
+              border: `1px solid ${t.accent}`,
+              borderRadius: 6,
+              background: `${t.accent}18`,
+              color: t.accent,
+              cursor: 'pointer',
+              padding: compact ? '4px 8px' : '5px 10px',
+              fontSize: 11,
+              fontFamily: t.font,
+              fontWeight: 700,
+            }}
+          >
+            {compact ? 'Insert SQL' : 'Insert SQL cell'}
+          </button>
+        )}
+        {canCreateBlock && (
+          <button
+            type="button"
+            onClick={createBlock}
+            style={{
+              border: `1px solid ${t.accent}`,
+              borderRadius: 6,
+              background: t.cellBg,
+              color: t.accent,
+              cursor: 'pointer',
+              padding: compact ? '4px 8px' : '5px 10px',
+              fontSize: 11,
+              fontFamily: t.font,
+              fontWeight: 700,
+            }}
+          >
+            {compact ? 'Block' : 'Create block'}
+          </button>
+        )}
       </div>
       {addMessage && <div style={{ fontSize: 11, color: addMessage.toLowerCase().includes('added') || addMessage.toLowerCase().includes('pinned') ? '#3fb950' : '#ff7b72' }}>{addMessage}</div>}
+      {insertMessage && <div style={{ fontSize: 11, color: '#3fb950' }}>{insertMessage}</div>}
 
       <div style={{ border: `1px solid ${t.cellBorder}`, borderTop: `2px solid ${trustAccent}`, borderRadius: compact ? 10 : 6, overflow: 'hidden', background: t.cellBg }}>
         {!compact && (

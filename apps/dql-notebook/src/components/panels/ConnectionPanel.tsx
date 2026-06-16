@@ -343,6 +343,12 @@ function isSensitiveField(field: string): boolean {
   );
 }
 
+function saveMessageColor(message: string, theme: Theme): string {
+  if (message.startsWith('Error') || message.toLowerCase().includes('failed')) return theme.error;
+  if (message.toLowerCase().includes('testing')) return theme.warning;
+  return theme.success;
+}
+
 function isPlaceholderLocalConnection(cfg: any): boolean {
   const driver = normalizeDriverName(String(cfg?.driver ?? cfg?.type ?? ''));
   if (driver !== 'duckdb' && driver !== 'file') return false;
@@ -410,6 +416,10 @@ export function ConnectionPanel({ variant = 'panel' }: { variant?: 'panel' | 'pa
   }, []);
 
   const handleTest = async () => {
+    if (!info || Object.keys(info.connections ?? {}).length === 0) {
+      setTestResult({ ok: false, message: 'Add or import a connection before testing.' });
+      return;
+    }
     setTesting(true);
     setTestResult(null);
     const result = await api.testConnection();
@@ -490,8 +500,7 @@ export function ConnectionPanel({ variant = 'panel' }: { variant?: 'panel' | 'pa
       // Refresh
       const refreshed = await api.getConnections();
       setInfo(refreshed);
-      setSaveMsg('Saved');
-      setTimeout(() => setSaveMsg(null), 2000);
+      setSaveMsg('Saved. Testing connection...');
       setEditing(null);
       setAddingNew(false);
       // Re-test the hot-swapped connection and refresh schema
@@ -499,8 +508,11 @@ export function ConnectionPanel({ variant = 'panel' }: { variant?: 'panel' | 'pa
         setTesting(true);
         const result = await api.testConnection();
         setTestResult(result);
-      } catch { /* non-fatal */ }
-      finally { setTesting(false); }
+        setSaveMsg(result.ok ? 'Saved and connected' : 'Saved, but connection test failed');
+        if (result.ok) setTimeout(() => setSaveMsg(null), 2000);
+      } catch (e: any) {
+        setSaveMsg(`Saved, but connection test failed: ${e.message ?? 'Connection failed'}`);
+      } finally { setTesting(false); }
     } catch (e: any) {
       setSaveMsg(`Error: ${e.message}`);
     } finally {
@@ -532,11 +544,12 @@ export function ConnectionPanel({ variant = 'panel' }: { variant?: 'panel' | 'pa
       await api.saveConnections(info.connections, key);
       const refreshed = await api.getConnections();
       setInfo(refreshed);
-      setSaveMsg('Default updated');
-      setTimeout(() => setSaveMsg(null), 2000);
+      setSaveMsg('Default updated. Testing connection...');
       setTesting(true);
       const result = await api.testConnection();
       setTestResult(result);
+      setSaveMsg(result.ok ? 'Default updated and connected' : 'Default updated, but connection test failed');
+      if (result.ok) setTimeout(() => setSaveMsg(null), 2000);
     } catch (e: any) {
       setSaveMsg(`Error: ${e.message}`);
     } finally {
@@ -567,6 +580,7 @@ export function ConnectionPanel({ variant = 'panel' }: { variant?: 'panel' | 'pa
   const defaultKey = info?.default ?? '';
   const dbtProfileCandidates = info?.dbtProfiles ?? [];
   const connectionCount = Object.keys(connections).length;
+  const canTestConnection = connectionCount > 0;
 
   const connectionListSection = (
     <>
@@ -829,8 +843,8 @@ export function ConnectionPanel({ variant = 'panel' }: { variant?: 'panel' | 'pa
       {saveMsg && (
         <div style={{
           fontSize: 11, fontFamily: t.font, padding: '4px 10px', borderRadius: 4, marginBottom: 8,
-          color: saveMsg.startsWith('Error') ? t.error : t.success,
-          background: saveMsg.startsWith('Error') ? `${t.error}12` : `${t.success}12`,
+          color: saveMessageColor(saveMsg, t),
+          background: `${saveMessageColor(saveMsg, t)}12`,
         }}>
           {saveMsg}
         </div>
@@ -842,16 +856,16 @@ export function ConnectionPanel({ variant = 'panel' }: { variant?: 'panel' | 'pa
     <>
       <button
         onClick={handleTest}
-        disabled={testing}
+        disabled={testing || !canTestConnection}
         style={{
           width: '100%', padding: '7px 0', borderRadius: 6,
           border: `1px solid ${t.btnBorder}`, background: t.btnBg,
           color: t.textSecondary, fontSize: 12, fontFamily: t.font, fontWeight: 500,
-          cursor: testing ? 'not-allowed' : 'pointer', marginBottom: 8,
-          opacity: testing ? 0.7 : 1, transition: 'all 0.15s',
+          cursor: testing || !canTestConnection ? 'not-allowed' : 'pointer', marginBottom: 8,
+          opacity: testing || !canTestConnection ? 0.7 : 1, transition: 'all 0.15s',
         }}
       >
-        {testing ? 'Testing…' : 'Test Connection'}
+        {testing ? 'Testing...' : canTestConnection ? 'Test Connection' : 'Add connection to test'}
       </button>
 
       {testResult && (

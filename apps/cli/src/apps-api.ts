@@ -1285,13 +1285,24 @@ async function runAppInvestigation(
     const previews = buildContextPreviews(selected);
     let metricSnapshot = buildMetricSnapshot(selected);
     let driverCards = buildDriverCards(selected, intent);
+    const sourceTileId = investigation.sourceTileId ?? selectedContextString(context, 'tileId');
+    const sourceBlockId = investigation.sourceBlockId ?? selectedContextString(context, 'blockId');
+    const deterministicGeneration = generatedSql
+      ? undefined
+      : buildDeterministicInvestigationSql(ctx.projectRoot, {
+          question,
+          intent,
+          selected,
+          sourceBlockId,
+        });
+    generatedSql = generatedSql || deterministicGeneration?.sql;
     const agentGeneration = generatedSql
       ? undefined
       : await generateInvestigationSql(ctx, {
           appId: investigation.appId,
           dashboardId: investigation.dashboardId ?? selectedString(context, 'dashboardId'),
-          sourceTileId: investigation.sourceTileId ?? selectedContextString(context, 'tileId'),
-          sourceBlockId: investigation.sourceBlockId ?? selectedContextString(context, 'blockId'),
+          sourceTileId,
+          sourceBlockId,
           title: investigation.title,
           question,
           intent,
@@ -1317,6 +1328,9 @@ async function runAppInvestigation(
         generatedSql: generatedSql || undefined,
         sqlExecuted: Boolean(sqlEvidence.preview),
         sqlError,
+        generationSource: deterministicGeneration ? 'selected_block_metadata' : agentGeneration?.providerUsed ? 'ai_provider' : generatedSql ? 'provided_sql' : 'context_only',
+        sourceBlockPath: deterministicGeneration?.sourceBlockPath,
+        sourceBlockName: deterministicGeneration?.sourceBlockName,
         providerUsed: agentGeneration?.providerUsed,
       },
       certifiedContext: {
@@ -1324,8 +1338,9 @@ async function runAppInvestigation(
         appName: appInfo?.app.name,
         dashboardId: investigation.dashboardId,
         dashboardTitle: selectedString(context, 'dashboardTitle'),
-        sourceTileId: investigation.sourceTileId ?? selectedContextString(context, 'tileId'),
-        sourceBlockId: investigation.sourceBlockId ?? selectedContextString(context, 'blockId'),
+        sourceTileId,
+        sourceBlockId,
+        sourceBlockPath: deterministicGeneration?.sourceBlockPath ?? selectedString(selected, 'blockPath'),
         certificationStatus: selectedString(selected, 'certificationStatus'),
       },
       assumptions: investigationAssumptions(intent, selected, generatedSql, sqlError),
@@ -1397,7 +1412,12 @@ function safeIntentContext(context: unknown): Record<string, unknown> {
 
 function selectedBlockContext(context: unknown): Record<string, unknown> | null {
   const root = asRecord(context);
-  return asRecord(root?.selectedBlock);
+  const selected = asRecord(root?.selectedBlock);
+  if (selected) return selected;
+  if (!root) return null;
+  const hasSelectedTileContext = ['blockId', 'blockPath', 'tileId', 'certificationStatus', 'resultSample', 'rowCount']
+    .some((key) => root[key] !== undefined && root[key] !== null);
+  return hasSelectedTileContext ? root : null;
 }
 
 function selectedContextString(context: unknown, key: string): string | undefined {
@@ -1505,7 +1525,8 @@ function buildPreviewMetricSnapshot(preview: Record<string, unknown>, fallbackTi
     };
   }
   const currentColumn = pickColumn(numericColumns, [/^current_/i, /current.*(revenue|value|amount|total|orders?)/i])
-    ?? pickColumn(numericColumns, [/(revenue|value|amount|total|orders?|count)$/i])
+    ?? pickColumn(numericColumns, [/^total_/i, /(revenue|value|amount|total|orders?|points?|goals?|assists?|rebounds?|score|games_played)$/i])
+    ?? pickColumn(numericColumns, [/(count|row_count)$/i])
     ?? numericColumns[0];
   const baselineColumn = pickColumn(numericColumns, [/^baseline_/i, /baseline.*(revenue|value|amount|total|orders?)/i]);
   const deltaColumn = pickColumn(numericColumns, [/(delta|change|variance|diff|contribution)/i]);
@@ -1537,7 +1558,8 @@ function buildPreviewDriverCards(
   }
   const numericColumns = columns.filter((column) => rows.some((row) => typeofNumber(row[column]) !== null));
   const contributionColumn = pickColumn(numericColumns, [/(delta|change|variance|diff|contribution)/i])
-    ?? pickColumn(numericColumns, [/^current_/i, /(revenue|value|amount|total|orders?|count)$/i])
+    ?? pickColumn(numericColumns, [/^current_/i, /^total_/i, /(revenue|value|amount|total|orders?|points?|goals?|assists?|rebounds?|score|games_played)$/i])
+    ?? pickColumn(numericColumns, [/(count|row_count)$/i])
     ?? numericColumns[0];
   const dimensionColumn = columns.find((column) => column !== contributionColumn && rows.some((row) => typeof row[column] === 'string'));
   if (!contributionColumn) {
@@ -1592,6 +1614,261 @@ function sumNumericRows(rows: Array<Record<string, unknown>>, column: string): n
     found = true;
   }
   return found ? total : null;
+}
+
+function buildDeterministicInvestigationSql(
+  projectRoot: string,
+  input: {
+    question: string;
+    intent: LocalAppInvestigationIntent;
+    selected: Record<string, unknown> | null;
+    sourceBlockId?: string;
+  },
+): { sql: string; sourceBlockPath: string; sourceBlockName: string } | undefined {
+  if (input.intent === 'trust_gap_review') return undefined;
+  const block = resolveSelectedBlock(projectRoot, input.selected, input.sourceBlockId);
+  if (!block) return undefined;
+  const source = readFileSync(join(projectRoot, block.path), 'utf-8');
+  const blockSql = extractDqlQuery(source);
+  if (!blockSql || /\{\{/.test(blockSql) || !isReadOnlySql(blockSql)) return undefined;
+  const rows = selectedRows(input.selected);
+  const columns = selectedColumns(input.selected, rows);
+  const sourceSql = stripTopLevelOrderAndLimit(blockSql);
+  const profile = profileResultColumns(columns, rows);
+  const measure = chooseMeasureColumn(profile);
+  if (!measure) return undefined;
+  const dimension = chooseDimensionColumn(input.question, profile, input.intent);
+  const sourceCte = `WITH dql_source AS (\n${sourceSql}\n)`;
+
+  if (input.intent === 'entity_drilldown') {
+    const entity = inferEntityFilter(input.question, profile, rows);
+    const orderBy = `ORDER BY ${quoteSqlIdentifier(measure.name)} DESC`;
+    const where = entity ? `\nWHERE ${quoteSqlIdentifier(entity.column)} IS NOT NULL AND LOWER(CAST(${quoteSqlIdentifier(entity.column)} AS VARCHAR)) LIKE ${sqlStringLiteral(`%${entity.value.toLowerCase()}%`)}` : '';
+    return {
+      sql: `${sourceCte}\nSELECT *\nFROM dql_source${where}\n${orderBy}\nLIMIT 100`,
+      sourceBlockPath: block.path,
+      sourceBlockName: block.name,
+    };
+  }
+
+  if (input.intent === 'anomaly_investigation') {
+    const timeDimension = chooseTimeDimension(profile) ?? dimension;
+    const rankExpr = `${measureAgg(measure)}(${quoteSqlIdentifier(measure.name)})`;
+    if (timeDimension) {
+      return {
+        sql: [
+          sourceCte,
+          ', dql_trend AS (',
+          `  SELECT ${quoteSqlIdentifier(timeDimension.name)} AS ${quoteSqlIdentifier(timeDimension.name)}, ${rankExpr} AS ${quoteSqlIdentifier(measure.name)}`,
+          '  FROM dql_source',
+          `  GROUP BY ${quoteSqlIdentifier(timeDimension.name)}`,
+          '), dql_deltas AS (',
+          `  SELECT ${quoteSqlIdentifier(timeDimension.name)}, ${quoteSqlIdentifier(measure.name)}, LAG(${quoteSqlIdentifier(measure.name)}) OVER (ORDER BY ${quoteSqlIdentifier(timeDimension.name)}) AS baseline_${safeAlias(measure.name)}`,
+          '  FROM dql_trend',
+          ')',
+          `SELECT *, ${quoteSqlIdentifier(measure.name)} - baseline_${safeAlias(measure.name)} AS delta_${safeAlias(measure.name)}`,
+          'FROM dql_deltas',
+          `ORDER BY ABS(COALESCE(delta_${safeAlias(measure.name)}, 0)) DESC`,
+          'LIMIT 20',
+        ].join('\n'),
+        sourceBlockPath: block.path,
+        sourceBlockName: block.name,
+      };
+    }
+  }
+
+  if (!dimension) return undefined;
+  const aggregate = `${measureAgg(measure)}(${quoteSqlIdentifier(measure.name)})`;
+  const label = quoteSqlIdentifier(dimension.name);
+  return {
+    sql: [
+      sourceCte,
+      `SELECT ${label} AS ${label}, ${aggregate} AS ${quoteSqlIdentifier(measure.name)}, COUNT(*) AS ${quoteSqlIdentifier('row_count')}`,
+      'FROM dql_source',
+      `GROUP BY ${label}`,
+      `ORDER BY ABS(COALESCE(${quoteSqlIdentifier(measure.name)}, 0)) DESC`,
+      'LIMIT 20',
+    ].join('\n'),
+    sourceBlockPath: block.path,
+    sourceBlockName: block.name,
+  };
+}
+
+function resolveSelectedBlock(
+  projectRoot: string,
+  selected: Record<string, unknown> | null,
+  sourceBlockId?: string,
+): BlockCandidate | undefined {
+  const selectedPath = selectedString(selected, 'blockPath');
+  const candidates = collectBlockCandidates(projectRoot);
+  if (selectedPath) {
+    const normalizedPath = selectedPath.replace(/^\/+/, '');
+    const found = candidates.find((block) => block.path === normalizedPath);
+    if (found) return found;
+    if (normalizedPath.startsWith('blocks/') && existsSync(join(projectRoot, normalizedPath))) {
+      const source = readFileSync(join(projectRoot, normalizedPath), 'utf-8');
+      const name = matchString(source, /block\s+"([^"]+)"/) ?? titleFromPath(normalizedPath);
+      return {
+        id: name,
+        name,
+        domain: matchString(source, /domain\s*=\s*"([^"]+)"/) ?? 'uncategorized',
+        status: matchString(source, /status\s*=\s*"([^"]+)"/) ?? 'draft',
+        owner: matchString(source, /owner\s*=\s*"([^"]+)"/),
+        tags: matchArray(source, /tags\s*=\s*\[([^\]]*)\]/),
+        path: normalizedPath,
+        lastModified: statSyncSafe(join(projectRoot, normalizedPath))?.mtime.toISOString() ?? new Date(0).toISOString(),
+        description: matchString(source, /description\s*=\s*"((?:[^"\\]|\\.)*)"/) ?? '',
+        llmContext: matchString(source, /llmContext\s*=\s*"((?:[^"\\]|\\.)*)"/),
+        chartType: matchString(source, /chart\s*=\s*"([^"]+)"/) ?? undefined,
+        score: 0,
+        reasons: [],
+      };
+    }
+  }
+  const id = cleanString(sourceBlockId) || selectedString(selected, 'blockId');
+  if (!id) return undefined;
+  return candidates.find((block) => block.id === id || block.name === id || block.path === id);
+}
+
+type ResultColumnProfile = {
+  name: string;
+  lower: string;
+  numeric: boolean;
+  text: boolean;
+  dimension: boolean;
+  measure: boolean;
+  time: boolean;
+};
+
+function profileResultColumns(columns: string[], rows: Array<Record<string, unknown>>): ResultColumnProfile[] {
+  return columns.map((name) => {
+    const lower = name.toLowerCase();
+    const numeric = rows.length === 0 ? !isLikelyTextColumn(lower) : rows.some((row) => typeofNumber(row[name]) !== null);
+    const text = rows.some((row) => typeof row[name] === 'string' && String(row[name]).trim().length > 0);
+    const time = /\b(season|year|month|week|quarter|date|day)\b/i.test(lower);
+    const identifier = /\b(id|key|uuid|number)\b/i.test(lower) && !time;
+    const measureName = /\b(total|sum|amount|revenue|sales|points?|goals?|assists?|rebounds?|count|avg|average|rate|pct|percent|score|value|delta|change|variance)\b/i.test(lower);
+    const dimensionName = /\b(name|type|segment|region|market|category|status|player|customer|account|team|season|year|month|week|quarter|date)\b/i.test(lower);
+    const measure = numeric && measureName && !identifier && !time;
+    const dimension = !measure && (text || time || dimensionName || !numeric);
+    return { name, lower, numeric, text, dimension, measure, time };
+  });
+}
+
+function chooseMeasureColumn(columns: ResultColumnProfile[]): ResultColumnProfile | undefined {
+  const candidates = columns.filter((column) => column.measure);
+  return candidates.find((column) => /\b(delta|change|variance|contribution)\b/i.test(column.lower))
+    ?? candidates.find((column) => /\b(total_points|total_revenue|total_amount|total|revenue|amount|sales|points|goals)\b/i.test(column.lower))
+    ?? candidates.find((column) => /\b(count|value|score|avg|average|rate|pct|percent)\b/i.test(column.lower))
+    ?? columns.find((column) => column.numeric && !column.dimension);
+}
+
+function chooseDimensionColumn(
+  question: string,
+  columns: ResultColumnProfile[],
+  intent: LocalAppInvestigationIntent,
+): ResultColumnProfile | undefined {
+  const dimensions = columns.filter((column) => column.dimension);
+  const questionTokens = new Set(question.toLowerCase().split(/[^a-z0-9]+/).filter(Boolean));
+  const mentioned = dimensions.find((column) => column.lower.split(/[^a-z0-9]+/).some((token) => questionTokens.has(token)));
+  if (mentioned) return mentioned;
+  const timeDimension = chooseTimeDimension(columns);
+  if ((intent === 'diagnose_change' || intent === 'segment_compare' || intent === 'anomaly_investigation') && timeDimension) return timeDimension;
+  return dimensions.find((column) => column.text && !column.time)
+    ?? timeDimension
+    ?? dimensions[0];
+}
+
+function chooseTimeDimension(columns: ResultColumnProfile[]): ResultColumnProfile | undefined {
+  return columns.find((column) => column.time);
+}
+
+function inferEntityFilter(
+  question: string,
+  columns: ResultColumnProfile[],
+  rows: Array<Record<string, unknown>>,
+): { column: string; value: string } | undefined {
+  const textDimensions = columns.filter((column) => column.dimension && (column.text || /\b(name|player|customer|account|team)\b/i.test(column.lower)));
+  const lowerQuestion = question.toLowerCase();
+  for (const column of textDimensions) {
+    for (const row of rows) {
+      const value = cleanString(row[column.name]);
+      if (value && lowerQuestion.includes(value.toLowerCase())) return { column: column.name, value };
+    }
+  }
+  const named = question.match(/\b([A-Z][a-z]+(?:\s+[A-Z][a-z]+)+)\b/);
+  const value = named?.[1]?.trim();
+  const column = textDimensions[0];
+  return value && column ? { column: column.name, value } : undefined;
+}
+
+function measureAgg(column: ResultColumnProfile): 'AVG' | 'SUM' {
+  return /\b(avg|average|rate|pct|percent|per_)\b/i.test(column.lower) ? 'AVG' : 'SUM';
+}
+
+function extractDqlQuery(source: string): string | null {
+  const tripleQuoteMatch = source.match(/query\s*=\s*"""([\s\S]*?)"""/i);
+  if (tripleQuoteMatch) return tripleQuoteMatch[1].trim() || null;
+  const singleQuoteMatch = source.match(/query\s*=\s*"((?:[^"\\]|\\.)*)"/i);
+  if (singleQuoteMatch) return singleQuoteMatch[1].replace(/\\"/g, '"').trim() || null;
+  return null;
+}
+
+function stripTopLevelOrderAndLimit(sql: string): string {
+  let next = sql.trim().replace(/;+\s*$/g, '');
+  const limitIndex = findLastTopLevelKeyword(next, 'limit');
+  if (limitIndex >= 0 && /^\s+limit\s+\d+\s*$/i.test(next.slice(limitIndex))) {
+    next = next.slice(0, limitIndex).trim();
+  }
+  const orderIndex = findLastTopLevelKeyword(next, 'order by');
+  if (orderIndex >= 0) next = next.slice(0, orderIndex).trim();
+  return next;
+}
+
+function findLastTopLevelKeyword(sql: string, keyword: string): number {
+  const lower = sql.toLowerCase();
+  const target = keyword.toLowerCase();
+  let depth = 0;
+  let quote: '"' | "'" | '`' | null = null;
+  let last = -1;
+  for (let i = 0; i < lower.length; i += 1) {
+    const char = lower[i];
+    if (quote) {
+      if (char === quote && lower[i - 1] !== '\\') quote = null;
+      continue;
+    }
+    if (char === '"' || char === "'" || char === '`') {
+      quote = char;
+      continue;
+    }
+    if (char === '(') depth += 1;
+    if (char === ')') depth = Math.max(0, depth - 1);
+    if (depth === 0 && lower.startsWith(target, i) && isKeywordBoundary(lower, i - 1) && isKeywordBoundary(lower, i + target.length)) {
+      last = i;
+    }
+  }
+  return last;
+}
+
+function isKeywordBoundary(value: string, index: number): boolean {
+  if (index < 0 || index >= value.length) return true;
+  return /[^a-z0-9_]/i.test(value[index]);
+}
+
+function quoteSqlIdentifier(identifier: string): string {
+  return `"${identifier.replace(/"/g, '""')}"`;
+}
+
+function sqlStringLiteral(value: string): string {
+  return `'${value.replace(/'/g, "''")}'`;
+}
+
+function safeAlias(identifier: string): string {
+  return identifier.replace(/[^a-z0-9_]+/gi, '_').replace(/^_+|_+$/g, '') || 'value';
+}
+
+function isLikelyTextColumn(value: string): boolean {
+  return /\b(name|type|segment|region|market|category|status|player|customer|account|team)\b/i.test(value);
 }
 
 async function generateInvestigationSql(
@@ -1676,10 +1953,24 @@ function buildGeneratedSqlPreview(result: unknown, generatedSql?: string): Recor
 }
 
 function isReadOnlySql(sql: string): boolean {
-  const trimmed = sql.trim().replace(/;+\s*$/g, '');
+  const trimmed = stripLeadingSqlComments(sql).replace(/;+\s*$/g, '');
   if (!/^(select|with)\b/i.test(trimmed)) return false;
   if (/;\s*\S/.test(trimmed)) return false;
   return !/\b(insert|update|delete|merge|drop|alter|create|truncate|copy|grant|revoke|call|execute|attach|detach)\b/i.test(trimmed);
+}
+
+function stripLeadingSqlComments(sql: string): string {
+  let next = sql.trim();
+  while (next.startsWith('--') || next.startsWith('/*')) {
+    if (next.startsWith('--')) {
+      const lineEnd = next.indexOf('\n');
+      next = lineEnd >= 0 ? next.slice(lineEnd + 1).trimStart() : '';
+      continue;
+    }
+    const blockEnd = next.indexOf('*/');
+    next = blockEnd >= 0 ? next.slice(blockEnd + 2).trimStart() : '';
+  }
+  return next;
 }
 
 function boundedPreviewSql(sql: string): string {
@@ -1789,7 +2080,11 @@ function titleFromInvestigation(question: string, selected: Record<string, unkno
 }
 
 function selectedRows(selected: Record<string, unknown> | null): Array<Record<string, unknown>> {
-  const rows = Array.isArray(selected?.sampleRows) ? selected?.sampleRows : selected?.rows;
+  const rows = Array.isArray(selected?.sampleRows)
+    ? selected?.sampleRows
+    : Array.isArray(selected?.resultSample)
+      ? selected?.resultSample
+      : selected?.rows;
   if (!Array.isArray(rows)) return [];
   return rows.map(asRecord).filter((row): row is Record<string, unknown> => Boolean(row)).slice(0, 100);
 }
@@ -2532,6 +2827,13 @@ async function readJson<T = Record<string, unknown>>(req: IncomingMessage): Prom
     req.on('error', reject);
   });
 }
+
+export const __test__ = {
+  buildPreviewDriverCards,
+  buildPreviewMetricSnapshot,
+  buildDeterministicInvestigationSql,
+  selectedBlockContext,
+};
 
 // reference unused parseAppDocument/readFileSync to keep import stable for forward use
 void parseAppDocument;

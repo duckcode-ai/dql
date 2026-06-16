@@ -11,15 +11,18 @@ import {
   loadProjectConfig,
   normalizeProjectConnection,
   prepareLocalExecution,
+  resolveDbtMacrosForExecution,
   resolveProjectRelativeSqlPaths,
   serializeJSON,
   validateBlockStudioSource,
+  validateConnectionForTest,
 } from './local-runtime.js';
 import { afterEach } from 'vitest';
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { SemanticLayer } from '@duckcodeailabs/dql-core';
+import type { DatabaseConnector, QueryResult } from '@duckcodeailabs/dql-connectors';
 
 const tempDirs: string[] = [];
 
@@ -303,6 +306,76 @@ describe('prepareLocalExecution', () => {
     expect(prepared.connection).toEqual({ driver: 'file', filepath: ':memory:' });
     expect(prepared.sql).toBe("SELECT * FROM read_csv_auto('/tmp/demo-project/data/revenue.csv')");
   });
+
+  it('resolves dbt ref macros from a parent project manifest before Snowflake execution', () => {
+    const repoRoot = mkdtempSync(join(tmpdir(), 'dql-dbt-ref-parent-'));
+    tempDirs.push(repoRoot);
+    const projectRoot = join(repoRoot, 'dql');
+    const targetDir = join(repoRoot, 'target');
+    mkdirSync(projectRoot, { recursive: true });
+    mkdirSync(targetDir, { recursive: true });
+    writeFileSync(join(targetDir, 'manifest.json'), JSON.stringify({
+      nodes: {
+        'model.nba_analysis.fct_player_performance': {
+          resource_type: 'model',
+          name: 'fct_player_performance',
+          alias: 'fct_player_performance',
+          database: 'NBA_GAMES',
+          schema: 'RAW',
+          relation_name: 'NBA_GAMES.RAW.FCT_PLAYER_PERFORMANCE',
+        },
+      },
+      sources: {},
+    }), 'utf-8');
+
+    const prepared = prepareLocalExecution(
+      "SELECT * FROM {{ ref('fct_player_performance') }} LIMIT 10",
+      { driver: 'snowflake', account: 'test', username: 'user', warehouse: 'WH', database: 'NBA_GAMES', schema: 'RAW' },
+      projectRoot,
+      {},
+    );
+
+    expect(prepared.sql).toBe('SELECT * FROM NBA_GAMES.RAW.FCT_PLAYER_PERFORMANCE LIMIT 10');
+  });
+
+  it('resolves dbt source macros from configured dbt project metadata', () => {
+    const projectRoot = mkdtempSync(join(tmpdir(), 'dql-dbt-source-config-'));
+    tempDirs.push(projectRoot);
+    const dbtRoot = join(projectRoot, 'dbt');
+    const targetDir = join(dbtRoot, 'target');
+    mkdirSync(targetDir, { recursive: true });
+    writeFileSync(join(dbtRoot, 'dbt_project.yml'), 'name: nba_analysis\n', 'utf-8');
+    writeFileSync(join(targetDir, 'manifest.json'), JSON.stringify({
+      nodes: {},
+      sources: {
+        'source.nba_analysis.raw.games': {
+          source_name: 'raw',
+          name: 'games',
+          identifier: 'GAMES',
+          database: 'NBA_GAMES',
+          schema: 'RAW',
+          relation_name: 'NBA_GAMES.RAW.GAMES',
+        },
+      },
+    }), 'utf-8');
+
+    expect(resolveDbtMacrosForExecution(
+      "SELECT * FROM {{ source('raw', 'games') }}",
+      projectRoot,
+      { dbt: { projectDir: './dbt', manifestPath: 'target/manifest.json' } },
+    )).toBe('SELECT * FROM NBA_GAMES.RAW.GAMES');
+  });
+
+  it('fails fast with a clear message when dbt macros cannot be resolved', () => {
+    const projectRoot = mkdtempSync(join(tmpdir(), 'dql-dbt-ref-missing-'));
+    tempDirs.push(projectRoot);
+
+    expect(() => resolveDbtMacrosForExecution(
+      "SELECT * FROM {{ ref('missing_model') }}",
+      projectRoot,
+      {},
+    )).toThrow(/target\/manifest\.json was not available/);
+  });
 });
 
 describe('buildAgentPreviewSql', () => {
@@ -315,6 +388,87 @@ describe('buildAgentPreviewSql', () => {
   it('rejects generated SQL that is not a single read-only statement', () => {
     expect(() => buildAgentPreviewSql('SELECT 1; DROP TABLE orders')).toThrow('one statement');
     expect(() => buildAgentPreviewSql('DELETE FROM orders')).toThrow('read-only SELECT or WITH');
+  });
+});
+
+describe('validateConnectionForTest', () => {
+  function result(rows: Record<string, unknown>[]): QueryResult {
+    return {
+      columns: [],
+      rows,
+      rowCount: rows.length,
+      executionTimeMs: 1,
+    };
+  }
+
+  function fakeSnowflakeConnector(
+    execute: (sql: string) => Promise<QueryResult>,
+  ): DatabaseConnector {
+    return {
+      driverName: 'snowflake',
+      connect: async () => {},
+      disconnect: async () => {},
+      ping: async () => true,
+      execute,
+    };
+  }
+
+  it('rejects a Snowflake warehouse that is visible but suspended', async () => {
+    const executed: string[] = [];
+    const connector = fakeSnowflakeConnector(async (sql) => {
+      executed.push(sql);
+      if (sql.startsWith('SHOW WAREHOUSES')) {
+        return result([{ name: 'ANALYTICS_WH', state: 'SUSPENDED' }]);
+      }
+      throw new Error('context query should not run while warehouse is suspended');
+    });
+
+    const validation = await validateConnectionForTest(connector, {
+      driver: 'snowflake',
+      account: 'acct',
+      username: 'analyst',
+      password: 'wrong-or-right',
+      database: 'PROD',
+      schema: 'MARTS',
+      warehouse: 'ANALYTICS_WH',
+    });
+
+    expect(validation.ok).toBe(false);
+    expect(validation.message).toContain('SUSPENDED');
+    expect(executed.some((sql) => sql.includes('CURRENT_ACCOUNT'))).toBe(false);
+  });
+
+  it('validates a running Snowflake warehouse with current context', async () => {
+    const connector = fakeSnowflakeConnector(async (sql) => {
+      if (sql.startsWith('SHOW WAREHOUSES')) {
+        return result([{ name: 'ANALYTICS_WH', state: 'STARTED' }]);
+      }
+      if (sql.includes('CURRENT_ACCOUNT')) {
+        return result([{
+          ACCOUNT_NAME: 'ACME',
+          USER_NAME: 'ANALYST',
+          ROLE_NAME: 'ANALYST_ROLE',
+          DATABASE_NAME: 'PROD',
+          SCHEMA_NAME: 'MARTS',
+          WAREHOUSE_NAME: 'ANALYTICS_WH',
+        }]);
+      }
+      throw new Error(`Unexpected SQL: ${sql}`);
+    });
+
+    const validation = await validateConnectionForTest(connector, {
+      driver: 'snowflake',
+      account: 'acct',
+      username: 'analyst',
+      password: 'secret',
+      database: 'PROD',
+      schema: 'MARTS',
+      warehouse: 'ANALYTICS_WH',
+    });
+
+    expect(validation.ok).toBe(true);
+    expect(validation.message).toContain('Connected to Snowflake as ANALYST');
+    expect(validation.details?.warehouseState).toBe('STARTED');
   });
 });
 

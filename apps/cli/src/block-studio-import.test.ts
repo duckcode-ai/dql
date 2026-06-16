@@ -28,7 +28,7 @@ function tempProject(): string {
 }
 
 describe('Block Studio SQL import', () => {
-  it('previews a single SQL file as a draft block candidate', () => {
+  it('previews a single SQL file as a local block candidate', () => {
     const root = tempProject();
     writeFileSync(join(root, 'revenue.sql'), `-- name: revenue by region
 -- description: Revenue by region from legacy BI
@@ -57,7 +57,7 @@ group by region;
     expect(candidate.dqlSource).toContain('block "Revenue By Region"');
     expect(candidate.dqlSource).toContain('status = "draft"');
     expect(candidate.dqlSource).toContain('query = """');
-    expect(candidate.reviewStatus).toBe('review');
+    expect(candidate.reviewStatus).toBe('draft');
     expect(candidate.conversionNotes?.[0]).toMatch(/Deterministic SQL extraction/);
     expect(readFileSync(join(root, '.dql', 'imports', session.id, 'manifest.json'), 'utf-8')).toContain(candidate.id);
   });
@@ -137,6 +137,30 @@ select * from account_revenue
 
     expect(session.candidates).toHaveLength(1);
     expect(session.candidates[0].warnings.join(' ')).toMatch(/multiple SELECT\/WITH clauses/i);
+  });
+
+  it('drops comment-only fragments after a trailing semicolon', () => {
+    const root = tempProject();
+    writeFileSync(join(root, 'availability.sql'), `
+with games_details_summary as (
+  select count(*) as total_records from NBA_GAMES.RAW.GAMES_DETAILS
+),
+final_summary as (
+  select total_records from games_details_summary
+)
+select * from final_summary
+order by total_records;
+-- Order by dataset name for clarity
+`);
+
+    const session = createBlockStudioImportSession(root, {
+      inputPath: 'availability.sql',
+      domain: 'quality',
+    });
+
+    expect(session.candidates).toHaveLength(1);
+    expect(session.candidates[0].lineage.sourceTables).toEqual(['NBA_GAMES.RAW.GAMES_DETAILS']);
+    expect(session.candidates[0].lineage.totalStatements).toBe(1);
   });
 
   it('imports every SQL file in a folder and reloads the persisted session', () => {

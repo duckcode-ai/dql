@@ -9,7 +9,6 @@ import {
   HelpCircle,
   Settings,
   Package,
-  Check,
   ChevronsLeft,
   ChevronsRight,
   BlockIcon,
@@ -120,8 +119,8 @@ export function ActivityBar() {
     persistExpanded(expanded);
   }, [expanded]);
 
-  function handlePanelClick(panel: SidebarPanel | 'review' | 'home') {
-    if (panel === 'home' || panel === 'review') {
+  function handlePanelClick(panel: SidebarPanel | 'home') {
+    if (panel === 'home') {
       dispatch({ type: 'SET_MAIN_VIEW', view: panel });
       return;
     }
@@ -144,7 +143,7 @@ export function ActivityBar() {
   }
 
   const items: Array<{
-    key: SidebarPanel | 'review' | 'home';
+    key: SidebarPanel | 'home';
     title: string;
     icon: React.ReactNode;
     active: boolean;
@@ -172,12 +171,6 @@ export function ActivityBar() {
       title: 'Blocks',
       icon: <BlockIcon size={16} />,
       active: state.sidebarPanel === 'block_library' && state.sidebarOpen,
-    },
-    {
-      key: 'review',
-      title: 'Review',
-      icon: <Check size={16} strokeWidth={1.75} />,
-      active: state.mainView === 'review',
     },
   ];
 

@@ -410,14 +410,27 @@ export interface AgentMemory {
 
 const BASE = window.location.origin;
 
+function formatRequestError(res: Response, text: string): string {
+  const fallback = text.trim() || res.statusText || `HTTP ${res.status}`;
+  if (!text.trim()) return fallback;
+  try {
+    const payload = JSON.parse(text);
+    if (typeof payload?.error === 'string' && payload.error.trim()) return payload.error;
+    if (typeof payload?.message === 'string' && payload.message.trim()) return payload.message;
+  } catch {
+    // Keep the original response text when the server did not return JSON.
+  }
+  return fallback;
+}
+
 async function request<T>(path: string, options?: RequestInit): Promise<T> {
   const res = await fetch(`${BASE}${path}`, {
     headers: { 'Content-Type': 'application/json' },
     ...options,
   });
   if (!res.ok) {
-    const text = await res.text().catch(() => res.statusText);
-    throw new Error(text || `HTTP ${res.status}`);
+    const text = await res.text().catch(() => '');
+    throw new Error(formatRequestError(res, text));
   }
   // 204 No Content
   if (res.status === 204) return undefined as T;

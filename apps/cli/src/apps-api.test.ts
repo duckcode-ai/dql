@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { createAppPackage, createNotebookForApp, generateAppPackage, previewNotebookForApp, recommendBlocks } from './apps-api.js';
+import { __test__, createAppPackage, createNotebookForApp, generateAppPackage, previewNotebookForApp, recommendBlocks } from './apps-api.js';
 
 const tempDirs: string[] = [];
 
@@ -140,6 +140,79 @@ describe('Apps command center API helpers', () => {
     );
   });
 
+  it('builds selected-block SQL for review-required driver research', () => {
+    const root = createProject();
+    writeBlock(root, 'nba/top-scorers.dql', {
+      name: 'Top Scorers',
+      domain: 'nba',
+      status: 'certified',
+      tags: ['nba', 'scoring'],
+      description: 'Top NBA player scoring output',
+      chart: 'bar',
+      query: `-- Imported analyst SQL with comments should still be eligible for read-only research.
+SELECT
+  player_name,
+  season,
+  total_points
+FROM NBA_GAMES.RAW.fct_player_performance
+ORDER BY total_points DESC
+LIMIT 10`,
+    });
+
+    const generated = __test__.buildDeterministicInvestigationSql(root, {
+      question: 'Break this down by player driver.',
+      intent: 'driver_breakdown',
+      sourceBlockId: 'Top Scorers',
+      selected: {
+        blockId: 'Top Scorers',
+        blockPath: 'blocks/nba/top-scorers.dql',
+        certificationStatus: 'certified',
+        columns: ['player_name', 'season', 'total_points'],
+        resultSample: [
+          { player_name: 'Stephen Curry', season: '2025', total_points: 325 },
+          { player_name: 'LeBron James', season: '2025', total_points: 302 },
+        ],
+      },
+    });
+
+    expect(generated).toBeDefined();
+    if (!generated) return;
+    expect(generated.sourceBlockPath).toBe('blocks/nba/top-scorers.dql');
+    expect(generated.sourceBlockName).toBe('Top Scorers');
+    expect(generated.sql).toContain('WITH dql_source AS');
+    expect(generated.sql).toContain('FROM NBA_GAMES.RAW.fct_player_performance');
+    expect(generated.sql).not.toContain('ORDER BY total_points DESC');
+    expect(generated.sql).not.toContain('LIMIT 10');
+    expect(generated.sql).toContain('GROUP BY "player_name"');
+    expect(generated.sql).toContain('SUM("total_points") AS "total_points"');
+    expect(generated.sql).toContain('LIMIT 20');
+  });
+
+  it('ranks research driver cards by business measures before row counts', () => {
+    const preview = {
+      result: {
+        columns: ['PLAYER_NAME', 'TOTAL_POINTS', 'row_count'],
+        rows: [
+          { PLAYER_NAME: 'LeBron James', TOTAL_POINTS: 14473, row_count: 11 },
+          { PLAYER_NAME: 'James Harden', TOTAL_POINTS: 14464, row_count: 11 },
+        ],
+      },
+    };
+
+    const cards = __test__.buildPreviewDriverCards(preview, 'driver_breakdown');
+    const metric = __test__.buildPreviewMetricSnapshot(preview, 'Top 10 Goal Scorers');
+
+    expect(cards[0]).toMatchObject({
+      title: 'LeBron James',
+      value: 14473,
+      evidenceLabel: 'TOTAL_POINTS',
+    });
+    expect(metric).toMatchObject({
+      metric: 'TOTAL_POINTS',
+      currentValue: 28937,
+    });
+  });
+
   it('creates and previews App-owned notebooks', () => {
     const root = createProject();
     const appResult = createAppPackage(root, {
@@ -190,7 +263,7 @@ function createProject(): string {
 function writeBlock(
   root: string,
   relPath: string,
-  block: { name: string; domain: string; status: string; tags: string[]; description: string; chart: string },
+  block: { name: string; domain: string; status: string; tags: string[]; description: string; chart: string; query?: string },
 ): void {
   const abs = join(root, 'blocks', relPath);
   mkdirSync(join(abs, '..'), { recursive: true });
@@ -203,7 +276,7 @@ function writeBlock(
   tags = [${block.tags.map((tag) => `"${tag}"`).join(', ')}]
 
   query = """
-SELECT 1 AS value
+${block.query ?? 'SELECT 1 AS value'}
 """
 
   visualization {

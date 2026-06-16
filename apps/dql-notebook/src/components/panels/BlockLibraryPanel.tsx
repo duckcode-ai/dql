@@ -22,13 +22,26 @@ export function BlockLibraryPanel() {
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState('');
   const [showAll, setShowAll] = useState(false);
+  const blockFileKey = state.files
+    .filter((file) => file.type === 'block')
+    .map((file) => file.path)
+    .sort()
+    .join('|');
 
   useEffect(() => {
+    let active = true;
     setLoading(true);
     api.getBlockLibrary()
-      .then((result) => setBlocks(result.blocks))
-      .finally(() => setLoading(false));
-  }, []);
+      .then((result) => {
+        if (active) setBlocks(result.blocks);
+      })
+      .finally(() => {
+        if (active) setLoading(false);
+      });
+    return () => {
+      active = false;
+    };
+  }, [blockFileKey]);
 
   const filtered = blocks.filter((b) => {
     if (search && !b.name.toLowerCase().includes(search.toLowerCase()) && !b.description.toLowerCase().includes(search.toLowerCase())) return false;
