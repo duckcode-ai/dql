@@ -22,6 +22,10 @@ if (!dryRun && !publish) {
 // Order matters — leaf packages first, leaves of leaves before that. The
 // CLI is published last because it depends on every other workspace package.
 const packages = [
+  'packages/dql-telemetry',
+  'packages/dql-openlineage',
+  'packages/dql-plugin-api',
+  'packages/dql-ui',
   'packages/dql-core',
   'packages/dql-compiler',
   'packages/dql-runtime',
@@ -34,6 +38,7 @@ const packages = [
   'packages/dql-mcp',
   'packages/dql-slack',
   'packages/dql-lsp',
+  'apps/vscode-extension',
   'apps/cli',
   'packages/create-dql-app',
 ];
@@ -76,19 +81,32 @@ async function packageVersionExists(packageName, version) {
 }
 
 /**
- * Replace all "workspace:*" dependency versions with the actual package version.
- * pnpm publish is supposed to do this automatically, but it doesn't always work
- * reliably (especially in CI or when running from the release script).
+ * Prepare package manifests for npm pack/publish.
+ *
+ * - Replace all "workspace:*" dependency versions with the actual package
+ *   version. pnpm publish is supposed to do this automatically, but it doesn't
+ *   always work reliably when running from the release script.
+ * - Remove per-package prepublishOnly hooks. The script has already run the
+ *   workspace build once, and those hooks rebuild dist/ after pruning compiled
+ *   test files from the package payload.
  *
  * Returns a Map of filePath -> originalContent for restoration after publish.
  */
-function resolveWorkspaceDeps() {
-  // Build a map of package name -> version from all workspace packages
+function preparePackageManifests() {
+  // Build a map of package name -> version from every workspace package,
+  // including private packages used only for local build/dev dependencies.
   const versionMap = new Map();
-  for (const relPath of packages) {
-    const pkgPath = path.join(root, relPath, 'package.json');
-    const pkg = JSON.parse(readFileSync(pkgPath, 'utf-8'));
-    versionMap.set(pkg.name, pkg.version);
+  for (const workspaceDir of ['packages', 'apps']) {
+    const absWorkspaceDir = path.join(root, workspaceDir);
+    if (!existsSync(absWorkspaceDir)) continue;
+    for (const entry of readdirSync(absWorkspaceDir)) {
+      const pkgPath = path.join(absWorkspaceDir, entry, 'package.json');
+      if (!existsSync(pkgPath)) continue;
+      const pkg = JSON.parse(readFileSync(pkgPath, 'utf-8'));
+      if (pkg.name && pkg.version) {
+        versionMap.set(pkg.name, pkg.version);
+      }
+    }
   }
 
   const originals = new Map();
@@ -115,10 +133,18 @@ function resolveWorkspaceDeps() {
       }
     }
 
+    if (pkg.scripts?.prepublishOnly) {
+      delete pkg.scripts.prepublishOnly;
+      if (Object.keys(pkg.scripts).length === 0) {
+        delete pkg.scripts;
+      }
+      changed = true;
+    }
+
     if (changed) {
       originals.set(pkgPath, raw);
       writeFileSync(pkgPath, JSON.stringify(pkg, null, 2) + '\n');
-      console.log(`  Resolved workspace:* deps in ${relPath}/package.json`);
+      console.log(`  Prepared ${relPath}/package.json`);
     }
   }
 
@@ -130,7 +156,7 @@ function restoreOriginals(originals) {
     writeFileSync(filePath, content);
   }
   if (originals.size > 0) {
-    console.log(`\n  Restored ${originals.size} package.json file(s) to workspace:* versions`);
+    console.log(`\n  Restored ${originals.size} package.json file(s)`);
   }
 }
 
@@ -169,9 +195,10 @@ await mkdir(artifactsDir, { recursive: true });
 console.log('\nBuilding all packages (so CLI ships fresh notebook UI)...');
 await run('pnpm', ['-w', 'build'], root);
 
-// Replace workspace:* with real versions before pack/publish
-console.log('\nResolving workspace:* dependencies...');
-const originals = resolveWorkspaceDeps();
+// Replace workspace:* with real versions and disable redundant package-level
+// publish hooks before pack/publish.
+console.log('\nPreparing package manifests...');
+const originals = preparePackageManifests();
 
 let exitCode = 0;
 try {

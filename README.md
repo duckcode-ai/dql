@@ -5,185 +5,215 @@
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue)](./LICENSE)
 [![Node](https://img.shields.io/badge/node-20%20%7C%2022%20LTS-green)](https://nodejs.org)
 
-**Bringing dbt's discipline to the analytics layer.** Certified blocks, Apps,
-end-to-end lineage, and AI answers that cite their sources — built on top of
-dbt. Git-native, local-first, on your laptop.
+**DQL, Domain Query Language, is a Git-versioned analytics layer for dbt teams.**
 
-## Why we built DQL
+It turns dbt models, semantic metrics, SQL, notebooks, and Apps into reviewable
+files. The goal is simple: keep dbt as the source of truth, then make the
+analytics layer trustworthy too with certified blocks, lineage, tests, source
+control, and AI answers that cite reviewed context.
 
-dbt brought engineering discipline to **models**: transformations are
-code-reviewed, tested, versioned, and owned. But once that clean data lands,
-the place where it meets a decision — the query behind a dashboard tile, the
-metric pasted into Slack, the SQL an AI assistant just improvised against your
-warehouse — picks up none of that discipline. Every data team lives with query
-sprawl, dashboards nobody fully trusts, and now agents confidently generating
-SQL no one reviewed.
+## Start here
 
-DQL carries that same discipline downstream, into the analytics layer. An
-analytics answer becomes
-a **certified block**: one `.dql` file holding the SQL, owner, domain,
-description, tests, chart intent, and the context an LLM needs to use it
-correctly — tracked in git, certified by a local gate, and connected to
-lineage that runs from the dashboard tile back through your dbt DAG to the
-source.
+Use one of these two paths.
 
-When AI enters the picture, certification becomes the contract. DQL's agent
-and MCP server answer questions **from certified blocks first**, and cite
-them. When no block matches, the proposal is clearly flagged *Uncertified*
-and saved as a draft — so the questions your team actually asks become a
-review queue, and the good answers get promoted into governed, reusable
-blocks. Trusted answers compound; improvised SQL doesn't.
+### Path 1: Try the finished Jaffle Shop example
 
-**If you run dbt**, this will feel familiar by design: keep dbt as the source
-of truth for models and semantic metrics, add a `./dql` folder to the same
-repo, and the rest of your analytics — blocks, dashboards, notebooks, Apps,
-agent answers — becomes code too. No new platform, no lock-in: plain files,
-your warehouse, your git workflow.
-
-## Highlights
-
-*Screenshots below are from the [jaffle-shop-duckdb](https://github.com/duckcode-ai/jaffle-shop-duckdb)
-example — a real dbt project with a DQL workspace built on top.*
-
-**Apps for decision work** — package certified blocks into a local-first App
-with an executive dashboard. Every tile cites the certified block behind it; no
-SQL lives in the dashboard.
-
-![Jaffle Analytics executive dashboard](./docs/media/apps.png)
-
-**Block Studio with certified blocks** — every block carries owner / domain / tags / `llmContext` / tests, shows its certification status inline, and runs live against your warehouse.
-
-![Block Studio with a certified block and live result](./docs/media/studio.png)
-
-**Full-stack lineage** — `raw source → dbt model → certified block → dashboard → App`, rendered as an interactive graph. See exactly where every number comes from.
-
-![Full-stack lineage graph](./docs/media/lineage.png)
-
-**Notebooks — analysis as code** — SQL + DQL cells with live results and charts, tracked in git, sitting right next to the blocks and Apps they feed.
-
-![Notebook with live query results and a chart](./docs/media/notebook.png)
-
-## Get started
-
-*(Node 20 or 22 LTS.)*
-
-**Option A · See the finished example run**
-
-[duckcode-ai/jaffle-shop-duckdb](https://github.com/duckcode-ai/jaffle-shop-duckdb)
-is the Jaffle Shop dbt project with a complete DQL workspace already built in —
-10 certified blocks, an executive App dashboard, and full lineage:
+This is the fastest way to see the product working end to end.
 
 ```bash
 git clone https://github.com/duckcode-ai/jaffle-shop-duckdb.git
 cd jaffle-shop-duckdb
-./setup.sh                       # venv + dbt seed + dbt build, fully local
+./setup.sh
+
 cd dql
 npm install
-npm run notebook                 # opens http://127.0.0.1:3474
+npm run notebook
 ```
 
-Open **Apps → Jaffle Analytics** for the dashboard, **Blocks** for the
-certified blocks, and **Lineage** for `source → dbt model → block → dashboard
-→ App`. The repo's [`dql/TUTORIAL.md`](https://github.com/duckcode-ai/jaffle-shop-duckdb/blob/main/dql/TUTORIAL.md)
-is a guided tour plus a hands-on "build your own block" walkthrough.
+Open the local URL printed in the terminal, usually `http://127.0.0.1:3474`.
 
-**Option B · Add DQL to your own dbt repo**
+What to check first:
+
+1. Home shows dbt artifacts, database connection, blocks, notebooks, and Apps.
+2. Blocks shows certified examples built on top of the dbt project.
+3. Apps opens the Jaffle Analytics app.
+4. Lineage shows how sources, dbt models, blocks, dashboards, and Apps connect.
+
+### Path 2: Add DQL to your own dbt repo
+
+Run this from the root of an existing dbt project.
 
 ```bash
 cd your-dbt-repo
-dbt parse                        # make sure target/manifest.json exists
-npx create-dql-app@latest dql    # scaffolds ./dql, auto-wires the dbt project
+dbt parse
+
+npx create-dql-app@latest dql
 cd dql
 npm install
-npm run sync                     # import dbt models + lineage
-npm run notebook                 # opens http://127.0.0.1:3474
+npm run sync
+npm run notebook
 ```
 
-Then open **Block Studio** to create a certified block from a dbt model, add it
-to a dashboard page in an **App**, and watch it appear in **Lineage**. No dbt at
-all? The scaffold also works standalone — DuckDB runs in-memory, so drop a CSV
-next to your blocks and query it with `read_csv_auto()`.
+`dbt parse` should create `target/manifest.json`. DQL also reads dbt artifacts
+such as `catalog.json`, `semantic_manifest.json`, and `run_results.json` when
+they exist.
 
-**Docker** *(zero local toolchain)*
+## Before you install
+
+- Use Node `20` or `22` LTS. Avoid Node `23` or `24`.
+- Use npm `10+`.
+- Use a dbt project if you want dbt import and lineage.
+- Python and native build tools are only needed when native database packages
+  cannot use prebuilt binaries.
+
+On macOS, if npm falls back to native compilation, install the command-line
+tools once:
 
 ```bash
-git clone https://github.com/duckcode-ai/dql.git && cd dql
-docker compose up
+xcode-select --install
 ```
 
-Notebook on **http://127.0.0.1:3474**. The working directory is mounted at
-`/workspace`; folders with a `dql.config.json` open directly, anything else
-gets an ignored starter project under `.dql/docker-starter/`. Add
-`--profile slack` for the Slack bot or `--profile ollama` for a local LLM
-daemon.
+## Why install can feel slow
+
+DQL's CLI installs the local database/runtime stack so the notebook, database
+connections, lineage, Apps, and agent flows work from one local workspace.
+That pulls native packages such as `duckdb` and `better-sqlite3`.
+
+On a supported machine, npm downloads prebuilt binaries. On Node `22` macOS
+arm64, a clean CLI install completed in about 12 seconds during release
+testing. On unsupported Node versions, older machines, locked-down networks, or
+missing build tools, npm may compile native packages instead. That can take a
+long time and may look like the install is stuck.
+
+If install is slow, check this first:
+
+```bash
+node -v
+npm -v
+python3 --version
+# macOS only:
+xcode-select -p
+```
+
+Expected Node versions are `v20.x` or `v22.x`. If you see npm building
+`duckdb`, `better-sqlite3`, or `node-gyp rebuild`, switch to Node `22` LTS and
+retry:
+
+```bash
+rm -rf node_modules package-lock.json
+npm install --foreground-scripts
+```
+
+For Linux, install `python3`, `make`, and `g++`. For Windows, install the
+Microsoft C++ Build Tools.
+
+## First 10-minute tutorial
+
+1. Open Home.
+   Confirm DQL found your dbt project and compiled artifacts.
+
+2. Connect the database.
+   If dbt `profiles.yml` or `profiles.yaml` exists, DQL can read the connection
+   shape. Enter any local credentials that are not stored in the profile, then
+   test the connection.
+
+3. Review imported objects.
+   Check dbt models, sources, semantic metrics, and database tables before
+   building blocks.
+
+4. Create your first block.
+   Use a dbt model, a semantic metric, imported SQL, or the local AI builder.
+   Keep the block small and tied to one trusted business question.
+
+5. Run and certify.
+   Run the block, review results, add validation/tests where needed, then mark
+   it ready for review or certification.
+
+6. Use notebooks.
+   Search blocks, add cells, edit SQL/DQL, and capture analysis next to the
+   governed blocks it uses.
+
+7. Push to an App.
+   Build a local App from certified blocks and notebooks so stakeholders see a
+   clean dashboard-style view.
+
+8. Check lineage and source control.
+   Confirm the path from source tables to dbt models, blocks, notebooks,
+   dashboards, and Apps. Review file changes before committing.
+
+## Daily commands
+
+Run these from the `dql/` workspace.
+
+```bash
+npm run notebook   # open the local UI
+npm run sync       # refresh dbt models, artifacts, and lineage
+npm run compile    # compile DQL files
+npm run validate   # validate blocks and project files
+npm run lineage    # inspect lineage from the CLI
+```
+
+## Core concepts
+
+- **Term**: a governed business definition.
+- **Block**: a reusable SQL or semantic answer with owner, description, tests,
+  chart intent, and AI context.
+- **Business view**: a composed business object that groups terms, blocks, and
+  nested views.
+- **Notebook**: analysis as code, with SQL/DQL cells and live results.
+- **App**: a stakeholder-facing local app built from governed blocks and
+  notebooks.
+- **Lineage**: the graph from source data to dbt models, DQL blocks, notebooks,
+  dashboards, and Apps.
+
+## Documentation
+
+All docs live in [`docs/`](./docs/). Start with these:
+
+- [Quickstart](./docs/01-quickstart.md)
+- [Install](./docs/03-install.md)
+- [Tutorials](./docs/tutorials/README.md)
+- [Import dbt](./docs/guides/import-dbt.md)
+- [Block Studio](./docs/guides/block-studio.md)
+- [Author a block](./docs/guides/authoring-blocks.md)
+- [Connectors](./docs/reference/connectors.md)
+- [CLI reference](./docs/reference/cli.md)
+- [Troubleshooting](./docs/guides/troubleshooting.md)
+
+## What is included in OSS
+
+- Local notebook UI
+- Block Studio
+- dbt artifact import
+- dbt `profiles.yml` connection discovery
+- Database connectors for local and warehouse development
+- Apps
+- Lineage
+- Source control workflow
+- Local agent/MCP runtime
+- Telemetry off by default
 
 DQL OSS is a single-user local workspace. Hosted multi-user governance,
 managed secrets, audit logs, approval workflows, and permissions-aware team
 retrieval belong to the commercial product.
 
-## Documentation
+## Privacy and telemetry
 
-All docs live in [`docs/`](./docs/) — plain markdown, rendered on github.com.
-Start with [docs/README.md](./docs/README.md).
+Telemetry is off by default and collects no PII. It does not send file names,
+query contents, warehouse URLs, or block names. If enabled with
+`dql telemetry on`, DQL sends only anonymized event names, enum-valued counters,
+and durations. Opt out with `dql telemetry off`, `DO_NOT_TRACK=1`, or
+`DQL_TELEMETRY_DISABLED=1`.
 
-Quick links:
-
-- **[Tutorials — end to end](./docs/tutorials/README.md)** *(getting started, certified blocks, dashboards & Apps, agentic analytics, CI)*
-- [Quickstart](./docs/01-quickstart.md) · [Concepts](./docs/02-concepts.md) · [Install](./docs/03-install.md)
-- [Import dbt](./docs/guides/import-dbt.md) · [Block Studio](./docs/guides/block-studio.md) · [Author a block](./docs/guides/authoring-blocks.md) · [Troubleshooting](./docs/guides/troubleshooting.md)
-- [CLI reference](./docs/reference/cli.md) · [Language reference](./docs/reference/language.md) · [Connectors](./docs/reference/connectors.md)
-- [Architecture](./docs/architecture/overview.md) · [Contributing](./docs/contribute/repo-layout.md)
-
-## What's in the box
-
-- **Notebook** — SQL + DQL cells with live results, charts, and params
-- **Block Studio** — governed, versioned analytics blocks with lint + certify
-- **Apps** — first-class consumption-layer artifact bundling dashboard pages,
-  notebooks, AI pins, drafts, local metadata, and schedules for a domain or use
-  case
-- **Local policy + RLS preview** — optional single-user preview path for
-  commercial governance patterns; `@rls("col", "{user.var}")` resolves at
-  execution time from the active local persona when configured
-- **Agentic analytics** — `@duckcodeailabs/dql-agent` ships a
-  local SQLite + FTS5 knowledge graph, Skills, a block-first answer loop, and
-  pluggable LLM providers (Claude / OpenAI / Gemini / local Ollama)
-- **MCP server** — 12 governed tools for Claude Code, Claude Desktop, Cursor,
-  Codex, and any MCP client: `query_via_block` (certified) + `query_via_metadata`
-  (flagged + drafted), `search_blocks`, `get_block`, `list_proposals`,
-  `list_metrics`, `list_dimensions`, `lineage_impact`, `certify`,
-  `suggest_block`, `kg_search`, `feedback_record`. See
-  [connect an AI agent](./docs/guides/mcp.md).
-- **Slack front-end** — `dql slack serve` runs a slash-command
-  bot answering via the same block-first loop, with feedback buttons that
-  feed self-learning
-- **`dql verify`** — proves `dql-manifest.json` is reproducible
-  from source for CI gates
-- **Semantic layer** — import dbt metrics/dimensions; author your own
-- **Lineage DAG** — Domain · App · Dashboard · Block · metric · dbt model · source granularity with impact analysis
-- **Git-native format** — canonical `.dql` serialization, `dql diff`, in-app git panel
-- **15 connectors** — Postgres, DuckDB, Snowflake, BigQuery, Redshift, MySQL, and more
-- **VS Code extension** — syntax, snippets, LSP (`code --install-extension dql.dql-language-support`)
-
-## What this repo does **not** include
-
-Real authentication (login screens, OIDC, password storage), hosted/multi-tenant
-deployment, enforced organization RBAC, governed secrets, audit logs, and
-managed approval workflows live outside OSS. Local persona/policy preview,
-agentic block generation, MCP runtime, and scheduled runs are included in OSS.
-
-## Privacy & telemetry
-
-Telemetry is **off by default** and collects **no PII** — no file names, query
-contents, warehouse URLs, or block names, ever. If you enable it with
-`dql telemetry on`, DQL sends only anonymized event names, enum-valued
-counters, and durations. Opt out anytime with `dql telemetry off`,
-`DO_NOT_TRACK=1`, or `DQL_TELEMETRY_DISABLED=1`. The full event schema is
-documented in the [dql-telemetry README](./packages/dql-telemetry/README.md).
+The full event schema is documented in
+[`packages/dql-telemetry/README.md`](./packages/dql-telemetry/README.md).
 
 ## Contributing
 
-See [CONTRIBUTING.md](./CONTRIBUTING.md) and [docs/contribute/repo-layout.md](./docs/contribute/repo-layout.md). Bugs and feature requests: [open an issue](https://github.com/duckcode-ai/dql/issues).
+See [CONTRIBUTING.md](./CONTRIBUTING.md) and
+[docs/contribute/repo-layout.md](./docs/contribute/repo-layout.md). Bugs and
+feature requests: [open an issue](https://github.com/duckcode-ai/dql/issues).
 
 ## License
 
-[Apache-2.0](./LICENSE).
+[Apache-2.0](./LICENSE)
