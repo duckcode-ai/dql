@@ -17,7 +17,7 @@
       "id": "starter_query",
       "type": "sql",
       "title": "Starter Query",
-      "source": "-- If using DuckDB, local CSV, Parquet, and JSON files work with zero setup\n-- Example: SELECT * FROM read_csv_auto('./data/my_file.csv') LIMIT 10;\nselect 1 as customer_count"
+      "source": "-- Connect a warehouse or add a local DuckDB/file connection, then query your source tables here\n-- Example: SELECT * FROM analytics.customers LIMIT 10;\nselect 1 as customer_count"
     },
     {
       "id": "domain_layer",
@@ -29,7 +29,7 @@
       "id": "next_steps",
       "type": "markdown",
       "title": "Next Steps",
-      "source": "## Next steps\n\n1. Connect a warehouse or query local files with DuckDB.\n2. Save repeated SQL as DQL blocks under `blocks/`.\n3. Add shared vocabulary under `terms/`.\n4. Compose business outcomes under `business-views/`.\n5. Run `dql compile .` and open Lineage to inspect technical and business paths."
+      "source": "## Next steps\n\n1. Connect a warehouse or add a local DuckDB/file connection.\n2. Save repeated SQL as DQL blocks under `blocks/`.\n3. Add shared vocabulary under `terms/`.\n4. Compose business outcomes under `business-views/`.\n5. Run `dql compile .` and open Lineage to inspect technical and business paths."
     }
   ]
 }

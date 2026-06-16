@@ -941,10 +941,13 @@ export const api = {
     }
   },
 
-  async saveConnections(connections: Record<string, unknown>): Promise<{ ok: boolean }> {
+  async saveConnections(
+    connections: Record<string, unknown>,
+    defaultConnectionName?: string,
+  ): Promise<{ ok: boolean }> {
     return request<{ ok: boolean }>('/api/connections', {
       method: 'PUT',
-      body: JSON.stringify({ connections }),
+      body: JSON.stringify({ connections, defaultConnectionName }),
     });
   },
 

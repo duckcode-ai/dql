@@ -10,7 +10,7 @@ export type BlockStudioImportSourceKind =
 
 export type BlockStudioImportReviewStatus = 'draft' | 'review' | 'saved' | 'rejected';
 export type BlockStudioImportInputMode = 'path' | 'paste' | 'upload';
-export type BlockStudioImportSplitStrategy = 'semicolon-go' | 'manual';
+export type BlockStudioImportSplitStrategy = 'semicolon-go' | 'metadata-comment' | 'manual';
 
 export interface BlockStudioImportSource {
   path: string;
@@ -330,14 +330,14 @@ function collectSqlStatements(sources: SqlSource[]): SqlStatementCandidate[] {
   const statements: SqlStatementCandidate[] = [];
   for (const source of sources) {
     const split = splitSqlStatements(source.content);
-    const sharedWarnings = split.length === 1 ? analyzeSqlWarnings(split[0], split.length) : [];
-    split.forEach((sql, index) => {
+    const sharedWarnings = split.statements.length === 1 ? analyzeSqlWarnings(split.statements[0], split.statements.length) : [];
+    split.statements.forEach((sql, index) => {
       statements.push({
         sourcePath: source.path,
         sql,
         statementIndex: index + 1,
-        totalStatements: split.length,
-        splitStrategy: 'semicolon-go',
+        totalStatements: split.statements.length,
+        splitStrategy: split.strategy,
         warnings: index === 0 ? sharedWarnings : [],
       });
     });
@@ -357,7 +357,7 @@ function buildSqlCandidate(options: {
   const sourcePath = displayPath(options.projectRoot, statement.sourcePath);
   const metadata = extractStatementMetadata(statement.sql);
   const baseName = metadata.name || basename(statement.sourcePath, extname(statement.sourcePath));
-  const name = statement.totalStatements > 1
+  const name = statement.totalStatements > 1 && !metadata.name
     ? `${baseName} ${statement.statementIndex}`
     : baseName;
   const sourceTables = extractSourceTables(statement.sql);
@@ -394,6 +394,7 @@ function buildSqlCandidate(options: {
     conversionNotes: [
       'Deterministic SQL extraction created this DQL draft locally.',
       'Name, description, domain, and tags come from leading SQL comments when present; otherwise DQL uses the source path and import defaults.',
+      'Multiple scripts in one file are split by semicolon, GO batch separator, or repeated name/title header comments.',
       'The SQL statement is wrapped into query = """ ... """ without LLM rewriting.',
       'Visualization defaults to table until a reviewer chooses a chart type.',
       'The default test is assert row_count > 0.',
@@ -406,7 +407,19 @@ function buildSqlCandidate(options: {
   return candidate;
 }
 
-function splitSqlStatements(source: string): string[] {
+function splitSqlStatements(source: string): { statements: string[]; strategy: BlockStudioImportSplitStrategy } {
+  const semicolonStatements = splitSqlBySemicolonAndGo(source);
+  if (semicolonStatements.length > 1) {
+    return { statements: semicolonStatements, strategy: 'semicolon-go' };
+  }
+  const metadataStatements = splitSqlByMetadataHeaders(source);
+  if (metadataStatements.length > 1) {
+    return { statements: metadataStatements, strategy: 'metadata-comment' };
+  }
+  return { statements: semicolonStatements, strategy: 'semicolon-go' };
+}
+
+function splitSqlBySemicolonAndGo(source: string): string[] {
   const statements: string[] = [];
   let start = 0;
   let single = false;
@@ -487,6 +500,27 @@ function splitSqlStatements(source: string): string[] {
   return statements;
 }
 
+function splitSqlByMetadataHeaders(source: string): string[] {
+  const chunks: string[] = [];
+  const lines = source.split(/\r?\n/);
+  let current: string[] = [];
+  const flush = () => {
+    const chunk = current.join('\n').trim();
+    if (chunk) chunks.push(chunk);
+    current = [];
+  };
+
+  for (const line of lines) {
+    const isHeader = /^\s*(?:--|\/\*)\s*(?:name|block|title|query)\s*:/i.test(line);
+    if (isHeader && current.some((item) => stripSqlComments(item).trim().length > 0)) {
+      flush();
+    }
+    current.push(line);
+  }
+  flush();
+  return chunks.filter((chunk) => /\b(select|with)\b/i.test(stripSqlComments(chunk)));
+}
+
 function matchGoBatchSeparator(source: string, index: number): { end: number } | null {
   const char = source[index];
   if (char !== 'g' && char !== 'G') return null;
@@ -512,7 +546,7 @@ function analyzeSqlWarnings(sql: string, totalStatements: number): string[] {
 
 function extractStatementMetadata(sql: string): { name: string; description: string; domain: string; tags: string[] } {
   const leading = sql.split(/\r?\n/).slice(0, 12).join('\n');
-  const name = leading.match(/(?:--|\/\*)\s*(?:name|block)\s*:\s*([^*\n]+)/i)?.[1]?.trim() ?? '';
+  const name = leading.match(/(?:--|\/\*)\s*(?:name|block|title|query)\s*:\s*([^*\n]+)/i)?.[1]?.trim() ?? '';
   const description = leading.match(/(?:--|\/\*)\s*(?:description|desc)\s*:\s*([^*\n]+)/i)?.[1]?.trim() ?? '';
   const domain = leading.match(/(?:--|\/\*)\s*domain\s*:\s*([^*\n]+)/i)?.[1]?.trim() ?? '';
   const tagText = leading.match(/(?:--|\/\*)\s*tags?\s*:\s*([^*\n]+)/i)?.[1]?.trim() ?? '';
@@ -538,7 +572,7 @@ function extractSourceTables(sql: string): string[] {
 
 function extractSqlParameters(sql: string): string[] {
   const params = new Set<string>();
-  const cleaned = stripSqlComments(sql);
+  const cleaned = stripSqlStrings(stripSqlComments(sql));
   let match: RegExpExecArray | null;
   const handlebars = /\{\{\s*([A-Za-z_][A-Za-z0-9_.-]*)\s*\}\}/g;
   while ((match = handlebars.exec(cleaned))) params.add(match[1]);
@@ -553,6 +587,12 @@ function stripSqlComments(sql: string): string {
   return sql
     .replace(/\/\*[\s\S]*?\*\//g, ' ')
     .replace(/--[^\n\r]*/g, ' ');
+}
+
+function stripSqlStrings(sql: string): string {
+  return sql
+    .replace(/'(?:''|[^'])*'/g, "''")
+    .replace(/"(?:\\"|[^"])*"/g, '""');
 }
 
 function scoreSqlCandidate(sql: string, lineage: BlockStudioImportLineage): number {

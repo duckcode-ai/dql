@@ -17,6 +17,7 @@ export interface CLIFlags {
   template: string;
   connection: string;
   skipTests: boolean;
+  save?: boolean;
   force?: boolean;
   http?: boolean;
   /** `dql certify --from-draft <path>` — promote a Tier-2 draft to certified. */
@@ -55,6 +56,7 @@ export function parseArgs(argv: string[]): ParsedArgs {
     template: '',
     connection: '',
     skipTests: false,
+    save: false,
     force: false,
     http: false,
   };
@@ -105,6 +107,8 @@ export function parseArgs(argv: string[]): ParsedArgs {
       flags.queryOnly = true;
     } else if (arg === '--skip-tests') {
       flags.skipTests = true;
+    } else if (arg === '--save') {
+      flags.save = true;
     } else if (arg === '--force' || arg === '-f') {
       flags.force = true;
     } else if (arg === '--http') {

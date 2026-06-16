@@ -127,10 +127,20 @@ Supported first-pass sources:
 - upload multiple `.sql` files
 - project-relative folder path
 
-The importer splits semicolon-delimited statements and common `GO` batches,
-detects tables and parameters, generates draft DQL candidates, and defaults
-visualization to `table`. Review candidates before saving. AI enrichment is
-optional and must be approved by the user.
+The importer splits semicolon-delimited statements, common `GO` batches, and
+repeated `-- name:` / `-- title:` query headers. It detects tables and
+parameters, generates draft DQL candidates, and defaults visualization to
+`table`. Review candidates before saving. AI enrichment is optional and must be
+approved by the user.
+
+For batch migration from the CLI:
+
+```bash
+dql import sql ./legacy-sql --domain finance --owner analytics --save
+```
+
+`--save` writes valid candidates as draft blocks. It does not certify them.
+Run the preview/tests and then certify the reviewed block.
 
 ## 5. Certify
 

@@ -1,5 +1,10 @@
 import type { CLIFlags } from '../args.js';
-import { createBlockStudioImportSession } from '../block-studio-import.js';
+import {
+  createBlockStudioImportSession,
+  writeBlockStudioImportCandidate,
+  type BlockStudioImportCandidate,
+} from '../block-studio-import.js';
+import { saveBlockStudioArtifacts, validateBlockStudioSource } from '../local-runtime.js';
 
 export async function runImport(source: string, rest: string[], flags: CLIFlags): Promise<void> {
   if (source !== 'sql') {
@@ -23,9 +28,53 @@ export async function runImport(source: string, rest: string[], flags: CLIFlags)
     domain: flags.domain || 'imported',
     owner: flags.owner || '',
   });
+  const candidates = session.candidates.map((candidate) => {
+    const validation = validateBlockStudioSource(candidate.dqlSource);
+    const next = { ...candidate, validation };
+    writeBlockStudioImportCandidate(process.cwd(), session.id, next);
+    return next;
+  });
+  const saved: Array<{ candidateId: string; path: string }> = [];
+  const errors: Array<{ candidateId: string; error: string }> = [];
+
+  if (flags.save) {
+    for (let index = 0; index < candidates.length; index += 1) {
+      const candidate = candidates[index];
+      const validationErrors = validationErrorsFor(candidate);
+      if (validationErrors.length > 0) {
+        errors.push({ candidateId: candidate.id, error: validationErrors.join(' ') });
+        continue;
+      }
+      try {
+        const savedPath = saveBlockStudioArtifacts(process.cwd(), {
+          source: candidate.dqlSource,
+          name: candidate.name,
+          domain: candidate.domain,
+          description: candidate.description,
+          owner: candidate.owner,
+          tags: candidate.tags,
+          lineage: candidate.lineage.sourceTables,
+          importMeta: {
+            importId: session.id,
+            candidateId: candidate.id,
+            sourceKind: candidate.sourceKind,
+            sourcePath: candidate.sourcePath,
+          },
+        });
+        const next = { ...candidate, reviewStatus: 'saved' as const, savedPath };
+        candidates[index] = next;
+        writeBlockStudioImportCandidate(process.cwd(), session.id, next);
+        saved.push({ candidateId: candidate.id, path: savedPath });
+      } catch (error) {
+        errors.push({ candidateId: candidate.id, error: error instanceof Error ? error.message : String(error) });
+      }
+    }
+  }
+
+  const validatedSession = { ...session, candidates };
 
   if (flags.format === 'json') {
-    console.log(JSON.stringify(session, null, 2));
+    console.log(JSON.stringify({ session: validatedSession, saved, errors }, null, 2));
     return;
   }
 
@@ -33,22 +82,43 @@ export async function runImport(source: string, rest: string[], flags: CLIFlags)
   console.log('  ─────────────────────────────');
   console.log(`  Session:     ${session.id}`);
   console.log(`  Source:      ${session.inputPath}`);
-  console.log(`  Candidates:  ${session.candidates.length}`);
-  console.log(`  Domain:      ${session.defaults.domain}`);
-  if (session.defaults.owner) console.log(`  Owner:       ${session.defaults.owner}`);
+  console.log(`  Candidates:  ${validatedSession.candidates.length}`);
+  console.log(`  Domain:      ${validatedSession.defaults.domain}`);
+  if (validatedSession.defaults.owner) console.log(`  Owner:       ${validatedSession.defaults.owner}`);
+  if (flags.save) {
+    console.log(`  Saved:       ${saved.length}`);
+    if (errors.length > 0) console.log(`  Needs review:${errors.length}`);
+  }
   console.log('');
-  for (const candidate of session.candidates) {
+  for (const candidate of validatedSession.candidates) {
     const tables = candidate.lineage.sourceTables.length > 0
       ? candidate.lineage.sourceTables.join(', ')
       : 'not detected';
-    const warnings = candidate.lineage.warnings.length > 0
+    const validationErrors = validationErrorsFor(candidate);
+    const warningText = candidate.lineage.warnings.length > 0
       ? ` · ${candidate.lineage.warnings.join('; ')}`
       : '';
+    const savedPath = saved.find((item) => item.candidateId === candidate.id)?.path;
     console.log(`  • ${candidate.name}`);
-    console.log(`    ${candidate.id} · confidence ${Math.round(candidate.confidence * 100)}% · tables: ${tables}${warnings}`);
+    console.log(`    ${candidate.id} · confidence ${Math.round(candidate.confidence * 100)}% · tables: ${tables}${warningText}`);
+    if (validationErrors.length > 0) console.log(`    review: ${validationErrors.join(' ')}`);
+    if (savedPath) console.log(`    saved draft: ${savedPath}`);
   }
   console.log('');
-  console.log('  Review in Block Studio Import, then run and save selected candidates as draft blocks.');
-  console.log(`  Import cache: .dql/imports/${session.id}/`);
+  if (flags.save) {
+    console.log('  Saved candidates are draft blocks. Run previews/tests and certify only after review.');
+  } else {
+    console.log('  Review in Block Studio Import, then run and save selected candidates as draft blocks.');
+    console.log('  Or re-run with --save to save all valid candidates as draft blocks.');
+  }
+  console.log(`  Import cache: .dql/imports/${validatedSession.id}/`);
   console.log('');
+  if (flags.save && errors.length > 0) process.exitCode = 1;
+}
+
+function validationErrorsFor(candidate: BlockStudioImportCandidate): string[] {
+  const diagnostics = ((candidate.validation as any)?.diagnostics ?? []) as Array<{ severity?: string; message?: string }>;
+  return diagnostics
+    .filter((diagnostic) => diagnostic.severity === 'error')
+    .map((diagnostic) => diagnostic.message || 'Candidate validation failed.');
 }

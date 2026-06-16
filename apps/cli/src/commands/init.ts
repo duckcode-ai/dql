@@ -82,7 +82,11 @@ export async function runInit(targetArg: string | null, flags: CLIFlags): Promis
   const notebookPath = join(targetDir, 'notebooks', 'welcome.dqlnb');
   if (!existsSync(notebookPath)) {
     const configJson = existsSync(configPath) ? JSON.parse(readFileSync(configPath, 'utf-8')) : {};
-    const driver = configJson?.connections?.default?.driver ?? 'duckdb';
+    const defaultConnectionName = typeof configJson?.defaultConnectionName === 'string'
+      ? configJson.defaultConnectionName
+      : 'default';
+    const driver = configJson?.connections?.[defaultConnectionName]?.driver
+      ?? configJson?.connections?.default?.driver;
     const nb = createWelcomeNotebook(isDbt ? 'dbt' : 'default', projectName, driver);
     writeFileSync(notebookPath, serializeNotebook(nb), 'utf-8');
   }
@@ -121,7 +125,7 @@ export async function runInit(targetArg: string | null, flags: CLIFlags): Promis
   } else {
     console.log(`    dbt project: ${isDbt ? 'yes (dbt_project.yml found)' : 'no'}`);
   }
-  console.log(`    DuckDB file: ${duckdbPath ?? 'none (using :memory:)'}`);
+  console.log(`    DuckDB file: ${duckdbPath ?? 'none'}`);
   if (isDbt) {
     console.log(`    Semantic layer: ${importedSemanticCatalog ? 'imported dbt catalog into semantic-layer/' : hasDbtSemanticDefinitions ? 'dbt project with semantic definitions detected' : 'dbt project detected (no semantic definitions imported)'}`);
   }
@@ -239,13 +243,17 @@ function buildConfig(
 ): Record<string, unknown> {
   const config: Record<string, unknown> = {
     project: projectName,
-    connections: {
+  };
+
+  if (duckdbPath) {
+    config.defaultConnectionName = 'default';
+    config.connections = {
       default: {
         driver: 'duckdb',
-        filepath: duckdbPath ?? ':memory:',
+        filepath: duckdbPath,
       },
-    },
-  };
+    };
+  }
 
   if (isDbt) {
     // Normalize dbt path to a repo-relative form if possible — makes

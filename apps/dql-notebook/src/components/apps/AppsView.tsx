@@ -73,7 +73,7 @@ interface AgentSkillCard {
   description: string;
 }
 
-const DEFAULT_PROMPT = 'Revenue overview for the cards team: monthly trend, top products, and how new vs returning customers contribute.';
+const DEFAULT_PROMPT = 'Build an analytics app from my certified DQL blocks and available warehouse tables.';
 
 const APP_PROMPT_EXAMPLES: AppPromptExample[] = [
   {
@@ -155,9 +155,9 @@ export function AppsView(): JSX.Element {
   const [appLoading, setAppLoading] = useState(false);
   const [builderMode, setBuilderMode] = useState<BuilderMode>('ai');
   const [builderPrompt, setBuilderPrompt] = useState(DEFAULT_PROMPT);
-  const [builderName, setBuilderName] = useState('Jaffle Analytics');
-  const [builderDomain, setBuilderDomain] = useState('Revenue');
-  const [builderOwner, setBuilderOwner] = useState('analytics@jaffle.shop');
+  const [builderName, setBuilderName] = useState('Business Analytics');
+  const [builderDomain, setBuilderDomain] = useState('Business');
+  const [builderOwner, setBuilderOwner] = useState('analytics');
   const [catalog, setCatalog] = useState<AppBlockRecommendation[]>([]);
   const [catalogLoading, setCatalogLoading] = useState(false);
   const [selectedBlocks, setSelectedBlocks] = useState<Set<string>>(() => new Set());

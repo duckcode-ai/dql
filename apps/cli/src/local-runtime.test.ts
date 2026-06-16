@@ -8,6 +8,7 @@ import {
   discoverDbtProfileConnections,
   extractAgentValueSearchTerms,
   formatLocalQueryRuntimeError,
+  loadProjectConfig,
   normalizeProjectConnection,
   prepareLocalExecution,
   resolveProjectRelativeSqlPaths,
@@ -88,6 +89,86 @@ describe('normalizeProjectConnection', () => {
       if (previous === undefined) delete process.env.DQL_TEST_DATABASE;
       else process.env.DQL_TEST_DATABASE = previous;
     }
+  });
+});
+
+describe('loadProjectConfig', () => {
+  it('uses the configured named Snowflake connection for execution', () => {
+    const projectRoot = mkdtempSync(join(tmpdir(), 'dql-config-default-name-'));
+    tempDirs.push(projectRoot);
+    writeFileSync(join(projectRoot, 'dql.config.json'), JSON.stringify({
+      project: 'demo',
+      defaultConnectionName: 'warehouse',
+      connections: {
+        default: { driver: 'duckdb', filepath: ':memory:' },
+        warehouse: {
+          driver: 'snowflake',
+          account: 'acme',
+          username: 'analyst',
+          database: 'analytics',
+          warehouse: 'compute_wh',
+          schema: 'public',
+        },
+      },
+    }), 'utf-8');
+
+    const config = loadProjectConfig(projectRoot);
+
+    expect(config.defaultConnectionName).toBe('warehouse');
+    expect(config.defaultConnection).toMatchObject({
+      driver: 'snowflake',
+      account: 'acme',
+      database: 'analytics',
+    });
+  });
+
+  it('auto-promotes the only real connection over an in-memory starter DuckDB placeholder', () => {
+    const projectRoot = mkdtempSync(join(tmpdir(), 'dql-config-auto-default-'));
+    tempDirs.push(projectRoot);
+    writeFileSync(join(projectRoot, 'dql.config.json'), JSON.stringify({
+      project: 'demo',
+      connections: {
+        default: { driver: 'duckdb', filepath: ':memory:' },
+        snowflake: {
+          driver: 'snowflake',
+          account: 'acme',
+          username: 'analyst',
+          database: 'analytics',
+          warehouse: 'compute_wh',
+        },
+      },
+    }), 'utf-8');
+
+    const config = loadProjectConfig(projectRoot);
+
+    expect(config.defaultConnectionName).toBe('snowflake');
+    expect(config.defaultConnection?.driver).toBe('snowflake');
+  });
+
+  it('keeps a detected DuckDB file as default when it is a real project connection', () => {
+    const projectRoot = mkdtempSync(join(tmpdir(), 'dql-config-real-duckdb-'));
+    tempDirs.push(projectRoot);
+    writeFileSync(join(projectRoot, 'dql.config.json'), JSON.stringify({
+      project: 'demo',
+      connections: {
+        default: { driver: 'duckdb', filepath: 'jaffle_shop.duckdb' },
+        snowflake: {
+          driver: 'snowflake',
+          account: 'acme',
+          username: 'analyst',
+          database: 'analytics',
+          warehouse: 'compute_wh',
+        },
+      },
+    }), 'utf-8');
+
+    const config = loadProjectConfig(projectRoot);
+
+    expect(config.defaultConnectionName).toBe('default');
+    expect(config.defaultConnection).toMatchObject({
+      driver: 'duckdb',
+      filepath: 'jaffle_shop.duckdb',
+    });
   });
 });
 
@@ -499,6 +580,25 @@ FROM orders
 
     expect(validation.valid).toBe(true);
     expect(validation.executableSql).toContain('SELECT revenue');
+  });
+
+  it('rejects non-read-only custom block SQL before save or certification', () => {
+    const source = `block "Unsafe Revenue" {
+  domain = "finance"
+  type = "custom"
+  description = ""
+  owner = ""
+  tags = []
+
+  query = """
+DELETE FROM orders
+"""
+}`;
+
+    const validation = validateBlockStudioSource(source, semanticLayer);
+
+    expect(validation.valid).toBe(false);
+    expect(validation.diagnostics.some((item) => item.code === 'sql_read_only')).toBe(true);
   });
 
   it('resolves semantic refs inside custom block SQL before execution', () => {
