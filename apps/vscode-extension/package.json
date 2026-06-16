@@ -2,7 +2,7 @@
   "name": "dql-language-support",
   "displayName": "DQL Language Support",
   "description": "Syntax highlighting, snippets, formatting, and language server support for DQL.",
-  "version": "1.6.1",
+  "version": "1.6.2",
   "publisher": "dql",
   "license": "Apache-2.0",
   "repository": {
@@ -23,6 +23,17 @@
     "onLanguage:dql"
   ],
   "main": "./dist/extension.js",
+  "files": [
+    "dist",
+    "language-configuration.json",
+    "syntaxes",
+    "snippets",
+    "README.md",
+    "LICENSE.txt"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
   "contributes": {
     "languages": [
       {
