@@ -20,7 +20,6 @@ import {
   Terminal,
   GitFork,
   Files,
-  Database,
   Network,
   GitBranch,
   Blocks,
@@ -93,7 +92,6 @@ export function CommandPalette({
     };
     const panels: Array<[string, NonNullable<typeof state.sidebarPanel>, React.ComponentType<any>]> = [
       ['Files', 'files', Files],
-      ['Schema', 'schema', Database],
       ['Lineage', 'lineage', GitFork],
       ['Git', 'git', GitBranch],
       ['Block Library', 'block_library', Blocks],
@@ -157,7 +155,7 @@ export function CommandPalette({
         mode: 'studio',
         run: wrap(() => {
           d({ type: 'SET_SIDEBAR_PANEL', panel });
-          if (!state.sidebarOpen) d({ type: 'TOGGLE_SIDEBAR' });
+          if (panel !== 'lineage' && !state.sidebarOpen) d({ type: 'TOGGLE_SIDEBAR' });
         }),
       });
     }

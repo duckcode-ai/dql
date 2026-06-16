@@ -55,6 +55,18 @@ export function createConnectionConfigKey(config: ConnectionConfig): string {
     httpPath: config.httpPath,
     catalog: config.catalog,
     privateKey: config.privateKey,
+    privateKeyPath: config.privateKeyPath,
+    privateKeyPassphrase: config.privateKeyPassphrase,
+    authMethod: config.authMethod,
+    authenticator: config.authenticator,
+    keyFilename: config.keyFilename,
+    serviceAccountJson: config.serviceAccountJson,
+    credentials: config.credentials,
+    location: config.location,
+    accessKeyId: config.accessKeyId,
+    secretAccessKey: config.secretAccessKey,
+    sessionToken: config.sessionToken,
+    profile: config.profile,
   };
   const payload = stableSerialize(normalized);
   return createHash('sha1').update(payload).digest('hex');

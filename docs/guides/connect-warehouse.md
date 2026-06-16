@@ -2,7 +2,7 @@
 
 > ~3 minutes · ends with `dql doctor` confirming the configured connection
 
-DQL ships 15 drivers out of the box. Connections live in `dql.config.json` at
+DQL ships 14 drivers out of the box. Connections live in `dql.config.json` at
 the project root. Keep secrets in environment variables and reference them with
 `${ENV_VAR}` interpolation.
 
@@ -12,11 +12,11 @@ the project root. Keep secrets in environment variables and reference them with
 {
   "connections": {
     "default": {
-      "driver": "postgres",
+      "driver": "postgresql",
       "host": "${PGHOST}",
       "port": 5432,
       "database": "analytics",
-      "user": "${PGUSER}",
+      "username": "${PGUSER}",
       "password": "${PGPASSWORD}",
       "schema": "public"
     }
@@ -39,7 +39,7 @@ export PGPASSWORD=...
 ```bash
 dql doctor
 # Local query runtime
-# driver=postgres is available
+# driver=postgresql is available
 ```
 
 If that passes, the notebook and CLI resolve table references against this
@@ -50,9 +50,9 @@ connection.
 ```json
 {
   "connections": {
-    "default": { "driver": "duckdb", "path": "./warehouse.duckdb" },
+    "default": { "driver": "duckdb", "filepath": "./warehouse.duckdb" },
     "prod": { "driver": "snowflake", "account": "${SNOWFLAKE_ACCOUNT}" },
-    "raw": { "driver": "postgres", "host": "${RAW_PGHOST}" }
+    "raw": { "driver": "postgresql", "host": "${RAW_PGHOST}" }
   }
 }
 ```
@@ -68,4 +68,6 @@ select count(*) from analytics.orders
 
 - **`connection refused`** — firewall, VPN, wrong host, or wrong port. Run `dql doctor` after checking the resolved environment variables.
 - **`role does not have USAGE on schema`** — warehouse permissions. DQL needs `USAGE` on the schema and `SELECT` on queried objects.
-- **BigQuery service account** — set `GOOGLE_APPLICATION_CREDENTIALS` to the key file path; the driver auto-picks it up.
+- **BigQuery service account** — set `GOOGLE_APPLICATION_CREDENTIALS`, or configure `keyFilename` / `serviceAccountJson` when your enterprise setup requires an explicit key file.
+- **Snowflake key-pair auth** — set `authMethod` to `key_pair` and provide `privateKeyPath` or `privateKey`.
+- **Athena enterprise auth** — use the AWS default provider chain for SSO, or set `profile`, `accessKeyId`, `secretAccessKey`, and optional `sessionToken`.

@@ -880,9 +880,35 @@ export const api = {
     }
   },
 
-  async getConnections(): Promise<{ default: string; connections: Record<string, unknown> }> {
+  async getConnections(): Promise<{
+    default: string;
+    connections: Record<string, unknown>;
+    dbtProfiles?: Array<{
+      id: string;
+      profileName: string;
+      targetName: string;
+      adapter: string;
+      path: string;
+      connection: Record<string, unknown>;
+      missingFields: string[];
+      warnings: string[];
+    }>;
+  }> {
     try {
-      return await request<{ default: string; connections: Record<string, unknown> }>('/api/connections');
+      return await request<{
+        default: string;
+        connections: Record<string, unknown>;
+        dbtProfiles?: Array<{
+          id: string;
+          profileName: string;
+          targetName: string;
+          adapter: string;
+          path: string;
+          connection: Record<string, unknown>;
+          missingFields: string[];
+          warnings: string[];
+        }>;
+      }>('/api/connections');
     } catch {
       return { default: 'unknown', connections: {} };
     }

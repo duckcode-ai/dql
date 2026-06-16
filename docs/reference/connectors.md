@@ -1,6 +1,6 @@
 # Connectors
 
-DQL ships 15 drivers out of the box. Each supports **query execution** and
+DQL ships 14 drivers out of the box. Each supports **query execution** and
 **schema introspection** (tables, columns, types). Configure connections in
 `dql.config.json`.
 
@@ -9,20 +9,19 @@ DQL ships 15 drivers out of the box. Each supports **query execution** and
 | Driver | Ident | Auth | Notes |
 | --- | --- | --- | --- |
 | DuckDB | `duckdb` | file path | Default for local dev |
-| MotherDuck | `motherduck` | token | Cloud DuckDB |
-| Postgres | `postgres` | user/pass | Also aliases Aurora, Crunchy, etc. |
+| Local files | `file` | file path | CSV, Parquet, and JSON through DuckDB |
+| PostgreSQL | `postgresql` | user/pass, connection string | Also aliases Aurora, Crunchy, etc. |
 | MySQL | `mysql` | user/pass | |
 | SQLite | `sqlite` | file path | |
-| Snowflake | `snowflake` | user/pass, keypair | |
-| BigQuery | `bigquery` | service account | `GOOGLE_APPLICATION_CREDENTIALS` |
+| Snowflake | `snowflake` | password, key pair, external browser SSO, OAuth | |
+| BigQuery | `bigquery` | ADC, service account key file, service account JSON | |
 | Redshift | `redshift` | user/pass | |
 | ClickHouse | `clickhouse` | user/pass | |
 | Databricks | `databricks` | PAT | |
 | Trino | `trino` | user | |
-| Athena | `athena` | AWS | |
+| Athena | `athena` | AWS default chain, AWS profile, access key/session token | |
 | MSSQL | `mssql` | user/pass | |
-| StarRocks | `starrocks` | user/pass | |
-| Oracle | `oracle` | user/pass | |
+| Microsoft Fabric | `fabric` | user/pass | SQL endpoint over TDS |
 
 ## Common options
 
@@ -30,15 +29,14 @@ DQL ships 15 drivers out of the box. Each supports **query execution** and
 {
   "connections": {
     "default": {
-      "driver": "postgres",
+      "driver": "postgresql",
       "host": "prod-db.internal",
       "port": 5432,
       "database": "analytics",
-      "user": "${PGUSER}",
+      "username": "${PGUSER}",
       "password": "${PGPASSWORD}",
       "schema": "public",
-      "ssl": true,
-      "pool": { "max": 10, "idleTimeoutMs": 30000 }
+      "ssl": true
     }
   }
 }
@@ -49,16 +47,36 @@ DQL ships 15 drivers out of the box. Each supports **query execution** and
 ### DuckDB
 
 ```json
-{ "driver": "duckdb", "path": "./warehouse.duckdb" }
+{ "driver": "duckdb", "filepath": "./warehouse.duckdb" }
 ```
 
 ### BigQuery
 
+Use Application Default Credentials:
+
 ```json
-{ "driver": "bigquery", "projectId": "my-gcp-project", "location": "US" }
+{
+  "driver": "bigquery",
+  "projectId": "my-gcp-project",
+  "location": "US",
+  "authMethod": "application_default"
+}
 ```
 
-`GOOGLE_APPLICATION_CREDENTIALS` is read automatically.
+Or provide a managed key file path:
+
+```json
+{
+  "driver": "bigquery",
+  "projectId": "my-gcp-project",
+  "location": "US",
+  "authMethod": "service_account_key_file",
+  "keyFilename": "${BIGQUERY_KEY_FILE}"
+}
+```
+
+`GOOGLE_APPLICATION_CREDENTIALS` is still picked up automatically when explicit
+key material is omitted.
 
 ### Snowflake
 
@@ -66,11 +84,57 @@ DQL ships 15 drivers out of the box. Each supports **query execution** and
 {
   "driver": "snowflake",
   "account": "xy12345.us-east-1",
-  "user": "${SNOWFLAKE_USER}",
+  "username": "${SNOWFLAKE_USER}",
+  "authMethod": "password",
   "password": "${SNOWFLAKE_PASSWORD}",
   "warehouse": "ANALYTICS_WH",
   "database": "PROD",
   "role": "ANALYST"
+}
+```
+
+For key-pair auth:
+
+```json
+{
+  "driver": "snowflake",
+  "account": "xy12345.us-east-1",
+  "username": "${SNOWFLAKE_USER}",
+  "authMethod": "key_pair",
+  "privateKeyPath": "${SNOWFLAKE_PRIVATE_KEY_PATH}",
+  "privateKeyPassphrase": "${SNOWFLAKE_PRIVATE_KEY_PASSPHRASE}",
+  "warehouse": "ANALYTICS_WH",
+  "database": "PROD",
+  "role": "ANALYST"
+}
+```
+
+### Athena
+
+Use the local AWS provider chain, including SSO sessions and environment
+credentials:
+
+```json
+{
+  "driver": "athena",
+  "region": "us-east-1",
+  "database": "analytics",
+  "outputLocation": "s3://my-query-results/athena/",
+  "workgroup": "primary",
+  "authMethod": "aws_default"
+}
+```
+
+Or bind a named profile:
+
+```json
+{
+  "driver": "athena",
+  "region": "us-east-1",
+  "database": "analytics",
+  "outputLocation": "s3://my-query-results/athena/",
+  "authMethod": "aws_profile",
+  "profile": "prod-analytics"
 }
 ```
 

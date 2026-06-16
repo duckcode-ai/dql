@@ -1,4 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { Blocks, Bot, CheckCircle2, Code2, Database, FileInput, ShieldCheck, type LucideIcon } from 'lucide-react';
 import { api } from '../../api/client';
 import { useNotebook } from '../../store/NotebookStore';
 import type {
@@ -21,6 +22,7 @@ import { MiniLineageGraph } from '../lineage/MiniLineageGraph';
 import { LineagePathSection, LayerSummary } from '../lineage/LineagePathBreadcrumb';
 import type { CompletePathResult } from '../lineage/lineage-constants';
 import { TableOutput } from '../output/TableOutput';
+import { BlockLibraryPanel } from '../panels/BlockLibraryPanel';
 import { MetricDetailPanel } from '../panels/MetricDetailPanel';
 import { SemanticSearchBar } from '../panels/SemanticSearchBar';
 import { SemanticTreeNode as TreeRow } from '../panels/SemanticTreeNode';
@@ -36,8 +38,8 @@ import {
 } from '../../utils/block-studio';
 import { getTypeColor } from '../../utils/type-colors';
 
-type ExplorerTab = 'semantic' | 'database';
-type ResultTab = 'validate' | 'results' | 'visualization' | 'lineage' | 'save' | 'history' | 'tests';
+type ExplorerTab = 'blocks' | 'semantic' | 'database';
+type ResultTab = 'results' | 'lineage' | 'save' | 'history';
 
 interface FlatSemanticRow {
   node: SemanticTreeNode;
@@ -52,8 +54,8 @@ const TREE_OVERSCAN = 10;
 export function BlockStudio() {
   const { state, dispatch } = useNotebook();
   const t = themes[state.themeMode];
-  const [explorerTab, setExplorerTab] = useState<ExplorerTab>('semantic');
-  const [resultTab, setResultTab] = useState<ResultTab>('validate');
+  const [explorerTab, setExplorerTab] = useState<ExplorerTab>('blocks');
+  const [resultTab, setResultTab] = useState<ResultTab>('results');
   const [query, setQuery] = useState('');
   const [providerFilter, setProviderFilter] = useState('');
   const [domainFilter, setDomainFilter] = useState('');
@@ -74,8 +76,6 @@ export function BlockStudio() {
   const [catalogError, setCatalogError] = useState<string | null>(null);
   const [historyEntries, setHistoryEntries] = useState<Array<{ hash: string; date: string; author: string; message: string }>>([]);
   const [historyLoaded, setHistoryLoaded] = useState(false);
-  const [testResults, setTestResults] = useState<Array<{ field: string; operator: string; expected: string; passed: boolean; actual?: string }> | null>(null);
-  const [testRunning, setTestRunning] = useState(false);
   const [lineageLoading, setLineageLoading] = useState(false);
   const [lineageDetail, setLineageDetail] = useState<{
     node: { id: string; type: string; name: string; domain?: string } | null;
@@ -87,10 +87,11 @@ export function BlockStudio() {
   const [statusUpdating, setStatusUpdating] = useState(false);
   const [scrollTop, setScrollTop] = useState(0);
   const [viewportHeight, setViewportHeight] = useState(400);
-  const [leftPaneWidth, setLeftPaneWidth] = useState(300);
-  const [bottomPaneHeight, setBottomPaneHeight] = useState(420);
+  const [leftPaneWidth, setLeftPaneWidth] = useState(340);
+  const [bottomPaneHeight, setBottomPaneHeight] = useState(320);
   const [leftPaneCollapsed, setLeftPaneCollapsed] = useState(false);
   const [bottomPaneCollapsed, setBottomPaneCollapsed] = useState(false);
+  const [compactLayout, setCompactLayout] = useState(() => typeof window !== 'undefined' ? window.innerWidth < 900 : false);
   const [importSession, setImportSession] = useState<BlockStudioImportSession | null>(null);
   const [importSessions, setImportSessions] = useState<BlockStudioImportSessionSummary[]>([]);
   const [importSessionsLoading, setImportSessionsLoading] = useState(false);
@@ -255,6 +256,13 @@ export function BlockStudio() {
   }, []);
 
   useEffect(() => {
+    const updateCompactLayout = () => setCompactLayout(window.innerWidth < 900);
+    updateCompactLayout();
+    window.addEventListener('resize', updateCompactLayout);
+    return () => window.removeEventListener('resize', updateCompactLayout);
+  }, []);
+
+  useEffect(() => {
     setScrollTop(0);
     if (semanticTreeRef.current) semanticTreeRef.current.scrollTop = 0;
   }, [query, providerFilter, domainFilter, cubeFilter, ownerFilter, tagFilter, typeFilter]);
@@ -328,7 +336,7 @@ export function BlockStudio() {
           ],
         },
       });
-      setResultTab('validate');
+      setResultTab('results');
     } finally {
       setRunning(false);
     }
@@ -465,7 +473,7 @@ export function BlockStudio() {
       payload,
     });
     dispatch({ type: 'SET_BLOCK_STUDIO_PREVIEW', preview: candidate.preview });
-    setResultTab(candidate.validation?.diagnostics?.length ? 'validate' : 'results');
+    setResultTab('results');
     dispatch({ type: 'CLOSE_BLOCK_IMPORT' });
   };
 
@@ -567,7 +575,7 @@ export function BlockStudio() {
     const startX = event.clientX;
     const startWidth = leftPaneWidth;
     const onMove = (moveEvent: MouseEvent) => {
-      const next = Math.min(520, Math.max(280, startWidth + moveEvent.clientX - startX));
+      const next = Math.min(560, Math.max(300, startWidth + moveEvent.clientX - startX));
       setLeftPaneWidth(next);
     };
     const onUp = () => {
@@ -583,7 +591,7 @@ export function BlockStudio() {
     const startY = event.clientY;
     const startHeight = bottomPaneHeight;
     const onMove = (moveEvent: MouseEvent) => {
-      const next = Math.min(520, Math.max(180, startHeight - (moveEvent.clientY - startY)));
+      const next = Math.min(500, Math.max(180, startHeight - (moveEvent.clientY - startY)));
       setBottomPaneHeight(next);
     };
     const onUp = () => {
@@ -594,28 +602,49 @@ export function BlockStudio() {
     window.addEventListener('mouseup', onUp);
   };
 
+  const rootGridColumns = compactLayout || leftPaneCollapsed
+    ? 'minmax(0, 1fr)'
+    : `${leftPaneWidth}px 6px minmax(0, 1fr)`;
+  const rootGridRows = compactLayout
+    ? leftPaneCollapsed
+      ? bottomPaneCollapsed
+        ? 'minmax(0, 1fr) 0 0'
+        : `minmax(0, 1fr) 6px ${bottomPaneHeight}px`
+      : bottomPaneCollapsed
+        ? 'minmax(220px, 34vh) minmax(0, 1fr) 0 0'
+        : `minmax(220px, 34vh) minmax(320px, 1fr) 6px ${bottomPaneHeight}px`
+    : bottomPaneCollapsed
+      ? 'minmax(0, 1fr) 0 0'
+      : `minmax(0, 1fr) 6px ${bottomPaneHeight}px`;
+  const editorGridColumn = compactLayout ? '1' : '3';
+  const editorGridRow = compactLayout ? (leftPaneCollapsed ? '1' : '2') : '1';
+  const bottomResizeGridColumn = compactLayout ? '1' : '3';
+  const bottomResizeGridRow = compactLayout ? (leftPaneCollapsed ? '2' : '3') : '2';
+  const bottomPaneGridColumn = compactLayout ? '1' : '3';
+  const bottomPaneGridRow = compactLayout ? (leftPaneCollapsed ? '3' : '4') : '3';
+
   return (
     <div
       style={{
         flex: 1,
         position: 'relative',
         display: 'grid',
-        gridTemplateColumns: leftPaneCollapsed ? '0 0 minmax(0, 1fr)' : `${leftPaneWidth}px 6px minmax(0, 1fr)`,
-        gridTemplateRows: bottomPaneCollapsed ? 'minmax(0, 1fr) 0 0' : `minmax(0, 1fr) 6px ${bottomPaneHeight}px`,
+        gridTemplateColumns: rootGridColumns,
+        gridTemplateRows: rootGridRows,
         overflow: 'hidden',
         background: t.appBg,
       }}
     >
-      <div style={{ borderRight: leftPaneCollapsed ? 'none' : `1px solid ${t.headerBorder}`, display: leftPaneCollapsed ? 'none' : 'flex', flexDirection: 'column', overflow: 'hidden', background: t.sidebarBg, minWidth: 0 }}>
+      <div style={{ gridColumn: '1', gridRow: compactLayout ? '1' : '1 / 4', borderRight: leftPaneCollapsed ? 'none' : `1px solid ${t.headerBorder}`, borderBottom: compactLayout && !leftPaneCollapsed ? `1px solid ${t.headerBorder}` : 'none', display: leftPaneCollapsed ? 'none' : 'flex', flexDirection: 'column', overflow: 'hidden', background: t.sidebarBg, minWidth: 0 }}>
         {/* v1.3.3 Hex cleanup — single compact header row; drop wordy
             description and the empty 3-up stat cards in favor of an
             inline count chip. */}
         <div style={{ padding: '10px 14px', display: 'flex', alignItems: 'center', gap: 10, borderBottom: `1px solid ${t.headerBorder}` }}>
           <span style={{ fontSize: 10, fontWeight: 600, letterSpacing: '0.06em', color: t.textMuted, textTransform: 'uppercase' as const, fontFamily: t.font }}>
-            Explorer
+            Source
           </span>
           <span style={{ fontSize: 11, color: t.textMuted, fontFamily: t.font }}>
-              {semanticStats.metrics} metrics · {semanticStats.measures} measures · {semanticStats.dimensions + semanticStats.timeDimensions} dims · {semanticStats.entities} entities · {semanticStats.savedQueries} saved queries
+            Blocks, semantics, and database objects
           </span>
           <div style={{ flex: 1 }} />
           {state.semanticLayer.provider && (
@@ -635,11 +664,16 @@ export function BlockStudio() {
         {/* v1.3.3 Hex cleanup — Semantic/Database as compact segmented
             pair with inline underline (no bordered button boxes). */}
         <div style={{ display: 'flex', padding: '0 14px', gap: 16, borderBottom: `1px solid ${t.headerBorder}` }}>
+          <SegmentedTab active={explorerTab === 'blocks'} onClick={() => setExplorerTab('blocks')} label="Blocks" t={t} />
           <SegmentedTab active={explorerTab === 'semantic'} onClick={() => setExplorerTab('semantic')} label="Semantic" t={t} />
           <SegmentedTab active={explorerTab === 'database'} onClick={() => setExplorerTab('database')} label="Database" t={t} />
         </div>
 
-        {explorerTab === 'semantic' ? (
+        {explorerTab === 'blocks' ? (
+          <div style={{ flex: 1, minHeight: 0, overflow: 'hidden' }}>
+            <BlockLibraryPanel />
+          </div>
+        ) : explorerTab === 'semantic' ? (
           <>
             <div style={{ padding: 12, borderBottom: `1px solid ${t.headerBorder}`, background: `${t.cellBg}66` }}>
               <SemanticSearchBar
@@ -747,13 +781,15 @@ export function BlockStudio() {
       <div
         onMouseDown={leftPaneCollapsed ? undefined : startLeftResize}
         style={{
-          display: leftPaneCollapsed ? 'none' : 'block',
+          gridColumn: '2',
+          gridRow: '1 / 4',
+          display: leftPaneCollapsed || compactLayout ? 'none' : 'block',
           cursor: 'col-resize',
           background: t.headerBorder,
         }}
       />
 
-      <div style={{ display: 'flex', flexDirection: 'column', minWidth: 0, overflow: 'hidden', gridColumn: '3', gridRow: '1' }}>
+      <div style={{ display: 'flex', flexDirection: 'column', minWidth: 0, overflow: 'hidden', gridColumn: editorGridColumn, gridRow: editorGridRow }}>
         {/* v1.3.3 Hex cleanup — tight single-row editor toolbar to match
             the explorer header; drop wordy subtitle. */}
         <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '10px 14px', borderBottom: `1px solid ${t.headerBorder}`, background: t.cellBg }}>
@@ -821,7 +857,7 @@ export function BlockStudio() {
               onCreateSemantic={() => dispatch({ type: 'OPEN_NEW_BLOCK_MODAL', blockType: 'semantic' })}
               onImport={() => dispatch({ type: 'OPEN_BLOCK_IMPORT' })}
               onAskAi={() => {
-                setResultTab('validate');
+                setResultTab('results');
                 dispatch({
                   type: 'SET_BLOCK_STUDIO_VALIDATION',
                   validation: {
@@ -859,7 +895,7 @@ export function BlockStudio() {
                   t={t}
                 />
               )}
-              <div style={{ flex: 1, minHeight: 0 }}>
+              <div style={{ flex: 1, minHeight: 0, overflow: 'hidden', background: t.cellBg }}>
                 <SQLCellEditor
                   value={state.blockStudioDraft}
                   onChange={handleDraftChange}
@@ -867,6 +903,7 @@ export function BlockStudio() {
                   themeMode={state.themeMode}
                   autoFocus
                   wrap={false}
+                  fillHeight
                   errorMessage={state.blockStudioValidation?.diagnostics.find((item) => item.severity === 'error')?.message}
                 />
               </div>
@@ -878,33 +915,29 @@ export function BlockStudio() {
       <div
         onMouseDown={bottomPaneCollapsed ? undefined : startBottomResize}
         style={{
-          gridColumn: '1 / -1',
-          gridRow: '2',
+          gridColumn: bottomResizeGridColumn,
+          gridRow: bottomResizeGridRow,
           display: bottomPaneCollapsed ? 'none' : 'block',
           cursor: 'row-resize',
           background: t.headerBorder,
         }}
       />
 
-      <div style={{ gridColumn: '1 / -1', gridRow: '3', borderTop: bottomPaneCollapsed ? 'none' : `1px solid ${t.headerBorder}`, display: bottomPaneCollapsed ? 'none' : 'flex', flexDirection: 'column', overflow: 'hidden', background: t.cellBg }}>
-        {/* v1.3.3 Hex handoff — compact tab row grouping Output tabs
-            (Results/Viz/Lineage) on the left and Governance tabs
-            (Validate/Tests/History/Save) on the right, separated by a
-            subtle divider. Replaces the bulky "Preview & Governance"
-            title block. */}
+      <div style={{ gridColumn: bottomPaneGridColumn, gridRow: bottomPaneGridRow, borderTop: bottomPaneCollapsed ? 'none' : `1px solid ${t.headerBorder}`, display: bottomPaneCollapsed ? 'none' : 'flex', flexDirection: 'column', overflow: 'hidden', background: t.cellBg }}>
+        {/* Compact bottom workspace: keep only tabs that are actively useful
+            during block authoring. Validation and test details still run in
+            the background and certification flow, but do not compete for
+            attention as primary tabs. */}
         <div style={{ padding: '10px 14px', display: 'flex', gap: 6, alignItems: 'center', borderBottom: `1px solid ${t.headerBorder}`, flexWrap: 'wrap' }}>
           <span style={{ fontSize: 10, fontWeight: 600, letterSpacing: '0.06em', color: t.textMuted, textTransform: 'uppercase' as const, fontFamily: t.font, marginRight: 4 }}>
             Output
           </span>
           <ExplorerTabButton active={resultTab === 'results'} onClick={() => setResultTab('results')} label="Results" />
-          <ExplorerTabButton active={resultTab === 'visualization'} onClick={() => setResultTab('visualization')} label="Visualization" />
           <ExplorerTabButton active={resultTab === 'lineage'} onClick={() => setResultTab('lineage')} label="Lineage" />
           <span style={{ width: 1, height: 18, background: t.headerBorder, margin: '0 6px' }} />
           <span style={{ fontSize: 10, fontWeight: 600, letterSpacing: '0.06em', color: t.textMuted, textTransform: 'uppercase' as const, fontFamily: t.font, marginRight: 4 }}>
             Governance
           </span>
-          <ExplorerTabButton active={resultTab === 'validate'} onClick={() => setResultTab('validate')} label="Validate" />
-          <ExplorerTabButton active={resultTab === 'tests'} onClick={() => setResultTab('tests')} label="Tests" />
           <ExplorerTabButton active={resultTab === 'history'} onClick={() => {
             setResultTab('history');
             if (!historyLoaded && state.activeBlockPath) {
@@ -938,15 +971,8 @@ export function BlockStudio() {
                 )}
               </div>
             ) : (
-              <EmptyPanel message="Run the block to preview results and visualization." />
+              <EmptyPanel message="Run the block to preview results." />
             )
-          )}
-          {resultTab === 'visualization' && (
-            <VisualizationPanel
-              chartConfig={currentChart}
-              onChange={(next) => handleDraftChange(upsertVisualizationConfig(state.blockStudioDraft, next))}
-              t={t}
-            />
           )}
           {resultTab === 'lineage' && (
             <BlockLineagePanel
@@ -968,27 +994,6 @@ export function BlockStudio() {
               }}
               t={t}
             />
-          )}
-          {resultTab === 'tests' && (
-            <TestsPanel
-              source={state.blockStudioDraft}
-              blockPath={state.activeBlockPath}
-              testResults={testResults}
-              running={testRunning}
-              onRunTests={async () => {
-                if (!state.activeBlockPath) return;
-                setTestRunning(true);
-                try {
-                  const result = await api.runBlockTests(state.blockStudioDraft, state.activeBlockPath);
-                  setTestResults(result.assertions ?? []);
-                } catch { setTestResults([]); }
-                finally { setTestRunning(false); }
-              }}
-              t={t}
-            />
-          )}
-          {resultTab === 'validate' && (
-            <DiagnosticsPanel diagnostics={state.blockStudioValidation?.diagnostics ?? []} t={t} />
           )}
           {resultTab === 'history' && (
             <HistoryPanel entries={historyEntries} t={t} />
@@ -1186,77 +1191,156 @@ function BlockStudioStartPage({
 }) {
   const cards = [
     {
-      title: 'Create SQL Block from dbt Model',
-      detail: 'Pick dbt models or database tables, then author a SELECT block with validation, tests, and chart intent.',
+      title: 'SQL block',
+      detail: 'Model or table to reusable SELECT.',
       action: onCreateSql,
-      label: 'Create SQL Block',
+      label: 'Create',
+      Icon: Code2,
     },
     {
-      title: 'Create Semantic Block from dbt Metric',
-      detail: 'Use governed metrics, dimensions, time grain, filters, and chart intent without raw SELECT editing.',
+      title: 'Semantic block',
+      detail: 'Metric to governed answer block.',
       action: onCreateSemantic,
-      label: 'Create Semantic Block',
+      label: 'Build',
+      Icon: Blocks,
     },
     {
       title: 'Import SQL',
-      detail: 'One-time SQL migration flow: split, review, run, save drafts, then certify useful blocks.',
+      detail: 'Convert existing queries to DQL.',
       action: onImport,
-      label: 'Import SQL',
+      label: 'Import',
+      Icon: FileInput,
     },
     {
-      title: 'Ask AI to Generate Block',
-      detail: 'Generate or fix a block from bounded dbt/model context. Suggestions stay review-gated.',
+      title: 'Ask AI',
+      detail: 'Draft from dbt project context.',
       action: onAskAi,
-      label: 'Ask AI',
+      label: 'Draft',
+      Icon: Bot,
     },
   ];
+  const dbtReady = Boolean(dbtStatus?.artifacts.manifest.exists);
+  const semanticMetricCount = dbtStatus?.counts.metrics ?? semanticStats.metrics;
+  const semanticObjectCount = semanticMetricCount + (dbtStatus?.counts.savedQueries ?? semanticStats.savedQueries);
+  const sourceSummary = dbtStatus
+    ? `${dbtStatus.counts.models} models · ${semanticMetricCount} metrics`
+    : 'Waiting for dbt artifacts';
+  const projectLabel = dbtStatus?.projectName || dbtStatus?.projectPath?.split('/').filter(Boolean).pop() || 'dbt project';
+
   return (
-    <div style={{ height: '100%', overflow: 'auto', padding: 24, display: 'grid', gap: 18, alignContent: 'start', background: t.appBg }}>
-      <div>
-        <div style={{ fontSize: 22, fontWeight: 800, color: t.textPrimary, fontFamily: t.font }}>Build trusted DQL blocks from dbt</div>
-        <div style={{ fontSize: 13, color: t.textMuted, lineHeight: 1.5, marginTop: 6, maxWidth: 900, fontFamily: t.font }}>
-          dbt remains the source of truth for models and semantic metrics. DQL turns those assets into reusable answer blocks, visualizations, notebooks, Apps, and certification labels.
+    <div style={{ height: '100%', overflow: 'auto', padding: 22, display: 'grid', gap: 14, alignContent: 'start', background: t.appBg }}>
+      <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 16, flexWrap: 'wrap' }}>
+        <div>
+          <div style={{ fontSize: 20, fontWeight: 800, color: t.textPrimary, fontFamily: t.font }}>Build a DQL block</div>
+          <div style={{ fontSize: 12, color: t.textMuted, lineHeight: 1.45, marginTop: 5, maxWidth: 560, fontFamily: t.font }}>
+            Start from dbt models, semantic metrics, existing SQL, or an AI draft.
+          </div>
+        </div>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 7, padding: '7px 10px', border: `1px solid ${dbtReady ? '#2ea04340' : t.headerBorder}`, borderRadius: 8, background: dbtReady ? '#2ea0430d' : t.cellBg }}>
+          <CheckCircle2 size={15} strokeWidth={2} color={dbtReady ? '#2ea043' : t.textMuted} aria-hidden="true" />
+          <span style={{ fontSize: 11, color: dbtReady ? '#2ea043' : t.textMuted, fontWeight: 700, fontFamily: t.font }}>
+            {dbtReady ? 'dbt ready' : 'dbt pending'}
+          </span>
         </div>
       </div>
 
-      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(190px, 1fr))', gap: 12 }}>
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(160px, 1fr))', gap: 10 }}>
         {cards.map((card) => (
-          <button
+          <CompactStartTile
             key={card.title}
+            title={card.title}
+            detail={card.detail}
+            label={card.label}
+            Icon={card.Icon}
             onClick={card.action}
-            style={{
-              textAlign: 'left',
-              background: t.cellBg,
-              border: `1px solid ${t.headerBorder}`,
-              borderRadius: 8,
-              padding: 14,
-              cursor: 'pointer',
-              color: t.textPrimary,
-              display: 'grid',
-              gap: 9,
-              minHeight: 160,
-              fontFamily: t.font,
-            }}
-          >
-            <span style={{ fontSize: 14, fontWeight: 800 }}>{card.title}</span>
-            <span style={{ fontSize: 12, color: t.textMuted, lineHeight: 1.45 }}>{card.detail}</span>
-            <span style={{ marginTop: 'auto', color: t.accent, fontSize: 12, fontWeight: 800 }}>{card.label}</span>
-          </button>
+            t={t}
+          />
         ))}
       </div>
 
-      <section style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(300px, 1fr))', gap: 12 }}>
-        <PanelBox title="dbt connection" t={t}>
-          <DbtStatusRows status={dbtStatus} t={t} />
-        </PanelBox>
-        <PanelBox title="DQL basics" t={t}>
-          <InfoLine label="SQL Block" value={'type = "custom" + query = """ SELECT ... """'} t={t} />
-          <InfoLine label="Semantic Block" value="metric, dimensions, time_dimension, granularity" t={t} />
-          <InfoLine label="Schema" value={`${databaseStats.tables} database tables available for SQL blocks`} t={t} />
-          <InfoLine label="Metrics" value={`${semanticStats.metrics} metrics and ${semanticStats.dimensions + semanticStats.timeDimensions} dimensions available for semantic blocks`} t={t} />
-          <InfoLine label="Certify" value="Run, validate, test, review lineage, then certify." t={t} />
-        </PanelBox>
+      <section style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(160px, 1fr))', gap: 8 }}>
+        <ReadinessChip Icon={Database} label={projectLabel} value={sourceSummary} tone={dbtReady ? 'success' : 'neutral'} t={t} />
+        <ReadinessChip Icon={Database} label="Database" value={`${databaseStats.tables} tables`} tone={databaseStats.tables > 0 ? 'success' : 'neutral'} t={t} />
+        <ReadinessChip Icon={Blocks} label="Semantic layer" value={`${semanticObjectCount} objects`} tone={semanticObjectCount > 0 ? 'success' : 'neutral'} t={t} />
+        <ReadinessChip Icon={ShieldCheck} label="Governance" value="Run · validate · certify" tone="neutral" t={t} />
       </section>
+    </div>
+  );
+}
+
+function CompactStartTile({
+  title,
+  detail,
+  label,
+  Icon,
+  onClick,
+  t,
+}: {
+  title: string;
+  detail: string;
+  label: string;
+  Icon: LucideIcon;
+  onClick: () => void;
+  t: Theme;
+}) {
+  return (
+    <button
+      onClick={onClick}
+      style={{
+        textAlign: 'left',
+        background: t.cellBg,
+        border: `1px solid ${t.headerBorder}`,
+        borderRadius: 8,
+        padding: 12,
+        cursor: 'pointer',
+        color: t.textPrimary,
+        display: 'grid',
+        gridTemplateColumns: '30px minmax(0, 1fr)',
+        gap: 10,
+        minHeight: 94,
+        fontFamily: t.font,
+        alignItems: 'start',
+      }}
+    >
+      <span style={{ width: 30, height: 30, borderRadius: 7, display: 'inline-flex', alignItems: 'center', justifyContent: 'center', background: `${t.accent}14`, color: t.accent }}>
+        <Icon size={16} strokeWidth={2} aria-hidden="true" />
+      </span>
+      <span style={{ display: 'grid', gap: 5, minWidth: 0 }}>
+        <span style={{ fontSize: 13, fontWeight: 800, color: t.textPrimary }}>{title}</span>
+        <span style={{ fontSize: 11, color: t.textMuted, lineHeight: 1.35 }}>{detail}</span>
+        <span style={{ color: t.accent, fontSize: 11, fontWeight: 800 }}>{label}</span>
+      </span>
+    </button>
+  );
+}
+
+function ReadinessChip({
+  Icon,
+  label,
+  value,
+  tone,
+  t,
+}: {
+  Icon: LucideIcon;
+  label: string;
+  value: string;
+  tone: 'success' | 'neutral';
+  t: Theme;
+}) {
+  const color = tone === 'success' ? '#2ea043' : t.textMuted;
+  return (
+    <div style={{ border: `1px solid ${t.headerBorder}`, borderRadius: 8, background: t.cellBg, padding: '9px 10px', display: 'flex', alignItems: 'center', gap: 8, minWidth: 0 }}>
+      <span style={{ color, display: 'inline-flex', flexShrink: 0 }}>
+        <Icon size={15} strokeWidth={2} aria-hidden="true" />
+      </span>
+      <span style={{ display: 'grid', gap: 2, minWidth: 0 }}>
+        <span style={{ fontSize: 10, color: t.textMuted, fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.04em', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+          {label}
+        </span>
+        <span style={{ fontSize: 12, color: t.textPrimary, fontWeight: 700, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+          {value}
+        </span>
+      </span>
     </div>
   );
 }

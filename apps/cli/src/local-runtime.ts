@@ -1,6 +1,7 @@
 import { execSync } from 'node:child_process';
 import { createServer } from 'node:http';
 import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, watch, writeFileSync } from 'node:fs';
+import { homedir } from 'node:os';
 import { dirname, extname, join, normalize, relative, resolve } from 'node:path';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { QueryExecutor, type ConnectionConfig } from '@duckcodeailabs/dql-connectors';
@@ -124,6 +125,17 @@ export interface ProjectConfig {
     theme?: string;
     open?: boolean;
   };
+}
+
+export interface DbtProfileConnectionCandidate {
+  id: string;
+  profileName: string;
+  targetName: string;
+  adapter: string;
+  path: string;
+  connection: ConnectionConfig;
+  missingFields: string[];
+  warnings: string[];
 }
 
 export interface LocalServerOptions {
@@ -2094,8 +2106,9 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
       const defaultKey = raw.defaultConnection
         ? 'default'
         : Object.keys(connections)[0] ?? 'default';
+      const dbtProfiles = discoverDbtProfileConnections(projectRoot, cfg);
       res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
-      res.end(serializeJSON({ default: defaultKey, connections }));
+      res.end(serializeJSON({ default: defaultKey, connections, dbtProfiles }));
       return;
     }
     // Save/update connections
@@ -3770,13 +3783,14 @@ export function loadProjectConfig(projectRoot: string): ProjectConfig {
 
   // Normalize modern `connections.default` format to `defaultConnection`
   if (!config.defaultConnection && raw.connections) {
-    const connections = raw.connections as Record<string, Record<string, unknown>>;
+    const connections = raw.connections as Record<string, ConnectionConfig & { path?: string }>;
     const defaultConn = connections.default;
     if (defaultConn?.driver) {
       // Support both `filepath` (correct) and `path` (legacy/init compat)
       const filepath = (defaultConn.filepath ?? defaultConn.path) as string | undefined;
       config.defaultConnection = {
-        driver: defaultConn.driver as ConnectionConfig['driver'],
+        ...defaultConn,
+        driver: defaultConn.driver,
         ...(filepath ? { filepath } : {}),
       };
     }
@@ -3925,7 +3939,7 @@ export function prepareSemanticSql(
 }
 
 export function normalizeProjectConnection(connection: ConnectionConfig, projectRoot: string): ConnectionConfig {
-  const normalized: ConnectionConfig = { ...connection };
+  const normalized: ConnectionConfig = expandConnectionEnvPlaceholders({ ...connection });
 
   if ((normalized.driver === 'file' || normalized.driver === 'duckdb') && normalized.filepath && normalized.filepath !== ':memory:' && !isAbsoluteLikePath(normalized.filepath)) {
     normalized.filepath = resolve(projectRoot, normalized.filepath);
@@ -3936,6 +3950,16 @@ export function normalizeProjectConnection(connection: ConnectionConfig, project
   }
 
   return normalized;
+}
+
+function expandConnectionEnvPlaceholders(connection: ConnectionConfig): ConnectionConfig {
+  const expanded: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(connection)) {
+    expanded[key] = typeof value === 'string'
+      ? value.replace(/\$\{([A-Za-z_][A-Za-z0-9_]*)\}/g, (match, envKey: string) => process.env[envKey] ?? match)
+      : value;
+  }
+  return expanded as unknown as ConnectionConfig;
 }
 
 export function resolveProjectRelativeSqlPaths(sql: string, projectRoot: string, dataDir?: string): string {
@@ -5902,7 +5926,59 @@ function resolveDbtManifestPath(projectRoot: string): string | undefined {
   return existsSync(candidate) ? candidate : undefined;
 }
 
-export function buildDbtStatus(projectRoot: string, projectConfig: ProjectConfig, lastSyncTime: string | null) {
+type DbtProfileOutput = Record<string, unknown>;
+
+interface DbtProfileTextResult {
+  value?: string;
+  envRefs: string[];
+}
+
+export function discoverDbtProfileConnections(projectRoot: string, projectConfig: ProjectConfig): DbtProfileConnectionCandidate[] {
+  const dbtProjectPath = findDbtProjectPath(projectRoot, projectConfig);
+  const projectProfileName = readDbtProjectProfileName(dbtProjectPath);
+  const profilePaths = findDbtProfilePaths(projectRoot, dbtProjectPath);
+  const candidates: DbtProfileConnectionCandidate[] = [];
+
+  for (const profilePath of profilePaths) {
+    const profiles = readYamlFile(profilePath);
+    if (!profiles) continue;
+
+    for (const [profileName, rawProfile] of Object.entries(profiles)) {
+      if (!rawProfile || typeof rawProfile !== 'object') continue;
+      if (projectProfileName && profileName !== projectProfileName) continue;
+      const profile = rawProfile as Record<string, unknown>;
+      const outputs = profile.outputs && typeof profile.outputs === 'object'
+        ? profile.outputs as Record<string, DbtProfileOutput>
+        : {};
+      const defaultTarget = typeof profile.target === 'string' ? profile.target : 'default';
+
+      for (const [targetName, output] of Object.entries(outputs)) {
+        if (!output || typeof output !== 'object') continue;
+        const mapped = mapDbtProfileOutput(output);
+        if (!mapped) continue;
+        const warnings = [...mapped.warnings];
+        if (targetName !== defaultTarget) {
+          warnings.push(`Not the default dbt target "${defaultTarget}".`);
+        }
+
+        candidates.push({
+          id: `${profilePath}:${profileName}:${targetName}`,
+          profileName,
+          targetName,
+          adapter: mapped.adapter,
+          path: profilePath,
+          connection: mapped.connection,
+          missingFields: requiredConnectionFields(mapped.connection, mapped.envRefs),
+          warnings,
+        });
+      }
+    }
+  }
+
+  return candidates.slice(0, 20);
+}
+
+function findDbtProjectPath(projectRoot: string, projectConfig: ProjectConfig): string {
   const configuredDbtDir = projectConfig.dbt?.projectDir
     ? resolve(projectRoot, projectConfig.dbt.projectDir)
     : undefined;
@@ -5917,7 +5993,272 @@ export function buildDbtStatus(projectRoot: string, projectConfig: ProjectConfig
     resolve(projectRoot, '../dbt'),
     resolve(projectRoot, '../../dbt'),
   ].filter((value): value is string => Boolean(value));
-  const dbtProjectPath = candidateDirs.find((dir, index, list) => list.indexOf(dir) === index && existsSync(join(dir, 'dbt_project.yml'))) ?? configuredDbtDir ?? semanticDbtDir ?? projectRoot;
+
+  return candidateDirs.find((dir, index, list) => list.indexOf(dir) === index && existsSync(join(dir, 'dbt_project.yml')))
+    ?? configuredDbtDir
+    ?? semanticDbtDir
+    ?? projectRoot;
+}
+
+function findDbtProfilePaths(projectRoot: string, dbtProjectPath: string): string[] {
+  const dirs = [
+    process.env.DBT_PROFILES_DIR,
+    dbtProjectPath,
+    projectRoot,
+    join(homedir(), '.dbt'),
+  ].filter((value): value is string => Boolean(value));
+
+  const paths: string[] = [];
+  for (const dir of dirs) {
+    for (const filename of ['profiles.yml', 'profiles.yaml']) {
+      const profilePath = resolve(dir, filename);
+      if (existsSync(profilePath) && !paths.includes(profilePath)) {
+        paths.push(profilePath);
+      }
+    }
+  }
+  return paths;
+}
+
+function readDbtProjectProfileName(dbtProjectPath: string): string | null {
+  const projectFile = join(dbtProjectPath, 'dbt_project.yml');
+  const projectYaml = readYamlFile(projectFile);
+  return typeof projectYaml?.profile === 'string' ? projectYaml.profile : null;
+}
+
+function readYamlFile(path: string): Record<string, unknown> | null {
+  if (!existsSync(path)) return null;
+  try {
+    const parsed = loadYaml(readFileSync(path, 'utf-8'));
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed)
+      ? parsed as Record<string, unknown>
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+function mapDbtProfileOutput(output: DbtProfileOutput): {
+  adapter: string;
+  connection: ConnectionConfig;
+  envRefs: string[];
+  warnings: string[];
+} | null {
+  const adapter = text(output, 'type').value?.toLowerCase();
+  const envRefs = new Set<string>();
+  const warnings: string[] = [];
+  const read = (...keys: string[]) => {
+    const result = text(output, ...keys);
+    result.envRefs.forEach((ref) => envRefs.add(ref));
+    return result.value;
+  };
+
+  const port = numberValue(output, 'port');
+  const sslRaw = read('ssl', 'sslmode');
+  const ssl = sslRaw === undefined
+    ? undefined
+    : !['false', '0', 'disable', 'disabled', 'off'].includes(sslRaw.toLowerCase());
+
+  switch (adapter) {
+    case 'postgres':
+    case 'postgresql':
+      return {
+        adapter,
+        connection: compactConnection({
+          driver: 'postgresql',
+          host: read('host'),
+          port,
+          database: read('dbname', 'database'),
+          schema: read('schema'),
+          username: read('user', 'username'),
+          password: read('password', 'pass'),
+          ssl,
+        }),
+        envRefs: [...envRefs],
+        warnings,
+      };
+    case 'redshift':
+      return {
+        adapter,
+        connection: compactConnection({
+          driver: 'redshift',
+          host: read('host'),
+          port: port ?? 5439,
+          database: read('dbname', 'database'),
+          schema: read('schema'),
+          username: read('user', 'username'),
+          password: read('password', 'pass'),
+          ssl,
+        }),
+        envRefs: [...envRefs],
+        warnings,
+      };
+    case 'snowflake': {
+      const privateKeyPath = read('private_key_path', 'privateKeyPath');
+      const authenticator = read('authenticator');
+      const authMethod = privateKeyPath
+        ? 'key_pair'
+        : authenticator?.toLowerCase() === 'externalbrowser'
+          ? 'external_browser'
+          : 'password';
+      return {
+        adapter,
+        connection: compactConnection({
+          driver: 'snowflake',
+          account: read('account'),
+          warehouse: read('warehouse'),
+          database: read('database'),
+          schema: read('schema'),
+          username: read('user', 'username'),
+          password: read('password'),
+          role: read('role'),
+          privateKeyPath,
+          privateKeyPassphrase: read('private_key_passphrase', 'privateKeyPassphrase'),
+          authenticator,
+          authMethod,
+        }),
+        envRefs: [...envRefs],
+        warnings,
+      };
+    }
+    case 'bigquery': {
+      const keyFilename = read('keyfile', 'keyFilename');
+      return {
+        adapter,
+        connection: compactConnection({
+          driver: 'bigquery',
+          projectId: read('project', 'projectId'),
+          schema: read('dataset', 'schema'),
+          location: read('location'),
+          keyFilename,
+          authMethod: keyFilename ? 'service_account_key_file' : 'application_default',
+        }),
+        envRefs: [...envRefs],
+        warnings,
+      };
+    }
+    case 'duckdb':
+      return {
+        adapter,
+        connection: compactConnection({
+          driver: 'duckdb',
+          filepath: read('path', 'database') ?? ':memory:',
+        }),
+        envRefs: [...envRefs],
+        warnings,
+      };
+    case 'databricks':
+      return {
+        adapter,
+        connection: compactConnection({
+          driver: 'databricks',
+          host: read('host', 'server_hostname'),
+          httpPath: read('http_path', 'httpPath'),
+          warehouse: read('warehouse', 'warehouse_id'),
+          catalog: read('catalog'),
+          database: read('catalog', 'database'),
+          schema: read('schema'),
+          token: read('token'),
+          authMethod: 'token',
+        }),
+        envRefs: [...envRefs],
+        warnings,
+      };
+    default:
+      return null;
+  }
+}
+
+function text(source: Record<string, unknown>, ...keys: string[]): DbtProfileTextResult {
+  for (const key of keys) {
+    const raw = source[key];
+    if (raw === undefined || raw === null) continue;
+    const value = String(raw).trim();
+    if (!value) continue;
+    return resolveDbtEnvVars(value);
+  }
+  return { envRefs: [] };
+}
+
+function resolveDbtEnvVars(value: string): DbtProfileTextResult {
+  const envRefs: string[] = [];
+  const replaced = value.replace(
+    /\{\{\s*env_var\(\s*['"]([^'"]+)['"]\s*(?:,\s*(['"])(.*?)\2)?\s*\)\s*\}\}/g,
+    (_match, envKey: string, _quote: string | undefined, fallback: string | undefined) => {
+      const envValue = process.env[envKey];
+      if (envValue !== undefined) return envValue;
+      if (fallback !== undefined) return fallback;
+      envRefs.push(envKey);
+      return `\${${envKey}}`;
+    },
+  );
+  return { value: replaced, envRefs };
+}
+
+function numberValue(source: Record<string, unknown>, key: string): number | undefined {
+  const raw = source[key];
+  if (raw === undefined || raw === null || raw === '') return undefined;
+  const value = Number(raw);
+  return Number.isFinite(value) ? value : undefined;
+}
+
+function compactConnection(connection: Partial<ConnectionConfig> & { driver: ConnectionConfig['driver'] }): ConnectionConfig {
+  const compact: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(connection)) {
+    if (value === undefined || value === null || value === '') continue;
+    compact[key] = value;
+  }
+  return compact as unknown as ConnectionConfig;
+}
+
+function requiredConnectionFields(connection: ConnectionConfig, envRefs: string[]): string[] {
+  const missing = new Set<string>();
+  const needs = (field: keyof ConnectionConfig) => {
+    const value = connection[field];
+    if (value === undefined || value === null || value === '') missing.add(String(field));
+  };
+
+  switch (connection.driver) {
+    case 'postgresql':
+    case 'redshift':
+      needs('host');
+      needs('database');
+      needs('username');
+      break;
+    case 'snowflake':
+      needs('account');
+      needs('warehouse');
+      needs('database');
+      needs('schema');
+      needs('username');
+      if (connection.authMethod === 'key_pair') {
+        needs('privateKeyPath');
+      } else if (connection.authMethod !== 'external_browser') {
+        needs('password');
+      }
+      break;
+    case 'bigquery':
+      needs('projectId');
+      break;
+    case 'duckdb':
+      needs('filepath');
+      break;
+    case 'databricks':
+      needs('host');
+      if (!connection.httpPath && !connection.warehouse) missing.add('httpPath');
+      needs('token');
+      break;
+  }
+
+  for (const envKey of envRefs) {
+    if (!process.env[envKey]) missing.add(`env:${envKey}`);
+  }
+
+  return [...missing];
+}
+
+export function buildDbtStatus(projectRoot: string, projectConfig: ProjectConfig, lastSyncTime: string | null) {
+  const dbtProjectPath = findDbtProjectPath(projectRoot, projectConfig);
   const configuredManifest = projectConfig.dbt?.manifestPath ?? 'target/manifest.json';
   const manifestPath = resolve(dbtProjectPath, configuredManifest);
   const catalogPath = resolve(dbtProjectPath, 'target/catalog.json');
@@ -5948,7 +6289,9 @@ export function buildDbtStatus(projectRoot: string, projectConfig: ProjectConfig
   const savedQueryCount = Array.isArray(semanticManifest?.saved_queries)
     ? semanticManifest.saved_queries.length
     : 0;
-  const configured = existsSync(join(dbtProjectPath, 'dbt_project.yml')) || Boolean(configuredDbtDir || semanticDbtDir);
+  const configured = existsSync(join(dbtProjectPath, 'dbt_project.yml'))
+    || Boolean(projectConfig.dbt?.projectDir)
+    || Boolean(projectConfig.semanticLayer?.provider === 'dbt' && projectConfig.semanticLayer.projectPath);
   const manifestExists = existsSync(manifestPath);
   const semanticExists = existsSync(semanticManifestPath);
   const setupHint = !configured
@@ -6088,15 +6431,22 @@ async function execGit(cwd: string, args: string[]): Promise<{ stdout: string; s
   });
 }
 
-async function readGitStatus(cwd: string): Promise<GitStatusResult> {
+async function resolveGitRoot(cwd: string): Promise<string | null> {
   const isRepo = await execGit(cwd, ['rev-parse', '--is-inside-work-tree']);
-  if (isRepo.code !== 0 || isRepo.stdout.trim() !== 'true') {
+  if (isRepo.code !== 0 || isRepo.stdout.trim() !== 'true') return null;
+  const root = await execGit(cwd, ['rev-parse', '--show-toplevel']);
+  return root.code === 0 && root.stdout.trim() ? root.stdout.trim() : cwd;
+}
+
+async function readGitStatus(cwd: string): Promise<GitStatusResult> {
+  const gitRoot = await resolveGitRoot(cwd);
+  if (!gitRoot) {
     return { inRepo: false, branch: null, ahead: 0, behind: 0, changes: [] };
   }
-  const branchRes = await execGit(cwd, ['rev-parse', '--abbrev-ref', 'HEAD']);
+  const branchRes = await execGit(gitRoot, ['rev-parse', '--abbrev-ref', 'HEAD']);
   const branch = branchRes.code === 0 ? branchRes.stdout.trim() : null;
 
-  const trackRes = await execGit(cwd, ['rev-list', '--left-right', '--count', '@{u}...HEAD']);
+  const trackRes = await execGit(gitRoot, ['rev-list', '--left-right', '--count', '@{u}...HEAD']);
   let ahead = 0;
   let behind = 0;
   if (trackRes.code === 0) {
@@ -6105,7 +6455,7 @@ async function readGitStatus(cwd: string): Promise<GitStatusResult> {
     ahead = Number(match[1] ?? 0);
   }
 
-  const statusRes = await execGit(cwd, ['status', '--porcelain=v1', '--untracked-files=normal']);
+  const statusRes = await execGit(gitRoot, ['status', '--porcelain=v1', '--untracked-files=normal']);
   const changes: Array<{ path: string; status: string }> = [];
   if (statusRes.code === 0) {
     for (const line of statusRes.stdout.split('\n')) {
@@ -6126,12 +6476,12 @@ export interface GitCommit {
 }
 
 async function readGitLog(cwd: string, limit: number): Promise<{ inRepo: boolean; commits: GitCommit[] }> {
-  const isRepo = await execGit(cwd, ['rev-parse', '--is-inside-work-tree']);
-  if (isRepo.code !== 0) return { inRepo: false, commits: [] };
+  const gitRoot = await resolveGitRoot(cwd);
+  if (!gitRoot) return { inRepo: false, commits: [] };
   const sep = '\x1f';
   const end = '\x1e';
   const fmt = ['%H', '%an', '%ad', '%s'].join(sep) + end;
-  const res = await execGit(cwd, ['log', `-${limit}`, `--pretty=format:${fmt}`, '--date=short']);
+  const res = await execGit(gitRoot, ['log', `-${limit}`, `--pretty=format:${fmt}`, '--date=short']);
   if (res.code !== 0) return { inRepo: true, commits: [] };
   const commits: GitCommit[] = [];
   for (const entry of res.stdout.split(end)) {
@@ -6200,23 +6550,97 @@ async function readGitDiff(
   after: string | null;
   diffReport: DiffReport | null;
 }> {
-  const isRepo = await execGit(cwd, ['rev-parse', '--is-inside-work-tree']);
-  if (isRepo.code !== 0) {
+  const gitRoot = await resolveGitRoot(cwd);
+  if (!gitRoot) {
     return { inRepo: false, diff: '', before: null, after: null, diffReport: null };
   }
   const baseArgs = staged ? ['diff', '--cached', '--no-color'] : ['diff', '--no-color'];
   if (!filePath) {
-    const res = await execGit(cwd, baseArgs);
+    const res = await execGit(gitRoot, baseArgs);
     return { inRepo: true, diff: res.stdout, before: null, after: null, diffReport: null };
   }
   const isSemantic = filePath.endsWith('.dql') || filePath.endsWith('.dqlnb');
   const [diffRes, before, after] = await Promise.all([
-    execGit(cwd, [...baseArgs, '--', filePath]),
-    isSemantic ? readHeadBlob(cwd, filePath) : Promise.resolve<string | null>(null),
-    isSemantic ? readWorkingCopy(join(cwd, filePath)) : Promise.resolve<string | null>(null),
+    execGit(gitRoot, [...baseArgs, '--', filePath]),
+    isSemantic ? readHeadBlob(gitRoot, filePath) : Promise.resolve<string | null>(null),
+    isSemantic ? readWorkingCopy(join(gitRoot, filePath)) : Promise.resolve<string | null>(null),
   ]);
+  const diffText = !staged && !diffRes.stdout.trim()
+    ? (await readUntrackedTextDiff(gitRoot, filePath)) || diffRes.stdout
+    : diffRes.stdout;
   const diffReport = isSemantic ? computeSemanticDiff(filePath, before, after) : null;
-  return { inRepo: true, diff: diffRes.stdout, before, after, diffReport };
+  return { inRepo: true, diff: diffText, before, after, diffReport };
+}
+
+const MAX_UNTRACKED_DIFF_FILES = 20;
+const MAX_UNTRACKED_DIFF_BYTES = 512 * 1024;
+
+async function readUntrackedTextDiff(cwd: string, filePath: string): Promise<string> {
+  const status = await execGit(cwd, ['status', '--porcelain=v1', '--untracked-files=normal', '--', filePath]);
+  if (status.code !== 0 || !status.stdout.split('\n').some((line) => line.startsWith('?? '))) {
+    return '';
+  }
+
+  const listed = await execGit(cwd, ['ls-files', '--others', '--exclude-standard', '--', filePath]);
+  if (listed.code !== 0) return '';
+
+  const chunks: string[] = [];
+  let totalBytes = 0;
+  for (const rawPath of listed.stdout.split('\n').map((p) => p.trim()).filter(Boolean)) {
+    if (chunks.length >= MAX_UNTRACKED_DIFF_FILES || totalBytes >= MAX_UNTRACKED_DIFF_BYTES) break;
+    const absPath = safeJoin(cwd, rawPath);
+    if (!absPath || !existsSync(absPath)) continue;
+    const st = statSync(absPath);
+    if (!st.isFile()) continue;
+    if (st.size > MAX_UNTRACKED_DIFF_BYTES) {
+      chunks.push(formatBinaryAddedDiff(rawPath));
+      continue;
+    }
+    const buf = readFileSync(absPath);
+    if (buf.includes(0)) {
+      chunks.push(formatBinaryAddedDiff(rawPath));
+      continue;
+    }
+    totalBytes += buf.length;
+    chunks.push(formatAddedFileDiff(rawPath, buf.toString('utf-8')));
+  }
+  if (chunks.length === 0) return '';
+  const omitted = listed.stdout.split('\n').filter(Boolean).length - chunks.length;
+  if (omitted > 0) {
+    chunks.push(`diff --git a/${filePath} b/${filePath}\n# ${omitted} additional untracked file${omitted === 1 ? '' : 's'} omitted from preview`);
+  }
+  return chunks.join('\n');
+}
+
+function formatAddedFileDiff(filePath: string, content: string): string {
+  const normalized = content.replace(/\r\n/g, '\n');
+  const hasFinalNewline = normalized.endsWith('\n');
+  const lines = normalized.length === 0
+    ? []
+    : normalized.split('\n').slice(0, hasFinalNewline ? -1 : undefined);
+  const hunk = lines.length > 0
+    ? [`@@ -0,0 +1,${lines.length} @@`, ...lines.map((line) => `+${line}`)]
+    : [];
+  if (!hasFinalNewline && normalized.length > 0) hunk.push('\\ No newline at end of file');
+  return [
+    `diff --git a/${filePath} b/${filePath}`,
+    'new file mode 100644',
+    'index 0000000..0000000',
+    '--- /dev/null',
+    `+++ b/${filePath}`,
+    ...hunk,
+  ].join('\n');
+}
+
+function formatBinaryAddedDiff(filePath: string): string {
+  return [
+    `diff --git a/${filePath} b/${filePath}`,
+    'new file mode 100644',
+    'index 0000000..0000000',
+    '--- /dev/null',
+    `+++ b/${filePath}`,
+    `Binary file ${filePath} added`,
+  ].join('\n');
 }
 
 // ── git write operations ──────────────────────────────────────────────────
@@ -6246,31 +6670,37 @@ function gitErrorOutput(res: { stdout: string; stderr: string }): string {
 }
 
 async function gitStage(cwd: string, paths: string[]): Promise<{ ok: boolean; error?: string }> {
-  const v = validatePaths(cwd, paths);
+  const gitRoot = await resolveGitRoot(cwd);
+  if (!gitRoot) return { ok: false, error: 'Not a git repository' };
+  const v = validatePaths(gitRoot, paths);
   if (!v.ok) return { ok: false, error: v.error };
-  const res = await execGit(cwd, ['add', '--', ...v.paths]);
+  const res = await execGit(gitRoot, ['add', '--', ...v.paths]);
   return res.code === 0 ? { ok: true } : { ok: false, error: gitErrorOutput(res) };
 }
 
 async function gitUnstage(cwd: string, paths: string[]): Promise<{ ok: boolean; error?: string }> {
-  const v = validatePaths(cwd, paths);
+  const gitRoot = await resolveGitRoot(cwd);
+  if (!gitRoot) return { ok: false, error: 'Not a git repository' };
+  const v = validatePaths(gitRoot, paths);
   if (!v.ok) return { ok: false, error: v.error };
   // `restore --staged` works with or without HEAD; for an initial commit (no
   // HEAD yet) git's `rm --cached` is the fallback. Try restore first.
-  const res = await execGit(cwd, ['restore', '--staged', '--', ...v.paths]);
+  const res = await execGit(gitRoot, ['restore', '--staged', '--', ...v.paths]);
   if (res.code === 0) return { ok: true };
-  const fallback = await execGit(cwd, ['rm', '--cached', '-r', '--', ...v.paths]);
+  const fallback = await execGit(gitRoot, ['rm', '--cached', '-r', '--', ...v.paths]);
   return fallback.code === 0 ? { ok: true } : { ok: false, error: gitErrorOutput(fallback) };
 }
 
 async function gitDiscard(cwd: string, paths: string[]): Promise<{ ok: boolean; error?: string }> {
-  const v = validatePaths(cwd, paths);
+  const gitRoot = await resolveGitRoot(cwd);
+  if (!gitRoot) return { ok: false, error: 'Not a git repository' };
+  const v = validatePaths(gitRoot, paths);
   if (!v.ok) return { ok: false, error: v.error };
   // For tracked files: `restore --worktree` reverts to HEAD. For untracked
   // files: that's a no-op and we delete them via `clean -f`. Run both so
   // the caller doesn't have to know which list each path is in.
-  const restore = await execGit(cwd, ['restore', '--worktree', '--', ...v.paths]);
-  const clean = await execGit(cwd, ['clean', '-f', '--', ...v.paths]);
+  const restore = await execGit(gitRoot, ['restore', '--worktree', '--', ...v.paths]);
+  const clean = await execGit(gitRoot, ['clean', '-f', '--', ...v.paths]);
   if (restore.code !== 0 && clean.code !== 0) {
     return { ok: false, error: gitErrorOutput(restore) || gitErrorOutput(clean) };
   }
@@ -6278,40 +6708,54 @@ async function gitDiscard(cwd: string, paths: string[]): Promise<{ ok: boolean; 
 }
 
 async function gitCommit(cwd: string, message: string, stageAll: boolean): Promise<{ ok: boolean; error?: string; hash?: string }> {
+  const gitRoot = await resolveGitRoot(cwd);
+  if (!gitRoot) return { ok: false, error: 'Not a git repository' };
   const trimmed = message.trim();
   if (!trimmed) return { ok: false, error: 'Commit message required' };
   if (stageAll) {
-    const add = await execGit(cwd, ['add', '-A']);
+    const add = await execGit(gitRoot, ['add', '-A']);
     if (add.code !== 0) return { ok: false, error: gitErrorOutput(add) };
   }
-  const res = await execGit(cwd, ['commit', '-m', trimmed]);
+  const res = await execGit(gitRoot, ['commit', '-m', trimmed]);
   if (res.code !== 0) return { ok: false, error: gitErrorOutput(res) };
-  const hashRes = await execGit(cwd, ['rev-parse', 'HEAD']);
+  const hashRes = await execGit(gitRoot, ['rev-parse', 'HEAD']);
   return { ok: true, hash: hashRes.code === 0 ? hashRes.stdout.trim() : undefined };
 }
 
 async function gitPush(cwd: string): Promise<{ ok: boolean; error?: string; output?: string }> {
-  const res = await execGit(cwd, ['push']);
+  const gitRoot = await resolveGitRoot(cwd);
+  if (!gitRoot) return { ok: false, error: 'Not a git repository' };
+  const branch = await execGit(gitRoot, ['rev-parse', '--abbrev-ref', 'HEAD']);
+  const upstream = await execGit(gitRoot, ['rev-parse', '--abbrev-ref', '--symbolic-full-name', '@{u}']);
+  const remotes = await execGit(gitRoot, ['remote']);
+  const remote = remotes.stdout.split('\n').map((s) => s.trim()).find(Boolean) ?? 'origin';
+  const branchName = branch.code === 0 ? branch.stdout.trim() : '';
+  const args = upstream.code === 0 || !branchName || branchName === 'HEAD'
+    ? ['push']
+    : ['push', '-u', remote, branchName];
+  const res = await execGit(gitRoot, args);
   return res.code === 0
     ? { ok: true, output: gitErrorOutput(res) }
     : { ok: false, error: gitErrorOutput(res) };
 }
 
 async function gitPull(cwd: string): Promise<{ ok: boolean; error?: string; output?: string }> {
+  const gitRoot = await resolveGitRoot(cwd);
+  if (!gitRoot) return { ok: false, error: 'Not a git repository' };
   // `--ff-only` keeps the operation non-destructive: if the local branch has
   // diverged from upstream, we surface the error rather than auto-merging.
   // The user can resolve via the terminal or a future merge UI.
-  const res = await execGit(cwd, ['pull', '--ff-only']);
+  const res = await execGit(gitRoot, ['pull', '--ff-only']);
   return res.code === 0
     ? { ok: true, output: gitErrorOutput(res) }
     : { ok: false, error: gitErrorOutput(res) };
 }
 
 async function readGitBranches(cwd: string): Promise<{ inRepo: boolean; current: string | null; branches: string[] }> {
-  const isRepo = await execGit(cwd, ['rev-parse', '--is-inside-work-tree']);
-  if (isRepo.code !== 0) return { inRepo: false, current: null, branches: [] };
-  const cur = await execGit(cwd, ['rev-parse', '--abbrev-ref', 'HEAD']);
-  const list = await execGit(cwd, ['branch', '--list', '--format=%(refname:short)']);
+  const gitRoot = await resolveGitRoot(cwd);
+  if (!gitRoot) return { inRepo: false, current: null, branches: [] };
+  const cur = await execGit(gitRoot, ['rev-parse', '--abbrev-ref', 'HEAD']);
+  const list = await execGit(gitRoot, ['branch', '--list', '--format=%(refname:short)']);
   const branches = list.code === 0
     ? list.stdout.split('\n').map((s) => s.trim()).filter(Boolean)
     : [];
@@ -6319,31 +6763,35 @@ async function readGitBranches(cwd: string): Promise<{ inRepo: boolean; current:
 }
 
 async function readGitRemote(cwd: string): Promise<{ inRepo: boolean; url: string | null; name: string | null }> {
-  const isRepo = await execGit(cwd, ['rev-parse', '--is-inside-work-tree']);
-  if (isRepo.code !== 0) return { inRepo: false, url: null, name: null };
-  const remoteName = await execGit(cwd, ['config', '--get', 'remote.pushDefault']);
+  const gitRoot = await resolveGitRoot(cwd);
+  if (!gitRoot) return { inRepo: false, url: null, name: null };
+  const remoteName = await execGit(gitRoot, ['config', '--get', 'remote.pushDefault']);
   const name = remoteName.code === 0 && remoteName.stdout.trim() ? remoteName.stdout.trim() : 'origin';
-  const url = await execGit(cwd, ['remote', 'get-url', name]);
+  const url = await execGit(gitRoot, ['remote', 'get-url', name]);
   return { inRepo: true, url: url.code === 0 ? url.stdout.trim() : null, name };
 }
 
 async function gitCreateBranch(cwd: string, name: string, checkout: boolean): Promise<{ ok: boolean; error?: string }> {
+  const gitRoot = await resolveGitRoot(cwd);
+  if (!gitRoot) return { ok: false, error: 'Not a git repository' };
   const trimmed = name.trim();
   // Branch names can't start with `-` (would be parsed as a flag) and must be
   // non-empty. git itself enforces the rest of the ref-name rules.
   if (!trimmed) return { ok: false, error: 'Branch name required' };
   if (trimmed.startsWith('-')) return { ok: false, error: 'Invalid branch name' };
   const res = checkout
-    ? await execGit(cwd, ['checkout', '-b', trimmed])
-    : await execGit(cwd, ['branch', trimmed]);
+    ? await execGit(gitRoot, ['checkout', '-b', trimmed])
+    : await execGit(gitRoot, ['branch', trimmed]);
   return res.code === 0 ? { ok: true } : { ok: false, error: gitErrorOutput(res) };
 }
 
 async function gitCheckout(cwd: string, name: string): Promise<{ ok: boolean; error?: string }> {
+  const gitRoot = await resolveGitRoot(cwd);
+  if (!gitRoot) return { ok: false, error: 'Not a git repository' };
   const trimmed = name.trim();
   if (!trimmed) return { ok: false, error: 'Branch name required' };
   if (trimmed.startsWith('-')) return { ok: false, error: 'Invalid branch name' };
-  const res = await execGit(cwd, ['checkout', trimmed]);
+  const res = await execGit(gitRoot, ['checkout', trimmed]);
   return res.code === 0 ? { ok: true } : { ok: false, error: gitErrorOutput(res) };
 }
 

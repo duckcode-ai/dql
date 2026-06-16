@@ -35,7 +35,30 @@ export interface ConnectionConfig {
   outputLocation?: string;
   httpPath?: string;
   privateKey?: string;
+  privateKeyPath?: string;
+  privateKeyPassphrase?: string;
   connectionString?: string;
+  authMethod?:
+    | 'password'
+    | 'key_pair'
+    | 'external_browser'
+    | 'oauth'
+    | 'application_default'
+    | 'service_account_key_file'
+    | 'service_account_json'
+    | 'aws_default'
+    | 'aws_profile'
+    | 'aws_access_key'
+    | 'token';
+  authenticator?: string;
+  keyFilename?: string;
+  serviceAccountJson?: string;
+  credentials?: Record<string, unknown>;
+  location?: string;
+  accessKeyId?: string;
+  secretAccessKey?: string;
+  sessionToken?: string;
+  profile?: string;
 }
 
 export type DriverName = ConnectionConfig['driver'];

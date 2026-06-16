@@ -4,6 +4,7 @@ import type { QueryResult, ColumnMeta, ColumnType, Row } from '../result-types.j
 export class BigQueryConnector implements DatabaseConnector {
   readonly driverName = 'bigquery';
   private client: any = null;
+  private location = 'US';
 
   async connect(config: ConnectionConfig): Promise<void> {
     // Dynamic import to avoid requiring @google-cloud/bigquery when not used
@@ -15,8 +16,25 @@ export class BigQueryConnector implements DatabaseConnector {
       options.projectId = config.projectId;
     }
 
-    // BigQuery uses Application Default Credentials (ADC) or service account key
-    // The key file path can be set via GOOGLE_APPLICATION_CREDENTIALS env var
+    if (config.keyFilename) {
+      options.keyFilename = config.keyFilename;
+    }
+
+    if (config.serviceAccountJson) {
+      try {
+        options.credentials = JSON.parse(config.serviceAccountJson);
+      } catch (error) {
+        throw new Error(`BigQuery serviceAccountJson is not valid JSON: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    } else if (config.credentials) {
+      options.credentials = config.credentials;
+    }
+
+    if (config.location) {
+      this.location = config.location;
+    }
+
+    // Without explicit key material, BigQuery uses Application Default Credentials.
     this.client = new BigQuery(options);
   }
 
@@ -30,7 +48,7 @@ export class BigQueryConnector implements DatabaseConnector {
     let queryText = sql;
     const queryOptions: Record<string, unknown> = {
       query: queryText,
-      location: 'US',
+      location: this.location,
     };
 
     if (params && params.length > 0) {

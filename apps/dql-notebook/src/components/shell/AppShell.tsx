@@ -12,7 +12,6 @@ import { NotebookEditor } from '../notebook/NotebookEditor';
 import { NewNotebookModal } from '../modals/NewNotebookModal';
 import { NewBlockModal } from '../modals/NewBlockModal';
 import { BlockStudio } from '../block-studio/BlockStudio';
-import { LineageDAG } from '../panels/LineageDAG';
 import { BusinessArtifactView } from '../panels/BusinessArtifactView';
 import { LineageDetailView } from '../panels/LineageDetailView';
 import { ConnectionPanel } from '../panels/ConnectionPanel';
@@ -28,11 +27,13 @@ import { makeCell } from '../../store/NotebookStore';
 import { useKeyboardShortcuts } from '../../hooks/useKeyboardShortcuts';
 import { useRunSnapshotAutosave } from '../../hooks/useRunSnapshotAutosave';
 import type { NotebookFile } from '../../store/types';
+import { LineageNodeIcon } from '@duckcodeailabs/dql-ui/icons';
 
 export function AppShell() {
   const { state, dispatch } = useNotebook();
   const t = themes[state.themeMode];
   const cellRefs = useRef<Record<string, HTMLDivElement>>({});
+  const blockWorkspaceOpen = state.mainView === 'block_studio' || state.mainView === 'imports';
 
   const [paletteOpen, setPaletteOpen] = useState(false);
 
@@ -175,7 +176,7 @@ export function AppShell() {
       <div style={{ flex: 1, display: 'flex', overflow: 'hidden' }}>
         {state.appMode === 'studio' && <ActivityBar />}
 
-        {state.appMode === 'studio' && state.sidebarOpen && (
+        {state.appMode === 'studio' && state.sidebarOpen && !blockWorkspaceOpen && (
           <Sidebar
             onOpenFile={handleOpenFile}
           />
@@ -191,21 +192,18 @@ export function AppShell() {
             minWidth: 0,
           }}
         >
-          {state.lineageFullscreen ? (
-            <LineageDAG />
-          ) : state.mainView === 'home' ? (
+          {state.mainView === 'home' ? (
             <HomePage />
           ) : state.mainView === 'business_artifact' ? (
             <BusinessArtifactView />
+          ) : state.mainView === 'lineage' ? (
+            <LineageWorkspace />
           ) : state.mainView === 'lineage_detail' ? (
             <LineageDetailView />
           ) : state.mainView === 'connection' ? (
-            <FullPageSection
-              title="Connections"
-              description="Manage database connections, edit driver settings, and test connectivity in a full-page workspace."
-            >
-              <ConnectionPanel />
-            </FullPageSection>
+            <ConnectionWorkspace>
+              <ConnectionPanel variant="page" />
+            </ConnectionWorkspace>
           ) : state.mainView === 'reference' ? (
             <FullPageSection
               title="Quick Reference"
@@ -262,6 +260,94 @@ export function AppShell() {
       {state.newNotebookModalOpen && <NewNotebookModal onFileOpened={handleOpenFile} />}
       {state.newBlockModalOpen && <NewBlockModal onFileOpened={handleOpenFile} />}
       <CommandPalette open={paletteOpen} onClose={() => setPaletteOpen(false)} />
+    </div>
+  );
+}
+
+function ConnectionWorkspace({ children }: { children: React.ReactNode }) {
+  return (
+    <div style={{ flex: 1, minWidth: 0, overflow: 'auto' }}>
+      <div
+        style={{
+          maxWidth: 1120,
+          margin: '0 auto',
+          padding: '22px 28px 32px',
+        }}
+      >
+        <div
+          style={{
+            marginBottom: 16,
+            display: 'flex',
+            alignItems: 'flex-end',
+            justifyContent: 'space-between',
+            gap: 18,
+          }}
+        >
+          <div>
+            <div style={{ fontSize: 22, fontWeight: 700 }}>Connections</div>
+            <div style={{ fontSize: 13, opacity: 0.72, marginTop: 6, maxWidth: 660, lineHeight: 1.5 }}>
+              Import a dbt profile target, enter missing credentials, and test the active warehouse connection before building blocks.
+            </div>
+          </div>
+        </div>
+        {children}
+      </div>
+    </div>
+  );
+}
+
+function LineageWorkspace() {
+  const { state } = useNotebook();
+  const t = themes[state.themeMode];
+  return (
+    <div
+      style={{
+        flex: 1,
+        minWidth: 0,
+        overflow: 'hidden',
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        background: t.appBg,
+        padding: 28,
+      }}
+    >
+      <div
+        style={{
+          width: 'min(520px, 100%)',
+          border: `1px solid ${t.headerBorder}`,
+          borderRadius: 8,
+          background: t.cellBg,
+          padding: 22,
+          display: 'flex',
+          alignItems: 'flex-start',
+          gap: 14,
+        }}
+      >
+        <div
+          style={{
+            width: 34,
+            height: 34,
+            borderRadius: 7,
+            background: `${t.accent}18`,
+            color: t.accent,
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            flexShrink: 0,
+          }}
+        >
+          <LineageNodeIcon size={18} />
+        </div>
+        <div style={{ minWidth: 0 }}>
+          <div style={{ color: t.textPrimary, fontSize: 15, fontWeight: 700, marginBottom: 6 }}>
+            Select a lineage item
+          </div>
+          <div style={{ color: t.textMuted, fontSize: 12, lineHeight: 1.55 }}>
+            Focused upstream and downstream context opens here.
+          </div>
+        </div>
+      </div>
     </div>
   );
 }

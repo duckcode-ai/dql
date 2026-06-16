@@ -140,7 +140,7 @@ export interface ParamConfig {
 }
 export type SidebarPanel = 'files' | 'schema' | 'block_library' | 'connection' | 'reference' | 'lineage' | 'git' | 'apps' | 'settings' | null;
 export type DevPanelTab = 'logs' | 'errors';
-export type MainView = 'home' | 'notebook' | 'business_artifact' | 'lineage_detail' | 'block_studio' | 'imports' | 'connection' | 'reference' | 'git' | 'apps' | 'review' | 'settings';
+export type MainView = 'home' | 'notebook' | 'business_artifact' | 'lineage' | 'lineage_detail' | 'block_studio' | 'imports' | 'connection' | 'reference' | 'git' | 'apps' | 'review' | 'settings';
 export type AppWorkspaceExperience = 'view' | 'build';
 export type AppWorkspaceSection = 'dashboards' | 'notebooks' | 'ai' | 'drafts' | 'settings';
 export type LineageReturnTarget =

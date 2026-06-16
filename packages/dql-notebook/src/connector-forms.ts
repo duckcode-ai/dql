@@ -3,9 +3,11 @@ import type { ConnectionConfig } from '@duckcodeailabs/dql-connectors';
 export interface ConnectorFieldSchema {
   key: keyof ConnectionConfig | 'name';
   label: string;
-  type: 'text' | 'number' | 'password' | 'checkbox';
+  type: 'text' | 'number' | 'password' | 'checkbox' | 'select' | 'textarea';
   placeholder?: string;
   required?: boolean;
+  options?: Array<{ value: string; label: string }>;
+  helpText?: string;
 }
 
 export interface ConnectorFormSchema {
@@ -90,7 +92,22 @@ const schemas: ConnectorFormSchema[] = [
       { key: 'database', label: 'Database', type: 'text', required: true },
       { key: 'schema', label: 'Schema', type: 'text', required: true },
       { key: 'username', label: 'Username', type: 'text', required: true },
-      { key: 'password', label: 'Password', type: 'password', required: true },
+      {
+        key: 'authMethod',
+        label: 'Authentication',
+        type: 'select',
+        options: [
+          { value: 'password', label: 'Password' },
+          { value: 'key_pair', label: 'Key pair / private key' },
+          { value: 'external_browser', label: 'SSO / external browser' },
+          { value: 'oauth', label: 'OAuth token' },
+        ],
+      },
+      { key: 'password', label: 'Password / OAuth token', type: 'password' },
+      { key: 'privateKeyPath', label: 'Private key file path', type: 'text', placeholder: '~/.ssh/snowflake_key.p8' },
+      { key: 'privateKey', label: 'Private key PEM', type: 'textarea', helpText: 'Paste PEM only when a key file cannot be referenced.' },
+      { key: 'privateKeyPassphrase', label: 'Private key passphrase', type: 'password' },
+      { key: 'authenticator', label: 'Authenticator override', type: 'text', placeholder: 'EXTERNALBROWSER or OAUTH' },
       { key: 'role', label: 'Role', type: 'text' },
     ],
   },
@@ -98,9 +115,22 @@ const schemas: ConnectorFormSchema[] = [
     driver: 'bigquery',
     label: 'BigQuery',
     category: 'warehouse',
-    description: 'Google BigQuery project-level connection.',
+    description: 'Google BigQuery project-level connection with ADC or service account credentials.',
     fields: [
       { key: 'projectId', label: 'Project ID', type: 'text', required: true },
+      { key: 'location', label: 'Location', type: 'text', placeholder: 'US' },
+      {
+        key: 'authMethod',
+        label: 'Authentication',
+        type: 'select',
+        options: [
+          { value: 'application_default', label: 'Application default credentials' },
+          { value: 'service_account_key_file', label: 'Service account key file' },
+          { value: 'service_account_json', label: 'Service account JSON' },
+        ],
+      },
+      { key: 'keyFilename', label: 'Key file path', type: 'text', placeholder: '/secure/path/service-account.json' },
+      { key: 'serviceAccountJson', label: 'Service account JSON', type: 'textarea' },
     ],
   },
   {
@@ -121,25 +151,40 @@ const schemas: ConnectorFormSchema[] = [
     driver: 'databricks',
     label: 'Databricks SQL',
     category: 'lakehouse',
-    description: 'Databricks SQL warehouse hostname, path, and personal access token.',
+    description: 'Databricks SQL warehouse hostname, path, and access token.',
     fields: [
       { key: 'host', label: 'Server hostname', type: 'text', required: true },
       { key: 'database', label: 'Catalog / database', type: 'text' },
       { key: 'schema', label: 'Schema', type: 'text' },
       { key: 'warehouse', label: 'HTTP path / warehouse', type: 'text', required: true },
-      { key: 'password', label: 'Access token', type: 'password', required: true },
+      { key: 'authMethod', label: 'Authentication', type: 'select', options: [{ value: 'token', label: 'Access token' }] },
+      { key: 'token', label: 'Access token', type: 'password', required: true },
     ],
   },
   {
     driver: 'athena',
     label: 'Amazon Athena',
     category: 'lakehouse',
-    description: 'Athena workgroup-backed query execution via AWS.',
+    description: 'Athena workgroup-backed query execution via AWS credentials.',
     fields: [
       { key: 'host', label: 'Region', type: 'text', placeholder: 'us-east-1', required: true },
       { key: 'database', label: 'Database', type: 'text', required: true },
-      { key: 'schema', label: 'S3 output location', type: 'text', placeholder: 's3://bucket/query-results/', required: true },
-      { key: 'warehouse', label: 'Workgroup', type: 'text' },
+      { key: 'outputLocation', label: 'S3 output location', type: 'text', placeholder: 's3://bucket/query-results/', required: true },
+      { key: 'workgroup', label: 'Workgroup', type: 'text' },
+      {
+        key: 'authMethod',
+        label: 'Authentication',
+        type: 'select',
+        options: [
+          { value: 'aws_default', label: 'AWS default provider chain' },
+          { value: 'aws_profile', label: 'AWS profile' },
+          { value: 'aws_access_key', label: 'Access key / session token' },
+        ],
+      },
+      { key: 'profile', label: 'AWS profile', type: 'text', placeholder: 'prod-analytics' },
+      { key: 'accessKeyId', label: 'Access key ID', type: 'password' },
+      { key: 'secretAccessKey', label: 'Secret access key', type: 'password' },
+      { key: 'sessionToken', label: 'Session token', type: 'password' },
     ],
   },
   {

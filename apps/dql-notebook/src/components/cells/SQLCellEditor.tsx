@@ -57,6 +57,7 @@ interface SQLCellEditorProps {
   // Block Studio passes false so long queries aren't char-wrapped when the
   // pane is narrow.
   wrap?: boolean;
+  fillHeight?: boolean;
 }
 
 /**
@@ -254,6 +255,7 @@ export function SQLCellEditor({
   errorMessage,
   editorRef,
   wrap = true,
+  fillHeight = false,
 }: SQLCellEditorProps) {
   const t = themes[themeMode];
   const containerRef = useRef<HTMLDivElement>(null);
@@ -332,12 +334,13 @@ export function SQLCellEditor({
         color: 'var(--color-text-primary)',
         fontFamily: 'var(--font-mono)',
         fontSize: '13px',
-        minHeight: '80px',
-        maxHeight: '480px',
+        minHeight: fillHeight ? '100%' : '80px',
+        maxHeight: fillHeight ? 'none' : '480px',
+        ...(fillHeight ? { height: '100%' } : {}),
       },
-      '.cm-scroller': { overflow: 'auto', fontFamily: 'inherit' },
-      '.cm-content': { padding: '10px 0', minHeight: '80px', color: 'var(--color-text-primary)' },
-      '.cm-focused': { outline: 'none' },
+      '.cm-scroller': { overflow: 'auto', fontFamily: 'inherit', ...(fillHeight ? { height: '100%' } : {}) },
+      '.cm-content': { padding: '10px 0', minHeight: fillHeight ? '100%' : '80px', color: 'var(--color-text-primary)' },
+      '&.cm-focused': { outline: 'none' },
       '.cm-editor': { border: 'none' },
       '.cm-gutters': { minWidth: 40 },
       '.cm-foldGutter': { cursor: 'pointer' },
@@ -480,13 +483,15 @@ export function SQLCellEditor({
       }}
       style={{
         background: 'var(--color-bg-surface)',
-        minHeight: 80,
+        height: fillHeight ? '100%' : undefined,
+        minHeight: fillHeight ? 0 : 80,
         border: dragActive ? `1px solid ${t.accent}` : '1px solid transparent',
-        borderRadius: 6,
+        borderRadius: fillHeight ? 0 : 6,
         transition: 'border-color 0.15s',
+        overflow: 'hidden',
       }}
     >
-      <div ref={containerRef} style={{ minHeight: 80 }} />
+      <div ref={containerRef} style={{ height: fillHeight ? '100%' : undefined, minHeight: fillHeight ? 0 : 80 }} />
     </div>
   );
 }

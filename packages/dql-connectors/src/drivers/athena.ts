@@ -12,7 +12,20 @@ export class AthenaConnector implements DatabaseConnector {
   async connect(config: ConnectionConfig): Promise<void> {
     const moduleName = '@aws-sdk/client-athena';
     this.athenaModule = await import(moduleName as string);
-    this.client = new this.athenaModule.AthenaClient({ region: config.region ?? config.host ?? 'us-east-1' });
+    const clientConfig: Record<string, unknown> = { region: config.region ?? config.host ?? 'us-east-1' };
+
+    if (config.accessKeyId && config.secretAccessKey) {
+      clientConfig.credentials = {
+        accessKeyId: config.accessKeyId,
+        secretAccessKey: config.secretAccessKey,
+        sessionToken: config.sessionToken,
+      };
+    } else if (config.profile) {
+      const { fromIni } = await import('@aws-sdk/credential-provider-ini');
+      clientConfig.credentials = fromIni({ profile: config.profile });
+    }
+
+    this.client = new this.athenaModule.AthenaClient(clientConfig);
     this.database = config.database;
     this.outputLocation = config.outputLocation ?? config.schema;
     this.workgroup = config.workgroup ?? config.warehouse;

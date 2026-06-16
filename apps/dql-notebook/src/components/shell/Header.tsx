@@ -63,6 +63,7 @@ export function Header() {
   const VIEW_TITLES: Partial<Record<typeof state.mainView, string>> = {
     home: 'Home',
     business_artifact: state.activeFile?.name.replace(/\.(dqlnb|dql)$/i, '') ?? 'Business Definition',
+    lineage: 'Lineage',
     lineage_detail: 'Lineage',
     connection: 'Connections',
     reference: 'Quick Reference',

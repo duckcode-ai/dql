@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
-import { PanelFrame, PanelEmpty } from '@duckcodeailabs/dql-ui';
+import { PanelEmpty } from '@duckcodeailabs/dql-ui';
+import { Briefcase, Database, Monitor, type LucideIcon } from 'lucide-react';
 import type { Theme } from '../../themes/notebook-theme';
 import { api } from '../../api/client';
 import { useNotebook } from '../../store/NotebookStore';
@@ -129,11 +130,13 @@ function secondaryForNode(node: LineageNode): string | undefined {
 }
 
 function SummaryCard({
+  Icon,
   label,
   value,
   detail,
   t,
 }: {
+  Icon: LucideIcon;
   label: string;
   value: number;
   detail: string;
@@ -143,21 +146,32 @@ function SummaryCard({
     <div
       style={{
         display: 'flex',
-        alignItems: 'baseline',
-        gap: 7,
+        alignItems: 'center',
+        gap: 8,
         border: `1px solid ${t.headerBorder}`,
         borderRadius: 6,
-        padding: '6px 8px',
+        padding: '7px 9px',
         background: t.inputBg,
         minWidth: 0,
       }}
       title={detail}
     >
-      <div style={{ color: t.textMuted, fontSize: 10, fontWeight: 800, textTransform: 'uppercase', flexShrink: 0 }}>{label}</div>
-      <div style={{ color: t.textPrimary, fontSize: 16, fontWeight: 800, lineHeight: 1 }}>{value}</div>
-      <div style={{ color: t.textMuted, fontSize: 10, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', minWidth: 0 }}>
-        {detail}
+      <Icon size={14} strokeWidth={1.8} color={t.accent} style={{ flexShrink: 0 }} />
+      <div
+        style={{
+          color: t.textMuted,
+          fontSize: 10,
+          fontWeight: 800,
+          textTransform: 'uppercase',
+          overflow: 'hidden',
+          textOverflow: 'ellipsis',
+          whiteSpace: 'nowrap',
+          minWidth: 0,
+        }}
+      >
+        {label}
       </div>
+      <div style={{ marginLeft: 'auto', color: t.textPrimary, fontSize: 15, fontWeight: 800, lineHeight: 1, flexShrink: 0 }}>{value}</div>
     </div>
   );
 }
@@ -236,9 +250,11 @@ function Section({
   );
 }
 
-export function LineagePanel() {
+export function LineagePanel({ variant = 'sidebar' }: { variant?: 'sidebar' | 'page' }) {
   const { state, dispatch } = useNotebook();
   const t = themes[state.themeMode];
+  const page = variant === 'page';
+  const [compactLayout, setCompactLayout] = useState(() => typeof window !== 'undefined' ? window.innerWidth < 700 : false);
 
   const [loading, setLoading] = useState(true);
   const [allNodes, setAllNodes] = useState<LineageNode[]>([]);
@@ -257,6 +273,14 @@ export function LineagePanel() {
   useEffect(() => {
     loadLineage();
   }, [loadLineage]);
+
+  useEffect(() => {
+    if (!page) return;
+    const update = () => setCompactLayout(window.innerWidth < 700);
+    update();
+    window.addEventListener('resize', update);
+    return () => window.removeEventListener('resize', update);
+  }, [page]);
 
   useEffect(() => {
     let cancelled = false;
@@ -318,17 +342,28 @@ export function LineagePanel() {
 
   if (allNodes.length === 0) {
     return (
-      <PanelFrame title="Lineage" bodyPadding={0}>
+      <div style={{ height: '100%', background: page ? t.sidebarBg : 'transparent', border: page ? `1px solid ${t.headerBorder}` : 'none', borderRadius: page ? 8 : 0 }}>
         <PanelEmpty
           title="No lineage data"
           description="Run `dql compile` or add notebooks/blocks first."
         />
-      </PanelFrame>
+      </div>
     );
   }
 
   return (
-    <PanelFrame title="Lineage" bodyPadding={0}>
+    <div
+      style={{
+        height: '100%',
+        minHeight: 0,
+        display: 'flex',
+        flexDirection: 'column',
+        background: page ? t.sidebarBg : 'transparent',
+        border: page ? `1px solid ${t.headerBorder}` : 'none',
+        borderRadius: page ? 8 : 0,
+        overflow: 'hidden',
+      }}
+    >
       <div style={{ padding: '10px 12px 8px', borderBottom: `1px solid ${t.headerBorder}` }}>
         <SearchInput
           value={search}
@@ -336,9 +371,6 @@ export function LineagePanel() {
           placeholder="Search lineage..."
           t={t}
         />
-        <div style={{ marginTop: 7, color: t.textMuted, fontSize: 11, lineHeight: 1.4 }}>
-          Select an item to open only its focused lineage path.
-        </div>
       </div>
 
       <div style={{ flex: 1, overflow: 'auto' }}>
@@ -363,27 +395,30 @@ export function LineagePanel() {
           style={{
             padding: '8px 12px',
             display: 'grid',
-            gridTemplateColumns: 'repeat(auto-fit, minmax(170px, 1fr))',
+            gridTemplateColumns: page && !compactLayout ? 'repeat(3, minmax(0, 1fr))' : '1fr',
             gap: 6,
             borderBottom: `1px solid ${t.headerBorder}`,
           }}
         >
           <SummaryCard
+            Icon={Briefcase}
             label="Business"
             value={summary.businessNodes}
-            detail={`${grouped.terms.length} terms · ${grouped.businessViews.length} views · ${summary.businessEdges} business edges`}
+            detail={`${grouped.terms.length} terms · ${grouped.businessViews.length} views · ${summary.businessEdges} edges`}
             t={t}
           />
           <SummaryCard
+            Icon={Database}
             label="Technical"
             value={summary.technicalNodes}
             detail={`${grouped.tables.length} tables · ${grouped.dbtModels.length + grouped.dbtSources.length} dbt · ${grouped.blocks.length} blocks`}
             t={t}
           />
           <SummaryCard
+            Icon={Monitor}
             label="Consumption"
             value={summary.consumptionNodes}
-            detail={`${grouped.dashboards.length} dashboards · ${grouped.notebooks.length} notebooks · ${grouped.apps.length} Apps`}
+            detail={`${grouped.dashboards.length} dashboards · ${grouped.notebooks.length} notebooks · ${grouped.apps.length} apps`}
             t={t}
           />
         </div>
@@ -453,6 +488,6 @@ export function LineagePanel() {
           </>
         )}
       </div>
-    </PanelFrame>
+    </div>
   );
 }

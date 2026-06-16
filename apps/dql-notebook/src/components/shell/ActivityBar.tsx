@@ -188,16 +188,10 @@ export function ActivityBar() {
     active: boolean;
   }> = [
     {
-      key: 'schema',
-      title: 'Schema',
-      icon: <Database size={16} strokeWidth={1.75} />,
-      active: state.sidebarPanel === 'schema' && state.sidebarOpen,
-    },
-    {
       key: 'lineage',
       title: 'Lineage',
       icon: <LineageNodeIcon size={16} />,
-      active: state.mainView === 'lineage_detail' || (state.sidebarPanel === 'lineage' && state.sidebarOpen),
+      active: state.mainView === 'lineage' || state.mainView === 'lineage_detail',
     },
     {
       key: 'git',

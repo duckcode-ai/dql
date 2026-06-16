@@ -184,10 +184,12 @@ function notebookReducer(state: NotebookState, action: NotebookAction): Notebook
       if (action.panel === 'lineage') {
         return {
           ...state,
-          sidebarPanel: action.panel,
+          sidebarPanel: 'lineage',
           sidebarOpen: true,
           lineageFullscreen: false,
-          mainView: state.mainView === 'lineage_detail' && state.lineageFocusNodeId ? 'lineage_detail' : state.mainView,
+          lineageFocusNodeId: state.mainView === 'lineage_detail' ? state.lineageFocusNodeId : null,
+          lineageReturnTarget: null,
+          mainView: 'lineage',
         };
       }
       const fullPagePanels = ['connection', 'reference', 'git', 'apps', 'settings'] as const;

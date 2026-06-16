@@ -1,5 +1,6 @@
 import type { DatabaseConnector, ConnectionConfig, TableInfo, ColumnInfo } from '../connector.js';
 import type { QueryResult, ColumnMeta, ColumnType, Row } from '../result-types.js';
+import { readFile } from 'node:fs/promises';
 
 export class SnowflakeConnector implements DatabaseConnector {
   readonly driverName = 'snowflake';
@@ -26,13 +27,28 @@ export class SnowflakeConnector implements DatabaseConnector {
     if (config.schema) connectionConfig.schema = config.schema;
     if (config.role) connectionConfig.role = config.role;
 
-    // Auth: private key (key-pair) or password
-    if (config.privateKey) {
+    const privateKey = config.privateKeyPath
+      ? await readFile(config.privateKeyPath, 'utf-8')
+      : config.privateKey;
+
+    // Auth: key-pair, OAuth, external browser SSO, or password.
+    if (privateKey || config.authMethod === 'key_pair') {
+      if (!privateKey) {
+        throw new Error('Snowflake key-pair authentication requires privateKey or privateKeyPath.');
+      }
       connectionConfig.authenticator = 'SNOWFLAKE_JWT';
-      connectionConfig.privateKey = config.privateKey;
+      connectionConfig.privateKey = privateKey;
+      if (config.privateKeyPassphrase) {
+        connectionConfig.privateKeyPass = config.privateKeyPassphrase;
+      }
+    } else if (config.authMethod === 'oauth') {
+      connectionConfig.authenticator = config.authenticator ?? 'OAUTH';
+      connectionConfig.token = config.token ?? config.password ?? '';
+    } else if (config.authMethod === 'external_browser') {
+      connectionConfig.authenticator = config.authenticator ?? 'EXTERNALBROWSER';
     } else {
       connectionConfig.password = config.password ?? '';
-      connectionConfig.authenticator = 'SNOWFLAKE';
+      connectionConfig.authenticator = config.authenticator ?? 'SNOWFLAKE';
     }
 
     if (config.host) {

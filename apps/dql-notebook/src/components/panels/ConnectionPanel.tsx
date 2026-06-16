@@ -6,14 +6,43 @@ import { api } from '../../api/client';
 import { PanelFrame } from '@duckcodeailabs/dql-ui';
 import { DriverLogo } from './DriverLogo';
 
+interface ConnectorFieldSchema {
+  key: string;
+  label: string;
+  type: 'text' | 'number' | 'password' | 'checkbox' | 'select' | 'textarea';
+  placeholder?: string;
+  required?: boolean;
+  options?: Array<{ value: string; label: string }>;
+  helpText?: string;
+}
+
+interface ConnectorFormSchema {
+  driver: string;
+  label: string;
+  fields: ConnectorFieldSchema[];
+}
+
 interface ConnectionInfo {
   default: string;
   connections: Record<string, any>;
+  dbtProfiles?: DbtProfileConnectionCandidate[];
+}
+
+interface DbtProfileConnectionCandidate {
+  id: string;
+  profileName: string;
+  targetName: string;
+  adapter: string;
+  path: string;
+  connection: Record<string, unknown>;
+  missingFields: string[];
+  warnings: string[];
 }
 
 const DRIVER_LABELS: Record<string, string> = {
   duckdb: 'DuckDB',
   file: 'Local File / DuckDB',
+  postgresql: 'PostgreSQL',
   postgres: 'PostgreSQL',
   bigquery: 'BigQuery',
   snowflake: 'Snowflake',
@@ -31,6 +60,7 @@ const DRIVER_LABELS: Record<string, string> = {
 const DRIVER_COLORS: Record<string, string> = {
   duckdb: '#f4bc00',
   file: '#f4bc00',
+  postgresql: '#336791',
   postgres: '#336791',
   bigquery: '#4285f4',
   snowflake: '#29b5e8',
@@ -52,6 +82,7 @@ const DRIVER_COLORS: Record<string, string> = {
 const DRIVER_TAGLINES: Record<string, string> = {
   duckdb: 'In-process analytical database',
   file: 'Local CSV / Parquet via DuckDB',
+  postgresql: 'Open-source relational warehouse',
   postgres: 'Open-source relational warehouse',
   bigquery: 'Google Cloud serverless warehouse',
   snowflake: 'Cloud data platform',
@@ -66,21 +97,178 @@ const DRIVER_TAGLINES: Record<string, string> = {
   fabric: 'Microsoft unified analytics',
 };
 
-const DRIVER_FIELDS: Record<string, string[]> = {
-  duckdb: ['filepath'],
-  postgres: ['host', 'port', 'database', 'user', 'password'],
-  mysql: ['host', 'port', 'database', 'user', 'password'],
-  bigquery: ['project', 'dataset', 'keyFilename'],
-  snowflake: ['account', 'warehouse', 'database', 'schema', 'username', 'password'],
-  mssql: ['server', 'port', 'database', 'user', 'password'],
-  redshift: ['host', 'port', 'database', 'user', 'password'],
-  sqlite: ['filepath'],
-  databricks: ['host', 'path', 'token'],
-  clickhouse: ['host', 'port', 'database', 'user', 'password'],
-  athena: ['region', 'database', 'outputLocation'],
-  trino: ['host', 'port', 'catalog', 'schema', 'user'],
-  fabric: ['server', 'database', 'authentication'],
-};
+const CONNECTOR_SCHEMAS: ConnectorFormSchema[] = [
+  {
+    driver: 'file',
+    label: 'Files / DuckDB memory',
+    fields: [
+      { key: 'filepath', label: 'DuckDB file path', type: 'text', placeholder: ':memory:' },
+    ],
+  },
+  {
+    driver: 'duckdb',
+    label: 'DuckDB',
+    fields: [
+      { key: 'filepath', label: 'DuckDB file path', type: 'text', placeholder: './local/dev.duckdb', required: true },
+    ],
+  },
+  {
+    driver: 'sqlite',
+    label: 'SQLite',
+    fields: [
+      { key: 'filepath', label: 'SQLite file path', type: 'text', placeholder: './local/dev.sqlite', required: true },
+    ],
+  },
+  {
+    driver: 'postgresql',
+    label: 'PostgreSQL',
+    fields: warehouseFields(5432),
+  },
+  {
+    driver: 'mysql',
+    label: 'MySQL',
+    fields: warehouseFields(3306),
+  },
+  {
+    driver: 'mssql',
+    label: 'SQL Server',
+    fields: warehouseFields(1433),
+  },
+  {
+    driver: 'fabric',
+    label: 'Microsoft Fabric',
+    fields: warehouseFields(1433),
+  },
+  {
+    driver: 'redshift',
+    label: 'Amazon Redshift',
+    fields: warehouseFields(5439),
+  },
+  {
+    driver: 'snowflake',
+    label: 'Snowflake',
+    fields: [
+      { key: 'account', label: 'Account', type: 'text', required: true },
+      { key: 'warehouse', label: 'Warehouse', type: 'text', required: true },
+      { key: 'database', label: 'Database', type: 'text', required: true },
+      { key: 'schema', label: 'Schema', type: 'text', required: true },
+      { key: 'username', label: 'Username', type: 'text', required: true },
+      {
+        key: 'authMethod',
+        label: 'Authentication',
+        type: 'select',
+        options: [
+          { value: 'password', label: 'Password' },
+          { value: 'key_pair', label: 'Key pair / private key' },
+          { value: 'external_browser', label: 'SSO / external browser' },
+          { value: 'oauth', label: 'OAuth token' },
+        ],
+      },
+      { key: 'password', label: 'Password / OAuth token', type: 'password' },
+      { key: 'privateKeyPath', label: 'Private key file path', type: 'text', placeholder: '~/.ssh/snowflake_key.p8' },
+      { key: 'privateKey', label: 'Private key PEM', type: 'textarea', helpText: 'Paste PEM only when a key file cannot be referenced.' },
+      { key: 'privateKeyPassphrase', label: 'Private key passphrase', type: 'password' },
+      { key: 'authenticator', label: 'Authenticator override', type: 'text', placeholder: 'EXTERNALBROWSER or OAUTH' },
+      { key: 'role', label: 'Role', type: 'text' },
+    ],
+  },
+  {
+    driver: 'bigquery',
+    label: 'BigQuery',
+    fields: [
+      { key: 'projectId', label: 'Project ID', type: 'text', required: true },
+      { key: 'location', label: 'Location', type: 'text', placeholder: 'US' },
+      {
+        key: 'authMethod',
+        label: 'Authentication',
+        type: 'select',
+        options: [
+          { value: 'application_default', label: 'Application default credentials' },
+          { value: 'service_account_key_file', label: 'Service account key file' },
+          { value: 'service_account_json', label: 'Service account JSON' },
+        ],
+      },
+      { key: 'keyFilename', label: 'Key file path', type: 'text', placeholder: '/secure/path/service-account.json' },
+      { key: 'serviceAccountJson', label: 'Service account JSON', type: 'textarea' },
+    ],
+  },
+  {
+    driver: 'clickhouse',
+    label: 'ClickHouse',
+    fields: [
+      { key: 'host', label: 'Host', type: 'text', required: true },
+      { key: 'port', label: 'Port', type: 'number', placeholder: '8443' },
+      { key: 'database', label: 'Database', type: 'text' },
+      { key: 'username', label: 'Username', type: 'text' },
+      { key: 'password', label: 'Password', type: 'password' },
+      { key: 'ssl', label: 'Use TLS', type: 'checkbox' },
+    ],
+  },
+  {
+    driver: 'databricks',
+    label: 'Databricks SQL',
+    fields: [
+      { key: 'host', label: 'Server hostname', type: 'text', required: true },
+      { key: 'database', label: 'Catalog / database', type: 'text' },
+      { key: 'schema', label: 'Schema', type: 'text' },
+      { key: 'warehouse', label: 'HTTP path / warehouse', type: 'text', required: true },
+      { key: 'authMethod', label: 'Authentication', type: 'select', options: [{ value: 'token', label: 'Access token' }] },
+      { key: 'token', label: 'Access token', type: 'password', required: true },
+    ],
+  },
+  {
+    driver: 'athena',
+    label: 'Amazon Athena',
+    fields: [
+      { key: 'host', label: 'Region', type: 'text', placeholder: 'us-east-1', required: true },
+      { key: 'database', label: 'Database', type: 'text', required: true },
+      { key: 'outputLocation', label: 'S3 output location', type: 'text', placeholder: 's3://bucket/query-results/', required: true },
+      { key: 'workgroup', label: 'Workgroup', type: 'text' },
+      {
+        key: 'authMethod',
+        label: 'Authentication',
+        type: 'select',
+        options: [
+          { value: 'aws_default', label: 'AWS default provider chain' },
+          { value: 'aws_profile', label: 'AWS profile' },
+          { value: 'aws_access_key', label: 'Access key / session token' },
+        ],
+      },
+      { key: 'profile', label: 'AWS profile', type: 'text', placeholder: 'prod-analytics' },
+      { key: 'accessKeyId', label: 'Access key ID', type: 'password' },
+      { key: 'secretAccessKey', label: 'Secret access key', type: 'password' },
+      { key: 'sessionToken', label: 'Session token', type: 'password' },
+    ],
+  },
+  {
+    driver: 'trino',
+    label: 'Trino',
+    fields: [
+      { key: 'host', label: 'Host', type: 'text', required: true },
+      { key: 'port', label: 'Port', type: 'number', placeholder: '8080' },
+      { key: 'database', label: 'Catalog', type: 'text', required: true },
+      { key: 'schema', label: 'Schema', type: 'text', required: true },
+      { key: 'username', label: 'Username', type: 'text' },
+      { key: 'password', label: 'Password', type: 'password' },
+      { key: 'ssl', label: 'Use TLS', type: 'checkbox' },
+    ],
+  },
+];
+const CONNECTOR_SCHEMA_BY_DRIVER = Object.fromEntries(
+  CONNECTOR_SCHEMAS.map((schema) => [schema.driver, schema]),
+) as Record<string, ConnectorFormSchema>;
+
+function warehouseFields(defaultPort: number): ConnectorFieldSchema[] {
+  return [
+    { key: 'host', label: 'Host', type: 'text', required: true },
+    { key: 'port', label: 'Port', type: 'number', placeholder: String(defaultPort) },
+    { key: 'database', label: 'Database', type: 'text', required: true },
+    { key: 'username', label: 'Username', type: 'text' },
+    { key: 'password', label: 'Password', type: 'password' },
+    { key: 'ssl', label: 'Use TLS', type: 'checkbox' },
+    { key: 'connectionString', label: 'Connection string', type: 'text' },
+  ];
+}
 
 const QUICK_CONNECT_PRESETS = [
   {
@@ -93,7 +281,7 @@ const QUICK_CONNECT_PRESETS = [
     name: 'postgres',
     label: 'PostgreSQL',
     description: 'Connect to a local PostgreSQL instance',
-    config: { driver: 'postgres', host: 'localhost', port: 5432, database: 'postgres', user: 'postgres', password: '' },
+    config: { driver: 'postgresql', host: 'localhost', port: 5432, database: 'postgres', username: 'postgres', password: '' },
   },
   {
     name: 'snowflake',
@@ -103,9 +291,61 @@ const QUICK_CONNECT_PRESETS = [
   },
 ];
 
-export function ConnectionPanel() {
+function normalizeDriverName(driver: string): string {
+  return driver === 'postgres' ? 'postgresql' : driver;
+}
+
+function normalizeFieldName(field: string): string {
+  const aliases: Record<string, string> = {
+    dbname: 'database',
+    dataset: 'schema',
+    http_path: 'httpPath',
+    keyFile: 'keyFilename',
+    keyFileName: 'keyFilename',
+    private_key_path: 'privateKeyPath',
+    private_key_passphrase: 'privateKeyPassphrase',
+    path: 'filepath',
+    project: 'projectId',
+    server: 'host',
+    server_hostname: 'host',
+    user: 'username',
+  };
+  return aliases[field] ?? field;
+}
+
+function connectionNameFromProfile(profile: DbtProfileConnectionCandidate): string {
+  const name = `${profile.profileName}_${profile.targetName}`
+    .toLowerCase()
+    .replace(/[^a-z0-9_-]+/g, '_')
+    .replace(/^_+|_+$/g, '');
+  return name || 'dbt_profile';
+}
+
+function shortPath(path: string): string {
+  const marker = '/.dbt/';
+  const markerIndex = path.indexOf(marker);
+  if (markerIndex >= 0) return `~${path.slice(markerIndex)}`;
+  const parts = path.split('/');
+  return parts.slice(-3).join('/');
+}
+
+function isSensitiveField(field: string): boolean {
+  const key = field.toLowerCase();
+  return (
+    key.includes('password') ||
+    key.includes('token') ||
+    key.includes('passphrase') ||
+    key.includes('privatekey') ||
+    key.includes('serviceaccountjson') ||
+    key.includes('secretaccesskey') ||
+    key.includes('clientsecret')
+  );
+}
+
+export function ConnectionPanel({ variant = 'panel' }: { variant?: 'panel' | 'page' } = {}) {
   const { state } = useNotebook();
   const t = themes[state.themeMode];
+  const isPage = variant === 'page';
 
   const [info, setInfo] = useState<ConnectionInfo | null>(null);
   const [testing, setTesting] = useState(false);
@@ -142,10 +382,10 @@ export function ConnectionPanel() {
     setEditing(key);
     setAddingNew(false);
     setEditName(key);
-    setEditDriver(cfg?.driver ?? 'duckdb');
+    setEditDriver(normalizeDriverName(cfg?.driver ?? cfg?.type ?? 'duckdb'));
     const fields: Record<string, string> = {};
     Object.entries(cfg ?? {}).forEach(([k, v]) => {
-      if (k !== 'driver' && k !== 'type') fields[k] = String(v ?? '');
+      if (k !== 'driver' && k !== 'type') fields[normalizeFieldName(k)] = String(v ?? '');
     });
     setEditFields(fields);
   };
@@ -156,6 +396,21 @@ export function ConnectionPanel() {
     setEditName('');
     setEditDriver('duckdb');
     setEditFields({});
+  };
+
+  const startAddFromDbtProfile = (profile: DbtProfileConnectionCandidate) => {
+    setAddingNew(true);
+    setEditing(null);
+    setEditName(connectionNameFromProfile(profile));
+    setEditDriver(normalizeDriverName(String(profile.connection.driver ?? profile.adapter ?? 'duckdb')));
+    const fields: Record<string, string> = {};
+    Object.entries(profile.connection ?? {}).forEach(([key, value]) => {
+      if (key !== 'driver' && value !== undefined && value !== null) {
+        fields[normalizeFieldName(key)] = String(value);
+      }
+    });
+    setEditFields(fields);
+    setTestResult(null);
   };
 
   const cancelEdit = () => {
@@ -170,11 +425,18 @@ export function ConnectionPanel() {
 
     const name = editName.trim() || (editing ?? 'default');
     const newConn: Record<string, unknown> = { driver: editDriver };
+    const schema = CONNECTOR_SCHEMA_BY_DRIVER[editDriver];
+    const fieldSchemas = new Map((schema?.fields ?? []).map((field) => [field.key, field]));
     Object.entries(editFields).forEach(([k, v]) => {
-      if (v.trim()) {
-        // Try to parse numbers for port
-        if (k === 'port' && !isNaN(Number(v))) newConn[k] = Number(v);
-        else newConn[k] = v;
+      const fieldSchema = fieldSchemas.get(k as ConnectorFieldSchema['key']);
+      if (fieldSchema?.type === 'checkbox') {
+        if (v !== '') newConn[k] = v === 'true';
+        return;
+      }
+      const trimmed = v.trim();
+      if (trimmed) {
+        if (fieldSchema?.type === 'number' && !isNaN(Number(trimmed))) newConn[k] = Number(trimmed);
+        else newConn[k] = trimmed;
       }
     });
 
@@ -241,11 +503,11 @@ export function ConnectionPanel() {
 
   const connections = info?.connections ?? {};
   const defaultKey = info?.default ?? '';
+  const dbtProfileCandidates = info?.dbtProfiles ?? [];
+  const connectionCount = Object.keys(connections).length;
 
-  return (
-    <PanelFrame title="Connections" bodyPadding={12}>
-
-      {/* Connection list */}
+  const connectionListSection = (
+    <>
       <div style={sectionLabel}>Connections</div>
       {info === null ? (
         <div style={{ fontSize: 12, color: t.textMuted, fontFamily: t.font }}>Loading…</div>
@@ -322,7 +584,7 @@ export function ConnectionPanel() {
                     <div key={k} style={{ display: 'flex', gap: 6, alignItems: 'baseline' }}>
                       <span style={{ fontSize: 11, color: t.textMuted, fontFamily: t.fontMono, minWidth: 70, flexShrink: 0 }}>{k}</span>
                       <span style={{ fontSize: 11, color: t.textSecondary, fontFamily: t.fontMono, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' as const }}>
-                        {k.toLowerCase().includes('password') || k.toLowerCase().includes('token') ? '••••••••' : String(v)}
+                        {isSensitiveField(k) ? '••••••••' : String(v)}
                       </span>
                     </div>
                   ))}
@@ -331,8 +593,89 @@ export function ConnectionPanel() {
           );
         })
       )}
+      {info !== null && connectionCount === 0 && (
+        <div
+          style={{
+            ...card,
+            color: t.textMuted,
+            fontSize: 12,
+            fontFamily: t.font,
+            lineHeight: 1.45,
+          }}
+        >
+          No saved connections yet. Import a dbt profile target or add one manually.
+        </div>
+      )}
+    </>
+  );
 
-      {/* Quick Connect presets */}
+  const dbtProfilesSection = (
+    <>
+      {!addingNew && !editing && dbtProfileCandidates.length > 0 && (
+        <>
+          <div style={{ ...sectionLabel, marginTop: 8 }}>dbt profiles.yml</div>
+          <div style={{ display: 'grid', gap: 8, marginBottom: 12 }}>
+            {dbtProfileCandidates.map((profile) => {
+              const driver = normalizeDriverName(String(profile.connection.driver ?? profile.adapter));
+              const color = DRIVER_COLORS[driver] ?? t.accent;
+              const ready = profile.missingFields.length === 0;
+              return (
+                <div
+                  key={profile.id}
+                  style={{
+                    ...card,
+                    marginBottom: 0,
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: 10,
+                  }}
+                >
+                  <DriverLogo driver={driver} size={18} fallbackColor={color} />
+                  <div style={{ minWidth: 0, flex: 1 }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 6, minWidth: 0 }}>
+                      <span style={{ fontSize: 12, fontWeight: 600, color: t.textPrimary, fontFamily: t.font }}>
+                        {profile.profileName}
+                      </span>
+                      <span style={{ fontSize: 11, color: t.textMuted, fontFamily: t.fontMono }}>
+                        {profile.targetName}
+                      </span>
+                    </div>
+                    <div style={{ fontSize: 10, color: t.textMuted, fontFamily: t.font, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                      {DRIVER_LABELS[driver] ?? profile.adapter} from {shortPath(profile.path)}
+                    </div>
+                    <div style={{ fontSize: 10, color: ready ? t.success : t.warning, fontFamily: t.font, marginTop: 2 }}>
+                      {ready
+                        ? 'Ready to test after import'
+                        : `Needs ${profile.missingFields.join(', ')}`}
+                    </div>
+                  </div>
+                  <button
+                    onClick={() => startAddFromDbtProfile(profile)}
+                    style={{
+                      background: t.btnBg,
+                      border: `1px solid ${t.btnBorder}`,
+                      borderRadius: 4,
+                      cursor: 'pointer',
+                      color: t.textSecondary,
+                      fontSize: 11,
+                      fontFamily: t.font,
+                      padding: '4px 8px',
+                      flexShrink: 0,
+                    }}
+                  >
+                    Import
+                  </button>
+                </div>
+              );
+            })}
+          </div>
+        </>
+      )}
+    </>
+  );
+
+  const quickConnectSection = (
+    <>
       {!addingNew && !editing && Object.keys(connections).length === 0 && (
         <>
           <div style={{ ...sectionLabel, marginTop: 8 }}>Quick Connect</div>
@@ -378,8 +721,11 @@ export function ConnectionPanel() {
           </div>
         </>
       )}
+    </>
+  );
 
-      {/* Add new connection form */}
+  const addConnectionSection = (
+    <>
       {addingNew ? (
         <ConnectionForm t={t} editName={editName} setEditName={setEditName}
           editDriver={editDriver} setEditDriver={setEditDriver} editFields={editFields}
@@ -400,7 +746,11 @@ export function ConnectionPanel() {
           Add Connection
         </button>
       )}
+    </>
+  );
 
+  const saveMessageSection = (
+    <>
       {saveMsg && (
         <div style={{
           fontSize: 11, fontFamily: t.font, padding: '4px 10px', borderRadius: 4, marginBottom: 8,
@@ -410,8 +760,11 @@ export function ConnectionPanel() {
           {saveMsg}
         </div>
       )}
+    </>
+  );
 
-      {/* Test connection */}
+  const testConnectionSection = (
+    <>
       <button
         onClick={handleTest}
         disabled={testing}
@@ -439,17 +792,22 @@ export function ConnectionPanel() {
           {testResult.ok ? '✓ ' : '✗ '}{testResult.message}
         </div>
       )}
+    </>
+  );
 
+  const catalogSection = (
+    <>
       <div style={{ ...sectionLabel, marginTop: 4 }}>Catalog</div>
       <div
+        className={isPage ? 'dql-connection-catalog-grid' : undefined}
         style={{
           display: 'grid',
-          gridTemplateColumns: 'repeat(auto-fill, minmax(160px, 1fr))',
+          gridTemplateColumns: isPage ? 'repeat(auto-fit, minmax(180px, 1fr))' : 'repeat(auto-fill, minmax(160px, 1fr))',
           gap: 8,
           marginBottom: 12,
         }}
       >
-        {Object.entries(DRIVER_LABELS).map(([driver, label]) => {
+          {CONNECTOR_SCHEMAS.map(({ driver, label }) => {
           const color = DRIVER_COLORS[driver] ?? t.accent;
           const tagline = DRIVER_TAGLINES[driver] ?? '';
           return (
@@ -491,9 +849,67 @@ export function ConnectionPanel() {
           );
         })}
       </div>
+    </>
+  );
+
+  if (isPage) {
+    const panelSurface = {
+      background: t.cellBg,
+      border: `1px solid ${t.cellBorder}`,
+      borderRadius: 8,
+      padding: 14,
+      minWidth: 0,
+      boxShadow: '0 1px 2px rgba(0, 0, 0, 0.03)',
+    };
+
+    return (
+      <>
+        <style>{CONNECTION_PAGE_STYLES}</style>
+        <div className="dql-connection-page-grid">
+          <section style={panelSurface}>
+            {connectionListSection}
+            {dbtProfilesSection}
+            {quickConnectSection}
+          </section>
+          <aside style={panelSurface}>
+            <div style={{ ...sectionLabel, marginBottom: 8 }}>Setup</div>
+            {addConnectionSection}
+            {saveMessageSection}
+            {testConnectionSection}
+            {catalogSection}
+          </aside>
+        </div>
+      </>
+    );
+  }
+
+  return (
+    <PanelFrame title="Connections" bodyPadding={12}>
+      {connectionListSection}
+      {dbtProfilesSection}
+      {quickConnectSection}
+      {addConnectionSection}
+      {saveMessageSection}
+      {testConnectionSection}
+      {catalogSection}
     </PanelFrame>
   );
 }
+
+const CONNECTION_PAGE_STYLES = `
+.dql-connection-page-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1.18fr) minmax(320px, 0.82fr);
+  gap: 16px;
+  align-items: start;
+}
+
+@media (max-width: 920px) {
+  .dql-connection-page-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+`;
 
 function ConnectionForm({
   t, editName, setEditName, editDriver, setEditDriver, editFields, setEditFields,
@@ -507,7 +923,8 @@ function ConnectionForm({
   onDelete?: () => void;
   saving: boolean; isNew: boolean;
 }) {
-  const fields = DRIVER_FIELDS[editDriver] ?? [];
+  const schema = CONNECTOR_SCHEMA_BY_DRIVER[editDriver];
+  const fields = schema?.fields ?? [];
 
   const inputStyle = {
     background: t.inputBg,
@@ -554,23 +971,60 @@ function ConnectionForm({
           value={editDriver}
           onChange={(e) => { setEditDriver(e.target.value); setEditFields({}); }}
         >
-          {Object.entries(DRIVER_LABELS).map(([k, v]) => (
-            <option key={k} value={k}>{v}</option>
+          {CONNECTOR_SCHEMAS.map((schema) => (
+            <option key={schema.driver} value={schema.driver}>{schema.label}</option>
           ))}
         </select>
       </div>
 
       {/* Driver-specific fields */}
       {fields.map((field) => (
-        <div key={field} style={{ marginBottom: 6 }}>
-          <div style={labelStyle}>{field}</div>
-          <input
-            style={inputStyle}
-            type={field.toLowerCase().includes('password') || field.toLowerCase().includes('token') ? 'password' : 'text'}
-            value={editFields[field] ?? ''}
-            placeholder={field === 'port' ? '5432' : field === 'filepath' ? ':memory:' : ''}
-            onChange={(e) => setEditFields({ ...editFields, [field]: e.target.value })}
-          />
+        <div key={field.key} style={{ marginBottom: 6 }}>
+          <div style={labelStyle}>
+            {field.label}
+            {field.required ? ' *' : ''}
+          </div>
+          {field.type === 'select' ? (
+            <select
+              style={{ ...inputStyle, fontFamily: t.font }}
+              value={editFields[field.key] ?? ''}
+              onChange={(e) => setEditFields({ ...editFields, [field.key]: e.target.value })}
+            >
+              <option value="">Default</option>
+              {(field.options ?? []).map((option) => (
+                <option key={option.value} value={option.value}>{option.label}</option>
+              ))}
+            </select>
+          ) : field.type === 'checkbox' ? (
+            <label style={{ display: 'flex', alignItems: 'center', gap: 7, fontSize: 11, color: t.textSecondary, fontFamily: t.font }}>
+              <input
+                type="checkbox"
+                checked={editFields[field.key] === 'true'}
+                onChange={(e) => setEditFields({ ...editFields, [field.key]: e.target.checked ? 'true' : 'false' })}
+              />
+              Enabled
+            </label>
+          ) : field.type === 'textarea' ? (
+            <textarea
+              style={{ ...inputStyle, minHeight: 72, resize: 'vertical' as const }}
+              value={editFields[field.key] ?? ''}
+              placeholder={field.placeholder ?? ''}
+              onChange={(e) => setEditFields({ ...editFields, [field.key]: e.target.value })}
+            />
+          ) : (
+            <input
+              style={inputStyle}
+              type={field.type === 'password' ? 'password' : field.type === 'number' ? 'number' : 'text'}
+              value={editFields[field.key] ?? ''}
+              placeholder={field.placeholder ?? ''}
+              onChange={(e) => setEditFields({ ...editFields, [field.key]: e.target.value })}
+            />
+          )}
+          {field.helpText && (
+            <div style={{ fontSize: 10, color: t.textMuted, fontFamily: t.font, marginTop: 3, lineHeight: 1.35 }}>
+              {field.helpText}
+            </div>
+          )}
         </div>
       ))}
 

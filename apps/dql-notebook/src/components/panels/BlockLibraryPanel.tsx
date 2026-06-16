@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { PanelFrame, PanelToolbar, PanelEmpty, StatusPill } from '@duckcodeailabs/dql-ui';
+import { PanelFrame, PanelEmpty, StatusPill } from '@duckcodeailabs/dql-ui';
 import { api } from '../../api/client';
 import { useNotebook } from '../../store/NotebookStore';
 import { themes } from '../../themes/notebook-theme';
@@ -21,8 +21,6 @@ export function BlockLibraryPanel() {
   const [blocks, setBlocks] = useState<BlockEntry[]>([]);
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState('');
-  const [domainFilter, setDomainFilter] = useState('');
-  const [statusFilter, setStatusFilter] = useState('');
   const [showAll, setShowAll] = useState(false);
 
   useEffect(() => {
@@ -32,16 +30,11 @@ export function BlockLibraryPanel() {
       .finally(() => setLoading(false));
   }, []);
 
-  const domains = [...new Set(blocks.map((b) => b.domain))].sort();
-  const statuses = [...new Set(blocks.map((b) => b.status))].sort();
-
   const filtered = blocks.filter((b) => {
     if (search && !b.name.toLowerCase().includes(search.toLowerCase()) && !b.description.toLowerCase().includes(search.toLowerCase())) return false;
-    if (domainFilter && b.domain !== domainFilter) return false;
-    if (statusFilter && b.status !== statusFilter) return false;
     return true;
   });
-  const visibleBlocks = showAll || search || domainFilter || statusFilter ? filtered : filtered.slice(0, 10);
+  const visibleBlocks = showAll || search ? filtered : filtered.slice(0, 10);
 
   const handleOpen = (block: BlockEntry) => {
     const file = {
@@ -66,30 +59,16 @@ export function BlockLibraryPanel() {
   };
 
   const inputStyle: React.CSSProperties = {
+    width: '100%',
     background: t.inputBg,
     border: `1px solid ${t.inputBorder}`,
     borderRadius: 6,
     color: t.textPrimary,
-    fontSize: 11,
+    fontSize: 12,
     fontFamily: t.font,
-    padding: '6px 10px',
+    padding: '7px 10px',
     outline: 'none',
-  };
-  // Custom select with embedded SVG chevron — replaces the native dropdown
-  // arrow which doesn't honor the theme.
-  const chevronSvg = `data:image/svg+xml;utf8,${encodeURIComponent(
-    `<svg xmlns='http://www.w3.org/2000/svg' width='10' height='10' viewBox='0 0 10 10'><path fill='none' stroke='${t.textMuted}' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round' d='M2 4l3 3 3-3'/></svg>`
-  )}`;
-  const selectStyle: React.CSSProperties = {
-    ...inputStyle,
-    appearance: 'none' as const,
-    WebkitAppearance: 'none' as const,
-    MozAppearance: 'none' as const,
-    backgroundImage: `url("${chevronSvg}")`,
-    backgroundRepeat: 'no-repeat',
-    backgroundPosition: 'right 8px center',
-    paddingRight: 24,
-    cursor: 'pointer',
+    boxSizing: 'border-box',
   };
 
   const actions = (
@@ -127,22 +106,12 @@ export function BlockLibraryPanel() {
   );
 
   const toolbar = (
-    <PanelToolbar>
-      <input
-        value={search}
-        onChange={(e) => setSearch(e.target.value)}
-        placeholder="Search blocks..."
-        style={{ ...inputStyle, flex: 1, minWidth: 100 }}
-      />
-      <select value={domainFilter} onChange={(e) => setDomainFilter(e.target.value)} style={selectStyle}>
-        <option value="">All domains</option>
-        {domains.map((d) => <option key={d} value={d}>{d}</option>)}
-      </select>
-      <select value={statusFilter} onChange={(e) => setStatusFilter(e.target.value)} style={selectStyle}>
-        <option value="">All statuses</option>
-        {statuses.map((s) => <option key={s} value={s}>{s}</option>)}
-      </select>
-    </PanelToolbar>
+    <input
+      value={search}
+      onChange={(e) => setSearch(e.target.value)}
+      placeholder="Search blocks..."
+      style={inputStyle}
+    />
   );
 
   return (
@@ -161,7 +130,7 @@ export function BlockLibraryPanel() {
           description={
             blocks.length === 0
               ? 'Create your first block to get started.'
-              : 'No blocks match your filters.'
+              : 'No blocks match your search.'
           }
         />
       ) : (
@@ -214,7 +183,7 @@ export function BlockLibraryPanel() {
               </div>
             </button>
           ))}
-          {!showAll && !search && !domainFilter && !statusFilter && filtered.length > 10 && (
+          {!showAll && !search && filtered.length > 10 && (
             <button
               onClick={() => setShowAll(true)}
               style={{

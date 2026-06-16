@@ -12,7 +12,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   GitBranch, GitCommit, RefreshCw, ArrowUp, ArrowDown,
-  Search, ChevronDown, X, Plus, Check,
+  Search, ChevronDown, X, Plus, Check, ExternalLink,
 } from 'lucide-react';
 import { useNotebook } from '../../store/NotebookStore';
 import { themes, type Theme } from '../../themes/notebook-theme';
@@ -90,6 +90,8 @@ export function GitPage() {
   const [selectedPath, setSelectedPath] = useState<string | null>(null);
   const [selectedStaged, setSelectedStaged] = useState(false);
   const [diff, setDiff] = useState<{ diff: string; before: string | null; after: string | null } | null>(null);
+  const [diffLoading, setDiffLoading] = useState(false);
+  const [diffError, setDiffError] = useState<string | null>(null);
   const [query, setQuery] = useState('');
   const [statusFilter, setStatusFilter] = useState<StatusFilter>('all');
   const [commitMsg, setCommitMsg] = useState('');
@@ -140,14 +142,29 @@ export function GitPage() {
   }, [branchMenuOpen]);
 
   // Re-fetch the diff for the selected file when selection changes or after
-  // any operation refreshes status. Don't clear the diff while loading so
-  // the panel doesn't flicker.
+  // any operation refreshes status. The right pane keeps an explicit loading
+  // state so selecting a row never looks like a blank review.
   useEffect(() => {
-    if (!selectedPath) { setDiff(null); return; }
+    if (!selectedPath) {
+      setDiff(null);
+      setDiffError(null);
+      setDiffLoading(false);
+      return;
+    }
     let cancelled = false;
-    void api.fetchGitDiff(selectedPath, selectedStaged).then((d) => {
-      if (!cancelled) setDiff(d);
-    });
+    setDiffLoading(true);
+    setDiffError(null);
+    setDiff(null);
+    void api.fetchGitDiff(selectedPath, selectedStaged)
+      .then((d) => {
+        if (!cancelled) setDiff(d);
+      })
+      .catch((e) => {
+        if (!cancelled) setDiffError(e instanceof Error ? e.message : String(e));
+      })
+      .finally(() => {
+        if (!cancelled) setDiffLoading(false);
+      });
     return () => { cancelled = true; };
   }, [selectedPath, selectedStaged, status]);
 
@@ -243,6 +260,10 @@ export function GitPage() {
   };
 
   const selectedEntry = entries.find((e) => e.path === selectedPath && e.staged === selectedStaged) ?? null;
+  const prUrl = useMemo(
+    () => githubCompareUrl(remote.url, branchInfo.current),
+    [remote.url, branchInfo.current],
+  );
 
   if (status && !status.inRepo) {
     return <NotARepo t={t} />;
@@ -262,6 +283,7 @@ export function GitPage() {
         onPull={onPull}
         onPush={onPush}
         onRefresh={() => void refreshAll()}
+        prUrl={prUrl}
         onCheckout={onCheckout}
         branchMenuOpen={branchMenuOpen}
         setBranchMenuOpen={setBranchMenuOpen}
@@ -294,7 +316,7 @@ export function GitPage() {
           branchCurrent={branchInfo.current}
         />
         <div style={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', overflow: 'hidden', background: t.appBg }}>
-          {selectedEntry && diff ? (
+          {selectedEntry ? (
             <>
               <FileDiffHeader
                 t={t}
@@ -304,7 +326,13 @@ export function GitPage() {
                 onDiscard={() => onDiscard(selectedEntry.path)}
                 stagedView={selectedStaged}
               />
-              <DiffPane t={t} diff={diff.diff} />
+              <DiffBody
+                t={t}
+                diff={diff?.diff ?? ''}
+                entry={selectedEntry}
+                loading={diffLoading}
+                error={diffError}
+              />
             </>
           ) : (
             <DiffEmpty t={t} hasFiles={entries.length > 0} />
@@ -341,6 +369,7 @@ interface TopBarProps {
   onPull: () => void;
   onPush: () => void;
   onRefresh: () => void;
+  prUrl: string | null;
   onCheckout: (name: string) => void;
   branchMenuOpen: boolean;
   setBranchMenuOpen: (v: boolean) => void;
@@ -496,6 +525,20 @@ function TopBar(p: TopBarProps) {
         Push
         {p.ahead > 0 && <span style={{ fontFamily: t.fontMono, fontSize: 10, opacity: 0.75, marginLeft: 2 }}>{p.ahead}</span>}
       </button>
+      {p.prUrl && (
+        <a
+          href={p.prUrl}
+          target="_blank"
+          rel="noreferrer"
+          style={{
+            ...topBtn(t),
+            textDecoration: 'none',
+          }}
+        >
+          <ExternalLink size={12} strokeWidth={1.75} />
+          Open PR
+        </a>
+      )}
     </div>
   );
 }
@@ -525,6 +568,14 @@ function miniBtn(t: Theme, kind: 'primary' | 'default' = 'default'): React.CSSPr
 
 function prettyRemote(url: string): string {
   return url.replace(/^git@([^:]+):/, '$1/').replace(/^https?:\/\//, '').replace(/\.git$/, '');
+}
+
+function githubCompareUrl(remoteUrl: string | null, branch: string | null): string | null {
+  if (!remoteUrl || !branch || branch === 'main' || branch === 'master' || branch === 'HEAD') return null;
+  const pretty = prettyRemote(remoteUrl);
+  const match = /(?:^|\/)github\.com\/([^/]+\/[^/]+)$/.exec(pretty);
+  if (!match) return null;
+  return `https://github.com/${match[1]}/compare/${encodeURIComponent(branch)}?expand=1`;
 }
 
 // ---------- File Tree ----------
@@ -834,15 +885,40 @@ function FileDiffHeader({ t, entry, stagedView, onStage, onUnstage, onDiscard }:
 
 // ---------- Diff Pane ----------
 
-function DiffPane({ t, diff }: { t: Theme; diff: string }) {
+function DiffBody({
+  t,
+  diff,
+  entry,
+  loading,
+  error,
+}: {
+  t: Theme;
+  diff: string;
+  entry: FileEntry;
+  loading: boolean;
+  error: string | null;
+}) {
+  if (loading) {
+    return <DiffStatus t={t} title="Loading diff" body="Preparing the selected change for review." />;
+  }
+  if (error) {
+    return <DiffStatus t={t} title="Could not load diff" body={error} tone="error" />;
+  }
+  return <DiffPane t={t} diff={diff} entry={entry} />;
+}
+
+function DiffPane({ t, diff, entry }: { t: Theme; diff: string; entry: FileEntry }) {
   if (!diff.trim()) {
     return (
-      <div style={{
-        flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center',
-        color: t.textMuted, fontSize: 13, background: t.appBg,
-      }}>
-        No textual diff (binary file or empty change)
-      </div>
+      <DiffStatus
+        t={t}
+        title="No text hunks to review"
+        body={
+          entry.status === '?'
+            ? 'This untracked item does not expose a readable text diff yet. Stage it to include it in the next commit.'
+            : 'Git reports this file changed, but there are no line-level text hunks for this selection.'
+        }
+      />
     );
   }
   return (
@@ -855,6 +931,49 @@ function DiffPane({ t, diff }: { t: Theme; diff: string }) {
       {parseDiff(diff).map((line, i) => (
         <DiffLine key={i} t={t} line={line} />
       ))}
+    </div>
+  );
+}
+
+function DiffStatus({
+  t,
+  title,
+  body,
+  tone = 'muted',
+}: {
+  t: Theme;
+  title: string;
+  body: string;
+  tone?: 'muted' | 'error';
+}) {
+  const color = tone === 'error' ? t.error : t.textMuted;
+  return (
+    <div style={{
+      flex: 1,
+      display: 'flex',
+      alignItems: 'center',
+      justifyContent: 'center',
+      background: t.appBg,
+      padding: 32,
+    }}>
+      <div style={{
+        maxWidth: 420,
+        border: `1px solid ${tone === 'error' ? `${t.error}55` : t.cellBorder}`,
+        background: t.cellBg,
+        borderRadius: 8,
+        padding: 18,
+        display: 'flex',
+        flexDirection: 'column',
+        gap: 7,
+        textAlign: 'center',
+      }}>
+        <div style={{ fontSize: 14, fontWeight: 600, color: tone === 'error' ? t.error : t.textPrimary }}>
+          {title}
+        </div>
+        <div style={{ fontSize: 12, lineHeight: 1.5, color }}>
+          {body}
+        </div>
+      </div>
     </div>
   );
 }
@@ -881,6 +1000,19 @@ function parseDiff(diff: string): ParsedLine[] {
       break;
     }
     if (line.startsWith('diff --git') || line.startsWith('index ') || line.startsWith('+++ ') || line.startsWith('--- ')) {
+      continue;
+    }
+    if (
+      line.startsWith('new file mode ') ||
+      line.startsWith('deleted file mode ') ||
+      line.startsWith('old mode ') ||
+      line.startsWith('new mode ') ||
+      line.startsWith('rename from ') ||
+      line.startsWith('rename to ') ||
+      line.startsWith('Binary file ') ||
+      line.startsWith('# ')
+    ) {
+      out.push({ kind: 'meta', text: line, oldNum: null, newNum: null });
       continue;
     }
     if (line.startsWith('@@')) {

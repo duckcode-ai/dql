@@ -2,7 +2,6 @@ import React, { useRef, useState } from 'react';
 import { useNotebook } from '../../store/NotebookStore';
 import { themes } from '../../themes/notebook-theme';
 import { FilesPanel } from '../panels/FilesPanel';
-import { SchemaPanel } from '../panels/SchemaPanel';
 import { ConnectionPanel } from '../panels/ConnectionPanel';
 import { ReferencePanel } from '../panels/ReferencePanel';
 import { LineagePanel } from '../panels/LineagePanel';
@@ -17,7 +16,6 @@ interface SidebarProps {
 
 const PANEL_TITLES: Record<string, string> = {
   files: 'Explorer',
-  schema: 'Schema',
   block_library: 'Block Library',
   lineage: 'Lineage',
   connection: 'Connection',
@@ -118,7 +116,6 @@ export function Sidebar({ onOpenFile }: SidebarProps) {
       {/* Panel content */}
       <div style={{ flex: 1, overflow: 'hidden', display: 'flex', flexDirection: 'column' }}>
         {panel === 'files' && <FilesPanel onOpenFile={onOpenFile} />}
-        {panel === 'schema' && <SchemaPanel />}
         {panel === 'block_library' && <BlockLibraryPanel />}
         {panel === 'lineage' && <LineagePanel />}
         {panel === 'connection' && <ConnectionPanel />}

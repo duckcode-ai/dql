@@ -4,6 +4,7 @@ import {
   buildDbtStatus,
   createBlockArtifacts,
   createSemanticBuilderBlock,
+  discoverDbtProfileConnections,
   formatLocalQueryRuntimeError,
   normalizeProjectConnection,
   prepareLocalExecution,
@@ -71,6 +72,64 @@ describe('normalizeProjectConnection', () => {
       { driver: 'duckdb', filepath: './local/dev.duckdb' },
       '/tmp/demo-project',
     )).toEqual({ driver: 'duckdb', filepath: '/tmp/demo-project/local/dev.duckdb' });
+  });
+
+  it('expands environment placeholders when the value is available', () => {
+    const previous = process.env.DQL_TEST_DATABASE;
+    process.env.DQL_TEST_DATABASE = 'analytics';
+    try {
+      expect(normalizeProjectConnection(
+        { driver: 'postgresql', host: 'localhost', database: '${DQL_TEST_DATABASE}', username: 'dql' },
+        '/tmp/demo-project',
+      )).toEqual({ driver: 'postgresql', host: 'localhost', database: 'analytics', username: 'dql' });
+    } finally {
+      if (previous === undefined) delete process.env.DQL_TEST_DATABASE;
+      else process.env.DQL_TEST_DATABASE = previous;
+    }
+  });
+});
+
+describe('discoverDbtProfileConnections', () => {
+  it('maps dbt profiles.yml targets into DQL connection drafts', () => {
+    const projectRoot = mkdtempSync(join(tmpdir(), 'dql-dbt-profiles-'));
+    tempDirs.push(projectRoot);
+    writeFileSync(join(projectRoot, 'dbt_project.yml'), 'name: banking\nprofile: banking\n', 'utf-8');
+    writeFileSync(join(projectRoot, 'profiles.yml'), [
+      'banking:',
+      '  target: dev',
+      '  outputs:',
+      '    dev:',
+      '      type: postgres',
+      '      host: "{{ env_var(\'PGHOST\', \'localhost\') }}"',
+      '      port: 5432',
+      '      dbname: analytics',
+      '      schema: marts',
+      '      user: analyst',
+      '      password: "{{ env_var(\'PGPASSWORD\') }}"',
+      'other:',
+      '  outputs:',
+      '    dev:',
+      '      type: duckdb',
+      '      path: other.duckdb',
+    ].join('\n'), 'utf-8');
+
+    const profilePath = join(projectRoot, 'profiles.yml');
+    const candidates = discoverDbtProfileConnections(projectRoot, {});
+    const candidate = candidates.find((item) => item.path === profilePath && item.profileName === 'banking');
+
+    expect(candidate).toBeDefined();
+    expect(candidate?.targetName).toBe('dev');
+    expect(candidate?.connection).toMatchObject({
+      driver: 'postgresql',
+      host: 'localhost',
+      port: 5432,
+      database: 'analytics',
+      schema: 'marts',
+      username: 'analyst',
+      password: '${PGPASSWORD}',
+    });
+    expect(candidate?.missingFields).toContain('env:PGPASSWORD');
+    expect(candidates.some((item) => item.profileName === 'other')).toBe(false);
   });
 });
 

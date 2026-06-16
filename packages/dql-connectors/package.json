@@ -30,6 +30,7 @@
   },
   "dependencies": {
     "@aws-sdk/client-athena": "^3.882.0",
+    "@aws-sdk/credential-provider-ini": "^3.882.0",
     "@google-cloud/bigquery": "^7.5.0",
     "better-sqlite3": "^11.7.0",
     "duckdb": "^1.1.0",
