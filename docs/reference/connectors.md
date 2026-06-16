@@ -109,6 +109,28 @@ For key-pair auth:
 }
 ```
 
+Use either `privateKeyPath` or `privateKey`. `privateKey` is useful when the key
+comes from an environment variable or secret manager:
+
+```json
+{
+  "driver": "snowflake",
+  "account": "xy12345.us-east-1",
+  "username": "${SNOWFLAKE_USER}",
+  "authMethod": "key_pair",
+  "privateKey": "${SNOWFLAKE_PRIVATE_KEY}",
+  "privateKeyPassphrase": "${SNOWFLAKE_PRIVATE_KEY_PASSPHRASE}",
+  "warehouse": "ANALYTICS_WH",
+  "database": "PROD",
+  "role": "ANALYST"
+}
+```
+
+For dbt `profiles.yml`, DQL imports Snowflake `private_key_path`,
+`private_key`, `private_key_passphrase`, and `authenticator: SNOWFLAKE_JWT`.
+The public key is configured on the Snowflake user; DQL only needs the private
+key material or file path.
+
 ### Athena
 
 Use the local AWS provider chain, including SSO sessions and environment

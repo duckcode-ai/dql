@@ -6095,11 +6095,15 @@ function mapDbtProfileOutput(output: DbtProfileOutput): {
       };
     case 'snowflake': {
       const privateKeyPath = read('private_key_path', 'privateKeyPath');
+      const privateKey = read('private_key', 'privateKey');
       const authenticator = read('authenticator');
-      const authMethod = privateKeyPath
+      const normalizedAuthenticator = authenticator?.toLowerCase().replace(/[\s_-]/g, '');
+      const authMethod = privateKeyPath || privateKey || normalizedAuthenticator === 'snowflakejwt'
         ? 'key_pair'
-        : authenticator?.toLowerCase() === 'externalbrowser'
+        : normalizedAuthenticator === 'externalbrowser'
           ? 'external_browser'
+          : normalizedAuthenticator === 'oauth' || normalizedAuthenticator === 'programmaticaccesstoken'
+            ? 'oauth'
           : 'password';
       return {
         adapter,
@@ -6113,6 +6117,7 @@ function mapDbtProfileOutput(output: DbtProfileOutput): {
           password: read('password'),
           role: read('role'),
           privateKeyPath,
+          privateKey,
           privateKeyPassphrase: read('private_key_passphrase', 'privateKeyPassphrase'),
           authenticator,
           authMethod,
@@ -6232,7 +6237,13 @@ function requiredConnectionFields(connection: ConnectionConfig, envRefs: string[
       needs('schema');
       needs('username');
       if (connection.authMethod === 'key_pair') {
-        needs('privateKeyPath');
+        if (!connection.privateKeyPath && !connection.privateKey) {
+          missing.add('privateKeyPath');
+        }
+      } else if (connection.authMethod === 'oauth') {
+        if (!connection.token && !connection.password) {
+          missing.add('token');
+        }
       } else if (connection.authMethod !== 'external_browser') {
         needs('password');
       }

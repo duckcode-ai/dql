@@ -302,6 +302,7 @@ function normalizeFieldName(field: string): string {
     http_path: 'httpPath',
     keyFile: 'keyFilename',
     keyFileName: 'keyFilename',
+    private_key: 'privateKey',
     private_key_path: 'privateKeyPath',
     private_key_passphrase: 'privateKeyPassphrase',
     path: 'filepath',

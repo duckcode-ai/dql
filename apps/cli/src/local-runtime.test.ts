@@ -131,6 +131,81 @@ describe('discoverDbtProfileConnections', () => {
     expect(candidate?.missingFields).toContain('env:PGPASSWORD');
     expect(candidates.some((item) => item.profileName === 'other')).toBe(false);
   });
+
+  it('maps Snowflake dbt key-pair profiles from inline keys and key files', () => {
+    const previousPrivateKey = process.env.SNOWFLAKE_PRIVATE_KEY;
+    const previousPrivateKeyPath = process.env.SNOWFLAKE_PRIVATE_KEY_PATH;
+    const previousPrivateKeyPassphrase = process.env.SNOWFLAKE_PRIVATE_KEY_PASSPHRASE;
+    delete process.env.SNOWFLAKE_PRIVATE_KEY;
+    delete process.env.SNOWFLAKE_PRIVATE_KEY_PATH;
+    delete process.env.SNOWFLAKE_PRIVATE_KEY_PASSPHRASE;
+
+    try {
+      const projectRoot = mkdtempSync(join(tmpdir(), 'dql-dbt-snowflake-profiles-'));
+      tempDirs.push(projectRoot);
+      writeFileSync(join(projectRoot, 'dbt_project.yml'), 'name: analytics\nprofile: analytics\n', 'utf-8');
+      writeFileSync(join(projectRoot, 'profiles.yml'), [
+        'analytics:',
+        '  target: inline',
+        '  outputs:',
+        '    inline:',
+        '      type: snowflake',
+        '      account: xy12345.us-east-1',
+        '      warehouse: ANALYTICS_WH',
+        '      database: PROD',
+        '      schema: MARTS',
+        '      user: svc_dql',
+        '      role: ANALYST',
+        '      private_key: "{{ env_var(\'SNOWFLAKE_PRIVATE_KEY\') }}"',
+        '      private_key_passphrase: "{{ env_var(\'SNOWFLAKE_PRIVATE_KEY_PASSPHRASE\', \'\') }}"',
+        '    keyfile:',
+        '      type: snowflake',
+        '      account: xy12345.us-east-1',
+        '      warehouse: ANALYTICS_WH',
+        '      database: PROD',
+        '      schema: MARTS',
+        '      user: svc_dql',
+        '      role: ANALYST',
+        '      authenticator: SNOWFLAKE_JWT',
+        '      private_key_path: "{{ env_var(\'SNOWFLAKE_PRIVATE_KEY_PATH\') }}"',
+      ].join('\n'), 'utf-8');
+
+      const candidates = discoverDbtProfileConnections(projectRoot, {});
+      const inline = candidates.find((item) => item.profileName === 'analytics' && item.targetName === 'inline');
+      const keyfile = candidates.find((item) => item.profileName === 'analytics' && item.targetName === 'keyfile');
+
+      expect(inline?.connection).toMatchObject({
+        driver: 'snowflake',
+        account: 'xy12345.us-east-1',
+        warehouse: 'ANALYTICS_WH',
+        database: 'PROD',
+        schema: 'MARTS',
+        username: 'svc_dql',
+        role: 'ANALYST',
+        privateKey: '${SNOWFLAKE_PRIVATE_KEY}',
+        authMethod: 'key_pair',
+      });
+      expect(inline?.missingFields).toContain('env:SNOWFLAKE_PRIVATE_KEY');
+      expect(inline?.missingFields).not.toContain('privateKeyPath');
+
+      expect(keyfile?.connection).toMatchObject({
+        driver: 'snowflake',
+        privateKeyPath: '${SNOWFLAKE_PRIVATE_KEY_PATH}',
+        authenticator: 'SNOWFLAKE_JWT',
+        authMethod: 'key_pair',
+      });
+      expect(keyfile?.missingFields).toContain('env:SNOWFLAKE_PRIVATE_KEY_PATH');
+      expect(keyfile?.missingFields).not.toContain('privateKeyPath');
+      expect(keyfile?.warnings).toContain('Not the default dbt target "inline".');
+    } finally {
+      if (previousPrivateKey === undefined) delete process.env.SNOWFLAKE_PRIVATE_KEY;
+      else process.env.SNOWFLAKE_PRIVATE_KEY = previousPrivateKey;
+      if (previousPrivateKeyPath === undefined) delete process.env.SNOWFLAKE_PRIVATE_KEY_PATH;
+      else process.env.SNOWFLAKE_PRIVATE_KEY_PATH = previousPrivateKeyPath;
+      if (previousPrivateKeyPassphrase === undefined) delete process.env.SNOWFLAKE_PRIVATE_KEY_PASSPHRASE;
+      else process.env.SNOWFLAKE_PRIVATE_KEY_PASSPHRASE = previousPrivateKeyPassphrase;
+    }
+  });
 });
 
 describe('prepareLocalExecution', () => {

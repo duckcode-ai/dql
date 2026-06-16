@@ -61,5 +61,30 @@ describe('createConnectionConfigKey', () => {
       ...athena,
       profile: 'staging',
     }));
+
+    const snowflake = {
+      driver: 'snowflake' as const,
+      account: 'xy12345.us-east-1',
+      username: 'svc_dql',
+      database: 'PROD',
+      schema: 'MARTS',
+      warehouse: 'ANALYTICS_WH',
+      authMethod: 'key_pair' as const,
+      privateKeyPath: '/secure/prod/snowflake_key.p8',
+      privateKeyPassphrase: 'prod-passphrase',
+    };
+    expect(createConnectionConfigKey(snowflake)).not.toBe(createConnectionConfigKey({
+      ...snowflake,
+      privateKeyPath: '/secure/staging/snowflake_key.p8',
+    }));
+    expect(createConnectionConfigKey(snowflake)).not.toBe(createConnectionConfigKey({
+      ...snowflake,
+      privateKeyPath: undefined,
+      privateKey: '-----BEGIN PRIVATE KEY-----\nstaging\n-----END PRIVATE KEY-----',
+    }));
+    expect(createConnectionConfigKey(snowflake)).not.toBe(createConnectionConfigKey({
+      ...snowflake,
+      privateKeyPassphrase: 'staging-passphrase',
+    }));
   });
 });

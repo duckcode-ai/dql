@@ -1,6 +1,7 @@
 import type { DatabaseConnector, ConnectionConfig, TableInfo, ColumnInfo } from '../connector.js';
 import type { QueryResult, ColumnMeta, ColumnType, Row } from '../result-types.js';
 import { readFile } from 'node:fs/promises';
+import { homedir } from 'node:os';
 
 export class SnowflakeConnector implements DatabaseConnector {
   readonly driverName = 'snowflake';
@@ -28,7 +29,7 @@ export class SnowflakeConnector implements DatabaseConnector {
     if (config.role) connectionConfig.role = config.role;
 
     const privateKey = config.privateKeyPath
-      ? await readFile(config.privateKeyPath, 'utf-8')
+      ? await readFile(resolvePrivateKeyPath(config.privateKeyPath), 'utf-8')
       : config.privateKey;
 
     // Auth: key-pair, OAuth, external browser SSO, or password.
@@ -189,6 +190,16 @@ export class SnowflakeConnector implements DatabaseConnector {
       ordinalPosition: Number(row['ORDINAL_POSITION'] ?? row['ordinal_position'] ?? 0),
     }));
   }
+}
+
+function resolvePrivateKeyPath(path: string): string {
+  const expandedEnv = path.replace(/\$\{([A-Za-z_][A-Za-z0-9_]*)\}/g, (match, key: string) => {
+    return process.env[key] ?? match;
+  });
+
+  if (expandedEnv === '~') return homedir();
+  if (expandedEnv.startsWith('~/')) return `${homedir()}${expandedEnv.slice(1)}`;
+  return expandedEnv;
 }
 
 function mapSnowflakeType(sfType: string): ColumnType {
