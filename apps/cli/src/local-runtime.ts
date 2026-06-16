@@ -62,6 +62,7 @@ import {
   OpenAIProvider,
   defaultMemoryPath,
   ensureDefaultMemoryFiles,
+  type AgentAnswer,
   type AgentResultPayload,
   type AgentProvider,
   type AgentSchemaTable,
@@ -422,10 +423,92 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
         runtimeVariables({}),
         connection,
       );
-      return buildAgentSchemaContext(question, result.rows);
+      const schemaContext = buildAgentSchemaContext(question, result.rows);
+      return enrichAgentSchemaContextWithValueMatches(question, schemaContext, executor, connection);
     } catch {
       return [];
     }
+  };
+
+  const generateInvestigationSqlForApp = async (input: {
+    appId: string;
+    dashboardId?: string;
+    sourceTileId?: string;
+    sourceBlockId?: string;
+    title?: string;
+    question: string;
+    intent: string;
+    context?: unknown;
+  }): Promise<{
+    sql?: string;
+    answer?: string;
+    result?: AgentResultPayload;
+    analysisPlan?: unknown;
+    evidence?: unknown;
+    citations?: unknown[];
+    suggestedViz?: string;
+    executionError?: string;
+    providerUsed?: string;
+  }> => {
+    const resolvedProvider = resolveDefaultLLMProvider(projectRoot);
+    const runner = resolvedProvider ? getLLMRunner(resolvedProvider) : null;
+    if (!resolvedProvider || !runner) {
+      throw new Error('No AI provider is configured. Configure OpenAI, Gemini, Ollama, or a custom OpenAI-compatible endpoint in Settings.');
+    }
+
+    let governedAnswer: AgentAnswer | undefined;
+    let providerError: string | undefined;
+    const contextEnvelope = {
+      mode: 'app_research',
+      intent: input.intent,
+      appId: input.appId,
+      dashboardId: input.dashboardId,
+      sourceTileId: input.sourceTileId,
+      sourceBlockId: input.sourceBlockId,
+      title: input.title,
+      instruction: 'Generate review-required read-only SQL when certified blocks do not exactly answer the requested research grain. Execute only through the bounded generated SQL preview path.',
+      context: input.context,
+    };
+    const controller = new AbortController();
+    await runner.run(
+      {
+        provider: resolvedProvider,
+        messages: [{ role: 'user', content: input.question }],
+        upstream: {
+          cellId: `app-research:${input.appId}:${input.dashboardId ?? 'app'}`,
+          sql: JSON.stringify(contextEnvelope, null, 2),
+        },
+        projectRoot,
+        executeCertifiedBlock: executeCertifiedBlockForAgent,
+        executeGeneratedSql: executeGeneratedSqlForAgent,
+        getSchemaContext: getSchemaContextForAgent,
+      },
+      (turn) => {
+        if (turn.kind === 'tool_result' && turn.id === 'governed_answer') {
+          governedAnswer = turn.output as AgentAnswer;
+        }
+        if (turn.kind === 'error') {
+          providerError = turn.message;
+        }
+      },
+      controller.signal,
+    );
+
+    if (!governedAnswer) {
+      throw new Error(providerError ?? 'The AI provider did not return a governed answer.');
+    }
+
+    return {
+      sql: governedAnswer.proposedSql ?? governedAnswer.sql,
+      answer: governedAnswer.answer ?? governedAnswer.text,
+      result: governedAnswer.result,
+      analysisPlan: governedAnswer.analysisPlan,
+      evidence: governedAnswer.evidence,
+      citations: governedAnswer.citations,
+      suggestedViz: governedAnswer.suggestedViz,
+      executionError: governedAnswer.executionError,
+      providerUsed: governedAnswer.providerUsed,
+    };
   };
 
   // SSE clients for /api/watch hot-reload
@@ -1002,6 +1085,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           path,
           projectRoot,
           executeSql: executeLocalSqlForStoredResult,
+          generateInvestigationSql: generateInvestigationSqlForApp,
           runNotebook: (appId, notebookPath) => runNotebookForApp(appId, notebookPath),
         });
         if (handled) return;
@@ -6954,7 +7038,7 @@ function isAiPinRefreshDue(lastRefreshedAt?: string): boolean {
   return Date.now() - last >= 24 * 60 * 60 * 1000;
 }
 
-function buildAgentSchemaContext(question: string, rows: unknown[]): AgentSchemaTable[] {
+export function buildAgentSchemaContext(question: string, rows: unknown[]): AgentSchemaTable[] {
   const byRelation = new Map<string, AgentSchemaTable>();
   for (const row of rows) {
     if (!row || typeof row !== 'object') continue;
@@ -6980,12 +7064,61 @@ function buildAgentSchemaContext(question: string, rows: unknown[]): AgentSchema
     byRelation.set(relation, current);
   }
   const tokens = agentSchemaTokens(question);
+  const shouldProbeValues = extractAgentValueSearchTerms(question).length > 0;
   return Array.from(byRelation.values())
-    .map((table) => ({ table, score: scoreAgentSchemaTable(table, tokens) }))
+    .map((table) => ({
+      table,
+      score: scoreAgentSchemaTable(table, tokens) + (shouldProbeValues ? scoreAgentValueProbeTable(table) : 0),
+    }))
     .filter((entry) => entry.score > 0)
     .sort((a, b) => b.score - a.score || a.table.relation.localeCompare(b.table.relation))
     .slice(0, 12)
     .map((entry) => entry.table);
+}
+
+async function enrichAgentSchemaContextWithValueMatches(
+  question: string,
+  schemaContext: AgentSchemaTable[],
+  executor: QueryExecutor,
+  connection: ConnectionConfig,
+): Promise<AgentSchemaTable[]> {
+  const searchTerms = extractAgentValueSearchTerms(question);
+  if (schemaContext.length === 0 || searchTerms.length === 0) return schemaContext;
+
+  const matches = new Map<string, Map<string, string[]>>();
+  for (const candidate of rankAgentValueProbeColumns(schemaContext).slice(0, 12)) {
+    try {
+      const result = await executor.executeQuery(
+        buildAgentValueProbeSql(candidate.table, candidate.column.name, searchTerms, connection),
+        [],
+        runtimeVariables({}),
+        connection,
+      );
+      const values = uniqueStrings(result.rows.flatMap(valueProbeRowValues)).slice(0, 5);
+      if (values.length === 0) continue;
+      const tableMatches = matches.get(candidate.table.relation) ?? new Map<string, string[]>();
+      tableMatches.set(candidate.column.name, values);
+      matches.set(candidate.table.relation, tableMatches);
+    } catch {
+      // Value probes are advisory. Unsupported casts, privileges, and large-table
+      // failures should not block the metadata-backed answer path.
+    }
+  }
+  if (matches.size === 0) return schemaContext;
+
+  return schemaContext.map((table) => {
+    const tableMatches = matches.get(table.relation);
+    if (!tableMatches) return table;
+    return {
+      ...table,
+      columns: table.columns.map((column) => {
+        const sampleValues = tableMatches.get(column.name);
+        return sampleValues?.length
+          ? { ...column, sampleValues: uniqueStrings([...(column.sampleValues ?? []), ...sampleValues]).slice(0, 5) }
+          : column;
+      }),
+    };
+  });
 }
 
 function scoreAgentSchemaTable(table: AgentSchemaTable, tokens: Set<string>): number {
@@ -7004,6 +7137,162 @@ function scoreAgentSchemaTable(table: AgentSchemaTable, tokens: Set<string>): nu
   return score;
 }
 
+function scoreAgentValueProbeTable(table: AgentSchemaTable): number {
+  let score = 0;
+  if (hasAgentSchemaToken(table.name, ['account', 'customer', 'member', 'order', 'product', 'sku', 'subscriber', 'user'])) score += 5;
+  for (const column of table.columns) {
+    if (!isAgentValueProbeColumn(column)) continue;
+    score += 2;
+    if (hasAgentSchemaToken(column.name, ['account', 'customer', 'email', 'full', 'member', 'name', 'product', 'sku', 'user'])) score += 2;
+  }
+  return Math.min(score, 18);
+}
+
+function rankAgentValueProbeColumns(schemaContext: AgentSchemaTable[]): Array<{
+  table: AgentSchemaTable;
+  column: AgentSchemaTable['columns'][number];
+  score: number;
+}> {
+  const ranked: Array<{
+    table: AgentSchemaTable;
+    column: AgentSchemaTable['columns'][number];
+    score: number;
+  }> = [];
+  for (const table of schemaContext) {
+    for (const column of table.columns) {
+      if (!isAgentValueProbeColumn(column)) continue;
+      ranked.push({
+        table,
+        column,
+        score: scoreAgentValueProbeColumn(table, column),
+      });
+    }
+  }
+  return ranked.sort((a, b) => b.score - a.score || a.table.relation.localeCompare(b.table.relation) || a.column.name.localeCompare(b.column.name));
+}
+
+function scoreAgentValueProbeColumn(table: AgentSchemaTable, column: AgentSchemaTable['columns'][number]): number {
+  let score = 0;
+  if (hasAgentSchemaToken(table.name, ['account', 'customer', 'member', 'product', 'sku', 'subscriber', 'user'])) score += 4;
+  if (hasAgentSchemaToken(column.name, ['full', 'name', 'email', 'account', 'customer', 'member', 'product', 'sku', 'subscriber', 'user'])) score += 8;
+  if (hasAgentSchemaToken(column.name, ['id', 'key', 'code', 'number', 'status', 'segment', 'region', 'category', 'type'])) score += 3;
+  return score;
+}
+
+function isAgentValueProbeColumn(column: AgentSchemaTable['columns'][number]): boolean {
+  const name = column.name.toLowerCase();
+  if (/\b(password|secret|token|credential|hash|salt)\b/.test(name)) return false;
+  if (!hasAgentSchemaToken(name, [
+    'account',
+    'category',
+    'channel',
+    'city',
+    'code',
+    'country',
+    'customer',
+    'email',
+    'full',
+    'id',
+    'key',
+    'member',
+    'name',
+    'number',
+    'product',
+    'region',
+    'segment',
+    'sku',
+    'state',
+    'status',
+    'subscriber',
+    'type',
+    'user',
+  ])) {
+    return false;
+  }
+  const type = column.type?.toLowerCase() ?? '';
+  if (!type) return true;
+  return /\b(char|character|clob|email|string|text|uuid|varchar)\b/.test(type);
+}
+
+function buildAgentValueProbeSql(
+  table: AgentSchemaTable,
+  column: string,
+  searchTerms: string[],
+  connection: ConnectionConfig,
+): string {
+  const relation = quoteAgentRelation(table.relation, connection);
+  const identifier = quoteAgentIdentifier(column, connection);
+  const castValue = `LOWER(CAST(${identifier} AS ${agentTextCastType(connection.driver)}))`;
+  const predicates = searchTerms
+    .slice(0, 5)
+    .map((term) => `${castValue} LIKE ${sqlStringLiteral(`%${escapeSqlLike(term.toLowerCase())}%`)} ESCAPE '\\\\'`)
+    .join(' OR ');
+  return [
+    `SELECT DISTINCT CAST(${identifier} AS ${agentTextCastType(connection.driver)}) AS value`,
+    `FROM ${relation}`,
+    `WHERE ${identifier} IS NOT NULL AND (${predicates})`,
+    'LIMIT 5',
+  ].join('\n');
+}
+
+function agentTextCastType(driver?: string): string {
+  switch (driver) {
+    case 'bigquery':
+      return 'STRING';
+    case 'clickhouse':
+      return 'String';
+    case 'fabric':
+    case 'mssql':
+      return 'NVARCHAR(MAX)';
+    case 'mysql':
+      return 'CHAR';
+    case 'sqlite':
+      return 'TEXT';
+    default:
+      return 'VARCHAR';
+  }
+}
+
+function quoteAgentRelation(relation: string, connection: ConnectionConfig): string {
+  return relation.split('.').map((part) => quoteAgentIdentifier(part, connection)).join('.');
+}
+
+function quoteAgentIdentifier(identifier: string, connection: ConnectionConfig): string {
+  return getDialect(connection.driver).quoteIdentifier(identifier);
+}
+
+function sqlStringLiteral(value: string): string {
+  return `'${value.replace(/'/g, "''")}'`;
+}
+
+function escapeSqlLike(value: string): string {
+  return value.replace(/[\\%_]/g, (match) => `\\${match}`);
+}
+
+function valueProbeRowValues(row: unknown): string[] {
+  if (!row || typeof row !== 'object') return [];
+  const record = row as Record<string, unknown>;
+  return Object.values(record)
+    .filter((value): value is string | number | boolean => (
+      typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean'
+    ))
+    .map(String)
+    .map((value) => value.trim())
+    .filter(Boolean);
+}
+
+function uniqueStrings(values: string[]): string[] {
+  const seen = new Set<string>();
+  const output: string[] = [];
+  for (const value of values) {
+    const normalized = value.toLowerCase();
+    if (seen.has(normalized)) continue;
+    seen.add(normalized);
+    output.push(value);
+  }
+  return output;
+}
+
 function agentSchemaTokens(value: string): Set<string> {
   const tokens = new Set<string>();
   for (const raw of value.toLowerCase().match(/[a-z0-9_]+/g) ?? []) {
@@ -7016,9 +7305,65 @@ function agentSchemaTokens(value: string): Set<string> {
   return tokens;
 }
 
+function hasAgentSchemaToken(value: string, expected: string[]): boolean {
+  const tokens = agentSchemaTokens(value);
+  return expected.some((token) => tokens.has(token));
+}
+
+export function extractAgentValueSearchTerms(question: string): string[] {
+  const terms: string[] = [];
+  for (const match of question.matchAll(/["']([^"']{3,120})["']/g)) {
+    terms.push(match[1]);
+  }
+  for (const match of question.matchAll(/\b[\w.%+-]+@[\w.-]+\.[A-Za-z]{2,}\b/g)) {
+    terms.push(match[0]);
+  }
+  for (const match of question.matchAll(/\b[A-Z][a-z0-9]+(?:\s+[A-Z][a-z0-9]+){1,3}\b/g)) {
+    terms.push(match[0]);
+  }
+  for (const match of question.matchAll(/\b(?:for|named|called|only|where|customer|user|account|product)\s+([A-Za-z0-9@._-]+(?:\s+[A-Za-z0-9@._-]+){0,3})/gi)) {
+    terms.push(match[1]);
+  }
+  return uniqueStrings(
+    terms
+      .map(cleanAgentValueSearchTerm)
+      .filter((term) => term.length >= 3 && !AGENT_VALUE_SEARCH_STOP_PHRASES.has(term.toLowerCase())),
+  ).slice(0, 6);
+}
+
+function cleanAgentValueSearchTerm(term: string): string {
+  return term
+    .replace(/[?.,;:]+$/g, '')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .replace(/^(?:account|customer|member|named|called|product|sku|subscriber|user)\s+/i, '')
+    .replace(/\s+\b(?:last|next|this)\b.*$/i, '')
+    .replace(/\s+\b(?:last|this)\s+(?:day|week|month|quarter|year)\b.*$/i, '')
+    .replace(/\s+\b(?:daily|weekly|monthly|quarterly|yearly)\b.*$/i, '')
+    .trim();
+}
+
 const AGENT_SCHEMA_STOPWORDS = new Set([
   'all', 'and', 'are', 'can', 'data', 'for', 'from', 'have', 'how', 'many', 'me',
   'show', 'the', 'this', 'who', 'with', 'value',
+]);
+
+const AGENT_VALUE_SEARCH_STOP_PHRASES = new Set([
+  'account',
+  'customer',
+  'last week',
+  'this week',
+  'last month',
+  'this month',
+  'last quarter',
+  'this quarter',
+  'last year',
+  'this year',
+  'member',
+  'product',
+  'sku',
+  'subscriber',
+  'user',
 ]);
 
 function normalizeAgentSchemaToken(token: string): string {

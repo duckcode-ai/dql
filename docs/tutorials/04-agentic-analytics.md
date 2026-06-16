@@ -25,8 +25,8 @@ The agent never silently invents SQL. Every answer is routed through tiers:
 
 | Tier | Source                                                                                                                                            | Label                        |
 | ---- | ------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------- |
-| 1    | A **certified DQL artifact** matches the question: executable blocks for data answers, or business terms/views for definition and context answers | ✓ Certified                  |
-| 2    | No match — the LLM proposes SQL grounded in business context, dbt, and semantic metadata, saved as a **draft**                                    | ⚠ Uncertified                |
+| 1    | A **certified DQL artifact** exactly matches the question: executable blocks for direct KPI/saved-block answers, or business terms/views for definition and context answers | ✓ Certified                  |
+| 2    | No exact match, or the user asks for a named entity, custom filter, ranking, breakdown, comparison, drill-through, or different grain — the agent proposes SQL grounded in business context, dbt, semantic metadata, and runtime schema, saved as a **draft** | ⚠ Uncertified                |
 | 3    | Not answerable from the project                                                                                                                   | Refusal, with what's missing |
 
 Tier-2 drafts land in `blocks/_drafts/` so popular questions become
@@ -37,6 +37,11 @@ Enterprise last week" after a certified revenue answer, the agent uses the
 prior answer as context, searches for a distinct certified drilldown block
 first, and only then creates a review-ready draft. It does not silently reuse
 the top-level block or mark generated drilldown SQL as certified.
+
+The same rule applies to single-customer or single-user questions. A certified
+`total_revenue` block can ground the business meaning of revenue, but a question
+like "what is revenue for Alice Johnson?" is a custom filter and should produce
+review-required SQL unless a certified block already covers that exact grain.
 
 ---
 
@@ -180,10 +185,11 @@ Claude Desktop, Cursor, and Codex use a config file instead — full copy-paste
 setup for each is in [Connect an AI agent (MCP)](../guides/mcp.md).
 
 The server exposes 12 tools — `search_blocks`, `query_via_block` (Tier 1,
-certified only), `query_via_metadata` (Tier 2, flagged + drafted),
+certified exact matches only), `query_via_metadata` (Tier 2, flagged + drafted),
 `list_proposals`, `list_metrics`, `lineage_impact`, `suggest_block`, and more.
 Ask your agent a revenue question and it answers **from your certified
-blocks**, citing them — and files drafts when it has to improvise.
+blocks** when the block grain fits, citing them — and files drafts when it has
+to generate a deeper or different-grain answer.
 
 ---
 

@@ -124,7 +124,13 @@ export function createDqlAgentProviderRunner(id: SimpleProviderId): AgentRunner 
             : [];
           const skills = loadSkills(req.projectRoot).skills;
           const followUp = inferFollowUpContext(req, question);
-          const blockHints = followUp?.kind === 'generic' && followUp.sourceBlockName ? [followUp.sourceBlockName] : [];
+          const selectedBlockHints = followUp?.kind === 'drilldown' || isDrilldownFollowUp(question)
+            ? []
+            : extractSelectedBlockHints(req);
+          const blockHints = Array.from(new Set([
+            ...(followUp?.kind === 'generic' && followUp.sourceBlockName ? [followUp.sourceBlockName] : []),
+            ...selectedBlockHints,
+          ]));
           const result = await answer({
             question,
             extraContext: renderExtraContext(req, followUp),
@@ -196,6 +202,23 @@ function renderExtraContext(req: AgentRunRequest, followUp?: AgentFollowUpContex
     parts.push(`Requested follow-up dimensions: ${followUp.dimensions.join(', ')}`);
   }
   return parts.length > 0 ? parts.join('\n\n') : undefined;
+}
+
+function extractSelectedBlockHints(req: AgentRunRequest): string[] {
+  const upstream = req.upstream?.sql?.trim();
+  if (!upstream || (!upstream.startsWith('{') && !upstream.startsWith('['))) return [];
+  try {
+    const parsed = JSON.parse(upstream) as {
+      selectedBlock?: { blockId?: unknown };
+      availableBlocks?: Array<{ blockId?: unknown }>;
+    };
+    const selected = typeof parsed.selectedBlock?.blockId === 'string'
+      ? parsed.selectedBlock.blockId.trim()
+      : '';
+    return selected ? [selected] : [];
+  } catch {
+    return [];
+  }
 }
 
 function inferFollowUpContext(req: AgentRunRequest, question: string): AgentFollowUpContext | undefined {
@@ -341,7 +364,7 @@ function emitDraftProposal(result: AgentAnswer, question: string, emit: (turn: A
   const isDrilldown = result.evidence?.route.some((step) => step.tool === 'propose_drilldown' && step.status === 'checked') ?? false;
   const proposal: BlockProposal = {
     name: slugify(question).slice(0, 56) || 'ai_generated_analysis',
-    domain: '',
+    domain: inferProposalDomain(result) ?? '',
     owner: `${process.env.USER ?? 'analyst'}@local`,
     description: result.text.slice(0, 240),
     sql: result.proposedSql!,
@@ -361,6 +384,16 @@ function emitDraftProposal(result: AgentAnswer, question: string, emit: (turn: A
       ],
     },
   });
+}
+
+function inferProposalDomain(result: AgentAnswer): string | undefined {
+  const evidence = result.evidence;
+  const candidates = [
+    ...(evidence?.selectedAssets ?? []),
+    ...(evidence?.semanticObjects ?? []),
+    ...(evidence?.sourceTables ?? []),
+  ];
+  return candidates.find((asset) => typeof asset.domain === 'string' && asset.domain.trim())?.domain?.trim();
 }
 
 function persistThreadMemory(memory: MemoryStore, req: AgentRunRequest, question: string, result: AgentAnswer): void {

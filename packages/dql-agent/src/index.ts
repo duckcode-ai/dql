@@ -33,7 +33,13 @@ export type {
   KGSearchOptions,
 } from "./kg/types.js";
 export { buildKGFromManifest, buildKGFromSemanticLayer } from "./kg/build.js";
-export { loadSkills, parseSkill, buildSkillsPrompt } from "./skills/loader.js";
+export {
+  activeSkills,
+  buildSkillBlockHints,
+  loadSkills,
+  parseSkill,
+  buildSkillsPrompt,
+} from "./skills/loader.js";
 export type { Skill, SkillLoadResult } from "./skills/loader.js";
 export { answer, parseProposal } from "./answer-loop.js";
 export type {

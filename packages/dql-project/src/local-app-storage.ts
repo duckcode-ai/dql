@@ -15,6 +15,15 @@ export type LocalAppVisibility = 'mine' | 'shared' | 'template';
 export type LocalAiPinRefreshCadence = 'none' | 'daily';
 export type LocalAiPinReviewStatus = 'needs_review' | 'draft_created' | 'certified' | 'rejected';
 export type LocalAppConversationRole = 'user' | 'assistant';
+export type LocalAppInvestigationIntent =
+  | 'diagnose_change'
+  | 'driver_breakdown'
+  | 'segment_compare'
+  | 'entity_drilldown'
+  | 'anomaly_investigation'
+  | 'trust_gap_review';
+export type LocalAppInvestigationStatus = 'draft' | 'running' | 'ready' | 'error';
+export type LocalAppInvestigationReviewStatus = LocalAiPinReviewStatus;
 
 export interface LocalAiPin {
   id: string;
@@ -98,6 +107,67 @@ export interface UpdateLocalAppConversationInput {
   dashboardId?: string;
   notebookPath?: string;
   messages?: Array<Pick<LocalAppConversationMessage, 'role' | 'content'> & { id?: string; events?: unknown[]; createdAt?: string }>;
+}
+
+export interface LocalAppInvestigation {
+  id: string;
+  appId: string;
+  dashboardId?: string;
+  sourceTileId?: string;
+  sourceBlockId?: string;
+  title: string;
+  question: string;
+  intent: LocalAppInvestigationIntent;
+  context?: unknown;
+  status: LocalAppInvestigationStatus;
+  summary?: string;
+  recommendation?: string;
+  metrics?: unknown;
+  driverCards?: unknown[];
+  resultPreviews?: unknown[];
+  evidence?: unknown;
+  generatedSql?: string;
+  reviewStatus: LocalAppInvestigationReviewStatus;
+  error?: string;
+  pinnedAiPinId?: string;
+  createdAt: string;
+  updatedAt: string;
+  lastRunAt?: string;
+}
+
+export interface CreateLocalAppInvestigationInput {
+  id?: string;
+  appId: string;
+  dashboardId?: string;
+  sourceTileId?: string;
+  sourceBlockId?: string;
+  title?: string;
+  question: string;
+  intent?: LocalAppInvestigationIntent;
+  context?: unknown;
+  generatedSql?: string;
+}
+
+export interface UpdateLocalAppInvestigationInput {
+  dashboardId?: string;
+  sourceTileId?: string;
+  sourceBlockId?: string;
+  title?: string;
+  question?: string;
+  intent?: LocalAppInvestigationIntent;
+  context?: unknown;
+  status?: LocalAppInvestigationStatus;
+  summary?: string;
+  recommendation?: string;
+  metrics?: unknown;
+  driverCards?: unknown[];
+  resultPreviews?: unknown[];
+  evidence?: unknown;
+  generatedSql?: string;
+  reviewStatus?: LocalAppInvestigationReviewStatus;
+  error?: string;
+  pinnedAiPinId?: string;
+  lastRunAt?: string;
 }
 
 export function defaultLocalAppsDbPath(projectRoot: string): string {
@@ -217,6 +287,118 @@ export class LocalAppStorage {
       WHERE id = ?
     `).run(blockPath, now, id);
     return this.getAiPin(id);
+  }
+
+  createAppInvestigation(input: CreateLocalAppInvestigationInput): LocalAppInvestigation {
+    const now = new Date().toISOString();
+    const question = cleanOptionalString(input.question) ?? 'Investigate this dashboard';
+    const investigation: LocalAppInvestigation = {
+      id: input.id ?? `inv_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+      appId: input.appId,
+      dashboardId: cleanOptionalString(input.dashboardId),
+      sourceTileId: cleanOptionalString(input.sourceTileId),
+      sourceBlockId: cleanOptionalString(input.sourceBlockId),
+      title: cleanOptionalString(input.title) ?? titleFromQuestion(question),
+      question,
+      intent: input.intent ?? 'driver_breakdown',
+      context: input.context,
+      status: 'draft',
+      generatedSql: cleanOptionalString(input.generatedSql),
+      reviewStatus: 'needs_review',
+      createdAt: now,
+      updatedAt: now,
+    };
+    this.db.prepare(`
+      INSERT INTO app_investigations (
+        id, app_id, dashboard_id, source_tile_id, source_block_id, title, question,
+        intent, context, status, summary, recommendation, metrics, driver_cards,
+        result_previews, evidence, generated_sql, review_status, error, pinned_ai_pin_id,
+        created_at, updated_at, last_run_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      investigation.id,
+      investigation.appId,
+      investigation.dashboardId ?? null,
+      investigation.sourceTileId ?? null,
+      investigation.sourceBlockId ?? null,
+      investigation.title,
+      investigation.question,
+      investigation.intent,
+      json(investigation.context),
+      investigation.status,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      investigation.generatedSql ?? null,
+      investigation.reviewStatus,
+      null,
+      null,
+      investigation.createdAt,
+      investigation.updatedAt,
+      null,
+    );
+    return investigation;
+  }
+
+  listAppInvestigations(appId: string, dashboardId?: string): LocalAppInvestigation[] {
+    const params: unknown[] = [appId];
+    const dashboardClause = dashboardId ? ' AND dashboard_id = ?' : '';
+    if (dashboardId) params.push(dashboardId);
+    const rows = this.db.prepare(`
+      SELECT * FROM app_investigations
+      WHERE app_id = ?${dashboardClause}
+      ORDER BY updated_at DESC
+    `).all(...params) as Record<string, unknown>[];
+    return rows.map(rowToInvestigation);
+  }
+
+  getAppInvestigation(id: string): LocalAppInvestigation | null {
+    const row = this.db.prepare('SELECT * FROM app_investigations WHERE id = ?').get(id) as Record<string, unknown> | undefined;
+    return row ? rowToInvestigation(row) : null;
+  }
+
+  updateAppInvestigation(id: string, input: UpdateLocalAppInvestigationInput): LocalAppInvestigation | null {
+    const current = this.getAppInvestigation(id);
+    if (!current) return null;
+    const now = new Date().toISOString();
+    this.db.prepare(`
+      UPDATE app_investigations
+      SET dashboard_id = ?, source_tile_id = ?, source_block_id = ?, title = ?, question = ?,
+          intent = ?, context = ?, status = ?, summary = ?, recommendation = ?, metrics = ?,
+          driver_cards = ?, result_previews = ?, evidence = ?, generated_sql = ?, review_status = ?,
+          error = ?, pinned_ai_pin_id = ?, updated_at = ?, last_run_at = ?
+      WHERE id = ?
+    `).run(
+      input.dashboardId === undefined ? (current.dashboardId ?? null) : (cleanOptionalString(input.dashboardId) ?? null),
+      input.sourceTileId === undefined ? (current.sourceTileId ?? null) : (cleanOptionalString(input.sourceTileId) ?? null),
+      input.sourceBlockId === undefined ? (current.sourceBlockId ?? null) : (cleanOptionalString(input.sourceBlockId) ?? null),
+      cleanOptionalString(input.title) ?? current.title,
+      cleanOptionalString(input.question) ?? current.question,
+      input.intent ?? current.intent,
+      input.context === undefined ? json(current.context) : json(input.context),
+      input.status ?? current.status,
+      input.summary === undefined ? (current.summary ?? null) : (cleanOptionalString(input.summary) ?? null),
+      input.recommendation === undefined ? (current.recommendation ?? null) : (cleanOptionalString(input.recommendation) ?? null),
+      input.metrics === undefined ? json(current.metrics) : json(input.metrics),
+      input.driverCards === undefined ? json(current.driverCards ?? []) : json(input.driverCards ?? []),
+      input.resultPreviews === undefined ? json(current.resultPreviews ?? []) : json(input.resultPreviews ?? []),
+      input.evidence === undefined ? json(current.evidence) : json(input.evidence),
+      input.generatedSql === undefined ? (current.generatedSql ?? null) : (cleanOptionalString(input.generatedSql) ?? null),
+      input.reviewStatus ?? current.reviewStatus,
+      input.error === undefined ? (current.error ?? null) : (cleanOptionalString(input.error) ?? null),
+      input.pinnedAiPinId === undefined ? (current.pinnedAiPinId ?? null) : (cleanOptionalString(input.pinnedAiPinId) ?? null),
+      now,
+      input.lastRunAt === undefined ? (current.lastRunAt ?? null) : (cleanOptionalString(input.lastRunAt) ?? null),
+      id,
+    );
+    return this.getAppInvestigation(id);
+  }
+
+  markAppInvestigationPinned(id: string, pinId: string): LocalAppInvestigation | null {
+    return this.updateAppInvestigation(id, { pinnedAiPinId: pinId });
   }
 
   createAppConversation(input: CreateLocalAppConversationInput): LocalAppConversation {
@@ -356,6 +538,35 @@ export class LocalAppStorage {
       CREATE INDEX IF NOT EXISTS idx_ai_pins_app_dashboard ON ai_pins(app_id, dashboard_id);
       CREATE INDEX IF NOT EXISTS idx_ai_pins_review ON ai_pins(review_status);
 
+      CREATE TABLE IF NOT EXISTS app_investigations (
+        id TEXT PRIMARY KEY,
+        app_id TEXT NOT NULL,
+        dashboard_id TEXT,
+        source_tile_id TEXT,
+        source_block_id TEXT,
+        title TEXT NOT NULL,
+        question TEXT NOT NULL,
+        intent TEXT NOT NULL,
+        context TEXT,
+        status TEXT NOT NULL,
+        summary TEXT,
+        recommendation TEXT,
+        metrics TEXT,
+        driver_cards TEXT,
+        result_previews TEXT,
+        evidence TEXT,
+        generated_sql TEXT,
+        review_status TEXT NOT NULL,
+        error TEXT,
+        pinned_ai_pin_id TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        last_run_at TEXT
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_app_investigations_app_dashboard ON app_investigations(app_id, dashboard_id);
+      CREATE INDEX IF NOT EXISTS idx_app_investigations_review ON app_investigations(review_status);
+
       CREATE TABLE IF NOT EXISTS app_conversations (
         id TEXT PRIMARY KEY,
         app_id TEXT NOT NULL,
@@ -383,6 +594,13 @@ export class LocalAppStorage {
     this.ensureColumn('ai_pins', 'analysis_plan', 'TEXT');
     this.ensureColumn('ai_pins', 'evidence', 'TEXT');
     this.ensureColumn('ai_pins', 'follow_ups', 'TEXT');
+    this.ensureColumn('app_investigations', 'source_tile_id', 'TEXT');
+    this.ensureColumn('app_investigations', 'source_block_id', 'TEXT');
+    this.ensureColumn('app_investigations', 'metrics', 'TEXT');
+    this.ensureColumn('app_investigations', 'driver_cards', 'TEXT');
+    this.ensureColumn('app_investigations', 'result_previews', 'TEXT');
+    this.ensureColumn('app_investigations', 'generated_sql', 'TEXT');
+    this.ensureColumn('app_investigations', 'pinned_ai_pin_id', 'TEXT');
   }
 
   private ensureColumn(table: string, column: string, type: string): void {
@@ -481,9 +699,54 @@ function rowToAiPin(row: Record<string, unknown>): LocalAiPin {
   };
 }
 
+function rowToInvestigation(row: Record<string, unknown>): LocalAppInvestigation {
+  return {
+    id: String(row.id),
+    appId: String(row.app_id),
+    dashboardId: optionalString(row.dashboard_id),
+    sourceTileId: optionalString(row.source_tile_id),
+    sourceBlockId: optionalString(row.source_block_id),
+    title: String(row.title),
+    question: String(row.question),
+    intent: parseInvestigationIntent(row.intent),
+    context: parseJson(row.context),
+    status: parseInvestigationStatus(row.status),
+    summary: optionalString(row.summary),
+    recommendation: optionalString(row.recommendation),
+    metrics: parseJson(row.metrics),
+    driverCards: (parseJson(row.driver_cards) as unknown[] | undefined) ?? [],
+    resultPreviews: (parseJson(row.result_previews) as unknown[] | undefined) ?? [],
+    evidence: parseJson(row.evidence),
+    generatedSql: optionalString(row.generated_sql),
+    reviewStatus: parseReviewStatus(row.review_status),
+    error: optionalString(row.error),
+    pinnedAiPinId: optionalString(row.pinned_ai_pin_id),
+    createdAt: String(row.created_at),
+    updatedAt: String(row.updated_at),
+    lastRunAt: optionalString(row.last_run_at),
+  };
+}
+
 function parseReviewStatus(value: unknown): LocalAiPinReviewStatus {
   if (value === 'draft_created' || value === 'certified' || value === 'rejected') return value;
   return 'needs_review';
+}
+
+function parseInvestigationIntent(value: unknown): LocalAppInvestigationIntent {
+  if (
+    value === 'diagnose_change'
+    || value === 'driver_breakdown'
+    || value === 'segment_compare'
+    || value === 'entity_drilldown'
+    || value === 'anomaly_investigation'
+    || value === 'trust_gap_review'
+  ) return value;
+  return 'driver_breakdown';
+}
+
+function parseInvestigationStatus(value: unknown): LocalAppInvestigationStatus {
+  if (value === 'running' || value === 'ready' || value === 'error') return value;
+  return 'draft';
 }
 
 function optionalString(value: unknown): string | undefined {
@@ -498,6 +761,10 @@ function titleFromMessages(messages: CreateLocalAppConversationInput['messages']
   const firstUserMessage = messages?.find((message) => message.role === 'user' && message.content.trim());
   if (!firstUserMessage) return undefined;
   return firstUserMessage.content.trim().replace(/\s+/g, ' ').slice(0, 80);
+}
+
+function titleFromQuestion(question: string): string {
+  return question.trim().replace(/\s+/g, ' ').slice(0, 90) || 'Research investigation';
 }
 
 function json(value: unknown): string | null {

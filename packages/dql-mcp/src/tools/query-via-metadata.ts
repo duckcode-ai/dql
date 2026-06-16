@@ -16,6 +16,17 @@ export const queryViaMetadataInput = {
     .describe(
       'SQL the agent inferred from the available manifest + dbt schema. Will be executed through the local DQL runtime against the certified data plane.',
     ),
+  intent: z
+    .enum([
+      'diagnose_change',
+      'driver_breakdown',
+      'segment_compare',
+      'entity_drilldown',
+      'anomaly_investigation',
+      'trust_gap_review',
+    ])
+    .optional()
+    .describe('Optional deep-research intent for dashboard drilldowns and investigation-style answers.'),
   upstreamRefs: z
     .array(z.string())
     .optional()
@@ -79,6 +90,7 @@ export async function queryViaMetadata(
   args: {
     question: string;
     proposedSql: string;
+    intent?: MetadataResearchIntent;
     upstreamRefs?: string[];
     proposedDomain?: string;
     proposedEntity?: string;
@@ -90,6 +102,20 @@ export async function queryViaMetadata(
 ) {
   const slug = deriveSlug(args.question);
   const proposedContractId = suggestContractId(slug, args.proposedDomain, args.proposedEntity);
+  const intent = normalizeMetadataResearchIntent(args.intent, args.question);
+  const safety = buildMetadataPreviewSql(args.proposedSql, args.limit ?? 200);
+  if (!safety.ok) {
+    return {
+      uncertified: true,
+      intent,
+      reviewStatus: 'rejected',
+      trustStatus: metadataTrustStatus('rejected', intent, undefined, safety.error),
+      evidence: metadataEvidence(intent, args, { status: 'rejected', error: safety.error }),
+      error: safety.error,
+      proposedSql: args.proposedSql,
+      draftBlock: undefined,
+    };
+  }
 
   let draftBlock: { path: string; askedTimes: number; proposedContractId: string } | undefined;
   if (args.saveDraft !== false) {
@@ -107,6 +133,10 @@ export async function queryViaMetadata(
   if (args.dryRun) {
     return {
       uncertified: true,
+      intent,
+      reviewStatus: 'draft_ready',
+      trustStatus: metadataTrustStatus('draft_ready', intent, draftBlock),
+      evidence: metadataEvidence(intent, args, { status: 'dry_run', draftBlock }),
       reason: 'dryRun=true; SQL not executed. Returned proposal only.',
       proposedSql: args.proposedSql,
       draftBlock,
@@ -128,23 +158,31 @@ export async function queryViaMetadata(
         cell: {
           id: `mcp-tier2-${slug}`,
           type: 'dql',
-          source: wrapSqlAsDqlCell(args.proposedSql),
+          source: wrapSqlAsDqlCell(safety.sql),
           title: args.question,
         },
       }),
     });
   } catch (err) {
+    const error = `Could not reach DQL runtime at ${base}. Start it with \`dql serve\` in ${ctx.projectRoot}. (${err instanceof Error ? err.message : String(err)})`;
     return {
       uncertified: true,
-      error: `Could not reach DQL runtime at ${base}. Start it with \`dql serve\` in ${ctx.projectRoot}. (${err instanceof Error ? err.message : String(err)})`,
+      intent,
+      trustStatus: metadataTrustStatus('draft_ready', intent, draftBlock, error),
+      evidence: metadataEvidence(intent, args, { status: 'runtime_unavailable', draftBlock, error }),
+      error,
       draftBlock,
     };
   }
 
   if (!response.ok) {
+    const error = `Runtime returned ${response.status}: ${await response.text()}`;
     return {
       uncertified: true,
-      error: `Runtime returned ${response.status}: ${await response.text()}`,
+      intent,
+      trustStatus: metadataTrustStatus('draft_ready', intent, draftBlock, error),
+      evidence: metadataEvidence(intent, args, { status: 'runtime_error', draftBlock, error }),
+      error,
       draftBlock,
     };
   }
@@ -158,18 +196,35 @@ export async function queryViaMetadata(
     error?: string;
   };
   if (payload.error) {
-    return { uncertified: true, error: payload.error, draftBlock };
+    return {
+      uncertified: true,
+      intent,
+      trustStatus: metadataTrustStatus('draft_ready', intent, draftBlock, payload.error),
+      evidence: metadataEvidence(intent, args, { status: 'execution_failed', draftBlock, error: payload.error }),
+      error: payload.error,
+      draftBlock,
+    };
   }
   const rows = payload.result?.rows ?? [];
 
   return {
     uncertified: true,
+    intent,
+    reviewStatus: 'draft_ready',
+    trustStatus: metadataTrustStatus('draft_ready', intent, draftBlock),
+    evidence: metadataEvidence(intent, args, {
+      status: 'executed',
+      draftBlock,
+      rowCount: rows.length,
+      durationMs: payload.result?.executionTime ?? null,
+    }),
     reason: 'no certified block matched the question; result derived from manifest + dbt schema',
     question: args.question,
     rowCount: rows.length,
     durationMs: payload.result?.executionTime ?? null,
     columns: payload.result?.columns ?? [],
     rows: args.limit ? rows.slice(0, args.limit) : rows,
+    proposedSql: args.proposedSql,
     draftBlock,
     promote: draftBlock
       ? `if you want this question certified, run: dql certify --from-draft ${draftBlock.path}`
@@ -178,6 +233,114 @@ export async function queryViaMetadata(
 }
 
 // -- helpers ---------------------------------------------------------------
+
+type MetadataResearchIntent =
+  | 'diagnose_change'
+  | 'driver_breakdown'
+  | 'segment_compare'
+  | 'entity_drilldown'
+  | 'anomaly_investigation'
+  | 'trust_gap_review';
+
+function normalizeMetadataResearchIntent(value: unknown, question: string): MetadataResearchIntent {
+  if (
+    value === 'diagnose_change'
+    || value === 'driver_breakdown'
+    || value === 'segment_compare'
+    || value === 'entity_drilldown'
+    || value === 'anomaly_investigation'
+    || value === 'trust_gap_review'
+  ) return value;
+  const text = question.toLowerCase();
+  if (/\b(trust|rely|certif|lineage|owner|caveat|gap)\b/.test(text)) return 'trust_gap_review';
+  if (/\b(anomal|exception|outlier|spike|dip)\b/.test(text)) return 'anomaly_investigation';
+  if (/\b(compare|versus| vs |segment|cohort)\b/.test(text)) return 'segment_compare';
+  if (/\b(customer|account|user|client|merchant|product|sku|entity)\b/.test(text)) return 'entity_drilldown';
+  if (/\b(why|changed|change|drop|decline|increase|decrease|month|week|quarter)\b/.test(text)) return 'diagnose_change';
+  if (/\b(driver|drove|break down|breakdown|contribute|top mover|movers)\b/.test(text)) return 'driver_breakdown';
+  return 'driver_breakdown';
+}
+
+function metadataTrustStatus(
+  reviewStatus: 'draft_ready' | 'rejected',
+  intent: MetadataResearchIntent,
+  draftBlock?: { path: string; askedTimes: number; proposedContractId: string },
+  error?: string,
+) {
+  return {
+    label: 'AI-generated metadata research',
+    uncertified: true,
+    intent,
+    reviewStatus,
+    certification: 'uncertified',
+    draftPath: draftBlock?.path,
+    promotionPath: draftBlock ? 'dql certify --from-draft' : undefined,
+    caveats: [
+      'No certified block exactly answered this grain.',
+      'SQL was generated from metadata and must be reviewed before certification.',
+      ...(error ? [`Execution caveat: ${error}`] : []),
+    ],
+  };
+}
+
+function metadataEvidence(
+  intent: MetadataResearchIntent,
+  args: {
+    question: string;
+    proposedSql: string;
+    upstreamRefs?: string[];
+    proposedDomain?: string;
+    proposedEntity?: string;
+    limit?: number;
+  },
+  execution: {
+    status: string;
+    draftBlock?: { path: string; askedTimes: number; proposedContractId: string };
+    rowCount?: number;
+    durationMs?: number | null;
+    error?: string;
+  },
+) {
+  return {
+    planner: {
+      mode: 'metadata_text_to_sql',
+      intent,
+      steps: metadataInvestigationSteps(intent),
+      reviewRequired: true,
+      boundedPreviewLimit: args.limit ?? 200,
+    },
+    certifiedContext: {
+      upstreamRefs: args.upstreamRefs ?? [],
+      proposedDomain: args.proposedDomain,
+      proposedEntity: args.proposedEntity,
+      draftBlock: execution.draftBlock,
+    },
+    execution: {
+      status: execution.status,
+      rowCount: execution.rowCount,
+      durationMs: execution.durationMs,
+      error: execution.error,
+    },
+    assumptions: [
+      `Intent classified as ${intent}.`,
+      'Certified blocks and metadata are context; this generated SQL is not certified.',
+      'Preview SQL is read-only and bounded before execution.',
+      execution.draftBlock
+        ? `Draft review path captured at ${execution.draftBlock.path}.`
+        : 'No draft block was captured for this run.',
+    ],
+  };
+}
+
+function metadataInvestigationSteps(intent: MetadataResearchIntent): string[] {
+  const common = ['trust check', 'draft review path'];
+  if (intent === 'trust_gap_review') return ['certification review', 'lineage review', 'owner and caveat check', ...common];
+  if (intent === 'entity_drilldown') return ['entity value match', 'metric trend', 'exception rows', ...common];
+  if (intent === 'segment_compare') return ['segment grouping', 'baseline comparison', 'top movers', ...common];
+  if (intent === 'anomaly_investigation') return ['baseline comparison', 'trend check', 'exception rows', 'top movers', ...common];
+  if (intent === 'diagnose_change') return ['baseline comparison', 'trend check', 'top movers', 'segment contribution', ...common];
+  return ['top movers', 'segment contribution', 'exception rows', ...common];
+}
 
 const STOPWORDS = new Set([
   'a', 'an', 'and', 'are', 'as', 'at', 'be', 'by', 'do', 'for', 'from',
@@ -220,6 +383,105 @@ function wrapSqlAsDqlCell(sql: string): string {
   // Tier-2 cells are raw SQL. The runtime accepts SQL directly; no DQL
   // block wrapper is required for execution.
   return sql;
+}
+
+const METADATA_PREVIEW_FORBIDDEN_SQL = [
+  'alter',
+  'analyze',
+  'attach',
+  'call',
+  'copy',
+  'create',
+  'delete',
+  'detach',
+  'drop',
+  'export',
+  'grant',
+  'import',
+  'insert',
+  'install',
+  'load',
+  'merge',
+  'pragma',
+  'reset',
+  'revoke',
+  'set',
+  'truncate',
+  'update',
+  'vacuum',
+];
+
+function buildMetadataPreviewSql(sql: string, limit: number): { ok: true; sql: string } | { ok: false; error: string } {
+  const trimmed = sql.trim();
+  if (!trimmed) return { ok: false, error: 'Tier-2 metadata SQL is empty.' };
+  const withoutTrailingSemicolon = trimmed.replace(/;\s*$/, '').trim();
+  const scanSql = stripSqlStringsAndComments(withoutTrailingSemicolon).trim();
+  if (!/^(select|with)\b/i.test(scanSql)) {
+    return { ok: false, error: 'Tier-2 metadata SQL only supports read-only SELECT or WITH queries.' };
+  }
+  if (scanSql.includes(';')) {
+    return { ok: false, error: 'Tier-2 metadata SQL only supports one statement.' };
+  }
+  const forbiddenPattern = new RegExp(`\\b(${METADATA_PREVIEW_FORBIDDEN_SQL.join('|')})\\b`, 'i');
+  const forbidden = scanSql.match(forbiddenPattern)?.[1];
+  if (forbidden) {
+    return { ok: false, error: `Tier-2 metadata SQL rejected unsupported statement keyword: ${forbidden.toUpperCase()}.` };
+  }
+  const boundedLimit = Math.min(Math.max(Math.trunc(limit), 1), 10000);
+  return {
+    ok: true,
+    sql: `SELECT * FROM (\n${withoutTrailingSemicolon}\n) AS dql_mcp_metadata_preview LIMIT ${boundedLimit}`,
+  };
+}
+
+function stripSqlStringsAndComments(sql: string): string {
+  let output = '';
+  for (let index = 0; index < sql.length; index += 1) {
+    const current = sql[index];
+    const next = sql[index + 1];
+    if (current === '-' && next === '-') {
+      output += '  ';
+      index += 2;
+      while (index < sql.length && sql[index] !== '\n') {
+        output += ' ';
+        index += 1;
+      }
+      if (index < sql.length) output += '\n';
+      continue;
+    }
+    if (current === '/' && next === '*') {
+      output += '  ';
+      index += 2;
+      while (index < sql.length && !(sql[index] === '*' && sql[index + 1] === '/')) {
+        output += sql[index] === '\n' ? '\n' : ' ';
+        index += 1;
+      }
+      if (index < sql.length) {
+        output += '  ';
+        index += 1;
+      }
+      continue;
+    }
+    if (current === "'" || current === '"') {
+      const quote = current;
+      output += ' ';
+      while (index + 1 < sql.length) {
+        index += 1;
+        output += sql[index] === '\n' ? '\n' : ' ';
+        if (sql[index] === quote) {
+          if (sql[index + 1] === quote) {
+            index += 1;
+            output += ' ';
+            continue;
+          }
+          break;
+        }
+      }
+      continue;
+    }
+    output += current;
+  }
+  return output;
 }
 
 interface DraftRecord {

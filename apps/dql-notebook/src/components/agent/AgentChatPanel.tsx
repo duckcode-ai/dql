@@ -23,6 +23,7 @@ export function AgentChatPanel({
   addToAppTarget,
   conversationTarget,
   onConversationUpdated,
+  onInterceptPrompt,
   initialInput,
   autoAsk,
   emptyHint,
@@ -43,6 +44,7 @@ export function AgentChatPanel({
   addToAppTarget?: { appId: string; dashboardId: string };
   conversationTarget?: { appId: string; dashboardId?: string; notebookPath?: string };
   onConversationUpdated?: () => void;
+  onInterceptPrompt?: (text: string) => boolean;
   initialInput?: string;
   autoAsk?: { text: string; nonce: number };
   emptyHint?: string;
@@ -91,6 +93,10 @@ export function AgentChatPanel({
   const send = async (textOverride?: string) => {
     const text = (textOverride ?? input).trim();
     if (!text || running) return;
+    if (onInterceptPrompt?.(text)) {
+      setInput('');
+      return;
+    }
     const userMessage: LocalMessage = { id: makeMessageId(), role: 'user', content: text, createdAt: new Date().toISOString() };
     const next: LocalMessage[] = [...messages, userMessage];
     setMessages(next);

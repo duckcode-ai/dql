@@ -16,31 +16,33 @@ export interface CreateServerOptions {
   version?: string;
 }
 
+export const DQL_MCP_INSTRUCTIONS =
+  'DQL exposes governed analytics under graduated trust:\n' +
+  ' Tier 1 — Use certified artifacts when the user asks for an exact saved block, ' +
+  'direct KPI, or definition. Discover candidates with `kg_search`, `search_blocks`, ' +
+  'and `get_block`; execute data blocks with `query_via_block` only when the block ' +
+  'grain exactly answers the question. Certified blocks may optionally enforce ' +
+  'DataLex contract resolution when a DataLex manifest is loaded.\n' +
+  ' Tier 2 — For named customer/user/account questions, custom filters, rankings, ' +
+  'breakdowns, comparisons, drill-throughs, or any different grain, use certified ' +
+  'blocks/terms only as context and call `query_via_metadata` with read-only SQL ' +
+  'inferred from the manifest, semantic layer, dbt/source metadata, and runtime ' +
+  'schema. Surface `uncertified: true` and the draft review path verbatim.\n' +
+  ' Tier 3 — If the available metadata does not identify a safe table, metric, ' +
+  'dimension, or grain, refuse and ask for the missing business object or metric.\n' +
+  'Other tools support the loop: `list_proposals` shows repeated Tier-2 drafts, ' +
+  '`suggest_block` proposes shared building blocks, `certify` evaluates governance, ' +
+  '`lineage_impact` traces dependencies, `list_metrics` / `list_dimensions` expose ' +
+  'the semantic layer, `kg_search` searches the DQL agent knowledge graph, and ' +
+  '`feedback_record` records answer quality. Never present Tier-2 output as certified.';
+
 export function createDQLMCPServer(options: CreateServerOptions = {}): McpServer {
   const projectRoot = options.projectRoot ?? findProjectRoot(process.cwd());
   const ctx = new DQLContext({ projectRoot, dqlVersion: options.version });
 
   const server = new McpServer(
     { name: 'dql-mcp', version: options.version ?? '0.1.0' },
-    {
-      instructions:
-        'DQL exposes certified, git-versioned analytics blocks under graduated trust:\n' +
-        ' Tier 1 — Always try `query_via_block` first. It only serves blocks that are ' +
-        '`status = "certified"` AND have a resolved `datalex_contract`. The answer is ' +
-        'safe to ship to dashboards.\n' +
-        ' Tier 2 — When no certified block matches, call `query_via_metadata` with the ' +
-        'SQL you inferred from the manifest + dbt schema. The result is returned with ' +
-        '`uncertified: true` — surface that flag to the user verbatim. The proposal is ' +
-        'auto-saved as a draft block under blocks/_drafts/ for human certification.\n' +
-        ' Tier 3 — If the question is unanswerable from the available data, refuse and ' +
-        'tell the user why.\n' +
-        'Other tools support the loop: `search_blocks` / `get_block` to discover Tier-1 ' +
-        'matches, `list_proposals` to see the review queue, `suggest_block` to propose ' +
-        'a new block source-of-truth, `certify` to evaluate governance rules, ' +
-        '`lineage_impact` to trace upstream/downstream, `list_metrics` / ' +
-        '`list_dimensions` for the semantic layer. Never fabricate SQL outside ' +
-        '`query_via_metadata` — it captures provenance the human needs to certify.',
-    },
+    { instructions: DQL_MCP_INSTRUCTIONS },
   );
 
   server.registerTool(
@@ -57,7 +59,7 @@ export function createDQLMCPServer(options: CreateServerOptions = {}): McpServer
     'query_via_block',
     {
       description:
-        'Tier-1 of graduated trust. Execute a certified block against the local DQL runtime. Refuses non-certified blocks AND certified blocks whose datalex_contract reference is unresolved. Always try this first; fall back to query_via_metadata only when this returns "no block named".',
+        'Tier-1 of graduated trust. Execute a certified block against the local DQL runtime when the block grain exactly answers the user question. Refuses non-certified blocks and refuses unresolved datalex_contract references when a DataLex manifest is loaded. For named-entity filters, custom rankings, breakdowns, comparisons, or drill-throughs, use the block as context and call query_via_metadata instead.',
       inputSchema: queryViaBlockInput,
     },
     async (args) => wrap(await queryViaBlock(ctx, args)),
@@ -66,7 +68,7 @@ export function createDQLMCPServer(options: CreateServerOptions = {}): McpServer
     'query_via_metadata',
     {
       description:
-        'Tier-2 of graduated trust. Use ONLY when query_via_block has no matching certified block. Provide the SQL you inferred from the manifest + dbt schema; the runtime executes it and returns the result with `uncertified: true`. The proposal is auto-saved as a draft block under blocks/_drafts/. Surface the `uncertified` flag verbatim and tell the user about the `dql certify --from-draft` command if they want the answer certified for next time.',
+        'Tier-2 of graduated trust. Use when no certified block exactly answers the requested grain, including why-changed diagnostics, named customer/user/account filters, rankings, breakdowns, comparisons, anomalies, and drill-throughs. Provide one read-only SELECT/WITH query inferred from DQL metadata, semantic/dbt/source context, and runtime schema. The runtime executes a bounded preview, returns `uncertified: true` plus trustStatus/evidence, and saves a draft block under blocks/_drafts/. Surface the `uncertified` flag and review path verbatim.',
       inputSchema: queryViaMetadataInput,
     },
     async (args) => wrap(await queryViaMetadata(ctx, args)),

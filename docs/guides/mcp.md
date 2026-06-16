@@ -2,7 +2,8 @@
 
 DQL ships an [MCP](https://modelcontextprotocol.io) server that gives any
 MCP-capable agent **governed** access to your analytics: it answers from
-certified blocks first and clearly flags anything it has to improvise. Point
+certified blocks when they exactly fit the question and clearly flags anything
+it has to generate. Point
 Claude Code, Claude Desktop, Cursor, Codex, or any other MCP client at it and
 your agent answers data questions from trusted, git-versioned blocks — citing
 them — instead of inventing SQL.
@@ -13,13 +14,14 @@ The server exposes **12 tools** organized around a graduated-trust loop:
 
 | Tier | Tools | Behavior |
 |---|---|---|
-| **1 — certified** | `query_via_block`, `search_blocks`, `get_block` | Serves only `status = "certified"` blocks. Safe to ship. |
-| **2 — proposed** | `query_via_metadata`, `list_proposals`, `suggest_block` | When no certified block matches, the agent's SQL runs but returns `uncertified: true` and is saved as a draft under `blocks/_drafts/` for human review. |
+| **1 — certified** | `query_via_block`, `search_blocks`, `get_block` | Serves only `status = "certified"` blocks when the block grain exactly answers the question. Safe to ship. |
+| **2 — proposed** | `query_via_metadata`, `list_proposals`, `suggest_block` | For named customers/users/accounts, custom filters, rankings, breakdowns, comparisons, drill-throughs, or missing exact blocks, the agent's read-only SQL runs as a bounded preview, returns `uncertified: true`, and is saved as a draft under `blocks/_drafts/` for human review. |
 | **support** | `certify`, `lineage_impact`, `list_metrics`, `list_dimensions`, `kg_search`, `feedback_record` | Governance checks, lineage tracing, the semantic layer, and feedback. |
 
-The server's instructions tell the agent to **always try Tier 1 first**, flag
-Tier‑2 answers verbatim, and refuse when a question isn't answerable — so
-improvised SQL never silently becomes a "trusted" number.
+The server's instructions tell the agent to search certified context first,
+execute a certified block only for an exact direct KPI or saved-block match,
+flag Tier‑2 answers verbatim, and refuse when metadata is insufficient — so
+generated SQL never silently becomes a "trusted" number.
 
 ## Run the server
 
@@ -119,7 +121,7 @@ After wiring any client, ask:
 > *"What was our revenue last month?"*
 
 A certified block match → the agent answers from it and cites it. No match →
-it proposes SQL flagged **Uncertified** and files a draft you can review with
+or a deeper/custom-grain question → it proposes SQL flagged **Uncertified** and files a draft you can review with
 `dql certify --from-draft`. Build the knowledge graph first if you haven't:
 
 ```bash

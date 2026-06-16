@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { loadSkills, parseSkill, buildSkillsPrompt } from './loader.js';
+import { loadSkills, parseSkill, buildSkillsPrompt, buildSkillBlockHints } from './loader.js';
 
 let root: string;
 
@@ -22,9 +22,11 @@ id: cxo-monthly-review
 user: alice@acme.com
 description: Alice's monthly board review
 preferred_metrics: [arr, nrr, gross_margin]
+preferred_blocks: [revenue_total]
 vocabulary:
   ARR: metric:arr
   "logo churn": metric:logo_churn
+  "bookings": block:bookings_by_month
 ---
 Body content.`;
     const skill = parseSkill(raw, '/skills/cxo.skill.md');
@@ -32,9 +34,11 @@ Body content.`;
     expect(skill?.id).toBe('cxo-monthly-review');
     expect(skill?.user).toBe('alice@acme.com');
     expect(skill?.preferredMetrics).toEqual(['arr', 'nrr', 'gross_margin']);
+    expect(skill?.preferredBlocks).toEqual(['revenue_total']);
     expect(skill?.vocabulary).toEqual({
       ARR: 'metric:arr',
       'logo churn': 'metric:logo_churn',
+      bookings: 'block:bookings_by_month',
     });
     expect(skill?.body).toBe('Body content.');
   });
@@ -64,7 +68,7 @@ describe('loadSkills', () => {
 
 describe('buildSkillsPrompt', () => {
   const skills = [
-    { id: 'shared', preferredMetrics: ['arr'], preferredBlocks: [], vocabulary: {}, body: 'Shared body', sourcePath: '' },
+    { id: 'shared', preferredMetrics: ['arr'], preferredBlocks: ['revenue_total'], vocabulary: {}, body: 'Shared body', sourcePath: '' },
     { id: 'alice', user: 'alice@acme.com', preferredMetrics: [], preferredBlocks: [], vocabulary: { ARR: 'metric:arr' }, body: 'Alice body', sourcePath: '' },
   ];
   it('filters to skills matching the active user (or unscoped)', () => {
@@ -79,5 +83,35 @@ describe('buildSkillsPrompt', () => {
   });
   it('returns empty when no relevant skills', () => {
     expect(buildSkillsPrompt([], null)).toBe('');
+  });
+  it('marks skills as advisory and includes preferred blocks', () => {
+    const prompt = buildSkillsPrompt(skills, null);
+    expect(prompt).toContain('Skills are advisory business preferences');
+    expect(prompt).toContain('Preferred blocks: revenue_total');
+  });
+});
+
+describe('buildSkillBlockHints', () => {
+  it('collects preferred block and vocabulary block refs from active skills', () => {
+    const hints = buildSkillBlockHints([
+      {
+        id: 'shared',
+        preferredMetrics: [],
+        preferredBlocks: ['revenue_total'],
+        vocabulary: { bookings: 'block:bookings_by_month', arr: 'metric:arr' },
+        body: '',
+        sourcePath: '',
+      },
+      {
+        id: 'alice',
+        user: 'alice@acme.com',
+        preferredMetrics: [],
+        preferredBlocks: ['private_revenue'],
+        vocabulary: {},
+        body: '',
+        sourcePath: '',
+      },
+    ], null);
+    expect(hints).toEqual(['revenue_total', 'bookings_by_month']);
   });
 });

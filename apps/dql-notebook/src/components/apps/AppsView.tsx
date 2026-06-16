@@ -36,6 +36,7 @@ import {
   type DashboardRunResponse,
   type GenerateAppResponse,
   type GeneratedAppPlan,
+  type LocalAppInvestigation,
 } from '../../api/client';
 import type { AppSummary, AppWorkspaceExperience, AppWorkspaceSection } from '../../store/types';
 import type { ThemeMode } from '../../themes/notebook-theme';
@@ -48,6 +49,17 @@ type AppExperience = AppWorkspaceExperience;
 type BuilderMode = 'ai' | 'classic';
 type AppSection = AppWorkspaceSection;
 type LibraryFilter = 'all' | 'mine' | 'shared' | 'fav' | 'review';
+
+interface AppResearchSeed {
+  question: string;
+  title?: string;
+  dashboardId?: string;
+  sourceTileId?: string;
+  sourceBlockId?: string;
+  context?: unknown;
+  intent?: LocalAppInvestigation['intent'];
+  nonce: number;
+}
 
 interface AppPromptExample {
   title: string;
@@ -945,6 +957,7 @@ function AppWorkspaceSurface({
   const [selectedBlockId, setSelectedBlockId] = useState<string | null>(dashboardBlockIds[0] ?? null);
   const [dashboardRun, setDashboardRun] = useState<DashboardRunResponse | null>(null);
   const [askSeed, setAskSeed] = useState<{ text: string; nonce: number } | null>(null);
+  const [researchSeed, setResearchSeed] = useState<AppResearchSeed | null>(null);
   const [shareStatus, setShareStatus] = useState<'idle' | 'copied' | 'downloaded' | 'ready'>('idle');
   const [shareText, setShareText] = useState('');
   const handleDashboardRunChange = useCallback((run: DashboardRunResponse | null) => {
@@ -955,6 +968,11 @@ function AppWorkspaceSurface({
     onExplainChange(true);
     setAskSeed({ text: question, nonce: Date.now() });
   }, [onExplainChange]);
+  const handleStartResearch = useCallback((seed: Omit<AppResearchSeed, 'nonce'>) => {
+    setResearchSeed({ ...seed, nonce: Date.now() });
+    onSectionChange('research');
+    onExplainChange(false);
+  }, [onExplainChange, onSectionChange]);
 
   useEffect(() => {
     if (dashboardBlockIds.length === 0) {
@@ -1141,6 +1159,14 @@ function AppWorkspaceSurface({
               />
             ) : section === 'notebooks' ? (
               <NotebookListPanel appDoc={appDoc} />
+            ) : section === 'research' ? (
+              <ResearchPanel
+                appDoc={appDoc}
+                dashboardDoc={dashboardDoc}
+                seed={researchSeed}
+                onSeedHandled={() => setResearchSeed(null)}
+                onDashboardChanged={onDashboardChanged}
+              />
             ) : section === 'ai' ? (
               <AiPinsPanel appDoc={appDoc} />
             ) : section === 'drafts' ? (
@@ -1161,6 +1187,7 @@ function AppWorkspaceSurface({
               askSeed={askSeed}
               themeMode={themeMode}
               onSelectBlock={setSelectedBlockId}
+              onStartResearch={handleStartResearch}
             />
           ) : null}
         </div>
@@ -1245,6 +1272,7 @@ function AppWorkspaceTabs({
   const tabs: Array<{ id: AppSection; label: string; count?: number; icon: ReactNode }> = [
     { id: 'dashboards', label: 'Dashboards', count: appDoc?.dashboards.length ?? 0, icon: <LayoutDashboard size={14} /> },
     { id: 'notebooks', label: 'Notebooks', count: appDoc?.notebooks?.length ?? appDoc?.app.notebooks?.length ?? 0, icon: <BookOpenText size={14} /> },
+    { id: 'research', label: 'Research', count: appDoc?.investigations?.length ?? 0, icon: <Search size={14} /> },
     { id: 'ai', label: 'AI', count: appDoc?.aiPins?.length ?? 0, icon: <Bot size={14} /> },
     ...(experience === 'build' ? [
       { id: 'drafts' as const, label: 'Drafts', count: appDoc?.drafts?.length ?? 0, icon: <FileText size={14} /> },
@@ -1316,6 +1344,7 @@ function AppCopilotPanel({
   askSeed,
   themeMode,
   onSelectBlock,
+  onStartResearch,
 }: {
   app: AppSummary | null;
   appDoc: AppDocumentSummary | null;
@@ -1325,6 +1354,7 @@ function AppCopilotPanel({
   askSeed?: { text: string; nonce: number } | null;
   themeMode: ThemeMode;
   onSelectBlock: (blockId: string | null) => void;
+  onStartResearch: (seed: Omit<AppResearchSeed, 'nonce'>) => void;
 }) {
   const [evidenceOpen, setEvidenceOpen] = useState(false);
   const blockTiles = useMemo(() => {
@@ -1392,7 +1422,7 @@ function AppCopilotPanel({
     ? `${selectedRows.toLocaleString()} rows${selectedColumns ? ` / ${selectedColumns} fields` : ''}`
     : focusStatus;
 
-  const contextJson = JSON.stringify({
+  const contextPayload = {
     scope: selectedBlockContext ? 'selected-dashboard-block' : 'dashboard',
     responseStyle: {
       audience: 'CXO and business stakeholder',
@@ -1417,7 +1447,19 @@ function AppCopilotPanel({
       status: dashboardRun?.tiles.find((tile) => tile.tileId === block.tileId || tile.blockId === block.blockId)?.status,
       rowCount: dashboardRun?.tiles.find((tile) => tile.tileId === block.tileId || tile.blockId === block.blockId)?.result?.rowCount,
     })),
-  }, null, 2);
+  };
+  const contextJson = JSON.stringify(contextPayload, null, 2);
+  const startResearch = (question: string) => {
+    onStartResearch({
+      question,
+      title: selectedBlock ? `${selectedBlock.title}: ${question}` : question,
+      dashboardId: dashboardDoc?.dashboard.id,
+      sourceTileId: selectedBlock?.tileId,
+      sourceBlockId: selectedBlock?.blockId,
+      context: contextPayload,
+      intent: researchIntentFromPrompt(question),
+    });
+  };
   const promptStarters = [
     {
       label: 'Explain impact',
@@ -1494,6 +1536,18 @@ function AppCopilotPanel({
         </div>
       ) : null}
 
+      <div className="dql-app-research-launchers">
+        <button type="button" onClick={() => startResearch(selectedBlock ? `Why did ${selectedBlock.title} change?` : 'Why did this dashboard change?')}>
+          <Search size={13} /> Why
+        </button>
+        <button type="button" onClick={() => startResearch(selectedBlock ? `Break ${selectedBlock.title} down by the strongest driver.` : 'Break this dashboard down by the strongest driver.')}>
+          <LineChart size={13} /> Drivers
+        </button>
+        <button type="button" onClick={() => startResearch(selectedBlock ? `Can leaders rely on ${selectedBlock.title}?` : 'Can leaders rely on this dashboard?')}>
+          <ShieldCheck size={13} /> Trust
+        </button>
+      </div>
+
       <div className="dql-app-assistant-chat">
         <AgentChatPanel
           title={selectedBlock ? selectedBlock.title : 'Ask the app copilot'}
@@ -1505,6 +1559,11 @@ function AppCopilotPanel({
           autoAsk={askSeed ?? undefined}
           emptyHint="Ask what changed, why it matters, what action to take, or what evidence needs review."
           inputPlaceholder="Ask a business question..."
+          onInterceptPrompt={(text) => {
+            if (!isResearchPrompt(text)) return false;
+            startResearch(text);
+            return true;
+          }}
           variant="executive"
           embedded
           showHeader={false}
@@ -1513,6 +1572,296 @@ function AppCopilotPanel({
         />
       </div>
     </aside>
+  );
+}
+
+function ResearchPanel({
+  appDoc,
+  dashboardDoc,
+  seed,
+  onSeedHandled,
+  onDashboardChanged,
+}: {
+  appDoc: AppDocumentSummary | null;
+  dashboardDoc: DashboardDocumentResponse | null;
+  seed: AppResearchSeed | null;
+  onSeedHandled: () => void;
+  onDashboardChanged: (dashboard: DashboardDocumentResponse['dashboard']) => void;
+}) {
+  const appId = appDoc?.app.id;
+  const activeDashboardId = dashboardDoc?.dashboard.id;
+  const [items, setItems] = useState<LocalAppInvestigation[]>(() => appDoc?.investigations ?? []);
+  const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [busy, setBusy] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [evidenceTab, setEvidenceTab] = useState<'preview' | 'sql' | 'assumptions' | 'context'>('preview');
+
+  useEffect(() => {
+    if (!appId) {
+      setItems([]);
+      setSelectedId(null);
+      return;
+    }
+    let cancelled = false;
+    setLoading(true);
+    void api.listAppInvestigations(appId).then((investigations) => {
+      if (cancelled) return;
+      setItems(investigations);
+      setSelectedId((current) => current ?? investigations[0]?.id ?? null);
+    }).finally(() => {
+      if (!cancelled) setLoading(false);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [appId]);
+
+  useEffect(() => {
+    if (!seed || !appId) return;
+    let cancelled = false;
+    const create = async () => {
+      setBusy('create');
+      setError(null);
+      const result = await api.createAppInvestigation(appId, {
+        dashboardId: seed.dashboardId ?? activeDashboardId,
+        sourceTileId: seed.sourceTileId,
+        sourceBlockId: seed.sourceBlockId,
+        title: seed.title,
+        question: seed.question,
+        intent: seed.intent,
+        context: seed.context,
+        run: true,
+      });
+      if (cancelled) return;
+      setBusy(null);
+      if (!result.ok) {
+        setError(result.error);
+        return;
+      }
+      setItems((current) => upsertInvestigation(current, result.investigation));
+      setSelectedId(result.investigation.id);
+      setEvidenceTab('preview');
+      onSeedHandled();
+    };
+    void create();
+    return () => {
+      cancelled = true;
+    };
+  }, [seed?.nonce, appId, activeDashboardId]);
+
+  const selected = items.find((item) => item.id === selectedId) ?? items[0] ?? null;
+
+  const createResearch = async (question: string, intent?: LocalAppInvestigation['intent']) => {
+    if (!appId) return;
+    setBusy('create');
+    setError(null);
+    const result = await api.createAppInvestigation(appId, {
+      dashboardId: activeDashboardId,
+      title: question,
+      question,
+      intent,
+      context: {
+        scope: 'dashboard',
+        appId,
+        appName: appDoc?.app.name,
+        dashboardId: activeDashboardId,
+        dashboardTitle: dashboardDoc?.dashboard.metadata.title,
+        domain: appDoc?.app.domain ?? dashboardDoc?.dashboard.metadata.domain,
+      },
+      run: true,
+    });
+    setBusy(null);
+    if (!result.ok) {
+      setError(result.error);
+      return;
+    }
+    setItems((current) => upsertInvestigation(current, result.investigation));
+    setSelectedId(result.investigation.id);
+    setEvidenceTab('preview');
+  };
+
+  const rerunResearch = async (investigation: LocalAppInvestigation) => {
+    if (!appId) return;
+    setBusy(investigation.id);
+    setError(null);
+    const result = await api.runAppInvestigation(appId, investigation.id);
+    setBusy(null);
+    if (!result.ok) {
+      setError(result.error);
+      return;
+    }
+    setItems((current) => upsertInvestigation(current, result.investigation));
+    setEvidenceTab('preview');
+  };
+
+  const pinResearch = async (investigation: LocalAppInvestigation): Promise<LocalAppInvestigation | null> => {
+    if (!appId) return null;
+    setBusy(`pin:${investigation.id}`);
+    setError(null);
+    const result = await api.pinAppInvestigation(appId, investigation.id, {
+      dashboardId: investigation.dashboardId ?? activeDashboardId,
+      title: investigation.title,
+    });
+    setBusy(null);
+    if (!result.ok) {
+      setError(result.error);
+      return null;
+    }
+    setItems((current) => upsertInvestigation(current, result.investigation));
+    setSelectedId(result.investigation.id);
+    if (result.dashboard) onDashboardChanged(result.dashboard);
+    return result.investigation;
+  };
+
+  const promoteResearch = async (investigation: LocalAppInvestigation) => {
+    if (!appId) return;
+    if (!investigation.generatedSql) {
+      setError('Add reviewed SQL before creating a draft block.');
+      return;
+    }
+    const pinned = investigation.pinnedAiPinId ? investigation : await pinResearch(investigation);
+    const pinId = pinned?.pinnedAiPinId;
+    if (!pinId) return;
+    setBusy(`promote:${investigation.id}`);
+    setError(null);
+    const result = await api.promoteAiPin(appId, pinId);
+    setBusy(null);
+    if (!result.ok) {
+      setError(result.error ?? 'Draft block could not be created.');
+      return;
+    }
+    const refreshed = await api.getAppInvestigation(appId, investigation.id);
+    if (refreshed) setItems((current) => upsertInvestigation(current, refreshed));
+  };
+
+  if (!appDoc) return <EmptyPanel title="No App selected." detail="Choose an App before starting research." />;
+
+  return (
+    <div className="dql-app-research-shell">
+      <section className="dql-app-research-list">
+        <div className="dql-app-research-head">
+          <span><Search size={14} /> Research</span>
+          <b>{items.length}</b>
+        </div>
+        <button
+          type="button"
+          className="dql-app-research-new"
+          onClick={() => void createResearch('What changed and what drove it?', 'diagnose_change')}
+          disabled={busy === 'create'}
+        >
+          <Plus size={14} /> New investigation
+        </button>
+        {loading ? <EmptyPanel title="Loading research..." detail="Reading local investigations." compact /> : null}
+        {!loading && items.length === 0 ? (
+          <EmptyPanel title="No research yet." detail="Open a dashboard tile and ask why, drivers, exceptions, or trust." compact />
+        ) : null}
+        <div className="dql-app-research-items">
+          {items.map((item) => (
+            <button
+              key={item.id}
+              type="button"
+              className={selected?.id === item.id ? 'on' : ''}
+              onClick={() => {
+                setSelectedId(item.id);
+                setEvidenceTab('preview');
+              }}
+            >
+              <span>{formatBusinessLabel(item.title)}</span>
+              <small>{formatBusinessLabel(item.intent)} / {formatBusinessLabel(item.status)}</small>
+            </button>
+          ))}
+        </div>
+      </section>
+
+      <section className="dql-app-research-detail">
+        {selected ? (
+          <>
+            <div className="dql-app-research-titlebar">
+              <div>
+                <span className="dql-app-assistant-kicker">Investigation</span>
+                <h2>{formatBusinessLabel(selected.title)}</h2>
+              </div>
+              <div className="dql-app-research-actions">
+                <StatusSeal tone={selected.status === 'error' ? 'draft' : 'agentic'}>{selected.reviewStatus}</StatusSeal>
+                <button type="button" className="dql-apps-btn dql-apps-btn-line" onClick={() => void rerunResearch(selected)} disabled={busy === selected.id}>
+                  <Workflow size={13} /> {busy === selected.id ? 'Running...' : 'Run'}
+                </button>
+                <button type="button" className="dql-apps-btn dql-apps-btn-line" onClick={() => void pinResearch(selected)} disabled={busy === `pin:${selected.id}`}>
+                  <MapPin size={13} /> {selected.pinnedAiPinId ? 'Pinned' : 'Pin'}
+                </button>
+                <button type="button" className="dql-apps-btn dql-apps-btn-primary" onClick={() => void promoteResearch(selected)} disabled={!selected.generatedSql || busy === `promote:${selected.id}`}>
+                  <FileText size={13} /> Draft block
+                </button>
+              </div>
+            </div>
+
+            {error ? <div className="dql-app-error">{error}</div> : null}
+            {selected.error ? <div className="dql-app-error">{selected.error}</div> : null}
+
+            <div className="dql-app-research-grid">
+              <section className="dql-app-research-answer">
+                <PanelHead title="Business answer" meta={formatBusinessLabel(selected.intent)} />
+                <p>{selected.summary ?? 'Run this investigation to generate the business answer.'}</p>
+                <div className="dql-app-research-callout">{selected.recommendation ?? 'Review the evidence before promoting this result.'}</div>
+              </section>
+
+              <section className="dql-app-research-metrics">
+                <PanelHead title="What changed" meta={selected.dashboardId ?? activeDashboardId ?? 'app'} />
+                <ResearchMetricStrip investigation={selected} />
+              </section>
+            </div>
+
+            <section className="dql-app-research-section">
+              <PanelHead title="Top drivers" meta={`${(selected.driverCards ?? []).length} ranked`} />
+              <div className="dql-app-research-drivers">
+                {(selected.driverCards ?? []).slice(0, 6).map((driver, index) => {
+                  const record = asUiRecord(driver);
+                  return (
+                    <div key={index} className="dql-app-research-driver">
+                      <b>{String(record.title ?? `Driver ${index + 1}`)}</b>
+                      <span>{String(record.contribution ?? record.value ?? 'Evidence')}</span>
+                      <p>{String(record.explanation ?? 'Review this driver with the supporting evidence.')}</p>
+                    </div>
+                  );
+                })}
+              </div>
+            </section>
+
+            <section className="dql-app-research-section">
+              <div className="dql-app-research-evidence-head">
+                <PanelHead title="Evidence" meta="review-required" />
+                <div className="dql-app-research-tabs">
+                  {(['preview', 'sql', 'assumptions', 'context'] as const).map((tab) => (
+                    <button key={tab} type="button" className={evidenceTab === tab ? 'on' : ''} onClick={() => setEvidenceTab(tab)}>
+                      {formatBusinessLabel(tab)}
+                    </button>
+                  ))}
+                </div>
+              </div>
+              <ResearchEvidence investigation={selected} tab={evidenceTab} />
+            </section>
+
+            <section className="dql-app-research-section">
+              <PanelHead title="Next actions" meta="local-first" />
+              <div className="dql-app-research-next">
+                <button type="button" onClick={() => void createResearch(`Show exception rows for ${selected.sourceBlockId ?? selected.title}`, 'anomaly_investigation')}>
+                  Exceptions
+                </button>
+                <button type="button" onClick={() => void createResearch(`Compare segments for ${selected.sourceBlockId ?? selected.title}`, 'segment_compare')}>
+                  Compare
+                </button>
+                <button type="button" onClick={() => void createResearch(`Can leaders rely on ${selected.sourceBlockId ?? selected.title}?`, 'trust_gap_review')}>
+                  Trust gaps
+                </button>
+              </div>
+            </section>
+          </>
+        ) : (
+          <EmptyPanel title="Start research from a dashboard tile." detail="Use the tile menu or the copilot Research buttons." />
+        )}
+      </section>
+    </div>
   );
 }
 
@@ -1769,6 +2118,126 @@ function KeyValueInline({ label, value }: { label: string; value: string }) {
       <b>{value}</b>
     </div>
   );
+}
+
+function ResearchMetricStrip({ investigation }: { investigation: LocalAppInvestigation }) {
+  const metrics = asUiRecord(investigation.metrics);
+  return (
+    <div className="dql-app-research-metricstrip">
+      <MiniMetric label="Current" value={formatResearchValue(metrics.currentValue)} />
+      <MiniMetric label="Baseline" value={formatResearchValue(metrics.baselineValue)} />
+      <MiniMetric label="Delta" value={formatResearchValue(metrics.delta)} />
+      <MiniMetric label="Context" value={String(metrics.context ?? investigation.sourceBlockId ?? 'Tile')} />
+    </div>
+  );
+}
+
+function ResearchEvidence({
+  investigation,
+  tab,
+}: {
+  investigation: LocalAppInvestigation;
+  tab: 'preview' | 'sql' | 'assumptions' | 'context';
+}) {
+  if (tab === 'sql') {
+    return (
+      <pre className="dql-app-research-code">
+        {investigation.generatedSql || 'No SQL has been attached to this investigation yet.'}
+      </pre>
+    );
+  }
+  const evidence = asUiRecord(investigation.evidence);
+  if (tab === 'assumptions') {
+    const assumptions = Array.isArray(evidence.assumptions) ? evidence.assumptions : [];
+    const trust = asUiRecord(evidence.trustStatus);
+    return (
+      <div className="dql-app-research-assumptions">
+        {assumptions.length ? assumptions.map((item, index) => <p key={index}>{String(item)}</p>) : <p>Run the investigation to capture assumptions.</p>}
+        <KeyValueInline label="Trust" value={String(trust.label ?? 'AI-generated research')} />
+        <KeyValueInline label="Review" value={investigation.reviewStatus} />
+      </div>
+    );
+  }
+  if (tab === 'context') {
+    return (
+      <pre className="dql-app-research-code">
+        {JSON.stringify({
+          certifiedContext: evidence.certifiedContext,
+          trustStatus: evidence.trustStatus,
+          planner: evidence.planner,
+        }, null, 2)}
+      </pre>
+    );
+  }
+  return <ResearchPreviewTable investigation={investigation} />;
+}
+
+function ResearchPreviewTable({ investigation }: { investigation: LocalAppInvestigation }) {
+  const preview = firstResearchPreview(investigation);
+  if (!preview) return <EmptyPanel title="No preview rows yet." detail="Run the investigation with SQL or selected tile results to capture evidence." compact />;
+  const result = asUiRecord(preview.result);
+  const rows = Array.isArray(result.rows) ? result.rows.map(asUiRecord).filter((row): row is Record<string, unknown> => Boolean(row)).slice(0, 8) : [];
+  const columns = Array.isArray(result.columns) ? result.columns.map(String).slice(0, 8) : Object.keys(rows[0] ?? {}).slice(0, 8);
+  if (!rows.length || !columns.length) return <EmptyPanel title="No preview rows yet." detail="The investigation captured evidence, but no row preview was available." compact />;
+  return (
+    <div className="dql-app-research-table">
+      <table>
+        <thead>
+          <tr>{columns.map((column) => <th key={column}>{formatBusinessLabel(column)}</th>)}</tr>
+        </thead>
+        <tbody>
+          {rows.map((row, rowIndex) => (
+            <tr key={rowIndex}>
+              {columns.map((column) => <td key={column}>{formatCell(row[column])}</td>)}
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+function firstResearchPreview(investigation: LocalAppInvestigation): Record<string, unknown> | null {
+  const previews = Array.isArray(investigation.resultPreviews) ? investigation.resultPreviews : [];
+  return previews.map(asUiRecord).find((preview) => Boolean(preview.result)) ?? null;
+}
+
+function upsertInvestigation(items: LocalAppInvestigation[], next: LocalAppInvestigation): LocalAppInvestigation[] {
+  const without = items.filter((item) => item.id !== next.id);
+  return [next, ...without].sort((a, b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime());
+}
+
+function isResearchPrompt(text: string): boolean {
+  return /\b(why|driver|drove|break\s*down|top mover|exception|outlier|anomal|compare|versus|trust|rely|certif|lineage|customer|account|what happened)\b/i.test(text);
+}
+
+function researchIntentFromPrompt(text: string): LocalAppInvestigation['intent'] {
+  const value = text.toLowerCase();
+  if (/\b(trust|rely|certif|lineage|gap|caveat)\b/.test(value)) return 'trust_gap_review';
+  if (/\b(anomal|exception|outlier|spike|dip)\b/.test(value)) return 'anomaly_investigation';
+  if (/\b(compare|versus| vs |segment|cohort)\b/.test(value)) return 'segment_compare';
+  if (/\b(customer|account|user|client|alice|johnson|entity)\b/.test(value)) return 'entity_drilldown';
+  if (/\b(why|changed|change|drop|decline|increase|decrease)\b/.test(value)) return 'diagnose_change';
+  return 'driver_breakdown';
+}
+
+function formatResearchValue(value: unknown): string {
+  if (typeof value === 'number' && Number.isFinite(value)) {
+    return Math.abs(value) >= 100 ? Math.round(value).toLocaleString() : Number(value.toFixed(2)).toLocaleString();
+  }
+  if (typeof value === 'string' && value.trim()) return value;
+  return 'n/a';
+}
+
+function formatCell(value: unknown): string {
+  if (value === null || value === undefined) return '';
+  if (typeof value === 'number') return formatResearchValue(value);
+  if (typeof value === 'string') return value;
+  return JSON.stringify(value);
+}
+
+function asUiRecord(value: unknown): Record<string, unknown> {
+  return value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : {};
 }
 
 function PanelCard({ icon, children }: { icon: ReactNode; children: ReactNode }) {
@@ -3876,6 +4345,321 @@ const APP_STYLES = `
 }
 
 .dql-app-gapcard p { margin: 6px 0 0; color: var(--dql-app-muted); font-size: 11.5px; line-height: 1.45; }
+.dql-app-research-launchers {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 7px;
+  padding: 10px 0 0;
+}
+
+.dql-app-research-launchers button {
+  height: 30px;
+  border: 1px solid var(--dql-app-line);
+  border-radius: 7px;
+  background: var(--dql-app-surface);
+  color: var(--dql-app-ink);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  font: 800 11px var(--font-ui);
+  cursor: pointer;
+}
+
+.dql-app-research-launchers button:hover {
+  border-color: rgba(37, 99, 235, 0.34);
+  color: var(--dql-app-accent);
+  background: var(--dql-app-accent-soft);
+}
+
+.dql-app-research-shell {
+  display: grid;
+  grid-template-columns: minmax(220px, 280px) minmax(0, 1fr);
+  gap: 14px;
+  min-height: 620px;
+}
+
+.dql-app-research-list,
+.dql-app-research-detail {
+  border: 1px solid var(--dql-app-line);
+  border-radius: 8px;
+  background: var(--dql-app-surface);
+}
+
+.dql-app-research-list {
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-width: 0;
+}
+
+.dql-app-research-detail {
+  padding: 16px;
+  min-width: 0;
+  overflow: hidden;
+}
+
+.dql-app-research-head,
+.dql-app-research-titlebar,
+.dql-app-research-evidence-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.dql-app-research-head span {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  font-weight: 850;
+}
+
+.dql-app-research-head b {
+  color: var(--dql-app-faint);
+  font-family: var(--font-mono);
+  font-size: 10px;
+}
+
+.dql-app-research-new {
+  height: 32px;
+  border: 1px solid var(--dql-app-line);
+  border-radius: 7px;
+  background: var(--dql-app-control);
+  color: var(--dql-app-ink);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  font: 800 12px var(--font-ui);
+  cursor: pointer;
+}
+
+.dql-app-research-new:disabled { opacity: 0.65; cursor: not-allowed; }
+.dql-app-research-items { display: grid; gap: 6px; overflow: auto; }
+.dql-app-research-items button {
+  border: 1px solid transparent;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--dql-app-ink);
+  text-align: left;
+  padding: 9px;
+  cursor: pointer;
+  min-width: 0;
+}
+
+.dql-app-research-items button.on,
+.dql-app-research-items button:hover {
+  border-color: var(--dql-app-line);
+  background: var(--dql-app-control);
+}
+
+.dql-app-research-items span,
+.dql-app-research-items small {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.dql-app-research-items span { font-weight: 800; font-size: 12px; }
+.dql-app-research-items small { margin-top: 3px; color: var(--dql-app-muted); font-size: 10.5px; }
+.dql-app-research-titlebar { align-items: flex-start; margin-bottom: 14px; }
+.dql-app-research-titlebar h2 {
+  margin: 2px 0 0;
+  font-size: 20px;
+  line-height: 1.2;
+}
+
+.dql-app-research-actions {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+.dql-app-research-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1.35fr) minmax(260px, 0.65fr);
+  gap: 12px;
+}
+
+.dql-app-research-answer,
+.dql-app-research-metrics,
+.dql-app-research-section {
+  border: 1px solid var(--dql-app-line);
+  border-radius: 8px;
+  background: var(--dql-app-surface-muted);
+  padding: 13px;
+  min-width: 0;
+}
+
+.dql-app-research-section { margin-top: 12px; }
+.dql-app-research-answer p {
+  margin: 10px 0 0;
+  color: var(--dql-app-ink);
+  line-height: 1.55;
+}
+
+.dql-app-research-callout {
+  margin-top: 10px;
+  border-left: 3px solid var(--dql-app-accent);
+  padding: 8px 10px;
+  background: var(--dql-app-surface);
+  color: var(--dql-app-muted);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.dql-app-research-metricstrip {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.dql-app-research-metricstrip > span {
+  border-radius: 7px;
+  background: var(--dql-app-surface);
+  border: 1px solid var(--dql-app-line);
+  padding: 8px;
+  min-width: 0;
+}
+
+.dql-app-research-metricstrip small {
+  display: block;
+  color: var(--dql-app-muted);
+  font-family: var(--font-mono);
+  font-size: 8px;
+  text-transform: uppercase;
+}
+
+.dql-app-research-metricstrip b {
+  display: block;
+  margin-top: 2px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.dql-app-research-drivers {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.dql-app-research-driver {
+  border: 1px solid var(--dql-app-line);
+  border-radius: 8px;
+  background: var(--dql-app-surface);
+  padding: 10px;
+  min-width: 0;
+}
+
+.dql-app-research-driver b,
+.dql-app-research-driver span {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.dql-app-research-driver b { font-size: 12px; }
+.dql-app-research-driver span { margin-top: 4px; color: var(--dql-app-accent); font: 800 12px var(--font-mono); }
+.dql-app-research-driver p { margin: 7px 0 0; color: var(--dql-app-muted); font-size: 11px; line-height: 1.4; }
+.dql-app-research-tabs {
+  display: flex;
+  gap: 4px;
+  flex-wrap: wrap;
+}
+
+.dql-app-research-tabs button,
+.dql-app-research-next button {
+  border: 1px solid var(--dql-app-line);
+  border-radius: 999px;
+  background: var(--dql-app-surface);
+  color: var(--dql-app-muted);
+  font: 800 11px var(--font-ui);
+  padding: 5px 9px;
+  cursor: pointer;
+}
+
+.dql-app-research-tabs button.on,
+.dql-app-research-tabs button:hover,
+.dql-app-research-next button:hover {
+  color: var(--dql-app-accent);
+  border-color: rgba(37, 99, 235, 0.34);
+  background: var(--dql-app-accent-soft);
+}
+
+.dql-app-research-code {
+  margin: 10px 0 0;
+  max-height: 320px;
+  overflow: auto;
+  border-radius: 8px;
+  border: 1px solid var(--dql-app-line);
+  background: var(--dql-app-surface);
+  padding: 11px;
+  color: var(--dql-app-ink);
+  font: 11px/1.5 var(--font-mono);
+  white-space: pre-wrap;
+}
+
+.dql-app-research-assumptions {
+  display: grid;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.dql-app-research-assumptions p {
+  margin: 0;
+  border: 1px solid var(--dql-app-line);
+  border-radius: 7px;
+  background: var(--dql-app-surface);
+  padding: 9px;
+  color: var(--dql-app-muted);
+  font-size: 12px;
+}
+
+.dql-app-research-table {
+  margin-top: 10px;
+  overflow: auto;
+  border: 1px solid var(--dql-app-line);
+  border-radius: 8px;
+  background: var(--dql-app-surface);
+}
+
+.dql-app-research-table table {
+  width: 100%;
+  border-collapse: collapse;
+  min-width: 520px;
+}
+
+.dql-app-research-table th,
+.dql-app-research-table td {
+  padding: 8px 9px;
+  border-bottom: 1px solid var(--dql-app-line);
+  text-align: left;
+  font-size: 11.5px;
+  white-space: nowrap;
+}
+
+.dql-app-research-table th {
+  color: var(--dql-app-muted);
+  background: var(--dql-app-control);
+  font-weight: 850;
+}
+
+.dql-app-research-next {
+  display: flex;
+  gap: 7px;
+  flex-wrap: wrap;
+  margin-top: 10px;
+}
+
 .dql-app-simple-list,
 .dql-app-settings-grid { display: grid; gap: 10px; }
 .dql-app-settings-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
@@ -3989,10 +4773,17 @@ const APP_STYLES = `
     gap: 6px;
     font-weight: 750;
   }
+  .dql-app-research-grid,
+  .dql-app-research-drivers {
+    grid-template-columns: 1fr;
+  }
 }
 
 @media (max-width: 900px) {
   .dql-app-view-layout { grid-template-columns: 1fr; }
+  .dql-app-research-shell {
+    grid-template-columns: 1fr;
+  }
   .dql-app-explain-panel {
     position: static;
     width: 100%;
@@ -4030,6 +4821,13 @@ const APP_STYLES = `
   .dql-app-mode-seg button { flex: 1; }
   .dql-app-build-actions,
   .dql-app-view-actions { margin-left: 0; width: 100%; flex-wrap: wrap; }
+  .dql-app-research-titlebar {
+    align-items: stretch;
+    flex-direction: column;
+  }
+  .dql-app-research-actions {
+    justify-content: flex-start;
+  }
   .dql-app-nav-row { width: 100%; justify-content: flex-start; }
   .dql-app-page-picker select { min-width: 0; max-width: 100%; }
   .dql-app-preview-tile,

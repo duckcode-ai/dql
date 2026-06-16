@@ -142,7 +142,7 @@ export type SidebarPanel = 'files' | 'schema' | 'block_library' | 'connection' |
 export type DevPanelTab = 'logs' | 'errors';
 export type MainView = 'home' | 'notebook' | 'business_artifact' | 'lineage' | 'lineage_detail' | 'block_studio' | 'imports' | 'connection' | 'reference' | 'git' | 'apps' | 'review' | 'settings';
 export type AppWorkspaceExperience = 'view' | 'build';
-export type AppWorkspaceSection = 'dashboards' | 'notebooks' | 'ai' | 'drafts' | 'settings';
+export type AppWorkspaceSection = 'dashboards' | 'notebooks' | 'research' | 'ai' | 'drafts' | 'settings';
 export type LineageReturnTarget =
   | {
       view: 'apps';
@@ -181,6 +181,7 @@ export interface AppSummary {
   notebooks?: Array<{ path: string; title?: string; role: 'source' | 'analysis' | 'supporting'; visibility: 'shared' | 'private' | 'template' }>;
   drafts?: Array<{ path: string; name: string; reviewStatus?: string }>;
   aiPins?: number;
+  investigations?: number;
   homepage?: { type: 'dashboard'; id: string } | { type: 'notebook'; path: string };
 }
 
