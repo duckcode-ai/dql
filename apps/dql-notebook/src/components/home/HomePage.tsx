@@ -4,6 +4,7 @@ import {
   ArrowRight,
   Blocks,
   BookOpenText,
+  Check,
   Database,
   FileJson,
   GitBranch,
@@ -66,6 +67,7 @@ export function HomePage() {
 
   const [connections, setConnections] = useState<ConnectionInfo | null>(null);
   const [setupWizardOpen, setSetupWizardOpen] = useState(false);
+  const [selectedStepId, setSelectedStepId] = useState<string | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -247,6 +249,9 @@ export function HomePage() {
   ]);
 
   const readyCount = steps.filter((step) => step.state === 'ready').length;
+  const currentStepObj = steps.find((step) => step.id === currentStep) ?? steps[0];
+  const focusStep = steps.find((step) => step.id === selectedStepId) ?? currentStepObj;
+  const allReady = readyCount === steps.length;
 
   return (
     <div
@@ -259,120 +264,119 @@ export function HomePage() {
     >
       <style>{HOME_PAGE_STYLES}</style>
       <main className="dql-home-page">
-        <section className="dql-home-hero" style={{ borderColor: t.cellBorder, background: t.cellBg }}>
+        <section className="dql-home-hero dql-home-fade" style={{ animationDelay: '0ms' }}>
           <div className="dql-home-hero-copy">
             <div className="dql-home-brand-row">
               <span className="dql-home-logo">DQL</span>
-              <span style={{ color: t.textSecondary }}>Guided setup</span>
+              <span style={{ color: t.textMuted }}>Guided setup</span>
             </div>
-            <h1 style={{ color: t.textPrimary }}>Set up your analytics workspace</h1>
+            <h1 style={{ color: t.textPrimary }}>
+              {allReady ? 'Your workspace is ready' : 'Set up your analytics workspace'}
+            </h1>
             <p className="dql-home-lead" style={{ color: t.textSecondary }}>
-              Connect source context, verify database access, build reviewed DQL blocks,
-              then use notebooks and Apps as the delivery layer.
+              {allReady
+                ? 'Source, database, blocks, notebooks and Apps are all connected. Jump back into building.'
+                : 'Connect your data, build reviewed DQL blocks, then deliver with notebooks and Apps.'}
             </p>
             <div className="dql-home-cta-row">
-              <button className="dql-home-primary-btn" onClick={() => setSetupWizardOpen(true)}>
-                <GitBranch size={15} strokeWidth={2.2} aria-hidden="true" />
-                Connect dbt repo
-              </button>
-              <button className="dql-home-secondary-btn" onClick={() => openPanel('connection')}>
-                <Database size={15} strokeWidth={2} aria-hidden="true" />
-                Database connection
-              </button>
-              <button className="dql-home-secondary-btn" onClick={openSemanticBlock}>
-                <Blocks size={15} strokeWidth={2} aria-hidden="true" />
-                Build block
+              <button className="dql-home-primary-btn" onClick={currentStepObj.onPrimary}>
+                <currentStepObj.Icon size={15} strokeWidth={2.2} aria-hidden="true" />
+                {currentStepObj.primaryLabel}
+                <ArrowRight size={15} strokeWidth={2.2} aria-hidden="true" />
               </button>
             </div>
           </div>
-
-          <div className="dql-home-readiness" style={{ borderColor: t.cellBorder, background: t.inputBg }}>
-            <div className="dql-home-readiness-head">
-              <span style={{ color: t.textMuted }}>Project readiness</span>
-              <strong style={{ color: t.textPrimary }}>{readyCount}/4 ready</strong>
-            </div>
-            <div className="dql-home-meter" aria-label={`${readyCount} of 4 setup steps ready`}>
-              {steps.map((step) => (
-                <span
-                  key={step.id}
-                  className={`dql-home-meter-segment is-${step.state}`}
-                  title={step.title}
-                />
-              ))}
-            </div>
-            <div className="dql-home-readiness-grid">
-              <ReadinessItem label="Source context" value={sourceReady ? 'Ready' : 'Needs setup'} state={sourceReady ? 'ready' : 'active'} t={t} />
-              <ReadinessItem label="Database" value={connectionReady ? 'Connected' : 'Not tested'} state={connectionReady ? 'ready' : 'active'} t={t} />
-              <ReadinessItem label="DQL blocks" value={`${counts.blocks}`} state={dqlReady ? 'ready' : 'waiting'} t={t} />
-              <ReadinessItem label="Apps" value={`${state.apps.length}`} state={appReady ? 'ready' : 'waiting'} t={t} />
+          <div className="dql-home-progress-badge" style={{ borderColor: t.cellBorder, background: t.inputBg }}>
+            <ProgressRing ready={readyCount} total={steps.length} t={t} />
+            <div>
+              <strong style={{ color: t.textPrimary }}>{readyCount} of {steps.length} ready</strong>
+              <span style={{ color: t.textMuted }}>{allReady ? 'All set up' : nextActionShort(currentStep)}</span>
             </div>
           </div>
         </section>
 
-        <section className="dql-home-steps" aria-label="DQL setup steps">
-          {steps.map((step) => (
-            <StepCard key={step.id} step={step} t={t} />
+        <section className="dql-home-stepper dql-home-fade" aria-label="DQL setup steps" style={{ animationDelay: '60ms' }}>
+          {steps.map((step, index) => (
+            <Stepper
+              key={step.id}
+              step={step}
+              index={index}
+              total={steps.length}
+              selected={focusStep?.id === step.id}
+              t={t}
+              onSelect={() => setSelectedStepId(step.id)}
+            />
           ))}
         </section>
 
-        <section className="dql-home-context-grid">
-          <ContextPanel
-            title="Source objects from dbt and semantic imports"
-            description="Use these as trusted inputs when composing DQL blocks."
-            Icon={GitBranch}
-            t={t}
-            rows={[
-              ['dbt project', dbtStatus?.projectName ?? (dbtStatus?.configured ? 'Configured' : 'Not detected')],
-              ['manifest.json', artifactLabel(dbtStatus?.artifacts.manifest)],
-              ['semantic_manifest.json', artifactLabel(dbtStatus?.artifacts.semanticManifest)],
-              ['Semantic models', String(sourceCounts.models)],
-              ['Metrics', String(sourceCounts.metrics)],
-              ['Measures', String(semanticCounts.measures)],
-              ['Dimensions', String(sourceCounts.dimensions)],
-            ]}
-            actionLabel="Connect or refresh"
-            onAction={() => setSetupWizardOpen(true)}
-          />
-          <ContextPanel
-            title="Database catalog and access"
-            description="Connection status and schema determine whether blocks can run."
-            Icon={Database}
-            t={t}
-            rows={[
-              ['Default connection', connections?.default ?? 'Unknown'],
-              ['Connection profiles', String(connectionCount)],
-              ['dbt profile targets', String(dbtProfileCount)],
-              ['Schemas', String(schemaCounts.schemas)],
-              ['Tables', String(schemaCounts.tables)],
-              ['Columns', String(schemaCounts.columns)],
-            ]}
-            actionLabel="Open connections"
-            onAction={() => openPanel('connection')}
-          />
-          <ContextPanel
-            title="DQL authoring inventory"
-            description="Reviewed files are versioned artifacts that can move into notebooks and Apps."
-            Icon={FileJson}
-            t={t}
-            rows={[
-              ['Blocks', String(counts.blocks)],
-              ['Business terms', String(counts.terms)],
-              ['Business views', String(counts.businessViews)],
-              ['Notebooks', String(counts.notebooks)],
-              ['Apps', String(state.apps.length)],
-            ]}
-            actionLabel="Open Block Studio"
-            onAction={() => dispatch({ type: 'SET_MAIN_VIEW', view: 'block_studio' })}
-          />
+        {focusStep && (
+          <section className="dql-home-fade" style={{ animationDelay: '120ms' }}>
+            <StepFocusCard step={focusStep} t={t} />
+          </section>
+        )}
+
+        <section className="dql-home-metrics dql-home-fade" style={{ animationDelay: '180ms' }}>
+          <MetricChip label="Blocks" value={counts.blocks} Icon={Blocks} t={t} />
+          <MetricChip label="Notebooks" value={counts.notebooks} Icon={BookOpenText} t={t} />
+          <MetricChip label="Apps" value={state.apps.length} Icon={Workflow} t={t} />
+          <MetricChip label="Tables" value={schemaCounts.tables} Icon={Database} t={t} />
+          <MetricChip label="Metrics" value={sourceCounts.metrics} Icon={Network} t={t} />
         </section>
 
-        <section className="dql-home-bottom">
-          <div className="dql-home-artifacts" style={{ borderColor: t.cellBorder, background: t.cellBg }}>
-            <div>
-              <h2 style={{ color: t.textPrimary }}>What each setup step creates</h2>
-              <p style={{ color: t.textSecondary }}>
-                The Home page tracks concrete project artifacts so new users know what to do next.
-              </p>
+        <details className="dql-home-details dql-home-fade" style={{ animationDelay: '240ms', borderColor: t.cellBorder, background: t.cellBg }}>
+          <summary style={{ color: t.textSecondary }}>
+            <span>Project details</span>
+            <span className="dql-home-details-hint" style={{ color: t.textMuted }}>catalog, schema, and artifacts</span>
+          </summary>
+          <div className="dql-home-details-body">
+            <div className="dql-home-context-grid">
+              <ContextPanel
+                title="Source objects"
+                description="Trusted inputs from dbt and semantic imports."
+                Icon={GitBranch}
+                t={t}
+                rows={[
+                  ['dbt project', dbtStatus?.projectName ?? (dbtStatus?.configured ? 'Configured' : 'Not detected')],
+                  ['manifest.json', artifactLabel(dbtStatus?.artifacts.manifest)],
+                  ['semantic_manifest.json', artifactLabel(dbtStatus?.artifacts.semanticManifest)],
+                  ['Semantic models', String(sourceCounts.models)],
+                  ['Metrics', String(sourceCounts.metrics)],
+                  ['Dimensions', String(sourceCounts.dimensions)],
+                ]}
+                actionLabel="Connect or refresh"
+                onAction={() => setSetupWizardOpen(true)}
+              />
+              <ContextPanel
+                title="Database catalog"
+                description="Connection and schema determine whether blocks run."
+                Icon={Database}
+                t={t}
+                rows={[
+                  ['Default connection', connections?.default ?? 'Unknown'],
+                  ['Connection profiles', String(connectionCount)],
+                  ['dbt profile targets', String(dbtProfileCount)],
+                  ['Schemas', String(schemaCounts.schemas)],
+                  ['Tables', String(schemaCounts.tables)],
+                  ['Columns', String(schemaCounts.columns)],
+                ]}
+                actionLabel="Open connections"
+                onAction={() => openPanel('connection')}
+              />
+              <ContextPanel
+                title="Authoring inventory"
+                description="Versioned files that move into notebooks and Apps."
+                Icon={FileJson}
+                t={t}
+                rows={[
+                  ['Blocks', String(counts.blocks)],
+                  ['Business terms', String(counts.terms)],
+                  ['Business views', String(counts.businessViews)],
+                  ['Notebooks', String(counts.notebooks)],
+                  ['Apps', String(state.apps.length)],
+                ]}
+                actionLabel="Open Block Studio"
+                onAction={() => dispatch({ type: 'SET_MAIN_VIEW', view: 'block_studio' })}
+              />
             </div>
             <div className="dql-home-artifact-list">
               {ARTIFACTS.map(([name, description]) => (
@@ -383,16 +387,7 @@ export function HomePage() {
               ))}
             </div>
           </div>
-
-          <div className="dql-home-next" style={{ borderColor: t.cellBorder, background: t.cellBg }}>
-            <h2 style={{ color: t.textPrimary }}>Recommended next action</h2>
-            <p style={{ color: t.textSecondary }}>{nextActionCopy(currentStep)}</p>
-            <button className="dql-home-link-btn" onClick={steps.find((step) => step.id === currentStep)?.onPrimary}>
-              {steps.find((step) => step.id === currentStep)?.primaryLabel ?? 'Continue setup'}
-              <ArrowRight size={15} strokeWidth={2} aria-hidden="true" />
-            </button>
-          </div>
-        </section>
+        </details>
       </main>
 
       {setupWizardOpen && (
@@ -406,58 +401,125 @@ export function HomePage() {
   );
 }
 
-function StepCard({ step, t }: { step: WorkflowStep; t: Theme }) {
+const ACCENT = 'var(--color-accent-blue, #2563eb)';
+const SUCCESS = 'var(--color-accent-green, #16a34a)';
+
+function stepColor(state: StepState, t: Theme): string {
+  if (state === 'ready') return SUCCESS;
+  if (state === 'active') return t.warning;
+  return t.textMuted;
+}
+
+function Stepper({
+  step,
+  index,
+  total,
+  selected,
+  t,
+  onSelect,
+}: {
+  step: WorkflowStep;
+  index: number;
+  total: number;
+  selected: boolean;
+  t: Theme;
+  onSelect: () => void;
+}) {
+  const Icon = step.Icon;
+  const badgeStyle = step.state === 'ready'
+    ? { background: SUCCESS, borderColor: SUCCESS, color: '#fff' }
+    : step.state === 'active'
+      ? { background: t.cellBg, borderColor: t.warning, color: t.warning }
+      : { background: t.cellBg, borderColor: t.cellBorder, color: t.textMuted };
+  return (
+    <button
+      type="button"
+      className={`dql-home-node is-${step.state} ${selected ? 'is-selected' : ''}`}
+      onClick={onSelect}
+      style={{ color: t.textSecondary, background: selected ? t.cellBg : 'transparent' }}
+    >
+      {index < total - 1 ? (
+        <span className="dql-home-node-track" aria-hidden="true" style={{ background: step.state === 'ready' ? SUCCESS : t.cellBorder }} />
+      ) : null}
+      <span className="dql-home-node-badge" aria-hidden="true" style={badgeStyle}>
+        {step.state === 'ready' ? <Check size={18} strokeWidth={3} /> : <Icon size={18} strokeWidth={2} />}
+      </span>
+      <span className="dql-home-node-meta">
+        <span className="dql-home-node-title" style={{ color: t.textPrimary }}>{step.title.split(' ').slice(0, 3).join(' ')}</span>
+        <span className="dql-home-node-status" style={{ color: stepColor(step.state, t) }}>{statusLabel(step.state)}</span>
+      </span>
+    </button>
+  );
+}
+
+function StepFocusCard({ step, t }: { step: WorkflowStep; t: Theme }) {
   const Icon = step.Icon;
   return (
-    <article
-      className={`dql-home-step is-${step.state}`}
-      style={{ borderColor: step.state === 'active' ? t.accent : t.cellBorder, background: t.cellBg }}
-    >
-      <div className="dql-home-step-top">
-        <span className={`dql-home-step-number is-${step.state}`}>{step.number}</span>
-        <Icon size={18} strokeWidth={2} color={step.state === 'ready' ? 'var(--color-accent-green)' : step.state === 'active' ? t.accent : t.textMuted} aria-hidden="true" />
-        <span className={`dql-home-status is-${step.state}`}>{statusLabel(step.state)}</span>
+    <article className={`dql-home-focus is-${step.state}`} style={{ borderColor: step.state === 'active' ? t.warning : step.state === 'ready' ? `${SUCCESS}` : t.cellBorder, background: t.cellBg }}>
+      <div className="dql-home-focus-icon" style={{ background: `${t.accent}16`, color: t.accent }}>
+        <Icon size={20} strokeWidth={2} aria-hidden="true" />
       </div>
-      <h2 style={{ color: t.textPrimary }}>{step.title}</h2>
-      <p style={{ color: t.textSecondary }}>{step.body}</p>
-      <div className="dql-home-evidence">
-        {step.evidence.map((item) => (
-          <span key={item} style={{ borderColor: t.cellBorder, color: t.textMuted }}>{item}</span>
-        ))}
-      </div>
-      <div className="dql-home-card-actions">
-        <button className="dql-home-primary-btn dql-home-card-btn" onClick={step.onPrimary}>
-          {step.primaryLabel}
-        </button>
-        {step.secondaryLabel && step.onSecondary && (
-          <button className="dql-home-secondary-btn dql-home-card-btn" onClick={step.onSecondary}>
-            {step.secondaryLabel}
+      <div className="dql-home-focus-body">
+        <div className="dql-home-focus-head">
+          <h2 style={{ color: t.textPrimary }}>{step.title}</h2>
+          <span className="dql-home-status" style={{ color: stepColor(step.state, t), background: `${stepColor(step.state, t)}1f` }}>{statusLabel(step.state)}</span>
+        </div>
+        <p style={{ color: t.textSecondary }}>{step.body}</p>
+        <div className="dql-home-evidence">
+          {step.evidence.map((item) => (
+            <span key={item} style={{ borderColor: t.cellBorder, color: t.textMuted }}>{item}</span>
+          ))}
+        </div>
+        <div className="dql-home-card-actions">
+          <button className="dql-home-primary-btn dql-home-card-btn" onClick={step.onPrimary}>
+            {step.primaryLabel}
+            <ArrowRight size={15} strokeWidth={2.2} aria-hidden="true" />
           </button>
-        )}
+          {step.secondaryLabel && step.onSecondary && (
+            <button className="dql-home-secondary-btn dql-home-card-btn" onClick={step.onSecondary}>
+              {step.secondaryLabel}
+            </button>
+          )}
+        </div>
       </div>
     </article>
   );
 }
 
-function ReadinessItem({
-  label,
-  value,
-  state,
-  t,
-}: {
-  label: string;
-  value: string;
-  state: StepState;
-  t: Theme;
-}) {
+function MetricChip({ label, value, Icon, t }: { label: string; value: number; Icon: LucideIcon; t: Theme }) {
   return (
-    <div className="dql-home-readiness-item" style={{ borderColor: t.cellBorder }}>
+    <div className="dql-home-metric" style={{ borderColor: t.cellBorder, background: t.cellBg }}>
+      <span className="dql-home-metric-icon" style={{ color: t.accent }}><Icon size={15} strokeWidth={2} aria-hidden="true" /></span>
+      <strong style={{ color: t.textPrimary }}>{value.toLocaleString()}</strong>
       <span style={{ color: t.textMuted }}>{label}</span>
-      <strong className={`is-${state}`} style={{ color: state === 'ready' ? 'var(--color-accent-green)' : state === 'active' ? t.accent : t.textPrimary }}>
-        {value}
-      </strong>
     </div>
   );
+}
+
+function ProgressRing({ ready, total, t }: { ready: number; total: number; t: Theme }) {
+  const pct = total > 0 ? ready / total : 0;
+  const r = 16;
+  const c = 2 * Math.PI * r;
+  return (
+    <svg className="dql-home-ring" width={44} height={44} viewBox="0 0 44 44" aria-hidden="true">
+      <circle cx="22" cy="22" r={r} fill="none" stroke={t.cellBorder} strokeWidth="4" />
+      <circle
+        cx="22" cy="22" r={r} fill="none"
+        stroke={SUCCESS} strokeWidth="4" strokeLinecap="round"
+        strokeDasharray={c} strokeDashoffset={c * (1 - pct)}
+        transform="rotate(-90 22 22)"
+        style={{ transition: 'stroke-dashoffset 700ms ease' }}
+      />
+      <text x="22" y="26" textAnchor="middle" fontSize="12" fontWeight="800" fill={t.textPrimary}>{ready}</text>
+    </svg>
+  );
+}
+
+function nextActionShort(currentStep: string): string {
+  if (currentStep === 'source') return 'Connect a dbt or semantic source';
+  if (currentStep === 'connection') return 'Add and test a database';
+  if (currentStep === 'build') return 'Build your first DQL block';
+  return 'Open notebooks and publish an App';
 }
 
 function ContextPanel({
@@ -571,410 +633,100 @@ function countSchema(tables: Array<{ name: string; columns: unknown[] }>) {
 
 const HOME_PAGE_STYLES = `
 .dql-home-page {
-  width: min(1220px, calc(100% - 48px));
+  width: min(1080px, calc(100% - 48px));
   margin: 0 auto;
-  padding: 24px 0 44px;
-}
-
-.dql-home-hero {
-  display: grid;
-  grid-template-columns: minmax(360px, 1fr) minmax(360px, 0.82fr);
+  padding: 28px 0 56px;
+  display: flex;
+  flex-direction: column;
   gap: 18px;
-  align-items: stretch;
-  border: 1px solid;
-  border-radius: 8px;
-  padding: 22px;
 }
 
-.dql-home-hero-copy,
-.dql-home-readiness,
-.dql-home-context-panel,
-.dql-home-artifacts,
-.dql-home-next {
-  min-width: 0;
+@keyframes dql-home-rise { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
+.dql-home-fade { animation: dql-home-rise 480ms cubic-bezier(0.2,0.7,0.2,1) both; }
+
+.dql-home-hero { display: flex; align-items: center; justify-content: space-between; gap: 24px; flex-wrap: wrap; }
+.dql-home-hero-copy { display: flex; flex-direction: column; gap: 12px; min-width: 0; flex: 1 1 420px; }
+.dql-home-brand-row { display: inline-flex; align-items: center; gap: 10px; font: 800 11px var(--font-mono, ui-monospace, monospace); letter-spacing: 0.08em; text-transform: uppercase; }
+.dql-home-logo { display: inline-flex; align-items: center; justify-content: center; height: 24px; padding: 0 9px; border-radius: 7px; background: var(--color-accent-blue, #2563eb); color: var(--accent-on, #fff); }
+.dql-home-hero h1 { margin: 0; font-size: 30px; line-height: 1.1; font-weight: 820; letter-spacing: -0.01em; }
+.dql-home-lead { margin: 0; font-size: 14px; line-height: 1.5; max-width: 48ch; }
+.dql-home-cta-row { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 4px; }
+
+.dql-home-primary-btn { display: inline-flex; align-items: center; gap: 8px; border: 1px solid var(--color-accent-blue, #2563eb); border-radius: 9px; background: var(--color-accent-blue, #2563eb); color: var(--accent-on, #fff); padding: 9px 15px; font: 750 13px var(--font-ui, inherit); cursor: pointer; transition: transform 120ms ease, box-shadow 120ms ease, filter 120ms ease; }
+.dql-home-primary-btn:hover { filter: brightness(1.06); box-shadow: 0 8px 22px rgba(37,99,235,0.26); transform: translateY(-1px); }
+.dql-home-secondary-btn { display: inline-flex; align-items: center; gap: 8px; border: 1px solid var(--border-color, rgba(0,0,0,0.16)); border-radius: 9px; background: transparent; color: inherit; padding: 9px 14px; font: 700 13px var(--font-ui, inherit); cursor: pointer; transition: border-color 120ms ease, background 120ms ease; }
+.dql-home-secondary-btn:hover { border-color: var(--color-accent-blue, #2563eb); }
+
+.dql-home-progress-badge { display: inline-flex; align-items: center; gap: 12px; border: 1px solid; border-radius: 12px; padding: 12px 16px; flex: none; }
+.dql-home-progress-badge > div { display: flex; flex-direction: column; }
+.dql-home-progress-badge strong { font-size: 14px; }
+.dql-home-progress-badge span { font-size: 12px; margin-top: 2px; }
+
+.dql-home-stepper { display: grid; grid-template-columns: repeat(4, 1fr); }
+.dql-home-node { position: relative; display: flex; flex-direction: column; align-items: center; gap: 9px; border: 0; cursor: pointer; padding: 8px 8px 10px; border-radius: 12px; transition: background 140ms ease; }
+.dql-home-node-track { position: absolute; top: 30px; left: 50%; width: 100%; height: 3px; z-index: 0; border-radius: 2px; transition: background 500ms ease; }
+.dql-home-node-badge { position: relative; z-index: 1; width: 46px; height: 46px; border-radius: 50%; display: inline-flex; align-items: center; justify-content: center; border: 2px solid; transition: transform 200ms ease; }
+.dql-home-node.is-ready .dql-home-node-badge { animation: dql-home-pop 380ms cubic-bezier(0.2,1.5,0.4,1) both; }
+.dql-home-node.is-active .dql-home-node-badge { animation: dql-home-pulse 1.8s ease-in-out infinite; }
+@keyframes dql-home-pop { 0% { transform: scale(0.5); } 60% { transform: scale(1.14); } 100% { transform: scale(1); } }
+@keyframes dql-home-pulse { 0%,100% { box-shadow: 0 0 0 0 rgba(217,119,6,0.40); } 50% { box-shadow: 0 0 0 8px rgba(217,119,6,0); } }
+.dql-home-node-meta { display: flex; flex-direction: column; align-items: center; gap: 3px; text-align: center; }
+.dql-home-node-title { font: 750 12.5px var(--font-ui, inherit); }
+.dql-home-node-status { font: 700 9.5px var(--font-mono, ui-monospace, monospace); text-transform: uppercase; letter-spacing: 0.05em; }
+
+.dql-home-focus { display: flex; gap: 14px; border: 1px solid; border-radius: 12px; padding: 16px 18px; }
+.dql-home-focus-icon { flex: none; width: 40px; height: 40px; border-radius: 10px; display: inline-flex; align-items: center; justify-content: center; }
+.dql-home-focus-body { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 9px; }
+.dql-home-focus-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.dql-home-focus-head h2 { margin: 0; font-size: 16px; font-weight: 780; }
+.dql-home-focus-body p { margin: 0; font-size: 13px; line-height: 1.5; }
+.dql-home-status { font: 700 9.5px var(--font-mono, ui-monospace, monospace); text-transform: uppercase; letter-spacing: 0.05em; padding: 3px 9px; border-radius: 999px; }
+.dql-home-evidence { display: flex; flex-wrap: wrap; gap: 6px; }
+.dql-home-evidence span { font: 650 11px var(--font-mono, ui-monospace, monospace); border: 1px solid; border-radius: 999px; padding: 3px 9px; }
+.dql-home-card-actions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 2px; }
+.dql-home-card-btn { font-size: 12.5px; }
+
+.dql-home-metrics { display: flex; flex-wrap: wrap; gap: 10px; }
+.dql-home-metric { display: inline-flex; align-items: center; gap: 8px; border: 1px solid; border-radius: 10px; padding: 8px 13px; }
+.dql-home-metric strong { font-size: 16px; font-weight: 800; }
+.dql-home-metric span { font-size: 12px; }
+.dql-home-metric-icon { display: inline-flex; }
+
+.dql-home-details { border: 1px solid; border-radius: 12px; overflow: hidden; }
+.dql-home-details > summary { list-style: none; cursor: pointer; padding: 13px 16px; display: flex; align-items: center; gap: 10px; font: 750 13px var(--font-ui, inherit); }
+.dql-home-details > summary::-webkit-details-marker { display: none; }
+.dql-home-details > summary::after { content: "\\2304"; margin-left: auto; font-size: 14px; transition: transform 200ms ease; }
+.dql-home-details[open] > summary::after { transform: rotate(180deg); }
+.dql-home-details-hint { font: 600 11.5px var(--font-ui, inherit); }
+.dql-home-details-body { padding: 0 16px 16px; display: flex; flex-direction: column; gap: 14px; }
+
+.dql-home-context-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; }
+.dql-home-context-panel { display: flex; flex-direction: column; gap: 10px; border: 1px solid; border-radius: 10px; padding: 14px; }
+.dql-home-context-head { display: flex; gap: 10px; align-items: flex-start; }
+.dql-home-context-icon { flex: none; width: 34px; height: 34px; border-radius: 9px; display: inline-flex; align-items: center; justify-content: center; }
+.dql-home-context-head h2 { margin: 0; font-size: 13.5px; font-weight: 760; line-height: 1.25; }
+.dql-home-context-head p { margin: 3px 0 0; font-size: 12px; line-height: 1.4; }
+.dql-home-context-rows { display: flex; flex-direction: column; }
+.dql-home-context-row { display: flex; justify-content: space-between; gap: 10px; padding: 6px 0; border-bottom: 1px solid; font-size: 12.5px; }
+.dql-home-context-row:last-child { border-bottom: 0; }
+.dql-home-link-btn { display: inline-flex; align-items: center; gap: 6px; border: 0; background: transparent; color: var(--color-accent-blue, #2563eb); cursor: pointer; font: 750 12.5px var(--font-ui, inherit); padding: 2px 0; margin-top: auto; }
+.dql-home-artifact-list { display: grid; grid-template-columns: repeat(2, 1fr); gap: 8px; }
+.dql-home-artifact-row { display: flex; gap: 10px; align-items: baseline; border: 1px solid; border-radius: 8px; padding: 8px 11px; }
+.dql-home-artifact-row code { font: 700 12px var(--font-mono, ui-monospace, monospace); flex: none; }
+.dql-home-artifact-row span { font-size: 12px; line-height: 1.4; }
+
+@media (max-width: 880px) {
+  .dql-home-stepper { grid-template-columns: repeat(2, 1fr); }
+  .dql-home-node-track { display: none; }
+  .dql-home-context-grid, .dql-home-artifact-list { grid-template-columns: 1fr; }
+  .dql-home-hero { flex-direction: column; align-items: flex-start; }
+  .dql-home-focus { flex-direction: column; }
 }
 
-.dql-home-hero-copy {
-  display: flex;
-  flex-direction: column;
-  justify-content: center;
-  gap: 16px;
-}
-
-.dql-home-brand-row {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  font-size: 12px;
-  font-weight: 800;
-  text-transform: uppercase;
-}
-
-.dql-home-logo {
-  height: 28px;
-  padding: 0 10px;
-  border-radius: 6px;
-  display: inline-flex;
-  align-items: center;
-  background: var(--color-accent-blue);
-  color: var(--accent-on, #fff);
-  font-weight: 900;
-  font-family: var(--font-mono);
-}
-
-.dql-home-hero h1 {
-  margin: 0;
-  max-width: 720px;
-  font-size: 44px;
-  line-height: 1.02;
-  font-weight: 900;
-  letter-spacing: 0;
-  overflow-wrap: break-word;
-}
-
-.dql-home-lead {
-  max-width: 720px;
-  margin: 0;
-  font-size: 15px;
-  line-height: 1.55;
-}
-
-.dql-home-cta-row,
-.dql-home-card-actions {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 10px;
-}
-
-.dql-home-primary-btn,
-.dql-home-secondary-btn,
-.dql-home-link-btn {
-  min-height: 34px;
-  border-radius: 6px;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  gap: 8px;
-  padding: 0 12px;
-  border: 1px solid var(--color-border-primary);
-  font: 800 12px var(--font-ui);
-  cursor: pointer;
-  max-width: 100%;
-  transition: transform 160ms ease, border-color 160ms ease, background 160ms ease;
-}
-
-.dql-home-primary-btn {
-  background: var(--color-accent-blue);
-  color: var(--accent-on, #fff);
-  border-color: var(--color-accent-blue);
-}
-
-.dql-home-secondary-btn,
-.dql-home-link-btn {
-  background: var(--color-bg-sunken);
-  color: var(--color-text-secondary);
-}
-
-.dql-home-primary-btn:hover,
-.dql-home-secondary-btn:hover,
-.dql-home-link-btn:hover {
-  transform: translateY(-1px);
-  border-color: var(--color-accent-blue);
-}
-
-.dql-home-readiness {
-  border: 1px solid;
-  border-radius: 8px;
-  padding: 16px;
-  display: flex;
-  flex-direction: column;
-  gap: 14px;
-}
-
-.dql-home-readiness-head {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  font-size: 12px;
-  font-weight: 900;
-  text-transform: uppercase;
-}
-
-.dql-home-meter {
-  display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
-  gap: 6px;
-}
-
-.dql-home-meter-segment {
-  height: 8px;
-  border-radius: 999px;
-  background: var(--color-border-secondary);
-}
-
-.dql-home-meter-segment.is-ready {
-  background: var(--color-accent-green);
-}
-
-.dql-home-meter-segment.is-active {
-  background: var(--color-accent-blue);
-}
-
-.dql-home-readiness-grid {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 8px;
-}
-
-.dql-home-readiness-item {
-  border: 1px solid;
-  border-radius: 7px;
-  padding: 10px;
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-}
-
-.dql-home-readiness-item span {
-  font-size: 11px;
-  font-weight: 800;
-  text-transform: uppercase;
-}
-
-.dql-home-readiness-item strong {
-  font-size: 15px;
-  line-height: 1.1;
-}
-
-.dql-home-steps {
-  margin-top: 14px;
-  display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
-  gap: 12px;
-}
-
-.dql-home-step {
-  border: 1px solid;
-  border-radius: 8px;
-  padding: 14px;
-  min-height: 286px;
-  display: flex;
-  flex-direction: column;
-  gap: 12px;
-}
-
-.dql-home-step.is-active {
-  box-shadow: 0 0 0 1px color-mix(in srgb, var(--color-accent-blue) 22%, transparent);
-}
-
-.dql-home-step-top {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-
-.dql-home-step-number {
-  width: 24px;
-  height: 24px;
-  border-radius: 999px;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  font: 900 12px var(--font-mono);
-  background: var(--color-bg-sunken);
-  color: var(--color-text-secondary);
-}
-
-.dql-home-step-number.is-ready {
-  background: color-mix(in srgb, var(--color-accent-green) 18%, transparent);
-  color: var(--color-accent-green);
-}
-
-.dql-home-step-number.is-active {
-  background: color-mix(in srgb, var(--color-accent-blue) 18%, transparent);
-  color: var(--color-accent-blue);
-}
-
-.dql-home-status {
-  margin-left: auto;
-  font: 900 10px var(--font-ui);
-  text-transform: uppercase;
-  color: var(--color-text-tertiary);
-}
-
-.dql-home-status.is-ready {
-  color: var(--color-accent-green);
-}
-
-.dql-home-status.is-active {
-  color: var(--color-accent-blue);
-}
-
-.dql-home-step h2,
-.dql-home-context-panel h2,
-.dql-home-artifacts h2,
-.dql-home-next h2 {
-  margin: 0;
-  font-size: 17px;
-  line-height: 1.2;
-}
-
-.dql-home-step p,
-.dql-home-context-panel p,
-.dql-home-artifacts p,
-.dql-home-next p {
-  margin: 0;
-  font-size: 12px;
-  line-height: 1.5;
-}
-
-.dql-home-evidence {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-  margin-top: auto;
-}
-
-.dql-home-evidence span {
-  border: 1px solid;
-  border-radius: 6px;
-  padding: 6px 8px;
-  font: 800 11px var(--font-ui);
-}
-
-.dql-home-card-btn {
-  flex: 1 1 120px;
-}
-
-.dql-home-context-grid {
-  margin-top: 14px;
-  display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 12px;
-}
-
-.dql-home-context-panel {
-  border: 1px solid;
-  border-radius: 8px;
-  padding: 16px;
-  display: flex;
-  flex-direction: column;
-  gap: 14px;
-}
-
-.dql-home-context-head {
-  display: grid;
-  grid-template-columns: 34px 1fr;
-  gap: 10px;
-  align-items: start;
-}
-
-.dql-home-context-icon {
-  width: 34px;
-  height: 34px;
-  border-radius: 8px;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-}
-
-.dql-home-context-rows {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-}
-
-.dql-home-context-row {
-  min-height: 32px;
-  border-bottom: 1px solid;
-  display: grid;
-  grid-template-columns: minmax(110px, 1fr) auto;
-  gap: 10px;
-  align-items: center;
-  font-size: 12px;
-}
-
-.dql-home-context-row:last-child {
-  border-bottom: none;
-}
-
-.dql-home-context-row strong {
-  font-family: var(--font-mono);
-  font-size: 12px;
-}
-
-.dql-home-bottom {
-  margin-top: 14px;
-  display: grid;
-  grid-template-columns: minmax(520px, 1fr) minmax(320px, 0.45fr);
-  gap: 12px;
-}
-
-.dql-home-artifacts,
-.dql-home-next {
-  border: 1px solid;
-  border-radius: 8px;
-  padding: 18px;
-  display: flex;
-  flex-direction: column;
-  gap: 16px;
-}
-
-.dql-home-artifact-list {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 8px;
-}
-
-.dql-home-artifact-row {
-  border: 1px solid;
-  border-radius: 6px;
-  padding: 10px;
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-}
-
-.dql-home-artifact-row code {
-  font: 800 12px var(--font-mono);
-}
-
-.dql-home-artifact-row span {
-  font-size: 12px;
-  line-height: 1.35;
-}
-
-@media (max-width: 1120px) {
-  .dql-home-steps {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-  }
-
-  .dql-home-context-grid,
-  .dql-home-bottom,
-  .dql-home-hero {
-    grid-template-columns: 1fr;
-  }
-}
-
-@media (max-width: 720px) {
-  .dql-home-page {
-    width: min(100% - 16px, 560px);
-    padding-top: 16px;
-  }
-
-  .dql-home-hero {
-    padding: 14px;
-  }
-
-  .dql-home-hero h1 {
-    font-size: 30px;
-  }
-
-  .dql-home-steps,
-  .dql-home-readiness-grid,
-  .dql-home-artifact-list {
-    grid-template-columns: 1fr;
-  }
+@media (prefers-reduced-motion: reduce) {
+  .dql-home-fade,
+  .dql-home-node.is-ready .dql-home-node-badge,
+  .dql-home-node.is-active .dql-home-node-badge { animation: none !important; }
+  .dql-home-node-track, .dql-home-primary-btn { transition: none; }
 }
 `;
