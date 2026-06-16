@@ -87,7 +87,7 @@ export async function runImport(source: string, rest: string[], flags: CLIFlags)
   if (validatedSession.defaults.owner) console.log(`  Owner:       ${validatedSession.defaults.owner}`);
   if (flags.save) {
     console.log(`  Saved:       ${saved.length}`);
-    if (errors.length > 0) console.log(`  Needs review:${errors.length}`);
+    if (errors.length > 0) console.log(`  Needs fixes:  ${errors.length}`);
   }
   console.log('');
   for (const candidate of validatedSession.candidates) {
@@ -101,15 +101,15 @@ export async function runImport(source: string, rest: string[], flags: CLIFlags)
     const savedPath = saved.find((item) => item.candidateId === candidate.id)?.path;
     console.log(`  • ${candidate.name}`);
     console.log(`    ${candidate.id} · confidence ${Math.round(candidate.confidence * 100)}% · tables: ${tables}${warningText}`);
-    if (validationErrors.length > 0) console.log(`    review: ${validationErrors.join(' ')}`);
-    if (savedPath) console.log(`    saved draft: ${savedPath}`);
+    if (validationErrors.length > 0) console.log(`    fix: ${validationErrors.join(' ')}`);
+    if (savedPath) console.log(`    saved block: ${savedPath}`);
   }
   console.log('');
   if (flags.save) {
-    console.log('  Saved candidates are draft blocks. Run previews/tests and certify only after review.');
+    console.log('  Saved candidates are local blocks. Run previews/tests, then certify when they pass.');
   } else {
-    console.log('  Review in Block Studio Import, then run and save selected candidates as draft blocks.');
-    console.log('  Or re-run with --save to save all valid candidates as draft blocks.');
+    console.log('  Open in Block Studio Import, then run and save selected candidates as blocks.');
+    console.log('  Or re-run with --save to save all valid candidates as blocks.');
   }
   console.log(`  Import cache: .dql/imports/${validatedSession.id}/`);
   console.log('');

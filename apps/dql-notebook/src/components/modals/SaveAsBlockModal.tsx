@@ -13,6 +13,8 @@ interface SaveAsBlockModalProps {
   initialName?: string;
   initialDescription?: string;
   initialTags?: string[];
+  initialDomain?: string;
+  initialOwner?: string;
 }
 
 function RequiredMark() {
@@ -45,14 +47,16 @@ export function SaveAsBlockModal({
   initialName,
   initialDescription,
   initialTags,
+  initialDomain,
+  initialOwner,
 }: SaveAsBlockModalProps) {
   const { state, dispatch } = useNotebook();
   const t = themes[state.themeMode];
   const nameRef = useRef<HTMLInputElement>(null);
 
   const [name, setName] = useState(initialName || cell.name || 'new_block');
-  const [domain, setDomain] = useState('');
-  const [owner, setOwner] = useState('');
+  const [domain, setDomain] = useState(initialDomain ?? '');
+  const [owner, setOwner] = useState(initialOwner ?? '');
   const [description, setDescription] = useState(initialDescription ?? state.notebookMetadata.description ?? '');
   const [tags, setTags] = useState((initialTags ?? state.notebookMetadata.categories ?? []).join(', '));
   const [content, setContent] = useState(initialContent ?? cell.content);

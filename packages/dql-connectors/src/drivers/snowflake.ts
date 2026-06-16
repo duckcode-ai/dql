@@ -7,15 +7,12 @@ export class SnowflakeConnector implements DatabaseConnector {
   readonly driverName = 'snowflake';
   private connection: any = null;
   private sdk: any = null;
-  private warehouse: string = '';
 
   async connect(config: ConnectionConfig): Promise<void> {
     // Dynamic import to avoid requiring snowflake-sdk when not used
     // snowflake-sdk is a CJS module, so the API lives on .default
     const mod = await import('snowflake-sdk');
     this.sdk = (mod as any).default ?? mod;
-
-    this.warehouse = config.warehouse ?? '';
 
     const connectionConfig: Record<string, unknown> = {
       account: config.account ?? '',
@@ -67,23 +64,6 @@ export class SnowflakeConnector implements DatabaseConnector {
       });
     });
 
-    // Auto-resume warehouse if suspended (matching DuckCode-Modeling pattern)
-    if (this.warehouse) {
-      try {
-        await this.executeRaw(`ALTER WAREHOUSE IF EXISTS ${this.warehouse} RESUME IF SUSPENDED`);
-      } catch (_) { /* ignore — permission denied or warehouse doesn't exist */ }
-    }
-  }
-
-  private executeRaw(sql: string): Promise<void> {
-    return new Promise((resolve, reject) => {
-      this.connection.execute({
-        sqlText: sql,
-        complete: (err: Error | undefined) => {
-          if (err) reject(err); else resolve();
-        },
-      });
-    });
   }
 
   async execute(sql: string, params?: unknown[]): Promise<QueryResult> {

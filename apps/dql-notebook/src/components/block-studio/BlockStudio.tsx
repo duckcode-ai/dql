@@ -15,7 +15,7 @@ import type {
   BlockStudioDbtStatus,
 } from '../../store/types';
 import { themes } from '../../themes/notebook-theme';
-import type { Theme } from '../../themes/notebook-theme';
+import type { Theme, ThemeMode } from '../../themes/notebook-theme';
 import { SQLCellEditor } from '../cells/SQLCellEditor';
 import { ChartOutput, CHART_TYPE_OPTIONS, resolveChartType } from '../output/ChartOutput';
 import { MiniLineageGraph } from '../lineage/MiniLineageGraph';
@@ -26,6 +26,7 @@ import { BlockLibraryPanel } from '../panels/BlockLibraryPanel';
 import { MetricDetailPanel } from '../panels/MetricDetailPanel';
 import { SemanticSearchBar } from '../panels/SemanticSearchBar';
 import { SemanticTreeNode as TreeRow } from '../panels/SemanticTreeNode';
+import { AiSqlDraftDialog, type AiSqlDraftMeta } from '../agent/AiSqlDraftDialog';
 import {
   appendSemanticRefToQuery,
   buildSemanticRef,
@@ -84,7 +85,6 @@ export function BlockStudio() {
   } | null>(null);
   const [lineageGraph, setLineageGraph] = useState<{ nodes: Array<{ id: string; type: string; name: string; domain?: string; layer?: string }>; edges: Array<{ source: string; target: string; type: string }> } | null>(null);
   const [lineagePaths, setLineagePaths] = useState<CompletePathResult | null>(null);
-  const [statusUpdating, setStatusUpdating] = useState(false);
   const [scrollTop, setScrollTop] = useState(0);
   const [viewportHeight, setViewportHeight] = useState(400);
   const [leftPaneWidth, setLeftPaneWidth] = useState(340);
@@ -97,6 +97,7 @@ export function BlockStudio() {
   const [importSessionsLoading, setImportSessionsLoading] = useState(false);
   const [semanticInsertChoice, setSemanticInsertChoice] = useState<SemanticObjectDetail | null>(null);
   const [databaseInsertWarning, setDatabaseInsertWarning] = useState<string | null>(null);
+  const [aiSqlOpen, setAiSqlOpen] = useState(false);
   const [certifying, setCertifying] = useState(false);
   const [certificationResult, setCertificationResult] = useState<{
     ok?: boolean;
@@ -116,6 +117,7 @@ export function BlockStudio() {
       errors: Array<{ rule: string; message: string }>;
       warnings: Array<{ rule: string; message: string }>;
     };
+    blockers?: string[];
     error?: string;
   } | null>(null);
   const semanticTreeRef = useRef<HTMLDivElement | null>(null);
@@ -342,6 +344,51 @@ export function BlockStudio() {
     }
   };
 
+  const persistBlockStudioDraft = async (): Promise<BlockStudioOpenPayload> => {
+    if (!state.blockStudioMetadata) {
+      throw new Error('Block metadata is required before saving.');
+    }
+    const payload = await api.saveBlockStudio({
+      path: state.activeBlockPath,
+      source: state.blockStudioDraft,
+      metadata: {
+        name: state.blockStudioMetadata.name,
+        domain: state.blockStudioMetadata.domain,
+        description: state.blockStudioMetadata.description,
+        owner: state.blockStudioMetadata.owner,
+        tags: state.blockStudioMetadata.tags,
+        sourceKind: state.blockStudioMetadata.sourceKind,
+        sourcePath: state.blockStudioMetadata.sourcePath,
+        importId: state.blockStudioMetadata.importId,
+        candidateId: state.blockStudioMetadata.candidateId,
+        lineage: state.blockStudioMetadata.lineage,
+      },
+    });
+    dispatch({
+      type: 'OPEN_BLOCK_STUDIO',
+      file: {
+        name: `${payload.metadata.name}.dql`,
+        path: payload.path,
+        type: 'block',
+        folder: 'blocks',
+      },
+      payload,
+    });
+    const existing = state.files.some((file) => file.path === payload.path);
+    if (!existing) {
+      dispatch({
+        type: 'FILE_ADDED',
+        file: {
+          name: `${payload.metadata.name}.dql`,
+          path: payload.path,
+          type: 'block',
+          folder: 'blocks',
+        },
+      });
+    }
+    return payload;
+  };
+
   const handleSave = async () => {
     // If no metadata yet (new block), open the New Block modal to collect a name
     if (!state.blockStudioMetadata) {
@@ -351,44 +398,7 @@ export function BlockStudio() {
     setSaving(true);
     setSaveError(null);
     try {
-      const payload = await api.saveBlockStudio({
-        path: state.activeBlockPath,
-        source: state.blockStudioDraft,
-        metadata: {
-          name: state.blockStudioMetadata.name,
-          domain: state.blockStudioMetadata.domain,
-          description: state.blockStudioMetadata.description,
-          owner: state.blockStudioMetadata.owner,
-          tags: state.blockStudioMetadata.tags,
-          sourceKind: state.blockStudioMetadata.sourceKind,
-          sourcePath: state.blockStudioMetadata.sourcePath,
-          importId: state.blockStudioMetadata.importId,
-          candidateId: state.blockStudioMetadata.candidateId,
-          lineage: state.blockStudioMetadata.lineage,
-        },
-      });
-      dispatch({
-        type: 'OPEN_BLOCK_STUDIO',
-        file: {
-          name: `${payload.metadata.name}.dql`,
-          path: payload.path,
-          type: 'block',
-          folder: 'blocks',
-        },
-        payload,
-      });
-      const existing = state.files.some((file) => file.path === payload.path);
-      if (!existing) {
-        dispatch({
-          type: 'FILE_ADDED',
-          file: {
-            name: `${payload.metadata.name}.dql`,
-            path: payload.path,
-            type: 'block',
-            folder: 'blocks',
-          },
-        });
-      }
+      await persistBlockStudioDraft();
       setResultTab('save');
     } catch (err: any) {
       const msg = err?.message ?? 'Save failed';
@@ -399,36 +409,30 @@ export function BlockStudio() {
     }
   };
 
-  const handleMoveToReview = async () => {
-    if (!state.activeBlockPath || !state.blockStudioMetadata) return;
-    setStatusUpdating(true);
-    try {
-      const result = await api.updateBlockStatus(state.activeBlockPath, 'review');
-      if (result.ok && result.status) {
-        dispatch({ type: 'SET_BLOCK_STUDIO_METADATA', metadata: { ...state.blockStudioMetadata, reviewStatus: result.status } });
-        dispatch({ type: 'SET_BLOCK_STUDIO_DRAFT', draft: setBlockStringField(state.blockStudioDraft, 'status', result.status) });
-        setCertificationResult(null);
-      }
-    } finally {
-      setStatusUpdating(false);
-    }
-  };
-
   const handleCertify = async () => {
     if (!state.activeBlockPath || !state.blockStudioDraft.trim()) return;
+    if (!state.blockStudioMetadata) {
+      dispatch({ type: 'OPEN_NEW_BLOCK_MODAL' });
+      return;
+    }
     setCertifying(true);
+    setSaveError(null);
     try {
-      const result = await api.certifyBlockStudio({ source: state.blockStudioDraft, path: state.activeBlockPath });
+      setCertificationResult(null);
+      const saved = await persistBlockStudioDraft();
+      const result = await api.certifyBlockStudio({ source: saved.source, path: saved.path });
       setCertificationResult(result);
-      if (result.ok && result.status && state.blockStudioMetadata) {
-        dispatch({ type: 'SET_BLOCK_STUDIO_METADATA', metadata: { ...state.blockStudioMetadata, reviewStatus: result.status } });
-        dispatch({ type: 'SET_BLOCK_STUDIO_DRAFT', draft: setBlockStringField(state.blockStudioDraft, 'status', result.status) });
+      if (result.ok && result.status) {
+        const certifiedSource = setBlockStringField(saved.source, 'status', result.status);
+        dispatch({ type: 'SET_BLOCK_STUDIO_METADATA', metadata: { ...saved.metadata, reviewStatus: result.status } });
+        dispatch({ type: 'SET_BLOCK_STUDIO_DRAFT', draft: certifiedSource });
       }
       setResultTab('save');
     } catch (error: any) {
       let parsed: any = null;
       try { parsed = JSON.parse(error?.message ?? ''); } catch { /* no-op */ }
-      setCertificationResult(parsed ?? { ok: false, error: error?.message ?? 'Certification failed' });
+      const message = error?.message ?? 'Certification failed';
+      setCertificationResult(parsed ?? { ok: false, error: message.includes('409') || message.includes('BLOCK_EXISTS') ? 'Save failed because a block with this name already exists. Rename and try again.' : message });
       setResultTab('save');
     } finally {
       setCertifying(false);
@@ -490,12 +494,10 @@ export function BlockStudio() {
         },
       });
     }
-    if (importSession) {
-      setImportSession({
-        ...importSession,
-        candidates: importSession.candidates.map((item) => item.id === candidate.id ? candidate : item),
-      });
-    }
+    setImportSession((current) => current ? {
+      ...current,
+      candidates: current.candidates.map((item) => item.id === candidate.id ? candidate : item),
+    } : current);
     void refreshImportSessions();
   };
 
@@ -534,6 +536,52 @@ export function BlockStudio() {
       return;
     }
     handleDraftChange(appendSnippetToDraft(state.blockStudioDraft, snippet));
+  };
+
+  const handleAiSqlInsert = (sql: string, meta?: AiSqlDraftMeta) => {
+    const nextDraft = meta?.blockSource?.trim()
+      ? meta.blockSource.trim()
+      : applyGeneratedSqlToBlockDraft(state.blockStudioDraft, sql);
+    handleDraftChange(nextDraft);
+    const parsed = parseBlockFields(nextDraft);
+    if (parsed) {
+      dispatch({
+        type: 'SET_BLOCK_STUDIO_METADATA',
+        metadata: {
+          name: parsed.name || meta?.title || 'AI Generated Block',
+          path: state.activeBlockPath,
+          domain: parsed.domain || meta?.domain || 'analytics',
+          description: parsed.description || meta?.description || `AI generated block for ${meta?.question ?? 'analysis'}`,
+          owner: parsed.owner || meta?.owner || 'analytics',
+          tags: parsed.tags.length > 0 ? parsed.tags : (meta?.tags ?? ['ai-generated', 'review-required']),
+          reviewStatus: parsed.status || 'draft',
+          sourceKind: state.blockStudioMetadata?.sourceKind ?? 'ai-generated',
+          sourcePath: state.blockStudioMetadata?.sourcePath,
+          importId: state.blockStudioMetadata?.importId,
+          candidateId: state.blockStudioMetadata?.candidateId,
+          lineage: state.blockStudioMetadata?.lineage,
+        },
+      });
+    }
+    dispatch({
+      type: 'SET_BLOCK_STUDIO_VALIDATION',
+      validation: {
+        valid: true,
+        diagnostics: [
+          {
+            severity: 'info',
+            code: 'ai_sql_draft_inserted',
+            message: parsed
+              ? 'AI generated a draft block with metadata, SQL, visualization, and tests. Run preview, review joins and grain, then save.'
+              : 'AI generated SQL inserted. Run preview, review joins and grain, then save or certify.',
+          },
+        ],
+        semanticRefs: { metrics: [], dimensions: [], segments: [] },
+        executableSql: sql.trim(),
+      },
+    });
+    setResultTab('results');
+    setAiSqlOpen(false);
   };
 
   const ensureDbColumns = async (node: DatabaseSchemaNode) => {
@@ -832,14 +880,12 @@ export function BlockStudio() {
             </span>
           )}
           <div style={{ flex: 1 }} />
+          <TemplateButton label="Ask AI" onClick={() => { setResultTab('results'); setAiSqlOpen(true); }} />
           <TemplateButton label="Import SQL" onClick={() => dispatch({ type: 'OPEN_BLOCK_IMPORT' })} />
           <TemplateButton label="Run" onClick={() => void handleRun()} busy={running} />
-          <TemplateButton label="Save Draft" onClick={() => void handleSave()} busy={saving} />
+          <TemplateButton label="Save Block" onClick={() => void handleSave()} busy={saving} />
           {state.activeBlockPath && (
-            <>
-              <TemplateButton label="Move to Review" onClick={() => void handleMoveToReview()} busy={statusUpdating} />
-              <TemplateButton label="Certify" onClick={() => void handleCertify()} busy={certifying} />
-            </>
+            <TemplateButton label="Certify" onClick={() => void handleCertify()} busy={certifying} />
           )}
           {saveError && (
             <span style={{ fontSize: 11, color: '#f85149', fontFamily: t.font, padding: '4px 8px', background: '#f8514918', borderRadius: 6 }}>
@@ -858,15 +904,7 @@ export function BlockStudio() {
               onImport={() => dispatch({ type: 'OPEN_BLOCK_IMPORT' })}
               onAskAi={() => {
                 setResultTab('results');
-                dispatch({
-                  type: 'SET_BLOCK_STUDIO_VALIDATION',
-                  validation: {
-                    valid: true,
-                    diagnostics: [{ severity: 'info', message: 'AI block generation will use the selected dbt model, semantic metric, or current prompt context when provider settings are configured.' }],
-                    semanticRefs: { metrics: [], dimensions: [], segments: [] },
-                    executableSql: null,
-                  },
-                });
+                setAiSqlOpen(true);
               }}
               t={t}
             />
@@ -1050,6 +1088,17 @@ export function BlockStudio() {
         </div>
       )}
 
+      {aiSqlOpen && (
+        <AiSqlDraftDialog
+          mode="block"
+          themeMode={state.themeMode}
+          contextLabel={activeBlockName ?? state.activeBlockPath ?? 'Block Studio'}
+          upstreamSql={state.blockStudioDraft}
+          onClose={() => setAiSqlOpen(false)}
+          onInsertSql={(sql, meta) => handleAiSqlInsert(sql, meta)}
+        />
+      )}
+
       {state.blockStudioImportOpen && (
         <BlockStudioImportOverlay
           t={t}
@@ -1066,6 +1115,7 @@ export function BlockStudio() {
             onSavedCandidate={handleImportCandidateSaved}
             defaultDomain={draftMetadata?.domain || state.blockStudioMetadata?.domain || 'imported'}
             defaultOwner={draftMetadata?.owner || state.blockStudioMetadata?.owner || ''}
+            themeMode={state.themeMode}
             t={t}
           />
         </BlockStudioImportOverlay>
@@ -1542,7 +1592,89 @@ function SegmentedTab({ active, onClick, label, t }: { active: boolean; onClick:
   );
 }
 
-type ImportSourceMode = 'path' | 'paste' | 'upload' | 'tableau' | 'powerbi';
+type ImportSourceMode = 'import' | 'paste';
+type SmartImportPhase = 'idle' | 'creating' | 'running' | 'saving' | 'complete';
+type SmartImportItemStatus = 'queued' | 'running' | 'ready' | 'saving' | 'saved' | 'needs_attention';
+
+interface SmartImportCounts {
+  saved: number;
+  ready: number;
+  attention: number;
+  processing: number;
+}
+
+interface SmartImportItem {
+  id: string;
+  name: string;
+  sourcePath: string;
+  status: SmartImportItemStatus;
+  message?: string;
+  rows?: number;
+  savedPath?: string;
+}
+
+function rowCountForImportCandidate(candidate: BlockStudioImportCandidate): number | undefined {
+  const rowCount = candidate.preview?.result?.rowCount ?? candidate.preview?.result?.rows?.length;
+  return typeof rowCount === 'number' ? rowCount : undefined;
+}
+
+function smartItemFromCandidate(candidate: BlockStudioImportCandidate): SmartImportItem {
+  if (candidate.reviewStatus === 'saved') {
+    return {
+      id: candidate.id,
+      name: candidate.name,
+      sourcePath: candidate.sourcePath,
+      status: 'saved',
+      rows: rowCountForImportCandidate(candidate),
+      message: 'Block saved.',
+    };
+  }
+  if (candidate.validation?.valid === false) {
+    return {
+      id: candidate.id,
+      name: candidate.name,
+      sourcePath: candidate.sourcePath,
+      status: 'needs_attention',
+      message: candidate.validation.diagnostics.find((diagnostic) => diagnostic.severity === 'error')?.message ?? 'DQL validation needs attention.',
+    };
+  }
+  if (candidate.preview) {
+    return {
+      id: candidate.id,
+      name: candidate.name,
+      sourcePath: candidate.sourcePath,
+      status: 'ready',
+      rows: rowCountForImportCandidate(candidate),
+      message: 'Preview ran successfully.',
+    };
+  }
+  return {
+    id: candidate.id,
+    name: candidate.name,
+    sourcePath: candidate.sourcePath,
+    status: 'queued',
+    message: 'Ready to process.',
+  };
+}
+
+function smartImportPhaseLabel(phase: SmartImportPhase): string {
+  if (phase === 'creating') return 'Reading SQL';
+  if (phase === 'running') return 'Running previews';
+  if (phase === 'saving') return 'Saving blocks';
+  if (phase === 'complete') return 'Import complete';
+  return 'Ready';
+}
+
+function smartImportStatusLabel(status: SmartImportItemStatus): string {
+  if (status === 'needs_attention') return 'needs attention';
+  return status.replace('_', ' ');
+}
+
+function smartImportStatusTone(status: SmartImportItemStatus): 'ok' | 'warn' | 'info' {
+  if (status === 'saved' || status === 'ready') return 'ok';
+  if (status === 'needs_attention') return 'warn';
+  return 'info';
+}
 
 function BlockStudioImportWorkspace({
   session,
@@ -1555,6 +1687,7 @@ function BlockStudioImportWorkspace({
   onSavedCandidate,
   defaultDomain,
   defaultOwner,
+  themeMode,
   t,
 }: {
   session: BlockStudioImportSession | null;
@@ -1567,9 +1700,10 @@ function BlockStudioImportWorkspace({
   onSavedCandidate: (candidate: BlockStudioImportCandidate, block: BlockStudioOpenPayload) => void;
   defaultDomain: string;
   defaultOwner: string;
+  themeMode: ThemeMode;
   t: Theme;
 }) {
-  const [mode, setMode] = useState<ImportSourceMode>('path');
+  const [mode, setMode] = useState<ImportSourceMode>('import');
   const [path, setPath] = useState('');
   const [pasteSql, setPasteSql] = useState('');
   const [uploadSources, setUploadSources] = useState<Array<{ path: string; content: string }>>([]);
@@ -1583,6 +1717,10 @@ function BlockStudioImportWorkspace({
   const [historyOpen, setHistoryOpen] = useState(false);
   const [candidateSearch, setCandidateSearch] = useState('');
   const [showAllCandidates, setShowAllCandidates] = useState(false);
+  const [candidateErrors, setCandidateErrors] = useState<Record<string, string>>({});
+  const [showAdvanced, setShowAdvanced] = useState(false);
+  const [smartPhase, setSmartPhase] = useState<SmartImportPhase>('idle');
+  const [smartItems, setSmartItems] = useState<Record<string, SmartImportItem>>({});
 
   const selectedCandidate = useMemo(() => {
     if (!session) return null;
@@ -1598,6 +1736,21 @@ function BlockStudioImportWorkspace({
       setSelectedId(session.candidates[0].id);
     }
   }, [session, selectedId]);
+
+  useEffect(() => {
+    setCandidateErrors({});
+  }, [session?.id]);
+
+  useEffect(() => {
+    if (!session) {
+      setSmartItems({});
+      setSmartPhase('idle');
+      setShowAdvanced(false);
+      return;
+    }
+    setSmartItems(Object.fromEntries(session.candidates.map((candidate) => [candidate.id, smartItemFromCandidate(candidate)])));
+    setSmartPhase((phase) => phase === 'idle' ? 'complete' : phase);
+  }, [session?.id]);
 
   const readyCount = session?.candidates.filter((candidate) => candidate.validation?.valid !== false && candidate.reviewStatus !== 'rejected').length ?? 0;
   const savedCount = session?.candidates.filter((candidate) => candidate.reviewStatus === 'saved').length ?? 0;
@@ -1617,36 +1770,150 @@ function BlockStudioImportWorkspace({
   const visibleCandidates = showAllCandidates || candidateSearch.trim()
     ? candidateMatches
     : candidateMatches.slice(0, 10);
+  const smartCandidateItems = session?.candidates.map((candidate) => smartItems[candidate.id] ?? smartItemFromCandidate(candidate)) ?? [];
+  const smartCounts = smartCandidateItems.reduce<SmartImportCounts>((counts, item) => {
+    if (item.status === 'saved') counts.saved += 1;
+    else if (item.status === 'ready') counts.ready += 1;
+    else if (item.status === 'needs_attention') counts.attention += 1;
+    else counts.processing += 1;
+    return counts;
+  }, { saved: 0, ready: 0, attention: 0, processing: 0 });
+
+  const sourceReady = Boolean(mode === 'paste'
+    ? pasteSql.trim()
+    : path.trim() || uploadSources.length > 0);
+
+  const buildImportPayload = () => {
+    if (mode === 'paste') {
+      return {
+        inputMode: 'paste' as const,
+        sourceKind: 'raw-sql' as const,
+        domain,
+        owner,
+        sources: [{ path: 'pasted.sql', content: pasteSql }],
+      };
+    }
+    if (uploadSources.length > 0) {
+      return {
+        inputMode: 'upload' as const,
+        sourceKind: 'raw-sql' as const,
+        domain,
+        owner,
+        sources: uploadSources,
+      };
+    }
+    return { path, inputMode: 'path' as const, sourceKind: 'raw-sql' as const, domain, owner };
+  };
 
   const createSession = async () => {
     setLoading(true);
     setError(null);
     try {
-      if (mode === 'tableau' || mode === 'powerbi') {
-        setError(mode === 'tableau'
-          ? 'Tableau local file import is designed for the next migration-helper pass. SQL import is the active OSS path now.'
-          : 'Power BI PBIP/PBIR/TMDL import is designed for the next migration-helper pass. SQL import is the active OSS path now.');
-        return;
-      }
-      const payload = mode === 'path'
-        ? { path, inputMode: 'path' as const, sourceKind: 'raw-sql' as const, domain, owner }
-        : {
-            inputMode: mode,
-            sourceKind: 'raw-sql' as const,
-            domain,
-            owner,
-            sources: mode === 'paste'
-              ? [{ path: 'pasted.sql', content: pasteSql }]
-              : uploadSources,
-          };
+      const payload = buildImportPayload();
       const next = await api.createBlockStudioImport(payload);
       onSessionChange(next);
       setSelectedId(next.candidates[0]?.id ?? null);
+      setCandidateErrors({});
+      setSmartPhase('complete');
+      setShowAdvanced(true);
       await onRefreshSessions();
     } catch (err: any) {
       setError(err?.message ?? 'Import session failed.');
     } finally {
       setLoading(false);
+    }
+  };
+
+  const runSmartImport = async () => {
+    setLoading(true);
+    setSavingAll(true);
+    setError(null);
+    setCandidateErrors({});
+    setShowAdvanced(false);
+    setSmartItems({});
+    setSmartPhase('creating');
+    try {
+      const created = await api.createBlockStudioImport(buildImportPayload());
+      let workingSession = created;
+      let items: Record<string, SmartImportItem> = Object.fromEntries(created.candidates.map((candidate) => [
+        candidate.id,
+        { ...smartItemFromCandidate(candidate), status: 'queued' as SmartImportItemStatus, message: 'Waiting to run.' },
+      ]));
+      const updateItem = (candidateId: string, updater: (item: SmartImportItem) => SmartImportItem) => {
+        items = { ...items, [candidateId]: updater(items[candidateId]) };
+        setSmartItems(items);
+      };
+      const replaceCandidate = (candidate: BlockStudioImportCandidate) => {
+        workingSession = {
+          ...workingSession,
+          candidates: workingSession.candidates.map((item) => item.id === candidate.id ? candidate : item),
+        };
+        onSessionChange(workingSession);
+      };
+
+      onSessionChange(workingSession);
+      setSelectedId(workingSession.candidates[0]?.id ?? null);
+      setSmartItems(items);
+      await onRefreshSessions();
+
+      setSmartPhase('running');
+      for (const candidate of created.candidates) {
+        updateItem(candidate.id, (item) => ({ ...item, status: 'running', message: 'Running preview.' }));
+        try {
+          const next = await api.runBlockStudioImportCandidate(created.id, candidate.id);
+          replaceCandidate(next);
+          updateItem(candidate.id, (item) => ({
+            ...item,
+            name: next.name,
+            sourcePath: next.sourcePath,
+            status: 'ready',
+            rows: rowCountForImportCandidate(next),
+            message: 'Preview ran successfully.',
+          }));
+        } catch (err: any) {
+          const message = err?.message ?? 'Preview failed.';
+          setCandidateErrors((current) => ({ ...current, [candidate.id]: message }));
+          updateItem(candidate.id, (item) => ({ ...item, status: 'needs_attention', message }));
+        }
+      }
+
+      setSmartPhase('saving');
+      for (const candidate of workingSession.candidates) {
+        const item = items[candidate.id];
+        if (!item || item.status !== 'ready' || candidate.reviewStatus === 'saved') continue;
+        updateItem(candidate.id, (current) => ({ ...current, status: 'saving', message: 'Saving block.' }));
+        try {
+          const result = await api.saveBlockStudioImportCandidate(workingSession.id, candidate.id);
+          replaceCandidate(result.candidate);
+          onSavedCandidate(result.candidate, result.block);
+          updateItem(candidate.id, (current) => ({
+            ...current,
+            status: 'saved',
+            savedPath: result.block.path,
+            message: 'Block saved.',
+          }));
+        } catch (err: any) {
+          const message = err?.message ?? 'Save failed.';
+          updateItem(candidate.id, (current) => ({
+            ...current,
+            status: 'needs_attention',
+            message: message.includes('409') || message.includes('already exists')
+              ? 'A block with this name already exists. Rename it in advanced details, then save again.'
+              : message,
+          }));
+        }
+      }
+
+      onSessionChange(workingSession);
+      setSelectedId(workingSession.candidates.find((candidate) => candidate.reviewStatus !== 'saved')?.id ?? workingSession.candidates[0]?.id ?? null);
+      await onRefreshSessions();
+      setSmartPhase('complete');
+    } catch (err: any) {
+      setError(err?.message ?? 'Import failed.');
+      setSmartPhase('idle');
+    } finally {
+      setLoading(false);
+      setSavingAll(false);
     }
   };
 
@@ -1657,6 +1924,9 @@ function BlockStudioImportWorkspace({
       const next = await api.getBlockStudioImport(id);
       onSessionChange(next);
       setSelectedId(next.candidates.find((candidate) => candidate.reviewStatus !== 'saved' && candidate.reviewStatus !== 'rejected')?.id ?? next.candidates[0]?.id ?? null);
+      setCandidateErrors({});
+      setSmartPhase('complete');
+      setShowAdvanced(false);
     } catch (err: any) {
       setError(err?.message ?? 'Failed to resume import session.');
     } finally {
@@ -1703,18 +1973,34 @@ function BlockStudioImportWorkspace({
       ...session,
       candidates: session.candidates.map((item) => item.id === candidate.id ? candidate : item),
     });
+    setSmartItems((current) => ({ ...current, [candidate.id]: smartItemFromCandidate(candidate) }));
   };
 
   const runCandidate = async (candidate: BlockStudioImportCandidate) => {
     if (!session) return;
     setLoading(true);
     setError(null);
+    setCandidateErrors((current) => {
+      if (!current[candidate.id]) return current;
+      const next = { ...current };
+      delete next[candidate.id];
+      return next;
+    });
     try {
       const next = await api.runBlockStudioImportCandidate(session.id, candidate.id);
       updateCandidate(next);
       setSelectedId(next.id);
+      setCandidateErrors((current) => {
+        if (!current[candidate.id]) return current;
+        const cleared = { ...current };
+        delete cleared[candidate.id];
+        return cleared;
+      });
     } catch (err: any) {
-      setError(err?.message ?? 'Candidate run failed.');
+      const message = err?.message ?? 'Candidate run failed.';
+      setError(message);
+      setSelectedId(candidate.id);
+      setCandidateErrors((current) => ({ ...current, [candidate.id]: message }));
     } finally {
       setLoading(false);
     }
@@ -1746,6 +2032,30 @@ function BlockStudioImportWorkspace({
     try {
       const result = await api.saveAllBlockStudioImportCandidates(session.id);
       onSessionChange(result.session);
+      const errorsByCandidateId = new Map(result.errors.map((item) => [item.candidateId, item.error]));
+      const savedByCandidateId = new Map(result.saved.map((item) => [item.candidateId, item.path]));
+      setSmartItems(Object.fromEntries(result.session.candidates.map((candidate) => {
+        const errorMessage = errorsByCandidateId.get(candidate.id);
+        const savedPath = savedByCandidateId.get(candidate.id) ?? candidate.savedPath;
+        if (errorMessage) {
+          return [candidate.id, {
+            ...smartItemFromCandidate(candidate),
+            status: 'needs_attention' as const,
+            message: errorMessage.includes('409') || errorMessage.includes('already exists')
+              ? 'A block with this name already exists. Rename it in advanced details, then save again.'
+              : errorMessage,
+          }];
+        }
+        if (savedPath || candidate.reviewStatus === 'saved') {
+          return [candidate.id, {
+            ...smartItemFromCandidate(candidate),
+            status: 'saved' as const,
+            savedPath,
+            message: 'Block saved.',
+          }];
+        }
+        return [candidate.id, smartItemFromCandidate(candidate)];
+      })));
       await onRefreshSessions();
       if (result.errors.length > 0) {
         setError(`${result.saved.length} saved. ${result.errors.length} candidate(s) need attention.`);
@@ -1775,6 +2085,7 @@ function BlockStudioImportWorkspace({
     const sqlFiles = list.filter((file) => file.name.toLowerCase().endsWith('.sql'));
     const sources = await Promise.all(sqlFiles.map(async (file) => ({ path: file.name, content: await file.text() })));
     setUploadSources(sources);
+    if (sources.length > 0) setPath('');
   };
 
   return (
@@ -1786,8 +2097,8 @@ function BlockStudioImportWorkspace({
             <span style={{ flex: 1 }} />
             <button onClick={onClose} style={secondaryImportButtonStyle(t)}>Close</button>
           </div>
-          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, minmax(0, 1fr))', gap: 4 }}>
-            {(['path', 'paste', 'upload'] as const).map((value) => (
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, minmax(0, 1fr))', gap: 4 }}>
+            {(['import', 'paste'] as const).map((value) => (
               <button
                 key={value}
                 onClick={() => setMode(value)}
@@ -1799,24 +2110,34 @@ function BlockStudioImportWorkspace({
                   background: mode === value ? `${t.accent}14` : t.btnBg,
                 }}
               >
-                {value === 'path' ? 'File / folder' : value[0].toUpperCase() + value.slice(1)}
+                {value === 'import' ? 'Import' : 'Paste SQL'}
               </button>
             ))}
           </div>
-          {mode === 'path' && (
-            <FieldLabel label="SQL file or folder path" t={t}>
-              <input value={path} onChange={(event) => setPath(event.target.value)} placeholder="./queries or ./legacy.sql" style={importInputStyle(t)} />
-            </FieldLabel>
+          {mode === 'import' && (
+            <div style={{ display: 'grid', gap: 8 }}>
+              <FieldLabel label="SQL file or folder path" t={t}>
+                <input
+                  value={path}
+                  onChange={(event) => {
+                    setPath(event.target.value);
+                    if (event.target.value.trim()) setUploadSources([]);
+                  }}
+                  placeholder="./queries or ./legacy.sql"
+                  style={importInputStyle(t)}
+                />
+              </FieldLabel>
+              <FieldLabel label="Or choose SQL files" t={t}>
+                <input type="file" multiple accept=".sql,text/sql,text/plain" onChange={(event) => void handleFiles(event.target.files)} style={importInputStyle(t)} />
+                <span style={{ fontSize: 11, color: t.textMuted, fontFamily: t.font }}>
+                  {uploadSources.length > 0 ? `${uploadSources.length} SQL file(s) ready` : 'Use this for multiple files.'}
+                </span>
+              </FieldLabel>
+            </div>
           )}
           {mode === 'paste' && (
             <FieldLabel label="Paste SQL" t={t}>
               <textarea value={pasteSql} onChange={(event) => setPasteSql(event.target.value)} placeholder="select ...; go&#10;select ..." style={{ ...importInputStyle(t), minHeight: 108, resize: 'vertical', fontFamily: t.fontMono }} />
-            </FieldLabel>
-          )}
-          {mode === 'upload' && (
-            <FieldLabel label="Upload .sql files" t={t}>
-              <input type="file" multiple accept=".sql,text/sql,text/plain" onChange={(event) => void handleFiles(event.target.files)} style={importInputStyle(t)} />
-              <span style={{ fontSize: 11, color: t.textMuted, fontFamily: t.font }}>{uploadSources.length} SQL file(s) ready</span>
             </FieldLabel>
           )}
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
@@ -1828,19 +2149,26 @@ function BlockStudioImportWorkspace({
             </FieldLabel>
           </div>
           <button
-            onClick={() => void createSession()}
-            disabled={loading || mode === 'tableau' || mode === 'powerbi' || (mode === 'path' && !path.trim()) || (mode === 'paste' && !pasteSql.trim()) || (mode === 'upload' && uploadSources.length === 0)}
+            onClick={() => void runSmartImport()}
+            disabled={loading || !sourceReady}
             style={{ ...primaryImportButtonStyle(t), padding: '8px 12px', opacity: loading ? 0.65 : 1 }}
           >
-            {loading ? 'Working...' : 'Preview SQL'}
+            {loading ? smartImportPhaseLabel(smartPhase) : 'Create DQL blocks'}
           </button>
           <div style={{ fontSize: 11, color: t.textMuted, fontFamily: t.font, lineHeight: 1.45 }}>
-            Flow: choose SQL, review each detected query, then save draft blocks. Split uses semicolons, GO batches, and repeated name/title comments.
+            DQL will scan SQL, create blocks, run safe previews, and save the blocks that pass.
           </div>
           <details style={{ fontSize: 11, color: t.textMuted, fontFamily: t.font, border: `1px dashed ${t.headerBorder}`, borderRadius: 8, padding: '8px 10px' }}>
-            <summary style={{ cursor: 'pointer', color: t.textSecondary, fontWeight: 700 }}>Tableau / Power BI migration helpers</summary>
-            <div style={{ marginTop: 8, lineHeight: 1.45 }}>
-              Local Tableau `.twb/.twbx` and Power BI PBIP/PBIR/TMDL import are planned. OSS v1 keeps SQL import active first and preserves unsupported BI formulas as future warnings.
+            <summary style={{ cursor: 'pointer', color: t.textSecondary, fontWeight: 700 }}>Advanced controls</summary>
+            <div style={{ marginTop: 8, display: 'grid', gap: 8, lineHeight: 1.45 }}>
+              <button
+                onClick={() => void createSession()}
+                disabled={loading || !sourceReady}
+                style={{ ...secondaryImportButtonStyle(t), justifySelf: 'start', opacity: loading || !sourceReady ? 0.6 : 1 }}
+              >
+                Inspect before saving
+              </button>
+              Use this when you want to inspect generated blocks before DQL previews and saves them.
             </div>
           </details>
         </div>
@@ -1911,7 +2239,67 @@ function BlockStudioImportWorkspace({
 
         <div style={{ flex: 1, minHeight: 0, overflow: 'auto', padding: 12, display: 'grid', alignContent: 'start', gap: 8 }}>
           {!session ? (
-            <div style={{ fontSize: 12, color: t.textMuted, lineHeight: 1.5 }}>Create or open an import preview to review detected SQL queries.</div>
+            <div style={{ fontSize: 12, color: t.textMuted, lineHeight: 1.5 }}>Choose a SQL file or folder, then create DQL blocks.</div>
+          ) : !showAdvanced ? (
+            <>
+              <div style={{ border: `1px solid ${t.headerBorder}`, borderRadius: 8, padding: 12, background: t.appBg, display: 'grid', gap: 8 }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+                  <span style={{ fontSize: 13, fontWeight: 800, color: t.textPrimary, fontFamily: t.font }}>{smartImportPhaseLabel(smartPhase)}</span>
+                  <ImportPill label={`${session.candidates.length} found`} tone="info" t={t} />
+                </div>
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, minmax(0, 1fr))', gap: 6 }}>
+                  <SmartCount label="Saved" value={smartCounts.saved} tone="ok" t={t} />
+                  <SmartCount label="Ready" value={smartCounts.ready} tone="ok" t={t} />
+                  <SmartCount label="Needs attention" value={smartCounts.attention} tone="warn" t={t} />
+                  <SmartCount label="Processing" value={smartCounts.processing} tone="info" t={t} />
+                </div>
+                <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+                  {smartCounts.ready > 0 && (
+                    <button onClick={() => void saveAll()} disabled={savingAll} style={primaryImportButtonStyle(t)}>
+                      {savingAll ? 'Saving...' : 'Save valid blocks'}
+                    </button>
+                  )}
+                  <button onClick={() => setShowAdvanced(true)} style={secondaryImportButtonStyle(t)}>Show advanced details</button>
+                </div>
+              </div>
+              {smartCandidateItems.length === 0 ? (
+                <div style={{ fontSize: 12, color: t.textMuted, lineHeight: 1.5 }}>Import status will appear here.</div>
+              ) : (
+                <div style={{ display: 'grid', gap: 8 }}>
+                  {smartCandidateItems.slice(0, 24).map((item) => (
+                    <button
+                      key={item.id}
+                      onClick={() => {
+                        setSelectedId(item.id);
+                        setShowAdvanced(true);
+                      }}
+                      style={{
+                        border: `1px solid ${item.status === 'needs_attention' ? '#d2992255' : t.headerBorder}`,
+                        borderRadius: 8,
+                        background: t.appBg,
+                        color: t.textPrimary,
+                        padding: 10,
+                        display: 'grid',
+                        gap: 5,
+                        textAlign: 'left',
+                        cursor: 'pointer',
+                      }}
+                    >
+                      <span style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                        <span style={{ minWidth: 0, flex: 1, fontSize: 12, fontWeight: 800, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{item.name}</span>
+                        <ImportPill label={smartImportStatusLabel(item.status)} tone={smartImportStatusTone(item.status)} t={t} />
+                      </span>
+                      <span style={{ fontSize: 10, color: t.textMuted, fontFamily: t.fontMono, overflowWrap: 'anywhere' }}>{item.sourcePath}</span>
+                      {item.rows !== undefined && <span style={{ fontSize: 11, color: t.textMuted }}>{item.rows} rows previewed</span>}
+                      {item.message && <span style={{ fontSize: 11, color: item.status === 'needs_attention' ? '#d29922' : t.textMuted, lineHeight: 1.35, overflowWrap: 'anywhere' }}>{item.message}</span>}
+                    </button>
+                  ))}
+                  {smartCandidateItems.length > 24 && (
+                    <div style={{ fontSize: 12, color: t.textMuted }}>{smartCandidateItems.length - 24} more block(s). Use advanced details to search.</div>
+                  )}
+                </div>
+              )}
+            </>
           ) : (
             <>
               <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', alignItems: 'center' }}>
@@ -1922,7 +2310,7 @@ function BlockStudioImportWorkspace({
               </div>
               <div style={{ display: 'flex', gap: 6 }}>
                 <button onClick={selectNextUnsaved} style={secondaryImportButtonStyle(t)}>Open next unsaved</button>
-                <button onClick={() => void saveAll()} disabled={savingAll} style={primaryImportButtonStyle(t)}>{savingAll ? 'Saving...' : 'Save valid drafts'}</button>
+                <button onClick={() => void saveAll()} disabled={savingAll} style={primaryImportButtonStyle(t)}>{savingAll ? 'Saving...' : 'Save valid blocks'}</button>
               </div>
               <input
                 value={candidateSearch}
@@ -1933,33 +2321,80 @@ function BlockStudioImportWorkspace({
               {visibleCandidates.map((candidate) => {
                 const selected = candidate.id === selectedCandidate?.id;
                 const warnings = candidate.warnings ?? candidate.lineage.warnings;
+                const runError = candidateErrors[candidate.id];
+                const rowCount = candidate.preview?.result?.rowCount ?? candidate.preview?.result?.rows?.length;
                 return (
-                  <button
+                  <div
                     key={candidate.id}
-                    onClick={() => setSelectedId(candidate.id)}
                     style={{
                       border: `1px solid ${selected ? t.accent : t.headerBorder}`,
                       borderRadius: 8,
                       background: selected ? `${t.accent}10` : t.appBg,
                       color: t.textPrimary,
-                      padding: 10,
                       display: 'grid',
-                      gap: 6,
-                      textAlign: 'left',
-                      cursor: 'pointer',
+                      gap: 8,
+                      overflow: 'hidden',
                     }}
                   >
-                    <span style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-                      <span style={{ minWidth: 0, flex: 1, fontSize: 12, fontWeight: 800, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{candidate.name}</span>
-                      <ImportPill label={candidate.reviewStatus} tone={candidate.reviewStatus === 'saved' ? 'ok' : candidate.reviewStatus === 'rejected' ? 'warn' : 'info'} t={t} />
-                    </span>
-                    <span style={{ fontSize: 10, color: t.textMuted, fontFamily: t.fontMono }}>{candidate.lineage.statementIndex}/{candidate.lineage.totalStatements} · {candidate.sourcePath}</span>
-                    <span style={{ display: 'flex', gap: 5, flexWrap: 'wrap' }}>
-                      <ImportPill label={`${Math.round(candidate.confidence * 100)}%`} tone="info" t={t} />
-                      <ImportPill label={candidate.validation?.valid === false ? 'review' : 'valid'} tone={candidate.validation?.valid === false ? 'warn' : 'ok'} t={t} />
-                      {warnings.length > 0 && <ImportPill label={`${warnings.length} warning`} tone="warn" t={t} />}
-                    </span>
-                  </button>
+                    <button
+                      onClick={() => setSelectedId(candidate.id)}
+                      style={{
+                        background: 'transparent',
+                        border: 'none',
+                        color: t.textPrimary,
+                        padding: '10px 10px 0',
+                        display: 'grid',
+                        gap: 6,
+                        textAlign: 'left',
+                        cursor: 'pointer',
+                        minWidth: 0,
+                      }}
+                    >
+                      <span style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                        <span style={{ minWidth: 0, flex: 1, fontSize: 12, fontWeight: 800, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{candidate.name}</span>
+                        <ImportPill label={candidate.reviewStatus} tone={candidate.reviewStatus === 'saved' ? 'ok' : candidate.reviewStatus === 'rejected' ? 'warn' : 'info'} t={t} />
+                      </span>
+                      <span style={{ fontSize: 10, color: t.textMuted, fontFamily: t.fontMono, overflowWrap: 'anywhere' }}>{candidate.lineage.statementIndex}/{candidate.lineage.totalStatements} · {candidate.sourcePath}</span>
+                      <span style={{ display: 'flex', gap: 5, flexWrap: 'wrap' }}>
+                        <ImportPill label={`${Math.round(candidate.confidence * 100)}%`} tone="info" t={t} />
+                        <ImportPill label={candidate.validation?.valid === false ? 'fix' : 'valid'} tone={candidate.validation?.valid === false ? 'warn' : 'ok'} t={t} />
+                        {warnings.length > 0 && <ImportPill label={`${warnings.length} warning`} tone="warn" t={t} />}
+                        {runError && <ImportPill label="run failed" tone="warn" t={t} />}
+                      </span>
+                      {runError && (
+                        <span style={{ fontSize: 11, color: '#f85149', lineHeight: 1.35, overflowWrap: 'anywhere' }}>
+                          Preview failed: {runError}
+                        </span>
+                      )}
+                      {!runError && candidate.preview && (
+                        <span style={{ fontSize: 11, color: t.textMuted, lineHeight: 1.35 }}>
+                          Preview ready{typeof rowCount === 'number' ? ` · ${rowCount} rows` : ''}
+                        </span>
+                      )}
+                    </button>
+                    <div style={{ display: 'flex', gap: 6, padding: '0 10px 10px' }}>
+                      <button
+                        onClick={() => {
+                          setSelectedId(candidate.id);
+                          void runCandidate(candidate);
+                        }}
+                        disabled={loading}
+                        style={{ ...secondaryImportButtonStyle(t), flex: 1, opacity: loading ? 0.65 : 1 }}
+                      >
+                        {loading && selected ? 'Running...' : 'Run'}
+                      </button>
+                      <button
+                        onClick={() => {
+                          setSelectedId(candidate.id);
+                          void saveCandidate(candidate);
+                        }}
+                        disabled={loading || candidate.reviewStatus === 'saved'}
+                        style={{ ...primaryImportButtonStyle(t), flex: 1, opacity: loading || candidate.reviewStatus === 'saved' ? 0.55 : 1 }}
+                      >
+                        {candidate.reviewStatus === 'saved' ? 'Saved' : 'Save'}
+                      </button>
+                    </div>
+                  </div>
                 );
               })}
               {!showAllCandidates && !candidateSearch.trim() && candidateMatches.length > 10 && (
@@ -1974,11 +2409,26 @@ function BlockStudioImportWorkspace({
 
       <section style={{ minWidth: 0, minHeight: 0, overflow: 'auto', padding: 14 }}>
         {error && (
-          <div style={{ padding: '10px 12px', color: '#f85149', background: '#f8514914', border: `1px solid #f8514933`, borderRadius: 8, marginBottom: 12, fontSize: 12 }}>
+          <div role="alert" style={{ padding: '10px 12px', color: '#f85149', background: '#f8514914', border: `1px solid #f8514933`, borderRadius: 8, marginBottom: 12, fontSize: 12 }}>
             {error}
           </div>
         )}
-        {!session || !selectedCandidate ? (
+        {!session ? (
+          <ImportGuide t={t} />
+        ) : !showAdvanced ? (
+          <SmartImportOverview
+            session={session}
+            items={smartCandidateItems}
+            counts={smartCounts}
+            phase={smartPhase}
+            onShowAdvanced={() => setShowAdvanced(true)}
+            onSelectItem={(id) => {
+              setSelectedId(id);
+              setShowAdvanced(true);
+            }}
+            t={t}
+          />
+        ) : !selectedCandidate ? (
           <ImportGuide t={t} />
         ) : (
           <ImportCandidateDetail
@@ -1990,6 +2440,8 @@ function BlockStudioImportWorkspace({
             onSave={saveCandidate}
             onReject={rejectCandidate}
             onReviewInEditor={onSelectCandidate}
+            runError={candidateErrors[selectedCandidate.id] ?? null}
+            themeMode={themeMode}
             t={t}
           />
         )}
@@ -2000,8 +2452,8 @@ function BlockStudioImportWorkspace({
           busy={loading}
           title={pendingDelete.kind === 'all' ? 'Clear import history?' : 'Delete import preview?'}
           message={pendingDelete.kind === 'all'
-            ? `This removes ${sessions.length} local import preview${sessions.length === 1 ? '' : 's'} from .dql/imports. Saved draft blocks stay in the project.`
-            : 'This removes the selected local import preview from .dql/imports. Saved draft blocks stay in the project.'}
+            ? `This removes ${sessions.length} local import preview${sessions.length === 1 ? '' : 's'} from .dql/imports. Saved blocks stay in the project.`
+            : 'This removes the selected local import preview from .dql/imports. Saved blocks stay in the project.'}
           confirmLabel={pendingDelete.kind === 'all' ? 'Clear history' : 'Delete preview'}
           onCancel={() => setPendingDelete(null)}
           onConfirm={() => void confirmDelete()}
@@ -2067,6 +2519,125 @@ function ImportConfirmPanel({
   );
 }
 
+function SmartImportOverview({
+  session,
+  items,
+  counts,
+  phase,
+  onShowAdvanced,
+  onSelectItem,
+  t,
+}: {
+  session: BlockStudioImportSession;
+  items: SmartImportItem[];
+  counts: SmartImportCounts;
+  phase: SmartImportPhase;
+  onShowAdvanced: () => void;
+  onSelectItem: (id: string) => void;
+  t: Theme;
+}) {
+  const total = items.length || session.candidates.length;
+  const orderedItems = [...items].sort((left, right) => {
+    const priority: Record<SmartImportItemStatus, number> = {
+      needs_attention: 0,
+      running: 1,
+      saving: 2,
+      queued: 3,
+      ready: 4,
+      saved: 5,
+    };
+    return priority[left.status] - priority[right.status] || left.name.localeCompare(right.name);
+  });
+  const headline = counts.attention > 0
+    ? `${counts.saved} saved, ${counts.attention} need attention`
+    : counts.processing > 0
+      ? smartImportPhaseLabel(phase)
+      : `${counts.saved} DQL block${counts.saved === 1 ? '' : 's'} saved`;
+  const detail = counts.attention > 0
+    ? 'Passing SQL was saved. Fix the exceptions in advanced details.'
+    : counts.processing > 0
+      ? 'DQL is previewing SQL and saving blocks that pass.'
+      : 'Passing SQL was previewed against the active connection and saved as DQL blocks.';
+
+  return (
+    <div style={{ display: 'grid', gap: 12 }}>
+      <PanelBox title="Import Summary" t={t}>
+        <div style={{ display: 'grid', gap: 8 }}>
+          <div style={{ display: 'flex', alignItems: 'flex-start', gap: 10, flexWrap: 'wrap' }}>
+            <div style={{ minWidth: 0, flex: 1 }}>
+              <div style={{ fontSize: 18, fontWeight: 800, color: t.textPrimary, fontFamily: t.font }}>{headline}</div>
+              <div style={{ fontSize: 12, color: t.textMuted, fontFamily: t.font, lineHeight: 1.45, marginTop: 4 }}>{detail}</div>
+              <div style={{ fontSize: 11, color: t.textMuted, fontFamily: t.fontMono, overflowWrap: 'anywhere', marginTop: 6 }}>
+                Source: {session.inputPath}
+              </div>
+            </div>
+            <ImportPill label={`${total} found`} tone="info" t={t} />
+            <ImportPill label={smartImportPhaseLabel(phase)} tone={counts.attention > 0 ? 'warn' : 'ok'} t={t} />
+          </div>
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, minmax(110px, 1fr))', gap: 8 }}>
+            <SmartCount label="Saved" value={counts.saved} tone="ok" t={t} />
+            <SmartCount label="Ready" value={counts.ready} tone="ok" t={t} />
+            <SmartCount label="Needs attention" value={counts.attention} tone="warn" t={t} />
+            <SmartCount label="Processing" value={counts.processing} tone="info" t={t} />
+          </div>
+          <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+            <button onClick={onShowAdvanced} style={counts.attention > 0 ? primaryImportButtonStyle(t) : secondaryImportButtonStyle(t)}>
+              {counts.attention > 0 ? 'Fix exceptions' : 'Open advanced details'}
+            </button>
+          </div>
+        </div>
+      </PanelBox>
+
+      <PanelBox title="Blocks" t={t}>
+        {orderedItems.length === 0 ? (
+          <EmptyPanel message="Import status will appear here." />
+        ) : (
+          <div style={{ display: 'grid', gap: 8 }}>
+            {orderedItems.slice(0, 40).map((item) => (
+              <button
+                key={item.id}
+                onClick={() => onSelectItem(item.id)}
+                style={{
+                  border: `1px solid ${item.status === 'needs_attention' ? '#d2992255' : t.headerBorder}`,
+                  borderRadius: 8,
+                  background: item.status === 'needs_attention' ? '#d299220f' : t.appBg,
+                  color: t.textPrimary,
+                  padding: 11,
+                  display: 'grid',
+                  gridTemplateColumns: 'minmax(0, 1fr) auto',
+                  gap: 8,
+                  textAlign: 'left',
+                  cursor: 'pointer',
+                  alignItems: 'start',
+                }}
+              >
+                <span style={{ display: 'grid', gap: 4, minWidth: 0 }}>
+                  <span style={{ fontSize: 13, fontWeight: 800, color: t.textPrimary, fontFamily: t.font, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{item.name}</span>
+                  <span style={{ fontSize: 10, color: t.textMuted, fontFamily: t.fontMono, overflowWrap: 'anywhere' }}>{item.savedPath ?? item.sourcePath}</span>
+                  {item.message && (
+                    <span style={{ fontSize: 11, color: item.status === 'needs_attention' ? '#d29922' : t.textMuted, lineHeight: 1.35, overflowWrap: 'anywhere' }}>
+                      {item.message}
+                    </span>
+                  )}
+                </span>
+                <span style={{ display: 'grid', justifyItems: 'end', gap: 5 }}>
+                  <ImportPill label={smartImportStatusLabel(item.status)} tone={smartImportStatusTone(item.status)} t={t} />
+                  {item.rows !== undefined && <span style={{ fontSize: 10, color: t.textMuted, fontFamily: t.font }}>{item.rows} rows</span>}
+                </span>
+              </button>
+            ))}
+            {orderedItems.length > 40 && (
+              <div style={{ fontSize: 12, color: t.textMuted, fontFamily: t.font }}>
+                {orderedItems.length - 40} more block(s). Open advanced details to search the full list.
+              </div>
+            )}
+          </div>
+        )}
+      </PanelBox>
+    </div>
+  );
+}
+
 function ImportCandidateDetail({
   session,
   candidate,
@@ -2076,6 +2647,8 @@ function ImportCandidateDetail({
   onSave,
   onReject,
   onReviewInEditor,
+  runError,
+  themeMode,
   t,
 }: {
   session: BlockStudioImportSession;
@@ -2086,6 +2659,8 @@ function ImportCandidateDetail({
   onSave: (candidate: BlockStudioImportCandidate) => Promise<void>;
   onReject: (candidate: BlockStudioImportCandidate) => Promise<void>;
   onReviewInEditor: (candidate: BlockStudioImportCandidate) => void;
+  runError?: string | null;
+  themeMode: ThemeMode;
   t: Theme;
 }) {
   const [name, setName] = useState(candidate.name);
@@ -2139,6 +2714,7 @@ function ImportCandidateDetail({
 
   const warnings = candidate.warnings ?? candidate.lineage.warnings;
   const inputStyle = importInputStyle(t);
+  const previewRowCount = candidate.preview?.result?.rowCount ?? candidate.preview?.result?.rows?.length;
 
   return (
     <div style={{ display: 'grid', gap: 12 }}>
@@ -2148,12 +2724,17 @@ function ImportCandidateDetail({
           <div style={{ fontSize: 11, color: t.textMuted, fontFamily: t.fontMono, marginTop: 3 }}>{candidate.sourcePath} · statement {candidate.lineage.statementIndex}/{candidate.lineage.totalStatements}</div>
         </div>
         <button onClick={() => void onRun(candidate)} disabled={loading} style={secondaryImportButtonStyle(t)}>Run preview</button>
-        <button onClick={() => onReviewInEditor(candidate)} style={primaryImportButtonStyle(t)}>Review in editor</button>
-        <button onClick={() => void onSave(candidate)} disabled={loading || candidate.reviewStatus === 'saved'} style={primaryImportButtonStyle(t)}>{candidate.reviewStatus === 'saved' ? 'Saved' : 'Save draft'}</button>
+        <button onClick={() => onReviewInEditor(candidate)} style={primaryImportButtonStyle(t)}>Open in editor</button>
+        <button onClick={() => void onSave(candidate)} disabled={loading || candidate.reviewStatus === 'saved'} style={primaryImportButtonStyle(t)}>{candidate.reviewStatus === 'saved' ? 'Saved' : 'Save block'}</button>
         <button onClick={() => void onReject(candidate)} disabled={candidate.reviewStatus === 'rejected'} style={secondaryImportButtonStyle(t)}>Reject</button>
       </div>
 
-      {editError && <div style={{ fontSize: 12, color: '#f85149', background: '#f8514914', borderRadius: 8, padding: 10 }}>{editError}</div>}
+      {editError && <div role="alert" style={{ fontSize: 12, color: '#f85149', background: '#f8514914', borderRadius: 8, padding: 10 }}>{editError}</div>}
+      {runError && (
+        <div role="alert" style={{ fontSize: 12, color: '#f85149', background: '#f8514914', border: `1px solid #f8514933`, borderRadius: 8, padding: 10, lineHeight: 1.45, overflowWrap: 'anywhere' }}>
+          Preview failed: {runError}
+        </div>
+      )}
 
       <div style={{ display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) minmax(300px, 38%)', gap: 12, alignItems: 'start' }}>
         <div style={{ display: 'grid', gap: 12 }}>
@@ -2167,6 +2748,17 @@ function ImportCandidateDetail({
             <FieldLabel label="Description" t={t}><input value={description} onChange={(event) => setDescription(event.target.value)} style={inputStyle} /></FieldLabel>
             <button onClick={() => void saveEdits()} style={primaryImportButtonStyle(t)}>Apply edits</button>
           </PanelBox>
+
+          {candidate.preview && (
+            <PanelBox title="Preview Results" t={t}>
+              <div style={{ fontSize: 12, color: t.textMuted, lineHeight: 1.45 }}>
+                Query ran successfully{typeof previewRowCount === 'number' ? ` and returned ${previewRowCount} rows` : ''}.
+              </div>
+              <div style={{ maxHeight: 320, overflow: 'auto', border: `1px solid ${t.headerBorder}`, borderRadius: 8 }}>
+                <TableOutput result={candidate.preview.result} themeMode={themeMode} />
+              </div>
+            </PanelBox>
+          )}
 
           <PanelBox title="Original SQL" t={t}>
             <textarea value={sql} onChange={(event) => setSql(event.target.value)} style={{ ...inputStyle, minHeight: 210, fontFamily: t.fontMono, resize: 'vertical' }} />
@@ -2214,7 +2806,7 @@ function ImportCandidateDetail({
 
           <PanelBox title="Optional AI Suggestions" t={t}>
             <div style={{ fontSize: 12, color: t.textMuted, lineHeight: 1.45 }}>
-              Optional helper for naming, explanation, validation fixes, chart ideas, and stronger tests. It only uses this selected candidate context and records suggestions for review.
+              Optional helper for naming, explanation, validation fixes, chart ideas, and stronger tests. It only uses this selected candidate context and records suggestions for your approval.
             </div>
             <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
               {[
@@ -2271,9 +2863,14 @@ function BlockStudioImportModal({
   const [runningId, setRunningId] = useState<string | null>(null);
   const [savingId, setSavingId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [candidateErrors, setCandidateErrors] = useState<Record<string, string>>({});
   const readyCount = session?.candidates.filter((candidate) => candidate.validation?.valid !== false).length ?? 0;
   const savedCount = session?.candidates.filter((candidate) => candidate.reviewStatus === 'saved').length ?? 0;
   const activeStep = !session ? 1 : savedCount > 0 ? 3 : 2;
+
+  useEffect(() => {
+    setCandidateErrors({});
+  }, [session?.id]);
 
   const updateCandidate = (candidate: BlockStudioImportCandidate) => {
     if (!session) return;
@@ -2294,6 +2891,7 @@ function BlockStudioImportModal({
         owner,
       });
       onSessionChange(next);
+      setCandidateErrors({});
     } catch (err: any) {
       setError(err?.message ?? 'Import preview failed.');
     } finally {
@@ -2305,11 +2903,25 @@ function BlockStudioImportModal({
     if (!session) return;
     setRunningId(candidate.id);
     setError(null);
+    setCandidateErrors((current) => {
+      if (!current[candidate.id]) return current;
+      const next = { ...current };
+      delete next[candidate.id];
+      return next;
+    });
     try {
       const next = await api.runBlockStudioImportCandidate(session.id, candidate.id);
       updateCandidate(next);
+      setCandidateErrors((current) => {
+        if (!current[candidate.id]) return current;
+        const cleared = { ...current };
+        delete cleared[candidate.id];
+        return cleared;
+      });
     } catch (err: any) {
-      setError(err?.message ?? 'Candidate run failed.');
+      const message = err?.message ?? 'Candidate run failed.';
+      setError(message);
+      setCandidateErrors((current) => ({ ...current, [candidate.id]: message }));
     } finally {
       setRunningId(null);
     }
@@ -2326,7 +2938,7 @@ function BlockStudioImportModal({
     } catch (err: any) {
       const message = err?.message ?? 'Candidate save failed.';
       setError(message.includes('409') || message.includes('already exists')
-        ? 'A block with this name already exists. Use Review in editor to rename it, then save.'
+        ? 'A block with this name already exists. Open it in the editor to rename it, then save.'
         : message);
     } finally {
       setSavingId(null);
@@ -2363,7 +2975,7 @@ function BlockStudioImportModal({
         <div style={{ padding: '14px 16px', borderBottom: `1px solid ${t.headerBorder}`, display: 'flex', alignItems: 'center', gap: 12 }}>
           <div>
             <div style={{ fontSize: 14, fontWeight: 700, color: t.textPrimary, fontFamily: t.font }}>Import SQL into Block Studio</div>
-            <div style={{ fontSize: 11, color: t.textMuted, fontFamily: t.font, marginTop: 2 }}>Scan existing SQL, review candidates, then save draft DQL blocks.</div>
+            <div style={{ fontSize: 11, color: t.textMuted, fontFamily: t.font, marginTop: 2 }}>Scan existing SQL, inspect candidates, then save DQL blocks.</div>
           </div>
           <div style={{ flex: 1 }} />
           <button
@@ -2377,8 +2989,8 @@ function BlockStudioImportModal({
 
         <div style={{ padding: '12px 14px', borderBottom: `1px solid ${t.headerBorder}`, display: 'grid', gridTemplateColumns: 'repeat(3, minmax(0, 1fr))', gap: 8, background: `${t.appBg}99` }}>
           <ImportStep index={1} active={activeStep === 1} complete={Boolean(session)} title="Choose source" detail="SQL file or folder" t={t} />
-          <ImportStep index={2} active={activeStep === 2} complete={savedCount > 0} title="Review candidates" detail={session ? `${session.candidates.length} found · ${readyCount} ready` : 'Validate metadata'} t={t} />
-          <ImportStep index={3} active={activeStep === 3} complete={savedCount > 0} title="Save drafts" detail={savedCount > 0 ? `${savedCount} saved` : 'Open or save as block'} t={t} />
+          <ImportStep index={2} active={activeStep === 2} complete={savedCount > 0} title="Inspect queries" detail={session ? `${session.candidates.length} found · ${readyCount} ready` : 'Validate metadata'} t={t} />
+          <ImportStep index={3} active={activeStep === 3} complete={savedCount > 0} title="Save blocks" detail={savedCount > 0 ? `${savedCount} saved` : 'Open or save as block'} t={t} />
         </div>
 
         <div style={{ padding: 14, borderBottom: `1px solid ${t.headerBorder}`, display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) 150px 150px auto', gap: 8, alignItems: 'end' }}>
@@ -2417,7 +3029,7 @@ function BlockStudioImportModal({
         </div>
 
         {error && (
-          <div style={{ padding: '10px 14px', color: '#f85149', background: '#f8514914', borderBottom: `1px solid ${t.headerBorder}`, fontSize: 12, fontFamily: t.font }}>
+          <div role="alert" style={{ padding: '10px 14px', color: '#f85149', background: '#f8514914', borderBottom: `1px solid ${t.headerBorder}`, fontSize: 12, fontFamily: t.font }}>
             {error}
           </div>
         )}
@@ -2443,6 +3055,7 @@ function BlockStudioImportModal({
               {session.candidates.map((candidate) => {
                 const valid = candidate.validation?.valid !== false;
                 const rowCount = candidate.preview?.result?.rowCount ?? candidate.preview?.result?.rows?.length;
+                const runError = candidateErrors[candidate.id];
                 return (
                   <div
                     key={candidate.id}
@@ -2461,8 +3074,9 @@ function BlockStudioImportModal({
                         <div style={{ fontSize: 11, color: t.textMuted, fontFamily: t.fontMono, marginTop: 3 }}>{candidate.sourcePath}</div>
                       </div>
                       <ImportPill label={`${Math.round(candidate.confidence * 100)}%`} tone="info" t={t} />
-                      <ImportPill label={valid ? 'valid' : 'review'} tone={valid ? 'ok' : 'warn'} t={t} />
+                      <ImportPill label={valid ? 'valid' : 'fix'} tone={valid ? 'ok' : 'warn'} t={t} />
                       <ImportPill label={candidate.reviewStatus} tone={candidate.reviewStatus === 'saved' ? 'ok' : 'info'} t={t} />
+                      {runError && <ImportPill label="run failed" tone="warn" t={t} />}
                       {candidate.lineage.totalStatements > 1 && (
                         <ImportPill label={`${candidate.lineage.statementIndex}/${candidate.lineage.totalStatements}`} tone="info" t={t} />
                       )}
@@ -2496,6 +3110,11 @@ function BlockStudioImportModal({
                         {candidate.validation.diagnostics.filter((diagnostic) => diagnostic.severity === 'error').map((diagnostic) => diagnostic.message).join(' · ')}
                       </div>
                     )}
+                    {runError && (
+                      <div role="alert" style={{ fontSize: 11, color: '#f85149', background: '#f8514914', border: `1px solid #f8514933`, borderRadius: 8, padding: 9, fontFamily: t.font, lineHeight: 1.45, overflowWrap: 'anywhere' }}>
+                        Preview failed: {runError}
+                      </div>
+                    )}
                     {candidate.preview && (
                       <div style={{ fontSize: 11, color: t.textMuted, fontFamily: t.font, display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
                         <span>Preview ready</span>
@@ -2515,7 +3134,7 @@ function BlockStudioImportModal({
                         onClick={() => onSelectCandidate(candidate)}
                         style={primaryImportButtonStyle(t)}
                       >
-                        Review in editor
+                        Open in editor
                       </button>
                       <button
                         onClick={() => void handleSaveCandidate(candidate)}
@@ -2526,7 +3145,7 @@ function BlockStudioImportModal({
                           cursor: savingId === candidate.id || candidate.reviewStatus === 'saved' ? 'not-allowed' : 'pointer',
                         }}
                       >
-                        {candidate.reviewStatus === 'saved' ? 'Saved' : savingId === candidate.id ? 'Saving…' : 'Save draft'}
+                        {candidate.reviewStatus === 'saved' ? 'Saved' : savingId === candidate.id ? 'Saving…' : 'Save block'}
                       </button>
                     </div>
                   </div>
@@ -2582,8 +3201,8 @@ function ImportStep({ index, active, complete, title, detail, t }: { index: numb
 function ImportGuide({ t }: { t: Theme }) {
   const items = [
     ['1', 'Choose source', 'Enter a local .sql file or a folder with SQL files.'],
-    ['2', 'Review candidates', 'DQL detects statements, tables, parameters, and draft metadata.'],
-    ['3', 'Save draft blocks', 'Open in Block Studio for edits or save directly as draft blocks.'],
+    ['2', 'Inspect queries', 'DQL detects statements, tables, parameters, and block metadata.'],
+    ['3', 'Save blocks', 'Open in Block Studio for edits or save directly as blocks.'],
   ];
   return (
     <div style={{ display: 'grid', gap: 12 }}>
@@ -2636,6 +3255,18 @@ function ImportPill({ label, tone, t }: { label: string; tone: 'ok' | 'warn' | '
     <span style={{ fontSize: 10, fontWeight: 700, color, background: `${color}18`, borderRadius: 999, padding: '3px 7px', fontFamily: t.font, textTransform: 'uppercase' }}>
       {label}
     </span>
+  );
+}
+
+function SmartCount({ label, value, tone, t }: { label: string; value: number; tone: 'ok' | 'warn' | 'info'; t: Theme }) {
+  const color = tone === 'ok' ? '#2ea043' : tone === 'warn' ? '#d29922' : t.accent;
+  return (
+    <div style={{ border: `1px solid ${color}33`, borderRadius: 8, background: `${color}10`, padding: '8px 10px', display: 'grid', gap: 2, minWidth: 0 }}>
+      <span style={{ fontSize: 17, fontWeight: 800, color, fontFamily: t.font, lineHeight: 1 }}>{value}</span>
+      <span style={{ fontSize: 10, color: t.textMuted, fontFamily: t.font, textTransform: 'uppercase', fontWeight: 800, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+        {label}
+      </span>
+    </div>
   );
 }
 
@@ -2938,7 +3569,7 @@ const STATUS_COLORS: Record<string, string> = {
 };
 
 const STATUS_TRANSITIONS: Record<string, string[]> = {
-  draft: ['review'],
+  draft: [],
   review: ['draft'],
   certified: ['deprecated'],
   deprecated: ['draft'],
@@ -3023,6 +3654,7 @@ function CertificationChecklistPanel({
       errors: Array<{ rule: string; message: string }>;
       warnings: Array<{ rule: string; message: string }>;
     };
+    blockers?: string[];
     error?: string;
   };
   t: Theme;
@@ -3035,15 +3667,23 @@ function CertificationChecklistPanel({
     ['Tests', checklist.tests],
     ['Chart', checklist.chart],
     ['Lineage', checklist.lineage],
-    ['AI reviewed', checklist.aiReviewed],
   ] as const : [];
+  const blockers = Array.from(new Set((result.blockers?.length ? result.blockers : checklist?.blockers ?? []).map(formatCertificationBlocker)));
+  const missingSummary = summarizeCertificationBlockers(blockers);
   return (
     <div style={{ margin: '12px 12px 0', border: `1px solid ${result.ok ? '#3fb95055' : '#d2992255'}`, borderRadius: 8, background: result.ok ? '#3fb9500d' : '#d299220d', padding: 12, display: 'grid', gap: 10 }}>
       <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
         <span style={{ fontSize: 12, fontWeight: 800, color: result.ok ? '#3fb950' : '#d29922', fontFamily: t.font }}>
-          {result.ok ? 'Certification passed' : 'Certification needs attention'}
+          {result.ok ? 'Block certified' : 'Unable to certify'}
         </span>
         {checklist?.checkedAt && <span style={{ fontSize: 10, color: t.textMuted, fontFamily: t.fontMono }}>{checklist.checkedAt}</span>}
+      </div>
+      <div style={{ fontSize: 12, color: t.textMuted, lineHeight: 1.45 }}>
+        {result.ok
+          ? 'Latest edits were saved, the block ran successfully, tests passed, and status was updated to certified.'
+          : missingSummary
+            ? `Latest edits were saved, but certification cannot finish because ${missingSummary}. Fix it, then click Certify again.`
+            : 'Latest edits were saved, but certification cannot finish yet. Fix the blockers below, then click Certify again.'}
       </div>
       {items.length > 0 && (
         <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
@@ -3055,18 +3695,48 @@ function CertificationChecklistPanel({
         </div>
       )}
       {result.error && <div style={{ fontSize: 12, color: '#f85149' }}>{result.error}</div>}
-      {(checklist?.blockers?.length ?? 0) > 0 && (
+      {blockers.length > 0 && (
         <div style={{ display: 'grid', gap: 5 }}>
-          {checklist!.blockers.map((blocker, index) => <div key={index} style={{ fontSize: 12, color: '#d29922', lineHeight: 1.4 }}>{blocker}</div>)}
+          <div style={{ fontSize: 10, color: '#d29922', textTransform: 'uppercase', fontWeight: 800 }}>Missing before certification</div>
+          {blockers.map((blocker, index) => <div key={index} style={{ fontSize: 12, color: '#d29922', lineHeight: 1.4 }}>{blocker}</div>)}
         </div>
       )}
       {(result.certification?.warnings?.length ?? 0) > 0 && (
         <div style={{ display: 'grid', gap: 5 }}>
+          <div style={{ fontSize: 10, color: t.textMuted, textTransform: 'uppercase', fontWeight: 800 }}>Warnings</div>
           {result.certification!.warnings.map((warning) => <div key={`${warning.rule}-${warning.message}`} style={{ fontSize: 12, color: t.textMuted }}>{warning.rule}: {warning.message}</div>)}
         </div>
       )}
     </div>
   );
+}
+
+function formatCertificationBlocker(blocker: string): string {
+  const clean = blocker.trim();
+  const lower = clean.toLowerCase();
+  if (lower === 'missing owner' || lower === 'block has owner: missing owner') return 'Owner is required.';
+  if (lower === 'missing domain' || lower === 'block has domain: missing domain') return 'Domain is required.';
+  if (lower === 'missing description' || lower === 'block has description: missing description') return 'Description is required.';
+  if (lower === 'block has not run successfully') return 'The query must run successfully.';
+  if (lower === 'tests must pass before certification' || lower.startsWith('all tests pass:')) return 'Tests must pass.';
+  if (lower === 'at least one test assertion is required before certification' || lower.startsWith('block has tests:')) return 'Add at least one test assertion.';
+  if (lower === 'visualization config is missing') return 'Choose a visualization.';
+  return clean;
+}
+
+function summarizeCertificationBlockers(blockers: string[]): string {
+  const required = blockers
+    .filter((blocker) => blocker.endsWith(' is required.'))
+    .map((blocker) => blocker.replace(' is required.', '').toLowerCase());
+  if (required.length === 0) return blockers[0] ? blockers[0].replace(/\.$/, '').toLowerCase() : '';
+  if (required.length === 1) return `${required[0]} is missing`;
+  if (required.length === 2) return `${required[0]} and ${required[1]} are missing`;
+  if (required.length > 2) return `${required.slice(0, -1).join(', ')}, and ${required[required.length - 1]} are missing`;
+  if (blockers.includes('Add at least one test assertion.')) return 'a test assertion is missing';
+  if (blockers.includes('Choose a visualization.')) return 'a visualization is missing';
+  if (blockers.includes('Tests must pass.')) return 'tests must pass';
+  if (blockers.includes('The query must run successfully.')) return 'the query has not run successfully';
+  return blockers[0] ? blockers[0].replace(/\.$/, '').toLowerCase() : '';
 }
 
 function TestsPanel({
@@ -3410,6 +4080,28 @@ function appendSnippetToDraft(source: string, snippet: string): string {
     return source.replace(/\n\}\s*$/, `\n\n  query = """\n${snippet}\n  """\n}\n`);
   }
   return `${source.trimEnd()}\n${snippet}\n`;
+}
+
+function applyGeneratedSqlToBlockDraft(source: string, sql: string): string {
+  const clean = sql.trim().replace(/;\s*$/, '');
+  if (!clean) return source;
+  const sourceText = source.trim();
+  if (!sourceText) return clean;
+
+  const queryMatch = source.match(/query\s*=\s*"""[\s\S]*?"""/i);
+  if (queryMatch) {
+    return source.replace(queryMatch[0], `query = """\n${clean}\n  """`);
+  }
+
+  if (/^\s*block\s+"/i.test(sourceText)) {
+    const queryBlock = `\n  query = """\n${clean}\n  """\n`;
+    if (/\}\s*$/.test(source)) {
+      return source.replace(/\}\s*$/, `${queryBlock}}\n`);
+    }
+    return `${source.trimEnd()}${queryBlock}`;
+  }
+
+  return clean;
 }
 
 function parseSemanticBlockValues(source: string): { metric: string; dimensions: string[]; timeDimension: string; granularity: string } {

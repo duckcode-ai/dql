@@ -13,8 +13,10 @@ import type { KGNode } from "./kg/types.js";
 import type { KGStore } from "./kg/sqlite-fts.js";
 
 export type AppBuilderSkillId =
+  | "interpret_business_intent"
   | "match_certified_context"
   | "shape_business_story"
+  | "design_dashboard_layout"
   | "draft_missing_sections"
   | "route_review";
 
@@ -22,6 +24,36 @@ export type AppPlanTileKind =
   | "certified_block"
   | "draft_placeholder"
   | "narrative";
+
+export type AppPlanAnalysisIntent =
+  | "executive_summary"
+  | "metric_monitoring"
+  | "driver_analysis"
+  | "entity_drilldown"
+  | "trust_review"
+  | "data_quality"
+  | "experiment_readout";
+
+export type AppPlanTileRole =
+  | "business_summary"
+  | "kpi"
+  | "trend"
+  | "breakdown"
+  | "evidence"
+  | "trust"
+  | "research"
+  | "narrative";
+
+export type AppPlanTrustState =
+  | "certified"
+  | "review_required"
+  | "draft_ready";
+
+export type AppPlanFollowUpAction =
+  | "ask_follow_up"
+  | "open_research"
+  | "review_trust"
+  | "create_draft_block";
 
 export interface AppPlanFilter {
   id: string;
@@ -44,6 +76,15 @@ export interface AppPlanTile {
   rationale?: string;
   caveats?: string[];
   reviewTasks?: string[];
+  display?: {
+    role: AppPlanTileRole;
+    recommendedDisplayType: DashboardVizConfig["type"];
+    layoutPriority: number;
+    expectedGrain?: string;
+    trustState: AppPlanTrustState;
+    followUpActions: AppPlanFollowUpAction[];
+    rationale: string;
+  };
 }
 
 export interface AppPlanPage {
@@ -65,6 +106,23 @@ export interface AppPlan {
   appId: string;
   name: string;
   prompt: string;
+  planning: {
+    plannerMode: "deterministic" | "ai_assisted";
+    normalizedGoal: string;
+    analysisIntent: AppPlanAnalysisIntent;
+    audience: string;
+    domain: string;
+    certifiedContext: Array<{
+      nodeId: string;
+      name: string;
+      kind: string;
+      reason: string;
+    }>;
+    missingEvidence: string[];
+    displayStrategy: string;
+    layoutRationale: string;
+    handoffPlan: string[];
+  };
   skills: AppBuilderSkill[];
   domain: string;
   audience: string;
@@ -111,6 +169,12 @@ export interface GeneratedAppPackage {
 
 export const APP_BUILDER_SKILLS: AppBuilderSkill[] = [
   {
+    id: "interpret_business_intent",
+    title: "Interpret business intent",
+    description:
+      "Normalize the raw user prompt into audience, goal, domain, and analysis intent before selecting assets.",
+  },
+  {
     id: "match_certified_context",
     title: "Match certified context",
     description:
@@ -121,6 +185,12 @@ export const APP_BUILDER_SKILLS: AppBuilderSkill[] = [
     title: "Shape the story",
     description:
       "Turn matched blocks into a stakeholder flow with filters, page title, tile order, and decision framing.",
+  },
+  {
+    id: "design_dashboard_layout",
+    title: "Design dashboard layout",
+    description:
+      "Choose display roles, chart types, and tile sizing from metadata so the generated app reads cleanly.",
   },
   {
     id: "draft_missing_sections",
@@ -142,6 +212,7 @@ export function planAppFromPrompt(input: PlanAppFromPromptInput): AppPlan {
   const domain =
     normalizeToken(input.domain) ?? inferDomain(prompt) ?? "general";
   const audience = inferAudience(prompt) ?? inferDefaultAudience(prompt);
+  const analysisIntent = inferAnalysisIntent(prompt);
   const appName = titleForPrompt(prompt, inferFallbackName(prompt, domain));
   const appId = suggestAppId(appName);
   const maxCertifiedTiles = input.maxCertifiedTiles ?? 4;
@@ -159,12 +230,13 @@ export function planAppFromPrompt(input: PlanAppFromPromptInput): AppPlan {
     preferredNodes,
     matchedNodes,
   ).slice(0, Math.max(maxCertifiedTiles, preferredNodes.length));
+  const contextNodes = findCertifiedContextNodes(input.kg, prompt, domain, 6);
   const filters = inferFilters(prompt);
 
   const certifiedTiles = certifiedNodes.map((node, index) =>
-    tileFromCertifiedNode(node, index),
+    tileFromCertifiedNode(node, index, analysisIntent),
   );
-  const draftTiles = inferDraftTiles(prompt, domain, certifiedNodes).map(
+  const draftTiles = inferDraftTiles(prompt, domain, analysisIntent, certifiedNodes).map(
     (tile, index): AppPlanTile => ({
       id: slugify(tile.title) || `draft-${index + 1}`,
       title: tile.title,
@@ -173,6 +245,7 @@ export function planAppFromPrompt(input: PlanAppFromPromptInput): AppPlan {
       viz: tile.viz,
       certification: "uncertified",
       reviewStatus: "draft_ready",
+      display: displayForDraftTile(tile.title, tile.viz, index),
       rationale:
         "No certified block was selected for this generated app section.",
       reviewTasks: [
@@ -183,13 +256,23 @@ export function planAppFromPrompt(input: PlanAppFromPromptInput): AppPlan {
   );
 
   const narrativeTile: AppPlanTile = {
-    id: "app-context",
-    title: "App context",
+    id: "business-brief",
+    title: "Business brief",
     kind: "narrative",
-    description: `Generated from prompt: ${prompt}`,
+    description: businessBriefDescription(prompt, audience, analysisIntent),
     viz: "text",
     certification: "uncertified",
     reviewStatus: "review_required",
+    display: {
+      role: "business_summary",
+      recommendedDisplayType: "text",
+      layoutPriority: 0,
+      expectedGrain: "app",
+      trustState: "review_required",
+      followUpActions: ["ask_follow_up", "review_trust"],
+      rationale:
+        "Compact business brief keeps the app goal visible without dominating the dashboard.",
+    },
     rationale:
       "Narrative text is generated scaffolding and should be reviewed with the app.",
     reviewTasks: [
@@ -202,6 +285,31 @@ export function planAppFromPrompt(input: PlanAppFromPromptInput): AppPlan {
     appId,
     name: appName,
     prompt,
+    planning: {
+      plannerMode: "deterministic",
+      normalizedGoal: normalizeGoal(prompt),
+      analysisIntent,
+      audience,
+      domain,
+      certifiedContext: summarizeCertifiedContext([
+        ...certifiedNodes,
+        ...contextNodes,
+      ]),
+      missingEvidence: missingEvidenceForPlan(
+        prompt,
+        analysisIntent,
+        certifiedNodes,
+        contextNodes,
+      ),
+      displayStrategy: displayStrategyForIntent(analysisIntent),
+      layoutRationale:
+        "Business-first layout: compact brief, certified KPIs/trends/breakdowns, then review-required trust and research tiles.",
+      handoffPlan: [
+        "Use certified block tiles as governed dashboard evidence.",
+        "Use generated text/table tiles only as review-required planning scaffolds.",
+        "Open Research for deeper drilldowns, driver analysis, and trust checks.",
+      ],
+    },
     skills: APP_BUILDER_SKILLS,
     domain,
     audience,
@@ -355,10 +463,10 @@ export function generateAppFromPlan(
     version: 1,
     id: plan.appId,
     name: plan.name,
-    description: plan.businessGoal,
-    businessOutcome: plan.businessGoal,
+    description: plan.planning.normalizedGoal,
+    businessOutcome: plan.planning.normalizedGoal,
     businessOwner: plan.owner,
-    decisionUse: `${plan.audience} review`,
+    decisionUse: plan.planning.displayStrategy,
     reviewCadence: inferReviewCadence(plan.prompt),
     businessRules: [
       "Certified tiles must reference existing certified blocks.",
@@ -423,15 +531,15 @@ export function generateAppFromPlan(
       id: page.id,
       metadata: {
         title: page.title,
-        description: page.description,
+        description: page.description ?? plan.planning.displayStrategy,
         domain: plan.domain,
         audience: plan.audience,
         visibility: "shared",
         lifecycle: "draft",
         tags: plan.tags,
-        businessOutcome: plan.businessGoal,
+        businessOutcome: plan.planning.normalizedGoal,
         businessOwner: plan.owner,
-        decisionUse: `${plan.audience} review`,
+        decisionUse: plan.planning.displayStrategy,
         reviewCadence: inferReviewCadence(plan.prompt),
         caveats: plan.caveats,
       },
@@ -570,8 +678,221 @@ function mergeCertifiedBlockNodes(
   return merged;
 }
 
-function tileFromCertifiedNode(node: KGNode, index: number): AppPlanTile {
+function findCertifiedContextNodes(
+  kg: KGStore,
+  prompt: string,
+  domain: string,
+  limit: number,
+): KGNode[] {
+  const kinds: KGNode["kind"][] = [
+    "business_view",
+    "term",
+    "metric",
+    "semantic_model",
+    "saved_query",
+    "dbt_model",
+    "dbt_source",
+  ];
+  const search = (withDomain: boolean) =>
+    kg.search({
+      query: prompt,
+      kinds,
+      domain: withDomain && domain !== "general" ? domain : undefined,
+      limit: limit * 2,
+    });
+  const hits = search(true);
+  const fallbackHits = hits.length === 0 ? search(false) : [];
+  const seen = new Set<string>();
+  return [...hits, ...fallbackHits]
+    .map((hit) => hit.node)
+    .filter((node) => {
+      if (seen.has(node.nodeId)) return false;
+      seen.add(node.nodeId);
+      return node.status === "certified" || node.certification === "certified";
+    })
+    .slice(0, limit);
+}
+
+function inferAnalysisIntent(prompt: string): AppPlanAnalysisIntent {
+  const lower = prompt.toLowerCase();
+  if (/\btrust|certif|lineage|caveat|rely|govern/.test(lower))
+    return "trust_review";
+  if (/\bwhy|driver|drove|break\s*down|root cause|change|drop|increase|decrease/.test(lower))
+    return "driver_analysis";
+  if (/\bcustomer|account|player|vendor|merchant|entity|360|profile/.test(lower))
+    return "entity_drilldown";
+  if (/\bquality|freshness|availability|missing|anomal|monitor/.test(lower))
+    return "data_quality";
+  if (/\bexperiment|ab test|a\/b|variant|treatment|control/.test(lower))
+    return "experiment_readout";
+  if (/\bkpi|metric|scorecard|weekly|monthly|quarterly|trend/.test(lower))
+    return "metric_monitoring";
+  return "executive_summary";
+}
+
+function normalizeGoal(prompt: string): string {
+  return prompt
+    .replace(/\s+/g, " ")
+    .trim()
+    .replace(/\.$/, "");
+}
+
+function businessBriefDescription(
+  prompt: string,
+  audience: string,
+  intent: AppPlanAnalysisIntent,
+): string {
+  return [
+    `Generated from prompt: ${normalizeGoal(prompt)}.`,
+    `Audience: ${audience}.`,
+    `Intent: ${titleCase(intent.replace(/_/g, " "))}.`,
+    "Use certified tiles as governed evidence; review generated guidance before stakeholder use.",
+  ].join("\n\n");
+}
+
+function summarizeCertifiedContext(nodes: KGNode[]): AppPlan["planning"]["certifiedContext"] {
+  const seen = new Set<string>();
+  return nodes
+    .filter((node) => {
+      if (seen.has(node.nodeId)) return false;
+      seen.add(node.nodeId);
+      return true;
+    })
+    .slice(0, 10)
+    .map((node) => ({
+      nodeId: node.nodeId,
+      name: node.name,
+      kind: node.kind,
+      reason:
+        node.decisionUse ??
+        node.businessOutcome ??
+        node.description ??
+        "Matched the app prompt as certified context.",
+    }));
+}
+
+function missingEvidenceForPlan(
+  prompt: string,
+  intent: AppPlanAnalysisIntent,
+  certifiedNodes: KGNode[],
+  contextNodes: KGNode[],
+): string[] {
+  const lower = prompt.toLowerCase();
+  const missing = new Set<string>();
+  if (certifiedNodes.length === 0) {
+    missing.add("No certified block matched strongly enough for the primary dashboard evidence.");
+  }
+  if (contextNodes.length === 0) {
+    missing.add("No certified business view, term, semantic object, or dbt context was matched for extra explanation.");
+  }
+  if (intent === "driver_analysis" || /\bwhy|driver|break\s*down/.test(lower)) {
+    missing.add("Driver analysis should be opened as review-required Research until a certified drilldown block exists.");
+  }
+  if (intent === "trust_review" || /\btrust|rely|lineage/.test(lower)) {
+    missing.add("Leadership trust checks need lineage, owner, caveats, and review cadence confirmation.");
+  }
+  if (/\bforecast|predict|what if|plan\b/.test(lower)) {
+    missing.add("Forecasting or planning views need explicit reviewed assumptions before certification.");
+  }
+  return Array.from(missing);
+}
+
+function displayStrategyForIntent(intent: AppPlanAnalysisIntent): string {
+  switch (intent) {
+    case "driver_analysis":
+      return "Lead with certified summary evidence, then expose breakdown and Research actions for root-cause analysis.";
+    case "entity_drilldown":
+      return "Lead with entity context and certified performance blocks, then provide drilldown and trust review paths.";
+    case "trust_review":
+      return "Lead with certification, lineage, caveats, and review tasks before any generated interpretation.";
+    case "data_quality":
+      return "Lead with availability/freshness evidence, then list gaps and review actions.";
+    case "experiment_readout":
+      return "Lead with KPI impact, guardrails, segment readout, and decision caveats.";
+    case "metric_monitoring":
+      return "Lead with KPIs, trends, and breakdowns for recurring operating review.";
+    default:
+      return "Lead with the business brief, certified metrics, supporting breakdowns, then trust and Research actions.";
+  }
+}
+
+function displayForCertifiedNode(
+  node: KGNode,
+  viz: DashboardVizConfig["type"],
+  index: number,
+  intent: AppPlanAnalysisIntent,
+): NonNullable<AppPlanTile["display"]> {
+  const text = [
+    node.name,
+    node.description,
+    node.llmContext,
+    ...(node.tags ?? []),
+  ]
+    .join(" ")
+    .toLowerCase();
+  const role: AppPlanTileRole =
+    viz === "single_value" || viz === "kpi"
+      ? "kpi"
+      : viz === "line" || viz === "area"
+        ? "trend"
+        : /\bsegment|breakdown|split|driver|player|customer|account|region|channel\b/.test(text)
+          ? "breakdown"
+          : "evidence";
+  return {
+    role,
+    recommendedDisplayType: viz,
+    layoutPriority: role === "kpi" ? 10 + index : role === "trend" ? 20 + index : 30 + index,
+    expectedGrain: inferExpectedGrain(text, intent),
+    trustState: "certified",
+    followUpActions: ["ask_follow_up", "open_research", "review_trust"],
+    rationale:
+      node.decisionUse ??
+      node.businessOutcome ??
+      "Certified block matched the app goal and can anchor the generated dashboard.",
+  };
+}
+
+function displayForDraftTile(
+  title: string,
+  viz: DashboardVizConfig["type"],
+  index: number,
+): NonNullable<AppPlanTile["display"]> {
+  const lower = title.toLowerCase();
+  const role: AppPlanTileRole = /\btrust|caveat|risk|gap|certif/.test(lower)
+    ? "trust"
+    : /\bresearch|drill|driver|exception/.test(lower)
+      ? "research"
+      : /\bnarrative|story|decision/.test(lower)
+        ? "narrative"
+        : "evidence";
+  return {
+    role,
+    recommendedDisplayType: viz,
+    layoutPriority: role === "trust" ? 80 + index : role === "research" ? 70 + index : 60 + index,
+    expectedGrain: role === "research" ? "investigation" : "app",
+    trustState: "draft_ready",
+    followUpActions: ["open_research", "review_trust", "create_draft_block"],
+    rationale:
+      "Generated section captures missing evidence or review work without implying certification.",
+  };
+}
+
+function inferExpectedGrain(text: string, intent: AppPlanAnalysisIntent): string {
+  if (/\bcustomer|account|player|merchant|vendor|entity\b/.test(text)) return "entity";
+  if (/\bweek|day|month|quarter|season|date|time|trend\b/.test(text)) return "time";
+  if (/\bsegment|region|channel|category|product|team\b/.test(text)) return "segment";
+  if (intent === "entity_drilldown") return "entity";
+  if (intent === "metric_monitoring") return "metric";
+  return "dashboard";
+}
+
+function tileFromCertifiedNode(
+  node: KGNode,
+  index: number,
+  intent: AppPlanAnalysisIntent,
+): AppPlanTile {
   const blockId = node.name;
+  const viz = inferVizForNode(node, index);
   return {
     id: slugify(blockId) || `certified-${index + 1}`,
     title: node.name,
@@ -579,9 +900,10 @@ function tileFromCertifiedNode(node: KGNode, index: number): AppPlanTile {
     description: node.description,
     blockId,
     sourceNodeId: node.nodeId,
-    viz: inferVizForNode(node, index),
+    viz,
     certification: "certified",
     reviewStatus: "certified",
+    display: displayForCertifiedNode(node, viz, index, intent),
     rationale:
       node.decisionUse ??
       node.businessOutcome ??
@@ -597,8 +919,13 @@ function buildLayoutItems(tiles: AppPlanTile[]): DashboardGridItem[] {
   let x = 0;
   let y = 0;
   let rowH = 0;
-  return tiles.map((tile, index) => {
-    const size = tileSize(tile.viz, tile.kind);
+  const orderedTiles = [...tiles].sort((a, b) => {
+    const priorityA = a.display?.layoutPriority ?? 50;
+    const priorityB = b.display?.layoutPriority ?? 50;
+    return priorityA - priorityB;
+  });
+  return orderedTiles.map((tile, index) => {
+    const size = tileSize(tile);
     if (x + size.w > 12) {
       x = 0;
       y += rowH || size.h;
@@ -628,13 +955,20 @@ function markdownForGeneratedTile(tile: AppPlanTile): string {
     "",
     tile.description ?? "Generated app section pending analyst review.",
     "",
-    `Certification: ${tile.certification}`,
-    `Review status: ${tile.reviewStatus}`,
+    `**Trust:** ${tile.certification}`,
+    `**Review status:** ${tile.reviewStatus}`,
   ];
+  if (tile.display?.followUpActions.length) {
+    lines.push(
+      "",
+      "**Next actions:**",
+      ...tile.display.followUpActions.map((action) => `- ${titleCase(action.replace(/_/g, " "))}`),
+    );
+  }
   if (tile.reviewTasks?.length) {
     lines.push(
       "",
-      "Review tasks:",
+      "**Review tasks:**",
       ...tile.reviewTasks.map((task) => `- ${task}`),
     );
   }
@@ -651,11 +985,33 @@ function appPlanReadme(
     plan.businessGoal,
     "",
     `- Generated from prompt: ${plan.prompt}`,
+    `- Planner mode: ${plan.planning.plannerMode}`,
+    `- Analysis intent: ${plan.planning.analysisIntent}`,
     `- Domain: ${plan.domain}`,
     `- Audience: ${plan.audience}`,
     `- Lifecycle: ${plan.lifecycle}`,
     `- Certified tiles: ${validation.certifiedTiles}`,
     `- Draft/review tiles: ${validation.draftTiles}`,
+    "",
+    "## Planner brief",
+    "",
+    `- Goal: ${plan.planning.normalizedGoal}`,
+    `- Display strategy: ${plan.planning.displayStrategy}`,
+    `- Layout rationale: ${plan.planning.layoutRationale}`,
+    "",
+    "## Certified context",
+    "",
+    ...(plan.planning.certifiedContext.length
+      ? plan.planning.certifiedContext.map(
+          (item) => `- ${item.kind}:${item.name} — ${item.reason}`,
+        )
+      : ["- No certified context matched strongly enough."]),
+    "",
+    "## Missing evidence",
+    "",
+    ...(plan.planning.missingEvidence.length
+      ? plan.planning.missingEvidence.map((item) => `- ${item}`)
+      : ["- No missing evidence was identified by the deterministic planner."]),
     "",
     "## Agent skills applied",
     "",
@@ -732,6 +1088,7 @@ function inferTags(prompt: string, domain: string): string[] {
 function inferDraftTiles(
   prompt: string,
   domain: string,
+  intent: AppPlanAnalysisIntent,
   certifiedNodes: KGNode[],
 ): Array<{
   title: string;
@@ -746,14 +1103,21 @@ function inferDraftTiles(
     viz: DashboardVizConfig["type"];
   }> = [
     {
-      title: `${domainLabel} decision narrative`,
+      title: `${domainLabel} decision story`,
       description:
-        "Draft explanation of the business story, decision context, and caveats inferred from the prompt.",
+        "Compact draft explanation of the business story, decision context, and caveats inferred from the prompt.",
       viz: "text",
     },
   ];
 
-  if (/\brisk|caveat|issue|anomal|quality\b/.test(lower)) {
+  if (intent === "driver_analysis" || /\bwhy|driver|break\s*down|root cause\b/.test(lower)) {
+    tiles.push({
+      title: "Research drilldowns to review",
+      description:
+        "Open review-required investigations for drivers, exceptions, segment comparison, and entity drilldown.",
+      viz: "table",
+    });
+  } else if (/\brisk|caveat|issue|anomal|quality\b/.test(lower)) {
     tiles.push({
       title: "Open risks and caveats",
       description:
@@ -769,9 +1133,9 @@ function inferDraftTiles(
     });
   } else {
     tiles.push({
-      title: "Evidence gaps to certify",
+      title: "Trust and evidence gaps",
       description:
-        "Open sections where new or extended DQL blocks should be created before this app is governed.",
+        "Open evidence, lineage, and review tasks to complete before this app is governed.",
       viz: "table",
     });
   }
@@ -781,6 +1145,15 @@ function inferDraftTiles(
       title: "Certified block search",
       description:
         "No certified blocks matched strongly enough; review suggested sources and create certified blocks.",
+      viz: "table",
+    });
+  }
+
+  if (!tiles.some((tile) => /\btrust|evidence|risk|caveat|gap/.test(tile.title.toLowerCase()))) {
+    tiles.push({
+      title: "Trust and evidence gaps",
+      description:
+        "Certification, lineage, caveats, and review actions that must be confirmed before stakeholder use.",
       viz: "table",
     });
   }
@@ -882,13 +1255,16 @@ function inferVizForNode(
   return "table";
 }
 
-function tileSize(
-  viz: DashboardVizConfig["type"],
-  kind: AppPlanTileKind,
-): { w: number; h: number } {
-  if (kind === "narrative") return { w: 12, h: 2 };
+function tileSize(tile: AppPlanTile): { w: number; h: number } {
+  const role = tile.display?.role;
+  const viz = tile.viz;
+  if (role === "business_summary") return { w: 12, h: 2 };
+  if (role === "trust" || role === "research") return { w: 6, h: 3 };
+  if (tile.kind === "narrative") return { w: 12, h: 2 };
   if (viz === "single_value" || viz === "kpi") return { w: 3, h: 2 };
-  if (viz === "text") return { w: 6, h: 3 };
+  if (viz === "line" || viz === "area") return { w: 6, h: 3 };
+  if (viz === "bar" || viz === "grouped_bar" || viz === "stacked_bar") return { w: 6, h: 3 };
+  if (viz === "text") return { w: 6, h: 2 };
   if (viz === "table" || viz === "pivot") return { w: 6, h: 4 };
   return { w: 6, h: 3 };
 }

@@ -7,9 +7,11 @@ import type { CellChartConfig, ThemeMode } from '../../store/types';
 import { ChartOutput, CHART_TYPE_OPTIONS, type ChartType } from '../output/ChartOutput';
 import { TableOutput } from '../output/TableOutput';
 import { AgentChatPanel } from '../agent/AgentChatPanel';
+import { renderMarkdown } from '../cells/MarkdownCellEditor';
 import { inferColumnKind, columnKindToChartRole, type ChartColumnRole } from '../../utils/column-kind';
 import { classifyColumns } from '../../utils/semantic-fields';
 import { NODE_TYPE_COLORS, TYPE_LABELS, TYPE_TITLES } from '../lineage/lineage-constants';
+import { themes, type ThemeMode as NotebookThemeMode } from '../../themes/notebook-theme';
 
 type DashboardLayoutItem = DashboardDocumentResponse['dashboard']['layout']['items'][number];
 
@@ -656,7 +658,6 @@ function DashboardTile({
       onMouseLeave={() => setHovered(false)}
       onClick={() => {
         if (blockId) onFocusBlock?.(blockId);
-        if (canAsk) setAskOpen((value) => !value);
       }}
       style={{
         gridColumn: `${item.x + 1} / span ${item.w}`,
@@ -683,10 +684,19 @@ function DashboardTile({
         transition: dragOffset ? undefined : 'box-shadow 120ms ease, transform 120ms ease',
       }}
     >
-      {canAsk && hovered && !askOpen ? (
-        <div style={askHintStyle} aria-hidden="true">
+      {canAsk && (hovered || selected) && !askOpen ? (
+        <button
+          type="button"
+          style={askHintStyle}
+          onClick={(event) => {
+            event.stopPropagation();
+            if (blockId) onFocusBlock?.(blockId);
+            setAskOpen((value) => !value);
+          }}
+          title="Ask AI about this tile"
+        >
           <Sparkles size={11} strokeWidth={2} /> Ask AI
-        </div>
+        </button>
       ) : null}
       {askOpen && blockId ? (
         <TileAskPopover
@@ -815,7 +825,9 @@ const askHintStyle: CSSProperties = {
   color: 'var(--dql-app-accent, var(--accent, #4f46e5))',
   background: 'var(--dql-app-accent-soft, rgba(79,70,229,0.12))',
   border: '1px solid var(--dql-app-accent, rgba(79,70,229,0.4))',
-  pointerEvents: 'none',
+  cursor: 'pointer',
+  lineHeight: 1.2,
+  fontFamily: 'inherit',
 };
 
 function TileAskPopover({
@@ -964,7 +976,7 @@ function TileBody({
   themeMode: ThemeMode;
 }): JSX.Element {
   if (loading && !tile) return <span>Loading data...</span>;
-  if (tile?.tileType === 'text') return <MarkdownTile markdown={tile.text?.markdown ?? ''} variant={tile.viz?.type === 'heading' ? 'heading' : 'text'} />;
+  if (tile?.tileType === 'text') return <MarkdownTile markdown={tile.text?.markdown ?? ''} variant={tile.viz?.type === 'heading' ? 'heading' : 'text'} themeMode={themeMode} />;
   if (tile?.tileType === 'aiPin' && tile.aiPin && !tile.result) {
     return <AiPinSummary pin={tile.aiPin} />;
   }
@@ -1279,14 +1291,15 @@ function AddTileMenuItem({
   );
 }
 
-function MarkdownTile({ markdown, variant = 'text' }: { markdown: string; variant?: 'text' | 'heading' }) {
+function MarkdownTile({ markdown, variant = 'text', themeMode }: { markdown: string; variant?: 'text' | 'heading'; themeMode: ThemeMode }) {
+  const theme = themes[themeMode as NotebookThemeMode];
   return (
     <div
       style={{
         width: '100%',
         alignSelf: 'stretch',
         overflow: 'auto',
-        whiteSpace: 'pre-wrap',
+        whiteSpace: 'normal',
         lineHeight: 1.45,
         fontStyle: 'normal',
         opacity: 1,
@@ -1296,7 +1309,7 @@ function MarkdownTile({ markdown, variant = 'text' }: { markdown: string; varian
         alignItems: variant === 'heading' ? 'center' : undefined,
       }}
     >
-      {markdown}
+      {renderMarkdown(markdown, theme)}
     </div>
   );
 }

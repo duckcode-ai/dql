@@ -87,11 +87,32 @@ describe("planAppFromPrompt", () => {
       });
 
       expect(plan.skills.map((skill) => skill.id)).toEqual([
+        "interpret_business_intent",
         "match_certified_context",
         "shape_business_story",
+        "design_dashboard_layout",
         "draft_missing_sections",
         "route_review",
       ]);
+      expect(plan.planning).toMatchObject({
+        plannerMode: "deterministic",
+        analysisIntent: "metric_monitoring",
+        audience: "COO",
+        domain: "growth",
+      });
+      expect(plan.planning.displayStrategy).toContain("KPIs");
+      expect(plan.planning.certifiedContext).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            nodeId: "block:revenue_total",
+            kind: "block",
+          }),
+          expect.objectContaining({
+            nodeId: "business_view:Revenue Health",
+            kind: "business_view",
+          }),
+        ]),
+      );
       expect(plan.appId).toBe("weekly-revenue-health");
       expect(plan.domain).toBe("growth");
       expect(plan.audience).toBe("COO");
@@ -106,11 +127,18 @@ describe("planAppFromPrompt", () => {
             blockId: "revenue_total",
             certification: "certified",
             reviewStatus: "certified",
+            display: expect.objectContaining({
+              trustState: "certified",
+              followUpActions: expect.arrayContaining(["open_research"]),
+            }),
           }),
           expect.objectContaining({
             kind: "draft_placeholder",
             certification: "uncertified",
             reviewStatus: "draft_ready",
+            display: expect.objectContaining({
+              trustState: "draft_ready",
+            }),
           }),
         ]),
       );
@@ -206,10 +234,21 @@ describe("generateAppFromPlan", () => {
           expect.objectContaining({ block: { blockId: "revenue_total" } }),
           expect.objectContaining({
             text: expect.objectContaining({
-              markdown: expect.stringContaining("Certification: uncertified"),
+              markdown: expect.stringContaining("**Trust:** uncertified"),
             }),
           }),
         ]),
       );
+      expect(dashboard.layout.items[0]).toMatchObject({
+        i: "business-brief",
+        w: 12,
+        h: 2,
+      });
+      const readme = readFileSync(
+        join(projectRoot, generated.paths[2]),
+        "utf-8",
+      );
+      expect(readme).toContain("## Planner brief");
+      expect(readme).toContain("## Certified context");
     }));
 });

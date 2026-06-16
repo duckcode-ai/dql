@@ -275,6 +275,15 @@ export function AppsView(): JSX.Element {
     () => state.apps.find((app) => app.id === state.activeAppId) ?? null,
     [state.apps, state.activeAppId],
   );
+  const handleInvestigationsChanged = useCallback((investigations: LocalAppInvestigation[]) => {
+    setAppDoc((current) => {
+      if (!current) return current;
+      return {
+        ...current,
+        investigations,
+      };
+    });
+  }, []);
 
   const openApp = (app: AppSummary, nextExperience: AppExperience = 'view') => {
     dispatch({ type: 'OPEN_APP', appId: app.id, experience: nextExperience, section: 'dashboards' });
@@ -484,6 +493,7 @@ export function AppsView(): JSX.Element {
             setDashboardDoc((current) => current ? { ...current, dashboard } : current);
             void refreshApps(state.activeAppId, dashboard.id, 'workspace');
           }}
+          onInvestigationsChanged={handleInvestigationsChanged}
           onOpenLineageNode={(nodeId) => {
             dispatch({
               type: 'OPEN_LINEAGE_DETAIL',
@@ -649,6 +659,9 @@ function AppCard({
 }) {
   const certified = app.certification === 'certified' || app.lifecycle === 'certified';
   const draftCount = app.drafts?.length ?? 0;
+  const researchCount = app.investigations ?? 0;
+  const aiPinCount = app.aiPins ?? 0;
+  const trustLabel = certified ? 'Certified app' : draftCount > 0 || researchCount > 0 || aiPinCount > 0 ? 'Review needed' : 'Draft app';
   return (
     <article className="dql-app-card">
       <div className="dql-app-card-body" onClick={onOpen} role="button" tabIndex={0}>
@@ -676,10 +689,10 @@ function AppCard({
           <MiniMetric label="Books" value={String(app.notebooks?.length ?? 0)} />
           <MiniMetric label="Drafts" value={String(draftCount)} />
         </div>
-        <div className="dql-app-spark" aria-hidden="true">
-          {[28, 34, 32, 42, 38, 48, 54, 50, 59, 64].map((value, index) => (
-            <i key={index} style={{ height: `${value}%` }} />
-          ))}
+        <div className="dql-app-card-signals">
+          <span><ShieldCheck size={13} /> {trustLabel}</span>
+          <span><Search size={13} /> {researchCount} research</span>
+          <span><Sparkles size={13} /> {aiPinCount} AI pins</span>
         </div>
       </div>
       <div className="dql-app-card-depth">
@@ -918,6 +931,7 @@ function AppWorkspaceSurface({
   onAddPage,
   onOpenDashboard,
   onDashboardChanged,
+  onInvestigationsChanged,
   onOpenLineageNode,
 }: {
   app: AppSummary | null;
@@ -944,6 +958,7 @@ function AppWorkspaceSurface({
   onAddPage: () => void;
   onOpenDashboard: (dashboardId: string) => void;
   onDashboardChanged: (dashboard: DashboardDocumentResponse['dashboard']) => void;
+  onInvestigationsChanged: (investigations: LocalAppInvestigation[]) => void;
   onOpenLineageNode: (nodeId: string) => void;
 }) {
   const certifiedCount = dashboardDoc?.dashboard.layout.items.filter((item) => Boolean(item.block)).length ?? 0;
@@ -1166,6 +1181,7 @@ function AppWorkspaceSurface({
                 seed={researchSeed}
                 onSeedHandled={() => setResearchSeed(null)}
                 onDashboardChanged={onDashboardChanged}
+                onInvestigationsChanged={onInvestigationsChanged}
               />
             ) : section === 'ai' ? (
               <AiPinsPanel appDoc={appDoc} />
@@ -1378,6 +1394,7 @@ function AppCopilotPanel({
   const selectedBlockContext = selectedBlock
     ? {
         ...selectedBlock,
+        blockPath: selectedTileRun?.blockPath,
         status: selectedTileRun?.status,
         certificationStatus: selectedTileRun?.certificationStatus,
         rowCount: selectedTileRun?.result?.rowCount,
@@ -1581,12 +1598,14 @@ function ResearchPanel({
   seed,
   onSeedHandled,
   onDashboardChanged,
+  onInvestigationsChanged,
 }: {
   appDoc: AppDocumentSummary | null;
   dashboardDoc: DashboardDocumentResponse | null;
   seed: AppResearchSeed | null;
   onSeedHandled: () => void;
   onDashboardChanged: (dashboard: DashboardDocumentResponse['dashboard']) => void;
+  onInvestigationsChanged: (investigations: LocalAppInvestigation[]) => void;
 }) {
   const appId = appDoc?.app.id;
   const activeDashboardId = dashboardDoc?.dashboard.id;
@@ -1608,6 +1627,7 @@ function ResearchPanel({
     void api.listAppInvestigations(appId).then((investigations) => {
       if (cancelled) return;
       setItems(investigations);
+      onInvestigationsChanged(investigations);
       setSelectedId((current) => current ?? investigations[0]?.id ?? null);
     }).finally(() => {
       if (!cancelled) setLoading(false);
@@ -1615,7 +1635,7 @@ function ResearchPanel({
     return () => {
       cancelled = true;
     };
-  }, [appId]);
+  }, [appId, onInvestigationsChanged]);
 
   useEffect(() => {
     if (!seed || !appId) return;
@@ -1639,7 +1659,11 @@ function ResearchPanel({
         setError(result.error);
         return;
       }
-      setItems((current) => upsertInvestigation(current, result.investigation));
+      setItems((current) => {
+        const next = upsertInvestigation(current, result.investigation);
+        onInvestigationsChanged(next);
+        return next;
+      });
       setSelectedId(result.investigation.id);
       setEvidenceTab('preview');
       onSeedHandled();
@@ -1648,7 +1672,7 @@ function ResearchPanel({
     return () => {
       cancelled = true;
     };
-  }, [seed?.nonce, appId, activeDashboardId]);
+  }, [seed?.nonce, appId, activeDashboardId, onInvestigationsChanged, onSeedHandled]);
 
   const selected = items.find((item) => item.id === selectedId) ?? items[0] ?? null;
 
@@ -1676,7 +1700,11 @@ function ResearchPanel({
       setError(result.error);
       return;
     }
-    setItems((current) => upsertInvestigation(current, result.investigation));
+    setItems((current) => {
+      const next = upsertInvestigation(current, result.investigation);
+      onInvestigationsChanged(next);
+      return next;
+    });
     setSelectedId(result.investigation.id);
     setEvidenceTab('preview');
   };
@@ -1691,7 +1719,11 @@ function ResearchPanel({
       setError(result.error);
       return;
     }
-    setItems((current) => upsertInvestigation(current, result.investigation));
+    setItems((current) => {
+      const next = upsertInvestigation(current, result.investigation);
+      onInvestigationsChanged(next);
+      return next;
+    });
     setEvidenceTab('preview');
   };
 
@@ -1708,7 +1740,11 @@ function ResearchPanel({
       setError(result.error);
       return null;
     }
-    setItems((current) => upsertInvestigation(current, result.investigation));
+    setItems((current) => {
+      const next = upsertInvestigation(current, result.investigation);
+      onInvestigationsChanged(next);
+      return next;
+    });
     setSelectedId(result.investigation.id);
     if (result.dashboard) onDashboardChanged(result.dashboard);
     return result.investigation;
@@ -2678,19 +2714,25 @@ const APP_STYLES = `
 
 .dql-app-card-mini b { display: block; margin-top: 1px; font-size: 15px; }
 
-.dql-app-spark {
-  height: 34px;
+.dql-app-card-signals {
   margin-top: 12px;
   display: flex;
-  align-items: end;
-  gap: 4px;
+  flex-wrap: wrap;
+  gap: 7px;
+  color: var(--dql-app-muted);
+  font: 700 10px var(--font-mono);
 }
 
-.dql-app-spark i {
-  flex: 1;
-  min-width: 3px;
-  border-radius: 999px 999px 0 0;
-  background: linear-gradient(180deg, var(--dql-app-accent), rgba(37, 99, 235, 0.22));
+.dql-app-card-signals span {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  min-height: 24px;
+  padding: 4px 8px;
+  border: 1px solid var(--dql-app-line);
+  border-radius: 7px;
+  background: var(--dql-app-surface-muted);
+  white-space: nowrap;
 }
 
 .dql-app-card-depth {

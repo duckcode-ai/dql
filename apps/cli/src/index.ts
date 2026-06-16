@@ -51,8 +51,8 @@ const HELP = `
     dql info <file.dql>             Show block metadata
     dql migrate <source>            Scaffold migration from looker/tableau/dbt/metabase/raw-sql
     dql migrate format [--check]    Upgrade all .dql/.dqlnb files to canonical format
-    dql import sql <path>           Preview SQL files/folders as draft Block Studio import candidates
-    dql import sql <path> --save    Save valid import candidates as draft blocks
+    dql import sql <path>           Preview SQL files/folders as Block Studio import candidates
+    dql import sql <path> --save    Save valid import candidates as local blocks
     dql fmt <file.dql|.dqlnb>       Format DQL/notebook file in place
     dql diff <path>                 Diff a .dql/.dqlnb file vs HEAD
     dql diff <before> <after>       Semantic diff between two files
@@ -87,7 +87,7 @@ const HELP = `
     --owner <name>                  Owner for new block scaffolds (default: current user)
     --query-only                    Create a query-only block without visualization
     --connection <driver|path>      Database connection for certify/test (e.g. duckdb, path/to/db)
-    --save                          For "import sql": save valid candidates as draft blocks
+    --save                          For "import sql": save valid candidates as local blocks
     --from-draft <path>             For "certify": promote a Tier-2 draft block to certified
     --contract <id@version>         For "certify --from-draft": DataLex contract id (e.g. commerce.Customer.foo@1)
     --datalex-manifest <path>       Optional DataLex manifest for datalex_contract validation
@@ -108,15 +108,15 @@ const COMMAND_HELP: Record<string, string> = {
     blocks that pass metadata, lineage, and test checks.
   `,
   import: `
-  dql import — Convert existing SQL into reviewable DQL block drafts
+  dql import — Convert existing SQL into local DQL blocks
 
   Usage:
     dql import sql <file-or-folder> [--domain <name>] [--owner <name>]
     dql import sql <file-or-folder> --save [--domain <name>] [--owner <name>]
 
   Notes:
-    Import creates draft/review blocks only. Run previews and certification
-    separately before treating imported SQL as certified.
+    Import creates local blocks. Run previews and certification before treating
+    imported SQL as certified.
   `,
   app: `
   dql app — Manage local App artifacts

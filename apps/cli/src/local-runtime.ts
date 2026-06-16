@@ -4,7 +4,7 @@ import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, wat
 import { homedir } from 'node:os';
 import { dirname, extname, join, normalize, relative, resolve } from 'node:path';
 import type { IncomingMessage, ServerResponse } from 'node:http';
-import { QueryExecutor, type ConnectionConfig } from '@duckcodeailabs/dql-connectors';
+import { QueryExecutor, type ConnectionConfig, type DatabaseConnector } from '@duckcodeailabs/dql-connectors';
 import {
   buildExecutionPlan,
   createWelcomeNotebook,
@@ -618,15 +618,20 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
       { id: 'block-studio', type: 'dql', source, title: 'Block Studio' },
       { semanticLayer, driver: targetConnection.driver, tableMapping },
     );
-    const sql = resolveProjectRelativeSqlPaths(semanticCompose?.sql ?? plan?.sql ?? executableSql, projectRoot, projectConfig.dataDir);
+    const prepared = prepareLocalExecution(
+      semanticCompose?.sql ?? plan?.sql ?? executableSql,
+      targetConnection,
+      projectRoot,
+      projectConfig,
+    );
     const result = await executor.executeQuery(
-      sql,
+      prepared.sql,
       plan?.sqlParams ?? [],
       runtimeVariables(plan?.variables ?? {}),
-      targetConnection,
+      prepared.connection,
     );
     return {
-      sql: plan?.sql ?? executableSql,
+      sql: prepared.sql,
       result: normalizeQueryResult(result),
       chartConfig: plan?.chartConfig ?? validation.chartConfig ?? null,
     };
@@ -1812,10 +1817,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           return;
         }
         const result = await certifyBlockStudioSource(source, blockPath);
-        const blockers = [
-          ...result.checklist.blockers,
-          ...result.certification.errors.map((error) => `${error.rule}: ${error.message}`),
-        ];
+        const blockers = Array.from(new Set(result.checklist.blockers));
         if (!result.certification.certified || blockers.length > 0) {
           res.writeHead(422, { 'Content-Type': 'application/json; charset=utf-8' });
           res.end(serializeJSON({ ok: false, ...result, blockers }));
@@ -3327,25 +3329,22 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
     }
 
     if (req.method === 'POST' && path === '/api/test-connection') {
+      let target: ConnectionConfig = connection;
       try {
         const body = await readJSON(req);
-        const target = normalizeProjectConnection(
+        target = normalizeProjectConnection(
           isConnectionConfig(body.connection) ? body.connection : connection,
           projectRoot,
         );
         const connector = await executor.getConnector(target);
-        const ok = await connector.ping();
-        const driver = target.driver ?? 'unknown';
-        res.writeHead(ok ? 200 : 400, { 'Content-Type': 'application/json; charset=utf-8' });
-        res.end(serializeJSON({
-          ok,
-          message: ok ? `Connected to ${driver} successfully` : `Connection to ${driver} failed`,
-        }));
+        const result = await validateConnectionForTest(connector, target);
+        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON(result));
       } catch (error) {
-        res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
         res.end(serializeJSON({
           ok: false,
-          message: error instanceof Error ? error.message : String(error),
+          message: formatConnectionTestError(target, error),
         }));
       }
       return;
@@ -3755,6 +3754,130 @@ export function formatLocalQueryRuntimeError(
   return `Local query runtime is unavailable for driver "${driver}": ${detail}`;
 }
 
+export interface ConnectionTestResult {
+  ok: boolean;
+  message: string;
+  details?: Record<string, unknown>;
+}
+
+export async function validateConnectionForTest(
+  connector: DatabaseConnector,
+  connection: ConnectionConfig,
+): Promise<ConnectionTestResult> {
+  if (connection.driver === 'snowflake') {
+    return validateSnowflakeConnectionForTest(connector, connection);
+  }
+
+  const ok = await connector.ping();
+  const label = connectionDriverLabel(connection);
+  return {
+    ok,
+    message: ok
+      ? `Connected to ${label} successfully.`
+      : `Connection to ${label} failed. Check credentials, network access, and database availability.`,
+  };
+}
+
+function formatConnectionTestError(connection: ConnectionConfig, error: unknown): string {
+  const detail = error instanceof Error ? error.message : String(error);
+  const label = connectionDriverLabel(connection);
+  if (connection.driver === 'snowflake') {
+    const cleaned = detail.replace(/^Snowflake (?:connection|query) failed:\s*/i, '').trim();
+    return `Snowflake connection failed: ${cleaned || 'Check account, user, password/auth method, role, and network access.'}`;
+  }
+  return `Connection to ${label} failed: ${detail}`;
+}
+
+async function validateSnowflakeConnectionForTest(
+  connector: DatabaseConnector,
+  connection: ConnectionConfig,
+): Promise<ConnectionTestResult> {
+  const warehouse = connection.warehouse?.trim();
+  if (!warehouse) {
+    return {
+      ok: false,
+      message: 'Snowflake connection requires a warehouse before it can be tested.',
+    };
+  }
+
+  const warehouseRow = await findSnowflakeWarehouse(connector, warehouse);
+  if (!warehouseRow) {
+    return {
+      ok: false,
+      message: `Snowflake warehouse "${warehouse}" was not found or is not visible to this role.`,
+    };
+  }
+
+  const state = String(readRowField(warehouseRow, 'state') ?? '').trim();
+  const normalizedState = state.toUpperCase();
+  if (normalizedState && normalizedState !== 'STARTED') {
+    return {
+      ok: false,
+      message: `Snowflake warehouse "${warehouse}" is ${state}. Start or resume it, then test again.`,
+      details: {
+        warehouse,
+        state,
+      },
+    };
+  }
+
+  const context = await connector.execute(
+    `SELECT
+       CURRENT_ACCOUNT() AS account_name,
+       CURRENT_USER() AS user_name,
+       CURRENT_ROLE() AS role_name,
+       CURRENT_DATABASE() AS database_name,
+       CURRENT_SCHEMA() AS schema_name,
+       CURRENT_WAREHOUSE() AS warehouse_name`,
+  );
+  const row = context.rows[0] ?? {};
+  const user = String(readRowField(row, 'user_name') ?? connection.username ?? '').trim();
+  const role = String(readRowField(row, 'role_name') ?? connection.role ?? '').trim();
+  const activeWarehouse = String(readRowField(row, 'warehouse_name') ?? warehouse).trim();
+
+  return {
+    ok: true,
+    message: `Connected to Snowflake${user ? ` as ${user}` : ''} using warehouse ${activeWarehouse || warehouse}.`,
+    details: {
+      warehouse: activeWarehouse || warehouse,
+      warehouseState: state || 'STARTED',
+      role: role || undefined,
+      database: readRowField(row, 'database_name') ?? connection.database,
+      schema: readRowField(row, 'schema_name') ?? connection.schema,
+    },
+  };
+}
+
+async function findSnowflakeWarehouse(
+  connector: DatabaseConnector,
+  warehouse: string,
+): Promise<Record<string, unknown> | null> {
+  const candidates = Array.from(new Set([warehouse, warehouse.toUpperCase()]));
+  for (const candidate of candidates) {
+    const result = await connector.execute(`SHOW WAREHOUSES LIKE '${escapeSqlString(candidate)}'`);
+    const row = result.rows.find((item) => {
+      const name = String(readRowField(item, 'name') ?? '').trim();
+      return name.localeCompare(warehouse, undefined, { sensitivity: 'accent' }) === 0;
+    });
+    if (row) return row;
+  }
+  return null;
+}
+
+function readRowField(row: Record<string, unknown>, field: string): unknown {
+  const expected = field.toLowerCase();
+  const entry = Object.entries(row).find(([key]) => key.toLowerCase() === expected);
+  return entry?.[1];
+}
+
+function escapeSqlString(value: string): string {
+  return value.replace(/'/g, "''");
+}
+
+function connectionDriverLabel(connection: ConnectionConfig): string {
+  return connection.driver === 'snowflake' ? 'Snowflake' : connection.driver ?? 'database';
+}
+
 /**
  * Normalize connector QueryResult → SPA-friendly shape.
  * Connector returns columns as ColumnMeta[] ({name,type,driverType}).
@@ -4023,12 +4146,122 @@ export function prepareLocalExecution(
   projectConfig: ProjectConfig,
 ): { sql: string; connection: ConnectionConfig } {
   const normalizedConnection = normalizeProjectConnection(connection, projectRoot);
+  const dbtResolvedSql = resolveDbtMacrosForExecution(sql, projectRoot, projectConfig);
   return {
     sql: shouldResolveProjectPaths(normalizedConnection)
-      ? resolveProjectRelativeSqlPaths(sql, projectRoot, projectConfig.dataDir)
-      : sql,
+      ? resolveProjectRelativeSqlPaths(dbtResolvedSql, projectRoot, projectConfig.dataDir)
+      : dbtResolvedSql,
     connection: normalizedConnection,
   };
+}
+
+export function resolveDbtMacrosForExecution(
+  sql: string,
+  projectRoot: string,
+  projectConfig: ProjectConfig = {},
+): string {
+  if (!/\{\{\s*(?:ref|source)\s*\(/i.test(sql)) return sql;
+  const manifestPath = resolveDbtManifestPath(projectRoot, projectConfig);
+  if (!manifestPath) {
+    throw new Error('dbt ref/source macros were found, but target/manifest.json was not available. Run dbt parse or dbt compile, then retry.');
+  }
+  const manifest = readJsonFile(manifestPath);
+  const refs = buildDbtRelationLookup(manifest);
+  const unresolved = new Set<string>();
+
+  let rendered = sql.replace(
+    /\{\{\s*ref\(\s*(?:(['"])([^'"]+)\1\s*,\s*)?(['"])([^'"]+)\3(?:\s*,[^)]*)?\)\s*\}\}/gi,
+    (match: string, _pkgQuote: string | undefined, packageName: string | undefined, _modelQuote: string, modelName: string) => {
+      const key = normalizeDbtLookupKey(modelName);
+      const scopedKey = packageName ? normalizeDbtLookupKey(`${packageName}.${modelName}`) : key;
+      const relation = refs.models.get(scopedKey) ?? refs.models.get(key);
+      if (!relation) {
+        unresolved.add(packageName ? `ref('${packageName}', '${modelName}')` : `ref('${modelName}')`);
+        return match;
+      }
+      return relation;
+    },
+  );
+
+  rendered = rendered.replace(
+    /\{\{\s*source\(\s*(['"])([^'"]+)\1\s*,\s*(['"])([^'"]+)\3\s*\)\s*\}\}/gi,
+    (match: string, _sourceQuote: string, sourceName: string, _tableQuote: string, tableName: string) => {
+      const key = normalizeDbtLookupKey(`${sourceName}.${tableName}`);
+      const relation = refs.sources.get(key) ?? refs.sources.get(normalizeDbtLookupKey(tableName));
+      if (!relation) {
+        unresolved.add(`source('${sourceName}', '${tableName}')`);
+        return match;
+      }
+      return relation;
+    },
+  );
+
+  if (unresolved.size > 0) {
+    throw new Error(`Could not resolve dbt macro${unresolved.size === 1 ? '' : 's'} from manifest.json: ${Array.from(unresolved).join(', ')}.`);
+  }
+  return rendered;
+}
+
+function buildDbtRelationLookup(manifest: unknown): { models: Map<string, string>; sources: Map<string, string> } {
+  const models = new Map<string, string>();
+  const sources = new Map<string, string>();
+  const root = manifest && typeof manifest === 'object' ? manifest as Record<string, unknown> : {};
+  const nodes = root.nodes && typeof root.nodes === 'object' ? root.nodes as Record<string, unknown> : {};
+  const manifestSources = root.sources && typeof root.sources === 'object' ? root.sources as Record<string, unknown> : {};
+
+  for (const [uniqueId, rawNode] of Object.entries(nodes)) {
+    const node = rawNode && typeof rawNode === 'object' ? rawNode as Record<string, unknown> : null;
+    if (!node || node.resource_type !== 'model') continue;
+    const relation = dbtRelationName(node);
+    if (!relation) continue;
+    const name = stringField(node, 'name');
+    const alias = stringField(node, 'alias');
+    const packageName = uniqueId.split('.')[1];
+    for (const key of [name, alias, packageName && name ? `${packageName}.${name}` : null, uniqueId]) {
+      if (key) models.set(normalizeDbtLookupKey(key), relation);
+    }
+  }
+
+  for (const [uniqueId, rawSource] of Object.entries(manifestSources)) {
+    const source = rawSource && typeof rawSource === 'object' ? rawSource as Record<string, unknown> : null;
+    if (!source) continue;
+    const relation = dbtRelationName(source);
+    if (!relation) continue;
+    const sourceName = stringField(source, 'source_name');
+    const name = stringField(source, 'name');
+    const identifier = stringField(source, 'identifier');
+    for (const key of [
+      sourceName && name ? `${sourceName}.${name}` : null,
+      sourceName && identifier ? `${sourceName}.${identifier}` : null,
+      name,
+      identifier,
+      uniqueId,
+    ]) {
+      if (key) sources.set(normalizeDbtLookupKey(key), relation);
+    }
+  }
+
+  return { models, sources };
+}
+
+function dbtRelationName(node: Record<string, unknown>): string | null {
+  const relationName = stringField(node, 'relation_name');
+  if (relationName) return relationName;
+  const database = stringField(node, 'database');
+  const schema = stringField(node, 'schema');
+  const alias = stringField(node, 'alias') ?? stringField(node, 'identifier') ?? stringField(node, 'name');
+  if (database && schema && alias) return `${database}.${schema}.${alias}`;
+  if (schema && alias) return `${schema}.${alias}`;
+  return alias ?? null;
+}
+
+function stringField(source: Record<string, unknown>, key: string): string | null {
+  const value = source[key];
+  return typeof value === 'string' && value.trim() ? value.trim() : null;
+}
+
+function normalizeDbtLookupKey(value: string): string {
+  return value.trim().replace(/^['"]|['"]$/g, '').toLowerCase();
 }
 
 const AGENT_PREVIEW_FORBIDDEN_SQL = [
@@ -5288,9 +5521,6 @@ function buildBlockStudioCertificationChecklist(input: {
   }
   for (const error of input.certificationErrors) blockers.add(`${error.rule}: ${error.message}`);
   for (const blocker of input.extraBlockers ?? []) blockers.add(blocker);
-  if (!parsed.domain.trim()) blockers.add('Missing domain');
-  if (!parsed.owner.trim()) blockers.add('Missing owner');
-  if (!parsed.description.trim()) blockers.add('Missing description');
   if (!input.previewSucceeded) blockers.add('Block has not run successfully');
   if (!input.testResults || input.testResults.failed > 0) blockers.add('Tests must pass before certification');
   if (!input.testResults || input.testResults.assertions.length === 0) blockers.add('At least one test assertion is required before certification');
@@ -6099,7 +6329,7 @@ function buildProjectLineageGraphUncached(projectRoot: string, semanticLayer: Se
     }
   }
 
-  const dbtManifestPath = resolveDbtManifestPath(projectRoot);
+  const dbtManifestPath = resolveDbtManifestPath(projectRoot, {});
   try {
     const manifest = buildManifest({
       projectRoot,
@@ -6155,9 +6385,19 @@ function buildProjectLineageGraphUncached(projectRoot: string, semanticLayer: Se
   }
 }
 
-function resolveDbtManifestPath(projectRoot: string): string | undefined {
-  const candidate = join(projectRoot, 'target', 'manifest.json');
-  return existsSync(candidate) ? candidate : undefined;
+function resolveDbtManifestPath(projectRoot: string, projectConfig: ProjectConfig = {}): string | undefined {
+  const candidates: string[] = [];
+  if (projectConfig.dbt?.projectDir || projectConfig.semanticLayer?.provider === 'dbt') {
+    const dbtProjectPath = findDbtProjectPath(projectRoot, projectConfig);
+    candidates.push(resolve(dbtProjectPath, projectConfig.dbt?.manifestPath ?? 'target/manifest.json'));
+  }
+  candidates.push(
+    join(projectRoot, 'target', 'manifest.json'),
+    join(resolve(projectRoot, '..'), 'target', 'manifest.json'),
+    join(resolve(projectRoot, '../dbt'), 'target', 'manifest.json'),
+    join(resolve(projectRoot, '../../dbt'), 'target', 'manifest.json'),
+  );
+  return candidates.find((candidate, index, list) => list.indexOf(candidate) === index && existsSync(candidate));
 }
 
 type DbtProfileOutput = Record<string, unknown>;
