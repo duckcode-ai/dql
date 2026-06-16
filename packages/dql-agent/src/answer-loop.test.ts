@@ -176,6 +176,55 @@ describe("answer (block-first loop)", () => {
     ).toBe(true);
   });
 
+  it("prefers an exact certified executable block over a certified term for KPI questions", async () => {
+    kg.rebuild(
+      [
+        {
+          nodeId: "block:total_revenue",
+          kind: "block",
+          name: "total_revenue",
+          domain: "revenue",
+          status: "certified",
+          description: "Single-value gross revenue KPI across all orders.",
+          tags: ["revenue", "kpi"],
+          sourceTier: "certified_artifact",
+          certification: "certified",
+          provenance: "DQL block",
+        },
+        {
+          nodeId: "term:Lifetime Revenue",
+          kind: "term",
+          name: "Lifetime Revenue",
+          domain: "customer",
+          status: "certified",
+          description: "Total order revenue attributed to a customer across all known orders.",
+          llmContext: "synonyms: lifetime spend, customer revenue, total spend",
+          sourceTier: "business_context",
+          certification: "certified",
+          provenance: "DQL business term",
+        },
+      ],
+      [],
+    );
+    const provider = new StubProvider("should not be called");
+    const result = await answer({
+      question: "What is total revenue?",
+      provider,
+      executeCertifiedBlock: async () => ({
+        columns: ["total_revenue"],
+        rows: [{ total_revenue: 222.5 }],
+        rowCount: 1,
+      }),
+      kg,
+    });
+
+    expect(result.kind).toBe("certified");
+    expect(result.block?.nodeId).toBe("block:total_revenue");
+    expect(result.result?.rowCount).toBe(1);
+    expect(result.sourceTier).toBe("certified_artifact");
+    expect(provider.calls).toHaveLength(0);
+  });
+
   it("executes a certified block when the host supplies an executor", async () => {
     const provider = new StubProvider("should not be called");
     const result = await answer({
@@ -388,6 +437,168 @@ describe("answer (block-first loop)", () => {
     expect(provider.calls).toHaveLength(0);
   });
 
+  it("uses active skill preferred blocks for exact certified lookups", async () => {
+    kg.rebuild(
+      [
+        {
+          nodeId: "block:revenue_by_month",
+          kind: "block",
+          name: "revenue_by_month",
+          domain: "growth",
+          status: "certified",
+          description: "Monthly revenue trend.",
+          tags: ["revenue", "trend"],
+          sourceTier: "certified_artifact",
+          certification: "certified",
+          provenance: "DQL block",
+        },
+        {
+          nodeId: "block:revenue_total",
+          kind: "block",
+          name: "revenue_total",
+          domain: "growth",
+          status: "certified",
+          description: "Board-level total revenue KPI.",
+          tags: ["revenue", "kpi"],
+          sourceTier: "certified_artifact",
+          certification: "certified",
+          provenance: "DQL block",
+        },
+      ],
+      [],
+    );
+    const provider = new StubProvider("should not be called");
+    const result = await answer({
+      question: "What is revenue?",
+      provider,
+      kg,
+      skills: [
+        {
+          id: "board-review",
+          preferredMetrics: [],
+          preferredBlocks: ["revenue_total"],
+          vocabulary: {},
+          body: "For board revenue questions, prefer the board-level KPI.",
+          sourcePath: "/tmp/board.skill.md",
+        },
+      ],
+    });
+    expect(result.kind).toBe("certified");
+    expect(result.block?.nodeId).toBe("block:revenue_total");
+    expect(provider.calls).toHaveLength(0);
+  });
+
+  it("generates dynamic SQL for diagnostic metric questions instead of stopping at a certified KPI", async () => {
+    const provider = new StubProvider(
+      "February revenue declined versus January; review the segment contribution before certification.\n\n" +
+        "```sql\nSELECT date_trunc('month', ordered_at) AS month, SUM(order_total) AS revenue FROM analytics.orders GROUP BY 1 ORDER BY 1\n```\n\n" +
+        "Viz: line",
+    );
+    const result = await answer({
+      question: "Why did revenue drop in February?",
+      provider,
+      kg,
+      schemaContext: [
+        {
+          relation: "analytics.orders",
+          schema: "analytics",
+          name: "orders",
+          columns: [
+            { name: "ordered_at", type: "TIMESTAMP" },
+            { name: "order_total", type: "DECIMAL" },
+          ],
+        },
+      ],
+      executeGeneratedSql: async (sql) => ({
+        columns: ["month", "revenue"],
+        rows: [
+          { month: "2024-01-01", revenue: 39.5 },
+          { month: "2024-02-01", revenue: 31.0 },
+        ],
+        rowCount: 2,
+        sql,
+      }),
+    });
+
+    expect(result.kind).toBe("uncertified");
+    expect(result.block).toBeUndefined();
+    expect(result.reviewStatus).toBe("draft_ready");
+    expect(result.analysisPlan?.intent).toBe("ad_hoc_analysis");
+    expect(result.proposedSql).toContain("analytics.orders");
+    expect(result.result?.rowCount).toBe(2);
+    expect(result.evidence?.route).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          tool: "execute_generated_sql",
+          status: "selected",
+        }),
+      ]),
+    );
+    expect(provider.calls).toHaveLength(1);
+  });
+
+  it("does not let skill preferred blocks override dynamic custom-grain analysis", async () => {
+    kg.rebuild(
+      [
+        {
+          nodeId: "block:total_customers",
+          kind: "block",
+          name: "total_customers",
+          domain: "customers",
+          status: "certified",
+          description: "Total number of customers.",
+          tags: ["customers", "kpi"],
+          sourceTier: "certified_artifact",
+          certification: "certified",
+          provenance: "DQL block",
+        },
+        {
+          nodeId: "dbt_model:customers",
+          kind: "dbt_model",
+          name: "customers",
+          domain: "customers",
+          description: "Customer mart with lifetime spend and order counts.",
+          sourceTier: "dbt_manifest",
+          certification: "ai_generated",
+          provenance: "dbt manifest",
+        },
+      ],
+      [],
+    );
+    const provider = new StubProvider("should not be called");
+    const result = await answer({
+      question: "Can you show me the orders by customer who have performed better?",
+      provider,
+      kg,
+      skills: [
+        {
+          id: "customer-kpis",
+          preferredMetrics: [],
+          preferredBlocks: ["total_customers"],
+          vocabulary: {},
+          body: "Executives often ask for customer totals.",
+          sourcePath: "/tmp/customer.skill.md",
+        },
+      ],
+      schemaContext: [
+        {
+          relation: "analytics.customers",
+          schema: "analytics",
+          name: "customers",
+          columns: [
+            { name: "customer_name", type: "VARCHAR" },
+            { name: "count_lifetime_orders", type: "BIGINT" },
+            { name: "lifetime_spend", type: "DECIMAL" },
+          ],
+        },
+      ],
+    });
+    expect(result.kind).toBe("uncertified");
+    expect(result.block).toBeUndefined();
+    expect(result.proposedSql).toContain("analytics.customers");
+    expect(result.proposedSql).not.toContain("total_customers");
+  });
+
   it("allows an explicit saved top customers block request to stay certified", async () => {
     kg.rebuild(
       [
@@ -502,6 +713,202 @@ describe("answer (block-first loop)", () => {
     );
     expect(result.evidence?.selectedAssets.some((asset) => asset.name === "top_customers")).toBe(true);
     expect(provider.calls).toHaveLength(0);
+  });
+
+  it("generates dynamic SQL for a named-customer metric instead of selecting a broad certified KPI", async () => {
+    kg.rebuild(
+      [
+        {
+          nodeId: "block:revenue_total",
+          kind: "block",
+          name: "revenue_total",
+          domain: "growth",
+          status: "certified",
+          description: "Total revenue for the business.",
+          tags: ["revenue", "kpi"],
+          sourceTier: "certified_artifact",
+          certification: "certified",
+          provenance: "DQL block",
+        },
+        {
+          nodeId: "dbt_model:orders",
+          kind: "dbt_model",
+          name: "orders",
+          domain: "growth",
+          description: "Order fact table with customer revenue.",
+          llmContext: "runtime relation: dev.orders\nColumns:\n- customer_name\n- order_total",
+          sourceTier: "dbt_manifest",
+          certification: "ai_generated",
+          provenance: "dbt manifest",
+        },
+      ],
+      [],
+    );
+    const provider = new StubProvider(
+      "Revenue for Matthew Meyer from order totals. This is AI-generated and needs analyst review.\n\n" +
+        "```sql\nSELECT customer_name, SUM(order_total) AS revenue FROM dev.orders WHERE customer_name = 'Matthew Meyer' GROUP BY customer_name\n```\n\n" +
+        "Viz: single_value",
+    );
+    const result = await answer({
+      question: "What is revenue for customer Matthew Meyer?",
+      provider,
+      kg,
+      schemaContext: [
+        {
+          relation: "dev.orders",
+          schema: "dev",
+          name: "orders",
+          columns: [
+            { name: "customer_name", type: "VARCHAR", sampleValues: ["Matthew Meyer"] },
+            { name: "order_total", type: "DECIMAL" },
+          ],
+        },
+      ],
+      executeGeneratedSql: async (sql) => ({
+        columns: ["customer_name", "revenue"],
+        rows: [{ customer_name: "Matthew Meyer", revenue: 3089.8 }],
+        rowCount: 1,
+        sql,
+      }),
+    });
+    expect(result.kind).toBe("uncertified");
+    expect(result.block).toBeUndefined();
+    expect(result.analysisPlan?.intent).toBe("ad_hoc_analysis");
+    expect(result.proposedSql).toContain("Matthew Meyer");
+    expect(result.proposedSql).not.toContain("revenue_total");
+    expect(result.result?.rowCount).toBe(1);
+    expect(
+      provider.messages.some((message) =>
+        message.content.includes('matched values: "Matthew Meyer"'),
+      ),
+    ).toBe(true);
+  });
+
+  it("prioritizes customer-context citations when runtime values match a customer table", async () => {
+    kg.rebuild(
+      [
+        {
+          nodeId: "block:revenue_by_month",
+          kind: "block",
+          name: "revenue_by_month",
+          domain: "revenue",
+          status: "certified",
+          description: "Monthly revenue trend.",
+          tags: ["revenue", "trend"],
+          sourceTier: "certified_artifact",
+          certification: "certified",
+          provenance: "DQL block",
+        },
+        {
+          nodeId: "block:customer_lifetime_revenue",
+          kind: "block",
+          name: "customer_lifetime_revenue",
+          domain: "customer",
+          status: "certified",
+          description: "Customer-level lifetime revenue and order count for customer performance reviews.",
+          tags: ["customer", "revenue", "performance"],
+          sourceTier: "certified_artifact",
+          certification: "certified",
+          provenance: "DQL block",
+        },
+      ],
+      [],
+    );
+    const provider = new StubProvider(
+      "Revenue for Matthew Meyer from the customer mart. This is AI-generated and needs analyst review.\n\n" +
+        "```sql\nSELECT customer_name, lifetime_spend AS revenue FROM analytics.customers WHERE customer_name = 'Matthew Meyer'\n```\n\n" +
+        "Viz: table",
+    );
+    const result = await answer({
+      question: "What is revenue for Matthew Meyer?",
+      provider,
+      kg,
+      schemaContext: [
+        {
+          relation: "analytics.customers",
+          schema: "analytics",
+          name: "customers",
+          columns: [
+            { name: "customer_name", type: "VARCHAR", sampleValues: ["Matthew Meyer"] },
+            { name: "lifetime_spend", type: "DECIMAL" },
+          ],
+        },
+      ],
+      executeGeneratedSql: async (sql) => ({
+        columns: ["customer_name", "revenue"],
+        rows: [{ customer_name: "Matthew Meyer", revenue: 3089.8 }],
+        rowCount: 1,
+        sql,
+      }),
+    });
+
+    expect(result.kind).toBe("uncertified");
+    expect(result.citations[0]).toMatchObject({
+      kind: "block",
+      name: "customer_lifetime_revenue",
+    });
+    expect(result.evidence?.selectedAssets[0]).toMatchObject({
+      kind: "block",
+      name: "customer_lifetime_revenue",
+    });
+  });
+
+  it("surfaces runtime schema evidence for schema-only generated answers", async () => {
+    kg.rebuild([], []);
+    const provider = new StubProvider(
+      "Order count for Matthew Meyer from the runtime orders table. This is AI-generated and needs analyst review.\n\n" +
+        "```sql\nSELECT customer_name, COUNT(*) AS orders FROM dev.orders WHERE customer_name = 'Matthew Meyer' GROUP BY customer_name\n```\n\n" +
+        "Viz: table",
+    );
+    const result = await answer({
+      question: "How many orders does customer Matthew Meyer have?",
+      provider,
+      kg,
+      schemaContext: [
+        {
+          relation: "dev.orders",
+          schema: "dev",
+          name: "orders",
+          source: "runtime information_schema",
+          columns: [
+            { name: "customer_name", type: "VARCHAR", sampleValues: ["Matthew Meyer"] },
+            { name: "order_id", type: "VARCHAR" },
+          ],
+        },
+      ],
+      executeGeneratedSql: async (sql) => ({
+        columns: ["customer_name", "orders"],
+        rows: [{ customer_name: "Matthew Meyer", orders: 33 }],
+        rowCount: 1,
+        sql,
+      }),
+    });
+
+    expect(result.kind).toBe("uncertified");
+    expect(result.citations).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          kind: "runtime_schema",
+          name: "dev.orders",
+        }),
+      ]),
+    );
+    expect(result.evidence?.sourceTables).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          kind: "runtime_schema",
+          name: "dev.orders",
+        }),
+      ]),
+    );
+    expect(result.evidence?.route).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          tool: "inspect_runtime_schema",
+          status: "checked",
+        }),
+      ]),
+    );
   });
 
   it("does not certify a generic KPI when a stronger draft breakdown block matches", async () => {

@@ -1,10 +1,12 @@
 import { describe, expect, it } from 'vitest';
 import {
   buildAgentPreviewSql,
+  buildAgentSchemaContext,
   buildDbtStatus,
   createBlockArtifacts,
   createSemanticBuilderBlock,
   discoverDbtProfileConnections,
+  extractAgentValueSearchTerms,
   formatLocalQueryRuntimeError,
   normalizeProjectConnection,
   prepareLocalExecution,
@@ -232,6 +234,39 @@ describe('buildAgentPreviewSql', () => {
   it('rejects generated SQL that is not a single read-only statement', () => {
     expect(() => buildAgentPreviewSql('SELECT 1; DROP TABLE orders')).toThrow('one statement');
     expect(() => buildAgentPreviewSql('DELETE FROM orders')).toThrow('read-only SELECT or WITH');
+  });
+});
+
+describe('buildAgentSchemaContext', () => {
+  it('keeps likely entity tables for value-led single-customer questions', () => {
+    const rows = [
+      { table_schema: 'dev', table_name: 'customers', column_name: 'customer_id', data_type: 'VARCHAR' },
+      { table_schema: 'dev', table_name: 'customers', column_name: 'customer_name', data_type: 'VARCHAR' },
+      { table_schema: 'dev', table_name: 'orders', column_name: 'order_id', data_type: 'VARCHAR' },
+      { table_schema: 'dev', table_name: 'orders', column_name: 'customer_id', data_type: 'VARCHAR' },
+      { table_schema: 'dev', table_name: 'orders', column_name: 'order_total', data_type: 'DECIMAL' },
+      { table_schema: 'dev', table_name: 'inventory', column_name: 'sku', data_type: 'VARCHAR' },
+    ];
+
+    const context = buildAgentSchemaContext('What did Matthew Meyer order?', rows);
+
+    expect(context.map((table) => table.relation)).toEqual(
+      expect.arrayContaining(['dev.customers', 'dev.orders']),
+    );
+    expect(context.find((table) => table.relation === 'dev.customers')?.columns.map((column) => column.name)).toEqual([
+      'customer_id',
+      'customer_name',
+    ]);
+  });
+});
+
+describe('extractAgentValueSearchTerms', () => {
+  it('extracts names, quoted values, and emails for bounded value search', () => {
+    expect(extractAgentValueSearchTerms('What is revenue for customer Matthew Meyer?')).toContain('Matthew Meyer');
+    expect(extractAgentValueSearchTerms('Show orders for "Acme West"')).toContain('Acme West');
+    expect(extractAgentValueSearchTerms('Usage for jane@example.com')).toContain('jane@example.com');
+    expect(extractAgentValueSearchTerms('What is revenue for customer matthew meyer last month?')).toContain('matthew meyer');
+    expect(extractAgentValueSearchTerms('What is revenue for customer matthew meyer last month?')).not.toContain('customer matthew meyer last month');
   });
 });
 

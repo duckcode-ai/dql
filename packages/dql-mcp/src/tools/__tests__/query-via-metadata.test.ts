@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -65,7 +65,15 @@ describe('queryViaMetadata — Tier-2 promotion loop entry point', () => {
     });
 
     expect(result.uncertified).toBe(true);
+    expect((result as { reviewStatus: string }).reviewStatus).toBe('draft_ready');
+    expect((result as { trustStatus: { uncertified: boolean } }).trustStatus.uncertified).toBe(true);
+    expect((result as { evidence: { planner: { mode: string; steps: string[] } } }).evidence.planner.mode).toBe('metadata_text_to_sql');
+    expect((result as { evidence: { planner: { steps: string[] } } }).evidence.planner.steps).toContain('trust check');
     expect((result as { rowCount: number }).rowCount).toBe(1);
+    const call = (globalThis.fetch as unknown as ReturnType<typeof vi.fn>).mock.calls[0];
+    const body = JSON.parse(String(call[1].body));
+    expect(body.cell.source).toContain('SELECT * FROM (');
+    expect(body.cell.source).toContain('LIMIT 200');
     expect(result.draftBlock?.path).toMatch(/blocks\/_drafts\/.*\.dql$/);
     expect(result.draftBlock?.proposedContractId).toBe(
       'customer.Customer.many_active_customers_last_month',
@@ -142,6 +150,8 @@ describe('queryViaMetadata — Tier-2 promotion loop entry point', () => {
     expect(fetchSpy).not.toHaveBeenCalled();
     expect(out.uncertified).toBe(true);
     expect((out as { proposedSql: string }).proposedSql).toBe('SELECT 99');
+    expect((out as { trustStatus: { label: string; reviewStatus: string } }).trustStatus.label).toBe('AI-generated metadata research');
+    expect((out as { evidence: { execution: { status: string } } }).evidence.execution.status).toBe('dry_run');
     expect(out.draftBlock).toBeDefined();
   });
 
@@ -172,5 +182,24 @@ describe('queryViaMetadata — Tier-2 promotion loop entry point', () => {
       limit: 2,
     });
     expect((out as { rows: unknown[] }).rows).toHaveLength(2);
+    const call = (globalThis.fetch as unknown as ReturnType<typeof vi.fn>).mock.calls[0];
+    const body = JSON.parse(String(call[1].body));
+    expect(body.cell.source).toContain('LIMIT 2');
+  });
+
+  it('rejects unsafe SQL before execution or draft capture', async () => {
+    const fetchSpy = vi.fn();
+    globalThis.fetch = fetchSpy as unknown as typeof fetch;
+
+    const out = await queryViaMetadata(ctxFor(tmpProject), {
+      question: 'delete bad data',
+      proposedSql: 'DELETE FROM orders',
+    });
+    expect(out.uncertified).toBe(true);
+    expect((out as { reviewStatus: string }).reviewStatus).toBe('rejected');
+    expect((out as { error: string }).error).toContain('read-only SELECT or WITH');
+    expect(out.draftBlock).toBeUndefined();
+    expect(fetchSpy).not.toHaveBeenCalled();
+    expect(existsSync(join(tmpProject, 'blocks', '_drafts'))).toBe(false);
   });
 });

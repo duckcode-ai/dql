@@ -19,7 +19,7 @@ import type { KGStore } from './kg/sqlite-fts.js';
 import type { KGNode, KGNodeKind, KGSearchHit } from './kg/types.js';
 import type { AgentProvider, AgentMessage } from './providers/types.js';
 import type { Skill } from './skills/loader.js';
-import { buildSkillsPrompt } from './skills/loader.js';
+import { buildSkillBlockHints, buildSkillsPrompt } from './skills/loader.js';
 import type { AgentMemory } from './memory/sqlite-memory.js';
 
 export type AnswerKind = 'certified' | 'uncertified' | 'no_answer';
@@ -30,7 +30,7 @@ export type AgentIntent = 'exact_certified_lookup' | 'ad_hoc_analysis' | 'drillt
 
 export interface AgentCitation {
   nodeId: string;
-  kind: KGNode['kind'] | 'memory';
+  kind: KGNode['kind'] | 'memory' | 'runtime_schema';
   name: string;
   /** Frozen-in-time SHA at the moment of indexing. */
   gitSha?: string;
@@ -57,7 +57,7 @@ export interface AgentEvidenceRouteStep {
 
 export interface AgentEvidenceAsset {
   nodeId: string;
-  kind: KGNode['kind'] | 'memory' | 'question';
+  kind: KGNode['kind'] | 'memory' | 'question' | 'runtime_schema';
   name: string;
   description?: string;
   sourceTier?: AnswerSourceTier | 'memory' | 'project';
@@ -91,6 +91,8 @@ export interface AgentSchemaColumn {
   name: string;
   type?: string;
   description?: string;
+  /** Bounded runtime values that matched the user's question, used only as SQL-generation hints. */
+  sampleValues?: string[];
 }
 
 export interface AgentSchemaTable {
@@ -263,6 +265,10 @@ const MANIFEST_KINDS: KGNodeKind[] = ['dbt_model', 'dbt_source'];
 
 export async function answer(input: AnswerLoopInput): Promise<AgentAnswer> {
   const { question, userId, domain, provider, kg, skills = [], blockHints = [] } = input;
+  const effectiveBlockHints = Array.from(new Set([
+    ...blockHints,
+    ...buildSkillBlockHints(skills, userId ?? null),
+  ]));
   const followUpSourceBlock = input.followUp?.sourceBlockName
     ? kg.getNode(`block:${input.followUp.sourceBlockName}`)
     : null;
@@ -298,7 +304,7 @@ export async function answer(input: AnswerLoopInput): Promise<AgentAnswer> {
         executableArtifactHits,
         businessHits,
         question,
-        blockHints: input.followUp?.kind === 'drilldown' ? [] : blockHints,
+        blockHints: input.followUp?.kind === 'drilldown' ? [] : effectiveBlockHints,
         excludedArtifactIds,
         kg,
       })
@@ -417,7 +423,11 @@ export async function answer(input: AnswerLoopInput): Promise<AgentAnswer> {
   const reviewRequiredArtifactHits = artifactHits
     .filter((hit) => hit.score >= CERTIFIED_HIT_THRESHOLD && !isCertifiedHit(hit, kg))
     .slice(0, 4);
-  const trustedArtifactContext = executableArtifactHits
+  const trustedArtifactContext = rankGeneratedContextHits(
+    executableArtifactHits.filter((hit) => !excludedArtifactIds?.has(hit.node.nodeId)),
+    input.schemaContext ?? [],
+    question,
+  )
     .filter((hit) => !excludedArtifactIds?.has(hit.node.nodeId))
     .slice(0, 5);
   const contextHits = activeTier === 'semantic_layer'
@@ -537,6 +547,7 @@ export async function answer(input: AnswerLoopInput): Promise<AgentAnswer> {
       sourceTier: 'memory' as const,
       provenance: m.source,
     })),
+    ...schemaCitations(input.schemaContext ?? [], Math.max(0, 4 - contextNodes.length)),
   ];
   let result: AgentResultPayload | undefined;
   let executionError: string | undefined;
@@ -623,6 +634,7 @@ export async function answer(input: AnswerLoopInput): Promise<AgentAnswer> {
       activeTier,
       intent,
       contextNodes,
+      schemaContext: input.schemaContext ?? [],
       followUp: input.followUp,
       businessHits,
       semanticHits,
@@ -643,18 +655,27 @@ export async function answer(input: AnswerLoopInput): Promise<AgentAnswer> {
 const SYSTEM_PROMPT = `You are the DQL Analytics Agent.
 
 Rules:
-1. Use certified DQL blocks only when the user's question exactly asks for that
-   saved block, direct KPI, or definition. For ad hoc rankings, breakdowns,
-   comparisons, drill-throughs, or custom grains, generate review-required SQL
-   from the supplied metadata and cite certified context as evidence.
-2. If you must generate SQL, return it inside a single \`\`\`sql code block.
-3. Provide a one-paragraph natural-language summary BEFORE the SQL block.
-4. Suggest a visualization type from this list, on a line starting with "Viz:":
+1. First classify the question: exact saved artifact/direct KPI, entity-specific
+   lookup, ad hoc ranking/breakdown/comparison/custom grain, drill-through
+   follow-up, or insufficient context.
+2. Use certified DQL blocks only when the user's question exactly asks for that
+   saved block, direct KPI, or definition. For single-user/customer/account,
+   custom filters, rankings, breakdowns, comparisons, drill-throughs, or custom
+   grains, generate review-required SQL from supplied metadata and cite
+   certified context as evidence.
+3. If you must generate SQL, return it inside a single \`\`\`sql code block.
+4. Provide a one-paragraph natural-language summary BEFORE the SQL block.
+5. Suggest a visualization type from this list, on a line starting with "Viz:":
    line, bar, area, pie, single_value, table, pivot, kpi.
-5. NEVER fabricate column names that are not present in the supplied schema context.
-6. Return runnable SQL for the local warehouse/runtime. Do NOT use dbt/Jinja
-   macros such as {{ ref(...) }} or {{ source(...) }} in proposed SQL.
-7. If the schema is insufficient to answer, say so explicitly and ask a clarifying question.`;
+6. NEVER fabricate column names that are not present in the supplied schema context.
+   If a requested filter value is supplied as a matched value, prefer the table
+   and column that matched that value.
+7. Return one read-only SELECT or WITH query for the local warehouse/runtime.
+   Do NOT use dbt/Jinja macros such as {{ ref(...) }} or {{ source(...) }} in
+   proposed SQL. Do not emit INSERT, UPDATE, DELETE, CREATE, DROP, ALTER, COPY,
+   PRAGMA, SET, or multiple statements.
+8. If the schema is insufficient to answer, say so explicitly and ask a
+   clarifying question instead of guessing.`;
 
 function renderContextPrompt(
   blocks: KGNode[],
@@ -691,7 +712,12 @@ function renderContextPrompt(
         .map((table) => {
           const cols = table.columns
             .slice(0, 50)
-            .map((col) => `${col.name}${col.type ? ` ${col.type}` : ''}${col.description ? ` (${col.description})` : ''}`)
+            .map((col) => {
+              const sampleValues = col.sampleValues?.length
+                ? `; matched values: ${col.sampleValues.slice(0, 4).map(formatPromptValue).join(', ')}`
+                : '';
+              return `${col.name}${col.type ? ` ${col.type}` : ''}${col.description ? ` (${col.description})` : ''}${sampleValues}`;
+            })
             .join(', ');
           return `- ${table.relation}${table.description ? ` — ${table.description}` : ''}\n  columns: ${cols}`;
         })
@@ -756,6 +782,7 @@ function buildSchemaAwareProposal(input: {
   schemaContext: AgentSchemaTable[];
 }): ParsedProposal | undefined {
   if (input.intent !== 'ad_hoc_analysis' && input.intent !== 'drillthrough') return undefined;
+  if (isFilteredEntityQuestion(input.question)) return undefined;
   const lower = input.question.toLowerCase();
   const asksForCustomerPerformance = /\bcustomers?\b/.test(lower)
     && /\border|orders|spend|revenue|perform|performed|better|top|best|rank|ranking\b/.test(lower)
@@ -865,12 +892,15 @@ function pickCertifiedArtifact(input: {
     }
   }
 
+  const executableHit = pickFirstCertifiedHit(input.executableArtifactHits, input.kg, input.excludedArtifactIds, input.question);
   if (isBusinessDefinitionQuestion(input.question)) {
+    if (executableHit && hasExactExecutableArtifactSignal(input.question, executableHit.node)) {
+      return executableHit;
+    }
     const businessHit = pickFirstCertifiedHit(input.businessHits, input.kg);
     if (businessHit) return businessHit;
   }
 
-  const executableHit = pickFirstCertifiedHit(input.executableArtifactHits, input.kg, input.excludedArtifactIds, input.question);
   if (executableHit && shouldDeferCertifiedArtifactForReviewPath({
     hits: input.executableArtifactHits,
     selected: executableHit,
@@ -988,12 +1018,116 @@ function hasMeaningfulCertifiedBlockSignal(question: string, node: KGNode): bool
   return false;
 }
 
+function hasExactExecutableArtifactSignal(question: string, node: KGNode): boolean {
+  if (!EXECUTABLE_ARTIFACT_KINDS.includes(node.kind)) return false;
+  const questionTokens = exactMatchTokens(question);
+  const nameTokens = exactMatchTokens(node.name);
+  if (nameTokens.size === 0) return false;
+  for (const token of nameTokens) {
+    if (!questionTokens.has(token)) return false;
+  }
+  return true;
+}
+
+function rankGeneratedContextHits(
+  hits: KGSearchHit[],
+  schemaContext: AgentSchemaTable[],
+  question: string,
+): KGSearchHit[] {
+  const schemaTokens = schemaEntityTokens(schemaContext, question);
+  if (schemaTokens.size === 0) return hits;
+  const filteredEntityQuestion = isFilteredEntityQuestion(question);
+  return [...hits].sort((a, b) => {
+    const aScore = generatedContextScore(a, schemaTokens, filteredEntityQuestion);
+    const bScore = generatedContextScore(b, schemaTokens, filteredEntityQuestion);
+    return bScore - aScore;
+  });
+}
+
+function generatedContextScore(
+  hit: KGSearchHit,
+  schemaTokens: Set<string>,
+  filteredEntityQuestion: boolean,
+): number {
+  const identityTokens = exactMatchTokens([
+    hit.node.name,
+    hit.node.domain ?? '',
+    ...(hit.node.tags ?? []),
+  ].join(' '));
+  const bodyTokens = exactMatchTokens([
+    hit.node.description ?? '',
+    hit.node.llmContext ?? '',
+  ].join(' '));
+  let score = hit.score;
+  for (const token of schemaTokens) {
+    if (identityTokens.has(token)) {
+      score += filteredEntityQuestion ? 0.6 : 0.25;
+    } else if (bodyTokens.has(token)) {
+      score += filteredEntityQuestion ? 0.15 : 0.05;
+    }
+  }
+  if (hit.node.kind === 'block') score += 0.2;
+  return score;
+}
+
+function schemaEntityTokens(schemaContext: AgentSchemaTable[], question: string): Set<string> {
+  const tokens = new Set<string>();
+  for (const table of schemaContext) {
+    const hasMatchedValues = table.columns.some((column) => column.sampleValues?.length);
+    if (!hasMatchedValues) continue;
+    for (const token of exactMatchTokens([table.relation, table.name, table.description ?? ''].join(' '))) {
+      tokens.add(token);
+    }
+    for (const column of table.columns) {
+      if (!column.sampleValues?.length) continue;
+      for (const token of exactMatchTokens(column.name)) tokens.add(token);
+    }
+  }
+  if (tokens.size > 0 || !isFilteredEntityQuestion(question)) return tokens;
+  for (const table of schemaContext) {
+    for (const token of exactMatchTokens([table.relation, table.name, table.description ?? ''].join(' '))) {
+      if (ENTITY_CONTEXT_TOKENS.has(token)) tokens.add(token);
+    }
+    for (const column of table.columns) {
+      for (const token of exactMatchTokens(column.name)) {
+        if (ENTITY_CONTEXT_TOKENS.has(token)) tokens.add(token);
+      }
+    }
+  }
+  return tokens;
+}
+
+const ENTITY_CONTEXT_TOKENS = new Set([
+  'account',
+  'customer',
+  'location',
+  'member',
+  'order',
+  'product',
+  'region',
+  'segment',
+  'subscriber',
+  'user',
+]);
+
 function meaningfulTokens(value: string): Set<string> {
   const tokens = new Set<string>();
   for (const raw of value.toLowerCase().match(/[a-z0-9_]+/g) ?? []) {
     for (const part of raw.split('_')) {
       const normalized = normalizeToken(part);
       if (!normalized || normalized.length < 3 || GENERIC_ANALYTIC_TOKENS.has(normalized)) continue;
+      tokens.add(normalized);
+    }
+  }
+  return tokens;
+}
+
+function exactMatchTokens(value: string): Set<string> {
+  const tokens = new Set<string>();
+  for (const raw of value.toLowerCase().match(/[a-z0-9_]+/g) ?? []) {
+    for (const part of raw.split('_')) {
+      const normalized = normalizeToken(part);
+      if (!normalized || normalized.length < 3) continue;
       tokens.add(normalized);
     }
   }
@@ -1019,7 +1153,6 @@ function classifyAgentIntent(input: {
   schemaContext: AgentSchemaTable[];
 }): AgentIntent {
   if (input.followUp?.kind === 'drilldown') return 'drillthrough';
-  if (isBusinessDefinitionQuestion(input.question)) return 'exact_certified_lookup';
   if (isExplicitSavedArtifactQuestion(input.question, input.artifactHits)) return 'exact_certified_lookup';
 
   const hasContext =
@@ -1027,6 +1160,8 @@ function classifyAgentIntent(input: {
     input.semanticHits.some((hit) => hit.score >= CERTIFIED_HIT_THRESHOLD) ||
     input.manifestHits.some((hit) => hit.score >= CERTIFIED_HIT_THRESHOLD) ||
     input.schemaContext.length > 0;
+  if (isFilteredEntityQuestion(input.question)) return hasContext ? 'ad_hoc_analysis' : 'clarify';
+  if (isBusinessDefinitionQuestion(input.question)) return 'exact_certified_lookup';
   if (isAdHocAnalysisQuestion(input.question)) return hasContext ? 'ad_hoc_analysis' : 'clarify';
   if (looksLikeDataQuestion(input.question) && !hasContext) return 'clarify';
   return 'exact_certified_lookup';
@@ -1046,12 +1181,26 @@ function isExplicitSavedArtifactQuestion(question: string, artifactHits: KGSearc
 function isAdHocAnalysisQuestion(question: string): boolean {
   const lower = question.toLowerCase();
   if (isBusinessDefinitionQuestion(question)) return false;
-  return /\b(break\s*down|breakdown|drill\s*(?:down|into)|slice|segment|split|compare|versus|vs\.?|trend|over time|top|bottom|best|worst|highest|lowest|rank|ranking|performed better|better performing|by\s+[a-z][\w\s-]{1,40})\b/i.test(lower)
-    || /\b(show|list|find|give)\b.+\b(customer|customers|product|products|order|orders|region|location|month|week|day)\b/i.test(lower);
+  return /\b(break\s*down|breakdown|drill\s*(?:down|into)|slice|segment|split|compare|versus|vs\.?|trend|over time|top|bottom|best|worst|highest|lowest|rank|ranking|performed better|better performing|why|what drove|driver|drivers|top movers?|changed?|change|dropped?|drop|decreased?|decrease|declined?|decline|increased?|increase|anomal(?:y|ies)|exceptions?|root cause|contribut(?:e|ed|ion)|variance|delta|by\s+[a-z][\w\s-]{1,40})\b/i.test(lower)
+    || /\b(show|list|find|give)\b.+\b(account|accounts|customer|customers|product|products|order|orders|region|location|month|week|day|user|users)\b/i.test(lower);
+}
+
+function isFilteredEntityQuestion(question: string): boolean {
+  const lower = question.toLowerCase();
+  if (!looksLikeDataQuestion(question)) return false;
+  if (/\b(for|where|only|specific|single|individual|named|called)\b.+\b(account|accounts|customer|customers|product|products|sku|user|users)\b/i.test(lower)) {
+    return true;
+  }
+  if (/\b(account|customer|product|sku|user)\s+(?:id|name|email)\b/i.test(lower)) return true;
+  if (/[A-Z][a-z]+(?:\s+[A-Z][a-z]+){1,3}/.test(question) && /\b(revenue|sales|order|orders|spend|value|churn|usage|activity|performance|performed|metric|kpi)\b/i.test(lower)) {
+    return true;
+  }
+  if (/\b[\w.%+-]+@[\w.-]+\.[A-Za-z]{2,}\b/.test(question)) return true;
+  return false;
 }
 
 function looksLikeDataQuestion(question: string): boolean {
-  return /\b(show|list|find|what|which|how many|how much|compare|trend|revenue|customer|customers|order|orders|product|products|sales|metric|kpi|dashboard|performance|performed)\b/i.test(question);
+  return /\b(show|list|find|what|which|how many|how much|compare|trend|revenue|account|accounts|customer|customers|order|orders|product|products|sales|metric|kpi|dashboard|performance|performed|user|users)\b/i.test(question);
 }
 
 function citationSourceTier(node: KGNode, fallback: AnswerSourceTier): AnswerSourceTier {
@@ -1180,6 +1329,12 @@ function chartNameFromConfig(config: unknown): string | undefined {
     return (config as { chart: string }).chart;
   }
   return undefined;
+}
+
+function formatPromptValue(value: string): string {
+  const compact = value.replace(/\s+/g, ' ').trim();
+  const shown = compact.length > 80 ? `${compact.slice(0, 77)}...` : compact;
+  return JSON.stringify(shown);
 }
 
 function composeClarificationText(question: string, considered: KGSearchHit[], schemaContext: AgentSchemaTable[]): string {
@@ -1422,6 +1577,7 @@ function buildGeneratedEvidence(input: {
   activeTier: AnswerSourceTier;
   intent: AgentIntent;
   contextNodes: KGNode[];
+  schemaContext: AgentSchemaTable[];
   followUp?: AgentFollowUpContext;
   businessHits: KGSearchHit[];
   semanticHits: KGSearchHit[];
@@ -1446,9 +1602,12 @@ function buildGeneratedEvidence(input: {
       .map(assetFromNode),
   ).slice(0, 6);
   const sourceTables = uniqueAssets(
-    [...input.contextNodes, ...input.manifestHits.map((hit) => hit.node)]
-      .filter((node) => MANIFEST_KINDS.includes(node.kind))
-      .map(assetFromNode),
+    [
+      ...[...input.contextNodes, ...input.manifestHits.map((hit) => hit.node)]
+        .filter((node) => MANIFEST_KINDS.includes(node.kind))
+        .map(assetFromNode),
+      ...schemaContextAssets(input.schemaContext),
+    ],
   ).slice(0, 6);
   const selectedAssets = uniqueAssets(selectedNodes.map(assetFromNode)).slice(0, 4);
   const selectedSemantic = input.activeTier === 'semantic_layer' && semanticObjects.length > 0;
@@ -1487,7 +1646,17 @@ function buildGeneratedEvidence(input: {
       {
         tool: input.activeTier === 'semantic_layer' ? 'compose_semantic_query' : 'search_dbt_manifest',
         status: 'selected',
-        label: input.activeTier === 'semantic_layer' ? 'Composed SQL from semantic context' : 'Composed SQL from dbt manifest context',
+        label: input.activeTier === 'semantic_layer'
+          ? 'Composed SQL from semantic context'
+          : input.schemaContext.length > 0
+            ? 'Composed SQL from runtime schema and project metadata'
+            : 'Composed SQL from dbt manifest context',
+      },
+      {
+        tool: 'inspect_runtime_schema',
+        status: input.schemaContext.length > 0 ? 'checked' : 'skipped',
+        label: input.schemaContext.length > 0 ? 'Runtime tables and columns attached' : 'No runtime schema context available',
+        detail: input.schemaContext.slice(0, 3).map((table) => table.relation).join(', ') || undefined,
       },
       {
         tool: 'validate_sql',
@@ -1659,6 +1828,30 @@ function assetFromNode(node: KGNode): AgentEvidenceAsset {
     domain: node.domain,
     status: node.status,
   };
+}
+
+function schemaContextAssets(schemaContext: AgentSchemaTable[]): AgentEvidenceAsset[] {
+  return schemaContext.slice(0, 6).map((table) => ({
+    nodeId: `runtime_schema:${table.relation}`,
+    kind: 'runtime_schema',
+    name: table.relation,
+    description: table.description ?? `${table.columns.length} runtime column${table.columns.length === 1 ? '' : 's'} available for generated SQL.`,
+    sourceTier: 'project',
+    certification: 'ai_generated',
+    provenance: table.source ?? 'runtime information_schema',
+    sourcePath: table.relation,
+  }));
+}
+
+function schemaCitations(schemaContext: AgentSchemaTable[], limit: number): AgentCitation[] {
+  if (limit <= 0) return [];
+  return schemaContext.slice(0, limit).map((table) => ({
+    nodeId: `runtime_schema:${table.relation}`,
+    kind: 'runtime_schema',
+    name: table.relation,
+    sourceTier: 'dbt_manifest',
+    provenance: table.source ?? 'runtime information_schema',
+  }));
 }
 
 function certificationForNode(node: KGNode): AgentEvidenceAsset['certification'] {

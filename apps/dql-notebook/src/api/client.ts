@@ -83,6 +83,7 @@ export interface AppDocumentSummary {
   notebooks?: Array<{ path: string; title?: string; role: 'source' | 'analysis' | 'supporting'; visibility: 'shared' | 'private' | 'template' }>;
   drafts?: Array<{ path: string; name: string; reviewStatus?: string }>;
   aiPins?: LocalAiPin[];
+  investigations?: LocalAppInvestigation[];
 }
 
 export interface DashboardDocumentResponse {
@@ -275,6 +276,32 @@ export interface LocalAiPin {
   lastRefreshedAt?: string;
   lastRefreshError?: string;
   promotedBlockPath?: string;
+}
+
+export interface LocalAppInvestigation {
+  id: string;
+  appId: string;
+  dashboardId?: string;
+  sourceTileId?: string;
+  sourceBlockId?: string;
+  title: string;
+  question: string;
+  intent: 'diagnose_change' | 'driver_breakdown' | 'segment_compare' | 'entity_drilldown' | 'anomaly_investigation' | 'trust_gap_review';
+  context?: unknown;
+  status: 'draft' | 'running' | 'ready' | 'error';
+  summary?: string;
+  recommendation?: string;
+  metrics?: unknown;
+  driverCards?: unknown[];
+  resultPreviews?: unknown[];
+  evidence?: unknown;
+  generatedSql?: string;
+  reviewStatus: 'needs_review' | 'draft_created' | 'certified' | 'rejected';
+  error?: string;
+  pinnedAiPinId?: string;
+  createdAt: string;
+  updatedAt: string;
+  lastRunAt?: string;
 }
 
 export interface AppNotebookCandidate {
@@ -1610,6 +1637,83 @@ export const api = {
       return await request(
         `/api/apps/${encodeURIComponent(appId)}/conversations/${encodeURIComponent(conversationId)}`,
         { method: 'DELETE' },
+      );
+    } catch (e) {
+      return { ok: false, error: e instanceof Error ? e.message : String(e) };
+    }
+  },
+
+  async listAppInvestigations(appId: string, dashboardId?: string): Promise<LocalAppInvestigation[]> {
+    try {
+      const search = new URLSearchParams();
+      if (dashboardId) search.set('dashboardId', dashboardId);
+      const qs = search.toString();
+      const { investigations } = await request<{ investigations: LocalAppInvestigation[] }>(
+        `/api/apps/${encodeURIComponent(appId)}/investigations${qs ? `?${qs}` : ''}`,
+      );
+      return investigations;
+    } catch {
+      return [];
+    }
+  },
+
+  async createAppInvestigation(appId: string, input: {
+    dashboardId?: string;
+    sourceTileId?: string;
+    sourceBlockId?: string;
+    title?: string;
+    question: string;
+    intent?: LocalAppInvestigation['intent'];
+    context?: unknown;
+    generatedSql?: string;
+    run?: boolean;
+  }): Promise<{ ok: true; investigation: LocalAppInvestigation } | { ok: false; error: string }> {
+    try {
+      return await request(
+        `/api/apps/${encodeURIComponent(appId)}/investigations`,
+        { method: 'POST', body: JSON.stringify(input) },
+      );
+    } catch (e) {
+      return { ok: false, error: e instanceof Error ? e.message : String(e) };
+    }
+  },
+
+  async getAppInvestigation(appId: string, investigationId: string): Promise<LocalAppInvestigation | null> {
+    try {
+      const { investigation } = await request<{ investigation: LocalAppInvestigation }>(
+        `/api/apps/${encodeURIComponent(appId)}/investigations/${encodeURIComponent(investigationId)}`,
+      );
+      return investigation;
+    } catch {
+      return null;
+    }
+  },
+
+  async runAppInvestigation(appId: string, investigationId: string, input?: {
+    question?: string;
+    intent?: LocalAppInvestigation['intent'];
+    context?: unknown;
+    generatedSql?: string;
+  }): Promise<{ ok: true; investigation: LocalAppInvestigation } | { ok: false; error: string }> {
+    try {
+      return await request(
+        `/api/apps/${encodeURIComponent(appId)}/investigations/${encodeURIComponent(investigationId)}/run`,
+        { method: 'POST', body: JSON.stringify(input ?? {}) },
+      );
+    } catch (e) {
+      return { ok: false, error: e instanceof Error ? e.message : String(e) };
+    }
+  },
+
+  async pinAppInvestigation(appId: string, investigationId: string, input?: {
+    dashboardId?: string;
+    title?: string;
+    refreshCadence?: 'none' | 'daily';
+  }): Promise<{ ok: true; investigation: LocalAppInvestigation; pin: LocalAiPin; dashboard?: DashboardDocumentResponse['dashboard']; tile?: DashboardDocumentResponse['dashboard']['layout']['items'][number] } | { ok: false; error: string }> {
+    try {
+      return await request(
+        `/api/apps/${encodeURIComponent(appId)}/investigations/${encodeURIComponent(investigationId)}/pin`,
+        { method: 'POST', body: JSON.stringify(input ?? {}) },
       );
     } catch (e) {
       return { ok: false, error: e instanceof Error ? e.message : String(e) };

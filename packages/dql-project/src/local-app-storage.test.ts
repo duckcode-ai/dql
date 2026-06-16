@@ -76,4 +76,41 @@ describe('LocalAppStorage', () => {
     expect(store.deleteAppConversation(created.id)).toBe(true);
     expect(store.listAppConversations('executive-cockpit')).toHaveLength(0);
   });
+
+  it('stores App research investigations locally', () => {
+    const created = store.createAppInvestigation({
+      appId: 'executive-cockpit',
+      dashboardId: 'bank-overview',
+      sourceTileId: 'revenue-trend',
+      sourceBlockId: 'monthly_revenue',
+      question: 'Why did revenue drop in February?',
+      intent: 'diagnose_change',
+      context: { selectedBlock: { blockId: 'monthly_revenue', rowCount: 3 } },
+      generatedSql: 'SELECT 1 AS revenue',
+    });
+
+    expect(created.reviewStatus).toBe('needs_review');
+    expect(created.status).toBe('draft');
+    expect(store.listAppInvestigations('executive-cockpit')).toHaveLength(1);
+
+    const updated = store.updateAppInvestigation(created.id, {
+      status: 'ready',
+      summary: 'Revenue dropped because enterprise renewals slipped.',
+      recommendation: 'Review the enterprise renewal cohort.',
+      metrics: { currentValue: 10, baselineValue: 15, delta: -5 },
+      driverCards: [{ title: 'Enterprise', contribution: '-5' }],
+      resultPreviews: [{ result: { columns: ['segment', 'revenue'], rows: [{ segment: 'Enterprise', revenue: 10 }] } }],
+      evidence: { trustStatus: { uncertified: true } },
+      lastRunAt: '2026-02-01T00:00:00.000Z',
+    });
+
+    expect(updated?.status).toBe('ready');
+    expect(updated?.metrics).toMatchObject({ delta: -5 });
+    expect(updated?.driverCards).toHaveLength(1);
+    expect(updated?.resultPreviews).toHaveLength(1);
+
+    const pinned = store.markAppInvestigationPinned(created.id, 'pin_revenue_drop');
+    expect(pinned?.pinnedAiPinId).toBe('pin_revenue_drop');
+    expect(store.listAppInvestigations('executive-cockpit', 'bank-overview')[0].sourceBlockId).toBe('monthly_revenue');
+  });
 });

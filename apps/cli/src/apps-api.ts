@@ -25,6 +25,8 @@ import {
   LocalAppStorage,
   personaFromMember,
   type ActivePersona,
+  type LocalAppInvestigation,
+  type LocalAppInvestigationIntent,
 } from '@duckcodeailabs/dql-project';
 
 interface Ctx {
@@ -34,6 +36,7 @@ interface Ctx {
   path: string;
   projectRoot: string;
   executeSql?: (sql: string) => Promise<unknown>;
+  generateInvestigationSql?: (input: AppInvestigationGenerationRequest) => Promise<AppInvestigationGenerationResult>;
   runNotebook?: (appId: string, notebookPath: string) => Promise<void>;
 }
 
@@ -299,6 +302,153 @@ export async function handleAppsApi(ctx: Ctx): Promise<boolean> {
     }
   }
 
+  m = path.match(/^\/api\/apps\/([^/]+)\/investigations$/);
+  if (m) {
+    const appId = decodeURIComponent(m[1]);
+    if (!loadAppById(projectRoot, appId)) {
+      sendJson(res, 404, { error: `App "${appId}" not found` });
+      return true;
+    }
+    const storage = new LocalAppStorage(defaultLocalAppsDbPath(projectRoot));
+    try {
+      if (req.method === 'GET') {
+        const dashboardId = ctx.url.searchParams.get('dashboardId') ?? undefined;
+        sendJson(res, 200, { investigations: storage.listAppInvestigations(appId, dashboardId) });
+        return true;
+      }
+      if (req.method === 'POST') {
+        const body = await readJson<AppInvestigationCreateRequest>(req);
+        const question = cleanString(body.question);
+        if (!question) {
+          sendJson(res, 400, { error: 'question is required' });
+          return true;
+        }
+        let investigation = storage.createAppInvestigation({
+          appId,
+          dashboardId: body.dashboardId,
+          sourceTileId: body.sourceTileId ?? selectedContextString(body.context, 'tileId'),
+          sourceBlockId: body.sourceBlockId ?? selectedContextString(body.context, 'blockId'),
+          title: body.title,
+          question,
+          intent: normalizeInvestigationIntent(body.intent, question, body.context),
+          context: body.context,
+          generatedSql: body.generatedSql,
+        });
+        if (body.run !== false) {
+          investigation = await runAppInvestigation(ctx, storage, investigation, body);
+        }
+        sendJson(res, 201, { ok: true, investigation });
+        return true;
+      }
+    } catch (err) {
+      sendJson(res, 500, { error: err instanceof Error ? err.message : String(err) });
+      return true;
+    } finally {
+      storage.close();
+    }
+  }
+
+  m = path.match(/^\/api\/apps\/([^/]+)\/investigations\/([^/]+)$/);
+  if (m) {
+    const appId = decodeURIComponent(m[1]);
+    const investigationId = decodeURIComponent(m[2]);
+    const storage = new LocalAppStorage(defaultLocalAppsDbPath(projectRoot));
+    try {
+      const investigation = storage.getAppInvestigation(investigationId);
+      if (!investigation || investigation.appId !== appId) {
+        sendJson(res, 404, { error: `Investigation "${investigationId}" not found` });
+        return true;
+      }
+      if (req.method === 'GET') {
+        sendJson(res, 200, { investigation });
+        return true;
+      }
+    } catch (err) {
+      sendJson(res, 500, { error: err instanceof Error ? err.message : String(err) });
+      return true;
+    } finally {
+      storage.close();
+    }
+  }
+
+  m = path.match(/^\/api\/apps\/([^/]+)\/investigations\/([^/]+)\/run$/);
+  if (m && req.method === 'POST') {
+    const appId = decodeURIComponent(m[1]);
+    const investigationId = decodeURIComponent(m[2]);
+    const storage = new LocalAppStorage(defaultLocalAppsDbPath(projectRoot));
+    try {
+      const investigation = storage.getAppInvestigation(investigationId);
+      if (!investigation || investigation.appId !== appId) {
+        sendJson(res, 404, { error: `Investigation "${investigationId}" not found` });
+        return true;
+      }
+      const body = await readJson<AppInvestigationRunRequest>(req);
+      const updated = await runAppInvestigation(ctx, storage, investigation, body);
+      sendJson(res, 200, { ok: true, investigation: updated });
+    } catch (err) {
+      sendJson(res, 500, { error: err instanceof Error ? err.message : String(err) });
+    } finally {
+      storage.close();
+    }
+    return true;
+  }
+
+  m = path.match(/^\/api\/apps\/([^/]+)\/investigations\/([^/]+)\/pin$/);
+  if (m && req.method === 'POST') {
+    const appId = decodeURIComponent(m[1]);
+    const investigationId = decodeURIComponent(m[2]);
+    const storage = new LocalAppStorage(defaultLocalAppsDbPath(projectRoot));
+    try {
+      const investigation = storage.getAppInvestigation(investigationId);
+      if (!investigation || investigation.appId !== appId) {
+        sendJson(res, 404, { error: `Investigation "${investigationId}" not found` });
+        return true;
+      }
+      const body = await readJson<AppInvestigationPinRequest>(req);
+      const appInfo = loadAppById(projectRoot, appId);
+      const dashboardId = cleanString(body.dashboardId) || investigation.dashboardId || appInfo?.dashboards[0]?.id;
+      if (!dashboardId) {
+        sendJson(res, 400, { error: 'No dashboard is available for this investigation.' });
+        return true;
+      }
+      const created = createAiPinTile(projectRoot, appId, {
+        dashboardId,
+        title: cleanString(body.title) || investigation.title,
+        answer: investigation.summary ?? investigation.recommendation ?? investigation.title,
+        question: investigation.question,
+        sql: investigation.generatedSql,
+        sourceTier: 'metadata_research',
+        certification: 'ai_generated',
+        reviewStatus: 'needs_review',
+        refreshCadence: body.refreshCadence === 'daily' ? 'daily' : 'none',
+        chartConfig: { chart: 'table' },
+        result: investigationPreviewResult(investigation),
+        citations: investigationCitations(investigation),
+        analysisPlan: {
+          intent: investigation.intent,
+          reviewRequired: true,
+          uncertified: true,
+          sourceTileId: investigation.sourceTileId,
+          sourceBlockId: investigation.sourceBlockId,
+        },
+        evidence: investigation.evidence,
+        followUps: nextResearchFollowUps(investigation),
+      });
+      if (!created.ok) {
+        sendJson(res, 400, { error: created.error });
+        return true;
+      }
+      const pinId = typeof created.pin === 'object' && created.pin && 'id' in created.pin ? String((created.pin as { id: unknown }).id) : '';
+      const updated = pinId ? storage.markAppInvestigationPinned(investigationId, pinId) : investigation;
+      sendJson(res, 200, { ...created, investigation: updated });
+    } catch (err) {
+      sendJson(res, 500, { error: err instanceof Error ? err.message : String(err) });
+    } finally {
+      storage.close();
+    }
+    return true;
+  }
+
   m = path.match(/^\/api\/apps\/([^/]+)\/ai-pins$/);
   if (m) {
     const appId = decodeURIComponent(m[1]);
@@ -513,6 +663,7 @@ type AppListEntry = {
   notebooks: Array<{ path: string; title?: string; role: 'source' | 'analysis' | 'supporting'; visibility: NonNullable<AppDocument['visibility']> }>;
   drafts: Array<{ path: string; name: string; reviewStatus?: string }>;
   aiPins: number;
+  investigations: number;
   homepage?: AppDocument['homepage'];
 };
 
@@ -550,6 +701,7 @@ function collectAppsList(projectRoot: string): AppListEntry[] {
       notebooks: listAppNotebookRefs(projectRoot, document, appDir),
       drafts: listAppDrafts(projectRoot, appDir),
       aiPins: countAiPins(projectRoot, document.id),
+      investigations: countAppInvestigations(projectRoot, document.id),
       homepage: document.homepage,
     });
   }
@@ -612,6 +764,54 @@ interface AppConversationMessageRequest {
   content?: string;
   events?: unknown[];
   createdAt?: string;
+}
+
+interface AppInvestigationCreateRequest {
+  dashboardId?: string;
+  sourceTileId?: string;
+  sourceBlockId?: string;
+  title?: string;
+  question?: string;
+  intent?: LocalAppInvestigationIntent;
+  context?: unknown;
+  generatedSql?: string;
+  run?: boolean;
+}
+
+interface AppInvestigationRunRequest {
+  question?: string;
+  intent?: LocalAppInvestigationIntent;
+  context?: unknown;
+  generatedSql?: string;
+}
+
+interface AppInvestigationPinRequest {
+  dashboardId?: string;
+  title?: string;
+  refreshCadence?: 'none' | 'daily';
+}
+
+interface AppInvestigationGenerationRequest {
+  appId: string;
+  dashboardId?: string;
+  sourceTileId?: string;
+  sourceBlockId?: string;
+  title?: string;
+  question: string;
+  intent: LocalAppInvestigationIntent;
+  context?: unknown;
+}
+
+interface AppInvestigationGenerationResult {
+  sql?: string;
+  answer?: string;
+  result?: unknown;
+  analysisPlan?: unknown;
+  evidence?: unknown;
+  citations?: unknown[];
+  suggestedViz?: string;
+  executionError?: string;
+  providerUsed?: string;
 }
 
 interface BlockCandidate {
@@ -1058,6 +1258,565 @@ function normalizeConversationMessages(messages: AppConversationMessageRequest[]
     .filter((message) => message.content.length > 0);
 }
 
+async function runAppInvestigation(
+  ctx: Ctx,
+  storage: LocalAppStorage,
+  investigation: LocalAppInvestigation,
+  input: AppInvestigationRunRequest | AppInvestigationCreateRequest = {},
+): Promise<LocalAppInvestigation> {
+  const question = cleanString(input.question) || investigation.question;
+  const context = input.context === undefined ? investigation.context : input.context;
+  const intent = normalizeInvestigationIntent(input.intent, question, context);
+  let generatedSql = cleanString(input.generatedSql) || investigation.generatedSql;
+  const lastRunAt = new Date().toISOString();
+  storage.updateAppInvestigation(investigation.id, {
+    question,
+    intent,
+    context,
+    generatedSql,
+    status: 'running',
+    reviewStatus: 'needs_review',
+    error: '',
+  });
+
+  try {
+    const selected = selectedBlockContext(context);
+    const appInfo = ctx.path.includes('/api/apps/') ? loadAppById(ctx.projectRoot, investigation.appId) : null;
+    const previews = buildContextPreviews(selected);
+    let metricSnapshot = buildMetricSnapshot(selected);
+    let driverCards = buildDriverCards(selected, intent);
+    const agentGeneration = generatedSql
+      ? undefined
+      : await generateInvestigationSql(ctx, {
+          appId: investigation.appId,
+          dashboardId: investigation.dashboardId ?? selectedString(context, 'dashboardId'),
+          sourceTileId: investigation.sourceTileId ?? selectedContextString(context, 'tileId'),
+          sourceBlockId: investigation.sourceBlockId ?? selectedContextString(context, 'blockId'),
+          title: investigation.title,
+          question,
+          intent,
+          context,
+        });
+    generatedSql = generatedSql || cleanString(agentGeneration?.sql);
+    const generationError = cleanString(agentGeneration?.executionError);
+    const sqlEvidence = agentGeneration?.result
+      ? { preview: buildGeneratedSqlPreview(agentGeneration.result, generatedSql), error: generationError || undefined }
+      : await runGeneratedSqlPreview(ctx, generatedSql);
+    const sqlError = sqlEvidence.error ?? generationError;
+    if (sqlEvidence.preview) {
+      previews.unshift(sqlEvidence.preview);
+      metricSnapshot = buildPreviewMetricSnapshot(sqlEvidence.preview, selectedString(selected, 'title'));
+      driverCards = buildPreviewDriverCards(sqlEvidence.preview, intent);
+    }
+    const evidence = {
+      trustStatus: buildInvestigationTrust(investigation, selected, sqlError),
+      planner: {
+        intent,
+        steps: investigationSteps(intent),
+        reviewRequired: true,
+        generatedSql: generatedSql || undefined,
+        sqlExecuted: Boolean(sqlEvidence.preview),
+        sqlError,
+        providerUsed: agentGeneration?.providerUsed,
+      },
+      certifiedContext: {
+        appId: investigation.appId,
+        appName: appInfo?.app.name,
+        dashboardId: investigation.dashboardId,
+        dashboardTitle: selectedString(context, 'dashboardTitle'),
+        sourceTileId: investigation.sourceTileId ?? selectedContextString(context, 'tileId'),
+        sourceBlockId: investigation.sourceBlockId ?? selectedContextString(context, 'blockId'),
+        certificationStatus: selectedString(selected, 'certificationStatus'),
+      },
+      assumptions: investigationAssumptions(intent, selected, generatedSql, sqlError),
+      context,
+      agentEvidence: agentGeneration?.evidence,
+      analysisPlan: agentGeneration?.analysisPlan,
+      citations: agentGeneration?.citations,
+    };
+    const summary = cleanString(agentGeneration?.answer) || buildInvestigationSummary(intent, question, selected, metricSnapshot, driverCards);
+    const recommendation = buildInvestigationRecommendation(intent, selected, sqlError);
+    return storage.updateAppInvestigation(investigation.id, {
+      title: cleanString(input.question) ? titleFromInvestigation(question, selected) : investigation.title,
+      question,
+      intent,
+      context,
+      status: sqlEvidence.fatal ? 'error' : 'ready',
+      summary,
+      recommendation,
+      metrics: metricSnapshot,
+      driverCards,
+      resultPreviews: previews,
+      evidence,
+      generatedSql,
+      reviewStatus: 'needs_review',
+      error: sqlError ?? '',
+      lastRunAt,
+    }) ?? investigation;
+  } catch (err) {
+    return storage.updateAppInvestigation(investigation.id, {
+      status: 'error',
+      reviewStatus: 'needs_review',
+      error: err instanceof Error ? err.message : String(err),
+      lastRunAt,
+    }) ?? investigation;
+  }
+}
+
+function normalizeInvestigationIntent(
+  value: unknown,
+  question: string,
+  context: unknown,
+): LocalAppInvestigationIntent {
+  if (
+    value === 'diagnose_change'
+    || value === 'driver_breakdown'
+    || value === 'segment_compare'
+    || value === 'entity_drilldown'
+    || value === 'anomaly_investigation'
+    || value === 'trust_gap_review'
+  ) return value;
+  const text = `${question} ${JSON.stringify(safeIntentContext(context)).slice(0, 500)}`.toLowerCase();
+  if (/\b(trust|rely|certif|lineage|owner|caveat|gap)\b/.test(text)) return 'trust_gap_review';
+  if (/\b(anomal|exception|outlier|spike|dip)\b/.test(text)) return 'anomaly_investigation';
+  if (/\b(compare|versus| vs |segment|cohort)\b/.test(text)) return 'segment_compare';
+  if (/\b(why|changed|change|drop|decline|increase|decrease|february|month|week|quarter)\b/.test(text)) return 'diagnose_change';
+  if (/\b(driver|drove|break down|breakdown|contribute|top mover|movers)\b/.test(text)) return 'driver_breakdown';
+  if (/\b(customer|account|user|client|merchant|product|sku|alice|johnson)\b/.test(text)) return 'entity_drilldown';
+  return 'driver_breakdown';
+}
+
+function safeIntentContext(context: unknown): Record<string, unknown> {
+  const root = asRecord(context);
+  return {
+    selectedBlock: root ? root.selectedBlock : undefined,
+    dashboardTitle: root ? root.dashboardTitle : undefined,
+    availableBlocks: root ? root.availableBlocks : undefined,
+  };
+}
+
+function selectedBlockContext(context: unknown): Record<string, unknown> | null {
+  const root = asRecord(context);
+  return asRecord(root?.selectedBlock);
+}
+
+function selectedContextString(context: unknown, key: string): string | undefined {
+  return selectedString(selectedBlockContext(context), key);
+}
+
+function selectedString(context: unknown, key: string): string | undefined {
+  const record = asRecord(context);
+  const value = record?.[key];
+  return typeof value === 'string' && value.trim() ? value.trim() : undefined;
+}
+
+function buildContextPreviews(selected: Record<string, unknown> | null): unknown[] {
+  const rows = selectedRows(selected);
+  if (rows.length === 0) return [];
+  const columns = selectedColumns(selected, rows);
+  return [{
+    id: 'selected-tile-sample',
+    title: 'Selected tile evidence',
+    kind: 'table',
+    reviewRequired: true,
+    result: {
+      columns,
+      rows,
+      rowCount: typeof selected?.rowCount === 'number' ? selected.rowCount : rows.length,
+    },
+  }];
+}
+
+function buildMetricSnapshot(selected: Record<string, unknown> | null): Record<string, unknown> {
+  const rows = selectedRows(selected);
+  const columns = selectedColumns(selected, rows);
+  const numericColumns = columns.filter((column) => rows.some((row) => typeofNumber(row[column]) !== null));
+  const metricColumn = numericColumns[0];
+  if (!metricColumn || rows.length === 0) {
+    return {
+      currentValue: undefined,
+      baselineValue: undefined,
+      delta: undefined,
+      context: 'Metric values were not available in the selected tile sample.',
+    };
+  }
+  const baselineValue = typeofNumber(rows[0]?.[metricColumn]);
+  const currentValue = typeofNumber(rows[rows.length - 1]?.[metricColumn]) ?? baselineValue;
+  const delta = currentValue !== null && baselineValue !== null ? currentValue - baselineValue : undefined;
+  return {
+    metric: metricColumn,
+    currentValue,
+    baselineValue,
+    delta,
+    rowsReviewed: rows.length,
+    context: selectedString(selected, 'title') ?? 'Selected dashboard tile',
+  };
+}
+
+function buildDriverCards(
+  selected: Record<string, unknown> | null,
+  intent: LocalAppInvestigationIntent,
+): Array<Record<string, unknown>> {
+  const rows = selectedRows(selected);
+  const columns = selectedColumns(selected, rows);
+  if (rows.length === 0) {
+    return [{
+      title: 'Runtime context needed',
+      contribution: 'Needs SQL preview',
+      explanation: 'The selected tile did not include sample rows, so DQL captured the question and review path for a deeper SQL run.',
+      intent,
+    }];
+  }
+  const numericColumn = columns.find((column) => rows.some((row) => typeofNumber(row[column]) !== null));
+  const dimensionColumn = columns.find((column) => column !== numericColumn && rows.some((row) => typeof row[column] === 'string'));
+  if (!numericColumn) {
+    return rows.slice(0, 5).map((row, index) => ({
+      title: String(row[dimensionColumn ?? columns[0]] ?? `Row ${index + 1}`),
+      contribution: 'Context row',
+      explanation: 'This row is part of the tile evidence for the investigation.',
+    }));
+  }
+  return rows
+    .map((row, index) => {
+      const value = typeofNumber(row[numericColumn]) ?? 0;
+      const label = String(row[dimensionColumn ?? columns[0]] ?? `Row ${index + 1}`);
+      return {
+        title: label,
+        value,
+        contribution: formatContribution(value),
+        explanation: `${label} is one of the highest-signal rows in the selected tile sample for ${numericColumn}.`,
+        evidenceLabel: numericColumn,
+      };
+    })
+    .sort((a, b) => Math.abs(Number(b.value ?? 0)) - Math.abs(Number(a.value ?? 0)))
+    .slice(0, 5);
+}
+
+function buildPreviewMetricSnapshot(preview: Record<string, unknown>, fallbackTitle?: string): Record<string, unknown> {
+  const rows = previewResultRows(preview);
+  const columns = previewResultColumns(preview, rows);
+  const numericColumns = columns.filter((column) => rows.some((row) => typeofNumber(row[column]) !== null));
+  if (rows.length === 0 || numericColumns.length === 0) {
+    return {
+      currentValue: undefined,
+      baselineValue: undefined,
+      delta: undefined,
+      context: 'Generated SQL preview did not return numeric metric rows.',
+    };
+  }
+  const currentColumn = pickColumn(numericColumns, [/^current_/i, /current.*(revenue|value|amount|total|orders?)/i])
+    ?? pickColumn(numericColumns, [/(revenue|value|amount|total|orders?|count)$/i])
+    ?? numericColumns[0];
+  const baselineColumn = pickColumn(numericColumns, [/^baseline_/i, /baseline.*(revenue|value|amount|total|orders?)/i]);
+  const deltaColumn = pickColumn(numericColumns, [/(delta|change|variance|diff|contribution)/i]);
+  const currentValue = sumNumericRows(rows, currentColumn);
+  const baselineValue = baselineColumn ? sumNumericRows(rows, baselineColumn) : typeofNumber(rows[0]?.[currentColumn]);
+  const delta = deltaColumn
+    ? sumNumericRows(rows, deltaColumn)
+    : currentValue !== null && baselineValue !== null
+      ? currentValue - baselineValue
+      : undefined;
+  return {
+    metric: deltaColumn ?? currentColumn,
+    currentValue,
+    baselineValue,
+    delta,
+    rowsReviewed: rows.length,
+    context: fallbackTitle ?? selectedString(preview, 'title') ?? 'Generated SQL preview',
+  };
+}
+
+function buildPreviewDriverCards(
+  preview: Record<string, unknown>,
+  intent: LocalAppInvestigationIntent,
+): Array<Record<string, unknown>> {
+  const rows = previewResultRows(preview);
+  const columns = previewResultColumns(preview, rows);
+  if (rows.length === 0) {
+    return buildDriverCards(null, intent);
+  }
+  const numericColumns = columns.filter((column) => rows.some((row) => typeofNumber(row[column]) !== null));
+  const contributionColumn = pickColumn(numericColumns, [/(delta|change|variance|diff|contribution)/i])
+    ?? pickColumn(numericColumns, [/^current_/i, /(revenue|value|amount|total|orders?|count)$/i])
+    ?? numericColumns[0];
+  const dimensionColumn = columns.find((column) => column !== contributionColumn && rows.some((row) => typeof row[column] === 'string'));
+  if (!contributionColumn) {
+    return rows.slice(0, 5).map((row, index) => ({
+      title: String(row[dimensionColumn ?? columns[0]] ?? `Row ${index + 1}`),
+      contribution: 'Preview row',
+      explanation: 'This row came from the generated SQL preview and needs analyst review.',
+      intent,
+    }));
+  }
+  return rows
+    .map((row, index) => {
+      const value = typeofNumber(row[contributionColumn]) ?? 0;
+      const label = String(row[dimensionColumn ?? columns[0]] ?? `Row ${index + 1}`);
+      return {
+        title: label,
+        value,
+        contribution: formatContribution(value),
+        explanation: `${label} is ranked by ${contributionColumn} from the generated SQL preview.`,
+        evidenceLabel: contributionColumn,
+        reviewRequired: true,
+        intent,
+      };
+    })
+    .sort((a, b) => Math.abs(Number(b.value ?? 0)) - Math.abs(Number(a.value ?? 0)))
+    .slice(0, 5);
+}
+
+function previewResultRows(preview: Record<string, unknown>): Array<Record<string, unknown>> {
+  const result = asRecord(preview.result);
+  const rows = Array.isArray(result?.rows) ? result.rows : [];
+  return rows.map(asRecord).filter((row): row is Record<string, unknown> => Boolean(row)).slice(0, 100);
+}
+
+function previewResultColumns(preview: Record<string, unknown>, rows: Array<Record<string, unknown>>): string[] {
+  const result = asRecord(preview.result);
+  const columns = Array.isArray(result?.columns) ? result.columns.map(String).filter(Boolean) : [];
+  return columns.length > 0 ? columns.slice(0, 20) : Object.keys(rows[0] ?? {}).slice(0, 20);
+}
+
+function pickColumn(columns: string[], patterns: RegExp[]): string | undefined {
+  return columns.find((column) => patterns.some((pattern) => pattern.test(column)));
+}
+
+function sumNumericRows(rows: Array<Record<string, unknown>>, column: string): number | null {
+  let total = 0;
+  let found = false;
+  for (const row of rows) {
+    const value = typeofNumber(row[column]);
+    if (value === null) continue;
+    total += value;
+    found = true;
+  }
+  return found ? total : null;
+}
+
+async function generateInvestigationSql(
+  ctx: Ctx,
+  input: AppInvestigationGenerationRequest,
+): Promise<AppInvestigationGenerationResult | undefined> {
+  if (!ctx.generateInvestigationSql) return undefined;
+  try {
+    return await ctx.generateInvestigationSql(input);
+  } catch (err) {
+    return {
+      executionError: err instanceof Error ? err.message : String(err),
+    };
+  }
+}
+
+async function runGeneratedSqlPreview(
+  ctx: Ctx,
+  generatedSql?: string,
+): Promise<{ preview?: Record<string, unknown>; error?: string; fatal?: boolean }> {
+  const sql = cleanString(generatedSql);
+  if (!sql) return {};
+  if (!isReadOnlySql(sql)) {
+    return {
+      error: 'Generated SQL was not run because it was not a read-only SELECT or WITH query.',
+      fatal: true,
+    };
+  }
+  if (!ctx.executeSql) {
+    return {
+      error: 'This host cannot execute investigation SQL.',
+      fatal: false,
+    };
+  }
+  try {
+    const result = await ctx.executeSql(boundedPreviewSql(sql));
+    return {
+      preview: {
+        id: 'generated-sql-preview',
+        title: 'Generated SQL preview',
+        kind: 'table',
+        reviewRequired: true,
+        result,
+      },
+    };
+  } catch (err) {
+    return {
+      error: err instanceof Error ? err.message : String(err),
+      fatal: true,
+    };
+  }
+}
+
+function buildGeneratedSqlPreview(result: unknown, generatedSql?: string): Record<string, unknown> {
+  const record = asRecord(result);
+  const rawRows = Array.isArray(record?.rows) ? record.rows : [];
+  const rows = rawRows.map(asRecord).filter((row): row is Record<string, unknown> => Boolean(row)).slice(0, 100);
+  const rawColumns = Array.isArray(record?.columns) ? record.columns : [];
+  const columns = rawColumns.length
+    ? rawColumns.map((column) => {
+        const columnRecord = asRecord(column);
+        return typeof column === 'string'
+          ? column
+          : typeof columnRecord?.name === 'string'
+            ? columnRecord.name
+            : String(column);
+      })
+    : Object.keys(rows[0] ?? {});
+  return {
+    id: 'generated-sql-preview',
+    title: 'Generated SQL preview',
+    kind: 'table',
+    reviewRequired: true,
+    sql: generatedSql,
+    result: {
+      columns,
+      rows,
+      rowCount: typeof record?.rowCount === 'number' ? record.rowCount : rows.length,
+      executionTime: typeof record?.executionTime === 'number' ? record.executionTime : undefined,
+    },
+  };
+}
+
+function isReadOnlySql(sql: string): boolean {
+  const trimmed = sql.trim().replace(/;+\s*$/g, '');
+  if (!/^(select|with)\b/i.test(trimmed)) return false;
+  if (/;\s*\S/.test(trimmed)) return false;
+  return !/\b(insert|update|delete|merge|drop|alter|create|truncate|copy|grant|revoke|call|execute|attach|detach)\b/i.test(trimmed);
+}
+
+function boundedPreviewSql(sql: string): string {
+  return `SELECT * FROM (${sql.trim().replace(/;+\s*$/g, '')}) AS dql_research_preview LIMIT 100`;
+}
+
+function buildInvestigationTrust(
+  investigation: LocalAppInvestigation,
+  selected: Record<string, unknown> | null,
+  sqlError?: string,
+): Record<string, unknown> {
+  return {
+    label: 'AI-generated research',
+    uncertified: true,
+    reviewStatus: 'needs_review',
+    certifiedContext: selectedString(selected, 'certificationStatus') === 'certified' ? 'selected tile is certified' : 'selected tile certification needs review',
+    sourceBlockId: investigation.sourceBlockId ?? selectedString(selected, 'blockId'),
+    sourceTileId: investigation.sourceTileId ?? selectedString(selected, 'tileId'),
+    caveats: [
+      'Investigation output is not certified until a reviewer promotes or certifies the generated block.',
+      ...(sqlError ? [`SQL preview caveat: ${sqlError}`] : []),
+    ],
+  };
+}
+
+function investigationSteps(intent: LocalAppInvestigationIntent): string[] {
+  const common = ['trust check', 'evidence capture'];
+  if (intent === 'trust_gap_review') return ['certification review', 'lineage review', 'owner and caveat check', ...common];
+  if (intent === 'entity_drilldown') return ['entity value match', 'metric trend', 'exception rows', ...common];
+  if (intent === 'segment_compare') return ['segment grouping', 'baseline comparison', 'top movers', ...common];
+  if (intent === 'anomaly_investigation') return ['baseline comparison', 'trend check', 'exception rows', 'top movers', ...common];
+  if (intent === 'diagnose_change') return ['baseline comparison', 'trend check', 'top movers', 'segment contribution', ...common];
+  return ['top movers', 'segment contribution', 'exception rows', ...common];
+}
+
+function investigationAssumptions(
+  intent: LocalAppInvestigationIntent,
+  selected: Record<string, unknown> | null,
+  generatedSql?: string,
+  sqlError?: string,
+): string[] {
+  return [
+    `Intent classified as ${intent}.`,
+    selected ? 'The selected dashboard tile is the starting context.' : 'No selected tile context was provided.',
+    generatedSql ? 'A generated SQL preview was requested and bounded to 100 rows.' : 'No generated SQL was supplied, so the first pass used dashboard result samples and metadata.',
+    sqlError ? `SQL preview needs review: ${sqlError}` : 'The result remains uncertified until reviewed.',
+  ];
+}
+
+function buildInvestigationSummary(
+  intent: LocalAppInvestigationIntent,
+  question: string,
+  selected: Record<string, unknown> | null,
+  metrics: Record<string, unknown>,
+  drivers: Array<Record<string, unknown>>,
+): string {
+  const target = selectedString(selected, 'title') ?? 'this dashboard question';
+  const delta = typeof metrics.delta === 'number' ? ` Delta from the sampled baseline is ${formatContribution(metrics.delta)}.` : '';
+  if (intent === 'trust_gap_review') {
+    return `This tile can be used as certified context only where its source block and lineage are certified. The deeper answer is AI-generated research and needs review before leaders rely on it.${delta}`;
+  }
+  const driver = drivers[0]?.title ? ` Top visible driver in the current evidence is ${drivers[0].title}.` : '';
+  return `DQL opened a review-required investigation for ${target}: ${question}.${delta}${driver}`;
+}
+
+function buildInvestigationRecommendation(
+  intent: LocalAppInvestigationIntent,
+  selected: Record<string, unknown> | null,
+  sqlError?: string,
+): string {
+  if (sqlError) return 'Review the generated SQL or add a certified drilldown block before promoting this result.';
+  if (intent === 'trust_gap_review') return 'Use the certified tile for reporting, and promote only the reviewed gaps into a draft block.';
+  if (!selected) return 'Select a dashboard tile or provide SQL so DQL can rank drivers with stronger evidence.';
+  return 'Review the driver evidence, then pin the useful answer or promote the SQL path into a draft DQL block.';
+}
+
+function investigationPreviewResult(investigation: LocalAppInvestigation): unknown {
+  const previews = Array.isArray(investigation.resultPreviews) ? investigation.resultPreviews : [];
+  const first = previews.find((preview) => asRecord(preview)?.result);
+  return asRecord(first)?.result;
+}
+
+function investigationCitations(investigation: LocalAppInvestigation): unknown[] {
+  return [{
+    kind: 'app_investigation',
+    name: investigation.title,
+    reviewStatus: investigation.reviewStatus,
+    uncertified: true,
+    sourceBlockId: investigation.sourceBlockId,
+    sourceTileId: investigation.sourceTileId,
+  }];
+}
+
+function nextResearchFollowUps(investigation: LocalAppInvestigation): string[] {
+  const target = investigation.sourceBlockId ?? investigation.sourceTileId ?? 'this result';
+  return [
+    `Break ${target} down by the strongest segment`,
+    `Show exception rows for ${target}`,
+    `What would need review before certifying this answer?`,
+  ];
+}
+
+function titleFromInvestigation(question: string, selected: Record<string, unknown> | null): string {
+  const selectedTitle = selectedString(selected, 'title');
+  const base = selectedTitle ? `${selectedTitle}: ${question}` : question;
+  return base.replace(/\s+/g, ' ').slice(0, 90);
+}
+
+function selectedRows(selected: Record<string, unknown> | null): Array<Record<string, unknown>> {
+  const rows = Array.isArray(selected?.sampleRows) ? selected?.sampleRows : selected?.rows;
+  if (!Array.isArray(rows)) return [];
+  return rows.map(asRecord).filter((row): row is Record<string, unknown> => Boolean(row)).slice(0, 100);
+}
+
+function selectedColumns(selected: Record<string, unknown> | null, rows: Array<Record<string, unknown>>): string[] {
+  const columns = selected?.columns;
+  if (Array.isArray(columns) && columns.length > 0) {
+    return columns.map(String).filter(Boolean).slice(0, 20);
+  }
+  return Object.keys(rows[0] ?? {}).slice(0, 20);
+}
+
+function typeofNumber(value: unknown): number | null {
+  if (typeof value === 'number' && Number.isFinite(value)) return value;
+  if (typeof value === 'string' && value.trim() && Number.isFinite(Number(value))) return Number(value);
+  return null;
+}
+
+function formatContribution(value: number): string {
+  const rounded = Math.abs(value) >= 100 ? Math.round(value).toLocaleString() : Number(value.toFixed(2)).toLocaleString();
+  return value >= 0 ? `+${rounded}` : `-${rounded.replace(/^-/, '')}`;
+}
+
+function asRecord(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : null;
+}
+
 function cleanString(value: unknown): string {
   return typeof value === 'string' ? value.trim() : '';
 }
@@ -1313,6 +2072,7 @@ function loadAppById(
   notebooks: AppListEntry['notebooks'];
   drafts: AppListEntry['drafts'];
   aiPins: unknown[];
+  investigations: unknown[];
 } | null {
   for (const p of findAppDocuments(projectRoot)) {
     const { document } = loadAppDocument(p);
@@ -1336,6 +2096,7 @@ function loadAppById(
       notebooks: listAppNotebookRefs(projectRoot, document, appDir),
       drafts: listAppDrafts(projectRoot, appDir),
       aiPins: listAiPins(projectRoot, document.id),
+      investigations: listAppInvestigations(projectRoot, document.id),
     };
   }
   return null;
@@ -1634,6 +2395,10 @@ function countAiPins(projectRoot: string, appId: string): number {
   return listAiPins(projectRoot, appId).length;
 }
 
+function countAppInvestigations(projectRoot: string, appId: string): number {
+  return listAppInvestigations(projectRoot, appId).length;
+}
+
 function listAiPins(projectRoot: string, appId: string): unknown[] {
   const dbPath = defaultLocalAppsDbPath(projectRoot);
   if (!existsSync(dbPath)) return [];
@@ -1647,6 +2412,21 @@ function listAiPins(projectRoot: string, appId: string): unknown[] {
   } catch {
     // AI pins are optional local overlays. Do not hide file-backed Apps when
     // the native SQLite module is unavailable for the current Node runtime.
+    return [];
+  }
+}
+
+function listAppInvestigations(projectRoot: string, appId: string): unknown[] {
+  const dbPath = defaultLocalAppsDbPath(projectRoot);
+  if (!existsSync(dbPath)) return [];
+  try {
+    const storage = new LocalAppStorage(dbPath);
+    try {
+      return storage.listAppInvestigations(appId);
+    } finally {
+      storage.close();
+    }
+  } catch {
     return [];
   }
 }
