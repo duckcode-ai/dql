@@ -3,7 +3,13 @@ import { Bot, Maximize2, Minimize2, Send, X } from 'lucide-react';
 import { runAgent } from '../../llm/client';
 import type { AgentConversationContext, AgentTurn } from '../../llm/types';
 import { themes, type Theme } from '../../themes/notebook-theme';
-import { AgentAnswerCard, StructuredAnswerText, extractGovernedAnswer, type AgentAnswerEnvelope } from './AgentAnswerCard';
+import {
+  AgentAnswerCard,
+  StructuredAnswerText,
+  extractGovernedAnswer,
+  type AgentAnswerEnvelope,
+  type AgentAnswerInvestigationRequest,
+} from './AgentAnswerCard';
 import { api, type AppConversation, type AppConversationMessage } from '../../api/client';
 
 interface LocalMessage {
@@ -23,7 +29,7 @@ export function AgentChatPanel({
   addToAppTarget,
   conversationTarget,
   onConversationUpdated,
-  onInterceptPrompt,
+  onInvestigate,
   initialInput,
   autoAsk,
   emptyHint,
@@ -44,7 +50,7 @@ export function AgentChatPanel({
   addToAppTarget?: { appId: string; dashboardId: string };
   conversationTarget?: { appId: string; dashboardId?: string; notebookPath?: string };
   onConversationUpdated?: () => void;
-  onInterceptPrompt?: (text: string) => boolean;
+  onInvestigate?: (request: AgentAnswerInvestigationRequest) => void;
   initialInput?: string;
   autoAsk?: { text: string; nonce: number };
   emptyHint?: string;
@@ -123,10 +129,6 @@ export function AgentChatPanel({
   const send = async (textOverride?: string) => {
     const text = (textOverride ?? input).trim();
     if (!text || running) return;
-    if (onInterceptPrompt?.(text)) {
-      setInput('');
-      return;
-    }
     const userMessage: LocalMessage = { id: makeMessageId(), role: 'user', content: text, createdAt: new Date().toISOString() };
     const next: LocalMessage[] = [...messages, userMessage];
     setMessages(next);
@@ -134,6 +136,41 @@ export function AgentChatPanel({
     setError(null);
     setLiveText('');
     setLiveEvents([]);
+    const chatResearchRequest = onInvestigate ? researchRequestFromChatPrompt(text, conversationContext) : null;
+    if (chatResearchRequest && onInvestigate) {
+      const planMessage: LocalMessage = {
+        id: makeMessageId(),
+        role: 'assistant',
+        content: researchPlanMessage(chatResearchRequest),
+        createdAt: new Date().toISOString(),
+      };
+      const finalMessages = [...next, planMessage];
+      setMessages(finalMessages);
+      onInvestigate(chatResearchRequest);
+      if (conversationTarget) {
+        let activeConversationId = conversationId;
+        if (!activeConversationId) {
+          const created = await api.createAppConversation(conversationTarget.appId, {
+            title: text.slice(0, 80),
+            dashboardId: conversationTarget.dashboardId,
+            notebookPath: conversationTarget.notebookPath,
+            context: conversationContext,
+            messages: toConversationMessages(finalMessages),
+          });
+          if (created.ok) {
+            activeConversationId = created.conversation.id;
+            setConversationId(activeConversationId);
+          }
+        } else {
+          await api.updateAppConversation(conversationTarget.appId, activeConversationId, {
+            context: conversationContext ?? null,
+            messages: toConversationMessages(finalMessages),
+          });
+        }
+        onConversationUpdated?.();
+      }
+      return;
+    }
     setRunning(true);
     const controller = new AbortController();
     abortRef.current = controller;
@@ -194,6 +231,26 @@ export function AgentChatPanel({
       setLiveEvents([]);
       abortRef.current = null;
     }
+  };
+  const continueIntoInvestigation = (request: AgentAnswerInvestigationRequest) => {
+    if (!onInvestigate) return;
+    onInvestigate(request);
+    const note: LocalMessage = {
+      id: makeMessageId(),
+      role: 'assistant',
+      content: `I opened a Research workspace for "${request.question}". Keep asking here; this chat stays attached while the evidence opens in the main view.`,
+      createdAt: new Date().toISOString(),
+    };
+    setMessages((current) => {
+      const next = [...current, note];
+      if (conversationTarget && conversationId) {
+        void api.updateAppConversation(conversationTarget.appId, conversationId, {
+          context: conversationContext ?? null,
+          messages: toConversationMessages(next),
+        }).then(() => onConversationUpdated?.());
+      }
+      return next;
+    });
   };
 
   return (
@@ -305,10 +362,12 @@ export function AgentChatPanel({
           <Bubble
             key={index}
             message={m}
+            sourceQuestion={previousUserQuestion(messages, index)}
             t={t}
             themeMode={themeMode}
             hideSqlByDefault={hideSqlByDefault}
             addToAppTarget={addToAppTarget}
+            onInvestigate={onInvestigate ? continueIntoInvestigation : undefined}
             executive={executive}
           />
         ))}
@@ -413,10 +472,7 @@ function contextFromGovernedAnswer(
   previous: AgentConversationContext | undefined,
   activeSurface: AgentConversationContext['activeSurface'],
 ): AgentConversationContext | undefined {
-  const sourceCertifiedBlock = cleanOptionalString(answer.sourceCertifiedBlock)
-    ?? cleanOptionalString(answer.result?.blockName)
-    ?? cleanOptionalString(answer.block?.name)
-    ?? previous?.sourceCertifiedBlock;
+  const sourceCertifiedBlock = sourceBlockNameFromAnswer(answer) ?? previous?.sourceCertifiedBlock;
   const draftBlockPath = cleanOptionalString(answer.draftBlock?.path)
     ?? cleanOptionalString(answer.draftBlockId)
     ?? previous?.draftBlockPath;
@@ -504,6 +560,21 @@ function mergeTextArrays(...groups: Array<unknown[] | undefined>): string[] | un
   return unique.length > 0 ? unique : undefined;
 }
 
+function sourceBlockNameFromAnswer(answer: AgentAnswerEnvelope): string | undefined {
+  return cleanOptionalString(answer.sourceCertifiedBlock)
+    ?? firstBlockName(answer.evidence?.selectedAssets)
+    ?? firstBlockName(answer.evidence?.lineage)
+    ?? firstBlockName(answer.citations)
+    ?? cleanOptionalString(answer.result?.blockName)
+    ?? cleanOptionalString(answer.block?.name);
+}
+
+function firstBlockName(items?: Array<{ kind?: string; name?: string }>): string | undefined {
+  return items
+    ?.map((item) => (item.kind === 'block' ? cleanOptionalString(item.name) : undefined))
+    .find((value): value is string => Boolean(value));
+}
+
 function cleanOptionalString(value: unknown): string | undefined {
   return typeof value === 'string' && value.trim() ? value.trim() : undefined;
 }
@@ -538,21 +609,63 @@ function matchesConversationTarget(
   return true;
 }
 
+function previousUserQuestion(messages: LocalMessage[], index: number): string | undefined {
+  for (let i = index - 1; i >= 0; i -= 1) {
+    if (messages[i]?.role === 'user') return messages[i].content;
+  }
+  return undefined;
+}
+
+function researchRequestFromChatPrompt(
+  text: string,
+  context: AgentConversationContext | undefined,
+): AgentAnswerInvestigationRequest | null {
+  const question = cleanOptionalString(text);
+  if (!question || !looksLikeResearchRequest(question)) return null;
+  const blockName = cleanOptionalString(context?.sourceCertifiedBlock);
+  return {
+    question,
+    title: blockName ? `${blockName}: ${question}` : question,
+    blockName,
+    answerSummary: context?.sourceAnswerSummary,
+  };
+}
+
+function looksLikeResearchRequest(text: string): boolean {
+  return /\b(deep\s+research|research\s+plan|investigate|investigation|root\s+cause|why\s+(did|has|have|is|are|was|were)|what\s+(changed|happened)|drivers?|drove|break\s*down|compare|trust|rely|lineage|certif|gap|anomal|exception|outlier)\b/i.test(text);
+}
+
+function researchPlanMessage(request: AgentAnswerInvestigationRequest): string {
+  const source = request.blockName ? `Start from ${request.blockName} as the evidence context.` : 'Start from the current app context.';
+  return [
+    `I'll handle this as a Research request: "${request.question}".`,
+    '',
+    'Plan:',
+    `1. ${source}`,
+    '2. Build review-required evidence in the Research workspace.',
+    '3. Keep this chat attached so follow-ups, clarifications, and next actions stay in one flow.',
+  ].join('\n');
+}
+
 function Bubble({
   message,
+  sourceQuestion,
   t,
   live,
   themeMode,
   hideSqlByDefault,
   addToAppTarget,
+  onInvestigate,
   executive,
 }: {
   message: LocalMessage;
+  sourceQuestion?: string;
   t: Theme;
   live?: boolean;
   themeMode: keyof typeof themes;
   hideSqlByDefault: boolean;
   addToAppTarget?: { appId: string; dashboardId: string };
+  onInvestigate?: (request: AgentAnswerInvestigationRequest) => void;
   executive?: boolean;
 }) {
   const isUser = message.role === 'user';
@@ -578,6 +691,8 @@ function Bubble({
           showSql={!hideSqlByDefault}
           compact
           addToAppTarget={addToAppTarget}
+          sourceQuestion={sourceQuestion}
+          onInvestigate={onInvestigate}
         />
       </div>
     );

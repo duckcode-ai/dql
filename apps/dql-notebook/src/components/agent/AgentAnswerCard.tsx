@@ -10,6 +10,15 @@ import { TrustBadge, type TrustState } from '@duckcodeailabs/dql-ui';
 type AnswerTab = 'answer' | 'visual' | 'data' | 'lineage' | 'context' | 'sql' | 'review';
 type AddToAppMode = 'auto' | 'chart' | 'data' | 'both';
 
+export interface AgentAnswerInvestigationRequest {
+  question: string;
+  title?: string;
+  answerSummary?: string;
+  blockName?: string;
+  sql?: string;
+  evidence?: unknown;
+}
+
 interface EvidenceRouteStep {
   tool?: string;
   status?: string;
@@ -165,12 +174,21 @@ function normalizeChartConfig(config: unknown, answer: AgentAnswerEnvelope): Cel
   };
 }
 
+function cleanQuestion(value: unknown): string | undefined {
+  if (typeof value !== 'string') return undefined;
+  const clean = value.replace(/\s+/g, ' ').trim();
+  if (!clean) return undefined;
+  return clean.length > 180 ? `${clean.slice(0, 177)}...` : clean;
+}
+
 export function AgentAnswerCard({
   answer,
   themeMode,
   showSql = true,
   compact = false,
   addToAppTarget,
+  sourceQuestion,
+  onInvestigate,
   onInsertSql,
   onCreateBlock,
 }: {
@@ -179,6 +197,8 @@ export function AgentAnswerCard({
   showSql?: boolean;
   compact?: boolean;
   addToAppTarget?: { appId: string; dashboardId: string };
+  sourceQuestion?: string;
+  onInvestigate?: (request: AgentAnswerInvestigationRequest) => void;
   onInsertSql?: (sql: string, title?: string) => void;
   onCreateBlock?: (sql: string, meta: { title?: string; description?: string; tags?: string[] }) => void;
 }) {
@@ -198,6 +218,7 @@ export function AgentAnswerCard({
   const trustAccent = trustStateColor(trustState, t);
   const summary = (answer.answer ?? answer.text ?? '').replace(/\n\n_Question:_[\s\S]*$/m, '').trim();
   const blockName = answer.result?.blockName ?? answer.block?.name ?? answer.citations?.find((c) => c.kind === 'block')?.name;
+  const investigationBlockName = resolveInvestigationBlockName(answer, blockName);
   const provenance = buildAnswerProvenance(answer, result, blockName, blockPath);
   const [adding, setAdding] = useState(false);
   const [addMessage, setAddMessage] = useState<string | null>(null);
@@ -205,6 +226,11 @@ export function AgentAnswerCard({
   const canAddToApp = Boolean(addToAppTarget && (result || sql || summary || blockName));
   const canInsertSql = Boolean(onInsertSql && sql);
   const canCreateBlock = Boolean(onCreateBlock && sql);
+  const investigationQuestion = cleanQuestion(analysisPlan?.question)
+    ?? cleanQuestion(sourceQuestion)
+    ?? cleanQuestion(summary)
+    ?? 'Investigate this answer';
+  const canInvestigate = Boolean(onInvestigate && investigationQuestion);
   const insertSql = () => {
     if (!onInsertSql || !sql) return;
     onInsertSql(sql, blockName ?? analysisPlan?.question ?? 'AI SQL draft');
@@ -295,6 +321,17 @@ export function AgentAnswerCard({
       setAdding(false);
     }
   };
+  const investigate = () => {
+    if (!onInvestigate || !investigationQuestion) return;
+    onInvestigate({
+      question: investigationQuestion,
+      title: investigationBlockName ? `${investigationBlockName}: ${investigationQuestion}` : investigationQuestion,
+      answerSummary: summary,
+      blockName: investigationBlockName,
+      sql,
+      evidence: answer.evidence,
+    });
+  };
   const tabItems: Array<{ id: AnswerTab; label: string; visible: boolean }> = [
     { id: 'answer', label: compact ? 'Summary' : 'Answer', visible: true },
     { id: 'visual', label: compact ? 'Chart' : 'Visualization', visible: hasChart },
@@ -369,6 +406,25 @@ export function AgentAnswerCard({
             onToggle={() => setAddMenuOpen((value) => !value)}
             onAdd={(mode) => void addToApp(mode)}
           />
+        )}
+        {canInvestigate && (
+          <button
+            type="button"
+            onClick={investigate}
+            style={{
+              border: `1px solid ${t.accent}`,
+              borderRadius: 6,
+              background: `${t.accent}12`,
+              color: t.accent,
+              cursor: 'pointer',
+              padding: compact ? '4px 8px' : '5px 10px',
+              fontSize: 11,
+              fontFamily: t.font,
+              fontWeight: 800,
+            }}
+          >
+            {compact ? 'Investigate' : 'Investigate deeper'}
+          </button>
         )}
         {canInsertSql && (
           <button
@@ -1368,6 +1424,28 @@ function buildAnswerProvenance(
   if (answer.reviewStatus && answer.reviewStatus !== 'certified') items.push({ label: 'next', value: formatLabel(answer.reviewStatus) });
 
   return dedupeProvenanceItems(items).slice(0, 5);
+}
+
+function resolveInvestigationBlockName(answer: AgentAnswerEnvelope, fallback?: string): string | undefined {
+  return cleanSourceName(answer.sourceCertifiedBlock)
+    ?? firstBlockName(answer.evidence?.selectedAssets)
+    ?? firstBlockName(answer.evidence?.lineage)
+    ?? firstBlockName(answer.citations)
+    ?? cleanSourceName(answer.block?.name)
+    ?? cleanSourceName(answer.result?.blockName)
+    ?? cleanSourceName(fallback);
+}
+
+function firstBlockName(items?: Array<{ kind?: string; name?: string }>): string | undefined {
+  return items
+    ?.map((item) => (item.kind === 'block' ? cleanSourceName(item.name) : undefined))
+    .find((value): value is string => Boolean(value));
+}
+
+function cleanSourceName(value: unknown): string | undefined {
+  if (typeof value !== 'string') return undefined;
+  const clean = value.replace(/\s+/g, ' ').trim();
+  return clean || undefined;
 }
 
 function dedupeProvenanceItems(items: ProvenanceItem[]): ProvenanceItem[] {

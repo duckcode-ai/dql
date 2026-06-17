@@ -41,6 +41,7 @@ import {
 import type { AppSummary, AppWorkspaceExperience, AppWorkspaceSection } from '../../store/types';
 import type { ThemeMode } from '../../themes/notebook-theme';
 import { AgentChatPanel } from '../agent/AgentChatPanel';
+import type { AgentAnswerInvestigationRequest } from '../agent/AgentAnswerCard';
 import { DashboardRenderer } from './DashboardRenderer';
 import { PersonaSwitcher } from './PersonaSwitcher';
 
@@ -58,8 +59,12 @@ interface AppResearchSeed {
   sourceBlockId?: string;
   context?: unknown;
   intent?: LocalAppInvestigation['intent'];
+  generatedSql?: string;
   nonce: number;
 }
+
+type CreateInvestigationResult = Awaited<ReturnType<typeof api.createAppInvestigation>>;
+const inFlightResearchSeedRequests = new Map<string, Promise<CreateInvestigationResult>>();
 
 interface AppPromptExample {
   title: string;
@@ -981,45 +986,13 @@ function AppWorkspaceSurface({
   const handleStartResearch = useCallback((seed: Omit<AppResearchSeed, 'nonce'>) => {
     setResearchSeed({ ...seed, nonce: Date.now() });
     onSectionChange('research');
-    onExplainChange(false);
+    onExplainChange(true);
   }, [onExplainChange, onSectionChange]);
   const handleAskBlock = useCallback((blockId: string, question: string) => {
     setSelectedBlockId(blockId);
-    const item = dashboardDoc?.dashboard.layout.items.find((candidate) => getDashboardItemBlockId(candidate) === blockId);
-    const tileRun = dashboardRun?.tiles.find((tile) => tile.tileId === item?.i || tile.blockId === blockId);
-    if (isResearchPrompt(question)) {
-      const title = item?.title ?? blockId;
-      handleStartResearch({
-        question,
-        title: `${title}: ${question}`,
-        dashboardId: dashboardDoc?.dashboard.id,
-        sourceTileId: item?.i,
-        sourceBlockId: blockId,
-        intent: researchIntentFromPrompt(question),
-        context: {
-          scope: 'selected-dashboard-block',
-          appId: app?.id,
-          appName: app?.name,
-          dashboardId: dashboardDoc?.dashboard.id,
-          dashboardTitle: dashboardDoc?.dashboard.metadata.title,
-          domain: app?.domain ?? dashboardDoc?.dashboard.metadata.domain,
-          selectedBlock: {
-            blockId,
-            title,
-            tileId: item?.i,
-            viz: item?.viz.type,
-            status: tileRun?.status,
-            rowCount: tileRun?.result?.rowCount,
-            columns: tileRun?.result?.columns?.slice(0, 8),
-            sampleRows: sampleDashboardRows(tileRun?.result?.rows, tileRun?.result?.columns),
-          },
-        },
-      });
-      return;
-    }
     onExplainChange(true);
     setAskSeed({ text: question, nonce: Date.now() });
-  }, [app, dashboardDoc, dashboardRun, handleStartResearch, onExplainChange]);
+  }, [onExplainChange]);
 
   useEffect(() => {
     if (dashboardBlockIds.length === 0) {
@@ -1033,6 +1006,8 @@ function AppWorkspaceSurface({
   useEffect(() => {
     setDashboardRun(null);
   }, [app?.id, dashboardDoc?.dashboard.id]);
+  const copilotAvailable = Boolean(app && dashboardDoc && (section === 'dashboards' || section === 'research'));
+  const copilotVisible = copilotAvailable && explainOpen;
   const markAction = (status: 'copied' | 'downloaded' | 'ready') => {
     setShareStatus(status);
     if (status !== 'ready') window.setTimeout(() => setShareStatus('idle'), 1800);
@@ -1161,16 +1136,18 @@ function AppWorkspaceSurface({
                 onAdd={onAddPage}
               />
             ) : null}
+            {copilotAvailable ? (
+              <button
+                type="button"
+                className={`dql-apps-btn dql-apps-btn-line dql-apps-btn-icon ${explainOpen ? 'on' : ''}`}
+                title={explainOpen ? 'Hide AI copilot' : 'Show AI copilot'}
+                onClick={() => onExplainChange(!explainOpen)}
+              >
+                <Bot size={15} />
+              </button>
+            ) : null}
             {onDashboards ? (
               <>
-                <button
-                  type="button"
-                  className={`dql-apps-btn dql-apps-btn-line dql-apps-btn-icon ${explainOpen ? 'on' : ''}`}
-                  title={explainOpen ? 'Hide AI copilot' : 'Show AI copilot'}
-                  onClick={() => onExplainChange(!explainOpen)}
-                >
-                  <Bot size={15} />
-                </button>
                 <button
                   type="button"
                   className="dql-apps-btn dql-apps-btn-line dql-apps-btn-icon"
@@ -1184,7 +1161,7 @@ function AppWorkspaceSurface({
           </div>
         </div>
 
-        <div className={`dql-app-view-layout ${explainOpen && section === 'dashboards' ? '' : 'no-explain'}`}>
+        <div className={`dql-app-view-layout ${copilotVisible ? '' : 'no-explain'}`}>
           <div className="dql-app-main-column">
             {loading ? (
               <EmptyPanel title="Loading app..." detail="Reading dashboard files and running local blocks." />
@@ -1225,7 +1202,7 @@ function AppWorkspaceSurface({
               <EmptyPanel title="No dashboard page selected." detail="Choose a dashboard page or add one in Build mode." />
             )}
           </div>
-          {explainOpen && section === 'dashboards' ? (
+          {copilotVisible ? (
             <AppCopilotPanel
               app={app}
               appDoc={appDoc}
@@ -1420,20 +1397,24 @@ function AppCopilotPanel({
       .filter((item): item is { blockId: string; title: string; viz: string; tileId: string } => Boolean(item)) ?? [];
   }, [dashboardDoc]);
   const selectedBlock = blockTiles.find((item) => item.blockId === selectedBlockId) ?? blockTiles[0] ?? null;
-  const selectedTileRun = selectedBlock
-    ? dashboardRun?.tiles.find((tile) => tile.tileId === selectedBlock.tileId || tile.blockId === selectedBlock.blockId)
+  const tileRunFor = (block: { blockId: string; tileId: string } | null | undefined) => block
+    ? dashboardRun?.tiles.find((tile) => tile.tileId === block.tileId || tile.blockId === block.blockId)
     : null;
-  const selectedBlockContext = selectedBlock
-    ? {
-        ...selectedBlock,
-        blockPath: selectedTileRun?.blockPath,
-        status: selectedTileRun?.status,
-        certificationStatus: selectedTileRun?.certificationStatus,
-        rowCount: selectedTileRun?.result?.rowCount,
-        columns: selectedTileRun?.result?.columns?.slice(0, 8),
-        sampleRows: sampleDashboardRows(selectedTileRun?.result?.rows, selectedTileRun?.result?.columns),
-      }
-    : null;
+  const contextForBlock = (block: typeof selectedBlock) => {
+    if (!block) return null;
+    const tileRun = tileRunFor(block);
+    return {
+      ...block,
+      blockPath: tileRun?.blockPath,
+      status: tileRun?.status,
+      certificationStatus: tileRun?.certificationStatus,
+      rowCount: tileRun?.result?.rowCount,
+      columns: tileRun?.result?.columns?.slice(0, 8),
+      sampleRows: sampleDashboardRows(tileRun?.result?.rows, tileRun?.result?.columns),
+    };
+  };
+  const selectedTileRun = tileRunFor(selectedBlock);
+  const selectedBlockContext = contextForBlock(selectedBlock);
 
   const dashboardMeta = dashboardDoc?.dashboard.metadata;
   const domainLabel = formatBusinessLabel(app?.domain ?? dashboardMeta?.domain ?? 'Business');
@@ -1471,8 +1452,15 @@ function AppCopilotPanel({
     ? `${selectedRows.toLocaleString()} rows${selectedColumns ? ` / ${selectedColumns} fields` : ''}`
     : focusStatus;
 
-  const contextPayload = {
-    scope: selectedBlockContext ? 'selected-dashboard-block' : 'dashboard',
+  const availableBlockContext = blockTiles.map((block) => ({
+    blockId: block.blockId,
+    title: block.title,
+    viz: block.viz,
+    status: tileRunFor(block)?.status,
+    rowCount: tileRunFor(block)?.result?.rowCount,
+  }));
+  const buildContextPayload = (blockContext: ReturnType<typeof contextForBlock> = selectedBlockContext) => ({
+    scope: blockContext ? 'selected-dashboard-block' : 'dashboard',
     responseStyle: {
       audience: 'CXO and business stakeholder',
       firstResponse: 'Start with a plain-language business answer and recommended action.',
@@ -1488,25 +1476,35 @@ function AppCopilotPanel({
     audience,
     owner,
     reviewCadence: cadence,
-    selectedBlock: selectedBlockContext,
-    availableBlocks: blockTiles.map((block) => ({
-      blockId: block.blockId,
-      title: block.title,
-      viz: block.viz,
-      status: dashboardRun?.tiles.find((tile) => tile.tileId === block.tileId || tile.blockId === block.blockId)?.status,
-      rowCount: dashboardRun?.tiles.find((tile) => tile.tileId === block.tileId || tile.blockId === block.blockId)?.result?.rowCount,
-    })),
-  };
+    selectedBlock: blockContext,
+    availableBlocks: availableBlockContext,
+  });
+  const contextPayload = buildContextPayload();
   const contextJson = JSON.stringify(contextPayload, null, 2);
-  const startResearch = (question: string) => {
+  const startInvestigationFromAnswer = (request: AgentAnswerInvestigationRequest) => {
+    const question = request.question.trim() || 'Investigate this answer';
+    const answerBlock = blockForInvestigationRequest(blockTiles, request);
+    const researchBlock = answerBlock ?? selectedBlock;
+    const researchBlockContext = contextForBlock(researchBlock);
+    const researchContextPayload = buildContextPayload(researchBlockContext);
     onStartResearch({
       question,
-      title: selectedBlock ? `${selectedBlock.title}: ${question}` : question,
+      title: researchBlock ? `${researchBlock.title}: ${question}` : request.title ?? question,
       dashboardId: dashboardDoc?.dashboard.id,
-      sourceTileId: selectedBlock?.tileId,
-      sourceBlockId: selectedBlock?.blockId,
-      context: contextPayload,
+      sourceTileId: researchBlock?.tileId,
+      sourceBlockId: request.blockName ?? researchBlock?.blockId,
+      context: {
+        ...researchContextPayload,
+        originatingAnswer: {
+          question,
+          summary: request.answerSummary,
+          blockName: request.blockName,
+          hasSql: Boolean(request.sql),
+          evidence: request.evidence,
+        },
+      },
       intent: researchIntentFromPrompt(question),
+      generatedSql: request.sql,
     });
   };
   const promptStarters = [
@@ -1585,18 +1583,6 @@ function AppCopilotPanel({
         </div>
       ) : null}
 
-      <div className="dql-app-research-launchers">
-        <button type="button" onClick={() => startResearch(selectedBlock ? `Why did ${selectedBlock.title} change?` : 'Why did this dashboard change?')}>
-          <Search size={13} /> Why
-        </button>
-        <button type="button" onClick={() => startResearch(selectedBlock ? `Break ${selectedBlock.title} down by the strongest driver.` : 'Break this dashboard down by the strongest driver.')}>
-          <LineChart size={13} /> Drivers
-        </button>
-        <button type="button" onClick={() => startResearch(selectedBlock ? `Can leaders rely on ${selectedBlock.title}?` : 'Can leaders rely on this dashboard?')}>
-          <ShieldCheck size={13} /> Trust
-        </button>
-      </div>
-
       <div className="dql-app-assistant-chat">
         <AgentChatPanel
           title={selectedBlock ? selectedBlock.title : 'Ask the app copilot'}
@@ -1608,11 +1594,7 @@ function AppCopilotPanel({
           autoAsk={askSeed ?? undefined}
           emptyHint="Ask what changed, why it matters, what action to take, or what evidence needs review."
           inputPlaceholder="Ask a business question..."
-          onInterceptPrompt={(text) => {
-            if (!isResearchPrompt(text)) return false;
-            startResearch(text);
-            return true;
-          }}
+          onInvestigate={startInvestigationFromAnswer}
           variant="executive"
           embedded
           showHeader={false}
@@ -1672,19 +1654,30 @@ function ResearchPanel({
   useEffect(() => {
     if (!seed || !appId) return;
     let cancelled = false;
+    const investigationInput = {
+      dashboardId: seed.dashboardId ?? activeDashboardId,
+      sourceTileId: seed.sourceTileId,
+      sourceBlockId: seed.sourceBlockId,
+      title: seed.title,
+      question: seed.question,
+      intent: seed.intent,
+      context: seed.context,
+      generatedSql: seed.generatedSql,
+      run: true,
+    };
+    const seedKey = `${appId}:${JSON.stringify(investigationInput)}`;
     const create = async () => {
       setBusy('create');
       setError(null);
-      const result = await api.createAppInvestigation(appId, {
-        dashboardId: seed.dashboardId ?? activeDashboardId,
-        sourceTileId: seed.sourceTileId,
-        sourceBlockId: seed.sourceBlockId,
-        title: seed.title,
-        question: seed.question,
-        intent: seed.intent,
-        context: seed.context,
-        run: true,
-      });
+      let request = inFlightResearchSeedRequests.get(seedKey);
+      if (!request) {
+        request = api.createAppInvestigation(appId, investigationInput);
+        inFlightResearchSeedRequests.set(seedKey, request);
+        void request.finally(() => {
+          window.setTimeout(() => inFlightResearchSeedRequests.delete(seedKey), 5000);
+        });
+      }
+      const result = await request;
       if (cancelled) return;
       setBusy(null);
       if (!result.ok) {
@@ -1700,9 +1693,10 @@ function ResearchPanel({
       setEvidenceTab('preview');
       onSeedHandled();
     };
-    void create();
+    const timer = window.setTimeout(() => void create(), 0);
     return () => {
       cancelled = true;
+      window.clearTimeout(timer);
     };
   }, [seed?.nonce, appId, activeDashboardId, onInvestigationsChanged, onSeedHandled]);
 
@@ -2275,10 +2269,6 @@ function upsertInvestigation(items: LocalAppInvestigation[], next: LocalAppInves
   return [next, ...without].sort((a, b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime());
 }
 
-function isResearchPrompt(text: string): boolean {
-  return /\b(why|what\s+changed|changed?|change|drop|dropped|decline|declined|increase|increased|decrease|decreased|delta|variance|driver|drove|break\s*down|top mover|exception|outlier|anomal|compare|versus|trust|rely|certif|lineage|customer|account|what happened)\b/i.test(text);
-}
-
 function researchIntentFromPrompt(text: string): LocalAppInvestigation['intent'] {
   const value = text.toLowerCase();
   if (/\b(trust|rely|certif|lineage|gap|caveat)\b/.test(value)) return 'trust_gap_review';
@@ -2287,6 +2277,32 @@ function researchIntentFromPrompt(text: string): LocalAppInvestigation['intent']
   if (/\b(customer|account|user|client|alice|johnson|entity)\b/.test(value)) return 'entity_drilldown';
   if (/\b(why|changed|change|drop|decline|increase|decrease)\b/.test(value)) return 'diagnose_change';
   return 'driver_breakdown';
+}
+
+function blockForInvestigationRequest<T extends { blockId: string; title: string }>(
+  blocks: T[],
+  request: AgentAnswerInvestigationRequest,
+): T | null {
+  const explicitName = normalizeSearchText(request.blockName);
+  if (explicitName) {
+    const exact = blocks.find((block) => normalizeSearchText(block.blockId) === explicitName || normalizeSearchText(block.title) === explicitName);
+    if (exact) return exact;
+  }
+  const question = normalizeSearchText(request.question);
+  if (!question) return null;
+  return [...blocks]
+    .sort((a, b) => b.title.length - a.title.length)
+    .find((block) => {
+      const title = normalizeSearchText(block.title);
+      const blockId = normalizeSearchText(block.blockId);
+      return Boolean((title && question.includes(title)) || (blockId && question.includes(blockId)));
+    }) ?? null;
+}
+
+function normalizeSearchText(value: unknown): string {
+  return typeof value === 'string'
+    ? value.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim()
+    : '';
 }
 
 function formatResearchValue(value: unknown): string {
@@ -4419,33 +4435,6 @@ const APP_STYLES = `
 }
 
 .dql-app-gapcard p { margin: 6px 0 0; color: var(--dql-app-muted); font-size: 11.5px; line-height: 1.45; }
-.dql-app-research-launchers {
-  display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 7px;
-  padding: 10px 0 0;
-}
-
-.dql-app-research-launchers button {
-  height: 30px;
-  border: 1px solid var(--dql-app-line);
-  border-radius: 7px;
-  background: var(--dql-app-surface);
-  color: var(--dql-app-ink);
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  gap: 6px;
-  font: 800 11px var(--font-ui);
-  cursor: pointer;
-}
-
-.dql-app-research-launchers button:hover {
-  border-color: rgba(37, 99, 235, 0.34);
-  color: var(--dql-app-accent);
-  background: var(--dql-app-accent-soft);
-}
-
 .dql-app-research-shell {
   display: grid;
   grid-template-columns: minmax(220px, 280px) minmax(0, 1fr);
