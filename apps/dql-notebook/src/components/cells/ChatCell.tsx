@@ -11,7 +11,7 @@ import type {
 import { runAgent } from '../../llm/client';
 import type { AgentTurn } from '../../llm/types';
 import { SaveAsBlockModal } from '../modals/SaveAsBlockModal';
-import { AgentAnswerCard, extractGovernedAnswer } from '../agent/AgentAnswerCard';
+import { AgentAnswerCard, StructuredAnswerText, extractGovernedAnswer } from '../agent/AgentAnswerCard';
 
 interface ChatCellProps {
   cell: Cell;
@@ -246,6 +246,8 @@ export function ChatCell({ cell, cells, index, themeMode, onUpdate }: ChatCellPr
           initialContent={proposal.sql}
           initialName={proposal.name}
           initialDescription={proposal.description}
+          initialDomain={proposal.domain || inferDomainFromText(proposal.name || proposal.description)}
+          initialOwner={proposal.owner || 'analytics'}
           initialTags={proposal.tags}
           onClose={() => setProposalOpen(false)}
           onSaved={({ path, name }) => {
@@ -366,7 +368,7 @@ function MessageBubble({
         fontSize: 13,
         lineHeight: 1.5,
         color: t.textPrimary,
-        whiteSpace: 'pre-wrap',
+        whiteSpace: isUser ? 'pre-wrap' : 'normal',
       }}
     >
       <div style={{ fontSize: 10, fontFamily: t.fontMono, color: t.textMuted, marginBottom: 4, textTransform: 'uppercase', letterSpacing: '0.08em' }}>
@@ -375,7 +377,9 @@ function MessageBubble({
       {answer ? (
         <AgentAnswerCard answer={answer} themeMode={themeMode} onInsertSql={onInsertSql} onCreateBlock={onCreateBlock} />
       ) : (
-        msg.content || (events.length > 0 ? <em style={{ color: t.textSecondary }}>(tool calls only)</em> : null)
+        msg.content
+          ? (isUser ? msg.content : <StructuredAnswerText text={msg.content} t={t} />)
+          : (events.length > 0 ? <em style={{ color: t.textSecondary }}>(tool calls only)</em> : null)
       )}
       {events.filter((e) => e.kind === 'tool_call').map((e) => (
         <ToolCallChip key={`tc-${(e as { id: string }).id}`} turn={e} t={t} />
@@ -401,11 +405,11 @@ function LiveBubble({
 }) {
   const answer = extractGovernedAnswer(events);
   return (
-    <div style={{ padding: '8px 12px', borderRadius: 6, background: t.cellBg, border: `1px solid ${t.cellBorder}`, fontSize: 13, lineHeight: 1.5, color: t.textPrimary, whiteSpace: 'pre-wrap' }}>
+    <div style={{ padding: '8px 12px', borderRadius: 6, background: t.cellBg, border: `1px solid ${t.cellBorder}`, fontSize: 13, lineHeight: 1.5, color: t.textPrimary, whiteSpace: 'normal' }}>
       <div style={{ fontSize: 10, fontFamily: t.fontMono, color: t.textMuted, marginBottom: 4, textTransform: 'uppercase', letterSpacing: '0.08em' }}>
         Assistant <span style={{ color: t.accent }}>●</span>
       </div>
-      {answer ? <AgentAnswerCard answer={answer} themeMode={themeMode} onInsertSql={onInsertSql} onCreateBlock={onCreateBlock} /> : (streamingText || <em style={{ color: t.textSecondary }}>Thinking…</em>)}
+      {answer ? <AgentAnswerCard answer={answer} themeMode={themeMode} onInsertSql={onInsertSql} onCreateBlock={onCreateBlock} /> : (streamingText ? <StructuredAnswerText text={streamingText} t={t} /> : <em style={{ color: t.textSecondary }}>Thinking…</em>)}
       {events.filter((e) => e.kind === 'tool_call').map((e) => (
         <ToolCallChip key={`live-${(e as { id: string }).id}`} turn={e} t={t} />
       ))}

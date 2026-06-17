@@ -65,9 +65,10 @@ const HELP = `
     dql app new|generate|ls|show|build|reindex <name>
                                     Manage App artifacts (metadata, policies, dashboards, schedules)
     dql schedule list|run|start|status  Local scheduler for @schedule'd blocks (alerts + notifications)
-    dql agent ask "<question>"      Block-first agent loop (certified blocks → fallback LLM SQL)
-    dql agent reindex               Rebuild .dql/cache/agent-kg.sqlite and metadata.sqlite
-    dql agent feedback up|down      Record thumbs-up/down feedback for self-learning
+      dql agent ask "<question>"      Block-first agent loop (certified blocks → fallback LLM SQL)
+      dql agent reindex               Rebuild .dql/cache/agent-kg.sqlite and metadata.sqlite
+      dql agent feedback up|down      Record thumbs-up/down feedback for self-learning
+      dql agent eval agent-evals.yml  Measure certified/follow-up/refusal accuracy
     dql slack serve                 Slack slash-command bot (forwards to the answer loop)
     dql verify                      Verify dql-manifest.json is reproducible from source
     dql --version                    Show version
@@ -92,8 +93,9 @@ const HELP = `
     --contract <id@version>         For "certify --from-draft": DataLex contract id (e.g. commerce.Customer.foo@1)
     --datalex-manifest <path>       Optional DataLex manifest for datalex_contract validation
     --open-pr                       For "certify --from-draft": push branch + open GitHub PR with the diff
-    --force                         For "certify --from-draft": overwrite an existing certified block
-`;
+      --force                         For "certify --from-draft": overwrite an existing certified block
+      --execute                       For "agent eval": run bounded SQL previews
+  `;
 
 const COMMAND_HELP: Record<string, string> = {
   certify: `

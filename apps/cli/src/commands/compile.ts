@@ -31,6 +31,17 @@ export function manifestCacheTrackedFiles(inputFiles: string[], dqlVersion: stri
   ];
 }
 
+export function readCliDqlVersion(): string {
+  let dqlVersion = '0.6.0';
+  try {
+    const pkgPath = join(import.meta.dirname ?? __dirname, '..', '..', 'package.json');
+    if (existsSync(pkgPath)) {
+      dqlVersion = JSON.parse(readFileSync(pkgPath, 'utf-8')).version ?? dqlVersion;
+    }
+  } catch { /* use default */ }
+  return dqlVersion;
+}
+
 export async function runCompile(
   pathArg: string | null,
   rest: string[],
@@ -73,14 +84,7 @@ export async function runCompile(
     return;
   }
 
-  // Read DQL version from CLI package.json
-  let dqlVersion = '0.6.0';
-  try {
-    const pkgPath = join(import.meta.dirname ?? __dirname, '..', '..', 'package.json');
-    if (existsSync(pkgPath)) {
-      dqlVersion = JSON.parse(readFileSync(pkgPath, 'utf-8')).version ?? dqlVersion;
-    }
-  } catch { /* use default */ }
+  const dqlVersion = readCliDqlVersion();
 
   // Resolve via explicit flag → dql.config.json `dbt:` → target/manifest.json
   const resolvedDbt = resolveDbtManifestPath(projectRoot, dbtManifestPath);

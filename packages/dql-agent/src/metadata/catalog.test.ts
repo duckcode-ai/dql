@@ -128,6 +128,92 @@ describe('local metadata catalog', () => {
     });
   });
 
+  it('routes exact certified example questions to certified execution', async () => {
+    const plan = await planAgentAnswer(projectRoot, {
+      question: 'Who were the top scorers?',
+      limit: 20,
+    });
+
+    expect(plan.routeDecision).toMatchObject({
+      route: 'certified',
+      intent: 'ad_hoc_ranking',
+      reviewStatus: 'certified',
+      exactObjectKey: 'dql:block:Top 10 Goal Scorers',
+    });
+  });
+
+  it('routes direct KPI value questions to certified blocks without requiring an example', async () => {
+    const plan = await planAgentAnswer(projectRoot, {
+      question: 'What was revenue last week?',
+      limit: 20,
+    });
+
+    expect(plan.routeDecision).toMatchObject({
+      route: 'certified',
+      intent: 'exact_certified_lookup',
+      reviewStatus: 'certified',
+      exactObjectKey: 'dql:block:Revenue Total',
+    });
+  });
+
+  it('pins source certified block and follow-up request context for drilldowns', async () => {
+    const pack = await buildLocalContextPack(projectRoot, {
+      question: 'Drill into Stephen Curry by game date',
+      followUp: {
+        kind: 'drilldown',
+        sourceBlockName: 'Top 10 Goal Scorers',
+        sourceQuestion: 'Run Top 10 Goal Scorers',
+        filters: ['Stephen Curry'],
+        dimensions: ['game date'],
+      },
+      limit: 20,
+    });
+
+    expect(pack.followUp).toMatchObject({
+      kind: 'drilldown',
+      sourceBlockName: 'Top 10 Goal Scorers',
+    });
+    expect(pack.objects.map((row) => row.objectKey)).toEqual(
+      expect.arrayContaining([
+        'dql:block:Top 10 Goal Scorers',
+        expect.stringMatching(/^selected:followup:/),
+      ]),
+    );
+    expect(pack.routeDecision).toMatchObject({
+      route: 'generated_sql',
+      intent: 'entity_drilldown',
+      reviewStatus: 'draft_ready',
+    });
+  });
+
+  it('does not use generated draft blocks as allowed SQL context', async () => {
+    mkdirSync(join(projectRoot, 'blocks', '_drafts'), { recursive: true });
+    writeFileSync(
+      join(projectRoot, 'blocks', '_drafts', 'draft_fraud_pipeline.dql'),
+      `block "Draft Fraud Pipeline" {
+  domain = "risk"
+  type = "custom"
+  status = "draft"
+  description = "AI-generated draft that has not been certified."
+  asked_times = 1
+  query = """
+    SELECT account_id, risk_score
+    FROM draft_only_table
+  """
+}`,
+      'utf-8',
+    );
+
+    const pack = await buildLocalContextPack(projectRoot, {
+      question: 'review draft fraud pipeline',
+      limit: 20,
+    });
+
+    expect(pack.objects.map((row) => row.objectKey)).toContain('dql:block:Draft Fraud Pipeline');
+    expect(pack.allowedSqlContext.sourceBlockSql.map((source) => source.objectKey)).not.toContain('dql:block:Draft Fraud Pipeline');
+    expect(pack.allowedSqlContext.relations.map((relation) => relation.relation)).not.toContain('draft_only_table');
+  });
+
   it('asks for missing baseline context instead of proxying change analysis to an unrelated table', async () => {
     const pack = await buildLocalContextPack(projectRoot, {
       question: 'What changed in Player Stats Data Availability?',
@@ -197,6 +283,7 @@ function seedDqlProject(root: string): void {
   description = "Top 10 NBA players by total points scored."
   tags = ["nba", "player", "points", "scoring"]
   llmContext = "Use for top scorers only. Do not use as a least-points or bottom-ranking answer."
+  examples = [{ question = "Who were the top scorers?" }]
   query = """
     SELECT player_name, season, SUM(points) AS total_points
     FROM fct_player_performance
@@ -221,6 +308,21 @@ function seedDqlProject(root: string): void {
     SELECT dataset_name, COUNT(*) AS row_count
     FROM int_player_stats
     GROUP BY 1
+  """
+}`,
+    'utf-8',
+  );
+  writeFileSync(
+    join(root, 'blocks', 'revenue_total.dql'),
+    `block "Revenue Total" {
+  domain = "revenue"
+  type = "custom"
+  status = "certified"
+  owner = "analytics@example.com"
+  description = "Certified total revenue for the last completed week."
+  tags = ["revenue", "kpi", "weekly"]
+  query = """
+    SELECT 42500 AS revenue_total
   """
 }`,
     'utf-8',

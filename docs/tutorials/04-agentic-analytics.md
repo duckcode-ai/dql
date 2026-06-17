@@ -104,6 +104,19 @@ ls blocks/_drafts/
 Questions that get asked repeatedly accumulate in `_drafts/` — that's your
 prioritized review queue for what to certify next.
 
+Measure the follow-up path with an eval suite:
+
+```bash
+dql agent eval docs/guides/agent-evals.yml --format json
+```
+
+> **You should see** certified hit rate, generated follow-up pass rate, safe
+> refusal rate, wrong-certified count, draft capture count, and context size
+> metrics. Add `--execute` when a local runtime is running and you want bounded
+> SQL previews compared against expected rows. Add `--save` when eval-generated
+> drafts should be written to `blocks/_drafts/`; otherwise eval reports the
+> draft path without mutating the project.
+
 ---
 
 ## Step 4 — Promote a good proposal to a certified block

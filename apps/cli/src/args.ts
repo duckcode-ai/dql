@@ -35,6 +35,8 @@ export interface CLIFlags {
   /** Local runtime URL for agent block execution. */
   runtimeUrl?: string;
   runtime?: string;
+  /** Execute generated SQL previews during eval. Default false for route-only eval. */
+  execute?: boolean;
   /** Agent feedback helpers. */
   block?: string;
   question?: string;
@@ -140,6 +142,8 @@ export function parseArgs(argv: string[]): ParsedArgs {
       flags.runtimeUrl = argv[++i];
     } else if (arg === '--runtime' && i + 1 < argv.length) {
       flags.runtime = argv[++i];
+    } else if (arg === '--execute') {
+      flags.execute = true;
     } else if (arg === '--block' && i + 1 < argv.length) {
       flags.block = argv[++i];
     } else if (arg === '--question' && i + 1 < argv.length) {

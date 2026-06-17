@@ -1,8 +1,13 @@
-import { mkdirSync, writeFileSync, existsSync, readFileSync } from 'node:fs';
-import { dirname, join } from 'node:path';
 import { z } from 'zod';
 import type { DQLContext } from '../context.js';
-import { buildLocalContextPack, openMetadataCatalog, recordQueryRun, type LocalContextPack } from '@duckcodeailabs/dql-agent';
+import {
+  buildLocalContextPack,
+  openMetadataCatalog,
+  recordQueryRun,
+  upsertGeneratedDraft,
+  validateSqlAgainstLocalContext,
+  type LocalContextPack,
+} from '@duckcodeailabs/dql-agent';
 
 export const queryViaMetadataInput = {
   question: z
@@ -37,6 +42,17 @@ export const queryViaMetadataInput = {
     .array(z.string())
     .optional()
     .describe('Tables / blocks the agent thinks are involved.'),
+  followUp: z
+    .object({
+      kind: z.enum(['generic', 'drilldown']),
+      sourceBlockName: z.string().optional(),
+      sourceQuestion: z.string().optional(),
+      sourceAnswer: z.string().optional(),
+      filters: z.array(z.string()).optional(),
+      dimensions: z.array(z.string()).optional(),
+    })
+    .optional()
+    .describe('Structured prior-answer context for follow-up drilldowns. Generated SQL remains uncertified.'),
   proposedDomain: z
     .string()
     .optional()
@@ -99,6 +115,7 @@ export async function queryViaMetadata(
     contextPackId?: string;
     intent?: MetadataResearchIntent;
     upstreamRefs?: string[];
+    followUp?: MetadataFollowUpContext;
     proposedDomain?: string;
     proposedEntity?: string;
     saveDraft?: boolean;
@@ -110,13 +127,15 @@ export async function queryViaMetadata(
   const slug = deriveSlug(args.question);
   const proposedContractId = suggestContractId(slug, args.proposedDomain, args.proposedEntity);
   const intent = normalizeMetadataResearchIntent(args.intent, args.question);
-  const contextPack = await buildTier2ContextPack(ctx.projectRoot, args.question, args.contextPackId);
-  if (contextPack?.routeDecision.route === 'clarify' || !args.proposedSql?.trim()) {
+  const contextPack = await buildTier2ContextPack(ctx.projectRoot, args.question, args.contextPackId, args.followUp);
+  const hasInspectedContext = hasInspectedMetadataContext(contextPack);
+  const contextNeedsClarification = hasInspectedContext && contextPack?.routeDecision.route === 'clarify';
+  if (contextNeedsClarification || !args.proposedSql?.trim()) {
     recordTier2QueryRun(ctx.projectRoot, {
       slug,
       question: args.question,
-      status: contextPack?.routeDecision.route === 'clarify' ? 'clarify' : 'planning_only',
-      errorCode: contextPack?.routeDecision.route === 'clarify' ? 'missing_context' : undefined,
+      status: contextNeedsClarification ? 'clarify' : 'planning_only',
+      errorCode: contextNeedsClarification ? 'missing_context' : undefined,
       contextPack,
     });
     return {
@@ -129,23 +148,29 @@ export async function queryViaMetadata(
       allowedSqlContext: contextPack?.allowedSqlContext,
       missingContext: contextPack?.missingContext ?? [],
       evidence: metadataEvidence(intent, args, { status: 'planning_only' }, contextPack),
-      reason: contextPack?.routeDecision.route === 'clarify'
+      reason: contextNeedsClarification
         ? contextPack.routeDecision.reason
         : 'No SQL was supplied. Inspect the context pack and provide one read-only SELECT/WITH query that uses only allowed relations and columns.',
     };
   }
   const proposedSql = args.proposedSql.trim();
-  const contextValidation = validateSqlAgainstContext(proposedSql, contextPack);
+  const contextValidation = validateSqlAgainstLocalContext(proposedSql, hasInspectedContext ? contextPack : undefined, {
+    question: args.question,
+    intent,
+    filterValues: args.followUp?.filters,
+  });
   if (!contextValidation.ok) {
-    recordTier2QueryRun(ctx.projectRoot, { slug, question: args.question, status: 'rejected', errorCode: 'outside_context', contextPack });
+    recordTier2QueryRun(ctx.projectRoot, { slug, question: args.question, status: 'rejected', errorCode: contextValidation.code, contextPack });
     return {
       uncertified: true,
       intent,
       reviewStatus: 'rejected',
-      trustStatus: metadataTrustStatus('rejected', intent, undefined, contextValidation.error),
-      evidence: metadataEvidence(intent, args, { status: 'rejected', error: contextValidation.error }, contextPack),
+      errorCode: contextValidation.code,
+      trustStatus: metadataTrustStatus('rejected', intent, undefined, contextValidation.error, contextValidation.warnings),
+      evidence: metadataEvidence(intent, args, { status: 'rejected', error: contextValidation.error, validationWarnings: contextValidation.warnings }, contextPack),
       contextPack,
       error: contextValidation.error,
+      validationWarnings: contextValidation.warnings,
       proposedSql,
       draftBlock: undefined,
     };
@@ -157,10 +182,12 @@ export async function queryViaMetadata(
       uncertified: true,
       intent,
       reviewStatus: 'rejected',
-      trustStatus: metadataTrustStatus('rejected', intent, undefined, safety.error),
-      evidence: metadataEvidence(intent, args, { status: 'rejected', error: safety.error }, contextPack),
+      errorCode: safety.code,
+      trustStatus: metadataTrustStatus('rejected', intent, undefined, safety.error, contextValidation.warnings),
+      evidence: metadataEvidence(intent, args, { status: 'rejected', error: safety.error, validationWarnings: contextValidation.warnings }, contextPack),
       contextPack,
       error: safety.error,
+      validationWarnings: contextValidation.warnings,
       proposedSql,
       draftBlock: undefined,
     };
@@ -168,7 +195,7 @@ export async function queryViaMetadata(
 
   let draftBlock: { path: string; askedTimes: number; proposedContractId: string } | undefined;
   if (args.saveDraft !== false) {
-    draftBlock = upsertDraft(ctx.projectRoot, {
+    draftBlock = upsertGeneratedDraft(ctx.projectRoot, {
       slug,
       question: args.question,
       proposedSql,
@@ -176,6 +203,14 @@ export async function queryViaMetadata(
       proposedDomain: args.proposedDomain,
       proposedEntity: args.proposedEntity,
       upstreamRefs: args.upstreamRefs ?? [],
+      sourceQuestion: args.followUp?.sourceQuestion,
+      sourceBlock: args.followUp?.sourceBlockName,
+      followupKind: args.followUp?.kind,
+      requestedFilters: args.followUp?.filters,
+      requestedDimensions: args.followUp?.dimensions,
+      contextPackId: contextPack?.id,
+      routeIntent: contextPack?.routeDecision.intent ?? intent,
+      validationWarnings: contextValidation.warnings,
     });
   }
 
@@ -184,12 +219,13 @@ export async function queryViaMetadata(
       uncertified: true,
       intent,
       reviewStatus: 'draft_ready',
-      trustStatus: metadataTrustStatus('draft_ready', intent, draftBlock),
-      evidence: metadataEvidence(intent, args, { status: 'dry_run', draftBlock }, contextPack),
+      trustStatus: metadataTrustStatus('draft_ready', intent, draftBlock, undefined, contextValidation.warnings),
+      evidence: metadataEvidence(intent, args, { status: 'dry_run', draftBlock, validationWarnings: contextValidation.warnings }, contextPack),
       contextPack,
       reason: 'dryRun=true; SQL not executed. Returned proposal only.',
       proposedSql,
       draftBlock,
+      validationWarnings: contextValidation.warnings,
       promote: draftBlock
         ? `if you want this question certified, run: dql certify --from-draft ${draftBlock.path}`
         : undefined,
@@ -219,11 +255,12 @@ export async function queryViaMetadata(
     return {
       uncertified: true,
       intent,
-      trustStatus: metadataTrustStatus('draft_ready', intent, draftBlock, error),
-      evidence: metadataEvidence(intent, args, { status: 'runtime_unavailable', draftBlock, error }, contextPack),
+      trustStatus: metadataTrustStatus('draft_ready', intent, draftBlock, error, contextValidation.warnings),
+      evidence: metadataEvidence(intent, args, { status: 'runtime_unavailable', draftBlock, error, validationWarnings: contextValidation.warnings }, contextPack),
       contextPack,
       error,
       draftBlock,
+      validationWarnings: contextValidation.warnings,
     };
   }
 
@@ -233,11 +270,12 @@ export async function queryViaMetadata(
     return {
       uncertified: true,
       intent,
-      trustStatus: metadataTrustStatus('draft_ready', intent, draftBlock, error),
-      evidence: metadataEvidence(intent, args, { status: 'runtime_error', draftBlock, error }, contextPack),
+      trustStatus: metadataTrustStatus('draft_ready', intent, draftBlock, error, contextValidation.warnings),
+      evidence: metadataEvidence(intent, args, { status: 'runtime_error', draftBlock, error, validationWarnings: contextValidation.warnings }, contextPack),
       contextPack,
       error,
       draftBlock,
+      validationWarnings: contextValidation.warnings,
     };
   }
 
@@ -254,11 +292,12 @@ export async function queryViaMetadata(
     return {
       uncertified: true,
       intent,
-      trustStatus: metadataTrustStatus('draft_ready', intent, draftBlock, payload.error),
-      evidence: metadataEvidence(intent, args, { status: 'execution_failed', draftBlock, error: payload.error }, contextPack),
+      trustStatus: metadataTrustStatus('draft_ready', intent, draftBlock, payload.error, contextValidation.warnings),
+      evidence: metadataEvidence(intent, args, { status: 'execution_failed', draftBlock, error: payload.error, validationWarnings: contextValidation.warnings }, contextPack),
       contextPack,
       error: payload.error,
       draftBlock,
+      validationWarnings: contextValidation.warnings,
     };
   }
   const rows = payload.result?.rows ?? [];
@@ -275,12 +314,13 @@ export async function queryViaMetadata(
     uncertified: true,
     intent,
     reviewStatus: 'draft_ready',
-    trustStatus: metadataTrustStatus('draft_ready', intent, draftBlock),
+    trustStatus: metadataTrustStatus('draft_ready', intent, draftBlock, undefined, contextValidation.warnings),
     evidence: metadataEvidence(intent, args, {
       status: 'executed',
       draftBlock,
       rowCount: rows.length,
       durationMs: payload.result?.executionTime ?? null,
+      validationWarnings: contextValidation.warnings,
     }, contextPack),
     contextPack,
     reason: 'no certified block matched the question; result derived from manifest + dbt schema',
@@ -291,6 +331,7 @@ export async function queryViaMetadata(
     rows: args.limit ? rows.slice(0, args.limit) : rows,
     proposedSql,
     draftBlock,
+    validationWarnings: contextValidation.warnings,
     promote: draftBlock
       ? `if you want this question certified, run: dql certify --from-draft ${draftBlock.path}`
       : undefined,
@@ -306,6 +347,15 @@ type MetadataResearchIntent =
   | 'entity_drilldown'
   | 'anomaly_investigation'
   | 'trust_gap_review';
+
+type MetadataFollowUpContext = {
+  kind: 'generic' | 'drilldown';
+  sourceBlockName?: string;
+  sourceQuestion?: string;
+  sourceAnswer?: string;
+  filters?: string[];
+  dimensions?: string[];
+};
 
 function normalizeMetadataResearchIntent(value: unknown, question: string): MetadataResearchIntent {
   if (
@@ -331,6 +381,7 @@ function metadataTrustStatus(
   intent: MetadataResearchIntent,
   draftBlock?: { path: string; askedTimes: number; proposedContractId: string },
   error?: string,
+  validationWarnings: string[] = [],
 ) {
   return {
     label: 'AI-generated metadata research',
@@ -343,6 +394,7 @@ function metadataTrustStatus(
     caveats: [
       'No certified block exactly answered this grain.',
       'SQL was generated from metadata and must be reviewed before certification.',
+      ...validationWarnings,
       ...(error ? [`Execution caveat: ${error}`] : []),
     ],
   };
@@ -354,6 +406,7 @@ function metadataEvidence(
     question: string;
     proposedSql?: string;
     upstreamRefs?: string[];
+    followUp?: MetadataFollowUpContext;
     proposedDomain?: string;
     proposedEntity?: string;
     limit?: number;
@@ -364,6 +417,7 @@ function metadataEvidence(
     rowCount?: number;
     durationMs?: number | null;
     error?: string;
+    validationWarnings?: string[];
   },
   contextPack?: LocalContextPack,
 ) {
@@ -380,10 +434,11 @@ function metadataEvidence(
       proposedDomain: args.proposedDomain,
       proposedEntity: args.proposedEntity,
       draftBlock: execution.draftBlock,
+      sourceCertifiedBlock: args.followUp?.sourceBlockName,
       contextPackId: contextPack?.id,
       trustLabel: contextPack?.trustLabel,
       selectedEvidence: contextPack?.retrievalDiagnostics.selectedEvidence.slice(0, 12) ?? [],
-      warnings: contextPack?.warnings ?? [],
+      warnings: [...(contextPack?.warnings ?? []), ...(execution.validationWarnings ?? [])],
     },
     execution: {
       status: execution.status,
@@ -402,7 +457,12 @@ function metadataEvidence(
   };
 }
 
-async function buildTier2ContextPack(projectRoot: string, question: string, contextPackId?: string): Promise<LocalContextPack | undefined> {
+async function buildTier2ContextPack(
+  projectRoot: string,
+  question: string,
+  contextPackId?: string,
+  followUp?: MetadataFollowUpContext,
+): Promise<LocalContextPack | undefined> {
   if (contextPackId) {
     const catalog = openMetadataCatalog(projectRoot);
     try {
@@ -415,7 +475,16 @@ async function buildTier2ContextPack(projectRoot: string, question: string, cont
   return buildLocalContextPack(projectRoot, {
     question,
     mode: 'question',
+    followUp,
   }).catch(() => undefined);
+}
+
+function hasInspectedMetadataContext(contextPack: LocalContextPack | undefined): contextPack is LocalContextPack {
+  return Boolean(contextPack && (
+    contextPack.allowedSqlContext.relations.length > 0
+    || contextPack.allowedSqlContext.sourceBlockSql.length > 0
+    || contextPack.objects.some((object) => object.objectType.startsWith('semantic_'))
+  ));
 }
 
 function recordTier2QueryRun(
@@ -528,97 +597,21 @@ const METADATA_PREVIEW_FORBIDDEN_SQL = [
   'vacuum',
 ];
 
-function validateSqlAgainstContext(sql: string, contextPack?: LocalContextPack): { ok: true } | { ok: false; error: string } {
-  if (!contextPack) return { ok: true };
-  if (contextPack.routeDecision.route === 'clarify') {
-    const missing = contextPack.missingContext.map((item) => item.message).join(' ');
-    return {
-      ok: false,
-      error: `Metadata context is insufficient for SQL generation. ${missing || contextPack.routeDecision.reason}`,
-    };
-  }
-  const allowed = new Set<string>();
-  for (const relation of contextPack.allowedSqlContext.relations) {
-    for (const key of relationLookupKeys(relation.relation)) allowed.add(key);
-    for (const key of relationLookupKeys(relation.name)) allowed.add(key);
-  }
-  for (const source of contextPack.allowedSqlContext.sourceBlockSql) {
-    for (const table of extractSqlRelations(source.sql)) {
-      for (const key of relationLookupKeys(table)) allowed.add(key);
-    }
-  }
-  if (allowed.size === 0) return { ok: true };
-  const referenced = extractSqlRelations(sql);
-  const unknown = referenced.filter((relation) => !relationLookupKeys(relation).some((key) => allowed.has(key)));
-  if (unknown.length > 0) {
-    return {
-      ok: false,
-      error: `SQL references relation(s) outside the inspected metadata context: ${unknown.join(', ')}. Use inspect_metadata_context and only query allowed relations.`,
-    };
-  }
-  return { ok: true };
-}
-
-function extractSqlRelations(sql: string): string[] {
-  const cleaned = stripSqlStringsAndComments(sql);
-  const cteNames = extractCteNames(cleaned);
-  const relations = new Set<string>();
-  const pattern = /\b(?:from|join)\s+((?:"[^"]+"|`[^`]+`|[A-Za-z_][\w$]*)(?:\s*\.\s*(?:"[^"]+"|`[^`]+`|[A-Za-z_][\w$]*)){0,2})/gi;
-  let match: RegExpExecArray | null;
-  while ((match = pattern.exec(cleaned)) !== null) {
-    const relation = normalizeRelation(match[1]);
-    if (!relation || cteNames.has(relation.toLowerCase())) continue;
-    if (relation.startsWith('select') || relation.startsWith('(')) continue;
-    relations.add(relation);
-  }
-  return Array.from(relations);
-}
-
-function extractCteNames(sql: string): Set<string> {
-  const names = new Set<string>();
-  if (!/^\s*with\b/i.test(sql)) return names;
-  const pattern = /\b("([^"]+)"|`([^`]+)`|([A-Za-z_][\w$]*))\s+as\s*\(/gi;
-  let match: RegExpExecArray | null;
-  while ((match = pattern.exec(sql)) !== null) {
-    const name = normalizeRelation(match[2] ?? match[3] ?? match[4] ?? match[1]);
-    if (name) names.add(name.toLowerCase());
-  }
-  return names;
-}
-
-function relationLookupKeys(relation: string): string[] {
-  const normalized = normalizeRelation(relation).toLowerCase();
-  const parts = normalized.split('.').filter(Boolean);
-  const keys = new Set<string>();
-  if (normalized) keys.add(normalized);
-  if (parts.length >= 2) keys.add(parts.slice(-2).join('.'));
-  if (parts.length >= 1) keys.add(parts[parts.length - 1]!);
-  return Array.from(keys);
-}
-
-function normalizeRelation(value: string): string {
-  return value
-    .replace(/["`]/g, '')
-    .replace(/\s*\.\s*/g, '.')
-    .replace(/\s+/g, ' ')
-    .trim();
-}
-
-function buildMetadataPreviewSql(sql: string, limit: number): { ok: true; sql: string } | { ok: false; error: string } {
+function buildMetadataPreviewSql(sql: string, limit: number): { ok: true; sql: string } | { ok: false; code: 'unsafe_sql'; error: string } {
   const trimmed = sql.trim();
-  if (!trimmed) return { ok: false, error: 'Tier-2 metadata SQL is empty.' };
+  if (!trimmed) return { ok: false, code: 'unsafe_sql', error: 'Tier-2 metadata SQL is empty.' };
   const withoutTrailingSemicolon = trimmed.replace(/;\s*$/, '').trim();
   const scanSql = stripSqlStringsAndComments(withoutTrailingSemicolon).trim();
   if (!/^(select|with)\b/i.test(scanSql)) {
-    return { ok: false, error: 'Tier-2 metadata SQL only supports read-only SELECT or WITH queries.' };
+    return { ok: false, code: 'unsafe_sql', error: 'Tier-2 metadata SQL only supports read-only SELECT or WITH queries.' };
   }
   if (scanSql.includes(';')) {
-    return { ok: false, error: 'Tier-2 metadata SQL only supports one statement.' };
+    return { ok: false, code: 'unsafe_sql', error: 'Tier-2 metadata SQL only supports one statement.' };
   }
   const forbiddenPattern = new RegExp(`\\b(${METADATA_PREVIEW_FORBIDDEN_SQL.join('|')})\\b`, 'i');
   const forbidden = scanSql.match(forbiddenPattern)?.[1];
   if (forbidden) {
-    return { ok: false, error: `Tier-2 metadata SQL rejected unsupported statement keyword: ${forbidden.toUpperCase()}.` };
+    return { ok: false, code: 'unsafe_sql', error: `Tier-2 metadata SQL rejected unsupported statement keyword: ${forbidden.toUpperCase()}.` };
   }
   const boundedLimit = Math.min(Math.max(Math.trunc(limit), 1), 10000);
   return {
@@ -675,97 +668,4 @@ function stripSqlStringsAndComments(sql: string): string {
     output += current;
   }
   return output;
-}
-
-interface DraftRecord {
-  slug: string;
-  question: string;
-  proposedSql: string;
-  proposedContractId: string;
-  proposedDomain?: string;
-  proposedEntity?: string;
-  upstreamRefs: string[];
-}
-
-function upsertDraft(
-  projectRoot: string,
-  rec: DraftRecord,
-): { path: string; askedTimes: number; proposedContractId: string } {
-  const draftDir = join(projectRoot, 'blocks', '_drafts');
-  const filePath = join(draftDir, `${rec.slug}.dql`);
-
-  if (existsSync(filePath)) {
-    const existing = readFileSync(filePath, 'utf-8');
-    const m = existing.match(/asked_times\s*=\s*(\d+)/);
-    const prev = m ? Number.parseInt(m[1], 10) : 1;
-    const next = Number.isFinite(prev) ? prev + 1 : 2;
-    const updated = m
-      ? existing.replace(/asked_times\s*=\s*\d+/, `asked_times = ${next}`)
-      : existing.replace(/\n\s*query\s*=/, `\n    asked_times = ${next}\n\n    query =`);
-    const stamped = stampLastAsked(updated);
-    writeFileSync(filePath, stamped);
-    return {
-      path: relativeToProject(projectRoot, filePath),
-      askedTimes: next,
-      proposedContractId: rec.proposedContractId,
-    };
-  }
-
-  mkdirSync(dirname(filePath), { recursive: true });
-  writeFileSync(filePath, renderDraft(rec));
-  return {
-    path: relativeToProject(projectRoot, filePath),
-    askedTimes: 1,
-    proposedContractId: rec.proposedContractId,
-  };
-}
-
-function relativeToProject(root: string, abs: string): string {
-  const rootSlash = root.endsWith('/') ? root : root + '/';
-  return abs.startsWith(rootSlash) ? abs.slice(rootSlash.length) : abs;
-}
-
-function renderDraft(rec: DraftRecord): string {
-  const now = new Date().toISOString();
-  const upstream = rec.upstreamRefs.length > 0
-    ? `\n    upstream_refs = [${rec.upstreamRefs.map((u) => `"${u}"`).join(', ')}]`
-    : '';
-  // Single quoted SQL inside triple-double-quotes; avoid breaking on `"""` in user SQL.
-  const safeSql = rec.proposedSql.replace(/"""/g, '\\"\\"\\"');
-  return `block "${rec.slug}" {
-    domain = "${rec.proposedDomain ?? 'misc'}"
-    type = "custom"
-    status = "draft"
-    description = """${rec.question}"""
-
-    # Tier-2 proposal — auto-captured from query_via_metadata. Reviewer
-    # fills in datalex_contract + owner, then runs:
-    #   dql certify --from-draft blocks/_drafts/${rec.slug}.dql \\
-    #               --domain ${rec.proposedDomain ?? 'misc'} \\
-    #               --contract ${rec.proposedContractId}@1 \\
-    #               --owner you@example.com
-    datalex_contract = ""
-
-    # Tier-2 proposal metadata. Keep these as flat fields so the draft remains
-    # valid DQL and can be indexed by the local metadata catalog.
-    asked_times = 1
-    first_asked = "${now}"
-    last_asked = "${now}"
-    proposed_contract_id = "${rec.proposedContractId}"
-    proposed_domain = "${rec.proposedDomain ?? ''}"
-    proposed_entity = "${rec.proposedEntity ?? ''}"${upstream}
-
-    query = """
-        ${safeSql.split('\n').join('\n        ')}
-    """
-}
-`;
-}
-
-function stampLastAsked(content: string): string {
-  const now = new Date().toISOString();
-  if (/last_asked\s*=\s*"[^"]*"/.test(content)) {
-    return content.replace(/last_asked\s*=\s*"[^"]*"/, `last_asked = "${now}"`);
-  }
-  return content;
 }

@@ -100,10 +100,19 @@ export interface BuildLocalContextPackRequest {
   objectTypes?: string[];
   intent?: MetadataAgentIntent;
   surface?: 'cli' | 'notebook' | 'block' | 'app' | 'research' | 'mcp' | string;
-  followUp?: unknown;
+  followUp?: MetadataFollowUpContext | unknown;
   selectedContext?: unknown;
   runtimeSchemaSnapshot?: RuntimeSchemaSnapshot;
   strictness?: 'safe' | 'balanced' | 'exploratory';
+}
+
+export interface MetadataFollowUpContext {
+  kind: 'generic' | 'drilldown';
+  sourceBlockName?: string;
+  sourceQuestion?: string;
+  sourceAnswer?: string;
+  filters?: string[];
+  dimensions?: string[];
 }
 
 export type MetadataAgentIntent =
@@ -212,6 +221,7 @@ export interface PlanAgentAnswerResult {
 export interface LocalContextPack {
   id: string;
   question: string;
+  followUp?: MetadataFollowUpContext;
   focusObjectKey: string | null;
   mode: 'question' | 'build' | 'debug' | 'certify' | 'impact' | 'explain';
   trustLabel: MetadataTrustLabel;
@@ -397,28 +407,34 @@ export async function buildLocalContextPack(
   const catalog = openMetadataCatalog(projectRoot);
   try {
     const mode = request.mode ?? 'question';
+    const followUp = normalizeFollowUpContext(request.followUp);
     const runtimeSnapshot = request.runtimeSchemaSnapshot ?? catalog.latestRuntimeSchemaSnapshot();
     const runtimeObjects = runtimeSnapshot ? runtimeSchemaObjects(runtimeSnapshot) : [];
     const selectedObjects = selectedContextObjects(request.selectedContext);
+    const followUpObjects = followUpContextObjects(followUp);
+    const followUpSourceObjects = catalog.getObjectsByKeys(followUpSourceObjectKeys(followUp));
+    const searchQuery = buildFollowUpSearchQuery(request.question, followUp);
     const searchRows = catalog.searchObjects({
-      query: request.question,
+      query: searchQuery,
       objectTypes: request.objectTypes,
       limit: Math.max(request.limit ?? 80, 20),
     });
     const exact = request.focusObjectKey ? catalog.getObject(request.focusObjectKey) : null;
     const ranked = rankMetadataObjects({
-      rows: mergeObjects(exact ? [exact, ...searchRows, ...runtimeObjects, ...selectedObjects] : [...searchRows, ...runtimeObjects, ...selectedObjects]),
-      question: request.question,
+      rows: mergeObjects(exact
+        ? [exact, ...followUpSourceObjects, ...followUpObjects, ...searchRows, ...runtimeObjects, ...selectedObjects]
+        : [...followUpSourceObjects, ...followUpObjects, ...searchRows, ...runtimeObjects, ...selectedObjects]),
+      question: searchQuery,
       limit: request.limit ?? 80,
     });
-    const selected = ranked.selected;
+    const selected = mergeObjects([...followUpSourceObjects, ...followUpObjects, ...ranked.selected]);
     const focusObjectKey = request.focusObjectKey ?? selected[0]?.objectKey ?? null;
     const edgeWalk = catalog.edgesForKeys(selected.map((row) => row.objectKey), 3);
     const edgeObjectKeys = Array.from(new Set(edgeWalk.flatMap((edge) => [edge.fromKey, edge.toKey])));
     const graphObjects = catalog.getObjectsByKeys(edgeObjectKeys);
     const objects = rankMetadataObjects({
-      rows: mergeObjects([...selected, ...graphObjects, ...runtimeObjects, ...selectedObjects]),
-      question: request.question,
+      rows: mergeObjects([...followUpSourceObjects, ...followUpObjects, ...selected, ...graphObjects, ...runtimeObjects, ...selectedObjects]),
+      question: searchQuery,
       limit: request.limit ?? 120,
     }).selected;
     const objectKeys = objects.map((row) => row.objectKey);
@@ -432,7 +448,7 @@ export async function buildLocalContextPack(
     const evidenceRoles = buildEvidenceRoles(objects, queryRuns);
     const reranked = rankMetadataObjects({
       rows: mergeObjects([...searchRows, ...objects]),
-      question: request.question,
+      question: searchQuery,
       limit: request.limit ?? 120,
     });
     const conflicts = buildCandidateConflicts(reranked.ranked);
@@ -447,6 +463,7 @@ export async function buildLocalContextPack(
     const payload: LocalContextPack = {
       id: '',
       question: request.question,
+      followUp: followUp ?? undefined,
       focusObjectKey,
       mode,
       trustLabel,
@@ -1122,6 +1139,7 @@ function objectFromKGNode(node: KGNode): MetadataObject {
     businessRules: node.businessRules ?? [],
     caveats: node.caveats ?? [],
     llmContext: node.llmContext,
+    referencedBy: node.referencedBy ?? [],
   };
   return {
     objectKey: objectKeyFromKGNode(node),
@@ -1288,6 +1306,7 @@ function addManifestBlockDetails(manifest: DQLManifest, objects: Map<string, Met
         chartType: block.chartType,
         blockType: block.blockType,
         tests: block.tests,
+        draftMetadata: block.draftMetadata,
       }),
     }));
   }
@@ -1422,12 +1441,14 @@ function planContextPackRoute(input: {
 }): MetadataRouteDecision {
   const intent = input.request.intent ?? classifyMetadataIntent(input.request.question, input.request.followUp);
   const exact = findExactCertifiedObject(input.request.question, intent, input.objects);
+  const exactExampleMatch = exact ? hasExactExampleQuestion(input.request.question, exact) : false;
   const missingContext = buildMissingContext(input.request, intent, input.objects, input.allowedSqlContext);
   const selectedEvidence = input.evidenceRoles.slice(0, 16);
 
   if (exact && (
     intent === 'exact_certified_lookup'
     || intent === 'definition_lookup'
+    || exactExampleMatch
     || (intent === 'ad_hoc_ranking' && objectNameInQuestion(input.request.question, exact))
   )) {
     return {
@@ -1545,6 +1566,7 @@ function classifyMetadataIntent(question: string, followUp?: unknown): MetadataA
   if (isEntityQuestion(question)) return 'entity_drilldown';
   if (/\b(top|bottom|best|worst|highest|lowest|least|fewest|minimum|min|maximum|max|rank|ranking|most)\b/.test(lower)) return 'ad_hoc_ranking';
   if (/\b(block|certified|saved|existing|approved|governed)\b/.test(lower)) return 'exact_certified_lookup';
+  if (isDirectKpiValueQuestion(question)) return 'exact_certified_lookup';
   if (/\b(show|list|find|which|who|how many|how much|metric|kpi|dashboard|performance|revenue|sales|points|goals|orders|customers|users)\b/.test(lower)) return 'ad_hoc_ranking';
   return 'clarify';
 }
@@ -1570,6 +1592,12 @@ function findExactCertifiedObject(question: string, intent: MetadataAgentIntent,
     hasCompatibleMetadataRankingDirection(question, object)
   );
   if (namedExact) return namedExact;
+  const exampleExact = candidates.find((object) =>
+    object.objectType === 'dql_block' &&
+    hasExactExampleQuestion(question, object) &&
+    hasCompatibleMetadataRankingDirection(question, object)
+  );
+  if (exampleExact) return exampleExact;
   if (isGeneratedMetadataIntent(intent)) return undefined;
   return candidates.find((object) =>
     object.objectType === 'dql_block' &&
@@ -1594,6 +1622,17 @@ function objectNameInQuestion(question: string, object: MetadataObject): boolean
   return Boolean(name && q.includes(name)) || Boolean(fullName && q.includes(fullName));
 }
 
+function hasExactExampleQuestion(question: string, object: MetadataObject): boolean {
+  const q = normalizeSearchText(question);
+  if (!q) return false;
+  const examples = Array.isArray(object.payload?.examples) ? object.payload.examples : [];
+  return examples.some((example) =>
+    example &&
+    typeof example === 'object' &&
+    normalizeSearchText(String((example as { question?: unknown }).question ?? '')) === q,
+  );
+}
+
 function hasMeaningfulObjectOverlap(question: string, object: MetadataObject): boolean {
   const terms = new Set(tokenize(question));
   if (terms.size === 0) return false;
@@ -1609,6 +1648,17 @@ function hasMeaningfulObjectOverlap(question: string, object: MetadataObject): b
 
 function looksLikeDifferentGrainQuestion(question: string): boolean {
   return /\b(for|where|only|specific|single|individual|named|called|by|break\s*down|breakdown|drill|compare|versus|vs\.?|segment|least|lowest|fewest|bottom|why|changed?|driver|anomal|exception)\b/i.test(question);
+}
+
+function isDirectKpiValueQuestion(question: string): boolean {
+  const lower = question.toLowerCase();
+  if (/\b(by|break\s*down|breakdown|drill|compare|versus|vs\.?|segment|cohort|top|bottom|best|worst|highest|lowest|least|fewest|rank|ranking|most|why|changed?|driver|anomal|exception)\b/.test(lower)) {
+    return false;
+  }
+  if (isEntityQuestion(question)) return false;
+  const asksForValue = /\b(what\s+(?:is|was|were|are)|how\s+(?:much|many)|show|report|calculate|give\s+me|tell\s+me)\b/.test(lower);
+  const metricLanguage = /\b(revenue|sales|arr|mrr|bookings|orders|customers|users|churn|retention|conversion|rate|count|total|points|goals|kpi|metric)\b/.test(lower);
+  return asksForValue && metricLanguage;
 }
 
 function hasCompatibleMetadataRankingDirection(question: string, object: MetadataObject): boolean {
@@ -1785,6 +1835,7 @@ function evidenceReasonForObject(object: MetadataObject): string {
 
 function buildAllowedSqlContext(objects: MetadataObject[], edges: MetadataEdge[]): MetadataAllowedSqlContext {
   const byRelation = new Map<string, MetadataAllowedSqlRelation>();
+  const objectsByKey = new Map(objects.map((object) => [object.objectKey, object]));
   const addRelation = (relation: MetadataAllowedSqlRelation) => {
     const key = normalizeRelationKey(relation.relation);
     if (!key) return;
@@ -1802,8 +1853,14 @@ function buildAllowedSqlContext(objects: MetadataObject[], edges: MetadataEdge[]
   };
 
   for (const object of objects) {
+    if (object.objectType === 'warehouse_table' && !warehouseTableHasTrustedReference(object, objectsByKey)) {
+      continue;
+    }
     const relation = metadataRelationFromObject(object);
     if (relation) addRelation(relation);
+    if (object.objectType === 'dql_block' && !isCertifiedMetadataObject(object)) {
+      continue;
+    }
     for (const table of metadataStringArray(object.payload?.tableDependencies)) {
       addRelation({
         relation: table,
@@ -1824,7 +1881,6 @@ function buildAllowedSqlContext(objects: MetadataObject[], edges: MetadataEdge[]
     }
   }
 
-  const objectsByKey = new Map(objects.map((object) => [object.objectKey, object]));
   for (const edge of edges) {
     if (edge.edgeType !== 'maps_to_dbt_model' && edge.edgeType !== 'uses_dbt_model') continue;
     const from = objectsByKey.get(edge.fromKey);
@@ -1837,7 +1893,11 @@ function buildAllowedSqlContext(objects: MetadataObject[], edges: MetadataEdge[]
   return {
     relations: Array.from(byRelation.values()).sort((a, b) => a.relation.localeCompare(b.relation)),
     sourceBlockSql: objects
-      .filter((object) => object.objectType === 'dql_block' && typeof object.payload?.sql === 'string' && object.payload.sql.trim())
+      .filter((object) =>
+        object.objectType === 'dql_block' &&
+        isCertifiedMetadataObject(object) &&
+        typeof object.payload?.sql === 'string' &&
+        object.payload.sql.trim())
       .slice(0, 8)
       .map((object) => ({
         objectKey: object.objectKey,
@@ -1846,6 +1906,20 @@ function buildAllowedSqlContext(objects: MetadataObject[], edges: MetadataEdge[]
         sql: String(object.payload?.sql ?? ''),
       })),
   };
+}
+
+function warehouseTableHasTrustedReference(
+  object: MetadataObject,
+  objectsByKey: Map<string, MetadataObject>,
+): boolean {
+  const refs = metadataStringArray(object.payload?.referencedBy);
+  if (refs.length === 0) return true;
+  if (refs.some((ref) => !ref.startsWith('block:'))) return true;
+  return refs.some((ref) => {
+    const blockName = ref.slice('block:'.length);
+    const block = objectsByKey.get(`dql:block:${blockName}`);
+    return block ? isCertifiedMetadataObject(block) : false;
+  });
 }
 
 function metadataRelationFromObject(object: MetadataObject): MetadataAllowedSqlRelation | null {
@@ -1938,6 +2012,65 @@ function selectedContextObjects(value: unknown): MetadataObject[] {
       rows: selectedRows(root).slice(0, 20),
     }),
   }];
+}
+
+function normalizeFollowUpContext(value: unknown): MetadataFollowUpContext | null {
+  if (!value || typeof value !== 'object') return null;
+  const record = value as Record<string, unknown>;
+  const kind = record.kind === 'drilldown' ? 'drilldown' : record.kind === 'generic' ? 'generic' : null;
+  if (!kind) return null;
+  return {
+    kind,
+    sourceBlockName: stringValue(record.sourceBlockName),
+    sourceQuestion: stringValue(record.sourceQuestion),
+    sourceAnswer: stringValue(record.sourceAnswer),
+    filters: metadataStringArray(record.filters),
+    dimensions: metadataStringArray(record.dimensions),
+  };
+}
+
+function followUpSourceObjectKeys(followUp: MetadataFollowUpContext | null): string[] {
+  if (!followUp?.sourceBlockName) return [];
+  return [`dql:block:${followUp.sourceBlockName}`];
+}
+
+function followUpContextObjects(followUp: MetadataFollowUpContext | null): MetadataObject[] {
+  if (!followUp) return [];
+  const text = [
+    followUp.kind,
+    followUp.sourceBlockName ?? '',
+    followUp.sourceQuestion ?? '',
+    followUp.sourceAnswer ?? '',
+    ...(followUp.filters ?? []),
+    ...(followUp.dimensions ?? []),
+  ].join(' ');
+  return [{
+    objectKey: `selected:followup:${sha256(stableStringify(followUp)).slice(0, 16)}`,
+    objectType: 'selected_context',
+    name: followUp.kind === 'drilldown' ? 'Follow-up drilldown request' : 'Follow-up request',
+    description: text.trim() || undefined,
+    status: 'transient_context',
+    sourceSystem: 'agent follow-up context',
+    payload: compactObject({
+      kind: followUp.kind,
+      sourceBlockName: followUp.sourceBlockName,
+      sourceQuestion: followUp.sourceQuestion,
+      sourceAnswer: followUp.sourceAnswer,
+      filters: followUp.filters,
+      dimensions: followUp.dimensions,
+    }),
+  }];
+}
+
+function buildFollowUpSearchQuery(question: string, followUp: MetadataFollowUpContext | null): string {
+  if (!followUp) return question;
+  return [
+    question,
+    followUp.sourceBlockName ?? '',
+    followUp.sourceQuestion ?? '',
+    ...(followUp.filters ?? []),
+    ...(followUp.dimensions ?? []),
+  ].filter(Boolean).join(' ');
 }
 
 function normalizeRuntimeSchemaTables(tables: RuntimeSchemaTable[]): RuntimeSchemaTable[] {

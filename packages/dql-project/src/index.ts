@@ -25,6 +25,7 @@ export type {
   LocalAiPin,
   CreateLocalAiPinInput,
   LocalAppConversation,
+  LocalAppConversationContext,
   LocalAppConversationMessage,
   CreateLocalAppConversationInput,
   UpdateLocalAppConversationInput,

@@ -24,6 +24,7 @@ import { join, resolve, relative } from 'node:path';
 import { collectInputFiles, loadProjectConfig, resolveDbtManifestPath } from '@duckcodeailabs/dql-core';
 import { ManifestCache } from '@duckcodeailabs/dql-project';
 import type { CLIFlags } from '../args.js';
+import { manifestCacheTrackedFiles, readCliDqlVersion } from './compile.js';
 
 interface DbtManifestShape {
   nodes?: Record<string, { resource_type?: string }>;
@@ -170,7 +171,10 @@ function reportDiff(opts: {
     return;
   }
 
-  const files = collectInputFiles({ projectRoot, dbtManifestPath }).map((path) => ({ path }));
+  const files = manifestCacheTrackedFiles(
+    collectInputFiles({ projectRoot, dbtManifestPath }),
+    readCliDqlVersion(),
+  );
   const cache = new ManifestCache({ path: cachePath });
   try {
     const changed = cache.diffFiles(files);

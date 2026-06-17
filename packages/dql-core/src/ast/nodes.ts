@@ -335,6 +335,22 @@ export interface BlockDeclNode extends BaseNode {
    * manifest-spec interop pattern; see docs/interop.md.
    */
   datalexContract?: string;
+  /** Tier-2 generated draft metadata. These fields are valid only as flat keys. */
+  askedTimes?: number;
+  firstAsked?: string;
+  lastAsked?: string;
+  proposedContractId?: string;
+  proposedDomain?: string;
+  proposedEntity?: string;
+  sourceQuestion?: string;
+  sourceBlock?: string;
+  followupKind?: string;
+  contextPackId?: string;
+  routeIntent?: string;
+  upstreamRefs?: string[];
+  requestedFilters?: string[];
+  requestedDimensions?: string[];
+  validationWarnings?: string[];
 }
 
 // ---- Business Term Declaration ----

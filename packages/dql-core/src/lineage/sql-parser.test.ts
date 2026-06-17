@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { extractTablesFromSql } from './sql-parser.js';
+import { analyzeSqlReferences, extractTablesFromSql } from './sql-parser.js';
 
 describe('extractTablesFromSql', () => {
   it('extracts a single table from a simple SELECT', () => {
@@ -196,5 +196,34 @@ describe('extractTablesFromSql', () => {
       GROUP BY segment_tier
     `);
     expect(result.tables).toEqual(["read_csv_auto('./data/revenue.csv')"]);
+  });
+});
+
+describe('analyzeSqlReferences', () => {
+  it('extracts relations, aliases, CTEs, and columns from generated drilldown SQL', () => {
+    const result = analyzeSqlReferences(`
+      WITH enterprise AS (
+        SELECT o.customer_id, o.week, SUM(o.amount) AS revenue
+        FROM analytics.fct_orders o
+        JOIN analytics.dim_customers c ON o.customer_id = c.customer_id
+        WHERE c.segment = 'Enterprise'
+        GROUP BY 1, 2
+      )
+      SELECT week, revenue FROM enterprise WHERE revenue > 0
+    `);
+
+    expect(result.parsed).toBe(true);
+    expect(result.tables).toEqual(
+      expect.arrayContaining(['analytics.fct_orders', 'analytics.dim_customers']),
+    );
+    expect(result.tables).not.toContain('enterprise');
+    expect(result.ctes).toContain('enterprise');
+    expect(result.aliasToRelation.o).toBe('analytics.fct_orders');
+    expect(result.columns).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ relation: 'analytics.fct_orders', column: 'amount' }),
+        expect.objectContaining({ relation: 'analytics.dim_customers', column: 'segment' }),
+      ]),
+    );
   });
 });

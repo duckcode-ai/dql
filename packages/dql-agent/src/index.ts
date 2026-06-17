@@ -102,6 +102,13 @@ export {
   recordQueryRun,
   upsertMetadataSnapshot,
 } from "./metadata/catalog.js";
+export {
+  validateSqlAgainstLocalContext,
+} from "./metadata/sql-context-validation.js";
+export {
+  deriveGeneratedDraftSlug,
+  upsertGeneratedDraft,
+} from "./metadata/drafts.js";
 export type {
   BuildLocalContextPackRequest,
   EnsureMetadataCatalogOptions,
@@ -114,6 +121,7 @@ export type {
   MetadataAllowedSqlContext,
   MetadataAnswerRoute,
   MetadataEvidenceRole,
+  MetadataFollowUpContext,
   MetadataMissingContext,
   MetadataObject,
   MetadataRouteDecision,
@@ -125,6 +133,15 @@ export type {
   RuntimeSchemaTable,
   RuntimeSchemaColumn,
 } from "./metadata/catalog.js";
+export type {
+  SqlContextValidationCode,
+  SqlContextValidationOptions,
+  SqlContextValidationResult,
+} from "./metadata/sql-context-validation.js";
+export type {
+  GeneratedDraftBlock,
+  GeneratedDraftRecord,
+} from "./metadata/drafts.js";
 export {
   ClaudeProvider,
   OpenAIProvider,

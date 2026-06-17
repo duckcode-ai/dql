@@ -1,8 +1,11 @@
 // Lineage analysis — SQL parsing, dependency resolution, graph building, and domain lineage
 
 export {
+  analyzeSqlReferences,
   extractTablesFromSql,
+  type SqlColumnReference,
   type SqlParseResult,
+  type SqlReferenceAnalysis,
 } from './sql-parser.js';
 
 export {

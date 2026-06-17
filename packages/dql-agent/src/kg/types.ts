@@ -74,6 +74,8 @@ export interface KGNode {
   businessRules?: string[];
   /** Known caveats or interpretation constraints. */
   caveats?: string[];
+  /** Manifest references that introduced this source, for example block or notebook ids. */
+  referencedBy?: string[];
 }
 
 export interface KGEdge {

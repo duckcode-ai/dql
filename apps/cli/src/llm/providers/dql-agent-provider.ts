@@ -8,8 +8,10 @@ import {
   OpenAIProvider,
   answer,
   buildLocalContextPack,
+  deriveGeneratedDraftSlug,
   loadSkills,
   reindexProject,
+  upsertGeneratedDraft,
   type AgentAnswer,
   type AgentFollowUpContext,
   type AgentProvider,
@@ -124,7 +126,7 @@ export function createDqlAgentProviderRunner(id: SimpleProviderId): AgentRunner 
             ? await req.getSchemaContext(question).catch(() => [])
             : [];
           const skills = loadSkills(req.projectRoot).skills;
-          const followUp = inferFollowUpContext(req, question);
+          const followUp = followUpFromConversationContext(req, question) ?? inferFollowUpContext(req, question);
           const contextPack = await buildLocalContextPack(req.projectRoot, {
             question,
             surface: 'notebook',
@@ -166,6 +168,26 @@ export function createDqlAgentProviderRunner(id: SimpleProviderId): AgentRunner 
             signal,
             executeCertifiedBlock: req.executeCertifiedBlock,
             executeGeneratedSql: req.executeGeneratedSql,
+            captureGeneratedDraft: ({ question: draftQuestion, sql, intent, followUp: draftFollowUp, contextPack: draftContextPack, sourceBlock, validationWarnings }) => {
+              if (!sql.trim()) return undefined;
+              const slug = deriveGeneratedDraftSlug(draftQuestion);
+              const domain = sourceBlock?.domain ?? draftContextPack?.objects.find((object) => object.domain)?.domain ?? 'misc';
+              return upsertGeneratedDraft(req.projectRoot, {
+                slug,
+                question: draftQuestion,
+                proposedSql: sql,
+                proposedContractId: `${domain}.Unknown.${slug}`,
+                proposedDomain: domain,
+                sourceQuestion: draftFollowUp?.sourceQuestion,
+                sourceBlock: draftFollowUp?.sourceBlockName ?? sourceBlock?.name,
+                followupKind: draftFollowUp?.kind,
+                requestedFilters: draftFollowUp?.filters,
+                requestedDimensions: draftFollowUp?.dimensions,
+                contextPackId: draftContextPack?.id,
+                routeIntent: String(intent),
+                validationWarnings,
+              });
+            },
           });
           emit({ kind: 'tool_result', id: 'governed_answer', output: result });
           emit({ kind: 'text', text: formatAgentAnswer(result) });
@@ -210,6 +232,24 @@ function renderExtraContext(req: AgentRunRequest, followUp?: AgentFollowUpContex
       ? 'Current app/drill context'
       : 'Current upstream SQL';
     parts.push(`${label}:\n${upstream}`);
+  }
+  const context = req.conversationContext;
+  if (context) {
+    const contextLines = [
+      context.sourceCertifiedBlock ? `source certified block: ${context.sourceCertifiedBlock}` : '',
+      context.sourceQuestion ? `source question: ${context.sourceQuestion}` : '',
+      context.sourceAnswerSummary ? `source answer summary: ${context.sourceAnswerSummary}` : '',
+      context.contextPackId ? `context pack: ${context.contextPackId}` : '',
+      context.trustLabel ? `trust label: ${context.trustLabel}` : '',
+      context.reviewStatus ? `review status: ${context.reviewStatus}` : '',
+      context.draftBlockPath ? `draft block: ${context.draftBlockPath}` : '',
+      context.requestedFilters?.length ? `remembered filters: ${context.requestedFilters.join(', ')}` : '',
+      context.requestedDimensions?.length ? `remembered dimensions: ${context.requestedDimensions.join(', ')}` : '',
+      context.outputColumns?.length ? `prior output columns: ${context.outputColumns.join(', ')}` : '',
+    ].filter(Boolean);
+    if (contextLines.length > 0) {
+      parts.push(`Conversation memory:\n${contextLines.join('\n')}`);
+    }
   }
   if (followUp?.sourceBlockName) {
     const suffix = followUp.kind === 'drilldown'
@@ -262,10 +302,49 @@ function inferFollowUpContext(req: AgentRunRequest, question: string): AgentFoll
   return undefined;
 }
 
+function followUpFromConversationContext(req: AgentRunRequest, question: string): AgentFollowUpContext | undefined {
+  const context = req.conversationContext;
+  if (!context) return undefined;
+  const sourceBlockName = cleanOptionalString(context.sourceCertifiedBlock);
+  if (!sourceBlockName) return undefined;
+  const inferredKind = isGenericFollowUp(question)
+    ? 'generic'
+    : isDrilldownFollowUp(question)
+      ? 'drilldown'
+      : null;
+  const kind = inferredKind ?? (context.followupKind === 'generic' || context.followupKind === 'drilldown' ? context.followupKind : null);
+  if (!kind) return undefined;
+  return {
+    kind,
+    sourceBlockName,
+    sourceQuestion: cleanOptionalString(context.sourceQuestion),
+    sourceAnswer: cleanOptionalString(context.sourceAnswerSummary),
+    filters: kind === 'drilldown'
+      ? mergeStrings(context.requestedFilters, extractDrilldownFilters(question))
+      : undefined,
+    dimensions: kind === 'drilldown'
+      ? mergeStrings(context.requestedDimensions, extractDrilldownDimensions(question))
+      : undefined,
+  };
+}
+
 function extractCertifiedBlockName(content: string): string | undefined {
   const fromAnswer = content.match(/Answered by certified block \*\*([^*]+)\*\*/i)?.[1];
   const fromCitation = content.match(/^- block:\s*([A-Za-z0-9_.-]+)/im)?.[1];
   return (fromAnswer ?? fromCitation)?.trim();
+}
+
+function cleanOptionalString(value: unknown): string | undefined {
+  return typeof value === 'string' && value.trim() ? value.trim() : undefined;
+}
+
+function mergeStrings(...groups: Array<unknown[] | undefined>): string[] | undefined {
+  const values = groups
+    .flatMap((group) => group ?? [])
+    .map((value) => cleanOptionalString(value))
+    .filter((value): value is string => Boolean(value));
+  const unique = Array.from(new Set(values)).slice(0, 24);
+  return unique.length > 0 ? unique : undefined;
 }
 
 const GENERIC_FOLLOW_UP_WORDS = new Set([
@@ -285,7 +364,7 @@ function isGenericFollowUp(question: string): boolean {
 
 function isDrilldownFollowUp(question: string): boolean {
   const lower = question.toLowerCase();
-  return /\b(drill|break\s*down|slice|segment|filter|compare|split|by|for|only|where|last week|this week|last month|this month|enterprise|region|customer|channel|product)\b/.test(lower)
+  return /\b(drill|break\s*down|slice|segment|filter|compare|split|why|changed?|change|driver|root cause|increase|decrease|drop|spike|variance|by|for|only|where|last week|this week|last month|this month|enterprise|region|customer|channel|product)\b/.test(lower)
     && !/\b(what is|what are|define|definition|meaning of)\b/.test(lower);
 }
 
@@ -429,8 +508,11 @@ function persistThreadMemory(memory: MemoryStore, req: AgentRunRequest, question
     content: [
       `Latest question: ${question}`,
       `Latest route: ${result.sourceTier ?? 'unknown'} / ${result.certification ?? 'unknown'}`,
+      result.sourceCertifiedBlock ? `Latest source block: ${result.sourceCertifiedBlock}` : '',
+      result.contextPackId ? `Latest context pack: ${result.contextPackId}` : '',
+      result.draftBlockId ? `Latest draft block: ${result.draftBlockId}` : '',
       `Latest answer: ${result.text.slice(0, 500)}`,
-    ].join('\n'),
+    ].filter(Boolean).join('\n'),
     tags: ['chat', result.sourceTier ?? 'unknown', result.certification ?? 'unknown'],
     source: 'notebook-chat',
     confidence: result.confidence ?? 0.5,

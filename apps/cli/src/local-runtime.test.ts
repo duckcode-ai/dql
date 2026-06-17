@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
+  buildAgentValueProbeSql,
   buildAgentPreviewSql,
   buildAgentSchemaContext,
   buildDbtStatus,
@@ -502,6 +503,27 @@ describe('extractAgentValueSearchTerms', () => {
     expect(extractAgentValueSearchTerms('Usage for jane@example.com')).toContain('jane@example.com');
     expect(extractAgentValueSearchTerms('What is revenue for customer matthew meyer last month?')).toContain('matthew meyer');
     expect(extractAgentValueSearchTerms('What is revenue for customer matthew meyer last month?')).not.toContain('customer matthew meyer last month');
+    expect(extractAgentValueSearchTerms('Break that down by segment for Enterprise last week')).toContain('Enterprise');
+  });
+});
+
+describe('buildAgentValueProbeSql', () => {
+  it('uses a one-character LIKE escape for DuckDB/file runtime probes', () => {
+    const sql = buildAgentValueProbeSql(
+      {
+        relation: 'main.revenue',
+        schema: 'main',
+        name: 'revenue',
+        source: 'runtime information_schema',
+        columns: [{ name: 'segment', type: 'VARCHAR' }],
+      },
+      'segment',
+      ['Enterprise'],
+      { driver: 'file', filepath: ':memory:' },
+    );
+
+    expect(sql).toContain("LIKE '%enterprise%' ESCAPE '\\'");
+    expect(sql).not.toContain("ESCAPE '\\\\'");
   });
 });
 
