@@ -48,6 +48,7 @@ export type {
   AgentAnswer,
   AgentCitation,
   AgentFollowUpContext,
+  AgentJoinPath,
   AgentIntent,
   AgentResultPayload,
   AgentSchemaColumn,
@@ -102,6 +103,21 @@ export {
   recordQueryRun,
   upsertMetadataSnapshot,
 } from "./metadata/catalog.js";
+export {
+  buildAnalysisQuestionPlan,
+  certifiedApplicabilityForObject,
+  scoreAllowedSqlRelationWithAnalysisPlan,
+  scoreMetadataObjectWithAnalysisPlan,
+  sortAllowedSqlContextForAnalysisPlan,
+} from "./metadata/analysis-planner.js";
+export type {
+  AnalysisEntityMention,
+  AnalysisQuestionMode,
+  AnalysisQuestionPlan,
+  AllowedSqlRelationScore,
+  CertifiedApplicabilityKind,
+  CertifiedBlockApplicability,
+} from "./metadata/analysis-planner.js";
 export {
   validateSqlAgainstLocalContext,
 } from "./metadata/sql-context-validation.js";

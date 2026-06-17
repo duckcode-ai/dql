@@ -840,11 +840,6 @@ function TileAskPopover({
   onClose: () => void;
 }): JSX.Element {
   const [value, setValue] = useState('');
-  const suggestions = [
-    `What changed in ${title}?`,
-    `Why does ${title} matter?`,
-    `What should we do about ${title}?`,
-  ];
   return (
     <div
       onClick={(event) => event.stopPropagation()}
@@ -875,18 +870,6 @@ function TileAskPopover({
           <X size={13} />
         </button>
       </div>
-      <div style={{ display: 'flex', flexDirection: 'column', gap: 5 }}>
-        {suggestions.map((suggestion) => (
-          <button
-            key={suggestion}
-            type="button"
-            onClick={() => onAsk(suggestion)}
-            style={askSuggestionStyle}
-          >
-            {suggestion}
-          </button>
-        ))}
-      </div>
       <form
         onSubmit={(event) => {
           event.preventDefault();
@@ -899,7 +882,7 @@ function TileAskPopover({
           autoFocus
           value={value}
           onChange={(event) => setValue(event.target.value)}
-          placeholder="Ask your own question..."
+          placeholder="Ask a follow-up..."
           style={{
             flex: 1,
             minWidth: 0,
@@ -932,18 +915,6 @@ const askIconButtonStyle: CSSProperties = {
   alignItems: 'center',
   justifyContent: 'center',
   flexShrink: 0,
-};
-
-const askSuggestionStyle: CSSProperties = {
-  textAlign: 'left',
-  border: '1px solid var(--dql-app-line, rgba(0,0,0,0.1))',
-  borderRadius: 8,
-  background: 'var(--dql-app-control, rgba(0,0,0,0.02))',
-  color: 'inherit',
-  padding: '7px 9px',
-  fontSize: 12,
-  cursor: 'pointer',
-  lineHeight: 1.3,
 };
 
 function askSubmitStyle(active: boolean): CSSProperties {

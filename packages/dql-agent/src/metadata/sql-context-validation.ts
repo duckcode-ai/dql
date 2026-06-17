@@ -1,5 +1,6 @@
 import { analyzeSqlReferences } from '@duckcodeailabs/dql-core';
 import type { LocalContextPack, MetadataAgentIntent, MetadataAllowedSqlRelation } from './catalog.js';
+import { sourceSqlShapeColumns } from './sql-shape.js';
 
 export type SqlContextValidationCode =
   | 'unknown_relation'
@@ -116,7 +117,7 @@ export function validateSqlAgainstLocalContext(
     }
   }
 
-  const unknownColumn = findUnknownColumn(analysis.columns, allowed, analysis.ctes.length > 0, outputAliases);
+  const unknownColumn = findUnknownColumn(analysis.columns, allowed, outputAliases);
   if (unknownColumn) {
     return {
       ok: false,
@@ -165,24 +166,63 @@ export function validateSqlAgainstLocalContext(
 
 function buildAllowedRelationLookup(contextPack: LocalContextPack): Map<string, MetadataAllowedSqlRelation> {
   const allowed = new Map<string, MetadataAllowedSqlRelation>();
+  const putAllowed = (entry: MetadataAllowedSqlRelation) => {
+    for (const key of relationLookupKeys(entry.relation)) {
+      allowed.set(key, mergeAllowedRelation(allowed.get(key), entry));
+    }
+    for (const key of relationLookupKeys(entry.name)) {
+      allowed.set(key, mergeAllowedRelation(allowed.get(key), entry));
+    }
+  };
   for (const relation of contextPack.allowedSqlContext.relations) {
-    for (const key of relationLookupKeys(relation.relation)) allowed.set(key, relation);
-    for (const key of relationLookupKeys(relation.name)) allowed.set(key, relation);
+    putAllowed(relation);
   }
   for (const source of contextPack.allowedSqlContext.sourceBlockSql) {
     const analysis = analyzeSqlReferences(source.sql);
     for (const relation of analysis.tables) {
-      const entry: MetadataAllowedSqlRelation = {
+      putAllowed({
         relation,
         name: relation.split('.').at(-1) ?? relation,
         objectKey: source.objectKey,
         source: 'certified source block SQL',
-        columns: [],
-      };
-      for (const key of relationLookupKeys(relation)) allowed.set(key, entry);
+        columns: sourceSqlShapeColumns(source.sql),
+      });
     }
   }
   return allowed;
+}
+
+function mergeAllowedRelation(
+  existing: MetadataAllowedSqlRelation | undefined,
+  incoming: MetadataAllowedSqlRelation,
+): MetadataAllowedSqlRelation {
+  if (!existing) return incoming;
+  return {
+    ...existing,
+    objectKey: existing.objectKey ?? incoming.objectKey,
+    source: existing.source === incoming.source ? existing.source : 'inspected metadata and certified source SQL',
+    columns: mergeAllowedColumns(existing.columns, incoming.columns),
+  };
+}
+
+function mergeAllowedColumns(
+  left: MetadataAllowedSqlRelation['columns'],
+  right: MetadataAllowedSqlRelation['columns'],
+): MetadataAllowedSqlRelation['columns'] {
+  const byName = new Map<string, MetadataAllowedSqlRelation['columns'][number]>();
+  for (const column of [...left, ...right]) {
+    const key = column.name.toLowerCase();
+    const existing = byName.get(key);
+    byName.set(key, existing
+      ? {
+          ...existing,
+          type: existing.type ?? column.type,
+          description: existing.description ?? column.description,
+          sampleValues: Array.from(new Set([...(existing.sampleValues ?? []), ...(column.sampleValues ?? [])])).slice(0, 8),
+        }
+      : column);
+  }
+  return Array.from(byName.values());
 }
 
 function findAllowedRelation(
@@ -199,7 +239,6 @@ function findAllowedRelation(
 function findUnknownColumn(
   columns: Array<{ column: string; relation?: string; unqualified: boolean }>,
   allowed: Map<string, MetadataAllowedSqlRelation>,
-  hasCtes: boolean,
   outputAliases: Set<string>,
 ): { column: string; relation?: string } | undefined {
   for (const column of columns) {
@@ -213,8 +252,6 @@ function findUnknownColumn(
       }
       continue;
     }
-
-    if (hasCtes) continue;
 
     const relationsWithColumns = Array.from(new Set(Array.from(allowed.values())))
       .filter((relation) => relation.columns.length > 0);

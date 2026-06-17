@@ -1,9 +1,10 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { KGStore } from "./kg/sqlite-fts.js";
 import { answer, parseProposal } from "./answer-loop.js";
+import { buildLocalContextPack } from "./metadata/catalog.js";
 import type { KGNode } from "./kg/types.js";
 import type { AgentProvider, AgentMessage } from "./providers/types.js";
 
@@ -43,6 +44,78 @@ function revenueSegmentBlock(): KGNode {
     certification: "certified",
     provenance: "DQL block",
   };
+}
+
+function seedLargeDbtProfileProject(projectRoot: string): void {
+  mkdirSync(join(projectRoot, "target"), { recursive: true });
+  writeFileSync(join(projectRoot, "dql.config.json"), JSON.stringify({ project: "large_dbt_profile" }), "utf-8");
+  const nodes: Record<string, Record<string, unknown>> = {};
+  for (let index = 0; index < 220; index += 1) {
+    nodes[`model.large_dbt_profile.noisy_${index}`] = {
+      resource_type: "model",
+      name: `noisy_${index}`,
+      alias: `noisy_${index}`,
+      database: "NBA_DB",
+      schema: "ANALYTICS",
+      description: `Unrelated model ${index} in a large dbt repo.`,
+      depends_on: { nodes: [] },
+      tags: ["noise"],
+      original_file_path: `models/noisy/noisy_${index}.sql`,
+      config: { materialized: "table" },
+      columns: {
+        id: { name: "id", data_type: "number" },
+        created_at: { name: "created_at", data_type: "timestamp" },
+      },
+    };
+  }
+  nodes["model.large_dbt_profile.athlete_box_scores"] = {
+    resource_type: "model",
+    name: "athlete_box_scores",
+    alias: "athlete_box_scores",
+    database: "NBA_DB",
+    schema: "ANALYTICS",
+    description: "Box score rows at game grain for each athlete.",
+    depends_on: { nodes: [] },
+    tags: ["profile", "stats"],
+    original_file_path: "models/marts/athlete_box_scores.sql",
+    config: { materialized: "table" },
+    columns: {
+      athlete_name: {
+        name: "athlete_name",
+        data_type: "text",
+        description: "Name of the athlete.",
+      },
+      game_date: {
+        name: "game_date",
+        data_type: "date",
+        description: "Date of the game.",
+      },
+      pts: {
+        name: "pts",
+        data_type: "number",
+        description: "Points recorded.",
+      },
+      ast: {
+        name: "ast",
+        data_type: "number",
+        description: "Assists recorded.",
+      },
+      reb: {
+        name: "reb",
+        data_type: "number",
+        description: "Rebounds recorded.",
+      },
+    },
+  };
+  writeFileSync(
+    join(projectRoot, "target", "manifest.json"),
+    JSON.stringify({
+      metadata: { project_name: "large_dbt_profile" },
+      nodes,
+      sources: {},
+    }),
+    "utf-8",
+  );
 }
 
 beforeEach(() => {
@@ -694,8 +767,9 @@ describe("answer (block-first loop)", () => {
     expect(result.block).toBeUndefined();
     expect(result.analysisPlan?.intent).toBe("ad_hoc_analysis");
     expect(result.proposedSql).toContain("ORDER BY total_points ASC");
+    expect(result.proposedSql).toContain("season");
     expect(result.result?.rowCount).toBe(1);
-    expect(provider.calls).toHaveLength(1);
+    expect(provider.calls).toHaveLength(0);
   });
 
   it("uses context-pack block SQL to invert certified top rankings without hallucinating tables", async () => {
@@ -1052,6 +1126,752 @@ describe("answer (block-first loop)", () => {
           status: "checked",
         }),
       ]),
+    );
+  });
+
+  it("generates generic dbt-only ranking SQL from inspected relation columns", async () => {
+    kg.rebuild([], []);
+    const provider = new StubProvider("should not be called");
+    const result = await answer({
+      question: "Which products have the highest revenue?",
+      provider,
+      kg,
+      schemaContext: [
+        {
+          relation: "analytics.product_revenue",
+          schema: "analytics",
+          name: "product_revenue",
+          source: "dbt manifest",
+          columns: [
+            { name: "product_name", type: "VARCHAR" },
+            { name: "month", type: "DATE" },
+            { name: "revenue", type: "DECIMAL" },
+          ],
+        },
+      ],
+      executeGeneratedSql: async (sql) => ({
+        columns: ["product_name", "revenue_sum"],
+        rows: [{ product_name: "Enterprise Plan", revenue_sum: 200000 }],
+        rowCount: 1,
+        sql,
+      }),
+    });
+
+    expect(result.kind).toBe("uncertified");
+    expect(result.reviewStatus).toBe("draft_ready");
+    expect(result.proposedSql).toContain("FROM analytics.product_revenue");
+    expect(result.proposedSql).toContain("product_name");
+    expect(result.proposedSql).toContain("SUM(revenue)");
+    expect(result.proposedSql).toContain("ORDER BY revenue_sum DESC");
+    expect(result.result?.rowCount).toBe(1);
+    expect(provider.calls).toHaveLength(0);
+  });
+
+  it("generates generic dbt-only trend SQL from inspected relation columns", async () => {
+    kg.rebuild([], []);
+    const provider = new StubProvider("should not be called");
+    const result = await answer({
+      question: "Show revenue by month",
+      provider,
+      kg,
+      schemaContext: [
+        {
+          relation: "analytics.monthly_revenue",
+          schema: "analytics",
+          name: "monthly_revenue",
+          source: "dbt manifest",
+          columns: [
+            { name: "month", type: "DATE" },
+            { name: "revenue", type: "DECIMAL" },
+            { name: "customer_count", type: "INTEGER" },
+          ],
+        },
+      ],
+    });
+
+    expect(result.kind).toBe("uncertified");
+    expect(result.suggestedViz).toBe("line");
+    expect(result.proposedSql).toContain("FROM analytics.monthly_revenue");
+    expect(result.proposedSql).toContain("GROUP BY month");
+    expect(result.proposedSql).toContain("SUM(revenue)");
+    expect(provider.calls).toHaveLength(0);
+  });
+
+  it("generates distinct entity count SQL when the question asks how many customers", async () => {
+    kg.rebuild([], []);
+    const provider = new StubProvider("should not be called");
+    const result = await answer({
+      question: "How many customers by region?",
+      provider,
+      kg,
+      schemaContext: [
+        {
+          relation: "analytics.customer_orders",
+          schema: "analytics",
+          name: "customer_orders",
+          source: "dbt manifest",
+          columns: [
+            { name: "customer_id", type: "VARCHAR" },
+            { name: "region", type: "VARCHAR" },
+            { name: "order_total", type: "DECIMAL" },
+          ],
+        },
+      ],
+    });
+
+    expect(result.kind).toBe("uncertified");
+    expect(result.proposedSql).toContain("FROM analytics.customer_orders");
+    expect(result.proposedSql).toContain("region");
+    expect(result.proposedSql).toContain("COUNT(DISTINCT customer_id) AS customer_count");
+    expect(result.proposedSql).toContain("GROUP BY region");
+    expect(provider.calls).toHaveLength(0);
+  });
+
+  it("generates distinct order count SQL for count-by-time questions", async () => {
+    kg.rebuild([], []);
+    const provider = new StubProvider("should not be called");
+    const result = await answer({
+      question: "Number of orders by month",
+      provider,
+      kg,
+      schemaContext: [
+        {
+          relation: "analytics.orders",
+          schema: "analytics",
+          name: "orders",
+          source: "dbt manifest",
+          columns: [
+            { name: "order_id", type: "VARCHAR" },
+            { name: "month", type: "DATE" },
+            { name: "amount", type: "DECIMAL" },
+          ],
+        },
+      ],
+    });
+
+    expect(result.kind).toBe("uncertified");
+    expect(result.suggestedViz).toBe("line");
+    expect(result.proposedSql).toContain("FROM analytics.orders");
+    expect(result.proposedSql).toContain("COUNT(DISTINCT order_id) AS order_count");
+    expect(result.proposedSql).toContain("GROUP BY month");
+    expect(provider.calls).toHaveLength(0);
+  });
+
+  it("prefers the context-pack selected relation when several dbt tables look plausible", async () => {
+    kg.rebuild([], []);
+    const provider = new StubProvider("should not be called");
+    const schemaContext = [
+      {
+        relation: "analytics.product_revenue_summary",
+        schema: "analytics",
+        name: "product_revenue_summary",
+        source: "dbt manifest",
+        columns: [
+          { name: "product_name", type: "VARCHAR" },
+          { name: "month", type: "DATE" },
+          { name: "revenue", type: "DECIMAL" },
+        ],
+      },
+      {
+        relation: "analytics.fct_product_revenue",
+        schema: "analytics",
+        name: "fct_product_revenue",
+        source: "dbt manifest",
+        columns: [
+          { name: "product_name", type: "VARCHAR" },
+          { name: "month", type: "DATE" },
+          { name: "net_revenue", type: "DECIMAL" },
+        ],
+      },
+    ];
+    const result = await answer({
+      question: "Show revenue by product",
+      provider,
+      kg,
+      schemaContext,
+      contextPack: contextPackForRankedRelations("Show revenue by product", [
+        {
+          relation: "analytics.product_revenue_summary",
+          name: "product_revenue_summary",
+          source: "dbt manifest",
+          columns: schemaContext[0]!.columns,
+          rank: 2,
+          score: 42,
+          reason: "secondary model with weaker metadata score",
+        },
+        {
+          relation: "analytics.fct_product_revenue",
+          name: "fct_product_revenue",
+          source: "dbt manifest",
+          columns: schemaContext[1]!.columns,
+          rank: 1,
+          score: 75,
+          reason: "selected by metadata planner for product revenue",
+        },
+      ]),
+    });
+
+    expect(result.kind).toBe("uncertified");
+    expect(result.proposedSql).toContain("FROM analytics.fct_product_revenue");
+    expect(result.proposedSql).toContain("SUM(net_revenue)");
+    expect(result.proposedSql).not.toContain("analytics.product_revenue_summary");
+    expect(provider.calls).toHaveLength(0);
+  });
+
+  it("generates generic join SQL when a metric fact table needs a requested dimension table", async () => {
+    kg.rebuild([], []);
+    const provider = new StubProvider("should not be called");
+    const schemaContext = [
+      {
+        relation: "analytics.fct_orders",
+        schema: "analytics",
+        name: "fct_orders",
+        source: "dbt manifest",
+        columns: [
+          { name: "order_id", type: "VARCHAR" },
+          { name: "customer_id", type: "VARCHAR" },
+          { name: "revenue", type: "DECIMAL" },
+          { name: "order_month", type: "DATE" },
+        ],
+      },
+      {
+        relation: "analytics.dim_customers",
+        schema: "analytics",
+        name: "dim_customers",
+        source: "dbt manifest",
+        columns: [
+          { name: "customer_id", type: "VARCHAR" },
+          { name: "customer_name", type: "VARCHAR" },
+          { name: "segment", type: "VARCHAR" },
+        ],
+      },
+    ];
+
+    const result = await answer({
+      question: "Show revenue by customer segment",
+      provider,
+      kg,
+      schemaContext,
+      contextPack: contextPackForRankedRelations("Show revenue by customer segment", [
+        {
+          relation: "analytics.fct_orders",
+          name: "fct_orders",
+          source: "dbt manifest",
+          columns: schemaContext[0]!.columns,
+          rank: 1,
+          score: 78,
+          reason: "selected fact table for revenue metric",
+        },
+        {
+          relation: "analytics.dim_customers",
+          name: "dim_customers",
+          source: "dbt manifest",
+          columns: schemaContext[1]!.columns,
+          rank: 2,
+          score: 64,
+          reason: "selected dimension table for customer segment",
+        },
+      ], { dimensionTerms: ["customer", "segment"] }),
+      executeGeneratedSql: async (sql) => ({
+        columns: ["segment", "revenue_sum"],
+        rows: [{ segment: "Enterprise", revenue_sum: 250000 }],
+        rowCount: 1,
+        sql,
+      }),
+    });
+
+    expect(result.kind).toBe("uncertified");
+    expect(result.proposedSql).toContain("FROM analytics.fct_orders AS f");
+    expect(result.proposedSql).toContain("JOIN analytics.dim_customers AS d ON f.customer_id = d.customer_id");
+    expect(result.proposedSql).toContain("d.segment AS segment");
+    expect(result.proposedSql).toContain("SUM(f.revenue) AS revenue_sum");
+    expect(result.proposedSql).toContain("GROUP BY d.segment");
+    expect(result.result?.rowCount).toBe(1);
+    expect(result.analysisPlan?.candidateJoins[0]).toMatchObject({
+      leftRelation: "analytics.fct_orders",
+      leftColumn: "customer_id",
+      rightRelation: "analytics.dim_customers",
+      rightColumn: "customer_id",
+      reason: "shared key customer_id",
+    });
+    expect(provider.calls).toHaveLength(0);
+  });
+
+  it("renders ranked relation cards with column meaning for provider-generated SQL", async () => {
+    kg.rebuild([], []);
+    const provider = new StubProvider(
+      "Revenue change by product is generated from the selected dbt relation and needs review.\n\n" +
+        "```sql\nSELECT product_name, month, SUM(net_revenue) AS revenue FROM analytics.fct_product_revenue GROUP BY product_name, month ORDER BY month DESC\n```\n\n" +
+        "Viz: line",
+    );
+
+    const result = await answer({
+      question: "Why did revenue change by product?",
+      provider,
+      kg,
+      contextPack: contextPackForRankedRelations("Why did revenue change by product?", [
+        {
+          relation: "analytics.fct_product_revenue",
+          name: "fct_product_revenue",
+          source: "dbt manifest",
+          columns: [
+            { name: "product_id", type: "VARCHAR", description: "Product key" },
+            { name: "product_name", type: "VARCHAR", description: "Product display name", sampleValues: ["Starter"] },
+            { name: "month", type: "DATE", description: "Revenue month" },
+            { name: "net_revenue", type: "DECIMAL", description: "Revenue after refunds and test-account exclusions" },
+          ],
+          rank: 1,
+          score: 81.5,
+          reason: "selected by metadata planner for product revenue change",
+        },
+        {
+          relation: "analytics.dim_products",
+          name: "dim_products",
+          source: "dbt manifest",
+          columns: [
+            { name: "product_id", type: "VARCHAR", description: "Product key" },
+            { name: "product_category", type: "VARCHAR", description: "Product category" },
+          ],
+          rank: 2,
+          score: 55,
+          reason: "selected dimension table for product attributes",
+        },
+      ]),
+    });
+
+    const prompt = provider.messages.map((message) => message.content).join("\n\n");
+    expect(result.kind).toBe("uncertified");
+    expect(provider.calls).toHaveLength(1);
+    expect(prompt).toContain("Selected SQL relation context:");
+    expect(prompt).toContain("[rank 1, score 81.5] analytics.fct_product_revenue (dbt manifest)");
+    expect(prompt).toContain("why selected: selected by metadata planner for product revenue change");
+    expect(prompt).toContain("Suggested join paths from selected metadata:");
+    expect(prompt).toContain("analytics.fct_product_revenue.product_id -> analytics.dim_products.product_id (shared key product_id)");
+    expect(prompt).toContain("product_name VARCHAR - Product display name; matched values: \"Starter\"");
+    expect(prompt).toContain("net_revenue DECIMAL - Revenue after refunds and test-account exclusions");
+    expect(result.analysisPlan?.candidateTables[0]).toMatchObject({
+      relation: "analytics.fct_product_revenue",
+      reason: "metadata rank 1: selected by metadata planner for product revenue change",
+    });
+    expect(result.analysisPlan?.candidateJoins[0]).toMatchObject({
+      leftRelation: "analytics.fct_product_revenue",
+      leftColumn: "product_id",
+      rightRelation: "analytics.dim_products",
+      rightColumn: "product_id",
+    });
+  });
+
+  it("generates review-required entity profile SQL from inspected schema context", async () => {
+    kg.rebuild([], []);
+    const provider = new StubProvider("should not be called");
+    const schemaContext = [
+      {
+        relation: "analytics.int_player_stats",
+        schema: "analytics",
+        name: "int_player_stats",
+        source: "dbt manifest",
+        columns: [
+          { name: "player_name", type: "VARCHAR" },
+          { name: "season", type: "INTEGER" },
+          { name: "team_name", type: "VARCHAR" },
+          { name: "total_points", type: "INTEGER" },
+          { name: "total_assists", type: "INTEGER" },
+          { name: "total_rebounds", type: "INTEGER" },
+        ],
+      },
+    ];
+    const result = await answer({
+      question: "Can you research on Kevin Durant profile and provide me the complete stats",
+      provider,
+      kg,
+      schemaContext,
+      contextPack: {
+        id: "ctx_profile",
+        question: "Can you research on Kevin Durant profile and provide me the complete stats",
+        focusObjectKey: "dbt:model:int_player_stats",
+        mode: "question",
+        trustLabel: "mixed",
+        questionPlan: {
+          question: "Can you research on Kevin Durant profile and provide me the complete stats",
+          normalizedQuestion: "can you research on kevin durant profile and provide me the complete stats",
+          mode: "entity_profile",
+          routeIntent: "entity_drilldown",
+          entities: [{ text: "Kevin Durant", source: "explicit_filter" }],
+          metricTerms: ["stat"],
+          dimensionTerms: ["profile"],
+          filterTerms: ["kevin", "durant"],
+          timeTerms: [],
+          outputShape: "profile",
+          needsGeneratedSql: true,
+          shouldConsiderCertifiedExact: false,
+          needsResearchWorkspace: true,
+          searchQueries: ["Kevin Durant stat profile"],
+          searchTerms: ["kevin", "durant", "stat", "profile"],
+          confidence: 0.9,
+          reasons: ["classified as entity_profile"],
+        },
+        objects: [
+          {
+            objectKey: "dbt:model:int_player_stats",
+            objectType: "dbt_model",
+            name: "int_player_stats",
+            fullName: "analytics.int_player_stats",
+            status: "dbt_imported",
+          },
+        ],
+        edges: [],
+        queryRuns: [],
+        citations: [],
+        evidenceSummaries: [],
+        warnings: [],
+        routeDecision: {
+          route: "generated_sql",
+          intent: "entity_drilldown",
+          reason: "Entity profile questions require generated SQL at the requested entity grain.",
+          trustLabel: "mixed",
+          reviewStatus: "draft_ready",
+          selectedEvidence: [],
+          missingContext: [],
+          followUps: [],
+        },
+        evidenceRoles: [],
+        allowedSqlContext: {
+          relations: schemaContext.map((table) => ({
+            relation: table.relation,
+            name: table.name,
+            source: table.source,
+            columns: table.columns,
+          })),
+          sourceBlockSql: [],
+        },
+        missingContext: [],
+        conflicts: [],
+        retrievalDiagnostics: {
+          strategy: "sqlite_fts",
+          selectedObjects: 1,
+          selectedEvidence: [],
+          topRejected: [],
+          candidateConflicts: [],
+        },
+        freshness: {
+          catalogPath: "/tmp/metadata.sqlite",
+          builtAt: null,
+          fingerprint: null,
+        },
+      } as any,
+      executeGeneratedSql: async (sql) => ({
+        columns: ["player_name", "season", "team_name", "total_points", "total_assists", "total_rebounds"],
+        rows: [{ player_name: "Kevin Durant", season: 2024, team_name: "PHX", total_points: 2032, total_assists: 320, total_rebounds: 512 }],
+        rowCount: 1,
+        sql,
+      }),
+    });
+
+    expect(result.kind).toBe("uncertified");
+    expect(result.block).toBeUndefined();
+    expect(result.reviewStatus).toBe("draft_ready");
+    expect(result.analysisPlan?.intent).toBe("entity_drilldown");
+    expect(result.proposedSql).toContain("analytics.int_player_stats");
+    expect(result.proposedSql).toContain("player_name = 'Kevin Durant'");
+    expect(result.proposedSql).toContain("total_points");
+    expect(result.result?.rowCount).toBe(1);
+    expect(provider.calls).toHaveLength(0);
+  });
+
+  it("generates entity profile SQL from catalog-only dbt models in a large repo", async () => {
+    kg.rebuild([], []);
+    const projectRoot = join(dir, "large-dbt-project");
+    seedLargeDbtProfileProject(projectRoot);
+    const provider = new StubProvider("should not be called");
+    const question = "Can you research Kevin Durant profile and provide complete stats";
+    const contextPack = await buildLocalContextPack(projectRoot, {
+      question,
+      limit: 80,
+    });
+
+    const result = await answer({
+      question,
+      provider,
+      kg,
+      contextPack,
+      executeGeneratedSql: async (sql) => ({
+        columns: ["athlete_name", "game_date", "pts", "ast", "reb"],
+        rows: [{
+          athlete_name: "Kevin Durant",
+          game_date: "2024-01-01",
+          pts: 31,
+          ast: 5,
+          reb: 8,
+        }],
+        rowCount: 1,
+        sql,
+      }),
+    });
+
+    expect(contextPack.retrievalDiagnostics.schemaShapeCandidates).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          objectKey: "dbt:model:athlete_box_scores",
+          relation: "NBA_DB.ANALYTICS.athlete_box_scores",
+        }),
+      ]),
+    );
+    expect(contextPack.allowedSqlContext.relations.map((relation) => relation.relation)).toContain("NBA_DB.ANALYTICS.athlete_box_scores");
+    expect(result.kind).toBe("uncertified");
+    expect(result.reviewStatus).toBe("draft_ready");
+    expect(result.proposedSql).toContain("NBA_DB.ANALYTICS.athlete_box_scores");
+    expect(result.proposedSql).toContain("athlete_name = 'Kevin Durant'");
+    expect(result.proposedSql).toContain("game_date");
+    expect(result.proposedSql).toContain("pts");
+    expect(result.result?.rowCount).toBe(1);
+    expect(provider.calls).toHaveLength(0);
+  });
+
+  it("uses certified block SQL shape as context for entity profiles when dbt columns are unavailable", async () => {
+    kg.rebuild([], []);
+    const provider = new StubProvider("should not be called");
+    const result = await answer({
+      question: "Can you research on Kevin Durant profile and provide me the complete stats",
+      provider,
+      kg,
+      contextPack: {
+        id: "ctx_profile_sql_shape",
+        question: "Can you research on Kevin Durant profile and provide me the complete stats",
+        focusObjectKey: "dql:block:Top 10 Goal Scorers",
+        mode: "question",
+        trustLabel: "mixed",
+        questionPlan: {
+          question: "Can you research on Kevin Durant profile and provide me the complete stats",
+          normalizedQuestion: "can you research on kevin durant profile and provide me the complete stats",
+          mode: "entity_profile",
+          routeIntent: "entity_drilldown",
+          entities: [{ text: "Kevin Durant", source: "explicit_filter" }],
+          metricTerms: ["stat"],
+          dimensionTerms: ["profile"],
+          filterTerms: ["kevin", "durant"],
+          timeTerms: [],
+          outputShape: "profile",
+          needsGeneratedSql: true,
+          shouldConsiderCertifiedExact: false,
+          needsResearchWorkspace: true,
+          searchQueries: ["Kevin Durant stat profile"],
+          searchTerms: ["kevin", "durant", "stat", "profile"],
+          confidence: 0.9,
+          reasons: ["classified as entity_profile"],
+        },
+        objects: [
+          {
+            objectKey: "dql:block:Top 10 Goal Scorers",
+            objectType: "dql_block",
+            name: "Top 10 Goal Scorers",
+            status: "certified",
+            payload: {
+              sql: [
+                "SELECT player_name, season, total_points, games_played,",
+                "ROUND(total_points / NULLIF(games_played, 0), 2) AS points_per_game",
+                "FROM NBA_GAMES.RAW.fct_player_performance",
+                "WHERE season = 2016",
+                "ORDER BY total_points DESC",
+                "LIMIT 10",
+              ].join("\n"),
+            },
+          },
+        ],
+        edges: [],
+        queryRuns: [],
+        citations: [],
+        evidenceSummaries: [],
+        warnings: [],
+        routeDecision: {
+          route: "generated_sql",
+          intent: "entity_drilldown",
+          reason: "Use certified player stats as context only for the requested entity profile.",
+          trustLabel: "mixed",
+          reviewStatus: "draft_ready",
+          certifiedApplicability: {
+            objectKey: "dql:block:Top 10 Goal Scorers",
+            name: "Top 10 Goal Scorers",
+            kind: "context_only",
+            score: 44,
+            reasons: ["question asks for a different entity grain"],
+          },
+          selectedEvidence: [],
+          missingContext: [],
+          followUps: [],
+        },
+        evidenceRoles: [],
+        allowedSqlContext: {
+          relations: [
+            {
+              relation: "NBA_GAMES.RAW.fct_player_performance",
+              name: "fct_player_performance",
+              source: "certified block dependency",
+              columns: [],
+            },
+          ],
+          sourceBlockSql: [
+            {
+              objectKey: "dql:block:Top 10 Goal Scorers",
+              name: "Top 10 Goal Scorers",
+              status: "certified",
+              sql: [
+                "SELECT player_name, season, total_points, games_played,",
+                "ROUND(total_points / NULLIF(games_played, 0), 2) AS points_per_game",
+                "FROM NBA_GAMES.RAW.fct_player_performance",
+                "WHERE season = 2016",
+                "ORDER BY total_points DESC",
+                "LIMIT 10",
+              ].join("\n"),
+            },
+          ],
+        },
+        missingContext: [],
+        conflicts: [],
+        retrievalDiagnostics: {
+          strategy: "sqlite_fts",
+          selectedObjects: 1,
+          selectedEvidence: [],
+          topRejected: [],
+          candidateConflicts: [],
+        },
+        freshness: {
+          catalogPath: "/tmp/metadata.sqlite",
+          builtAt: null,
+          fingerprint: null,
+        },
+      } as any,
+      executeGeneratedSql: async (sql) => ({
+        columns: ["player_name", "season", "total_points", "games_played", "points_per_game"],
+        rows: [{ player_name: "Kevin Durant", season: 2016, total_points: 1555, games_played: 62, points_per_game: 25.08 }],
+        rowCount: 1,
+        sql,
+      }),
+    });
+
+    expect(result.kind).toBe("uncertified");
+    expect(result.proposedSql).toContain("NBA_GAMES.RAW.fct_player_performance");
+    expect(result.proposedSql).toContain("player_name = 'Kevin Durant'");
+    expect(result.proposedSql).toContain("points_per_game");
+    expect(result.validationWarnings ?? []).not.toEqual(
+      expect.arrayContaining([expect.stringContaining("Column validation was advisory")]),
+    );
+    expect(result.result?.rowCount).toBe(1);
+    expect(provider.calls).toHaveLength(0);
+  });
+
+  it("passes certified SQL shape context to the provider when relation columns are sparse", async () => {
+    kg.rebuild([], []);
+    const provider = new StubProvider(
+      "Team scoring comparison generated from certified source SQL shape.\n\n" +
+        "```sql\nSELECT team_name, SUM(total_points) AS total_points FROM NBA_GAMES.RAW.fct_player_performance GROUP BY team_name ORDER BY total_points DESC\n```\n\n" +
+        "Viz: bar",
+    );
+    const result = await answer({
+      question: "Compare scoring by team",
+      provider,
+      kg,
+      contextPack: {
+        id: "ctx_sparse_shape",
+        question: "Compare scoring by team",
+        focusObjectKey: "dql:block:Top 10 Goal Scorers",
+        mode: "question",
+        trustLabel: "mixed",
+        questionPlan: {
+          question: "Compare scoring by team",
+          normalizedQuestion: "compare scoring by team",
+          mode: "comparison",
+          routeIntent: "segment_compare",
+          entities: [],
+          metricTerms: ["scoring"],
+          dimensionTerms: ["team"],
+          filterTerms: [],
+          timeTerms: [],
+          outputShape: "table",
+          needsGeneratedSql: true,
+          shouldConsiderCertifiedExact: false,
+          needsResearchWorkspace: true,
+          searchQueries: ["scoring team"],
+          searchTerms: ["scoring", "team"],
+          confidence: 0.82,
+          reasons: ["classified as comparison"],
+        },
+        objects: [
+          {
+            objectKey: "dql:block:Top 10 Goal Scorers",
+            objectType: "dql_block",
+            name: "Top 10 Goal Scorers",
+            status: "certified",
+            payload: {
+              sql: "SELECT player_name, team_name, season, total_points FROM NBA_GAMES.RAW.fct_player_performance ORDER BY total_points DESC LIMIT 10",
+            },
+          },
+        ],
+        edges: [],
+        queryRuns: [],
+        citations: [],
+        evidenceSummaries: [],
+        warnings: [],
+        routeDecision: {
+          route: "generated_sql",
+          intent: "segment_compare",
+          reason: "Use certified scoring block as context only for the requested team comparison.",
+          trustLabel: "mixed",
+          reviewStatus: "draft_ready",
+          certifiedApplicability: {
+            objectKey: "dql:block:Top 10 Goal Scorers",
+            name: "Top 10 Goal Scorers",
+            kind: "context_only",
+            score: 38,
+            reasons: ["question asks for a different team grain"],
+          },
+          selectedEvidence: [],
+          missingContext: [],
+          followUps: [],
+        },
+        evidenceRoles: [],
+        allowedSqlContext: {
+          relations: [
+            {
+              relation: "NBA_GAMES.RAW.fct_player_performance",
+              name: "fct_player_performance",
+              source: "certified block dependency",
+              columns: [],
+            },
+          ],
+          sourceBlockSql: [
+            {
+              objectKey: "dql:block:Top 10 Goal Scorers",
+              name: "Top 10 Goal Scorers",
+              status: "certified",
+              sql: "SELECT player_name, team_name, season, total_points FROM NBA_GAMES.RAW.fct_player_performance ORDER BY total_points DESC LIMIT 10",
+            },
+          ],
+        },
+        missingContext: [],
+        conflicts: [],
+        retrievalDiagnostics: {
+          strategy: "sqlite_fts",
+          selectedObjects: 1,
+          selectedEvidence: [],
+          topRejected: [],
+          candidateConflicts: [],
+        },
+        freshness: {
+          catalogPath: "/tmp/metadata.sqlite",
+          builtAt: null,
+          fingerprint: null,
+        },
+      } as any,
+    });
+
+    const prompt = provider.messages.map((message) => message.content).join("\n\n");
+    expect(result.kind).toBe("uncertified");
+    expect(provider.calls).toHaveLength(1);
+    expect(prompt).toContain("Certified source SQL shape context");
+    expect(prompt).toContain("relation: NBA_GAMES.RAW.fct_player_performance");
+    expect(prompt).toContain("projected columns: player_name, team_name, season, total_points");
+    expect(result.validationWarnings ?? []).not.toEqual(
+      expect.arrayContaining([expect.stringContaining("Column validation was advisory")]),
     );
   });
 
@@ -1448,7 +2268,7 @@ describe("answer (block-first loop)", () => {
     ]);
     let attempts = 0;
     const result = await answer({
-      question: "Show revenue by customer",
+      question: "Repair revenue by customer",
       provider,
       kg,
       schemaContext: [
@@ -1533,6 +2353,62 @@ describe("answer (block-first loop)", () => {
     expect(result.executionError).toBeUndefined();
   });
 
+  it("rejects provider SQL that selects unknown columns from a joined CTE before execution", async () => {
+    const provider = new StubProvider(
+      "Draft diagnostic SQL.\n\n" +
+        "```sql\nWITH enterprise AS (\n  SELECT o.amount AS revenue, c.segment\n  FROM analytics.fct_orders o\n  JOIN analytics.dim_customers c ON o.customer_id = c.customer_id\n)\nSELECT fake_column FROM enterprise\n```\n\n" +
+        "Viz: table",
+    );
+    let executed = false;
+    const question = "Why did revenue change by segment?";
+    const result = await answer({
+      question,
+      provider,
+      kg,
+      contextPack: contextPackForRankedRelations(question, [
+        {
+          relation: "analytics.fct_orders",
+          name: "fct_orders",
+          source: "dbt manifest",
+          columns: [
+            { name: "customer_id", type: "VARCHAR" },
+            { name: "amount", type: "DECIMAL" },
+            { name: "week", type: "DATE" },
+          ],
+          rank: 1,
+          score: 80,
+          reason: "selected revenue fact table",
+        },
+        {
+          relation: "analytics.dim_customers",
+          name: "dim_customers",
+          source: "dbt manifest",
+          columns: [
+            { name: "customer_id", type: "VARCHAR" },
+            { name: "segment", type: "VARCHAR" },
+          ],
+          rank: 2,
+          score: 65,
+          reason: "selected customer dimension",
+        },
+      ], {
+        metricTerms: ["revenue"],
+        dimensionTerms: ["segment"],
+        mode: "diagnose_change",
+        routeIntent: "diagnose_change",
+      }),
+      executeGeneratedSql: async (sql) => {
+        executed = true;
+        return { columns: ["fake_column"], rows: [], rowCount: 0, sql };
+      },
+    });
+
+    expect(result.kind).toBe("no_answer");
+    expect(result.text).toContain('column "fake_column"');
+    expect(executed).toBe(false);
+    expect(provider.calls).toHaveLength(1);
+  });
+
   it("asks for clarification when no metadata can ground an analytical question", async () => {
     kg.rebuild([], []);
     const provider = new StubProvider("should not be called");
@@ -1547,6 +2423,95 @@ describe("answer (block-first loop)", () => {
     expect(provider.calls).toHaveLength(0);
   });
 });
+
+function contextPackForRankedRelations(
+  question: string,
+  relations: Array<{
+    relation: string;
+    name: string;
+    source: string;
+    columns: Array<{ name: string; type?: string; description?: string; sampleValues?: string[] }>;
+    rank: number;
+    score: number;
+    reason: string;
+  }>,
+  options: { metricTerms?: string[]; dimensionTerms?: string[]; mode?: string; routeIntent?: string } = {},
+) {
+  const metricTerms = options.metricTerms ?? ["revenue"];
+  const dimensionTerms = options.dimensionTerms ?? ["product"];
+  const mode = options.mode ?? "general_analysis";
+  const routeIntent = options.routeIntent ?? "driver_breakdown";
+  return {
+    id: "ctx_ranked_relations",
+    question,
+    focusObjectKey: null,
+    mode: "question",
+    trustLabel: "mixed",
+    questionPlan: {
+      question,
+      normalizedQuestion: question.toLowerCase(),
+      mode,
+      routeIntent,
+      entities: [],
+      metricTerms,
+      dimensionTerms,
+      filterTerms: [],
+      timeTerms: [],
+      outputShape: "table",
+      needsGeneratedSql: true,
+      shouldConsiderCertifiedExact: false,
+      needsResearchWorkspace: false,
+      searchQueries: [question],
+      searchTerms: [...metricTerms, ...dimensionTerms],
+      confidence: 0.85,
+      reasons: ["test context"],
+    },
+    objects: [],
+    edges: [],
+    queryRuns: [],
+    citations: [],
+    evidenceSummaries: [],
+    warnings: [],
+    routeDecision: {
+      route: "generated_sql",
+      intent: routeIntent,
+      reason: "Use selected dbt metadata context.",
+      trustLabel: "mixed",
+      reviewStatus: "draft_ready",
+      selectedEvidence: [],
+      missingContext: [],
+      followUps: [],
+    },
+    evidenceRoles: [],
+    allowedSqlContext: {
+      relations: relations.map(({ rank: _rank, score: _score, reason: _reason, ...relation }) => relation),
+      sourceBlockSql: [],
+    },
+    missingContext: [],
+    conflicts: [],
+    retrievalDiagnostics: {
+      strategy: "sqlite_fts",
+      selectedObjects: relations.length,
+      selectedEvidence: [],
+      selectedRelations: relations.map((relation) => ({
+        relation: relation.relation,
+        name: relation.name,
+        source: relation.source,
+        score: relation.score,
+        reason: relation.reason,
+        columns: relation.columns.map((column) => column.name),
+        rank: relation.rank,
+      })),
+      topRejected: [],
+      candidateConflicts: [],
+    },
+    freshness: {
+      catalogPath: "/tmp/metadata.sqlite",
+      builtAt: null,
+      fingerprint: null,
+    },
+  } as any;
+}
 
 describe("parseProposal", () => {
   it("extracts SQL block + viz line + summary text", () => {

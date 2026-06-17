@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -122,7 +122,7 @@ describe('local metadata catalog', () => {
 
     expect(plan.routeDecision).toMatchObject({
       route: 'certified',
-      intent: 'ad_hoc_ranking',
+      intent: 'exact_certified_lookup',
       reviewStatus: 'certified',
       exactObjectKey: 'dql:block:Top 10 Goal Scorers',
     });
@@ -139,6 +139,27 @@ describe('local metadata catalog', () => {
       intent: 'ad_hoc_ranking',
       reviewStatus: 'certified',
       exactObjectKey: 'dql:block:Top 10 Goal Scorers',
+    });
+  });
+
+  it('routes certified blocks by business content even when the block name is not used', async () => {
+    const plan = await planAgentAnswer(projectRoot, {
+      question: 'Which NBA players are the leading scorers?',
+      limit: 20,
+    });
+
+    expect(plan.contextPack.questionPlan).toMatchObject({
+      mode: 'ranking',
+      routeIntent: 'ad_hoc_ranking',
+    });
+    expect(plan.routeDecision).toMatchObject({
+      route: 'certified',
+      reviewStatus: 'certified',
+      exactObjectKey: 'dql:block:Top 10 Goal Scorers',
+      certifiedApplicability: expect.objectContaining({
+        kind: 'exact_answer',
+        name: 'Top 10 Goal Scorers',
+      }),
     });
   });
 
@@ -183,6 +204,150 @@ describe('local metadata catalog', () => {
       route: 'generated_sql',
       intent: 'entity_drilldown',
       reviewStatus: 'draft_ready',
+    });
+  });
+
+  it('uses certified blocks as context for entity profile questions and generates SQL from metadata', async () => {
+    const pack = await buildLocalContextPack(projectRoot, {
+      question: 'Research Kevin Durant profile and complete stats',
+      limit: 20,
+    });
+
+    expect(pack.questionPlan).toMatchObject({
+      mode: 'entity_profile',
+      routeIntent: 'entity_drilldown',
+    });
+    expect(pack.questionPlan.entities.map((entity) => entity.text)).toContain('Kevin Durant');
+    expect(pack.routeDecision).toMatchObject({
+      route: 'generated_sql',
+      intent: 'entity_drilldown',
+      reviewStatus: 'draft_ready',
+      certifiedApplicability: expect.objectContaining({
+        kind: 'context_only',
+      }),
+    });
+    expect(pack.allowedSqlContext.relations.map((relation) => relation.relation)).toEqual(
+      expect.arrayContaining(['NBA_DB.ANALYTICS.int_player_stats']),
+    );
+    const sourceShapeRelation = pack.allowedSqlContext.relations.find((relation) =>
+      relation.relation.endsWith('int_player_stats'),
+    );
+    expect(sourceShapeRelation?.columns.map((column) => column.name)).toEqual(
+      expect.arrayContaining(['dataset_name', 'row_count']),
+    );
+  });
+
+  it('keeps SQL relation context bounded and ranked in noisy dbt projects', async () => {
+    addNoisyDbtModels(projectRoot, 80);
+
+    const pack = await buildLocalContextPack(projectRoot, {
+      question: 'Show NBA player points by season',
+      limit: 120,
+    });
+
+    expect(pack.allowedSqlContext.relations.length).toBeLessThanOrEqual(40);
+    expect(pack.allowedSqlContext.relations[0]?.relation).toContain('fct_player_performance');
+    expect(pack.retrievalDiagnostics.selectedRelations?.[0]).toMatchObject({
+      relation: expect.stringContaining('fct_player_performance'),
+    });
+    expect(pack.retrievalDiagnostics.selectedRelations?.[0]?.reason).toMatch(/metric terms matched|dimension terms matched|relation shape/);
+  });
+
+  it('adds schema-shape dbt candidates when entity values do not appear in metadata text', async () => {
+    addNoisyDbtModels(projectRoot, 120);
+    addGenericAthleteBoxScoreModel(projectRoot);
+
+    const pack = await buildLocalContextPack(projectRoot, {
+      question: 'Can you research Kevin Durant profile and provide complete stats',
+      limit: 40,
+    });
+
+    expect(pack.questionPlan).toMatchObject({
+      mode: 'entity_profile',
+      routeIntent: 'entity_drilldown',
+    });
+    expect(pack.allowedSqlContext.relations.map((relation) => relation.relation)).toContain('NBA_DB.ANALYTICS.athlete_box_scores');
+    expect(pack.retrievalDiagnostics.schemaShapeCandidates).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          objectKey: 'dbt:model:athlete_box_scores',
+          relation: 'NBA_DB.ANALYTICS.athlete_box_scores',
+          reason: expect.stringContaining('entity identifiers: athlete_name'),
+          columns: expect.arrayContaining(['athlete_name', 'game_date', 'pts', 'ast', 'reb']),
+        }),
+      ]),
+    );
+    expect(pack.retrievalDiagnostics.selectedRelations?.map((relation) => relation.relation)).toContain('NBA_DB.ANALYTICS.athlete_box_scores');
+  });
+
+  it('finds schema-shape dbt candidates beyond the first large-repo scan window', async () => {
+    addNoisyDbtModels(projectRoot, 1800);
+    addGenericAthleteBoxScoreModel(projectRoot, 'zz_athlete_box_scores');
+
+    const pack = await buildLocalContextPack(projectRoot, {
+      question: 'Can you research Kevin Durant profile and provide complete stats',
+      limit: 40,
+    });
+
+    expect(pack.allowedSqlContext.relations.map((relation) => relation.relation)).toContain('NBA_DB.ANALYTICS.zz_athlete_box_scores');
+    expect(pack.retrievalDiagnostics.schemaShapeCandidates).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          objectKey: 'dbt:model:zz_athlete_box_scores',
+          relation: 'NBA_DB.ANALYTICS.zz_athlete_box_scores',
+          reason: expect.stringContaining('entity identifiers: athlete_name'),
+          columns: expect.arrayContaining(['athlete_name', 'game_date', 'pts', 'ast', 'reb']),
+        }),
+      ]),
+    );
+  });
+
+  it('exposes selected join paths between dbt relations with shared keys', async () => {
+    addPlayerDimensionModel(projectRoot);
+
+    const pack = await buildLocalContextPack(projectRoot, {
+      question: 'Show player points by position',
+      limit: 40,
+    });
+
+    expect(pack.allowedSqlContext.relations.map((relation) => relation.relation)).toEqual(
+      expect.arrayContaining([
+        'NBA_DB.ANALYTICS.fct_player_performance',
+        'NBA_DB.ANALYTICS.dim_players',
+      ]),
+    );
+    expect(pack.retrievalDiagnostics.selectedJoinPaths).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          leftRelation: 'NBA_DB.ANALYTICS.fct_player_performance',
+          leftColumn: 'player_id',
+          rightRelation: 'NBA_DB.ANALYTICS.dim_players',
+          rightColumn: 'player_id',
+          reason: 'shared key player_id',
+        }),
+      ]),
+    );
+  });
+
+  it('retains parent dbt model columns when retrieval starts from column hits', async () => {
+    addNoisyDbtModels(projectRoot, 80);
+
+    const pack = await buildLocalContextPack(projectRoot, {
+      question: 'Show player points by season',
+      objectTypes: ['dbt_column'],
+      limit: 2,
+    });
+
+    const relation = pack.allowedSqlContext.relations.find((candidate) =>
+      candidate.relation.endsWith('fct_player_performance'),
+    );
+
+    expect(relation?.columns.map((column) => column.name)).toEqual(
+      expect.arrayContaining(['player_name', 'season', 'points', 'total_points']),
+    );
+    expect(pack.retrievalDiagnostics.selectedRelations?.[0]).toMatchObject({
+      relation: expect.stringContaining('fct_player_performance'),
+      columns: expect.arrayContaining(['player_name', 'season', 'points', 'total_points']),
     });
   });
 
@@ -267,6 +432,128 @@ describe('local metadata catalog', () => {
 
 function mkdtempProject(): string {
   return mkdtempSync(join(tmpdir(), 'dql-metadata-catalog-'));
+}
+
+function addNoisyDbtModels(root: string, count: number): void {
+  const path = join(root, 'target', 'manifest.json');
+  const manifest = JSON.parse(readFileSync(path, 'utf-8')) as {
+    nodes: Record<string, Record<string, unknown>>;
+  };
+  for (let index = 0; index < count; index += 1) {
+    manifest.nodes[`model.nba_analysis.noisy_${index}`] = {
+      resource_type: 'model',
+      name: `noisy_${index}`,
+      alias: `noisy_${index}`,
+      database: 'NBA_DB',
+      schema: 'ANALYTICS',
+      description: `Unrelated noisy model ${index} for large repo retrieval testing.`,
+      depends_on: { nodes: [] },
+      tags: ['noise'],
+      original_file_path: `models/noisy/noisy_${index}.sql`,
+      config: { materialized: 'table' },
+      columns: {
+        id: { name: 'id', data_type: 'number' },
+        created_at: { name: 'created_at', data_type: 'timestamp' },
+      },
+    };
+  }
+  writeFileSync(path, JSON.stringify(manifest), 'utf-8');
+}
+
+function addGenericAthleteBoxScoreModel(root: string, modelName = 'athlete_box_scores'): void {
+  const path = join(root, 'target', 'manifest.json');
+  const manifest = JSON.parse(readFileSync(path, 'utf-8')) as {
+    nodes: Record<string, Record<string, unknown>>;
+  };
+  manifest.nodes[`model.nba_analysis.${modelName}`] = {
+    resource_type: 'model',
+    name: modelName,
+    alias: modelName,
+    database: 'NBA_DB',
+    schema: 'ANALYTICS',
+    description: 'Box score rows at game grain.',
+    depends_on: { nodes: [] },
+    tags: ['analytics'],
+    original_file_path: `models/marts/${modelName}.sql`,
+    config: { materialized: 'table' },
+    columns: {
+      athlete_name: {
+        name: 'athlete_name',
+        data_type: 'text',
+        description: 'Name of the athlete.',
+      },
+      game_id: {
+        name: 'game_id',
+        data_type: 'text',
+        description: 'Game identifier.',
+      },
+      game_date: {
+        name: 'game_date',
+        data_type: 'date',
+        description: 'Date of the game.',
+      },
+      pts: {
+        name: 'pts',
+        data_type: 'number',
+        description: 'Points recorded.',
+      },
+      ast: {
+        name: 'ast',
+        data_type: 'number',
+        description: 'Assists recorded.',
+      },
+      reb: {
+        name: 'reb',
+        data_type: 'number',
+        description: 'Rebounds recorded.',
+      },
+    },
+  };
+  writeFileSync(path, JSON.stringify(manifest), 'utf-8');
+}
+
+function addPlayerDimensionModel(root: string): void {
+  const path = join(root, 'target', 'manifest.json');
+  const manifest = JSON.parse(readFileSync(path, 'utf-8')) as {
+    nodes: Record<string, Record<string, unknown>>;
+  };
+  const fact = manifest.nodes['model.nba_analysis.fct_player_performance'];
+  if (fact) {
+    fact.depends_on = { nodes: ['model.nba_analysis.dim_players'] };
+    fact.columns = {
+      ...((fact.columns as Record<string, unknown> | undefined) ?? {}),
+      player_id: {
+        name: 'player_id',
+        data_type: 'text',
+        description: 'Player identifier for joining to player attributes.',
+      },
+    };
+  }
+  manifest.nodes['model.nba_analysis.dim_players'] = {
+    resource_type: 'model',
+    name: 'dim_players',
+    alias: 'dim_players',
+    database: 'NBA_DB',
+    schema: 'ANALYTICS',
+    description: 'Player dimension table with profile attributes.',
+    depends_on: { nodes: [] },
+    tags: ['nba', 'player'],
+    original_file_path: 'models/marts/dim_players.sql',
+    config: { materialized: 'table' },
+    columns: {
+      player_id: {
+        name: 'player_id',
+        data_type: 'text',
+        description: 'Player identifier.',
+      },
+      position: {
+        name: 'position',
+        data_type: 'text',
+        description: 'Primary court position.',
+      },
+    },
+  };
+  writeFileSync(path, JSON.stringify(manifest), 'utf-8');
 }
 
 function seedDqlProject(root: string): void {

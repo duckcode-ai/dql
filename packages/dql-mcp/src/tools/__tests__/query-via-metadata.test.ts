@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -155,6 +155,119 @@ describe('queryViaMetadata — Tier-2 promotion loop entry point', () => {
     expect(out.draftBlock).toBeDefined();
   });
 
+  it('returns selected relation reasoning when planning from metadata', async () => {
+    seedNbaMetadataProject(tmpProject);
+
+    const out = await queryViaMetadata(ctxFor(tmpProject), {
+      question: 'Show NBA player points by season',
+    });
+
+    expect(out.uncertified).toBe(true);
+    expect((out as { planningOnly: boolean }).planningOnly).toBe(true);
+    expect((out as { selectedRelations: Array<{ relation: string; reason: string; columns: string[] }> }).selectedRelations[0]).toMatchObject({
+      relation: expect.stringContaining('fct_player_performance'),
+    });
+    expect((out as { selectedRelations: Array<{ relation: string; reason: string; columns: string[] }> }).selectedRelations[0]?.reason).toMatch(/metric terms matched|dimension terms matched|relation shape/);
+    expect((out as { selectedRelations: Array<{ relation: string; reason: string; columns: string[] }> }).selectedRelations[0]?.columns).toEqual(
+      expect.arrayContaining(['player_name', 'season', 'total_points']),
+    );
+    expect((out as {
+      evidence: {
+        certifiedContext: {
+          selectedRelations: Array<{ relation: string; reason: string; rank: number }>;
+          selectedJoinPaths: Array<{ leftRelation: string; leftColumn: string; rightRelation: string; rightColumn: string }>;
+        };
+      };
+    }).evidence.certifiedContext.selectedRelations[0]).toMatchObject({
+      relation: expect.stringContaining('fct_player_performance'),
+      rank: 1,
+    });
+  });
+
+  it('returns selected join paths when planning needs related dbt models', async () => {
+    seedNbaMetadataProject(tmpProject);
+
+    const out = await queryViaMetadata(ctxFor(tmpProject), {
+      question: 'Show NBA player points by position',
+    });
+
+    expect(out.uncertified).toBe(true);
+    expect((out as { planningOnly: boolean }).planningOnly).toBe(true);
+    expect((out as {
+      selectedJoinPaths: Array<{ leftRelation: string; leftColumn: string; rightRelation: string; rightColumn: string }>;
+    }).selectedJoinPaths[0]).toMatchObject({
+      leftRelation: expect.stringContaining('fct_player_performance'),
+      leftColumn: 'player_id',
+      rightRelation: expect.stringContaining('dim_players'),
+      rightColumn: 'player_id',
+    });
+    expect((out as {
+      evidence: {
+        certifiedContext: {
+          selectedJoinPaths: Array<{ leftColumn: string; rightColumn: string }>;
+        };
+      };
+    }).evidence.certifiedContext.selectedJoinPaths[0]).toMatchObject({
+      leftColumn: 'player_id',
+      rightColumn: 'player_id',
+    });
+  });
+
+  it('returns schema-shape candidates when planning over catalog-only dbt models', async () => {
+    seedLargeDbtProfileProject(tmpProject);
+
+    const out = await queryViaMetadata(ctxFor(tmpProject), {
+      question: 'Can you research Kevin Durant profile and provide complete stats',
+    });
+
+    expect(out.uncertified).toBe(true);
+    expect((out as { planningOnly: boolean }).planningOnly).toBe(true);
+    expect((out as {
+      schemaShapeCandidates: Array<{ objectKey: string; relation: string; reason: string; columns: string[] }>;
+    }).schemaShapeCandidates).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          objectKey: 'dbt:model:athlete_box_scores',
+          relation: 'NBA_DB.ANALYTICS.athlete_box_scores',
+          reason: expect.stringContaining('entity identifiers: athlete_name'),
+          columns: expect.arrayContaining(['athlete_name', 'game_date', 'pts']),
+        }),
+      ]),
+    );
+    expect((out as {
+      evidence: {
+        certifiedContext: {
+          schemaShapeCandidates: Array<{ objectKey: string; relation: string }>;
+        };
+      };
+    }).evidence.certifiedContext.schemaShapeCandidates[0]).toMatchObject({
+      objectKey: 'dbt:model:athlete_box_scores',
+      relation: 'NBA_DB.ANALYTICS.athlete_box_scores',
+    });
+  });
+
+  it('carries selected relation reasoning through dry-run evidence', async () => {
+    seedNbaMetadataProject(tmpProject);
+
+    const out = await queryViaMetadata(ctxFor(tmpProject), {
+      question: 'Who scored least points?',
+      proposedSql: 'SELECT player_name, season, total_points FROM NBA_DB.ANALYTICS.fct_player_performance ORDER BY total_points ASC LIMIT 10',
+      dryRun: true,
+    });
+
+    expect((out as { reviewStatus: string }).reviewStatus).toBe('draft_ready');
+    expect((out as {
+      evidence: {
+        certifiedContext: {
+          selectedRelations: Array<{ relation: string; reason: string; columns: string[] }>;
+        };
+      };
+    }).evidence.certifiedContext.selectedRelations[0]).toMatchObject({
+      relation: expect.stringContaining('fct_player_performance'),
+      columns: expect.arrayContaining(['player_name', 'season', 'total_points']),
+    });
+  });
+
   it('reports a clear runtime-down error and still saves the draft for later', async () => {
     globalThis.fetch = vi.fn(async () => {
       throw new Error('ECONNREFUSED');
@@ -203,3 +316,174 @@ describe('queryViaMetadata — Tier-2 promotion loop entry point', () => {
     expect(existsSync(join(tmpProject, 'blocks', '_drafts'))).toBe(false);
   });
 });
+
+function seedNbaMetadataProject(root: string): void {
+  writeFileSync(join(root, 'dql.config.json'), JSON.stringify({ project: 'nba_ops' }), 'utf-8');
+  mkdirSync(join(root, 'blocks'), { recursive: true });
+  mkdirSync(join(root, 'target'), { recursive: true });
+  writeFileSync(
+    join(root, 'blocks', 'top_10_scorers.dql'),
+    `block "Top 10 Scorers" {
+  domain = "nba"
+  type = "custom"
+  status = "certified"
+  owner = "analytics@example.com"
+  description = "Top NBA players by total points scored."
+  tags = ["nba", "player", "points", "scoring"]
+  llmContext = "Use for top scorers. For bottom rankings, use this as context only."
+  query = """
+    SELECT player_name, season, SUM(points) AS total_points
+    FROM fct_player_performance
+    GROUP BY 1, 2
+    ORDER BY total_points DESC
+    LIMIT 10
+  """
+}`,
+    'utf-8',
+  );
+  writeFileSync(
+    join(root, 'target', 'manifest.json'),
+    JSON.stringify({
+      metadata: { project_name: 'nba_analysis' },
+      nodes: {
+        'model.nba_analysis.fct_player_performance': {
+          resource_type: 'model',
+          name: 'fct_player_performance',
+          alias: 'fct_player_performance',
+          database: 'NBA_DB',
+          schema: 'ANALYTICS',
+          description: 'Player performance fact table with scoring, assists, and season grain.',
+          depends_on: { nodes: ['model.nba_analysis.dim_players'] },
+          tags: ['nba', 'player'],
+          original_file_path: 'models/marts/fct_player_performance.sql',
+          config: { materialized: 'table' },
+          columns: {
+            player_id: {
+              name: 'player_id',
+              data_type: 'text',
+              description: 'Player identifier for joining to player attributes.',
+            },
+            player_name: {
+              name: 'player_name',
+              data_type: 'text',
+              description: 'Player full name.',
+            },
+            season: {
+              name: 'season',
+              data_type: 'number',
+              description: 'NBA season year.',
+            },
+            points: {
+              name: 'points',
+              data_type: 'number',
+              description: 'Points scored in a game.',
+            },
+            total_points: {
+              name: 'total_points',
+              data_type: 'number',
+              description: 'Aggregated points for a player and season.',
+            },
+          },
+        },
+        'model.nba_analysis.dim_players': {
+          resource_type: 'model',
+          name: 'dim_players',
+          alias: 'dim_players',
+          database: 'NBA_DB',
+          schema: 'ANALYTICS',
+          description: 'Player dimension table with profile attributes.',
+          depends_on: { nodes: [] },
+          tags: ['nba', 'player'],
+          original_file_path: 'models/marts/dim_players.sql',
+          config: { materialized: 'table' },
+          columns: {
+            player_id: {
+              name: 'player_id',
+              data_type: 'text',
+              description: 'Player identifier.',
+            },
+            position: {
+              name: 'position',
+              data_type: 'text',
+              description: 'Primary court position.',
+            },
+          },
+        },
+      },
+      sources: {},
+    }),
+    'utf-8',
+  );
+}
+
+function seedLargeDbtProfileProject(root: string): void {
+  writeFileSync(join(root, 'dql.config.json'), JSON.stringify({ project: 'large_dbt_profile' }), 'utf-8');
+  mkdirSync(join(root, 'target'), { recursive: true });
+  const nodes: Record<string, Record<string, unknown>> = {};
+  for (let index = 0; index < 220; index += 1) {
+    nodes[`model.large_dbt_profile.noisy_${index}`] = {
+      resource_type: 'model',
+      name: `noisy_${index}`,
+      alias: `noisy_${index}`,
+      database: 'NBA_DB',
+      schema: 'ANALYTICS',
+      description: `Unrelated model ${index} in a large dbt repo.`,
+      depends_on: { nodes: [] },
+      tags: ['noise'],
+      original_file_path: `models/noisy/noisy_${index}.sql`,
+      config: { materialized: 'table' },
+      columns: {
+        id: { name: 'id', data_type: 'number' },
+        created_at: { name: 'created_at', data_type: 'timestamp' },
+      },
+    };
+  }
+  nodes['model.large_dbt_profile.athlete_box_scores'] = {
+    resource_type: 'model',
+    name: 'athlete_box_scores',
+    alias: 'athlete_box_scores',
+    database: 'NBA_DB',
+    schema: 'ANALYTICS',
+    description: 'Box score rows at game grain for each athlete.',
+    depends_on: { nodes: [] },
+    tags: ['profile', 'stats'],
+    original_file_path: 'models/marts/athlete_box_scores.sql',
+    config: { materialized: 'table' },
+    columns: {
+      athlete_name: {
+        name: 'athlete_name',
+        data_type: 'text',
+        description: 'Name of the athlete.',
+      },
+      game_date: {
+        name: 'game_date',
+        data_type: 'date',
+        description: 'Date of the game.',
+      },
+      pts: {
+        name: 'pts',
+        data_type: 'number',
+        description: 'Points recorded.',
+      },
+      ast: {
+        name: 'ast',
+        data_type: 'number',
+        description: 'Assists recorded.',
+      },
+      reb: {
+        name: 'reb',
+        data_type: 'number',
+        description: 'Rebounds recorded.',
+      },
+    },
+  };
+  writeFileSync(
+    join(root, 'target', 'manifest.json'),
+    JSON.stringify({
+      metadata: { project_name: 'large_dbt_profile' },
+      nodes,
+      sources: {},
+    }),
+    'utf-8',
+  );
+}

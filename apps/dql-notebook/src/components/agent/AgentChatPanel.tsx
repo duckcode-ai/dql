@@ -136,41 +136,6 @@ export function AgentChatPanel({
     setError(null);
     setLiveText('');
     setLiveEvents([]);
-    const chatResearchRequest = onInvestigate ? researchRequestFromChatPrompt(text, conversationContext) : null;
-    if (chatResearchRequest && onInvestigate) {
-      const planMessage: LocalMessage = {
-        id: makeMessageId(),
-        role: 'assistant',
-        content: researchPlanMessage(chatResearchRequest),
-        createdAt: new Date().toISOString(),
-      };
-      const finalMessages = [...next, planMessage];
-      setMessages(finalMessages);
-      onInvestigate(chatResearchRequest);
-      if (conversationTarget) {
-        let activeConversationId = conversationId;
-        if (!activeConversationId) {
-          const created = await api.createAppConversation(conversationTarget.appId, {
-            title: text.slice(0, 80),
-            dashboardId: conversationTarget.dashboardId,
-            notebookPath: conversationTarget.notebookPath,
-            context: conversationContext,
-            messages: toConversationMessages(finalMessages),
-          });
-          if (created.ok) {
-            activeConversationId = created.conversation.id;
-            setConversationId(activeConversationId);
-          }
-        } else {
-          await api.updateAppConversation(conversationTarget.appId, activeConversationId, {
-            context: conversationContext ?? null,
-            messages: toConversationMessages(finalMessages),
-          });
-        }
-        onConversationUpdated?.();
-      }
-      return;
-    }
     setRunning(true);
     const controller = new AbortController();
     abortRef.current = controller;
@@ -614,37 +579,6 @@ function previousUserQuestion(messages: LocalMessage[], index: number): string |
     if (messages[i]?.role === 'user') return messages[i].content;
   }
   return undefined;
-}
-
-function researchRequestFromChatPrompt(
-  text: string,
-  context: AgentConversationContext | undefined,
-): AgentAnswerInvestigationRequest | null {
-  const question = cleanOptionalString(text);
-  if (!question || !looksLikeResearchRequest(question)) return null;
-  const blockName = cleanOptionalString(context?.sourceCertifiedBlock);
-  return {
-    question,
-    title: blockName ? `${blockName}: ${question}` : question,
-    blockName,
-    answerSummary: context?.sourceAnswerSummary,
-  };
-}
-
-function looksLikeResearchRequest(text: string): boolean {
-  return /\b(deep\s+research|research\s+plan|investigate|investigation|root\s+cause|why\s+(did|has|have|is|are|was|were)|what\s+(changed|happened)|drivers?|drove|break\s*down|compare|trust|rely|lineage|certif|gap|anomal|exception|outlier)\b/i.test(text);
-}
-
-function researchPlanMessage(request: AgentAnswerInvestigationRequest): string {
-  const source = request.blockName ? `Start from ${request.blockName} as the evidence context.` : 'Start from the current app context.';
-  return [
-    `I'll handle this as a Research request: "${request.question}".`,
-    '',
-    'Plan:',
-    `1. ${source}`,
-    '2. Build review-required evidence in the Research workspace.',
-    '3. Keep this chat attached so follow-ups, clarifications, and next actions stay in one flow.',
-  ].join('\n');
 }
 
 function Bubble({

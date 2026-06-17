@@ -1422,7 +1422,7 @@ function AppCopilotPanel({
   const businessOutcome = dashboardMeta?.businessOutcome
     ?? app?.description
     ?? dashboardMeta?.description
-    ?? 'Understand what is changing, why it matters, and what action should happen next.';
+    ?? 'Understand business movement, decision relevance, and the next operating action.';
   const decisionUse = dashboardMeta?.decisionUse
     ?? 'Review performance, isolate drivers, and decide the next operating action.';
   const audience = dashboardMeta?.audience ?? app?.audience ?? 'Leadership';
@@ -1512,8 +1512,8 @@ function AppCopilotPanel({
       label: 'Explain impact',
       icon: <MessageSquareText size={14} />,
       prompt: selectedBlock
-        ? `Explain ${selectedBlock.title} for an executive audience. Start with what it means for the business, why it matters, and what action to consider. Keep technical evidence secondary.`
-        : 'Explain this dashboard for an executive audience. Start with the business story, decision impact, and what action to consider. Keep technical evidence secondary.',
+        ? `Explain ${selectedBlock.title} for an executive audience. Start with the business meaning, decision relevance, and recommended action. Keep technical evidence secondary.`
+        : 'Explain this dashboard for an executive audience. Start with the business story, decision impact, and recommended action. Keep technical evidence secondary.',
     },
     {
       label: 'Drill into drivers',
@@ -1592,7 +1592,7 @@ function AppCopilotPanel({
           hideSqlByDefault
           suggestions={promptStarters}
           autoAsk={askSeed ?? undefined}
-          emptyHint="Ask what changed, why it matters, what action to take, or what evidence needs review."
+          emptyHint="Ask a question or request deeper research from the current context."
           inputPlaceholder="Ask a business question..."
           onInvestigate={startInvestigationFromAnswer}
           variant="executive"
@@ -1702,39 +1702,6 @@ function ResearchPanel({
 
   const selected = items.find((item) => item.id === selectedId) ?? items[0] ?? null;
 
-  const createResearch = async (question: string, intent?: LocalAppInvestigation['intent']) => {
-    if (!appId) return;
-    setBusy('create');
-    setError(null);
-    const result = await api.createAppInvestigation(appId, {
-      dashboardId: activeDashboardId,
-      title: question,
-      question,
-      intent,
-      context: {
-        scope: 'dashboard',
-        appId,
-        appName: appDoc?.app.name,
-        dashboardId: activeDashboardId,
-        dashboardTitle: dashboardDoc?.dashboard.metadata.title,
-        domain: appDoc?.app.domain ?? dashboardDoc?.dashboard.metadata.domain,
-      },
-      run: true,
-    });
-    setBusy(null);
-    if (!result.ok) {
-      setError(result.error);
-      return;
-    }
-    setItems((current) => {
-      const next = upsertInvestigation(current, result.investigation);
-      onInvestigationsChanged(next);
-      return next;
-    });
-    setSelectedId(result.investigation.id);
-    setEvidenceTab('preview');
-  };
-
   const rerunResearch = async (investigation: LocalAppInvestigation) => {
     if (!appId) return;
     setBusy(investigation.id);
@@ -1806,17 +1773,9 @@ function ResearchPanel({
           <span><Search size={14} /> Research</span>
           <b>{items.length}</b>
         </div>
-        <button
-          type="button"
-          className="dql-app-research-new"
-          onClick={() => void createResearch('What changed and what drove it?', 'diagnose_change')}
-          disabled={busy === 'create'}
-        >
-          <Plus size={14} /> New investigation
-        </button>
         {loading ? <EmptyPanel title="Loading research..." detail="Reading local investigations." compact /> : null}
         {!loading && items.length === 0 ? (
-          <EmptyPanel title="No research yet." detail="Open a dashboard tile and ask why, drivers, exceptions, or trust." compact />
+          <EmptyPanel title="No research yet." detail="Start from the assistant so the research keeps the original question and context." compact />
         ) : null}
         <div className="dql-app-research-items">
           {items.map((item) => (
@@ -1869,7 +1828,7 @@ function ResearchPanel({
               </section>
 
               <section className="dql-app-research-metrics">
-                <PanelHead title="What changed" meta={selected.dashboardId ?? activeDashboardId ?? 'app'} />
+                <PanelHead title="Metric context" meta={selected.dashboardId ?? activeDashboardId ?? 'app'} />
                 <ResearchMetricStrip investigation={selected} />
               </section>
             </div>
@@ -1903,24 +1862,9 @@ function ResearchPanel({
               </div>
               <ResearchEvidence investigation={selected} tab={evidenceTab} />
             </section>
-
-            <section className="dql-app-research-section">
-              <PanelHead title="Next actions" meta="local-first" />
-              <div className="dql-app-research-next">
-                <button type="button" onClick={() => void createResearch(`Show exception rows for ${selected.sourceBlockId ?? selected.title}`, 'anomaly_investigation')}>
-                  Exceptions
-                </button>
-                <button type="button" onClick={() => void createResearch(`Compare segments for ${selected.sourceBlockId ?? selected.title}`, 'segment_compare')}>
-                  Compare
-                </button>
-                <button type="button" onClick={() => void createResearch(`Can leaders rely on ${selected.sourceBlockId ?? selected.title}?`, 'trust_gap_review')}>
-                  Trust gaps
-                </button>
-              </div>
-            </section>
           </>
         ) : (
-          <EmptyPanel title="Start research from a dashboard tile." detail="Use the tile menu or the copilot Research buttons." />
+          <EmptyPanel title="Start research from the assistant." detail="Ask a follow-up, then keep the evidence review here." />
         )}
       </section>
     </div>
