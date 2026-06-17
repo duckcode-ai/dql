@@ -12,7 +12,14 @@
 import { z } from 'zod';
 import { existsSync } from 'node:fs';
 import type { DQLContext } from '../context.js';
-import { KGStore, defaultKgPath, type KGNodeKind } from '@duckcodeailabs/dql-agent';
+import {
+  KGStore,
+  buildLocalContextPack,
+  defaultKgPath,
+  ensureMetadataCatalogFresh,
+  reindexProject,
+  type KGNodeKind,
+} from '@duckcodeailabs/dql-agent';
 
 export const kgSearchInput = {
   query: z.string().describe('Natural-language or keyword query.'),
@@ -30,15 +37,18 @@ export const kgSearchInput = {
   limit: z.number().int().min(1).max(50).optional().describe('Max hits (default 10).'),
 };
 
-export function kgSearch(
+export async function kgSearch(
   ctx: DQLContext,
   args: { query: string; kinds?: string[]; domain?: string; limit?: number },
 ) {
   const path = defaultKgPath(ctx.projectRoot);
-  if (!existsSync(path)) {
+  const refreshError = await reindexProject(ctx.projectRoot, { kgPath: path })
+    .then(() => null)
+    .catch((err) => err instanceof Error ? err.message : String(err));
+  if (refreshError) {
     return {
       hits: [],
-      hint: `KG not built. Run \`dql app reindex\` to build .dql/cache/agent-kg.sqlite.`,
+      hint: `KG refresh failed: ${refreshError}`,
     };
   }
   const kg = new KGStore(path);
@@ -72,6 +82,53 @@ export function kgSearch(
   } finally {
     kg.close();
   }
+}
+
+export const inspectMetadataContextInput = {
+  question: z.string().describe('User question to ground in the local SQLite metadata catalog.'),
+  focusObjectKey: z.string().optional().describe('Optional object key, such as dql:block:Revenue or semantic:metric:revenue.'),
+  objectTypes: z.array(z.string()).optional().describe('Optional metadata object type filter.'),
+  limit: z.number().int().min(1).max(160).optional().describe('Maximum selected objects in the context pack.'),
+};
+
+export async function inspectMetadataContext(
+  ctx: DQLContext,
+  args: {
+    question: string;
+    focusObjectKey?: string;
+    objectTypes?: string[];
+    limit?: number;
+  },
+) {
+  const refresh = await ensureMetadataCatalogFresh(ctx.projectRoot)
+    .catch((err) => ({
+      path: '',
+      refreshed: false,
+      objectCount: 0,
+      edgeCount: 0,
+      diagnostics: [{
+        kind: 'metadata',
+        severity: 'error' as const,
+        message: err instanceof Error ? err.message : String(err),
+      }],
+      fingerprint: '',
+    }));
+  const contextPack = await buildLocalContextPack(ctx.projectRoot, {
+    question: args.question,
+    focusObjectKey: args.focusObjectKey,
+    objectTypes: args.objectTypes,
+    limit: args.limit,
+  });
+  return {
+    catalog: {
+      path: refresh.path || '.dql/cache/metadata.sqlite',
+      refreshed: refresh.refreshed,
+      objectCount: refresh.objectCount,
+      edgeCount: refresh.edgeCount,
+      diagnostics: refresh.diagnostics,
+    },
+    contextPack,
+  };
 }
 
 export const feedbackRecordInput = {

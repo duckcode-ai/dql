@@ -978,16 +978,48 @@ function AppWorkspaceSurface({
   const handleDashboardRunChange = useCallback((run: DashboardRunResponse | null) => {
     setDashboardRun(run);
   }, []);
-  const handleAskBlock = useCallback((blockId: string, question: string) => {
-    setSelectedBlockId(blockId);
-    onExplainChange(true);
-    setAskSeed({ text: question, nonce: Date.now() });
-  }, [onExplainChange]);
   const handleStartResearch = useCallback((seed: Omit<AppResearchSeed, 'nonce'>) => {
     setResearchSeed({ ...seed, nonce: Date.now() });
     onSectionChange('research');
     onExplainChange(false);
   }, [onExplainChange, onSectionChange]);
+  const handleAskBlock = useCallback((blockId: string, question: string) => {
+    setSelectedBlockId(blockId);
+    const item = dashboardDoc?.dashboard.layout.items.find((candidate) => getDashboardItemBlockId(candidate) === blockId);
+    const tileRun = dashboardRun?.tiles.find((tile) => tile.tileId === item?.i || tile.blockId === blockId);
+    if (isResearchPrompt(question)) {
+      const title = item?.title ?? blockId;
+      handleStartResearch({
+        question,
+        title: `${title}: ${question}`,
+        dashboardId: dashboardDoc?.dashboard.id,
+        sourceTileId: item?.i,
+        sourceBlockId: blockId,
+        intent: researchIntentFromPrompt(question),
+        context: {
+          scope: 'selected-dashboard-block',
+          appId: app?.id,
+          appName: app?.name,
+          dashboardId: dashboardDoc?.dashboard.id,
+          dashboardTitle: dashboardDoc?.dashboard.metadata.title,
+          domain: app?.domain ?? dashboardDoc?.dashboard.metadata.domain,
+          selectedBlock: {
+            blockId,
+            title,
+            tileId: item?.i,
+            viz: item?.viz.type,
+            status: tileRun?.status,
+            rowCount: tileRun?.result?.rowCount,
+            columns: tileRun?.result?.columns?.slice(0, 8),
+            sampleRows: sampleDashboardRows(tileRun?.result?.rows, tileRun?.result?.columns),
+          },
+        },
+      });
+      return;
+    }
+    onExplainChange(true);
+    setAskSeed({ text: question, nonce: Date.now() });
+  }, [app, dashboardDoc, dashboardRun, handleStartResearch, onExplainChange]);
 
   useEffect(() => {
     if (dashboardBlockIds.length === 0) {
@@ -2244,7 +2276,7 @@ function upsertInvestigation(items: LocalAppInvestigation[], next: LocalAppInves
 }
 
 function isResearchPrompt(text: string): boolean {
-  return /\b(why|driver|drove|break\s*down|top mover|exception|outlier|anomal|compare|versus|trust|rely|certif|lineage|customer|account|what happened)\b/i.test(text);
+  return /\b(why|what\s+changed|changed?|change|drop|dropped|decline|declined|increase|increased|decrease|decreased|delta|variance|driver|drove|break\s*down|top mover|exception|outlier|anomal|compare|versus|trust|rely|certif|lineage|customer|account|what happened)\b/i.test(text);
 }
 
 function researchIntentFromPrompt(text: string): LocalAppInvestigation['intent'] {

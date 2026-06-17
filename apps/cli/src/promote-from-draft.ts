@@ -26,14 +26,14 @@ export interface PromoteResult {
  *        ->  next ask hits Tier-1 forever
  *
  * Behavior:
- *   1. Validates the draft exists, has status=draft, and has a sane
- *      `_proposed { proposed_contract_id = ... }` block.
+ *   1. Validates the draft exists, has status=draft, and has proposal
+ *      metadata such as `proposed_contract_id = ...`.
  *   2. Moves the file to blocks/<domain>/<slug>.dql.
  *   3. Flips `status = "draft"` to `status = "certified"`.
  *   4. Sets `datalex_contract = "<contract>"` (provided via --contract or
- *      taken from `_proposed.proposed_contract_id` with `@1` appended).
+ *      taken from `proposed_contract_id` with `@1` appended).
  *   5. Sets `owner = "<owner>"` from --owner if provided.
- *   6. Drops the `_proposed { ... }` provenance block (its job is done).
+ *   6. Drops Tier-2 proposal metadata fields (their job is done).
  *   7. Computes the patch the human still needs to apply to
  *      datalex-manifest.json (or surfaces it for --open-pr).
  *
@@ -68,7 +68,7 @@ export function promoteFromDraft(
       ok: false,
       message:
         'No --contract <id@version> provided and no proposed_contract_id in the draft. ' +
-        'Either pass --contract commerce.Customer.foo@1 or restore the _proposed block.',
+        'Either pass --contract commerce.Customer.foo@1 or restore proposed_contract_id.',
     };
   }
 
@@ -171,10 +171,10 @@ function renderPromoted(
     }
   }
 
-  // Drop the _proposed { ... } provenance block. Its job is done; the
-  // certified block is the new source of truth and should not carry the
-  // capture metadata.
+  // Drop Tier-2 provenance metadata. Its job is done; the certified block is
+  // the new source of truth and should not carry capture metadata.
   out = out.replace(/\n\s*_proposed\s*\{[^}]*\}\s*\n/, '\n');
+  out = out.replace(/\n\s*(asked_times|first_asked|last_asked|proposed_contract_id|proposed_domain|proposed_entity|upstream_refs)\s*=\s*(?:"[^"]*"|"""[\s\S]*?"""|\d+|\[[^\]]*\])\s*/g, '\n');
 
   return out;
 }

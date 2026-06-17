@@ -216,6 +216,7 @@ async function runAppGenerate(rest: string[], flags: CLIFlags): Promise<void> {
   const {
     KGStore,
     defaultKgPath,
+    ensureMetadataCatalogFresh,
     generateAppFromPlan,
     planAppFromPrompt,
     reindexProject,
@@ -236,6 +237,7 @@ async function runAppGenerate(rest: string[], flags: CLIFlags): Promise<void> {
     const generated = generateAppFromPlan(projectRoot, plan, kg, {
       overwrite: Boolean(flags.force),
     });
+    await ensureMetadataCatalogFresh(projectRoot, { force: true });
 
     if ((flags as { format?: string }).format === "json") {
       console.log(
@@ -411,7 +413,7 @@ async function runAppReindex(flags: CLIFlags): Promise<void> {
     return;
   }
   console.log(
-    `  ✓ Knowledge graph reindexed — ${stats.nodes} nodes, ${stats.edges} edges, ${stats.skills} skill(s).`,
+    `  ✓ Knowledge graph and metadata catalog reindexed — ${stats.nodes} nodes, ${stats.edges} edges, ${stats.skills} skill(s).`,
   );
 }
 

@@ -34,8 +34,8 @@ export interface ProposalSummary {
 
 /**
  * The OSS-side review queue for the Tier-2 promotion loop. Reads
- * `blocks/_drafts/*.dql` from the project, parses the `_proposed { ... }`
- * provenance block out of each, and returns a list ranked by `askedTimes`
+ * `blocks/_drafts/*.dql` from the project, parses Tier-2 proposal metadata
+ * fields out of each, and returns a list ranked by `askedTimes`
  * descending — questions that get asked repeatedly are the strongest
  * candidates for certification.
  *

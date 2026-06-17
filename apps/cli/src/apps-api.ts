@@ -84,6 +84,7 @@ export async function handleAppsApi(ctx: Ctx): Promise<boolean> {
         sendJson(res, 400, { error: result.error });
         return true;
       }
+      await refreshGeneratedMetadata(projectRoot);
       sendJson(res, 201, result);
     } catch (err) {
       sendJson(res, 500, { error: (err as Error).message });
@@ -899,6 +900,7 @@ export async function generateAppPackage(
     KGStore,
     defaultKgPath,
     generateAppFromPlan,
+    ensureMetadataCatalogFresh,
     planAppFromPrompt,
     reindexProject,
     validateAppPlan,
@@ -919,6 +921,7 @@ export async function generateAppPackage(
     const generated = generateAppFromPlan(projectRoot, plan, kg, {
       overwrite: Boolean(input.force),
     });
+    await ensureMetadataCatalogFresh(projectRoot, { force: true });
     const app = collectAppsList(projectRoot).find((entry) => entry.id === plan.appId) ?? null;
     return {
       ok: true,
@@ -1285,9 +1288,10 @@ async function runAppInvestigation(
     const previews = buildContextPreviews(selected);
     let metricSnapshot = buildMetricSnapshot(selected);
     let driverCards = buildDriverCards(selected, intent);
+    const baselineGap = intent === 'diagnose_change' && hasSelectedRows(selected) && !hasComparableTimeBaseline(selected);
     const sourceTileId = investigation.sourceTileId ?? selectedContextString(context, 'tileId');
     const sourceBlockId = investigation.sourceBlockId ?? selectedContextString(context, 'blockId');
-    const deterministicGeneration = generatedSql
+    const deterministicGeneration = generatedSql || baselineGap
       ? undefined
       : buildDeterministicInvestigationSql(ctx.projectRoot, {
           question,
@@ -1296,7 +1300,7 @@ async function runAppInvestigation(
           sourceBlockId,
         });
     generatedSql = generatedSql || deterministicGeneration?.sql;
-    const agentGeneration = generatedSql
+    const agentGeneration = generatedSql || baselineGap
       ? undefined
       : await generateInvestigationSql(ctx, {
           appId: investigation.appId,
@@ -1328,7 +1332,8 @@ async function runAppInvestigation(
         generatedSql: generatedSql || undefined,
         sqlExecuted: Boolean(sqlEvidence.preview),
         sqlError,
-        generationSource: deterministicGeneration ? 'selected_block_metadata' : agentGeneration?.providerUsed ? 'ai_provider' : generatedSql ? 'provided_sql' : 'context_only',
+        generationSource: baselineGap ? 'missing_baseline' : deterministicGeneration ? 'selected_block_metadata' : agentGeneration?.providerUsed ? 'ai_provider' : generatedSql ? 'provided_sql' : 'context_only',
+        baselineGap,
         sourceBlockPath: deterministicGeneration?.sourceBlockPath,
         sourceBlockName: deterministicGeneration?.sourceBlockName,
         providerUsed: agentGeneration?.providerUsed,
@@ -1343,14 +1348,21 @@ async function runAppInvestigation(
         sourceBlockPath: deterministicGeneration?.sourceBlockPath ?? selectedString(selected, 'blockPath'),
         certificationStatus: selectedString(selected, 'certificationStatus'),
       },
-      assumptions: investigationAssumptions(intent, selected, generatedSql, sqlError),
+      assumptions: [
+        ...investigationAssumptions(intent, selected, generatedSql, sqlError),
+        ...(baselineGap ? ['The selected tile sample does not include at least two comparable time values, so DQL did not invent a change query from an unrelated table.'] : []),
+      ],
       context,
       agentEvidence: agentGeneration?.evidence,
       analysisPlan: agentGeneration?.analysisPlan,
       citations: agentGeneration?.citations,
     };
-    const summary = cleanString(agentGeneration?.answer) || buildInvestigationSummary(intent, question, selected, metricSnapshot, driverCards);
-    const recommendation = buildInvestigationRecommendation(intent, selected, sqlError);
+    const summary = cleanString(agentGeneration?.answer) || (baselineGap
+      ? buildMissingBaselineSummary(question, selected)
+      : buildInvestigationSummary(intent, question, selected, metricSnapshot, driverCards));
+    const recommendation = baselineGap
+      ? buildMissingBaselineRecommendation(selected)
+      : buildInvestigationRecommendation(intent, selected, sqlError);
     return storage.updateAppInvestigation(investigation.id, {
       title: cleanString(input.question) ? titleFromInvestigation(question, selected) : investigation.title,
       question,
@@ -1471,6 +1483,26 @@ function buildMetricSnapshot(selected: Record<string, unknown> | null): Record<s
     rowsReviewed: rows.length,
     context: selectedString(selected, 'title') ?? 'Selected dashboard tile',
   };
+}
+
+function hasSelectedRows(selected: Record<string, unknown> | null): boolean {
+  return selectedRows(selected).length > 0;
+}
+
+function hasComparableTimeBaseline(selected: Record<string, unknown> | null): boolean {
+  const rows = selectedRows(selected);
+  if (rows.length < 2) return false;
+  const columns = selectedColumns(selected, rows);
+  const profile = profileResultColumns(columns, rows);
+  const timeDimension = chooseTimeDimension(profile);
+  if (!timeDimension) return false;
+  const values = new Set(
+    rows
+      .map((row) => row[timeDimension.name])
+      .filter((value) => value !== null && value !== undefined && String(value).trim())
+      .map((value) => String(value)),
+  );
+  return values.size >= 2;
 }
 
 function buildDriverCards(
@@ -1651,7 +1683,7 @@ function buildDeterministicInvestigationSql(
     };
   }
 
-  if (input.intent === 'anomaly_investigation') {
+  if (input.intent === 'anomaly_investigation' || input.intent === 'diagnose_change') {
     const timeDimension = chooseTimeDimension(profile) ?? dimension;
     const rankExpr = `${measureAgg(measure)}(${quoteSqlIdentifier(measure.name)})`;
     if (timeDimension) {
@@ -2034,6 +2066,19 @@ function buildInvestigationSummary(
   }
   const driver = drivers[0]?.title ? ` Top visible driver in the current evidence is ${drivers[0].title}.` : '';
   return `DQL opened a review-required investigation for ${target}: ${question}.${delta}${driver}`;
+}
+
+function buildMissingBaselineSummary(
+  question: string,
+  selected: Record<string, unknown> | null,
+): string {
+  const target = selectedString(selected, 'title') ?? 'the selected tile';
+  return `DQL opened a review-required investigation for ${target}: ${question}. The selected tile shows the current certified result, but its sample does not include a comparable prior period or historical snapshot, so DQL cannot calculate what changed without guessing.`;
+}
+
+function buildMissingBaselineRecommendation(selected: Record<string, unknown> | null): string {
+  const target = selectedString(selected, 'title') ?? 'this tile';
+  return `Use ${target} as current-state evidence. To explain change, add or select a block with a time grain, snapshot date, or prior-period baseline, then rerun the investigation.`;
 }
 
 function buildInvestigationRecommendation(
@@ -2805,6 +2850,16 @@ function activatePersona(
 }
 
 // ---- IO utilities ----
+
+async function refreshGeneratedMetadata(projectRoot: string): Promise<void> {
+  try {
+    const { ensureMetadataCatalogFresh } = await import('@duckcodeailabs/dql-agent');
+    await ensureMetadataCatalogFresh(projectRoot, { force: true });
+  } catch {
+    // App files remain the source of truth; the local catalog refreshes again
+    // on the next agent/MCP call if this best-effort update fails.
+  }
+}
 
 function sendJson(res: ServerResponse, status: number, body: unknown): void {
   res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8' });

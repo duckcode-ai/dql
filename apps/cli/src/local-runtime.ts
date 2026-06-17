@@ -60,12 +60,17 @@ import {
   MemoryStore,
   OllamaProvider,
   OpenAIProvider,
+  buildLocalContextPack,
   defaultMemoryPath,
   ensureDefaultMemoryFiles,
+  ensureMetadataCatalogFresh,
+  recordRuntimeSchemaSnapshot,
   type AgentAnswer,
   type AgentResultPayload,
   type AgentProvider,
   type AgentSchemaTable,
+  type LocalContextPack,
+  type MetadataObject,
   type KGNode,
 } from '@duckcodeailabs/dql-agent';
 import { handleAppsApi } from './apps-api.js';
@@ -111,6 +116,8 @@ import {
   compileMetricFlowQuery,
   hasDbtSemanticManifest,
 } from './metricflow.js';
+
+const NOTEBOOK_EXECUTE_PREVIEW_ROW_LIMIT = 500;
 
 export interface ProjectConfig {
   project?: string;
@@ -188,6 +195,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
       } catch { /* continue without */ }
     }
   }
+  await refreshLocalMetadataCatalog(projectRoot);
 
   // Auto-register data/ CSV and Parquet files as DuckDB views so semantic layer
   // queries like `FROM orders` resolve without requiring read_csv_auto() in SQL.
@@ -415,18 +423,28 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
   };
 
   const getSchemaContextForAgent = async (question: string): Promise<AgentSchemaTable[]> => {
+    const catalogContext = await buildAgentSchemaContextFromCatalog(projectRoot, question).catch(() => []);
+    if (catalogContext.length > 0) {
+      const enriched = await enrichAgentSchemaContextWithValueMatches(question, catalogContext, executor, connection);
+      recordAgentRuntimeSchemaSnapshot(projectRoot, enriched, 'catalog enriched runtime schema');
+      return enriched;
+    }
+
     try {
       const result = await executor.executeQuery(
         `SELECT table_schema, table_name, column_name, data_type
          FROM information_schema.columns
          WHERE table_schema NOT IN ('information_schema', 'pg_catalog')
-         ORDER BY table_schema, table_name, ordinal_position`,
+         ORDER BY table_schema, table_name, ordinal_position
+         LIMIT 2000`,
         [],
         runtimeVariables({}),
         connection,
       );
       const schemaContext = buildAgentSchemaContext(question, result.rows);
-      return enrichAgentSchemaContextWithValueMatches(question, schemaContext, executor, connection);
+      const enriched = await enrichAgentSchemaContextWithValueMatches(question, schemaContext, executor, connection);
+      recordAgentRuntimeSchemaSnapshot(projectRoot, enriched, 'information_schema runtime scan');
+      return enriched;
     } catch {
       return [];
     }
@@ -1696,6 +1714,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           return;
         }
         setBlockStudioStatus(projectRoot, blockPath, newStatus);
+        await refreshLocalMetadataCatalog(projectRoot);
         res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
         res.end(serializeJSON({ ok: true, status: newStatus }));
       } catch (error) {
@@ -1824,6 +1843,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           return;
         }
         if (blockPath) setBlockStudioStatus(projectRoot, blockPath, 'certified');
+        await refreshLocalMetadataCatalog(projectRoot);
         res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
         res.end(serializeJSON({ ok: true, status: 'certified', ...result }));
       } catch (error) {
@@ -1926,6 +1946,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
         }
         const nextSession = { ...session, candidates: nextCandidates, updatedAt: new Date().toISOString() };
         writeBlockStudioImportSession(projectRoot, nextSession);
+        if (saved.length > 0) await refreshLocalMetadataCatalog(projectRoot);
         res.writeHead(errors.length > 0 ? 207 : 200, { 'Content-Type': 'application/json; charset=utf-8' });
         res.end(serializeJSON({ ok: errors.length === 0, session: nextSession, saved, errors }));
       } catch (error) {
@@ -2054,6 +2075,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           });
           const next = { ...readiness.candidate, reviewStatus: 'saved' as const, savedPath };
           writeBlockStudioImportCandidate(projectRoot, importId, next);
+          await refreshLocalMetadataCatalog(projectRoot);
           const payload = openBlockStudioDocument(projectRoot, savedPath, semanticLayer);
           res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
           res.end(serializeJSON({ candidate: next, block: payload }));
@@ -2204,6 +2226,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
               }
             : undefined,
         });
+        await refreshLocalMetadataCatalog(projectRoot);
         const payload = openBlockStudioDocument(projectRoot, savedPath, semanticLayer);
         res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
         res.end(serializeJSON(payload));
@@ -3602,7 +3625,9 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
         const resolved = resolveNotebookBlockReferenceCell(cell, projectRoot);
         const executableCell = resolved.cell;
         const cellConnection = isConnectionConfig(body.connection) ? body.connection : connection;
-        const tableMapping = await resolveSemanticTableMapping(executor, cellConnection, semanticLayer);
+        const tableMapping = needsSemanticTableMapping(executableCell)
+          ? await resolveSemanticTableMapping(executor, cellConnection, semanticLayer)
+          : undefined;
         const plan = buildExecutionPlan(executableCell, { semanticLayer, driver: cellConnection.driver, tableMapping });
         if (!plan) {
           res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
@@ -3891,22 +3916,26 @@ function normalizeQueryResult(
   rows: Record<string, unknown>[];
   rowCount: number;
   executionTime: number;
+  truncated?: boolean;
   semanticRefs?: { metrics: string[]; dimensions: string[] };
 } {
   const rawCols: unknown[] = Array.isArray(result?.columns) ? result.columns : [];
   const columns = rawCols.map((c) =>
     typeof c === 'string' ? c : typeof (c as any)?.name === 'string' ? (c as any).name : String(c)
   );
+  const rawRows = Array.isArray(result?.rows) ? result.rows : [];
+  const rows = rawRows.slice(0, NOTEBOOK_EXECUTE_PREVIEW_ROW_LIMIT);
   const hasRefs = semanticRefs && (semanticRefs.metrics.length > 0 || semanticRefs.dimensions.length > 0);
   return {
     columns,
-    rows: Array.isArray(result?.rows) ? result.rows : [],
-    rowCount: typeof result?.rowCount === 'number' ? result.rowCount : (result?.rows?.length ?? 0),
+    rows,
+    rowCount: typeof result?.rowCount === 'number' ? result.rowCount : rawRows.length,
     executionTime: typeof result?.executionTimeMs === 'number'
       ? result.executionTimeMs
       : typeof result?.executionTime === 'number'
         ? result.executionTime
         : 0,
+    ...(rawRows.length > rows.length ? { truncated: true } : {}),
     ...(hasRefs ? { semanticRefs } : {}),
   };
 }
@@ -3986,6 +4015,15 @@ export function serializeJSON(value: unknown): string {
     }
     return current;
   });
+}
+
+async function refreshLocalMetadataCatalog(projectRoot: string): Promise<void> {
+  try {
+    await ensureMetadataCatalogFresh(projectRoot, { force: true });
+  } catch {
+    // The catalog is a rebuildable local cache. Save/certify flows should not
+    // fail only because metadata refresh hit a stale dbt or semantic config.
+  }
 }
 
 function renderNotFound(path: string): string {
@@ -4392,6 +4430,12 @@ export function prepareSemanticSql(
     },
     unresolvedRefs: resolution.unresolvedRefs,
   };
+}
+
+function needsSemanticTableMapping(cell: NotebookCell): boolean {
+  if (cell.type === 'sql') return hasSemanticRefs(cell.source);
+  if (cell.type !== 'dql') return false;
+  return hasSemanticRefs(cell.source) || /\btype\s*=\s*"semantic"/i.test(cell.source);
 }
 
 export function normalizeProjectConnection(connection: ConnectionConfig, projectRoot: string): ConnectionConfig {
@@ -4972,7 +5016,9 @@ export async function resolveSemanticTableMapping(
     const tablesResult = await executor.executeQuery(
       `SELECT table_schema, table_name
        FROM information_schema.tables
-       WHERE table_schema NOT IN ('information_schema', 'pg_catalog')`,
+       WHERE table_schema NOT IN ('information_schema', 'pg_catalog')
+       ORDER BY table_schema, table_name
+       LIMIT 2000`,
       [], {}, connection,
     );
     return buildSemanticTableMapping(semanticLayer, tablesResult.rows);
@@ -7426,6 +7472,177 @@ function isAiPinRefreshDue(lastRefreshedAt?: string): boolean {
   const last = Date.parse(lastRefreshedAt);
   if (!Number.isFinite(last)) return true;
   return Date.now() - last >= 24 * 60 * 60 * 1000;
+}
+
+async function buildAgentSchemaContextFromCatalog(projectRoot: string, question: string): Promise<AgentSchemaTable[]> {
+  const contextPack = await buildLocalContextPack(projectRoot, { question, limit: 80 });
+  return buildAgentSchemaContextFromContextPack(question, contextPack);
+}
+
+function recordAgentRuntimeSchemaSnapshot(projectRoot: string, schemaContext: AgentSchemaTable[], source: string): void {
+  if (schemaContext.length === 0) return;
+  try {
+    recordRuntimeSchemaSnapshot(projectRoot, {
+      source,
+      tables: schemaContext.slice(0, 80).map((table) => ({
+        relation: table.relation,
+        schema: table.schema,
+        name: table.name,
+        description: table.description,
+        source: table.source,
+        columns: table.columns.slice(0, 120).map((column) => ({
+          name: column.name,
+          type: column.type,
+          description: column.description,
+          sampleValues: column.sampleValues?.slice(0, 8),
+        })),
+      })),
+    });
+  } catch {
+    // Runtime schema snapshots are advisory local metadata and must not block answers.
+  }
+}
+
+function buildAgentSchemaContextFromContextPack(question: string, contextPack: LocalContextPack): AgentSchemaTable[] {
+  const byRelation = new Map<string, AgentSchemaTable>();
+  const objectsByKey = new Map(contextPack.objects.map((object) => [object.objectKey, object]));
+
+  const upsert = (table: AgentSchemaTable) => {
+    if (!table.relation || !table.name) return;
+    const key = table.relation.toLowerCase();
+    const existing = byRelation.get(key);
+    if (!existing) {
+      byRelation.set(key, {
+        ...table,
+        columns: dedupeAgentSchemaColumns(table.columns).slice(0, 80),
+      });
+      return;
+    }
+    byRelation.set(key, {
+      ...existing,
+      description: existing.description ?? table.description,
+      source: existing.source === table.source ? existing.source : 'local metadata catalog',
+      columns: dedupeAgentSchemaColumns([...existing.columns, ...table.columns]).slice(0, 80),
+    });
+  };
+
+  for (const object of contextPack.objects) {
+    const table = metadataObjectToAgentSchemaTable(object);
+    if (table) upsert(table);
+  }
+
+  for (const edge of contextPack.edges) {
+    if (edge.edgeType !== 'maps_to_dbt_model' && edge.edgeType !== 'uses_dbt_model') continue;
+    const from = objectsByKey.get(edge.fromKey);
+    const to = objectsByKey.get(edge.toKey);
+    const warehouse = from?.objectType === 'warehouse_table' ? from : null;
+    const dbtModel = to && (to.objectType === 'dbt_model' || to.objectType === 'dbt_source') ? to : null;
+    if (!warehouse || !dbtModel) continue;
+    const warehouseTable = metadataObjectToAgentSchemaTable(warehouse);
+    const modelTable = metadataObjectToAgentSchemaTable(dbtModel);
+    if (!warehouseTable || !modelTable) continue;
+    upsert({
+      ...warehouseTable,
+      description: warehouseTable.description ?? modelTable.description,
+      columns: modelTable.columns,
+      source: 'local metadata catalog',
+    });
+  }
+
+  const tokens = agentSchemaTokens(question);
+  const shouldProbeValues = extractAgentValueSearchTerms(question).length > 0;
+  return Array.from(byRelation.values())
+    .map((table) => ({
+      table,
+      score: scoreAgentSchemaTable(table, tokens) + (shouldProbeValues ? scoreAgentValueProbeTable(table) : 0),
+    }))
+    .filter((entry) => entry.table.columns.length > 0 && entry.score > 0)
+    .sort((a, b) => b.score - a.score || a.table.relation.localeCompare(b.table.relation))
+    .slice(0, 12)
+    .map((entry) => entry.table);
+}
+
+function metadataObjectToAgentSchemaTable(object: MetadataObject): AgentSchemaTable | null {
+  if (object.objectType === 'dbt_column' || object.objectType === 'runtime_column') {
+    const relation = metadataPayloadString(object, 'relation');
+    const model = metadataPayloadString(object, 'model') ?? relation;
+    if (!model) return null;
+    return {
+      relation: relation ?? model,
+      schema: relation ? relation.split('.').slice(-2, -1)[0] : undefined,
+      name: relation ? relation.split('.').at(-1) ?? model : model,
+      source: 'local metadata catalog',
+      columns: [{
+        name: object.name,
+        type: metadataPayloadString(object, 'type'),
+        description: object.description,
+      }],
+    };
+  }
+
+  if (object.objectType !== 'dbt_model' && object.objectType !== 'dbt_source' && object.objectType !== 'warehouse_table' && object.objectType !== 'runtime_table') {
+    return null;
+  }
+
+  const relation = metadataObjectRelation(object);
+  if (!relation) return null;
+  const relationParts = relation.split('.').filter(Boolean);
+  const schema = metadataPayloadString(object, 'schema') ?? (relationParts.length >= 2 ? relationParts[relationParts.length - 2] : undefined);
+  const name = relationParts.at(-1) ?? object.name;
+  const columns = metadataObjectColumns(object);
+  return {
+    relation,
+    schema,
+    name,
+    description: object.description,
+    columns,
+    source: 'local metadata catalog',
+  };
+}
+
+function metadataObjectRelation(object: MetadataObject): string | undefined {
+  const relation = metadataPayloadString(object, 'relation');
+  if (relation) return relation;
+  const database = metadataPayloadString(object, 'database');
+  const schema = metadataPayloadString(object, 'schema');
+  if (database && schema) return [database, schema, object.name].join('.');
+  return object.fullName ?? object.name;
+}
+
+function metadataObjectColumns(object: MetadataObject): AgentSchemaTable['columns'] {
+  const columns = object.payload?.columns;
+  if (!Array.isArray(columns)) return [];
+  return columns.flatMap((column) => {
+    if (!column || typeof column !== 'object') return [];
+    const record = column as Record<string, unknown>;
+    const name = stringFromRecord(record, 'name') ?? stringFromRecord(record, 'column_name');
+    if (!name) return [];
+    return [{
+      name,
+      type: stringFromRecord(record, 'type') ?? stringFromRecord(record, 'data_type'),
+      description: stringFromRecord(record, 'description'),
+    }];
+  });
+}
+
+function metadataPayloadString(object: MetadataObject, key: string): string | undefined {
+  const value = object.payload?.[key];
+  return typeof value === 'string' && value.trim() ? value.trim() : undefined;
+}
+
+function dedupeAgentSchemaColumns(columns: AgentSchemaTable['columns']): AgentSchemaTable['columns'] {
+  const byName = new Map<string, AgentSchemaTable['columns'][number]>();
+  for (const column of columns) {
+    const key = column.name.toLowerCase();
+    const existing = byName.get(key);
+    byName.set(key, existing ? {
+      ...existing,
+      type: existing.type ?? column.type,
+      description: existing.description ?? column.description,
+      sampleValues: uniqueStrings([...(existing.sampleValues ?? []), ...(column.sampleValues ?? [])]).slice(0, 5),
+    } : column);
+  }
+  return Array.from(byName.values());
 }
 
 export function buildAgentSchemaContext(question: string, rows: unknown[]): AgentSchemaTable[] {

@@ -22,6 +22,7 @@ import { buildKGFromManifest, buildKGFromSemanticLayer } from "./kg/build.js";
 import { loadSkills } from "./skills/loader.js";
 import type { Skill } from "./skills/loader.js";
 import type { KGEdge, KGNode } from "./kg/types.js";
+import { ensureMetadataCatalogFresh } from "./metadata/catalog.js";
 
 export { KGStore } from "./kg/sqlite-fts.js";
 export type {
@@ -90,6 +91,41 @@ export type {
   MemorySearchOptions,
 } from "./memory/sqlite-memory.js";
 export {
+  MetadataCatalog,
+  buildLocalContextPack,
+  buildMetadataSnapshot,
+  defaultMetadataPath,
+  ensureMetadataCatalogFresh,
+  openMetadataCatalog,
+  planAgentAnswer,
+  recordRuntimeSchemaSnapshot,
+  recordQueryRun,
+  upsertMetadataSnapshot,
+} from "./metadata/catalog.js";
+export type {
+  BuildLocalContextPackRequest,
+  EnsureMetadataCatalogOptions,
+  EnsureMetadataCatalogResult,
+  LocalContextPack,
+  MetadataCandidateConflict,
+  MetadataDiagnostic,
+  MetadataEdge,
+  MetadataAgentIntent,
+  MetadataAllowedSqlContext,
+  MetadataAnswerRoute,
+  MetadataEvidenceRole,
+  MetadataMissingContext,
+  MetadataObject,
+  MetadataRouteDecision,
+  MetadataSnapshot,
+  MetadataTrustLabel,
+  PlanAgentAnswerResult,
+  QueryRunSummary,
+  RuntimeSchemaSnapshot,
+  RuntimeSchemaTable,
+  RuntimeSchemaColumn,
+} from "./metadata/catalog.js";
+export {
   ClaudeProvider,
   OpenAIProvider,
   GeminiProvider,
@@ -131,9 +167,8 @@ export async function reindexProject(
 ): Promise<{ nodes: number; edges: number; skills: number }> {
   const manifest = opts.manifest ?? loadManifest(projectRoot);
   const manifestGraph = buildKGFromManifest(manifest);
-  const semanticGraph = buildKGFromSemanticLayer(
-    loadAgentSemanticLayer(projectRoot),
-  );
+  const semanticLayer = loadAgentSemanticLayer(projectRoot);
+  const semanticGraph = buildKGFromSemanticLayer(semanticLayer);
   let nodes = [...manifestGraph.nodes, ...semanticGraph.nodes];
   let edges = [...manifestGraph.edges, ...semanticGraph.edges];
 
@@ -162,6 +197,11 @@ export async function reindexProject(
   } finally {
     kg.close();
   }
+  await ensureMetadataCatalogFresh(projectRoot, {
+    manifest,
+    semanticLayer,
+    force: true,
+  });
   return { nodes: nodes.length, edges: edges.length, skills: skills.length };
 }
 

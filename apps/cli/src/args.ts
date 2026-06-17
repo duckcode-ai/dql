@@ -28,6 +28,17 @@ export interface CLIFlags {
   datalexManifestPath?: string;
   /** `--open-pr` — push a branch + open a GitHub PR with the promotion diff. */
   openPr?: boolean;
+  /** Agent/provider selection, e.g. ollama/openai/claude/gemini. */
+  provider?: string;
+  /** Optional agent user id for memory/feedback attribution. */
+  user?: string;
+  /** Local runtime URL for agent block execution. */
+  runtimeUrl?: string;
+  runtime?: string;
+  /** Agent feedback helpers. */
+  block?: string;
+  question?: string;
+  comment?: string;
 }
 
 export interface ParsedArgs {
@@ -121,6 +132,20 @@ export function parseArgs(argv: string[]): ParsedArgs {
       flags.datalexManifestPath = argv[++i];
     } else if (arg === '--open-pr') {
       flags.openPr = true;
+    } else if (arg === '--provider' && i + 1 < argv.length) {
+      flags.provider = argv[++i];
+    } else if (arg === '--user' && i + 1 < argv.length) {
+      flags.user = argv[++i];
+    } else if (arg === '--runtime-url' && i + 1 < argv.length) {
+      flags.runtimeUrl = argv[++i];
+    } else if (arg === '--runtime' && i + 1 < argv.length) {
+      flags.runtime = argv[++i];
+    } else if (arg === '--block' && i + 1 < argv.length) {
+      flags.block = argv[++i];
+    } else if (arg === '--question' && i + 1 < argv.length) {
+      flags.question = argv[++i];
+    } else if (arg === '--comment' && i + 1 < argv.length) {
+      flags.comment = argv[++i];
     } else if (!command) {
       command = arg;
     } else if (!file) {

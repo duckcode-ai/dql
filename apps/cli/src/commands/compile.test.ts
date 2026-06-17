@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { ManifestCache, type TrackedFile } from '@duckcodeailabs/dql-project';
 import { collectInputFiles, type DQLManifest } from '@duckcodeailabs/dql-core';
-import { runCompile } from './compile.js';
+import { manifestCacheTrackedFiles, runCompile } from './compile.js';
 
 const baseFlags = {
   format: 'text' as const,
@@ -50,12 +50,13 @@ describe('runCompile cache integration', () => {
       const manifestPath = join(projectRoot, 'dql-manifest.json');
       const firstManifest: DQLManifest = JSON.parse(readFileSync(manifestPath, 'utf-8'));
       expect(firstManifest.blocks).toHaveProperty('Revenue');
+      expect(() => readFileSync(join(projectRoot, '.dql', 'cache', 'metadata.sqlite'))).not.toThrow();
 
       // Cache file should exist and contain a hit for the current fingerprint.
       const cachePath = join(projectRoot, '.dql', 'cache', 'manifest.sqlite');
       const cache = new ManifestCache({ path: cachePath });
       try {
-        const files: TrackedFile[] = collectInputFiles({ projectRoot }).map((path) => ({ path }));
+        const files: TrackedFile[] = manifestCacheTrackedFiles(collectInputFiles({ projectRoot }), firstManifest.dqlVersion);
         const fp = cache.fingerprint(files);
         const lookup = cache.lookup<DQLManifest>(fp, files);
         expect(lookup.hit).toBe(true);
@@ -76,7 +77,9 @@ describe('runCompile cache integration', () => {
       await runCompile(projectRoot, [], baseFlags);
 
       const cachePath = join(projectRoot, '.dql', 'cache', 'manifest.sqlite');
-      const files1: TrackedFile[] = collectInputFiles({ projectRoot }).map((path) => ({ path }));
+      const manifestPath = join(projectRoot, 'dql-manifest.json');
+      const firstManifest: DQLManifest = JSON.parse(readFileSync(manifestPath, 'utf-8'));
+      const files1: TrackedFile[] = manifestCacheTrackedFiles(collectInputFiles({ projectRoot }), firstManifest.dqlVersion);
 
       let fp1: string;
       {
@@ -98,7 +101,7 @@ describe('runCompile cache integration', () => {
 
       {
         const cache = new ManifestCache({ path: cachePath });
-        const files2: TrackedFile[] = collectInputFiles({ projectRoot }).map((path) => ({ path }));
+        const files2: TrackedFile[] = manifestCacheTrackedFiles(collectInputFiles({ projectRoot }), firstManifest.dqlVersion);
         const fp2 = cache.fingerprint(files2);
         expect(fp2).not.toBe(fp1);
         const lookup = cache.lookup(fp2, files2);
@@ -120,6 +123,29 @@ describe('runCompile cache integration', () => {
       await runCompile(projectRoot, ['--no-cache'], baseFlags);
       expect(() => readFileSync(join(projectRoot, '.dql', 'cache', 'manifest.sqlite')))
         .toThrow();
+    } finally {
+      rmSync(projectRoot, { recursive: true, force: true });
+    }
+  });
+
+  it('invalidates the cache entry when the compiler version changes', () => {
+    const projectRoot = seedProject();
+    try {
+      const inputFiles = collectInputFiles({ projectRoot });
+      const cachePath = join(projectRoot, '.dql', 'cache', 'manifest.sqlite');
+      const cache = new ManifestCache({ path: cachePath });
+      try {
+        const filesV1 = manifestCacheTrackedFiles(inputFiles, '1.0.0');
+        const fp1 = cache.fingerprint(filesV1);
+        cache.put(fp1, { project: 'demo' }, filesV1);
+
+        const filesV2 = manifestCacheTrackedFiles(inputFiles, '1.0.1');
+        const fp2 = cache.fingerprint(filesV2);
+        expect(fp2).not.toBe(fp1);
+        expect(cache.lookup(fp2, filesV2).hit).toBe(false);
+      } finally {
+        cache.close();
+      }
     } finally {
       rmSync(projectRoot, { recursive: true, force: true });
     }

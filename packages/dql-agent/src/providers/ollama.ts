@@ -20,7 +20,7 @@ export class OllamaProvider implements AgentProvider {
 
   constructor(opts: { baseUrl?: string; model?: string } = {}) {
     this.baseUrls = buildOllamaBaseUrlCandidates(opts.baseUrl ?? process.env.OLLAMA_BASE_URL);
-    this.defaultModel = opts.model ?? process.env.OLLAMA_MODEL ?? 'llama3.1';
+    this.defaultModel = opts.model ?? process.env.OLLAMA_MODEL ?? 'qwen3.6:latest';
   }
 
   async available(): Promise<boolean> {
@@ -38,6 +38,7 @@ export class OllamaProvider implements AgentProvider {
             model: options.model ?? this.defaultModel,
             messages: messages.map((m) => ({ role: m.role, content: m.content })),
             stream: false,
+            think: false,
             options: {
               temperature: options.temperature ?? 0.2,
               num_predict: options.maxTokens ?? 1024,

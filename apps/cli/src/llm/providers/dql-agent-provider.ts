@@ -7,6 +7,7 @@ import {
   OllamaProvider,
   OpenAIProvider,
   answer,
+  buildLocalContextPack,
   loadSkills,
   reindexProject,
   type AgentAnswer,
@@ -101,8 +102,8 @@ export function createDqlAgentProviderRunner(id: SimpleProviderId): AgentRunner 
         const kgPath = defaultKgPath(req.projectRoot);
         if (!existsSync(kgPath)) {
           emit({ kind: 'thinking', text: 'Building the local agent knowledge graph from terms, business views, blocks, apps, dashboards, dbt, and semantic metadata.' });
-          await reindexProject(req.projectRoot, { kgPath });
         }
+        await reindexProject(req.projectRoot, { kgPath });
 
         const question = lastUserMessage(req);
         if (!question) {
@@ -124,6 +125,26 @@ export function createDqlAgentProviderRunner(id: SimpleProviderId): AgentRunner 
             : [];
           const skills = loadSkills(req.projectRoot).skills;
           const followUp = inferFollowUpContext(req, question);
+          const contextPack = await buildLocalContextPack(req.projectRoot, {
+            question,
+            surface: 'notebook',
+            followUp,
+            selectedContext: req.upstream,
+            runtimeSchemaSnapshot: schemaContext.length > 0
+              ? {
+                  source: 'agent provider schema context',
+                  tables: schemaContext.map((table) => ({
+                    relation: table.relation,
+                    schema: table.schema,
+                    name: table.name,
+                    description: table.description,
+                    source: table.source,
+                    columns: table.columns,
+                  })),
+                }
+              : undefined,
+          })
+            .catch(() => undefined);
           const selectedBlockHints = followUp?.kind === 'drilldown' || isDrilldownFollowUp(question)
             ? []
             : extractSelectedBlockHints(req);
@@ -141,6 +162,7 @@ export function createDqlAgentProviderRunner(id: SimpleProviderId): AgentRunner 
             followUp,
             memoryContext,
             schemaContext,
+            contextPack,
             signal,
             executeCertifiedBlock: req.executeCertifiedBlock,
             executeGeneratedSql: req.executeGeneratedSql,

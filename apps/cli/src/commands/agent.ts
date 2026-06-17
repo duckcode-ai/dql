@@ -8,8 +8,8 @@
  *     [--format json]           (emits structured JSON instead of prose)
  *
  *   dql agent reindex
- *     Rebuilds .dql/cache/agent-kg.sqlite from the project's manifest +
- *     Skills folder. Equivalent to `dql app reindex`.
+ *     Rebuilds .dql/cache/agent-kg.sqlite and metadata.sqlite from the
+ *     project's manifest + Skills folder. Equivalent to `dql app reindex`.
  *
  *   dql agent feedback <up|down> --block <id> --question "..."
  *     Records feedback into the KG. Used by clients without MCP access.
@@ -27,6 +27,8 @@ import {
   loadSkills,
   pickProvider,
   answer,
+  buildLocalContextPack,
+  recordQueryRun,
   type ProviderName,
 } from '@duckcodeailabs/dql-agent';
 import { buildManifest, resolveDbtManifestPath } from '@duckcodeailabs/dql-core';
@@ -64,11 +66,7 @@ async function runAsk(rest: string[], flags: CLIFlags): Promise<void> {
 
   const projectRoot = findProjectRoot(process.cwd());
   const kgPath = defaultKgPath(projectRoot);
-  if (!existsSync(kgPath)) {
-    throw new Error(
-      'KG not built. Run `dql agent reindex` (or `dql app reindex`) before asking.',
-    );
-  }
+  await reindexProject(projectRoot, { kgPath });
 
   const providerName = (flags as { provider?: string }).provider as ProviderName | undefined;
   const userId = (flags as { user?: string }).user;
@@ -86,7 +84,12 @@ async function runAsk(rest: string[], flags: CLIFlags): Promise<void> {
       scopes: ['project', 'user', 'artifact'],
       limit: 6,
     });
+    const contextPack = await buildLocalContextPack(projectRoot, { question, limit: 80 }).catch(() => undefined);
     const manifest = buildManifest({ projectRoot, dbtManifestPath: resolveDbtManifestPath(projectRoot) ?? undefined });
+    const runtimeBase = (flags as { runtimeUrl?: string; runtime?: string }).runtimeUrl
+      ?? (flags as { runtime?: string }).runtime
+      ?? process.env.DQL_RUNTIME_URL
+      ?? 'http://127.0.0.1:3474';
     const result = await answer({
       question,
       provider,
@@ -95,15 +98,12 @@ async function runAsk(rest: string[], flags: CLIFlags): Promise<void> {
       userId,
       domain,
       memoryContext,
+      contextPack,
       executeCertifiedBlock: async (node) => {
         const block = manifest.blocks[node.name] ?? manifest.blocks[node.nodeId.replace(/^block:/, '')];
         if (!block) throw new Error(`Matched block ${node.name} is not present in the manifest.`);
-        const base = (flags as { runtimeUrl?: string; runtime?: string }).runtimeUrl
-          ?? (flags as { runtime?: string }).runtime
-          ?? process.env.DQL_RUNTIME_URL
-          ?? 'http://127.0.0.1:3474';
         const source = readFileSync(join(projectRoot, block.filePath), 'utf-8');
-        const response = await fetch(`${base.replace(/\/$/, '')}/api/notebook/execute`, {
+        const response = await fetch(`${runtimeBase.replace(/\/$/, '')}/api/notebook/execute`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
@@ -127,13 +127,63 @@ async function runAsk(rest: string[], flags: CLIFlags): Promise<void> {
         };
         if (payload.error) throw new Error(payload.error);
         const rows = Array.isArray(payload.result?.rows) ? payload.result.rows : [];
-        return {
+        const result = {
           columns: Array.isArray(payload.result?.columns) ? payload.result.columns : [],
           rows,
           rowCount: typeof payload.result?.rowCount === 'number' ? payload.result.rowCount : rows.length,
           executionTime: payload.result?.executionTime,
           blockName: node.name,
         };
+        recordCliQueryRun(projectRoot, {
+          objectKey: `dql:block:${node.name}`,
+          source: 'certified_block',
+          status: 'executed',
+          rowCount: result.rowCount,
+          durationMs: result.executionTime,
+          payload: { question, blockName: node.name },
+        });
+        return result;
+      },
+      executeGeneratedSql: async (sql) => {
+        const response = await fetch(`${runtimeBase.replace(/\/$/, '')}/api/notebook/execute`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            cell: {
+              id: `agent-generated-${Date.now().toString(36)}`,
+              type: 'sql',
+              source: sql,
+              title: question,
+            },
+          }),
+        });
+        if (!response.ok) throw new Error(`Runtime returned ${response.status}: ${await response.text()}`);
+        const payload = (await response.json()) as {
+          result?: {
+            columns?: unknown[];
+            rows?: unknown[];
+            rowCount?: number;
+            executionTime?: number;
+          };
+          error?: string;
+        };
+        if (payload.error) throw new Error(payload.error);
+        const rows = Array.isArray(payload.result?.rows) ? payload.result.rows : [];
+        const result = {
+          columns: Array.isArray(payload.result?.columns) ? payload.result.columns : [],
+          rows,
+          rowCount: typeof payload.result?.rowCount === 'number' ? payload.result.rowCount : rows.length,
+          executionTime: payload.result?.executionTime,
+          sql,
+        };
+        recordCliQueryRun(projectRoot, {
+          source: 'ai_draft',
+          status: 'executed',
+          rowCount: result.rowCount,
+          durationMs: result.executionTime,
+          payload: { question, sql },
+        });
+        return result;
       },
     });
 
@@ -165,6 +215,25 @@ async function runAsk(rest: string[], flags: CLIFlags): Promise<void> {
   }
 }
 
+function recordCliQueryRun(
+  projectRoot: string,
+  run: {
+    objectKey?: string;
+    source: string;
+    status: string;
+    rowCount?: number;
+    durationMs?: number;
+    errorCode?: string;
+    payload?: Record<string, unknown>;
+  },
+): void {
+  try {
+    recordQueryRun(projectRoot, run);
+  } catch {
+    // Local query-run history is advisory and must not block CLI answers.
+  }
+}
+
 async function runReindex(flags: CLIFlags): Promise<void> {
   const projectRoot = findProjectRoot(process.cwd());
   const stats = await reindexProject(projectRoot);
@@ -172,7 +241,7 @@ async function runReindex(flags: CLIFlags): Promise<void> {
     console.log(JSON.stringify({ ok: true, ...stats }, null, 2));
     return;
   }
-  console.log(`  ✓ KG rebuilt — ${stats.nodes} nodes, ${stats.edges} edges, ${stats.skills} skill(s).`);
+  console.log(`  ✓ KG and metadata catalog rebuilt — ${stats.nodes} nodes, ${stats.edges} edges, ${stats.skills} skill(s).`);
 }
 
 async function runFeedback(rest: string[], flags: CLIFlags): Promise<void> {
@@ -221,6 +290,10 @@ interface AgentEvalCase {
     sqlContains?: string;
     citationKind?: string;
     noHallucinatedColumns?: string[];
+    route?: 'certified' | 'generated_sql' | 'research' | 'clarify';
+    intent?: string;
+    reviewStatus?: 'none' | 'draft_ready' | 'analyst_review_required' | 'certified';
+    missingContextKind?: string;
   };
 }
 
@@ -257,6 +330,11 @@ async function runEval(rest: string[], flags: CLIFlags): Promise<void> {
         kg,
         skills,
         memoryContext,
+        contextPack: await buildLocalContextPack(projectRoot, {
+          question: testCase.question,
+          surface: 'cli-eval',
+          limit: 80,
+        }).catch(() => undefined),
       });
       const failures = evaluateCase(testCase, result);
       results.push({
@@ -290,6 +368,10 @@ function evaluateCase(testCase: AgentEvalCase, result: Awaited<ReturnType<typeof
   if (expected.kind && result.kind !== expected.kind) failures.push(`kind expected ${expected.kind}, got ${result.kind}`);
   if (expected.sourceTier && result.sourceTier !== expected.sourceTier) failures.push(`sourceTier expected ${expected.sourceTier}, got ${result.sourceTier}`);
   if (expected.certification && result.certification !== expected.certification) failures.push(`certification expected ${expected.certification}, got ${result.certification}`);
+  if (expected.reviewStatus && result.reviewStatus !== expected.reviewStatus) failures.push(`reviewStatus expected ${expected.reviewStatus}, got ${result.reviewStatus}`);
+  if (expected.route && result.contextPack?.routeDecision.route !== expected.route) failures.push(`route expected ${expected.route}, got ${result.contextPack?.routeDecision.route ?? 'none'}`);
+  if (expected.intent && result.contextPack?.routeDecision.intent !== expected.intent) failures.push(`intent expected ${expected.intent}, got ${result.contextPack?.routeDecision.intent ?? 'none'}`);
+  if (expected.missingContextKind && !result.contextPack?.missingContext.some((item) => item.kind === expected.missingContextKind)) failures.push(`missing context kind ${expected.missingContextKind} was not reported`);
   if (expected.sqlContains && !result.proposedSql?.toLowerCase().includes(expected.sqlContains.toLowerCase())) failures.push(`SQL did not contain "${expected.sqlContains}"`);
   if (expected.citationKind && !result.citations.some((c) => c.kind === expected.citationKind)) failures.push(`missing citation kind ${expected.citationKind}`);
   for (const column of expected.noHallucinatedColumns ?? []) {

@@ -683,6 +683,25 @@ export class Parser {
     return token;
   }
 
+  private skipBalancedBlock(): void {
+    if (!this.check(TokenType.LeftBrace)) return;
+    let depth = 0;
+    while (!this.isAtEnd()) {
+      if (this.check(TokenType.LeftBrace)) {
+        depth += 1;
+        this.advance();
+        continue;
+      }
+      if (this.check(TokenType.RightBrace)) {
+        depth -= 1;
+        this.advance();
+        if (depth <= 0) return;
+        continue;
+      }
+      this.advance();
+    }
+  }
+
   private expect(type: TokenType): Token {
     if (this.check(type)) {
       return this.advance();
@@ -1238,6 +1257,18 @@ export class Parser {
           }
         }
       } else {
+        if (
+          this.check(TokenType.Identifier)
+          && this.tokens[this.pos + 1]?.type === TokenType.LeftBrace
+        ) {
+          const section = this.current().value;
+          this.error(
+            `Unexpected nested section '${section}' inside block. Unknown block sections are skipped during parse recovery.`,
+          );
+          this.advance();
+          this.skipBalancedBlock();
+          continue;
+        }
         this.error(
           `Unexpected token '${this.current().value}' inside block. Expected 'domain', 'type', 'status', 'datalex_contract', 'metric', 'metrics', 'dimensions', 'description', 'tags', 'owner', 'terms', 'params', 'query', 'visualization', 'tests', 'llmContext', 'invariants', 'examples', 'businessOutcome', 'businessOwner', 'decisionUse', 'reviewCadence', 'businessRules', 'caveats', or '}'.`,
         );

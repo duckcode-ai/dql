@@ -629,6 +629,147 @@ describe("answer (block-first loop)", () => {
     expect(provider.calls).toHaveLength(0);
   });
 
+  it("generates dynamic SQL for least-ranked questions instead of selecting a certified top block", async () => {
+    kg.rebuild(
+      [
+        {
+          nodeId: "block:top_10_goal_scorers",
+          kind: "block",
+          name: "top_10_goal_scorers",
+          domain: "nba",
+          status: "certified",
+          description: "Top 10 NBA players by total points scored.",
+          llmContext: "Use for highest scoring players and top scorers by season.",
+          tags: ["nba", "top", "scorers", "points", "ranking"],
+          sourceTier: "certified_artifact",
+          certification: "certified",
+          provenance: "DQL block",
+        },
+        {
+          nodeId: "dbt_model:player_scoring",
+          kind: "dbt_model",
+          name: "player_scoring",
+          domain: "nba",
+          description: "Player scoring fact table with season total points.",
+          llmContext: "runtime relation: analytics.player_scoring\nColumns:\n- player_name\n- season\n- total_points",
+          sourceTier: "dbt_manifest",
+          certification: "ai_generated",
+          provenance: "dbt manifest",
+        },
+      ],
+      [],
+    );
+    const provider = new StubProvider(
+      "Players with the fewest total points, generated for review because the certified block covers the top scorers only.\n\n" +
+        "```sql\nSELECT player_name, season, total_points FROM analytics.player_scoring ORDER BY total_points ASC LIMIT 10\n```\n\n" +
+        "Viz: table",
+    );
+    const result = await answer({
+      question: "Who scored the least points?",
+      provider,
+      kg,
+      schemaContext: [
+        {
+          relation: "analytics.player_scoring",
+          schema: "analytics",
+          name: "player_scoring",
+          columns: [
+            { name: "player_name", type: "VARCHAR" },
+            { name: "season", type: "INTEGER" },
+            { name: "total_points", type: "INTEGER" },
+          ],
+        },
+      ],
+      executeGeneratedSql: async (sql) => ({
+        columns: ["player_name", "season", "total_points"],
+        rows: [{ player_name: "Bench Player", season: 2024, total_points: 1 }],
+        rowCount: 1,
+        sql,
+      }),
+    });
+    expect(result.kind).toBe("uncertified");
+    expect(result.block).toBeUndefined();
+    expect(result.analysisPlan?.intent).toBe("ad_hoc_analysis");
+    expect(result.proposedSql).toContain("ORDER BY total_points ASC");
+    expect(result.result?.rowCount).toBe(1);
+    expect(provider.calls).toHaveLength(1);
+  });
+
+  it("uses context-pack block SQL to invert certified top rankings without hallucinating tables", async () => {
+    kg.rebuild(
+      [
+        {
+          nodeId: "block:Top 10 Goal Scorers",
+          kind: "block",
+          name: "Top 10 Goal Scorers",
+          domain: "nba",
+          status: "certified",
+          description: "Top 10 NBA players by total points scored.",
+          tags: ["nba", "top", "points"],
+          sourceTier: "certified_artifact",
+          certification: "certified",
+          provenance: "DQL block",
+        },
+      ],
+      [],
+    );
+    const provider = new StubProvider("should not be called");
+    const result = await answer({
+      question: "Who scored the least points?",
+      provider,
+      kg,
+      contextPack: {
+        id: "ctx_test",
+        question: "Who scored the least points?",
+        focusObjectKey: "dql:block:Top 10 Goal Scorers",
+        mode: "question",
+        trustLabel: "mixed",
+        objects: [
+          {
+            objectKey: "dql:block:Top 10 Goal Scorers",
+            objectType: "dql_block",
+            name: "Top 10 Goal Scorers",
+            status: "certified",
+            payload: {
+              sql: "SELECT player_name, season, total_points FROM NBA_GAMES.RAW.fct_player_performance ORDER BY total_points DESC LIMIT 10",
+            },
+          },
+          {
+            objectKey: "dbt:model:fct_player_performance",
+            objectType: "dbt_model",
+            name: "fct_player_performance",
+            status: "dbt_imported",
+          },
+        ],
+        edges: [],
+        queryRuns: [],
+        citations: [],
+        evidenceSummaries: [],
+        warnings: [],
+        retrievalDiagnostics: {
+          strategy: "sqlite_fts",
+          selectedObjects: 2,
+          selectedEvidence: [],
+          topRejected: [],
+          candidateConflicts: [],
+        },
+      } as any,
+      executeGeneratedSql: async (sql) => ({
+        columns: ["PLAYER_NAME", "SEASON", "TOTAL_POINTS"],
+        rows: [{ PLAYER_NAME: "Chris Smith", SEASON: 2013, TOTAL_POINTS: 0 }],
+        rowCount: 1,
+        sql,
+      }),
+    });
+
+    expect(result.kind).toBe("uncertified");
+    expect(result.proposedSql).toContain("NBA_GAMES.RAW.fct_player_performance");
+    expect(result.proposedSql).toContain("ORDER BY total_points ASC");
+    expect(result.proposedSql).not.toContain("game_logs");
+    expect(result.result?.rowCount).toBe(1);
+    expect(provider.calls).toHaveLength(0);
+  });
+
   it("generates dynamic customer ranking SQL instead of selecting total_customers for ad hoc performance questions", async () => {
     kg.rebuild(
       [
@@ -708,7 +849,7 @@ describe("answer (block-first loop)", () => {
     expect(result.analysisPlan?.intent).toBe("ad_hoc_analysis");
     expect(result.analysisPlan?.assumptions).toEqual(
       expect.arrayContaining([
-        expect.stringContaining("schema-aware local planner"),
+        expect.stringContaining("local metadata planner"),
       ]),
     );
     expect(result.evidence?.selectedAssets.some((asset) => asset.name === "top_customers")).toBe(true);

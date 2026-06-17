@@ -21,12 +21,13 @@ import type { AgentProvider, AgentMessage } from './providers/types.js';
 import type { Skill } from './skills/loader.js';
 import { buildSkillBlockHints, buildSkillsPrompt } from './skills/loader.js';
 import type { AgentMemory } from './memory/sqlite-memory.js';
+import type { LocalContextPack, MetadataAgentIntent, MetadataRouteDecision } from './metadata/catalog.js';
 
 export type AnswerKind = 'certified' | 'uncertified' | 'no_answer';
 export type AnswerSourceTier = 'certified_artifact' | 'business_context' | 'semantic_layer' | 'dbt_manifest' | 'no_answer';
 export type AnswerCertification = 'certified' | 'ai_generated' | 'analyst_review_required';
 export type AnswerReviewStatus = 'none' | 'draft_ready' | 'analyst_review_required' | 'certified';
-export type AgentIntent = 'exact_certified_lookup' | 'ad_hoc_analysis' | 'drillthrough' | 'clarify';
+export type AgentIntent = MetadataAgentIntent | 'ad_hoc_analysis' | 'drillthrough';
 
 export interface AgentCitation {
   nodeId: string;
@@ -193,6 +194,8 @@ export interface AgentAnswer {
   analysisPlan?: AgentAnalysisPlan;
   /** Provider name used (for telemetry / UI badge). */
   providerUsed?: string;
+  /** Local SQLite metadata context pack used to ground retrieval, when supplied by the host. */
+  contextPack?: LocalContextPack;
   /** Top KG hits the loop considered, useful for the UI's "we considered" panel. */
   considered: KGSearchHit[];
 }
@@ -253,6 +256,8 @@ export interface AnswerLoopInput {
   executeGeneratedSql?: (sql: string) => Promise<AgentResultPayload>;
   /** Runtime schema/column context supplied by the host for generated analysis. */
   schemaContext?: AgentSchemaTable[];
+  /** Shared local metadata context pack from `.dql/cache/metadata.sqlite`. */
+  contextPack?: LocalContextPack;
 }
 
 const CERTIFIED_HIT_THRESHOLD = 0.18;
@@ -287,7 +292,8 @@ export async function answer(input: AnswerLoopInput): Promise<AgentAnswer> {
     manifestHits,
     kg.search({ query: question, domain, limit: 10 }),
   ).slice(0, 30);
-  const intent = classifyAgentIntent({
+  const catalogRoute = input.contextPack?.routeDecision;
+  const fallbackIntent = classifyAgentIntent({
     question,
     followUp: input.followUp,
     artifactHits,
@@ -295,19 +301,21 @@ export async function answer(input: AnswerLoopInput): Promise<AgentAnswer> {
     manifestHits,
     schemaContext: input.schemaContext ?? [],
   });
+  const intent = catalogRoute ? agentIntentFromCatalogRoute(catalogRoute) : fallbackIntent;
 
   // Stage 1: certified artifact match. Blocks can be executed; dashboards,
   // Apps, and notebooks are returned as governed citations/navigation targets.
-  const artifactHit = intent === 'exact_certified_lookup'
-    ? pickCertifiedArtifact({
-        artifactHits,
-        executableArtifactHits,
-        businessHits,
-        question,
-        blockHints: input.followUp?.kind === 'drilldown' ? [] : effectiveBlockHints,
-        excludedArtifactIds,
-        kg,
-      })
+  const artifactHit = shouldUseCertifiedRoute(catalogRoute, intent)
+    ? certifiedHitFromContextPack(input.contextPack, kg)
+      ?? pickCertifiedArtifact({
+          artifactHits,
+          executableArtifactHits,
+          businessHits,
+          question,
+          blockHints: input.followUp?.kind === 'drilldown' ? [] : effectiveBlockHints,
+          excludedArtifactIds,
+          kg,
+        })
     : null;
   if (artifactHit) {
     let result: AgentResultPayload | undefined;
@@ -336,7 +344,7 @@ export async function answer(input: AnswerLoopInput): Promise<AgentAnswer> {
     const analysisPlan = buildAnalysisPlan({
       question,
       intent,
-      routeReason: 'The question matched a certified DQL artifact closely enough to answer without generating new SQL.',
+      routeReason: catalogRoute?.reason ?? 'The question matched a certified DQL artifact closely enough to answer without generating new SQL.',
       selectedNodes: [artifactHit.node],
       schemaContext: input.schemaContext ?? [],
       sql: result?.sql,
@@ -371,20 +379,23 @@ export async function answer(input: AnswerLoopInput): Promise<AgentAnswer> {
         memoryContext: input.memoryContext ?? [],
         analysisPlan,
       }),
+      contextPack: input.contextPack,
       considered,
       providerUsed: provider.name,
     };
   }
 
-  if (intent === 'clarify') {
-    const text = composeClarificationText(question, considered, input.schemaContext ?? []);
+  if (intent === 'clarify' || catalogRoute?.route === 'clarify') {
+    const text = composeCatalogClarificationText(question, catalogRoute) ?? composeClarificationText(question, considered, input.schemaContext ?? []);
     const analysisPlan = buildAnalysisPlan({
       question,
       intent,
-      routeReason: 'No certified artifact, semantic object, dbt/source table, or runtime schema match was strong enough to safely generate SQL.',
+      routeReason: catalogRoute?.reason ?? 'No certified artifact, semantic object, dbt/source table, or runtime schema match was strong enough to safely generate SQL.',
       selectedNodes: considered.slice(0, 4).map((hit) => hit.node),
       schemaContext: input.schemaContext ?? [],
-      assumptions: ['Need a clearer business object, measure, or grain before querying.'],
+      assumptions: catalogRoute?.missingContext.length
+        ? catalogRoute.missingContext.map((item) => item.message)
+        : ['Need a clearer business object, measure, or grain before querying.'],
     });
     return {
       kind: 'no_answer',
@@ -408,6 +419,7 @@ export async function answer(input: AnswerLoopInput): Promise<AgentAnswer> {
         memoryContext: input.memoryContext ?? [],
         analysisPlan,
       }),
+      contextPack: input.contextPack,
       considered,
       providerUsed: provider.name,
     };
@@ -415,11 +427,11 @@ export async function answer(input: AnswerLoopInput): Promise<AgentAnswer> {
 
   // Stage 2/3: generate only after certified artifacts miss. Semantic context
   // wins over raw dbt manifest context; memory is appended last as advisory.
-  const activeTier: AnswerSourceTier = semanticHits.length > 0
+  const activeTier: AnswerSourceTier = sourceTierFromContextPack(input.contextPack) ?? (semanticHits.length > 0
     ? 'semantic_layer'
     : manifestHits.length > 0
       ? 'dbt_manifest'
-      : 'dbt_manifest';
+      : 'dbt_manifest');
   const reviewRequiredArtifactHits = artifactHits
     .filter((hit) => hit.score >= CERTIFIED_HIT_THRESHOLD && !isCertifiedHit(hit, kg))
     .slice(0, 4);
@@ -459,6 +471,7 @@ export async function answer(input: AnswerLoopInput): Promise<AgentAnswer> {
       input.followUp,
       input.schemaContext ?? [],
       intent,
+      input.contextPack,
     ),
   });
   messages.push({ role: 'user', content: question });
@@ -467,6 +480,10 @@ export async function answer(input: AnswerLoopInput): Promise<AgentAnswer> {
     question,
     intent,
     schemaContext: input.schemaContext ?? [],
+  }) ?? buildContextPackAwareProposal({
+    question,
+    intent,
+    contextPack: input.contextPack,
   });
   let proposed = '';
   let parsed: ParsedProposal;
@@ -497,6 +514,7 @@ export async function answer(input: AnswerLoopInput): Promise<AgentAnswer> {
           considered,
           memoryContext: input.memoryContext ?? [],
         }),
+        contextPack: input.contextPack,
         considered,
         providerUsed: provider.name,
       };
@@ -526,12 +544,14 @@ export async function answer(input: AnswerLoopInput): Promise<AgentAnswer> {
         considered,
         memoryContext: input.memoryContext ?? [],
       }),
+      contextPack: input.contextPack,
       considered,
       providerUsed: provider.name,
     };
   }
 
   const generatedCitations: AgentCitation[] = [
+    ...contextPackCitations(input.contextPack, 4),
     ...contextNodes.slice(0, 4).map((n) => ({
       nodeId: n.nodeId,
       kind: n.kind,
@@ -599,16 +619,16 @@ export async function answer(input: AnswerLoopInput): Promise<AgentAnswer> {
   const analysisPlan = buildAnalysisPlan({
     question,
     intent,
-    routeReason: intent === 'drillthrough'
+    routeReason: catalogRoute?.reason ?? (intent === 'drillthrough'
       ? 'The user asked for a drill-through or follow-up, so DQL generated review-required SQL from the prior context and current metadata.'
-      : 'The question asks for a custom analysis, ranking, breakdown, comparison, or grain that should not be answered by a loose certified block match.',
+      : 'The question asks for a custom analysis, ranking, breakdown, comparison, or grain that should not be answered by a loose certified block match.'),
     selectedNodes: contextNodes,
     schemaContext: input.schemaContext ?? [],
     sql: parsed.sql,
     suggestedViz: parsed.viz ?? 'table',
     assumptions: [
       'Generated SQL is an uncertified preview until an analyst reviews and promotes it.',
-      ...(localProposal ? ['A schema-aware local planner selected the customer ranking grain before provider generation.'] : []),
+      ...(localProposal ? ['A local metadata planner selected a review-required SQL grain before provider generation.'] : []),
       ...(executionError ? ['The preview execution error must be reviewed before reuse.'] : []),
     ],
     repairAttempts,
@@ -647,6 +667,7 @@ export async function answer(input: AnswerLoopInput): Promise<AgentAnswer> {
       executorWasAvailable: Boolean(input.executeGeneratedSql),
       analysisPlan,
     }),
+    contextPack: input.contextPack,
     considered,
     providerUsed: localProposal ? 'schema_planner' : provider.name,
   };
@@ -687,6 +708,7 @@ function renderContextPrompt(
   followUp?: AgentFollowUpContext,
   schemaContext: AgentSchemaTable[] = [],
   intent: AgentIntent = 'ad_hoc_analysis',
+  contextPack?: LocalContextPack,
 ): string {
   const intentSection = `## Routing intent\n\nintent: ${intent}\n${intent === 'exact_certified_lookup'
     ? 'Use a certified artifact only if it exactly answers the question.'
@@ -735,7 +757,130 @@ function renderContextPrompt(
   const followUpSection = followUp
     ? `\n\n## Follow-up routing context\n\n${renderFollowUpContext(followUp)}`
     : '';
-  return `${intentSection}\n\n${blockSection}${businessSection}${otherSection}${schemaSection}${memorySection}${extraSection}${followUpSection}`;
+  const contextPackSection = contextPack
+    ? `\n\n## Local metadata context pack\n\n${renderContextPackForPrompt(contextPack)}`
+    : '';
+  return `${intentSection}\n\n${blockSection}${businessSection}${otherSection}${schemaSection}${contextPackSection}${memorySection}${extraSection}${followUpSection}`;
+}
+
+function renderContextPackForPrompt(contextPack: LocalContextPack): string {
+  const warnings = contextPack.warnings.length
+    ? `Warnings:\n${contextPack.warnings.slice(0, 8).map((warning) => `- ${warning}`).join('\n')}\n`
+    : '';
+  const objects = contextPack.objects.slice(0, 18).map((object) => {
+    const detail = [
+      object.objectType,
+      object.domain ? `domain: ${object.domain}` : '',
+      object.status ? `status: ${object.status}` : '',
+      object.description ? `description: ${object.description}` : '',
+    ].filter(Boolean).join('; ');
+    return `- ${object.objectKey} (${detail})`;
+  }).join('\n');
+  const conflicts = contextPack.retrievalDiagnostics.candidateConflicts.length
+    ? `\nCandidate conflicts:\n${contextPack.retrievalDiagnostics.candidateConflicts.slice(0, 4).map((conflict) => `- ${conflict.reason} ${conflict.prompt}`).join('\n')}`
+    : '';
+  const route = contextPack.routeDecision
+    ? `\nRoute decision: ${contextPack.routeDecision.route} / ${contextPack.routeDecision.intent}\nReason: ${contextPack.routeDecision.reason}\nMissing context: ${contextPack.routeDecision.missingContext.map((item) => item.message).join(' ') || 'none'}`
+    : '';
+  const allowed = contextPack.allowedSqlContext?.relations.length
+    ? `\nAllowed SQL relations:\n${contextPack.allowedSqlContext.relations.slice(0, 12).map((relation) => `- ${relation.relation}: ${relation.columns.slice(0, 24).map((column) => column.name).join(', ') || '(columns unavailable)'}`).join('\n')}`
+    : '';
+  return [
+    `context_pack_id: ${contextPack.id}`,
+    `trust_label: ${contextPack.trustLabel}`,
+    route.trim(),
+    warnings.trim(),
+    `Selected evidence:\n${objects || '- none'}`,
+    allowed.trim(),
+    conflicts.trim(),
+  ].filter(Boolean).join('\n');
+}
+
+function contextPackCitations(contextPack: LocalContextPack | undefined, limit: number): AgentCitation[] {
+  if (!contextPack) return [];
+  return contextPack.objects.slice(0, limit).map((object) => ({
+    nodeId: object.objectKey,
+    kind: metadataObjectKindForCitation(object.objectType),
+    name: object.name,
+    sourceTier: metadataObjectSourceTier(object.objectType),
+    provenance: object.sourceSystem,
+  }));
+}
+
+function agentIntentFromCatalogRoute(route: MetadataRouteDecision): AgentIntent {
+  if (route.route === 'clarify') return 'clarify';
+  if (route.route === 'certified') return route.intent === 'definition_lookup' ? 'definition_lookup' : 'exact_certified_lookup';
+  return route.intent;
+}
+
+function shouldUseCertifiedRoute(route: MetadataRouteDecision | undefined, intent: AgentIntent): boolean {
+  if (route) return route.route === 'certified';
+  return intent === 'exact_certified_lookup' || intent === 'definition_lookup';
+}
+
+function certifiedHitFromContextPack(contextPack: LocalContextPack | undefined, kg: KGStore): KGSearchHit | null {
+  const key = contextPack?.routeDecision.exactObjectKey;
+  if (!key) return null;
+  const object = contextPack.objects.find((item) => item.objectKey === key);
+  if (!object) return null;
+  const nodeId = object.objectType === 'dql_block'
+    ? `block:${object.name}`
+    : object.objectType === 'dql_term'
+      ? `term:${object.name}`
+      : object.objectType === 'business_view'
+        ? `business_view:${object.name}`
+        : undefined;
+  const node = nodeId ? kg.getNode(nodeId) : null;
+  return node ? { node, score: 1, snippet: object.snippet } : null;
+}
+
+function composeCatalogClarificationText(question: string, route: MetadataRouteDecision | undefined): string | undefined {
+  if (!route?.missingContext.length) return undefined;
+  const missing = route.missingContext.map((item) => item.message).join(' ');
+  const followUp = route.followUps[0] ? ` ${route.followUps[0]}?` : '';
+  return `I need one more detail before querying "${question}". ${missing}${followUp}`;
+}
+
+function sourceTierFromContextPack(contextPack: LocalContextPack | undefined): AnswerSourceTier | undefined {
+  if (!contextPack) return undefined;
+  if (contextPack.objects.some((object) => object.objectType === 'semantic_metric')) return 'semantic_layer';
+  if (contextPack.objects.some((object) => object.objectType.startsWith('dbt_') || object.objectType === 'warehouse_table' || object.objectType === 'runtime_table')) return 'dbt_manifest';
+  if (contextPack.objects.some((object) => object.objectType === 'dql_term' || object.objectType === 'business_view')) return 'business_context';
+  if (contextPack.objects.some((object) => object.objectType === 'dql_block')) return 'certified_artifact';
+  return undefined;
+}
+
+function isGeneratedAgentIntent(intent: AgentIntent): boolean {
+  return intent === 'ad_hoc_analysis'
+    || intent === 'drillthrough'
+    || intent === 'ad_hoc_ranking'
+    || intent === 'driver_breakdown'
+    || intent === 'diagnose_change'
+    || intent === 'segment_compare'
+    || intent === 'entity_drilldown'
+    || intent === 'anomaly_investigation';
+}
+
+function metadataObjectKindForCitation(objectType: string): AgentCitation['kind'] {
+  if (objectType === 'dql_block') return 'block';
+  if (objectType === 'dql_term') return 'term';
+  if (objectType === 'business_view') return 'business_view';
+  if (objectType === 'semantic_metric') return 'metric';
+  if (objectType === 'semantic_dimension') return 'dimension';
+  if (objectType === 'dbt_model') return 'dbt_model';
+  if (objectType === 'dbt_source' || objectType === 'warehouse_table') return 'dbt_source';
+  if (objectType === 'notebook') return 'notebook';
+  if (objectType === 'dashboard') return 'dashboard';
+  if (objectType === 'app') return 'app';
+  return 'runtime_schema';
+}
+
+function metadataObjectSourceTier(objectType: string): AgentCitation['sourceTier'] {
+  if (objectType === 'dql_block') return 'certified_artifact';
+  if (objectType === 'dql_term' || objectType === 'business_view') return 'business_context';
+  if (objectType.startsWith('semantic_')) return 'semantic_layer';
+  if (objectType.startsWith('dbt_') || objectType === 'warehouse_table') return 'dbt_manifest';
+  return 'business_context';
 }
 
 function renderFollowUpContext(followUp: AgentFollowUpContext): string {
@@ -781,7 +926,7 @@ function buildSchemaAwareProposal(input: {
   intent: AgentIntent;
   schemaContext: AgentSchemaTable[];
 }): ParsedProposal | undefined {
-  if (input.intent !== 'ad_hoc_analysis' && input.intent !== 'drillthrough') return undefined;
+  if (!isGeneratedAgentIntent(input.intent)) return undefined;
   if (isFilteredEntityQuestion(input.question)) return undefined;
   const lower = input.question.toLowerCase();
   const asksForCustomerPerformance = /\bcustomers?\b/.test(lower)
@@ -833,6 +978,51 @@ function buildSchemaAwareProposal(input: {
     ].join('\n'),
     viz: 'table',
   };
+}
+
+function buildContextPackAwareProposal(input: {
+  question: string;
+  intent: AgentIntent;
+  contextPack?: LocalContextPack;
+}): ParsedProposal | undefined {
+  if (!isGeneratedAgentIntent(input.intent)) return undefined;
+  if (!input.contextPack) return undefined;
+  const lower = input.question.toLowerCase();
+  if (!/\b(least|lowest|fewest|bottom|min(?:imum)?)\b/.test(lower)) return undefined;
+
+  for (const object of input.contextPack.objects) {
+    if (object.objectType !== 'dql_block' || object.status !== 'certified') continue;
+    const sql = typeof object.payload?.sql === 'string' ? object.payload.sql.trim() : '';
+    if (!sql || !/\border\s+by\b/i.test(sql) || !/\bdesc\b/i.test(sql)) continue;
+    const inverted = invertRankingSql(sql);
+    if (!inverted || inverted === sql) continue;
+    return {
+      text: `Generated a review-required least-ranking query by using certified block "${object.name}" as context and reversing its ranking direction. This result is uncertified until reviewed and promoted.`,
+      sql: ensurePreviewLimit(inverted, 10),
+      viz: 'table',
+    };
+  }
+  return undefined;
+}
+
+function invertRankingSql(sql: string): string | undefined {
+  const withoutTrailingSemicolon = sql.replace(/;\s*$/, '').trim();
+  const inverted = withoutTrailingSemicolon.replace(
+    /\border\s+by\s+([\s\S]*?)(\blimit\b|$)/i,
+    (match: string, orderExpr: string, limitKeyword: string) => {
+      if (!/\bdesc\b/i.test(orderExpr)) return match;
+      const nextExpr = orderExpr
+        .replace(/\bDESC\b/gi, 'ASC')
+        .replace(/\bNULLS\s+FIRST\b/gi, 'NULLS LAST');
+      return `ORDER BY ${nextExpr}${limitKeyword}`;
+    },
+  );
+  return inverted !== withoutTrailingSemicolon ? inverted : undefined;
+}
+
+function ensurePreviewLimit(sql: string, limit: number): string {
+  if (/\blimit\s+\d+\b/i.test(sql)) return sql;
+  return `${sql.replace(/;\s*$/, '').trim()}\nLIMIT ${limit}`;
 }
 
 function findSchemaTable(schemaContext: AgentSchemaTable[], names: string[]): AgentSchemaTable | undefined {
@@ -887,7 +1077,7 @@ function pickCertifiedArtifact(input: {
   // user at a specific block. We still validate it's certified.
   for (const hint of input.blockHints) {
     const node = input.kg.getNode(`block:${hint}`);
-    if (node && node.status === 'certified') {
+    if (node && node.status === 'certified' && hasCompatibleCertifiedBlockMatch(input.question, node)) {
       return { node, score: 1, snippet: undefined };
     }
   }
@@ -931,7 +1121,7 @@ function pickFirstCertifiedHit(
     if (hit.score < CERTIFIED_HIT_THRESHOLD) break;
     if (excludedNodeIds?.has(hit.node.nodeId)) continue;
     if (!isCertifiedHit(hit, kg)) continue;
-    if (question && hit.node.kind === 'block' && !hasMeaningfulCertifiedBlockSignal(question, hit.node)) continue;
+    if (question && hit.node.kind === 'block' && !hasCompatibleCertifiedBlockMatch(question, hit.node)) continue;
     return hit;
   }
   return null;
@@ -1016,6 +1206,46 @@ function hasMeaningfulCertifiedBlockSignal(question: string, node: KGNode): bool
     if (nodeTokens.has(token)) return true;
   }
   return false;
+}
+
+type RankingDirection = 'top' | 'bottom';
+
+function hasCompatibleCertifiedBlockMatch(question: string, node: KGNode): boolean {
+  return hasMeaningfulCertifiedBlockSignal(question, node)
+    && hasCompatibleRankingDirection(question, node);
+}
+
+function hasCompatibleRankingDirection(question: string, node: KGNode): boolean {
+  const questionDirection = rankingDirectionFromText(question);
+  if (!questionDirection) return true;
+  const blockDirection = rankingDirectionFromText(certifiedBlockSignalText(node));
+  if (!blockDirection) return true;
+  return questionDirection === blockDirection;
+}
+
+function rankingDirectionFromText(text: string): RankingDirection | undefined {
+  const lower = text.toLowerCase();
+  const hasBottomSignal = /\b(bottom|least|fewest|lowest|minimum|min|smallest|worst|underperform(?:ing|ed|er|ers)?)\b/.test(lower);
+  const hasTopSignal = /\b(top|most|highest|maximum|max|greatest|best|leader|leaders|leading)\b/.test(lower);
+  if (hasBottomSignal && !hasTopSignal) return 'bottom';
+  if (hasTopSignal && !hasBottomSignal) return 'top';
+  return undefined;
+}
+
+function certifiedBlockSignalText(node: KGNode): string {
+  const examples = (node.examples ?? [])
+    .flatMap((example) => [example.question, example.sql ?? '']);
+  return [
+    node.name,
+    node.domain ?? '',
+    node.description ?? '',
+    node.llmContext ?? '',
+    node.provenance ?? '',
+    ...(node.tags ?? []),
+    ...(node.businessRules ?? []),
+    ...(node.caveats ?? []),
+    ...examples,
+  ].join(' ');
 }
 
 function hasExactExecutableArtifactSignal(question: string, node: KGNode): boolean {
@@ -1181,7 +1411,7 @@ function isExplicitSavedArtifactQuestion(question: string, artifactHits: KGSearc
 function isAdHocAnalysisQuestion(question: string): boolean {
   const lower = question.toLowerCase();
   if (isBusinessDefinitionQuestion(question)) return false;
-  return /\b(break\s*down|breakdown|drill\s*(?:down|into)|slice|segment|split|compare|versus|vs\.?|trend|over time|top|bottom|best|worst|highest|lowest|rank|ranking|performed better|better performing|why|what drove|driver|drivers|top movers?|changed?|change|dropped?|drop|decreased?|decrease|declined?|decline|increased?|increase|anomal(?:y|ies)|exceptions?|root cause|contribut(?:e|ed|ion)|variance|delta|by\s+[a-z][\w\s-]{1,40})\b/i.test(lower)
+  return /\b(break\s*down|breakdown|drill\s*(?:down|into)|slice|segment|split|compare|versus|vs\.?|trend|over time|top|bottom|best|worst|highest|lowest|least|fewest|minimum|min|smallest|rank|ranking|performed better|better performing|why|what drove|driver|drivers|top movers?|changed?|change|dropped?|drop|decreased?|decrease|declined?|decline|increased?|increase|anomal(?:y|ies)|exceptions?|root cause|contribut(?:e|ed|ion)|variance|delta|by\s+[a-z][\w\s-]{1,40})\b/i.test(lower)
     || /\b(show|list|find|give)\b.+\b(account|accounts|customer|customers|product|products|order|orders|region|location|month|week|day|user|users)\b/i.test(lower);
 }
 

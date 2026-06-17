@@ -210,6 +210,10 @@ export function buildManifest(options: ManifestBuildOptions): DQLManifest {
   for (const [name, block] of Object.entries(notebookBlocks)) {
     if (!blocks[name]) blocks[name] = block;
   }
+  const notebookTerms = extractNotebookTerms(notebooks);
+  for (const [name, term] of Object.entries(notebookTerms)) {
+    if (!terms[name]) terms[name] = term;
+  }
 
   validateBusinessViews(businessViews, blocks, diagnostics);
   validateTermRefs(terms, blocks, businessViews, diagnostics);
@@ -424,6 +428,14 @@ function scanBlocks(
           const block = stmt as any;
           if (block.kind !== 'BlockDecl') continue;
 
+          if (blocks[block.name]) {
+            diagnostics?.push({
+              kind: 'resolve',
+              filePath: relPath,
+              severity: 'warning',
+              message: `duplicate block "${block.name}" also declared in ${blocks[block.name].filePath}`,
+            });
+          }
           blocks[block.name] = blockDeclToManifestBlock(block, relPath);
         }
       } catch (err) {
@@ -823,6 +835,29 @@ function extractNotebookBlocks(notebooks: Record<string, ManifestNotebook>): Rec
   return blocks;
 }
 
+/** Extract terms declared inside notebook DQL cells into the terms map. */
+function extractNotebookTerms(notebooks: Record<string, ManifestNotebook>): Record<string, ManifestTerm> {
+  const terms: Record<string, ManifestTerm> = {};
+
+  for (const [nbPath, nb] of Object.entries(notebooks)) {
+    for (const cell of nb.cells) {
+      if (cell.type !== 'dql' || !cell.source.includes('term')) continue;
+      try {
+        const ast = new Parser(cell.source, `${nbPath}:${cell.id}`).parse();
+        for (const stmt of ast.statements) {
+          const term = stmt as any;
+          if (term.kind !== 'TermDecl' || terms[term.name]) continue;
+          terms[term.name] = termDeclToManifestTerm(term, `${nbPath}#${cell.id}`);
+        }
+      } catch {
+        // scanNotebooks already records parse diagnostics for invalid DQL cells.
+      }
+    }
+  }
+
+  return terms;
+}
+
 // ---- Semantic Layer ----
 
 function loadSemanticDefinitions(
@@ -1048,18 +1083,34 @@ function importDbtManifest(
   } else {
     // Large project or explicit references: selective BFS upstream from anchors
 
-    // Build reverse lookup: normalised name → uniqueId
-    const nameToId = new Map<string, string>();
+    // Build reverse lookup: normalised table/model names -> uniqueIds.
+    // Multiple dbt nodes may share a short alias, so short-name matches are
+    // used only when they resolve unambiguously.
+    const nameToIds = new Map<string, Set<string>>();
+    const addNameLookup = (key: string, uniqueId: string) => {
+      const normalized = key.toLowerCase();
+      const existing = nameToIds.get(normalized);
+      if (existing) existing.add(uniqueId);
+      else nameToIds.set(normalized, new Set([uniqueId]));
+    };
     for (const entry of index.values()) {
       for (const key of entry.lookupKeys) {
-        nameToId.set(key, entry.uniqueId);
+        addNameLookup(key, entry.uniqueId);
       }
     }
+
+    const resolveDbtAnchor = (ref: string): string | undefined => {
+      for (const key of buildReferencedTableLookupKeys(ref)) {
+        const ids = nameToIds.get(key);
+        if (ids?.size === 1) return [...ids][0];
+      }
+      return undefined;
+    };
 
     // Anchors = DQL-referenced tables ∪ user-declared `dbtImport.anchors`
     const anchors = new Set<string>();
     for (const tableName of referencedTables) {
-      const uid = nameToId.get(tableName);
+      const uid = resolveDbtAnchor(tableName);
       if (uid) anchors.add(uid);
     }
     for (const anchorExpr of filters?.anchors ?? []) {
@@ -1070,7 +1121,7 @@ function importDbtManifest(
           if (match(entry)) anchors.add(entry.uniqueId);
         }
       } else {
-        const uid = nameToId.get(anchorExpr.toLowerCase());
+        const uid = resolveDbtAnchor(anchorExpr);
         if (uid) anchors.add(uid);
       }
     }
@@ -1211,10 +1262,33 @@ function importDbtManifest(
 
 /** Build all normalised lookup keys for a dbt node name. */
 function buildLookupKeys(name: string, schema?: string, database?: string): string[] {
-  const keys = [name.toLowerCase()];
-  if (schema) keys.push(`${schema}.${name}`.toLowerCase());
-  if (schema && database) keys.push(`${database}.${schema}.${name}`.toLowerCase());
-  return keys;
+  const aliases = new Set([name.toLowerCase()]);
+  const stripped = stripDbtRolePrefix(name);
+  if (stripped) aliases.add(stripped);
+
+  const keys = new Set<string>();
+  for (const alias of aliases) {
+    keys.add(alias);
+    if (schema) keys.add(`${schema}.${alias}`.toLowerCase());
+    if (schema && database) keys.add(`${database}.${schema}.${alias}`.toLowerCase());
+  }
+  return [...keys];
+}
+
+function buildReferencedTableLookupKeys(ref: string): string[] {
+  const normalized = ref.replace(/["`]/g, '').toLowerCase();
+  const parts = normalized.split('.').filter(Boolean);
+  const keys = new Set<string>([normalized]);
+  if (parts.length >= 2) keys.add(parts.slice(-2).join('.'));
+  const last = parts.at(-1);
+  if (last) keys.add(last);
+  return [...keys];
+}
+
+function stripDbtRolePrefix(name: string): string | undefined {
+  const normalized = name.toLowerCase();
+  const match = /^(?:src|stg|int|dim|fct)_(.+)$/.exec(normalized);
+  return match?.[1];
 }
 
 // ---- Apps & Dashboards Scanning ----

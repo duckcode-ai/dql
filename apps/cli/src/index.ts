@@ -66,7 +66,7 @@ const HELP = `
                                     Manage App artifacts (metadata, policies, dashboards, schedules)
     dql schedule list|run|start|status  Local scheduler for @schedule'd blocks (alerts + notifications)
     dql agent ask "<question>"      Block-first agent loop (certified blocks → fallback LLM SQL)
-    dql agent reindex               Rebuild .dql/cache/agent-kg.sqlite
+    dql agent reindex               Rebuild .dql/cache/agent-kg.sqlite and metadata.sqlite
     dql agent feedback up|down      Record thumbs-up/down feedback for self-learning
     dql slack serve                 Slack slash-command bot (forwards to the answer loop)
     dql verify                      Verify dql-manifest.json is reproducible from source

@@ -111,6 +111,16 @@ describe('buildManifest dbt import filters', () => {
           tags: ['unrelated'],
           original_file_path: 'models/misc/d.sql',
         },
+        'model.demo.src_sales': {
+          resource_type: 'model',
+          name: 'src_sales',
+          alias: 'src_sales',
+          schema: 'raw',
+          database: 'warehouse',
+          depends_on: { nodes: [] },
+          tags: [],
+          original_file_path: 'models/sources/src_sales.sql',
+        },
       },
       sources: {},
       metadata: { project_name: 'demo' },
@@ -204,6 +214,25 @@ describe('buildManifest dbt import filters', () => {
     const names = (manifest.dbtImport?.dbtDag?.models ?? []).map((m) => m.name).sort();
     expect(names).toEqual(['a']);
   });
+
+  it('anchors dbt models from fully qualified warehouse refs and dbt role-prefix aliases', () => {
+    writeProject();
+    mkdirSync(join(tmpDir, 'blocks'), { recursive: true });
+    writeFileSync(join(tmpDir, 'blocks', 'sales.dql'), `block "Sales" {
+  domain = "sales"
+  type = "custom"
+  query = """
+    SELECT *
+    FROM WAREHOUSE.RAW.sales
+  """
+}`);
+    const dbtManifestPath = writeDbtFixture();
+
+    const manifest = buildManifest({ projectRoot: tmpDir, dbtManifestPath });
+    const names = (manifest.dbtImport?.dbtDag?.models ?? []).map((m) => m.name).sort();
+
+    expect(names).toEqual(['src_sales']);
+  });
 });
 
 describe('buildManifest block extraction', () => {
@@ -226,12 +255,21 @@ describe('buildManifest block extraction', () => {
         {
           id: 'cell-1',
           type: 'dql',
-          source: `block "Notebook Revenue" {
+          source: `term "Notebook Revenue Term" {
+  domain = "finance"
+  type = "metric"
+  status = "certified"
+  description = "Revenue used by the notebook inline block."
+  owner = "analytics@example.com"
+}
+
+block "Notebook Revenue" {
   domain = "finance"
   type = "custom"
   status = "certified"
   owner = "analytics@example.com"
   tags = ["finance", "notebook"]
+  terms = ["Notebook Revenue Term"]
   query = """
     SELECT segment, SUM(revenue) AS revenue
     FROM orders
@@ -253,6 +291,7 @@ describe('buildManifest block extraction', () => {
     const manifest = buildManifest({ projectRoot: tmpDir, dqlVersion: 'test' });
     const block = manifest.blocks['Notebook Revenue'];
 
+    expect(manifest.terms['Notebook Revenue Term']?.filePath).toBe('notebooks/analysis.dqlnb#cell-1');
     expect(block.sql).toContain('SELECT segment');
     expect(block.sql).not.toContain('block "Notebook Revenue"');
     expect(block.domain).toBe('finance');
@@ -262,6 +301,29 @@ describe('buildManifest block extraction', () => {
     expect(block.chartType).toBe('bar');
     expect(block.tests).toEqual(['row_count > 0']);
     expect(block.tableDependencies).toEqual(['orders']);
+  });
+
+  it('recovers from legacy nested proposal metadata in draft blocks', () => {
+    mkdirSync(join(tmpDir, 'blocks', '_drafts'), { recursive: true });
+    writeFileSync(join(tmpDir, 'blocks', '_drafts', 'legacy.dql'), `block "legacy" {
+  domain = "misc"
+  type = "custom"
+  status = "draft"
+  _proposed {
+    asked_times = 2
+    proposed_contract_id = "misc.Unknown.legacy"
+  }
+  query = """SELECT 1"""
+}`);
+
+    const manifest = buildManifest({ projectRoot: tmpDir, dqlVersion: 'test' });
+
+    expect(manifest.blocks).not.toHaveProperty('legacy');
+    expect(manifest.diagnostics?.some((diagnostic) =>
+      diagnostic.kind === 'parse'
+      && diagnostic.filePath === 'blocks/_drafts/legacy.dql'
+      && diagnostic.message.includes('Failed to parse block file'),
+    )).toBe(true);
   });
 
   it('validates datalex_contract references when configured with a DataLex manifest', () => {

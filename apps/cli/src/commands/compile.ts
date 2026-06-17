@@ -20,8 +20,16 @@
 import { writeFileSync, existsSync, readFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { buildManifest, collectInputFiles, resolveDataLexManifestPath, resolveDbtManifestPath, type DQLManifest } from '@duckcodeailabs/dql-core';
-import { ManifestCache } from '@duckcodeailabs/dql-project';
+import { ManifestCache, type TrackedFile } from '@duckcodeailabs/dql-project';
+import { ensureMetadataCatalogFresh } from '@duckcodeailabs/dql-agent';
 import type { CLIFlags } from '../args.js';
+
+export function manifestCacheTrackedFiles(inputFiles: string[], dqlVersion: string): TrackedFile[] {
+  return [
+    ...inputFiles.map((path) => ({ path })),
+    { path: '__dql_compiler_version__', contentHash: dqlVersion },
+  ];
+}
 
 export async function runCompile(
   pathArg: string | null,
@@ -100,7 +108,7 @@ export async function runCompile(
       const cachePath = join(projectRoot, '.dql', 'cache', 'manifest.sqlite');
       const cache = new ManifestCache({ path: cachePath });
       try {
-        const files = collectInputFiles(buildOptions).map((path) => ({ path }));
+        const files = manifestCacheTrackedFiles(collectInputFiles(buildOptions), dqlVersion);
         const fingerprint = cache.fingerprint(files);
         const lookup = cache.lookup<DQLManifest>(fingerprint, files);
         if (lookup.hit) {
@@ -124,6 +132,9 @@ export async function runCompile(
 
   // JSON mode: output to stdout
   if (flags.format === 'json') {
+    if (!noCache) {
+      await refreshMetadataCatalog(projectRoot, manifest, true);
+    }
     console.log(JSON.stringify(manifest, null, 2));
     return;
   }
@@ -132,6 +143,9 @@ export async function runCompile(
   const outDir = flags.outDir ? resolve(flags.outDir) : projectRoot;
   const manifestPath = join(outDir, 'dql-manifest.json');
   writeFileSync(manifestPath, JSON.stringify(manifest, null, 2));
+  const metadataRefresh = noCache
+    ? null
+    : await refreshMetadataCatalog(projectRoot, manifest, false);
 
   // Print summary
   const blockCount = Object.keys(manifest.blocks).length;
@@ -183,6 +197,14 @@ export async function runCompile(
   }
 
   console.log(`\n  Manifest written to: ${manifestPath}`);
+  if (metadataRefresh) {
+    console.log(`  Metadata catalog ${metadataRefresh.refreshed ? 'refreshed' : 'up to date'}: .dql/cache/metadata.sqlite`);
+    if (metadataRefresh.diagnostics.length > 0) {
+      const warnCount = metadataRefresh.diagnostics.filter((d) => d.severity === 'warning').length;
+      const errCount = metadataRefresh.diagnostics.filter((d) => d.severity === 'error').length;
+      console.log(`  Metadata diagnostics: ${errCount} error(s), ${warnCount} warning(s)`);
+    }
+  }
   console.log(`  ${cacheHit ? 'Served from cache' : 'Compiled'} in ${elapsed}ms`);
 
   // Surface non-fatal problems — a silent "0 blocks" should never happen again.
@@ -255,5 +277,20 @@ export async function runCompile(
     }
 
     console.log('');
+  }
+}
+
+async function refreshMetadataCatalog(
+  projectRoot: string,
+  manifest: DQLManifest,
+  silent: boolean,
+) {
+  try {
+    return await ensureMetadataCatalogFresh(projectRoot, { manifest });
+  } catch (err) {
+    if (!silent) {
+      console.log(`  Metadata catalog warning: ${err instanceof Error ? err.message : String(err)}`);
+    }
+    return null;
   }
 }

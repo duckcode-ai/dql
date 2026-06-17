@@ -9,7 +9,14 @@ import { certify, certifyInput } from './tools/certify.js';
 import { suggestBlock, suggestBlockInput } from './tools/suggest-block.js';
 import { queryViaMetadata, queryViaMetadataInput } from './tools/query-via-metadata.js';
 import { listProposals, listProposalsInput } from './tools/list-proposals.js';
-import { kgSearch, kgSearchInput, feedbackRecord, feedbackRecordInput } from './tools/kg.js';
+import {
+  feedbackRecord,
+  feedbackRecordInput,
+  inspectMetadataContext,
+  inspectMetadataContextInput,
+  kgSearch,
+  kgSearchInput,
+} from './tools/kg.js';
 
 export interface CreateServerOptions {
   projectRoot?: string;
@@ -25,9 +32,11 @@ export const DQL_MCP_INSTRUCTIONS =
   'DataLex contract resolution when a DataLex manifest is loaded.\n' +
   ' Tier 2 — For named customer/user/account questions, custom filters, rankings, ' +
   'breakdowns, comparisons, drill-throughs, or any different grain, use certified ' +
-  'blocks/terms only as context and call `query_via_metadata` with read-only SQL ' +
-  'inferred from the manifest, semantic layer, dbt/source metadata, and runtime ' +
-  'schema. Surface `uncertified: true` and the draft review path verbatim.\n' +
+  'blocks/terms only as context. Call `inspect_metadata_context` first, then call ' +
+  '`query_via_metadata`; omit SQL when you need the route plan/allowed SQL context, ' +
+  'or provide read-only SQL inferred from the manifest, semantic layer, dbt/source ' +
+  'metadata, and runtime schema. Surface `uncertified: true` and the draft review ' +
+  'path verbatim.\n' +
   ' Tier 3 — If the available metadata does not identify a safe table, metric, ' +
   'dimension, or grain, refuse and ask for the missing business object or metric.\n' +
   'Other tools support the loop: `list_proposals` shows repeated Tier-2 drafts, ' +
@@ -68,7 +77,7 @@ export function createDQLMCPServer(options: CreateServerOptions = {}): McpServer
     'query_via_metadata',
     {
       description:
-        'Tier-2 of graduated trust. Use when no certified block exactly answers the requested grain, including why-changed diagnostics, named customer/user/account filters, rankings, breakdowns, comparisons, anomalies, and drill-throughs. Provide one read-only SELECT/WITH query inferred from DQL metadata, semantic/dbt/source context, and runtime schema. The runtime executes a bounded preview, returns `uncertified: true` plus trustStatus/evidence, and saves a draft block under blocks/_drafts/. Surface the `uncertified` flag and review path verbatim.',
+        'Tier-2 of graduated trust. Use when no certified block exactly answers the requested grain, including why-changed diagnostics, named customer/user/account filters, rankings, breakdowns, comparisons, anomalies, and drill-throughs. Call inspect_metadata_context first; pass its contextPackId when available. If proposedSql is omitted, this returns the catalog route plan, allowed SQL context, and missing context. If proposedSql is supplied, it must be one read-only SELECT/WITH query using only inspected relations/columns. The runtime executes a bounded preview, returns `uncertified: true` plus trustStatus/evidence, and saves a draft block under blocks/_drafts/. Surface the `uncertified` flag and review path verbatim.',
       inputSchema: queryViaMetadataInput,
     },
     async (args) => wrap(await queryViaMetadata(ctx, args)),
@@ -114,7 +123,16 @@ export function createDQLMCPServer(options: CreateServerOptions = {}): McpServer
   server.registerTool(
     'kg_search',
     { description: 'Search the agent knowledge graph (FTS5) over terms, business views, blocks, metrics, dimensions, dashboards, apps, notebooks, and dbt/source metadata.', inputSchema: kgSearchInput },
-    async (args) => wrap(kgSearch(ctx, args)),
+    async (args) => wrap(await kgSearch(ctx, args)),
+  );
+  server.registerTool(
+    'inspect_metadata_context',
+    {
+      description:
+        'Build the local SQLite metadata context pack for a question. Use before Tier-2 SQL generation to inspect certified blocks, semantic metrics, DQL terms/views, dbt/warehouse objects, lineage edges, diagnostics, selected evidence, rejected candidates, and trust labels.',
+      inputSchema: inspectMetadataContextInput,
+    },
+    async (args) => wrap(await inspectMetadataContext(ctx, args)),
   );
   server.registerTool(
     'feedback_record',

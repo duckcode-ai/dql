@@ -42,4 +42,25 @@ describe('parseArgs', () => {
     expect(parsed.flags.domain).toBe('finance');
     expect(parsed.flags.owner).toBe('analytics');
   });
+
+  it('parses agent provider, runtime, and feedback flags without adding them to the prompt', () => {
+    const parsed = parseArgs([
+      'agent',
+      'ask',
+      'Who scored the least points?',
+      '--provider',
+      'ollama',
+      '--runtime-url',
+      'http://127.0.0.1:3474',
+      '--user',
+      'analyst@local',
+    ]);
+
+    expect(parsed.command).toBe('agent');
+    expect(parsed.file).toBe('ask');
+    expect(parsed.rest).toEqual(['Who scored the least points?']);
+    expect(parsed.flags.provider).toBe('ollama');
+    expect(parsed.flags.runtimeUrl).toBe('http://127.0.0.1:3474');
+    expect(parsed.flags.user).toBe('analyst@local');
+  });
 });
