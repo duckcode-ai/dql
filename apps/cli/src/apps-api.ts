@@ -1289,9 +1289,11 @@ async function runAppInvestigation(
     let metricSnapshot = buildMetricSnapshot(selected);
     let driverCards = buildDriverCards(selected, intent);
     const baselineGap = intent === 'diagnose_change' && hasSelectedRows(selected) && !hasComparableTimeBaseline(selected);
+    const metadataOnly = intent === 'trust_gap_review';
+    if (metadataOnly) generatedSql = '';
     const sourceTileId = investigation.sourceTileId ?? selectedContextString(context, 'tileId');
     const sourceBlockId = investigation.sourceBlockId ?? selectedContextString(context, 'blockId');
-    const deterministicGeneration = generatedSql || baselineGap
+    const deterministicGeneration = generatedSql || baselineGap || metadataOnly
       ? undefined
       : buildDeterministicInvestigationSql(ctx.projectRoot, {
           question,
@@ -1300,7 +1302,7 @@ async function runAppInvestigation(
           sourceBlockId,
         });
     generatedSql = generatedSql || deterministicGeneration?.sql;
-    const agentGeneration = generatedSql || baselineGap
+    const agentGeneration = generatedSql || baselineGap || metadataOnly
       ? undefined
       : await generateInvestigationSql(ctx, {
           appId: investigation.appId,
@@ -1316,7 +1318,7 @@ async function runAppInvestigation(
     const generationError = cleanString(agentGeneration?.executionError);
     const sqlEvidence = agentGeneration?.result
       ? { preview: buildGeneratedSqlPreview(agentGeneration.result, generatedSql), error: generationError || undefined }
-      : await runGeneratedSqlPreview(ctx, generatedSql);
+      : metadataOnly ? {} : await runGeneratedSqlPreview(ctx, generatedSql);
     const sqlError = sqlEvidence.error ?? generationError;
     if (sqlEvidence.preview) {
       previews.unshift(sqlEvidence.preview);

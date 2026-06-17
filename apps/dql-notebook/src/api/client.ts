@@ -222,6 +222,15 @@ export interface GeneratedAppPlan {
       viz: string;
       certification: 'certified' | 'uncertified';
       reviewStatus: 'certified' | 'draft_ready' | 'review_required';
+      display?: {
+        role?: string;
+        recommendedDisplayType?: string;
+        layoutPriority?: number;
+        expectedGrain?: string;
+        trustState?: string;
+        followUpActions?: string[];
+        rationale?: string;
+      };
       rationale?: string;
       caveats?: string[];
       reviewTasks?: string[];

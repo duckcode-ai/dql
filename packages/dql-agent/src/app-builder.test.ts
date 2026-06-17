@@ -133,15 +133,19 @@ describe("planAppFromPrompt", () => {
             }),
           }),
           expect.objectContaining({
-            kind: "draft_placeholder",
-            certification: "uncertified",
-            reviewStatus: "draft_ready",
+            kind: "certified_block",
+            blockId: "revenue_by_segment",
+            certification: "certified",
+            reviewStatus: "certified",
             display: expect.objectContaining({
-              trustState: "draft_ready",
+              trustState: "certified",
             }),
           }),
         ]),
       );
+      expect(
+        plan.pages[0].tiles.some((tile) => tile.kind === "draft_placeholder"),
+      ).toBe(false);
     }));
 
   it("prioritizes explicitly selected certified blocks in generated plans", () =>
@@ -161,6 +165,40 @@ describe("planAppFromPrompt", () => {
         certification: "certified",
       });
     }));
+
+  it("keeps ranking and leaderboard blocks table-shaped instead of KPI-shaped", () =>
+    withKg(
+      [
+        {
+          nodeId: "block:top_goal_scorers",
+          kind: "block",
+          name: "Top 10 Goal Scorers",
+          domain: "nba",
+          status: "certified",
+          description: "Top 10 NBA players by total points scored",
+          llmContext:
+            "Ranking table with player name, season, and total points scored.",
+          tags: ["nba", "players", "ranking", "points"],
+          sourceTier: "certified_artifact",
+          certification: "certified",
+        },
+      ],
+      (kg) => {
+        const plan = planAppFromPrompt({
+          prompt: "Build an NBA operations analytics app for basketball leaders using top scorers",
+          kg,
+          domain: "nba",
+        });
+
+        expect(plan.pages[0].tiles[0]).toMatchObject({
+          blockId: "Top 10 Goal Scorers",
+          viz: "table",
+          display: expect.objectContaining({
+            recommendedDisplayType: "table",
+          }),
+        });
+      },
+    ));
 });
 
 describe("validateAppPlan", () => {
@@ -232,16 +270,15 @@ describe("generateAppFromPlan", () => {
       expect(dashboard.layout.items).toEqual(
         expect.arrayContaining([
           expect.objectContaining({ block: { blockId: "revenue_total" } }),
-          expect.objectContaining({
-            text: expect.objectContaining({
-              markdown: expect.stringContaining("**Trust:** uncertified"),
-            }),
-          }),
         ]),
       );
+      expect(
+        dashboard.layout.items.some((item: { text?: unknown }) => item.text),
+      ).toBe(false);
       expect(dashboard.layout.items[0]).toMatchObject({
-        i: "business-brief",
-        w: 12,
+        i: "revenue-total",
+        block: { blockId: "revenue_total" },
+        w: 3,
         h: 2,
       });
       const readme = readFileSync(

@@ -770,6 +770,140 @@ describe("answer (block-first loop)", () => {
     expect(provider.calls).toHaveLength(0);
   });
 
+  it("uses selected source block SQL for year-filter drilldowns without asking the model", async () => {
+    kg.rebuild(
+      [
+        {
+          nodeId: "block:Top 10 Goal Scorers",
+          kind: "block",
+          name: "Top 10 Goal Scorers",
+          domain: "nba",
+          status: "certified",
+          description: "Top 10 NBA players by total points scored.",
+          tags: ["nba", "top", "points"],
+          sourceTier: "certified_artifact",
+          certification: "certified",
+          provenance: "DQL block",
+        },
+      ],
+      [],
+    );
+    const provider = new StubProvider("should not be called");
+    const result = await answer({
+      question: "I need to focus on only 2016 year",
+      provider,
+      kg,
+      followUp: {
+        kind: "drilldown",
+        sourceBlockName: "Top 10 Goal Scorers",
+        filters: ["season = 2016"],
+      },
+      contextPack: {
+        id: "ctx_selected_year",
+        question: "I need to focus on only 2016 year",
+        focusObjectKey: "dql:block:Top 10 Goal Scorers",
+        mode: "question",
+        trustLabel: "mixed",
+        objects: [
+          {
+            objectKey: "dql:block:Top 10 Goal Scorers",
+            objectType: "dql_block",
+            name: "Top 10 Goal Scorers",
+            status: "certified",
+            payload: {
+              sql: "SELECT player_name, season, total_points FROM NBA_GAMES.RAW.fct_player_performance ORDER BY total_points DESC LIMIT 10",
+            },
+          },
+        ],
+        edges: [],
+        queryRuns: [],
+        citations: [],
+        evidenceSummaries: [],
+        warnings: [],
+        allowedSqlContext: {
+          relations: [],
+          sourceBlockSql: [{
+            objectKey: "dql:block:Top 10 Goal Scorers",
+            name: "Top 10 Goal Scorers",
+            status: "certified",
+            sql: "SELECT player_name, season, total_points FROM NBA_GAMES.RAW.fct_player_performance ORDER BY total_points DESC LIMIT 10",
+          }],
+        },
+        routeDecision: {
+          route: "generated_sql",
+          intent: "entity_drilldown",
+          reason: "selected block drilldown",
+          trustLabel: "mixed",
+          reviewStatus: "draft_ready",
+          selectedEvidence: [],
+          missingContext: [],
+          followUps: [],
+        },
+        evidenceRoles: [],
+        missingContext: [],
+        conflicts: [],
+        retrievalDiagnostics: {
+          strategy: "sqlite_fts",
+          selectedObjects: 1,
+          selectedEvidence: [],
+          topRejected: [],
+          candidateConflicts: [],
+        },
+        freshness: {},
+      } as any,
+      executeGeneratedSql: async (sql) => ({
+        columns: ["PLAYER_NAME", "SEASON", "TOTAL_POINTS"],
+        rows: [{ PLAYER_NAME: "James Harden", SEASON: 2016, TOTAL_POINTS: 1781 }],
+        rowCount: 1,
+        sql,
+      }),
+    });
+
+    expect(result.kind).toBe("uncertified");
+    expect(result.proposedSql).toContain("WHERE season = 2016");
+    expect(result.proposedSql).not.toMatch(/LIMIT 10\s*\)\s+AS dql_source/i);
+    expect(result.result?.rowCount).toBe(1);
+    expect(provider.calls).toHaveLength(0);
+  });
+
+  it("keeps generated SQL execution failures concise instead of surfacing speculative repair text", async () => {
+    kg.rebuild(
+      [
+        {
+          nodeId: "dbt_model:player_scoring",
+          kind: "dbt_model",
+          name: "player_scoring",
+          domain: "nba",
+          description: "Player scoring fact table.",
+          sourceTier: "dbt_manifest",
+          certification: "ai_generated",
+          provenance: "dbt manifest",
+        },
+      ],
+      [],
+    );
+    const provider = new StubProvider(
+      "I will try another unrelated table as a proxy.\n\n" +
+        "```sql\nSELECT player_name, season, total_points FROM missing.player_scoring WHERE season = 2016\n```\n\n" +
+        "Viz: table",
+    );
+    const result = await answer({
+      question: "I need to give the complete view of 2016 year players and goals",
+      provider,
+      kg,
+      executeGeneratedSql: async () => {
+        throw new Error("Snowflake query failed: Object 'MISSING.PLAYER_SCORING' does not exist or not authorized");
+      },
+    });
+
+    expect(result.kind).toBe("uncertified");
+    expect(result.executionError).toContain("does not exist or not authorized");
+    expect(result.text).toContain("did not run successfully");
+    expect(result.text).toContain("did not switch to a proxy table");
+    expect(result.text).not.toContain("unrelated table");
+    expect(provider.calls).toHaveLength(1);
+  });
+
   it("generates dynamic customer ranking SQL instead of selecting total_customers for ad hoc performance questions", async () => {
     kg.rebuild(
       [

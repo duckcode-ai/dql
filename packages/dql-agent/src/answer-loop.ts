@@ -484,6 +484,7 @@ export async function answer(input: AnswerLoopInput): Promise<AgentAnswer> {
     question,
     intent,
     contextPack: input.contextPack,
+    followUp: input.followUp,
   });
   let proposed = '';
   let parsed: ParsedProposal;
@@ -589,7 +590,7 @@ export async function answer(input: AnswerLoopInput): Promise<AgentAnswer> {
             executionError = retryErr instanceof Error ? retryErr.message : String(retryErr);
           }
         }
-        if (executionError) {
+        if (executionError && hasUsableRepairSchema(input.schemaContext ?? [])) {
           const repairedRaw = await requestSqlRepair({
             provider,
             baseMessages: messages,
@@ -602,7 +603,6 @@ export async function answer(input: AnswerLoopInput): Promise<AgentAnswer> {
           const repaired = parseProposal(repairedRaw);
           if (repaired.sql) {
             repairAttempts += 1;
-            parsed.text = repaired.text || parsed.text;
             parsed.sql = repaired.sql;
             parsed.viz = repaired.viz ?? parsed.viz;
             try {
@@ -615,6 +615,9 @@ export async function answer(input: AnswerLoopInput): Promise<AgentAnswer> {
         }
       }
     }
+  }
+  if (executionError) {
+    parsed.text = composeGeneratedExecutionFailureText(question, executionError);
   }
   const analysisPlan = buildAnalysisPlan({
     question,
@@ -785,6 +788,9 @@ function renderContextPackForPrompt(contextPack: LocalContextPack): string {
   const allowed = contextPack.allowedSqlContext?.relations.length
     ? `\nAllowed SQL relations:\n${contextPack.allowedSqlContext.relations.slice(0, 12).map((relation) => `- ${relation.relation}: ${relation.columns.slice(0, 24).map((column) => column.name).join(', ') || '(columns unavailable)'}`).join('\n')}`
     : '';
+  const sourceSql = contextPack.allowedSqlContext?.sourceBlockSql.length
+    ? `\nSource block SQL for review-required drafts:\n${contextPack.allowedSqlContext.sourceBlockSql.slice(0, 4).map((source) => `- ${source.name}${source.status ? ` (${source.status})` : ''}:\n${indentSqlForPrompt(source.sql)}`).join('\n')}`
+    : '';
   return [
     `context_pack_id: ${contextPack.id}`,
     `trust_label: ${contextPack.trustLabel}`,
@@ -792,8 +798,14 @@ function renderContextPackForPrompt(contextPack: LocalContextPack): string {
     warnings.trim(),
     `Selected evidence:\n${objects || '- none'}`,
     allowed.trim(),
+    sourceSql.trim(),
     conflicts.trim(),
   ].filter(Boolean).join('\n');
+}
+
+function indentSqlForPrompt(sql: string): string {
+  const normalized = sql.trim().slice(0, 1600);
+  return normalized.split(/\r?\n/).map((line) => `  ${line}`).join('\n');
 }
 
 function contextPackCitations(contextPack: LocalContextPack | undefined, limit: number): AgentCitation[] {
@@ -984,10 +996,19 @@ function buildContextPackAwareProposal(input: {
   question: string;
   intent: AgentIntent;
   contextPack?: LocalContextPack;
+  followUp?: AgentFollowUpContext;
 }): ParsedProposal | undefined {
   if (!isGeneratedAgentIntent(input.intent)) return undefined;
   if (!input.contextPack) return undefined;
+  const contextPack = input.contextPack;
   const lower = input.question.toLowerCase();
+  const filteredSourceProposal = buildSourceBlockFilterProposal({
+    question: input.question,
+    contextPack,
+    followUp: input.followUp,
+  });
+  if (filteredSourceProposal) return filteredSourceProposal;
+
   if (!/\b(least|lowest|fewest|bottom|min(?:imum)?)\b/.test(lower)) return undefined;
 
   for (const object of input.contextPack.objects) {
@@ -1003,6 +1024,72 @@ function buildContextPackAwareProposal(input: {
     };
   }
   return undefined;
+}
+
+function buildSourceBlockFilterProposal(input: {
+  question: string;
+  contextPack: LocalContextPack;
+  followUp?: AgentFollowUpContext;
+}): ParsedProposal | undefined {
+  const year = extractYearFilterValue(input.question, input.followUp);
+  if (!year) return undefined;
+  const source = preferredSourceBlockSql(input.contextPack, input.followUp?.sourceBlockName);
+  if (!source?.sql.trim()) return undefined;
+  const sql = source.sql.trim();
+  const filterColumn = pickTimeFilterColumn(sql);
+  if (!filterColumn) return undefined;
+  return {
+    text: `Generated a review-required ${year} view from certified block "${source.name}" as context. This filters the selected block grain instead of reusing the certified answer directly, so it remains uncertified until reviewed.`,
+    sql: [
+      'SELECT *',
+      'FROM (',
+      indentSubquerySql(stripFinalLimit(sql)),
+      ') AS dql_source',
+      `WHERE ${sqlIdentifier(filterColumn)} = ${year}`,
+      'LIMIT 200',
+    ].join('\n'),
+    viz: 'table',
+  };
+}
+
+function preferredSourceBlockSql(
+  contextPack: LocalContextPack,
+  sourceBlockName?: string,
+): LocalContextPack['allowedSqlContext']['sourceBlockSql'][number] | undefined {
+  const sources = contextPack.allowedSqlContext?.sourceBlockSql ?? [];
+  const normalizedSource = sourceBlockName ? normalizeSourceName(sourceBlockName) : undefined;
+  if (normalizedSource) {
+    const exact = sources.find((source) => normalizeSourceName(source.name) === normalizedSource);
+    if (exact) return exact;
+  }
+  return sources.find((source) => source.status === 'certified') ?? sources[0];
+}
+
+function extractYearFilterValue(question: string, followUp?: AgentFollowUpContext): string | undefined {
+  const direct = question.match(/\b(19|20)\d{2}\b/)?.[0];
+  if (direct) return direct;
+  const fromFollowUp = followUp?.filters
+    ?.map((filter) => filter.match(/\b(19|20)\d{2}\b/)?.[0])
+    .find(Boolean);
+  return fromFollowUp;
+}
+
+function pickTimeFilterColumn(sql: string): string | undefined {
+  if (/\bseason\b/i.test(sql)) return 'season';
+  if (/\byear\b/i.test(sql)) return 'year';
+  return undefined;
+}
+
+function stripFinalLimit(sql: string): string {
+  return sql.replace(/;\s*$/, '').replace(/\s+limit\s+\d+\s*$/i, '').trim();
+}
+
+function indentSubquerySql(sql: string): string {
+  return sql.split(/\r?\n/).map((line) => `  ${line}`).join('\n');
+}
+
+function normalizeSourceName(value: string): string {
+  return value.replace(/^block:/i, '').trim().toLowerCase();
 }
 
 function invertRankingSql(sql: string): string | undefined {
@@ -1601,11 +1688,27 @@ async function requestSqlRepair(input: {
         'The generated SQL failed during bounded preview execution.',
         `Question: ${input.question}`,
         `Execution error: ${input.executionError}`,
-        'Return one corrected read-only SQL query using only the runtime schema below.',
+        'Return only one corrected read-only SQL query in a fenced sql block using only the runtime schema below.',
+        'If the runtime schema is not enough to repair the SQL, return "NEEDS_CONTEXT:" followed by one short missing-context question. Do not propose proxy tables.',
         schema,
       ].join('\n\n'),
     },
   ], { signal: input.signal });
+}
+
+function hasUsableRepairSchema(schemaContext: AgentSchemaTable[]): boolean {
+  return schemaContext.some((table) => table.columns.length > 0);
+}
+
+function composeGeneratedExecutionFailureText(question: string, executionError: string): string {
+  const compactError = executionError.replace(/\s+/g, ' ').trim();
+  const shownError = compactError.length > 220 ? `${compactError.slice(0, 217)}...` : compactError;
+  return [
+    `I generated a review-required SQL draft for "${question}", but the bounded preview did not run successfully.`,
+    'I did not switch to a proxy table because that could answer a different question.',
+    `Execution issue: ${shownError}`,
+    'Refresh the runtime schema or fix the source relation/columns, then rerun the draft.',
+  ].join(' ');
 }
 
 function isRetryableGeneratedSqlError(error: string): boolean {

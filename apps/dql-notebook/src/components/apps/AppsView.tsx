@@ -73,7 +73,7 @@ interface AgentSkillCard {
   description: string;
 }
 
-const DEFAULT_PROMPT = 'Build an analytics app from my certified DQL blocks and available warehouse tables.';
+const EMPTY_APP_PROMPT = '';
 
 const APP_PROMPT_EXAMPLES: AppPromptExample[] = [
   {
@@ -154,7 +154,7 @@ export function AppsView(): JSX.Element {
   const [dashboardDoc, setDashboardDoc] = useState<DashboardDocumentResponse | null>(null);
   const [appLoading, setAppLoading] = useState(false);
   const [builderMode, setBuilderMode] = useState<BuilderMode>('ai');
-  const [builderPrompt, setBuilderPrompt] = useState(DEFAULT_PROMPT);
+  const [builderPrompt, setBuilderPrompt] = useState(EMPTY_APP_PROMPT);
   const [builderName, setBuilderName] = useState('Business Analytics');
   const [builderDomain, setBuilderDomain] = useState('Business');
   const [builderOwner, setBuilderOwner] = useState('analytics');
@@ -569,7 +569,7 @@ function AppLibrarySurface({
           title="Build with AI"
           description="Let AI draft the app."
           action="Start"
-          onClick={() => onStartAi(DEFAULT_PROMPT)}
+          onClick={() => onStartAi(EMPTY_APP_PROMPT)}
         />
         <StartOption
           icon={<LayoutDashboard size={17} strokeWidth={1.9} />}
@@ -751,11 +751,13 @@ function AppCreateSurface({
   const selected = catalog.filter((block) => selectedBlocks.has(block.id));
   const contextDomainLabel = domain.trim() || 'Auto domain';
   const contextOwnerLabel = owner.trim() || 'Local owner';
-  const plan = generated?.plan ?? planFromSelection(appName, prompt, domain, owner, selected);
+  const plan = generated?.plan ?? (mode === 'ai'
+    ? emptyAppPlan(appName, prompt, domain, owner)
+    : planFromSelection(appName, prompt, domain, owner, selected));
   const validation = generated?.validation ?? {
     ok: selected.length > 0,
     certifiedTiles: selected.length,
-    draftTiles: mode === 'ai' ? 2 : 0,
+    draftTiles: 0,
     issues: [],
   };
   return (
@@ -779,7 +781,7 @@ function AppCreateSurface({
         </div>
         <div className="dql-app-build-actions">
           <span className="dql-app-persona"><b>CFO</b> CFO</span>
-          {generated ? <button type="button" className="dql-apps-btn dql-apps-btn-line" onClick={onOpenGenerated}>Preview</button> : null}
+          {generated ? <button type="button" className="dql-apps-btn dql-apps-btn-line" onClick={onOpenGenerated}>Open app</button> : null}
           <button type="button" className="dql-apps-btn dql-apps-btn-primary" onClick={onBuild} disabled={saving}>
             {saving ? 'Building...' : mode === 'ai' ? 'Send to AI' : 'Create app'}
           </button>
@@ -853,29 +855,38 @@ function AppCreateSurface({
         </section>
 
         <section className="dql-app-panel dql-app-preview-panel">
-          <PanelHead title={mode === 'ai' ? 'Live preview' : 'Canvas'} meta={generated ? 'generated' : selected.length ? `${selected.length} selected` : 'empty'} />
+          <PanelHead title={mode === 'ai' ? 'Generated output' : 'Canvas'} meta={generated ? 'generated' : selected.length ? `${selected.length} selected` : 'empty'} />
           <div className="dql-app-preview-scroll">
-            <div className="dql-app-preview-card">
-              <div className="dql-app-preview-head">
-                <h2>{generated?.plan.name ?? appName}</h2>
-                <StatusSeal tone={generated ? 'agentic' : 'draft'}>{generated ? 'ready to refine' : 'ready when you are'}</StatusSeal>
+            {mode === 'ai' ? (
+              <GeneratedOutputPanel
+                generated={generated}
+                saving={saving}
+                onBuild={onBuild}
+                onOpenGenerated={onOpenGenerated}
+              />
+            ) : (
+              <div className="dql-app-preview-card">
+                <div className="dql-app-preview-head">
+                  <h2>{appName}</h2>
+                  <StatusSeal tone="draft">ready when you are</StatusSeal>
+                </div>
+                <div className="dql-app-preview-filters">
+                  <span>Last 12 months <ChevronDown size={12} /></span>
+                  <span>All customers <ChevronDown size={12} /></span>
+                  <span>All regions <ChevronDown size={12} /></span>
+                </div>
+                <div className="dql-app-preview-grid">
+                  {plan.pages[0]?.tiles.length ? (
+                    plan.pages[0].tiles.map((tile) => <PreviewTile key={tile.id} tile={tile} />)
+                  ) : (
+                    <div className="dql-app-preview-empty">
+                      <LayoutDashboard size={38} strokeWidth={1.4} />
+                      <div>Select blocks to compose the app.</div>
+                    </div>
+                  )}
+                </div>
               </div>
-              <div className="dql-app-preview-filters">
-                <span>Last 12 months <ChevronDown size={12} /></span>
-                <span>All customers <ChevronDown size={12} /></span>
-                <span>All regions <ChevronDown size={12} /></span>
-              </div>
-              <div className="dql-app-preview-grid">
-                {plan.pages[0]?.tiles.length ? (
-                  plan.pages[0].tiles.map((tile, index) => <PreviewTile key={tile.id} tile={tile} index={index} />)
-                ) : (
-                  <div className="dql-app-preview-empty">
-                    <LayoutDashboard size={38} strokeWidth={1.4} />
-                    <div>{mode === 'ai' ? 'Describe the app outcome, then send it to AI.' : 'Select blocks to compose the app.'}</div>
-                  </div>
-                )}
-              </div>
-            </div>
+            )}
           </div>
         </section>
 
@@ -1675,6 +1686,7 @@ function ResearchPanel({
     const create = async () => {
       setBusy('create');
       setError(null);
+      onSeedHandled();
       const result = await api.createAppInvestigation(appId, {
         dashboardId: seed.dashboardId ?? activeDashboardId,
         sourceTileId: seed.sourceTileId,
@@ -1698,7 +1710,6 @@ function ResearchPanel({
       });
       setSelectedId(result.investigation.id);
       setEvidenceTab('preview');
-      onSeedHandled();
     };
     void create();
     return () => {
@@ -1708,22 +1719,31 @@ function ResearchPanel({
 
   const selected = items.find((item) => item.id === selectedId) ?? items[0] ?? null;
 
-  const createResearch = async (question: string, intent?: LocalAppInvestigation['intent']) => {
+  const createResearch = async (
+    question: string,
+    intent?: LocalAppInvestigation['intent'],
+    parent?: LocalAppInvestigation,
+  ) => {
     if (!appId) return;
     setBusy('create');
     setError(null);
+    const inheritedContext = asUiRecord(parent?.context);
     const result = await api.createAppInvestigation(appId, {
-      dashboardId: activeDashboardId,
+      dashboardId: parent?.dashboardId ?? activeDashboardId,
+      sourceTileId: parent?.sourceTileId,
+      sourceBlockId: parent?.sourceBlockId,
       title: question,
       question,
       intent,
       context: {
-        scope: 'dashboard',
+        ...inheritedContext,
+        scope: parent ? 'research-follow-up' : 'dashboard',
         appId,
         appName: appDoc?.app.name,
-        dashboardId: activeDashboardId,
-        dashboardTitle: dashboardDoc?.dashboard.metadata.title,
+        dashboardId: parent?.dashboardId ?? activeDashboardId,
+        dashboardTitle: String(inheritedContext.dashboardTitle ?? dashboardDoc?.dashboard.metadata.title ?? ''),
         domain: appDoc?.app.domain ?? dashboardDoc?.dashboard.metadata.domain,
+        parentInvestigationId: parent?.id,
       },
       run: true,
     });
@@ -1913,13 +1933,13 @@ function ResearchPanel({
             <section className="dql-app-research-section">
               <PanelHead title="Next actions" meta="local-first" />
               <div className="dql-app-research-next">
-                <button type="button" onClick={() => void createResearch(`Show exception rows for ${selected.sourceBlockId ?? selected.title}`, 'anomaly_investigation')}>
+                <button type="button" onClick={() => void createResearch(`Show exception rows for ${selected.sourceBlockId ?? selected.title}`, 'anomaly_investigation', selected)}>
                   Exceptions
                 </button>
-                <button type="button" onClick={() => void createResearch(`Compare segments for ${selected.sourceBlockId ?? selected.title}`, 'segment_compare')}>
+                <button type="button" onClick={() => void createResearch(`Compare segments for ${selected.sourceBlockId ?? selected.title}`, 'segment_compare', selected)}>
                   Compare
                 </button>
-                <button type="button" onClick={() => void createResearch(`Can leaders rely on ${selected.sourceBlockId ?? selected.title}?`, 'trust_gap_review')}>
+                <button type="button" onClick={() => void createResearch(`Can leaders rely on ${selected.sourceBlockId ?? selected.title}?`, 'trust_gap_review', selected)}>
                   Trust gaps
                 </button>
               </div>
@@ -1999,8 +2019,72 @@ function PanelHead({ title, meta }: { title: string; meta?: string }) {
   );
 }
 
-function PreviewTile({ tile, index }: { tile: GeneratedAppPlan['pages'][number]['tiles'][number]; index: number }) {
-  const wide = tile.viz === 'line' || tile.viz === 'bar';
+function GeneratedOutputPanel({
+  generated,
+  saving,
+  onBuild,
+  onOpenGenerated,
+}: {
+  generated: GenerateAppResponse | null;
+  saving: boolean;
+  onBuild: () => void;
+  onOpenGenerated: () => void;
+}) {
+  if (!generated) {
+    return (
+      <div className="dql-app-preview-card dql-app-preview-card-empty">
+        <div className="dql-app-preview-empty">
+          <LayoutDashboard size={38} strokeWidth={1.4} />
+          <div>No generated app yet.</div>
+        </div>
+      </div>
+    );
+  }
+
+  const tiles = generated.plan.pages[0]?.tiles ?? [];
+  return (
+    <div className="dql-app-generated-output">
+      <div className="dql-app-generated-hero">
+        <div className="dql-app-generated-icon">
+          <Sparkles size={18} strokeWidth={1.8} />
+        </div>
+        <span>Generated app ready</span>
+        <h2>{generated.plan.name}</h2>
+        <p>
+          {generated.validation.certifiedTiles} certified tile
+          {generated.validation.certifiedTiles === 1 ? '' : 's'} / {generated.validation.draftTiles} draft tile
+          {generated.validation.draftTiles === 1 ? '' : 's'}
+        </p>
+        <div className="dql-app-generated-actions">
+          <button type="button" className="dql-apps-btn dql-apps-btn-primary" onClick={onOpenGenerated}>
+            Open generated app
+          </button>
+          <button type="button" className="dql-apps-btn dql-apps-btn-line" onClick={onBuild} disabled={saving}>
+            {saving ? 'Regenerating...' : 'Regenerate'}
+          </button>
+        </div>
+      </div>
+      <div className="dql-app-generated-tile-list">
+        {tiles.map((tile) => (
+          <div key={tile.id} className="dql-app-generated-tile-row">
+            <i className={tile.certification === 'uncertified' ? 'draft' : ''} />
+            <span>
+              <b>{tile.title}</b>
+              <small>{formatBusinessLabel(tile.display?.role ?? tile.kind)} / {previewTileLayoutLabel(tile)} / {tile.viz}</small>
+            </span>
+            <em>{tile.certification === 'certified' ? 'Certified' : 'Review'}</em>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function PreviewTile({ tile }: { tile: GeneratedAppPlan['pages'][number]['tiles'][number] }) {
+  const wide = ['line', 'area', 'bar', 'grouped_bar', 'stacked_bar', 'table', 'pivot'].includes(tile.viz);
+  const role = formatBusinessLabel(tile.display?.role ?? tile.kind);
+  const layout = previewTileLayoutLabel(tile);
+  const detail = tile.description ?? tile.rationale ?? tile.blockId ?? 'Generated app tile';
   return (
     <div className={`dql-app-preview-tile ${tile.certification === 'uncertified' ? 'draft' : ''} ${wide ? 'wide' : ''}`}>
       <div className="dql-app-preview-tile-head">
@@ -2008,16 +2092,12 @@ function PreviewTile({ tile, index }: { tile: GeneratedAppPlan['pages'][number][
         <span>{tile.viz}</span>
       </div>
       <div className="dql-app-preview-tile-body">
-        {tile.viz === 'single_value' || tile.viz === 'kpi' ? (
-          <>
-            <strong>{index % 2 === 0 ? '$48.2K' : '61.9K'}</strong>
-            <small>{tile.description ?? 'Certified KPI tile'}</small>
-          </>
-        ) : (
-          <div className="dql-app-mini-bars">
-            {[72, 42, 64, 36, 86].map((value, barIndex) => <i key={barIndex} style={{ width: `${value}%` }} />)}
-          </div>
-        )}
+        <b>{role}</b>
+        <small>{detail}</small>
+        <dl>
+          <div><dt>Layout</dt><dd>{layout}</dd></div>
+          <div><dt>Grain</dt><dd>{formatBusinessLabel(tile.display?.expectedGrain ?? 'Auto')}</dd></div>
+        </dl>
       </div>
       <div className="dql-app-preview-tile-foot">
         <span>{tile.kind.replace(/_/g, ' ')}</span>
@@ -2025,6 +2105,16 @@ function PreviewTile({ tile, index }: { tile: GeneratedAppPlan['pages'][number][
       </div>
     </div>
   );
+}
+
+function previewTileLayoutLabel(tile: GeneratedAppPlan['pages'][number]['tiles'][number]): string {
+  const role = tile.display?.role;
+  if (tile.viz === 'single_value' || tile.viz === 'kpi') return 'compact';
+  if (role === 'trust' || role === 'research') return 'half';
+  if (tile.viz === 'table' || tile.viz === 'pivot') return 'half / tall';
+  if (['line', 'area', 'bar', 'grouped_bar', 'stacked_bar'].includes(tile.viz)) return 'half';
+  if (tile.viz === 'text') return 'compact';
+  return 'auto';
 }
 
 function PlanItem({ tile }: { tile: GeneratedAppPlan['pages'][number]['tiles'][number] }) {
@@ -2392,6 +2482,34 @@ function planFromSelection(
     lifecycle: 'draft',
     tags: ['app-builder'],
     pages: [{ id: 'overview', title: 'Overview', filters: [], tiles }],
+    caveats: [],
+    reviewTasks: [],
+  };
+}
+
+function emptyAppPlan(
+  name: string,
+  prompt: string,
+  domain: string,
+  owner: string,
+): GeneratedAppPlan {
+  return {
+    version: 1,
+    appId: slugify(name) || 'new-app',
+    name,
+    prompt,
+    skills: AGENT_SKILLS.map((skill) => ({
+      id: skill.id,
+      title: skill.title,
+      description: skill.description,
+    })),
+    domain,
+    audience: 'stakeholder',
+    businessGoal: prompt,
+    owner,
+    lifecycle: 'draft',
+    tags: ['app-builder'],
+    pages: [{ id: 'overview', title: 'Overview', filters: [], tiles: [] }],
     caveats: [],
     reviewTasks: [],
   };
@@ -3277,6 +3395,13 @@ const APP_STYLES = `
   overflow: hidden;
 }
 
+.dql-app-preview-card-empty {
+  min-height: 420px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
 .dql-app-preview-head {
   min-height: 58px;
   display: flex;
@@ -3327,6 +3452,123 @@ const APP_STYLES = `
   text-align: center;
 }
 
+.dql-app-generated-output {
+  min-height: 420px;
+  display: grid;
+  grid-template-columns: minmax(260px, 0.9fr) minmax(320px, 1.1fr);
+  gap: 16px;
+}
+
+.dql-app-generated-hero,
+.dql-app-generated-tile-list {
+  border: 1px solid var(--dql-app-line);
+  border-radius: 8px;
+  background: var(--dql-app-surface);
+}
+
+.dql-app-generated-hero {
+  min-height: 360px;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 28px;
+}
+
+.dql-app-generated-icon {
+  width: 38px;
+  height: 38px;
+  border-radius: 8px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--dql-app-accent);
+  background: var(--dql-app-accent-soft);
+  border: 1px solid rgba(79, 99, 215, 0.2);
+}
+
+.dql-app-generated-hero > span {
+  color: var(--dql-app-faint);
+  font: 800 10px var(--font-mono);
+  letter-spacing: 0;
+  text-transform: uppercase;
+}
+
+.dql-app-generated-hero h2 {
+  margin: 0;
+  color: var(--dql-app-ink);
+  font-size: 24px;
+  line-height: 1.15;
+  overflow-wrap: anywhere;
+}
+
+.dql-app-generated-hero p {
+  margin: 0;
+  color: var(--dql-app-muted);
+}
+
+.dql-app-generated-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding-top: 6px;
+}
+
+.dql-app-generated-tile-list {
+  display: flex;
+  flex-direction: column;
+  min-height: 360px;
+  padding: 8px 16px;
+}
+
+.dql-app-generated-tile-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 13px 0;
+  border-bottom: 1px solid var(--dql-app-line);
+}
+
+.dql-app-generated-tile-row:last-child { border-bottom: 0; }
+
+.dql-app-generated-tile-row i {
+  width: 8px;
+  height: 8px;
+  border-radius: 999px;
+  background: var(--dql-app-green);
+  flex: 0 0 auto;
+}
+
+.dql-app-generated-tile-row i.draft { background: var(--dql-app-orange); }
+
+.dql-app-generated-tile-row span {
+  min-width: 0;
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.dql-app-generated-tile-row b {
+  color: var(--dql-app-ink);
+  font-size: 13px;
+  overflow-wrap: anywhere;
+}
+
+.dql-app-generated-tile-row small {
+  color: var(--dql-app-muted);
+  font-size: 11px;
+}
+
+.dql-app-generated-tile-row em {
+  color: var(--dql-app-faint);
+  font: 800 10px var(--font-mono);
+  text-transform: uppercase;
+  letter-spacing: 0;
+  font-style: normal;
+}
+
 .dql-app-preview-tile {
   grid-column: span 4;
   min-height: 136px;
@@ -3350,6 +3592,10 @@ const APP_STYLES = `
 }
 
 .dql-app-preview-tile-head b { font-size: 12px; }
+.dql-app-preview-tile-head b,
+.dql-app-preview-tile-body small {
+  overflow-wrap: anywhere;
+}
 .dql-app-preview-tile-head span,
 .dql-app-preview-tile-foot {
   color: var(--dql-app-faint);
@@ -3363,25 +3609,48 @@ const APP_STYLES = `
   flex: 1;
   display: flex;
   flex-direction: column;
-  justify-content: center;
+  justify-content: space-between;
+  gap: 10px;
   padding: 10px;
 }
 
-.dql-app-preview-tile-body strong { font-size: 26px; }
+.dql-app-preview-tile-body > b {
+  color: var(--dql-app-ink);
+  font: 800 12px var(--font-ui);
+}
 .dql-app-preview-tile-body small { color: var(--dql-app-muted); }
+.dql-app-preview-tile-body dl {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+  margin: 0;
+}
+
+.dql-app-preview-tile-body dl div {
+  min-width: 0;
+  border: 1px solid var(--dql-app-line);
+  border-radius: 6px;
+  padding: 6px 7px;
+  background: var(--dql-app-surface-muted);
+}
+
+.dql-app-preview-tile-body dt {
+  margin: 0 0 3px;
+  color: var(--dql-app-faint);
+  font: 700 8px var(--font-mono);
+  letter-spacing: 0;
+  text-transform: uppercase;
+}
+
+.dql-app-preview-tile-body dd {
+  margin: 0;
+  color: var(--dql-app-ink);
+  font: 750 11px var(--font-ui);
+  overflow-wrap: anywhere;
+}
 .dql-app-preview-tile-foot { border-bottom: 0; border-top: 1px solid var(--dql-app-line); }
 .dql-app-preview-tile-foot b { margin-left: auto; color: var(--dql-app-green); }
 .dql-app-preview-tile.draft .dql-app-preview-tile-foot b { color: var(--dql-app-orange); }
-
-.dql-app-mini-bars i {
-  display: block;
-  height: 8px;
-  border-radius: 999px;
-  background: var(--dql-app-accent);
-  margin: 6px 0;
-}
-
-.dql-app-preview-tile.draft .dql-app-mini-bars i { background: var(--dql-app-orange); }
 .dql-app-plan-item {
   display: flex;
   align-items: center;
@@ -4849,6 +5118,9 @@ const APP_STYLES = `
   }
   .dql-app-research-grid,
   .dql-app-research-drivers {
+    grid-template-columns: 1fr;
+  }
+  .dql-app-generated-output {
     grid-template-columns: 1fr;
   }
 }

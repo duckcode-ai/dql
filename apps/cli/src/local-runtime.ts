@@ -3719,7 +3719,10 @@ table: ${table}${tagList}
     }
 
     const content = readFileSync(filePath);
-    res.writeHead(200, { 'Content-Type': contentTypeFor(filePath) });
+    res.writeHead(200, {
+      'Content-Type': contentTypeFor(filePath),
+      'Cache-Control': 'no-store, max-age=0',
+    });
     res.end(content);
   });
 

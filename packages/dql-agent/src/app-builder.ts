@@ -254,31 +254,7 @@ export function planAppFromPrompt(input: PlanAppFromPromptInput): AppPlan {
       ],
     }),
   );
-
-  const narrativeTile: AppPlanTile = {
-    id: "business-brief",
-    title: "Business brief",
-    kind: "narrative",
-    description: businessBriefDescription(prompt, audience, analysisIntent),
-    viz: "text",
-    certification: "uncertified",
-    reviewStatus: "review_required",
-    display: {
-      role: "business_summary",
-      recommendedDisplayType: "text",
-      layoutPriority: 0,
-      expectedGrain: "app",
-      trustState: "review_required",
-      followUpActions: ["ask_follow_up", "review_trust"],
-      rationale:
-        "Compact business brief keeps the app goal visible without dominating the dashboard.",
-    },
-    rationale:
-      "Narrative text is generated scaffolding and should be reviewed with the app.",
-    reviewTasks: [
-      "Confirm the audience, business goal, caveats, and review cadence.",
-    ],
-  };
+  const dashboardTiles = certifiedTiles.length > 0 ? certifiedTiles : draftTiles;
 
   return {
     version: 1,
@@ -303,10 +279,10 @@ export function planAppFromPrompt(input: PlanAppFromPromptInput): AppPlan {
       ),
       displayStrategy: displayStrategyForIntent(analysisIntent),
       layoutRationale:
-        "Business-first layout: compact brief, certified KPIs/trends/breakdowns, then review-required trust and research tiles.",
+        "Business-first layout: certified data-backed tiles first, sized by display role and result shape. Review and research guidance stays in the plan and Research surface instead of noisy dashboard text boxes.",
       handoffPlan: [
         "Use certified block tiles as governed dashboard evidence.",
-        "Use generated text/table tiles only as review-required planning scaffolds.",
+        "Use generated review placeholders only when no certified block can anchor the dashboard.",
         "Open Research for deeper drilldowns, driver analysis, and trust checks.",
       ],
     },
@@ -329,12 +305,12 @@ export function planAppFromPrompt(input: PlanAppFromPromptInput): AppPlan {
         title: inferDashboardTitle(prompt, domain, appName),
         description: `Generated app story for ${audience}.`,
         filters,
-        tiles: [narrativeTile, ...certifiedTiles, ...draftTiles],
+        tiles: dashboardTiles,
       },
     ],
     caveats: [
       "Generated app plans are local draft artifacts until reviewed.",
-      "Certified tiles stay governed; draft and narrative tiles require analyst review.",
+      "Certified tiles stay governed; generated research and trust outputs require analyst review.",
     ],
     reviewTasks: [
       "Review every uncertified tile before stakeholder use.",
@@ -1087,7 +1063,7 @@ function inferTags(prompt: string, domain: string): string[] {
 
 function inferDraftTiles(
   prompt: string,
-  domain: string,
+  _domain: string,
   intent: AppPlanAnalysisIntent,
   certifiedNodes: KGNode[],
 ): Array<{
@@ -1095,70 +1071,23 @@ function inferDraftTiles(
   description: string;
   viz: DashboardVizConfig["type"];
 }> {
+  if (certifiedNodes.length > 0) return [];
+
   const lower = prompt.toLowerCase();
-  const domainLabel = titleCase(domain);
-  const tiles: Array<{
-    title: string;
-    description: string;
-    viz: DashboardVizConfig["type"];
-  }> = [
+  const needsResearch =
+    intent === "driver_analysis" ||
+    /\bwhy|driver|break\s*down|root cause|research|drilldown\b/.test(lower);
+
+  return [
     {
-      title: `${domainLabel} decision story`,
+      title: needsResearch
+        ? "Certified evidence needed"
+        : "Certified block needed",
       description:
-        "Compact draft explanation of the business story, decision context, and caveats inferred from the prompt.",
-      viz: "text",
+        "No certified block matched strongly enough. Import, create, or certify a block before relying on this generated app.",
+      viz: "table",
     },
   ];
-
-  if (intent === "driver_analysis" || /\bwhy|driver|break\s*down|root cause\b/.test(lower)) {
-    tiles.push({
-      title: "Research drilldowns to review",
-      description:
-        "Open review-required investigations for drivers, exceptions, segment comparison, and entity drilldown.",
-      viz: "table",
-    });
-  } else if (/\brisk|caveat|issue|anomal|quality\b/.test(lower)) {
-    tiles.push({
-      title: "Open risks and caveats",
-      description:
-        "Generated review checklist for risks that need certified evidence before stakeholder use.",
-      viz: "table",
-    });
-  } else if (/\bsegment|cohort|region|location|product|channel|customer\b/.test(lower)) {
-    tiles.push({
-      title: "Missing drilldowns to certify",
-      description:
-        "Candidate slices and drilldowns the agent could not fully back with certified blocks yet.",
-      viz: "table",
-    });
-  } else {
-    tiles.push({
-      title: "Trust and evidence gaps",
-      description:
-        "Open evidence, lineage, and review tasks to complete before this app is governed.",
-      viz: "table",
-    });
-  }
-
-  if (certifiedNodes.length === 0) {
-    tiles.push({
-      title: "Certified block search",
-      description:
-        "No certified blocks matched strongly enough; review suggested sources and create certified blocks.",
-      viz: "table",
-    });
-  }
-
-  if (!tiles.some((tile) => /\btrust|evidence|risk|caveat|gap/.test(tile.title.toLowerCase()))) {
-    tiles.push({
-      title: "Trust and evidence gaps",
-      description:
-        "Certification, lineage, caveats, and review actions that must be confirmed before stakeholder use.",
-      viz: "table",
-    });
-  }
-
-  return tiles;
 }
 
 function inferDomain(prompt: string): string | undefined {
@@ -1246,18 +1175,35 @@ function inferVizForNode(
   ]
     .join(" ")
     .toLowerCase();
-  if (/\btrend|time|week|month|quarter|daily|weekly|monthly\b/.test(text))
+  if (
+    /\b(top\s*\d*|rank|ranking|leaderboard|leader|scorer|scorers|goal scorer|goal scorers|points scored|players? by|list)\b/.test(
+      text,
+    )
+  )
+    return "table";
+  if (/\btrend|time series|over time|by week|by month|by quarter|daily trend|weekly trend|monthly trend\b/.test(text))
     return "line";
-  if (/\btotal|count|rate|score|kpi|arr|revenue\b/.test(text) && index === 0)
-    return "single_value";
   if (/\bsegment|region|channel|category|breakdown|split\b/.test(text))
     return "bar";
+  if (/\btotal|count|rate|score|kpi|arr|revenue\b/.test(text) && index === 0)
+    return "single_value";
+  if (/\btime|week|month|quarter|daily|weekly|monthly\b/.test(text))
+    return "line";
   return "table";
 }
 
 function tileSize(tile: AppPlanTile): { w: number; h: number } {
   const role = tile.display?.role;
   const viz = tile.viz;
+  const text = [
+    tile.title,
+    tile.description,
+    tile.display?.expectedGrain,
+    tile.display?.recommendedDisplayType,
+  ]
+    .filter(Boolean)
+    .join(" ")
+    .toLowerCase();
   if (role === "business_summary") return { w: 12, h: 2 };
   if (role === "trust" || role === "research") return { w: 6, h: 3 };
   if (tile.kind === "narrative") return { w: 12, h: 2 };
@@ -1265,7 +1211,12 @@ function tileSize(tile: AppPlanTile): { w: number; h: number } {
   if (viz === "line" || viz === "area") return { w: 6, h: 3 };
   if (viz === "bar" || viz === "grouped_bar" || viz === "stacked_bar") return { w: 6, h: 3 };
   if (viz === "text") return { w: 6, h: 2 };
-  if (viz === "table" || viz === "pivot") return { w: 6, h: 4 };
+  if (viz === "table" || viz === "pivot") {
+    if (/\b(top|rank|leader|availability|records|details|players?|customers?|accounts?)\b/.test(text)) {
+      return { w: 6, h: 4 };
+    }
+    return { w: 6, h: 3 };
+  }
   return { w: 6, h: 3 };
 }
 

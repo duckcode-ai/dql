@@ -188,6 +188,34 @@ LIMIT 10`,
     expect(generated.sql).toContain('LIMIT 20');
   });
 
+  it('keeps trust-gap research metadata-only instead of generating SQL', () => {
+    const root = createProject();
+    writeBlock(root, 'nba/top-scorers.dql', {
+      name: 'Top Scorers',
+      domain: 'nba',
+      status: 'certified',
+      tags: ['nba', 'scoring'],
+      description: 'Top NBA player scoring output',
+      chart: 'bar',
+      query: `SELECT player_name, season, total_points FROM NBA_GAMES.RAW.fct_player_performance LIMIT 10`,
+    });
+
+    const generated = __test__.buildDeterministicInvestigationSql(root, {
+      question: 'Can leaders rely on Top Scorers?',
+      intent: 'trust_gap_review',
+      sourceBlockId: 'Top Scorers',
+      selected: {
+        blockId: 'Top Scorers',
+        blockPath: 'blocks/nba/top-scorers.dql',
+        certificationStatus: 'certified',
+        columns: ['player_name', 'season', 'total_points'],
+        resultSample: [{ player_name: 'Stephen Curry', season: '2025', total_points: 325 }],
+      },
+    });
+
+    expect(generated).toBeUndefined();
+  });
+
   it('ranks research driver cards by business measures before row counts', () => {
     const preview = {
       result: {

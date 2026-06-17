@@ -24,6 +24,7 @@ import { join, resolve, relative } from 'node:path';
 import { collectInputFiles, loadProjectConfig, resolveDbtManifestPath } from '@duckcodeailabs/dql-core';
 import { ManifestCache } from '@duckcodeailabs/dql-project';
 import type { CLIFlags } from '../args.js';
+import { manifestCacheTrackedFiles } from './compile.js';
 
 interface DbtManifestShape {
   nodes?: Record<string, { resource_type?: string }>;
@@ -124,7 +125,8 @@ export async function runSync(
     return;
   }
 
-  const runOnce = () => reportDiff({ projectRoot, dbtManifestPath: dbtManifestPath!, cachePath });
+  const dqlVersion = readCliVersion();
+  const runOnce = () => reportDiff({ projectRoot, dbtManifestPath: dbtManifestPath!, cachePath, dqlVersion });
   runOnce();
 
   if (!watch) return;
@@ -155,8 +157,9 @@ function reportDiff(opts: {
   projectRoot: string;
   dbtManifestPath: string;
   cachePath: string;
+  dqlVersion: string;
 }): void {
-  const { projectRoot, dbtManifestPath, cachePath } = opts;
+  const { projectRoot, dbtManifestPath, cachePath, dqlVersion } = opts;
 
   const counts = readDbtCounts(dbtManifestPath);
 
@@ -170,7 +173,7 @@ function reportDiff(opts: {
     return;
   }
 
-  const files = collectInputFiles({ projectRoot, dbtManifestPath }).map((path) => ({ path }));
+  const files = manifestCacheTrackedFiles(collectInputFiles({ projectRoot, dbtManifestPath }), dqlVersion);
   const cache = new ManifestCache({ path: cachePath });
   try {
     const changed = cache.diffFiles(files);
@@ -199,6 +202,18 @@ function reportDiff(opts: {
   } finally {
     cache.close();
   }
+}
+
+function readCliVersion(): string {
+  try {
+    const pkgPath = join(import.meta.dirname ?? __dirname, '..', '..', 'package.json');
+    if (existsSync(pkgPath)) {
+      return JSON.parse(readFileSync(pkgPath, 'utf-8')).version ?? '0.6.0';
+    }
+  } catch {
+    // Keep sync non-fatal; a missing package file only affects cache status.
+  }
+  return '0.6.0';
 }
 
 function readDbtCounts(manifestPath: string): DbtCounts {

@@ -124,12 +124,13 @@ export function createDqlAgentProviderRunner(id: SimpleProviderId): AgentRunner 
             ? await req.getSchemaContext(question).catch(() => [])
             : [];
           const skills = loadSkills(req.projectRoot).skills;
+          const selectedContext = parseUpstreamAppContext(req) ?? req.upstream;
           const followUp = inferFollowUpContext(req, question);
           const contextPack = await buildLocalContextPack(req.projectRoot, {
             question,
-            surface: 'notebook',
+            surface: selectedContext && selectedContext !== req.upstream ? 'app' : 'notebook',
             followUp,
-            selectedContext: req.upstream,
+            selectedContext,
             runtimeSchemaSnapshot: schemaContext.length > 0
               ? {
                   source: 'agent provider schema context',
@@ -145,11 +146,9 @@ export function createDqlAgentProviderRunner(id: SimpleProviderId): AgentRunner 
               : undefined,
           })
             .catch(() => undefined);
-          const selectedBlockHints = followUp?.kind === 'drilldown' || isDrilldownFollowUp(question)
-            ? []
-            : extractSelectedBlockHints(req);
+          const selectedBlockHints = extractSelectedBlockHints(req);
           const blockHints = Array.from(new Set([
-            ...(followUp?.kind === 'generic' && followUp.sourceBlockName ? [followUp.sourceBlockName] : []),
+            ...(followUp?.sourceBlockName ? [followUp.sourceBlockName] : []),
             ...selectedBlockHints,
           ]));
           const result = await answer({
@@ -227,6 +226,10 @@ function renderExtraContext(req: AgentRunRequest, followUp?: AgentFollowUpContex
 }
 
 function extractSelectedBlockHints(req: AgentRunRequest): string[] {
+  const parsed = parseUpstreamAppContext(req);
+  const selectedFromParsed = normalizeBlockName(selectedBlockIdFromContext(parsed));
+  if (selectedFromParsed) return [selectedFromParsed];
+
   const upstream = req.upstream?.sql?.trim();
   if (!upstream || (!upstream.startsWith('{') && !upstream.startsWith('['))) return [];
   try {
@@ -234,9 +237,9 @@ function extractSelectedBlockHints(req: AgentRunRequest): string[] {
       selectedBlock?: { blockId?: unknown };
       availableBlocks?: Array<{ blockId?: unknown }>;
     };
-    const selected = typeof parsed.selectedBlock?.blockId === 'string'
+    const selected = normalizeBlockName(typeof parsed.selectedBlock?.blockId === 'string'
       ? parsed.selectedBlock.blockId.trim()
-      : '';
+      : '');
     return selected ? [selected] : [];
   } catch {
     return [];
@@ -246,10 +249,22 @@ function extractSelectedBlockHints(req: AgentRunRequest): string[] {
 function inferFollowUpContext(req: AgentRunRequest, question: string): AgentFollowUpContext | undefined {
   const kind = isGenericFollowUp(question) ? 'generic' : isDrilldownFollowUp(question) ? 'drilldown' : null;
   if (!kind) return undefined;
+  const selectedContext = parseUpstreamAppContext(req);
+  const selectedSourceBlock = normalizeBlockName(selectedBlockIdFromContext(selectedContext));
+  if (selectedSourceBlock) {
+    return {
+      kind,
+      sourceBlockName: selectedSourceBlock,
+      sourceQuestion: selectedContext ? selectedContextString(selectedContext, 'dashboardTitle') ?? selectedContextString(selectedContext, 'title') : undefined,
+      sourceAnswer: selectedContext ? summarizeSelectedContext(selectedContext) : undefined,
+      filters: kind === 'drilldown' ? extractDrilldownFilters(question) : undefined,
+      dimensions: kind === 'drilldown' ? extractDrilldownDimensions(question) : undefined,
+    };
+  }
   for (let i = req.messages.length - 1; i >= 0; i--) {
     const msg = req.messages[i];
     if (msg.role !== 'assistant') continue;
-    const sourceBlockName = extractCertifiedBlockName(msg.content);
+    const sourceBlockName = normalizeBlockName(extractCertifiedBlockName(msg.content));
     if (!sourceBlockName) continue;
     return {
       kind,
@@ -260,6 +275,70 @@ function inferFollowUpContext(req: AgentRunRequest, question: string): AgentFoll
     };
   }
   return undefined;
+}
+
+function parseUpstreamAppContext(req: AgentRunRequest): Record<string, unknown> | undefined {
+  const upstream = req.upstream?.sql?.trim();
+  if (!upstream || (!upstream.startsWith('{') && !upstream.startsWith('['))) return undefined;
+  try {
+    const parsed = JSON.parse(upstream) as unknown;
+    return normalizeAppContextPayload(parsed) ?? undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function normalizeAppContextPayload(value: unknown): Record<string, unknown> | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  const root = value as Record<string, unknown>;
+  const nested = root.context && typeof root.context === 'object' && !Array.isArray(root.context)
+    ? root.context as Record<string, unknown>
+    : null;
+  if (!nested) return root;
+  return {
+    ...root,
+    ...nested,
+    requestTitle: root.title,
+    requestIntent: root.intent,
+    requestMode: root.mode,
+    context: nested,
+  };
+}
+
+function selectedBlockIdFromContext(context: Record<string, unknown> | undefined): string | undefined {
+  if (!context) return undefined;
+  const selected = context.selectedBlock && typeof context.selectedBlock === 'object'
+    ? context.selectedBlock as Record<string, unknown>
+    : null;
+  const fromSelected = selectedContextString(selected, 'blockId');
+  const fromRoot = selectedContextString(context, 'sourceBlockId') ?? selectedContextString(context, 'blockId');
+  return fromSelected ?? fromRoot;
+}
+
+function selectedContextString(context: Record<string, unknown> | null | undefined, key: string): string | undefined {
+  const value = context?.[key];
+  return typeof value === 'string' && value.trim() ? value.trim() : undefined;
+}
+
+function summarizeSelectedContext(context: Record<string, unknown>): string | undefined {
+  const selected = context.selectedBlock && typeof context.selectedBlock === 'object'
+    ? context.selectedBlock as Record<string, unknown>
+    : null;
+  const title = selectedContextString(selected, 'title') ?? selectedContextString(context, 'title') ?? selectedContextString(context, 'dashboardTitle');
+  const columns = Array.isArray(selected?.columns) ? selected.columns.slice(0, 8).map(String).join(', ') : '';
+  const rowCount = typeof selected?.rowCount === 'number' ? `${selected.rowCount} rows` : '';
+  const parts = [
+    title ? `title: ${title}` : '',
+    columns ? `columns: ${columns}` : '',
+    rowCount,
+  ].filter(Boolean);
+  return parts.length > 0 ? parts.join('; ') : undefined;
+}
+
+function normalizeBlockName(value: string | undefined): string | undefined {
+  const trimmed = value?.trim();
+  if (!trimmed) return undefined;
+  return trimmed.replace(/^block:/i, '').trim() || undefined;
 }
 
 function extractCertifiedBlockName(content: string): string | undefined {
@@ -293,6 +372,9 @@ function extractDrilldownFilters(question: string): string[] {
   const filters: string[] = [];
   const quoted = [...question.matchAll(/["']([^"']+)["']/g)].map((match) => match[1].trim()).filter(Boolean);
   filters.push(...quoted);
+  for (const match of question.matchAll(/\b(19|20)\d{2}\b/g)) {
+    filters.push(`season = ${match[0]}`);
+  }
   for (const pattern of [
     /\benterprise\b/i,
     /\bsmall business\b/i,
@@ -316,7 +398,7 @@ function extractDrilldownDimensions(question: string): string[] {
     const value = match[1].replace(/\b(last|this|where|for|only|and|with)\b.*$/i, '').trim();
     if (value) dims.push(value);
   }
-  for (const dim of ['segment', 'region', 'customer', 'channel', 'product', 'week', 'month']) {
+  for (const dim of ['segment', 'region', 'customer', 'channel', 'product', 'week', 'month', 'season', 'year']) {
     if (new RegExp(`\\b${dim}\\b`, 'i').test(question)) dims.push(dim);
   }
   return Array.from(new Set(dims));

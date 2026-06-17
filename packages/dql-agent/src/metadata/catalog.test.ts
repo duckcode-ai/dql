@@ -147,6 +147,48 @@ describe('local metadata catalog', () => {
     );
   });
 
+  it('carries selected app block context into drilldown follow-ups', async () => {
+    const selectedContext = {
+      cellId: 'scope:nba',
+      sql: JSON.stringify({
+        scope: 'selected-dashboard-block',
+        dashboardTitle: 'NBA Operations',
+        selectedBlock: {
+          blockId: 'Top 10 Goal Scorers',
+          title: 'Top 10 Goal Scorers',
+          tileId: 'tile-top-scorers',
+          rowCount: 10,
+          columns: ['player_name', 'season', 'total_points'],
+          sampleRows: [{ player_name: 'James Harden', season: 2016, total_points: 1881 }],
+        },
+      }),
+    };
+    const pack = await buildLocalContextPack(projectRoot, {
+      question: 'I need to focus on only 2016 year',
+      followUp: { kind: 'drilldown', sourceBlockName: 'Top 10 Goal Scorers', filters: ['season = 2016'] },
+      selectedContext,
+      limit: 20,
+    });
+
+    expect(pack.routeDecision).toMatchObject({
+      route: 'generated_sql',
+      intent: 'entity_drilldown',
+      reviewStatus: 'draft_ready',
+    });
+    expect(pack.focusObjectKey).toBe('dql:block:Top 10 Goal Scorers');
+    expect(pack.objects[0]?.objectKey).toBe('dql:block:Top 10 Goal Scorers');
+    expect(pack.objects.map((row) => row.objectKey)).toContain('dql:block:Top 10 Goal Scorers');
+    expect(pack.objects.map((row) => row.objectType)).toContain('selected_context');
+    expect(pack.allowedSqlContext.sourceBlockSql).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          name: 'Top 10 Goal Scorers',
+          status: 'certified',
+        }),
+      ]),
+    );
+  });
+
   it('uses runtime schema snapshots as allowed SQL context', async () => {
     recordRuntimeSchemaSnapshot(projectRoot, {
       source: 'test runtime',

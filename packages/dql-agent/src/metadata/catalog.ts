@@ -400,6 +400,9 @@ export async function buildLocalContextPack(
     const runtimeSnapshot = request.runtimeSchemaSnapshot ?? catalog.latestRuntimeSchemaSnapshot();
     const runtimeObjects = runtimeSnapshot ? runtimeSchemaObjects(runtimeSnapshot) : [];
     const selectedObjects = selectedContextObjects(request.selectedContext);
+    const selectedReferencedObjects = catalog
+      .getObjectsByKeys(selectedContextReferenceKeys(request.selectedContext, selectedObjects))
+      .map((object) => ({ ...object, score: Math.max(object.score ?? 0, 20) }));
     const searchRows = catalog.searchObjects({
       query: request.question,
       objectTypes: request.objectTypes,
@@ -407,17 +410,19 @@ export async function buildLocalContextPack(
     });
     const exact = request.focusObjectKey ? catalog.getObject(request.focusObjectKey) : null;
     const ranked = rankMetadataObjects({
-      rows: mergeObjects(exact ? [exact, ...searchRows, ...runtimeObjects, ...selectedObjects] : [...searchRows, ...runtimeObjects, ...selectedObjects]),
+      rows: mergeObjects(exact
+        ? [exact, ...selectedReferencedObjects, ...searchRows, ...runtimeObjects, ...selectedObjects]
+        : [...selectedReferencedObjects, ...searchRows, ...runtimeObjects, ...selectedObjects]),
       question: request.question,
       limit: request.limit ?? 80,
     });
     const selected = ranked.selected;
-    const focusObjectKey = request.focusObjectKey ?? selected[0]?.objectKey ?? null;
+    const focusObjectKey = request.focusObjectKey ?? selectedReferencedObjects[0]?.objectKey ?? selected[0]?.objectKey ?? null;
     const edgeWalk = catalog.edgesForKeys(selected.map((row) => row.objectKey), 3);
     const edgeObjectKeys = Array.from(new Set(edgeWalk.flatMap((edge) => [edge.fromKey, edge.toKey])));
     const graphObjects = catalog.getObjectsByKeys(edgeObjectKeys);
     const objects = rankMetadataObjects({
-      rows: mergeObjects([...selected, ...graphObjects, ...runtimeObjects, ...selectedObjects]),
+      rows: mergeObjects([...selectedReferencedObjects, ...selected, ...graphObjects, ...runtimeObjects, ...selectedObjects]),
       question: request.question,
       limit: request.limit ?? 120,
     }).selected;
@@ -1714,7 +1719,7 @@ function isTimeLikeColumn(name: string): boolean {
 }
 
 function selectedRows(value: unknown): Array<Record<string, unknown>> {
-  const root = value && typeof value === 'object' ? value as Record<string, unknown> : null;
+  const root = normalizeSelectedContextRoot(value);
   const selected = root?.selectedBlock && typeof root.selectedBlock === 'object' ? root.selectedBlock as Record<string, unknown> : root;
   const candidates = [
     selected?.resultSample,
@@ -1916,7 +1921,7 @@ function runtimeSchemaObjects(snapshot: RuntimeSchemaSnapshot): MetadataObject[]
 }
 
 function selectedContextObjects(value: unknown): MetadataObject[] {
-  const root = value && typeof value === 'object' ? value as Record<string, unknown> : null;
+  const root = normalizeSelectedContextRoot(value);
   if (!root) return [];
   const selected = root.selectedBlock && typeof root.selectedBlock === 'object' ? root.selectedBlock as Record<string, unknown> : root;
   const title = stringValue(selected.title) ?? stringValue(root.dashboardTitle) ?? stringValue(root.title) ?? 'Selected app context';
@@ -1938,6 +1943,58 @@ function selectedContextObjects(value: unknown): MetadataObject[] {
       rows: selectedRows(root).slice(0, 20),
     }),
   }];
+}
+
+function selectedContextReferenceKeys(value: unknown, selectedObjects: MetadataObject[]): string[] {
+  const root = normalizeSelectedContextRoot(value);
+  const keys = new Set<string>();
+  const addBlock = (blockId: unknown) => {
+    if (typeof blockId !== 'string') return;
+    const name = blockId.replace(/^block:/i, '').trim();
+    if (name) keys.add(`dql:block:${name}`);
+  };
+  if (root) {
+    const selected = root.selectedBlock && typeof root.selectedBlock === 'object' ? root.selectedBlock as Record<string, unknown> : root;
+    addBlock(selected.blockId);
+    addBlock(root.sourceBlockId);
+    addBlock(root.blockId);
+  }
+  for (const object of selectedObjects) {
+    addBlock(object.payload?.blockId);
+  }
+  return Array.from(keys);
+}
+
+function normalizeSelectedContextRoot(value: unknown): Record<string, unknown> | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  const original = value as Record<string, unknown>;
+  const fromSql = typeof original.sql === 'string' ? parseJsonObject(original.sql) : null;
+  const root = fromSql ?? original;
+  const nested = root.context && typeof root.context === 'object' && !Array.isArray(root.context)
+    ? root.context as Record<string, unknown>
+    : null;
+  if (!nested) return root;
+  return {
+    ...root,
+    ...nested,
+    requestTitle: root.title,
+    requestIntent: root.intent,
+    requestMode: root.mode,
+    context: nested,
+  };
+}
+
+function parseJsonObject(raw: string): Record<string, unknown> | null {
+  const trimmed = raw.trim();
+  if (!trimmed || (!trimmed.startsWith('{') && !trimmed.startsWith('['))) return null;
+  try {
+    const parsed = JSON.parse(trimmed) as unknown;
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed)
+      ? parsed as Record<string, unknown>
+      : null;
+  } catch {
+    return null;
+  }
 }
 
 function normalizeRuntimeSchemaTables(tables: RuntimeSchemaTable[]): RuntimeSchemaTable[] {
@@ -2046,6 +2103,7 @@ function mergeObject(a: MetadataObject | undefined, b: MetadataObject): Metadata
   return {
     ...a,
     ...b,
+    score: Math.max(a.score ?? 0, b.score ?? 0) || undefined,
     description: b.description || a.description,
     payload: compactObject({ ...(a.payload ?? {}), ...(b.payload ?? {}) }),
   };

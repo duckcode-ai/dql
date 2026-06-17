@@ -111,7 +111,7 @@ export async function queryViaMetadata(
   const proposedContractId = suggestContractId(slug, args.proposedDomain, args.proposedEntity);
   const intent = normalizeMetadataResearchIntent(args.intent, args.question);
   const contextPack = await buildTier2ContextPack(ctx.projectRoot, args.question, args.contextPackId);
-  if (contextPack?.routeDecision.route === 'clarify' || !args.proposedSql?.trim()) {
+  if (!args.proposedSql?.trim()) {
     recordTier2QueryRun(ctx.projectRoot, {
       slug,
       question: args.question,
@@ -135,7 +135,7 @@ export async function queryViaMetadata(
     };
   }
   const proposedSql = args.proposedSql.trim();
-  const contextValidation = validateSqlAgainstContext(proposedSql, contextPack);
+  const contextValidation = validateSqlAgainstContext(proposedSql, contextPack, Boolean(args.contextPackId));
   if (!contextValidation.ok) {
     recordTier2QueryRun(ctx.projectRoot, { slug, question: args.question, status: 'rejected', errorCode: 'outside_context', contextPack });
     return {
@@ -219,6 +219,7 @@ export async function queryViaMetadata(
     return {
       uncertified: true,
       intent,
+      reviewStatus: 'draft_ready',
       trustStatus: metadataTrustStatus('draft_ready', intent, draftBlock, error),
       evidence: metadataEvidence(intent, args, { status: 'runtime_unavailable', draftBlock, error }, contextPack),
       contextPack,
@@ -233,6 +234,7 @@ export async function queryViaMetadata(
     return {
       uncertified: true,
       intent,
+      reviewStatus: 'draft_ready',
       trustStatus: metadataTrustStatus('draft_ready', intent, draftBlock, error),
       evidence: metadataEvidence(intent, args, { status: 'runtime_error', draftBlock, error }, contextPack),
       contextPack,
@@ -254,6 +256,7 @@ export async function queryViaMetadata(
     return {
       uncertified: true,
       intent,
+      reviewStatus: 'draft_ready',
       trustStatus: metadataTrustStatus('draft_ready', intent, draftBlock, payload.error),
       evidence: metadataEvidence(intent, args, { status: 'execution_failed', draftBlock, error: payload.error }, contextPack),
       contextPack,
@@ -528,9 +531,9 @@ const METADATA_PREVIEW_FORBIDDEN_SQL = [
   'vacuum',
 ];
 
-function validateSqlAgainstContext(sql: string, contextPack?: LocalContextPack): { ok: true } | { ok: false; error: string } {
+function validateSqlAgainstContext(sql: string, contextPack?: LocalContextPack, strictContext = false): { ok: true } | { ok: false; error: string } {
   if (!contextPack) return { ok: true };
-  if (contextPack.routeDecision.route === 'clarify') {
+  if (strictContext && contextPack.routeDecision.route === 'clarify') {
     const missing = contextPack.missingContext.map((item) => item.message).join(' ');
     return {
       ok: false,
