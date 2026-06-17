@@ -24,6 +24,11 @@ import type { AgentMemory } from './memory/sqlite-memory.js';
 import type { LocalContextPack, MetadataAgentIntent, MetadataRouteDecision } from './metadata/catalog.js';
 import type { GeneratedDraftBlock } from './metadata/drafts.js';
 import { validateSqlAgainstLocalContext } from './metadata/sql-context-validation.js';
+import {
+  compactSqlSnippet,
+  extractSimpleSelectShape,
+  selectExpressionOutputName,
+} from './metadata/sql-shape.js';
 
 export type AnswerKind = 'certified' | 'uncertified' | 'no_answer';
 export type AnswerSourceTier = 'certified_artifact' | 'business_context' | 'semantic_layer' | 'dbt_manifest' | 'no_answer';
@@ -105,6 +110,10 @@ export interface AgentSchemaTable {
   description?: string;
   columns: AgentSchemaColumn[];
   source?: string;
+  /** Optional metadata-context rank; lower is better. Used to preserve catalog relation ordering. */
+  selectionRank?: number;
+  selectionScore?: number;
+  selectionReason?: string;
 }
 
 export interface AgentAnalysisPlan {
@@ -119,6 +128,7 @@ export interface AgentAnalysisPlan {
     columns: string[];
     reason?: string;
   }>;
+  candidateJoins: AgentJoinPath[];
   trustedContext: Array<{
     kind: KGNode['kind'] | 'memory';
     name: string;
@@ -130,6 +140,14 @@ export interface AgentAnalysisPlan {
   suggestedViz?: string;
   followUps: string[];
   repairAttempts?: number;
+}
+
+export interface AgentJoinPath {
+  leftRelation: string;
+  leftColumn: string;
+  rightRelation: string;
+  rightColumn: string;
+  reason?: string;
 }
 
 export interface AgentFollowUpContext {
@@ -310,6 +328,7 @@ export async function answer(input: AnswerLoopInput): Promise<AgentAnswer> {
     manifestHits,
     kg.search({ query: question, domain, limit: 10 }),
   ).slice(0, 30);
+  const schemaContext = schemaContextWithAllowedSqlContext(input.schemaContext ?? [], input.contextPack);
   const catalogRoute = input.contextPack?.routeDecision;
   const fallbackIntent = classifyAgentIntent({
     question,
@@ -317,7 +336,7 @@ export async function answer(input: AnswerLoopInput): Promise<AgentAnswer> {
     artifactHits,
     semanticHits,
     manifestHits,
-    schemaContext: input.schemaContext ?? [],
+    schemaContext,
   });
   const intent = catalogRoute ? agentIntentFromCatalogRoute(catalogRoute) : fallbackIntent;
 
@@ -373,7 +392,7 @@ export async function answer(input: AnswerLoopInput): Promise<AgentAnswer> {
       intent,
       routeReason: catalogRoute?.reason ?? 'The question matched a certified DQL artifact closely enough to answer without generating new SQL.',
       selectedNodes: [artifactHit.node],
-      schemaContext: input.schemaContext ?? [],
+      schemaContext,
       sql: result?.sql,
       suggestedViz: result?.chartConfig ? chartNameFromConfig(result.chartConfig) : undefined,
     });
@@ -417,13 +436,13 @@ export async function answer(input: AnswerLoopInput): Promise<AgentAnswer> {
   }
 
   if (intent === 'clarify' || catalogRoute?.route === 'clarify') {
-    const text = composeCatalogClarificationText(question, catalogRoute) ?? composeClarificationText(question, considered, input.schemaContext ?? []);
+    const text = composeCatalogClarificationText(question, catalogRoute) ?? composeClarificationText(question, considered, schemaContext);
     const analysisPlan = buildAnalysisPlan({
       question,
       intent,
       routeReason: catalogRoute?.reason ?? 'No certified artifact, semantic object, dbt/source table, or runtime schema match was strong enough to safely generate SQL.',
       selectedNodes: considered.slice(0, 4).map((hit) => hit.node),
-      schemaContext: input.schemaContext ?? [],
+      schemaContext,
       assumptions: catalogRoute?.missingContext.length
         ? catalogRoute.missingContext.map((item) => item.message)
         : ['Need a clearer business object, measure, or grain before querying.'],
@@ -468,7 +487,7 @@ export async function answer(input: AnswerLoopInput): Promise<AgentAnswer> {
     .slice(0, 4);
   const trustedArtifactContext = rankGeneratedContextHits(
     executableArtifactHits.filter((hit) => !excludedArtifactIds?.has(hit.node.nodeId)),
-    input.schemaContext ?? [],
+    schemaContext,
     question,
   )
     .filter((hit) => !excludedArtifactIds?.has(hit.node.nodeId))
@@ -500,7 +519,7 @@ export async function answer(input: AnswerLoopInput): Promise<AgentAnswer> {
       input.memoryContext ?? [],
       input.extraContext,
       input.followUp,
-      input.schemaContext ?? [],
+      schemaContext,
       intent,
       input.contextPack,
     ),
@@ -510,7 +529,7 @@ export async function answer(input: AnswerLoopInput): Promise<AgentAnswer> {
   const localProposal = buildSchemaAwareProposal({
     question,
     intent,
-    schemaContext: input.schemaContext ?? [],
+    schemaContext,
     followUp: input.followUp,
     contextPack: input.contextPack,
   }) ?? buildContextPackAwareProposal({
@@ -595,7 +614,7 @@ export async function answer(input: AnswerLoopInput): Promise<AgentAnswer> {
       intent,
       routeReason: catalogRoute?.reason ?? 'Generated SQL failed metadata context validation before preview execution or draft capture.',
       selectedNodes: contextNodes,
-      schemaContext: input.schemaContext ?? [],
+      schemaContext,
       sql: parsed.sql,
       suggestedViz: parsed.viz ?? 'table',
       assumptions: [
@@ -655,7 +674,7 @@ export async function answer(input: AnswerLoopInput): Promise<AgentAnswer> {
       sourceTier: 'memory' as const,
       provenance: m.source,
     })),
-    ...schemaCitations(input.schemaContext ?? [], Math.max(0, 4 - contextNodes.length)),
+    ...schemaCitations(schemaContext, Math.max(0, 4 - contextNodes.length)),
   ];
   let result: AgentResultPayload | undefined;
   let executionError: string | undefined;
@@ -666,7 +685,7 @@ export async function answer(input: AnswerLoopInput): Promise<AgentAnswer> {
     } catch (err) {
       executionError = err instanceof Error ? err.message : String(err);
       if (isRetryableGeneratedSqlError(executionError)) {
-        const localRepairSql = repairGeneratedSqlLocally(parsed.sql, executionError, input.schemaContext ?? []);
+        const localRepairSql = repairGeneratedSqlLocally(parsed.sql, executionError, schemaContext);
         if (localRepairSql) {
           repairAttempts = 1;
           parsed.sql = localRepairSql;
@@ -684,7 +703,7 @@ export async function answer(input: AnswerLoopInput): Promise<AgentAnswer> {
             question,
             parsed,
             executionError,
-            schemaContext: input.schemaContext ?? [],
+            schemaContext,
             signal: input.signal,
           });
           const repaired = parseProposal(repairedRaw);
@@ -711,18 +730,20 @@ export async function answer(input: AnswerLoopInput): Promise<AgentAnswer> {
       ? 'The user asked for a drill-through or follow-up, so DQL generated review-required SQL from the prior context and current metadata.'
       : 'The question asks for a custom analysis, ranking, breakdown, comparison, or grain that should not be answered by a loose certified block match.'),
     selectedNodes: contextNodes,
-    schemaContext: input.schemaContext ?? [],
+    schemaContext,
     sql: parsed.sql,
     suggestedViz: parsed.viz ?? 'table',
     assumptions: [
       'Generated SQL is an uncertified preview until an analyst reviews and promotes it.',
       ...(localProposal ? ['A local metadata planner selected a review-required SQL grain before provider generation.'] : []),
+      ...contextValidation.warnings,
       ...(executionError ? ['The preview execution error must be reviewed before reuse.'] : []),
     ],
       repairAttempts,
     });
     const validationWarnings = [
       ...(input.contextPack?.warnings ?? []),
+      ...contextValidation.warnings,
       ...(executionError ? ['The preview execution error must be reviewed before reuse.'] : []),
     ];
     let draftBlock: GeneratedDraftBlock | undefined;
@@ -782,7 +803,7 @@ export async function answer(input: AnswerLoopInput): Promise<AgentAnswer> {
       activeTier,
       intent,
       contextNodes,
-      schemaContext: input.schemaContext ?? [],
+      schemaContext,
       followUp: input.followUp,
       businessHits,
       semanticHits,
@@ -816,9 +837,10 @@ Rules:
 4. Provide a one-paragraph natural-language summary BEFORE the SQL block.
 5. Suggest a visualization type from this list, on a line starting with "Viz:":
    line, bar, area, pie, single_value, table, pivot, kpi.
-6. NEVER fabricate column names that are not present in the supplied schema context.
-   If a requested filter value is supplied as a matched value, prefer the table
-   and column that matched that value.
+6. NEVER fabricate column names that are not present in the supplied schema,
+   dbt metadata, or certified source SQL shape context. If a requested filter
+   value is supplied as a matched value, prefer the table and column that
+   matched that value.
 7. Return one read-only SELECT or WITH query for the local warehouse/runtime.
    Do NOT use dbt/Jinja macros such as {{ ref(...) }} or {{ source(...) }} in
    proposed SQL. Do not emit INSERT, UPDATE, DELETE, CREATE, DROP, ALTER, COPY,
@@ -895,6 +917,20 @@ function renderContextPrompt(
 }
 
 function renderContextPackForPrompt(contextPack: LocalContextPack): string {
+  const questionPlan = contextPack.questionPlan
+    ? [
+        `Question plan: ${contextPack.questionPlan.mode} -> ${contextPack.questionPlan.routeIntent}`,
+        contextPack.questionPlan.entities.length
+          ? `Entities: ${contextPack.questionPlan.entities.map((entity) => entity.text).join(', ')}`
+          : '',
+        contextPack.questionPlan.metricTerms.length ? `Metric terms: ${contextPack.questionPlan.metricTerms.join(', ')}` : '',
+        contextPack.questionPlan.dimensionTerms.length ? `Dimension terms: ${contextPack.questionPlan.dimensionTerms.join(', ')}` : '',
+        `Answer shape: ${contextPack.questionPlan.outputShape}`,
+      ].filter(Boolean).join('\n')
+    : '';
+  const certifiedApplicability = contextPack.routeDecision?.certifiedApplicability
+    ? `\nCertified applicability: ${contextPack.routeDecision.certifiedApplicability.name} is ${contextPack.routeDecision.certifiedApplicability.kind} (${contextPack.routeDecision.certifiedApplicability.reasons.join('; ')})`
+    : '';
   const warnings = contextPack.warnings.length
     ? `Warnings:\n${contextPack.warnings.slice(0, 8).map((warning) => `- ${warning}`).join('\n')}\n`
     : '';
@@ -911,20 +947,103 @@ function renderContextPackForPrompt(contextPack: LocalContextPack): string {
     ? `\nCandidate conflicts:\n${contextPack.retrievalDiagnostics.candidateConflicts.slice(0, 4).map((conflict) => `- ${conflict.reason} ${conflict.prompt}`).join('\n')}`
     : '';
   const route = contextPack.routeDecision
-    ? `\nRoute decision: ${contextPack.routeDecision.route} / ${contextPack.routeDecision.intent}\nReason: ${contextPack.routeDecision.reason}\nMissing context: ${contextPack.routeDecision.missingContext.map((item) => item.message).join(' ') || 'none'}`
+    ? `\nRoute decision: ${contextPack.routeDecision.route} / ${contextPack.routeDecision.intent}\nReason: ${contextPack.routeDecision.reason}${certifiedApplicability}\nMissing context: ${contextPack.routeDecision.missingContext.map((item) => item.message).join(' ') || 'none'}`
     : '';
-  const allowed = contextPack.allowedSqlContext?.relations.length
-    ? `\nAllowed SQL relations:\n${contextPack.allowedSqlContext.relations.slice(0, 12).map((relation) => `- ${relation.relation}: ${relation.columns.slice(0, 24).map((column) => column.name).join(', ') || '(columns unavailable)'}`).join('\n')}`
+  const allowed = renderAllowedSqlRelationsForPrompt(contextPack);
+  const joins = renderCandidateJoinsForPrompt(contextPack);
+  const relationDiagnostics = contextPack.retrievalDiagnostics?.selectedRelations?.length
+    ? `\nSelected relation reasoning:\n${contextPack.retrievalDiagnostics.selectedRelations.slice(0, 8).map((relation) => `- ${relation.relation} (score ${relation.score.toFixed(1)}): ${relation.reason}`).join('\n')}`
     : '';
+  const sourceSql = renderSourceBlockSqlContext(contextPack);
   return [
     `context_pack_id: ${contextPack.id}`,
     `trust_label: ${contextPack.trustLabel}`,
+    questionPlan.trim(),
     route.trim(),
     warnings.trim(),
     `Selected evidence:\n${objects || '- none'}`,
     allowed.trim(),
+    joins.trim(),
+    relationDiagnostics.trim(),
+    sourceSql.trim(),
     conflicts.trim(),
   ].filter(Boolean).join('\n');
+}
+
+function renderCandidateJoinsForPrompt(contextPack: LocalContextPack): string {
+  const joins = contextPack.retrievalDiagnostics.selectedJoinPaths?.length
+    ? contextPack.retrievalDiagnostics.selectedJoinPaths.slice(0, 8).map((join) => ({
+        leftRelation: join.leftRelation,
+        leftColumn: join.leftColumn,
+        rightRelation: join.rightRelation,
+        rightColumn: join.rightColumn,
+        reason: join.reason,
+      }))
+    : buildCandidateJoinPaths(schemaContextWithAllowedSqlContext([], contextPack)).slice(0, 8);
+  if (joins.length === 0) return '';
+  return [
+    'Suggested join paths from selected metadata:',
+    ...joins.map((join) =>
+      `- ${join.leftRelation}.${join.leftColumn} -> ${join.rightRelation}.${join.rightColumn}${join.reason ? ` (${join.reason})` : ''}`
+    ),
+  ].join('\n');
+}
+
+function renderAllowedSqlRelationsForPrompt(contextPack: LocalContextPack): string {
+  const relations = contextPack.allowedSqlContext?.relations ?? [];
+  if (relations.length === 0) return '';
+  const selectedLookup = selectedRelationLookup(contextPack);
+  const cards = relations.slice(0, 12).map((relation, index) => {
+    const selection = relationSelectionFor(relation.relation, selectedLookup);
+    const rank = selection?.rank ?? index + 1;
+    const score = typeof selection?.score === 'number' ? `, score ${selection.score.toFixed(1)}` : '';
+    const reason = selection?.reason ? `\n  why selected: ${selection.reason}` : '';
+    const columns = relation.columns.length
+      ? relation.columns.slice(0, 32).map(formatRelationColumnForPrompt).join(', ')
+      : '(columns unavailable; use certified source SQL shape or inspect metadata before inventing columns)';
+    return [
+      `- [rank ${rank}${score}] ${relation.relation} (${relation.source})`,
+      reason,
+      `\n  columns: ${columns}`,
+    ].join('');
+  });
+  return [
+    'Selected SQL relation context:',
+    'Use these ranked relations and columns as the primary SQL-generation boundary. Prefer lower rank when multiple relations look plausible.',
+    ...cards,
+  ].join('\n');
+}
+
+function formatRelationColumnForPrompt(column: AgentSchemaColumn): string {
+  const type = column.type ? ` ${column.type}` : '';
+  const description = column.description ? ` - ${column.description.replace(/\s+/g, ' ').trim()}` : '';
+  const samples = column.sampleValues?.length
+    ? `; matched values: ${column.sampleValues.slice(0, 4).map(formatPromptValue).join(', ')}`
+    : '';
+  return `${column.name}${type}${description}${samples}`;
+}
+
+function renderSourceBlockSqlContext(contextPack: LocalContextPack): string {
+  const sources = contextPack.allowedSqlContext?.sourceBlockSql ?? [];
+  if (sources.length === 0) return '';
+  const lines = sources.slice(0, 5).map((source) => {
+    const shape = extractSimpleSelectShape(source.sql);
+    const projectedColumns = shape
+      ? shape.selectExpressions
+          .map(selectExpressionOutputName)
+          .filter((value): value is string => Boolean(value))
+          .slice(0, 24)
+          .join(', ')
+      : '';
+    const snippet = compactSqlSnippet(source.sql, 280);
+    return [
+      `- ${source.name}${source.status ? ` (${source.status})` : ''}`,
+      shape?.relation ? `  relation: ${shape.relation}` : '',
+      projectedColumns ? `  projected columns: ${projectedColumns}` : '',
+      snippet ? `  sql: ${snippet}` : '',
+    ].filter(Boolean).join('\n');
+  });
+  return `Certified source SQL shape context:\n${lines.join('\n')}`;
 }
 
 function contextPackCitations(contextPack: LocalContextPack | undefined, limit: number): AgentCitation[] {
@@ -1092,57 +1211,889 @@ function buildSchemaAwareProposal(input: {
   const schemaContext = schemaContextWithAllowedSqlContext(input.schemaContext, input.contextPack);
   const drilldownProposal = buildMatchedEntityDrilldownProposal({ ...input, schemaContext });
   if (drilldownProposal) return drilldownProposal;
+  const profileProposal = buildEntityProfileProposal({ ...input, schemaContext });
+  if (profileProposal) return profileProposal;
   if (isFilteredEntityQuestion(input.question)) return undefined;
   const lower = input.question.toLowerCase();
   const asksForCustomerPerformance = /\bcustomers?\b/.test(lower)
     && /\border|orders|spend|revenue|perform|performed|better|top|best|rank|ranking\b/.test(lower)
     && !/\b(order details|specific orders|each order|all orders|order line|line item)\b/.test(lower);
-  if (!asksForCustomerPerformance) return undefined;
+  if (asksForCustomerPerformance) {
+    const customers = findSchemaTable(schemaContext, ['customers', 'customer']);
+    if (customers) {
+      const customerName = findSchemaColumn(customers, ['customer_name', 'name', 'full_name']);
+      const orderCount = findSchemaColumn(customers, ['count_lifetime_orders', 'lifetime_orders', 'order_count', 'orders_count', 'orders']);
+      const spend = findSchemaColumn(customers, ['lifetime_spend', 'total_lifetime_spend', 'customer_lifetime_value', 'total_revenue', 'revenue']);
+      if (customerName && orderCount && spend) {
+        return {
+          text: `Top performing customers ranked by ${businessMeasurePhrase(spend)} with ${businessMeasurePhrase(orderCount)} for context. This is AI-generated and needs analyst review before certification.`,
+          sql: [
+            'SELECT',
+            `  ${sqlIdentifier(customerName)} AS customer_name,`,
+            `  ${sqlIdentifier(orderCount)} AS orders,`,
+            `  ROUND(${sqlIdentifier(spend)}, 2) AS lifetime_spend`,
+            `FROM ${sqlRelation(customers.relation)}`,
+            `ORDER BY ${sqlIdentifier(spend)} DESC, ${sqlIdentifier(orderCount)} DESC`,
+            'LIMIT 10',
+          ].join('\n'),
+          viz: 'table',
+        };
+      }
 
-  const customers = findSchemaTable(schemaContext, ['customers', 'customer']);
-  if (!customers) return undefined;
-  const customerName = findSchemaColumn(customers, ['customer_name', 'name', 'full_name']);
-  const orderCount = findSchemaColumn(customers, ['count_lifetime_orders', 'lifetime_orders', 'order_count', 'orders_count', 'orders']);
-  const spend = findSchemaColumn(customers, ['lifetime_spend', 'total_lifetime_spend', 'customer_lifetime_value', 'total_revenue', 'revenue']);
-  if (customerName && orderCount && spend) {
+      const customerId = findSchemaColumn(customers, ['customer_id', 'id']);
+      const orders = findSchemaTable(schemaContext, ['orders', 'order']);
+      const orderCustomerId = orders ? findSchemaColumn(orders, ['customer_id', 'customer']) : undefined;
+      const orderTotal = orders ? findSchemaColumn(orders, ['order_total', 'total_order_amount', 'total_amount', 'amount', 'subtotal']) : undefined;
+      const orderId = orders ? findSchemaColumn(orders, ['order_id', 'id']) : undefined;
+      if (orders && customerName && customerId && orderCustomerId && orderTotal) {
+        const countExpression = orderId ? `COUNT(DISTINCT o.${sqlIdentifier(orderId)})` : 'COUNT(*)';
+        return {
+          text: `Top performing customers ranked from order totals with order count for context. This is AI-generated and needs analyst review before certification.`,
+          sql: [
+            'SELECT',
+            `  c.${sqlIdentifier(customerName)} AS customer_name,`,
+            `  ${countExpression} AS orders,`,
+            `  ROUND(SUM(o.${sqlIdentifier(orderTotal)}), 2) AS lifetime_spend`,
+            `FROM ${sqlRelation(orders.relation)} AS o`,
+            `JOIN ${sqlRelation(customers.relation)} AS c ON o.${sqlIdentifier(orderCustomerId)} = c.${sqlIdentifier(customerId)}`,
+            `GROUP BY c.${sqlIdentifier(customerName)}`,
+            'ORDER BY lifetime_spend DESC, orders DESC',
+            'LIMIT 10',
+          ].join('\n'),
+          viz: 'table',
+        };
+      }
+    }
+  }
+
+  const genericJoinProposal = buildGenericJoinProposal({ ...input, schemaContext });
+  if (genericJoinProposal) return genericJoinProposal;
+  const genericProposal = buildGenericSingleTableProposal({ ...input, schemaContext });
+  if (genericProposal) return genericProposal;
+  return undefined;
+}
+
+function buildGenericJoinProposal(input: {
+  question: string;
+  intent: AgentIntent;
+  schemaContext: AgentSchemaTable[];
+  followUp?: AgentFollowUpContext;
+  contextPack?: LocalContextPack;
+}): ParsedProposal | undefined {
+  const planMode = input.contextPack?.questionPlan?.mode;
+  if (planMode === 'entity_profile' || planMode === 'diagnose_change' || planMode === 'anomaly' || planMode === 'trust_review') {
+    return undefined;
+  }
+  const lower = input.question.toLowerCase();
+  if (/\b(why|root cause|diagnos|changed?|drop|decline|increase|decrease|repair|fix|bad|details?|detail rows?|line items?|raw rows?)\b/i.test(lower)) {
+    return undefined;
+  }
+  if (!/\b(by\s+[a-z]|per\s+[a-z]|for each|group(?:ed)? by|split|segment|break\s*down|breakdown|compare)\b/i.test(lower)) {
+    return undefined;
+  }
+
+  const candidate = pickGenericJoinCandidate(input.schemaContext, input.question);
+  if (!candidate) return undefined;
+
+  const direction = rankingDirectionFromText(input.question);
+  const orderDirection = direction === 'bottom' ? 'ASC' : 'DESC';
+  const limit = /\b(all|complete|full)\b/i.test(input.question) ? 50 : 10;
+  const chart = isTimeLikeGenericColumn(candidate.dimensionColumn) ? 'line' : 'bar';
+  const metricExpression = qualifiedMetricExpression(candidate.metric, 'f');
+  const metricAlias = candidate.metric.alias;
+  const dimensionAlias = candidate.dimensionColumn;
+
+  return {
+    text: `Prepared a review-required ${businessMeasurePhrase(candidate.metric.column)} breakdown by ${humanizeIdentifier(candidate.dimensionColumn)} by joining ${candidate.metricTable.relation} to ${candidate.dimensionTable.relation}. This result is uncertified until reviewed and promoted.`,
+    sql: [
+      'SELECT',
+      `  d.${sqlIdentifier(candidate.dimensionColumn)} AS ${sqlIdentifier(dimensionAlias)},`,
+      `  ${metricExpression} AS ${sqlIdentifier(metricAlias)}`,
+      `FROM ${sqlRelation(candidate.metricTable.relation)} AS f`,
+      `JOIN ${sqlRelation(candidate.dimensionTable.relation)} AS d ON f.${sqlIdentifier(candidate.metricJoinColumn)} = d.${sqlIdentifier(candidate.dimensionJoinColumn)}`,
+      `GROUP BY d.${sqlIdentifier(candidate.dimensionColumn)}`,
+      `ORDER BY ${sqlIdentifier(metricAlias)} ${orderDirection}`,
+      `LIMIT ${limit}`,
+    ].join('\n'),
+    viz: chart,
+  };
+}
+
+function buildGenericSingleTableProposal(input: {
+  question: string;
+  intent: AgentIntent;
+  schemaContext: AgentSchemaTable[];
+  followUp?: AgentFollowUpContext;
+  contextPack?: LocalContextPack;
+}): ParsedProposal | undefined {
+  const planMode = input.contextPack?.questionPlan?.mode;
+  if (planMode === 'entity_profile' || planMode === 'diagnose_change' || planMode === 'anomaly' || planMode === 'trust_review') {
+    return undefined;
+  }
+  const lower = input.question.toLowerCase();
+  if (/\b(why|root cause|diagnos|changed?|drop|decline|increase|decrease|repair|fix|bad|details?|detail rows?|line items?|raw rows?)\b/i.test(lower)) {
+    return undefined;
+  }
+  if (!/\b(show|list|top|bottom|best|worst|highest|lowest|least|fewest|rank|ranking|compare|trend|by\s+[a-z]|how many|number of|revenue|sales|orders?|points?|score|count|total|average|avg|sum)\b/i.test(lower)) {
+    return undefined;
+  }
+  const table = pickGenericAnalysisTable(input.schemaContext, input.question);
+  if (!table) return undefined;
+  const metric = inferGenericMetric(table, input.question);
+  if (!metric) return undefined;
+  const dimensions = augmentGenericRankingDimensions(
+    table,
+    inferGenericDimensions(table, input.question, metric.column),
+    metric,
+    input.question,
+  ).slice(0, 2);
+  const direction = rankingDirectionFromText(input.question);
+  const limit = /\b(all|complete|full)\b/i.test(input.question) ? 50 : 10;
+  const metricAlias = metric.alias;
+
+  if (dimensions.length === 0) {
     return {
-      text: `Top performing customers ranked by ${businessMeasurePhrase(spend)} with ${businessMeasurePhrase(orderCount)} for context. This is AI-generated and needs analyst review before certification.`,
+      text: `Prepared a review-required ${businessMeasurePhrase(metric.column)} summary from ${table.relation}. This result is uncertified until reviewed and promoted.`,
       sql: [
         'SELECT',
-        `  ${sqlIdentifier(customerName)} AS customer_name,`,
-        `  ${sqlIdentifier(orderCount)} AS orders,`,
-        `  ROUND(${sqlIdentifier(spend)}, 2) AS lifetime_spend`,
-        `FROM ${sqlRelation(customers.relation)}`,
-        `ORDER BY ${sqlIdentifier(spend)} DESC, ${sqlIdentifier(orderCount)} DESC`,
-        'LIMIT 10',
+        `  ${metric.expression} AS ${sqlIdentifier(metricAlias)}`,
+        `FROM ${sqlRelation(table.relation)}`,
+      ].join('\n'),
+      viz: 'single_value',
+    };
+  }
+
+  if (direction && metric.preAggregated) {
+    return {
+      text: `Prepared a review-required ${businessMeasurePhrase(metric.column)} ranking by ${dimensions.map(humanizeIdentifier).join(' and ')} from ${table.relation}. This result is uncertified until reviewed and promoted.`,
+      sql: [
+        'SELECT',
+        ...dimensions.map((dimension) => `  ${sqlIdentifier(dimension)} AS ${sqlIdentifier(dimension)},`),
+        `  ${sqlIdentifier(metric.column)} AS ${sqlIdentifier(metric.column)}`,
+        `FROM ${sqlRelation(table.relation)}`,
+        `ORDER BY ${sqlIdentifier(metric.column)} ${direction === 'bottom' ? 'ASC' : 'DESC'}`,
+        `LIMIT ${limit}`,
       ].join('\n'),
       viz: 'table',
     };
   }
 
-  const customerId = findSchemaColumn(customers, ['customer_id', 'id']);
-  const orders = findSchemaTable(schemaContext, ['orders', 'order']);
-  if (!orders || !customerName || !customerId) return undefined;
-  const orderCustomerId = findSchemaColumn(orders, ['customer_id', 'customer']);
-  const orderTotal = findSchemaColumn(orders, ['order_total', 'total_order_amount', 'total_amount', 'amount', 'subtotal']);
-  const orderId = findSchemaColumn(orders, ['order_id', 'id']);
-  if (!orderCustomerId || !orderTotal) return undefined;
-  const countExpression = orderId ? `COUNT(DISTINCT o.${sqlIdentifier(orderId)})` : 'COUNT(*)';
+  const selectDimensions = dimensions.map((dimension) => `  ${sqlIdentifier(dimension)} AS ${sqlIdentifier(dimension)},`);
+  const groupBy = dimensions.map(sqlIdentifier).join(', ');
+  const orderDirection = direction === 'bottom' ? 'ASC' : 'DESC';
+  const chart = dimensions.some(isTimeLikeGenericColumn) ? 'line' : 'bar';
   return {
-    text: `Top performing customers ranked from order totals with order count for context. This is AI-generated and needs analyst review before certification.`,
+    text: `Prepared a review-required ${businessMeasurePhrase(metric.column)} breakdown by ${dimensions.map(humanizeIdentifier).join(' and ')} from ${table.relation}. This result is uncertified until reviewed and promoted.`,
     sql: [
       'SELECT',
-      `  c.${sqlIdentifier(customerName)} AS customer_name,`,
-      `  ${countExpression} AS orders,`,
-      `  ROUND(SUM(o.${sqlIdentifier(orderTotal)}), 2) AS lifetime_spend`,
-      `FROM ${sqlRelation(orders.relation)} AS o`,
-      `JOIN ${sqlRelation(customers.relation)} AS c ON o.${sqlIdentifier(orderCustomerId)} = c.${sqlIdentifier(customerId)}`,
-      `GROUP BY c.${sqlIdentifier(customerName)}`,
-      'ORDER BY lifetime_spend DESC, orders DESC',
-      'LIMIT 10',
+      ...selectDimensions,
+      `  ${metric.expression} AS ${sqlIdentifier(metricAlias)}`,
+      `FROM ${sqlRelation(table.relation)}`,
+      `GROUP BY ${groupBy}`,
+      `ORDER BY ${sqlIdentifier(metricAlias)} ${orderDirection}`,
+      `LIMIT ${limit}`,
+    ].join('\n'),
+    viz: chart,
+  };
+}
+
+interface GenericMetricSelection {
+  column: string;
+  expression: string;
+  alias: string;
+  score: number;
+  preAggregated: boolean;
+}
+
+function pickGenericAnalysisTable(
+  schemaContext: AgentSchemaTable[],
+  question: string,
+): AgentSchemaTable | undefined {
+  return schemaContext
+    .filter((table) => table.columns.length > 0)
+    .map((table, index) => ({
+      table,
+      metric: inferGenericMetric(table, question),
+      dimensions: inferGenericDimensions(table, question),
+      index,
+    }))
+    .filter((candidate) => candidate.metric)
+    .sort((a, b) =>
+      genericTableScore(b.table, question, b.metric, b.dimensions) -
+      genericTableScore(a.table, question, a.metric, a.dimensions) ||
+      a.index - b.index
+    )[0]?.table;
+}
+
+function genericTableScore(
+  table: AgentSchemaTable,
+  question: string,
+  metric: GenericMetricSelection | undefined,
+  dimensions: string[],
+): number {
+  const questionTokens = meaningfulTokens(question);
+  const tableTokens = meaningfulTokens([table.relation, table.name, table.description ?? ''].join(' '));
+  const columnTokens = meaningfulTokens(table.columns.map((column) => column.name).join(' '));
+  const overlap = [...questionTokens].filter((token) => tableTokens.has(token) || columnTokens.has(token)).length;
+  const selectedRelationBoost = table.selectionRank
+    ? Math.max(0, 56 - table.selectionRank * 3) + Math.min(table.selectionScore ?? 0, 24)
+    : 0;
+  return selectedRelationBoost + overlap * 8 + (metric?.score ?? 0) + dimensions.length * 8 + Math.min(table.columns.length, 20) * 0.3;
+}
+
+interface GenericJoinCandidate {
+  metricTable: AgentSchemaTable;
+  dimensionTable: AgentSchemaTable;
+  metric: GenericMetricSelection;
+  dimensionColumn: string;
+  metricJoinColumn: string;
+  dimensionJoinColumn: string;
+  score: number;
+}
+
+function pickGenericJoinCandidate(
+  schemaContext: AgentSchemaTable[],
+  question: string,
+): GenericJoinCandidate | undefined {
+  const requestedDimensions = requestedDimensionPhrases(question);
+  if (requestedDimensions.length === 0) return undefined;
+  const metricCandidates = schemaContext
+    .filter((table) => table.columns.length > 0)
+    .map((table, index) => ({
+      table,
+      metric: inferGenericMetric(table, question),
+      localDimensions: inferGenericDimensions(table, question),
+      index,
+    }))
+    .filter((candidate): candidate is {
+      table: AgentSchemaTable;
+      metric: GenericMetricSelection;
+      localDimensions: string[];
+      index: number;
+    } => Boolean(candidate.metric))
+    .filter((candidate) =>
+      !candidate.localDimensions.some((dimension) =>
+        !isJoinKeyColumn(dimension) && requestedDimensionMatchesColumn(requestedDimensions, dimension)
+      )
+    );
+
+  const candidates: GenericJoinCandidate[] = [];
+  for (const metricCandidate of metricCandidates) {
+    for (const dimensionTable of schemaContext) {
+      if (normalizeRelationKey(dimensionTable.relation) === normalizeRelationKey(metricCandidate.table.relation)) continue;
+      const dimensionColumn = pickRequestedDimensionColumn(dimensionTable, question, requestedDimensions);
+      if (!dimensionColumn || namesEqualLoose(dimensionColumn, metricCandidate.metric.column)) continue;
+      const join = pickJoinColumns(metricCandidate.table, dimensionTable);
+      if (!join) continue;
+      const dimensionScore = genericDimensionScore(
+        { name: dimensionColumn, type: findColumnType(dimensionTable, dimensionColumn) },
+        question,
+        Math.max(0, dimensionTable.columns.findIndex((column) => namesEqualLoose(column.name, dimensionColumn))),
+        metricCandidate.metric.column,
+      );
+      candidates.push({
+        metricTable: metricCandidate.table,
+        dimensionTable,
+        metric: metricCandidate.metric,
+        dimensionColumn,
+        metricJoinColumn: join.leftColumn,
+        dimensionJoinColumn: join.rightColumn,
+        score:
+          genericTableScore(metricCandidate.table, question, metricCandidate.metric, metricCandidate.localDimensions) +
+          dimensionScore +
+          join.score +
+          selectedRelationWeight(dimensionTable),
+      });
+    }
+  }
+
+  return candidates
+    .sort((a, b) =>
+      b.score - a.score ||
+      (a.metricTable.selectionRank ?? Number.MAX_SAFE_INTEGER) - (b.metricTable.selectionRank ?? Number.MAX_SAFE_INTEGER) ||
+      a.metricTable.relation.localeCompare(b.metricTable.relation)
+    )[0];
+}
+
+function buildCandidateJoinPaths(schemaContext: AgentSchemaTable[]): AgentJoinPath[] {
+  const tables = [...schemaContext]
+    .filter((table) => table.columns.some((column) => isJoinKeyColumn(column.name)))
+    .sort((a, b) =>
+      (a.selectionRank ?? Number.MAX_SAFE_INTEGER) - (b.selectionRank ?? Number.MAX_SAFE_INTEGER) ||
+      a.relation.localeCompare(b.relation)
+    )
+    .slice(0, 16);
+  const joins: AgentJoinPath[] = [];
+  const seen = new Set<string>();
+  for (let leftIndex = 0; leftIndex < tables.length; leftIndex += 1) {
+    for (let rightIndex = leftIndex + 1; rightIndex < tables.length; rightIndex += 1) {
+      const left = tables[leftIndex]!;
+      const right = tables[rightIndex]!;
+      const join = pickJoinColumns(left, right);
+      if (!join) continue;
+      const key = [
+        normalizeRelationKey(left.relation),
+        join.leftColumn.toLowerCase(),
+        normalizeRelationKey(right.relation),
+        join.rightColumn.toLowerCase(),
+      ].join('|');
+      if (seen.has(key)) continue;
+      seen.add(key);
+      joins.push({
+        leftRelation: left.relation,
+        leftColumn: join.leftColumn,
+        rightRelation: right.relation,
+        rightColumn: join.rightColumn,
+        reason: joinReason(join.leftColumn, join.rightColumn, join.score),
+      });
+    }
+  }
+  return joins.slice(0, 12);
+}
+
+function joinReason(leftColumn: string, rightColumn: string, score: number): string {
+  if (namesEqualLoose(leftColumn, rightColumn)) return `shared key ${leftColumn}`;
+  const leftSubject = joinSubjectForColumn(leftColumn);
+  const rightSubject = joinSubjectForColumn(rightColumn);
+  if (leftSubject && rightSubject && leftSubject === rightSubject) return `matching ${leftSubject} key`;
+  if (score >= 55) return 'foreign-key style id match';
+  return 'join-key style column match';
+}
+
+function requestedDimensionPhrases(question: string): string[] {
+  const lower = question.toLowerCase();
+  const phrases = [
+    ...Array.from(lower.matchAll(/\bby\s+([a-z][a-z0-9_ -]{1,50})/g)).map((match) => match[1] ?? ''),
+    ...Array.from(lower.matchAll(/\bper\s+([a-z][a-z0-9_ -]{1,50})/g)).map((match) => match[1] ?? ''),
+    ...Array.from(lower.matchAll(/\bfor each\s+([a-z][a-z0-9_ -]{1,50})/g)).map((match) => match[1] ?? ''),
+  ];
+  return uniqueDrilldownStrings(phrases
+    .flatMap((phrase) => phrase.split(/\band\b|,|\//i))
+    .map((phrase) => phrase
+      .replace(/\b(desc|asc|top|bottom|highest|lowest|least|most|over time|where|for|with|from|in|during|last|this|next)\b.*$/gi, '')
+      .replace(/[^a-z0-9_ -]+/gi, ' ')
+      .replace(/\s+/g, ' ')
+      .trim())
+    .filter((phrase) => phrase.length > 0));
+}
+
+function pickRequestedDimensionColumn(
+  table: AgentSchemaTable,
+  question: string,
+  requestedDimensions: string[],
+): string | undefined {
+  for (const phrase of requestedDimensions) {
+    const direct = findSchemaColumn(table, dimensionColumnCandidatesForPhrase(phrase));
+    if (direct && !isJoinKeyColumn(direct) && !isNumericLikeColumn({ name: direct, type: findColumnType(table, direct) })) {
+      return direct;
+    }
+  }
+  const inferred = inferGenericDimensions(table, question)
+    .find((dimension) => !isJoinKeyColumn(dimension) && requestedDimensionMatchesColumn(requestedDimensions, dimension));
+  return inferred;
+}
+
+function dimensionColumnCandidatesForPhrase(phrase: string): string[] {
+  const tokens = (phrase.toLowerCase().match(/[a-z0-9_]+/g) ?? [])
+    .flatMap((token) => token.split('_'))
+    .map(normalizeToken)
+    .filter((token) => token.length > 0);
+  if (tokens.length === 0) return [];
+  const joined = tokens.join('_');
+  const tail = tokens.slice(1).join('_');
+  return uniqueDrilldownStrings([
+    joined,
+    phrase.replace(/\s+/g, '_').toLowerCase(),
+    tail,
+    tokens.at(-1) ?? '',
+    ...tokens,
+  ].filter(Boolean));
+}
+
+function requestedDimensionMatchesColumn(requestedDimensions: string[], column: string): boolean {
+  const columnTokens = exactMatchTokens(column);
+  return requestedDimensions.some((phrase) => {
+    const phraseTokens = (phrase.toLowerCase().match(/[a-z0-9_]+/g) ?? [])
+      .flatMap((token) => token.split('_'))
+      .map(normalizeToken)
+      .filter((token) => token.length > 0);
+    return phraseTokens.some((token) => columnTokens.has(token));
+  });
+}
+
+function selectedRelationWeight(table: AgentSchemaTable): number {
+  return table.selectionRank
+    ? Math.max(0, 30 - table.selectionRank * 2) + Math.min(table.selectionScore ?? 0, 16)
+    : 0;
+}
+
+interface JoinColumnSelection {
+  leftColumn: string;
+  rightColumn: string;
+  score: number;
+}
+
+function pickJoinColumns(left: AgentSchemaTable, right: AgentSchemaTable): JoinColumnSelection | undefined {
+  const candidates: JoinColumnSelection[] = [];
+  const leftColumns = left.columns.filter((column) => isJoinKeyColumn(column.name)).slice(0, 32);
+  const rightColumns = right.columns.filter((column) => isJoinKeyColumn(column.name)).slice(0, 32);
+  for (const leftColumn of leftColumns) {
+    for (const rightColumn of rightColumns) {
+      const score = joinColumnScore(leftColumn.name, rightColumn.name, left, right);
+      if (score <= 0) continue;
+      candidates.push({ leftColumn: leftColumn.name, rightColumn: rightColumn.name, score });
+    }
+  }
+  return candidates.sort((a, b) => b.score - a.score || a.leftColumn.localeCompare(b.leftColumn))[0];
+}
+
+function joinColumnScore(
+  leftColumn: string,
+  rightColumn: string,
+  leftTable: AgentSchemaTable,
+  rightTable: AgentSchemaTable,
+): number {
+  const leftKey = normalizeRelationKey(leftColumn).replace(/\./g, '_');
+  const rightKey = normalizeRelationKey(rightColumn).replace(/\./g, '_');
+  const leftJoinLike = isJoinKeyColumn(leftColumn);
+  const rightJoinLike = isJoinKeyColumn(rightColumn);
+  if (!leftJoinLike || !rightJoinLike) return 0;
+  if (leftKey === rightKey) return 70;
+  const leftSubject = joinSubjectForColumn(leftColumn);
+  const rightSubject = joinSubjectForColumn(rightColumn);
+  if (leftSubject && rightSubject && leftSubject === rightSubject) return 62;
+  const leftTableTokens = tableEntityTokens(leftTable);
+  const rightTableTokens = tableEntityTokens(rightTable);
+  if (leftSubject && rightKey === 'id' && rightTableTokens.has(leftSubject)) return 58;
+  if (rightSubject && leftKey === 'id' && leftTableTokens.has(rightSubject)) return 58;
+  if (leftSubject && rightTableTokens.has(leftSubject) && rightKey.endsWith('_key')) return 42;
+  if (rightSubject && leftTableTokens.has(rightSubject) && leftKey.endsWith('_key')) return 42;
+  return 0;
+}
+
+function isJoinKeyColumn(column: string): boolean {
+  const normalized = column.toLowerCase();
+  return normalized === 'id' ||
+    /(^|_)(id|key|uuid|sk)$/.test(normalized) ||
+    /_(id|key|uuid|sk)$/.test(normalized);
+}
+
+function joinSubjectForColumn(column: string): string | undefined {
+  const normalized = column.toLowerCase();
+  const subject = normalized.replace(/_(id|key|uuid|sk)$/i, '');
+  if (!subject || subject === normalized || subject === 'id' || subject === 'key') return undefined;
+  return normalizeToken(subject.split('_').at(-1) ?? subject);
+}
+
+function tableEntityTokens(table: AgentSchemaTable): Set<string> {
+  const tokens = exactMatchTokens([table.name, table.relation.split('.').at(-1) ?? table.relation].join(' '));
+  for (const generic of ['dim', 'fct', 'fact', 'stg', 'stage', 'model', 'table']) tokens.delete(generic);
+  return tokens;
+}
+
+function findColumnType(table: AgentSchemaTable, columnName: string): string | undefined {
+  return table.columns.find((column) => namesEqualLoose(column.name, columnName))?.type;
+}
+
+function qualifiedMetricExpression(metric: GenericMetricSelection, tableAlias: string): string {
+  const column = `${tableAlias}.${sqlIdentifier(metric.column)}`;
+  if (metric.column === 'rows') return 'COUNT(*)';
+  if (/^COUNT\s*\(\s*DISTINCT\b/i.test(metric.expression)) return `COUNT(DISTINCT ${column})`;
+  if (metric.preAggregated) return column;
+  const aggregate = metric.expression.match(/^(SUM|AVG|MIN|MAX|MEDIAN)\s*\(/i)?.[1]?.toUpperCase()
+    ?? (/avg|average|mean/i.test(metric.alias) ? 'AVG' : 'SUM');
+  return `${aggregate}(${column})`;
+}
+
+function inferGenericMetric(table: AgentSchemaTable, question: string): GenericMetricSelection | undefined {
+  const lower = question.toLowerCase();
+  const wantsCount = /\b(count|how many|number of|volume)\b/i.test(lower);
+  const candidates = table.columns
+    .map((column) => {
+      const name = column.name.toLowerCase();
+      const tokens = meaningfulTokens(column.name);
+      let score = isNumericLikeColumn(column) ? 20 : 0;
+      for (const token of meaningfulTokens(question)) {
+        if (tokens.has(token)) score += 18;
+      }
+      if (/\b(revenue|sales|amount|total|spend|cost|margin|profit|value|points?|score|orders?|count|quantity|duration|minutes?|rate|average|avg)\b/i.test(name.replace(/_/g, ' '))) {
+        score += 18;
+      }
+      if (/\b(id|key|code|zip|postal|phone|season|year|month|week|day|date|time)\b/i.test(name.replace(/_/g, ' '))) {
+        score -= 14;
+      }
+      return { column: column.name, score };
+    })
+    .filter((candidate) => candidate.score > 0)
+    .sort((a, b) => b.score - a.score);
+
+  const countSubject = wantsCount ? inferCountSubject(question) : undefined;
+  if (wantsCount) {
+    const precomputed = candidates.find((candidate) => isPrecomputedCountMetric(candidate.column, countSubject));
+    if (precomputed) {
+      return {
+        column: precomputed.column,
+        expression: isPreAggregatedMetricColumn(precomputed.column) ? sqlIdentifier(precomputed.column) : `SUM(${sqlIdentifier(precomputed.column)})`,
+        alias: isPreAggregatedMetricColumn(precomputed.column) ? precomputed.column : `${precomputed.column}_sum`,
+        score: precomputed.score + 8,
+        preAggregated: isPreAggregatedMetricColumn(precomputed.column),
+      };
+    }
+    const distinctColumn = countSubject ? findDistinctCountColumn(table, countSubject) : undefined;
+    if (distinctColumn) {
+      return {
+        column: distinctColumn,
+        expression: `COUNT(DISTINCT ${sqlIdentifier(distinctColumn)})`,
+        alias: `${countSubject}_count`,
+        score: 34,
+        preAggregated: false,
+      };
+    }
+  }
+
+  const selected = candidates[0];
+  if (!selected && !wantsCount) return undefined;
+  if (!selected || wantsCount && selected.score < 26) {
+    return {
+      column: 'rows',
+      expression: 'COUNT(*)',
+      alias: 'row_count',
+      score: 18,
+      preAggregated: true,
+    };
+  }
+  const aggregate = /\b(avg|average|mean)\b/i.test(lower) ? 'AVG' : 'SUM';
+  const aliasBase = `${selected.column}_${aggregate.toLowerCase()}`;
+  const preAggregated = isPreAggregatedMetricColumn(selected.column);
+  return {
+    column: selected.column,
+    expression: preAggregated ? sqlIdentifier(selected.column) : `${aggregate}(${sqlIdentifier(selected.column)})`,
+    alias: preAggregated ? selected.column : aliasBase,
+    score: selected.score,
+    preAggregated,
+  };
+}
+
+function inferCountSubject(question: string): string | undefined {
+  const lower = question.toLowerCase();
+  const match = lower.match(/\b(?:how many|number of|count of|count|total)\s+(?:distinct\s+|unique\s+)?([a-z][a-z0-9_-]*)/);
+  const raw = match?.[1] ?? lower.match(/\b(customers?|accounts?|users?|members?|orders?|products?|players?|teams?|transactions?|sessions?|events?|records?|rows?)\b/)?.[1];
+  if (!raw) return undefined;
+  const normalized = normalizeToken(raw.replace(/[^a-z0-9_]/g, ''));
+  if (!normalized || normalized === 'row' || normalized === 'record') return undefined;
+  return normalized;
+}
+
+function findDistinctCountColumn(table: AgentSchemaTable, subject: string): string | undefined {
+  const preferred = [
+    `${subject}_id`,
+    `${subject}_key`,
+    `${subject}_uuid`,
+    `${subject}_sk`,
+    `${subject}_name`,
+    subject,
+  ];
+  const direct = findSchemaColumn(table, preferred);
+  if (direct) return direct;
+  const tableTokens = meaningfulTokens([table.name, table.relation].join(' '));
+  if (!tableTokens.has(subject)) return undefined;
+  return findSchemaColumn(table, ['id', 'key', 'uuid']);
+}
+
+function isPrecomputedCountMetric(column: string, subject?: string): boolean {
+  const normalized = column.toLowerCase();
+  const text = normalized.replace(/_/g, ' ');
+  if (/\b(id|key|uuid|code)\b/i.test(text)) return false;
+  if (/\b(count|cnt|number|num)\b/i.test(text)) {
+    return !subject || text.includes(subject) || text.includes(pluralizeSimple(subject));
+  }
+  return Boolean(subject && (
+    normalized === `total_${subject}` ||
+    normalized === `total_${pluralizeSimple(subject)}`
+  ));
+}
+
+function pluralizeSimple(value: string): string {
+  if (value.endsWith('y')) return `${value.slice(0, -1)}ies`;
+  if (value.endsWith('s')) return value;
+  return `${value}s`;
+}
+
+function augmentGenericRankingDimensions(
+  table: AgentSchemaTable,
+  dimensions: string[],
+  metric: GenericMetricSelection,
+  question: string,
+): string[] {
+  const direction = rankingDirectionFromText(question);
+  if (!direction || !metric.preAggregated || /\bby\s+/i.test(question)) return dimensions;
+  const timeColumn = table.columns
+    .map((column) => column.name)
+    .find((name) => isTimeLikeGenericColumn(name) && !dimensions.some((dimension) => namesEqualLoose(dimension, name)));
+  return timeColumn ? [...dimensions, timeColumn] : dimensions;
+}
+
+function inferGenericDimensions(
+  table: AgentSchemaTable,
+  question: string,
+  metricColumn?: string,
+): string[] {
+  const lower = question.toLowerCase();
+  const requested = Array.from(lower.matchAll(/\bby\s+([a-z][a-z0-9_ -]{1,40})/g))
+    .map((match) => match[1] ?? '')
+    .flatMap((value) => value.split(/\band\b|,|\//i))
+    .map((value) => value.replace(/\b(desc|asc|top|bottom|highest|lowest|least|most|over time)\b/gi, '').trim())
+    .filter(Boolean);
+  const direct = requested
+    .map((value) => findSchemaColumn(table, [value, value.replace(/\s+/g, '_')]))
+    .filter((value): value is string => Boolean(value));
+  if (direct.length > 0) return uniqueDrilldownStrings(direct);
+
+  const domainHints = [
+    /\bcustomers?\b/.test(lower) ? ['customer_name', 'customer', 'customer_id'] : [],
+    /\bproducts?\b/.test(lower) ? ['product_name', 'product', 'sku', 'product_id'] : [],
+    /\bplayers?\b/.test(lower) ? ['player_name', 'player', 'player_id'] : [],
+    /\bteams?\b/.test(lower) ? ['team_name', 'team', 'team_id'] : [],
+    /\bregions?\b|\bmarkets?\b/.test(lower) ? ['region', 'market', 'geo'] : [],
+    /\bsegments?\b/.test(lower) ? ['segment', 'customer_segment', 'type'] : [],
+    /\bchannels?\b/.test(lower) ? ['channel', 'source_channel'] : [],
+    /\b(month|monthly)\b/.test(lower) ? ['month', 'order_month', 'created_month'] : [],
+    /\b(week|weekly)\b/.test(lower) ? ['week', 'order_week', 'created_week'] : [],
+    /\b(year|season|yearly)\b/.test(lower) ? ['season', 'year', 'order_year'] : [],
+  ].flat();
+  const hinted = findSchemaColumn(table, domainHints);
+  if (hinted) return [hinted];
+
+  const fallback = table.columns
+    .map((column, index) => ({
+      column: column.name,
+      score: genericDimensionScore(column, question, index, metricColumn),
+    }))
+    .filter((candidate) => candidate.score > 0)
+    .sort((a, b) => b.score - a.score)
+    .map((candidate) => candidate.column);
+  return uniqueDrilldownStrings(fallback).slice(0, 1);
+}
+
+function genericDimensionScore(
+  column: AgentSchemaColumn,
+  question: string,
+  index: number,
+  metricColumn?: string,
+): number {
+  if (metricColumn && namesEqualLoose(column.name, metricColumn)) return -100;
+  const name = column.name.toLowerCase();
+  const text = name.replace(/_/g, ' ');
+  let score = Math.max(0, 10 - index * 0.05);
+  if (/\b(name|category|type|segment|region|market|channel|status|team|player|customer|product|vendor|account|month|week|year|season|date)\b/i.test(text)) {
+    score += 24;
+  }
+  if (isNumericLikeColumn(column) && !isTimeLikeGenericColumn(column.name)) score -= 18;
+  for (const token of meaningfulTokens(question)) {
+    if (meaningfulTokens(column.name).has(token)) score += 10;
+  }
+  return score;
+}
+
+function isNumericLikeColumn(column: AgentSchemaColumn): boolean {
+  const type = column.type ?? '';
+  const name = column.name.toLowerCase();
+  return /\b(INT|INTEGER|BIGINT|DECIMAL|DOUBLE|FLOAT|NUMBER|NUMERIC|REAL)\b/i.test(type)
+    || /\b(total|count|amount|revenue|sales|spend|cost|margin|profit|value|points?|score|quantity|duration|minutes?|rate|avg|average)\b/i.test(name.replace(/_/g, ' '));
+}
+
+function isPreAggregatedMetricColumn(name: string): boolean {
+  return /^(total|count|avg|average|median|min|max)_/i.test(name)
+    || /_(total|count|avg|average|median|min|max)$/i.test(name);
+}
+
+function isTimeLikeGenericColumn(name: string): boolean {
+  return /\b(date|time|day|week|month|quarter|year|season|period)\b/i.test(name);
+}
+
+function buildEntityProfileProposal(input: {
+  question: string;
+  intent: AgentIntent;
+  schemaContext: AgentSchemaTable[];
+  followUp?: AgentFollowUpContext;
+  contextPack?: LocalContextPack;
+}): ParsedProposal | undefined {
+  const entityTexts = entityMentionsForProfile(input.question, input.contextPack);
+  if (entityTexts.length === 0 || !isEntityProfileQuestion(input.question, input.contextPack)) return undefined;
+
+  const candidates = input.schemaContext
+    .map((table) => profileTableCandidate(table, input.question, input.followUp, entityTexts))
+    .filter((candidate): candidate is ProfileTableCandidate => Boolean(candidate))
+    .sort((a, b) => b.score - a.score);
+  const selected = candidates[0];
+  if (!selected) return undefined;
+
+  const where = selected.filterValue
+    ? [`WHERE ${sqlIdentifier(selected.entityColumn)} = ${sqlStringLiteral(selected.filterValue)}`]
+    : [];
+  const columns = selected.selectColumns.map((column) => `  ${sqlIdentifier(column)}`).join(',\n');
+  const text = [
+    `Prepared a review-required profile query for ${selected.filterValue ?? entityTexts[0]} from ${selected.table.relation}.`,
+    selected.usedSampleValue
+      ? `The entity filter uses an inspected value match on ${selected.entityColumn}.`
+      : `The entity filter uses the likely entity column ${selected.entityColumn} from inspected schema metadata.`,
+    'This result is uncertified until reviewed and promoted.',
+  ].join(' ');
+
+  return {
+    text,
+    sql: [
+      'SELECT',
+      columns,
+      `FROM ${sqlRelation(selected.table.relation)}`,
+      ...where,
+      'LIMIT 50',
     ].join('\n'),
     viz: 'table',
   };
+}
+
+interface ProfileTableCandidate {
+  table: AgentSchemaTable;
+  entityColumn: string;
+  filterValue: string;
+  selectColumns: string[];
+  usedSampleValue: boolean;
+  score: number;
+}
+
+function profileTableCandidate(
+  table: AgentSchemaTable,
+  question: string,
+  followUp: AgentFollowUpContext | undefined,
+  entityTexts: string[],
+): ProfileTableCandidate | undefined {
+  if (table.columns.length === 0) return undefined;
+  const matchedFilters = matchedEntityFiltersForQuestion(table, question, followUp);
+  const sampled = matchedFilters.find((filter) =>
+    entityTexts.some((entity) => normalizeForEntityMatch(entity) === normalizeForEntityMatch(filter.value)),
+  ) ?? matchedFilters[0];
+  const entityColumn = sampled?.column ?? pickEntityProfileColumn(table, question);
+  if (!entityColumn) return undefined;
+  const filterValue = sampled?.value ?? entityTexts[0];
+  if (!filterValue) return undefined;
+  const selectColumns = orderedProfileColumns(table, entityColumn, question);
+  if (selectColumns.length === 0) return undefined;
+
+  const questionTokens = meaningfulTokens(question);
+  const tableTokens = meaningfulTokens([table.relation, table.name, table.description ?? ''].join(' '));
+  const columnTokens = meaningfulTokens(table.columns.map((column) => column.name).join(' '));
+  const overlap = [...questionTokens].filter((token) => tableTokens.has(token) || columnTokens.has(token)).length;
+  const profileSignal = selectColumns.filter((column) => isProfileMeasureColumn(column, table)).length;
+  const score =
+    (sampled ? 80 : 42) +
+    overlap * 6 +
+    profileSignal * 3 +
+    (/\b(player|customer|account|user|member|person|entity)\b/i.test(table.name) ? 8 : 0);
+
+  return {
+    table,
+    entityColumn,
+    filterValue,
+    selectColumns,
+    usedSampleValue: Boolean(sampled),
+    score,
+  };
+}
+
+function isEntityProfileQuestion(question: string, contextPack: LocalContextPack | undefined): boolean {
+  const mode = contextPack?.questionPlan?.mode;
+  if (mode === 'entity_profile') return true;
+  return /\b(profile|overview|360|complete\s+(?:stats|statistics|view)|full\s+(?:stats|statistics|view)|all\s+(?:stats|statistics|metrics)|research|reserach)\b/i.test(question);
+}
+
+function entityMentionsForProfile(question: string, contextPack: LocalContextPack | undefined): string[] {
+  const values = [
+    ...(contextPack?.questionPlan?.entities ?? []).map((entity) => entity.text),
+    ...Array.from(question.matchAll(/\b(?:for|on|profile\s+for|research\s+on|reserach\s+on)\s+([A-Z][A-Za-z0-9&.'-]+(?:\s+[A-Z][A-Za-z0-9&.'-]+){0,5})/g))
+      .map((match) => match[1] ?? ''),
+  ];
+  if (isEntityProfileQuestion(question, contextPack)) {
+    values.push(...Array.from(question.matchAll(/\b([A-Z][a-z]+(?:\s+[A-Z][a-z]+){1,5})\b/g)).map((match) => match[1] ?? ''));
+  }
+  return uniqueDrilldownStrings(values
+    .map((value) => value.replace(/\b(profile|stats|statistics|details|summary)\b.*$/i, '').trim())
+    .filter((value) => value.length > 1 && !/^(Can You|Could You|Tell Me|Show Me)$/i.test(value)))
+    .slice(0, 6);
+}
+
+function pickEntityProfileColumn(table: AgentSchemaTable, question: string): string | undefined {
+  const lower = question.toLowerCase();
+  const domainHints = [
+    /\bplayers?\b/.test(lower) ? 'player' : '',
+    /\bcustomers?\b/.test(lower) ? 'customer' : '',
+    /\baccounts?\b/.test(lower) ? 'account' : '',
+    /\busers?\b/.test(lower) ? 'user' : '',
+    /\bmembers?\b/.test(lower) ? 'member' : '',
+    /\bteams?\b/.test(lower) ? 'team' : '',
+    /\bproducts?\b/.test(lower) ? 'product' : '',
+  ].filter(Boolean);
+  const preferred = [
+    ...domainHints.flatMap((hint) => [`${hint}_name`, `${hint}_full_name`, hint]),
+    'name',
+    'full_name',
+    'display_name',
+    'title',
+  ];
+  const direct = findSchemaColumn(table, preferred);
+  if (direct) return direct;
+
+  const scored = table.columns
+    .map((column) => {
+      const name = column.name.toLowerCase();
+      let score = 0;
+      if (name.endsWith('_name') || name === 'name') score += 30;
+      if (/\b(name|title|email)\b/i.test(name.replace(/_/g, ' '))) score += 20;
+      if (domainHints.some((hint) => name.includes(hint))) score += 16;
+      if (/\b(id|key|code|date|time|amount|total|count|score|points|revenue)\b/i.test(name.replace(/_/g, ' '))) score -= 12;
+      return { column: column.name, score };
+    })
+    .filter((item) => item.score > 0)
+    .sort((a, b) => b.score - a.score);
+  return scored[0]?.column;
+}
+
+function orderedProfileColumns(table: AgentSchemaTable, entityColumn: string, question: string): string[] {
+  const scored = table.columns
+    .map((column, index) => ({
+      column: column.name,
+      score: profileColumnScore(column, question, index),
+      index,
+    }))
+    .sort((a, b) => b.score - a.score || a.index - b.index);
+  const selected = uniqueDrilldownStrings([
+    entityColumn,
+    ...scored.map((item) => item.column),
+  ]).slice(0, 24);
+  return selected.length > 0 ? selected : [entityColumn];
+}
+
+function profileColumnScore(column: AgentSchemaColumn, question: string, index: number): number {
+  const name = column.name.toLowerCase();
+  const text = name.replace(/_/g, ' ');
+  const lowerQuestion = question.toLowerCase();
+  let score = Math.max(0, 12 - index * 0.1);
+  if (isProfileMeasureColumn(column.name, { relation: '', name: '', columns: [column] })) score += 35;
+  if (/\b(name|title|team|season|year|date|type|category|segment|status)\b/i.test(text)) score += 18;
+  if (/\b(id|key|code)\b/i.test(text)) score += 2;
+  for (const token of meaningfulTokens(lowerQuestion)) {
+    if (meaningfulTokens(column.name).has(token)) score += 12;
+  }
+  if (column.description && meaningfulTokens(column.description).size > 0) score += 4;
+  return score;
+}
+
+function isProfileMeasureColumn(columnName: string, table: AgentSchemaTable): boolean {
+  const column = table.columns.find((item) => namesEqualLoose(item.name, columnName));
+  const name = columnName.toLowerCase();
+  const text = name.replace(/_/g, ' ');
+  return /\b(total|count|avg|average|sum|rate|score|points|pts|rebounds?|assists?|steals?|blocks?|turnovers?|minutes?|games?|wins?|losses?|revenue|amount|spend|orders?|quantity|margin|cost|value|stat)\b/i.test(text)
+    || /\b(INT|INTEGER|BIGINT|DECIMAL|DOUBLE|FLOAT|NUMBER|NUMERIC|REAL)\b/i.test(column?.type ?? '');
 }
 
 function buildMatchedEntityDrilldownProposal(input: {
@@ -1205,15 +2156,21 @@ function schemaContextWithAllowedSqlContext(
   contextPack: LocalContextPack | undefined,
 ): AgentSchemaTable[] {
   const byRelation = new Map<string, AgentSchemaTable>();
+  const relationSelections = selectedRelationLookup(contextPack);
   for (const table of schemaContext) {
+    const selection = relationSelectionFor(table.relation, relationSelections);
     byRelation.set(normalizeRelationKey(table.relation), {
       ...table,
       columns: table.columns.map((column) => ({ ...column, sampleValues: column.sampleValues?.slice() })),
+      selectionRank: selection?.rank ?? table.selectionRank,
+      selectionScore: selection?.score ?? table.selectionScore,
+      selectionReason: selection?.reason ?? table.selectionReason,
     });
   }
   for (const relation of contextPack?.allowedSqlContext?.relations ?? []) {
     const key = normalizeRelationKey(relation.relation);
     const existing = byRelation.get(key);
+    const selection = relationSelectionFor(relation.relation, relationSelections);
     if (!existing) {
       byRelation.set(key, {
         relation: relation.relation,
@@ -1225,9 +2182,15 @@ function schemaContextWithAllowedSqlContext(
           sampleValues: column.sampleValues?.slice(),
         })),
         source: relation.source,
+        selectionRank: selection?.rank,
+        selectionScore: selection?.score,
+        selectionReason: selection?.reason,
       });
       continue;
     }
+    existing.selectionRank = selection?.rank ?? existing.selectionRank;
+    existing.selectionScore = selection?.score ?? existing.selectionScore;
+    existing.selectionReason = selection?.reason ?? existing.selectionReason;
     const columns = new Map(existing.columns.map((column) => [column.name.toLowerCase(), column]));
     for (const column of relation.columns) {
       const existingColumn = columns.get(column.name.toLowerCase());
@@ -1249,6 +2212,29 @@ function schemaContextWithAllowedSqlContext(
     }
   }
   return Array.from(byRelation.values());
+}
+
+function selectedRelationLookup(
+  contextPack: LocalContextPack | undefined,
+): Map<string, NonNullable<LocalContextPack['retrievalDiagnostics']['selectedRelations']>[number]> {
+  const lookup = new Map<string, NonNullable<LocalContextPack['retrievalDiagnostics']['selectedRelations']>[number]>();
+  for (const relation of contextPack?.retrievalDiagnostics?.selectedRelations ?? []) {
+    for (const key of relationLookupKeys(relation.relation)) {
+      lookup.set(key, relation);
+    }
+  }
+  return lookup;
+}
+
+function relationSelectionFor(
+  relation: string,
+  lookup: Map<string, NonNullable<LocalContextPack['retrievalDiagnostics']['selectedRelations']>[number]>,
+): NonNullable<LocalContextPack['retrievalDiagnostics']['selectedRelations']>[number] | undefined {
+  for (const key of relationLookupKeys(relation)) {
+    const selection = lookup.get(key);
+    if (selection) return selection;
+  }
+  return undefined;
 }
 
 interface MatchedEntityFilter {
@@ -1461,6 +2447,16 @@ function normalizeRelationKey(relation: string): string {
   return relation.replace(/["`]/g, '').replace(/\s*\.\s*/g, '.').toLowerCase().trim();
 }
 
+function relationLookupKeys(relation: string): string[] {
+  const normalized = normalizeRelationKey(relation);
+  const parts = normalized.split('.').filter(Boolean);
+  const keys = new Set<string>();
+  if (normalized) keys.add(normalized);
+  if (parts.length >= 2) keys.add(parts.slice(-2).join('.'));
+  if (parts.length >= 1) keys.add(parts[parts.length - 1]!);
+  return Array.from(keys);
+}
+
 function normalizeForEntityMatch(value: string): string {
   return value.toLowerCase().replace(/[^a-z0-9.%+-]+/g, ' ').replace(/\s+/g, ' ').trim();
 }
@@ -1496,6 +2492,8 @@ function buildContextPackAwareProposal(input: {
 }): ParsedProposal | undefined {
   if (!isGeneratedAgentIntent(input.intent)) return undefined;
   if (!input.contextPack) return undefined;
+  const profileProposal = buildContextPackProfileProposal(input.question, input.contextPack);
+  if (profileProposal) return profileProposal;
   const lower = input.question.toLowerCase();
   if (!/\b(least|lowest|fewest|bottom|min(?:imum)?)\b/.test(lower)) return undefined;
 
@@ -1512,6 +2510,85 @@ function buildContextPackAwareProposal(input: {
     };
   }
   return undefined;
+}
+
+function buildContextPackProfileProposal(
+  question: string,
+  contextPack: LocalContextPack,
+): ParsedProposal | undefined {
+  const entityTexts = entityMentionsForProfile(question, contextPack);
+  if (entityTexts.length === 0 || !isEntityProfileQuestion(question, contextPack)) return undefined;
+
+  const sources = [...(contextPack.allowedSqlContext?.sourceBlockSql ?? [])]
+    .sort((a, b) => {
+      const preferred = contextPack.routeDecision.certifiedApplicability?.objectKey;
+      if (preferred && a.objectKey === preferred) return -1;
+      if (preferred && b.objectKey === preferred) return 1;
+      return 0;
+    });
+  for (const source of sources) {
+    const shape = extractSimpleSelectShape(source.sql);
+    if (!shape) continue;
+    const entityColumn = pickEntityColumnFromSelectExpressions(shape.selectExpressions, question);
+    if (!entityColumn) continue;
+    const selectExpressions = uniqueSqlSelectExpressions(shape.selectExpressions).slice(0, 24);
+    if (selectExpressions.length === 0) continue;
+    const orderColumn = selectExpressions
+      .map(selectExpressionOutputName)
+      .find((column) => column && /\b(season|year|date|month|week|game_date|created_at)\b/i.test(column));
+    const sql = [
+      'SELECT',
+      selectExpressions.map((expression) => `  ${expression}`).join(',\n'),
+      `FROM ${shape.relation}`,
+      `WHERE ${sqlIdentifier(entityColumn)} = ${sqlStringLiteral(entityTexts[0]!)}`,
+      orderColumn ? `ORDER BY ${sqlIdentifier(orderColumn)} DESC` : '',
+      'LIMIT 50',
+    ].filter(Boolean).join('\n');
+    return {
+      text: `Prepared a review-required profile query for ${entityTexts[0]} by using certified block "${source.name}" as SQL-shape context. This result is uncertified until reviewed and promoted.`,
+      sql,
+      viz: 'table',
+    };
+  }
+  return undefined;
+}
+
+function pickEntityColumnFromSelectExpressions(expressions: string[], question: string): string | undefined {
+  const outputNames = expressions
+    .map(selectExpressionOutputName)
+    .filter((value): value is string => Boolean(value));
+  const lower = question.toLowerCase();
+  const hints = [
+    /\bplayers?\b/.test(lower) ? 'player' : '',
+    /\bcustomers?\b/.test(lower) ? 'customer' : '',
+    /\baccounts?\b/.test(lower) ? 'account' : '',
+    /\busers?\b/.test(lower) ? 'user' : '',
+    /\bteams?\b/.test(lower) ? 'team' : '',
+    /\bproducts?\b/.test(lower) ? 'product' : '',
+  ].filter(Boolean);
+  const preferred = [
+    ...hints.flatMap((hint) => [`${hint}_name`, `${hint}_full_name`, hint]),
+    'name',
+    'full_name',
+    'display_name',
+  ];
+  for (const wanted of preferred) {
+    const match = outputNames.find((name) => namesEqualLoose(name, wanted));
+    if (match) return match;
+  }
+  return outputNames.find((name) => /(^|_)(name|title|email)$/.test(name.toLowerCase()));
+}
+
+function uniqueSqlSelectExpressions(expressions: string[]): string[] {
+  const seen = new Set<string>();
+  const unique: string[] = [];
+  for (const expression of expressions) {
+    const normalized = expression.replace(/\s+/g, ' ').trim().toLowerCase();
+    if (!normalized || seen.has(normalized)) continue;
+    seen.add(normalized);
+    unique.push(expression.replace(/\s+/g, ' ').trim());
+  }
+  return unique;
 }
 
 function invertRankingSql(sql: string): string | undefined {
@@ -1954,7 +3031,10 @@ function isExplicitSavedArtifactQuestion(question: string, artifactHits: KGSearc
 function isAdHocAnalysisQuestion(question: string): boolean {
   const lower = question.toLowerCase();
   if (isBusinessDefinitionQuestion(question)) return false;
-  return /\b(break\s*down|breakdown|drill\s*(?:down|into)|slice|segment|split|compare|versus|vs\.?|trend|over time|top|bottom|best|worst|highest|lowest|least|fewest|minimum|min|smallest|rank|ranking|performed better|better performing|why|what drove|driver|drivers|top movers?|changed?|change|dropped?|drop|decreased?|decrease|declined?|decline|increased?|increase|anomal(?:y|ies)|exceptions?|root cause|contribut(?:e|ed|ion)|variance|delta|by\s+[a-z][\w\s-]{1,40})\b/i.test(lower)
+  const asksCountBreakdown = /\b(how many|number of|count of|count)\b/i.test(lower)
+    && /\b(by\s+[a-z][\w\s-]{1,40}|per|for each|group(?:ed)? by|split|segment)\b/i.test(lower);
+  return asksCountBreakdown
+    || /\b(break\s*down|breakdown|drill\s*(?:down|into)|slice|segment|split|compare|versus|vs\.?|trend|over time|top|bottom|best|worst|highest|lowest|least|fewest|minimum|min|smallest|rank|ranking|performed better|better performing|why|what drove|driver|drivers|top movers?|changed?|change|dropped?|drop|decreased?|decrease|declined?|decline|increased?|increase|anomal(?:y|ies)|exceptions?|root cause|contribut(?:e|ed|ion)|variance|delta|by\s+[a-z][\w\s-]{1,40})\b/i.test(lower)
     || /\b(show|list|find|give)\b.+\b(account|accounts|customer|customers|product|products|order|orders|region|location|month|week|day|user|users)\b/i.test(lower);
 }
 
@@ -1998,7 +3078,11 @@ function buildAnalysisPlan(input: {
   const tokens = meaningfulTokens(input.question);
   const dimensions = inferDimensions(input.question, input.selectedNodes, input.schemaContext);
   const measures = inferMeasures(input.question, input.selectedNodes, input.schemaContext);
-  const candidateTables = input.schemaContext.slice(0, 8).map((table) => ({
+  const candidateJoins = buildCandidateJoinPaths(input.schemaContext);
+  const candidateTables = [...input.schemaContext].sort((a, b) =>
+    (a.selectionRank ?? Number.MAX_SAFE_INTEGER) - (b.selectionRank ?? Number.MAX_SAFE_INTEGER) ||
+    a.relation.localeCompare(b.relation)
+  ).slice(0, 8).map((table) => ({
     relation: table.relation,
     columns: table.columns.slice(0, 16).map((col) => col.name),
     reason: tableReason(table, tokens),
@@ -2017,6 +3101,7 @@ function buildAnalysisPlan(input: {
     measures,
     dimensions,
     candidateTables,
+    candidateJoins,
     trustedContext,
     assumptions: input.assumptions ?? [],
     sql: input.sql,
@@ -2074,6 +3159,11 @@ function inferMeasures(question: string, selectedNodes: KGNode[], schemaContext:
 }
 
 function tableReason(table: AgentSchemaTable, questionTokens: Set<string>): string | undefined {
+  if (table.selectionReason) {
+    return table.selectionRank
+      ? `metadata rank ${table.selectionRank}: ${table.selectionReason}`
+      : table.selectionReason;
+  }
   const tableTokens = meaningfulTokens([table.relation, table.name, table.description ?? ''].join(' '));
   const columnTokens = meaningfulTokens(table.columns.map((col) => col.name).join(' '));
   const matches = [...questionTokens].filter((token) => tableTokens.has(token) || columnTokens.has(token));

@@ -8,7 +8,7 @@
  */
 
 import { createHash } from 'node:crypto';
-import { mkdirSync } from 'node:fs';
+import { mkdirSync, readFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { dirname, join } from 'node:path';
 import type Database from 'better-sqlite3';
@@ -23,6 +23,16 @@ import {
 } from '@duckcodeailabs/dql-core';
 import { buildKGFromManifest, buildKGFromSemanticLayer } from '../kg/build.js';
 import type { KGEdge, KGNode } from '../kg/types.js';
+import {
+  buildAnalysisQuestionPlan,
+  certifiedApplicabilityForObject,
+  scoreAllowedSqlRelationWithAnalysisPlan,
+  scoreMetadataObjectWithAnalysisPlan,
+  sortAllowedSqlContextForAnalysisPlan,
+  type AnalysisQuestionPlan,
+  type CertifiedBlockApplicability,
+} from './analysis-planner.js';
+import { extractSimpleSelectShape, sourceSqlShapeColumns } from './sql-shape.js';
 
 const require = createRequire(import.meta.url);
 let databaseCtor: typeof Database | null = null;
@@ -196,6 +206,7 @@ export interface MetadataRouteDecision {
   trustLabel: MetadataTrustLabel;
   reviewStatus: 'certified' | 'draft_ready' | 'needs_review' | 'none';
   exactObjectKey?: string;
+  certifiedApplicability?: CertifiedBlockApplicability;
   selectedEvidence: Array<{
     objectKey: string;
     objectType: string;
@@ -224,6 +235,7 @@ export interface LocalContextPack {
   followUp?: MetadataFollowUpContext;
   focusObjectKey: string | null;
   mode: 'question' | 'build' | 'debug' | 'certify' | 'impact' | 'explain';
+  questionPlan: AnalysisQuestionPlan;
   trustLabel: MetadataTrustLabel;
   objects: MetadataObject[];
   edges: MetadataEdge[];
@@ -264,6 +276,30 @@ export interface LocalContextPack {
       rank: number;
       score: number;
       priorityTier: string;
+    }>;
+    selectedRelations?: Array<{
+      relation: string;
+      name: string;
+      source: string;
+      score: number;
+      reason: string;
+      columns: string[];
+      rank: number;
+    }>;
+    selectedJoinPaths?: Array<{
+      leftRelation: string;
+      leftColumn: string;
+      rightRelation: string;
+      rightColumn: string;
+      reason: string;
+      confidence: number;
+    }>;
+    schemaShapeCandidates?: Array<{
+      objectKey: string;
+      relation: string;
+      score: number;
+      reason: string;
+      columns: string[];
     }>;
     topRejected: Array<{
       objectKey: string;
@@ -317,6 +353,13 @@ interface RankedMetadataObject {
   score: number;
   reason: string;
   priorityTier: string;
+}
+
+interface SchemaShapeCandidate {
+  object: MetadataObject;
+  relation: MetadataAllowedSqlRelation;
+  score: number;
+  reasons: string[];
 }
 
 const OBJECT_PRIORITY: Record<string, number> = {
@@ -408,23 +451,32 @@ export async function buildLocalContextPack(
   try {
     const mode = request.mode ?? 'question';
     const followUp = normalizeFollowUpContext(request.followUp);
+    const questionPlan = buildAnalysisQuestionPlan(request.question, followUp ?? undefined);
     const runtimeSnapshot = request.runtimeSchemaSnapshot ?? catalog.latestRuntimeSchemaSnapshot();
     const runtimeObjects = runtimeSnapshot ? runtimeSchemaObjects(runtimeSnapshot) : [];
     const selectedObjects = selectedContextObjects(request.selectedContext);
     const followUpObjects = followUpContextObjects(followUp);
     const followUpSourceObjects = catalog.getObjectsByKeys(followUpSourceObjectKeys(followUp));
-    const searchQuery = buildFollowUpSearchQuery(request.question, followUp);
-    const searchRows = catalog.searchObjects({
-      query: searchQuery,
-      objectTypes: request.objectTypes,
-      limit: Math.max(request.limit ?? 80, 20),
-    });
+    const searchQueries = uniqueMetadataSearchQueries([
+      buildFollowUpSearchQuery(request.question, followUp),
+      ...questionPlan.searchQueries,
+    ]);
+    const searchRows = mergeObjects(searchQueries.flatMap((query) =>
+      catalog.searchObjects({
+        query,
+        objectTypes: request.objectTypes,
+        limit: Math.max(request.limit ?? 80, 20),
+      })
+    ));
+    const schemaShapeCandidates = schemaShapeCandidateObjects(catalog, questionPlan, request, runtimeObjects);
+    const schemaShapeObjects = schemaShapeCandidates.map((candidate) => candidate.object);
     const exact = request.focusObjectKey ? catalog.getObject(request.focusObjectKey) : null;
     const ranked = rankMetadataObjects({
       rows: mergeObjects(exact
-        ? [exact, ...followUpSourceObjects, ...followUpObjects, ...searchRows, ...runtimeObjects, ...selectedObjects]
-        : [...followUpSourceObjects, ...followUpObjects, ...searchRows, ...runtimeObjects, ...selectedObjects]),
-      question: searchQuery,
+        ? [exact, ...followUpSourceObjects, ...followUpObjects, ...searchRows, ...schemaShapeObjects, ...runtimeObjects, ...selectedObjects]
+        : [...followUpSourceObjects, ...followUpObjects, ...searchRows, ...schemaShapeObjects, ...runtimeObjects, ...selectedObjects]),
+      question: searchQueries.join(' '),
+      questionPlan,
       limit: request.limit ?? 80,
     });
     const selected = mergeObjects([...followUpSourceObjects, ...followUpObjects, ...ranked.selected]);
@@ -432,11 +484,18 @@ export async function buildLocalContextPack(
     const edgeWalk = catalog.edgesForKeys(selected.map((row) => row.objectKey), 3);
     const edgeObjectKeys = Array.from(new Set(edgeWalk.flatMap((edge) => [edge.fromKey, edge.toKey])));
     const graphObjects = catalog.getObjectsByKeys(edgeObjectKeys);
-    const objects = rankMetadataObjects({
-      rows: mergeObjects([...followUpSourceObjects, ...followUpObjects, ...selected, ...graphObjects, ...runtimeObjects, ...selectedObjects]),
-      question: searchQuery,
+    const rankedObjects = rankMetadataObjects({
+      rows: mergeObjects([...followUpSourceObjects, ...followUpObjects, ...selected, ...graphObjects, ...schemaShapeObjects, ...runtimeObjects, ...selectedObjects]),
+      question: searchQueries.join(' '),
+      questionPlan,
       limit: request.limit ?? 120,
     }).selected;
+    const sqlParentObjects = sqlParentObjectsForSelectedColumns(
+      rankedObjects,
+      mergeObjects([...graphObjects, ...runtimeObjects]),
+      questionPlan,
+    );
+    const objects = mergeObjects([...rankedObjects, ...sqlParentObjects]);
     const objectKeys = objects.map((row) => row.objectKey);
     const queryRuns = catalog.queryRunsForObjectKeys(objectKeys, 20);
     const diagnostics = catalog.diagnostics();
@@ -444,11 +503,25 @@ export async function buildLocalContextPack(
     const trustLabel = deriveTrust(objects);
     const citations = buildCitations(objects, edgeWalk);
     const evidenceSummaries = buildEvidenceSummaries(objects, edgeWalk, queryRuns, diagnostics);
-    const allowedSqlContext = buildAllowedSqlContext(objects, edgeWalk);
+    const allowedSqlContext = sortAllowedSqlContextForAnalysisPlan(buildAllowedSqlContext(objects, edgeWalk), questionPlan);
+    const selectedRelations = allowedSqlContext.relations.slice(0, 24).map((relation, index) => {
+      const scored = scoreAllowedSqlRelationWithAnalysisPlan(relation, questionPlan);
+      return {
+        relation: relation.relation,
+        name: relation.name,
+        source: relation.source,
+        score: scored.score,
+        reason: scored.reasons.join('; ') || 'relation retained as inspected SQL context',
+        columns: relation.columns.slice(0, 24).map((column) => column.name),
+        rank: index + 1,
+      };
+    });
+    const selectedJoinPaths = buildSelectedJoinPaths(allowedSqlContext);
     const evidenceRoles = buildEvidenceRoles(objects, queryRuns);
     const reranked = rankMetadataObjects({
-      rows: mergeObjects([...searchRows, ...objects]),
-      question: searchQuery,
+      rows: mergeObjects([...searchRows, ...schemaShapeObjects, ...objects]),
+      question: searchQueries.join(' '),
+      questionPlan,
       limit: request.limit ?? 120,
     });
     const conflicts = buildCandidateConflicts(reranked.ranked);
@@ -459,6 +532,7 @@ export async function buildLocalContextPack(
       evidenceRoles,
       diagnostics,
       trustLabel,
+      questionPlan,
     });
     const payload: LocalContextPack = {
       id: '',
@@ -466,6 +540,7 @@ export async function buildLocalContextPack(
       followUp: followUp ?? undefined,
       focusObjectKey,
       mode,
+      questionPlan,
       trustLabel,
       objects,
       edges: edgeWalk,
@@ -489,6 +564,15 @@ export async function buildLocalContextPack(
           rank: item.rank,
           score: item.score,
           priorityTier: item.priorityTier,
+        })),
+        selectedRelations,
+        selectedJoinPaths,
+        schemaShapeCandidates: schemaShapeCandidates.slice(0, 16).map((candidate) => ({
+          objectKey: candidate.object.objectKey,
+          relation: candidate.relation.relation,
+          score: candidate.score,
+          reason: candidate.reasons.join('; '),
+          columns: candidate.relation.columns.slice(0, 16).map((column) => column.name),
         })),
         topRejected: reranked.rejected,
         candidateConflicts: conflicts,
@@ -574,6 +658,7 @@ export function buildMetadataSnapshot(
 
   addManifestBlockDetails(manifest, objects);
   addDbtDagObjects(manifest, objects, edges, diagnostics);
+  addRawDbtManifestCatalogObjects(projectRoot, manifest, objects, edges, diagnostics);
   addBlockDependencyEdges(manifest, edges);
 
   const nodeKeyMap = new Map<string, string>();
@@ -865,6 +950,44 @@ export class MetadataCatalog {
       LIMIT ?
     `).all(...params, options.limit ?? 100) as MetadataObjectRow[];
     return rows.map(rowToObject);
+  }
+
+  scanObjects(options: {
+    objectTypes?: string[];
+    domain?: string;
+    batchSize?: number;
+  }, visit: (objects: MetadataObject[]) => void): void {
+    const filters: string[] = [];
+    const params: unknown[] = [];
+    if (options.objectTypes && options.objectTypes.length > 0) {
+      filters.push(`object_type IN (${options.objectTypes.map(() => '?').join(', ')})`);
+      params.push(...options.objectTypes);
+    }
+    if (options.domain) {
+      filters.push('domain = ?');
+      params.push(options.domain);
+    }
+    const batchSize = Math.max(1, options.batchSize ?? 500);
+    let lastObjectKey = '';
+    while (true) {
+      const pageFilters = [...filters];
+      const pageParams = [...params];
+      if (lastObjectKey) {
+        pageFilters.push('object_key > ?');
+        pageParams.push(lastObjectKey);
+      }
+      const where = pageFilters.length > 0 ? `WHERE ${pageFilters.join(' AND ')}` : '';
+      const rows = this.db.prepare(`
+        SELECT * FROM metadata_objects
+        ${where}
+        ORDER BY object_key
+        LIMIT ?
+      `).all(...pageParams, batchSize) as MetadataObjectRow[];
+      if (rows.length === 0) break;
+      visit(rows.map(rowToObject));
+      lastObjectKey = rows[rows.length - 1]?.object_key ?? lastObjectKey;
+      if (rows.length < batchSize) break;
+    }
   }
 
   getObject(objectKey: string): MetadataObject | null {
@@ -1288,6 +1411,170 @@ function addDbtDagObjects(
   }
 }
 
+function addRawDbtManifestCatalogObjects(
+  projectRoot: string,
+  manifest: DQLManifest,
+  objects: Map<string, MetadataObject>,
+  edges: Map<string, MetadataEdge>,
+  diagnostics: MetadataDiagnostic[],
+): void {
+  const manifestPath = manifest.dbtImport?.manifestPath ?? resolveDbtManifestPath(projectRoot);
+  if (!manifestPath) return;
+  let raw: {
+    nodes?: Record<string, Record<string, unknown>>;
+    sources?: Record<string, Record<string, unknown>>;
+  };
+  try {
+    raw = JSON.parse(readFileSync(manifestPath, 'utf-8')) as typeof raw;
+  } catch (error) {
+    diagnostics.push({
+      kind: 'dbt',
+      severity: 'warning',
+      message: `Could not read dbt manifest catalog metadata from ${manifestPath}: ${error instanceof Error ? error.message : String(error)}`,
+      filePath: manifestPath,
+    });
+    return;
+  }
+
+  for (const [uniqueId, node] of Object.entries(raw.nodes ?? {})) {
+    if (node.resource_type !== 'model') continue;
+    const name = rawDbtName(node);
+    if (!name) continue;
+    addRawDbtCatalogObject({
+      uniqueId,
+      name,
+      node,
+      objectKey: `dbt:model:${name}`,
+      objectType: 'dbt_model',
+      objects,
+      edges,
+    });
+  }
+
+  for (const [uniqueId, source] of Object.entries(raw.sources ?? {})) {
+    const name = rawDbtName(source);
+    if (!name) continue;
+    addRawDbtCatalogObject({
+      uniqueId,
+      name,
+      node: source,
+      objectKey: `dbt:source:${name}`,
+      objectType: 'dbt_source',
+      objects,
+      edges,
+    });
+  }
+}
+
+function addRawDbtCatalogObject(input: {
+  uniqueId: string;
+  name: string;
+  node: Record<string, unknown>;
+  objectKey: string;
+  objectType: 'dbt_model' | 'dbt_source';
+  objects: Map<string, MetadataObject>;
+  edges: Map<string, MetadataEdge>;
+}): void {
+  const existing = input.objects.get(input.objectKey);
+  const database = stringValue(input.node.database);
+  const schema = stringValue(input.node.schema);
+  const relation = [database, schema, input.name].filter(Boolean).join('.');
+  const columns = rawDbtColumns(input.node.columns);
+  input.objects.set(input.objectKey, mergeObject(existing, {
+    objectKey: input.objectKey,
+    objectType: input.objectType,
+    name: input.name,
+    fullName: relation || input.name,
+    description: stringValue(input.node.description),
+    status: existing?.status ?? 'dbt_catalog',
+    sourcePath: stringValue(input.node.original_file_path) ?? stringValue(input.node.path),
+    sourceSystem: existing?.sourceSystem ?? 'dbt manifest.json catalog',
+    payload: compactObject({
+      ...(existing?.payload ?? {}),
+      uniqueId: input.uniqueId,
+      relation,
+      database,
+      schema,
+      materialized: rawDbtMaterialization(input.node),
+      dependsOn: rawDbtDependsOn(input.node),
+      tags: metadataStringArray(input.node.tags),
+      catalogOnly: existing ? undefined : true,
+      columns,
+    }),
+  }));
+
+  for (const column of columns) {
+    const columnKey = `dbt:column:${input.name}.${column.name}`;
+    const existingColumn = input.objects.get(columnKey);
+    input.objects.set(columnKey, mergeObject(existingColumn, {
+      objectKey: columnKey,
+      objectType: 'dbt_column',
+      name: column.name,
+      fullName: `${input.name}.${column.name}`,
+      description: column.description,
+      status: existingColumn?.status ?? 'dbt_catalog',
+      sourcePath: stringValue(input.node.original_file_path) ?? stringValue(input.node.path),
+      sourceSystem: existingColumn?.sourceSystem ?? 'dbt manifest.json catalog',
+      payload: compactObject({
+        ...(existingColumn?.payload ?? {}),
+        model: input.name,
+        uniqueId: input.uniqueId,
+        type: column.type,
+        relation,
+        catalogOnly: existingColumn ? undefined : true,
+      }),
+    }));
+    putEdge(input.edges, {
+      edgeType: 'contains',
+      fromKey: input.objectKey,
+      toKey: columnKey,
+      confidence: 1,
+      payload: { source: 'raw dbt manifest column catalog' },
+    });
+  }
+
+  for (const dep of rawDbtDependsOn(input.node)) {
+    putEdge(input.edges, {
+      edgeType: 'depends_on',
+      fromKey: input.objectKey,
+      toKey: dbtDependencyKey(dep),
+      confidence: 1,
+      payload: { source: 'raw dbt manifest depends_on catalog', uniqueId: dep },
+    });
+  }
+}
+
+function rawDbtName(node: Record<string, unknown>): string | undefined {
+  return stringValue(node.alias) ?? stringValue(node.identifier) ?? stringValue(node.name);
+}
+
+function rawDbtMaterialization(node: Record<string, unknown>): string | undefined {
+  const config = node.config && typeof node.config === 'object' ? node.config as Record<string, unknown> : null;
+  return stringValue(config?.materialized);
+}
+
+function rawDbtDependsOn(node: Record<string, unknown>): string[] {
+  const dependsOn = node.depends_on && typeof node.depends_on === 'object'
+    ? node.depends_on as Record<string, unknown>
+    : null;
+  return metadataStringArray(dependsOn?.nodes);
+}
+
+function rawDbtColumns(value: unknown): RuntimeSchemaColumn[] {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return [];
+  return Object.values(value as Record<string, unknown>).flatMap((entry) => {
+    if (!entry || typeof entry !== 'object') return [];
+    const record = entry as Record<string, unknown>;
+    const name = stringValue(record.name) ?? stringValue(record.column_name);
+    if (!name) return [];
+    return [{
+      name,
+      type: stringValue(record.data_type) ?? stringValue(record.type),
+      description: stringValue(record.description),
+    }];
+  });
+}
+
 function addManifestBlockDetails(manifest: DQLManifest, objects: Map<string, MetadataObject>): void {
   for (const block of Object.values(manifest.blocks ?? {})) {
     const objectKey = `dql:block:${block.name}`;
@@ -1438,15 +1725,30 @@ function planContextPackRoute(input: {
   evidenceRoles: LocalContextPack['evidenceRoles'];
   diagnostics: MetadataDiagnostic[];
   trustLabel: MetadataTrustLabel;
+  questionPlan: AnalysisQuestionPlan;
 }): MetadataRouteDecision {
-  const intent = input.request.intent ?? classifyMetadataIntent(input.request.question, input.request.followUp);
-  const exact = findExactCertifiedObject(input.request.question, intent, input.objects);
+  const intent = input.request.intent ?? input.questionPlan.routeIntent ?? classifyMetadataIntent(input.request.question, input.request.followUp);
+  const applicabilityByKey = certifiedApplicabilities(input.objects, input.questionPlan);
+  const exactByApplicability = [...applicabilityByKey.values()]
+    .filter((item) => item.kind === 'exact_answer' || item.kind === 'safe_parameterized')
+    .sort((a, b) => b.score - a.score)[0];
+  const exact = exactByApplicability
+    ? input.objects.find((object) => object.objectKey === exactByApplicability.objectKey)
+    : findExactCertifiedObject(input.request.question, intent, input.objects);
+  const certifiedApplicability = exact
+    ? applicabilityByKey.get(exact.objectKey) ?? certifiedApplicabilityForObject(exact, input.questionPlan)
+    : undefined;
+  const contextApplicability = [...applicabilityByKey.values()]
+    .filter((item) => item.kind === 'context_only')
+    .sort((a, b) => b.score - a.score)[0];
   const exactExampleMatch = exact ? hasExactExampleQuestion(input.request.question, exact) : false;
   const missingContext = buildMissingContext(input.request, intent, input.objects, input.allowedSqlContext);
   const selectedEvidence = input.evidenceRoles.slice(0, 16);
 
   if (exact && (
-    intent === 'exact_certified_lookup'
+    certifiedApplicability?.kind === 'exact_answer'
+    || certifiedApplicability?.kind === 'safe_parameterized'
+    || intent === 'exact_certified_lookup'
     || intent === 'definition_lookup'
     || exactExampleMatch
     || (intent === 'ad_hoc_ranking' && objectNameInQuestion(input.request.question, exact))
@@ -1458,6 +1760,7 @@ function planContextPackRoute(input: {
       trustLabel: 'certified',
       reviewStatus: 'certified',
       exactObjectKey: exact.objectKey,
+      certifiedApplicability,
       selectedEvidence,
       missingContext: [],
       followUps: buildMetadataFollowUps(intent, input.allowedSqlContext),
@@ -1478,6 +1781,7 @@ function planContextPackRoute(input: {
       reason: 'Trust questions need a certification, lineage, owner, caveat, and diagnostic review rather than a metric SQL preview.',
       trustLabel: input.trustLabel,
       reviewStatus: 'needs_review',
+      certifiedApplicability: contextApplicability,
       selectedEvidence,
       missingContext,
       followUps: buildMetadataFollowUps(intent, input.allowedSqlContext),
@@ -1500,6 +1804,7 @@ function planContextPackRoute(input: {
       reason: 'The question asks for a different grain, ranking, breakdown, comparison, entity drilldown, or diagnostic analysis, so certified artifacts are context only.',
       trustLabel: input.trustLabel === 'certified' ? 'mixed' : input.trustLabel,
       reviewStatus: 'draft_ready',
+      certifiedApplicability: contextApplicability,
       selectedEvidence,
       missingContext,
       followUps: buildMetadataFollowUps(intent, input.allowedSqlContext),
@@ -1514,6 +1819,7 @@ function planContextPackRoute(input: {
       trustLabel: 'certified',
       reviewStatus: 'certified',
       exactObjectKey: exact.objectKey,
+      certifiedApplicability,
       selectedEvidence,
       missingContext: [],
       followUps: buildMetadataFollowUps('exact_certified_lookup', input.allowedSqlContext),
@@ -1525,6 +1831,18 @@ function planContextPackRoute(input: {
     severity: 'blocking',
     message: 'The local metadata matched some context, but not enough to choose a safe metric, table, or grain.',
   }]);
+}
+
+function certifiedApplicabilities(
+  objects: MetadataObject[],
+  questionPlan: AnalysisQuestionPlan,
+): Map<string, CertifiedBlockApplicability> {
+  const items = objects
+    .filter((object) => object.objectType === 'dql_block' && isCertifiedMetadataObject(object))
+    .map((object) => certifiedApplicabilityForObject(object, questionPlan))
+    .filter((item) => item.kind !== 'not_applicable')
+    .sort((a, b) => b.score - a.score);
+  return new Map(items.map((item) => [item.objectKey, item]));
 }
 
 function clarifyDecision(
@@ -1833,6 +2151,274 @@ function evidenceReasonForObject(object: MetadataObject): string {
   return reasonForObject(object);
 }
 
+function sqlParentObjectsForSelectedColumns(
+  selectedObjects: MetadataObject[],
+  candidateObjects: MetadataObject[],
+  questionPlan: AnalysisQuestionPlan,
+): MetadataObject[] {
+  const selectedKeys = new Set(selectedObjects.map((object) => object.objectKey));
+  const parentByRelation = new Map<string, Array<{ object: MetadataObject; relation: MetadataAllowedSqlRelation }>>();
+  for (const object of candidateObjects) {
+    if (!isSqlParentObject(object) || selectedKeys.has(object.objectKey)) continue;
+    const relation = metadataRelationFromObject(object);
+    const key = relation ? normalizeRelationKey(relation.relation) : '';
+    if (!relation || !key) continue;
+    const existing = parentByRelation.get(key) ?? [];
+    existing.push({ object, relation });
+    parentByRelation.set(key, existing);
+  }
+
+  const scoredParents = new Map<string, { object: MetadataObject; score: number }>();
+  for (const object of selectedObjects) {
+    if (!isSqlColumnObject(object)) continue;
+    const relation = metadataRelationFromObject(object);
+    const key = relation ? normalizeRelationKey(relation.relation) : '';
+    if (!key) continue;
+    for (const parent of parentByRelation.get(key) ?? []) {
+      const relationScore = scoreAllowedSqlRelationWithAnalysisPlan(parent.relation, questionPlan).score;
+      const columnScore = scoreMetadataObjectWithAnalysisPlan(object, questionPlan).score;
+      const score = relationScore + columnScore;
+      const existing = scoredParents.get(parent.object.objectKey);
+      if (!existing || score > existing.score) {
+        scoredParents.set(parent.object.objectKey, { object: parent.object, score });
+      }
+    }
+  }
+
+  return Array.from(scoredParents.values())
+    .sort((a, b) => b.score - a.score || a.object.name.localeCompare(b.object.name))
+    .slice(0, 24)
+    .map((item) => item.object);
+}
+
+function schemaShapeCandidateObjects(
+  catalog: MetadataCatalog,
+  questionPlan: AnalysisQuestionPlan,
+  request: BuildLocalContextPackRequest,
+  runtimeObjects: MetadataObject[],
+): SchemaShapeCandidate[] {
+  if (!questionPlan.needsGeneratedSql) return [];
+  const candidates = new Map<string, SchemaShapeCandidate>();
+  const considerObject = (object: MetadataObject): void => {
+    const relation = metadataRelationFromObject(object);
+    if (!relation || relation.columns.length === 0) return;
+    const shape = schemaShapeMatchForQuestion(relation, questionPlan);
+    if (shape.score <= 0) return;
+    const relationScore = scoreAllowedSqlRelationWithAnalysisPlan(relation, questionPlan);
+    const objectScore = scoreMetadataObjectWithAnalysisPlan(object, questionPlan);
+    const score = Number((shape.score + relationScore.score + objectScore.score).toFixed(3));
+    if (score < schemaShapeMinimumScore(questionPlan)) return;
+    candidates.set(object.objectKey, {
+      object,
+      relation,
+      score,
+      reasons: [
+        ...shape.reasons,
+        ...relationScore.reasons.filter((reason) =>
+          /analysis terms|metric terms|dimension terms|columns match|inspected\/projected columns/i.test(reason)
+        ).slice(0, 3),
+      ],
+    });
+    trimSchemaShapeCandidateMap(candidates, 64);
+  };
+  catalog.scanObjects({
+    objectTypes: ['dbt_model', 'dbt_source', 'warehouse_table'],
+    batchSize: schemaShapeScanBatchSize(request),
+  }, (objects) => {
+    for (const object of objects) considerObject(object);
+  });
+  for (const object of mergeObjects(runtimeObjects.filter(isSqlParentObject))) {
+    considerObject(object);
+  }
+  return Array.from(candidates.values())
+    .sort((a, b) => b.score - a.score || a.relation.relation.localeCompare(b.relation.relation))
+    .slice(0, 24);
+}
+
+function schemaShapeScanBatchSize(request: BuildLocalContextPackRequest): number {
+  if (request.strictness === 'exploratory') return 1000;
+  return 500;
+}
+
+function trimSchemaShapeCandidateMap(candidates: Map<string, SchemaShapeCandidate>, maxCandidates: number): void {
+  if (candidates.size <= maxCandidates) return;
+  const topCandidates = Array.from(candidates.values())
+    .sort((a, b) => b.score - a.score || a.relation.relation.localeCompare(b.relation.relation))
+    .slice(0, maxCandidates);
+  candidates.clear();
+  for (const candidate of topCandidates) {
+    candidates.set(candidate.object.objectKey, candidate);
+  }
+}
+
+function schemaShapeMinimumScore(questionPlan: AnalysisQuestionPlan): number {
+  switch (questionPlan.mode) {
+    case 'entity_profile':
+    case 'entity_drilldown':
+      return 40;
+    case 'trend':
+    case 'diagnose_change':
+    case 'driver_breakdown':
+    case 'comparison':
+      return 42;
+    case 'ranking':
+    case 'general_analysis':
+      return 38;
+    default:
+      return 44;
+  }
+}
+
+function schemaShapeMatchForQuestion(
+  relation: MetadataAllowedSqlRelation,
+  questionPlan: AnalysisQuestionPlan,
+): { score: number; reasons: string[] } {
+  const columns = relation.columns;
+  const entityColumns = columns.filter((column) => isEntityIdentifyingColumn(column.name));
+  const measureColumns = columns.filter(isMeasureLikeColumn);
+  const timeColumns = columns.filter((column) => isTimeLikeColumn(column.name));
+  const dimensionColumns = columns.filter((column) => isDimensionLikeColumn(column.name));
+  const relationText = normalizeSearchText(relationSearchTextForCatalog(relation));
+  const termHits = informativeSchemaTerms(questionPlan)
+    .filter((term) => term.length >= 3 && relationText.includes(term))
+    .slice(0, 8);
+  let score = termHits.length * 5;
+  const reasons: string[] = [];
+
+  if (termHits.length > 0) reasons.push(`schema terms matched: ${termHits.join(', ')}`);
+  switch (questionPlan.mode) {
+    case 'entity_profile':
+    case 'entity_drilldown':
+      if (entityColumns.length > 0 && measureColumns.length > 0) {
+        score += 34;
+        reasons.push(`entity identifiers: ${entityColumns.slice(0, 3).map((column) => column.name).join(', ')}`);
+        reasons.push(`measures: ${measureColumns.slice(0, 4).map((column) => column.name).join(', ')}`);
+      } else if (entityColumns.length > 0 && (dimensionColumns.length > 0 || relationLooksEntityCentric(relation))) {
+        score += 24;
+        reasons.push(`entity/profile columns: ${entityColumns.slice(0, 4).map((column) => column.name).join(', ')}`);
+      }
+      if (timeColumns.length > 0 && (entityColumns.length > 0 || measureColumns.length > 0)) {
+        score += 6;
+        reasons.push(`time columns: ${timeColumns.slice(0, 3).map((column) => column.name).join(', ')}`);
+      }
+      break;
+    case 'trend':
+    case 'diagnose_change':
+      if (measureColumns.length > 0 && timeColumns.length > 0) {
+        score += 34;
+        reasons.push(`trend-ready measures: ${measureColumns.slice(0, 4).map((column) => column.name).join(', ')}`);
+        reasons.push(`time columns: ${timeColumns.slice(0, 3).map((column) => column.name).join(', ')}`);
+      }
+      break;
+    case 'driver_breakdown':
+    case 'comparison':
+      if (measureColumns.length > 0 && (dimensionColumns.length > 0 || entityColumns.length > 0)) {
+        score += 32;
+        reasons.push(`breakdown dimensions: ${[...dimensionColumns, ...entityColumns].slice(0, 4).map((column) => column.name).join(', ')}`);
+        reasons.push(`measures: ${measureColumns.slice(0, 4).map((column) => column.name).join(', ')}`);
+      }
+      break;
+    case 'ranking':
+    case 'general_analysis':
+      if (measureColumns.length > 0 && (dimensionColumns.length > 0 || entityColumns.length > 0)) {
+        score += 28;
+        reasons.push(`rankable dimensions: ${[...dimensionColumns, ...entityColumns].slice(0, 4).map((column) => column.name).join(', ')}`);
+        reasons.push(`measures: ${measureColumns.slice(0, 4).map((column) => column.name).join(', ')}`);
+      }
+      break;
+    default:
+      break;
+  }
+
+  if (score === 0 && termHits.length >= 2 && (measureColumns.length > 0 || entityColumns.length > 0)) {
+    score += 18;
+  }
+
+  return {
+    score,
+    reasons: reasons.length > 0 ? reasons : ['relation has analytical schema shape for generated SQL'],
+  };
+}
+
+function informativeSchemaTerms(questionPlan: AnalysisQuestionPlan): string[] {
+  const entityTerms = new Set(questionPlan.entities.flatMap((entity) => normalizeSearchText(entity.text).split(/\s+/)));
+  const generic = new Set([
+    'complete', 'detail', 'details', 'full', 'history', 'overview', 'profile', 'research',
+    'reserach', 'stat', 'stats', 'statistics', 'summary',
+  ]);
+  return uniqueStringValues([
+    ...questionPlan.metricTerms,
+    ...questionPlan.dimensionTerms,
+    ...questionPlan.timeTerms,
+    ...questionPlan.searchTerms,
+  ].flatMap((value) => normalizeSearchText(value).split(/\s+/)))
+    .filter((term) => term.length >= 3 && !entityTerms.has(term) && !generic.has(term));
+}
+
+function relationSearchTextForCatalog(relation: MetadataAllowedSqlRelation): string {
+  return [
+    relation.relation,
+    relation.name,
+    relation.source,
+    relation.columns.map((column) => `${column.name} ${column.type ?? ''} ${column.description ?? ''}`).join(' '),
+  ].join(' ');
+}
+
+function relationLooksEntityCentric(relation: MetadataAllowedSqlRelation): boolean {
+  return /\b(dim|dimension|entity|profile|customer|account|user|person|member|player|athlete|product|vendor|supplier|employee|merchant|team)\b/i
+    .test(`${relation.name} ${relation.relation}`);
+}
+
+function isEntityIdentifyingColumn(name: string): boolean {
+  const normalized = normalizeColumnToken(name);
+  if (/(^|_)(name|full_name|display_name|title|email|username)$/.test(normalized)) return true;
+  if (/(^|_)(customer|account|user|member|person|player|athlete|product|sku|vendor|supplier|employee|merchant|team|organization|company|store|location)_(id|key|uuid|sk|name|email)$/.test(normalized)) {
+    return true;
+  }
+  return /(^|_)(customer|account|user|member|person|player|athlete|product|vendor|supplier|employee|merchant|team|organization|company|store|location)$/.test(normalized);
+}
+
+function isDimensionLikeColumn(name: string): boolean {
+  const normalized = normalizeColumnToken(name);
+  if (isTimeLikeColumn(normalized) || isMeasureColumnName(normalized)) return false;
+  return /(^|_)(category|channel|class|cohort|country|department|division|group|market|name|position|region|segment|status|team|territory|type|zone)$/.test(normalized) ||
+    /(customer|account|user|member|person|player|athlete|product|sku|vendor|supplier|employee|merchant|team|organization|company|store|location)_(name|type|segment|category|status|group|region)$/.test(normalized);
+}
+
+function isMeasureLikeColumn(column: RuntimeSchemaColumn): boolean {
+  const normalized = normalizeColumnToken(column.name);
+  if (isJoinKeyColumnForCatalog(normalized) || isTimeLikeColumn(normalized)) return false;
+  if (/^(?:season|year|month|week|quarter|rank|row_number)$/.test(normalized)) return false;
+  return isMeasureColumnName(normalized) || isNumericColumnType(column.type);
+}
+
+function isMeasureColumnName(normalizedName: string): boolean {
+  return /(^|_)(amount|arr|ast|assist|assists|avg|average|balance|bookings|count|cost|duration|expense|goal|goals|margin|minutes|mrr|orders|points|profit|pts|quantity|rate|reb|rebound|rebounds|revenue|sales|score|scores|spend|stat|stats|total|usage|value|volume)$/.test(normalizedName);
+}
+
+function isNumericColumnType(type: string | undefined): boolean {
+  return Boolean(type && /\b(bigint|decimal|double|float|int|integer|number|numeric|real)\b/i.test(type));
+}
+
+function normalizeColumnToken(value: string): string {
+  return value.replace(/["`]/g, '').replace(/[^a-zA-Z0-9_]+/g, '_').replace(/^_+|_+$/g, '').toLowerCase();
+}
+
+function uniqueStringValues(values: string[]): string[] {
+  return Array.from(new Set(values.map((value) => value.trim()).filter(Boolean)));
+}
+
+function isSqlColumnObject(object: MetadataObject): boolean {
+  return object.objectType === 'dbt_column' || object.objectType === 'runtime_column';
+}
+
+function isSqlParentObject(object: MetadataObject): boolean {
+  return object.objectType === 'dbt_model' ||
+    object.objectType === 'dbt_source' ||
+    object.objectType === 'warehouse_table' ||
+    object.objectType === 'runtime_table';
+}
+
 function buildAllowedSqlContext(objects: MetadataObject[], edges: MetadataEdge[]): MetadataAllowedSqlContext {
   const byRelation = new Map<string, MetadataAllowedSqlRelation>();
   const objectsByKey = new Map(objects.map((object) => [object.objectKey, object]));
@@ -1847,7 +2433,7 @@ function buildAllowedSqlContext(objects: MetadataObject[], edges: MetadataEdge[]
     byRelation.set(key, {
       ...existing,
       objectKey: existing.objectKey ?? relation.objectKey,
-      source: existing.source === relation.source ? existing.source : 'local metadata catalog',
+      source: mergeRelationSources(existing.source, relation.source),
       columns: dedupeRuntimeColumns([...existing.columns, ...relation.columns]).slice(0, 120),
     });
   };
@@ -1879,6 +2465,17 @@ function buildAllowedSqlContext(objects: MetadataObject[], edges: MetadataEdge[]
         columns: [],
       });
     }
+    const sourceSql = typeof object.payload?.sql === 'string' ? object.payload.sql.trim() : '';
+    const shape = sourceSql ? extractSimpleSelectShape(sourceSql) : undefined;
+    if (shape) {
+      addRelation({
+        relation: shape.relation,
+        name: shape.relation.split('.').at(-1) ?? shape.relation,
+        objectKey: object.objectKey,
+        source: 'certified source SQL shape',
+        columns: sourceSqlShapeColumns(sourceSql),
+      });
+    }
   }
 
   for (const edge of edges) {
@@ -1891,7 +2488,8 @@ function buildAllowedSqlContext(objects: MetadataObject[], edges: MetadataEdge[]
   }
 
   return {
-    relations: Array.from(byRelation.values()).sort((a, b) => a.relation.localeCompare(b.relation)),
+    relations: coalesceRelationAliases(Array.from(byRelation.values()))
+      .sort((a, b) => a.relation.localeCompare(b.relation)),
     sourceBlockSql: objects
       .filter((object) =>
         object.objectType === 'dql_block' &&
@@ -1906,6 +2504,172 @@ function buildAllowedSqlContext(objects: MetadataObject[], edges: MetadataEdge[]
         sql: String(object.payload?.sql ?? ''),
       })),
   };
+}
+
+function buildSelectedJoinPaths(
+  allowedSqlContext: MetadataAllowedSqlContext,
+): NonNullable<LocalContextPack['retrievalDiagnostics']['selectedJoinPaths']> {
+  const relations = allowedSqlContext.relations
+    .filter((relation) => relation.columns.some((column) => isJoinKeyColumnForCatalog(column.name)))
+    .slice(0, 16);
+  const joins: NonNullable<LocalContextPack['retrievalDiagnostics']['selectedJoinPaths']> = [];
+  const seen = new Set<string>();
+  for (let leftIndex = 0; leftIndex < relations.length; leftIndex += 1) {
+    for (let rightIndex = leftIndex + 1; rightIndex < relations.length; rightIndex += 1) {
+      const left = relations[leftIndex]!;
+      const right = relations[rightIndex]!;
+      const join = pickCatalogJoinColumns(left, right);
+      if (!join) continue;
+      const key = [
+        normalizeRelationKey(left.relation),
+        join.leftColumn.toLowerCase(),
+        normalizeRelationKey(right.relation),
+        join.rightColumn.toLowerCase(),
+      ].join('|');
+      if (seen.has(key)) continue;
+      seen.add(key);
+      joins.push({
+        leftRelation: left.relation,
+        leftColumn: join.leftColumn,
+        rightRelation: right.relation,
+        rightColumn: join.rightColumn,
+        reason: catalogJoinReason(join.leftColumn, join.rightColumn, join.confidence),
+        confidence: join.confidence,
+      });
+    }
+  }
+  return joins
+    .sort((a, b) => b.confidence - a.confidence || a.leftRelation.localeCompare(b.leftRelation))
+    .slice(0, 12);
+}
+
+function pickCatalogJoinColumns(
+  left: MetadataAllowedSqlRelation,
+  right: MetadataAllowedSqlRelation,
+): { leftColumn: string; rightColumn: string; confidence: number } | undefined {
+  const candidates: Array<{ leftColumn: string; rightColumn: string; confidence: number }> = [];
+  const leftColumns = left.columns.filter((column) => isJoinKeyColumnForCatalog(column.name)).slice(0, 32);
+  const rightColumns = right.columns.filter((column) => isJoinKeyColumnForCatalog(column.name)).slice(0, 32);
+  for (const leftColumn of leftColumns) {
+    for (const rightColumn of rightColumns) {
+      const confidence = catalogJoinConfidence(leftColumn.name, rightColumn.name, left, right);
+      if (confidence <= 0) continue;
+      candidates.push({ leftColumn: leftColumn.name, rightColumn: rightColumn.name, confidence });
+    }
+  }
+  return candidates.sort((a, b) => b.confidence - a.confidence || a.leftColumn.localeCompare(b.leftColumn))[0];
+}
+
+function catalogJoinConfidence(
+  leftColumn: string,
+  rightColumn: string,
+  leftRelation: MetadataAllowedSqlRelation,
+  rightRelation: MetadataAllowedSqlRelation,
+): number {
+  const left = normalizeJoinColumnName(leftColumn);
+  const right = normalizeJoinColumnName(rightColumn);
+  if (!isJoinKeyColumnForCatalog(left) || !isJoinKeyColumnForCatalog(right)) return 0;
+  if (left === right) return 0.92;
+  const leftSubject = joinSubjectForCatalog(left);
+  const rightSubject = joinSubjectForCatalog(right);
+  if (leftSubject && rightSubject && leftSubject === rightSubject) return 0.86;
+  const leftRelationTokens = relationEntityTokensForCatalog(leftRelation);
+  const rightRelationTokens = relationEntityTokensForCatalog(rightRelation);
+  if (leftSubject && right === 'id' && rightRelationTokens.has(leftSubject)) return 0.78;
+  if (rightSubject && left === 'id' && leftRelationTokens.has(rightSubject)) return 0.78;
+  return 0;
+}
+
+function catalogJoinReason(leftColumn: string, rightColumn: string, confidence: number): string {
+  if (leftColumn.toLowerCase() === rightColumn.toLowerCase()) return `shared key ${leftColumn}`;
+  const leftSubject = joinSubjectForCatalog(leftColumn);
+  const rightSubject = joinSubjectForCatalog(rightColumn);
+  if (leftSubject && rightSubject && leftSubject === rightSubject) return `matching ${leftSubject} key`;
+  if (confidence >= 0.75) return 'foreign-key style id match';
+  return 'join-key style column match';
+}
+
+function isJoinKeyColumnForCatalog(column: string): boolean {
+  const normalized = normalizeJoinColumnName(column);
+  return normalized === 'id' ||
+    /(^|_)(id|key|uuid|sk)$/.test(normalized) ||
+    /_(id|key|uuid|sk)$/.test(normalized);
+}
+
+function joinSubjectForCatalog(column: string): string | undefined {
+  const normalized = normalizeJoinColumnName(column);
+  const subject = normalized.replace(/_(id|key|uuid|sk)$/i, '');
+  if (!subject || subject === normalized || subject === 'id' || subject === 'key') return undefined;
+  return normalizeSingularToken(subject.split('_').at(-1) ?? subject);
+}
+
+function relationEntityTokensForCatalog(relation: MetadataAllowedSqlRelation): Set<string> {
+  const tokens = new Set<string>();
+  for (const raw of [relation.name, relation.relation.split('.').at(-1) ?? relation.relation].join(' ').toLowerCase().match(/[a-z0-9_]+/g) ?? []) {
+    for (const part of raw.split('_')) {
+      const token = normalizeSingularToken(part);
+      if (!token || token.length < 2 || ['dim', 'fct', 'fact', 'stg', 'stage', 'model', 'table'].includes(token)) continue;
+      tokens.add(token);
+    }
+  }
+  return tokens;
+}
+
+function normalizeJoinColumnName(column: string): string {
+  return column.replace(/["`]/g, '').replace(/[^a-zA-Z0-9_]+/g, '_').replace(/^_+|_+$/g, '').toLowerCase();
+}
+
+function normalizeSingularToken(token: string): string {
+  if (token.endsWith('ies') && token.length > 4) return `${token.slice(0, -3)}y`;
+  if (token.endsWith('s') && token.length > 4) return token.slice(0, -1);
+  return token;
+}
+
+function coalesceRelationAliases(relations: MetadataAllowedSqlRelation[]): MetadataAllowedSqlRelation[] {
+  const qualifiedByTail = new Map<string, MetadataAllowedSqlRelation[]>();
+  for (const relation of relations) {
+    const tailKey = relationTailKey(relation.relation);
+    if (!tailKey || !relation.relation.includes('.')) continue;
+    const existing = qualifiedByTail.get(tailKey) ?? [];
+    existing.push(relation);
+    qualifiedByTail.set(tailKey, existing);
+  }
+
+  const mergedByRelation = new Map(relations.map((relation) => [normalizeRelationKey(relation.relation), relation]));
+  const skipped = new Set<string>();
+  for (const relation of relations) {
+    const relationKey = normalizeRelationKey(relation.relation);
+    const tailKey = relationTailKey(relation.relation);
+    if (!tailKey || relation.relation.includes('.')) continue;
+    const targets = qualifiedByTail.get(tailKey) ?? [];
+    if (targets.length !== 1) continue;
+    const target = targets[0]!;
+    const targetKey = normalizeRelationKey(target.relation);
+    mergedByRelation.set(targetKey, {
+      ...target,
+      objectKey: target.objectKey ?? relation.objectKey,
+      source: mergeRelationSources(target.source, relation.source),
+      columns: dedupeRuntimeColumns([...target.columns, ...relation.columns]).slice(0, 120),
+    });
+    skipped.add(relationKey);
+  }
+
+  return Array.from(mergedByRelation.entries())
+    .filter(([key]) => !skipped.has(key))
+    .map(([, relation]) => relation);
+}
+
+function relationTailKey(relation: string): string {
+  const parts = normalizeRelationKey(relation).split('.').filter(Boolean);
+  return parts.at(-1) ?? '';
+}
+
+function mergeRelationSources(left: string, right: string): string {
+  if (left === right) return left;
+  const parts = [...left.split(/\s+\+\s+/), ...right.split(/\s+\+\s+/)]
+    .map((part) => part.trim())
+    .filter(Boolean);
+  return Array.from(new Set(parts)).join(' + ');
 }
 
 function warehouseTableHasTrustedReference(
@@ -2071,6 +2835,20 @@ function buildFollowUpSearchQuery(question: string, followUp: MetadataFollowUpCo
     ...(followUp.filters ?? []),
     ...(followUp.dimensions ?? []),
   ].filter(Boolean).join(' ');
+}
+
+function uniqueMetadataSearchQueries(values: string[]): string[] {
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const value of values) {
+    const clean = value.replace(/\s+/g, ' ').trim();
+    if (!clean) continue;
+    const key = normalizeSearchText(clean);
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    out.push(clean);
+  }
+  return out.slice(0, 5);
 }
 
 function normalizeRuntimeSchemaTables(tables: RuntimeSchemaTable[]): RuntimeSchemaTable[] {
@@ -2296,6 +3074,7 @@ function safeJson<T>(raw: string | null | undefined, fallback: T): T {
 function rankMetadataObjects(args: {
   rows: MetadataObject[];
   question: string;
+  questionPlan?: AnalysisQuestionPlan;
   limit: number;
 }): {
   selected: MetadataObject[];
@@ -2305,12 +3084,14 @@ function rankMetadataObjects(args: {
   const terms = tokenize(args.question).slice(0, 12);
   const ranked = mergeObjects(args.rows)
     .map((row) => {
-      const score = scoreMetadataObject(row, terms);
+      const baseScore = scoreMetadataObject(row, terms);
+      const planScore = args.questionPlan ? scoreMetadataObjectWithAnalysisPlan(row, args.questionPlan) : { score: 0, reasons: [] };
+      const score = Number((baseScore + planScore.score).toFixed(3));
       return {
         row,
         rank: 0,
         score,
-        reason: selectionReason(row, score),
+        reason: selectionReason(row, score, planScore.reasons),
         priorityTier: priorityTier(row),
       };
     })
@@ -2369,9 +3150,10 @@ function priorityTier(row: MetadataObject): string {
   return 'metadata';
 }
 
-function selectionReason(row: MetadataObject, score: number): string {
+function selectionReason(row: MetadataObject, score: number, plannerReasons: string[] = []): string {
   const reasons = [reasonForObject(row), `priority tier: ${priorityTier(row)}`];
   if (row.status === 'certified') reasons.push('certified status');
+  reasons.push(...plannerReasons.slice(0, 3));
   reasons.push(`score ${score.toFixed(1)}`);
   return reasons.join('; ');
 }

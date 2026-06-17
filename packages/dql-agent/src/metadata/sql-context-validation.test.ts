@@ -18,6 +18,35 @@ describe('validateSqlAgainstLocalContext', () => {
     expect(result.ok).toBe(true);
   });
 
+  it('accepts inspected source columns and output aliases selected from a joined CTE', () => {
+    const result = validateSqlAgainstLocalContext(`
+      WITH enterprise AS (
+        SELECT o.amount AS revenue, c.segment
+        FROM analytics.fct_orders o
+        JOIN analytics.dim_customers c ON o.customer_id = c.customer_id
+      )
+      SELECT revenue, segment FROM enterprise
+    `, pack());
+
+    expect(result.ok).toBe(true);
+  });
+
+  it('rejects unknown unqualified columns selected from joined CTEs', () => {
+    const result = validateSqlAgainstLocalContext(`
+      WITH enterprise AS (
+        SELECT o.amount AS revenue, c.segment
+        FROM analytics.fct_orders o
+        JOIN analytics.dim_customers c ON o.customer_id = c.customer_id
+      )
+      SELECT fake_column FROM enterprise
+    `, pack());
+
+    expect(result).toMatchObject({
+      ok: false,
+      code: 'unknown_column',
+    });
+  });
+
   it('rejects relations outside the context pack', () => {
     const result = validateSqlAgainstLocalContext(
       'SELECT order_id FROM analytics.secret_orders',
@@ -37,6 +66,38 @@ describe('validateSqlAgainstLocalContext', () => {
     );
 
     expect(result).toMatchObject({
+      ok: false,
+      code: 'unknown_column',
+    });
+  });
+
+  it('uses certified source SQL shape columns when relation metadata is sparse', () => {
+    const context = pack();
+    context.allowedSqlContext = {
+      relations: [{
+        relation: 'analytics.player_stats',
+        name: 'player_stats',
+        source: 'certified block dependency',
+        columns: [],
+      }],
+      sourceBlockSql: [{
+        objectKey: 'dql:block:Top Players',
+        name: 'Top Players',
+        status: 'certified',
+        sql: 'SELECT player_name, season, total_points FROM analytics.player_stats ORDER BY total_points DESC LIMIT 10',
+      }],
+    };
+
+    expect(validateSqlAgainstLocalContext(
+      'SELECT player_name, SUM(total_points) AS total_points FROM analytics.player_stats GROUP BY player_name',
+      context,
+    ).ok).toBe(true);
+
+    const rejected = validateSqlAgainstLocalContext(
+      'SELECT player_name, fake_metric FROM analytics.player_stats',
+      context,
+    );
+    expect(rejected).toMatchObject({
       ok: false,
       code: 'unknown_column',
     });

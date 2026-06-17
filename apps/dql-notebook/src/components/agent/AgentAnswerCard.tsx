@@ -83,6 +83,7 @@ interface AgentAnalysisPlan {
   measures?: string[];
   dimensions?: string[];
   candidateTables?: Array<{ relation?: string; columns?: string[]; reason?: string }>;
+  candidateJoins?: Array<{ leftRelation?: string; leftColumn?: string; rightRelation?: string; rightColumn?: string; reason?: string }>;
   trustedContext?: Array<{ kind?: string; name?: string; certification?: string; sourceTier?: string }>;
   assumptions?: string[];
   sql?: string;
@@ -593,6 +594,11 @@ function AnswerPanel({
               {analysisPlan.dimensions?.slice(0, 2).map((dimension) => <Pill key={`dimension-${dimension}`} label={dimension} t={t} />)}
             </div>
           )}
+          {analysisPlan.candidateJoins && analysisPlan.candidateJoins.length > 0 && (
+            <div style={{ fontSize: 12, color: t.textMuted }}>
+              Join: <span style={{ color: t.textSecondary }}>{formatJoinPath(analysisPlan.candidateJoins[0])}</span>
+            </div>
+          )}
           {nextAction && (
             <div style={{ fontSize: 12, color: t.textMuted }}>
               Next: <span style={{ color: t.textSecondary }}>{nextAction}</span>
@@ -1082,6 +1088,13 @@ function ReviewPanel({ answer, t }: { answer: AgentAnswerEnvelope; t: Theme }) {
               t={t}
             />
           )}
+          {analysisPlan.candidateJoins && analysisPlan.candidateJoins.length > 0 && (
+            <KeyValue
+              label="Join Paths"
+              value={analysisPlan.candidateJoins.slice(0, 3).map(formatJoinPath).join('; ')}
+              t={t}
+            />
+          )}
           {analysisPlan.assumptions && analysisPlan.assumptions.length > 0 && (
             <KeyValue label="Assumptions" value={analysisPlan.assumptions.join(' ')} t={t} />
           )}
@@ -1362,6 +1375,13 @@ function addButtonStyle(t: Theme, adding: boolean): React.CSSProperties {
 
 function formatLabel(value: string): string {
   return value.replace(/_/g, ' ');
+}
+
+function formatJoinPath(join: NonNullable<AgentAnalysisPlan['candidateJoins']>[number]): string {
+  const left = [join.leftRelation, join.leftColumn].filter(Boolean).join('.');
+  const right = [join.rightRelation, join.rightColumn].filter(Boolean).join('.');
+  const path = [left, right].filter(Boolean).join(' to ');
+  return join.reason ? `${path} (${join.reason})` : path;
 }
 
 function formatPreviewValue(value: unknown): string {

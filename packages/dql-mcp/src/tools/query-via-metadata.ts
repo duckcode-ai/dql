@@ -146,6 +146,9 @@ export async function queryViaMetadata(
       contextPack,
       routeDecision: contextPack?.routeDecision,
       allowedSqlContext: contextPack?.allowedSqlContext,
+      selectedRelations: contextPack?.retrievalDiagnostics.selectedRelations?.slice(0, 12) ?? [],
+      selectedJoinPaths: contextPack?.retrievalDiagnostics.selectedJoinPaths?.slice(0, 12) ?? [],
+      schemaShapeCandidates: contextPack?.retrievalDiagnostics.schemaShapeCandidates?.slice(0, 12) ?? [],
       missingContext: contextPack?.missingContext ?? [],
       evidence: metadataEvidence(intent, args, { status: 'planning_only' }, contextPack),
       reason: contextNeedsClarification
@@ -438,6 +441,9 @@ function metadataEvidence(
       contextPackId: contextPack?.id,
       trustLabel: contextPack?.trustLabel,
       selectedEvidence: contextPack?.retrievalDiagnostics.selectedEvidence.slice(0, 12) ?? [],
+      selectedRelations: contextPack?.retrievalDiagnostics.selectedRelations?.slice(0, 12) ?? [],
+      selectedJoinPaths: contextPack?.retrievalDiagnostics.selectedJoinPaths?.slice(0, 12) ?? [],
+      schemaShapeCandidates: contextPack?.retrievalDiagnostics.schemaShapeCandidates?.slice(0, 12) ?? [],
       warnings: [...(contextPack?.warnings ?? []), ...(execution.validationWarnings ?? [])],
     },
     execution: {
