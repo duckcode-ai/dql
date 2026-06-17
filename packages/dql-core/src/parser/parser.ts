@@ -39,6 +39,34 @@ import {
   type NarrativeNode,
 } from '../ast/nodes.js';
 
+const DRAFT_STRING_METADATA_FIELDS = new Set([
+  'first_asked',
+  'last_asked',
+  'proposed_contract_id',
+  'proposed_domain',
+  'proposed_entity',
+  'source_question',
+  'source_block',
+  'followup_kind',
+  'context_pack_id',
+  'route_intent',
+]);
+
+const DRAFT_ARRAY_METADATA_FIELDS = new Set([
+  'upstream_refs',
+  'requested_filters',
+  'requested_dimensions',
+  'validation_warnings',
+]);
+
+function isDraftStringMetadataField(value: string): boolean {
+  return DRAFT_STRING_METADATA_FIELDS.has(value);
+}
+
+function isDraftArrayMetadataField(value: string): boolean {
+  return DRAFT_ARRAY_METADATA_FIELDS.has(value);
+}
+
 export class Parser {
   private tokens: Token[];
   private pos: number = 0;
@@ -720,6 +748,13 @@ export class Parser {
     };
   }
 
+  private expectStringLike(): Token {
+    if (this.check(TokenType.StringLiteral) || this.check(TokenType.TripleQuoteString)) {
+      return this.advance();
+    }
+    return this.expect(TokenType.StringLiteral);
+  }
+
   private isAtEnd(): boolean {
     return this.current().type === TokenType.EOF;
   }
@@ -778,7 +813,7 @@ export class Parser {
       } else if (this.check(TokenType.DescriptionKeyword)) {
         this.advance();
         this.expect(TokenType.Equals);
-        const val = this.expect(TokenType.StringLiteral);
+        const val = this.expectStringLike();
         description = val.value;
       } else if (this.check(TokenType.TagsKeyword)) {
         this.advance();
@@ -893,7 +928,7 @@ export class Parser {
       } else if (this.check(TokenType.DescriptionKeyword)) {
         this.advance();
         this.expect(TokenType.Equals);
-        const val = this.expect(TokenType.StringLiteral);
+        const val = this.expectStringLike();
         description = val.value;
       } else if (this.check(TokenType.TagsKeyword)) {
         this.advance();
@@ -1064,6 +1099,23 @@ export class Parser {
     // the project's DataLex manifest and emits diagnostics for unresolved
     // / malformed references. See contracts/registry.ts.
     let datalexContract: string | undefined;
+    // Tier-2 generated draft metadata. Kept flat so generated proposals remain
+    // regular draft blocks that compile and can be indexed.
+    let askedTimes: number | undefined;
+    let firstAsked: string | undefined;
+    let lastAsked: string | undefined;
+    let proposedContractId: string | undefined;
+    let proposedDomain: string | undefined;
+    let proposedEntity: string | undefined;
+    let sourceQuestion: string | undefined;
+    let sourceBlock: string | undefined;
+    let followupKind: string | undefined;
+    let contextPackId: string | undefined;
+    let routeIntent: string | undefined;
+    let upstreamRefs: string[] | undefined;
+    let requestedFilters: string[] | undefined;
+    let requestedDimensions: string[] | undefined;
+    let validationWarnings: string[] | undefined;
 
     while (!this.check(TokenType.RightBrace) && !this.isAtEnd()) {
       if (this.check(TokenType.DomainKeyword)) {
@@ -1110,7 +1162,7 @@ export class Parser {
       } else if (this.check(TokenType.DescriptionKeyword)) {
         this.advance();
         this.expect(TokenType.Equals);
-        const val = this.expect(TokenType.StringLiteral);
+        const val = this.expectStringLike();
         description = val.value;
       } else if (this.check(TokenType.TagsKeyword)) {
         this.advance();
@@ -1176,6 +1228,74 @@ export class Parser {
         this.expect(TokenType.Equals);
         const val = this.expect(TokenType.StringLiteral);
         datalexContract = val.value;
+      } else if (
+        this.check(TokenType.Identifier)
+        && this.current().value === 'asked_times'
+      ) {
+        this.advance();
+        this.expect(TokenType.Equals);
+        const val = this.expect(TokenType.NumberLiteral);
+        askedTimes = Number(val.value);
+      } else if (
+        this.check(TokenType.Identifier)
+        && isDraftStringMetadataField(this.current().value)
+      ) {
+        const keyToken = this.advance();
+        this.expect(TokenType.Equals);
+        const val = this.expect(TokenType.StringLiteral);
+        switch (keyToken.value) {
+          case 'first_asked':
+            firstAsked = val.value;
+            break;
+          case 'last_asked':
+            lastAsked = val.value;
+            break;
+          case 'proposed_contract_id':
+            proposedContractId = val.value;
+            break;
+          case 'proposed_domain':
+            proposedDomain = val.value;
+            break;
+          case 'proposed_entity':
+            proposedEntity = val.value;
+            break;
+          case 'source_question':
+            sourceQuestion = val.value;
+            break;
+          case 'source_block':
+            sourceBlock = val.value;
+            break;
+          case 'followup_kind':
+            followupKind = val.value;
+            break;
+          case 'context_pack_id':
+            contextPackId = val.value;
+            break;
+          case 'route_intent':
+            routeIntent = val.value;
+            break;
+        }
+      } else if (
+        this.check(TokenType.Identifier)
+        && isDraftArrayMetadataField(this.current().value)
+      ) {
+        const keyToken = this.advance();
+        this.expect(TokenType.Equals);
+        const values = this.parseStringArrayValues();
+        switch (keyToken.value) {
+          case 'upstream_refs':
+            upstreamRefs = values;
+            break;
+          case 'requested_filters':
+            requestedFilters = values;
+            break;
+          case 'requested_dimensions':
+            requestedDimensions = values;
+            break;
+          case 'validation_warnings':
+            validationWarnings = values;
+            break;
+        }
       } else if (
         this.check(TokenType.Identifier)
         && (this.current().value === 'llmContext'
@@ -1270,7 +1390,7 @@ export class Parser {
           continue;
         }
         this.error(
-          `Unexpected token '${this.current().value}' inside block. Expected 'domain', 'type', 'status', 'datalex_contract', 'metric', 'metrics', 'dimensions', 'description', 'tags', 'owner', 'terms', 'params', 'query', 'visualization', 'tests', 'llmContext', 'invariants', 'examples', 'businessOutcome', 'businessOwner', 'decisionUse', 'reviewCadence', 'businessRules', 'caveats', or '}'.`,
+          `Unexpected token '${this.current().value}' inside block. Expected 'domain', 'type', 'status', 'datalex_contract', 'metric', 'metrics', 'dimensions', 'description', 'tags', 'owner', 'terms', 'params', 'query', 'visualization', 'tests', 'llmContext', 'invariants', 'examples', 'businessOutcome', 'businessOwner', 'decisionUse', 'reviewCadence', 'businessRules', 'caveats', Tier-2 draft metadata fields, or '}'.`,
         );
         this.advance();
       }
@@ -1313,6 +1433,21 @@ export class Parser {
       caveats,
       status,
       datalexContract,
+      askedTimes,
+      firstAsked,
+      lastAsked,
+      proposedContractId,
+      proposedDomain,
+      proposedEntity,
+      sourceQuestion,
+      sourceBlock,
+      followupKind,
+      contextPackId,
+      routeIntent,
+      upstreamRefs,
+      requestedFilters,
+      requestedDimensions,
+      validationWarnings,
       span: this.makeSpan(start, this.previousSpan()),
     };
   }

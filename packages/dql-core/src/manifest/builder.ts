@@ -1805,6 +1805,7 @@ function blockDeclToManifestBlock(block: any, filePath: string): ManifestBlock {
     businessRules: agent.businessRules,
     caveats: agent.caveats,
     datalexContract: typeof block.datalexContract === 'string' ? block.datalexContract : undefined,
+    draftMetadata: extractDraftMetadata(block),
     outputs: columnLineage?.parsed && columnLineage.columns.length > 0
       ? columnLineage.columns.map((c) => ({
           name: c.name,
@@ -1960,6 +1961,31 @@ function extractAgentMetadata(block: any): {
     businessRules: Array.isArray(block.businessRules) ? block.businessRules : undefined,
     caveats: Array.isArray(block.caveats) ? block.caveats : undefined,
   };
+}
+
+function extractDraftMetadata(block: any): NonNullable<ManifestBlock['draftMetadata']> | undefined {
+  const metadata = stripUndefined({
+    sourceQuestion: typeof block.sourceQuestion === 'string' ? block.sourceQuestion : undefined,
+    sourceBlock: typeof block.sourceBlock === 'string' ? block.sourceBlock : undefined,
+    followupKind: typeof block.followupKind === 'string' ? block.followupKind : undefined,
+    requestedFilters: Array.isArray(block.requestedFilters) ? block.requestedFilters : undefined,
+    requestedDimensions: Array.isArray(block.requestedDimensions) ? block.requestedDimensions : undefined,
+    contextPackId: typeof block.contextPackId === 'string' ? block.contextPackId : undefined,
+    routeIntent: typeof block.routeIntent === 'string' ? block.routeIntent : undefined,
+    askedTimes: typeof block.askedTimes === 'number' ? block.askedTimes : undefined,
+    validationWarnings: Array.isArray(block.validationWarnings) ? block.validationWarnings : undefined,
+    proposedContractId: typeof block.proposedContractId === 'string' ? block.proposedContractId : undefined,
+    proposedDomain: typeof block.proposedDomain === 'string' ? block.proposedDomain : undefined,
+    proposedEntity: typeof block.proposedEntity === 'string' ? block.proposedEntity : undefined,
+    upstreamRefs: Array.isArray(block.upstreamRefs) ? block.upstreamRefs : undefined,
+    firstAsked: typeof block.firstAsked === 'string' ? block.firstAsked : undefined,
+    lastAsked: typeof block.lastAsked === 'string' ? block.lastAsked : undefined,
+  });
+  return Object.keys(metadata).length > 0 ? metadata : undefined;
+}
+
+function stripUndefined<T extends Record<string, unknown>>(value: T): T {
+  return Object.fromEntries(Object.entries(value).filter(([, item]) => item !== undefined)) as T;
 }
 
 function extractTests(block: any): string[] {

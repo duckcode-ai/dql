@@ -1,4 +1,5 @@
 import type { DiffReport } from '@duckcodeailabs/dql-core/format';
+import type { AgentConversationContext } from '../llm/types';
 import type {
   Cell,
   NotebookFile,
@@ -357,6 +358,7 @@ export interface AppConversation {
   updatedAt: string;
   messageCount: number;
   lastMessage?: string;
+  context?: AgentConversationContext;
   messages?: AppConversationMessage[];
 }
 
@@ -1609,6 +1611,7 @@ export const api = {
     title?: string;
     dashboardId?: string;
     notebookPath?: string;
+    context?: AgentConversationContext;
     messages?: AppConversationMessage[];
   }): Promise<{ ok: true; conversation: AppConversation } | { ok: false; error: string }> {
     try {
@@ -1636,6 +1639,7 @@ export const api = {
     title?: string;
     dashboardId?: string;
     notebookPath?: string;
+    context?: AgentConversationContext | null;
     messages?: AppConversationMessage[];
   }): Promise<{ ok: true; conversation: AppConversation } | { ok: false; error: string }> {
     try {

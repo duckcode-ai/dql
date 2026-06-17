@@ -311,6 +311,7 @@ describe("answer (block-first loop)", () => {
     const provider = new StubProvider(
       "Unsafe generated SQL.\n\n```sql\nDELETE FROM orders\n```\n\nViz: table",
     );
+    let executed = false;
     const result = await answer({
       question: "Show bad orders",
       provider,
@@ -327,22 +328,24 @@ describe("answer (block-first loop)", () => {
         },
       ],
       executeGeneratedSql: async () => {
+        executed = true;
         throw new Error("Generated SQL preview only supports read-only SELECT or WITH queries.");
       },
     });
-    expect(result.kind).toBe("uncertified");
+    expect(result.kind).toBe("no_answer");
     expect(result.result).toBeUndefined();
-    expect(result.executionError).toContain("read-only SELECT");
-    expect(result.evidence?.execution?.status).toBe("failed");
+    expect(result.text).toContain("read-only SELECT");
+    expect(executed).toBe(false);
+    expect(result.evidence?.execution?.status).toBe("not_applicable");
     expect(result.evidence?.route).toEqual(
       expect.arrayContaining([
         expect.objectContaining({
-          tool: "execute_generated_sql",
+          tool: "validate_sql",
           status: "failed",
         }),
       ]),
     );
-    expect(result.evidence?.validation?.status).toBe("warning");
+    expect(result.evidence?.validation?.status).toBe("failed");
   });
 
   it("does not route an unmatched business object to a generic certified count block", async () => {
@@ -1160,7 +1163,7 @@ describe("answer (block-first loop)", () => {
     expect(result.kind).toBe("uncertified");
   });
 
-  it("generates review-ready SQL for drillthrough follow-ups even when certified context exists", async () => {
+  it("uses a distinct certified drilldown block when the follow-up grain is covered", async () => {
     kg.rebuild(
       [
         revenueSegmentBlock(),
@@ -1179,11 +1182,7 @@ describe("answer (block-first loop)", () => {
       ],
       [],
     );
-    const provider = new StubProvider(
-      "Enterprise revenue by segment drillthrough draft.\n\n" +
-        "```sql\nSELECT segment, SUM(amount) AS revenue FROM fct_orders WHERE segment = 'Enterprise' GROUP BY segment\n```\n\n" +
-        "Viz: bar",
-    );
+    const provider = new StubProvider("should not be called");
     const result = await answer({
       question: "Drill into revenue by segment for Enterprise",
       provider,
@@ -1195,11 +1194,10 @@ describe("answer (block-first loop)", () => {
         dimensions: ["segment"],
       },
     });
-    expect(result.kind).toBe("uncertified");
-    expect(result.block).toBeUndefined();
-    expect(result.proposedSql).toContain("Enterprise");
+    expect(result.kind).toBe("certified");
+    expect(result.block?.name).toBe("revenue_by_segment");
     expect(result.analysisPlan?.intent).toBe("drillthrough");
-    expect(provider.calls.length).toBeGreaterThan(0);
+    expect(provider.calls.length).toBe(0);
   });
 
   it("uses prior certified block context for review-ready drilldown drafts when no certified drilldown exists", async () => {
@@ -1208,19 +1206,28 @@ describe("answer (block-first loop)", () => {
         "```sql\nSELECT week, SUM(amount) AS revenue FROM fct_orders WHERE segment = 'Enterprise' GROUP BY week\n```\n\n" +
         "Viz: line",
     );
-    const result = await answer({
-      question: "Drill into Enterprise last week",
-      provider,
-      kg,
+	  const result = await answer({
+	    question: "Drill into Enterprise last week",
+	    provider,
+	    kg,
       followUp: {
         kind: "drilldown",
-        sourceBlockName: "revenue_total",
-        filters: ["Enterprise", "last week"],
-      },
-    });
-    expect(result.kind).toBe("uncertified");
-    expect(result.reviewStatus).toBe("draft_ready");
-    expect(result.proposedSql).toContain("segment = 'Enterprise'");
+	      sourceBlockName: "revenue_total",
+	      filters: ["Enterprise", "last week"],
+	    },
+	    captureGeneratedDraft: ({ followUp, sourceBlock }) => ({
+	      path: `blocks/_drafts/${followUp?.sourceBlockName ?? sourceBlock?.name ?? "draft"}.dql`,
+	      askedTimes: 1,
+	      proposedContractId: "growth.Unknown.enterprise_drilldown",
+	    }),
+	  });
+	    expect(result.kind).toBe("uncertified");
+	    expect(result.reviewStatus).toBe("draft_ready");
+	    expect(result.text).toContain("This is an uncertified drilldown.");
+	    expect(result.proposedSql).toContain("segment = 'Enterprise'");
+	    expect(result.sourceCertifiedBlock).toBe("revenue_total");
+	    expect(result.draftBlock?.path).toBe("blocks/_drafts/revenue_total.dql");
+	    expect(result.promoteCommand).toContain("dql certify --from-draft");
     expect(result.evidence?.route).toEqual(
       expect.arrayContaining([
         expect.objectContaining({
@@ -1241,6 +1248,197 @@ describe("answer (block-first loop)", () => {
     expect(result.evidence?.validation?.message).toContain(
       "drilldown SQL is not certified",
     );
+  });
+
+  it("rejects generated drilldown SQL before execution when a filter uses the wrong inspected column", async () => {
+    const provider = new StubProvider(
+      "Enterprise revenue drilldown draft.\n\n" +
+        "```sql\nSELECT segment, SUM(amount) AS revenue FROM fct_orders WHERE customer = 'Enterprise' GROUP BY segment\n```\n\n" +
+        "Viz: table",
+    );
+    let executed = false;
+    let captured = false;
+    const result = await answer({
+      question: "Break that down by segment for Enterprise last week",
+      provider,
+      kg,
+      followUp: {
+        kind: "drilldown",
+        sourceBlockName: "revenue_total",
+        filters: ["Enterprise", "last week"],
+        dimensions: ["segment"],
+      },
+      contextPack: {
+        id: "ctx_enterprise",
+        question: "Break that down by segment for Enterprise last week",
+        focusObjectKey: "dql:block:revenue_total",
+        mode: "question",
+        trustLabel: "mixed",
+        objects: [],
+        edges: [],
+        queryRuns: [],
+        citations: [],
+        evidenceSummaries: [],
+        warnings: [],
+        routeDecision: {
+          route: "generated_sql",
+          intent: "entity_drilldown",
+          reason: "follow-up drilldown",
+          trustLabel: "mixed",
+          reviewStatus: "draft_ready",
+          selectedEvidence: [],
+          missingContext: [],
+          followUps: [],
+        },
+        evidenceRoles: [],
+        allowedSqlContext: {
+          relations: [{
+            relation: "fct_orders",
+            name: "fct_orders",
+            source: "runtime schema",
+            columns: [
+              { name: "week" },
+              { name: "segment", sampleValues: ["Enterprise"] },
+              { name: "customer", sampleValues: ["Acme Corp"] },
+              { name: "amount" },
+            ],
+          }],
+          sourceBlockSql: [],
+        },
+        missingContext: [],
+        conflicts: [],
+        retrievalDiagnostics: {
+          strategy: "sqlite_fts",
+          selectedObjects: 0,
+          selectedEvidence: [],
+          topRejected: [],
+          candidateConflicts: [],
+        },
+        freshness: {
+          catalogPath: ".dql/cache/metadata.sqlite",
+          builtAt: null,
+          fingerprint: null,
+        },
+      } as any,
+      executeGeneratedSql: async () => {
+        executed = true;
+        throw new Error("should not execute invalid SQL");
+      },
+      captureGeneratedDraft: () => {
+        captured = true;
+        throw new Error("should not capture invalid SQL");
+      },
+    });
+
+    expect(result.kind).toBe("no_answer");
+    expect(result.text).toContain("could not safely prepare");
+    expect(result.evidence?.validation?.message).toContain("filters \"Enterprise\" on customer");
+    expect(executed).toBe(false);
+    expect(captured).toBe(false);
+  });
+
+  it("plans a clear entity follow-up drilldown from inspected values and source block SQL", async () => {
+    const provider = new StubProvider("provider should not be called");
+    let executedSql = "";
+    let capturedSql = "";
+    const result = await answer({
+      question: "Break Enterprise revenue down by customer last week",
+      provider,
+      kg,
+      followUp: {
+        kind: "drilldown",
+        sourceBlockName: "revenue_total",
+        filters: ["Enterprise", "last week"],
+        dimensions: ["customer"],
+      },
+      schemaContext: [],
+      contextPack: {
+        id: "ctx_enterprise_customer",
+        question: "Break Enterprise revenue down by customer last week",
+        focusObjectKey: "dql:block:revenue_total",
+        mode: "question",
+        trustLabel: "mixed",
+        objects: [],
+        edges: [],
+        queryRuns: [],
+        citations: [],
+        evidenceSummaries: [],
+        warnings: [],
+        routeDecision: {
+          route: "generated_sql",
+          intent: "entity_drilldown",
+          reason: "follow-up drilldown",
+          trustLabel: "mixed",
+          reviewStatus: "draft_ready",
+          selectedEvidence: [],
+          missingContext: [],
+          followUps: [],
+        },
+        evidenceRoles: [],
+        allowedSqlContext: {
+          relations: [{
+            relation: "main.revenue",
+            name: "revenue",
+            source: "runtime schema",
+            columns: [
+              { name: "week" },
+              { name: "segment", sampleValues: ["Enterprise"] },
+              { name: "customer", sampleValues: ["Acme Corp"] },
+              { name: "revenue" },
+            ],
+          }],
+          sourceBlockSql: [{
+            objectKey: "dql:block:revenue_total",
+            name: "revenue_total",
+            status: "certified",
+            sql: "SELECT SUM(revenue) AS revenue_total FROM main.revenue WHERE week = DATE '2026-06-08'",
+          }],
+        },
+        missingContext: [],
+        conflicts: [],
+        retrievalDiagnostics: {
+          strategy: "sqlite_fts",
+          selectedObjects: 0,
+          selectedEvidence: [],
+          topRejected: [],
+          candidateConflicts: [],
+        },
+        freshness: {
+          catalogPath: ".dql/cache/metadata.sqlite",
+          builtAt: null,
+          fingerprint: null,
+        },
+      } as any,
+      executeGeneratedSql: async (sql) => {
+        executedSql = sql;
+        return {
+          columns: ["customer", "revenue_total"],
+          rows: [{ customer: "Acme Corp", revenue_total: 12000 }],
+          rowCount: 1,
+          sql,
+        };
+      },
+      captureGeneratedDraft: ({ sql }) => {
+        capturedSql = sql;
+        return {
+          path: "blocks/_drafts/break_enterprise_revenue_down_by_customer_last_week.dql",
+          askedTimes: 1,
+          proposedContractId: "growth.Unknown.break_enterprise",
+        };
+      },
+    });
+
+    expect(result.kind).toBe("uncertified");
+    expect(result.reviewStatus).toBe("draft_ready");
+    expect(result.proposedSql).toContain("FROM main.revenue");
+    expect(result.proposedSql).toContain("segment = 'Enterprise'");
+    expect(result.proposedSql).toContain("week = DATE '2026-06-08'");
+    expect(result.proposedSql).toContain("GROUP BY customer");
+    expect(result.proposedSql).not.toContain("total_revenue");
+    expect(executedSql).toBe(result.proposedSql);
+    expect(capturedSql).toBe(result.proposedSql);
+    expect(provider.calls).toHaveLength(0);
+    expect(result.draftBlock?.path).toContain("blocks/_drafts/");
   });
 
   it("repairs generated SQL once after a retryable execution failure", async () => {

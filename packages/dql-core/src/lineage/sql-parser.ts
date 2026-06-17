@@ -1,10 +1,15 @@
 /**
- * Lightweight SQL table extractor for lineage analysis.
+ * SQL reference extractors for lineage and generated-query validation.
  *
- * Extracts table references from SQL statements without a full AST parser.
- * Handles FROM, JOIN, subqueries, and CTEs. Filters out CTE names so only
- * external table dependencies are returned.
+ * `extractTablesFromSql` intentionally stays lightweight for manifest lineage.
+ * `analyzeSqlReferences` uses node-sql-parser for the stricter Tier-2 agent
+ * validation path, where relation and column references must be checked against
+ * an inspected context pack before SQL is executed.
  */
+
+import nodeSqlParserPkg from 'node-sql-parser';
+
+const { Parser } = nodeSqlParserPkg;
 
 export interface SqlParseResult {
   /** External table dependencies (CTEs excluded) */
@@ -18,6 +23,35 @@ export interface SqlParseResult {
   /** @dim() references found in the SQL */
   dimensionRefs: string[];
 }
+
+export interface SqlColumnReference {
+  column: string;
+  tableAlias?: string;
+  relation?: string;
+  unqualified: boolean;
+}
+
+export interface SqlReferenceAnalysis {
+  parsed: boolean;
+  statementTypes: string[];
+  tables: string[];
+  ctes: string[];
+  columns: SqlColumnReference[];
+  aliasToRelation: Record<string, string>;
+  error?: string;
+}
+
+const DIALECT_MAP: Record<string, string> = {
+  duckdb: 'postgresql',
+  postgres: 'postgresql',
+  postgresql: 'postgresql',
+  mysql: 'mysql',
+  bigquery: 'bigquery',
+  snowflake: 'snowflake',
+  redshift: 'redshift',
+  mssql: 'transactsql',
+  sqlite: 'sqlite',
+};
 
 /**
  * Extract table references from a SQL string.
@@ -91,6 +125,60 @@ export function extractTablesFromSql(sql: string): SqlParseResult {
   return { tables, ctes, refs, metricRefs, dimensionRefs };
 }
 
+export function analyzeSqlReferences(sql: string, dialect = 'duckdb'): SqlReferenceAnalysis {
+  const parser = new Parser();
+  let astRoot: unknown;
+  try {
+    astRoot = parser.astify(sql, { database: DIALECT_MAP[dialect.toLowerCase()] ?? 'postgresql' });
+  } catch (err) {
+    const fallback = extractTablesFromSql(sql);
+    return {
+      parsed: false,
+      statementTypes: [],
+      tables: fallback.tables,
+      ctes: fallback.ctes,
+      columns: [],
+      aliasToRelation: {},
+      error: err instanceof Error ? err.message : String(err),
+    };
+  }
+
+  const statements = Array.isArray(astRoot) ? astRoot : [astRoot];
+  const ctes = new Set(extractCteNames(sql).map((name) => normalizeSqlIdentifier(name)));
+  const tableRefs = new Map<string, string>();
+  const aliasToRelation = new Map<string, string>();
+  const statementTypes = new Set<string>();
+
+  for (const statement of statements) {
+    const type = readStatementType(statement);
+    if (type) statementTypes.add(type);
+    collectSqlTables(statement, {
+      ctes,
+      tableRefs,
+      aliasToRelation,
+    });
+  }
+
+  const columns: SqlColumnReference[] = [];
+  for (const statement of statements) {
+    collectSqlColumns(statement, {
+      ctes,
+      aliasToRelation,
+      singleRelation: tableRefs.size === 1 ? Array.from(tableRefs.values())[0] : undefined,
+      columns,
+    });
+  }
+
+  return {
+    parsed: true,
+    statementTypes: Array.from(statementTypes),
+    tables: Array.from(tableRefs.values()),
+    ctes: Array.from(ctes),
+    columns: dedupeColumnReferences(columns),
+    aliasToRelation: Object.fromEntries(aliasToRelation),
+  };
+}
+
 /** Extract CTE names from WITH ... AS (...) patterns */
 function extractCteNames(sql: string): string[] {
   const ctes: string[] = [];
@@ -108,6 +196,140 @@ function extractCteNames(sql: string): string[] {
   }
 
   return ctes;
+}
+
+function collectSqlTables(
+  node: unknown,
+  state: {
+    ctes: Set<string>;
+    tableRefs: Map<string, string>;
+    aliasToRelation: Map<string, string>;
+  },
+  parentKey?: string,
+): void {
+  if (!node || typeof node !== 'object') return;
+  if (Array.isArray(node)) {
+    for (const item of node) collectSqlTables(item, state, parentKey);
+    return;
+  }
+
+  const obj = node as Record<string, unknown>;
+  if (parentKey === 'with' || parentKey === 'cte') {
+    const cteName = stringField(obj, 'name') ?? stringField(obj, 'as');
+    if (cteName) state.ctes.add(normalizeSqlIdentifier(cteName));
+  }
+
+  const relation = relationFromTableNode(obj);
+  if (relation && obj.type !== 'column_ref') {
+    const normalized = normalizeSqlIdentifier(relation);
+    const alias = stringField(obj, 'as') ?? stringField(obj, 'alias') ?? relation.split('.').at(-1);
+    if (alias) state.aliasToRelation.set(normalizeSqlIdentifier(alias), relation);
+    if (!state.ctes.has(normalized) && !isSqlFunctionRelation(relation)) {
+      state.tableRefs.set(normalized, relation);
+    }
+  }
+
+  for (const [key, value] of Object.entries(obj)) {
+    collectSqlTables(value, state, key);
+  }
+}
+
+function collectSqlColumns(
+  node: unknown,
+  state: {
+    ctes: Set<string>;
+    aliasToRelation: Map<string, string>;
+    singleRelation?: string;
+    columns: SqlColumnReference[];
+  },
+): void {
+  if (!node || typeof node !== 'object') return;
+  if (Array.isArray(node)) {
+    for (const item of node) collectSqlColumns(item, state);
+    return;
+  }
+
+  const obj = node as Record<string, unknown>;
+  if (obj.type === 'column_ref') {
+    const column = readColumnRefName(obj);
+    if (column && column !== '*') {
+      const rawTable = stringField(obj, 'table');
+      const tableAlias = rawTable ? normalizeSqlIdentifier(rawTable) : undefined;
+      const relation = tableAlias
+        ? state.aliasToRelation.get(tableAlias) ?? rawTable
+        : state.singleRelation;
+      if (!relation || !state.ctes.has(normalizeSqlIdentifier(relation))) {
+        state.columns.push({
+          column,
+          tableAlias: rawTable,
+          relation,
+          unqualified: !rawTable,
+        });
+      }
+    }
+    return;
+  }
+
+  for (const value of Object.values(obj)) collectSqlColumns(value, state);
+}
+
+function relationFromTableNode(obj: Record<string, unknown>): string | undefined {
+  const table = stringField(obj, 'table');
+  if (!table) return undefined;
+  const parts = [
+    stringField(obj, 'database'),
+    stringField(obj, 'db'),
+    stringField(obj, 'schema'),
+    table,
+  ].filter((part): part is string => Boolean(part));
+  return parts.join('.');
+}
+
+function readStatementType(node: unknown): string | undefined {
+  if (!node || typeof node !== 'object') return undefined;
+  const type = (node as { type?: unknown }).type;
+  return typeof type === 'string' ? type.toLowerCase() : undefined;
+}
+
+function readColumnRefName(ref: Record<string, unknown>): string {
+  const col = ref.column;
+  if (typeof col === 'string') return col;
+  if (col && typeof col === 'object') {
+    const expr = (col as { expr?: Record<string, unknown> }).expr;
+    if (expr && typeof expr === 'object') {
+      const value = (expr as { value?: unknown }).value;
+      if (typeof value === 'string') return value;
+    }
+  }
+  return '';
+}
+
+function stringField(obj: Record<string, unknown>, key: string): string | undefined {
+  const value = obj[key];
+  return typeof value === 'string' && value.trim() ? value.trim() : undefined;
+}
+
+function normalizeSqlIdentifier(value: string): string {
+  return value.replace(/["`]/g, '').replace(/\s*\.\s*/g, '.').trim().toLowerCase();
+}
+
+function isSqlFunctionRelation(relation: string): boolean {
+  return /\b(read_csv_auto|read_csv|read_parquet|read_json|read_json_auto|unnest|generate_series|range)\s*\(/i.test(relation);
+}
+
+function dedupeColumnReferences(columns: SqlColumnReference[]): SqlColumnReference[] {
+  const seen = new Set<string>();
+  return columns.filter((column) => {
+    const key = [
+      column.relation ?? '',
+      column.tableAlias ?? '',
+      column.column.toLowerCase(),
+      column.unqualified ? 'u' : 'q',
+    ].join('|');
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
 }
 
 /** Extract DuckDB reader function calls (e.g., read_csv_auto('./data/file.csv')) */

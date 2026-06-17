@@ -187,6 +187,7 @@ export function buildKGFromManifest(manifest: DQLManifest): {
       sourceTier: isDbt ? 'dbt_manifest' : 'project',
       certification: 'ai_generated',
       provenance: isDbt ? 'dbt manifest.json' : 'SQL/table reference',
+      referencedBy: s.referencedBy,
     });
   }
 

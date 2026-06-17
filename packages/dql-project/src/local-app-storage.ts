@@ -25,6 +25,25 @@ export type LocalAppInvestigationIntent =
 export type LocalAppInvestigationStatus = 'draft' | 'running' | 'ready' | 'error';
 export type LocalAppInvestigationReviewStatus = LocalAiPinReviewStatus;
 
+export interface LocalAppConversationContext {
+  activeSurface?: string;
+  sourceCertifiedBlock?: string;
+  sourceQuestion?: string;
+  sourceAnswerSummary?: string;
+  followupKind?: 'generic' | 'drilldown';
+  requestedFilters?: string[];
+  requestedDimensions?: string[];
+  outputColumns?: string[];
+  trustLabel?: string;
+  reviewStatus?: string;
+  certification?: string;
+  route?: string;
+  contextPackId?: string;
+  draftBlockPath?: string;
+  selectedEvidence?: unknown[];
+  updatedAt?: string;
+}
+
 export interface LocalAiPin {
   id: string;
   appId: string;
@@ -90,6 +109,7 @@ export interface LocalAppConversation {
   updatedAt: string;
   messageCount: number;
   lastMessage?: string;
+  context?: LocalAppConversationContext;
   messages?: LocalAppConversationMessage[];
 }
 
@@ -99,6 +119,7 @@ export interface CreateLocalAppConversationInput {
   dashboardId?: string;
   notebookPath?: string;
   title?: string;
+  context?: LocalAppConversationContext;
   messages?: Array<Pick<LocalAppConversationMessage, 'role' | 'content'> & { id?: string; events?: unknown[]; createdAt?: string }>;
 }
 
@@ -106,6 +127,7 @@ export interface UpdateLocalAppConversationInput {
   title?: string;
   dashboardId?: string;
   notebookPath?: string;
+  context?: LocalAppConversationContext | null;
   messages?: Array<Pick<LocalAppConversationMessage, 'role' | 'content'> & { id?: string; events?: unknown[]; createdAt?: string }>;
 }
 
@@ -415,14 +437,15 @@ export class LocalAppStorage {
     };
     this.db.prepare(`
       INSERT INTO app_conversations (
-        id, app_id, dashboard_id, notebook_path, title, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?)
+        id, app_id, dashboard_id, notebook_path, title, context, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       conversation.id,
       conversation.appId,
       conversation.dashboardId ?? null,
       conversation.notebookPath ?? null,
       conversation.title,
+      json(input.context),
       conversation.createdAt,
       conversation.updatedAt,
     );
@@ -456,12 +479,13 @@ export class LocalAppStorage {
     const now = new Date().toISOString();
     this.db.prepare(`
       UPDATE app_conversations
-      SET title = ?, dashboard_id = ?, notebook_path = ?, updated_at = ?
+      SET title = ?, dashboard_id = ?, notebook_path = ?, context = ?, updated_at = ?
       WHERE id = ?
     `).run(
       cleanOptionalString(input.title) ?? current.title,
       input.dashboardId === undefined ? (current.dashboardId ?? null) : (cleanOptionalString(input.dashboardId) ?? null),
       input.notebookPath === undefined ? (current.notebookPath ?? null) : (cleanOptionalString(input.notebookPath) ?? null),
+      input.context === undefined ? json(current.context) : json(input.context ?? undefined),
       now,
       id,
     );
@@ -573,6 +597,7 @@ export class LocalAppStorage {
         dashboard_id TEXT,
         notebook_path TEXT,
         title TEXT NOT NULL,
+        context TEXT,
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL
       );
@@ -601,6 +626,7 @@ export class LocalAppStorage {
     this.ensureColumn('app_investigations', 'result_previews', 'TEXT');
     this.ensureColumn('app_investigations', 'generated_sql', 'TEXT');
     this.ensureColumn('app_investigations', 'pinned_ai_pin_id', 'TEXT');
+    this.ensureColumn('app_conversations', 'context', 'TEXT');
   }
 
   private ensureColumn(table: string, column: string, type: string): void {
@@ -667,8 +693,14 @@ export class LocalAppStorage {
       updatedAt: String(row.updated_at),
       messageCount: typeof summary.message_count === 'number' ? summary.message_count : Number(summary.message_count ?? 0),
       lastMessage: optionalString(summary.last_message),
+      context: normalizeConversationContext(parseJson(row.context)),
     };
   }
+}
+
+function normalizeConversationContext(value: unknown): LocalAppConversationContext | undefined {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
+  return value as LocalAppConversationContext;
 }
 
 function rowToAiPin(row: Record<string, unknown>): LocalAiPin {

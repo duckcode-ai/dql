@@ -3,7 +3,7 @@ import { Bot, CheckCircle2, Send, Sparkles, X } from 'lucide-react';
 import { runAgent } from '../../llm/client';
 import type { AgentTurn, BlockProposal } from '../../llm/types';
 import { themes, type Theme, type ThemeMode } from '../../themes/notebook-theme';
-import { extractGovernedAnswer, type AgentAnswerEnvelope } from './AgentAnswerCard';
+import { StructuredAnswerText, extractGovernedAnswer, type AgentAnswerEnvelope } from './AgentAnswerCard';
 
 type AiSqlMode = 'notebook' | 'block';
 
@@ -172,9 +172,9 @@ export function AiSqlDraftDialog({
               </div>
               {error && <div style={errorStyle}>{error}</div>}
               {answer?.text || answer?.answer ? (
-                <div style={summaryStyle(t)}>{answer.answer ?? answer.text}</div>
+                <div style={summaryStyle(t)}><StructuredAnswerText text={answer.answer ?? answer.text ?? ''} t={t} compact /></div>
               ) : text ? (
-                <div style={summaryStyle(t)}>{stripSqlBlock(text)}</div>
+                <div style={summaryStyle(t)}><StructuredAnswerText text={stripSqlBlock(text)} t={t} compact /></div>
               ) : null}
               {previewText ? (
                 <pre style={sqlPreviewStyle(t)}>{previewText}</pre>

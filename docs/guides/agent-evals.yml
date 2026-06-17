@@ -1,0 +1,34 @@
+cases:
+  - name: certified revenue answer
+    question: "Run revenue_total"
+    expected:
+      kind: certified
+      route: certified
+      certification: certified
+
+  - name: enterprise revenue drilldown
+    question: "Drill into Enterprise last week"
+    followUp:
+      kind: drilldown
+      sourceBlockName: revenue_total
+      sourceQuestion: "What was revenue last week?"
+      filters: ["Enterprise", "last week"]
+      dimensions: ["week"]
+    expected:
+      kind: uncertified
+      route: generated_sql
+      reviewStatus: draft_ready
+      certification: ai_generated
+      sqlContains:
+        - "Enterprise"
+      sqlNotContains:
+        - "fake_column"
+      allowedRelationsOnly: true
+      allowedColumnsOnly: true
+      draftSaved: true
+
+  - name: missing baseline refusal
+    question: "Why did revenue change?"
+    expected:
+      route: clarify
+      missingContextKind: baseline

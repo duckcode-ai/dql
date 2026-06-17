@@ -54,6 +54,13 @@ describe('LocalAppStorage', () => {
       appId: 'executive-cockpit',
       dashboardId: 'bank-overview',
       title: 'Weekly review',
+      context: {
+        activeSurface: 'app',
+        sourceCertifiedBlock: 'monthly_revenue',
+        sourceQuestion: 'What changed?',
+        trustLabel: 'certified',
+        contextPackId: 'ctx_123',
+      },
       messages: [
         { role: 'user', content: 'What changed?' },
         { role: 'assistant', content: 'Deposits grew.' },
@@ -61,18 +68,28 @@ describe('LocalAppStorage', () => {
     });
 
     expect(created.messageCount).toBe(2);
+    expect(created.context?.sourceCertifiedBlock).toBe('monthly_revenue');
     expect(store.listAppConversations('executive-cockpit')).toHaveLength(1);
 
     const updated = store.updateAppConversation(created.id, {
+      context: {
+        activeSurface: 'app',
+        sourceCertifiedBlock: 'card_approval_rate',
+        sourceQuestion: 'Why did approvals soften?',
+        reviewStatus: 'draft_ready',
+        draftBlockPath: 'blocks/_drafts/card_approval_rate.dql',
+      },
       messages: [
         { role: 'user', content: 'What changed?' },
         { role: 'assistant', content: 'Deposits grew and card approvals softened.' },
       ],
     });
     expect(updated?.lastMessage).toContain('card approvals');
+    expect(updated?.context?.sourceCertifiedBlock).toBe('card_approval_rate');
 
     const full = store.getAppConversation(created.id);
     expect(full?.messages?.map((message) => message.role)).toEqual(['user', 'assistant']);
+    expect(full?.context?.draftBlockPath).toBe('blocks/_drafts/card_approval_rate.dql');
     expect(store.deleteAppConversation(created.id)).toBe(true);
     expect(store.listAppConversations('executive-cockpit')).toHaveLength(0);
   });

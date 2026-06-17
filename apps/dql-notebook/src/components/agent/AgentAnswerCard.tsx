@@ -87,6 +87,7 @@ export interface AgentAnswerEnvelope {
   sourceTier?: string;
   certification?: string;
   reviewStatus?: string;
+  trustLabel?: string;
   confidence?: number;
   text?: string;
   answer?: string;
@@ -107,6 +108,13 @@ export interface AgentAnswerEnvelope {
   citations?: Array<{ kind?: string; name?: string; provenance?: string }>;
   evidence?: AgentEvidence;
   analysisPlan?: AgentAnalysisPlan;
+  sourceCertifiedBlock?: string;
+  contextPackId?: string;
+  validationWarnings?: string[];
+  selectedEvidence?: unknown[];
+  draftBlockId?: string;
+  draftBlock?: { path?: string; name?: string };
+  promoteCommand?: string;
 }
 
 export function extractGovernedAnswer(events: AgentTurn[]): AgentAnswerEnvelope | null {
@@ -479,9 +487,7 @@ function AnswerPanel({
   return (
     <div style={{ padding: compact ? 14 : 12, display: 'flex', flexDirection: 'column', gap: compact ? 10 : 12 }}>
       {summary ? (
-        <div style={{ fontSize: compact ? 13.5 : 13, lineHeight: 1.55, color: t.textPrimary, whiteSpace: 'pre-wrap' }}>
-          {summary}
-        </div>
+        <StructuredAnswerText text={summary} t={t} compact={compact} />
       ) : (
         <div style={{ fontSize: 12, color: t.textMuted }}>No summary text was returned.</div>
       )}
@@ -540,6 +546,304 @@ function AnswerPanel({
       )}
     </div>
   );
+}
+
+export function StructuredAnswerText({
+  text,
+  t,
+  compact = false,
+}: {
+  text: string;
+  t: Theme;
+  compact?: boolean;
+}) {
+  const nodes = renderStructuredAnswer(text, t, compact);
+  return (
+    <div
+      style={{
+        display: 'flex',
+        flexDirection: 'column',
+        gap: compact ? 7 : 8,
+        color: t.textPrimary,
+        fontFamily: t.font,
+        overflowWrap: 'anywhere',
+      }}
+    >
+      {nodes}
+    </div>
+  );
+}
+
+function renderStructuredAnswer(text: string, t: Theme, compact: boolean): React.ReactNode[] {
+  const lines = text.replace(/\r\n/g, '\n').split('\n');
+  const nodes: React.ReactNode[] = [];
+  let i = 0;
+  let key = 0;
+
+  while (i < lines.length) {
+    const raw = lines[i];
+    const line = raw.trim();
+    if (!line) {
+      i += 1;
+      continue;
+    }
+
+    if (line.startsWith('```')) {
+      const lang = line.replace(/^```/, '').trim();
+      const codeLines: string[] = [];
+      i += 1;
+      while (i < lines.length && !lines[i].trim().startsWith('```')) {
+        codeLines.push(lines[i]);
+        i += 1;
+      }
+      if (i < lines.length) i += 1;
+      nodes.push(
+        <pre key={`code-${key++}`} style={answerCodeBlockStyle(t, compact)} aria-label={lang ? `${lang} code` : 'code'}>
+          {codeLines.join('\n')}
+        </pre>,
+      );
+      continue;
+    }
+
+    const heading = line.match(/^(#{1,4})\s+(.+)$/);
+    if (heading) {
+      const level = heading[1].length;
+      nodes.push(
+        <div key={`heading-${key++}`} style={answerHeadingStyle(t, compact, level)}>
+          {inlineAnswerMarkdown(heading[2], t)}
+        </div>,
+      );
+      i += 1;
+      continue;
+    }
+
+    if (/^[-*_]{3,}$/.test(line)) {
+      nodes.push(<hr key={`hr-${key++}`} style={{ width: '100%', border: 0, borderTop: `1px solid ${t.cellBorder}`, margin: compact ? '2px 0' : '4px 0' }} />);
+      i += 1;
+      continue;
+    }
+
+    if (line.startsWith('>')) {
+      const quoteLines: string[] = [];
+      while (i < lines.length && lines[i].trim().startsWith('>')) {
+        quoteLines.push(lines[i].trim().replace(/^>\s?/, ''));
+        i += 1;
+      }
+      nodes.push(
+        <div key={`quote-${key++}`} style={answerCalloutStyle(t, compact)}>
+          {inlineAnswerMarkdown(quoteLines.join(' '), t)}
+        </div>,
+      );
+      continue;
+    }
+
+    if (/^[-*+]\s+/.test(line)) {
+      const items: string[] = [];
+      while (i < lines.length && /^[-*+]\s+/.test(lines[i].trim())) {
+        items.push(lines[i].trim().replace(/^[-*+]\s+/, ''));
+        i += 1;
+      }
+      nodes.push(
+        <ul key={`ul-${key++}`} style={answerListStyle(t, compact)}>
+          {items.map((item, index) => (
+            <li key={`${item}-${index}`} style={answerListItemStyle(t, compact)}>
+              {inlineAnswerMarkdown(item, t)}
+            </li>
+          ))}
+        </ul>,
+      );
+      continue;
+    }
+
+    if (/^\d+\.\s+/.test(line)) {
+      const items: string[] = [];
+      while (i < lines.length && /^\d+\.\s+/.test(lines[i].trim())) {
+        items.push(lines[i].trim().replace(/^\d+\.\s+/, ''));
+        i += 1;
+      }
+      nodes.push(
+        <ol key={`ol-${key++}`} style={answerListStyle(t, compact)}>
+          {items.map((item, index) => (
+            <li key={`${item}-${index}`} style={answerListItemStyle(t, compact)}>
+              {inlineAnswerMarkdown(item, t)}
+            </li>
+          ))}
+        </ol>,
+      );
+      continue;
+    }
+
+    const paragraphLines: string[] = [];
+    while (i < lines.length) {
+      const candidate = lines[i].trim();
+      if (!candidate) break;
+      if (isStructuredAnswerBlockStart(candidate) && paragraphLines.length > 0) break;
+      paragraphLines.push(candidate);
+      i += 1;
+      if (isStructuredAnswerBlockStart(lines[i]?.trim() ?? '')) break;
+    }
+    const paragraph = paragraphLines.join(' ');
+    nodes.push(
+      <div
+        key={`p-${key++}`}
+        style={nodes.length === 0 && isTrustLead(paragraph)
+          ? answerCalloutStyle(t, compact)
+          : answerParagraphStyle(t, compact)}
+      >
+        {inlineAnswerMarkdown(paragraph, t)}
+      </div>,
+    );
+  }
+
+  return nodes;
+}
+
+function isStructuredAnswerBlockStart(line: string): boolean {
+  return Boolean(
+    line.startsWith('```')
+      || /^(#{1,4})\s+/.test(line)
+      || /^[-*_]{3,}$/.test(line)
+      || line.startsWith('>')
+      || /^[-*+]\s+/.test(line)
+      || /^\d+\.\s+/.test(line),
+  );
+}
+
+function isTrustLead(value: string): boolean {
+  return /\b(certified|uncertified|review[- ]required|draft|trusted|trust)\b/i.test(value);
+}
+
+function inlineAnswerMarkdown(text: string, t: Theme): React.ReactNode {
+  const parts: React.ReactNode[] = [];
+  let remaining = text;
+  let key = 0;
+
+  while (remaining.length > 0) {
+    const boldItalic = remaining.match(/\*{3}(.+?)\*{3}/);
+    const bold = remaining.match(/\*{2}(.+?)\*{2}/);
+    const code = remaining.match(/`([^`]+?)`/);
+    const link = remaining.match(/\[([^\]]+?)\]\((https?:\/\/[^)\s]+|\/[^)\s]+|#[^)\s]+)\)/);
+    const italic = remaining.match(/\*([^\s*](?:.*?[^\s*])?)\*/);
+    const candidates = [
+      boldItalic ? { match: boldItalic, type: 'boldItalic' as const } : null,
+      bold ? { match: bold, type: 'bold' as const } : null,
+      code ? { match: code, type: 'code' as const } : null,
+      link ? { match: link, type: 'link' as const } : null,
+      italic ? { match: italic, type: 'italic' as const } : null,
+    ].filter(Boolean) as Array<{ match: RegExpMatchArray; type: 'boldItalic' | 'bold' | 'code' | 'link' | 'italic' }>;
+
+    if (candidates.length === 0) {
+      parts.push(<React.Fragment key={`plain-${key++}`}>{remaining}</React.Fragment>);
+      break;
+    }
+
+    const first = candidates.reduce((left, right) => ((left.match.index ?? 0) <= (right.match.index ?? 0) ? left : right));
+    const index = first.match.index ?? 0;
+    if (index > 0) parts.push(<React.Fragment key={`plain-${key++}`}>{remaining.slice(0, index)}</React.Fragment>);
+
+    if (first.type === 'boldItalic') {
+      parts.push(<strong key={`bi-${key++}`} style={{ fontStyle: 'italic', color: t.textPrimary }}>{first.match[1]}</strong>);
+    } else if (first.type === 'bold') {
+      parts.push(<strong key={`b-${key++}`} style={{ color: t.textPrimary }}>{first.match[1]}</strong>);
+    } else if (first.type === 'italic') {
+      parts.push(<em key={`i-${key++}`}>{first.match[1]}</em>);
+    } else if (first.type === 'code') {
+      parts.push(
+        <code key={`code-${key++}`} style={answerInlineCodeStyle(t)}>
+          {first.match[1]}
+        </code>,
+      );
+    } else if (first.type === 'link') {
+      parts.push(
+        <a key={`link-${key++}`} href={first.match[2]} target="_blank" rel="noopener noreferrer" style={{ color: t.accent, textDecoration: 'underline' }}>
+          {first.match[1]}
+        </a>,
+      );
+    }
+
+    remaining = remaining.slice(index + first.match[0].length);
+  }
+
+  return <>{parts}</>;
+}
+
+function answerParagraphStyle(t: Theme, compact: boolean): React.CSSProperties {
+  return {
+    color: t.textPrimary,
+    fontSize: compact ? 13 : 13,
+    lineHeight: compact ? 1.55 : 1.6,
+  };
+}
+
+function answerHeadingStyle(t: Theme, compact: boolean, level: number): React.CSSProperties {
+  return {
+    color: t.textPrimary,
+    fontSize: compact ? 13 : Math.max(13, 15 - level),
+    fontWeight: 800,
+    lineHeight: 1.35,
+    marginTop: level <= 2 ? 2 : 0,
+  };
+}
+
+function answerCalloutStyle(t: Theme, compact: boolean): React.CSSProperties {
+  return {
+    color: t.textPrimary,
+    fontSize: compact ? 12.5 : 12.5,
+    lineHeight: 1.5,
+    padding: compact ? '8px 9px' : '9px 10px',
+    border: `1px solid ${t.cellBorder}`,
+    borderLeft: `3px solid ${t.accent}`,
+    borderRadius: 6,
+    background: `${t.tableHeaderBg}55`,
+  };
+}
+
+function answerListStyle(t: Theme, compact: boolean): React.CSSProperties {
+  return {
+    margin: 0,
+    paddingLeft: compact ? 18 : 20,
+    color: t.textPrimary,
+    display: 'grid',
+    gap: compact ? 4 : 5,
+  };
+}
+
+function answerListItemStyle(t: Theme, compact: boolean): React.CSSProperties {
+  return {
+    color: t.textPrimary,
+    fontSize: compact ? 13 : 13,
+    lineHeight: 1.5,
+    paddingLeft: 2,
+  };
+}
+
+function answerInlineCodeStyle(t: Theme): React.CSSProperties {
+  return {
+    background: t.editorBg,
+    border: `1px solid ${t.cellBorder}`,
+    borderRadius: 4,
+    color: t.accent,
+    fontFamily: t.fontMono,
+    fontSize: '0.92em',
+    padding: '1px 4px',
+  };
+}
+
+function answerCodeBlockStyle(t: Theme, compact: boolean): React.CSSProperties {
+  return {
+    margin: 0,
+    padding: compact ? 9 : 10,
+    overflow: 'auto',
+    maxHeight: compact ? 220 : 280,
+    borderRadius: 6,
+    background: t.editorBg,
+    color: t.textPrimary,
+    border: `1px solid ${t.cellBorder}`,
+    fontSize: compact ? 11.5 : 12,
+    fontFamily: t.fontMono,
+    lineHeight: 1.5,
+    whiteSpace: 'pre',
+  };
 }
 
 function ResultPreview({ result, t, compact }: { result: QueryResult; t: Theme; compact?: boolean }) {

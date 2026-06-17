@@ -25,6 +25,7 @@ import {
   LocalAppStorage,
   personaFromMember,
   type ActivePersona,
+  type LocalAppConversationContext,
   type LocalAppInvestigation,
   type LocalAppInvestigationIntent,
 } from '@duckcodeailabs/dql-project';
@@ -240,6 +241,7 @@ export async function handleAppsApi(ctx: Ctx): Promise<boolean> {
           title?: string;
           dashboardId?: string;
           notebookPath?: string;
+          context?: unknown;
           messages?: AppConversationMessageRequest[];
         }>(req);
         const conversation = storage.createAppConversation({
@@ -247,6 +249,7 @@ export async function handleAppsApi(ctx: Ctx): Promise<boolean> {
           title: body.title,
           dashboardId: body.dashboardId,
           notebookPath: body.notebookPath,
+          context: normalizeConversationContext(body.context),
           messages: normalizeConversationMessages(body.messages),
         });
         sendJson(res, 201, { ok: true, conversation });
@@ -280,12 +283,14 @@ export async function handleAppsApi(ctx: Ctx): Promise<boolean> {
           title?: string;
           dashboardId?: string;
           notebookPath?: string;
+          context?: unknown;
           messages?: AppConversationMessageRequest[];
         }>(req);
         const updated = storage.updateAppConversation(conversationId, {
           title: body.title,
           dashboardId: body.dashboardId,
           notebookPath: body.notebookPath,
+          context: body.context === undefined ? undefined : normalizeConversationContext(body.context) ?? null,
           messages: body.messages ? normalizeConversationMessages(body.messages) : undefined,
         });
         sendJson(res, 200, { ok: true, conversation: updated });
@@ -765,6 +770,29 @@ interface AppConversationMessageRequest {
   content?: string;
   events?: unknown[];
   createdAt?: string;
+}
+
+function normalizeConversationContext(value: unknown): LocalAppConversationContext | undefined {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
+  const record = value as Record<string, unknown>;
+  return {
+    activeSurface: cleanString(record.activeSurface) || undefined,
+    sourceCertifiedBlock: cleanString(record.sourceCertifiedBlock) || undefined,
+    sourceQuestion: cleanString(record.sourceQuestion) || undefined,
+    sourceAnswerSummary: cleanString(record.sourceAnswerSummary) || undefined,
+    followupKind: record.followupKind === 'generic' || record.followupKind === 'drilldown' ? record.followupKind : undefined,
+    requestedFilters: stringArray(record.requestedFilters),
+    requestedDimensions: stringArray(record.requestedDimensions),
+    outputColumns: stringArray(record.outputColumns),
+    trustLabel: cleanString(record.trustLabel) || undefined,
+    reviewStatus: cleanString(record.reviewStatus) || undefined,
+    certification: cleanString(record.certification) || undefined,
+    route: cleanString(record.route) || undefined,
+    contextPackId: cleanString(record.contextPackId) || undefined,
+    draftBlockPath: cleanString(record.draftBlockPath) || undefined,
+    selectedEvidence: Array.isArray(record.selectedEvidence) ? record.selectedEvidence.slice(0, 16) : undefined,
+    updatedAt: cleanString(record.updatedAt) || undefined,
+  };
 }
 
 interface AppInvestigationCreateRequest {
@@ -2159,6 +2187,15 @@ function asRecord(value: unknown): Record<string, unknown> | null {
 
 function cleanString(value: unknown): string {
   return typeof value === 'string' ? value.trim() : '';
+}
+
+function stringArray(value: unknown): string[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  const items = value
+    .map((item) => cleanString(item))
+    .filter(Boolean)
+    .slice(0, 24);
+  return items.length > 0 ? items : undefined;
 }
 
 function normalizeTags(values: string[]): string[] {

@@ -5,6 +5,25 @@ export interface ChatTurn {
   content: string;
 }
 
+export interface AgentConversationContext {
+  activeSurface?: 'notebook' | 'block' | 'app' | 'research' | 'chat' | string;
+  sourceCertifiedBlock?: string;
+  sourceQuestion?: string;
+  sourceAnswerSummary?: string;
+  followupKind?: 'generic' | 'drilldown';
+  requestedFilters?: string[];
+  requestedDimensions?: string[];
+  outputColumns?: string[];
+  trustLabel?: string;
+  reviewStatus?: string;
+  certification?: string;
+  route?: string;
+  contextPackId?: string;
+  draftBlockPath?: string;
+  selectedEvidence?: unknown[];
+  updatedAt?: string;
+}
+
 export interface BlockProposal {
   name: string;
   domain: string;

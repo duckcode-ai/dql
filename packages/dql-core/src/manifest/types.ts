@@ -132,6 +132,24 @@ export interface ManifestBlock {
    * contracts/registry.ts.
    */
   datalexContract?: string;
+  /** Tier-2 generated draft metadata, present for review-required generated proposals. */
+  draftMetadata?: {
+    sourceQuestion?: string;
+    sourceBlock?: string;
+    followupKind?: string;
+    requestedFilters?: string[];
+    requestedDimensions?: string[];
+    contextPackId?: string;
+    routeIntent?: string;
+    askedTimes?: number;
+    validationWarnings?: string[];
+    proposedContractId?: string;
+    proposedDomain?: string;
+    proposedEntity?: string;
+    upstreamRefs?: string[];
+    firstAsked?: string;
+    lastAsked?: string;
+  };
   /**
    * v1.6 — Column-level lineage for the block's SELECT output. Each entry
    * names an output column and the source table.column refs it depends on

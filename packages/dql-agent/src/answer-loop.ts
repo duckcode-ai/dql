@@ -22,6 +22,8 @@ import type { Skill } from './skills/loader.js';
 import { buildSkillBlockHints, buildSkillsPrompt } from './skills/loader.js';
 import type { AgentMemory } from './memory/sqlite-memory.js';
 import type { LocalContextPack, MetadataAgentIntent, MetadataRouteDecision } from './metadata/catalog.js';
+import type { GeneratedDraftBlock } from './metadata/drafts.js';
+import { validateSqlAgainstLocalContext } from './metadata/sql-context-validation.js';
 
 export type AnswerKind = 'certified' | 'uncertified' | 'no_answer';
 export type AnswerSourceTier = 'certified_artifact' | 'business_context' | 'semantic_layer' | 'dbt_manifest' | 'no_answer';
@@ -185,6 +187,13 @@ export interface AgentAnswer {
   suggestedViz?: string;
   /** Draft block id/path once a host persists the proposal. */
   draftBlockId?: string;
+  draftBlock?: GeneratedDraftBlock;
+  promoteCommand?: string;
+  trustLabel?: string;
+  sourceCertifiedBlock?: string;
+  contextPackId?: string;
+  validationWarnings?: string[];
+  selectedEvidence?: LocalContextPack['evidenceRoles'];
   citations: AgentCitation[];
   /** Relevant local memory supplied as advisory context. */
   memoryContext?: AgentMemory[];
@@ -254,6 +263,15 @@ export interface AnswerLoopInput {
    * data evidence before an analyst promotes the query into a certified block.
    */
   executeGeneratedSql?: (sql: string) => Promise<AgentResultPayload>;
+  captureGeneratedDraft?: (proposal: {
+    question: string;
+    sql: string;
+    intent: AgentIntent;
+    followUp?: AgentFollowUpContext;
+    contextPack?: LocalContextPack;
+    sourceBlock?: KGNode;
+    validationWarnings: string[];
+  }) => Promise<GeneratedDraftBlock | undefined> | GeneratedDraftBlock | undefined;
   /** Runtime schema/column context supplied by the host for generated analysis. */
   schemaContext?: AgentSchemaTable[];
   /** Shared local metadata context pack from `.dql/cache/metadata.sqlite`. */
@@ -305,7 +323,16 @@ export async function answer(input: AnswerLoopInput): Promise<AgentAnswer> {
 
   // Stage 1: certified artifact match. Blocks can be executed; dashboards,
   // Apps, and notebooks are returned as governed citations/navigation targets.
-  const artifactHit = shouldUseCertifiedRoute(catalogRoute, intent)
+  const drilldownCertifiedHit = input.followUp?.kind === 'drilldown'
+    ? pickCertifiedDrilldownArtifact({
+        executableArtifactHits,
+        question,
+        followUp: input.followUp,
+        excludedArtifactIds,
+        kg,
+      })
+    : null;
+  const artifactHit = drilldownCertifiedHit ?? (shouldUseCertifiedRoute(catalogRoute, intent)
     ? certifiedHitFromContextPack(input.contextPack, kg)
       ?? pickCertifiedArtifact({
           artifactHits,
@@ -316,7 +343,7 @@ export async function answer(input: AnswerLoopInput): Promise<AgentAnswer> {
           excludedArtifactIds,
           kg,
         })
-    : null;
+    : null);
   if (artifactHit) {
     let result: AgentResultPayload | undefined;
     let executionError: string | undefined;
@@ -362,6 +389,10 @@ export async function answer(input: AnswerLoopInput): Promise<AgentAnswer> {
       result,
       executionError,
       sql: result?.sql,
+      trustLabel: input.contextPack?.trustLabel ?? 'certified',
+      sourceCertifiedBlock: artifactHit.node.kind === 'block' ? artifactHit.node.name : undefined,
+      contextPackId: input.contextPack?.id,
+      selectedEvidence: input.contextPack?.evidenceRoles?.slice(0, 12),
       citations,
       memoryContext: input.memoryContext,
       analysisPlan,
@@ -480,6 +511,8 @@ export async function answer(input: AnswerLoopInput): Promise<AgentAnswer> {
     question,
     intent,
     schemaContext: input.schemaContext ?? [],
+    followUp: input.followUp,
+    contextPack: input.contextPack,
   }) ?? buildContextPackAwareProposal({
     question,
     intent,
@@ -547,6 +580,61 @@ export async function answer(input: AnswerLoopInput): Promise<AgentAnswer> {
       contextPack: input.contextPack,
       considered,
       providerUsed: provider.name,
+    };
+  }
+
+  const contextValidation = validateSqlAgainstLocalContext(parsed.sql, input.contextPack, {
+    question,
+    intent,
+    filterValues: input.followUp?.filters,
+  });
+  if (!contextValidation.ok) {
+    const text = `I could not safely prepare this generated SQL from the inspected context. ${contextValidation.error}`;
+    const analysisPlan = buildAnalysisPlan({
+      question,
+      intent,
+      routeReason: catalogRoute?.reason ?? 'Generated SQL failed metadata context validation before preview execution or draft capture.',
+      selectedNodes: contextNodes,
+      schemaContext: input.schemaContext ?? [],
+      sql: parsed.sql,
+      suggestedViz: parsed.viz ?? 'table',
+      assumptions: [
+        'Generated SQL was rejected before execution because it did not match inspected metadata context.',
+        ...contextValidation.warnings,
+      ],
+    });
+    return {
+      kind: 'no_answer',
+      sourceTier: 'no_answer',
+      certification: 'analyst_review_required',
+      reviewStatus: 'none',
+      confidence: 0.15,
+      text,
+      answer: text,
+      proposedSql: parsed.sql,
+      sql: parsed.sql,
+      trustLabel: input.contextPack?.trustLabel,
+      sourceCertifiedBlock: followUpSourceBlock?.name ?? input.followUp?.sourceBlockName,
+      contextPackId: input.contextPack?.id,
+      validationWarnings: contextValidation.warnings,
+      selectedEvidence: input.contextPack?.evidenceRoles?.slice(0, 12),
+      citations: [],
+      memoryContext: input.memoryContext,
+      analysisPlan,
+      evidence: buildNoAnswerEvidence({
+        question,
+        reason: contextValidation.error,
+        artifactHits,
+        businessHits,
+        semanticHits,
+        manifestHits,
+        considered,
+        memoryContext: input.memoryContext ?? [],
+        analysisPlan,
+      }),
+      contextPack: input.contextPack,
+      considered,
+      providerUsed: localProposal ? 'schema_planner' : provider.name,
     };
   }
 
@@ -631,23 +719,63 @@ export async function answer(input: AnswerLoopInput): Promise<AgentAnswer> {
       ...(localProposal ? ['A local metadata planner selected a review-required SQL grain before provider generation.'] : []),
       ...(executionError ? ['The preview execution error must be reviewed before reuse.'] : []),
     ],
-    repairAttempts,
-  });
-  return {
-    kind: 'uncertified',
-    sourceTier: activeTier,
-    certification: 'ai_generated',
-    reviewStatus: 'draft_ready',
-    confidence: activeTier === 'semantic_layer' ? 0.72 : 0.55,
-    text: parsed.text,
-    answer: parsed.text,
-    proposedSql: parsed.sql,
-    sql: parsed.sql,
-    result,
-    executionError,
-    suggestedViz: parsed.viz ?? 'table',
-    citations: generatedCitations,
-    memoryContext: input.memoryContext,
+      repairAttempts,
+    });
+    const validationWarnings = [
+      ...(input.contextPack?.warnings ?? []),
+      ...(executionError ? ['The preview execution error must be reviewed before reuse.'] : []),
+    ];
+    let draftBlock: GeneratedDraftBlock | undefined;
+    let draftCaptureError: string | undefined;
+    if (input.captureGeneratedDraft && parsed.sql) {
+      try {
+        draftBlock = await input.captureGeneratedDraft({
+          question,
+          sql: parsed.sql,
+          intent,
+          followUp: input.followUp,
+          contextPack: input.contextPack,
+          sourceBlock: followUpSourceBlock ?? undefined,
+          validationWarnings,
+        });
+      } catch (err) {
+        draftCaptureError = err instanceof Error ? err.message : String(err);
+        validationWarnings.push(`Draft capture failed: ${draftCaptureError}`);
+      }
+    }
+    const sourceCertifiedBlock = followUpSourceBlock?.name ?? input.followUp?.sourceBlockName;
+    const trustExplanation = generatedTrustExplanation({
+      followUp: input.followUp,
+      sourceCertifiedBlock,
+      draftBlock,
+    });
+    const cleanedSummary = cleanGeneratedSummary(parsed.text);
+    const generatedText = trustExplanation
+      ? [trustExplanation, cleanedSummary].filter(Boolean).join('\n\n')
+      : cleanedSummary;
+    return {
+      kind: 'uncertified',
+      sourceTier: activeTier,
+      certification: 'ai_generated',
+      reviewStatus: 'draft_ready',
+      confidence: activeTier === 'semantic_layer' ? 0.72 : 0.55,
+      text: generatedText,
+      answer: generatedText,
+      proposedSql: parsed.sql,
+      sql: parsed.sql,
+      result,
+      executionError,
+      suggestedViz: parsed.viz ?? 'table',
+      draftBlock,
+      draftBlockId: draftBlock?.path,
+      promoteCommand: draftBlock ? `dql certify --from-draft ${draftBlock.path}` : undefined,
+      trustLabel: input.contextPack?.trustLabel,
+      sourceCertifiedBlock,
+      contextPackId: input.contextPack?.id,
+      validationWarnings,
+      selectedEvidence: input.contextPack?.evidenceRoles?.slice(0, 12),
+      citations: generatedCitations,
+      memoryContext: input.memoryContext,
     analysisPlan,
     evidence: buildGeneratedEvidence({
       question,
@@ -696,7 +824,10 @@ Rules:
    proposed SQL. Do not emit INSERT, UPDATE, DELETE, CREATE, DROP, ALTER, COPY,
    PRAGMA, SET, or multiple statements.
 8. If the schema is insufficient to answer, say so explicitly and ask a
-   clarifying question instead of guessing.`;
+   clarifying question instead of guessing.
+9. Write directly to the analyst. Do not say "the user is asking", "the user
+   requested", "I will generate", or describe internal routing. State the
+   answer, the certified context used, and the review requirement.`;
 
 function renderContextPrompt(
   blocks: KGNode[],
@@ -898,6 +1029,35 @@ function renderFollowUpContext(followUp: AgentFollowUpContext): string {
   return [...parts, rule].join('\n');
 }
 
+function generatedTrustExplanation(input: {
+  followUp?: AgentFollowUpContext;
+  sourceCertifiedBlock?: string;
+  draftBlock?: GeneratedDraftBlock;
+}): string | undefined {
+  if (input.followUp?.kind !== 'drilldown') return undefined;
+  const source = input.sourceCertifiedBlock
+    ? ` I used the certified \`${input.sourceCertifiedBlock}\` block for the business definition,`
+    : ' I used certified context where available,';
+  const filters = [
+    ...(input.followUp.filters ?? []),
+    ...(input.followUp.dimensions ?? []),
+  ];
+  const grain = filters.length ? ` at the requested ${filters.join('/')} grain` : ' at the requested drilldown grain';
+  const draft = input.draftBlock
+    ? ` The draft was saved at \`${input.draftBlock.path}\` for review.`
+    : ' The generated SQL still needs analyst review before certification.';
+  return `This is an uncertified drilldown.${source} then generated new SQL${grain}.${draft}`;
+}
+
+function cleanGeneratedSummary(text: string): string {
+  return text
+    .trim()
+    .replace(/^(?:the user (?:is asking|asked|wants|requested)[^.]*\.\s*)+/i, '')
+    .replace(/\s*(?:therefore,\s*)?i will generate review-required sql[^.]*\.\s*/gi, ' ')
+    .replace(/\s*(?:therefore,\s*)?i will generate[^.]*\.\s*/gi, ' ')
+    .trim();
+}
+
 interface ParsedProposal {
   text: string;
   sql?: string;
@@ -925,8 +1085,13 @@ function buildSchemaAwareProposal(input: {
   question: string;
   intent: AgentIntent;
   schemaContext: AgentSchemaTable[];
+  followUp?: AgentFollowUpContext;
+  contextPack?: LocalContextPack;
 }): ParsedProposal | undefined {
   if (!isGeneratedAgentIntent(input.intent)) return undefined;
+  const schemaContext = schemaContextWithAllowedSqlContext(input.schemaContext, input.contextPack);
+  const drilldownProposal = buildMatchedEntityDrilldownProposal({ ...input, schemaContext });
+  if (drilldownProposal) return drilldownProposal;
   if (isFilteredEntityQuestion(input.question)) return undefined;
   const lower = input.question.toLowerCase();
   const asksForCustomerPerformance = /\bcustomers?\b/.test(lower)
@@ -934,7 +1099,7 @@ function buildSchemaAwareProposal(input: {
     && !/\b(order details|specific orders|each order|all orders|order line|line item)\b/.test(lower);
   if (!asksForCustomerPerformance) return undefined;
 
-  const customers = findSchemaTable(input.schemaContext, ['customers', 'customer']);
+  const customers = findSchemaTable(schemaContext, ['customers', 'customer']);
   if (!customers) return undefined;
   const customerName = findSchemaColumn(customers, ['customer_name', 'name', 'full_name']);
   const orderCount = findSchemaColumn(customers, ['count_lifetime_orders', 'lifetime_orders', 'order_count', 'orders_count', 'orders']);
@@ -956,7 +1121,7 @@ function buildSchemaAwareProposal(input: {
   }
 
   const customerId = findSchemaColumn(customers, ['customer_id', 'id']);
-  const orders = findSchemaTable(input.schemaContext, ['orders', 'order']);
+  const orders = findSchemaTable(schemaContext, ['orders', 'order']);
   if (!orders || !customerName || !customerId) return undefined;
   const orderCustomerId = findSchemaColumn(orders, ['customer_id', 'customer']);
   const orderTotal = findSchemaColumn(orders, ['order_total', 'total_order_amount', 'total_amount', 'amount', 'subtotal']);
@@ -978,6 +1143,350 @@ function buildSchemaAwareProposal(input: {
     ].join('\n'),
     viz: 'table',
   };
+}
+
+function buildMatchedEntityDrilldownProposal(input: {
+  question: string;
+  intent: AgentIntent;
+  schemaContext: AgentSchemaTable[];
+  followUp?: AgentFollowUpContext;
+  contextPack?: LocalContextPack;
+}): ParsedProposal | undefined {
+  if (input.intent !== 'entity_drilldown' && input.followUp?.kind !== 'drilldown') return undefined;
+  const table = pickDrilldownTable(input.schemaContext, input.question, input.followUp);
+  if (!table) return undefined;
+
+  const dimension = inferDrilldownDimension(table, input.question, input.followUp);
+  if (!dimension) return undefined;
+
+  const entityFilters = matchedEntityFiltersForQuestion(table, input.question, input.followUp);
+  if (entityFilters.length === 0) return undefined;
+  if (entityFilters.some((filter) => namesEqualLoose(filter.column, dimension))) return undefined;
+
+  const sourceSql = selectSourceBlockSql(input.contextPack, input.followUp?.sourceBlockName);
+  const metric = inferDrilldownMetric(table, input.question, sourceSql);
+  if (!metric) return undefined;
+
+  const timePredicates = drilldownTimePredicates({
+    question: input.question,
+    followUp: input.followUp,
+    table,
+    sourceSql,
+  });
+  if (mentionsRelativeTime(input.question, input.followUp) && timePredicates.length === 0) return undefined;
+
+  const predicates = [
+    ...entityFilters.map((filter) => `${sqlIdentifier(filter.column)} = ${sqlStringLiteral(filter.value)}`),
+    ...timePredicates,
+  ];
+  const where = predicates.length ? [`WHERE ${predicates.join(' AND ')}`] : [];
+  return {
+    text: [
+      `Prepared a review-required ${humanizeIdentifier(dimension)} drilldown from inspected metadata.`,
+      `The entity filter uses ${entityFilters.map((filter) => `${filter.column} = ${filter.value}`).join(', ')} from matched sample values.`,
+      'This result is uncertified until reviewed and promoted.',
+    ].join(' '),
+    sql: [
+      'SELECT',
+      `  ${sqlIdentifier(dimension)} AS ${sqlIdentifier(dimension)},`,
+      `  ${metric.expression} AS ${sqlIdentifier(metric.alias)}`,
+      `FROM ${sqlRelation(table.relation)}`,
+      ...where,
+      `GROUP BY ${sqlIdentifier(dimension)}`,
+      `ORDER BY ${sqlIdentifier(metric.alias)} DESC`,
+      'LIMIT 50',
+    ].join('\n'),
+    viz: 'bar',
+  };
+}
+
+function schemaContextWithAllowedSqlContext(
+  schemaContext: AgentSchemaTable[],
+  contextPack: LocalContextPack | undefined,
+): AgentSchemaTable[] {
+  const byRelation = new Map<string, AgentSchemaTable>();
+  for (const table of schemaContext) {
+    byRelation.set(normalizeRelationKey(table.relation), {
+      ...table,
+      columns: table.columns.map((column) => ({ ...column, sampleValues: column.sampleValues?.slice() })),
+    });
+  }
+  for (const relation of contextPack?.allowedSqlContext?.relations ?? []) {
+    const key = normalizeRelationKey(relation.relation);
+    const existing = byRelation.get(key);
+    if (!existing) {
+      byRelation.set(key, {
+        relation: relation.relation,
+        name: relation.name,
+        columns: relation.columns.map((column) => ({
+          name: column.name,
+          type: column.type,
+          description: column.description,
+          sampleValues: column.sampleValues?.slice(),
+        })),
+        source: relation.source,
+      });
+      continue;
+    }
+    const columns = new Map(existing.columns.map((column) => [column.name.toLowerCase(), column]));
+    for (const column of relation.columns) {
+      const existingColumn = columns.get(column.name.toLowerCase());
+      if (!existingColumn) {
+        existing.columns.push({
+          name: column.name,
+          type: column.type,
+          description: column.description,
+          sampleValues: column.sampleValues?.slice(),
+        });
+        continue;
+      }
+      existingColumn.sampleValues = uniqueDrilldownStrings([
+        ...(existingColumn.sampleValues ?? []),
+        ...(column.sampleValues ?? []),
+      ]).slice(0, 8);
+      existingColumn.type ??= column.type;
+      existingColumn.description ??= column.description;
+    }
+  }
+  return Array.from(byRelation.values());
+}
+
+interface MatchedEntityFilter {
+  column: string;
+  value: string;
+}
+
+interface DrilldownMetric {
+  expression: string;
+  alias: string;
+}
+
+function pickDrilldownTable(
+  schemaContext: AgentSchemaTable[],
+  question: string,
+  followUp: AgentFollowUpContext | undefined,
+): AgentSchemaTable | undefined {
+  const scored = schemaContext
+    .map((table) => ({
+      table,
+      filters: matchedEntityFiltersForQuestion(table, question, followUp).length,
+      dimension: inferDrilldownDimension(table, question, followUp) ? 1 : 0,
+      measure: inferDrilldownMetric(table, question, undefined) ? 1 : 0,
+    }))
+    .filter((candidate) => candidate.filters > 0 && candidate.dimension > 0 && candidate.measure > 0)
+    .sort((a, b) => (b.filters + b.dimension + b.measure) - (a.filters + a.dimension + a.measure));
+  return scored[0]?.table;
+}
+
+function inferDrilldownDimension(
+  table: AgentSchemaTable,
+  question: string,
+  followUp: AgentFollowUpContext | undefined,
+): string | undefined {
+  const lower = question.toLowerCase();
+  const requested = [
+    ...(followUp?.dimensions ?? []),
+    ...Array.from(lower.matchAll(/\bby\s+([a-z][a-z0-9_ -]{1,40})/g)).map((match) => match[1] ?? ''),
+  ]
+    .flatMap((value) => value.split(/\band\b|,|\//i))
+    .map((value) => value.replace(/\b(last|this|next|previous|prior|current)\s+(day|week|month|quarter|year)\b/gi, '').trim())
+    .filter(Boolean);
+
+  const direct = findSchemaColumn(table, requested);
+  if (direct) return direct;
+
+  if (/\bcustomers?\b/.test(lower)) {
+    const customer = findSchemaColumn(table, ['customer', 'customer_name', 'account', 'account_name']);
+    if (customer) return customer;
+  }
+  if (/\bsegments?\b/.test(lower)) {
+    const segment = findSchemaColumn(table, ['segment', 'customer_segment', 'market_segment']);
+    if (segment) return segment;
+  }
+  if (/\bproducts?\b/.test(lower)) {
+    const product = findSchemaColumn(table, ['product', 'product_name', 'sku']);
+    if (product) return product;
+  }
+  if (/\bregions?\b/.test(lower)) {
+    const region = findSchemaColumn(table, ['region', 'market', 'geo']);
+    if (region) return region;
+  }
+  return undefined;
+}
+
+function matchedEntityFiltersForQuestion(
+  table: AgentSchemaTable,
+  question: string,
+  followUp: AgentFollowUpContext | undefined,
+): MatchedEntityFilter[] {
+  const text = normalizeForEntityMatch([
+    question,
+    ...(followUp?.filters ?? []),
+  ].join(' '));
+  const filters: MatchedEntityFilter[] = [];
+  for (const column of table.columns) {
+    for (const sampleValue of column.sampleValues ?? []) {
+      if (isTemporalDrilldownValue(sampleValue)) continue;
+      const needle = normalizeForEntityMatch(sampleValue);
+      if (!needle || !text.includes(needle)) continue;
+      filters.push({ column: column.name, value: sampleValue });
+    }
+  }
+  return uniqueMatchedEntityFilters(filters);
+}
+
+function inferDrilldownMetric(
+  table: AgentSchemaTable,
+  question: string,
+  sourceSql: string | undefined,
+): DrilldownMetric | undefined {
+  const sourceMetric = sourceSql ? aggregateMetricFromSourceSql(table, sourceSql) : undefined;
+  if (sourceMetric) return sourceMetric;
+
+  const lower = question.toLowerCase();
+  const candidates = /\brevenue|arr|mrr|sales\b/.test(lower)
+    ? ['revenue', 'net_revenue', 'gross_revenue', 'amount', 'order_total', 'total_amount', 'sales', 'arr', 'mrr']
+    : ['amount', 'revenue', 'order_total', 'total_amount', 'value', 'spend'];
+  const column = findSchemaColumn(table, candidates);
+  if (!column) return undefined;
+  const alias = /\brevenue|arr|mrr|sales\b/.test(lower) ? 'revenue_total' : `${column}_total`;
+  return {
+    expression: `SUM(${sqlIdentifier(column)})`,
+    alias,
+  };
+}
+
+function aggregateMetricFromSourceSql(table: AgentSchemaTable, sourceSql: string): DrilldownMetric | undefined {
+  for (const column of table.columns) {
+    const columnPattern = sqlIdentifierPattern(column.name);
+    const aggregatePattern = new RegExp(
+      `\\b(SUM|COUNT|AVG|MIN|MAX)\\s*\\(\\s*(?:["\`]?\\w+["\`]?\\s*\\.\\s*)?(${columnPattern}|\\*)\\s*\\)\\s*(?:AS\\s+(["\`]?\\w+["\`]?))?`,
+      'i',
+    );
+    const match = sourceSql.match(aggregatePattern);
+    if (!match) continue;
+    const fn = (match[1] ?? 'SUM').toUpperCase();
+    const target = match[2] === '*' ? '*' : sqlIdentifier(column.name);
+    const alias = cleanSqlIdentifier(match[3] ?? defaultMetricAlias(fn, column.name));
+    return {
+      expression: `${fn}(${target})`,
+      alias,
+    };
+  }
+  return undefined;
+}
+
+function drilldownTimePredicates(input: {
+  question: string;
+  followUp?: AgentFollowUpContext;
+  table: AgentSchemaTable;
+  sourceSql?: string;
+}): string[] {
+  if (!mentionsRelativeTime(input.question, input.followUp)) return [];
+  if (!input.sourceSql) return [];
+  const timeColumns = input.table.columns.map((column) => column.name).filter(isTimeLikeDrilldownColumn);
+  if (timeColumns.length === 0) return [];
+  return extractWherePredicates(input.sourceSql)
+    .map(stripSqlAliasQualifiers)
+    .filter((predicate) => isReusableSqlPredicate(predicate))
+    .filter((predicate) => timeColumns.some((column) => predicateReferencesColumn(predicate, column)))
+    .slice(0, 3);
+}
+
+function selectSourceBlockSql(contextPack: LocalContextPack | undefined, sourceBlockName: string | undefined): string | undefined {
+  const sourceSql = contextPack?.allowedSqlContext?.sourceBlockSql ?? [];
+  if (sourceSql.length === 0) return undefined;
+  const preferred = sourceBlockName
+    ? sourceSql.find((source) => namesEqualLoose(source.name, sourceBlockName))
+    : undefined;
+  return (preferred ?? sourceSql.find((source) => source.status === 'certified') ?? sourceSql[0])?.sql;
+}
+
+function extractWherePredicates(sql: string): string[] {
+  const match = sql.match(/\bWHERE\b([\s\S]*?)(\bGROUP\s+BY\b|\bHAVING\b|\bORDER\s+BY\b|\bLIMIT\b|$)/i);
+  if (!match) return [];
+  return (match[1] ?? '')
+    .split(/\s+AND\s+/i)
+    .map((part) => part.trim().replace(/^\(+|\)+$/g, '').replace(/\s+/g, ' '))
+    .filter(Boolean);
+}
+
+function mentionsRelativeTime(question: string, followUp: AgentFollowUpContext | undefined): boolean {
+  const text = [question, ...(followUp?.filters ?? [])].join(' ');
+  return /\b(last|this|next|previous|prior|current)\s+(day|week|month|quarter|year)\b/i.test(text)
+    || /\b(today|yesterday|tomorrow|ytd|mtd|qtd|wtd)\b/i.test(text);
+}
+
+function isTimeLikeDrilldownColumn(name: string): boolean {
+  return /\b(date|time|day|week|month|quarter|year|period|created_at|updated_at)\b/i.test(name);
+}
+
+function stripSqlAliasQualifiers(predicate: string): string {
+  return predicate.replace(/\b["`]?\w+["`]?\s*\.\s*(["`]?\w+["`]?)/g, '$1');
+}
+
+function isReusableSqlPredicate(predicate: string): boolean {
+  if (!predicate || predicate.length > 240) return false;
+  if (/[;]/.test(predicate) || /--|\/\*/.test(predicate)) return false;
+  return !/\b(SELECT|INSERT|UPDATE|DELETE|CREATE|DROP|ALTER|COPY|PRAGMA|SET)\b/i.test(predicate);
+}
+
+function predicateReferencesColumn(predicate: string, column: string): boolean {
+  return new RegExp(`(^|[^\\w])${sqlIdentifierPattern(column)}([^\\w]|$)`, 'i').test(predicate);
+}
+
+function sqlIdentifierPattern(identifier: string): string {
+  const escaped = escapeRegExp(identifier);
+  return `(?:"${escaped}"|\`${escaped}\`|${escaped})`;
+}
+
+function sqlStringLiteral(value: string): string {
+  return `'${value.replace(/'/g, "''")}'`;
+}
+
+function defaultMetricAlias(fn: string, column: string): string {
+  if (fn === 'SUM' && /revenue|amount|sales|arr|mrr/i.test(column)) return 'revenue_total';
+  return `${column}_${fn.toLowerCase()}`;
+}
+
+function cleanSqlIdentifier(identifier: string): string {
+  return identifier.replace(/^["`]|["`]$/g, '').trim();
+}
+
+function namesEqualLoose(a: string, b: string): boolean {
+  return cleanSqlIdentifier(a).replace(/[_-]+/g, ' ').toLowerCase() === cleanSqlIdentifier(b).replace(/[_-]+/g, ' ').toLowerCase();
+}
+
+function normalizeRelationKey(relation: string): string {
+  return relation.replace(/["`]/g, '').replace(/\s*\.\s*/g, '.').toLowerCase().trim();
+}
+
+function normalizeForEntityMatch(value: string): string {
+  return value.toLowerCase().replace(/[^a-z0-9.%+-]+/g, ' ').replace(/\s+/g, ' ').trim();
+}
+
+function uniqueMatchedEntityFilters(filters: MatchedEntityFilter[]): MatchedEntityFilter[] {
+  const seen = new Set<string>();
+  const unique: MatchedEntityFilter[] = [];
+  for (const filter of filters) {
+    const key = `${filter.column.toLowerCase()}\0${filter.value.toLowerCase()}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    unique.push(filter);
+  }
+  return unique;
+}
+
+function uniqueDrilldownStrings(values: string[]): string[] {
+  return Array.from(new Set(values));
+}
+
+function isTemporalDrilldownValue(value: string): boolean {
+  return mentionsRelativeTime(value, undefined) || /^\d{4}-\d{2}-\d{2}/.test(value);
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
 function buildContextPackAwareProposal(input: {
@@ -1125,6 +1634,40 @@ function pickFirstCertifiedHit(
     return hit;
   }
   return null;
+}
+
+function pickCertifiedDrilldownArtifact(input: {
+  executableArtifactHits: KGSearchHit[];
+  question: string;
+  followUp: AgentFollowUpContext;
+  excludedArtifactIds?: Set<string>;
+  kg: KGStore;
+}): KGSearchHit | null {
+  const requestedTerms = meaningfulTokens([
+    input.question,
+    ...(input.followUp.filters ?? []),
+    ...(input.followUp.dimensions ?? []),
+  ].join(' '));
+  for (const hit of input.executableArtifactHits) {
+    if (hit.score < CERTIFIED_HIT_THRESHOLD) break;
+    if (input.excludedArtifactIds?.has(hit.node.nodeId)) continue;
+    if (hit.node.kind !== 'block') continue;
+    if (!isCertifiedHit(hit, input.kg)) continue;
+    if (!hasCompatibleCertifiedBlockMatch(input.question, hit.node)) continue;
+    if (!hasRequestedDrilldownOverlap(hit.node, requestedTerms)) continue;
+    return hit;
+  }
+  return null;
+}
+
+function hasRequestedDrilldownOverlap(node: KGNode, requestedTerms: Set<string>): boolean {
+  if (requestedTerms.size === 0) return false;
+  const nodeTerms = meaningfulTokens(certifiedBlockSignalText(node));
+  let overlaps = 0;
+  for (const term of requestedTerms) {
+    if (nodeTerms.has(term)) overlaps += 1;
+  }
+  return overlaps >= 2 || (requestedTerms.size === 1 && overlaps === 1);
 }
 
 function shouldDeferCertifiedArtifactForReviewPath(input: {

@@ -53,7 +53,7 @@ import {
 import { load as loadYaml } from 'js-yaml';
 import { listBlockTemplates } from './block-templates.js';
 import { getRunner as getLLMRunner } from './llm/index.js';
-import type { ProviderId } from './llm/types.js';
+import type { AgentConversationContext, ProviderId } from './llm/types.js';
 import {
   ClaudeProvider,
   GeminiProvider,
@@ -2956,10 +2956,11 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
         res.end(serializeJSON({ error: 'Invalid JSON body' }));
         return;
       }
-      const { provider, messages, upstream } = body as {
+      const { provider, messages, upstream, conversationContext } = body as {
         provider?: string;
         messages?: Array<{ role: 'user' | 'assistant'; content: string }>;
         upstream?: { cellId?: string; sql?: string };
+        conversationContext?: unknown;
       };
       const resolvedProvider = isLLMProviderId(provider) ? provider : resolveDefaultLLMProvider(projectRoot);
       const runner = resolvedProvider ? getLLMRunner(resolvedProvider) : null;
@@ -2989,6 +2990,9 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
             provider: resolvedProvider,
             messages,
             upstream,
+            conversationContext: conversationContext && typeof conversationContext === 'object' && !Array.isArray(conversationContext)
+              ? conversationContext as AgentConversationContext
+              : undefined,
             projectRoot,
             executeCertifiedBlock: executeCertifiedBlockForAgent,
             executeGeneratedSql: executeGeneratedSqlForAgent,
@@ -3450,8 +3454,8 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
         const graph = buildProjectLineageGraph(projectRoot, semanticLayer);
         const node = resolveLineageNode(graph, rawNodeId);
         if (!node) {
-          res.writeHead(404, { 'Content-Type': 'application/json; charset=utf-8' });
-          res.end(serializeJSON({ error: `Lineage node "${rawNodeId}" not found` }));
+          res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+          res.end(serializeJSON({ node: null, incoming: [], outgoing: [] }));
           return;
         }
         res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
@@ -3545,8 +3549,8 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
         const maxPaths = Number(url.searchParams.get('maxPaths') ?? '20') || 20;
         const result = queryCompleteLineagePaths(graph, rawNodeId, { maxDepth, maxPaths });
         if (!result) {
-          res.writeHead(404, { 'Content-Type': 'application/json; charset=utf-8' });
-          res.end(serializeJSON({ error: `Node "${rawNodeId}" not found` }));
+          res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+          res.end('null');
           return;
         }
         res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
@@ -7821,7 +7825,7 @@ function isAgentValueProbeColumn(column: AgentSchemaTable['columns'][number]): b
   return /\b(char|character|clob|email|string|text|uuid|varchar)\b/.test(type);
 }
 
-function buildAgentValueProbeSql(
+export function buildAgentValueProbeSql(
   table: AgentSchemaTable,
   column: string,
   searchTerms: string[],
@@ -7832,7 +7836,7 @@ function buildAgentValueProbeSql(
   const castValue = `LOWER(CAST(${identifier} AS ${agentTextCastType(connection.driver)}))`;
   const predicates = searchTerms
     .slice(0, 5)
-    .map((term) => `${castValue} LIKE ${sqlStringLiteral(`%${escapeSqlLike(term.toLowerCase())}%`)} ESCAPE '\\\\'`)
+    .map((term) => `${castValue} LIKE ${sqlStringLiteral(`%${escapeSqlLike(term.toLowerCase())}%`)} ESCAPE '\\'`)
     .join(' OR ');
   return [
     `SELECT DISTINCT CAST(${identifier} AS ${agentTextCastType(connection.driver)}) AS value`,

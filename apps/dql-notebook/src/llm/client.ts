@@ -1,9 +1,10 @@
-import type { AgentTurn, ChatTurn, ProviderId } from './types';
+import type { AgentConversationContext, AgentTurn, ChatTurn, ProviderId } from './types';
 
 export interface RunAgentOptions {
   provider?: ProviderId;
   messages: ChatTurn[];
   upstream?: { cellId?: string; sql?: string };
+  conversationContext?: AgentConversationContext;
   signal?: AbortSignal;
 }
 
@@ -15,7 +16,12 @@ export async function runAgent(opts: RunAgentOptions, onTurn: (turn: AgentTurn) 
   const res = await fetch('/api/llm/run', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', Accept: 'text/event-stream' },
-    body: JSON.stringify({ provider: opts.provider, messages: opts.messages, upstream: opts.upstream }),
+    body: JSON.stringify({
+      provider: opts.provider,
+      messages: opts.messages,
+      upstream: opts.upstream,
+      conversationContext: opts.conversationContext,
+    }),
     signal: opts.signal,
   });
   if (!res.ok) {

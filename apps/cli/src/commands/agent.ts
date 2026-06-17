@@ -27,10 +27,16 @@ import {
   loadSkills,
   pickProvider,
   answer,
-  buildLocalContextPack,
-  recordQueryRun,
-  type ProviderName,
-} from '@duckcodeailabs/dql-agent';
+    buildLocalContextPack,
+    deriveGeneratedDraftSlug,
+    recordQueryRun,
+    type ProviderName,
+    upsertGeneratedDraft,
+    validateSqlAgainstLocalContext,
+    type AgentAnswer,
+    type AgentFollowUpContext,
+    type AgentResultPayload,
+  } from '@duckcodeailabs/dql-agent';
 import { buildManifest, resolveDbtManifestPath } from '@duckcodeailabs/dql-core';
 import type { CLIFlags } from '../args.js';
 import { findProjectRoot } from '../local-runtime.js';
@@ -52,11 +58,11 @@ export async function runAgent(
     default:
       throw new Error(
         'Usage: dql agent <ask|reindex|feedback|eval> [args]\n' +
-          '  dql agent ask "<question>" [--provider claude|openai|gemini|ollama] [--user <id>] [--domain <d>]\n' +
-          '  dql agent reindex\n' +
-          '  dql agent feedback up|down --block <id> --question "..."\n' +
-          '  dql agent eval agent-evals.yml [--provider claude|openai|gemini|ollama]',
-      );
+            '  dql agent ask "<question>" [--provider claude|openai|gemini|ollama] [--user <id>] [--domain <d>]\n' +
+      '  dql agent reindex\n' +
+      '  dql agent feedback up|down --block <id> --question "..."\n' +
+      '  dql agent eval agent-evals.yml [--provider claude|openai|gemini|ollama] [--execute] [--save]',
+        );
   }
 }
 
@@ -144,7 +150,7 @@ async function runAsk(rest: string[], flags: CLIFlags): Promise<void> {
         });
         return result;
       },
-      executeGeneratedSql: async (sql) => {
+        executeGeneratedSql: async (sql) => {
         const response = await fetch(`${runtimeBase.replace(/\/$/, '')}/api/notebook/execute`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -182,10 +188,29 @@ async function runAsk(rest: string[], flags: CLIFlags): Promise<void> {
           rowCount: result.rowCount,
           durationMs: result.executionTime,
           payload: { question, sql },
-        });
-        return result;
-      },
-    });
+          });
+          return result;
+        },
+        captureGeneratedDraft: ({ question: draftQuestion, sql, intent, followUp, contextPack, sourceBlock, validationWarnings }) => {
+          const slug = deriveGeneratedDraftSlug(draftQuestion);
+          const proposedDomain = sourceBlock?.domain ?? contextPack?.objects.find((object) => object.domain)?.domain ?? domain ?? 'misc';
+          return upsertGeneratedDraft(projectRoot, {
+            slug,
+            question: draftQuestion,
+            proposedSql: sql,
+            proposedContractId: `${proposedDomain}.Unknown.${slug}`,
+            proposedDomain,
+            sourceQuestion: followUp?.sourceQuestion,
+            sourceBlock: followUp?.sourceBlockName ?? sourceBlock?.name,
+            followupKind: followUp?.kind,
+            requestedFilters: followUp?.filters,
+            requestedDimensions: followUp?.dimensions,
+            contextPackId: contextPack?.id,
+            routeIntent: String(intent),
+            validationWarnings,
+          });
+        },
+      });
 
     if (format === 'json') {
       console.log(JSON.stringify(result, null, 2));
@@ -205,10 +230,12 @@ async function runAsk(rest: string[], flags: CLIFlags): Promise<void> {
       console.log(`\nRows: ${result.result.rowCount}`);
       console.log(JSON.stringify(result.result.rows.slice(0, 5), null, 2));
     }
-    if (result.proposedSql) {
-      console.log(`\n--- Proposed SQL (review before saving as a block) ---\n${result.proposedSql}`);
-      if (result.suggestedViz) console.log(`Viz: ${result.suggestedViz}`);
-    }
+      if (result.proposedSql) {
+        console.log(`\n--- Proposed SQL (review before saving as a block) ---\n${result.proposedSql}`);
+        if (result.suggestedViz) console.log(`Viz: ${result.suggestedViz}`);
+        if (result.draftBlock?.path) console.log(`Draft: ${result.draftBlock.path}`);
+        if (result.promoteCommand) console.log(`Promote: ${result.promoteCommand}`);
+      }
   } finally {
     kg.close();
     memory.close();
@@ -283,18 +310,42 @@ interface AgentEvalCase {
   name?: string;
   question: string;
   domain?: string;
+  followUp?: AgentFollowUpContext;
+  selectedContext?: unknown;
   expected?: {
     sourceTier?: 'certified_artifact' | 'business_context' | 'semantic_layer' | 'dbt_manifest' | 'no_answer';
     certification?: 'certified' | 'ai_generated' | 'analyst_review_required';
     kind?: 'certified' | 'uncertified' | 'no_answer';
-    sqlContains?: string;
+    sqlContains?: string | string[];
+    sqlNotContains?: string | string[];
     citationKind?: string;
     noHallucinatedColumns?: string[];
     route?: 'certified' | 'generated_sql' | 'research' | 'clarify';
     intent?: string;
     reviewStatus?: 'none' | 'draft_ready' | 'analyst_review_required' | 'certified';
     missingContextKind?: string;
+    allowedRelationsOnly?: boolean;
+    allowedColumnsOnly?: boolean;
+    draftSaved?: boolean;
+    rows?: unknown[];
   };
+}
+
+interface AgentEvalResult {
+  name: string;
+  passed: boolean;
+  failures: string[];
+  durationMs: number;
+  executionMs?: number;
+  kind: AgentAnswer['kind'];
+  route?: string;
+  intent?: string;
+  reviewStatus?: string;
+  contextObjects: number;
+  followUp: boolean;
+  draftSaved: boolean;
+  expected?: AgentEvalCase['expected'];
+  validationCode?: string;
 }
 
 async function runEval(rest: string[], flags: CLIFlags): Promise<void> {
@@ -314,15 +365,31 @@ async function runEval(rest: string[], flags: CLIFlags): Promise<void> {
   const kg = new KGStore(kgPath);
   const memory = new MemoryStore(defaultMemoryPath(projectRoot));
   const { skills } = loadSkills(projectRoot);
-  const results: Array<{ name: string; passed: boolean; failures: string[] }> = [];
+  const execute = Boolean((flags as { execute?: boolean }).execute);
+  const runtimeBase = (flags as { runtimeUrl?: string; runtime?: string }).runtimeUrl
+    ?? (flags as { runtime?: string }).runtime
+    ?? process.env.DQL_RUNTIME_URL
+    ?? 'http://127.0.0.1:3474';
+  const manifest = execute
+    ? buildManifest({ projectRoot, dbtManifestPath: resolveDbtManifestPath(projectRoot) ?? undefined })
+    : null;
+  const results: AgentEvalResult[] = [];
 
   try {
     for (const testCase of cases) {
+      const startedAt = Date.now();
       const memoryContext = memory.search({
         query: testCase.question,
         scopes: ['project', 'user', 'artifact'],
         limit: 6,
       });
+      const contextPack = await buildLocalContextPack(projectRoot, {
+        question: testCase.question,
+        surface: 'cli-eval',
+        followUp: testCase.followUp,
+        selectedContext: testCase.selectedContext,
+        limit: 80,
+      }).catch(() => undefined);
       const result = await answer({
         question: testCase.question,
         domain: testCase.domain,
@@ -330,17 +397,57 @@ async function runEval(rest: string[], flags: CLIFlags): Promise<void> {
         kg,
         skills,
         memoryContext,
-        contextPack: await buildLocalContextPack(projectRoot, {
-          question: testCase.question,
-          surface: 'cli-eval',
-          limit: 80,
-        }).catch(() => undefined),
+        followUp: testCase.followUp,
+        contextPack,
+        executeCertifiedBlock: execute && manifest
+          ? createCertifiedBlockExecutor(projectRoot, manifest, runtimeBase)
+          : undefined,
+        executeGeneratedSql: execute
+          ? createGeneratedSqlExecutor(runtimeBase)
+          : undefined,
+        captureGeneratedDraft: ({ question: draftQuestion, sql, intent, followUp, contextPack: draftContextPack, sourceBlock, validationWarnings }) => {
+          const slug = deriveGeneratedDraftSlug(draftQuestion);
+          const proposedDomain = sourceBlock?.domain ?? draftContextPack?.objects.find((object) => object.domain)?.domain ?? testCase.domain ?? 'misc';
+          if (!(flags as { save?: boolean }).save) {
+            return {
+              path: `blocks/_drafts/${slug}.dql`,
+              askedTimes: 0,
+              proposedContractId: `${proposedDomain}.Unknown.${slug}`,
+            };
+          }
+          return upsertGeneratedDraft(projectRoot, {
+            slug,
+            question: draftQuestion,
+            proposedSql: sql,
+            proposedContractId: `${proposedDomain}.Unknown.${slug}`,
+            proposedDomain,
+            sourceQuestion: followUp?.sourceQuestion,
+            sourceBlock: followUp?.sourceBlockName ?? sourceBlock?.name,
+            followupKind: followUp?.kind,
+            requestedFilters: followUp?.filters,
+            requestedDimensions: followUp?.dimensions,
+            contextPackId: draftContextPack?.id,
+            routeIntent: String(intent),
+            validationWarnings,
+          });
+        },
       });
-      const failures = evaluateCase(testCase, result);
+      const evaluation = evaluateCase(testCase, result);
       results.push({
         name: testCase.name ?? testCase.question,
-        passed: failures.length === 0,
-        failures,
+        passed: evaluation.failures.length === 0,
+        failures: evaluation.failures,
+        durationMs: Date.now() - startedAt,
+        executionMs: result.result?.executionTime,
+        kind: result.kind,
+        route: result.contextPack?.routeDecision.route,
+        intent: result.contextPack?.routeDecision.intent,
+        reviewStatus: result.reviewStatus,
+        contextObjects: result.contextPack?.objects.length ?? 0,
+        followUp: Boolean(testCase.followUp),
+        draftSaved: Boolean(result.draftBlock?.path ?? result.draftBlockId),
+        expected: testCase.expected,
+        validationCode: evaluation.validationCode,
       });
     }
   } finally {
@@ -349,8 +456,9 @@ async function runEval(rest: string[], flags: CLIFlags): Promise<void> {
   }
 
   const passed = results.filter((r) => r.passed).length;
+  const metrics = computeEvalMetrics(results);
   if ((flags as { format?: string }).format === 'json') {
-    console.log(JSON.stringify({ ok: passed === results.length, passed, total: results.length, results }, null, 2));
+    console.log(JSON.stringify({ ok: passed === results.length, passed, total: results.length, metrics, results }, null, 2));
     return;
   }
   for (const result of results) {
@@ -358,13 +466,19 @@ async function runEval(rest: string[], flags: CLIFlags): Promise<void> {
     for (const failure of result.failures) console.log(`  - ${failure}`);
   }
   console.log(`\n${passed}/${results.length} eval case(s) passed.`);
+  console.log(`Certified hit rate: ${formatRate(metrics.certified_hit_rate)}`);
+  console.log(`Generated follow-up pass rate: ${formatRate(metrics.generated_followup_pass_rate)}`);
+  console.log(`Safe refusal rate: ${formatRate(metrics.safe_refusal_rate)}`);
+  console.log(`Wrong certified count: ${metrics.wrong_certified_count}`);
+  console.log(`Draft saved count: ${metrics.draft_saved_count}`);
   if (passed !== results.length) process.exitCode = 1;
 }
 
-function evaluateCase(testCase: AgentEvalCase, result: Awaited<ReturnType<typeof answer>>): string[] {
+function evaluateCase(testCase: AgentEvalCase, result: Awaited<ReturnType<typeof answer>>): { failures: string[]; validationCode?: string } {
   const expected = testCase.expected;
-  if (!expected) return [];
+  if (!expected) return { failures: [] };
   const failures: string[] = [];
+  let validationCode: string | undefined;
   if (expected.kind && result.kind !== expected.kind) failures.push(`kind expected ${expected.kind}, got ${result.kind}`);
   if (expected.sourceTier && result.sourceTier !== expected.sourceTier) failures.push(`sourceTier expected ${expected.sourceTier}, got ${result.sourceTier}`);
   if (expected.certification && result.certification !== expected.certification) failures.push(`certification expected ${expected.certification}, got ${result.certification}`);
@@ -372,10 +486,178 @@ function evaluateCase(testCase: AgentEvalCase, result: Awaited<ReturnType<typeof
   if (expected.route && result.contextPack?.routeDecision.route !== expected.route) failures.push(`route expected ${expected.route}, got ${result.contextPack?.routeDecision.route ?? 'none'}`);
   if (expected.intent && result.contextPack?.routeDecision.intent !== expected.intent) failures.push(`intent expected ${expected.intent}, got ${result.contextPack?.routeDecision.intent ?? 'none'}`);
   if (expected.missingContextKind && !result.contextPack?.missingContext.some((item) => item.kind === expected.missingContextKind)) failures.push(`missing context kind ${expected.missingContextKind} was not reported`);
-  if (expected.sqlContains && !result.proposedSql?.toLowerCase().includes(expected.sqlContains.toLowerCase())) failures.push(`SQL did not contain "${expected.sqlContains}"`);
+  for (const token of stringList(expected.sqlContains)) {
+    if (!result.proposedSql?.toLowerCase().includes(token.toLowerCase())) failures.push(`SQL did not contain "${token}"`);
+  }
+  for (const token of stringList(expected.sqlNotContains)) {
+    if (result.proposedSql?.toLowerCase().includes(token.toLowerCase())) failures.push(`SQL contained forbidden token "${token}"`);
+  }
   if (expected.citationKind && !result.citations.some((c) => c.kind === expected.citationKind)) failures.push(`missing citation kind ${expected.citationKind}`);
   for (const column of expected.noHallucinatedColumns ?? []) {
     if (result.proposedSql?.toLowerCase().includes(column.toLowerCase())) failures.push(`hallucinated forbidden column "${column}"`);
   }
-  return failures;
+  if (expected.draftSaved !== undefined) {
+    const saved = Boolean(result.draftBlock?.path ?? result.draftBlockId);
+    if (saved !== expected.draftSaved) failures.push(`draftSaved expected ${expected.draftSaved}, got ${saved}`);
+  }
+  if ((expected.allowedRelationsOnly || expected.allowedColumnsOnly) && result.proposedSql) {
+    const validation = validateSqlAgainstLocalContext(result.proposedSql, result.contextPack, {
+      question: testCase.question,
+      intent: result.contextPack?.routeDecision.intent,
+      filterValues: testCase.followUp?.filters,
+    });
+    if (!validation.ok) {
+      validationCode = validation.code;
+      failures.push(`SQL context validation failed (${validation.code}): ${validation.error}`);
+    }
+  }
+  if (expected.rows) {
+    const actualRows = result.result?.rows ?? [];
+    if (!rowsEqual(actualRows, expected.rows)) failures.push('executed rows did not match expected rows');
+  }
+  return { failures, validationCode };
 }
+
+function computeEvalMetrics(results: AgentEvalResult[]) {
+  const certifiedCases = results.filter((result) =>
+    result.expected?.kind === 'certified' ||
+    result.expected?.certification === 'certified' ||
+    result.expected?.route === 'certified',
+  );
+  const generatedFollowUpCases = results.filter((result) =>
+    result.followUp &&
+    (result.expected?.kind === 'uncertified' || result.expected?.route === 'generated_sql'),
+  );
+  const refusalCases = results.filter((result) =>
+    result.expected?.kind === 'no_answer' || result.expected?.route === 'clarify',
+  );
+  const executionTimes = results
+    .map((result) => result.executionMs)
+    .filter((value): value is number => typeof value === 'number' && Number.isFinite(value));
+  return {
+    certified_hit_rate: ratio(certifiedCases.filter((result) => result.passed && result.kind === 'certified').length, certifiedCases.length),
+    generated_followup_pass_rate: ratio(generatedFollowUpCases.filter((result) => result.passed).length, generatedFollowUpCases.length),
+    safe_refusal_rate: ratio(refusalCases.filter((result) => result.passed && result.kind === 'no_answer').length, refusalCases.length),
+    wrong_certified_count: results.filter((result) =>
+      result.kind === 'certified' &&
+      (result.expected?.kind ? result.expected.kind !== 'certified' : result.followUp),
+    ).length,
+    outside_context_rejection_count: results.filter((result) =>
+      result.validationCode === 'unknown_relation' || result.validationCode === 'unknown_column',
+    ).length,
+    draft_saved_count: results.filter((result) => result.draftSaved).length,
+    avg_context_objects: average(results.map((result) => result.contextObjects)),
+    avg_execution_ms: executionTimes.length ? average(executionTimes) : null,
+  };
+}
+
+function ratio(numerator: number, denominator: number): number | null {
+  if (denominator === 0) return null;
+  return Number((numerator / denominator).toFixed(4));
+}
+
+function average(values: number[]): number {
+  if (values.length === 0) return 0;
+  return Number((values.reduce((sum, value) => sum + value, 0) / values.length).toFixed(2));
+}
+
+function formatRate(value: number | null): string {
+  return value === null ? 'n/a' : `${Math.round(value * 1000) / 10}%`;
+}
+
+function stringList(value: string | string[] | undefined): string[] {
+  if (!value) return [];
+  return Array.isArray(value) ? value : [value];
+}
+
+function rowsEqual(actual: unknown[], expected: unknown[]): boolean {
+  return JSON.stringify(normalizeRows(actual)) === JSON.stringify(normalizeRows(expected));
+}
+
+function normalizeRows(rows: unknown[]): unknown[] {
+  return rows.map((row) => {
+    if (!row || typeof row !== 'object' || Array.isArray(row)) return row;
+    return Object.fromEntries(Object.entries(row as Record<string, unknown>).sort(([a], [b]) => a.localeCompare(b)));
+  });
+}
+
+function createCertifiedBlockExecutor(
+  projectRoot: string,
+  manifest: ReturnType<typeof buildManifest>,
+  runtimeBase: string,
+) {
+  return async (node: { name: string; nodeId: string }): Promise<AgentResultPayload> => {
+    const block = manifest.blocks[node.name] ?? manifest.blocks[node.nodeId.replace(/^block:/, '')];
+    if (!block) throw new Error(`Matched block ${node.name} is not present in the manifest.`);
+    const source = readFileSync(join(projectRoot, block.filePath), 'utf-8');
+    const payload = await executeRuntimeCell(runtimeBase, {
+      id: `agent-eval-${node.name}`,
+      type: 'dql',
+      source,
+      title: node.name,
+    });
+    const rows = Array.isArray(payload.result?.rows) ? payload.result.rows : [];
+    return {
+      columns: Array.isArray(payload.result?.columns) ? payload.result.columns : [],
+      rows,
+      rowCount: typeof payload.result?.rowCount === 'number' ? payload.result.rowCount : rows.length,
+      executionTime: payload.result?.executionTime,
+      blockName: node.name,
+    };
+  };
+}
+
+function createGeneratedSqlExecutor(runtimeBase: string) {
+  return async (sql: string): Promise<AgentResultPayload> => {
+    const payload = await executeRuntimeCell(runtimeBase, {
+      id: `agent-eval-generated-${Date.now().toString(36)}`,
+      type: 'sql',
+      source: sql,
+      title: 'agent eval generated SQL',
+    });
+    const rows = Array.isArray(payload.result?.rows) ? payload.result.rows : [];
+    return {
+      columns: Array.isArray(payload.result?.columns) ? payload.result.columns : [],
+      rows,
+      rowCount: typeof payload.result?.rowCount === 'number' ? payload.result.rowCount : rows.length,
+      executionTime: payload.result?.executionTime,
+      sql,
+    };
+  };
+}
+
+async function executeRuntimeCell(
+  runtimeBase: string,
+  cell: { id: string; type: 'dql' | 'sql'; source: string; title: string },
+): Promise<{
+  result?: {
+    columns?: unknown[];
+    rows?: unknown[];
+    rowCount?: number;
+    executionTime?: number;
+  };
+  error?: string;
+}> {
+  const response = await fetch(`${runtimeBase.replace(/\/$/, '')}/api/notebook/execute`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ cell }),
+  });
+  if (!response.ok) throw new Error(`Runtime returned ${response.status}: ${await response.text()}`);
+  const payload = (await response.json()) as {
+    result?: {
+      columns?: unknown[];
+      rows?: unknown[];
+      rowCount?: number;
+      executionTime?: number;
+    };
+    error?: string;
+  };
+  if (payload.error) throw new Error(payload.error);
+  return payload;
+}
+
+export const __test__ = {
+  computeEvalMetrics,
+  evaluateCase,
+};
