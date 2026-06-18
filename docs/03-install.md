@@ -151,7 +151,7 @@ Works on macOS, Linux, and Windows.
 
 ```bash
 dql --version
-# dql 1.6.16 or later
+# dql 1.6.17 or later
 ```
 
 If you see the version number, jump to the [Quickstart →](01-quickstart.md).

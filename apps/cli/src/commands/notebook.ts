@@ -3,6 +3,7 @@ import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { QueryExecutor } from '@duckcodeailabs/dql-connectors';
 import type { CLIFlags } from '../args.js';
+import type { ProjectConfig } from '../local-runtime.js';
 import {
   findProjectRoot,
   loadProjectConfig,
@@ -17,6 +18,12 @@ const REACT_APP_DIR = resolve(COMMAND_DIR, '../assets/dql-notebook');
 const LEGACY_APP_DIR = resolve(COMMAND_DIR, '../assets/notebook-browser');
 const NOTEBOOK_APP_DIR = existsSync(join(REACT_APP_DIR, 'index.html')) ? REACT_APP_DIR : LEGACY_APP_DIR;
 
+export function resolveNotebookConnection(config: ProjectConfig, projectRoot: string) {
+  return config.defaultConnection
+    ? normalizeProjectConnection(config.defaultConnection, projectRoot)
+    : null;
+}
+
 export async function runNotebook(targetArg: string | null, flags: CLIFlags): Promise<void> {
   const baseDir = resolve(targetArg ?? '.');
   const projectRoot = findProjectRoot(baseDir);
@@ -27,10 +34,7 @@ export async function runNotebook(targetArg: string | null, flags: CLIFlags): Pr
   }
   const config = loadProjectConfig(projectRoot);
   const executor = new QueryExecutor();
-  const connection = normalizeProjectConnection(
-    config.defaultConnection ?? { driver: 'file' as const, filepath: ':memory:' },
-    projectRoot,
-  );
+  const connection = resolveNotebookConnection(config, projectRoot);
 
   const host = flags.host ?? process.env.DQL_HOST ?? '127.0.0.1';
   const port = await startLocalServer({

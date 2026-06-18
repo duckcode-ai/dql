@@ -6,6 +6,22 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 
 ---
 
+## v1.6.17 - 2026-06-18
+
+### Notebook startup patch
+
+### Fixed
+
+- Notebook startup no longer invents a hidden DuckDB-backed `file/:memory:`
+  connection when a project has no default connection.
+- Fresh projects can open the notebook UI before DuckDB or Snowflake optional
+  connector packages are installed.
+- Schema/catalog startup endpoints now degrade to project/file metadata when no
+  runtime connection is active, while SQL execution returns a clear connection
+  setup message.
+
+---
+
 ## v1.6.16 - 2026-06-18
 
 ### MCP agent readiness for Claude Code and Codex

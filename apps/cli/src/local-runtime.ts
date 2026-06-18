@@ -168,7 +168,7 @@ export interface LocalServerOptions {
   rootDir: string;
   projectRoot?: string;
   executor: QueryExecutor;
-  connection: ConnectionConfig;
+  connection?: ConnectionConfig | null;
   preferredPort: number;
   /**
    * Host the HTTP server binds to. Defaults to `127.0.0.1` (loopback only)
@@ -181,8 +181,14 @@ export interface LocalServerOptions {
 export async function startLocalServer(opts: LocalServerOptions): Promise<number> {
   const { rootDir, executor, connection: rawConnection, preferredPort, projectRoot = process.cwd() } = opts;
   const bindHost = opts.host ?? process.env.DQL_HOST ?? '127.0.0.1';
-  let connection = normalizeProjectConnection(rawConnection, projectRoot);
+  let connection = rawConnection ? normalizeProjectConnection(rawConnection, projectRoot) : null;
   let projectConfig = loadProjectConfig(projectRoot);
+  const requireActiveConnection = (candidate: ConnectionConfig | null | undefined = connection): ConnectionConfig => {
+    if (!candidate) {
+      throw new Error('No database connection is configured yet. Open Connections, add a warehouse or local DuckDB/file connection, then retry.');
+    }
+    return candidate;
+  };
 
   // Load semantic layer via provider system (dql native, dbt, cubejs, etc.)
   let semanticLayer: SemanticLayer | undefined;
@@ -194,8 +200,9 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
   const semanticConfig = projectConfig.semanticLayer;
   let semanticLastSyncTime: string | null = null;
   {
-    const executeQuery = semanticConfig?.provider === 'snowflake'
-      ? async (sql: string) => { const r = await executor.executeQuery(sql, [], {}, connection); return { rows: r.rows }; }
+    const semanticConnection = connection;
+    const executeQuery = semanticConfig?.provider === 'snowflake' && semanticConnection
+      ? async (sql: string) => { const r = await executor.executeQuery(sql, [], {}, semanticConnection); return { rows: r.rows }; }
       : undefined;
     const result = await resolveSemanticLayerAsync(semanticConfig, projectRoot, executeQuery);
     semanticLayer = result.layer;
@@ -215,7 +222,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
 
   // Auto-register data/ CSV and Parquet files as DuckDB views so semantic layer
   // queries like `FROM orders` resolve without requiring read_csv_auto() in SQL.
-  if (connection.driver === 'file' || connection.driver === 'duckdb') {
+  if (connection && (connection.driver === 'file' || connection.driver === 'duckdb')) {
     const dataDir = projectConfig.dataDir
       ? resolve(projectRoot, projectConfig.dataDir)
       : join(projectRoot, 'data');
@@ -235,11 +242,12 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
   }
 
   const executeLocalSqlForStoredResult = async (sql: string) => {
+    const activeConnection = requireActiveConnection();
     const semantic = prepareSemanticSql(sql, semanticLayer);
     if (semantic.unresolvedRefs.length > 0) {
       throw new Error(`Unknown semantic reference${semantic.unresolvedRefs.length > 1 ? 's' : ''}: ${semantic.unresolvedRefs.join(', ')}`);
     }
-    const prepared = prepareLocalExecution(semantic.sql, connection, projectRoot, projectConfig);
+    const prepared = prepareLocalExecution(semantic.sql, activeConnection, projectRoot, projectConfig);
     const result = await executor.executeQuery(
       prepared.sql,
       [],
@@ -298,13 +306,14 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
             config: (sourceCell.chartConfig ?? sourceCell.config) as NotebookCell['config'],
           };
           const resolved = resolveNotebookBlockReferenceCell(cell, projectRoot);
-          const tableMapping = await resolveSemanticTableMapping(executor, connection, semanticLayer);
-          const plan = buildExecutionPlan(resolved.cell, { semanticLayer, driver: connection.driver, tableMapping });
+          const activeConnection = requireActiveConnection();
+          const tableMapping = await resolveSemanticTableMapping(executor, activeConnection, semanticLayer);
+          const plan = buildExecutionPlan(resolved.cell, { semanticLayer, driver: activeConnection.driver, tableMapping });
           if (!plan) {
             snapshotCells.push({ cellId, status: 'idle', executionCount: 0, executedAt });
             continue;
           }
-          const prepared = prepareLocalExecution(plan.sql, connection, projectRoot, projectConfig);
+          const prepared = prepareLocalExecution(plan.sql, activeConnection, projectRoot, projectConfig);
           assertAppAccess({ app, domain: resolved.domain ?? app.domain, level: 'execute' });
           const rawResult = await executor.executeQuery(
             prepared.sql,
@@ -367,10 +376,11 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
 
     const absBlockPath = join(projectRoot, block.filePath);
     const source = readFileSync(absBlockPath, 'utf-8');
-    const tableMapping = await resolveSemanticTableMapping(executor, connection, semanticLayer);
+    const activeConnection = requireActiveConnection();
+    const tableMapping = await resolveSemanticTableMapping(executor, activeConnection, semanticLayer);
     const semanticCompose = semanticLayer
       ? composeSemanticBlockSql(source, semanticLayer, {
-          driver: connection.driver,
+          driver: activeConnection.driver,
           tableMapping,
           projectRoot,
           projectConfig,
@@ -379,7 +389,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
       : null;
     const plan = buildExecutionPlan(
       { id: `agent-${block.name}`, type: 'dql', source, title: block.name },
-      { semanticLayer, driver: connection.driver, tableMapping },
+      { semanticLayer, driver: activeConnection.driver, tableMapping },
     );
     if (!plan && !semanticCompose?.sql) {
       const semanticError = semanticCompose?.diagnostics.find((diagnostic) => diagnostic.severity === 'error')?.message;
@@ -388,7 +398,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
 
     const prepared = prepareLocalExecution(
       semanticCompose?.sql ?? plan!.sql,
-      connection,
+      activeConnection,
       projectRoot,
       projectConfig,
     );
@@ -414,12 +424,13 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
   };
 
   const executeGeneratedSqlForAgent = async (sql: string): Promise<AgentResultPayload> => {
+    const activeConnection = requireActiveConnection();
     const boundedSql = buildAgentPreviewSql(sql);
     const semantic = prepareSemanticSql(boundedSql, semanticLayer);
     if (semantic.unresolvedRefs.length > 0) {
       throw new Error(`Unknown semantic reference${semantic.unresolvedRefs.length > 1 ? 's' : ''}: ${semantic.unresolvedRefs.join(', ')}`);
     }
-    const prepared = prepareLocalExecution(semantic.sql, connection, projectRoot, projectConfig);
+    const prepared = prepareLocalExecution(semantic.sql, activeConnection, projectRoot, projectConfig);
     const app = loadRuntimeApp(projectRoot, activePersonaAppId());
     assertAppAccess({ app, domain: app?.domain, level: 'execute' });
     const rawResult = await executor.executeQuery(
@@ -441,11 +452,13 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
   const getSchemaContextForAgent = async (question: string): Promise<AgentSchemaTable[]> => {
     const catalogContext = await buildAgentSchemaContextFromCatalog(projectRoot, question).catch(() => []);
     if (catalogContext.length > 0) {
+      if (!connection) return catalogContext;
       const enriched = await enrichAgentSchemaContextWithValueMatches(question, catalogContext, executor, connection);
       recordAgentRuntimeSchemaSnapshot(projectRoot, enriched, 'catalog enriched runtime schema');
       return enriched;
     }
 
+    if (!connection) return [];
     try {
       const result = await executor.executeQuery(
         `SELECT table_schema, table_name, column_name, data_type
@@ -565,8 +578,9 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           }
           // Hot-reload semantic layer on change and notify frontend
           if (dir === 'semantic-layer') {
-            const executeQuery = semanticConfig?.provider === 'snowflake'
-              ? async (sql: string) => { const r = await executor.executeQuery(sql, [], {}, connection); return { rows: r.rows }; }
+            const semanticConnection = connection;
+            const executeQuery = semanticConfig?.provider === 'snowflake' && semanticConnection
+              ? async (sql: string) => { const r = await executor.executeQuery(sql, [], {}, semanticConnection); return { rows: r.rows }; }
               : undefined;
             resolveSemanticLayerAsync(semanticConfig, projectRoot, executeQuery).then((refreshed) => {
               if (refreshed.layer) {
@@ -611,12 +625,13 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
 
   const runBlockStudioPreviewSource = async (
     source: string,
-    targetConnection: ConnectionConfig = connection,
+    targetConnection?: ConnectionConfig | null,
   ): Promise<{
     sql: string;
     result: ReturnType<typeof normalizeQueryResult>;
     chartConfig: { chart?: string; x?: string; y?: string; color?: string; title?: string } | null;
   }> => {
+    const activeConnection = requireActiveConnection(targetConnection);
     let tableMapping: Record<string, string> | undefined;
     if (semanticLayer) {
       try {
@@ -624,7 +639,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           `SELECT table_schema, table_name
            FROM information_schema.tables
            WHERE table_schema NOT IN ('information_schema', 'pg_catalog')`,
-          [], {}, targetConnection,
+          [], {}, activeConnection,
         );
         tableMapping = buildSemanticTableMapping(semanticLayer, tablesResult.rows);
       } catch {
@@ -633,7 +648,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
     }
     const semanticCompose = semanticLayer
       ? composeSemanticBlockSql(source, semanticLayer, {
-          driver: targetConnection.driver,
+          driver: activeConnection.driver,
           tableMapping,
           projectRoot,
           projectConfig,
@@ -650,11 +665,11 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
     }
     const plan = buildExecutionPlan(
       { id: 'block-studio', type: 'dql', source, title: 'Block Studio' },
-      { semanticLayer, driver: targetConnection.driver, tableMapping },
+      { semanticLayer, driver: activeConnection.driver, tableMapping },
     );
     const prepared = prepareLocalExecution(
       semanticCompose?.sql ?? plan?.sql ?? executableSql,
-      targetConnection,
+      activeConnection,
       projectRoot,
       projectConfig,
     );
@@ -673,13 +688,14 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
 
   const runBlockStudioTestSummary = async (
     source: string,
-    targetConnection: ConnectionConfig = connection,
+    targetConnection?: ConnectionConfig | null,
   ): Promise<TestResultSummary> => {
+    const activeConnection = requireActiveConnection(targetConnection);
     const start = Date.now();
-    const tableMapping = await resolveSemanticTableMapping(executor, targetConnection, semanticLayer);
+    const tableMapping = await resolveSemanticTableMapping(executor, activeConnection, semanticLayer);
     const plan = buildExecutionPlan(
       { id: 'block-studio-tests', type: 'dql', source, title: 'Block Studio' },
-      { semanticLayer, driver: targetConnection.driver, tableMapping },
+      { semanticLayer, driver: activeConnection.driver, tableMapping },
     );
     const tests = plan?.tests ?? [];
     if (!plan || !plan.sql) {
@@ -700,7 +716,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
       return { passed: 0, failed: 0, skipped: 0, duration: Date.now() - start, assertions: [], runAt: new Date() };
     }
 
-    const prepared = prepareLocalExecution(plan.sql, targetConnection, projectRoot, projectConfig);
+    const prepared = prepareLocalExecution(plan.sql, activeConnection, projectRoot, projectConfig);
     const rawResult = await executor.executeQuery(
       prepared.sql,
       plan.sqlParams ?? [],
@@ -1445,7 +1461,9 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
     if (req.method === 'GET' && path === '/api/schema') {
       try {
         const dataFiles = scanDataFiles(projectRoot);
-        const { tables, columnsByPath } = await introspectSchema(executor, connection);
+        const { tables, columnsByPath } = connection
+          ? await introspectSchema(executor, connection)
+          : { tables: [], columnsByPath: new Map<string, Array<{ name: string; type: string }>>() };
         const dbTables = tables.map((t) => ({
           name: t.path,
           path: t.path,
@@ -1464,8 +1482,8 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
         const message = error instanceof Error ? error.message : String(error);
         console.warn(`[dql] /api/schema introspection failed: ${message}`);
         const fallback = scanDataFiles(projectRoot).map((f) => ({ ...f, source: 'file' }));
-        res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' });
-        res.end(serializeJSON({ error: message, fallback }));
+        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON(fallback));
       }
       return;
     }
@@ -2614,7 +2632,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
             };
         const executeQuery = provider === 'snowflake'
           ? async (sql: string) => {
-              const result = await executor.executeQuery(sql, [], {}, connection);
+              const result = await executor.executeQuery(sql, [], {}, requireActiveConnection());
               return { rows: result.rows };
             }
           : undefined;
@@ -2652,7 +2670,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
       try {
         const executeQuery = semanticImportManifest?.provider === 'snowflake'
           ? async (sql: string) => {
-              const result = await executor.executeQuery(sql, [], {}, connection);
+              const result = await executor.executeQuery(sql, [], {}, requireActiveConnection());
               return { rows: result.rows };
             }
           : undefined;
@@ -2708,7 +2726,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
             };
         const executeQuery = provider === 'snowflake'
           ? async (sql: string) => {
-              const result = await executor.executeQuery(sql, [], {}, connection);
+              const result = await executor.executeQuery(sql, [], {}, requireActiveConnection());
               return { rows: result.rows };
             }
           : undefined;
@@ -2740,7 +2758,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
       try {
         const executeQuery = semanticImportManifest?.provider === 'snowflake'
           ? async (sql: string) => {
-              const result = await executor.executeQuery(sql, [], {}, connection);
+              const result = await executor.executeQuery(sql, [], {}, requireActiveConnection());
               return { rows: result.rows };
             }
           : undefined;
@@ -2973,8 +2991,10 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
         }
         // Try connector.listColumns() first
         let columns: Array<{ name: string; type: string }> = [];
+        const activeConnection = connection;
         try {
-          const connector = await executor.getConnector(connection);
+          if (!activeConnection) throw new Error('No active connection');
+          const connector = await executor.getConnector(activeConnection);
           if (typeof connector.listColumns === 'function') {
             const rawCols = await connector.listColumns(schemaName, tablePath);
             columns = rawCols.map((c) => ({ name: c.name, type: c.dataType }));
@@ -2991,7 +3011,8 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
             const sql = isFile
               ? `DESCRIBE SELECT * FROM read_csv_auto('${safePath}') LIMIT 0`
               : `DESCRIBE ${qualifiedIdentifier}`;
-            const result = await executor.executeQuery(sql, [], {}, connection);
+            if (!activeConnection) throw new Error('No active connection');
+            const result = await executor.executeQuery(sql, [], {}, activeConnection);
             columns = result.rows.map((row) => ({
               name: String(row['column_name'] ?? row['Field'] ?? ''),
               type: String(row['column_type'] ?? row['Type'] ?? ''),
@@ -3090,7 +3111,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
         }
         const prepared = prepareLocalExecution(
           semantic.sql,
-          isConnectionConfig(body.connection) ? body.connection : connection,
+          requireActiveConnection(isConnectionConfig(body.connection) ? body.connection : connection),
           projectRoot,
           projectConfig,
         );
@@ -3151,7 +3172,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           engine?: 'native' | 'metricflow';
         };
         // Resolve which connection to use — request can override default
-        const targetConnection = isConnectionConfig(body.connection) ? body.connection : connection;
+        const targetConnection = requireActiveConnection(isConnectionConfig(body.connection) ? body.connection : connection);
         const driver = targetConnection.driver;
         // Build table mapping: resolve semantic model names to actual DB table names
         let tableMapping: Record<string, string> | undefined;
@@ -3251,7 +3272,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           savedQuery?: string;
           engine?: 'native' | 'metricflow';
         };
-        const targetConnection = isConnectionConfig(body.connection) ? body.connection : connection;
+        const targetConnection = requireActiveConnection(isConnectionConfig(body.connection) ? body.connection : connection);
         const driver = targetConnection.driver;
         let tableMapping: Record<string, string> | undefined;
         try {
@@ -3361,7 +3382,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           res.end(serializeJSON({ error: 'name and at least one metric are required.' }));
           return;
         }
-        const targetConnection = isConnectionConfig(body.connection) ? body.connection : connection;
+        const targetConnection = requireActiveConnection(isConnectionConfig(body.connection) ? body.connection : connection);
         const composed = composeRuntimeSemanticQuery({
           metrics,
           dimensions,
@@ -3416,11 +3437,11 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
     }
 
     if (req.method === 'POST' && path === '/api/test-connection') {
-      let target: ConnectionConfig = connection;
+      let target: ConnectionConfig | null = connection;
       try {
         const body = await readJSON(req);
         target = normalizeProjectConnection(
-          isConnectionConfig(body.connection) ? body.connection : connection,
+          requireActiveConnection(isConnectionConfig(body.connection) ? body.connection : connection),
           projectRoot,
         );
         const connector = await executor.getConnector(target);
@@ -3431,7 +3452,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
         res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
         res.end(serializeJSON({
           ok: false,
-          message: formatConnectionTestError(target, error),
+          message: target ? formatConnectionTestError(target, error) : error instanceof Error ? error.message : String(error),
         }));
       }
       return;
@@ -3688,7 +3709,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
 
         const resolved = resolveNotebookBlockReferenceCell(cell, projectRoot);
         const executableCell = resolved.cell;
-        const cellConnection = isConnectionConfig(body.connection) ? body.connection : connection;
+        const cellConnection = requireActiveConnection(isConnectionConfig(body.connection) ? body.connection : connection);
         const tableMapping = needsSemanticTableMapping(executableCell)
           ? await resolveSemanticTableMapping(executor, cellConnection, semanticLayer)
           : undefined;
@@ -3701,7 +3722,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
 
         const prepared = prepareLocalExecution(
           plan.sql,
-          isConnectionConfig(body.connection) ? body.connection : connection,
+          cellConnection,
           projectRoot,
           projectConfig,
         );
@@ -4988,7 +5009,7 @@ async function introspectSchema(
 function buildDatabaseSchemaTree(
   projectRoot: string,
   executor: QueryExecutor,
-  connection: ConnectionConfig,
+  connection: ConnectionConfig | null,
 ): Promise<Array<{
   id: string;
   label: string;
@@ -4999,7 +5020,9 @@ function buildDatabaseSchemaTree(
 }>> {
   return (async () => {
     const dataFiles = scanDataFiles(projectRoot);
-    const { tables: dbTables, columnsByPath: dbColumnsByPath } = await introspectSchema(executor, connection);
+    const { tables: dbTables, columnsByPath: dbColumnsByPath } = connection
+      ? await introspectSchema(executor, connection)
+      : { tables: [], columnsByPath: new Map<string, Array<{ name: string; type: string }>>() };
 
     const schemaMap = new Map<string, Array<{ name: string; path: string; type?: string }>>();
     for (const table of dbTables) {
@@ -5041,22 +5064,24 @@ function buildDatabaseSchemaTree(
       }> = [];
       for (const file of dataFiles) {
         let columns: Array<{ id: string; label: string; kind: 'column'; path: string; type: string }> = [];
-        try {
-          const ext = file.name.split('.').pop()?.toLowerCase();
-          const readFn = ext === 'parquet' ? 'read_parquet' : ext === 'json' ? 'read_json_auto' : 'read_csv_auto';
-          const descResult = await executor.executeQuery(
-            `DESCRIBE SELECT * FROM ${readFn}('${file.path.replace(/'/g, "''")}') LIMIT 0`,
-            [], {}, connection,
-          );
-          columns = descResult.rows.map((row) => ({
-            id: `db-column:${file.path}:${String(row['column_name'] ?? '')}`,
-            label: String(row['column_name'] ?? ''),
-            kind: 'column' as const,
-            path: file.path,
-            type: String(row['column_type'] ?? ''),
-          }));
-        } catch {
-          // file column discovery failed — empty children is fine
+        if (connection) {
+          try {
+            const ext = file.name.split('.').pop()?.toLowerCase();
+            const readFn = ext === 'parquet' ? 'read_parquet' : ext === 'json' ? 'read_json_auto' : 'read_csv_auto';
+            const descResult = await executor.executeQuery(
+              `DESCRIBE SELECT * FROM ${readFn}('${file.path.replace(/'/g, "''")}') LIMIT 0`,
+              [], {}, connection,
+            );
+            columns = descResult.rows.map((row) => ({
+              id: `db-column:${file.path}:${String(row['column_name'] ?? '')}`,
+              label: String(row['column_name'] ?? ''),
+              kind: 'column' as const,
+              path: file.path,
+              type: String(row['column_type'] ?? ''),
+            }));
+          } catch {
+            // file column discovery failed — empty children is fine
+          }
         }
         fileChildren.push({
           id: `db-table:${file.path}`,
