@@ -17,6 +17,16 @@ import {
   kgSearch,
   kgSearchInput,
 } from './tools/kg.js';
+import {
+  askDql,
+  askDqlInput,
+  buildDqlApp,
+  buildDqlAppInput,
+  buildDqlBlock,
+  buildDqlBlockInput,
+  inspectDqlProject,
+  inspectDqlProjectInput,
+} from './tools/workflows.js';
 
 export interface CreateServerOptions {
   projectRoot?: string;
@@ -24,26 +34,25 @@ export interface CreateServerOptions {
 }
 
 export const DQL_MCP_INSTRUCTIONS =
-  'DQL exposes governed analytics under graduated trust:\n' +
-  ' Tier 1 — Use certified artifacts when the user asks for an exact saved block, ' +
-  'direct KPI, or definition. Discover candidates with `kg_search`, `search_blocks`, ' +
-  'and `get_block`; execute data blocks with `query_via_block` only when the block ' +
-  'grain exactly answers the question. Certified blocks may optionally enforce ' +
-  'DataLex contract resolution when a DataLex manifest is loaded.\n' +
-  ' Tier 2 — For named customer/user/account questions, custom filters, rankings, ' +
-  'breakdowns, comparisons, drill-throughs, or any different grain, use certified ' +
-  'blocks/terms only as context. Call `inspect_metadata_context` first, then call ' +
-  '`query_via_metadata`; omit SQL when you need the route plan/allowed SQL context, ' +
-  'or provide read-only SQL inferred from the manifest, semantic layer, dbt/source ' +
-  'metadata, and runtime schema. Surface `uncertified: true` and the draft review ' +
-  'path verbatim.\n' +
-  ' Tier 3 — If the available metadata does not identify a safe table, metric, ' +
-  'dimension, or grain, refuse and ask for the missing business object or metric.\n' +
-  'Other tools support the loop: `list_proposals` shows repeated Tier-2 drafts, ' +
-  '`suggest_block` proposes shared building blocks, `certify` evaluates governance, ' +
-  '`lineage_impact` traces dependencies, `list_metrics` / `list_dimensions` expose ' +
-  'the semantic layer, `kg_search` searches the DQL agent knowledge graph, and ' +
-  '`feedback_record` records answer quality. Never present Tier-2 output as certified.';
+  'DQL is a governed analytics MCP server. Start each session with ' +
+  '`inspect_dql_project`; route every analytics question through `ask_dql` ' +
+  'before writing SQL. It returns the safe route, trust label, certified ' +
+  'candidate when available, allowed SQL context, and next tool.\n' +
+  'Tier 1 certified: for an exact saved block or direct KPI, use ' +
+  '`search_blocks`/`get_block` for discovery and `query_via_block` only when ' +
+  'a certified block grain exactly answers the question.\n' +
+  'Tier 2 generated: for named customer/user/account questions, custom filters, ' +
+  'rankings, breakdowns, comparisons, drill-throughs, or different grain, use ' +
+  'certified assets only as context. Call `inspect_metadata_context`, then `query_via_metadata` with ' +
+  'one read-only SELECT/WITH query from the inspected context. Surface ' +
+  '`uncertified: true`, the trust status, and draft path verbatim.\n' +
+  'Tier 3 missing context: if metadata does not identify a safe table, metric, ' +
+  'dimension, or grain, refuse and ask for what is missing.\n' +
+  'Use `build_dql_block` for reusable draft blocks, `build_dql_app` for app ' +
+  'drafts with certified tiles plus review-only gaps, `certify` for governance, ' +
+  '`lineage_impact` for dependencies, `kg_search` for the knowledge graph, and ' +
+  '`feedback_record` for answer quality. Never present generated SQL or draft ' +
+  'output as certified.';
 
 export function createDQLMCPServer(options: CreateServerOptions = {}): McpServer {
   const projectRoot = options.projectRoot ?? findProjectRoot(process.cwd());
@@ -54,6 +63,42 @@ export function createDQLMCPServer(options: CreateServerOptions = {}): McpServer
     { instructions: DQL_MCP_INSTRUCTIONS },
   );
 
+  server.registerTool(
+    'inspect_dql_project',
+    {
+      description:
+        'Front-door project health/context tool for MCP clients. Refreshes metadata/index by default and returns block, app, dashboard, semantic, catalog, and recommended-next-step status.',
+      inputSchema: inspectDqlProjectInput,
+    },
+    async (args) => wrap(await inspectDqlProject(ctx, args)),
+  );
+  server.registerTool(
+    'ask_dql',
+    {
+      description:
+        'High-level governed ask router. Use first for business questions. Returns certified-vs-generated route, contextPackId, exact block candidate, allowed SQL context, missing context, trust status, and next safe DQL tool.',
+      inputSchema: askDqlInput,
+    },
+    async (args) => wrap(await askDql(ctx, args)),
+  );
+  server.registerTool(
+    'build_dql_block',
+    {
+      description:
+        'High-level draft-block tool. Writes a proposed block to blocks/_drafts/ with governance results. Does not certify automatically.',
+      inputSchema: buildDqlBlockInput,
+    },
+    async (args) => wrap(await buildDqlBlock(ctx, args)),
+  );
+  server.registerTool(
+    'build_dql_app',
+    {
+      description:
+        'High-level app builder. Creates or plans a governed DQL app draft from a prompt using certified tiles first and review-only placeholders for missing evidence.',
+      inputSchema: buildDqlAppInput,
+    },
+    async (args) => wrap(await buildDqlApp(ctx, args)),
+  );
   server.registerTool(
     'search_blocks',
     { description: 'Find certified DQL blocks by keyword, domain, or status.', inputSchema: searchBlocksInput },

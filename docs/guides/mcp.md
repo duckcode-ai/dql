@@ -10,18 +10,29 @@ them — instead of inventing SQL.
 
 ## What the agent gets
 
-The server exposes **12 tools** organized around a graduated-trust loop:
+The server exposes governed workflow tools plus the lower-level building blocks
+they use:
 
 | Tier | Tools | Behavior |
 |---|---|---|
+| **front door** | `inspect_dql_project`, `ask_dql` | Verifies the project, refreshes local metadata/indexes, and returns the safe route: certified block, generated SQL preview, research, or clarify. |
 | **1 — certified** | `query_via_block`, `search_blocks`, `get_block` | Serves only `status = "certified"` blocks when the block grain exactly answers the question. Safe to ship. |
-| **2 — proposed** | `query_via_metadata`, `list_proposals`, `suggest_block` | For named customers/users/accounts, custom filters, rankings, breakdowns, comparisons, drill-throughs, or missing exact blocks, the agent's read-only SQL runs as a bounded preview, returns `uncertified: true`, and is saved as a draft under `blocks/_drafts/` for human review. |
+| **2 — proposed** | `query_via_metadata`, `list_proposals`, `suggest_block`, `build_dql_block` | For named customers/users/accounts, custom filters, rankings, breakdowns, comparisons, drill-throughs, or missing exact blocks, the agent's read-only SQL runs as a bounded preview, returns `uncertified: true`, and is saved as a draft under `blocks/_drafts/` for human review. |
+| **Apps** | `build_dql_app` | Creates or plans an app draft using certified tiles first and review-only placeholders for missing evidence. |
 | **support** | `certify`, `lineage_impact`, `list_metrics`, `list_dimensions`, `kg_search`, `feedback_record` | Governance checks, lineage tracing, the semantic layer, and feedback. |
 
 The server's instructions tell the agent to search certified context first,
 execute a certified block only for an exact direct KPI or saved-block match,
 flag Tier‑2 answers verbatim, and refuse when metadata is insufficient — so
 generated SQL never silently becomes a "trusted" number.
+
+For external agents, the preferred call order is:
+
+1. `inspect_dql_project`
+2. `ask_dql`
+3. `query_via_block` when `ask_dql.route = "certified"`
+4. `query_via_metadata` when `ask_dql.route = "generated_sql"`
+5. `build_dql_block` or `build_dql_app` only after the user asks to save a reusable asset
 
 ## App chat with SDK providers
 
@@ -70,6 +81,7 @@ From a DQL project folder:
 ```bash
 dql mcp                 # stdio (default) — for clients that spawn a child process
 dql mcp --http          # loopback HTTP on 127.0.0.1 with a bearer token
+dql mcp test            # verify manifest, metadata, agent index, and MCP readiness
 ```
 
 Most desktop clients use **stdio** and launch the command for you — you just
@@ -86,14 +98,21 @@ instead of spawning a process (it prints `http://127.0.0.1:<port>/mcp` and an
 
 ## Claude Code
 
-Run from your DQL project folder (cwd is the project, so no path needed):
+Run from your DQL project folder:
 
 ```bash
-claude mcp add dql -- npx -y @duckcodeailabs/dql-cli mcp
+dql connect claude-code
 ```
 
-Then ask Claude a data question — it answers from your certified blocks and
-cites them.
+This writes project-local `.mcp.json` and adds DQL guidance to `CLAUDE.md`.
+Open Claude Code in the same project and run `/mcp` to confirm the `dql` server
+is loaded. Then ask a data question — Claude routes through `ask_dql`, answers
+from certified blocks when the grain fits, and flags generated SQL as
+uncertified.
+
+Starter projects ignore `.mcp.json` because it can contain local machine paths.
+Commit `CLAUDE.md` only when you want to share the DQL agent guidance with the
+team.
 
 ## Claude Desktop
 
@@ -111,6 +130,12 @@ Settings → Developer → **Edit Config** opens `claude_desktop_config.json`. A
 ```
 
 Restart Claude Desktop; "dql" appears in the tools menu.
+
+Or let DQL write/update that config:
+
+```bash
+dql connect claude-desktop /abs/path/to/your/dql
+```
 
 ## Cursor
 
@@ -130,14 +155,51 @@ projects):
 
 Enable it under Cursor → Settings → MCP.
 
+Or generate the project config:
+
+```bash
+dql connect cursor
+```
+
 ## Codex (OpenAI Codex CLI)
 
-Add to `~/.codex/config.toml`:
+Add to the trusted project's `.codex/config.toml`:
 
 ```toml
 [mcp_servers.dql]
 command = "npx"
 args = ["-y", "@duckcodeailabs/dql-cli", "mcp", "/abs/path/to/your/dql"]
+```
+
+Or let DQL add the block and DQL guidance in `AGENTS.md`:
+
+```bash
+dql connect codex
+```
+
+Open the DQL project in Codex after connecting. If Codex asks whether to trust
+the project, trust it so the project-local MCP config is loaded.
+
+Starter projects ignore `.codex/` because it can contain local machine paths.
+Commit `AGENTS.md` only when you want to share the DQL agent guidance with the
+team.
+
+## Configure all local clients
+
+From the DQL project folder:
+
+```bash
+dql connect all
+```
+
+This writes project config for Claude Code, Codex, and Cursor, and updates
+Claude Desktop's user config. Use the individual commands above when you only
+want one client configured.
+
+After connecting any client, run:
+
+```bash
+dql mcp test /abs/path/to/your/dql
 ```
 
 ## Any other MCP client

@@ -179,30 +179,27 @@ dql app build
 
 ---
 
-## Step 6 — Connect the MCP server
+## Step 6 — Connect an external AI agent
 
 The same graduated-trust loop is exposed to any MCP client (Claude Code,
-Claude Desktop, Cursor):
+Claude Desktop, Cursor, Codex):
 
 ```bash
-dql mcp
+dql mcp test
+dql connect claude-code
+# or: dql connect codex
+# or: dql connect all
 ```
 
-Register it with your client — e.g. for Claude Code, from your project folder:
+`dql connect claude-code` writes project-local `.mcp.json` plus `CLAUDE.md`.
+`dql connect codex` writes project-local `.codex/config.toml` plus `AGENTS.md`.
+Full setup for every client is in [Connect an AI agent (MCP)](../guides/mcp.md).
 
-```bash
-claude mcp add dql -- npx -y @duckcodeailabs/dql-cli mcp
-```
-
-Claude Desktop, Cursor, and Codex use a config file instead — full copy-paste
-setup for each is in [Connect an AI agent (MCP)](../guides/mcp.md).
-
-The server exposes 12 tools — `search_blocks`, `query_via_block` (Tier 1,
-certified exact matches only), `query_via_metadata` (Tier 2, flagged + drafted),
-`list_proposals`, `list_metrics`, `lineage_impact`, `suggest_block`, and more.
-Ask your agent a revenue question and it answers **from your certified
-blocks** when the block grain fits, citing them — and files drafts when it has
-to generate a deeper or different-grain answer.
+The server exposes workflow tools such as `inspect_dql_project`, `ask_dql`,
+`query_via_block`, `query_via_metadata`, `build_dql_block`, and
+`build_dql_app`. Ask your agent a revenue question and it answers **from your
+certified blocks** when the block grain fits, citing them — and files drafts
+when it has to generate a deeper or different-grain answer.
 
 ---
 
@@ -212,6 +209,6 @@ to generate a deeper or different-grain answer.
 ✓ Agent answers that are certified-first, flagged when improvised
 ✓ The promotion loop: draft → review → certify → re-ask → certified
 ✓ A local generated App package with certified tiles and draft review tasks
-✓ An MCP server giving Claude/Cursor governed access to your analytics
+✓ An MCP server giving Claude, Codex, Cursor, and other agents governed access to your analytics
 
 [Continue to tutorial 05 — CI and `dql verify` →](./05-ci-and-verify.md)

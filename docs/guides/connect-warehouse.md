@@ -2,7 +2,7 @@
 
 > ~3 minutes · ends with `dql doctor` confirming the configured connection
 
-DQL `1.6.15` keeps the CLI install small. Databricks SQL is built in. DuckDB,
+DQL `1.6.16` keeps the CLI install small. Databricks SQL is built in. DuckDB,
 local files, and Snowflake are enabled by installing the project-local driver
 from the notebook connection panel.
 

@@ -70,6 +70,27 @@ dql lineage --table fct_orders         # technical source lineage
 dql lineage --dashboard daily_ops      # consumption lineage
 ```
 
+### Apps, agent, and MCP
+
+| Command | What it does |
+| --- | --- |
+| `dql app new <name>` | Create a local App package |
+| `dql app generate "<prompt>"` | Generate a governed App draft from certified blocks plus review placeholders |
+| `dql app generate "<prompt>" --ai-layout` | Store richer GenUI layout metadata for dynamic visualization/layout decisions |
+| `dql app ls\|show\|build\|reindex` | List, inspect, compile, or reindex local Apps |
+| `dql agent ask "<question>"` | Ask through the certified-first local agent loop |
+| `dql agent reindex` | Rebuild `.dql/cache/agent-kg.sqlite` and metadata cache |
+| `dql agent feedback up\|down` | Record answer feedback |
+| `dql agent eval <file.yml>` | Run agent routing/eval checks |
+| `dql mcp [path]` | Run the DQL MCP server over stdio |
+| `dql mcp --http [path]` | Run loopback HTTP MCP with a bearer token |
+| `dql mcp test [path]` | Verify manifest, metadata catalog, agent index, and MCP tool readiness |
+| `dql connect codex [path]` | Write project `.codex/config.toml` plus `AGENTS.md` |
+| `dql connect claude-code [path]` | Write project `.mcp.json` plus `CLAUDE.md` |
+| `dql connect claude-desktop [path]` | Update Claude Desktop MCP config |
+| `dql connect cursor [path]` | Write project `.cursor/mcp.json` |
+| `dql connect all [path]` | Configure all supported local MCP clients |
+
 ### Migration
 
 | Command | What it does |
@@ -95,6 +116,10 @@ dql lineage --dashboard daily_ops      # consumption lineage
 | `--owner <name>` | Owner for new block scaffolds |
 | `--query-only` | Create a query-only block (no visualization) |
 | `--connection <driver\|path>` | Connection for `certify`/`test` (e.g. `duckdb`, `./db.duckdb`) |
+| `--ai` | Include AI provider, MCP, and metadata checks in `dql doctor` |
+| `--ai-layout` | Store dynamic GenUI layout metadata for `dql app generate` |
+| `--provider <name>` | Select agent provider where supported |
+| `--execute` | Execute bounded generated SQL previews during agent eval |
 
 ## Exit codes
 

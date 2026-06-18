@@ -14,6 +14,9 @@ pnpm-debug.log*
 jaffle-shop/
 !packages/create-dql-app/templates/jaffle-shop/
 .claude/
+.codex/
+.cursor/
+.mcp.json
 *.dqlnb.run.json
 *.dql.run.json
 .dql/runs/

@@ -10,7 +10,7 @@ packages; the two user-facing surfaces are the CLI and the notebook.
 | `@duckcodeailabs/dql-core` | Lexer, parser, AST, semantic resolution, lineage, canonical format |
 | `@duckcodeailabs/dql-compiler` | IR + Vega-Lite / HTML emitters |
 | `@duckcodeailabs/dql-runtime` | Query execution, param binding, result shaping |
-| `@duckcodeailabs/dql-connectors` | 15 warehouse drivers with introspection |
+| `@duckcodeailabs/dql-connectors` | Active Databricks HTTP, DuckDB/file, and Snowflake drivers, with optional project-local installs for native packages |
 | `@duckcodeailabs/dql-governance` | Lint rules, certification gates |
 | `@duckcodeailabs/dql-project` | SQLite-backed project registry & manifest cache |
 | `@duckcodeailabs/dql-lsp` | Language server for editor integrations |

@@ -3,6 +3,7 @@ import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { QueryExecutor } from '@duckcodeailabs/dql-connectors';
 import { resolveSemanticLayerWithDiagnostics } from '@duckcodeailabs/dql-core';
+import { defaultKgPath, defaultMetadataPath } from '@duckcodeailabs/dql-agent';
 import type { CLIFlags } from '../args.js';
 import {
   assertLocalQueryRuntimeReady,
@@ -10,6 +11,8 @@ import {
   getConnectorInstallStatuses,
   loadProjectConfig,
 } from '../local-runtime.js';
+import { listRemoteMcpSettings } from '../llm/mcp-config.js';
+import { listProviderSettings } from '../settings/provider-settings.js';
 
 interface Check {
   name: string;
@@ -83,6 +86,9 @@ export async function runDoctor(targetPath: string | null, flags: CLIFlags): Pro
   }
   if (defaultConnection?.driver) {
     checks.push(await checkLocalQueryRuntime(projectRoot, defaultConnection));
+  }
+  if (flags.ai) {
+    checks.push(...checkAiRuntime(projectRoot));
   }
 
   const passed = checks.filter((check) => check.ok).length;
@@ -304,4 +310,58 @@ async function checkLocalQueryRuntime(projectRoot: string, connection: NonNullab
     process.chdir(previousCwd);
     await executor.disconnect().catch(() => {});
   }
+}
+
+function checkAiRuntime(projectRoot: string): Check[] {
+  const providers = listProviderSettings(projectRoot);
+  const active = providers.find((provider) => provider.active);
+  const usableProviders = providers.filter((provider) =>
+    provider.enabled &&
+    provider.hasApiKey &&
+    (provider.id !== 'ollama' || provider.active || provider.source !== 'none')
+  );
+  const mcp = listRemoteMcpSettings(projectRoot);
+  const trustedMcp = mcp.entries.filter((entry) => entry.enabled && entry.trusted);
+  const metadataPath = defaultMetadataPath(projectRoot);
+  const kgPath = defaultKgPath(projectRoot);
+
+  return [
+    {
+      name: 'AI provider',
+      ok: Boolean(active?.enabled && active.hasApiKey) || usableProviders.length > 0,
+      detail: active
+        ? `${active.label} is active${active.model ? `, model=${active.model}` : ''}, source=${active.source}`
+        : usableProviders.length > 0
+          ? `${usableProviders.map((provider) => provider.label).join(', ')} configured; choose one in Connections`
+          : 'no usable provider configured; add OpenAI, Anthropic Claude, or another provider in Connections',
+    },
+    {
+      name: 'Provider fallback',
+      ok: true,
+      detail: 'DQL uses the selected provider and reports errors instead of silently falling back to another model.',
+    },
+    {
+      name: 'MCP servers and connectors',
+      ok: mcp.warnings.length === 0,
+      detail: trustedMcp.length > 0
+        ? `${trustedMcp.length} trusted enabled MCP connection(s); config=${mcp.path}`
+        : mcp.warnings.length > 0
+          ? mcp.warnings.join('; ')
+          : `none configured yet; optional config path=${mcp.path}`,
+    },
+    {
+      name: 'Metadata catalog',
+      ok: existsSync(metadataPath),
+      detail: existsSync(metadataPath)
+        ? metadataPath
+        : 'missing; run dql compile or dql agent reindex before deep ask/build flows',
+    },
+    {
+      name: 'Agent knowledge index',
+      ok: existsSync(kgPath),
+      detail: existsSync(kgPath)
+        ? kgPath
+        : 'missing; run dql agent reindex before Claude Code/Codex ask flows',
+    },
+  ];
 }

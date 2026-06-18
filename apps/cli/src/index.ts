@@ -30,6 +30,7 @@ import { runAgent } from "./commands/agent.js";
 import { runSlack } from "./commands/slack.js";
 import { runVerify } from "./commands/verify.js";
 import { runImport } from "./commands/import.js";
+import { runConnect } from "./commands/connect.js";
 
 const HELP = `
   dql — DQL CLI
@@ -62,6 +63,8 @@ const HELP = `
     dql sync dbt [path]             Detect dbt manifest changes; report DQL cache status
     dql lineage [block] [path]      Answer-layer lineage analysis
     dql mcp [--http]                Run the DQL MCP server (stdio by default; --http = loopback)
+    dql mcp test [path]             Check whether DQL MCP can load this project
+    dql connect <target> [path]     Configure Codex, Claude Code, Claude Desktop, or Cursor MCP
     dql app new|generate|ls|show|build|reindex <name>
                                     Manage App artifacts (metadata, policies, dashboards, schedules)
     dql schedule list|run|start|status  Local scheduler for @schedule'd blocks (alerts + notifications)
@@ -96,6 +99,7 @@ const HELP = `
     --open-pr                       For "certify --from-draft": push branch + open GitHub PR with the diff
       --force                         For "certify --from-draft": overwrite an existing certified block
       --execute                       For "agent eval": run bounded SQL previews
+      --ai                            For "doctor": include AI, MCP, and metadata checks
   `;
 
 const COMMAND_HELP: Record<string, string> = {
@@ -150,8 +154,21 @@ const COMMAND_HELP: Record<string, string> = {
 
   Usage:
     dql doctor [path] [--format json]
+    dql doctor [path] --ai
 
   Prints setup checks and the next local-first commands to run.
+  `,
+  connect: `
+  dql connect — Configure DQL for external AI agents
+
+  Usage:
+    dql connect codex [path]          Write project .codex/config.toml + AGENTS.md
+    dql connect claude-code [path]    Write project .mcp.json + CLAUDE.md
+    dql connect claude-desktop [path]
+    dql connect cursor [path]
+    dql connect all [path]
+
+  After connecting, run: dql mcp test [path]
   `,
   semantic: `
   dql semantic — Work with the local semantic layer
@@ -209,6 +226,7 @@ async function main() {
     command === "compile" ||
     command === "sync" ||
     command === "mcp" ||
+    command === "connect" ||
     command === "app" ||
     command === "schedule" ||
     command === "verify" ||
@@ -283,7 +301,10 @@ async function main() {
         await runDiff(file, rest, flags);
         break;
       case "mcp":
-        await runMcp(file, flags);
+        await runMcp(file, rest, flags);
+        break;
+      case "connect":
+        await runConnect(file, rest, flags);
         break;
       case "app":
         await runApp(file, rest, flags);

@@ -54,6 +54,26 @@ Open `notebooks/welcome.dqlnb` first. It shows the starter workflow:
 4. Compose business outcomes under `business-views/`.
 5. Use Lineage to trace source data into business views and consumption.
 
+## Connect an AI agent
+
+After `npm run doctor` passes, DQL can expose the same governed project context
+to Claude Code, Codex, Cursor, Claude Desktop, or any MCP client:
+
+```bash
+npm run compile
+npx dql mcp test
+npx dql connect claude-code
+# or: npx dql connect codex
+# or: npx dql connect all
+```
+
+Claude Code uses project `.mcp.json` and `CLAUDE.md`. Codex uses project
+`.codex/config.toml` and `AGENTS.md`. Agents should start with
+`inspect_dql_project`, route questions through `ask_dql`, use certified blocks
+when the grain exactly fits, and mark generated SQL as uncertified.
+The generated `.mcp.json`, `.codex/`, and `.cursor/` files are ignored by
+default because they can contain local machine paths.
+
 ## Have a dbt project?
 
 Point `dql.config.json` at it (auto-wired if a sibling dbt project was

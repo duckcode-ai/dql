@@ -9,5 +9,7 @@ describe('DQL MCP server instructions', () => {
     expect(DQL_MCP_INSTRUCTIONS).toContain('custom filters, rankings');
     expect(DQL_MCP_INSTRUCTIONS).toContain('query_via_metadata');
     expect(DQL_MCP_INSTRUCTIONS).toContain('uncertified: true');
+    expect(DQL_MCP_INSTRUCTIONS).toContain('ask_dql');
+    expect(DQL_MCP_INSTRUCTIONS).toContain('build_dql_app');
   });
 });

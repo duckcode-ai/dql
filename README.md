@@ -182,6 +182,22 @@ npm run validate   # validate blocks and project files
 npm run lineage    # inspect lineage from the CLI
 ```
 
+## Connect AI agents
+
+DQL includes an MCP server for Claude Code, Codex, Cursor, Claude Desktop, and
+other MCP clients. The server routes questions through certified blocks first,
+uses project metadata for safe generated SQL previews, and saves uncertified
+drafts for review.
+
+```bash
+dql mcp test
+dql connect claude-code   # writes .mcp.json and CLAUDE.md
+dql connect codex         # writes .codex/config.toml and AGENTS.md
+```
+
+See [Connect an AI agent](./docs/guides/mcp.md) for Claude Desktop, Cursor,
+remote MCP server config, and SDK provider notes.
+
 ## Core concepts
 
 - **Term**: a governed business definition.

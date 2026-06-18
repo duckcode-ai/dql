@@ -6,6 +6,31 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 
 ---
 
+## v1.6.16 - 2026-06-18
+
+### MCP agent readiness for Claude Code and Codex
+
+### Added
+
+- `dql connect` configures Claude Code, Codex, Claude Desktop, Cursor, or all
+  supported MCP clients from a DQL project.
+- `dql mcp test` verifies manifest loading, metadata catalog freshness, the
+  agent index, and the MCP tool surface before users ask an external agent.
+- The DQL MCP server now exposes front-door workflow tools:
+  `inspect_dql_project`, `ask_dql`, `build_dql_block`, and `build_dql_app`.
+
+### Changed
+
+- Generated Claude Code and Codex setup is project-local and includes
+  `CLAUDE.md` / `AGENTS.md` guidance so agents route questions through DQL
+  trust rules before writing SQL.
+- Starter projects ignore generated local agent config files such as
+  `.mcp.json`, `.codex/`, and `.cursor/`.
+- MCP documentation and the starter README now show the full Claude/Codex
+  testing path.
+
+---
+
 ## v1.6.1 - 2026-06-10
 
 ### OSS release: clean foundation, external example, UI polish
