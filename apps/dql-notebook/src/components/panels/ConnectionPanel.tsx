@@ -5,6 +5,7 @@ import type { Theme } from '../../themes/notebook-theme';
 import { api } from '../../api/client';
 import { PanelFrame } from '@duckcodeailabs/dql-ui';
 import { DriverLogo } from './DriverLogo';
+import { ConnectionRuntimeSettings } from '../settings/SettingsPage';
 
 interface ConnectorFieldSchema {
   key: string;
@@ -949,19 +950,22 @@ export function ConnectionPanel({ variant = 'panel' }: { variant?: 'panel' | 'pa
     return (
       <>
         <style>{CONNECTION_PAGE_STYLES}</style>
-        <div className="dql-connection-page-grid">
-          <section style={panelSurface}>
-            {connectionListSection}
-            {dbtProfilesSection}
-            {quickConnectSection}
-          </section>
-          <aside style={panelSurface}>
-            <div style={{ ...sectionLabel, marginBottom: 8 }}>Setup</div>
-            {addConnectionSection}
-            {saveMessageSection}
-            {testConnectionSection}
-            {catalogSection}
-          </aside>
+        <div className="dql-connection-page-stack">
+          <div className="dql-connection-page-grid">
+            <section style={panelSurface}>
+              {connectionListSection}
+              {dbtProfilesSection}
+              {quickConnectSection}
+            </section>
+            <aside style={panelSurface}>
+              <div style={{ ...sectionLabel, marginBottom: 8 }}>Database setup</div>
+              {addConnectionSection}
+              {saveMessageSection}
+              {testConnectionSection}
+              {catalogSection}
+            </aside>
+          </div>
+          <ConnectionRuntimeSettings embedded includeMemory />
         </div>
       </>
     );
@@ -981,6 +985,11 @@ export function ConnectionPanel({ variant = 'panel' }: { variant?: 'panel' | 'pa
 }
 
 const CONNECTION_PAGE_STYLES = `
+.dql-connection-page-stack {
+  display: grid;
+  gap: 16px;
+}
+
 .dql-connection-page-grid {
   display: grid;
   grid-template-columns: minmax(0, 1.18fr) minmax(320px, 0.82fr);

@@ -18,7 +18,6 @@ import { ConnectionPanel } from '../panels/ConnectionPanel';
 import { ReferencePanel } from '../panels/ReferencePanel';
 import { GitPage } from '../git/GitPage';
 import { AppsView } from '../apps/AppsView';
-import { SettingsPage } from '../settings/SettingsPage';
 import { LineageDrawer } from '../lineage/LineageDrawer';
 import { api } from '../../api/client';
 import { parseNotebookFile } from '../../utils/parse-workbook';
@@ -199,7 +198,7 @@ export function AppShell() {
             <LineageWorkspace />
           ) : state.mainView === 'lineage_detail' ? (
             <LineageDetailView />
-          ) : state.mainView === 'connection' ? (
+          ) : state.mainView === 'connection' || state.mainView === 'settings' ? (
             <ConnectionWorkspace>
               <ConnectionPanel variant="page" />
             </ConnectionWorkspace>
@@ -214,13 +213,6 @@ export function AppShell() {
             <GitPage />
           ) : state.mainView === 'apps' ? (
             <AppsView />
-          ) : state.mainView === 'settings' ? (
-            <FullPageSection
-              title="Settings"
-              description="Check local environment keys for AI chat, Slack, email schedules, and Docker/native runtime setup."
-            >
-              <SettingsPage />
-            </FullPageSection>
           ) : (
             <>
               {state.mainView === 'imports' || state.mainView === 'block_studio' ? (
@@ -278,7 +270,7 @@ function ConnectionWorkspace({ children }: { children: React.ReactNode }) {
           <div>
             <div style={{ fontSize: 22, fontWeight: 700 }}>Connections</div>
             <div style={{ fontSize: 13, opacity: 0.72, marginTop: 6, maxWidth: 660, lineHeight: 1.5 }}>
-              Import a dbt profile target, enter missing credentials, and test the active warehouse connection before building blocks.
+              Manage database connections, model providers, MCP servers, OpenAI connectors, and runtime checks from one place before building blocks or asking AI.
             </div>
           </div>
         </div>

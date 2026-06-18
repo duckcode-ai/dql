@@ -293,7 +293,7 @@ export function AgentChatPanel({
           <div style={{ flex: 1, minWidth: 0 }}>
             <div style={{ fontSize: executive ? 12.5 : 13, fontWeight: 800, lineHeight: 1.25 }}>{title}</div>
             <div style={{ fontSize: 11, color: t.textSecondary, marginTop: 2 }}>
-              {scopeHint}{executive ? ' · evidence available on demand' : ' · Provider from Settings'}
+              {scopeHint}{executive ? ' · evidence available on demand' : ' · Provider from Connections'}
             </div>
           </div>
           {onToggleExpanded && (

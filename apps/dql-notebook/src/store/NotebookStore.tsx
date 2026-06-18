@@ -212,7 +212,7 @@ function notebookReducer(state: NotebookState, action: NotebookAction): Notebook
                 : action.panel === 'apps'
                   ? 'apps'
                     : action.panel === 'settings'
-                    ? 'settings'
+                    ? 'connection'
                     : action.panel === 'files'
                       ? 'notebook'
                       : action.panel === 'block_library'

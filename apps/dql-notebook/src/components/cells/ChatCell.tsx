@@ -312,7 +312,7 @@ function ChatHeader({
       </span>
       {cell.name && <span style={{ fontSize: 12, fontFamily: t.fontMono, color: t.textSecondary }}>{cell.name}</span>}
       <span
-        title="Configure the active AI provider in Settings"
+        title="Configure the active AI provider in Connections"
         style={{
           marginLeft: 'auto',
           fontSize: 11,
@@ -320,7 +320,7 @@ function ChatHeader({
           color: t.textMuted,
         }}
       >
-        Provider from Settings
+        Provider from Connections
       </span>
       {onClear && (
         <button

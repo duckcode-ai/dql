@@ -69,7 +69,7 @@ export function Header() {
     reference: 'Quick Reference',
     apps: 'Apps',
     git: 'Source control',
-    settings: 'Settings',
+    settings: 'Connections',
     imports: 'Import SQL',
   };
   const headerTitle = isEditorView

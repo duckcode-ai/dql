@@ -14,6 +14,16 @@ import { themes, type Theme } from '../../themes/notebook-theme';
 const PROVIDER_ORDER: ProviderSettingsId[] = ['anthropic', 'openai', 'gemini', 'ollama', 'custom-openai'];
 
 export function SettingsPage() {
+  return <ConnectionRuntimeSettings includeMemory />;
+}
+
+export function ConnectionRuntimeSettings({
+  includeMemory = true,
+  embedded = false,
+}: {
+  includeMemory?: boolean;
+  embedded?: boolean;
+}) {
   const { state } = useNotebook();
   const t = themes[state.themeMode];
   const [groups, setGroups] = useState<SettingsEnvGroup[]>([]);
@@ -30,7 +40,7 @@ export function SettingsPage() {
         api.getSettingsEnvStatus(),
         api.getProviderSettings(),
         api.getRemoteMcpSettings(),
-        api.listAgentMemory(),
+        includeMemory ? api.listAgentMemory() : Promise.resolve({ memories: [] }),
       ]);
       setGroups(env.groups);
       setProviders(providerRes.providers);
@@ -49,12 +59,12 @@ export function SettingsPage() {
   const activeProvider = providers.find((provider) => provider.active);
 
   return (
-    <div style={{ padding: 24, maxWidth: 1180 }}>
+    <div style={{ padding: embedded ? 0 : 24, maxWidth: embedded ? undefined : 1180 }}>
       <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 16 }}>
         <div>
-          <div style={{ fontSize: 18, fontWeight: 700 }}>AI & Memory Settings</div>
+          <div style={{ fontSize: 18, fontWeight: 700 }}>AI providers and MCP connections</div>
           <div style={{ color: t.textSecondary, fontSize: 13, marginTop: 6, lineHeight: 1.5, maxWidth: 820 }}>
-            Configure local AI providers and the project memory used by governed analytics chat. Secrets stay under <code>.dql/</code> and are never returned raw.
+            Connect model providers, MCP servers, OpenAI connectors, and runtime checks used by governed analytics chat. Secrets stay under <code>.dql/</code> and are never returned raw.
           </div>
         </div>
         <SummaryCard
@@ -76,7 +86,7 @@ export function SettingsPage() {
       ) : (
         <>
           <section style={{ marginTop: 22 }}>
-            <SectionTitle title="Provider Setup" detail="Use env vars or save project-local provider settings." t={t} />
+            <SectionTitle title="Model providers" detail="Use environment variables or save project-local provider settings for OpenAI, Anthropic, Gemini, Ollama, or compatible endpoints." t={t} />
             <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(320px, 1fr))', gap: 14 }}>
               {PROVIDER_ORDER.map((id) => {
                 const provider = providers.find((p) => p.id === id);
@@ -94,7 +104,7 @@ export function SettingsPage() {
           </section>
 
           <section style={{ marginTop: 22 }}>
-            <SectionTitle title="MCP Connections" detail="Optional external tools for OpenAI and Anthropic SDK chat. DQL governance still controls SQL, trust, and certification." t={t} />
+            <SectionTitle title="MCP servers and connectors" detail="Remote MCP servers can be attached to OpenAI and Claude SDK chat. OpenAI hosted connectors are OpenAI-only." t={t} />
             <McpConnectionsEditor
               settings={mcpSettings}
               t={t}
@@ -103,18 +113,20 @@ export function SettingsPage() {
             />
           </section>
 
-          <section style={{ marginTop: 22 }}>
-            <SectionTitle title="Local Agent Memory" detail="Memory helps interpret business language but never overrides certified metadata." t={t} />
-            <MemoryEditor
-              memories={memories}
-              t={t}
-              onChange={setMemories}
-              onStatus={setStatus}
-            />
-          </section>
+          {includeMemory && (
+            <section style={{ marginTop: 22 }}>
+              <SectionTitle title="Agent memory" detail="Optional local context for business language. It never overrides certified metadata." t={t} />
+              <MemoryEditor
+                memories={memories}
+                t={t}
+                onChange={setMemories}
+                onStatus={setStatus}
+              />
+            </section>
+          )}
 
           <section style={{ marginTop: 22 }}>
-            <SectionTitle title="Environment Status" detail="Runtime variables remain supported for Docker, CI, and shell-based setup." t={t} />
+            <SectionTitle title="Runtime status" detail="Environment variables remain supported for Docker, CI, and shell-based setup." t={t} />
             <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(320px, 1fr))', gap: 14 }}>
               {groups.map((group) => (
                 <EnvGroupCard key={group.id} group={group} t={t} />
@@ -236,6 +248,8 @@ function McpConnectionsEditor({
   };
 
   const enabledTrusted = entries.filter((entry) => entry.enabled && entry.trusted).length;
+  const serverCount = entries.filter((entry) => entry.kind === 'server').length;
+  const connectorCount = entries.filter((entry) => entry.kind === 'connector').length;
 
   return (
     <section style={{ border: `1px solid ${t.headerBorder}`, borderRadius: 8, background: t.cellBg, padding: 14 }}>
@@ -244,15 +258,39 @@ function McpConnectionsEditor({
           <div style={{ fontSize: 12, color: t.textSecondary }}>
             {enabledTrusted} trusted connection{enabledTrusted === 1 ? '' : 's'} available to SDK providers
           </div>
+          <div style={{ fontSize: 11, color: t.textMuted, marginTop: 3 }}>
+            {serverCount} remote server{serverCount === 1 ? '' : 's'} / {connectorCount} OpenAI connector{connectorCount === 1 ? '' : 's'}
+          </div>
           {settings.path && <div style={{ fontSize: 11, color: t.textMuted, marginTop: 3, fontFamily: t.fontMono }}>{settings.path}</div>}
         </div>
         <div style={{ display: 'flex', border: `1px solid ${t.headerBorder}`, borderRadius: 6, overflow: 'hidden' }}>
           <button type="button" onClick={() => selectMode('form')} style={segmentedButtonStyle(t, mode === 'form')}>Form</button>
-          <button type="button" onClick={() => selectMode('json')} style={segmentedButtonStyle(t, mode === 'json')}>JSON</button>
+          <button type="button" onClick={() => selectMode('json')} style={segmentedButtonStyle(t, mode === 'json')}>JSON import</button>
         </div>
-        <button type="button" onClick={addServer} style={buttonStyle(t, false)}>Add remote server</button>
+        <button type="button" onClick={addServer} style={buttonStyle(t, false)}>Add MCP server</button>
         <button type="button" onClick={addConnector} style={buttonStyle(t, false)}>Add OpenAI connector</button>
         <button type="button" onClick={save} disabled={busy} style={buttonStyle(t, true)}>Save MCP</button>
+      </div>
+
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: 10, marginTop: 12 }}>
+        <McpCompatibilityCard
+          title="Remote MCP server"
+          detail="Use URL-based MCP servers with OpenAI and Claude. Mark trusted when the server is approved for model tool use."
+          badge="OpenAI + Claude"
+          t={t}
+        />
+        <McpCompatibilityCard
+          title="OpenAI connector"
+          detail="Use OpenAI hosted connectors such as Google Drive. These are skipped for Claude because Anthropic does not use connector IDs."
+          badge="OpenAI only"
+          t={t}
+        />
+        <McpCompatibilityCard
+          title="JSON import"
+          detail="Paste DQL JSON, OpenAI Responses tools, or Claude mcp_servers. DQL saves the normalized project config."
+          badge="DQL normalized"
+          t={t}
+        />
       </div>
 
       {settings.warnings.length > 0 && (
@@ -264,7 +302,7 @@ function McpConnectionsEditor({
       {mode === 'json' ? (
         <div style={{ marginTop: 14 }}>
           <div style={{ color: t.textSecondary, fontSize: 12, lineHeight: 1.45, marginBottom: 8 }}>
-            Edit the project MCP JSON. Existing stored tokens are preserved when <code>authorizationToken</code> is omitted and the same kind/name is kept.
+            Paste DQL MCP JSON, OpenAI Responses <code>tools</code>, or Claude <code>mcp_servers</code>. Existing stored tokens are preserved when <code>authorizationToken</code> is omitted and the same kind/name is kept.
           </div>
           <textarea
             value={jsonDraft}
@@ -378,6 +416,32 @@ function McpConnectionsEditor({
         </div>
       )}
     </section>
+  );
+}
+
+function McpCompatibilityCard({
+  title,
+  detail,
+  badge,
+  t,
+}: {
+  title: string;
+  detail: string;
+  badge: string;
+  t: Theme;
+}) {
+  return (
+    <div style={{ border: `1px solid ${t.headerBorder}`, borderRadius: 8, background: t.appBg, padding: 10 }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+        <div style={{ fontSize: 12, fontWeight: 700, color: t.textPrimary }}>{title}</div>
+        <span style={{ marginLeft: 'auto', border: `1px solid ${t.accent}33`, borderRadius: 999, padding: '2px 7px', color: t.accent, background: `${t.accent}12`, fontSize: 10, fontWeight: 800, whiteSpace: 'nowrap' }}>
+          {badge}
+        </span>
+      </div>
+      <div style={{ color: t.textSecondary, fontSize: 11, lineHeight: 1.45, marginTop: 6 }}>
+        {detail}
+      </div>
+    </div>
   );
 }
 
@@ -766,6 +830,9 @@ function parseMcpConfigJson(value: string): RemoteMcpEntry[] {
   if (Array.isArray(parsed.tools)) {
     entries.push(...parseOpenAiMcpTools(parsed.tools));
   }
+  if (Array.isArray(parsed.mcp_servers)) {
+    entries.push(...parseAnthropicMcpServersArray(parsed.mcp_servers));
+  }
   if (isRecord(parsed.mcpServers)) {
     entries.push(...parseRemoteMcpServersObject(parsed.mcpServers));
   }
@@ -799,6 +866,17 @@ function parseOpenAiMcpTools(tools: unknown[]): RemoteMcpEntry[] {
       trusted: tool.trusted === true || tool.require_approval === 'never',
       providers: ['openai'],
     }, 'server', `tools[${index}]`)];
+  });
+}
+
+function parseAnthropicMcpServersArray(servers: unknown[]): RemoteMcpEntry[] {
+  return servers.map((server, index) => {
+    const entry = parseMcpEntry(server, 'server', `mcp_servers[${index}]`);
+    return normalizeMcpEntry({
+      ...entry,
+      authorizationToken: entry.authorizationToken ?? (isRecord(server) ? stringField(server, ['authorization_token']) : undefined),
+      providers: ['anthropic'],
+    });
   });
 }
 

@@ -7,7 +7,6 @@ import {
   GitBranch,
   BookOpen,
   HelpCircle,
-  Settings,
   Package,
   ChevronsLeft,
   ChevronsRight,
@@ -220,13 +219,6 @@ export function ActivityBar() {
       icon: <HelpCircle size={16} strokeWidth={1.75} />,
       active: false,
       onClick: () => handlePanelClick('reference'),
-    },
-    {
-      key: 'settings',
-      title: 'Settings',
-      icon: <Settings size={16} strokeWidth={1.75} />,
-      active: state.mainView === 'settings',
-      onClick: () => handlePanelClick('settings' as SidebarPanel),
     },
   ];
 
