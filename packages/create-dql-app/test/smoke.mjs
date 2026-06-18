@@ -30,7 +30,7 @@ function assert(cond, msg) {
   console.log(`  ✓ ${msg}`);
 }
 
-const EXPECTED_CLI_RANGE = '^1.6.13';
+const EXPECTED_CLI_RANGE = '^1.6.14';
 
 function collectFiles(dir, predicate, out = []) {
   for (const entry of readdirSync(dir)) {
@@ -79,10 +79,15 @@ function runTest(template, name, expected, placeholderFile) {
 }
 
 runTest('starter', 'smoke-starter', [
+  'apps/.gitkeep',
+  'blocks/.gitkeep',
+  'business-views/.gitkeep',
   'dql.config.json',
   'package.json',
   'README.md',
   'notebooks/welcome.dqlnb',
+  'semantic-layer/.gitkeep',
+  'terms/.gitkeep',
   '.gitignore',
 ], 'dql.config.json');
 

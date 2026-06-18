@@ -68,8 +68,10 @@ export async function runDoctor(targetPath: string | null, flags: CLIFlags): Pro
     },
     {
       name: 'Default connection',
-      ok: Boolean(defaultConnection?.driver),
-      detail: defaultConnection?.driver ? `driver=${defaultConnection.driver}` : 'not configured',
+      ok: true,
+      detail: defaultConnection?.driver
+        ? `driver=${defaultConnection.driver}`
+        : 'not configured yet; add Databricks, DuckDB/file, or Snowflake in the notebook Connections page',
     },
     checkSemanticLayer(config.semanticLayer, projectRoot),
   ];
