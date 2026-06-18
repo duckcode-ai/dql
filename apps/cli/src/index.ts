@@ -87,6 +87,7 @@ const HELP = `
     --domain <name>                 Domain for new block scaffolds (default: general)
     --owner <name>                  Owner for new block scaffolds (default: current user)
     --query-only                    Create a query-only block without visualization
+    --ai-layout                     For "app generate": store dynamic GenUI layout metadata
     --connection <driver|path>      Database connection for certify/test (e.g. duckdb, path/to/db)
     --save                          For "import sql": save valid candidates as local blocks
     --from-draft <path>             For "certify": promote a Tier-2 draft block to certified
@@ -125,11 +126,15 @@ const COMMAND_HELP: Record<string, string> = {
 
   Usage:
     dql app new <name>
-    dql app generate "<prompt>" [--domain <domain>] [--owner <user>]
+    dql app generate "<prompt>" [--domain <domain>] [--owner <user>] [--ai-layout]
     dql app ls
     dql app show <name>
     dql app build <name>
     dql app reindex
+
+  Notes:
+    --ai-layout stores DQL-native GenUI metadata for dynamic visualization and
+    layout decisions while preserving certified block trust boundaries.
   `,
   compile: `
   dql compile — Generate dql-manifest.json

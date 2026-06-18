@@ -55,6 +55,48 @@ export type AppPlanFollowUpAction =
   | "review_trust"
   | "create_draft_block";
 
+export type AppPlanLayoutIntent =
+  | "auto"
+  | "compact"
+  | "standard"
+  | "wide"
+  | "tall"
+  | "full";
+
+export type AppPlanGenUiComponent =
+  | "BusinessBrief"
+  | "KpiMetric"
+  | "TrendPanel"
+  | "RankingPanel"
+  | "EvidenceTable"
+  | "TrustCallout"
+  | "ResearchActions"
+  | "NarrativePanel";
+
+export interface AppPlanGenUi {
+  version: 1;
+  component: AppPlanGenUiComponent;
+  role: AppPlanTileRole;
+  layoutIntent: AppPlanLayoutIntent;
+  defaultVisualization: DashboardVizConfig["type"];
+  allowedVisualizations: DashboardVizConfig["type"][];
+  fieldHints?: {
+    label?: string;
+    value?: string;
+    x?: string;
+    y?: string;
+    color?: string;
+    time?: string;
+    rank?: string;
+  };
+  insightTitle: string;
+  trustState: AppPlanTrustState;
+  reviewStatus: AppPlanTile["reviewStatus"];
+  sourceNodeId?: string;
+  followUpActions: AppPlanFollowUpAction[];
+  rationale: string;
+}
+
 export interface AppPlanFilter {
   id: string;
   label: string;
@@ -84,6 +126,7 @@ export interface AppPlanTile {
     trustState: AppPlanTrustState;
     followUpActions: AppPlanFollowUpAction[];
     rationale: string;
+    genUi: AppPlanGenUi;
   };
 }
 
@@ -142,6 +185,7 @@ export interface PlanAppFromPromptInput {
   owner?: string;
   preferredBlockIds?: string[];
   maxCertifiedTiles?: number;
+  plannerMode?: "deterministic" | "ai_assisted";
 }
 
 export interface AppPlanValidationIssue {
@@ -272,6 +316,17 @@ export function planAppFromPrompt(input: PlanAppFromPromptInput): AppPlan {
       followUpActions: ["ask_follow_up", "review_trust"],
       rationale:
         "Compact business brief keeps the app goal visible without dominating the dashboard.",
+      genUi: buildGenUiContract({
+        title: "Business brief",
+        role: "business_summary",
+        viz: "text",
+        text: prompt,
+        trustState: "review_required",
+        reviewStatus: "review_required",
+        followUpActions: ["ask_follow_up", "review_trust"],
+        rationale:
+          "Compact business brief keeps the app goal visible without dominating the dashboard.",
+      }),
     },
     rationale:
       "Narrative text is generated scaffolding and should be reviewed with the app.",
@@ -286,7 +341,7 @@ export function planAppFromPrompt(input: PlanAppFromPromptInput): AppPlan {
     name: appName,
     prompt,
     planning: {
-      plannerMode: "deterministic",
+      plannerMode: input.plannerMode ?? "deterministic",
       normalizedGoal: normalizeGoal(prompt),
       analysisIntent,
       audience,
@@ -835,20 +890,39 @@ function displayForCertifiedNode(
       ? "kpi"
       : viz === "line" || viz === "area"
         ? "trend"
-        : /\bsegment|breakdown|split|driver|player|customer|account|region|channel\b/.test(text)
+        : /\bavailability|freshness|quality|record|records|dataset|lineage|evidence|certification|certified\b/.test(text)
+          ? "evidence"
+          : /\btop\s*\d+|rank|ranking|leader|leaderboard|scorer|score|goal|segment|breakdown|split|driver|player|customer|account|region|channel\b/.test(text)
           ? "breakdown"
           : "evidence";
+  const followUpActions: AppPlanFollowUpAction[] = [
+    "ask_follow_up",
+    "open_research",
+    "review_trust",
+  ];
+  const rationale =
+    node.decisionUse ??
+    node.businessOutcome ??
+    "Certified block matched the app goal and can anchor the generated dashboard.";
   return {
     role,
     recommendedDisplayType: viz,
     layoutPriority: role === "kpi" ? 10 + index : role === "trend" ? 20 + index : 30 + index,
     expectedGrain: inferExpectedGrain(text, intent),
     trustState: "certified",
-    followUpActions: ["ask_follow_up", "open_research", "review_trust"],
-    rationale:
-      node.decisionUse ??
-      node.businessOutcome ??
-      "Certified block matched the app goal and can anchor the generated dashboard.",
+    followUpActions,
+    rationale,
+    genUi: buildGenUiContract({
+      title: node.name,
+      role,
+      viz,
+      text,
+      trustState: "certified",
+      reviewStatus: "certified",
+      sourceNodeId: node.nodeId,
+      followUpActions,
+      rationale,
+    }),
   };
 }
 
@@ -865,16 +939,147 @@ function displayForDraftTile(
       : /\bnarrative|story|decision/.test(lower)
         ? "narrative"
         : "evidence";
+  const followUpActions: AppPlanFollowUpAction[] = [
+    "open_research",
+    "review_trust",
+    "create_draft_block",
+  ];
+  const rationale =
+    "Generated section captures missing evidence or review work without implying certification.";
   return {
     role,
     recommendedDisplayType: viz,
     layoutPriority: role === "trust" ? 80 + index : role === "research" ? 70 + index : 60 + index,
     expectedGrain: role === "research" ? "investigation" : "app",
     trustState: "draft_ready",
-    followUpActions: ["open_research", "review_trust", "create_draft_block"],
-    rationale:
-      "Generated section captures missing evidence or review work without implying certification.",
+    followUpActions,
+    rationale,
+    genUi: buildGenUiContract({
+      title,
+      role,
+      viz,
+      text: lower,
+      trustState: "draft_ready",
+      reviewStatus: "draft_ready",
+      followUpActions,
+      rationale,
+    }),
   };
+}
+
+function buildGenUiContract(input: {
+  title: string;
+  role: AppPlanTileRole;
+  viz: DashboardVizConfig["type"];
+  text: string;
+  trustState: AppPlanTrustState;
+  reviewStatus: AppPlanTile["reviewStatus"];
+  sourceNodeId?: string;
+  followUpActions: AppPlanFollowUpAction[];
+  rationale: string;
+}): AppPlanGenUi {
+  const text = `${input.title} ${input.text}`.toLowerCase();
+  const component = componentForPresentation(input.role, input.viz, text);
+  return {
+    version: 1,
+    component,
+    role: input.role,
+    layoutIntent: layoutIntentForPresentation(input.role, input.viz, component),
+    defaultVisualization: input.viz,
+    allowedVisualizations: allowedVisualizationsForPresentation(input.role, input.viz, component),
+    fieldHints: fieldHintsForPresentation(text, input.viz),
+    insightTitle: insightTitleForPresentation(input.title, input.role, component),
+    trustState: input.trustState,
+    reviewStatus: input.reviewStatus,
+    sourceNodeId: input.sourceNodeId,
+    followUpActions: input.followUpActions,
+    rationale: input.rationale,
+  };
+}
+
+function componentForPresentation(
+  role: AppPlanTileRole,
+  viz: DashboardVizConfig["type"],
+  text: string,
+): AppPlanGenUiComponent {
+  if (role === "business_summary") return "BusinessBrief";
+  if (role === "trust") return "TrustCallout";
+  if (role === "research") return "ResearchActions";
+  if (role === "narrative") return "NarrativePanel";
+  if (role === "kpi") return "KpiMetric";
+  if (role === "trend") return "TrendPanel";
+  if (/\btop\s*\d+|rank|ranking|leader|leaderboard|scorer|scoring|score|goal\b/.test(text))
+    return "RankingPanel";
+  if (viz === "bar" || viz === "grouped_bar" || viz === "stacked_bar")
+    return "RankingPanel";
+  return "EvidenceTable";
+}
+
+function layoutIntentForPresentation(
+  role: AppPlanTileRole,
+  viz: DashboardVizConfig["type"],
+  component: AppPlanGenUiComponent,
+): AppPlanLayoutIntent {
+  if (role === "business_summary") return "wide";
+  if (role === "kpi") return "compact";
+  if (component === "RankingPanel" || component === "TrendPanel") return "wide";
+  if (component === "EvidenceTable") return viz === "table" || viz === "pivot" ? "standard" : "wide";
+  if (role === "trust" || role === "research") return "compact";
+  if (role === "narrative") return "standard";
+  return "auto";
+}
+
+function allowedVisualizationsForPresentation(
+  role: AppPlanTileRole,
+  viz: DashboardVizConfig["type"],
+  component: AppPlanGenUiComponent,
+): DashboardVizConfig["type"][] {
+  const base = new Set<DashboardVizConfig["type"]>([viz]);
+  if (role === "kpi") {
+    ["single_value", "kpi", "gauge", "table"].forEach((type) => base.add(type as DashboardVizConfig["type"]));
+  } else if (component === "TrendPanel") {
+    ["line", "area", "bar", "table"].forEach((type) => base.add(type as DashboardVizConfig["type"]));
+  } else if (component === "RankingPanel") {
+    ["bar", "table", "donut"].forEach((type) => base.add(type as DashboardVizConfig["type"]));
+  } else if (component === "EvidenceTable") {
+    ["table", "bar"].forEach((type) => base.add(type as DashboardVizConfig["type"]));
+  } else if (component === "TrustCallout" || component === "ResearchActions" || component === "NarrativePanel" || component === "BusinessBrief") {
+    base.add("text");
+  }
+  return Array.from(base);
+}
+
+function fieldHintsForPresentation(
+  text: string,
+  viz: DashboardVizConfig["type"],
+): AppPlanGenUi["fieldHints"] | undefined {
+  const hints: NonNullable<AppPlanGenUi["fieldHints"]> = {};
+  if (/\bplayer|customer|account|vendor|merchant|name\b/.test(text)) hints.label = "name";
+  if (/\bscore|scorer|goal|count|total|revenue|arr|amount|rate\b/.test(text)) hints.value = "value";
+  if (/\bdate|week|month|quarter|season|time\b/.test(text)) hints.time = "date";
+  if (/\brank|top|leader\b/.test(text)) hints.rank = "rank";
+  if (viz === "line" || viz === "area") {
+    hints.x ??= hints.time ?? "date";
+    hints.y ??= hints.value ?? "value";
+  } else if (viz === "bar" || viz === "donut" || viz === "pie") {
+    hints.x ??= hints.label ?? "category";
+    hints.y ??= hints.value ?? "value";
+  }
+  return Object.keys(hints).length ? hints : undefined;
+}
+
+function insightTitleForPresentation(
+  title: string,
+  role: AppPlanTileRole,
+  component: AppPlanGenUiComponent,
+): string {
+  if (component === "BusinessBrief") return "Business context";
+  if (component === "TrustCallout") return "Trust and evidence";
+  if (component === "ResearchActions") return "Follow-up research";
+  if (role === "kpi") return title;
+  if (component === "RankingPanel") return title;
+  if (component === "TrendPanel") return title;
+  return title;
 }
 
 function inferExpectedGrain(text: string, intent: AppPlanAnalysisIntent): string {
@@ -938,7 +1143,22 @@ function buildLayoutItems(tiles: AppPlanTile[]): DashboardGridItem[] {
       w: size.w,
       h: size.h,
       title: tile.title,
-      viz: { type: tile.viz },
+      viz: {
+        type: tile.viz,
+        options: {
+          dqlGenUi: tile.display?.genUi ?? buildGenUiContract({
+            title: tile.title,
+            role: tile.display?.role ?? "evidence",
+            viz: tile.viz,
+            text: `${tile.title} ${tile.description ?? ""}`,
+            trustState: tile.display?.trustState ?? (tile.certification === "certified" ? "certified" : "draft_ready"),
+            reviewStatus: tile.reviewStatus,
+            sourceNodeId: tile.sourceNodeId,
+            followUpActions: tile.display?.followUpActions ?? [],
+            rationale: tile.display?.rationale ?? tile.rationale ?? "Generated DQL app presentation metadata.",
+          }),
+        },
+      },
       ...(tile.kind === "certified_block" && tile.blockId
         ? { block: { blockId: tile.blockId } }
         : { text: { markdown: markdownForGeneratedTile(tile) } }),
@@ -1246,8 +1466,12 @@ function inferVizForNode(
   ]
     .join(" ")
     .toLowerCase();
+  if (/\bavailability|freshness|quality|record|records|dataset|coverage|missing\b/.test(text))
+    return "table";
   if (/\btrend|time|week|month|quarter|daily|weekly|monthly\b/.test(text))
     return "line";
+  if (/\btop\s*\d+|rank|ranking|leader|leaderboard|scorer|scoring|score|goal\b/.test(text))
+    return "bar";
   if (/\btotal|count|rate|score|kpi|arr|revenue\b/.test(text) && index === 0)
     return "single_value";
   if (/\bsegment|region|channel|category|breakdown|split\b/.test(text))
@@ -1258,12 +1482,16 @@ function inferVizForNode(
 function tileSize(tile: AppPlanTile): { w: number; h: number } {
   const role = tile.display?.role;
   const viz = tile.viz;
+  const component = tile.display?.genUi.component;
+  const layoutIntent = tile.display?.genUi.layoutIntent;
   if (role === "business_summary") return { w: 12, h: 2 };
-  if (role === "trust" || role === "research") return { w: 6, h: 3 };
+  if (component === "RankingPanel") return { w: 8, h: 4 };
+  if (component === "EvidenceTable") return { w: layoutIntent === "tall" ? 6 : 4, h: 4 };
+  if (role === "trust" || role === "research") return { w: 4, h: 3 };
   if (tile.kind === "narrative") return { w: 12, h: 2 };
   if (viz === "single_value" || viz === "kpi") return { w: 3, h: 2 };
-  if (viz === "line" || viz === "area") return { w: 6, h: 3 };
-  if (viz === "bar" || viz === "grouped_bar" || viz === "stacked_bar") return { w: 6, h: 3 };
+  if (viz === "line" || viz === "area") return { w: 8, h: 4 };
+  if (viz === "bar" || viz === "grouped_bar" || viz === "stacked_bar") return { w: 8, h: 4 };
   if (viz === "text") return { w: 6, h: 2 };
   if (viz === "table" || viz === "pivot") return { w: 6, h: 4 };
   return { w: 6, h: 3 };

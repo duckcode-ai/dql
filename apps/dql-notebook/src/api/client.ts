@@ -194,6 +194,7 @@ export interface GenerateAppRequest {
   owner?: string;
   force?: boolean;
   selectedBlockIds?: string[];
+  plannerMode?: 'deterministic' | 'ai_assisted';
 }
 
 export interface GeneratedAppPlan {
@@ -226,6 +227,30 @@ export interface GeneratedAppPlan {
       rationale?: string;
       caveats?: string[];
       reviewTasks?: string[];
+      display?: {
+        role: string;
+        recommendedDisplayType: string;
+        layoutPriority: number;
+        expectedGrain?: string;
+        trustState: string;
+        followUpActions: string[];
+        rationale: string;
+        genUi?: {
+          version: 1;
+          component: string;
+          role: string;
+          layoutIntent: string;
+          defaultVisualization: string;
+          allowedVisualizations: string[];
+          fieldHints?: Record<string, string>;
+          insightTitle: string;
+          trustState: string;
+          reviewStatus: string;
+          sourceNodeId?: string;
+          followUpActions: string[];
+          rationale: string;
+        };
+      };
     }>;
   }>;
   caveats: string[];

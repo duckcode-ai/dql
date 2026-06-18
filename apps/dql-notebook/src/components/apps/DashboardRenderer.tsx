@@ -1,9 +1,9 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { CSSProperties, PointerEvent as ReactPointerEvent } from 'react';
-import { Bot, GitBranch, GripVertical, Maximize2, Plus, SlidersHorizontal, Sparkles, Send, Trash2, Wand2, X } from 'lucide-react';
+import { AlertTriangle, BarChart3, Bot, GitBranch, GripVertical, LineChart, Maximize2, PieChart, Plus, ShieldCheck, SlidersHorizontal, Sparkles, Send, Table2, Trash2, Wand2, X } from 'lucide-react';
 import { api, type AppBlockRecommendation, type DashboardDocumentResponse, type DashboardRunResponse } from '../../api/client';
 import { useNotebook } from '../../store/NotebookStore';
-import type { CellChartConfig, ThemeMode } from '../../store/types';
+import type { CellChartConfig, QueryResult, ThemeMode } from '../../store/types';
 import { ChartOutput, CHART_TYPE_OPTIONS, type ChartType } from '../output/ChartOutput';
 import { TableOutput } from '../output/TableOutput';
 import { AgentChatPanel } from '../agent/AgentChatPanel';
@@ -37,6 +37,22 @@ const TILE_SIZE_PRESETS: Array<{ id: TileSizePresetId; label: string; descriptio
   { id: 'tall', label: 'Tall', description: 'More vertical room for tables and dense charts' },
   { id: 'full', label: 'Full page', description: 'Large focused view across the page' },
 ];
+
+interface DqlGenUiMetadata {
+  version?: number;
+  component?: 'BusinessBrief' | 'KpiMetric' | 'TrendPanel' | 'RankingPanel' | 'EvidenceTable' | 'TrustCallout' | 'ResearchActions' | 'NarrativePanel' | string;
+  role?: string;
+  layoutIntent?: TileSizePresetId | string;
+  defaultVisualization?: string;
+  allowedVisualizations?: string[];
+  fieldHints?: Record<string, string>;
+  insightTitle?: string;
+  trustState?: 'certified' | 'review_required' | 'draft_ready' | string;
+  reviewStatus?: string;
+  sourceNodeId?: string;
+  followUpActions?: string[];
+  rationale?: string;
+}
 
 /**
  * Grid renderer for `.dqld` dashboards backed by the live dashboard run API.
@@ -87,6 +103,7 @@ export function DashboardRenderer({
   const [textDialogValue, setTextDialogValue] = useState('');
   const [dragPreview, setDragPreview] = useState<{ tileId: string; x: number; y: number; w: number; h: number } | null>(null);
   const gridRef = useRef<HTMLDivElement | null>(null);
+  const [narrowGrid, setNarrowGrid] = useState(false);
   const cols = dashboard.layout.cols;
   const rowHeight = dashboard.layout.rowHeight;
   const variablesKey = useMemo(() => JSON.stringify(variables ?? {}), [variables]);
@@ -136,6 +153,13 @@ export function DashboardRenderer({
     window.addEventListener('dql-app-dashboard-updated', handler);
     return () => window.removeEventListener('dql-app-dashboard-updated', handler);
   }, [appId, dashboard.id, onDashboardChanged, onRunChange, runVariables]);
+
+  useEffect(() => {
+    const update = () => setNarrowGrid(window.innerWidth < 760);
+    update();
+    window.addEventListener('resize', update);
+    return () => window.removeEventListener('resize', update);
+  }, []);
 
   const chatContext = useMemo(() => {
     const tiles = dashboard.layout.items.map((item) => {
@@ -302,7 +326,7 @@ export function DashboardRenderer({
         return rank !== 0 ? rank : a.index - b.index;
       })
       .map(({ item }) => {
-        const size = autoTileSizeForViz(normalizeViz(String(item.viz.type ?? 'table')), cols);
+        const size = autoTileSizeForItem(item, cols);
         return { ...item, w: size.w, h: size.h };
       });
     await saveItems(packDashboardItems(ordered, cols));
@@ -460,12 +484,12 @@ export function DashboardRenderer({
           ref={gridRef}
           style={{
             display: 'grid',
-            gridTemplateColumns: `repeat(${cols}, 1fr)`,
-            gridAutoRows: `${rowHeight}px`,
+            gridTemplateColumns: narrowGrid ? 'minmax(0, 1fr)' : `repeat(${cols}, 1fr)`,
+            gridAutoRows: narrowGrid ? 'auto' : `${rowHeight}px`,
             gap: 12,
           }}
         >
-          {dragPreview && (
+          {dragPreview && !narrowGrid && (
             <div
               aria-hidden="true"
               style={{
@@ -488,6 +512,7 @@ export function DashboardRenderer({
               error={error}
               themeMode={state.themeMode}
               editable={editable}
+              narrow={narrowGrid}
               cols={cols}
               selected={Boolean(getDashboardItemBlockId(item) && getDashboardItemBlockId(item) === selectedBlockId)}
               onFocusBlock={onBlockFocus}
@@ -560,6 +585,7 @@ function DashboardTile({
   error,
   themeMode,
   editable,
+  narrow,
   cols,
   selected,
   onFocusBlock,
@@ -575,6 +601,7 @@ function DashboardTile({
   error: string | null;
   themeMode: ThemeMode;
   editable: boolean;
+  narrow: boolean;
   cols: number;
   selected?: boolean;
   onFocusBlock?: (blockId: string) => void;
@@ -596,9 +623,31 @@ function DashboardTile({
       ? `aiPin:${item.aiPin.id}`
       : 'text';
   const vizType = normalizeViz(String(item.viz.type ?? 'table'));
+  const genUi = getDqlGenUi(item);
+  const generatedComponent = genUi?.component;
+  const generatedTitle = genUi?.insightTitle || item.title || blockRef;
+  const generatedTrust = genUi?.trustState ?? (tile?.certificationStatus === 'certified' ? 'certified' : undefined);
+  const isGeneratedUi = Boolean(genUi);
   const isCompactMetric = item.h <= 2 && (vizType === 'single_value' || vizType === 'kpi' || vizType === 'gauge');
   const [hovered, setHovered] = useState(false);
   const showEditChrome = editable && (hovered || selected || settingsOpen);
+  const generatedVizOptions = getGeneratedVizOptions(item, genUi);
+  const switchGeneratedViz = (chart: ChartType) => {
+    const dashboardViz = chartToDashboardViz(chart);
+    const options = item.viz.options ?? {};
+    const currentGenUi = getDqlGenUi(item);
+    onPatch({
+      viz: {
+        ...item.viz,
+        type: dashboardViz,
+        options: {
+          ...options,
+          chart,
+          ...(currentGenUi ? { dqlGenUi: { ...currentGenUi, defaultVisualization: dashboardViz } } : {}),
+        },
+      },
+    });
+  };
   useEffect(() => {
     if (!askOpen) return;
     const onKey = (event: KeyboardEvent) => {
@@ -615,6 +664,7 @@ function DashboardTile({
     };
   }, [askOpen]);
   const startDrag = (event: ReactPointerEvent<HTMLElement>) => {
+    if (narrow) return;
     const tileEl = tileRef.current;
     if (!tileEl) return;
     event.preventDefault();
@@ -660,22 +710,26 @@ function DashboardTile({
         if (blockId) onFocusBlock?.(blockId);
       }}
       style={{
-        gridColumn: `${item.x + 1} / span ${item.w}`,
-        gridRow: `${item.y + 1} / span ${item.h}`,
+        gridColumn: narrow ? '1 / -1' : `${item.x + 1} / span ${item.w}`,
+        gridRow: narrow ? 'auto' : `${item.y + 1} / span ${item.h}`,
         transform: dragOffset ? `translate(${dragOffset.x}px, ${dragOffset.y}px) scale(1.02)` : undefined,
         opacity: dragOffset ? 0.92 : 1,
         zIndex: dragOffset ? 30 : undefined,
         position: 'relative',
-        background: 'var(--dql-app-surface, var(--surface, rgba(0,0,0,0.02)))',
+        background: isGeneratedUi
+          ? tileSurfaceForGenUi(generatedComponent)
+          : 'var(--dql-app-surface, var(--surface, rgba(0,0,0,0.02)))',
         border: selected || dragOffset
           ? '1.5px solid var(--dql-app-accent, var(--accent, #4f46e5))'
-          : '1px solid var(--dql-app-line, var(--border-color, rgba(0,0,0,0.08)))',
-        borderRadius: 10,
+          : isGeneratedUi
+            ? '1px solid var(--dql-app-line-2, var(--border-color, rgba(15,23,42,0.10)))'
+            : '1px solid var(--dql-app-line, var(--border-color, rgba(0,0,0,0.08)))',
+        borderRadius: 8,
         padding: isCompactMetric ? 12 : 14,
         display: 'flex',
         flexDirection: 'column',
-        gap: isCompactMetric ? 4 : 6,
-        minHeight: 0,
+        gap: isCompactMetric ? 4 : isGeneratedUi ? 10 : 6,
+        minHeight: narrow ? narrowTileMinHeight(item, genUi) : 0,
         overflow: 'visible',
         boxShadow: dragOffset
           ? '0 16px 40px rgba(0,0,0,0.22)'
@@ -708,7 +762,7 @@ function DashboardTile({
           onClose={() => setAskOpen(false)}
         />
       ) : null}
-      {editable ? (
+      {editable && !narrow ? (
         <div
           style={{
             position: 'absolute',
@@ -767,21 +821,54 @@ function DashboardTile({
             />
           </div>
         ) : null}
-      <div
-        style={{
-          minHeight: isCompactMetric ? 22 : 26,
-          paddingLeft: showEditChrome ? 30 : 0,
-          paddingRight: showEditChrome ? (isCompactMetric ? 82 : 134) : 0,
-          transition: 'padding 120ms ease',
-        }}
-      >
-        <div style={{ fontSize: isCompactMetric ? 12 : 13, fontWeight: 720, lineHeight: 1.25, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-          {item.title ?? blockRef}
+      {isGeneratedUi ? (
+        <div
+          style={{
+            minHeight: isCompactMetric ? 26 : 42,
+            paddingLeft: showEditChrome ? 30 : 0,
+            paddingRight: showEditChrome ? (isCompactMetric ? 82 : 134) : 0,
+            transition: 'padding 120ms ease',
+            display: 'grid',
+            gap: 7,
+          }}
+        >
+          <div style={{ display: 'flex', alignItems: 'flex-start', gap: 8, minWidth: 0 }}>
+            <div style={{ flex: 1, minWidth: 0 }}>
+              <div style={{ fontSize: isCompactMetric ? 12 : 13, fontWeight: 780, lineHeight: 1.25, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                {generatedTitle}
+              </div>
+              <div style={generatedMetaRowStyle}>
+                {generatedTrust ? <TrustPill trust={generatedTrust} /> : null}
+                {genUi ? <span style={generatedMetaPillStyle}>{componentLabelForGenUi(genUi)}</span> : null}
+                {genUi?.layoutIntent ? <span style={generatedMetaPillStyle}>{formatGenUiLabel(String(genUi.layoutIntent))}</span> : null}
+              </div>
+            </div>
+            {editable && generatedVizOptions.length > 1 ? (
+              <GeneratedVizSwitcher
+                value={normalizeChartType(item.viz.type)}
+                options={generatedVizOptions}
+                onChange={switchGeneratedViz}
+              />
+            ) : null}
+          </div>
         </div>
-        {!isCompactMetric ? (
-          <div style={{ marginTop: 5, fontSize: 10.5, opacity: 0.58, fontFamily: 'var(--font-mono, monospace)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{blockRef}</div>
-        ) : null}
-      </div>
+      ) : (
+        <div
+          style={{
+            minHeight: isCompactMetric ? 22 : 26,
+            paddingLeft: showEditChrome ? 30 : 0,
+            paddingRight: showEditChrome ? (isCompactMetric ? 82 : 134) : 0,
+            transition: 'padding 120ms ease',
+          }}
+        >
+          <div style={{ fontSize: isCompactMetric ? 12 : 13, fontWeight: 720, lineHeight: 1.25, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+            {item.title ?? blockRef}
+          </div>
+          {!isCompactMetric ? (
+            <div style={{ marginTop: 5, fontSize: 10.5, opacity: 0.58, fontFamily: 'var(--font-mono, monospace)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{blockRef}</div>
+          ) : null}
+        </div>
+      )}
       {editable && settingsOpen ? (
         <TileSettingsPanel
           item={item}
@@ -804,9 +891,49 @@ function DashboardTile({
           fontStyle: tile?.status === 'ok' ? 'normal' : 'italic',
         }}
       >
-        <TileBody item={item} tile={tile} loading={loading} error={error} themeMode={themeMode} />
+        <TileBody item={item} tile={tile} loading={loading} error={error} themeMode={themeMode} genUi={genUi} />
       </div>
     </div>
+  );
+}
+
+function GeneratedVizSwitcher({
+  value,
+  options,
+  onChange,
+}: {
+  value: ChartType;
+  options: Array<{ value: ChartType; label: string }>;
+  onChange: (value: ChartType) => void;
+}) {
+  return (
+    <div style={generatedVizSwitcherStyle} aria-label="Visualization">
+      {options.map((option) => (
+        <button
+          key={option.value}
+          type="button"
+          title={option.label}
+          onClick={(event) => {
+            event.stopPropagation();
+            onChange(option.value);
+          }}
+          style={generatedVizButtonStyle(value === option.value)}
+        >
+          {iconForChartType(option.value)}
+        </button>
+      ))}
+    </div>
+  );
+}
+
+function TrustPill({ trust }: { trust: string }) {
+  const certified = trust === 'certified';
+  const label = certified ? 'Certified' : trust === 'review_required' ? 'Review required' : 'Draft ready';
+  return (
+    <span style={trustPillStyle(certified)}>
+      {certified ? <ShieldCheck size={10} strokeWidth={2.4} /> : <AlertTriangle size={10} strokeWidth={2.4} />}
+      {label}
+    </span>
   );
 }
 
@@ -939,15 +1066,29 @@ function TileBody({
   loading,
   error,
   themeMode,
+  genUi,
 }: {
   item: DashboardDocumentResponse['dashboard']['layout']['items'][number];
   tile?: DashboardRunResponse['tiles'][number];
   loading: boolean;
   error: string | null;
   themeMode: ThemeMode;
+  genUi?: DqlGenUiMetadata | null;
 }): JSX.Element {
   if (loading && !tile) return <span>Loading data...</span>;
-  if (tile?.tileType === 'text') return <MarkdownTile markdown={tile.text?.markdown ?? ''} variant={tile.viz?.type === 'heading' ? 'heading' : 'text'} themeMode={themeMode} />;
+  if (tile?.tileType === 'text') {
+    if (genUi) {
+      return (
+        <GeneratedTextTile
+          title={item.title ?? genUi.insightTitle ?? 'Generated section'}
+          markdown={tile.text?.markdown ?? ''}
+          genUi={genUi}
+          themeMode={themeMode}
+        />
+      );
+    }
+    return <MarkdownTile markdown={tile.text?.markdown ?? ''} variant={tile.viz?.type === 'heading' ? 'heading' : 'text'} themeMode={themeMode} />;
+  }
   if (tile?.tileType === 'aiPin' && tile.aiPin && !tile.result) {
     return <AiPinSummary pin={tile.aiPin} />;
   }
@@ -961,6 +1102,9 @@ function TileBody({
   const chartConfig = mergeTileChartConfig(item, tile.chartConfig as CellChartConfig | undefined);
   const chart = String(chartConfig.chart ?? tile.viz?.type ?? '').toLowerCase();
   if (chart === 'table' || item.viz.type === 'table') {
+    if (genUi?.component === 'EvidenceTable') {
+      return <GeneratedEvidenceTable result={tile.result} genUi={genUi} themeMode={themeMode} />;
+    }
     return <div style={{ width: '100%', alignSelf: 'stretch' }}><TableOutput result={tile.result} themeMode={themeMode} /></div>;
   }
   return <div style={{ width: '100%', alignSelf: 'stretch' }}><ChartOutput result={tile.result} themeMode={themeMode} chartConfig={chartConfig} /></div>;
@@ -1081,12 +1225,18 @@ function TileSettingsPanel({
 
   const patchConfig = (patch: Partial<CellChartConfig>) => {
     const next = compactChartConfig({ ...chartConfig, ...patch });
+    const dashboardViz = chartToDashboardViz(next.chart);
+    const currentGenUi = getDqlGenUi(item);
+    const options: Record<string, unknown> = { ...next };
+    if (currentGenUi) {
+      options.dqlGenUi = { ...currentGenUi, defaultVisualization: dashboardViz };
+    }
     onPatch({
       title: next.title || item.title,
       viz: {
         ...item.viz,
-        type: chartToDashboardViz(next.chart),
-        options: next as Record<string, unknown>,
+        type: dashboardViz,
+        options,
       },
     });
   };
@@ -1259,6 +1409,120 @@ function AddTileMenuItem({
       <span style={{ fontSize: 12, fontWeight: 700 }}>{title}</span>
       <span style={{ fontSize: 11, opacity: 0.66 }}>{description}</span>
     </button>
+  );
+}
+
+function GeneratedTextTile({
+  title,
+  markdown,
+  genUi,
+  themeMode,
+}: {
+  title: string;
+  markdown: string;
+  genUi: DqlGenUiMetadata;
+  themeMode: ThemeMode;
+}) {
+  const theme = themes[themeMode as NotebookThemeMode];
+  const summary = extractGeneratedSummary(markdown, title);
+  const isTrust = genUi.component === 'TrustCallout';
+  const isResearch = genUi.component === 'ResearchActions';
+  return (
+    <div style={generatedTextTileStyle(isTrust)}>
+      <div style={{ display: 'flex', gap: 8, alignItems: 'flex-start' }}>
+        <span style={generatedTextIconStyle(isTrust)}>
+          {isTrust ? <AlertTriangle size={15} /> : isResearch ? <Sparkles size={15} /> : <ShieldCheck size={15} />}
+        </span>
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <div style={{ fontSize: 13, fontWeight: 780, lineHeight: 1.25 }}>{genUi.insightTitle ?? title}</div>
+          <div style={{ marginTop: 6, fontSize: 13, lineHeight: 1.45, color: theme.textSecondary }}>
+            {summary}
+          </div>
+        </div>
+      </div>
+      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+        {genUi.trustState ? <TrustPill trust={genUi.trustState} /> : null}
+        {genUi.reviewStatus ? <span style={generatedMetaPillStyle}>{formatGenUiLabel(genUi.reviewStatus)}</span> : null}
+      </div>
+      {genUi.followUpActions?.length ? (
+        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+          {genUi.followUpActions.slice(0, 3).map((action) => (
+            <span key={action} style={generatedActionChipStyle}>
+              {formatGenUiLabel(action)}
+            </span>
+          ))}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+function GeneratedEvidenceTable({
+  result,
+  genUi,
+  themeMode,
+}: {
+  result: QueryResult;
+  genUi: DqlGenUiMetadata;
+  themeMode: ThemeMode;
+}) {
+  const theme = themes[themeMode as NotebookThemeMode];
+  const rows = result.rows ?? [];
+  const columns = result.columns ?? [];
+  const labelColumn = pickEvidenceLabelColumn(columns, rows, genUi.fieldHints?.label);
+  const statusColumn = columns.find((column) => /\b(status|quality|trust|certification|review)\b/i.test(column));
+  const metricColumns = columns
+    .filter((column) => column !== labelColumn && column !== statusColumn)
+    .filter((column) => evidenceMetricRank(column) < 90 || isNumericColumn(column, rows))
+    .sort((a, b) => evidenceMetricRank(a) - evidenceMetricRank(b))
+    .slice(0, 2);
+  const detailColumns = columns
+    .filter((column) => column !== labelColumn && column !== statusColumn && !metricColumns.includes(column))
+    .slice(0, 2);
+  const rowCount = result.rowCount ?? rows.length;
+
+  return (
+    <div style={generatedEvidenceStyle}>
+      <div style={{ fontSize: 11.5, color: theme.textSecondary }}>
+        {rowCount} {rowCount === 1 ? 'row' : 'rows'} across {columns.length} {columns.length === 1 ? 'field' : 'fields'}
+      </div>
+      <div style={generatedEvidenceRowsStyle}>
+        {rows.slice(0, 4).map((row, index) => {
+          const label = labelColumn ? formatEvidenceValue(row[labelColumn]) : `Row ${index + 1}`;
+          const status = statusColumn ? formatEvidenceValue(row[statusColumn]) : null;
+          return (
+            <div key={index} style={generatedEvidenceRowStyle}>
+              <div style={{ minWidth: 0 }}>
+                <div style={{ fontSize: 12.5, fontWeight: 760, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{label}</div>
+                {detailColumns.length ? (
+                  <div style={{ display: 'flex', flexWrap: 'wrap', gap: 5, marginTop: 4 }}>
+                    {detailColumns.map((column) => (
+                      <span key={column} style={generatedEvidenceMiniPillStyle}>
+                        {formatGenUiLabel(column)}: {formatEvidenceValue(row[column])}
+                      </span>
+                    ))}
+                  </div>
+                ) : null}
+              </div>
+              <div style={{ display: 'flex', gap: 5, flexWrap: 'wrap', justifyContent: 'flex-start', minWidth: 0 }}>
+                {metricColumns.map((column) => (
+                  <span key={column} style={generatedEvidenceMetricStyle}>
+                    <span style={{ opacity: 0.62 }}>{formatGenUiLabel(column)}</span>
+                    <strong>{formatEvidenceValue(row[column])}</strong>
+                  </span>
+                ))}
+                {status ? <span style={generatedEvidenceStatusStyle}>{status}</span> : null}
+              </div>
+            </div>
+          );
+        })}
+      </div>
+      {rows.length > 4 ? (
+        <div style={{ fontSize: 11, color: theme.textSecondary }}>
+          Showing first 4 rows in generated view. Switch tile settings for full table controls.
+        </div>
+      ) : null}
+    </div>
   );
 }
 
@@ -1538,6 +1802,151 @@ function compactChartConfig(config: CellChartConfig): CellChartConfig {
   return out;
 }
 
+function getDqlGenUi(item: DashboardLayoutItem): DqlGenUiMetadata | null {
+  const raw = (item.viz.options as Record<string, unknown> | undefined)?.dqlGenUi;
+  if (!isRecord(raw)) return null;
+  return {
+    version: typeof raw.version === 'number' ? raw.version : undefined,
+    component: typeof raw.component === 'string' ? raw.component : undefined,
+    role: typeof raw.role === 'string' ? raw.role : undefined,
+    layoutIntent: typeof raw.layoutIntent === 'string' ? raw.layoutIntent : undefined,
+    defaultVisualization: typeof raw.defaultVisualization === 'string' ? raw.defaultVisualization : undefined,
+    allowedVisualizations: Array.isArray(raw.allowedVisualizations) ? raw.allowedVisualizations.filter((value): value is string => typeof value === 'string') : undefined,
+    fieldHints: isRecord(raw.fieldHints)
+      ? Object.fromEntries(Object.entries(raw.fieldHints).filter((entry): entry is [string, string] => typeof entry[1] === 'string'))
+      : undefined,
+    insightTitle: typeof raw.insightTitle === 'string' ? raw.insightTitle : undefined,
+    trustState: typeof raw.trustState === 'string' ? raw.trustState : undefined,
+    reviewStatus: typeof raw.reviewStatus === 'string' ? raw.reviewStatus : undefined,
+    sourceNodeId: typeof raw.sourceNodeId === 'string' ? raw.sourceNodeId : undefined,
+    followUpActions: Array.isArray(raw.followUpActions) ? raw.followUpActions.filter((value): value is string => typeof value === 'string') : undefined,
+    rationale: typeof raw.rationale === 'string' ? raw.rationale : undefined,
+  };
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function getGeneratedVizOptions(
+  item: DashboardLayoutItem,
+  genUi?: DqlGenUiMetadata | null,
+): Array<{ value: ChartType; label: string }> {
+  const allowed = new Set<string>([
+    String(item.viz.type ?? 'table'),
+    ...(genUi?.allowedVisualizations ?? []),
+  ]);
+  const values = Array.from(allowed)
+    .map((value) => normalizeChartType(value))
+    .filter((value, index, arr) => arr.indexOf(value) === index);
+  return values
+    .map((value) => APP_CHART_TYPE_OPTIONS.find((option) => option.value === value) ?? { value, label: formatGenUiLabel(value) })
+    .filter((option) => option.value !== 'table' || values.length === 1 || item.block);
+}
+
+function tileSurfaceForGenUi(component?: string): string {
+  if (component === 'TrustCallout') return 'linear-gradient(180deg, rgba(255,255,255,0.92), rgba(255,251,235,0.72))';
+  if (component === 'RankingPanel' || component === 'TrendPanel') return 'linear-gradient(180deg, rgba(255,255,255,0.96), rgba(248,250,252,0.86))';
+  if (component === 'BusinessBrief') return 'var(--dql-app-surface, rgba(255,255,255,0.90))';
+  return 'var(--dql-app-surface, var(--surface, rgba(255,255,255,0.84)))';
+}
+
+function iconForChartType(type: ChartType): JSX.Element {
+  if (type === 'line' || type === 'area') return <LineChart size={13} strokeWidth={2.2} />;
+  if (type === 'pie' || type === 'donut') return <PieChart size={13} strokeWidth={2.2} />;
+  if (type === 'table') return <Table2 size={13} strokeWidth={2.2} />;
+  return <BarChart3 size={13} strokeWidth={2.2} />;
+}
+
+function formatGenUiLabel(value: string): string {
+  return value
+    .replace(/[_-]+/g, ' ')
+    .replace(/\b\w/g, (char) => char.toUpperCase());
+}
+
+function componentLabelForGenUi(genUi: DqlGenUiMetadata): string {
+  switch (genUi.component) {
+    case 'BusinessBrief':
+      return 'Business summary';
+    case 'KpiMetric':
+      return 'KPI';
+    case 'TrendPanel':
+      return 'Trend';
+    case 'RankingPanel':
+      return 'Ranking';
+    case 'EvidenceTable':
+      return 'Evidence';
+    case 'TrustCallout':
+      return 'Trust';
+    case 'ResearchActions':
+      return 'Research';
+    case 'NarrativePanel':
+      return 'Narrative';
+    default:
+      return genUi.role ? formatGenUiLabel(genUi.role) : 'Generated';
+  }
+}
+
+function extractGeneratedSummary(markdown: string, title: string): string {
+  const titlePattern = new RegExp(`^###\\s*${escapeRegExp(title)}\\s*`, 'i');
+  const cleaned = markdown
+    .replace(titlePattern, '')
+    .replace(/\*\*Trust:\*\*.*$/gim, '')
+    .replace(/\*\*Review status:\*\*.*$/gim, '')
+    .replace(/\*\*Next actions:\*\*[\s\S]*$/im, '')
+    .replace(/\*\*Review tasks:\*\*[\s\S]*$/im, '')
+    .trim();
+  const paragraph = cleaned.split(/\n{2,}/).map((part) => part.trim()).find(Boolean);
+  return paragraph || 'Generated app section pending analyst review.';
+}
+
+function pickEvidenceLabelColumn(columns: string[], rows: QueryResult['rows'], hint?: string): string | undefined {
+  if (columns.length === 0) return undefined;
+  const normalizedHint = hint?.toLowerCase();
+  if (normalizedHint) {
+    const hinted = columns.find((column) => {
+      const lower = column.toLowerCase();
+      return lower === normalizedHint || lower.includes(normalizedHint) || normalizedHint.includes(lower);
+    });
+    if (hinted) return hinted;
+  }
+  return columns.find((column) => /\b(name|label|title|dataset|table|block|player|customer|account)\b/i.test(column))
+    ?? columns.find((column) => !isNumericColumn(column, rows))
+    ?? columns[0];
+}
+
+function evidenceMetricRank(column: string): number {
+  const lower = column.toLowerCase();
+  if (/(total|count|records|rows|volume)/.test(lower)) return 1;
+  if (/(rate|percent|pct|score|quality|freshness)/.test(lower)) return 2;
+  if (/(amount|revenue|arr|value)/.test(lower)) return 3;
+  if (/(date|time|season)/.test(lower)) return 6;
+  if (/(^|_)id($|_)/.test(lower)) return 20;
+  return 100;
+}
+
+function isNumericColumn(column: string, rows: QueryResult['rows']): boolean {
+  const sample = rows.slice(0, 8).map((row) => row[column]).filter((value) => value !== null && value !== undefined && value !== '');
+  if (sample.length === 0) return false;
+  return sample.every((value) => typeof value === 'number' || (typeof value === 'string' && value.trim() !== '' && Number.isFinite(Number(value))));
+}
+
+function formatEvidenceValue(value: unknown): string {
+  if (value === null || value === undefined || value === '') return 'N/A';
+  if (typeof value === 'number') return Number.isFinite(value) ? new Intl.NumberFormat('en-US', { maximumFractionDigits: 2 }).format(value) : String(value);
+  if (typeof value === 'boolean') return value ? 'Yes' : 'No';
+  const text = String(value);
+  const numeric = Number(text);
+  if (text.trim() !== '' && Number.isFinite(numeric) && /^-?\d+(\.\d+)?$/.test(text.trim())) {
+    return new Intl.NumberFormat('en-US', { maximumFractionDigits: 2 }).format(numeric);
+  }
+  return text.replace(/_/g, ' ');
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
 function toolbarButtonStyle(active: boolean): CSSProperties {
   return {
     border: '1px solid var(--dql-app-line, var(--border-color, rgba(0,0,0,0.12)))',
@@ -1687,6 +2096,159 @@ const fieldChipStyle: CSSProperties = {
   whiteSpace: 'nowrap',
 };
 
+const generatedMetaRowStyle: CSSProperties = {
+  marginTop: 7,
+  display: 'flex',
+  flexWrap: 'wrap',
+  gap: 5,
+  alignItems: 'center',
+  minWidth: 0,
+};
+
+const generatedMetaPillStyle: CSSProperties = {
+  display: 'inline-flex',
+  alignItems: 'center',
+  minHeight: 18,
+  borderRadius: 999,
+  border: '1px solid var(--border-color, rgba(15,23,42,0.10))',
+  background: 'rgba(148,163,184,0.10)',
+  color: 'var(--dql-app-muted, rgba(15,23,42,0.70))',
+  padding: '2px 7px',
+  fontSize: 10,
+  fontWeight: 720,
+  lineHeight: 1.1,
+};
+
+function trustPillStyle(certified: boolean): CSSProperties {
+  return {
+    ...generatedMetaPillStyle,
+    border: certified ? '1px solid rgba(22,163,74,0.26)' : '1px solid rgba(217,119,6,0.28)',
+    background: certified ? 'rgba(22,163,74,0.10)' : 'rgba(245,158,11,0.12)',
+    color: certified ? '#15803d' : '#b45309',
+    gap: 4,
+  };
+}
+
+const generatedVizSwitcherStyle: CSSProperties = {
+  display: 'inline-flex',
+  alignItems: 'center',
+  gap: 2,
+  padding: 2,
+  border: '1px solid var(--border-color, rgba(15,23,42,0.12))',
+  borderRadius: 6,
+  background: 'rgba(255,255,255,0.74)',
+  flexShrink: 0,
+};
+
+function generatedVizButtonStyle(active: boolean): CSSProperties {
+  return {
+    width: 24,
+    height: 24,
+    border: 'none',
+    borderRadius: 4,
+    background: active ? 'var(--dql-app-accent, var(--accent, #4f46e5))' : 'transparent',
+    color: active ? 'var(--color-text-on-accent, #fff)' : 'inherit',
+    cursor: 'pointer',
+    display: 'inline-flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    padding: 0,
+  };
+}
+
+function generatedTextTileStyle(isTrust: boolean): CSSProperties {
+  return {
+    width: '100%',
+    alignSelf: 'stretch',
+    overflow: 'auto',
+    display: 'flex',
+    flexDirection: 'column',
+    gap: 10,
+    fontStyle: 'normal',
+    opacity: 1,
+    lineHeight: 1.45,
+    borderRadius: 6,
+    padding: isTrust ? 10 : 0,
+    background: isTrust ? 'rgba(245,158,11,0.08)' : 'transparent',
+  };
+}
+
+function generatedTextIconStyle(isTrust: boolean): CSSProperties {
+  return {
+    width: 30,
+    height: 30,
+    borderRadius: 7,
+    display: 'inline-flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    flexShrink: 0,
+    background: isTrust ? 'rgba(245,158,11,0.14)' : 'rgba(79,70,229,0.10)',
+    color: isTrust ? '#b45309' : 'var(--dql-app-accent, var(--accent, #4f46e5))',
+  };
+}
+
+const generatedActionChipStyle: CSSProperties = {
+  ...generatedMetaPillStyle,
+  background: 'rgba(79,70,229,0.08)',
+  color: 'var(--dql-app-accent, var(--accent, #4f46e5))',
+  border: '1px solid rgba(79,70,229,0.16)',
+};
+
+const generatedEvidenceStyle: CSSProperties = {
+  width: '100%',
+  alignSelf: 'stretch',
+  overflow: 'auto',
+  display: 'flex',
+  flexDirection: 'column',
+  gap: 9,
+  fontStyle: 'normal',
+  opacity: 1,
+  lineHeight: 1.35,
+};
+
+const generatedEvidenceRowsStyle: CSSProperties = {
+  display: 'grid',
+  gap: 6,
+};
+
+const generatedEvidenceRowStyle: CSSProperties = {
+  display: 'grid',
+  gridTemplateColumns: 'minmax(0, 1fr)',
+  gap: 7,
+  alignItems: 'start',
+  border: '1px solid var(--border-color, rgba(15,23,42,0.09))',
+  borderRadius: 7,
+  background: 'rgba(255,255,255,0.56)',
+  padding: '7px 8px',
+};
+
+const generatedEvidenceMiniPillStyle: CSSProperties = {
+  ...generatedMetaPillStyle,
+  minHeight: 16,
+  borderRadius: 5,
+  padding: '1px 5px',
+  maxWidth: '100%',
+  overflow: 'hidden',
+  textOverflow: 'ellipsis',
+  whiteSpace: 'nowrap',
+};
+
+const generatedEvidenceMetricStyle: CSSProperties = {
+  display: 'grid',
+  gap: 1,
+  minWidth: 82,
+  textAlign: 'left',
+  fontSize: 10.5,
+};
+
+const generatedEvidenceStatusStyle: CSSProperties = {
+  ...generatedMetaPillStyle,
+  minHeight: 18,
+  background: 'rgba(22,163,74,0.09)',
+  border: '1px solid rgba(22,163,74,0.18)',
+  color: '#15803d',
+};
+
 const iconTileButtonStyle: CSSProperties = {
   width: 24,
   height: 24,
@@ -1801,6 +2363,22 @@ function autoTileSizeForViz(vizType: string, cols: number): { w: number; h: numb
   return tileSizeForPreset('standard', cols, normalized);
 }
 
+function autoTileSizeForItem(item: DashboardLayoutItem, cols: number): { w: number; h: number } {
+  const genUi = getDqlGenUi(item);
+  const preset = normalizeSizePreset(genUi?.layoutIntent);
+  if (preset && preset !== 'auto') return tileSizeForPreset(preset, cols, String(item.viz.type ?? 'table'));
+  return autoTileSizeForViz(normalizeViz(String(item.viz.type ?? 'table')), cols);
+}
+
+function narrowTileMinHeight(item: DashboardLayoutItem, genUi?: DqlGenUiMetadata | null): number {
+  if (item.viz.type === 'heading') return 90;
+  if (genUi?.component === 'BusinessBrief' || genUi?.component === 'NarrativePanel' || item.viz.type === 'text') return 180;
+  if (genUi?.component === 'TrustCallout' || genUi?.component === 'ResearchActions') return 210;
+  if (genUi?.component === 'EvidenceTable') return 330;
+  if (genUi?.component === 'KpiMetric') return 150;
+  return Math.max(280, Math.min(420, item.h * 76));
+}
+
 function tileSizeForPreset(preset: TileSizePresetId, cols: number, vizType = 'table'): { w: number; h: number } {
   const safeCols = Math.max(1, cols);
   const half = Math.max(1, Math.ceil(safeCols / 2));
@@ -1816,7 +2394,7 @@ function tileSizeForPreset(preset: TileSizePresetId, cols: number, vizType = 'ta
 function tileSizePatch(item: DashboardLayoutItem, cols: number, preset: TileSizePresetId): Partial<DashboardLayoutItem> {
   const vizType = String(item.viz.type ?? 'table');
   const size = preset === 'auto'
-    ? autoTileSizeForViz(vizType, cols)
+    ? autoTileSizeForItem(item, cols)
     : tileSizeForPreset(preset, cols, vizType);
   return {
     w: size.w,
@@ -1826,9 +2404,15 @@ function tileSizePatch(item: DashboardLayoutItem, cols: number, preset: TileSize
 }
 
 function presetMatches(item: DashboardLayoutItem, cols: number, preset: TileSizePresetId): boolean {
-  if (preset === 'auto') return false;
-  const size = tileSizeForPreset(preset, cols, String(item.viz.type ?? 'table'));
+  const size = preset === 'auto'
+    ? autoTileSizeForItem(item, cols)
+    : tileSizeForPreset(preset, cols, String(item.viz.type ?? 'table'));
   return item.w === size.w && item.h === size.h;
+}
+
+function normalizeSizePreset(value?: string): TileSizePresetId | null {
+  if (value === 'auto' || value === 'compact' || value === 'standard' || value === 'wide' || value === 'tall' || value === 'full') return value;
+  return null;
 }
 
 function nextTilePosition(
@@ -1913,6 +2497,13 @@ function layoutScore(item: DashboardLayoutItem, cols: number): number {
 // Clean enterprise reading order for Auto layout:
 // headings → KPIs → charts → tables/pivots → text.
 function autoLayoutRank(item: DashboardLayoutItem): number {
+  const genUi = getDqlGenUi(item);
+  if (genUi?.role === 'business_summary') return 0;
+  if (genUi?.role === 'kpi') return 1;
+  if (genUi?.component === 'RankingPanel' || genUi?.component === 'TrendPanel') return 2;
+  if (genUi?.component === 'EvidenceTable') return 3;
+  if (genUi?.component === 'TrustCallout' || genUi?.component === 'ResearchActions') return 4;
+  if (genUi?.role === 'narrative') return 5;
   const viz = normalizeViz(String(item.viz.type ?? 'table'));
   if (viz === 'heading') return 0;
   if (viz === 'single_value' || viz === 'kpi' || viz === 'gauge') return 1;

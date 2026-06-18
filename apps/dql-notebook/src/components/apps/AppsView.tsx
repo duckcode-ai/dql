@@ -335,6 +335,7 @@ export function AppsView(): JSX.Element {
       owner: builderOwner.trim() || undefined,
       force: false,
       selectedBlockIds: Array.from(selectedBlocks),
+      plannerMode: 'ai_assisted',
     });
     setBuilderSaving(false);
     if (!result.ok) {
@@ -1938,15 +1939,22 @@ function PanelHead({ title, meta }: { title: string; meta?: string }) {
 }
 
 function PreviewTile({ tile, index }: { tile: GeneratedAppPlan['pages'][number]['tiles'][number]; index: number }) {
-  const wide = tile.viz === 'line' || tile.viz === 'bar';
+  const genUi = tile.display?.genUi;
+  const wide = genUi?.layoutIntent === 'wide' || genUi?.layoutIntent === 'full' || tile.viz === 'line' || tile.viz === 'bar';
+  const component = genUi?.component ?? (tile.kind === 'narrative' ? 'NarrativePanel' : 'EvidenceTable');
   return (
     <div className={`dql-app-preview-tile ${tile.certification === 'uncertified' ? 'draft' : ''} ${wide ? 'wide' : ''}`}>
       <div className="dql-app-preview-tile-head">
-        <b>{tile.title}</b>
-        <span>{tile.viz}</span>
+        <b>{genUi?.insightTitle ?? tile.title}</b>
+        <span>{component.replace(/([a-z])([A-Z])/g, '$1 $2')}</span>
       </div>
       <div className="dql-app-preview-tile-body">
-        {tile.viz === 'single_value' || tile.viz === 'kpi' ? (
+        {component === 'TrustCallout' ? (
+          <>
+            <strong>Review</strong>
+            <small>{tile.description ?? 'Trust, lineage, and evidence tasks before certification.'}</small>
+          </>
+        ) : tile.viz === 'single_value' || tile.viz === 'kpi' ? (
           <>
             <strong>{index % 2 === 0 ? '$48.2K' : '61.9K'}</strong>
             <small>{tile.description ?? 'Certified KPI tile'}</small>
@@ -1958,7 +1966,7 @@ function PreviewTile({ tile, index }: { tile: GeneratedAppPlan['pages'][number][
         )}
       </div>
       <div className="dql-app-preview-tile-foot">
-        <span>{tile.kind.replace(/_/g, ' ')}</span>
+        <span>{genUi?.layoutIntent ?? tile.kind.replace(/_/g, ' ')}</span>
         <b>{tile.certification === 'certified' ? 'certified' : 'draft'}</b>
       </div>
     </div>
@@ -1966,11 +1974,12 @@ function PreviewTile({ tile, index }: { tile: GeneratedAppPlan['pages'][number][
 }
 
 function PlanItem({ tile }: { tile: GeneratedAppPlan['pages'][number]['tiles'][number] }) {
+  const genUi = tile.display?.genUi;
   return (
     <div className="dql-app-plan-item">
       <i className={tile.certification === 'uncertified' ? 'draft' : ''} />
       <span><b>{tile.title}</b><small>{tile.rationale ?? tile.description ?? tile.kind.replace(/_/g, ' ')}</small></span>
-      <em>{tile.viz}</em>
+      <em>{genUi ? `${genUi.component.replace(/([a-z])([A-Z])/g, '$1 $2')} / ${genUi.layoutIntent}` : tile.viz}</em>
     </div>
   );
 }

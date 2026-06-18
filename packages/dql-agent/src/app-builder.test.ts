@@ -77,6 +77,33 @@ const revenueNodes: KGNode[] = [
   },
 ];
 
+const nbaNodes: KGNode[] = [
+  {
+    nodeId: "block:top_10_goal_scorers",
+    kind: "block",
+    name: "top_10_goal_scorers",
+    domain: "nba",
+    status: "certified",
+    description: "Top 10 goal scorers by player and total goal count",
+    llmContext: "Use this for ranking NBA players by scoring output.",
+    tags: ["nba", "player", "top", "scoring"],
+    sourceTier: "certified_artifact",
+    certification: "certified",
+  },
+  {
+    nodeId: "block:player_stats_data_availability",
+    kind: "block",
+    name: "player_stats_data_availability",
+    domain: "nba",
+    status: "certified",
+    description: "Dataset availability and record counts for player stats",
+    llmContext: "Use this as supporting data availability evidence.",
+    tags: ["nba", "availability", "records"],
+    sourceTier: "certified_artifact",
+    certification: "certified",
+  },
+];
+
 describe("planAppFromPrompt", () => {
   it("builds a reviewable local app plan from certified DQL context", () =>
     withKg(revenueNodes, (kg) => {
@@ -130,6 +157,11 @@ describe("planAppFromPrompt", () => {
             display: expect.objectContaining({
               trustState: "certified",
               followUpActions: expect.arrayContaining(["open_research"]),
+              genUi: expect.objectContaining({
+                version: 1,
+                trustState: "certified",
+                allowedVisualizations: expect.arrayContaining(["line", "bar", "table"]),
+              }),
             }),
           }),
           expect.objectContaining({
@@ -159,6 +191,47 @@ describe("planAppFromPrompt", () => {
       expect(certifiedTiles[0]).toMatchObject({
         blockId: "revenue_by_segment",
         certification: "certified",
+      });
+    }));
+
+  it("uses ranking and evidence GenUI panels for an NBA scorer app", () =>
+    withKg(nbaNodes, (kg) => {
+      const plan = planAppFromPrompt({
+        prompt:
+          "Build an NBA E2E QA app for Kevin Durant profile and player performance. Use certified player performance and top scorers blocks when available.",
+        kg,
+        domain: "nba",
+        preferredBlockIds: [
+          "top_10_goal_scorers",
+          "player_stats_data_availability",
+        ],
+      });
+
+      const scorerTile = plan.pages[0].tiles.find(
+        (tile) => tile.blockId === "top_10_goal_scorers",
+      );
+      const availabilityTile = plan.pages[0].tiles.find(
+        (tile) => tile.blockId === "player_stats_data_availability",
+      );
+
+      expect(scorerTile).toMatchObject({
+        viz: "bar",
+        display: expect.objectContaining({
+          genUi: expect.objectContaining({
+            component: "RankingPanel",
+            layoutIntent: "wide",
+            allowedVisualizations: expect.arrayContaining(["bar", "table", "donut"]),
+          }),
+        }),
+      });
+      expect(availabilityTile).toMatchObject({
+        viz: "table",
+        display: expect.objectContaining({
+          genUi: expect.objectContaining({
+            component: "EvidenceTable",
+            layoutIntent: "standard",
+          }),
+        }),
       });
     }));
 });
@@ -231,10 +304,27 @@ describe("generateAppFromPlan", () => {
       const dashboard = JSON.parse(dashboardText);
       expect(dashboard.layout.items).toEqual(
         expect.arrayContaining([
-          expect.objectContaining({ block: { blockId: "revenue_total" } }),
+          expect.objectContaining({
+            block: { blockId: "revenue_total" },
+            viz: expect.objectContaining({
+              options: expect.objectContaining({
+                dqlGenUi: expect.objectContaining({
+                  version: 1,
+                  trustState: "certified",
+                }),
+              }),
+            }),
+          }),
           expect.objectContaining({
             text: expect.objectContaining({
               markdown: expect.stringContaining("**Trust:** uncertified"),
+            }),
+            viz: expect.objectContaining({
+              options: expect.objectContaining({
+                dqlGenUi: expect.objectContaining({
+                  component: expect.stringMatching(/TrustCallout|NarrativePanel|ResearchActions|BusinessBrief/),
+                }),
+              }),
             }),
           }),
         ]),

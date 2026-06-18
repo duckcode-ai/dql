@@ -43,6 +43,14 @@ describe('parseArgs', () => {
     expect(parsed.flags.owner).toBe('analytics');
   });
 
+  it('parses app generation AI layout flag', () => {
+    const parsed = parseArgs(['app', 'generate', 'Build a clean NBA app', '--ai-layout']);
+    expect(parsed.command).toBe('app');
+    expect(parsed.file).toBe('generate');
+    expect(parsed.rest).toEqual(['Build a clean NBA app']);
+    expect(parsed.flags.aiLayout).toBe(true);
+  });
+
   it('parses agent provider, runtime, and feedback flags without adding them to the prompt', () => {
     const parsed = parseArgs([
       'agent',

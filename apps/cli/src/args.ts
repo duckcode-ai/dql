@@ -37,6 +37,8 @@ export interface CLIFlags {
   runtime?: string;
   /** Execute generated SQL previews during eval. Default false for route-only eval. */
   execute?: boolean;
+  /** Ask app generation to use the richer GenUI planning mode when available. */
+  aiLayout?: boolean;
   /** Agent feedback helpers. */
   block?: string;
   question?: string;
@@ -144,6 +146,8 @@ export function parseArgs(argv: string[]): ParsedArgs {
       flags.runtime = argv[++i];
     } else if (arg === '--execute') {
       flags.execute = true;
+    } else if (arg === '--ai-layout') {
+      flags.aiLayout = true;
     } else if (arg === '--block' && i + 1 < argv.length) {
       flags.block = argv[++i];
     } else if (arg === '--question' && i + 1 < argv.length) {

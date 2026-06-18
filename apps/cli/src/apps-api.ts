@@ -743,6 +743,7 @@ interface AppGenerateRequest {
   owner?: string;
   force?: boolean;
   selectedBlockIds?: string[];
+  plannerMode?: 'deterministic' | 'ai_assisted';
 }
 
 interface AiPinCreateRequest {
@@ -944,6 +945,7 @@ export async function generateAppPackage(
       domain: cleanString(input.domain) || undefined,
       owner: cleanString(input.owner) || undefined,
       preferredBlockIds: selectedBlockIds,
+      plannerMode: input.plannerMode === 'ai_assisted' ? 'ai_assisted' : 'deterministic',
     });
     const validation = validateAppPlan(plan, kg);
     const generated = generateAppFromPlan(projectRoot, plan, kg, {

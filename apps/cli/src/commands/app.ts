@@ -8,7 +8,7 @@
  *
  * Subcommands:
  *   dql app new <id> --domain <domain> [--owner <user>]
- *   dql app generate "<prompt>" [--domain <domain>] [--owner <user>]
+ *   dql app generate "<prompt>" [--domain <domain>] [--owner <user>] [--ai-layout]
  *   dql app ls
  *   dql app show <id>
  *   dql app build [--app <id>]
@@ -63,7 +63,7 @@ export async function runApp(
       throw new Error(
         "Usage: dql app <new|ls|show|build|reindex> [args]\n" +
           "  dql app new <id> --domain <domain> [--owner <user>]\n" +
-          '  dql app generate "<prompt>" [--domain <domain>] [--owner <user>]\n' +
+          '  dql app generate "<prompt>" [--domain <domain>] [--owner <user>] [--ai-layout]\n' +
           "  dql app ls\n" +
           "  dql app show <id>\n" +
           "  dql app build\n" +
@@ -210,7 +210,7 @@ async function runAppGenerate(rest: string[], flags: CLIFlags): Promise<void> {
   const prompt = await readPrompt(rest, flags);
   if (!prompt) {
     throw new Error(
-      'Usage: dql app generate "<prompt>" [--domain <domain>] [--owner <user>]',
+      'Usage: dql app generate "<prompt>" [--domain <domain>] [--owner <user>] [--ai-layout]',
     );
   }
   const {
@@ -232,6 +232,9 @@ async function runAppGenerate(rest: string[], flags: CLIFlags): Promise<void> {
       kg,
       domain: cleanOptional((flags as { domain?: string }).domain),
       owner: cleanOptional((flags as { owner?: string }).owner),
+      plannerMode: (flags as { aiLayout?: boolean }).aiLayout
+        ? "ai_assisted"
+        : "deterministic",
     });
     const validation = validateAppPlan(plan, kg);
     const generated = generateAppFromPlan(projectRoot, plan, kg, {
