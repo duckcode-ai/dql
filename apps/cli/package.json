@@ -1,6 +1,6 @@
 {
   "name": "@duckcodeailabs/dql-cli",
-  "version": "1.6.11",
+  "version": "1.6.12",
   "description": "Public CLI for parsing, formatting, testing, and certifying DQL blocks",
   "license": "Apache-2.0",
   "type": "module",
@@ -27,8 +27,8 @@
     "directory": "apps/cli"
   },
   "dependencies": {
+    "@anthropic-ai/sdk": "^0.104.2",
     "@duckcodeailabs/dql-agent": "workspace:*",
-    "@duckcodeailabs/dql-slack": "workspace:*",
     "@duckcodeailabs/dql-compiler": "workspace:*",
     "@duckcodeailabs/dql-connectors": "workspace:*",
     "@duckcodeailabs/dql-core": "workspace:*",
@@ -36,10 +36,12 @@
     "@duckcodeailabs/dql-mcp": "workspace:*",
     "@duckcodeailabs/dql-notebook": "workspace:*",
     "@duckcodeailabs/dql-project": "workspace:*",
+    "@duckcodeailabs/dql-slack": "workspace:*",
     "isomorphic-git": "^1.27.0",
     "js-yaml": "^4.1.0",
     "node-cron": "^3.0.3",
-    "nodemailer": "^6.9.16"
+    "nodemailer": "^6.9.16",
+    "openai": "^6.44.0"
   },
   "devDependencies": {
     "@duckcodeailabs/dql-notebook-app": "workspace:*",

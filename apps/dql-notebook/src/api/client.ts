@@ -420,12 +420,36 @@ export interface ProviderSettings {
   id: ProviderSettingsId;
   label: string;
   enabled: boolean;
+  active: boolean;
   hasApiKey: boolean;
   apiKeyPreview?: string;
   baseUrl?: string;
   model?: string;
   source: 'local' | 'env' | 'none';
   envVars: string[];
+}
+
+export interface RemoteMcpEntry {
+  kind: 'server' | 'connector';
+  name: string;
+  url?: string;
+  connectorId?: string;
+  description?: string;
+  authorizationTokenEnv?: string;
+  authorizationToken?: string;
+  allowedTools?: string[];
+  enabled: boolean;
+  trusted: boolean;
+  deferLoading?: boolean;
+  providers?: Array<'openai' | 'anthropic'>;
+  hasAuthorizationToken?: boolean;
+  authorizationTokenPreview?: string;
+}
+
+export interface RemoteMcpSettings {
+  path: string;
+  entries: RemoteMcpEntry[];
+  warnings: string[];
 }
 
 export interface AgentMemory {
@@ -541,6 +565,21 @@ export const api = {
     return request('/api/settings/providers/test', {
       method: 'POST',
       body: JSON.stringify({ id }),
+    });
+  },
+
+  async getRemoteMcpSettings(): Promise<{ settings: RemoteMcpSettings }> {
+    try {
+      return await request<{ settings: RemoteMcpSettings }>('/api/settings/mcp');
+    } catch {
+      return { settings: { path: '', entries: [], warnings: [] } };
+    }
+  },
+
+  async saveRemoteMcpSettings(entries: RemoteMcpEntry[]): Promise<{ ok: boolean; settings: RemoteMcpSettings }> {
+    return request('/api/settings/mcp', {
+      method: 'POST',
+      body: JSON.stringify({ entries }),
     });
   },
 

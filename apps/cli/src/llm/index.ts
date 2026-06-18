@@ -1,6 +1,7 @@
 import { claudeAgentSdkRunner } from './providers/claude-agent-sdk.js';
 import { claudeCodeRunner } from './providers/claude-code.js';
 import { createDqlAgentProviderRunner } from './providers/dql-agent-provider.js';
+import { anthropicSdkRunner, openAiSdkRunner } from './providers/native-sdk-provider.js';
 import type { AgentRunner, ProviderId } from './types.js';
 
 export {
@@ -19,9 +20,10 @@ export {
  * explicit experimental runners for MCP-oriented workflows.
  */
 const RUNNERS: Record<ProviderId, AgentRunner> = {
+  anthropic: anthropicSdkRunner,
   'claude-agent-sdk': claudeAgentSdkRunner,
   'claude-code': claudeCodeRunner,
-  openai: createDqlAgentProviderRunner('openai'),
+  openai: openAiSdkRunner,
   gemini: createDqlAgentProviderRunner('gemini'),
   ollama: createDqlAgentProviderRunner('ollama'),
   'custom-openai': createDqlAgentProviderRunner('custom-openai'),

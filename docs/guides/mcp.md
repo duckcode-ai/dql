@@ -23,6 +23,46 @@ execute a certified block only for an exact direct KPI or saved-block match,
 flag Tier‑2 answers verbatim, and refuse when metadata is insufficient — so
 generated SQL never silently becomes a "trusted" number.
 
+## App chat with SDK providers
+
+The notebook and app chat runtime can also attach trusted remote MCP servers
+when OpenAI or Anthropic is the active provider. DQL still exposes its own
+governed tools first: certified block search/execution, DQL manifest search,
+dbt/source metadata, semantic context, runtime schema inspection, bounded SQL
+preview, draft block creation, and certification checks.
+
+Create `.dql/mcp-servers.json` to let the active SDK provider use external
+remote MCP servers or OpenAI connectors:
+
+```json
+{
+  "servers": [
+    {
+      "name": "github",
+      "url": "https://api.githubcopilot.com/mcp/",
+      "trusted": true,
+      "authorizationTokenEnv": "GITHUB_MCP_TOKEN",
+      "allowedTools": ["search_issues"],
+      "providers": ["openai", "anthropic"]
+    }
+  ],
+  "connectors": [
+    {
+      "name": "gdrive",
+      "connectorId": "connector_googledrive",
+      "trusted": true,
+      "authorizationTokenEnv": "GOOGLE_DRIVE_OAUTH_TOKEN",
+      "providers": ["openai"]
+    }
+  ]
+}
+```
+
+`trusted: true` is required before DQL attaches a remote MCP server. Use
+provider filtering when a server should only be available to one SDK. OpenAI
+uses the Responses API `mcp` tool for remote servers and connectors; Anthropic
+uses the Messages API MCP connector for remote HTTP/SSE servers.
+
 ## Run the server
 
 From a DQL project folder:

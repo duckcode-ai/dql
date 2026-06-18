@@ -19,6 +19,7 @@ export interface RedactedProviderSettings {
   id: ProviderSettingsId;
   label: string;
   enabled: boolean;
+  active: boolean;
   hasApiKey: boolean;
   apiKeyPreview?: string;
   baseUrl?: string;
@@ -34,6 +35,11 @@ export interface EffectiveProviderConfig {
   enabled: boolean;
 }
 
+interface StoredProviderState {
+  activeProvider?: ProviderSettingsId;
+  providers: Partial<Record<ProviderSettingsId, StoredProviderSettings>>;
+}
+
 const PROVIDER_META: Record<ProviderSettingsId, { label: string; keyEnv?: string; modelEnv?: string; baseUrlEnv?: string }> = {
   anthropic: { label: 'Anthropic Claude', keyEnv: 'ANTHROPIC_API_KEY', modelEnv: 'ANTHROPIC_MODEL' },
   openai: { label: 'OpenAI', keyEnv: 'OPENAI_API_KEY', modelEnv: 'OPENAI_MODEL', baseUrlEnv: 'OPENAI_BASE_URL' },
@@ -47,7 +53,8 @@ export function providerSettingsPath(projectRoot: string): string {
 }
 
 export function listProviderSettings(projectRoot: string): RedactedProviderSettings[] {
-  const stored = readStoredProviders(projectRoot);
+  const state = readStoredProviderState(projectRoot);
+  const stored = state.providers;
   return (Object.keys(PROVIDER_META) as ProviderSettingsId[]).map((id) => {
     const meta = PROVIDER_META[id];
     const local = stored[id];
@@ -59,6 +66,7 @@ export function listProviderSettings(projectRoot: string): RedactedProviderSetti
       id,
       label: meta.label,
       enabled: local?.enabled ?? (hasLocalKey || hasEnvKey || hasNoAuthEndpoint || id === 'ollama'),
+      active: state.activeProvider === id,
       hasApiKey: hasLocalKey || hasEnvKey || hasNoAuthEndpoint || id === 'ollama',
       apiKeyPreview: hasLocalKey ? previewSecret(local!.apiKey!) : hasEnvKey ? `${meta.keyEnv}=set` : undefined,
       baseUrl: local?.baseUrl || (meta.baseUrlEnv ? process.env[meta.baseUrlEnv] : undefined),
@@ -70,7 +78,7 @@ export function listProviderSettings(projectRoot: string): RedactedProviderSetti
 }
 
 export function getEffectiveProviderConfig(projectRoot: string, id: ProviderSettingsId): EffectiveProviderConfig {
-  const stored = readStoredProviders(projectRoot)[id];
+  const stored = readStoredProviderState(projectRoot).providers[id];
   const meta = PROVIDER_META[id];
   return {
     apiKey: stored?.apiKey || (meta.keyEnv ? process.env[meta.keyEnv] : undefined),
@@ -80,8 +88,13 @@ export function getEffectiveProviderConfig(projectRoot: string, id: ProviderSett
   };
 }
 
+export function getActiveProvider(projectRoot: string): ProviderSettingsId | undefined {
+  return readStoredProviderState(projectRoot).activeProvider;
+}
+
 export function saveProviderSettings(projectRoot: string, input: ProviderSettingsInput): RedactedProviderSettings[] {
-  const stored = readStoredProviders(projectRoot);
+  const state = readStoredProviderState(projectRoot);
+  const stored = state.providers;
   const existing = stored[input.id];
   const next: StoredProviderSettings = {
     id: input.id,
@@ -92,27 +105,40 @@ export function saveProviderSettings(projectRoot: string, input: ProviderSetting
     updatedAt: new Date().toISOString(),
   };
   stored[input.id] = next;
-  writeStoredProviders(projectRoot, stored);
+  if (next.enabled === false && state.activeProvider === input.id) {
+    state.activeProvider = undefined;
+  } else if (next.enabled !== false && providerCanBeActive(input.id, next)) {
+    state.activeProvider = input.id;
+  }
+  writeStoredProviderState(projectRoot, state);
   return listProviderSettings(projectRoot);
 }
 
-function readStoredProviders(projectRoot: string): Partial<Record<ProviderSettingsId, StoredProviderSettings>> {
+function readStoredProviderState(projectRoot: string): StoredProviderState {
   const path = providerSettingsPath(projectRoot);
-  if (!existsSync(path)) return {};
+  if (!existsSync(path)) return { providers: {} };
   try {
     const parsed = JSON.parse(readFileSync(path, 'utf-8')) as {
+      activeProvider?: ProviderSettingsId;
       providers?: Partial<Record<ProviderSettingsId, StoredProviderSettings>>;
     };
-    return parsed.providers ?? {};
+    return {
+      activeProvider: isProviderSettingsId(parsed.activeProvider) ? parsed.activeProvider : undefined,
+      providers: parsed.providers ?? {},
+    };
   } catch {
-    return {};
+    return { providers: {} };
   }
 }
 
-function writeStoredProviders(projectRoot: string, providers: Partial<Record<ProviderSettingsId, StoredProviderSettings>>): void {
+function writeStoredProviderState(projectRoot: string, state: StoredProviderState): void {
   const path = providerSettingsPath(projectRoot);
   mkdirSync(dirname(path), { recursive: true });
-  writeFileSync(path, JSON.stringify({ version: 1, providers }, null, 2) + '\n', 'utf-8');
+  writeFileSync(path, JSON.stringify({
+    version: 1,
+    ...(state.activeProvider ? { activeProvider: state.activeProvider } : {}),
+    providers: state.providers,
+  }, null, 2) + '\n', 'utf-8');
   try {
     chmodSync(path, 0o600);
   } catch {
@@ -122,6 +148,25 @@ function writeStoredProviders(projectRoot: string, providers: Partial<Record<Pro
 
 function envHas(meta: { modelEnv?: string; baseUrlEnv?: string }): boolean {
   return Boolean((meta.modelEnv && process.env[meta.modelEnv]) || (meta.baseUrlEnv && process.env[meta.baseUrlEnv]));
+}
+
+function providerCanBeActive(id: ProviderSettingsId, stored: StoredProviderSettings): boolean {
+  if (stored.enabled === true) return true;
+  const meta = PROVIDER_META[id];
+  const hasKey = Boolean(stored.apiKey?.trim() || (meta.keyEnv && process.env[meta.keyEnv]?.trim()));
+  const hasBaseUrl = Boolean(stored.baseUrl?.trim() || (meta.baseUrlEnv && process.env[meta.baseUrlEnv]?.trim()));
+  const hasModel = Boolean(stored.model?.trim() || (meta.modelEnv && process.env[meta.modelEnv]?.trim()));
+  if (id === 'ollama') return hasBaseUrl || hasModel;
+  if (id === 'custom-openai') return hasBaseUrl;
+  return hasKey;
+}
+
+function isProviderSettingsId(value: unknown): value is ProviderSettingsId {
+  return value === 'anthropic'
+    || value === 'openai'
+    || value === 'gemini'
+    || value === 'ollama'
+    || value === 'custom-openai';
 }
 
 function previewSecret(secret: string): string {

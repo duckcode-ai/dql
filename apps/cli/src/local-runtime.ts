@@ -4,6 +4,8 @@ import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, wat
 import { homedir } from 'node:os';
 import { dirname, extname, join, normalize, relative, resolve } from 'node:path';
 import type { IncomingMessage, ServerResponse } from 'node:http';
+import Anthropic from '@anthropic-ai/sdk';
+import OpenAI from 'openai';
 import { QueryExecutor, type ConnectionConfig, type DatabaseConnector } from '@duckcodeailabs/dql-connectors';
 import {
   buildExecutionPlan,
@@ -54,6 +56,7 @@ import { load as loadYaml } from 'js-yaml';
 import { listBlockTemplates } from './block-templates.js';
 import { getRunner as getLLMRunner } from './llm/index.js';
 import type { AgentConversationContext, ProviderId } from './llm/types.js';
+import { listRemoteMcpSettings, saveRemoteMcpSettings } from './llm/mcp-config.js';
 import {
   ClaudeProvider,
   GeminiProvider,
@@ -75,6 +78,7 @@ import {
 } from '@duckcodeailabs/dql-agent';
 import { handleAppsApi } from './apps-api.js';
 import {
+  getActiveProvider,
   getEffectiveProviderConfig,
   listProviderSettings,
   saveProviderSettings,
@@ -855,6 +859,25 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
         const ok = await testProviderConfig(projectRoot, body.id);
         res.writeHead(ok.ok ? 200 : 400, { 'Content-Type': 'application/json; charset=utf-8' });
         res.end(serializeJSON(ok));
+      } catch (error) {
+        res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({ ok: false, error: error instanceof Error ? error.message : String(error) }));
+      }
+      return;
+    }
+
+    if (req.method === 'GET' && path === '/api/settings/mcp') {
+      res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+      res.end(serializeJSON({ settings: listRemoteMcpSettings(projectRoot) }));
+      return;
+    }
+
+    if (req.method === 'POST' && path === '/api/settings/mcp') {
+      try {
+        const body = await readJSON(req);
+        const settings = saveRemoteMcpSettings(projectRoot, { entries: body?.entries });
+        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({ ok: true, settings }));
       } catch (error) {
         res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' });
         res.end(serializeJSON({ ok: false, error: error instanceof Error ? error.message : String(error) }));
@@ -3945,7 +3968,8 @@ function normalizeQueryResult(
 }
 
 function isLLMProviderId(value: unknown): value is ProviderId {
-  return value === 'claude-agent-sdk'
+  return value === 'anthropic'
+    || value === 'claude-agent-sdk'
     || value === 'claude-code'
     || value === 'openai'
     || value === 'gemini'
@@ -3953,9 +3977,14 @@ function isLLMProviderId(value: unknown): value is ProviderId {
     || value === 'custom-openai';
 }
 
-function resolveDefaultLLMProvider(projectRoot: string): ProviderId | null {
+export function resolveDefaultLLMProvider(projectRoot: string): ProviderId | null {
   const settings = listProviderSettings(projectRoot);
-  const preferred: ProviderId[] = ['openai', 'gemini', 'ollama', 'custom-openai'];
+  const activeProvider = getActiveProvider(projectRoot);
+  if (activeProvider) {
+    const active = settings.find((item) => item.id === activeProvider);
+    if (active?.enabled) return activeProvider;
+  }
+  const preferred: ProviderId[] = ['openai', 'gemini', 'anthropic', 'custom-openai', 'ollama'];
   for (const id of preferred) {
     const provider = settings.find((item) => item.id === id);
     if (provider?.enabled && provider.hasApiKey) return id;
@@ -5694,9 +5723,11 @@ async function createBlockStudioAssistProvider(
   requestedProvider?: ProviderSettingsId,
 ): Promise<AgentProvider | null> {
   const settings = listProviderSettings(projectRoot);
+  const activeProvider = getActiveProvider(projectRoot);
   const selected = requestedProvider
     ? settings.find((provider) => provider.id === requestedProvider && provider.enabled && provider.hasApiKey)
-    : settings.find((provider) => provider.enabled && provider.hasApiKey);
+    : settings.find((provider) => provider.id === activeProvider && provider.enabled)
+      ?? settings.find((provider) => provider.enabled && provider.hasApiKey);
   if (!selected) return null;
   const config = getEffectiveProviderConfig(projectRoot, selected.id);
   let provider: AgentProvider;
@@ -7443,11 +7474,16 @@ function isProviderSettingsId(value: unknown): value is ProviderSettingsId {
 
 async function testProviderConfig(projectRoot: string, id: ProviderSettingsId): Promise<{ ok: boolean; message: string }> {
   const config = getEffectiveProviderConfig(projectRoot, id);
-  let provider: { available(): Promise<boolean> };
+  const label = providerSettingsLabel(id);
+  const details = providerConfigDetails(id, config);
+  if (!config.enabled) {
+    return { ok: false, message: `${label} is disabled in Settings.` };
+  }
+  if (id === 'openai') return testOpenAIProviderConfig(config, label, details);
+  if (id === 'anthropic') return testAnthropicProviderConfig(config, label, details);
+
+  let provider: AgentProvider;
   switch (id) {
-    case 'anthropic':
-      provider = new ClaudeProvider({ apiKey: config.apiKey, model: config.model });
-      break;
     case 'gemini':
       provider = new GeminiProvider({ apiKey: config.apiKey, model: config.model });
       break;
@@ -7455,20 +7491,106 @@ async function testProviderConfig(projectRoot: string, id: ProviderSettingsId): 
       provider = new OllamaProvider({ baseUrl: config.baseUrl, model: config.model });
       break;
     case 'custom-openai':
+    default:
       provider = new OpenAIProvider({ apiKey: config.apiKey, baseUrl: config.baseUrl, model: config.model, allowNoApiKey: true });
       break;
-    case 'openai':
-    default:
-      provider = new OpenAIProvider({ apiKey: config.apiKey, baseUrl: config.baseUrl, model: config.model });
-      break;
   }
-  const ok = await provider.available();
-  return {
-    ok,
-    message: ok
-      ? `${id} is configured.`
-      : `${id} is not configured or not reachable. Check API key, base URL, and local service state.`,
-  };
+  const available = await provider.available().catch(() => false);
+  if (!available) {
+    return {
+      ok: false,
+      message: `${label} is not configured or reachable${details}. Check API key, base URL, and local service state.`,
+    };
+  }
+  try {
+    const text = await provider.generate([
+      { role: 'user', content: 'Reply with exactly: OK' },
+    ], { maxTokens: 8, temperature: 0 });
+    return {
+      ok: true,
+      message: `${label} responded${details}: ${text.trim().slice(0, 80) || 'OK'}`,
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      message: `${label} is configured but the model call failed${details}: ${error instanceof Error ? error.message : String(error)}`,
+    };
+  }
+}
+
+async function testOpenAIProviderConfig(
+  config: ReturnType<typeof getEffectiveProviderConfig>,
+  label: string,
+  details: string,
+): Promise<{ ok: boolean; message: string }> {
+  if (!config.apiKey) {
+    return { ok: false, message: `${label} is not configured${details}. Add an API key in Settings or OPENAI_API_KEY.` };
+  }
+  try {
+    const client = new OpenAI({ apiKey: config.apiKey, baseURL: config.baseUrl });
+    const response = await client.responses.create({
+      model: config.model ?? 'gpt-5.5',
+      input: 'Reply with exactly: OK',
+      max_output_tokens: 16,
+    } as never) as unknown as { output_text?: string };
+    return {
+      ok: true,
+      message: `${label} SDK responded${details}: ${(response.output_text ?? 'OK').trim().slice(0, 80) || 'OK'}`,
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      message: `${label} SDK call failed${details}: ${error instanceof Error ? error.message : String(error)}`,
+    };
+  }
+}
+
+async function testAnthropicProviderConfig(
+  config: ReturnType<typeof getEffectiveProviderConfig>,
+  label: string,
+  details: string,
+): Promise<{ ok: boolean; message: string }> {
+  if (!config.apiKey) {
+    return { ok: false, message: `${label} is not configured${details}. Add an API key in Settings or ANTHROPIC_API_KEY.` };
+  }
+  try {
+    const client = new Anthropic({ apiKey: config.apiKey });
+    const response = await client.messages.create({
+      model: config.model ?? 'claude-opus-4-8',
+      max_tokens: 16,
+      temperature: 0,
+      messages: [{ role: 'user', content: 'Reply with exactly: OK' }],
+    } as never) as unknown as { content?: Array<{ type?: string; text?: string }> };
+    const text = response.content?.filter((block) => block.type === 'text').map((block) => block.text ?? '').join('') ?? '';
+    return {
+      ok: true,
+      message: `${label} SDK responded${details}: ${text.trim().slice(0, 80) || 'OK'}`,
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      message: `${label} SDK call failed${details}: ${error instanceof Error ? error.message : String(error)}`,
+    };
+  }
+}
+
+function providerSettingsLabel(id: ProviderSettingsId): string {
+  switch (id) {
+    case 'anthropic': return 'Anthropic Claude';
+    case 'openai': return 'OpenAI';
+    case 'gemini': return 'Gemini';
+    case 'ollama': return 'Ollama';
+    case 'custom-openai': return 'Custom OpenAI-compatible provider';
+  }
+}
+
+function providerConfigDetails(id: ProviderSettingsId, config: ReturnType<typeof getEffectiveProviderConfig>): string {
+  const parts = [
+    config.model ? `model ${config.model}` : '',
+    config.baseUrl ? `base URL ${config.baseUrl}` : '',
+    id === 'ollama' ? 'local endpoint' : config.apiKey ? 'API key present' : 'API key missing',
+  ].filter(Boolean);
+  return parts.length ? ` (${parts.join(', ')})` : '';
 }
 
 function isAiPinRefreshDue(lastRefreshedAt?: string): boolean {

@@ -12,12 +12,18 @@ import {
   loadProjectConfig,
   normalizeProjectConnection,
   prepareLocalExecution,
+  resolveDefaultLLMProvider,
   resolveDbtMacrosForExecution,
   resolveProjectRelativeSqlPaths,
   serializeJSON,
   validateBlockStudioSource,
   validateConnectionForTest,
 } from './local-runtime.js';
+import {
+  getActiveProvider,
+  providerSettingsPath,
+  saveProviderSettings,
+} from './settings/provider-settings.js';
 import { afterEach } from 'vitest';
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -56,6 +62,55 @@ describe('serializeJSON', () => {
   it('serializes unsafe bigint values as strings', () => {
     const value = BigInt(Number.MAX_SAFE_INTEGER) + 1n;
     expect(serializeJSON({ revenue: value })).toBe(`{"revenue":"${value.toString()}"}`);
+  });
+});
+
+describe('AI provider settings', () => {
+  it('makes saved OpenAI settings the active default instead of falling through to Ollama', () => {
+    const projectRoot = mkdtempSync(join(tmpdir(), 'dql-ai-provider-openai-'));
+    tempDirs.push(projectRoot);
+
+    saveProviderSettings(projectRoot, {
+      id: 'openai',
+      enabled: true,
+      apiKey: 'sk-test-openai',
+      model: 'gpt-test',
+    });
+
+    expect(getActiveProvider(projectRoot)).toBe('openai');
+    expect(resolveDefaultLLMProvider(projectRoot)).toBe('openai');
+    expect(readFileSync(providerSettingsPath(projectRoot), 'utf-8')).toContain('"activeProvider": "openai"');
+  });
+
+  it('keeps an enabled but incomplete OpenAI setup active so chat shows an OpenAI error', () => {
+    const projectRoot = mkdtempSync(join(tmpdir(), 'dql-ai-provider-openai-missing-key-'));
+    tempDirs.push(projectRoot);
+
+    saveProviderSettings(projectRoot, {
+      id: 'openai',
+      enabled: true,
+    });
+
+    expect(getActiveProvider(projectRoot)).toBe('openai');
+    expect(resolveDefaultLLMProvider(projectRoot)).toBe('openai');
+  });
+
+  it('clears the active default when that provider is disabled', () => {
+    const projectRoot = mkdtempSync(join(tmpdir(), 'dql-ai-provider-disable-'));
+    tempDirs.push(projectRoot);
+
+    saveProviderSettings(projectRoot, {
+      id: 'openai',
+      enabled: true,
+      apiKey: 'sk-test-openai',
+    });
+    saveProviderSettings(projectRoot, {
+      id: 'openai',
+      enabled: false,
+    });
+
+    expect(getActiveProvider(projectRoot)).toBeUndefined();
+    expect(resolveDefaultLLMProvider(projectRoot)).toBe('ollama');
   });
 });
 

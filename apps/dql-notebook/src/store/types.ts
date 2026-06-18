@@ -101,7 +101,7 @@ export interface TableCellConfig {
   pinnedColumns?: string[];
 }
 
-export type ChatProviderId = 'claude-agent-sdk' | 'claude-code' | 'openai' | 'gemini' | 'ollama' | 'custom-openai';
+export type ChatProviderId = 'anthropic' | 'claude-agent-sdk' | 'claude-code' | 'openai' | 'gemini' | 'ollama' | 'custom-openai';
 
 export interface ChatMessage {
   id: string;

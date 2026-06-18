@@ -1,4 +1,5 @@
 import {
+  ClaudeProvider,
   KGStore,
   MemoryStore,
   defaultKgPath,
@@ -21,7 +22,7 @@ import { existsSync } from 'node:fs';
 import type { AgentRunRequest, AgentRunner, AgentTurn, BlockProposal, ProviderId } from '../types.js';
 import { getEffectiveProviderConfig } from '../../settings/provider-settings.js';
 
-type SimpleProviderId = Extract<ProviderId, 'openai' | 'gemini' | 'ollama' | 'custom-openai'>;
+type SimpleProviderId = Extract<ProviderId, 'anthropic' | 'openai' | 'gemini' | 'ollama' | 'custom-openai'>;
 
 interface ProviderSpec {
   label: string;
@@ -30,6 +31,14 @@ interface ProviderSpec {
 }
 
 const SPECS: Record<SimpleProviderId, ProviderSpec> = {
+  anthropic: {
+    label: 'Anthropic Claude',
+    setup: 'Configure Anthropic in Settings or set ANTHROPIC_API_KEY. Optional: ANTHROPIC_MODEL.',
+    create: (projectRoot) => {
+      const config = getEffectiveProviderConfig(projectRoot, 'anthropic');
+      return new ClaudeProvider({ apiKey: config.apiKey, model: config.model });
+    },
+  },
   openai: {
     label: 'OpenAI',
     setup: 'Configure OpenAI in Settings or set OPENAI_API_KEY. Optional: OPENAI_MODEL and OPENAI_BASE_URL.',

@@ -30,7 +30,7 @@ function assert(cond, msg) {
   console.log(`  ✓ ${msg}`);
 }
 
-const EXPECTED_CLI_RANGE = '^1.6.9';
+const EXPECTED_CLI_RANGE = '^1.6.12';
 
 function collectFiles(dir, predicate, out = []) {
   for (const entry of readdirSync(dir)) {

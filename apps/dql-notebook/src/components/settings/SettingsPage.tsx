@@ -4,6 +4,8 @@ import {
   type AgentMemory,
   type ProviderSettings,
   type ProviderSettingsId,
+  type RemoteMcpEntry,
+  type RemoteMcpSettings,
   type SettingsEnvGroup,
 } from '../../api/client';
 import { useNotebook } from '../../store/NotebookStore';
@@ -16,6 +18,7 @@ export function SettingsPage() {
   const t = themes[state.themeMode];
   const [groups, setGroups] = useState<SettingsEnvGroup[]>([]);
   const [providers, setProviders] = useState<ProviderSettings[]>([]);
+  const [mcpSettings, setMcpSettings] = useState<RemoteMcpSettings>({ path: '', entries: [], warnings: [] });
   const [memories, setMemories] = useState<AgentMemory[]>([]);
   const [loading, setLoading] = useState(true);
   const [status, setStatus] = useState<string | null>(null);
@@ -23,13 +26,15 @@ export function SettingsPage() {
   const refresh = async () => {
     setLoading(true);
     try {
-      const [env, providerRes, memoryRes] = await Promise.all([
+      const [env, providerRes, mcpRes, memoryRes] = await Promise.all([
         api.getSettingsEnvStatus(),
         api.getProviderSettings(),
+        api.getRemoteMcpSettings(),
         api.listAgentMemory(),
       ]);
       setGroups(env.groups);
       setProviders(providerRes.providers);
+      setMcpSettings(mcpRes.settings);
       setMemories(memoryRes.memories);
     } finally {
       setLoading(false);
@@ -41,6 +46,7 @@ export function SettingsPage() {
   }, []);
 
   const configured = useMemo(() => providers.filter((p) => p.enabled && (p.hasApiKey || p.id === 'ollama')).length, [providers]);
+  const activeProvider = providers.find((provider) => provider.active);
 
   return (
     <div style={{ padding: 24, maxWidth: 1180 }}>
@@ -51,7 +57,12 @@ export function SettingsPage() {
             Configure local AI providers and the project memory used by governed analytics chat. Secrets stay under <code>.dql/</code> and are never returned raw.
           </div>
         </div>
-        <SummaryCard configured={configured} total={providers.length || PROVIDER_ORDER.length} t={t} />
+        <SummaryCard
+          configured={configured}
+          total={providers.length || PROVIDER_ORDER.length}
+          activeLabel={activeProvider?.label}
+          t={t}
+        />
       </div>
 
       {status && (
@@ -83,6 +94,16 @@ export function SettingsPage() {
           </section>
 
           <section style={{ marginTop: 22 }}>
+            <SectionTitle title="MCP Connections" detail="Optional external tools for OpenAI and Anthropic SDK chat. DQL governance still controls SQL, trust, and certification." t={t} />
+            <McpConnectionsEditor
+              settings={mcpSettings}
+              t={t}
+              onChange={setMcpSettings}
+              onStatus={setStatus}
+            />
+          </section>
+
+          <section style={{ marginTop: 22 }}>
             <SectionTitle title="Local Agent Memory" detail="Memory helps interpret business language but never overrides certified metadata." t={t} />
             <MemoryEditor
               memories={memories}
@@ -103,6 +124,260 @@ export function SettingsPage() {
         </>
       )}
     </div>
+  );
+}
+
+function McpConnectionsEditor({
+  settings,
+  t,
+  onChange,
+  onStatus,
+}: {
+  settings: RemoteMcpSettings;
+  t: Theme;
+  onChange: (settings: RemoteMcpSettings) => void;
+  onStatus: (message: string | null) => void;
+}) {
+  const [entries, setEntries] = useState<RemoteMcpEntry[]>(settings.entries);
+  const [mode, setMode] = useState<'form' | 'json'>('form');
+  const [jsonDraft, setJsonDraft] = useState(() => entriesToMcpConfigJson(settings.entries));
+  const [jsonError, setJsonError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    setEntries(settings.entries);
+    setJsonDraft(entriesToMcpConfigJson(settings.entries));
+    setJsonError(null);
+  }, [settings]);
+
+  const replaceEntries = (next: RemoteMcpEntry[]) => {
+    setEntries(next);
+    setJsonDraft(entriesToMcpConfigJson(next));
+    setJsonError(null);
+  };
+
+  const update = (index: number, patch: Partial<RemoteMcpEntry>) => {
+    replaceEntries(entries.map((entry, i) => i === index ? normalizeMcpEntry({ ...entry, ...patch }) : entry));
+  };
+
+  const remove = (index: number) => {
+    replaceEntries(entries.filter((_, i) => i !== index));
+  };
+
+  const addServer = () => {
+    replaceEntries([...entries, {
+      kind: 'server',
+      name: '',
+      url: '',
+      enabled: true,
+      trusted: false,
+      providers: ['openai', 'anthropic'],
+    }]);
+  };
+
+  const addConnector = () => {
+    replaceEntries([...entries, {
+      kind: 'connector',
+      name: '',
+      connectorId: 'connector_googledrive',
+      enabled: true,
+      trusted: false,
+      providers: ['openai'],
+    }]);
+  };
+
+  const selectMode = (next: 'form' | 'json') => {
+    if (next === 'json') setJsonDraft(entriesToMcpConfigJson(entries));
+    setJsonError(null);
+    setMode(next);
+  };
+
+  const parseJsonDraft = (): RemoteMcpEntry[] => {
+    const next = parseMcpConfigJson(jsonDraft);
+    setEntries(next);
+    setJsonDraft(entriesToMcpConfigJson(next));
+    setJsonError(null);
+    return next;
+  };
+
+  const formatJsonDraft = () => {
+    try {
+      parseJsonDraft();
+    } catch (error) {
+      setJsonError(error instanceof Error ? error.message : String(error));
+    }
+  };
+
+  const applyJsonDraft = () => {
+    try {
+      parseJsonDraft();
+      setMode('form');
+      onStatus('MCP JSON applied.');
+    } catch (error) {
+      setJsonError(error instanceof Error ? error.message : String(error));
+    }
+  };
+
+  const save = async () => {
+    setBusy(true);
+    try {
+      const nextEntries = mode === 'json' ? parseJsonDraft() : entries;
+      const result = await api.saveRemoteMcpSettings(nextEntries.map((entry) => normalizeMcpEntry(entry)));
+      onChange(result.settings);
+      const warningText = result.settings.warnings.length ? ` ${result.settings.warnings.join(' ')}` : '';
+      onStatus(`MCP connections saved.${warningText}`);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (mode === 'json') setJsonError(message);
+      onStatus(message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const enabledTrusted = entries.filter((entry) => entry.enabled && entry.trusted).length;
+
+  return (
+    <section style={{ border: `1px solid ${t.headerBorder}`, borderRadius: 8, background: t.cellBg, padding: 14 }}>
+      <div style={{ display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap' }}>
+        <div style={{ flex: 1, minWidth: 240 }}>
+          <div style={{ fontSize: 12, color: t.textSecondary }}>
+            {enabledTrusted} trusted connection{enabledTrusted === 1 ? '' : 's'} available to SDK providers
+          </div>
+          {settings.path && <div style={{ fontSize: 11, color: t.textMuted, marginTop: 3, fontFamily: t.fontMono }}>{settings.path}</div>}
+        </div>
+        <div style={{ display: 'flex', border: `1px solid ${t.headerBorder}`, borderRadius: 6, overflow: 'hidden' }}>
+          <button type="button" onClick={() => selectMode('form')} style={segmentedButtonStyle(t, mode === 'form')}>Form</button>
+          <button type="button" onClick={() => selectMode('json')} style={segmentedButtonStyle(t, mode === 'json')}>JSON</button>
+        </div>
+        <button type="button" onClick={addServer} style={buttonStyle(t, false)}>Add remote server</button>
+        <button type="button" onClick={addConnector} style={buttonStyle(t, false)}>Add OpenAI connector</button>
+        <button type="button" onClick={save} disabled={busy} style={buttonStyle(t, true)}>Save MCP</button>
+      </div>
+
+      {settings.warnings.length > 0 && (
+        <div style={{ marginTop: 10, color: '#9a5a00', fontSize: 12, lineHeight: 1.4 }}>
+          {settings.warnings.join(' ')}
+        </div>
+      )}
+
+      {mode === 'json' ? (
+        <div style={{ marginTop: 14 }}>
+          <div style={{ color: t.textSecondary, fontSize: 12, lineHeight: 1.45, marginBottom: 8 }}>
+            Edit the project MCP JSON. Existing stored tokens are preserved when <code>authorizationToken</code> is omitted and the same kind/name is kept.
+          </div>
+          <textarea
+            value={jsonDraft}
+            onChange={(event) => {
+              setJsonDraft(event.target.value);
+              setJsonError(null);
+            }}
+            spellCheck={false}
+            rows={18}
+            style={{
+              ...inputStyle(t),
+              width: '100%',
+              minHeight: 360,
+              resize: 'vertical',
+              fontFamily: t.fontMono,
+              fontSize: 12,
+              lineHeight: 1.45,
+            }}
+          />
+          {jsonError && (
+            <div style={{ color: '#b42318', fontSize: 12, marginTop: 8 }}>
+              {jsonError}
+            </div>
+          )}
+          <div style={{ display: 'flex', gap: 8, marginTop: 10 }}>
+            <button type="button" onClick={formatJsonDraft} style={buttonStyle(t, false)}>Format JSON</button>
+            <button type="button" onClick={applyJsonDraft} style={buttonStyle(t, false)}>Apply to form</button>
+          </div>
+        </div>
+      ) : entries.length === 0 ? (
+        <div style={{ marginTop: 14, color: t.textSecondary, fontSize: 12 }}>
+          No MCP connections configured.
+        </div>
+      ) : (
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(340px, 1fr))', gap: 12, marginTop: 14 }}>
+          {entries.map((entry, index) => (
+            <div key={`${entry.kind}-${entry.name || index}`} style={{ border: `1px solid ${t.headerBorder}`, borderRadius: 8, padding: 12, background: t.appBg }}>
+              <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+                <select
+                  value={entry.kind}
+                  onChange={(event) => update(index, {
+                    kind: event.target.value === 'connector' ? 'connector' : 'server',
+                    providers: event.target.value === 'connector' ? ['openai'] : entry.providers,
+                  })}
+                  style={{ ...inputStyle(t), width: 116 }}
+                >
+                  <option value="server">Server</option>
+                  <option value="connector">Connector</option>
+                </select>
+                <input
+                  value={entry.name}
+                  onChange={(event) => update(index, { name: event.target.value })}
+                  placeholder="Name"
+                  style={{ ...inputStyle(t), flex: 1 }}
+                />
+                <button type="button" onClick={() => remove(index)} style={buttonStyle(t, false)}>Remove</button>
+              </div>
+
+              <div style={{ display: 'grid', gap: 8, marginTop: 10 }}>
+                {entry.kind === 'connector' ? (
+                  <input
+                    value={entry.connectorId ?? ''}
+                    onChange={(event) => update(index, { connectorId: event.target.value })}
+                    placeholder="connector_googledrive"
+                    style={inputStyle(t)}
+                  />
+                ) : (
+                  <input
+                    value={entry.url ?? ''}
+                    onChange={(event) => update(index, { url: event.target.value })}
+                    placeholder="https://example.com/mcp or /sse"
+                    style={inputStyle(t)}
+                  />
+                )}
+                <input
+                  value={entry.description ?? ''}
+                  onChange={(event) => update(index, { description: event.target.value })}
+                  placeholder="Description shown to the model"
+                  style={inputStyle(t)}
+                />
+                <input
+                  value={entry.authorizationTokenEnv ?? ''}
+                  onChange={(event) => update(index, { authorizationTokenEnv: event.target.value })}
+                  placeholder="Authorization token env var"
+                  style={inputStyle(t)}
+                />
+                <input
+                  value={entry.authorizationToken ?? ''}
+                  onChange={(event) => update(index, { authorizationToken: event.target.value })}
+                  type="password"
+                  placeholder={entry.hasAuthorizationToken ? `Leave blank to keep ${entry.authorizationTokenPreview ?? 'stored token'}` : 'Optional OAuth token'}
+                  style={inputStyle(t)}
+                />
+                <input
+                  value={(entry.allowedTools ?? []).join(', ')}
+                  onChange={(event) => update(index, { allowedTools: splitCsv(event.target.value) })}
+                  placeholder="Allowed tools, comma separated"
+                  style={inputStyle(t)}
+                />
+              </div>
+
+              <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', marginTop: 10 }}>
+                <label style={checkboxLabelStyle(t)}><input type="checkbox" checked={entry.enabled} onChange={(event) => update(index, { enabled: event.target.checked })} /> Enabled</label>
+                <label style={checkboxLabelStyle(t)}><input type="checkbox" checked={entry.trusted} onChange={(event) => update(index, { trusted: event.target.checked })} /> Trusted</label>
+                <label style={checkboxLabelStyle(t)}><input type="checkbox" checked={Boolean(entry.deferLoading)} onChange={(event) => update(index, { deferLoading: event.target.checked })} /> Defer tools</label>
+                <label style={checkboxLabelStyle(t)}><input type="checkbox" checked={(entry.providers ?? []).includes('openai')} onChange={(event) => update(index, { providers: toggleMcpProvider(entry.providers, 'openai', event.target.checked) })} /> OpenAI</label>
+                <label style={checkboxLabelStyle(t)}><input type="checkbox" checked={(entry.providers ?? []).includes('anthropic')} disabled={entry.kind === 'connector'} onChange={(event) => update(index, { providers: toggleMcpProvider(entry.providers, 'anthropic', event.target.checked) })} /> Anthropic</label>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+    </section>
   );
 }
 
@@ -165,7 +440,10 @@ function ProviderCard({
     <section style={{ border: `1px solid ${t.headerBorder}`, borderRadius: 8, background: t.cellBg, padding: 14 }}>
       <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
         <div style={{ flex: 1 }}>
-          <div style={{ fontSize: 14, fontWeight: 700 }}>{provider.label}</div>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+            <div style={{ fontSize: 14, fontWeight: 700 }}>{provider.label}</div>
+            {provider.active ? <span style={activeBadgeStyle(t)}>Active</span> : null}
+          </div>
           <div style={{ fontSize: 11, color: t.textSecondary, marginTop: 3 }}>
             {provider.source === 'local' ? 'Project local' : provider.source === 'env' ? 'Environment' : 'Not configured'}
             {provider.apiKeyPreview ? ` · ${provider.apiKeyPreview}` : ''}
@@ -204,7 +482,9 @@ function ProviderCard({
       </div>
 
       <div style={{ display: 'flex', gap: 8, marginTop: 12 }}>
-        <button type="button" onClick={save} disabled={busy} style={buttonStyle(t, true)}>Save</button>
+        <button type="button" onClick={save} disabled={busy} style={buttonStyle(t, true)}>
+          {provider.active ? 'Save active provider' : 'Save and use'}
+        </button>
         <button type="button" onClick={test} disabled={busy} style={buttonStyle(t, false)}>Test</button>
       </div>
 
@@ -337,11 +617,24 @@ function SectionTitle({ title, detail, t }: { title: string; detail: string; t: 
   );
 }
 
-function SummaryCard({ configured, total, t }: { configured: number; total: number; t: Theme }) {
+function SummaryCard({
+  configured,
+  total,
+  activeLabel,
+  t,
+}: {
+  configured: number;
+  total: number;
+  activeLabel?: string;
+  t: Theme;
+}) {
   return (
-    <div style={{ border: `1px solid ${t.headerBorder}`, borderRadius: 8, padding: '10px 12px', minWidth: 132, textAlign: 'right', background: t.cellBg }}>
+    <div style={{ border: `1px solid ${t.headerBorder}`, borderRadius: 8, padding: '10px 12px', minWidth: 160, textAlign: 'right', background: t.cellBg }}>
       <div style={{ fontSize: 20, fontWeight: 700 }}>{configured}/{total}</div>
       <div style={{ fontSize: 12, color: t.textSecondary }}>providers ready</div>
+      <div style={{ fontSize: 11, color: activeLabel ? t.accent : t.textMuted, marginTop: 4 }}>
+        {activeLabel ? `${activeLabel} active` : 'No active provider'}
+      </div>
     </div>
   );
 }
@@ -377,5 +670,244 @@ function buttonStyle(t: Theme, primary: boolean): React.CSSProperties {
     padding: '0 10px',
     cursor: 'pointer',
     fontSize: 12,
+  };
+}
+
+function segmentedButtonStyle(t: Theme, active: boolean): React.CSSProperties {
+  return {
+    height: 28,
+    border: 0,
+    borderRight: `1px solid ${t.headerBorder}`,
+    background: active ? `${t.accent}18` : t.appBg,
+    color: active ? t.accent : t.textSecondary,
+    padding: '0 10px',
+    cursor: 'pointer',
+    fontSize: 12,
+    fontWeight: active ? 700 : 500,
+  };
+}
+
+function activeBadgeStyle(t: Theme): React.CSSProperties {
+  return {
+    border: `1px solid ${t.accent}44`,
+    background: `${t.accent}16`,
+    color: t.accent,
+    borderRadius: 999,
+    padding: '2px 7px',
+    fontSize: 10,
+    fontWeight: 800,
+    textTransform: 'uppercase',
+    letterSpacing: 0,
+  };
+}
+
+function checkboxLabelStyle(t: Theme): React.CSSProperties {
+  return {
+    display: 'flex',
+    alignItems: 'center',
+    gap: 5,
+    fontSize: 12,
+    color: t.textSecondary,
+  };
+}
+
+function splitCsv(value: string): string[] {
+  return value.split(',').map((item) => item.trim()).filter(Boolean);
+}
+
+function entriesToMcpConfigJson(entries: RemoteMcpEntry[]): string {
+  const servers = entries
+    .filter((entry) => entry.kind !== 'connector')
+    .map((entry) => compactMcpJson({
+      name: entry.name,
+      url: entry.url,
+      description: entry.description,
+      authorizationToken: entry.authorizationToken,
+      authorizationTokenEnv: entry.authorizationTokenEnv,
+      allowedTools: entry.allowedTools,
+      enabled: entry.enabled,
+      trusted: entry.trusted,
+      deferLoading: entry.deferLoading,
+      providers: normalizeMcpEntry(entry).providers,
+    }));
+  const connectors = entries
+    .filter((entry) => entry.kind === 'connector')
+    .map((entry) => compactMcpJson({
+      name: entry.name,
+      connectorId: entry.connectorId,
+      description: entry.description,
+      authorizationToken: entry.authorizationToken,
+      authorizationTokenEnv: entry.authorizationTokenEnv,
+      allowedTools: entry.allowedTools,
+      enabled: entry.enabled,
+      trusted: entry.trusted,
+      deferLoading: entry.deferLoading,
+      providers: ['openai'],
+    }));
+  return JSON.stringify({ version: 1, servers, connectors }, null, 2);
+}
+
+function parseMcpConfigJson(value: string): RemoteMcpEntry[] {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(value);
+  } catch (error) {
+    throw new Error(`Invalid JSON: ${error instanceof Error ? error.message : String(error)}`);
+  }
+  if (!isRecord(parsed)) throw new Error('MCP config must be a JSON object.');
+
+  const entries: RemoteMcpEntry[] = [];
+  if (Array.isArray(parsed.servers)) {
+    entries.push(...parsed.servers.map((entry, index) => parseMcpEntry(entry, 'server', `servers[${index}]`)));
+  }
+  if (Array.isArray(parsed.connectors)) {
+    entries.push(...parsed.connectors.map((entry, index) => parseMcpEntry(entry, 'connector', `connectors[${index}]`)));
+  }
+  if (Array.isArray(parsed.tools)) {
+    entries.push(...parseOpenAiMcpTools(parsed.tools));
+  }
+  if (isRecord(parsed.mcpServers)) {
+    entries.push(...parseRemoteMcpServersObject(parsed.mcpServers));
+  }
+  return entries.map(normalizeMcpEntry);
+}
+
+function parseOpenAiMcpTools(tools: unknown[]): RemoteMcpEntry[] {
+  return tools.flatMap((tool, index) => {
+    if (!isRecord(tool) || tool.type !== 'mcp') return [];
+    const connectorId = stringField(tool, ['connectorId', 'connector_id']);
+    const authorization = stringField(tool, ['authorization']);
+    if (connectorId) {
+      return [normalizeMcpEntry({
+        kind: 'connector',
+        name: stringField(tool, ['name', 'server_label', 'serverLabel']) ?? connectorId,
+        connectorId,
+        authorizationToken: authorization,
+        allowedTools: stringArrayField(tool, ['allowedTools', 'allowed_tools']),
+        enabled: true,
+        trusted: tool.trusted === true || tool.require_approval === 'never',
+        providers: ['openai'],
+      })];
+    }
+    return [parseMcpEntry({
+      ...tool,
+      name: stringField(tool, ['name', 'server_label', 'serverLabel']),
+      url: stringField(tool, ['url', 'server_url', 'serverUrl']),
+      authorizationToken: authorization ?? bearerTokenFromHeaders(tool.headers),
+      allowedTools: stringArrayField(tool, ['allowedTools', 'allowed_tools']),
+      enabled: true,
+      trusted: tool.trusted === true || tool.require_approval === 'never',
+      providers: ['openai'],
+    }, 'server', `tools[${index}]`)];
+  });
+}
+
+function parseRemoteMcpServersObject(servers: Record<string, unknown>): RemoteMcpEntry[] {
+  return Object.entries(servers).map(([name, raw]) => {
+    if (!isRecord(raw)) throw new Error(`mcpServers.${name} must be an object.`);
+    const url = stringField(raw, ['url', 'server_url', 'serverUrl']);
+    if (!url) {
+      throw new Error(`mcpServers.${name} is not a remote HTTP MCP server. App chat SDK config only supports URL-based MCP servers.`);
+    }
+    return normalizeMcpEntry({
+      kind: 'server',
+      name,
+      url,
+      authorizationToken: bearerTokenFromHeaders(raw.headers),
+      enabled: raw.enabled !== false,
+      trusted: raw.trusted === true,
+      allowedTools: stringArrayField(raw, ['allowedTools', 'allowed_tools']),
+      providers: providerArrayField(raw, ['providers']) ?? ['openai', 'anthropic'],
+    });
+  });
+}
+
+function parseMcpEntry(raw: unknown, kind: 'server' | 'connector', label: string): RemoteMcpEntry {
+  if (!isRecord(raw)) throw new Error(`${label} must be an object.`);
+  const name = stringField(raw, ['name', 'server_label', 'serverLabel']);
+  if (!name) throw new Error(`${label} needs a name.`);
+  const url = stringField(raw, ['url', 'server_url', 'serverUrl']);
+  const connectorId = stringField(raw, ['connectorId', 'connector_id']);
+  if (kind === 'server' && !url) throw new Error(`${label} needs a url.`);
+  if (kind === 'connector' && !connectorId) throw new Error(`${label} needs a connectorId.`);
+  return {
+    kind,
+    name,
+    url,
+    connectorId,
+    description: stringField(raw, ['description', 'server_description', 'serverDescription']),
+    authorizationToken: stringField(raw, ['authorizationToken', 'authorization', 'authorization_token']) ?? bearerTokenFromHeaders(raw.headers),
+    authorizationTokenEnv: stringField(raw, ['authorizationTokenEnv', 'authorizationEnv', 'authorization_token_env']),
+    allowedTools: stringArrayField(raw, ['allowedTools', 'allowed_tools']),
+    enabled: raw.enabled !== false,
+    trusted: raw.trusted === true,
+    deferLoading: raw.deferLoading === true || raw.defer_loading === true,
+    providers: providerArrayField(raw, ['providers']),
+  };
+}
+
+function compactMcpJson(input: Record<string, unknown>): Record<string, unknown> {
+  return Object.fromEntries(Object.entries(input).filter(([, value]) => {
+    if (value === undefined || value === null || value === '') return false;
+    if (Array.isArray(value) && value.length === 0) return false;
+    return true;
+  }));
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
+}
+
+function stringField(input: Record<string, unknown>, keys: string[]): string | undefined {
+  for (const key of keys) {
+    const value = input[key];
+    if (typeof value === 'string' && value.trim()) return value.trim();
+  }
+  return undefined;
+}
+
+function stringArrayField(input: Record<string, unknown>, keys: string[]): string[] | undefined {
+  for (const key of keys) {
+    const value = input[key];
+    if (Array.isArray(value)) {
+      const out = value.map((item) => typeof item === 'string' ? item.trim() : '').filter(Boolean);
+      return out.length ? Array.from(new Set(out)) : undefined;
+    }
+  }
+  return undefined;
+}
+
+function providerArrayField(input: Record<string, unknown>, keys: string[]): Array<'openai' | 'anthropic'> | undefined {
+  const values = stringArrayField(input, keys);
+  if (!values) return undefined;
+  const providers = values.filter((item): item is 'openai' | 'anthropic' => item === 'openai' || item === 'anthropic');
+  return providers.length ? providers : undefined;
+}
+
+function bearerTokenFromHeaders(headers: unknown): string | undefined {
+  if (!isRecord(headers)) return undefined;
+  const authorization = stringField(headers, ['Authorization', 'authorization']);
+  return authorization?.replace(/^Bearer\s+/i, '').trim() || undefined;
+}
+
+function toggleMcpProvider(
+  providers: RemoteMcpEntry['providers'],
+  provider: 'openai' | 'anthropic',
+  checked: boolean,
+): Array<'openai' | 'anthropic'> {
+  const next = new Set(providers ?? []);
+  if (checked) next.add(provider);
+  else next.delete(provider);
+  return Array.from(next);
+}
+
+function normalizeMcpEntry(entry: RemoteMcpEntry): RemoteMcpEntry {
+  const providers: Array<'openai' | 'anthropic'> = entry.kind === 'connector'
+    ? ['openai']
+    : entry.providers?.length ? entry.providers : ['openai', 'anthropic'];
+  return {
+    ...entry,
+    providers,
+    allowedTools: entry.allowedTools?.filter(Boolean),
   };
 }
