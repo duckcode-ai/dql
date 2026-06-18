@@ -37,10 +37,12 @@ npx create-dql-app@latest my-analytics
 cd my-analytics
 npm install
 npm run doctor
-npm install --prefix .dql/connectors duckdb       # DuckDB/local files only
-# npm install --prefix .dql/connectors snowflake-sdk  # Snowflake only
-# Databricks does not need an extra package.
 npm run notebook
+
+# Optional, only before running queries with these drivers:
+# npm install --prefix .dql/connectors duckdb        # DuckDB/local files
+# npm install --prefix .dql/connectors snowflake-sdk # Snowflake
+# Databricks does not need an extra package.
 ```
 
 Open **http://127.0.0.1:3474**. The starter is a clean project with
@@ -80,10 +82,12 @@ npx create-dql-app@latest dql    # detects the dbt project, wires the config
 cd dql
 npm install
 npm run sync                     # import dbt models + lineage
-npm install --prefix .dql/connectors duckdb       # DuckDB/local files only
-# npm install --prefix .dql/connectors snowflake-sdk  # Snowflake only
-# Databricks does not need an extra package.
 npm run notebook
+
+# Optional, only before running queries with these drivers:
+# npm install --prefix .dql/connectors duckdb        # DuckDB/local files
+# npm install --prefix .dql/connectors snowflake-sdk # Snowflake
+# Databricks does not need an extra package.
 ```
 
 Global or local CLI install alone does not create the project folders. If you

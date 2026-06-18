@@ -53,10 +53,12 @@ cd dql
 npm install
 npm run doctor
 npm run sync
-npm install --prefix .dql/connectors duckdb       # DuckDB or local files only
-# npm install --prefix .dql/connectors snowflake-sdk  # Snowflake only
-# Databricks does not need an extra package.
 npm run notebook
+
+# Optional, only before running queries with these drivers:
+# npm install --prefix .dql/connectors duckdb        # DuckDB or local files
+# npm install --prefix .dql/connectors snowflake-sdk # Snowflake
+# Databricks does not need an extra package.
 ```
 
 `dbt parse` should create `target/manifest.json`. DQL also reads dbt artifacts

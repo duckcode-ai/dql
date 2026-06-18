@@ -34,10 +34,12 @@ npx create-dql-app@latest dql    # scaffolds ./dql, auto-wires dbt
 cd dql
 npm install
 npm run sync                     # import dbt models + lineage
-npm install --prefix .dql/connectors duckdb       # DuckDB/local files only
-# npm install --prefix .dql/connectors snowflake-sdk  # Snowflake only
-# Databricks does not need an extra package.
 npm run notebook                 # http://127.0.0.1:3474
+
+# Optional, only before running queries with these drivers:
+# npm install --prefix .dql/connectors duckdb        # DuckDB/local files
+# npm install --prefix .dql/connectors snowflake-sdk # Snowflake
+# Databricks does not need an extra package.
 ```
 
 If you installed `@duckcodeailabs/dql-cli` globally, initialize the project
