@@ -2,23 +2,47 @@
 
 > ~3 minutes · ends with `dql doctor` confirming the configured connection
 
-DQL ships 14 drivers out of the box. Connections live in `dql.config.json` at
-the project root. Keep secrets in environment variables and reference them with
-`${ENV_VAR}` interpolation.
+DQL `1.6.13` keeps the CLI install small. Databricks SQL is built in. DuckDB,
+local files, and Snowflake are enabled by installing the project-local driver
+from the notebook connection panel.
+
+Connections live in `dql.config.json` at the project root. Keep secrets in
+environment variables and reference them with `${ENV_VAR}` interpolation.
 
 ## 1. Pick your connector
+
+Databricks example:
 
 ```json
 {
   "connections": {
     "default": {
-      "driver": "postgresql",
-      "host": "${PGHOST}",
-      "port": 5432,
-      "database": "analytics",
-      "username": "${PGUSER}",
-      "password": "${PGPASSWORD}",
-      "schema": "public"
+      "driver": "databricks",
+      "host": "${DATABRICKS_HOST}",
+      "httpPath": "/sql/1.0/warehouses/${DATABRICKS_WAREHOUSE_ID}",
+      "catalog": "main",
+      "schema": "analytics",
+      "token": "${DATABRICKS_TOKEN}"
+    }
+  }
+}
+```
+
+Snowflake example:
+
+```json
+{
+  "connections": {
+    "default": {
+      "driver": "snowflake",
+      "account": "${SNOWFLAKE_ACCOUNT}",
+      "username": "${SNOWFLAKE_USER}",
+      "authMethod": "key_pair",
+      "privateKeyPath": "${SNOWFLAKE_PRIVATE_KEY_PATH}",
+      "warehouse": "ANALYTICS_WH",
+      "database": "PROD",
+      "schema": "MARTS",
+      "role": "ANALYST"
     }
   }
 }
@@ -26,20 +50,32 @@ the project root. Keep secrets in environment variables and reference them with
 
 Per-driver options live in the [Connector reference](../reference/connectors.md).
 
-## 2. Export credentials
+## 2. Install optional drivers
+
+Open the notebook connection panel and click **Install** for DuckDB or
+Snowflake. The driver is installed into the project under `.dql/connectors/`.
+Databricks does not need an extra package.
+
+## 3. Export credentials
 
 ```bash
-export PGHOST=prod-db.internal
-export PGUSER=analyst_ro
-export PGPASSWORD=...
+export DATABRICKS_HOST=adb-123456789.0.azuredatabricks.net
+export DATABRICKS_WAREHOUSE_ID=9196548d010cf14d
+export DATABRICKS_TOKEN=...
 ```
 
-## 3. Verify
+or:
+
+```bash
+export SNOWFLAKE_ACCOUNT=xy12345.us-east-1
+export SNOWFLAKE_USER=svc_dql
+export SNOWFLAKE_PRIVATE_KEY_PATH="$HOME/.ssh/snowflake_key.p8"
+```
+
+## 4. Verify
 
 ```bash
 dql doctor
-# Local query runtime
-# driver=postgresql is available
 ```
 
 If that passes, the notebook and CLI resolve table references against this
@@ -50,9 +86,9 @@ connection.
 ```json
 {
   "connections": {
-    "default": { "driver": "duckdb", "filepath": "./warehouse.duckdb" },
+    "default": { "driver": "databricks", "host": "${DATABRICKS_HOST}", "token": "${DATABRICKS_TOKEN}" },
     "prod": { "driver": "snowflake", "account": "${SNOWFLAKE_ACCOUNT}" },
-    "raw": { "driver": "postgresql", "host": "${RAW_PGHOST}" }
+    "local": { "driver": "duckdb", "filepath": "./warehouse.duckdb" }
   }
 }
 ```
@@ -66,8 +102,14 @@ select count(*) from analytics.orders
 
 ## Troubleshooting
 
-- **`connection refused`** — firewall, VPN, wrong host, or wrong port. Run `dql doctor` after checking the resolved environment variables.
-- **`role does not have USAGE on schema`** — warehouse permissions. DQL needs `USAGE` on the schema and `SELECT` on queried objects.
-- **BigQuery service account** — set `GOOGLE_APPLICATION_CREDENTIALS`, or configure `keyFilename` / `serviceAccountJson` when your enterprise setup requires an explicit key file.
-- **Snowflake key-pair auth** — set `authMethod` to `key_pair` and provide `privateKeyPath` or `privateKey`.
-- **Athena enterprise auth** — use the AWS default provider chain for SSO, or set `profile`, `accessKeyId`, `secretAccessKey`, and optional `sessionToken`.
+- **`driver package is not installed`** — open the notebook connection panel
+  and install the project-local driver for DuckDB or Snowflake.
+- **`connection refused`** — firewall, VPN, wrong host, or wrong port. Run
+  `dql doctor` after checking the resolved environment variables.
+- **`role does not have USAGE on schema`** — warehouse permissions. DQL needs
+  `USAGE` on the schema and `SELECT` on queried objects.
+- **Snowflake key-pair auth** — set `authMethod` to `key_pair` and provide
+  `privateKeyPath` or `privateKey`. The public key belongs on the Snowflake
+  user, not in DQL config.
+- **Databricks HTTP path** — paste the dbt/JDBC path
+  `/sql/1.0/warehouses/<id>` or the raw warehouse ID.

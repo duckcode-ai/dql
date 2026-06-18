@@ -37,6 +37,16 @@ The scaffolder detects the parent dbt project and wires it into
 untouched. The generated project installs the DQL CLI locally, so `npm run
 ...` works without a global `dql` binary.
 
+If you already installed the CLI globally, that only installs the command. It
+does not create a `dql/` folder. Use this equivalent path:
+
+```bash
+cd your-dbt-repo
+dql init ./dql
+cd dql
+dql doctor
+```
+
 Point the default connection at your dbt warehouse in `dql.config.json`. For a
 local DuckDB file that's:
 
@@ -46,7 +56,7 @@ local DuckDB file that's:
 }
 ```
 
-(Postgres, Snowflake, BigQuery, etc. — see
+(Databricks, DuckDB/local files, and Snowflake — see
 [connectors](reference/connectors.md).)
 
 ## 3. Check the setup and sync dbt

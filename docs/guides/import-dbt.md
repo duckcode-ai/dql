@@ -65,6 +65,16 @@ npm i -D @duckcodeailabs/dql-cli
 npx dql init ./dql
 ```
 
+If you installed the CLI globally, skip the local `npm i` and run:
+
+```bash
+dql init ./dql
+```
+
+The install step only provides the command. The `init` step creates
+`dql.config.json`, `blocks/`, `terms/`, `business-views/`, `notebooks/`, and
+`apps/`.
+
 `dql init ./dql` detects the parent `dbt_project.yml` and writes portable dbt
 wiring:
 

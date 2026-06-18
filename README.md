@@ -50,6 +50,7 @@ dbt parse
 npx create-dql-app@latest dql
 cd dql
 npm install
+npm run doctor
 npm run sync
 npm run notebook
 ```
@@ -57,6 +58,20 @@ npm run notebook
 `dbt parse` should create `target/manifest.json`. DQL also reads dbt artifacts
 such as `catalog.json`, `semantic_manifest.json`, and `run_results.json` when
 they exist.
+
+If you installed the CLI globally, installation only gives you the `dql`
+command. It does not create a `dql/` folder by itself. Bootstrap the folder
+explicitly:
+
+```bash
+cd your-dbt-repo
+dql init ./dql
+cd dql
+dql doctor
+dql compile
+dql sync dbt
+dql notebook
+```
 
 ## Before you install
 
@@ -75,15 +90,14 @@ xcode-select --install
 
 ## Why install can feel slow
 
-DQL's CLI installs the local database/runtime stack so the notebook, database
-connections, lineage, Apps, and agent flows work from one local workspace.
-That pulls native packages such as `duckdb` and `better-sqlite3`.
+DQL uses a flat CLI install by default. Heavy warehouse drivers are not bundled
+into the global install. Databricks SQL works through the built-in HTTP
+connector, while DuckDB and Snowflake can be installed project-locally from the
+notebook connection panel when needed.
 
-On a supported machine, npm downloads prebuilt binaries. On Node `22` macOS
-arm64, a clean CLI install completed in about 12 seconds during release
-testing. On unsupported Node versions, older machines, locked-down networks, or
-missing build tools, npm may compile native packages instead. That can take a
-long time and may look like the install is stuck.
+Most slow installs now come from optional native packages installed for a
+specific project, older Node versions, locked-down networks, or missing build
+tools.
 
 If install is slow, check this first:
 
@@ -95,9 +109,8 @@ python3 --version
 xcode-select -p
 ```
 
-Expected Node versions are `v20.x` or `v22.x`. If you see npm building
-`duckdb`, `better-sqlite3`, or `node-gyp rebuild`, switch to Node `22` LTS and
-retry:
+Expected Node versions are `v20.x` or `v22.x`. If an optional connector install
+shows `node-gyp rebuild`, switch to Node `22` LTS and retry:
 
 ```bash
 rm -rf node_modules package-lock.json

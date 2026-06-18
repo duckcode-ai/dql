@@ -17,7 +17,9 @@ connects technical lineage with business lineage.
 
 ## Connect your warehouse
 
-Edit `dql.config.json` — DQL ships 15 drivers out of the box:
+Edit `dql.config.json` or open the notebook connection panel. DQL uses a flat
+install by default: Databricks SQL works through the built-in HTTP connector,
+and DuckDB or Snowflake drivers can be installed project-locally when needed.
 [docs/reference/connectors.md](https://github.com/duckcode-ai/dql/blob/main/docs/reference/connectors.md).
 Add your warehouse connection in the notebook or config. For local files, add a
 DuckDB/file connection and query CSV or Parquet data with functions such as

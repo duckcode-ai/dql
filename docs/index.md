@@ -37,6 +37,16 @@ npm run sync                     # import dbt models + lineage
 npm run notebook                 # http://127.0.0.1:3474
 ```
 
+If you installed `@duckcodeailabs/dql-cli` globally, initialize the project
+folder first:
+
+```bash
+cd your-dbt-repo
+dql init ./dql
+cd dql
+dql doctor
+```
+
 Then run:
 
 ```bash

@@ -23,6 +23,9 @@ Want a ready-made dbt project to try DQL on? Clone the example repo and add
 DQL to it — the same steps you'd use on your own dbt repo:
 [github.com/duckcode-ai/jaffle-shop-duckdb](https://github.com/duckcode-ai/jaffle-shop-duckdb).
 
+Already installed `@duckcodeailabs/dql-cli` globally? That only installs the
+command. From an existing dbt repo, run `dql init ./dql` before `cd dql`.
+
 ## Flags
 
 | Flag | Default | Meaning |

@@ -1,84 +1,101 @@
 # Connectors
 
-DQL ships 14 drivers out of the box. Each supports **query execution** and
-**schema introspection** (tables, columns, types). Configure connections in
-`dql.config.json`.
+DQL `1.6.13` uses a flat install. The CLI installs quickly and does not bundle
+every database driver. Configure connections in `dql.config.json` or through
+the notebook connection panel.
 
-## Driver matrix
+## Active connectors
 
-| Driver | Ident | Auth | Notes |
+| Connector | Driver | Install model | Notes |
 | --- | --- | --- | --- |
-| DuckDB | `duckdb` | file path | Default for local dev |
-| Local files | `file` | file path | CSV, Parquet, and JSON through DuckDB |
-| PostgreSQL | `postgresql` | user/pass, connection string | Also aliases Aurora, Crunchy, etc. |
-| MySQL | `mysql` | user/pass | |
-| SQLite | `sqlite` | file path | |
-| Snowflake | `snowflake` | password, key pair, external browser SSO, OAuth | |
-| BigQuery | `bigquery` | ADC, service account key file, service account JSON | |
-| Redshift | `redshift` | user/pass | |
-| ClickHouse | `clickhouse` | user/pass | |
-| Databricks | `databricks` | PAT | |
-| Trino | `trino` | user | |
-| Athena | `athena` | AWS default chain, AWS profile, access key/session token | |
-| MSSQL | `mssql` | user/pass | |
-| Microsoft Fabric | `fabric` | user/pass | SQL endpoint over TDS |
+| Databricks SQL | `databricks` | Built in | Uses the Databricks Statement Execution API over HTTPS |
+| DuckDB | `duckdb` | Project-local install | Install from the notebook connection panel when needed |
+| Local files | `file` | Project-local DuckDB install | CSV, Parquet, and JSON through DuckDB |
+| Snowflake | `snowflake` | Project-local install | Supports password, key pair, SSO, OAuth, PAT, MFA, and workload identity fields |
 
-## Common options
+Other warehouse connectors are planned/legacy code paths, but they are not
+active in the lightweight `1.6.13` package.
+
+## Project-local driver install
+
+Open the notebook connection panel and use **Install** for DuckDB or Snowflake.
+DQL installs the driver into:
+
+```text
+.dql/connectors/
+```
+
+This keeps the global CLI install small while still letting each project opt
+into the database packages it actually uses.
+
+## Common shape
 
 ```json
 {
   "connections": {
     "default": {
-      "driver": "postgresql",
-      "host": "prod-db.internal",
-      "port": 5432,
-      "database": "analytics",
-      "username": "${PGUSER}",
-      "password": "${PGPASSWORD}",
-      "schema": "public",
-      "ssl": true
+      "driver": "databricks",
+      "host": "${DATABRICKS_HOST}",
+      "httpPath": "/sql/1.0/warehouses/${DATABRICKS_WAREHOUSE_ID}",
+      "catalog": "main",
+      "schema": "analytics",
+      "token": "${DATABRICKS_TOKEN}"
     }
   }
 }
 ```
 
-## Per-driver specifics
+Environment variables are resolved at runtime, so keep secrets out of git.
 
-### DuckDB
+## Databricks SQL
 
-```json
-{ "driver": "duckdb", "filepath": "./warehouse.duckdb" }
-```
-
-### BigQuery
-
-Use Application Default Credentials:
+Use either a warehouse ID or the dbt/JDBC HTTP path. DQL extracts the warehouse
+ID from paths like `/sql/1.0/warehouses/<id>`.
 
 ```json
 {
-  "driver": "bigquery",
-  "projectId": "my-gcp-project",
-  "location": "US",
-  "authMethod": "application_default"
+  "driver": "databricks",
+  "host": "adb-123456789.0.azuredatabricks.net",
+  "httpPath": "/sql/1.0/warehouses/9196548d010cf14d",
+  "catalog": "main",
+  "schema": "marts",
+  "authMethod": "oauth",
+  "token": "${DATABRICKS_TOKEN}",
+  "waitTimeout": "50s",
+  "byteLimit": 25000000
 }
 ```
 
-Or provide a managed key file path:
+For automation, prefer an enterprise-approved OAuth token or service principal
+token rather than a personal token.
+
+## DuckDB and local files
 
 ```json
 {
-  "driver": "bigquery",
-  "projectId": "my-gcp-project",
-  "location": "US",
-  "authMethod": "service_account_key_file",
-  "keyFilename": "${BIGQUERY_KEY_FILE}"
+  "driver": "duckdb",
+  "filepath": "./warehouse.duckdb"
 }
 ```
 
-`GOOGLE_APPLICATION_CREDENTIALS` is still picked up automatically when explicit
-key material is omitted.
+For CSV/Parquet/JSON exploration, use the `file` driver with DuckDB installed:
 
-### Snowflake
+```json
+{
+  "driver": "file",
+  "filepath": ":memory:"
+}
+```
+
+Then query files from SQL:
+
+```sql
+select * from read_csv_auto('./data/orders.csv')
+```
+
+## Snowflake
+
+Password auth:
 
 ```json
 {
@@ -89,11 +106,12 @@ key material is omitted.
   "password": "${SNOWFLAKE_PASSWORD}",
   "warehouse": "ANALYTICS_WH",
   "database": "PROD",
+  "schema": "MARTS",
   "role": "ANALYST"
 }
 ```
 
-For key-pair auth:
+Key-pair auth:
 
 ```json
 {
@@ -105,60 +123,37 @@ For key-pair auth:
   "privateKeyPassphrase": "${SNOWFLAKE_PRIVATE_KEY_PASSPHRASE}",
   "warehouse": "ANALYTICS_WH",
   "database": "PROD",
+  "schema": "MARTS",
   "role": "ANALYST"
 }
 ```
 
-Use either `privateKeyPath` or `privateKey`. `privateKey` is useful when the key
-comes from an environment variable or secret manager:
+Use either `privateKeyPath` or `privateKey`. The public key is configured on
+the Snowflake user; DQL only needs the private key material or file path.
+
+Enterprise auth fields are passed through to the Snowflake Node driver:
 
 ```json
 {
   "driver": "snowflake",
   "account": "xy12345.us-east-1",
   "username": "${SNOWFLAKE_USER}",
-  "authMethod": "key_pair",
-  "privateKey": "${SNOWFLAKE_PRIVATE_KEY}",
-  "privateKeyPassphrase": "${SNOWFLAKE_PRIVATE_KEY_PASSPHRASE}",
+  "authMethod": "programmatic_access_token",
+  "token": "${SNOWFLAKE_PAT}",
   "warehouse": "ANALYTICS_WH",
   "database": "PROD",
-  "role": "ANALYST"
+  "schema": "MARTS",
+  "queryTag": "team=analytics;app=dql",
+  "proxyHost": "${HTTPS_PROXY_HOST}",
+  "proxyPort": 8080
 }
 ```
+
+Supported `authMethod` values include `password`, `mfa`, `key_pair`,
+`external_browser`, `oauth`, `oauth_authorization_code`,
+`oauth_client_credentials`, `programmatic_access_token`, and
+`workload_identity`.
 
 For dbt `profiles.yml`, DQL imports Snowflake `private_key_path`,
-`private_key`, `private_key_passphrase`, and `authenticator: SNOWFLAKE_JWT`.
-The public key is configured on the Snowflake user; DQL only needs the private
-key material or file path.
-
-### Athena
-
-Use the local AWS provider chain, including SSO sessions and environment
-credentials:
-
-```json
-{
-  "driver": "athena",
-  "region": "us-east-1",
-  "database": "analytics",
-  "outputLocation": "s3://my-query-results/athena/",
-  "workgroup": "primary",
-  "authMethod": "aws_default"
-}
-```
-
-Or bind a named profile:
-
-```json
-{
-  "driver": "athena",
-  "region": "us-east-1",
-  "database": "analytics",
-  "outputLocation": "s3://my-query-results/athena/",
-  "authMethod": "aws_profile",
-  "profile": "prod-analytics"
-}
-```
-
-For the full per-driver option list, see each connector's README under
-[`packages/dql-connectors/src/`](https://github.com/duckcode-ai/dql/tree/main/packages/dql-connectors/src).
+`private_key`, `private_key_passphrase`, `authenticator`, `token`, proxy
+fields, OAuth fields, workload identity fields, and query tags where present.

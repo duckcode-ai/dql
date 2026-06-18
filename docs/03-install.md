@@ -69,7 +69,27 @@ npm run sync                     # import dbt models + lineage
 npm run notebook
 ```
 
-(Equivalent manual path: `npm i -D @duckcodeailabs/dql-cli && npx dql init ./dql`.)
+Global or local CLI install alone does not create the project folders. If you
+installed `dql` globally, bootstrap the folder explicitly:
+
+```bash
+cd my-dbt-repo
+dbt parse
+dql init ./dql
+cd dql
+dql doctor
+dql compile
+dql sync dbt
+dql notebook
+```
+
+Equivalent project-local manual path:
+
+```bash
+cd my-dbt-repo
+npm i -D @duckcodeailabs/dql-cli
+npx dql init ./dql
+```
 
 The resulting layout is:
 
@@ -105,13 +125,16 @@ npm i -g @duckcodeailabs/dql-cli
 dql --version
 ```
 
+After a global install, run `dql init ./dql` from your dbt repo root before
+trying `cd dql`.
+
 Works on macOS, Linux, and Windows.
 
 ## Verify
 
 ```bash
 dql --version
-# dql 1.6.1 or later
+# dql 1.6.13 or later
 ```
 
 If you see the version number, jump to the [Quickstart →](01-quickstart.md).

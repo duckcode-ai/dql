@@ -177,11 +177,11 @@ jaffle-shop-duckdb repo):
 - Local `node apps/cli/dist/index.js --help` and
   `node apps/cli/dist/index.js --version` resolve successfully.
 - After publishing, verify `npx @duckcodeailabs/dql-cli@latest --version`
-  reports `dql 1.6.1` and `npx create-dql-app@latest --help` reports
-  `create-dql-app 1.6.1`.
+  reports the current release and `npx create-dql-app@latest --help` reports
+  the matching scaffold release.
 
 ## Recommended Next Actions
 
 1. Commit the OSS release candidate changes.
-2. Push `main` with the `1.6.1` release state.
+2. Push `main` with the current release state.
 3. Publish/tag the release, smoke `latest`, then open the GitHub repo to public.

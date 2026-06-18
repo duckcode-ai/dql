@@ -20,23 +20,41 @@ npx dql certify blocks/revenue_by_month.dql
 If `npx dql` still fails, re-run `npm install` — the dependency link
 probably broke.
 
-### Native module errors ("Cannot find module 'better-sqlite3'")
+### `dql --version` works, but `cd dql` says "no such file or directory"
 
-`better-sqlite3` and `duckdb` ship native bindings. On a fresh OS install:
+The CLI install only installs the command. It does not create a project folder.
+From your dbt repo root, initialize DQL first:
 
 ```bash
-npm rebuild better-sqlite3 duckdb
+dql init ./dql
+cd dql
+dql doctor
 ```
 
-Or wipe and re-install:
+Use `dql init .` only if you want DQL folders directly in the current repo
+root.
+
+### Optional connector package errors
+
+DuckDB and Snowflake drivers are installed project-locally when needed. If the
+connection panel says a driver package is missing, install it from the panel or
+run the printed project-local install command. If a native package fails to
+build on a fresh OS install, check Node `20` or `22` LTS and local build tools.
+
+```bash
+node -v
+npm -v
+```
+
+Then retry the connector install. For local project dependencies, wiping and
+reinstalling can help:
 
 ```bash
 rm -rf node_modules package-lock.json
 npm install
 ```
 
-(Building the framework repo from source? Use the pnpm equivalents:
-`pnpm rebuild better-sqlite3`, then `pnpm install && pnpm -r build`.)
+(Building the framework repo from source? Use `pnpm install && pnpm -r build`.)
 
 ### Preview doesn't open
 
