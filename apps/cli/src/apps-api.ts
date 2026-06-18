@@ -1446,7 +1446,7 @@ function normalizeInvestigationIntent(
 function safeIntentContext(context: unknown): Record<string, unknown> {
   const root = asRecord(context);
   return {
-    selectedBlock: root ? root.selectedBlock : undefined,
+    selectedBlock: root ? root.selectedBlock ?? root.focusBlock : undefined,
     dashboardTitle: root ? root.dashboardTitle : undefined,
     availableBlocks: root ? root.availableBlocks : undefined,
   };
@@ -1454,7 +1454,7 @@ function safeIntentContext(context: unknown): Record<string, unknown> {
 
 function selectedBlockContext(context: unknown): Record<string, unknown> | null {
   const root = asRecord(context);
-  const selected = asRecord(root?.selectedBlock);
+  const selected = asRecord(root?.selectedBlock) ?? asRecord(root?.focusBlock);
   if (selected) return selected;
   if (!root) return null;
   const hasSelectedTileContext = ['blockId', 'blockPath', 'tileId', 'certificationStatus', 'resultSample', 'rowCount']

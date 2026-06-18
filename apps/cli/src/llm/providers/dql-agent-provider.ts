@@ -127,11 +127,12 @@ export function createDqlAgentProviderRunner(id: SimpleProviderId): AgentRunner 
             : [];
           const skills = loadSkills(req.projectRoot).skills;
           const followUp = followUpFromConversationContext(req, question) ?? inferFollowUpContext(req, question);
+          const selectedContext = selectedContextForMetadata(req, question);
           const contextPack = await buildLocalContextPack(req.projectRoot, {
             question,
             surface: 'notebook',
             followUp,
-            selectedContext: req.upstream,
+            selectedContext,
             runtimeSchemaSnapshot: schemaContext.length > 0
               ? {
                   source: 'agent provider schema context',
@@ -147,9 +148,9 @@ export function createDqlAgentProviderRunner(id: SimpleProviderId): AgentRunner 
               : undefined,
           })
             .catch(() => undefined);
-          const selectedBlockHints = followUp?.kind === 'drilldown' || isDrilldownFollowUp(question)
-            ? []
-            : extractSelectedBlockHints(req);
+          const selectedBlockHints = shouldUseSelectedBlockHint(req, question, followUp)
+            ? extractSelectedBlockHints(req)
+            : [];
           const blockHints = Array.from(new Set([
             ...(followUp?.kind === 'generic' && followUp.sourceBlockName ? [followUp.sourceBlockName] : []),
             ...selectedBlockHints,
@@ -266,16 +267,62 @@ function renderExtraContext(req: AgentRunRequest, followUp?: AgentFollowUpContex
   return parts.length > 0 ? parts.join('\n\n') : undefined;
 }
 
+function selectedContextForMetadata(req: AgentRunRequest, question: string): unknown {
+  const upstream = req.upstream?.sql?.trim();
+  if (!upstream || (!upstream.startsWith('{') && !upstream.startsWith('['))) return req.upstream;
+  try {
+    const parsed = JSON.parse(upstream) as Record<string, unknown>;
+    if (!('selectedBlock' in parsed) && !('focusBlock' in parsed)) return req.upstream;
+    if (shouldUseFocusedTileForQuestion(question)) return req.upstream;
+    const { selectedBlock: _selectedBlock, ...rest } = parsed;
+    return {
+      ...rest,
+      focusBlock: rest.focusBlock ?? _selectedBlock,
+      contextPolicy: {
+        ...(rest.contextPolicy && typeof rest.contextPolicy === 'object' && !Array.isArray(rest.contextPolicy)
+          ? rest.contextPolicy as Record<string, unknown>
+          : {}),
+        retrieval: 'question_first',
+        focusBlockUse: 'soft_context_only',
+      },
+    };
+  } catch {
+    return req.upstream;
+  }
+}
+
+function shouldUseSelectedBlockHint(
+  req: AgentRunRequest,
+  question: string,
+  followUp?: AgentFollowUpContext,
+): boolean {
+  if (followUp?.kind === 'generic' && followUp.sourceBlockName) return false;
+  if (followUp?.kind === 'drilldown' || isDrilldownFollowUp(question)) return false;
+  return shouldUseFocusedTileForQuestion(question) && extractSelectedBlockHints(req).length > 0;
+}
+
+function shouldUseFocusedTileForQuestion(question: string): boolean {
+  const lower = question.toLowerCase();
+  if (!/\b(this|that|it|selected\s+(?:tile|block|metric)|current\s+(?:tile|block|metric))\b/.test(lower)) return false;
+  if (/\b(top|bottom|best|worst|highest|lowest|least|fewest|less|most|rank|ranking|orders?|customers?|revenue|spend|by\s+[a-z]|compare|break\s*down|drill|why|driver|list|show|give me)\b/.test(lower)) {
+    return false;
+  }
+  return true;
+}
+
 function extractSelectedBlockHints(req: AgentRunRequest): string[] {
   const upstream = req.upstream?.sql?.trim();
   if (!upstream || (!upstream.startsWith('{') && !upstream.startsWith('['))) return [];
   try {
     const parsed = JSON.parse(upstream) as {
       selectedBlock?: { blockId?: unknown };
+      focusBlock?: { blockId?: unknown };
       availableBlocks?: Array<{ blockId?: unknown }>;
     };
     const selected = typeof parsed.selectedBlock?.blockId === 'string'
       ? parsed.selectedBlock.blockId.trim()
+      : typeof parsed.focusBlock?.blockId === 'string'
+        ? parsed.focusBlock.blockId.trim()
       : '';
     return selected ? [selected] : [];
   } catch {

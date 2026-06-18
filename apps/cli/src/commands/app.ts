@@ -271,10 +271,11 @@ async function runAppGenerate(rest: string[], flags: CLIFlags): Promise<void> {
     console.log("");
     console.log("  Next steps:");
     console.log(
-      "    1. Review generated draft/narrative tiles in the dashboard file",
+      "    1. Review the certified dashboard tiles in the generated app",
     );
-    console.log("    2. Promote useful draft sections into certified blocks");
-    console.log("    3. Run dql app build");
+    console.log("    2. Use app chat or Research for missing drilldowns and SQL previews");
+    console.log("    3. Promote reviewed results into draft/certified blocks before adding them to the app");
+    console.log("    4. Run dql app build");
     console.log("");
   } finally {
     kg.close();

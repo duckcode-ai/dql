@@ -3,6 +3,7 @@ import type { CSSProperties, ReactNode } from 'react';
 import {
   ArrowLeft,
   ArrowRight,
+  BarChart3,
   Blocks,
   BookOpenText,
   Bot,
@@ -16,6 +17,7 @@ import {
   LineChart,
   MapPin,
   MessageSquareText,
+  PieChart,
   Pencil,
   Plus,
   Search,
@@ -24,6 +26,7 @@ import {
   Sparkles,
   Star,
   Share2,
+  Table2,
   Users,
   Workflow,
 } from 'lucide-react';
@@ -176,7 +179,7 @@ export function AppsView(): JSX.Element {
   const [segment, setSegment] = useState('all_customers');
   const [region, setRegion] = useState('all');
   const [smartView, setSmartView] = useState(false);
-  const [explainOpen, setExplainOpen] = useState(true);
+  const [explainOpen, setExplainOpen] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -386,6 +389,34 @@ export function AppsView(): JSX.Element {
     setSurface('workspace');
   };
 
+  const updateGeneratedTileViz = useCallback(async (tileId: string, viz: string) => {
+    const appId = generated?.app?.id ?? generated?.plan.appId;
+    const dashboardId = generated?.dashboardId ?? generated?.plan.pages[0]?.id;
+    setGenerated((current) => current ? updateGeneratedPlanTileViz(current, tileId, viz) : current);
+    if (!appId || !dashboardId) return;
+    const dashboard = await api.getDashboard(appId, dashboardId);
+    const layout = dashboard?.dashboard.layout;
+    if (!layout) return;
+    const nextItems = layout.items.map((item) => {
+      if (item.i !== tileId) return item;
+      const options = item.viz.options ?? {};
+      const genUi = asUiRecord(options.dqlGenUi);
+      return {
+        ...item,
+        viz: {
+          ...item.viz,
+          type: viz,
+          options: {
+            ...options,
+            ...(Object.keys(genUi).length ? { dqlGenUi: { ...genUi, defaultVisualization: viz } } : {}),
+          },
+        },
+      };
+    });
+    const result = await api.patchDashboardLayout(appId, dashboardId, { ...layout, items: nextItems });
+    if (!result.ok) setBuilderError(result.error);
+  }, [generated]);
+
   const createDashboardPage = async () => {
     if (!state.activeAppId) return;
     const title = addPageTitle.trim();
@@ -469,6 +500,7 @@ export function AppsView(): JSX.Element {
           onToggleBlock={toggleSelectedBlock}
           onBuild={() => builderMode === 'ai' ? void runGenerate() : void runClassicCreate()}
           onOpenGenerated={openGeneratedWorkspace}
+          onTileVizChange={(tileId, viz) => void updateGeneratedTileViz(tileId, viz)}
         />
       ) : (
         <AppWorkspaceSurface
@@ -731,6 +763,7 @@ function AppCreateSurface({
   onToggleBlock,
   onBuild,
   onOpenGenerated,
+  onTileVizChange,
 }: {
   mode: BuilderMode;
   appName: string;
@@ -753,11 +786,15 @@ function AppCreateSurface({
   onToggleBlock: (blockId: string) => void;
   onBuild: () => void;
   onOpenGenerated: () => void;
+  onTileVizChange: (tileId: string, viz: string) => void;
 }) {
   const selected = catalog.filter((block) => selectedBlocks.has(block.id));
   const contextDomainLabel = domain.trim() || 'Auto domain';
   const contextOwnerLabel = owner.trim() || 'Local owner';
   const plan = generated?.plan ?? planFromSelection(appName, prompt, domain, owner, selected);
+  const planTiles = plan.pages[0]?.tiles ?? [];
+  const certifiedPlanTiles = planTiles.filter(isCertifiedPlanTile);
+  const reviewPlanTiles = planTiles.filter((tile) => !isCertifiedPlanTile(tile));
   const validation = generated?.validation ?? {
     ok: selected.length > 0,
     certifiedTiles: selected.length,
@@ -802,8 +839,8 @@ function AppCreateSurface({
                 <p>Describe the app outcome. DQL finds certified context and drafts review gaps.</p>
                 {generated ? (
                   <div className="dql-app-ai-result">
-                    Generated <b>{generated.plan.name}</b> with {generated.validation.certifiedTiles} certified tile
-                    {generated.validation.certifiedTiles === 1 ? '' : 's'} and {generated.validation.draftTiles} draft tile
+                    Generated <b>{generated.plan.name}</b> with {generated.validation.certifiedTiles} certified app tile
+                    {generated.validation.certifiedTiles === 1 ? '' : 's'} and {generated.validation.draftTiles} review backlog item
                     {generated.validation.draftTiles === 1 ? '' : 's'}.
                   </div>
                 ) : null}
@@ -859,7 +896,7 @@ function AppCreateSurface({
         </section>
 
         <section className="dql-app-panel dql-app-preview-panel">
-          <PanelHead title={mode === 'ai' ? 'Live preview' : 'Canvas'} meta={generated ? 'generated' : selected.length ? `${selected.length} selected` : 'empty'} />
+          <PanelHead title={mode === 'ai' ? 'Live preview' : 'Canvas'} meta={certifiedPlanTiles.length ? `${certifiedPlanTiles.length} certified` : 'empty'} />
           <div className="dql-app-preview-scroll">
             <div className="dql-app-preview-card">
               <div className="dql-app-preview-head">
@@ -872,15 +909,24 @@ function AppCreateSurface({
                 <span>All regions <ChevronDown size={12} /></span>
               </div>
               <div className="dql-app-preview-grid">
-                {plan.pages[0]?.tiles.length ? (
-                  plan.pages[0].tiles.map((tile, index) => <PreviewTile key={tile.id} tile={tile} index={index} />)
+                {certifiedPlanTiles.length ? (
+                  certifiedPlanTiles.map((tile, index) => (
+                    <PreviewTile
+                      key={tile.id}
+                      tile={tile}
+                      index={index}
+                      generated={Boolean(generated)}
+                      onVizChange={(viz) => onTileVizChange(tile.id, viz)}
+                    />
+                  ))
                 ) : (
                   <div className="dql-app-preview-empty">
                     <LayoutDashboard size={38} strokeWidth={1.4} />
-                    <div>{mode === 'ai' ? 'Describe the app outcome, then send it to AI.' : 'Select blocks to compose the app.'}</div>
+                    <div>{mode === 'ai' ? 'No certified blocks matched this app yet.' : 'Select blocks to compose the app.'}</div>
                   </div>
                 )}
               </div>
+              {reviewPlanTiles.length ? <ReviewBacklog tiles={reviewPlanTiles} /> : null}
             </div>
           </div>
         </section>
@@ -888,13 +934,17 @@ function AppCreateSurface({
         <section className="dql-app-panel dql-app-plan-panel">
           <PanelHead title="Build plan" meta={generated ? generated.plan.appId : 'draft'} />
           <div className="dql-app-plan-list">
-            {plan.pages[0]?.tiles.map((tile) => <PlanItem key={tile.id} tile={tile} />)}
-            {plan.pages[0]?.tiles.length === 0 ? <EmptyPanel title="No plan yet." detail="Run the builder to create a plan." compact /> : null}
+            {plan.planning ? <PlannerFlow planning={plan.planning} /> : null}
+            {certifiedPlanTiles.length ? <PlanGroupLabel label="Certified app tiles" /> : null}
+            {certifiedPlanTiles.map((tile) => <PlanItem key={tile.id} tile={tile} />)}
+            {reviewPlanTiles.length ? <PlanGroupLabel label="Needs review before adding" /> : null}
+            {reviewPlanTiles.map((tile) => <PlanItem key={tile.id} tile={tile} />)}
+            {planTiles.length === 0 ? <EmptyPanel title="No plan yet." detail="Run the builder to create a plan." compact /> : null}
           </div>
           <div className="dql-app-plan-foot">
-            <Leader label="tiles traced to ledger" value={`${validation.certifiedTiles} / ${(plan.pages[0]?.tiles.length ?? 0)}`} />
+            <Leader label="app tiles traced to ledger" value={`${validation.certifiedTiles} / ${certifiedPlanTiles.length}`} />
             <Leader label="certified" value={String(validation.certifiedTiles)} tone="certified" />
-            <Leader label="drafted / routed" value={String(validation.draftTiles)} tone="draft" />
+            <Leader label="review backlog" value={String(validation.draftTiles)} tone="draft" />
             {error ? <div className="dql-app-error">{error}</div> : null}
             {generated ? (
               <button type="button" className="dql-apps-btn dql-apps-btn-dark" onClick={onOpenGenerated}>
@@ -1441,7 +1491,7 @@ function AppCopilotPanel({
           ? 'Waiting for result'
           : 'Ready to ask';
   const focusDetail = selectedBlock
-    ? 'Business answer first; data and lineage stay in evidence.'
+    ? 'The selected tile is context only. New questions still search the full app and metadata.'
     : 'Ask across the dashboard. The copilot will answer in business language first, then expose evidence when you need the trace.';
   const businessFacts = [
     { label: 'Audience', value: audience },
@@ -1461,7 +1511,12 @@ function AppCopilotPanel({
     rowCount: tileRunFor(block)?.result?.rowCount,
   }));
   const buildContextPayload = (blockContext: ReturnType<typeof contextForBlock> = selectedBlockContext) => ({
-    scope: blockContext ? 'selected-dashboard-block' : 'dashboard',
+    scope: 'dashboard',
+    contextPolicy: {
+      retrieval: 'question_first',
+      focusBlockUse: blockContext ? 'soft_context_only' : 'none',
+      rule: 'Use the selected tile to understand the app, but do not restrict retrieval or SQL generation to that block unless the question explicitly asks about this tile.',
+    },
     responseStyle: {
       audience: 'CXO and business stakeholder',
       firstResponse: 'Start with a plain-language business answer and recommended action.',
@@ -1477,7 +1532,7 @@ function AppCopilotPanel({
     audience,
     owner,
     reviewCadence: cadence,
-    selectedBlock: blockContext,
+    focusBlock: blockContext,
     availableBlocks: availableBlockContext,
   });
   const contextPayload = buildContextPayload();
@@ -1938,10 +1993,27 @@ function PanelHead({ title, meta }: { title: string; meta?: string }) {
   );
 }
 
-function PreviewTile({ tile, index }: { tile: GeneratedAppPlan['pages'][number]['tiles'][number]; index: number }) {
+type GeneratedPlanTile = GeneratedAppPlan['pages'][number]['tiles'][number];
+
+function isCertifiedPlanTile(tile: GeneratedPlanTile): boolean {
+  return tile.kind === 'certified_block' && tile.certification === 'certified';
+}
+
+function PreviewTile({
+  tile,
+  index,
+  generated,
+  onVizChange,
+}: {
+  tile: GeneratedPlanTile;
+  index: number;
+  generated: boolean;
+  onVizChange: (viz: string) => void;
+}) {
   const genUi = tile.display?.genUi;
   const wide = genUi?.layoutIntent === 'wide' || genUi?.layoutIntent === 'full' || tile.viz === 'line' || tile.viz === 'bar';
   const component = genUi?.component ?? (tile.kind === 'narrative' ? 'NarrativePanel' : 'EvidenceTable');
+  const vizChoices = buildPreviewVizChoices(tile);
   return (
     <div className={`dql-app-preview-tile ${tile.certification === 'uncertified' ? 'draft' : ''} ${wide ? 'wide' : ''}`}>
       <div className="dql-app-preview-tile-head">
@@ -1965,6 +2037,22 @@ function PreviewTile({ tile, index }: { tile: GeneratedAppPlan['pages'][number][
           </div>
         )}
       </div>
+      {vizChoices.length > 1 ? (
+        <div className="dql-app-preview-viz-row" aria-label={`${tile.title} visualization choices`}>
+          {vizChoices.map((viz) => (
+            <button
+              key={viz}
+              type="button"
+              className={normalizePreviewViz(tile.viz) === normalizePreviewViz(viz) ? 'on' : ''}
+              title={formatBusinessLabel(viz)}
+              disabled={!generated}
+              onClick={() => onVizChange(viz)}
+            >
+              {previewVizIcon(viz)}
+            </button>
+          ))}
+        </div>
+      ) : null}
       <div className="dql-app-preview-tile-foot">
         <span>{genUi?.layoutIntent ?? tile.kind.replace(/_/g, ' ')}</span>
         <b>{tile.certification === 'certified' ? 'certified' : 'draft'}</b>
@@ -1973,7 +2061,59 @@ function PreviewTile({ tile, index }: { tile: GeneratedAppPlan['pages'][number][
   );
 }
 
-function PlanItem({ tile }: { tile: GeneratedAppPlan['pages'][number]['tiles'][number] }) {
+function ReviewBacklog({ tiles }: { tiles: GeneratedPlanTile[] }) {
+  return (
+    <div className="dql-app-review-backlog">
+      <div className="dql-app-review-backlog-head">
+        <span><Search size={13} /> Needs review before adding</span>
+        <b>{tiles.length}</b>
+      </div>
+      <div className="dql-app-review-backlog-grid">
+        {tiles.map((tile) => {
+          const actions = tile.display?.followUpActions ?? [];
+          return (
+            <div key={tile.id} className="dql-app-review-backlog-item">
+              <div>
+                <b>{tile.title}</b>
+                <p>{tile.description ?? tile.rationale ?? 'Review this item before it becomes an app tile.'}</p>
+              </div>
+              {actions.length ? (
+                <div>
+                  {actions.slice(0, 3).map((action) => (
+                    <span key={action}>{formatBusinessLabel(action)}</span>
+                  ))}
+                </div>
+              ) : null}
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+function PlannerFlow({ planning }: { planning: NonNullable<GeneratedAppPlan['planning']> }) {
+  return (
+    <div className="dql-app-planner-flow">
+      <div className="dql-app-planner-flow-title">
+        <Sparkles size={13} />
+        <span>{formatBusinessLabel(planning.analysisIntent)}</span>
+      </div>
+      <p>{planning.displayStrategy}</p>
+      <div className="dql-app-planner-flow-steps">
+        {planning.handoffPlan.slice(0, 3).map((step, index) => (
+          <span key={step}><b>{index + 1}</b>{step}</span>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function PlanGroupLabel({ label }: { label: string }) {
+  return <div className="dql-app-plan-group-label">{label}</div>;
+}
+
+function PlanItem({ tile }: { tile: GeneratedPlanTile }) {
   const genUi = tile.display?.genUi;
   return (
     <div className="dql-app-plan-item">
@@ -1982,6 +2122,29 @@ function PlanItem({ tile }: { tile: GeneratedAppPlan['pages'][number]['tiles'][n
       <em>{genUi ? `${genUi.component.replace(/([a-z])([A-Z])/g, '$1 $2')} / ${genUi.layoutIntent}` : tile.viz}</em>
     </div>
   );
+}
+
+function buildPreviewVizChoices(tile: GeneratedPlanTile): string[] {
+  const choices = new Set<string>([
+    tile.viz,
+    ...(tile.display?.genUi?.allowedVisualizations ?? []),
+  ]);
+  return Array.from(choices)
+    .map(normalizePreviewViz)
+    .filter((value, index, values) => Boolean(value) && values.indexOf(value) === index)
+    .slice(0, 5);
+}
+
+function normalizePreviewViz(value: string): string {
+  return value.toLowerCase().replace(/-/g, '_');
+}
+
+function previewVizIcon(viz: string): JSX.Element {
+  const normalized = normalizePreviewViz(viz);
+  if (normalized === 'line' || normalized === 'area') return <LineChart size={13} />;
+  if (normalized === 'pie' || normalized === 'donut') return <PieChart size={13} />;
+  if (normalized === 'table' || normalized === 'pivot') return <Table2 size={13} />;
+  return <BarChart3 size={13} />;
 }
 
 function FilterSelect({
@@ -2363,6 +2526,41 @@ function planFromSelection(
     pages: [{ id: 'overview', title: 'Overview', filters: [], tiles }],
     caveats: [],
     reviewTasks: [],
+  };
+}
+
+function updateGeneratedPlanTileViz(
+  current: GenerateAppResponse,
+  tileId: string,
+  viz: string,
+): GenerateAppResponse {
+  return {
+    ...current,
+    plan: {
+      ...current.plan,
+      pages: current.plan.pages.map((page) => ({
+        ...page,
+        tiles: page.tiles.map((tile) => {
+          if (tile.id !== tileId) return tile;
+          return {
+            ...tile,
+            viz,
+            display: tile.display
+              ? {
+                  ...tile.display,
+                  recommendedDisplayType: viz,
+                  genUi: tile.display.genUi
+                    ? {
+                        ...tile.display.genUi,
+                        defaultVisualization: viz,
+                      }
+                    : tile.display.genUi,
+                }
+              : tile.display,
+          };
+        }),
+      })),
+    },
   };
 }
 
@@ -3281,7 +3479,7 @@ const APP_STYLES = `
   grid-template-columns: repeat(12, minmax(0, 1fr));
   gap: 12px;
   padding: 16px 18px;
-  min-height: 380px;
+  min-height: 300px;
 }
 
 .dql-app-preview-empty {
@@ -3338,6 +3536,33 @@ const APP_STYLES = `
 
 .dql-app-preview-tile-body strong { font-size: 26px; }
 .dql-app-preview-tile-body small { color: var(--dql-app-muted); }
+.dql-app-preview-viz-row {
+  display: flex;
+  gap: 4px;
+  padding: 0 10px 8px;
+  align-items: center;
+}
+.dql-app-preview-viz-row button {
+  width: 26px;
+  height: 26px;
+  border: 1px solid var(--dql-app-line);
+  border-radius: 6px;
+  background: var(--dql-app-surface);
+  color: var(--dql-app-muted);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+}
+.dql-app-preview-viz-row button.on {
+  background: var(--dql-app-accent);
+  border-color: var(--dql-app-accent);
+  color: #fff;
+}
+.dql-app-preview-viz-row button:disabled {
+  cursor: default;
+  opacity: 0.58;
+}
 .dql-app-preview-tile-foot { border-bottom: 0; border-top: 1px solid var(--dql-app-line); }
 .dql-app-preview-tile-foot b { margin-left: auto; color: var(--dql-app-green); }
 .dql-app-preview-tile.draft .dql-app-preview-tile-foot b { color: var(--dql-app-orange); }
@@ -3351,6 +3576,124 @@ const APP_STYLES = `
 }
 
 .dql-app-preview-tile.draft .dql-app-mini-bars i { background: var(--dql-app-orange); }
+.dql-app-review-backlog {
+  border-top: 1px solid var(--dql-app-line);
+  background: var(--dql-app-surface-muted);
+  padding: 14px 18px 18px;
+}
+.dql-app-review-backlog-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 10px;
+  color: var(--dql-app-muted);
+}
+.dql-app-review-backlog-head span {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font: 850 12px var(--font-ui);
+  color: var(--dql-app-ink);
+}
+.dql-app-review-backlog-head b {
+  margin-left: auto;
+  min-width: 22px;
+  height: 22px;
+  border-radius: 999px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--dql-app-orange-soft);
+  color: var(--dql-app-orange);
+  font: 800 10px var(--font-mono);
+}
+.dql-app-review-backlog-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+.dql-app-review-backlog-item {
+  border: 1px solid rgba(202, 138, 4, 0.22);
+  border-radius: 8px;
+  background: var(--dql-app-surface);
+  padding: 11px;
+  display: grid;
+  gap: 9px;
+}
+.dql-app-review-backlog-item b {
+  display: block;
+  font-size: 12.5px;
+  line-height: 1.25;
+}
+.dql-app-review-backlog-item p {
+  margin: 5px 0 0;
+  color: var(--dql-app-muted);
+  font-size: 11.5px;
+  line-height: 1.4;
+}
+.dql-app-review-backlog-item > div:last-child {
+  display: flex;
+  gap: 5px;
+  flex-wrap: wrap;
+}
+.dql-app-review-backlog-item span {
+  border: 1px solid rgba(79, 99, 215, 0.18);
+  border-radius: 999px;
+  background: var(--dql-app-accent-soft);
+  color: var(--dql-app-accent);
+  padding: 3px 7px;
+  font: 750 10px var(--font-ui);
+}
+.dql-app-planner-flow {
+  border: 1px solid var(--dql-app-line);
+  border-radius: 8px;
+  background: var(--dql-app-surface);
+  padding: 11px;
+  margin-bottom: 12px;
+}
+.dql-app-planner-flow-title {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  color: var(--dql-app-accent);
+  font: 850 12px var(--font-ui);
+}
+.dql-app-planner-flow p {
+  margin: 7px 0 0;
+  color: var(--dql-app-muted);
+  font-size: 11.5px;
+  line-height: 1.42;
+}
+.dql-app-planner-flow-steps {
+  display: grid;
+  gap: 6px;
+  margin-top: 10px;
+}
+.dql-app-planner-flow-steps span {
+  display: grid;
+  grid-template-columns: 20px minmax(0, 1fr);
+  gap: 7px;
+  color: var(--dql-app-muted);
+  font-size: 11px;
+  line-height: 1.35;
+}
+.dql-app-planner-flow-steps b {
+  width: 20px;
+  height: 20px;
+  border-radius: 999px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--dql-app-accent-soft);
+  color: var(--dql-app-accent);
+  font: 850 10px var(--font-mono);
+}
+.dql-app-plan-group-label {
+  margin: 14px 0 4px;
+  color: var(--dql-app-faint);
+  font: 850 10px var(--font-mono);
+  text-transform: uppercase;
+}
 .dql-app-plan-item {
   display: flex;
   align-items: center;
@@ -4791,6 +5134,9 @@ const APP_STYLES = `
   }
   .dql-app-research-grid,
   .dql-app-research-drivers {
+    grid-template-columns: 1fr;
+  }
+  .dql-app-review-backlog-grid {
     grid-template-columns: 1fr;
   }
 }

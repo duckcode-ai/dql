@@ -202,6 +202,18 @@ export interface GeneratedAppPlan {
   appId: string;
   name: string;
   prompt: string;
+  planning?: {
+    plannerMode: 'deterministic' | 'ai_assisted';
+    normalizedGoal: string;
+    analysisIntent: string;
+    audience: string;
+    domain: string;
+    certifiedContext: Array<{ nodeId: string; name: string; kind: string; reason: string }>;
+    missingEvidence: string[];
+    displayStrategy: string;
+    layoutRationale: string;
+    handoffPlan: string[];
+  };
   skills: Array<{ id: string; title: string; description: string }>;
   domain: string;
   audience: string;

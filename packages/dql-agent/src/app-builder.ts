@@ -358,11 +358,11 @@ export function planAppFromPrompt(input: PlanAppFromPromptInput): AppPlan {
       ),
       displayStrategy: displayStrategyForIntent(analysisIntent),
       layoutRationale:
-        "Business-first layout: compact brief, certified KPIs/trends/breakdowns, then review-required trust and research tiles.",
+        "Business-first layout: certified KPIs, trends, breakdowns, and evidence tiles only; generated gaps stay in the review backlog until promoted.",
       handoffPlan: [
-        "Use certified block tiles as governed dashboard evidence.",
-        "Use generated text/table tiles only as review-required planning scaffolds.",
-        "Open Research for deeper drilldowns, driver analysis, and trust checks.",
+        "Use certified block tiles as the governed dashboard surface.",
+        "Keep generated narrative, trust gaps, and drilldown ideas in the review backlog.",
+        "Use app chat and Research to run additional SQL, inspect previews, then pin or promote reviewed results into the app.",
       ],
     },
     skills: APP_BUILDER_SKILLS,
@@ -382,19 +382,19 @@ export function planAppFromPrompt(input: PlanAppFromPromptInput): AppPlan {
       {
         id: "overview",
         title: inferDashboardTitle(prompt, domain, appName),
-        description: `Generated app story for ${audience}.`,
+        description: `Certified app surface for ${audience}. Draft gaps stay in Research until reviewed.`,
         filters,
         tiles: [narrativeTile, ...certifiedTiles, ...draftTiles],
       },
     ],
     caveats: [
       "Generated app plans are local draft artifacts until reviewed.",
-      "Certified tiles stay governed; draft and narrative tiles require analyst review.",
+      "Generated dashboards render certified block tiles only; draft and narrative suggestions require analyst review before they become app tiles.",
     ],
     reviewTasks: [
-      "Review every uncertified tile before stakeholder use.",
+      "Review every backlog item before stakeholder use.",
       "Run dql app build after accepting the generated files.",
-      "Promote repeated draft sections to certified blocks when the review is complete.",
+      "Use app chat or Research for additional questions, then promote reviewed SQL results to draft or certified blocks.",
     ],
   };
 }
@@ -1124,7 +1124,7 @@ function buildLayoutItems(tiles: AppPlanTile[]): DashboardGridItem[] {
   let x = 0;
   let y = 0;
   let rowH = 0;
-  const orderedTiles = [...tiles].sort((a, b) => {
+  const orderedTiles = tiles.filter(isDashboardTile).sort((a, b) => {
     const priorityA = a.display?.layoutPriority ?? 50;
     const priorityB = b.display?.layoutPriority ?? 50;
     return priorityA - priorityB;
@@ -1159,9 +1159,7 @@ function buildLayoutItems(tiles: AppPlanTile[]): DashboardGridItem[] {
           }),
         },
       },
-      ...(tile.kind === "certified_block" && tile.blockId
-        ? { block: { blockId: tile.blockId } }
-        : { text: { markdown: markdownForGeneratedTile(tile) } }),
+      block: { blockId: tile.blockId },
     };
     x += size.w;
     rowH = Math.max(rowH, size.h);
@@ -1169,30 +1167,11 @@ function buildLayoutItems(tiles: AppPlanTile[]): DashboardGridItem[] {
   });
 }
 
-function markdownForGeneratedTile(tile: AppPlanTile): string {
-  const lines = [
-    `### ${tile.title}`,
-    "",
-    tile.description ?? "Generated app section pending analyst review.",
-    "",
-    `**Trust:** ${tile.certification}`,
-    `**Review status:** ${tile.reviewStatus}`,
-  ];
-  if (tile.display?.followUpActions.length) {
-    lines.push(
-      "",
-      "**Next actions:**",
-      ...tile.display.followUpActions.map((action) => `- ${titleCase(action.replace(/_/g, " "))}`),
-    );
-  }
-  if (tile.reviewTasks?.length) {
-    lines.push(
-      "",
-      "**Review tasks:**",
-      ...tile.reviewTasks.map((task) => `- ${task}`),
-    );
-  }
-  return lines.join("\n");
+function isDashboardTile(tile: AppPlanTile): tile is AppPlanTile & {
+  kind: "certified_block";
+  blockId: string;
+} {
+  return tile.kind === "certified_block" && tile.certification === "certified" && Boolean(tile.blockId);
 }
 
 function appPlanReadme(
@@ -1211,7 +1190,7 @@ function appPlanReadme(
     `- Audience: ${plan.audience}`,
     `- Lifecycle: ${plan.lifecycle}`,
     `- Certified tiles: ${validation.certifiedTiles}`,
-    `- Draft/review tiles: ${validation.draftTiles}`,
+    `- Review backlog items: ${validation.draftTiles}`,
     "",
     "## Planner brief",
     "",
@@ -1232,6 +1211,14 @@ function appPlanReadme(
     ...(plan.planning.missingEvidence.length
       ? plan.planning.missingEvidence.map((item) => `- ${item}`)
       : ["- No missing evidence was identified by the deterministic planner."]),
+    "",
+    "## Review backlog",
+    "",
+    ...plan.pages.flatMap((page) =>
+      page.tiles
+        .filter((tile) => !isDashboardTile(tile))
+        .map((tile) => `- ${tile.title}: ${tile.description ?? tile.rationale ?? "Review before adding to the app."}`),
+    ),
     "",
     "## Agent skills applied",
     "",

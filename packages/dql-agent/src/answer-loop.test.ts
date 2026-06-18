@@ -933,6 +933,100 @@ describe("answer (block-first loop)", () => {
     expect(provider.calls).toHaveLength(0);
   });
 
+  it("generates least-order customer names instead of reusing selected summary blocks", async () => {
+    kg.rebuild(
+      [
+        {
+          nodeId: "block:total_customers",
+          kind: "block",
+          name: "total_customers",
+          domain: "customers",
+          status: "certified",
+          description: "Total number of distinct customers.",
+          tags: ["customers", "kpi"],
+          sourceTier: "certified_artifact",
+          certification: "certified",
+          provenance: "DQL block",
+        },
+        {
+          nodeId: "block:top_customers",
+          kind: "block",
+          name: "top_customers",
+          domain: "customers",
+          status: "certified",
+          description: "Top 10 customers by lifetime spend, with order counts.",
+          llmContext: "Use for best customers and highest lifetime spend questions.",
+          tags: ["customers", "ranking", "orders"],
+          sourceTier: "certified_artifact",
+          certification: "certified",
+          provenance: "DQL block",
+        },
+        {
+          nodeId: "block:revenue_by_month",
+          kind: "block",
+          name: "revenue_by_month",
+          domain: "revenue",
+          status: "certified",
+          description: "Monthly revenue trend.",
+          tags: ["revenue", "trend"],
+          sourceTier: "certified_artifact",
+          certification: "certified",
+          provenance: "DQL block",
+        },
+        {
+          nodeId: "dbt_model:customers",
+          kind: "dbt_model",
+          name: "customers",
+          domain: "customers",
+          description: "Customer mart with lifetime spend and order counts.",
+          llmContext: "runtime relation: dev.customers\nColumns:\n- customer_name\n- count_lifetime_orders\n- lifetime_spend",
+          sourceTier: "dbt_manifest",
+          certification: "ai_generated",
+          provenance: "dbt manifest",
+        },
+      ],
+      [],
+    );
+    const provider = new StubProvider("should not be called");
+    const result = await answer({
+      question: "I need the customer names who order least performance and less orders?",
+      provider,
+      kg,
+      blockHints: ["top_customers"],
+      schemaContext: [
+        {
+          relation: "dev.customers",
+          schema: "dev",
+          name: "customers",
+          columns: [
+            { name: "customer_name", type: "VARCHAR" },
+            { name: "count_lifetime_orders", type: "BIGINT" },
+            { name: "lifetime_spend", type: "DECIMAL" },
+          ],
+        },
+      ],
+      executeGeneratedSql: async (sql) => ({
+        columns: ["customer_name", "orders", "lifetime_spend"],
+        rows: [
+          { customer_name: "Low Order Customer", orders: 1, lifetime_spend: 24.5 },
+          { customer_name: "Occasional Buyer", orders: 2, lifetime_spend: 80 },
+        ],
+        rowCount: 2,
+        sql,
+      }),
+    });
+    expect(result.kind).toBe("uncertified");
+    expect(result.block).toBeUndefined();
+    expect(result.proposedSql).toContain("dev.customers");
+    expect(result.proposedSql).toContain("customer_name");
+    expect(result.proposedSql).toContain("count_lifetime_orders");
+    expect(result.proposedSql).toContain("ORDER BY count_lifetime_orders ASC");
+    expect(result.proposedSql).not.toContain("total_customers");
+    expect(result.proposedSql).not.toContain("revenue_by_month");
+    expect(result.result?.rowCount).toBe(2);
+    expect(provider.calls).toHaveLength(0);
+  });
+
   it("generates dynamic SQL for a named-customer metric instead of selecting a broad certified KPI", async () => {
     kg.rebuild(
       [

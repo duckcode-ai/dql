@@ -1216,24 +1216,33 @@ function buildSchemaAwareProposal(input: {
   if (isFilteredEntityQuestion(input.question)) return undefined;
   const lower = input.question.toLowerCase();
   const asksForCustomerPerformance = /\bcustomers?\b/.test(lower)
-    && /\border|orders|spend|revenue|perform|performed|better|top|best|rank|ranking\b/.test(lower)
+    && /\border|orders|spend|revenue|perform|performed|better|top|best|rank|ranking|bottom|least|fewest|lowest|less|worst|underperform/.test(lower)
     && !/\b(order details|specific orders|each order|all orders|order line|line item)\b/.test(lower);
   if (asksForCustomerPerformance) {
+    const direction = customerRankingDirectionFromText(input.question);
+    const orderDirection = direction === 'bottom' ? 'ASC' : 'DESC';
+    const orderFocused = /\border|orders|order count|ordered\b/.test(lower)
+      && !/\b(spend|revenue|sales|amount|lifetime spend|value)\b/.test(lower);
     const customers = findSchemaTable(schemaContext, ['customers', 'customer']);
     if (customers) {
       const customerName = findSchemaColumn(customers, ['customer_name', 'name', 'full_name']);
       const orderCount = findSchemaColumn(customers, ['count_lifetime_orders', 'lifetime_orders', 'order_count', 'orders_count', 'orders']);
       const spend = findSchemaColumn(customers, ['lifetime_spend', 'total_lifetime_spend', 'customer_lifetime_value', 'total_revenue', 'revenue']);
       if (customerName && orderCount && spend) {
+        const primarySort = orderFocused ? orderCount : spend;
+        const secondarySort = orderFocused ? spend : orderCount;
+        const rankingLabel = direction === 'bottom'
+          ? orderFocused ? 'Customers with the fewest orders' : 'Lowest performing customers'
+          : orderFocused ? 'Top customers by order count' : 'Top performing customers';
         return {
-          text: `Top performing customers ranked by ${businessMeasurePhrase(spend)} with ${businessMeasurePhrase(orderCount)} for context. This is AI-generated and needs analyst review before certification.`,
+          text: `${rankingLabel}, with ${businessMeasurePhrase(orderCount)} and ${businessMeasurePhrase(spend)} for context. This is AI-generated and needs analyst review before certification.`,
           sql: [
             'SELECT',
             `  ${sqlIdentifier(customerName)} AS customer_name,`,
             `  ${sqlIdentifier(orderCount)} AS orders,`,
             `  ROUND(${sqlIdentifier(spend)}, 2) AS lifetime_spend`,
             `FROM ${sqlRelation(customers.relation)}`,
-            `ORDER BY ${sqlIdentifier(spend)} DESC, ${sqlIdentifier(orderCount)} DESC`,
+            `ORDER BY ${sqlIdentifier(primarySort)} ${orderDirection}, ${sqlIdentifier(secondarySort)} ${orderDirection}`,
             'LIMIT 10',
           ].join('\n'),
           viz: 'table',
@@ -1247,8 +1256,13 @@ function buildSchemaAwareProposal(input: {
       const orderId = orders ? findSchemaColumn(orders, ['order_id', 'id']) : undefined;
       if (orders && customerName && customerId && orderCustomerId && orderTotal) {
         const countExpression = orderId ? `COUNT(DISTINCT o.${sqlIdentifier(orderId)})` : 'COUNT(*)';
+        const primarySort = orderFocused ? 'orders' : 'lifetime_spend';
+        const secondarySort = orderFocused ? 'lifetime_spend' : 'orders';
+        const rankingLabel = direction === 'bottom'
+          ? orderFocused ? 'Customers with the fewest orders' : 'Lowest performing customers'
+          : orderFocused ? 'Top customers by order count' : 'Top performing customers';
         return {
-          text: `Top performing customers ranked from order totals with order count for context. This is AI-generated and needs analyst review before certification.`,
+          text: `${rankingLabel} from order totals, with order count for context. This is AI-generated and needs analyst review before certification.`,
           sql: [
             'SELECT',
             `  c.${sqlIdentifier(customerName)} AS customer_name,`,
@@ -1257,7 +1271,7 @@ function buildSchemaAwareProposal(input: {
             `FROM ${sqlRelation(orders.relation)} AS o`,
             `JOIN ${sqlRelation(customers.relation)} AS c ON o.${sqlIdentifier(orderCustomerId)} = c.${sqlIdentifier(customerId)}`,
             `GROUP BY c.${sqlIdentifier(customerName)}`,
-            'ORDER BY lifetime_spend DESC, orders DESC',
+            `ORDER BY ${sqlIdentifier(primarySort)} ${orderDirection}, ${sqlIdentifier(secondarySort)} ${orderDirection}`,
             'LIMIT 10',
           ].join('\n'),
           viz: 'table',
@@ -1271,6 +1285,14 @@ function buildSchemaAwareProposal(input: {
   const genericProposal = buildGenericSingleTableProposal({ ...input, schemaContext });
   if (genericProposal) return genericProposal;
   return undefined;
+}
+
+function customerRankingDirectionFromText(text: string): RankingDirection {
+  const lower = text.toLowerCase();
+  if (/\b(less|lesser)\s+(?:order|orders|ordering)\b/.test(lower) || /\borders?\s+(?:less|least|fewest|lowest)\b/.test(lower)) {
+    return 'bottom';
+  }
+  return rankingDirectionFromText(text) ?? 'top';
 }
 
 function buildGenericJoinProposal(input: {

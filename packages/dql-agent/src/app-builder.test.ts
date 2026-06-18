@@ -302,6 +302,10 @@ describe("generateAppFromPlan", () => {
       expect(parseDashboardDocument(dashboardText).errors).toEqual([]);
 
       const dashboard = JSON.parse(dashboardText);
+      expect(dashboard.layout.items).toHaveLength(
+        plan.pages[0].tiles.filter((tile) => tile.kind === "certified_block").length,
+      );
+      expect(dashboard.layout.items.some((item: any) => item.text)).toBe(false);
       expect(dashboard.layout.items).toEqual(
         expect.arrayContaining([
           expect.objectContaining({
@@ -315,24 +319,11 @@ describe("generateAppFromPlan", () => {
               }),
             }),
           }),
-          expect.objectContaining({
-            text: expect.objectContaining({
-              markdown: expect.stringContaining("**Trust:** uncertified"),
-            }),
-            viz: expect.objectContaining({
-              options: expect.objectContaining({
-                dqlGenUi: expect.objectContaining({
-                  component: expect.stringMatching(/TrustCallout|NarrativePanel|ResearchActions|BusinessBrief/),
-                }),
-              }),
-            }),
-          }),
         ]),
       );
       expect(dashboard.layout.items[0]).toMatchObject({
-        i: "business-brief",
-        w: 12,
-        h: 2,
+        i: "revenue-total",
+        block: { blockId: "revenue_total" },
       });
       const readme = readFileSync(
         join(projectRoot, generated.paths[2]),
@@ -340,5 +331,7 @@ describe("generateAppFromPlan", () => {
       );
       expect(readme).toContain("## Planner brief");
       expect(readme).toContain("## Certified context");
+      expect(readme).toContain("## Review backlog");
+      expect(readme).toContain("Trust and evidence gaps");
     }));
 });
