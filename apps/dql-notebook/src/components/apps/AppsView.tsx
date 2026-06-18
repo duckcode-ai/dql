@@ -896,7 +896,7 @@ function AppCreateSurface({
         </section>
 
         <section className="dql-app-panel dql-app-preview-panel">
-          <PanelHead title={mode === 'ai' ? 'Live preview' : 'Canvas'} meta={certifiedPlanTiles.length ? `${certifiedPlanTiles.length} certified` : 'empty'} />
+          <PanelHead title={mode === 'ai' ? 'Generated layout' : 'Canvas'} meta={certifiedPlanTiles.length ? `${certifiedPlanTiles.length} certified` : 'empty'} />
           <div className="dql-app-preview-scroll">
             <div className="dql-app-preview-card">
               <div className="dql-app-preview-head">
@@ -910,11 +910,10 @@ function AppCreateSurface({
               </div>
               <div className="dql-app-preview-grid">
                 {certifiedPlanTiles.length ? (
-                  certifiedPlanTiles.map((tile, index) => (
+                  certifiedPlanTiles.map((tile) => (
                     <PreviewTile
                       key={tile.id}
                       tile={tile}
-                      index={index}
                       generated={Boolean(generated)}
                       onVizChange={(viz) => onTileVizChange(tile.id, viz)}
                     />
@@ -2001,12 +2000,10 @@ function isCertifiedPlanTile(tile: GeneratedPlanTile): boolean {
 
 function PreviewTile({
   tile,
-  index,
   generated,
   onVizChange,
 }: {
   tile: GeneratedPlanTile;
-  index: number;
   generated: boolean;
   onVizChange: (viz: string) => void;
 }) {
@@ -2014,6 +2011,8 @@ function PreviewTile({
   const wide = genUi?.layoutIntent === 'wide' || genUi?.layoutIntent === 'full' || tile.viz === 'line' || tile.viz === 'bar';
   const component = genUi?.component ?? (tile.kind === 'narrative' ? 'NarrativePanel' : 'EvidenceTable');
   const vizChoices = buildPreviewVizChoices(tile);
+  const displayLabel = previewDisplayLabel(tile, component);
+  const detail = tile.description ?? tile.rationale ?? 'Certified data block';
   return (
     <div className={`dql-app-preview-tile ${tile.certification === 'uncertified' ? 'draft' : ''} ${wide ? 'wide' : ''}`}>
       <div className="dql-app-preview-tile-head">
@@ -2021,21 +2020,13 @@ function PreviewTile({
         <span>{component.replace(/([a-z])([A-Z])/g, '$1 $2')}</span>
       </div>
       <div className="dql-app-preview-tile-body">
-        {component === 'TrustCallout' ? (
-          <>
-            <strong>Review</strong>
-            <small>{tile.description ?? 'Trust, lineage, and evidence tasks before certification.'}</small>
-          </>
-        ) : tile.viz === 'single_value' || tile.viz === 'kpi' ? (
-          <>
-            <strong>{index % 2 === 0 ? '$48.2K' : '61.9K'}</strong>
-            <small>{tile.description ?? 'Certified KPI tile'}</small>
-          </>
-        ) : (
-          <div className="dql-app-mini-bars">
-            {[72, 42, 64, 36, 86].map((value, barIndex) => <i key={barIndex} style={{ width: `${value}%` }} />)}
+        <div className="dql-app-preview-source">
+          <span>{previewVizIcon(tile.viz)}</span>
+          <div>
+            <b>{displayLabel}</b>
+            <p>{detail}</p>
           </div>
-        )}
+        </div>
       </div>
       {vizChoices.length > 1 ? (
         <div className="dql-app-preview-viz-row" aria-label={`${tile.title} visualization choices`}>
@@ -2133,6 +2124,13 @@ function buildPreviewVizChoices(tile: GeneratedPlanTile): string[] {
     .map(normalizePreviewViz)
     .filter((value, index, values) => Boolean(value) && values.indexOf(value) === index)
     .slice(0, 5);
+}
+
+function previewDisplayLabel(tile: GeneratedPlanTile, component: string): string {
+  if (component === 'TrustCallout') return 'Review path';
+  const normalized = normalizePreviewViz(tile.viz);
+  if (normalized === 'single_value') return 'KPI';
+  return formatBusinessLabel(normalized);
 }
 
 function normalizePreviewViz(value: string): string {
@@ -3536,6 +3534,38 @@ const APP_STYLES = `
 
 .dql-app-preview-tile-body strong { font-size: 26px; }
 .dql-app-preview-tile-body small { color: var(--dql-app-muted); }
+.dql-app-preview-source {
+  display: grid;
+  grid-template-columns: 34px minmax(0, 1fr);
+  gap: 10px;
+  align-items: center;
+}
+.dql-app-preview-source > span {
+  width: 34px;
+  height: 34px;
+  border-radius: 8px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--dql-app-accent-soft);
+  color: var(--dql-app-accent);
+}
+.dql-app-preview-source b {
+  display: block;
+  color: var(--dql-app-ink);
+  font-size: 13px;
+  line-height: 1.2;
+}
+.dql-app-preview-source p {
+  margin: 4px 0 0;
+  color: var(--dql-app-muted);
+  font-size: 11.5px;
+  line-height: 1.4;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
 .dql-app-preview-viz-row {
   display: flex;
   gap: 4px;
@@ -3566,16 +3596,6 @@ const APP_STYLES = `
 .dql-app-preview-tile-foot { border-bottom: 0; border-top: 1px solid var(--dql-app-line); }
 .dql-app-preview-tile-foot b { margin-left: auto; color: var(--dql-app-green); }
 .dql-app-preview-tile.draft .dql-app-preview-tile-foot b { color: var(--dql-app-orange); }
-
-.dql-app-mini-bars i {
-  display: block;
-  height: 8px;
-  border-radius: 999px;
-  background: var(--dql-app-accent);
-  margin: 6px 0;
-}
-
-.dql-app-preview-tile.draft .dql-app-mini-bars i { background: var(--dql-app-orange); }
 .dql-app-review-backlog {
   border-top: 1px solid var(--dql-app-line);
   background: var(--dql-app-surface-muted);
