@@ -26,6 +26,7 @@ interface ConnectionInfo {
   default: string;
   connections: Record<string, any>;
   dbtProfiles?: DbtProfileConnectionCandidate[];
+  connectorStatus?: ConnectorInstallStatus[];
 }
 
 interface DbtProfileConnectionCandidate {
@@ -39,110 +40,46 @@ interface DbtProfileConnectionCandidate {
   warnings: string[];
 }
 
+interface ConnectorInstallStatus {
+  driver: 'duckdb' | 'snowflake' | 'databricks';
+  label: string;
+  packageName?: string;
+  packageSpec?: string;
+  installed: boolean;
+  builtIn: boolean;
+  installPath: string;
+  installCommand?: string;
+}
+
 const DRIVER_LABELS: Record<string, string> = {
   duckdb: 'DuckDB',
   file: 'Local File / DuckDB',
-  postgresql: 'PostgreSQL',
-  postgres: 'PostgreSQL',
-  bigquery: 'BigQuery',
   snowflake: 'Snowflake',
-  sqlite: 'SQLite',
-  mysql: 'MySQL',
-  mssql: 'SQL Server',
-  redshift: 'Amazon Redshift',
   databricks: 'Databricks',
-  clickhouse: 'ClickHouse',
-  athena: 'Amazon Athena',
-  trino: 'Trino',
-  fabric: 'Microsoft Fabric',
 };
 
 const DRIVER_COLORS: Record<string, string> = {
   duckdb: '#f4bc00',
   file: '#f4bc00',
-  postgresql: '#336791',
-  postgres: '#336791',
-  bigquery: '#4285f4',
   snowflake: '#29b5e8',
-  sqlite: '#003b57',
-  mysql: '#00758f',
-  mssql: '#cc2927',
-  redshift: '#8c4fff',
   databricks: '#ff3621',
-  clickhouse: '#ffcc00',
-  athena: '#ff9900',
-  trino: '#dd00a1',
-  fabric: '#0078d4',
 };
-
-// v1.3.3 Hex handoff — drivers with a TRENDING badge in the catalog grid.
-// These are the warehouses teams adopt most in our handoff deck.
 
 // Short one-line blurbs for the driver cards.
 const DRIVER_TAGLINES: Record<string, string> = {
   duckdb: 'In-process analytical database',
   file: 'Local CSV / Parquet via DuckDB',
-  postgresql: 'Open-source relational warehouse',
-  postgres: 'Open-source relational warehouse',
-  bigquery: 'Google Cloud serverless warehouse',
   snowflake: 'Cloud data platform',
-  sqlite: 'Embedded SQL database',
-  mysql: 'Open-source relational database',
-  mssql: 'Microsoft SQL Server',
-  redshift: 'AWS cloud data warehouse',
   databricks: 'Lakehouse platform',
-  clickhouse: 'Columnar OLAP database',
-  athena: 'AWS serverless S3 query engine',
-  trino: 'Distributed SQL query engine',
-  fabric: 'Microsoft unified analytics',
 };
 
 const CONNECTOR_SCHEMAS: ConnectorFormSchema[] = [
-  {
-    driver: 'file',
-    label: 'Files / DuckDB memory',
-    fields: [
-      { key: 'filepath', label: 'DuckDB file path', type: 'text', placeholder: ':memory:' },
-    ],
-  },
   {
     driver: 'duckdb',
     label: 'DuckDB',
     fields: [
       { key: 'filepath', label: 'DuckDB file path', type: 'text', placeholder: './local/dev.duckdb', required: true },
     ],
-  },
-  {
-    driver: 'sqlite',
-    label: 'SQLite',
-    fields: [
-      { key: 'filepath', label: 'SQLite file path', type: 'text', placeholder: './local/dev.sqlite', required: true },
-    ],
-  },
-  {
-    driver: 'postgresql',
-    label: 'PostgreSQL',
-    fields: warehouseFields(5432),
-  },
-  {
-    driver: 'mysql',
-    label: 'MySQL',
-    fields: warehouseFields(3306),
-  },
-  {
-    driver: 'mssql',
-    label: 'SQL Server',
-    fields: warehouseFields(1433),
-  },
-  {
-    driver: 'fabric',
-    label: 'Microsoft Fabric',
-    fields: warehouseFields(1433),
-  },
-  {
-    driver: 'redshift',
-    label: 'Amazon Redshift',
-    fields: warehouseFields(5439),
   },
   {
     driver: 'snowflake',
@@ -159,49 +96,50 @@ const CONNECTOR_SCHEMAS: ConnectorFormSchema[] = [
         type: 'select',
         options: [
           { value: 'password', label: 'Password' },
+          { value: 'mfa', label: 'Password + MFA' },
           { value: 'key_pair', label: 'Key pair / private key' },
           { value: 'external_browser', label: 'SSO / external browser' },
           { value: 'oauth', label: 'OAuth token' },
+          { value: 'oauth_authorization_code', label: 'OAuth authorization code' },
+          { value: 'oauth_client_credentials', label: 'OAuth client credentials' },
+          { value: 'programmatic_access_token', label: 'Programmatic access token' },
+          { value: 'workload_identity', label: 'Workload identity' },
         ],
       },
-      { key: 'password', label: 'Password / OAuth token', type: 'password' },
+      { key: 'password', label: 'Password', type: 'password' },
+      { key: 'token', label: 'Token', type: 'password', helpText: 'OAuth, programmatic access token, or OIDC workload identity token.' },
       { key: 'privateKeyPath', label: 'Private key file path', type: 'text', placeholder: '~/.ssh/snowflake_key.p8' },
       { key: 'privateKey', label: 'Private key PEM', type: 'textarea', helpText: 'Paste PEM only when a key file cannot be referenced.' },
       { key: 'privateKeyPassphrase', label: 'Private key passphrase', type: 'password' },
-      { key: 'authenticator', label: 'Authenticator override', type: 'text', placeholder: 'EXTERNALBROWSER or OAUTH' },
+      { key: 'authenticator', label: 'Authenticator override', type: 'text', placeholder: 'EXTERNALBROWSER, OAUTH, WORKLOAD_IDENTITY, or Okta URL' },
       { key: 'role', label: 'Role', type: 'text' },
-    ],
-  },
-  {
-    driver: 'bigquery',
-    label: 'BigQuery',
-    fields: [
-      { key: 'projectId', label: 'Project ID', type: 'text', required: true },
-      { key: 'location', label: 'Location', type: 'text', placeholder: 'US' },
-      {
-        key: 'authMethod',
-        label: 'Authentication',
-        type: 'select',
-        options: [
-          { value: 'application_default', label: 'Application default credentials' },
-          { value: 'service_account_key_file', label: 'Service account key file' },
-          { value: 'service_account_json', label: 'Service account JSON' },
-        ],
-      },
-      { key: 'keyFilename', label: 'Key file path', type: 'text', placeholder: '/secure/path/service-account.json' },
-      { key: 'serviceAccountJson', label: 'Service account JSON', type: 'textarea' },
-    ],
-  },
-  {
-    driver: 'clickhouse',
-    label: 'ClickHouse',
-    fields: [
-      { key: 'host', label: 'Host', type: 'text', required: true },
-      { key: 'port', label: 'Port', type: 'number', placeholder: '8443' },
-      { key: 'database', label: 'Database', type: 'text' },
-      { key: 'username', label: 'Username', type: 'text' },
-      { key: 'password', label: 'Password', type: 'password' },
-      { key: 'ssl', label: 'Use TLS', type: 'checkbox' },
+      { key: 'accessUrl', label: 'Access URL', type: 'text' },
+      { key: 'application', label: 'Application name', type: 'text', placeholder: 'DQL' },
+      { key: 'queryTag', label: 'Query tag', type: 'text', placeholder: 'team=analytics;app=dql' },
+      { key: 'passcode', label: 'MFA passcode', type: 'password' },
+      { key: 'passcodeInPassword', label: 'MFA passcode is appended to password', type: 'checkbox' },
+      { key: 'clientRequestMFAToken', label: 'Reuse cached MFA token', type: 'checkbox' },
+      { key: 'clientStoreTemporaryCredential', label: 'Cache SSO token locally', type: 'checkbox' },
+      { key: 'clientSessionKeepAlive', label: 'Keep session alive', type: 'checkbox' },
+      { key: 'clientSessionKeepAliveHeartbeatFrequency', label: 'Keep-alive heartbeat seconds', type: 'number', placeholder: '3600' },
+      { key: 'credentialCacheDir', label: 'Credential cache directory', type: 'text' },
+      { key: 'browserActionTimeout', label: 'Browser SSO timeout ms', type: 'number', placeholder: '120000' },
+      { key: 'keepAlive', label: 'Socket keep-alive', type: 'checkbox' },
+      { key: 'timeout', label: 'Connection timeout ms', type: 'number', placeholder: '60000' },
+      { key: 'proxyHost', label: 'Proxy host', type: 'text' },
+      { key: 'proxyPort', label: 'Proxy port', type: 'number' },
+      { key: 'proxyProtocol', label: 'Proxy protocol', type: 'text', placeholder: 'https' },
+      { key: 'proxyUser', label: 'Proxy user', type: 'text' },
+      { key: 'proxyPassword', label: 'Proxy password', type: 'password' },
+      { key: 'noProxy', label: 'No proxy hosts', type: 'text', placeholder: '*.amazonaws.com|*.internal' },
+      { key: 'oauthClientId', label: 'OAuth client ID', type: 'text' },
+      { key: 'oauthClientSecret', label: 'OAuth client secret', type: 'password' },
+      { key: 'oauthAuthorizationUrl', label: 'OAuth authorization URL', type: 'text' },
+      { key: 'oauthTokenRequestUrl', label: 'OAuth token request URL', type: 'text' },
+      { key: 'oauthScope', label: 'OAuth scope', type: 'text' },
+      { key: 'oauthRedirectUri', label: 'OAuth redirect URI', type: 'text' },
+      { key: 'workloadIdentityProvider', label: 'Workload identity provider', type: 'text', placeholder: 'AWS, AZURE, GCP, or OIDC' },
+      { key: 'workloadIdentityAzureClientId', label: 'Azure client ID', type: 'text' },
     ],
   },
   {
@@ -211,64 +149,26 @@ const CONNECTOR_SCHEMAS: ConnectorFormSchema[] = [
       { key: 'host', label: 'Server hostname', type: 'text', required: true },
       { key: 'database', label: 'Catalog / database', type: 'text' },
       { key: 'schema', label: 'Schema', type: 'text' },
-      { key: 'warehouse', label: 'HTTP path / warehouse', type: 'text', required: true },
-      { key: 'authMethod', label: 'Authentication', type: 'select', options: [{ value: 'token', label: 'Access token' }] },
-      { key: 'token', label: 'Access token', type: 'password', required: true },
-    ],
-  },
-  {
-    driver: 'athena',
-    label: 'Amazon Athena',
-    fields: [
-      { key: 'host', label: 'Region', type: 'text', placeholder: 'us-east-1', required: true },
-      { key: 'database', label: 'Database', type: 'text', required: true },
-      { key: 'outputLocation', label: 'S3 output location', type: 'text', placeholder: 's3://bucket/query-results/', required: true },
-      { key: 'workgroup', label: 'Workgroup', type: 'text' },
+      { key: 'warehouse', label: 'Warehouse ID', type: 'text', helpText: 'Use the SQL warehouse ID when you have it.' },
+      { key: 'httpPath', label: 'HTTP path', type: 'text', placeholder: '/sql/1.0/warehouses/abc123', helpText: 'Paste the dbt/JDBC HTTP path and DQL will extract the warehouse ID.' },
       {
         key: 'authMethod',
         label: 'Authentication',
         type: 'select',
         options: [
-          { value: 'aws_default', label: 'AWS default provider chain' },
-          { value: 'aws_profile', label: 'AWS profile' },
-          { value: 'aws_access_key', label: 'Access key / session token' },
+          { value: 'token', label: 'Access token' },
+          { value: 'oauth', label: 'OAuth bearer token' },
         ],
       },
-      { key: 'profile', label: 'AWS profile', type: 'text', placeholder: 'prod-analytics' },
-      { key: 'accessKeyId', label: 'Access key ID', type: 'password' },
-      { key: 'secretAccessKey', label: 'Secret access key', type: 'password' },
-      { key: 'sessionToken', label: 'Session token', type: 'password' },
-    ],
-  },
-  {
-    driver: 'trino',
-    label: 'Trino',
-    fields: [
-      { key: 'host', label: 'Host', type: 'text', required: true },
-      { key: 'port', label: 'Port', type: 'number', placeholder: '8080' },
-      { key: 'database', label: 'Catalog', type: 'text', required: true },
-      { key: 'schema', label: 'Schema', type: 'text', required: true },
-      { key: 'username', label: 'Username', type: 'text' },
-      { key: 'password', label: 'Password', type: 'password' },
-      { key: 'ssl', label: 'Use TLS', type: 'checkbox' },
+      { key: 'token', label: 'Bearer token', type: 'password', required: true, helpText: 'Use an OAuth token for automation when possible, or a service-principal PAT.' },
+      { key: 'waitTimeout', label: 'Statement wait timeout', type: 'text', placeholder: '50s' },
+      { key: 'byteLimit', label: 'Inline byte limit', type: 'number', placeholder: '25000000' },
     ],
   },
 ];
 const CONNECTOR_SCHEMA_BY_DRIVER = Object.fromEntries(
   CONNECTOR_SCHEMAS.map((schema) => [schema.driver, schema]),
 ) as Record<string, ConnectorFormSchema>;
-
-function warehouseFields(defaultPort: number): ConnectorFieldSchema[] {
-  return [
-    { key: 'host', label: 'Host', type: 'text', required: true },
-    { key: 'port', label: 'Port', type: 'number', placeholder: String(defaultPort) },
-    { key: 'database', label: 'Database', type: 'text', required: true },
-    { key: 'username', label: 'Username', type: 'text' },
-    { key: 'password', label: 'Password', type: 'password' },
-    { key: 'ssl', label: 'Use TLS', type: 'checkbox' },
-    { key: 'connectionString', label: 'Connection string', type: 'text' },
-  ];
-}
 
 const QUICK_CONNECT_PRESETS = [
   {
@@ -278,16 +178,16 @@ const QUICK_CONNECT_PRESETS = [
     config: { driver: 'duckdb', filepath: ':memory:' },
   },
   {
-    name: 'postgres',
-    label: 'PostgreSQL',
-    description: 'Connect to a local PostgreSQL instance',
-    config: { driver: 'postgresql', host: 'localhost', port: 5432, database: 'postgres', username: 'postgres', password: '' },
-  },
-  {
     name: 'snowflake',
     label: 'Snowflake',
     description: 'Connect to your Snowflake data warehouse',
     config: { driver: 'snowflake', account: '', warehouse: '', database: '', schema: 'PUBLIC', username: '', password: '' },
+  },
+  {
+    name: 'databricks',
+    label: 'Databricks SQL',
+    description: 'Connect to a Databricks SQL warehouse',
+    config: { driver: 'databricks', host: '', warehouse: '', schema: 'default', token: '' },
   },
 ];
 
@@ -299,17 +199,45 @@ function normalizeFieldName(field: string): string {
   const aliases: Record<string, string> = {
     dbname: 'database',
     dataset: 'schema',
+    access_url: 'accessUrl',
+    auth_method: 'authMethod',
+    auth_type: 'authMethod',
+    browser_action_timeout: 'browserActionTimeout',
+    byte_limit: 'byteLimit',
+    client_request_mfa_token: 'clientRequestMFAToken',
+    client_session_keep_alive: 'clientSessionKeepAlive',
+    client_session_keep_alive_heartbeat_frequency: 'clientSessionKeepAliveHeartbeatFrequency',
+    client_store_temporary_credential: 'clientStoreTemporaryCredential',
+    credential_cache_dir: 'credentialCacheDir',
     http_path: 'httpPath',
+    keep_alive: 'keepAlive',
     keyFile: 'keyFilename',
     keyFileName: 'keyFilename',
+    no_proxy: 'noProxy',
+    oauth_authorization_url: 'oauthAuthorizationUrl',
+    oauth_client_id: 'oauthClientId',
+    oauth_client_secret: 'oauthClientSecret',
+    oauth_redirect_uri: 'oauthRedirectUri',
+    oauth_scope: 'oauthScope',
+    oauth_token_request_url: 'oauthTokenRequestUrl',
+    passcode_in_password: 'passcodeInPassword',
     private_key: 'privateKey',
     private_key_path: 'privateKeyPath',
     private_key_passphrase: 'privateKeyPassphrase',
+    proxy_host: 'proxyHost',
+    proxy_password: 'proxyPassword',
+    proxy_port: 'proxyPort',
+    proxy_protocol: 'proxyProtocol',
+    proxy_user: 'proxyUser',
+    query_tag: 'queryTag',
     path: 'filepath',
     project: 'projectId',
     server: 'host',
     server_hostname: 'host',
     user: 'username',
+    wait_timeout: 'waitTimeout',
+    workload_identity_azure_client_id: 'workloadIdentityAzureClientId',
+    workload_identity_provider: 'workloadIdentityProvider',
   };
   return aliases[field] ?? field;
 }
@@ -399,6 +327,7 @@ export function ConnectionPanel({ variant = 'panel' }: { variant?: 'panel' | 'pa
   const [addingNew, setAddingNew] = useState(false);
   const [saving, setSaving] = useState(false);
   const [saveMsg, setSaveMsg] = useState<string | null>(null);
+  const [installingDriver, setInstallingDriver] = useState<string | null>(null);
 
   // Edit form state
   const [editName, setEditName] = useState('');
@@ -465,6 +394,25 @@ export function ConnectionPanel({ variant = 'panel' }: { variant?: 'panel' | 'pa
   const cancelEdit = () => {
     setEditing(null);
     setAddingNew(false);
+  };
+
+  const handleInstallConnector = async (driver: string) => {
+    setInstallingDriver(driver);
+    setSaveMsg(null);
+    try {
+      const result = await api.installConnector(driver);
+      if (result.connectorStatus && info) {
+        setInfo({ ...info, connectorStatus: result.connectorStatus });
+      } else {
+        const refreshed = await api.getConnections();
+        setInfo(refreshed);
+      }
+      setSaveMsg(result.ok ? 'Connector installed' : `Error: ${result.error ?? 'Install failed'}`);
+    } catch (error: any) {
+      setSaveMsg(`Error: ${error?.message ?? 'Install failed'}`);
+    } finally {
+      setInstallingDriver(null);
+    }
   };
 
   const handleSave = async () => {
@@ -579,6 +527,9 @@ export function ConnectionPanel({ variant = 'panel' }: { variant?: 'panel' | 'pa
   const connections = info?.connections ?? {};
   const defaultKey = info?.default ?? '';
   const dbtProfileCandidates = info?.dbtProfiles ?? [];
+  const connectorStatusByDriver = Object.fromEntries(
+    (info?.connectorStatus ?? []).map((status) => [status.driver, status]),
+  ) as Record<string, ConnectorInstallStatus>;
   const connectionCount = Object.keys(connections).length;
   const canTestConnection = connectionCount > 0;
 
@@ -896,9 +847,13 @@ export function ConnectionPanel({ variant = 'panel' }: { variant?: 'panel' | 'pa
           marginBottom: 12,
         }}
       >
-          {CONNECTOR_SCHEMAS.map(({ driver, label }) => {
+        {CONNECTOR_SCHEMAS.map(({ driver, label }) => {
           const color = DRIVER_COLORS[driver] ?? t.accent;
           const tagline = DRIVER_TAGLINES[driver] ?? '';
+          const installStatus = connectorStatusByDriver[driver];
+          const installed = installStatus?.installed ?? true;
+          const builtIn = installStatus?.builtIn ?? false;
+          const installing = installingDriver === driver;
           return (
             <div
               key={driver}
@@ -931,7 +886,47 @@ export function ConnectionPanel({ variant = 'panel' }: { variant?: 'panel' | 'pa
               >
                 {tagline}
               </div>
-              <code style={{ fontSize: 9, color: t.textMuted, fontFamily: t.fontMono, marginTop: 'auto' }}>
+              <div style={{
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'space-between',
+                gap: 8,
+                marginTop: 'auto',
+              }}>
+                <span
+                  style={{
+                    fontSize: 9,
+                    fontFamily: t.font,
+                    fontWeight: 600,
+                    color: installed ? t.success : t.warning,
+                    letterSpacing: '0.05em',
+                    textTransform: 'uppercase',
+                  }}
+                >
+                  {builtIn ? 'Built in' : installed ? 'Installed' : 'Install required'}
+                </span>
+                {!installed && (
+                  <button
+                    onClick={() => handleInstallConnector(driver)}
+                    disabled={Boolean(installingDriver)}
+                    title={installStatus?.installCommand}
+                    style={{
+                      border: `1px solid ${t.btnBorder}`,
+                      background: t.btnBg,
+                      color: t.textSecondary,
+                      borderRadius: 4,
+                      padding: '2px 7px',
+                      fontSize: 10,
+                      fontFamily: t.font,
+                      cursor: installingDriver ? 'not-allowed' : 'pointer',
+                      whiteSpace: 'nowrap',
+                    }}
+                  >
+                    {installing ? 'Installing...' : 'Install'}
+                  </button>
+                )}
+              </div>
+              <code style={{ fontSize: 9, color: t.textMuted, fontFamily: t.fontMono }}>
                 {driver}
               </code>
             </div>

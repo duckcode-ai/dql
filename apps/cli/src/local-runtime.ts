@@ -1,6 +1,7 @@
-import { execSync } from 'node:child_process';
+import { execFileSync, execSync } from 'node:child_process';
 import { createServer } from 'node:http';
 import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, watch, writeFileSync } from 'node:fs';
+import { createRequire } from 'node:module';
 import { homedir } from 'node:os';
 import { dirname, extname, join, normalize, relative, resolve } from 'node:path';
 import type { IncomingMessage, ServerResponse } from 'node:http';
@@ -150,6 +151,17 @@ export interface DbtProfileConnectionCandidate {
   connection: ConnectionConfig;
   missingFields: string[];
   warnings: string[];
+}
+
+export interface ConnectorInstallStatus {
+  driver: 'duckdb' | 'snowflake' | 'databricks';
+  label: string;
+  packageName?: string;
+  packageSpec?: string;
+  installed: boolean;
+  builtIn: boolean;
+  installPath: string;
+  installCommand?: string;
 }
 
 export interface LocalServerOptions {
@@ -2272,10 +2284,35 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
         ?? Object.keys(connections)[0]
         ?? 'default';
       const dbtProfiles = discoverDbtProfileConnections(projectRoot, cfg);
+      const connectorStatus = getConnectorInstallStatuses(projectRoot);
       res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
-      res.end(serializeJSON({ default: defaultKey, connections, dbtProfiles }));
+      res.end(serializeJSON({ default: defaultKey, connections, dbtProfiles, connectorStatus }));
       return;
     }
+
+    if (req.method === 'POST' && path === '/api/connectors/install') {
+      try {
+        const body = await readJSON(req);
+        const driver = typeof body.driver === 'string' ? body.driver : '';
+        const status = installConnectorPackage(projectRoot, driver);
+        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({
+          ok: true,
+          status,
+          connectorStatus: getConnectorInstallStatuses(projectRoot),
+        }));
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({
+          ok: false,
+          error: message,
+          connectorStatus: getConnectorInstallStatuses(projectRoot),
+        }));
+      }
+      return;
+    }
+
     // Save/update connections
     if (req.method === 'PUT' && path === '/api/connections') {
       try {
@@ -4136,6 +4173,109 @@ function getProjectConnectionsForApi(config: ProjectConfig | Record<string, unkn
   return connections;
 }
 
+const CONNECTOR_INSTALLS: Record<string, Omit<ConnectorInstallStatus, 'installed' | 'installPath' | 'installCommand'>> = {
+  duckdb: {
+    driver: 'duckdb',
+    label: 'DuckDB',
+    packageName: 'duckdb',
+    packageSpec: 'duckdb@^1.1.0',
+    builtIn: false,
+  },
+  snowflake: {
+    driver: 'snowflake',
+    label: 'Snowflake',
+    packageName: 'snowflake-sdk',
+    packageSpec: 'snowflake-sdk@^1.12.0',
+    builtIn: false,
+  },
+  databricks: {
+    driver: 'databricks',
+    label: 'Databricks',
+    builtIn: true,
+  },
+};
+
+function connectorInstallRoot(projectRoot: string): string {
+  return join(projectRoot, '.dql', 'connectors');
+}
+
+function connectorModuleSearchPaths(projectRoot: string): string[] {
+  return [connectorInstallRoot(projectRoot), projectRoot];
+}
+
+function connectorInstallCommand(projectRoot: string, packageSpec: string): string {
+  return `npm install --prefix ${connectorInstallRoot(projectRoot)} ${packageSpec}`;
+}
+
+function isConnectorPackageInstalled(projectRoot: string, packageName: string): boolean {
+  for (const basePath of connectorModuleSearchPaths(projectRoot)) {
+    try {
+      const req = createRequire(join(basePath, 'package.json'));
+      req.resolve(packageName);
+      return true;
+    } catch {
+      // Try the next supported location.
+    }
+  }
+  return false;
+}
+
+export function getConnectorInstallStatuses(projectRoot: string): ConnectorInstallStatus[] {
+  return Object.values(CONNECTOR_INSTALLS).map((definition) => {
+    const installPath = connectorInstallRoot(projectRoot);
+    const installed = definition.builtIn || (
+      definition.packageName
+        ? isConnectorPackageInstalled(projectRoot, definition.packageName)
+        : true
+    );
+    return {
+      ...definition,
+      installed,
+      installPath,
+      installCommand: definition.packageSpec
+        ? connectorInstallCommand(projectRoot, definition.packageSpec)
+        : undefined,
+    };
+  });
+}
+
+function installConnectorPackage(projectRoot: string, driver: string): ConnectorInstallStatus {
+  const definition = CONNECTOR_INSTALLS[driver];
+  if (!definition) {
+    throw new Error(`Unknown connector "${driver}".`);
+  }
+  if (definition.builtIn || !definition.packageSpec) {
+    return getConnectorInstallStatuses(projectRoot).find((status) => status.driver === definition.driver)!;
+  }
+
+  const installRoot = connectorInstallRoot(projectRoot);
+  mkdirSync(installRoot, { recursive: true });
+  const packageJsonPath = join(installRoot, 'package.json');
+  if (!existsSync(packageJsonPath)) {
+    writeFileSync(
+      packageJsonPath,
+      JSON.stringify({
+        private: true,
+        description: 'Project-local DQL connector packages',
+      }, null, 2) + '\n',
+      'utf-8',
+    );
+  }
+
+  execFileSync(
+    'npm',
+    ['install', '--prefix', installRoot, '--no-audit', '--no-fund', definition.packageSpec],
+    {
+      cwd: projectRoot,
+      encoding: 'utf-8',
+      stdio: 'pipe',
+      timeout: 10 * 60 * 1000,
+    },
+  );
+
+  return getConnectorInstallStatuses(projectRoot).find((status) => status.driver === definition.driver)!;
+}
+
 function getStoredConnections(raw: Record<string, unknown>): Record<string, unknown> {
   const value = raw.connections;
   if (!value || typeof value !== 'object' || Array.isArray(value)) {
@@ -4476,6 +4616,10 @@ export function normalizeProjectConnection(connection: ConnectionConfig, project
 
   if ((normalized.driver === 'file' || normalized.driver === 'duckdb') && normalized.filepath && normalized.filepath !== ':memory:' && !isAbsoluteLikePath(normalized.filepath)) {
     normalized.filepath = resolve(projectRoot, normalized.filepath);
+  }
+
+  if (normalized.driver === 'file' || normalized.driver === 'duckdb' || normalized.driver === 'snowflake') {
+    normalized.moduleSearchPaths = connectorModuleSearchPaths(projectRoot);
   }
 
   if (normalized.driver === 'sqlite' && normalized.database && normalized.database !== ':memory:' && !isAbsoluteLikePath(normalized.database)) {
@@ -6608,56 +6752,27 @@ function mapDbtProfileOutput(output: DbtProfileOutput): {
     return result.value;
   };
 
-  const port = numberValue(output, 'port');
-  const sslRaw = read('ssl', 'sslmode');
-  const ssl = sslRaw === undefined
-    ? undefined
-    : !['false', '0', 'disable', 'disabled', 'off'].includes(sslRaw.toLowerCase());
-
   switch (adapter) {
-    case 'postgres':
-    case 'postgresql':
-      return {
-        adapter,
-        connection: compactConnection({
-          driver: 'postgresql',
-          host: read('host'),
-          port,
-          database: read('dbname', 'database'),
-          schema: read('schema'),
-          username: read('user', 'username'),
-          password: read('password', 'pass'),
-          ssl,
-        }),
-        envRefs: [...envRefs],
-        warnings,
-      };
-    case 'redshift':
-      return {
-        adapter,
-        connection: compactConnection({
-          driver: 'redshift',
-          host: read('host'),
-          port: port ?? 5439,
-          database: read('dbname', 'database'),
-          schema: read('schema'),
-          username: read('user', 'username'),
-          password: read('password', 'pass'),
-          ssl,
-        }),
-        envRefs: [...envRefs],
-        warnings,
-      };
     case 'snowflake': {
       const privateKeyPath = read('private_key_path', 'privateKeyPath');
       const privateKey = read('private_key', 'privateKey');
       const authenticator = read('authenticator');
       const normalizedAuthenticator = authenticator?.toLowerCase().replace(/[\s_-]/g, '');
-      const authMethod = privateKeyPath || privateKey || normalizedAuthenticator === 'snowflakejwt'
+      const authMethod: ConnectionConfig['authMethod'] = privateKeyPath || privateKey || normalizedAuthenticator === 'snowflakejwt'
         ? 'key_pair'
         : normalizedAuthenticator === 'externalbrowser'
           ? 'external_browser'
-          : normalizedAuthenticator === 'oauth' || normalizedAuthenticator === 'programmaticaccesstoken'
+          : normalizedAuthenticator === 'usernamepasswordmfa'
+            ? 'mfa'
+          : normalizedAuthenticator === 'oauthauthorizationcode'
+            ? 'oauth_authorization_code'
+          : normalizedAuthenticator === 'oauthclientcredentials'
+            ? 'oauth_client_credentials'
+          : normalizedAuthenticator === 'programmaticaccesstoken'
+            ? 'programmatic_access_token'
+          : normalizedAuthenticator === 'workloadidentity'
+            ? 'workload_identity'
+          : normalizedAuthenticator === 'oauth'
             ? 'oauth'
           : 'password';
       return {
@@ -6676,22 +6791,34 @@ function mapDbtProfileOutput(output: DbtProfileOutput): {
           privateKeyPassphrase: read('private_key_passphrase', 'privateKeyPassphrase'),
           authenticator,
           authMethod,
-        }),
-        envRefs: [...envRefs],
-        warnings,
-      };
-    }
-    case 'bigquery': {
-      const keyFilename = read('keyfile', 'keyFilename');
-      return {
-        adapter,
-        connection: compactConnection({
-          driver: 'bigquery',
-          projectId: read('project', 'projectId'),
-          schema: read('dataset', 'schema'),
-          location: read('location'),
-          keyFilename,
-          authMethod: keyFilename ? 'service_account_key_file' : 'application_default',
+          token: read('token'),
+          accessUrl: read('access_url', 'accessUrl'),
+          application: read('application'),
+          browserActionTimeout: readNumber(output, 'browser_action_timeout', 'browserActionTimeout'),
+          clientRequestMFAToken: readBoolean(output, 'client_request_mfa_token', 'clientRequestMFAToken'),
+          clientStoreTemporaryCredential: readBoolean(output, 'client_store_temporary_credential', 'clientStoreTemporaryCredential'),
+          clientSessionKeepAlive: readBoolean(output, 'client_session_keep_alive', 'clientSessionKeepAlive'),
+          clientSessionKeepAliveHeartbeatFrequency: readNumber(output, 'client_session_keep_alive_heartbeat_frequency', 'clientSessionKeepAliveHeartbeatFrequency'),
+          credentialCacheDir: read('credential_cache_dir', 'credentialCacheDir'),
+          keepAlive: readBoolean(output, 'keep_alive', 'keepAlive'),
+          noProxy: read('no_proxy', 'noProxy'),
+          oauthAuthorizationUrl: read('oauth_authorization_url', 'oauthAuthorizationUrl'),
+          oauthClientId: read('oauth_client_id', 'oauthClientId'),
+          oauthClientSecret: read('oauth_client_secret', 'oauthClientSecret'),
+          oauthRedirectUri: read('oauth_redirect_uri', 'oauthRedirectUri'),
+          oauthScope: read('oauth_scope', 'oauthScope'),
+          oauthTokenRequestUrl: read('oauth_token_request_url', 'oauthTokenRequestUrl'),
+          passcode: read('passcode'),
+          passcodeInPassword: readBoolean(output, 'passcode_in_password', 'passcodeInPassword'),
+          proxyHost: read('proxy_host', 'proxyHost'),
+          proxyPassword: read('proxy_password', 'proxyPassword'),
+          proxyPort: readNumber(output, 'proxy_port', 'proxyPort'),
+          proxyProtocol: read('proxy_protocol', 'proxyProtocol'),
+          proxyUser: read('proxy_user', 'proxyUser'),
+          queryTag: read('query_tag', 'queryTag'),
+          timeout: readNumber(output, 'timeout'),
+          workloadIdentityProvider: read('workload_identity_provider', 'workloadIdentityProvider'),
+          workloadIdentityAzureClientId: read('workload_identity_azure_client_id', 'workloadIdentityAzureClientId'),
         }),
         envRefs: [...envRefs],
         warnings,
@@ -6707,7 +6834,9 @@ function mapDbtProfileOutput(output: DbtProfileOutput): {
         envRefs: [...envRefs],
         warnings,
       };
-    case 'databricks':
+    case 'databricks': {
+      const databricksAuth = read('auth_type', 'auth_method', 'authMethod');
+      const authMethod: ConnectionConfig['authMethod'] = databricksAuth?.toLowerCase().includes('oauth') ? 'oauth' : 'token';
       return {
         adapter,
         connection: compactConnection({
@@ -6719,14 +6848,39 @@ function mapDbtProfileOutput(output: DbtProfileOutput): {
           database: read('catalog', 'database'),
           schema: read('schema'),
           token: read('token'),
-          authMethod: 'token',
+          authMethod,
+          waitTimeout: read('wait_timeout', 'waitTimeout'),
+          byteLimit: readNumber(output, 'byte_limit', 'byteLimit'),
         }),
         envRefs: [...envRefs],
         warnings,
       };
+    }
     default:
       return null;
   }
+}
+
+function readBoolean(source: Record<string, unknown>, ...keys: string[]): boolean | undefined {
+  for (const key of keys) {
+    const raw = source[key];
+    if (typeof raw === 'boolean') return raw;
+    if (raw === undefined || raw === null) continue;
+    const value = String(raw).trim().toLowerCase();
+    if (['true', '1', 'yes', 'y'].includes(value)) return true;
+    if (['false', '0', 'no', 'n'].includes(value)) return false;
+  }
+  return undefined;
+}
+
+function readNumber(source: Record<string, unknown>, ...keys: string[]): number | undefined {
+  for (const key of keys) {
+    const raw = source[key];
+    if (raw === undefined || raw === null || raw === '') continue;
+    const value = Number(raw);
+    if (Number.isFinite(value)) return value;
+  }
+  return undefined;
 }
 
 function text(source: Record<string, unknown>, ...keys: string[]): DbtProfileTextResult {
@@ -6755,13 +6909,6 @@ function resolveDbtEnvVars(value: string): DbtProfileTextResult {
   return { value: replaced, envRefs };
 }
 
-function numberValue(source: Record<string, unknown>, key: string): number | undefined {
-  const raw = source[key];
-  if (raw === undefined || raw === null || raw === '') return undefined;
-  const value = Number(raw);
-  return Number.isFinite(value) ? value : undefined;
-}
-
 function compactConnection(connection: Partial<ConnectionConfig> & { driver: ConnectionConfig['driver'] }): ConnectionConfig {
   const compact: Record<string, unknown> = {};
   for (const [key, value] of Object.entries(connection)) {
@@ -6779,12 +6926,6 @@ function requiredConnectionFields(connection: ConnectionConfig, envRefs: string[
   };
 
   switch (connection.driver) {
-    case 'postgresql':
-    case 'redshift':
-      needs('host');
-      needs('database');
-      needs('username');
-      break;
     case 'snowflake':
       needs('account');
       needs('warehouse');
@@ -6799,12 +6940,22 @@ function requiredConnectionFields(connection: ConnectionConfig, envRefs: string[
         if (!connection.token && !connection.password) {
           missing.add('token');
         }
+      } else if (connection.authMethod === 'programmatic_access_token') {
+        if (!connection.token && !connection.password) {
+          missing.add('token');
+        }
+      } else if (connection.authMethod === 'oauth_authorization_code') {
+        needs('oauthClientId');
+        needs('oauthClientSecret');
+      } else if (connection.authMethod === 'oauth_client_credentials') {
+        needs('oauthClientId');
+        needs('oauthClientSecret');
+        needs('oauthTokenRequestUrl');
+      } else if (connection.authMethod === 'workload_identity') {
+        needs('workloadIdentityProvider');
       } else if (connection.authMethod !== 'external_browser') {
         needs('password');
       }
-      break;
-    case 'bigquery':
-      needs('projectId');
       break;
     case 'duckdb':
       needs('filepath');

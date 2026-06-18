@@ -26,6 +26,7 @@ export interface AgentConversationContext {
 
 export interface BlockProposal {
   name: string;
+  path?: string;
   domain: string;
   owner: string;
   description: string;

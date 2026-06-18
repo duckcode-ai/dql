@@ -1,5 +1,6 @@
 import type { DatabaseConnector, ConnectionConfig, TableInfo, ColumnInfo } from '../connector.js';
 import type { QueryResult, ColumnMeta, ColumnType, Row } from '../result-types.js';
+import { importConnectorDependency } from '../optional-dependency.js';
 
 export class DuckDBConnector implements DatabaseConnector {
   readonly driverName = 'duckdb';
@@ -7,8 +8,7 @@ export class DuckDBConnector implements DatabaseConnector {
   private connection: any = null;
 
   async connect(config: ConnectionConfig): Promise<void> {
-    // Dynamic import to avoid requiring duckdb when not used
-    const duckdbModule = await import('duckdb');
+    const duckdbModule = await importConnectorDependency('duckdb', config);
     const duckdb = resolveDuckDBModule(duckdbModule);
 
     const dbPath = config.filepath ?? ':memory:';

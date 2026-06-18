@@ -163,8 +163,10 @@ function emitProposal(input: unknown, output: unknown, emit: (turn: AgentTurn) =
   if (!input || typeof input !== 'object') return;
   const p = input as Partial<BlockProposal>;
   if (!p.name || !p.sql) return;
+  const out = (output ?? {}) as { path?: unknown; certified?: boolean; errors?: string[]; warnings?: string[] };
   const proposal: BlockProposal = {
     name: String(p.name),
+    path: typeof out.path === 'string' && out.path.trim() ? out.path : undefined,
     domain: String(p.domain ?? ''),
     owner: String(p.owner ?? ''),
     description: String(p.description ?? ''),
@@ -172,7 +174,6 @@ function emitProposal(input: unknown, output: unknown, emit: (turn: AgentTurn) =
     tags: Array.isArray(p.tags) ? p.tags.map(String) : undefined,
     chartType: typeof p.chartType === 'string' ? p.chartType : undefined,
   };
-  const out = (output ?? {}) as { certified?: boolean; errors?: string[]; warnings?: string[] };
   emit({
     kind: 'proposal',
     proposal,

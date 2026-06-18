@@ -9,6 +9,7 @@ import {
   discoverDbtProfileConnections,
   extractAgentValueSearchTerms,
   formatLocalQueryRuntimeError,
+  getConnectorInstallStatuses,
   loadProjectConfig,
   normalizeProjectConnection,
   prepareLocalExecution,
@@ -133,7 +134,14 @@ describe('normalizeProjectConnection', () => {
     expect(normalizeProjectConnection(
       { driver: 'duckdb', filepath: './local/dev.duckdb' },
       '/tmp/demo-project',
-    )).toEqual({ driver: 'duckdb', filepath: '/tmp/demo-project/local/dev.duckdb' });
+    )).toEqual({
+      driver: 'duckdb',
+      filepath: '/tmp/demo-project/local/dev.duckdb',
+      moduleSearchPaths: [
+        '/tmp/demo-project/.dql/connectors',
+        '/tmp/demo-project',
+      ],
+    });
   });
 
   it('expands environment placeholders when the value is available', () => {
@@ -148,6 +156,28 @@ describe('normalizeProjectConnection', () => {
       if (previous === undefined) delete process.env.DQL_TEST_DATABASE;
       else process.env.DQL_TEST_DATABASE = previous;
     }
+  });
+});
+
+describe('getConnectorInstallStatuses', () => {
+  it('reports optional connector packages and built-in Databricks support', () => {
+    const statuses = getConnectorInstallStatuses('/tmp/demo-project');
+
+    expect(statuses.find((status) => status.driver === 'duckdb')).toMatchObject({
+      packageName: 'duckdb',
+      packageSpec: 'duckdb@^1.1.0',
+      builtIn: false,
+      installPath: '/tmp/demo-project/.dql/connectors',
+    });
+    expect(statuses.find((status) => status.driver === 'snowflake')).toMatchObject({
+      packageName: 'snowflake-sdk',
+      packageSpec: 'snowflake-sdk@^1.12.0',
+      builtIn: false,
+    });
+    expect(statuses.find((status) => status.driver === 'databricks')).toMatchObject({
+      builtIn: true,
+      installed: true,
+    });
   });
 });
 
@@ -232,7 +262,7 @@ describe('loadProjectConfig', () => {
 });
 
 describe('discoverDbtProfileConnections', () => {
-  it('maps dbt profiles.yml targets into DQL connection drafts', () => {
+  it('maps only lightweight-supported dbt profiles.yml targets into DQL connection drafts', () => {
     const projectRoot = mkdtempSync(join(tmpdir(), 'dql-dbt-profiles-'));
     tempDirs.push(projectRoot);
     writeFileSync(join(projectRoot, 'dbt_project.yml'), 'name: banking\nprofile: banking\n', 'utf-8');
@@ -248,30 +278,22 @@ describe('discoverDbtProfileConnections', () => {
       '      schema: marts',
       '      user: analyst',
       '      password: "{{ env_var(\'PGPASSWORD\') }}"',
-      'other:',
-      '  outputs:',
-      '    dev:',
+      '    local:',
       '      type: duckdb',
-      '      path: other.duckdb',
+      '      path: banking.duckdb',
     ].join('\n'), 'utf-8');
 
     const profilePath = join(projectRoot, 'profiles.yml');
     const candidates = discoverDbtProfileConnections(projectRoot, {});
-    const candidate = candidates.find((item) => item.path === profilePath && item.profileName === 'banking');
+    const candidate = candidates.find((item) => item.path === profilePath && item.profileName === 'banking' && item.targetName === 'local');
 
     expect(candidate).toBeDefined();
-    expect(candidate?.targetName).toBe('dev');
     expect(candidate?.connection).toMatchObject({
-      driver: 'postgresql',
-      host: 'localhost',
-      port: 5432,
-      database: 'analytics',
-      schema: 'marts',
-      username: 'analyst',
-      password: '${PGPASSWORD}',
+      driver: 'duckdb',
+      filepath: 'banking.duckdb',
     });
-    expect(candidate?.missingFields).toContain('env:PGPASSWORD');
-    expect(candidates.some((item) => item.profileName === 'other')).toBe(false);
+    expect(candidate?.warnings).toContain('Not the default dbt target "dev".');
+    expect(candidates.some((item) => item.adapter === 'postgres')).toBe(false);
   });
 
   it('maps Snowflake dbt key-pair profiles from inline keys and key files', () => {
@@ -348,6 +370,67 @@ describe('discoverDbtProfileConnections', () => {
       else process.env.SNOWFLAKE_PRIVATE_KEY_PASSPHRASE = previousPrivateKeyPassphrase;
     }
   });
+
+  it('maps enterprise Snowflake and Databricks dbt profile options', () => {
+    const projectRoot = mkdtempSync(join(tmpdir(), 'dql-dbt-enterprise-profiles-'));
+    tempDirs.push(projectRoot);
+    writeFileSync(join(projectRoot, 'dbt_project.yml'), 'name: analytics\nprofile: analytics\n', 'utf-8');
+    writeFileSync(join(projectRoot, 'profiles.yml'), [
+      'analytics:',
+      '  target: snowflake_prod',
+      '  outputs:',
+      '    snowflake_prod:',
+      '      type: snowflake',
+      '      account: xy12345.us-east-1',
+      '      warehouse: ANALYTICS_WH',
+      '      database: PROD',
+      '      schema: MARTS',
+      '      user: svc_dql',
+      '      authenticator: PROGRAMMATIC_ACCESS_TOKEN',
+      '      token: "{{ env_var(\'SNOWFLAKE_PAT\') }}"',
+      '      query_tag: team=analytics;app=dql',
+      '      proxy_host: proxy.internal',
+      '      proxy_port: 8080',
+      '    databricks_prod:',
+      '      type: databricks',
+      '      host: adb-123.4.azuredatabricks.net',
+      '      http_path: /sql/1.0/warehouses/9196548d010cf14d',
+      '      catalog: main',
+      '      schema: marts',
+      '      auth_type: oauth',
+      '      token: "{{ env_var(\'DATABRICKS_TOKEN\') }}"',
+      '      wait_timeout: 50s',
+      '      byte_limit: 1000000',
+    ].join('\n'), 'utf-8');
+
+    const candidates = discoverDbtProfileConnections(projectRoot, {});
+    const snowflake = candidates.find((item) => item.targetName === 'snowflake_prod');
+    const databricks = candidates.find((item) => item.targetName === 'databricks_prod');
+
+    expect(snowflake?.connection).toMatchObject({
+      driver: 'snowflake',
+      authMethod: 'programmatic_access_token',
+      token: '${SNOWFLAKE_PAT}',
+      queryTag: 'team=analytics;app=dql',
+      proxyHost: 'proxy.internal',
+      proxyPort: 8080,
+    });
+    expect(snowflake?.missingFields).toContain('env:SNOWFLAKE_PAT');
+    expect(snowflake?.missingFields).not.toContain('password');
+
+    expect(databricks?.connection).toMatchObject({
+      driver: 'databricks',
+      host: 'adb-123.4.azuredatabricks.net',
+      httpPath: '/sql/1.0/warehouses/9196548d010cf14d',
+      catalog: 'main',
+      authMethod: 'oauth',
+      token: '${DATABRICKS_TOKEN}',
+      waitTimeout: '50s',
+      byteLimit: 1000000,
+    });
+    expect(databricks?.missingFields).toContain('env:DATABRICKS_TOKEN');
+    expect(databricks?.missingFields).not.toContain('httpPath');
+  });
 });
 
 describe('prepareLocalExecution', () => {
@@ -359,7 +442,14 @@ describe('prepareLocalExecution', () => {
       { dataDir: './data' },
     );
 
-    expect(prepared.connection).toEqual({ driver: 'file', filepath: ':memory:' });
+    expect(prepared.connection).toEqual({
+      driver: 'file',
+      filepath: ':memory:',
+      moduleSearchPaths: [
+        '/tmp/demo-project/.dql/connectors',
+        '/tmp/demo-project',
+      ],
+    });
     expect(prepared.sql).toBe("SELECT * FROM read_csv_auto('/tmp/demo-project/data/revenue.csv')");
   });
 

@@ -1,18 +1,8 @@
 import type { DatabaseConnector, ConnectionConfig } from './connector.js';
-import { PostgreSQLConnector } from './drivers/postgresql.js';
-import { SQLiteConnector } from './drivers/sqlite.js';
-import { MySQLConnector } from './drivers/mysql.js';
 import { SnowflakeConnector } from './drivers/snowflake.js';
-import { BigQueryConnector } from './drivers/bigquery.js';
 import { DuckDBConnector } from './drivers/duckdb.js';
-import { MSSQLConnector } from './drivers/mssql.js';
 import { FileConnector } from './drivers/file.js';
-import { RedshiftConnector } from './drivers/redshift.js';
-import { FabricConnector } from './drivers/fabric.js';
-import { ClickHouseConnector } from './drivers/clickhouse.js';
 import { DatabricksConnector } from './drivers/databricks.js';
-import { AthenaConnector } from './drivers/athena.js';
-import { TrinoConnector } from './drivers/trino.js';
 import { createHash } from 'node:crypto';
 
 function stableSerialize(value: unknown): string {
@@ -54,6 +44,36 @@ export function createConnectionConfigKey(config: ConnectionConfig): string {
     outputLocation: config.outputLocation,
     httpPath: config.httpPath,
     catalog: config.catalog,
+    accessUrl: config.accessUrl,
+    application: config.application,
+    browserActionTimeout: config.browserActionTimeout,
+    clientRequestMFAToken: config.clientRequestMFAToken,
+    clientStoreTemporaryCredential: config.clientStoreTemporaryCredential,
+    clientSessionKeepAlive: config.clientSessionKeepAlive,
+    clientSessionKeepAliveHeartbeatFrequency: config.clientSessionKeepAliveHeartbeatFrequency,
+    credentialCacheDir: config.credentialCacheDir,
+    keepAlive: config.keepAlive,
+    noProxy: config.noProxy,
+    oauthAuthorizationUrl: config.oauthAuthorizationUrl,
+    oauthClientId: config.oauthClientId,
+    oauthClientSecret: config.oauthClientSecret,
+    oauthRedirectUri: config.oauthRedirectUri,
+    oauthScope: config.oauthScope,
+    oauthTokenRequestUrl: config.oauthTokenRequestUrl,
+    passcode: config.passcode,
+    passcodeInPassword: config.passcodeInPassword,
+    proxyHost: config.proxyHost,
+    proxyPassword: config.proxyPassword,
+    proxyPort: config.proxyPort,
+    proxyProtocol: config.proxyProtocol,
+    proxyUser: config.proxyUser,
+    queryTag: config.queryTag,
+    timeout: config.timeout,
+    workloadIdentityProvider: config.workloadIdentityProvider,
+    workloadIdentityAzureClientId: config.workloadIdentityAzureClientId,
+    workloadIdentityImpersonationPath: config.workloadIdentityImpersonationPath,
+    waitTimeout: config.waitTimeout,
+    byteLimit: config.byteLimit,
     privateKey: config.privateKey,
     privateKeyPath: config.privateKeyPath,
     privateKeyPassphrase: config.privateKeyPassphrase,
@@ -67,6 +87,7 @@ export function createConnectionConfigKey(config: ConnectionConfig): string {
     secretAccessKey: config.secretAccessKey,
     sessionToken: config.sessionToken,
     profile: config.profile,
+    moduleSearchPaths: config.moduleSearchPaths,
   };
   const payload = stableSerialize(normalized);
   return createHash('sha1').update(payload).digest('hex');
@@ -105,36 +126,18 @@ export class ConnectionPoolManager {
 
   private createConnector(config: ConnectionConfig): DatabaseConnector {
     switch (config.driver) {
-      case 'postgresql':
-        return new PostgreSQLConnector();
-      case 'sqlite':
-        return new SQLiteConnector();
-      case 'mysql':
-        return new MySQLConnector();
       case 'snowflake':
         return new SnowflakeConnector();
-      case 'bigquery':
-        return new BigQueryConnector();
       case 'duckdb':
         return new DuckDBConnector();
-      case 'mssql':
-        return new MSSQLConnector();
       case 'file':
         return new FileConnector();
-      case 'redshift':
-        return new RedshiftConnector();
-      case 'fabric':
-        return new FabricConnector();
-      case 'clickhouse':
-        return new ClickHouseConnector();
       case 'databricks':
         return new DatabricksConnector();
-      case 'athena':
-        return new AthenaConnector();
-      case 'trino':
-        return new TrinoConnector();
       default:
-        throw new Error(`Unsupported database driver: ${config.driver}`);
+        throw new Error(
+          `Unsupported database driver: ${config.driver}. This lightweight DQL package includes DuckDB, Snowflake, and Databricks connectors.`,
+        );
     }
   }
 

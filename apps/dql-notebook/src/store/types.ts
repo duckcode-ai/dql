@@ -112,6 +112,7 @@ export interface ChatMessage {
 
 export interface ChatBlockProposalSnapshot {
   name: string;
+  path?: string;
   domain: string;
   owner: string;
   description: string;

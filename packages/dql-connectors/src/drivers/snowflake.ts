@@ -2,6 +2,8 @@ import type { DatabaseConnector, ConnectionConfig, TableInfo, ColumnInfo } from 
 import type { QueryResult, ColumnMeta, ColumnType, Row } from '../result-types.js';
 import { readFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
+import { createPrivateKey } from 'node:crypto';
+import { importConnectorDependency } from '../optional-dependency.js';
 
 export class SnowflakeConnector implements DatabaseConnector {
   readonly driverName = 'snowflake';
@@ -9,9 +11,8 @@ export class SnowflakeConnector implements DatabaseConnector {
   private sdk: any = null;
 
   async connect(config: ConnectionConfig): Promise<void> {
-    // Dynamic import to avoid requiring snowflake-sdk when not used
     // snowflake-sdk is a CJS module, so the API lives on .default
-    const mod = await import('snowflake-sdk');
+    const mod = await importConnectorDependency('snowflake-sdk', config);
     this.sdk = (mod as any).default ?? mod;
 
     const connectionConfig: Record<string, unknown> = {
@@ -21,15 +22,19 @@ export class SnowflakeConnector implements DatabaseConnector {
       warehouse: config.warehouse,
     };
 
-    // Schema and role
+    // Schema, role, and enterprise driver options.
     if (config.schema) connectionConfig.schema = config.schema;
     if (config.role) connectionConfig.role = config.role;
+    applySnowflakeConnectionOptions(connectionConfig, config);
 
-    const privateKey = config.privateKeyPath
+    const privateKeySource = config.privateKeyPath
       ? await readFile(resolvePrivateKeyPath(config.privateKeyPath), 'utf-8')
       : config.privateKey;
+    const privateKey = privateKeySource
+      ? normalizeSnowflakePrivateKeyForAuth(privateKeySource, config.privateKeyPassphrase)
+      : undefined;
 
-    // Auth: key-pair, OAuth, external browser SSO, or password.
+    // Auth: key-pair, OAuth, PAT, workload identity, SSO/MFA, or password.
     if (privateKey || config.authMethod === 'key_pair') {
       if (!privateKey) {
         throw new Error('Snowflake key-pair authentication requires privateKey or privateKeyPath.');
@@ -42,6 +47,21 @@ export class SnowflakeConnector implements DatabaseConnector {
     } else if (config.authMethod === 'oauth') {
       connectionConfig.authenticator = config.authenticator ?? 'OAUTH';
       connectionConfig.token = config.token ?? config.password ?? '';
+    } else if (config.authMethod === 'oauth_authorization_code') {
+      connectionConfig.authenticator = config.authenticator ?? 'OAUTH_AUTHORIZATION_CODE';
+    } else if (config.authMethod === 'oauth_client_credentials') {
+      connectionConfig.authenticator = config.authenticator ?? 'OAUTH_CLIENT_CREDENTIALS';
+    } else if (config.authMethod === 'programmatic_access_token') {
+      connectionConfig.authenticator = config.authenticator ?? 'PROGRAMMATIC_ACCESS_TOKEN';
+      connectionConfig.token = config.token ?? config.password ?? '';
+    } else if (config.authMethod === 'workload_identity') {
+      connectionConfig.authenticator = config.authenticator ?? 'WORKLOAD_IDENTITY';
+      if (config.token) {
+        connectionConfig.token = config.token;
+      }
+    } else if (config.authMethod === 'mfa') {
+      connectionConfig.authenticator = config.authenticator ?? 'USERNAME_PASSWORD_MFA';
+      connectionConfig.password = config.password ?? '';
     } else if (config.authMethod === 'external_browser') {
       connectionConfig.authenticator = config.authenticator ?? 'EXTERNALBROWSER';
     } else {
@@ -172,6 +192,49 @@ export class SnowflakeConnector implements DatabaseConnector {
   }
 }
 
+function applySnowflakeConnectionOptions(
+  connectionConfig: Record<string, unknown>,
+  config: ConnectionConfig,
+): void {
+  const optionKeys: Array<keyof ConnectionConfig> = [
+    'accessUrl',
+    'application',
+    'browserActionTimeout',
+    'clientRequestMFAToken',
+    'clientStoreTemporaryCredential',
+    'clientSessionKeepAlive',
+    'clientSessionKeepAliveHeartbeatFrequency',
+    'credentialCacheDir',
+    'keepAlive',
+    'noProxy',
+    'oauthAuthorizationUrl',
+    'oauthClientId',
+    'oauthClientSecret',
+    'oauthRedirectUri',
+    'oauthScope',
+    'oauthTokenRequestUrl',
+    'passcode',
+    'passcodeInPassword',
+    'proxyHost',
+    'proxyPassword',
+    'proxyPort',
+    'proxyProtocol',
+    'proxyUser',
+    'queryTag',
+    'timeout',
+    'workloadIdentityProvider',
+    'workloadIdentityAzureClientId',
+    'workloadIdentityImpersonationPath',
+  ];
+
+  for (const key of optionKeys) {
+    const value = config[key];
+    if (value !== undefined && value !== null && value !== '') {
+      connectionConfig[key] = value;
+    }
+  }
+}
+
 function resolvePrivateKeyPath(path: string): string {
   const expandedEnv = path.replace(/\$\{([A-Za-z_][A-Za-z0-9_]*)\}/g, (match, key: string) => {
     return process.env[key] ?? match;
@@ -180,6 +243,33 @@ function resolvePrivateKeyPath(path: string): string {
   if (expandedEnv === '~') return homedir();
   if (expandedEnv.startsWith('~/')) return `${homedir()}${expandedEnv.slice(1)}`;
   return expandedEnv;
+}
+
+export function normalizeSnowflakePrivateKeyForAuth(
+  privateKey: string,
+  passphrase?: string,
+): string {
+  const cleaned = privateKey
+    .trim()
+    .replace(/^['"]|['"]$/g, '')
+    .replace(/\\n/g, '\n');
+
+  try {
+    const keyObject = createPrivateKey({
+      key: cleaned,
+      format: 'pem',
+      passphrase: passphrase || undefined,
+    });
+    return keyObject.export({
+      format: 'pem',
+      type: 'pkcs8',
+    }).toString();
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error);
+    throw new Error(
+      `Snowflake private key could not be parsed or decrypted. Check that the pasted key includes the full PEM header/footer, uses the matching passphrase if encrypted, and belongs to the Snowflake user. Original error: ${detail}`,
+    );
+  }
 }
 
 function mapSnowflakeType(sfType: string): ColumnType {

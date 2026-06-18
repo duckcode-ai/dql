@@ -42,9 +42,9 @@ import {
   type LocalAppInvestigation,
 } from '../../api/client';
 import type { AppSummary, AppWorkspaceExperience, AppWorkspaceSection } from '../../store/types';
-import type { ThemeMode } from '../../themes/notebook-theme';
+import { themes, type ThemeMode } from '../../themes/notebook-theme';
 import { AgentChatPanel } from '../agent/AgentChatPanel';
-import type { AgentAnswerInvestigationRequest } from '../agent/AgentAnswerCard';
+import { StructuredAnswerText, type AgentAnswerInvestigationRequest } from '../agent/AgentAnswerCard';
 import { DashboardRenderer } from './DashboardRenderer';
 import { PersonaSwitcher } from './PersonaSwitcher';
 
@@ -1238,6 +1238,7 @@ function AppWorkspaceSurface({
                 appDoc={appDoc}
                 dashboardDoc={dashboardDoc}
                 seed={researchSeed}
+                themeMode={themeMode}
                 onSeedHandled={() => setResearchSeed(null)}
                 onDashboardChanged={onDashboardChanged}
                 onInvestigationsChanged={onInvestigationsChanged}
@@ -1450,7 +1451,7 @@ function AppCopilotPanel({
   const tileRunFor = (block: { blockId: string; tileId: string } | null | undefined) => block
     ? dashboardRun?.tiles.find((tile) => tile.tileId === block.tileId || tile.blockId === block.blockId)
     : null;
-  const contextForBlock = (block: typeof selectedBlock) => {
+  const contextForBlock = (block: { blockId: string; title: string; viz: string; tileId: string } | null) => {
     if (!block) return null;
     const tileRun = tileRunFor(block);
     return {
@@ -1539,7 +1540,7 @@ function AppCopilotPanel({
   const startInvestigationFromAnswer = (request: AgentAnswerInvestigationRequest) => {
     const question = request.question.trim() || 'Investigate this answer';
     const answerBlock = blockForInvestigationRequest(blockTiles, request);
-    const researchBlock = answerBlock ?? selectedBlock;
+    const researchBlock = answerBlock ?? (request.blockName ? selectedBlock : null);
     const researchBlockContext = contextForBlock(researchBlock);
     const researchContextPayload = buildContextPayload(researchBlockContext);
     onStartResearch({
@@ -1665,6 +1666,7 @@ function ResearchPanel({
   appDoc,
   dashboardDoc,
   seed,
+  themeMode,
   onSeedHandled,
   onDashboardChanged,
   onInvestigationsChanged,
@@ -1672,12 +1674,14 @@ function ResearchPanel({
   appDoc: AppDocumentSummary | null;
   dashboardDoc: DashboardDocumentResponse | null;
   seed: AppResearchSeed | null;
+  themeMode: ThemeMode;
   onSeedHandled: () => void;
   onDashboardChanged: (dashboard: DashboardDocumentResponse['dashboard']) => void;
   onInvestigationsChanged: (investigations: LocalAppInvestigation[]) => void;
 }) {
   const appId = appDoc?.app.id;
   const activeDashboardId = dashboardDoc?.dashboard.id;
+  const t = themes[themeMode];
   const [items, setItems] = useState<LocalAppInvestigation[]>(() => appDoc?.investigations ?? []);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
@@ -1853,6 +1857,12 @@ function ResearchPanel({
       <section className="dql-app-research-detail">
         {selected ? (
           <>
+            {busy === 'create' ? (
+              <div className="dql-app-research-status">
+                <Workflow size={14} />
+                <span>Running research with bounded SQL preview and evidence capture...</span>
+              </div>
+            ) : null}
             <div className="dql-app-research-titlebar">
               <div>
                 <span className="dql-app-assistant-kicker">Investigation</span>
@@ -1864,22 +1874,32 @@ function ResearchPanel({
                   <Workflow size={13} /> {busy === selected.id ? 'Running...' : 'Run'}
                 </button>
                 <button type="button" className="dql-apps-btn dql-apps-btn-line" onClick={() => void pinResearch(selected)} disabled={busy === `pin:${selected.id}`}>
-                  <MapPin size={13} /> {selected.pinnedAiPinId ? 'Pinned' : 'Pin'}
+                  <MapPin size={13} /> {selected.pinnedAiPinId ? 'Added to app' : 'Add to app'}
                 </button>
                 <button type="button" className="dql-apps-btn dql-apps-btn-primary" onClick={() => void promoteResearch(selected)} disabled={!selected.generatedSql || busy === `promote:${selected.id}`}>
-                  <FileText size={13} /> Draft block
+                  <FileText size={13} /> {busy === `promote:${selected.id}` ? 'Creating...' : 'Create draft block'}
                 </button>
               </div>
             </div>
 
             {error ? <div className="dql-app-error">{error}</div> : null}
             {selected.error ? <div className="dql-app-error">{selected.error}</div> : null}
+            <div className="dql-app-research-path">
+              <span><Search size={13} /> Review-required research</span>
+              <span><Table2 size={13} /> Preview rows</span>
+              <span><MapPin size={13} /> Add result to app</span>
+              <span><FileText size={13} /> Create draft block</span>
+            </div>
 
             <div className="dql-app-research-grid">
               <section className="dql-app-research-answer">
                 <PanelHead title="Business answer" meta={formatBusinessLabel(selected.intent)} />
-                <p>{selected.summary ?? 'Run this investigation to generate the business answer.'}</p>
-                <div className="dql-app-research-callout">{selected.recommendation ?? 'Review the evidence before promoting this result.'}</div>
+                <div className="dql-app-research-markdown">
+                  <StructuredAnswerText text={selected.summary ?? 'Run this investigation to generate the business answer.'} t={t} compact />
+                </div>
+                <div className="dql-app-research-callout">
+                  <StructuredAnswerText text={selected.recommendation ?? 'Review the evidence before promoting this result.'} t={t} compact />
+                </div>
               </section>
 
               <section className="dql-app-research-metrics">
@@ -4851,6 +4871,38 @@ const APP_STYLES = `
   line-height: 1.2;
 }
 
+.dql-app-research-status {
+  margin-bottom: 10px;
+  border: 1px solid rgba(37, 99, 235, 0.26);
+  border-radius: 8px;
+  background: var(--dql-app-accent-soft);
+  color: var(--dql-app-accent);
+  padding: 8px 10px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font: 800 12px var(--font-ui);
+}
+
+.dql-app-research-path {
+  margin: -2px 0 12px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
+}
+
+.dql-app-research-path span {
+  border: 1px solid var(--dql-app-line);
+  border-radius: 999px;
+  background: var(--dql-app-control);
+  color: var(--dql-app-muted);
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 5px 8px;
+  font: 800 10.5px var(--font-ui);
+}
+
 .dql-app-research-actions {
   display: flex;
   align-items: center;
@@ -4876,10 +4928,10 @@ const APP_STYLES = `
 }
 
 .dql-app-research-section { margin-top: 12px; }
-.dql-app-research-answer p {
-  margin: 10px 0 0;
-  color: var(--dql-app-ink);
-  line-height: 1.55;
+
+.dql-app-research-markdown {
+  margin-top: 10px;
+  min-width: 0;
 }
 
 .dql-app-research-callout {

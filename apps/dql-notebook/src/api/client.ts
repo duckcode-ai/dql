@@ -1001,6 +1001,16 @@ export const api = {
   async getConnections(): Promise<{
     default: string;
     connections: Record<string, unknown>;
+    connectorStatus?: Array<{
+      driver: 'duckdb' | 'snowflake' | 'databricks';
+      label: string;
+      packageName?: string;
+      packageSpec?: string;
+      installed: boolean;
+      builtIn: boolean;
+      installPath: string;
+      installCommand?: string;
+    }>;
     dbtProfiles?: Array<{
       id: string;
       profileName: string;
@@ -1016,6 +1026,16 @@ export const api = {
       return await request<{
         default: string;
         connections: Record<string, unknown>;
+        connectorStatus?: Array<{
+          driver: 'duckdb' | 'snowflake' | 'databricks';
+          label: string;
+          packageName?: string;
+          packageSpec?: string;
+          installed: boolean;
+          builtIn: boolean;
+          installPath: string;
+          installCommand?: string;
+        }>;
         dbtProfiles?: Array<{
           id: string;
           profileName: string;
@@ -1039,6 +1059,36 @@ export const api = {
     return request<{ ok: boolean }>('/api/connections', {
       method: 'PUT',
       body: JSON.stringify({ connections, defaultConnectionName }),
+    });
+  },
+
+  async installConnector(driver: string): Promise<{
+    ok: boolean;
+    status?: {
+      driver: 'duckdb' | 'snowflake' | 'databricks';
+      label: string;
+      packageName?: string;
+      packageSpec?: string;
+      installed: boolean;
+      builtIn: boolean;
+      installPath: string;
+      installCommand?: string;
+    };
+    connectorStatus?: Array<{
+      driver: 'duckdb' | 'snowflake' | 'databricks';
+      label: string;
+      packageName?: string;
+      packageSpec?: string;
+      installed: boolean;
+      builtIn: boolean;
+      installPath: string;
+      installCommand?: string;
+    }>;
+    error?: string;
+  }> {
+    return request('/api/connectors/install', {
+      method: 'POST',
+      body: JSON.stringify({ driver }),
     });
   },
 

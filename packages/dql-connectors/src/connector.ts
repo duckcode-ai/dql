@@ -38,11 +38,46 @@ export interface ConnectionConfig {
   privateKeyPath?: string;
   privateKeyPassphrase?: string;
   connectionString?: string;
+  accessUrl?: string;
+  application?: string;
+  browserActionTimeout?: number;
+  clientRequestMFAToken?: boolean;
+  clientStoreTemporaryCredential?: boolean;
+  clientSessionKeepAlive?: boolean;
+  clientSessionKeepAliveHeartbeatFrequency?: number;
+  credentialCacheDir?: string;
+  keepAlive?: boolean;
+  noProxy?: string;
+  oauthAuthorizationUrl?: string;
+  oauthClientId?: string;
+  oauthClientSecret?: string;
+  oauthRedirectUri?: string;
+  oauthScope?: string;
+  oauthTokenRequestUrl?: string;
+  passcode?: string;
+  passcodeInPassword?: boolean;
+  proxyHost?: string;
+  proxyPassword?: string;
+  proxyPort?: number;
+  proxyProtocol?: string;
+  proxyUser?: string;
+  queryTag?: string;
+  timeout?: number;
+  workloadIdentityProvider?: string;
+  workloadIdentityAzureClientId?: string;
+  workloadIdentityImpersonationPath?: string[];
+  waitTimeout?: string;
+  byteLimit?: number;
   authMethod?:
     | 'password'
     | 'key_pair'
     | 'external_browser'
+    | 'mfa'
     | 'oauth'
+    | 'oauth_authorization_code'
+    | 'oauth_client_credentials'
+    | 'programmatic_access_token'
+    | 'workload_identity'
     | 'application_default'
     | 'service_account_key_file'
     | 'service_account_json'
@@ -59,6 +94,7 @@ export interface ConnectionConfig {
   secretAccessKey?: string;
   sessionToken?: string;
   profile?: string;
+  moduleSearchPaths?: string[];
 }
 
 export type DriverName = ConnectionConfig['driver'];

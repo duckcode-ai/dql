@@ -1,7 +1,7 @@
 import React, { useRef, useState } from 'react';
-import { Bot, Maximize2, Minimize2, Send, X } from 'lucide-react';
+import { Bot, FileText, Maximize2, Minimize2, Plus, Send, X } from 'lucide-react';
 import { runAgent } from '../../llm/client';
-import type { AgentConversationContext, AgentTurn } from '../../llm/types';
+import type { AgentConversationContext, AgentTurn, BlockProposal } from '../../llm/types';
 import { themes, type Theme } from '../../themes/notebook-theme';
 import {
   AgentAnswerCard,
@@ -11,6 +11,8 @@ import {
   type AgentAnswerInvestigationRequest,
 } from './AgentAnswerCard';
 import { api, type AppConversation, type AppConversationMessage } from '../../api/client';
+import { useNotebook } from '../../store/NotebookStore';
+import type { NotebookFile } from '../../store/types';
 
 interface LocalMessage {
   id?: string;
@@ -136,6 +138,43 @@ export function AgentChatPanel({
     setError(null);
     setLiveText('');
     setLiveEvents([]);
+    if (onInvestigate && shouldRouteToResearchWorkspace(text)) {
+      const note: LocalMessage = {
+        id: makeMessageId(),
+        role: 'assistant',
+        content: 'I opened this in Research so the answer can keep SQL, preview rows, evidence, and review actions together.',
+        createdAt: new Date().toISOString(),
+      };
+      const finalMessages = [...next, note];
+      setMessages(finalMessages);
+      onInvestigate({
+        question: text,
+        title: researchTitleFromQuestion(text),
+      });
+      if (conversationTarget) {
+        let activeConversationId = conversationId;
+        if (!activeConversationId) {
+          const created = await api.createAppConversation(conversationTarget.appId, {
+            title: text.slice(0, 80),
+            dashboardId: conversationTarget.dashboardId,
+            notebookPath: conversationTarget.notebookPath,
+            context: conversationContext,
+            messages: toConversationMessages(finalMessages),
+          });
+          if (created.ok) {
+            activeConversationId = created.conversation.id;
+            setConversationId(activeConversationId);
+          }
+        } else {
+          await api.updateAppConversation(conversationTarget.appId, activeConversationId, {
+            context: conversationContext ?? null,
+            messages: toConversationMessages(finalMessages),
+          });
+        }
+        onConversationUpdated?.();
+      }
+      return;
+    }
     setRunning(true);
     const controller = new AbortController();
     abortRef.current = controller;
@@ -176,9 +215,12 @@ export function AgentChatPanel({
       );
       const finalMessages = [...next, { id: makeMessageId(), role: 'assistant' as const, content: acc, events, createdAt: new Date().toISOString() }];
       const governedAnswer = extractGovernedAnswer(events);
+      const proposalEvent = latestProposalEvent(events);
       const nextContext = governedAnswer
         ? contextFromGovernedAnswer(governedAnswer, text, conversationContext, conversationTarget ? 'app' : 'notebook')
-        : conversationContext;
+        : proposalEvent
+          ? contextFromProposalEvent(proposalEvent, text, conversationContext, conversationTarget ? 'app' : 'notebook')
+          : conversationContext;
       setConversationContext(nextContext);
       setMessages(finalMessages);
       if (conversationTarget && activeConversationId) {
@@ -431,6 +473,52 @@ function makeMessageId(): string {
   return `msg_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
 }
 
+function shouldRouteToResearchWorkspace(text: string): boolean {
+  const value = text.toLowerCase();
+  return /\b(research|investigate|investigation|deep[- ]?dive|root cause)\b/.test(value)
+    || /\b(detailed|complete|full)\s+(overview|analysis|summary)\b/.test(value);
+}
+
+function researchTitleFromQuestion(text: string): string {
+  const clean = text.replace(/\s+/g, ' ').trim();
+  return clean.length > 90 ? `${clean.slice(0, 87)}...` : clean || 'Research request';
+}
+
+type ProposalTurn = Extract<AgentTurn, { kind: 'proposal' }>;
+
+function latestProposalEvent(events: AgentTurn[] | undefined): ProposalTurn | null {
+  if (!events) return null;
+  for (let i = events.length - 1; i >= 0; i -= 1) {
+    const event = events[i];
+    if (event.kind === 'proposal') return event;
+  }
+  return null;
+}
+
+function contextFromProposalEvent(
+  event: ProposalTurn,
+  sourceQuestion: string,
+  previous: AgentConversationContext | undefined,
+  activeSurface: AgentConversationContext['activeSurface'],
+): AgentConversationContext | undefined {
+  const path = cleanOptionalString(event.proposal.path);
+  const summary = summarizeAnswer(event.proposal.description || event.proposal.name);
+  if (!path && !summary) return previous;
+  return {
+    ...previous,
+    activeSurface,
+    sourceQuestion: sourceQuestion.trim(),
+    sourceAnswerSummary: summary ?? previous?.sourceAnswerSummary,
+    draftBlockPath: path ?? previous?.draftBlockPath,
+    requestedFilters: mergeTextArrays(previous?.requestedFilters, inferFilters(sourceQuestion)),
+    requestedDimensions: previous?.requestedDimensions,
+    trustLabel: event.governance.certified ? 'certified' : 'draft',
+    certification: event.governance.certified ? 'certified' : 'uncertified',
+    route: 'proposal',
+    updatedAt: new Date().toISOString(),
+  };
+}
+
 function contextFromGovernedAnswer(
   answer: AgentAnswerEnvelope,
   sourceQuestion: string,
@@ -604,6 +692,7 @@ function Bubble({
 }) {
   const isUser = message.role === 'user';
   const answer = !isUser ? extractGovernedAnswer(message.events ?? []) : null;
+  const proposalEvent = !isUser ? latestProposalEvent(message.events) : null;
   if (answer) {
     return (
       <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
@@ -628,27 +717,283 @@ function Bubble({
           sourceQuestion={sourceQuestion}
           onInvestigate={onInvestigate}
         />
+        {proposalEvent && (
+          <ProposalActionCard
+            proposal={proposalEvent.proposal}
+            governance={proposalEvent.governance}
+            t={t}
+            addToAppTarget={addToAppTarget}
+          />
+        )}
       </div>
     );
   }
   return (
-    <div style={{
-      alignSelf: isUser && executive ? 'flex-end' : 'stretch',
-      maxWidth: isUser && executive ? '88%' : undefined,
-      border: `1px solid ${isUser ? `${t.accent}55` : t.headerBorder}`,
-      borderRadius: executive ? 12 : 8,
-      padding: executive ? '9px 11px' : 10,
-      background: isUser ? `${t.accent}12` : t.appBg,
-      whiteSpace: isUser ? 'pre-wrap' : 'normal',
-      fontSize: executive ? 12.5 : 12,
-      lineHeight: 1.5,
-    }}>
-      <div style={{ fontSize: 10, color: live ? t.accent : t.textMuted, textTransform: 'uppercase', fontWeight: 800, marginBottom: 4 }}>
-        {isUser ? 'You' : 'Copilot'}
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 8, alignSelf: isUser && executive ? 'flex-end' : 'stretch', maxWidth: isUser && executive ? '88%' : undefined }}>
+      <div style={{
+        border: `1px solid ${isUser ? `${t.accent}55` : t.headerBorder}`,
+        borderRadius: executive ? 12 : 8,
+        padding: executive ? '9px 11px' : 10,
+        background: isUser ? `${t.accent}12` : t.appBg,
+        whiteSpace: isUser ? 'pre-wrap' : 'normal',
+        fontSize: executive ? 12.5 : 12,
+        lineHeight: 1.5,
+      }}>
+        <div style={{ fontSize: 10, color: live ? t.accent : t.textMuted, textTransform: 'uppercase', fontWeight: 800, marginBottom: 4 }}>
+          {isUser ? 'You' : 'Copilot'}
+        </div>
+        {isUser ? message.content : <StructuredAnswerText text={message.content} t={t} compact />}
       </div>
-      {isUser ? message.content : <StructuredAnswerText text={message.content} t={t} compact />}
+      {proposalEvent && (
+        <ProposalActionCard
+          proposal={proposalEvent.proposal}
+          governance={proposalEvent.governance}
+          t={t}
+          addToAppTarget={addToAppTarget}
+        />
+      )}
     </div>
   );
+}
+
+function ProposalActionCard({
+  proposal,
+  governance,
+  t,
+  addToAppTarget,
+}: {
+  proposal: BlockProposal;
+  governance: { certified: boolean; errors: string[]; warnings: string[] };
+  t: Theme;
+  addToAppTarget?: { appId: string; dashboardId: string };
+}) {
+  const { state, dispatch } = useNotebook();
+  const [busy, setBusy] = useState<'open' | 'add' | null>(null);
+  const [status, setStatus] = useState<{ tone: 'success' | 'error' | 'muted'; text: string } | null>(null);
+  const path = cleanOptionalString(proposal.path);
+  const name = cleanOptionalString(proposal.name)
+    ?? path?.split('/').pop()?.replace(/\.dql$/i, '')
+    ?? 'draft_block';
+  const hasErrors = governance.errors.length > 0;
+  const hasWarnings = governance.warnings.length > 0;
+  const accent = governance.certified ? '#3fb950' : hasErrors ? '#ff7b72' : '#f0883e';
+
+  const openDraft = async () => {
+    if (!path) {
+      setStatus({ tone: 'error', text: 'The AI response did not include a saved draft path.' });
+      return;
+    }
+    setBusy('open');
+    setStatus(null);
+    try {
+      const payload = await api.openBlockStudio(path);
+      const file: NotebookFile = { name, path, type: 'block', folder: 'blocks' };
+      if (!state.files.some((existing) => existing.path === path)) {
+        dispatch({ type: 'FILE_ADDED', file });
+      }
+      dispatch({ type: 'OPEN_BLOCK_STUDIO', file, payload });
+      setStatus({ tone: 'success', text: 'Opened draft block for review.' });
+    } catch (err) {
+      setStatus({ tone: 'error', text: err instanceof Error ? err.message : String(err) });
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const addDraftToApp = async () => {
+    if (!addToAppTarget) return;
+    if (!path) {
+      setStatus({ tone: 'error', text: 'The AI response did not include a saved draft path.' });
+      return;
+    }
+    setBusy('add');
+    setStatus(null);
+    try {
+      const doc = await api.getDashboard(addToAppTarget.appId, addToAppTarget.dashboardId);
+      if (!doc) throw new Error('Dashboard could not be loaded.');
+      const vizType = normalizeProposalViz(proposal.chartType);
+      const nextItems = [...doc.dashboard.layout.items];
+      const dashboardForPosition = { ...doc.dashboard, layout: { ...doc.dashboard.layout, items: nextItems } };
+      nextItems.push({
+        i: proposalTileId(dashboardForPosition, name),
+        ...proposalTilePosition(dashboardForPosition, proposalTileSize(vizType)),
+        block: { ref: path },
+        viz: { type: vizType },
+        title: name,
+      });
+      const saved = await api.patchDashboardLayout(addToAppTarget.appId, addToAppTarget.dashboardId, {
+        ...doc.dashboard.layout,
+        items: nextItems,
+      });
+      if (!saved.ok) throw new Error(saved.error);
+      window.dispatchEvent(new CustomEvent('dql-app-dashboard-updated', { detail: addToAppTarget }));
+      setStatus({ tone: 'success', text: 'Added draft tile to the app for review.' });
+    } catch (err) {
+      setStatus({ tone: 'error', text: err instanceof Error ? err.message : String(err) });
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  return (
+    <div style={{
+      border: `1px solid ${accent}55`,
+      borderLeft: `3px solid ${accent}`,
+      borderRadius: 10,
+      background: `${accent}10`,
+      padding: '10px 11px',
+      display: 'flex',
+      flexDirection: 'column',
+      gap: 8,
+      color: t.textPrimary,
+    }}>
+      <div style={{ display: 'flex', gap: 8, alignItems: 'flex-start' }}>
+        <div style={{
+          width: 28,
+          height: 28,
+          borderRadius: 8,
+          background: `${accent}14`,
+          border: `1px solid ${accent}45`,
+          color: accent,
+          display: 'inline-flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          flex: '0 0 auto',
+        }}>
+          <FileText size={15} />
+        </div>
+        <div style={{ minWidth: 0, flex: 1 }}>
+          <div style={{ display: 'flex', gap: 7, alignItems: 'center', flexWrap: 'wrap' }}>
+            <span style={{ fontSize: 12.5, fontWeight: 850 }}>{name}</span>
+            <span style={proposalPillStyle(t, accent)}>
+              {governance.certified ? 'passes gate' : hasErrors ? 'needs fixes' : 'draft review'}
+            </span>
+          </div>
+          <div style={{ fontSize: 11, color: t.textMuted, fontFamily: t.fontMono, marginTop: 3, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+            {path ?? 'No draft file path returned'}
+          </div>
+          {proposal.description && (
+            <div style={{ fontSize: 12, color: t.textSecondary, lineHeight: 1.45, marginTop: 5 }}>
+              {proposal.description}
+            </div>
+          )}
+        </div>
+      </div>
+      {(hasErrors || hasWarnings) && (
+        <div style={{ display: 'grid', gap: 4 }}>
+          {governance.errors.slice(0, 2).map((error, index) => (
+            <div key={`proposal-error-${index}`} style={{ fontSize: 11.5, color: '#ff7b72', lineHeight: 1.35 }}>
+              {error}
+            </div>
+          ))}
+          {governance.warnings.slice(0, 2).map((warning, index) => (
+            <div key={`proposal-warning-${index}`} style={{ fontSize: 11.5, color: '#f0883e', lineHeight: 1.35 }}>
+              {warning}
+            </div>
+          ))}
+        </div>
+      )}
+      <div style={{ display: 'flex', gap: 7, alignItems: 'center', flexWrap: 'wrap' }}>
+        <button
+          type="button"
+          onClick={() => void openDraft()}
+          disabled={busy !== null || !path}
+          style={proposalButtonStyle(t, true, busy !== null || !path)}
+        >
+          <FileText size={13} />
+          <span>{busy === 'open' ? 'Opening...' : 'Open draft'}</span>
+        </button>
+        {addToAppTarget && (
+          <button
+            type="button"
+            onClick={() => void addDraftToApp()}
+            disabled={busy !== null || !path}
+            style={proposalButtonStyle(t, false, busy !== null || !path)}
+          >
+            <Plus size={13} />
+            <span>{busy === 'add' ? 'Adding...' : 'Add to app'}</span>
+          </button>
+        )}
+        {proposal.chartType && (
+          <span style={{ fontSize: 11, color: t.textMuted }}>
+            view: {proposal.chartType}
+          </span>
+        )}
+      </div>
+      {status && (
+        <div style={{
+          fontSize: 11.5,
+          color: status.tone === 'success' ? '#3fb950' : status.tone === 'error' ? '#ff7b72' : t.textMuted,
+        }}>
+          {status.text}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function proposalPillStyle(t: Theme, accent: string): React.CSSProperties {
+  return {
+    border: `1px solid ${accent}45`,
+    borderRadius: 999,
+    background: `${accent}12`,
+    color: accent,
+    padding: '2px 7px',
+    fontSize: 10,
+    fontWeight: 850,
+    lineHeight: 1.15,
+    textTransform: 'uppercase',
+    letterSpacing: '0.02em',
+    fontFamily: t.font,
+  };
+}
+
+function proposalButtonStyle(t: Theme, primary: boolean, disabled: boolean): React.CSSProperties {
+  return {
+    border: `1px solid ${primary ? t.accent : t.headerBorder}`,
+    borderRadius: 7,
+    background: disabled ? t.appBg : primary ? `${t.accent}18` : t.cellBg,
+    color: disabled ? t.textMuted : primary ? t.accent : t.textPrimary,
+    cursor: disabled ? 'not-allowed' : 'pointer',
+    display: 'inline-flex',
+    alignItems: 'center',
+    gap: 6,
+    padding: '6px 10px',
+    fontSize: 11.5,
+    fontWeight: 800,
+    fontFamily: t.font,
+  };
+}
+
+function proposalTilePosition(dashboard: { layout: { items: Array<{ y: number; h: number }> } }, size: { w: number; h: number }): { x: number; y: number; w: number; h: number } {
+  const y = dashboard.layout.items.reduce((max, item) => Math.max(max, item.y + item.h), 0);
+  return { x: 0, y, w: size.w, h: size.h };
+}
+
+function proposalTileId(dashboard: { layout: { items: Array<{ i: string }> } }, raw: string): string {
+  const base = raw.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '') || 'draft-tile';
+  const used = new Set(dashboard.layout.items.map((item) => item.i));
+  if (!used.has(base)) return base;
+  for (let i = 2; i < 1000; i += 1) {
+    const candidate = `${base}-${i}`;
+    if (!used.has(candidate)) return candidate;
+  }
+  return `${base}-${Date.now()}`;
+}
+
+function proposalTileSize(vizType: string): { w: number; h: number } {
+  if (vizType === 'kpi' || vizType === 'single_value') return { w: 3, h: 3 };
+  if (vizType === 'table' || vizType === 'pivot') return { w: 6, h: 4 };
+  return { w: 6, h: 3 };
+}
+
+function normalizeProposalViz(value: unknown): string {
+  const chart = String(value ?? 'table').toLowerCase().replace(/-/g, '_');
+  if (chart === 'single_value' || chart === 'kpi' || chart === 'line' || chart === 'bar' || chart === 'area'
+    || chart === 'pie' || chart === 'pivot' || chart === 'map' || chart === 'funnel' || chart === 'table') {
+    return chart;
+  }
+  return 'table';
 }
 
 function stripSqlBlocks(text: string): string {

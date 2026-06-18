@@ -39,27 +39,27 @@ describe('createConnectionConfigKey', () => {
   });
 
   it('includes enterprise credential fields in the key', () => {
-    const base = {
-      driver: 'bigquery' as const,
-      projectId: 'analytics-prod',
-      authMethod: 'service_account_key_file' as const,
-      keyFilename: '/secure/prod.json',
+    const databricks = {
+      driver: 'databricks' as const,
+      host: 'adb-123.cloud.databricks.com',
+      warehouse: 'prod-warehouse',
+      token: 'prod-token',
     };
-    expect(createConnectionConfigKey(base)).not.toBe(createConnectionConfigKey({
-      ...base,
-      keyFilename: '/secure/staging.json',
+    expect(createConnectionConfigKey(databricks)).not.toBe(createConnectionConfigKey({
+      ...databricks,
+      token: 'staging-token',
     }));
-
-    const athena = {
-      driver: 'athena' as const,
-      region: 'us-east-1',
-      database: 'analytics',
-      outputLocation: 's3://query-results/',
-      profile: 'prod',
-    };
-    expect(createConnectionConfigKey(athena)).not.toBe(createConnectionConfigKey({
-      ...athena,
-      profile: 'staging',
+    expect(createConnectionConfigKey(databricks)).not.toBe(createConnectionConfigKey({
+      ...databricks,
+      warehouse: 'staging-warehouse',
+    }));
+    expect(createConnectionConfigKey(databricks)).not.toBe(createConnectionConfigKey({
+      ...databricks,
+      httpPath: '/sql/1.0/warehouses/staging-warehouse',
+    }));
+    expect(createConnectionConfigKey(databricks)).not.toBe(createConnectionConfigKey({
+      ...databricks,
+      waitTimeout: '5s',
     }));
 
     const snowflake = {
@@ -85,6 +85,19 @@ describe('createConnectionConfigKey', () => {
     expect(createConnectionConfigKey(snowflake)).not.toBe(createConnectionConfigKey({
       ...snowflake,
       privateKeyPassphrase: 'staging-passphrase',
+    }));
+    expect(createConnectionConfigKey(snowflake)).not.toBe(createConnectionConfigKey({
+      ...snowflake,
+      proxyHost: 'proxy.internal',
+    }));
+    expect(createConnectionConfigKey(snowflake)).not.toBe(createConnectionConfigKey({
+      ...snowflake,
+      queryTag: 'team=finance',
+    }));
+    expect(createConnectionConfigKey(snowflake)).not.toBe(createConnectionConfigKey({
+      ...snowflake,
+      authMethod: 'workload_identity' as const,
+      workloadIdentityProvider: 'AWS',
     }));
   });
 });

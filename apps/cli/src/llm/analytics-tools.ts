@@ -148,12 +148,13 @@ export function emitProposalFromSuggestBlock(input: unknown, output: unknown, em
   const proposalInput = input as Partial<BlockProposal>;
   if (!proposalInput.name || !proposalInput.sql) return;
   const outputRecord = output && typeof output === 'object'
-    ? output as { certified?: boolean; errors?: unknown[]; warnings?: unknown[] }
+    ? output as { name?: unknown; path?: unknown; certified?: boolean; errors?: unknown[]; warnings?: unknown[] }
     : {};
   emit({
     kind: 'proposal',
     proposal: {
-      name: String(proposalInput.name),
+      name: typeof outputRecord.name === 'string' && outputRecord.name.trim() ? outputRecord.name : String(proposalInput.name),
+      path: typeof outputRecord.path === 'string' && outputRecord.path.trim() ? outputRecord.path : undefined,
       domain: String(proposalInput.domain ?? ''),
       owner: String(proposalInput.owner ?? ''),
       description: String(proposalInput.description ?? ''),

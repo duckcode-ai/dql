@@ -158,6 +158,7 @@ function emitProposalFromResult(output: unknown, emit: (turn: AgentTurn) => void
   if (!o.name || !o.path) return;
   const proposal: BlockProposal = {
     name: String(o.name),
+    path: String(o.path),
     domain: '',
     owner: '',
     description: '',

@@ -83,6 +83,7 @@ function emitProposalFromText(text: string, emit: (turn: AgentTurn) => void): vo
       kind: 'proposal',
       proposal: {
         name: String(raw.name),
+        path: typeof raw.path === 'string' && raw.path.trim() ? raw.path : undefined,
         domain: String(raw.domain ?? ''),
         owner: String(raw.owner ?? ''),
         description: String(raw.description ?? ''),

@@ -637,7 +637,7 @@ export function StructuredAnswerText({
 }
 
 function renderStructuredAnswer(text: string, t: Theme, compact: boolean): React.ReactNode[] {
-  const lines = text.replace(/\r\n/g, '\n').split('\n');
+  const lines = normalizeStructuredAnswerText(text).split('\n');
   const nodes: React.ReactNode[] = [];
   let i = 0;
   let key = 0;
@@ -682,6 +682,23 @@ function renderStructuredAnswer(text: string, t: Theme, compact: boolean): React
     if (/^[-*_]{3,}$/.test(line)) {
       nodes.push(<hr key={`hr-${key++}`} style={{ width: '100%', border: 0, borderTop: `1px solid ${t.cellBorder}`, margin: compact ? '2px 0' : '4px 0' }} />);
       i += 1;
+      continue;
+    }
+
+    if (isMarkdownTableStart(lines, i)) {
+      const tableLines: string[] = [];
+      while (i < lines.length && isMarkdownTableLine(lines[i].trim())) {
+        tableLines.push(lines[i].trim());
+        i += 1;
+      }
+      nodes.push(
+        <MarkdownAnswerTable
+          key={`table-${key++}`}
+          lines={tableLines}
+          t={t}
+          compact={compact}
+        />,
+      );
       continue;
     }
 
@@ -760,14 +777,95 @@ function renderStructuredAnswer(text: string, t: Theme, compact: boolean): React
   return nodes;
 }
 
+function normalizeStructuredAnswerText(text: string): string {
+  return text
+    .replace(/\r\n/g, '\n')
+    .replace(/\|\s+\|(?=[^\n]*\|)/g, '|\n|');
+}
+
 function isStructuredAnswerBlockStart(line: string): boolean {
   return Boolean(
     line.startsWith('```')
       || /^(#{1,4})\s+/.test(line)
       || /^[-*_]{3,}$/.test(line)
+      || isMarkdownTableLine(line)
       || line.startsWith('>')
       || /^[-*+]\s+/.test(line)
       || /^\d+\.\s+/.test(line),
+  );
+}
+
+function isMarkdownTableStart(lines: string[], index: number): boolean {
+  const current = lines[index]?.trim() ?? '';
+  const next = lines[index + 1]?.trim() ?? '';
+  return isMarkdownTableLine(current) && isMarkdownTableDivider(next);
+}
+
+function isMarkdownTableLine(line: string): boolean {
+  return line.startsWith('|') && line.endsWith('|') && parseMarkdownTableRow(line).length >= 2;
+}
+
+function isMarkdownTableDivider(line: string): boolean {
+  if (!isMarkdownTableLine(line)) return false;
+  const cells = parseMarkdownTableRow(line);
+  return cells.length >= 2 && cells.every((cell) => /^:?-{3,}:?$/.test(cell.replace(/\s+/g, '')));
+}
+
+function parseMarkdownTableRow(line: string): string[] {
+  return line
+    .trim()
+    .replace(/^\|/, '')
+    .replace(/\|$/, '')
+    .split('|')
+    .map((cell) => cell.trim());
+}
+
+function MarkdownAnswerTable({
+  lines,
+  t,
+  compact,
+}: {
+  lines: string[];
+  t: Theme;
+  compact: boolean;
+}) {
+  const header = parseMarkdownTableRow(lines[0] ?? '');
+  const divider = parseMarkdownTableRow(lines[1] ?? '');
+  const rows = lines.slice(2).map(parseMarkdownTableRow).filter((row) => row.length > 0);
+  const columnCount = Math.max(header.length, ...rows.map((row) => row.length), 0);
+  if (columnCount === 0) return null;
+  const alignments = Array.from({ length: columnCount }, (_, index) => {
+    const marker = divider[index]?.replace(/\s+/g, '') ?? '';
+    if (marker.startsWith(':') && marker.endsWith(':')) return 'center' as const;
+    if (marker.endsWith(':')) return 'right' as const;
+    return 'left' as const;
+  });
+  const normalizedHeader = Array.from({ length: columnCount }, (_, index) => header[index] ?? '');
+  return (
+    <div style={answerTableWrapStyle(t)}>
+      <table style={answerTableStyle(t, compact)}>
+        <thead>
+          <tr>
+            {normalizedHeader.map((cell, index) => (
+              <th key={`h-${index}`} style={answerTableCellStyle(t, compact, true, alignments[index])}>
+                {inlineAnswerMarkdown(cell, t)}
+              </th>
+            ))}
+          </tr>
+        </thead>
+        <tbody>
+          {rows.map((row, rowIndex) => (
+            <tr key={`r-${rowIndex}`}>
+              {Array.from({ length: columnCount }, (_, cellIndex) => (
+                <td key={`c-${rowIndex}-${cellIndex}`} style={answerTableCellStyle(t, compact, false, alignments[cellIndex])}>
+                  {inlineAnswerMarkdown(row[cellIndex] ?? '', t)}
+                </td>
+              ))}
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
   );
 }
 
@@ -876,6 +974,48 @@ function answerListItemStyle(t: Theme, compact: boolean): React.CSSProperties {
     fontSize: compact ? 13 : 13,
     lineHeight: 1.5,
     paddingLeft: 2,
+  };
+}
+
+function answerTableWrapStyle(t: Theme): React.CSSProperties {
+  return {
+    width: '100%',
+    maxWidth: '100%',
+    overflowX: 'auto',
+    border: `1px solid ${t.cellBorder}`,
+    borderRadius: 8,
+    background: t.editorBg,
+  };
+}
+
+function answerTableStyle(t: Theme, compact: boolean): React.CSSProperties {
+  return {
+    width: '100%',
+    minWidth: compact ? 360 : 420,
+    borderCollapse: 'collapse',
+    color: t.textPrimary,
+    fontSize: compact ? 12 : 12.5,
+    lineHeight: 1.45,
+  };
+}
+
+function answerTableCellStyle(
+  t: Theme,
+  compact: boolean,
+  header: boolean,
+  align: 'left' | 'center' | 'right',
+): React.CSSProperties {
+  return {
+    padding: compact ? '6px 8px' : '7px 9px',
+    borderBottom: `1px solid ${t.cellBorder}`,
+    color: header ? t.textMuted : t.textPrimary,
+    background: header ? `${t.tableHeaderBg}75` : undefined,
+    fontFamily: header ? t.fontMono : t.font,
+    fontSize: header ? (compact ? 10.5 : 11) : undefined,
+    fontWeight: header ? 800 : 500,
+    textAlign: align,
+    whiteSpace: 'nowrap',
+    verticalAlign: 'top',
   };
 }
 
