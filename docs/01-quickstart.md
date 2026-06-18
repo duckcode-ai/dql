@@ -12,8 +12,9 @@ hosted account, SSO, or team RBAC is required.
 > [jaffle-shop-duckdb](https://github.com/duckcode-ai/jaffle-shop-duckdb) repo
 > ships a complete, ready-built DQL workspace (10 certified blocks + an
 > executive App dashboard). Clone it, `./setup.sh`, then
-> `cd dql && npm install && npm run notebook`. The rest of this page builds the
-> same thing from scratch on your repo.
+> `cd dql && npm install && npm install --prefix .dql/connectors duckdb &&
+> npm run notebook`. The rest of this page builds the same thing from scratch
+> on your repo.
 
 ## 1. Make your dbt manifest fresh
 
@@ -58,6 +59,17 @@ local DuckDB file that's:
 
 (Databricks, DuckDB/local files, and Snowflake — see
 [connectors](reference/connectors.md).)
+
+Install only the database driver your project uses:
+
+| Database | Extra install before running queries | Notes |
+| --- | --- | --- |
+| Databricks SQL | none | Built into DQL through HTTPS |
+| DuckDB or local CSV/Parquet/JSON files | `npm install --prefix .dql/connectors duckdb` | Needed for `duckdb` and `file` connections |
+| Snowflake | `npm install --prefix .dql/connectors snowflake-sdk` | Needed for Snowflake connections |
+
+The notebook Connections page can also install DuckDB or Snowflake into
+`.dql/connectors/`.
 
 ## 3. Check the setup and sync dbt
 

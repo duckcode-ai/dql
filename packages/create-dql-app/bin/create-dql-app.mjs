@@ -167,6 +167,12 @@ async function main() {
   const pm = detectPackageManager();
   const installCmd = pm === 'npm' ? 'npm install' : `${pm} install`;
   const runCmd = pm === 'npm' ? 'npm run notebook' : `${pm} notebook`;
+  const connectorTip = [
+    c.dim('# Optional database driver install before running queries:'),
+    c.dim('#   DuckDB/local files: npm install --prefix .dql/connectors duckdb'),
+    c.dim('#   Snowflake:       npm install --prefix .dql/connectors snowflake-sdk'),
+    c.dim('#   Databricks:      no extra package'),
+  ].join('\n  ');
   const dbtTip = dbtSibling
     ? `\n\n${c.dim('Tip:')} run ${c.bold('dbt parse')} inside ${c.dim(dbtSibling)}\n     first, then ${c.bold(pm === 'npm' ? 'npm run sync' : `${pm} sync`)} to import the dbt DAG.`
     : '';
@@ -176,6 +182,7 @@ ${c.green('✓ Ready.')} Next steps:
 
   ${c.bold(`cd ${args.dir}`)}
   ${c.bold(installCmd)}
+  ${connectorTip}
   ${c.bold(runCmd)}${dbtTip}
 
 Your notebook will open at ${c.cyan('http://127.0.0.1:3474')}.

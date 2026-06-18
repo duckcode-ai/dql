@@ -6,6 +6,9 @@ The fastest way to start a DQL project.
 npx create-dql-app@latest my-analytics
 cd my-analytics
 npm install
+npm install --prefix .dql/connectors duckdb       # DuckDB/local files only
+# npm install --prefix .dql/connectors snowflake-sdk  # Snowflake only
+# Databricks does not need an extra package.
 npm run notebook
 ```
 
@@ -13,11 +16,20 @@ Opens a running notebook at <http://127.0.0.1:3474> in under 5 minutes on a
 clean machine. No global install required; the template installs
 `@duckcodeailabs/dql-cli` locally and exposes it through npm scripts.
 
-The scaffolded project is a clean starter: `dql.config.json` (DuckDB
-in-memory by default — bring your own warehouse), a welcome notebook, and npm
-scripts for `notebook`, `compile`, `lineage`, `doctor`, and `validate`. If a
-sibling dbt project is detected, it is wired into `dql.config.json`
-automatically so `dql sync dbt` works out of the box.
+The scaffolded project is a clean starter: `dql.config.json`, a welcome
+notebook, and npm scripts for `notebook`, `compile`, `lineage`, `doctor`, and
+`validate`. If a sibling dbt project is detected, it is wired into
+`dql.config.json` automatically so `dql sync dbt` works out of the box.
+
+Database drivers are project-local so the base install stays fast:
+
+| Database | Extra install | Notes |
+| --- | --- | --- |
+| Databricks SQL | none | Built into DQL through HTTPS |
+| DuckDB or local files | `npm install --prefix .dql/connectors duckdb` | Needed for DuckDB, CSV, Parquet, and JSON |
+| Snowflake | `npm install --prefix .dql/connectors snowflake-sdk` | Needed for Snowflake connections |
+
+You can also install DuckDB or Snowflake from the notebook Connections page.
 
 Want a ready-made dbt project to try DQL on? Clone the example repo and add
 DQL to it — the same steps you'd use on your own dbt repo:

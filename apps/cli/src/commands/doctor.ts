@@ -4,7 +4,12 @@ import { fileURLToPath } from 'node:url';
 import { QueryExecutor } from '@duckcodeailabs/dql-connectors';
 import { resolveSemanticLayerWithDiagnostics } from '@duckcodeailabs/dql-core';
 import type { CLIFlags } from '../args.js';
-import { assertLocalQueryRuntimeReady, findProjectRoot, loadProjectConfig } from '../local-runtime.js';
+import {
+  assertLocalQueryRuntimeReady,
+  findProjectRoot,
+  getConnectorInstallStatuses,
+  loadProjectConfig,
+} from '../local-runtime.js';
 
 interface Check {
   name: string;
@@ -202,35 +207,22 @@ function readRunningCliVersion(): string {
 }
 
 function checkDuckDBDependency(projectRoot: string): Check {
-  const packageJsonPath = join(projectRoot, 'package.json');
-  if (!existsSync(packageJsonPath)) {
+  const status = getConnectorInstallStatuses(projectRoot).find((item) => item.driver === 'duckdb');
+  if (!status) {
     return {
-      name: 'duckdb dependency',
-      ok: true,
-      detail: 'no project package.json; skipping dependency check',
+      name: 'DuckDB connector package',
+      ok: false,
+      detail: 'DuckDB connector status was not available.',
     };
   }
 
-  try {
-    const pkg = JSON.parse(readFileSync(packageJsonPath, 'utf-8')) as {
-      dependencies?: Record<string, string>;
-      devDependencies?: Record<string, string>;
-    };
-    const hasDuckDB = Boolean(pkg.dependencies?.duckdb || pkg.devDependencies?.duckdb);
-    return {
-      name: 'duckdb dependency',
-      ok: true,
-      detail: hasDuckDB
-        ? 'duckdb listed in package.json'
-        : 'provided by installed DQL CLI; runtime check below verifies availability',
-    };
-  } catch {
-    return {
-      name: 'duckdb dependency',
-      ok: false,
-      detail: 'failed to parse package.json',
-    };
-  }
+  return {
+    name: 'DuckDB connector package',
+    ok: status.installed,
+    detail: status.installed
+      ? `installed at ${status.installPath} or project node_modules`
+      : `missing; install from the notebook Connections page or run ${status.installCommand}`,
+  };
 }
 
 function checkSemanticLayer(semanticConfig: unknown, projectRoot: string): Check {

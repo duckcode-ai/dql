@@ -8,8 +8,9 @@
 
 ## Connectors
 
-All 15 drivers ship in `@duckcodeailabs/dql-connectors`. For first-run local
-exploration, start with `duckdb` or `file`. See [Connectors](./connectors.md).
+DQL uses a flat install. Databricks SQL is built in; DuckDB/local files and
+Snowflake install project-local driver packages into `.dql/connectors/`. See
+[Connectors](./connectors.md).
 
 ## Chart types
 
@@ -30,7 +31,7 @@ exploration, start with `duckdb` or `file`. See [Connectors](./connectors.md).
 - Apps, dashboard pages, attached notebooks, personal AI pins, and optional local persona/policy previews
 - Semantic layer (local YAML + dbt manifest and semantic manifest import)
 - Lineage DAG (Domain / App / Dashboard / Notebook / Block / semantic / dbt / source granularity)
-- 15 database connectors
+- Active connectors for Databricks SQL, DuckDB/local files, and Snowflake
 - Local agentic analytics with certified-first routing, draft block proposals, and BYO provider setup
 - Local schedules and Slack front-end
 - Plugin API (custom connectors, charts, governance rules)

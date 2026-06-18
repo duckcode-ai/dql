@@ -37,14 +37,28 @@ npx create-dql-app@latest my-analytics
 cd my-analytics
 npm install
 npm run doctor
+npm install --prefix .dql/connectors duckdb       # DuckDB/local files only
+# npm install --prefix .dql/connectors snowflake-sdk  # Snowflake only
+# Databricks does not need an extra package.
 npm run notebook
 ```
 
-Open **http://127.0.0.1:3474**. The starter is a clean project: DuckDB
-in-memory connection, a welcome notebook, and npm scripts for the local
-workflow. Run it inside a dbt repo and the dbt project is wired in
-automatically (see below). To try DQL on a sample dbt project, clone
+Open **http://127.0.0.1:3474**. The starter is a clean project with
+`dql.config.json`, a welcome notebook, and npm scripts for the local workflow.
+Run it inside a dbt repo and the dbt project is wired in automatically (see
+below). To try DQL on a sample dbt project, clone
 [jaffle-shop-duckdb](https://github.com/duckcode-ai/jaffle-shop-duckdb).
+
+Install only the database driver the project uses:
+
+| Database | Extra install before running queries | Notes |
+| --- | --- | --- |
+| Databricks SQL | none | Built into DQL through HTTPS |
+| DuckDB or local CSV/Parquet/JSON files | `npm install --prefix .dql/connectors duckdb` | Needed for `duckdb` and `file` connections |
+| Snowflake | `npm install --prefix .dql/connectors snowflake-sdk` | Needed for Snowflake connections |
+
+The notebook Connections page can also install DuckDB or Snowflake into
+`.dql/connectors/`.
 
 For an existing DQL project, install only the CLI:
 
@@ -66,6 +80,9 @@ npx create-dql-app@latest dql    # detects the dbt project, wires the config
 cd dql
 npm install
 npm run sync                     # import dbt models + lineage
+npm install --prefix .dql/connectors duckdb       # DuckDB/local files only
+# npm install --prefix .dql/connectors snowflake-sdk  # Snowflake only
+# Databricks does not need an extra package.
 npm run notebook
 ```
 

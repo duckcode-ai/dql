@@ -74,8 +74,17 @@ edit `dql.config.json`:
 }
 ```
 
-(On your own repo, use your warehouse driver instead — DQL ships 15
-connectors; see [connect-warehouse](../guides/connect-warehouse.md).)
+(On your own repo, use your warehouse driver instead. Databricks is built in;
+DuckDB/local files and Snowflake use project-local drivers. See
+[connect-warehouse](../guides/connect-warehouse.md).)
+
+Install only the driver your project uses:
+
+```bash
+npm install --prefix .dql/connectors duckdb          # DuckDB and local files
+# npm install --prefix .dql/connectors snowflake-sdk # Snowflake
+# Databricks does not need an extra package.
+```
 
 ---
 

@@ -7,8 +7,9 @@ Every tutorial works on **your own dbt repo**. If you don't have one handy, the
 [duckcode-ai/jaffle-shop-duckdb](https://github.com/duckcode-ai/jaffle-shop-duckdb)
 repo is a Jaffle Shop dbt + DuckDB project that already ships a fully-built DQL
 workspace (10 certified blocks + an executive App dashboard) — clone it,
-`./setup.sh`, then `cd dql && npm install && npm run notebook` to explore a
-finished result, and follow its `dql/TUTORIAL.md` for a guided tour.
+`./setup.sh`, then `cd dql && npm install && npm install --prefix .dql/connectors duckdb && npm run notebook`
+to explore a finished result, and follow its `dql/TUTORIAL.md` for a guided
+tour.
 
 ## Reading order
 

@@ -27,6 +27,7 @@ cd jaffle-shop-duckdb
 
 cd dql
 npm install
+npm install --prefix .dql/connectors duckdb
 npm run notebook
 ```
 
@@ -52,12 +53,27 @@ cd dql
 npm install
 npm run doctor
 npm run sync
+npm install --prefix .dql/connectors duckdb       # DuckDB or local files only
+# npm install --prefix .dql/connectors snowflake-sdk  # Snowflake only
+# Databricks does not need an extra package.
 npm run notebook
 ```
 
 `dbt parse` should create `target/manifest.json`. DQL also reads dbt artifacts
 such as `catalog.json`, `semantic_manifest.json`, and `run_results.json` when
 they exist.
+
+Install only the database driver your project uses:
+
+| Database | Extra install before running queries | Notes |
+| --- | --- | --- |
+| Databricks SQL | none | Built into DQL through HTTPS |
+| DuckDB or local CSV/Parquet/JSON files | `npm install --prefix .dql/connectors duckdb` | Needed for `duckdb` and `file` connections |
+| Snowflake | `npm install --prefix .dql/connectors snowflake-sdk` | Needed for Snowflake password, key-pair, SSO, OAuth, PAT, MFA, and workload identity auth |
+
+The notebook Connections page can also install DuckDB or Snowflake into
+`.dql/connectors/`. This keeps the base DQL install fast while each project
+opts into the warehouse package it actually needs.
 
 If you installed the CLI globally, installation only gives you the `dql`
 command. It does not create a `dql/` folder by itself. Bootstrap the folder

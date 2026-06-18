@@ -56,6 +56,13 @@ Open the notebook connection panel and click **Install** for DuckDB or
 Snowflake. The driver is installed into the project under `.dql/connectors/`.
 Databricks does not need an extra package.
 
+CLI equivalents:
+
+```bash
+npm install --prefix .dql/connectors duckdb          # DuckDB and local files
+npm install --prefix .dql/connectors snowflake-sdk   # Snowflake
+```
+
 ## 3. Export credentials
 
 ```bash

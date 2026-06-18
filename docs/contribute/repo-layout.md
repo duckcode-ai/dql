@@ -25,7 +25,7 @@ dql/
 │   ├── dql-core/         # parser + AST + semantic + lineage
 │   ├── dql-compiler/     # IR + emitters
 │   ├── dql-runtime/      # query execution
-│   ├── dql-connectors/   # 15 drivers
+│   ├── dql-connectors/   # active Databricks, DuckDB/file, and Snowflake drivers
 │   ├── dql-governance/   # lint + certification
 │   ├── dql-project/      # SQLite registry
 │   ├── dql-lsp/          # language server

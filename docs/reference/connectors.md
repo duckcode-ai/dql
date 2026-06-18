@@ -25,6 +25,13 @@ DQL installs the driver into:
 .dql/connectors/
 ```
 
+CLI equivalents:
+
+```bash
+npm install --prefix .dql/connectors duckdb          # DuckDB and local files
+npm install --prefix .dql/connectors snowflake-sdk   # Snowflake
+```
+
 This keeps the global CLI install small while still letting each project opt
 into the database packages it actually uses.
 

@@ -8,8 +8,15 @@ file in git. See [Concepts](../02-concepts.md).
 
 ## Do I need a cloud warehouse to try it?
 
-No. DQL ships with DuckDB. Drop a CSV into `data/`, open `dql notebook`, and
-query it immediately. No credentials, no configuration.
+No. DQL supports local DuckDB and file queries. Install the project-local
+DuckDB driver, then query CSV, Parquet, or JSON files from the notebook:
+
+```bash
+npm install --prefix .dql/connectors duckdb
+```
+
+Databricks SQL is built in. Snowflake uses a project-local `snowflake-sdk`
+install.
 
 ## Do I need dbt?
 

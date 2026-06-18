@@ -4,7 +4,6 @@ import { fileURLToPath } from 'node:url';
 import { QueryExecutor } from '@duckcodeailabs/dql-connectors';
 import type { CLIFlags } from '../args.js';
 import {
-  assertLocalQueryRuntimeReady,
   findProjectRoot,
   loadProjectConfig,
   normalizeProjectConnection,
@@ -32,8 +31,6 @@ export async function runNotebook(targetArg: string | null, flags: CLIFlags): Pr
     config.defaultConnection ?? { driver: 'file' as const, filepath: ':memory:' },
     projectRoot,
   );
-
-  await assertLocalQueryRuntimeReady(executor, connection);
 
   const host = flags.host ?? process.env.DQL_HOST ?? '127.0.0.1';
   const port = await startLocalServer({
