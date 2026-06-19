@@ -3089,6 +3089,28 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
       return;
     }
 
+    if (req.method === 'POST' && path === '/api/ai/sql-draft/preview') {
+      try {
+        const body = await readJSON(req);
+        if (typeof body.sql !== 'string' || body.sql.trim().length === 0) {
+          res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
+          res.end(serializeJSON({ error: 'Missing SQL in request body.' }));
+          return;
+        }
+        const previewSql = buildAgentPreviewSql(body.sql);
+        const result = await executeLocalSqlForStoredResult(previewSql);
+        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({ ok: true, result }));
+      } catch (error) {
+        res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({
+          ok: false,
+          error: error instanceof Error ? error.message : String(error),
+        }));
+      }
+      return;
+    }
+
     if (req.method === 'POST' && path === '/api/query') {
       try {
         const body = await readJSON(req);

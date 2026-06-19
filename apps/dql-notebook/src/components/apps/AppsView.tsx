@@ -896,7 +896,7 @@ function AppCreateSurface({
         </section>
 
         <section className="dql-app-panel dql-app-preview-panel">
-          <PanelHead title={mode === 'ai' ? 'Generated layout' : 'Canvas'} meta={certifiedPlanTiles.length ? `${certifiedPlanTiles.length} certified` : 'empty'} />
+          <PanelHead title={mode === 'ai' ? 'Generated layout' : 'Canvas'} meta={planTiles.length ? `${certifiedPlanTiles.length} certified / ${reviewPlanTiles.length} review` : 'empty'} />
           <div className="dql-app-preview-scroll">
             <div className="dql-app-preview-card">
               <div className="dql-app-preview-head">
@@ -909,8 +909,8 @@ function AppCreateSurface({
                 <span>All regions <ChevronDown size={12} /></span>
               </div>
               <div className="dql-app-preview-grid">
-                {certifiedPlanTiles.length ? (
-                  certifiedPlanTiles.map((tile) => (
+                {planTiles.length ? (
+                  planTiles.map((tile) => (
                     <PreviewTile
                       key={tile.id}
                       tile={tile}
@@ -921,7 +921,7 @@ function AppCreateSurface({
                 ) : (
                   <div className="dql-app-preview-empty">
                     <LayoutDashboard size={38} strokeWidth={1.4} />
-                    <div>{mode === 'ai' ? 'No certified blocks matched this app yet.' : 'Select blocks to compose the app.'}</div>
+                    <div>{mode === 'ai' ? 'Run AI to generate certified and review-needed sections.' : 'Select blocks to compose the app.'}</div>
                   </div>
                 )}
               </div>
@@ -1645,7 +1645,6 @@ function AppCopilotPanel({
           scopeHint="Business answer first"
           upstreamContext={contextJson}
           themeMode={themeMode}
-          hideSqlByDefault
           suggestions={promptStarters}
           autoAsk={askSeed ?? undefined}
           emptyHint="Ask a question or request deeper research from the current context."
@@ -1688,6 +1687,7 @@ function ResearchPanel({
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [evidenceTab, setEvidenceTab] = useState<'preview' | 'sql' | 'assumptions' | 'context'>('preview');
+  const [sqlDraft, setSqlDraft] = useState('');
 
   useEffect(() => {
     if (!appId) {
@@ -1761,15 +1761,20 @@ function ResearchPanel({
 
   const selected = items.find((item) => item.id === selectedId) ?? items[0] ?? null;
 
-  const rerunResearch = async (investigation: LocalAppInvestigation) => {
-    if (!appId) return;
+  useEffect(() => {
+    setSqlDraft(selected?.generatedSql ?? '');
+  }, [selected?.id, selected?.generatedSql]);
+
+  const rerunResearch = async (investigation: LocalAppInvestigation, sqlOverride?: string): Promise<LocalAppInvestigation | null> => {
+    if (!appId) return null;
     setBusy(investigation.id);
     setError(null);
-    const result = await api.runAppInvestigation(appId, investigation.id);
+    const reviewedSql = sqlOverride?.trim();
+    const result = await api.runAppInvestigation(appId, investigation.id, reviewedSql ? { generatedSql: reviewedSql } : undefined);
     setBusy(null);
     if (!result.ok) {
       setError(result.error);
-      return;
+      return null;
     }
     setItems((current) => {
       const next = upsertInvestigation(current, result.investigation);
@@ -1777,6 +1782,7 @@ function ResearchPanel({
       return next;
     });
     setEvidenceTab('preview');
+    return result.investigation;
   };
 
   const pinResearch = async (investigation: LocalAppInvestigation): Promise<LocalAppInvestigation | null> => {
@@ -1821,6 +1827,28 @@ function ResearchPanel({
     }
     const refreshed = await api.getAppInvestigation(appId, investigation.id);
     if (refreshed) setItems((current) => upsertInvestigation(current, refreshed));
+  };
+
+  const promoteReviewedResearch = async (investigation: LocalAppInvestigation) => {
+    const reviewedSql = sqlDraft.trim();
+    let target = investigation;
+    if (reviewedSql && reviewedSql !== (investigation.generatedSql ?? '').trim()) {
+      const rerun = await rerunResearch(investigation, reviewedSql);
+      if (!rerun) return;
+      target = rerun;
+    }
+    await promoteResearch(target);
+  };
+
+  const pinReviewedResearch = async (investigation: LocalAppInvestigation) => {
+    const reviewedSql = sqlDraft.trim();
+    let target = investigation;
+    if (reviewedSql && reviewedSql !== (investigation.generatedSql ?? '').trim()) {
+      const rerun = await rerunResearch(investigation, reviewedSql);
+      if (!rerun) return null;
+      target = rerun;
+    }
+    return pinResearch(target);
   };
 
   if (!appDoc) return <EmptyPanel title="No App selected." detail="Choose an App before starting research." />;
@@ -1870,13 +1898,13 @@ function ResearchPanel({
               </div>
               <div className="dql-app-research-actions">
                 <StatusSeal tone={selected.status === 'error' ? 'draft' : 'agentic'}>{selected.reviewStatus}</StatusSeal>
-                <button type="button" className="dql-apps-btn dql-apps-btn-line" onClick={() => void rerunResearch(selected)} disabled={busy === selected.id}>
+                <button type="button" className="dql-apps-btn dql-apps-btn-line" onClick={() => void rerunResearch(selected, sqlDraft)} disabled={busy === selected.id}>
                   <Workflow size={13} /> {busy === selected.id ? 'Running...' : 'Run'}
                 </button>
-                <button type="button" className="dql-apps-btn dql-apps-btn-line" onClick={() => void pinResearch(selected)} disabled={busy === `pin:${selected.id}`}>
+                <button type="button" className="dql-apps-btn dql-apps-btn-line" onClick={() => void pinReviewedResearch(selected)} disabled={busy === `pin:${selected.id}`}>
                   <MapPin size={13} /> {selected.pinnedAiPinId ? 'Added to app' : 'Add to app'}
                 </button>
-                <button type="button" className="dql-apps-btn dql-apps-btn-primary" onClick={() => void promoteResearch(selected)} disabled={!selected.generatedSql || busy === `promote:${selected.id}`}>
+                <button type="button" className="dql-apps-btn dql-apps-btn-primary" onClick={() => void promoteReviewedResearch(selected)} disabled={!(sqlDraft.trim() || selected.generatedSql) || busy === `promote:${selected.id}`}>
                   <FileText size={13} /> {busy === `promote:${selected.id}` ? 'Creating...' : 'Create draft block'}
                 </button>
               </div>
@@ -1935,7 +1963,12 @@ function ResearchPanel({
                   ))}
                 </div>
               </div>
-              <ResearchEvidence investigation={selected} tab={evidenceTab} />
+              <ResearchEvidence
+                investigation={selected}
+                tab={evidenceTab}
+                sqlDraft={sqlDraft}
+                onSqlDraftChange={setSqlDraft}
+              />
             </section>
           </>
         ) : (
@@ -2331,15 +2364,25 @@ function ResearchMetricStrip({ investigation }: { investigation: LocalAppInvesti
 function ResearchEvidence({
   investigation,
   tab,
+  sqlDraft,
+  onSqlDraftChange,
 }: {
   investigation: LocalAppInvestigation;
   tab: 'preview' | 'sql' | 'assumptions' | 'context';
+  sqlDraft: string;
+  onSqlDraftChange: (value: string) => void;
 }) {
   if (tab === 'sql') {
     return (
-      <pre className="dql-app-research-code">
-        {investigation.generatedSql || 'No SQL has been attached to this investigation yet.'}
-      </pre>
+      <div className="dql-app-research-sql-review">
+        <textarea
+          value={sqlDraft}
+          onChange={(event) => onSqlDraftChange(event.target.value)}
+          spellCheck={false}
+          placeholder="Generated SQL will appear here for review."
+        />
+        {investigation.error ? <div className="dql-app-error">{investigation.error}</div> : null}
+      </div>
     );
   }
   const evidence = asUiRecord(investigation.evidence);
@@ -5037,6 +5080,29 @@ const APP_STYLES = `
   color: var(--dql-app-ink);
   font: 11px/1.5 var(--font-mono);
   white-space: pre-wrap;
+}
+
+.dql-app-research-sql-review {
+  display: grid;
+  gap: 10px;
+  margin-top: 10px;
+}
+
+.dql-app-research-sql-review textarea {
+  min-height: 260px;
+  resize: vertical;
+  border-radius: 8px;
+  border: 1px solid var(--dql-app-line);
+  background: var(--dql-app-surface);
+  color: var(--dql-app-ink);
+  padding: 11px;
+  font: 11px/1.5 var(--font-mono);
+  outline: none;
+}
+
+.dql-app-research-sql-review textarea:focus {
+  border-color: rgba(37, 99, 235, 0.42);
+  box-shadow: 0 0 0 3px var(--dql-app-accent-soft);
 }
 
 .dql-app-research-assumptions {

@@ -1,11 +1,15 @@
-import React, { useMemo, useRef, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { Bot, CheckCircle2, Send, Sparkles, X } from 'lucide-react';
+import { api } from '../../api/client';
 import { runAgent } from '../../llm/client';
 import type { AgentTurn, BlockProposal } from '../../llm/types';
+import type { QueryResult } from '../../store/types';
 import { themes, type Theme, type ThemeMode } from '../../themes/notebook-theme';
 import { StructuredAnswerText, extractGovernedAnswer, type AgentAnswerEnvelope } from './AgentAnswerCard';
+import { TableOutput } from '../output/TableOutput';
 
 type AiSqlMode = 'notebook' | 'block';
+type DraftRunStatus = 'idle' | 'generating' | 'running' | 'ready' | 'error' | 'fixing';
 
 export interface AiSqlDraftMeta {
   question: string;
@@ -16,6 +20,8 @@ export interface AiSqlDraftMeta {
   tags?: string[];
   answer?: AgentAnswerEnvelope | null;
   blockSource?: string;
+  previewResult?: QueryResult;
+  previewError?: string;
 }
 
 interface AiSqlDraftDialogProps {
@@ -46,14 +52,48 @@ export function AiSqlDraftDialog({
   const [text, setText] = useState('');
   const [error, setError] = useState<string | null>(null);
   const [proposal, setProposal] = useState<BlockProposal | null>(null);
+  const [sqlDraft, setSqlDraft] = useState('');
+  const [sqlEdited, setSqlEdited] = useState(false);
+  const [previewResult, setPreviewResult] = useState<QueryResult | null>(null);
+  const [previewError, setPreviewError] = useState<string | null>(null);
+  const [runStatus, setRunStatus] = useState<DraftRunStatus>('idle');
   const abortRef = useRef<AbortController | null>(null);
   const answer = useMemo(() => extractGovernedAnswer(events), [events]);
-  const sql = extractSqlDraft(answer, proposal, text);
-  const blockMeta = buildBlockDraftMeta(question, answer, proposal, sql, text);
+  const generatedSql = extractSqlDraft(answer, proposal, text);
+  const activeSql = sqlDraft || generatedSql;
+  const blockMeta = buildBlockDraftMeta(question, answer, proposal, activeSql, text);
   const title = blockMeta.title;
   const isBlockMode = mode === 'block';
-  const previewText = isBlockMode ? blockMeta.blockSource : sql;
-  const canCreateBlock = Boolean(onCreateBlock && sql && !running);
+  const previewText = isBlockMode ? blockMeta.blockSource : activeSql;
+  const canCreateBlock = Boolean(onCreateBlock && activeSql && !running);
+
+  useEffect(() => {
+    if (!generatedSql || sqlEdited) return;
+    setSqlDraft(generatedSql);
+  }, [generatedSql, sqlEdited]);
+
+  const runPreviewForSql = async (value: string, status: DraftRunStatus = 'running') => {
+    const trimmed = value.trim();
+    if (!trimmed) {
+      setPreviewResult(null);
+      setPreviewError('No SQL is available to run.');
+      setRunStatus('error');
+      return;
+    }
+    setRunStatus(status);
+    setPreviewResult(null);
+    setPreviewError(null);
+    const result = await api.previewGeneratedSql(trimmed);
+    if (result.ok) {
+      setPreviewResult(result.result);
+      setPreviewError(null);
+      setRunStatus('ready');
+    } else {
+      setPreviewResult(null);
+      setPreviewError(result.error);
+      setRunStatus('error');
+    }
+  };
 
   const generate = async () => {
     const trimmed = question.trim();
@@ -63,10 +103,16 @@ export function AiSqlDraftDialog({
     setText('');
     setError(null);
     setProposal(null);
+    setSqlDraft('');
+    setSqlEdited(false);
+    setPreviewResult(null);
+    setPreviewError(null);
+    setRunStatus('generating');
     const controller = new AbortController();
     abortRef.current = controller;
     const collected: AgentTurn[] = [];
     let output = '';
+    let latestProposal: BlockProposal | null = null;
     try {
       await runAgent(
         {
@@ -81,12 +127,77 @@ export function AiSqlDraftDialog({
             output += turn.text;
             setText(output);
           }
-          if (turn.kind === 'proposal') setProposal(turn.proposal);
+          if (turn.kind === 'proposal') {
+            latestProposal = turn.proposal;
+            setProposal(turn.proposal);
+          }
           if (turn.kind === 'error') setError(turn.message);
         },
       );
+      const finalAnswer = extractGovernedAnswer(collected);
+      const nextSql = extractSqlDraft(finalAnswer, latestProposal, output);
+      if (nextSql) {
+        setSqlDraft(nextSql);
+        setSqlEdited(false);
+        await runPreviewForSql(nextSql);
+      } else {
+        setRunStatus('idle');
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
+      setRunStatus('error');
+    } finally {
+      setRunning(false);
+      abortRef.current = null;
+    }
+  };
+
+  const fixWithAi = async () => {
+    const currentSql = activeSql.trim();
+    const currentError = previewError?.trim() || error?.trim();
+    if (!currentSql || !currentError || running) return;
+    setRunning(true);
+    setRunStatus('fixing');
+    setError(null);
+    const controller = new AbortController();
+    abortRef.current = controller;
+    const collected: AgentTurn[] = [];
+    let output = '';
+    let latestProposal: BlockProposal | null = null;
+    try {
+      await runAgent(
+        {
+          messages: [{ role: 'user', content: buildSqlRepairPrompt(question.trim(), currentSql, currentError, mode) }],
+          upstream: { cellId: `ai-sql-repair:${mode}`, sql: currentSql },
+          signal: controller.signal,
+        },
+        (turn) => {
+          collected.push(turn);
+          setEvents([...collected]);
+          if (turn.kind === 'text') {
+            output += turn.text;
+            setText(output);
+          }
+          if (turn.kind === 'proposal') {
+            latestProposal = turn.proposal;
+            setProposal(turn.proposal);
+          }
+          if (turn.kind === 'error') setError(turn.message);
+        },
+      );
+      const fixedAnswer = extractGovernedAnswer(collected);
+      const fixedSql = extractSqlDraft(fixedAnswer, latestProposal, output);
+      if (!fixedSql) {
+        setPreviewError('AI did not return repaired SQL. Edit the SQL directly and run it again.');
+        setRunStatus('error');
+        return;
+      }
+      setSqlDraft(fixedSql);
+      setSqlEdited(false);
+      await runPreviewForSql(fixedSql);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+      setRunStatus('error');
     } finally {
       setRunning(false);
       abortRef.current = null;
@@ -94,13 +205,13 @@ export function AiSqlDraftDialog({
   };
 
   const insert = () => {
-    if (!sql) return;
-    onInsertSql(sql, blockMeta);
+    if (!activeSql) return;
+    onInsertSql(activeSql, { ...blockMeta, previewResult: previewResult ?? undefined, previewError: previewError ?? undefined });
   };
 
   const createBlock = () => {
-    if (!sql || !onCreateBlock) return;
-    onCreateBlock(sql, blockMeta);
+    if (!activeSql || !onCreateBlock) return;
+    onCreateBlock(activeSql, { ...blockMeta, previewResult: previewResult ?? undefined, previewError: previewError ?? undefined });
   };
 
   return (
@@ -167,7 +278,7 @@ export function AiSqlDraftDialog({
           {events.length > 0 || text || error ? (
             <div style={resultShellStyle(t)}>
               <div style={resultHeadStyle(t)}>
-                <span>{running ? (isBlockMode ? 'Drafting block' : 'Drafting SQL') : previewText ? (isBlockMode ? 'Block draft ready' : 'SQL draft ready') : 'AI response'}</span>
+                <span>{statusLabel(runStatus, isBlockMode, Boolean(previewText))}</span>
                 {answer?.certification && <b>{formatLabel(answer.certification)}</b>}
               </div>
               {error && <div style={errorStyle}>{error}</div>}
@@ -177,7 +288,52 @@ export function AiSqlDraftDialog({
                 <div style={summaryStyle(t)}><StructuredAnswerText text={stripSqlBlock(text)} t={t} compact /></div>
               ) : null}
               {previewText ? (
-                <pre style={sqlPreviewStyle(t)}>{previewText}</pre>
+                <div style={draftPreviewWrapStyle(t)}>
+                  {isBlockMode ? <pre style={blockPreviewStyle(t)}>{blockMeta.blockSource}</pre> : null}
+                  <label style={labelStyle(t)}>
+                    SQL draft
+                    <textarea
+                      value={activeSql}
+                      rows={10}
+                      spellCheck={false}
+                      onChange={(event) => {
+                        setSqlDraft(event.target.value);
+                        setSqlEdited(true);
+                        setPreviewResult(null);
+                        setPreviewError(null);
+                        setRunStatus('idle');
+                      }}
+                      style={sqlEditorStyle(t)}
+                    />
+                  </label>
+                  <div style={draftActionRowStyle}>
+                    <button
+                      type="button"
+                      onClick={() => void runPreviewForSql(activeSql)}
+                      disabled={!activeSql.trim() || running || runStatus === 'running'}
+                      style={draftActionButtonStyle(t, Boolean(activeSql.trim()) && !running && runStatus !== 'running')}
+                    >
+                      {runStatus === 'running' ? 'Running...' : 'Run preview'}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => void fixWithAi()}
+                      disabled={!activeSql.trim() || !previewError || running}
+                      style={draftActionButtonStyle(t, Boolean(activeSql.trim() && previewError && !running))}
+                    >
+                      {runStatus === 'fixing' ? 'Fixing...' : 'Fix with AI'}
+                    </button>
+                    <span style={runStatusStyle(t, runStatus)}>
+                      {runStatusText(runStatus, previewResult, previewError)}
+                    </span>
+                  </div>
+                  {previewError ? <div style={errorStyle}>{previewError}</div> : null}
+                  {previewResult ? (
+                    <div style={previewTableWrapStyle(t)}>
+                      <TableOutput result={previewResult} themeMode={themeMode} />
+                    </div>
+                  ) : null}
+                </div>
               ) : (
                 <div style={emptySqlStyle(t)}>
                   {running ? (isBlockMode ? 'Waiting for the agent to produce a block...' : 'Waiting for the agent to produce SQL...') : 'No SQL was returned. Add more schema context or ask for a specific metric/table grain.'}
@@ -215,7 +371,7 @@ export function AiSqlDraftDialog({
                 <CheckCircle2 size={13} /> Create block
               </button>
             )}
-            <button type="button" onClick={insert} disabled={!sql || running} style={insertButtonStyle(t, Boolean(sql) && !running)}>
+            <button type="button" onClick={insert} disabled={!activeSql || running} style={insertButtonStyle(t, Boolean(activeSql) && !running)}>
               <CheckCircle2 size={13} /> {isBlockMode ? 'Use draft block' : 'Insert SQL cell'}
             </button>
           </div>
@@ -250,6 +406,42 @@ function buildSqlDraftPrompt(question: string, mode: AiSqlMode): string {
     '',
     `User question: ${question}`,
   ].join('\n');
+}
+
+function buildSqlRepairPrompt(question: string, sql: string, error: string, mode: AiSqlMode): string {
+  return [
+    mode === 'block' ? 'Repair the SQL inside this review-required DQL block draft.' : 'Repair this review-required SQL draft.',
+    'Use only read-only SELECT/WITH SQL. Return a short note, then exactly one fenced sql block.',
+    'Do not change the business question unless the error proves the current SQL cannot answer it.',
+    '',
+    `Original question: ${question || '(not provided)'}`,
+    '',
+    'Current SQL:',
+    '```sql',
+    sql,
+    '```',
+    '',
+    `Runtime error: ${error}`,
+  ].join('\n');
+}
+
+function statusLabel(status: DraftRunStatus, isBlockMode: boolean, hasPreviewText: boolean): string {
+  if (status === 'generating') return isBlockMode ? 'Generating block' : 'Generating SQL';
+  if (status === 'running') return 'Running preview';
+  if (status === 'fixing') return 'Fixing SQL';
+  if (status === 'ready') return isBlockMode ? 'Block preview ready' : 'SQL preview ready';
+  if (status === 'error') return 'Needs fix';
+  if (hasPreviewText) return isBlockMode ? 'Block draft ready' : 'SQL draft ready';
+  return 'AI response';
+}
+
+function runStatusText(status: DraftRunStatus, result: QueryResult | null, error: string | null): string {
+  if (status === 'generating') return 'Generating draft...';
+  if (status === 'running') return 'Running against the active connection...';
+  if (status === 'fixing') return 'Repairing with AI...';
+  if (error) return 'Preview failed';
+  if (result) return `${result.rowCount ?? result.rows.length} rows`;
+  return 'Review required';
 }
 
 function buildBlockDraftMeta(
@@ -576,6 +768,92 @@ function resultHeadStyle(t: Theme): React.CSSProperties {
     fontSize: 11,
     fontWeight: 800,
     textTransform: 'uppercase',
+  };
+}
+
+function draftPreviewWrapStyle(t: Theme): React.CSSProperties {
+  return {
+    display: 'flex',
+    flexDirection: 'column',
+    gap: 10,
+    padding: 12,
+    borderTop: `1px solid ${t.headerBorder}`,
+    background: t.cellBg,
+  };
+}
+
+function blockPreviewStyle(t: Theme): React.CSSProperties {
+  return {
+    margin: 0,
+    maxHeight: 220,
+    overflow: 'auto',
+    padding: 10,
+    background: t.editorBg,
+    border: `1px solid ${t.headerBorder}`,
+    borderRadius: 8,
+    color: t.textSecondary,
+    fontFamily: t.fontMono,
+    fontSize: 11.5,
+    lineHeight: 1.45,
+    whiteSpace: 'pre',
+  };
+}
+
+function sqlEditorStyle(t: Theme): React.CSSProperties {
+  return {
+    resize: 'vertical',
+    minHeight: 190,
+    border: `1px solid ${t.cellBorder}`,
+    borderRadius: 8,
+    background: t.editorBg,
+    color: t.textPrimary,
+    fontFamily: t.fontMono,
+    fontSize: 12,
+    lineHeight: 1.5,
+    padding: 10,
+    outline: 'none',
+    whiteSpace: 'pre',
+  };
+}
+
+const draftActionRowStyle: React.CSSProperties = {
+  display: 'flex',
+  alignItems: 'center',
+  gap: 8,
+  flexWrap: 'wrap',
+};
+
+function draftActionButtonStyle(t: Theme, enabled: boolean): React.CSSProperties {
+  return {
+    border: `1px solid ${enabled ? t.accent : t.headerBorder}`,
+    borderRadius: 7,
+    background: enabled ? `${t.accent}14` : t.appBg,
+    color: enabled ? t.accent : t.textMuted,
+    cursor: enabled ? 'pointer' : 'not-allowed',
+    padding: '6px 10px',
+    fontSize: 11,
+    fontFamily: t.font,
+    fontWeight: 800,
+  };
+}
+
+function runStatusStyle(t: Theme, status: DraftRunStatus): React.CSSProperties {
+  return {
+    marginLeft: 'auto',
+    color: status === 'ready' ? '#3fb950' : status === 'error' ? '#ff7b72' : t.textMuted,
+    fontSize: 11,
+    fontFamily: t.fontMono,
+    fontWeight: 700,
+  };
+}
+
+function previewTableWrapStyle(t: Theme): React.CSSProperties {
+  return {
+    maxHeight: 260,
+    overflow: 'auto',
+    border: `1px solid ${t.headerBorder}`,
+    borderRadius: 8,
+    background: t.appBg,
   };
 }
 

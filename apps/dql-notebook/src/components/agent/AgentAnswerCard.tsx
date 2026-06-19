@@ -115,6 +115,7 @@ export interface AgentAnswerEnvelope {
     blockName?: string;
     blockPath?: string;
   };
+  executionError?: string;
   citations?: Array<{ kind?: string; name?: string; provenance?: string }>;
   evidence?: AgentEvidence;
   analysisPlan?: AgentAnalysisPlan;
@@ -209,8 +210,10 @@ export function AgentAnswerCard({
   const hasChart = Boolean(result && resolveChartType(result, chartConfig) !== 'table');
   const analysisPlan = answer.analysisPlan ?? answer.evidence?.analysisPlan;
   const sql = showSql ? answer.sql ?? answer.result?.sql ?? answer.proposedSql ?? analysisPlan?.sql : undefined;
+  const executionError = answer.executionError
+    ?? (answer.evidence?.execution?.status === 'failed' ? answer.evidence.execution.message : undefined);
   const blockPath = answer.result?.blockPath ?? answer.block?.sourcePath;
-  const hasSqlPanel = Boolean(sql || (showSql && blockPath));
+  const hasSqlPanel = Boolean(sql || executionError || (showSql && blockPath));
   const hasEvidence = Boolean(answer.evidence);
   const [tab, setTab] = useState<AnswerTab>('answer');
   const [addMenuOpen, setAddMenuOpen] = useState(false);
@@ -291,6 +294,14 @@ export function AgentAnswerCard({
         const keepDaily = Boolean(sql && window.confirm('Keep this AI result refreshed daily?'));
         const baseTitle = blockName ?? (summary.slice(0, 60) || 'AI result');
         const modesToAdd = selectedModes.length > 0 ? selectedModes : ['data'];
+        let resultForPin = result ?? undefined;
+        if (!resultForPin && sql) {
+          const preview = await api.previewGeneratedSql(sql);
+          if (!preview.ok) {
+            throw new Error(`SQL preview failed: ${preview.error}`);
+          }
+          resultForPin = preview.result;
+        }
         for (const tileMode of modesToAdd) {
           const tileChartConfig = tileMode === 'data'
             ? ({ ...(chartConfig ?? {}), chart: 'table', title: `${baseTitle} data` } as Record<string, unknown>)
@@ -303,9 +314,10 @@ export function AgentAnswerCard({
             sql,
             sourceTier: answer.sourceTier,
             certification: answer.certification === 'certified' ? 'certified' : 'ai_generated',
+            reviewStatus: 'needs_review',
             refreshCadence: keepDaily ? 'daily' : 'none',
             chartConfig: tileChartConfig,
-            result: result ?? undefined,
+            result: resultForPin,
             citations: answer.citations,
             analysisPlan,
             evidence: answer.evidence,
@@ -376,7 +388,7 @@ export function AgentAnswerCard({
     }
     if (targetTab === 'lineage') return <LineagePanel evidence={answer.evidence} t={t} />;
     if (targetTab === 'context') return <BusinessContextPanel evidence={answer.evidence} t={t} />;
-    if (targetTab === 'sql' && showSql && hasSqlPanel) return <SqlPanel sql={sql} blockPath={blockPath} t={t} />;
+    if (targetTab === 'sql' && showSql && hasSqlPanel) return <SqlPanel sql={sql} blockPath={blockPath} executionError={executionError} t={t} />;
     if (targetTab === 'review') return <ReviewPanel answer={answer} t={t} />;
     return null;
   };
@@ -1211,6 +1223,7 @@ function ReviewPanel({ answer, t }: { answer: AgentAnswerEnvelope; t: Theme }) {
         {evidence?.execution?.message && (
           <KeyValue label={`Execution ${evidence.execution.status ?? ''}`.trim()} value={evidence.execution.message} t={t} />
         )}
+        {answer.executionError && <KeyValue label="Execution Error" value={answer.executionError} t={t} />}
         {answer.kind !== 'certified' && (
           <KeyValue label="Promotion Path" value="Create draft block, edit SQL, attach tests, then certify after analyst approval." t={t} />
         )}
@@ -1281,12 +1294,26 @@ function AssetList({ title, assets, t }: { title: string; assets: EvidenceAsset[
   );
 }
 
-function SqlPanel({ sql, blockPath, t }: { sql?: string; blockPath?: string; t: Theme }) {
+function SqlPanel({ sql, blockPath, executionError, t }: { sql?: string; blockPath?: string; executionError?: string; t: Theme }) {
   return (
     <div style={{ padding: 12, display: 'flex', flexDirection: 'column', gap: 8 }}>
       {blockPath && (
         <div style={{ fontSize: 12, color: t.textSecondary }}>
           Source block: <span style={{ fontFamily: t.fontMono, color: t.textPrimary }}>{blockPath}</span>
+        </div>
+      )}
+      {executionError && (
+        <div style={{
+          padding: 10,
+          border: '1px solid rgba(248, 81, 73, 0.35)',
+          borderRadius: 6,
+          background: 'rgba(248, 81, 73, 0.10)',
+          color: '#ff7b72',
+          fontSize: 12,
+          lineHeight: 1.45,
+          whiteSpace: 'pre-wrap',
+        }}>
+          {executionError}
         </div>
       )}
       {sql ? (

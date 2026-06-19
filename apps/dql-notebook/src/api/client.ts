@@ -953,6 +953,19 @@ export const api = {
     return normalizeQueryResultPayload(raw);
   },
 
+  async previewGeneratedSql(sql: string, signal?: AbortSignal): Promise<{ ok: true; result: QueryResult } | { ok: false; error: string }> {
+    try {
+      const raw = await request<any>('/api/ai/sql-draft/preview', {
+        method: 'POST',
+        body: JSON.stringify({ sql }),
+        signal,
+      });
+      return { ok: true, result: normalizeQueryResultPayload(raw.result) };
+    } catch (e) {
+      return { ok: false, error: e instanceof Error ? e.message : String(e) };
+    }
+  },
+
   async executeNotebookCell(cell: Cell, signal?: AbortSignal): Promise<NotebookCellExecutionResponse> {
     const raw = await request<any>('/api/notebook/execute', {
       method: 'POST',
@@ -1924,6 +1937,7 @@ export const api = {
     sql?: string;
     sourceTier?: string;
     certification?: 'certified' | 'ai_generated';
+    reviewStatus?: 'needs_review' | 'draft_created' | 'certified' | 'rejected';
     refreshCadence?: 'none' | 'daily';
     chartConfig?: Record<string, unknown>;
     result?: QueryResult;

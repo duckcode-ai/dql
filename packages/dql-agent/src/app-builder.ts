@@ -1124,7 +1124,7 @@ function buildLayoutItems(tiles: AppPlanTile[]): DashboardGridItem[] {
   let x = 0;
   let y = 0;
   let rowH = 0;
-  const orderedTiles = tiles.filter(isDashboardTile).sort((a, b) => {
+  const orderedTiles = [...tiles].sort((a, b) => {
     const priorityA = a.display?.layoutPriority ?? 50;
     const priorityB = b.display?.layoutPriority ?? 50;
     return priorityA - priorityB;
@@ -1159,12 +1159,37 @@ function buildLayoutItems(tiles: AppPlanTile[]): DashboardGridItem[] {
           }),
         },
       },
-      block: { blockId: tile.blockId },
     };
+    if (isDashboardTile(tile)) {
+      item.block = { blockId: tile.blockId };
+    } else {
+      item.text = { markdown: markdownForGeneratedPlanTile(tile) };
+    }
     x += size.w;
     rowH = Math.max(rowH, size.h);
     return item;
   });
+}
+
+function markdownForGeneratedPlanTile(tile: AppPlanTile): string {
+  const reviewTasks = tile.reviewTasks?.length
+    ? tile.reviewTasks.map((task) => `- ${task}`).join("\n")
+    : "- Review this generated section before stakeholder use.";
+  const caveats = tile.caveats?.length
+    ? `\n\nCaveats:\n${tile.caveats.map((caveat) => `- ${caveat}`).join("\n")}`
+    : "";
+  return [
+    `### ${tile.title}`,
+    "",
+    tile.description ?? tile.rationale ?? "AI-generated app section.",
+    "",
+    `Trust: ${tile.certification === "certified" ? "certified" : "AI generated / needs review"}`,
+    `Review status: ${tile.reviewStatus}`,
+    "",
+    "Next actions:",
+    reviewTasks,
+    caveats,
+  ].filter(Boolean).join("\n");
 }
 
 function isDashboardTile(tile: AppPlanTile): tile is AppPlanTile & {

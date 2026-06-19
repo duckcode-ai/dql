@@ -302,10 +302,8 @@ describe("generateAppFromPlan", () => {
       expect(parseDashboardDocument(dashboardText).errors).toEqual([]);
 
       const dashboard = JSON.parse(dashboardText);
-      expect(dashboard.layout.items).toHaveLength(
-        plan.pages[0].tiles.filter((tile) => tile.kind === "certified_block").length,
-      );
-      expect(dashboard.layout.items.some((item: any) => item.text)).toBe(false);
+      expect(dashboard.layout.items).toHaveLength(plan.pages[0].tiles.length);
+      expect(dashboard.layout.items.some((item: any) => item.text)).toBe(true);
       expect(dashboard.layout.items).toEqual(
         expect.arrayContaining([
           expect.objectContaining({
@@ -319,12 +317,28 @@ describe("generateAppFromPlan", () => {
               }),
             }),
           }),
+          expect.objectContaining({
+            text: expect.objectContaining({
+              markdown: expect.stringContaining("AI generated / needs review"),
+            }),
+            viz: expect.objectContaining({
+              options: expect.objectContaining({
+                dqlGenUi: expect.objectContaining({
+                  trustState: "draft_ready",
+                }),
+              }),
+            }),
+          }),
         ]),
       );
-      expect(dashboard.layout.items[0]).toMatchObject({
-        i: "revenue-total",
-        block: { blockId: "revenue_total" },
-      });
+      expect(dashboard.layout.items).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            i: "revenue-total",
+            block: { blockId: "revenue_total" },
+          }),
+        ]),
+      );
       const readme = readFileSync(
         join(projectRoot, generated.paths[2]),
         "utf-8",

@@ -626,7 +626,10 @@ function DashboardTile({
   const genUi = getDqlGenUi(item);
   const generatedComponent = genUi?.component;
   const generatedTitle = genUi?.insightTitle || item.title || blockRef;
-  const generatedTrust = genUi?.trustState ?? (tile?.certificationStatus === 'certified' ? 'certified' : undefined);
+  const aiPinTrust = tile?.tileType === 'aiPin'
+    ? tile.aiPin?.certification === 'certified' ? 'certified' : 'review_required'
+    : undefined;
+  const generatedTrust = genUi?.trustState ?? aiPinTrust ?? (tile?.certificationStatus === 'certified' ? 'certified' : undefined);
   const isGeneratedUi = Boolean(genUi);
   const isCompactMetric = item.h <= 2 && (vizType === 'single_value' || vizType === 'kpi' || vizType === 'gauge');
   const [hovered, setHovered] = useState(false);
@@ -864,7 +867,12 @@ function DashboardTile({
           <div style={{ fontSize: isCompactMetric ? 12 : 13, fontWeight: 720, lineHeight: 1.25, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
             {item.title ?? blockRef}
           </div>
-          {!isCompactMetric ? (
+          {aiPinTrust ? (
+            <div style={{ marginTop: 5, display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
+              <TrustPill trust={aiPinTrust} />
+              <span style={generatedMetaPillStyle}>AI generated</span>
+            </div>
+          ) : !isCompactMetric ? (
             <div style={{ marginTop: 5, fontSize: 10.5, opacity: 0.58, fontFamily: 'var(--font-mono, monospace)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{blockRef}</div>
           ) : null}
         </div>

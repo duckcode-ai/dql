@@ -105,11 +105,20 @@ export function AddCellBar({ afterId }: AddCellBarProps) {
     closeAll();
   };
 
-  const insertAiSqlCell = (sql: string, meta: { question: string; title?: string }) => {
+  const insertAiSqlCell = (sql: string, meta: AiSqlDraftMeta) => {
     const trimmed = sql.trim();
     if (!trimmed) return;
     const cell = makeCell('sql', trimmed);
     cell.name = uniqueAiSqlCellName(meta.title || meta.question, state.cells);
+    if ('previewResult' in meta && meta.previewResult) {
+      cell.result = meta.previewResult;
+      cell.status = 'success';
+      cell.executionCount = 1;
+    } else if ('previewError' in meta && meta.previewError) {
+      cell.error = meta.previewError;
+      cell.status = 'error';
+      cell.executionCount = 1;
+    }
     dispatch({ type: 'ADD_CELL', cell, afterId });
     setAiSqlOpen(false);
     closeAll();
@@ -120,6 +129,15 @@ export function AddCellBar({ afterId }: AddCellBarProps) {
     if (!trimmed) return;
     const cell = makeCell('sql', trimmed);
     cell.name = uniqueAiSqlCellName(meta.title || meta.question, state.cells);
+    if (meta.previewResult) {
+      cell.result = meta.previewResult;
+      cell.status = 'success';
+      cell.executionCount = 1;
+    } else if (meta.previewError) {
+      cell.error = meta.previewError;
+      cell.status = 'error';
+      cell.executionCount = 1;
+    }
     setAiBlockDraft({ cell, meta });
     setAiSqlOpen(false);
     closeAll();

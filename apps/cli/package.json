@@ -1,6 +1,6 @@
 {
   "name": "@duckcodeailabs/dql-cli",
-  "version": "1.6.17",
+  "version": "1.6.18",
   "description": "Public CLI for parsing, formatting, testing, and certifying DQL blocks",
   "license": "Apache-2.0",
   "type": "module",
