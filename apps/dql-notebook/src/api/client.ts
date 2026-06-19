@@ -24,7 +24,10 @@ import type {
   BlockStudioImportSession,
   BlockStudioImportSessionSummary,
   BlockStudioImportCandidate,
+  DqlGenerationSession,
+  DqlGenerationCandidate,
   BlockStudioDbtStatus,
+  SemanticLayerDiagnostics,
   AppSummary,
   ActivePersona,
 } from '../store/types';
@@ -789,9 +792,9 @@ export const api = {
     return request<{ sessions: BlockStudioImportSessionSummary[] }>('/api/block-studio/imports');
   },
 
-  async createBlockStudioImport(payload: {
-    path?: string;
-    sourceKind?: 'raw-sql' | BlockStudioImportCandidate['sourceKind'];
+    async createBlockStudioImport(payload: {
+      path?: string;
+      sourceKind?: 'raw-sql' | BlockStudioImportCandidate['sourceKind'];
     inputMode?: 'path' | 'paste' | 'upload';
     sources?: Array<{ path: string; content: string }>;
     domain?: string;
@@ -801,8 +804,28 @@ export const api = {
     return request<BlockStudioImportSession>('/api/block-studio/imports', {
       method: 'POST',
       body: JSON.stringify(payload),
-    });
-  },
+      });
+    },
+
+    async createDqlGenerationSession(payload: {
+      path?: string;
+      sourceKind?: 'raw-sql' | BlockStudioImportCandidate['sourceKind'];
+      inputMode?: 'path' | 'paste' | 'upload';
+      sources?: Array<{ path: string; content: string }>;
+      domain?: string;
+      owner?: string;
+      tags?: string[];
+      provider?: string;
+    }): Promise<DqlGenerationSession> {
+      return request<DqlGenerationSession>('/api/block-studio/ai-imports', {
+        method: 'POST',
+        body: JSON.stringify(payload),
+      });
+    },
+
+    async getDqlGenerationSession(importId: string): Promise<DqlGenerationSession> {
+      return request<DqlGenerationSession>(`/api/block-studio/ai-imports/${encodeURIComponent(importId)}`);
+    },
 
   async getBlockStudioImport(importId: string): Promise<BlockStudioImportSession> {
     return request<BlockStudioImportSession>(`/api/block-studio/imports/${encodeURIComponent(importId)}`);
@@ -819,16 +842,41 @@ export const api = {
     return request<{ ok: boolean; removed: number }>('/api/block-studio/imports', { method: 'DELETE' });
   },
 
-  async updateBlockStudioImportCandidate(
-    importId: string,
-    candidateId: string,
-    patch: Partial<Pick<BlockStudioImportCandidate, 'name' | 'domain' | 'description' | 'owner' | 'tags' | 'sql' | 'reviewStatus'>>,
-  ): Promise<BlockStudioImportCandidate> {
+    async updateBlockStudioImportCandidate(
+      importId: string,
+      candidateId: string,
+      patch: Partial<Pick<BlockStudioImportCandidate, 'name' | 'domain' | 'description' | 'owner' | 'tags' | 'sql' | 'reviewStatus' | 'llmContext'>>,
+    ): Promise<BlockStudioImportCandidate> {
     return request<BlockStudioImportCandidate>(
       `/api/block-studio/imports/${encodeURIComponent(importId)}/candidates/${encodeURIComponent(candidateId)}`,
       { method: 'PATCH', body: JSON.stringify(patch) },
     );
-  },
+    },
+
+    async updateDqlGenerationCandidate(
+      importId: string,
+      candidateId: string,
+      patch: Partial<Pick<DqlGenerationCandidate, 'name' | 'domain' | 'description' | 'owner' | 'tags' | 'sql' | 'llmContext'>>,
+    ): Promise<DqlGenerationCandidate> {
+      return request<DqlGenerationCandidate>(
+        `/api/block-studio/ai-imports/${encodeURIComponent(importId)}/candidates/${encodeURIComponent(candidateId)}`,
+        { method: 'PATCH', body: JSON.stringify(patch) },
+      );
+    },
+
+    async previewDqlGenerationCandidate(importId: string, candidateId: string): Promise<DqlGenerationCandidate> {
+      return request<DqlGenerationCandidate>(
+        `/api/block-studio/ai-imports/${encodeURIComponent(importId)}/candidates/${encodeURIComponent(candidateId)}/preview`,
+        { method: 'POST' },
+      );
+    },
+
+    async certifyDqlGenerationCandidate(importId: string, candidateId: string): Promise<{ candidate: DqlGenerationCandidate; block: BlockStudioOpenPayload }> {
+      return request<{ candidate: DqlGenerationCandidate; block: BlockStudioOpenPayload }>(
+        `/api/block-studio/ai-imports/${encodeURIComponent(importId)}/candidates/${encodeURIComponent(candidateId)}/certify`,
+        { method: 'POST' },
+      );
+    },
 
   async runBlockStudioImportCandidate(importId: string, candidateId: string): Promise<BlockStudioImportCandidate> {
     return request<BlockStudioImportCandidate>(
@@ -856,16 +904,29 @@ export const api = {
     );
   },
 
-  async assistBlockStudioImportCandidate(importId: string, candidateId: string, action: string): Promise<BlockStudioImportCandidate> {
+    async assistBlockStudioImportCandidate(importId: string, candidateId: string, action: string): Promise<BlockStudioImportCandidate> {
     return request<BlockStudioImportCandidate>(
       `/api/block-studio/imports/${encodeURIComponent(importId)}/candidates/${encodeURIComponent(candidateId)}/ai-assist`,
       { method: 'POST', body: JSON.stringify({ action }) },
     );
-  },
+    },
+
+    async getSemanticLayerDiagnostics(): Promise<SemanticLayerDiagnostics> {
+      return request<SemanticLayerDiagnostics>('/api/semantic-layer/diagnostics');
+    },
+
+    async reloadSemanticLayer(): Promise<{ ok: boolean; available: boolean; provider: string | null; errors: string[]; lastSyncTime?: string | null; dbt: BlockStudioDbtStatus }> {
+      return request('/api/semantic-layer/reload', { method: 'POST' });
+    },
 
   async certifyBlockStudio(payload: { source: string; path?: string | null }): Promise<{
     ok: boolean;
     status?: string;
+    path?: string | null;
+    source?: string;
+    metadata?: BlockStudioOpenPayload['metadata'];
+    companionPath?: string | null;
+    validation?: BlockStudioValidation;
     certification: {
       certified: boolean;
       errors: Array<{ rule: string; message: string }>;

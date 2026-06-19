@@ -46,6 +46,23 @@ export interface BlockStudioCertificationChecklist {
   checkedAt?: string;
 }
 
+export interface DqlGenerationEvidence {
+  kind: 'dql_block' | 'semantic_metric' | 'semantic_model' | 'dbt_model' | 'warehouse_table' | 'metadata' | 'lineage';
+  name: string;
+  description?: string;
+  objectKey?: string;
+  source?: string;
+  reason?: string;
+  confidence?: number;
+}
+
+export interface BlockDraftSaveState {
+  status: 'pending' | 'saved' | 'error';
+  path?: string;
+  savedAt?: string;
+  error?: string;
+}
+
 export interface BlockStudioImportCandidate {
   id: string;
   sourceKind: BlockStudioImportSourceKind;
@@ -68,7 +85,20 @@ export interface BlockStudioImportCandidate {
   certificationChecklist?: BlockStudioCertificationChecklist;
   reviewStatus: BlockStudioImportReviewStatus;
   savedPath?: string;
+  generationMode?: 'ai' | 'deterministic';
+  generationProvider?: string;
+  llmContext?: string;
+  evidence?: DqlGenerationEvidence[];
+  draftSave?: BlockDraftSaveState;
 }
+
+export type DqlGenerationCandidate = BlockStudioImportCandidate & {
+  generationMode: 'ai' | 'deterministic';
+  generationProvider: string;
+  llmContext: string;
+  evidence: DqlGenerationEvidence[];
+  draftSave: BlockDraftSaveState;
+};
 
 export interface BlockStudioImportManifest {
   id: string;
@@ -88,6 +118,18 @@ export interface BlockStudioImportManifest {
 
 export interface BlockStudioImportSession extends BlockStudioImportManifest {
   candidates: BlockStudioImportCandidate[];
+}
+
+export interface DqlGenerationSession extends Omit<BlockStudioImportSession, 'candidates'> {
+  mode: 'ai-import';
+  generation: {
+    provider: string;
+    aiEnabled: boolean;
+    contextObjectCount: number;
+    createdDrafts: number;
+    warnings: string[];
+  };
+  candidates: DqlGenerationCandidate[];
 }
 
 export interface BlockStudioImportSessionSummary {
@@ -274,7 +316,7 @@ export function updateBlockStudioImportCandidate(
   projectRoot: string,
   importId: string,
   candidateId: string,
-  patch: Partial<Pick<BlockStudioImportCandidate, 'name' | 'domain' | 'description' | 'owner' | 'tags' | 'sql' | 'reviewStatus'>>,
+  patch: Partial<Pick<BlockStudioImportCandidate, 'name' | 'domain' | 'description' | 'owner' | 'tags' | 'sql' | 'reviewStatus' | 'llmContext' | 'evidence' | 'draftSave' | 'generationMode' | 'generationProvider' | 'savedPath' | 'conversionNotes'>>,
 ): BlockStudioImportCandidate {
   const candidate = readBlockStudioImportCandidate(projectRoot, importId, candidateId);
   const next: BlockStudioImportCandidate = { ...candidate };
@@ -285,7 +327,14 @@ export function updateBlockStudioImportCandidate(
   if (patch.tags !== undefined) next.tags = normalizeTags(patch.tags);
   if (patch.sql !== undefined) next.sql = patch.sql;
   if (patch.reviewStatus !== undefined) next.reviewStatus = patch.reviewStatus;
-  if (patch.name || patch.domain || patch.description || patch.owner || patch.tags || patch.sql) {
+  if (patch.llmContext !== undefined) next.llmContext = patch.llmContext;
+  if (patch.evidence !== undefined) next.evidence = patch.evidence;
+  if (patch.draftSave !== undefined) next.draftSave = patch.draftSave;
+  if (patch.generationMode !== undefined) next.generationMode = patch.generationMode;
+  if (patch.generationProvider !== undefined) next.generationProvider = patch.generationProvider;
+  if (patch.savedPath !== undefined) next.savedPath = patch.savedPath;
+  if (patch.conversionNotes !== undefined) next.conversionNotes = patch.conversionNotes;
+  if (patch.name || patch.domain || patch.description || patch.owner || patch.tags || patch.sql || patch.llmContext) {
     next.dqlSource = candidateToDqlSource(next);
     next.lineage = {
       ...next.lineage,
@@ -300,9 +349,10 @@ export function updateBlockStudioImportCandidate(
   return next;
 }
 
-export function candidateToDqlSource(candidate: Pick<BlockStudioImportCandidate, 'name' | 'domain' | 'description' | 'owner' | 'tags' | 'sql'>): string {
+export function candidateToDqlSource(candidate: Pick<BlockStudioImportCandidate, 'name' | 'domain' | 'description' | 'owner' | 'tags' | 'sql' | 'llmContext'>): string {
   const tags = normalizeTags(candidate.tags).map((tag) => dqlString(tag)).join(', ');
   const sql = candidate.sql.trim().replace(/"""/g, '\\"\\"\\"');
+  const llmContext = candidate.llmContext?.trim();
   return `block ${dqlString(candidate.name)} {
     status = "draft"
     domain = ${dqlString(sanitizeDomain(candidate.domain))}
@@ -310,6 +360,7 @@ export function candidateToDqlSource(candidate: Pick<BlockStudioImportCandidate,
     description = ${dqlString(candidate.description)}
     tags = [${tags}]
     owner = ${dqlString(candidate.owner)}
+${llmContext ? `    llmContext = ${dqlString(llmContext)}\n` : ''}
 
     query = """
 ${sql}
@@ -357,11 +408,12 @@ function buildSqlCandidate(options: {
   const statement = options.statement;
   const sourcePath = displayPath(options.projectRoot, statement.sourcePath);
   const metadata = extractStatementMetadata(statement.sql);
-  const baseName = metadata.name || basename(statement.sourcePath, extname(statement.sourcePath));
+  const sourceTables = extractSourceTables(statement.sql);
+  const inferred = metadata.name ? null : inferStatementBusinessMetadata(statement.sql, sourcePath, sourceTables);
+  const baseName = metadata.name || inferred?.name || basename(statement.sourcePath, extname(statement.sourcePath));
   const name = statement.totalStatements > 1 && !metadata.name
     ? `${baseName} ${statement.statementIndex}`
     : baseName;
-  const sourceTables = extractSourceTables(statement.sql);
   const parameters = extractSqlParameters(statement.sql);
   const warnings = [
     ...(parameters.length > 0 ? [`Contains parameters: ${parameters.join(', ')}`] : []),
@@ -381,9 +433,9 @@ function buildSqlCandidate(options: {
     sourcePath,
     name: titleizeName(name),
     domain: metadata.domain ? sanitizeDomain(metadata.domain) : options.defaults.domain,
-    description: metadata.description || `Imported from ${sourcePath}`,
+    description: metadata.description || inferred?.description || `Imported from ${sourcePath}`,
     owner: options.defaults.owner,
-    tags: normalizeTags([...options.defaults.tags, ...metadata.tags]),
+    tags: normalizeTags([...options.defaults.tags, ...metadata.tags, ...(inferred?.tags ?? [])]),
     sql: statement.sql.trim(),
     dqlSource: '',
     validation: null,
@@ -557,9 +609,152 @@ function extractStatementMetadata(sql: string): { name: string; description: str
   return { name, description: firstComment, domain, tags };
 }
 
+function inferStatementBusinessMetadata(sql: string, sourcePath: string, sourceTables: string[]): { name: string; description: string; tags: string[] } {
+  const expressions = extractSelectExpressions(sql);
+  const aggregateAliases = expressions.filter(isAggregateExpression).map(extractExpressionAlias).filter(Boolean);
+  const dimensionAliases = expressions.filter((expression) => !isAggregateExpression(expression)).map(extractExpressionAlias).filter(Boolean);
+  const orderByAliases = extractOrderByAliases(sql);
+  const metric = aggregateAliases[0] || orderByAliases.find((alias) => /total|sum|count|avg|score|point|revenue|amount|sales|games?/i.test(alias)) || aggregateAliases[0] || '';
+  const dimension = dimensionAliases.find((alias) => !/^row_?number$/i.test(alias)) || '';
+  const years = extractYearFilters(sql);
+  const tableLabel = sourceTables[0] || sourcePath;
+  const tableEntity = businessEntityFromIdentifier(tableLabel.split('.').pop() || tableLabel);
+  const metricLabel = metric ? titleizeName(metric) : '';
+  const pluralDimension = dimension ? pluralizeBusinessEntity(businessEntityFromIdentifier(dimension)) : pluralizeBusinessEntity(tableEntity);
+  const yearLabel = years.length === 1 ? years[0] : years.length > 1 ? years.join(' ') : '';
+  const yearClause = years.length === 1 ? ` for ${years[0]}` : years.length > 1 ? ` for ${years.join(' and ')}` : '';
+
+  let name = '';
+  if (metricLabel && dimension) {
+    name = `Top ${pluralDimension} By ${metricLabel}${yearLabel ? ` ${yearLabel}` : ''}`;
+  } else if (metricLabel) {
+    name = `${metricLabel}${yearLabel ? ` ${yearLabel}` : ''}`;
+  } else if (dimension) {
+    name = `${pluralDimension} Detail${yearLabel ? ` ${yearLabel}` : ''}`;
+  }
+
+  const selectedMeasures = aggregateAliases.map(titleizeName).filter((label) => label && label !== metricLabel);
+  let description = '';
+  if (metricLabel && dimension) {
+    description = `Ranks ${pluralDimension.toLowerCase()} by ${metricLabel.toLowerCase()}${yearClause} using ${sourceTables.join(', ') || sourcePath}.`;
+  } else if (metricLabel) {
+    description = `Calculates ${metricLabel.toLowerCase()}${yearClause} using ${sourceTables.join(', ') || sourcePath}.`;
+  } else if (dimension) {
+    description = `Lists ${pluralDimension.toLowerCase()}${yearClause} from ${sourceTables.join(', ') || sourcePath}.`;
+  }
+  if (description && selectedMeasures.length > 0) {
+    description = `${description.replace(/\.$/, '')}, including ${selectedMeasures.map((item) => item.toLowerCase()).join(', ')}.`;
+  }
+
+  const tags = [
+    ...sourceTables.flatMap((table) => table.split('.').slice(-2).map(businessToken)),
+    metric,
+    dimension,
+    ...years,
+  ].flatMap((item) => item.split(/[_\s.-]+/)).map(businessToken).filter(Boolean);
+
+  return {
+    name: name || '',
+    description,
+    tags,
+  };
+}
+
+function extractSelectExpressions(sql: string): string[] {
+  const cleaned = stripSqlComments(sql);
+  const match = cleaned.match(/\bselect\b([\s\S]+?)\bfrom\b/i);
+  if (!match) return [];
+  return splitTopLevelCommas(match[1])
+    .map((expression) => expression.trim())
+    .filter((expression) => expression && expression !== '*');
+}
+
+function splitTopLevelCommas(value: string): string[] {
+  const parts: string[] = [];
+  let start = 0;
+  let depth = 0;
+  let single = false;
+  let double = false;
+  for (let i = 0; i < value.length; i += 1) {
+    const char = value[i];
+    if (!double && char === "'" && value[i - 1] !== '\\') single = !single;
+    else if (!single && char === '"' && value[i - 1] !== '\\') double = !double;
+    else if (!single && !double && char === '(') depth += 1;
+    else if (!single && !double && char === ')' && depth > 0) depth -= 1;
+    else if (!single && !double && depth === 0 && char === ',') {
+      parts.push(value.slice(start, i));
+      start = i + 1;
+    }
+  }
+  parts.push(value.slice(start));
+  return parts;
+}
+
+function isAggregateExpression(expression: string): boolean {
+  return /\b(sum|count|avg|min|max|median|percentile_cont|percentile_disc)\s*\(/i.test(expression);
+}
+
+function extractExpressionAlias(expression: string): string {
+  const asMatch = expression.match(/\bas\s+[`"[]?([A-Za-z_][A-Za-z0-9_$]*)[`"\]]?\s*$/i);
+  if (asMatch) return asMatch[1];
+  const trailing = expression.match(/\s+[`"[]?([A-Za-z_][A-Za-z0-9_$]*)[`"\]]?\s*$/);
+  if (trailing && !/[).]$/.test(trailing[1])) return trailing[1];
+  const simple = expression.match(/(?:^|\.)[`"[]?([A-Za-z_][A-Za-z0-9_$]*)[`"\]]?\s*$/);
+  return simple?.[1] ?? '';
+}
+
+function extractOrderByAliases(sql: string): string[] {
+  const cleaned = stripSqlComments(sql);
+  const match = cleaned.match(/\border\s+by\b([\s\S]+?)(?:\blimit\b|\bfetch\b|\boffset\b|$)/i);
+  if (!match) return [];
+  return splitTopLevelCommas(match[1])
+    .map((item) => item.replace(/\b(asc|desc|nulls\s+first|nulls\s+last)\b/gi, '').trim())
+    .map(extractExpressionAlias)
+    .filter(Boolean);
+}
+
+function extractYearFilters(sql: string): string[] {
+  const years = new Set<string>();
+  const cleaned = stripSqlComments(sql);
+  let match: RegExpExecArray | null;
+  const extractYear = /extract\s*\(\s*year\s+from\s+[^)]+\)\s*(?:=\s*([12][0-9]{3})|in\s*\(([^)]*)\))/gi;
+  while ((match = extractYear.exec(cleaned))) {
+    const raw = match[1] || match[2] || '';
+    for (const year of raw.match(/[12][0-9]{3}/g) ?? []) years.add(year);
+  }
+  const namedYear = /\b(?:year|season)\b\s*(?:=|in\s*\()\s*([^)\s]+(?:\s*,\s*[^)\s]+)*)/gi;
+  while ((match = namedYear.exec(cleaned))) {
+    for (const year of match[1].match(/[12][0-9]{3}/g) ?? []) years.add(year);
+  }
+  return Array.from(years).sort();
+}
+
+function businessEntityFromIdentifier(identifier: string): string {
+  const clean = identifier
+    .replace(/^(dim|fact|fct|stg|src|int)_/i, '')
+    .replace(/_(id|key|name|code)$/i, '')
+    .replace(/s$/i, '');
+  return titleizeName(clean) || 'Records';
+}
+
+function pluralizeBusinessEntity(entity: string): string {
+  if (/s$/i.test(entity)) return entity;
+  if (/y$/i.test(entity)) return `${entity.slice(0, -1)}ies`;
+  return `${entity}s`;
+}
+
+function businessToken(value: string): string {
+  return value
+    .trim()
+    .toLowerCase()
+    .replace(/^(dim|fact|fct|stg|src|int)_/, '')
+    .replace(/[^a-z0-9_-]+/g, '-')
+    .replace(/^-+|-+$/g, '');
+}
+
 function extractSourceTables(sql: string): string[] {
   const tables = new Set<string>();
-  const cleaned = stripSqlComments(sql);
+  const cleaned = stripSqlComments(sql).replace(/extract\s*\(\s*\w+\s+from\s+[^)]+\)/gi, 'EXTRACT_VALUE');
   const cteNames = extractCteNames(cleaned);
   const regex = /\b(?:from|join|update|into)\s+([`"[]?[A-Za-z0-9_./:-]+(?:\.[A-Za-z0-9_./:-]+)*[`"\]]?)/gi;
   let match: RegExpExecArray | null;

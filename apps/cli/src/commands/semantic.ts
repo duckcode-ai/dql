@@ -16,7 +16,7 @@ import {
 } from '@duckcodeailabs/dql-core';
 import { QueryExecutor } from '@duckcodeailabs/dql-connectors';
 import type { CLIFlags } from '../args.js';
-import { findProjectRoot, loadProjectConfig } from '../local-runtime.js';
+import { findProjectRoot, loadProjectConfig, resolveProjectSemanticConfig } from '../local-runtime.js';
 import { loadSemanticImportManifest, performSemanticImport, syncSemanticImport } from '../semantic-import.js';
 
 export async function runSemantic(
@@ -38,7 +38,7 @@ export async function runSemantic(
   }
 
   const config = loadProjectConfig(projectRoot);
-  const semanticConfig = config.semanticLayer;
+  const semanticConfig = resolveProjectSemanticConfig(config, projectRoot);
 
   switch (subcommand) {
     case 'list':

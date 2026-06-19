@@ -115,6 +115,10 @@ import {
   writeBlockStudioImportSession,
   writeBlockStudioImportCandidate,
   type BlockStudioImportCandidate,
+  type DqlGenerationCandidate,
+  type DqlGenerationEvidence,
+  type DqlGenerationSession,
+  type BlockDraftSaveState,
 } from './block-studio-import.js';
 import {
   MetricFlowUnavailableError,
@@ -140,6 +144,37 @@ export interface ProjectConfig {
     theme?: string;
     open?: boolean;
   };
+}
+
+export function resolveProjectSemanticConfig(
+  projectConfig: ProjectConfig,
+  projectRoot: string,
+): SemanticLayerProviderConfig | undefined {
+  const configured = projectConfig.semanticLayer;
+  const dbtProjectDir = projectConfig.dbt?.projectDir;
+  if (
+    dbtProjectDir
+    && (!configured || configured.provider === 'dql')
+    && hasDbtSemanticArtifacts(projectRoot, dbtProjectDir)
+  ) {
+    return { provider: 'dbt', projectPath: dbtProjectDir };
+  }
+  return configured;
+}
+
+function hasDbtSemanticArtifacts(projectRoot: string, dbtProjectDir: string): boolean {
+  const dbtRoot = resolve(projectRoot, dbtProjectDir);
+  if (existsSync(join(dbtRoot, 'target', 'semantic_manifest.json'))) return true;
+  const manifestPath = join(dbtRoot, 'target', 'manifest.json');
+  if (!existsSync(manifestPath)) return false;
+  try {
+    const parsed = JSON.parse(readFileSync(manifestPath, 'utf-8')) as Record<string, unknown>;
+    if (parsed.semantic_models && typeof parsed.semantic_models === 'object') return true;
+    if (parsed.metrics && typeof parsed.metrics === 'object') return true;
+  } catch {
+    return false;
+  }
+  return false;
 }
 
 export interface DbtProfileConnectionCandidate {
@@ -197,7 +232,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
   const semanticLayerDir = join(projectRoot, 'semantic-layer');
   let semanticImportManifest = loadSemanticImportManifest(projectRoot);
   const userPrefsPath = join(projectRoot, '.dql-user-prefs.json');
-  const semanticConfig = projectConfig.semanticLayer;
+  const semanticConfig = resolveProjectSemanticConfig(projectConfig, projectRoot);
   let semanticLastSyncTime: string | null = null;
   {
     const semanticConnection = connection;
@@ -763,6 +798,154 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
     return { passed, failed, skipped: 0, duration: Date.now() - start, assertions, runAt: new Date() };
   };
 
+  const saveDqlGenerationDraft = (
+    importId: string,
+    candidate: BlockStudioImportCandidate,
+  ): DqlGenerationCandidate => {
+    let draftSave: BlockDraftSaveState;
+    try {
+      const savedPath = saveBlockStudioDraftArtifacts(projectRoot, {
+        currentPath: candidate.savedPath?.startsWith('blocks/_drafts/') ? candidate.savedPath : undefined,
+        source: candidate.dqlSource,
+        name: candidate.name,
+        domain: candidate.domain,
+        description: candidate.description,
+        owner: candidate.owner,
+        tags: candidate.tags,
+        lineage: candidate.lineage.sourceTables,
+        stableSuffix: candidate.id.replace(/^cand_/, ''),
+        importMeta: {
+          importId,
+          candidateId: candidate.id,
+          sourceKind: candidate.sourceKind,
+          sourcePath: candidate.sourcePath,
+        },
+      });
+      draftSave = { status: 'saved', path: savedPath, savedAt: new Date().toISOString() };
+      return {
+        ...candidate,
+        reviewStatus: candidate.reviewStatus === 'rejected' ? 'rejected' : 'draft',
+        savedPath,
+        draftSave,
+        generationMode: candidate.generationMode ?? 'deterministic',
+        generationProvider: candidate.generationProvider ?? 'local-deterministic',
+        llmContext: candidate.llmContext ?? deterministicDqlGenerationContext(candidate, candidate.evidence ?? []),
+        evidence: candidate.evidence ?? [],
+      };
+    } catch (error) {
+      draftSave = { status: 'error', error: error instanceof Error ? error.message : String(error) };
+      return {
+        ...candidate,
+        draftSave,
+        generationMode: candidate.generationMode ?? 'deterministic',
+        generationProvider: candidate.generationProvider ?? 'local-deterministic',
+        llmContext: candidate.llmContext ?? deterministicDqlGenerationContext(candidate, candidate.evidence ?? []),
+        evidence: candidate.evidence ?? [],
+      };
+    }
+  };
+
+  const createDqlGenerationSessionFromBody = async (body: any): Promise<DqlGenerationSession> => {
+    const inputPath = typeof body.path === 'string' ? body.path : '';
+    const requestedProvider = isProviderSettingsId(body.provider) ? body.provider : undefined;
+    const provider = await createBlockStudioAssistProvider(projectRoot, requestedProvider);
+    const session = createBlockStudioImportSession(projectRoot, {
+      inputPath,
+      inputMode: body.inputMode === 'paste' || body.inputMode === 'upload' || body.inputMode === 'path' ? body.inputMode : undefined,
+      sources: Array.isArray(body.sources)
+        ? body.sources.map((source: any, index: number) => ({
+            path: typeof source?.path === 'string' ? source.path : `source-${index + 1}.sql`,
+            content: typeof source?.content === 'string' ? source.content : '',
+          }))
+        : undefined,
+      sourceKind: typeof body.sourceKind === 'string' ? body.sourceKind : 'raw-sql',
+      domain: typeof body.domain === 'string' ? body.domain : undefined,
+      owner: typeof body.owner === 'string' ? body.owner : undefined,
+      tags: Array.isArray(body.tags) ? body.tags.map(String) : undefined,
+    });
+
+    const warnings: string[] = [];
+    const nextCandidates: DqlGenerationCandidate[] = [];
+    let contextObjectCount = 0;
+    for (const candidate of session.candidates) {
+      const contextPack = await buildDqlGenerationContextPack(projectRoot, candidate).catch((error) => {
+        warnings.push(`Context pack failed for ${candidate.name}: ${error instanceof Error ? error.message : String(error)}`);
+        return null;
+      });
+      contextObjectCount += contextPack?.objects.length ?? 0;
+      const evidence = contextPack ? dqlGenerationEvidenceFromContext(contextPack, candidate) : deterministicDqlGenerationEvidence(candidate);
+      let patch = deterministicDqlGenerationPatch(candidate, evidence);
+      if (provider) {
+        const aiPatch = await buildAiDqlGenerationPatch(provider, candidate, evidence, contextPack).catch((error) => {
+          warnings.push(`AI generation fell back for ${candidate.name}: ${error instanceof Error ? error.message : String(error)}`);
+          return null;
+        });
+        if (aiPatch) patch = mergeDqlGenerationPatch(patch, aiPatch, candidate, evidence);
+      }
+      const enriched = updateBlockStudioImportCandidate(projectRoot, session.id, candidate.id, {
+        name: patch.name,
+        domain: patch.domain,
+        description: patch.description,
+        owner: patch.owner,
+        tags: patch.tags,
+        llmContext: patch.llmContext,
+        evidence,
+        conversionNotes: dqlGenerationConversionNotes(provider?.name ?? 'local-deterministic'),
+        generationMode: provider ? 'ai' : 'deterministic',
+        generationProvider: provider?.name ?? 'local-deterministic',
+      });
+      const validated = validateImportCandidate(enriched);
+      const savedDraft = saveDqlGenerationDraft(session.id, validated);
+      writeBlockStudioImportCandidate(projectRoot, session.id, savedDraft);
+      nextCandidates.push(savedDraft);
+    }
+
+    const generationSession: DqlGenerationSession = {
+      ...session,
+      mode: 'ai-import',
+      candidates: nextCandidates,
+      updatedAt: new Date().toISOString(),
+      generation: {
+        provider: provider?.name ?? 'local-deterministic',
+        aiEnabled: Boolean(provider),
+        contextObjectCount,
+        createdDrafts: nextCandidates.filter((candidate) => candidate.draftSave.status === 'saved').length,
+        warnings,
+      },
+    };
+    writeBlockStudioImportSession(projectRoot, generationSession);
+    if (generationSession.generation.createdDrafts > 0) await refreshLocalMetadataCatalog(projectRoot);
+    return generationSession;
+  };
+
+  const loadDqlGenerationSession = (importId: string): DqlGenerationSession => {
+    const session = loadBlockStudioImportSession(projectRoot, importId);
+    const candidates = session.candidates.map((candidate) => ({
+      ...candidate,
+      generationMode: candidate.generationMode ?? 'deterministic',
+      generationProvider: candidate.generationProvider ?? 'local-deterministic',
+      llmContext: candidate.llmContext ?? deterministicDqlGenerationContext(candidate, candidate.evidence ?? []),
+      evidence: candidate.evidence ?? deterministicDqlGenerationEvidence(candidate),
+      draftSave: candidate.draftSave ?? (
+        candidate.savedPath?.startsWith('blocks/_drafts/')
+          ? { status: 'saved' as const, path: candidate.savedPath }
+          : { status: 'pending' as const }
+      ),
+    }));
+    return {
+      ...session,
+      mode: 'ai-import',
+      candidates,
+      generation: {
+        provider: candidates.find((candidate) => candidate.generationProvider)?.generationProvider ?? 'local-deterministic',
+        aiEnabled: candidates.some((candidate) => candidate.generationMode === 'ai'),
+        contextObjectCount: candidates.reduce((sum, candidate) => sum + (candidate.evidence?.length ?? 0), 0),
+        createdDrafts: candidates.filter((candidate) => candidate.draftSave.status === 'saved').length,
+        warnings: candidates.flatMap((candidate) => candidate.draftSave.status === 'error' && candidate.draftSave.error ? [candidate.draftSave.error] : []),
+      },
+    };
+  };
+
   const certifyBlockStudioSource = async (source: string, blockPath?: string | null) => {
     const validation = validateBlockStudioSource(source, semanticLayer);
     let preview: Awaited<ReturnType<typeof runBlockStudioPreviewSource>> | null = null;
@@ -802,6 +985,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
       description: parsed.description,
       owner: parsed.owner,
       tags: parsed.tags,
+      llmContext: parsed.llmContext,
       dependencies: [],
       usedInCount: 0,
       createdAt: new Date(),
@@ -1169,9 +1353,9 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
     // Apps, dashboards, persona — see apps-api.ts. Returns true if handled.
     if (path.startsWith('/api/apps') || path === '/api/persona') {
       try {
-        const handled = await handleAppsApi({
-          req,
-          res,
+          const handled = await handleAppsApi({
+            req,
+            res: res as unknown as ServerResponse,
           url,
           path,
           projectRoot,
@@ -1198,8 +1382,8 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
         'X-Accel-Buffering': 'no',
       });
       res.write(': connected\n\n');
-      sseClients.add(res);
-      req.on('close', () => { sseClients.delete(res); });
+        sseClients.add(res as unknown as ServerResponse);
+        req.on('close', () => { sseClients.delete(res as unknown as ServerResponse); });
       return;
     }
 
@@ -1895,11 +2079,173 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           res.end(serializeJSON({ ok: false, ...result, blockers }));
           return;
         }
-        if (blockPath) setBlockStudioStatus(projectRoot, blockPath, 'certified');
+        let certifiedPayload: ReturnType<typeof openBlockStudioDocument> | null = null;
+        const certifiedSource = setBlockStudioStatusInSource(source, 'certified');
+        if (blockPath) {
+          const normalizedBlockPath = normalize(blockPath).replace(/^\/+/, '');
+          const parsed = parseBlockSourceMetadata(certifiedSource);
+          if (normalizedBlockPath.startsWith('blocks/_drafts/')) {
+            const savedPath = saveBlockStudioArtifacts(projectRoot, {
+              currentPath: normalizedBlockPath,
+              source: certifiedSource,
+              name: parsed.name,
+              domain: parsed.domain,
+              description: parsed.description,
+              owner: parsed.owner,
+              tags: parsed.tags,
+            });
+            certifiedPayload = openBlockStudioDocument(projectRoot, savedPath, semanticLayer);
+          } else {
+            setBlockStudioStatus(projectRoot, normalizedBlockPath, 'certified');
+            certifiedPayload = openBlockStudioDocument(projectRoot, normalizedBlockPath, semanticLayer);
+          }
+        }
         await refreshLocalMetadataCatalog(projectRoot);
         res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
-        res.end(serializeJSON({ ok: true, status: 'certified', ...result }));
+        res.end(serializeJSON({
+          ok: true,
+          status: 'certified',
+          ...result,
+          path: certifiedPayload?.path ?? blockPath ?? null,
+          source: certifiedPayload?.source ?? certifiedSource,
+          metadata: certifiedPayload?.metadata,
+          companionPath: certifiedPayload?.companionPath ?? null,
+          validation: certifiedPayload?.validation ?? result.validation,
+        }));
       } catch (error) {
+        res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({ error: error instanceof Error ? error.message : String(error) }));
+      }
+      return;
+    }
+
+    if (req.method === 'POST' && path === '/api/block-studio/ai-imports') {
+      try {
+        const body = await readJSON(req);
+        const session = await createDqlGenerationSessionFromBody(body);
+        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON(session));
+      } catch (error) {
+        res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({ error: error instanceof Error ? error.message : String(error) }));
+      }
+      return;
+    }
+
+    const aiImportPathMatch = path.match(/^\/api\/block-studio\/ai-imports\/([^/]+)(?:\/candidates\/([^/]+)(?:\/(preview|certify))?)?$/);
+    if (aiImportPathMatch) {
+      const importId = decodeURIComponent(aiImportPathMatch[1]);
+      const candidateId = aiImportPathMatch[2] ? decodeURIComponent(aiImportPathMatch[2]) : null;
+      const action = aiImportPathMatch[3] ?? null;
+      try {
+        if (req.method === 'GET' && !candidateId) {
+          const session = loadDqlGenerationSession(importId);
+          res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+          res.end(serializeJSON(session));
+          return;
+        }
+
+        if (req.method === 'PATCH' && candidateId && !action) {
+          const body = await readJSON(req);
+          const candidate = updateBlockStudioImportCandidate(projectRoot, importId, candidateId, {
+            name: typeof body.name === 'string' ? body.name : undefined,
+            domain: typeof body.domain === 'string' ? body.domain : undefined,
+            description: typeof body.description === 'string' ? body.description : undefined,
+            owner: typeof body.owner === 'string' ? body.owner : undefined,
+            tags: Array.isArray(body.tags) ? body.tags.map(String) : undefined,
+            sql: typeof body.sql === 'string' ? body.sql : undefined,
+            llmContext: typeof body.llmContext === 'string' ? body.llmContext : undefined,
+          });
+          const validated = validateImportCandidate(candidate);
+          const savedDraft = saveDqlGenerationDraft(importId, validated);
+          writeBlockStudioImportCandidate(projectRoot, importId, savedDraft);
+          await refreshLocalMetadataCatalog(projectRoot);
+          res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+          res.end(serializeJSON(savedDraft));
+          return;
+        }
+
+        if (req.method === 'POST' && candidateId && action === 'preview') {
+          const candidate = readBlockStudioImportCandidate(projectRoot, importId, candidateId);
+          const preview = await runBlockStudioPreviewSource(candidate.dqlSource);
+          const next = saveDqlGenerationDraft(importId, {
+            ...candidate,
+            preview,
+            validation: validateBlockStudioSource(candidate.dqlSource, semanticLayer),
+          });
+          writeBlockStudioImportCandidate(projectRoot, importId, next);
+          res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+          res.end(serializeJSON(next));
+          return;
+        }
+
+        if (req.method === 'POST' && candidateId && action === 'certify') {
+          const candidate = readBlockStudioImportCandidate(projectRoot, importId, candidateId);
+          const readiness = validateImportCandidateForSave(candidate);
+          if (readiness.errors.length > 0) {
+            const savedDraft = saveDqlGenerationDraft(importId, readiness.candidate);
+            writeBlockStudioImportCandidate(projectRoot, importId, savedDraft);
+            res.writeHead(422, { 'Content-Type': 'application/json; charset=utf-8' });
+            res.end(serializeJSON({
+              error: readiness.errors.join(' '),
+              candidate: savedDraft,
+              diagnostics: (savedDraft.validation as any)?.diagnostics ?? [],
+            }));
+            return;
+          }
+          const certifiedSource = setBlockStudioSourceStatus(readiness.candidate.dqlSource, 'certified');
+          const certification = await certifyBlockStudioSource(certifiedSource, readiness.candidate.savedPath);
+          const blockers = Array.from(new Set(certification.checklist.blockers));
+          if (!certification.certification.certified || blockers.length > 0) {
+            const savedDraft = saveDqlGenerationDraft(importId, readiness.candidate);
+            writeBlockStudioImportCandidate(projectRoot, importId, savedDraft);
+            res.writeHead(422, { 'Content-Type': 'application/json; charset=utf-8' });
+            res.end(serializeJSON({ ok: false, candidate: savedDraft, blockers, ...certification }));
+            return;
+          }
+          const savedPath = saveBlockStudioArtifacts(projectRoot, {
+            source: certifiedSource,
+            name: readiness.candidate.name,
+            domain: readiness.candidate.domain,
+            description: readiness.candidate.description,
+            owner: readiness.candidate.owner,
+            tags: readiness.candidate.tags,
+            lineage: readiness.candidate.lineage.sourceTables,
+            importMeta: {
+              importId,
+              candidateId,
+              sourceKind: readiness.candidate.sourceKind,
+              sourcePath: readiness.candidate.sourcePath,
+            },
+          });
+          const next: DqlGenerationCandidate = {
+            ...readiness.candidate,
+            dqlSource: certifiedSource,
+            reviewStatus: 'saved',
+            savedPath,
+            validation: validateBlockStudioSource(certifiedSource, semanticLayer),
+            generationMode: readiness.candidate.generationMode ?? 'deterministic',
+            generationProvider: readiness.candidate.generationProvider ?? 'local-deterministic',
+            llmContext: readiness.candidate.llmContext ?? deterministicDqlGenerationContext(readiness.candidate, readiness.candidate.evidence ?? []),
+            evidence: readiness.candidate.evidence ?? [],
+            draftSave: readiness.candidate.draftSave ?? { status: 'pending' },
+          };
+          writeBlockStudioImportCandidate(projectRoot, importId, next);
+          await refreshLocalMetadataCatalog(projectRoot);
+          const payload = openBlockStudioDocument(projectRoot, savedPath, semanticLayer);
+          res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+          res.end(serializeJSON({ candidate: next, block: payload, certification }));
+          return;
+        }
+
+        res.writeHead(405, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({ error: 'Unsupported AI import operation.' }));
+      } catch (error) {
+        if (error instanceof Error && error.message === 'BLOCK_EXISTS') {
+          res.writeHead(409, { 'Content-Type': 'application/json; charset=utf-8' });
+          res.end(serializeJSON({ error: 'Block already exists' }));
+          return;
+        }
         res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' });
         res.end(serializeJSON({ error: error instanceof Error ? error.message : String(error) }));
       }
@@ -2186,6 +2532,77 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
       return;
     }
 
+    if (req.method === 'GET' && path === '/api/semantic-layer/diagnostics') {
+      try {
+        const provider = semanticConfig?.provider ?? semanticDetectedProvider ?? null;
+        const dbtStatus = buildDbtStatus(projectRoot, projectConfig, semanticLastSyncTime);
+        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({
+          available: Boolean(semanticLayer),
+          provider,
+          errors: semanticLayerErrors,
+          lastSyncTime: semanticLastSyncTime,
+          counts: semanticLayer
+            ? {
+                domains: semanticLayer.listDomains().length,
+                metrics: semanticLayer.listMetrics().length,
+                measures: semanticLayer.listMeasures().length,
+                dimensions: semanticLayer.listDimensions().length,
+                semanticModels: semanticLayer.listSemanticModels().length,
+                savedQueries: semanticLayer.listSavedQueries().length,
+              }
+            : {
+                domains: 0,
+                metrics: 0,
+                measures: 0,
+                dimensions: 0,
+                semanticModels: 0,
+                savedQueries: 0,
+              },
+          dbt: dbtStatus,
+          warnings: [
+            ...semanticLayerErrors,
+            ...(!dbtStatus.artifacts.semanticManifest.exists && provider === 'dbt'
+              ? ['dbt MetricFlow semantic_manifest.json is missing. Run dbt parse/build or MetricFlow setup for this project.']
+              : []),
+          ],
+        }));
+      } catch (error) {
+        res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({ error: error instanceof Error ? error.message : String(error) }));
+      }
+      return;
+    }
+
+    if (req.method === 'POST' && path === '/api/semantic-layer/reload') {
+      try {
+        const semanticConnection = connection;
+        const executeQuery = semanticConfig?.provider === 'snowflake' && semanticConnection
+          ? async (sql: string) => { const r = await executor.executeQuery(sql, [], {}, semanticConnection); return { rows: r.rows }; }
+          : undefined;
+        const refreshed = await resolveSemanticLayerAsync(semanticConfig, projectRoot, executeQuery);
+        semanticLayer = refreshed.layer;
+        semanticLayerErrors = refreshed.errors;
+        semanticDetectedProvider = refreshed.detectedProvider;
+        semanticLastSyncTime = refreshed.layer ? new Date().toISOString() : null;
+        semanticImportManifest = loadSemanticImportManifest(projectRoot);
+        const dbtStatus = buildDbtStatus(projectRoot, projectConfig, semanticLastSyncTime);
+        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({
+          ok: Boolean(refreshed.layer),
+          available: Boolean(refreshed.layer),
+          provider: semanticConfig?.provider ?? refreshed.detectedProvider ?? null,
+          errors: semanticLayerErrors,
+          lastSyncTime: semanticLastSyncTime,
+          dbt: dbtStatus,
+        }));
+      } catch (error) {
+        res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({ error: error instanceof Error ? error.message : String(error) }));
+      }
+      return;
+    }
+
     if (req.method === 'GET' && path === '/api/block-studio/open') {
       try {
         const relativePath = url.searchParams.get('path');
@@ -2239,7 +2656,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
         const source = typeof body.source === 'string' ? body.source : '';
         const metadata = body.metadata && typeof body.metadata === 'object'
           ? body.metadata as {
-              name?: string;
+            name?: string;
             domain?: string;
             description?: string;
             owner?: string;
@@ -2261,8 +2678,9 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           res.end(serializeJSON({ error: 'Block name is required.' }));
           return;
         }
-        const savedPath = saveBlockStudioArtifacts(projectRoot, {
-          currentPath: typeof body.path === 'string' ? body.path : undefined,
+        const currentPath = typeof body.path === 'string' ? body.path : undefined;
+        const saveOptions = {
+          currentPath,
           source,
           name: metadata.name,
           domain: metadata.domain,
@@ -2278,7 +2696,13 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
                 sourcePath: metadata.sourcePath,
               }
             : undefined,
-        });
+        };
+        const savedPath = currentPath?.startsWith('blocks/_drafts/')
+          ? saveBlockStudioDraftArtifacts(projectRoot, {
+              ...saveOptions,
+              stableSuffix: metadata.candidateId,
+            })
+          : saveBlockStudioArtifacts(projectRoot, saveOptions);
         await refreshLocalMetadataCatalog(projectRoot);
         const payload = openBlockStudioDocument(projectRoot, savedPath, semanticLayer);
         res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
@@ -2405,7 +2829,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
         res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
         res.end(serializeJSON({
           available: false,
-          provider: projectConfig.semanticLayer?.provider ?? semanticDetectedProvider ?? null,
+          provider: semanticConfig?.provider ?? semanticDetectedProvider ?? null,
           errors: semanticLayerErrors,
           metrics: [],
           measures: [],
@@ -2534,9 +2958,9 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
         owner: q.owner ?? null,
         source: q.source ?? null,
       }));
-      const provider = projectConfig.semanticLayer?.provider ?? semanticDetectedProvider ?? 'dql';
+      const provider = semanticConfig?.provider ?? semanticDetectedProvider ?? 'dql';
       const dbtExecutionReady = provider === 'dbt'
-        ? hasDbtSemanticManifest(projectRoot, projectConfig.semanticLayer?.projectPath)
+        ? hasDbtSemanticManifest(projectRoot, semanticConfig?.projectPath)
         : false;
       res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
       res.end(serializeJSON({
@@ -5282,7 +5706,7 @@ function isDbtSemanticRuntime(
   detectedProvider: string | null | undefined,
   semanticLayer?: SemanticLayer | null,
 ): boolean {
-  if (projectConfig.semanticLayer?.provider === 'dbt' || detectedProvider === 'dbt') return true;
+  if (projectConfig.semanticLayer?.provider === 'dbt' || projectConfig.dbt?.projectDir || detectedProvider === 'dbt') return true;
   return Boolean(semanticLayer?.listMetrics().some((metric) => metric.source?.provider === 'dbt'));
 }
 
@@ -5303,7 +5727,10 @@ function composeRuntimeSemanticQuery(
   );
 
   if (useMetricFlow) {
-    const dbtProjectPath = context.projectConfig.semanticLayer?.projectPath;
+    const effectiveSemanticConfig = resolveProjectSemanticConfig(context.projectConfig, context.projectRoot);
+    const dbtProjectPath = effectiveSemanticConfig?.provider === 'dbt'
+      ? effectiveSemanticConfig.projectPath
+      : context.projectConfig.dbt?.projectDir;
     const compiled = compileMetricFlowQuery({
       projectRoot: context.projectRoot,
       dbtProjectPath,
@@ -5664,6 +6091,69 @@ export function saveBlockStudioArtifacts(
   return targetRelativePath;
 }
 
+export function saveBlockStudioDraftArtifacts(
+  projectRoot: string,
+  options: {
+    currentPath?: string;
+    source: string;
+    name: string;
+    domain?: string;
+    description?: string;
+    owner?: string;
+    tags?: string[];
+    lineage?: string[];
+    importMeta?: {
+      importId?: string;
+      candidateId?: string;
+      sourceKind?: string;
+      sourcePath?: string;
+    };
+    stableSuffix?: string;
+  },
+): string {
+  const slug = options.name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '') || 'block';
+  const safeDomain = (options.domain ?? '')
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9/_-]+/g, '-')
+    .replace(/^\/+|\/+$/g, '') || 'uncategorized';
+  const previousPath = options.currentPath ? normalize(options.currentPath).replace(/^\/+/, '') : null;
+  const draftPrefix = `blocks/_drafts/${safeDomain}/`;
+  const stableSuffix = options.stableSuffix?.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 18);
+  let targetRelativePath = previousPath?.startsWith('blocks/_drafts/')
+    ? previousPath
+    : `${draftPrefix}${slug}${stableSuffix ? `-${stableSuffix}` : ''}.dql`;
+  let targetPath = join(projectRoot, targetRelativePath);
+  if (!previousPath && existsSync(targetPath)) {
+    for (let index = 2; index < 1000; index += 1) {
+      const candidatePath = `${draftPrefix}${slug}-${index}.dql`;
+      if (!existsSync(join(projectRoot, candidatePath))) {
+        targetRelativePath = candidatePath;
+        targetPath = join(projectRoot, targetRelativePath);
+        break;
+      }
+    }
+  }
+
+  mkdirSync(dirname(targetPath), { recursive: true });
+  writeFileSync(targetPath, options.source.trimEnd() + '\n', 'utf-8');
+  const companionSlug = targetRelativePath.split('/').pop()?.replace(/\.dql$/, '') || slug;
+  writeBlockCompanionFile(projectRoot, {
+    slug: companionSlug,
+    name: options.name,
+    domain: `_drafts/${safeDomain}`,
+    description: options.description,
+    owner: options.owner,
+    tags: options.tags,
+    provider: 'dql',
+    content: options.source,
+    lineage: options.lineage,
+    importMeta: options.importMeta,
+  });
+
+  return targetRelativePath;
+}
+
 function blockCompanionRelativePath(blockPath: string): string | null {
   const normalized = normalize(blockPath).replace(/^\/+/, '');
   if (!normalized.startsWith('blocks/')) return null;
@@ -5728,6 +6218,7 @@ function parseBlockSourceMetadata(source: string): {
   tags: string[];
   status: string;
   blockType: string;
+  llmContext: string;
 } {
   const name = source.match(/^\s*block\s+"([^"]+)"/i)?.[1] ?? '';
   const extractString = (key: string) => source.match(new RegExp(`\\b${key}\\s*=\\s*"([^"]*)"`, 'i'))?.[1] ?? '';
@@ -5740,6 +6231,7 @@ function parseBlockSourceMetadata(source: string): {
     tags: tags ? (tags[1].match(/"([^"]*)"/g) ?? []).map((value) => value.slice(1, -1)) : [],
     status: extractString('status') || 'draft',
     blockType: extractString('type') || 'custom',
+    llmContext: extractString('llmContext'),
   };
 }
 
@@ -5811,7 +6303,10 @@ function buildBlockStudioCertificationChecklist(input: {
 
 function extractSqlTablesLight(sql: string): string[] {
   const tables = new Set<string>();
-  const cleaned = sql.replace(/\/\*[\s\S]*?\*\//g, ' ').replace(/--[^\n\r]*/g, ' ');
+  const cleaned = sql
+    .replace(/\/\*[\s\S]*?\*\//g, ' ')
+    .replace(/--[^\n\r]*/g, ' ')
+    .replace(/extract\s*\(\s*\w+\s+from\s+[^)]+\)/gi, 'EXTRACT_VALUE');
   const regex = /\b(?:from|join|update|into)\s+([`"[]?[A-Za-z0-9_./:-]+(?:\.[A-Za-z0-9_./:-]+)*[`"\]]?)/gi;
   let match: RegExpExecArray | null;
   while ((match = regex.exec(cleaned))) {
@@ -5821,17 +6316,19 @@ function extractSqlTablesLight(sql: string): string[] {
   return Array.from(tables);
 }
 
+function setBlockStudioStatusInSource(source: string, newStatus: string): string {
+  if (/status\s*=\s*"[^"]*"/.test(source)) {
+    return source.replace(/status\s*=\s*"[^"]*"/, `status = "${newStatus}"`);
+  }
+  return source.replace(/block\s+"[^"]*"\s*\{/, (match) => `${match}\n  status = "${newStatus}"`);
+}
+
 function setBlockStudioStatus(projectRoot: string, blockPath: string, newStatus: string): void {
   const normalizedPath = normalize(blockPath).replace(/^\/+/, '');
   if (!normalizedPath.startsWith('blocks/')) throw new Error('Invalid block path');
   const absPath = join(projectRoot, normalizedPath);
   if (!existsSync(absPath)) throw new Error('Block file not found');
-  let source = readFileSync(absPath, 'utf-8');
-  if (/status\s*=\s*"[^"]*"/.test(source)) {
-    source = source.replace(/status\s*=\s*"[^"]*"/, `status = "${newStatus}"`);
-  } else {
-    source = source.replace(/block\s+"[^"]*"\s*\{/, (match) => `${match}\n  status = "${newStatus}"`);
-  }
+  const source = setBlockStudioStatusInSource(readFileSync(absPath, 'utf-8'), newStatus);
   writeFileSync(absPath, source, 'utf-8');
 
   const companionPath = blockCompanionRelativePath(normalizedPath);
@@ -5845,6 +6342,448 @@ function setBlockStudioStatus(projectRoot: string, blockPath: string, newStatus:
     companion = `${companion.trimEnd()}\nreviewStatus: ${newStatus}\n`;
   }
   writeFileSync(absCompanionPath, companion, 'utf-8');
+}
+
+interface DqlGenerationPatch {
+  name?: string;
+  domain?: string;
+  description?: string;
+  owner?: string;
+  tags?: string[];
+  llmContext?: string;
+}
+
+async function buildDqlGenerationContextPack(
+  projectRoot: string,
+  candidate: BlockStudioImportCandidate,
+): Promise<LocalContextPack> {
+  const tables = candidate.lineage.sourceTables.join(', ');
+  const question = [
+    `Generate a governed DQL block draft for SQL import candidate "${candidate.name}".`,
+    candidate.description,
+    tables ? `Source tables: ${tables}.` : '',
+    candidate.sql.slice(0, 1200),
+  ].filter(Boolean).join('\n');
+  return buildLocalContextPack(projectRoot, {
+    question,
+    mode: 'build',
+    surface: 'block-studio',
+    limit: 80,
+    objectTypes: [
+      'dql_block',
+      'semantic_metric',
+      'semantic_model',
+      'semantic_dimension',
+      'semantic_measure',
+      'dbt_model',
+      'dbt_source',
+      'dbt_column',
+      'warehouse_table',
+      'business_view',
+    ],
+    strictness: 'balanced',
+  });
+}
+
+function dqlGenerationEvidenceFromContext(
+  contextPack: LocalContextPack,
+  candidate: BlockStudioImportCandidate,
+): DqlGenerationEvidence[] {
+  const directEvidence = contextPack.objects
+    .filter((object) => isDqlGenerationEvidenceObject(object))
+    .filter((object) => metadataObjectMatchesImportedSource(object, candidate.lineage.sourceTables))
+    .map((object) => metadataObjectToDqlGenerationEvidence(object, 'Directly matches an imported SQL source table.'));
+  if (directEvidence.length > 0) return uniqueDqlGenerationEvidence(directEvidence).slice(0, 8);
+  const selected = contextPack.retrievalDiagnostics.selectedEvidence.slice(0, 12);
+  const byKey = new Map(contextPack.objects.map((object) => [object.objectKey, object]));
+  const evidence = selected.flatMap((item): DqlGenerationEvidence[] => {
+    const object = byKey.get(item.objectKey);
+    if (!object || !isDqlGenerationEvidenceObject(object)) return [];
+    return [metadataObjectToDqlGenerationEvidence(
+      object,
+      item.reason,
+      Math.max(0.35, Math.min(0.98, item.score / Math.max(item.score, 10))),
+    )];
+  });
+  const ranked = uniqueDqlGenerationEvidence([...directEvidence, ...evidence]).slice(0, 12);
+  return ranked.length > 0 ? ranked : deterministicDqlGenerationEvidence(candidate);
+}
+
+function deterministicDqlGenerationEvidence(candidate: BlockStudioImportCandidate): DqlGenerationEvidence[] {
+  return candidate.lineage.sourceTables.map((table) => ({
+    kind: 'warehouse_table',
+    name: table,
+    source: candidate.sourcePath,
+    reason: 'Detected in the imported SQL source.',
+    confidence: 0.7,
+  }));
+}
+
+function isDqlGenerationEvidenceObject(object: LocalContextPack['objects'][number]): boolean {
+  if (object.objectType === 'dql_block') {
+    if (object.status !== 'certified') return false;
+    if (object.sourcePath?.includes('/_drafts/') || object.sourcePath?.includes('\\_drafts\\')) return false;
+  }
+  return true;
+}
+
+function metadataObjectToDqlGenerationEvidence(
+  object: LocalContextPack['objects'][number],
+  reason: string,
+  confidence = 0.82,
+): DqlGenerationEvidence {
+  return {
+    kind: dqlGenerationEvidenceKind(object.objectType),
+    name: object.fullName ?? object.name,
+    description: object.description,
+    objectKey: object.objectKey,
+    source: object.sourcePath ?? object.sourceSystem,
+    reason,
+    confidence,
+  };
+}
+
+function metadataObjectMatchesImportedSource(
+  object: LocalContextPack['objects'][number],
+  sourceTables: string[],
+): boolean {
+  if (sourceTables.length === 0) return false;
+  const haystack = [
+    object.fullName,
+    object.name,
+    object.objectKey,
+    object.sourcePath,
+    object.sourceSystem,
+    typeof object.payload?.relation === 'string' ? object.payload.relation : '',
+    typeof object.payload?.relationName === 'string' ? object.payload.relationName : '',
+    typeof object.payload?.relation_name === 'string' ? object.payload.relation_name : '',
+  ].filter(Boolean).join(' ').toLowerCase();
+  return sourceTables.some((table) =>
+    relationLookupTokens(table).some((token) => token && haystack.includes(token))
+  );
+}
+
+function relationLookupTokens(relation: string): string[] {
+  const normalized = relation.replace(/[`"[\]]/g, '').toLowerCase();
+  const parts = normalized.split('.').filter(Boolean);
+  return Array.from(new Set([
+    normalized,
+    parts.slice(-2).join('.'),
+    parts.at(-1) ?? '',
+  ].filter((item) => item.length >= 3)));
+}
+
+function uniqueDqlGenerationEvidence(evidence: DqlGenerationEvidence[]): DqlGenerationEvidence[] {
+  const seen = new Set<string>();
+  const result: DqlGenerationEvidence[] = [];
+  for (const item of evidence) {
+    const key = item.objectKey || `${item.kind}:${item.name}`.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    result.push(item);
+  }
+  return result;
+}
+
+function dqlGenerationEvidenceKind(objectType: string): DqlGenerationEvidence['kind'] {
+  if (objectType === 'dql_block') return 'dql_block';
+  if (objectType === 'semantic_metric') return 'semantic_metric';
+  if (objectType === 'semantic_model') return 'semantic_model';
+  if (objectType === 'dbt_model' || objectType === 'dbt_source' || objectType === 'dbt_column') return 'dbt_model';
+  if (objectType === 'warehouse_table') return 'warehouse_table';
+  if (objectType.includes('lineage')) return 'lineage';
+  return 'metadata';
+}
+
+function deterministicDqlGenerationPatch(
+  candidate: BlockStudioImportCandidate,
+  evidence: DqlGenerationEvidence[],
+): DqlGenerationPatch {
+  const domain = inferDqlGenerationDomain(candidate);
+  const description = candidate.description && !candidate.description.startsWith('Imported from ')
+    ? candidate.description
+    : deterministicDqlGenerationDescription(candidate, evidence);
+  return {
+    name: candidate.name,
+    domain,
+    description,
+    owner: candidate.owner,
+    tags: dqlGenerationBusinessTags(candidate, evidence, domain),
+    llmContext: deterministicDqlGenerationContext(candidate, evidence),
+  };
+}
+
+function deterministicDqlGenerationDescription(
+  candidate: BlockStudioImportCandidate,
+  evidence: DqlGenerationEvidence[],
+): string {
+  const tables = candidate.lineage.sourceTables.length > 0
+    ? candidate.lineage.sourceTables.join(', ')
+    : candidate.sourcePath;
+  const sourceContext = evidence.find((item) =>
+    (item.kind === 'dbt_model' || item.kind === 'semantic_model' || item.kind === 'warehouse_table') &&
+    item.description &&
+    candidate.lineage.sourceTables.some((table) => relationLookupTokens(table).some((token) => item.name.toLowerCase().includes(token)))
+  );
+  const aggregate = /\b(sum|count|avg|min|max)\s*\(/i.test(candidate.sql);
+  const grouped = /\bgroup\s+by\b/i.test(candidate.sql);
+  const sourcePhrase = sourceContext?.description
+    ? ` using ${sourceContext.name} (${sourceContext.description})`
+    : ` using ${tables}`;
+  if (aggregate && grouped) return `Summarizes imported SQL${sourcePhrase}.`;
+  if (aggregate) return `Calculates aggregate values${sourcePhrase}.`;
+  return `Exposes imported SQL${sourcePhrase}.`;
+}
+
+function dqlGenerationBusinessTags(
+  candidate: BlockStudioImportCandidate,
+  evidence: DqlGenerationEvidence[],
+  domain: string,
+): string[] {
+  const generic = new Set(['imported', 'raw-sql', 'ai-generated']);
+  const stopTags = new Set(['int', 'stg', 'src', 'fct', 'dim', 'name', 'id', 'key', 'model', 'source', 'table']);
+  const sourceTokens = candidate.lineage.sourceTables
+    .flatMap((table) => table.split('.').slice(-2))
+    .flatMap((part) => part.split(/[_\s.-]+/));
+  const tags = [
+    ...candidate.tags.filter((tag) => !generic.has(tag)),
+    domain,
+    ...sourceTokens,
+    'review-required',
+  ].map((tag) => tag.trim().toLowerCase())
+    .filter((tag) => tag.length > 1 && !generic.has(tag) && !stopTags.has(tag))
+    .map((tag) => tag.replace(/[^a-z0-9_-]+/g, '-').replace(/^-+|-+$/g, ''))
+    .filter(Boolean);
+  return Array.from(new Set(tags)).slice(0, 12);
+}
+
+function deterministicDqlGenerationContext(
+  candidate: Pick<BlockStudioImportCandidate, 'name' | 'sql' | 'lineage'>,
+  evidence: DqlGenerationEvidence[],
+): string {
+  const tables = candidate.lineage.sourceTables.length > 0
+    ? candidate.lineage.sourceTables.join(', ')
+    : 'the imported SQL source';
+  const evidenceNames = evidence
+    .filter((item) => item.kind !== 'dql_block')
+    .slice(0, 3)
+    .map((item) => item.name)
+    .filter(Boolean);
+  const grain = extractDqlGenerationGroupByFields(candidate.sql);
+  const years = extractDqlGenerationYearFilters(candidate.sql);
+  return [
+    `Use after review for questions matching "${candidate.name}".`,
+    grain.length > 0 ? `Grain: ${grain.join(', ')}.` : '',
+    years.length > 0 ? `Filters: year ${years.join(', ')}.` : '',
+    `Source: ${tables}.`,
+    evidenceNames.length > 0 ? `Grounded by: ${evidenceNames.join(', ')}.` : '',
+    'Certification must confirm grain, filters, owner, tags, and tests.',
+  ].filter(Boolean).join(' ');
+}
+
+function extractDqlGenerationGroupByFields(sql: string): string[] {
+  const match = sql.match(/\bgroup\s+by\b([\s\S]+?)(?:\border\s+by\b|\blimit\b|\bqualify\b|\bhaving\b|$)/i);
+  if (!match) return [];
+  return splitDqlGenerationSqlList(match[1])
+    .map((item) => item.replace(/[`"[\]]/g, '').trim())
+    .filter((item) => item && !/^\d+$/.test(item))
+    .slice(0, 4);
+}
+
+function extractDqlGenerationYearFilters(sql: string): string[] {
+  const years = new Set<string>();
+  const cleaned = sql.replace(/--[^\n\r]*/g, ' ').replace(/\/\*[\s\S]*?\*\//g, ' ');
+  let match: RegExpExecArray | null;
+  const extractYear = /extract\s*\(\s*year\s+from\s+[^)]+\)\s*(?:=\s*([12][0-9]{3})|in\s*\(([^)]*)\))/gi;
+  while ((match = extractYear.exec(cleaned))) {
+    for (const year of (match[1] || match[2] || '').match(/[12][0-9]{3}/g) ?? []) years.add(year);
+  }
+  return Array.from(years).sort();
+}
+
+function splitDqlGenerationSqlList(value: string): string[] {
+  const parts: string[] = [];
+  let start = 0;
+  let depth = 0;
+  let single = false;
+  let double = false;
+  for (let i = 0; i < value.length; i += 1) {
+    const char = value[i];
+    if (!double && char === "'" && value[i - 1] !== '\\') single = !single;
+    else if (!single && char === '"' && value[i - 1] !== '\\') double = !double;
+    else if (!single && !double && char === '(') depth += 1;
+    else if (!single && !double && char === ')' && depth > 0) depth -= 1;
+    else if (!single && !double && depth === 0 && char === ',') {
+      parts.push(value.slice(start, i));
+      start = i + 1;
+    }
+  }
+  parts.push(value.slice(start));
+  return parts.map((part) => part.trim()).filter(Boolean);
+}
+
+function inferDqlGenerationDomain(candidate: BlockStudioImportCandidate): string {
+  const current = candidate.domain?.trim();
+  if (current && current !== 'imported' && current !== 'general') return current;
+  const firstTable = candidate.lineage.sourceTables[0];
+  const schema = firstTable?.split('.').filter(Boolean).slice(-2, -1)[0];
+  return schema?.replace(/[^a-z0-9/_-]+/gi, '-').toLowerCase() || current || 'imported';
+}
+
+async function buildAiDqlGenerationPatch(
+  provider: AgentProvider,
+  candidate: BlockStudioImportCandidate,
+  evidence: DqlGenerationEvidence[],
+  contextPack: LocalContextPack | null,
+): Promise<DqlGenerationPatch | null> {
+  const payload = {
+    candidate: {
+      name: candidate.name,
+      domain: candidate.domain,
+      description: candidate.description,
+      owner: candidate.owner,
+      tags: candidate.tags,
+      sql: candidate.sql,
+      sourceTables: candidate.lineage.sourceTables,
+      parameters: candidate.lineage.parameters,
+      warnings: candidate.warnings ?? candidate.lineage.warnings,
+      grain: extractDqlGenerationGroupByFields(candidate.sql),
+      yearFilters: extractDqlGenerationYearFilters(candidate.sql),
+    },
+    context: {
+      evidence,
+      selectedObjects: contextPack?.objects.slice(0, 24).map((object) => ({
+        objectKey: object.objectKey,
+        objectType: object.objectType,
+        name: object.fullName ?? object.name,
+        domain: object.domain,
+        status: object.status,
+        description: object.description,
+      })) ?? [],
+      allowedRelations: contextPack?.allowedSqlContext.relations.slice(0, 12).map((relation) => ({
+        relation: relation.relation,
+        source: relation.source,
+        columns: relation.columns.slice(0, 16).map((column) => column.name),
+      })) ?? [],
+    },
+  };
+  const text = await provider.generate([
+    {
+      role: 'system',
+      content: [
+        'You generate DQL Block Studio metadata for a local draft.',
+        'Return only a compact JSON object with optional keys: name, domain, description, owner, tags, llmContext.',
+        'Do not return markdown. Do not mark the block certified. Do not change SQL.',
+        'Use only directly relevant dbt, semantic, warehouse, certified block, and SQL-shape evidence from the payload.',
+        'If metadata descriptions are missing, describe the observable SQL intent instead of inventing business meaning.',
+        'Descriptions and llmContext must be specific, business-readable, concise, and review-required.',
+        'Tags must be business/search tags. Avoid generic tags such as raw-sql, imported, ai-generated.',
+      ].join('\n'),
+    },
+    { role: 'user', content: JSON.stringify(payload) },
+  ], { maxTokens: 900, temperature: 0.1 });
+  return normalizeDqlGenerationPatch(parseFirstJsonObject(text));
+}
+
+function parseFirstJsonObject(text: string): unknown {
+  const trimmed = text.trim();
+  if (trimmed.startsWith('{') && trimmed.endsWith('}')) return JSON.parse(trimmed);
+  const match = trimmed.match(/\{[\s\S]*\}/);
+  if (!match) return null;
+  return JSON.parse(match[0]);
+}
+
+function normalizeDqlGenerationPatch(value: unknown): DqlGenerationPatch | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  const record = value as Record<string, unknown>;
+  const patch: DqlGenerationPatch = {};
+  if (typeof record.name === 'string' && record.name.trim()) patch.name = record.name.trim().slice(0, 120);
+  if (typeof record.domain === 'string' && record.domain.trim()) patch.domain = record.domain.trim().slice(0, 80);
+  if (typeof record.description === 'string' && record.description.trim()) patch.description = record.description.trim().slice(0, 500);
+  if (typeof record.owner === 'string' && record.owner.trim()) patch.owner = record.owner.trim().slice(0, 120);
+  if (Array.isArray(record.tags)) patch.tags = record.tags.map(String).map((tag) => tag.trim()).filter(Boolean).slice(0, 12);
+  if (typeof record.llmContext === 'string' && record.llmContext.trim()) patch.llmContext = record.llmContext.trim().slice(0, 1000);
+  return Object.keys(patch).length > 0 ? patch : null;
+}
+
+function mergeDqlGenerationPatch(
+  base: DqlGenerationPatch,
+  override: DqlGenerationPatch,
+  candidate: BlockStudioImportCandidate,
+  evidence: DqlGenerationEvidence[],
+): DqlGenerationPatch {
+  const name = override.name && !isWeakDqlGenerationName(override.name) ? override.name : base.name;
+  const description = override.description
+    && !isWeakDqlGenerationDescription(override.description)
+    && !isUngroundedDqlGenerationDescription(override.description, candidate, evidence)
+    ? override.description
+    : base.description;
+  const llmContext = override.llmContext
+    && !isUngroundedDqlGenerationDescription(override.llmContext, candidate, evidence)
+    ? override.llmContext
+    : base.llmContext;
+  const overrideTags = override.tags
+    ? override.tags.filter((tag) => !/^(raw-sql|imported|ai-generated)$/i.test(tag))
+    : [];
+  return {
+    ...base,
+    ...override,
+    name,
+    description,
+    llmContext,
+    tags: Array.from(new Set([...(base.tags ?? []), ...overrideTags])).slice(0, 12),
+  };
+}
+
+function isWeakDqlGenerationName(name: string): boolean {
+  return /^(pasted|query|source|imported query|sql import)(?:\s+\d+)?$/i.test(name.trim());
+}
+
+function isWeakDqlGenerationDescription(description: string): boolean {
+  return /^draft dql block summarizing imported sql/i.test(description.trim())
+    || /^draft dql block generated from imported sql/i.test(description.trim())
+    || /^imported from /i.test(description.trim())
+    || /^this query (shows|returns|provides)/i.test(description.trim());
+}
+
+function isUngroundedDqlGenerationDescription(
+  description: string,
+  candidate: BlockStudioImportCandidate,
+  evidence: DqlGenerationEvidence[],
+): boolean {
+  const text = description.toLowerCase();
+  const tokens = new Set<string>();
+  for (const tag of candidate.tags) {
+    if (!/^(raw-sql|imported|ai-generated|review-required)$/i.test(tag) && tag.length > 2) tokens.add(tag.toLowerCase());
+  }
+  for (const table of candidate.lineage.sourceTables) {
+    for (const token of table.split(/[._\s/-]+/)) {
+      if (token.length > 2) tokens.add(token.toLowerCase());
+    }
+  }
+  for (const item of evidence.slice(0, 6)) {
+    for (const token of item.name.split(/[._\s/-]+/)) {
+      if (token.length > 3 && !/^(model|source|semantic|table)$/i.test(token)) tokens.add(token.toLowerCase());
+    }
+  }
+  if (tokens.size === 0) return false;
+  return !Array.from(tokens).some((token) => text.includes(token));
+}
+
+function dqlGenerationConversionNotes(providerName: string): string[] {
+  return [
+    `Generated with ${providerName} using local project context when available.`,
+    'SQL text is preserved; metadata, tags, evidence, and agent context remain editable.',
+    'Drafts are autosaved under blocks/_drafts before certification.',
+    'Preview results and tests gate certification before promotion.',
+  ];
+}
+
+function setBlockStudioSourceStatus(source: string, status: string): string {
+  if (/status\s*=\s*"[^"]*"/.test(source)) {
+    return source.replace(/status\s*=\s*"[^"]*"/, `status = "${status}"`);
+  }
+  return source.replace(/block\s+"[^"]*"\s*\{/, (match) => `${match}\n  status = "${status}"`);
 }
 
 async function buildBlockStudioAiAssistSummary(

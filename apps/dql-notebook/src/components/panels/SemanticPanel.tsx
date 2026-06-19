@@ -4,8 +4,9 @@ import { api } from '../../api/client';
 import { insertSemanticReference, serializeSemanticDragRef } from '../../editor/semantic-completions';
 import { makeCell, useNotebook } from '../../store/NotebookStore';
 import type {
-  SemanticLayerState,
-  SemanticObjectDetail,
+    SemanticLayerState,
+    SemanticLayerDiagnostics,
+    SemanticObjectDetail,
   SemanticTreeNode,
 } from '../../store/types';
 import type { Theme } from '../../themes/notebook-theme';
@@ -545,19 +546,22 @@ export function SemanticPanel() {
   const [selectedMetrics, setSelectedMetrics] = useState<Set<string>>(new Set());
   const [selectedDimensions, setSelectedDimensions] = useState<Set<string>>(new Set());
   const [composing, setComposing] = useState(false);
-  const [scrollTop, setScrollTop] = useState(0);
-  const [viewportHeight, setViewportHeight] = useState(400);
-  const treeContainerRef = useRef<HTMLDivElement | null>(null);
+    const [scrollTop, setScrollTop] = useState(0);
+    const [viewportHeight, setViewportHeight] = useState(400);
+    const [diagnostics, setDiagnostics] = useState<SemanticLayerDiagnostics | null>(null);
+    const treeContainerRef = useRef<HTMLDivElement | null>(null);
 
   const handleRefresh = async () => {
     dispatch({ type: 'SET_SEMANTIC_LOADING', loading: true });
     try {
-      const [layer, nextTree] = await Promise.all([
-        api.getSemanticLayer(),
-        api.getSemanticTree().catch(() => null),
-      ]);
-      dispatch({ type: 'SET_SEMANTIC_LAYER', layer });
-      setTree(nextTree);
+        const [layer, nextTree, nextDiagnostics] = await Promise.all([
+          api.getSemanticLayer(),
+          api.getSemanticTree().catch(() => null),
+          api.getSemanticLayerDiagnostics().catch(() => null),
+        ]);
+        dispatch({ type: 'SET_SEMANTIC_LAYER', layer });
+        setTree(nextTree);
+        setDiagnostics(nextDiagnostics);
     } finally {
       dispatch({ type: 'SET_SEMANTIC_LOADING', loading: false });
     }
@@ -778,8 +782,8 @@ export function SemanticPanel() {
       <>
         <SetupState
           t={t}
-          provider={sl.provider}
-          errors={(state.semanticLayer as any).errors}
+            provider={sl.provider}
+            errors={diagnostics?.warnings.length ? diagnostics.warnings : (state.semanticLayer as any).errors}
           onOpenWizard={() => setWizardOpen(true)}
           onRefresh={() => void handleRefresh()}
         />
@@ -872,9 +876,19 @@ export function SemanticPanel() {
         >
           {sl.loading ? 'Loading…' : 'Refresh'}
         </button>
-      </div>
+        </div>
 
-      <div style={{ padding: '10px', borderBottom: `1px solid ${t.headerBorder}`, background: `${t.accent}0d`, display: 'grid', gap: 6 }}>
+        {diagnostics?.warnings.length ? (
+          <div style={{ padding: '8px 10px', borderBottom: `1px solid ${t.headerBorder}`, background: '#d2992212' }}>
+            {diagnostics.warnings.slice(0, 3).map((warning, index) => (
+              <div key={index} style={{ fontSize: 11, color: t.textSecondary, fontFamily: t.font, lineHeight: 1.4 }}>
+                {warning}
+              </div>
+            ))}
+          </div>
+        ) : null}
+
+        <div style={{ padding: '10px', borderBottom: `1px solid ${t.headerBorder}`, background: `${t.accent}0d`, display: 'grid', gap: 6 }}>
         <div style={{ fontSize: 11, fontWeight: 600, color: t.textPrimary, fontFamily: t.font }}>
           Build blocks in Block Studio
         </div>

@@ -101,6 +101,34 @@ go
     expect(session.candidates[0].splitStrategy).toBe('semicolon-go');
   });
 
+  it('infers useful metadata for pasted analytical SQL without comments', () => {
+    const root = tempProject();
+    const session = createBlockStudioImportSession(root, {
+      inputMode: 'paste',
+      sources: [{
+        path: 'pasted.sql',
+        content: `
+select
+  player_name,
+  sum(coalesce(pts, 0)) as total_points,
+  count(distinct details_game_id) as games_played
+from TRANSFORMED.int_player_stats
+where extract(year from game_date_est) = 2017
+  and player_name is not null
+group by player_name
+order by total_points desc
+limit 3;
+`,
+      }],
+    });
+
+    const candidate = session.candidates[0];
+    expect(candidate.name).toBe('Top Players By Total Points 2017');
+    expect(candidate.description).toBe('Ranks players by total points for 2017 using TRANSFORMED.int_player_stats, including games played.');
+    expect(candidate.tags).toEqual(expect.arrayContaining(['transformed', 'player', 'stats', 'total', 'points', '2017']));
+    expect(candidate.dqlSource).toContain('block "Top Players By Total Points 2017"');
+  });
+
   it('splits named query sections without semicolons', () => {
     const root = tempProject();
     writeFileSync(join(root, 'named-sections.sql'), `

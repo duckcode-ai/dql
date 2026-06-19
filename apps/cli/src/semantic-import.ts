@@ -227,7 +227,6 @@ export function buildSemanticTree(
   manifest: SemanticImportManifest | null,
 ): SemanticTreeNode {
   const providerName = manifest?.provider ?? 'dql';
-  const domains = layer.listDomains();
   const cubes = layer.listCubes();
   const metrics = layer.listMetrics();
   const measures = layer.listMeasures();
@@ -239,16 +238,30 @@ export function buildSemanticTree(
   const preAggregations = layer.listPreAggregations();
   const semanticModels = layer.listSemanticModels();
   const savedQueries = layer.listSavedQueries();
+  const domains = Array.from(new Set([
+    ...layer.listDomains().map((domain) => normalizeDomain(domain)),
+    ...cubes.map((item) => normalizeDomain(item.domain)),
+    ...metrics.map((item) => normalizeDomain(item.domain)),
+    ...measures.map((item) => normalizeDomain(item.domain)),
+    ...dimensions.map((item) => normalizeDomain(item.domain)),
+    ...timeDimensions.map((item) => normalizeDomain(item.domain)),
+    ...entities.map((item) => normalizeDomain(item.domain)),
+    ...hierarchies.map((item) => normalizeDomain(item.domain)),
+    ...segments.map((item) => normalizeDomain(item.domain)),
+    ...preAggregations.map((item) => normalizeDomain(item.domain)),
+    ...semanticModels.map((item) => normalizeDomain(item.domain)),
+    ...savedQueries.map((item) => normalizeDomain(item.domain)),
+  ])).sort((a, b) => a.localeCompare(b));
 
   const domainNodes = domains.map((domain) => {
-    const domainCubes = cubes.filter((cube) => cube.domain === domain);
-    const looseMetrics = metrics.filter((metric) => metric.domain === domain && !metric.cube);
-    const looseDimensions = dimensions.filter((dimension) => dimension.domain === domain && !dimension.cube);
-    const looseMeasures = measures.filter((measure) => measure.domain === domain && !measure.cube);
-    const looseEntities = entities.filter((entity) => entity.domain === domain && !entity.cube);
-    const domainHierarchies = hierarchies.filter((hierarchy) => hierarchy.domain === domain);
-    const domainSemanticModels = semanticModels.filter((model) => model.domain === domain);
-    const domainSavedQueries = savedQueries.filter((query) => query.domain === domain);
+    const domainCubes = cubes.filter((cube) => sameSemanticDomain(cube.domain, domain));
+    const looseMetrics = metrics.filter((metric) => sameSemanticDomain(metric.domain, domain) && !metric.cube);
+    const looseDimensions = dimensions.filter((dimension) => sameSemanticDomain(dimension.domain, domain) && !dimension.cube);
+    const looseMeasures = measures.filter((measure) => sameSemanticDomain(measure.domain, domain) && !measure.cube);
+    const looseEntities = entities.filter((entity) => sameSemanticDomain(entity.domain, domain) && !entity.cube);
+    const domainHierarchies = hierarchies.filter((hierarchy) => sameSemanticDomain(hierarchy.domain, domain));
+    const domainSemanticModels = semanticModels.filter((model) => sameSemanticDomain(model.domain, domain));
+    const domainSavedQueries = savedQueries.filter((query) => sameSemanticDomain(query.domain, domain));
 
     const cubeNodes = domainCubes.map((cube) => ({
       id: objectId('cube', cube.name),
@@ -354,7 +367,7 @@ export function buildSemanticTree(
         tags: (dimension.tags ?? []).join(','),
         table: dimension.table,
       }))),
-      buildGroupNode(`domain:${domain}`, 'time_dimension', 'Time Dimensions', timeDimensions.filter((dimension) => dimension.domain === domain && !dimension.cube).map((dimension) => toLeaf('time_dimension', dimension.name, dimension.label, {
+      buildGroupNode(`domain:${domain}`, 'time_dimension', 'Time Dimensions', timeDimensions.filter((dimension) => sameSemanticDomain(dimension.domain, domain) && !dimension.cube).map((dimension) => toLeaf('time_dimension', dimension.name, dimension.label, {
         provider: dimension.source?.provider ?? providerName,
         domain: normalizeDomain(dimension.domain),
         cube: dimension.cube ?? null,
@@ -389,14 +402,14 @@ export function buildSemanticTree(
         owner: hierarchy.owner ?? null,
         tags: (hierarchy.tags ?? []).join(','),
       }))),
-      buildGroupNode(`domain:${domain}`, 'segment', 'Segments', segments.filter((segment) => segment.domain === domain && !segment.cube).map((segment) => toLeaf('segment', segment.name, segment.label, {
+      buildGroupNode(`domain:${domain}`, 'segment', 'Segments', segments.filter((segment) => sameSemanticDomain(segment.domain, domain) && !segment.cube).map((segment) => toLeaf('segment', segment.name, segment.label, {
         provider: segment.source?.provider ?? providerName,
         domain: normalizeDomain(segment.domain),
         cube: segment.cube || null,
         owner: segment.owner ?? null,
         tags: (segment.tags ?? []).join(','),
       }))),
-      buildGroupNode(`domain:${domain}`, 'pre_aggregation', 'Pre-aggregations', preAggregations.filter((preAggregation) => preAggregation.domain === domain && !preAggregation.cube).map((preAggregation) => toLeaf('pre_aggregation', preAggregation.name, preAggregation.label, {
+      buildGroupNode(`domain:${domain}`, 'pre_aggregation', 'Pre-aggregations', preAggregations.filter((preAggregation) => sameSemanticDomain(preAggregation.domain, domain) && !preAggregation.cube).map((preAggregation) => toLeaf('pre_aggregation', preAggregation.name, preAggregation.label, {
         provider: preAggregation.source?.provider ?? providerName,
         domain: normalizeDomain(preAggregation.domain),
         cube: preAggregation.cube || null,
@@ -1117,6 +1130,10 @@ function countObjects(objects: SemanticImportManifestObject[]): Record<SemanticI
 
 function normalizeDomain(domain: string | undefined): string {
   return domain && domain.trim().length > 0 ? domain.trim() : 'uncategorized';
+}
+
+function sameSemanticDomain(value: string | undefined, domain: string): boolean {
+  return normalizeDomain(value) === normalizeDomain(domain);
 }
 
 function slugifyPathSegment(value: string): string {

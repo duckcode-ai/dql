@@ -10,6 +10,8 @@ import {
   findProjectRoot,
   getConnectorInstallStatuses,
   loadProjectConfig,
+  normalizeProjectConnection,
+  resolveProjectSemanticConfig,
 } from '../local-runtime.js';
 import { listRemoteMcpSettings } from '../llm/mcp-config.js';
 import { listProviderSettings } from '../settings/provider-settings.js';
@@ -76,7 +78,7 @@ export async function runDoctor(targetPath: string | null, flags: CLIFlags): Pro
         ? `driver=${defaultConnection.driver}`
         : 'not configured yet; add Databricks, DuckDB/file, or Snowflake in the notebook Connections page',
     },
-    checkSemanticLayer(config.semanticLayer, projectRoot),
+    checkSemanticLayer(resolveProjectSemanticConfig(config, projectRoot), projectRoot),
   ];
 
   checks.push(checkNotebookAssets());
@@ -294,7 +296,7 @@ async function checkLocalQueryRuntime(projectRoot: string, connection: NonNullab
 
   try {
     process.chdir(projectRoot);
-    await assertLocalQueryRuntimeReady(executor, connection);
+    await assertLocalQueryRuntimeReady(executor, normalizeProjectConnection(connection, projectRoot));
     return {
       name: 'Local query runtime',
       ok: true,

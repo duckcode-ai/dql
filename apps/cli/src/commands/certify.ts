@@ -5,7 +5,7 @@ import { Certifier } from '@duckcodeailabs/dql-governance';
 import type { BlockRecord, TestResultSummary, TestAssertionResult } from '@duckcodeailabs/dql-project';
 import { QueryExecutor, type ConnectionConfig } from '@duckcodeailabs/dql-connectors';
 import { buildExecutionPlan, type NotebookCell } from '@duckcodeailabs/dql-notebook';
-import { loadProjectConfig, prepareLocalExecution, normalizeProjectConnection, resolveSemanticTableMapping } from '../local-runtime.js';
+import { loadProjectConfig, prepareLocalExecution, normalizeProjectConnection, resolveProjectSemanticConfig, resolveSemanticTableMapping } from '../local-runtime.js';
 import type { ProjectConfig } from '../local-runtime.js';
 import type { CLIFlags } from '../args.js';
 import { promoteFromDraft } from '../promote-from-draft.js';
@@ -69,7 +69,7 @@ async function runBlockTests(
   try {
     const cell: NotebookCell = { id: b.name, type: 'dql', source, title: b.name };
     let semanticLayer = undefined;
-    const semanticResult = resolveSemanticLayerWithDiagnostics(projectConfig.semanticLayer, projectRoot);
+    const semanticResult = resolveSemanticLayerWithDiagnostics(resolveProjectSemanticConfig(projectConfig, projectRoot), projectRoot);
     if (semanticResult.errors.length === 0) {
       semanticLayer = semanticResult.layer;
     }

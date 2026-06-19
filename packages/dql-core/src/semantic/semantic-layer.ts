@@ -845,35 +845,36 @@ export class SemanticLayer {
 
   listDomains(): string[] {
     const domains = new Set<string>();
+    const addDomain = (domain?: string) => domains.add(domain && domain.trim() ? domain : 'uncategorized');
     for (const metric of this.metrics.values()) {
-      if (metric.domain) domains.add(metric.domain);
+      addDomain(metric.domain);
     }
     for (const dimension of this.dimensions.values()) {
-      if (dimension.domain) domains.add(dimension.domain);
+      addDomain(dimension.domain);
     }
     for (const hierarchy of this.hierarchies.values()) {
-      if (hierarchy.domain) domains.add(hierarchy.domain);
+      addDomain(hierarchy.domain);
     }
     for (const segment of this.segments.values()) {
-      if (segment.domain) domains.add(segment.domain);
+      addDomain(segment.domain);
     }
     for (const preAggregation of this.preAggregations.values()) {
-      if (preAggregation.domain) domains.add(preAggregation.domain);
+      addDomain(preAggregation.domain);
     }
     for (const cube of this.cubes.values()) {
-      if (cube.domain) domains.add(cube.domain);
+      addDomain(cube.domain);
     }
     for (const measure of this.measures.values()) {
-      if (measure.domain) domains.add(measure.domain);
+      addDomain(measure.domain);
     }
     for (const entity of this.entities.values()) {
-      if (entity.domain) domains.add(entity.domain);
+      addDomain(entity.domain);
     }
     for (const model of this.semanticModels.values()) {
-      if (model.domain) domains.add(model.domain);
+      addDomain(model.domain);
     }
     for (const query of this.savedQueries.values()) {
-      if (query.domain) domains.add(query.domain);
+      addDomain(query.domain);
     }
     return Array.from(domains).sort((a, b) => a.localeCompare(b));
   }

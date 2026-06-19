@@ -553,6 +553,83 @@ function BlockGovernanceBar({
   );
 }
 
+function RunningOutput({
+  cellType,
+  cellName,
+  t,
+  onCancel,
+}: {
+  cellType: string;
+  cellName?: string;
+  t: Theme;
+  onCancel: () => void;
+}) {
+  const [elapsed, setElapsed] = useState(0);
+  useEffect(() => {
+    const started = Date.now();
+    const id = window.setInterval(() => setElapsed(Date.now() - started), 250);
+    return () => window.clearInterval(id);
+  }, []);
+  const seconds = elapsed < 1000 ? `${Math.max(1, Math.round(elapsed))}ms` : `${(elapsed / 1000).toFixed(1)}s`;
+  const stage = cellType === 'dql'
+    ? elapsed < 1200 ? 'Preparing DQL block' : elapsed < 5000 ? 'Executing generated SQL' : 'Waiting for warehouse response'
+    : elapsed < 1200 ? 'Preparing SQL' : elapsed < 5000 ? 'Executing query' : 'Waiting for database response';
+  return (
+    <div
+      role="status"
+      aria-live="polite"
+      style={{
+        display: 'grid',
+        gap: 10,
+        padding: 14,
+        minHeight: 92,
+        background: `${t.cellBorderRunning}0f`,
+        borderTop: `1px solid ${t.cellBorder}`,
+      }}
+    >
+      <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+        <span
+          aria-hidden
+          style={{
+            width: 10,
+            height: 10,
+            borderRadius: 999,
+            background: t.cellBorderRunning,
+            boxShadow: `0 0 0 4px ${t.cellBorderRunning}22`,
+            animation: 'pulse 1.2s ease-in-out infinite',
+            flexShrink: 0,
+          }}
+        />
+        <div style={{ minWidth: 0, flex: 1 }}>
+          <div style={{ fontSize: 13, fontWeight: 800, color: t.textPrimary, fontFamily: t.font }}>{stage}</div>
+          <div style={{ fontSize: 11, color: t.textMuted, fontFamily: t.fontMono, marginTop: 3 }}>
+            {cellName || cellType.toUpperCase()} · {seconds}
+          </div>
+        </div>
+        <button
+          onClick={onCancel}
+          style={{
+            border: `1px solid ${t.error}`,
+            background: `${t.error}12`,
+            color: t.error,
+            borderRadius: 4,
+            padding: '4px 8px',
+            fontSize: 11,
+            fontFamily: t.font,
+            fontWeight: 700,
+            cursor: 'pointer',
+          }}
+        >
+          Cancel
+        </button>
+      </div>
+      <div style={{ fontSize: 11, color: t.textMuted, fontFamily: t.font, lineHeight: 1.45 }}>
+        The result table will appear here when execution finishes. Errors will replace this status card with details.
+      </div>
+    </div>
+  );
+}
+
 // v1.3 Track 5 — cell types that are "developer affordances" and collapse
 // to a one-line strip in App mode. Viewer types (markdown, chart, single_value,
 // pivot, table, map, filter) render as today. The plan's full per-type chrome
@@ -799,7 +876,7 @@ export function CellComponent({ cell, index }: CellProps) {
     });
   };
 
-  const hasOutput = (cell.result || cell.error) && cell.type !== 'markdown';
+  const hasOutput = (cell.result || cell.error || cell.status === 'running') && cell.type !== 'markdown';
   // canChart: explicit chartConfig overrides heuristic detection
   const canChart = cell.result
     ? resolveChartType(cell.result, cell.chartConfig) !== 'table'
@@ -1340,6 +1417,14 @@ export function CellComponent({ cell, index }: CellProps) {
 
             {showOutput && (
               <>
+                {cell.status === 'running' && isExecutable && (
+                  <RunningOutput
+                    cellType={cell.type}
+                    cellName={cell.name}
+                    t={t}
+                    onCancel={() => cancelCell(cell.id)}
+                  />
+                )}
                 {cell.error && (
                   <ErrorOutput
                     message={cell.error}

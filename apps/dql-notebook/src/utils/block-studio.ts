@@ -8,6 +8,7 @@ export interface BlockFields {
   blockType: string;
   name: string;
   status: string;
+  llmContext?: string;
 }
 
 interface ParsedBlockDocument extends BlockFields {
@@ -116,6 +117,7 @@ export function parseBlockFields(content: string): BlockFields | null {
     blockType: parsed.blockType,
     status: parsed.status,
     tags: parsed.tags,
+    llmContext: parsed.llmContext,
   };
 }
 
@@ -254,6 +256,7 @@ function parseBlockDocument(content: string): ParsedBlockDocument | null {
     domain: str('domain'),
     owner: str('owner'),
     description: str('description'),
+    llmContext: str('llmContext'),
     status: str('status') || 'draft',
     blockType: (str('type') || 'custom').toLowerCase() === 'semantic' ? 'semantic' : 'custom',
     tags: tagsMatch ? (tagsMatch[1].match(/"([^"]*)"/g) ?? []).map((value) => value.slice(1, -1)) : [],
@@ -304,6 +307,9 @@ function normalizeBlockDocument(doc: ParsedBlockDocument): string {
     `  owner = "${escapeDqlString(doc.owner)}"`,
     `  tags = [${doc.tags.map((tag) => `"${escapeDqlString(tag)}"`).join(', ')}]`,
   ];
+  if (doc.llmContext) {
+    lines.push(`  llmContext = "${escapeDqlString(doc.llmContext)}"`);
+  }
 
   if (doc.blockType === 'semantic') {
     const semanticMetrics = doc.metrics.length > 0

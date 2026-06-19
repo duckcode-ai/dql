@@ -97,16 +97,6 @@ export function BlockLibraryPanel() {
         Import SQL
       </button>
       <button
-        onClick={() => dispatch({ type: 'OPEN_NEW_BLOCK_MODAL' })}
-        style={{
-          background: t.accent, border: 'none', borderRadius: 4,
-          color: '#fff', cursor: 'pointer', fontSize: 10, fontWeight: 600,
-          fontFamily: t.font, padding: '3px 10px',
-        }}
-      >
-        + New
-      </button>
-      <button
         onClick={refresh}
         style={{
           background: 'transparent', border: `1px solid ${t.cellBorder}`, borderRadius: 4,
@@ -142,7 +132,7 @@ export function BlockLibraryPanel() {
           title={blocks.length === 0 ? 'No blocks yet' : 'No matches'}
           description={
             blocks.length === 0
-              ? 'Create your first block to get started.'
+              ? 'Use Import SQL to create your first review-ready DQL block.'
               : 'No blocks match your search.'
           }
         />

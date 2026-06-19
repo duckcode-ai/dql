@@ -543,10 +543,40 @@ export interface BlockStudioImportCandidate {
     aiReviewed: boolean;
     blockers: string[];
     checkedAt?: string;
-  };
-  reviewStatus: 'draft' | 'review' | 'saved' | 'rejected';
-  savedPath?: string;
+    };
+    reviewStatus: 'draft' | 'review' | 'saved' | 'rejected';
+    savedPath?: string;
+    generationMode?: 'ai' | 'deterministic';
+    generationProvider?: string;
+    llmContext?: string;
+    evidence?: DqlGenerationEvidence[];
+    draftSave?: BlockDraftSaveState;
+  }
+
+export interface DqlGenerationEvidence {
+  kind: 'dql_block' | 'semantic_metric' | 'semantic_model' | 'dbt_model' | 'warehouse_table' | 'metadata' | 'lineage';
+  name: string;
+  description?: string;
+  objectKey?: string;
+  source?: string;
+  reason?: string;
+  confidence?: number;
 }
+
+export interface BlockDraftSaveState {
+  status: 'pending' | 'saved' | 'error';
+  path?: string;
+  savedAt?: string;
+  error?: string;
+}
+
+export type DqlGenerationCandidate = BlockStudioImportCandidate & {
+  generationMode: 'ai' | 'deterministic';
+  generationProvider: string;
+  llmContext: string;
+  evidence: DqlGenerationEvidence[];
+  draftSave: BlockDraftSaveState;
+};
 
 export interface BlockStudioImportSession {
   id: string;
@@ -563,6 +593,18 @@ export interface BlockStudioImportSession {
   };
   candidateIds: string[];
   candidates: BlockStudioImportCandidate[];
+}
+
+export interface DqlGenerationSession extends Omit<BlockStudioImportSession, 'candidates'> {
+  mode: 'ai-import';
+  generation: {
+    provider: string;
+    aiEnabled: boolean;
+    contextObjectCount: number;
+    createdDrafts: number;
+    warnings: string[];
+  };
+  candidates: DqlGenerationCandidate[];
 }
 
 export interface BlockStudioImportSessionSummary {
@@ -632,6 +674,23 @@ export interface BlockStudioDbtStatus {
   };
   lastSyncTime?: string | null;
   setupHint: string;
+}
+
+export interface SemanticLayerDiagnostics {
+  available: boolean;
+  provider: string | null;
+  errors: string[];
+  lastSyncTime?: string | null;
+  counts: {
+    domains: number;
+    metrics: number;
+    measures: number;
+    dimensions: number;
+    semanticModels: number;
+    savedQueries: number;
+  };
+  dbt: BlockStudioDbtStatus;
+  warnings: string[];
 }
 
 export interface BlockStudioOpenPayload {

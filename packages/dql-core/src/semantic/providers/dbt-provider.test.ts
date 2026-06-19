@@ -133,6 +133,41 @@ metrics:
     expect(totalLtv.sql).toBe('SUM(ltv)');
   });
 
+  it('surfaces regular dbt models when manifest has no MetricFlow semantic nodes', () => {
+    writeManifest({
+      nodes: {
+        'model.demo.fct_player_performance': {
+          unique_id: 'model.demo.fct_player_performance',
+          resource_type: 'model',
+          package_name: 'demo',
+          name: 'fct_player_performance',
+          alias: 'FCT_PLAYER_PERFORMANCE',
+          database: 'NBA_ANALYTICS',
+          schema: 'TRANSFORMED',
+          description: 'Player performance fact model',
+          fqn: ['demo', 'fct', 'fct_player_performance'],
+          columns: {
+            player_name: { name: 'player_name', description: 'Player name', data_type: 'varchar' },
+            total_points: { name: 'total_points', description: 'Total points', data_type: 'number' },
+            game_date_est: { name: 'game_date_est', description: 'Game date', data_type: 'date' },
+          },
+        },
+      },
+      semantic_models: {},
+      metrics: {},
+    });
+
+    const provider = new DbtProvider();
+    const layer = provider.load({ provider: 'dbt' }, tmpDir);
+
+    expect(layer.listSemanticModels().map((model) => model.name)).toContain('fct_player_performance');
+    expect(layer.listMetrics()).toEqual([]);
+    expect(layer.getDimension('fct_player_performance.player_name')?.type).toBe('string');
+    expect(layer.getDimension('fct_player_performance.total_points')?.type).toBe('number');
+    expect(layer.getDimension('fct_player_performance.game_date_est')?.isTimeDimension).toBe(true);
+    expect(layer.getSemanticModel('fct_player_performance')?.domain).toBe('fct');
+  });
+
   it('extracts table name from ref() syntax in model field', () => {
     writeManifest({
       semantic_models: {

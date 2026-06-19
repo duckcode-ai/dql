@@ -82,7 +82,7 @@ const initialState: NotebookState = {
   newNotebookModalOpen: false,
   newBlockModalOpen: false,
   newBlockModalDefaultType: 'custom',
-  autoSave: false,
+  autoSave: true,
   executionCounter: 0,
   savingFile: false,
   lineageFullscreen: false,
