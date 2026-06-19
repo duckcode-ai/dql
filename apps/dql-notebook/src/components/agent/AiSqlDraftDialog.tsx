@@ -218,7 +218,7 @@ export function AiSqlDraftDialog({
     <div
       role="dialog"
       aria-modal="true"
-      aria-label={mode === 'block' ? 'Ask AI for block SQL' : 'Ask AI for notebook SQL'}
+      aria-label={mode === 'block' ? 'Build DQL block' : 'Build SQL draft'}
       style={overlayStyle}
       onMouseDown={(event) => {
         if (event.target === event.currentTarget) onClose();
@@ -229,7 +229,7 @@ export function AiSqlDraftDialog({
           <div style={iconWrapStyle(t)}><Bot size={17} /></div>
           <div style={{ flex: 1, minWidth: 0 }}>
             <div style={{ fontSize: 15, fontWeight: 800, color: t.textPrimary }}>
-              {isBlockMode ? 'Build DQL block with AI' : 'Build SQL with AI'}
+              {isBlockMode ? 'Build DQL block' : 'Build SQL draft'}
             </div>
             <div style={{ fontSize: 12, color: t.textSecondary, marginTop: 2 }}>
               Metadata, dbt, certified blocks, and schema first. Generated work stays review-required.

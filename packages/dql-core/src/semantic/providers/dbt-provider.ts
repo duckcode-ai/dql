@@ -287,6 +287,7 @@ function loadFromManifestJson(manifestPath: string, artifactKind: 'manifest' | '
   }
 
   if (models.length === 0 && dbtMetrics.length === 0 && savedQueries.length === 0) {
+    if (artifactKind === 'manifest') return loadDbtModelInventoryFromManifest(manifest);
     // No semantic content — let the caller try the YAML fallback.
     return null;
   }
@@ -332,9 +333,115 @@ interface DbtManifestMetric extends DbtMetric {
   // Same story — manifest.json has extra metadata we don't consume.
 }
 
+interface DbtManifestModelNode {
+  name: string;
+  alias?: string;
+  relation_name?: string;
+  database?: string;
+  schema?: string;
+  description?: string;
+  resource_type?: string;
+  columns?: Record<string, Record<string, unknown>>;
+  config?: Record<string, unknown>;
+  meta?: Record<string, unknown>;
+  tags?: string[];
+  package_name?: string;
+  original_file_path?: string;
+  path?: string;
+  unique_id?: string;
+  fqn?: string[];
+}
+
 function asRecord(value: unknown): Record<string, unknown> {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return {};
   return value as Record<string, unknown>;
+}
+
+function loadDbtModelInventoryFromManifest(manifest: Record<string, unknown>): SemanticLayer | null {
+  const nodes = Object.values(asRecord(manifest.nodes))
+    .filter((node): node is DbtManifestModelNode => {
+      return Boolean(
+        node
+        && typeof node === 'object'
+        && !Array.isArray(node)
+        && (node as DbtManifestModelNode).resource_type === 'model'
+        && typeof (node as DbtManifestModelNode).name === 'string',
+      );
+    });
+  if (nodes.length === 0) return null;
+
+  const layer = new SemanticLayer();
+  for (const node of nodes) {
+    const tableName = resolveDbtModelTableName(node);
+    const domain = deriveDbtManifestNodeDomain(node);
+    const dimensions: DimensionDefinition[] = [];
+    const timeDimensions: TimeDimensionDefinition[] = [];
+
+    for (const [columnKey, columnValue] of Object.entries(asRecord(node.columns))) {
+      const rawColumn = asRecord(columnValue);
+      const columnName = firstString(rawColumn.name, columnKey);
+      if (!columnName) continue;
+      const columnType = inferDbtColumnType(rawColumn.data_type, columnName);
+      const dimension: DimensionDefinition = {
+        name: `${node.name}.${columnName}`,
+        label: labelFromName(columnName),
+        description: firstString(rawColumn.description) ?? '',
+        domain,
+        sql: columnName,
+        type: columnType,
+        table: tableName,
+        cube: node.name,
+        tags: Array.isArray(rawColumn.tags) ? rawColumn.tags.map(String) : undefined,
+        source: dbtSource('dbt_column', `${node.unique_id ?? node.name}.${columnName}`, columnName, {
+          ...rawColumn,
+          unique_id: `${node.unique_id ?? node.name}.${columnName}`,
+          package_name: node.package_name,
+          original_file_path: node.original_file_path ?? node.path,
+        }),
+      };
+      if (columnType === 'date') {
+        timeDimensions.push({
+          ...dimension,
+          isTimeDimension: true,
+          granularities: ['day', 'week', 'month', 'quarter', 'year'],
+        });
+      } else {
+        dimensions.push(dimension);
+      }
+    }
+
+    layer.addCube({
+      name: node.name,
+      label: labelFromName(node.name),
+      description: node.description ?? '',
+      sql: `SELECT * FROM ${tableName}`,
+      table: tableName,
+      domain,
+      measures: [],
+      dimensions,
+      timeDimensions,
+      joins: [],
+      segments: [],
+      preAggregations: [],
+      source: dbtSource('dbt_model', node.unique_id ?? node.name, node.name, node as unknown as Record<string, unknown>),
+    });
+    layer.addSemanticModel({
+      name: node.name,
+      label: labelFromName(node.name),
+      description: node.description ?? '',
+      domain,
+      model: node.name,
+      table: tableName,
+      entities: [],
+      measures: [],
+      dimensions: dimensions.map((dimension) => dimension.name),
+      timeDimensions: timeDimensions.map((dimension) => dimension.name),
+      tags: node.tags,
+      source: dbtSource('dbt_model', node.unique_id ?? node.name, node.name, node as unknown as Record<string, unknown>),
+    });
+  }
+
+  return layer;
 }
 
 /** Recursively collect all .yml/.yaml files in a directory. */
@@ -362,6 +469,39 @@ function collectYamlFiles(dir: string): string[] {
 }
 
 /** Extract a table name from a dbt semantic model. */
+function resolveDbtModelTableName(node: DbtManifestModelNode): string {
+  if (node.relation_name) return node.relation_name;
+  const relation = [node.database, node.schema, node.alias ?? node.name].filter(Boolean).join('.');
+  return relation || node.name;
+}
+
+function inferDbtColumnType(dataType: unknown, columnName: string): DimensionDefinition['type'] {
+  const value = `${typeof dataType === 'string' ? dataType : ''} ${columnName}`.toLowerCase();
+  if (/\b(bool|boolean)\b/.test(value)) return 'boolean';
+  if (/\b(date|time|timestamp|datetime)\b/.test(value)) return 'date';
+  if (/\b(int|integer|number|numeric|decimal|double|float|real)\b/.test(value)) return 'number';
+  return 'string';
+}
+
+function labelFromName(name: string): string {
+  return name.replace(/[_-]+/g, ' ').replace(/\b\w/g, (char) => char.toUpperCase());
+}
+
+function deriveDbtManifestNodeDomain(node: DbtManifestModelNode): string {
+  const meta = asRecord(node.meta);
+  const config = asRecord(node.config);
+  const configMeta = asRecord(config.meta);
+  return firstString(
+    meta?.domain,
+    meta?.group,
+    configMeta?.domain,
+    configMeta?.group,
+    config?.group,
+    Array.isArray(node.fqn) && node.fqn.length > 1 ? node.fqn[1] : undefined,
+    node.package_name,
+  )?.replace(/[^a-z0-9/_-]+/gi, '-').toLowerCase() || 'uncategorized';
+}
+
 function resolveTableName(model: DbtSemanticModel): string {
   if (model.model) {
     // dbt model refs look like "ref('stg_orders')" - extract the model name
@@ -418,12 +558,13 @@ function convertSemanticModel(
   artifactKind: 'manifest' | 'semantic_manifest' | 'yaml' = 'yaml',
 ): CubeDefinition {
   const tableName = resolveTableName(model);
+  const domain = deriveDbtDomain(model);
 
   const measures: MetricDefinition[] = (model.measures ?? []).map((m) => ({
     name: m.name,
     label: m.label ?? m.name,
     description: m.description ?? '',
-    domain: '',
+    domain,
     sql: buildAggSql(m.agg, m.expr ?? m.name),
     type: AGG_TYPE_MAP[m.agg] ?? 'custom',
     table: tableName,
@@ -458,7 +599,7 @@ function convertSemanticModel(
       const defaultGrans: TimeDimensionDefinition['granularities'] = ['day', 'week', 'month', 'quarter', 'year'];
       const isPrimary = model.defaults?.agg_time_dimension === dim.name;
 
-      timeDimensions.push({
+          timeDimensions.push({
         name: dim.name,
         label: dim.label ?? dim.name,
         description: dim.description ?? '',
@@ -471,14 +612,15 @@ function convertSemanticModel(
         typeParams: dim.type_params,
         granularities: defaultGrans,
         primaryTime: isPrimary,
-        source: dbtSource('time_dimension', `${model.name}.${dim.name}`, dim.name, {
+          domain,
+          source: dbtSource('time_dimension', `${model.name}.${dim.name}`, dim.name, {
           ...dim,
           semantic_model: model.name,
           artifactKind,
         }),
       });
     } else {
-      dimensions.push({
+        dimensions.push({
         name: dim.name,
         label: dim.label ?? dim.name,
         description: dim.description ?? '',
@@ -488,7 +630,8 @@ function convertSemanticModel(
         cube: model.name,
         expr: dim.expr,
         typeParams: dim.type_params,
-        source: dbtSource('dimension', `${model.name}.${dim.name}`, dim.name, {
+          domain,
+          source: dbtSource('dimension', `${model.name}.${dim.name}`, dim.name, {
           ...dim,
           semantic_model: model.name,
           artifactKind,
@@ -516,8 +659,8 @@ function convertSemanticModel(
     label: model.label ?? model.name,
     description: model.description ?? '',
     sql: `SELECT * FROM ${tableName}`,
-    table: tableName,
-    domain: '',
+      table: tableName,
+      domain,
     measures,
     dimensions,
     timeDimensions,
@@ -631,7 +774,7 @@ function convertDbtMetric(
     name: dbtMetric.name,
     label: dbtMetric.label ?? dbtMetric.name,
     description: dbtMetric.description ?? '',
-    domain: '',
+    domain: deriveDbtMetricDomain(dbtMetric, resolvedMeasure?.modelName),
     sql: resolvedMeasure
       ? buildAggSql(resolvedMeasure.agg, resolvedMeasure.sql)
       : String(dbtMetric.type_params?.expr ?? dbtMetric.name),
@@ -647,15 +790,45 @@ function convertDbtMetric(
   };
 }
 
+function deriveDbtDomain(model: DbtSemanticModel): string {
+  const meta = asRecord(model.meta);
+  const config = asRecord(model.config);
+  const configMeta = asRecord(config.meta);
+  return firstString(
+    meta?.domain,
+    meta?.group,
+    configMeta?.domain,
+    configMeta?.group,
+    config?.group,
+    model.package_name,
+  )?.replace(/[^a-z0-9/_-]+/gi, '-').toLowerCase() || 'uncategorized';
+}
+
+function deriveDbtMetricDomain(metric: DbtMetric, modelName?: string): string {
+  const meta = asRecord(metric.meta);
+  const config = asRecord(metric.config);
+  const configMeta = asRecord(config.meta);
+  return firstString(
+    meta?.domain,
+    meta?.group,
+    configMeta?.domain,
+    configMeta?.group,
+    config?.group,
+    metric.package_name,
+    modelName,
+  )?.replace(/[^a-z0-9/_-]+/gi, '-').toLowerCase() || 'uncategorized';
+}
+
 function convertSavedQuery(savedQuery: DbtSavedQuery): SavedQueryDefinition {
   const groupBy = savedQuery.query_params?.group_by ?? [];
   const timeRef = groupBy.find((value) => value.includes('__')) ?? groupBy.find((value) => value.toLowerCase().includes('metric_time'));
   const [timeDimension, granularity] = timeRef?.split('__') ?? [];
+  const meta = asRecord(savedQuery.config?.meta);
   return {
     name: savedQuery.name,
     label: savedQuery.label ?? savedQuery.name,
     description: savedQuery.description ?? '',
-    domain: '',
+    domain: firstString(meta.domain, meta.group) ?? 'uncategorized',
     metrics: savedQuery.query_params?.metrics ?? [],
     dimensions: groupBy.filter((value) => value !== timeRef),
     timeDimension: timeDimension || undefined,

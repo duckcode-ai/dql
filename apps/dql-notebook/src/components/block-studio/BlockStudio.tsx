@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Blocks, Bot, CheckCircle2, Code2, Database, FileInput, ShieldCheck, type LucideIcon } from 'lucide-react';
+import { AlertTriangle, Blocks, Bot, CheckCircle2, Code2, Database, FileInput, Loader2, ShieldCheck, Sparkles, X, type LucideIcon } from 'lucide-react';
 import { api } from '../../api/client';
 import { useNotebook } from '../../store/NotebookStore';
 import type {
@@ -72,6 +72,9 @@ export function BlockStudio() {
   const [databaseQuery, setDatabaseQuery] = useState('');
   const [loadingDbNodes, setLoadingDbNodes] = useState<Set<string>>(new Set());
   const [running, setRunning] = useState(false);
+  const [runError, setRunError] = useState<string | null>(null);
+  const [runStartedAt, setRunStartedAt] = useState<number | null>(null);
+  const [runElapsedMs, setRunElapsedMs] = useState(0);
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
   const [catalogError, setCatalogError] = useState<string | null>(null);
@@ -231,8 +234,13 @@ export function BlockStudio() {
     timeDimensions: state.semanticLayer.timeDimensions.length,
     entities: state.semanticLayer.entities.length,
     hierarchies: state.semanticLayer.hierarchies.length,
+    semanticModels: state.semanticLayer.semanticModels.length,
     savedQueries: state.semanticLayer.savedQueries.length,
   };
+  const semanticObjectCount = Math.max(
+    countSemanticObjects(semanticStats),
+    countSemanticLeafNodes(effectiveSemanticTree),
+  );
   const totalTreeHeight = flatSemanticRows.length * TREE_ROW_HEIGHT;
   const visibleRows = useMemo(() => {
     const startIndex = Math.max(0, Math.floor(scrollTop / TREE_ROW_HEIGHT) - TREE_OVERSCAN);
@@ -312,35 +320,26 @@ export function BlockStudio() {
   }, [activeBlockName, dispatch]);
 
   const handleDraftChange = (draft: string) => {
+    setRunError(null);
     dispatch({ type: 'SET_BLOCK_STUDIO_DRAFT', draft });
   };
 
   const handleRun = async () => {
     setRunning(true);
+    setRunError(null);
+    setRunStartedAt(Date.now());
+    setRunElapsedMs(0);
+    dispatch({ type: 'SET_BLOCK_STUDIO_PREVIEW', preview: null });
     try {
       const preview = await api.runBlockStudio(state.blockStudioDraft, state.activeBlockPath);
       dispatch({ type: 'SET_BLOCK_STUDIO_PREVIEW', preview });
       setResultTab('results');
     } catch (error) {
-      dispatch({
-        type: 'SET_BLOCK_STUDIO_VALIDATION',
-        validation: {
-          valid: false,
-          chartConfig: state.blockStudioValidation?.chartConfig,
-          executableSql: state.blockStudioValidation?.executableSql ?? null,
-          semanticRefs: state.blockStudioValidation?.semanticRefs ?? { metrics: [], dimensions: [], segments: [] },
-          diagnostics: [
-            {
-              severity: 'error',
-              code: 'block_run_failed',
-              message: error instanceof Error ? error.message : String(error),
-            },
-          ],
-        },
-      });
+      setRunError(error instanceof Error ? error.message : String(error));
       setResultTab('results');
     } finally {
       setRunning(false);
+      setRunStartedAt(null);
     }
   };
 
@@ -423,9 +422,27 @@ export function BlockStudio() {
       const result = await api.certifyBlockStudio({ source: saved.source, path: saved.path });
       setCertificationResult(result);
       if (result.ok && result.status) {
-        const certifiedSource = setBlockStringField(saved.source, 'status', result.status);
-        dispatch({ type: 'SET_BLOCK_STUDIO_METADATA', metadata: { ...saved.metadata, reviewStatus: result.status } });
-        dispatch({ type: 'SET_BLOCK_STUDIO_DRAFT', draft: certifiedSource });
+        const nextPath = result.path || saved.path;
+        const nextSource = result.source ?? setBlockStringField(saved.source, 'status', result.status);
+        const nextMetadata = result.metadata ?? { ...saved.metadata, path: nextPath, reviewStatus: result.status };
+        const nextPayload: BlockStudioOpenPayload = {
+          path: nextPath,
+          source: nextSource,
+          metadata: { ...nextMetadata, path: nextPath, reviewStatus: result.status },
+          companionPath: result.companionPath ?? saved.companionPath ?? null,
+          validation: result.validation ?? saved.validation,
+        };
+        dispatch({
+          type: 'OPEN_BLOCK_STUDIO',
+          file: {
+            name: `${nextPayload.metadata.name}.dql`,
+            path: nextPath,
+            type: 'block',
+            folder: 'blocks',
+            isNew: false,
+          },
+          payload: nextPayload,
+        });
       }
       setResultTab('save');
     } catch (error: any) {
@@ -440,12 +457,13 @@ export function BlockStudio() {
   };
 
   const handleImportCandidateSelect = (candidate: BlockStudioImportCandidate) => {
+    const candidatePath = candidate.savedPath ?? candidate.draftSave?.path ?? '';
     const payload = {
-      path: '',
+      path: candidatePath,
       source: candidate.dqlSource,
       metadata: {
         name: candidate.name,
-        path: null,
+        path: candidatePath || null,
         domain: candidate.domain,
         description: candidate.description,
         owner: candidate.owner,
@@ -469,10 +487,10 @@ export function BlockStudio() {
       type: 'OPEN_BLOCK_STUDIO',
       file: {
         name: `${candidate.name}.dql`,
-        path: '',
+        path: candidatePath,
         type: 'block',
         folder: 'blocks',
-        isNew: true,
+        isNew: !candidatePath,
       },
       payload,
     });
@@ -613,6 +631,14 @@ export function BlockStudio() {
       dispatch({ type: 'SET_BLOCK_STUDIO_CATALOG', catalog });
     } catch { /* non-fatal */ }
   }, [dispatch]);
+
+  useEffect(() => {
+    if (!running || !runStartedAt) return;
+    const updateElapsed = () => setRunElapsedMs(Date.now() - runStartedAt);
+    updateElapsed();
+    const timer = window.setInterval(updateElapsed, 1000);
+    return () => window.clearInterval(timer);
+  }, [running, runStartedAt]);
 
   const currentChart = state.blockStudioValidation?.chartConfig ?? state.blockStudioPreview?.chartConfig ?? { chart: 'table' };
   const activeResultChartType = state.blockStudioPreview
@@ -880,10 +906,10 @@ export function BlockStudio() {
             </span>
           )}
           <div style={{ flex: 1 }} />
-          <TemplateButton label="Ask AI" onClick={() => { setResultTab('results'); setAiSqlOpen(true); }} />
-          <TemplateButton label="Import SQL" onClick={() => dispatch({ type: 'OPEN_BLOCK_IMPORT' })} />
+          <TemplateButton label="Import SQL" Icon={FileInput} variant="primary" onClick={() => dispatch({ type: 'OPEN_BLOCK_IMPORT' })} />
+          <TemplateButton label="Build DQL" Icon={Bot} onClick={() => { setResultTab('results'); setAiSqlOpen(true); }} />
           <TemplateButton label="Run" onClick={() => void handleRun()} busy={running} />
-          <TemplateButton label="Save Block" onClick={() => void handleSave()} busy={saving} />
+          <TemplateButton label="Save" onClick={() => void handleSave()} busy={saving} />
           {state.activeBlockPath && (
             <TemplateButton label="Certify" onClick={() => void handleCertify()} busy={certifying} />
           )}
@@ -898,11 +924,12 @@ export function BlockStudio() {
             <BlockStudioStartPage
               dbtStatus={state.blockStudioDbtStatus}
               semanticStats={semanticStats}
+              semanticObjectCount={semanticObjectCount}
               databaseStats={databaseStats}
               onCreateSql={() => dispatch({ type: 'OPEN_NEW_BLOCK_MODAL', blockType: 'custom' })}
               onCreateSemantic={() => dispatch({ type: 'OPEN_NEW_BLOCK_MODAL', blockType: 'semantic' })}
               onImport={() => dispatch({ type: 'OPEN_BLOCK_IMPORT' })}
-              onAskAi={() => {
+              onBuildDql={() => {
                 setResultTab('results');
                 setAiSqlOpen(true);
               }}
@@ -995,7 +1022,9 @@ export function BlockStudio() {
 
         <div style={{ flex: 1, overflow: 'auto' }}>
           {resultTab === 'results' && (
-            state.blockStudioPreview ? (
+            running ? (
+              <BlockStudioRunStatusCard elapsedMs={runElapsedMs} />
+            ) : state.blockStudioPreview ? (
               <div style={{ display: 'grid', gap: 12, padding: 12 }}>
                 <div style={{ fontSize: 11, color: t.textMuted, fontFamily: t.fontMono }}>{state.blockStudioPreview.sql}</div>
                 {activeResultChartType === 'table' ? (
@@ -1008,6 +1037,8 @@ export function BlockStudio() {
                   />
                 )}
               </div>
+            ) : runError ? (
+              <BlockStudioRunErrorCard message={runError} />
             ) : (
               <EmptyPanel message="Run the block to preview results." />
             )
@@ -1100,21 +1131,18 @@ export function BlockStudio() {
       )}
 
       {state.blockStudioImportOpen && (
-        <BlockStudioImportOverlay
-          t={t}
-          onClose={() => dispatch({ type: 'CLOSE_BLOCK_IMPORT' })}
-        >
+        <BlockStudioImportOverlay t={t}>
           <BlockStudioImportWorkspace
             session={importSession}
             sessions={importSessions}
             sessionsLoading={importSessionsLoading}
+            onClose={() => dispatch({ type: 'CLOSE_BLOCK_IMPORT' })}
             onSessionChange={setImportSession}
             onRefreshSessions={refreshImportSessions}
-            onClose={() => dispatch({ type: 'CLOSE_BLOCK_IMPORT' })}
             onSelectCandidate={handleImportCandidateSelect}
             onSavedCandidate={handleImportCandidateSaved}
-            defaultDomain={draftMetadata?.domain || state.blockStudioMetadata?.domain || 'imported'}
-            defaultOwner={draftMetadata?.owner || state.blockStudioMetadata?.owner || ''}
+            defaultDomain=""
+            defaultOwner=""
             themeMode={state.themeMode}
             t={t}
           />
@@ -1124,88 +1152,85 @@ export function BlockStudio() {
   );
 }
 
-function ExplorerTabButton({ active, onClick, label, busy }: { active: boolean; onClick: () => void; label: string; busy?: boolean }) {
+function ExplorerTabButton({
+  active,
+  onClick,
+  label,
+  busy,
+  Icon,
+  variant = 'secondary',
+}: {
+  active: boolean;
+  onClick: () => void;
+  label: string;
+  busy?: boolean;
+  Icon?: LucideIcon;
+  variant?: 'primary' | 'secondary';
+}) {
   const { state } = useNotebook();
   const t = themes[state.themeMode];
+  const primary = variant === 'primary';
   return (
     <button
       onClick={onClick}
       style={{
-        background: active ? `${t.accent}18` : t.btnBg,
-        border: `1px solid ${active ? t.accent : t.btnBorder}`,
+        background: primary ? t.accent : active ? `${t.accent}18` : t.btnBg,
+        border: `1px solid ${primary || active ? t.accent : t.btnBorder}`,
         borderRadius: 6,
-        color: active ? t.accent : t.textSecondary,
+        color: primary ? '#ffffff' : active ? t.accent : t.textSecondary,
         cursor: 'pointer',
+        display: 'inline-flex',
+        alignItems: 'center',
+        gap: 6,
         fontSize: 11,
+        fontWeight: primary ? 800 : 600,
         fontFamily: t.font,
         padding: '6px 10px',
         opacity: busy ? 0.7 : 1,
       }}
     >
-      {busy ? `${label}…` : label}
+      {busy ? <Loader2 size={13} strokeWidth={2} aria-hidden="true" /> : Icon ? <Icon size={13} strokeWidth={2} aria-hidden="true" /> : null}
+      {busy ? `${label}...` : label}
     </button>
   );
 }
 
-function TemplateButton(props: { label: string; onClick: () => void; busy?: boolean }) {
+function TemplateButton(props: { label: string; onClick: () => void; busy?: boolean; Icon?: LucideIcon; variant?: 'primary' | 'secondary' }) {
   return <ExplorerTabButton active={false} {...props} />;
 }
 
 function BlockStudioImportOverlay({
   children,
-  onClose,
   t,
 }: {
   children: React.ReactNode;
-  onClose: () => void;
   t: Theme;
 }) {
   return (
     <div
       style={{
         position: 'absolute',
-        inset: 0,
+        inset: '48px 0 0 0',
         zIndex: 40,
         background: 'rgba(0, 0, 0, 0.28)',
         display: 'flex',
         alignItems: 'center',
         justifyContent: 'center',
-        padding: 24,
+        padding: 10,
       }}
     >
       <div
         style={{
-          width: 'min(1180px, calc(100vw - 64px))',
-          height: 'min(760px, calc(100vh - 96px))',
+          width: 'min(1540px, calc(100vw - 20px))',
+          height: 'min(900px, calc(100vh - 76px))',
           background: t.appBg,
           border: `1px solid ${t.headerBorder}`,
-          borderRadius: 10,
+          borderRadius: 8,
           boxShadow: '0 24px 80px rgba(0,0,0,0.36)',
           overflow: 'hidden',
           position: 'relative',
         }}
       >
-        <button
-          onClick={onClose}
-          title="Close import"
-          style={{
-            position: 'absolute',
-            top: 10,
-            right: 12,
-            zIndex: 4,
-            background: t.btnBg,
-            border: `1px solid ${t.btnBorder}`,
-            borderRadius: 6,
-            color: t.textSecondary,
-            cursor: 'pointer',
-            fontSize: 16,
-            lineHeight: 1,
-            width: 30,
-            height: 30,
-          }}
-        >
-          ×
-        </button>
         {children}
       </div>
     </div>
@@ -1215,11 +1240,12 @@ function BlockStudioImportOverlay({
 function BlockStudioStartPage({
   dbtStatus,
   semanticStats,
+  semanticObjectCount,
   databaseStats,
   onCreateSql,
   onCreateSemantic,
   onImport,
-  onAskAi,
+  onBuildDql,
   t,
 }: {
   dbtStatus: BlockStudioDbtStatus | null;
@@ -1230,48 +1256,35 @@ function BlockStudioStartPage({
     timeDimensions: number;
     entities: number;
     hierarchies: number;
+    semanticModels: number;
     savedQueries: number;
   };
+  semanticObjectCount: number;
   databaseStats: { schemas: number; tables: number; columns: number };
   onCreateSql: () => void;
   onCreateSemantic: () => void;
   onImport: () => void;
-  onAskAi: () => void;
+  onBuildDql: () => void;
   t: Theme;
 }) {
-  const cards = [
+  const manualActions = [
     {
-      title: 'SQL block',
-      detail: 'Model or table to reusable SELECT.',
+      title: 'Blank SQL block',
+      detail: 'Start with an empty custom query.',
       action: onCreateSql,
       label: 'Create',
       Icon: Code2,
     },
     {
       title: 'Semantic block',
-      detail: 'Metric to governed answer block.',
+      detail: 'Build directly from governed metrics.',
       action: onCreateSemantic,
       label: 'Build',
       Icon: Blocks,
     },
-    {
-      title: 'Import SQL',
-      detail: 'Convert existing queries to DQL.',
-      action: onImport,
-      label: 'Import',
-      Icon: FileInput,
-    },
-    {
-      title: 'Ask AI',
-      detail: 'Draft from dbt project context.',
-      action: onAskAi,
-      label: 'Draft',
-      Icon: Bot,
-    },
   ];
   const dbtReady = Boolean(dbtStatus?.artifacts.manifest.exists);
   const semanticMetricCount = dbtStatus?.counts.metrics ?? semanticStats.metrics;
-  const semanticObjectCount = semanticMetricCount + (dbtStatus?.counts.savedQueries ?? semanticStats.savedQueries);
   const sourceSummary = dbtStatus
     ? `${dbtStatus.counts.models} models · ${semanticMetricCount} metrics`
     : 'Waiting for dbt artifacts';
@@ -1281,9 +1294,9 @@ function BlockStudioStartPage({
     <div style={{ height: '100%', overflow: 'auto', padding: 22, display: 'grid', gap: 14, alignContent: 'start', background: t.appBg }}>
       <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 16, flexWrap: 'wrap' }}>
         <div>
-          <div style={{ fontSize: 20, fontWeight: 800, color: t.textPrimary, fontFamily: t.font }}>Build a DQL block</div>
+          <div style={{ fontSize: 20, fontWeight: 800, color: t.textPrimary, fontFamily: t.font }}>Create DQL blocks</div>
           <div style={{ fontSize: 12, color: t.textMuted, lineHeight: 1.45, marginTop: 5, maxWidth: 560, fontFamily: t.font }}>
-            Start from dbt models, semantic metrics, existing SQL, or an AI draft.
+            Start from SQL you already have, or describe the business asset you want DQL to build from project context.
           </div>
         </div>
         <div style={{ display: 'flex', alignItems: 'center', gap: 7, padding: '7px 10px', border: `1px solid ${dbtReady ? '#2ea04340' : t.headerBorder}`, borderRadius: 8, background: dbtReady ? '#2ea0430d' : t.cellBg }}>
@@ -1294,19 +1307,41 @@ function BlockStudioStartPage({
         </div>
       </div>
 
-      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(160px, 1fr))', gap: 10 }}>
-        {cards.map((card) => (
-          <CompactStartTile
-            key={card.title}
-            title={card.title}
-            detail={card.detail}
-            label={card.label}
-            Icon={card.Icon}
-            onClick={card.action}
-            t={t}
-          />
-        ))}
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(260px, 1fr))', gap: 10 }}>
+        <PrimaryStartAction
+          title="Import SQL"
+          detail="Paste scripts, upload files, or point at a folder. DQL analyzes metadata and creates autosaved review drafts."
+          label="Start import"
+          Icon={FileInput}
+          onClick={onImport}
+          t={t}
+        />
+        <PrimaryStartAction
+          title="Build DQL"
+          detail="Describe the reusable block you need. DQL uses dbt, semantic, warehouse, and certified block context before drafting."
+          label="Build draft"
+          Icon={Bot}
+          onClick={onBuildDql}
+          t={t}
+        />
       </div>
+
+      <details style={importDisclosureStyle(t)}>
+        <summary style={importSummaryStyle(t)}>Manual options</summary>
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(160px, 1fr))', gap: 10 }}>
+          {manualActions.map((card) => (
+            <CompactStartTile
+              key={card.title}
+              title={card.title}
+              detail={card.detail}
+              label={card.label}
+              Icon={card.Icon}
+              onClick={card.action}
+              t={t}
+            />
+          ))}
+        </div>
+      </details>
 
       <section style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(160px, 1fr))', gap: 8 }}>
         <ReadinessChip Icon={Database} label={projectLabel} value={sourceSummary} tone={dbtReady ? 'success' : 'neutral'} t={t} />
@@ -1315,6 +1350,55 @@ function BlockStudioStartPage({
         <ReadinessChip Icon={ShieldCheck} label="Governance" value="Run · validate · certify" tone="neutral" t={t} />
       </section>
     </div>
+  );
+}
+
+function PrimaryStartAction({
+  title,
+  detail,
+  label,
+  Icon,
+  onClick,
+  t,
+}: {
+  title: string;
+  detail: string;
+  label: string;
+  Icon: LucideIcon;
+  onClick: () => void;
+  t: Theme;
+}) {
+  return (
+    <button
+      onClick={onClick}
+      style={{
+        border: `1px solid ${t.accent}`,
+        borderRadius: 8,
+        background: t.cellBg,
+        color: t.textPrimary,
+        cursor: 'pointer',
+        display: 'grid',
+        gridTemplateColumns: '42px minmax(0, 1fr) auto',
+        gap: 12,
+        alignItems: 'center',
+        padding: 16,
+        minHeight: 104,
+        textAlign: 'left',
+        fontFamily: t.font,
+        boxShadow: `inset 0 0 0 1px ${t.accent}22`,
+      }}
+    >
+      <span style={{ width: 42, height: 42, borderRadius: 8, display: 'inline-flex', alignItems: 'center', justifyContent: 'center', background: `${t.accent}18`, color: t.accent }}>
+        <Icon size={20} strokeWidth={2} aria-hidden="true" />
+      </span>
+      <span style={{ display: 'grid', gap: 5, minWidth: 0 }}>
+        <span style={{ fontSize: 15, fontWeight: 850, color: t.textPrimary }}>{title}</span>
+        <span style={{ fontSize: 12, color: t.textMuted, lineHeight: 1.4 }}>{detail}</span>
+      </span>
+      <span style={{ color: '#ffffff', background: t.accent, borderRadius: 6, padding: '7px 10px', fontSize: 11, fontWeight: 800, whiteSpace: 'nowrap' }}>
+        {label}
+      </span>
+    </button>
   );
 }
 
@@ -1361,6 +1445,24 @@ function CompactStartTile({
         <span style={{ color: t.accent, fontSize: 11, fontWeight: 800 }}>{label}</span>
       </span>
     </button>
+  );
+}
+
+function StartPill({ label, t }: { label: string; t: Theme }) {
+  return (
+    <span style={{
+      border: `1px solid ${t.headerBorder}`,
+      borderRadius: 999,
+      color: t.textSecondary,
+      background: t.btnBg,
+      fontSize: 10,
+      fontWeight: 750,
+      padding: '3px 7px',
+      lineHeight: 1.2,
+      whiteSpace: 'nowrap',
+    }}>
+      {label}
+    </span>
   );
 }
 
@@ -1645,7 +1747,29 @@ function smartItemFromCandidate(candidate: BlockStudioImportCandidate): SmartImp
       sourcePath: candidate.sourcePath,
       status: 'ready',
       rows: rowCountForImportCandidate(candidate),
-      message: 'Preview ran successfully.',
+      savedPath: candidate.savedPath,
+      message: candidate.savedPath?.startsWith('blocks/_drafts/')
+        ? 'Preview ran successfully. Draft is autosaved for review.'
+        : 'Preview ran successfully.',
+    };
+  }
+  if (candidate.draftSave?.status === 'saved' || candidate.savedPath?.startsWith('blocks/_drafts/')) {
+    return {
+      id: candidate.id,
+      name: candidate.name,
+      sourcePath: candidate.sourcePath,
+      status: 'ready',
+      savedPath: candidate.draftSave?.path ?? candidate.savedPath,
+      message: 'Draft autosaved. Run preview, then certify when ready.',
+    };
+  }
+  if (candidate.draftSave?.status === 'error') {
+    return {
+      id: candidate.id,
+      name: candidate.name,
+      sourcePath: candidate.sourcePath,
+      status: 'needs_attention',
+      message: candidate.draftSave.error ?? 'Draft autosave failed.',
     };
   }
   return {
@@ -1655,6 +1779,10 @@ function smartItemFromCandidate(candidate: BlockStudioImportCandidate): SmartImp
     status: 'queued',
     message: 'Ready to process.',
   };
+}
+
+function isAiGeneratedCandidate(candidate: BlockStudioImportCandidate): boolean {
+  return Boolean(candidate.generationMode || candidate.draftSave || candidate.savedPath?.startsWith('blocks/_drafts/'));
 }
 
 function smartImportPhaseLabel(phase: SmartImportPhase): string {
@@ -1680,9 +1808,9 @@ function BlockStudioImportWorkspace({
   session,
   sessions,
   sessionsLoading,
+  onClose,
   onSessionChange,
   onRefreshSessions,
-  onClose,
   onSelectCandidate,
   onSavedCandidate,
   defaultDomain,
@@ -1693,9 +1821,9 @@ function BlockStudioImportWorkspace({
   session: BlockStudioImportSession | null;
   sessions: BlockStudioImportSessionSummary[];
   sessionsLoading: boolean;
+  onClose: () => void;
   onSessionChange: (session: BlockStudioImportSession | null) => void;
   onRefreshSessions: () => Promise<void>;
-  onClose: () => void;
   onSelectCandidate: (candidate: BlockStudioImportCandidate) => void;
   onSavedCandidate: (candidate: BlockStudioImportCandidate, block: BlockStudioOpenPayload) => void;
   defaultDomain: string;
@@ -1703,7 +1831,7 @@ function BlockStudioImportWorkspace({
   themeMode: ThemeMode;
   t: Theme;
 }) {
-  const [mode, setMode] = useState<ImportSourceMode>('import');
+  const [mode, setMode] = useState<ImportSourceMode>('paste');
   const [path, setPath] = useState('');
   const [pasteSql, setPasteSql] = useState('');
   const [uploadSources, setUploadSources] = useState<Array<{ path: string; content: string }>>([]);
@@ -1715,10 +1843,10 @@ function BlockStudioImportWorkspace({
   const [error, setError] = useState<string | null>(null);
   const [pendingDelete, setPendingDelete] = useState<{ kind: 'one'; id: string } | { kind: 'all' } | null>(null);
   const [historyOpen, setHistoryOpen] = useState(false);
+  const [sourceOpen, setSourceOpen] = useState(true);
   const [candidateSearch, setCandidateSearch] = useState('');
   const [showAllCandidates, setShowAllCandidates] = useState(false);
   const [candidateErrors, setCandidateErrors] = useState<Record<string, string>>({});
-  const [showAdvanced, setShowAdvanced] = useState(false);
   const [smartPhase, setSmartPhase] = useState<SmartImportPhase>('idle');
   const [smartItems, setSmartItems] = useState<Record<string, SmartImportItem>>({});
 
@@ -1742,19 +1870,19 @@ function BlockStudioImportWorkspace({
   }, [session?.id]);
 
   useEffect(() => {
+    setSourceOpen(!session?.candidates.length);
+  }, [session?.id, session?.candidates.length]);
+
+  useEffect(() => {
     if (!session) {
       setSmartItems({});
       setSmartPhase('idle');
-      setShowAdvanced(false);
       return;
     }
     setSmartItems(Object.fromEntries(session.candidates.map((candidate) => [candidate.id, smartItemFromCandidate(candidate)])));
     setSmartPhase((phase) => phase === 'idle' ? 'complete' : phase);
   }, [session?.id]);
 
-  const readyCount = session?.candidates.filter((candidate) => candidate.validation?.valid !== false && candidate.reviewStatus !== 'rejected').length ?? 0;
-  const savedCount = session?.candidates.filter((candidate) => candidate.reviewStatus === 'saved').length ?? 0;
-  const warningCount = session?.candidates.reduce((sum, candidate) => sum + ((candidate.warnings ?? candidate.lineage.warnings).length), 0) ?? 0;
   const candidateMatches = useMemo(() => {
     const normalized = candidateSearch.trim().toLowerCase();
     const source = session?.candidates ?? [];
@@ -1778,6 +1906,8 @@ function BlockStudioImportWorkspace({
     else counts.processing += 1;
     return counts;
   }, { saved: 0, ready: 0, attention: 0, processing: 0 });
+  const activeStep = !session ? 1 : smartCounts.saved > 0 ? 3 : 2;
+  const readyCount = session?.candidates.filter((candidate) => candidate.validation?.valid !== false).length ?? 0;
 
   const sourceReady = Boolean(mode === 'paste'
     ? pasteSql.trim()
@@ -1805,40 +1935,20 @@ function BlockStudioImportWorkspace({
     return { path, inputMode: 'path' as const, sourceKind: 'raw-sql' as const, domain, owner };
   };
 
-  const createSession = async () => {
-    setLoading(true);
-    setError(null);
-    try {
-      const payload = buildImportPayload();
-      const next = await api.createBlockStudioImport(payload);
-      onSessionChange(next);
-      setSelectedId(next.candidates[0]?.id ?? null);
-      setCandidateErrors({});
-      setSmartPhase('complete');
-      setShowAdvanced(true);
-      await onRefreshSessions();
-    } catch (err: any) {
-      setError(err?.message ?? 'Import session failed.');
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  const runSmartImport = async () => {
+    const runSmartImport = async () => {
     setLoading(true);
     setSavingAll(true);
     setError(null);
     setCandidateErrors({});
-    setShowAdvanced(false);
     setSmartItems({});
-    setSmartPhase('creating');
-    try {
-      const created = await api.createBlockStudioImport(buildImportPayload());
-      let workingSession = created;
-      let items: Record<string, SmartImportItem> = Object.fromEntries(created.candidates.map((candidate) => [
-        candidate.id,
-        { ...smartItemFromCandidate(candidate), status: 'queued' as SmartImportItemStatus, message: 'Waiting to run.' },
-      ]));
+      setSmartPhase('creating');
+      try {
+        const created = await api.createDqlGenerationSession(buildImportPayload());
+        let workingSession: BlockStudioImportSession = created;
+        let items: Record<string, SmartImportItem> = Object.fromEntries(created.candidates.map((candidate) => [
+          candidate.id,
+          { ...smartItemFromCandidate(candidate), status: 'queued' as SmartImportItemStatus, message: candidate.draftSave?.status === 'saved' ? 'Draft saved. Waiting to preview.' : 'Waiting to run.' },
+        ]));
       const updateItem = (candidateId: string, updater: (item: SmartImportItem) => SmartImportItem) => {
         items = { ...items, [candidateId]: updater(items[candidateId]) };
         setSmartItems(items);
@@ -1856,20 +1966,21 @@ function BlockStudioImportWorkspace({
       setSmartItems(items);
       await onRefreshSessions();
 
-      setSmartPhase('running');
-      for (const candidate of created.candidates) {
-        updateItem(candidate.id, (item) => ({ ...item, status: 'running', message: 'Running preview.' }));
-        try {
-          const next = await api.runBlockStudioImportCandidate(created.id, candidate.id);
-          replaceCandidate(next);
-          updateItem(candidate.id, (item) => ({
-            ...item,
-            name: next.name,
-            sourcePath: next.sourcePath,
-            status: 'ready',
-            rows: rowCountForImportCandidate(next),
-            message: 'Preview ran successfully.',
-          }));
+        setSmartPhase('running');
+        for (const candidate of created.candidates) {
+          updateItem(candidate.id, (item) => ({ ...item, status: 'running', message: 'Running preview.' }));
+          try {
+            const next = await api.previewDqlGenerationCandidate(created.id, candidate.id);
+            replaceCandidate(next);
+            updateItem(candidate.id, (item) => ({
+              ...item,
+              name: next.name,
+              sourcePath: next.sourcePath,
+              status: 'ready',
+              rows: rowCountForImportCandidate(next),
+              savedPath: next.draftSave?.path ?? next.savedPath,
+              message: 'Preview ran successfully. Draft is autosaved for review.',
+            }));
         } catch (err: any) {
           const message = err?.message ?? 'Preview failed.';
           setCandidateErrors((current) => ({ ...current, [candidate.id]: message }));
@@ -1877,37 +1988,10 @@ function BlockStudioImportWorkspace({
         }
       }
 
-      setSmartPhase('saving');
-      for (const candidate of workingSession.candidates) {
-        const item = items[candidate.id];
-        if (!item || item.status !== 'ready' || candidate.reviewStatus === 'saved') continue;
-        updateItem(candidate.id, (current) => ({ ...current, status: 'saving', message: 'Saving block.' }));
-        try {
-          const result = await api.saveBlockStudioImportCandidate(workingSession.id, candidate.id);
-          replaceCandidate(result.candidate);
-          onSavedCandidate(result.candidate, result.block);
-          updateItem(candidate.id, (current) => ({
-            ...current,
-            status: 'saved',
-            savedPath: result.block.path,
-            message: 'Block saved.',
-          }));
-        } catch (err: any) {
-          const message = err?.message ?? 'Save failed.';
-          updateItem(candidate.id, (current) => ({
-            ...current,
-            status: 'needs_attention',
-            message: message.includes('409') || message.includes('already exists')
-              ? 'A block with this name already exists. Rename it in advanced details, then save again.'
-              : message,
-          }));
-        }
-      }
-
-      onSessionChange(workingSession);
-      setSelectedId(workingSession.candidates.find((candidate) => candidate.reviewStatus !== 'saved')?.id ?? workingSession.candidates[0]?.id ?? null);
-      await onRefreshSessions();
-      setSmartPhase('complete');
+        onSessionChange(workingSession);
+        setSelectedId(workingSession.candidates.find((candidate) => candidate.reviewStatus !== 'rejected')?.id ?? workingSession.candidates[0]?.id ?? null);
+        await onRefreshSessions();
+        setSmartPhase('complete');
     } catch (err: any) {
       setError(err?.message ?? 'Import failed.');
       setSmartPhase('idle');
@@ -1917,16 +2001,15 @@ function BlockStudioImportWorkspace({
     }
   };
 
-  const resumeSession = async (id: string) => {
-    setLoading(true);
-    setError(null);
-    try {
-      const next = await api.getBlockStudioImport(id);
-      onSessionChange(next);
+    const resumeSession = async (id: string) => {
+      setLoading(true);
+      setError(null);
+      try {
+        const next = await api.getDqlGenerationSession(id).catch(() => api.getBlockStudioImport(id));
+        onSessionChange(next);
       setSelectedId(next.candidates.find((candidate) => candidate.reviewStatus !== 'saved' && candidate.reviewStatus !== 'rejected')?.id ?? next.candidates[0]?.id ?? null);
       setCandidateErrors({});
       setSmartPhase('complete');
-      setShowAdvanced(false);
     } catch (err: any) {
       setError(err?.message ?? 'Failed to resume import session.');
     } finally {
@@ -1976,7 +2059,7 @@ function BlockStudioImportWorkspace({
     setSmartItems((current) => ({ ...current, [candidate.id]: smartItemFromCandidate(candidate) }));
   };
 
-  const runCandidate = async (candidate: BlockStudioImportCandidate) => {
+    const runCandidate = async (candidate: BlockStudioImportCandidate) => {
     if (!session) return;
     setLoading(true);
     setError(null);
@@ -1985,10 +2068,12 @@ function BlockStudioImportWorkspace({
       const next = { ...current };
       delete next[candidate.id];
       return next;
-    });
-    try {
-      const next = await api.runBlockStudioImportCandidate(session.id, candidate.id);
-      updateCandidate(next);
+      });
+      try {
+        const next = isAiGeneratedCandidate(candidate)
+          ? await api.previewDqlGenerationCandidate(session.id, candidate.id)
+          : await api.runBlockStudioImportCandidate(session.id, candidate.id);
+        updateCandidate(next);
       setSelectedId(next.id);
       setCandidateErrors((current) => {
         if (!current[candidate.id]) return current;
@@ -2006,14 +2091,16 @@ function BlockStudioImportWorkspace({
     }
   };
 
-  const saveCandidate = async (candidate: BlockStudioImportCandidate) => {
-    if (!session) return;
-    setLoading(true);
-    setError(null);
-    try {
-      const result = await api.saveBlockStudioImportCandidate(session.id, candidate.id);
-      updateCandidate(result.candidate);
-      onSavedCandidate(result.candidate, result.block);
+    const saveCandidate = async (candidate: BlockStudioImportCandidate) => {
+      if (!session) return;
+      setLoading(true);
+      setError(null);
+      try {
+        const result = isAiGeneratedCandidate(candidate)
+          ? await api.certifyDqlGenerationCandidate(session.id, candidate.id)
+          : await api.saveBlockStudioImportCandidate(session.id, candidate.id);
+        updateCandidate(result.candidate);
+        onSavedCandidate(result.candidate, result.block);
       await onRefreshSessions();
     } catch (err: any) {
       const message = err?.message ?? 'Candidate save failed.';
@@ -2074,12 +2161,6 @@ function BlockStudioImportWorkspace({
     void onRefreshSessions();
   };
 
-  const selectNextUnsaved = () => {
-    if (!session) return;
-    const next = session.candidates.find((candidate) => candidate.reviewStatus !== 'saved' && candidate.reviewStatus !== 'rejected');
-    if (next) setSelectedId(next.id);
-  };
-
   const handleFiles = async (files: FileList | null) => {
     const list = Array.from(files ?? []);
     const sqlFiles = list.filter((file) => file.name.toLowerCase().endsWith('.sql'));
@@ -2089,260 +2170,164 @@ function BlockStudioImportWorkspace({
   };
 
   return (
-    <div style={{ position: 'relative', height: '100%', display: 'grid', gridTemplateColumns: '320px minmax(0, 1fr)', minHeight: 0, background: t.appBg }}>
-      <aside style={{ borderRight: `1px solid ${t.headerBorder}`, display: 'flex', flexDirection: 'column', minHeight: 0, background: t.cellBg }}>
-        <div style={{ padding: 16, borderBottom: `1px solid ${t.headerBorder}`, display: 'grid', gap: 10 }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-            <span style={{ fontSize: 14, fontWeight: 800, color: t.textPrimary, fontFamily: t.font }}>Import SQL</span>
-            <span style={{ flex: 1 }} />
-            <button onClick={onClose} style={secondaryImportButtonStyle(t)}>Close</button>
-          </div>
-          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, minmax(0, 1fr))', gap: 4 }}>
-            {(['import', 'paste'] as const).map((value) => (
-              <button
-                key={value}
-                onClick={() => setMode(value)}
-                style={{
-                  ...secondaryImportButtonStyle(t),
-                  padding: '6px 4px',
-                  color: mode === value ? t.accent : t.textSecondary,
-                  borderColor: mode === value ? t.accent : t.btnBorder,
-                  background: mode === value ? `${t.accent}14` : t.btnBg,
-                }}
-              >
-                {value === 'import' ? 'Import' : 'Paste SQL'}
-              </button>
-            ))}
-          </div>
-          {mode === 'import' && (
-            <div style={{ display: 'grid', gap: 8 }}>
-              <FieldLabel label="SQL file or folder path" t={t}>
-                <input
-                  value={path}
-                  onChange={(event) => {
-                    setPath(event.target.value);
-                    if (event.target.value.trim()) setUploadSources([]);
-                  }}
-                  placeholder="./queries or ./legacy.sql"
-                  style={importInputStyle(t)}
-                />
-              </FieldLabel>
-              <FieldLabel label="Or choose SQL files" t={t}>
-                <input type="file" multiple accept=".sql,text/sql,text/plain" onChange={(event) => void handleFiles(event.target.files)} style={importInputStyle(t)} />
-                <span style={{ fontSize: 11, color: t.textMuted, fontFamily: t.font }}>
-                  {uploadSources.length > 0 ? `${uploadSources.length} SQL file(s) ready` : 'Use this for multiple files.'}
-                </span>
-              </FieldLabel>
-            </div>
-          )}
-          {mode === 'paste' && (
-            <FieldLabel label="Paste SQL" t={t}>
-              <textarea value={pasteSql} onChange={(event) => setPasteSql(event.target.value)} placeholder="select ...; go&#10;select ..." style={{ ...importInputStyle(t), minHeight: 108, resize: 'vertical', fontFamily: t.fontMono }} />
-            </FieldLabel>
-          )}
-          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
-            <FieldLabel label="Domain" t={t}>
-              <input value={domain} onChange={(event) => setDomain(event.target.value)} placeholder="imported" style={importInputStyle(t)} />
-            </FieldLabel>
-            <FieldLabel label="Owner" t={t}>
-              <input value={owner} onChange={(event) => setOwner(event.target.value)} placeholder="analytics" style={importInputStyle(t)} />
-            </FieldLabel>
-          </div>
-          <button
-            onClick={() => void runSmartImport()}
-            disabled={loading || !sourceReady}
-            style={{ ...primaryImportButtonStyle(t), padding: '8px 12px', opacity: loading ? 0.65 : 1 }}
-          >
-            {loading ? smartImportPhaseLabel(smartPhase) : 'Create DQL blocks'}
-          </button>
-          <div style={{ fontSize: 11, color: t.textMuted, fontFamily: t.font, lineHeight: 1.45 }}>
-            DQL will scan SQL, create blocks, run safe previews, and save the blocks that pass.
-          </div>
-          <details style={{ fontSize: 11, color: t.textMuted, fontFamily: t.font, border: `1px dashed ${t.headerBorder}`, borderRadius: 8, padding: '8px 10px' }}>
-            <summary style={{ cursor: 'pointer', color: t.textSecondary, fontWeight: 700 }}>Advanced controls</summary>
-            <div style={{ marginTop: 8, display: 'grid', gap: 8, lineHeight: 1.45 }}>
-              <button
-                onClick={() => void createSession()}
-                disabled={loading || !sourceReady}
-                style={{ ...secondaryImportButtonStyle(t), justifySelf: 'start', opacity: loading || !sourceReady ? 0.6 : 1 }}
-              >
-                Inspect before saving
-              </button>
-              Use this when you want to inspect generated blocks before DQL previews and saves them.
-            </div>
-          </details>
+    <div style={{ position: 'relative', height: '100%', display: 'grid', gridTemplateRows: '80px minmax(0, 1fr)', minHeight: 0, background: t.appBg }}>
+      <header style={{ borderBottom: `1px solid ${t.headerBorder}`, background: t.cellBg, padding: '14px 14px 12px', display: 'flex', alignItems: 'center', gap: 14, minWidth: 0 }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 10, minWidth: 260 }}>
+          <span style={{ width: 34, height: 34, borderRadius: 8, display: 'inline-flex', alignItems: 'center', justifyContent: 'center', color: t.accent, background: `${t.accent}16`, flexShrink: 0 }}>
+            <Sparkles size={17} strokeWidth={2} aria-hidden="true" />
+          </span>
+          <span style={{ display: 'grid', gap: 2, minWidth: 0 }}>
+            <span style={{ fontSize: 15, fontWeight: 800, color: t.textPrimary, fontFamily: t.font }}>Import SQL to DQL</span>
+            <span style={{ fontSize: 11, color: t.textMuted, fontFamily: t.font, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+              SQL source to AI-grounded drafts to review and certify
+            </span>
+          </span>
         </div>
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, minmax(130px, 1fr))', gap: 6, width: 'min(560px, 44vw)', minWidth: 390 }}>
+          <ImportStep index={1} active={activeStep === 1} complete={Boolean(session)} title="Source" detail={mode === 'paste' ? 'Paste SQL' : 'Files or folder'} t={t} />
+          <ImportStep index={2} active={activeStep === 2} complete={smartCounts.ready > 0 || smartCounts.saved > 0} title="Draft" detail={session ? `${session.candidates.length} blocks · ${readyCount} ready` : 'Generate DQL'} t={t} />
+          <ImportStep index={3} active={activeStep === 3} complete={smartCounts.saved > 0} title="Review" detail={smartCounts.saved > 0 ? `${smartCounts.saved} certified` : 'Preview and certify'} t={t} />
+        </div>
+        <div style={{ flex: 1 }} />
+        <button
+          onClick={onClose}
+          title="Close import"
+          aria-label="Close import"
+          style={{ ...secondaryImportButtonStyle(t), width: 32, height: 32, padding: 0, display: 'inline-flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}
+        >
+          <X size={15} strokeWidth={2} aria-hidden="true" />
+        </button>
+      </header>
 
-        <div style={{ padding: 12, borderBottom: `1px solid ${t.headerBorder}`, display: 'grid', gap: 8 }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-            <button onClick={() => setHistoryOpen((open) => !open)} style={{ ...secondaryImportButtonStyle(t), padding: '5px 8px' }}>
-              {historyOpen ? 'Hide recent imports' : 'Recent imports'}
+      <div style={{ minHeight: 0, display: 'grid', gridTemplateColumns: '300px minmax(0, 1fr)' }}>
+        <aside style={{ borderRight: `1px solid ${t.headerBorder}`, display: 'grid', gridTemplateRows: 'auto minmax(0, 1fr) auto', minHeight: 0, background: t.cellBg }}>
+          <section style={{ borderBottom: `1px solid ${t.headerBorder}`, padding: 12, display: 'grid', gap: 10 }}>
+            <button
+              onClick={() => setSourceOpen((open) => !open)}
+              style={{ background: 'transparent', border: 'none', color: t.textPrimary, cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 8, padding: 0, fontFamily: t.font, textAlign: 'left' }}
+            >
+              <FileInput size={14} strokeWidth={2} color={t.accent} aria-hidden="true" />
+              <span style={{ fontSize: 12, fontWeight: 800, flex: 1 }}>Source</span>
+              {session && <span style={{ fontSize: 10, color: t.textMuted }}>{sourceOpen ? 'Hide' : 'Edit'}</span>}
             </button>
-            <span style={{ flex: 1 }} />
-            {historyOpen && <button onClick={() => void onRefreshSessions()} style={secondaryImportButtonStyle(t)}>Refresh</button>}
-            {historyOpen && sessions.length > 0 && <button onClick={() => void clearSessions()} style={secondaryImportButtonStyle(t)}>Clear all</button>}
-          </div>
-          {historyOpen && (sessionsLoading ? (
-            <div style={{ fontSize: 12, color: t.textMuted }}>Loading sessions...</div>
-          ) : sessions.length === 0 ? (
-            <div style={{ fontSize: 12, color: t.textMuted }}>No saved import previews yet.</div>
-          ) : (
-            <div style={{ display: 'grid', gap: 6, maxHeight: 190, overflow: 'auto' }}>
-              {sessions.slice(0, 8).map((item) => (
-                <div key={item.id} style={{
-                  border: `1px solid ${session?.id === item.id ? t.accent : t.btnBorder}`,
-                  borderRadius: 8,
-                  background: session?.id === item.id ? `${t.accent}10` : t.btnBg,
-                  display: 'grid',
-                  gridTemplateColumns: 'minmax(0, 1fr) auto',
-                  alignItems: 'stretch',
-                  overflow: 'hidden',
-                }}>
-                  <button onClick={() => void resumeSession(item.id)} style={{
-                    background: 'transparent',
-                    border: 'none',
-                    color: t.textSecondary,
-                    cursor: 'pointer',
-                    fontFamily: t.font,
-                    padding: '8px 9px',
-                    textAlign: 'left',
-                    display: 'grid',
-                    gap: 3,
-                    minWidth: 0,
-                  }}>
-                    <span style={{ fontFamily: t.fontMono, fontSize: 10 }}>{item.id}</span>
-                    <span style={{ fontSize: 11 }}>{item.candidateCount} candidates · {item.savedCount} saved · {item.warningCount} warnings</span>
-                    <span style={{ fontSize: 10, color: t.textMuted, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{item.inputPath}</span>
-                  </button>
-                  <button
-                    onClick={() => void deleteSession(item.id)}
-                    title="Delete local import preview"
-                    style={{
-                      background: 'transparent',
-                      border: 'none',
-                      borderLeft: `1px solid ${t.headerBorder}`,
-                      color: t.textMuted,
-                      cursor: 'pointer',
-                      fontFamily: t.font,
-                      padding: '0 8px',
-                      fontSize: 11,
-                      fontWeight: 700,
-                    }}
-                  >
-                    Delete
-                  </button>
-                </div>
-              ))}
-            </div>
-          ))}
-        </div>
-
-        <div style={{ flex: 1, minHeight: 0, overflow: 'auto', padding: 12, display: 'grid', alignContent: 'start', gap: 8 }}>
-          {!session ? (
-            <div style={{ fontSize: 12, color: t.textMuted, lineHeight: 1.5 }}>Choose a SQL file or folder, then create DQL blocks.</div>
-          ) : !showAdvanced ? (
-            <>
-              <div style={{ border: `1px solid ${t.headerBorder}`, borderRadius: 8, padding: 12, background: t.appBg, display: 'grid', gap: 8 }}>
-                <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
-                  <span style={{ fontSize: 13, fontWeight: 800, color: t.textPrimary, fontFamily: t.font }}>{smartImportPhaseLabel(smartPhase)}</span>
-                  <ImportPill label={`${session.candidates.length} found`} tone="info" t={t} />
-                </div>
-                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, minmax(0, 1fr))', gap: 6 }}>
-                  <SmartCount label="Saved" value={smartCounts.saved} tone="ok" t={t} />
-                  <SmartCount label="Ready" value={smartCounts.ready} tone="ok" t={t} />
-                  <SmartCount label="Needs attention" value={smartCounts.attention} tone="warn" t={t} />
-                  <SmartCount label="Processing" value={smartCounts.processing} tone="info" t={t} />
-                </div>
-                <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
-                  {smartCounts.ready > 0 && (
-                    <button onClick={() => void saveAll()} disabled={savingAll} style={primaryImportButtonStyle(t)}>
-                      {savingAll ? 'Saving...' : 'Save valid blocks'}
-                    </button>
-                  )}
-                  <button onClick={() => setShowAdvanced(true)} style={secondaryImportButtonStyle(t)}>Show advanced details</button>
-                </div>
-              </div>
-              {smartCandidateItems.length === 0 ? (
-                <div style={{ fontSize: 12, color: t.textMuted, lineHeight: 1.5 }}>Import status will appear here.</div>
-              ) : (
-                <div style={{ display: 'grid', gap: 8 }}>
-                  {smartCandidateItems.slice(0, 24).map((item) => (
+            {sourceOpen ? (
+              <>
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, minmax(0, 1fr))', gap: 4 }}>
+                  {(['import', 'paste'] as const).map((value) => (
                     <button
-                      key={item.id}
-                      onClick={() => {
-                        setSelectedId(item.id);
-                        setShowAdvanced(true);
-                      }}
+                      key={value}
+                      onClick={() => setMode(value)}
                       style={{
-                        border: `1px solid ${item.status === 'needs_attention' ? '#d2992255' : t.headerBorder}`,
-                        borderRadius: 8,
-                        background: t.appBg,
-                        color: t.textPrimary,
-                        padding: 10,
-                        display: 'grid',
-                        gap: 5,
-                        textAlign: 'left',
-                        cursor: 'pointer',
+                        ...secondaryImportButtonStyle(t),
+                        padding: '6px 4px',
+                        color: mode === value ? t.accent : t.textSecondary,
+                        borderColor: mode === value ? t.accent : t.btnBorder,
+                        background: mode === value ? `${t.accent}14` : t.btnBg,
                       }}
                     >
-                      <span style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-                        <span style={{ minWidth: 0, flex: 1, fontSize: 12, fontWeight: 800, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{item.name}</span>
-                        <ImportPill label={smartImportStatusLabel(item.status)} tone={smartImportStatusTone(item.status)} t={t} />
-                      </span>
-                      <span style={{ fontSize: 10, color: t.textMuted, fontFamily: t.fontMono, overflowWrap: 'anywhere' }}>{item.sourcePath}</span>
-                      {item.rows !== undefined && <span style={{ fontSize: 11, color: t.textMuted }}>{item.rows} rows previewed</span>}
-                      {item.message && <span style={{ fontSize: 11, color: item.status === 'needs_attention' ? '#d29922' : t.textMuted, lineHeight: 1.35, overflowWrap: 'anywhere' }}>{item.message}</span>}
+                      {value === 'import' ? 'Files / folder' : 'Paste SQL'}
                     </button>
                   ))}
-                  {smartCandidateItems.length > 24 && (
-                    <div style={{ fontSize: 12, color: t.textMuted }}>{smartCandidateItems.length - 24} more block(s). Use advanced details to search.</div>
+                </div>
+                {mode === 'import' && (
+                  <div style={{ display: 'grid', gap: 8 }}>
+                    <FieldLabel label="Path" t={t}>
+                      <input
+                        value={path}
+                        onChange={(event) => {
+                          setPath(event.target.value);
+                          if (event.target.value.trim()) setUploadSources([]);
+                        }}
+                        placeholder="./queries or ./legacy.sql"
+                        style={importInputStyle(t)}
+                      />
+                    </FieldLabel>
+                    <FieldLabel label="Upload SQL files" t={t}>
+                      <input type="file" multiple accept=".sql,text/sql,text/plain" onChange={(event) => void handleFiles(event.target.files)} style={importInputStyle(t)} />
+                      <span style={{ fontSize: 11, color: t.textMuted, fontFamily: t.font }}>
+                        {uploadSources.length > 0 ? `${uploadSources.length} SQL file(s) ready` : 'Optional for multiple files.'}
+                      </span>
+                    </FieldLabel>
+                  </div>
+                )}
+                {mode === 'paste' && (
+                  <FieldLabel label="Paste SQL" t={t}>
+                    <textarea value={pasteSql} onChange={(event) => setPasteSql(event.target.value)} placeholder="select ...; go&#10;select ..." style={{ ...importInputStyle(t), minHeight: session ? 86 : 150, resize: 'vertical', fontFamily: t.fontMono }} />
+                  </FieldLabel>
+                )}
+                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
+                  <FieldLabel label="Domain" t={t}>
+                    <input value={domain} onChange={(event) => setDomain(event.target.value)} placeholder="auto" style={importInputStyle(t)} />
+                  </FieldLabel>
+                  <FieldLabel label="Owner" t={t}>
+                    <input value={owner} onChange={(event) => setOwner(event.target.value)} placeholder="analytics" style={importInputStyle(t)} />
+                  </FieldLabel>
+                </div>
+                <button
+                  onClick={() => void runSmartImport()}
+                  disabled={loading || !sourceReady}
+                  style={{ ...primaryImportButtonStyle(t), padding: '8px 12px', opacity: loading || !sourceReady ? 0.65 : 1, cursor: loading || !sourceReady ? 'not-allowed' : 'pointer' }}
+                >
+                  {loading ? smartImportPhaseLabel(smartPhase) : 'Generate DQL drafts'}
+                </button>
+                <div style={{ fontSize: 11, color: t.textMuted, fontFamily: t.font, lineHeight: 1.45 }}>
+                  Uses dbt, MetricFlow, warehouse catalog, and existing DQL context when available.
+                </div>
+              </>
+            ) : (
+              <button
+                onClick={() => setSourceOpen(true)}
+                style={{ ...secondaryImportButtonStyle(t), display: 'grid', gap: 4, textAlign: 'left', width: '100%', justifyItems: 'start' }}
+              >
+                <span style={{ fontSize: 11, color: t.textSecondary }}>{mode === 'paste' ? 'Pasted SQL' : 'Files / folder'}</span>
+                <span style={{ maxWidth: '100%', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', color: t.textMuted, fontFamily: t.fontMono }}>
+                  {session?.inputPath ?? (mode === 'paste' ? 'pasted.sql' : path || './queries')}
+                </span>
+              </button>
+            )}
+          </section>
+
+          <section style={{ minHeight: 0, overflow: 'auto', padding: 12, display: 'grid', alignContent: 'start', gap: 10 }}>
+            {!session ? (
+              <div style={{ fontSize: 12, color: t.textMuted, lineHeight: 1.5 }}>
+                Paste SQL or choose files. DQL creates autosaved draft blocks for review.
+              </div>
+            ) : (
+              <>
+                <div style={{ display: 'grid', gap: 8 }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
+                    <span style={{ fontSize: 12, fontWeight: 800, color: t.textPrimary, fontFamily: t.font }}>Drafts</span>
+                    <ImportPill label={`${session.candidates.length}`} tone="info" t={t} />
+                    {smartCounts.ready > 0 && <ImportPill label={`${smartCounts.ready} ready`} tone="ok" t={t} />}
+                    {smartCounts.attention > 0 && <ImportPill label={`${smartCounts.attention} attention`} tone="warn" t={t} />}
+                  </div>
+                  {session.candidates.length > 6 && (
+                    <input
+                      value={candidateSearch}
+                      onChange={(event) => setCandidateSearch(event.target.value)}
+                      placeholder="Search drafts, tables, files..."
+                      style={importInputStyle(t)}
+                    />
                   )}
                 </div>
-              )}
-            </>
-          ) : (
-            <>
-              <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', alignItems: 'center' }}>
-                <ImportPill label={`${session.candidates.length} candidates`} tone="info" t={t} />
-                <ImportPill label={`${readyCount} ready`} tone="ok" t={t} />
-                <ImportPill label={`${savedCount} saved`} tone="ok" t={t} />
-                {warningCount > 0 && <ImportPill label={`${warningCount} warnings`} tone="warn" t={t} />}
-              </div>
-              <div style={{ display: 'flex', gap: 6 }}>
-                <button onClick={selectNextUnsaved} style={secondaryImportButtonStyle(t)}>Open next unsaved</button>
-                <button onClick={() => void saveAll()} disabled={savingAll} style={primaryImportButtonStyle(t)}>{savingAll ? 'Saving...' : 'Save valid blocks'}</button>
-              </div>
-              <input
-                value={candidateSearch}
-                onChange={(event) => setCandidateSearch(event.target.value)}
-                placeholder="Search candidates, tables, files..."
-                style={importInputStyle(t)}
-              />
-              {visibleCandidates.map((candidate) => {
-                const selected = candidate.id === selectedCandidate?.id;
-                const warnings = candidate.warnings ?? candidate.lineage.warnings;
-                const runError = candidateErrors[candidate.id];
-                const rowCount = candidate.preview?.result?.rowCount ?? candidate.preview?.result?.rows?.length;
-                return (
-                  <div
-                    key={candidate.id}
-                    style={{
-                      border: `1px solid ${selected ? t.accent : t.headerBorder}`,
-                      borderRadius: 8,
-                      background: selected ? `${t.accent}10` : t.appBg,
-                      color: t.textPrimary,
-                      display: 'grid',
-                      gap: 8,
-                      overflow: 'hidden',
-                    }}
-                  >
+                {visibleCandidates.map((candidate) => {
+                  const selected = candidate.id === selectedCandidate?.id;
+                  const warnings = candidate.warnings ?? candidate.lineage.warnings;
+                  const runError = candidateErrors[candidate.id];
+                  const rowCount = candidate.preview?.result?.rowCount ?? candidate.preview?.result?.rows?.length;
+                  const item = smartItems[candidate.id] ?? smartItemFromCandidate(candidate);
+                  return (
                     <button
-                      onClick={() => setSelectedId(candidate.id)}
+                      key={candidate.id}
+                      onClick={() => {
+                        setSelectedId(candidate.id);
+                      }}
                       style={{
-                        background: 'transparent',
-                        border: 'none',
+                        border: `1px solid ${selected ? t.accent : runError ? '#f8514955' : t.headerBorder}`,
+                        borderRadius: 8,
+                        background: selected ? `${t.accent}10` : t.appBg,
                         color: t.textPrimary,
-                        padding: '10px 10px 0',
+                        padding: 10,
                         display: 'grid',
                         gap: 6,
                         textAlign: 'left',
@@ -2352,100 +2337,94 @@ function BlockStudioImportWorkspace({
                     >
                       <span style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
                         <span style={{ minWidth: 0, flex: 1, fontSize: 12, fontWeight: 800, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{candidate.name}</span>
-                        <ImportPill label={candidate.reviewStatus} tone={candidate.reviewStatus === 'saved' ? 'ok' : candidate.reviewStatus === 'rejected' ? 'warn' : 'info'} t={t} />
+                        <ImportPill label={smartImportStatusLabel(item.status)} tone={smartImportStatusTone(item.status)} t={t} />
                       </span>
-                      <span style={{ fontSize: 10, color: t.textMuted, fontFamily: t.fontMono, overflowWrap: 'anywhere' }}>{candidate.lineage.statementIndex}/{candidate.lineage.totalStatements} · {candidate.sourcePath}</span>
+                      <span style={{ fontSize: 10, color: t.textMuted, fontFamily: t.fontMono, overflowWrap: 'anywhere' }}>
+                        {candidate.lineage.statementIndex}/{candidate.lineage.totalStatements} · {candidate.sourcePath}
+                      </span>
                       <span style={{ display: 'flex', gap: 5, flexWrap: 'wrap' }}>
-                        <ImportPill label={`${Math.round(candidate.confidence * 100)}%`} tone="info" t={t} />
+                        <ImportPill label={candidate.draftSave?.status === 'saved' || candidate.savedPath?.startsWith('blocks/_drafts/') ? 'draft saved' : candidate.reviewStatus} tone={candidate.reviewStatus === 'rejected' ? 'warn' : 'info'} t={t} />
                         <ImportPill label={candidate.validation?.valid === false ? 'fix' : 'valid'} tone={candidate.validation?.valid === false ? 'warn' : 'ok'} t={t} />
+                        {typeof rowCount === 'number' && <ImportPill label={`${rowCount} rows`} tone="ok" t={t} />}
                         {warnings.length > 0 && <ImportPill label={`${warnings.length} warning`} tone="warn" t={t} />}
-                        {runError && <ImportPill label="run failed" tone="warn" t={t} />}
                       </span>
-                      {runError && (
-                        <span style={{ fontSize: 11, color: '#f85149', lineHeight: 1.35, overflowWrap: 'anywhere' }}>
-                          Preview failed: {runError}
-                        </span>
-                      )}
-                      {!runError && candidate.preview && (
-                        <span style={{ fontSize: 11, color: t.textMuted, lineHeight: 1.35 }}>
-                          Preview ready{typeof rowCount === 'number' ? ` · ${rowCount} rows` : ''}
+                      {(runError || item.message) && (
+                        <span style={{ fontSize: 11, color: runError ? '#f85149' : t.textMuted, lineHeight: 1.35, overflowWrap: 'anywhere' }}>
+                          {runError ?? item.message}
                         </span>
                       )}
                     </button>
-                    <div style={{ display: 'flex', gap: 6, padding: '0 10px 10px' }}>
-                      <button
-                        onClick={() => {
-                          setSelectedId(candidate.id);
-                          void runCandidate(candidate);
-                        }}
-                        disabled={loading}
-                        style={{ ...secondaryImportButtonStyle(t), flex: 1, opacity: loading ? 0.65 : 1 }}
-                      >
-                        {loading && selected ? 'Running...' : 'Run'}
+                  );
+                })}
+                {!showAllCandidates && !candidateSearch.trim() && candidateMatches.length > 10 && (
+                  <button onClick={() => setShowAllCandidates(true)} style={secondaryImportButtonStyle(t)}>
+                    Show all {candidateMatches.length} drafts
+                  </button>
+                )}
+                {!session.candidates.some(isAiGeneratedCandidate) && smartCounts.ready > 0 && (
+                  <button onClick={() => void saveAll()} disabled={savingAll} style={primaryImportButtonStyle(t)}>{savingAll ? 'Saving...' : 'Save valid blocks'}</button>
+                )}
+              </>
+            )}
+          </section>
+
+          <details open={historyOpen} onToggle={(event) => setHistoryOpen((event.currentTarget as HTMLDetailsElement).open)} style={{ borderTop: `1px solid ${t.headerBorder}`, padding: 12, display: 'grid', gap: 8 }}>
+            <summary style={{ cursor: 'pointer', color: t.textSecondary, fontSize: 11, fontWeight: 800, fontFamily: t.font }}>
+              Import history{sessions.length > 0 ? ` (${sessions.length})` : ''}
+            </summary>
+            <div style={{ display: 'grid', gap: 8, marginTop: 8 }}>
+              <div style={{ display: 'flex', gap: 6 }}>
+                <button onClick={() => void onRefreshSessions()} style={secondaryImportButtonStyle(t)}>Refresh</button>
+                {sessions.length > 0 && <button onClick={() => void clearSessions()} style={secondaryImportButtonStyle(t)}>Clear</button>}
+              </div>
+              {sessionsLoading ? (
+                <div style={{ fontSize: 12, color: t.textMuted }}>Loading...</div>
+              ) : sessions.length === 0 ? (
+                <div style={{ fontSize: 12, color: t.textMuted }}>No saved import sessions.</div>
+              ) : (
+                <div style={{ display: 'grid', gap: 6, maxHeight: 140, overflow: 'auto' }}>
+                  {sessions.slice(0, 6).map((item) => (
+                    <div key={item.id} style={{ border: `1px solid ${session?.id === item.id ? t.accent : t.btnBorder}`, borderRadius: 8, background: session?.id === item.id ? `${t.accent}10` : t.btnBg, display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) auto', overflow: 'hidden' }}>
+                      <button onClick={() => void resumeSession(item.id)} style={{ background: 'transparent', border: 'none', color: t.textSecondary, cursor: 'pointer', fontFamily: t.font, padding: '8px 9px', textAlign: 'left', display: 'grid', gap: 3, minWidth: 0 }}>
+                        <span style={{ fontSize: 11 }}>{item.candidateCount} drafts · {item.savedCount} certified</span>
+                        <span style={{ fontSize: 10, color: t.textMuted, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{item.inputPath}</span>
                       </button>
-                      <button
-                        onClick={() => {
-                          setSelectedId(candidate.id);
-                          void saveCandidate(candidate);
-                        }}
-                        disabled={loading || candidate.reviewStatus === 'saved'}
-                        style={{ ...primaryImportButtonStyle(t), flex: 1, opacity: loading || candidate.reviewStatus === 'saved' ? 0.55 : 1 }}
-                      >
-                        {candidate.reviewStatus === 'saved' ? 'Saved' : 'Save'}
+                      <button onClick={() => void deleteSession(item.id)} title="Delete local import session" style={{ background: 'transparent', border: 'none', borderLeft: `1px solid ${t.headerBorder}`, color: t.textMuted, cursor: 'pointer', fontFamily: t.font, padding: '0 8px', fontSize: 11, fontWeight: 700 }}>
+                        Delete
                       </button>
                     </div>
-                  </div>
-                );
-              })}
-              {!showAllCandidates && !candidateSearch.trim() && candidateMatches.length > 10 && (
-                <button onClick={() => setShowAllCandidates(true)} style={secondaryImportButtonStyle(t)}>
-                  Show all {candidateMatches.length} candidates
-                </button>
+                  ))}
+                </div>
               )}
-            </>
-          )}
-        </div>
-      </aside>
+            </div>
+          </details>
+        </aside>
 
-      <section style={{ minWidth: 0, minHeight: 0, overflow: 'auto', padding: 14 }}>
-        {error && (
-          <div role="alert" style={{ padding: '10px 12px', color: '#f85149', background: '#f8514914', border: `1px solid #f8514933`, borderRadius: 8, marginBottom: 12, fontSize: 12 }}>
-            {error}
-          </div>
-        )}
-        {!session ? (
-          <ImportGuide t={t} />
-        ) : !showAdvanced ? (
-          <SmartImportOverview
-            session={session}
-            items={smartCandidateItems}
-            counts={smartCounts}
-            phase={smartPhase}
-            onShowAdvanced={() => setShowAdvanced(true)}
-            onSelectItem={(id) => {
-              setSelectedId(id);
-              setShowAdvanced(true);
-            }}
-            t={t}
-          />
-        ) : !selectedCandidate ? (
-          <ImportGuide t={t} />
-        ) : (
-          <ImportCandidateDetail
-            session={session}
-            candidate={selectedCandidate}
-            loading={loading}
-            onCandidateUpdated={updateCandidate}
-            onRun={runCandidate}
-            onSave={saveCandidate}
-            onReject={rejectCandidate}
-            onReviewInEditor={onSelectCandidate}
-            runError={candidateErrors[selectedCandidate.id] ?? null}
-            themeMode={themeMode}
-            t={t}
-          />
-        )}
-      </section>
+        <main style={{ minWidth: 0, minHeight: 0, overflow: 'auto', padding: 20, background: t.appBg }}>
+          {error && (
+            <div role="alert" style={{ padding: '10px 12px', color: '#f85149', background: '#f8514914', border: `1px solid #f8514933`, borderRadius: 8, marginBottom: 12, fontSize: 12 }}>
+              {error}
+            </div>
+          )}
+          {!session || !selectedCandidate ? (
+            <ImportGuide t={t} />
+          ) : (
+            <ImportCandidateDetail
+              session={session}
+              candidate={selectedCandidate}
+              loading={loading}
+              onCandidateUpdated={updateCandidate}
+              onRun={runCandidate}
+              onSave={saveCandidate}
+              onReject={rejectCandidate}
+              onReviewInEditor={onSelectCandidate}
+              runError={candidateErrors[selectedCandidate.id] ?? null}
+              themeMode={themeMode}
+              t={t}
+            />
+          )}
+        </main>
+      </div>
       {pendingDelete && (
         <ImportConfirmPanel
           t={t}
@@ -2548,16 +2527,20 @@ function SmartImportOverview({
     };
     return priority[left.status] - priority[right.status] || left.name.localeCompare(right.name);
   });
-  const headline = counts.attention > 0
-    ? `${counts.saved} saved, ${counts.attention} need attention`
-    : counts.processing > 0
-      ? smartImportPhaseLabel(phase)
-      : `${counts.saved} DQL block${counts.saved === 1 ? '' : 's'} saved`;
-  const detail = counts.attention > 0
-    ? 'Passing SQL was saved. Fix the exceptions in advanced details.'
-    : counts.processing > 0
-      ? 'DQL is previewing SQL and saving blocks that pass.'
-      : 'Passing SQL was previewed against the active connection and saved as DQL blocks.';
+    const headline = counts.attention > 0
+      ? `${counts.ready} ready, ${counts.attention} need attention`
+      : counts.processing > 0
+        ? smartImportPhaseLabel(phase)
+        : counts.ready > 0
+          ? `${counts.ready} draft${counts.ready === 1 ? '' : 's'} ready for review`
+          : `${counts.saved} DQL block${counts.saved === 1 ? '' : 's'} certified`;
+    const detail = counts.attention > 0
+      ? 'Drafts that could be generated are autosaved. Fix the exceptions in advanced details.'
+      : counts.processing > 0
+        ? 'DQL is previewing SQL and keeping generated drafts saved.'
+        : counts.ready > 0
+          ? 'Generated DQL drafts are saved under blocks/_drafts. Open a candidate to review, preview, and certify.'
+          : 'Certified blocks are saved in the canonical blocks folder.';
 
   return (
     <div style={{ display: 'grid', gap: 12 }}>
@@ -2575,7 +2558,7 @@ function SmartImportOverview({
             <ImportPill label={smartImportPhaseLabel(phase)} tone={counts.attention > 0 ? 'warn' : 'ok'} t={t} />
           </div>
           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, minmax(110px, 1fr))', gap: 8 }}>
-            <SmartCount label="Saved" value={counts.saved} tone="ok" t={t} />
+              <SmartCount label="Certified" value={counts.saved} tone="ok" t={t} />
             <SmartCount label="Ready" value={counts.ready} tone="ok" t={t} />
             <SmartCount label="Needs attention" value={counts.attention} tone="warn" t={t} />
             <SmartCount label="Processing" value={counts.processing} tone="info" t={t} />
@@ -2671,6 +2654,7 @@ function ImportCandidateDetail({
   const [sql, setSql] = useState(candidate.sql);
   const [aiBusy, setAiBusy] = useState<string | null>(null);
   const [editError, setEditError] = useState<string | null>(null);
+  const [contextOpen, setContextOpen] = useState(false);
 
   useEffect(() => {
     setName(candidate.name);
@@ -2680,20 +2664,25 @@ function ImportCandidateDetail({
     setTags(candidate.tags.join(', '));
     setSql(candidate.sql);
     setEditError(null);
+    setContextOpen(false);
   }, [candidate.id, candidate.name, candidate.domain, candidate.owner, candidate.description, candidate.tags, candidate.sql]);
 
-  const saveEdits = async () => {
-    setEditError(null);
-    try {
-      const next = await api.updateBlockStudioImportCandidate(session.id, candidate.id, {
-        name,
-        domain,
-        owner,
-        description,
-        tags: tags.split(',').map((tag) => tag.trim()).filter(Boolean),
-        sql,
-      });
-      onCandidateUpdated(next);
+    const saveEdits = async () => {
+      setEditError(null);
+      try {
+        const patch = {
+          name,
+          domain,
+          owner,
+          description,
+          tags: tags.split(',').map((tag) => tag.trim()).filter(Boolean),
+          sql,
+          llmContext: candidate.llmContext,
+        };
+        const next = isAiGeneratedCandidate(candidate)
+          ? await api.updateDqlGenerationCandidate(session.id, candidate.id, patch)
+          : await api.updateBlockStudioImportCandidate(session.id, candidate.id, patch);
+        onCandidateUpdated(next);
     } catch (err: any) {
       setEditError(err?.message ?? 'Could not update candidate.');
     }
@@ -2712,9 +2701,12 @@ function ImportCandidateDetail({
     }
   };
 
-  const warnings = candidate.warnings ?? candidate.lineage.warnings;
-  const inputStyle = importInputStyle(t);
-  const previewRowCount = candidate.preview?.result?.rowCount ?? candidate.preview?.result?.rows?.length;
+    const warnings = candidate.warnings ?? candidate.lineage.warnings;
+    const inputStyle = importInputStyle(t);
+    const previewRowCount = candidate.preview?.result?.rowCount ?? candidate.preview?.result?.rows?.length;
+    const generatedDraft = isAiGeneratedCandidate(candidate);
+    const draftPath = candidate.draftSave?.path ?? (candidate.savedPath?.startsWith('blocks/_drafts/') ? candidate.savedPath : undefined);
+    const contextCount = candidate.lineage.sourceTables.length + (candidate.evidence?.length ?? 0) + candidate.lineage.parameters.length + warnings.length;
 
   return (
     <div style={{ display: 'grid', gap: 12 }}>
@@ -2723,10 +2715,12 @@ function ImportCandidateDetail({
           <div style={{ fontSize: 18, fontWeight: 800, color: t.textPrimary }}>{candidate.name}</div>
           <div style={{ fontSize: 11, color: t.textMuted, fontFamily: t.fontMono, marginTop: 3 }}>{candidate.sourcePath} · statement {candidate.lineage.statementIndex}/{candidate.lineage.totalStatements}</div>
         </div>
-        <button onClick={() => void onRun(candidate)} disabled={loading} style={secondaryImportButtonStyle(t)}>Run preview</button>
-        <button onClick={() => onReviewInEditor(candidate)} style={primaryImportButtonStyle(t)}>Open in editor</button>
-        <button onClick={() => void onSave(candidate)} disabled={loading || candidate.reviewStatus === 'saved'} style={primaryImportButtonStyle(t)}>{candidate.reviewStatus === 'saved' ? 'Saved' : 'Save block'}</button>
-        <button onClick={() => void onReject(candidate)} disabled={candidate.reviewStatus === 'rejected'} style={secondaryImportButtonStyle(t)}>Reject</button>
+        <button onClick={() => void onRun(candidate)} disabled={loading} style={secondaryImportButtonStyle(t)}>{loading ? 'Running...' : 'Preview'}</button>
+        <button onClick={() => setContextOpen((open) => !open)} style={contextOpen ? primaryImportButtonStyle(t) : secondaryImportButtonStyle(t)}>
+          {contextOpen ? 'Hide context' : `Show context${contextCount > 0 ? ` (${contextCount})` : ''}`}
+        </button>
+        <button onClick={() => onReviewInEditor(candidate)} style={primaryImportButtonStyle(t)}>Edit full DQL</button>
+        <button onClick={() => void onSave(candidate)} disabled={loading || candidate.reviewStatus === 'saved'} style={primaryImportButtonStyle(t)}>{candidate.reviewStatus === 'saved' ? 'Certified' : generatedDraft ? 'Certify' : 'Save'}</button>
       </div>
 
       {editError && <div role="alert" style={{ fontSize: 12, color: '#f85149', background: '#f8514914', borderRadius: 8, padding: 10 }}>{editError}</div>}
@@ -2736,17 +2730,24 @@ function ImportCandidateDetail({
         </div>
       )}
 
-      <div style={{ display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) minmax(300px, 38%)', gap: 12, alignItems: 'start' }}>
+      <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+        <ImportPill label={candidate.draftSave?.status === 'saved' || draftPath ? 'draft saved' : candidate.reviewStatus} tone={candidate.reviewStatus === 'rejected' ? 'warn' : 'info'} t={t} />
+        <ImportPill label={`${Math.round(candidate.confidence * 100)}% confidence`} tone="info" t={t} />
+        <ImportPill label={candidate.validation?.valid === false ? 'needs fixes' : 'valid'} tone={candidate.validation?.valid === false ? 'warn' : 'ok'} t={t} />
+        {typeof previewRowCount === 'number' && <ImportPill label={`${previewRowCount} rows`} tone="ok" t={t} />}
+      </div>
+
+      <div style={{ display: 'grid', gridTemplateColumns: contextOpen ? 'minmax(0, 1fr) minmax(320px, 380px)' : 'minmax(0, 1fr)', gap: 12, alignItems: 'start' }}>
         <div style={{ display: 'grid', gap: 12 }}>
-          <PanelBox title="Block Details" t={t}>
+          <PanelBox title="Review details" t={t}>
             <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
               <FieldLabel label="Name" t={t}><input value={name} onChange={(event) => setName(event.target.value)} style={inputStyle} /></FieldLabel>
               <FieldLabel label="Domain" t={t}><input value={domain} onChange={(event) => setDomain(event.target.value)} style={inputStyle} /></FieldLabel>
               <FieldLabel label="Owner" t={t}><input value={owner} onChange={(event) => setOwner(event.target.value)} style={inputStyle} /></FieldLabel>
-              <FieldLabel label="Tags" t={t}><input value={tags} onChange={(event) => setTags(event.target.value)} style={inputStyle} /></FieldLabel>
+              <FieldLabel label="Tags" t={t}><textarea value={tags} onChange={(event) => setTags(event.target.value)} style={{ ...inputStyle, minHeight: 58, resize: 'vertical' }} /></FieldLabel>
             </div>
-            <FieldLabel label="Description" t={t}><input value={description} onChange={(event) => setDescription(event.target.value)} style={inputStyle} /></FieldLabel>
-            <button onClick={() => void saveEdits()} style={primaryImportButtonStyle(t)}>Apply edits</button>
+            <FieldLabel label="Business description" t={t}><textarea value={description} onChange={(event) => setDescription(event.target.value)} style={{ ...inputStyle, minHeight: 70, resize: 'vertical' }} /></FieldLabel>
+            <button onClick={() => void saveEdits()} style={{ ...primaryImportButtonStyle(t), justifySelf: 'start' }}>Apply edits</button>
           </PanelBox>
 
           {candidate.preview && (
@@ -2760,32 +2761,40 @@ function ImportCandidateDetail({
             </PanelBox>
           )}
 
-          <PanelBox title="Original SQL" t={t}>
-            <textarea value={sql} onChange={(event) => setSql(event.target.value)} style={{ ...inputStyle, minHeight: 210, fontFamily: t.fontMono, resize: 'vertical' }} />
-          </PanelBox>
+          <details style={importDisclosureStyle(t)}>
+            <summary style={importSummaryStyle(t)}>Original SQL</summary>
+            <textarea value={sql} onChange={(event) => setSql(event.target.value)} style={{ ...inputStyle, minHeight: 210, fontFamily: t.fontMono, resize: 'vertical', marginTop: 10 }} />
+          </details>
 
-          <PanelBox title="Draft DQL Block" t={t}>
-            <pre style={{ margin: 0, whiteSpace: 'pre-wrap', fontSize: 11, lineHeight: 1.45, color: t.textSecondary, fontFamily: t.fontMono }}>{candidate.dqlSource}</pre>
-          </PanelBox>
+          <details style={importDisclosureStyle(t)}>
+            <summary style={importSummaryStyle(t)}>Draft DQL block</summary>
+            <pre style={{ margin: '10px 0 0', whiteSpace: 'pre-wrap', fontSize: 11, lineHeight: 1.45, color: t.textSecondary, fontFamily: t.fontMono }}>{candidate.dqlSource}</pre>
+          </details>
         </div>
 
+        {contextOpen && (
         <div style={{ display: 'grid', gap: 12 }}>
-          <PanelBox title="How DQL Was Generated" t={t}>
-            <div style={{ fontSize: 12, color: t.textMuted, lineHeight: 1.45 }}>
-              This is an audit view for the selected SQL query. It explains what DQL created locally before you save the draft block.
-            </div>
-            <InfoLine label="Method" value="Deterministic local conversion" t={t} />
-            <InfoLine label="Block" value={candidate.name} t={t} />
-            <InfoLine label="Domain" value={candidate.domain} t={t} />
-            <InfoLine label="Visualization" value="table" t={t} />
-            <InfoLine label="Default test" value="assert row_count > 0" t={t} />
-            <InfoLine label="Split strategy" value={candidate.splitStrategy ?? 'semicolon-go'} t={t} />
+          <PanelBox title="Grounding" t={t}>
             <div style={{ display: 'grid', gap: 5 }}>
-              <div style={{ fontSize: 10, color: t.textMuted, textTransform: 'uppercase', fontWeight: 800 }}>Detected tables</div>
+              <div style={{ fontSize: 10, color: t.textMuted, textTransform: 'uppercase', fontWeight: 800 }}>Source tables</div>
               <div style={{ display: 'flex', flexWrap: 'wrap', gap: 5 }}>
                 {candidate.lineage.sourceTables.length ? candidate.lineage.sourceTables.map((table) => <ImportPill key={table} label={table} tone="info" t={t} />) : <span style={{ fontSize: 12, color: t.textMuted }}>None detected</span>}
               </div>
             </div>
+            {(candidate.evidence ?? []).length > 0 && (
+              <div style={{ display: 'grid', gap: 6 }}>
+                <div style={{ fontSize: 10, color: t.textMuted, textTransform: 'uppercase', fontWeight: 800 }}>Context used</div>
+                {(candidate.evidence ?? []).slice(0, 5).map((item, index) => (
+                  <div key={`${item.objectKey ?? item.name}-${index}`} style={{ border: `1px solid ${t.headerBorder}`, borderRadius: 7, padding: 8, background: t.appBg }}>
+                    <div style={{ fontSize: 11, fontWeight: 800, color: t.textSecondary, overflowWrap: 'anywhere' }}>{item.name}</div>
+                    <div style={{ fontSize: 10, color: t.textMuted, marginTop: 3 }}>{item.kind}{item.reason ? ` · ${item.reason}` : ''}</div>
+                    {item.description && (
+                      <div style={{ fontSize: 11, color: t.textMuted, lineHeight: 1.35, marginTop: 5 }}>{item.description}</div>
+                    )}
+                  </div>
+                ))}
+              </div>
+            )}
             <div style={{ display: 'grid', gap: 5 }}>
               <div style={{ fontSize: 10, color: t.textMuted, textTransform: 'uppercase', fontWeight: 800 }}>Parameters</div>
               <div style={{ display: 'flex', flexWrap: 'wrap', gap: 5 }}>
@@ -2798,28 +2807,38 @@ function ImportCandidateDetail({
                 {warnings.map((warning, index) => <div key={index} style={{ fontSize: 12, color: '#d29922', lineHeight: 1.4 }}>{warning}</div>)}
               </div>
             )}
-            <div style={{ display: 'grid', gap: 6 }}>
-              <div style={{ fontSize: 10, color: t.textMuted, textTransform: 'uppercase', fontWeight: 800 }}>Notes</div>
-              {(candidate.conversionNotes ?? []).map((note, index) => <div key={index} style={{ fontSize: 12, color: t.textMuted, lineHeight: 1.4 }}>{note}</div>)}
-            </div>
           </PanelBox>
 
-          <PanelBox title="Optional AI Suggestions" t={t}>
-            <div style={{ fontSize: 12, color: t.textMuted, lineHeight: 1.45 }}>
-              Optional helper for naming, explanation, validation fixes, chart ideas, and stronger tests. It only uses this selected candidate context and records suggestions for your approval.
+          <details style={importDisclosureStyle(t)}>
+            <summary style={importSummaryStyle(t)}>Generation audit</summary>
+            <div style={{ display: 'grid', gap: 8, marginTop: 10 }}>
+              <InfoLine label="Method" value={candidate.generationMode === 'ai' ? `AI-assisted local generation (${candidate.generationProvider ?? 'configured provider'})` : 'Deterministic local generation'} t={t} />
+              {draftPath && <InfoLine label="Draft path" value={draftPath} t={t} />}
+              <InfoLine label="Default test" value="assert row_count > 0" t={t} />
+              <InfoLine label="Split strategy" value={candidate.splitStrategy ?? 'semicolon-go'} t={t} />
+              {candidate.llmContext && <InfoLine label="Agent use" value={candidate.llmContext} t={t} />}
+              {(candidate.conversionNotes ?? []).map((note, index) => <div key={index} style={{ fontSize: 12, color: t.textMuted, lineHeight: 1.4 }}>{note}</div>)}
             </div>
-            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
-              {[
-                ['explain', 'Explain'],
-                ['fix-validation', 'Fix validation'],
-                ['infer-chart', 'Infer chart'],
-                ['propose-tests', 'Propose tests'],
-              ].map(([action, label]) => (
-                <button key={action} onClick={() => void assist(action)} disabled={Boolean(aiBusy)} style={secondaryImportButtonStyle(t)}>
-                  {aiBusy === action ? 'Working...' : label}
-                </button>
-              ))}
-            </div>
+          </details>
+
+          <details style={importDisclosureStyle(t)}>
+            <summary style={importSummaryStyle(t)}>AI refine tools</summary>
+            <div style={{ display: 'grid', gap: 10, marginTop: 10 }}>
+              <div style={{ fontSize: 12, color: t.textMuted, lineHeight: 1.45 }}>
+                Use these only when the generated draft needs a targeted improvement before certification.
+              </div>
+              <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+                {[
+                  ['explain', 'Explain'],
+                  ['fix-validation', 'Fix validation'],
+                  ['infer-chart', 'Infer chart'],
+                  ['propose-tests', 'Propose tests'],
+                ].map(([action, label]) => (
+                  <button key={action} onClick={() => void assist(action)} disabled={Boolean(aiBusy)} style={secondaryImportButtonStyle(t)}>
+                    {aiBusy === action ? 'Working...' : label}
+                  </button>
+                ))}
+              </div>
             {(candidate.aiAssistance ?? []).length > 0 && (
               <div style={{ display: 'grid', gap: 8 }}>
                 {(candidate.aiAssistance ?? []).slice().reverse().map((item, index) => (
@@ -2830,8 +2849,13 @@ function ImportCandidateDetail({
                 ))}
               </div>
             )}
-          </PanelBox>
+            </div>
+          </details>
+          <button onClick={() => void onReject(candidate)} disabled={candidate.reviewStatus === 'rejected'} style={{ ...secondaryImportButtonStyle(t), justifySelf: 'start' }}>
+            {candidate.reviewStatus === 'rejected' ? 'Rejected' : 'Reject draft'}
+          </button>
         </div>
+        )}
       </div>
     </div>
   );
@@ -3003,7 +3027,7 @@ function BlockStudioImportModal({
             />
           </FieldLabel>
           <FieldLabel label="Domain" t={t}>
-            <input value={domain} onChange={(event) => setDomain(event.target.value)} placeholder="imported" style={importInputStyle(t)} />
+            <input value={domain} onChange={(event) => setDomain(event.target.value)} placeholder="auto" style={importInputStyle(t)} />
           </FieldLabel>
           <FieldLabel label="Owner" t={t}>
             <input value={owner} onChange={(event) => setOwner(event.target.value)} placeholder="analytics" style={importInputStyle(t)} />
@@ -3200,13 +3224,13 @@ function ImportStep({ index, active, complete, title, detail, t }: { index: numb
 
 function ImportGuide({ t }: { t: Theme }) {
   const items = [
-    ['1', 'Choose source', 'Enter a local .sql file or a folder with SQL files.'],
-    ['2', 'Inspect queries', 'DQL detects statements, tables, parameters, and block metadata.'],
-    ['3', 'Save blocks', 'Open in Block Studio for edits or save directly as blocks.'],
+    ['1', 'Add SQL', 'Paste SQL, upload files, or point to an enterprise SQL folder.'],
+    ['2', 'Generate drafts', 'DQL analyzes statements, project metadata, tables, and business context.'],
+    ['3', 'Review and certify', 'Preview results, edit metadata, then certify the governed block.'],
   ];
   return (
     <div style={{ display: 'grid', gap: 12 }}>
-      <EmptyPanel message="Choose a SQL file or folder to create import candidates." />
+      <EmptyPanel message="Add SQL to generate autosaved DQL draft blocks." />
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, minmax(0, 1fr))', gap: 10 }}>
         {items.map(([index, title, detail]) => (
           <div key={title} style={{ border: `1px solid ${t.headerBorder}`, borderRadius: 8, background: t.appBg, padding: 12, display: 'grid', gap: 6 }}>
@@ -3268,6 +3292,29 @@ function SmartCount({ label, value, tone, t }: { label: string; value: number; t
       </span>
     </div>
   );
+}
+
+function importDisclosureStyle(t: Theme): React.CSSProperties {
+  return {
+    border: `1px solid ${t.headerBorder}`,
+    borderRadius: 8,
+    background: t.cellBg,
+    padding: 12,
+    color: t.textPrimary,
+    fontFamily: t.font,
+  };
+}
+
+function importSummaryStyle(t: Theme): React.CSSProperties {
+  return {
+    cursor: 'pointer',
+    color: t.textSecondary,
+    fontSize: 11,
+    fontWeight: 800,
+    textTransform: 'uppercase',
+    letterSpacing: '0.05em',
+    fontFamily: t.font,
+  };
 }
 
 function importInputStyle(t: Theme): React.CSSProperties {
@@ -3559,6 +3606,71 @@ function EmptyPanel({ message }: { message: string }) {
   const { state } = useNotebook();
   const t = themes[state.themeMode];
   return <div style={{ padding: 16, fontSize: 12, color: t.textMuted }}>{message}</div>;
+}
+
+function BlockStudioRunStatusCard({ elapsedMs }: { elapsedMs: number }) {
+  const { state } = useNotebook();
+  const t = themes[state.themeMode];
+  return (
+    <div style={{ padding: 12 }}>
+      <div style={{
+        display: 'grid',
+        gap: 8,
+        border: `1px solid ${t.headerBorder}`,
+        borderRadius: 8,
+        background: t.cellBg,
+        padding: 12,
+        color: t.textPrimary,
+        fontFamily: t.font,
+      }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 13, fontWeight: 700 }}>
+          <Loader2 size={16} strokeWidth={2} color={t.accent} aria-hidden="true" />
+          <span>Running preview</span>
+          <span style={{ marginLeft: 'auto', color: t.textMuted, fontSize: 11, fontWeight: 500 }}>
+            {formatElapsed(elapsedMs)}
+          </span>
+        </div>
+        <div style={{ color: t.textMuted, fontSize: 12, lineHeight: 1.45 }}>
+          Executing the block query against the active connection.
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function BlockStudioRunErrorCard({ message }: { message: string }) {
+  const { state } = useNotebook();
+  const t = themes[state.themeMode];
+  return (
+    <div style={{ padding: 12 }}>
+      <div style={{
+        display: 'grid',
+        gap: 8,
+        border: '1px solid rgba(248, 81, 73, 0.35)',
+        borderRadius: 8,
+        background: 'rgba(248, 81, 73, 0.08)',
+        color: t.textPrimary,
+        fontFamily: t.font,
+        padding: 12,
+      }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 13, fontWeight: 700, color: '#f85149' }}>
+          <AlertTriangle size={16} strokeWidth={2} aria-hidden="true" />
+          <span>Preview failed</span>
+        </div>
+        <div style={{ color: t.textPrimary, fontSize: 12, lineHeight: 1.5, whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>
+          {message}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function formatElapsed(ms: number): string {
+  const seconds = Math.max(0, Math.floor(ms / 1000));
+  if (seconds < 60) return `${seconds}s`;
+  const minutes = Math.floor(seconds / 60);
+  const remainder = seconds % 60;
+  return `${minutes}m ${remainder}s`;
 }
 
 const STATUS_COLORS: Record<string, string> = {
@@ -4287,6 +4399,48 @@ function summarizeDatabaseTree(tree: DatabaseSchemaNode[]): { schemas: number; t
 
 function hasSemanticNodes(tree: SemanticTreeNode | null): boolean {
   return Boolean(tree && tree.children && tree.children.length > 0);
+}
+
+function countSemanticObjects(stats: {
+  metrics: number;
+  measures: number;
+  dimensions: number;
+  timeDimensions: number;
+  entities: number;
+  hierarchies: number;
+  semanticModels: number;
+  savedQueries: number;
+}): number {
+  return stats.metrics
+    + stats.measures
+    + stats.dimensions
+    + stats.timeDimensions
+    + stats.entities
+    + stats.hierarchies
+    + stats.semanticModels
+    + stats.savedQueries;
+}
+
+function countSemanticLeafNodes(tree: SemanticTreeNode | null): number {
+  if (!tree) return 0;
+  const objectKinds = new Set<SemanticTreeNode['kind']>([
+    'cube',
+    'metric',
+    'measure',
+    'dimension',
+    'time_dimension',
+    'entity',
+    'hierarchy',
+    'segment',
+    'pre_aggregation',
+    'semantic_model',
+    'saved_query',
+  ]);
+  let count = objectKinds.has(tree.kind) ? 1 : 0;
+  for (const child of tree.children ?? []) {
+    count += countSemanticLeafNodes(child);
+  }
+  return count;
 }
 
 function buildFallbackSemanticTree(layer: SemanticLayerState): SemanticTreeNode | null {

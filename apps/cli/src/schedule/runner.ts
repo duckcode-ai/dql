@@ -12,7 +12,7 @@ import {
   type ManifestBlock,
 } from '@duckcodeailabs/dql-core';
 import { buildExecutionPlan } from '@duckcodeailabs/dql-notebook';
-import { findProjectRoot, loadProjectConfig, prepareLocalExecution } from '../local-runtime.js';
+import { findProjectRoot, loadProjectConfig, prepareLocalExecution, resolveProjectSemanticConfig } from '../local-runtime.js';
 import { runtimeVariables } from '../governance-runtime.js';
 import { isDigestOutput, runDigestBuild } from '../digest.js';
 import { evaluateAlerts } from './alerts.js';
@@ -177,7 +177,7 @@ export async function runAppDashboard(
     const loadedDashboard = loadDashboardDocument(join(projectRoot, dashboard.filePath)).document;
     if (!loadedDashboard) throw new Error(`Dashboard file could not be loaded: ${dashboard.filePath}`);
 
-    const semantic = await resolveSemanticLayerAsync(projectConfig.semanticLayer, projectRoot);
+    const semantic = await resolveSemanticLayerAsync(resolveProjectSemanticConfig(projectConfig, projectRoot), projectRoot);
     const semanticLayer = semantic.layer;
 
     for (const item of loadedDashboard.layout.items) {

@@ -16,6 +16,7 @@ import {
   resolveDefaultLLMProvider,
   resolveDbtMacrosForExecution,
   resolveProjectRelativeSqlPaths,
+  saveBlockStudioDraftArtifacts,
   serializeJSON,
   validateBlockStudioSource,
   validateConnectionForTest,
@@ -673,6 +674,35 @@ describe('buildAgentValueProbeSql', () => {
 });
 
 describe('semantic block save artifacts', () => {
+  it('autosaves generated blocks under draft paths without promoting to canonical blocks', () => {
+    const projectRoot = mkdtempSync(join(tmpdir(), 'dql-draft-artifacts-'));
+    tempDirs.push(projectRoot);
+    writeFileSync(join(projectRoot, 'dql.config.json'), '{}\n');
+
+    const firstPath = saveBlockStudioDraftArtifacts(projectRoot, {
+      name: 'Revenue Draft',
+      domain: 'finance',
+      description: 'Draft revenue block',
+      owner: 'analytics',
+      tags: ['ai-generated'],
+      source: 'block "Revenue Draft" {\n  status = "draft"\n  domain = "finance"\n  type = "custom"\n  query = """\nselect 1\n  """\n}',
+      stableSuffix: 'cand123',
+    });
+    const secondPath = saveBlockStudioDraftArtifacts(projectRoot, {
+      currentPath: firstPath,
+      name: 'Revenue Draft',
+      domain: 'finance',
+      description: 'Draft revenue block',
+      source: 'block "Revenue Draft" {\n  status = "draft"\n  domain = "finance"\n  type = "custom"\n  query = """\nselect 2\n  """\n}',
+      stableSuffix: 'cand123',
+    });
+
+    expect(firstPath).toBe('blocks/_drafts/finance/revenue-draft-cand123.dql');
+    expect(secondPath).toBe(firstPath);
+    expect(readFileSync(join(projectRoot, firstPath), 'utf-8')).toContain('select 2');
+    expect(() => readFileSync(join(projectRoot, 'blocks/finance/revenue-draft.dql'), 'utf-8')).toThrow();
+  });
+
   it('writes both the block file and semantic companion metadata for save-from-cell flows', () => {
     const projectRoot = mkdtempSync(join(tmpdir(), 'dql-block-artifacts-'));
     tempDirs.push(projectRoot);

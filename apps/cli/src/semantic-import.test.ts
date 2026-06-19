@@ -3,6 +3,48 @@ import { SemanticLayer } from '@duckcodeailabs/dql-core';
 import { buildSemanticTree } from './semantic-import.js';
 
 describe('buildSemanticTree', () => {
+  it('keeps blank-domain semantic models visible under uncategorized', () => {
+    const layer = new SemanticLayer();
+    layer.addSemanticModel({
+      name: 'orders',
+      label: 'Orders',
+      description: 'Orders semantic model',
+      domain: '',
+      table: 'orders',
+      entities: [],
+      measures: ['order_total'],
+      dimensions: ['order_status'],
+      timeDimensions: [],
+    });
+    layer.addMetric({
+      name: 'order_total',
+      label: 'Order Total',
+      description: 'Order total',
+      domain: '',
+      sql: 'SUM(order_total)',
+      type: 'sum',
+      table: 'orders',
+      tags: [],
+    });
+    layer.addDimension({
+      name: 'order_status',
+      label: 'Order Status',
+      description: 'Order status',
+      domain: '',
+      sql: 'order_status',
+      type: 'string',
+      table: 'orders',
+      tags: [],
+    });
+
+    const tree = buildSemanticTree(layer, null);
+    const uncategorized = tree.children?.find((node) => node.id === 'domain:uncategorized');
+    expect(uncategorized).toBeTruthy();
+    expect(JSON.stringify(uncategorized)).toContain('Orders');
+    expect(JSON.stringify(uncategorized)).toContain('Order Total');
+    expect(JSON.stringify(uncategorized)).toContain('Order Status');
+  });
+
   it('creates unique group ids for repeated labels across cubes and domains', () => {
     const layer = new SemanticLayer();
     layer.addCube({

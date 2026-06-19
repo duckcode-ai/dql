@@ -159,6 +159,47 @@ export class SnowflakeSemanticProvider {
       const fqn = `"${view.databaseName}"."${view.schemaName}"."${view.name}"`;
       const descRows = cache.viewDescriptions[fqn] ?? [];
       const relRows = cache.relationships[fqn] ?? [];
+      if (!layer.getCube(view.name)) {
+        layer.addCube({
+          name: view.name,
+          label: view.name.replace(/_/g, ' '),
+          description: `Snowflake semantic view ${fqn}`,
+          sql: `SELECT * FROM ${fqn}`,
+          table: fqn,
+          domain: view.schemaName || 'snowflake',
+          measures: [],
+          dimensions: [],
+          timeDimensions: [],
+          joins: [],
+          segments: [],
+          preAggregations: [],
+          source: {
+            provider: 'snowflake',
+            objectType: 'semantic_view',
+            objectId: fqn,
+            objectName: view.name,
+          },
+        });
+        layer.addSemanticModel({
+          name: view.name,
+          label: view.name.replace(/_/g, ' '),
+          description: `Snowflake semantic view ${fqn}`,
+          domain: view.schemaName || 'snowflake',
+          table: fqn,
+          measures: [],
+          dimensions: [],
+          timeDimensions: [],
+          entities: [],
+          source: {
+            provider: 'snowflake',
+            objectType: 'semantic_view',
+            objectId: fqn,
+            objectName: view.name,
+          },
+        });
+      }
+      const cube = layer.getCube(view.name);
+      const semanticModel = layer.getSemanticModel(view.name);
 
       // Process metrics and dimensions from cached description
       for (const row of descRows) {
@@ -170,7 +211,7 @@ export class SnowflakeSemanticProvider {
 
         if (semanticRole.toLowerCase() === 'measure' || semanticRole.toLowerCase() === 'metric') {
           const aggregation = inferAggregation(colType, expression);
-          layer.addMetric({
+          const metric: MetricDefinition = {
             name: `${view.name}.${colName}`,
             label: colName.replace(/_/g, ' '),
             description: description || `Metric from ${view.name}`,
@@ -186,16 +227,20 @@ export class SnowflakeSemanticProvider {
               objectId: `${fqn}.${colName}`,
               objectName: colName,
             },
-          });
+          };
+          layer.addMetric(metric);
+          cube?.measures.push(metric);
+          semanticModel?.measures.push(metric.name);
         } else if (semanticRole.toLowerCase() === 'dimension' || semanticRole.toLowerCase() === 'entity') {
           const dimType = inferDimensionType(colType);
-          layer.addDimension({
+          const dimension: DimensionDefinition = {
             name: `${view.name}.${colName}`,
             label: colName.replace(/_/g, ' '),
             description: description || `Dimension from ${view.name}`,
             sql: colName,
             type: dimType,
             table: fqn,
+            domain: view.schemaName,
             cube: view.name,
             source: {
               provider: 'snowflake',
@@ -203,7 +248,15 @@ export class SnowflakeSemanticProvider {
               objectId: `${fqn}.${colName}`,
               objectName: colName,
             },
-          });
+          };
+          layer.addDimension(dimension);
+          if (dimension.type === 'date') {
+            cube?.timeDimensions.push({ ...dimension, isTimeDimension: true, granularities: ['day', 'week', 'month', 'quarter', 'year'] });
+            semanticModel?.timeDimensions.push(dimension.name);
+          } else {
+            cube?.dimensions.push(dimension);
+            semanticModel?.dimensions.push(dimension.name);
+          }
         }
       }
 
@@ -300,10 +353,8 @@ export class SnowflakeSemanticProvider {
         databaseName: String(row['TABLE_CATALOG'] ?? ''),
         schemaName: String(row['TABLE_SCHEMA'] ?? ''),
       }));
-    } catch {
-      // If neither approach works, return empty — the error will surface as
-      // "no metrics found" which is more helpful than a raw SQL error.
-      return [];
+    } catch (error) {
+      throw new Error(`Could not discover Snowflake semantic views: ${error instanceof Error ? error.message : String(error)}`);
     }
   }
 

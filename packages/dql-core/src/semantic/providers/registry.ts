@@ -3,7 +3,7 @@
  * Supports auto-detection when no config is provided.
  */
 
-import { existsSync } from 'node:fs';
+import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import type { SemanticLayer } from '../semantic-layer.js';
 import type { SemanticLayerProviderConfig } from './provider.js';
@@ -81,7 +81,16 @@ export async function resolveSemanticLayerAsync(
 }
 
 function autoDetect(projectRoot: string): SemanticLayerResult {
-  // 1. DQL native semantic-layer/ directory
+  // 1. Prefer dbt MetricFlow artifacts when present. Block Studio writes local
+  // semantic-layer companion files for drafts, so native files alone should not
+  // hide the authoritative dbt semantic model source.
+  if (existsSync(join(projectRoot, 'dbt_project.yml')) && hasDbtSemanticArtifacts(projectRoot)) {
+    const result = loadFromConfig({ provider: 'dbt' }, projectRoot);
+    result.detectedProvider = 'dbt';
+    return result;
+  }
+
+  // 2. DQL native semantic-layer/ directory
   const nativeDir = join(projectRoot, 'semantic-layer');
   if (existsSync(nativeDir)) {
     const result = loadFromConfig({ provider: 'dql' }, projectRoot);
@@ -89,14 +98,14 @@ function autoDetect(projectRoot: string): SemanticLayerResult {
     return result;
   }
 
-  // 2. dbt project (dbt_project.yml in root)
+  // 3. dbt project (dbt_project.yml in root)
   if (existsSync(join(projectRoot, 'dbt_project.yml'))) {
     const result = loadFromConfig({ provider: 'dbt' }, projectRoot);
     result.detectedProvider = 'dbt';
     return result;
   }
 
-  // 3. Cube.js project (model/ or schema/ directory)
+  // 4. Cube.js project (model/ or schema/ directory)
   for (const candidate of ['model', 'schema']) {
     if (existsSync(join(projectRoot, candidate))) {
       const result = loadFromConfig({ provider: 'cubejs' }, projectRoot);
@@ -106,6 +115,54 @@ function autoDetect(projectRoot: string): SemanticLayerResult {
   }
 
   return { layer: undefined, errors: [] };
+}
+
+function hasDbtSemanticArtifacts(projectRoot: string): boolean {
+  for (const file of ['target/semantic_manifest.json', 'target/manifest.json']) {
+    const path = join(projectRoot, file);
+    if (!existsSync(path)) continue;
+    try {
+      const parsed = JSON.parse(readFileSync(path, 'utf-8')) as Record<string, unknown>;
+      if (file.endsWith('semantic_manifest.json')) {
+        return Array.isArray(parsed.semantic_models) || Array.isArray(parsed.metrics);
+      }
+      if (parsed.semantic_models && typeof parsed.semantic_models === 'object') return true;
+      if (parsed.metrics && typeof parsed.metrics === 'object') return true;
+    } catch {
+      // Continue to YAML discovery below.
+    }
+  }
+  return hasDbtSemanticYaml(projectRoot);
+}
+
+function hasDbtSemanticYaml(projectRoot: string): boolean {
+  const stack = [projectRoot];
+  while (stack.length > 0) {
+    const dir = stack.pop()!;
+    let entries: Array<{ name: string; isDirectory(): boolean; isFile(): boolean }>;
+    try {
+      entries = readdirSync(dir, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+    for (const entry of entries) {
+      if (entry.name === 'node_modules' || entry.name === '.git' || entry.name === '.dql' || entry.name === 'target') continue;
+      const full = join(dir, entry.name);
+      if (entry.isDirectory()) {
+        stack.push(full);
+        continue;
+      }
+      if (!entry.isFile() || !/\.(ya?ml)$/i.test(entry.name)) continue;
+      try {
+        if (statSync(full).size > 2_000_000) continue;
+        const content = readFileSync(full, 'utf-8');
+        if (/\bsemantic_models\s*:/.test(content) || /\bmetrics\s*:/.test(content)) return true;
+      } catch {
+        // Ignore unreadable files.
+      }
+    }
+  }
+  return false;
 }
 
 function loadFromConfig(
