@@ -91,6 +91,36 @@ export interface AppDocumentSummary {
   investigations?: LocalAppInvestigation[];
 }
 
+export type DashboardDisplayMetadata = {
+  mode: 'manual' | 'ai_generated' | 'block_hint';
+  component:
+    | 'BusinessBrief'
+    | 'KpiMetric'
+    | 'TrendPanel'
+    | 'RankingPanel'
+    | 'EvidenceTable'
+    | 'PivotTable'
+    | 'TrustCallout'
+    | 'NarrativePanel'
+    | 'ResearchActions';
+  defaultVisualization: string;
+  allowedVisualizations: string[];
+  fieldHints?: Record<string, string>;
+  layoutIntent: 'auto' | 'compact' | 'standard' | 'wide' | 'tall' | 'full';
+  rationale: string;
+  trustState: 'certified' | 'review_required' | 'draft_ready';
+  reviewStatus: 'certified' | 'draft_ready' | 'review_required';
+};
+
+export type VisualizationRecommendationResponse =
+  | {
+      ok: true;
+      display: DashboardDisplayMetadata;
+      evidence: Array<{ source: string; reason: string }>;
+      warnings: string[];
+    }
+  | { ok: false; error: string };
+
 export interface DashboardDocumentResponse {
   app: AppDocumentSummary['app'];
   dashboard: {
@@ -126,6 +156,7 @@ export interface DashboardDocumentResponse {
         text?: { markdown: string };
         aiPin?: { id: string };
         viz: { type: string; options?: Record<string, unknown> };
+        display?: DashboardDisplayMetadata;
         title?: string;
       }>;
     };
@@ -2014,6 +2045,26 @@ export const api = {
       return await request(
         `/api/apps/${encodeURIComponent(appId)}/dashboards/${encodeURIComponent(dashboardId)}/layout`,
         { method: 'PATCH', body: JSON.stringify({ layout }) },
+      );
+    } catch (e) {
+      return { ok: false, error: e instanceof Error ? e.message : String(e) };
+    }
+  },
+
+  async recommendVisualization(input: {
+    blockRef?: string;
+    resultSchema?: unknown;
+    rowSample?: Array<Record<string, unknown>>;
+    appAudience?: string;
+    prompt?: string;
+    allowedVisualizations?: string[];
+    component?: DashboardDisplayMetadata['component'];
+    defaultVisualization?: string;
+  }): Promise<VisualizationRecommendationResponse> {
+    try {
+      return await request(
+        '/api/visualizations/recommend',
+        { method: 'POST', body: JSON.stringify(input) },
       );
     } catch (e) {
       return { ok: false, error: e instanceof Error ? e.message : String(e) };

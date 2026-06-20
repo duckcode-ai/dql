@@ -18,6 +18,7 @@ dql --version
 | `dql init [dir]` | Initialize DQL in a project (auto-detects dbt) |
 | `dql doctor [path]` | Run local setup checks |
 | `dql doctor scale` | Report enterprise-scale manifest/cache/index health |
+| `dql doctor git-hygiene` | Flag tracked local/generated files before commit |
 | `dql validate [path]` | Validate all `.dql` files and semantic references |
 | `dql compile [path]` | Generate project manifest (`dql-manifest.json`) |
 
@@ -25,6 +26,10 @@ dql --version
 metadata/KG index state, context-pack timing, source fingerprints, domain
 shards, and top rejected evidence candidates that were relevant but excluded by
 retrieval caps.
+
+`dql doctor git-hygiene --format json` checks tracked files against the OSS Git
+policy and flags `.dql/cache`, `.dql/local`, `*.run.json`, `dql-manifest.json`,
+local databases, data files, AI pins, saved views, and layout overrides.
 
 ### Authoring
 
@@ -90,6 +95,9 @@ dql lineage --dashboard daily_ops      # consumption lineage
 | `dql app generate "<prompt>"` | Generate a governed App draft from certified blocks plus review placeholders |
 | `dql app generate "<prompt>" --ai-layout` | Store richer GenUI layout metadata for dynamic visualization/layout decisions |
 | `dql app ls\|show\|build\|reindex` | List, inspect, compile, or reindex local Apps |
+| `dql promote notebook <path> --to shared` | Strip local run/UI state and mark a notebook as shared source |
+| `dql promote app <app-id> --to shared` | Mark an App manifest as shared/reviewed source |
+| `dql promote dashboard <app-id>/<dashboard-id> --to shared` | Strip AI pins/local state and mark a dashboard as shared source |
 | `dql agent ask "<question>"` | Ask through the certified-first local agent loop |
 | `dql agent reindex` | Rebuild `.dql/cache/agent-kg.sqlite` and metadata cache |
 | `dql agent feedback up\|down` | Record answer feedback |
@@ -126,6 +134,7 @@ dql lineage --dashboard daily_ops      # consumption lineage
 | `--out-dir <path>` | Output directory for `build` |
 | `--to domain-first` | Target for `dql migrate layout` |
 | `--dry-run` | Preview layout moves without writing |
+| `--to shared` | Target for `dql promote` |
 | `--port <n>` | Preferred local port for `preview`/`serve` |
 | `--chart <type>` | Primary chart type for `new` scaffolds |
 | `--domain <name>` | Domain for new block scaffolds |

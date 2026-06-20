@@ -100,6 +100,8 @@ export interface ManifestBlock {
   allDependencies: string[];
   /** Visualization chart type */
   chartType?: string;
+  /** Consumer display hints derived from block visualization metadata. Apps/notebooks may override these. */
+  displayHints?: ManifestBlockDisplayHints;
   /** Metric reference for semantic blocks */
   metricRef?: string;
   /** Metric references for semantic blocks */
@@ -186,6 +188,13 @@ export interface ManifestBlock {
     sources: Array<{ table: string; column: string }>;
     unresolved?: boolean;
   }>;
+}
+
+export interface ManifestBlockDisplayHints {
+  defaultVisualization?: string;
+  allowedVisualizations?: string[];
+  fieldHints?: Record<string, string>;
+  source: 'block_visualization' | 'derived' | 'ai_import';
 }
 
 export interface ManifestBlockParameterPolicy {

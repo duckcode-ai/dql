@@ -2055,6 +2055,7 @@ function blockDeclToManifestBlock(block: any, filePath: string): ManifestBlock {
       ...((block.dimensionsRef ?? []).map((d: string) => `@dim(${d})`)),
     ],
     chartType: extractVisualizationChart(block),
+    displayHints: extractDisplayHints(block),
     metricRef: block.metricRef,
     metricsRef: block.metricsRef,
     tests,
@@ -2220,6 +2221,44 @@ function extractVisualizationChart(block: any): string | undefined {
       return String(prop.value.value);
     }
   }
+  return undefined;
+}
+
+function extractDisplayHints(block: any): ManifestBlock['displayHints'] | undefined {
+  const chart = extractVisualizationChart(block);
+  const fieldHints: Record<string, string> = {};
+  if (block.visualization) {
+    for (const prop of block.visualization.properties ?? []) {
+      const name = String(prop.name ?? prop.key ?? '');
+      if (!['x', 'y', 'color', 'time', 'label', 'value', 'rank'].includes(name)) continue;
+      const value = literalOrIdentifier(prop.value);
+      if (value) fieldHints[name] = value;
+    }
+  }
+  if (!chart && Object.keys(fieldHints).length === 0) return undefined;
+  const allowed = new Set<string>();
+  if (chart) allowed.add(chart);
+  allowed.add('table');
+  if (chart === 'bar' || chart === 'grouped_bar' || chart === 'stacked_bar') {
+    allowed.add('line');
+  }
+  if (chart === 'line' || chart === 'area') {
+    allowed.add('bar');
+  }
+  return {
+    ...(chart ? { defaultVisualization: chart } : {}),
+    allowedVisualizations: Array.from(allowed),
+    ...(Object.keys(fieldHints).length > 0 ? { fieldHints } : {}),
+    source: 'block_visualization',
+  };
+}
+
+function literalOrIdentifier(value: any): string | undefined {
+  if (!value) return undefined;
+  if (value.kind === 'StringLiteral' || value.kind === 'Literal') return String(value.value);
+  if (value.kind === 'Identifier') return String(value.name);
+  if (typeof value.name === 'string') return value.name;
+  if (typeof value.value === 'string' || typeof value.value === 'number') return String(value.value);
   return undefined;
 }
 

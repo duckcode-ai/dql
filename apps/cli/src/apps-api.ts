@@ -16,6 +16,7 @@ import {
   parseDashboardDocument,
   suggestAppId,
   type AppDocument,
+  type DashboardDisplayMetadata,
   type DashboardDocument,
   type DashboardGridItem,
 } from '@duckcodeailabs/dql-core';
@@ -43,6 +44,21 @@ interface Ctx {
 
 export async function handleAppsApi(ctx: Ctx): Promise<boolean> {
   const { req, res, path, projectRoot } = ctx;
+
+  if (req.method === 'POST' && path === '/api/visualizations/recommend') {
+    try {
+      const body = await readJson<VisualizationRecommendationRequest>(req);
+      const result = recommendVisualization(projectRoot, body);
+      if (!result.ok) {
+        sendJson(res, 400, result);
+        return true;
+      }
+      sendJson(res, 200, result);
+    } catch (err) {
+      sendJson(res, 500, { ok: false, error: (err as Error).message });
+    }
+    return true;
+  }
 
   // ── Apps ────────────────────────────────────────────────────────────────
 
@@ -724,6 +740,20 @@ interface AppRecommendationRequest {
   certifiedOnly?: boolean;
 }
 
+interface VisualizationRecommendationRequest {
+  blockRef?: string;
+  resultSchema?: unknown;
+  rowSample?: Array<Record<string, unknown>>;
+  rows?: Array<Record<string, unknown>>;
+  appAudience?: string;
+  audience?: string;
+  prompt?: string;
+  filters?: unknown;
+  allowedVisualizations?: string[];
+  component?: DashboardDisplayMetadata['component'];
+  defaultVisualization?: string;
+}
+
 interface AppCreateRequest {
   name?: string;
   domain?: string;
@@ -907,6 +937,84 @@ export function recommendBlocks(projectRoot: string, input: AppRecommendationReq
     .filter((block): block is BlockCandidate => Boolean(block))
     .sort((a, b) => b.score - a.score || new Date(b.lastModified).getTime() - new Date(a.lastModified).getTime())
     .slice(0, 50);
+}
+
+export function recommendVisualization(
+  projectRoot: string,
+  input: VisualizationRecommendationRequest,
+): { ok: true; display: DashboardDisplayMetadata; evidence: Array<{ source: string; reason: string }>; warnings: string[] } | { ok: false; error: string } {
+  const blockRef = cleanString(input.blockRef);
+  const prompt = cleanString(input.prompt).toLowerCase();
+  const audience = cleanString(input.appAudience) || cleanString(input.audience);
+  const rows = Array.isArray(input.rowSample) ? input.rowSample : Array.isArray(input.rows) ? input.rows : [];
+  const columns = extractRecommendationColumns(input.resultSchema, rows);
+  const block = blockRef
+    ? collectBlockCandidates(projectRoot).find((candidate) =>
+        candidate.id === blockRef ||
+        candidate.name === blockRef ||
+        candidate.path === blockRef ||
+        candidate.path.endsWith(`/${blockRef}`),
+      )
+    : undefined;
+  const evidence: Array<{ source: string; reason: string }> = [];
+  const warnings: string[] = [];
+  if (block) {
+    evidence.push({ source: block.path, reason: `Block hint: ${block.chartType ?? 'table'}; status: ${block.status}; domain: ${block.domain}` });
+  } else if (blockRef) {
+    warnings.push(`Block reference was not found locally: ${blockRef}`);
+  }
+  if (columns.length > 0) {
+    evidence.push({ source: 'result_schema', reason: `${columns.length} result column(s) were inspected.` });
+  } else {
+    warnings.push('No result schema or row sample was provided, so recommendation used block metadata and prompt only.');
+  }
+  if (audience) {
+    evidence.push({ source: 'audience', reason: `Audience: ${audience}` });
+  }
+
+  const requestedViz = cleanString(input.defaultVisualization);
+  if (requestedViz && !isSupportedVizType(requestedViz)) {
+    return { ok: false, error: `Unsupported visualization: ${requestedViz}` };
+  }
+  const defaultVisualization = requestedViz
+    ? normalizeVizType(requestedViz)
+    : recommendVizType({ columns, rows, prompt, blockChartType: block?.chartType });
+  const component = input.component ?? componentForViz(defaultVisualization, prompt);
+  if (!componentVizCompatible(component, defaultVisualization)) {
+    return {
+      ok: false,
+      error: `${component} cannot use ${defaultVisualization}. Choose one of ${allowedVisualizationsForComponent(component, defaultVisualization).join(', ')}.`,
+    };
+  }
+  const unsupportedAllowed = (input.allowedVisualizations ?? []).filter((value) => !isSupportedVizType(value));
+  if (unsupportedAllowed.length > 0) {
+    return { ok: false, error: `Unsupported allowed visualization(s): ${unsupportedAllowed.join(', ')}` };
+  }
+  const supportedAllowed = (input.allowedVisualizations ?? [])
+    .map((value) => normalizeVizType(value))
+    .filter((value, index, arr) => arr.indexOf(value) === index);
+  if (supportedAllowed.length > 0 && !supportedAllowed.includes(defaultVisualization)) {
+    return {
+      ok: false,
+      error: `Requested visualization ${defaultVisualization} is outside allowed visualizations: ${supportedAllowed.join(', ')}.`,
+    };
+  }
+  const allowedVisualizations = supportedAllowed.length > 0
+    ? supportedAllowed
+    : allowedVisualizationsForComponent(component, defaultVisualization);
+  const fieldHints = fieldHintsForColumns(columns, rows, prompt);
+  const display: DashboardDisplayMetadata = {
+    mode: block ? 'block_hint' : 'ai_generated',
+    component,
+    defaultVisualization,
+    allowedVisualizations,
+    ...(Object.keys(fieldHints).length > 0 ? { fieldHints } : {}),
+    layoutIntent: layoutIntentForComponent(component),
+    rationale: recommendationRationale(component, defaultVisualization, block, columns, prompt),
+    trustState: block?.status === 'certified' ? 'certified' : 'review_required',
+    reviewStatus: block?.status === 'certified' ? 'certified' : 'review_required',
+  };
+  return { ok: true, display, evidence, warnings };
 }
 
 export async function generateAppPackage(
@@ -1135,6 +1243,7 @@ function dashboardItemForBlock(
     h: size.h,
     block: { blockId: block.name },
     viz: { type: chartType },
+    display: displayForBlockHint(block, chartType),
     title: block.name,
   };
 }
@@ -1172,7 +1281,201 @@ function normalizeVizType(chartType?: string): DashboardGridItem['viz']['type'] 
   if (normalized === 'pivot') return 'pivot';
   if (normalized === 'map') return 'map';
   if (normalized === 'funnel') return 'funnel';
+  if (normalized === 'text') return 'text';
+  if (normalized === 'heading') return 'heading';
   return 'table';
+}
+
+function isSupportedVizType(chartType?: string): boolean {
+  const normalized = (chartType ?? '').toLowerCase().replace(/-/g, '_');
+  return [
+    'single', 'single_value', 'kpi', 'line', 'bar', 'grouped_bar', 'stacked_bar',
+    'area', 'pie', 'donut', 'scatter', 'heatmap', 'histogram', 'waterfall',
+    'gauge', 'pivot', 'map', 'funnel', 'table', 'text', 'heading',
+  ].includes(normalized);
+}
+
+function displayForBlockHint(
+  block: BlockCandidate,
+  chartType: DashboardGridItem['viz']['type'],
+): DashboardDisplayMetadata {
+  const component = componentForViz(chartType, `${block.name} ${block.description} ${block.tags.join(' ')}`.toLowerCase());
+  return {
+    mode: 'block_hint',
+    component,
+    defaultVisualization: chartType,
+    allowedVisualizations: allowedVisualizationsForComponent(component, chartType),
+    layoutIntent: layoutIntentForComponent(component),
+    rationale: `Block-level visualization is treated as a display hint for ${block.name}; apps and notebooks may override it.`,
+    trustState: block.status === 'certified' ? 'certified' : 'draft_ready',
+    reviewStatus: block.status === 'certified' ? 'certified' : 'draft_ready',
+  };
+}
+
+function displayForAiPin(
+  title: string,
+  chartType: DashboardGridItem['viz']['type'],
+  input: AiPinCreateRequest,
+): DashboardDisplayMetadata {
+  const text = `${title} ${cleanString(input.question)} ${cleanString(input.answer)}`.toLowerCase();
+  const component = componentForViz(chartType, text);
+  const certified = input.certification === 'certified' || input.reviewStatus === 'certified';
+  return {
+    mode: 'ai_generated',
+    component,
+    defaultVisualization: chartType,
+    allowedVisualizations: allowedVisualizationsForComponent(component, chartType),
+    layoutIntent: layoutIntentForComponent(component),
+    rationale: 'AI-generated research pin saved as governed presentation metadata; promote the SQL to a draft block before treating it as reusable logic.',
+    trustState: certified ? 'certified' : 'review_required',
+    reviewStatus: certified ? 'certified' : 'review_required',
+  };
+}
+
+function extractRecommendationColumns(
+  schema: unknown,
+  rows: Array<Record<string, unknown>>,
+): Array<{ name: string; type?: string }> {
+  const rawColumns = Array.isArray(schema)
+    ? schema
+    : schema && typeof schema === 'object' && Array.isArray((schema as { columns?: unknown }).columns)
+      ? (schema as { columns: unknown[] }).columns
+      : [];
+  const columns = rawColumns.flatMap((column): Array<{ name: string; type?: string }> => {
+    if (typeof column === 'string') return [{ name: column }];
+    if (column && typeof column === 'object') {
+      const record = column as Record<string, unknown>;
+      const name = cleanString(record.name) || cleanString(record.field) || cleanString(record.id);
+      if (!name) return [];
+      const type = cleanString(record.type) || cleanString(record.dataType);
+      return [{ name, ...(type ? { type } : {}) }];
+    }
+    return [];
+  });
+  if (columns.length > 0) return columns;
+  const first = rows.find((row) => row && typeof row === 'object');
+  return first ? Object.keys(first).map((name) => ({ name, type: typeof first[name] })) : [];
+}
+
+function recommendVizType(input: {
+  columns: Array<{ name: string; type?: string }>;
+  rows: Array<Record<string, unknown>>;
+  prompt: string;
+  blockChartType?: string;
+}): DashboardGridItem['viz']['type'] {
+  const names = input.columns.map((column) => column.name.toLowerCase());
+  const hasTime = names.some((name) => /\b(date|time|week|month|quarter|year|season|period)\b/.test(name));
+  const measures = input.columns.filter((column) => isMeasureColumn(column, input.rows));
+  const dimensions = input.columns.filter((column) => !isMeasureColumn(column, input.rows));
+  if (/\bpivot|matrix|cross.?tab\b/.test(input.prompt)) return 'pivot';
+  if (/\btrend|over time|weekly|monthly|daily|quarterly\b/.test(input.prompt) || (hasTime && measures.length > 0)) return 'line';
+  if (/\btop|bottom|rank|ranking|leader|leaderboard|players?|scorers?\b/.test(input.prompt)) return 'bar';
+  if (measures.length === 1 && dimensions.length === 0) return 'single_value';
+  if (dimensions.length > 0 && measures.length > 0) return 'bar';
+  return normalizeVizType(input.blockChartType);
+}
+
+function isMeasureColumn(column: { name: string; type?: string }, rows: Array<Record<string, unknown>>): boolean {
+  const type = (column.type ?? '').toLowerCase();
+  if (/\b(number|numeric|decimal|double|float|integer|int|bigint|real)\b/.test(type)) return true;
+  const name = column.name.toLowerCase();
+  if (/\b(count|sum|avg|average|total|revenue|arr|amount|rate|score|points?|goals?|rank|value)\b/.test(name)) return true;
+  const sample = rows.map((row) => row[column.name]).find((value) => value !== null && value !== undefined);
+  return typeof sample === 'number';
+}
+
+function fieldHintsForColumns(
+  columns: Array<{ name: string; type?: string }>,
+  rows: Array<Record<string, unknown>>,
+  prompt: string,
+): Record<string, string> {
+  const hints: Record<string, string> = {};
+  const measure = columns.find((column) => isMeasureColumn(column, rows));
+  const time = columns.find((column) => /\b(date|time|week|month|quarter|year|season|period)\b/i.test(column.name));
+  const rank = columns.find((column) => /\b(rank|position)\b/i.test(column.name));
+  const label = columns.find((column) =>
+    !isMeasureColumn(column, rows) && /\b(name|player|customer|account|team|segment|region|category|label)\b/i.test(column.name),
+  ) ?? columns.find((column) => !isMeasureColumn(column, rows));
+  if (label) hints.label = label.name;
+  if (measure) hints.value = measure.name;
+  if (time) hints.time = time.name;
+  if (rank || /\brank|top|bottom\b/i.test(prompt)) hints.rank = rank?.name ?? 'rank';
+  if (time && measure) {
+    hints.x = time.name;
+    hints.y = measure.name;
+  } else if (label && measure) {
+    hints.x = label.name;
+    hints.y = measure.name;
+  }
+  return hints;
+}
+
+function componentForViz(
+  viz: DashboardGridItem['viz']['type'],
+  text: string,
+): DashboardDisplayMetadata['component'] {
+  if (viz === 'single_value' || viz === 'kpi' || viz === 'gauge') return 'KpiMetric';
+  if (viz === 'line' || viz === 'area') return 'TrendPanel';
+  if (viz === 'pivot') return 'PivotTable';
+  if (viz === 'text' || viz === 'heading') return /\btrust|evidence|caveat|quality\b/.test(text) ? 'TrustCallout' : 'NarrativePanel';
+  if (/\btop|bottom|rank|ranking|leader|leaderboard|scorer|player\b/.test(text)) return 'RankingPanel';
+  if (viz === 'bar' || viz === 'grouped_bar' || viz === 'stacked_bar' || viz === 'pie' || viz === 'donut') return 'RankingPanel';
+  return 'EvidenceTable';
+}
+
+function allowedVisualizationsForComponent(
+  component: DashboardDisplayMetadata['component'],
+  primary: DashboardGridItem['viz']['type'],
+): DashboardGridItem['viz']['type'][] {
+  const base = new Set<DashboardGridItem['viz']['type']>([primary]);
+  for (const viz of compatibleVisualizationsForComponent(component)) base.add(viz);
+  return Array.from(base);
+}
+
+function compatibleVisualizationsForComponent(
+  component: DashboardDisplayMetadata['component'],
+): DashboardGridItem['viz']['type'][] {
+  if (component === 'KpiMetric') {
+    return ['single_value', 'kpi', 'gauge', 'table'];
+  }
+  if (component === 'TrendPanel') return ['line', 'area', 'bar', 'table'];
+  if (component === 'RankingPanel') return ['bar', 'grouped_bar', 'stacked_bar', 'pie', 'donut', 'table'];
+  if (component === 'PivotTable') return ['pivot', 'table', 'bar'];
+  if (component === 'EvidenceTable') return ['table', 'bar', 'scatter', 'heatmap', 'histogram', 'waterfall', 'map', 'funnel'];
+  return ['text', 'heading'];
+}
+
+function componentVizCompatible(
+  component: DashboardDisplayMetadata['component'],
+  viz: DashboardGridItem['viz']['type'],
+): boolean {
+  return compatibleVisualizationsForComponent(component).includes(viz);
+}
+
+function layoutIntentForComponent(component: DashboardDisplayMetadata['component']): DashboardDisplayMetadata['layoutIntent'] {
+  if (component === 'KpiMetric' || component === 'TrustCallout' || component === 'ResearchActions') return 'compact';
+  if (component === 'TrendPanel' || component === 'RankingPanel') return 'wide';
+  if (component === 'PivotTable' || component === 'EvidenceTable') return 'standard';
+  if (component === 'BusinessBrief') return 'wide';
+  return 'standard';
+}
+
+function recommendationRationale(
+  component: DashboardDisplayMetadata['component'],
+  viz: DashboardGridItem['viz']['type'],
+  block: BlockCandidate | undefined,
+  columns: Array<{ name: string; type?: string }>,
+  prompt: string,
+): string {
+  if (block) {
+    return `Recommended ${component} with ${viz} from the block display hint and result shape. The certified block remains the business logic source.`;
+  }
+  if (columns.length > 0) {
+    return `Recommended ${component} with ${viz} from ${columns.length} output column(s) and the app prompt. This is consumer-level metadata pending review.`;
+  }
+  return prompt
+    ? `Recommended ${component} with ${viz} from the app prompt. Review against previewed fields before sharing.`
+    : `Recommended ${component} with ${viz} as a safe table-first presentation fallback.`;
 }
 
 function appReadme(app: AppDocument, audience: string, blocks: BlockCandidate[], dashboardId = 'overview'): string {
@@ -2344,11 +2647,13 @@ function createAiPinTile(
       evidence: input.evidence,
       followUps: Array.isArray(input.followUps) ? input.followUps.filter((item): item is string => typeof item === 'string') : [],
     });
+    const vizType = normalizeVizTypeFromChart(input.chartConfig);
     const tile: DashboardGridItem = {
       i: tileId,
       ...nextTilePosition(loaded.dashboard),
       aiPin: { id: pin.id },
-      viz: { type: normalizeVizTypeFromChart(input.chartConfig) },
+      viz: { type: vizType },
+      display: displayForAiPin(title, vizType, input),
       title,
     };
     const dashboard: DashboardDocument = {

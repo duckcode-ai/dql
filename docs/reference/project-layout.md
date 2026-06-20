@@ -191,9 +191,18 @@ dbt source -> dbt model -> semantic metric -> DQL block -> business_view -> dash
 
 ## What gets committed
 
-**Commit:** `dql/blocks/`, `dql/terms/`, `dql/business-views/`,
-`dql/notebooks/`, `dql/apps/`, `dql/semantic-layer/`,
-`dql/dql.config.json`, `package.json`.
+**Commit:** durable shared source: `domains/**/domain.dql`,
+`domains/**/blocks/**/*.dql`, legacy `blocks/**/*.dql`, `terms/**/*.dql`,
+`business-views/**/*.dql`, `semantic-layer/**/*.yaml`, reviewed
+`apps/*/dql.app.json`, reviewed `apps/*/dashboards/*.dqld`, curated/shared
+`.dqlnb` notebooks, `dql.config.json`, and `package.json`.
 
-**Don't commit:** `data/`, `.dql/`, `*.run.json`, `dql-manifest.json` (build
-output). The default `.gitignore` from the scaffolder handles this.
+**Don't commit:** local or generated state: `.dql/cache/**`, `.dql/local/**`,
+`.dql/imports/**` by default, `*.run.json`, `dql-manifest.json`, `data/**`,
+AI pins, saved views, personal layout overrides, local SQLite/DuckDB files, and
+temporary generated artifacts.
+
+Use `dql promote notebook <path> --to shared`, `dql promote app <app-id> --to shared`,
+or `dql promote dashboard <app-id>/<dashboard-id> --to shared` to turn private
+work into clean shared source. Run `dql doctor git-hygiene` before committing to
+flag tracked files that violate this policy.

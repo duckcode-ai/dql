@@ -5,6 +5,7 @@ import {
   parseDashboardDocument,
   suggestAppId,
   type AppDocument,
+  type DashboardDisplayMetadata,
   type DashboardDocument,
   type DashboardGridItem,
   type DashboardVizConfig,
@@ -69,6 +70,7 @@ export type AppPlanGenUiComponent =
   | "TrendPanel"
   | "RankingPanel"
   | "EvidenceTable"
+  | "PivotTable"
   | "TrustCallout"
   | "ResearchActions"
   | "NarrativePanel";
@@ -1008,6 +1010,7 @@ function componentForPresentation(
   if (role === "narrative") return "NarrativePanel";
   if (role === "kpi") return "KpiMetric";
   if (role === "trend") return "TrendPanel";
+  if (viz === "pivot") return "PivotTable";
   if (/\btop\s*\d+|rank|ranking|leader|leaderboard|scorer|scoring|score|goal\b/.test(text))
     return "RankingPanel";
   if (viz === "bar" || viz === "grouped_bar" || viz === "stacked_bar")
@@ -1023,6 +1026,7 @@ function layoutIntentForPresentation(
   if (role === "business_summary") return "wide";
   if (role === "kpi") return "compact";
   if (component === "RankingPanel" || component === "TrendPanel") return "wide";
+  if (component === "PivotTable") return "standard";
   if (component === "EvidenceTable") return viz === "table" || viz === "pivot" ? "standard" : "wide";
   if (role === "trust" || role === "research") return "compact";
   if (role === "narrative") return "standard";
@@ -1041,6 +1045,8 @@ function allowedVisualizationsForPresentation(
     ["line", "area", "bar", "table"].forEach((type) => base.add(type as DashboardVizConfig["type"]));
   } else if (component === "RankingPanel") {
     ["bar", "table", "donut"].forEach((type) => base.add(type as DashboardVizConfig["type"]));
+  } else if (component === "PivotTable") {
+    ["pivot", "table", "bar"].forEach((type) => base.add(type as DashboardVizConfig["type"]));
   } else if (component === "EvidenceTable") {
     ["table", "bar"].forEach((type) => base.add(type as DashboardVizConfig["type"]));
   } else if (component === "TrustCallout" || component === "ResearchActions" || component === "NarrativePanel" || component === "BusinessBrief") {
@@ -1079,6 +1085,7 @@ function insightTitleForPresentation(
   if (role === "kpi") return title;
   if (component === "RankingPanel") return title;
   if (component === "TrendPanel") return title;
+  if (component === "PivotTable") return title;
   return title;
 }
 
@@ -1131,6 +1138,17 @@ function buildLayoutItems(tiles: AppPlanTile[]): DashboardGridItem[] {
   });
   return orderedTiles.map((tile, index) => {
     const size = tileSize(tile);
+    const genUi = tile.display?.genUi ?? buildGenUiContract({
+      title: tile.title,
+      role: tile.display?.role ?? "evidence",
+      viz: tile.viz,
+      text: `${tile.title} ${tile.description ?? ""}`,
+      trustState: tile.display?.trustState ?? (tile.certification === "certified" ? "certified" : "draft_ready"),
+      reviewStatus: tile.reviewStatus,
+      sourceNodeId: tile.sourceNodeId,
+      followUpActions: tile.display?.followUpActions ?? [],
+      rationale: tile.display?.rationale ?? tile.rationale ?? "Generated DQL app presentation metadata.",
+    });
     if (x + size.w > 12) {
       x = 0;
       y += rowH || size.h;
@@ -1146,19 +1164,10 @@ function buildLayoutItems(tiles: AppPlanTile[]): DashboardGridItem[] {
       viz: {
         type: tile.viz,
         options: {
-          dqlGenUi: tile.display?.genUi ?? buildGenUiContract({
-            title: tile.title,
-            role: tile.display?.role ?? "evidence",
-            viz: tile.viz,
-            text: `${tile.title} ${tile.description ?? ""}`,
-            trustState: tile.display?.trustState ?? (tile.certification === "certified" ? "certified" : "draft_ready"),
-            reviewStatus: tile.reviewStatus,
-            sourceNodeId: tile.sourceNodeId,
-            followUpActions: tile.display?.followUpActions ?? [],
-            rationale: tile.display?.rationale ?? tile.rationale ?? "Generated DQL app presentation metadata.",
-          }),
+          dqlGenUi: genUi,
         },
       },
+      display: displayMetadataForTile(tile, genUi),
     };
     if (isDashboardTile(tile)) {
       item.block = { blockId: tile.blockId };
@@ -1498,6 +1507,7 @@ function tileSize(tile: AppPlanTile): { w: number; h: number } {
   const layoutIntent = tile.display?.genUi.layoutIntent;
   if (role === "business_summary") return { w: 12, h: 2 };
   if (component === "RankingPanel") return { w: 8, h: 4 };
+  if (component === "PivotTable") return { w: 6, h: 4 };
   if (component === "EvidenceTable") return { w: layoutIntent === "tall" ? 6 : 4, h: 4 };
   if (role === "trust" || role === "research") return { w: 4, h: 3 };
   if (tile.kind === "narrative") return { w: 12, h: 2 };
@@ -1507,6 +1517,32 @@ function tileSize(tile: AppPlanTile): { w: number; h: number } {
   if (viz === "text") return { w: 6, h: 2 };
   if (viz === "table" || viz === "pivot") return { w: 6, h: 4 };
   return { w: 6, h: 3 };
+}
+
+function displayMetadataForTile(
+  tile: AppPlanTile,
+  genUi: AppPlanGenUi,
+): DashboardDisplayMetadata {
+  return {
+    mode: tile.kind === "certified_block" ? "block_hint" : "ai_generated",
+    component: genUi.component,
+    defaultVisualization: genUi.defaultVisualization,
+    allowedVisualizations: genUi.allowedVisualizations,
+    ...(genUi.fieldHints ? { fieldHints: cleanFieldHints(genUi.fieldHints) } : {}),
+    layoutIntent: genUi.layoutIntent,
+    rationale: genUi.rationale || tile.rationale || "Generated presentation metadata for this consumer surface.",
+    trustState: genUi.trustState,
+    reviewStatus: genUi.reviewStatus,
+  };
+}
+
+function cleanFieldHints(input: AppPlanGenUi["fieldHints"]): Record<string, string> | undefined {
+  if (!input) return undefined;
+  const out: Record<string, string> = {};
+  for (const [key, value] of Object.entries(input)) {
+    if (typeof value === "string" && value.trim()) out[key] = value.trim();
+  }
+  return Object.keys(out).length > 0 ? out : undefined;
 }
 
 function titleCase(value: string): string {

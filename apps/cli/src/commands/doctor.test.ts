@@ -1,4 +1,5 @@
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -230,5 +231,50 @@ describe('runDoctor', () => {
       objectType: 'dql_block',
       reason: expect.stringContaining('Lower retrieval score than selected context window'),
     }));
+  });
+
+  it('flags tracked local/generated files in git hygiene mode', async () => {
+    const projectDir = makeProject('dql-doctor-git-hygiene-');
+    mkdirSync(join(projectDir, '.dql', 'cache'), { recursive: true });
+    writeFileSync(join(projectDir, 'dql.config.json'), JSON.stringify({ project: 'demo' }));
+    writeFileSync(join(projectDir, 'dql-manifest.json'), JSON.stringify({ generated: true }));
+    writeFileSync(join(projectDir, 'analysis.run.json'), JSON.stringify({ rows: [] }));
+    writeFileSync(join(projectDir, '.dql', 'cache', 'metadata.sqlite'), 'sqlite');
+    execFileSync('git', ['init'], { cwd: projectDir });
+    execFileSync('git', ['add', '.'], { cwd: projectDir });
+
+    const spy = vi.spyOn(console, 'log').mockImplementation(() => {});
+    const previousCwd = process.cwd();
+    try {
+      process.chdir(projectDir);
+      await runDoctor('git-hygiene', {
+        check: false,
+        chart: '',
+        domain: '',
+        format: 'json',
+        help: false,
+        open: null,
+        input: '',
+        outDir: '',
+        owner: '',
+        port: null,
+        queryOnly: false,
+        template: '',
+        connection: '',
+        verbose: false,
+        skipTests: false, version: false,
+      });
+    } finally {
+      process.chdir(previousCwd);
+    }
+
+    const report = JSON.parse(String(spy.mock.calls.at(-1)?.[0] ?? '{}'));
+    expect(report.ok).toBe(false);
+    expect(report.issues.map((issue: { code: string }) => issue.code)).toEqual(expect.arrayContaining([
+      'compiled_manifest_tracked',
+      'run_snapshot_tracked',
+      'cache_tracked',
+      'database_file_tracked',
+    ]));
   });
 });

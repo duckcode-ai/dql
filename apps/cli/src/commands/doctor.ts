@@ -1,4 +1,5 @@
 import { existsSync, readFileSync, statSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { QueryExecutor } from '@duckcodeailabs/dql-connectors';
@@ -25,6 +26,10 @@ interface Check {
 export async function runDoctor(targetPath: string | null, flags: CLIFlags): Promise<void> {
   if (targetPath === 'scale') {
     await runDoctorScale(null, flags);
+    return;
+  }
+  if (targetPath === 'git-hygiene') {
+    runDoctorGitHygiene(flags);
     return;
   }
 
@@ -133,6 +138,126 @@ export async function runDoctor(targetPath: string | null, flags: CLIFlags): Pro
   console.log('');
   console.log('  OSS note: certification, personas, and policies are local single-user trust previews.');
   console.log('');
+}
+
+interface GitHygieneIssue {
+  severity: 'warning' | 'error';
+  path: string;
+  code: string;
+  message: string;
+}
+
+interface GitHygieneReport {
+  ok: boolean;
+  projectRoot: string;
+  checkedFiles: number;
+  issues: GitHygieneIssue[];
+  commitPolicy: {
+    durable: string[];
+    localOnly: string[];
+  };
+}
+
+function runDoctorGitHygiene(flags: CLIFlags): void {
+  const projectRoot = findProjectRoot(resolve('.'));
+  const tracked = listTrackedGitFiles(projectRoot);
+  const issues = tracked.flatMap((path) => classifyGitHygieneIssue(path));
+  const report: GitHygieneReport = {
+    ok: issues.length === 0,
+    projectRoot,
+    checkedFiles: tracked.length,
+    issues,
+    commitPolicy: {
+      durable: [
+        'domains/**/domain.dql',
+        'domains/**/blocks/**/*.dql',
+        'blocks/**/*.dql',
+        'terms/**/*.dql',
+        'business-views/**/*.dql',
+        'semantic-layer/**/*.yaml',
+        'apps/*/dql.app.json',
+        'apps/*/dashboards/*.dqld',
+        'curated/shared .dqlnb files',
+        'dql.config.json',
+        'package.json',
+      ],
+      localOnly: [
+        '.dql/cache/**',
+        '.dql/local/**',
+        '.dql/imports/** by default',
+        '*.run.json',
+        'dql-manifest.json',
+        'data/**',
+        'AI pins and saved views',
+        'personal layout overrides',
+      ],
+    },
+  };
+
+  if (flags.format === 'json') {
+    console.log(JSON.stringify(report, null, 2));
+    return;
+  }
+
+  console.log('\n  DQL Git Hygiene');
+  console.log(`    Project: ${projectRoot}`);
+  console.log(`    Tracked files checked: ${tracked.length}`);
+  console.log('');
+  if (issues.length === 0) {
+    console.log('  ✓ No tracked local/generated files found.');
+  } else {
+    for (const issue of issues) {
+      console.log(`  ${issue.severity === 'error' ? '✗' : '!'} ${issue.path}`);
+      console.log(`    ${issue.message}`);
+    }
+  }
+  console.log('');
+  console.log('  Durable shared source: DQL domains/blocks/terms/views, reviewed Apps/dashboards, curated notebooks, semantic-layer YAML, config.');
+  console.log('  Keep local/private: .dql cache/local/imports, run snapshots, compiled manifests, data files, AI pins, saved views, layout overrides.');
+  console.log('');
+}
+
+function listTrackedGitFiles(projectRoot: string): string[] {
+  try {
+    return execFileSync('git', ['ls-files'], { cwd: projectRoot, encoding: 'utf-8' })
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .filter(Boolean);
+  } catch {
+    return [];
+  }
+}
+
+function classifyGitHygieneIssue(path: string): GitHygieneIssue[] {
+  const issues: GitHygieneIssue[] = [];
+  const add = (code: string, message: string, severity: GitHygieneIssue['severity'] = 'warning') => {
+    issues.push({ severity, path, code, message });
+  };
+  if (path === 'dql-manifest.json') {
+    add('compiled_manifest_tracked', 'Compiled dql-manifest.json should be reproducible and usually excluded from source commits.');
+  }
+  if (/\.run\.json$/i.test(path) || /\.dqlnb\.run\.json$/i.test(path) || /\.dql\.run\.json$/i.test(path)) {
+    add('run_snapshot_tracked', 'Run snapshots are execution state, not durable shared source.');
+  }
+  if (path.startsWith('.dql/cache/')) {
+    add('cache_tracked', '.dql/cache contains generated SQLite/index artifacts and should stay local.', 'error');
+  }
+  if (path.startsWith('.dql/local/')) {
+    add('local_state_tracked', '.dql/local contains private app pins, saved views, and user-local state.', 'error');
+  }
+  if (path.startsWith('.dql/imports/')) {
+    add('imports_tracked', '.dql/imports should stay local unless a specific imported artifact is curated and promoted.');
+  }
+  if (path.startsWith('data/')) {
+    add('data_file_tracked', 'Raw data files are usually environment data; commit only intentional tiny fixtures.');
+  }
+  if (/\.sqlite(?:3)?$/i.test(path) || /\.(duckdb|duckdb\.wal)$/i.test(path)) {
+    add('database_file_tracked', 'Local database files create noisy and potentially sensitive commits.', 'error');
+  }
+  if (/ai[-_]?pin/i.test(path) || /saved[-_]?view/i.test(path) || /layout[-_]?override/i.test(path)) {
+    add('private_ui_state_tracked', 'AI pins, saved views, and layout overrides should be promoted into clean shared artifacts before commit.');
+  }
+  return issues;
 }
 
 interface ScaleIssue {

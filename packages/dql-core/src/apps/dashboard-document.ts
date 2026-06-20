@@ -66,6 +66,34 @@ export type DashboardVizConfig = {
   options?: Record<string, unknown>;
 };
 
+export type DashboardDisplayMode = 'manual' | 'ai_generated' | 'block_hint';
+export type DashboardDisplayComponent =
+  | 'BusinessBrief'
+  | 'KpiMetric'
+  | 'TrendPanel'
+  | 'RankingPanel'
+  | 'EvidenceTable'
+  | 'PivotTable'
+  | 'TrustCallout'
+  | 'NarrativePanel'
+  | 'ResearchActions';
+export type DashboardDisplayLayoutIntent = 'auto' | 'compact' | 'standard' | 'wide' | 'tall' | 'full';
+export type DashboardDisplayTrustState = 'certified' | 'review_required' | 'draft_ready';
+export type DashboardDisplayReviewStatus = 'certified' | 'draft_ready' | 'review_required';
+
+export type DashboardDisplayMetadata = {
+  /** Presentation source. The block remains the data contract; this is consumer-level UI metadata. */
+  mode: DashboardDisplayMode;
+  component: DashboardDisplayComponent;
+  defaultVisualization: DashboardVizConfig['type'];
+  allowedVisualizations: DashboardVizConfig['type'][];
+  fieldHints?: Record<string, string>;
+  layoutIntent: DashboardDisplayLayoutIntent;
+  rationale: string;
+  trustState: DashboardDisplayTrustState;
+  reviewStatus: DashboardDisplayReviewStatus;
+};
+
 export type DashboardTextTile = {
   markdown: string;
 };
@@ -88,6 +116,8 @@ export type DashboardGridItem = {
   /** Local AI-generated answer pin stored in .dql/local/apps.sqlite. */
   aiPin?: DashboardAiPinRef;
   viz: DashboardVizConfig;
+  /** Governed GenUI/display contract for this specific App or notebook tile. */
+  display?: DashboardDisplayMetadata;
   /** Optional human-readable title shown in the tile header. */
   title?: string;
 };
@@ -426,6 +456,8 @@ function readLayout(raw: unknown, err: (m: string) => void): DashboardDocument['
       }
     }
 
+    const display = readDisplayMetadata(it.display, i, allowedViz, err);
+
     items.push({
       i: it.i,
       x, y, w, h,
@@ -433,11 +465,95 @@ function readLayout(raw: unknown, err: (m: string) => void): DashboardDocument['
       ...(text ? { text } : {}),
       ...(aiPin ? { aiPin } : {}),
       viz: { type: vizRaw.type as DashboardVizConfig['type'], options: opts },
+      ...(display ? { display } : {}),
       title: typeof it.title === 'string' ? it.title : undefined,
     });
   }
 
   return { kind: 'grid', cols, rowHeight, items };
+}
+
+function readDisplayMetadata(
+  raw: unknown,
+  index: number,
+  allowedViz: readonly DashboardVizConfig['type'][],
+  err: (m: string) => void,
+): DashboardDisplayMetadata | undefined {
+  if (raw === undefined) return undefined;
+  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) {
+    err(`layout.items[${index}].display must be an object`);
+    return undefined;
+  }
+  const display = raw as Record<string, unknown>;
+  const modes = ['manual', 'ai_generated', 'block_hint'] as const;
+  const components = [
+    'BusinessBrief',
+    'KpiMetric',
+    'TrendPanel',
+    'RankingPanel',
+    'EvidenceTable',
+    'PivotTable',
+    'TrustCallout',
+    'NarrativePanel',
+    'ResearchActions',
+  ] as const;
+  const layoutIntents = ['auto', 'compact', 'standard', 'wide', 'tall', 'full'] as const;
+  const trustStates = ['certified', 'review_required', 'draft_ready'] as const;
+  const reviewStatuses = ['certified', 'draft_ready', 'review_required'] as const;
+  const mode = enumValue(display.mode, modes, `layout.items[${index}].display.mode`, err);
+  const component = enumValue(display.component, components, `layout.items[${index}].display.component`, err);
+  const defaultVisualization = enumValue(display.defaultVisualization, allowedViz, `layout.items[${index}].display.defaultVisualization`, err);
+  const layoutIntent = enumValue(display.layoutIntent, layoutIntents, `layout.items[${index}].display.layoutIntent`, err);
+  const trustState = enumValue(display.trustState, trustStates, `layout.items[${index}].display.trustState`, err);
+  const reviewStatus = enumValue(display.reviewStatus, reviewStatuses, `layout.items[${index}].display.reviewStatus`, err);
+  const rationale = typeof display.rationale === 'string' ? display.rationale : undefined;
+  if (!rationale) err(`layout.items[${index}].display.rationale must be a string`);
+  const allowedVisualizations = Array.isArray(display.allowedVisualizations)
+    ? display.allowedVisualizations.filter((value): value is DashboardVizConfig['type'] =>
+        typeof value === 'string' && allowedViz.includes(value as DashboardVizConfig['type']),
+      )
+    : [];
+  if (!Array.isArray(display.allowedVisualizations) || allowedVisualizations.length === 0) {
+    err(`layout.items[${index}].display.allowedVisualizations must include at least one supported visualization`);
+  }
+  let fieldHints: Record<string, string> | undefined;
+  if (display.fieldHints !== undefined) {
+    if (typeof display.fieldHints !== 'object' || display.fieldHints === null || Array.isArray(display.fieldHints)) {
+      err(`layout.items[${index}].display.fieldHints must be an object`);
+    } else {
+      fieldHints = Object.fromEntries(
+        Object.entries(display.fieldHints as Record<string, unknown>)
+          .filter((entry): entry is [string, string] => typeof entry[1] === 'string'),
+      );
+    }
+  }
+  if (!mode || !component || !defaultVisualization || !layoutIntent || !trustState || !reviewStatus || !rationale || allowedVisualizations.length === 0) {
+    return undefined;
+  }
+  return {
+    mode,
+    component,
+    defaultVisualization,
+    allowedVisualizations,
+    ...(fieldHints && Object.keys(fieldHints).length > 0 ? { fieldHints } : {}),
+    layoutIntent,
+    rationale,
+    trustState,
+    reviewStatus,
+  };
+}
+
+function enumValue<T extends readonly string[]>(
+  raw: unknown,
+  allowed: T,
+  field: string,
+  err: (m: string) => void,
+): T[number] | undefined {
+  if (typeof raw !== 'string' || !allowed.includes(raw as T[number])) {
+    err(`${field} must be one of ${allowed.join('|')}`);
+    return undefined;
+  }
+  return raw as T[number];
 }
 
 function num(v: unknown): number | null {

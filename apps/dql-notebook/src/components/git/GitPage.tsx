@@ -178,8 +178,8 @@ export function GitPage() {
     return true;
   }, [statusFilter, query]);
 
-  const filteredStaged = stagedFiles.filter(filterFn);
-  const filteredUnstaged = unstagedFiles.filter(filterFn);
+  const filteredStaged = stagedFiles.filter(filterFn).sort(compareArtifactEntries);
+  const filteredUnstaged = unstagedFiles.filter(filterFn).sort(compareArtifactEntries);
 
   // Auto-pick first file when none selected
   useEffect(() => {
@@ -578,6 +578,40 @@ function githubCompareUrl(remoteUrl: string | null, branch: string | null): stri
   return `https://github.com/${match[1]}/compare/${encodeURIComponent(branch)}?expand=1`;
 }
 
+type ArtifactGroupId = 'business' | 'apps' | 'notebooks' | 'generated' | 'local';
+
+interface ArtifactGroup {
+  id: ArtifactGroupId;
+  label: string;
+  tone: 'good' | 'neutral' | 'warn' | 'danger';
+  rank: number;
+}
+
+function artifactGroupForPath(path: string): ArtifactGroup {
+  if (path.startsWith('.dql/local/') || /ai[-_]?pin|saved[-_]?view|layout[-_]?override/i.test(path)) {
+    return { id: 'local', label: 'Local/private', tone: 'danger', rank: 4 };
+  }
+  if (path.startsWith('.dql/cache/') || path.startsWith('.dql/imports/') || path.startsWith('data/') || path === 'dql-manifest.json' || /\.run\.json$/i.test(path) || /\.(sqlite|duckdb|duckdb\.wal)$/i.test(path)) {
+    return { id: 'generated', label: 'Generated', tone: 'warn', rank: 3 };
+  }
+  if (/\.dqlnb$/i.test(path)) {
+    return { id: 'notebooks', label: 'Curated notebook', tone: 'neutral', rank: 2 };
+  }
+  if (/\/apps\/[^/]+\/dql\.app\.json$/.test(path) || /^apps\/[^/]+\/dql\.app\.json$/.test(path) || /\/dashboards\/[^/]+\.dqld$/.test(path) || /^apps\/[^/]+\/dashboards\/[^/]+\.dqld$/.test(path)) {
+    return { id: 'apps', label: 'Shared app', tone: 'neutral', rank: 1 };
+  }
+  if (/\.dql$/i.test(path) || path.startsWith('semantic-layer/') || /\.(ya?ml)$/i.test(path) || path === 'dql.config.json' || path === 'package.json') {
+    return { id: 'business', label: 'Business logic', tone: 'good', rank: 0 };
+  }
+  return { id: 'apps', label: 'Shared source', tone: 'neutral', rank: 1 };
+}
+
+function compareArtifactEntries(a: FileEntry, b: FileEntry): number {
+  const groupA = artifactGroupForPath(a.path);
+  const groupB = artifactGroupForPath(b.path);
+  return groupA.rank - groupB.rank || a.path.localeCompare(b.path);
+}
+
 // ---------- File Tree ----------
 
 interface FileTreeProps {
@@ -763,6 +797,7 @@ function FileRow({ t, file, active, onClick, actionLabel, onAction }: FileRowPro
   const [hover, setHover] = useState(false);
   const dir = file.path.split('/').slice(0, -1).join('/');
   const base = file.path.split('/').pop() ?? file.path;
+  const group = artifactGroupForPath(file.path);
   return (
     <div
       onClick={onClick}
@@ -792,6 +827,9 @@ function FileRow({ t, file, active, onClick, actionLabel, onAction }: FileRowPro
             {dir}
           </div>
         )}
+        <div style={{ marginTop: 4, display: 'flex', alignItems: 'center', gap: 5 }}>
+          <span style={artifactGroupPillStyle(t, group)}>{group.label}</span>
+        </div>
       </div>
       {hover && (
         <button
@@ -808,6 +846,31 @@ function FileRow({ t, file, active, onClick, actionLabel, onAction }: FileRowPro
       )}
     </div>
   );
+}
+
+function artifactGroupPillStyle(t: Theme, group: ArtifactGroup): React.CSSProperties {
+  const color = group.tone === 'good'
+    ? t.success
+    : group.tone === 'warn'
+      ? t.warning
+      : group.tone === 'danger'
+        ? t.error
+        : t.textMuted;
+  return {
+    display: 'inline-flex',
+    alignItems: 'center',
+    minWidth: 0,
+    maxWidth: '100%',
+    border: `1px solid ${color}35`,
+    background: `${color}12`,
+    color,
+    borderRadius: 3,
+    padding: '1px 5px',
+    fontSize: 9,
+    fontWeight: 650,
+    lineHeight: '14px',
+    whiteSpace: 'nowrap',
+  };
 }
 
 function StatusBadge({ t, status }: { t: Theme; status: FileEntry['status'] }) {

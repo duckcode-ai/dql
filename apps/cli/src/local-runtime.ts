@@ -1309,7 +1309,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
     }
 
     // Apps, dashboards, persona — see apps-api.ts. Returns true if handled.
-    if (path.startsWith('/api/apps') || path === '/api/persona') {
+    if (path.startsWith('/api/apps') || path.startsWith('/api/visualizations') || path === '/api/persona') {
       try {
           const handled = await handleAppsApi({
             req,

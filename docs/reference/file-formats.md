@@ -33,6 +33,8 @@ GROUP BY 1
   header are still parsed; `dql fmt` adds the header on next save.
 - **Canonical whitespace** — `dql fmt` enforces it. CI should run `dql fmt --check .`
 - **Forward compatibility** — unknown top-level keys are preserved verbatim
+- **Display hints** — block `visualization` is stored in the manifest as
+  `displayHints`; Apps and notebooks can override it without changing the block.
 
 ## `.dqlnb` — notebook
 
@@ -77,33 +79,56 @@ Sibling file next to a notebook holding the last execution's results:
 ## `.dqld` — App dashboard page
 
 JSON document for one dashboard page inside an App. It stores grid layout,
-block refs, text tiles, per-tile visualization options, filters, and page
-metadata.
+block refs, text tiles, filters, page metadata, and per-tile consumer display
+metadata. A tile's `viz` is the current renderer choice. A tile's `display`
+is the governed GenUI contract: why that renderer was chosen, which
+visualizations are allowed, and whether the presentation is certified or still
+review-required.
 
 ```json
 {
   "version": 1,
   "id": "daily-ops",
-  "title": "Daily Ops",
-  "layout": {
-    "type": "grid",
-    "columns": 12
+  "metadata": {
+    "title": "Daily Ops",
+    "visibility": "shared",
+    "lifecycle": "review"
   },
-  "tiles": [
-    {
-      "id": "approval-rate",
-      "type": "block",
-      "blockRef": "card_approval_rate",
-      "title": "Approval Rate",
-      "layout": { "x": 0, "y": 0, "w": 4, "h": 3 },
-      "viz": { "type": "kpi", "options": { "valueField": "approval_rate" } }
-    }
-  ]
+  "layout": {
+    "kind": "grid",
+    "cols": 12,
+    "rowHeight": 80,
+    "items": [
+      {
+        "i": "approval-rate",
+        "x": 0,
+        "y": 0,
+        "w": 4,
+        "h": 3,
+        "block": { "blockId": "card_approval_rate" },
+        "title": "Approval Rate",
+        "viz": { "type": "kpi", "options": { "valueField": "approval_rate" } },
+        "display": {
+          "mode": "block_hint",
+          "component": "KpiMetric",
+          "defaultVisualization": "kpi",
+          "allowedVisualizations": ["kpi", "single_value", "table"],
+          "fieldHints": { "value": "approval_rate" },
+          "layoutIntent": "compact",
+          "rationale": "Executive app uses KPI presentation for the certified approval-rate block.",
+          "trustState": "certified",
+          "reviewStatus": "certified"
+        }
+      }
+    ]
+  }
 }
 ```
 
 Dashboard pages are committed under `apps/<app-id>/dashboards/*.dqld`.
 Private layout overrides and saved views stay local under `.dql/local/`.
+AI pins are local until promoted into draft/certified DQL blocks or reviewed
+dashboard tiles.
 
 ## `dql.app.json` — App manifest
 

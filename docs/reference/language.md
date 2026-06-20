@@ -108,8 +108,16 @@ Canonical block fields:
 | `replacementFor` | Prior blocks or business questions this block replaces |
 | `query` | SQL for `type = "custom"` blocks |
 | `metric` / `metrics` | Metric refs for `type = "semantic"` blocks |
-| `visualization` | Chart configuration |
+| `visualization` | Compatibility display hint, not fixed presentation |
 | `tests` | Local certification assertions |
+
+`visualization { ... }` remains valid for existing blocks, but DQL treats it as
+a block-level display hint. Apps and notebooks own the actual presentation for
+their audience: the same certified block can render as a table in a notebook, a
+KPI in an executive App, a ranking panel in an NBA analysis App, or a trend in a
+monitoring dashboard. Enterprise certification prioritizes the business/data
+contract: domain, owner, grain, outputs, filters, lineage, tests, and review
+metadata. Blocks may be query-only when that contract is complete.
 
 `dql certify --enterprise` treats the reusable contract as certification
 criteria. Runtime parameters may be scalar values, date/year ranges represented

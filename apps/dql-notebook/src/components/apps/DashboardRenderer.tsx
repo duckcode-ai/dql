@@ -40,7 +40,7 @@ const TILE_SIZE_PRESETS: Array<{ id: TileSizePresetId; label: string; descriptio
 
 interface DqlGenUiMetadata {
   version?: number;
-  component?: 'BusinessBrief' | 'KpiMetric' | 'TrendPanel' | 'RankingPanel' | 'EvidenceTable' | 'TrustCallout' | 'ResearchActions' | 'NarrativePanel' | string;
+  component?: 'BusinessBrief' | 'KpiMetric' | 'TrendPanel' | 'RankingPanel' | 'EvidenceTable' | 'PivotTable' | 'TrustCallout' | 'ResearchActions' | 'NarrativePanel' | string;
   role?: string;
   layoutIntent?: TileSizePresetId | string;
   defaultVisualization?: string;
@@ -248,6 +248,7 @@ export function DashboardRenderer({
           ...nextTilePosition(dashboard, tileSizeForPreset('wide', cols, 'heading')),
           text: { markdown: value },
           viz: { type: 'heading' },
+          display: textTileDisplay('heading', value),
           title: value,
         },
       ]);
@@ -260,6 +261,7 @@ export function DashboardRenderer({
           ...nextTilePosition(dashboard, tileSizeForPreset('standard', cols, 'text')),
           text: { markdown: value },
           viz: { type: 'text' },
+          display: textTileDisplay('text', title),
           title,
         },
       ]);
@@ -649,6 +651,7 @@ function DashboardTile({
           ...(currentGenUi ? { dqlGenUi: { ...currentGenUi, defaultVisualization: dashboardViz } } : {}),
         },
       },
+      display: displayWithVisualization(item, dashboardViz, currentGenUi),
     });
   };
   useEffect(() => {
@@ -1109,8 +1112,8 @@ function TileBody({
 
   const chartConfig = mergeTileChartConfig(item, tile.chartConfig as CellChartConfig | undefined);
   const chart = String(chartConfig.chart ?? tile.viz?.type ?? '').toLowerCase();
-  if (chart === 'table' || item.viz.type === 'table') {
-    if (genUi?.component === 'EvidenceTable') {
+  if (chart === 'table' || item.viz.type === 'table' || item.viz.type === 'pivot') {
+    if (genUi?.component === 'EvidenceTable' || genUi?.component === 'PivotTable') {
       return <GeneratedEvidenceTable result={tile.result} genUi={genUi} themeMode={themeMode} />;
     }
     return <div style={{ width: '100%', alignSelf: 'stretch' }}><TableOutput result={tile.result} themeMode={themeMode} /></div>;
@@ -1215,6 +1218,10 @@ function TileSettingsPanel({
   const result = tile?.result;
   const chartConfig = mergeTileChartConfig(item, tile?.chartConfig as CellChartConfig | undefined);
   const chart = normalizeChartType(chartConfig.chart);
+  const genUi = getDqlGenUi(item);
+  const [recommendBusy, setRecommendBusy] = useState(false);
+  const [recommendNote, setRecommendNote] = useState<string | null>(null);
+  const [recommendError, setRecommendError] = useState<string | null>(null);
   const classified = useMemo(() => classifyColumns(result), [result]);
   const columnKinds = useMemo(() => {
     const map = new Map<string, ChartColumnRole>();
@@ -1246,7 +1253,50 @@ function TileSettingsPanel({
         type: dashboardViz,
         options,
       },
+      display: displayWithVisualization(item, dashboardViz, currentGenUi),
     });
+  };
+
+  const applyRecommendation = async () => {
+    setRecommendBusy(true);
+    setRecommendError(null);
+    setRecommendNote(null);
+    const blockRef = getDashboardItemBlockId(item) ?? item.title;
+    const response = await api.recommendVisualization({
+      ...(blockRef ? { blockRef } : {}),
+      resultSchema: result ? { columns: result.columns } : undefined,
+      rowSample: result?.rows.slice(0, 5) as Array<Record<string, unknown>> | undefined,
+      prompt: [item.title, genUi?.rationale].filter(Boolean).join(' '),
+      allowedVisualizations: genUi?.allowedVisualizations,
+    });
+    setRecommendBusy(false);
+    if (!response.ok) {
+      setRecommendError(response.error);
+      return;
+    }
+    const chart = normalizeChartType(response.display.defaultVisualization);
+    const dashboardViz = chartToDashboardViz(chart);
+    const hints = response.display.fieldHints ?? {};
+    const next = compactChartConfig({
+      ...chartConfig,
+      chart,
+      title: chartConfig.title ?? item.title,
+      x: hints.x ?? hints.label ?? chartConfig.x,
+      y: hints.y ?? hints.value ?? chartConfig.y,
+      color: hints.color ?? chartConfig.color,
+    });
+    onPatch({
+      title: next.title || item.title,
+      viz: {
+        ...item.viz,
+        type: dashboardViz,
+        options: { ...next } as Record<string, unknown>,
+      },
+      display: response.display,
+    });
+    const evidence = response.evidence.map((entry) => entry.source).slice(0, 3).join(', ');
+    const warning = response.warnings[0];
+    setRecommendNote(warning ? `${response.display.component}: ${warning}` : `${response.display.component}${evidence ? ` from ${evidence}` : ''}`);
   };
 
   return (
@@ -1266,6 +1316,33 @@ function TileSettingsPanel({
             </button>
           ))}
         </div>
+      </div>
+      <div style={tileDisplayContractStyle}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8, justifyContent: 'space-between' }}>
+          <div style={{ minWidth: 0 }}>
+            <div style={{ fontSize: 10, fontWeight: 800, textTransform: 'uppercase', opacity: 0.58 }}>Display contract</div>
+            <div style={{ marginTop: 3, fontSize: 11, lineHeight: 1.35, opacity: 0.76 }}>
+              {genUi?.rationale ?? item.display?.rationale ?? 'Choose a governed visualization for this app tile.'}
+            </div>
+          </div>
+          <button
+            type="button"
+            onClick={() => void applyRecommendation()}
+            disabled={recommendBusy}
+            style={recommendButtonStyle(recommendBusy)}
+            title="Recommend visualization from block hints and result fields"
+          >
+            <Wand2 size={12} strokeWidth={2.2} />
+            {recommendBusy ? 'Thinking' : 'AI recommend'}
+          </button>
+        </div>
+        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 5 }}>
+          {genUi?.component ? <span style={generatedMetaPillStyle}>{componentLabelForGenUi(genUi)}</span> : null}
+          {genUi?.defaultVisualization ? <span style={generatedMetaPillStyle}>{formatGenUiLabel(String(genUi.defaultVisualization))}</span> : null}
+          {genUi?.reviewStatus ? <span style={generatedMetaPillStyle}>{formatGenUiLabel(String(genUi.reviewStatus))}</span> : null}
+        </div>
+        {recommendNote ? <div style={recommendNoteStyle}>{recommendNote}</div> : null}
+        {recommendError ? <div style={recommendErrorStyle}>{recommendError}</div> : null}
       </div>
       <div style={tileSettingsGridStyle}>
         <label style={tileSettingsLabelStyle}>
@@ -1811,6 +1888,25 @@ function compactChartConfig(config: CellChartConfig): CellChartConfig {
 }
 
 function getDqlGenUi(item: DashboardLayoutItem): DqlGenUiMetadata | null {
+  if (isRecord(item.display)) {
+    const display = item.display;
+    const component = typeof display.component === 'string' ? display.component : undefined;
+    return {
+      version: 1,
+      component,
+      role: roleForDisplayComponent(component),
+      layoutIntent: typeof display.layoutIntent === 'string' ? display.layoutIntent : undefined,
+      defaultVisualization: typeof display.defaultVisualization === 'string' ? display.defaultVisualization : undefined,
+      allowedVisualizations: Array.isArray(display.allowedVisualizations) ? display.allowedVisualizations.filter((value): value is string => typeof value === 'string') : undefined,
+      fieldHints: isRecord(display.fieldHints)
+        ? Object.fromEntries(Object.entries(display.fieldHints).filter((entry): entry is [string, string] => typeof entry[1] === 'string'))
+        : undefined,
+      insightTitle: item.title,
+      trustState: typeof display.trustState === 'string' ? display.trustState : undefined,
+      reviewStatus: typeof display.reviewStatus === 'string' ? display.reviewStatus : undefined,
+      rationale: typeof display.rationale === 'string' ? display.rationale : undefined,
+    };
+  }
   const raw = (item.viz.options as Record<string, unknown> | undefined)?.dqlGenUi;
   if (!isRecord(raw)) return null;
   return {
@@ -1830,6 +1926,84 @@ function getDqlGenUi(item: DashboardLayoutItem): DqlGenUiMetadata | null {
     followUpActions: Array.isArray(raw.followUpActions) ? raw.followUpActions.filter((value): value is string => typeof value === 'string') : undefined,
     rationale: typeof raw.rationale === 'string' ? raw.rationale : undefined,
   };
+}
+
+function textTileDisplay(
+  viz: 'text' | 'heading',
+  title: string,
+): NonNullable<DashboardLayoutItem['display']> {
+  return {
+    mode: 'manual',
+    component: viz === 'heading' ? 'NarrativePanel' : 'BusinessBrief',
+    defaultVisualization: viz,
+    allowedVisualizations: [viz],
+    layoutIntent: viz === 'heading' ? 'wide' : 'standard',
+    rationale: title ? `Manual narrative tile for "${title}" on this app surface.` : 'Manual narrative tile for this app surface.',
+    trustState: 'review_required',
+    reviewStatus: 'review_required',
+  };
+}
+
+function displayWithVisualization(
+  item: DashboardLayoutItem,
+  dashboardViz: string,
+  genUi?: DqlGenUiMetadata | null,
+): DashboardLayoutItem['display'] | undefined {
+  const allowed = uniqueStrings([
+    dashboardViz,
+    ...(item.display?.allowedVisualizations ?? []),
+    ...(genUi?.allowedVisualizations ?? []),
+  ]);
+  const component = item.display?.component ?? componentForDashboardViz(dashboardViz);
+  return {
+    mode: item.display?.mode ?? (genUi ? 'ai_generated' : item.block ? 'block_hint' : 'manual'),
+    component,
+    defaultVisualization: dashboardViz,
+    allowedVisualizations: allowed.length ? allowed : [dashboardViz],
+    ...(item.display?.fieldHints || genUi?.fieldHints ? { fieldHints: item.display?.fieldHints ?? genUi?.fieldHints } : {}),
+    layoutIntent: coerceLayoutIntent(item.display?.layoutIntent ?? genUi?.layoutIntent),
+    rationale: item.display?.rationale ?? genUi?.rationale ?? 'Visualization selected for this consumer surface.',
+    trustState: coerceTrustState(item.display?.trustState ?? genUi?.trustState),
+    reviewStatus: coerceReviewStatus(item.display?.reviewStatus ?? genUi?.reviewStatus),
+  };
+}
+
+function uniqueStrings(values: string[]): string[] {
+  return Array.from(new Set(values.filter((value) => typeof value === 'string' && value.trim()).map((value) => value.trim())));
+}
+
+function componentForDashboardViz(viz: string): NonNullable<DashboardLayoutItem['display']>['component'] {
+  if (viz === 'single_value' || viz === 'kpi' || viz === 'gauge') return 'KpiMetric';
+  if (viz === 'line' || viz === 'area') return 'TrendPanel';
+  if (viz === 'bar' || viz === 'grouped_bar' || viz === 'stacked_bar' || viz === 'donut' || viz === 'pie') return 'RankingPanel';
+  if (viz === 'pivot') return 'PivotTable';
+  if (viz === 'text' || viz === 'heading') return 'NarrativePanel';
+  return 'EvidenceTable';
+}
+
+function roleForDisplayComponent(component?: string): string | undefined {
+  if (component === 'BusinessBrief') return 'business_summary';
+  if (component === 'KpiMetric') return 'kpi';
+  if (component === 'TrendPanel') return 'trend';
+  if (component === 'RankingPanel') return 'breakdown';
+  if (component === 'TrustCallout') return 'trust';
+  if (component === 'ResearchActions') return 'research';
+  if (component === 'NarrativePanel') return 'narrative';
+  return component ? 'evidence' : undefined;
+}
+
+function coerceLayoutIntent(value?: string): NonNullable<DashboardLayoutItem['display']>['layoutIntent'] {
+  return value === 'compact' || value === 'standard' || value === 'wide' || value === 'tall' || value === 'full' || value === 'auto'
+    ? value
+    : 'auto';
+}
+
+function coerceTrustState(value?: string): NonNullable<DashboardLayoutItem['display']>['trustState'] {
+  return value === 'certified' || value === 'draft_ready' || value === 'review_required' ? value : 'review_required';
+}
+
+function coerceReviewStatus(value?: string): NonNullable<DashboardLayoutItem['display']>['reviewStatus'] {
+  return value === 'certified' || value === 'draft_ready' || value === 'review_required' ? value : 'review_required';
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -1854,7 +2028,7 @@ function getGeneratedVizOptions(
 
 function tileSurfaceForGenUi(component?: string): string {
   if (component === 'TrustCallout') return 'linear-gradient(180deg, rgba(255,255,255,0.92), rgba(255,251,235,0.72))';
-  if (component === 'RankingPanel' || component === 'TrendPanel') return 'linear-gradient(180deg, rgba(255,255,255,0.96), rgba(248,250,252,0.86))';
+  if (component === 'RankingPanel' || component === 'TrendPanel' || component === 'PivotTable') return 'linear-gradient(180deg, rgba(255,255,255,0.96), rgba(248,250,252,0.86))';
   if (component === 'BusinessBrief') return 'var(--dql-app-surface, rgba(255,255,255,0.90))';
   return 'var(--dql-app-surface, var(--surface, rgba(255,255,255,0.84)))';
 }
@@ -1884,6 +2058,8 @@ function componentLabelForGenUi(genUi: DqlGenUiMetadata): string {
       return 'Ranking';
     case 'EvidenceTable':
       return 'Evidence';
+    case 'PivotTable':
+      return 'Pivot';
     case 'TrustCallout':
       return 'Trust';
     case 'ResearchActions':
@@ -2088,6 +2264,44 @@ const tileSettingsInputStyle: CSSProperties = {
   color: 'inherit',
   padding: '5px 6px',
   fontSize: 11,
+};
+
+const tileDisplayContractStyle: CSSProperties = {
+  display: 'grid',
+  gap: 6,
+  border: '1px solid var(--border-color, rgba(0,0,0,0.08))',
+  borderRadius: 6,
+  background: 'var(--surface, rgba(248,250,252,0.62))',
+  padding: 8,
+};
+
+function recommendButtonStyle(busy: boolean): CSSProperties {
+  return {
+    border: '1px solid var(--accent, rgba(79,70,229,0.55))',
+    background: busy ? 'rgba(79,70,229,0.10)' : 'rgba(79,70,229,0.08)',
+    color: 'var(--accent, #4f46e5)',
+    borderRadius: 5,
+    padding: '5px 7px',
+    fontSize: 11,
+    fontWeight: 750,
+    display: 'inline-flex',
+    alignItems: 'center',
+    gap: 5,
+    cursor: busy ? 'wait' : 'pointer',
+    opacity: busy ? 0.72 : 1,
+    whiteSpace: 'nowrap',
+  };
+}
+
+const recommendNoteStyle: CSSProperties = {
+  fontSize: 11,
+  lineHeight: 1.35,
+  color: 'var(--dql-app-muted, rgba(15,23,42,0.68))',
+};
+
+const recommendErrorStyle: CSSProperties = {
+  ...recommendNoteStyle,
+  color: 'var(--error-color, #b91c1c)',
 };
 
 const fieldChipStyle: CSSProperties = {
@@ -2382,7 +2596,7 @@ function narrowTileMinHeight(item: DashboardLayoutItem, genUi?: DqlGenUiMetadata
   if (item.viz.type === 'heading') return 90;
   if (genUi?.component === 'BusinessBrief' || genUi?.component === 'NarrativePanel' || item.viz.type === 'text') return 180;
   if (genUi?.component === 'TrustCallout' || genUi?.component === 'ResearchActions') return 210;
-  if (genUi?.component === 'EvidenceTable') return 330;
+  if (genUi?.component === 'EvidenceTable' || genUi?.component === 'PivotTable') return 330;
   if (genUi?.component === 'KpiMetric') return 150;
   return Math.max(280, Math.min(420, item.h * 76));
 }
@@ -2509,7 +2723,7 @@ function autoLayoutRank(item: DashboardLayoutItem): number {
   if (genUi?.role === 'business_summary') return 0;
   if (genUi?.role === 'kpi') return 1;
   if (genUi?.component === 'RankingPanel' || genUi?.component === 'TrendPanel') return 2;
-  if (genUi?.component === 'EvidenceTable') return 3;
+  if (genUi?.component === 'EvidenceTable' || genUi?.component === 'PivotTable') return 3;
   if (genUi?.component === 'TrustCallout' || genUi?.component === 'ResearchActions') return 4;
   if (genUi?.role === 'narrative') return 5;
   const viz = normalizeViz(String(item.viz.type ?? 'table'));

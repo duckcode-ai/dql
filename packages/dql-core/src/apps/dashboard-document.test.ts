@@ -69,6 +69,41 @@ describe('parseDashboardDocument', () => {
     expect(document?.layout.items[0].viz.options?.chart).toBe('scatter');
   });
 
+  it('parses governed display metadata on dashboard tiles', () => {
+    const doc = {
+      ...minimal,
+      layout: {
+        ...minimal.layout,
+        items: [
+          {
+            i: 'ranking',
+            x: 0, y: 0, w: 8, h: 4,
+            block: { blockId: 'top_scorers' },
+            viz: { type: 'bar' },
+            display: {
+              mode: 'block_hint',
+              component: 'RankingPanel',
+              defaultVisualization: 'bar',
+              allowedVisualizations: ['bar', 'table'],
+              fieldHints: { label: 'player_name', value: 'total_points' },
+              layoutIntent: 'wide',
+              rationale: 'Consumer surface uses ranking view for NBA analysis.',
+              trustState: 'certified',
+              reviewStatus: 'certified',
+            },
+          },
+        ],
+      },
+    };
+    const { document, errors } = parseDashboardDocument(JSON.stringify(doc));
+    expect(errors).toEqual([]);
+    expect(document?.layout.items[0].display).toMatchObject({
+      component: 'RankingPanel',
+      allowedVisualizations: ['bar', 'table'],
+      fieldHints: { label: 'player_name', value: 'total_points' },
+    });
+  });
+
   it('errors on unknown viz type', () => {
     const bad = {
       ...minimal,

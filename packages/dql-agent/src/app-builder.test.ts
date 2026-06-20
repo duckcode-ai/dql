@@ -308,6 +308,13 @@ describe("generateAppFromPlan", () => {
         expect.arrayContaining([
           expect.objectContaining({
             block: { blockId: "revenue_total" },
+            display: expect.objectContaining({
+              mode: "block_hint",
+              component: expect.any(String),
+              trustState: "certified",
+              reviewStatus: "certified",
+              allowedVisualizations: expect.arrayContaining(["table"]),
+            }),
             viz: expect.objectContaining({
               options: expect.objectContaining({
                 dqlGenUi: expect.objectContaining({
@@ -320,6 +327,11 @@ describe("generateAppFromPlan", () => {
           expect.objectContaining({
             text: expect.objectContaining({
               markdown: expect.stringContaining("AI generated / needs review"),
+            }),
+            display: expect.objectContaining({
+              mode: "ai_generated",
+              trustState: "draft_ready",
+              reviewStatus: "draft_ready",
             }),
             viz: expect.objectContaining({
               options: expect.objectContaining({

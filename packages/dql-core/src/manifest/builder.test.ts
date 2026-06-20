@@ -513,6 +513,12 @@ block "Notebook Revenue" {
     expect(block.owner).toBe('analytics@example.com');
     expect(block.tags).toEqual(['finance', 'notebook']);
     expect(block.chartType).toBe('bar');
+    expect(block.displayHints).toMatchObject({
+      defaultVisualization: 'bar',
+      allowedVisualizations: expect.arrayContaining(['bar', 'table']),
+      fieldHints: { x: 'segment', y: 'revenue' },
+      source: 'block_visualization',
+    });
     expect(block.tests).toEqual(['row_count > 0']);
     expect(block.tableDependencies).toEqual(['orders']);
   });

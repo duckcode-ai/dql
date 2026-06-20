@@ -10,6 +10,7 @@ import {
   generateAppPackage,
   previewNotebookForApp,
   recommendBlocks,
+  recommendVisualization,
 } from './apps-api.js';
 
 const tempDirs: string[] = [];
@@ -99,6 +100,11 @@ describe('Apps command center API helpers', () => {
     expect(dashboard.metadata.visibility).toBe('shared');
     expect(dashboard.metadata.lifecycle).toBe('draft');
     expect(dashboard.layout.items[0].block).toEqual({ blockId: 'Revenue Total' });
+    expect(dashboard.layout.items[0].display).toMatchObject({
+      mode: 'block_hint',
+      component: 'KpiMetric',
+      trustState: 'certified',
+    });
     expect(result.app.dashboards).toEqual([{ id: 'overview', title: 'Overview' }]);
   });
 
@@ -194,9 +200,55 @@ describe('Apps command center API helpers', () => {
     const dashboard = JSON.parse(readFileSync(join(root, `apps/${plan.appId}/dashboards/overview.dqld`), 'utf-8'));
     expect(dashboard.layout.items).toEqual(
       expect.arrayContaining([
-        expect.objectContaining({ block: { blockId: 'Revenue by Month' } }),
+        expect.objectContaining({
+          block: { blockId: 'Revenue by Month' },
+        }),
       ]),
     );
+  });
+
+  it('recommends governed visualization metadata from result shape and block hints', () => {
+    const root = createProject();
+    writeBlock(root, 'nba/top-scorers.dql', {
+      name: 'Top Scorers',
+      domain: 'nba',
+      status: 'certified',
+      tags: ['nba', 'scoring'],
+      description: 'Top NBA player scoring output',
+      chart: 'bar',
+    });
+
+    const result = recommendVisualization(root, {
+      blockRef: 'Top Scorers',
+      prompt: 'Show top NBA players by points',
+      resultSchema: { columns: [{ name: 'player_name', type: 'string' }, { name: 'total_points', type: 'number' }] },
+      rowSample: [{ player_name: 'Grant Jerrett', total_points: 357 }],
+    });
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.display).toMatchObject({
+      mode: 'block_hint',
+      component: 'RankingPanel',
+      defaultVisualization: 'bar',
+      trustState: 'certified',
+      reviewStatus: 'certified',
+      fieldHints: { label: 'player_name', value: 'total_points' },
+    });
+    expect(result.evidence.some((entry) => entry.source.endsWith('nba/top-scorers.dql'))).toBe(true);
+  });
+
+  it('rejects unsupported governed visualization combinations', () => {
+    const root = createProject();
+    const result = recommendVisualization(root, {
+      component: 'KpiMetric',
+      defaultVisualization: 'scatter',
+      resultSchema: { columns: ['x', 'y'] },
+    });
+
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error).toContain('KpiMetric cannot use scatter');
   });
 
   it('builds selected-block SQL for review-required driver research', () => {

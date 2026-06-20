@@ -656,6 +656,8 @@ export function CellComponent({ cell, index }: CellProps) {
   const [selectedChartType, setSelectedChartType] = useState<ChartType | null>(null);
   const [chartDropdownOpen, setChartDropdownOpen] = useState(false);
   const [chartConfigOpen, setChartConfigOpen] = useState(false);
+  const [chartRecommendBusy, setChartRecommendBusy] = useState(false);
+  const [chartRecommendNote, setChartRecommendNote] = useState<string | null>(null);
   const [saveAsBlockOpen, setSaveAsBlockOpen] = useState(false);
 
   const derivedBlock = useMemo(
@@ -750,6 +752,36 @@ export function CellComponent({ cell, index }: CellProps) {
     (updates: Partial<Cell>) => dispatch({ type: 'UPDATE_CELL', id: cell.id, updates }),
     [dispatch, cell.id]
   );
+
+  const handleRecommendChart = useCallback(async () => {
+    if (!cell.result) return;
+    setChartRecommendBusy(true);
+    setChartRecommendNote(null);
+    const response = await api.recommendVisualization({
+      resultSchema: { columns: cell.result.columns },
+      rowSample: cell.result.rows.slice(0, 5) as Array<Record<string, unknown>>,
+      prompt: [cell.name, cell.content].filter(Boolean).join(' ').slice(0, 600),
+    });
+    setChartRecommendBusy(false);
+    if (!response.ok) {
+      setChartRecommendNote(response.error);
+      return;
+    }
+    const chart = normalizeNotebookChartType(response.display.defaultVisualization);
+    const hints = response.display.fieldHints ?? {};
+    setSelectedChartType(chart !== 'table' ? chart : null);
+    setViewMode(chart !== 'table' ? 'chart' : 'table');
+    onCellUpdate({
+      chartConfig: {
+        ...cell.chartConfig,
+        chart,
+        x: hints.x ?? hints.label ?? cell.chartConfig?.x,
+        y: hints.y ?? hints.value ?? cell.chartConfig?.y,
+        color: hints.color ?? cell.chartConfig?.color,
+      },
+    });
+    setChartRecommendNote(`${response.display.component} · ${response.display.defaultVisualization}`);
+  }, [cell.chartConfig, cell.content, cell.name, cell.result, onCellUpdate]);
 
   const handleDelete = () => {
     dispatch({ type: 'DELETE_CELL', id: cell.id });
@@ -1366,6 +1398,36 @@ export function CellComponent({ cell, index }: CellProps) {
                       />
                     )}
                   </div>
+                  <button
+                    onClick={() => void handleRecommendChart()}
+                    disabled={chartRecommendBusy}
+                    title="Recommend chart from result fields"
+                    style={{
+                      padding: '1px 7px', fontSize: 10, fontFamily: t.font, borderRadius: 3,
+                      border: `1px solid ${chartRecommendBusy ? t.btnBorder : t.accent}`,
+                      background: chartRecommendBusy ? 'transparent' : `${t.accent}14`,
+                      color: chartRecommendBusy ? t.textMuted : t.accent,
+                      cursor: chartRecommendBusy ? 'wait' : 'pointer', transition: 'all 0.15s',
+                    }}
+                  >
+                    {chartRecommendBusy ? '...' : 'AI'}
+                  </button>
+                  {chartRecommendNote && (
+                    <span
+                      title={chartRecommendNote}
+                      style={{
+                        maxWidth: 150,
+                        overflow: 'hidden',
+                        textOverflow: 'ellipsis',
+                        whiteSpace: 'nowrap',
+                        fontSize: 10,
+                        color: t.textMuted,
+                        fontFamily: t.font,
+                      }}
+                    >
+                      {chartRecommendNote}
+                    </span>
+                  )}
                   {/* Config gear */}
                   {viewMode === 'chart' && (
                     <button
@@ -1474,6 +1536,16 @@ export function CellComponent({ cell, index }: CellProps) {
   );
 }
 
+function normalizeNotebookChartType(value: string): ChartType {
+  const normalized = value.toLowerCase().replace(/-/g, '_');
+  const chartValue = normalized === 'grouped_bar'
+    ? 'grouped-bar'
+    : normalized === 'stacked_bar'
+      ? 'stacked-bar'
+      : normalized;
+  const match = CHART_TYPE_OPTIONS.find((option) => option.value === chartValue);
+  return match?.value ?? 'table';
+}
 
 function HeaderActionBtn({
   title,

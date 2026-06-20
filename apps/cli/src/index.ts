@@ -31,6 +31,7 @@ import { runSlack } from "./commands/slack.js";
 import { runVerify } from "./commands/verify.js";
 import { runImport } from "./commands/import.js";
 import { runConnect } from "./commands/connect.js";
+import { runPromote } from "./commands/promote.js";
 
 const HELP = `
   dql — DQL CLI
@@ -41,6 +42,7 @@ const HELP = `
     dql build <file.dql>            Compile a DQL file to a static HTML bundle
     dql doctor [path]               Run local setup checks for a DQL project
     dql doctor scale                Report enterprise-scale manifest/cache/index health
+    dql doctor git-hygiene          Flag tracked local/generated files that create noisy commits
     dql preview <file.dql>          Render a local browser preview for a DQL file
     dql serve [directory]           Serve a built DQL bundle locally
     dql parse <file.dql>            Parse and analyze a DQL file
@@ -59,6 +61,12 @@ const HELP = `
                                     Preview or apply legacy-to-domain folder moves
     dql import sql <path>           Generate AI import drafts from SQL files/folders
     dql import sql <path> --save    Compatibility alias; drafts autosave before certification
+    dql promote notebook <path> --to shared
+                                    Strip local run/UI state and mark a notebook shared
+    dql promote app <app-id> --to shared
+                                    Promote an App manifest to reviewed shared source
+    dql promote dashboard <app-id>/<dashboard-id> --to shared
+                                    Strip local tiles/state and mark a dashboard shared
     dql fmt <file.dql|.dqlnb>       Format DQL/notebook file in place
     dql diff <path>                 Diff a .dql/.dqlnb file vs HEAD
     dql diff <before> <after>       Semantic diff between two files
@@ -92,6 +100,7 @@ const HELP = `
     --input <path>                  Source path for scaffold-style migration commands
     --out-dir <path>                Output directory for "build"
     --to <layout>                   Target layout for "migrate layout" (domain-first)
+                                    For "promote": shared
     --port <number>                 Preferred local port for "preview" or "serve"
     --chart <type>                  Primary chart type for "new" scaffolds (default: bar)
     --domain <name>                 Domain for new block scaffolds (default: general)
@@ -170,8 +179,20 @@ const COMMAND_HELP: Record<string, string> = {
     dql doctor [path] [--format json]
     dql doctor [path] --ai
     dql doctor scale [--format json]
+    dql doctor git-hygiene [--format json]
 
   Prints setup checks and the next local-first commands to run.
+  `,
+  promote: `
+  dql promote — Turn private/local work into clean shared Git source
+
+  Usage:
+    dql promote notebook <path> --to shared
+    dql promote app <app-id> --to shared
+    dql promote dashboard <app-id>/<dashboard-id> --to shared
+
+  Promotion removes run snapshots, local UI state, AI pins, and legacy generated
+  options while preserving reviewed app/notebook/dashboard metadata.
   `,
   connect: `
   dql connect — Configure DQL for external AI agents
@@ -243,6 +264,7 @@ async function main() {
     command === "mcp" ||
     command === "connect" ||
     command === "app" ||
+    command === "promote" ||
     command === "schedule" ||
     command === "verify" ||
     (command === "certify" && Boolean(flags.fromDraft));
@@ -320,6 +342,9 @@ async function main() {
         break;
       case "connect":
         await runConnect(file, rest, flags);
+        break;
+      case "promote":
+        await runPromote(file, rest, flags);
         break;
       case "app":
         await runApp(file, rest, flags);
