@@ -5,7 +5,7 @@ import { parse } from '../parser/parser.js';
 describe('formatDQL', () => {
   it('formats domain declarations and block contract metadata idempotently', () => {
     const source = `domain "Customer"{owner="customer-analytics" businessOwner="Customer Success" boundedContext="Customer boundary" sourceSystems=["crm","orders"] primaryTerms=["Customer"] reviewCadence="monthly" tags=["customer"]}
-block "Customer Orders Rollup"{domain="Customer" type="custom" pattern="entity_rollup" grain="customer_id" entities=["Customer"] outputs=["customer_id","total_orders"] allowedFilters=["order_date"] sourceSystems=["orders"] replacementFor=["Legacy Orders"] query="""SELECT customer_id, COUNT(*) AS total_orders FROM orders GROUP BY customer_id"""}`;
+block "Customer Orders Rollup"{domain="Customer" type="custom" pattern="entity_rollup" grain="customer_id" entities=["Customer"] outputs=["customer_id","total_orders"] dimensions=["segment"] allowedFilters=["order_date"] parameterPolicy{start_date="dynamic" active_status="static"} filterBindings{date_range="order_date"} sourceSystems=["orders"] replacementFor=["Legacy Orders"] query="""SELECT customer_id, COUNT(*) AS total_orders FROM orders GROUP BY customer_id"""}`;
 
     const formatted = formatDQL(source);
 
@@ -14,6 +14,11 @@ block "Customer Orders Rollup"{domain="Customer" type="custom" pattern="entity_r
     expect(formatted).toContain('pattern = "entity_rollup"');
     expect(formatted).toContain('grain = "customer_id"');
     expect(formatted).toContain('outputs = ["customer_id", "total_orders"]');
+    expect(formatted).toContain('dimensions = ["segment"]');
+    expect(formatted).toContain('parameterPolicy {');
+    expect(formatted).toContain('start_date = "dynamic"');
+    expect(formatted).toContain('filterBindings {');
+    expect(formatted).toContain('date_range = "order_date"');
     expect(formatted).toContain('replacementFor = ["Legacy Orders"]');
     expect(formatDQL(formatted)).toBe(formatted);
   });

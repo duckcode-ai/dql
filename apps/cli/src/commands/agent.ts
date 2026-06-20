@@ -410,7 +410,7 @@ async function runEval(rest: string[], flags: CLIFlags): Promise<void> {
           const proposedDomain = sourceBlock?.domain ?? draftContextPack?.objects.find((object) => object.domain)?.domain ?? testCase.domain ?? 'misc';
           if (!(flags as { save?: boolean }).save) {
             return {
-              path: `blocks/_drafts/${slug}.dql`,
+              path: previewGeneratedDraftPath(projectRoot, proposedDomain, slug),
               askedTimes: 0,
               proposedContractId: `${proposedDomain}.Unknown.${slug}`,
             };
@@ -472,6 +472,18 @@ async function runEval(rest: string[], flags: CLIFlags): Promise<void> {
   console.log(`Wrong certified count: ${metrics.wrong_certified_count}`);
   console.log(`Draft saved count: ${metrics.draft_saved_count}`);
   if (passed !== results.length) process.exitCode = 1;
+}
+
+function previewGeneratedDraftPath(projectRoot: string, domain: string, slug: string): string {
+  const safeDomain = domain
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9/_-]+/g, '-')
+    .replace(/^\/+|\/+$/g, '');
+  if (safeDomain && existsSync(join(projectRoot, 'domains', safeDomain))) {
+    return `domains/${safeDomain}/blocks/_drafts/${slug}.dql`;
+  }
+  return `blocks/_drafts/${slug}.dql`;
 }
 
 function evaluateCase(testCase: AgentEvalCase, result: Awaited<ReturnType<typeof answer>>): { failures: string[]; validationCode?: string } {

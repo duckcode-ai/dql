@@ -1160,7 +1160,7 @@ export class Parser {
     let blockType: 'semantic' | 'custom' | undefined;
     let metricRef: string | undefined;
     let metricsRef: string[] | undefined;
-    let dimensionsRef: string[] | undefined;
+    let parsedDimensions: string[] | undefined;
     let description: string | undefined;
     let tags: string[] | undefined;
     let owner: string | undefined;
@@ -1170,6 +1170,8 @@ export class Parser {
     let entities: string[] | undefined;
     let outputs: string[] | undefined;
     let allowedFilters: string[] | undefined;
+    let parameterPolicy: BlockDeclNode['parameterPolicy'] | undefined;
+    let filterBindings: BlockDeclNode['filterBindings'] | undefined;
     let sourceSystems: string[] | undefined;
     let replacementFor: string[] | undefined;
     let params: BlockParamsNode | undefined;
@@ -1252,7 +1254,7 @@ export class Parser {
         this.expect(TokenType.Equals);
         const arrExpr = this.parseArrayLiteral();
         if (arrExpr.kind === NodeKind.ArrayLiteral) {
-          dimensionsRef = arrExpr.elements
+          parsedDimensions = arrExpr.elements
             .filter((e): e is import('../ast/nodes.js').StringLiteralNode => e.kind === NodeKind.StringLiteral)
             .map((e) => e.value);
         }
@@ -1310,21 +1312,35 @@ export class Parser {
         }
       } else if (this.check(TokenType.ParamsKeyword)) {
         params = this.parseBlockParams();
+      } else if (
+        this.check(TokenType.Identifier)
+        && this.current().value === 'parameterPolicy'
+      ) {
+        parameterPolicy = this.parseBlockParameterPolicy();
+      } else if (
+        this.check(TokenType.Identifier)
+        && this.current().value === 'filterBindings'
+      ) {
+        filterBindings = this.parseBlockFilterBindings();
       } else if (this.check(TokenType.QueryKeyword)) {
         this.advance();
-        this.expect(TokenType.Equals);
-        if (this.check(TokenType.TripleQuoteString)) {
-          const sqlToken = this.advance();
-          const interpolations = this.extractInterpolations(sqlToken.value, sqlToken.span);
-          query = {
-            kind: NodeKind.SQLQuery,
-            rawSQL: sqlToken.value,
-            interpolations,
-            span: sqlToken.span,
-          };
+        if (this.check(TokenType.LeftBrace)) {
+          query = this.parseLegacyBlockQuerySection();
         } else {
-          // Fallback: parse as inline SQL
-          query = this.parseSQLQuery();
+          this.expect(TokenType.Equals);
+          if (this.check(TokenType.TripleQuoteString)) {
+            const sqlToken = this.advance();
+            const interpolations = this.extractInterpolations(sqlToken.value, sqlToken.span);
+            query = {
+              kind: NodeKind.SQLQuery,
+              rawSQL: sqlToken.value,
+              interpolations,
+              span: sqlToken.span,
+            };
+          } else {
+            // Fallback: parse as inline SQL
+            query = this.parseSQLQuery();
+          }
         }
       } else if (this.check(TokenType.VisualizationKeyword)) {
         visualization = this.parseBlockVisualization();
@@ -1516,17 +1532,18 @@ export class Parser {
           continue;
         }
         this.error(
-          `Unexpected token '${this.current().value}' inside block. Expected 'domain', 'type', 'status', 'datalex_contract', 'metric', 'metrics', 'dimensions', 'description', 'tags', 'owner', 'terms', 'pattern', 'grain', 'entities', 'outputs', 'allowedFilters', 'sourceSystems', 'replacementFor', 'params', 'query', 'visualization', 'tests', 'llmContext', 'invariants', 'examples', 'businessOutcome', 'businessOwner', 'decisionUse', 'reviewCadence', 'businessRules', 'caveats', Tier-2 draft metadata fields, or '}'.`,
+          `Unexpected token '${this.current().value}' inside block. Expected 'domain', 'type', 'status', 'datalex_contract', 'metric', 'metrics', 'dimensions', 'description', 'tags', 'owner', 'terms', 'pattern', 'grain', 'entities', 'outputs', 'allowedFilters', 'parameterPolicy', 'filterBindings', 'sourceSystems', 'replacementFor', 'params', 'query', 'visualization', 'tests', 'llmContext', 'invariants', 'examples', 'businessOutcome', 'businessOwner', 'decisionUse', 'reviewCadence', 'businessRules', 'caveats', Tier-2 draft metadata fields, or '}'.`,
         );
         this.advance();
       }
     }
 
     if (!blockType) {
-      this.error(
-        `Block "${nameToken.value}" is missing a required type declaration. Add type = "semantic" for dbt metric blocks or type = "custom" for SQL blocks.`,
+      blockType = 'custom';
+      this.reporter.warning(
+        `Block "${nameToken.value}" is missing a type declaration. DQL treated it as type = "custom" for backward compatibility.`,
+        nameToken.span,
       );
-      blockType = 'custom'; // error-recovery default — keeps downstream analysis working
     }
 
     this.expect(TokenType.RightBrace);
@@ -1538,7 +1555,7 @@ export class Parser {
       blockType,
       metricRef,
       metricsRef,
-      dimensionsRef,
+      dimensionsRef: blockType === 'semantic' ? parsedDimensions : undefined,
       description,
       tags,
       owner,
@@ -1547,7 +1564,10 @@ export class Parser {
       grain,
       entities,
       outputs,
+      dimensions: blockType === 'semantic' ? undefined : parsedDimensions,
       allowedFilters,
+      parameterPolicy,
+      filterBindings,
       sourceSystems,
       replacementFor,
       params,
@@ -1585,6 +1605,48 @@ export class Parser {
     };
   }
 
+  private parseLegacyBlockQuerySection(): SQLQueryNode | undefined {
+    const start = this.currentSpan();
+    this.expect(TokenType.LeftBrace);
+    let query: SQLQueryNode | undefined;
+
+    while (!this.check(TokenType.RightBrace) && !this.isAtEnd()) {
+      if (this.check(TokenType.Identifier) && this.current().value === 'sql') {
+        this.advance();
+        this.expect(TokenType.Equals);
+        if (this.check(TokenType.TripleQuoteString)) {
+          const sqlToken = this.advance();
+          const interpolations = this.extractInterpolations(sqlToken.value, sqlToken.span);
+          query = {
+            kind: NodeKind.SQLQuery,
+            rawSQL: sqlToken.value,
+            interpolations,
+            span: sqlToken.span,
+          };
+        } else {
+          query = this.parseSQLQuery();
+        }
+      } else if (
+        this.check(TokenType.Identifier)
+        && SQL_START_KEYWORDS.has(this.current().value.toUpperCase())
+      ) {
+        query = this.parseSQLQuery();
+      } else {
+        this.error(`Unexpected token '${this.current().value}' inside query section. Expected 'sql' or inline SQL.`);
+        this.advance();
+      }
+    }
+
+    this.expect(TokenType.RightBrace);
+    if (!query) {
+      this.reporter.error(
+        'Query section must contain sql = """...""" or inline SQL.',
+        this.makeSpan(start, this.previousSpan()),
+      );
+    }
+    return query;
+  }
+
   private parseBlockParams(): BlockParamsNode {
     const start = this.currentSpan();
     this.expect(TokenType.ParamsKeyword);
@@ -1618,6 +1680,58 @@ export class Parser {
       params: paramEntries,
       span: this.makeSpan(start, this.previousSpan()),
     };
+  }
+
+  private parseBlockParameterPolicy(): BlockDeclNode['parameterPolicy'] {
+    const entries: NonNullable<BlockDeclNode['parameterPolicy']> = [];
+    this.expect(TokenType.Identifier);
+    this.expect(TokenType.LeftBrace);
+    while (!this.check(TokenType.RightBrace) && !this.isAtEnd()) {
+      const entryStart = this.currentSpan();
+      const nameToken = this.current();
+      if (nameToken.type === TokenType.Identifier || this.isBlockFieldKeyword(nameToken.type)) {
+        this.advance();
+      } else {
+        this.error(`Expected parameter name inside parameterPolicy, got '${nameToken.value}'.`);
+        this.advance();
+        continue;
+      }
+      this.expect(TokenType.Equals);
+      const policy = this.expectStringLike();
+      entries.push({
+        name: nameToken.value,
+        policy: policy.value,
+        span: this.makeSpan(entryStart, this.previousSpan()),
+      });
+    }
+    this.expect(TokenType.RightBrace);
+    return entries;
+  }
+
+  private parseBlockFilterBindings(): BlockDeclNode['filterBindings'] {
+    const entries: NonNullable<BlockDeclNode['filterBindings']> = [];
+    this.expect(TokenType.Identifier);
+    this.expect(TokenType.LeftBrace);
+    while (!this.check(TokenType.RightBrace) && !this.isAtEnd()) {
+      const entryStart = this.currentSpan();
+      const nameToken = this.current();
+      if (nameToken.type === TokenType.Identifier || this.isBlockFieldKeyword(nameToken.type)) {
+        this.advance();
+      } else {
+        this.error(`Expected business filter name inside filterBindings, got '${nameToken.value}'.`);
+        this.advance();
+        continue;
+      }
+      this.expect(TokenType.Equals);
+      const binding = this.expectStringLike();
+      entries.push({
+        filter: nameToken.value,
+        binding: binding.value,
+        span: this.makeSpan(entryStart, this.previousSpan()),
+      });
+    }
+    this.expect(TokenType.RightBrace);
+    return entries;
   }
 
   private parseBlockVisualization(): BlockVisualizationNode {

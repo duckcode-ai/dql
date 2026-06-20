@@ -3,7 +3,7 @@
 VS Code extension for DQL with:
 
 - Syntax highlighting for DQL files (`.dql`)
-- Snippets for dashboards, workbooks, and blocks
+- Snippets for domains, enterprise-ready blocks, business views, terms, dashboards, and workbooks
 - Language Server support (diagnostics, completion, hover, formatting)
 
 ## Development

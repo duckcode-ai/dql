@@ -151,6 +151,7 @@ function printBlockDecl(node: BlockDeclNode, indent: number): string {
   if (node.grain) result += `${prefix}  grain = "${node.grain}"\n`;
   if (node.entities) result += `${prefix}  entities = [${node.entities.map(t => `"${t}"`).join(', ')}]\n`;
   if (node.outputs) result += `${prefix}  outputs = [${node.outputs.map(t => `"${t}"`).join(', ')}]\n`;
+  if (node.dimensions) result += `${prefix}  dimensions = [${node.dimensions.map(t => `"${t}"`).join(', ')}]\n`;
   if (node.allowedFilters) result += `${prefix}  allowedFilters = [${node.allowedFilters.map(t => `"${t}"`).join(', ')}]\n`;
   if (node.sourceSystems) result += `${prefix}  sourceSystems = [${node.sourceSystems.map(t => `"${t}"`).join(', ')}]\n`;
   if (node.replacementFor) result += `${prefix}  replacementFor = [${node.replacementFor.map(t => `"${t}"`).join(', ')}]\n`;

@@ -156,7 +156,7 @@ export function buildAgentTools(ctx: DQLContext): AgentTool[] {
     {
       name: 'suggest_block',
       description:
-        'Write a proposed block to blocks/_drafts/ and return governance results. ' +
+        'Write a proposed block to the local draft queue and return governance results. ' +
         'Use this at the end of a conversation to hand the user a reviewable draft.',
       inputSchema: SUGGEST_BLOCK_SCHEMA,
       run: async (args) => suggestBlock(ctx, args as Parameters<typeof suggestBlock>[1]),

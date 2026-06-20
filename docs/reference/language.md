@@ -44,6 +44,17 @@ block "Revenue by segment" {
   outputs = ["segment", "revenue"]
   dimensions = ["segment"]
   allowedFilters = ["order_date", "segment"]
+  parameterPolicy {
+    start_date = "dynamic"
+    segment = "dynamic"
+    team_set = "dynamic"
+    approved_status = "static"
+  }
+  filterBindings {
+    date_range = "order_date"
+    segment = "customer_segment"
+    team_set = "team_abbreviation"
+  }
   sourceSystems = ["orders"]
   replacementFor = []
   reviewCadence = "monthly"
@@ -89,14 +100,29 @@ Canonical block fields:
 | `entities` | Business entities represented by the block |
 | `terms` | Business term references implemented or used by the block |
 | `outputs` | Declared output columns reviewers expect from the block |
-| `dimensions` | Declared grouping dimensions for semantic and SQL-backed blocks |
+| `dimensions` | Declared grouping dimensions. In `type = "semantic"` blocks these are MetricFlow dimensions; in `type = "custom"` blocks they are reusable business-contract dimensions, not semantic dependencies |
 | `allowedFilters` | Filters considered safe and meaningful for reuse |
+| `parameterPolicy` | Review intent for parameters: `dynamic`, `static`, `business`, `derived`, `optional`, or `ambiguous_review_required` |
+| `filterBindings` | Mapping from app/business filters to physical columns or expressions used by the block |
 | `sourceSystems` | Business source-system hints used in lineage and AI context |
 | `replacementFor` | Prior blocks or business questions this block replaces |
 | `query` | SQL for `type = "custom"` blocks |
 | `metric` / `metrics` | Metric refs for `type = "semantic"` blocks |
 | `visualization` | Chart configuration |
 | `tests` | Local certification assertions |
+
+`dql certify --enterprise` treats the reusable contract as certification
+criteria. Runtime parameters may be scalar values, date/year ranges represented
+by paired parameters, or selected sets represented by array params such as
+`team_set = ["LAL", "BOS"]`. Execution expands selected-set arrays into safe
+warehouse bind placeholders at runtime. It validates official pattern
+requirements, for example:
+`metric_wrapper` must bind exactly one semantic metric, `entity_profile` and
+`entity_rollup` must declare a stable entity grain, `ranking` must expose a
+ranked dimension/entity plus metric output, `trend` must declare time context,
+`bridge` must declare the two source systems or entities it connects plus a
+bridge/id/key output and review cadence, and `drilldown` must declare reusable
+filters or parameter bindings.
 
 ## Certified Block
 

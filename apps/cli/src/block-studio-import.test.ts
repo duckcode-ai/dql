@@ -9,6 +9,7 @@ import {
   deleteBlockStudioImportSession,
   listBlockStudioImportSessions,
   loadBlockStudioImportSession,
+  parameterizeSqlForDqlImport,
   updateBlockStudioImportCandidate,
 } from './block-studio-import.js';
 
@@ -28,6 +29,192 @@ function tempProject(): string {
 }
 
 describe('Block Studio SQL import', () => {
+  it('parameterizes reusable season and top-N filters for AI import drafts', () => {
+    const sql = `
+SELECT player_name, SUM(COALESCE(pts, 0)) AS total_points
+FROM TRANSFORMED.int_player_stats
+WHERE EXTRACT(YEAR FROM game_date_est) IN (2016, 2017)
+GROUP BY player_name
+ORDER BY total_points DESC
+LIMIT 5
+`;
+
+    const parameterized = parameterizeSqlForDqlImport(sql);
+    const source = candidateToDqlSource({
+      name: 'Top NBA Scorers',
+      domain: 'player_performance',
+      description: 'Ranks NBA players by total points for a selected season range.',
+      owner: 'analytics',
+      tags: ['nba', 'players'],
+      pattern: 'ranking',
+      grain: 'player_name',
+      entities: ['Player'],
+      outputs: ['player_name', 'total_points'],
+      allowedFilters: parameterized.allowedFilters,
+      parameterPolicy: parameterized.parameterPolicy,
+      filterBindings: parameterized.filterBindings,
+      parameterDecisions: parameterized.parameterDecisions,
+      sourceSystems: ['TRANSFORMED'],
+      replacementFor: [],
+      sql: parameterized.sql,
+      llmContext: 'Use after review for top NBA scorer questions.',
+    });
+
+    expect(parameterized.sql).toContain('${season_start}');
+    expect(parameterized.sql).toContain('${season_end}');
+    expect(parameterized.sql).toContain('${top_n}');
+    expect(parameterized.sql).toContain('EXTRACT(YEAR FROM game_date_est) BETWEEN ${season_start} AND ${season_end}');
+    expect(parameterized.sql).not.toContain('IN (${season_start}, ${season_end})');
+    expect(parameterized.parameterPolicy).toEqual(expect.arrayContaining([
+      { name: 'season_start', policy: 'dynamic' },
+      { name: 'season_end', policy: 'dynamic' },
+      { name: 'top_n', policy: 'dynamic' },
+    ]));
+    expect(parameterized.filterBindings).toEqual([{ filter: 'season_range', binding: 'game_date_est.year' }]);
+    expect(source).toContain('parameterPolicy {');
+    expect(source).toContain('filterBindings {');
+    expect(source).toContain('params {');
+    expect(source).toContain('season_start = 2016');
+    expect(source).toContain('top_n = 5');
+  });
+
+  it('infers ranking pattern after LIMIT is parameterized', () => {
+    const parameterized = parameterizeSqlForDqlImport(`
+SELECT player_name, SUM(COALESCE(pts, 0)) AS total_points
+FROM TRANSFORMED.int_player_stats
+WHERE EXTRACT(YEAR FROM game_date_est) IN (2016, 2017)
+GROUP BY player_name
+ORDER BY total_points DESC
+LIMIT 5
+`);
+
+    const source = candidateToDqlSource({
+      name: 'Top NBA Scorers',
+      domain: 'player_performance',
+      description: 'Ranks NBA players by total points for a selected season range.',
+      owner: 'analytics',
+      tags: ['nba', 'players'],
+      grain: 'player_name',
+      outputs: ['player_name', 'total_points'],
+      allowedFilters: parameterized.allowedFilters,
+      parameterPolicy: parameterized.parameterPolicy,
+      filterBindings: parameterized.filterBindings,
+      parameterDecisions: parameterized.parameterDecisions,
+      sourceSystems: ['TRANSFORMED'],
+      replacementFor: [],
+      sql: parameterized.sql,
+      llmContext: 'Use after review for top NBA scorer questions.',
+    });
+
+    expect(parameterized.sql).toContain('LIMIT ${top_n}');
+    expect(source).toContain('pattern = "ranking"');
+  });
+
+  it('keeps non-contiguous year lists as explicit selected-set parameters', () => {
+    const parameterized = parameterizeSqlForDqlImport(`
+select player_name, sum(pts) as total_points
+from TRANSFORMED.int_player_stats
+where extract(year from game_date_est) in (2016, 2018)
+group by player_name
+`);
+
+    expect(parameterized.sql).toMatch(/in\s*\(\$\{season_year_2016\},\s*\$\{season_year_2018\}\)/i);
+    expect(parameterized.sql).not.toContain('BETWEEN ${season_start} AND ${season_end}');
+    expect(parameterized.parameterPolicy).toEqual(expect.arrayContaining([
+      { name: 'season_year_2016', policy: 'dynamic' },
+      { name: 'season_year_2018', policy: 'dynamic' },
+    ]));
+    expect(parameterized.filterBindings).toEqual([{ filter: 'season_set', binding: 'game_date_est.year' }]);
+    expect(parameterized.allowedFilters).toEqual(expect.arrayContaining(['season_set', 'season_year_2016', 'season_year_2018']));
+  });
+
+  it('parameterizes runtime selected-set filters as array-backed business params', () => {
+    const parameterized = parameterizeSqlForDqlImport(`
+select player_name, team_abbreviation, sum(pts) as total_points
+from TRANSFORMED.int_player_stats
+where team_abbreviation in ('LAL', 'BOS')
+group by player_name, team_abbreviation
+`);
+
+    expect(parameterized.sql).toContain('team_abbreviation IN (${team_abbreviation_set})');
+    expect(parameterized.parameterDecisions).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        name: 'team_abbreviation_set',
+        policy: 'dynamic',
+        valueType: 'set',
+        value: ['LAL', 'BOS'],
+      }),
+    ]));
+    expect(parameterized.filterBindings).toEqual([{ filter: 'team_abbreviation_set', binding: 'team_abbreviation' }]);
+
+    const source = candidateToDqlSource({
+      name: 'Scoring By Team Set',
+      domain: 'player_performance',
+      description: 'Ranks scoring for a selected team set.',
+      owner: 'analytics',
+      tags: ['nba'],
+      pattern: 'ranking',
+      grain: 'player_name',
+      entities: ['Player'],
+      outputs: ['player_name', 'team_abbreviation', 'total_points'],
+      allowedFilters: parameterized.allowedFilters,
+      parameterPolicy: parameterized.parameterPolicy,
+      filterBindings: parameterized.filterBindings,
+      parameterDecisions: parameterized.parameterDecisions,
+      sourceSystems: ['TRANSFORMED'],
+      replacementFor: [],
+      sql: parameterized.sql,
+      llmContext: 'Use for selected-team scoring questions.',
+    });
+
+    expect(source).toContain('team_abbreviation_set = ["LAL", "BOS"]');
+    expect(source).toContain('team_abbreviation_set = "dynamic"');
+  });
+
+  it('parameterizes date BETWEEN filters as reusable date ranges', () => {
+    const parameterized = parameterizeSqlForDqlImport(`
+select player_name, sum(pts) as total_points
+from TRANSFORMED.int_player_stats
+where game_date_est between '2016-10-01' and '2017-06-30'
+group by player_name
+`);
+
+    expect(parameterized.sql).toContain('game_date_est BETWEEN ${start_date} AND ${end_date}');
+    expect(parameterized.parameterPolicy).toEqual(expect.arrayContaining([
+      { name: 'start_date', policy: 'dynamic' },
+      { name: 'end_date', policy: 'dynamic' },
+    ]));
+    expect(parameterized.filterBindings).toEqual([{ filter: 'date_range', binding: 'game_date_est' }]);
+    expect(parameterized.allowedFilters).toEqual(expect.arrayContaining(['date_range', 'start_date', 'end_date']));
+  });
+
+  it('preserves optional parameter policies in generated DQL', () => {
+    const source = candidateToDqlSource({
+      name: 'Player Scoring By Team',
+      domain: 'player_performance',
+      description: 'Ranks player scoring with an optional team filter.',
+      owner: 'analytics',
+      tags: ['nba', 'players'],
+      pattern: 'ranking',
+      grain: 'player_name',
+      entities: ['Player'],
+      outputs: ['player_name', 'total_points'],
+      dimensions: ['team_name'],
+      allowedFilters: ['team'],
+      parameterPolicy: [{ name: 'team', policy: 'optional' }],
+      filterBindings: [{ filter: 'team', binding: 'team_name' }],
+      parameterDecisions: [],
+      sourceSystems: ['TRANSFORMED'],
+      replacementFor: [],
+      sql: 'SELECT player_name, SUM(pts) AS total_points FROM TRANSFORMED.int_player_stats WHERE (${team} IS NULL OR team_name = ${team}) GROUP BY player_name',
+      llmContext: 'Use the team parameter only when the question asks for one team.',
+    });
+
+    expect(source).toContain('team = "optional"');
+    expect(source).toContain('dimensions = ["team_name"]');
+    expect(source).not.toContain('team = "ambiguous_review_required"');
+  });
+
   it('previews a single SQL file as a local block candidate', () => {
     const root = tempProject();
     writeFileSync(join(root, 'revenue.sql'), `-- name: revenue by region

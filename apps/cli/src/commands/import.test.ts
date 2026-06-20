@@ -1,4 +1,4 @@
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -15,7 +15,7 @@ afterEach(() => {
 });
 
 describe('runImport', () => {
-  it('saves valid SQL import candidates as draft blocks', async () => {
+  it('autosaves valid SQL import candidates as review drafts', async () => {
     const originalCwd = process.cwd();
     const root = mkdtempSync(join(tmpdir(), 'dql-import-cli-'));
     tempDirs.push(root);
@@ -49,9 +49,11 @@ group by region;
         version: false,
       });
 
-      const blockPath = join(root, 'blocks', 'finance', 'orders-by-region.dql');
-      const companionPath = join(root, 'semantic-layer', 'blocks', 'finance', 'orders-by-region.yaml');
-      expect(existsSync(blockPath)).toBe(true);
+      const draftDir = join(root, 'blocks', '_drafts', 'finance');
+      const draftFile = readdirSync(draftDir).find((file) => file.startsWith('orders-by-region-') && file.endsWith('.dql'));
+      expect(draftFile).toBeTruthy();
+      const blockPath = join(draftDir, draftFile!);
+      const companionPath = join(root, 'semantic-layer', 'blocks', '_drafts', 'finance', draftFile!.replace(/\.dql$/, '.yaml'));
       expect(existsSync(companionPath)).toBe(true);
       expect(readFileSync(blockPath, 'utf-8')).toContain('status = "draft"');
       expect(readFileSync(companionPath, 'utf-8')).toContain('reviewStatus: draft');

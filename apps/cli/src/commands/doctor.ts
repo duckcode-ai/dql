@@ -2,7 +2,7 @@ import { existsSync, readFileSync, statSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { QueryExecutor } from '@duckcodeailabs/dql-connectors';
-import { buildManifest, collectInputFiles, resolveSemanticLayerWithDiagnostics } from '@duckcodeailabs/dql-core';
+import { buildManifest, collectInputFiles, resolveDbtManifestPath, resolveSemanticLayerWithDiagnostics } from '@duckcodeailabs/dql-core';
 import { buildLocalContextPack, defaultKgPath, defaultMetadataPath, openMetadataCatalog } from '@duckcodeailabs/dql-agent';
 import type { CLIFlags } from '../args.js';
 import {
@@ -155,14 +155,25 @@ interface ScaleReport {
     sourceFingerprints: number | null;
     domainShards: number | null;
   };
+  retrieval: {
+    topRejectedEvidence: Array<{
+      objectKey: string;
+      objectType: string;
+      name: string;
+      reason: string;
+      score: number;
+      rejectedRank: number;
+    }>;
+  };
   issues: ScaleIssue[];
 }
 
 async function runDoctorScale(targetPath: string | null, flags: CLIFlags): Promise<void> {
   const projectRoot = findProjectRoot(resolve(targetPath || '.'));
   const started = Date.now();
-  const manifest = buildManifest({ projectRoot });
-  const inputFiles = collectInputFiles({ projectRoot });
+  const dbtManifestPath = resolveDbtManifestPath(projectRoot) ?? undefined;
+  const manifest = buildManifest({ projectRoot, dbtManifestPath });
+  const inputFiles = collectInputFiles({ projectRoot, dbtManifestPath });
   const manifestPath = join(projectRoot, 'dql-manifest.json');
   const manifestFresh = isManifestFresh(manifestPath, inputFiles);
   const metadataPath = defaultMetadataPath(projectRoot);
@@ -172,6 +183,7 @@ async function runDoctorScale(targetPath: string | null, flags: CLIFlags): Promi
   let contextPackObjects: number | null = null;
   let sourceFingerprints: number | null = null;
   let domainShards: number | null = null;
+  let topRejectedEvidence: ScaleReport['retrieval']['topRejectedEvidence'] = [];
   const issues: ScaleIssue[] = [];
 
   if (existsSync(metadataPath)) {
@@ -187,10 +199,11 @@ async function runDoctorScale(targetPath: string | null, flags: CLIFlags): Promi
         question: 'DQL doctor scale retrieval check for enterprise metadata coverage',
         mode: 'debug',
         surface: 'doctor',
-        limit: 25,
+        limit: 16,
       });
       contextPackMs = Date.now() - contextStarted;
       contextPackObjects = pack.objects.length;
+      topRejectedEvidence = pack.retrievalDiagnostics.topRejected.slice(0, 10);
       if (sourceFingerprints === 0) {
         issues.push({
           severity: 'warning',
@@ -235,11 +248,12 @@ async function runDoctorScale(targetPath: string | null, flags: CLIFlags): Promi
     });
   }
 
-  const declaredDomains = new Set(Object.keys(manifest.domains ?? {}));
+  const resolveDomain = createDomainResolver(manifest.domains ?? {});
+  const declaredDomains = new Set(Object.values(manifest.domains ?? {}).map((domain) => domain.name));
   const usedDomains = new Set<string>();
-  for (const block of Object.values(manifest.blocks)) if (block.domain) usedDomains.add(block.domain);
-  for (const term of Object.values(manifest.terms ?? {})) if (term.domain) usedDomains.add(term.domain);
-  for (const view of Object.values(manifest.businessViews ?? {})) if (view.domain) usedDomains.add(view.domain);
+  for (const block of Object.values(manifest.blocks)) if (block.domain) usedDomains.add(resolveDomain(block.domain));
+  for (const term of Object.values(manifest.terms ?? {})) if (term.domain) usedDomains.add(resolveDomain(term.domain));
+  for (const view of Object.values(manifest.businessViews ?? {})) if (view.domain) usedDomains.add(resolveDomain(view.domain));
   const missingDomains = [...usedDomains].filter((domain) => !declaredDomains.has(domain));
   if (missingDomains.length > 0) {
     issues.push({
@@ -296,6 +310,9 @@ async function runDoctorScale(targetPath: string | null, flags: CLIFlags): Promi
       sourceFingerprints,
       domainShards,
     },
+    retrieval: {
+      topRejectedEvidence,
+    },
     issues,
   };
 
@@ -320,6 +337,14 @@ async function runDoctorScale(targetPath: string | null, flags: CLIFlags): Promi
   console.log(`    context pack: ${report.cache.contextPackMs === null ? 'not checked' : `${report.cache.contextPackMs}ms, ${report.cache.contextPackObjects} objects`}`);
   console.log(`    source fingerprints: ${report.cache.sourceFingerprints === null ? 'not checked' : report.cache.sourceFingerprints}`);
   console.log(`    domain shards: ${report.cache.domainShards === null ? 'not checked' : report.cache.domainShards}`);
+  if (report.retrieval.topRejectedEvidence.length > 0) {
+    console.log('');
+    console.log('  Top rejected evidence:');
+    for (const item of report.retrieval.topRejectedEvidence) {
+      console.log(`    #${item.rejectedRank} ${item.objectType}:${item.name} (${item.score.toFixed(1)})`);
+      console.log(`      ${item.reason}`);
+    }
+  }
   if (issues.length > 0) {
     console.log('');
     console.log('  Issues:');
@@ -350,6 +375,21 @@ function manifestAgeMs(manifestPath: string): number | null {
 function fileState(path: string): { exists: boolean; path: string; sizeBytes: number | null } {
   if (!existsSync(path)) return { exists: false, path, sizeBytes: null };
   return { exists: true, path, sizeBytes: statSync(path).size };
+}
+
+function createDomainResolver(domains: Record<string, { name: string; filePath?: string }>): (domain: string) => string {
+  const aliases = new Map<string, string>();
+  for (const domain of Object.values(domains)) {
+    aliases.set(domain.name, domain.name);
+    aliases.set(domainAliasKey(domain.name), domain.name);
+    const folderAlias = domain.filePath?.replace(/\\/g, '/').match(/^domains\/([^/]+)\//)?.[1];
+    if (folderAlias) aliases.set(domainAliasKey(folderAlias), domain.name);
+  }
+  return (domain) => aliases.get(domain) ?? aliases.get(domainAliasKey(domain)) ?? domain;
+}
+
+function domainAliasKey(value: string): string {
+  return value.trim().toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
 }
 
 function formatBytes(value: number): string {

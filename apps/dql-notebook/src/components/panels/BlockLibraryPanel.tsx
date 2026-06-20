@@ -85,27 +85,15 @@ export function BlockLibraryPanel() {
   };
 
   const actions = (
-    <>
-      <button
-        onClick={() => dispatch({ type: 'OPEN_BLOCK_IMPORT' })}
-        style={{
-          background: `${t.accent}18`, border: `1px solid ${t.accent}`, borderRadius: 4,
-          color: t.accent, cursor: 'pointer', fontSize: 10, fontWeight: 600,
-          fontFamily: t.font, padding: '3px 10px',
-        }}
-      >
-        Import SQL
-      </button>
-      <button
-        onClick={refresh}
-        style={{
-          background: 'transparent', border: `1px solid ${t.cellBorder}`, borderRadius: 4,
-          color: t.textSecondary, cursor: 'pointer', fontSize: 10, fontFamily: t.font, padding: '3px 8px',
-        }}
-      >
-        Refresh
-      </button>
-    </>
+    <button
+      onClick={refresh}
+      style={{
+        background: 'transparent', border: `1px solid ${t.cellBorder}`, borderRadius: 4,
+        color: t.textSecondary, cursor: 'pointer', fontSize: 10, fontFamily: t.font, padding: '3px 8px',
+      }}
+    >
+      Refresh
+    </button>
   );
 
   const toolbar = (
@@ -132,7 +120,7 @@ export function BlockLibraryPanel() {
           title={blocks.length === 0 ? 'No blocks yet' : 'No matches'}
           description={
             blocks.length === 0
-              ? 'Use Import SQL to create your first review-ready DQL block.'
+              ? 'Open the builder to create your first review-ready DQL block.'
               : 'No blocks match your search.'
           }
         />

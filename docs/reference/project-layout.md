@@ -87,9 +87,10 @@ my-dql-project/
   `target/semantic_manifest.json` and keeps generated cache files under `.dql/`.
 - **`data/`** — sample data for local exploration. Production projects usually
   query a warehouse instead.
-- **`.dql/imports/`** — local import review sessions. SQL imports follow
-  `extract -> normalize -> validate -> review -> save`. LLM enrichment is
-  optional and review-gated.
+- **`.dql/imports/`** — local import review sessions. AI SQL imports follow
+  `extract -> parameterize -> match/reuse -> validate -> review -> certify`.
+  The session stores draft candidates, parameter decisions, evidence, and
+  duplicate/reuse recommendations.
 - **`.dql/local/apps.sqlite`** — private single-user state such as local Apps,
   layout overrides, AI pins, and saved views.
 

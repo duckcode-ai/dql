@@ -69,7 +69,7 @@ export const queryViaMetadataInput = {
     .boolean()
     .optional()
     .describe(
-      'Persist a draft .dql file under blocks/_drafts/ for later human review and certification. Default true.',
+      'Persist a draft .dql file under the local draft queue for later human review and certification. Default true.',
     ),
   dryRun: z
     .boolean()
@@ -99,8 +99,8 @@ export const queryViaMetadataInput = {
  * - Executes the proposed SQL against the local runtime (unless dryRun).
  * - Returns the result with `uncertified: true` so the agent surfaces the
  *   trust label to the human.
- * - Optionally captures the proposal as a draft block at
- *   `blocks/_drafts/<slug>.dql`. Same question = same slug; askedTimes
+ * - Optionally captures the proposal as a draft block in the local draft
+ *   queue. Same question = same slug; askedTimes
  *   counter increments on dedupe.
  *
  * The agent contract: surface `uncertified: true` verbatim, and tell the

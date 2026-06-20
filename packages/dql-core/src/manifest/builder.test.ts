@@ -20,6 +20,7 @@ describe('collectInputFiles', () => {
     mkdirSync(join(tmpDir, 'blocks'), { recursive: true });
     mkdirSync(join(tmpDir, 'business-views'), { recursive: true });
     mkdirSync(join(tmpDir, 'domains', 'customer'), { recursive: true });
+    mkdirSync(join(tmpDir, 'domains', 'customer', 'apps', 'customer-360', 'dashboards'), { recursive: true });
     mkdirSync(join(tmpDir, 'notebooks'), { recursive: true });
     mkdirSync(join(tmpDir, 'semantic-layer', 'metrics'), { recursive: true });
     mkdirSync(join(tmpDir, 'target'), { recursive: true });
@@ -27,6 +28,8 @@ describe('collectInputFiles', () => {
     writeFileSync(join(tmpDir, 'blocks', 'a.dql'), 'block a {}');
     writeFileSync(join(tmpDir, 'business-views', 'customer_360.dql'), 'business_view "Customer 360" { includes { block "Customer" } }');
     writeFileSync(join(tmpDir, 'domains', 'customer', 'domain.dql'), 'domain "Customer" { owner = "analytics" }');
+    writeFileSync(join(tmpDir, 'domains', 'customer', 'apps', 'customer-360', 'dql.app.json'), '{}');
+    writeFileSync(join(tmpDir, 'domains', 'customer', 'apps', 'customer-360', 'dashboards', 'overview.dqld'), '{}');
     writeFileSync(join(tmpDir, 'notebooks', 'x.dqlnb'), '{"version":1,"cells":[]}');
     writeFileSync(join(tmpDir, 'semantic-layer', 'metrics', 'revenue.yaml'), 'name: revenue');
     writeFileSync(join(tmpDir, 'target', 'manifest.json'), '{}');
@@ -41,6 +44,8 @@ describe('collectInputFiles', () => {
     expect(files).toContain(join(tmpDir, 'blocks', 'a.dql'));
     expect(files).toContain(join(tmpDir, 'business-views', 'customer_360.dql'));
     expect(files).toContain(join(tmpDir, 'domains', 'customer', 'domain.dql'));
+    expect(files).toContain(join(tmpDir, 'domains', 'customer', 'apps', 'customer-360', 'dql.app.json'));
+    expect(files).toContain(join(tmpDir, 'domains', 'customer', 'apps', 'customer-360', 'dashboards', 'overview.dqld'));
     expect(files).toContain(join(tmpDir, 'notebooks', 'x.dqlnb'));
     expect(files).toContain(join(tmpDir, 'semantic-layer', 'metrics', 'revenue.yaml'));
     expect(files).toContain(join(tmpDir, 'target', 'manifest.json'));
@@ -365,6 +370,14 @@ describe('buildManifest block extraction', () => {
   outputs = ["customer_id", "total_orders"]
   dimensions = ["segment"]
   allowedFilters = ["order_date", "segment"]
+  parameterPolicy {
+    start_date = "dynamic"
+    active_status = "static"
+  }
+  filterBindings {
+    date_range = "order_date"
+    segment = "segment"
+  }
   sourceSystems = ["orders"]
   replacementFor = []
   query = """
@@ -397,9 +410,20 @@ describe('buildManifest block extraction', () => {
       grain: 'customer_id',
       entities: ['Customer'],
       declaredOutputs: ['customer_id', 'total_orders'],
+      dimensions: ['segment'],
       allowedFilters: ['order_date', 'segment'],
+      parameterPolicy: [
+        { name: 'start_date', policy: 'dynamic' },
+        { name: 'active_status', policy: 'static' },
+      ],
+      filterBindings: [
+        { filter: 'date_range', binding: 'order_date' },
+        { filter: 'segment', binding: 'segment' },
+      ],
       sourceSystems: ['orders'],
     });
+    expect(block.dimensionsRef).toBeUndefined();
+    expect(block.allDependencies).not.toContain('@dim(segment)');
     expect(manifest.businessViews['Customer 360'].blockRefs).toEqual(['Customer Orders Rollup']);
     expect(manifest.lineage.nodes.some((node) => node.id === 'domain:Customer')).toBe(true);
     expect(manifest.lineage.edges.some((edge) =>
@@ -408,6 +432,33 @@ describe('buildManifest block extraction', () => {
       && edge.type === 'contains',
     )).toBe(true);
     expect(manifest.diagnostics?.filter((diag) => diag.severity === 'error')).toEqual([]);
+  });
+
+  it('resolves domain display names, folder slugs, and lowercase references as one domain', () => {
+    mkdirSync(join(tmpDir, 'domains', 'nba', 'blocks'), { recursive: true });
+    writeFileSync(join(tmpDir, 'domains', 'nba', 'domain.dql'), `domain "NBA" {
+  owner = "sports-analytics"
+  reviewCadence = "monthly"
+}`);
+    writeFileSync(join(tmpDir, 'domains', 'nba', 'blocks', 'top_players.dql'), `block "Top Players" {
+  domain = "nba"
+  type = "custom"
+  owner = "sports-analytics"
+  query = """
+    SELECT player_name FROM int_player_stats
+  """
+}`);
+
+    const manifest = buildManifest({ projectRoot: tmpDir, dqlVersion: 'test' });
+    const messages = manifest.diagnostics?.map((diag) => diag.message) ?? [];
+    const blockNode = manifest.lineage.nodes.find((node) => node.id === 'block:Top Players');
+
+    expect(messages.some((message) => message.includes('domain "nba" is used'))).toBe(false);
+    expect(messages.some((message) => message.includes('domain "NBA" has no terms, blocks, or business views yet'))).toBe(false);
+    expect(manifest.lineage.domains).toEqual(['NBA']);
+    expect(blockNode?.domain).toBe('NBA');
+    expect(manifest.lineage.edges.some((edge) => edge.source === 'domain:NBA' && edge.target === 'block:Top Players')).toBe(true);
+    expect(manifest.lineage.domainTrust.NBA).toMatchObject({ total: 1, certified: 0 });
   });
 
   it('extracts notebook DQL block SQL and metadata from the parsed block', () => {

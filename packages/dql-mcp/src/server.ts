@@ -85,7 +85,7 @@ export function createDQLMCPServer(options: CreateServerOptions = {}): McpServer
     'build_dql_block',
     {
       description:
-        'High-level draft-block tool. Writes a proposed block to blocks/_drafts/ with governance results. Does not certify automatically.',
+        'High-level draft-block tool. Writes a proposed block to the local draft queue (domains/<domain>/blocks/_drafts/ when available, otherwise blocks/_drafts/) with governance results. Does not certify automatically.',
       inputSchema: buildDqlBlockInput,
     },
     async (args) => wrap(await buildDqlBlock(ctx, args)),
@@ -122,7 +122,7 @@ export function createDQLMCPServer(options: CreateServerOptions = {}): McpServer
     'query_via_metadata',
     {
       description:
-        'Tier-2 of graduated trust. Use when no certified block exactly answers the requested grain, including why-changed diagnostics, named customer/user/account filters, rankings, breakdowns, comparisons, anomalies, and drill-throughs. Call inspect_metadata_context first; pass its contextPackId when available. If proposedSql is omitted, this returns the catalog route plan, allowed SQL context, and missing context. If proposedSql is supplied, it must be one read-only SELECT/WITH query using only inspected relations/columns. The runtime executes a bounded preview, returns `uncertified: true` plus trustStatus/evidence, and saves a draft block under blocks/_drafts/. Surface the `uncertified` flag and review path verbatim.',
+        'Tier-2 of graduated trust. Use when no certified block exactly answers the requested grain, including why-changed diagnostics, named customer/user/account filters, rankings, breakdowns, comparisons, anomalies, and drill-throughs. Call inspect_metadata_context first; pass its contextPackId when available. If proposedSql is omitted, this returns the catalog route plan, allowed SQL context, and missing context. If proposedSql is supplied, it must be one read-only SELECT/WITH query using only inspected relations/columns. The runtime executes a bounded preview, returns `uncertified: true` plus trustStatus/evidence, and saves a draft block under the local draft queue. Surface the `uncertified` flag and review path verbatim.',
       inputSchema: queryViaMetadataInput,
     },
     async (args) => wrap(await queryViaMetadata(ctx, args)),
@@ -131,7 +131,7 @@ export function createDQLMCPServer(options: CreateServerOptions = {}): McpServer
     'list_proposals',
     {
       description:
-        'List Tier-2 draft proposals from blocks/_drafts/ ordered by askedTimes DESC. Filter with askedAtLeastTimes / since. Use this to surface "questions that get asked repeatedly are good certify candidates" — the prioritization signal for the human review queue.',
+        'List Tier-2 draft proposals from blocks/_drafts/ and domains/<domain>/blocks/_drafts/ ordered by askedTimes DESC. Filter with askedAtLeastTimes / since. Use this to surface "questions that get asked repeatedly are good certify candidates" — the prioritization signal for the human review queue.',
       inputSchema: listProposalsInput,
     },
     async (args) => wrap(listProposals(ctx, args)),
@@ -160,7 +160,7 @@ export function createDQLMCPServer(options: CreateServerOptions = {}): McpServer
     'suggest_block',
     {
       description:
-        'Write a curated proposed block to blocks/_drafts/ with a hand-shaped name + structure, plus the governance gate result. Use when proposing a SHARED building block on top of multiple Tier-2 proposals. For one-shot ad-hoc Tier-2 captures, use `query_via_metadata` instead — it auto-saves the draft.',
+        'Write a curated proposed block to the local draft queue with a hand-shaped name + structure, plus the governance gate result. Use when proposing a SHARED building block on top of multiple Tier-2 proposals. For one-shot ad-hoc Tier-2 captures, use `query_via_metadata` instead — it auto-saves the draft.',
       inputSchema: suggestBlockInput,
     },
     async (args) => wrap(await suggestBlock(ctx, args)),

@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -347,5 +347,27 @@ describe("generateAppFromPlan", () => {
       expect(readme).toContain("## Certified context");
       expect(readme).toContain("## Review backlog");
       expect(readme).toContain("Trust and evidence gaps");
+    }));
+
+  it("writes generated apps under domains/<domain>/apps when the domain folder exists", () =>
+    withKg(revenueNodes, (kg, dir) => {
+      const projectRoot = join(dir, "project");
+      mkdirSync(join(projectRoot, "domains", "growth"), { recursive: true });
+      const plan = planAppFromPrompt({
+        prompt: "Build a weekly revenue health app for the COO",
+        kg,
+        owner: "ops@example.com",
+        domain: "growth",
+      });
+
+      const generated = generateAppFromPlan(projectRoot, plan, kg);
+
+      expect(generated.paths).toEqual([
+        `domains/growth/apps/${plan.appId}/dql.app.json`,
+        `domains/growth/apps/${plan.appId}/dashboards/overview.dqld`,
+        `domains/growth/apps/${plan.appId}/README.md`,
+      ]);
+      expect(parseAppDocument(readFileSync(join(projectRoot, generated.paths[0]), "utf-8")).errors).toEqual([]);
+      expect(parseDashboardDocument(readFileSync(join(projectRoot, generated.paths[1]), "utf-8")).errors).toEqual([]);
     }));
 });

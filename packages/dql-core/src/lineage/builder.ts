@@ -42,7 +42,10 @@ export interface LineageBlockInput {
   grain?: string;
   entities?: string[];
   declaredOutputs?: string[];
+  dimensions?: string[];
   allowedFilters?: string[];
+  parameterPolicy?: Array<{ name: string; policy: string }>;
+  filterBindings?: Array<{ filter: string; binding: string }>;
   sourceSystems?: string[];
   replacementFor?: string[];
 }
@@ -163,6 +166,7 @@ export function buildLineageGraph(
 ): LineageGraph {
   const graph = new LineageGraph();
   const blockNames = options.blockNames ?? new Set(blocks.map((b) => b.name));
+  const resolveDomain = createDomainResolver(options.domains ?? []);
   const materializedMap = new Map<string, string>();
   const dbtNodeMap = new Map<string, string>();
   const dbtUniqueIdMap = new Map<string, string>();
@@ -238,12 +242,13 @@ export function buildLineageGraph(
 
   // 1b. Add business term nodes before blocks/views so they can define them.
   for (const term of options.terms ?? []) {
+    const domain = resolveDomain(term.domain);
     graph.addNode({
       id: `term:${term.name}`,
       type: 'term',
       layer: 'answer',
       name: term.name,
-      domain: term.domain,
+      domain,
       owner: term.owner,
       status: term.status,
       metadata: {
@@ -256,17 +261,18 @@ export function buildLineageGraph(
         reviewCadence: term.reviewCadence,
       },
     });
-    addDomainContainmentEdge(graph, term.domain, `term:${term.name}`);
+    addDomainContainmentEdge(graph, domain, `term:${term.name}`);
   }
 
   // 2. Add block nodes
   for (const block of blocks) {
+    const domain = resolveDomain(block.domain);
     graph.addNode({
       id: `block:${block.name}`,
       type: 'block',
       layer: 'answer',
       name: block.name,
-      domain: block.domain,
+      domain,
       owner: block.owner,
       status: block.status,
       metadata: {
@@ -281,22 +287,26 @@ export function buildLineageGraph(
         grain: block.grain,
         entities: block.entities,
         declaredOutputs: block.declaredOutputs,
+        dimensions: block.dimensions,
         allowedFilters: block.allowedFilters,
+        parameterPolicy: block.parameterPolicy,
+        filterBindings: block.filterBindings,
         sourceSystems: block.sourceSystems,
         replacementFor: block.replacementFor,
       },
     });
-    addDomainContainmentEdge(graph, block.domain, `block:${block.name}`);
+    addDomainContainmentEdge(graph, domain, `block:${block.name}`);
   }
 
   // 2b. Add business view nodes before edges so views can compose other views.
   for (const view of options.businessViews ?? []) {
+    const domain = resolveDomain(view.domain);
     graph.addNode({
       id: `business_view:${view.name}`,
       type: 'business_view',
       layer: 'answer',
       name: view.name,
-      domain: view.domain,
+      domain,
       owner: view.owner,
       status: view.status,
       metadata: {
@@ -306,17 +316,18 @@ export function buildLineageGraph(
         reviewCadence: view.reviewCadence,
       },
     });
-    addDomainContainmentEdge(graph, view.domain, `business_view:${view.name}`);
+    addDomainContainmentEdge(graph, domain, `business_view:${view.name}`);
   }
 
   // 3. Add metric nodes
   for (const metric of metrics) {
+    const domain = resolveDomain(metric.domain);
     graph.addNode({
       id: `metric:${metric.name}`,
       type: 'metric',
       layer: 'answer',
       name: metric.name,
-      domain: metric.domain,
+      domain,
       metadata: { type: metric.type },
     });
 
@@ -461,12 +472,13 @@ export function buildLineageGraph(
     // Chart visualization edge
     if (block.chartType) {
       const chartNodeId = `chart:${block.name}`;
+      const domain = resolveDomain(block.domain);
       graph.addNode({
         id: chartNodeId,
         type: 'chart',
         layer: 'consumption',
         name: `${block.name} (${block.chartType})`,
-        domain: block.domain,
+        domain,
         metadata: { chartType: block.chartType },
       });
       graph.addEdge({
@@ -564,16 +576,17 @@ export function buildLineageGraph(
   // 4b. Add app nodes and connect to their dashboards.
   for (const app of options.apps ?? []) {
     const appId = `app:${app.id}`;
+    const domain = resolveDomain(app.domain);
     graph.addNode({
       id: appId,
       type: 'app',
       layer: 'consumption',
       name: app.name,
-      domain: app.domain,
+      domain,
       owner: app.owner,
       metadata: { filePath: app.filePath, appId: app.id },
     });
-    addDomainContainmentEdge(graph, app.domain, appId);
+    addDomainContainmentEdge(graph, domain, appId);
     for (const dashId of app.dashboards) {
       const dashboardNodeId = `dashboard:${dashId}`;
       if (!graph.getNode(dashboardNodeId)) continue;
@@ -591,6 +604,24 @@ export function buildLineageGraph(
   addDomainNodes(graph);
 
   return graph;
+}
+
+function createDomainResolver(domains: LineageDomainInput[]): (domain: string | undefined) => string | undefined {
+  const aliases = new Map<string, string>();
+  for (const domain of domains) {
+    aliases.set(domain.name, domain.name);
+    aliases.set(domainAliasKey(domain.name), domain.name);
+    const folderAlias = domain.filePath?.replace(/\\/g, '/').match(/^domains\/([^/]+)\//)?.[1];
+    if (folderAlias) aliases.set(domainAliasKey(folderAlias), domain.name);
+  }
+  return (domain) => {
+    if (!domain) return undefined;
+    return aliases.get(domain) ?? aliases.get(domainAliasKey(domain)) ?? domain;
+  };
+}
+
+function domainAliasKey(value: string): string {
+  return value.trim().toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
 }
 
 function addDomainContainmentEdge(graph: LineageGraph, domain: string | undefined, targetId: string): void {

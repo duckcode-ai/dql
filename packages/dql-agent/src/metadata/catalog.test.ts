@@ -11,6 +11,8 @@ import {
   recordRuntimeSchemaSnapshot,
   recordQueryRun,
 } from './catalog.js';
+import { buildBlockBusinessFingerprint, buildBlockSqlFingerprints } from './block-fingerprints.js';
+import { resolveSemanticLayerWithDiagnostics } from '@duckcodeailabs/dql-core';
 
 describe('local metadata catalog', () => {
   let projectRoot: string;
@@ -48,8 +50,27 @@ describe('local metadata catalog', () => {
         payload: expect.objectContaining({
           sql: expect.stringContaining('ORDER BY total_points DESC'),
           tableDependencies: expect.arrayContaining(['fct_player_performance']),
+          sqlFingerprints: expect.objectContaining({
+            version: 'sql-fingerprint-v1',
+            exact: expect.any(String),
+            parameterized: expect.any(String),
+          }),
+          businessFingerprint: expect.objectContaining({
+            version: 'business-shape-v1',
+            hash: expect.any(String),
+            tokens: expect.arrayContaining(['domain:nba']),
+          }),
         }),
       });
+      expect(catalog.getObject('dql:block:Top 10 Goal Scorers')?.payload?.sqlFingerprints).toMatchObject(
+        buildBlockSqlFingerprints(`
+    SELECT player_name, season, SUM(points) AS total_points
+    FROM fct_player_performance
+    GROUP BY 1, 2
+    ORDER BY total_points DESC
+    LIMIT 10
+  `),
+      );
       expect(catalog.getObject('dbt:model:fct_player_performance')).toMatchObject({
         objectType: 'dbt_model',
         status: 'dbt_imported',
@@ -406,6 +427,52 @@ describe('local metadata catalog', () => {
     );
   });
 
+  it('indexes enterprise-scale dbt models and MetricFlow metrics with bounded retrieval', async () => {
+    writeFileSync(join(projectRoot, 'dql.config.json'), JSON.stringify({
+      project: 'nba_ops',
+      dbt: { projectDir: '.' },
+    }), 'utf-8');
+    addNoisyDbtModels(projectRoot, 3998);
+    addLargeSemanticManifest(projectRoot, 3000);
+
+    const semanticLayer = resolveSemanticLayerWithDiagnostics({
+      provider: 'dbt',
+      projectPath: '.',
+    }, projectRoot).layer;
+    expect(semanticLayer?.listMetrics().length).toBeGreaterThanOrEqual(3000);
+
+    const refresh = await ensureMetadataCatalogFresh(projectRoot, { force: true, semanticLayer });
+    expect(refresh.objectCount).toBeGreaterThan(10_000);
+
+    const catalog = openMetadataCatalog(projectRoot);
+    try {
+      expect(catalog.objectCount()).toBeGreaterThan(10_000);
+      expect(catalog.getObject('dbt:model:noisy_3997')).toMatchObject({
+        objectType: 'dbt_model',
+      });
+      expect(catalog.getObject('semantic:metric:enterprise_metrics.enterprise_metric_2999')).toMatchObject({
+        objectType: 'semantic_metric',
+      });
+      expect(catalog.sourceFingerprints().length).toBeGreaterThan(10);
+      expect(catalog.domainShards().some((shard) => shard.semanticMetricCount >= 3000)).toBe(true);
+    } finally {
+      catalog.close();
+    }
+
+    const start = Date.now();
+    const pack = await buildLocalContextPack(projectRoot, {
+      question: 'Show enterprise metric 2999 by enterprise segment',
+      objectTypes: ['semantic_metric', 'semantic_model', 'dbt_model'],
+      limit: 80,
+    });
+    const elapsed = Date.now() - start;
+
+    expect(pack.objects.length).toBeLessThanOrEqual(80);
+    expect(pack.objects.map((object) => object.objectKey)).toContain('semantic:metric:enterprise_metrics.enterprise_metric_2999');
+    expect(pack.retrievalDiagnostics.topRejected.length).toBeGreaterThan(0);
+    expect(elapsed).toBeLessThan(2_500);
+  }, 60_000);
+
   it('exposes selected join paths between dbt relations with shared keys', async () => {
     addPlayerDimensionModel(projectRoot);
 
@@ -534,6 +601,70 @@ describe('local metadata catalog', () => {
   });
 });
 
+describe('block fingerprints', () => {
+  it('separates exact SQL copies from parameterized business-shape copies', () => {
+    const left = buildBlockSqlFingerprints(`
+      SELECT player_name, SUM(points) AS total_points
+      FROM fct_player_performance
+      WHERE season = 2016
+      GROUP BY 1
+      ORDER BY total_points DESC
+      LIMIT 5
+    `);
+    const right = buildBlockSqlFingerprints(`
+      SELECT player_name, SUM(points) AS total_points
+      FROM fct_player_performance
+      WHERE season = 2017
+      GROUP BY 1
+      ORDER BY total_points DESC
+      LIMIT 10
+    `);
+
+    expect(left.exact).not.toBe(right.exact);
+    expect(left.parameterized).toBe(right.parameterized);
+  });
+
+  it('treats different selected-set literal counts as the same parameterized SQL shape', () => {
+    const oneTeam = buildBlockSqlFingerprints(`
+      SELECT player_name, SUM(points) AS total_points
+      FROM fct_player_performance
+      WHERE team_abbreviation IN ('LAL')
+      GROUP BY 1
+    `);
+    const twoTeams = buildBlockSqlFingerprints(`
+      SELECT player_name, SUM(points) AS total_points
+      FROM fct_player_performance
+      WHERE team_abbreviation IN ('LAL', 'BOS')
+      GROUP BY 1
+    `);
+
+    expect(oneTeam.exact).not.toBe(twoTeams.exact);
+    expect(oneTeam.parameterized).toBe(twoTeams.parameterized);
+  });
+
+  it('includes declared dimensions in business-shape fingerprints', () => {
+    const bySegment = buildBlockBusinessFingerprint({
+      domain: 'revenue',
+      pattern: 'ranking',
+      grain: 'customer_id',
+      outputs: ['customer_id', 'total_revenue'],
+      dimensions: ['segment'],
+      sources: ['marts.orders'],
+    });
+    const byRegion = buildBlockBusinessFingerprint({
+      domain: 'revenue',
+      pattern: 'ranking',
+      grain: 'customer_id',
+      outputs: ['customer_id', 'total_revenue'],
+      dimensions: ['region'],
+      sources: ['marts.orders'],
+    });
+
+    expect(bySegment.hash).not.toBe(byRegion.hash);
+    expect(bySegment.tokens).toContain('dimension:segment');
+  });
+});
+
 function mkdtempProject(): string {
   return mkdtempSync(join(tmpdir(), 'dql-metadata-catalog-'));
 }
@@ -562,6 +693,43 @@ function addNoisyDbtModels(root: string, count: number): void {
     };
   }
   writeFileSync(path, JSON.stringify(manifest), 'utf-8');
+}
+
+function addLargeSemanticManifest(root: string, metricCount: number): void {
+  const measures = Array.from({ length: metricCount }, (_, index) => ({
+    name: `enterprise_measure_${index}`,
+    expr: `metric_value_${index}`,
+    agg: 'sum',
+    description: `Enterprise measure ${index}.`,
+  }));
+  const metrics = Object.fromEntries(Array.from({ length: metricCount }, (_, index) => [
+    `metric.nba_analysis.enterprise_metric_${index}`,
+    {
+      name: `enterprise_metric_${index}`,
+      label: `Enterprise Metric ${index}`,
+      description: `Enterprise scale semantic metric ${index}.`,
+      type: 'simple',
+      type_params: { measure: `enterprise_measure_${index}` },
+      tags: ['enterprise', 'scale'],
+    },
+  ]));
+  writeFileSync(join(root, 'target', 'semantic_manifest.json'), JSON.stringify({
+    semantic_models: {
+      'semantic_model.nba_analysis.enterprise_metrics': {
+        name: 'enterprise_metrics',
+        model: "ref('fct_enterprise_metric_0')",
+        defaults: { agg_time_dimension: 'metric_date' },
+        entities: [{ name: 'enterprise_account', type: 'primary', expr: 'account_id' }],
+        dimensions: [
+          { name: 'enterprise_segment', type: 'categorical', expr: 'segment' },
+          { name: 'metric_date', type: 'time', type_params: { time_granularity: 'day' }, expr: 'metric_date' },
+        ],
+        measures,
+      },
+    },
+    metrics,
+    saved_queries: {},
+  }), 'utf-8');
 }
 
 function addGenericAthleteBoxScoreModel(root: string, modelName = 'athlete_box_scores'): void {

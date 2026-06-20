@@ -110,14 +110,15 @@ block "Approval Rate by Region" {
 Semantic blocks hide raw `SELECT` editing by default. If you need custom SQL,
 create a SQL Block instead.
 
-## 4. Import legacy SQL
+## 4. AI Import legacy SQL
 
-Use **Import SQL** for one-time migration, not daily authoring.
+Use **AI Import** when pasting SQL, uploading `.sql` files, migrating folders,
+or turning an agent-generated SQL answer into a reusable block draft.
 
 The wizard is:
 
 ```text
-Source -> Split Preview -> Review -> Save -> Done
+Source -> Analyze -> Reuse/parameterize -> Preview -> Certify
 ```
 
 Supported first-pass sources:
@@ -128,19 +129,35 @@ Supported first-pass sources:
 - project-relative folder path
 
 The importer splits semicolon-delimited statements, common `GO` batches, and
-repeated `-- name:` / `-- title:` query headers. It detects tables and
-parameters, generates draft DQL candidates, and defaults visualization to
-`table`. Review candidates before saving. AI enrichment is optional and must be
-approved by the user.
+repeated `-- name:` / `-- title:` query headers. For each statement it detects
+tables, joins, parameters, literals, grain, outputs, and source metadata.
+
+Before saving a new draft, DQL runs a reuse-first check:
+
+- exact SQL match -> reuse the existing block
+- same SQL shape with different values -> reuse with new parameter values
+- same business intent -> prefer the certified block
+- close variant -> propose extending the existing block
+- genuinely new logic -> save a draft block
+
+Runtime-scope literals such as years, dates, `LIMIT`, IDs, segments, teams,
+players, regions, products, and comparison windows become DQL params when safe.
+Contiguous year lists become range parameters, non-contiguous year lists stay
+selected-set parameters, and filters such as `team IN ('LAL', 'BOS')` become
+array-backed params such as `team_set = ["LAL", "BOS"]`.
+Business constants stay static or review-required. Generated drafts include
+`parameterPolicy` and `filterBindings` so Apps can apply shared filters only to
+compatible blocks.
 
 For batch migration from the CLI:
 
 ```bash
-dql import sql ./legacy-sql --domain finance --owner analytics --save
+dql import sql ./legacy-sql --domain finance --owner analytics
 ```
 
-`--save` writes valid candidates as draft blocks. It does not certify them.
-Run the preview/tests and then certify the reviewed block.
+The import command autosaves valid candidates as `_drafts` blocks, reports
+similar certified blocks, and keeps `--save` only as a compatibility alias. Run
+the preview/tests and then certify the reviewed block.
 
 ## 5. Certify
 

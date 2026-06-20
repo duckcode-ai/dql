@@ -21,6 +21,11 @@ dql --version
 | `dql validate [path]` | Validate all `.dql` files and semantic references |
 | `dql compile [path]` | Generate project manifest (`dql-manifest.json`) |
 
+`dql doctor scale --format json` includes counts, cache freshness,
+metadata/KG index state, context-pack timing, source fingerprints, domain
+shards, and top rejected evidence candidates that were relevant but excluded by
+retrieval caps.
+
 ### Authoring
 
 | Command | What it does |
@@ -29,12 +34,12 @@ dql --version
 | `dql new domain <name>` | Create `domains/<domain>/domain.dql` plus domain-local `terms/`, `blocks/`, `views/`, and `apps/` folders |
 | `dql new block --domain <domain> --pattern <pattern> <name>` | Create a draft block scaffold with enterprise contract metadata |
 | `dql new view --domain <domain> <name>` | Create a domain-local business view scaffold |
-| `dql import sql <path>` | Preview existing SQL files or folders as Block Studio import candidates |
-| `dql import sql <path> --save` | Save valid SQL import candidates as draft DQL blocks |
+| `dql import sql <path>` | Generate AI-first DQL draft blocks from SQL files or folders |
+| `dql import sql <path> --save` | Compatibility alias; generated drafts autosave before certification |
 | `dql parse <file.dql>` | Parse and analyze a DQL file |
 | `dql info <file.dql>` | Show block metadata |
 | `dql certify <file.dql>` | Evaluate certification rules |
-| `dql certify <file.dql> --enterprise` | Enforce grain, outputs, source-system lineage, pattern, review cadence, and test assertions |
+| `dql certify <file.dql> --enterprise` | Enforce grain, outputs, source-system lineage, pattern-specific reusable contracts, review cadence, and test assertions |
 | `dql fmt <file.dql>` | Format a file in place (canonical form) |
 | `dql fmt --check <path>` | CI check; exits 1 if anything needs formatting |
 
@@ -68,7 +73,9 @@ Useful lineage flags:
 
 ```bash
 dql lineage --term "Customer"          # business term to blocks/views/consumption
-dql lineage --business-360 "Customer"  # business definition, sources, consumers, and gaps
+dql lineage --business-360 "Customer"  # business definition, reusable block contracts, sources, consumers, and gaps
+dql lineage cross-domain --domain customer
+                                      # domain boundary flows touching customer
 dql lineage --business                 # business lineage summary
 dql lineage --business "Customer 360"  # focused business composition and backing sources
 dql lineage --table fct_orders         # technical source lineage
@@ -100,7 +107,7 @@ dql lineage --dashboard daily_ops      # consumption lineage
 
 | Command | What it does |
 | --- | --- |
-| `dql import sql <path>` | Preview SQL files/folders as draft Block Studio import candidates |
+| `dql import sql <path>` | Generate autosaved AI import drafts from SQL files/folders |
 | `dql migrate <source>` | Scaffold from looker, tableau, dbt, metabase, or raw-sql |
 | `dql migrate layout --to domain-first --dry-run` | Preview moves from legacy folders into `domains/<domain>/...` |
 | `dql migrate layout --to domain-first --force` | Apply the previewed domain-first file moves |
@@ -124,7 +131,7 @@ dql lineage --dashboard daily_ops      # consumption lineage
 | `--domain <name>` | Domain for new block scaffolds |
 | `--owner <name>` | Owner for new block scaffolds |
 | `--pattern <name>` | Block scaffold pattern, such as `metric_wrapper`, `entity_profile`, `entity_rollup`, `ranking`, `trend`, `bridge`, `drilldown`, or `replacement` |
-| `--enterprise` | For `certify`: require enterprise-ready reusable block contract metadata |
+| `--enterprise` | For `certify`: require enterprise-ready reusable block metadata plus pattern-specific parameter/filter contracts |
 | `--query-only` | Create a query-only block (no visualization) |
 | `--connection <driver\|path>` | Connection for `certify`/`test` (e.g. `duckdb`, `./db.duckdb`) |
 | `--ai` | Include AI provider, MCP, and metadata checks in `dql doctor` |

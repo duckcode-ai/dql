@@ -17,6 +17,7 @@ import type {
   SemanticLayer,
 } from '@duckcodeailabs/dql-core';
 import type { KGNode, KGEdge, KGNodeKind, KGCertification } from './types.js';
+import { buildBlockBusinessFingerprint, buildBlockSqlFingerprints } from '../metadata/block-fingerprints.js';
 
 export function buildKGFromManifest(manifest: DQLManifest): {
   nodes: KGNode[];
@@ -72,9 +73,26 @@ export function buildKGFromManifest(manifest: DQLManifest): {
       grain: block.grain,
       entities: block.entities,
       declaredOutputs: block.declaredOutputs,
+      dimensions: block.dimensions,
       allowedFilters: block.allowedFilters,
+      parameterPolicy: block.parameterPolicy,
+      filterBindings: block.filterBindings,
       sourceSystems: block.sourceSystems,
       replacementFor: block.replacementFor,
+      sqlFingerprints: buildBlockSqlFingerprints(block.sql),
+      businessFingerprint: buildBlockBusinessFingerprint({
+        name: block.name,
+        domain: block.domain,
+        pattern: block.pattern,
+        grain: block.grain,
+        entities: block.entities,
+        terms: block.termRefs,
+        outputs: block.declaredOutputs,
+        dimensions: block.dimensions,
+        filters: block.allowedFilters,
+        sources: [...(block.tableDependencies ?? []), ...(block.rawTableRefs ?? [])],
+        sourceSystems: block.sourceSystems,
+      }),
       datalexContract: block.datalexContract,
       businessRules: block.businessRules ?? block.invariants,
       caveats: block.caveats,

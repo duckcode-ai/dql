@@ -61,10 +61,11 @@ traces back through the contract → dbt model → source column.
 Use when Tier 1 returns no match. The agent supplies the SQL it inferred from
 the manifest + dbt schema; the runtime executes it. The result returns with
 `uncertified: true` so the human sees the trust label, and the proposal is
-auto-captured as a draft block at `blocks/_drafts/<slug>.dql`. Same question
-asked again increments the `asked_times` counter on the existing draft —
-questions that get asked repeatedly are the strongest candidates for
-certification.
+auto-captured as a draft block. Domain-first projects use
+`domains/<domain>/blocks/_drafts/<slug>.dql`; legacy projects use
+`blocks/_drafts/<slug>.dql`. Same question asked again increments the
+`asked_times` counter on the existing draft — questions that get asked
+repeatedly are the strongest candidates for certification.
 
 For follow-up drilldowns, Tier 2 is also context-aware. A prior certified
 answer can seed the next request, but the agent must first search for a
@@ -105,7 +106,10 @@ workflow that turns ad-hoc AI proposals into certified contracts.
 3. **Refine** — A human edits the SQL, names the contract, sets ownership.
    Standard git workflow — open a PR, request review.
 4. **Certify** — `dql certify --from-draft <path>` does the promotion:
-   - Moves `blocks/_drafts/<slug>.dql` → `blocks/<domain>/<slug>.dql`
+   - Moves `domains/<domain>/blocks/_drafts/<slug>.dql` →
+     `domains/<domain>/blocks/<slug>.dql` in domain-first projects, or
+     `blocks/_drafts/<slug>.dql` → `blocks/<domain>/<slug>.dql` in legacy
+     projects
    - Flips `status = "draft"` to `"certified"`
    - Sets `datalex_contract = "<id>@<version>"`
    - Drops the `_proposed` provenance block
@@ -118,7 +122,7 @@ Example end-to-end:
 
 ```bash
 # Step 4 — promote a draft after review
-dql certify --from-draft blocks/_drafts/active_customers_by_quarter.dql \
+dql certify --from-draft domains/customer/blocks/_drafts/active_customers_by_quarter.dql \
             --domain customer \
             --contract commerce.Customer.active_customers_by_quarter@1 \
             --owner growth@example.com

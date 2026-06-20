@@ -431,4 +431,141 @@ describe('runNew', () => {
       process.chdir(originalCwd);
     }
   });
+
+  it('creates domain-first semantic block companions under the domain namespace', async () => {
+    const originalCwd = process.cwd();
+    const targetDir = mkdtempSync(join(tmpdir(), 'dql-new-domain-semantic-'));
+    const projectDir = join(targetDir, 'demo-project');
+
+    await runInit(projectDir, {
+      check: false,
+      chart: '',
+      domain: '',
+      format: 'json',
+      help: false,
+      open: null,
+      input: '',
+      outDir: '',
+      owner: '',
+      port: null,
+      queryOnly: false,
+      template: '',
+      connection: '',
+      verbose: false,
+      skipTests: false, version: false,
+    });
+
+    try {
+      process.chdir(projectDir);
+
+      await runNew('domain', ['Revenue'], {
+        check: false,
+        chart: '',
+        domain: '',
+        format: 'json',
+        help: false,
+        open: null,
+        input: '',
+        outDir: '',
+        owner: 'finance-analytics',
+        port: null,
+        queryOnly: false,
+        template: '',
+        connection: '',
+        verbose: false,
+        skipTests: false, version: false,
+      });
+
+      await runNew('semantic-block', ['ARR Growth'], {
+        check: false,
+        chart: 'bar',
+        domain: 'revenue',
+        format: 'json',
+        help: false,
+        open: null,
+        input: '',
+        outDir: '',
+        owner: 'finance-analytics',
+        port: null,
+        queryOnly: false,
+        template: '',
+        connection: '',
+        verbose: false,
+        skipTests: false, version: false,
+      });
+
+      const blockPath = join(projectDir, 'domains', 'revenue', 'blocks', 'arr_growth.dql');
+      const metricPath = join(projectDir, 'semantic-layer', 'metrics', 'arr_growth_metric.yaml');
+      const companionPath = join(projectDir, 'semantic-layer', 'blocks', 'revenue', 'arr_growth.yaml');
+
+      expect(existsSync(blockPath)).toBe(true);
+      expect(existsSync(metricPath)).toBe(true);
+      expect(existsSync(companionPath)).toBe(true);
+      expect(readFileSync(companionPath, 'utf-8')).toContain('domain: revenue');
+    } finally {
+      process.chdir(originalCwd);
+    }
+  });
+
+  it('creates bridge block scaffolds with cross-domain contract placeholders', async () => {
+    const originalCwd = process.cwd();
+    const targetDir = mkdtempSync(join(tmpdir(), 'dql-new-bridge-'));
+    const projectDir = join(targetDir, 'demo-project');
+
+    await runInit(projectDir, {
+      check: false,
+      chart: '',
+      domain: '',
+      format: 'json',
+      help: false,
+      open: null,
+      input: '',
+      outDir: '',
+      owner: '',
+      port: null,
+      queryOnly: false,
+      template: '',
+      connection: '',
+      verbose: false,
+      skipTests: false, version: false,
+    });
+
+    try {
+      process.chdir(projectDir);
+
+      await runNew('block', ['Customer Revenue Bridge'], {
+        check: false,
+        chart: 'table',
+        domain: 'customer',
+        format: 'json',
+        help: false,
+        open: null,
+        input: '',
+        outDir: '',
+        owner: 'customer-analytics',
+        port: null,
+        queryOnly: false,
+        template: 'bridge',
+        connection: '',
+        verbose: false,
+        skipTests: false, version: false,
+      });
+
+      const blockPath = join(projectDir, 'blocks', 'customer_revenue_bridge.dql');
+      expect(existsSync(blockPath)).toBe(true);
+
+      const block = readFileSync(blockPath, 'utf-8');
+      expect(block).toContain('pattern = "bridge"');
+      expect(block).toContain('grain = "bridge_key"');
+      expect(block).toContain('entities = ["Source Entity", "Target Entity"]');
+      expect(block).toContain('outputs = ["bridge_key", "source_entity_id", "target_entity_id"]');
+      expect(block).toContain('allowedFilters = ["source_entity_id", "target_entity_id"]');
+      expect(block).toContain('filterBindings {');
+      expect(block).toContain('source_entity_id = "source_entity_id"');
+      expect(block).toContain('target_entity_id = "target_entity_id"');
+      expect(block).toContain('sourceSystems = ["source_system", "target_system"]');
+    } finally {
+      process.chdir(originalCwd);
+    }
+  });
 });

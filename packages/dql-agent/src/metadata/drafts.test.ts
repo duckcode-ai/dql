@@ -1,4 +1,4 @@
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { buildManifest, parse } from '@duckcodeailabs/dql-core';
@@ -60,5 +60,28 @@ describe('generated draft blocks', () => {
       askedTimes: 1,
       validationWarnings: ['review_required'],
     });
+  });
+
+  it('writes generated drafts under the domain-first draft folder when the domain exists', () => {
+    mkdirSync(join(projectRoot, 'domains', 'finance'), { recursive: true });
+
+    const draft = upsertGeneratedDraft(projectRoot, {
+      slug: 'enterprise_revenue_by_week',
+      question: 'Break revenue down by Enterprise week',
+      proposedSql: 'SELECT 1 AS revenue',
+      proposedContractId: 'finance.Revenue.enterprise_revenue_by_week',
+      proposedDomain: 'finance',
+      proposedEntity: 'Revenue',
+    });
+
+    expect(draft.path).toBe('domains/finance/blocks/_drafts/enterprise_revenue_by_week.dql');
+
+    const source = readFileSync(join(projectRoot, draft.path), 'utf-8');
+    expect(source).toContain('dql certify --from-draft domains/finance/blocks/_drafts/enterprise_revenue_by_week.dql');
+    expect(() => parse(source)).not.toThrow();
+
+    const manifest = buildManifest({ projectRoot, dqlVersion: 'test' });
+    expect(manifest.blocks.enterprise_revenue_by_week?.filePath).toBe(draft.path);
+    expect(manifest.blocks.enterprise_revenue_by_week?.draftMetadata?.askedTimes).toBe(1);
   });
 });

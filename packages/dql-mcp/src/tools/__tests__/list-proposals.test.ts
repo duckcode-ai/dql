@@ -17,7 +17,35 @@ function writeDraft(
     entity?: string;
   },
 ) {
-  const draftDir = join(root, 'blocks', '_drafts');
+  writeDraftAt(root, join(root, 'blocks', '_drafts'), slug, fields);
+}
+
+function writeDomainDraft(
+  root: string,
+  domain: string,
+  slug: string,
+  fields: {
+    question: string;
+    askedTimes?: number;
+    lastAsked?: string;
+    entity?: string;
+  },
+) {
+  writeDraftAt(root, join(root, 'domains', domain, 'blocks', '_drafts'), slug, { ...fields, domain });
+}
+
+function writeDraftAt(
+  root: string,
+  draftDir: string,
+  slug: string,
+  fields: {
+    question: string;
+    askedTimes?: number;
+    lastAsked?: string;
+    domain?: string;
+    entity?: string;
+  },
+) {
   mkdirSync(draftDir, { recursive: true });
   const askedTimes = fields.askedTimes ?? 1;
   const lastAsked = fields.lastAsked ?? '2026-05-01T12:00:00Z';
@@ -83,6 +111,26 @@ describe('listProposals', () => {
     });
     expect(out.proposals[0].certifyHint).toContain('dql certify --from-draft');
     expect(out.proposals[0].certifyHint).toContain('--domain customer');
+  });
+
+  it('includes domain-first draft proposals in the review queue', () => {
+    writeDomainDraft(tmpProject, 'finance', 'enterprise_revenue_by_week', {
+      question: 'Break enterprise revenue by week',
+      askedTimes: 6,
+      entity: 'Revenue',
+    });
+
+    const out = listProposals(makeCtx({}, { projectRoot: tmpProject } as never));
+
+    expect(out.proposals).toHaveLength(1);
+    expect(out.proposals[0]).toMatchObject({
+      draftPath: 'domains/finance/blocks/_drafts/enterprise_revenue_by_week.dql',
+      slug: 'enterprise_revenue_by_week',
+      askedTimes: 6,
+      proposedDomain: 'finance',
+      proposedEntity: 'Revenue',
+    });
+    expect(out.proposals[0].certifyHint).toContain('dql certify --from-draft domains/finance/blocks/_drafts/enterprise_revenue_by_week.dql');
   });
 
   it('ranks by askedTimes DESC, then lastAsked DESC', () => {

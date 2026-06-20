@@ -107,6 +107,83 @@ describe('buildManifest with apps + dashboards', () => {
     expect(blockToDashboard?.type).toBe('contains');
   });
 
+  it('discovers domain-first apps and dashboards and resolves domain block path refs', () => {
+    const domainDir = join(projectRoot, 'domains', 'growth');
+    mkdirSync(join(domainDir, 'blocks'), { recursive: true });
+    writeFileSync(join(domainDir, 'domain.dql'), `domain "growth" { owner = "growth-analytics" }`, 'utf-8');
+    writeFileSync(join(domainDir, 'blocks', 'growth_kpi.dql'), `block "Growth KPI" {
+  domain = "growth"
+  type = "custom"
+  status = "certified"
+  description = "Growth KPI"
+  owner = "growth-analytics"
+  query = """SELECT 1 AS revenue"""
+}`, 'utf-8');
+
+    const appDir = join(domainDir, 'apps', 'growth-cxo');
+    mkdirSync(join(appDir, 'dashboards'), { recursive: true });
+    writeFileSync(join(appDir, 'dql.app.json'), JSON.stringify({
+      version: 1,
+      id: 'growth-cxo',
+      name: 'Growth CXO',
+      domain: 'growth',
+      owners: ['alice@acme.com'],
+      members: [{ userId: 'alice@acme.com', roles: ['owner'] }],
+      roles: [{ id: 'owner' }],
+      policies: [],
+      homepage: { type: 'dashboard', id: 'weekly-overview' },
+    }), 'utf-8');
+    writeFileSync(join(appDir, 'dashboards', 'weekly-overview.dqld'), JSON.stringify({
+      version: 1,
+      id: 'weekly-overview',
+      metadata: { title: 'Weekly Overview', domain: 'growth' },
+      layout: {
+        kind: 'grid',
+        cols: 12,
+        rowHeight: 80,
+        items: [
+          {
+            i: 'kpi',
+            x: 0,
+            y: 0,
+            w: 3,
+            h: 2,
+            block: { ref: 'domains/growth/blocks/growth_kpi.dql' },
+            viz: { type: 'single_value' },
+          },
+        ],
+      },
+    }), 'utf-8');
+
+    const manifest = buildManifest({ projectRoot, dqlVersion: 'test' });
+
+    expect(manifest.apps?.['growth-cxo']).toMatchObject({
+      id: 'growth-cxo',
+      domain: 'growth',
+      filePath: 'domains/growth/apps/growth-cxo',
+      dashboards: ['growth-cxo/weekly-overview'],
+    });
+    expect(manifest.dashboards?.['growth-cxo/weekly-overview']).toMatchObject({
+      appId: 'growth-cxo',
+      domain: 'growth',
+      blockPathRefs: ['Growth KPI'],
+      unresolvedRefs: [],
+      filePath: 'domains/growth/apps/growth-cxo/dashboards/weekly-overview.dqld',
+    });
+
+    const ids = new Set(manifest.lineage.nodes.map((node) => node.id));
+    expect(ids.has('app:growth-cxo')).toBe(true);
+    expect(ids.has('dashboard:growth-cxo/weekly-overview')).toBe(true);
+    expect(ids.has('block:Growth KPI')).toBe(true);
+    expect(manifest.lineage.edges).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        source: 'block:Growth KPI',
+        target: 'dashboard:growth-cxo/weekly-overview',
+        type: 'contains',
+      }),
+    ]));
+  });
+
   it('records diagnostics for unresolved block refs and unknown homepage', () => {
     const appDir = join(projectRoot, 'apps', 'growth-cxo');
     mkdirSync(join(appDir, 'dashboards'), { recursive: true });

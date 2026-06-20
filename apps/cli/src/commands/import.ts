@@ -1,10 +1,6 @@
 import type { CLIFlags } from '../args.js';
-import {
-  createBlockStudioImportSession,
-  writeBlockStudioImportCandidate,
-  type BlockStudioImportCandidate,
-} from '../block-studio-import.js';
-import { saveBlockStudioArtifacts, validateBlockStudioSource } from '../local-runtime.js';
+import type { BlockStudioImportCandidate } from '../block-studio-import.js';
+import { createDqlGenerationSessionForProject } from '../local-runtime.js';
 
 export async function runImport(source: string, rest: string[], flags: CLIFlags): Promise<void> {
   if (source !== 'sql') {
@@ -22,75 +18,45 @@ export async function runImport(source: string, rest: string[], flags: CLIFlags)
     process.exit(1);
   }
 
-  const session = createBlockStudioImportSession(process.cwd(), {
+  const session = await createDqlGenerationSessionForProject(process.cwd(), {
     sourceKind: 'raw-sql',
     inputPath,
     domain: flags.domain || 'imported',
     owner: flags.owner || '',
+    provider: flags.provider,
   });
-  const candidates = session.candidates.map((candidate) => {
-    const validation = validateBlockStudioSource(candidate.dqlSource);
-    const next = { ...candidate, validation };
-    writeBlockStudioImportCandidate(process.cwd(), session.id, next);
-    return next;
+  const candidates = session.candidates;
+  const drafts = candidates
+    .filter((candidate) => candidate.draftSave.status === 'saved' && candidate.draftSave.path)
+    .map((candidate) => ({ candidateId: candidate.id, path: candidate.draftSave.path as string }));
+  const reused = candidates
+    .filter((candidate) => candidate.draftSave.status === 'skipped')
+    .map((candidate) => ({ candidateId: candidate.id, reason: candidate.draftSave.reason ?? 'Reuse recommended.' }));
+  const errors = candidates.flatMap((candidate) => {
+    const validationErrors = validationErrorsFor(candidate);
+    const saveError = candidate.draftSave.status === 'error' && candidate.draftSave.error ? [candidate.draftSave.error] : [];
+    return [...validationErrors, ...saveError].map((error) => ({ candidateId: candidate.id, error }));
   });
-  const saved: Array<{ candidateId: string; path: string }> = [];
-  const errors: Array<{ candidateId: string; error: string }> = [];
-
-  if (flags.save) {
-    for (let index = 0; index < candidates.length; index += 1) {
-      const candidate = candidates[index];
-      const validationErrors = validationErrorsFor(candidate);
-      if (validationErrors.length > 0) {
-        errors.push({ candidateId: candidate.id, error: validationErrors.join(' ') });
-        continue;
-      }
-      try {
-        const savedPath = saveBlockStudioArtifacts(process.cwd(), {
-          source: candidate.dqlSource,
-          name: candidate.name,
-          domain: candidate.domain,
-          description: candidate.description,
-          owner: candidate.owner,
-          tags: candidate.tags,
-          lineage: candidate.lineage.sourceTables,
-          importMeta: {
-            importId: session.id,
-            candidateId: candidate.id,
-            sourceKind: candidate.sourceKind,
-            sourcePath: candidate.sourcePath,
-          },
-        });
-        const next = { ...candidate, reviewStatus: 'saved' as const, savedPath };
-        candidates[index] = next;
-        writeBlockStudioImportCandidate(process.cwd(), session.id, next);
-        saved.push({ candidateId: candidate.id, path: savedPath });
-      } catch (error) {
-        errors.push({ candidateId: candidate.id, error: error instanceof Error ? error.message : String(error) });
-      }
-    }
-  }
-
-  const validatedSession = { ...session, candidates };
 
   if (flags.format === 'json') {
-    console.log(JSON.stringify({ session: validatedSession, saved, errors }, null, 2));
+    console.log(JSON.stringify({ session, drafts, saved: drafts, reused, errors }, null, 2));
     return;
   }
 
-  console.log('\n  DQL Import: SQL');
+  console.log('\n  DQL AI Import: SQL');
   console.log('  ─────────────────────────────');
   console.log(`  Session:     ${session.id}`);
   console.log(`  Source:      ${session.inputPath}`);
-  console.log(`  Candidates:  ${validatedSession.candidates.length}`);
-  console.log(`  Domain:      ${validatedSession.defaults.domain}`);
-  if (validatedSession.defaults.owner) console.log(`  Owner:       ${validatedSession.defaults.owner}`);
-  if (flags.save) {
-    console.log(`  Saved:       ${saved.length}`);
-    if (errors.length > 0) console.log(`  Needs fixes:  ${errors.length}`);
-  }
+  console.log(`  Candidates:  ${session.candidates.length}`);
+  console.log(`  Drafts:      ${drafts.length}`);
+  console.log(`  Reuse:       ${reused.length}`);
+  console.log(`  Domain:      ${session.defaults.domain}`);
+  if (session.defaults.owner) console.log(`  Owner:       ${session.defaults.owner}`);
+  console.log(`  Generator:   ${session.generation.provider}`);
+  if (errors.length > 0) console.log(`  Needs fixes: ${errors.length}`);
+  if (flags.save) console.log('  Note:        --save is retained for compatibility; AI imports autosave as review drafts.');
   console.log('');
-  for (const candidate of validatedSession.candidates) {
+  for (const candidate of session.candidates) {
     const tables = candidate.lineage.sourceTables.length > 0
       ? candidate.lineage.sourceTables.join(', ')
       : 'not detected';
@@ -98,22 +64,26 @@ export async function runImport(source: string, rest: string[], flags: CLIFlags)
     const warningText = candidate.lineage.warnings.length > 0
       ? ` · ${candidate.lineage.warnings.join('; ')}`
       : '';
-    const savedPath = saved.find((item) => item.candidateId === candidate.id)?.path;
+    const draftPath = drafts.find((item) => item.candidateId === candidate.id)?.path;
+    const action = candidate.recommendedAction ? ` · ${candidate.recommendedAction}` : '';
+    const params = candidate.parameterPolicy?.length
+      ? ` · params ${candidate.parameterPolicy.map((entry) => `${entry.name}:${entry.policy}`).join(', ')}`
+      : '';
     console.log(`  • ${candidate.name}`);
-    console.log(`    ${candidate.id} · confidence ${Math.round(candidate.confidence * 100)}% · tables: ${tables}${warningText}`);
+    console.log(`    ${candidate.id} · confidence ${Math.round(candidate.confidence * 100)}%${action} · tables: ${tables}${params}${warningText}`);
     if (validationErrors.length > 0) console.log(`    fix: ${validationErrors.join(' ')}`);
-    if (savedPath) console.log(`    saved block: ${savedPath}`);
+    if (draftPath) console.log(`    draft: ${draftPath}`);
+    if (candidate.draftSave.status === 'skipped' && candidate.draftSave.reason) console.log(`    reuse: ${candidate.draftSave.reason}`);
+    if (candidate.similarityMatches?.length) {
+      const match = candidate.similarityMatches[0];
+      console.log(`    match: ${match.name} (${match.kind}, ${Math.round(match.score * 100)}%)`);
+    }
   }
   console.log('');
-  if (flags.save) {
-    console.log('  Saved candidates are local blocks. Run previews/tests, then certify when they pass.');
-  } else {
-    console.log('  Open in Block Studio Import, then run and save selected candidates as blocks.');
-    console.log('  Or re-run with --save to save all valid candidates as blocks.');
-  }
-  console.log(`  Import cache: .dql/imports/${validatedSession.id}/`);
+  console.log('  Drafts are autosaved under blocks/_drafts or domains/<domain>/blocks/_drafts. Review, preview, then certify selected candidates.');
+  console.log(`  Import cache: .dql/imports/${session.id}/`);
   console.log('');
-  if (flags.save && errors.length > 0) process.exitCode = 1;
+  if (errors.length > 0) process.exitCode = 1;
 }
 
 function validationErrorsFor(candidate: BlockStudioImportCandidate): string[] {

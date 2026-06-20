@@ -47,8 +47,7 @@ export function upsertGeneratedDraft(
   projectRoot: string,
   rec: GeneratedDraftRecord,
 ): GeneratedDraftBlock {
-  const draftDir = join(projectRoot, 'blocks', '_drafts');
-  const filePath = join(draftDir, `${rec.slug}.dql`);
+  const { filePath, relativePath } = resolveGeneratedDraftPath(projectRoot, rec);
 
   if (existsSync(filePath)) {
     const existing = readFileSync(filePath, 'utf-8');
@@ -60,22 +59,37 @@ export function upsertGeneratedDraft(
       : existing.replace(/\n\s*query\s*=/, `\n    asked_times = ${next}\n\n    query =`);
     writeFileSync(filePath, stampLastAsked(updated));
     return {
-      path: relativeToProject(projectRoot, filePath),
+      path: relativePath,
       askedTimes: next,
       proposedContractId: rec.proposedContractId,
     };
   }
 
   mkdirSync(dirname(filePath), { recursive: true });
-  writeFileSync(filePath, renderGeneratedDraft(rec));
+  writeFileSync(filePath, renderGeneratedDraft(rec, relativePath));
   return {
-    path: relativeToProject(projectRoot, filePath),
+    path: relativePath,
     askedTimes: 1,
     proposedContractId: rec.proposedContractId,
   };
 }
 
-function renderGeneratedDraft(rec: GeneratedDraftRecord): string {
+function resolveGeneratedDraftPath(projectRoot: string, rec: GeneratedDraftRecord): { filePath: string; relativePath: string } {
+  const safeDomain = (rec.proposedDomain ?? '')
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9/_-]+/g, '-')
+    .replace(/^\/+|\/+$/g, '');
+  const relativePath = safeDomain && existsSync(join(projectRoot, 'domains', safeDomain))
+    ? `domains/${safeDomain}/blocks/_drafts/${rec.slug}.dql`
+    : `blocks/_drafts/${rec.slug}.dql`;
+  return {
+    filePath: join(projectRoot, relativePath),
+    relativePath,
+  };
+}
+
+function renderGeneratedDraft(rec: GeneratedDraftRecord, draftPath: string): string {
   const now = new Date().toISOString();
   const upstream = arrayField('upstream_refs', rec.upstreamRefs ?? []);
   const requestedFilters = arrayField('requested_filters', rec.requestedFilters ?? []);
@@ -93,7 +107,7 @@ function renderGeneratedDraft(rec: GeneratedDraftRecord): string {
     // and contract ownership before promotion.
     //
     // Promotion path:
-    //   dql certify --from-draft blocks/_drafts/${rec.slug}.dql \\
+    //   dql certify --from-draft ${draftPath} \\
     //               --domain ${rec.proposedDomain ?? 'misc'} \\
     //               --contract ${rec.proposedContractId}@1 \\
     //               --owner you@example.com
@@ -131,11 +145,6 @@ function stampLastAsked(content: string): string {
     return content.replace(/last_asked\s*=\s*"[^"]*"/, `last_asked = "${now}"`);
   }
   return content;
-}
-
-function relativeToProject(root: string, abs: string): string {
-  const rootSlash = root.endsWith('/') ? root : root + '/';
-  return abs.startsWith(rootSlash) ? abs.slice(rootSlash.length) : abs;
 }
 
 function escapeDqlString(value: string): string {

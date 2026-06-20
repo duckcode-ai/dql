@@ -149,6 +149,10 @@ export interface DashboardRunResponse {
     result?: QueryResult;
     text?: { markdown: string };
     aiPin?: LocalAiPin;
+    filters?: {
+      applied: Array<{ filter: string; binding?: string; mode: 'parameter' | 'predicate'; paramNames: string[] }>;
+      skipped: Array<{ filter: string; reason: string }>;
+    };
     citation?: { kind: string; name: string; path?: string };
     error?: string;
   }>;
@@ -846,7 +850,7 @@ export const api = {
     async updateBlockStudioImportCandidate(
       importId: string,
       candidateId: string,
-      patch: Partial<Pick<BlockStudioImportCandidate, 'name' | 'domain' | 'description' | 'owner' | 'tags' | 'pattern' | 'grain' | 'entities' | 'outputs' | 'allowedFilters' | 'sourceSystems' | 'replacementFor' | 'sql' | 'reviewStatus' | 'llmContext'>>,
+      patch: Partial<Pick<BlockStudioImportCandidate, 'name' | 'domain' | 'description' | 'owner' | 'tags' | 'terms' | 'pattern' | 'grain' | 'entities' | 'outputs' | 'dimensions' | 'allowedFilters' | 'parameterPolicy' | 'filterBindings' | 'sourceSystems' | 'replacementFor' | 'reviewCadence' | 'sql' | 'reviewStatus' | 'llmContext'>>,
     ): Promise<BlockStudioImportCandidate> {
     return request<BlockStudioImportCandidate>(
       `/api/block-studio/imports/${encodeURIComponent(importId)}/candidates/${encodeURIComponent(candidateId)}`,
@@ -857,12 +861,27 @@ export const api = {
     async updateDqlGenerationCandidate(
       importId: string,
       candidateId: string,
-      patch: Partial<Pick<DqlGenerationCandidate, 'name' | 'domain' | 'description' | 'owner' | 'tags' | 'pattern' | 'grain' | 'entities' | 'outputs' | 'allowedFilters' | 'sourceSystems' | 'replacementFor' | 'sql' | 'llmContext'>>,
+      patch: Partial<Pick<DqlGenerationCandidate, 'name' | 'domain' | 'description' | 'owner' | 'tags' | 'terms' | 'pattern' | 'grain' | 'entities' | 'outputs' | 'dimensions' | 'allowedFilters' | 'parameterPolicy' | 'filterBindings' | 'sourceSystems' | 'replacementFor' | 'reviewCadence' | 'sql' | 'llmContext'>>,
     ): Promise<DqlGenerationCandidate> {
       return request<DqlGenerationCandidate>(
         `/api/block-studio/ai-imports/${encodeURIComponent(importId)}/candidates/${encodeURIComponent(candidateId)}`,
         { method: 'PATCH', body: JSON.stringify(patch) },
       );
+    },
+
+    async matchSqlForBlockReuse(sql: string, options?: { sourcePath?: string; name?: string; domain?: string; owner?: string }): Promise<{
+      parameterDecisions: DqlGenerationCandidate['parameterDecisions'];
+      parameterPolicy: DqlGenerationCandidate['parameterPolicy'];
+      filterBindings: DqlGenerationCandidate['filterBindings'];
+      allowedFilters: string[];
+      parameterizedSql: string;
+      similarityMatches: DqlGenerationCandidate['similarityMatches'];
+      recommendedAction: DqlGenerationCandidate['recommendedAction'];
+    }> {
+      return request('/api/block-studio/match-sql', {
+        method: 'POST',
+        body: JSON.stringify({ sql, ...(options ?? {}) }),
+      });
     },
 
     async previewDqlGenerationCandidate(importId: string, candidateId: string): Promise<DqlGenerationCandidate> {

@@ -39,12 +39,31 @@ export interface Business360Gap {
     | 'missing_owner'
     | 'missing_terms'
     | 'missing_grain'
+    | 'missing_outputs'
+    | 'missing_reusable_filters'
     | 'missing_tests'
     | 'stale_review'
     | 'missing_sources'
     | 'missing_consumers';
   severity: 'info' | 'warning';
   message: string;
+}
+
+export type Business360Reusability = 'dynamic' | 'partial_dynamic' | 'static';
+
+export interface Business360BlockContract {
+  block: Business360Asset;
+  pattern?: string;
+  grain?: string;
+  entities: string[];
+  outputs: string[];
+  dimensions: string[];
+  allowedFilters: string[];
+  parameterPolicy: Array<{ name: string; policy: string }>;
+  filterBindings: Array<{ filter: string; binding: string }>;
+  sourceSystems: string[];
+  replacementFor: string[];
+  reusability: Business360Reusability;
 }
 
 export interface Business360Result {
@@ -78,6 +97,7 @@ export interface Business360Result {
     replacedBy: Business360Asset[];
     replacementRefs: string[];
   };
+  blockContracts: Business360BlockContract[];
   gaps: Business360Gap[];
   evidence: {
     nodes: Business360Asset[];
@@ -226,6 +246,14 @@ export function queryBusiness360(
     .filter((node) => node.type === 'block')
     .filter((node) => !seedIds.has(node.id));
   const replacementHistory = buildReplacementHistory(graph, focus);
+  const blockContractNodes = uniqueNodes([
+    ...seedNodes.filter((node) => node.type === 'block'),
+    ...definedArtifacts.filter((node) => node.type === 'block'),
+    ...includedArtifacts.filter((node) => node.type === 'block'),
+    ...upstreamBlocks,
+    ...downstreamBlocks,
+  ]);
+  const blockContracts = blockContractNodes.map(blockContractForNode);
 
   const evidenceNodes = uniqueNodes([
     focus,
@@ -259,6 +287,7 @@ export function queryBusiness360(
     terms,
     definedByTerms,
     replacementHistory,
+    blockContracts,
     sourceCount: sourceTables.length + dbtModels.length + dbtSources.length,
     consumerCount: dashboards.length + apps.length + notebooks.length,
   });
@@ -294,6 +323,7 @@ export function queryBusiness360(
       replacedBy: nodesToAssets(replacementHistory.replacedBy),
       replacementRefs: replacementHistory.replacementRefs,
     },
+    blockContracts,
     gaps,
     evidence: {
       nodes: nodesToAssets(evidenceNodes),
@@ -467,6 +497,38 @@ function assetForNode(node: LineageNode): Business360Asset {
   };
 }
 
+function blockContractForNode(node: LineageNode): Business360BlockContract {
+  const parameterPolicy = parameterPolicyArray(node.metadata?.parameterPolicy);
+  const filterBindings = filterBindingArray(node.metadata?.filterBindings);
+  const allowedFilters = stringArray(node.metadata?.allowedFilters);
+  return {
+    block: assetForNode(node),
+    pattern: stringValue(node.metadata?.pattern),
+    grain: stringValue(node.metadata?.grain),
+    entities: stringArray(node.metadata?.entities),
+    outputs: stringArray(node.metadata?.declaredOutputs),
+    dimensions: stringArray(node.metadata?.dimensions),
+    allowedFilters,
+    parameterPolicy,
+    filterBindings,
+    sourceSystems: stringArray(node.metadata?.sourceSystems),
+    replacementFor: stringArray(node.metadata?.replacementFor),
+    reusability: classifyBlockReusability({ parameterPolicy, filterBindings, allowedFilters }),
+  };
+}
+
+function classifyBlockReusability(input: {
+  parameterPolicy: Array<{ name: string; policy: string }>;
+  filterBindings: Array<{ filter: string; binding: string }>;
+  allowedFilters: string[];
+}): Business360Reusability {
+  if (input.parameterPolicy.length > 0 && input.filterBindings.length > 0) return 'dynamic';
+  if (input.parameterPolicy.length > 0 || input.filterBindings.length > 0 || input.allowedFilters.length > 0) {
+    return 'partial_dynamic';
+  }
+  return 'static';
+}
+
 function buildReplacementHistory(graph: LineageGraph, focus: LineageNode): {
   replaces: LineageNode[];
   replacedBy: LineageNode[];
@@ -549,6 +611,7 @@ function buildBusiness360Gaps(input: {
     replacedBy: LineageNode[];
     replacementRefs: string[];
   };
+  blockContracts: Business360BlockContract[];
   sourceCount: number;
   consumerCount: number;
 }): Business360Gap[] {
@@ -602,6 +665,24 @@ function buildBusiness360Gaps(input: {
       code: 'missing_grain',
       severity: 'warning',
       message: `${missingGrain.length} block(s) are missing grain metadata: ${sampleNodeLabels(missingGrain)}.`,
+    });
+  }
+
+  const missingOutputs = blocksForContract.filter((node) => stringArray(node.metadata?.declaredOutputs).length === 0);
+  if (missingOutputs.length > 0) {
+    gaps.push({
+      code: 'missing_outputs',
+      severity: 'warning',
+      message: `${missingOutputs.length} block(s) are missing declared output fields: ${sampleNodeLabels(missingOutputs)}.`,
+    });
+  }
+
+  const staticContracts = input.blockContracts.filter((contract) => contract.reusability === 'static');
+  if (staticContracts.length > 0) {
+    gaps.push({
+      code: 'missing_reusable_filters',
+      severity: 'info',
+      message: `${staticContracts.length} block contract(s) do not declare reusable parameters or filter bindings: ${staticContracts.slice(0, 5).map((contract) => assetLabel(contract.block)).join(', ')}${staticContracts.length > 5 ? `, +${staticContracts.length - 5} more` : ''}.`,
     });
   }
 
@@ -700,6 +781,37 @@ function stringArray(value: unknown): string[] {
   return Array.isArray(value)
     ? value.filter((item): item is string => typeof item === 'string' && item.trim().length > 0)
     : [];
+}
+
+function stringValue(value: unknown): string | undefined {
+  return typeof value === 'string' && value.trim().length > 0 ? value : undefined;
+}
+
+function parameterPolicyArray(value: unknown): Array<{ name: string; policy: string }> {
+  if (!Array.isArray(value)) return [];
+  return value.flatMap((entry) => {
+    if (!entry || typeof entry !== 'object') return [];
+    const candidate = entry as { name?: unknown; policy?: unknown };
+    if (typeof candidate.name !== 'string' || typeof candidate.policy !== 'string') return [];
+    if (!candidate.name.trim() || !candidate.policy.trim()) return [];
+    return [{ name: candidate.name, policy: candidate.policy }];
+  });
+}
+
+function filterBindingArray(value: unknown): Array<{ filter: string; binding: string }> {
+  if (!Array.isArray(value)) return [];
+  return value.flatMap((entry) => {
+    if (!entry || typeof entry !== 'object') return [];
+    const candidate = entry as { filter?: unknown; binding?: unknown };
+    if (typeof candidate.filter !== 'string' || typeof candidate.binding !== 'string') return [];
+    if (!candidate.filter.trim() || !candidate.binding.trim()) return [];
+    return [{ filter: candidate.filter, binding: candidate.binding }];
+  });
+}
+
+function assetLabel(asset: Business360Asset): string {
+  const type = asset.type === 'source_table' ? 'table' : asset.type;
+  return `${type}:${asset.name}`;
 }
 
 function sampleNodeLabels(nodes: LineageNode[]): string {

@@ -145,7 +145,7 @@ export async function handleAppsApi(ctx: Ctx): Promise<boolean> {
       sendJson(res, 404, { error: `App "${appId}" not found` });
       return true;
     }
-    sendJson(res, 200, { notebooks: listNotebookCandidates(projectRoot, loaded.app, join(projectRoot, 'apps', appId)) });
+    sendJson(res, 200, { notebooks: listNotebookCandidates(projectRoot, loaded.app, loaded.appDir) });
     return true;
   }
 
@@ -649,6 +649,7 @@ export async function handleAppsApi(ctx: Ctx): Promise<boolean> {
 type AppListEntry = {
   id: string;
   name: string;
+  filePath: string;
   domain: string;
   subdomain?: string;
   groups: string[];
@@ -687,6 +688,7 @@ function collectAppsList(projectRoot: string): AppListEntry[] {
     out.push({
       id: document.id,
       name: document.name,
+      filePath: relative(projectRoot, appDir),
       domain: document.domain,
       subdomain: document.subdomain,
       groups: document.groups ?? [],
@@ -978,7 +980,7 @@ export function createAppPackage(
   if (!domain) return { ok: false, error: 'domain is required' };
 
   const id = suggestAppId(name);
-  const appDir = join(projectRoot, 'apps', id);
+  const appDir = resolveAppPackageDir(projectRoot, domain, id);
   if (existsSync(appDir)) return { ok: false, error: `App already exists: ${id}` };
   const dashboardTitle = cleanString(input.dashboardTitle) || 'Overview';
   const dashboardId = slugify(dashboardTitle) || 'overview';
@@ -1204,16 +1206,17 @@ function appReadme(app: AppDocument, audience: string, blocks: BlockCandidate[],
 }
 
 function collectBlockCandidates(projectRoot: string): BlockCandidate[] {
-  const blocksDir = join(projectRoot, 'blocks');
   const blocks: BlockCandidate[] = [];
-  if (!existsSync(blocksDir)) return blocks;
+  const seen = new Set<string>();
   const scanDir = (dir: string) => {
+    if (!existsSync(dir)) return;
     for (const entry of readdirSyncSafe(dir)) {
       const filePath = join(dir, entry.name);
       if (entry.isDirectory()) {
         scanDir(filePath);
-      } else if (entry.isFile() && entry.name.endsWith('.dql')) {
+      } else if (entry.isFile() && entry.name.endsWith('.dql') && !seen.has(filePath)) {
         try {
+          seen.add(filePath);
           const source = readFileSync(filePath, 'utf-8');
           const stat = statSyncSafe(filePath);
           const name = matchString(source, /block\s+"([^"]+)"/) ?? entry.name.replace(/\.dql$/, '');
@@ -1225,7 +1228,7 @@ function collectBlockCandidates(projectRoot: string): BlockCandidate[] {
             status: matchString(source, /status\s*=\s*"([^"]+)"/) ?? 'draft',
             owner: matchString(source, /owner\s*=\s*"([^"]+)"/),
             tags,
-            path: filePath.slice(projectRoot.length + 1),
+            path: relative(projectRoot, filePath).replaceAll('\\', '/'),
             lastModified: stat?.mtime.toISOString() ?? new Date(0).toISOString(),
             description: matchString(source, /description\s*=\s*"((?:[^"\\]|\\.)*)"/) ?? '',
             llmContext: matchString(source, /llmContext\s*=\s*"((?:[^"\\]|\\.)*)"/),
@@ -1239,7 +1242,8 @@ function collectBlockCandidates(projectRoot: string): BlockCandidate[] {
       }
     }
   };
-  scanDir(blocksDir);
+  scanDir(join(projectRoot, 'blocks'));
+  scanDir(join(projectRoot, 'domains'));
   return blocks;
 }
 
@@ -2215,6 +2219,15 @@ function slugify(value: string): string {
     .replace(/^-+|-+$/g, '');
 }
 
+function resolveAppPackageDir(projectRoot: string, domain: string, id: string): string {
+  const domainSlug = slugify(domain);
+  const domainDir = domainSlug ? join(projectRoot, 'domains', domainSlug) : '';
+  if (domainDir && existsSync(domainDir)) {
+    return join(domainDir, 'apps', id);
+  }
+  return join(projectRoot, 'apps', id);
+}
+
 function titleFromPath(path: string): string {
   return basename(path)
     .replace(/\.(dqlnb|dql)$/i, '')
@@ -2238,7 +2251,7 @@ function appAllowsExecute(app: AppDocument, domain: string): boolean {
   });
 }
 
-function createDashboardForApp(
+export function createDashboardForApp(
   projectRoot: string,
   appId: string,
   input: { id?: string; title?: string; description?: string },
@@ -2248,7 +2261,7 @@ function createDashboardForApp(
   const title = cleanString(input.title) || 'New page';
   const id = slugify(cleanString(input.id) || title) || `page-${Date.now()}`;
   if (!/^[a-z0-9][a-z0-9_-]*$/i.test(id)) return { ok: false, error: 'dashboard id must be folder-safe' };
-  const appDir = join(projectRoot, 'apps', appId);
+  const appDir = loaded.appDir;
   const dashboardPath = join(appDir, 'dashboards', `${id}.dqld`);
   if (existsSync(dashboardPath)) return { ok: false, error: `Dashboard already exists: ${id}` };
   const dashboard: DashboardDocument = {
@@ -2379,7 +2392,7 @@ function promoteAiPinToDraftBlock(
       analysisPlan?.dimensions?.length ? `Dimensions: ${analysisPlan.dimensions.join(', ')}` : '',
       analysisPlan?.measures?.length ? `Measures: ${analysisPlan.measures.join(', ')}` : '',
     ].filter(Boolean).join(' | ');
-    const draftDir = join(projectRoot, 'apps', appId, 'drafts');
+    const draftDir = join(loaded.appDir, 'drafts');
     const blockPath = join(draftDir, `${blockName}.dql`);
     mkdirSync(draftDir, { recursive: true });
     const source = [
@@ -2447,6 +2460,8 @@ function loadAppById(
   id: string,
 ): {
   app: AppDocument;
+  appDir: string;
+  appPath: string;
   dashboards: Array<{ id: string; title: string; description?: string; itemCount: number }>;
   notebooks: AppListEntry['notebooks'];
   drafts: AppListEntry['drafts'];
@@ -2471,6 +2486,8 @@ function loadAppById(
     }
     return {
       app: document,
+      appDir,
+      appPath: relative(projectRoot, appDir),
       dashboards,
       notebooks: listAppNotebookRefs(projectRoot, document, appDir),
       drafts: listAppDrafts(projectRoot, appDir),
@@ -2526,8 +2543,8 @@ export function createNotebookForApp(
   if (!loaded) return { ok: false, error: `App "${appId}" not found` };
   const title = cleanString(input.title) || cleanString(input.name) || 'App analysis';
   const slug = slugify(cleanString(input.name) || title) || `notebook-${Date.now()}`;
-  const appDir = join(projectRoot, 'apps', appId);
-  const relPath = `apps/${appId}/notebooks/${slug}.dqlnb`;
+  const appDir = loaded.appDir;
+  const relPath = relative(projectRoot, join(appDir, 'notebooks', `${slug}.dqlnb`)).replaceAll('\\', '/');
   const absPath = join(projectRoot, relPath);
   if (existsSync(absPath)) return { ok: false, error: `Notebook already exists: ${relPath}` };
   mkdirSync(dirname(absPath), { recursive: true });
@@ -2850,10 +2867,9 @@ function writeDashboard(
   }
 
   // Confirm the App exists.
-  const appDir = join(projectRoot, 'apps', appId);
-  if (!existsSync(join(appDir, 'dql.app.json'))) {
-    return { ok: false, error: `App "${appId}" not found at ${appDir}` };
-  }
+  const loaded = loadAppById(projectRoot, appId);
+  if (!loaded) return { ok: false, error: `App "${appId}" not found` };
+  const appDir = loaded.appDir;
   const dashboardPath = join(appDir, 'dashboards', `${dashboardId}.dqld`);
   mkdirSync(dirname(dashboardPath), { recursive: true });
   writeFileSync(dashboardPath, JSON.stringify(document, null, 2) + '\n', 'utf-8');

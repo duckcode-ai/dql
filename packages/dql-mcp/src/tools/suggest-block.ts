@@ -1,5 +1,5 @@
-import { mkdirSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
 import { z } from 'zod';
 import { Certifier } from '@duckcodeailabs/dql-governance';
 import type { BlockRecord, BlockStatus } from '@duckcodeailabs/dql-project';
@@ -16,9 +16,9 @@ export const suggestBlockInput = {
 };
 
 /**
- * Write a proposed block to `blocks/_drafts/<name>.dql` and return the
- * governance-gate result. Never auto-certifies — the human still has to
- * review and move the file.
+ * Write a proposed block to the local draft queue and return the governance
+ * gate result. Never auto-certifies — the human still has to review and move
+ * the file.
  */
 export function suggestBlock(
   ctx: DQLContext,
@@ -34,6 +34,7 @@ export function suggestBlock(
 ) {
   const safeName = args.name.trim().toLowerCase().replace(/[^a-z0-9_]+/g, '_');
   if (!safeName) return { error: 'Invalid block name.' };
+  const draftPath = resolveDraftPath(ctx.projectRoot, args.domain, safeName);
 
   const now = new Date();
   const record: BlockRecord = {
@@ -44,7 +45,7 @@ export function suggestBlock(
     version: '0.1.0',
     status: 'draft' as BlockStatus,
     gitRepo: '',
-    gitPath: `blocks/_drafts/${safeName}.dql`,
+    gitPath: draftPath,
     gitCommitSha: '',
     description: args.description,
     owner: args.owner,
@@ -57,15 +58,14 @@ export function suggestBlock(
 
   const certification = new Certifier().evaluate(record);
 
-  const draftsDir = join(ctx.projectRoot, 'blocks', '_drafts');
-  mkdirSync(draftsDir, { recursive: true });
-  const filePath = join(draftsDir, `${safeName}.dql`);
+  const filePath = join(ctx.projectRoot, draftPath);
+  mkdirSync(dirname(filePath), { recursive: true });
   writeFileSync(filePath, renderBlock(args, safeName));
   ctx.refresh();
 
   return {
     name: safeName,
-    path: `blocks/_drafts/${safeName}.dql`,
+    path: draftPath,
     certified: certification.certified,
     errors: certification.errors,
     warnings: certification.warnings,
@@ -73,6 +73,18 @@ export function suggestBlock(
       ? 'Draft saved and passes governance. Move to the appropriate domain folder and commit.'
       : 'Draft saved but does NOT pass governance. Address errors before promotion.',
   };
+}
+
+function resolveDraftPath(projectRoot: string, domain: string, safeName: string): string {
+  const safeDomain = domain
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9/_-]+/g, '-')
+    .replace(/^\/+|\/+$/g, '');
+  if (safeDomain && existsSync(join(projectRoot, 'domains', safeDomain))) {
+    return `domains/${safeDomain}/blocks/_drafts/${safeName}.dql`;
+  }
+  return `blocks/_drafts/${safeName}.dql`;
 }
 
 function renderBlock(

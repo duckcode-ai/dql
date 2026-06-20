@@ -31,12 +31,24 @@
       "patterns": [
         {
           "name": "keyword.control.dql",
-          "match": "\\b(dashboard|workbook|page|layout|row|span|chart|filter|param|let|import|from|use|block|term|terms|business_view|includes|domain|type|description|tags|owner|params|query|visualization|tests|assert|IN)\\b"
+          "match": "\\b(dashboard|workbook|page|layout|row|span|chart|filter|param|let|import|from|use|block|term|terms|business_view|includes|domain|status|type|datalex_contract|description|tags|owner|businessOwner|boundedContext|sourceSystems|primaryTerms|params|query|visualization|tests|assert|metric|metrics|pattern|grain|entities|outputs|dimensions|allowedFilters|parameterPolicy|filterBindings|replacementFor|reviewCadence|llmContext|invariants|examples|businessOutcome|decisionUse|businessRules|caveats|IN)\\b"
         }
       ]
     },
     "types": {
       "patterns": [
+        {
+          "name": "constant.language.status.dql",
+          "match": "\\b(draft|certified|deprecated|review-required)\\b"
+        },
+        {
+          "name": "constant.language.pattern.dql",
+          "match": "\\b(metric_wrapper|entity_profile|entity_rollup|ranking|trend|bridge|drilldown|replacement|custom)\\b"
+        },
+        {
+          "name": "constant.language.parameter-policy.dql",
+          "match": "\\b(dynamic|static|business|derived|optional|ambiguous_review_required)\\b"
+        },
         {
           "name": "entity.name.type.chart.dql",
           "match": "(?<=chart\\.)[A-Za-z_][A-Za-z0-9_\\-]*"

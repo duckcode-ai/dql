@@ -36,7 +36,24 @@ function writeDraft(
   slug: string,
   body?: { domain?: string; proposedContractId?: string; status?: string },
 ) {
-  const draftDir = join(root, 'blocks', '_drafts');
+  writeDraftAt(root, join(root, 'blocks', '_drafts'), slug, body);
+}
+
+function writeDomainDraft(
+  root: string,
+  domain: string,
+  slug: string,
+  body?: { domain?: string; proposedContractId?: string; status?: string },
+) {
+  writeDraftAt(root, join(root, 'domains', domain, 'blocks', '_drafts'), slug, { ...body, domain: body?.domain ?? domain });
+}
+
+function writeDraftAt(
+  root: string,
+  draftDir: string,
+  slug: string,
+  body?: { domain?: string; proposedContractId?: string; status?: string },
+) {
   mkdirSync(draftDir, { recursive: true });
   const domain = body?.domain ?? 'customer';
   const id = body?.proposedContractId ?? 'commerce.Customer.monthly_active_customers';
@@ -112,6 +129,41 @@ describe('promoteFromDraft (dql certify --from-draft)', () => {
     expect(existsSync(join(tmp, 'blocks/_drafts/mau.dql'))).toBe(false);
   });
 
+  it('promotes a domain-first draft into domains/<domain>/blocks/<slug>.dql', () => {
+    writeDomainDraft(tmp, 'customer', 'mau');
+    const out = promoteFromDraft(
+      tmp,
+      baseFlags({
+        fromDraft: 'domains/customer/blocks/_drafts/mau.dql',
+        domain: 'customer',
+        contract: 'commerce.Customer.monthly_active_customers@1',
+      }),
+    );
+
+    expect(out.ok).toBe(true);
+    expect(out.certifiedPath).toBe('domains/customer/blocks/mau.dql');
+    expect(existsSync(join(tmp, 'domains/customer/blocks/_drafts/mau.dql'))).toBe(false);
+    expect(readFileSync(join(tmp, 'domains/customer/blocks/mau.dql'), 'utf-8')).toContain('status = "certified"');
+    expect(existsSync(join(tmp, 'blocks/customer/mau.dql'))).toBe(false);
+  });
+
+  it('promotes a legacy draft into the domain-first folder when the domain exists', () => {
+    mkdirSync(join(tmp, 'domains', 'customer'), { recursive: true });
+    writeDraft(tmp, 'mau');
+    const out = promoteFromDraft(
+      tmp,
+      baseFlags({
+        fromDraft: 'blocks/_drafts/mau.dql',
+        domain: 'customer',
+        contract: 'commerce.Customer.monthly_active_customers@1',
+      }),
+    );
+
+    expect(out.ok).toBe(true);
+    expect(out.certifiedPath).toBe('domains/customer/blocks/mau.dql');
+    expect(readFileSync(join(tmp, 'domains/customer/blocks/mau.dql'), 'utf-8')).toContain('datalex_contract = "commerce.Customer.monthly_active_customers@1"');
+  });
+
   it('falls back to the proposed contract id with @1 when --contract is omitted', () => {
     writeDraft(tmp, 'mau', {
       proposedContractId: 'commerce.Customer.monthly_active_customers',
@@ -125,11 +177,16 @@ describe('promoteFromDraft (dql certify --from-draft)', () => {
     expect(certified).toContain('datalex_contract = "commerce.Customer.monthly_active_customers@1"');
   });
 
-  it('errors when no --contract and no proposed_contract_id available', () => {
+  it('promotes an OSS draft without requiring a DataLex contract', () => {
     writeDraft(tmp, 'mau', { proposedContractId: '' });
     const out = promoteFromDraft(tmp, baseFlags({ fromDraft: 'blocks/_drafts/mau.dql', domain: 'customer' }));
-    expect(out.ok).toBe(false);
-    expect(out.message).toMatch(/contract/i);
+    expect(out.ok).toBe(true);
+    expect(out.certifiedPath).toBe('blocks/customer/mau.dql');
+    expect(out.datalexManifestDiff).toBeUndefined();
+
+    const certified = readFileSync(join(tmp, 'blocks/customer/mau.dql'), 'utf-8');
+    expect(certified).toContain('status = "certified"');
+    expect(certified).not.toContain('datalex_contract = ""');
   });
 
   it('refuses to overwrite an existing certified file unless --force', () => {

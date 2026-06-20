@@ -633,6 +633,60 @@ describe('queryBusiness360', () => {
     expect(result?.businessDefinition.metadata.boundedContext).toBe('Customer identity and lifecycle');
   });
 
+  it('resolves declared domain aliases for folder-slug and lowercase artifact references', () => {
+    const graph = buildLineageGraph(
+      [
+        {
+          name: 'Top Players',
+          sql: 'SELECT player_name FROM int_player_stats',
+          domain: 'nba',
+          termRefs: ['Player'],
+        },
+      ],
+      [],
+      [],
+      {
+        domains: [
+          {
+            name: 'NBA',
+            owner: 'sports-analytics',
+            filePath: 'domains/nba/domain.dql',
+            boundedContext: 'NBA analysis',
+          },
+        ],
+        terms: [{ name: 'Player', domain: 'nba', termType: 'entity' }],
+        businessViews: [
+          {
+            name: 'NBA 360',
+            domain: 'nba',
+            blockRefs: ['Top Players'],
+            businessViewRefs: [],
+          },
+        ],
+        apps: [
+          {
+            id: 'nba-app',
+            name: 'NBA App',
+            domain: 'nba',
+            dashboards: [],
+          },
+        ],
+      },
+    );
+
+    const result = queryBusiness360(graph, 'domain:NBA');
+
+    expect(graph.getNode('domain:nba')).toBeUndefined();
+    expect(graph.getNode('block:Top Players')?.domain).toBe('NBA');
+    expect(graph.getNode('term:Player')?.domain).toBe('NBA');
+    expect(result?.businessDefinition.terms.map((asset) => asset.id)).toEqual(['term:Player']);
+    expect(result?.businessComposition.includedArtifacts.map((asset) => asset.id)).toEqual([
+      'block:Top Players',
+      'business_view:NBA 360',
+    ]);
+    expect(result?.consumers.apps.map((asset) => asset.id)).toEqual(['app:nba-app']);
+  });
+
   it('shows business view composition and downstream consumption through included blocks', () => {
     const graph = buildLineageGraph(
       [
@@ -696,6 +750,67 @@ describe('queryBusiness360', () => {
       'stale_review',
     ]));
     expect(result?.technicalSources.sourceTables.map((asset) => asset.id)).toEqual(['table:fct_revenue']);
+  });
+
+  it('summarizes reusable parameter and filter contracts for blocks', () => {
+    const graph = buildLineageGraph(
+      [
+        {
+          name: 'Top Players By Season',
+          sql: 'SELECT player_name, SUM(pts) AS total_points FROM fct_player_stats WHERE season BETWEEN ${season_start} AND ${season_end} GROUP BY 1',
+          domain: 'Basketball',
+          status: 'certified',
+          owner: 'league-analytics',
+          pattern: 'ranking',
+          grain: 'player_name, season',
+          declaredOutputs: ['player_name', 'total_points'],
+          allowedFilters: ['season_range', 'team'],
+          parameterPolicy: [
+            { name: 'season_start', policy: 'dynamic' },
+            { name: 'season_end', policy: 'dynamic' },
+            { name: 'team', policy: 'optional' },
+          ],
+          filterBindings: [
+            { filter: 'season_range', binding: 'season' },
+            { filter: 'team', binding: 'team_name' },
+          ],
+          sourceSystems: ['nba_stats'],
+          replacementFor: ['Top Players 2017 Static'],
+          tests: ['row_count > 0'],
+          reviewCadence: 'monthly',
+          termRefs: ['Player Points'],
+        },
+      ],
+      [],
+      [],
+      {
+        terms: [{ name: 'Player Points', domain: 'Basketball', owner: 'league-analytics', reviewCadence: 'monthly' }],
+      },
+    );
+
+    const result = queryBusiness360(graph, 'Top Players By Season');
+    expect(result?.blockContracts).toEqual([
+      expect.objectContaining({
+        block: expect.objectContaining({ id: 'block:Top Players By Season' }),
+        pattern: 'ranking',
+        grain: 'player_name, season',
+        outputs: ['player_name', 'total_points'],
+        allowedFilters: ['season_range', 'team'],
+        parameterPolicy: [
+          { name: 'season_start', policy: 'dynamic' },
+          { name: 'season_end', policy: 'dynamic' },
+          { name: 'team', policy: 'optional' },
+        ],
+        filterBindings: [
+          { filter: 'season_range', binding: 'season' },
+          { filter: 'team', binding: 'team_name' },
+        ],
+        sourceSystems: ['nba_stats'],
+        replacementFor: ['Top Players 2017 Static'],
+        reusability: 'dynamic',
+      }),
+    ]);
+    expect(result?.gaps.map((gap) => gap.code)).not.toContain('missing_reusable_filters');
   });
 
   it('reports replacement history in both directions', () => {
