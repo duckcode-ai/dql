@@ -364,17 +364,26 @@ export function resolveDbtManifestPath(
   return null;
 }
 
+/**
+ * Resolve the absolute path to the configured DataLex manifest.
+ * Honors explicit CLI flag first, then `datalex.manifestPath` from config,
+ * then `<projectRoot>/datalex-manifest.json`.
+ */
 export function resolveDataLexManifestPath(
   projectRoot: string,
   explicit?: string,
-  config: ProjectConfig = loadProjectConfig(projectRoot),
+  loadedConfig?: ProjectConfig,
 ): string | null {
   if (explicit) {
-    return isAbsPath(explicit) ? explicit : join(projectRoot, explicit);
+    const abs = isAbsPath(explicit) ? explicit : join(projectRoot, explicit);
+    return existsSync(abs) ? abs : abs;
   }
-  const configured = config.datalex?.manifestPath;
-  if (configured) {
-    return isAbsPath(configured) ? configured : join(projectRoot, configured);
+  const config = loadedConfig ?? loadProjectConfig(projectRoot);
+  if (config.datalex?.manifestPath) {
+    const rel = config.datalex.manifestPath;
+    const abs = isAbsPath(rel) ? rel : join(projectRoot, rel);
+    if (existsSync(abs)) return abs;
+    return abs;
   }
   const fallback = join(projectRoot, 'datalex-manifest.json');
   if (existsSync(fallback)) return fallback;

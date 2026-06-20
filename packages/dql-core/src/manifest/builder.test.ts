@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { mkdtempSync, rmSync, writeFileSync, mkdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { buildManifest, collectInputFiles } from './builder.js';
+import { buildManifest, collectInputFiles, resolveDataLexManifestPath } from './builder.js';
 
 describe('collectInputFiles', () => {
   let tmpDir: string;
@@ -49,10 +49,94 @@ describe('collectInputFiles', () => {
     expect(files).toEqual([...files].sort());
   });
 
+  it('tracks configured DataLex manifest files', () => {
+    const manifestPath = join(tmpDir, 'datalex-manifest.json');
+    writeFileSync(manifestPath, JSON.stringify({
+      manifestSpecVersion: '1.0.0',
+      datalexVersion: '1.10.0',
+      generatedAt: '2026-06-01T00:00:00Z',
+      project: { name: 'demo' },
+      domains: [],
+    }));
+    writeFileSync(join(tmpDir, 'dql.config.json'), JSON.stringify({
+      project: 'demo',
+      datalex: { manifestPath: 'datalex-manifest.json' },
+    }));
+
+    expect(resolveDataLexManifestPath(tmpDir)).toBe(manifestPath);
+    expect(collectInputFiles({ projectRoot: tmpDir })).toContain(manifestPath);
+  });
+
   it('omits missing paths without erroring', () => {
     const files = collectInputFiles({ projectRoot: tmpDir });
     // Only the config was created; no blocks/notebooks dirs
     expect(files).toEqual([join(tmpDir, 'dql.config.json')]);
+  });
+});
+
+describe('buildManifest DataLex contract validation', () => {
+  let tmpDir: string;
+
+  beforeEach(() => {
+    tmpDir = mkdtempSync(join(tmpdir(), 'dql-datalex-'));
+    mkdirSync(join(tmpDir, 'blocks'), { recursive: true });
+    writeFileSync(join(tmpDir, 'dql.config.json'), JSON.stringify({
+      project: 'demo',
+      datalex: { manifestPath: 'datalex-manifest.json' },
+    }));
+    writeFileSync(join(tmpDir, 'datalex-manifest.json'), JSON.stringify({
+      manifestSpecVersion: '1.0.0',
+      datalexVersion: '1.10.0',
+      generatedAt: '2026-06-01T00:00:00Z',
+      project: { name: 'demo' },
+      domains: [{
+        name: 'commerce',
+        entities: [{
+          name: 'Customer',
+          contracts: [{
+            id: 'commerce.Customer.monthly_active_customers',
+            name: 'monthly_active_customers',
+            version: 1,
+          }],
+        }],
+      }],
+    }));
+  });
+
+  afterEach(() => {
+    rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  it('passes certified blocks with known DataLex contracts', () => {
+    writeFileSync(join(tmpDir, 'blocks', 'mac.dql'), `
+      block "Monthly Active Customers" {
+        domain = "commerce"
+        type = "custom"
+        status = "certified"
+        datalex_contract = "commerce.Customer.monthly_active_customers@1"
+        query = """SELECT 1"""
+      }
+    `);
+
+    const manifest = buildManifest({ projectRoot: tmpDir });
+    expect((manifest.diagnostics ?? []).filter((d) => d.message.includes('datalex_contract'))).toEqual([]);
+  });
+
+  it('emits an error for certified blocks with missing DataLex contracts', () => {
+    writeFileSync(join(tmpDir, 'blocks', 'bad.dql'), `
+      block "Bad Contract" {
+        domain = "commerce"
+        type = "custom"
+        status = "certified"
+        datalex_contract = "commerce.Customer.does_not_exist@1"
+        query = """SELECT 1"""
+      }
+    `);
+
+    const manifest = buildManifest({ projectRoot: tmpDir });
+    expect((manifest.diagnostics ?? []).some((d) =>
+      d.severity === 'error' && d.message.includes('not found'),
+    )).toBe(true);
   });
 });
 
