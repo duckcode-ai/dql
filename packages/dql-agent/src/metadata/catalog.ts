@@ -15,8 +15,11 @@ import type Database from 'better-sqlite3';
 import {
   buildManifest,
   loadProjectConfig,
+  parseContractRef,
+  resolveDataLexManifestPath,
   resolveDbtManifestPath,
   resolveSemanticLayerWithDiagnostics,
+  type DataLexManifest,
   type DQLManifest,
   type ManifestDiagnostic,
   type SemanticLayer,
@@ -85,6 +88,23 @@ export interface MetadataSnapshot {
   diagnostics: MetadataDiagnostic[];
   fingerprint: string;
   generatedAt: string;
+}
+
+export interface MetadataSourceFingerprint {
+  sourcePath: string;
+  fingerprint: string;
+  objectCount: number;
+  updatedAt: string;
+}
+
+export interface MetadataDomainShard {
+  domain: string;
+  objectCount: number;
+  blockCount: number;
+  certifiedBlockCount: number;
+  semanticMetricCount: number;
+  dbtObjectCount: number;
+  updatedAt: string;
 }
 
 export interface EnsureMetadataCatalogOptions {
@@ -317,6 +337,13 @@ export interface LocalContextPack {
     fingerprint: string | null;
   };
 }
+
+/**
+ * Enterprise-facing name for the shared ranked-evidence envelope used by
+ * AI Import, Ask AI, Build AI, MCP, and app-builder flows. `LocalContextPack`
+ * remains the historical OSS type name; both names describe the same contract.
+ */
+export type DqlContextPack = LocalContextPack;
 
 export interface QueryRunSummary {
   id: string;
@@ -660,6 +687,7 @@ export function buildMetadataSnapshot(
   addDbtDagObjects(manifest, objects, edges, diagnostics);
   addRawDbtManifestCatalogObjects(projectRoot, manifest, objects, edges, diagnostics);
   addBlockDependencyEdges(manifest, edges);
+  addDataLexManifestObjects(projectRoot, manifest, objects, edges, diagnostics);
 
   const nodeKeyMap = new Map<string, string>();
   for (const node of [...manifestGraph.nodes, ...semanticGraph.nodes]) {
@@ -792,6 +820,23 @@ export class MetadataCatalog {
         created_at TEXT NOT NULL
       );
       CREATE INDEX IF NOT EXISTS idx_metadata_diagnostics_severity ON metadata_diagnostics(severity);
+
+      CREATE TABLE IF NOT EXISTS metadata_source_fingerprints (
+        source_path  TEXT PRIMARY KEY,
+        fingerprint  TEXT NOT NULL,
+        object_count INTEGER NOT NULL,
+        updated_at   TEXT NOT NULL
+      );
+
+      CREATE TABLE IF NOT EXISTS metadata_domain_shards (
+        domain                TEXT PRIMARY KEY,
+        object_count          INTEGER NOT NULL,
+        block_count           INTEGER NOT NULL,
+        certified_block_count INTEGER NOT NULL,
+        semantic_metric_count INTEGER NOT NULL,
+        dbt_object_count      INTEGER NOT NULL,
+        updated_at            TEXT NOT NULL
+      );
     `);
   }
 
@@ -820,12 +865,27 @@ export class MetadataCatalog {
     const setState = this.db.prepare(`
       INSERT OR REPLACE INTO metadata_state (key, value) VALUES (?, ?)
     `);
+    const insertSourceFingerprint = this.db.prepare(`
+      INSERT OR REPLACE INTO metadata_source_fingerprints (
+        source_path, fingerprint, object_count, updated_at
+      ) VALUES (?, ?, ?, ?)
+    `);
+    const insertDomainShard = this.db.prepare(`
+      INSERT OR REPLACE INTO metadata_domain_shards (
+        domain, object_count, block_count, certified_block_count,
+        semantic_metric_count, dbt_object_count, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?)
+    `);
+    const sourceFingerprints = buildSourceFingerprints(snapshot.objects, now);
+    const domainShards = buildDomainShards(snapshot.objects, now);
 
     const txn = this.db.transaction(() => {
       this.db.prepare('DELETE FROM metadata_edges').run();
       this.db.prepare('DELETE FROM metadata_fts').run();
       this.db.prepare('DELETE FROM metadata_objects').run();
       this.db.prepare('DELETE FROM metadata_diagnostics').run();
+      this.db.prepare('DELETE FROM metadata_source_fingerprints').run();
+      this.db.prepare('DELETE FROM metadata_domain_shards').run();
 
       for (const object of snapshot.objects) {
         const payload = object.payload ?? {};
@@ -877,11 +937,28 @@ export class MetadataCatalog {
         );
       }
 
+      for (const item of sourceFingerprints) {
+        insertSourceFingerprint.run(item.sourcePath, item.fingerprint, item.objectCount, item.updatedAt);
+      }
+      for (const item of domainShards) {
+        insertDomainShard.run(
+          item.domain,
+          item.objectCount,
+          item.blockCount,
+          item.certifiedBlockCount,
+          item.semanticMetricCount,
+          item.dbtObjectCount,
+          item.updatedAt,
+        );
+      }
+
       setState.run('built_at', now);
       setState.run('fingerprint', snapshot.fingerprint);
       setState.run('project_root', snapshot.projectRoot);
       setState.run('object_count', String(snapshot.objects.length));
       setState.run('edge_count', String(snapshot.edges.length));
+      setState.run('source_fingerprint_count', String(sourceFingerprints.length));
+      setState.run('domain_shard_count', String(domainShards.length));
       setState.run('diagnostics_json', JSON.stringify(snapshot.diagnostics));
       setState.run('manifest_generated_at', snapshot.manifest.generatedAt);
     });
@@ -1160,6 +1237,53 @@ export class MetadataCatalog {
     }));
   }
 
+  sourceFingerprints(limit = 500): MetadataSourceFingerprint[] {
+    const rows = this.db.prepare(`
+      SELECT source_path, fingerprint, object_count, updated_at
+      FROM metadata_source_fingerprints
+      ORDER BY object_count DESC, source_path
+      LIMIT ?
+    `).all(limit) as Array<{
+      source_path: string;
+      fingerprint: string;
+      object_count: number;
+      updated_at: string;
+    }>;
+    return rows.map((row) => ({
+      sourcePath: row.source_path,
+      fingerprint: row.fingerprint,
+      objectCount: row.object_count,
+      updatedAt: row.updated_at,
+    }));
+  }
+
+  domainShards(limit = 100): MetadataDomainShard[] {
+    const rows = this.db.prepare(`
+      SELECT domain, object_count, block_count, certified_block_count,
+        semantic_metric_count, dbt_object_count, updated_at
+      FROM metadata_domain_shards
+      ORDER BY object_count DESC, domain
+      LIMIT ?
+    `).all(limit) as Array<{
+      domain: string;
+      object_count: number;
+      block_count: number;
+      certified_block_count: number;
+      semantic_metric_count: number;
+      dbt_object_count: number;
+      updated_at: string;
+    }>;
+    return rows.map((row) => ({
+      domain: row.domain,
+      objectCount: row.object_count,
+      blockCount: row.block_count,
+      certifiedBlockCount: row.certified_block_count,
+      semanticMetricCount: row.semantic_metric_count,
+      dbtObjectCount: row.dbt_object_count,
+      updatedAt: row.updated_at,
+    }));
+  }
+
   state(key: string): string | null {
     const row = this.db.prepare('SELECT value FROM metadata_state WHERE key = ?').get(key) as { value: string } | undefined;
     return row?.value ?? null;
@@ -1259,6 +1383,16 @@ function objectFromKGNode(node: KGNode): MetadataObject {
     businessOwner: node.businessOwner,
     decisionUse: node.decisionUse,
     reviewCadence: node.reviewCadence,
+    pattern: node.pattern,
+    grain: node.grain,
+    entities: node.entities ?? [],
+    declaredOutputs: node.declaredOutputs ?? [],
+    allowedFilters: node.allowedFilters ?? [],
+    sourceSystems: node.sourceSystems ?? [],
+    replacementFor: node.replacementFor ?? [],
+    datalexContract: node.datalexContract,
+    boundedContext: node.boundedContext,
+    primaryTerms: node.primaryTerms ?? [],
     businessRules: node.businessRules ?? [],
     caveats: node.caveats ?? [],
     llmContext: node.llmContext,
@@ -1596,6 +1730,184 @@ function addManifestBlockDetails(manifest: DQLManifest, objects: Map<string, Met
         draftMetadata: block.draftMetadata,
       }),
     }));
+  }
+}
+
+function addDataLexManifestObjects(
+  projectRoot: string,
+  manifest: DQLManifest,
+  objects: Map<string, MetadataObject>,
+  edges: Map<string, MetadataEdge>,
+  diagnostics: MetadataDiagnostic[],
+): void {
+  const manifestPath = resolveDataLexManifestPath(projectRoot);
+  if (!manifestPath) return;
+
+  let raw: DataLexManifest;
+  try {
+    raw = JSON.parse(readFileSync(manifestPath, 'utf-8')) as DataLexManifest;
+  } catch (error) {
+    diagnostics.push({
+      kind: 'datalex',
+      severity: 'warning',
+      message: `Could not read DataLex manifest context from ${manifestPath}: ${error instanceof Error ? error.message : String(error)}`,
+      filePath: manifestPath,
+    });
+    return;
+  }
+  if (!Array.isArray(raw.domains)) {
+    diagnostics.push({
+      kind: 'datalex',
+      severity: 'warning',
+      message: `DataLex manifest at ${manifestPath} does not contain a domains array.`,
+      filePath: manifestPath,
+    });
+    return;
+  }
+
+  const latestContractKeyById = new Map<string, string>();
+  const contractKeyByVersionedRef = new Map<string, string>();
+  for (const domain of raw.domains) {
+    if (!domain?.name) continue;
+    const domainKey = `datalex:domain:${domain.name}`;
+    objects.set(domainKey, mergeObject(objects.get(domainKey), {
+      objectKey: domainKey,
+      objectType: 'datalex_domain',
+      name: domain.name,
+      fullName: domain.name,
+      domain: domain.name,
+      owner: domain.owners?.[0],
+      status: 'contract_evidence',
+      description: domain.description,
+      sourcePath: manifestPath,
+      sourceSystem: 'DataLex manifest',
+      payload: compactObject({
+        project: raw.project?.name,
+        owners: domain.owners ?? [],
+        tags: [],
+        generatedAt: raw.generatedAt,
+      }),
+    }));
+
+    for (const term of domain.glossary ?? []) {
+      if (!term?.term) continue;
+      const termKey = `datalex:term:${domain.name}.${term.term}`;
+      objects.set(termKey, mergeObject(objects.get(termKey), {
+        objectKey: termKey,
+        objectType: 'datalex_term',
+        name: term.term,
+        fullName: `${domain.name}.${term.term}`,
+        domain: domain.name,
+        status: 'contract_evidence',
+        description: term.definition,
+        sourcePath: manifestPath,
+        sourceSystem: 'DataLex manifest',
+        payload: compactObject({
+          tags: term.tags ?? [],
+          relatedFields: term.related_fields ?? [],
+        }),
+      }));
+      putEdge(edges, {
+        edgeType: 'contains',
+        fromKey: domainKey,
+        toKey: termKey,
+        confidence: 1,
+        payload: { source: 'datalex manifest glossary' },
+      });
+    }
+
+    for (const entity of domain.entities ?? []) {
+      if (!entity?.name) continue;
+      const entityKey = `datalex:entity:${domain.name}.${entity.name}`;
+      objects.set(entityKey, mergeObject(objects.get(entityKey), {
+        objectKey: entityKey,
+        objectType: 'datalex_entity',
+        name: entity.name,
+        fullName: `${domain.name}.${entity.name}`,
+        domain: domain.name,
+        status: 'contract_evidence',
+        description: entity.description,
+        sourcePath: manifestPath,
+        sourceSystem: 'DataLex manifest',
+        payload: compactObject({
+          tags: entity.tags ?? [],
+          binding: entity.binding,
+          fields: (entity.fields ?? []).slice(0, 100).map((field) => compactObject({
+            name: field.name,
+            type: field.type,
+            description: field.description,
+            primaryKey: field.primary_key,
+            classification: field.classification,
+            tags: field.tags ?? [],
+          })),
+        }),
+      }));
+      putEdge(edges, {
+        edgeType: 'contains',
+        fromKey: domainKey,
+        toKey: entityKey,
+        confidence: 1,
+        payload: { source: 'datalex manifest entity' },
+      });
+
+      for (const contract of entity.contracts ?? []) {
+        if (!contract?.id) continue;
+        const version = Number(contract.version);
+        if (!Number.isFinite(version)) continue;
+        const contractKey = `datalex:contract:${contract.id}@${version}`;
+        contractKeyByVersionedRef.set(`${contract.id}@${version}`, contractKey);
+        const latest = latestContractKeyById.get(contract.id);
+        if (!latest || Number(latest.split('@').at(-1) ?? 0) < version) {
+          latestContractKeyById.set(contract.id, contractKey);
+        }
+        objects.set(contractKey, mergeObject(objects.get(contractKey), {
+          objectKey: contractKey,
+          objectType: 'datalex_contract',
+          name: contract.name || contract.id,
+          fullName: `${contract.id}@${contract.version}`,
+          domain: domain.name,
+          owner: contract.owner ?? domain.owners?.[0],
+          status: 'contract_evidence',
+          description: contract.description,
+          sourcePath: manifestPath,
+          sourceSystem: 'DataLex manifest',
+          payload: compactObject({
+            contractId: contract.id,
+            version,
+            entity: entity.name,
+            tags: contract.tags ?? [],
+            signature: contract.signature,
+          }),
+        }));
+        putEdge(edges, {
+          edgeType: 'contains',
+          fromKey: entityKey,
+          toKey: contractKey,
+          confidence: 1,
+          payload: { source: 'datalex manifest contract' },
+        });
+      }
+    }
+  }
+
+  for (const block of Object.values(manifest.blocks ?? {})) {
+    if (!block.datalexContract) continue;
+    const parsed = parseContractRef(block.datalexContract);
+    if (!parsed.ok || !parsed.id) continue;
+    const contractKey = parsed.version
+      ? contractKeyByVersionedRef.get(`${parsed.id}@${parsed.version}`)
+      : latestContractKeyById.get(parsed.id);
+    if (!contractKey) continue;
+    putEdge(edges, {
+      edgeType: 'resolves_contract',
+      fromKey: `dql:block:${block.name}`,
+      toKey: contractKey,
+      confidence: 1,
+      payload: {
+        source: 'dql datalex_contract',
+        reference: block.datalexContract,
+      },
+    });
   }
 }
 
@@ -2960,6 +3272,49 @@ function mergeObject(a: MetadataObject | undefined, b: MetadataObject): Metadata
     description: b.description || a.description,
     payload: compactObject({ ...(a.payload ?? {}), ...(b.payload ?? {}) }),
   };
+}
+
+function buildSourceFingerprints(objects: MetadataObject[], updatedAt: string): MetadataSourceFingerprint[] {
+  const bySource = new Map<string, MetadataObject[]>();
+  for (const object of objects) {
+    const sourcePath = object.sourcePath ?? object.sourceSystem;
+    if (!sourcePath) continue;
+    const list = bySource.get(sourcePath) ?? [];
+    list.push(object);
+    bySource.set(sourcePath, list);
+  }
+  return Array.from(bySource.entries()).map(([sourcePath, rows]) => ({
+    sourcePath,
+    fingerprint: sha256(stableStringify(rows.map((row) => ({
+      objectKey: row.objectKey,
+      objectType: row.objectType,
+      name: row.name,
+      domain: row.domain,
+      status: row.status,
+      payload: row.payload,
+    })))),
+    objectCount: rows.length,
+    updatedAt,
+  })).sort((a, b) => a.sourcePath.localeCompare(b.sourcePath));
+}
+
+function buildDomainShards(objects: MetadataObject[], updatedAt: string): MetadataDomainShard[] {
+  const byDomain = new Map<string, MetadataObject[]>();
+  for (const object of objects) {
+    const domain = object.domain?.trim() || '_uncategorized';
+    const list = byDomain.get(domain) ?? [];
+    list.push(object);
+    byDomain.set(domain, list);
+  }
+  return Array.from(byDomain.entries()).map(([domain, rows]) => ({
+    domain,
+    objectCount: rows.length,
+    blockCount: rows.filter((row) => row.objectType === 'dql_block').length,
+    certifiedBlockCount: rows.filter((row) => row.objectType === 'dql_block' && row.status === 'certified').length,
+    semanticMetricCount: rows.filter((row) => row.objectType === 'semantic_metric').length,
+    dbtObjectCount: rows.filter((row) => row.objectType === 'dbt_model' || row.objectType === 'dbt_source' || row.objectType === 'dbt_column').length,
+    updatedAt,
+  })).sort((a, b) => a.domain.localeCompare(b.domain));
 }
 
 function fingerprintSnapshot(snapshot: Omit<MetadataSnapshot, 'fingerprint'>): string {

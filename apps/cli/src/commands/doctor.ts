@@ -1,9 +1,9 @@
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, readFileSync, statSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { QueryExecutor } from '@duckcodeailabs/dql-connectors';
-import { resolveSemanticLayerWithDiagnostics } from '@duckcodeailabs/dql-core';
-import { defaultKgPath, defaultMetadataPath } from '@duckcodeailabs/dql-agent';
+import { buildManifest, collectInputFiles, resolveSemanticLayerWithDiagnostics } from '@duckcodeailabs/dql-core';
+import { buildLocalContextPack, defaultKgPath, defaultMetadataPath, openMetadataCatalog } from '@duckcodeailabs/dql-agent';
 import type { CLIFlags } from '../args.js';
 import {
   assertLocalQueryRuntimeReady,
@@ -23,6 +23,11 @@ interface Check {
 }
 
 export async function runDoctor(targetPath: string | null, flags: CLIFlags): Promise<void> {
+  if (targetPath === 'scale') {
+    await runDoctorScale(null, flags);
+    return;
+  }
+
   const cwd = resolve(targetPath || '.');
   const projectRoot = findProjectRoot(cwd);
   const config = loadProjectConfig(projectRoot);
@@ -128,6 +133,229 @@ export async function runDoctor(targetPath: string | null, flags: CLIFlags): Pro
   console.log('');
   console.log('  OSS note: certification, personas, and policies are local single-user trust previews.');
   console.log('');
+}
+
+interface ScaleIssue {
+  severity: 'info' | 'warning' | 'error';
+  code: string;
+  message: string;
+}
+
+interface ScaleReport {
+  ok: boolean;
+  projectRoot: string;
+  counts: Record<string, number>;
+  cache: {
+    manifestFresh: boolean;
+    manifestAgeMs: number | null;
+    metadataCatalog: { exists: boolean; path: string; sizeBytes: number | null };
+    agentKg: { exists: boolean; path: string; sizeBytes: number | null };
+    contextPackMs: number | null;
+    contextPackObjects: number | null;
+    sourceFingerprints: number | null;
+    domainShards: number | null;
+  };
+  issues: ScaleIssue[];
+}
+
+async function runDoctorScale(targetPath: string | null, flags: CLIFlags): Promise<void> {
+  const projectRoot = findProjectRoot(resolve(targetPath || '.'));
+  const started = Date.now();
+  const manifest = buildManifest({ projectRoot });
+  const inputFiles = collectInputFiles({ projectRoot });
+  const manifestPath = join(projectRoot, 'dql-manifest.json');
+  const manifestFresh = isManifestFresh(manifestPath, inputFiles);
+  const metadataPath = defaultMetadataPath(projectRoot);
+  const kgPath = defaultKgPath(projectRoot);
+  const contextStarted = Date.now();
+  let contextPackMs: number | null = null;
+  let contextPackObjects: number | null = null;
+  let sourceFingerprints: number | null = null;
+  let domainShards: number | null = null;
+  const issues: ScaleIssue[] = [];
+
+  if (existsSync(metadataPath)) {
+    try {
+      const catalog = openMetadataCatalog(projectRoot);
+      try {
+        sourceFingerprints = catalog.sourceFingerprints(10000).length;
+        domainShards = catalog.domainShards(1000).length;
+      } finally {
+        catalog.close();
+      }
+      const pack = await buildLocalContextPack(projectRoot, {
+        question: 'DQL doctor scale retrieval check for enterprise metadata coverage',
+        mode: 'debug',
+        surface: 'doctor',
+        limit: 25,
+      });
+      contextPackMs = Date.now() - contextStarted;
+      contextPackObjects = pack.objects.length;
+      if (sourceFingerprints === 0) {
+        issues.push({
+          severity: 'warning',
+          code: 'source_fingerprints_missing',
+          message: 'metadata.sqlite has no source fingerprints. Run dql compile or dql agent reindex with the current CLI to refresh the scale index.',
+        });
+      }
+      if (domainShards === 0) {
+        issues.push({
+          severity: 'warning',
+          code: 'domain_shards_missing',
+          message: 'metadata.sqlite has no domain shard stats. Run dql compile or dql agent reindex with the current CLI to refresh the scale index.',
+        });
+      }
+    } catch (error) {
+      issues.push({
+        severity: 'warning',
+        code: 'context_pack_failed',
+        message: `Metadata retrieval check failed: ${error instanceof Error ? error.message : String(error)}`,
+      });
+    }
+  } else {
+    issues.push({
+      severity: 'warning',
+      code: 'metadata_catalog_missing',
+      message: 'metadata.sqlite is missing. Run dql compile or dql agent reindex before AI import and Ask AI workflows.',
+    });
+  }
+
+  if (!existsSync(kgPath)) {
+    issues.push({
+      severity: 'warning',
+      code: 'agent_kg_missing',
+      message: 'agent-kg.sqlite is missing. Run dql agent reindex for scalable agent retrieval.',
+    });
+  }
+  if (!manifestFresh) {
+    issues.push({
+      severity: 'warning',
+      code: 'manifest_stale',
+      message: 'dql-manifest.json is missing or older than at least one tracked project input.',
+    });
+  }
+
+  const declaredDomains = new Set(Object.keys(manifest.domains ?? {}));
+  const usedDomains = new Set<string>();
+  for (const block of Object.values(manifest.blocks)) if (block.domain) usedDomains.add(block.domain);
+  for (const term of Object.values(manifest.terms ?? {})) if (term.domain) usedDomains.add(term.domain);
+  for (const view of Object.values(manifest.businessViews ?? {})) if (view.domain) usedDomains.add(view.domain);
+  const missingDomains = [...usedDomains].filter((domain) => !declaredDomains.has(domain));
+  if (missingDomains.length > 0) {
+    issues.push({
+      severity: 'warning',
+      code: 'missing_domain_declarations',
+      message: `${missingDomains.length} used domain(s) have no first-class domain declaration: ${missingDomains.slice(0, 10).join(', ')}${missingDomains.length > 10 ? '...' : ''}`,
+    });
+  }
+  const missingEnterpriseMetadata = Object.values(manifest.blocks).filter((block) =>
+    !block.pattern || !block.grain || !(block.declaredOutputs?.length),
+  );
+  if (missingEnterpriseMetadata.length > 0) {
+    issues.push({
+      severity: 'info',
+      code: 'block_contract_gaps',
+      message: `${missingEnterpriseMetadata.length} block(s) are missing pattern, grain, or declared outputs.`,
+    });
+  }
+  if (contextPackMs !== null && contextPackMs > 1000) {
+    issues.push({
+      severity: 'warning',
+      code: 'slow_context_pack',
+      message: `Context-pack retrieval took ${contextPackMs}ms; target is under 1000ms for common questions.`,
+    });
+  }
+
+  const report: ScaleReport = {
+    ok: !issues.some((issue) => issue.severity === 'error'),
+    projectRoot,
+    counts: {
+      domains: Object.keys(manifest.domains ?? {}).length,
+      blocks: Object.keys(manifest.blocks).length,
+      certifiedBlocks: Object.values(manifest.blocks).filter((block) => block.status === 'certified').length,
+      draftBlocks: Object.values(manifest.blocks).filter((block) => block.status === 'draft').length,
+      terms: Object.keys(manifest.terms ?? {}).length,
+      businessViews: Object.keys(manifest.businessViews ?? {}).length,
+      apps: Object.keys(manifest.apps ?? {}).length,
+      dashboards: Object.keys(manifest.dashboards ?? {}).length,
+      semanticMetrics: Object.keys(manifest.metrics ?? {}).length,
+      semanticDimensions: Object.keys(manifest.dimensions ?? {}).length,
+      dbtModels: manifest.dbtImport?.dbtDag?.models?.length ?? 0,
+      dbtSources: manifest.dbtImport?.sourcesImported ?? 0,
+      lineageNodes: manifest.lineage.nodes.length,
+      lineageEdges: manifest.lineage.edges.length,
+      diagnostics: manifest.diagnostics?.length ?? 0,
+    },
+    cache: {
+      manifestFresh,
+      manifestAgeMs: manifestAgeMs(manifestPath),
+      metadataCatalog: fileState(metadataPath),
+      agentKg: fileState(kgPath),
+      contextPackMs,
+      contextPackObjects,
+      sourceFingerprints,
+      domainShards,
+    },
+    issues,
+  };
+
+  if (flags.format === 'json') {
+    console.log(JSON.stringify(report, null, 2));
+    return;
+  }
+
+  console.log('\n  DQL Doctor Scale');
+  console.log(`    Project: ${projectRoot}`);
+  console.log(`    Checked in ${Date.now() - started}ms`);
+  console.log('');
+  console.log('  Counts:');
+  for (const [key, value] of Object.entries(report.counts)) {
+    console.log(`    ${key}: ${value}`);
+  }
+  console.log('');
+  console.log('  Cache:');
+  console.log(`    manifest fresh: ${report.cache.manifestFresh ? 'yes' : 'no'}`);
+  console.log(`    metadata.sqlite: ${report.cache.metadataCatalog.exists ? formatBytes(report.cache.metadataCatalog.sizeBytes ?? 0) : 'missing'}`);
+  console.log(`    agent-kg.sqlite: ${report.cache.agentKg.exists ? formatBytes(report.cache.agentKg.sizeBytes ?? 0) : 'missing'}`);
+  console.log(`    context pack: ${report.cache.contextPackMs === null ? 'not checked' : `${report.cache.contextPackMs}ms, ${report.cache.contextPackObjects} objects`}`);
+  console.log(`    source fingerprints: ${report.cache.sourceFingerprints === null ? 'not checked' : report.cache.sourceFingerprints}`);
+  console.log(`    domain shards: ${report.cache.domainShards === null ? 'not checked' : report.cache.domainShards}`);
+  if (issues.length > 0) {
+    console.log('');
+    console.log('  Issues:');
+    for (const issue of issues) {
+      console.log(`    ${issue.severity.toUpperCase()} ${issue.code}: ${issue.message}`);
+    }
+  }
+  console.log('');
+}
+
+function isManifestFresh(manifestPath: string, inputFiles: string[]): boolean {
+  if (!existsSync(manifestPath)) return false;
+  const manifestMtime = statSync(manifestPath).mtimeMs;
+  return inputFiles.every((filePath) => {
+    try {
+      return statSync(filePath).mtimeMs <= manifestMtime;
+    } catch {
+      return true;
+    }
+  });
+}
+
+function manifestAgeMs(manifestPath: string): number | null {
+  if (!existsSync(manifestPath)) return null;
+  return Math.max(0, Date.now() - statSync(manifestPath).mtimeMs);
+}
+
+function fileState(path: string): { exists: boolean; path: string; sizeBytes: number | null } {
+  if (!existsSync(path)) return { exists: false, path, sizeBytes: null };
+  return { exists: true, path, sizeBytes: statSync(path).size };
+}
+
+function formatBytes(value: number): string {
+  if (value < 1024) return `${value} B`;
+  if (value < 1024 * 1024) return `${(value / 1024).toFixed(1)} KB`;
+  return `${(value / (1024 * 1024)).toFixed(1)} MB`;
 }
 
 function checkNodeVersion(): Check {

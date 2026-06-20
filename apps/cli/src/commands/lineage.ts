@@ -709,6 +709,17 @@ function printBusiness360(result: Business360Result): void {
     printAssetList('Blocks', result.consumers.downstreamBlocks);
   }
 
+  if (result.replacementHistory.replaces.length > 0
+    || result.replacementHistory.replacedBy.length > 0
+    || result.replacementHistory.replacementRefs.length > 0) {
+    console.log('\n  Replacement History:');
+    printAssetList('Replaces', result.replacementHistory.replaces);
+    printAssetList('Replaced by', result.replacementHistory.replacedBy);
+    if (result.replacementHistory.replacementRefs.length > 0) {
+      console.log(`    Declared refs: ${result.replacementHistory.replacementRefs.join(', ')}`);
+    }
+  }
+
   if (result.gaps.length > 0) {
     console.log('\n  Gaps:');
     for (const gap of result.gaps) {

@@ -4,6 +4,61 @@ import { NodeKind } from '../ast/nodes.js';
 import { analyze } from '../semantic/analyzer.js';
 
 describe('Parser', () => {
+  it('parses domain declarations and enterprise block contract metadata', () => {
+    const source = `domain "Customer" {
+      owner = "customer-analytics"
+      businessOwner = "Customer Success"
+      boundedContext = "Customer identity, lifecycle, value, and retention"
+      sourceSystems = ["crm", "orders"]
+      primaryTerms = ["Customer", "Lifetime Value"]
+      reviewCadence = "monthly"
+      tags = ["customer", "retention"]
+    }
+
+    block "Customer Orders Rollup" {
+      domain = "Customer"
+      type = "custom"
+      status = "draft"
+      pattern = "entity_rollup"
+      grain = "customer_id"
+      entities = ["Customer"]
+      terms = ["Customer", "Lifetime Value"]
+      outputs = ["customer_id", "total_orders", "lifetime_revenue"]
+      dimensions = ["segment", "region"]
+      allowedFilters = ["order_date", "segment", "region"]
+      sourceSystems = ["orders"]
+      replacementFor = ["Legacy Customer Orders"]
+
+      query = """
+        SELECT customer_id, COUNT(*) AS total_orders
+        FROM orders
+        GROUP BY customer_id
+      """
+    }`;
+
+    const ast = parse(source);
+    expect(ast.statements).toHaveLength(2);
+    const domain = ast.statements[0];
+    expect(domain.kind).toBe(NodeKind.DomainDecl);
+    if (domain.kind === NodeKind.DomainDecl) {
+      expect(domain.name).toBe('Customer');
+      expect(domain.sourceSystems).toEqual(['crm', 'orders']);
+      expect(domain.primaryTerms).toEqual(['Customer', 'Lifetime Value']);
+    }
+
+    const block = ast.statements[1];
+    expect(block.kind).toBe(NodeKind.BlockDecl);
+    if (block.kind === NodeKind.BlockDecl) {
+      expect(block.grain).toBe('customer_id');
+      expect(block.pattern).toBe('entity_rollup');
+      expect(block.entities).toEqual(['Customer']);
+      expect(block.outputs).toEqual(['customer_id', 'total_orders', 'lifetime_revenue']);
+      expect(block.allowedFilters).toEqual(['order_date', 'segment', 'region']);
+      expect(block.sourceSystems).toEqual(['orders']);
+      expect(block.replacementFor).toEqual(['Legacy Customer Orders']);
+    }
+  });
+
   it('parses a standalone chart call', () => {
     const source = `chart.line(
       SELECT date, revenue FROM sales,

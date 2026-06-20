@@ -579,6 +579,60 @@ describe('queryBusiness360', () => {
     expect(result?.gaps.map((gap) => gap.code)).not.toContain('missing_definition');
   });
 
+  it('expands first-class domains to contained terms, blocks, views, and apps', () => {
+    const graph = buildLineageGraph(
+      [
+        {
+          name: 'Customer Profile',
+          sql: 'SELECT customer_id FROM dim_customer',
+          domain: 'Customer',
+          termRefs: ['Customer'],
+        },
+      ],
+      [],
+      [],
+      {
+        domains: [
+          {
+            name: 'Customer',
+            owner: 'customer-analytics',
+            businessOwner: 'Customer Success',
+            boundedContext: 'Customer identity and lifecycle',
+            primaryTerms: ['Customer'],
+          },
+        ],
+        terms: [{ name: 'Customer', domain: 'Customer', termType: 'entity' }],
+        businessViews: [
+          {
+            name: 'Customer 360',
+            domain: 'Customer',
+            blockRefs: ['Customer Profile'],
+            businessViewRefs: [],
+          },
+        ],
+        apps: [
+          {
+            id: 'customer-app',
+            name: 'Customer App',
+            domain: 'Customer',
+            dashboards: [],
+          },
+        ],
+      },
+    );
+
+    const result = queryBusiness360(graph, 'domain:Customer');
+    expect(result?.focus.id).toBe('domain:Customer');
+    expect(result?.focus.owner).toBe('customer-analytics');
+    expect(result?.businessDefinition.terms.map((asset) => asset.id)).toEqual(['term:Customer']);
+    expect(result?.businessComposition.includedArtifacts.map((asset) => asset.id)).toEqual([
+      'block:Customer Profile',
+      'business_view:Customer 360',
+    ]);
+    expect(result?.consumers.apps.map((asset) => asset.id)).toEqual(['app:customer-app']);
+    expect(result?.businessDefinition.metadata.boundedContext).toBe('Customer identity and lifecycle');
+  });
+
   it('shows business view composition and downstream consumption through included blocks', () => {
     const graph = buildLineageGraph(
       [
@@ -618,6 +672,72 @@ describe('queryBusiness360', () => {
     expect(result?.consumers.dashboards.map((asset) => asset.id)).toEqual(['dashboard:Customer Overview']);
   });
 
+  it('surfaces enterprise readiness gaps for block contracts', () => {
+    const graph = buildLineageGraph(
+      [
+        {
+          name: 'Revenue By Customer',
+          sql: 'SELECT customer_id, SUM(revenue) AS revenue FROM fct_revenue GROUP BY 1',
+          domain: 'Revenue',
+          status: 'certified',
+          reviewCadence: 'annual',
+        },
+      ],
+      [],
+      [],
+    );
+
+    const result = queryBusiness360(graph, 'Revenue By Customer');
+    expect(result?.gaps.map((gap) => gap.code)).toEqual(expect.arrayContaining([
+      'missing_owner',
+      'missing_terms',
+      'missing_grain',
+      'missing_tests',
+      'stale_review',
+    ]));
+    expect(result?.technicalSources.sourceTables.map((asset) => asset.id)).toEqual(['table:fct_revenue']);
+  });
+
+  it('reports replacement history in both directions', () => {
+    const graph = buildLineageGraph(
+      [
+        {
+          name: 'Legacy Customer Revenue',
+          sql: 'SELECT customer_id, revenue FROM fct_revenue',
+          domain: 'Revenue',
+          owner: 'finance-analytics',
+          grain: 'customer_id',
+          tests: ['row_count > 0'],
+          reviewCadence: 'monthly',
+          termRefs: ['Revenue'],
+        },
+        {
+          name: 'Customer Revenue v2',
+          sql: 'SELECT customer_id, SUM(revenue) AS revenue FROM fct_revenue GROUP BY 1',
+          domain: 'Revenue',
+          owner: 'finance-analytics',
+          grain: 'customer_id',
+          tests: ['row_count > 0'],
+          reviewCadence: 'monthly',
+          termRefs: ['Revenue'],
+          replacementFor: ['Legacy Customer Revenue'],
+        },
+      ],
+      [],
+      [],
+      {
+        terms: [{ name: 'Revenue', domain: 'Revenue', owner: 'finance-analytics', reviewCadence: 'monthly' }],
+      },
+    );
+
+    const legacy = queryBusiness360(graph, 'Legacy Customer Revenue');
+    expect(legacy?.replacementHistory.replacedBy.map((asset) => asset.id)).toEqual(['block:Customer Revenue v2']);
+
+    const current = queryBusiness360(graph, 'Customer Revenue v2');
+    expect(current?.replacementHistory.replaces.map((asset) => asset.id)).toEqual(['block:Legacy Customer Revenue']);
+    expect(current?.replacementHistory.replacementRefs).toEqual(['Legacy Customer Revenue']);
+  });
+
   it('surfaces useful gaps for disconnected terms', () => {
     const graph = buildLineageGraph(
       [],
@@ -631,6 +751,8 @@ describe('queryBusiness360', () => {
     const result = queryBusiness360(graph, 'Churn Risk');
     expect(result?.gaps.map((gap) => gap.code)).toEqual([
       'missing_definition',
+      'missing_owner',
+      'stale_review',
       'missing_sources',
       'missing_consumers',
     ]);

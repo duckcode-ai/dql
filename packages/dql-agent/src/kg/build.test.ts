@@ -10,6 +10,19 @@ describe('buildKGFromManifest', () => {
       generatedAt: '2026-06-12T00:00:00.000Z',
       project: 'test',
       projectRoot: '/tmp/dql',
+      domains: {
+        revenue: {
+          name: 'revenue',
+          filePath: 'domains/revenue/domain.dql',
+          owner: 'revenue-analytics',
+          businessOwner: 'Revenue Operations',
+          boundedContext: 'Revenue bookings, recognition, refunds, and health.',
+          sourceSystems: ['orders'],
+          primaryTerms: ['Net Revenue'],
+          reviewCadence: 'monthly',
+          tags: ['revenue'],
+        },
+      },
       blocks: {
         'Revenue Total': {
           name: 'Revenue Total',
@@ -26,6 +39,7 @@ describe('buildKGFromManifest', () => {
           tests: [],
           termRefs: ['Net Revenue'],
           description: 'Certified net revenue block.',
+          datalexContract: 'commerce.Revenue.net_revenue@1',
         },
       },
       businessViews: {
@@ -80,11 +94,22 @@ describe('buildKGFromManifest', () => {
     expect(graph.nodes).toEqual(
       expect.arrayContaining([
         expect.objectContaining({
+          nodeId: 'domain:revenue',
+          kind: 'domain',
+          sourceTier: 'business_context',
+          boundedContext: 'Revenue bookings, recognition, refunds, and health.',
+          primaryTerms: ['Net Revenue'],
+        }),
+        expect.objectContaining({
           nodeId: 'term:Net Revenue',
           kind: 'term',
           sourceTier: 'business_context',
           certification: 'certified',
           llmContext: expect.stringContaining('synonyms: recognized revenue'),
+        }),
+        expect.objectContaining({
+          nodeId: 'block:Revenue Total',
+          datalexContract: 'commerce.Revenue.net_revenue@1',
         }),
         expect.objectContaining({
           nodeId: 'business_view:Revenue Health',
@@ -101,6 +126,9 @@ describe('buildKGFromManifest', () => {
         { src: 'term:Net Revenue', dst: 'block:Revenue Total', kind: 'defines' },
         { src: 'term:Net Revenue', dst: 'business_view:Revenue Health', kind: 'defines' },
         { src: 'block:Revenue Total', dst: 'business_view:Revenue Health', kind: 'composes' },
+        { src: 'domain:revenue', dst: 'term:Net Revenue', kind: 'contains' },
+        { src: 'domain:revenue', dst: 'block:Revenue Total', kind: 'contains' },
+        { src: 'domain:revenue', dst: 'business_view:Revenue Health', kind: 'contains' },
       ]),
     );
   });
@@ -112,6 +140,7 @@ describe('buildKGFromManifest', () => {
       generatedAt: '2026-06-12T00:00:00.000Z',
       project: 'test',
       projectRoot: '/tmp/dql',
+      domains: {},
       blocks: {},
       businessViews: {},
       terms: {},

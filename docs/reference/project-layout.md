@@ -4,6 +4,36 @@ A DQL project is a local-first git repo with a few conventional directories.
 Shared assets are plain files. Private App overlays, saved layouts, and AI pins
 live under `.dql/local/` and are not committed.
 
+For new enterprise-style repos, prefer the domain-first layout:
+
+```text
+my-dql-project/
+├─ dql.config.json
+├─ domains/
+│   ├─ customer/
+│   │   ├─ domain.dql
+│   │   ├─ terms/
+│   │   ├─ blocks/
+│   │   │   └─ _drafts/
+│   │   ├─ views/
+│   │   └─ apps/
+│   └─ revenue/
+├─ blocks/                  # legacy-compatible shared blocks
+├─ terms/                   # legacy-compatible shared terms
+├─ business-views/          # legacy-compatible shared views
+├─ apps/
+└─ .dql/cache/
+```
+
+The compiler scans both layouts and emits one manifest. Use:
+
+```bash
+dql new domain customer
+dql new block --domain customer --pattern entity_profile "Customer Profile"
+dql new view --domain customer "Customer 360"
+dql migrate layout --to domain-first --dry-run
+```
+
 ```text
 my-dql-project/
 ├─ dql.config.json          # connection, semantic layer, dbt wiring
@@ -37,6 +67,9 @@ my-dql-project/
 
 ## What each directory holds
 
+- **`domains/<domain>/domain.dql`** — first-class domain metadata: owner,
+  business owner, bounded context, source systems, primary terms, cadence, and
+  tags. Domain folders can contain `terms/`, `blocks/`, `views/`, and `apps/`.
 - **`blocks/`** — one `.dql` file per block. Governance fields (`domain`,
   `owner`) are required by default; the certification check runs on CI.
 - **`terms/`** — one `.dql` file per `term`. These define business vocabulary,

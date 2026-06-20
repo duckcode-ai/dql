@@ -3,7 +3,7 @@ import { basename, join, resolve } from 'node:path';
 import type { CLIFlags } from '../args.js';
 import { findProjectRoot } from '../local-runtime.js';
 
-type ScaffoldKind = 'block' | 'dashboard' | 'workbook' | 'semantic-block' | 'notebook' | 'business-view' | 'term';
+type ScaffoldKind = 'block' | 'dashboard' | 'workbook' | 'semantic-block' | 'notebook' | 'business-view' | 'term' | 'domain';
 
 export async function runNew(subject: string | null, rest: string[], flags: CLIFlags): Promise<void> {
   const { kind, rawName } = resolveNewTarget(subject, rest);
@@ -20,7 +20,15 @@ export async function runNew(subject: string | null, rest: string[], flags: CLIF
     return runNewNotebook({ projectRoot, title, slug, flags, usingStarterData, availableDataFiles });
   }
 
-  const outputDir = resolve(projectRoot, defaultDirForKind(kind, flags.outDir));
+  if (kind === 'domain') {
+    return runNewDomain({ projectRoot, title, slug, flags });
+  }
+
+  const domainSlug = toSlug(flags.domain || 'general');
+  const outputDir = resolve(
+    projectRoot,
+    defaultDirForKind(kind, flags.outDir, domainSlug, existsSync(join(projectRoot, 'domains'))),
+  );
   const filePath = join(outputDir, `${slug}.dql`);
 
   if (existsSync(filePath)) {
@@ -43,6 +51,7 @@ export async function runNew(subject: string | null, rest: string[], flags: CLIF
     queryOnly: flags.queryOnly,
     usingStarterData,
     metricName,
+    pattern: flags.template,
   });
 
   writeFileSync(filePath, content, 'utf-8');
@@ -81,14 +90,14 @@ export async function runNew(subject: string | null, rest: string[], flags: CLIF
 
 function resolveNewTarget(subject: string | null, rest: string[]): { kind: ScaffoldKind; rawName: string } {
   if (!subject) {
-    throw new Error('Usage: dql new <block|dashboard|workbook|semantic-block|notebook|business-view|term> <name>');
+    throw new Error('Usage: dql new <domain|block|dashboard|workbook|semantic-block|notebook|view|business-view|term> <name>');
   }
 
-  if (subject === 'business_view') {
+  if (subject === 'business_view' || subject === 'view') {
     subject = 'business-view';
   }
 
-  if (subject === 'block' || subject === 'dashboard' || subject === 'workbook' || subject === 'semantic-block' || subject === 'notebook' || subject === 'business-view' || subject === 'term') {
+  if (subject === 'domain' || subject === 'block' || subject === 'dashboard' || subject === 'workbook' || subject === 'semantic-block' || subject === 'notebook' || subject === 'business-view' || subject === 'term') {
     const rawName = rest.join(' ').trim();
     if (!rawName) {
       throw new Error(`Missing ${subject} name. Usage: dql new ${subject} <name>`);
@@ -108,6 +117,7 @@ function buildTemplate(opts: {
   queryOnly: boolean;
   usingStarterData: boolean;
   metricName: string;
+  pattern: string;
 }): string {
   switch (opts.kind) {
     case 'dashboard':
@@ -120,10 +130,30 @@ function buildTemplate(opts: {
       return buildBusinessViewTemplate(opts);
     case 'term':
       return buildTermTemplate(opts);
+    case 'domain':
+      return buildDomainTemplate(opts);
     case 'block':
     default:
       return buildBlockTemplate(opts);
   }
+}
+
+function buildDomainTemplate(opts: {
+  title: string;
+  owner: string;
+  domain: string;
+}): string {
+  const domainSlug = toSlug(opts.domain || opts.title).replace(/_/g, '-');
+  return `domain "${opts.title}" {
+    owner = "${opts.owner}"
+    businessOwner = "${opts.owner}"
+    boundedContext = "Describe the business boundary for ${opts.title.toLowerCase()}."
+    sourceSystems = []
+    primaryTerms = []
+    reviewCadence = "monthly"
+    tags = ["${domainSlug}"]
+}
+`;
 }
 
 function buildTermTemplate(opts: {
@@ -178,12 +208,16 @@ function buildBlockTemplate(opts: {
   chart: string;
   queryOnly: boolean;
   usingStarterData: boolean;
+  pattern: string;
 }): string {
+  const pattern = normalizeBlockPattern(opts.pattern);
   const description = opts.usingStarterData
     ? `Starter block for ${opts.title.toLowerCase()} using local sample data`
     : `Starter block for ${opts.title.toLowerCase()}`;
 
   const query = opts.usingStarterData ? starterBlockQueryForChart(opts.chart) : placeholderBlockQueryForChart(opts.chart);
+  const contract = blockContractForPattern(pattern, opts);
+  const tags = ['starter', opts.domain, pattern].filter(Boolean);
   const params = opts.usingStarterData && (opts.chart === 'bar' || opts.chart === 'kpi')
     ? `
     params {
@@ -196,9 +230,20 @@ function buildBlockTemplate(opts: {
   return `block "${opts.title}" {
     domain = "${opts.domain}"
     type = "custom"
+    status = "draft"
     description = "${description}"
     owner = "${opts.owner}"
-    tags = ["starter", "${opts.domain}"]${params}
+    tags = [${tags.map((tag) => `"${tag}"`).join(', ')}]
+    pattern = "${pattern}"
+    grain = "${contract.grain}"
+    entities = [${contract.entities.map((entity) => `"${entity}"`).join(', ')}]
+    terms = []
+    outputs = [${contract.outputs.map((output) => `"${output}"`).join(', ')}]
+    dimensions = [${contract.dimensions.map((dimension) => `"${dimension}"`).join(', ')}]
+    allowedFilters = [${contract.allowedFilters.map((filter) => `"${filter}"`).join(', ')}]
+    sourceSystems = []
+    replacementFor = []
+    reviewCadence = "monthly"${params}
 
     query = """
 ${indentBlock(query, 8)}
@@ -363,6 +408,146 @@ function blockVisualizationForChart(chart: string): string {
   }
 }
 
+function normalizeBlockPattern(value: string): string {
+  const normalized = value.trim().toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '');
+  const allowed = new Set([
+    'metric_wrapper',
+    'entity_profile',
+    'entity_rollup',
+    'ranking',
+    'trend',
+    'bridge',
+    'drilldown',
+    'replacement',
+  ]);
+  return allowed.has(normalized) ? normalized : 'custom';
+}
+
+function blockContractForPattern(pattern: string, opts: {
+  title: string;
+  chart: string;
+}): {
+  grain: string;
+  entities: string[];
+  outputs: string[];
+  dimensions: string[];
+  allowedFilters: string[];
+} {
+  const titleToken = toSlug(opts.title).split('_').filter(Boolean)[0] || 'entity';
+  switch (pattern) {
+    case 'metric_wrapper':
+      return {
+        grain: 'metric_time',
+        entities: [],
+        outputs: ['metric_time', 'metric_value'],
+        dimensions: ['metric_time'],
+        allowedFilters: ['metric_time'],
+      };
+    case 'entity_profile':
+      return {
+        grain: `${titleToken}_id`,
+        entities: [toTitle(titleToken)],
+        outputs: [`${titleToken}_id`, `${titleToken}_name`],
+        dimensions: [],
+        allowedFilters: [`${titleToken}_id`],
+      };
+    case 'entity_rollup':
+      return {
+        grain: `${titleToken}_id`,
+        entities: [toTitle(titleToken)],
+        outputs: [`${titleToken}_id`, 'metric_value'],
+        dimensions: [],
+        allowedFilters: [`${titleToken}_id`, 'date'],
+      };
+    case 'ranking':
+      return {
+        grain: titleToken,
+        entities: [toTitle(titleToken)],
+        outputs: [titleToken, 'metric_value', 'rank'],
+        dimensions: [titleToken],
+        allowedFilters: ['date'],
+      };
+    case 'trend':
+      return {
+        grain: 'date',
+        entities: [],
+        outputs: ['date', 'metric_value'],
+        dimensions: ['date'],
+        allowedFilters: ['date'],
+      };
+    case 'bridge':
+      return {
+        grain: 'bridge_key',
+        entities: ['Review Required'],
+        outputs: ['bridge_key'],
+        dimensions: [],
+        allowedFilters: [],
+      };
+    case 'drilldown':
+      return {
+        grain: 'detail_row',
+        entities: [],
+        outputs: ['detail_row'],
+        dimensions: [],
+        allowedFilters: ['date'],
+      };
+    case 'replacement':
+      return {
+        grain: 'review_required',
+        entities: [],
+        outputs: ['review_required'],
+        dimensions: [],
+        allowedFilters: [],
+      };
+    default:
+      return contractForChart(opts.chart);
+  }
+}
+
+function contractForChart(chart: string): {
+  grain: string;
+  entities: string[];
+  outputs: string[];
+  dimensions: string[];
+  allowedFilters: string[];
+} {
+  switch (chart) {
+    case 'kpi':
+      return {
+        grain: 'all',
+        entities: [],
+        outputs: ['total_revenue'],
+        dimensions: [],
+        allowedFilters: [],
+      };
+    case 'line':
+      return {
+        grain: 'revenue_date',
+        entities: [],
+        outputs: ['revenue_date', 'total_revenue'],
+        dimensions: ['revenue_date'],
+        allowedFilters: ['revenue_date'],
+      };
+    case 'table':
+      return {
+        grain: 'row',
+        entities: [],
+        outputs: [],
+        dimensions: [],
+        allowedFilters: [],
+      };
+    case 'bar':
+    default:
+      return {
+        grain: 'segment',
+        entities: [],
+        outputs: ['segment', 'revenue'],
+        dimensions: ['segment'],
+        allowedFilters: ['segment'],
+      };
+  }
+}
+
 function dashboardChartFor(chart: string, source: string, usingStarterData: boolean): string {
   switch (chart) {
     case 'kpi':
@@ -425,6 +610,15 @@ function nextStepsFor(kind: ScaffoldKind, relativePath: string, usingStarterData
     ];
   }
 
+  if (kind === 'domain') {
+    const domainSlug = basename(resolve(relativePath, '..'));
+    return [
+      `Edit ${relativePath} to capture the domain owner, boundary, source systems, and primary terms`,
+      `dql new block --domain ${domainSlug} --pattern entity_profile "Customer Profile"`,
+      `dql compile`,
+    ];
+  }
+
   if (!usingStarterData) {
     return [
       `Edit ${relativePath} to replace the placeholder SQL`,
@@ -441,8 +635,21 @@ function nextStepsFor(kind: ScaffoldKind, relativePath: string, usingStarterData
   return steps;
 }
 
-function defaultDirForKind(kind: ScaffoldKind, outDir: string): string {
+function defaultDirForKind(kind: ScaffoldKind, outDir: string, domainSlug = 'general', domainFirst = false): string {
   if (outDir) return outDir;
+  if (domainFirst) {
+    switch (kind) {
+      case 'semantic-block':
+      case 'block':
+        return join('domains', domainSlug, 'blocks');
+      case 'business-view':
+        return join('domains', domainSlug, 'views');
+      case 'term':
+        return join('domains', domainSlug, 'terms');
+      default:
+        break;
+    }
+  }
   switch (kind) {
     case 'dashboard':
       return 'dashboards';
@@ -460,6 +667,56 @@ function defaultDirForKind(kind: ScaffoldKind, outDir: string): string {
     default:
       return 'blocks';
   }
+}
+
+async function runNewDomain(opts: {
+  projectRoot: string;
+  title: string;
+  slug: string;
+  flags: CLIFlags;
+}): Promise<void> {
+  const { projectRoot, title, slug, flags } = opts;
+  const domainDir = resolve(projectRoot, flags.outDir || join('domains', slug));
+  const filePath = join(domainDir, 'domain.dql');
+
+  if (existsSync(filePath)) {
+    throw new Error(`Domain already exists: ${filePath}`);
+  }
+
+  mkdirSync(domainDir, { recursive: true });
+  for (const child of ['terms', 'blocks', 'views', 'apps']) {
+    mkdirSync(join(domainDir, child), { recursive: true });
+  }
+
+  const owner = flags.owner || process.env.USER || 'team';
+  const content = buildDomainTemplate({
+    title,
+    owner,
+    domain: slug,
+  });
+  writeFileSync(filePath, content, 'utf-8');
+
+  const relativePath = relativeToProject(projectRoot, filePath);
+  const nextSteps = nextStepsFor('domain', relativePath, false, false);
+
+  if (flags.format === 'json') {
+    console.log(JSON.stringify({
+      created: true,
+      type: 'domain',
+      name: title,
+      path: filePath,
+      folders: ['terms', 'blocks', 'views', 'apps'].map((child) => join(domainDir, child)),
+      nextSteps,
+    }, null, 2));
+    return;
+  }
+
+  console.log(`\n  ✓ Created DQL domain: ${title}`);
+  console.log(`    Path: ${filePath}`);
+  console.log('');
+  console.log('  Next steps:');
+  nextSteps.forEach((step, index) => console.log(`    ${index + 1}. ${step}`));
+  console.log('');
 }
 
 async function runNewNotebook(opts: {

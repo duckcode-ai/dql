@@ -324,6 +324,10 @@ export class SemanticAnalyzer {
         case NodeKind.ImportDecl:
           // Import validation is handled at compile time
           break;
+        case NodeKind.DomainDecl:
+          // Domain-level completeness is handled by the manifest builder so it
+          // can evaluate usage across files.
+          break;
         case NodeKind.BlockDecl:
           this.analyzeBlockDecl(stmt);
           break;

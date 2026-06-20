@@ -3,6 +3,21 @@ import { formatDQL } from './formatter.js';
 import { parse } from '../parser/parser.js';
 
 describe('formatDQL', () => {
+  it('formats domain declarations and block contract metadata idempotently', () => {
+    const source = `domain "Customer"{owner="customer-analytics" businessOwner="Customer Success" boundedContext="Customer boundary" sourceSystems=["crm","orders"] primaryTerms=["Customer"] reviewCadence="monthly" tags=["customer"]}
+block "Customer Orders Rollup"{domain="Customer" type="custom" pattern="entity_rollup" grain="customer_id" entities=["Customer"] outputs=["customer_id","total_orders"] allowedFilters=["order_date"] sourceSystems=["orders"] replacementFor=["Legacy Orders"] query="""SELECT customer_id, COUNT(*) AS total_orders FROM orders GROUP BY customer_id"""}`;
+
+    const formatted = formatDQL(source);
+
+    expect(formatted).toContain('domain "Customer" {');
+    expect(formatted).toContain('boundedContext = "Customer boundary"');
+    expect(formatted).toContain('pattern = "entity_rollup"');
+    expect(formatted).toContain('grain = "customer_id"');
+    expect(formatted).toContain('outputs = ["customer_id", "total_orders"]');
+    expect(formatted).toContain('replacementFor = ["Legacy Orders"]');
+    expect(formatDQL(formatted)).toBe(formatted);
+  });
+
   it('formats dashboard charts and filters with stable indentation', () => {
     const source = `dashboard "Daily"{
 @cache(300)

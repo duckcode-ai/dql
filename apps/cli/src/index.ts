@@ -37,21 +37,26 @@ const HELP = `
 
   Usage:
     dql init [directory]             Initialize DQL in a project (auto-detects dbt)
-    dql new <type> <name>           Create a new block, semantic block, dashboard, or workbook
+    dql new <type> <name>           Create a domain, block, semantic block, view, term, dashboard, or workbook
     dql build <file.dql>            Compile a DQL file to a static HTML bundle
     dql doctor [path]               Run local setup checks for a DQL project
+    dql doctor scale                Report enterprise-scale manifest/cache/index health
     dql preview <file.dql>          Render a local browser preview for a DQL file
     dql serve [directory]           Serve a built DQL bundle locally
     dql parse <file.dql>            Parse and analyze a DQL file
     dql test <file.dql>             [deprecated] Use dql certify --connection instead
     dql validate [path]             Validate all DQL files and semantic references
     dql certify <file.dql>          Evaluate certification rules
+    dql certify <file.dql> --enterprise
+                                    Enforce enterprise reusable-block requirements
     dql certify --from-draft <path> Promote a Tier-2 draft block to certified
                                     (auto-flips status, sets datalex_contract,
                                      surfaces datalex-manifest.json patch)
     dql info <file.dql>             Show block metadata
     dql migrate <source>            Scaffold migration from looker/tableau/dbt/metabase/raw-sql
     dql migrate format [--check]    Upgrade all .dql/.dqlnb files to canonical format
+    dql migrate layout --to domain-first [--dry-run]
+                                    Preview or apply legacy-to-domain folder moves
     dql import sql <path>           Preview SQL files/folders as Block Studio import candidates
     dql import sql <path> --save    Save valid import candidates as local blocks
     dql fmt <file.dql|.dqlnb>       Format DQL/notebook file in place
@@ -85,12 +90,15 @@ const HELP = `
     --check                         For "fmt": check-only and exit 1 if changes needed
     --input <path>                  Source path for scaffold-style migration commands
     --out-dir <path>                Output directory for "build"
+    --to <layout>                   Target layout for "migrate layout" (domain-first)
     --port <number>                 Preferred local port for "preview" or "serve"
     --chart <type>                  Primary chart type for "new" scaffolds (default: bar)
     --domain <name>                 Domain for new block scaffolds (default: general)
     --owner <name>                  Owner for new block scaffolds (default: current user)
     --query-only                    Create a query-only block without visualization
+    --pattern <name>                Block scaffold pattern (entity_profile, ranking, trend, bridge, ...)
     --ai-layout                     For "app generate": store dynamic GenUI layout metadata
+    --enterprise                    For "certify": require enterprise block contract metadata
     --connection <driver|path>      Database connection for certify/test (e.g. duckdb, path/to/db)
     --save                          For "import sql": save valid candidates as local blocks
     --from-draft <path>             For "certify": promote a Tier-2 draft block to certified
@@ -98,6 +106,8 @@ const HELP = `
     --datalex-manifest <path>       Optional DataLex manifest for datalex_contract validation
     --open-pr                       For "certify --from-draft": push branch + open GitHub PR with the diff
       --force                         For "certify --from-draft": overwrite an existing certified block
+                                      For "migrate layout": apply domain-first file moves
+      --dry-run                       For "migrate layout": preview file moves
       --execute                       For "agent eval": run bounded SQL previews
       --ai                            For "doctor": include AI, MCP, and metadata checks
   `;
@@ -107,12 +117,14 @@ const COMMAND_HELP: Record<string, string> = {
   dql certify — Evaluate local certification rules
 
   Usage:
-    dql certify <file.dql> [--connection <driver|path>] [--skip-tests]
+    dql certify <file.dql> [--connection <driver|path>] [--skip-tests] [--enterprise]
     dql certify --from-draft <path> [--contract <id@version>] [--force]
 
   Notes:
     Certification is a local OSS trust label. Use status = "certified" for
     blocks that pass metadata, lineage, and test checks.
+    --enterprise makes grain, declared outputs, source-system lineage,
+    reusable pattern, review cadence, and test assertions hard requirements.
   `,
   import: `
   dql import — Convert existing SQL into local DQL blocks
@@ -155,6 +167,7 @@ const COMMAND_HELP: Record<string, string> = {
   Usage:
     dql doctor [path] [--format json]
     dql doctor [path] --ai
+    dql doctor scale [--format json]
 
   Prints setup checks and the next local-first commands to run.
   `,

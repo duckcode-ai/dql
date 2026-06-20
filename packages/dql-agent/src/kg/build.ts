@@ -68,6 +68,14 @@ export function buildKGFromManifest(manifest: DQLManifest): {
       businessOwner: block.businessOwner,
       decisionUse: block.decisionUse,
       reviewCadence: block.reviewCadence,
+      pattern: block.pattern,
+      grain: block.grain,
+      entities: block.entities,
+      declaredOutputs: block.declaredOutputs,
+      allowedFilters: block.allowedFilters,
+      sourceSystems: block.sourceSystems,
+      replacementFor: block.replacementFor,
+      datalexContract: block.datalexContract,
       businessRules: block.businessRules ?? block.invariants,
       caveats: block.caveats,
       sourcePath: block.filePath,
@@ -249,8 +257,31 @@ export function buildKGFromManifest(manifest: DQLManifest): {
     }
   }
 
-  // Domains: derive a node per distinct domain seen across blocks/dashboards/apps.
+  // Domains: prefer first-class domain declarations, then derive nodes from
+  // legacy domain strings so older projects still index cleanly.
   const domains = new Set<string>();
+  for (const domain of Object.values(manifest.domains ?? {})) {
+    domains.add(domain.name);
+    nodes.push({
+      nodeId: `domain:${domain.name}`,
+      kind: 'domain',
+      name: domain.name,
+      domain: domain.name,
+      owner: domain.owner,
+      description: domain.description ?? domain.boundedContext,
+      tags: domain.tags ?? [],
+      businessOutcome: domain.businessOutcome,
+      businessOwner: domain.businessOwner,
+      reviewCadence: domain.reviewCadence,
+      sourceSystems: domain.sourceSystems,
+      boundedContext: domain.boundedContext,
+      primaryTerms: domain.primaryTerms,
+      sourcePath: domain.filePath,
+      sourceTier: 'business_context',
+      certification: 'analyst_review_required',
+      provenance: 'DQL domain',
+    });
+  }
   for (const term of Object.values(manifest.terms ?? {})) if (term.domain) domains.add(term.domain);
   for (const view of Object.values(manifest.businessViews ?? {})) if (view.domain) domains.add(view.domain);
   for (const block of Object.values(manifest.blocks)) if (block.domain) domains.add(block.domain);
@@ -258,12 +289,31 @@ export function buildKGFromManifest(manifest: DQLManifest): {
   for (const a of Object.values(manifest.apps ?? {})) if (a.domain) domains.add(a.domain);
   for (const m of Object.values(manifest.metrics)) if (m.domain) domains.add(m.domain);
   for (const d of domains) {
+    if (nodes.some((node) => node.nodeId === `domain:${d}`)) continue;
     nodes.push({
       nodeId: `domain:${d}`,
       kind: 'domain',
       name: d,
       domain: d,
     });
+  }
+  for (const term of Object.values(manifest.terms ?? {})) {
+    if (term.domain) edges.push({ src: `domain:${term.domain}`, dst: `term:${term.name}`, kind: 'contains' });
+  }
+  for (const view of Object.values(manifest.businessViews ?? {})) {
+    if (view.domain) edges.push({ src: `domain:${view.domain}`, dst: `business_view:${view.name}`, kind: 'contains' });
+  }
+  for (const block of Object.values(manifest.blocks)) {
+    if (block.domain) edges.push({ src: `domain:${block.domain}`, dst: `block:${block.name}`, kind: 'contains' });
+  }
+  for (const d of Object.values(manifest.dashboards ?? {})) {
+    if (d.domain) edges.push({ src: `domain:${d.domain}`, dst: `dashboard:${d.qualifiedId ?? `${d.appId}/${d.id}`}`, kind: 'contains' });
+  }
+  for (const a of Object.values(manifest.apps ?? {})) {
+    if (a.domain) edges.push({ src: `domain:${a.domain}`, dst: `app:${a.id}`, kind: 'contains' });
+  }
+  for (const m of Object.values(manifest.metrics)) {
+    if (m.domain) edges.push({ src: `domain:${m.domain}`, dst: `metric:${m.name}`, kind: 'contains' });
   }
 
   return { nodes, edges };

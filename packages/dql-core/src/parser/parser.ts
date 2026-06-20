@@ -28,6 +28,7 @@ import {
   type LayoutRowNode,
   type LayoutRowItem,
   type BlockDeclNode,
+  type DomainDeclNode,
   type TermDeclNode,
   type BusinessViewDeclNode,
   type BusinessViewIncludeNode,
@@ -137,6 +138,10 @@ export class Parser {
       return this.parseBlockDecl(decorators);
     }
 
+    if (this.check(TokenType.DomainKeyword)) {
+      return this.parseDomainDecl(decorators);
+    }
+
     if (this.check(TokenType.TermKeyword)) {
       return this.parseTermDecl(decorators);
     }
@@ -156,7 +161,7 @@ export class Parser {
       return null;
     }
 
-    this.error(`Unexpected token '${this.current().value}'. Expected 'dashboard', 'digest', 'workbook', 'chart', 'block', 'term', 'business_view', or 'import'.`);
+    this.error(`Unexpected token '${this.current().value}'. Expected 'dashboard', 'digest', 'workbook', 'chart', 'domain', 'block', 'term', 'business_view', or 'import'.`);
     return null;
   }
 
@@ -775,6 +780,91 @@ export class Parser {
     return { start: start.start, end: end.end };
   }
 
+  // ---- Domain Declaration ----
+
+  private parseDomainDecl(decorators: DecoratorNode[]): DomainDeclNode {
+    const start = decorators.length > 0 ? decorators[0].span : this.currentSpan();
+    this.expect(TokenType.DomainKeyword);
+
+    const nameToken = this.expect(TokenType.StringLiteral);
+    this.expect(TokenType.LeftBrace);
+
+    let owner: string | undefined;
+    let businessOwner: string | undefined;
+    let boundedContext: string | undefined;
+    let sourceSystems: string[] | undefined;
+    let primaryTerms: string[] | undefined;
+    let reviewCadence: string | undefined;
+    let tags: string[] | undefined;
+    let businessOutcome: string | undefined;
+    let description: string | undefined;
+
+    while (!this.check(TokenType.RightBrace) && !this.isAtEnd()) {
+      if (this.check(TokenType.OwnerKeyword)) {
+        this.advance();
+        this.expect(TokenType.Equals);
+        owner = this.expect(TokenType.StringLiteral).value;
+      } else if (this.check(TokenType.DescriptionKeyword)) {
+        this.advance();
+        this.expect(TokenType.Equals);
+        description = this.expectStringLike().value;
+      } else if (this.check(TokenType.TagsKeyword)) {
+        this.advance();
+        this.expect(TokenType.Equals);
+        tags = this.parseStringArrayValues();
+      } else if (
+        this.check(TokenType.Identifier)
+        && (this.current().value === 'businessOwner'
+          || this.current().value === 'boundedContext'
+          || this.current().value === 'sourceSystems'
+          || this.current().value === 'primaryTerms'
+          || this.current().value === 'reviewCadence'
+          || this.current().value === 'businessOutcome')
+      ) {
+        const keyToken = this.advance();
+        this.expect(TokenType.Equals);
+        if (keyToken.value === 'businessOwner') {
+          businessOwner = this.expect(TokenType.StringLiteral).value;
+        } else if (keyToken.value === 'boundedContext') {
+          boundedContext = this.expectStringLike().value;
+        } else if (keyToken.value === 'sourceSystems') {
+          sourceSystems = this.parseStringArrayValues();
+        } else if (keyToken.value === 'primaryTerms') {
+          primaryTerms = this.parseStringArrayValues();
+        } else if (keyToken.value === 'reviewCadence') {
+          reviewCadence = this.expect(TokenType.StringLiteral).value;
+        } else if (keyToken.value === 'businessOutcome') {
+          businessOutcome = this.expect(TokenType.StringLiteral).value;
+        }
+      } else if (this.check(TokenType.RightBrace)) {
+        break;
+      } else {
+        this.error(
+          `Unexpected token '${this.current().value}' inside domain. Expected 'owner', 'businessOwner', 'boundedContext', 'sourceSystems', 'primaryTerms', 'reviewCadence', 'tags', 'businessOutcome', 'description', or '}'.`,
+        );
+        this.advance();
+      }
+    }
+
+    this.expect(TokenType.RightBrace);
+
+    return {
+      kind: NodeKind.DomainDecl,
+      name: nameToken.value,
+      owner,
+      businessOwner,
+      boundedContext,
+      sourceSystems,
+      primaryTerms,
+      reviewCadence,
+      tags,
+      businessOutcome,
+      description,
+      decorators,
+      span: this.makeSpan(start, this.previousSpan()),
+    };
+  }
+
   // ---- Business Term Declaration ----
 
   private parseTermDecl(decorators: DecoratorNode[]): TermDeclNode {
@@ -1075,6 +1165,13 @@ export class Parser {
     let tags: string[] | undefined;
     let owner: string | undefined;
     let termRefs: string[] | undefined;
+    let pattern: string | undefined;
+    let grain: string | undefined;
+    let entities: string[] | undefined;
+    let outputs: string[] | undefined;
+    let allowedFilters: string[] | undefined;
+    let sourceSystems: string[] | undefined;
+    let replacementFor: string[] | undefined;
     let params: BlockParamsNode | undefined;
     let query: SQLQueryNode | undefined;
     let visualization: BlockVisualizationNode | undefined;
@@ -1182,6 +1279,35 @@ export class Parser {
         this.advance();
         this.expect(TokenType.Equals);
         termRefs = this.parseStringArrayValues();
+      } else if (
+        this.check(TokenType.Identifier)
+        && (this.current().value === 'grain'
+          || this.current().value === 'pattern'
+          || this.current().value === 'entities'
+          || this.current().value === 'outputs'
+          || this.current().value === 'allowedFilters'
+          || this.current().value === 'sourceSystems'
+          || this.current().value === 'replacementFor')
+      ) {
+        const keyToken = this.advance();
+        this.expect(TokenType.Equals);
+        if (keyToken.value === 'pattern') {
+          const val = this.expect(TokenType.StringLiteral);
+          pattern = val.value;
+        } else if (keyToken.value === 'grain') {
+          const val = this.expect(TokenType.StringLiteral);
+          grain = val.value;
+        } else if (keyToken.value === 'entities') {
+          entities = this.parseStringArrayValues();
+        } else if (keyToken.value === 'outputs') {
+          outputs = this.parseStringArrayValues();
+        } else if (keyToken.value === 'allowedFilters') {
+          allowedFilters = this.parseStringArrayValues();
+        } else if (keyToken.value === 'sourceSystems') {
+          sourceSystems = this.parseStringArrayValues();
+        } else if (keyToken.value === 'replacementFor') {
+          replacementFor = this.parseStringArrayValues();
+        }
       } else if (this.check(TokenType.ParamsKeyword)) {
         params = this.parseBlockParams();
       } else if (this.check(TokenType.QueryKeyword)) {
@@ -1390,7 +1516,7 @@ export class Parser {
           continue;
         }
         this.error(
-          `Unexpected token '${this.current().value}' inside block. Expected 'domain', 'type', 'status', 'datalex_contract', 'metric', 'metrics', 'dimensions', 'description', 'tags', 'owner', 'terms', 'params', 'query', 'visualization', 'tests', 'llmContext', 'invariants', 'examples', 'businessOutcome', 'businessOwner', 'decisionUse', 'reviewCadence', 'businessRules', 'caveats', Tier-2 draft metadata fields, or '}'.`,
+          `Unexpected token '${this.current().value}' inside block. Expected 'domain', 'type', 'status', 'datalex_contract', 'metric', 'metrics', 'dimensions', 'description', 'tags', 'owner', 'terms', 'pattern', 'grain', 'entities', 'outputs', 'allowedFilters', 'sourceSystems', 'replacementFor', 'params', 'query', 'visualization', 'tests', 'llmContext', 'invariants', 'examples', 'businessOutcome', 'businessOwner', 'decisionUse', 'reviewCadence', 'businessRules', 'caveats', Tier-2 draft metadata fields, or '}'.`,
         );
         this.advance();
       }
@@ -1417,6 +1543,13 @@ export class Parser {
       tags,
       owner,
       termRefs,
+      pattern,
+      grain,
+      entities,
+      outputs,
+      allowedFilters,
+      sourceSystems,
+      replacementFor,
       params,
       query,
       visualization,

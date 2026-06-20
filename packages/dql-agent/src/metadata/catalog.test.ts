@@ -63,6 +63,12 @@ describe('local metadata catalog', () => {
           }),
         ]),
       );
+      expect(catalog.sourceFingerprints().map((item) => item.sourcePath)).toEqual(
+        expect.arrayContaining(['blocks/top_10_goal_scorers.dql']),
+      );
+      expect(catalog.domainShards().map((item) => item.domain)).toEqual(
+        expect.arrayContaining(['nba']),
+      );
       expect(catalog.searchObjects({ query: 'least points player', limit: 10 }).map((row) => row.objectKey)).toEqual(
         expect.arrayContaining([
           'dql:block:Top 10 Goal Scorers',
@@ -126,6 +132,104 @@ describe('local metadata catalog', () => {
       reviewStatus: 'certified',
       exactObjectKey: 'dql:block:Top 10 Goal Scorers',
     });
+  });
+
+  it('indexes optional DataLex contract evidence and links bound DQL blocks', async () => {
+    writeFileSync(
+      join(projectRoot, 'datalex-manifest.json'),
+      JSON.stringify({
+        manifestSpecVersion: '1.0.0',
+        datalexVersion: 'test',
+        generatedAt: '2026-06-20T00:00:00.000Z',
+        project: { name: 'nba_contracts' },
+        domains: [
+          {
+            name: 'nba',
+            description: 'NBA player analytics contracts.',
+            owners: ['data-governance'],
+            glossary: [
+              {
+                term: 'Top Scorer',
+                definition: 'A player ranked by total points scored.',
+                tags: ['nba', 'scoring'],
+              },
+            ],
+            entities: [
+              {
+                name: 'Player',
+                description: 'NBA player business entity.',
+                fields: [
+                  { name: 'player_name', type: 'string', description: 'Player display name.' },
+                  { name: 'total_points', type: 'number', description: 'Total points scored.' },
+                ],
+                contracts: [
+                  {
+                    id: 'nba.Player.top_scorers',
+                    name: 'Top Scorers',
+                    version: 1,
+                    description: 'Contract for ranking NBA players by points.',
+                    owner: 'analytics@example.com',
+                    signature: {
+                      outputs: [
+                        { name: 'player_name', type: 'string' },
+                        { name: 'total_points', type: 'number' },
+                      ],
+                    },
+                  },
+                ],
+              },
+            ],
+          },
+        ],
+      }),
+      'utf-8',
+    );
+    writeFileSync(
+      join(projectRoot, 'blocks', 'contracted_top_scorers.dql'),
+      `block "Contracted Top Scorers" {
+  domain = "nba"
+  type = "custom"
+  status = "certified"
+  datalex_contract = "nba.Player.top_scorers@1"
+  owner = "analytics@example.com"
+  description = "Contract-backed top scorer ranking."
+  tags = ["nba", "player", "points"]
+  query = """
+    SELECT player_name, SUM(points) AS total_points
+    FROM fct_player_performance
+    GROUP BY 1
+  """
+}`,
+      'utf-8',
+    );
+
+    await ensureMetadataCatalogFresh(projectRoot);
+    const catalog = openMetadataCatalog(projectRoot);
+    try {
+      expect(catalog.getObject('datalex:domain:nba')).toMatchObject({
+        objectType: 'datalex_domain',
+        owner: 'data-governance',
+      });
+      expect(catalog.getObject('datalex:entity:nba.Player')).toMatchObject({
+        objectType: 'datalex_entity',
+        description: 'NBA player business entity.',
+      });
+      expect(catalog.getObject('datalex:contract:nba.Player.top_scorers@1')).toMatchObject({
+        objectType: 'datalex_contract',
+        description: 'Contract for ranking NBA players by points.',
+      });
+      expect(catalog.edgesForKeys(['dql:block:Contracted Top Scorers'], 1)).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            edgeType: 'resolves_contract',
+            fromKey: 'dql:block:Contracted Top Scorers',
+            toKey: 'datalex:contract:nba.Player.top_scorers@1',
+          }),
+        ]),
+      );
+    } finally {
+      catalog.close();
+    }
   });
 
   it('routes exact certified example questions to certified execution', async () => {

@@ -3,6 +3,24 @@
 This page is the canonical OSS language reference for the stable local-first
 surface. The formatter emits this style and the parser accepts these examples.
 
+## Domain
+
+A `domain` declares a business boundary. Domain declarations are optional for
+legacy projects, but recommended for enterprise-scale repos because they become
+manifest nodes and lineage roots.
+
+```dql
+domain "Customer" {
+  owner = "customer-analytics"
+  businessOwner = "Customer Success"
+  boundedContext = "Customer identity, lifecycle, activity, value, and retention."
+  sourceSystems = ["crm", "orders", "support"]
+  primaryTerms = ["Customer", "Customer Health", "Lifetime Value"]
+  reviewCadence = "monthly"
+  tags = ["customer", "retention"]
+}
+```
+
 ## Block
 
 A block is the reusable analytics unit. Blocks live in `blocks/**/*.dql` and
@@ -19,6 +37,16 @@ block "Revenue by segment" {
   owner = "analytics@company.com"
   tags = ["revenue", "sample"]
   llmContext = "Use this block when people ask for revenue by customer segment."
+  pattern = "ranking"
+  grain = "segment"
+  entities = ["Customer Segment"]
+  terms = ["Revenue", "Customer Segment"]
+  outputs = ["segment", "revenue"]
+  dimensions = ["segment"]
+  allowedFilters = ["order_date", "segment"]
+  sourceSystems = ["orders"]
+  replacementFor = []
+  reviewCadence = "monthly"
 
   query = """
     SELECT
@@ -52,10 +80,19 @@ Canonical block fields:
 | `owner` | Person or team responsible for the block |
 | `tags` | Discovery and filtering labels |
 | `llmContext` | Agent-facing natural-language context |
+| `pattern` | Official reusable-widget pattern: `metric_wrapper`, `entity_profile`, `entity_rollup`, `ranking`, `trend`, `bridge`, `drilldown`, `replacement`, or `custom` |
 | `businessOutcome` | Outcome this block supports |
 | `businessOwner` | Business stakeholder for the metric or decision |
 | `decisionUse` | How the block should be used in decisions |
 | `reviewCadence` | Expected review interval |
+| `grain` | Row or business grain, such as `customer_id`, `order_month`, or `segment` |
+| `entities` | Business entities represented by the block |
+| `terms` | Business term references implemented or used by the block |
+| `outputs` | Declared output columns reviewers expect from the block |
+| `dimensions` | Declared grouping dimensions for semantic and SQL-backed blocks |
+| `allowedFilters` | Filters considered safe and meaningful for reuse |
+| `sourceSystems` | Business source-system hints used in lineage and AI context |
+| `replacementFor` | Prior blocks or business questions this block replaces |
 | `query` | SQL for `type = "custom"` blocks |
 | `metric` / `metrics` | Metric refs for `type = "semantic"` blocks |
 | `visualization` | Chart configuration |

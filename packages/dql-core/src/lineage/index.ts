@@ -57,6 +57,7 @@ export {
   type Business360Gap,
   type Business360Options,
   type Business360Result,
+  type Business360ResultV2,
   type LineagePath,
   type CompletePathResult,
   type CompletePathOptions,

@@ -34,6 +34,7 @@ import {
   detectDomainFlows,
   getDomainTrustOverview,
   queryLineage,
+  queryBusiness360,
   queryCompleteLineagePaths,
   LineageGraph,
   type SemanticLayer,
@@ -42,6 +43,7 @@ import {
   type LineageBlockInput,
   type LineageMetricInput,
   type LineageDimensionInput,
+  type Business360ResultV2,
   type AppDocument,
   type DashboardDocument,
   type DashboardGridItem,
@@ -805,7 +807,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
     let draftSave: BlockDraftSaveState;
     try {
       const savedPath = saveBlockStudioDraftArtifacts(projectRoot, {
-        currentPath: candidate.savedPath?.startsWith('blocks/_drafts/') ? candidate.savedPath : undefined,
+        currentPath: isDraftBlockPath(candidate.savedPath) ? candidate.savedPath : undefined,
         source: candidate.dqlSource,
         name: candidate.name,
         domain: candidate.domain,
@@ -888,6 +890,13 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
         description: patch.description,
         owner: patch.owner,
         tags: patch.tags,
+        pattern: patch.pattern,
+        grain: patch.grain,
+        entities: patch.entities,
+        outputs: patch.outputs,
+        allowedFilters: patch.allowedFilters,
+        sourceSystems: patch.sourceSystems,
+        replacementFor: patch.replacementFor,
         llmContext: patch.llmContext,
         evidence,
         conversionNotes: dqlGenerationConversionNotes(provider?.name ?? 'local-deterministic'),
@@ -927,7 +936,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
       llmContext: candidate.llmContext ?? deterministicDqlGenerationContext(candidate, candidate.evidence ?? []),
       evidence: candidate.evidence ?? deterministicDqlGenerationEvidence(candidate),
       draftSave: candidate.draftSave ?? (
-        candidate.savedPath?.startsWith('blocks/_drafts/')
+        isDraftBlockPath(candidate.savedPath)
           ? { status: 'saved' as const, path: candidate.savedPath }
           : { status: 'pending' as const }
       ),
@@ -986,6 +995,14 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
       owner: parsed.owner,
       tags: parsed.tags,
       llmContext: parsed.llmContext,
+      pattern: parsed.pattern,
+      grain: parsed.grain,
+      entities: parsed.entities,
+      declaredOutputs: parsed.outputs,
+      allowedFilters: parsed.allowedFilters,
+      sourceSystems: parsed.sourceSystems,
+      replacementFor: parsed.replacementFor,
+      reviewCadence: parsed.reviewCadence,
       dependencies: [],
       usedInCount: 0,
       createdAt: new Date(),
@@ -2084,7 +2101,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
         if (blockPath) {
           const normalizedBlockPath = normalize(blockPath).replace(/^\/+/, '');
           const parsed = parseBlockSourceMetadata(certifiedSource);
-          if (normalizedBlockPath.startsWith('blocks/_drafts/')) {
+          if (isDraftBlockPath(normalizedBlockPath)) {
             const savedPath = saveBlockStudioArtifacts(projectRoot, {
               currentPath: normalizedBlockPath,
               source: certifiedSource,
@@ -2697,7 +2714,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
               }
             : undefined,
         };
-        const savedPath = currentPath?.startsWith('blocks/_drafts/')
+        const savedPath = isDraftBlockPath(currentPath)
           ? saveBlockStudioDraftArtifacts(projectRoot, {
               ...saveOptions,
               stableSuffix: metadata.candidateId,
@@ -3966,6 +3983,25 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           upstreamDepth: upstreamDepthParam ? Number(upstreamDepthParam) : undefined,
           downstreamDepth: downstreamDepthParam ? Number(downstreamDepthParam) : undefined,
         });
+        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON(result));
+      } catch (error) {
+        res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({ error: error instanceof Error ? error.message : String(error) }));
+      }
+      return;
+    }
+
+    if (req.method === 'GET' && path.startsWith('/api/lineage/business-360/')) {
+      const rawNodeId = decodeURIComponent(path.slice('/api/lineage/business-360/'.length));
+      try {
+        const graph = buildProjectLineageGraph(projectRoot, semanticLayer);
+        const result: Business360ResultV2 | null = queryBusiness360(graph, rawNodeId);
+        if (!result) {
+          res.writeHead(404, { 'Content-Type': 'application/json; charset=utf-8' });
+          res.end(serializeJSON({ error: `Lineage node "${rawNodeId}" not found` }));
+          return;
+        }
         res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
         res.end(serializeJSON(result));
       } catch (error) {
@@ -6118,9 +6154,13 @@ export function saveBlockStudioDraftArtifacts(
     .replace(/[^a-z0-9/_-]+/g, '-')
     .replace(/^\/+|\/+$/g, '') || 'uncategorized';
   const previousPath = options.currentPath ? normalize(options.currentPath).replace(/^\/+/, '') : null;
-  const draftPrefix = `blocks/_drafts/${safeDomain}/`;
+  const domainFirstRoot = join(projectRoot, 'domains');
+  const useDomainFirstDrafts = existsSync(domainFirstRoot);
+  const draftPrefix = useDomainFirstDrafts
+    ? `domains/${safeDomain}/blocks/_drafts/`
+    : `blocks/_drafts/${safeDomain}/`;
   const stableSuffix = options.stableSuffix?.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 18);
-  let targetRelativePath = previousPath?.startsWith('blocks/_drafts/')
+  let targetRelativePath: string = previousPath && isDraftBlockPath(previousPath)
     ? previousPath
     : `${draftPrefix}${slug}${stableSuffix ? `-${stableSuffix}` : ''}.dql`;
   let targetPath = join(projectRoot, targetRelativePath);
@@ -6152,6 +6192,12 @@ export function saveBlockStudioDraftArtifacts(
   });
 
   return targetRelativePath;
+}
+
+function isDraftBlockPath(value: string | null | undefined): boolean {
+  if (!value) return false;
+  const normalized = normalize(value).replace(/^\/+/, '');
+  return normalized.startsWith('blocks/_drafts/') || /^domains\/[^/]+\/blocks\/_drafts\//.test(normalized);
 }
 
 function blockCompanionRelativePath(blockPath: string): string | null {
@@ -6219,19 +6265,38 @@ function parseBlockSourceMetadata(source: string): {
   status: string;
   blockType: string;
   llmContext: string;
+  pattern: string;
+  grain: string;
+  entities: string[];
+  outputs: string[];
+  allowedFilters: string[];
+  sourceSystems: string[];
+  replacementFor: string[];
+  reviewCadence: string;
 } {
   const name = source.match(/^\s*block\s+"([^"]+)"/i)?.[1] ?? '';
   const extractString = (key: string) => source.match(new RegExp(`\\b${key}\\s*=\\s*"([^"]*)"`, 'i'))?.[1] ?? '';
-  const tags = source.match(/\btags\s*=\s*\[([^\]]*)\]/i);
+  const extractStringArray = (key: string) => {
+    const match = source.match(new RegExp(`\\b${key}\\s*=\\s*\\[([^\\]]*)\\]`, 'i'));
+    return match ? (match[1].match(/"([^"]*)"/g) ?? []).map((value) => value.slice(1, -1)) : [];
+  };
   return {
     name,
     domain: extractString('domain'),
     description: extractString('description'),
     owner: extractString('owner'),
-    tags: tags ? (tags[1].match(/"([^"]*)"/g) ?? []).map((value) => value.slice(1, -1)) : [],
+    tags: extractStringArray('tags'),
     status: extractString('status') || 'draft',
     blockType: extractString('type') || 'custom',
     llmContext: extractString('llmContext'),
+    pattern: extractString('pattern'),
+    grain: extractString('grain'),
+    entities: extractStringArray('entities'),
+    outputs: extractStringArray('outputs'),
+    allowedFilters: extractStringArray('allowedFilters'),
+    sourceSystems: extractStringArray('sourceSystems'),
+    replacementFor: extractStringArray('replacementFor'),
+    reviewCadence: extractString('reviewCadence'),
   };
 }
 
@@ -6351,6 +6416,13 @@ interface DqlGenerationPatch {
   owner?: string;
   tags?: string[];
   llmContext?: string;
+  pattern?: string;
+  grain?: string;
+  entities?: string[];
+  outputs?: string[];
+  allowedFilters?: string[];
+  sourceSystems?: string[];
+  replacementFor?: string[];
 }
 
 async function buildDqlGenerationContextPack(
@@ -6371,6 +6443,9 @@ async function buildDqlGenerationContextPack(
     limit: 80,
     objectTypes: [
       'dql_block',
+      'dql_term',
+      'business_view',
+      'domain',
       'semantic_metric',
       'semantic_model',
       'semantic_dimension',
@@ -6379,7 +6454,10 @@ async function buildDqlGenerationContextPack(
       'dbt_source',
       'dbt_column',
       'warehouse_table',
-      'business_view',
+      'datalex_domain',
+      'datalex_entity',
+      'datalex_contract',
+      'datalex_term',
     ],
     strictness: 'balanced',
   });
@@ -6393,7 +6471,6 @@ function dqlGenerationEvidenceFromContext(
     .filter((object) => isDqlGenerationEvidenceObject(object))
     .filter((object) => metadataObjectMatchesImportedSource(object, candidate.lineage.sourceTables))
     .map((object) => metadataObjectToDqlGenerationEvidence(object, 'Directly matches an imported SQL source table.'));
-  if (directEvidence.length > 0) return uniqueDqlGenerationEvidence(directEvidence).slice(0, 8);
   const selected = contextPack.retrievalDiagnostics.selectedEvidence.slice(0, 12);
   const byKey = new Map(contextPack.objects.map((object) => [object.objectKey, object]));
   const evidence = selected.flatMap((item): DqlGenerationEvidence[] => {
@@ -6487,10 +6564,16 @@ function uniqueDqlGenerationEvidence(evidence: DqlGenerationEvidence[]): DqlGene
 
 function dqlGenerationEvidenceKind(objectType: string): DqlGenerationEvidence['kind'] {
   if (objectType === 'dql_block') return 'dql_block';
+  if (objectType === 'dql_term') return 'dql_term';
+  if (objectType === 'business_view') return 'business_view';
+  if (objectType === 'domain') return 'domain';
   if (objectType === 'semantic_metric') return 'semantic_metric';
   if (objectType === 'semantic_model') return 'semantic_model';
   if (objectType === 'dbt_model' || objectType === 'dbt_source' || objectType === 'dbt_column') return 'dbt_model';
   if (objectType === 'warehouse_table') return 'warehouse_table';
+  if (objectType === 'datalex_contract') return 'datalex_contract';
+  if (objectType === 'datalex_entity') return 'datalex_entity';
+  if (objectType === 'datalex_domain') return 'datalex_domain';
   if (objectType.includes('lineage')) return 'lineage';
   return 'metadata';
 }
@@ -6510,6 +6593,11 @@ function deterministicDqlGenerationPatch(
     owner: candidate.owner,
     tags: dqlGenerationBusinessTags(candidate, evidence, domain),
     llmContext: deterministicDqlGenerationContext(candidate, evidence),
+    pattern: inferDqlGenerationPattern(candidate.sql),
+    grain: extractDqlGenerationGroupByFields(candidate.sql)[0],
+    outputs: extractDqlGenerationSelectOutputs(candidate.sql),
+    allowedFilters: extractDqlGenerationFilterFields(candidate.sql),
+    sourceSystems: candidate.lineage.sourceTables.map((table) => table.split('.').filter(Boolean).slice(-2, -1)[0] ?? '').filter(Boolean),
   };
 }
 
@@ -6588,6 +6676,70 @@ function extractDqlGenerationGroupByFields(sql: string): string[] {
     .map((item) => item.replace(/[`"[\]]/g, '').trim())
     .filter((item) => item && !/^\d+$/.test(item))
     .slice(0, 4);
+}
+
+function extractDqlGenerationSelectOutputs(sql: string): string[] {
+  const selectMatch = sql.match(/\bselect\b([\s\S]+?)\bfrom\b/i);
+  if (!selectMatch) return [];
+  return splitDqlGenerationSqlList(selectMatch[1])
+    .map((expr) => {
+      const alias = expr.match(/\bas\s+([A-Za-z_][A-Za-z0-9_]*)\b/i)?.[1]
+        ?? expr.match(/([A-Za-z_][A-Za-z0-9_]*)\s*$/)?.[1]
+        ?? '';
+      return alias.replace(/[`"[\]]/g, '');
+    })
+    .filter(Boolean)
+    .filter((name) => !/^(from|where|group|order|limit)$/i.test(name))
+    .slice(0, 24);
+}
+
+function inferDqlGenerationPattern(sql: string): string {
+  const groupFields = extractDqlGenerationGroupByFields(sql);
+  if (/@metric\s*\(/i.test(sql)) return 'metric_wrapper';
+  if (/\bjoin\b/i.test(sql)) {
+    const systems = new Set(extractDqlGenerationSourceSystems(sql));
+    if (systems.size > 1) return 'bridge';
+  }
+  if (/\border\s+by\b[\s\S]*\blimit\s+\d+/i.test(sql)) return 'ranking';
+  if (groupFields.some((field) => /\b(date|day|week|month|quarter|year|period|time)\b/i.test(field))) return 'trend';
+  if (groupFields.length === 1 && /_id$|_key$/i.test(groupFields[0])) return 'entity_rollup';
+  if (!/\b(sum|count|avg|min|max|median|percentile|rank)\s*\(/i.test(sql) && /\b(dim|profile|customer|account|player|product|user|entity)\b/i.test(sql)) {
+    return 'entity_profile';
+  }
+  return 'custom';
+}
+
+function extractDqlGenerationSourceSystems(sql: string): string[] {
+  const tables = new Set<string>();
+  const cleaned = sql.replace(/--[^\n\r]*/g, ' ').replace(/\/\*[\s\S]*?\*\//g, ' ');
+  const regex = /\b(?:from|join|update|into)\s+([`"[]?[A-Za-z0-9_./:-]+(?:\.[A-Za-z0-9_./:-]+)*[`"\]]?)/gi;
+  let match: RegExpExecArray | null;
+  while ((match = regex.exec(cleaned))) {
+    const raw = match[1].replace(/^[`"[]|[`"\]]$/g, '');
+    const parts = raw.split('.').filter(Boolean);
+    const system = parts.slice(-2, -1)[0] ?? parts[0];
+    if (system) tables.add(system.trim().toLowerCase().replace(/[^a-z0-9_-]+/g, '-'));
+  }
+  return [...tables].filter(Boolean).slice(0, 12);
+}
+
+function extractDqlGenerationFilterFields(sql: string): string[] {
+  const filters = new Set<string>();
+  const where = sql.match(/\bwhere\b([\s\S]+?)(?:\bgroup\s+by\b|\border\s+by\b|\blimit\b|$)/i)?.[1] ?? '';
+  const addFilter = (value: string | undefined) => {
+    const name = value?.split('.').pop()?.replace(/[`"[\]]/g, '');
+    if (name && !/^(and|or|not|null|year|month|day)$/i.test(name)) filters.add(name);
+  };
+  const extractRegex = /\bextract\s*\([^)]*\bfrom\s+([A-Za-z_][A-Za-z0-9_.]*)\s*\)\s*(?:=|<>|!=|>|<|>=|<=|\bin\b|\blike\b)/gi;
+  const isNullRegex = /\b([A-Za-z_][A-Za-z0-9_.]*)\s+is\s+(?:not\s+)?null\b/gi;
+  const regex = /\b([A-Za-z_][A-Za-z0-9_.]*)\s*(?:=|<>|!=|>|<|>=|<=|\bin\b|\blike\b)/gi;
+  let match: RegExpExecArray | null;
+  while ((match = extractRegex.exec(where))) addFilter(match[1]);
+  while ((match = isNullRegex.exec(where))) addFilter(match[1]);
+  while ((match = regex.exec(where))) {
+    addFilter(match[1]);
+  }
+  return [...filters].slice(0, 16);
 }
 
 function extractDqlGenerationYearFilters(sql: string): string[] {
@@ -6672,7 +6824,7 @@ async function buildAiDqlGenerationPatch(
       role: 'system',
       content: [
         'You generate DQL Block Studio metadata for a local draft.',
-        'Return only a compact JSON object with optional keys: name, domain, description, owner, tags, llmContext.',
+        'Return only a compact JSON object with optional keys: name, domain, description, owner, tags, llmContext, pattern, grain, entities, outputs, allowedFilters, sourceSystems, replacementFor.',
         'Do not return markdown. Do not mark the block certified. Do not change SQL.',
         'Use only directly relevant dbt, semantic, warehouse, certified block, and SQL-shape evidence from the payload.',
         'If metadata descriptions are missing, describe the observable SQL intent instead of inventing business meaning.',
@@ -6703,7 +6855,30 @@ function normalizeDqlGenerationPatch(value: unknown): DqlGenerationPatch | null 
   if (typeof record.owner === 'string' && record.owner.trim()) patch.owner = record.owner.trim().slice(0, 120);
   if (Array.isArray(record.tags)) patch.tags = record.tags.map(String).map((tag) => tag.trim()).filter(Boolean).slice(0, 12);
   if (typeof record.llmContext === 'string' && record.llmContext.trim()) patch.llmContext = record.llmContext.trim().slice(0, 1000);
+  if (typeof record.pattern === 'string' && record.pattern.trim()) patch.pattern = normalizeDqlGenerationPattern(record.pattern);
+  if (typeof record.grain === 'string' && record.grain.trim()) patch.grain = record.grain.trim().slice(0, 120);
+  if (Array.isArray(record.entities)) patch.entities = record.entities.map(String).map((value) => value.trim()).filter(Boolean).slice(0, 12);
+  if (Array.isArray(record.outputs)) patch.outputs = record.outputs.map(String).map((value) => value.trim()).filter(Boolean).slice(0, 24);
+  if (Array.isArray(record.allowedFilters)) patch.allowedFilters = record.allowedFilters.map(String).map((value) => value.trim()).filter(Boolean).slice(0, 16);
+  if (Array.isArray(record.sourceSystems)) patch.sourceSystems = record.sourceSystems.map(String).map((value) => value.trim()).filter(Boolean).slice(0, 12);
+  if (Array.isArray(record.replacementFor)) patch.replacementFor = record.replacementFor.map(String).map((value) => value.trim()).filter(Boolean).slice(0, 12);
   return Object.keys(patch).length > 0 ? patch : null;
+}
+
+function normalizeDqlGenerationPattern(value: string): string | undefined {
+  const normalized = value.trim().toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '');
+  const allowed = new Set([
+    'metric_wrapper',
+    'entity_profile',
+    'entity_rollup',
+    'ranking',
+    'trend',
+    'bridge',
+    'drilldown',
+    'replacement',
+    'custom',
+  ]);
+  return allowed.has(normalized) ? normalized : undefined;
 }
 
 function mergeDqlGenerationPatch(
@@ -6732,6 +6907,13 @@ function mergeDqlGenerationPatch(
     description,
     llmContext,
     tags: Array.from(new Set([...(base.tags ?? []), ...overrideTags])).slice(0, 12),
+    pattern: override.pattern ?? base.pattern,
+    grain: override.grain ?? base.grain,
+    entities: override.entities?.length ? override.entities : base.entities,
+    outputs: override.outputs?.length ? override.outputs : base.outputs,
+    allowedFilters: override.allowedFilters?.length ? override.allowedFilters : base.allowedFilters,
+    sourceSystems: override.sourceSystems?.length ? override.sourceSystems : base.sourceSystems,
+    replacementFor: override.replacementFor?.length ? override.replacementFor : base.replacementFor,
   };
 }
 

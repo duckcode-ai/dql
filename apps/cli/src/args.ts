@@ -7,6 +7,8 @@ export interface CLIFlags {
   open: boolean | null;
   input: string;
   outDir: string;
+  to?: string;
+  dryRun?: boolean;
   port: number | null;
   /** HTTP bind host. Defaults to 127.0.0.1; set to 0.0.0.0 inside containers. */
   host?: string | null;
@@ -39,6 +41,8 @@ export interface CLIFlags {
   execute?: boolean;
   /** Include AI provider, MCP, and metadata checks in `dql doctor`. */
   ai?: boolean;
+  /** Enforce enterprise-ready certification requirements. */
+  enterprise?: boolean;
   /** Ask app generation to use the richer GenUI planning mode when available. */
   aiLayout?: boolean;
   /** Agent feedback helpers. */
@@ -103,6 +107,10 @@ export function parseArgs(argv: string[]): ParsedArgs {
       flags.input = argv[++i];
     } else if (arg === '--out-dir' && i + 1 < argv.length) {
       flags.outDir = argv[++i];
+    } else if (arg === '--to' && i + 1 < argv.length) {
+      flags.to = argv[++i];
+    } else if (arg === '--dry-run') {
+      flags.dryRun = true;
     } else if (arg === '--port' && i + 1 < argv.length) {
       const value = Number(argv[++i]);
       if (Number.isFinite(value) && value > 0) {
@@ -116,7 +124,7 @@ export function parseArgs(argv: string[]): ParsedArgs {
       flags.domain = argv[++i];
     } else if (arg === '--owner' && i + 1 < argv.length) {
       flags.owner = argv[++i];
-    } else if (arg === '--template' && i + 1 < argv.length) {
+    } else if ((arg === '--template' || arg === '--pattern') && i + 1 < argv.length) {
       flags.template = argv[++i];
     } else if (arg === '--connection' && i + 1 < argv.length) {
       flags.connection = argv[++i];
@@ -150,6 +158,8 @@ export function parseArgs(argv: string[]): ParsedArgs {
       flags.execute = true;
     } else if (arg === '--ai') {
       flags.ai = true;
+    } else if (arg === '--enterprise') {
+      flags.enterprise = true;
     } else if (arg === '--ai-layout') {
       flags.aiLayout = true;
     } else if (arg === '--block' && i + 1 < argv.length) {
