@@ -9,6 +9,8 @@
 import { readdirSync, readFileSync, existsSync, statSync } from 'node:fs';
 import { join, extname, relative } from 'node:path';
 import { Parser } from '../parser/index.js';
+import { DataLexContractRegistry } from '../contracts/index.js';
+import { analyze } from '../semantic/analyzer.js';
 import { extractTablesFromSql } from '../lineage/sql-parser.js';
 import { extractColumnLineage } from '../lineage/column-lineage.js';
 import { buildLineageGraph } from '../lineage/builder.js';
@@ -75,6 +77,8 @@ export interface ManifestBuildOptions {
   dqlVersion?: string;
   /** Path to dbt manifest.json for import */
   dbtManifestPath?: string;
+  /** Path to DataLex datalex-manifest.json for datalex_contract validation */
+  datalexManifestPath?: string;
   /**
    * Max upstream hops to follow through the dbt DAG from DQL anchor tables.
    * undefined = follow all the way to raw sources (default).
@@ -134,6 +138,10 @@ export function collectInputFiles(options: ManifestBuildOptions): string[] {
   if (options.dbtManifestPath && existsSync(options.dbtManifestPath)) {
     files.add(options.dbtManifestPath);
   }
+  const datalexManifestPath = resolveDataLexManifestPath(projectRoot, options.datalexManifestPath, config);
+  if (datalexManifestPath && existsSync(datalexManifestPath)) {
+    files.add(datalexManifestPath);
+  }
 
   // Apps & dashboards. Manifests live at apps/<id>/dql.app.json; dashboards
   // live under apps/<id>/dashboards/*.dqld.
@@ -154,10 +162,24 @@ export function buildManifest(options: ManifestBuildOptions): DQLManifest {
   // Load project config
   const config = loadProjectConfig(projectRoot);
   const projectName = config.project ?? 'dql-project';
+  const datalexManifestPath = resolveDataLexManifestPath(projectRoot, options.datalexManifestPath, config);
+  const datalexRegistry = datalexManifestPath
+    ? new DataLexContractRegistry({ manifestPath: datalexManifestPath })
+    : undefined;
+  if (datalexRegistry) {
+    for (const message of datalexRegistry.loadDiagnostics()) {
+      diagnostics.push({
+        kind: 'datalex',
+        filePath: datalexManifestPath,
+        severity: 'warning',
+        message,
+      });
+    }
+  }
 
   // Scan blocks
   const blockDirs = ['blocks', 'dashboards', 'workbooks', ...(options.extraBlockDirs ?? [])];
-  const blocks = scanBlocks(projectRoot, blockDirs, diagnostics);
+  const blocks = scanBlocks(projectRoot, blockDirs, diagnostics, datalexRegistry);
 
   // Scan notebooks
   const notebookDirs = ['notebooks', 'blocks', 'dashboards', 'workbooks', ...(options.extraNotebookDirs ?? [])];
@@ -254,6 +276,14 @@ interface ProjectConfig {
     /** Path to the dbt manifest.json, relative to `projectDir`. Default: target/manifest.json */
     manifestPath?: string;
   };
+  /**
+   * DataLex integration — path to the compiled datalex-manifest.json used to
+   * validate certified block `datalex_contract` bindings.
+   */
+  datalex?: {
+    /** Path to datalex-manifest.json, absolute or relative to projectRoot. */
+    manifestPath?: string;
+  };
 }
 
 /**
@@ -297,6 +327,32 @@ export function resolveDbtManifestPath(
   return null;
 }
 
+/**
+ * Resolve the absolute path to the configured DataLex manifest.
+ * Honors explicit CLI flag first, then `datalex.manifestPath` from config,
+ * then `<projectRoot>/datalex-manifest.json`.
+ */
+export function resolveDataLexManifestPath(
+  projectRoot: string,
+  explicit?: string,
+  loadedConfig?: ProjectConfig,
+): string | null {
+  if (explicit) {
+    const abs = isAbsPath(explicit) ? explicit : join(projectRoot, explicit);
+    return existsSync(abs) ? abs : abs;
+  }
+  const config = loadedConfig ?? loadProjectConfig(projectRoot);
+  if (config.datalex?.manifestPath) {
+    const rel = config.datalex.manifestPath;
+    const abs = isAbsPath(rel) ? rel : join(projectRoot, rel);
+    if (existsSync(abs)) return abs;
+    return abs;
+  }
+  const fallback = join(projectRoot, 'datalex-manifest.json');
+  if (existsSync(fallback)) return fallback;
+  return null;
+}
+
 function isAbsPath(p: string): boolean {
   return p.startsWith('/') || /^[A-Za-z]:[\\/]/.test(p);
 }
@@ -333,6 +389,7 @@ function scanBlocks(
   projectRoot: string,
   dirs: string[],
   diagnostics?: ManifestDiagnostic[],
+  datalexRegistry?: DataLexContractRegistry,
 ): Record<string, ManifestBlock> {
   const blocks: Record<string, ManifestBlock> = {};
 
@@ -346,6 +403,15 @@ function scanBlocks(
         const source = readFileSync(filePath, 'utf-8');
         const parser = new Parser(source, relPath);
         const ast = parser.parse();
+        const semanticDiagnostics = analyze(ast, { datalexRegistry });
+        for (const diagnostic of semanticDiagnostics) {
+          diagnostics?.push({
+            kind: 'semantic',
+            filePath: relPath,
+            severity: diagnostic.severity === 'error' ? 'error' : 'warning',
+            message: diagnostic.message,
+          });
+        }
 
         for (const stmt of ast.statements) {
           const block = stmt as any;

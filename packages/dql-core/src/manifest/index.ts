@@ -5,6 +5,7 @@ export {
   collectInputFiles,
   loadProjectConfig,
   resolveDbtManifestPath,
+  resolveDataLexManifestPath,
   type ManifestBuildOptions,
   type DbtImportFilters,
 } from './builder.js';

@@ -7,6 +7,7 @@
  * Usage:
  *   dql compile [path]                        Compile project at path (default: .)
  *   dql compile --dbt-manifest <path>         Import dbt manifest.json as upstream
+ *   dql compile --datalex-manifest <path>     Validate datalex_contract refs
  *   dql compile --dbt-hops <n>               Limit upstream dbt hops (default: unlimited)
  *   dql compile --out-dir <dir>               Write manifest to a specific directory
  *   dql compile --format json                 Output manifest to stdout (no file write)
@@ -19,7 +20,13 @@
 
 import { writeFileSync, existsSync, readFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
-import { buildManifest, collectInputFiles, resolveDbtManifestPath, type DQLManifest } from '@duckcodeailabs/dql-core';
+import {
+  buildManifest,
+  collectInputFiles,
+  resolveDbtManifestPath,
+  resolveDataLexManifestPath,
+  type DQLManifest,
+} from '@duckcodeailabs/dql-core';
 import { ManifestCache } from '@duckcodeailabs/dql-project';
 import type { CLIFlags } from '../args.js';
 
@@ -43,6 +50,18 @@ export async function runCompile(
     }
   }
 
+  // Parse --datalex-manifest flag
+  let datalexManifestPath: string | undefined;
+  const datalexIdx = allArgs.indexOf('--datalex-manifest');
+  if (datalexIdx >= 0 && allArgs[datalexIdx + 1]) {
+    datalexManifestPath = resolve(allArgs[datalexIdx + 1]);
+    if (!existsSync(datalexManifestPath)) {
+      console.error(`DataLex manifest not found: ${datalexManifestPath}`);
+      process.exitCode = 1;
+      return;
+    }
+  }
+
   // Parse --dbt-hops flag (max upstream hops for selective import)
   let maxDbtHops: number | undefined;
   const hopsIdx = allArgs.indexOf('--dbt-hops');
@@ -57,7 +76,10 @@ export async function runCompile(
   const filteredCandidates = dbtIdx >= 0
     ? pathCandidates.filter((c) => c !== allArgs[dbtIdx + 1])
     : pathCandidates;
-  const projectRoot = resolve(filteredCandidates[0] ?? '.');
+  const projectCandidates = datalexIdx >= 0
+    ? filteredCandidates.filter((c) => c !== allArgs[datalexIdx + 1])
+    : filteredCandidates;
+  const projectRoot = resolve(projectCandidates[0] ?? '.');
 
   if (!existsSync(join(projectRoot, 'dql.config.json'))) {
     console.error('No DQL project found (missing dql.config.json). Run from a project root or pass a project path.');
@@ -77,6 +99,8 @@ export async function runCompile(
   // Resolve via explicit flag → dql.config.json `dbt:` → target/manifest.json
   const resolvedDbt = resolveDbtManifestPath(projectRoot, dbtManifestPath);
   if (resolvedDbt) dbtManifestPath = resolvedDbt;
+  const resolvedDataLex = resolveDataLexManifestPath(projectRoot, datalexManifestPath);
+  if (resolvedDataLex) datalexManifestPath = resolvedDataLex;
 
   const noCache = allArgs.includes('--no-cache');
 
@@ -85,7 +109,7 @@ export async function runCompile(
   let manifest: DQLManifest;
   let cacheHit = false;
 
-  const buildOptions = { projectRoot, dqlVersion, dbtManifestPath, maxDbtHops };
+  const buildOptions = { projectRoot, dqlVersion, dbtManifestPath, datalexManifestPath, maxDbtHops };
 
   try {
     if (noCache) {
@@ -165,6 +189,11 @@ export async function runCompile(
       console.log(`    ${dbt.modelsImported} model(s), ${dbt.sourcesImported} source(s)`);
     }
     console.log(`    from: ${dbt.manifestPath}`);
+  }
+
+  if (datalexManifestPath) {
+    console.log(`\n  DataLex Contracts:`);
+    console.log(`    from: ${datalexManifestPath}`);
   }
 
   console.log(`\n  Manifest written to: ${manifestPath}`);
