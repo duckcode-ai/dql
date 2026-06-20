@@ -136,6 +136,7 @@ describe('runCompile cache integration', () => {
       const cache = new ManifestCache({ path: cachePath });
       try {
         const filesV1 = manifestCacheTrackedFiles(inputFiles, '1.0.0');
+        expect(filesV1.some((file) => file.path === '__dql_compiler_semantics__')).toBe(true);
         const fp1 = cache.fingerprint(filesV1);
         cache.put(fp1, { project: 'demo' }, filesV1);
 

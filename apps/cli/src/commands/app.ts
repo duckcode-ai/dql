@@ -1,7 +1,8 @@
 /**
  * `dql app` — manage Apps (consumption-layer artifacts).
  *
- * Apps live at `apps/<id>/dql.app.json` and bundle dashboards/notebooks plus
+ * Apps live at `apps/<id>/dql.app.json` or
+ * `domains/<domain>/apps/<id>/dql.app.json` and bundle dashboards/notebooks plus
  * declarative members, roles, policies, RLS bindings, and schedules. They're
  * compiled into the `apps[]` and `dashboards[]` records of `dql-manifest.json`
  * and read by both the desktop UI and the CLI.
@@ -86,7 +87,7 @@ async function runAppNew(rest: string[], flags: CLIFlags): Promise<void> {
 
   const id = suggestAppId(rawId);
   const projectRoot = findProjectRoot(process.cwd());
-  const appDir = join(projectRoot, APPS_ROOT, id);
+  const appDir = resolveAppDir(projectRoot, domain, id);
 
   if (existsSync(appDir)) {
     throw new Error(
@@ -315,7 +316,7 @@ async function runAppShow(rest: string[], flags: CLIFlags): Promise<void> {
   const projectRoot = findProjectRoot(process.cwd());
   const apps = collectApps(projectRoot);
   const app = apps.find((a) => a.id === id);
-  if (!app) throw new Error(`No app named "${id}" under ${APPS_ROOT}/`);
+  if (!app) throw new Error(`No app named "${id}" under apps/ or domains/<domain>/apps/`);
 
   if ((flags as { format?: string }).format === "json") {
     console.log(JSON.stringify(app, null, 2));
@@ -359,9 +360,10 @@ async function runAppBuild(flags: CLIFlags): Promise<void> {
   const json = (flags as { format?: string }).format === "json";
   const apps = manifest.apps ?? {};
   const dashboards = manifest.dashboards ?? {};
-  const diagnostics = (manifest.diagnostics ?? []).filter(
-    (d) => d.filePath?.startsWith("apps/") ?? false,
-  );
+  const diagnostics = (manifest.diagnostics ?? []).filter((d) => {
+    const filePath = d.filePath ?? "";
+    return filePath.startsWith("apps/") || filePath.includes("/apps/");
+  });
 
   if (json) {
     console.log(
@@ -495,6 +497,22 @@ function collectApps(projectRoot: string): ResolvedApp[] {
 function relFromRoot(projectRoot: string, p: string): string {
   const prefix = projectRoot.endsWith("/") ? projectRoot : `${projectRoot}/`;
   return p.startsWith(prefix) ? p.slice(prefix.length) : p;
+}
+
+function resolveAppDir(projectRoot: string, domain: string, id: string): string {
+  const domainSlug = slugify(domain);
+  const domainDir = domainSlug ? join(projectRoot, "domains", domainSlug) : "";
+  if (domainDir && existsSync(domainDir)) {
+    return join(domainDir, APPS_ROOT, id);
+  }
+  return join(projectRoot, APPS_ROOT, id);
+}
+
+function slugify(value: string): string {
+  return value
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "");
 }
 
 function humanise(id: string): string {

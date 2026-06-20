@@ -17,7 +17,7 @@ they use:
 |---|---|---|
 | **front door** | `inspect_dql_project`, `ask_dql` | Verifies the project, refreshes local metadata/indexes, and returns the safe route: certified block, generated SQL preview, research, or clarify. |
 | **1 — certified** | `query_via_block`, `search_blocks`, `get_block` | Serves only `status = "certified"` blocks when the block grain exactly answers the question. Safe to ship. |
-| **2 — proposed** | `query_via_metadata`, `list_proposals`, `suggest_block`, `build_dql_block` | For named customers/users/accounts, custom filters, rankings, breakdowns, comparisons, drill-throughs, or missing exact blocks, the agent's read-only SQL runs as a bounded preview, returns `uncertified: true`, and is saved as a draft under `blocks/_drafts/` for human review. |
+| **2 — proposed** | `query_via_metadata`, `list_proposals`, `suggest_block`, `build_dql_block` | For named customers/users/accounts, custom filters, rankings, breakdowns, comparisons, drill-throughs, or missing exact blocks, the agent's read-only SQL runs as a bounded preview, returns `uncertified: true`, and is saved as a draft under `domains/<domain>/blocks/_drafts/` when using the domain-first layout, otherwise `blocks/_drafts/`, for human review. |
 | **Apps** | `build_dql_app` | Creates or plans an app draft using certified tiles first and review-only placeholders for missing evidence. |
 | **support** | `certify`, `lineage_impact`, `list_metrics`, `list_dimensions`, `kg_search`, `feedback_record` | Governance checks, lineage tracing, the semantic layer, and feedback. |
 

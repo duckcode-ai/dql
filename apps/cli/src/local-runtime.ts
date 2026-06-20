@@ -7,7 +7,7 @@ import { dirname, extname, join, normalize, relative, resolve } from 'node:path'
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import Anthropic from '@anthropic-ai/sdk';
 import OpenAI from 'openai';
-import { QueryExecutor, type ConnectionConfig, type DatabaseConnector } from '@duckcodeailabs/dql-connectors';
+import { QueryExecutor, type ConnectionConfig, type DatabaseConnector, type SQLParamSpec } from '@duckcodeailabs/dql-connectors';
 import {
   buildExecutionPlan,
   createWelcomeNotebook,
@@ -66,6 +66,8 @@ import {
   MemoryStore,
   OllamaProvider,
   OpenAIProvider,
+  buildBlockBusinessFingerprint,
+  buildBlockSqlFingerprints,
   buildLocalContextPack,
   defaultMemoryPath,
   ensureDefaultMemoryFiles,
@@ -96,7 +98,7 @@ import {
 } from './governance-runtime.js';
 import { LocalAppStorage, defaultLocalAppsDbPath } from '@duckcodeailabs/dql-project';
 import type { BlockRecord, TestAssertionResult, TestResultSummary } from '@duckcodeailabs/dql-project';
-import { Certifier } from '@duckcodeailabs/dql-governance';
+import { Certifier, ENTERPRISE_RULES } from '@duckcodeailabs/dql-governance';
 import {
   buildSemanticObjectDetail,
   buildSemanticTree,
@@ -113,14 +115,21 @@ import {
   listBlockStudioImportSessions,
   loadBlockStudioImportSession,
   readBlockStudioImportCandidate,
+  parameterizeSqlForDqlImport,
   updateBlockStudioImportCandidate,
   writeBlockStudioImportSession,
   writeBlockStudioImportCandidate,
+  type BlockStudioImportInputMode,
+  type BlockStudioImportSource,
+  type BlockStudioImportSourceKind,
   type BlockStudioImportCandidate,
   type DqlGenerationCandidate,
   type DqlGenerationEvidence,
   type DqlGenerationSession,
   type BlockDraftSaveState,
+  type BlockSimilarityMatch,
+  type DqlCandidateRecommendedAction,
+  type DqlParameterDecision,
 } from './block-studio-import.js';
 import {
   MetricFlowUnavailableError,
@@ -657,7 +666,24 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
     if (validated.reviewStatus === 'rejected') {
       errors.unshift('Candidate was rejected.');
     }
+    const duplicateBlocker = duplicateCertificationBlocker(validated);
+    if (duplicateBlocker) errors.unshift(duplicateBlocker);
     return { candidate: validated, errors };
+  };
+
+  const duplicateCertificationBlocker = (candidate: BlockStudioImportCandidate): string | null => {
+    const match = candidate.similarityMatches?.[0];
+    if (!match) return null;
+    const duplicateKind = match.kind === 'exact_sql_match'
+      || match.kind === 'parameterized_duplicate'
+      || (match.kind === 'business_duplicate' && match.status === 'certified' && match.score >= 0.76);
+    if (!duplicateKind) return null;
+    const replacementFor = new Set((candidate.replacementFor ?? []).map((value) => value.toLowerCase()));
+    const documentedReplacement = candidate.recommendedAction === 'create_replacement'
+      || replacementFor.has(match.name.toLowerCase())
+      || (match.objectKey && replacementFor.has(match.objectKey.toLowerCase()));
+    if (documentedReplacement) return null;
+    return `Likely duplicate of ${match.name} (${match.kind}, ${Math.round(match.score * 100)}% match). Reuse the existing block, extend it, or document this draft as a replacement before certification.`;
   };
 
   const runBlockStudioPreviewSource = async (
@@ -803,56 +829,11 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
   const saveDqlGenerationDraft = (
     importId: string,
     candidate: BlockStudioImportCandidate,
-  ): DqlGenerationCandidate => {
-    let draftSave: BlockDraftSaveState;
-    try {
-      const savedPath = saveBlockStudioDraftArtifacts(projectRoot, {
-        currentPath: isDraftBlockPath(candidate.savedPath) ? candidate.savedPath : undefined,
-        source: candidate.dqlSource,
-        name: candidate.name,
-        domain: candidate.domain,
-        description: candidate.description,
-        owner: candidate.owner,
-        tags: candidate.tags,
-        lineage: candidate.lineage.sourceTables,
-        stableSuffix: candidate.id.replace(/^cand_/, ''),
-        importMeta: {
-          importId,
-          candidateId: candidate.id,
-          sourceKind: candidate.sourceKind,
-          sourcePath: candidate.sourcePath,
-        },
-      });
-      draftSave = { status: 'saved', path: savedPath, savedAt: new Date().toISOString() };
-      return {
-        ...candidate,
-        reviewStatus: candidate.reviewStatus === 'rejected' ? 'rejected' : 'draft',
-        savedPath,
-        draftSave,
-        generationMode: candidate.generationMode ?? 'deterministic',
-        generationProvider: candidate.generationProvider ?? 'local-deterministic',
-        llmContext: candidate.llmContext ?? deterministicDqlGenerationContext(candidate, candidate.evidence ?? []),
-        evidence: candidate.evidence ?? [],
-      };
-    } catch (error) {
-      draftSave = { status: 'error', error: error instanceof Error ? error.message : String(error) };
-      return {
-        ...candidate,
-        draftSave,
-        generationMode: candidate.generationMode ?? 'deterministic',
-        generationProvider: candidate.generationProvider ?? 'local-deterministic',
-        llmContext: candidate.llmContext ?? deterministicDqlGenerationContext(candidate, candidate.evidence ?? []),
-        evidence: candidate.evidence ?? [],
-      };
-    }
-  };
+  ): DqlGenerationCandidate => saveDqlGenerationDraftForProject(projectRoot, importId, candidate);
 
   const createDqlGenerationSessionFromBody = async (body: any): Promise<DqlGenerationSession> => {
-    const inputPath = typeof body.path === 'string' ? body.path : '';
-    const requestedProvider = isProviderSettingsId(body.provider) ? body.provider : undefined;
-    const provider = await createBlockStudioAssistProvider(projectRoot, requestedProvider);
-    const session = createBlockStudioImportSession(projectRoot, {
-      inputPath,
+    return createDqlGenerationSessionForProject(projectRoot, {
+      inputPath: typeof body.path === 'string' ? body.path : '',
       inputMode: body.inputMode === 'paste' || body.inputMode === 'upload' || body.inputMode === 'path' ? body.inputMode : undefined,
       sources: Array.isArray(body.sources)
         ? body.sources.map((source: any, index: number) => ({
@@ -864,67 +845,8 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
       domain: typeof body.domain === 'string' ? body.domain : undefined,
       owner: typeof body.owner === 'string' ? body.owner : undefined,
       tags: Array.isArray(body.tags) ? body.tags.map(String) : undefined,
-    });
-
-    const warnings: string[] = [];
-    const nextCandidates: DqlGenerationCandidate[] = [];
-    let contextObjectCount = 0;
-    for (const candidate of session.candidates) {
-      const contextPack = await buildDqlGenerationContextPack(projectRoot, candidate).catch((error) => {
-        warnings.push(`Context pack failed for ${candidate.name}: ${error instanceof Error ? error.message : String(error)}`);
-        return null;
-      });
-      contextObjectCount += contextPack?.objects.length ?? 0;
-      const evidence = contextPack ? dqlGenerationEvidenceFromContext(contextPack, candidate) : deterministicDqlGenerationEvidence(candidate);
-      let patch = deterministicDqlGenerationPatch(candidate, evidence);
-      if (provider) {
-        const aiPatch = await buildAiDqlGenerationPatch(provider, candidate, evidence, contextPack).catch((error) => {
-          warnings.push(`AI generation fell back for ${candidate.name}: ${error instanceof Error ? error.message : String(error)}`);
-          return null;
-        });
-        if (aiPatch) patch = mergeDqlGenerationPatch(patch, aiPatch, candidate, evidence);
-      }
-      const enriched = updateBlockStudioImportCandidate(projectRoot, session.id, candidate.id, {
-        name: patch.name,
-        domain: patch.domain,
-        description: patch.description,
-        owner: patch.owner,
-        tags: patch.tags,
-        pattern: patch.pattern,
-        grain: patch.grain,
-        entities: patch.entities,
-        outputs: patch.outputs,
-        allowedFilters: patch.allowedFilters,
-        sourceSystems: patch.sourceSystems,
-        replacementFor: patch.replacementFor,
-        llmContext: patch.llmContext,
-        evidence,
-        conversionNotes: dqlGenerationConversionNotes(provider?.name ?? 'local-deterministic'),
-        generationMode: provider ? 'ai' : 'deterministic',
-        generationProvider: provider?.name ?? 'local-deterministic',
-      });
-      const validated = validateImportCandidate(enriched);
-      const savedDraft = saveDqlGenerationDraft(session.id, validated);
-      writeBlockStudioImportCandidate(projectRoot, session.id, savedDraft);
-      nextCandidates.push(savedDraft);
-    }
-
-    const generationSession: DqlGenerationSession = {
-      ...session,
-      mode: 'ai-import',
-      candidates: nextCandidates,
-      updatedAt: new Date().toISOString(),
-      generation: {
-        provider: provider?.name ?? 'local-deterministic',
-        aiEnabled: Boolean(provider),
-        contextObjectCount,
-        createdDrafts: nextCandidates.filter((candidate) => candidate.draftSave.status === 'saved').length,
-        warnings,
-      },
-    };
-    writeBlockStudioImportSession(projectRoot, generationSession);
-    if (generationSession.generation.createdDrafts > 0) await refreshLocalMetadataCatalog(projectRoot);
-    return generationSession;
+      provider: typeof body.provider === 'string' ? body.provider : undefined,
+    }, semanticLayer);
   };
 
   const loadDqlGenerationSession = (importId: string): DqlGenerationSession => {
@@ -955,7 +877,11 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
     };
   };
 
-  const certifyBlockStudioSource = async (source: string, blockPath?: string | null) => {
+  const certifyBlockStudioSource = async (
+    source: string,
+    blockPath?: string | null,
+    options: { enterprise?: boolean } = {},
+  ) => {
     const validation = validateBlockStudioSource(source, semanticLayer);
     let preview: Awaited<ReturnType<typeof runBlockStudioPreviewSource>> | null = null;
     let testResults: TestResultSummary | null = null;
@@ -999,7 +925,10 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
       grain: parsed.grain,
       entities: parsed.entities,
       declaredOutputs: parsed.outputs,
+      dimensions: parsed.dimensions,
       allowedFilters: parsed.allowedFilters,
+      parameterPolicy: parsed.parameterPolicy,
+      filterBindings: parsed.filterBindings,
       sourceSystems: parsed.sourceSystems,
       replacementFor: parsed.replacementFor,
       reviewCadence: parsed.reviewCadence,
@@ -1008,7 +937,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
       createdAt: new Date(),
       updatedAt: new Date(),
     };
-    const certification = new Certifier().evaluate(record, testResults ?? undefined);
+    const certification = new Certifier(options.enterprise ? ENTERPRISE_RULES : undefined).evaluate(record, testResults ?? undefined);
     const checklist = buildBlockStudioCertificationChecklist({
       source,
       validation,
@@ -1200,6 +1129,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
         const variables = body.variables && typeof body.variables === 'object'
           ? body.variables as Record<string, unknown>
           : {};
+        const dashboardVariables = dashboardRuntimeVariables(loaded.dashboard, variables);
         const tiles = [];
         let localApps: LocalAppStorage | null = null;
         for (const item of loaded.dashboard.layout.items) {
@@ -1306,16 +1236,23 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
               });
               continue;
             }
+            const filterApplication = applyDashboardFiltersToBlockExecution({
+              sql: semanticCompose?.sql ?? plan!.sql,
+              sqlParams: plan?.sqlParams ?? [],
+              variables: { ...(plan?.variables ?? {}), ...dashboardVariables },
+              block,
+              dashboard: loaded.dashboard,
+            });
             const prepared = prepareLocalExecution(
-              semanticCompose?.sql ?? plan!.sql,
+              filterApplication.sql,
               targetConnection,
               projectRoot,
               projectConfig,
             );
             const result = await executor.executeQuery(
               prepared.sql,
-              plan?.sqlParams ?? [],
-              runtimeVariables({ ...(plan?.variables ?? {}), ...variables }),
+              filterApplication.sqlParams,
+              runtimeVariables(filterApplication.variables),
               prepared.connection,
             );
             tiles.push({
@@ -1328,6 +1265,10 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
               viz: item.viz,
               chartConfig: mergeDashboardChartConfig(plan?.chartConfig, item),
               result: normalizeQueryResult(result),
+              filters: {
+                applied: filterApplication.appliedFilters,
+                skipped: filterApplication.skippedFilters,
+              },
               citation: {
                 kind: 'block',
                 name: block.name,
@@ -1822,52 +1763,53 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
     // ── Block library (list all blocks with metadata) ────────────────────
     if (req.method === 'GET' && path === '/api/blocks/library') {
       try {
-        const blocksDir = join(projectRoot, 'blocks');
         const blocks: Array<{
           name: string; domain: string; status: string;
           owner: string | null; tags: string[]; path: string;
           lastModified: string; description: string;
           llmContext: string | null;
         }> = [];
-        if (existsSync(blocksDir)) {
-          const scanDir = (dir: string) => {
-            for (const entry of readdirSync(dir, { withFileTypes: true })) {
-              if (entry.isDirectory()) {
-                scanDir(join(dir, entry.name));
-              } else if (entry.name.endsWith('.dql')) {
-                const filePath = join(dir, entry.name);
-                const relPath = relative(projectRoot, filePath);
-                try {
-                  const source = readFileSync(filePath, 'utf-8');
-                  const stat = statSync(filePath);
-                  // Quick regex parse for key block fields
-                  const nameMatch = /block\s+"([^"]+)"/.exec(source);
-                  const domainMatch = /domain\s*=\s*"([^"]+)"/.exec(source);
-                  const statusMatch = /status\s*=\s*"([^"]+)"/.exec(source);
-                  const ownerMatch = /owner\s*=\s*"([^"]+)"/.exec(source);
-                  const descMatch = /description\s*=\s*"([^"]+)"/.exec(source);
-                  const tagsMatch = /tags\s*=\s*\[([^\]]*)\]/.exec(source);
-                  const parsedTags = tagsMatch
-                    ? tagsMatch[1].split(',').map((tag) => tag.trim().replace(/^"|"$/g, '')).filter(Boolean)
-                    : [];
-                  const llmMatch = /llmContext\s*=\s*"((?:[^"\\]|\\.)*)"/.exec(source);
-                  blocks.push({
-                    name: nameMatch?.[1] ?? entry.name.replace('.dql', ''),
-                    domain: domainMatch?.[1] ?? 'uncategorized',
-                    status: statusMatch?.[1] ?? 'draft',
-                    owner: ownerMatch?.[1] ?? null,
-                    tags: parsedTags,
-                    path: relPath,
-                    lastModified: stat.mtime.toISOString(),
-                    description: descMatch?.[1] ?? '',
-                    llmContext: llmMatch?.[1] ?? null,
-                  });
-                } catch { /* skip unreadable files */ }
-              }
+        const seen = new Set<string>();
+        const scanDir = (dir: string) => {
+          if (!existsSync(dir)) return;
+          for (const entry of readdirSync(dir, { withFileTypes: true })) {
+            const filePath = join(dir, entry.name);
+            if (entry.isDirectory()) {
+              scanDir(filePath);
+            } else if (entry.name.endsWith('.dql') && !seen.has(filePath)) {
+              seen.add(filePath);
+              const relPath = relative(projectRoot, filePath).replaceAll('\\', '/');
+              try {
+                const source = readFileSync(filePath, 'utf-8');
+                const stat = statSync(filePath);
+                // Quick regex parse for key block fields
+                const nameMatch = /block\s+"([^"]+)"/.exec(source);
+                const domainMatch = /domain\s*=\s*"([^"]+)"/.exec(source);
+                const statusMatch = /status\s*=\s*"([^"]+)"/.exec(source);
+                const ownerMatch = /owner\s*=\s*"([^"]+)"/.exec(source);
+                const descMatch = /description\s*=\s*"([^"]+)"/.exec(source);
+                const tagsMatch = /tags\s*=\s*\[([^\]]*)\]/.exec(source);
+                const parsedTags = tagsMatch
+                  ? tagsMatch[1].split(',').map((tag) => tag.trim().replace(/^"|"$/g, '')).filter(Boolean)
+                  : [];
+                const llmMatch = /llmContext\s*=\s*"((?:[^"\\]|\\.)*)"/.exec(source);
+                blocks.push({
+                  name: nameMatch?.[1] ?? entry.name.replace('.dql', ''),
+                  domain: (domainMatch?.[1] ?? inferBlockStudioPathDomain(relPath)) || 'uncategorized',
+                  status: statusMatch?.[1] ?? 'draft',
+                  owner: ownerMatch?.[1] ?? null,
+                  tags: parsedTags,
+                  path: relPath,
+                  lastModified: stat.mtime.toISOString(),
+                  description: descMatch?.[1] ?? '',
+                  llmContext: llmMatch?.[1] ?? null,
+                });
+              } catch { /* skip unreadable files */ }
             }
-          };
-          scanDir(blocksDir);
-        }
+          }
+        };
+        scanDir(join(projectRoot, 'blocks'));
+        scanDir(join(projectRoot, 'domains'));
         blocks.sort((a, b) => new Date(b.lastModified).getTime() - new Date(a.lastModified).getTime());
         res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
         res.end(serializeJSON({ blocks }));
@@ -2089,7 +2031,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           res.end(serializeJSON({ error: 'source is required' }));
           return;
         }
-        const result = await certifyBlockStudioSource(source, blockPath);
+        const result = await certifyBlockStudioSource(source, blockPath, { enterprise: body.enterprise !== false });
         const blockers = Array.from(new Set(result.checklist.blockers));
         if (!result.certification.certified || blockers.length > 0) {
           res.writeHead(422, { 'Content-Type': 'application/json; charset=utf-8' });
@@ -2149,6 +2091,64 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
       return;
     }
 
+    if (req.method === 'POST' && path === '/api/block-studio/match-sql') {
+      try {
+        const body = await readJSON(req);
+        if (typeof body.sql !== 'string' || body.sql.trim().length === 0) {
+          res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
+          res.end(serializeJSON({ error: 'Missing SQL in request body.' }));
+          return;
+        }
+        const sql = body.sql.trim();
+        const sourceTables = extractSqlTablesLight(sql);
+        const candidate: BlockStudioImportCandidate = {
+          id: 'match_sql',
+          sourceKind: 'raw-sql-file',
+          sourcePath: typeof body.sourcePath === 'string' ? body.sourcePath : 'pasted.sql',
+          name: typeof body.name === 'string' ? body.name : 'SQL match preview',
+          domain: typeof body.domain === 'string' ? body.domain : 'imported',
+          description: 'SQL match preview candidate.',
+          owner: typeof body.owner === 'string' ? body.owner : 'analytics',
+          tags: [],
+          sql,
+          dqlSource: '',
+          validation: null,
+          preview: null,
+          lineage: {
+            sourceTables,
+            parameters: [],
+            warnings: [],
+            statementIndex: 1,
+            totalStatements: 1,
+          },
+          confidence: 0.8,
+          splitStrategy: 'manual',
+          warnings: [],
+          conversionNotes: [],
+          aiAssistance: [],
+          reviewStatus: 'draft',
+        };
+        const evidence = deterministicDqlGenerationEvidence(candidate);
+        const patch = deterministicDqlGenerationPatch(candidate, evidence);
+        const contextPack = await buildDqlGenerationContextPack(projectRoot, { ...candidate, sql: patch.sql ?? sql }).catch(() => null);
+        const similarity = buildDqlGenerationSimilarityMatches(candidate, patch, contextPack);
+        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({
+          parameterDecisions: patch.parameterDecisions ?? [],
+          parameterPolicy: patch.parameterPolicy ?? [],
+          filterBindings: patch.filterBindings ?? [],
+          allowedFilters: patch.allowedFilters ?? [],
+          parameterizedSql: patch.sql ?? sql,
+          similarityMatches: similarity.matches,
+          recommendedAction: similarity.recommendedAction,
+        }));
+      } catch (error) {
+        res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({ error: error instanceof Error ? error.message : String(error) }));
+      }
+      return;
+    }
+
     const aiImportPathMatch = path.match(/^\/api\/block-studio\/ai-imports\/([^/]+)(?:\/candidates\/([^/]+)(?:\/(preview|certify))?)?$/);
     if (aiImportPathMatch) {
       const importId = decodeURIComponent(aiImportPathMatch[1]);
@@ -2170,6 +2170,18 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
             description: typeof body.description === 'string' ? body.description : undefined,
             owner: typeof body.owner === 'string' ? body.owner : undefined,
             tags: Array.isArray(body.tags) ? body.tags.map(String) : undefined,
+            terms: Array.isArray(body.terms) ? body.terms.map(String) : undefined,
+            pattern: typeof body.pattern === 'string' ? body.pattern : undefined,
+            grain: typeof body.grain === 'string' ? body.grain : undefined,
+            entities: Array.isArray(body.entities) ? body.entities.map(String) : undefined,
+            outputs: Array.isArray(body.outputs) ? body.outputs.map(String) : undefined,
+            dimensions: Array.isArray(body.dimensions) ? body.dimensions.map(String) : undefined,
+            allowedFilters: Array.isArray(body.allowedFilters) ? body.allowedFilters.map(String) : undefined,
+            parameterPolicy: Array.isArray(body.parameterPolicy) ? body.parameterPolicy : undefined,
+            filterBindings: Array.isArray(body.filterBindings) ? body.filterBindings : undefined,
+            sourceSystems: Array.isArray(body.sourceSystems) ? body.sourceSystems.map(String) : undefined,
+            replacementFor: Array.isArray(body.replacementFor) ? body.replacementFor.map(String) : undefined,
+            reviewCadence: typeof body.reviewCadence === 'string' ? body.reviewCadence : undefined,
             sql: typeof body.sql === 'string' ? body.sql : undefined,
             llmContext: typeof body.llmContext === 'string' ? body.llmContext : undefined,
           });
@@ -2211,7 +2223,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
             return;
           }
           const certifiedSource = setBlockStudioSourceStatus(readiness.candidate.dqlSource, 'certified');
-          const certification = await certifyBlockStudioSource(certifiedSource, readiness.candidate.savedPath);
+          const certification = await certifyBlockStudioSource(certifiedSource, readiness.candidate.savedPath, { enterprise: true });
           const blockers = Array.from(new Set(certification.checklist.blockers));
           if (!certification.certification.certified || blockers.length > 0) {
             const savedDraft = saveDqlGenerationDraft(importId, readiness.candidate);
@@ -2221,6 +2233,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
             return;
           }
           const savedPath = saveBlockStudioArtifacts(projectRoot, {
+            currentPath: readiness.candidate.savedPath,
             source: certifiedSource,
             name: readiness.candidate.name,
             domain: readiness.candidate.domain,
@@ -2403,6 +2416,8 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
             description: typeof body.description === 'string' ? body.description : undefined,
             owner: typeof body.owner === 'string' ? body.owner : undefined,
             tags: Array.isArray(body.tags) ? body.tags.map(String) : undefined,
+            terms: Array.isArray(body.terms) ? body.terms.map(String) : undefined,
+            reviewCadence: typeof body.reviewCadence === 'string' ? body.reviewCadence : undefined,
             sql: typeof body.sql === 'string' ? body.sql : undefined,
             reviewStatus,
           });
@@ -2551,39 +2566,15 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
 
     if (req.method === 'GET' && path === '/api/semantic-layer/diagnostics') {
       try {
-        const provider = semanticConfig?.provider ?? semanticDetectedProvider ?? null;
-        const dbtStatus = buildDbtStatus(projectRoot, projectConfig, semanticLastSyncTime);
-        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
-        res.end(serializeJSON({
-          available: Boolean(semanticLayer),
-          provider,
-          errors: semanticLayerErrors,
+        const diagnostics = buildSemanticLayerDiagnostics(projectRoot, projectConfig, {
+          semanticLayer,
+          semanticErrors: semanticLayerErrors,
+          semanticConfig,
+          detectedProvider: semanticDetectedProvider,
           lastSyncTime: semanticLastSyncTime,
-          counts: semanticLayer
-            ? {
-                domains: semanticLayer.listDomains().length,
-                metrics: semanticLayer.listMetrics().length,
-                measures: semanticLayer.listMeasures().length,
-                dimensions: semanticLayer.listDimensions().length,
-                semanticModels: semanticLayer.listSemanticModels().length,
-                savedQueries: semanticLayer.listSavedQueries().length,
-              }
-            : {
-                domains: 0,
-                metrics: 0,
-                measures: 0,
-                dimensions: 0,
-                semanticModels: 0,
-                savedQueries: 0,
-              },
-          dbt: dbtStatus,
-          warnings: [
-            ...semanticLayerErrors,
-            ...(!dbtStatus.artifacts.semanticManifest.exists && provider === 'dbt'
-              ? ['dbt MetricFlow semantic_manifest.json is missing. Run dbt parse/build or MetricFlow setup for this project.']
-              : []),
-          ],
-        }));
+        });
+        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON(diagnostics));
       } catch (error) {
         res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' });
         res.end(serializeJSON({ error: error instanceof Error ? error.message : String(error) }));
@@ -2603,15 +2594,17 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
         semanticDetectedProvider = refreshed.detectedProvider;
         semanticLastSyncTime = refreshed.layer ? new Date().toISOString() : null;
         semanticImportManifest = loadSemanticImportManifest(projectRoot);
-        const dbtStatus = buildDbtStatus(projectRoot, projectConfig, semanticLastSyncTime);
+        const diagnostics = buildSemanticLayerDiagnostics(projectRoot, projectConfig, {
+          semanticLayer,
+          semanticErrors: semanticLayerErrors,
+          semanticConfig,
+          detectedProvider: semanticDetectedProvider,
+          lastSyncTime: semanticLastSyncTime,
+        });
         res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
         res.end(serializeJSON({
           ok: Boolean(refreshed.layer),
-          available: Boolean(refreshed.layer),
-          provider: semanticConfig?.provider ?? refreshed.detectedProvider ?? null,
-          errors: semanticLayerErrors,
-          lastSyncTime: semanticLastSyncTime,
-          dbt: dbtStatus,
+          ...diagnostics,
         }));
       } catch (error) {
         res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' });
@@ -4869,6 +4862,307 @@ export function prepareLocalExecution(
   };
 }
 
+export interface DashboardFilterApplicationResult {
+  sql: string;
+  sqlParams: SQLParamSpec[];
+  variables: Record<string, unknown>;
+  appliedFilters: Array<{
+    filter: string;
+    binding?: string;
+    mode: 'parameter' | 'predicate';
+    paramNames: string[];
+  }>;
+  skippedFilters: Array<{
+    filter: string;
+    reason: string;
+  }>;
+}
+
+export function dashboardRuntimeVariables(
+  dashboard: Pick<DashboardDocument, 'filters' | 'params'>,
+  overrides: Record<string, unknown> = {},
+): Record<string, unknown> {
+  const variables: Record<string, unknown> = {};
+  for (const param of dashboard.params ?? []) {
+    if (param.default !== undefined) variables[param.id] = param.default;
+  }
+  for (const filter of dashboard.filters ?? []) {
+    if (filter.default !== undefined) variables[filter.id] = filter.default;
+  }
+  return { ...variables, ...overrides };
+}
+
+export function applyDashboardFiltersToBlockExecution(input: {
+  sql: string;
+  sqlParams: SQLParamSpec[];
+  variables: Record<string, unknown>;
+  block: Pick<ManifestBlock, 'name' | 'allowedFilters' | 'filterBindings' | 'parameterPolicy'>;
+  dashboard: Pick<DashboardDocument, 'filters'>;
+}): DashboardFilterApplicationResult {
+  const variables = { ...input.variables };
+  const sqlParams = [...input.sqlParams];
+  const appliedFilters: DashboardFilterApplicationResult['appliedFilters'] = [];
+  const skippedFilters: DashboardFilterApplicationResult['skippedFilters'] = [];
+  const clauses: string[] = [];
+  let nextPosition = sqlParams.reduce((max, param) => Math.max(max, param.position), 0);
+
+  for (const filter of input.dashboard.filters ?? []) {
+    const value = dashboardFilterValue(filter, variables);
+    if (isEmptyDashboardFilterValue(value)) {
+      skippedFilters.push({ filter: filter.id, reason: 'no value supplied' });
+      continue;
+    }
+
+    const paramNames = bindDashboardFilterToExistingParams(filter, value, input.block, sqlParams, variables);
+    if (paramNames.length > 0) {
+      appliedFilters.push({
+        filter: filter.id,
+        mode: 'parameter',
+        paramNames,
+      });
+      continue;
+    }
+
+    const binding = resolveDashboardFilterBinding(filter, input.block);
+    if (!binding) {
+      skippedFilters.push({ filter: filter.id, reason: `block "${input.block.name}" does not declare a compatible filter binding` });
+      continue;
+    }
+    const expression = dashboardFilterExpression(binding);
+    if (!expression) {
+      skippedFilters.push({ filter: filter.id, reason: `filter binding "${binding}" is not safe for runtime predicate injection` });
+      continue;
+    }
+    const predicate = buildDashboardFilterPredicate({
+      expression,
+      filterId: filter.id,
+      filterType: filter.type,
+      value,
+      params: sqlParams,
+      nextPosition: () => {
+        nextPosition += 1;
+        return nextPosition;
+      },
+      variables,
+    });
+    if (!predicate) {
+      skippedFilters.push({ filter: filter.id, reason: 'filter value could not be converted into a predicate' });
+      continue;
+    }
+    clauses.push(predicate);
+    appliedFilters.push({
+      filter: filter.id,
+      binding,
+      mode: 'predicate',
+      paramNames: sqlParams
+        .filter((param) => param.name.startsWith(`__dashboard_filter_${normalizeDashboardFilterName(filter.id)}_`))
+        .map((param) => param.name),
+    });
+  }
+
+  if (clauses.length === 0) {
+    return { sql: input.sql, sqlParams, variables, appliedFilters, skippedFilters };
+  }
+
+  return {
+    sql: `SELECT * FROM (${stripSqlTerminator(input.sql)}) _dql_filter WHERE ${clauses.join(' AND ')}`,
+    sqlParams,
+    variables,
+    appliedFilters,
+    skippedFilters,
+  };
+}
+
+function dashboardFilterValue(
+  filter: NonNullable<DashboardDocument['filters']>[number],
+  variables: Record<string, unknown>,
+): unknown {
+  if (Object.prototype.hasOwnProperty.call(variables, filter.id)) return variables[filter.id];
+  if (filter.bindsTo && Object.prototype.hasOwnProperty.call(variables, filter.bindsTo)) return variables[filter.bindsTo];
+  return filter.default;
+}
+
+function isEmptyDashboardFilterValue(value: unknown): boolean {
+  if (value === undefined || value === null) return true;
+  if (typeof value === 'string' && value.trim() === '') return true;
+  if (Array.isArray(value) && value.length === 0) return true;
+  return false;
+}
+
+function bindDashboardFilterToExistingParams(
+  filter: NonNullable<DashboardDocument['filters']>[number],
+  value: unknown,
+  block: Pick<ManifestBlock, 'parameterPolicy'>,
+  sqlParams: SQLParamSpec[],
+  variables: Record<string, unknown>,
+): string[] {
+  const availableParamNames = new Set(sqlParams.map((param) => param.name));
+  const declaredParamNames = new Set((block.parameterPolicy ?? []).map((entry) => entry.name));
+  const applied: string[] = [];
+  const directCandidates = uniqueDashboardStrings([
+    filter.id,
+    filter.bindsTo ?? '',
+    normalizeDashboardFilterName(filter.id),
+    filter.bindsTo ? normalizeDashboardFilterName(filter.bindsTo) : '',
+  ]);
+  for (const name of directCandidates) {
+    if (!name || !availableParamNames.has(name)) continue;
+    variables[name] = value;
+    applied.push(name);
+  }
+  if (applied.length > 0) return applied;
+
+  const range = dashboardRangeValue(value);
+  if (range) {
+    const baseNames = uniqueDashboardStrings([
+      filter.id,
+      filter.id.replace(/_?range$/i, ''),
+      filter.bindsTo ?? '',
+      filter.bindsTo ? filter.bindsTo.replace(/_?range$/i, '') : '',
+    ].map(normalizeDashboardFilterName));
+    for (const base of baseNames) {
+      const pairs = [
+        [`${base}_start`, `${base}_end`],
+        [`${base}_from`, `${base}_to`],
+        [`start_${base}`, `end_${base}`],
+      ];
+      for (const [startName, endName] of pairs) {
+        if (availableParamNames.has(startName) && availableParamNames.has(endName)) {
+          variables[startName] = range.start;
+          variables[endName] = range.end;
+          return [startName, endName];
+        }
+      }
+    }
+    for (const [startName, endName] of [['start_date', 'end_date'], ['date_start', 'date_end'], ['season_start', 'season_end'], ['year_start', 'year_end']]) {
+      if (availableParamNames.has(startName) && availableParamNames.has(endName)) {
+        variables[startName] = range.start;
+        variables[endName] = range.end;
+        return [startName, endName];
+      }
+    }
+  }
+
+  for (const name of declaredParamNames) {
+    if (!availableParamNames.has(name)) continue;
+    const normalized = normalizeDashboardFilterName(name);
+    if (normalized === normalizeDashboardFilterName(filter.id) || normalized === normalizeDashboardFilterName(filter.bindsTo ?? '')) {
+      variables[name] = value;
+      return [name];
+    }
+  }
+
+  return [];
+}
+
+function resolveDashboardFilterBinding(
+  filter: NonNullable<DashboardDocument['filters']>[number],
+  block: Pick<ManifestBlock, 'allowedFilters' | 'filterBindings'>,
+): string | null {
+  const candidates = uniqueDashboardStrings([filter.id, filter.bindsTo ?? '']).map(normalizeDashboardFilterName);
+  for (const entry of block.filterBindings ?? []) {
+    if (candidates.includes(normalizeDashboardFilterName(entry.filter))) return entry.binding;
+  }
+  if (filter.bindsTo && (block.allowedFilters ?? []).some((item) => normalizeDashboardFilterName(item) === normalizeDashboardFilterName(filter.bindsTo ?? ''))) {
+    return filter.bindsTo;
+  }
+  if ((block.allowedFilters ?? []).some((item) => normalizeDashboardFilterName(item) === normalizeDashboardFilterName(filter.id))) {
+    return filter.id;
+  }
+  return null;
+}
+
+function dashboardFilterExpression(binding: string): string | null {
+  const trimmed = binding.trim();
+  const yearMatch = trimmed.match(/^([A-Za-z_][A-Za-z0-9_.]*)\.year$/i);
+  if (yearMatch) {
+    const base = dashboardOutputColumn(yearMatch[1]);
+    return base ? `EXTRACT(YEAR FROM _dql_filter.${base})` : null;
+  }
+  const column = dashboardOutputColumn(trimmed);
+  return column ? `_dql_filter.${column}` : null;
+}
+
+function dashboardOutputColumn(binding: string): string | null {
+  const cleaned = binding.replace(/[`"[\]]/g, '').trim();
+  if (!/^[A-Za-z_][A-Za-z0-9_.]*$/.test(cleaned)) return null;
+  const column = cleaned.split('.').filter(Boolean).at(-1);
+  return column && /^[A-Za-z_][A-Za-z0-9_]*$/.test(column) ? column : null;
+}
+
+function buildDashboardFilterPredicate(input: {
+  expression: string;
+  filterId: string;
+  filterType: NonNullable<DashboardDocument['filters']>[number]['type'];
+  value: unknown;
+  params: SQLParamSpec[];
+  nextPosition: () => number;
+  variables: Record<string, unknown>;
+}): string | null {
+  const range = input.filterType === 'daterange' ? dashboardRangeValue(input.value) : null;
+  if (range) {
+    const start = addDashboardFilterParam(input, 'start', range.start);
+    const end = addDashboardFilterParam(input, 'end', range.end);
+    return `${input.expression} BETWEEN $${start.position} AND $${end.position}`;
+  }
+  const values = Array.isArray(input.value) ? input.value.filter((item) => !isEmptyDashboardFilterValue(item)) : [input.value];
+  if (values.length === 0) return null;
+  if (values.length === 1) {
+    const param = addDashboardFilterParam(input, 'value', values[0]);
+    return `${input.expression} = $${param.position}`;
+  }
+  const placeholders = values.map((value, index) => {
+    const param = addDashboardFilterParam(input, `value_${index + 1}`, value);
+    return `$${param.position}`;
+  });
+  return `${input.expression} IN (${placeholders.join(', ')})`;
+}
+
+function addDashboardFilterParam(
+  input: {
+    filterId: string;
+    params: SQLParamSpec[];
+    nextPosition: () => number;
+    variables: Record<string, unknown>;
+  },
+  suffix: string,
+  value: unknown,
+): SQLParamSpec {
+  const name = `__dashboard_filter_${normalizeDashboardFilterName(input.filterId)}_${suffix}`;
+  const uniqueName = input.variables[name] === undefined && !input.params.some((param) => param.name === name)
+    ? name
+    : `${name}_${input.params.length + 1}`;
+  const param = { name: uniqueName, position: input.nextPosition() };
+  input.params.push(param);
+  input.variables[uniqueName] = value;
+  return param;
+}
+
+function dashboardRangeValue(value: unknown): { start: unknown; end: unknown } | null {
+  if (Array.isArray(value) && value.length >= 2 && !isEmptyDashboardFilterValue(value[0]) && !isEmptyDashboardFilterValue(value[1])) {
+    return { start: value[0], end: value[1] };
+  }
+  if (value && typeof value === 'object') {
+    const record = value as Record<string, unknown>;
+    const start = record.start ?? record.from ?? record.min;
+    const end = record.end ?? record.to ?? record.max;
+    if (!isEmptyDashboardFilterValue(start) && !isEmptyDashboardFilterValue(end)) return { start, end };
+  }
+  return null;
+}
+
+function normalizeDashboardFilterName(value: string): string {
+  return String(value ?? '').trim().toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '');
+}
+
+function stripSqlTerminator(sql: string): string {
+  return sql.trim().replace(/;\s*$/, '');
+}
+
+function uniqueDashboardStrings(values: string[]): string[] {
+  return Array.from(new Set(values.map((value) => value.trim()).filter(Boolean)));
+}
+
 export function resolveDbtMacrosForExecution(
   sql: string,
   projectRoot: string,
@@ -5586,7 +5880,7 @@ function buildDatabaseSchemaTree(
   })();
 }
 
-function openBlockStudioDocument(
+export function openBlockStudioDocument(
   projectRoot: string,
   relativePath: string,
   semanticLayer?: SemanticLayer,
@@ -5606,7 +5900,7 @@ function openBlockStudioDocument(
   validation: ReturnType<typeof validateBlockStudioSource>;
 } {
   const normalizedPath = normalize(relativePath).replace(/^\/+/, '');
-  if (!normalizedPath.startsWith('blocks/')) {
+  if (!isBlockStudioBlockPath(normalizedPath)) {
     throw new Error('Invalid block path');
   }
   const absPath = join(projectRoot, normalizedPath);
@@ -5621,7 +5915,7 @@ function openBlockStudioDocument(
   const metadata = {
     name: parsedMetadata.name || companion?.name || fileName,
     path: normalizedPath,
-    domain: parsedMetadata.domain || companion?.domain || normalizedPath.split('/').slice(1, -1).join('/') || 'uncategorized',
+    domain: parsedMetadata.domain || companion?.domain || inferBlockStudioPathDomain(normalizedPath) || 'uncategorized',
     description: parsedMetadata.description || companion?.description || '',
     owner: parsedMetadata.owner || companion?.owner || '',
     tags: parsedMetadata.tags.length > 0 ? parsedMetadata.tags : companion?.tags ?? [],
@@ -6066,6 +6360,185 @@ export function validateBlockStudioSource(
   };
 }
 
+export interface CreateDqlGenerationSessionForProjectOptions {
+  inputPath?: string;
+  inputMode?: BlockStudioImportInputMode;
+  sources?: BlockStudioImportSource[];
+  sourceKind?: BlockStudioImportSourceKind | 'raw-sql';
+  domain?: string;
+  owner?: string;
+  tags?: string[];
+  provider?: string;
+}
+
+export async function createDqlGenerationSessionForProject(
+  projectRoot: string,
+  options: CreateDqlGenerationSessionForProjectOptions,
+  semanticLayer?: SemanticLayer,
+): Promise<DqlGenerationSession> {
+  const deterministicOnly = isDeterministicDqlGenerationProvider(options.provider);
+  const requestedProvider = !deterministicOnly && isProviderSettingsId(options.provider) ? options.provider : undefined;
+  const provider = deterministicOnly ? null : await createBlockStudioAssistProvider(projectRoot, requestedProvider);
+  const session = createBlockStudioImportSession(projectRoot, {
+    inputPath: options.inputPath ?? '',
+    inputMode: options.inputMode,
+    sources: options.sources,
+    sourceKind: options.sourceKind ?? 'raw-sql',
+    domain: options.domain,
+    owner: options.owner,
+    tags: options.tags,
+  });
+
+  const warnings: string[] = [];
+  const nextCandidates: DqlGenerationCandidate[] = [];
+  let contextObjectCount = 0;
+  for (const candidate of session.candidates) {
+    const contextPack = await buildDqlGenerationContextPack(projectRoot, candidate).catch((error) => {
+      warnings.push(`Context pack failed for ${candidate.name}: ${error instanceof Error ? error.message : String(error)}`);
+      return null;
+    });
+    contextObjectCount += contextPack?.objects.length ?? 0;
+    const evidence = contextPack ? dqlGenerationEvidenceFromContext(contextPack, candidate) : deterministicDqlGenerationEvidence(candidate);
+    let patch = deterministicDqlGenerationPatch(candidate, evidence);
+    let generatorName = 'local-deterministic';
+    let generationMode: 'ai' | 'deterministic' = 'deterministic';
+    if (provider) {
+      const aiPatch = await buildAiDqlGenerationPatch(provider, candidate, evidence, contextPack).catch((error) => {
+        warnings.push(`AI generation fell back for ${candidate.name}: ${error instanceof Error ? error.message : String(error)}`);
+        return null;
+      });
+      if (aiPatch) {
+        patch = mergeDqlGenerationPatch(patch, aiPatch, candidate, evidence);
+        generatorName = provider.name;
+        generationMode = 'ai';
+      }
+    }
+    const similarity = buildDqlGenerationSimilarityMatches(candidate, patch, contextPack);
+    patch = {
+      ...patch,
+      similarityMatches: similarity.matches,
+      recommendedAction: similarity.recommendedAction,
+    };
+    for (const warning of patch.warnings ?? []) warnings.push(`${candidate.name}: ${warning}`);
+    const enriched = updateBlockStudioImportCandidate(projectRoot, session.id, candidate.id, {
+      name: patch.name,
+      domain: patch.domain,
+      description: patch.description,
+      owner: patch.owner,
+      tags: patch.tags,
+      terms: patch.terms,
+      pattern: patch.pattern,
+      grain: patch.grain,
+      entities: patch.entities,
+      outputs: patch.outputs,
+      dimensions: patch.dimensions,
+      allowedFilters: patch.allowedFilters,
+      parameterPolicy: patch.parameterPolicy,
+      filterBindings: patch.filterBindings,
+      parameterDecisions: patch.parameterDecisions,
+      similarityMatches: patch.similarityMatches,
+      recommendedAction: patch.recommendedAction,
+      sourceSystems: patch.sourceSystems,
+      replacementFor: patch.replacementFor,
+      reviewCadence: patch.reviewCadence,
+      sql: patch.sql,
+      llmContext: patch.llmContext,
+      evidence,
+      conversionNotes: dqlGenerationConversionNotes(generatorName),
+      generationMode,
+      generationProvider: generatorName,
+    });
+    const validated: BlockStudioImportCandidate = {
+      ...enriched,
+      validation: validateBlockStudioSource(enriched.dqlSource, semanticLayer),
+    };
+    const savedDraft = saveDqlGenerationDraftForProject(projectRoot, session.id, validated);
+    writeBlockStudioImportCandidate(projectRoot, session.id, savedDraft);
+    nextCandidates.push(savedDraft);
+  }
+
+  const generationSession: DqlGenerationSession = {
+    ...session,
+    mode: 'ai-import',
+    candidates: nextCandidates,
+    updatedAt: new Date().toISOString(),
+    generation: {
+      provider: nextCandidates.find((candidate) => candidate.generationMode === 'ai')?.generationProvider ?? 'local-deterministic',
+      aiEnabled: nextCandidates.some((candidate) => candidate.generationMode === 'ai'),
+      contextObjectCount,
+      createdDrafts: nextCandidates.filter((candidate) => candidate.draftSave.status === 'saved').length,
+      warnings,
+    },
+  };
+  writeBlockStudioImportSession(projectRoot, generationSession);
+  if (generationSession.generation.createdDrafts > 0) await refreshLocalMetadataCatalog(projectRoot);
+  return generationSession;
+}
+
+function saveDqlGenerationDraftForProject(
+  projectRoot: string,
+  importId: string,
+  candidate: BlockStudioImportCandidate,
+): DqlGenerationCandidate {
+  if (candidate.recommendedAction === 'reuse_existing') {
+    const topMatch = candidate.similarityMatches?.[0];
+    return {
+      ...candidate,
+      reviewStatus: 'review',
+      draftSave: {
+        status: 'skipped',
+        reason: topMatch
+          ? `Reuse recommended: ${topMatch.name} (${topMatch.kind}, ${(topMatch.score * 100).toFixed(0)}%).`
+          : 'Reuse recommended; no new draft block was needed.',
+      },
+      generationMode: candidate.generationMode ?? 'deterministic',
+      generationProvider: candidate.generationProvider ?? 'local-deterministic',
+      llmContext: candidate.llmContext ?? deterministicDqlGenerationContext(candidate, candidate.evidence ?? []),
+      evidence: candidate.evidence ?? [],
+    };
+  }
+
+  try {
+    const savedPath = saveBlockStudioDraftArtifacts(projectRoot, {
+      currentPath: isDraftBlockPath(candidate.savedPath) ? candidate.savedPath : undefined,
+      source: candidate.dqlSource,
+      name: candidate.name,
+      domain: candidate.domain,
+      description: candidate.description,
+      owner: candidate.owner,
+      tags: candidate.tags,
+      lineage: candidate.lineage.sourceTables,
+      stableSuffix: candidate.id.replace(/^cand_/, ''),
+      importMeta: {
+        importId,
+        candidateId: candidate.id,
+        sourceKind: candidate.sourceKind,
+        sourcePath: candidate.sourcePath,
+      },
+    });
+    const draftSave: BlockDraftSaveState = { status: 'saved', path: savedPath, savedAt: new Date().toISOString() };
+    return {
+      ...candidate,
+      reviewStatus: candidate.reviewStatus === 'rejected' ? 'rejected' : 'draft',
+      savedPath,
+      draftSave,
+      generationMode: candidate.generationMode ?? 'deterministic',
+      generationProvider: candidate.generationProvider ?? 'local-deterministic',
+      llmContext: candidate.llmContext ?? deterministicDqlGenerationContext(candidate, candidate.evidence ?? []),
+      evidence: candidate.evidence ?? [],
+    };
+  } catch (error) {
+    return {
+      ...candidate,
+      draftSave: { status: 'error', error: error instanceof Error ? error.message : String(error) },
+      generationMode: candidate.generationMode ?? 'deterministic',
+      generationProvider: candidate.generationProvider ?? 'local-deterministic',
+      llmContext: candidate.llmContext ?? deterministicDqlGenerationContext(candidate, candidate.evidence ?? []),
+      evidence: candidate.evidence ?? [],
+    };
+  }
+}
+
 export function saveBlockStudioArtifacts(
   projectRoot: string,
   options: {
@@ -6091,9 +6564,9 @@ export function saveBlockStudioArtifacts(
     .toLowerCase()
     .replace(/[^a-z0-9/_-]+/g, '-')
     .replace(/^\/+|\/+$/g, '') || 'uncategorized';
-  const targetRelativePath = `blocks/${safeDomain}/${slug}.dql`;
-  const targetPath = join(projectRoot, targetRelativePath);
   const previousPath = options.currentPath ? normalize(options.currentPath).replace(/^\/+/, '') : null;
+  const targetRelativePath = canonicalBlockRelativePath(projectRoot, safeDomain, slug, previousPath);
+  const targetPath = join(projectRoot, targetRelativePath);
 
   if (existsSync(targetPath) && previousPath !== targetRelativePath) {
     throw new Error('BLOCK_EXISTS');
@@ -6194,17 +6667,63 @@ export function saveBlockStudioDraftArtifacts(
   return targetRelativePath;
 }
 
+function canonicalBlockRelativePath(
+  projectRoot: string,
+  safeDomain: string,
+  slug: string,
+  previousPath: string | null,
+): string {
+  const previousDomainFirst = previousPath?.match(/^domains\/([^/]+)\/blocks\/(?:_drafts\/)?[^/]+\.dql$/);
+  if (previousDomainFirst) {
+    return `domains/${previousDomainFirst[1]}/blocks/${slug}.dql`;
+  }
+  if (existsSync(join(projectRoot, 'domains', safeDomain))) {
+    return `domains/${safeDomain}/blocks/${slug}.dql`;
+  }
+  return `blocks/${safeDomain}/${slug}.dql`;
+}
+
 function isDraftBlockPath(value: string | null | undefined): boolean {
   if (!value) return false;
   const normalized = normalize(value).replace(/^\/+/, '');
   return normalized.startsWith('blocks/_drafts/') || /^domains\/[^/]+\/blocks\/_drafts\//.test(normalized);
 }
 
+function isBlockStudioBlockPath(value: string | null | undefined): boolean {
+  if (!value) return false;
+  const normalized = normalize(value).replace(/^\/+/, '');
+  return normalized.startsWith('blocks/') || /^domains\/[^/]+\/blocks\//.test(normalized);
+}
+
+function inferBlockStudioPathDomain(blockPath: string): string {
+  const normalized = normalize(blockPath).replace(/^\/+/, '');
+  if (normalized.startsWith('blocks/')) {
+    return normalized.split('/').slice(1, -1).join('/');
+  }
+  const domainFirst = normalized.match(/^domains\/([^/]+)\/blocks\/(.+)$/);
+  if (!domainFirst) return '';
+  const domain = domainFirst[1];
+  const blockSubpath = domainFirst[2];
+  if (blockSubpath.startsWith('_drafts/')) return `_drafts/${domain}`;
+  return domain;
+}
+
 function blockCompanionRelativePath(blockPath: string): string | null {
   const normalized = normalize(blockPath).replace(/^\/+/, '');
-  if (!normalized.startsWith('blocks/')) return null;
-  const withoutRoot = normalized.slice('blocks/'.length).replace(/\.dql$/, '.yaml');
-  return join('semantic-layer', 'blocks', withoutRoot).replaceAll('\\', '/');
+  if (normalized.startsWith('blocks/')) {
+    const withoutRoot = normalized.slice('blocks/'.length).replace(/\.dql$/, '.yaml');
+    return join('semantic-layer', 'blocks', withoutRoot).replaceAll('\\', '/');
+  }
+  const domainFirst = normalized.match(/^domains\/([^/]+)\/blocks\/(.+)\.dql$/);
+  if (domainFirst) {
+    const domain = domainFirst[1];
+    const blockPath = domainFirst[2];
+    const companionBlockPath = blockPath.startsWith('_drafts/')
+      ? join('_drafts', domain, blockPath.slice('_drafts/'.length))
+      : join(domain, blockPath);
+    return join('semantic-layer', 'blocks', `${companionBlockPath}.yaml`).replaceAll('\\', '/');
+  }
+  return null;
 }
 
 function readBlockCompanionFile(projectRoot: string, relativePath: string) {
@@ -6256,7 +6775,7 @@ function readBlockCompanionFile(projectRoot: string, relativePath: string) {
   }
 }
 
-function parseBlockSourceMetadata(source: string): {
+export function parseBlockSourceMetadata(source: string): {
   name: string;
   domain: string;
   description: string;
@@ -6269,7 +6788,10 @@ function parseBlockSourceMetadata(source: string): {
   grain: string;
   entities: string[];
   outputs: string[];
+  dimensions: string[];
   allowedFilters: string[];
+  parameterPolicy: Array<{ name: string; policy: string }>;
+  filterBindings: Array<{ filter: string; binding: string }>;
   sourceSystems: string[];
   replacementFor: string[];
   reviewCadence: string;
@@ -6280,6 +6802,20 @@ function parseBlockSourceMetadata(source: string): {
     const match = source.match(new RegExp(`\\b${key}\\s*=\\s*\\[([^\\]]*)\\]`, 'i'));
     return match ? (match[1].match(/"([^"]*)"/g) ?? []).map((value) => value.slice(1, -1)) : [];
   };
+  const extractStringMapSection = (key: string) => {
+    const match = source.match(new RegExp(`\\b${key}\\s*\\{([\\s\\S]*?)\\n\\s*\\}`, 'i'));
+    if (!match) return [];
+    return match[1]
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .map((line) => line.match(/^([A-Za-z_][\w.]*)\s*=\s*"([^"]*)"\s*$/))
+      .filter((entry): entry is RegExpMatchArray => Boolean(entry))
+      .map((entry) => ({ key: entry[1], value: entry[2] }));
+  };
+  const parameterPolicy = extractStringMapSection('parameterPolicy')
+    .map((entry) => ({ name: entry.key, policy: entry.value }));
+  const filterBindings = extractStringMapSection('filterBindings')
+    .map((entry) => ({ filter: entry.key, binding: entry.value }));
   return {
     name,
     domain: extractString('domain'),
@@ -6293,7 +6829,10 @@ function parseBlockSourceMetadata(source: string): {
     grain: extractString('grain'),
     entities: extractStringArray('entities'),
     outputs: extractStringArray('outputs'),
+    dimensions: extractStringArray('dimensions'),
     allowedFilters: extractStringArray('allowedFilters'),
+    parameterPolicy,
+    filterBindings,
     sourceSystems: extractStringArray('sourceSystems'),
     replacementFor: extractStringArray('replacementFor'),
     reviewCadence: extractString('reviewCadence'),
@@ -6388,9 +6927,9 @@ function setBlockStudioStatusInSource(source: string, newStatus: string): string
   return source.replace(/block\s+"[^"]*"\s*\{/, (match) => `${match}\n  status = "${newStatus}"`);
 }
 
-function setBlockStudioStatus(projectRoot: string, blockPath: string, newStatus: string): void {
+export function setBlockStudioStatus(projectRoot: string, blockPath: string, newStatus: string): void {
   const normalizedPath = normalize(blockPath).replace(/^\/+/, '');
-  if (!normalizedPath.startsWith('blocks/')) throw new Error('Invalid block path');
+  if (!isBlockStudioBlockPath(normalizedPath)) throw new Error('Invalid block path');
   const absPath = join(projectRoot, normalizedPath);
   if (!existsSync(absPath)) throw new Error('Block file not found');
   const source = setBlockStudioStatusInSource(readFileSync(absPath, 'utf-8'), newStatus);
@@ -6415,14 +6954,24 @@ interface DqlGenerationPatch {
   description?: string;
   owner?: string;
   tags?: string[];
+  terms?: string[];
   llmContext?: string;
   pattern?: string;
   grain?: string;
   entities?: string[];
   outputs?: string[];
+  dimensions?: string[];
   allowedFilters?: string[];
+  parameterPolicy?: Array<{ name: string; policy: string }>;
+  filterBindings?: Array<{ filter: string; binding: string }>;
+  parameterDecisions?: DqlParameterDecision[];
+  similarityMatches?: BlockSimilarityMatch[];
+  recommendedAction?: DqlCandidateRecommendedAction;
   sourceSystems?: string[];
   replacementFor?: string[];
+  reviewCadence?: string;
+  sql?: string;
+  warnings?: string[];
 }
 
 async function buildDqlGenerationContextPack(
@@ -6574,6 +7123,7 @@ function dqlGenerationEvidenceKind(objectType: string): DqlGenerationEvidence['k
   if (objectType === 'datalex_contract') return 'datalex_contract';
   if (objectType === 'datalex_entity') return 'datalex_entity';
   if (objectType === 'datalex_domain') return 'datalex_domain';
+  if (objectType === 'datalex_term') return 'datalex_term';
   if (objectType.includes('lineage')) return 'lineage';
   return 'metadata';
 }
@@ -6583,22 +7133,53 @@ function deterministicDqlGenerationPatch(
   evidence: DqlGenerationEvidence[],
 ): DqlGenerationPatch {
   const domain = inferDqlGenerationDomain(candidate);
+  const parameterized = parameterizeSqlForDqlImport(candidate.sql);
+  const grain = extractDqlGenerationGroupByFields(parameterized.sql)[0];
+  const outputs = extractDqlGenerationSelectOutputs(parameterized.sql);
+  const sourceSystems = candidate.lineage.sourceTables.map((table) => table.split('.').filter(Boolean).slice(-2, -1)[0] ?? '').filter(Boolean);
   const description = candidate.description && !candidate.description.startsWith('Imported from ')
     ? candidate.description
     : deterministicDqlGenerationDescription(candidate, evidence);
+  const allowedFilters = Array.from(new Set([
+    ...parameterized.allowedFilters,
+    ...extractDqlGenerationFilterFields(parameterized.sql),
+  ])).slice(0, 16);
   return {
     name: candidate.name,
     domain,
     description,
     owner: candidate.owner,
     tags: dqlGenerationBusinessTags(candidate, evidence, domain),
-    llmContext: deterministicDqlGenerationContext(candidate, evidence),
-    pattern: inferDqlGenerationPattern(candidate.sql),
-    grain: extractDqlGenerationGroupByFields(candidate.sql)[0],
-    outputs: extractDqlGenerationSelectOutputs(candidate.sql),
-    allowedFilters: extractDqlGenerationFilterFields(candidate.sql),
-    sourceSystems: candidate.lineage.sourceTables.map((table) => table.split('.').filter(Boolean).slice(-2, -1)[0] ?? '').filter(Boolean),
+    terms: inferDqlGenerationTerms(evidence),
+    llmContext: deterministicDqlGenerationContext({ ...candidate, sql: parameterized.sql }, evidence),
+    pattern: inferDqlGenerationPattern(parameterized.sql),
+    grain,
+    entities: inferDqlGenerationEntities({
+      grain,
+      outputs,
+      sourceTables: candidate.lineage.sourceTables,
+      evidence,
+    }),
+    outputs,
+    dimensions: extractDqlGenerationDimensions(parameterized.sql, grain, outputs),
+    allowedFilters,
+    parameterPolicy: parameterized.parameterPolicy,
+    filterBindings: parameterized.filterBindings,
+    parameterDecisions: parameterized.parameterDecisions,
+    sql: parameterized.sql,
+    warnings: parameterized.warnings,
+    sourceSystems,
+    reviewCadence: 'monthly',
   };
+}
+
+function inferDqlGenerationTerms(evidence: DqlGenerationEvidence[]): string[] {
+  return Array.from(new Set(
+    evidence
+      .filter((item) => item.kind === 'dql_term' || item.kind === 'datalex_term')
+      .map((item) => item.name.trim())
+      .filter(Boolean),
+  )).slice(0, 16);
 }
 
 function deterministicDqlGenerationDescription(
@@ -6693,6 +7274,103 @@ function extractDqlGenerationSelectOutputs(sql: string): string[] {
     .slice(0, 24);
 }
 
+function extractDqlGenerationDimensions(sql: string, grain: string | undefined, outputs: string[]): string[] {
+  const outputSet = new Set(outputs.map(normalizedTerm));
+  return extractDqlGenerationGroupByFields(sql)
+    .map((field) => field.split('.').pop() ?? field)
+    .filter((field) => normalizedTerm(field) !== normalizedTerm(grain ?? ''))
+    .filter((field) => !outputSet.has(normalizedTerm(field)))
+    .filter((field) => !/\b(total|count|sum|avg|average|min|max|rate|pct|percent|amount|revenue|points?|score)\b/i.test(field))
+    .slice(0, 16);
+}
+
+function inferDqlGenerationEntities(input: {
+  grain?: string;
+  outputs: string[];
+  sourceTables: string[];
+  evidence: DqlGenerationEvidence[];
+}): string[] {
+  const entities = new Set<string>();
+  const add = (value: string | undefined) => {
+    const entity = businessEntityFromDqlGenerationIdentifier(value ?? '');
+    if (entity) entities.add(entity);
+  };
+
+  add(input.grain);
+  for (const output of input.outputs) add(output);
+  for (const table of input.sourceTables) add(table.split('.').pop());
+  for (const item of input.evidence.slice(0, 12)) {
+    if (item.kind === 'datalex_entity' || item.kind === 'semantic_model' || item.kind === 'dbt_model' || item.kind === 'warehouse_table') {
+      add(item.name.split('.').pop());
+    }
+  }
+
+  return [...entities].slice(0, 8);
+}
+
+function businessEntityFromDqlGenerationIdentifier(value: string): string {
+  const raw = value
+    .split('.').pop()
+    ?.trim()
+    .replace(/[`"[\]]/g, '')
+    .replace(/^(dim|fact|fct|stg|src|int)_/i, '')
+    .replace(/_(id|key|name|code|uuid|number|num|abbreviation|abbr)$/i, '')
+    .replace(/s$/i, '') ?? '';
+  if (!raw) return '';
+  const tokens = raw
+    .split(/[^A-Za-z0-9]+/)
+    .map((token) => token.trim().toLowerCase())
+    .filter(Boolean)
+    .filter((token) => !isGenericDqlGenerationEntityToken(token));
+  if (tokens.length === 0) return '';
+  return titleizeDqlGenerationName(tokens.join(' '));
+}
+
+function isGenericDqlGenerationEntityToken(token: string): boolean {
+  return new Set([
+    'total',
+    'count',
+    'sum',
+    'avg',
+    'average',
+    'min',
+    'max',
+    'metric',
+    'measure',
+    'value',
+    'amount',
+    'revenue',
+    'point',
+    'points',
+    'score',
+    'date',
+    'day',
+    'week',
+    'month',
+    'quarter',
+    'year',
+    'season',
+    'period',
+    'time',
+    'row',
+    'record',
+    'detail',
+    'stat',
+    'stats',
+    'analytic',
+    'analytics',
+    'transformed',
+  ]).has(token);
+}
+
+function titleizeDqlGenerationName(value: string): string {
+  return value
+    .replace(/[_-]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .replace(/\b\w/g, (char) => char.toUpperCase());
+}
+
 function inferDqlGenerationPattern(sql: string): string {
   const groupFields = extractDqlGenerationGroupByFields(sql);
   if (/@metric\s*\(/i.test(sql)) return 'metric_wrapper';
@@ -6700,13 +7378,17 @@ function inferDqlGenerationPattern(sql: string): string {
     const systems = new Set(extractDqlGenerationSourceSystems(sql));
     if (systems.size > 1) return 'bridge';
   }
-  if (/\border\s+by\b[\s\S]*\blimit\s+\d+/i.test(sql)) return 'ranking';
+  if (hasDqlGenerationRankingLimit(sql)) return 'ranking';
   if (groupFields.some((field) => /\b(date|day|week|month|quarter|year|period|time)\b/i.test(field))) return 'trend';
   if (groupFields.length === 1 && /_id$|_key$/i.test(groupFields[0])) return 'entity_rollup';
   if (!/\b(sum|count|avg|min|max|median|percentile|rank)\s*\(/i.test(sql) && /\b(dim|profile|customer|account|player|product|user|entity)\b/i.test(sql)) {
     return 'entity_profile';
   }
   return 'custom';
+}
+
+function hasDqlGenerationRankingLimit(sql: string): boolean {
+  return /\border\s+by\b[\s\S]*\blimit\s+(?:\d+|\$\{\s*[A-Za-z_][A-Za-z0-9_]*\s*\}|[:?][A-Za-z_][A-Za-z0-9_]*)/i.test(sql);
 }
 
 function extractDqlGenerationSourceSystems(sql: string): string[] {
@@ -6800,8 +7482,9 @@ async function buildAiDqlGenerationPatch(
       parameters: candidate.lineage.parameters,
       warnings: candidate.warnings ?? candidate.lineage.warnings,
       grain: extractDqlGenerationGroupByFields(candidate.sql),
-      yearFilters: extractDqlGenerationYearFilters(candidate.sql),
-    },
+        yearFilters: extractDqlGenerationYearFilters(candidate.sql),
+        parameterization: parameterizeSqlForDqlImport(candidate.sql),
+      },
     context: {
       evidence,
       selectedObjects: contextPack?.objects.slice(0, 24).map((object) => ({
@@ -6824,11 +7507,13 @@ async function buildAiDqlGenerationPatch(
       role: 'system',
       content: [
         'You generate DQL Block Studio metadata for a local draft.',
-        'Return only a compact JSON object with optional keys: name, domain, description, owner, tags, llmContext, pattern, grain, entities, outputs, allowedFilters, sourceSystems, replacementFor.',
+        'Return only a compact JSON object with optional keys: name, domain, description, owner, tags, terms, llmContext, pattern, grain, entities, outputs, dimensions, allowedFilters, sourceSystems, replacementFor, reviewCadence.',
         'Do not return markdown. Do not mark the block certified. Do not change SQL.',
         'Use only directly relevant dbt, semantic, warehouse, certified block, and SQL-shape evidence from the payload.',
+        'terms must reference existing DQL/DataLex glossary terms from the payload. Do not invent term names.',
         'If metadata descriptions are missing, describe the observable SQL intent instead of inventing business meaning.',
         'Descriptions and llmContext must be specific, business-readable, concise, and review-required.',
+        'reviewCadence should usually be monthly or quarterly unless evidence strongly suggests a different cadence.',
         'Tags must be business/search tags. Avoid generic tags such as raw-sql, imported, ai-generated.',
       ].join('\n'),
     },
@@ -6853,16 +7538,42 @@ function normalizeDqlGenerationPatch(value: unknown): DqlGenerationPatch | null 
   if (typeof record.domain === 'string' && record.domain.trim()) patch.domain = record.domain.trim().slice(0, 80);
   if (typeof record.description === 'string' && record.description.trim()) patch.description = record.description.trim().slice(0, 500);
   if (typeof record.owner === 'string' && record.owner.trim()) patch.owner = record.owner.trim().slice(0, 120);
-  if (Array.isArray(record.tags)) patch.tags = record.tags.map(String).map((tag) => tag.trim()).filter(Boolean).slice(0, 12);
+  if (Array.isArray(record.tags)) patch.tags = normalizeDqlGenerationStringArray(record.tags, 12);
+  if (Array.isArray(record.terms)) patch.terms = normalizeDqlGenerationStringArray(record.terms, 16);
   if (typeof record.llmContext === 'string' && record.llmContext.trim()) patch.llmContext = record.llmContext.trim().slice(0, 1000);
   if (typeof record.pattern === 'string' && record.pattern.trim()) patch.pattern = normalizeDqlGenerationPattern(record.pattern);
   if (typeof record.grain === 'string' && record.grain.trim()) patch.grain = record.grain.trim().slice(0, 120);
-  if (Array.isArray(record.entities)) patch.entities = record.entities.map(String).map((value) => value.trim()).filter(Boolean).slice(0, 12);
-  if (Array.isArray(record.outputs)) patch.outputs = record.outputs.map(String).map((value) => value.trim()).filter(Boolean).slice(0, 24);
-  if (Array.isArray(record.allowedFilters)) patch.allowedFilters = record.allowedFilters.map(String).map((value) => value.trim()).filter(Boolean).slice(0, 16);
-  if (Array.isArray(record.sourceSystems)) patch.sourceSystems = record.sourceSystems.map(String).map((value) => value.trim()).filter(Boolean).slice(0, 12);
-  if (Array.isArray(record.replacementFor)) patch.replacementFor = record.replacementFor.map(String).map((value) => value.trim()).filter(Boolean).slice(0, 12);
+  if (Array.isArray(record.entities)) patch.entities = normalizeDqlGenerationStringArray(record.entities, 12);
+  if (Array.isArray(record.outputs)) patch.outputs = normalizeDqlGenerationStringArray(record.outputs, 24);
+  if (Array.isArray(record.dimensions)) patch.dimensions = normalizeDqlGenerationStringArray(record.dimensions, 16);
+  if (Array.isArray(record.allowedFilters)) patch.allowedFilters = normalizeDqlGenerationStringArray(record.allowedFilters, 16);
+  if (Array.isArray(record.sourceSystems)) patch.sourceSystems = normalizeDqlGenerationStringArray(record.sourceSystems, 12);
+  if (Array.isArray(record.replacementFor)) patch.replacementFor = normalizeDqlGenerationStringArray(record.replacementFor, 12);
+  if (typeof record.reviewCadence === 'string' && record.reviewCadence.trim()) {
+    const reviewCadence = normalizeDqlGenerationReviewCadence(record.reviewCadence);
+    if (reviewCadence) patch.reviewCadence = reviewCadence;
+  }
   return Object.keys(patch).length > 0 ? patch : null;
+}
+
+function normalizeDqlGenerationStringArray(value: unknown[], limit: number): string[] {
+  const result: string[] = [];
+  for (const item of value) {
+    const normalized = normalizeDqlGenerationStringItem(item);
+    if (normalized) result.push(normalized);
+  }
+  return Array.from(new Set(result)).slice(0, limit);
+}
+
+function normalizeDqlGenerationStringItem(value: unknown): string {
+  if (typeof value === 'string') return value.trim();
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return '';
+  const record = value as Record<string, unknown>;
+  for (const key of ['name', 'field', 'column', 'id', 'value', 'label', 'sourceSystem', 'source_system']) {
+    const nested = record[key];
+    if (typeof nested === 'string' && nested.trim()) return nested.trim();
+  }
+  return '';
 }
 
 function normalizeDqlGenerationPattern(value: string): string | undefined {
@@ -6879,6 +7590,30 @@ function normalizeDqlGenerationPattern(value: string): string | undefined {
     'custom',
   ]);
   return allowed.has(normalized) ? normalized : undefined;
+}
+
+function normalizeDqlGenerationReviewCadence(value: string): string | undefined {
+  const normalized = value.trim().toLowerCase().replace(/[^a-z0-9_ -]+/g, '').replace(/\s+/g, '_');
+  const allowed = new Set(['daily', 'weekly', 'biweekly', 'monthly', 'quarterly', 'semiannual', 'annual']);
+  return allowed.has(normalized) ? normalized : undefined;
+}
+
+function mergeGroundedDqlGenerationTerms(
+  baseTerms: string[] | undefined,
+  overrideTerms: string[] | undefined,
+  evidence: DqlGenerationEvidence[],
+): string[] | undefined {
+  const grounded = new Map<string, string>();
+  for (const item of evidence) {
+    if (item.kind !== 'dql_term' && item.kind !== 'datalex_term') continue;
+    const normalized = normalizedTerm(item.name);
+    if (normalized) grounded.set(normalized, item.name.trim());
+  }
+  const merged = [...(baseTerms ?? []), ...(overrideTerms ?? [])]
+    .map((term) => grounded.get(normalizedTerm(term)))
+    .filter((term): term is string => Boolean(term));
+  const result = Array.from(new Set(merged)).slice(0, 16);
+  return result.length > 0 ? result : undefined;
 }
 
 function mergeDqlGenerationPatch(
@@ -6907,14 +7642,230 @@ function mergeDqlGenerationPatch(
     description,
     llmContext,
     tags: Array.from(new Set([...(base.tags ?? []), ...overrideTags])).slice(0, 12),
+    terms: mergeGroundedDqlGenerationTerms(base.terms, override.terms, evidence),
     pattern: override.pattern ?? base.pattern,
     grain: override.grain ?? base.grain,
     entities: override.entities?.length ? override.entities : base.entities,
     outputs: override.outputs?.length ? override.outputs : base.outputs,
+    dimensions: override.dimensions?.length ? override.dimensions : base.dimensions,
     allowedFilters: override.allowedFilters?.length ? override.allowedFilters : base.allowedFilters,
+    parameterPolicy: base.parameterPolicy,
+    filterBindings: base.filterBindings,
+    parameterDecisions: base.parameterDecisions,
+    similarityMatches: base.similarityMatches,
+    recommendedAction: base.recommendedAction,
+    sql: base.sql,
+    warnings: base.warnings,
     sourceSystems: override.sourceSystems?.length ? override.sourceSystems : base.sourceSystems,
     replacementFor: override.replacementFor?.length ? override.replacementFor : base.replacementFor,
+    reviewCadence: override.reviewCadence ?? base.reviewCadence,
   };
+}
+
+function buildDqlGenerationSimilarityMatches(
+  candidate: BlockStudioImportCandidate,
+  patch: DqlGenerationPatch,
+  contextPack: LocalContextPack | null,
+): { matches: BlockSimilarityMatch[]; recommendedAction: DqlCandidateRecommendedAction } {
+  const candidateSql = patch.sql ?? candidate.sql;
+  const candidateFingerprints = buildBlockSqlFingerprints(candidateSql);
+  const candidateBusinessFingerprint = buildBlockBusinessFingerprint({
+    name: patch.name ?? candidate.name,
+    domain: patch.domain ?? candidate.domain,
+    pattern: patch.pattern,
+    grain: patch.grain,
+    entities: patch.entities,
+    terms: patch.terms,
+    outputs: patch.outputs,
+    dimensions: patch.dimensions,
+    filters: patch.allowedFilters,
+    sources: candidate.lineage.sourceTables,
+    sourceSystems: patch.sourceSystems,
+  });
+  const candidateShape = {
+    name: candidate.name,
+    pattern: patch.pattern,
+    grain: patch.grain,
+    outputs: new Set((patch.outputs ?? []).map(normalizedTerm)),
+    terms: new Set((patch.terms ?? []).map(normalizedTerm)),
+    dimensions: new Set((patch.dimensions ?? []).map(normalizedTerm)),
+    filters: new Set((patch.allowedFilters ?? []).map(normalizedTerm)),
+    entities: new Set((patch.entities ?? []).map(normalizedTerm)),
+    sources: new Set(candidate.lineage.sourceTables.flatMap(relationLookupTokens).map(normalizedTerm)),
+  };
+  const objects = (contextPack?.objects ?? []).filter((object) => object.objectType === 'dql_block');
+  const matches = objects.flatMap((object): BlockSimilarityMatch[] => {
+    const payload = object.payload ?? {};
+    const objectSql = typeof payload.sql === 'string' ? payload.sql : '';
+    const objectFingerprints = metadataSqlFingerprints(payload.sqlFingerprints)
+      ?? (objectSql ? buildBlockSqlFingerprints(objectSql) : null);
+    const objectBusinessFingerprint = metadataBusinessFingerprint(payload.businessFingerprint);
+    const objectShape = {
+      pattern: metadataString(payload.pattern),
+      grain: metadataString(payload.grain),
+      outputs: new Set(metadataStringArray(payload.declaredOutputs ?? payload.outputs)),
+      terms: new Set(metadataStringArray(payload.termRefs ?? payload.terms)),
+      dimensions: new Set(metadataStringArray(payload.dimensions)),
+      filters: new Set(metadataStringArray(payload.allowedFilters)),
+      entities: new Set(metadataStringArray(payload.entities)),
+      sources: new Set(metadataStringArray(payload.tableDependencies ?? payload.rawTableRefs).flatMap(relationLookupTokens).map(normalizedTerm)),
+    };
+    if (objectFingerprints?.exact && objectFingerprints.exact === candidateFingerprints.exact) {
+      return [{
+        kind: 'exact_sql_match',
+        objectKey: object.objectKey,
+        name: object.fullName ?? object.name,
+        status: object.status,
+        source: object.sourcePath,
+        score: 0.99,
+        reason: 'Normalized SQL exactly matches an existing DQL block.',
+        recommendedAction: 'reuse_existing',
+      }];
+    }
+    if (objectFingerprints?.parameterized && objectFingerprints.parameterized === candidateFingerprints.parameterized) {
+      return [{
+        kind: 'parameterized_duplicate',
+        objectKey: object.objectKey,
+        name: object.fullName ?? object.name,
+        status: object.status,
+        source: object.sourcePath,
+        score: 0.94,
+        reason: 'SQL shape matches after replacing literal values with parameters.',
+        recommendedAction: 'reuse_existing',
+      }];
+    }
+    const score = businessShapeSimilarity(candidateShape, objectShape, object);
+    if (
+      objectBusinessFingerprint?.hash
+      && objectBusinessFingerprint.hash === candidateBusinessFingerprint.hash
+      && object.status === 'certified'
+    ) {
+      return [{
+        kind: 'business_duplicate',
+        objectKey: object.objectKey,
+        name: object.fullName ?? object.name,
+        status: object.status,
+        source: object.sourcePath,
+        score: Math.max(score, 0.86),
+        reason: 'Certified block has the same persisted business-shape fingerprint.',
+        recommendedAction: 'reuse_existing',
+      }];
+    }
+    if (score >= 0.76 && object.status === 'certified') {
+      return [{
+        kind: 'business_duplicate',
+        objectKey: object.objectKey,
+        name: object.fullName ?? object.name,
+        status: object.status,
+        source: object.sourcePath,
+        score,
+        reason: 'Certified block has the same business shape: entity, grain, filters, outputs, or source family overlap.',
+        recommendedAction: 'reuse_existing',
+      }];
+    }
+    if (score >= 0.58) {
+      return [{
+        kind: 'near_variant',
+        objectKey: object.objectKey,
+        name: object.fullName ?? object.name,
+        status: object.status,
+        source: object.sourcePath,
+        score,
+        reason: 'Existing block is close but appears to need a reviewed filter, output, grain, or source extension.',
+        recommendedAction: 'extend_existing',
+      }];
+    }
+    return [];
+  }).sort((a, b) => b.score - a.score).slice(0, 8);
+  const top = matches[0];
+  return {
+    matches,
+    recommendedAction: top?.recommendedAction ?? 'create_new',
+  };
+}
+
+function metadataSqlFingerprints(value: unknown): { exact: string; parameterized: string } | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  const record = value as Record<string, unknown>;
+  const exact = typeof record.exact === 'string' ? record.exact : '';
+  const parameterized = typeof record.parameterized === 'string' ? record.parameterized : '';
+  if (!exact || !parameterized) return null;
+  return { exact, parameterized };
+}
+
+function metadataBusinessFingerprint(value: unknown): { hash: string; tokens: string[] } | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  const record = value as Record<string, unknown>;
+  const hash = typeof record.hash === 'string' ? record.hash : '';
+  if (!hash) return null;
+  const tokens = Array.isArray(record.tokens)
+    ? record.tokens.map((item) => String(item)).filter(Boolean)
+    : [];
+  return { hash, tokens };
+}
+
+function businessShapeSimilarity(
+  candidate: {
+    name: string;
+    pattern?: string;
+    grain?: string;
+    outputs: Set<string>;
+    terms: Set<string>;
+    dimensions: Set<string>;
+    filters: Set<string>;
+    entities: Set<string>;
+    sources: Set<string>;
+  },
+  object: {
+    pattern?: string;
+    grain?: string;
+    outputs: Set<string>;
+    terms: Set<string>;
+    dimensions: Set<string>;
+    filters: Set<string>;
+    entities: Set<string>;
+    sources: Set<string>;
+  },
+  metadata: MetadataObject,
+): number {
+  let score = 0;
+  if (candidate.pattern && object.pattern && normalizedTerm(candidate.pattern) === normalizedTerm(object.pattern)) score += 0.12;
+  if (candidate.grain && object.grain && normalizedTerm(candidate.grain) === normalizedTerm(object.grain)) score += 0.15;
+  score += overlapScore(candidate.outputs, object.outputs) * 0.18;
+  score += overlapScore(candidate.terms, object.terms) * 0.08;
+  score += overlapScore(candidate.dimensions, object.dimensions) * 0.13;
+  score += overlapScore(candidate.filters, object.filters) * 0.14;
+  score += overlapScore(candidate.entities, object.entities) * 0.12;
+  score += overlapScore(candidate.sources, object.sources) * 0.1;
+  const nameTokens = new Set(candidate.name.toLowerCase().split(/[^a-z0-9]+/).filter((value) => value.length > 2));
+  const targetTokens = new Set([
+    ...metadata.name.toLowerCase().split(/[^a-z0-9]+/),
+    ...(metadata.description ?? '').toLowerCase().split(/[^a-z0-9]+/),
+  ].filter((value) => value.length > 2));
+  score += overlapScore(nameTokens, targetTokens) * 0.04;
+  return Number(Math.min(0.98, score).toFixed(3));
+}
+
+function overlapScore(left: Set<string>, right: Set<string>): number {
+  if (left.size === 0 || right.size === 0) return 0;
+  let overlap = 0;
+  for (const value of left) {
+    if (value && right.has(value)) overlap += 1;
+  }
+  return overlap / Math.max(1, Math.min(left.size, right.size));
+}
+
+function normalizedTerm(value: string): string {
+  return String(value ?? '').trim().toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '');
+}
+
+function metadataString(value: unknown): string | undefined {
+  return typeof value === 'string' && value.trim() ? value.trim() : undefined;
+}
+
+function metadataStringArray(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  return value.map((item) => String(item).trim()).filter(Boolean).map(normalizedTerm);
 }
 
 function isWeakDqlGenerationName(name: string): boolean {
@@ -6955,8 +7906,10 @@ function isUngroundedDqlGenerationDescription(
 function dqlGenerationConversionNotes(providerName: string): string[] {
   return [
     `Generated with ${providerName} using local project context when available.`,
-    'SQL text is preserved; metadata, tags, evidence, and agent context remain editable.',
-    'Drafts are autosaved under blocks/_drafts before certification.',
+    'Runtime-scope SQL literals are converted into DQL params when safe; business constants stay static for review.',
+    'Certified and draft block similarity is checked before a new draft is saved.',
+    'SQL semantics are preserved while reusable parameter placeholders may replace literal values.',
+    'Drafts are autosaved under blocks/_drafts or domains/<domain>/blocks/_drafts before certification.',
     'Preview results and tests gate certification before promotion.',
   ];
 }
@@ -7182,6 +8135,19 @@ export function readGitMetadata(projectRoot: string): BlockGitMetadata | null {
   }
 }
 
+function resolveBlockWriteTarget(
+  projectRoot: string,
+  safeDomain: string,
+  slug: string,
+): { relativePath: string; absPath: string } {
+  if (safeDomain && existsSync(join(projectRoot, 'domains', safeDomain))) {
+    const relativePath = `domains/${safeDomain}/blocks/${slug}.dql`;
+    return { relativePath, absPath: join(projectRoot, relativePath) };
+  }
+  const relativePath = safeDomain ? `blocks/${safeDomain}/${slug}.dql` : `blocks/${slug}.dql`;
+  return { relativePath, absPath: join(projectRoot, relativePath) };
+}
+
 export function createBlockArtifacts(
   projectRoot: string,
   options: {
@@ -7206,9 +8172,9 @@ export function createBlockArtifacts(
     .toLowerCase()
     .replace(/[^a-z0-9/_-]+/g, '-')
     .replace(/^\/+|\/+$/g, '');
-  const blocksDir = safeDomain ? join(projectRoot, 'blocks', safeDomain) : join(projectRoot, 'blocks');
-  mkdirSync(blocksDir, { recursive: true });
-  const blockPath = join(blocksDir, `${slug}.dql`);
+  const target = resolveBlockWriteTarget(projectRoot, safeDomain, slug);
+  mkdirSync(dirname(target.absPath), { recursive: true });
+  const blockPath = target.absPath;
   if (existsSync(blockPath)) {
     throw new Error('BLOCK_EXISTS');
   }
@@ -7216,7 +8182,7 @@ export function createBlockArtifacts(
   const templateContent = options.template
     ? listBlockTemplates().find((template) => template.id === options.template)?.content
     : undefined;
-  const relativePath = safeDomain ? `blocks/${safeDomain}/${slug}.dql` : `blocks/${slug}.dql`;
+  const relativePath = target.relativePath;
   const fileContent = canonicalizeSafe(options.blockType === 'semantic' && !options.content?.trim() && !templateContent
     ? buildBlankSemanticBlockContent({
         name: options.name,
@@ -7281,9 +8247,9 @@ export function createSemanticBuilderBlock(
     .toLowerCase()
     .replace(/[^a-z0-9/_-]+/g, '-')
     .replace(/^\/+|\/+$/g, '') || 'uncategorized';
-  const blocksDir = join(projectRoot, 'blocks', safeDomain);
-  mkdirSync(blocksDir, { recursive: true });
-  const blockPath = join(blocksDir, `${slug}.dql`);
+  const target = resolveBlockWriteTarget(projectRoot, safeDomain, slug);
+  mkdirSync(dirname(target.absPath), { recursive: true });
+  const blockPath = target.absPath;
   if (existsSync(blockPath)) {
     throw new Error('BLOCK_EXISTS');
   }
@@ -7313,7 +8279,7 @@ export function createSemanticBuilderBlock(
   });
 
   return {
-    path: `blocks/${safeDomain}/${slug}.dql`,
+    path: target.relativePath,
     content,
     companionPath,
   };
@@ -8162,18 +9128,16 @@ export function buildDbtStatus(projectRoot: string, projectConfig: ProjectConfig
   const sourceCount = manifest?.sources && typeof manifest.sources === 'object'
     ? Object.keys(manifest.sources).length
     : 0;
-  const manifestMetricCount = manifest?.metrics && typeof manifest.metrics === 'object'
-    ? Object.keys(manifest.metrics).length
-    : 0;
-  const semanticMetricCount = Array.isArray(semanticManifest?.metrics)
-    ? semanticManifest.metrics.length
+  const manifestMetricCount = artifactCollectionCount(manifest?.metrics);
+  const semanticMetricCount = semanticManifest
+    ? artifactCollectionCount(semanticManifest.metrics)
     : manifestMetricCount;
-  const semanticModelCount = Array.isArray(semanticManifest?.semantic_models)
-    ? semanticManifest.semantic_models.length
-    : 0;
-  const savedQueryCount = Array.isArray(semanticManifest?.saved_queries)
-    ? semanticManifest.saved_queries.length
-    : 0;
+  const semanticModelCount = semanticManifest
+    ? artifactCollectionCount(semanticManifest.semantic_models)
+    : artifactCollectionCount(manifest?.semantic_models);
+  const savedQueryCount = semanticManifest
+    ? artifactCollectionCount(semanticManifest.saved_queries ?? semanticManifest.savedQueries)
+    : artifactCollectionCount(manifest?.saved_queries ?? manifest?.savedQueries);
   const configured = existsSync(join(dbtProjectPath, 'dbt_project.yml'))
     || Boolean(projectConfig.dbt?.projectDir)
     || Boolean(projectConfig.semanticLayer?.provider === 'dbt' && projectConfig.semanticLayer.projectPath);
@@ -8185,6 +9149,8 @@ export function buildDbtStatus(projectRoot: string, projectConfig: ProjectConfig
       ? 'Run `dbt parse`, `dbt compile`, or `dbt build`, then run `dql sync dbt`.'
       : !semanticExists
         ? 'dbt manifest is ready. Run `dbt parse` or `dbt build` if you use dbt Semantic Layer metrics.'
+        : semanticMetricCount === 0 && semanticModelCount === 0 && savedQueryCount === 0
+          ? 'dbt manifest is ready, but MetricFlow semantic_manifest.json is empty. Add dbt semantic_models and metrics, then rerun dbt parse/build.'
         : 'dbt artifacts are ready. Build SQL blocks from models or semantic blocks from metrics.';
 
   return {
@@ -8208,6 +9174,212 @@ export function buildDbtStatus(projectRoot: string, projectConfig: ProjectConfig
     lastSyncTime,
     setupHint,
   };
+}
+
+export type SemanticLayerDiagnosticsIssueSeverity = 'info' | 'warning' | 'error';
+
+export interface SemanticLayerDiagnosticsIssue {
+  severity: SemanticLayerDiagnosticsIssueSeverity;
+  code: string;
+  message: string;
+  action?: string;
+  path?: string;
+}
+
+export function buildSemanticLayerDiagnostics(
+  projectRoot: string,
+  projectConfig: ProjectConfig,
+  options: {
+    semanticLayer?: SemanticLayer;
+    semanticErrors?: string[];
+    semanticConfig?: SemanticLayerProviderConfig;
+    detectedProvider?: string;
+    lastSyncTime: string | null;
+  },
+) {
+  const provider = options.semanticConfig?.provider ?? options.detectedProvider ?? null;
+  const dbt = buildDbtStatus(projectRoot, projectConfig, options.lastSyncTime);
+  const counts = semanticLayerCounts(options.semanticLayer);
+  const uncategorizedObjects = countUncategorizedSemanticObjects(options.semanticLayer);
+  const totalObjects = counts.metrics
+    + counts.measures
+    + counts.dimensions
+    + counts.timeDimensions
+    + counts.entities
+    + counts.hierarchies
+    + counts.semanticModels
+    + counts.savedQueries;
+  const issues: SemanticLayerDiagnosticsIssue[] = [];
+
+  for (const error of options.semanticErrors ?? []) {
+    issues.push({
+      severity: 'error',
+      code: 'semantic_load_error',
+      message: error,
+      action: 'Open the semantic source configuration, fix the provider error, then reload the semantic layer.',
+    });
+  }
+
+  if (!provider) {
+    issues.push({
+      severity: existsSync(join(projectRoot, 'semantic-layer')) ? 'info' : 'warning',
+      code: 'semantic_provider_not_configured',
+      message: 'No semantic layer provider is configured.',
+      action: 'Configure dbt MetricFlow, local semantic-layer YAML, or Snowflake Semantic Views from the setup flow.',
+    });
+  }
+
+  if (provider === 'dbt' || dbt.configured) {
+    if (!dbt.configured) {
+      issues.push({
+        severity: 'warning',
+        code: 'dbt_project_not_detected',
+        message: 'dbt is selected as the semantic source, but no dbt project was detected.',
+        action: 'Set dbt.projectDir or run DQL from a repository containing dbt_project.yml.',
+      });
+    }
+    if (!dbt.artifacts.manifest.exists) {
+      issues.push({
+        severity: 'error',
+        code: 'dbt_manifest_missing',
+        message: 'dbt manifest.json is missing, so DQL cannot build dbt model context.',
+        action: 'Run dbt parse, dbt compile, or dbt build, then reload the semantic layer.',
+        path: dbt.artifacts.manifest.path,
+      });
+    }
+    if (!dbt.artifacts.semanticManifest.exists) {
+      issues.push({
+        severity: 'warning',
+        code: 'metricflow_semantic_manifest_missing',
+        message: 'dbt MetricFlow semantic_manifest.json is missing. DQL can still inspect dbt models, but MetricFlow metrics and saved queries may be incomplete.',
+        action: 'Run dbt parse or dbt build with semantic models configured, then reload. For execution, ensure MetricFlow is installed and mf is on PATH.',
+        path: dbt.artifacts.semanticManifest.path,
+      });
+    } else if (dbt.counts.metrics === 0 && dbt.counts.semanticModels === 0 && dbt.counts.savedQueries === 0) {
+      issues.push({
+        severity: 'warning',
+        code: 'metricflow_semantic_manifest_empty',
+        message: 'semantic_manifest.json exists, but it does not contain metrics, semantic models, or saved queries.',
+        action: 'Check dbt semantic model YAML definitions and rerun dbt parse.',
+        path: dbt.artifacts.semanticManifest.path,
+      });
+    }
+    if (options.semanticLayer && totalObjects === 0 && (dbt.counts.models > 0 || dbt.counts.sources > 0)) {
+      issues.push({
+        severity: 'warning',
+        code: 'dbt_model_inventory_only',
+        message: 'DQL loaded dbt model inventory, but no MetricFlow semantic metrics were found.',
+        action: 'Create dbt semantic_models and metrics, or use AI Import to build DQL blocks from dbt model metadata.',
+      });
+    }
+  }
+
+  if (provider === 'snowflake') {
+    if (!options.semanticLayer && (options.semanticErrors ?? []).length === 0) {
+      issues.push({
+        severity: 'warning',
+        code: 'snowflake_semantic_views_not_loaded',
+        message: 'Snowflake semantic provider did not load semantic views.',
+        action: 'Confirm the active Snowflake connection can query semantic views, then reload. Warehouse tables still feed database context separately.',
+      });
+    } else if (options.semanticLayer && totalObjects === 0) {
+      issues.push({
+        severity: 'info',
+        code: 'snowflake_semantic_views_empty',
+        message: 'Snowflake semantic provider loaded, but no semantic view objects were discovered.',
+        action: 'Check that Snowflake Semantic Views exist and the active role can see them.',
+      });
+    }
+  }
+
+  if (options.semanticLayer && totalObjects === 0 && issues.every((issue) => issue.code !== 'dbt_model_inventory_only')) {
+    issues.push({
+      severity: 'warning',
+      code: 'semantic_layer_empty',
+      message: 'Semantic layer is available, but no semantic objects are loaded.',
+      action: 'Import semantic definitions or run dbt parse/build, then reload.',
+    });
+  }
+
+  if (uncategorizedObjects > 0) {
+    issues.push({
+      severity: 'info',
+      code: 'semantic_uncategorized_domain',
+      message: `${uncategorizedObjects} semantic object${uncategorizedObjects === 1 ? '' : 's'} had no domain and are visible under "uncategorized".`,
+      action: 'Add domain metadata in dbt semantic YAML or local semantic-layer files when domain ownership matters.',
+    });
+  }
+
+  const warnings = Array.from(new Set([
+    ...(options.semanticErrors ?? []),
+    ...issues
+      .filter((issue) => issue.severity !== 'info')
+      .map((issue) => issue.message),
+  ]));
+
+  return {
+    available: Boolean(options.semanticLayer),
+    provider,
+    sourceOfTruth: provider === 'dbt'
+      ? 'dbt MetricFlow semantic_manifest.json, dbt manifest.json semantic nodes, then dbt semantic YAML fallback'
+      : provider === 'snowflake'
+        ? 'Snowflake Semantic Views only; warehouse tables remain database catalog context'
+        : provider === 'dql'
+          ? 'local semantic-layer YAML'
+          : 'not configured',
+    errors: options.semanticErrors ?? [],
+    lastSyncTime: options.lastSyncTime,
+    counts,
+    dbt,
+    issues,
+    warnings,
+  };
+}
+
+function semanticLayerCounts(layer: SemanticLayer | undefined) {
+  return layer
+    ? {
+        domains: layer.listDomains().length,
+        metrics: layer.listMetrics().length,
+        measures: layer.listMeasures().length,
+        dimensions: layer.listDimensions().length,
+        timeDimensions: layer.listTimeDimensions().length,
+        entities: layer.listEntities().length,
+        hierarchies: layer.listHierarchies().length,
+        semanticModels: layer.listSemanticModels().length,
+        savedQueries: layer.listSavedQueries().length,
+      }
+    : {
+        domains: 0,
+        metrics: 0,
+        measures: 0,
+        dimensions: 0,
+        timeDimensions: 0,
+        entities: 0,
+        hierarchies: 0,
+        semanticModels: 0,
+        savedQueries: 0,
+      };
+}
+
+function countUncategorizedSemanticObjects(layer: SemanticLayer | undefined): number {
+  if (!layer) return 0;
+  return [
+    ...layer.listMetrics(),
+    ...layer.listMeasures(),
+    ...layer.listDimensions(),
+    ...layer.listTimeDimensions(),
+    ...layer.listEntities(),
+    ...layer.listHierarchies(),
+    ...layer.listSemanticModels(),
+    ...layer.listSavedQueries(),
+  ].filter((object) => !object.domain || !object.domain.trim()).length;
+}
+
+function artifactCollectionCount(value: unknown): number {
+  if (Array.isArray(value)) return value.length;
+  if (value && typeof value === 'object') return Object.keys(value as Record<string, unknown>).length;
+  return 0;
 }
 
 function describeArtifact(path: string, count?: number, generatedAt?: string | null) {
@@ -8789,6 +9961,11 @@ function isProviderSettingsId(value: unknown): value is ProviderSettingsId {
     || value === 'gemini'
     || value === 'ollama'
     || value === 'custom-openai';
+}
+
+function isDeterministicDqlGenerationProvider(value: unknown): boolean {
+  if (typeof value !== 'string') return false;
+  return value === 'none' || value === 'deterministic' || value === 'local-deterministic';
 }
 
 async function testProviderConfig(projectRoot: string, id: ProviderSettingsId): Promise<{ ok: boolean; message: string }> {

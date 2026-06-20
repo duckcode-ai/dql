@@ -67,4 +67,109 @@ describe('Certifier enterprise rules', () => {
     expect(result.certified).toBe(true);
     expect(result.errors).toEqual([]);
   });
+
+  it('accepts declared tests when runtime execution is intentionally skipped', () => {
+    const skippedTests: TestResultSummary = {
+      passed: 0,
+      failed: 0,
+      skipped: 1,
+      duration: 0,
+      assertions: [],
+      runAt: new Date('2026-06-20T00:00:00.000Z'),
+    };
+    const result = new Certifier(ENTERPRISE_RULES).evaluate(block({
+      testAssertions: ['assert row_count > 0'],
+    }), skippedTests);
+
+    expect(result.certified).toBe(true);
+    expect(result.errors).toEqual([]);
+  });
+
+  it('requires metric_wrapper blocks to bind exactly one semantic metric', () => {
+    const passing = new Certifier(ENTERPRISE_RULES).evaluate(block({
+      name: 'Revenue Metric Wrapper',
+      type: 'semantic',
+      pattern: 'metric_wrapper',
+      grain: 'order_month',
+      entities: [],
+      declaredOutputs: ['order_month', 'total_revenue'],
+      metricRef: 'total_revenue',
+      dimensionsRef: ['order_month'],
+      allowedFilters: ['order_month'],
+      filterBindings: [{ filter: 'order_month', binding: 'order_month' }],
+    }), passingTests);
+    expect(passing.certified).toBe(true);
+
+    const failing = new Certifier(ENTERPRISE_RULES).evaluate(block({
+      pattern: 'metric_wrapper',
+      metricRef: undefined,
+      metricsRef: ['total_revenue', 'gross_margin'],
+    }), passingTests);
+    expect(failing.certified).toBe(false);
+    expect(failing.errors.map((error) => error.rule)).toContain('Metric wrapper binds exactly one semantic metric');
+  });
+
+  it('enforces pattern-specific contracts for rollups and drilldowns', () => {
+    const rollup = new Certifier(ENTERPRISE_RULES).evaluate(block({
+      pattern: 'entity_rollup',
+      entities: ['Customer'],
+      grain: 'customer_id',
+      declaredOutputs: ['customer_id'],
+    }), passingTests);
+    expect(rollup.certified).toBe(false);
+    expect(rollup.errors.map((error) => error.rule)).toContain('Entity rollup declares entity grain and measures');
+
+    const drilldown = new Certifier(ENTERPRISE_RULES).evaluate(block({
+      pattern: 'drilldown',
+      grain: 'detail_row',
+      entities: [],
+      declaredOutputs: ['customer_id', 'order_id'],
+      allowedFilters: [],
+      parameterPolicy: [],
+      filterBindings: [],
+    }), passingTests);
+    expect(drilldown.certified).toBe(false);
+    expect(drilldown.errors.map((error) => error.rule)).toContain('Drilldown declares reusable filters');
+  });
+
+  it('requires bridge blocks to declare both sides and review context', () => {
+    const failing = new Certifier(ENTERPRISE_RULES).evaluate(block({
+      pattern: 'bridge',
+      entities: ['Customer'],
+      declaredOutputs: ['customer_id'],
+      sourceSystems: ['crm'],
+    }), passingTests);
+
+    expect(failing.certified).toBe(false);
+    expect(failing.errors.map((error) => error.rule)).toContain('Bridge block declares cross-domain review context');
+
+    const passing = new Certifier(ENTERPRISE_RULES).evaluate(block({
+      pattern: 'bridge',
+      grain: 'customer_order_bridge_key',
+      entities: ['Customer', 'Order'],
+      declaredOutputs: ['customer_order_bridge_key', 'customer_id', 'order_id'],
+      sourceSystems: ['crm', 'orders'],
+      allowedFilters: ['customer_id', 'order_id'],
+      filterBindings: [
+        { filter: 'customer_id', binding: 'customer_id' },
+        { filter: 'order_id', binding: 'order_id' },
+      ],
+    }), passingTests);
+
+    expect(passing.certified).toBe(true);
+  });
+
+  it('enforces declared filter bindings and supported parameter policy values', () => {
+    const result = new Certifier(ENTERPRISE_RULES).evaluate(block({
+      allowedFilters: ['season_range'],
+      filterBindings: [{ filter: 'team', binding: 'team_name' }],
+      parameterPolicy: [{ name: 'season_start', policy: 'ad_hoc' }],
+    }), passingTests);
+
+    expect(result.certified).toBe(false);
+    expect(result.errors.map((error) => error.rule)).toEqual(expect.arrayContaining([
+      'Parameter policies are valid',
+      'Filter bindings map declared filters',
+    ]));
+  });
 });

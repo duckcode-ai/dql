@@ -4,9 +4,9 @@ import { api } from '../../api/client';
 import { insertSemanticReference, serializeSemanticDragRef } from '../../editor/semantic-completions';
 import { makeCell, useNotebook } from '../../store/NotebookStore';
 import type {
-    SemanticLayerState,
-    SemanticLayerDiagnostics,
-    SemanticObjectDetail,
+  SemanticLayerState,
+  SemanticLayerDiagnostics,
+  SemanticObjectDetail,
   SemanticTreeNode,
 } from '../../store/types';
 import type { Theme } from '../../themes/notebook-theme';
@@ -42,15 +42,19 @@ const PROVIDER_CARDS = [
   { id: 'snowflake' as const, label: 'Snowflake', color: '#29b5e8', desc: 'Introspect semantic views for metrics and dimensions' },
 ];
 
+type SemanticDiagnosticIssue = NonNullable<SemanticLayerDiagnostics['issues']>[number];
+
 function SetupState({
   t,
   provider,
+  diagnostics,
   errors,
   onOpenWizard,
   onRefresh,
 }: {
   t: Theme;
   provider: string | null;
+  diagnostics?: SemanticLayerDiagnostics | null;
   errors?: string[];
   onOpenWizard: () => void;
   onRefresh: () => void;
@@ -98,16 +102,7 @@ function SetupState({
         })}
       </div>
 
-      {errors && errors.length > 0 && (
-        <div style={{
-          background: `${t.error}12`, border: `1px solid ${t.error}40`,
-          borderRadius: 8, padding: '8px 12px', marginBottom: 12,
-        }}>
-          {errors.map((e, i) => (
-            <div key={i} style={{ fontSize: 11, color: t.error, fontFamily: t.font, lineHeight: 1.4 }}>{e}</div>
-          ))}
-        </div>
-      )}
+      <SemanticDiagnosticsCard t={t} diagnostics={diagnostics ?? null} fallbackErrors={errors} />
 
       <div style={{ display: 'flex', gap: 8 }}>
         <button onClick={onOpenWizard} style={{
@@ -119,6 +114,93 @@ function SetupState({
           color: t.textSecondary, cursor: 'pointer', fontSize: 12, fontFamily: t.font, padding: '7px 14px',
         }}>Refresh</button>
       </div>
+    </div>
+  );
+}
+
+function SemanticDiagnosticsCard({
+  t,
+  diagnostics,
+  fallbackErrors,
+  compact = false,
+}: {
+  t: Theme;
+  diagnostics: SemanticLayerDiagnostics | null;
+  fallbackErrors?: string[];
+  compact?: boolean;
+}) {
+  const issues: SemanticDiagnosticIssue[] = diagnostics?.issues?.length
+    ? diagnostics.issues
+    : diagnostics?.warnings?.map((message) => ({
+      severity: 'warning' as const,
+      code: 'semantic_warning',
+      message,
+    })) ?? fallbackErrors?.map((message) => ({
+      severity: 'error' as const,
+      code: 'semantic_error',
+      message,
+    })) ?? [];
+
+  if (!diagnostics && issues.length === 0) return null;
+
+  const visibleIssues = compact ? issues.slice(0, 3) : issues.slice(0, 6);
+  const source = diagnostics?.sourceOfTruth ?? diagnostics?.provider ?? 'not configured';
+  const counts = diagnostics?.counts;
+  const countsText = counts
+    ? [
+      `${counts.semanticModels} models`,
+      `${counts.metrics} metrics`,
+      `${counts.dimensions} dimensions`,
+      `${counts.entities ?? 0} entities`,
+    ].join(' · ')
+    : null;
+
+  return (
+    <div style={{
+      background: issues.some((issue) => issue.severity === 'error') ? `${t.error}10` : '#d2992212',
+      border: `1px solid ${issues.some((issue) => issue.severity === 'error') ? `${t.error}40` : '#d2992240'}`,
+      borderRadius: 8,
+      padding: '8px 10px',
+      marginBottom: compact ? 0 : 12,
+      display: 'grid',
+      gap: 6,
+    }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+        <span style={{ fontSize: 11, fontWeight: 700, color: t.textPrimary, fontFamily: t.font }}>
+          Semantic diagnostics
+        </span>
+        <span style={{ fontSize: 10, color: t.textMuted, fontFamily: t.fontMono }}>
+          {source}
+        </span>
+      </div>
+      {countsText && (
+        <div style={{ fontSize: 10, color: t.textMuted, fontFamily: t.font }}>
+          {countsText}
+        </div>
+      )}
+      {visibleIssues.map((issue, index) => (
+        <div key={`${issue.code}-${index}`} style={{ display: 'grid', gap: 2 }}>
+          <div style={{ fontSize: 11, color: issue.severity === 'error' ? t.error : t.textSecondary, fontFamily: t.font, lineHeight: 1.35 }}>
+            <strong style={{ textTransform: 'uppercase', fontSize: 9, marginRight: 6 }}>{issue.severity}</strong>
+            {issue.message}
+          </div>
+          {issue.action && (
+            <div style={{ fontSize: 10, color: t.textMuted, fontFamily: t.font, lineHeight: 1.35 }}>
+              {issue.action}
+            </div>
+          )}
+          {issue.path && (
+            <div style={{ fontSize: 10, color: t.textMuted, fontFamily: t.fontMono, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+              {issue.path}
+            </div>
+          )}
+        </div>
+      ))}
+      {issues.length > visibleIssues.length && (
+        <div style={{ fontSize: 10, color: t.textMuted, fontFamily: t.font }}>
+          +{issues.length - visibleIssues.length} more issue{issues.length - visibleIssues.length === 1 ? '' : 's'}
+        </div>
+      )}
     </div>
   );
 }
@@ -546,22 +628,22 @@ export function SemanticPanel() {
   const [selectedMetrics, setSelectedMetrics] = useState<Set<string>>(new Set());
   const [selectedDimensions, setSelectedDimensions] = useState<Set<string>>(new Set());
   const [composing, setComposing] = useState(false);
-    const [scrollTop, setScrollTop] = useState(0);
-    const [viewportHeight, setViewportHeight] = useState(400);
-    const [diagnostics, setDiagnostics] = useState<SemanticLayerDiagnostics | null>(null);
-    const treeContainerRef = useRef<HTMLDivElement | null>(null);
+  const [scrollTop, setScrollTop] = useState(0);
+  const [viewportHeight, setViewportHeight] = useState(400);
+  const [diagnostics, setDiagnostics] = useState<SemanticLayerDiagnostics | null>(null);
+  const treeContainerRef = useRef<HTMLDivElement | null>(null);
 
   const handleRefresh = async () => {
     dispatch({ type: 'SET_SEMANTIC_LOADING', loading: true });
     try {
-        const [layer, nextTree, nextDiagnostics] = await Promise.all([
-          api.getSemanticLayer(),
-          api.getSemanticTree().catch(() => null),
-          api.getSemanticLayerDiagnostics().catch(() => null),
-        ]);
-        dispatch({ type: 'SET_SEMANTIC_LAYER', layer });
-        setTree(nextTree);
-        setDiagnostics(nextDiagnostics);
+      const [layer, nextTree, nextDiagnostics] = await Promise.all([
+        api.getSemanticLayer(),
+        api.getSemanticTree().catch(() => null),
+        api.getSemanticLayerDiagnostics().catch(() => null),
+      ]);
+      dispatch({ type: 'SET_SEMANTIC_LAYER', layer });
+      setTree(nextTree);
+      setDiagnostics(nextDiagnostics);
     } finally {
       dispatch({ type: 'SET_SEMANTIC_LOADING', loading: false });
     }
@@ -782,8 +864,9 @@ export function SemanticPanel() {
       <>
         <SetupState
           t={t}
-            provider={sl.provider}
-            errors={diagnostics?.warnings.length ? diagnostics.warnings : (state.semanticLayer as any).errors}
+          provider={sl.provider}
+          diagnostics={diagnostics}
+          errors={(state.semanticLayer as any).errors}
           onOpenWizard={() => setWizardOpen(true)}
           onRefresh={() => void handleRefresh()}
         />
@@ -878,13 +961,9 @@ export function SemanticPanel() {
         </button>
         </div>
 
-        {diagnostics?.warnings.length ? (
-          <div style={{ padding: '8px 10px', borderBottom: `1px solid ${t.headerBorder}`, background: '#d2992212' }}>
-            {diagnostics.warnings.slice(0, 3).map((warning, index) => (
-              <div key={index} style={{ fontSize: 11, color: t.textSecondary, fontFamily: t.font, lineHeight: 1.4 }}>
-                {warning}
-              </div>
-            ))}
+        {diagnostics && (diagnostics.issues?.length || diagnostics.warnings.length) ? (
+          <div style={{ padding: '8px 10px', borderBottom: `1px solid ${t.headerBorder}` }}>
+            <SemanticDiagnosticsCard t={t} diagnostics={diagnostics} compact />
           </div>
         ) : null}
 

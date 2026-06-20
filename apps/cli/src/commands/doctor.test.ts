@@ -2,6 +2,7 @@ import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { ensureMetadataCatalogFresh } from '@duckcodeailabs/dql-agent';
 import { runDoctor } from './doctor.js';
 
 const tempDirs: string[] = [];
@@ -63,7 +64,26 @@ describe('runDoctor', () => {
   it('reports enterprise scale counts and cache issues', async () => {
     const projectDir = makeProject('dql-doctor-scale-');
     mkdirSync(join(projectDir, 'domains', 'customer', 'blocks'), { recursive: true });
+    mkdirSync(join(projectDir, 'target'), { recursive: true });
     writeFileSync(join(projectDir, 'dql.config.json'), JSON.stringify({ project: 'demo' }));
+    writeFileSync(join(projectDir, 'target', 'manifest.json'), JSON.stringify({
+      metadata: { project_name: 'demo' },
+      nodes: {
+        'model.demo.dim_customer': {
+          resource_type: 'model',
+          name: 'dim_customer',
+          alias: 'dim_customer',
+          schema: 'analytics',
+          database: 'demo',
+          depends_on: { nodes: [] },
+          config: { materialized: 'table' },
+          columns: {
+            customer_id: { name: 'customer_id', description: 'Customer identifier' },
+          },
+        },
+      },
+      sources: {},
+    }));
     writeFileSync(join(projectDir, 'domains', 'customer', 'domain.dql'), `domain "Customer" {
   owner = "customer-analytics"
 }`);
@@ -105,7 +125,110 @@ describe('runDoctor', () => {
     const report = JSON.parse(String(spy.mock.calls.at(-1)?.[0] ?? '{}'));
     expect(report.counts.domains).toBe(1);
     expect(report.counts.blocks).toBe(1);
+    expect(report.counts.dbtModels).toBe(1);
     expect(report.counts.lineageNodes).toBeGreaterThan(0);
     expect(report.issues.some((issue: { code: string }) => issue.code === 'metadata_catalog_missing')).toBe(true);
+  });
+
+  it('does not report missing domain declarations for display-name and folder-slug aliases', async () => {
+    const projectDir = makeProject('dql-doctor-scale-domain-alias-');
+    mkdirSync(join(projectDir, 'domains', 'nba', 'blocks'), { recursive: true });
+    writeFileSync(join(projectDir, 'dql.config.json'), JSON.stringify({ project: 'demo' }));
+    writeFileSync(join(projectDir, 'domains', 'nba', 'domain.dql'), `domain "NBA" {
+  owner = "sports-analytics"
+  reviewCadence = "monthly"
+}`);
+    writeFileSync(join(projectDir, 'domains', 'nba', 'blocks', 'top_players.dql'), `block "Top Players" {
+  domain = "nba"
+  type = "custom"
+  pattern = "ranking"
+  grain = "player_name"
+  outputs = ["player_name", "total_points"]
+  query = """SELECT player_name, total_points FROM player_points"""
+}`);
+
+    const spy = vi.spyOn(console, 'log').mockImplementation(() => {});
+    const previousCwd = process.cwd();
+    try {
+      process.chdir(projectDir);
+      await runDoctor('scale', {
+        check: false,
+        chart: '',
+        domain: '',
+        format: 'json',
+        help: false,
+        open: null,
+        input: '',
+        outDir: '',
+        owner: '',
+        port: null,
+        queryOnly: false,
+        template: '',
+        connection: '',
+        verbose: false,
+        skipTests: false, version: false,
+      });
+    } finally {
+      process.chdir(previousCwd);
+    }
+
+    const report = JSON.parse(String(spy.mock.calls.at(-1)?.[0] ?? '{}'));
+    expect(report.issues.some((issue: { code: string; message: string }) =>
+      issue.code === 'missing_domain_declarations' && issue.message.includes('nba'),
+    )).toBe(false);
+  });
+
+  it('surfaces top rejected evidence when retrieval caps exclude matching metadata', async () => {
+    const projectDir = makeProject('dql-doctor-scale-rejected-');
+    mkdirSync(join(projectDir, 'blocks'), { recursive: true });
+    writeFileSync(join(projectDir, 'dql.config.json'), JSON.stringify({ project: 'demo' }));
+    for (let index = 1; index <= 32; index += 1) {
+      writeFileSync(join(projectDir, 'blocks', `coverage_${index}.dql`), `block "Enterprise Metadata Coverage ${index}" {
+  domain = "ops"
+  type = "custom"
+  status = "${index % 2 === 0 ? 'certified' : 'draft'}"
+  description = "Enterprise metadata coverage retrieval check ${index}"
+  owner = "analytics"
+  tags = ["enterprise", "metadata", "coverage"]
+  pattern = "ranking"
+  grain = "object_id"
+  outputs = ["object_id", "score"]
+  query = """SELECT ${index} AS object_id, ${index} AS score"""
+}`);
+    }
+    await ensureMetadataCatalogFresh(projectDir, { force: true });
+
+    const spy = vi.spyOn(console, 'log').mockImplementation(() => {});
+    const previousCwd = process.cwd();
+    try {
+      process.chdir(projectDir);
+      await runDoctor('scale', {
+        check: false,
+        chart: '',
+        domain: '',
+        format: 'json',
+        help: false,
+        open: null,
+        input: '',
+        outDir: '',
+        owner: '',
+        port: null,
+        queryOnly: false,
+        template: '',
+        connection: '',
+        verbose: false,
+        skipTests: false, version: false,
+      });
+    } finally {
+      process.chdir(previousCwd);
+    }
+
+    const report = JSON.parse(String(spy.mock.calls.at(-1)?.[0] ?? '{}'));
+    expect(report.cache.contextPackObjects).toBeGreaterThan(0);
+    expect(report.retrieval.topRejectedEvidence.length).toBeGreaterThan(0);
+    expect(report.retrieval.topRejectedEvidence[0]).toEqual(expect.objectContaining({
+      objectType: 'dql_block',
+      reason: expect.stringContaining('Lower retrieval score than selected context window'),
+    }));
   });
 });

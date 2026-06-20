@@ -282,8 +282,25 @@ function formatBlock(node: BlockDeclNode, level: number, state: FormatState): st
   if (node.outputs && node.outputs.length > 0) {
     lines.push(`${indent(level + 1, state)}outputs = [${node.outputs.map(quote).join(', ')}]`);
   }
+  if (node.blockType !== 'semantic' && node.dimensions && node.dimensions.length > 0) {
+    lines.push(`${indent(level + 1, state)}dimensions = [${node.dimensions.map(quote).join(', ')}]`);
+  }
   if (node.allowedFilters && node.allowedFilters.length > 0) {
     lines.push(`${indent(level + 1, state)}allowedFilters = [${node.allowedFilters.map(quote).join(', ')}]`);
+  }
+  if (node.parameterPolicy && node.parameterPolicy.length > 0) {
+    lines.push(`${indent(level + 1, state)}parameterPolicy {`);
+    for (const entry of node.parameterPolicy) {
+      lines.push(`${indent(level + 2, state)}${entry.name} = ${quote(entry.policy)}`);
+    }
+    lines.push(`${indent(level + 1, state)}}`);
+  }
+  if (node.filterBindings && node.filterBindings.length > 0) {
+    lines.push(`${indent(level + 1, state)}filterBindings {`);
+    for (const entry of node.filterBindings) {
+      lines.push(`${indent(level + 2, state)}${entry.filter} = ${quote(entry.binding)}`);
+    }
+    lines.push(`${indent(level + 1, state)}}`);
   }
   if (node.sourceSystems && node.sourceSystems.length > 0) {
     lines.push(`${indent(level + 1, state)}sourceSystems = [${node.sourceSystems.map(quote).join(', ')}]`);

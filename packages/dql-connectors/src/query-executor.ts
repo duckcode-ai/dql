@@ -1,7 +1,7 @@
 import type { DatabaseConnector, ConnectionConfig } from './connector.js';
 import type { QueryResult } from './result-types.js';
 import { ConnectionPoolManager } from './connection-pool.js';
-import { buildParamValues, normalizeSQLPlaceholders, type SQLParamSpec } from './sql-params.js';
+import { buildParamValues, expandArrayParameters, normalizeSQLPlaceholders, type SQLParamSpec } from './sql-params.js';
 
 export class QueryExecutor {
   private pool: ConnectionPoolManager;
@@ -20,8 +20,9 @@ export class QueryExecutor {
     variables: Record<string, unknown>,
     config: ConnectionConfig,
   ): Promise<QueryResult> {
-    const paramValues = buildParamValues(params ?? [], variables ?? {});
-    return this.executePositional(sql, paramValues, config);
+    const expanded = expandArrayParameters(sql, params ?? [], variables ?? {});
+    const paramValues = buildParamValues(expanded.params, expanded.variables);
+    return this.executePositional(expanded.sql, paramValues, config);
   }
 
   async executePositional(

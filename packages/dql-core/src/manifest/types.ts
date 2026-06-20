@@ -119,8 +119,14 @@ export interface ManifestBlock {
   entities?: string[];
   /** Declared output field names reviewers should expect. */
   declaredOutputs?: string[];
+  /** Business dimensions reviewers can reuse for grouping or app filters. */
+  dimensions?: string[];
   /** Filters this block is designed to support safely. */
   allowedFilters?: string[];
+  /** Parameter reuse policy per block parameter. */
+  parameterPolicy?: ManifestBlockParameterPolicy[];
+  /** Business/app filter to physical column or expression bindings. */
+  filterBindings?: ManifestBlockFilterBinding[];
   /** Business/source systems represented by this block. */
   sourceSystems?: string[];
   /** Block names this block is intended to replace or supersede. */
@@ -180,6 +186,16 @@ export interface ManifestBlock {
     sources: Array<{ table: string; column: string }>;
     unresolved?: boolean;
   }>;
+}
+
+export interface ManifestBlockParameterPolicy {
+  name: string;
+  policy: string;
+}
+
+export interface ManifestBlockFilterBinding {
+  filter: string;
+  binding: string;
 }
 
 // ---- Business Domains ----

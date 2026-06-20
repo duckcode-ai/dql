@@ -13,6 +13,8 @@
  *   dql lineage --table <name> [path]     Show lineage for a specific source table
  *   dql lineage --metric <name> [path]    Show lineage for a specific metric
  *   dql lineage --domain <name> [path]    Show lineage within a domain
+ *   dql lineage cross-domain [--domain <name>]
+ *                                         Show cross-domain boundary flows
  *   dql lineage --impact <name> [path]    Impact analysis: what breaks if this node changes?
  *   dql lineage --trust-chain <from> <to> Show trust chain between two blocks
  *   dql lineage --search <term> [path]    Search lineage nodes by name
@@ -104,6 +106,10 @@ export async function runLineage(
       return;
     }
     return printBusiness360(result);
+  }
+
+  if (allArgs.includes('cross-domain') || allArgs.includes('--cross-domain')) {
+    return printCrossDomainLineage(graph, flags);
   }
 
   if (flags.format === 'json' || allArgs.includes('--export')) {
@@ -511,6 +517,88 @@ function printSummary(graph: LineageGraph, _flags: CLIFlags): void {
   console.log('');
 }
 
+function printCrossDomainLineage(graph: LineageGraph, flags: CLIFlags): void {
+  const domainFilter = flags.domain?.trim();
+  const allFlows = detectDomainFlows(graph);
+  const flows = domainFilter
+    ? allFlows.filter((flow) => sameDomain(flow.from, domainFilter) || sameDomain(flow.to, domainFilter))
+    : allFlows;
+  const payload = {
+    domain: domainFilter || null,
+    summary: {
+      flowCount: flows.length,
+      edgeCount: flows.reduce((sum, flow) => sum + flow.edges.length, 0),
+      domains: Array.from(new Set(flows.flatMap((flow) => [flow.from, flow.to]))).sort(),
+    },
+    flows: flows.map((flow) => ({
+      from: flow.from,
+      to: flow.to,
+      edgeCount: flow.edges.length,
+      sourceNodes: flow.sourceNodes
+        .map((id) => graph.getNode(id))
+        .filter((node): node is LineageNode => Boolean(node))
+        .map(crossDomainNodePayload),
+      targetNodes: flow.targetNodes
+        .map((id) => graph.getNode(id))
+        .filter((node): node is LineageNode => Boolean(node))
+        .map(crossDomainNodePayload),
+      edges: flow.edges.map((edge) => ({
+        source: edge.source,
+        target: edge.target,
+        type: edge.type,
+        sourceDomain: edge.sourceDomain,
+        targetDomain: edge.targetDomain,
+      })),
+    })),
+  };
+
+  if (flags.format === 'json') {
+    console.log(JSON.stringify(payload, null, 2));
+    return;
+  }
+
+  console.log('\n  Cross-Domain Lineage');
+  console.log('  ' + '='.repeat(50));
+  if (domainFilter) console.log(`\n  Domain filter: ${domainFilter}`);
+  if (flows.length === 0) {
+    console.log('\n  No cross-domain flows found.');
+    console.log('');
+    return;
+  }
+  console.log(`\n  ${payload.summary.flowCount} flow(s), ${payload.summary.edgeCount} boundary edge(s)`);
+  for (const flow of payload.flows) {
+    console.log(`\n  ${flow.from} -> ${flow.to} (${flow.edgeCount} edge(s))`);
+    for (const edge of flow.edges) {
+      const source = graph.getNode(edge.source);
+      const target = graph.getNode(edge.target);
+      console.log(`    ${source ? nodeTypeLabel(source) : 'node'}:${source?.name ?? edge.source} -> ${target ? nodeTypeLabel(target) : 'node'}:${target?.name ?? edge.target}`);
+    }
+  }
+  console.log('');
+}
+
+function crossDomainNodePayload(node: LineageNode): {
+  id: string;
+  type: string;
+  name: string;
+  domain?: string;
+  status?: string;
+  owner?: string;
+} {
+  return {
+    id: node.id,
+    type: node.type,
+    name: node.name,
+    domain: node.domain,
+    status: node.status,
+    owner: node.owner,
+  };
+}
+
+function sameDomain(left: string | undefined, right: string): boolean {
+  return String(left ?? '').trim().toLowerCase() === right.trim().toLowerCase();
+}
+
 /** Recursively print DAG tree from a node. */
 function printDAGNode(graph: LineageGraph, node: LineageNode, depth: number, printed: Set<string>): void {
   if (printed.has(node.id)) return;
@@ -717,6 +805,28 @@ function printBusiness360(result: Business360Result): void {
     printAssetList('Replaced by', result.replacementHistory.replacedBy);
     if (result.replacementHistory.replacementRefs.length > 0) {
       console.log(`    Declared refs: ${result.replacementHistory.replacementRefs.join(', ')}`);
+    }
+  }
+
+  if (result.blockContracts.length > 0) {
+    console.log('\n  Reusable Block Contracts:');
+    for (const contract of result.blockContracts) {
+      const parts = [
+        `reusability: ${contract.reusability}`,
+        contract.pattern ? `pattern: ${contract.pattern}` : '',
+        contract.grain ? `grain: ${contract.grain}` : '',
+      ].filter(Boolean);
+      console.log(`    ${assetLabel(contract.block)}${parts.length > 0 ? ` (${parts.join(', ')})` : ''}`);
+      if (contract.outputs.length > 0) console.log(`      outputs: ${contract.outputs.join(', ')}`);
+      if (contract.dimensions.length > 0) console.log(`      dimensions: ${contract.dimensions.join(', ')}`);
+      if (contract.allowedFilters.length > 0) console.log(`      filters: ${contract.allowedFilters.join(', ')}`);
+      if (contract.parameterPolicy.length > 0) {
+        console.log(`      parameters: ${contract.parameterPolicy.map((entry) => `${entry.name}=${entry.policy}`).join(', ')}`);
+      }
+      if (contract.filterBindings.length > 0) {
+        console.log(`      bindings: ${contract.filterBindings.map((entry) => `${entry.filter}->${entry.binding}`).join(', ')}`);
+      }
+      if (contract.replacementFor.length > 0) console.log(`      replaces: ${contract.replacementFor.join(', ')}`);
     }
   }
 

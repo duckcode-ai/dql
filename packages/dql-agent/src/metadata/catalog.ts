@@ -26,6 +26,7 @@ import {
 } from '@duckcodeailabs/dql-core';
 import { buildKGFromManifest, buildKGFromSemanticLayer } from '../kg/build.js';
 import type { KGEdge, KGNode } from '../kg/types.js';
+import { buildBlockBusinessFingerprint, buildBlockSqlFingerprints } from './block-fingerprints.js';
 import {
   buildAnalysisQuestionPlan,
   certifiedApplicabilityForObject,
@@ -1387,9 +1388,14 @@ function objectFromKGNode(node: KGNode): MetadataObject {
     grain: node.grain,
     entities: node.entities ?? [],
     declaredOutputs: node.declaredOutputs ?? [],
+    dimensions: node.dimensions ?? [],
     allowedFilters: node.allowedFilters ?? [],
+    parameterPolicy: node.parameterPolicy ?? [],
+    filterBindings: node.filterBindings ?? [],
     sourceSystems: node.sourceSystems ?? [],
     replacementFor: node.replacementFor ?? [],
+    sqlFingerprints: node.sqlFingerprints,
+    businessFingerprint: node.businessFingerprint,
     datalexContract: node.datalexContract,
     boundedContext: node.boundedContext,
     primaryTerms: node.primaryTerms ?? [],
@@ -1724,9 +1730,26 @@ function addManifestBlockDetails(manifest: DQLManifest, objects: Map<string, Met
         refDependencies: block.refDependencies,
         metricRefs: block.metricRefs,
         dimensionRefs: block.dimensionRefs,
+        dimensions: block.dimensions,
         chartType: block.chartType,
         blockType: block.blockType,
         tests: block.tests,
+        parameterPolicy: block.parameterPolicy,
+        filterBindings: block.filterBindings,
+        sqlFingerprints: buildBlockSqlFingerprints(block.sql),
+        businessFingerprint: buildBlockBusinessFingerprint({
+          name: block.name,
+          domain: block.domain,
+          pattern: block.pattern,
+          grain: block.grain,
+          entities: block.entities,
+          terms: block.termRefs,
+          outputs: block.declaredOutputs,
+          dimensions: block.dimensions,
+          filters: block.allowedFilters,
+          sources: [...(block.tableDependencies ?? []), ...(block.rawTableRefs ?? [])],
+          sourceSystems: block.sourceSystems,
+        }),
         draftMetadata: block.draftMetadata,
       }),
     }));

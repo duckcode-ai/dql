@@ -178,6 +178,28 @@ describe('findAppDocuments', () => {
     }
   });
 
+  it('discovers manifest files under domains/<domain>/apps/<id>/', () => {
+    const root = mkdtempSync(join(tmpdir(), 'dql-domain-apps-'));
+    try {
+      mkdirSync(join(root, 'apps', 'root-app'), { recursive: true });
+      mkdirSync(join(root, 'domains', 'customer', 'apps', 'customer-360'), { recursive: true });
+      mkdirSync(join(root, 'domains', 'revenue', 'apps', 'revenue-review'), { recursive: true });
+      writeFileSync(join(root, 'apps', 'root-app', 'dql.app.json'), '{}');
+      writeFileSync(join(root, 'domains', 'customer', 'apps', 'customer-360', 'dql.app.json'), '{}');
+      writeFileSync(join(root, 'domains', 'revenue', 'apps', 'revenue-review', 'dql.app.json'), '{}');
+
+      const found = findAppDocuments(root).map((path) => path.replace(root, ''));
+
+      expect(found).toEqual([
+        '/apps/root-app/dql.app.json',
+        '/domains/customer/apps/customer-360/dql.app.json',
+        '/domains/revenue/apps/revenue-review/dql.app.json',
+      ]);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   it('returns empty when no apps/ exists', () => {
     const root = mkdtempSync(join(tmpdir(), 'dql-apps-'));
     try {

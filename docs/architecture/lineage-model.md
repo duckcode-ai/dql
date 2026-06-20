@@ -90,6 +90,12 @@ consumers. These are local graph gaps only; org-wide catalog search and
 cross-repo lineage stay outside the OSS local lineage surface unless that
 metadata is present in the project manifest.
 
+For block-centric views, Business 360 also emits reusable block contracts:
+pattern, grain, declared outputs, allowed filters, parameter policies, filter
+bindings, source systems, and replacement references. This is how reviewers can
+distinguish a reusable parameterized block from static duplicate SQL created
+for one set of filter values.
+
 ## Column-level lineage
 
 Table-level lineage is fully open-source. **Column-level lineage is a

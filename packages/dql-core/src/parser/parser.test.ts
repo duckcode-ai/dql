@@ -26,6 +26,14 @@ describe('Parser', () => {
       outputs = ["customer_id", "total_orders", "lifetime_revenue"]
       dimensions = ["segment", "region"]
       allowedFilters = ["order_date", "segment", "region"]
+      parameterPolicy {
+        start_date = "dynamic"
+        active_status = "static"
+      }
+      filterBindings {
+        date_range = "order_date"
+        segment = "segment"
+      }
       sourceSystems = ["orders"]
       replacementFor = ["Legacy Customer Orders"]
 
@@ -53,7 +61,17 @@ describe('Parser', () => {
       expect(block.pattern).toBe('entity_rollup');
       expect(block.entities).toEqual(['Customer']);
       expect(block.outputs).toEqual(['customer_id', 'total_orders', 'lifetime_revenue']);
+      expect(block.dimensions).toEqual(['segment', 'region']);
+      expect(block.dimensionsRef).toBeUndefined();
       expect(block.allowedFilters).toEqual(['order_date', 'segment', 'region']);
+      expect(block.parameterPolicy).toEqual([
+        expect.objectContaining({ name: 'start_date', policy: 'dynamic' }),
+        expect.objectContaining({ name: 'active_status', policy: 'static' }),
+      ]);
+      expect(block.filterBindings).toEqual([
+        expect.objectContaining({ filter: 'date_range', binding: 'order_date' }),
+        expect.objectContaining({ filter: 'segment', binding: 'segment' }),
+      ]);
       expect(block.sourceSystems).toEqual(['orders']);
       expect(block.replacementFor).toEqual(['Legacy Customer Orders']);
     }
@@ -80,6 +98,31 @@ describe('Parser', () => {
       expect(chart.args[0].name).toBe('x');
       expect(chart.args[1].name).toBe('y');
       expect(chart.args[2].name).toBe('title');
+    }
+  });
+
+  it('parses legacy block query sections', () => {
+    const source = `block "Legacy SQL Shape" {
+      domain = "nba"
+      owner = "analytics"
+      description = "Legacy query block shape"
+
+      query {
+        sql = """
+          SELECT player_name, SUM(points) AS total_points
+          FROM transformed.player_stats
+          GROUP BY player_name
+        """
+      }
+    }`;
+
+    const ast = parse(source);
+    expect(ast.statements).toHaveLength(1);
+    const block = ast.statements[0];
+    expect(block.kind).toBe(NodeKind.BlockDecl);
+    if (block.kind === NodeKind.BlockDecl) {
+      expect(block.query?.rawSQL).toContain('SELECT player_name');
+      expect(block.query?.rawSQL).toContain('GROUP BY player_name');
     }
   });
 
@@ -737,25 +780,20 @@ describe('Parser - Block Declaration', () => {
 // ---- Phase A: Block Schema tests (A8–A12) ----
 
 describe('Block declarations — Phase A schema enforcement', () => {
-  // A8: parser emits error for block missing type (parse throws DQLSyntaxError)
-  it('A8 — emits error for block missing type declaration', () => {
+  // A8: legacy blocks without type still parse as custom blocks for migration compatibility.
+  it('A8 — defaults a legacy block without type to custom', () => {
     const source = `block "Revenue KPI" {
       domain = "revenue"
       query = """SELECT SUM(amount) FROM orders"""
     }`;
-    // The parser records the missing-type error and throws DQLSyntaxError with diagnostics.
-    let errors: Array<{ severity: string; message: string }> = [];
-    try {
-      const ast = parse(source);
-      errors = analyze(ast).filter((d) => d.severity === 'error');
-    } catch (e: unknown) {
-      const syntaxErr = e as { diagnostics?: Array<{ severity: string; message: string }> };
-      if (syntaxErr.diagnostics) {
-        errors = syntaxErr.diagnostics.filter((d) => d.severity === 'error');
-      }
+    const ast = parse(source);
+    const block = ast.statements[0];
+    expect(block.kind).toBe(NodeKind.BlockDecl);
+    if (block.kind === NodeKind.BlockDecl) {
+      expect(block.blockType).toBe('custom');
     }
-    expect(errors.length).toBeGreaterThanOrEqual(1);
-    expect(errors.some((e) => e.message.toLowerCase().includes('missing a required type'))).toBe(true);
+    const errors = analyze(ast).filter((d) => d.severity === 'error');
+    expect(errors).toHaveLength(0);
   });
 
   // A9: semantic analyzer rejects semantic block with query but no metricRef

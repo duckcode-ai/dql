@@ -1,4 +1,4 @@
-import { existsSync, readdirSync, readFileSync } from 'node:fs';
+import { existsSync, readdirSync, readFileSync, type Dirent } from 'node:fs';
 import { join } from 'node:path';
 import { z } from 'zod';
 import type { DQLContext } from '../context.js';
@@ -34,8 +34,8 @@ export interface ProposalSummary {
 
 /**
  * The OSS-side review queue for the Tier-2 promotion loop. Reads
- * `blocks/_drafts/*.dql` from the project, parses Tier-2 proposal metadata
- * fields out of each, and returns a list ranked by `askedTimes`
+ * local draft queues from the project, parses Tier-2 proposal metadata fields
+ * out of each, and returns a list ranked by `askedTimes`
  * descending — questions that get asked repeatedly are the strongest
  * candidates for certification.
  *
@@ -47,17 +47,15 @@ export function listProposals(
   ctx: DQLContext,
   args: { askedAtLeastTimes?: number; since?: string } = {},
 ): { proposals: ProposalSummary[] } {
-  const draftDir = join(ctx.projectRoot, 'blocks', '_drafts');
-  if (!existsSync(draftDir)) return { proposals: [] };
+  const draftFiles = collectProposalDraftFiles(ctx.projectRoot);
+  if (draftFiles.length === 0) return { proposals: [] };
 
   const minTimes = args.askedAtLeastTimes ?? 1;
   const sinceMs = args.since ? Date.parse(args.since) : null;
 
   const proposals: ProposalSummary[] = [];
-  for (const entry of readdirSync(draftDir)) {
-    if (!entry.endsWith('.dql')) continue;
-    const path = join(draftDir, entry);
-    const summary = parseProposal(readFileSync(path, 'utf-8'), entry, ctx.projectRoot);
+  for (const draft of draftFiles) {
+    const summary = parseProposal(readFileSync(draft.absPath, 'utf-8'), draft.filename, draft.relativePath);
     if (!summary) continue;
     if (summary.askedTimes < minTimes) continue;
     if (sinceMs !== null && Date.parse(summary.lastAsked) < sinceMs) continue;
@@ -72,10 +70,44 @@ export function listProposals(
   return { proposals };
 }
 
+function collectProposalDraftFiles(projectRoot: string): Array<{ absPath: string; relativePath: string; filename: string }> {
+  const files: Array<{ absPath: string; relativePath: string; filename: string }> = [];
+  const addDraftDir = (relativeDir: string) => {
+    const absDir = join(projectRoot, relativeDir);
+    if (!existsSync(absDir)) return;
+    for (const entry of safeReaddir(absDir)) {
+      if (!entry.isFile() || !entry.name.endsWith('.dql')) continue;
+      files.push({
+        absPath: join(absDir, entry.name),
+        relativePath: `${relativeDir}/${entry.name}`,
+        filename: entry.name,
+      });
+    }
+  };
+
+  addDraftDir('blocks/_drafts');
+  const domainsDir = join(projectRoot, 'domains');
+  if (existsSync(domainsDir)) {
+    for (const entry of safeReaddir(domainsDir)) {
+      if (!entry.isDirectory()) continue;
+      addDraftDir(`domains/${entry.name}/blocks/_drafts`);
+    }
+  }
+  return files.sort((a, b) => a.relativePath.localeCompare(b.relativePath));
+}
+
+function safeReaddir(dir: string): Dirent[] {
+  try {
+    return readdirSync(dir, { withFileTypes: true });
+  } catch {
+    return [];
+  }
+}
+
 function parseProposal(
   content: string,
   filename: string,
-  projectRoot: string,
+  draftPath: string,
 ): ProposalSummary | null {
   const slug = filename.replace(/\.dql$/, '');
   const question = pickStringField(content, 'description') ?? slug;
@@ -86,7 +118,6 @@ function parseProposal(
   const proposedDomain = pickStringField(content, 'proposed_domain') ?? '';
   const proposedEntity = pickStringField(content, 'proposed_entity') ?? '';
   const upstreamRefs = pickArrayField(content, 'upstream_refs');
-  const draftPath = relativeTo(projectRoot, `blocks/_drafts/${filename}`);
   const certifyHint = `dql certify --from-draft ${draftPath} --domain ${proposedDomain || '<domain>'} --contract ${proposedContractId || '<id>'}@1 --owner <you@example.com>`;
   return {
     draftPath,
@@ -122,8 +153,4 @@ function pickArrayField(content: string, key: string): string[] {
     .split(',')
     .map((s) => s.trim().replace(/^"|"$/g, ''))
     .filter((s) => s.length > 0);
-}
-
-function relativeTo(root: string, relPath: string): string {
-  return relPath.startsWith('/') ? relPath : relPath;
 }

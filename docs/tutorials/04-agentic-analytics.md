@@ -29,7 +29,8 @@ The agent never silently invents SQL. Every answer is routed through tiers:
 | 2    | No exact match, or the user asks for a named entity, custom filter, ranking, breakdown, comparison, drill-through, or different grain — the agent proposes SQL grounded in business context, dbt, semantic metadata, and runtime schema, saved as a **draft** | ⚠ Uncertified                |
 | 3    | Not answerable from the project                                                                                                                   | Refusal, with what's missing |
 
-Tier-2 drafts land in `blocks/_drafts/` so popular questions become
+Tier-2 drafts land in `domains/<domain>/blocks/_drafts/` in domain-first
+projects, or `blocks/_drafts/` in legacy projects, so popular questions become
 candidates for certification — that's the promotion loop.
 
 Follow-up questions keep the same trust model. If a user asks "drill into
@@ -92,13 +93,12 @@ dql agent ask "what share of orders are food vs drink?"
 
 > **You should see** the answer clearly labelled **Uncertified**: the LLM
 > proposed SQL against the dbt `orders` mart (`is_food_order` /
-> `is_drink_order`), and the proposal was saved as a draft under
-> `blocks/_drafts/`.
+> `is_drink_order`), and the proposal was saved as a review draft.
 
 List accumulated proposals:
 
 ```bash
-ls blocks/_drafts/
+find domains blocks -path "*/_drafts/*.dql" 2>/dev/null
 ```
 
 Questions that get asked repeatedly accumulate in `_drafts/` — that's your
@@ -114,7 +114,7 @@ dql agent eval docs/guides/agent-evals.yml --format json
 > refusal rate, wrong-certified count, draft capture count, and context size
 > metrics. Add `--execute` when a local runtime is running and you want bounded
 > SQL previews compared against expected rows. Add `--save` when eval-generated
-> drafts should be written to `blocks/_drafts/`; otherwise eval reports the
+> drafts should be written to the local draft queue; otherwise eval reports the
 > draft path without mutating the project.
 
 ---
@@ -126,11 +126,11 @@ needed, add `owner`, `llmContext`, and `tests`, then run it through the same
 gate as tutorial 02:
 
 ```bash
-dql certify --from-draft blocks/_drafts/<draft-file>.dql
+dql certify --from-draft domains/<domain>/blocks/_drafts/<draft-file>.dql
 ```
 
-> **You should see** the rule table go green and the block land in
-> `blocks/` as `certified`. Re-run `dql agent reindex`, ask the same
+> **You should see** the rule table go green and the block land in the domain
+> block folder as `certified`. Re-run `dql agent reindex`, ask the same
 > question again, and the answer is now **✓ Certified** — the loop is
 > closed.
 

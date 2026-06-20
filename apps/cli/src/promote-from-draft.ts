@@ -13,9 +13,10 @@ export interface PromoteResult {
 }
 
 /**
- * Promote a Tier-2 draft block from `blocks/_drafts/<slug>.dql` to the
- * canonical `blocks/<domain>/<slug>.dql` location, flipping `status` to
- * `certified` and setting the `datalex_contract` reference.
+ * Promote a Tier-2 draft block from `blocks/_drafts/<slug>.dql` or
+ * `domains/<domain>/blocks/_drafts/<slug>.dql` to the canonical block
+ * location, flipping `status` to `certified`. When a DataLex contract is
+ * supplied, the promoted block is also bound to that contract.
  *
  * Companion to the dql-mcp `query_via_metadata` tool. Together they close
  * the graduated-trust promotion loop:
@@ -26,16 +27,16 @@ export interface PromoteResult {
  *        ->  next ask hits Tier-1 forever
  *
  * Behavior:
- *   1. Validates the draft exists, has status=draft, and has proposal
- *      metadata such as `proposed_contract_id = ...`.
- *   2. Moves the file to blocks/<domain>/<slug>.dql.
+ *   1. Validates the draft exists and has status=draft.
+ *   2. Moves the file to domains/<domain>/blocks/<slug>.dql when that domain
+ *      layout exists, otherwise blocks/<domain>/<slug>.dql.
  *   3. Flips `status = "draft"` to `status = "certified"`.
- *   4. Sets `datalex_contract = "<contract>"` (provided via --contract or
- *      taken from `proposed_contract_id` with `@1` appended).
+ *   4. Optionally sets `datalex_contract = "<contract>"` (provided via
+ *      --contract or taken from `proposed_contract_id` with `@1` appended).
  *   5. Sets `owner = "<owner>"` from --owner if provided.
  *   6. Drops Tier-2 proposal metadata fields (their job is done).
- *   7. Computes the patch the human still needs to apply to
- *      datalex-manifest.json (or surfaces it for --open-pr).
+ *   7. Computes the optional patch the human still needs to apply to
+ *      datalex-manifest.json when a contract is present.
  *
  * Does NOT auto-modify datalex-manifest.json. That file is hand-curated
  * until the DataLex compiler ships its v1 emitter; this command shows
@@ -63,25 +64,18 @@ export function promoteFromDraft(
 
   const proposedContractId = pickField(content, 'proposed_contract_id') ?? '';
   const contract = flags.contract || (proposedContractId ? `${proposedContractId}@1` : '');
-  if (!contract) {
-    return {
-      ok: false,
-      message:
-        'No --contract <id@version> provided and no proposed_contract_id in the draft. ' +
-        'Either pass --contract commerce.Customer.foo@1 or restore proposed_contract_id.',
-    };
-  }
 
-  const domain = flags.domain || pickField(content, 'proposed_domain') || guessDomain(contract);
+  const domain = flags.domain || pickField(content, 'proposed_domain') || guessDomain(contract) || pickField(content, 'domain');
   if (!domain) {
     return {
       ok: false,
-      message: 'No --domain provided and could not infer one from the contract id.',
+      message: 'No --domain provided and could not infer one from the draft or contract id.',
     };
   }
 
   const slug = inferSlugFromPath(draftAbs);
-  const destAbs = join(projectRoot, 'blocks', domain, `${slug}.dql`);
+  const destRel = resolvePromotedBlockPath(projectRoot, domain, slug, draftPathInput);
+  const destAbs = join(projectRoot, destRel);
 
   if (existsSync(destAbs) && !flags.force) {
     return {
@@ -93,7 +87,7 @@ export function promoteFromDraft(
   }
 
   const promoted = renderPromoted(content, {
-    contract,
+    contract: contract || undefined,
     domain,
     owner: flags.owner || pickField(content, 'owner') || '',
   });
@@ -104,12 +98,14 @@ export function promoteFromDraft(
   // that the certified file is on disk.
   unlinkSync(draftAbs);
 
-  const datalexManifestDiff = renderDataLexManifestDiff({
-    contract,
-    domain,
-    slug,
-    description: pickField(content, 'description') ?? '',
-  });
+  const datalexManifestDiff = contract
+    ? renderDataLexManifestDiff({
+      contract,
+      domain,
+      slug,
+      description: pickField(content, 'description') ?? '',
+    })
+    : undefined;
 
   return {
     ok: true,
@@ -137,6 +133,23 @@ function inferSlugFromPath(absPath: string): string {
   return absPath.replace(/.*\//, '').replace(/\.dql$/, '');
 }
 
+function resolvePromotedBlockPath(projectRoot: string, domain: string, slug: string, draftPathInput: string): string {
+  const normalizedDraft = draftPathInput.replaceAll('\\', '/').replace(/^\/+/, '');
+  const domainFirstDraft = normalizedDraft.match(/^domains\/([^/]+)\/blocks\/_drafts\/[^/]+\.dql$/);
+  if (domainFirstDraft) {
+    return `domains/${domainFirstDraft[1]}/blocks/${slug}.dql`;
+  }
+  const safeDomain = domain
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9/_-]+/g, '-')
+    .replace(/^\/+|\/+$/g, '');
+  if (safeDomain && existsSync(join(projectRoot, 'domains', safeDomain))) {
+    return `domains/${safeDomain}/blocks/${slug}.dql`;
+  }
+  return `blocks/${safeDomain || domain}/${slug}.dql`;
+}
+
 function shortPath(projectRoot: string, abs: string): string {
   const root = projectRoot.endsWith('/') ? projectRoot : projectRoot + '/';
   return abs.startsWith(root) ? abs.slice(root.length) : abs;
@@ -144,7 +157,7 @@ function shortPath(projectRoot: string, abs: string): string {
 
 function renderPromoted(
   source: string,
-  fields: { contract: string; domain: string; owner: string },
+  fields: { contract?: string; domain: string; owner: string },
 ): string {
   let out = source;
 
@@ -154,9 +167,20 @@ function renderPromoted(
   // Set domain (overwrite the existing one).
   out = out.replace(/(domain\s*=\s*)"[^"]*"/, `$1"${fields.domain}"`);
 
-  // Set datalex_contract. The draft template ships an empty value
-  // (`datalex_contract = ""`); replace with the provided id@version.
-  out = out.replace(/datalex_contract\s*=\s*"[^"]*"/, `datalex_contract = "${fields.contract}"`);
+  // Set datalex_contract when DataLex interop is used. Otherwise remove empty
+  // placeholders so OSS-only certified blocks do not carry unresolved contracts.
+  if (fields.contract) {
+    if (/datalex_contract\s*=\s*"[^"]*"/.test(out)) {
+      out = out.replace(/datalex_contract\s*=\s*"[^"]*"/, `datalex_contract = "${fields.contract}"`);
+    } else {
+      out = out.replace(
+        /(status\s*=\s*"certified"\s*\n)/,
+        `$1    datalex_contract = "${fields.contract}"\n`,
+      );
+    }
+  } else {
+    out = out.replace(/\n\s*datalex_contract\s*=\s*""\s*/g, '\n');
+  }
 
   // Set owner if provided + the field exists in the file.
   if (fields.owner) {

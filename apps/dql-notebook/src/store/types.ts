@@ -162,6 +162,7 @@ export type LineageReturnTarget =
 export interface AppSummary {
   id: string;
   name: string;
+  filePath?: string;
   domain: string;
   subdomain?: string;
   groups?: string[];
@@ -510,13 +511,21 @@ export interface BlockStudioImportCandidate {
   description: string;
   owner: string;
   tags: string[];
+  terms?: string[];
   pattern?: string;
   grain?: string;
   entities?: string[];
   outputs?: string[];
+  dimensions?: string[];
   allowedFilters?: string[];
+  parameterPolicy?: Array<{ name: string; policy: string }>;
+  filterBindings?: BlockFilterBinding[];
   sourceSystems?: string[];
   replacementFor?: string[];
+  reviewCadence?: string;
+  parameterDecisions?: DqlParameterDecision[];
+  similarityMatches?: BlockSimilarityMatch[];
+  recommendedAction?: DqlCandidateRecommendedAction;
   sql: string;
   dqlSource: string;
   validation: BlockStudioValidation | null;
@@ -538,7 +547,7 @@ export interface BlockStudioImportCandidate {
     createdAt: string;
     status: 'suggested' | 'accepted' | 'rejected';
     provider?: string;
-    patch?: Partial<Pick<BlockStudioImportCandidate, 'name' | 'domain' | 'description' | 'owner' | 'tags' | 'pattern' | 'grain' | 'entities' | 'outputs' | 'allowedFilters' | 'sourceSystems' | 'replacementFor' | 'sql' | 'dqlSource'>>;
+    patch?: Partial<Pick<BlockStudioImportCandidate, 'name' | 'domain' | 'description' | 'owner' | 'tags' | 'terms' | 'pattern' | 'grain' | 'entities' | 'outputs' | 'dimensions' | 'allowedFilters' | 'parameterPolicy' | 'filterBindings' | 'sourceSystems' | 'replacementFor' | 'reviewCadence' | 'sql' | 'dqlSource'>>;
   }>;
   certificationChecklist?: {
     metadata: boolean;
@@ -561,7 +570,7 @@ export interface BlockStudioImportCandidate {
   }
 
 export interface DqlGenerationEvidence {
-  kind: 'dql_block' | 'dql_term' | 'business_view' | 'domain' | 'semantic_metric' | 'semantic_model' | 'dbt_model' | 'warehouse_table' | 'datalex_contract' | 'datalex_entity' | 'datalex_domain' | 'metadata' | 'lineage';
+  kind: 'dql_block' | 'dql_term' | 'business_view' | 'domain' | 'semantic_metric' | 'semantic_model' | 'dbt_model' | 'warehouse_table' | 'datalex_contract' | 'datalex_entity' | 'datalex_domain' | 'datalex_term' | 'metadata' | 'lineage';
   name: string;
   description?: string;
   objectKey?: string;
@@ -571,10 +580,55 @@ export interface DqlGenerationEvidence {
 }
 
 export interface BlockDraftSaveState {
-  status: 'pending' | 'saved' | 'error';
+  status: 'pending' | 'saved' | 'error' | 'skipped';
   path?: string;
   savedAt?: string;
   error?: string;
+  reason?: string;
+}
+
+export type DqlParameterPolicyKind = 'dynamic' | 'static' | 'business' | 'derived' | 'optional' | 'ambiguous_review_required';
+export type DqlParameterValue = string | number | boolean | Array<string | number | boolean>;
+
+export interface DqlParameterDecision {
+  name: string;
+  policy: DqlParameterPolicyKind;
+  value: DqlParameterValue;
+  valueType: 'string' | 'number' | 'boolean' | 'date' | 'year' | 'set';
+  sourceExpression: string;
+  reason: string;
+  confidence: number;
+}
+
+export interface BlockFilterBinding {
+  filter: string;
+  binding: string;
+}
+
+export type BlockSimilarityMatchKind =
+  | 'exact_sql_match'
+  | 'parameterized_duplicate'
+  | 'business_duplicate'
+  | 'near_variant'
+  | 'source_variant'
+  | 'new_logic';
+
+export type DqlCandidateRecommendedAction =
+  | 'reuse_existing'
+  | 'extend_existing'
+  | 'create_replacement'
+  | 'create_new'
+  | 'review_required';
+
+export interface BlockSimilarityMatch {
+  kind: BlockSimilarityMatchKind;
+  objectKey?: string;
+  name: string;
+  status?: string;
+  source?: string;
+  score: number;
+  reason: string;
+  recommendedAction: DqlCandidateRecommendedAction;
 }
 
 export type DqlGenerationCandidate = BlockStudioImportCandidate & {
@@ -693,10 +747,21 @@ export interface SemanticLayerDiagnostics {
     metrics: number;
     measures: number;
     dimensions: number;
+    timeDimensions?: number;
+    entities?: number;
+    hierarchies?: number;
     semanticModels: number;
     savedQueries: number;
   };
   dbt: BlockStudioDbtStatus;
+  sourceOfTruth?: string;
+  issues?: Array<{
+    severity: 'info' | 'warning' | 'error';
+    code: string;
+    message: string;
+    action?: string;
+    path?: string;
+  }>;
   warnings: string[];
 }
 

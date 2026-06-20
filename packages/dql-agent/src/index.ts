@@ -104,6 +104,18 @@ export {
   upsertMetadataSnapshot,
 } from "./metadata/catalog.js";
 export {
+  buildBlockBusinessFingerprint,
+  buildBlockSqlFingerprints,
+  fingerprintSql,
+  normalizeBusinessFingerprintToken,
+  normalizeSqlForFingerprint,
+} from "./metadata/block-fingerprints.js";
+export type {
+  BlockBusinessFingerprint,
+  BlockSqlFingerprints,
+  BuildBlockBusinessFingerprintInput,
+} from "./metadata/block-fingerprints.js";
+export {
   buildAnalysisQuestionPlan,
   certifiedApplicabilityForObject,
   scoreAllowedSqlRelationWithAnalysisPlan,

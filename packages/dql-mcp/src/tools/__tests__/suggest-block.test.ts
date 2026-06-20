@@ -17,6 +17,7 @@ vi.mock('node:fs', async (importOriginal) => {
   const actual = await importOriginal<typeof import('node:fs')>();
   return {
     ...actual,
+    existsSync: vi.fn((path: string) => path.endsWith('/domains/finance')),
     mkdirSync: vi.fn(),
     writeFileSync: vi.fn(),
   };
@@ -24,6 +25,7 @@ vi.mock('node:fs', async (importOriginal) => {
 
 import { suggestBlock } from '../suggest-block.js';
 import { makeCtx } from './_helpers.js';
+import { writeFileSync } from 'node:fs';
 
 function ctxWithRefresh() {
   return makeCtx({}, { refresh: vi.fn() } as Partial<import('../../context.js').DQLContext>);
@@ -53,5 +55,22 @@ describe('suggestBlock tool', () => {
     });
     expect(result).toBeDefined();
     expect(typeof result).toBe('object');
+  });
+
+  it('writes suggestions under the domain-first draft folder when the domain exists', () => {
+    const ctx = ctxWithRefresh();
+    const result = suggestBlock(ctx, {
+      name: 'monthly_revenue',
+      domain: 'finance',
+      owner: 'tests@example.com',
+      description: 'monthly gross revenue',
+      sql: 'SELECT 1',
+    });
+
+    expect(result).toMatchObject({
+      path: 'domains/finance/blocks/_drafts/monthly_revenue.dql',
+    });
+    const lastWrite = vi.mocked(writeFileSync).mock.calls.at(-1);
+    expect(String(lastWrite?.[0])).toContain('domains/finance/blocks/_drafts/monthly_revenue.dql');
   });
 });

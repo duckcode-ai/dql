@@ -13,7 +13,7 @@ with four paths:
 
 - **Create SQL Block from dbt Model**
 - **Create Semantic Block from dbt Metric**
-- **Import SQL**
+- **AI Import SQL**
 - **Ask AI to Generate Block**
 
 Use the CLI when you want a file scaffold:
@@ -30,7 +30,7 @@ do not get mixed into raw SQL unless you explicitly choose the advanced path.
 
 | Block type | Use when | Primary inputs |
 | --- | --- | --- |
-| SQL Block | You need explicit SQL against dbt models or warehouse tables | SQL, detected tables, parameters |
+| SQL Block | You need explicit SQL against dbt models or warehouse tables | SQL, detected tables, parameters, filter bindings |
 | Semantic Block | You want a dbt/DQL metric plus dimensions and grain | metric, dimensions, time dimension, filters |
 
 ## 3. Write the SQL

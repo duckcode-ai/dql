@@ -508,9 +508,9 @@ export function generateAppFromPlan(
     );
   }
 
-  const appDir = join(projectRoot, "apps", plan.appId);
+  const appDir = resolveAppPackageDir(projectRoot, plan.domain, plan.appId);
   if (existsSync(appDir) && !options.overwrite) {
-    throw new Error(`App already exists: apps/${plan.appId}`);
+    throw new Error(`App already exists: ${relative(projectRoot, appDir)}`);
   }
 
   const dashboardId = plan.pages[0]?.id || "overview";
@@ -1526,6 +1526,15 @@ function slugify(input: string): string {
     .replace(/[^a-z0-9]+/g, "-")
     .replace(/^-+|-+$/g, "")
     .replace(/-{2,}/g, "-");
+}
+
+function resolveAppPackageDir(projectRoot: string, domain: string, appId: string): string {
+  const domainSlug = slugify(domain);
+  const domainDir = domainSlug ? join(projectRoot, "domains", domainSlug) : "";
+  if (domainDir && existsSync(domainDir)) {
+    return join(domainDir, "apps", appId);
+  }
+  return join(projectRoot, "apps", appId);
 }
 
 function normalizeToken(input?: string): string | undefined {

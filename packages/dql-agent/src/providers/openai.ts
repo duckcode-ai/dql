@@ -32,24 +32,59 @@ export class OpenAIProvider implements AgentProvider {
     }
     const headers: Record<string, string> = { 'content-type': 'application/json' };
     if (this.apiKey) headers.Authorization = `Bearer ${this.apiKey}`;
-    const res = await fetch(`${this.baseUrl}/chat/completions`, {
-      method: 'POST',
-      headers,
-      body: JSON.stringify({
-        model: options.model ?? this.defaultModel,
-        messages: messages.map((m) => ({ role: m.role, content: m.content })),
-        max_tokens: options.maxTokens ?? 1024,
-        temperature: options.temperature ?? 0.2,
-      }),
-      signal: options.signal,
-    });
-    if (!res.ok) {
-      const body = await res.text().catch(() => res.statusText);
-      throw new Error(`openai: ${res.status} ${body}`);
-    }
-    const json = (await res.json()) as {
-      choices?: Array<{ message?: { content?: string } }>;
+    const model = options.model ?? this.defaultModel;
+    const completionTokenBudget = options.maxTokens ?? 1024;
+    const bodyBase = {
+      model,
+      messages: messages.map((m) => ({ role: m.role, content: m.content })),
     };
-    return json.choices?.[0]?.message?.content ?? '';
+    let useMaxCompletionTokens = false;
+    let includeTemperature = true;
+    let lastStatus = 0;
+    let lastBody = '';
+    for (let attempt = 0; attempt < 4; attempt += 1) {
+      const body: Record<string, unknown> = {
+        ...bodyBase,
+        [useMaxCompletionTokens ? 'max_completion_tokens' : 'max_tokens']: completionTokenBudget,
+      };
+      if (includeTemperature) body.temperature = options.temperature ?? 0.2;
+
+      const res = await fetch(`${this.baseUrl}/chat/completions`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify(body),
+        signal: options.signal,
+      });
+      if (res.ok) return extractOpenAIChatContent(await res.json());
+
+      lastStatus = res.status;
+      lastBody = await res.text().catch(() => res.statusText);
+      let retry = false;
+      if (!useMaxCompletionTokens && shouldRetryWithMaxCompletionTokens(lastBody)) {
+        useMaxCompletionTokens = true;
+        retry = true;
+      }
+      if (includeTemperature && shouldRetryWithoutTemperature(lastBody)) {
+        includeTemperature = false;
+        retry = true;
+      }
+      if (!retry) break;
+    }
+    throw new Error(`openai: ${lastStatus} ${lastBody}`);
   }
+}
+
+function shouldRetryWithMaxCompletionTokens(body: string): boolean {
+  return /max_tokens/i.test(body) && /max_completion_tokens/i.test(body);
+}
+
+function shouldRetryWithoutTemperature(body: string): boolean {
+  return /temperature/i.test(body) && (/unsupported/i.test(body) || /default/i.test(body));
+}
+
+function extractOpenAIChatContent(json: unknown): string {
+  const parsed = json as {
+    choices?: Array<{ message?: { content?: string } }>;
+  };
+  return parsed.choices?.[0]?.message?.content ?? '';
 }

@@ -634,13 +634,15 @@ function validateDomains(
   terms: Record<string, ManifestTerm>,
   diagnostics: ManifestDiagnostic[],
 ): void {
-  const declaredDomains = new Set(Object.keys(domains));
+  const resolveDomain = createManifestDomainResolver(domains);
+  const declaredDomains = new Set(Object.values(domains).map((domain) => domain.name));
   const usedDomains = new Map<string, string[]>();
   const addUse = (domain: string | undefined, label: string) => {
     if (!domain) return;
-    const list = usedDomains.get(domain) ?? [];
+    const resolvedDomain = resolveDomain(domain);
+    const list = usedDomains.get(resolvedDomain) ?? [];
     list.push(label);
-    usedDomains.set(domain, list);
+    usedDomains.set(resolvedDomain, list);
   };
 
   for (const block of Object.values(blocks)) {
@@ -659,37 +661,42 @@ function validateDomains(
 
   for (const block of Object.values(blocks)) {
     if (!block.domain) continue;
+    const blockDomain = resolveDomain(block.domain);
     for (const ref of block.refDependencies ?? []) {
       const dependency = blocks[ref];
-      if (!dependency?.domain || dependency.domain === block.domain) continue;
+      const dependencyDomain = dependency?.domain ? resolveDomain(dependency.domain) : undefined;
+      if (!dependencyDomain || dependencyDomain === blockDomain) continue;
       diagnostics.push({
         kind: 'resolve',
         filePath: block.filePath,
         severity: 'warning',
-        message: `block "${block.name}" in domain "${block.domain}" depends on block "${dependency.name}" in domain "${dependency.domain}". Mark this as a bridge pattern or document the cross-domain dependency.`,
+        message: `block "${block.name}" in domain "${blockDomain}" depends on block "${dependency.name}" in domain "${dependencyDomain}". Mark this as a bridge pattern or document the cross-domain dependency.`,
       });
     }
   }
   for (const view of Object.values(views)) {
     if (!view.domain) continue;
+    const viewDomain = resolveDomain(view.domain);
     for (const ref of view.blockRefs ?? []) {
       const block = blocks[ref];
-      if (!block?.domain || block.domain === view.domain) continue;
+      const blockDomain = block?.domain ? resolveDomain(block.domain) : undefined;
+      if (!blockDomain || blockDomain === viewDomain) continue;
       diagnostics.push({
         kind: 'resolve',
         filePath: view.filePath,
         severity: 'warning',
-        message: `business_view "${view.name}" in domain "${view.domain}" includes block "${block.name}" from domain "${block.domain}". Review the cross-domain dependency.`,
+        message: `business_view "${view.name}" in domain "${viewDomain}" includes block "${block.name}" from domain "${blockDomain}". Review the cross-domain dependency.`,
       });
     }
     for (const ref of view.businessViewRefs ?? []) {
       const dependency = views[ref];
-      if (!dependency?.domain || dependency.domain === view.domain) continue;
+      const dependencyDomain = dependency?.domain ? resolveDomain(dependency.domain) : undefined;
+      if (!dependencyDomain || dependencyDomain === viewDomain) continue;
       diagnostics.push({
         kind: 'resolve',
         filePath: view.filePath,
         severity: 'warning',
-        message: `business_view "${view.name}" in domain "${view.domain}" includes business_view "${dependency.name}" from domain "${dependency.domain}". Review the cross-domain dependency.`,
+        message: `business_view "${view.name}" in domain "${viewDomain}" includes business_view "${dependency.name}" from domain "${dependencyDomain}". Review the cross-domain dependency.`,
       });
     }
   }
@@ -747,6 +754,21 @@ function validateDomains(
       });
     }
   }
+}
+
+function createManifestDomainResolver(domains: Record<string, ManifestDomain>): (domain: string) => string {
+  const aliases = new Map<string, string>();
+  for (const domain of Object.values(domains)) {
+    aliases.set(domain.name, domain.name);
+    aliases.set(domainAliasKey(domain.name), domain.name);
+    const folderAlias = domain.filePath?.replace(/\\/g, '/').match(/^domains\/([^/]+)\//)?.[1];
+    if (folderAlias) aliases.set(domainAliasKey(folderAlias), domain.name);
+  }
+  return (domain) => aliases.get(domain) ?? aliases.get(domainAliasKey(domain)) ?? domain;
+}
+
+function domainAliasKey(value: string): string {
+  return value.trim().toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
 }
 
 function reviewCadenceDays(value: string): number | null {
@@ -1774,7 +1796,10 @@ function buildManifestLineage(
     grain: b.grain,
     entities: b.entities,
     declaredOutputs: b.declaredOutputs,
+    dimensions: b.dimensions,
     allowedFilters: b.allowedFilters,
+    parameterPolicy: b.parameterPolicy,
+    filterBindings: b.filterBindings,
     sourceSystems: b.sourceSystems,
     replacementFor: b.replacementFor,
   }));
@@ -2031,7 +2056,20 @@ function blockDeclToManifestBlock(block: any, filePath: string): ManifestBlock {
     grain: typeof block.grain === 'string' ? block.grain : undefined,
     entities: Array.isArray(block.entities) ? block.entities : undefined,
     declaredOutputs: Array.isArray(block.outputs) ? block.outputs : undefined,
+    dimensions: Array.isArray(block.dimensions) ? block.dimensions : undefined,
     allowedFilters: Array.isArray(block.allowedFilters) ? block.allowedFilters : undefined,
+    parameterPolicy: Array.isArray(block.parameterPolicy)
+      ? block.parameterPolicy.map((entry: { name: string; policy: string }) => ({
+          name: entry.name,
+          policy: entry.policy,
+        }))
+      : undefined,
+    filterBindings: Array.isArray(block.filterBindings)
+      ? block.filterBindings.map((entry: { filter: string; binding: string }) => ({
+          filter: entry.filter,
+          binding: entry.binding,
+        }))
+      : undefined,
     sourceSystems: Array.isArray(block.sourceSystems) ? block.sourceSystems : undefined,
     replacementFor: Array.isArray(block.replacementFor) ? block.replacementFor : undefined,
     unresolvedTermRefs: [],

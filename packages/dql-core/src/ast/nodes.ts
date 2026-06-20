@@ -304,7 +304,13 @@ export interface BlockDeclNode extends BaseNode {
   grain?: string;
   entities?: string[];
   outputs?: string[];
+  /** Business dimensions available for grouping/filtering custom reusable blocks. */
+  dimensions?: string[];
   allowedFilters?: string[];
+  /** Parameter reuse contract: dynamic/static/business/derived review intent per parameter. */
+  parameterPolicy?: BlockParameterPolicyEntry[];
+  /** Maps business/app filters to the physical column/expression this block accepts. */
+  filterBindings?: BlockFilterBindingEntry[];
   sourceSystems?: string[];
   replacementFor?: string[];
   params?: BlockParamsNode;
@@ -410,6 +416,18 @@ export interface BlockParamsNode extends BaseNode {
 export interface BlockParamEntry {
   name: string;
   initializer: ExpressionNode;
+  span: SourceSpan;
+}
+
+export interface BlockParameterPolicyEntry {
+  name: string;
+  policy: string;
+  span: SourceSpan;
+}
+
+export interface BlockFilterBindingEntry {
+  filter: string;
+  binding: string;
   span: SourceSpan;
 }
 

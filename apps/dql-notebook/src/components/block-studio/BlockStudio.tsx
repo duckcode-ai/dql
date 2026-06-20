@@ -27,6 +27,7 @@ import { MetricDetailPanel } from '../panels/MetricDetailPanel';
 import { SemanticSearchBar } from '../panels/SemanticSearchBar';
 import { SemanticTreeNode as TreeRow } from '../panels/SemanticTreeNode';
 import { AiSqlDraftDialog, type AiSqlDraftMeta } from '../agent/AiSqlDraftDialog';
+import { AgentChatPanel } from '../agent/AgentChatPanel';
 import {
   appendSemanticRefToQuery,
   buildSemanticRef,
@@ -101,6 +102,7 @@ export function BlockStudio() {
   const [semanticInsertChoice, setSemanticInsertChoice] = useState<SemanticObjectDetail | null>(null);
   const [databaseInsertWarning, setDatabaseInsertWarning] = useState<string | null>(null);
   const [aiSqlOpen, setAiSqlOpen] = useState(false);
+  const [aiAskOpen, setAiAskOpen] = useState(false);
   const [certifying, setCertifying] = useState(false);
   const [certificationResult, setCertificationResult] = useState<{
     ok?: boolean;
@@ -676,18 +678,19 @@ export function BlockStudio() {
     window.addEventListener('mouseup', onUp);
   };
 
+  const bottomPaneVisible = hasActiveDraft && !bottomPaneCollapsed;
   const rootGridColumns = compactLayout || leftPaneCollapsed
     ? 'minmax(0, 1fr)'
     : `${leftPaneWidth}px 6px minmax(0, 1fr)`;
   const rootGridRows = compactLayout
     ? leftPaneCollapsed
-      ? bottomPaneCollapsed
+      ? !bottomPaneVisible
         ? 'minmax(0, 1fr) 0 0'
         : `minmax(0, 1fr) 6px ${bottomPaneHeight}px`
-      : bottomPaneCollapsed
+      : !bottomPaneVisible
         ? 'minmax(220px, 34vh) minmax(0, 1fr) 0 0'
         : `minmax(220px, 34vh) minmax(320px, 1fr) 6px ${bottomPaneHeight}px`
-    : bottomPaneCollapsed
+    : !bottomPaneVisible
       ? 'minmax(0, 1fr) 0 0'
       : `minmax(0, 1fr) 6px ${bottomPaneHeight}px`;
   const editorGridColumn = compactLayout ? '1' : '3';
@@ -906,11 +909,14 @@ export function BlockStudio() {
             </span>
           )}
           <div style={{ flex: 1 }} />
-          <TemplateButton label="Import SQL" Icon={FileInput} variant="primary" onClick={() => dispatch({ type: 'OPEN_BLOCK_IMPORT' })} />
-          <TemplateButton label="Build DQL" Icon={Bot} onClick={() => { setResultTab('results'); setAiSqlOpen(true); }} />
-          <TemplateButton label="Run" onClick={() => void handleRun()} busy={running} />
-          <TemplateButton label="Save" onClick={() => void handleSave()} busy={saving} />
-          {state.activeBlockPath && (
+          {hasActiveDraft && (
+            <>
+              <TemplateButton label="Build DQL" Icon={Bot} variant="primary" onClick={() => { setResultTab('results'); setAiSqlOpen(true); }} />
+              <TemplateButton label="Run" onClick={() => void handleRun()} busy={running} />
+              <TemplateButton label="Save" onClick={() => void handleSave()} busy={saving} />
+            </>
+          )}
+          {hasActiveDraft && state.activeBlockPath && (
             <TemplateButton label="Certify" onClick={() => void handleCertify()} busy={certifying} />
           )}
           {saveError && (
@@ -932,6 +938,10 @@ export function BlockStudio() {
               onBuildDql={() => {
                 setResultTab('results');
                 setAiSqlOpen(true);
+              }}
+              onAskAi={() => {
+                setResultTab('results');
+                setAiAskOpen(true);
               }}
               t={t}
             />
@@ -978,17 +988,17 @@ export function BlockStudio() {
       </div>
 
       <div
-        onMouseDown={bottomPaneCollapsed ? undefined : startBottomResize}
+        onMouseDown={bottomPaneVisible ? startBottomResize : undefined}
         style={{
           gridColumn: bottomResizeGridColumn,
           gridRow: bottomResizeGridRow,
-          display: bottomPaneCollapsed ? 'none' : 'block',
+          display: bottomPaneVisible ? 'block' : 'none',
           cursor: 'row-resize',
           background: t.headerBorder,
         }}
       />
 
-      <div style={{ gridColumn: bottomPaneGridColumn, gridRow: bottomPaneGridRow, borderTop: bottomPaneCollapsed ? 'none' : `1px solid ${t.headerBorder}`, display: bottomPaneCollapsed ? 'none' : 'flex', flexDirection: 'column', overflow: 'hidden', background: t.cellBg }}>
+      <div style={{ gridColumn: bottomPaneGridColumn, gridRow: bottomPaneGridRow, borderTop: bottomPaneVisible ? `1px solid ${t.headerBorder}` : 'none', display: bottomPaneVisible ? 'flex' : 'none', flexDirection: 'column', overflow: 'hidden', background: t.cellBg }}>
         {/* Compact bottom workspace: keep only tabs that are actively useful
             during block authoring. Validation and test details still run in
             the background and certification flow, but do not compete for
@@ -1108,7 +1118,7 @@ export function BlockStudio() {
         </div>
       </div>
 
-      {bottomPaneCollapsed && (
+      {hasActiveDraft && bottomPaneCollapsed && (
         <div style={{ position: 'absolute', right: 16, bottom: 16 }}>
           <button
             onClick={() => setBottomPaneCollapsed(false)}
@@ -1128,6 +1138,53 @@ export function BlockStudio() {
           onClose={() => setAiSqlOpen(false)}
           onInsertSql={(sql, meta) => handleAiSqlInsert(sql, meta)}
         />
+      )}
+
+      {aiAskOpen && (
+        <BlockStudioAskOverlay t={t}>
+          <div style={askOverlayHeaderStyle(t)}>
+            <div style={askOverlayIconStyle(t)}><Sparkles size={16} strokeWidth={2} /></div>
+            <div style={{ flex: 1, minWidth: 0 }}>
+              <div style={{ fontSize: 15, fontWeight: 850, color: t.textPrimary, fontFamily: t.font }}>Ask AI</div>
+              <div style={{ fontSize: 12, color: t.textMuted, marginTop: 2, fontFamily: t.font }}>
+                Answers and reuse guidance are grounded in certified DQL, dbt, semantic, warehouse, and draft context.
+              </div>
+            </div>
+            <button type="button" onClick={() => setAiAskOpen(false)} title="Close" style={closeAskButtonStyle(t)}>
+              <X size={15} strokeWidth={2} />
+            </button>
+          </div>
+          <div style={{ flex: 1, minHeight: 0, padding: '0 16px 16px' }}>
+            <AgentChatPanel
+              title="Ask AI"
+              scopeHint={activeBlockName ? `Current block: ${activeBlockName}` : 'Block Studio project context'}
+              upstreamContext={state.blockStudioDraft}
+              themeMode={state.themeMode}
+              hideSqlByDefault
+              embedded
+              showHeader={false}
+              emptyHint="Ask whether a block already exists, what domain it belongs in, which parameters should stay dynamic, or what evidence is missing before certification."
+              inputPlaceholder="Ask about reusable blocks, semantic metrics, domains, lineage, or certification gaps..."
+              suggestions={[
+                {
+                  label: 'Find reusable blocks',
+                  prompt: 'Which certified DQL blocks already answer this kind of analysis, and what should be reused instead of duplicated?',
+                  icon: <Blocks size={12} strokeWidth={2} />,
+                },
+                {
+                  label: 'Choose domain',
+                  prompt: 'Based on the dbt and semantic metadata, which domain should this analysis belong to and why?',
+                  icon: <ShieldCheck size={12} strokeWidth={2} />,
+                },
+                {
+                  label: 'Review parameters',
+                  prompt: 'Which filters in this analysis should be dynamic parameters, static defaults, or business-controlled parameters?',
+                  icon: <Sparkles size={12} strokeWidth={2} />,
+                },
+              ]}
+            />
+          </div>
+        </BlockStudioAskOverlay>
       )}
 
       {state.blockStudioImportOpen && (
@@ -1237,6 +1294,90 @@ function BlockStudioImportOverlay({
   );
 }
 
+function BlockStudioAskOverlay({
+  children,
+  t,
+}: {
+  children: React.ReactNode;
+  t: Theme;
+}) {
+  return (
+    <div
+      style={{
+        position: 'absolute',
+        inset: '48px 0 0 0',
+        zIndex: 38,
+        background: 'rgba(0, 0, 0, 0.22)',
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        padding: 14,
+      }}
+    >
+      <div
+        role="dialog"
+        aria-modal="true"
+        aria-label="Ask AI"
+        style={{
+          width: 'min(860px, calc(100vw - 28px))',
+          height: 'min(720px, calc(100vh - 92px))',
+          background: t.appBg,
+          border: `1px solid ${t.headerBorder}`,
+          borderRadius: 8,
+          boxShadow: '0 24px 80px rgba(0,0,0,0.32)',
+          overflow: 'hidden',
+          position: 'relative',
+          display: 'flex',
+          flexDirection: 'column',
+        }}
+      >
+        {children}
+      </div>
+    </div>
+  );
+}
+
+function askOverlayHeaderStyle(t: Theme): React.CSSProperties {
+  return {
+    display: 'flex',
+    alignItems: 'center',
+    gap: 10,
+    padding: '14px 16px',
+    borderBottom: `1px solid ${t.headerBorder}`,
+    background: t.cellBg,
+  };
+}
+
+function askOverlayIconStyle(t: Theme): React.CSSProperties {
+  return {
+    width: 30,
+    height: 30,
+    borderRadius: 8,
+    background: `${t.accent}15`,
+    border: `1px solid ${t.accent}35`,
+    color: t.accent,
+    display: 'inline-flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    flex: '0 0 auto',
+  };
+}
+
+function closeAskButtonStyle(t: Theme): React.CSSProperties {
+  return {
+    width: 30,
+    height: 30,
+    borderRadius: 7,
+    border: `1px solid ${t.btnBorder}`,
+    background: t.btnBg,
+    color: t.textSecondary,
+    cursor: 'pointer',
+    display: 'inline-flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+  };
+}
+
 function BlockStudioStartPage({
   dbtStatus,
   semanticStats,
@@ -1246,6 +1387,7 @@ function BlockStudioStartPage({
   onCreateSemantic,
   onImport,
   onBuildDql,
+  onAskAi,
   t,
 }: {
   dbtStatus: BlockStudioDbtStatus | null;
@@ -1265,6 +1407,7 @@ function BlockStudioStartPage({
   onCreateSemantic: () => void;
   onImport: () => void;
   onBuildDql: () => void;
+  onAskAi: () => void;
   t: Theme;
 }) {
   const manualActions = [
@@ -1286,7 +1429,7 @@ function BlockStudioStartPage({
   const dbtReady = Boolean(dbtStatus?.artifacts.manifest.exists);
   const semanticMetricCount = dbtStatus?.counts.metrics ?? semanticStats.metrics;
   const sourceSummary = dbtStatus
-    ? `${dbtStatus.counts.models} models · ${semanticMetricCount} metrics`
+    ? `${dbtStatus.counts.models} dbt models · ${semanticMetricCount} MetricFlow metrics`
     : 'Waiting for dbt artifacts';
   const projectLabel = dbtStatus?.projectName || dbtStatus?.projectPath?.split('/').filter(Boolean).pop() || 'dbt project';
 
@@ -1324,6 +1467,14 @@ function BlockStudioStartPage({
           onClick={onBuildDql}
           t={t}
         />
+        <PrimaryStartAction
+          title="Ask AI"
+          detail="Ask a business question over certified blocks, dbt, semantic, and warehouse context before deciding what to reuse or draft."
+          label="Ask question"
+          Icon={Sparkles}
+          onClick={onAskAi}
+          t={t}
+        />
       </div>
 
       <details style={importDisclosureStyle(t)}>
@@ -1344,9 +1495,9 @@ function BlockStudioStartPage({
       </details>
 
       <section style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(160px, 1fr))', gap: 8 }}>
-        <ReadinessChip Icon={Database} label={projectLabel} value={sourceSummary} tone={dbtReady ? 'success' : 'neutral'} t={t} />
+        <ReadinessChip Icon={Database} label={projectLabel ? `${projectLabel} dbt` : 'dbt context'} value={sourceSummary} tone={dbtReady ? 'success' : 'neutral'} t={t} />
         <ReadinessChip Icon={Database} label="Database" value={`${databaseStats.tables} tables`} tone={databaseStats.tables > 0 ? 'success' : 'neutral'} t={t} />
-        <ReadinessChip Icon={Blocks} label="Semantic layer" value={`${semanticObjectCount} objects`} tone={semanticObjectCount > 0 ? 'success' : 'neutral'} t={t} />
+        <ReadinessChip Icon={Blocks} label="DQL semantic layer" value={`${semanticObjectCount} objects`} tone={semanticObjectCount > 0 ? 'success' : 'neutral'} t={t} />
         <ReadinessChip Icon={ShieldCheck} label="Governance" value="Run · validate · certify" tone="neutral" t={t} />
       </section>
     </div>
@@ -1720,6 +1871,11 @@ function rowCountForImportCandidate(candidate: BlockStudioImportCandidate): numb
   return typeof rowCount === 'number' ? rowCount : undefined;
 }
 
+function isDraftBlockPath(path?: string | null): boolean {
+  if (!path) return false;
+  return path.startsWith('blocks/_drafts/') || /^domains\/[^/]+\/blocks\/_drafts\//.test(path);
+}
+
 function smartItemFromCandidate(candidate: BlockStudioImportCandidate): SmartImportItem {
   if (candidate.reviewStatus === 'saved') {
     return {
@@ -1748,12 +1904,12 @@ function smartItemFromCandidate(candidate: BlockStudioImportCandidate): SmartImp
       status: 'ready',
       rows: rowCountForImportCandidate(candidate),
       savedPath: candidate.savedPath,
-      message: candidate.savedPath?.startsWith('blocks/_drafts/')
+      message: isDraftBlockPath(candidate.savedPath)
         ? 'Preview ran successfully. Draft is autosaved for review.'
         : 'Preview ran successfully.',
     };
   }
-  if (candidate.draftSave?.status === 'saved' || candidate.savedPath?.startsWith('blocks/_drafts/')) {
+  if (candidate.draftSave?.status === 'saved' || isDraftBlockPath(candidate.savedPath)) {
     return {
       id: candidate.id,
       name: candidate.name,
@@ -1782,7 +1938,7 @@ function smartItemFromCandidate(candidate: BlockStudioImportCandidate): SmartImp
 }
 
 function isAiGeneratedCandidate(candidate: BlockStudioImportCandidate): boolean {
-  return Boolean(candidate.generationMode || candidate.draftSave || candidate.savedPath?.startsWith('blocks/_drafts/'));
+  return Boolean(candidate.generationMode || candidate.draftSave || isDraftBlockPath(candidate.savedPath));
 }
 
 function smartImportPhaseLabel(phase: SmartImportPhase): string {
@@ -2343,7 +2499,7 @@ function BlockStudioImportWorkspace({
                         {candidate.lineage.statementIndex}/{candidate.lineage.totalStatements} · {candidate.sourcePath}
                       </span>
                       <span style={{ display: 'flex', gap: 5, flexWrap: 'wrap' }}>
-                        <ImportPill label={candidate.draftSave?.status === 'saved' || candidate.savedPath?.startsWith('blocks/_drafts/') ? 'draft saved' : candidate.reviewStatus} tone={candidate.reviewStatus === 'rejected' ? 'warn' : 'info'} t={t} />
+                        <ImportPill label={candidate.draftSave?.status === 'saved' || isDraftBlockPath(candidate.savedPath) ? 'draft saved' : candidate.reviewStatus} tone={candidate.reviewStatus === 'rejected' ? 'warn' : 'info'} t={t} />
                         <ImportPill label={candidate.validation?.valid === false ? 'fix' : 'valid'} tone={candidate.validation?.valid === false ? 'warn' : 'ok'} t={t} />
                         {typeof rowCount === 'number' && <ImportPill label={`${rowCount} rows`} tone="ok" t={t} />}
                         {warnings.length > 0 && <ImportPill label={`${warnings.length} warning`} tone="warn" t={t} />}
@@ -2539,7 +2695,7 @@ function SmartImportOverview({
       : counts.processing > 0
         ? 'DQL is previewing SQL and keeping generated drafts saved.'
         : counts.ready > 0
-          ? 'Generated DQL drafts are saved under blocks/_drafts. Open a candidate to review, preview, and certify.'
+          ? 'Generated DQL drafts are saved under blocks/_drafts or domains/<domain>/blocks/_drafts. Open a candidate to review, preview, and certify.'
           : 'Certified blocks are saved in the canonical blocks folder.';
 
   return (
@@ -2651,13 +2807,16 @@ function ImportCandidateDetail({
   const [owner, setOwner] = useState(candidate.owner);
   const [description, setDescription] = useState(candidate.description);
   const [tags, setTags] = useState(candidate.tags.join(', '));
+  const [terms, setTerms] = useState((candidate.terms ?? []).join(', '));
   const [pattern, setPattern] = useState(candidate.pattern ?? '');
   const [grain, setGrain] = useState(candidate.grain ?? '');
   const [entities, setEntities] = useState((candidate.entities ?? []).join(', '));
   const [outputs, setOutputs] = useState((candidate.outputs ?? []).join(', '));
+  const [dimensions, setDimensions] = useState((candidate.dimensions ?? []).join(', '));
   const [allowedFilters, setAllowedFilters] = useState((candidate.allowedFilters ?? []).join(', '));
   const [sourceSystems, setSourceSystems] = useState((candidate.sourceSystems ?? []).join(', '));
   const [replacementFor, setReplacementFor] = useState((candidate.replacementFor ?? []).join(', '));
+  const [reviewCadence, setReviewCadence] = useState(candidate.reviewCadence ?? 'monthly');
   const [sql, setSql] = useState(candidate.sql);
   const [aiBusy, setAiBusy] = useState<string | null>(null);
   const [editError, setEditError] = useState<string | null>(null);
@@ -2669,17 +2828,20 @@ function ImportCandidateDetail({
     setOwner(candidate.owner);
     setDescription(candidate.description);
     setTags(candidate.tags.join(', '));
+    setTerms((candidate.terms ?? []).join(', '));
     setPattern(candidate.pattern ?? '');
     setGrain(candidate.grain ?? '');
     setEntities((candidate.entities ?? []).join(', '));
     setOutputs((candidate.outputs ?? []).join(', '));
+    setDimensions((candidate.dimensions ?? []).join(', '));
     setAllowedFilters((candidate.allowedFilters ?? []).join(', '));
     setSourceSystems((candidate.sourceSystems ?? []).join(', '));
     setReplacementFor((candidate.replacementFor ?? []).join(', '));
+    setReviewCadence(candidate.reviewCadence ?? 'monthly');
     setSql(candidate.sql);
     setEditError(null);
     setContextOpen(false);
-  }, [candidate.id, candidate.name, candidate.domain, candidate.owner, candidate.description, candidate.tags, candidate.pattern, candidate.grain, candidate.entities, candidate.outputs, candidate.allowedFilters, candidate.sourceSystems, candidate.replacementFor, candidate.sql]);
+  }, [candidate.id, candidate.name, candidate.domain, candidate.owner, candidate.description, candidate.tags, candidate.terms, candidate.pattern, candidate.grain, candidate.entities, candidate.outputs, candidate.dimensions, candidate.allowedFilters, candidate.sourceSystems, candidate.replacementFor, candidate.reviewCadence, candidate.sql]);
 
     const saveEdits = async () => {
       setEditError(null);
@@ -2690,13 +2852,16 @@ function ImportCandidateDetail({
           owner,
           description,
           tags: tags.split(',').map((tag) => tag.trim()).filter(Boolean),
+          terms: terms.split(',').map((value) => value.trim()).filter(Boolean),
           pattern,
           grain,
           entities: entities.split(',').map((value) => value.trim()).filter(Boolean),
           outputs: outputs.split(',').map((value) => value.trim()).filter(Boolean),
+          dimensions: dimensions.split(',').map((value) => value.trim()).filter(Boolean),
           allowedFilters: allowedFilters.split(',').map((value) => value.trim()).filter(Boolean),
           sourceSystems: sourceSystems.split(',').map((value) => value.trim()).filter(Boolean),
           replacementFor: replacementFor.split(',').map((value) => value.trim()).filter(Boolean),
+          reviewCadence,
           sql,
           llmContext: candidate.llmContext,
         };
@@ -2726,7 +2891,8 @@ function ImportCandidateDetail({
     const inputStyle = importInputStyle(t);
     const previewRowCount = candidate.preview?.result?.rowCount ?? candidate.preview?.result?.rows?.length;
     const generatedDraft = isAiGeneratedCandidate(candidate);
-    const draftPath = candidate.draftSave?.path ?? (candidate.savedPath?.startsWith('blocks/_drafts/') ? candidate.savedPath : undefined);
+    const draftPath = candidate.draftSave?.path ?? (isDraftBlockPath(candidate.savedPath) ? candidate.savedPath : undefined);
+    const reuseRecommended = candidate.recommendedAction === 'reuse_existing' || candidate.draftSave?.status === 'skipped';
     const contextCount = candidate.lineage.sourceTables.length + (candidate.evidence?.length ?? 0) + candidate.lineage.parameters.length + warnings.length;
 
   return (
@@ -2741,7 +2907,7 @@ function ImportCandidateDetail({
           {contextOpen ? 'Hide context' : `Show context${contextCount > 0 ? ` (${contextCount})` : ''}`}
         </button>
         <button onClick={() => onReviewInEditor(candidate)} style={primaryImportButtonStyle(t)}>Edit full DQL</button>
-        <button onClick={() => void onSave(candidate)} disabled={loading || candidate.reviewStatus === 'saved'} style={primaryImportButtonStyle(t)}>{candidate.reviewStatus === 'saved' ? 'Certified' : generatedDraft ? 'Certify' : 'Save'}</button>
+        <button onClick={() => void onSave(candidate)} disabled={loading || candidate.reviewStatus === 'saved' || reuseRecommended} style={primaryImportButtonStyle(t)}>{reuseRecommended ? 'Reuse existing' : candidate.reviewStatus === 'saved' ? 'Certified' : generatedDraft ? 'Certify' : 'Save'}</button>
       </div>
 
       {editError && <div role="alert" style={{ fontSize: 12, color: '#f85149', background: '#f8514914', borderRadius: 8, padding: 10 }}>{editError}</div>}
@@ -2752,7 +2918,7 @@ function ImportCandidateDetail({
       )}
 
       <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
-        <ImportPill label={candidate.draftSave?.status === 'saved' || draftPath ? 'draft saved' : candidate.reviewStatus} tone={candidate.reviewStatus === 'rejected' ? 'warn' : 'info'} t={t} />
+        <ImportPill label={candidate.draftSave?.status === 'skipped' ? 'reuse recommended' : candidate.draftSave?.status === 'saved' || draftPath ? 'draft saved' : candidate.reviewStatus} tone={candidate.reviewStatus === 'rejected' ? 'warn' : candidate.draftSave?.status === 'skipped' ? 'ok' : 'info'} t={t} />
         <ImportPill label={`${Math.round(candidate.confidence * 100)}% confidence`} tone="info" t={t} />
         <ImportPill label={candidate.validation?.valid === false ? 'needs fixes' : 'valid'} tone={candidate.validation?.valid === false ? 'warn' : 'ok'} t={t} />
         {typeof previewRowCount === 'number' && <ImportPill label={`${previewRowCount} rows`} tone="ok" t={t} />}
@@ -2768,7 +2934,7 @@ function ImportCandidateDetail({
               <FieldLabel label="Tags" t={t}><textarea value={tags} onChange={(event) => setTags(event.target.value)} style={{ ...inputStyle, minHeight: 58, resize: 'vertical' }} /></FieldLabel>
             </div>
             <FieldLabel label="Business description" t={t}><textarea value={description} onChange={(event) => setDescription(event.target.value)} style={{ ...inputStyle, minHeight: 70, resize: 'vertical' }} /></FieldLabel>
-            <div style={{ display: 'grid', gridTemplateColumns: 'minmax(160px, 0.8fr) minmax(160px, 1fr)', gap: 8 }}>
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(140px, 1fr))', gap: 8 }}>
               <FieldLabel label="Pattern" t={t}>
                 <select value={pattern} onChange={(event) => setPattern(event.target.value)} style={inputStyle}>
                   {['custom', 'metric_wrapper', 'entity_profile', 'entity_rollup', 'ranking', 'trend', 'bridge', 'drilldown', 'replacement'].map((item) => (
@@ -2777,12 +2943,21 @@ function ImportCandidateDetail({
                 </select>
               </FieldLabel>
               <FieldLabel label="Grain" t={t}><input value={grain} onChange={(event) => setGrain(event.target.value)} style={inputStyle} /></FieldLabel>
+              <FieldLabel label="Review cadence" t={t}>
+                <select value={reviewCadence} onChange={(event) => setReviewCadence(event.target.value)} style={inputStyle}>
+                  {['weekly', 'monthly', 'quarterly', 'semiannual', 'annual'].map((item) => (
+                    <option key={item} value={item}>{item}</option>
+                  ))}
+                </select>
+              </FieldLabel>
             </div>
             <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
               <FieldLabel label="Entities" t={t}><input value={entities} onChange={(event) => setEntities(event.target.value)} style={inputStyle} /></FieldLabel>
               <FieldLabel label="Outputs" t={t}><input value={outputs} onChange={(event) => setOutputs(event.target.value)} style={inputStyle} /></FieldLabel>
+              <FieldLabel label="Dimensions" t={t}><input value={dimensions} onChange={(event) => setDimensions(event.target.value)} style={inputStyle} /></FieldLabel>
               <FieldLabel label="Allowed filters" t={t}><input value={allowedFilters} onChange={(event) => setAllowedFilters(event.target.value)} style={inputStyle} /></FieldLabel>
               <FieldLabel label="Source systems" t={t}><input value={sourceSystems} onChange={(event) => setSourceSystems(event.target.value)} style={inputStyle} /></FieldLabel>
+              <FieldLabel label="Terms" t={t}><input value={terms} onChange={(event) => setTerms(event.target.value)} style={inputStyle} /></FieldLabel>
             </div>
             <FieldLabel label="Replaces" t={t}><input value={replacementFor} onChange={(event) => setReplacementFor(event.target.value)} style={inputStyle} /></FieldLabel>
             <button onClick={() => void saveEdits()} style={{ ...primaryImportButtonStyle(t), justifySelf: 'start' }}>Apply edits</button>
@@ -2812,6 +2987,46 @@ function ImportCandidateDetail({
 
         {contextOpen && (
         <div style={{ display: 'grid', gap: 12 }}>
+          {(candidate.similarityMatches?.length || candidate.draftSave?.status === 'skipped') && (
+            <PanelBox title="Reuse recommendation" t={t}>
+              <div style={{ display: 'grid', gap: 8 }}>
+                <InfoLine label="Action" value={candidate.recommendedAction ?? 'create_new'} t={t} />
+                {candidate.draftSave?.reason && <div style={{ fontSize: 12, color: t.textMuted, lineHeight: 1.4 }}>{candidate.draftSave.reason}</div>}
+                {(candidate.similarityMatches ?? []).slice(0, 3).map((match, index) => (
+                  <div key={`${match.objectKey ?? match.name}-${index}`} style={{ border: `1px solid ${t.headerBorder}`, borderRadius: 7, padding: 8, background: t.appBg }}>
+                    <div style={{ fontSize: 11, fontWeight: 800, color: t.textSecondary, overflowWrap: 'anywhere' }}>{match.name}</div>
+                    <div style={{ fontSize: 10, color: t.textMuted, marginTop: 3 }}>{match.kind} · {Math.round(match.score * 100)}% · {match.recommendedAction}</div>
+                    <div style={{ fontSize: 11, color: t.textMuted, lineHeight: 1.35, marginTop: 5 }}>{match.reason}</div>
+                  </div>
+                ))}
+              </div>
+            </PanelBox>
+          )}
+
+          {(candidate.parameterDecisions?.length || candidate.filterBindings?.length) && (
+            <PanelBox title="Parameter contract" t={t}>
+              <div style={{ display: 'grid', gap: 8 }}>
+                {(candidate.parameterDecisions ?? []).slice(0, 8).map((decision) => (
+                  <div key={decision.name} style={{ border: `1px solid ${t.headerBorder}`, borderRadius: 7, padding: 8, background: t.appBg }}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', gap: 8 }}>
+                      <span style={{ fontSize: 11, fontWeight: 800, color: t.textSecondary }}>{decision.name}</span>
+                      <span style={{ fontSize: 10, color: t.textMuted }}>{decision.policy}</span>
+                    </div>
+                    <div style={{ fontSize: 11, color: t.textMuted, lineHeight: 1.35, marginTop: 5 }}>{decision.sourceExpression} = {String(decision.value)}</div>
+                    <div style={{ fontSize: 11, color: t.textMuted, lineHeight: 1.35, marginTop: 5 }}>{decision.reason}</div>
+                  </div>
+                ))}
+                {(candidate.filterBindings ?? []).length > 0 && (
+                  <div style={{ display: 'flex', flexWrap: 'wrap', gap: 5 }}>
+                    {(candidate.filterBindings ?? []).map((binding) => (
+                      <ImportPill key={binding.filter} label={`${binding.filter} -> ${binding.binding}`} tone="info" t={t} />
+                    ))}
+                  </div>
+                )}
+              </div>
+            </PanelBox>
+          )}
+
           <PanelBox title="Grounding" t={t}>
             <div style={{ display: 'grid', gap: 5 }}>
               <div style={{ fontSize: 10, color: t.textMuted, textTransform: 'uppercase', fontWeight: 800 }}>Source tables</div>

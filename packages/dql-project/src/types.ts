@@ -21,6 +21,8 @@ export interface BlockRecord {
   costEstimate?: number;
   certifiedAt?: Date;
   certifiedBy?: string;
+  /** Test assertions declared in the DQL block, independent of whether they were executed in this run. */
+  testAssertions?: string[];
   testResults?: TestResultSummary;
   usedInCount: number;
   lastExecuted?: Date;
@@ -38,10 +40,16 @@ export interface BlockRecord {
   examples?: Array<{ question: string; sql?: string }>;
   invariants?: string[];
   pattern?: string;
+  metricRef?: string;
+  metricsRef?: string[];
+  dimensionsRef?: string[];
   grain?: string;
   entities?: string[];
   declaredOutputs?: string[];
+  dimensions?: string[];
   allowedFilters?: string[];
+  parameterPolicy?: Array<{ name: string; policy: string }>;
+  filterBindings?: Array<{ filter: string; binding: string }>;
   sourceSystems?: string[];
   replacementFor?: string[];
   reviewCadence?: string;

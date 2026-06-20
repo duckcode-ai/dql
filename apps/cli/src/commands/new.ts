@@ -12,6 +12,7 @@ export async function runNew(subject: string | null, rest: string[], flags: CLIF
   const title = toTitle(rawName);
   const slug = toSlug(rawName);
   const usingStarterData = existsSync(join(projectRoot, 'data', 'revenue.csv'));
+  const domainFirst = existsSync(join(projectRoot, 'domains'));
   // Detect available data files for smarter notebook templates
   const availableDataFiles = detectAvailableDataFiles(projectRoot);
 
@@ -27,7 +28,7 @@ export async function runNew(subject: string | null, rest: string[], flags: CLIF
   const domainSlug = toSlug(flags.domain || 'general');
   const outputDir = resolve(
     projectRoot,
-    defaultDirForKind(kind, flags.outDir, domainSlug, existsSync(join(projectRoot, 'domains'))),
+    defaultDirForKind(kind, flags.outDir, domainSlug, domainFirst),
   );
   const filePath = join(outputDir, `${slug}.dql`);
 
@@ -57,7 +58,7 @@ export async function runNew(subject: string | null, rest: string[], flags: CLIF
   writeFileSync(filePath, content, 'utf-8');
 
   const relatedFiles = kind === 'semantic-block'
-    ? writeSemanticCompanionFiles(projectRoot, slug, domain, owner, metricName)
+    ? writeSemanticCompanionFiles(projectRoot, slug, domain, owner, metricName, domainFirst)
     : [];
 
   const relativePath = relativeToProject(projectRoot, filePath);
@@ -218,6 +219,13 @@ function buildBlockTemplate(opts: {
   const query = opts.usingStarterData ? starterBlockQueryForChart(opts.chart) : placeholderBlockQueryForChart(opts.chart);
   const contract = blockContractForPattern(pattern, opts);
   const tags = ['starter', opts.domain, pattern].filter(Boolean);
+  const filterBindings = contract.allowedFilters.length > 0
+    ? `
+    filterBindings {
+${contract.allowedFilters.map((filter) => `        ${filter} = "${filter}"`).join('\n')}
+    }
+`
+    : '';
   const params = opts.usingStarterData && (opts.chart === 'bar' || opts.chart === 'kpi')
     ? `
     params {
@@ -241,7 +249,7 @@ function buildBlockTemplate(opts: {
     outputs = [${contract.outputs.map((output) => `"${output}"`).join(', ')}]
     dimensions = [${contract.dimensions.map((dimension) => `"${dimension}"`).join(', ')}]
     allowedFilters = [${contract.allowedFilters.map((filter) => `"${filter}"`).join(', ')}]
-    sourceSystems = []
+${filterBindings}    sourceSystems = [${contract.sourceSystems.map((sourceSystem) => `"${sourceSystem}"`).join(', ')}]
     replacementFor = []
     reviewCadence = "monthly"${params}
 
@@ -432,6 +440,7 @@ function blockContractForPattern(pattern: string, opts: {
   outputs: string[];
   dimensions: string[];
   allowedFilters: string[];
+  sourceSystems: string[];
 } {
   const titleToken = toSlug(opts.title).split('_').filter(Boolean)[0] || 'entity';
   switch (pattern) {
@@ -442,6 +451,7 @@ function blockContractForPattern(pattern: string, opts: {
         outputs: ['metric_time', 'metric_value'],
         dimensions: ['metric_time'],
         allowedFilters: ['metric_time'],
+        sourceSystems: [],
       };
     case 'entity_profile':
       return {
@@ -450,6 +460,7 @@ function blockContractForPattern(pattern: string, opts: {
         outputs: [`${titleToken}_id`, `${titleToken}_name`],
         dimensions: [],
         allowedFilters: [`${titleToken}_id`],
+        sourceSystems: [],
       };
     case 'entity_rollup':
       return {
@@ -458,6 +469,7 @@ function blockContractForPattern(pattern: string, opts: {
         outputs: [`${titleToken}_id`, 'metric_value'],
         dimensions: [],
         allowedFilters: [`${titleToken}_id`, 'date'],
+        sourceSystems: [],
       };
     case 'ranking':
       return {
@@ -466,6 +478,7 @@ function blockContractForPattern(pattern: string, opts: {
         outputs: [titleToken, 'metric_value', 'rank'],
         dimensions: [titleToken],
         allowedFilters: ['date'],
+        sourceSystems: [],
       };
     case 'trend':
       return {
@@ -474,14 +487,16 @@ function blockContractForPattern(pattern: string, opts: {
         outputs: ['date', 'metric_value'],
         dimensions: ['date'],
         allowedFilters: ['date'],
+        sourceSystems: [],
       };
     case 'bridge':
       return {
         grain: 'bridge_key',
-        entities: ['Review Required'],
-        outputs: ['bridge_key'],
+        entities: ['Source Entity', 'Target Entity'],
+        outputs: ['bridge_key', 'source_entity_id', 'target_entity_id'],
         dimensions: [],
-        allowedFilters: [],
+        allowedFilters: ['source_entity_id', 'target_entity_id'],
+        sourceSystems: ['source_system', 'target_system'],
       };
     case 'drilldown':
       return {
@@ -490,6 +505,7 @@ function blockContractForPattern(pattern: string, opts: {
         outputs: ['detail_row'],
         dimensions: [],
         allowedFilters: ['date'],
+        sourceSystems: [],
       };
     case 'replacement':
       return {
@@ -498,6 +514,7 @@ function blockContractForPattern(pattern: string, opts: {
         outputs: ['review_required'],
         dimensions: [],
         allowedFilters: [],
+        sourceSystems: [],
       };
     default:
       return contractForChart(opts.chart);
@@ -510,6 +527,7 @@ function contractForChart(chart: string): {
   outputs: string[];
   dimensions: string[];
   allowedFilters: string[];
+  sourceSystems: string[];
 } {
   switch (chart) {
     case 'kpi':
@@ -519,6 +537,7 @@ function contractForChart(chart: string): {
         outputs: ['total_revenue'],
         dimensions: [],
         allowedFilters: [],
+        sourceSystems: [],
       };
     case 'line':
       return {
@@ -527,6 +546,7 @@ function contractForChart(chart: string): {
         outputs: ['revenue_date', 'total_revenue'],
         dimensions: ['revenue_date'],
         allowedFilters: ['revenue_date'],
+        sourceSystems: [],
       };
     case 'table':
       return {
@@ -535,6 +555,7 @@ function contractForChart(chart: string): {
         outputs: [],
         dimensions: [],
         allowedFilters: [],
+        sourceSystems: [],
       };
     case 'bar':
     default:
@@ -544,6 +565,7 @@ function contractForChart(chart: string): {
         outputs: ['segment', 'revenue'],
         dimensions: ['segment'],
         allowedFilters: ['segment'],
+        sourceSystems: [],
       };
   }
 }
@@ -867,9 +889,12 @@ function writeSemanticCompanionFiles(
   domain: string,
   owner: string,
   metricName: string,
+  domainFirst = false,
 ): string[] {
   const metricDir = join(projectRoot, 'semantic-layer', 'metrics');
-  const blockDir = join(projectRoot, 'semantic-layer', 'blocks');
+  const blockDir = domainFirst
+    ? join(projectRoot, 'semantic-layer', 'blocks', toSlug(domain).replace(/_/g, '-'))
+    : join(projectRoot, 'semantic-layer', 'blocks');
   mkdirSync(metricDir, { recursive: true });
   mkdirSync(blockDir, { recursive: true });
 

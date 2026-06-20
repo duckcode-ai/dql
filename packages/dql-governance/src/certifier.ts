@@ -106,8 +106,10 @@ export const BUILTIN_RULES: CertificationRule[] = [
     name: 'Block has tests',
     description: 'Blocks should have at least one test assertion',
     severity: 'warning',
-    check: (_block, testResults) => {
-      if (!testResults || testResults.assertions.length === 0) {
+    check: (block, testResults) => {
+      const declaredCount = block.testAssertions?.length ?? 0;
+      const executedCount = testResults?.assertions.length ?? 0;
+      if (declaredCount === 0 && executedCount === 0) {
         return { passed: false, message: 'No test assertions defined' };
       }
       return { passed: true };
@@ -186,6 +188,43 @@ export const BUILTIN_RULES: CertificationRule[] = [
     },
   },
   {
+    id: 'metric-wrapper-contract',
+    name: 'Metric wrapper binds exactly one semantic metric',
+    description: 'metric_wrapper blocks should wrap one dbt MetricFlow metric and optional dimensions',
+    severity: 'warning',
+    check: (block) => {
+      if (block.pattern !== 'metric_wrapper') return { passed: true };
+      const metricRefs = semanticMetricRefs(block);
+      const passed = metricRefs.length === 1;
+      return {
+        passed,
+        message: passed
+          ? undefined
+          : 'metric_wrapper requires exactly one semantic metric reference through metric or metrics metadata',
+      };
+    },
+  },
+  {
+    id: 'entity-rollup-contract',
+    name: 'Entity rollup declares entity grain and measures',
+    description: 'entity_rollup blocks should aggregate measures to one business entity grain',
+    severity: 'warning',
+    check: (block) => {
+      if (block.pattern !== 'entity_rollup') return { passed: true };
+      const hasEntity = (block.entities ?? []).length === 1;
+      const grain = block.grain ?? '';
+      const outputs = block.declaredOutputs ?? [];
+      const hasIdentifier = outputs.some((output) => output === grain || /(_id|_key)$/i.test(output));
+      const hasMeasure = outputs.some(isMeasureLikeOutput);
+      return {
+        passed: hasEntity && Boolean(grain) && hasIdentifier && hasMeasure,
+        message: hasEntity && grain && hasIdentifier && hasMeasure
+          ? undefined
+          : 'entity_rollup requires one entity, a stable entity grain, an identifier output, and at least one measure output',
+      };
+    },
+  },
+  {
     id: 'ranking-contract',
     name: 'Ranking declares metric and tie-breaker context',
     description: 'ranking blocks should expose a ranked entity/dimension, metric output, and deterministic ordering context',
@@ -193,7 +232,7 @@ export const BUILTIN_RULES: CertificationRule[] = [
     check: (block) => {
       if (block.pattern !== 'ranking') return { passed: true };
       const outputs = block.declaredOutputs ?? [];
-      const hasMetric = outputs.some((output) => /\b(total|count|score|points?|revenue|amount|orders?|metric|rank|value)\b/i.test(output));
+      const hasMetric = outputs.some(isMeasureLikeOutput);
       const hasDimension = Boolean(block.grain) || (block.entities ?? []).length > 0;
       return {
         passed: hasMetric && hasDimension,
@@ -219,16 +258,88 @@ export const BUILTIN_RULES: CertificationRule[] = [
     },
   },
   {
+    id: 'drilldown-contract',
+    name: 'Drilldown declares reusable filters',
+    description: 'drilldown blocks should expose detail outputs plus filters or parameters inherited from a parent question',
+    severity: 'warning',
+    check: (block) => {
+      if (block.pattern !== 'drilldown') return { passed: true };
+      const hasOutputs = (block.declaredOutputs ?? []).length > 0;
+      const hasReusableFilterContract = hasFilterOrParameterContract(block);
+      return {
+        passed: hasOutputs && hasReusableFilterContract,
+        message: hasOutputs && hasReusableFilterContract
+          ? undefined
+          : 'drilldown requires declared detail outputs and at least one allowed filter, parameter policy, or filter binding',
+      };
+    },
+  },
+  {
+    id: 'parameter-policy-values',
+    name: 'Parameter policies are valid',
+    description: 'parameterPolicy entries should use supported review-policy values',
+    severity: 'warning',
+    check: (block) => {
+      const invalid = (block.parameterPolicy ?? [])
+        .filter((entry) => !isAllowedParameterPolicy(entry.policy))
+        .map((entry) => `${entry.name}=${entry.policy}`);
+      return {
+        passed: invalid.length === 0,
+        message: invalid.length === 0
+          ? undefined
+          : `Unsupported parameter policy value(s): ${invalid.join(', ')}`,
+      };
+    },
+  },
+  {
+    id: 'filter-binding-contract',
+    name: 'Filter bindings map declared filters',
+    description: 'filterBindings should map business filters that are declared in allowedFilters',
+    severity: 'warning',
+    check: (block) => {
+      const allowedFilters = new Set((block.allowedFilters ?? []).map((filter) => filter.trim()).filter(Boolean));
+      const bindings = block.filterBindings ?? [];
+      const unknown = allowedFilters.size === 0
+        ? []
+        : bindings
+          .filter((entry) => !allowedFilters.has(entry.filter))
+          .map((entry) => entry.filter);
+      const hasUnboundAllowedFilters = allowedFilters.size > 0
+        && bindings.length === 0
+        && (block.parameterPolicy ?? []).length === 0;
+      if (unknown.length > 0) {
+        return {
+          passed: false,
+          message: `filterBindings reference undeclared allowed filter(s): ${[...new Set(unknown)].join(', ')}`,
+        };
+      }
+      return {
+        passed: !hasUnboundAllowedFilters,
+        message: hasUnboundAllowedFilters
+          ? 'allowedFilters requires filterBindings or parameterPolicy so app/dashboard filters can be applied safely'
+          : undefined,
+      };
+    },
+  },
+  {
     id: 'bridge-review-required',
-    name: 'Bridge block remains review-required',
-    description: 'bridge blocks connect domains and should not bypass review',
+    name: 'Bridge block declares cross-domain review context',
+    description: 'bridge blocks connect domains and must declare both sides plus explicit review metadata',
     severity: 'warning',
     check: (block) => {
       if (block.pattern !== 'bridge') return { passed: true };
-      const passed = block.status !== 'certified' || (block.reviewCadence?.trim().length ?? 0) > 0;
+      const entities = normalizeList(block.entities);
+      const sourceSystems = normalizeList(block.sourceSystems);
+      const outputs = normalizeList(block.declaredOutputs);
+      const hasTwoSides = entities.length >= 2 || sourceSystems.length >= 2;
+      const hasBridgeOutput = outputs.some((output) => /\bbridge|_id$|_key$/i.test(output));
+      const hasReviewMetadata = (block.reviewCadence?.trim().length ?? 0) > 0;
+      const passed = hasTwoSides && hasBridgeOutput && hasReviewMetadata;
       return {
         passed,
-        message: passed ? undefined : 'bridge blocks require explicit review cadence before certification',
+        message: passed
+          ? undefined
+          : 'bridge requires two source systems or entities, a bridge/id/key output, and explicit review cadence',
       };
     },
   },
@@ -278,6 +389,36 @@ function isOfficialPattern(pattern: string): boolean {
   ]).has(pattern);
 }
 
+function semanticMetricRefs(block: BlockRecord): string[] {
+  return block.metricsRef?.length ? block.metricsRef : (block.metricRef ? [block.metricRef] : []);
+}
+
+function normalizeList(values: string[] | undefined): string[] {
+  return (values ?? []).map((value) => value.trim()).filter(Boolean);
+}
+
+function isMeasureLikeOutput(output: string): boolean {
+  const normalized = output.replace(/[_-]+/g, ' ');
+  return /\b(total|count|score|points?|revenue|amount|orders?|metric|measure|value|sum|avg|average|rate|pct|percent)\b/i.test(normalized);
+}
+
+function hasFilterOrParameterContract(block: BlockRecord): boolean {
+  return (block.allowedFilters ?? []).length > 0
+    || (block.parameterPolicy ?? []).length > 0
+    || (block.filterBindings ?? []).length > 0;
+}
+
+function isAllowedParameterPolicy(policy: string): boolean {
+  return new Set([
+    'dynamic',
+    'static',
+    'business',
+    'derived',
+    'optional',
+    'ambiguous_review_required',
+  ]).has(policy);
+}
+
 const ENTERPRISE_REQUIRED_RULE_IDS = new Set([
   'has-description',
   'has-owner',
@@ -288,6 +429,16 @@ const ENTERPRISE_REQUIRED_RULE_IDS = new Set([
   'declares-outputs',
   'declares-review-cadence',
   'valid-block-pattern',
+  'entity-profile-contract',
+  'metric-wrapper-contract',
+  'entity-rollup-contract',
+  'ranking-contract',
+  'trend-contract',
+  'drilldown-contract',
+  'bridge-review-required',
+  'replacement-declares-predecessor',
+  'parameter-policy-values',
+  'filter-binding-contract',
 ]);
 
 export const ENTERPRISE_RULES: CertificationRule[] = [

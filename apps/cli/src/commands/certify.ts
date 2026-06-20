@@ -1,6 +1,13 @@
 import { existsSync, readFileSync, readdirSync } from 'node:fs';
-import { join, resolve } from 'node:path';
-import { Parser, resolveSemanticLayerWithDiagnostics } from '@duckcodeailabs/dql-core';
+import { join, relative, resolve } from 'node:path';
+import {
+  DataLexContractRegistry,
+  Parser,
+  analyze,
+  resolveDataLexManifestPath,
+  resolveSemanticLayerWithDiagnostics,
+  type Diagnostic as CoreDiagnostic,
+} from '@duckcodeailabs/dql-core';
 import { Certifier, ENTERPRISE_RULES } from '@duckcodeailabs/dql-governance';
 import type { BlockRecord, TestResultSummary, TestAssertionResult } from '@duckcodeailabs/dql-project';
 import { QueryExecutor, type ConnectionConfig } from '@duckcodeailabs/dql-connectors';
@@ -47,6 +54,30 @@ function formatExpected(expr: any): string {
     return `[${expr.elements.map((e: any) => formatExpected(e)).join(', ')}]`;
   }
   return JSON.stringify(expr);
+}
+
+function formatDeclaredTest(test: any): string {
+  const field = test?.field ?? test?.left?.name ?? test?.name ?? 'assertion';
+  const operator = test?.operator ?? 'passes';
+  const expected = Object.prototype.hasOwnProperty.call(test ?? {}, 'expected')
+    ? ` ${formatExpected(test.expected)}`
+    : '';
+  return `assert ${field} ${operator}${expected}`.trim();
+}
+
+function declaredTestAssertions(block: any): string[] {
+  return (block.tests ?? []).map((test: any) => formatDeclaredTest(test));
+}
+
+function skippedTestSummary(assertions: string[]): TestResultSummary {
+  return {
+    passed: 0,
+    failed: 0,
+    skipped: assertions.length,
+    duration: 0,
+    assertions: [],
+    runAt: new Date(),
+  };
 }
 
 async function runBlockTests(
@@ -182,6 +213,11 @@ export async function runCertify(filePath: string, flags: CLIFlags): Promise<voi
   // canonical certified location and surfaces the datalex-manifest.json patch.
   if (flags.fromDraft) {
     const result = promoteFromDraft(process.cwd(), flags);
+    if (flags.format === 'json') {
+      console.log(JSON.stringify(result, null, 2));
+      if (!result.ok) process.exitCode = 1;
+      return;
+    }
     if (!result.ok) {
       console.error(`\n  ✗ ${result.message}\n`);
       process.exitCode = 1;
@@ -202,6 +238,7 @@ export async function runCertify(filePath: string, flags: CLIFlags): Promise<voi
   const source = readFileSync(filePath, 'utf-8');
   const parser = new Parser(source, filePath);
   const ast = parser.parse();
+  const datalexDiagnostics = collectDataLexDiagnostics(ast, process.cwd(), filePath, flags);
 
   const blocks = ast.statements.filter((s: any) => s.kind === 'BlockDecl');
 
@@ -216,13 +253,14 @@ export async function runCertify(filePath: string, flags: CLIFlags): Promise<voi
 
   for (const block of blocks) {
     const b = block as any;
+    const testAssertions = declaredTestAssertions(b);
     const record: BlockRecord = {
       id: 'local',
       name: b.name ?? 'unnamed',
       domain: b.domain ?? '',
       type: b.blockType ?? b.type ?? '',
       version: '0.0.0',
-      status: 'draft',
+      status: b.status ?? 'draft',
       gitRepo: '',
       gitPath: filePath,
       gitCommitSha: '',
@@ -237,19 +275,28 @@ export async function runCertify(filePath: string, flags: CLIFlags): Promise<voi
       examples: b.examples,
       invariants: b.invariants,
       pattern: b.pattern,
+      metricRef: b.metricRef,
+      metricsRef: b.metricsRef,
+      dimensionsRef: b.dimensionsRef,
       grain: b.grain,
       entities: b.entities,
       declaredOutputs: b.outputs,
+      dimensions: b.dimensions,
       allowedFilters: b.allowedFilters,
+      parameterPolicy: b.parameterPolicy,
+      filterBindings: b.filterBindings,
       sourceSystems: b.sourceSystems,
       replacementFor: b.replacementFor,
       reviewCadence: b.reviewCadence,
+      testAssertions,
     };
 
     // Run tests unless --skip-tests is set
     let testResults: TestResultSummary | null = null;
     const hasConnection = !!flags.connection || !!projectConfig.defaultConnection;
-    if (!flags.skipTests && (b.tests ?? []).length > 0) {
+    if (flags.skipTests && testAssertions.length > 0) {
+      testResults = skippedTestSummary(testAssertions);
+    } else if (testAssertions.length > 0) {
       if (!hasConnection) {
         if (flags.format !== 'json') {
           console.log(`\n  Block: "${record.name}"`);
@@ -261,9 +308,24 @@ export async function runCertify(filePath: string, flags: CLIFlags): Promise<voi
     }
 
     const result = certifier.evaluate(record, testResults ?? undefined);
+    const blockDataLexDiagnostics = datalexDiagnostics.filter((diag) =>
+      diag.message.includes(`Block "${record.name}"`) || !diag.message.startsWith('Block "'),
+    );
+    for (const diag of blockDataLexDiagnostics) {
+      const entry = { rule: 'DataLex contract', message: diag.message };
+      if (diag.severity === 'error') {
+        result.errors.push(entry);
+        result.certified = false;
+      } else {
+        result.warnings.push(entry);
+      }
+    }
+    if (!result.certified || (testResults?.failed ?? 0) > 0) {
+      anyFailed = true;
+    }
 
     if (flags.format === 'json') {
-      console.log(JSON.stringify({ ...result, testResults }, null, 2));
+      console.log(JSON.stringify({ ...result, testResults, datalexDiagnostics: blockDataLexDiagnostics }, null, 2));
       continue;
     }
 
@@ -272,7 +334,6 @@ export async function runCertify(filePath: string, flags: CLIFlags): Promise<voi
       console.log('  Status: ✓ CERTIFIABLE');
     } else {
       console.log('  Status: ✗ NOT CERTIFIABLE');
-      anyFailed = true;
     }
 
     // Print test results
@@ -307,4 +368,45 @@ export async function runCertify(filePath: string, flags: CLIFlags): Promise<voi
   if (anyFailed) {
     process.exitCode = 1;
   }
+}
+
+function collectDataLexDiagnostics(
+  ast: ReturnType<Parser['parse']>,
+  projectRoot: string,
+  filePath: string,
+  flags: CLIFlags,
+): Array<{ file: string; severity: 'error' | 'warning'; message: string; line?: number }> {
+  let datalexRegistry: DataLexContractRegistry | undefined;
+  const datalexManifestPath = resolveDataLexManifestPath(projectRoot, flags.datalexManifestPath || undefined) ?? undefined;
+  const diagnostics: Array<{ file: string; severity: 'error' | 'warning'; message: string; line?: number }> = [];
+
+  if (flags.datalexManifestPath && (!datalexManifestPath || !existsSync(datalexManifestPath))) {
+    diagnostics.push({
+      file: flags.datalexManifestPath,
+      severity: 'error',
+      message: `DataLex manifest not found: ${flags.datalexManifestPath}`,
+    });
+  } else if (datalexManifestPath) {
+    datalexRegistry = new DataLexContractRegistry({ manifestPath: datalexManifestPath });
+    for (const message of datalexRegistry.loadDiagnostics()) {
+      diagnostics.push({
+        file: relative(projectRoot, datalexManifestPath),
+        severity: 'warning',
+        message,
+      });
+    }
+  }
+
+  const semanticDiagnostics: CoreDiagnostic[] = analyze(ast, { datalexRegistry });
+  for (const diag of semanticDiagnostics) {
+    if (!diag.message.includes('datalex_contract') && !diag.message.includes('DataLex manifest')) continue;
+    diagnostics.push({
+      file: filePath,
+      severity: diag.severity === 'error' ? 'error' : 'warning',
+      message: diag.message,
+      line: diag.span?.start?.line,
+    });
+  }
+
+  return diagnostics;
 }

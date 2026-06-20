@@ -157,14 +157,26 @@ export function loadAppDocument(filePath: string): AppDocumentLoadResult {
 }
 
 /**
- * Discover all `dql.app.json` files under `<projectRoot>/apps/`.
+ * Discover all `dql.app.json` files under root `apps/<id>/` and domain-first
+ * `domains/<domain>/apps/<id>/` folders.
  * Returns absolute paths, sorted for deterministic manifest output.
  */
 export function findAppDocuments(projectRoot: string): string[] {
-  const appsDir = join(projectRoot, 'apps');
-  if (!existsSync(appsDir)) return [];
-
   const out: string[] = [];
+  collectAppDocumentsFromAppsDir(join(projectRoot, 'apps'), out);
+  const domainsDir = join(projectRoot, 'domains');
+  if (existsSync(domainsDir)) {
+    for (const domainEntry of readdirSync(domainsDir, { withFileTypes: true })) {
+      if (!domainEntry.isDirectory()) continue;
+      if (domainEntry.name.startsWith('.') || domainEntry.name === 'node_modules') continue;
+      collectAppDocumentsFromAppsDir(join(domainsDir, domainEntry.name, 'apps'), out);
+    }
+  }
+  return Array.from(new Set(out)).sort();
+}
+
+function collectAppDocumentsFromAppsDir(appsDir: string, out: string[]): void {
+  if (!existsSync(appsDir)) return;
   for (const entry of readdirSync(appsDir, { withFileTypes: true })) {
     if (!entry.isDirectory()) continue;
     if (entry.name.startsWith('.') || entry.name === 'node_modules') continue;
@@ -173,7 +185,6 @@ export function findAppDocuments(projectRoot: string): string[] {
       out.push(manifestPath);
     }
   }
-  return out.sort();
 }
 
 /** Normalize a member's attributes for RLS resolution. Always returns a plain object. */

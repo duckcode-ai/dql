@@ -1,10 +1,13 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import {
   buildAgentValueProbeSql,
+  applyDashboardFiltersToBlockExecution,
   buildAgentPreviewSql,
   buildAgentSchemaContext,
   buildDbtStatus,
+  buildSemanticLayerDiagnostics,
   createBlockArtifacts,
+  createDqlGenerationSessionForProject,
   createSemanticBuilderBlock,
   discoverDbtProfileConnections,
   extractAgentValueSearchTerms,
@@ -12,15 +15,21 @@ import {
   getConnectorInstallStatuses,
   loadProjectConfig,
   normalizeProjectConnection,
+  openBlockStudioDocument,
+  parseBlockSourceMetadata,
   prepareLocalExecution,
+  dashboardRuntimeVariables,
   resolveDefaultLLMProvider,
   resolveDbtMacrosForExecution,
   resolveProjectRelativeSqlPaths,
+  saveBlockStudioArtifacts,
   saveBlockStudioDraftArtifacts,
+  setBlockStudioStatus,
   serializeJSON,
   validateBlockStudioSource,
   validateConnectionForTest,
 } from './local-runtime.js';
+import { Certifier, ENTERPRISE_RULES } from '@duckcodeailabs/dql-governance';
 import {
   getActiveProvider,
   providerSettingsPath,
@@ -36,6 +45,7 @@ import type { DatabaseConnector, QueryResult } from '@duckcodeailabs/dql-connect
 const tempDirs: string[] = [];
 
 afterEach(() => {
+  vi.unstubAllGlobals();
   while (tempDirs.length > 0) {
     const dir = tempDirs.pop();
     if (dir) rmSync(dir, { recursive: true, force: true });
@@ -113,6 +123,207 @@ describe('AI provider settings', () => {
 
     expect(getActiveProvider(projectRoot)).toBeUndefined();
     expect(resolveDefaultLLMProvider(projectRoot)).toBe('ollama');
+  });
+
+  it('normalizes structured AI metadata arrays during SQL import', async () => {
+    const projectRoot = mkdtempSync(join(tmpdir(), 'dql-ai-import-structured-arrays-'));
+    tempDirs.push(projectRoot);
+    mkdirSync(join(projectRoot, 'terms'), { recursive: true });
+    writeFileSync(join(projectRoot, 'terms', 'player_points.dql'), `
+term "Player Points" {
+  domain = "nba"
+  type = "metric"
+  status = "certified"
+  description = "Total NBA points scored by a player."
+  owner = "analytics"
+}
+`, 'utf-8');
+    saveProviderSettings(projectRoot, {
+      id: 'openai',
+      enabled: true,
+      apiKey: 'sk-test-openai',
+      model: 'gpt-test',
+    });
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({
+      choices: [{
+        message: {
+          content: JSON.stringify({
+            name: 'NBA Player Points',
+            description: 'Ranks NBA players by total points. Review required.',
+            tags: [{ value: 'nba' }, { name: 'scoring' }],
+            terms: [{ name: 'Player Points' }, { name: 'Invented Term' }],
+            entities: [{ name: 'Player' }],
+            outputs: [{ name: 'player_name' }, { field: 'total_points' }],
+            dimensions: [{ column: 'team_name' }],
+            sourceSystems: [{ name: 'TRANSFORMED' }],
+            reviewCadence: 'quarterly',
+          }),
+        },
+      }],
+    }), { status: 200, headers: { 'content-type': 'application/json' } })));
+
+    const session = await createDqlGenerationSessionForProject(projectRoot, {
+      inputMode: 'upload',
+      sourceKind: 'raw-sql',
+      sources: [{
+        path: 'top_players.sql',
+        content: 'SELECT player_name, SUM(pts) AS total_points FROM TRANSFORMED.int_player_stats GROUP BY player_name LIMIT 5;',
+      }],
+      domain: 'nba',
+      owner: 'analytics',
+      provider: 'openai',
+    });
+
+    const candidate = session.candidates[0];
+    expect(candidate.generationMode).toBe('ai');
+    expect(candidate.dqlSource).not.toContain('[object Object]');
+    expect(candidate.dqlSource).toContain('entities = ["Player"]');
+    expect(candidate.dqlSource).toContain('outputs = ["player_name", "total_points"]');
+    expect(candidate.terms).toEqual(['Player Points']);
+    expect(candidate.dqlSource).toContain('terms = ["Player Points"]');
+    expect(candidate.dqlSource).not.toContain('Invented Term');
+    expect(candidate.dqlSource).toContain('dimensions = ["team_name"]');
+    expect(candidate.dqlSource).toContain('sourceSystems = ["TRANSFORMED"]');
+    expect(candidate.reviewCadence).toBe('quarterly');
+    expect(candidate.dqlSource).toContain('reviewCadence = "quarterly"');
+  });
+
+  it('keeps deterministic AI import local and infers ranking after parameterization', async () => {
+    const projectRoot = mkdtempSync(join(tmpdir(), 'dql-ai-import-deterministic-ranking-'));
+    tempDirs.push(projectRoot);
+
+    const session = await createDqlGenerationSessionForProject(projectRoot, {
+      inputMode: 'upload',
+      sourceKind: 'raw-sql',
+      sources: [{
+        path: 'top_players.sql',
+        content: `
+SELECT player_name, SUM(COALESCE(pts, 0)) AS total_points
+FROM TRANSFORMED.int_player_stats
+WHERE EXTRACT(YEAR FROM game_date_est) IN (2016, 2017)
+GROUP BY player_name
+ORDER BY total_points DESC
+LIMIT 5;
+`,
+      }],
+      domain: 'transformed',
+      owner: 'analytics',
+      provider: 'none',
+    });
+
+    const candidate = session.candidates[0];
+    expect(session.generation.provider).toBe('local-deterministic');
+    expect(session.generation.aiEnabled).toBe(false);
+    expect(session.generation.warnings).toEqual([]);
+    expect(candidate.pattern).toBe('ranking');
+    expect(candidate.entities).toEqual(['Player']);
+    expect(candidate.reviewCadence).toBe('monthly');
+    expect(candidate.parameterPolicy).toEqual(expect.arrayContaining([
+      { name: 'season_start', policy: 'dynamic' },
+      { name: 'season_end', policy: 'dynamic' },
+      { name: 'top_n', policy: 'dynamic' },
+    ]));
+    expect(candidate.dqlSource).toContain('pattern = "ranking"');
+    expect(candidate.dqlSource).toContain('entities = ["Player"]');
+    expect(candidate.dqlSource).toContain('reviewCadence = "monthly"');
+    expect(candidate.dqlSource).toContain('LIMIT ${top_n}');
+  });
+
+  it('preserves dynamic parameter metadata for enterprise certification', () => {
+    const source = `
+block "Top Players" {
+    status = "draft"
+    domain = "transformed"
+    type = "custom"
+    description = "Ranks NBA players by total points across a configurable season range."
+    tags = ["nba", "ranking"]
+    owner = "analytics"
+    pattern = "ranking"
+    grain = "player_name"
+    entities = ["Player"]
+    outputs = ["player_name", "total_points", "games_played"]
+    dimensions = ["player_name"]
+    allowedFilters = ["season_start", "season_end", "top_n"]
+    parameterPolicy {
+        season_start = "dynamic"
+        season_end = "dynamic"
+        top_n = "dynamic"
+    }
+    filterBindings {
+        season_start = "game_date_est"
+        season_end = "game_date_est"
+        top_n = "limit"
+    }
+    sourceSystems = ["TRANSFORMED"]
+    reviewCadence = "monthly"
+
+    query = """
+SELECT player_name, SUM(COALESCE(pts, 0)) AS total_points, COUNT(DISTINCT details_game_id) AS games_played
+FROM TRANSFORMED.int_player_stats
+WHERE EXTRACT(YEAR FROM game_date_est) BETWEEN \${season_start} AND \${season_end}
+GROUP BY player_name
+ORDER BY total_points DESC
+LIMIT \${top_n}
+    """
+
+    tests {
+        assert_row_count > 0
+    }
+}`;
+
+    const parsed = parseBlockSourceMetadata(source);
+
+    expect(parsed.dimensions).toEqual(['player_name']);
+    expect(parsed.parameterPolicy).toEqual([
+      { name: 'season_start', policy: 'dynamic' },
+      { name: 'season_end', policy: 'dynamic' },
+      { name: 'top_n', policy: 'dynamic' },
+    ]);
+    expect(parsed.filterBindings).toEqual([
+      { filter: 'season_start', binding: 'game_date_est' },
+      { filter: 'season_end', binding: 'game_date_est' },
+      { filter: 'top_n', binding: 'limit' },
+    ]);
+
+    const result = new Certifier(ENTERPRISE_RULES).evaluate({
+      id: parsed.name,
+      name: parsed.name,
+      domain: parsed.domain,
+      type: parsed.blockType,
+      version: '0.0.0',
+      status: 'draft',
+      gitRepo: '',
+      gitPath: 'domains/transformed/blocks/_drafts/top-players.dql',
+      gitCommitSha: '',
+      description: parsed.description,
+      owner: parsed.owner,
+      tags: parsed.tags,
+      pattern: parsed.pattern,
+      grain: parsed.grain,
+      entities: parsed.entities,
+      declaredOutputs: parsed.outputs,
+      dimensions: parsed.dimensions,
+      allowedFilters: parsed.allowedFilters,
+      parameterPolicy: parsed.parameterPolicy,
+      filterBindings: parsed.filterBindings,
+      sourceSystems: parsed.sourceSystems,
+      replacementFor: parsed.replacementFor,
+      reviewCadence: parsed.reviewCadence,
+      dependencies: [],
+      usedInCount: 0,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    }, {
+      passed: 1,
+      failed: 0,
+      skipped: 0,
+      duration: 0,
+      assertions: [{ name: 'assert_row_count > 0', passed: true }],
+      runAt: new Date(),
+    });
+
+    expect(result.errors).toEqual([]);
+    expect(result.certified).toBe(true);
   });
 });
 
@@ -435,6 +646,85 @@ describe('discoverDbtProfileConnections', () => {
 });
 
 describe('prepareLocalExecution', () => {
+  it('fills block parameters from dashboard filters before execution', () => {
+    const variables = dashboardRuntimeVariables(
+      {
+        filters: [
+          { id: 'season_range', type: 'daterange', default: [2016, 2017] },
+        ],
+      },
+      { top_n: 5 },
+    );
+    const applied = applyDashboardFiltersToBlockExecution({
+      sql: 'SELECT player_name, total_points FROM player_points WHERE season BETWEEN $1 AND $2 LIMIT $3',
+      sqlParams: [
+        { name: 'season_start', position: 1 },
+        { name: 'season_end', position: 2 },
+        { name: 'top_n', position: 3 },
+      ],
+      variables,
+      block: {
+        name: 'Top Players',
+        parameterPolicy: [
+          { name: 'season_start', policy: 'dynamic' },
+          { name: 'season_end', policy: 'dynamic' },
+          { name: 'top_n', policy: 'dynamic' },
+        ],
+      },
+      dashboard: {
+        filters: [
+          { id: 'season_range', type: 'daterange', default: [2016, 2017] },
+        ],
+      },
+    });
+
+    expect(applied.sql).toBe('SELECT player_name, total_points FROM player_points WHERE season BETWEEN $1 AND $2 LIMIT $3');
+    expect(applied.sqlParams).toHaveLength(3);
+    expect(applied.variables).toMatchObject({
+      season_start: 2016,
+      season_end: 2017,
+      top_n: 5,
+    });
+    expect(applied.appliedFilters).toEqual([
+      {
+        filter: 'season_range',
+        mode: 'parameter',
+        paramNames: ['season_start', 'season_end'],
+      },
+    ]);
+  });
+
+  it('wraps block SQL with safe dashboard predicates from filter bindings', () => {
+    const applied = applyDashboardFiltersToBlockExecution({
+      sql: 'SELECT region, SUM(revenue) AS revenue FROM marts.orders GROUP BY 1',
+      sqlParams: [],
+      variables: { region: ['East', 'West'] },
+      block: {
+        name: 'Revenue By Region',
+        allowedFilters: ['region'],
+        filterBindings: [{ filter: 'region', binding: 'region' }],
+      },
+      dashboard: {
+        filters: [{ id: 'region', type: 'select' }],
+      },
+    });
+
+    expect(applied.sql).toBe('SELECT * FROM (SELECT region, SUM(revenue) AS revenue FROM marts.orders GROUP BY 1) _dql_filter WHERE _dql_filter.region IN ($1, $2)');
+    expect(applied.sqlParams).toEqual([
+      { name: '__dashboard_filter_region_value_1', position: 1 },
+      { name: '__dashboard_filter_region_value_2', position: 2 },
+    ]);
+    expect(applied.variables).toMatchObject({
+      __dashboard_filter_region_value_1: 'East',
+      __dashboard_filter_region_value_2: 'West',
+    });
+    expect(applied.appliedFilters[0]).toMatchObject({
+      filter: 'region',
+      binding: 'region',
+      mode: 'predicate',
+    });
+  });
+
   it('rewrites SQL paths for file-backed notebook queries', () => {
     const prepared = prepareLocalExecution(
       "SELECT * FROM read_csv_auto('./data/revenue.csv')",
@@ -703,6 +993,70 @@ describe('semantic block save artifacts', () => {
     expect(() => readFileSync(join(projectRoot, 'blocks/finance/revenue-draft.dql'), 'utf-8')).toThrow();
   });
 
+  it('promotes domain-first drafts into the domain block folder and removes stale draft artifacts', () => {
+    const projectRoot = mkdtempSync(join(tmpdir(), 'dql-domain-first-promote-'));
+    tempDirs.push(projectRoot);
+    mkdirSync(join(projectRoot, 'domains', 'finance'), { recursive: true });
+    writeFileSync(join(projectRoot, 'dql.config.json'), '{}\n');
+    writeFileSync(join(projectRoot, 'domains', 'finance', 'domain.dql'), 'domain "Finance" {\n  owner = "analytics"\n}\n');
+
+    const draftPath = saveBlockStudioDraftArtifacts(projectRoot, {
+      name: 'Revenue Draft',
+      domain: 'finance',
+      description: 'Draft revenue block',
+      owner: 'analytics',
+      tags: ['finance'],
+      source: 'block "Revenue Draft" {\n  status = "draft"\n  domain = "finance"\n  type = "custom"\n  query = """\nselect 1\n  """\n}',
+      stableSuffix: 'cand123',
+    });
+
+    expect(draftPath).toBe('domains/finance/blocks/_drafts/revenue-draft-cand123.dql');
+    expect(readFileSync(join(projectRoot, 'semantic-layer', 'blocks', '_drafts', 'finance', 'revenue-draft-cand123.yaml'), 'utf-8')).toContain('domain: _drafts/finance');
+
+    const canonicalPath = saveBlockStudioArtifacts(projectRoot, {
+      currentPath: draftPath,
+      name: 'Revenue Draft',
+      domain: 'finance',
+      description: 'Certified revenue block',
+      owner: 'analytics',
+      tags: ['finance'],
+      source: 'block "Revenue Draft" {\n  status = "certified"\n  domain = "finance"\n  type = "custom"\n  query = """\nselect 2\n  """\n}',
+    });
+
+    expect(canonicalPath).toBe('domains/finance/blocks/revenue-draft.dql');
+    expect(readFileSync(join(projectRoot, canonicalPath), 'utf-8')).toContain('select 2');
+    expect(readFileSync(join(projectRoot, 'semantic-layer', 'blocks', 'finance', 'revenue-draft.yaml'), 'utf-8')).toContain('domain: finance');
+    expect(() => readFileSync(join(projectRoot, draftPath), 'utf-8')).toThrow();
+    expect(() => readFileSync(join(projectRoot, 'semantic-layer', 'blocks', '_drafts', 'finance', 'revenue-draft-cand123.yaml'), 'utf-8')).toThrow();
+  });
+
+  it('opens and updates status for domain-first block paths', () => {
+    const projectRoot = mkdtempSync(join(tmpdir(), 'dql-domain-first-status-'));
+    tempDirs.push(projectRoot);
+    mkdirSync(join(projectRoot, 'domains', 'finance'), { recursive: true });
+    writeFileSync(join(projectRoot, 'dql.config.json'), '{}\n');
+
+    const blockPath = saveBlockStudioArtifacts(projectRoot, {
+      name: 'Revenue Summary',
+      domain: 'finance',
+      description: 'Finance revenue summary',
+      owner: 'analytics',
+      tags: ['finance'],
+      source: 'block "Revenue Summary" {\n  status = "draft"\n  domain = "finance"\n  type = "custom"\n  description = "Finance revenue summary"\n  owner = "analytics"\n  tags = ["finance"]\n  query = """\nselect 1\n  """\n}\n',
+    });
+
+    expect(blockPath).toBe('domains/finance/blocks/revenue-summary.dql');
+    const opened = openBlockStudioDocument(projectRoot, blockPath);
+    expect(opened.metadata.domain).toBe('finance');
+    expect(opened.companionPath).toBe('semantic-layer/blocks/finance/revenue-summary.yaml');
+
+    setBlockStudioStatus(projectRoot, blockPath, 'review');
+
+    expect(readFileSync(join(projectRoot, blockPath), 'utf-8')).toContain('status = "review"');
+    expect(readFileSync(join(projectRoot, 'semantic-layer', 'blocks', 'finance', 'revenue-summary.yaml'), 'utf-8')).toContain('reviewStatus: review');
+    expect(openBlockStudioDocument(projectRoot, blockPath).metadata.reviewStatus).toBe('review');
+  });
+
   it('writes both the block file and semantic companion metadata for save-from-cell flows', () => {
     const projectRoot = mkdtempSync(join(tmpdir(), 'dql-block-artifacts-'));
     tempDirs.push(projectRoot);
@@ -727,6 +1081,27 @@ describe('semantic block save artifacts', () => {
     expect(companion).toContain('semanticDimensions:');
     expect(companion).toContain('  - order_date');
     expect(companion).toContain('reviewStatus: draft');
+  });
+
+  it('writes manual block artifacts under domains/<domain>/blocks when the domain exists', () => {
+    const projectRoot = mkdtempSync(join(tmpdir(), 'dql-domain-first-block-artifacts-'));
+    tempDirs.push(projectRoot);
+    writeFileSync(join(projectRoot, 'dql.config.json'), '{}\n');
+    mkdirSync(join(projectRoot, 'domains', 'finance'), { recursive: true });
+
+    const created = createBlockArtifacts(projectRoot, {
+      name: 'Revenue Summary',
+      domain: 'finance',
+      content: 'SELECT @metric(total_revenue), @dim(order_date);',
+      description: 'Finance summary block',
+      owner: 'finance-analytics',
+      tags: ['finance', 'exec'],
+    });
+
+    expect(created.path).toBe('domains/finance/blocks/revenue-summary.dql');
+    expect(() => readFileSync(join(projectRoot, 'blocks', 'finance', 'revenue-summary.dql'), 'utf-8')).toThrow();
+    expect(readFileSync(join(projectRoot, created.path), 'utf-8')).toContain('@metric(total_revenue)');
+    expect(readFileSync(join(projectRoot, created.companionPath), 'utf-8')).toContain('domain: finance');
   });
 
   it('writes semantic builder blocks with lineage companion metadata', () => {
@@ -763,6 +1138,34 @@ describe('semantic block save artifacts', () => {
     expect(companion).toContain('semanticDimensions:');
     expect(companion).toContain('  - sales_channel');
     expect(companion).toContain('  - order_date');
+  });
+
+  it('writes semantic builder blocks under the domain-first block folder when the domain exists', () => {
+    const projectRoot = mkdtempSync(join(tmpdir(), 'dql-domain-first-builder-artifacts-'));
+    tempDirs.push(projectRoot);
+    writeFileSync(join(projectRoot, 'dql.config.json'), '{}\n');
+    mkdirSync(join(projectRoot, 'domains', 'finance'), { recursive: true });
+
+    const created = createSemanticBuilderBlock(projectRoot, {
+      name: 'Executive Revenue',
+      domain: 'finance',
+      description: 'Executive revenue cut',
+      owner: 'finance-analytics',
+      tags: ['finance'],
+      metrics: ['total_revenue'],
+      dimensions: ['sales_channel'],
+      timeDimension: { name: 'order_date', granularity: 'month' },
+      chart: 'line',
+      blockType: 'semantic',
+      sql: 'SELECT 1',
+      tables: ['analytics.orders'],
+      provider: 'dbt',
+    });
+
+    expect(created.path).toBe('domains/finance/blocks/executive-revenue.dql');
+    expect(() => readFileSync(join(projectRoot, 'blocks', 'finance', 'executive-revenue.dql'), 'utf-8')).toThrow();
+    expect(readFileSync(join(projectRoot, created.path), 'utf-8')).toContain('metric = "total_revenue"');
+    expect(readFileSync(join(projectRoot, created.companionPath), 'utf-8')).toContain('provider: dbt');
   });
 
   it('writes a blank semantic block when created from the Semantic Block path', () => {
@@ -828,6 +1231,152 @@ describe('buildDbtStatus', () => {
     expect(status.counts.savedQueries).toBe(1);
     expect(status.lastSyncTime).toBe('2026-04-30T12:02:00Z');
     expect(status.setupHint).toContain('dbt artifacts are ready');
+  });
+
+  it('counts object-shaped dbt semantic artifacts and reports actionable diagnostics', () => {
+    const projectRoot = mkdtempSync(join(tmpdir(), 'dql-dbt-diagnostics-'));
+    tempDirs.push(projectRoot);
+    const dbtRoot = join(projectRoot, 'dbt');
+    const targetDir = join(dbtRoot, 'target');
+    mkdirSync(targetDir, { recursive: true });
+    writeFileSync(join(dbtRoot, 'dbt_project.yml'), 'name: banking\nversion: 1.0\n', 'utf-8');
+    writeFileSync(join(targetDir, 'manifest.json'), JSON.stringify({
+      metadata: { project_name: 'banking', generated_at: '2026-04-30T12:00:00Z' },
+      nodes: {
+        'model.banking.fct_cards': { resource_type: 'model' },
+      },
+      sources: {},
+      metrics: {
+        'metric.banking.approval_rate': { name: 'approval_rate' },
+      },
+      semantic_models: {
+        'semantic_model.banking.cards': { name: 'cards' },
+      },
+    }), 'utf-8');
+    writeFileSync(join(targetDir, 'semantic_manifest.json'), JSON.stringify({
+      metadata: { generated_at: '2026-04-30T12:01:00Z' },
+      metrics: {
+        'metric.banking.approval_rate': { name: 'approval_rate' },
+      },
+      semantic_models: {
+        'semantic_model.banking.cards': { name: 'cards' },
+      },
+      saved_queries: {
+        'saved_query.banking.daily_cards': { name: 'daily_cards' },
+      },
+    }), 'utf-8');
+
+    const projectConfig = {
+      semanticLayer: { provider: 'dbt' as const, projectPath: './dbt' },
+      dbt: { projectDir: './dbt', manifestPath: 'target/manifest.json' },
+    };
+    const status = buildDbtStatus(projectRoot, projectConfig, null);
+    const diagnostics = buildSemanticLayerDiagnostics(projectRoot, projectConfig, {
+      semanticLayer: new SemanticLayer(),
+      semanticConfig: projectConfig.semanticLayer,
+      lastSyncTime: null,
+    });
+
+    expect(status.counts.metrics).toBe(1);
+    expect(status.counts.semanticModels).toBe(1);
+    expect(status.counts.savedQueries).toBe(1);
+    expect(diagnostics.sourceOfTruth).toContain('dbt MetricFlow');
+    expect(diagnostics.issues.map((issue) => issue.code)).not.toContain('metricflow_semantic_manifest_missing');
+  });
+
+  it('diagnoses missing MetricFlow semantic manifest separately from dbt model metadata', () => {
+    const projectRoot = mkdtempSync(join(tmpdir(), 'dql-dbt-missing-semantic-manifest-'));
+    tempDirs.push(projectRoot);
+    const dbtRoot = join(projectRoot, 'dbt');
+    const targetDir = join(dbtRoot, 'target');
+    mkdirSync(targetDir, { recursive: true });
+    writeFileSync(join(dbtRoot, 'dbt_project.yml'), 'name: banking\nversion: 1.0\n', 'utf-8');
+    writeFileSync(join(targetDir, 'manifest.json'), JSON.stringify({
+      metadata: { project_name: 'banking' },
+      nodes: {
+        'model.banking.fct_cards': { resource_type: 'model' },
+      },
+      sources: {},
+    }), 'utf-8');
+
+    const diagnostics = buildSemanticLayerDiagnostics(projectRoot, {
+      semanticLayer: { provider: 'dbt', projectPath: './dbt' },
+      dbt: { projectDir: './dbt', manifestPath: 'target/manifest.json' },
+    }, {
+      semanticLayer: new SemanticLayer(),
+      semanticConfig: { provider: 'dbt', projectPath: './dbt' },
+      lastSyncTime: null,
+    });
+
+    expect(diagnostics.dbt.artifacts.manifest.exists).toBe(true);
+    expect(diagnostics.dbt.artifacts.semanticManifest.exists).toBe(false);
+    expect(diagnostics.issues).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          severity: 'warning',
+          code: 'metricflow_semantic_manifest_missing',
+          path: expect.stringContaining('semantic_manifest.json'),
+        }),
+      ]),
+    );
+    expect(diagnostics.warnings.join('\n')).toContain('dbt MetricFlow semantic_manifest.json is missing');
+  });
+
+  it('surfaces empty MetricFlow artifacts even when local DQL semantic layer is active', () => {
+    const projectRoot = mkdtempSync(join(tmpdir(), 'dql-dbt-empty-semantic-manifest-'));
+    tempDirs.push(projectRoot);
+    const dbtRoot = join(projectRoot, 'dbt');
+    const targetDir = join(dbtRoot, 'target');
+    mkdirSync(targetDir, { recursive: true });
+    writeFileSync(join(dbtRoot, 'dbt_project.yml'), 'name: nba_analysis\nversion: 1.0\n', 'utf-8');
+    writeFileSync(join(targetDir, 'manifest.json'), JSON.stringify({
+      metadata: { project_name: 'nba_analysis' },
+      nodes: {
+        'model.nba_analysis.int_player_stats': { resource_type: 'model' },
+      },
+      sources: {},
+    }), 'utf-8');
+    writeFileSync(join(targetDir, 'semantic_manifest.json'), JSON.stringify({
+      semantic_models: [],
+      metrics: [],
+      saved_queries: [],
+    }), 'utf-8');
+
+    const projectConfig = {
+      semanticLayer: { provider: 'dql' as const, path: 'semantic-layer' },
+      dbt: { projectDir: './dbt', manifestPath: 'target/manifest.json' },
+    };
+    const status = buildDbtStatus(projectRoot, projectConfig, null);
+    const diagnostics = buildSemanticLayerDiagnostics(projectRoot, projectConfig, {
+      semanticLayer: new SemanticLayer({
+        metrics: [{ name: 'draft_block_metric', label: 'Draft block metric', description: '', domain: 'business', sql: 'count(*)', type: 'count', table: 'blocks' }],
+        dimensions: [],
+        hierarchies: [],
+        segments: [],
+        preAggregations: [],
+        measures: [],
+        entities: [],
+        semanticModels: [],
+        savedQueries: [],
+      }),
+      semanticConfig: projectConfig.semanticLayer,
+      lastSyncTime: null,
+    });
+
+    expect(status.counts.models).toBe(1);
+    expect(status.counts.metrics).toBe(0);
+    expect(status.setupHint).toContain('MetricFlow semantic_manifest.json is empty');
+    expect(diagnostics.provider).toBe('dql');
+    expect(diagnostics.counts.metrics).toBe(1);
+    expect(diagnostics.issues).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          severity: 'warning',
+          code: 'metricflow_semantic_manifest_empty',
+          path: expect.stringContaining('semantic_manifest.json'),
+        }),
+      ]),
+    );
   });
 });
 

@@ -479,25 +479,15 @@ describe('SemanticAnalyzer - Block Declarations', () => {
     expect(warnings.some((w) => w.message.includes('missing a domain'))).toBe(true);
   });
 
-  it('errors when block is missing type', () => {
+  it('defaults a legacy block without type to custom', () => {
     const source = `block "Revenue" {
       domain = "revenue"
       query = """SELECT SUM(amount) FROM orders"""
     }`;
 
-    // After A3, the parser itself records the missing-type error and throws DQLSyntaxError.
-    // Catch it and verify the error is present in the diagnostics.
-    let errors: import('../errors/diagnostic.js').Diagnostic[] = [];
-    try {
-      const ast = parse(source);
-      errors = analyze(ast).filter((d) => d.severity === 'error');
-    } catch (e: unknown) {
-      const syntaxErr = e as { diagnostics?: import('../errors/diagnostic.js').Diagnostic[] };
-      if (syntaxErr.diagnostics) {
-        errors = syntaxErr.diagnostics.filter((d) => d.severity === 'error');
-      }
-    }
-    expect(errors.some((e) => e.message.includes('type'))).toBe(true);
+    const ast = parse(source);
+    const diagnostics = analyze(ast);
+    expect(diagnostics.filter((d) => d.severity === 'error')).toHaveLength(0);
   });
 
   it('errors when a custom block has no query field', () => {
@@ -587,7 +577,7 @@ describe('SemanticAnalyzer - Block Declarations', () => {
 // ── Phase A: blockType enforcement ───────────────────────────────────────────
 
 describe('BlockDecl — blockType validation', () => {
-  it('errors when blockType is missing', () => {
+  it('defaults a missing blockType to custom for legacy blocks', () => {
     const source = `
       block "Revenue KPI" {
         domain = "finance"
@@ -596,19 +586,9 @@ describe('BlockDecl — blockType validation', () => {
         query = """SELECT SUM(amount) as revenue FROM orders"""
       }
     `;
-    // After A3, the parser itself records the missing-type error and throws DQLSyntaxError.
-    let errors: import('../errors/diagnostic.js').Diagnostic[] = [];
-    try {
-      const ast = parse(source);
-      errors = analyze(ast).filter((d) => d.severity === 'error');
-    } catch (e: unknown) {
-      const syntaxErr = e as { diagnostics?: import('../errors/diagnostic.js').Diagnostic[] };
-      if (syntaxErr.diagnostics) {
-        errors = syntaxErr.diagnostics.filter((d) => d.severity === 'error');
-      }
-    }
-    expect(errors.length).toBeGreaterThanOrEqual(1);
-    expect(errors.some((e) => e.message.includes('type'))).toBe(true);
+    const ast = parse(source);
+    const diagnostics = analyze(ast);
+    expect(diagnostics.filter((d) => d.severity === 'error')).toHaveLength(0);
   });
 
   it('accepts a semantic block with both metricRef and query (import-adapter pattern)', () => {

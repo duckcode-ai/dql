@@ -76,7 +76,7 @@ function systemPrompt(ctx: DQLContext, upstreamSql?: string): string {
     '- list_metrics / list_dimensions: enumerate the semantic layer.',
     '- lineage_impact: understand upstream/downstream blast radius.',
     '- certify: check governance rules against a proposed block.',
-    '- suggest_block: END of turn — write a reviewable draft to blocks/_drafts/ once the user is ready.',
+    '- suggest_block: END of turn — write a reviewable draft to the local draft queue once the user is ready.',
     '',
     'When the conversation has produced a concrete block design, call `suggest_block` with all required fields (name, domain, owner, description, sql). The response includes a governance gate — if it fails, refine and retry.',
     '',

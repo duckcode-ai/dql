@@ -2,7 +2,15 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { __test__, createAppPackage, createNotebookForApp, generateAppPackage, previewNotebookForApp, recommendBlocks } from './apps-api.js';
+import {
+  __test__,
+  createAppPackage,
+  createDashboardForApp,
+  createNotebookForApp,
+  generateAppPackage,
+  previewNotebookForApp,
+  recommendBlocks,
+} from './apps-api.js';
 
 const tempDirs: string[] = [];
 
@@ -92,6 +100,57 @@ describe('Apps command center API helpers', () => {
     expect(dashboard.metadata.lifecycle).toBe('draft');
     expect(dashboard.layout.items[0].block).toEqual({ blockId: 'Revenue Total' });
     expect(result.app.dashboards).toEqual([{ id: 'overview', title: 'Overview' }]);
+  });
+
+  it('creates App packages under domains/<domain>/apps when the domain folder exists', () => {
+    const root = createProject();
+    mkdirSync(join(root, 'domains', 'growth'), { recursive: true });
+    writeDomainBlock(root, 'growth', 'revenue.dql', {
+      name: 'Revenue Total',
+      domain: 'growth',
+      status: 'certified',
+      tags: ['cxo', 'revenue'],
+      description: 'Executive revenue KPI',
+      chart: 'single_value',
+    });
+
+    const result = createAppPackage(root, {
+      name: 'Growth CXO',
+      domain: 'growth',
+      owners: ['owner@local'],
+      selectedBlockIds: ['Revenue Total'],
+    });
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.paths).toContain('domains/growth/apps/growth-cxo/dql.app.json');
+    expect(result.paths).toContain('domains/growth/apps/growth-cxo/dashboards/overview.dqld');
+    expect(existsSync(join(root, 'domains/growth/apps/growth-cxo/dql.app.json'))).toBe(true);
+    expect(existsSync(join(root, 'apps/growth-cxo/dql.app.json'))).toBe(false);
+    expect(result.app.filePath).toBe('domains/growth/apps/growth-cxo');
+    expect(result.app.dashboards).toEqual([{ id: 'overview', title: 'Overview' }]);
+
+    const dashboard = JSON.parse(readFileSync(join(root, 'domains/growth/apps/growth-cxo/dashboards/overview.dqld'), 'utf-8'));
+    expect(dashboard.layout.items[0].block).toEqual({ blockId: 'Revenue Total' });
+
+    const newDashboard = createDashboardForApp(root, 'growth-cxo', { title: 'Forecast Review' });
+    expect(newDashboard.ok).toBe(true);
+    if (!newDashboard.ok) return;
+    expect(newDashboard.path).toBe('domains/growth/apps/growth-cxo/dashboards/forecast-review.dqld');
+    expect(existsSync(join(root, newDashboard.path))).toBe(true);
+
+    const notebook = createNotebookForApp(root, 'growth-cxo', {
+      name: 'Board Notes',
+      role: 'analysis',
+      visibility: 'shared',
+    });
+    expect(notebook.ok).toBe(true);
+    if (!notebook.ok) return;
+    expect(notebook.path).toBe('domains/growth/apps/growth-cxo/notebooks/board-notes.dqlnb');
+    expect(existsSync(join(root, notebook.path))).toBe(true);
+
+    const updated = JSON.parse(readFileSync(join(root, 'domains/growth/apps/growth-cxo/dql.app.json'), 'utf-8'));
+    expect(updated.notebooks[0]).toMatchObject({ path: notebook.path, role: 'analysis' });
   });
 
   it('generates an AppPlan-backed App package for the UI builder', async () => {
@@ -265,7 +324,22 @@ function writeBlock(
   relPath: string,
   block: { name: string; domain: string; status: string; tags: string[]; description: string; chart: string; query?: string },
 ): void {
-  const abs = join(root, 'blocks', relPath);
+  writeBlockFile(join(root, 'blocks', relPath), block);
+}
+
+function writeDomainBlock(
+  root: string,
+  domain: string,
+  relPath: string,
+  block: { name: string; domain: string; status: string; tags: string[]; description: string; chart: string; query?: string },
+): void {
+  writeBlockFile(join(root, 'domains', domain, 'blocks', relPath), block);
+}
+
+function writeBlockFile(
+  abs: string,
+  block: { name: string; domain: string; status: string; tags: string[]; description: string; chart: string; query?: string },
+): void {
   mkdirSync(join(abs, '..'), { recursive: true });
   writeFileSync(abs, `block "${block.name}" {
   domain = "${block.domain}"

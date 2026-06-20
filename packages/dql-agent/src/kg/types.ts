@@ -77,12 +77,30 @@ export interface KGNode {
   entities?: string[];
   /** Declared output field names for review and retrieval. */
   declaredOutputs?: string[];
+  /** Business dimensions available for grouping or filters. */
+  dimensions?: string[];
   /** Filters the artifact is designed to support safely. */
   allowedFilters?: string[];
+  /** Parameter reuse policy per block parameter. */
+  parameterPolicy?: Array<{ name: string; policy: string }>;
+  /** Business/app filter to physical column or expression bindings. */
+  filterBindings?: Array<{ filter: string; binding: string }>;
   /** Business/source systems represented by this artifact. */
   sourceSystems?: string[];
   /** Replaced or superseded artifacts. */
   replacementFor?: string[];
+  /** Stable SQL fingerprints used to detect exact and parameterized duplicates. */
+  sqlFingerprints?: {
+    version: string;
+    exact: string;
+    parameterized: string;
+  };
+  /** Stable business-shape fingerprint used to detect duplicate reusable block contracts. */
+  businessFingerprint?: {
+    version: string;
+    hash: string;
+    tokens: string[];
+  };
   /** Optional DataLex contract reference, e.g. commerce.Customer.mau@1. */
   datalexContract?: string;
   /** Domain bounded context when this node represents a domain. */

@@ -57,8 +57,8 @@ const HELP = `
     dql migrate format [--check]    Upgrade all .dql/.dqlnb files to canonical format
     dql migrate layout --to domain-first [--dry-run]
                                     Preview or apply legacy-to-domain folder moves
-    dql import sql <path>           Preview SQL files/folders as Block Studio import candidates
-    dql import sql <path> --save    Save valid import candidates as local blocks
+    dql import sql <path>           Generate AI import drafts from SQL files/folders
+    dql import sql <path> --save    Compatibility alias; drafts autosave before certification
     dql fmt <file.dql|.dqlnb>       Format DQL/notebook file in place
     dql diff <path>                 Diff a .dql/.dqlnb file vs HEAD
     dql diff <before> <after>       Semantic diff between two files
@@ -67,6 +67,7 @@ const HELP = `
     dql compile [path]              Generate project manifest (dql-manifest.json)
     dql sync dbt [path]             Detect dbt manifest changes; report DQL cache status
     dql lineage [block] [path]      Answer-layer lineage analysis
+    dql lineage cross-domain        Show cross-domain lineage flows (--domain filters)
     dql mcp [--http]                Run the DQL MCP server (stdio by default; --http = loopback)
     dql mcp test [path]             Check whether DQL MCP can load this project
     dql connect <target> [path]     Configure Codex, Claude Code, Claude Desktop, or Cursor MCP
@@ -100,7 +101,7 @@ const HELP = `
     --ai-layout                     For "app generate": store dynamic GenUI layout metadata
     --enterprise                    For "certify": require enterprise block contract metadata
     --connection <driver|path>      Database connection for certify/test (e.g. duckdb, path/to/db)
-    --save                          For "import sql": save valid candidates as local blocks
+    --save                          For "import sql": retained for compatibility; drafts autosave
     --from-draft <path>             For "certify": promote a Tier-2 draft block to certified
     --contract <id@version>         For "certify --from-draft": DataLex contract id (e.g. commerce.Customer.foo@1)
     --datalex-manifest <path>       Optional DataLex manifest for datalex_contract validation
@@ -127,15 +128,16 @@ const COMMAND_HELP: Record<string, string> = {
     reusable pattern, review cadence, and test assertions hard requirements.
   `,
   import: `
-  dql import — Convert existing SQL into local DQL blocks
+  dql import — Convert existing SQL into reviewable DQL drafts
 
   Usage:
     dql import sql <file-or-folder> [--domain <name>] [--owner <name>]
     dql import sql <file-or-folder> --save [--domain <name>] [--owner <name>]
 
   Notes:
-    Import creates local blocks. Run previews and certification before treating
-    imported SQL as certified.
+    Import creates AI-first draft blocks under _drafts, parameterizes safe
+    runtime literals, checks for similar certified blocks, and never certifies
+    generated DQL automatically.
   `,
   app: `
   dql app — Manage local App artifacts

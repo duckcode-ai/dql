@@ -31,7 +31,7 @@ export interface BlockStudioAiAssistance {
   createdAt: string;
   status: 'suggested' | 'accepted' | 'rejected';
   provider?: string;
-  patch?: Partial<Pick<BlockStudioImportCandidate, 'name' | 'domain' | 'description' | 'owner' | 'tags' | 'pattern' | 'grain' | 'entities' | 'outputs' | 'allowedFilters' | 'sourceSystems' | 'replacementFor' | 'sql' | 'dqlSource'>>;
+  patch?: Partial<Pick<BlockStudioImportCandidate, 'name' | 'domain' | 'description' | 'owner' | 'tags' | 'terms' | 'pattern' | 'grain' | 'entities' | 'outputs' | 'dimensions' | 'allowedFilters' | 'parameterPolicy' | 'filterBindings' | 'sourceSystems' | 'replacementFor' | 'reviewCadence' | 'sql' | 'dqlSource'>>;
 }
 
 export interface BlockStudioCertificationChecklist {
@@ -47,7 +47,7 @@ export interface BlockStudioCertificationChecklist {
 }
 
 export interface DqlGenerationEvidence {
-  kind: 'dql_block' | 'dql_term' | 'business_view' | 'domain' | 'semantic_metric' | 'semantic_model' | 'dbt_model' | 'warehouse_table' | 'datalex_contract' | 'datalex_entity' | 'datalex_domain' | 'metadata' | 'lineage';
+  kind: 'dql_block' | 'dql_term' | 'business_view' | 'domain' | 'semantic_metric' | 'semantic_model' | 'dbt_model' | 'warehouse_table' | 'datalex_contract' | 'datalex_entity' | 'datalex_domain' | 'datalex_term' | 'metadata' | 'lineage';
   name: string;
   description?: string;
   objectKey?: string;
@@ -57,10 +57,55 @@ export interface DqlGenerationEvidence {
 }
 
 export interface BlockDraftSaveState {
-  status: 'pending' | 'saved' | 'error';
+  status: 'pending' | 'saved' | 'error' | 'skipped';
   path?: string;
   savedAt?: string;
   error?: string;
+  reason?: string;
+}
+
+export type DqlParameterPolicyKind = 'dynamic' | 'static' | 'business' | 'derived' | 'optional' | 'ambiguous_review_required';
+export type DqlParameterValue = string | number | boolean | Array<string | number | boolean>;
+
+export interface DqlParameterDecision {
+  name: string;
+  policy: DqlParameterPolicyKind;
+  value: DqlParameterValue;
+  valueType: 'string' | 'number' | 'boolean' | 'date' | 'year' | 'set';
+  sourceExpression: string;
+  reason: string;
+  confidence: number;
+}
+
+export interface BlockFilterBinding {
+  filter: string;
+  binding: string;
+}
+
+export type BlockSimilarityMatchKind =
+  | 'exact_sql_match'
+  | 'parameterized_duplicate'
+  | 'business_duplicate'
+  | 'near_variant'
+  | 'source_variant'
+  | 'new_logic';
+
+export type DqlCandidateRecommendedAction =
+  | 'reuse_existing'
+  | 'extend_existing'
+  | 'create_replacement'
+  | 'create_new'
+  | 'review_required';
+
+export interface BlockSimilarityMatch {
+  kind: BlockSimilarityMatchKind;
+  objectKey?: string;
+  name: string;
+  status?: string;
+  source?: string;
+  score: number;
+  reason: string;
+  recommendedAction: DqlCandidateRecommendedAction;
 }
 
 export interface BlockStudioImportCandidate {
@@ -72,13 +117,21 @@ export interface BlockStudioImportCandidate {
   description: string;
   owner: string;
   tags: string[];
+  terms?: string[];
   pattern?: string;
   grain?: string;
   entities?: string[];
   outputs?: string[];
+  dimensions?: string[];
   allowedFilters?: string[];
+  parameterPolicy?: Array<{ name: string; policy: string }>;
+  filterBindings?: BlockFilterBinding[];
   sourceSystems?: string[];
   replacementFor?: string[];
+  reviewCadence?: string;
+  parameterDecisions?: DqlParameterDecision[];
+  similarityMatches?: BlockSimilarityMatch[];
+  recommendedAction?: DqlCandidateRecommendedAction;
   sql: string;
   dqlSource: string;
   validation: unknown | null;
@@ -323,7 +376,7 @@ export function updateBlockStudioImportCandidate(
   projectRoot: string,
   importId: string,
   candidateId: string,
-  patch: Partial<Pick<BlockStudioImportCandidate, 'name' | 'domain' | 'description' | 'owner' | 'tags' | 'pattern' | 'grain' | 'entities' | 'outputs' | 'allowedFilters' | 'sourceSystems' | 'replacementFor' | 'sql' | 'reviewStatus' | 'llmContext' | 'evidence' | 'draftSave' | 'generationMode' | 'generationProvider' | 'savedPath' | 'conversionNotes'>>,
+  patch: Partial<Pick<BlockStudioImportCandidate, 'name' | 'domain' | 'description' | 'owner' | 'tags' | 'terms' | 'pattern' | 'grain' | 'entities' | 'outputs' | 'dimensions' | 'allowedFilters' | 'parameterPolicy' | 'filterBindings' | 'sourceSystems' | 'replacementFor' | 'reviewCadence' | 'parameterDecisions' | 'similarityMatches' | 'recommendedAction' | 'sql' | 'reviewStatus' | 'llmContext' | 'evidence' | 'draftSave' | 'generationMode' | 'generationProvider' | 'savedPath' | 'conversionNotes'>>,
 ): BlockStudioImportCandidate {
   const candidate = readBlockStudioImportCandidate(projectRoot, importId, candidateId);
   const next: BlockStudioImportCandidate = { ...candidate };
@@ -332,13 +385,21 @@ export function updateBlockStudioImportCandidate(
   if (patch.description !== undefined) next.description = patch.description;
   if (patch.owner !== undefined) next.owner = patch.owner;
   if (patch.tags !== undefined) next.tags = normalizeTags(patch.tags);
+  if (patch.terms !== undefined) next.terms = normalizeStringList(patch.terms);
   if (patch.pattern !== undefined) next.pattern = normalizePattern(patch.pattern);
   if (patch.grain !== undefined) next.grain = patch.grain;
   if (patch.entities !== undefined) next.entities = normalizeStringList(patch.entities);
   if (patch.outputs !== undefined) next.outputs = normalizeStringList(patch.outputs);
+  if (patch.dimensions !== undefined) next.dimensions = normalizeStringList(patch.dimensions);
   if (patch.allowedFilters !== undefined) next.allowedFilters = normalizeStringList(patch.allowedFilters);
+  if (patch.parameterPolicy !== undefined) next.parameterPolicy = normalizeParameterPolicy(patch.parameterPolicy);
+  if (patch.filterBindings !== undefined) next.filterBindings = normalizeFilterBindings(patch.filterBindings);
   if (patch.sourceSystems !== undefined) next.sourceSystems = normalizeStringList(patch.sourceSystems);
   if (patch.replacementFor !== undefined) next.replacementFor = normalizeStringList(patch.replacementFor);
+  if (patch.reviewCadence !== undefined) next.reviewCadence = normalizeReviewCadence(patch.reviewCadence) || 'monthly';
+  if (patch.parameterDecisions !== undefined) next.parameterDecisions = patch.parameterDecisions;
+  if (patch.similarityMatches !== undefined) next.similarityMatches = patch.similarityMatches;
+  if (patch.recommendedAction !== undefined) next.recommendedAction = patch.recommendedAction;
   if (patch.sql !== undefined) next.sql = patch.sql;
   if (patch.reviewStatus !== undefined) next.reviewStatus = patch.reviewStatus;
   if (patch.llmContext !== undefined) next.llmContext = patch.llmContext;
@@ -348,7 +409,7 @@ export function updateBlockStudioImportCandidate(
   if (patch.generationProvider !== undefined) next.generationProvider = patch.generationProvider;
   if (patch.savedPath !== undefined) next.savedPath = patch.savedPath;
   if (patch.conversionNotes !== undefined) next.conversionNotes = patch.conversionNotes;
-  if (patch.name || patch.domain || patch.description || patch.owner || patch.tags || patch.pattern || patch.grain || patch.entities || patch.outputs || patch.allowedFilters || patch.sourceSystems || patch.replacementFor || patch.sql || patch.llmContext) {
+  if (patch.name || patch.domain || patch.description || patch.owner || patch.tags || patch.terms || patch.pattern || patch.grain || patch.entities || patch.outputs || patch.dimensions || patch.allowedFilters || patch.parameterPolicy || patch.filterBindings || patch.sourceSystems || patch.replacementFor || patch.reviewCadence || patch.parameterDecisions || patch.sql || patch.llmContext) {
     next.dqlSource = candidateToDqlSource(next);
     next.lineage = {
       ...next.lineage,
@@ -363,41 +424,464 @@ export function updateBlockStudioImportCandidate(
   return next;
 }
 
-export function candidateToDqlSource(candidate: Pick<BlockStudioImportCandidate, 'name' | 'domain' | 'description' | 'owner' | 'tags' | 'pattern' | 'grain' | 'entities' | 'outputs' | 'allowedFilters' | 'sourceSystems' | 'replacementFor' | 'sql' | 'llmContext'>): string {
+export function candidateToDqlSource(candidate: Pick<BlockStudioImportCandidate, 'name' | 'domain' | 'description' | 'owner' | 'tags' | 'terms' | 'pattern' | 'grain' | 'entities' | 'outputs' | 'dimensions' | 'allowedFilters' | 'parameterPolicy' | 'filterBindings' | 'parameterDecisions' | 'sourceSystems' | 'replacementFor' | 'reviewCadence' | 'sql' | 'llmContext'>): string {
   const tags = normalizeTags(candidate.tags).map((tag) => dqlString(tag)).join(', ');
+  const terms = normalizeStringList(candidate.terms ?? []).slice(0, 16);
   const sql = candidate.sql.trim().replace(/"""/g, '\\"\\"\\"');
   const llmContext = candidate.llmContext?.trim();
   const pattern = normalizePattern(candidate.pattern || inferSqlPattern(candidate.sql));
   const grain = candidate.grain?.trim() || inferSqlGrain(candidate.sql);
   const outputs = normalizeStringList(candidate.outputs?.length ? candidate.outputs : inferSqlOutputs(candidate.sql)).slice(0, 24);
+  const dimensions = normalizeStringList(candidate.dimensions?.length ? candidate.dimensions : inferSqlDimensions(candidate.sql, grain, outputs)).slice(0, 16);
   const sourceSystems = normalizeStringList(candidate.sourceSystems?.length ? candidate.sourceSystems : inferSqlSourceSystems(candidate.sql)).slice(0, 12);
   const entities = normalizeStringList(candidate.entities?.length ? candidate.entities : inferSqlEntities(grain, sourceSystems)).slice(0, 12);
   const allowedFilters = normalizeStringList(candidate.allowedFilters?.length ? candidate.allowedFilters : inferSqlFilters(candidate.sql)).slice(0, 16);
-  return `block ${dqlString(candidate.name)} {
-    status = "draft"
-    domain = ${dqlString(sanitizeDomain(candidate.domain))}
-    type = "custom"
-    description = ${dqlString(candidate.description)}
-    tags = [${tags}]
-    owner = ${dqlString(candidate.owner)}
-${pattern ? `    pattern = ${dqlString(pattern)}\n` : ''}${grain ? `    grain = ${dqlString(grain)}\n` : ''}${entities.length > 0 ? `    entities = [${entities.map(dqlString).join(', ')}]\n` : ''}${outputs.length > 0 ? `    outputs = [${outputs.map(dqlString).join(', ')}]\n` : ''}${allowedFilters.length > 0 ? `    allowedFilters = [${allowedFilters.map(dqlString).join(', ')}]\n` : ''}${sourceSystems.length > 0 ? `    sourceSystems = [${sourceSystems.map(dqlString).join(', ')}]\n` : ''}${candidate.replacementFor?.length ? `    replacementFor = [${candidate.replacementFor.map(dqlString).join(', ')}]\n` : ''}
-${llmContext ? `    llmContext = ${dqlString(llmContext)}\n` : ''}
-
-    query = """
-${sql}
-    """
-
-    visualization {
-        chart = "table"
-    }
-
-    tests {
-        assert row_count > 0
-    }
+  const parameterDecisions = normalizeParameterDecisions(candidate.parameterDecisions ?? []);
+  const parameterPolicy = normalizeParameterPolicy(candidate.parameterPolicy?.length
+    ? candidate.parameterPolicy
+    : parameterDecisions.map((decision) => ({ name: decision.name, policy: decision.policy })));
+  const filterBindings = normalizeFilterBindings(candidate.filterBindings ?? []);
+  const reviewCadence = normalizeReviewCadence(candidate.reviewCadence || 'monthly');
+  const params = parameterDecisions.filter((decision) => decision.policy !== 'static');
+  const lines: string[] = [
+    `block ${dqlString(candidate.name)} {`,
+    '    status = "draft"',
+    `    domain = ${dqlString(sanitizeDomain(candidate.domain))}`,
+    '    type = "custom"',
+    `    description = ${dqlString(candidate.description)}`,
+    `    tags = [${tags}]`,
+    `    owner = ${dqlString(candidate.owner)}`,
+  ];
+  if (pattern) lines.push(`    pattern = ${dqlString(pattern)}`);
+  if (grain) lines.push(`    grain = ${dqlString(grain)}`);
+  if (entities.length > 0) lines.push(`    entities = [${entities.map(dqlString).join(', ')}]`);
+  if (outputs.length > 0) lines.push(`    outputs = [${outputs.map(dqlString).join(', ')}]`);
+  if (terms.length > 0) lines.push(`    terms = [${terms.map(dqlString).join(', ')}]`);
+  if (dimensions.length > 0) lines.push(`    dimensions = [${dimensions.map(dqlString).join(', ')}]`);
+  if (allowedFilters.length > 0) lines.push(`    allowedFilters = [${allowedFilters.map(dqlString).join(', ')}]`);
+  if (parameterPolicy.length > 0) {
+    lines.push('    parameterPolicy {');
+    lines.push(...parameterPolicy.map((entry) => `        ${entry.name} = ${dqlString(entry.policy)}`));
+    lines.push('    }');
+  }
+  if (filterBindings.length > 0) {
+    lines.push('    filterBindings {');
+    lines.push(...filterBindings.map((entry) => `        ${entry.filter} = ${dqlString(entry.binding)}`));
+    lines.push('    }');
+  }
+  if (sourceSystems.length > 0) lines.push(`    sourceSystems = [${sourceSystems.map(dqlString).join(', ')}]`);
+  if (candidate.replacementFor?.length) lines.push(`    replacementFor = [${candidate.replacementFor.map(dqlString).join(', ')}]`);
+  if (reviewCadence) lines.push(`    reviewCadence = ${dqlString(reviewCadence)}`);
+  if (llmContext) lines.push(`    llmContext = ${dqlString(llmContext)}`);
+  if (params.length > 0) {
+    lines.push('', '    params {');
+    lines.push(...params.map((param) => `        ${param.name} = ${formatDqlLiteral(param.value)}`));
+    lines.push('    }');
+  }
+  lines.push('', '    query = """', sql, '    """');
+  lines.push('', '    visualization {', '        chart = "table"', '    }');
+  lines.push('', '    tests {', '        assert row_count > 0', '    }', '}');
+  return `${lines.join('\n')}\n`;
 }
-`;
+
+function normalizeParameterPolicy(value: Array<{ name: string; policy: string }>): Array<{ name: string; policy: string }> {
+  const seen = new Set<string>();
+  const result: Array<{ name: string; policy: string }> = [];
+  for (const item of value) {
+    const name = normalizeIdentifier(item.name);
+    const policy = String(item.policy ?? '').trim().toLowerCase().replace(/[^a-z0-9_]+/g, '_');
+    if (!name || !policy || seen.has(name)) continue;
+    seen.add(name);
+    result.push({ name, policy });
+  }
+  return result.slice(0, 24);
 }
 
+function normalizeFilterBindings(value: BlockFilterBinding[]): BlockFilterBinding[] {
+  const seen = new Set<string>();
+  const result: BlockFilterBinding[] = [];
+  for (const item of value) {
+    const filter = normalizeIdentifier(item.filter);
+    const binding = String(item.binding ?? '').trim();
+    if (!filter || !binding || seen.has(filter)) continue;
+    seen.add(filter);
+    result.push({ filter, binding });
+  }
+  return result.slice(0, 24);
+}
+
+function normalizeReviewCadence(value: string | undefined): string {
+  const normalized = String(value ?? '').trim().toLowerCase().replace(/[^a-z0-9_ -]+/g, '').replace(/\s+/g, '_');
+  const allowed = new Set(['daily', 'weekly', 'biweekly', 'monthly', 'quarterly', 'semiannual', 'annual']);
+  return allowed.has(normalized) ? normalized : '';
+}
+
+function normalizeParameterDecisions(value: DqlParameterDecision[]): DqlParameterDecision[] {
+  const seen = new Set<string>();
+  const result: DqlParameterDecision[] = [];
+  for (const item of value) {
+    const name = normalizeIdentifier(item.name);
+    if (!name || seen.has(name)) continue;
+    seen.add(name);
+    result.push({
+      ...item,
+      name,
+      policy: normalizeParameterPolicyKind(item.policy),
+      reason: item.reason || 'Detected from imported SQL literal.',
+      confidence: Math.max(0, Math.min(1, Number(item.confidence) || 0.5)),
+    });
+  }
+  return result.slice(0, 24);
+}
+
+function normalizeParameterPolicyKind(value: string): DqlParameterPolicyKind {
+  const normalized = String(value || '').trim().toLowerCase();
+  if (
+    normalized === 'dynamic'
+    || normalized === 'static'
+    || normalized === 'business'
+    || normalized === 'derived'
+    || normalized === 'optional'
+    || normalized === 'ambiguous_review_required'
+  ) return normalized;
+  return 'ambiguous_review_required';
+}
+
+function normalizeIdentifier(value: string): string {
+  return String(value || '').trim().replace(/[^A-Za-z0-9_]+/g, '_').replace(/^_+|_+$/g, '').replace(/^([0-9])/, '_$1');
+}
+
+function formatDqlLiteral(value: DqlParameterValue): string {
+  if (Array.isArray(value)) return `[${value.map(formatDqlLiteral).join(', ')}]`;
+  if (typeof value === 'number' && Number.isFinite(value)) return String(value);
+  if (typeof value === 'boolean') return value ? 'true' : 'false';
+  return dqlString(String(value));
+}
+
+export interface DqlSqlParameterizationResult {
+  sql: string;
+  parameterDecisions: DqlParameterDecision[];
+  parameterPolicy: Array<{ name: string; policy: string }>;
+  filterBindings: BlockFilterBinding[];
+  allowedFilters: string[];
+  warnings: string[];
+}
+
+export function parameterizeSqlForDqlImport(sql: string): DqlSqlParameterizationResult {
+  let nextSql = sql;
+  const decisions = new Map<string, DqlParameterDecision>();
+  const bindings = new Map<string, BlockFilterBinding>();
+  const warnings: string[] = [];
+  const addDecision = (decision: DqlParameterDecision) => {
+    const name = normalizeIdentifier(decision.name);
+    if (!name || decisions.has(name)) return name;
+    decisions.set(name, { ...decision, name });
+    return name;
+  };
+  const addBinding = (filter: string, binding: string) => {
+    const normalized = normalizeIdentifier(filter);
+    if (!normalized || bindings.has(normalized)) return;
+    bindings.set(normalized, { filter: normalized, binding: binding.trim() });
+  };
+  const availableParamName = (preferred: string, fallback: string): string => {
+    const normalized = normalizeIdentifier(preferred);
+    return normalized && !decisions.has(normalized) ? normalized : normalizeIdentifier(fallback);
+  };
+  const availableFilterName = (preferred: string, fallback: string): string => {
+    const normalized = normalizeIdentifier(preferred);
+    return normalized && !bindings.has(normalized) ? normalized : normalizeIdentifier(fallback);
+  };
+  const placeholder = (name: string) => '${' + name + '}';
+
+  const yearLiterals = extractYearLiterals(nextSql);
+  const yearParamName = (year: number): string => {
+    if (yearLiterals.length <= 1) return 'season_year';
+    if (year === yearLiterals[0]) return 'season_start';
+    if (year === yearLiterals[yearLiterals.length - 1]) return 'season_end';
+    return `season_year_${year}`;
+  };
+  if (yearLiterals.length > 0) {
+    nextSql = nextSql.replace(
+      /(extract\s*\(\s*year\s+from\s+([^)]+?)\s*\)\s*(?:>=|<=|<>|!=|=|>|<)\s*)([12][0-9]{3})/gi,
+      (match, prefix: string, column: string, yearValue: string) => {
+        if (match.includes('${')) return match;
+        const year = Number(yearValue);
+        const name = addDecision({
+          name: yearParamName(year),
+          policy: 'dynamic',
+          value: year,
+          valueType: 'year',
+          sourceExpression: `EXTRACT(YEAR FROM ${column.trim()})`,
+          reason: 'Year literal is user scope and should be reusable across seasons.',
+          confidence: 0.94,
+        });
+        addBinding(yearLiterals.length > 1 ? 'season_range' : 'season', `${column.trim()}.year`);
+        return `${prefix}${placeholder(name)}`;
+      },
+    );
+    nextSql = nextSql.replace(
+      /(extract\s*\(\s*year\s+from\s+([^)]+?)\s*\)\s+in\s*\()([^)]+)(\))/gi,
+      (match, prefix: string, column: string, list: string, suffix: string) => {
+        if (match.includes('${')) return match;
+        const listYears = extractYearValuesFromList(list);
+        const normalizedColumn = column.trim();
+        if (listYears.length === 1) {
+          const name = addDecision({
+            name: 'season_year',
+            policy: 'dynamic',
+            value: listYears[0],
+            valueType: 'year',
+            sourceExpression: `EXTRACT(YEAR FROM ${normalizedColumn})`,
+            reason: 'Single-year list literal is user scope and should be reusable across seasons.',
+            confidence: 0.94,
+          });
+          addBinding('season', `${normalizedColumn}.year`);
+          return `EXTRACT(YEAR FROM ${normalizedColumn}) = ${placeholder(name)}`;
+        }
+        if (listYears.length > 1 && isContiguousYearRange(listYears)) {
+          const firstYear = listYears[0];
+          const lastYear = listYears[listYears.length - 1];
+          const startName = addDecision({
+            name: 'season_start',
+            policy: 'dynamic',
+            value: firstYear,
+            valueType: 'year',
+            sourceExpression: `EXTRACT(YEAR FROM ${normalizedColumn})`,
+            reason: 'Contiguous year list is treated as a reusable season range.',
+            confidence: 0.95,
+          });
+          const endName = addDecision({
+            name: 'season_end',
+            policy: 'dynamic',
+            value: lastYear,
+            valueType: 'year',
+            sourceExpression: `EXTRACT(YEAR FROM ${normalizedColumn})`,
+            reason: 'Contiguous year list is treated as a reusable season range.',
+            confidence: 0.95,
+          });
+          addBinding('season_range', `${normalizedColumn}.year`);
+          return `EXTRACT(YEAR FROM ${normalizedColumn}) BETWEEN ${placeholder(startName)} AND ${placeholder(endName)}`;
+        }
+        const replaced = list.replace(/\b([12][0-9]{3})\b/g, (_yearMatch, yearValue: string) => {
+          const year = Number(yearValue);
+          const name = addDecision({
+            name: `season_year_${year}`,
+            policy: 'dynamic',
+            value: year,
+            valueType: 'year',
+            sourceExpression: `EXTRACT(YEAR FROM ${normalizedColumn})`,
+            reason: 'Non-contiguous year list is user scope and should remain an explicit selected set.',
+            confidence: 0.94,
+          });
+          return placeholder(name);
+        });
+        addBinding('season_set', `${normalizedColumn}.year`);
+        return `${prefix}${replaced}${suffix}`;
+      },
+    );
+  }
+
+  nextSql = nextSql.replace(/\blimit\s+([0-9]+)\b/gi, (match, value: string) => {
+    if (match.includes('${')) return match;
+    const topN = Number(value);
+    if (!Number.isFinite(topN) || topN <= 0 || topN > 10000) return match;
+    const name = addDecision({
+      name: 'top_n',
+      policy: 'dynamic',
+      value: topN,
+      valueType: 'number',
+      sourceExpression: 'LIMIT',
+      reason: 'Top/bottom row count is presentation scope and should be reusable.',
+      confidence: 0.9,
+    });
+    return match.replace(value, placeholder(name));
+  });
+
+  nextSql = nextSql.replace(
+    /\b([A-Za-z_][A-Za-z0-9_.]*)\s+between\s+(?:date\s+)?'([12][0-9]{3}-[01][0-9]-[0-3][0-9])'\s+and\s+(?:date\s+)?'([12][0-9]{3}-[01][0-9]-[0-3][0-9])'/gi,
+    (match, column: string, startValue: string, endValue: string) => {
+      if (match.includes('${') || !isDateScopeColumn(column)) return match;
+      const columnName = lastIdentifierPart(column);
+      const startName = addDecision({
+        name: availableParamName('start_date', `${columnName}_start_date`),
+        policy: 'dynamic',
+        value: startValue,
+        valueType: 'date',
+        sourceExpression: column,
+        reason: 'Date range literal is runtime scope and should be controlled by app filters.',
+        confidence: 0.9,
+      });
+      const endName = addDecision({
+        name: availableParamName('end_date', `${columnName}_end_date`),
+        policy: 'dynamic',
+        value: endValue,
+        valueType: 'date',
+        sourceExpression: column,
+        reason: 'Date range literal is runtime scope and should be controlled by app filters.',
+        confidence: 0.9,
+      });
+      addBinding(availableFilterName('date_range', `${columnName}_range`), column);
+      return `${column} BETWEEN ${placeholder(startName)} AND ${placeholder(endName)}`;
+    },
+  );
+
+  nextSql = nextSql.replace(
+    /\b([A-Za-z_][A-Za-z0-9_.]*)\s*(>=|<=|=|>|<)\s*'([12][0-9]{3}-[01][0-9]-[0-3][0-9])'/gi,
+    (match, column: string, operator: string, value: string) => {
+      if (match.includes('${') || !isDateScopeColumn(column)) return match;
+      const name = operator === '>=' || operator === '>' ? 'start_date' : operator === '<=' || operator === '<' ? 'end_date' : `${lastIdentifierPart(column)}_date`;
+      const paramName = addDecision({
+        name,
+        policy: 'dynamic',
+        value,
+        valueType: 'date',
+        sourceExpression: column,
+        reason: 'Date literal is runtime scope and should be controlled by app filters.',
+        confidence: 0.88,
+      });
+      addBinding(name === 'start_date' || name === 'end_date' ? 'date_range' : name, column);
+      return `${column} ${operator} ${placeholder(paramName)}`;
+    },
+  );
+
+  nextSql = nextSql.replace(
+    /\b([A-Za-z_][A-Za-z0-9_.]*)\s+in\s*\(([^)]*)\)/gi,
+    (match, column: string, rawList: string) => {
+      if (match.includes('${') || /\bextract\s*\(/i.test(match)) return match;
+      const columnName = lastIdentifierPart(column);
+      if (!isRuntimeScopeColumn(columnName)) return match;
+      const values = parseSqlLiteralList(rawList);
+      if (!values || values.length === 0) return match;
+      const name = addDecision({
+        name: `${columnName}_set`,
+        policy: 'dynamic',
+        value: values,
+        valueType: 'set',
+        sourceExpression: column,
+        reason: 'Selected-set literal is user scope and should stay reusable for one or many values.',
+        confidence: 0.86,
+      });
+      addBinding(`${columnName}_set`, column);
+      return `${column} IN (${placeholder(name)})`;
+    },
+  );
+
+  nextSql = nextSql.replace(
+    /\b([A-Za-z_][A-Za-z0-9_.]*)\s*=\s*('(?:''|[^'])*'|[0-9]+(?:\.[0-9]+)?)/gi,
+    (match, column: string, rawValue: string) => {
+      if (match.includes('${') || /extract\s*\(/i.test(match)) return match;
+      const columnName = lastIdentifierPart(column);
+      if (!isRuntimeScopeColumn(columnName)) {
+        const literal = parseSqlLiteral(rawValue);
+        if (isBusinessRuleLiteral(columnName, literal)) {
+          const name = addDecision({
+            name: `${columnName}_rule`,
+            policy: 'static',
+            value: literal,
+            valueType: typeof literal === 'number' ? 'number' : 'string',
+            sourceExpression: column,
+            reason: 'Literal appears to define a fixed business rule, not runtime scope.',
+            confidence: 0.72,
+          });
+          warnings.push(`Kept ${columnName} as static business logic (${name}).`);
+        }
+        return match;
+      }
+      const literal = parseSqlLiteral(rawValue);
+      const name = addDecision({
+        name: columnName,
+        policy: 'dynamic',
+        value: literal,
+        valueType: typeof literal === 'number' ? 'number' : 'string',
+        sourceExpression: column,
+        reason: 'Filter literal is user scope and should be reusable.',
+        confidence: 0.82,
+      });
+      addBinding(columnName, column);
+      return `${column} = ${placeholder(name)}`;
+    },
+  );
+
+  const parameterDecisions = Array.from(decisions.values());
+  const parameterPolicy = parameterDecisions.map((decision) => ({ name: decision.name, policy: decision.policy }));
+  const filterBindings = Array.from(bindings.values());
+  const allowedFilters = Array.from(new Set([
+    ...filterBindings.map((binding) => binding.filter),
+    ...parameterDecisions.filter((decision) => decision.policy === 'dynamic').map((decision) => decision.name),
+  ])).slice(0, 16);
+
+  return { sql: nextSql, parameterDecisions, parameterPolicy, filterBindings, allowedFilters, warnings };
+}
+
+function extractYearLiterals(sql: string): number[] {
+  const years = new Set<number>();
+  const cleaned = stripSqlComments(sql);
+  const extractRegex = /extract\s*\(\s*year\s+from\s+[^)]+\)\s*(?:(?:>=|<=|<>|!=|=|>|<)\s*([12][0-9]{3})|\s+in\s*\(([^)]*)\))/gi;
+  let match: RegExpExecArray | null;
+  while ((match = extractRegex.exec(cleaned))) {
+    for (const value of [match[1], ...(match[2]?.match(/[12][0-9]{3}/g) ?? [])]) {
+      if (value) years.add(Number(value));
+    }
+  }
+  return Array.from(years).sort((a, b) => a - b);
+}
+
+function extractYearValuesFromList(list: string): number[] {
+  const years = new Set<number>();
+  for (const value of list.match(/\b[12][0-9]{3}\b/g) ?? []) {
+    years.add(Number(value));
+  }
+  return Array.from(years).sort((a, b) => a - b);
+}
+
+function isContiguousYearRange(years: number[]): boolean {
+  if (years.length < 2) return false;
+  for (let index = 1; index < years.length; index += 1) {
+    if (years[index] !== years[index - 1] + 1) return false;
+  }
+  return true;
+}
+
+function lastIdentifierPart(column: string): string {
+  return normalizeIdentifier(column.split('.').pop() ?? column).toLowerCase();
+}
+
+function stripSqlIdentifierQuotes(value: string): string {
+  return value.replace(/["\[\]]/g, '').replaceAll('`', '');
+}
+
+function parseSqlLiteral(raw: string): string | number {
+  if (/^'/.test(raw)) return raw.slice(1, -1).replace(/''/g, "'");
+  const numeric = Number(raw);
+  return Number.isFinite(numeric) ? numeric : raw;
+}
+
+function parseSqlLiteralList(rawList: string): Array<string | number> | null {
+  const parts = splitSqlList(rawList).map((part) => part.trim()).filter(Boolean);
+  if (parts.length === 0) return null;
+  const values: Array<string | number> = [];
+  for (const part of parts) {
+    if (!/^(?:'(?:''|[^'])*'|[0-9]+(?:\.[0-9]+)?)$/i.test(part)) return null;
+    values.push(parseSqlLiteral(part));
+  }
+  return values;
+}
+
+function isDateScopeColumn(column: string): boolean {
+  return /(date|day|time|period|month|week)/i.test(column);
+}
+
+function isRuntimeScopeColumn(column: string): boolean {
+  const normalized = normalizeIdentifier(column).toLowerCase();
+  return /(?:^|_)(player|team|customer|account|user|segment|region|product|position|market|channel|country|state|city|league|season|year)(?:_|$)/i.test(normalized)
+    || /(?:^|_)(id|key|name|code)$/i.test(normalized);
+}
+
+function isBusinessRuleLiteral(column: string, value: string | number): boolean {
+  const text = String(value).toLowerCase();
+  return /(status|state|type|flag|is_|mode|category)/i.test(column)
+    && /^(active|approved|complete|completed|valid|regular|true|1|yes|current)$/i.test(text);
+}
 function inferSqlGrain(sql: string): string {
   const groupFields = extractGroupByFields(sql);
   return groupFields[0] ?? '';
@@ -411,13 +895,17 @@ function inferSqlPattern(sql: string): string {
     const systems = new Set(inferSqlSourceSystems(sql));
     if (systems.size > 1) return 'bridge';
   }
-  if (/\border\s+by\b[\s\S]*\blimit\s+\d+/i.test(sql)) return 'ranking';
+  if (hasRankingLimit(sql)) return 'ranking';
   if (groupFields.some((field) => /\b(date|day|week|month|quarter|year|period|time)\b/i.test(field))) return 'trend';
   if (groupFields.length === 1 && /_id$|_key$/i.test(groupFields[0])) return 'entity_rollup';
   if (!/\b(sum|count|avg|min|max|median|percentile|rank)\s*\(/i.test(lower) && /\b(dim|profile|customer|account|player|product|user|entity)\b/i.test(lower)) {
     return 'entity_profile';
   }
   return 'custom';
+}
+
+function hasRankingLimit(sql: string): boolean {
+  return /\border\s+by\b[\s\S]*\blimit\s+(?:\d+|\$\{\s*[A-Za-z_][A-Za-z0-9_]*\s*\}|[:?][A-Za-z_][A-Za-z0-9_]*)/i.test(sql);
 }
 
 function inferSqlOutputs(sql: string): string[] {
@@ -428,7 +916,7 @@ function inferSqlOutputs(sql: string): string[] {
       const alias = expr.match(/\bas\s+([A-Za-z_][A-Za-z0-9_]*)\b/i)?.[1]
         ?? expr.match(/([A-Za-z_][A-Za-z0-9_]*)\s*$/)?.[1]
         ?? '';
-      return alias.replace(/[`"[\]]/g, '');
+      return stripSqlIdentifierQuotes(alias);
     })
     .filter(Boolean)
     .filter((name) => !/^(from|where|group|order|limit)$/i.test(name));
@@ -438,7 +926,7 @@ function inferSqlFilters(sql: string): string[] {
   const filters = new Set<string>();
   const where = sql.match(/\bwhere\b([\s\S]+?)(?:\bgroup\s+by\b|\border\s+by\b|\blimit\b|$)/i)?.[1] ?? '';
   const addFilter = (value: string | undefined) => {
-    const name = value?.split('.').pop()?.replace(/[`"[\]]/g, '');
+    const name = stripSqlIdentifierQuotes(value?.split('.').pop() ?? '');
     if (name && !/^(and|or|not|null|year|month|day)$/i.test(name)) filters.add(name);
   };
   const extractRegex = /\bextract\s*\([^)]*\bfrom\s+([A-Za-z_][A-Za-z0-9_.]*)\s*\)\s*(?:=|<>|!=|>|<|>=|<=|\bin\b|\blike\b)/gi;
@@ -466,11 +954,20 @@ function inferSqlEntities(grain: string, sourceSystems: string[]): string[] {
   return Array.from(new Set([entity, ...sourceSystems.map(businessEntityFromIdentifier)].filter(Boolean)));
 }
 
+function inferSqlDimensions(sql: string, grain: string, outputs: string[]): string[] {
+  const outputSet = new Set(outputs.map((output) => output.toLowerCase()));
+  return extractGroupByFields(sql)
+    .filter((field) => field !== grain)
+    .filter((field) => !outputSet.has(field.toLowerCase()))
+    .filter((field) => !/\b(total|count|sum|avg|average|min|max|rate|pct|percent|amount|revenue|points?|score)\b/i.test(field))
+    .slice(0, 16);
+}
+
 function extractGroupByFields(sql: string): string[] {
   const match = sql.match(/\bgroup\s+by\b([\s\S]+?)(?:\border\s+by\b|\blimit\b|\bqualify\b|\bhaving\b|$)/i);
   if (!match) return [];
   return splitSqlList(match[1])
-    .map((item) => item.replace(/[`"[\]]/g, '').trim())
+    .map((item) => stripSqlIdentifierQuotes(item).trim())
     .filter((item) => item && !/^\d+$/.test(item))
     .map((item) => item.split('.').pop() ?? item)
     .slice(0, 4);
@@ -574,6 +1071,7 @@ function buildSqlCandidate(options: {
       'Optional AI assist is review-gated and only receives this candidate context.',
     ],
     aiAssistance: [],
+    reviewCadence: 'monthly',
     reviewStatus: 'draft',
   };
   candidate.dqlSource = candidateToDqlSource(candidate);
@@ -909,6 +1407,8 @@ function extractSqlParameters(sql: string): string[] {
   let match: RegExpExecArray | null;
   const handlebars = /\{\{\s*([A-Za-z_][A-Za-z0-9_.-]*)\s*\}\}/g;
   while ((match = handlebars.exec(cleaned))) params.add(match[1]);
+  const dqlTemplate = /\$\{\s*([A-Za-z_][A-Za-z0-9_]*)\s*\}/g;
+  while ((match = dqlTemplate.exec(cleaned))) params.add(match[1]);
   const colon = /(^|[^:]):([A-Za-z_][A-Za-z0-9_]*)\b/g;
   while ((match = colon.exec(cleaned))) params.add(match[2]);
   const dollar = /(^|[^$])\$([A-Za-z_][A-Za-z0-9_]*)\b/g;
