@@ -127,6 +127,11 @@ limit 3;
     expect(candidate.description).toBe('Ranks players by total points for 2017 using TRANSFORMED.int_player_stats, including games played.');
     expect(candidate.tags).toEqual(expect.arrayContaining(['transformed', 'player', 'stats', 'total', 'points', '2017']));
     expect(candidate.dqlSource).toContain('block "Top Players By Total Points 2017"');
+    expect(candidate.dqlSource).toContain('pattern = "ranking"');
+    expect(candidate.dqlSource).toContain('grain = "player_name"');
+    expect(candidate.dqlSource).toContain('outputs = ["player_name", "total_points", "games_played"]');
+    expect(candidate.dqlSource).toContain('allowedFilters = ["game_date_est", "player_name"]');
+    expect(candidate.dqlSource).toContain('sourceSystems = ["transformed"]');
   });
 
   it('splits named query sections without semicolons', () => {
@@ -272,6 +277,8 @@ order by total_records;
 
     expect(source).toContain('domain = "finance"');
     expect(source).toContain('tags = ["imported", "raw-sql"]');
+    expect(source).toContain('pattern = "custom"');
+    expect(source).toContain('sourceSystems = ["finance"]');
     expect(source).toContain('visualization {');
     expect(source).toContain('chart = "table"');
   });

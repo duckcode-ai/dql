@@ -10,6 +10,7 @@ import type {
   LayoutBlockNode,
   LayoutRowNode,
   BusinessViewDeclNode,
+  DomainDeclNode,
   TermDeclNode,
   NamedArgNode,
   DigestNode,
@@ -68,6 +69,8 @@ function formatStatement(node: StatementNode, level: number, state: FormatState)
       return formatWorkbook(node, level, state);
     case NodeKind.ImportDecl:
       return formatImport(node, level, state);
+    case NodeKind.DomainDecl:
+      return formatDomain(node, level, state);
     case NodeKind.BlockDecl:
       return formatBlock(node, level, state);
     case NodeKind.TermDecl:
@@ -271,6 +274,23 @@ function formatBlock(node: BlockDeclNode, level: number, state: FormatState): st
   if (node.termRefs && node.termRefs.length > 0) {
     lines.push(`${indent(level + 1, state)}terms = [${node.termRefs.map(quote).join(', ')}]`);
   }
+  if (node.pattern) lines.push(`${indent(level + 1, state)}pattern = ${quote(node.pattern)}`);
+  if (node.grain) lines.push(`${indent(level + 1, state)}grain = ${quote(node.grain)}`);
+  if (node.entities && node.entities.length > 0) {
+    lines.push(`${indent(level + 1, state)}entities = [${node.entities.map(quote).join(', ')}]`);
+  }
+  if (node.outputs && node.outputs.length > 0) {
+    lines.push(`${indent(level + 1, state)}outputs = [${node.outputs.map(quote).join(', ')}]`);
+  }
+  if (node.allowedFilters && node.allowedFilters.length > 0) {
+    lines.push(`${indent(level + 1, state)}allowedFilters = [${node.allowedFilters.map(quote).join(', ')}]`);
+  }
+  if (node.sourceSystems && node.sourceSystems.length > 0) {
+    lines.push(`${indent(level + 1, state)}sourceSystems = [${node.sourceSystems.map(quote).join(', ')}]`);
+  }
+  if (node.replacementFor && node.replacementFor.length > 0) {
+    lines.push(`${indent(level + 1, state)}replacementFor = [${node.replacementFor.map(quote).join(', ')}]`);
+  }
   if (node.llmContext) lines.push(`${indent(level + 1, state)}llmContext = ${quote(node.llmContext)}`);
   if (node.businessOutcome) lines.push(`${indent(level + 1, state)}businessOutcome = ${quote(node.businessOutcome)}`);
   if (node.businessOwner) lines.push(`${indent(level + 1, state)}businessOwner = ${quote(node.businessOwner)}`);
@@ -330,6 +350,31 @@ function formatBlock(node: BlockDeclNode, level: number, state: FormatState): st
     }
     lines.push(`${indent(level + 1, state)}}`);
   }
+
+  lines.push(`${indent(level, state)}}`);
+  return lines.join('\n');
+}
+
+function formatDomain(node: DomainDeclNode, level: number, state: FormatState): string {
+  const lines: string[] = [];
+  lines.push(...formatDecorators(node.decorators, level, state));
+  lines.push(`${indent(level, state)}domain ${quote(node.name)} {`);
+
+  if (node.owner) lines.push(`${indent(level + 1, state)}owner = ${quote(node.owner)}`);
+  if (node.businessOwner) lines.push(`${indent(level + 1, state)}businessOwner = ${quote(node.businessOwner)}`);
+  if (node.boundedContext) lines.push(`${indent(level + 1, state)}boundedContext = ${quote(node.boundedContext)}`);
+  if (node.sourceSystems && node.sourceSystems.length > 0) {
+    lines.push(`${indent(level + 1, state)}sourceSystems = [${node.sourceSystems.map(quote).join(', ')}]`);
+  }
+  if (node.primaryTerms && node.primaryTerms.length > 0) {
+    lines.push(`${indent(level + 1, state)}primaryTerms = [${node.primaryTerms.map(quote).join(', ')}]`);
+  }
+  if (node.reviewCadence) lines.push(`${indent(level + 1, state)}reviewCadence = ${quote(node.reviewCadence)}`);
+  if (node.tags && node.tags.length > 0) {
+    lines.push(`${indent(level + 1, state)}tags = [${node.tags.map(quote).join(', ')}]`);
+  }
+  if (node.businessOutcome) lines.push(`${indent(level + 1, state)}businessOutcome = ${quote(node.businessOutcome)}`);
+  if (node.description) lines.push(`${indent(level + 1, state)}description = ${quote(node.description)}`);
 
   lines.push(`${indent(level, state)}}`);
   return lines.join('\n');

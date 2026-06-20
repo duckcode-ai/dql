@@ -2651,6 +2651,13 @@ function ImportCandidateDetail({
   const [owner, setOwner] = useState(candidate.owner);
   const [description, setDescription] = useState(candidate.description);
   const [tags, setTags] = useState(candidate.tags.join(', '));
+  const [pattern, setPattern] = useState(candidate.pattern ?? '');
+  const [grain, setGrain] = useState(candidate.grain ?? '');
+  const [entities, setEntities] = useState((candidate.entities ?? []).join(', '));
+  const [outputs, setOutputs] = useState((candidate.outputs ?? []).join(', '));
+  const [allowedFilters, setAllowedFilters] = useState((candidate.allowedFilters ?? []).join(', '));
+  const [sourceSystems, setSourceSystems] = useState((candidate.sourceSystems ?? []).join(', '));
+  const [replacementFor, setReplacementFor] = useState((candidate.replacementFor ?? []).join(', '));
   const [sql, setSql] = useState(candidate.sql);
   const [aiBusy, setAiBusy] = useState<string | null>(null);
   const [editError, setEditError] = useState<string | null>(null);
@@ -2662,10 +2669,17 @@ function ImportCandidateDetail({
     setOwner(candidate.owner);
     setDescription(candidate.description);
     setTags(candidate.tags.join(', '));
+    setPattern(candidate.pattern ?? '');
+    setGrain(candidate.grain ?? '');
+    setEntities((candidate.entities ?? []).join(', '));
+    setOutputs((candidate.outputs ?? []).join(', '));
+    setAllowedFilters((candidate.allowedFilters ?? []).join(', '));
+    setSourceSystems((candidate.sourceSystems ?? []).join(', '));
+    setReplacementFor((candidate.replacementFor ?? []).join(', '));
     setSql(candidate.sql);
     setEditError(null);
     setContextOpen(false);
-  }, [candidate.id, candidate.name, candidate.domain, candidate.owner, candidate.description, candidate.tags, candidate.sql]);
+  }, [candidate.id, candidate.name, candidate.domain, candidate.owner, candidate.description, candidate.tags, candidate.pattern, candidate.grain, candidate.entities, candidate.outputs, candidate.allowedFilters, candidate.sourceSystems, candidate.replacementFor, candidate.sql]);
 
     const saveEdits = async () => {
       setEditError(null);
@@ -2676,6 +2690,13 @@ function ImportCandidateDetail({
           owner,
           description,
           tags: tags.split(',').map((tag) => tag.trim()).filter(Boolean),
+          pattern,
+          grain,
+          entities: entities.split(',').map((value) => value.trim()).filter(Boolean),
+          outputs: outputs.split(',').map((value) => value.trim()).filter(Boolean),
+          allowedFilters: allowedFilters.split(',').map((value) => value.trim()).filter(Boolean),
+          sourceSystems: sourceSystems.split(',').map((value) => value.trim()).filter(Boolean),
+          replacementFor: replacementFor.split(',').map((value) => value.trim()).filter(Boolean),
           sql,
           llmContext: candidate.llmContext,
         };
@@ -2747,6 +2768,23 @@ function ImportCandidateDetail({
               <FieldLabel label="Tags" t={t}><textarea value={tags} onChange={(event) => setTags(event.target.value)} style={{ ...inputStyle, minHeight: 58, resize: 'vertical' }} /></FieldLabel>
             </div>
             <FieldLabel label="Business description" t={t}><textarea value={description} onChange={(event) => setDescription(event.target.value)} style={{ ...inputStyle, minHeight: 70, resize: 'vertical' }} /></FieldLabel>
+            <div style={{ display: 'grid', gridTemplateColumns: 'minmax(160px, 0.8fr) minmax(160px, 1fr)', gap: 8 }}>
+              <FieldLabel label="Pattern" t={t}>
+                <select value={pattern} onChange={(event) => setPattern(event.target.value)} style={inputStyle}>
+                  {['custom', 'metric_wrapper', 'entity_profile', 'entity_rollup', 'ranking', 'trend', 'bridge', 'drilldown', 'replacement'].map((item) => (
+                    <option key={item} value={item}>{item}</option>
+                  ))}
+                </select>
+              </FieldLabel>
+              <FieldLabel label="Grain" t={t}><input value={grain} onChange={(event) => setGrain(event.target.value)} style={inputStyle} /></FieldLabel>
+            </div>
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
+              <FieldLabel label="Entities" t={t}><input value={entities} onChange={(event) => setEntities(event.target.value)} style={inputStyle} /></FieldLabel>
+              <FieldLabel label="Outputs" t={t}><input value={outputs} onChange={(event) => setOutputs(event.target.value)} style={inputStyle} /></FieldLabel>
+              <FieldLabel label="Allowed filters" t={t}><input value={allowedFilters} onChange={(event) => setAllowedFilters(event.target.value)} style={inputStyle} /></FieldLabel>
+              <FieldLabel label="Source systems" t={t}><input value={sourceSystems} onChange={(event) => setSourceSystems(event.target.value)} style={inputStyle} /></FieldLabel>
+            </div>
+            <FieldLabel label="Replaces" t={t}><input value={replacementFor} onChange={(event) => setReplacementFor(event.target.value)} style={inputStyle} /></FieldLabel>
             <button onClick={() => void saveEdits()} style={{ ...primaryImportButtonStyle(t), justifySelf: 'start' }}>Apply edits</button>
           </PanelBox>
 

@@ -1,7 +1,7 @@
 import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { Parser, resolveSemanticLayerWithDiagnostics } from '@duckcodeailabs/dql-core';
-import { Certifier } from '@duckcodeailabs/dql-governance';
+import { Certifier, ENTERPRISE_RULES } from '@duckcodeailabs/dql-governance';
 import type { BlockRecord, TestResultSummary, TestAssertionResult } from '@duckcodeailabs/dql-project';
 import { QueryExecutor, type ConnectionConfig } from '@duckcodeailabs/dql-connectors';
 import { buildExecutionPlan, type NotebookCell } from '@duckcodeailabs/dql-notebook';
@@ -211,7 +211,7 @@ export async function runCertify(filePath: string, flags: CLIFlags): Promise<voi
     return;
   }
 
-  const certifier = new Certifier();
+  const certifier = flags.enterprise ? new Certifier(ENTERPRISE_RULES) : new Certifier();
   let anyFailed = false;
 
   for (const block of blocks) {
@@ -236,6 +236,14 @@ export async function runCertify(filePath: string, flags: CLIFlags): Promise<voi
       llmContext: b.llmContext,
       examples: b.examples,
       invariants: b.invariants,
+      pattern: b.pattern,
+      grain: b.grain,
+      entities: b.entities,
+      declaredOutputs: b.outputs,
+      allowedFilters: b.allowedFilters,
+      sourceSystems: b.sourceSystems,
+      replacementFor: b.replacementFor,
+      reviewCadence: b.reviewCadence,
     };
 
     // Run tests unless --skip-tests is set

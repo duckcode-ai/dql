@@ -28,6 +28,7 @@ export enum NodeKind {
   FunctionCall = 'FunctionCall',
   TemplateString = 'TemplateString',
   BlockDecl = 'BlockDecl',
+  DomainDecl = 'DomainDecl',
   TermDecl = 'TermDecl',
   BusinessViewDecl = 'BusinessViewDecl',
   BusinessViewInclude = 'BusinessViewInclude',
@@ -83,6 +84,7 @@ export type StatementNode =
   | ChartCallNode
   | WorkbookNode
   | ImportDeclNode
+  | DomainDeclNode
   | BlockDeclNode
   | TermDeclNode
   | BusinessViewDeclNode
@@ -297,6 +299,14 @@ export interface BlockDeclNode extends BaseNode {
   owner?: string;
   /** Business glossary terms this block implements or depends on. */
   termRefs?: string[];
+  /** Enterprise reusable-widget metadata: declared output grain, entities, outputs, filters, and replacement path. */
+  pattern?: string;
+  grain?: string;
+  entities?: string[];
+  outputs?: string[];
+  allowedFilters?: string[];
+  sourceSystems?: string[];
+  replacementFor?: string[];
   params?: BlockParamsNode;
   /** For blockType 'custom': the SQL query. Must not be present on 'semantic' blocks. */
   query?: SQLQueryNode;
@@ -351,6 +361,23 @@ export interface BlockDeclNode extends BaseNode {
   requestedFilters?: string[];
   requestedDimensions?: string[];
   validationWarnings?: string[];
+}
+
+// ---- Domain Declaration ----
+
+export interface DomainDeclNode extends BaseNode {
+  kind: NodeKind.DomainDecl;
+  name: string;
+  owner?: string;
+  businessOwner?: string;
+  boundedContext?: string;
+  sourceSystems?: string[];
+  primaryTerms?: string[];
+  reviewCadence?: string;
+  tags?: string[];
+  businessOutcome?: string;
+  description?: string;
+  decorators: DecoratorNode[];
 }
 
 // ---- Business Term Declaration ----

@@ -19,12 +19,14 @@ describe('collectInputFiles', () => {
   it('returns config + blocks + notebooks + semantic YAML + dbt manifest, sorted', () => {
     mkdirSync(join(tmpDir, 'blocks'), { recursive: true });
     mkdirSync(join(tmpDir, 'business-views'), { recursive: true });
+    mkdirSync(join(tmpDir, 'domains', 'customer'), { recursive: true });
     mkdirSync(join(tmpDir, 'notebooks'), { recursive: true });
     mkdirSync(join(tmpDir, 'semantic-layer', 'metrics'), { recursive: true });
     mkdirSync(join(tmpDir, 'target'), { recursive: true });
 
     writeFileSync(join(tmpDir, 'blocks', 'a.dql'), 'block a {}');
     writeFileSync(join(tmpDir, 'business-views', 'customer_360.dql'), 'business_view "Customer 360" { includes { block "Customer" } }');
+    writeFileSync(join(tmpDir, 'domains', 'customer', 'domain.dql'), 'domain "Customer" { owner = "analytics" }');
     writeFileSync(join(tmpDir, 'notebooks', 'x.dqlnb'), '{"version":1,"cells":[]}');
     writeFileSync(join(tmpDir, 'semantic-layer', 'metrics', 'revenue.yaml'), 'name: revenue');
     writeFileSync(join(tmpDir, 'target', 'manifest.json'), '{}');
@@ -38,6 +40,7 @@ describe('collectInputFiles', () => {
     expect(files).toContain(join(tmpDir, 'dql.config.json'));
     expect(files).toContain(join(tmpDir, 'blocks', 'a.dql'));
     expect(files).toContain(join(tmpDir, 'business-views', 'customer_360.dql'));
+    expect(files).toContain(join(tmpDir, 'domains', 'customer', 'domain.dql'));
     expect(files).toContain(join(tmpDir, 'notebooks', 'x.dqlnb'));
     expect(files).toContain(join(tmpDir, 'semantic-layer', 'metrics', 'revenue.yaml'));
     expect(files).toContain(join(tmpDir, 'target', 'manifest.json'));
@@ -245,6 +248,82 @@ describe('buildManifest block extraction', () => {
 
   afterEach(() => {
     rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  it('compiles domain-first folders with domain declarations and block contract metadata', () => {
+    mkdirSync(join(tmpDir, 'domains', 'customer', 'blocks'), { recursive: true });
+    mkdirSync(join(tmpDir, 'domains', 'customer', 'terms'), { recursive: true });
+    mkdirSync(join(tmpDir, 'domains', 'customer', 'views'), { recursive: true });
+    writeFileSync(join(tmpDir, 'domains', 'customer', 'domain.dql'), `domain "Customer" {
+  owner = "customer-analytics"
+  businessOwner = "Customer Success"
+  boundedContext = "Customer identity and lifecycle"
+  sourceSystems = ["crm", "orders"]
+  primaryTerms = ["Customer"]
+  reviewCadence = "monthly"
+  tags = ["customer"]
+}`);
+    writeFileSync(join(tmpDir, 'domains', 'customer', 'terms', 'customer.dql'), `term "Customer" {
+  domain = "Customer"
+  type = "entity"
+  owner = "customer-analytics"
+  identifiers = ["customer_id"]
+}`);
+    writeFileSync(join(tmpDir, 'domains', 'customer', 'blocks', 'orders_rollup.dql'), `block "Customer Orders Rollup" {
+  domain = "Customer"
+  type = "custom"
+  status = "draft"
+  owner = "customer-analytics"
+  pattern = "entity_rollup"
+  grain = "customer_id"
+  entities = ["Customer"]
+  terms = ["Customer"]
+  outputs = ["customer_id", "total_orders"]
+  dimensions = ["segment"]
+  allowedFilters = ["order_date", "segment"]
+  sourceSystems = ["orders"]
+  replacementFor = []
+  query = """
+    SELECT customer_id, COUNT(*) AS total_orders
+    FROM fct_orders
+    GROUP BY customer_id
+  """
+}`);
+    writeFileSync(join(tmpDir, 'domains', 'customer', 'views', 'customer_360.dql'), `business_view "Customer 360" {
+  domain = "Customer"
+  owner = "customer-analytics"
+  terms = ["Customer"]
+  includes {
+    block "Customer Orders Rollup"
+  }
+}`);
+
+    const manifest = buildManifest({ projectRoot: tmpDir, dqlVersion: 'test' });
+    const block = manifest.blocks['Customer Orders Rollup'];
+
+    expect(manifest.domains?.Customer).toMatchObject({
+      owner: 'customer-analytics',
+      businessOwner: 'Customer Success',
+      sourceSystems: ['crm', 'orders'],
+      primaryTerms: ['Customer'],
+    });
+    expect(block).toMatchObject({
+      domain: 'Customer',
+      pattern: 'entity_rollup',
+      grain: 'customer_id',
+      entities: ['Customer'],
+      declaredOutputs: ['customer_id', 'total_orders'],
+      allowedFilters: ['order_date', 'segment'],
+      sourceSystems: ['orders'],
+    });
+    expect(manifest.businessViews['Customer 360'].blockRefs).toEqual(['Customer Orders Rollup']);
+    expect(manifest.lineage.nodes.some((node) => node.id === 'domain:Customer')).toBe(true);
+    expect(manifest.lineage.edges.some((edge) =>
+      edge.source === 'domain:Customer'
+      && edge.target === 'block:Customer Orders Rollup'
+      && edge.type === 'contains',
+    )).toBe(true);
+    expect(manifest.diagnostics?.filter((diag) => diag.severity === 'error')).toEqual([]);
   });
 
   it('extracts notebook DQL block SQL and metadata from the parsed block', () => {
@@ -510,5 +589,46 @@ block "Notebook Revenue" {
     expect(messages.some((message) => message.includes('unresolved block refs: Missing Block'))).toBe(true);
     expect(messages.some((message) => message.includes('unresolved business_view refs: Missing View'))).toBe(true);
     expect(messages.some((message) => message.includes('business_view cycle detected'))).toBe(true);
+  });
+
+  it('warns on cross-domain dependencies and stale domain review cadence', () => {
+    mkdirSync(join(tmpDir, 'domains', 'customer', 'blocks'), { recursive: true });
+    mkdirSync(join(tmpDir, 'domains', 'revenue', 'blocks'), { recursive: true });
+    mkdirSync(join(tmpDir, 'domains', 'customer', 'views'), { recursive: true });
+    writeFileSync(join(tmpDir, 'domains', 'customer', 'domain.dql'), `domain "Customer" {
+  owner = "customer-analytics"
+  reviewCadence = "annual"
+}`);
+    writeFileSync(join(tmpDir, 'domains', 'revenue', 'domain.dql'), `domain "Revenue" {
+  owner = "revenue-analytics"
+  reviewCadence = "quarterly"
+}`);
+    writeFileSync(join(tmpDir, 'domains', 'revenue', 'blocks', 'revenue_total.dql'), `block "Revenue Total" {
+  domain = "Revenue"
+  type = "custom"
+  query = """
+    SELECT customer_id, SUM(revenue) AS revenue FROM fct_revenue GROUP BY 1
+  """
+}`);
+    writeFileSync(join(tmpDir, 'domains', 'customer', 'blocks', 'customer_revenue.dql'), `block "Customer Revenue" {
+  domain = "Customer"
+  type = "custom"
+  query = """
+    SELECT * FROM ref("Revenue Total")
+  """
+}`);
+    writeFileSync(join(tmpDir, 'domains', 'customer', 'views', 'customer_360.dql'), `business_view "Customer 360" {
+  domain = "Customer"
+  includes {
+    block "Revenue Total"
+  }
+}`);
+
+    const manifest = buildManifest({ projectRoot: tmpDir, dqlVersion: 'test' });
+    const messages = manifest.diagnostics?.map((diag) => diag.message) ?? [];
+
+    expect(messages.some((message) => message.includes('reviewCadence "annual" is stale'))).toBe(true);
+    expect(messages.some((message) => message.includes('block "Customer Revenue" in domain "Customer" depends on block "Revenue Total" in domain "Revenue"'))).toBe(true);
+    expect(messages.some((message) => message.includes('business_view "Customer 360" in domain "Customer" includes block "Revenue Total" from domain "Revenue"'))).toBe(true);
   });
 });

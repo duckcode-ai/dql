@@ -12,14 +12,30 @@ describe('parseArgs', () => {
   });
 
   it('collects extra positionals and new-block flags', () => {
-    const parsed = parseArgs(['new', 'block', 'Revenue', 'by', 'Segment', '--chart', 'line', '--domain', 'finance', '--owner', 'demo', '--query-only']);
+    const parsed = parseArgs(['new', 'block', 'Revenue', 'by', 'Segment', '--chart', 'line', '--domain', 'finance', '--owner', 'demo', '--pattern', 'ranking', '--query-only']);
     expect(parsed.command).toBe('new');
     expect(parsed.file).toBe('block');
     expect(parsed.rest).toEqual(['Revenue', 'by', 'Segment']);
     expect(parsed.flags.chart).toBe('line');
     expect(parsed.flags.domain).toBe('finance');
     expect(parsed.flags.owner).toBe('demo');
+    expect(parsed.flags.template).toBe('ranking');
     expect(parsed.flags.queryOnly).toBe(true);
+  });
+
+  it('parses domain layout migration flags', () => {
+    const parsed = parseArgs(['migrate', 'layout', '--to', 'domain-first', '--dry-run']);
+    expect(parsed.command).toBe('migrate');
+    expect(parsed.file).toBe('layout');
+    expect(parsed.flags.to).toBe('domain-first');
+    expect(parsed.flags.dryRun).toBe(true);
+  });
+
+  it('parses enterprise certification flag', () => {
+    const parsed = parseArgs(['certify', 'blocks/customer.dql', '--enterprise']);
+    expect(parsed.command).toBe('certify');
+    expect(parsed.file).toBe('blocks/customer.dql');
+    expect(parsed.flags.enterprise).toBe(true);
   });
 
   it('lets no-open override browser launching', () => {

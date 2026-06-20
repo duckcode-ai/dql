@@ -24,6 +24,7 @@ import type {
   LineageDashboardInput,
   LineageAppInput,
   LineageBusinessViewInput,
+  LineageDomainInput,
   LineageTermInput,
 } from '../lineage/builder.js';
 import type {
@@ -40,6 +41,7 @@ import type {
   ManifestApp,
   ManifestDashboard,
   ManifestBusinessView,
+  ManifestDomain,
   ManifestTerm,
 } from './types.js';
 import {
@@ -128,17 +130,17 @@ export function collectInputFiles(options: ManifestBuildOptions): string[] {
     files.add(datalexManifestPath);
   }
 
-  const blockDirs = ['blocks', 'dashboards', 'workbooks', ...(options.extraBlockDirs ?? [])];
+  const blockDirs = ['blocks', 'domains', 'dashboards', 'workbooks', ...(options.extraBlockDirs ?? [])];
   for (const dir of blockDirs) {
     for (const f of scanFilesRecursive(join(projectRoot, dir), ['.dql'])) files.add(f);
   }
 
-  const businessViewDirs = ['blocks', 'business-views', 'dashboards', 'workbooks', ...(options.extraBlockDirs ?? [])];
+  const businessViewDirs = ['blocks', 'business-views', 'domains', 'dashboards', 'workbooks', ...(options.extraBlockDirs ?? [])];
   for (const dir of businessViewDirs) {
     for (const f of scanFilesRecursive(join(projectRoot, dir), ['.dql'])) files.add(f);
   }
 
-  const termDirs = ['terms', 'blocks', 'business-views', 'dashboards', 'workbooks', ...(options.extraBlockDirs ?? [])];
+  const termDirs = ['terms', 'blocks', 'business-views', 'domains', 'dashboards', 'workbooks', ...(options.extraBlockDirs ?? [])];
   for (const dir of termDirs) {
     for (const f of scanFilesRecursive(join(projectRoot, dir), ['.dql'])) files.add(f);
   }
@@ -189,16 +191,20 @@ export function buildManifest(options: ManifestBuildOptions): DQLManifest {
     });
   }
 
+  // Scan first-class business domains
+  const domainDirs = ['domains', 'blocks', 'terms', 'business-views', ...(options.extraBlockDirs ?? [])];
+  const domains = scanDomains(projectRoot, domainDirs, diagnostics);
+
   // Scan blocks
-  const blockDirs = ['blocks', 'dashboards', 'workbooks', ...(options.extraBlockDirs ?? [])];
+  const blockDirs = ['blocks', 'domains', 'dashboards', 'workbooks', ...(options.extraBlockDirs ?? [])];
   const blocks = scanBlocks(projectRoot, blockDirs, diagnostics, datalexRegistry);
 
   // Scan business composition views
-  const businessViewDirs = ['blocks', 'business-views', 'dashboards', 'workbooks', ...(options.extraBlockDirs ?? [])];
+  const businessViewDirs = ['blocks', 'business-views', 'domains', 'dashboards', 'workbooks', ...(options.extraBlockDirs ?? [])];
   const businessViews = scanBusinessViews(projectRoot, businessViewDirs, diagnostics);
 
   // Scan business glossary terms
-  const termDirs = ['terms', 'blocks', 'business-views', 'dashboards', 'workbooks', ...(options.extraBlockDirs ?? [])];
+  const termDirs = ['terms', 'blocks', 'business-views', 'domains', 'dashboards', 'workbooks', ...(options.extraBlockDirs ?? [])];
   const terms = scanTerms(projectRoot, termDirs, diagnostics);
 
   // Scan notebooks
@@ -215,6 +221,7 @@ export function buildManifest(options: ManifestBuildOptions): DQLManifest {
     if (!terms[name]) terms[name] = term;
   }
 
+  validateDomains(domains, blocks, businessViews, terms, diagnostics);
   validateBusinessViews(businessViews, blocks, diagnostics);
   validateTermRefs(terms, blocks, businessViews, diagnostics);
 
@@ -257,6 +264,7 @@ export function buildManifest(options: ManifestBuildOptions): DQLManifest {
 
   // Build lineage
   const lineage = buildManifestLineage(
+    domains,
     blocks,
     metrics,
     dimensions,
@@ -274,6 +282,7 @@ export function buildManifest(options: ManifestBuildOptions): DQLManifest {
     generatedAt: new Date().toISOString(),
     project: projectName,
     projectRoot,
+    domains,
     blocks,
     businessViews,
     terms,
@@ -403,6 +412,59 @@ function scanFilesRecursive(dir: string, extensions: string[]): string[] {
 }
 
 // ---- Block Scanning ----
+
+function scanDomains(
+  projectRoot: string,
+  dirs: string[],
+  diagnostics?: ManifestDiagnostic[],
+): Record<string, ManifestDomain> {
+  const domains: Record<string, ManifestDomain> = {};
+  const seenFiles = new Set<string>();
+
+  for (const dir of dirs) {
+    const dirPath = join(projectRoot, dir);
+    const files = scanFilesRecursive(dirPath, ['.dql']);
+
+    for (const filePath of files) {
+      if (seenFiles.has(filePath)) continue;
+      seenFiles.add(filePath);
+      const relPath = relative(projectRoot, filePath);
+      try {
+        const source = readFileSync(filePath, 'utf-8');
+        if (!/(^|\n)\s*domain\s+"/.test(source)) continue;
+        const parser = new Parser(source, relPath);
+        const ast = parser.parse();
+
+        for (const stmt of ast.statements) {
+          const domain = stmt as any;
+          if (domain.kind !== 'DomainDecl') continue;
+
+          if (domains[domain.name]) {
+            diagnostics?.push({
+              kind: 'resolve',
+              filePath: relPath,
+              severity: 'error',
+              message: `duplicate domain "${domain.name}" also declared in ${domains[domain.name].filePath}`,
+            });
+            continue;
+          }
+
+          domains[domain.name] = domainDeclToManifestDomain(domain, relPath);
+        }
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        diagnostics?.push({
+          kind: 'parse',
+          filePath: relPath,
+          severity: 'error',
+          message: `Failed to parse domain file: ${msg}`,
+        });
+      }
+    }
+  }
+
+  return domains;
+}
 
 function scanBlocks(
   projectRoot: string,
@@ -563,6 +625,149 @@ function scanTerms(
   }
 
   return terms;
+}
+
+function validateDomains(
+  domains: Record<string, ManifestDomain>,
+  blocks: Record<string, ManifestBlock>,
+  views: Record<string, ManifestBusinessView>,
+  terms: Record<string, ManifestTerm>,
+  diagnostics: ManifestDiagnostic[],
+): void {
+  const declaredDomains = new Set(Object.keys(domains));
+  const usedDomains = new Map<string, string[]>();
+  const addUse = (domain: string | undefined, label: string) => {
+    if (!domain) return;
+    const list = usedDomains.get(domain) ?? [];
+    list.push(label);
+    usedDomains.set(domain, list);
+  };
+
+  for (const block of Object.values(blocks)) {
+    addUse(block.domain, `block "${block.name}"`);
+    if (!block.domain) {
+      diagnostics.push({
+        kind: 'resolve',
+        filePath: block.filePath,
+        severity: 'warning',
+        message: `block "${block.name}" is missing a domain. Add a domain field or place it under domains/<domain>/blocks/.`,
+      });
+    }
+  }
+  for (const view of Object.values(views)) addUse(view.domain, `business_view "${view.name}"`);
+  for (const term of Object.values(terms)) addUse(term.domain, `term "${term.name}"`);
+
+  for (const block of Object.values(blocks)) {
+    if (!block.domain) continue;
+    for (const ref of block.refDependencies ?? []) {
+      const dependency = blocks[ref];
+      if (!dependency?.domain || dependency.domain === block.domain) continue;
+      diagnostics.push({
+        kind: 'resolve',
+        filePath: block.filePath,
+        severity: 'warning',
+        message: `block "${block.name}" in domain "${block.domain}" depends on block "${dependency.name}" in domain "${dependency.domain}". Mark this as a bridge pattern or document the cross-domain dependency.`,
+      });
+    }
+  }
+  for (const view of Object.values(views)) {
+    if (!view.domain) continue;
+    for (const ref of view.blockRefs ?? []) {
+      const block = blocks[ref];
+      if (!block?.domain || block.domain === view.domain) continue;
+      diagnostics.push({
+        kind: 'resolve',
+        filePath: view.filePath,
+        severity: 'warning',
+        message: `business_view "${view.name}" in domain "${view.domain}" includes block "${block.name}" from domain "${block.domain}". Review the cross-domain dependency.`,
+      });
+    }
+    for (const ref of view.businessViewRefs ?? []) {
+      const dependency = views[ref];
+      if (!dependency?.domain || dependency.domain === view.domain) continue;
+      diagnostics.push({
+        kind: 'resolve',
+        filePath: view.filePath,
+        severity: 'warning',
+        message: `business_view "${view.name}" in domain "${view.domain}" includes business_view "${dependency.name}" from domain "${dependency.domain}". Review the cross-domain dependency.`,
+      });
+    }
+  }
+
+  for (const [domain, users] of usedDomains) {
+    if (!declaredDomains.has(domain)) {
+      diagnostics.push({
+        kind: 'resolve',
+        severity: 'warning',
+        message: `domain "${domain}" is used by ${users.slice(0, 3).join(', ')}${users.length > 3 ? ` and ${users.length - 3} more` : ''} but has no first-class domain declaration.`,
+      });
+    }
+  }
+
+  for (const domain of Object.values(domains)) {
+    if (!domain.owner) {
+      diagnostics.push({
+        kind: 'resolve',
+        filePath: domain.filePath,
+        severity: 'warning',
+        message: `domain "${domain.name}" is missing owner metadata.`,
+      });
+    }
+    if (!domain.reviewCadence) {
+      diagnostics.push({
+        kind: 'resolve',
+        filePath: domain.filePath,
+        severity: 'warning',
+        message: `domain "${domain.name}" is missing reviewCadence metadata.`,
+      });
+    } else {
+      const cadenceDays = reviewCadenceDays(domain.reviewCadence);
+      if (cadenceDays === null) {
+        diagnostics.push({
+          kind: 'resolve',
+          filePath: domain.filePath,
+          severity: 'warning',
+          message: `domain "${domain.name}" has unrecognized reviewCadence "${domain.reviewCadence}". Use daily, weekly, biweekly, monthly, quarterly, semiannual, or annual.`,
+        });
+      } else if (cadenceDays > 180) {
+        diagnostics.push({
+          kind: 'resolve',
+          filePath: domain.filePath,
+          severity: 'warning',
+          message: `domain "${domain.name}" reviewCadence "${domain.reviewCadence}" is stale for enterprise use. Prefer quarterly or more frequent review for active domains.`,
+        });
+      }
+    }
+    if (!usedDomains.has(domain.name)) {
+      diagnostics.push({
+        kind: 'resolve',
+        filePath: domain.filePath,
+        severity: 'warning',
+        message: `domain "${domain.name}" has no terms, blocks, or business views yet.`,
+      });
+    }
+  }
+}
+
+function reviewCadenceDays(value: string): number | null {
+  const normalized = value.trim().toLowerCase().replace(/[\s_-]+/g, '');
+  if (!normalized) return null;
+  if (normalized === 'daily' || normalized === 'day') return 1;
+  if (normalized === 'weekly' || normalized === 'week') return 7;
+  if (normalized === 'biweekly' || normalized === 'fortnightly') return 14;
+  if (normalized === 'monthly' || normalized === 'month') return 30;
+  if (normalized === 'quarterly' || normalized === 'quarter') return 90;
+  if (normalized === 'semiannual' || normalized === 'semiannually' || normalized === 'halfyearly') return 180;
+  if (normalized === 'annual' || normalized === 'annually' || normalized === 'yearly') return 365;
+  const everyMatch = normalized.match(/^every(\d+)(day|days|week|weeks|month|months)$/);
+  if (!everyMatch) return null;
+  const amount = Number(everyMatch[1]);
+  if (!Number.isFinite(amount) || amount <= 0) return null;
+  const unit = everyMatch[2];
+  if (unit.startsWith('day')) return amount;
+  if (unit.startsWith('week')) return amount * 7;
+  if (unit.startsWith('month')) return amount * 30;
+  return null;
 }
 
 function validateBusinessViews(
@@ -1536,6 +1741,7 @@ function appDocumentToManifest(
 // ---- Lineage Builder ----
 
 function buildManifestLineage(
+  manifestDomains: Record<string, ManifestDomain>,
   blocks: Record<string, ManifestBlock>,
   metrics: Record<string, ManifestMetric>,
   dimensions: Record<string, ManifestDimension>,
@@ -1559,7 +1765,31 @@ function buildManifestLineage(
     dimensionsRef: b.dimensionsRef,
     chartType: b.chartType,
     filePath: b.filePath,
+    description: b.description,
+    businessOutcome: b.businessOutcome,
+    reviewCadence: b.reviewCadence,
+    tests: b.tests,
     termRefs: b.termRefs,
+    pattern: b.pattern,
+    grain: b.grain,
+    entities: b.entities,
+    declaredOutputs: b.declaredOutputs,
+    allowedFilters: b.allowedFilters,
+    sourceSystems: b.sourceSystems,
+    replacementFor: b.replacementFor,
+  }));
+
+  const lineageDomains: LineageDomainInput[] = Object.values(manifestDomains ?? {}).map((domain) => ({
+    name: domain.name,
+    owner: domain.owner,
+    businessOwner: domain.businessOwner,
+    boundedContext: domain.boundedContext,
+    filePath: domain.filePath,
+    sourceSystems: domain.sourceSystems,
+    primaryTerms: domain.primaryTerms,
+    reviewCadence: domain.reviewCadence,
+    businessOutcome: domain.businessOutcome,
+    tags: domain.tags,
   }));
 
   const lineageTerms: LineageTermInput[] = Object.values(terms ?? {}).map((term) => ({
@@ -1573,6 +1803,7 @@ function buildManifestLineage(
     identifiers: term.identifiers,
     synonyms: term.synonyms,
     businessOutcome: term.businessOutcome,
+    reviewCadence: term.reviewCadence,
   }));
 
   const lineageMetrics: LineageMetricInput[] = Object.values(metrics).map((m) => ({
@@ -1595,6 +1826,7 @@ function buildManifestLineage(
     filePath: view.filePath,
     description: view.description,
     businessOutcome: view.businessOutcome,
+    reviewCadence: view.reviewCadence,
     blockRefs: view.blockRefs,
     businessViewRefs: view.businessViewRefs,
     termRefs: view.termRefs,
@@ -1705,6 +1937,7 @@ function buildManifestLineage(
     apps: lineageApps,
     businessViews: lineageBusinessViews,
     terms: lineageTerms,
+    domains: lineageDomains,
   });
 
   // Serialize to manifest format
@@ -1794,6 +2027,13 @@ function blockDeclToManifestBlock(block: any, filePath: string): ManifestBlock {
     tags,
     description,
     termRefs: Array.isArray(block.termRefs) ? block.termRefs : undefined,
+    pattern: typeof block.pattern === 'string' ? block.pattern : undefined,
+    grain: typeof block.grain === 'string' ? block.grain : undefined,
+    entities: Array.isArray(block.entities) ? block.entities : undefined,
+    declaredOutputs: Array.isArray(block.outputs) ? block.outputs : undefined,
+    allowedFilters: Array.isArray(block.allowedFilters) ? block.allowedFilters : undefined,
+    sourceSystems: Array.isArray(block.sourceSystems) ? block.sourceSystems : undefined,
+    replacementFor: Array.isArray(block.replacementFor) ? block.replacementFor : undefined,
     unresolvedTermRefs: [],
     llmContext: agent.llmContext,
     examples: agent.examples,
@@ -1815,6 +2055,22 @@ function blockDeclToManifestBlock(block: any, filePath: string): ManifestBlock {
           unresolved: c.unresolved,
         }))
       : undefined,
+  };
+}
+
+function domainDeclToManifestDomain(domain: any, filePath: string): ManifestDomain {
+  return {
+    name: domain.name,
+    filePath,
+    owner: typeof domain.owner === 'string' ? domain.owner : undefined,
+    businessOwner: typeof domain.businessOwner === 'string' ? domain.businessOwner : undefined,
+    boundedContext: typeof domain.boundedContext === 'string' ? domain.boundedContext : undefined,
+    sourceSystems: Array.isArray(domain.sourceSystems) ? domain.sourceSystems : undefined,
+    primaryTerms: Array.isArray(domain.primaryTerms) ? domain.primaryTerms : undefined,
+    reviewCadence: typeof domain.reviewCadence === 'string' ? domain.reviewCadence : undefined,
+    tags: Array.isArray(domain.tags) ? domain.tags : undefined,
+    businessOutcome: typeof domain.businessOutcome === 'string' ? domain.businessOutcome : undefined,
+    description: typeof domain.description === 'string' ? domain.description : undefined,
   };
 }
 

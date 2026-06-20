@@ -70,6 +70,25 @@ export interface KGNode {
   decisionUse?: string;
   /** Expected review cadence for certification/freshness. */
   reviewCadence?: string;
+  /** Row or business grain this artifact is designed to answer. */
+  pattern?: string;
+  grain?: string;
+  /** Business entities represented by the artifact. */
+  entities?: string[];
+  /** Declared output field names for review and retrieval. */
+  declaredOutputs?: string[];
+  /** Filters the artifact is designed to support safely. */
+  allowedFilters?: string[];
+  /** Business/source systems represented by this artifact. */
+  sourceSystems?: string[];
+  /** Replaced or superseded artifacts. */
+  replacementFor?: string[];
+  /** Optional DataLex contract reference, e.g. commerce.Customer.mau@1. */
+  datalexContract?: string;
+  /** Domain bounded context when this node represents a domain. */
+  boundedContext?: string;
+  /** Primary terms owned by a domain node. */
+  primaryTerms?: string[];
   /** Business rules attached to this asset. */
   businessRules?: string[];
   /** Known caveats or interpretation constraints. */

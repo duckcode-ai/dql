@@ -32,8 +32,19 @@ export interface LineageBlockInput {
   materializedAs?: string;
   /** File path of the block definition */
   filePath?: string;
+  description?: string;
+  businessOutcome?: string;
+  reviewCadence?: string;
+  tests?: string[];
   /** Business glossary terms this block implements or depends on. */
   termRefs?: string[];
+  pattern?: string;
+  grain?: string;
+  entities?: string[];
+  declaredOutputs?: string[];
+  allowedFilters?: string[];
+  sourceSystems?: string[];
+  replacementFor?: string[];
 }
 
 export interface LineageMetricInput {
@@ -55,12 +66,26 @@ export interface LineageBuilderOptions {
   dashboards?: LineageDashboardInput[];
   businessViews?: LineageBusinessViewInput[];
   terms?: LineageTermInput[];
+  domains?: LineageDomainInput[];
   /**
    * Apps (consumption-layer artifacts) that contain dashboards. App nodes sit
    * above the matching dashboard nodes in the graph and inherit the App's
    * declared `domain` so cross-domain analysis remains accurate.
    */
   apps?: LineageAppInput[];
+}
+
+export interface LineageDomainInput {
+  name: string;
+  owner?: string;
+  businessOwner?: string;
+  boundedContext?: string;
+  filePath?: string;
+  sourceSystems?: string[];
+  primaryTerms?: string[];
+  reviewCadence?: string;
+  businessOutcome?: string;
+  tags?: string[];
 }
 
 export interface LineageBusinessViewInput {
@@ -71,6 +96,7 @@ export interface LineageBusinessViewInput {
   filePath?: string;
   description?: string;
   businessOutcome?: string;
+  reviewCadence?: string;
   blockRefs: string[];
   businessViewRefs: string[];
   termRefs?: string[];
@@ -88,6 +114,7 @@ export interface LineageTermInput {
   identifiers?: string[];
   synonyms?: string[];
   businessOutcome?: string;
+  reviewCadence?: string;
 }
 
 export interface LineageAppInput {
@@ -186,7 +213,30 @@ export function buildLineageGraph(
     }
   }
 
-  // 1. Add business term nodes before blocks/views so they can define them.
+  // 1. Add first-class domain nodes before terms/blocks/views so the graph has
+  // a stable root for domain-scoped Business 360 and cross-domain analysis.
+  for (const domain of options.domains ?? []) {
+    graph.addNode({
+      id: `domain:${domain.name}`,
+      type: 'domain',
+      layer: 'answer',
+      name: domain.name,
+      domain: domain.name,
+      owner: domain.owner,
+      metadata: {
+        filePath: domain.filePath,
+        businessOwner: domain.businessOwner,
+        boundedContext: domain.boundedContext,
+        sourceSystems: domain.sourceSystems,
+        primaryTerms: domain.primaryTerms,
+        reviewCadence: domain.reviewCadence,
+        businessOutcome: domain.businessOutcome,
+        tags: domain.tags,
+      },
+    });
+  }
+
+  // 1b. Add business term nodes before blocks/views so they can define them.
   for (const term of options.terms ?? []) {
     graph.addNode({
       id: `term:${term.name}`,
@@ -203,8 +253,10 @@ export function buildLineageGraph(
         identifiers: term.identifiers,
         synonyms: term.synonyms,
         businessOutcome: term.businessOutcome,
+        reviewCadence: term.reviewCadence,
       },
     });
+    addDomainContainmentEdge(graph, term.domain, `term:${term.name}`);
   }
 
   // 2. Add block nodes
@@ -221,8 +273,20 @@ export function buildLineageGraph(
         blockType: block.blockType,
         materializedAs: block.materializedAs,
         filePath: block.filePath,
+        description: block.description,
+        businessOutcome: block.businessOutcome,
+        reviewCadence: block.reviewCadence,
+        tests: block.tests,
+        pattern: block.pattern,
+        grain: block.grain,
+        entities: block.entities,
+        declaredOutputs: block.declaredOutputs,
+        allowedFilters: block.allowedFilters,
+        sourceSystems: block.sourceSystems,
+        replacementFor: block.replacementFor,
       },
     });
+    addDomainContainmentEdge(graph, block.domain, `block:${block.name}`);
   }
 
   // 2b. Add business view nodes before edges so views can compose other views.
@@ -239,8 +303,10 @@ export function buildLineageGraph(
         filePath: view.filePath,
         description: view.description,
         businessOutcome: view.businessOutcome,
+        reviewCadence: view.reviewCadence,
       },
     });
+    addDomainContainmentEdge(graph, view.domain, `business_view:${view.name}`);
   }
 
   // 3. Add metric nodes
@@ -507,6 +573,7 @@ export function buildLineageGraph(
       owner: app.owner,
       metadata: { filePath: app.filePath, appId: app.id },
     });
+    addDomainContainmentEdge(graph, app.domain, appId);
     for (const dashId of app.dashboards) {
       const dashboardNodeId = `dashboard:${dashId}`;
       if (!graph.getNode(dashboardNodeId)) continue;
@@ -520,10 +587,29 @@ export function buildLineageGraph(
     }
   }
 
-  // 5. Add domain nodes and connect
+  // 5. Add derived domain nodes for legacy projects without domain declarations.
   addDomainNodes(graph);
 
   return graph;
+}
+
+function addDomainContainmentEdge(graph: LineageGraph, domain: string | undefined, targetId: string): void {
+  if (!domain) return;
+  const domainNodeId = `domain:${domain}`;
+  if (!graph.getNode(domainNodeId)) {
+    graph.addNode({
+      id: domainNodeId,
+      type: 'domain',
+      layer: 'answer',
+      name: domain,
+      domain,
+    });
+  }
+  graph.addEdge({
+    source: domainNodeId,
+    target: targetId,
+    type: 'contains',
+  });
 }
 
 /** Ensure a source_table node exists and return its ID. */
@@ -586,6 +672,7 @@ function addDomainNodes(graph: LineageGraph): void {
 
   for (const domain of domains) {
     const domainNodeId = `domain:${domain}`;
+    if (graph.getNode(domainNodeId)) continue;
     graph.addNode({
       id: domainNodeId,
       type: 'domain',

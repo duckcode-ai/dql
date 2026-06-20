@@ -11,6 +11,7 @@ import type {
   StatementNode,
   WorkbookNode,
   BlockDeclNode,
+  DomainDeclNode,
   TermDeclNode,
   BusinessViewDeclNode,
 } from './nodes.js';
@@ -36,6 +37,8 @@ function printStatement(node: StatementNode, indent: number): string {
       return `${'  '.repeat(indent)}Import [${node.names.join(', ')}] from "${node.path}"\n`;
     case NodeKind.BlockDecl:
       return printBlockDecl(node, indent);
+    case NodeKind.DomainDecl:
+      return printDomainDecl(node, indent);
     case NodeKind.TermDecl:
       return printTermDecl(node, indent);
     case NodeKind.BusinessViewDecl:
@@ -144,6 +147,13 @@ function printBlockDecl(node: BlockDeclNode, indent: number): string {
   if (node.description) result += `${prefix}  description = "${node.description}"\n`;
   if (node.tags) result += `${prefix}  tags = [${node.tags.map(t => `"${t}"`).join(', ')}]\n`;
   if (node.termRefs) result += `${prefix}  terms = [${node.termRefs.map(t => `"${t}"`).join(', ')}]\n`;
+  if (node.pattern) result += `${prefix}  pattern = "${node.pattern}"\n`;
+  if (node.grain) result += `${prefix}  grain = "${node.grain}"\n`;
+  if (node.entities) result += `${prefix}  entities = [${node.entities.map(t => `"${t}"`).join(', ')}]\n`;
+  if (node.outputs) result += `${prefix}  outputs = [${node.outputs.map(t => `"${t}"`).join(', ')}]\n`;
+  if (node.allowedFilters) result += `${prefix}  allowedFilters = [${node.allowedFilters.map(t => `"${t}"`).join(', ')}]\n`;
+  if (node.sourceSystems) result += `${prefix}  sourceSystems = [${node.sourceSystems.map(t => `"${t}"`).join(', ')}]\n`;
+  if (node.replacementFor) result += `${prefix}  replacementFor = [${node.replacementFor.map(t => `"${t}"`).join(', ')}]\n`;
   if (node.metricRef !== undefined) result += `${prefix}  metric = "${node.metricRef}"\n`;
   if (node.metricsRef) result += `${prefix}  metrics = [${node.metricsRef.map(t => `"${t}"`).join(', ')}]\n`;
   if (node.dimensionsRef) result += `${prefix}  dimensions = [${node.dimensionsRef.map(t => `"${t}"`).join(', ')}]\n`;
@@ -157,6 +167,22 @@ function printBlockDecl(node: BlockDeclNode, indent: number): string {
   if (node.tests) {
     result += `${prefix}  tests (${node.tests.length})\n`;
   }
+  return result;
+}
+
+function printDomainDecl(node: DomainDeclNode, indent: number): string {
+  const prefix = '  '.repeat(indent);
+  let result = `${prefix}Domain "${node.name}"\n`;
+  for (const dec of node.decorators) {
+    result += printDecorator(dec, indent + 1);
+  }
+  if (node.owner) result += `${prefix}  owner = "${node.owner}"\n`;
+  if (node.businessOwner) result += `${prefix}  businessOwner = "${node.businessOwner}"\n`;
+  if (node.boundedContext) result += `${prefix}  boundedContext = "${node.boundedContext}"\n`;
+  if (node.sourceSystems) result += `${prefix}  sourceSystems = [${node.sourceSystems.map(t => `"${t}"`).join(', ')}]\n`;
+  if (node.primaryTerms) result += `${prefix}  primaryTerms = [${node.primaryTerms.map(t => `"${t}"`).join(', ')}]\n`;
+  if (node.reviewCadence) result += `${prefix}  reviewCadence = "${node.reviewCadence}"\n`;
+  if (node.tags) result += `${prefix}  tags = [${node.tags.map(t => `"${t}"`).join(', ')}]\n`;
   return result;
 }
 

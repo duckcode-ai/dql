@@ -510,6 +510,13 @@ export interface BlockStudioImportCandidate {
   description: string;
   owner: string;
   tags: string[];
+  pattern?: string;
+  grain?: string;
+  entities?: string[];
+  outputs?: string[];
+  allowedFilters?: string[];
+  sourceSystems?: string[];
+  replacementFor?: string[];
   sql: string;
   dqlSource: string;
   validation: BlockStudioValidation | null;
@@ -531,7 +538,7 @@ export interface BlockStudioImportCandidate {
     createdAt: string;
     status: 'suggested' | 'accepted' | 'rejected';
     provider?: string;
-    patch?: Partial<Pick<BlockStudioImportCandidate, 'name' | 'domain' | 'description' | 'owner' | 'tags' | 'sql' | 'dqlSource'>>;
+    patch?: Partial<Pick<BlockStudioImportCandidate, 'name' | 'domain' | 'description' | 'owner' | 'tags' | 'pattern' | 'grain' | 'entities' | 'outputs' | 'allowedFilters' | 'sourceSystems' | 'replacementFor' | 'sql' | 'dqlSource'>>;
   }>;
   certificationChecklist?: {
     metadata: boolean;
@@ -554,7 +561,7 @@ export interface BlockStudioImportCandidate {
   }
 
 export interface DqlGenerationEvidence {
-  kind: 'dql_block' | 'semantic_metric' | 'semantic_model' | 'dbt_model' | 'warehouse_table' | 'metadata' | 'lineage';
+  kind: 'dql_block' | 'dql_term' | 'business_view' | 'domain' | 'semantic_metric' | 'semantic_model' | 'dbt_model' | 'warehouse_table' | 'datalex_contract' | 'datalex_entity' | 'datalex_domain' | 'metadata' | 'lineage';
   name: string;
   description?: string;
   objectKey?: string;

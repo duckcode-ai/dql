@@ -21,6 +21,8 @@ export interface DQLManifest {
   /** Absolute path to project root */
   projectRoot: string;
 
+  /** First-class business domains discovered in the project */
+  domains?: Record<string, ManifestDomain>;
   /** All blocks discovered in the project */
   blocks: Record<string, ManifestBlock>;
   /** Business composition views discovered in the project */
@@ -109,6 +111,20 @@ export interface ManifestBlock {
   description?: string;
   /** Business term names declared by this block and resolved in the manifest. */
   termRefs?: string[];
+  /** Official DQL block pattern, such as entity_profile, ranking, trend, or bridge. */
+  pattern?: string;
+  /** Enterprise reusable-widget grain, for example customer_id or month. */
+  grain?: string;
+  /** Business entities represented by the row grain or output. */
+  entities?: string[];
+  /** Declared output field names reviewers should expect. */
+  declaredOutputs?: string[];
+  /** Filters this block is designed to support safely. */
+  allowedFilters?: string[];
+  /** Business/source systems represented by this block. */
+  sourceSystems?: string[];
+  /** Block names this block is intended to replace or supersede. */
+  replacementFor?: string[];
   /** Business term names declared by this block that were not found during compile. */
   unresolvedTermRefs?: string[];
   /**
@@ -164,6 +180,23 @@ export interface ManifestBlock {
     sources: Array<{ table: string; column: string }>;
     unresolved?: boolean;
   }>;
+}
+
+// ---- Business Domains ----
+
+export interface ManifestDomain {
+  name: string;
+  /** Relative path from project root */
+  filePath: string;
+  owner?: string;
+  businessOwner?: string;
+  boundedContext?: string;
+  sourceSystems?: string[];
+  primaryTerms?: string[];
+  reviewCadence?: string;
+  tags?: string[];
+  businessOutcome?: string;
+  description?: string;
 }
 
 // ---- Business Terms ----

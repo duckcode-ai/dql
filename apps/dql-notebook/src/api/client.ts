@@ -1,4 +1,5 @@
 import type { DiffReport } from '@duckcodeailabs/dql-core/format';
+import type { Business360ResultV2 } from '@duckcodeailabs/dql-core';
 import type { AgentConversationContext } from '../llm/types';
 import type {
   Cell,
@@ -845,7 +846,7 @@ export const api = {
     async updateBlockStudioImportCandidate(
       importId: string,
       candidateId: string,
-      patch: Partial<Pick<BlockStudioImportCandidate, 'name' | 'domain' | 'description' | 'owner' | 'tags' | 'sql' | 'reviewStatus' | 'llmContext'>>,
+      patch: Partial<Pick<BlockStudioImportCandidate, 'name' | 'domain' | 'description' | 'owner' | 'tags' | 'pattern' | 'grain' | 'entities' | 'outputs' | 'allowedFilters' | 'sourceSystems' | 'replacementFor' | 'sql' | 'reviewStatus' | 'llmContext'>>,
     ): Promise<BlockStudioImportCandidate> {
     return request<BlockStudioImportCandidate>(
       `/api/block-studio/imports/${encodeURIComponent(importId)}/candidates/${encodeURIComponent(candidateId)}`,
@@ -856,7 +857,7 @@ export const api = {
     async updateDqlGenerationCandidate(
       importId: string,
       candidateId: string,
-      patch: Partial<Pick<DqlGenerationCandidate, 'name' | 'domain' | 'description' | 'owner' | 'tags' | 'sql' | 'llmContext'>>,
+      patch: Partial<Pick<DqlGenerationCandidate, 'name' | 'domain' | 'description' | 'owner' | 'tags' | 'pattern' | 'grain' | 'entities' | 'outputs' | 'allowedFilters' | 'sourceSystems' | 'replacementFor' | 'sql' | 'llmContext'>>,
     ): Promise<DqlGenerationCandidate> {
       return request<DqlGenerationCandidate>(
         `/api/block-studio/ai-imports/${encodeURIComponent(importId)}/candidates/${encodeURIComponent(candidateId)}`,
@@ -1484,6 +1485,16 @@ export const api = {
     try {
       return await request<{ node: any; incoming: any[]; outgoing: any[] }>(
         `/api/lineage/node/${encodeURIComponent(nodeId)}`,
+      );
+    } catch {
+      return null;
+    }
+  },
+
+  async fetchBusiness360(nodeId: string): Promise<Business360ResultV2 | null> {
+    try {
+      return await request<Business360ResultV2>(
+        `/api/lineage/business-360/${encodeURIComponent(nodeId)}`,
       );
     } catch {
       return null;

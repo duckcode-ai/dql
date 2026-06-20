@@ -322,4 +322,113 @@ describe('runNew', () => {
       process.chdir(originalCwd);
     }
   });
+
+  it('creates a domain-first folder and patterned block scaffold', async () => {
+    const originalCwd = process.cwd();
+    const targetDir = mkdtempSync(join(tmpdir(), 'dql-new-domain-'));
+    const projectDir = join(targetDir, 'demo-project');
+
+    await runInit(projectDir, {
+      check: false,
+      chart: '',
+      domain: '',
+      format: 'json',
+      help: false,
+      open: null,
+      input: '',
+      outDir: '',
+      owner: '',
+      port: null,
+      queryOnly: false,
+      template: '',
+      connection: '',
+      verbose: false,
+      skipTests: false, version: false,
+    });
+
+    try {
+      process.chdir(projectDir);
+
+      await runNew('domain', ['Customer'], {
+        check: false,
+        chart: '',
+        domain: '',
+        format: 'json',
+        help: false,
+        open: null,
+        input: '',
+        outDir: '',
+        owner: 'customer-analytics',
+        port: null,
+        queryOnly: false,
+        template: '',
+        connection: '',
+        verbose: false,
+        skipTests: false, version: false,
+      });
+
+      await runNew('block', ['Customer Profile'], {
+        check: false,
+        chart: 'table',
+        domain: 'customer',
+        format: 'json',
+        help: false,
+        open: null,
+        input: '',
+        outDir: '',
+        owner: 'customer-analytics',
+        port: null,
+        queryOnly: false,
+        template: 'entity_profile',
+        connection: '',
+        verbose: false,
+        skipTests: false, version: false,
+      });
+
+      await runNew('view', ['Customer 360'], {
+        check: false,
+        chart: '',
+        domain: 'customer',
+        format: 'json',
+        help: false,
+        open: null,
+        input: '',
+        outDir: '',
+        owner: 'customer-analytics',
+        port: null,
+        queryOnly: false,
+        template: '',
+        connection: '',
+        verbose: false,
+        skipTests: false, version: false,
+      });
+
+      const domainPath = join(projectDir, 'domains', 'customer', 'domain.dql');
+      const blockPath = join(projectDir, 'domains', 'customer', 'blocks', 'customer_profile.dql');
+      const viewPath = join(projectDir, 'domains', 'customer', 'views', 'customer_360.dql');
+
+      expect(existsSync(domainPath)).toBe(true);
+      expect(existsSync(join(projectDir, 'domains', 'customer', 'terms'))).toBe(true);
+      expect(existsSync(join(projectDir, 'domains', 'customer', 'views'))).toBe(true);
+      expect(existsSync(blockPath)).toBe(true);
+      expect(existsSync(viewPath)).toBe(true);
+
+      const domain = readFileSync(domainPath, 'utf-8');
+      const block = readFileSync(blockPath, 'utf-8');
+      const view = readFileSync(viewPath, 'utf-8');
+      expect(domain).toContain('domain "Customer"');
+      expect(domain).toContain('boundedContext = "Describe the business boundary for customer."');
+      expect(block).toContain('block "Customer Profile"');
+      expect(block).toContain('tags = ["starter", "customer", "entity_profile"]');
+      expect(block).toContain('pattern = "entity_profile"');
+      expect(block).toContain('grain = "customer_id"');
+      expect(block).toContain('entities = ["Customer"]');
+      expect(block).toContain('outputs = ["customer_id", "customer_name"]');
+      expect(block).toContain('reviewCadence = "monthly"');
+      expect(view).toContain('business_view "Customer 360"');
+      expect(view).toContain('domain = "customer"');
+    } finally {
+      process.chdir(originalCwd);
+    }
+  });
 });

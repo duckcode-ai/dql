@@ -114,6 +114,139 @@ export const BUILTIN_RULES: CertificationRule[] = [
     },
   },
   {
+    id: 'declares-grain',
+    name: 'Block declares grain',
+    description: 'Enterprise reusable blocks should declare the row or business grain they answer',
+    severity: 'warning',
+    check: (block) => ({
+      passed: !!block.grain && block.grain.trim().length > 0,
+      message: block.grain ? undefined : 'Missing grain metadata',
+    }),
+  },
+  {
+    id: 'declares-outputs',
+    name: 'Block declares outputs',
+    description: 'Enterprise reusable blocks should declare expected output fields for review',
+    severity: 'warning',
+    check: (block) => ({
+      passed: Array.isArray(block.declaredOutputs) && block.declaredOutputs.length > 0,
+      message: block.declaredOutputs?.length ? undefined : 'Missing declared outputs',
+    }),
+  },
+  {
+    id: 'declares-entities',
+    name: 'Block declares entities',
+    description: 'Enterprise reusable blocks should declare the business entities represented by the result',
+    severity: 'warning',
+    check: (block) => ({
+      passed: Array.isArray(block.entities) && block.entities.length > 0,
+      message: block.entities?.length ? undefined : 'Missing entities metadata',
+    }),
+  },
+  {
+    id: 'declares-review-cadence',
+    name: 'Block declares review cadence',
+    description: 'Enterprise reusable blocks should state how often the logic must be reviewed',
+    severity: 'warning',
+    check: (block) => ({
+      passed: !!block.reviewCadence && block.reviewCadence.trim().length > 0,
+      message: block.reviewCadence ? undefined : 'Missing reviewCadence metadata',
+    }),
+  },
+  {
+    id: 'valid-block-pattern',
+    name: 'Block pattern is valid',
+    description: 'Official reusable blocks should use a known DQL pattern when pattern metadata is declared',
+    severity: 'warning',
+    check: (block) => {
+      if (!block.pattern) return { passed: true };
+      return {
+        passed: isOfficialPattern(block.pattern),
+        message: isOfficialPattern(block.pattern) ? undefined : `Unknown block pattern: ${block.pattern}`,
+      };
+    },
+  },
+  {
+    id: 'entity-profile-contract',
+    name: 'Entity profile declares stable entity grain',
+    description: 'entity_profile blocks require one business entity, a stable grain, and an identifier output',
+    severity: 'warning',
+    check: (block) => {
+      if (block.pattern !== 'entity_profile') return { passed: true };
+      const hasEntity = (block.entities ?? []).length === 1;
+      const grain = block.grain ?? '';
+      const outputs = block.declaredOutputs ?? [];
+      const hasIdentifier = outputs.some((output) => output === grain || /(_id|_key)$/i.test(output));
+      return {
+        passed: hasEntity && Boolean(grain) && hasIdentifier,
+        message: hasEntity && grain && hasIdentifier
+          ? undefined
+          : 'entity_profile requires exactly one entity, a grain, and an identifier output',
+      };
+    },
+  },
+  {
+    id: 'ranking-contract',
+    name: 'Ranking declares metric and tie-breaker context',
+    description: 'ranking blocks should expose a ranked entity/dimension, metric output, and deterministic ordering context',
+    severity: 'warning',
+    check: (block) => {
+      if (block.pattern !== 'ranking') return { passed: true };
+      const outputs = block.declaredOutputs ?? [];
+      const hasMetric = outputs.some((output) => /\b(total|count|score|points?|revenue|amount|orders?|metric|rank|value)\b/i.test(output));
+      const hasDimension = Boolean(block.grain) || (block.entities ?? []).length > 0;
+      return {
+        passed: hasMetric && hasDimension,
+        message: hasMetric && hasDimension
+          ? undefined
+          : 'ranking requires a ranked grain/entity and a metric/rank output',
+      };
+    },
+  },
+  {
+    id: 'trend-contract',
+    name: 'Trend declares time grain',
+    description: 'trend blocks should declare a time grain or time output',
+    severity: 'warning',
+    check: (block) => {
+      if (block.pattern !== 'trend') return { passed: true };
+      const text = [block.grain, ...(block.declaredOutputs ?? []), ...(block.allowedFilters ?? [])].join(' ');
+      const hasTime = /\b(date|day|week|month|quarter|year|period|time)\b/i.test(text);
+      return {
+        passed: hasTime,
+        message: hasTime ? undefined : 'trend requires a time grain, output, or allowed filter',
+      };
+    },
+  },
+  {
+    id: 'bridge-review-required',
+    name: 'Bridge block remains review-required',
+    description: 'bridge blocks connect domains and should not bypass review',
+    severity: 'warning',
+    check: (block) => {
+      if (block.pattern !== 'bridge') return { passed: true };
+      const passed = block.status !== 'certified' || (block.reviewCadence?.trim().length ?? 0) > 0;
+      return {
+        passed,
+        message: passed ? undefined : 'bridge blocks require explicit review cadence before certification',
+      };
+    },
+  },
+  {
+    id: 'replacement-declares-predecessor',
+    name: 'Replacement declares predecessor',
+    description: 'replacement blocks should point at the block or business question they supersede',
+    severity: 'warning',
+    check: (block) => {
+      if (block.pattern !== 'replacement') return { passed: true };
+      const passed = (block.replacementFor ?? []).length > 0;
+      return {
+        passed,
+        message: passed ? undefined : 'replacement requires replacementFor metadata',
+      };
+    },
+  },
+  {
     id: 'cost-reasonable',
     name: 'Query cost is reasonable',
     description: 'Estimated query cost should be below threshold',
@@ -127,6 +260,69 @@ export const BUILTIN_RULES: CertificationRule[] = [
         };
       }
       return { passed: true };
+    },
+  },
+];
+
+function isOfficialPattern(pattern: string): boolean {
+  return new Set([
+    'metric_wrapper',
+    'entity_profile',
+    'entity_rollup',
+    'ranking',
+    'trend',
+    'bridge',
+    'drilldown',
+    'replacement',
+    'custom',
+  ]).has(pattern);
+}
+
+const ENTERPRISE_REQUIRED_RULE_IDS = new Set([
+  'has-description',
+  'has-owner',
+  'has-domain',
+  'tests-pass',
+  'has-tests',
+  'declares-grain',
+  'declares-outputs',
+  'declares-review-cadence',
+  'valid-block-pattern',
+]);
+
+export const ENTERPRISE_RULES: CertificationRule[] = [
+  ...BUILTIN_RULES.map((rule): CertificationRule => (
+    ENTERPRISE_REQUIRED_RULE_IDS.has(rule.id)
+      ? { ...rule, severity: 'error' as const }
+      : rule
+  )),
+  {
+    id: 'declares-lineage-context',
+    name: 'Block declares lineage context',
+    description: 'Enterprise reusable blocks must expose source-system or dependency lineage context',
+    severity: 'error',
+    check: (block) => {
+      const sourceSystems = block.sourceSystems ?? [];
+      const dependencies = block.dependencies ?? [];
+      const passed = sourceSystems.length > 0 || dependencies.length > 0;
+      return {
+        passed,
+        message: passed ? undefined : 'Missing sourceSystems or dependency lineage metadata',
+      };
+    },
+  },
+  {
+    id: 'declares-pattern',
+    name: 'Block declares reusable pattern',
+    description: 'Enterprise reusable blocks must declare an official DQL block pattern',
+    severity: 'error',
+    check: (block) => {
+      const pattern = block.pattern?.trim();
+      const passed = Boolean(pattern) && Boolean(pattern && isOfficialPattern(pattern));
+      return {
+        passed,
+        message: passed ? undefined : 'Missing or unknown block pattern',
+      };
     },
   },
 ];

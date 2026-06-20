@@ -1,7 +1,8 @@
-import { readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
-import { join, relative } from 'node:path';
+import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, statSync, writeFileSync } from 'node:fs';
+import { basename, dirname, join, relative, resolve } from 'node:path';
 import { canonicalize, canonicalizeNotebook } from '@duckcodeailabs/dql-core';
 import type { CLIFlags } from '../args.js';
+import { findProjectRoot } from '../local-runtime.js';
 import { runImport } from './import.js';
 
 export type MigrationSource = 'looker' | 'tableau' | 'dbt' | 'metabase' | 'raw-sql';
@@ -56,6 +57,10 @@ export async function runMigrate(file: string, flags: CLIFlags): Promise<void> {
     await runFormatMigrate(flags.input || '.', flags);
     return;
   }
+  if (file === 'layout') {
+    await runLayoutMigrate(flags);
+    return;
+  }
   // file is used as the source type for migration
   const source = file as MigrationSource;
   const validSources: MigrationSource[] = ['looker', 'tableau', 'dbt', 'metabase', 'raw-sql'];
@@ -64,6 +69,7 @@ export async function runMigrate(file: string, flags: CLIFlags): Promise<void> {
     console.error(`\n  ✗ Unknown migration source: "${source}"`);
     console.error(`    Valid sources: ${validSources.join(', ')}`);
     console.error(`    Or: "format" to upgrade .dql/.dqlnb files to the canonical on-disk format`);
+    console.error(`    Or: "layout --to domain-first --dry-run" to preview enterprise domain layout moves`);
     console.error('');
     process.exit(1);
   }
@@ -154,6 +160,113 @@ interface FormatMigrateReport {
   dryRun: boolean;
 }
 
+interface LayoutMove {
+  source: string;
+  target: string;
+  kind: 'block' | 'term' | 'business-view';
+  domain: string;
+  status: 'move' | 'exists' | 'same';
+}
+
+interface LayoutMigrateReport {
+  targetLayout: 'domain-first';
+  dryRun: boolean;
+  scanned: number;
+  moves: LayoutMove[];
+  skipped: LayoutMove[];
+}
+
+export async function runLayoutMigrate(flags: CLIFlags): Promise<void> {
+  if (flags.to !== 'domain-first') {
+    throw new Error('Usage: dql migrate layout --to domain-first [--dry-run]');
+  }
+
+  const projectRoot = findProjectRoot(resolve(flags.input || process.cwd()));
+  const dryRun = flags.dryRun === true || flags.force !== true;
+  const report: LayoutMigrateReport = {
+    targetLayout: 'domain-first',
+    dryRun,
+    scanned: 0,
+    moves: [],
+    skipped: [],
+  };
+
+  const legacyDirs: Array<{ dir: string; kind: LayoutMove['kind']; targetFolder: string }> = [
+    { dir: 'blocks', kind: 'block', targetFolder: 'blocks' },
+    { dir: 'terms', kind: 'term', targetFolder: 'terms' },
+    { dir: 'business-views', kind: 'business-view', targetFolder: 'views' },
+  ];
+
+  for (const legacy of legacyDirs) {
+    const root = join(projectRoot, legacy.dir);
+    if (!existsSync(root)) continue;
+    for (const sourcePath of walkDqlFiles(root)) {
+      report.scanned += 1;
+      const source = readFileSync(sourcePath, 'utf-8');
+      const domain = inferDomainFromDql(source);
+      const targetPath = join(projectRoot, 'domains', domain, legacy.targetFolder, basename(sourcePath));
+      const relSource = relative(projectRoot, sourcePath);
+      const relTarget = relative(projectRoot, targetPath);
+      const status: LayoutMove['status'] = sourcePath === targetPath
+        ? 'same'
+        : existsSync(targetPath)
+          ? 'exists'
+          : 'move';
+      const item: LayoutMove = {
+        source: relSource,
+        target: relTarget,
+        kind: legacy.kind,
+        domain,
+        status,
+      };
+      if (status === 'move') {
+        report.moves.push(item);
+        if (!dryRun) {
+          mkdirSync(dirname(targetPath), { recursive: true });
+          renameSync(sourcePath, targetPath);
+        }
+      } else {
+        report.skipped.push(item);
+      }
+    }
+  }
+
+  if (flags.format === 'json') {
+    console.log(JSON.stringify(report, null, 2));
+    return;
+  }
+
+  console.log(`\n  DQL layout migration to domain-first${dryRun ? ' (dry run)' : ''}`);
+  console.log('  ─────────────────────────────');
+  console.log(`  Project:       ${projectRoot}`);
+  console.log(`  Scanned:       ${report.scanned}`);
+  console.log(`  ${dryRun ? 'Would move' : 'Moved'}:    ${report.moves.length}`);
+  console.log(`  Skipped:       ${report.skipped.length}`);
+  if (report.moves.length > 0) {
+    console.log('');
+    for (const move of report.moves.slice(0, 25)) {
+      console.log(`    ${move.source} -> ${move.target}`);
+    }
+    if (report.moves.length > 25) {
+      console.log(`    ... ${report.moves.length - 25} more`);
+    }
+  }
+  if (report.skipped.length > 0) {
+    console.log('');
+    console.log('  Skipped files:');
+    for (const skipped of report.skipped.slice(0, 10)) {
+      console.log(`    ${skipped.source} (${skipped.status})`);
+    }
+    if (report.skipped.length > 10) {
+      console.log(`    ... ${report.skipped.length - 10} more`);
+    }
+  }
+  if (dryRun && report.moves.length > 0) {
+    console.log('  Re-run with --force to apply these file moves.');
+  }
+  console.log('');
+}
+
 export async function runFormatMigrate(root: string, flags: CLIFlags): Promise<void> {
   const dryRun = flags.check === true;
   const report: FormatMigrateReport = {
@@ -200,6 +313,19 @@ export async function runFormatMigrate(root: string, flags: CLIFlags): Promise<v
     process.exit(1);
   }
   console.log('');
+}
+
+function inferDomainFromDql(source: string): string {
+  const match = source.match(/^\s*domain\s*=\s*"([^"]+)"/m);
+  return slugifyDomain(match?.[1] || 'uncategorized');
+}
+
+function slugifyDomain(value: string): string {
+  return value
+    .trim()
+    .replace(/[^a-zA-Z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .toLowerCase() || 'uncategorized';
 }
 
 function* walkDqlFiles(root: string): Generator<string> {

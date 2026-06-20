@@ -37,6 +37,14 @@ export interface BlockRecord {
   llmContext?: string;
   examples?: Array<{ question: string; sql?: string }>;
   invariants?: string[];
+  pattern?: string;
+  grain?: string;
+  entities?: string[];
+  declaredOutputs?: string[];
+  allowedFilters?: string[];
+  sourceSystems?: string[];
+  replacementFor?: string[];
+  reviewCadence?: string;
 }
 
 export interface BlockVersion {

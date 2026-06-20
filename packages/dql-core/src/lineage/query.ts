@@ -33,7 +33,16 @@ export interface Business360Edge {
 }
 
 export interface Business360Gap {
-  code: 'missing_definition' | 'missing_composition' | 'missing_sources' | 'missing_consumers';
+  code:
+    | 'missing_definition'
+    | 'missing_composition'
+    | 'missing_owner'
+    | 'missing_terms'
+    | 'missing_grain'
+    | 'missing_tests'
+    | 'stale_review'
+    | 'missing_sources'
+    | 'missing_consumers';
   severity: 'info' | 'warning';
   message: string;
 }
@@ -64,12 +73,20 @@ export interface Business360Result {
     downstreamViews: Business360Asset[];
     downstreamBlocks: Business360Asset[];
   };
+  replacementHistory: {
+    replaces: Business360Asset[];
+    replacedBy: Business360Asset[];
+    replacementRefs: string[];
+  };
   gaps: Business360Gap[];
   evidence: {
     nodes: Business360Asset[];
     edges: Business360Edge[];
   };
 }
+
+/** Public v2 alias for the enterprise impact view shape. */
+export type Business360ResultV2 = Business360Result;
 
 export interface Business360Options {
   /** Maximum upstream/downstream traversal depth (default 12). */
@@ -155,6 +172,12 @@ export function queryBusiness360(
     ? incomingSourcesByType(graph, focus.id, 'composes', ['block', 'business_view'])
     : [];
   for (const artifact of directlyComposedArtifacts) seedIds.add(artifact.id);
+  const directlyContainedDomainArtifacts = focus.type === 'domain'
+    ? outgoingTargetsByType(graph, focus.id, 'contains', ['term', 'block', 'business_view', 'app'])
+    : [];
+  for (const artifact of directlyContainedDomainArtifacts) {
+    if (artifact.type !== 'app') seedIds.add(artifact.id);
+  }
 
   const upstreamNodes = collectReachableNodes(graph, seedIds, 'upstream', maxDepth);
   const downstreamNodes = collectReachableNodes(graph, seedIds, 'downstream', maxDepth);
@@ -168,11 +191,13 @@ export function queryBusiness360(
   const terms = uniqueNodes([
     ...(focus.type === 'term' ? [focus] : []),
     ...definedByTerms,
+    ...directlyContainedDomainArtifacts.filter((node) => node.type === 'term'),
     ...upstreamNodes.filter((node) => node.type === 'term'),
   ]);
 
   const includedArtifacts = uniqueNodes([
     ...directlyComposedArtifacts,
+    ...directlyContainedDomainArtifacts.filter((node) => node.type === 'block' || node.type === 'business_view'),
     ...seedNodes.flatMap((node) => incomingSourcesByType(graph, node.id, 'composes', ['block', 'business_view'])),
     ...upstreamNodes.filter((node) => node.type === 'block' || node.type === 'business_view'),
   ]).filter((node) => node.id !== focus.id && !definedArtifacts.some((artifact) => artifact.id === node.id));
@@ -189,7 +214,10 @@ export function queryBusiness360(
     .filter((node) => !seedIds.has(node.id));
 
   const dashboards = downstreamNodes.filter((node) => node.type === 'dashboard');
-  const apps = downstreamNodes.filter((node) => node.type === 'app');
+  const apps = uniqueNodes([
+    ...downstreamNodes.filter((node) => node.type === 'app'),
+    ...directlyContainedDomainArtifacts.filter((node) => node.type === 'app'),
+  ]);
   const notebooks = downstreamNodes.filter((node) => node.type === 'notebook');
   const downstreamViews = downstreamNodes
     .filter((node) => node.type === 'business_view')
@@ -197,6 +225,7 @@ export function queryBusiness360(
   const downstreamBlocks = downstreamNodes
     .filter((node) => node.type === 'block')
     .filter((node) => !seedIds.has(node.id));
+  const replacementHistory = buildReplacementHistory(graph, focus);
 
   const evidenceNodes = uniqueNodes([
     focus,
@@ -215,6 +244,8 @@ export function queryBusiness360(
     ...notebooks,
     ...downstreamViews,
     ...downstreamBlocks,
+    ...replacementHistory.replaces,
+    ...replacementHistory.replacedBy,
   ]);
   const evidenceNodeIds = new Set(evidenceNodes.map((node) => node.id));
   const evidenceEdges = graph.getAllEdges()
@@ -225,6 +256,9 @@ export function queryBusiness360(
     focus,
     definedArtifacts,
     includedArtifacts,
+    terms,
+    definedByTerms,
+    replacementHistory,
     sourceCount: sourceTables.length + dbtModels.length + dbtSources.length,
     consumerCount: dashboards.length + apps.length + notebooks.length,
   });
@@ -254,6 +288,11 @@ export function queryBusiness360(
       notebooks: nodesToAssets(notebooks),
       downstreamViews: nodesToAssets(downstreamViews),
       downstreamBlocks: nodesToAssets(downstreamBlocks),
+    },
+    replacementHistory: {
+      replaces: nodesToAssets(replacementHistory.replaces),
+      replacedBy: nodesToAssets(replacementHistory.replacedBy),
+      replacementRefs: replacementHistory.replacementRefs,
     },
     gaps,
     evidence: {
@@ -428,6 +467,29 @@ function assetForNode(node: LineageNode): Business360Asset {
   };
 }
 
+function buildReplacementHistory(graph: LineageGraph, focus: LineageNode): {
+  replaces: LineageNode[];
+  replacedBy: LineageNode[];
+  replacementRefs: string[];
+} {
+  const refs = stringArray(focus.metadata?.replacementFor);
+  const replaces = uniqueNodes(refs
+    .map((ref) => resolveFocusNode(graph, ref))
+    .filter((node): node is LineageNode => Boolean(node)));
+  const focusAliases = new Set([
+    focus.id.toLowerCase(),
+    focus.name.toLowerCase(),
+    `${focus.type}:${focus.name}`.toLowerCase(),
+  ]);
+  const replacedBy = uniqueNodes(graph.getAllNodes()
+    .filter((node) => node.type === 'block')
+    .filter((node) => node.id !== focus.id)
+    .filter((node) => stringArray(node.metadata?.replacementFor)
+      .some((ref) => focusAliases.has(ref.toLowerCase()))));
+
+  return { replaces, replacedBy, replacementRefs: refs };
+}
+
 function countTechnicalUpstreamPaths(
   graph: LineageGraph,
   startIds: Set<string>,
@@ -480,10 +542,22 @@ function buildBusiness360Gaps(input: {
   focus: LineageNode;
   definedArtifacts: LineageNode[];
   includedArtifacts: LineageNode[];
+  terms: LineageNode[];
+  definedByTerms: LineageNode[];
+  replacementHistory: {
+    replaces: LineageNode[];
+    replacedBy: LineageNode[];
+    replacementRefs: string[];
+  };
   sourceCount: number;
   consumerCount: number;
 }): Business360Gap[] {
   const gaps: Business360Gap[] = [];
+  const reviewNodes = uniqueNodesWithDomains([
+    input.focus,
+    ...input.definedArtifacts,
+    ...input.includedArtifacts,
+  ]).filter((node) => isGovernedBusinessNode(node));
 
   if (input.focus.type === 'term' && input.definedArtifacts.length === 0) {
     gaps.push({
@@ -498,6 +572,54 @@ function buildBusiness360Gaps(input: {
       code: 'missing_composition',
       severity: 'warning',
       message: 'This business view does not include any blocks or nested business views.',
+    });
+  }
+
+  const missingOwners = reviewNodes.filter((node) => !node.owner?.trim());
+  if (missingOwners.length > 0) {
+    gaps.push({
+      code: 'missing_owner',
+      severity: 'warning',
+      message: `${missingOwners.length} governed asset(s) are missing owner metadata: ${sampleNodeLabels(missingOwners)}.`,
+    });
+  }
+
+  const requiresTerms = input.focus.type === 'domain'
+    || input.focus.type === 'block'
+    || input.focus.type === 'business_view';
+  if (requiresTerms && input.terms.length === 0 && input.definedByTerms.length === 0) {
+    gaps.push({
+      code: 'missing_terms',
+      severity: 'warning',
+      message: 'No business terms are connected to this business asset.',
+    });
+  }
+
+  const blocksForContract = reviewNodes.filter((node) => node.type === 'block');
+  const missingGrain = blocksForContract.filter((node) => typeof node.metadata?.grain !== 'string' || node.metadata.grain.trim().length === 0);
+  if (missingGrain.length > 0) {
+    gaps.push({
+      code: 'missing_grain',
+      severity: 'warning',
+      message: `${missingGrain.length} block(s) are missing grain metadata: ${sampleNodeLabels(missingGrain)}.`,
+    });
+  }
+
+  const missingTests = blocksForContract.filter((node) => stringArray(node.metadata?.tests).length === 0);
+  if (missingTests.length > 0) {
+    gaps.push({
+      code: 'missing_tests',
+      severity: 'warning',
+      message: `${missingTests.length} block(s) are missing test assertions: ${sampleNodeLabels(missingTests)}.`,
+    });
+  }
+
+  const staleReview = reviewNodes.filter((node) => hasStaleOrMissingReviewCadence(node));
+  if (staleReview.length > 0) {
+    gaps.push({
+      code: 'stale_review',
+      severity: 'warning',
+      message: `${staleReview.length} governed asset(s) need review cadence metadata refreshed: ${sampleNodeLabels(staleReview)}.`,
     });
   }
 
@@ -518,6 +640,72 @@ function buildBusiness360Gaps(input: {
   }
 
   return gaps;
+}
+
+function isGovernedBusinessNode(node: LineageNode): boolean {
+  return node.type === 'domain'
+    || node.type === 'term'
+    || node.type === 'block'
+    || node.type === 'business_view'
+    || node.type === 'app'
+    || node.type === 'dashboard'
+    || node.type === 'notebook';
+}
+
+function hasStaleOrMissingReviewCadence(node: LineageNode): boolean {
+  if (node.type === 'dashboard' || node.type === 'notebook' || node.type === 'app') return false;
+  const value = typeof node.metadata?.reviewCadence === 'string' ? node.metadata.reviewCadence.trim() : '';
+  if (!value) return true;
+  const days = reviewCadenceDays(value);
+  return days == null || days > 180;
+}
+
+function reviewCadenceDays(value: string): number | null {
+  const normalized = value.trim().toLowerCase().replace(/[\s_-]+/g, '');
+  const known: Record<string, number> = {
+    daily: 1,
+    weekly: 7,
+    biweekly: 14,
+    monthly: 30,
+    quarterly: 90,
+    semiannual: 180,
+    semiannually: 180,
+    annual: 365,
+    annually: 365,
+    yearly: 365,
+  };
+  if (known[normalized] !== undefined) return known[normalized];
+  const everyMatch = normalized.match(/^every(\d+)(day|days|week|weeks|month|months)$/);
+  if (!everyMatch) return null;
+  const amount = Number(everyMatch[1]);
+  const unit = everyMatch[2];
+  if (!Number.isFinite(amount) || amount <= 0) return null;
+  if (unit.startsWith('day')) return amount;
+  if (unit.startsWith('week')) return amount * 7;
+  return amount * 30;
+}
+
+function uniqueNodesWithDomains(nodes: LineageNode[]): LineageNode[] {
+  const seen = new Set<string>();
+  const unique: LineageNode[] = [];
+  for (const node of nodes) {
+    if (seen.has(node.id)) continue;
+    seen.add(node.id);
+    unique.push(node);
+  }
+  return sortNodes(unique);
+}
+
+function stringArray(value: unknown): string[] {
+  return Array.isArray(value)
+    ? value.filter((item): item is string => typeof item === 'string' && item.trim().length > 0)
+    : [];
+}
+
+function sampleNodeLabels(nodes: LineageNode[]): string {
+  const sample = nodes.slice(0, 5).map((node) => `${node.type}:${node.name}`);
+  const suffix = nodes.length > sample.length ? `, +${nodes.length - sample.length} more` : '';
+  return `${sample.join(', ')}${suffix}`;
 }
 
 function searchLineage(graph: LineageGraph, rawTerm: string): Array<{ node: LineageNode; score: number }> {
@@ -645,6 +833,9 @@ function collectPaths(
 
     // Filter to non-visited neighbors
     const nextEdges = edges.filter((e) => {
+      if (e.type === 'contains' && graph.getNode(e.source)?.type === 'domain') {
+        return false;
+      }
       const nextId = direction === 'upstream' ? e.source : e.target;
       return !visited.has(nextId);
     });

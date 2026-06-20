@@ -31,7 +31,7 @@ export interface BlockStudioAiAssistance {
   createdAt: string;
   status: 'suggested' | 'accepted' | 'rejected';
   provider?: string;
-  patch?: Partial<Pick<BlockStudioImportCandidate, 'name' | 'domain' | 'description' | 'owner' | 'tags' | 'sql' | 'dqlSource'>>;
+  patch?: Partial<Pick<BlockStudioImportCandidate, 'name' | 'domain' | 'description' | 'owner' | 'tags' | 'pattern' | 'grain' | 'entities' | 'outputs' | 'allowedFilters' | 'sourceSystems' | 'replacementFor' | 'sql' | 'dqlSource'>>;
 }
 
 export interface BlockStudioCertificationChecklist {
@@ -47,7 +47,7 @@ export interface BlockStudioCertificationChecklist {
 }
 
 export interface DqlGenerationEvidence {
-  kind: 'dql_block' | 'semantic_metric' | 'semantic_model' | 'dbt_model' | 'warehouse_table' | 'metadata' | 'lineage';
+  kind: 'dql_block' | 'dql_term' | 'business_view' | 'domain' | 'semantic_metric' | 'semantic_model' | 'dbt_model' | 'warehouse_table' | 'datalex_contract' | 'datalex_entity' | 'datalex_domain' | 'metadata' | 'lineage';
   name: string;
   description?: string;
   objectKey?: string;
@@ -72,6 +72,13 @@ export interface BlockStudioImportCandidate {
   description: string;
   owner: string;
   tags: string[];
+  pattern?: string;
+  grain?: string;
+  entities?: string[];
+  outputs?: string[];
+  allowedFilters?: string[];
+  sourceSystems?: string[];
+  replacementFor?: string[];
   sql: string;
   dqlSource: string;
   validation: unknown | null;
@@ -316,7 +323,7 @@ export function updateBlockStudioImportCandidate(
   projectRoot: string,
   importId: string,
   candidateId: string,
-  patch: Partial<Pick<BlockStudioImportCandidate, 'name' | 'domain' | 'description' | 'owner' | 'tags' | 'sql' | 'reviewStatus' | 'llmContext' | 'evidence' | 'draftSave' | 'generationMode' | 'generationProvider' | 'savedPath' | 'conversionNotes'>>,
+  patch: Partial<Pick<BlockStudioImportCandidate, 'name' | 'domain' | 'description' | 'owner' | 'tags' | 'pattern' | 'grain' | 'entities' | 'outputs' | 'allowedFilters' | 'sourceSystems' | 'replacementFor' | 'sql' | 'reviewStatus' | 'llmContext' | 'evidence' | 'draftSave' | 'generationMode' | 'generationProvider' | 'savedPath' | 'conversionNotes'>>,
 ): BlockStudioImportCandidate {
   const candidate = readBlockStudioImportCandidate(projectRoot, importId, candidateId);
   const next: BlockStudioImportCandidate = { ...candidate };
@@ -325,6 +332,13 @@ export function updateBlockStudioImportCandidate(
   if (patch.description !== undefined) next.description = patch.description;
   if (patch.owner !== undefined) next.owner = patch.owner;
   if (patch.tags !== undefined) next.tags = normalizeTags(patch.tags);
+  if (patch.pattern !== undefined) next.pattern = normalizePattern(patch.pattern);
+  if (patch.grain !== undefined) next.grain = patch.grain;
+  if (patch.entities !== undefined) next.entities = normalizeStringList(patch.entities);
+  if (patch.outputs !== undefined) next.outputs = normalizeStringList(patch.outputs);
+  if (patch.allowedFilters !== undefined) next.allowedFilters = normalizeStringList(patch.allowedFilters);
+  if (patch.sourceSystems !== undefined) next.sourceSystems = normalizeStringList(patch.sourceSystems);
+  if (patch.replacementFor !== undefined) next.replacementFor = normalizeStringList(patch.replacementFor);
   if (patch.sql !== undefined) next.sql = patch.sql;
   if (patch.reviewStatus !== undefined) next.reviewStatus = patch.reviewStatus;
   if (patch.llmContext !== undefined) next.llmContext = patch.llmContext;
@@ -334,7 +348,7 @@ export function updateBlockStudioImportCandidate(
   if (patch.generationProvider !== undefined) next.generationProvider = patch.generationProvider;
   if (patch.savedPath !== undefined) next.savedPath = patch.savedPath;
   if (patch.conversionNotes !== undefined) next.conversionNotes = patch.conversionNotes;
-  if (patch.name || patch.domain || patch.description || patch.owner || patch.tags || patch.sql || patch.llmContext) {
+  if (patch.name || patch.domain || patch.description || patch.owner || patch.tags || patch.pattern || patch.grain || patch.entities || patch.outputs || patch.allowedFilters || patch.sourceSystems || patch.replacementFor || patch.sql || patch.llmContext) {
     next.dqlSource = candidateToDqlSource(next);
     next.lineage = {
       ...next.lineage,
@@ -349,10 +363,16 @@ export function updateBlockStudioImportCandidate(
   return next;
 }
 
-export function candidateToDqlSource(candidate: Pick<BlockStudioImportCandidate, 'name' | 'domain' | 'description' | 'owner' | 'tags' | 'sql' | 'llmContext'>): string {
+export function candidateToDqlSource(candidate: Pick<BlockStudioImportCandidate, 'name' | 'domain' | 'description' | 'owner' | 'tags' | 'pattern' | 'grain' | 'entities' | 'outputs' | 'allowedFilters' | 'sourceSystems' | 'replacementFor' | 'sql' | 'llmContext'>): string {
   const tags = normalizeTags(candidate.tags).map((tag) => dqlString(tag)).join(', ');
   const sql = candidate.sql.trim().replace(/"""/g, '\\"\\"\\"');
   const llmContext = candidate.llmContext?.trim();
+  const pattern = normalizePattern(candidate.pattern || inferSqlPattern(candidate.sql));
+  const grain = candidate.grain?.trim() || inferSqlGrain(candidate.sql);
+  const outputs = normalizeStringList(candidate.outputs?.length ? candidate.outputs : inferSqlOutputs(candidate.sql)).slice(0, 24);
+  const sourceSystems = normalizeStringList(candidate.sourceSystems?.length ? candidate.sourceSystems : inferSqlSourceSystems(candidate.sql)).slice(0, 12);
+  const entities = normalizeStringList(candidate.entities?.length ? candidate.entities : inferSqlEntities(grain, sourceSystems)).slice(0, 12);
+  const allowedFilters = normalizeStringList(candidate.allowedFilters?.length ? candidate.allowedFilters : inferSqlFilters(candidate.sql)).slice(0, 16);
   return `block ${dqlString(candidate.name)} {
     status = "draft"
     domain = ${dqlString(sanitizeDomain(candidate.domain))}
@@ -360,6 +380,7 @@ export function candidateToDqlSource(candidate: Pick<BlockStudioImportCandidate,
     description = ${dqlString(candidate.description)}
     tags = [${tags}]
     owner = ${dqlString(candidate.owner)}
+${pattern ? `    pattern = ${dqlString(pattern)}\n` : ''}${grain ? `    grain = ${dqlString(grain)}\n` : ''}${entities.length > 0 ? `    entities = [${entities.map(dqlString).join(', ')}]\n` : ''}${outputs.length > 0 ? `    outputs = [${outputs.map(dqlString).join(', ')}]\n` : ''}${allowedFilters.length > 0 ? `    allowedFilters = [${allowedFilters.map(dqlString).join(', ')}]\n` : ''}${sourceSystems.length > 0 ? `    sourceSystems = [${sourceSystems.map(dqlString).join(', ')}]\n` : ''}${candidate.replacementFor?.length ? `    replacementFor = [${candidate.replacementFor.map(dqlString).join(', ')}]\n` : ''}
 ${llmContext ? `    llmContext = ${dqlString(llmContext)}\n` : ''}
 
     query = """
@@ -375,6 +396,105 @@ ${sql}
     }
 }
 `;
+}
+
+function inferSqlGrain(sql: string): string {
+  const groupFields = extractGroupByFields(sql);
+  return groupFields[0] ?? '';
+}
+
+function inferSqlPattern(sql: string): string {
+  const lower = stripSqlComments(sql).toLowerCase();
+  const groupFields = extractGroupByFields(sql);
+  if (/@metric\s*\(/i.test(sql)) return 'metric_wrapper';
+  if (/\bjoin\b/i.test(sql)) {
+    const systems = new Set(inferSqlSourceSystems(sql));
+    if (systems.size > 1) return 'bridge';
+  }
+  if (/\border\s+by\b[\s\S]*\blimit\s+\d+/i.test(sql)) return 'ranking';
+  if (groupFields.some((field) => /\b(date|day|week|month|quarter|year|period|time)\b/i.test(field))) return 'trend';
+  if (groupFields.length === 1 && /_id$|_key$/i.test(groupFields[0])) return 'entity_rollup';
+  if (!/\b(sum|count|avg|min|max|median|percentile|rank)\s*\(/i.test(lower) && /\b(dim|profile|customer|account|player|product|user|entity)\b/i.test(lower)) {
+    return 'entity_profile';
+  }
+  return 'custom';
+}
+
+function inferSqlOutputs(sql: string): string[] {
+  const selectMatch = sql.match(/\bselect\b([\s\S]+?)\bfrom\b/i);
+  if (!selectMatch) return [];
+  return splitSqlList(selectMatch[1])
+    .map((expr) => {
+      const alias = expr.match(/\bas\s+([A-Za-z_][A-Za-z0-9_]*)\b/i)?.[1]
+        ?? expr.match(/([A-Za-z_][A-Za-z0-9_]*)\s*$/)?.[1]
+        ?? '';
+      return alias.replace(/[`"[\]]/g, '');
+    })
+    .filter(Boolean)
+    .filter((name) => !/^(from|where|group|order|limit)$/i.test(name));
+}
+
+function inferSqlFilters(sql: string): string[] {
+  const filters = new Set<string>();
+  const where = sql.match(/\bwhere\b([\s\S]+?)(?:\bgroup\s+by\b|\border\s+by\b|\blimit\b|$)/i)?.[1] ?? '';
+  const addFilter = (value: string | undefined) => {
+    const name = value?.split('.').pop()?.replace(/[`"[\]]/g, '');
+    if (name && !/^(and|or|not|null|year|month|day)$/i.test(name)) filters.add(name);
+  };
+  const extractRegex = /\bextract\s*\([^)]*\bfrom\s+([A-Za-z_][A-Za-z0-9_.]*)\s*\)\s*(?:=|<>|!=|>|<|>=|<=|\bin\b|\blike\b)/gi;
+  const isNullRegex = /\b([A-Za-z_][A-Za-z0-9_.]*)\s+is\s+(?:not\s+)?null\b/gi;
+  const regex = /\b([A-Za-z_][A-Za-z0-9_.]*)\s*(?:=|<>|!=|>|<|>=|<=|\bin\b|\blike\b)/gi;
+  let match: RegExpExecArray | null;
+  while ((match = extractRegex.exec(where))) addFilter(match[1]);
+  while ((match = isNullRegex.exec(where))) addFilter(match[1]);
+  while ((match = regex.exec(where))) {
+    addFilter(match[1]);
+  }
+  return [...filters];
+}
+
+function inferSqlSourceSystems(sql: string): string[] {
+  return extractSourceTables(sql)
+    .map((table) => table.split('.').filter(Boolean).slice(-2, -1)[0] ?? table.split('.').filter(Boolean)[0])
+    .filter(Boolean)
+    .map((value) => businessToken(value))
+    .filter(Boolean);
+}
+
+function inferSqlEntities(grain: string, sourceSystems: string[]): string[] {
+  const entity = grain && /_id$|_key$/i.test(grain) ? businessEntityFromIdentifier(grain) : '';
+  return Array.from(new Set([entity, ...sourceSystems.map(businessEntityFromIdentifier)].filter(Boolean)));
+}
+
+function extractGroupByFields(sql: string): string[] {
+  const match = sql.match(/\bgroup\s+by\b([\s\S]+?)(?:\border\s+by\b|\blimit\b|\bqualify\b|\bhaving\b|$)/i);
+  if (!match) return [];
+  return splitSqlList(match[1])
+    .map((item) => item.replace(/[`"[\]]/g, '').trim())
+    .filter((item) => item && !/^\d+$/.test(item))
+    .map((item) => item.split('.').pop() ?? item)
+    .slice(0, 4);
+}
+
+function splitSqlList(value: string): string[] {
+  const parts: string[] = [];
+  let start = 0;
+  let depth = 0;
+  let single = false;
+  let double = false;
+  for (let i = 0; i < value.length; i += 1) {
+    const char = value[i];
+    if (!double && char === "'" && value[i - 1] !== '\\') single = !single;
+    else if (!single && char === '"' && value[i - 1] !== '\\') double = !double;
+    else if (!single && !double && char === '(') depth += 1;
+    else if (!single && !double && char === ')' && depth > 0) depth -= 1;
+    else if (!single && !double && depth === 0 && char === ',') {
+      parts.push(value.slice(start, i));
+      start = i + 1;
+    }
+  }
+  parts.push(value.slice(start));
+  return parts.map((part) => part.trim()).filter(Boolean);
 }
 
 function collectSqlStatements(sources: SqlSource[]): SqlStatementCandidate[] {
@@ -919,6 +1039,26 @@ function sanitizeDomain(domain: string): string {
 
 function normalizeTags(tags: string[]): string[] {
   return Array.from(new Set(tags.map((tag) => tag.trim().toLowerCase()).filter(Boolean)));
+}
+
+function normalizePattern(value: string | undefined): string {
+  const normalized = (value ?? '').trim().toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '');
+  const allowed = new Set([
+    'metric_wrapper',
+    'entity_profile',
+    'entity_rollup',
+    'ranking',
+    'trend',
+    'bridge',
+    'drilldown',
+    'replacement',
+    'custom',
+  ]);
+  return allowed.has(normalized) ? normalized : '';
+}
+
+function normalizeStringList(values: string[] | undefined): string[] {
+  return Array.from(new Set((values ?? []).map((value) => value.trim()).filter(Boolean)));
 }
 
 function titleizeName(name: string): string {

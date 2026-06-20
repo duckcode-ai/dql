@@ -17,6 +17,7 @@ dql --version
 | --- | --- |
 | `dql init [dir]` | Initialize DQL in a project (auto-detects dbt) |
 | `dql doctor [path]` | Run local setup checks |
+| `dql doctor scale` | Report enterprise-scale manifest/cache/index health |
 | `dql validate [path]` | Validate all `.dql` files and semantic references |
 | `dql compile [path]` | Generate project manifest (`dql-manifest.json`) |
 
@@ -24,12 +25,16 @@ dql --version
 
 | Command | What it does |
 | --- | --- |
-| `dql new <type> <name>` | Create a block, semantic block, term, business view, dashboard, workbook, or notebook |
+| `dql new <type> <name>` | Create a domain, block, semantic block, term, business view, dashboard, workbook, or notebook |
+| `dql new domain <name>` | Create `domains/<domain>/domain.dql` plus domain-local `terms/`, `blocks/`, `views/`, and `apps/` folders |
+| `dql new block --domain <domain> --pattern <pattern> <name>` | Create a draft block scaffold with enterprise contract metadata |
+| `dql new view --domain <domain> <name>` | Create a domain-local business view scaffold |
 | `dql import sql <path>` | Preview existing SQL files or folders as Block Studio import candidates |
 | `dql import sql <path> --save` | Save valid SQL import candidates as draft DQL blocks |
 | `dql parse <file.dql>` | Parse and analyze a DQL file |
 | `dql info <file.dql>` | Show block metadata |
 | `dql certify <file.dql>` | Evaluate certification rules |
+| `dql certify <file.dql> --enterprise` | Enforce grain, outputs, source-system lineage, pattern, review cadence, and test assertions |
 | `dql fmt <file.dql>` | Format a file in place (canonical form) |
 | `dql fmt --check <path>` | CI check; exits 1 if anything needs formatting |
 
@@ -97,6 +102,8 @@ dql lineage --dashboard daily_ops      # consumption lineage
 | --- | --- |
 | `dql import sql <path>` | Preview SQL files/folders as draft Block Studio import candidates |
 | `dql migrate <source>` | Scaffold from looker, tableau, dbt, metabase, or raw-sql |
+| `dql migrate layout --to domain-first --dry-run` | Preview moves from legacy folders into `domains/<domain>/...` |
+| `dql migrate layout --to domain-first --force` | Apply the previewed domain-first file moves |
 | `dql migrate format` | Rewrite every `.dql` and `.dqlnb` in the project in canonical form |
 | `dql migrate format --check` | Dry run; exits 1 if anything would change |
 
@@ -110,10 +117,14 @@ dql lineage --dashboard daily_ops      # consumption lineage
 | `--check` | For `fmt`: non-zero exit if changes needed |
 | `--input <path>` | Source for scaffold-style migrations |
 | `--out-dir <path>` | Output directory for `build` |
+| `--to domain-first` | Target for `dql migrate layout` |
+| `--dry-run` | Preview layout moves without writing |
 | `--port <n>` | Preferred local port for `preview`/`serve` |
 | `--chart <type>` | Primary chart type for `new` scaffolds |
 | `--domain <name>` | Domain for new block scaffolds |
 | `--owner <name>` | Owner for new block scaffolds |
+| `--pattern <name>` | Block scaffold pattern, such as `metric_wrapper`, `entity_profile`, `entity_rollup`, `ranking`, `trend`, `bridge`, `drilldown`, or `replacement` |
+| `--enterprise` | For `certify`: require enterprise-ready reusable block contract metadata |
 | `--query-only` | Create a query-only block (no visualization) |
 | `--connection <driver\|path>` | Connection for `certify`/`test` (e.g. `duckdb`, `./db.duckdb`) |
 | `--ai` | Include AI provider, MCP, and metadata checks in `dql doctor` |
