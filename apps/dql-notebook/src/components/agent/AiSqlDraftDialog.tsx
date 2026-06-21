@@ -30,9 +30,11 @@ interface AiSqlDraftDialogProps {
   contextLabel?: string;
   upstreamSql?: string;
   initialPrompt?: string;
+  initialSqlDraft?: string;
+  initialError?: string;
+  insertLabel?: string;
   onClose: () => void;
   onInsertSql: (sql: string, meta: AiSqlDraftMeta) => void;
-  onCreateBlock?: (sql: string, meta: AiSqlDraftMeta) => void;
 }
 
 export function AiSqlDraftDialog({
@@ -41,22 +43,27 @@ export function AiSqlDraftDialog({
   contextLabel,
   upstreamSql,
   initialPrompt,
+  initialSqlDraft,
+  initialError,
+  insertLabel,
   onClose,
   onInsertSql,
-  onCreateBlock,
 }: AiSqlDraftDialogProps) {
   const t = themes[themeMode];
   const [question, setQuestion] = useState(initialPrompt ?? '');
+  const startsWithReview = Boolean(initialSqlDraft?.trim() || initialError?.trim());
   const [running, setRunning] = useState(false);
   const [events, setEvents] = useState<AgentTurn[]>([]);
   const [text, setText] = useState('');
   const [error, setError] = useState<string | null>(null);
   const [proposal, setProposal] = useState<BlockProposal | null>(null);
-  const [sqlDraft, setSqlDraft] = useState('');
+  const [sqlDraft, setSqlDraft] = useState(initialSqlDraft?.trim() ?? '');
   const [sqlEdited, setSqlEdited] = useState(false);
   const [previewResult, setPreviewResult] = useState<QueryResult | null>(null);
-  const [previewError, setPreviewError] = useState<string | null>(null);
-  const [runStatus, setRunStatus] = useState<DraftRunStatus>('idle');
+  const [previewError, setPreviewError] = useState<string | null>(initialError?.trim() || null);
+  const [runStatus, setRunStatus] = useState<DraftRunStatus>(initialError?.trim() ? 'error' : 'idle');
+  const [questionExpanded, setQuestionExpanded] = useState(!startsWithReview);
+  const [sqlEditing, setSqlEditing] = useState(false);
   const abortRef = useRef<AbortController | null>(null);
   const answer = useMemo(() => extractGovernedAnswer(events), [events]);
   const generatedSql = extractSqlDraft(answer, proposal, text);
@@ -64,8 +71,11 @@ export function AiSqlDraftDialog({
   const blockMeta = buildBlockDraftMeta(question, answer, proposal, activeSql, text);
   const title = blockMeta.title;
   const isBlockMode = mode === 'block';
+  const isRepairMode = Boolean(!isBlockMode && initialSqlDraft?.trim() && initialError?.trim());
   const previewText = isBlockMode ? blockMeta.blockSource : activeSql;
-  const canCreateBlock = Boolean(onCreateBlock && activeSql && !running);
+  const hasReviewOutput = Boolean(events.length > 0 || text || error || previewText || previewError);
+  const showQuestionEditor = questionExpanded || !hasReviewOutput;
+  const previewRowCount = previewResult?.rowCount ?? previewResult?.rows.length ?? 0;
 
   useEffect(() => {
     if (!generatedSql || sqlEdited) return;
@@ -108,16 +118,24 @@ export function AiSqlDraftDialog({
     setPreviewResult(null);
     setPreviewError(null);
     setRunStatus('generating');
+    setQuestionExpanded(false);
+    setSqlEditing(false);
     const controller = new AbortController();
     abortRef.current = controller;
     const collected: AgentTurn[] = [];
     let output = '';
     let latestProposal: BlockProposal | null = null;
     try {
+      const repairError = previewError?.trim() || initialError?.trim();
+      const prompt = isRepairMode && activeSql.trim() && repairError
+        ? buildSqlRepairPrompt(trimmed, activeSql.trim(), repairError, mode)
+        : buildSqlDraftPrompt(trimmed, mode);
       await runAgent(
         {
-          messages: [{ role: 'user', content: buildSqlDraftPrompt(trimmed, mode) }],
-          upstream: upstreamSql?.trim() ? { cellId: `ai-sql:${mode}`, sql: upstreamSql } : undefined,
+          messages: [{ role: 'user', content: prompt }],
+          upstream: (isRepairMode ? activeSql : upstreamSql)?.trim()
+            ? { cellId: `ai-sql:${mode}`, sql: (isRepairMode ? activeSql : upstreamSql) ?? '' }
+            : undefined,
           signal: controller.signal,
         },
         (turn) => {
@@ -139,6 +157,7 @@ export function AiSqlDraftDialog({
       if (nextSql) {
         setSqlDraft(nextSql);
         setSqlEdited(false);
+        setSqlEditing(false);
         await runPreviewForSql(nextSql);
       } else {
         setRunStatus('idle');
@@ -194,6 +213,7 @@ export function AiSqlDraftDialog({
       }
       setSqlDraft(fixedSql);
       setSqlEdited(false);
+      setSqlEditing(false);
       await runPreviewForSql(fixedSql);
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
@@ -207,11 +227,6 @@ export function AiSqlDraftDialog({
   const insert = () => {
     if (!activeSql) return;
     onInsertSql(activeSql, { ...blockMeta, previewResult: previewResult ?? undefined, previewError: previewError ?? undefined });
-  };
-
-  const createBlock = () => {
-    if (!activeSql || !onCreateBlock) return;
-    onCreateBlock(activeSql, { ...blockMeta, previewResult: previewResult ?? undefined, previewError: previewError ?? undefined });
   };
 
   return (
@@ -229,53 +244,73 @@ export function AiSqlDraftDialog({
           <div style={iconWrapStyle(t)}><Bot size={17} /></div>
           <div style={{ flex: 1, minWidth: 0 }}>
             <div style={{ fontSize: 15, fontWeight: 800, color: t.textPrimary }}>
-              {isBlockMode ? 'Build DQL block' : 'Build SQL draft'}
+              {isBlockMode ? 'Build DQL block' : isRepairMode ? 'Fix SQL draft' : 'Build SQL draft'}
             </div>
             <div style={{ fontSize: 12, color: t.textSecondary, marginTop: 2 }}>
-              Metadata, dbt, certified blocks, and schema first. Generated work stays review-required.
+              {isBlockMode
+                ? 'Metadata, dbt, certified blocks, and schema first. Generated work stays review-required.'
+                : 'Metadata, dbt, semantic context, and schema first. Generated SQL stays review-required.'}
             </div>
           </div>
           <button type="button" onClick={onClose} title="Close" style={iconButtonStyle(t)}><X size={15} /></button>
         </div>
 
         <div style={bodyStyle}>
-          <label style={labelStyle(t)}>
-            Question
-            <textarea
-              value={question}
-              onChange={(event) => setQuestion(event.target.value)}
-              placeholder={isBlockMode ? 'Example: build a top 10 players by points per game block' : 'Example: show monthly revenue by customer type'}
-              rows={4}
-              style={textareaStyle(t)}
-              autoFocus
-              onKeyDown={(event) => {
-                if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) {
-                  event.preventDefault();
-                  void generate();
-                }
-              }}
-            />
-          </label>
-
-          <div style={suggestionRowStyle}>
-            {starterPrompts(mode).map((prompt) => (
+          {showQuestionEditor ? (
+            <label style={labelStyle(t)}>
+              Question
+              <textarea
+                value={question}
+                onChange={(event) => setQuestion(event.target.value)}
+                placeholder={isBlockMode ? 'Example: build a top 10 players by points per game block' : 'Example: show monthly revenue by customer type'}
+                rows={hasReviewOutput ? 3 : 4}
+                style={textareaStyle(t, hasReviewOutput)}
+                autoFocus={!hasReviewOutput}
+                onKeyDown={(event) => {
+                  if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) {
+                    event.preventDefault();
+                    void generate();
+                  }
+                }}
+              />
+            </label>
+          ) : (
+            <div style={questionSummaryStyle(t)}>
+              <div style={{ minWidth: 0 }}>
+                <div style={compactEyebrowStyle(t)}>Question</div>
+                <div style={compactQuestionTextStyle(t)}>{question || 'No question provided'}</div>
+              </div>
               <button
-                key={prompt}
                 type="button"
-                onClick={() => setQuestion(prompt)}
-                style={suggestionStyle(t)}
+                onClick={() => setQuestionExpanded(true)}
+                style={compactActionButtonStyle(t)}
               >
-                <Sparkles size={12} /> {prompt}
+                Edit question
               </button>
-            ))}
-          </div>
+            </div>
+          )}
+
+          {showQuestionEditor && !hasReviewOutput ? (
+            <div style={suggestionRowStyle}>
+              {starterPrompts(mode).map((prompt) => (
+                <button
+                  key={prompt}
+                  type="button"
+                  onClick={() => setQuestion(prompt)}
+                  style={suggestionStyle(t)}
+                >
+                  <Sparkles size={12} /> {prompt}
+                </button>
+              ))}
+            </div>
+          ) : null}
 
           <div style={contextStyle(t)}>
             <span>{contextLabel ?? (mode === 'block' ? 'Block Studio' : 'Notebook')}</span>
             <b>{upstreamSql?.trim() ? 'Current SQL context included' : 'Project metadata and runtime schema'}</b>
           </div>
 
-          {events.length > 0 || text || error ? (
+          {hasReviewOutput ? (
             <div style={resultShellStyle(t)}>
               <div style={resultHeadStyle(t)}>
                 <span>{statusLabel(runStatus, isBlockMode, Boolean(previewText))}</span>
@@ -290,11 +325,25 @@ export function AiSqlDraftDialog({
               {previewText ? (
                 <div style={draftPreviewWrapStyle(t)}>
                   {isBlockMode ? <pre style={blockPreviewStyle(t)}>{blockMeta.blockSource}</pre> : null}
-                  <label style={labelStyle(t)}>
-                    SQL draft
+                  <div style={draftReviewHeaderStyle(t)}>
+                    <div style={{ minWidth: 0 }}>
+                      <div style={draftTitleStyle(t)}>SQL draft</div>
+                      <div style={draftSubtitleStyle(t)}>
+                        Review grain, joins, filters, and result shape before using this SQL.
+                      </div>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => setSqlEditing((value) => !value)}
+                      style={compactActionButtonStyle(t)}
+                    >
+                      {sqlEditing ? 'Preview SQL' : 'Edit SQL'}
+                    </button>
+                  </div>
+                  {sqlEditing ? (
                     <textarea
                       value={activeSql}
-                      rows={10}
+                      rows={14}
                       spellCheck={false}
                       onChange={(event) => {
                         setSqlDraft(event.target.value);
@@ -305,7 +354,9 @@ export function AiSqlDraftDialog({
                       }}
                       style={sqlEditorStyle(t)}
                     />
-                  </label>
+                  ) : (
+                    <pre style={sqlReviewStyle(t)}>{activeSql}</pre>
+                  )}
                   <div style={draftActionRowStyle}>
                     <button
                       type="button"
@@ -329,9 +380,15 @@ export function AiSqlDraftDialog({
                   </div>
                   {previewError ? <div style={errorStyle}>{previewError}</div> : null}
                   {previewResult ? (
-                    <div style={previewTableWrapStyle(t)}>
-                      <TableOutput result={previewResult} themeMode={themeMode} />
-                    </div>
+                    <>
+                      <div style={previewResultHeaderStyle(t)}>
+                        <span>Preview result</span>
+                        <b>{previewRowCount} rows</b>
+                      </div>
+                      <div style={previewTableWrapStyle(t)}>
+                        <TableOutput result={previewResult} themeMode={themeMode} />
+                      </div>
+                    </>
                   ) : null}
                 </div>
               ) : (
@@ -353,7 +410,11 @@ export function AiSqlDraftDialog({
 
         <div style={footerStyle(t)}>
           <span style={{ fontSize: 11, color: t.textMuted }}>
-            {isBlockMode ? 'Use this as a draft block. Run, test, save, then certify.' : 'Use this as a draft. Run, review joins/grain, then save as a block when ready.'}
+            {isBlockMode
+              ? 'Use this as a draft block. Run, test, save, then certify.'
+              : isRepairMode
+                ? 'Review the repair, run preview, then apply the fixed SQL to this cell.'
+                : 'Use this as a SQL draft. Run, review joins/grain, then insert it into the notebook.'}
           </span>
           <div style={{ display: 'flex', gap: 8 }}>
             <button type="button" onClick={onClose} style={secondaryButtonStyle(t)}>Cancel</button>
@@ -363,16 +424,11 @@ export function AiSqlDraftDialog({
               </button>
             ) : (
               <button type="button" onClick={() => void generate()} disabled={!question.trim()} style={primaryButtonStyle(t, Boolean(question.trim()))}>
-                <Send size={13} /> {isBlockMode ? 'Generate block' : 'Generate SQL'}
-              </button>
-            )}
-            {!isBlockMode && onCreateBlock && (
-              <button type="button" onClick={createBlock} disabled={!canCreateBlock} style={secondaryActionButtonStyle(t, canCreateBlock)}>
-                <CheckCircle2 size={13} /> Create block
+                <Send size={13} /> {isBlockMode ? 'Generate block' : isRepairMode ? 'Generate replacement SQL' : 'Generate SQL'}
               </button>
             )}
             <button type="button" onClick={insert} disabled={!activeSql || running} style={insertButtonStyle(t, Boolean(activeSql) && !running)}>
-              <CheckCircle2 size={13} /> {isBlockMode ? 'Use draft block' : 'Insert SQL cell'}
+              <CheckCircle2 size={13} /> {insertLabel ?? (isBlockMode ? 'Use draft block' : 'Insert SQL cell')}
             </button>
           </div>
         </div>
@@ -398,11 +454,12 @@ function buildSqlDraftPrompt(question: string, mode: AiSqlMode): string {
   const surface = 'notebook SQL cell';
   return [
     `Create review-required SQL for a ${surface}.`,
-    'Use certified DQL blocks, business views, terms, dbt manifest metadata, semantic objects, and runtime schema before guessing.',
-    'If a certified block exactly matches, you may reuse its SQL or cite it, but still return runnable SQL for this authoring surface.',
+    'Use trusted business logic, business views, terms, dbt manifest metadata, semantic objects, and runtime schema before guessing.',
+    'If an existing trusted query exactly matches, you may reuse its SQL or cite it, but still return runnable SQL for this notebook cell.',
     'If the requested grain needs new analysis, generate a single read-only SELECT/WITH query with bounded result size.',
     'Do not generate INSERT, UPDATE, DELETE, CREATE, DROP, ALTER, COPY, MERGE, TRUNCATE, or CALL statements.',
-    'Return a short business summary, then one fenced sql block, and mark the result as AI-generated/review-required.',
+    'Do not ask the user to create, certify, or save any reusable block in this response; this modal only reviews SQL and inserts a SQL cell.',
+    'Return a short business summary, then one fenced sql block, and mark the SQL as AI-generated/review-required.',
     '',
     `User question: ${question}`,
   ].join('\n');
@@ -621,10 +678,11 @@ const overlayStyle: React.CSSProperties = {
 };
 
 const bodyStyle: React.CSSProperties = {
-  padding: 16,
+  padding: 18,
   display: 'flex',
   flexDirection: 'column',
   gap: 12,
+  flex: 1,
   minHeight: 0,
   overflow: 'auto',
 };
@@ -637,8 +695,8 @@ const suggestionRowStyle: React.CSSProperties = {
 
 function dialogStyle(t: Theme): React.CSSProperties {
   return {
-    width: 'min(780px, calc(100vw - 48px))',
-    maxHeight: 'min(760px, calc(100vh - 48px))',
+    width: 'min(1040px, calc(100vw - 32px))',
+    maxHeight: 'min(880px, calc(100vh - 32px))',
     background: t.modalBg,
     color: t.textPrimary,
     border: `1px solid ${t.cellBorder}`,
@@ -702,10 +760,10 @@ function labelStyle(t: Theme): React.CSSProperties {
   };
 }
 
-function textareaStyle(t: Theme): React.CSSProperties {
+function textareaStyle(t: Theme, compact = false): React.CSSProperties {
   return {
     resize: 'vertical',
-    minHeight: 88,
+    minHeight: compact ? 70 : 88,
     border: `1px solid ${t.cellBorder}`,
     borderRadius: 8,
     background: t.editorBg,
@@ -715,6 +773,56 @@ function textareaStyle(t: Theme): React.CSSProperties {
     lineHeight: 1.45,
     padding: 10,
     outline: 'none',
+  };
+}
+
+function questionSummaryStyle(t: Theme): React.CSSProperties {
+  return {
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: 12,
+    padding: '10px 12px',
+    border: `1px solid ${t.cellBorder}`,
+    borderRadius: 10,
+    background: t.editorBg,
+  };
+}
+
+function compactEyebrowStyle(t: Theme): React.CSSProperties {
+  return {
+    color: t.textMuted,
+    fontSize: 10,
+    lineHeight: 1.2,
+    textTransform: 'uppercase',
+    fontWeight: 800,
+    marginBottom: 4,
+  };
+}
+
+function compactQuestionTextStyle(t: Theme): React.CSSProperties {
+  return {
+    color: t.textPrimary,
+    fontSize: 13,
+    lineHeight: 1.35,
+    whiteSpace: 'nowrap',
+    overflow: 'hidden',
+    textOverflow: 'ellipsis',
+  };
+}
+
+function compactActionButtonStyle(t: Theme): React.CSSProperties {
+  return {
+    border: `1px solid ${t.headerBorder}`,
+    borderRadius: 7,
+    background: t.cellBg,
+    color: t.textSecondary,
+    cursor: 'pointer',
+    padding: '6px 9px',
+    fontSize: 11,
+    fontFamily: t.font,
+    fontWeight: 800,
+    flex: '0 0 auto',
   };
 }
 
@@ -775,10 +883,35 @@ function draftPreviewWrapStyle(t: Theme): React.CSSProperties {
   return {
     display: 'flex',
     flexDirection: 'column',
-    gap: 10,
-    padding: 12,
+    gap: 12,
+    padding: 14,
     borderTop: `1px solid ${t.headerBorder}`,
     background: t.cellBg,
+  };
+}
+
+function draftReviewHeaderStyle(t: Theme): React.CSSProperties {
+  return {
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: 12,
+  };
+}
+
+function draftTitleStyle(t: Theme): React.CSSProperties {
+  return {
+    color: t.textPrimary,
+    fontSize: 13,
+    fontWeight: 800,
+  };
+}
+
+function draftSubtitleStyle(t: Theme): React.CSSProperties {
+  return {
+    color: t.textMuted,
+    fontSize: 11,
+    marginTop: 2,
   };
 }
 
@@ -802,7 +935,7 @@ function blockPreviewStyle(t: Theme): React.CSSProperties {
 function sqlEditorStyle(t: Theme): React.CSSProperties {
   return {
     resize: 'vertical',
-    minHeight: 190,
+    minHeight: 280,
     border: `1px solid ${t.cellBorder}`,
     borderRadius: 8,
     background: t.editorBg,
@@ -812,6 +945,23 @@ function sqlEditorStyle(t: Theme): React.CSSProperties {
     lineHeight: 1.5,
     padding: 10,
     outline: 'none',
+    whiteSpace: 'pre',
+  };
+}
+
+function sqlReviewStyle(t: Theme): React.CSSProperties {
+  return {
+    margin: 0,
+    maxHeight: 'min(430px, 44vh)',
+    overflow: 'auto',
+    padding: 14,
+    background: t.editorBg,
+    border: `1px solid ${t.cellBorder}`,
+    borderRadius: 9,
+    color: t.textPrimary,
+    fontFamily: t.fontMono,
+    fontSize: 12.5,
+    lineHeight: 1.55,
     whiteSpace: 'pre',
   };
 }
@@ -849,11 +999,23 @@ function runStatusStyle(t: Theme, status: DraftRunStatus): React.CSSProperties {
 
 function previewTableWrapStyle(t: Theme): React.CSSProperties {
   return {
-    maxHeight: 260,
+    maxHeight: 300,
     overflow: 'auto',
     border: `1px solid ${t.headerBorder}`,
     borderRadius: 8,
     background: t.appBg,
+  };
+}
+
+function previewResultHeaderStyle(t: Theme): React.CSSProperties {
+  return {
+    display: 'flex',
+    justifyContent: 'space-between',
+    gap: 10,
+    color: t.textSecondary,
+    fontSize: 11,
+    fontWeight: 800,
+    textTransform: 'uppercase',
   };
 }
 
@@ -937,22 +1099,6 @@ function primaryButtonStyle(t: Theme, enabled: boolean): React.CSSProperties {
     border: `1px solid ${enabled ? t.accent : t.headerBorder}`,
     borderRadius: 7,
     background: enabled ? `${t.accent}20` : t.cellBg,
-    color: enabled ? t.accent : t.textMuted,
-    cursor: enabled ? 'pointer' : 'not-allowed',
-    padding: '7px 11px',
-    fontSize: 12,
-    fontFamily: t.font,
-  };
-}
-
-function secondaryActionButtonStyle(t: Theme, enabled: boolean): React.CSSProperties {
-  return {
-    display: 'inline-flex',
-    alignItems: 'center',
-    gap: 6,
-    border: `1px solid ${enabled ? t.accent : t.headerBorder}`,
-    borderRadius: 7,
-    background: enabled ? t.cellBg : `${t.cellBg}88`,
     color: enabled ? t.accent : t.textMuted,
     cursor: enabled ? 'pointer' : 'not-allowed',
     padding: '7px 11px',

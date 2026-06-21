@@ -1,19 +1,35 @@
 import type { Theme } from '../../themes/notebook-theme';
-import React, { useState, useCallback, useEffect, useRef } from 'react';
+import React, { useState, useCallback, useEffect, useMemo, useRef } from 'react';
 import { useNotebook, makeCell } from '../../store/NotebookStore';
 import { useQueryExecution } from '../../hooks/useQueryExecution';
 import { themes } from '../../themes/notebook-theme';
 import { CellComponent } from '../cells/Cell';
 import { AddCellBar } from './AddCellBar';
+import { api, type NotebookResearchRun } from '../../api/client';
+import {
+  deriveCellResearchState,
+  NOTEBOOK_RESEARCH_CHANGED_EVENT,
+  type NotebookResearchChangedDetail,
+  notebookResearchSourceCellOption,
+  notebookResearchSourceSyncStatus,
+} from '../../utils/notebook-research';
 
 interface CellListProps {
   registerCellRef: (id: string, el: HTMLDivElement | null) => void;
+  onStartResearch?: (cellId: string) => void;
+  researchRefreshKey?: number;
 }
 
-export function CellList({ registerCellRef }: CellListProps) {
+export function CellList({ registerCellRef, onStartResearch, researchRefreshKey }: CellListProps) {
   const { state, dispatch } = useNotebook();
   const { executeCell } = useQueryExecution();
   const t = themes[state.themeMode];
+  const sourceCells = useMemo(
+    () => state.cells.map(notebookResearchSourceCellOption).filter((cell): cell is NonNullable<typeof cell> => Boolean(cell)),
+    [state.cells],
+  );
+  const sourceCellById = useMemo(() => new Map(sourceCells.map((cell) => [cell.id, cell])), [sourceCells]);
+  const [researchRunsByCellId, setResearchRunsByCellId] = useState<Map<string, NotebookResearchRun>>(new Map());
 
   // focusedCellId: the cell selected in command mode (not editing)
   const [focusedCellId, setFocusedCellId] = useState<string | null>(null);
@@ -33,6 +49,57 @@ export function CellList({ registerCellRef }: CellListProps) {
       dispatch({ type: 'SET_INSPECTOR_CONTEXT', context: { kind: 'cell', cellId: focusedCellId } });
     }
   }, [focusedCellId, state.inspectorOpen, dispatch]);
+
+  useEffect(() => {
+    const notebookPath = state.activeFile?.path;
+    if (!notebookPath || sourceCells.length === 0) {
+      setResearchRunsByCellId(new Map());
+      return;
+    }
+
+    let cancelled = false;
+    let timer: number | undefined;
+    const loadCoverage = () => {
+      api.listNotebookResearchSourceCoverage({
+        path: notebookPath,
+        sourceCellIds: sourceCells.map((cell) => cell.id),
+        sourceCells: sourceCells.map((cell) => ({
+          id: cell.id,
+          name: cell.name,
+          type: cell.type,
+          fingerprint: cell.fingerprint,
+        })),
+        limit: 10_000,
+      })
+        .then((coverage) => {
+          if (cancelled) return;
+          const next = new Map<string, NotebookResearchRun>();
+          for (const run of coverage.runs) {
+            if (run.sourceCellId && !next.has(run.sourceCellId)) {
+              next.set(run.sourceCellId, run);
+            }
+          }
+          setResearchRunsByCellId(next);
+        })
+        .catch(() => {
+          if (!cancelled) setResearchRunsByCellId(new Map());
+        });
+    };
+
+    loadCoverage();
+    const handleResearchChanged = (event: Event) => {
+      const detail = (event as CustomEvent<NotebookResearchChangedDetail>).detail;
+      if (detail?.notebookPath && detail.notebookPath !== notebookPath) return;
+      loadCoverage();
+    };
+    window.addEventListener(NOTEBOOK_RESEARCH_CHANGED_EVENT, handleResearchChanged);
+    timer = window.setInterval(loadCoverage, 15_000);
+    return () => {
+      cancelled = true;
+      window.removeEventListener(NOTEBOOK_RESEARCH_CHANGED_EVENT, handleResearchChanged);
+      if (timer) window.clearInterval(timer);
+    };
+  }, [researchRefreshKey, sourceCells, state.activeFile?.path]);
 
   // Global keyboard handler for command mode shortcuts
   useEffect(() => {
@@ -253,7 +320,16 @@ export function CellList({ registerCellRef }: CellListProps) {
                 <circle cx="6" cy="12" r="1.2" />
               </svg>
             </div>
-            <CellComponent cell={cell} index={index} />
+            <CellComponent
+              cell={cell}
+              index={index}
+              onStartResearch={onStartResearch}
+              researchState={deriveCellResearchState(
+                sourceCellById.get(cell.id) ?? null,
+                researchRunsByCellId.get(cell.id) ?? null,
+                notebookResearchSourceSyncStatus(researchRunsByCellId.get(cell.id) ?? null, sourceCellById),
+              )}
+            />
           </div>
           {state.appMode === 'studio' && <AddCellBar afterId={cell.id} />}
         </React.Fragment>

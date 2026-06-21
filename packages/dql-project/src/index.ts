@@ -40,6 +40,34 @@ export type {
   LocalAiPinReviewStatus,
   LocalAppVisibility,
 } from './local-app-storage.js';
+export {
+  LocalNotebookResearchStorage,
+  defaultNotebookResearchDbPath,
+} from './local-notebook-research-storage.js';
+export type {
+  NotebookResearchRun,
+  NotebookResearchSourceCellInput,
+  CreateNotebookResearchRunInput,
+  UpdateNotebookResearchRunInput,
+  ListNotebookResearchRunsQuery,
+  NotebookResearchRunListResult,
+  NotebookResearchSeedCellInput,
+  NotebookResearchSeedCellsInput,
+  NotebookResearchSeedCellsResult,
+  NotebookResearchSourceCoverageQuery,
+  NotebookResearchIntent,
+  NotebookResearchStatus,
+  NotebookResearchReviewStatus,
+  NotebookResearchPlan,
+  NotebookResearchDqlPromotionAction,
+  NotebookResearchReadinessFilter,
+  NotebookResearchAgeFilter,
+  NotebookResearchNextActionFilter,
+  NotebookResearchSort,
+  NotebookResearchDqlPromotion,
+  NotebookResearchDqlPromotionCandidate,
+  NotebookResearchDqlPromotionMatch,
+} from './local-notebook-research-storage.js';
 export { ManifestCache } from './manifest-cache.js';
 export type {
   TrackedFile,

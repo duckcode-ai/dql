@@ -1,5 +1,6 @@
 import type { Theme } from '../../themes/notebook-theme';
 import React, { useState, useCallback, useEffect, useMemo, useRef } from 'react';
+import { Sparkles } from 'lucide-react';
 import { useNotebook } from '../../store/NotebookStore';
 import { themes } from '../../themes/notebook-theme';
 import { useQueryExecution } from '../../hooks/useQueryExecution';
@@ -17,12 +18,14 @@ import { ChatCell } from './ChatCell';
 import { SnippetPicker } from './SnippetPicker';
 import { SaveAsBlockModal } from '../modals/SaveAsBlockModal';
 import { deriveBlockSource } from '../../utils/derive-block-source';
+import { AiSqlDraftDialog, type AiSqlDraftMeta } from '../agent/AiSqlDraftDialog';
 import { TableOutput } from '../output/TableOutput';
 import { ChartOutput, detectChartType, resolveChartType, renderChart, CHART_TYPE_OPTIONS } from '../output/ChartOutput';
 import type { ChartType } from '../output/ChartOutput';
 import { ErrorOutput } from '../output/ErrorOutput';
 import { CellLineage } from './CellLineage';
 import type { Cell, BlockBinding } from '../../store/types';
+import type { CellResearchState } from '../../utils/notebook-research';
 import { format as formatSQL } from 'sql-formatter';
 import { api } from '../../api/client';
 import { extractSqlFromText } from '../../utils/block-studio';
@@ -31,6 +34,8 @@ import { CellChrome } from '@duckcodeailabs/dql-ui';
 interface CellProps {
   cell: Cell;
   index: number;
+  onStartResearch?: (cellId: string) => void;
+  researchState?: CellResearchState | null;
 }
 
 function GutterWrap({ children }: { children: React.ReactNode }) {
@@ -643,7 +648,78 @@ const APP_MODE_HIDDEN_CELL_TYPES = new Set<string>([
   'chat',
 ]);
 
-export function CellComponent({ cell, index }: CellProps) {
+function CellResearchBadge({
+  state,
+  t,
+  onClick,
+}: {
+  state: CellResearchState;
+  t: Theme;
+  onClick: () => void;
+}) {
+  const accent = researchStateColor(state, t);
+  return (
+    <button
+      type="button"
+      title={state.title}
+      aria-label={`${state.label}. ${state.title}`}
+      onClick={(event) => {
+        event.stopPropagation();
+        onClick();
+      }}
+      style={{
+        height: 22,
+        maxWidth: 170,
+        minWidth: 0,
+        border: `1px solid ${accent}55`,
+        background: `${accent}12`,
+        color: accent,
+        borderRadius: 4,
+        padding: '0 7px',
+        display: 'inline-flex',
+        alignItems: 'center',
+        gap: 5,
+        fontSize: 10,
+        fontFamily: t.font,
+        fontWeight: 800,
+        cursor: 'pointer',
+        whiteSpace: 'nowrap',
+        overflow: 'hidden',
+        textOverflow: 'ellipsis',
+        flexShrink: 1,
+      }}
+    >
+      <Sparkles size={11} strokeWidth={2.2} style={{ flexShrink: 0 }} aria-hidden="true" />
+      <span style={{ overflow: 'hidden', textOverflow: 'ellipsis' }}>{state.label}</span>
+    </button>
+  );
+}
+
+function researchStateColor(state: CellResearchState, t: Theme): string {
+  switch (state.kind) {
+    case 'changed':
+    case 'review_sql':
+    case 'review_context':
+    case 'complete':
+      return t.warning;
+    case 'missing':
+    case 'blocked':
+      return t.error;
+    case 'reuse':
+    case 'cert_ready':
+    case 'done':
+      return t.success;
+    case 'draft_ready':
+    case 'run_preview':
+      return t.accent;
+    case 'new':
+    case 'unknown':
+    default:
+      return t.textMuted;
+  }
+}
+
+export function CellComponent({ cell, index, onStartResearch, researchState }: CellProps) {
   const { state, dispatch } = useNotebook();
   const t = themes[state.themeMode];
   const { executeCell, executeDependents, cancelCell } = useQueryExecution();
@@ -659,6 +735,7 @@ export function CellComponent({ cell, index }: CellProps) {
   const [chartRecommendBusy, setChartRecommendBusy] = useState(false);
   const [chartRecommendNote, setChartRecommendNote] = useState<string | null>(null);
   const [saveAsBlockOpen, setSaveAsBlockOpen] = useState(false);
+  const [aiRepairOpen, setAiRepairOpen] = useState(false);
 
   const derivedBlock = useMemo(
     () => (saveAsBlockOpen ? deriveBlockSource(cell, state.cells) : null),
@@ -747,6 +824,27 @@ export function CellComponent({ cell, index }: CellProps) {
     handleFormat();
     setTimeout(() => executeCell(cell.id), 80);
   }, [handleFormat, executeCell, cell.id]);
+
+  const applyAiSqlRepair = useCallback(
+    (sql: string, meta: AiSqlDraftMeta) => {
+      const nextSql = sql.trim();
+      if (!nextSql) return;
+      const updates: Partial<Cell> = {
+        content: nextSql,
+        error: meta.previewError,
+        result: meta.previewResult,
+        status: meta.previewResult ? 'success' : meta.previewError ? 'error' : 'idle',
+        fromSnapshot: false,
+        executionCount: meta.previewResult || meta.previewError ? (cell.executionCount ?? 0) + 1 : cell.executionCount,
+      };
+      dispatch({ type: 'UPDATE_CELL', id: cell.id, updates });
+      editorRef.current?.resetTo(nextSql);
+      savedContentRef.current = nextSql;
+      setIsDirty(false);
+      setAiRepairOpen(false);
+    },
+    [cell.executionCount, cell.id, dispatch]
+  );
 
   const onCellUpdate = useCallback(
     (updates: Partial<Cell>) => dispatch({ type: 'UPDATE_CELL', id: cell.id, updates }),
@@ -944,6 +1042,24 @@ export function CellComponent({ cell, index }: CellProps) {
           }}
         />
       )}
+      {aiRepairOpen && cell.error && (
+        <AiSqlDraftDialog
+          mode="notebook"
+          themeMode={state.themeMode}
+          contextLabel={cell.name ?? state.activeFile?.name ?? state.notebookTitle ?? 'Notebook cell'}
+          upstreamSql={cell.content}
+          initialSqlDraft={cell.content}
+          initialError={cell.error}
+          initialPrompt={[
+            'Fix this SQL cell error.',
+            'Keep the same business intent and return corrected read-only SQL.',
+            'If the error is a connection or server fetch problem, explain that SQL repair may not fix it.',
+          ].join(' ')}
+          insertLabel="Apply to cell"
+          onClose={() => setAiRepairOpen(false)}
+          onInsertSql={applyAiSqlRepair}
+        />
+      )}
       {/* v1.3.3 Hex handoff — left gutter removed; status moved inline
           into the cell header via <InlineStatus />. */}
 
@@ -1112,6 +1228,14 @@ export function CellComponent({ cell, index }: CellProps) {
                   : `${current.replace(/\s*$/, '')} ${token}`;
                 handleContentChange(next);
               }}
+            />
+          )}
+
+          {researchState && onStartResearch && (
+            <CellResearchBadge
+              state={researchState}
+              t={t}
+              onClick={() => onStartResearch(cell.id)}
             />
           )}
 
@@ -1492,6 +1616,7 @@ export function CellComponent({ cell, index }: CellProps) {
                     message={cell.error}
                     themeMode={state.themeMode}
                     onFix={isExecutable ? handleFixAndRun : undefined}
+                    onFixWithAi={cell.type === 'sql' ? () => setAiRepairOpen(true) : undefined}
                     schemaTables={state.schemaTables}
                   />
                 )}
@@ -1522,7 +1647,9 @@ export function CellComponent({ cell, index }: CellProps) {
           <CellLineage
             cellContent={cell.content}
             cellType={cell.type as 'sql' | 'dql'}
+            cellId={cell.id}
             cellName={cell.name}
+            cells={state.cells}
             themeMode={state.themeMode}
             t={t}
             onFocusNode={(nodeId) => {

@@ -8,7 +8,6 @@ import { api } from '../../api/client';
 import { BlockPicker, type BlockEntry } from '../blocks/BlockPicker';
 import { extractSqlFromText } from '../../utils/block-studio';
 import { AiSqlDraftDialog, type AiSqlDraftMeta } from '../agent/AiSqlDraftDialog';
-import { SaveAsBlockModal } from '../modals/SaveAsBlockModal';
 import {
   BlockIcon,
   SQLCellIcon,
@@ -60,7 +59,6 @@ export function AddCellBar({ afterId }: AddCellBarProps) {
   const [popoverOpen, setPopoverOpen] = useState(false);
   const [blockPickerOpen, setBlockPickerOpen] = useState(false);
   const [aiSqlOpen, setAiSqlOpen] = useState(false);
-  const [aiBlockDraft, setAiBlockDraft] = useState<{ cell: Cell; meta: AiSqlDraftMeta } | null>(null);
   const [dropActive, setDropActive] = useState(false);
   const containerRef = useRef<HTMLDivElement>(null);
 
@@ -120,25 +118,6 @@ export function AddCellBar({ afterId }: AddCellBarProps) {
       cell.executionCount = 1;
     }
     dispatch({ type: 'ADD_CELL', cell, afterId });
-    setAiSqlOpen(false);
-    closeAll();
-  };
-
-  const createAiBlock = (sql: string, meta: AiSqlDraftMeta) => {
-    const trimmed = sql.trim();
-    if (!trimmed) return;
-    const cell = makeCell('sql', trimmed);
-    cell.name = uniqueAiSqlCellName(meta.title || meta.question, state.cells);
-    if (meta.previewResult) {
-      cell.result = meta.previewResult;
-      cell.status = 'success';
-      cell.executionCount = 1;
-    } else if (meta.previewError) {
-      cell.error = meta.previewError;
-      cell.status = 'error';
-      cell.executionCount = 1;
-    }
-    setAiBlockDraft({ cell, meta });
     setAiSqlOpen(false);
     closeAll();
   };
@@ -289,25 +268,6 @@ export function AddCellBar({ afterId }: AddCellBarProps) {
           upstreamSql={findUpstreamSqlForInsert(state.cells, afterId)}
           onClose={() => setAiSqlOpen(false)}
           onInsertSql={insertAiSqlCell}
-          onCreateBlock={createAiBlock}
-        />
-      )}
-      {aiBlockDraft && (
-        <SaveAsBlockModal
-          cell={aiBlockDraft.cell}
-          initialContent={aiBlockDraft.meta.blockSource ?? aiBlockDraft.cell.content}
-          initialName={aiBlockDraft.meta.title}
-          initialDescription={aiBlockDraft.meta.description}
-          initialDomain={aiBlockDraft.meta.domain}
-          initialOwner={aiBlockDraft.meta.owner}
-          initialTags={aiBlockDraft.meta.tags}
-          onClose={() => setAiBlockDraft(null)}
-          onSaved={({ path, name }) => {
-            dispatch({
-              type: 'FILE_ADDED',
-              file: { name, path, type: 'block', folder: 'blocks' },
-            });
-          }}
         />
       )}
     </div>

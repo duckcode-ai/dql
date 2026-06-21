@@ -72,6 +72,7 @@ import {
   defaultMemoryPath,
   ensureDefaultMemoryFiles,
   ensureMetadataCatalogFresh,
+  recordQueryRun,
   recordRuntimeSchemaSnapshot,
   type AgentAnswer,
   type AgentResultPayload,
@@ -81,7 +82,7 @@ import {
   type MetadataObject,
   type KGNode,
 } from '@duckcodeailabs/dql-agent';
-import { handleAppsApi } from './apps-api.js';
+import { handleAppsApi, recommendVisualization } from './apps-api.js';
 import {
   getActiveProvider,
   getEffectiveProviderConfig,
@@ -96,8 +97,8 @@ import {
   loadRuntimeApp,
   runtimeVariables,
 } from './governance-runtime.js';
-import { LocalAppStorage, defaultLocalAppsDbPath } from '@duckcodeailabs/dql-project';
-import type { BlockRecord, TestAssertionResult, TestResultSummary } from '@duckcodeailabs/dql-project';
+import { LocalAppStorage, LocalNotebookResearchStorage, defaultLocalAppsDbPath, defaultNotebookResearchDbPath } from '@duckcodeailabs/dql-project';
+import type { BlockRecord, NotebookResearchDqlPromotion, NotebookResearchDqlPromotionAction, NotebookResearchIntent, NotebookResearchNextActionFilter, NotebookResearchPlan, NotebookResearchReadinessFilter, NotebookResearchRun, NotebookResearchRunListResult, NotebookResearchSort, NotebookResearchSourceCellInput, TestAssertionResult, TestResultSummary } from '@duckcodeailabs/dql-project';
 import { Certifier, ENTERPRISE_RULES } from '@duckcodeailabs/dql-governance';
 import {
   buildSemanticObjectDetail,
@@ -605,6 +606,464 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
       providerUsed: governedAnswer.providerUsed,
     };
   };
+
+  const openNotebookResearchStorage = () => new LocalNotebookResearchStorage(defaultNotebookResearchDbPath(projectRoot));
+
+  const runNotebookResearch = async (
+    storage: LocalNotebookResearchStorage,
+    run: NotebookResearchRun,
+    input: {
+      domain?: string;
+      owner?: string;
+      sourceCellFingerprint?: string;
+      question?: string;
+      intent?: NotebookResearchIntent;
+      context?: unknown;
+      generatedSql?: string;
+      reviewedSql?: string;
+    } = {},
+  ): Promise<NotebookResearchRun> => {
+    const question = notebookResearchString(input.question) || run.question;
+    const domain = notebookResearchString(input.domain) ?? run.domain;
+    const owner = notebookResearchString(input.owner) ?? run.owner;
+    const sourceCellFingerprint = notebookResearchString(input.sourceCellFingerprint) ?? run.sourceCellFingerprint;
+    const intent = input.intent ?? run.intent;
+    const context = input.context === undefined ? run.context : input.context;
+    let generatedSql = notebookResearchString(input.generatedSql) ?? run.generatedSql;
+    let reviewedSql = notebookResearchString(input.reviewedSql) ?? run.reviewedSql;
+    const startedAt = new Date().toISOString();
+    storage.updateRun(run.id, {
+      domain,
+      owner,
+      sourceCellFingerprint,
+      question,
+      intent,
+      context,
+      generatedSql,
+      reviewedSql,
+      status: 'running',
+      reviewStatus: 'needs_review',
+      error: '',
+    });
+
+    try {
+      const contextPack = await buildLocalContextPack(projectRoot, {
+        question,
+        mode: 'question',
+        surface: 'notebook',
+        selectedContext: {
+          ...notebookResearchSelectedContext(run, context),
+          domain,
+          owner,
+          intent,
+          researchPattern: notebookResearchIntentPattern(intent),
+        },
+        strictness: 'balanced',
+        limit: 100,
+      }).catch((error) => {
+        const message = error instanceof Error ? error.message : String(error);
+        return {
+          id: '',
+          routeDecision: undefined,
+          evidenceRoles: [],
+          warnings: [`Context pack failed: ${message}`],
+          retrievalDiagnostics: { selectedEvidence: [] },
+        } as unknown as LocalContextPack;
+      });
+
+      let governedAnswer: AgentAnswer | undefined;
+      let providerError: string | undefined;
+      const generationWarnings: string[] = [];
+      if (!generatedSql && !reviewedSql) {
+        const resolvedProvider = resolveDefaultLLMProvider(projectRoot);
+        const runner = resolvedProvider ? getLLMRunner(resolvedProvider) : null;
+        if (!resolvedProvider || !runner) {
+          generationWarnings.push('No AI provider is configured. Metadata context was saved as a research plan; paste SQL or configure an AI provider to generate candidate SQL.');
+        } else {
+          const controller = new AbortController();
+          try {
+            await runner.run(
+              {
+                provider: resolvedProvider,
+                messages: [{ role: 'user', content: notebookResearchAgentPrompt(question, intent) }],
+                upstream: {
+                  cellId: `notebook-research:${run.notebookPath}:${run.id}`,
+                  sql: JSON.stringify({
+                    mode: 'notebook_research',
+                    notebookPath: run.notebookPath,
+                    sourceCellId: run.sourceCellId,
+                    sourceCellName: run.sourceCellName,
+                    owner,
+                    intent,
+                    researchPattern: notebookResearchIntentPattern(intent),
+                    instruction: 'Generate review-required read-only SQL from the inspected metadata context. Execute only through bounded preview and keep the result uncertified until promoted to a DQL draft.',
+                    context,
+                  }, null, 2),
+                },
+                projectRoot,
+                executeCertifiedBlock: executeCertifiedBlockForAgent,
+                executeGeneratedSql: executeGeneratedSqlForAgent,
+                getSchemaContext: getSchemaContextForAgent,
+              },
+              (turn) => {
+                if (turn.kind === 'tool_result' && turn.id === 'governed_answer') {
+                  governedAnswer = turn.output as AgentAnswer;
+                }
+                if (turn.kind === 'error') providerError = turn.message;
+              },
+              controller.signal,
+            );
+          } catch (error) {
+            providerError = error instanceof Error ? error.message : String(error);
+          }
+          if (!governedAnswer) {
+            generationWarnings.push(`AI SQL generation did not return a governed answer. Metadata context was saved for review.${providerError ? ` ${providerError}` : ''}`);
+          } else {
+            generatedSql = notebookResearchString(governedAnswer.proposedSql) ?? notebookResearchString(governedAnswer.sql);
+            if (!generatedSql) {
+              generationWarnings.push('AI returned a governed answer without SQL. Metadata context was saved; add reviewed SQL before DQL promotion.');
+            }
+          }
+        }
+      }
+
+      const sqlForPreview = reviewedSql || generatedSql;
+      const warnings = [
+        ...(contextPack.warnings ?? []),
+        ...(governedAnswer?.validationWarnings ?? []),
+        ...generationWarnings,
+      ].filter(Boolean);
+      let resultPreview: ReturnType<typeof normalizeQueryResult> | undefined;
+      let previewError: string | undefined;
+      if (governedAnswer?.result?.rows && !reviewedSql) {
+        resultPreview = normalizeNotebookAgentResult(governedAnswer.result);
+      } else if (sqlForPreview) {
+        try {
+          const previewSql = buildAgentPreviewSql(sqlForPreview);
+          const previewStart = Date.now();
+          resultPreview = await executeLocalSqlForStoredResult(previewSql);
+          recordNotebookQueryRun(projectRoot, {
+            notebookPath: run.notebookPath,
+            cellId: run.sourceCellId,
+            cellName: run.sourceCellName,
+            researchRunId: run.id,
+            source: reviewedSql ? 'notebook_research_reviewed_sql' : 'notebook_research_ai_sql',
+            status: 'success',
+            rowCount: resultPreview.rowCount ?? resultPreview.rows.length,
+            durationMs: Date.now() - previewStart,
+            sql: sqlForPreview,
+            contextPackId: contextPack.id,
+          });
+        } catch (error) {
+          previewError = error instanceof Error ? error.message : String(error);
+          recordNotebookQueryRun(projectRoot, {
+            notebookPath: run.notebookPath,
+            cellId: run.sourceCellId,
+            cellName: run.sourceCellName,
+            researchRunId: run.id,
+            source: reviewedSql ? 'notebook_research_reviewed_sql' : 'notebook_research_ai_sql',
+            status: 'error',
+            errorCode: previewError,
+            sql: sqlForPreview,
+            contextPackId: contextPack.id,
+          });
+        }
+      }
+
+      const routeDecision = notebookResearchRouteDecisionForRun(run, contextPack.routeDecision, sqlForPreview);
+      const display = resultPreview
+        ? recommendVisualization(projectRoot, {
+            prompt: question,
+            resultSchema: resultPreview.columns,
+            rowSample: resultPreview.rows.slice(0, 25),
+            defaultVisualization: governedAnswer?.suggestedViz,
+          })
+        : undefined;
+      const evidence = {
+        trustStatus: {
+          label: governedAnswer?.trustLabel
+            ?? (reviewedSql ? 'Reviewed notebook SQL' : generatedSql ? 'AI-generated research SQL' : 'Metadata-grounded research plan'),
+          reviewRequired: true,
+        },
+        contextPackId: contextPack.id,
+        routeDecision,
+        selectedEvidence: contextPack.evidenceRoles?.slice(0, 24) ?? [],
+        evidenceRoles: contextPack.evidenceRoles?.slice(0, 24) ?? [],
+        evidenceSummaries: contextPack.evidenceSummaries?.slice(0, 16) ?? [],
+        allowedSqlContext: {
+          relations: (contextPack.allowedSqlContext?.relations ?? []).slice(0, 24).map((relation) => ({
+            relation: relation.relation,
+            name: relation.name,
+            source: relation.source,
+            columns: relation.columns.slice(0, 32).map((column) => {
+              if (typeof column === 'string') return column;
+              if (column && typeof column === 'object' && typeof (column as { name?: unknown }).name === 'string') {
+                return String((column as { name: unknown }).name);
+              }
+              return String(column);
+            }),
+          })),
+          sourceBlockSql: contextPack.allowedSqlContext?.sourceBlockSql?.slice(0, 12) ?? [],
+        },
+        missingContext: contextPack.missingContext?.slice(0, 16) ?? [],
+        warnings: contextPack.warnings?.slice(0, 16) ?? [],
+        retrievalDiagnostics: contextPack.retrievalDiagnostics,
+        agentEvidence: governedAnswer?.evidence,
+        analysisPlan: governedAnswer?.analysisPlan,
+        citations: [
+          ...(contextPack.citations ?? []),
+          ...(governedAnswer?.citations ?? []),
+        ].slice(0, 40),
+      };
+      const summary = notebookResearchString(governedAnswer?.answer)
+        ?? notebookResearchString(governedAnswer?.text)
+        ?? notebookResearchSummary(question, resultPreview, previewError);
+      const recommendation = previewError
+        ? 'Review the SQL, selected metadata, and connection context before rerunning.'
+        : sqlForPreview
+          ? 'Review the SQL, parameter choices, grain, and evidence before promoting this research into a DQL draft block.'
+          : 'Review the selected metadata context, then paste reviewed SQL or configure an AI provider before DQL draft promotion.';
+      const researchPlan = buildNotebookResearchPlan({
+        run,
+        evidence,
+        resultPreview,
+        previewError,
+        generatedSql,
+        reviewedSql,
+        routeDecision,
+      });
+      return storage.updateRun(run.id, {
+        domain,
+        owner,
+        sourceCellFingerprint,
+        question,
+        intent,
+        context,
+        status: previewError ? 'error' : 'ready',
+        summary,
+        recommendation,
+        resultPreview,
+        evidence,
+        researchPlan,
+        generatedSql,
+        reviewedSql,
+        display: display && display.ok ? display.display : undefined,
+        contextPackId: contextPack.id,
+        routeDecision,
+        warnings: [
+          ...warnings,
+          ...(display && !display.ok ? [display.error] : []),
+          ...(display && display.ok ? display.warnings : []),
+        ],
+        reviewStatus: 'needs_review',
+        error: previewError,
+        lastRunAt: startedAt,
+      }) ?? run;
+    } catch (error) {
+      return storage.updateRun(run.id, {
+        domain,
+        owner,
+        sourceCellFingerprint,
+        status: 'error',
+        error: error instanceof Error ? error.message : String(error),
+        reviewStatus: 'needs_review',
+        lastRunAt: startedAt,
+      }) ?? run;
+    }
+  };
+
+  const promoteNotebookResearchToDql = async (
+    storage: LocalNotebookResearchStorage,
+    run: NotebookResearchRun,
+    input: { domain?: string; owner?: string; tags?: string[]; provider?: string } = {},
+  ): Promise<{ run: NotebookResearchRun; session: DqlGenerationSession }> => {
+    const sql = notebookResearchString(run.reviewedSql) ?? notebookResearchString(run.generatedSql);
+    if (!sql) throw new Error('Notebook research needs generated or reviewed SQL before DQL draft promotion.');
+    const sourcePath = `${run.notebookPath}${run.sourceCellId ? `#${run.sourceCellId}` : ''}`;
+    const session = await createDqlGenerationSessionForProject(projectRoot, {
+      inputMode: 'upload',
+      sources: [{ path: sourcePath.endsWith('.sql') ? sourcePath : `${sourcePath}.sql`, content: sql }],
+      sourceKind: 'raw-sql-file',
+      domain: notebookResearchString(input.domain) ?? run.domain,
+      owner: notebookResearchString(input.owner),
+      tags: ['notebook-research', 'review-required', ...(Array.isArray(input.tags) ? input.tags : [])],
+      provider: input.provider,
+    }, semanticLayer);
+    const draftPath = session.candidates.find((candidate) => candidate.draftSave?.path)?.draftSave?.path
+      ?? session.candidates.find((candidate) => candidate.savedPath)?.savedPath;
+    const promotion = buildNotebookDqlPromotionSummary(session, draftPath);
+    const updated = storage.markPromoted(run.id, {
+      draftBlockPath: draftPath,
+      dqlImportId: session.id,
+      dqlCandidateIds: session.candidates.map((candidate) => candidate.id),
+      dqlPromotion: promotion,
+    }) ?? run;
+    const planned = storage.updateRun(updated.id, {
+      researchPlan: buildNotebookResearchPlan({
+        run: updated,
+        evidence: updated.evidence,
+        resultPreview: updated.resultPreview as ReturnType<typeof normalizeQueryResult> | undefined,
+        generatedSql: updated.generatedSql,
+        reviewedSql: updated.reviewedSql,
+        routeDecision: updated.routeDecision,
+      }),
+    }) ?? updated;
+    return { run: planned, session };
+  };
+
+  const checkNotebookResearchReuse = async (
+    storage: LocalNotebookResearchStorage,
+    run: NotebookResearchRun,
+    input: { domain?: string; owner?: string } = {},
+  ): Promise<{ run: NotebookResearchRun; promotion: NotebookResearchDqlPromotion; match: Awaited<ReturnType<typeof matchSqlForDqlReuse>> }> => {
+    const sql = notebookResearchString(run.reviewedSql) ?? notebookResearchString(run.generatedSql);
+    if (!sql) throw new Error('Notebook research needs generated or reviewed SQL before reuse checking.');
+    const sourcePath = `${run.notebookPath}${run.sourceCellId ? `#${run.sourceCellId}` : ''}.sql`;
+    const match = await matchSqlForDqlReuse({
+      sql,
+      sourcePath,
+      name: run.title || 'Notebook research SQL',
+      domain: notebookResearchString(input.domain) ?? run.domain ?? 'uncategorized',
+      owner: notebookResearchString(input.owner) ?? 'analytics',
+    });
+    const promotion: NotebookResearchDqlPromotion = {
+      importId: `reuse-check:${run.id}:${Date.now()}`,
+      candidateIds: ['reuse_check'],
+      recommendedAction: match.recommendedAction,
+      similarityMatches: match.similarityMatches.slice(0, 8).map(toNotebookPromotionMatch),
+      candidates: [{
+        id: 'reuse_check',
+        name: run.title || 'Notebook research SQL',
+        domain: notebookResearchString(input.domain) ?? run.domain,
+        reviewStatus: 'reuse_checked',
+        recommendedAction: match.recommendedAction,
+        similarityMatches: match.similarityMatches.slice(0, 5).map(toNotebookPromotionMatch),
+        parameterPolicy: match.parameterPolicy.slice(0, 16).map((entry) => ({
+          name: entry.name,
+          policy: entry.policy,
+        })),
+        allowedFilters: match.allowedFilters.slice(0, 16),
+        warnings: match.parameterDecisions
+          .filter((decision) => decision.reason)
+          .map((decision) => `${decision.name}: ${decision.reason}`)
+          .slice(0, 12),
+      }],
+      createdAt: new Date().toISOString(),
+    };
+    const checked = storage.updateRun(run.id, {
+      dqlPromotionAction: match.recommendedAction,
+      dqlPromotion: promotion,
+      researchPlan: buildNotebookResearchPlan({
+        run: {
+          ...run,
+          dqlPromotionAction: match.recommendedAction,
+          dqlPromotion: promotion,
+        },
+        evidence: run.evidence,
+        resultPreview: run.resultPreview as ReturnType<typeof normalizeQueryResult> | undefined,
+        generatedSql: run.generatedSql,
+        reviewedSql: run.reviewedSql,
+        routeDecision: run.routeDecision,
+      }),
+    }) ?? run;
+    return { run: checked, promotion, match };
+  };
+
+  const matchSqlForDqlReuse = async (input: {
+    sql: string;
+    sourcePath?: string;
+    name?: string;
+    domain?: string;
+    owner?: string;
+  }) => {
+    const sql = input.sql.trim();
+    if (!sql) throw new Error('Missing SQL for reuse check.');
+    const sourceTables = extractSqlTablesLight(sql);
+    const candidate: BlockStudioImportCandidate = {
+      id: 'match_sql',
+      sourceKind: 'raw-sql-file',
+      sourcePath: input.sourcePath ?? 'pasted.sql',
+      name: input.name ?? 'SQL match preview',
+      domain: input.domain ?? 'imported',
+      description: 'SQL match preview candidate.',
+      owner: input.owner ?? 'analytics',
+      tags: [],
+      sql,
+      dqlSource: '',
+      validation: null,
+      preview: null,
+      lineage: {
+        sourceTables,
+        parameters: [],
+        warnings: [],
+        statementIndex: 1,
+        totalStatements: 1,
+      },
+      confidence: 0.8,
+      splitStrategy: 'manual',
+      warnings: [],
+      conversionNotes: [],
+      aiAssistance: [],
+      reviewStatus: 'draft',
+    };
+    const evidence = deterministicDqlGenerationEvidence(candidate);
+    const patch = deterministicDqlGenerationPatch(candidate, evidence);
+    const contextPack = await buildDqlGenerationContextPack(projectRoot, { ...candidate, sql: patch.sql ?? sql }).catch(() => null);
+    const similarity = buildDqlGenerationSimilarityMatches(candidate, patch, contextPack);
+    return {
+      parameterDecisions: patch.parameterDecisions ?? [],
+      parameterPolicy: patch.parameterPolicy ?? [],
+      filterBindings: patch.filterBindings ?? [],
+      allowedFilters: patch.allowedFilters ?? [],
+      parameterizedSql: patch.sql ?? sql,
+      similarityMatches: similarity.matches,
+      recommendedAction: similarity.recommendedAction,
+    };
+  };
+
+  const buildNotebookDqlPromotionSummary = (
+    session: DqlGenerationSession,
+    draftBlockPath?: string,
+  ): NotebookResearchDqlPromotion => {
+    const primary = draftBlockPath
+      ? session.candidates.find((candidate) => candidate.draftSave?.path === draftBlockPath || candidate.savedPath === draftBlockPath) ?? session.candidates[0]
+      : session.candidates[0];
+    return {
+      importId: session.id,
+      candidateIds: session.candidates.map((candidate) => candidate.id),
+      draftBlockPath,
+      recommendedAction: primary?.recommendedAction,
+      similarityMatches: (primary?.similarityMatches ?? []).slice(0, 8).map(toNotebookPromotionMatch),
+      candidates: session.candidates.map((candidate) => ({
+        id: candidate.id,
+        name: candidate.name,
+        domain: candidate.domain,
+        draftPath: candidate.draftSave?.path,
+        savedPath: candidate.savedPath,
+        reviewStatus: candidate.reviewStatus,
+        recommendedAction: candidate.recommendedAction,
+        similarityMatches: (candidate.similarityMatches ?? []).slice(0, 5).map(toNotebookPromotionMatch),
+        parameterPolicy: (candidate.parameterPolicy ?? []).slice(0, 16).map((entry) => ({
+          name: entry.name,
+          policy: entry.policy,
+        })),
+        allowedFilters: (candidate.allowedFilters ?? []).slice(0, 16),
+        warnings: [...(candidate.warnings ?? []), ...(candidate.lineage.warnings ?? [])].slice(0, 12),
+      })),
+      createdAt: new Date().toISOString(),
+    };
+  };
+
+  const toNotebookPromotionMatch = (match: BlockSimilarityMatch) => ({
+    kind: match.kind,
+    objectKey: match.objectKey,
+    name: match.name,
+    status: match.status,
+    source: match.source,
+    score: match.score,
+    reason: match.reason,
+    recommendedAction: match.recommendedAction,
+  });
 
   // SSE clients for /api/watch hot-reload
   const sseClients = new Set<ServerResponse>();
@@ -1445,6 +1904,394 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
       return;
     }
 
+    if (req.method === 'GET' && path === '/api/notebook/research') {
+      const storage = openNotebookResearchStorage();
+      try {
+        const notebookPath = notebookResearchString(url.searchParams.get('path'));
+        const sourceCellId = notebookResearchString(url.searchParams.get('sourceCellId') ?? url.searchParams.get('cellId'));
+        const domain = notebookResearchString(url.searchParams.get('domain'));
+        const owner = notebookResearchString(url.searchParams.get('owner'));
+        const intent = notebookResearchIntent(url.searchParams.get('intent'));
+        const search = notebookResearchString(url.searchParams.get('q')) ?? notebookResearchString(url.searchParams.get('search'));
+        const status = notebookResearchStatus(url.searchParams.get('status'));
+        const reviewStatus = notebookResearchReviewStatus(url.searchParams.get('reviewStatus'));
+        const promotionAction = notebookResearchPromotionAction(url.searchParams.get('promotionAction') ?? url.searchParams.get('action'));
+        const readiness = notebookResearchReadiness(url.searchParams.get('readiness') ?? url.searchParams.get('ready'));
+        const age = notebookResearchAge(url.searchParams.get('age'));
+        const nextAction = notebookResearchNextAction(url.searchParams.get('nextAction') ?? url.searchParams.get('next'));
+        const activeOnlyParam = url.searchParams.get('activeOnly') ?? url.searchParams.get('active');
+        const activeOnly = activeOnlyParam === 'true' || activeOnlyParam === '1';
+        const sort = notebookResearchSort(url.searchParams.get('sort'));
+        const limit = notebookResearchInteger(url.searchParams.get('limit'), 50, 1, 500);
+        const offset = notebookResearchInteger(url.searchParams.get('offset'), 0, 0, Number.MAX_SAFE_INTEGER);
+        const page = storage.listRunsPage({ notebookPath, sourceCellId, domain, owner, intent, search, status, reviewStatus, promotionAction, readiness, age, nextAction, activeOnly, sort, limit, offset });
+        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON(withNotebookResearchChecklistPage(page)));
+      } catch (error) {
+        res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({ error: error instanceof Error ? error.message : String(error) }));
+      } finally {
+        storage.close();
+      }
+      return;
+    }
+
+    if (req.method === 'POST' && path === '/api/notebook/research') {
+      const storage = openNotebookResearchStorage();
+      try {
+	        const body = await readJSON(req);
+	        const notebookPath = notebookResearchString(body.notebookPath) ?? notebookResearchString(body.path);
+	        const question = notebookResearchString(body.question);
+	        const sourceCell = notebookResearchSourceCellPayload(body);
+	        const sourceCellId = notebookResearchString(body.sourceCellId) ?? notebookResearchSourceCellId(sourceCell);
+	        const sourceCellName = notebookResearchString(body.sourceCellName) ?? notebookResearchSourceCellName(sourceCell);
+	        const sourceCellFingerprint = notebookResearchString(body.sourceCellFingerprint) ?? notebookResearchSourceCellFingerprint(sourceCell);
+	        if (!notebookPath || !question) {
+	          res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
+	          res.end(serializeJSON({ error: 'notebookPath and question are required.' }));
+          return;
+        }
+        const created = storage.createRun({
+          notebookPath,
+          domain: notebookResearchString(body.domain),
+          owner: notebookResearchString(body.owner),
+          sourceCell,
+	          sourceCellId,
+	          sourceCellName,
+	          sourceCellFingerprint,
+	          title: notebookResearchString(body.title),
+	          question,
+          intent: notebookResearchIntent(body.intent),
+          context: body.context,
+          generatedSql: notebookResearchString(body.generatedSql),
+          reviewedSql: notebookResearchString(body.reviewedSql),
+        });
+        const run = body.run === true
+          ? await runNotebookResearch(storage, created, {
+              domain: notebookResearchString(body.domain),
+	              sourceCellFingerprint,
+	              question,
+              intent: notebookResearchIntent(body.intent),
+              context: body.context,
+              generatedSql: notebookResearchString(body.generatedSql),
+              reviewedSql: notebookResearchString(body.reviewedSql),
+            })
+          : created;
+        res.writeHead(201, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({ run: withNotebookResearchChecklist(run) }));
+      } catch (error) {
+        res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({ error: error instanceof Error ? error.message : String(error) }));
+      } finally {
+        storage.close();
+      }
+      return;
+    }
+
+    if (req.method === 'POST' && path === '/api/notebook/research/context-preview') {
+      try {
+        const body = await readJSON(req);
+        const notebookPath = notebookResearchString(body.notebookPath) ?? notebookResearchString(body.path);
+        const question = notebookResearchString(body.question);
+        if (!notebookPath || !question) {
+          res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
+          res.end(serializeJSON({ error: 'notebookPath and question are required.' }));
+          return;
+        }
+	        const intent = notebookResearchIntent(body.intent) ?? 'ad_hoc_analysis';
+	        const domain = notebookResearchString(body.domain);
+	        const context = body.context;
+	        const sourceCell = notebookResearchSourceCellPayload(body);
+	        const contextPack = await buildLocalContextPack(projectRoot, {
+          question,
+          mode: 'question',
+          surface: 'notebook',
+          selectedContext: {
+	            activeSurface: 'notebook',
+	            notebookPath,
+	            domain,
+	            sourceCellId: notebookResearchString(body.sourceCellId) ?? notebookResearchSourceCellId(sourceCell),
+	            sourceCellName: notebookResearchString(body.sourceCellName) ?? notebookResearchSourceCellName(sourceCell),
+	            context,
+            intent,
+            researchPattern: notebookResearchIntentPattern(intent),
+          },
+          strictness: 'balanced',
+          limit: 100,
+        });
+        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON(notebookResearchContextPreview(contextPack)));
+      } catch (error) {
+        res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({ error: error instanceof Error ? error.message : String(error) }));
+      }
+      return;
+    }
+
+    if (req.method === 'POST' && path === '/api/notebook/research/seed-cells') {
+      const storage = openNotebookResearchStorage();
+      try {
+        const body = await readJSON(req);
+        const notebookPath = notebookResearchString(body.notebookPath) ?? notebookResearchString(body.path);
+        if (!notebookPath) {
+          res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
+          res.end(serializeJSON({ error: 'notebookPath is required.' }));
+          return;
+        }
+        const cells: unknown[] = Array.isArray(body.cells) ? body.cells : [];
+        if (cells.length === 0) {
+          res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
+          res.end(serializeJSON({ error: 'At least one source cell is required.' }));
+          return;
+        }
+        const validCells = cells.filter((cell): cell is Record<string, unknown> => Boolean(cell && typeof cell === 'object' && !Array.isArray(cell)));
+        const invalidCellCount = cells.length - validCells.length;
+        const seeded = storage.seedRunsFromCells({
+          notebookPath,
+          domain: notebookResearchString(body.domain),
+          owner: notebookResearchString(body.owner),
+          notebookTitle: notebookResearchString(body.notebookTitle),
+	          cells: validCells.map((cell) => ({
+	            sourceCell: notebookResearchSourceCellPayload(cell),
+	            id: notebookResearchString(cell.id),
+	            sourceCellId: notebookResearchString(cell.sourceCellId),
+	            name: notebookResearchString(cell.name),
+	            sourceCellName: notebookResearchString(cell.sourceCellName),
+	            sourceCellFingerprint: notebookResearchString(cell.sourceCellFingerprint),
+	            title: notebookResearchString(cell.title),
+	            type: notebookResearchString(cell.type),
+	            sql: notebookResearchString(cell.sql),
+	            content: notebookResearchString(cell.content),
+	            source: notebookResearchString(cell.source),
+	            question: notebookResearchString(cell.question),
+	            intent: notebookResearchIntent(cell.intent),
+	          })),
+          limit: 1000,
+        });
+        res.writeHead(201, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({
+          created: seeded.created.map(withNotebookResearchChecklist),
+          createdCount: seeded.createdCount,
+          skippedCount: seeded.skippedCount + invalidCellCount,
+          limitApplied: seeded.limitApplied,
+        }));
+      } catch (error) {
+        res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({ error: error instanceof Error ? error.message : String(error) }));
+      } finally {
+        storage.close();
+      }
+      return;
+    }
+
+    if (req.method === 'POST' && path === '/api/notebook/research/source-coverage') {
+      const storage = openNotebookResearchStorage();
+      try {
+        const body = await readJSON(req);
+        const notebookPath = notebookResearchString(body.notebookPath) ?? notebookResearchString(body.path);
+        if (!notebookPath) {
+          res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
+          res.end(serializeJSON({ error: 'notebookPath is required.' }));
+          return;
+        }
+	        const rawSourceCells = Array.isArray(body.sourceCells)
+	          ? body.sourceCells
+	          : Array.isArray(body.cells)
+	            ? body.cells
+	            : [];
+	        const sourceCells = rawSourceCells.flatMap((cell: unknown): NotebookResearchSourceCellInput[] => {
+	          if (!cell || typeof cell !== 'object' || Array.isArray(cell)) return [];
+	          const record = cell as Record<string, unknown>;
+	          const nested = notebookResearchSourceCellPayload(record) ?? {};
+	          return [{
+	            ...nested,
+	            id: notebookResearchString(record.id) ?? nested.id,
+	            sourceCellId: notebookResearchString(record.sourceCellId) ?? nested.sourceCellId,
+	            cellId: notebookResearchString(record.cellId) ?? nested.cellId,
+	            name: notebookResearchString(record.name) ?? nested.name,
+	            sourceCellName: notebookResearchString(record.sourceCellName) ?? nested.sourceCellName,
+	            title: notebookResearchString(record.title) ?? nested.title,
+	            fingerprint: notebookResearchString(record.fingerprint) ?? nested.fingerprint,
+	            sourceCellFingerprint: notebookResearchString(record.sourceCellFingerprint) ?? nested.sourceCellFingerprint,
+	            sqlFingerprint: notebookResearchString(record.sqlFingerprint) ?? nested.sqlFingerprint,
+	            type: notebookResearchString(record.type) ?? nested.type,
+	          }];
+	        });
+	        const requestedIds: unknown[] = Array.isArray(body.sourceCellIds)
+	          ? body.sourceCellIds
+	          : rawSourceCells.length > 0
+	            ? sourceCells.map((cell: NotebookResearchSourceCellInput) => notebookResearchSourceCellId(cell))
+	            : [];
+	        const sourceCellIds: string[] = Array.from(new Set(
+	          requestedIds
+	            .map((id: unknown) => notebookResearchString(id))
+	            .filter((id: string | undefined): id is string => Boolean(id)),
+	        ));
+	        const requestedSourceCellCount = new Set([
+	          ...sourceCellIds,
+	          ...sourceCells
+	            .map((cell: NotebookResearchSourceCellInput) => notebookResearchSourceCellId(cell))
+	            .filter((id: string | undefined): id is string => Boolean(id)),
+	        ]).size;
+        const limit = typeof body.limit === 'number' && Number.isFinite(body.limit)
+          ? Math.max(1, Math.min(10_000, Math.floor(body.limit)))
+          : 10_000;
+	        const linkedRuns = storage.listLatestRunsBySourceCell({
+	          notebookPath,
+	          sourceCellIds,
+	          sourceCells,
+	          limit,
+	        });
+	        const missingRuns = storage.listLatestRunsForMissingSourceCells({
+	          notebookPath,
+	          sourceCellIds,
+	          sourceCells,
+	          limit,
+	        });
+        const runs = [...linkedRuns, ...missingRuns];
+        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({
+          runs: runs.map(withNotebookResearchChecklist),
+	          requestedCount: requestedSourceCellCount,
+	          matchedCount: runs.length,
+	          limitApplied: requestedSourceCellCount > limit,
+	        }));
+      } catch (error) {
+        res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({ error: error instanceof Error ? error.message : String(error) }));
+      } finally {
+        storage.close();
+      }
+      return;
+    }
+
+    if (req.method === 'GET' && path === '/api/notebook/research/diagnostics') {
+      const storage = openNotebookResearchStorage();
+      try {
+        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON(storage.getDiagnostics()));
+      } catch (error) {
+        res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({ error: error instanceof Error ? error.message : String(error) }));
+      } finally {
+        storage.close();
+      }
+      return;
+    }
+
+    const notebookResearchMatch = /^\/api\/notebook\/research\/([^/]+)(?:\/([^/]+))?$/.exec(path);
+    if (notebookResearchMatch) {
+      const id = decodeURIComponent(notebookResearchMatch[1]);
+      const action = notebookResearchMatch[2];
+      const storage = openNotebookResearchStorage();
+      try {
+        const run = storage.getRun(id);
+        if (!run) {
+          res.writeHead(404, { 'Content-Type': 'application/json; charset=utf-8' });
+          res.end(serializeJSON({ error: 'Notebook research run not found.' }));
+          return;
+        }
+
+        if (req.method === 'GET' && !action) {
+          res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+          res.end(serializeJSON({ run: withNotebookResearchChecklist(run) }));
+          return;
+        }
+
+	        if (req.method === 'PATCH' && !action) {
+	          const body = await readJSON(req);
+	          const sourceCell = notebookResearchSourceCellPayload(body);
+	          const sourceCellIdPatch = notebookResearchPatchString(body, 'sourceCellId');
+	          const sourceCellNamePatch = notebookResearchPatchString(body, 'sourceCellName');
+	          const sourceCellFingerprintPatch = notebookResearchPatchString(body, 'sourceCellFingerprint');
+          const updated = storage.updateRun(id, {
+            domain: notebookResearchString(body.domain),
+            owner: notebookResearchString(body.owner),
+            sourceCellId: sourceCellIdPatch !== undefined ? sourceCellIdPatch : notebookResearchSourceCellId(sourceCell),
+	            sourceCellName: sourceCellNamePatch !== undefined ? sourceCellNamePatch : notebookResearchSourceCellName(sourceCell),
+	            sourceCellFingerprint: sourceCellFingerprintPatch !== undefined ? sourceCellFingerprintPatch : notebookResearchSourceCellFingerprint(sourceCell),
+            title: notebookResearchString(body.title),
+            question: notebookResearchString(body.question),
+            intent: notebookResearchIntent(body.intent),
+            context: body.context,
+            recommendation: notebookResearchString(body.recommendation),
+            evidence: body.evidence,
+            contextPackId: notebookResearchString(body.contextPackId),
+            routeDecision: body.routeDecision,
+            generatedSql: notebookResearchString(body.generatedSql),
+            reviewedSql: notebookResearchString(body.reviewedSql),
+            warnings: Array.isArray(body.warnings) ? body.warnings.filter((item: unknown): item is string => typeof item === 'string') : undefined,
+            reviewStatus: notebookResearchReviewStatus(body.reviewStatus),
+          }) ?? run;
+          const planned = storage.updateRun(updated.id, {
+            researchPlan: buildNotebookResearchPlan({
+              run: updated,
+              evidence: updated.evidence,
+              resultPreview: updated.resultPreview as ReturnType<typeof normalizeQueryResult> | undefined,
+              previewError: updated.error,
+              generatedSql: updated.generatedSql,
+              reviewedSql: updated.reviewedSql,
+              routeDecision: updated.routeDecision,
+            }),
+          }) ?? updated;
+          res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+          res.end(serializeJSON({ run: withNotebookResearchChecklist(planned) }));
+          return;
+        }
+
+	        if (req.method === 'POST' && action === 'run') {
+	          const body = await readJSON(req).catch(() => ({}));
+	          const sourceCell = notebookResearchSourceCellPayload(body);
+          const updated = await runNotebookResearch(storage, run, {
+            domain: notebookResearchString(body.domain),
+            owner: notebookResearchString(body.owner),
+            sourceCellFingerprint: notebookResearchString(body.sourceCellFingerprint) ?? notebookResearchSourceCellFingerprint(sourceCell),
+            question: notebookResearchString(body.question),
+            intent: notebookResearchIntent(body.intent),
+            context: body.context,
+            generatedSql: notebookResearchString(body.generatedSql),
+            reviewedSql: notebookResearchString(body.reviewedSql),
+          });
+          res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+          res.end(serializeJSON({ run: withNotebookResearchChecklist(updated) }));
+          return;
+        }
+
+        if (req.method === 'POST' && action === 'reuse-check') {
+          const body = await readJSON(req).catch(() => ({}));
+          const payload = await checkNotebookResearchReuse(storage, run, {
+            domain: notebookResearchString(body.domain),
+            owner: notebookResearchString(body.owner),
+          });
+          res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+          res.end(serializeJSON({ ...payload, run: withNotebookResearchChecklist(payload.run) }));
+          return;
+        }
+
+        if (req.method === 'POST' && action === 'promote-dql') {
+          const body = await readJSON(req).catch(() => ({}));
+          const payload = await promoteNotebookResearchToDql(storage, run, {
+            domain: notebookResearchString(body.domain),
+            owner: notebookResearchString(body.owner),
+            provider: notebookResearchString(body.provider),
+            tags: Array.isArray(body.tags) ? body.tags.filter((item: unknown): item is string => typeof item === 'string') : undefined,
+          });
+          res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+          res.end(serializeJSON({ ...payload, run: withNotebookResearchChecklist(payload.run) }));
+          return;
+        }
+
+        res.writeHead(405, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({ error: 'Unsupported notebook research operation.' }));
+      } catch (error) {
+        res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({ error: error instanceof Error ? error.message : String(error) }));
+      } finally {
+        storage.close();
+      }
+      return;
+    }
+
     // ── run snapshots (v0.11) ───────────────────────────────────────────────
     // Captures executed notebook state (query results + timings) in a
     // sibling `.run.json` so notebooks can show last-run output without
@@ -2100,48 +2947,15 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           return;
         }
         const sql = body.sql.trim();
-        const sourceTables = extractSqlTablesLight(sql);
-        const candidate: BlockStudioImportCandidate = {
-          id: 'match_sql',
-          sourceKind: 'raw-sql-file',
+        const match = await matchSqlForDqlReuse({
+          sql,
           sourcePath: typeof body.sourcePath === 'string' ? body.sourcePath : 'pasted.sql',
           name: typeof body.name === 'string' ? body.name : 'SQL match preview',
           domain: typeof body.domain === 'string' ? body.domain : 'imported',
-          description: 'SQL match preview candidate.',
           owner: typeof body.owner === 'string' ? body.owner : 'analytics',
-          tags: [],
-          sql,
-          dqlSource: '',
-          validation: null,
-          preview: null,
-          lineage: {
-            sourceTables,
-            parameters: [],
-            warnings: [],
-            statementIndex: 1,
-            totalStatements: 1,
-          },
-          confidence: 0.8,
-          splitStrategy: 'manual',
-          warnings: [],
-          conversionNotes: [],
-          aiAssistance: [],
-          reviewStatus: 'draft',
-        };
-        const evidence = deterministicDqlGenerationEvidence(candidate);
-        const patch = deterministicDqlGenerationPatch(candidate, evidence);
-        const contextPack = await buildDqlGenerationContextPack(projectRoot, { ...candidate, sql: patch.sql ?? sql }).catch(() => null);
-        const similarity = buildDqlGenerationSimilarityMatches(candidate, patch, contextPack);
+        });
         res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
-        res.end(serializeJSON({
-          parameterDecisions: patch.parameterDecisions ?? [],
-          parameterPolicy: patch.parameterPolicy ?? [],
-          filterBindings: patch.filterBindings ?? [],
-          allowedFilters: patch.allowedFilters ?? [],
-          parameterizedSql: patch.sql ?? sql,
-          similarityMatches: similarity.matches,
-          recommendedAction: similarity.recommendedAction,
-        }));
+        res.end(serializeJSON(match));
       } catch (error) {
         res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' });
         res.end(serializeJSON({ error: error instanceof Error ? error.message : String(error) }));
@@ -3546,8 +4360,12 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
     }
 
     if (req.method === 'POST' && path === '/api/query') {
+      let body: any;
+      let execContext: NotebookExecutionContextInput | null = null;
+      const start = Date.now();
       try {
-        const body = await readJSON(req);
+        body = await readJSON(req);
+        execContext = notebookExecutionContext(body.executionContext);
         if (typeof body.sql !== 'string' || body.sql.trim().length === 0) {
           res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
           res.end(serializeJSON({ columns: [], rows: [], error: 'Missing SQL in request body.' }));
@@ -3580,7 +4398,26 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           runtimeVariables(body.variables && typeof body.variables === 'object' ? body.variables : {}),
           prepared.connection,
         );
-        const payload = serializeJSON(normalizeQueryResult(result, semantic.semanticRefs));
+        const normalized = normalizeQueryResult(result, semantic.semanticRefs);
+        if (execContext) {
+          recordNotebookQueryRun(projectRoot, {
+            notebookPath: execContext.notebookPath!,
+            cellId: execContext.cellId,
+            cellName: execContext.cellName,
+            researchRunId: execContext.researchRunId,
+            source: execContext.source ?? 'notebook_sql_cell',
+            status: 'success',
+            rowCount: normalized.rowCount ?? normalized.rows.length,
+            durationMs: Date.now() - start,
+            sql: body.sql,
+          });
+          updateNotebookResearchFromCellExecution(projectRoot, execContext, {
+            status: 'success',
+            resultPreview: normalized,
+            sql: body.sql,
+          });
+        }
+        const payload = serializeJSON(normalized);
         res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
         res.end(payload);
       } catch (error) {
@@ -3597,6 +4434,24 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
             code: 'unauthorized',
           }));
           return;
+        }
+        if (execContext) {
+          recordNotebookQueryRun(projectRoot, {
+            notebookPath: execContext.notebookPath!,
+            cellId: execContext.cellId,
+            cellName: execContext.cellName,
+            researchRunId: execContext.researchRunId,
+            source: execContext.source ?? 'notebook_sql_cell',
+            status: 'error',
+            durationMs: Date.now() - start,
+            errorCode: error instanceof Error ? error.message : String(error),
+            sql: typeof body?.sql === 'string' ? body.sql : undefined,
+          });
+          updateNotebookResearchFromCellExecution(projectRoot, execContext, {
+            status: 'error',
+            error: error instanceof Error ? error.message : String(error),
+            sql: typeof body?.sql === 'string' ? body.sql : undefined,
+          });
         }
         res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' });
         res.end(serializeJSON({
@@ -4173,8 +5028,12 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
     }
 
     if (req.method === 'POST' && path === '/api/notebook/execute') {
+      let body: any;
+      let execContext: NotebookExecutionContextInput | null = null;
+      const start = Date.now();
       try {
-        const body = await readJSON(req);
+        body = await readJSON(req);
+        execContext = notebookExecutionContext(body.executionContext);
         const cell = normalizeNotebookCell(body.cell);
         if (!cell) {
           res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
@@ -4209,6 +5068,26 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           runtimeVariables(plan.variables),
           prepared.connection,
         );
+        const normalized = normalizeQueryResult(rawResult);
+        if (execContext) {
+          recordNotebookQueryRun(projectRoot, {
+            notebookPath: execContext.notebookPath!,
+            cellId: execContext.cellId ?? cell.id,
+            cellName: execContext.cellName ?? plan.title ?? resolved.blockName,
+            researchRunId: execContext.researchRunId,
+            source: execContext.source ?? (cell.type === 'dql' ? 'notebook_dql_cell' : 'notebook_cell'),
+            status: 'success',
+            rowCount: normalized.rowCount ?? normalized.rows.length,
+            durationMs: Date.now() - start,
+            sql: plan.sql,
+            objectKey: resolved.blockPath,
+          });
+          updateNotebookResearchFromCellExecution(projectRoot, execContext, {
+            status: 'success',
+            resultPreview: normalized,
+            sql: plan.sql,
+          });
+        }
         res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
         res.end(serializeJSON({
           cellType: cell.type,
@@ -4217,9 +5096,25 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           blockPath: resolved.blockPath,
           chartConfig: plan.chartConfig,
           tests: plan.tests,
-          result: normalizeQueryResult(rawResult),
+          result: normalized,
         }));
       } catch (error) {
+        if (execContext) {
+          recordNotebookQueryRun(projectRoot, {
+            notebookPath: execContext.notebookPath!,
+            cellId: execContext.cellId,
+            cellName: execContext.cellName,
+            researchRunId: execContext.researchRunId,
+            source: execContext.source ?? 'notebook_cell',
+            status: 'error',
+            durationMs: Date.now() - start,
+            errorCode: error instanceof Error ? error.message : String(error),
+          });
+          updateNotebookResearchFromCellExecution(projectRoot, execContext, {
+            status: 'error',
+            error: error instanceof Error ? error.message : String(error),
+          });
+        }
         res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' });
         res.end(serializeJSON({ error: error instanceof Error ? error.message : String(error) }));
       }
@@ -10123,6 +11018,730 @@ function recordAgentRuntimeSchemaSnapshot(projectRoot: string, schemaContext: Ag
   } catch {
     // Runtime schema snapshots are advisory local metadata and must not block answers.
   }
+}
+
+function notebookResearchString(value: unknown): string | undefined {
+  return typeof value === 'string' && value.trim() ? value.trim() : undefined;
+}
+
+function notebookResearchRecord(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === 'object' && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : null;
+}
+
+function notebookResearchSourceCellPayload(body: Record<string, unknown>): NotebookResearchSourceCellInput | undefined {
+  const sourceCell = notebookResearchRecord(body.sourceCell)
+    ?? notebookResearchRecord(notebookResearchRecord(body.context)?.sourceCell);
+  if (!sourceCell) return undefined;
+  const payload: NotebookResearchSourceCellInput = {
+    id: notebookResearchString(sourceCell.id),
+    sourceCellId: notebookResearchString(sourceCell.sourceCellId),
+    cellId: notebookResearchString(sourceCell.cellId),
+    name: notebookResearchString(sourceCell.name),
+    sourceCellName: notebookResearchString(sourceCell.sourceCellName),
+    title: notebookResearchString(sourceCell.title),
+    fingerprint: notebookResearchString(sourceCell.fingerprint),
+    sourceCellFingerprint: notebookResearchString(sourceCell.sourceCellFingerprint),
+    sqlFingerprint: notebookResearchString(sourceCell.sqlFingerprint),
+    type: notebookResearchString(sourceCell.type),
+    sql: notebookResearchString(sourceCell.sql),
+    content: notebookResearchString(sourceCell.content),
+    source: notebookResearchString(sourceCell.source),
+  };
+  return Object.values(payload).some(Boolean) ? payload : undefined;
+}
+
+function notebookResearchSourceCellId(sourceCell: NotebookResearchSourceCellInput | undefined): string | undefined {
+  return notebookResearchString(sourceCell?.id)
+    ?? notebookResearchString(sourceCell?.sourceCellId)
+    ?? notebookResearchString(sourceCell?.cellId);
+}
+
+function notebookResearchSourceCellName(sourceCell: NotebookResearchSourceCellInput | undefined): string | undefined {
+  return notebookResearchString(sourceCell?.name)
+    ?? notebookResearchString(sourceCell?.sourceCellName)
+    ?? notebookResearchString(sourceCell?.title);
+}
+
+function notebookResearchSourceCellFingerprint(sourceCell: NotebookResearchSourceCellInput | undefined): string | undefined {
+  return notebookResearchString(sourceCell?.sourceCellFingerprint)
+    ?? notebookResearchString(sourceCell?.fingerprint)
+    ?? notebookResearchString(sourceCell?.sqlFingerprint);
+}
+
+function notebookResearchPatchString(body: Record<string, unknown>, key: string): string | null | undefined {
+  if (!Object.prototype.hasOwnProperty.call(body, key)) return undefined;
+  return notebookResearchString(body[key]) ?? null;
+}
+
+function notebookResearchIntent(value: unknown): NotebookResearchIntent | undefined {
+  return value === 'ad_hoc_analysis'
+    || value === 'diagnose_change'
+    || value === 'driver_breakdown'
+    || value === 'segment_compare'
+    || value === 'entity_drilldown'
+    || value === 'anomaly_investigation'
+    || value === 'trust_gap_review'
+    ? value
+    : undefined;
+}
+
+function notebookResearchReviewStatus(value: unknown): NotebookResearchRun['reviewStatus'] | undefined {
+  return value === 'needs_review'
+    || value === 'draft_created'
+    || value === 'completed'
+    || value === 'certified'
+    || value === 'rejected'
+    ? value
+    : undefined;
+}
+
+function notebookResearchStatus(value: unknown): NotebookResearchRun['status'] | undefined {
+  return value === 'draft'
+    || value === 'running'
+    || value === 'ready'
+    || value === 'error'
+    ? value
+    : undefined;
+}
+
+function notebookResearchPromotionAction(value: unknown): NotebookResearchDqlPromotionAction | undefined {
+  return value === 'reuse_existing'
+    || value === 'extend_existing'
+    || value === 'create_replacement'
+    || value === 'create_new'
+    || value === 'review_required'
+    ? value
+    : undefined;
+}
+
+function notebookResearchReadiness(value: unknown): NotebookResearchReadinessFilter | undefined {
+  return value === 'draft_ready' || value === 'certification_ready' || value === 'blocked' ? value : undefined;
+}
+
+function notebookResearchAge(value: unknown): 'stale_open' | 'expired_open' | undefined {
+  return value === 'stale_open' || value === 'expired_open' ? value : undefined;
+}
+
+function notebookResearchNextAction(value: unknown): NotebookResearchNextActionFilter | undefined {
+  return value === 'fix_blockers'
+    || value === 'review_sql'
+    || value === 'review_context'
+    || value === 'run_preview'
+    || value === 'reuse_existing'
+    || value === 'create_dql_draft'
+    || value === 'open_certification'
+    || value === 'complete_review'
+    || value === 'continue_review'
+    ? value
+    : undefined;
+}
+
+function notebookResearchSort(value: unknown): NotebookResearchSort | undefined {
+  return value === 'priority' || value === 'updated_desc' ? value : undefined;
+}
+
+type NotebookResearchChecklistItemStatus = 'passed' | 'pending' | 'warning' | 'blocked';
+type NotebookResearchReviewChecklist = {
+  readyForDqlDraft: boolean;
+  readyForCertificationReview: boolean;
+  blockers: string[];
+  warnings: string[];
+  items: Array<{
+    id: string;
+    label: string;
+    status: NotebookResearchChecklistItemStatus;
+    detail: string;
+  }>;
+};
+
+function withNotebookResearchChecklistPage(page: NotebookResearchRunListResult): Omit<NotebookResearchRunListResult, 'runs'> & { runs: Array<NotebookResearchRun & { reviewChecklist: NotebookResearchReviewChecklist }> } {
+  return {
+    ...page,
+    runs: page.runs.map(withNotebookResearchChecklist),
+  };
+}
+
+function withNotebookResearchChecklist(run: NotebookResearchRun): NotebookResearchRun & { reviewChecklist: NotebookResearchReviewChecklist } {
+  const researchPlan = run.researchPlan ?? buildNotebookResearchPlan({
+    run,
+    evidence: run.evidence,
+    resultPreview: run.resultPreview as ReturnType<typeof normalizeQueryResult> | undefined,
+    previewError: run.status === 'error' ? run.error : undefined,
+    generatedSql: run.generatedSql,
+    reviewedSql: run.reviewedSql,
+    routeDecision: run.routeDecision,
+  });
+  return {
+    ...run,
+    researchPlan,
+    reviewChecklist: buildNotebookResearchReviewChecklist(run),
+  };
+}
+
+function buildNotebookResearchReviewChecklist(run: NotebookResearchRun): NotebookResearchReviewChecklist {
+  const questionReady = Boolean(notebookResearchString(run.question));
+  const hasReviewedSql = Boolean(notebookResearchString(run.reviewedSql));
+  const hasGeneratedSql = Boolean(notebookResearchString(run.generatedSql));
+  const hasSql = hasReviewedSql || hasGeneratedSql;
+  const preview = notebookResearchPreviewInfo(run.resultPreview);
+  const previewReady = run.status === 'ready' && preview.hasPreview;
+  const evidenceReady = notebookResearchEvidenceCount(run.evidence) > 0 || Boolean(run.contextPackId);
+  const promoted = Boolean(run.dqlPromotion || run.dqlImportId || run.draftBlockPath);
+  const duplicateChecked = Boolean(run.dqlPromotionAction || run.dqlPromotion);
+  const promotionAction = run.dqlPromotionAction ?? run.dqlPromotion?.recommendedAction;
+  const reuseRecommended = promotionAction === 'reuse_existing';
+  const promotionReviewRequired = promotionAction === 'review_required';
+  const hasDraft = Boolean(notebookResearchString(run.draftBlockPath));
+  const sqlForParameterReview = notebookResearchString(run.reviewedSql) ?? notebookResearchString(run.generatedSql);
+  const parameterReview = sqlForParameterReview ? parameterizeSqlForDqlImport(sqlForParameterReview) : null;
+  const dynamicParameters = parameterReview?.parameterPolicy.filter((item) => item.policy === 'dynamic') ?? [];
+  const staticParameters = parameterReview?.parameterPolicy.filter((item) => item.policy !== 'dynamic') ?? [];
+  const blockers: string[] = [];
+  const warnings: string[] = [];
+
+  if (!questionReady) blockers.push('Add a business question before review.');
+  if (!hasSql) blockers.push('Add reviewed SQL or generate SQL before promotion.');
+  if (run.status === 'error') blockers.push(run.error ? `Fix preview error: ${run.error}` : 'Fix the failed preview before promotion.');
+  if (!previewReady && run.status !== 'error') warnings.push('Run a bounded preview before certification review.');
+  if (!evidenceReady) warnings.push('Inspect metadata evidence before turning this into a reusable block.');
+  if (hasSql && dynamicParameters.length === 0) warnings.push('No dynamic parameters were detected; confirm this should be a static block before certification.');
+  for (const warning of parameterReview?.warnings ?? []) warnings.push(warning);
+  if (promoted && !duplicateChecked) warnings.push('Promotion exists but duplicate/reuse evidence is missing.');
+  if (reuseRecommended) warnings.push('Reuse the matching block or explicitly document a replacement before certification.');
+  if (promotionReviewRequired) warnings.push('Resolve the review-required promotion decision before certification.');
+
+  const items: NotebookResearchReviewChecklist['items'] = [
+    {
+      id: 'question',
+      label: 'Question',
+      status: questionReady ? 'passed' : 'blocked',
+      detail: questionReady ? 'Business question is captured.' : 'A reusable block needs a clear business question.',
+    },
+    {
+      id: 'sql',
+      label: 'Reviewed SQL',
+      status: hasReviewedSql ? 'passed' : hasGeneratedSql ? 'warning' : 'blocked',
+      detail: hasReviewedSql
+        ? 'Reviewer SQL is saved.'
+        : hasGeneratedSql
+          ? 'Generated SQL exists; review it before promotion.'
+          : 'No SQL is available for preview or DQL generation.',
+    },
+    {
+      id: 'preview',
+      label: 'Preview',
+      status: previewReady ? 'passed' : run.status === 'error' ? 'blocked' : 'pending',
+      detail: previewReady
+        ? `Preview returned ${preview.rowCount.toLocaleString()} row${preview.rowCount === 1 ? '' : 's'}.`
+        : run.status === 'error'
+          ? (run.error ?? 'Preview failed.')
+          : 'Run a bounded preview to validate the query shape.',
+    },
+    {
+      id: 'evidence',
+      label: 'Evidence',
+      status: evidenceReady ? 'passed' : 'warning',
+      detail: evidenceReady ? 'Metadata evidence or context pack is attached.' : 'No context evidence is attached yet.',
+    },
+    {
+      id: 'duplicates',
+      label: 'Reuse check',
+      status: duplicateChecked ? (reuseRecommended || promotionReviewRequired ? 'warning' : 'passed') : promoted ? 'warning' : 'pending',
+      detail: duplicateChecked
+        ? `Promotion decision: ${promotionAction ?? 'review required'}.`
+        : promoted
+          ? 'Draft was created without stored duplicate evidence.'
+          : 'Duplicate check runs when creating a DQL draft.',
+    },
+    {
+      id: 'parameters',
+      label: 'Parameter review',
+      status: !hasSql ? 'pending' : dynamicParameters.length > 0 ? 'passed' : 'warning',
+      detail: !hasSql
+        ? 'Add SQL before checking runtime parameters.'
+        : dynamicParameters.length > 0
+          ? `Detected ${dynamicParameters.length.toLocaleString()} dynamic parameter${dynamicParameters.length === 1 ? '' : 's'}: ${dynamicParameters.slice(0, 6).map((item) => item.name).join(', ')}.`
+          : staticParameters.length > 0
+            ? `Only static or review-required literals were detected: ${staticParameters.slice(0, 6).map((item) => `${item.name} (${item.policy})`).join(', ')}.`
+            : 'No reusable runtime parameters were detected. Certify as static only if the business question is intentionally fixed.',
+    },
+    {
+      id: 'dql_draft',
+      label: 'DQL draft',
+      status: hasDraft ? 'passed' : hasReviewedSql && evidenceReady ? 'pending' : 'blocked',
+      detail: hasDraft
+        ? `Draft saved at ${run.draftBlockPath}.`
+        : !hasReviewedSql
+          ? 'Save reviewed SQL before DQL draft creation.'
+          : evidenceReady
+            ? 'Create a draft after SQL review.'
+            : 'Save metadata evidence before creating a reusable DQL draft.',
+    },
+  ];
+
+  const readyForDqlDraft = questionReady && hasReviewedSql && evidenceReady && run.status !== 'error';
+  const readyForCertificationReview = readyForDqlDraft && previewReady && hasDraft && !reuseRecommended && !promotionReviewRequired;
+  return { readyForDqlDraft, readyForCertificationReview, blockers, warnings, items };
+}
+
+function buildNotebookResearchPlan(input: {
+  run: NotebookResearchRun;
+  evidence?: unknown;
+  resultPreview?: ReturnType<typeof normalizeQueryResult>;
+  previewError?: string;
+  generatedSql?: string;
+  reviewedSql?: string;
+  routeDecision?: unknown;
+}): NotebookResearchPlan {
+  const reviewedSql = notebookResearchString(input.reviewedSql);
+  const generatedSql = notebookResearchString(input.generatedSql);
+  const sql = reviewedSql ?? generatedSql;
+  const parameterized = sql ? parameterizeSqlForDqlImport(sql) : null;
+  const evidence = input.evidence && typeof input.evidence === 'object' && !Array.isArray(input.evidence)
+    ? input.evidence as Record<string, unknown>
+    : {};
+  const trustStatus = evidence.trustStatus && typeof evidence.trustStatus === 'object' && !Array.isArray(evidence.trustStatus)
+    ? evidence.trustStatus as Record<string, unknown>
+    : {};
+  const allowedSqlContext = evidence.allowedSqlContext && typeof evidence.allowedSqlContext === 'object' && !Array.isArray(evidence.allowedSqlContext)
+    ? evidence.allowedSqlContext as Record<string, unknown>
+    : {};
+  const previewRows = input.resultPreview?.rowCount ?? input.resultPreview?.rows.length;
+  const hasEvidence = notebookResearchEvidenceCount(input.evidence) > 0 || Boolean(input.run.contextPackId);
+  const hasPreview = previewRows !== undefined && (previewRows > 0 || Boolean(input.resultPreview?.columns.length));
+  const promotionAction = input.run.dqlPromotionAction ?? input.run.dqlPromotion?.recommendedAction;
+  const missingContext = Array.isArray(evidence.missingContext) ? evidence.missingContext : [];
+  const relations = Array.isArray(allowedSqlContext.relations) ? allowedSqlContext.relations : [];
+  return {
+    sqlState: reviewedSql ? 'reviewed' : generatedSql ? 'generated' : 'missing',
+    grain: sql ? extractDqlGenerationGroupByFields(sql)[0] : undefined,
+    parameterPolicy: (parameterized?.parameterPolicy ?? []).slice(0, 16).map((entry) => ({
+      name: entry.name,
+      policy: entry.policy,
+    })),
+    allowedFilters: (parameterized?.allowedFilters ?? []).slice(0, 16),
+    evidence: {
+      trustLabel: notebookResearchString(trustStatus.label),
+      contextPackId: notebookResearchString(evidence.contextPackId) ?? input.run.contextPackId,
+      evidenceCount: notebookResearchEvidenceCount(input.evidence),
+      relationCount: relations.length,
+      missingContextCount: missingContext.length,
+    },
+    preview: {
+      status: input.previewError ? 'error' : hasPreview ? 'ready' : 'not_run',
+      ...(previewRows === undefined ? {} : { rowCount: previewRows }),
+    },
+    promotion: {
+      path: notebookResearchPlanPromotionPath({
+        hasSql: Boolean(sql),
+        hasEvidence,
+        hasPreview,
+        previewError: input.previewError,
+        draftBlockPath: input.run.draftBlockPath,
+        promotionAction,
+      }),
+      duplicateDecision: promotionAction,
+    },
+    reviewFocus: notebookResearchPlanFocus(input.run.intent, {
+      hasSql: Boolean(sql),
+      hasEvidence,
+      hasPreview,
+      dynamicParameterCount: parameterized?.parameterPolicy.filter((entry) => entry.policy === 'dynamic').length ?? 0,
+      missingContextCount: missingContext.length,
+      promotionAction,
+    }),
+    generatedAt: new Date().toISOString(),
+  };
+}
+
+function notebookResearchPlanPromotionPath(input: {
+  hasSql: boolean;
+  hasEvidence: boolean;
+  hasPreview: boolean;
+  previewError?: string;
+  draftBlockPath?: string;
+  promotionAction?: string;
+}): NotebookResearchPlan['promotion']['path'] {
+  if (!input.hasSql) return 'needs_sql';
+  if (!input.hasEvidence) return 'review_context';
+  if (input.previewError || !input.hasPreview) return 'run_preview';
+  if (input.promotionAction === 'reuse_existing') return 'reuse_existing';
+  if (input.draftBlockPath) return 'open_certification';
+  return 'create_dql_draft';
+}
+
+function notebookResearchPlanFocus(
+  intent: NotebookResearchIntent,
+  input: {
+    hasSql: boolean;
+    hasEvidence: boolean;
+    hasPreview: boolean;
+    dynamicParameterCount: number;
+    missingContextCount: number;
+    promotionAction?: string;
+  },
+): string[] {
+  const focus = new Set<string>();
+  if (!input.hasSql) focus.add('Add reviewed SQL or configure AI SQL generation.');
+  if (!input.hasEvidence) focus.add('Save metadata context evidence before DQL promotion.');
+  if (!input.hasPreview) focus.add('Run a bounded preview and inspect result shape.');
+  if (input.dynamicParameterCount === 0) focus.add('Confirm whether this should be static or parameterized.');
+  if (input.missingContextCount > 0) focus.add('Resolve missing metadata context before certification.');
+  if (input.promotionAction === 'reuse_existing') focus.add('Reuse the existing certified block or document replacement rationale.');
+  const pattern = notebookResearchIntentPattern(intent);
+  const reviewFocus = Array.isArray(pattern.reviewFocus) ? pattern.reviewFocus : [];
+  for (const item of reviewFocus.slice(0, 4)) focus.add(String(item));
+  return Array.from(focus).slice(0, 8);
+}
+
+function notebookResearchPreviewInfo(value: unknown): { hasPreview: boolean; rowCount: number } {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return { hasPreview: false, rowCount: 0 };
+  const record = value as Record<string, unknown>;
+  const rowCount = typeof record.rowCount === 'number' && Number.isFinite(record.rowCount)
+    ? record.rowCount
+    : Array.isArray(record.rows)
+      ? record.rows.length
+      : 0;
+  const hasColumns = Array.isArray(record.columns) && record.columns.length > 0;
+  return { hasPreview: hasColumns || rowCount > 0, rowCount };
+}
+
+function notebookResearchEvidenceCount(value: unknown): number {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return 0;
+  const record = value as Record<string, unknown>;
+  const selected = Array.isArray(record.selectedEvidence) ? record.selectedEvidence.length : 0;
+  const citations = Array.isArray(record.citations) ? record.citations.length : 0;
+  const roles = Array.isArray(record.evidenceRoles) ? record.evidenceRoles.length : 0;
+  return selected + citations + roles;
+}
+
+function notebookResearchInteger(value: unknown, fallback: number, min: number, max: number): number {
+  if (typeof value !== 'string' || !value.trim()) return fallback;
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) return fallback;
+  return Math.max(min, Math.min(max, Math.floor(parsed)));
+}
+
+type NotebookExecutionContextInput = {
+  notebookPath?: string;
+  cellId?: string;
+  cellName?: string;
+  researchRunId?: string;
+  source?: string;
+};
+
+function notebookExecutionContext(value: unknown): NotebookExecutionContextInput | null {
+  if (!value || typeof value !== 'object') return null;
+  const raw = value as Record<string, unknown>;
+  const notebookPath = notebookResearchString(raw.notebookPath);
+  if (!notebookPath) return null;
+  return {
+    notebookPath,
+    cellId: notebookResearchString(raw.cellId),
+    cellName: notebookResearchString(raw.cellName),
+    researchRunId: notebookResearchString(raw.researchRunId),
+    source: notebookResearchString(raw.source),
+  };
+}
+
+function notebookResearchSelectedContext(run: NotebookResearchRun, context: unknown): Record<string, unknown> {
+  return {
+    activeSurface: 'notebook',
+    notebookPath: run.notebookPath,
+    domain: run.domain,
+    sourceCellId: run.sourceCellId,
+    sourceCellName: run.sourceCellName,
+    context,
+  };
+}
+
+function notebookResearchIntentPattern(intent: NotebookResearchIntent): Record<string, unknown> {
+  switch (intent) {
+    case 'diagnose_change':
+      return {
+        label: 'Change diagnosis',
+        dqlTarget: 'driver or trend block',
+        sqlFocus: ['baseline period', 'comparison period', 'metric delta', 'driver dimensions'],
+        reviewFocus: ['time grain', 'comparison filters', 'metric definition', 'explainability evidence'],
+      };
+    case 'driver_breakdown':
+      return {
+        label: 'Driver breakdown',
+        dqlTarget: 'ranking or contribution block',
+        sqlFocus: ['contribution metric', 'ranking', 'tie breaker', 'segment dimensions'],
+        reviewFocus: ['metric grain', 'ranking direction', 'parameterized filters', 'duplicate block match'],
+      };
+    case 'segment_compare':
+      return {
+        label: 'Segment compare',
+        dqlTarget: 'comparison block',
+        sqlFocus: ['shared metric', 'segment fields', 'normalized comparisons', 'deltas'],
+        reviewFocus: ['segment definitions', 'filter compatibility', 'comparison grain', 'semantic metric alignment'],
+      };
+    case 'entity_drilldown':
+      return {
+        label: 'Entity drilldown',
+        dqlTarget: 'entity profile or drilldown block',
+        sqlFocus: ['entity grain', 'stable identifier', 'detail fields', 'supporting metrics'],
+        reviewFocus: ['entity contract', 'primary key', 'allowed filters', 'downstream drill path'],
+      };
+    case 'anomaly_investigation':
+      return {
+        label: 'Anomaly investigation',
+        dqlTarget: 'monitoring or exception block',
+        sqlFocus: ['observed value', 'expected range', 'anomaly rule', 'supporting dimensions'],
+        reviewFocus: ['threshold definition', 'time window', 'false-positive risk', 'evidence fields'],
+      };
+    case 'trust_gap_review':
+      return {
+        label: 'Trust review',
+        dqlTarget: 'replacement or validation block',
+        sqlFocus: ['definition comparison', 'lineage trace', 'duplicate candidates', 'conflict evidence'],
+        reviewFocus: ['certified block match', 'semantic metric match', 'replacement reason', 'governance blockers'],
+      };
+    default:
+      return {
+        label: 'Ad hoc analysis',
+        dqlTarget: 'custom block',
+        sqlFocus: ['business question', 'grain', 'metrics', 'dimensions', 'filters'],
+        reviewFocus: ['reusability', 'parameterization', 'lineage evidence', 'DQL promotion path'],
+      };
+  }
+}
+
+function notebookResearchAgentPrompt(question: string, intent: NotebookResearchIntent): string {
+  const pattern = notebookResearchIntentPattern(intent);
+  const sqlFocus = Array.isArray(pattern.sqlFocus) ? pattern.sqlFocus.join(', ') : 'business logic';
+  const reviewFocus = Array.isArray(pattern.reviewFocus) ? pattern.reviewFocus.join(', ') : 'review evidence';
+  return [
+    `Research question: ${question}`,
+    `Research pattern: ${pattern.label ?? intent}`,
+    `DQL target: ${pattern.dqlTarget ?? 'custom block'}`,
+    `SQL focus: ${sqlFocus}`,
+    `Review focus: ${reviewFocus}`,
+    'Generate read-only SQL that can become a reusable, parameterized DQL block after human review.',
+  ].join('\n');
+}
+
+function notebookResearchRouteDecisionForRun(
+  run: NotebookResearchRun,
+  routeDecision: LocalContextPack['routeDecision'] | undefined,
+  sqlForPreview?: string,
+): LocalContextPack['routeDecision'] | undefined {
+  if (!routeDecision) return undefined;
+  const hasSelectedNotebookSql = Boolean(run.sourceCellId && notebookResearchString(sqlForPreview));
+  if (!hasSelectedNotebookSql || routeDecision.route !== 'certified') return routeDecision;
+
+  const certifiedEvidence = routeDecision.selectedEvidence.find((item) => item.role === 'exact_certified_answer')
+    ?? routeDecision.selectedEvidence.find((item) => item.role === 'certified_context');
+  const certifiedName = certifiedEvidence?.name ?? routeDecision.certifiedApplicability?.objectKey ?? 'matching certified artifact';
+  return {
+    ...routeDecision,
+    route: 'research',
+    trustLabel: routeDecision.trustLabel === 'certified' ? 'mixed' : routeDecision.trustLabel,
+    reviewStatus: 'needs_review',
+    exactObjectKey: undefined,
+    reason: `Selected notebook SQL from "${run.sourceCellName ?? run.sourceCellId}" is the source for this research run. Certified artifact "${certifiedName}" is duplicate/reuse evidence until the reviewed SQL, grain, parameters, and preview are accepted.`,
+    selectedEvidence: routeDecision.selectedEvidence.map((item) => item.role === 'exact_certified_answer'
+      ? {
+          ...item,
+          role: 'certified_context',
+          reason: 'Certified block is reuse or duplicate evidence for the selected notebook SQL; it is not an automatic answer for this research run.',
+        }
+      : item),
+    missingContext: routeDecision.missingContext.length > 0
+      ? routeDecision.missingContext
+      : [{
+          kind: 'metadata',
+          severity: 'warning',
+          message: 'Selected notebook SQL requires human review before DQL promotion, even when certified context exists.',
+        }],
+  };
+}
+
+function notebookResearchContextPreview(contextPack: LocalContextPack): Record<string, unknown> {
+  return {
+    contextPackId: contextPack.id,
+    trustLabel: contextPack.trustLabel,
+    routeDecision: contextPack.routeDecision
+      ? {
+          route: contextPack.routeDecision.route,
+          intent: contextPack.routeDecision.intent,
+          reason: contextPack.routeDecision.reason,
+        }
+      : undefined,
+    evidence: contextPack.evidenceRoles.slice(0, 16).map((item) => ({
+      objectKey: item.objectKey,
+      objectType: item.objectType,
+      name: item.name,
+      role: item.role,
+      reason: item.reason,
+    })),
+    summaries: contextPack.evidenceSummaries.slice(0, 12).map((item) => ({
+      title: item.title,
+      detail: item.detail,
+      objectType: item.objectType,
+      reason: item.reason,
+    })),
+    relations: contextPack.allowedSqlContext.relations.slice(0, 12).map((relation) => ({
+      relation: relation.relation,
+      name: relation.name,
+      source: relation.source,
+      columns: relation.columns.slice(0, 24).map((column) => {
+        if (typeof column === 'string') return column;
+        if (column && typeof column === 'object' && typeof (column as { name?: unknown }).name === 'string') {
+          return String((column as { name: unknown }).name);
+        }
+        return String(column);
+      }),
+    })),
+    missingContext: contextPack.missingContext.slice(0, 12).map((item) => ({
+      kind: item.kind,
+      message: item.message,
+      severity: item.severity,
+    })),
+    warnings: contextPack.warnings.slice(0, 12),
+    topRejected: contextPack.retrievalDiagnostics.topRejected.slice(0, 8).map((item) => ({
+      name: item.name,
+      objectType: item.objectType,
+      reason: item.reason,
+      score: item.score,
+    })),
+    counts: {
+      objects: contextPack.objects.length,
+      evidence: contextPack.evidenceRoles.length,
+      relations: contextPack.allowedSqlContext.relations.length,
+      warnings: contextPack.warnings.length + contextPack.missingContext.length,
+    },
+  };
+}
+
+function normalizeNotebookAgentResult(result: AgentResultPayload): ReturnType<typeof normalizeQueryResult> {
+  const columns = Array.isArray(result.columns)
+    ? result.columns.map((column) => {
+        if (typeof column === 'string') return column;
+        if (column && typeof column === 'object' && typeof (column as { name?: unknown }).name === 'string') {
+          return String((column as { name: unknown }).name);
+        }
+        return String(column);
+      })
+    : [];
+  const rows = Array.isArray(result.rows)
+    ? result.rows
+        .filter((row): row is Record<string, unknown> => Boolean(row && typeof row === 'object' && !Array.isArray(row)))
+        .map((row) => row)
+    : [];
+  return {
+    columns,
+    rows,
+    rowCount: typeof result.rowCount === 'number' ? result.rowCount : rows.length,
+    executionTime: typeof result.executionTime === 'number' ? result.executionTime : 0,
+  };
+}
+
+function notebookResearchSummary(
+  question: string,
+  result: ReturnType<typeof normalizeQueryResult> | undefined,
+  error: string | undefined,
+): string {
+  if (error) return `Research could not preview results for "${question}". ${error}`;
+  if (result) {
+    const rowCount = result.rowCount ?? result.rows.length;
+    return `Research preview for "${question}" returned ${rowCount.toLocaleString()} row${rowCount === 1 ? '' : 's'} across ${result.columns.length.toLocaleString()} column${result.columns.length === 1 ? '' : 's'}.`;
+  }
+  return `Research plan created for "${question}". Add or generate SQL, then run a bounded preview.`;
+}
+
+function recordNotebookQueryRun(projectRoot: string, input: {
+  notebookPath: string;
+  cellId?: string;
+  cellName?: string;
+  researchRunId?: string;
+  source: string;
+  status: string;
+  rowCount?: number;
+  durationMs?: number;
+  errorCode?: string;
+  sql?: string;
+  contextPackId?: string;
+  objectKey?: string;
+}): void {
+  try {
+    recordQueryRun(projectRoot, {
+      objectKey: input.objectKey,
+      source: input.source,
+      status: input.status,
+      rowCount: input.rowCount,
+      durationMs: input.durationMs,
+      errorCode: input.errorCode,
+      payload: {
+        notebookPath: input.notebookPath,
+        cellId: input.cellId,
+        cellName: input.cellName,
+        researchRunId: input.researchRunId,
+        contextPackId: input.contextPackId,
+        sql: input.sql ? compactSqlForRunHistory(input.sql) : undefined,
+      },
+    });
+  } catch {
+    // Query history is advisory metadata and must not block notebook execution.
+  }
+}
+
+function updateNotebookResearchFromCellExecution(
+  projectRoot: string,
+  execContext: NotebookExecutionContextInput,
+  input: {
+    status: 'success' | 'error';
+    resultPreview?: ReturnType<typeof normalizeQueryResult>;
+    error?: string;
+    sql?: string;
+  },
+): void {
+  if (!execContext.notebookPath || (!execContext.cellId && !execContext.researchRunId)) return;
+  const storage = new LocalNotebookResearchStorage(defaultNotebookResearchDbPath(projectRoot));
+  try {
+    const page = storage.listRunsPage({
+      notebookPath: execContext.notebookPath,
+      sort: 'updated_desc',
+      limit: 500,
+    });
+    const matches = page.runs.filter((run) => {
+      if (execContext.researchRunId && run.id === execContext.researchRunId) return true;
+      return Boolean(execContext.cellId && run.sourceCellId === execContext.cellId);
+    });
+    const now = new Date().toISOString();
+    for (const run of matches.slice(0, 20)) {
+      if (input.status === 'success') {
+        storage.updateRun(run.id, {
+          status: 'ready',
+          resultPreview: input.resultPreview,
+          summary: notebookResearchSummary(run.question, input.resultPreview, undefined),
+          recommendation: run.recommendation ?? 'Review SQL, metadata evidence, grain, filters, and duplicate matches before DQL draft promotion.',
+          error: '',
+          lastRunAt: now,
+        });
+      } else {
+        storage.updateRun(run.id, {
+          status: 'error',
+          error: input.error,
+          summary: notebookResearchSummary(run.question, undefined, input.error),
+          lastRunAt: now,
+        });
+      }
+    }
+  } catch {
+    // Research run sync is advisory metadata and must not block notebook execution.
+  } finally {
+    storage.close();
+  }
+}
+
+function compactSqlForRunHistory(sql: string): string {
+  const clean = sql.replace(/\s+/g, ' ').trim();
+  return clean.length > 1200 ? `${clean.slice(0, 1197)}...` : clean;
 }
 
 function buildAgentSchemaContextFromContextPack(question: string, contextPack: LocalContextPack): AgentSchemaTable[] {

@@ -1,6 +1,8 @@
 import type { Theme, ThemeMode } from '../../themes/notebook-theme';
-import React, { useState, useEffect, useCallback, useRef } from 'react';
+import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import { api } from '../../api/client';
+import type { Cell } from '../../store/types';
+import { findHandleNames } from '../../utils/handles';
 import {
   NODE_TYPE_COLORS,
   TYPE_LABELS,
@@ -12,27 +14,311 @@ import {
 import { LineagePathBreadcrumb } from '../lineage/LineagePathBreadcrumb';
 import { MiniLineageGraph } from '../lineage/MiniLineageGraph';
 
+interface SqlSourceRef {
+  name: string;
+  alias?: string;
+  kind: 'table' | 'cte' | 'ref';
+}
+
+interface SqlJoinRef {
+  type: string;
+  table: string;
+  alias?: string;
+  condition?: string;
+}
+
+interface SqlLineageSummary {
+  sources: SqlSourceRef[];
+  ctes: string[];
+  joins: SqlJoinRef[];
+  filters: string[];
+  groupBy: string[];
+  orderBy: string[];
+  outputs: string[];
+  semanticRefs: { metrics: string[]; dimensions: string[] };
+  warnings: string[];
+}
+
+interface BusinessContextMatch {
+  source: string;
+  node: LineageNode;
+  score: number;
+}
+
+interface NotebookDownstreamRef {
+  id: string;
+  label: string;
+  type: string;
+  handle?: string;
+}
+
+const SQL_ALIAS_STOP_WORDS = new Set([
+  'where',
+  'on',
+  'join',
+  'inner',
+  'left',
+  'right',
+  'full',
+  'cross',
+  'group',
+  'order',
+  'having',
+  'limit',
+  'qualify',
+  'union',
+  'as',
+]);
+
+const BUSINESS_CONTEXT_TYPES = new Set([
+  'term',
+  'business_view',
+  'block',
+  'metric',
+  'dimension',
+  'domain',
+  'dbt_model',
+  'source_table',
+  'dbt_source',
+]);
+
 /** Extract a block name from DQL cell content: block "name" { ... } */
 function extractBlockName(content: string): string | null {
   const m = content.match(/^\s*block\s+"([^"]+)"/i);
   return m ? m[1] : null;
 }
 
-/** Extract table names from SQL for lineage lookup (lightweight client-side) */
-function extractSQLTables(sql: string): string[] {
-  const tables: string[] = [];
-  const pattern = /\b(?:FROM|JOIN)\s+([a-zA-Z_][\w.]*)/gi;
-  for (const m of sql.matchAll(pattern)) {
-    const name = m[1].toLowerCase();
-    if (!['select', 'where', 'group', 'order', 'having', 'limit', 'union', 'lateral'].includes(name)) {
-      tables.push(name);
+function emptySqlLineage(): SqlLineageSummary {
+  return {
+    sources: [],
+    ctes: [],
+    joins: [],
+    filters: [],
+    groupBy: [],
+    orderBy: [],
+    outputs: [],
+    semanticRefs: { metrics: [], dimensions: [] },
+    warnings: [],
+  };
+}
+
+function stripSqlComments(sql: string): string {
+  return sql.replace(/--.*$/gm, ' ').replace(/\/\*[\s\S]*?\*\//g, ' ');
+}
+
+function normalizeIdentifier(value: string): string {
+  return value.replace(/^["'`]+|["'`]+$/g, '').trim();
+}
+
+function sourceKey(source: SqlSourceRef): string {
+  return `${source.kind}:${source.name.toLowerCase()}:${source.alias ?? ''}`;
+}
+
+function dedupeSources(sources: SqlSourceRef[]): SqlSourceRef[] {
+  const seen = new Set<string>();
+  return sources.filter((source) => {
+    const key = sourceKey(source);
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+function splitTopLevelComma(input: string): string[] {
+  const parts: string[] = [];
+  let depth = 0;
+  let quote: string | null = null;
+  let current = '';
+  for (let i = 0; i < input.length; i += 1) {
+    const ch = input[i];
+    const prev = input[i - 1];
+    if (quote) {
+      current += ch;
+      if (ch === quote && prev !== '\\') quote = null;
+      continue;
+    }
+    if (ch === '\'' || ch === '"' || ch === '`') {
+      quote = ch;
+      current += ch;
+      continue;
+    }
+    if (ch === '(') depth += 1;
+    if (ch === ')') depth = Math.max(0, depth - 1);
+    if (ch === ',' && depth === 0) {
+      const trimmed = current.trim();
+      if (trimmed) parts.push(trimmed);
+      current = '';
+      continue;
+    }
+    current += ch;
+  }
+  const trimmed = current.trim();
+  if (trimmed) parts.push(trimmed);
+  return parts;
+}
+
+function isKeywordAt(input: string, keyword: string, index: number): boolean {
+  const normalizedKeyword = keyword.replace(/\s+/g, ' ');
+  const before = index === 0 ? '' : input[index - 1];
+  if (before && /[a-zA-Z0-9_]/.test(before)) return false;
+  let pos = index;
+  for (const part of normalizedKeyword.split(' ')) {
+    while (/\s/.test(input[pos] ?? '')) pos += 1;
+    if (input.slice(pos, pos + part.length).toLowerCase() !== part.toLowerCase()) return false;
+    pos += part.length;
+  }
+  const after = input[pos] ?? '';
+  return !after || !/[a-zA-Z0-9_]/.test(after);
+}
+
+function findTopLevelKeyword(input: string, keyword: string, start = 0): number {
+  let depth = 0;
+  let quote: string | null = null;
+  for (let i = start; i < input.length; i += 1) {
+    const ch = input[i];
+    const prev = input[i - 1];
+    if (quote) {
+      if (ch === quote && prev !== '\\') quote = null;
+      continue;
+    }
+    if (ch === '\'' || ch === '"' || ch === '`') {
+      quote = ch;
+      continue;
+    }
+    if (ch === '(') {
+      depth += 1;
+      continue;
+    }
+    if (ch === ')') {
+      depth = Math.max(0, depth - 1);
+      continue;
+    }
+    if (depth === 0 && isKeywordAt(input, keyword, i)) return i;
+  }
+  return -1;
+}
+
+function topLevelClause(input: string, keyword: string, stopKeywords: string[]): string {
+  const start = findTopLevelKeyword(input, keyword);
+  if (start < 0) return '';
+  let contentStart = start + keyword.length;
+  while (/\s/.test(input[contentStart] ?? '')) contentStart += 1;
+  const stops = stopKeywords
+    .map((stop) => findTopLevelKeyword(input, stop, contentStart))
+    .filter((idx) => idx >= 0);
+  const end = stops.length > 0 ? Math.min(...stops) : input.length;
+  return input.slice(contentStart, end).trim();
+}
+
+function safeAlias(value?: string): string | undefined {
+  if (!value) return undefined;
+  const normalized = normalizeIdentifier(value);
+  return SQL_ALIAS_STOP_WORDS.has(normalized.toLowerCase()) ? undefined : normalized;
+}
+
+function parenContextBefore(input: string, index: number): { depth: number; segment: string } {
+  const stack: number[] = [];
+  let quote: string | null = null;
+  for (let i = 0; i < index; i += 1) {
+    const ch = input[i];
+    const prev = input[i - 1];
+    if (quote) {
+      if (ch === quote && prev !== '\\') quote = null;
+      continue;
+    }
+    if (ch === '\'' || ch === '"' || ch === '`') {
+      quote = ch;
+      continue;
+    }
+    if (ch === '(') {
+      stack.push(i);
+    } else if (ch === ')') {
+      stack.pop();
     }
   }
-  const refPattern = /\bref\s*\(\s*"([^"]+)"\s*\)/gi;
-  for (const m of sql.matchAll(refPattern)) {
-    tables.push(m[1]);
+  const lastOpen = stack[stack.length - 1];
+  return {
+    depth: stack.length,
+    segment: lastOpen === undefined ? '' : input.slice(lastOpen + 1, index),
+  };
+}
+
+function isQuerySourceKeyword(sql: string, keywordIndex: number): boolean {
+  const context = parenContextBefore(sql, keywordIndex);
+  if (context.depth === 0) return true;
+  return /\bSELECT\b/i.test(context.segment);
+}
+
+function analyzeSqlLineage(content: string): SqlLineageSummary {
+  const sql = stripSqlComments(content);
+  if (!sql.trim()) return emptySqlLineage();
+
+  const warnings: string[] = [];
+  const ctes = [...sql.matchAll(/\b(?:WITH|,)\s+([a-zA-Z_][\w]*)\s+AS\s*\(/gi)]
+    .map((m) => m[1])
+    .filter(Boolean);
+  const cteSet = new Set(ctes.map((name) => name.toLowerCase()));
+
+  const sources: SqlSourceRef[] = [];
+  const fromJoinPattern = /\b(FROM|JOIN)\s+([a-zA-Z_][\w.]*)\s*(?:AS\s+)?([a-zA-Z_][\w]*)?/gi;
+  for (const m of sql.matchAll(fromJoinPattern)) {
+    if (!isQuerySourceKeyword(sql, m.index ?? 0)) continue;
+    const name = normalizeIdentifier(m[2]);
+    if (!name || SQL_ALIAS_STOP_WORDS.has(name.toLowerCase())) continue;
+    sources.push({
+      name,
+      alias: safeAlias(m[3]),
+      kind: cteSet.has(name.toLowerCase()) ? 'cte' : 'table',
+    });
   }
-  return [...new Set(tables)];
+
+  for (const m of sql.matchAll(/\bref\s*\(\s*["']([^"']+)["']\s*\)/gi)) {
+    sources.push({ name: normalizeIdentifier(m[1]), kind: 'ref' });
+  }
+
+  const joins: SqlJoinRef[] = [];
+  const joinPattern = /\b((?:LEFT|RIGHT|FULL|INNER|CROSS)?\s*JOIN)\s+([a-zA-Z_][\w.]*)\s*(?:AS\s+)?([a-zA-Z_][\w]*)?([\s\S]*?)(?=\b(?:LEFT|RIGHT|FULL|INNER|CROSS)?\s*JOIN\b|\bWHERE\b|\bGROUP\s+BY\b|\bORDER\s+BY\b|\bHAVING\b|\bQUALIFY\b|\bLIMIT\b|$)/gi;
+  for (const m of sql.matchAll(joinPattern)) {
+    if (!isQuerySourceKeyword(sql, m.index ?? 0)) continue;
+    const conditionMatch = m[4]?.match(/\bON\b\s+([\s\S]*)/i);
+    joins.push({
+      type: m[1].replace(/\s+/g, ' ').trim().toUpperCase(),
+      table: normalizeIdentifier(m[2]),
+      alias: safeAlias(m[3]),
+      condition: conditionMatch ? conditionMatch[1].trim().replace(/\s+/g, ' ') : undefined,
+    });
+  }
+
+  const selectClause = topLevelClause(sql, 'SELECT', ['FROM']);
+  const whereClause = topLevelClause(sql, 'WHERE', ['GROUP BY', 'HAVING', 'QUALIFY', 'ORDER BY', 'LIMIT']);
+  const groupClause = topLevelClause(sql, 'GROUP BY', ['HAVING', 'QUALIFY', 'ORDER BY', 'LIMIT']);
+  const orderClause = topLevelClause(sql, 'ORDER BY', ['LIMIT']);
+  const outputs = selectClause ? splitTopLevelComma(selectClause).slice(0, 20) : [];
+  const filters = whereClause ? [whereClause.replace(/\s+/g, ' ')] : [];
+  const groupBy = groupClause ? splitTopLevelComma(groupClause).slice(0, 12) : [];
+  const orderBy = orderClause ? splitTopLevelComma(orderClause).slice(0, 12) : [];
+
+  if (ctes.length > 0) {
+    warnings.push('CTEs are included. Review CTE-to-final-query dependencies before certifying.');
+  }
+  if (/\bSELECT\s+\*/i.test(sql)) {
+    warnings.push('SELECT * detected. Outputs may drift when upstream schema changes.');
+  }
+  if (sources.length === 0 && /\bSELECT\b/i.test(sql)) {
+    warnings.push('No source tables detected. This may be a literal query, parameter query, or unsupported SQL shape.');
+  }
+
+  return {
+    sources: dedupeSources(sources),
+    ctes,
+    joins,
+    filters,
+    groupBy,
+    orderBy,
+    outputs,
+    semanticRefs: extractSemanticRefs(sql),
+    warnings,
+  };
 }
 
 /** Extract @metric() and @dim() references from SQL */
@@ -46,6 +332,34 @@ function extractSemanticRefs(sql: string): { metrics: string[]; dimensions: stri
     dimensions.push(m[1].replace(/['"]/g, '').trim());
   }
   return { metrics, dimensions };
+}
+
+function displayNodeType(node: LineageNode): string {
+  return TYPE_LABELS[node.type] ?? node.type.slice(0, 4).toUpperCase();
+}
+
+function findDownstreamCells(cells: Cell[] | undefined, cellId: string | undefined, cellName: string | undefined): NotebookDownstreamRef[] {
+  if (!cells?.length) return [];
+  const handles = new Set<string>();
+  if (cellName?.trim()) handles.add(cellName.trim());
+  if (cellId?.trim()) handles.add(cellId.trim());
+  if (handles.size === 0) return [];
+
+  const downstream: NotebookDownstreamRef[] = [];
+  cells.forEach((cell, index) => {
+    if (cell.id === cellId) return;
+    const usedHandles = findHandleNames(cell.content).filter((handle) => handles.has(handle));
+    const upstreamMatches = cell.upstream && handles.has(cell.upstream) ? [cell.upstream] : [];
+    const match = [...new Set([...usedHandles, ...upstreamMatches])][0];
+    if (!match) return;
+    downstream.push({
+      id: cell.id,
+      label: cell.name || `Cell ${index + 1}`,
+      type: cell.type,
+      handle: match,
+    });
+  });
+  return downstream;
 }
 
 function MiniNode({ node, t }: { node: LineageNode; t: Theme }) {
@@ -78,17 +392,60 @@ function MiniNode({ node, t }: { node: LineageNode; t: Theme }) {
   );
 }
 
+function LineageCard({ title, t, children }: { title: string; t: Theme; children: React.ReactNode }) {
+  return (
+    <section
+      style={{
+        border: `1px solid ${t.cellBorder}`,
+        borderRadius: 6,
+        background: t.cellBg,
+        padding: 8,
+        minWidth: 0,
+      }}
+    >
+      <div style={{ fontSize: 9, fontWeight: 700, textTransform: 'uppercase', letterSpacing: 0, color: t.textMuted, marginBottom: 6 }}>
+        {title}
+      </div>
+      <div style={{ color: t.textPrimary, lineHeight: 1.45 }}>{children}</div>
+    </section>
+  );
+}
+
+function EmptyLineageText({ t, children }: { t: Theme; children: React.ReactNode }) {
+  return <div style={{ color: t.textMuted, fontSize: 11 }}>{children}</div>;
+}
+
+function LineageMiniStat({ label, value, t }: { label: string; value: number; t: Theme }) {
+  return (
+    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, padding: '2px 0' }}>
+      <span style={{ color: t.textMuted }}>{label}</span>
+      <strong style={{ color: t.textPrimary, fontVariantNumeric: 'tabular-nums' }}>{value}</strong>
+    </div>
+  );
+}
+
+function LineageDetailBlock({ title, t, children }: { title: string; t: Theme; children: React.ReactNode }) {
+  return (
+    <div style={{ display: 'grid', gap: 3, marginTop: 6 }}>
+      <div style={{ color: t.textMuted, fontSize: 10, fontWeight: 600 }}>{title}</div>
+      <div style={{ display: 'grid', gap: 3, minWidth: 0 }}>{children}</div>
+    </div>
+  );
+}
+
 interface CellLineageProps {
   cellContent: string;
   cellType: 'sql' | 'dql';
+  cellId?: string;
   cellName?: string;
+  cells?: Cell[];
   themeMode: ThemeMode;
   t: Theme;
   /** Called when a node is clicked to focus the full lineage DAG */
   onFocusNode?: (nodeId: string) => void;
 }
 
-export function CellLineage({ cellContent, cellType, cellName, themeMode, t, onFocusNode }: CellLineageProps) {
+export function CellLineage({ cellContent, cellType, cellId, cellName, cells, themeMode, t, onFocusNode }: CellLineageProps) {
   const [expanded, setExpanded] = useState(false);
   const [graphHeight, setGraphHeight] = useState(380);
   const graphHeightRef = useRef(graphHeight);
@@ -98,13 +455,18 @@ export function CellLineage({ cellContent, cellType, cellName, themeMode, t, onF
   const [graphNodes, setGraphNodes] = useState<LineageNode[]>([]);
   const [graphEdges, setGraphEdges] = useState<any[]>([]);
   const [focalNodeId, setFocalNodeId] = useState<string | undefined>();
-  const [tables, setTables] = useState<string[]>([]);
-  const [semanticRefs, setSemanticRefs] = useState<{ metrics: string[]; dimensions: string[] }>({ metrics: [], dimensions: [] });
   const [pathResult, setPathResult] = useState<CompletePathResult | null>(null);
+  const [businessMatches, setBusinessMatches] = useState<BusinessContextMatch[]>([]);
   const [error, setError] = useState<string | null>(null);
 
+  const sqlSummary = useMemo(() => analyzeSqlLineage(cellContent), [cellContent]);
+  const downstreamCells = useMemo(
+    () => findDownstreamCells(cells, cellId, cellName),
+    [cells, cellId, cellName],
+  );
   const blockName = cellType === 'dql' ? extractBlockName(cellContent) : null;
   const lookupName = blockName || cellName;
+  const isSqlCell = cellType === 'sql';
 
   const loadLineage = useCallback(async () => {
     if (!lookupName && cellType !== 'sql') return;
@@ -113,10 +475,37 @@ export function CellLineage({ cellContent, cellType, cellName, themeMode, t, onF
     setError(null);
 
     try {
-      // Extract SQL-level dependencies (lightweight client-side parse)
-      const sqlTables = extractSQLTables(cellContent);
-      setTables(sqlTables);
-      setSemanticRefs(extractSemanticRefs(cellContent));
+      if (isSqlCell) {
+        setGraphNodes([]);
+        setGraphEdges([]);
+        setFocalNodeId(undefined);
+        setPathResult(null);
+
+        const tableSources = sqlSummary.sources.filter((source) => source.kind !== 'cte').slice(0, 6);
+        const scopedMatches = await Promise.all(
+          tableSources.map(async (source) => {
+            const searchName = source.name.split('.').pop() || source.name;
+            const result = await api.searchLineage(searchName);
+            return (result.matches ?? [])
+              .filter(({ node }) => node && BUSINESS_CONTEXT_TYPES.has(String(node.type)))
+              .slice(0, 3)
+              .map(({ node, score }) => ({ source: source.name, node: node as LineageNode, score }));
+          }),
+        );
+        const seen = new Set<string>();
+        setBusinessMatches(
+          scopedMatches
+            .flat()
+            .filter((match) => {
+              const key = `${match.source}:${match.node.id}`;
+              if (seen.has(key)) return false;
+              seen.add(key);
+              return true;
+            })
+            .slice(0, 8),
+        );
+        return;
+      }
 
       if (lookupName) {
         const nodeId = `block:${lookupName}`;
@@ -138,13 +527,10 @@ export function CellLineage({ cellContent, cellType, cellName, themeMode, t, onF
           setPathResult(paths);
         }
       } else {
-        // Unnamed SQL cell: show matching table nodes from full graph
+        // Unnamed DQL-like executable fallback: avoid loading app lineage unless
+        // there is a real project node to focus.
         setFocalNodeId(undefined);
-        const fullLineage = await api.fetchLineage();
-        const matchingNodes = (fullLineage.nodes ?? []).filter(
-          (n: LineageNode) => sqlTables.some((tbl) => n.name === tbl || n.id === `table:${tbl}`)
-        );
-        setGraphNodes(matchingNodes);
+        setGraphNodes([]);
         setGraphEdges([]);
       }
     } catch {
@@ -152,7 +538,7 @@ export function CellLineage({ cellContent, cellType, cellName, themeMode, t, onF
     } finally {
       setLoading(false);
     }
-  }, [lookupName, cellContent, cellType]);
+  }, [lookupName, cellType, isSqlCell, sqlSummary.sources]);
 
   useEffect(() => {
     if (expanded) {
@@ -160,7 +546,205 @@ export function CellLineage({ cellContent, cellType, cellName, themeMode, t, onF
     }
   }, [expanded, loadLineage]);
 
-  const hasContent = tables.length > 0 || semanticRefs.metrics.length > 0 || semanticRefs.dimensions.length > 0;
+  const hasSqlContent =
+    sqlSummary.sources.length > 0 ||
+    sqlSummary.outputs.length > 0 ||
+    sqlSummary.joins.length > 0 ||
+    sqlSummary.filters.length > 0 ||
+    sqlSummary.groupBy.length > 0 ||
+    sqlSummary.orderBy.length > 0 ||
+    sqlSummary.semanticRefs.metrics.length > 0 ||
+    sqlSummary.semanticRefs.dimensions.length > 0 ||
+    downstreamCells.length > 0 ||
+    businessMatches.length > 0;
+  const hasProjectContent = graphNodes.length > 0 || Boolean(pathResult);
+
+  const renderSqlLineageContent = () => (
+    <div style={{ padding: '8px 12px 10px', display: 'grid', gap: 8 }}>
+      <div
+        style={{
+          display: 'grid',
+          gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))',
+          gap: 8,
+        }}
+      >
+        <LineageCard title="Technical source trace" t={t}>
+          {sqlSummary.sources.length > 0 ? (
+            <div style={{ display: 'grid', gap: 4 }}>
+              {sqlSummary.sources.map((source) => (
+                <div key={sourceKey(source)} style={{ display: 'flex', alignItems: 'center', gap: 6, minWidth: 0 }}>
+                  <span
+                    style={{
+                      color: source.kind === 'cte' ? t.textMuted : NODE_TYPE_COLORS.source_table,
+                      fontSize: 9,
+                      fontWeight: 700,
+                      width: 28,
+                      flexShrink: 0,
+                    }}
+                  >
+                    {source.kind === 'cte' ? 'CTE' : source.kind === 'ref' ? 'REF' : 'TBL'}
+                  </span>
+                  <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{source.name}</span>
+                  {source.alias && (
+                    <span style={{ color: t.textMuted, fontSize: 10, flexShrink: 0 }}>as {source.alias}</span>
+                  )}
+                </div>
+              ))}
+            </div>
+          ) : (
+            <EmptyLineageText t={t}>No table references detected.</EmptyLineageText>
+          )}
+          {sqlSummary.ctes.length > 0 && (
+            <div style={{ marginTop: 6, color: t.textMuted }}>
+              CTEs: {sqlSummary.ctes.slice(0, 6).join(', ')}
+            </div>
+          )}
+        </LineageCard>
+
+        <LineageCard title="SQL shape" t={t}>
+          <LineageMiniStat label="Outputs" value={sqlSummary.outputs.length} t={t} />
+          <LineageMiniStat label="Joins" value={sqlSummary.joins.length} t={t} />
+          <LineageMiniStat label="Filters" value={sqlSummary.filters.length} t={t} />
+          <LineageMiniStat label="Groups" value={sqlSummary.groupBy.length} t={t} />
+        </LineageCard>
+
+        <LineageCard title="Reverse notebook impact" t={t}>
+          {downstreamCells.length > 0 ? (
+            <div style={{ display: 'grid', gap: 4 }}>
+              {downstreamCells.slice(0, 6).map((ref) => (
+                <div key={ref.id} style={{ display: 'flex', alignItems: 'center', gap: 6, minWidth: 0 }}>
+                  <span style={{ color: NODE_TYPE_COLORS.notebook, fontSize: 9, fontWeight: 700, width: 28, flexShrink: 0 }}>
+                    {ref.type.toUpperCase().slice(0, 4)}
+                  </span>
+                  <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{ref.label}</span>
+                  {ref.handle && <span style={{ color: t.textMuted, fontSize: 10 }}>via {`{{${ref.handle}}}`}</span>}
+                </div>
+              ))}
+            </div>
+          ) : (
+            <EmptyLineageText t={t}>No downstream notebook cells reference this cell yet.</EmptyLineageText>
+          )}
+        </LineageCard>
+      </div>
+
+      {(sqlSummary.joins.length > 0 || sqlSummary.filters.length > 0 || sqlSummary.groupBy.length > 0 || sqlSummary.orderBy.length > 0) && (
+        <LineageCard title="Query logic" t={t}>
+          {sqlSummary.joins.length > 0 && (
+            <LineageDetailBlock title="Joins" t={t}>
+              {sqlSummary.joins.slice(0, 6).map((join, index) => (
+                <div key={`${join.table}-${index}`} style={{ color: t.textPrimary }}>
+                  <strong>{join.type}</strong> {join.table}{join.alias ? ` as ${join.alias}` : ''}
+                  {join.condition ? <span style={{ color: t.textMuted }}> on {join.condition}</span> : null}
+                </div>
+              ))}
+            </LineageDetailBlock>
+          )}
+          {sqlSummary.filters.length > 0 && (
+            <LineageDetailBlock title="Filters" t={t}>
+              {sqlSummary.filters.map((filter, index) => (
+                <code key={index} style={{ color: t.textPrimary, whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>{filter}</code>
+              ))}
+            </LineageDetailBlock>
+          )}
+          {sqlSummary.groupBy.length > 0 && (
+            <LineageDetailBlock title="Group by" t={t}>
+              <span>{sqlSummary.groupBy.join(', ')}</span>
+            </LineageDetailBlock>
+          )}
+          {sqlSummary.orderBy.length > 0 && (
+            <LineageDetailBlock title="Order by" t={t}>
+              <span>{sqlSummary.orderBy.join(', ')}</span>
+            </LineageDetailBlock>
+          )}
+        </LineageCard>
+      )}
+
+      {sqlSummary.outputs.length > 0 && (
+        <LineageCard title="Output fields" t={t}>
+          <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap' }}>
+            {sqlSummary.outputs.slice(0, 16).map((output, index) => (
+              <span
+                key={`${output}-${index}`}
+                style={{
+                  maxWidth: 260,
+                  overflow: 'hidden',
+                  textOverflow: 'ellipsis',
+                  whiteSpace: 'nowrap',
+                  padding: '2px 6px',
+                  borderRadius: 4,
+                  border: `1px solid ${t.cellBorder}`,
+                  color: t.textPrimary,
+                  background: t.inputBg,
+                }}
+                title={output}
+              >
+                {output}
+              </span>
+            ))}
+          </div>
+        </LineageCard>
+      )}
+
+      {(sqlSummary.semanticRefs.metrics.length > 0 || sqlSummary.semanticRefs.dimensions.length > 0 || businessMatches.length > 0) && (
+        <LineageCard title="Business context from detected sources" t={t}>
+          {sqlSummary.semanticRefs.metrics.length > 0 && (
+            <LineageDetailBlock title="Metrics" t={t}>
+              <span>{sqlSummary.semanticRefs.metrics.join(', ')}</span>
+            </LineageDetailBlock>
+          )}
+          {sqlSummary.semanticRefs.dimensions.length > 0 && (
+            <LineageDetailBlock title="Dimensions" t={t}>
+              <span>{sqlSummary.semanticRefs.dimensions.join(', ')}</span>
+            </LineageDetailBlock>
+          )}
+          {businessMatches.length > 0 ? (
+            <div style={{ display: 'grid', gap: 4 }}>
+              {businessMatches.map((match) => (
+                <div key={`${match.source}-${match.node.id}`} style={{ display: 'flex', alignItems: 'center', gap: 6, minWidth: 0 }}>
+                  <span
+                    style={{
+                      color: NODE_TYPE_COLORS[match.node.type] ?? t.accent,
+                      fontSize: 9,
+                      fontWeight: 700,
+                      width: 34,
+                      flexShrink: 0,
+                    }}
+                  >
+                    {displayNodeType(match.node)}
+                  </span>
+                  <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{match.node.name}</span>
+                  {match.node.domain && <span style={{ color: t.textMuted, fontSize: 10 }}>{match.node.domain}</span>}
+                  <span style={{ marginLeft: 'auto', color: t.textMuted, fontSize: 10, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                    from {match.source}
+                  </span>
+                </div>
+              ))}
+            </div>
+          ) : loading ? (
+            <EmptyLineageText t={t}>Looking up scoped business context...</EmptyLineageText>
+          ) : (
+            <EmptyLineageText t={t}>No matching business terms, metrics, or blocks found for these sources.</EmptyLineageText>
+          )}
+        </LineageCard>
+      )}
+
+      {sqlSummary.warnings.length > 0 && (
+        <LineageCard title="Review notes" t={t}>
+          <div style={{ display: 'grid', gap: 3 }}>
+            {sqlSummary.warnings.map((warning) => (
+              <div key={warning} style={{ color: t.warning }}>{warning}</div>
+            ))}
+          </div>
+        </LineageCard>
+      )}
+
+      {!hasSqlContent && (
+        <div style={{ color: t.textMuted, padding: '2px 0' }}>
+          No SQL lineage dependencies detected for this cell.
+        </div>
+      )}
+    </div>
+  );
 
   if (!cellContent.trim()) return null;
 
@@ -191,7 +775,22 @@ export function CellLineage({ cellContent, cellType, cellName, themeMode, t, onF
           <line x1="6" y1="4" x2="10" y2="8" />
           <line x1="6" y1="12" x2="10" y2="8" />
         </svg>
-        <span>Lineage</span>
+        <span>{isSqlCell ? 'Cell SQL lineage' : 'Project block lineage'}</span>
+        {expanded && (
+          <span
+            style={{
+              marginLeft: 2,
+              padding: '1px 5px',
+              borderRadius: 999,
+              border: `1px solid ${t.cellBorder}`,
+              color: t.textMuted,
+              background: t.inputBg,
+              fontSize: 9,
+            }}
+          >
+            {isSqlCell ? 'cell scoped' : 'project graph'}
+          </span>
+        )}
         <svg
           width="8" height="8" viewBox="0 0 10 10" fill="currentColor"
           style={{ transform: expanded ? 'rotate(0deg)' : 'rotate(-90deg)', transition: 'transform 0.15s' }}
@@ -199,7 +798,7 @@ export function CellLineage({ cellContent, cellType, cellName, themeMode, t, onF
           <path d="M1 3l4 4 4-4" stroke="currentColor" fill="none" strokeWidth="1.5" />
         </svg>
         {/* View in DAG button */}
-        {expanded && lookupName && onFocusNode && (
+        {expanded && !isSqlCell && lookupName && onFocusNode && (
           <span
             onClick={(e) => {
               e.stopPropagation();
@@ -221,7 +820,12 @@ export function CellLineage({ cellContent, cellType, cellName, themeMode, t, onF
       {/* Lineage content */}
       {expanded && (
         <div style={{ fontSize: 11 }}>
-          {loading ? (
+          {isSqlCell ? (
+            <>
+              {error && <div style={{ color: t.error, padding: '8px 12px 0' }}>{error}</div>}
+              {renderSqlLineageContent()}
+            </>
+          ) : loading ? (
             <div style={{ color: t.textMuted, padding: '8px 12px' }}>Loading lineage...</div>
           ) : error ? (
             <div style={{ color: t.error, padding: '8px 12px' }}>{error}</div>
@@ -305,27 +909,30 @@ export function CellLineage({ cellContent, cellType, cellName, themeMode, t, onF
                 )}
 
                 {/* SQL Dependencies */}
-                {tables.length > 0 && (
+                {sqlSummary.sources.length > 0 && (
                   <div style={{ marginBottom: 6 }}>
                     <div style={{ fontSize: 9, fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.5px', color: t.textMuted, marginBottom: 3 }}>
-                      Reads From ({tables.length})
+                      Reads From ({sqlSummary.sources.length})
                     </div>
-                    {tables.map((table) => (
-                      <div key={table} style={{ display: 'flex', alignItems: 'center', gap: 4, padding: '1px 0', fontSize: 11, color: t.textPrimary }}>
-                        <span style={{ color: NODE_TYPE_COLORS.source_table, fontSize: 9, fontWeight: 700, width: 26 }}>TBL</span>
-                        <span>{table}</span>
+                    {sqlSummary.sources.map((source) => (
+                      <div key={sourceKey(source)} style={{ display: 'flex', alignItems: 'center', gap: 4, padding: '1px 0', fontSize: 11, color: t.textPrimary }}>
+                        <span style={{ color: source.kind === 'cte' ? t.textMuted : NODE_TYPE_COLORS.source_table, fontSize: 9, fontWeight: 700, width: 26 }}>
+                          {source.kind === 'cte' ? 'CTE' : source.kind === 'ref' ? 'REF' : 'TBL'}
+                        </span>
+                        <span>{source.name}</span>
+                        {source.alias && <span style={{ color: t.textMuted }}>as {source.alias}</span>}
                       </div>
                     ))}
                   </div>
                 )}
 
                 {/* Semantic References */}
-                {semanticRefs.metrics.length > 0 && (
+                {sqlSummary.semanticRefs.metrics.length > 0 && (
                   <div style={{ marginBottom: 6 }}>
                     <div style={{ fontSize: 9, fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.5px', color: t.textMuted, marginBottom: 3 }}>
-                      Metrics ({semanticRefs.metrics.length})
+                      Metrics ({sqlSummary.semanticRefs.metrics.length})
                     </div>
-                    {semanticRefs.metrics.map((m) => (
+                    {sqlSummary.semanticRefs.metrics.map((m) => (
                       <div key={m} style={{ display: 'flex', alignItems: 'center', gap: 4, padding: '1px 0', fontSize: 11, color: t.textPrimary }}>
                         <span style={{ color: NODE_TYPE_COLORS.metric, fontSize: 9, fontWeight: 700, width: 26 }}>MET</span>
                         <span>{m}</span>
@@ -334,12 +941,12 @@ export function CellLineage({ cellContent, cellType, cellName, themeMode, t, onF
                   </div>
                 )}
 
-                {semanticRefs.dimensions.length > 0 && (
+                {sqlSummary.semanticRefs.dimensions.length > 0 && (
                   <div style={{ marginBottom: 6 }}>
                     <div style={{ fontSize: 9, fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.5px', color: t.textMuted, marginBottom: 3 }}>
-                      Dimensions ({semanticRefs.dimensions.length})
+                      Dimensions ({sqlSummary.semanticRefs.dimensions.length})
                     </div>
-                    {semanticRefs.dimensions.map((d) => (
+                    {sqlSummary.semanticRefs.dimensions.map((d) => (
                       <div key={d} style={{ display: 'flex', alignItems: 'center', gap: 4, padding: '1px 0', fontSize: 11, color: t.textPrimary }}>
                         <span style={{ color: NODE_TYPE_COLORS.dimension, fontSize: 9, fontWeight: 700, width: 26 }}>DIM</span>
                         <span>{d}</span>
@@ -349,7 +956,7 @@ export function CellLineage({ cellContent, cellType, cellName, themeMode, t, onF
                 )}
 
                 {/* No lineage found */}
-                {!hasContent && graphNodes.length === 0 && !pathResult && (
+                {!hasProjectContent && sqlSummary.sources.length === 0 && sqlSummary.semanticRefs.metrics.length === 0 && sqlSummary.semanticRefs.dimensions.length === 0 && (
                   <div style={{ color: t.textMuted, padding: '2px 0' }}>
                     No lineage dependencies detected for this cell.
                   </div>

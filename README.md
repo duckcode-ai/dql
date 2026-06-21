@@ -161,8 +161,8 @@ Microsoft C++ Build Tools.
    it ready for review or certification.
 
 6. Use notebooks.
-   Search blocks, add cells, edit SQL/DQL, and capture analysis next to the
-   governed blocks it uses.
+   Search blocks, add cells, edit SQL/DQL, run research from source cells, and
+   promote reviewed SQL into draft DQL blocks.
 
 7. Push to an App.
    Build a local App from certified blocks and notebooks so stakeholders see a
@@ -222,6 +222,7 @@ All docs live in [`docs/`](./docs/). Start with these:
 - [Tutorials](./docs/tutorials/README.md)
 - [Import dbt](./docs/guides/import-dbt.md)
 - [Block Studio](./docs/guides/block-studio.md)
+- [Notebook research engine](./docs/guides/notebook-research.md)
 - [Author a block](./docs/guides/authoring-blocks.md)
 - [Connectors](./docs/reference/connectors.md)
 - [CLI reference](./docs/reference/cli.md)

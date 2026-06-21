@@ -17,6 +17,15 @@ import { PanelFrame } from '@duckcodeailabs/dql-ui';
 import { useNotebook } from '../../store/NotebookStore';
 import { themes } from '../../themes/notebook-theme';
 import type { NotebookFile } from '../../store/types';
+import {
+  compareNotebookResearchSummaries,
+  notebookResearchSummaryLabel,
+  notebookResearchSummaryTitle,
+  notebookResearchSummaryTone,
+  type NotebookResearchSummaryTone,
+  type NotebookResearchSummary,
+  useNotebookResearchSummary,
+} from '../notebook/useNotebookResearchSummary';
 
 interface FilesPanelProps {
   onOpenFile: (file: NotebookFile) => void;
@@ -140,6 +149,8 @@ export function FilesPanel({ onOpenFile }: FilesPanelProps) {
     dashboards: false,
   });
   const [newBtnHover, setNewBtnHover] = useState(false);
+  const fileSignature = state.files.map((file) => file.path).join('|');
+  const { byPath: researchByNotebookPath } = useNotebookResearchSummary({ refreshKey: fileSignature });
 
   const grouped: Record<FolderKey, NotebookFile[]> = {
     notebooks: [],
@@ -250,11 +261,12 @@ export function FilesPanel({ onOpenFile }: FilesPanelProps) {
                     No {FOLDER_LABELS[key].toLowerCase()}
                   </div>
                 ) : (
-                  files.map((file) => (
+                  sortFilesForFolder(files, key, researchByNotebookPath).map((file) => (
                     <FileRow
                       key={file.path}
                       file={file}
                       active={state.activeFile?.path === file.path}
+                      researchSummary={key === 'notebooks' ? researchByNotebookPath.get(file.path) : undefined}
                       onClick={() => onOpenFile(file)}
                       onShowLineage={() => {
                         const nodeId = lineageNodeIdForFile(file);
@@ -272,6 +284,26 @@ export function FilesPanel({ onOpenFile }: FilesPanelProps) {
       })}
     </PanelFrame>
   );
+}
+
+function sortFilesForFolder(
+  files: NotebookFile[],
+  folderKey: FolderKey,
+  researchByNotebookPath: Map<string, NotebookResearchSummary>,
+): NotebookFile[] {
+  return [...files].sort((a, b) => {
+    if (folderKey === 'notebooks') {
+      const aSummary = researchByNotebookPath.get(a.path);
+      const bSummary = researchByNotebookPath.get(b.path);
+      if (aSummary && bSummary) {
+        const researchOrder = compareNotebookResearchSummaries(aSummary, bSummary);
+        if (researchOrder !== 0) return researchOrder;
+      }
+      if (aSummary) return -1;
+      if (bSummary) return 1;
+    }
+    return displayName(a).localeCompare(displayName(b));
+  });
 }
 
 function FolderHeader({
@@ -393,12 +425,14 @@ function FileRow({
   active,
   onClick,
   onShowLineage,
+  researchSummary,
   t,
 }: {
   file: NotebookFile;
   active: boolean;
   onClick: () => void;
   onShowLineage?: () => void;
+  researchSummary?: NotebookResearchSummary;
   t: Theme;
 }) {
   const [hovered, setHovered] = useState(false);
@@ -436,6 +470,7 @@ function FileRow({
           textAlign: 'left' as const,
           transition: 'color 0.1s',
           overflow: 'hidden',
+          paddingRight: hovered && lineageEligible ? 34 : 8,
         }}
       >
         <span
@@ -474,6 +509,9 @@ function FileRow({
             NEW
           </span>
         )}
+        {researchSummary && researchSummary.total > 0 && (
+          <ResearchBadge summary={researchSummary} t={t} />
+        )}
       </button>
       {hovered && lineageEligible && onShowLineage && (
         <button
@@ -507,4 +545,47 @@ function FileRow({
       )}
     </div>
   );
+}
+
+function ResearchBadge({ summary, t }: { summary: NotebookResearchSummary; t: Theme }) {
+  const color = researchToneColor(notebookResearchSummaryTone(summary), t);
+  return (
+    <span
+      title={notebookResearchSummaryTitle(summary)}
+      style={{
+        minWidth: 0,
+        maxWidth: 122,
+        overflow: 'hidden',
+        textOverflow: 'ellipsis',
+        whiteSpace: 'nowrap',
+        flexShrink: 0,
+        borderRadius: 999,
+        border: `1px solid ${color}44`,
+        background: `${color}12`,
+        color,
+        padding: '1px 6px',
+        fontSize: 10,
+        fontWeight: 800,
+        lineHeight: '16px',
+      }}
+    >
+      {notebookResearchSummaryLabel(summary, { includeCount: true })}
+    </span>
+  );
+}
+
+function researchToneColor(tone: NotebookResearchSummaryTone, t: Theme): string {
+  switch (tone) {
+    case 'error':
+      return t.error;
+    case 'warning':
+      return t.warning;
+    case 'success':
+      return t.success;
+    case 'accent':
+      return t.accent;
+    case 'neutral':
+    default:
+      return t.textMuted;
+  }
 }

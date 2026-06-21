@@ -8,6 +8,7 @@ end. If a guide doesn't work verbatim on a clean machine, it's a bug.
 - [Connect a warehouse](connect-warehouse.md) — Databricks, DuckDB/local files, and Snowflake
 - [Import a dbt project](import-dbt.md) — bring your `manifest.json`
 - [Block Studio dbt-first workflow](block-studio.md) — model/metric to trusted block
+- [Notebook research engine](notebook-research.md) — SQL/question research to reviewed DQL drafts
 - [Tutorials](../tutorials/README.md) — the end-to-end reference tour (works on
   your dbt repo, or the [example repo](https://github.com/duckcode-ai/jaffle-shop-duckdb))
 

@@ -91,6 +91,7 @@ nav:
       - guides/README.md
       - Authoring blocks: guides/authoring-blocks.md
       - Block Studio: guides/block-studio.md
+      - Notebook research engine: guides/notebook-research.md
       - Dashboards: guides/dashboards.md
       - Connect an AI agent (MCP): guides/mcp.md
       - Import dbt: guides/import-dbt.md

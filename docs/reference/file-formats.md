@@ -76,6 +76,19 @@ Sibling file next to a notebook holding the last execution's results:
 - **Used for rehydration** — re-opening a notebook loads results without re-running queries
 - **Save trigger** — debounced 600ms after a cell's execution count / row count changes
 
+## `.dql/local/notebook-research.sqlite` — notebook research state
+
+Project-local SQLite database for notebook research runs. It stores local
+review state such as source-cell fingerprints, reviewed SQL, preview metadata,
+context-pack evidence, parameter review, duplicate/reuse decisions, and DQL
+draft promotion references.
+
+- **Local/private by default** — do not commit `.dql/local/**`
+- **Source of queue state** — powers the notebook Research panel filters,
+  counts, source coverage, and next-action buckets
+- **Not a certified artifact** — create a DQL draft and certify the block when
+  the research becomes shared business logic
+
 ## `.dqld` — App dashboard page
 
 JSON document for one dashboard page inside an App. It stores grid layout,

@@ -1,5 +1,5 @@
 import React from 'react';
-import { themes, type ThemeMode } from '../../themes/notebook-theme';
+import { themes, type Theme, type ThemeMode } from '../../themes/notebook-theme';
 import { parseQueryError } from '../../utils/parse-error';
 import type { SchemaTable } from '../../store/types';
 
@@ -7,6 +7,7 @@ interface ErrorOutputProps {
   message: string;
   themeMode: ThemeMode;
   onFix?: () => void;
+  onFixWithAi?: () => void;
   schemaTables?: SchemaTable[];
 }
 
@@ -38,7 +39,7 @@ function closestMatch(name: string, candidates: string[]): string | null {
   return best;
 }
 
-export function ErrorOutput({ message, themeMode, onFix, schemaTables }: ErrorOutputProps) {
+export function ErrorOutput({ message, themeMode, onFix, onFixWithAi, schemaTables }: ErrorOutputProps) {
   const t = themes[themeMode];
   const parsed = parseQueryError(message);
 
@@ -182,40 +183,68 @@ export function ErrorOutput({ message, themeMode, onFix, schemaTables }: ErrorOu
         </div>
       )}
 
-      {/* Quick-fix action */}
-      {showFormatFix && (
-        <button
-          onClick={onFix}
-          style={{
-            alignSelf: 'flex-start',
-            marginTop: 2,
-            padding: '5px 12px',
-            background: `${t.accent}15`,
-            border: `1px solid ${t.accent}50`,
-            borderRadius: 6,
-            color: t.accent,
-            fontSize: 12,
-            fontFamily: t.font,
-            fontWeight: 500,
-            cursor: 'pointer',
-            display: 'flex',
-            alignItems: 'center',
-            gap: 6,
-            transition: 'all 0.15s',
-          }}
-          onMouseEnter={(e) => {
-            (e.currentTarget as HTMLButtonElement).style.background = `${t.accent}25`;
-          }}
-          onMouseLeave={(e) => {
-            (e.currentTarget as HTMLButtonElement).style.background = `${t.accent}15`;
-          }}
-        >
-          <svg width="11" height="11" viewBox="0 0 16 16" fill="currentColor">
-            <path d="M11.013 1.427a1.75 1.75 0 0 1 2.474 0l1.086 1.086a1.75 1.75 0 0 1 0 2.474l-8.61 8.61c-.21.21-.47.364-.756.445l-3.251.93a.75.75 0 0 1-.927-.928l.929-3.25c.081-.286.235-.547.445-.758l8.61-8.61Zm.176 4.823L9.75 4.81l-6.286 6.287a.253.253 0 0 0-.064.108l-.558 1.953 1.953-.558a.253.253 0 0 0 .108-.064Zm1.238-3.763a.25.25 0 0 0-.354 0L10.811 3.75l1.439 1.44 1.263-1.263a.25.25 0 0 0 0-.354Z" />
-          </svg>
-          Format & Run
-        </button>
+      {(showFormatFix || onFixWithAi) && (
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap', marginTop: 2 }}>
+          {showFormatFix && (
+            <ErrorActionButton t={t} onClick={onFix}>
+              <svg width="11" height="11" viewBox="0 0 16 16" fill="currentColor">
+                <path d="M11.013 1.427a1.75 1.75 0 0 1 2.474 0l1.086 1.086a1.75 1.75 0 0 1 0 2.474l-8.61 8.61c-.21.21-.47.364-.756.445l-3.251.93a.75.75 0 0 1-.927-.928l.929-3.25c.081-.286.235-.547.445-.758l8.61-8.61Zm.176 4.823L9.75 4.81l-6.286 6.287a.253.253 0 0 0-.064.108l-.558 1.953 1.953-.558a.253.253 0 0 0 .108-.064Zm1.238-3.763a.25.25 0 0 0-.354 0L10.811 3.75l1.439 1.44 1.263-1.263a.25.25 0 0 0 0-.354Z" />
+              </svg>
+              Format & Run
+            </ErrorActionButton>
+          )}
+          {onFixWithAi && (
+            <ErrorActionButton t={t} onClick={onFixWithAi}>
+              <svg width="11" height="11" viewBox="0 0 16 16" fill="currentColor">
+                <path d="M8 0a.75.75 0 0 1 .704.49l1.08 2.927 2.927 1.08a.75.75 0 0 1 0 1.406l-2.927 1.08-1.08 2.927a.75.75 0 0 1-1.408 0l-1.08-2.927-2.927-1.08a.75.75 0 0 1 0-1.406l2.927-1.08L7.296.49A.75.75 0 0 1 8 0Zm4.75 9.5a.75.75 0 0 1 .704.49l.41 1.11 1.11.41a.75.75 0 0 1 0 1.408l-1.11.41-.41 1.11a.75.75 0 0 1-1.408 0l-.41-1.11-1.11-.41a.75.75 0 0 1 0-1.408l1.11-.41.41-1.11a.75.75 0 0 1 .704-.49Z" />
+              </svg>
+              Fix with AI
+            </ErrorActionButton>
+          )}
+          <span style={{ fontSize: 11, color: t.textMuted, fontFamily: t.font }}>
+            You can also edit the SQL directly and run again.
+          </span>
+        </div>
       )}
     </div>
+  );
+}
+
+function ErrorActionButton({
+  children,
+  onClick,
+  t,
+}: {
+  children: React.ReactNode;
+  onClick?: () => void;
+  t: Theme;
+}) {
+  return (
+    <button
+      onClick={onClick}
+      style={{
+        padding: '5px 12px',
+        background: `${t.accent}15`,
+        border: `1px solid ${t.accent}50`,
+        borderRadius: 6,
+        color: t.accent,
+        fontSize: 12,
+        fontFamily: t.font,
+        fontWeight: 500,
+        cursor: 'pointer',
+        display: 'flex',
+        alignItems: 'center',
+        gap: 6,
+        transition: 'all 0.15s',
+      }}
+      onMouseEnter={(e) => {
+        (e.currentTarget as HTMLButtonElement).style.background = `${t.accent}25`;
+      }}
+      onMouseLeave={(e) => {
+        (e.currentTarget as HTMLButtonElement).style.background = `${t.accent}15`;
+      }}
+    >
+      {children}
+    </button>
   );
 }

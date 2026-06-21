@@ -60,7 +60,12 @@ export function useQueryExecution() {
         });
 
         try {
-          const payload = await api.executeNotebookCell(cell, controller.signal);
+          const payload = await api.executeNotebookCell(cell, controller.signal, {
+            notebookPath: state.activeFile?.path,
+            cellId: cell.id,
+            cellName: cell.name,
+            source: 'notebook_dql_cell',
+          });
           if (!payload.result) {
             throw new Error('DQL cell produced no executable result.');
           }
@@ -162,7 +167,12 @@ export function useQueryExecution() {
       });
 
       try {
-        const result = await api.executeQuery(sql, controller.signal);
+        const result = await api.executeQuery(sql, controller.signal, {
+          notebookPath: state.activeFile?.path,
+          cellId: cell.id,
+          cellName: cell.name,
+          source: 'notebook_sql_cell',
+        });
         const elapsed = Date.now() - start;
 
         const nextCount = (cell.executionCount ?? 0) + 1;
@@ -239,7 +249,7 @@ export function useQueryExecution() {
         runningControllers.delete(cellId);
       }
     },
-    [state.cells, dispatch]
+    [state.cells, state.activeFile?.path, dispatch, substituteVariables]
   );
 
   const executeAll = useCallback(async () => {

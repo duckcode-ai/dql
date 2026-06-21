@@ -27,6 +27,8 @@ import type {
   BlockStudioImportCandidate,
   DqlGenerationSession,
   DqlGenerationCandidate,
+  BlockSimilarityMatch,
+  DqlCandidateRecommendedAction,
   BlockStudioDbtStatus,
   SemanticLayerDiagnostics,
   AppSummary,
@@ -120,6 +122,352 @@ export type VisualizationRecommendationResponse =
       warnings: string[];
     }
   | { ok: false; error: string };
+
+export type NotebookResearchIntent =
+  | 'ad_hoc_analysis'
+  | 'diagnose_change'
+  | 'driver_breakdown'
+  | 'segment_compare'
+  | 'entity_drilldown'
+  | 'anomaly_investigation'
+  | 'trust_gap_review';
+
+export type NotebookResearchStatus = 'draft' | 'running' | 'ready' | 'error';
+export type NotebookResearchReviewStatus = 'needs_review' | 'draft_created' | 'completed' | 'certified' | 'rejected';
+export type NotebookResearchDqlPromotionAction = 'reuse_existing' | 'extend_existing' | 'create_replacement' | 'create_new' | 'review_required';
+export type NotebookResearchReadinessFilter = 'draft_ready' | 'certification_ready' | 'blocked';
+export type NotebookResearchAgeFilter = 'stale_open' | 'expired_open';
+export type NotebookResearchSort = 'priority' | 'updated_desc';
+export interface NotebookResearchSourceCellPayload {
+  id?: string;
+  sourceCellId?: string;
+  cellId?: string;
+  name?: string;
+  sourceCellName?: string;
+  title?: string;
+  fingerprint?: string;
+  sourceCellFingerprint?: string;
+  sqlFingerprint?: string;
+  type?: string;
+  sql?: string;
+  content?: string;
+  source?: string;
+}
+export type NotebookResearchNextActionFilter =
+  | 'fix_blockers'
+  | 'review_sql'
+  | 'review_context'
+  | 'run_preview'
+  | 'reuse_existing'
+  | 'create_dql_draft'
+  | 'open_certification'
+  | 'complete_review'
+  | 'continue_review';
+
+export interface NotebookResearchDqlPromotionCandidate {
+  id: string;
+  name: string;
+  domain?: string;
+  draftPath?: string;
+  savedPath?: string;
+  reviewStatus?: string;
+  recommendedAction?: DqlCandidateRecommendedAction | string;
+  similarityMatches: BlockSimilarityMatch[];
+  parameterPolicy: Array<{ name: string; policy: string }>;
+  allowedFilters: string[];
+  warnings: string[];
+}
+
+export interface NotebookResearchDqlPromotion {
+  importId: string;
+  candidateIds: string[];
+  draftBlockPath?: string;
+  recommendedAction?: DqlCandidateRecommendedAction | string;
+  similarityMatches: BlockSimilarityMatch[];
+  candidates: NotebookResearchDqlPromotionCandidate[];
+  createdAt: string;
+}
+
+export interface NotebookResearchReuseCheckResponse {
+  run: NotebookResearchRun;
+  promotion: NotebookResearchDqlPromotion;
+  match: {
+    parameterDecisions: DqlGenerationCandidate['parameterDecisions'];
+    parameterPolicy: DqlGenerationCandidate['parameterPolicy'];
+    filterBindings: DqlGenerationCandidate['filterBindings'];
+    allowedFilters: string[];
+    parameterizedSql: string;
+    similarityMatches: DqlGenerationCandidate['similarityMatches'];
+    recommendedAction: DqlGenerationCandidate['recommendedAction'];
+  };
+}
+
+export interface NotebookResearchReviewChecklist {
+  readyForDqlDraft: boolean;
+  readyForCertificationReview: boolean;
+  blockers: string[];
+  warnings: string[];
+  items: Array<{
+    id: string;
+    label: string;
+    status: 'passed' | 'pending' | 'warning' | 'blocked';
+    detail: string;
+  }>;
+}
+
+export interface NotebookResearchPlan {
+  sqlState: 'missing' | 'generated' | 'reviewed';
+  grain?: string;
+  parameterPolicy: Array<{ name: string; policy: string }>;
+  allowedFilters: string[];
+  evidence: {
+    trustLabel?: string;
+    contextPackId?: string;
+    evidenceCount: number;
+    relationCount: number;
+    missingContextCount: number;
+  };
+  preview: {
+    status: 'not_run' | 'ready' | 'error';
+    rowCount?: number;
+  };
+  promotion: {
+    path: 'needs_sql' | 'review_context' | 'run_preview' | 'reuse_existing' | 'create_dql_draft' | 'open_certification' | 'complete_review';
+    duplicateDecision?: string;
+  };
+  reviewFocus: string[];
+  generatedAt: string;
+}
+
+export interface NotebookResearchRun {
+  id: string;
+  notebookPath: string;
+  domain?: string;
+  owner?: string;
+  sourceCellId?: string;
+  sourceCellName?: string;
+  sourceCellFingerprint?: string;
+  title: string;
+  question: string;
+  intent: NotebookResearchIntent;
+  context?: unknown;
+  status: NotebookResearchStatus;
+  summary?: string;
+  recommendation?: string;
+  resultPreview?: QueryResult;
+  evidence?: unknown;
+  researchPlan?: NotebookResearchPlan;
+  generatedSql?: string;
+  reviewedSql?: string;
+  display?: DashboardDisplayMetadata;
+  contextPackId?: string;
+  routeDecision?: unknown;
+  warnings: string[];
+  reviewStatus: NotebookResearchReviewStatus;
+  error?: string;
+  draftBlockPath?: string;
+  dqlImportId?: string;
+  dqlCandidateIds: string[];
+  dqlPromotionAction?: NotebookResearchDqlPromotionAction;
+  dqlPromotion?: NotebookResearchDqlPromotion;
+  reviewChecklist?: NotebookResearchReviewChecklist;
+  createdAt: string;
+  updatedAt: string;
+  lastRunAt?: string;
+}
+
+export interface NotebookResearchListResponse {
+  runs: NotebookResearchRun[];
+  total: number;
+  domains: Array<{
+    domain: string;
+    total: number;
+    draftReady: number;
+    certificationReady: number;
+    blocked: number;
+    staleOpen: number;
+    expiredOpen: number;
+    nextAction?: NotebookResearchNextActionFilter;
+    nextActionCount?: number;
+  }>;
+  owners: Array<{
+    owner: string;
+    total: number;
+    draftReady: number;
+    certificationReady: number;
+    blocked: number;
+    staleOpen: number;
+    expiredOpen: number;
+    nextAction?: NotebookResearchNextActionFilter;
+    nextActionCount?: number;
+  }>;
+  intents: Array<{
+    intent: NotebookResearchIntent;
+    total: number;
+    draftReady: number;
+    certificationReady: number;
+    blocked: number;
+    staleOpen: number;
+    expiredOpen: number;
+    nextAction?: NotebookResearchNextActionFilter;
+    nextActionCount?: number;
+  }>;
+  notebooks: Array<{
+    path: string;
+    title: string;
+    total: number;
+    draftReady: number;
+    certificationReady: number;
+    blocked: number;
+    staleOpen: number;
+    expiredOpen: number;
+    nextAction?: NotebookResearchNextActionFilter;
+    nextActionCount?: number;
+  }>;
+  counts: {
+    total: number;
+    ready: number;
+    needsReview: number;
+    dqlDrafts: number;
+    errors: number;
+    reuseExisting: number;
+    extendExisting: number;
+    replacements: number;
+    createNew: number;
+    draftReady: number;
+    certificationReady: number;
+    blocked: number;
+    staleOpen: number;
+    expiredOpen: number;
+    sourceLinked: number;
+    nextActions: Record<NotebookResearchNextActionFilter, number>;
+  };
+  groupCounts: {
+    domains: number;
+    owners: number;
+    intents: number;
+    notebooks: number;
+  };
+  limit?: number;
+  offset: number;
+}
+
+export interface NotebookResearchDiagnostics {
+  counts: {
+    totalRuns: number;
+    activeRuns: number;
+    closedRuns: number;
+    notebooks: number;
+    domains: number;
+    owners: number;
+    sourceLinkedRuns: number;
+  };
+  health: {
+    staleOpenRuns: number;
+    expiredOpenRuns: number;
+    staleThresholdDays: number;
+    expiredThresholdDays: number;
+    oldestOpenUpdatedAt?: string;
+    newestOpenUpdatedAt?: string;
+  };
+  search: {
+    indexed: boolean;
+    indexRows: number;
+    indexVersion?: string;
+    stale: boolean;
+  };
+  updatedAt: {
+    oldest?: string;
+    newest?: string;
+  };
+  limits: {
+    pageSize: number;
+    maxPageSize: number;
+    sourceCoverageLimit: number;
+    seedCellLimit: number;
+  };
+  warnings: string[];
+}
+
+export interface NotebookResearchSeedCellsResponse {
+  created: NotebookResearchRun[];
+  createdCount: number;
+  skippedCount: number;
+  limitApplied?: boolean;
+}
+
+export interface NotebookResearchSourceCoverageResponse {
+  runs: NotebookResearchRun[];
+  requestedCount: number;
+  matchedCount: number;
+  limitApplied?: boolean;
+}
+
+export interface NotebookResearchContextPreview {
+  contextPackId: string;
+  trustLabel?: string;
+  routeDecision?: {
+    route?: string;
+    intent?: string;
+    reason?: string;
+  };
+  evidence: Array<{
+    objectKey?: string;
+    objectType?: string;
+    name: string;
+    role?: string;
+    reason: string;
+  }>;
+  summaries: Array<{
+    title: string;
+    detail: string;
+    objectType?: string;
+    reason?: string;
+  }>;
+  relations: Array<{
+    relation: string;
+    name: string;
+    source: string;
+    columns: string[];
+  }>;
+  missingContext: Array<{
+    kind: string;
+    message: string;
+    severity: string;
+  }>;
+  warnings: string[];
+  topRejected: Array<{
+    name: string;
+    objectType?: string;
+    reason: string;
+    score?: number;
+  }>;
+  counts: {
+    objects: number;
+    evidence: number;
+    relations: number;
+    warnings: number;
+  };
+}
+
+export type NotebookResearchUpdateInput =
+  Partial<Pick<
+    NotebookResearchRun,
+    'domain' | 'owner' | 'title' | 'question' | 'intent' | 'context' | 'evidence' | 'contextPackId' | 'routeDecision' | 'generatedSql' | 'reviewedSql' | 'warnings' | 'reviewStatus' | 'recommendation'
+  >> & {
+    sourceCell?: NotebookResearchSourceCellPayload;
+    sourceCellId?: string | null;
+    sourceCellName?: string | null;
+    sourceCellFingerprint?: string | null;
+  };
+
+export interface NotebookExecutionContext {
+  notebookPath?: string;
+  cellId?: string;
+  cellName?: string;
+  researchRunId?: string;
+  source?: string;
+}
 
 export interface DashboardDocumentResponse {
   app: AppDocumentSummary['app'];
@@ -526,10 +874,17 @@ function formatRequestError(res: Response, text: string): string {
 }
 
 async function request<T>(path: string, options?: RequestInit): Promise<T> {
-  const res = await fetch(`${BASE}${path}`, {
-    headers: { 'Content-Type': 'application/json' },
-    ...options,
-  });
+  let res: Response;
+  try {
+    res = await fetch(`${BASE}${path}`, {
+      headers: { 'Content-Type': 'application/json' },
+      ...options,
+    });
+  } catch (error) {
+    if (options?.signal?.aborted) throw error;
+    const detail = error instanceof Error && error.message ? ` ${error.message}` : '';
+    throw new Error(`Unable to reach the local DQL notebook server. Check that it is still running, then retry.${detail}`);
+  }
   if (!res.ok) {
     const text = await res.text().catch(() => '');
     throw new Error(formatRequestError(res, text));
@@ -557,6 +912,314 @@ function normalizeQueryResultPayload(raw: any): QueryResult {
     rowCount: raw?.rowCount ?? raw?.rows?.length ?? 0,
     executionTime: raw?.executionTime ?? raw?.executionTimeMs ?? 0,
     ...(semanticRefs ? { semanticRefs } : {}),
+  };
+}
+
+function normalizeNotebookResearchRun(raw: NotebookResearchRun): NotebookResearchRun {
+  const resultPreview = raw?.resultPreview && typeof raw.resultPreview === 'object'
+    ? normalizeQueryResultPayload(raw.resultPreview)
+    : undefined;
+  return {
+    ...raw,
+    domain: typeof raw?.domain === 'string' && raw.domain.trim() ? raw.domain : undefined,
+    owner: typeof raw?.owner === 'string' && raw.owner.trim() ? raw.owner : undefined,
+    warnings: Array.isArray(raw?.warnings) ? raw.warnings : [],
+    dqlCandidateIds: Array.isArray(raw?.dqlCandidateIds) ? raw.dqlCandidateIds : [],
+    dqlPromotionAction: normalizeNotebookPromotionAction(raw?.dqlPromotionAction ?? raw?.dqlPromotion?.recommendedAction),
+    dqlPromotion: normalizeNotebookDqlPromotion(raw?.dqlPromotion),
+    researchPlan: normalizeNotebookResearchPlan(raw?.researchPlan),
+    reviewChecklist: normalizeNotebookResearchChecklist(raw?.reviewChecklist, raw),
+    ...(resultPreview ? { resultPreview } : { resultPreview: undefined }),
+  };
+}
+
+function normalizeNotebookResearchPlan(raw: unknown): NotebookResearchPlan | undefined {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return undefined;
+  const record = raw as Record<string, unknown>;
+  const evidence = record.evidence && typeof record.evidence === 'object' && !Array.isArray(record.evidence)
+    ? record.evidence as Record<string, unknown>
+    : {};
+  const preview = record.preview && typeof record.preview === 'object' && !Array.isArray(record.preview)
+    ? record.preview as Record<string, unknown>
+    : {};
+  const promotion = record.promotion && typeof record.promotion === 'object' && !Array.isArray(record.promotion)
+    ? record.promotion as Record<string, unknown>
+    : {};
+  const sqlState = record.sqlState === 'generated' || record.sqlState === 'reviewed' ? record.sqlState : 'missing';
+  const previewStatus = preview.status === 'ready' || preview.status === 'error' ? preview.status : 'not_run';
+  const promotionPath = promotion.path === 'review_context'
+    || promotion.path === 'run_preview'
+    || promotion.path === 'reuse_existing'
+    || promotion.path === 'create_dql_draft'
+    || promotion.path === 'open_certification'
+    || promotion.path === 'complete_review'
+    ? promotion.path
+    : 'needs_sql';
+  const rowCount = typeof preview.rowCount === 'number' && Number.isFinite(preview.rowCount) ? preview.rowCount : undefined;
+  return {
+    sqlState,
+    grain: typeof record.grain === 'string' && record.grain.trim() ? record.grain : undefined,
+    parameterPolicy: normalizeParameterPolicy(record.parameterPolicy),
+    allowedFilters: Array.isArray(record.allowedFilters) ? record.allowedFilters.map(String).filter(Boolean) : [],
+    evidence: {
+      trustLabel: typeof evidence.trustLabel === 'string' && evidence.trustLabel.trim() ? evidence.trustLabel : undefined,
+      contextPackId: typeof evidence.contextPackId === 'string' && evidence.contextPackId.trim() ? evidence.contextPackId : undefined,
+      evidenceCount: finiteCount(evidence.evidenceCount),
+      relationCount: finiteCount(evidence.relationCount),
+      missingContextCount: finiteCount(evidence.missingContextCount),
+    },
+    preview: {
+      status: previewStatus,
+      ...(rowCount === undefined ? {} : { rowCount }),
+    },
+    promotion: {
+      path: promotionPath,
+      duplicateDecision: typeof promotion.duplicateDecision === 'string' && promotion.duplicateDecision.trim() ? promotion.duplicateDecision : undefined,
+    },
+    reviewFocus: Array.isArray(record.reviewFocus) ? record.reviewFocus.map(String).filter(Boolean) : [],
+    generatedAt: typeof record.generatedAt === 'string' && record.generatedAt.trim() ? record.generatedAt : new Date(0).toISOString(),
+  };
+}
+
+function normalizeParameterPolicy(value: unknown): Array<{ name: string; policy: string }> {
+  if (!Array.isArray(value)) return [];
+  return value.flatMap((item): Array<{ name: string; policy: string }> => {
+    if (!item || typeof item !== 'object' || Array.isArray(item)) return [];
+    const record = item as Record<string, unknown>;
+    const name = typeof record.name === 'string' && record.name.trim() ? record.name : undefined;
+    const policy = typeof record.policy === 'string' && record.policy.trim() ? record.policy : undefined;
+    return name && policy ? [{ name, policy }] : [];
+  });
+}
+
+function finiteCount(value: unknown): number {
+  return typeof value === 'number' && Number.isFinite(value) ? value : 0;
+}
+
+function normalizeNotebookResearchDiagnostics(raw: NotebookResearchDiagnostics): NotebookResearchDiagnostics {
+  const record = raw && typeof raw === 'object' ? raw : {} as NotebookResearchDiagnostics;
+  const counts = record.counts && typeof record.counts === 'object' ? record.counts : {} as NotebookResearchDiagnostics['counts'];
+  const health = record.health && typeof record.health === 'object' ? record.health as Record<string, unknown> : {};
+  const search = record.search && typeof record.search === 'object' ? record.search : {} as NotebookResearchDiagnostics['search'];
+  const updatedAt = record.updatedAt && typeof record.updatedAt === 'object' ? record.updatedAt as Record<string, unknown> : {};
+  const limits = record.limits && typeof record.limits === 'object' ? record.limits : {} as NotebookResearchDiagnostics['limits'];
+  return {
+    counts: {
+      totalRuns: finiteCount(counts.totalRuns),
+      activeRuns: finiteCount(counts.activeRuns),
+      closedRuns: finiteCount(counts.closedRuns),
+      notebooks: finiteCount(counts.notebooks),
+      domains: finiteCount(counts.domains),
+      owners: finiteCount(counts.owners),
+      sourceLinkedRuns: finiteCount(counts.sourceLinkedRuns),
+    },
+    health: {
+      staleOpenRuns: finiteCount(health.staleOpenRuns),
+      expiredOpenRuns: finiteCount(health.expiredOpenRuns),
+      staleThresholdDays: finiteCount(health.staleThresholdDays) || 7,
+      expiredThresholdDays: finiteCount(health.expiredThresholdDays) || 30,
+      oldestOpenUpdatedAt: typeof health.oldestOpenUpdatedAt === 'string' && health.oldestOpenUpdatedAt.trim() ? health.oldestOpenUpdatedAt : undefined,
+      newestOpenUpdatedAt: typeof health.newestOpenUpdatedAt === 'string' && health.newestOpenUpdatedAt.trim() ? health.newestOpenUpdatedAt : undefined,
+    },
+    search: {
+      indexed: search.indexed === true,
+      indexRows: finiteCount(search.indexRows),
+      indexVersion: typeof search.indexVersion === 'string' && search.indexVersion.trim() ? search.indexVersion : undefined,
+      stale: search.stale === true,
+    },
+    updatedAt: {
+      oldest: typeof updatedAt.oldest === 'string' && updatedAt.oldest.trim() ? updatedAt.oldest : undefined,
+      newest: typeof updatedAt.newest === 'string' && updatedAt.newest.trim() ? updatedAt.newest : undefined,
+    },
+    limits: {
+      pageSize: finiteCount(limits.pageSize) || 25,
+      maxPageSize: finiteCount(limits.maxPageSize) || 500,
+      sourceCoverageLimit: finiteCount(limits.sourceCoverageLimit) || 10_000,
+      seedCellLimit: finiteCount(limits.seedCellLimit) || 1_000,
+    },
+    warnings: Array.isArray(record.warnings) ? record.warnings.filter((item): item is string => typeof item === 'string') : [],
+  };
+}
+
+function normalizeNotebookResearchIntent(value: unknown): NotebookResearchIntent {
+  return value === 'diagnose_change'
+    || value === 'driver_breakdown'
+    || value === 'segment_compare'
+    || value === 'entity_drilldown'
+    || value === 'anomaly_investigation'
+    || value === 'trust_gap_review'
+    ? value
+    : 'ad_hoc_analysis';
+}
+
+function notebookTitleFromPath(value: unknown): string {
+  const path = typeof value === 'string' ? value : '';
+  const file = path.split(/[\\/]/).pop() ?? path;
+  return file
+    .replace(/\.dqlnb$/i, '')
+    .replace(/[-_]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    || 'Untitled notebook';
+}
+
+function normalizeNotebookResearchNextActionCounts(value: unknown): Record<NotebookResearchNextActionFilter, number> {
+  const raw = value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : {};
+  const read = (key: NotebookResearchNextActionFilter) => typeof raw[key] === 'number' && Number.isFinite(raw[key]) ? raw[key] as number : 0;
+  return {
+    fix_blockers: read('fix_blockers'),
+    review_sql: read('review_sql'),
+    review_context: read('review_context'),
+    run_preview: read('run_preview'),
+    reuse_existing: read('reuse_existing'),
+    create_dql_draft: read('create_dql_draft'),
+    open_certification: read('open_certification'),
+    complete_review: read('complete_review'),
+    continue_review: read('continue_review'),
+  };
+}
+
+function normalizeNotebookResearchNextAction(value: unknown): NotebookResearchNextActionFilter | undefined {
+  return value === 'fix_blockers'
+    || value === 'review_sql'
+    || value === 'review_context'
+    || value === 'run_preview'
+    || value === 'reuse_existing'
+    || value === 'create_dql_draft'
+    || value === 'open_certification'
+    || value === 'complete_review'
+    || value === 'continue_review'
+    ? value
+    : undefined;
+}
+
+function normalizeNotebookResearchChecklist(raw: NotebookResearchReviewChecklist | undefined, run: NotebookResearchRun): NotebookResearchReviewChecklist {
+  if (raw && typeof raw === 'object' && Array.isArray(raw.items)) {
+    return {
+      readyForDqlDraft: raw.readyForDqlDraft === true,
+      readyForCertificationReview: raw.readyForCertificationReview === true,
+      blockers: Array.isArray(raw.blockers) ? raw.blockers.filter((item): item is string => typeof item === 'string') : [],
+      warnings: Array.isArray(raw.warnings) ? raw.warnings.filter((item): item is string => typeof item === 'string') : [],
+      items: raw.items.map((item) => ({
+        id: typeof item.id === 'string' ? item.id : 'item',
+        label: typeof item.label === 'string' ? item.label : 'Review item',
+        status: item.status === 'passed' || item.status === 'pending' || item.status === 'warning' || item.status === 'blocked' ? item.status : 'pending',
+        detail: typeof item.detail === 'string' ? item.detail : '',
+      })),
+    };
+  }
+  const hasReviewedSql = Boolean(run.reviewedSql);
+  const hasSql = hasReviewedSql || Boolean(run.generatedSql);
+  const previewRowCount = run.resultPreview?.rowCount ?? run.resultPreview?.rows.length ?? 0;
+  const hasPreview = Boolean(run.resultPreview && (run.resultPreview.columns.length > 0 || previewRowCount > 0));
+  const hasDraft = Boolean(run.draftBlockPath);
+  const hasEvidence = Boolean(run.contextPackId || run.evidence);
+  return {
+    readyForDqlDraft: Boolean(run.question && hasReviewedSql && hasEvidence && run.status !== 'error'),
+    readyForCertificationReview: Boolean(run.question && hasReviewedSql && hasEvidence && hasPreview && hasDraft && run.dqlPromotionAction !== 'reuse_existing'),
+    blockers: run.status === 'error' ? [run.error ?? 'Preview failed.'] : [],
+    warnings: hasPreview ? [] : ['Run a bounded preview before certification review.'],
+    items: [
+      { id: 'question', label: 'Question', status: run.question ? 'passed' : 'blocked', detail: run.question ? 'Business question is captured.' : 'Add a business question.' },
+      { id: 'sql', label: 'Reviewed SQL', status: hasSql ? 'passed' : 'blocked', detail: hasSql ? 'SQL is available.' : 'Add SQL before promotion.' },
+      { id: 'evidence', label: 'Evidence', status: hasEvidence ? 'passed' : 'warning', detail: hasEvidence ? 'Context evidence is saved.' : 'Preview and save metadata context.' },
+      { id: 'preview', label: 'Preview', status: hasPreview ? 'passed' : 'pending', detail: hasPreview ? 'Preview result is available.' : 'Run a bounded preview.' },
+      { id: 'dql_draft', label: 'DQL draft', status: hasDraft ? 'passed' : 'pending', detail: hasDraft ? `Draft saved at ${run.draftBlockPath}.` : 'Create a DQL draft after review.' },
+    ],
+  };
+}
+
+function normalizeNotebookResearchContextPreview(raw: NotebookResearchContextPreview): NotebookResearchContextPreview {
+  const record = raw && typeof raw === 'object' ? raw : {} as NotebookResearchContextPreview;
+  const routeDecision = record.routeDecision && typeof record.routeDecision === 'object'
+    ? {
+        route: typeof record.routeDecision.route === 'string' ? record.routeDecision.route : undefined,
+        intent: typeof record.routeDecision.intent === 'string' ? record.routeDecision.intent : undefined,
+        reason: typeof record.routeDecision.reason === 'string' ? record.routeDecision.reason : undefined,
+      }
+    : undefined;
+  return {
+    contextPackId: typeof record.contextPackId === 'string' ? record.contextPackId : '',
+    trustLabel: typeof record.trustLabel === 'string' ? record.trustLabel : undefined,
+    routeDecision,
+    evidence: Array.isArray(record.evidence)
+      ? record.evidence.map((item) => ({
+          objectKey: typeof item.objectKey === 'string' ? item.objectKey : undefined,
+          objectType: typeof item.objectType === 'string' ? item.objectType : undefined,
+          name: typeof item.name === 'string' ? item.name : 'Evidence',
+          role: typeof item.role === 'string' ? item.role : undefined,
+          reason: typeof item.reason === 'string' ? item.reason : '',
+        }))
+      : [],
+    summaries: Array.isArray(record.summaries)
+      ? record.summaries.map((item) => ({
+          title: typeof item.title === 'string' ? item.title : 'Context',
+          detail: typeof item.detail === 'string' ? item.detail : '',
+          objectType: typeof item.objectType === 'string' ? item.objectType : undefined,
+          reason: typeof item.reason === 'string' ? item.reason : undefined,
+        }))
+      : [],
+    relations: Array.isArray(record.relations)
+      ? record.relations.map((item) => ({
+          relation: typeof item.relation === 'string' ? item.relation : '',
+          name: typeof item.name === 'string' ? item.name : 'Relation',
+          source: typeof item.source === 'string' ? item.source : '',
+          columns: Array.isArray(item.columns) ? item.columns.map(String) : [],
+        })).filter((item) => item.relation || item.name)
+      : [],
+    missingContext: Array.isArray(record.missingContext)
+      ? record.missingContext.map((item) => ({
+          kind: typeof item.kind === 'string' ? item.kind : 'metadata',
+          message: typeof item.message === 'string' ? item.message : '',
+          severity: typeof item.severity === 'string' ? item.severity : 'warning',
+        })).filter((item) => item.message)
+      : [],
+    warnings: Array.isArray(record.warnings) ? record.warnings.filter((item): item is string => typeof item === 'string') : [],
+    topRejected: Array.isArray(record.topRejected)
+      ? record.topRejected.map((item) => ({
+          name: typeof item.name === 'string' ? item.name : 'Rejected context',
+          objectType: typeof item.objectType === 'string' ? item.objectType : undefined,
+          reason: typeof item.reason === 'string' ? item.reason : '',
+          score: typeof item.score === 'number' && Number.isFinite(item.score) ? item.score : undefined,
+        })).filter((item) => item.reason)
+      : [],
+    counts: {
+      objects: typeof record.counts?.objects === 'number' ? record.counts.objects : 0,
+      evidence: typeof record.counts?.evidence === 'number' ? record.counts.evidence : 0,
+      relations: typeof record.counts?.relations === 'number' ? record.counts.relations : 0,
+      warnings: typeof record.counts?.warnings === 'number' ? record.counts.warnings : 0,
+    },
+  };
+}
+
+function normalizeNotebookPromotionAction(value: unknown): NotebookResearchDqlPromotionAction | undefined {
+  return value === 'reuse_existing'
+    || value === 'extend_existing'
+    || value === 'create_replacement'
+    || value === 'create_new'
+    || value === 'review_required'
+    ? value
+    : undefined;
+}
+
+function normalizeNotebookDqlPromotion(raw: NotebookResearchDqlPromotion | undefined): NotebookResearchDqlPromotion | undefined {
+  if (!raw || typeof raw !== 'object') return undefined;
+  return {
+    importId: typeof raw.importId === 'string' ? raw.importId : '',
+    candidateIds: Array.isArray(raw.candidateIds) ? raw.candidateIds.filter((item): item is string => typeof item === 'string') : [],
+    draftBlockPath: typeof raw.draftBlockPath === 'string' ? raw.draftBlockPath : undefined,
+    recommendedAction: typeof raw.recommendedAction === 'string' ? raw.recommendedAction : undefined,
+    similarityMatches: Array.isArray(raw.similarityMatches) ? raw.similarityMatches : [],
+    candidates: Array.isArray(raw.candidates)
+      ? raw.candidates.map((candidate) => ({
+          ...candidate,
+          similarityMatches: Array.isArray(candidate.similarityMatches) ? candidate.similarityMatches : [],
+          parameterPolicy: Array.isArray(candidate.parameterPolicy) ? candidate.parameterPolicy : [],
+          allowedFilters: Array.isArray(candidate.allowedFilters) ? candidate.allowedFilters : [],
+          warnings: Array.isArray(candidate.warnings) ? candidate.warnings : [],
+        }))
+      : [],
+    createdAt: typeof raw.createdAt === 'string' ? raw.createdAt : '',
   };
 }
 
@@ -1056,10 +1719,10 @@ export const api = {
     });
   },
 
-  async executeQuery(sql: string, signal?: AbortSignal): Promise<QueryResult> {
+  async executeQuery(sql: string, signal?: AbortSignal, executionContext?: NotebookExecutionContext): Promise<QueryResult> {
     const raw = await request<any>('/api/query', {
       method: 'POST',
-      body: JSON.stringify({ sql }),
+      body: JSON.stringify({ sql, executionContext }),
       signal,
     });
     return normalizeQueryResultPayload(raw);
@@ -1078,7 +1741,7 @@ export const api = {
     }
   },
 
-  async executeNotebookCell(cell: Cell, signal?: AbortSignal): Promise<NotebookCellExecutionResponse> {
+  async executeNotebookCell(cell: Cell, signal?: AbortSignal, executionContext?: NotebookExecutionContext): Promise<NotebookCellExecutionResponse> {
     const raw = await request<any>('/api/notebook/execute', {
       method: 'POST',
       body: JSON.stringify({
@@ -1089,6 +1752,7 @@ export const api = {
           title: cell.name,
           config: cell.chartConfig,
         },
+        executionContext,
       }),
       signal,
     });
@@ -1101,6 +1765,301 @@ export const api = {
       tests: Array.isArray(raw?.tests) ? raw.tests : undefined,
       result: raw?.result ? normalizeQueryResultPayload(raw.result) : null,
     };
+  },
+
+  async listNotebookResearch(input?: string | {
+    path?: string;
+    sourceCellId?: string;
+    domain?: string;
+    owner?: string;
+    intent?: NotebookResearchIntent;
+    search?: string;
+    status?: NotebookResearchStatus;
+    reviewStatus?: NotebookResearchReviewStatus;
+    promotionAction?: NotebookResearchDqlPromotionAction;
+    readiness?: NotebookResearchReadinessFilter;
+    age?: NotebookResearchAgeFilter;
+    nextAction?: NotebookResearchNextActionFilter;
+    activeOnly?: boolean;
+    sort?: NotebookResearchSort;
+    limit?: number;
+    offset?: number;
+  }): Promise<NotebookResearchListResponse> {
+    const params = new URLSearchParams();
+    if (typeof input === 'string') {
+      if (input) params.set('path', input);
+    } else if (input) {
+      if (input.path) params.set('path', input.path);
+      if (input.sourceCellId) params.set('sourceCellId', input.sourceCellId);
+      if (input.domain) params.set('domain', input.domain);
+      if (input.owner) params.set('owner', input.owner);
+      if (input.intent) params.set('intent', input.intent);
+      if (input.search) params.set('q', input.search);
+      if (input.status) params.set('status', input.status);
+      if (input.reviewStatus) params.set('reviewStatus', input.reviewStatus);
+      if (input.promotionAction) params.set('promotionAction', input.promotionAction);
+      if (input.readiness) params.set('readiness', input.readiness);
+      if (input.age) params.set('age', input.age);
+      if (input.nextAction) params.set('nextAction', input.nextAction);
+      if (input.activeOnly) params.set('activeOnly', 'true');
+      if (input.sort) params.set('sort', input.sort);
+      if (typeof input.limit === 'number') params.set('limit', String(input.limit));
+      if (typeof input.offset === 'number') params.set('offset', String(input.offset));
+    }
+    const suffix = params.toString() ? `?${params.toString()}` : '';
+    const raw = await request<NotebookResearchListResponse>(`/api/notebook/research${suffix}`);
+    return {
+      runs: raw.runs.map(normalizeNotebookResearchRun),
+      total: typeof raw.total === 'number' ? raw.total : raw.runs.length,
+      domains: Array.isArray(raw.domains)
+        ? raw.domains.map((item) => ({
+            domain: typeof item.domain === 'string' && item.domain.trim() ? item.domain : 'uncategorized',
+            total: typeof item.total === 'number' ? item.total : 0,
+            draftReady: typeof item.draftReady === 'number' ? item.draftReady : 0,
+            certificationReady: typeof item.certificationReady === 'number' ? item.certificationReady : 0,
+            blocked: typeof item.blocked === 'number' ? item.blocked : 0,
+            staleOpen: typeof item.staleOpen === 'number' ? item.staleOpen : 0,
+            expiredOpen: typeof item.expiredOpen === 'number' ? item.expiredOpen : 0,
+            nextAction: normalizeNotebookResearchNextAction(item.nextAction),
+            nextActionCount: typeof item.nextActionCount === 'number' && Number.isFinite(item.nextActionCount)
+              ? Math.max(0, Math.floor(item.nextActionCount))
+              : undefined,
+          }))
+        : [],
+      owners: Array.isArray(raw.owners)
+        ? raw.owners.map((item) => ({
+            owner: typeof item.owner === 'string' && item.owner.trim() ? item.owner : 'unassigned',
+            total: typeof item.total === 'number' ? item.total : 0,
+            draftReady: typeof item.draftReady === 'number' ? item.draftReady : 0,
+            certificationReady: typeof item.certificationReady === 'number' ? item.certificationReady : 0,
+            blocked: typeof item.blocked === 'number' ? item.blocked : 0,
+            staleOpen: typeof item.staleOpen === 'number' ? item.staleOpen : 0,
+            expiredOpen: typeof item.expiredOpen === 'number' ? item.expiredOpen : 0,
+            nextAction: normalizeNotebookResearchNextAction(item.nextAction),
+            nextActionCount: typeof item.nextActionCount === 'number' && Number.isFinite(item.nextActionCount)
+              ? Math.max(0, Math.floor(item.nextActionCount))
+              : undefined,
+          }))
+        : [],
+      intents: Array.isArray(raw.intents)
+        ? raw.intents.map((item) => ({
+            intent: normalizeNotebookResearchIntent(item.intent),
+            total: typeof item.total === 'number' ? item.total : 0,
+            draftReady: typeof item.draftReady === 'number' ? item.draftReady : 0,
+            certificationReady: typeof item.certificationReady === 'number' ? item.certificationReady : 0,
+            blocked: typeof item.blocked === 'number' ? item.blocked : 0,
+            staleOpen: typeof item.staleOpen === 'number' ? item.staleOpen : 0,
+            expiredOpen: typeof item.expiredOpen === 'number' ? item.expiredOpen : 0,
+            nextAction: normalizeNotebookResearchNextAction(item.nextAction),
+            nextActionCount: typeof item.nextActionCount === 'number' && Number.isFinite(item.nextActionCount)
+              ? Math.max(0, Math.floor(item.nextActionCount))
+              : undefined,
+          }))
+        : [],
+      notebooks: Array.isArray(raw.notebooks)
+        ? raw.notebooks.map((item) => ({
+            path: typeof item.path === 'string' && item.path.trim() ? item.path : 'notebooks/untitled.dqlnb',
+            title: typeof item.title === 'string' && item.title.trim() ? item.title : notebookTitleFromPath(item.path),
+            total: typeof item.total === 'number' ? item.total : 0,
+            draftReady: typeof item.draftReady === 'number' ? item.draftReady : 0,
+            certificationReady: typeof item.certificationReady === 'number' ? item.certificationReady : 0,
+            blocked: typeof item.blocked === 'number' ? item.blocked : 0,
+            staleOpen: typeof item.staleOpen === 'number' ? item.staleOpen : 0,
+            expiredOpen: typeof item.expiredOpen === 'number' ? item.expiredOpen : 0,
+            nextAction: normalizeNotebookResearchNextAction(item.nextAction),
+            nextActionCount: typeof item.nextActionCount === 'number' && Number.isFinite(item.nextActionCount)
+              ? Math.max(0, Math.floor(item.nextActionCount))
+              : undefined,
+          }))
+        : [],
+      counts: {
+        total: typeof raw.counts?.total === 'number' ? raw.counts.total : raw.runs.length,
+        ready: typeof raw.counts?.ready === 'number' ? raw.counts.ready : 0,
+        needsReview: typeof raw.counts?.needsReview === 'number' ? raw.counts.needsReview : 0,
+        dqlDrafts: typeof raw.counts?.dqlDrafts === 'number' ? raw.counts.dqlDrafts : 0,
+        errors: typeof raw.counts?.errors === 'number' ? raw.counts.errors : 0,
+        reuseExisting: typeof raw.counts?.reuseExisting === 'number' ? raw.counts.reuseExisting : 0,
+        extendExisting: typeof raw.counts?.extendExisting === 'number' ? raw.counts.extendExisting : 0,
+        replacements: typeof raw.counts?.replacements === 'number' ? raw.counts.replacements : 0,
+        createNew: typeof raw.counts?.createNew === 'number' ? raw.counts.createNew : 0,
+        draftReady: typeof raw.counts?.draftReady === 'number' ? raw.counts.draftReady : 0,
+        certificationReady: typeof raw.counts?.certificationReady === 'number' ? raw.counts.certificationReady : 0,
+        blocked: typeof raw.counts?.blocked === 'number' ? raw.counts.blocked : 0,
+        staleOpen: typeof raw.counts?.staleOpen === 'number' ? raw.counts.staleOpen : 0,
+        expiredOpen: typeof raw.counts?.expiredOpen === 'number' ? raw.counts.expiredOpen : 0,
+        sourceLinked: typeof raw.counts?.sourceLinked === 'number' ? raw.counts.sourceLinked : 0,
+        nextActions: normalizeNotebookResearchNextActionCounts(raw.counts?.nextActions),
+      },
+      groupCounts: {
+        domains: typeof raw.groupCounts?.domains === 'number' && Number.isFinite(raw.groupCounts.domains)
+          ? Math.max(0, Math.floor(raw.groupCounts.domains))
+          : (Array.isArray(raw.domains) ? raw.domains.length : 0),
+        owners: typeof raw.groupCounts?.owners === 'number' && Number.isFinite(raw.groupCounts.owners)
+          ? Math.max(0, Math.floor(raw.groupCounts.owners))
+          : (Array.isArray(raw.owners) ? raw.owners.length : 0),
+        intents: typeof raw.groupCounts?.intents === 'number' && Number.isFinite(raw.groupCounts.intents)
+          ? Math.max(0, Math.floor(raw.groupCounts.intents))
+          : (Array.isArray(raw.intents) ? raw.intents.length : 0),
+        notebooks: typeof raw.groupCounts?.notebooks === 'number' && Number.isFinite(raw.groupCounts.notebooks)
+          ? Math.max(0, Math.floor(raw.groupCounts.notebooks))
+          : (Array.isArray(raw.notebooks) ? raw.notebooks.length : 0),
+      },
+      limit: raw.limit,
+      offset: typeof raw.offset === 'number' ? raw.offset : 0,
+    };
+  },
+
+  async getNotebookResearchDiagnostics(): Promise<NotebookResearchDiagnostics> {
+    const raw = await request<NotebookResearchDiagnostics>('/api/notebook/research/diagnostics');
+    return normalizeNotebookResearchDiagnostics(raw);
+  },
+
+  async createNotebookResearch(input: {
+    notebookPath: string;
+    domain?: string;
+    owner?: string;
+    sourceCell?: NotebookResearchSourceCellPayload;
+    sourceCellId?: string;
+    sourceCellName?: string;
+    sourceCellFingerprint?: string;
+    title?: string;
+    question: string;
+    intent?: NotebookResearchIntent;
+    context?: unknown;
+    generatedSql?: string;
+    reviewedSql?: string;
+    run?: boolean;
+  }): Promise<NotebookResearchRun> {
+    const raw = await request<{ run: NotebookResearchRun }>('/api/notebook/research', {
+      method: 'POST',
+      body: JSON.stringify(input),
+    });
+    return normalizeNotebookResearchRun(raw.run);
+  },
+
+  async seedNotebookResearchFromCells(input: {
+    notebookPath: string;
+    domain?: string;
+    owner?: string;
+    notebookTitle?: string;
+	    cells: Array<{
+	      sourceCell?: NotebookResearchSourceCellPayload;
+	      id?: string;
+	      sourceCellId?: string;
+	      name?: string;
+	      sourceCellName?: string;
+	      type?: string;
+	      sql?: string;
+	      content?: string;
+	      source?: string;
+	      sourceCellFingerprint?: string;
+      question?: string;
+      intent?: NotebookResearchIntent;
+    }>;
+  }): Promise<NotebookResearchSeedCellsResponse> {
+    const raw = await request<NotebookResearchSeedCellsResponse>('/api/notebook/research/seed-cells', {
+      method: 'POST',
+      body: JSON.stringify(input),
+    });
+    return {
+      created: Array.isArray(raw.created) ? raw.created.map(normalizeNotebookResearchRun) : [],
+      createdCount: typeof raw.createdCount === 'number' ? raw.createdCount : Array.isArray(raw.created) ? raw.created.length : 0,
+      skippedCount: typeof raw.skippedCount === 'number' ? raw.skippedCount : 0,
+      limitApplied: raw.limitApplied === true,
+    };
+  },
+
+  async listNotebookResearchSourceCoverage(input: {
+    path: string;
+    sourceCellIds: string[];
+    sourceCells?: NotebookResearchSourceCellPayload[];
+    limit?: number;
+  }): Promise<NotebookResearchSourceCoverageResponse> {
+    const raw = await request<NotebookResearchSourceCoverageResponse>('/api/notebook/research/source-coverage', {
+      method: 'POST',
+      body: JSON.stringify({
+        path: input.path,
+        sourceCellIds: input.sourceCellIds,
+        sourceCells: input.sourceCells,
+        limit: input.limit,
+      }),
+    });
+    return {
+      runs: Array.isArray(raw.runs) ? raw.runs.map(normalizeNotebookResearchRun) : [],
+      requestedCount: typeof raw.requestedCount === 'number' ? raw.requestedCount : input.sourceCellIds.length,
+      matchedCount: typeof raw.matchedCount === 'number' ? raw.matchedCount : Array.isArray(raw.runs) ? raw.runs.length : 0,
+      limitApplied: raw.limitApplied === true,
+    };
+  },
+
+  async previewNotebookResearchContext(input: {
+    notebookPath: string;
+    domain?: string;
+    sourceCell?: NotebookResearchSourceCellPayload;
+    sourceCellId?: string;
+    sourceCellName?: string;
+    question: string;
+    intent?: NotebookResearchIntent;
+    context?: unknown;
+  }): Promise<NotebookResearchContextPreview> {
+    const raw = await request<NotebookResearchContextPreview>('/api/notebook/research/context-preview', {
+      method: 'POST',
+      body: JSON.stringify(input),
+    });
+    return normalizeNotebookResearchContextPreview(raw);
+  },
+
+  async getNotebookResearch(id: string): Promise<NotebookResearchRun> {
+    const raw = await request<{ run: NotebookResearchRun }>(`/api/notebook/research/${encodeURIComponent(id)}`);
+    return normalizeNotebookResearchRun(raw.run);
+  },
+
+  async updateNotebookResearch(id: string, input: NotebookResearchUpdateInput): Promise<NotebookResearchRun> {
+    const raw = await request<{ run: NotebookResearchRun }>(`/api/notebook/research/${encodeURIComponent(id)}`, {
+      method: 'PATCH',
+      body: JSON.stringify(input),
+    });
+    return normalizeNotebookResearchRun(raw.run);
+  },
+
+  async runNotebookResearch(id: string, input?: Partial<Pick<
+    NotebookResearchRun,
+    'domain' | 'owner' | 'sourceCellFingerprint' | 'question' | 'intent' | 'context' | 'generatedSql' | 'reviewedSql'
+  >>): Promise<NotebookResearchRun> {
+    const raw = await request<{ run: NotebookResearchRun }>(`/api/notebook/research/${encodeURIComponent(id)}/run`, {
+      method: 'POST',
+      body: JSON.stringify(input ?? {}),
+    });
+    return normalizeNotebookResearchRun(raw.run);
+  },
+
+  async checkNotebookResearchReuse(id: string, input?: { domain?: string; owner?: string }): Promise<NotebookResearchReuseCheckResponse> {
+    const raw = await request<NotebookResearchReuseCheckResponse>(
+      `/api/notebook/research/${encodeURIComponent(id)}/reuse-check`,
+      {
+        method: 'POST',
+        body: JSON.stringify(input ?? {}),
+      },
+    );
+    return {
+      ...raw,
+      run: normalizeNotebookResearchRun(raw.run),
+      promotion: normalizeNotebookDqlPromotion(raw.promotion) ?? raw.promotion,
+    };
+  },
+
+  async promoteNotebookResearchToDql(id: string, input?: { domain?: string; owner?: string; tags?: string[]; provider?: string }): Promise<{
+    run: NotebookResearchRun;
+    session: DqlGenerationSession;
+  }> {
+    const raw = await request<{ run: NotebookResearchRun; session: DqlGenerationSession }>(
+      `/api/notebook/research/${encodeURIComponent(id)}/promote-dql`,
+      {
+        method: 'POST',
+        body: JSON.stringify(input ?? {}),
+      },
+    );
+    return { ...raw, run: normalizeNotebookResearchRun(raw.run) };
   },
 
   async getSchema(): Promise<SchemaTable[]> {

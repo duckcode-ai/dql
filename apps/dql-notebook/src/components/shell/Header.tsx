@@ -202,12 +202,14 @@ export function Header() {
     return () => document.removeEventListener('keydown', handler);
   }, [handleSave]);
 
-  // Auto-save: trigger save after 2s of inactivity when dirty
+  // Auto-save: persist notebook/block edits quickly after inactivity.
+  // AI insert/repair actions dispatch ADD_CELL/UPDATE_CELL, so they are covered
+  // by the same path as manual edits.
   useEffect(() => {
     if (!state.autoSave || !currentDirty || !state.activeFile) return;
     const timer = setTimeout(() => {
       handleSave();
-    }, 2000);
+    }, 750);
     return () => clearTimeout(timer);
   }, [state.autoSave, currentDirty, state.activeFile, state.cells, state.blockStudioDraft, handleSave]);
 

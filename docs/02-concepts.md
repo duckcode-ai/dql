@@ -18,6 +18,12 @@ A `.dqlnb` file containing an ordered list of cells. Cells can be:
 Notebooks live in git. Results never do (they go in a sibling
 `.run.json` that's git-ignored by default — see [Run Snapshots](./reference/file-formats.md#run-snapshots)).
 
+Notebooks are also the research workspace for deeper SQL-to-DQL conversion.
+The Research panel turns source SQL cells into reviewable runs with metadata
+evidence, preview results, duplicate/reuse checks, parameter review, and a
+DQL-draft promotion path. See the [Notebook research engine](./guides/notebook-research.md)
+guide for the enterprise workflow.
+
 ## 2. Block
 
 A **named, versioned, governed** analytics artifact. Think of a block as a

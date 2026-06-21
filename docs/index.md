@@ -79,8 +79,9 @@ npm run lineage
 2. [DQL in 5 concepts](04-dql-in-5-concepts.md)
 3. [Tutorials](tutorials/README.md) — blocks → dashboards & Apps → agent → CI
 4. [Block Studio](guides/block-studio.md)
-5. [Author a certified block](guides/authoring-blocks.md)
-6. [Import dbt](guides/import-dbt.md)
+5. [Notebook research engine](guides/notebook-research.md)
+6. [Author a certified block](guides/authoring-blocks.md)
+7. [Import dbt](guides/import-dbt.md)
 
 ## What Ships
 
