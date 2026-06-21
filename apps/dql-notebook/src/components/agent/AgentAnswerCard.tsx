@@ -183,6 +183,61 @@ function cleanQuestion(value: unknown): string | undefined {
   return clean.length > 180 ? `${clean.slice(0, 177)}...` : clean;
 }
 
+function compactAgentAnswerSummary(value: string): string {
+  const answer = extractAgentAnswerSection(value, ['Answer', 'Business summary', 'Summary']);
+  if (answer) return truncateAgentAnswer(answer, 340);
+  const stopRegex = /^(?:reuse evidence|certified result preview|result preview|result summary|trust status|next action|recommended action|sql used by block|reusable block sql|proposed sql|sql generated|sql draft|evidence|parameters|lineage|technical lineage)\s*:/i;
+  const sqlRegex = /^(?:SELECT|WITH|FROM|WHERE|GROUP BY|ORDER BY|LIMIT)\b/i;
+  const collected: string[] = [];
+  for (const rawLine of value.split(/\r?\n/)) {
+    const line = rawLine.trim();
+    if (!line || /^#{1,6}\s*/.test(line) || /^```/.test(line) || /^\|/.test(line)) continue;
+    if (/^outcome\s*:/i.test(line)) continue;
+    if (stopRegex.test(line) || sqlRegex.test(line)) {
+      if (collected.length > 0) break;
+      continue;
+    }
+    collected.push(line);
+    if (collected.length >= 5) break;
+  }
+  const clean = collected.join(' ')
+    .replace(/[*_`]+/g, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+  return truncateAgentAnswer(clean, 340);
+}
+
+function extractAgentAnswerSection(value: string, headings: string[]): string | undefined {
+  const lines = value.split(/\r?\n/);
+  const headingPattern = headings
+    .map((heading) => heading.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))
+    .join('|');
+  const startRegex = new RegExp(`^\\s*(?:#{1,6}\\s*)?(?:[-*]\\s*)?(?:\\*\\*)?(${headingPattern})(?:\\*\\*)?\\s*:\\s*(.*)$`, 'i');
+  const boundaryRegex = /^\s*(?:#{1,6}\s*)?(?:[-*]\s*)?(?:\*\*)?[A-Z][A-Za-z /-]{2,42}(?:\*\*)?\s*:/;
+  const startIndex = lines.findIndex((line) => startRegex.test(line));
+  if (startIndex < 0) return undefined;
+  const first = lines[startIndex]?.match(startRegex)?.[2]?.trim() ?? '';
+  const collected = first ? [first] : [];
+  for (let i = startIndex + 1; i < lines.length; i += 1) {
+    const line = lines[i] ?? '';
+    if (boundaryRegex.test(line)) break;
+    if (/^\s*```/.test(line)) break;
+    if (line.trim()) collected.push(line.trim());
+  }
+  const clean = collected.join(' ').replace(/[*_`]+/g, '').replace(/\s+/g, ' ').trim();
+  return clean || undefined;
+}
+
+function truncateAgentAnswer(value: string, maxLength: number): string {
+  const clean = value.replace(/\s+/g, ' ').trim();
+  if (clean.length <= maxLength) return clean;
+  const clipped = clean.slice(0, maxLength - 1);
+  const sentenceEnd = Math.max(clipped.lastIndexOf('. '), clipped.lastIndexOf('; '));
+  if (sentenceEnd > 100) return clipped.slice(0, sentenceEnd + 1).trim();
+  const wordEnd = clipped.lastIndexOf(' ');
+  return `${clipped.slice(0, wordEnd > 80 ? wordEnd : clipped.length).trim()}...`;
+}
+
 export function AgentAnswerCard({
   answer,
   themeMode,
@@ -220,7 +275,8 @@ export function AgentAnswerCard({
   const [detailsOpen, setDetailsOpen] = useState(false);
   const trustState = resolveAnswerTrustState(answer);
   const trustAccent = trustStateColor(trustState, t);
-  const summary = (answer.answer ?? answer.text ?? '').replace(/\n\n_Question:_[\s\S]*$/m, '').trim();
+  const rawSummary = (answer.answer ?? answer.text ?? '').replace(/\n\n_Question:_[\s\S]*$/m, '').trim();
+  const summary = compact ? compactAgentAnswerSummary(rawSummary) : rawSummary;
   const blockName = answer.result?.blockName ?? answer.block?.name ?? answer.citations?.find((c) => c.kind === 'block')?.name;
   const investigationBlockName = resolveInvestigationBlockName(answer, blockName);
   const provenance = buildAnswerProvenance(answer, result, blockName, blockPath);
@@ -235,6 +291,13 @@ export function AgentAnswerCard({
     ?? cleanQuestion(summary)
     ?? 'Investigate this answer';
   const canInvestigate = Boolean(onInvestigate && investigationQuestion);
+  const outcome = resolveAgentOutcome(answer, {
+    sql,
+    executionError,
+    blockName,
+    blockPath,
+    result,
+  });
   const insertSql = () => {
     if (!onInsertSql || !sql) return;
     onInsertSql(sql, blockName ?? analysisPlan?.question ?? 'AI SQL draft');
@@ -480,6 +543,7 @@ export function AgentAnswerCard({
       </div>
       {addMessage && <div style={{ fontSize: 11, color: addMessage.toLowerCase().includes('added') || addMessage.toLowerCase().includes('pinned') ? '#3fb950' : '#ff7b72' }}>{addMessage}</div>}
       {insertMessage && <div style={{ fontSize: 11, color: '#3fb950' }}>{insertMessage}</div>}
+      <OutcomeBanner outcome={outcome} t={t} compact={compact} />
 
       <div style={{ border: `1px solid ${t.cellBorder}`, borderTop: `2px solid ${trustAccent}`, borderRadius: compact ? 10 : 6, overflow: 'hidden', background: t.cellBg }}>
         {!compact && (
@@ -535,6 +599,151 @@ export function AgentAnswerCard({
   );
 }
 
+type AgentOutcomeKind =
+  | 'reuse_certified_block'
+  | 'use_existing_draft'
+  | 'generate_sql_cell'
+  | 'fix_sql'
+  | 'create_dql_draft'
+  | 'needs_review'
+  | 'cannot_answer';
+
+interface AgentOutcome {
+  kind: AgentOutcomeKind;
+  label: string;
+  detail: string;
+  nextAction: string;
+  tone: 'success' | 'accent' | 'warning' | 'error' | 'muted';
+}
+
+function resolveAgentOutcome(
+  answer: AgentAnswerEnvelope,
+  context: {
+    sql?: string;
+    executionError?: string;
+    blockName?: string;
+    blockPath?: string;
+    result: QueryResult | null;
+  },
+): AgentOutcome {
+  if (answer.kind === 'no_answer') {
+    return {
+      kind: 'cannot_answer',
+      label: 'Cannot answer yet',
+      detail: 'The assistant did not find enough trusted context to safely answer or generate SQL.',
+      nextAction: 'Clarify the business object, metric, grain, or source table.',
+      tone: 'error',
+    };
+  }
+  if (answer.certification === 'certified' || answer.kind === 'certified') {
+    const block = context.blockName ?? answer.sourceCertifiedBlock ?? answer.block?.name;
+    return {
+      kind: 'reuse_certified_block',
+      label: 'Reuse certified block',
+      detail: block ? `Existing DQL block ${block} answers this request.` : 'A certified DQL artifact answers this request.',
+      nextAction: 'Use the certified block instead of creating duplicate SQL.',
+      tone: 'success',
+    };
+  }
+  if (context.executionError || answer.executionError) {
+    return {
+      kind: 'fix_sql',
+      label: 'Fix SQL',
+      detail: 'The generated or selected SQL needs correction before it can become reusable DQL.',
+      nextAction: 'Ask AI to repair, edit manually, then rerun preview.',
+      tone: 'error',
+    };
+  }
+  if (answer.draftBlock?.path || answer.draftBlockId) {
+    return {
+      kind: 'use_existing_draft',
+      label: 'Use existing draft',
+      detail: `A review-required DQL draft is available at ${answer.draftBlock?.path ?? answer.draftBlockId}.`,
+      nextAction: 'Open the draft, review metadata/tests/lineage, then certify manually.',
+      tone: 'accent',
+    };
+  }
+  if (context.sql) {
+    return {
+      kind: context.result ? 'generate_sql_cell' : 'create_dql_draft',
+      label: context.result ? 'Generate SQL cell' : 'Create DQL draft',
+      detail: context.result
+        ? `Review-required SQL preview returned ${(context.result.rowCount ?? context.result.rows.length).toLocaleString()} row${(context.result.rowCount ?? context.result.rows.length) === 1 ? '' : 's'}.`
+        : 'Review-required SQL is available but still needs preview and DQL metadata review.',
+      nextAction: context.result
+        ? 'Insert the SQL cell or create a draft block after reviewing parameters and lineage.'
+        : 'Run preview, inspect parameters, then create a draft block.',
+      tone: 'warning',
+    };
+  }
+  return {
+    kind: 'needs_review',
+    label: 'Needs review',
+    detail: 'The assistant returned business context but no executable certified answer or SQL draft.',
+    nextAction: 'Review evidence and ask for a specific SQL, reuse, or DQL draft action.',
+    tone: 'muted',
+  };
+}
+
+function OutcomeBanner({ outcome, t, compact }: { outcome: AgentOutcome; t: Theme; compact?: boolean }) {
+  const accent = outcomeToneColor(outcome.tone, t);
+  return (
+    <div
+      style={{
+        border: `1px solid ${accent}45`,
+        borderLeft: `3px solid ${accent}`,
+        borderRadius: compact ? 10 : 7,
+        background: `${accent}10`,
+        padding: compact ? '9px 10px' : '10px 12px',
+        display: 'grid',
+        gap: compact ? 4 : 5,
+      }}
+    >
+      <div style={{ display: 'flex', alignItems: 'center', gap: 7, minWidth: 0 }}>
+        <span
+          style={{
+            border: `1px solid ${accent}55`,
+            background: `${accent}14`,
+            color: accent,
+            borderRadius: 999,
+            padding: '2px 7px',
+            fontSize: 10,
+            fontWeight: 850,
+            lineHeight: 1.1,
+            textTransform: 'uppercase',
+            letterSpacing: 0,
+            flexShrink: 0,
+          }}
+        >
+          {outcome.label}
+        </span>
+        <span style={{ fontSize: compact ? 12 : 12.5, color: t.textPrimary, fontWeight: 750, overflow: 'hidden', textOverflow: 'ellipsis' }}>
+          {outcome.detail}
+        </span>
+      </div>
+      <div style={{ fontSize: compact ? 11.5 : 12, color: t.textSecondary, lineHeight: 1.45 }}>
+        Next: {outcome.nextAction}
+      </div>
+    </div>
+  );
+}
+
+function outcomeToneColor(tone: AgentOutcome['tone'], t: Theme): string {
+  switch (tone) {
+    case 'success':
+      return t.success;
+    case 'accent':
+      return t.accent;
+    case 'warning':
+      return t.warning;
+    case 'error':
+      return t.error;
+    case 'muted':
+    default:
+      return t.textMuted;
+  }
+}
+
 function AnswerPanel({
   summary,
   evidence,
@@ -556,7 +765,7 @@ function AnswerPanel({
   return (
     <div style={{ padding: compact ? 14 : 12, display: 'flex', flexDirection: 'column', gap: compact ? 10 : 12 }}>
       {summary ? (
-        <StructuredAnswerText text={summary} t={t} compact={compact} />
+        <StructuredAnswerText text={summary} t={t} compact={compact} summaryOnly={compact} />
       ) : (
         <div style={{ fontSize: 12, color: t.textMuted }}>No summary text was returned.</div>
       )}
@@ -584,8 +793,8 @@ function AnswerPanel({
           {evidence?.execution?.status && <Pill label={`execution: ${evidence.execution.status}`} t={t} />}
         </div>
       )}
-      {result && <ResultPreview result={result} t={t} compact={compact} />}
-      {analysisPlan && (
+      {result && !compact && <ResultPreview result={result} t={t} compact={compact} />}
+      {analysisPlan && !compact && (
         <div style={{
           display: 'grid',
           gap: 7,
@@ -626,12 +835,15 @@ export function StructuredAnswerText({
   text,
   t,
   compact = false,
+  summaryOnly = false,
 }: {
   text: string;
   t: Theme;
   compact?: boolean;
+  summaryOnly?: boolean;
 }) {
-  const nodes = renderStructuredAnswer(text, t, compact);
+  const displayText = summaryOnly ? compactAgentAnswerSummary(text) : text;
+  const nodes = renderStructuredAnswer(displayText, t, compact);
   return (
     <div
       style={{

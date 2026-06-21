@@ -22,6 +22,13 @@ interface LocalMessage {
   createdAt?: string;
 }
 
+export interface AgentAnswerCompletePayload {
+  question: string;
+  content: string;
+  events: AgentTurn[];
+  answer?: AgentAnswerEnvelope | null;
+}
+
 export function AgentChatPanel({
   title,
   scopeHint,
@@ -32,11 +39,15 @@ export function AgentChatPanel({
   conversationTarget,
   onConversationUpdated,
   onInvestigate,
+  onInsertSql,
+  onCreateBlock,
+  onAnswerComplete,
   initialInput,
   autoAsk,
   emptyHint,
   inputPlaceholder,
   suggestions,
+  collapseInputAfterAnswer = false,
   variant = 'default',
   embedded = false,
   showHeader = true,
@@ -53,11 +64,15 @@ export function AgentChatPanel({
   conversationTarget?: { appId: string; dashboardId?: string; notebookPath?: string };
   onConversationUpdated?: () => void;
   onInvestigate?: (request: AgentAnswerInvestigationRequest) => void;
+  onInsertSql?: (sql: string, title?: string) => void;
+  onCreateBlock?: (sql: string, meta: { title?: string; description?: string; tags?: string[] }) => void;
+  onAnswerComplete?: (payload: AgentAnswerCompletePayload) => void | Promise<void>;
   initialInput?: string;
   autoAsk?: { text: string; nonce: number };
   emptyHint?: string;
   inputPlaceholder?: string;
   suggestions?: Array<{ label: string; prompt: string; icon?: React.ReactNode }>;
+  collapseInputAfterAnswer?: boolean;
   variant?: 'default' | 'executive';
   embedded?: boolean;
   showHeader?: boolean;
@@ -74,6 +89,7 @@ export function AgentChatPanel({
   const [liveText, setLiveText] = useState('');
   const [liveEvents, setLiveEvents] = useState<AgentTurn[]>([]);
   const [error, setError] = useState<string | null>(null);
+  const [inputExpanded, setInputExpanded] = useState(true);
   const [conversationId, setConversationId] = useState<string | null>(null);
   const [conversationContext, setConversationContext] = useState<AgentConversationContext | undefined>(undefined);
   const abortRef = useRef<AbortController | null>(null);
@@ -89,6 +105,7 @@ export function AgentChatPanel({
     if (initialInput === lastInitialInputRef.current) return;
     lastInitialInputRef.current = initialInput;
     setInput(initialInput);
+    setInputExpanded(true);
   }, [initialInput, running]);
 
   React.useEffect(() => {
@@ -98,6 +115,7 @@ export function AgentChatPanel({
     const text = autoAsk.text.trim();
     if (!text) return;
     setInput(text);
+    setInputExpanded(false);
     void send(text);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [autoAsk?.nonce]);
@@ -138,43 +156,6 @@ export function AgentChatPanel({
     setError(null);
     setLiveText('');
     setLiveEvents([]);
-    if (onInvestigate && shouldRouteToResearchWorkspace(text)) {
-      const note: LocalMessage = {
-        id: makeMessageId(),
-        role: 'assistant',
-        content: 'I opened this in Research so the answer can keep SQL, preview rows, evidence, and review actions together.',
-        createdAt: new Date().toISOString(),
-      };
-      const finalMessages = [...next, note];
-      setMessages(finalMessages);
-      onInvestigate({
-        question: text,
-        title: researchTitleFromQuestion(text),
-      });
-      if (conversationTarget) {
-        let activeConversationId = conversationId;
-        if (!activeConversationId) {
-          const created = await api.createAppConversation(conversationTarget.appId, {
-            title: text.slice(0, 80),
-            dashboardId: conversationTarget.dashboardId,
-            notebookPath: conversationTarget.notebookPath,
-            context: conversationContext,
-            messages: toConversationMessages(finalMessages),
-          });
-          if (created.ok) {
-            activeConversationId = created.conversation.id;
-            setConversationId(activeConversationId);
-          }
-        } else {
-          await api.updateAppConversation(conversationTarget.appId, activeConversationId, {
-            context: conversationContext ?? null,
-            messages: toConversationMessages(finalMessages),
-          });
-        }
-        onConversationUpdated?.();
-      }
-      return;
-    }
     setRunning(true);
     const controller = new AbortController();
     abortRef.current = controller;
@@ -223,6 +204,17 @@ export function AgentChatPanel({
           : conversationContext;
       setConversationContext(nextContext);
       setMessages(finalMessages);
+      if (collapseInputAfterAnswer) setInputExpanded(false);
+      if (onAnswerComplete) {
+        void Promise.resolve(onAnswerComplete({
+          question: text,
+          content: acc,
+          events,
+          answer: governedAnswer,
+        })).catch(() => {
+          // History capture is best-effort and should not break the chat result.
+        });
+      }
       if (conversationTarget && activeConversationId) {
         await api.updateAppConversation(conversationTarget.appId, activeConversationId, {
           context: nextContext ?? null,
@@ -232,6 +224,7 @@ export function AgentChatPanel({
       }
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
+      setInputExpanded(true);
     } finally {
       setRunning(false);
       setLiveText('');
@@ -245,7 +238,7 @@ export function AgentChatPanel({
     const note: LocalMessage = {
       id: makeMessageId(),
       role: 'assistant',
-      content: `I opened a Research workspace for "${request.question}". Keep asking here; this chat stays attached while the evidence opens in the main view.`,
+      content: `I opened a focused investigation for "${request.question}". Keep asking here; this chat stays attached to the evidence.`,
       createdAt: new Date().toISOString(),
     };
     setMessages((current) => {
@@ -353,6 +346,7 @@ export function AgentChatPanel({
                     type="button"
                     onClick={() => {
                       setInput(suggestion.prompt);
+                      setInputExpanded(true);
                       requestAnimationFrame(() => inputRef.current?.focus());
                     }}
                     style={suggestionChipStyle(t)}
@@ -375,6 +369,8 @@ export function AgentChatPanel({
             hideSqlByDefault={hideSqlByDefault}
             addToAppTarget={addToAppTarget}
             onInvestigate={onInvestigate ? continueIntoInvestigation : undefined}
+            onInsertSql={onInsertSql}
+            onCreateBlock={onCreateBlock}
             executive={executive}
           />
         ))}
@@ -436,33 +432,64 @@ export function AgentChatPanel({
         alignItems: 'flex-end',
         background: embedded ? 'transparent' : executive ? t.appBg : undefined,
       }}>
-        <textarea
-          ref={inputRef}
-          value={input}
-          onChange={(e) => setInput(e.target.value)}
-          rows={executive ? 3 : 2}
-          placeholder={inputPlaceholder ?? 'Ask this context...'}
-          onKeyDown={(e) => {
-            if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
-              e.preventDefault();
-              void send();
-            }
-          }}
-          style={{
-            flex: 1,
-            resize: 'vertical',
-            minHeight: executive ? 54 : 42,
-            maxHeight: 140,
-            ...selectStyle(t, executive),
-          }}
-        />
-        {running ? (
-          <button type="button" onClick={() => abortRef.current?.abort()} style={buttonStyle(t, false, executive)}>Stop</button>
-        ) : (
-          <button type="button" onClick={() => void send()} disabled={!input.trim()} style={buttonStyle(t, true, executive)}>
-            {executive && <Send size={14} />}
-            <span>Ask</span>
+        {collapseInputAfterAnswer && !inputExpanded && !running && messages.length > 0 ? (
+          <button
+            type="button"
+            onClick={() => {
+              setInputExpanded(true);
+              requestAnimationFrame(() => inputRef.current?.focus());
+            }}
+            style={{
+              width: '100%',
+              minHeight: 38,
+              border: `1px solid ${t.btnBorder}`,
+              background: t.btnBg,
+              color: t.textSecondary,
+              borderRadius: 8,
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'space-between',
+              padding: '0 12px',
+              fontSize: executive ? 12 : 11.5,
+              fontFamily: t.font,
+              fontWeight: 700,
+              cursor: 'text',
+            }}
+          >
+            <span>Ask follow-up</span>
+            <Send size={14} />
           </button>
+        ) : (
+          <>
+            <textarea
+              ref={inputRef}
+              value={input}
+              onChange={(e) => setInput(e.target.value)}
+              rows={executive ? 3 : 2}
+              placeholder={inputPlaceholder ?? 'Ask this context...'}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
+                  e.preventDefault();
+                  void send();
+                }
+              }}
+              style={{
+                flex: 1,
+                resize: 'vertical',
+                minHeight: executive ? 54 : 42,
+                maxHeight: 140,
+                ...selectStyle(t, executive),
+              }}
+            />
+            {running ? (
+              <button type="button" onClick={() => abortRef.current?.abort()} style={buttonStyle(t, false, executive)}>Stop</button>
+            ) : (
+              <button type="button" onClick={() => void send()} disabled={!input.trim()} style={buttonStyle(t, true, executive)}>
+                {executive && <Send size={14} />}
+                <span>Ask</span>
+              </button>
+            )}
+          </>
         )}
       </div>
     </div>
@@ -471,17 +498,6 @@ export function AgentChatPanel({
 
 function makeMessageId(): string {
   return `msg_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
-}
-
-function shouldRouteToResearchWorkspace(text: string): boolean {
-  const value = text.toLowerCase();
-  return /\b(research|investigate|investigation|deep[- ]?dive|root cause)\b/.test(value)
-    || /\b(detailed|complete|full)\s+(overview|analysis|summary)\b/.test(value);
-}
-
-function researchTitleFromQuestion(text: string): string {
-  const clean = text.replace(/\s+/g, ' ').trim();
-  return clean.length > 90 ? `${clean.slice(0, 87)}...` : clean || 'Research request';
 }
 
 type ProposalTurn = Extract<AgentTurn, { kind: 'proposal' }>;
@@ -678,6 +694,8 @@ function Bubble({
   hideSqlByDefault,
   addToAppTarget,
   onInvestigate,
+  onInsertSql,
+  onCreateBlock,
   executive,
 }: {
   message: LocalMessage;
@@ -688,11 +706,16 @@ function Bubble({
   hideSqlByDefault: boolean;
   addToAppTarget?: { appId: string; dashboardId: string };
   onInvestigate?: (request: AgentAnswerInvestigationRequest) => void;
+  onInsertSql?: (sql: string, title?: string) => void;
+  onCreateBlock?: (sql: string, meta: { title?: string; description?: string; tags?: string[] }) => void;
   executive?: boolean;
 }) {
   const isUser = message.role === 'user';
   const answer = !isUser ? extractGovernedAnswer(message.events ?? []) : null;
   const proposalEvent = !isUser ? latestProposalEvent(message.events) : null;
+  const plainOutcome = !isUser && !answer && !live ? extractPlainOutcome(message.content) : null;
+  const assistantText = plainOutcome ? stripPlainOutcomeLine(message.content) : message.content;
+  const shouldCompactAssistant = !isUser && !live && !answer && (Boolean(plainOutcome) || shouldCompactAssistantText(assistantText));
   if (answer) {
     return (
       <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
@@ -716,6 +739,8 @@ function Bubble({
           addToAppTarget={addToAppTarget}
           sourceQuestion={sourceQuestion}
           onInvestigate={onInvestigate}
+          onInsertSql={onInsertSql}
+          onCreateBlock={onCreateBlock}
         />
         {proposalEvent && (
           <ProposalActionCard
@@ -742,7 +767,12 @@ function Bubble({
         <div style={{ fontSize: 10, color: live ? t.accent : t.textMuted, textTransform: 'uppercase', fontWeight: 800, marginBottom: 4 }}>
           {isUser ? 'You' : 'Copilot'}
         </div>
-        {isUser ? message.content : <StructuredAnswerText text={message.content} t={t} compact />}
+        {plainOutcome && <PlainOutcomeBanner outcome={plainOutcome} t={t} />}
+        {isUser ? message.content : shouldCompactAssistant ? (
+          <CompactPlainOutcomeAnswer text={assistantText} t={t} />
+        ) : (
+          <StructuredAnswerText text={assistantText} t={t} compact />
+        )}
       </div>
       {proposalEvent && (
         <ProposalActionCard
@@ -754,6 +784,274 @@ function Bubble({
       )}
     </div>
   );
+}
+
+type PlainOutcomeTone = 'success' | 'accent' | 'warning' | 'error' | 'muted';
+
+interface PlainOutcome {
+  label: string;
+  detail: string;
+  tone: PlainOutcomeTone;
+}
+
+function extractPlainOutcome(content: string): PlainOutcome | null {
+  const raw = findPlainOutcomeText(content);
+  if (!raw) return null;
+  const lower = raw.toLowerCase();
+  if (lower.includes('reuse') || lower.includes('certified block')) {
+    return {
+      label: normalizeOutcomeLabel(raw, 'Reuse certified block'),
+      detail: 'Use existing trusted DQL logic instead of creating duplicate SQL or another draft.',
+      tone: 'success',
+    };
+  }
+  if (lower.includes('existing draft')) {
+    return {
+      label: normalizeOutcomeLabel(raw, 'Use existing draft'),
+      detail: 'Continue from the saved draft, then review and certify when the logic is accepted.',
+      tone: 'warning',
+    };
+  }
+  if (lower.includes('generate sql') || lower.includes('sql cell')) {
+    return {
+      label: normalizeOutcomeLabel(raw, 'Generate SQL cell'),
+      detail: 'Insert and run a SQL cell first; promote only after preview, lineage, and review pass.',
+      tone: 'accent',
+    };
+  }
+  if (lower.includes('fix sql') || lower.includes('repair')) {
+    return {
+      label: normalizeOutcomeLabel(raw, 'Fix SQL'),
+      detail: 'Repair the SQL before preview, certification, or app use.',
+      tone: 'error',
+    };
+  }
+  if (lower.includes('create') && lower.includes('dql')) {
+    return {
+      label: normalizeOutcomeLabel(raw, 'Create DQL draft'),
+      detail: 'Create a review-required draft block. Certification remains a manual decision.',
+      tone: 'warning',
+    };
+  }
+  if (lower.includes('cannot') || lower.includes('insufficient')) {
+    return {
+      label: normalizeOutcomeLabel(raw, 'Cannot answer yet'),
+      detail: 'More metadata, schema, or clarification is needed before SQL or DQL can be trusted.',
+      tone: 'muted',
+    };
+  }
+  return {
+    label: normalizeOutcomeLabel(raw, 'Needs review'),
+    detail: 'Review the evidence and next action before saving or promoting anything.',
+    tone: 'warning',
+  };
+}
+
+function findPlainOutcomeText(content: string): string | undefined {
+  for (const line of content.split(/\r?\n/)) {
+    const clean = line
+      .replace(/^\s*(?:#{1,6}\s*)?(?:[-*]\s*)?/, '')
+      .replace(/\*\*/g, '')
+      .trim();
+    const match = clean.match(/^Outcome\s*:\s*(.+)$/i);
+    const outcome = match?.[1]?.replace(/[.:;]+$/, '').trim();
+    if (outcome) return outcome;
+  }
+  return undefined;
+}
+
+function normalizeOutcomeLabel(value: string, fallback: string): string {
+  const clean = value.replace(/[.:;]+$/, '').trim();
+  return clean || fallback;
+}
+
+function stripPlainOutcomeLine(content: string): string {
+  const lines = content.split(/\r?\n/);
+  const firstContentIndex = lines.findIndex((line) => line.trim().length > 0);
+  if (firstContentIndex < 0) return content;
+  const clean = lines[firstContentIndex]
+    .replace(/^\s*(?:#{1,6}\s*)?(?:[-*]\s*)?/, '')
+    .replace(/\*\*/g, '')
+    .trim();
+  if (!/^Outcome\s*:/i.test(clean)) return content;
+  return [...lines.slice(0, firstContentIndex), ...lines.slice(firstContentIndex + 1)].join('\n').trimStart();
+}
+
+function shouldCompactAssistantText(text: string): boolean {
+  return text.trim().length > 520
+    || /(?:Certified result preview|Result preview|SQL used by|Reusable block SQL|Proposed SQL|Trust status|Next action)\s*:/i.test(text)
+    || /^\s*(?:SELECT|WITH)\b/im.test(text);
+}
+
+function PlainOutcomeBanner({ outcome, t }: { outcome: PlainOutcome; t: Theme }) {
+  const tone = plainOutcomeColors(outcome.tone, t);
+  return (
+    <div style={{
+      display: 'flex',
+      flexDirection: 'column',
+      gap: 3,
+      border: `1px solid ${tone.border}`,
+      background: tone.background,
+      color: tone.text,
+      borderRadius: 8,
+      padding: '9px 10px',
+      marginBottom: 10,
+    }}>
+      <div style={{ fontSize: 10, fontWeight: 900, letterSpacing: 0, textTransform: 'uppercase' }}>
+        Outcome
+      </div>
+      <div style={{ fontSize: 12.5, fontWeight: 900, color: tone.heading }}>{outcome.label}</div>
+      <div style={{ fontSize: 11.5, lineHeight: 1.4 }}>{outcome.detail}</div>
+    </div>
+  );
+}
+
+function CompactPlainOutcomeAnswer({ text, t }: { text: string; t: Theme }) {
+  const [open, setOpen] = useState(false);
+  const summary = summarizePlainOutcomeAnswer(text);
+  const nextAction = extractPlainOutcomeSection(text, ['Next action', 'Recommended action', 'Action']);
+  const hasDetails = text.trim().length > 220
+    || /(?:Reusable block SQL|Proposed SQL|Evidence|Result summary|Technical lineage)\s*:/i.test(text)
+    || /^\s*(?:SELECT|WITH)\b/im.test(text)
+    || /^\s*\|.+\|\s*$/m.test(text);
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+      <div
+        style={{
+          border: `1px solid ${t.headerBorder}`,
+          borderRadius: 8,
+          background: t.cellBg,
+          padding: '9px 10px',
+          display: 'flex',
+          flexDirection: 'column',
+          gap: 6,
+        }}
+      >
+        <div style={{ fontSize: 10, fontWeight: 900, color: t.textMuted, textTransform: 'uppercase', letterSpacing: 0 }}>
+          Summary
+        </div>
+        <div style={{ fontSize: 12.5, color: t.textPrimary, lineHeight: 1.45 }}>
+          {summary || 'Review the evidence before saving or promoting this work.'}
+        </div>
+        {nextAction && (
+          <div style={{ fontSize: 11.5, color: t.textSecondary, lineHeight: 1.4 }}>
+            <strong style={{ color: t.textPrimary }}>Next:</strong> {nextAction}
+          </div>
+        )}
+      </div>
+
+      {hasDetails && (
+        <>
+          <button
+            type="button"
+            onClick={() => setOpen((value) => !value)}
+            style={{
+              alignSelf: 'flex-start',
+              border: `1px solid ${t.headerBorder}`,
+              borderRadius: 7,
+              background: t.btnBg,
+              color: t.textSecondary,
+              cursor: 'pointer',
+              display: 'inline-flex',
+              alignItems: 'center',
+              gap: 6,
+              padding: '5px 9px',
+              fontSize: 11.5,
+              fontWeight: 800,
+              fontFamily: t.font,
+            }}
+          >
+            <span aria-hidden>{open ? '▾' : '▸'}</span>
+            {open ? 'Hide evidence' : 'Show evidence'}
+          </button>
+          {open && (
+            <div
+              style={{
+                border: `1px solid ${t.headerBorder}`,
+                borderRadius: 8,
+                background: t.appBg,
+                padding: '9px 10px',
+                maxHeight: 360,
+                overflow: 'auto',
+              }}
+            >
+              <StructuredAnswerText text={text} t={t} compact />
+            </div>
+          )}
+        </>
+      )}
+    </div>
+  );
+}
+
+function summarizePlainOutcomeAnswer(text: string): string {
+  const businessSummary = extractPlainOutcomeSection(text, ['Answer', 'Business summary', 'Summary']);
+  if (businessSummary) return truncateSentence(businessSummary, 360);
+
+  const stopRegex = /^(?:reuse evidence|certified result preview|result preview|result summary|trust status|next action|recommended action|sql used by block|reusable block sql|proposed sql|sql generated|sql draft|evidence|parameters|lineage|technical lineage)\s*:/i;
+  const sqlRegex = /^(?:SELECT|WITH|FROM|WHERE|GROUP BY|ORDER BY|LIMIT)\b/i;
+  const lines: string[] = [];
+  for (const rawLine of text.split(/\r?\n/)) {
+    const line = rawLine.trim();
+    if (!line || /^#{1,6}\s*/.test(line) || /^```/.test(line) || /^\|/.test(line)) continue;
+    if (/^outcome\s*:/i.test(line)) continue;
+    if (stopRegex.test(line) || sqlRegex.test(line)) {
+      if (lines.length > 0) break;
+      continue;
+    }
+    lines.push(line);
+    if (lines.length >= 5) break;
+  }
+  const clean = lines.join(' ').replace(/[*_`]+/g, '').replace(/\s+/g, ' ').trim();
+  return truncateSentence(clean, 360);
+}
+
+function extractPlainOutcomeSection(text: string, headings: string[]): string | undefined {
+  const lines = text.split(/\r?\n/);
+  const headingPattern = headings
+    .map((heading) => heading.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))
+    .join('|');
+  const startRegex = new RegExp(`^\\s*(?:#{1,6}\\s*)?(?:[-*]\\s*)?(?:\\*\\*)?(${headingPattern})(?:\\*\\*)?\\s*:\\s*(.*)$`, 'i');
+  const boundaryRegex = /^\s*(?:#{1,6}\s*)?(?:[-*]\s*)?(?:\*\*)?[A-Z][A-Za-z /-]{2,40}(?:\*\*)?\s*:/;
+  const startIndex = lines.findIndex((line) => startRegex.test(line));
+  if (startIndex < 0) return undefined;
+  const first = lines[startIndex]?.match(startRegex)?.[2]?.trim() ?? '';
+  const collected = first ? [first] : [];
+  for (let i = startIndex + 1; i < lines.length; i += 1) {
+    const line = lines[i] ?? '';
+    if (boundaryRegex.test(line)) break;
+    if (/^\s*```/.test(line)) break;
+    if (line.trim()) collected.push(line.trim());
+  }
+  const clean = collected.join(' ').replace(/[*_`]+/g, '').replace(/\s+/g, ' ').trim();
+  return clean || undefined;
+}
+
+function truncateSentence(value: string, maxLength: number): string {
+  const clean = value.replace(/\s+/g, ' ').trim();
+  if (clean.length <= maxLength) return clean;
+  const clipped = clean.slice(0, maxLength - 1);
+  const sentenceEnd = Math.max(clipped.lastIndexOf('. '), clipped.lastIndexOf('; '));
+  if (sentenceEnd > 120) return `${clipped.slice(0, sentenceEnd + 1).trim()}`;
+  const wordEnd = clipped.lastIndexOf(' ');
+  return `${clipped.slice(0, wordEnd > 80 ? wordEnd : clipped.length).trim()}...`;
+}
+
+function plainOutcomeColors(tone: PlainOutcomeTone, t: Theme): { border: string; background: string; text: string; heading: string } {
+  if (tone === 'success') {
+    return { border: '#2ea04370', background: '#2ea04318', text: '#238636', heading: '#1f7a32' };
+  }
+  if (tone === 'accent') {
+    return { border: `${t.accent}70`, background: `${t.accent}14`, text: t.textSecondary, heading: t.accent };
+  }
+  if (tone === 'error') {
+    return { border: '#da363370', background: '#da363318', text: '#b42318', heading: '#b42318' };
+  }
+  if (tone === 'muted') {
+    return { border: t.btnBorder, background: t.btnBg, text: t.textSecondary, heading: t.textPrimary };
+  }
+  return { border: '#d2992270', background: '#d2992218', text: '#8a5a00', heading: '#7a4d00' };
 }
 
 function ProposalActionCard({

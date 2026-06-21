@@ -849,7 +849,11 @@ Rules:
    clarifying question instead of guessing.
 9. Write directly to the analyst. Do not say "the user is asking", "the user
    requested", "I will generate", or describe internal routing. State the
-   answer, the certified context used, and the review requirement.`;
+   answer, the certified context used, and the review requirement.
+10. For notebook research, SQL build or repair, DQL import/build, or DQL reuse
+   checks, start with one line in this form: "Outcome: <decision>". Use one of
+   these decisions: Reuse certified block, Use existing draft, Generate SQL
+   cell, Fix SQL, Create DQL draft, Needs review, Cannot answer yet.`;
 
 function renderContextPrompt(
   blocks: KGNode[],
@@ -3330,7 +3334,7 @@ function composeCertifiedAnswer(
       : artifact.kind === 'block'
         ? 'Governed execution was not requested by this host.'
         : `Matched certified ${artifact.kind.replace('_', ' ')} context.`;
-  return `Answered by certified ${artifact.kind.replace('_', ' ')} **${artifact.name}**${tag}.\n\n${desc ? `${desc}\n\n${resultText}` : resultText}`
+  return `Outcome: Reuse certified block\n\nAnswered by certified ${artifact.kind.replace('_', ' ')} **${artifact.name}**${tag}.\n\n${desc ? `${desc}\n\n${resultText}` : resultText}`
     + `\n\n_Question:_ ${question}`;
 }
 

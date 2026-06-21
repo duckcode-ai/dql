@@ -127,13 +127,13 @@ export function notebookResearchSummaryLabel(
   }
   if (summary.certificationReady > 0) return `${formatCompactCount(summary.certificationReady)} cert`;
   if (summary.draftReady > 0) return `${formatCompactCount(summary.draftReady)} draft`;
-  return `${formatCompactCount(summary.total)} research`;
+  return `${formatCompactCount(summary.total)} AI`;
 }
 
 export function notebookResearchSummaryTitle(summary: NotebookResearchSummary): string {
   const nextActionLabel = notebookResearchNextActionLabel(summary.nextAction);
   return [
-    `${summary.total.toLocaleString()} research ${summary.total === 1 ? 'run' : 'runs'}`,
+    `${summary.total.toLocaleString()} AI histor${summary.total === 1 ? 'y item' : 'y items'}`,
     nextActionLabel && summary.nextActionCount
       ? `Next: ${nextActionLabel} (${summary.nextActionCount.toLocaleString()})`
       : undefined,
@@ -159,8 +159,8 @@ export function notebookResearchSummaryDetail(summary: NotebookResearchSummary):
   ].filter(Boolean);
   const parts = [
     nextActionLabel && nextActionCount
-      ? `Next: ${nextActionLabel} for ${formatCompactCount(nextActionCount)} ${nextActionCount === 1 ? 'run' : 'runs'}`
-      : `${formatCompactCount(summary.total)} research ${summary.total === 1 ? 'run' : 'runs'}`,
+      ? `Next: ${nextActionLabel} for ${formatCompactCount(nextActionCount)} ${nextActionCount === 1 ? 'item' : 'items'}`
+      : `${formatCompactCount(summary.total)} AI histor${summary.total === 1 ? 'y item' : 'y items'}`,
     ...readiness,
   ];
   return parts.join(' · ');

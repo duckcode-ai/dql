@@ -18,7 +18,6 @@ import { ChatCell } from './ChatCell';
 import { SnippetPicker } from './SnippetPicker';
 import { SaveAsBlockModal } from '../modals/SaveAsBlockModal';
 import { deriveBlockSource } from '../../utils/derive-block-source';
-import { AiSqlDraftDialog, type AiSqlDraftMeta } from '../agent/AiSqlDraftDialog';
 import { TableOutput } from '../output/TableOutput';
 import { ChartOutput, detectChartType, resolveChartType, renderChart, CHART_TYPE_OPTIONS } from '../output/ChartOutput';
 import type { ChartType } from '../output/ChartOutput';
@@ -34,7 +33,7 @@ import { CellChrome } from '@duckcodeailabs/dql-ui';
 interface CellProps {
   cell: Cell;
   index: number;
-  onStartResearch?: (cellId: string) => void;
+  onStartResearch?: (cellId: string, prompt?: string, options?: { autoAsk?: boolean }) => void;
   researchState?: CellResearchState | null;
 }
 
@@ -648,7 +647,7 @@ const APP_MODE_HIDDEN_CELL_TYPES = new Set<string>([
   'chat',
 ]);
 
-function CellResearchBadge({
+function CellAiHistoryBadge({
   state,
   t,
   onClick,
@@ -695,6 +694,10 @@ function CellResearchBadge({
   );
 }
 
+function shouldShowAiHistoryBadge(state: CellResearchState): boolean {
+  return state.kind === 'changed' || state.kind === 'missing' || state.kind === 'blocked';
+}
+
 function researchStateColor(state: CellResearchState, t: Theme): string {
   switch (state.kind) {
     case 'changed':
@@ -735,7 +738,6 @@ export function CellComponent({ cell, index, onStartResearch, researchState }: C
   const [chartRecommendBusy, setChartRecommendBusy] = useState(false);
   const [chartRecommendNote, setChartRecommendNote] = useState<string | null>(null);
   const [saveAsBlockOpen, setSaveAsBlockOpen] = useState(false);
-  const [aiRepairOpen, setAiRepairOpen] = useState(false);
 
   const derivedBlock = useMemo(
     () => (saveAsBlockOpen ? deriveBlockSource(cell, state.cells) : null),
@@ -824,27 +826,6 @@ export function CellComponent({ cell, index, onStartResearch, researchState }: C
     handleFormat();
     setTimeout(() => executeCell(cell.id), 80);
   }, [handleFormat, executeCell, cell.id]);
-
-  const applyAiSqlRepair = useCallback(
-    (sql: string, meta: AiSqlDraftMeta) => {
-      const nextSql = sql.trim();
-      if (!nextSql) return;
-      const updates: Partial<Cell> = {
-        content: nextSql,
-        error: meta.previewError,
-        result: meta.previewResult,
-        status: meta.previewResult ? 'success' : meta.previewError ? 'error' : 'idle',
-        fromSnapshot: false,
-        executionCount: meta.previewResult || meta.previewError ? (cell.executionCount ?? 0) + 1 : cell.executionCount,
-      };
-      dispatch({ type: 'UPDATE_CELL', id: cell.id, updates });
-      editorRef.current?.resetTo(nextSql);
-      savedContentRef.current = nextSql;
-      setIsDirty(false);
-      setAiRepairOpen(false);
-    },
-    [cell.executionCount, cell.id, dispatch]
-  );
 
   const onCellUpdate = useCallback(
     (updates: Partial<Cell>) => dispatch({ type: 'UPDATE_CELL', id: cell.id, updates }),
@@ -1042,24 +1023,6 @@ export function CellComponent({ cell, index, onStartResearch, researchState }: C
           }}
         />
       )}
-      {aiRepairOpen && cell.error && (
-        <AiSqlDraftDialog
-          mode="notebook"
-          themeMode={state.themeMode}
-          contextLabel={cell.name ?? state.activeFile?.name ?? state.notebookTitle ?? 'Notebook cell'}
-          upstreamSql={cell.content}
-          initialSqlDraft={cell.content}
-          initialError={cell.error}
-          initialPrompt={[
-            'Fix this SQL cell error.',
-            'Keep the same business intent and return corrected read-only SQL.',
-            'If the error is a connection or server fetch problem, explain that SQL repair may not fix it.',
-          ].join(' ')}
-          insertLabel="Apply to cell"
-          onClose={() => setAiRepairOpen(false)}
-          onInsertSql={applyAiSqlRepair}
-        />
-      )}
       {/* v1.3.3 Hex handoff — left gutter removed; status moved inline
           into the cell header via <InlineStatus />. */}
 
@@ -1081,189 +1044,73 @@ export function CellComponent({ cell, index, onStartResearch, researchState }: C
         {/* Cell header */}
         <div
           style={{
-            minHeight: 32,
+            minHeight: 38,
             display: 'flex',
             alignItems: 'center',
-            padding: '8px 14px',
+            padding: '7px 12px',
             gap: 8,
+            rowGap: 6,
             background: 'transparent',
+            flexWrap: 'wrap',
           }}
         >
-          {/* Type dot + label (Hex style: no pill) */}
-          <span
-            aria-hidden
+          <div
             style={{
-              width: 6,
-              height: 6,
-              borderRadius: 999,
-              background: TYPE_COLORS[cell.type] ?? t.accent,
-              flexShrink: 0,
-            }}
-          />
-          <span
-            title={cell.type === 'dql' ? 'DQL cell — write a governed block (type, owner, description, tests) or use @metric()/@dim() refs' : cell.type === 'sql' ? 'SQL cell — write raw SQL, reference other cells with {{name}}' : undefined}
-            style={{
-              fontSize: 11,
-              fontWeight: 500,
-              letterSpacing: '0.2px',
-              color: t.textSecondary,
-              flexShrink: 0,
-              whiteSpace: 'nowrap' as const,
+              display: 'inline-flex',
+              alignItems: 'center',
+              gap: 8,
+              minWidth: 0,
+              flex: '1 1 260px',
             }}
           >
-            {TYPE_LABELS[cell.type]}
-          </span>
-
-          {/* Templates button — shown on hover for sql/dql cells */}
-          {cellHovered && (cell.type === 'sql' || cell.type === 'dql') && (
-            <SnippetPicker
-              themeMode={state.themeMode}
-              cellType={cell.type}
-              onInsert={(code) => handleContentChange(code)}
-            />
-          )}
-
-              {/* Format button — shown on hover for sql/dql cells */}
-              {cellHovered && (cell.type === 'sql' || cell.type === 'dql') && (
-                <button
-              title="Format SQL (clean up whitespace & keywords)"
-              onClick={handleFormat}
+            <span
+              aria-hidden
               style={{
-                background: 'transparent',
-                border: `1px solid ${t.btnBorder}`,
-                borderRadius: 4,
-                color: t.textMuted,
-                fontSize: 10,
-                fontFamily: t.font,
-                fontWeight: 600,
-                letterSpacing: '0.04em',
-                padding: '1px 7px',
-                cursor: 'pointer',
-                transition: 'color 0.15s, border-color 0.15s',
+                width: 6,
+                height: 6,
+                borderRadius: 999,
+                background: TYPE_COLORS[cell.type] ?? t.accent,
+                flexShrink: 0,
               }}
-              onMouseEnter={(e) => {
-                (e.currentTarget as HTMLButtonElement).style.color = t.textSecondary;
-                (e.currentTarget as HTMLButtonElement).style.borderColor = t.accent;
-              }}
-              onMouseLeave={(e) => {
-                (e.currentTarget as HTMLButtonElement).style.color = t.textMuted;
-                (e.currentTarget as HTMLButtonElement).style.borderColor = t.btnBorder;
+            />
+            <span
+              title={cell.type === 'dql' ? 'DQL cell — write a governed block (type, owner, description, tests) or use @metric()/@dim() refs' : cell.type === 'sql' ? 'SQL cell — write raw SQL, reference other cells with {{name}}' : undefined}
+              style={{
+                fontSize: 11,
+                fontWeight: 700,
+                letterSpacing: 0,
+                color: t.textSecondary,
+                flexShrink: 0,
+                whiteSpace: 'nowrap' as const,
               }}
             >
-              Format
-                </button>
-              )}
+              {TYPE_LABELS[cell.type]}
+            </span>
 
-              {/* Reset button — shown when cell content has unsaved changes */}
-              {isDirty && (cell.type === 'sql' || cell.type === 'dql') && (
-                <button
-                  title="Reset to last saved version (discard changes)"
-                  onClick={handleReset}
-                  style={{
-                    background: 'transparent',
-                    border: `1px solid ${t.btnBorder}`,
-                    borderRadius: 4,
-                    color: t.error,
-                    fontSize: 10,
-                    fontFamily: t.font,
-                    fontWeight: 600,
-                    letterSpacing: '0.04em',
-                    padding: '1px 7px',
-                    cursor: 'pointer',
-                    transition: 'color 0.15s, border-color 0.15s',
-                  }}
-                  onMouseEnter={(e) => {
-                    (e.currentTarget as HTMLButtonElement).style.borderColor = t.error;
-                  }}
-                  onMouseLeave={(e) => {
-                    (e.currentTarget as HTMLButtonElement).style.borderColor = t.btnBorder;
-                  }}
-                >
-                  ↺ Reset
-                </button>
-              )}
-
-              {cellHovered && canSaveAsBlock && (
-                <button
-                  title="Save this cell as a reusable block"
-                  onClick={() => setSaveAsBlockOpen(true)}
-                  style={{
-                    background: 'transparent',
-                    border: `1px solid ${t.btnBorder}`,
-                    borderRadius: 4,
-                    color: t.textMuted,
-                    fontSize: 10,
-                    fontFamily: t.font,
-                    fontWeight: 600,
-                    letterSpacing: '0.04em',
-                    padding: '1px 7px',
-                    cursor: 'pointer',
-                    transition: 'color 0.15s, border-color 0.15s',
-                  }}
-                  onMouseEnter={(e) => {
-                    (e.currentTarget as HTMLButtonElement).style.color = t.textSecondary;
-                    (e.currentTarget as HTMLButtonElement).style.borderColor = t.accent;
-                  }}
-                  onMouseLeave={(e) => {
-                    (e.currentTarget as HTMLButtonElement).style.color = t.textMuted;
-                    (e.currentTarget as HTMLButtonElement).style.borderColor = t.btnBorder;
-                  }}
-                >
-                  Save as Block
-                </button>
-              )}
-
-          {(cell.type === 'sql' || cell.type === 'dql') && (
-            <DataframeChip
-              cells={state.cells}
-              index={index}
-              content={cell.content}
-              themeMode={state.themeMode}
-              onInsertHandle={(name) => {
-                const token = `{{${name}}}`;
-                const current = cell.content ?? '';
-                if (current.includes(token)) return;
-                const next = current.trim().length === 0
-                  ? `SELECT * FROM ${token}`
-                  : `${current.replace(/\s*$/, '')} ${token}`;
-                handleContentChange(next);
-              }}
-            />
-          )}
-
-          {researchState && onStartResearch && (
-            <CellResearchBadge
-              state={researchState}
-              t={t}
-              onClick={() => onStartResearch(cell.id)}
-            />
-          )}
-
-          {/* Cell name */}
-          {nameEditing ? (
-            <input
-              autoFocus
-              value={nameDraft}
-              onChange={(e) => setNameDraft(e.target.value)}
-              onBlur={commitName}
-              onKeyDown={(e) => {
-                if (e.key === 'Enter') commitName();
-                if (e.key === 'Escape') setNameEditing(false);
-              }}
-              style={{
-                background: 'transparent',
-                border: `1px solid ${t.cellBorderActive}`,
-                borderRadius: 4,
-                color: t.textSecondary,
-                fontSize: 12,
-                fontFamily: t.fontMono,
-                padding: '1px 6px',
-                outline: 'none',
-                width: 140,
-              }}
-            />
-          ) : (
-            cell.name && (
+            {nameEditing ? (
+              <input
+                autoFocus
+                value={nameDraft}
+                onChange={(e) => setNameDraft(e.target.value)}
+                onBlur={commitName}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') commitName();
+                  if (e.key === 'Escape') setNameEditing(false);
+                }}
+                style={{
+                  background: t.appBg,
+                  border: `1px solid ${t.cellBorderActive}`,
+                  borderRadius: 5,
+                  color: t.textSecondary,
+                  fontSize: 12,
+                  fontFamily: t.fontMono,
+                  padding: '2px 6px',
+                  outline: 'none',
+                  width: 170,
+                  minWidth: 100,
+                }}
+              />
+            ) : cell.name ? (
               <span
                 onClick={() => {
                   setNameDraft(cell.name ?? '');
@@ -1278,75 +1125,154 @@ export function CellComponent({ cell, index, onStartResearch, researchState }: C
                   overflow: 'hidden',
                   textOverflow: 'ellipsis',
                   whiteSpace: 'nowrap' as const,
-                  maxWidth: 200,
+                  maxWidth: 260,
+                  minWidth: 0,
                 }}
               >
                 {cell.name}
               </span>
-            )
-          )}
+            ) : null}
 
-          <div style={{ flex: 1 }} />
+            <InlineStatus cell={cell} t={t} />
 
-          {/* v1.3.3 Hex handoff — inline status chip replaces the left `[N]` gutter. */}
-          <InlineStatus cell={cell} t={t} />
+            {(cell.type === 'sql' || cell.type === 'dql') && (
+              <DataframeChip
+                cells={state.cells}
+                index={index}
+                content={cell.content}
+                themeMode={state.themeMode}
+                onInsertHandle={(name) => {
+                  const token = `{{${name}}}`;
+                  const current = cell.content ?? '';
+                  if (current.includes(token)) return;
+                  const next = current.trim().length === 0
+                    ? `SELECT * FROM ${token}`
+                    : `${current.replace(/\s*$/, '')} ${token}`;
+                  handleContentChange(next);
+                }}
+              />
+            )}
 
-          {/* Action buttons — shown on hover */}
-          {cellHovered && (
-            <div style={{ display: 'flex', alignItems: 'center', gap: 2 }}>
-              {/* Rename button (if no name yet) */}
-              {!cell.name && !nameEditing && (
-                <HeaderActionBtn
-                  title="Name this cell"
-                  onClick={() => {
-                    setNameDraft('');
-                    setNameEditing(true);
-                  }}
-                  t={t}
-                >
+            {researchState && shouldShowAiHistoryBadge(researchState) && onStartResearch && (
+              <CellAiHistoryBadge
+                state={researchState}
+                t={t}
+                onClick={() => onStartResearch(cell.id)}
+              />
+            )}
+          </div>
+
+          <div
+            style={{
+              display: 'inline-flex',
+              alignItems: 'center',
+              justifyContent: 'flex-end',
+              gap: 5,
+              flex: '0 0 auto',
+              marginLeft: 'auto',
+            }}
+          >
+            {cellHovered && (cell.type === 'sql' || cell.type === 'dql') && (
+              <SnippetPicker
+                themeMode={state.themeMode}
+                cellType={cell.type}
+                onInsert={(code) => handleContentChange(code)}
+              />
+            )}
+
+            {cellHovered && (cell.type === 'sql' || cell.type === 'dql') && (
+              <button
+                type="button"
+                title="Format SQL (clean up whitespace and keywords)"
+                onClick={handleFormat}
+                style={cellHeaderTextButtonStyle(t)}
+              >
+                Format
+              </button>
+            )}
+
+            {isDirty && (cell.type === 'sql' || cell.type === 'dql') && (
+              <button
+                type="button"
+                title="Reset to last saved version (discard changes)"
+                onClick={handleReset}
+                style={cellHeaderTextButtonStyle(t, 'danger')}
+              >
+                Reset
+              </button>
+            )}
+
+            {cellHovered && onStartResearch && (cell.type === 'sql' || cell.type === 'dql') && (
+              <button
+                type="button"
+                title="Ask AI to explain, fix, find reuse, or prepare DQL from this cell"
+                onClick={() => onStartResearch(cell.id)}
+                style={cellHeaderTextButtonStyle(t, 'accent')}
+              >
+                Ask AI
+              </button>
+            )}
+
+            {cellHovered && canSaveAsBlock && (
+              <button
+                type="button"
+                title="Save this cell as a reusable block"
+                onClick={() => setSaveAsBlockOpen(true)}
+                style={cellHeaderTextButtonStyle(t)}
+              >
+                Save Block
+              </button>
+            )}
+
+            {cellHovered && !cell.name && !nameEditing && (
+              <HeaderActionBtn
+                title="Name this cell"
+                onClick={() => {
+                  setNameDraft('');
+                  setNameEditing(true);
+                }}
+                t={t}
+              >
+                <svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor">
+                  <path d="M11.013 1.427a1.75 1.75 0 0 1 2.474 0l1.086 1.086a1.75 1.75 0 0 1 0 2.474l-8.61 8.61c-.21.21-.47.364-.756.445l-3.251.93a.75.75 0 0 1-.927-.928l.929-3.25c.081-.286.235-.547.445-.758l8.61-8.61Zm.176 4.823L9.75 4.81l-6.286 6.287a.253.253 0 0 0-.064.108l-.558 1.953 1.953-.558a.253.253 0 0 0 .108-.064Zm1.238-3.763a.25.25 0 0 0-.354 0L10.811 3.75l1.439 1.44 1.263-1.263a.25.25 0 0 0 0-.354Z" />
+                </svg>
+              </HeaderActionBtn>
+            )}
+
+            {cellHovered && isExecutable && cell.status === 'running' ? (
+              <HeaderActionBtn title="Cancel execution" onClick={() => cancelCell(cell.id)} t={t} danger>
+                <svg width="11" height="11" viewBox="0 0 10 10" fill="currentColor">
+                  <rect x="2" y="2" width="6" height="6" rx="1" />
+                </svg>
+              </HeaderActionBtn>
+            ) : cellHovered && isExecutable ? (
+              <HeaderActionBtn title="Run cell (Shift+Enter)" onClick={handleRun} t={t} accent>
+                <svg width="11" height="11" viewBox="0 0 10 10" fill="currentColor">
+                  <path d="M1.5 1.5l7 3.5-7 3.5V1.5Z" />
+                </svg>
+              </HeaderActionBtn>
+            ) : null}
+
+            {cellHovered && (
+              <>
+                <HeaderActionBtn title="Move up" onClick={handleMoveUp} t={t}>
                   <svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor">
-                    <path d="M11.013 1.427a1.75 1.75 0 0 1 2.474 0l1.086 1.086a1.75 1.75 0 0 1 0 2.474l-8.61 8.61c-.21.21-.47.364-.756.445l-3.251.93a.75.75 0 0 1-.927-.928l.929-3.25c.081-.286.235-.547.445-.758l8.61-8.61Zm.176 4.823L9.75 4.81l-6.286 6.287a.253.253 0 0 0-.064.108l-.558 1.953 1.953-.558a.253.253 0 0 0 .108-.064Zm1.238-3.763a.25.25 0 0 0-.354 0L10.811 3.75l1.439 1.44 1.263-1.263a.25.25 0 0 0 0-.354Z" />
+                    <path d="M3.47 7.78a.75.75 0 0 1 0-1.06l4.25-4.25a.75.75 0 0 1 1.06 0l4.25 4.25a.75.75 0 0 1-1.06 1.06L8.75 4.81v7.44a.75.75 0 0 1-1.5 0V4.81L4.53 7.78a.75.75 0 0 1-1.06 0Z" />
                   </svg>
                 </HeaderActionBtn>
-              )}
-
-              {/* Run / Cancel button */}
-              {isExecutable && cell.status === 'running' ? (
-                <HeaderActionBtn title="Cancel execution" onClick={() => cancelCell(cell.id)} t={t} danger>
-                  <svg width="11" height="11" viewBox="0 0 10 10" fill="currentColor">
-                    <rect x="2" y="2" width="6" height="6" rx="1" />
+                <HeaderActionBtn title="Move down" onClick={handleMoveDown} t={t}>
+                  <svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor">
+                    <path d="M12.53 8.22a.75.75 0 0 1 0 1.06l-4.25 4.25a.75.75 0 0 1-1.06 0L2.97 9.28a.75.75 0 0 1 1.06-1.06l2.72 2.97V3.75a.75.75 0 0 1 1.5 0v7.44l2.72-2.97a.75.75 0 0 1 1.06 0Z" />
                   </svg>
                 </HeaderActionBtn>
-              ) : isExecutable ? (
-                <HeaderActionBtn title="Run cell (Shift+Enter)" onClick={handleRun} t={t} accent>
-                  <svg width="11" height="11" viewBox="0 0 10 10" fill="currentColor">
-                    <path d="M1.5 1.5l7 3.5-7 3.5V1.5Z" />
+                <HeaderActionBtn title="Delete cell" onClick={handleDelete} t={t} danger>
+                  <svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor">
+                    <path d="M11 1.75V3h2.25a.75.75 0 0 1 0 1.5H2.75a.75.75 0 0 1 0-1.5H5V1.75C5 .784 5.784 0 6.75 0h2.5C10.216 0 11 .784 11 1.75ZM4.496 6.675l.66 6.6a.25.25 0 0 0 .249.225h5.19a.25.25 0 0 0 .249-.225l.66-6.6a.75.75 0 0 1 1.492.149l-.66 6.6A1.748 1.748 0 0 1 10.595 15h-5.19a1.75 1.75 0 0 1-1.741-1.575l-.66-6.6a.75.75 0 1 1 1.492-.15ZM6.5 1.75V3h3V1.75a.25.25 0 0 0-.25-.25h-2.5a.25.25 0 0 0-.25.25Z" />
                   </svg>
                 </HeaderActionBtn>
-              ) : null}
-
-              {/* Move up */}
-              <HeaderActionBtn title="Move up" onClick={handleMoveUp} t={t}>
-                <svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor">
-                  <path d="M3.47 7.78a.75.75 0 0 1 0-1.06l4.25-4.25a.75.75 0 0 1 1.06 0l4.25 4.25a.75.75 0 0 1-1.06 1.06L8.75 4.81v7.44a.75.75 0 0 1-1.5 0V4.81L4.53 7.78a.75.75 0 0 1-1.06 0Z" />
-                </svg>
-              </HeaderActionBtn>
-
-              {/* Move down */}
-              <HeaderActionBtn title="Move down" onClick={handleMoveDown} t={t}>
-                <svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor">
-                  <path d="M12.53 8.22a.75.75 0 0 1 0 1.06l-4.25 4.25a.75.75 0 0 1-1.06 0L2.97 9.28a.75.75 0 0 1 1.06-1.06l2.72 2.97V3.75a.75.75 0 0 1 1.5 0v7.44l2.72-2.97a.75.75 0 0 1 1.06 0Z" />
-                </svg>
-              </HeaderActionBtn>
-
-              {/* Delete */}
-              <HeaderActionBtn title="Delete cell" onClick={handleDelete} t={t} danger>
-                <svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor">
-                  <path d="M11 1.75V3h2.25a.75.75 0 0 1 0 1.5H2.75a.75.75 0 0 1 0-1.5H5V1.75C5 .784 5.784 0 6.75 0h2.5C10.216 0 11 .784 11 1.75ZM4.496 6.675l.66 6.6a.25.25 0 0 0 .249.225h5.19a.25.25 0 0 0 .249-.225l.66-6.6a.75.75 0 0 1 1.492.149l-.66 6.6A1.748 1.748 0 0 1 10.595 15h-5.19a1.75 1.75 0 0 1-1.741-1.575l-.66-6.6a.75.75 0 1 1 1.492-.15ZM6.5 1.75V3h3V1.75a.25.25 0 0 0-.25-.25h-2.5a.25.25 0 0 0-.25.25Z" />
-                </svg>
-              </HeaderActionBtn>
-            </div>
-          )}
+              </>
+            )}
+          </div>
         </div>
 
         {/* Governance bar — shown for DQL cells that contain a block declaration */}
@@ -1534,7 +1460,7 @@ export function CellComponent({ cell, index, onStartResearch, researchState }: C
                       cursor: chartRecommendBusy ? 'wait' : 'pointer', transition: 'all 0.15s',
                     }}
                   >
-                    {chartRecommendBusy ? '...' : 'AI'}
+                    {chartRecommendBusy ? '...' : 'Suggest'}
                   </button>
                   {chartRecommendNote && (
                     <span
@@ -1616,7 +1542,9 @@ export function CellComponent({ cell, index, onStartResearch, researchState }: C
                     message={cell.error}
                     themeMode={state.themeMode}
                     onFix={isExecutable ? handleFixAndRun : undefined}
-                    onFixWithAi={cell.type === 'sql' ? () => setAiRepairOpen(true) : undefined}
+                    onFixWithAi={cell.type === 'sql' && onStartResearch
+                      ? () => onStartResearch(cell.id, buildCellErrorAiPrompt(cell), { autoAsk: true })
+                      : undefined}
                     schemaTables={state.schemaTables}
                   />
                 )}
@@ -1672,6 +1600,39 @@ function normalizeNotebookChartType(value: string): ChartType {
       : normalized;
   const match = CHART_TYPE_OPTIONS.find((option) => option.value === chartValue);
   return match?.value ?? 'table';
+}
+
+function buildCellErrorAiPrompt(cell: Cell): string {
+  return [
+    'Fix this SQL cell error inside the notebook AI flow.',
+    'Use the selected SQL, dbt/semantic metadata, warehouse schema, and existing DQL blocks before proposing changes.',
+    'If a certified or draft DQL block should be reused instead of repairing raw SQL, recommend that outcome.',
+    'When repair is appropriate, return corrected read-only SQL plus business summary, grain, filters/parameters, lineage, and next action.',
+    cell.error ? `Current error: ${cell.error}` : '',
+  ].filter(Boolean).join('\n');
+}
+
+function cellHeaderTextButtonStyle(t: Theme, tone: 'default' | 'accent' | 'danger' = 'default'): React.CSSProperties {
+  const isAccent = tone === 'accent';
+  const isDanger = tone === 'danger';
+  return {
+    height: 24,
+    display: 'inline-flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    border: `1px solid ${isAccent ? t.accent : isDanger ? `${t.error}80` : t.btnBorder}`,
+    borderRadius: 5,
+    background: isAccent ? `${t.accent}12` : 'transparent',
+    color: isAccent ? t.accent : isDanger ? t.error : t.textMuted,
+    fontSize: 10,
+    fontFamily: t.font,
+    fontWeight: 700,
+    letterSpacing: 0,
+    lineHeight: 1,
+    padding: '0 8px',
+    cursor: 'pointer',
+    whiteSpace: 'nowrap',
+  };
 }
 
 function HeaderActionBtn({

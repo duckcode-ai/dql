@@ -111,16 +111,16 @@ export function deriveCellResearchState(
   if (!run) {
     return {
       kind: 'new',
-      label: 'Research: New',
-      title: 'Start research from this source cell.',
+      label: 'AI: New',
+      title: 'Ask AI from this source cell.',
       syncStatus: null,
     };
   }
   if (syncStatus === 'changed') {
     return {
       kind: 'changed',
-      label: 'Research: Changed',
-      title: 'This source cell changed after the research run was saved. Review or sync before promotion.',
+      label: 'AI history changed',
+      title: 'This source cell changed after the saved AI history. Ask AI again before promotion.',
       run,
       syncStatus,
     };
@@ -128,7 +128,7 @@ export function deriveCellResearchState(
   if (syncStatus === 'missing') {
     return {
       kind: 'missing',
-      label: 'Research: Missing',
+      label: 'AI history missing',
       title: 'The linked source cell is missing. Keep the reviewed SQL as standalone evidence or resolve the source.',
       run,
       syncStatus,
@@ -137,17 +137,8 @@ export function deriveCellResearchState(
   if (run.status === 'running') {
     return {
       kind: 'run_preview',
-      label: 'Research: Running',
-      title: 'Research preview is running.',
-      run,
-      syncStatus,
-    };
-  }
-  if (run.status === 'error' || run.reviewChecklist?.blockers.length) {
-    return {
-      kind: 'blocked',
-      label: 'Research: Blocked',
-      title: run.error || run.reviewChecklist?.blockers[0] || 'Resolve the research blocker before DQL promotion.',
+      label: 'AI running',
+      title: 'AI preview is running.',
       run,
       syncStatus,
     };
@@ -155,8 +146,17 @@ export function deriveCellResearchState(
   if (run.reviewStatus === 'completed' || run.reviewStatus === 'certified') {
     return {
       kind: 'done',
-      label: run.reviewStatus === 'certified' ? 'Research: Certified' : 'Research: Done',
-      title: 'This research run is closed.',
+      label: run.reviewStatus === 'certified' ? 'AI certified' : 'AI done',
+      title: 'This AI history item is closed.',
+      run,
+      syncStatus,
+    };
+  }
+  if (run.status === 'error' || run.reviewChecklist?.blockers.length) {
+    return {
+      kind: 'blocked',
+      label: 'AI blocked',
+      title: run.error || run.reviewChecklist?.blockers[0] || 'Resolve this AI history blocker before DQL promotion.',
       run,
       syncStatus,
     };
@@ -164,8 +164,8 @@ export function deriveCellResearchState(
   if (run.reviewStatus === 'rejected') {
     return {
       kind: 'done',
-      label: 'Research: Rejected',
-      title: 'This research run was rejected and is closed.',
+      label: 'AI rejected',
+      title: 'This AI history item was rejected and is closed.',
       run,
       syncStatus,
     };
@@ -181,7 +181,7 @@ export function deriveCellResearchState(
   if (!hasReviewedSql && hasGeneratedSql) {
     return {
       kind: 'review_sql',
-      label: 'Research: Review SQL',
+      label: 'AI: Review SQL',
       title: 'Review generated SQL before promoting this work into a reusable block.',
       run,
       syncStatus,
@@ -190,7 +190,7 @@ export function deriveCellResearchState(
   if (!hasReviewedSql && !hasGeneratedSql) {
     return {
       kind: 'review_sql',
-      label: 'Research: Add SQL',
+      label: 'AI: Add SQL',
       title: 'Add, paste, or generate SQL for this research item.',
       run,
       syncStatus,
@@ -199,7 +199,7 @@ export function deriveCellResearchState(
   if (!hasEvidence) {
     return {
       kind: 'review_context',
-      label: 'Research: Context',
+      label: 'AI: Context',
       title: 'Save metadata evidence before DQL draft creation.',
       run,
       syncStatus,
@@ -208,7 +208,7 @@ export function deriveCellResearchState(
   if (!hasPreview) {
     return {
       kind: 'run_preview',
-      label: 'Research: Preview',
+      label: 'AI: Preview',
       title: 'Run a bounded preview before DQL promotion.',
       run,
       syncStatus,
@@ -217,7 +217,7 @@ export function deriveCellResearchState(
   if (run.dqlPromotionAction === 'reuse_existing') {
     return {
       kind: 'reuse',
-      label: 'Research: Reuse',
+      label: 'AI: Reuse',
       title: 'A similar certified block was found. Review whether this should reuse existing logic.',
       run,
       syncStatus,
@@ -226,7 +226,7 @@ export function deriveCellResearchState(
   if (run.draftBlockPath && run.reviewChecklist?.readyForCertificationReview) {
     return {
       kind: 'cert_ready',
-      label: 'Research: Certify',
+      label: 'AI: Certify',
       title: 'The DQL draft is ready for certification review.',
       run,
       syncStatus,
@@ -235,7 +235,7 @@ export function deriveCellResearchState(
   if (!run.draftBlockPath && run.reviewChecklist?.readyForDqlDraft) {
     return {
       kind: 'draft_ready',
-      label: 'Research: Draft ready',
+      label: 'AI: Draft ready',
       title: 'Reviewed SQL and evidence are ready for DQL draft creation.',
       run,
       syncStatus,
@@ -244,7 +244,7 @@ export function deriveCellResearchState(
   if (run.draftBlockPath) {
     return {
       kind: 'complete',
-      label: 'Research: Draft saved',
+      label: 'AI: Draft saved',
       title: 'Open the DQL draft and complete metadata, tests, lineage, and certification review.',
       run,
       syncStatus,
@@ -252,8 +252,8 @@ export function deriveCellResearchState(
   }
   return {
     kind: 'unknown',
-    label: 'Research: Review',
-    title: 'Continue the research review workflow.',
+    label: 'AI: Review',
+    title: 'Continue the AI history review workflow.',
     run,
     syncStatus,
   };

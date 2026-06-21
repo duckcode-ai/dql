@@ -198,7 +198,7 @@ export function ErrorOutput({ message, themeMode, onFix, onFixWithAi, schemaTabl
               <svg width="11" height="11" viewBox="0 0 16 16" fill="currentColor">
                 <path d="M8 0a.75.75 0 0 1 .704.49l1.08 2.927 2.927 1.08a.75.75 0 0 1 0 1.406l-2.927 1.08-1.08 2.927a.75.75 0 0 1-1.408 0l-1.08-2.927-2.927-1.08a.75.75 0 0 1 0-1.406l2.927-1.08L7.296.49A.75.75 0 0 1 8 0Zm4.75 9.5a.75.75 0 0 1 .704.49l.41 1.11 1.11.41a.75.75 0 0 1 0 1.408l-1.11.41-.41 1.11a.75.75 0 0 1-1.408 0l-.41-1.11-1.11-.41a.75.75 0 0 1 0-1.408l1.11-.41.41-1.11a.75.75 0 0 1 .704-.49Z" />
               </svg>
-              Fix with AI
+              Ask AI to fix
             </ErrorActionButton>
           )}
           <span style={{ fontSize: 11, color: t.textMuted, fontFamily: t.font }}>

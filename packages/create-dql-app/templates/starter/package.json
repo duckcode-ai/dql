@@ -11,7 +11,7 @@
     "validate": "dql validate"
   },
   "devDependencies": {
-    "@duckcodeailabs/dql-cli": "^1.6.19"
+    "@duckcodeailabs/dql-cli": "^1.6.20"
   },
   "engines": {
     "node": ">=20 <23"

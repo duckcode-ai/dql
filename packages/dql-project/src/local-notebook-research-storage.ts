@@ -12,16 +12,18 @@ const HAS_GENERATED_SQL = "(NULLIF(TRIM(generated_sql), '') IS NOT NULL)";
 const HAS_PREVIEW_SQL = "(result_preview IS NOT NULL AND TRIM(result_preview) <> '')";
 const HAS_DRAFT_SQL = "(draft_block_path IS NOT NULL AND TRIM(draft_block_path) <> '')";
 const HAS_EVIDENCE_SQL = "((evidence IS NOT NULL AND TRIM(evidence) <> '' AND TRIM(evidence) <> 'null') OR (context_pack_id IS NOT NULL AND TRIM(context_pack_id) <> ''))";
-const DRAFT_READY_SQL = `(TRIM(question) <> '' AND ${HAS_REVIEWED_SQL} AND ${HAS_EVIDENCE_SQL} AND status <> 'error')`;
+const OPEN_REVIEW_SQL = "(review_status NOT IN ('completed', 'certified', 'rejected'))";
+const REUSE_RECOMMENDED_SQL = "(COALESCE(dql_promotion_action, '') = 'reuse_existing')";
+const DRAFT_READY_SQL = `(${OPEN_REVIEW_SQL} AND TRIM(question) <> '' AND ${HAS_REVIEWED_SQL} AND ${HAS_EVIDENCE_SQL} AND status <> 'error')`;
 const CERTIFICATION_READY_SQL = `(${DRAFT_READY_SQL} AND ${HAS_PREVIEW_SQL} AND ${HAS_DRAFT_SQL} AND COALESCE(dql_promotion_action, '') NOT IN ('reuse_existing', 'review_required'))`;
-const BLOCKED_SQL = `(status = 'error' OR TRIM(question) = '' OR NOT ${HAS_SQL_SQL})`;
+const BLOCKED_SQL = `(${OPEN_REVIEW_SQL} AND (status = 'error' OR TRIM(question) = '' OR (NOT ${REUSE_RECOMMENDED_SQL} AND NOT ${HAS_SQL_SQL})))`;
 const NEXT_ACTION_SQL = `CASE
   WHEN review_status IN ('completed', 'rejected', 'certified') THEN 'continue_review'
   WHEN ${BLOCKED_SQL} THEN 'fix_blockers'
+  WHEN ${REUSE_RECOMMENDED_SQL} THEN 'reuse_existing'
   WHEN NOT ${HAS_REVIEWED_SQL} AND ${HAS_GENERATED_SQL} THEN 'review_sql'
   WHEN NOT ${HAS_EVIDENCE_SQL} THEN 'review_context'
   WHEN NOT ${HAS_PREVIEW_SQL} THEN 'run_preview'
-  WHEN dql_promotion_action = 'reuse_existing' THEN 'reuse_existing'
   WHEN NOT ${HAS_DRAFT_SQL} AND ${DRAFT_READY_SQL} THEN 'create_dql_draft'
   WHEN ${CERTIFICATION_READY_SQL} THEN 'open_certification'
   WHEN ${HAS_DRAFT_SQL} THEN 'complete_review'

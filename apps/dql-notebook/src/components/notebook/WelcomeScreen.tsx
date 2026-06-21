@@ -75,7 +75,7 @@ export function WelcomeScreen({ onOpenFile, onOpenResearchFile }: WelcomeScreenP
   ), [notebookFilesByPath, summaries]);
   const activeResearchCount = researchWorkspaceStats.totalResearch;
   const recentResearchLabel = [
-    `${researchWorkspaceStats.openResearch.toLocaleString()} open research`,
+    `${researchWorkspaceStats.openResearch.toLocaleString()} AI history`,
     `${researchWorkspaceStats.openNotebooks.toLocaleString()} notebook${researchWorkspaceStats.openNotebooks === 1 ? '' : 's'}`,
     ownerSummaries.length > 0
       ? `${ownerSummaries.length.toLocaleString()} owner${ownerSummaries.length === 1 ? '' : 's'}`
@@ -285,7 +285,7 @@ function ResearchQueueOverview({
   const visibleOwnerSummaries = ownerSummaries.slice(0, RESEARCH_OWNER_FOCUS_LIMIT);
   return (
     <section
-      aria-label="Project research queue"
+      aria-label="Project AI history"
       style={{
         borderTop: `1px solid ${t.cellBorder}`,
         borderBottom: `1px solid ${t.cellBorder}`,
@@ -299,10 +299,10 @@ function ResearchQueueOverview({
         <div style={{ minWidth: 0 }}>
           <div style={{ color: t.textPrimary, fontSize: 13, fontWeight: 850, display: 'flex', alignItems: 'center', gap: 7 }}>
             <ListChecks size={15} strokeWidth={2} color={t.accent} aria-hidden="true" />
-            Project research queue
+            Project AI history
           </div>
           <div style={{ marginTop: 3, color: t.textMuted, fontSize: 12, lineHeight: 1.4 }}>
-            Start with the next review action across research notebooks.
+            Reopen saved AI work only when you need audit, review, or DQL promotion context.
           </div>
         </div>
         {primaryFile && (
@@ -326,14 +326,14 @@ function ResearchQueueOverview({
               flexShrink: 0,
             }}
           >
-            Open next
+            Open history
             <ArrowRight size={14} strokeWidth={2.1} aria-hidden="true" />
           </button>
         )}
       </div>
 
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(118px, 1fr))', gap: 8 }}>
-        <QueueMetric label="Open research" value={totals.total} color={t.accent} t={t} />
+        <QueueMetric label="AI history" value={totals.total} color={t.accent} t={t} />
         <QueueMetric label="Draft ready" value={totals.draftReady} color={t.accent} t={t} />
         <QueueMetric label="Cert ready" value={totals.certificationReady} color={t.success} t={t} />
         <QueueMetric label="Blocked" value={totals.blocked} color={t.error} t={t} />
@@ -370,7 +370,7 @@ function ResearchQueueOverview({
                 onClick={() => {
                   if (primaryFile) openResearchFile(primaryFile, { ownerFilter: owner.owner });
                 }}
-                title={disabled ? 'Open a notebook before filtering research by owner.' : notebookResearchOwnerSummaryTitle(owner)}
+                title={disabled ? 'Open a notebook before filtering AI history by owner.' : notebookResearchOwnerSummaryTitle(owner)}
                 style={{
                   minWidth: 0,
                   maxWidth: 180,

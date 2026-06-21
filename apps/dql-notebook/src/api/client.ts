@@ -453,7 +453,7 @@ export interface NotebookResearchContextPreview {
 export type NotebookResearchUpdateInput =
   Partial<Pick<
     NotebookResearchRun,
-    'domain' | 'owner' | 'title' | 'question' | 'intent' | 'context' | 'evidence' | 'contextPackId' | 'routeDecision' | 'generatedSql' | 'reviewedSql' | 'warnings' | 'reviewStatus' | 'recommendation'
+    'domain' | 'owner' | 'title' | 'question' | 'intent' | 'context' | 'evidence' | 'contextPackId' | 'routeDecision' | 'generatedSql' | 'reviewedSql' | 'warnings' | 'reviewStatus' | 'recommendation' | 'dqlPromotionAction'
   >> & {
     sourceCell?: NotebookResearchSourceCellPayload;
     sourceCellId?: string | null;
@@ -1114,17 +1114,38 @@ function normalizeNotebookResearchChecklist(raw: NotebookResearchReviewChecklist
   const hasPreview = Boolean(run.resultPreview && (run.resultPreview.columns.length > 0 || previewRowCount > 0));
   const hasDraft = Boolean(run.draftBlockPath);
   const hasEvidence = Boolean(run.contextPackId || run.evidence);
+  const reuseExisting = run.dqlPromotionAction === 'reuse_existing';
   return {
-    readyForDqlDraft: Boolean(run.question && hasReviewedSql && hasEvidence && run.status !== 'error'),
-    readyForCertificationReview: Boolean(run.question && hasReviewedSql && hasEvidence && hasPreview && hasDraft && run.dqlPromotionAction !== 'reuse_existing'),
+    readyForDqlDraft: Boolean(!reuseExisting && run.question && hasReviewedSql && hasEvidence && run.status !== 'error'),
+    readyForCertificationReview: Boolean(!reuseExisting && run.question && hasReviewedSql && hasEvidence && hasPreview && hasDraft),
     blockers: run.status === 'error' ? [run.error ?? 'Preview failed.'] : [],
-    warnings: hasPreview ? [] : ['Run a bounded preview before certification review.'],
+    warnings: hasPreview || reuseExisting ? [] : ['Run a bounded preview before certification review.'],
     items: [
       { id: 'question', label: 'Question', status: run.question ? 'passed' : 'blocked', detail: run.question ? 'Business question is captured.' : 'Add a business question.' },
-      { id: 'sql', label: 'Reviewed SQL', status: hasSql ? 'passed' : 'blocked', detail: hasSql ? 'SQL is available.' : 'Add SQL before promotion.' },
-      { id: 'evidence', label: 'Evidence', status: hasEvidence ? 'passed' : 'warning', detail: hasEvidence ? 'Context evidence is saved.' : 'Preview and save metadata context.' },
-      { id: 'preview', label: 'Preview', status: hasPreview ? 'passed' : 'pending', detail: hasPreview ? 'Preview result is available.' : 'Run a bounded preview.' },
-      { id: 'dql_draft', label: 'DQL draft', status: hasDraft ? 'passed' : 'pending', detail: hasDraft ? `Draft saved at ${run.draftBlockPath}.` : 'Create a DQL draft after review.' },
+      {
+        id: 'sql',
+        label: 'Reviewed SQL',
+        status: hasSql || reuseExisting ? 'passed' : 'blocked',
+        detail: reuseExisting && !hasSql ? 'Existing DQL should be reused; no new SQL is required.' : hasSql ? 'SQL is available.' : 'Add SQL before promotion.',
+      },
+      {
+        id: 'evidence',
+        label: 'Evidence',
+        status: hasEvidence || reuseExisting ? 'passed' : 'warning',
+        detail: hasEvidence ? 'Context evidence is saved.' : reuseExisting ? 'Reuse evidence is captured in the recommendation.' : 'Preview and save metadata context.',
+      },
+      {
+        id: 'preview',
+        label: 'Preview',
+        status: hasPreview || reuseExisting ? 'passed' : 'pending',
+        detail: hasPreview ? 'Preview result is available.' : reuseExisting ? 'Certified block reuse does not require a new raw SQL preview.' : 'Run a bounded preview.',
+      },
+      {
+        id: 'dql_draft',
+        label: 'DQL draft',
+        status: hasDraft || reuseExisting ? 'passed' : 'pending',
+        detail: hasDraft ? `Draft saved at ${run.draftBlockPath}.` : reuseExisting ? 'No new DQL draft is required.' : 'Create a DQL draft after review.',
+      },
     ],
   };
 }

@@ -2222,6 +2222,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
             reviewedSql: notebookResearchString(body.reviewedSql),
             warnings: Array.isArray(body.warnings) ? body.warnings.filter((item: unknown): item is string => typeof item === 'string') : undefined,
             reviewStatus: notebookResearchReviewStatus(body.reviewStatus),
+            dqlPromotionAction: notebookResearchPromotionAction(body.dqlPromotionAction),
           }) ?? run;
           const planned = storage.updateRun(updated.id, {
             researchPlan: buildNotebookResearchPlan({
@@ -11193,6 +11194,7 @@ function buildNotebookResearchReviewChecklist(run: NotebookResearchRun): Noteboo
   const promotionAction = run.dqlPromotionAction ?? run.dqlPromotion?.recommendedAction;
   const reuseRecommended = promotionAction === 'reuse_existing';
   const promotionReviewRequired = promotionAction === 'review_required';
+  const reuseClosed = reuseRecommended && (run.reviewStatus === 'completed' || run.reviewStatus === 'certified');
   const hasDraft = Boolean(notebookResearchString(run.draftBlockPath));
   const sqlForParameterReview = notebookResearchString(run.reviewedSql) ?? notebookResearchString(run.generatedSql);
   const parameterReview = sqlForParameterReview ? parameterizeSqlForDqlImport(sqlForParameterReview) : null;
@@ -11202,14 +11204,14 @@ function buildNotebookResearchReviewChecklist(run: NotebookResearchRun): Noteboo
   const warnings: string[] = [];
 
   if (!questionReady) blockers.push('Add a business question before review.');
-  if (!hasSql) blockers.push('Add reviewed SQL or generate SQL before promotion.');
+  if (!hasSql && !reuseRecommended) blockers.push('Add reviewed SQL or generate SQL before promotion.');
   if (run.status === 'error') blockers.push(run.error ? `Fix preview error: ${run.error}` : 'Fix the failed preview before promotion.');
-  if (!previewReady && run.status !== 'error') warnings.push('Run a bounded preview before certification review.');
-  if (!evidenceReady) warnings.push('Inspect metadata evidence before turning this into a reusable block.');
+  if (!previewReady && run.status !== 'error' && !reuseRecommended) warnings.push('Run a bounded preview before certification review.');
+  if (!evidenceReady && !reuseRecommended) warnings.push('Inspect metadata evidence before turning this into a reusable block.');
   if (hasSql && dynamicParameters.length === 0) warnings.push('No dynamic parameters were detected; confirm this should be a static block before certification.');
   for (const warning of parameterReview?.warnings ?? []) warnings.push(warning);
   if (promoted && !duplicateChecked) warnings.push('Promotion exists but duplicate/reuse evidence is missing.');
-  if (reuseRecommended) warnings.push('Reuse the matching block or explicitly document a replacement before certification.');
+  if (reuseRecommended && !reuseClosed) warnings.push('Reuse the matching block or explicitly document a replacement before certification.');
   if (promotionReviewRequired) warnings.push('Resolve the review-required promotion decision before certification.');
 
   const items: NotebookResearchReviewChecklist['items'] = [
@@ -11222,8 +11224,10 @@ function buildNotebookResearchReviewChecklist(run: NotebookResearchRun): Noteboo
     {
       id: 'sql',
       label: 'Reviewed SQL',
-      status: hasReviewedSql ? 'passed' : hasGeneratedSql ? 'warning' : 'blocked',
-      detail: hasReviewedSql
+      status: hasReviewedSql || (reuseRecommended && !hasSql) ? 'passed' : hasGeneratedSql ? 'warning' : 'blocked',
+      detail: reuseRecommended && !hasSql
+        ? 'Existing certified DQL should be reused; no new SQL is required.'
+        : hasReviewedSql
         ? 'Reviewer SQL is saved.'
         : hasGeneratedSql
           ? 'Generated SQL exists; review it before promotion.'
@@ -11232,8 +11236,10 @@ function buildNotebookResearchReviewChecklist(run: NotebookResearchRun): Noteboo
     {
       id: 'preview',
       label: 'Preview',
-      status: previewReady ? 'passed' : run.status === 'error' ? 'blocked' : 'pending',
-      detail: previewReady
+      status: previewReady || (reuseRecommended && !hasSql) ? 'passed' : run.status === 'error' ? 'blocked' : 'pending',
+      detail: reuseRecommended && !hasSql
+        ? 'Certified block reuse does not require a new raw SQL preview.'
+        : previewReady
         ? `Preview returned ${preview.rowCount.toLocaleString()} row${preview.rowCount === 1 ? '' : 's'}.`
         : run.status === 'error'
           ? (run.error ?? 'Preview failed.')
@@ -11242,8 +11248,12 @@ function buildNotebookResearchReviewChecklist(run: NotebookResearchRun): Noteboo
     {
       id: 'evidence',
       label: 'Evidence',
-      status: evidenceReady ? 'passed' : 'warning',
-      detail: evidenceReady ? 'Metadata evidence or context pack is attached.' : 'No context evidence is attached yet.',
+      status: evidenceReady || reuseRecommended ? 'passed' : 'warning',
+      detail: evidenceReady
+        ? 'Metadata evidence or context pack is attached.'
+        : reuseRecommended
+          ? 'Reuse evidence is captured in the AI recommendation.'
+          : 'No context evidence is attached yet.',
     },
     {
       id: 'duplicates',
@@ -11258,8 +11268,10 @@ function buildNotebookResearchReviewChecklist(run: NotebookResearchRun): Noteboo
     {
       id: 'parameters',
       label: 'Parameter review',
-      status: !hasSql ? 'pending' : dynamicParameters.length > 0 ? 'passed' : 'warning',
-      detail: !hasSql
+      status: reuseRecommended && !hasSql ? 'passed' : !hasSql ? 'pending' : dynamicParameters.length > 0 ? 'passed' : 'warning',
+      detail: reuseRecommended && !hasSql
+        ? 'Use the certified block parameters; no new SQL parameterization is required.'
+        : !hasSql
         ? 'Add SQL before checking runtime parameters.'
         : dynamicParameters.length > 0
           ? `Detected ${dynamicParameters.length.toLocaleString()} dynamic parameter${dynamicParameters.length === 1 ? '' : 's'}: ${dynamicParameters.slice(0, 6).map((item) => item.name).join(', ')}.`
@@ -11270,8 +11282,10 @@ function buildNotebookResearchReviewChecklist(run: NotebookResearchRun): Noteboo
     {
       id: 'dql_draft',
       label: 'DQL draft',
-      status: hasDraft ? 'passed' : hasReviewedSql && evidenceReady ? 'pending' : 'blocked',
-      detail: hasDraft
+      status: reuseRecommended && !hasDraft ? 'passed' : hasDraft ? 'passed' : hasReviewedSql && evidenceReady ? 'pending' : 'blocked',
+      detail: reuseRecommended && !hasDraft
+        ? 'No new draft is required because an existing DQL block should be reused.'
+        : hasDraft
         ? `Draft saved at ${run.draftBlockPath}.`
         : !hasReviewedSql
           ? 'Save reviewed SQL before DQL draft creation.'
@@ -11364,10 +11378,10 @@ function notebookResearchPlanPromotionPath(input: {
   draftBlockPath?: string;
   promotionAction?: string;
 }): NotebookResearchPlan['promotion']['path'] {
+  if (input.promotionAction === 'reuse_existing') return 'reuse_existing';
   if (!input.hasSql) return 'needs_sql';
   if (!input.hasEvidence) return 'review_context';
   if (input.previewError || !input.hasPreview) return 'run_preview';
-  if (input.promotionAction === 'reuse_existing') return 'reuse_existing';
   if (input.draftBlockPath) return 'open_certification';
   return 'create_dql_draft';
 }

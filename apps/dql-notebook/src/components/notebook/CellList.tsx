@@ -16,7 +16,7 @@ import {
 
 interface CellListProps {
   registerCellRef: (id: string, el: HTMLDivElement | null) => void;
-  onStartResearch?: (cellId: string) => void;
+  onStartResearch?: (cellId: string, prompt?: string, options?: { autoAsk?: boolean }) => void;
   researchRefreshKey?: number;
 }
 
