@@ -8,13 +8,11 @@ dashboards in Apps, notebooks, and governed agent answers — all as files in
 git. This quickstart adds DQL to **your own dbt repo**. No external warehouse,
 hosted account, SSO, or team RBAC is required.
 
-> **Just want to see it running?** The
-> [jaffle-shop-duckdb](https://github.com/duckcode-ai/jaffle-shop-duckdb) repo
-> ships a complete, ready-built DQL workspace (10 certified blocks + an
-> executive App dashboard). Clone it, `./setup.sh`, then
-> `cd dql && npm install && npm install --prefix .dql/connectors duckdb &&
-> npm run notebook`. The rest of this page builds the same thing from scratch
-> on your repo.
+> **Just want to see it running?** Use the separate
+> [jaffle-shop-duckdb](https://github.com/duckcode-ai/jaffle-shop-duckdb)
+> example and follow its
+> [Jaffle Shop tutorial](https://github.com/duckcode-ai/jaffle-shop-duckdb/blob/main/TUTORIAL.md).
+> The rest of this page builds a DQL workspace from scratch on your repo.
 
 ## 1. Make your dbt manifest fresh
 

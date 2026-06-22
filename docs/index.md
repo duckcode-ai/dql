@@ -24,9 +24,7 @@ and policies are local previews, not hosted RBAC.
 
 ## Start Here
 
-From your dbt repo (or clone
-[jaffle-shop-duckdb](https://github.com/duckcode-ai/jaffle-shop-duckdb)
-and run `./setup.sh` first):
+From your dbt repo:
 
 ```bash
 dbt parse                        # ensure target/manifest.json exists
@@ -58,6 +56,9 @@ Then run:
 npm run compile
 npm run lineage
 ```
+
+To see a finished DataLex + DQL example, use the separate
+[jaffle-shop-duckdb tutorial](https://github.com/duckcode-ai/jaffle-shop-duckdb/blob/main/TUTORIAL.md).
 
 ## Why DQL
 

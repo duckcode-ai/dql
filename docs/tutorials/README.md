@@ -3,13 +3,10 @@
 Hands-on walkthroughs that take you from a plain dbt project to certified
 blocks, dashboards in an App, agent answers, and a CI gate.
 
-Every tutorial works on **your own dbt repo**. If you don't have one handy, the
+Every tutorial works on **your own dbt repo**. The DQL repo stays
+product-focused; the complete worked example lives in the separate
 [duckcode-ai/jaffle-shop-duckdb](https://github.com/duckcode-ai/jaffle-shop-duckdb)
-repo is a Jaffle Shop dbt + DuckDB project that already ships a fully-built DQL
-workspace (10 certified blocks + an executive App dashboard) — clone it,
-`./setup.sh`, then `cd dql && npm install && npm install --prefix .dql/connectors duckdb && npm run notebook`
-to explore a finished result, and follow its `dql/TUTORIAL.md` for a guided
-tour.
+repo.
 
 ## Reading order
 
@@ -24,6 +21,17 @@ tour.
    and the MCP server.
 5. **[05 — CI and `dql verify`](./05-ci-and-verify.md)** — keep
    `dql-manifest.json` reproducible and gate drift in CI.
+
+## End-to-end Example
+
+Use
+[duckcode-ai/jaffle-shop-duckdb](https://github.com/duckcode-ai/jaffle-shop-duckdb)
+when you want the full DataLex + DQL flow with concrete files, screenshots, and
+video planning:
+
+- [Jaffle Shop tutorial](https://github.com/duckcode-ai/jaffle-shop-duckdb/blob/main/TUTORIAL.md)
+- [DQL half of the tutorial](https://github.com/duckcode-ai/jaffle-shop-duckdb/blob/main/dql/TUTORIAL.md)
+- [YouTube storyboard](https://github.com/duckcode-ai/jaffle-shop-duckdb/blob/main/YOUTUBE.md)
 
 Stuck? See the [troubleshooting guide](../guides/troubleshooting.md).
 

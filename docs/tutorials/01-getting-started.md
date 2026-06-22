@@ -13,7 +13,7 @@ open the notebook, and see end-to-end lineage.
 
 - **Node.js** 20 or 22 LTS (check: `node --version`)
 - **git** (any modern version)
-- A dbt project — yours, or the example repo below
+- A dbt project with `target/manifest.json`
 - Optional for tutorial 04: `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`,
   `GEMINI_API_KEY`, or a local Ollama server.
 
@@ -21,40 +21,27 @@ open the notebook, and see end-to-end lineage.
 
 ## Step 1 — Pick your dbt repo
 
-**Your own repo:** make sure the manifest is fresh, then continue to Step 2:
+Make sure the dbt manifest is fresh, then continue to Step 2:
 
 ```bash
 cd your-dbt-repo
 dbt parse         # or dbt build — either writes target/manifest.json
 ```
 
-**No repo handy?** Clone the example — a standard dbt + DuckDB project (the
-classic Jaffle Shop), fully local:
-
-```bash
-git clone https://github.com/duckcode-ai/jaffle-shop-duckdb.git
-cd jaffle-shop-duckdb
-./setup.sh        # creates a venv, runs dbt seed + dbt build + docs generate
-```
-
-> **You should see** dbt build all models into `jaffle_shop.duckdb` at the
-> repo root, and `target/manifest.json` written.
-
-> **Note:** the example repo already ships a finished DQL workspace in `dql/`.
-> To follow this tutorial and build one from scratch, scaffold into a *new*
-> folder (the commands below use `dql-tutorial` so it won't collide), or just
-> explore the existing `dql/` and its `dql/TUTORIAL.md` instead.
+> **Need a ready repo?** Use the separate
+> [jaffle-shop-duckdb](https://github.com/duckcode-ai/jaffle-shop-duckdb)
+> example and follow its
+> [Jaffle Shop tutorial](https://github.com/duckcode-ai/jaffle-shop-duckdb/blob/main/TUTORIAL.md).
 
 ---
 
 ## Step 2 — Scaffold the DQL workspace
 
-From the dbt repo root (use `dql` on your own repo; on the example repo use
-`dql-tutorial` to avoid the shipped `dql/` folder):
+From the dbt repo root:
 
 ```bash
-npx create-dql-app@latest dql-tutorial
-cd dql-tutorial
+npx create-dql-app@latest dql
+cd dql
 npm install
 ```
 
@@ -62,20 +49,20 @@ npm install
 > the generated `dql.config.json` is wired back to the parent dbt project.
 > DQL stays isolated under its own folder; your dbt files are untouched.
 
-Point the default connection at the dbt warehouse. For the example repo,
+Point the default connection at the dbt warehouse. For a local DuckDB file,
 edit `dql.config.json`:
 
 ```json
 "connections": {
   "default": {
     "driver": "duckdb",
-    "filepath": "../jaffle_shop.duckdb"
+    "filepath": "../my_warehouse.duckdb"
   }
 }
 ```
 
-(On your own repo, use your warehouse driver instead. Databricks is built in;
-DuckDB/local files and Snowflake use project-local drivers. See
+(Use your warehouse driver instead. Databricks is built in; DuckDB/local files
+and Snowflake use project-local drivers. See
 [connect-warehouse](../guides/connect-warehouse.md).)
 
 Install only the driver your project uses:
@@ -107,8 +94,7 @@ npm run sync
 ```
 
 > **You should see** dbt sources and models imported into the DQL manifest —
-> for the example repo, the staging and marts models (`orders`, `customers`,
-> `products`, …) with their upstream edges.
+> with their upstream lineage edges.
 
 ---
 
@@ -130,8 +116,7 @@ GROUP BY 1 ORDER BY 1
 ```
 
 > **You should see** real rows from the dbt-built warehouse. (`dev` is the
-> schema the example repo's dbt profile writes to — substitute your own
-> schema on your repo.)
+> schema used in this sample query; substitute your own schema if needed.)
 
 ---
 

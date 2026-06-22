@@ -16,9 +16,10 @@ control, and AI answers that cite reviewed context.
 
 Use one of these two paths.
 
-### Path 1: Try the finished Jaffle Shop example
+### Path 1: Try the separate Jaffle Shop example
 
-This is the fastest way to see the product working end to end.
+This is the fastest way to see DQL working end to end without embedding example
+fixtures in this product repo.
 
 ```bash
 git clone https://github.com/duckcode-ai/jaffle-shop-duckdb.git
@@ -37,8 +38,12 @@ What to check first:
 
 1. Home shows dbt artifacts, database connection, blocks, notebooks, and Apps.
 2. Blocks shows certified examples built on top of the dbt project.
-3. Apps opens the Jaffle Analytics app.
+3. Apps opens the Jaffle Growth Command Center.
 4. Lineage shows how sources, dbt models, blocks, dashboards, and Apps connect.
+
+Follow the example repo's
+[Jaffle Shop tutorial](https://github.com/duckcode-ai/jaffle-shop-duckdb/blob/main/TUTORIAL.md)
+for the full DataLex + DQL story.
 
 ### Path 2: Add DQL to your own dbt repo
 
@@ -227,6 +232,7 @@ All docs live in [`docs/`](./docs/). Start with these:
 - [Connectors](./docs/reference/connectors.md)
 - [CLI reference](./docs/reference/cli.md)
 - [Troubleshooting](./docs/guides/troubleshooting.md)
+- [End-to-end Jaffle Shop example](https://github.com/duckcode-ai/jaffle-shop-duckdb/blob/main/TUTORIAL.md)
 
 ## What is included in OSS
 
