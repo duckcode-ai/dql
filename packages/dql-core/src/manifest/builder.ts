@@ -499,6 +499,7 @@ function scanBlocks(
           const block = stmt as any;
           if (block.kind !== 'BlockDecl') continue;
 
+          const nextBlock = blockDeclToManifestBlock(block, relPath);
           if (blocks[block.name]) {
             diagnostics?.push({
               kind: 'resolve',
@@ -507,7 +508,9 @@ function scanBlocks(
               message: `duplicate block "${block.name}" also declared in ${blocks[block.name].filePath}`,
             });
           }
-          blocks[block.name] = blockDeclToManifestBlock(block, relPath);
+          if (!blocks[block.name] || shouldReplaceDuplicateBlock(blocks[block.name], nextBlock)) {
+            blocks[block.name] = nextBlock;
+          }
         }
       } catch (err) {
         // Surface parse failures as diagnostics instead of silently dropping
@@ -524,6 +527,22 @@ function scanBlocks(
   }
 
   return blocks;
+}
+
+function shouldReplaceDuplicateBlock(existing: ManifestBlock, next: ManifestBlock): boolean {
+  return duplicateBlockPriority(next) > duplicateBlockPriority(existing);
+}
+
+function duplicateBlockPriority(block: ManifestBlock): number {
+  let score = 0;
+  if (block.status === 'certified') score += 100;
+  else if (block.status === 'review') score += 60;
+  else if (block.status === 'draft') score += 20;
+  else score += 10;
+  const path = block.filePath.replaceAll('\\', '/');
+  if (!path.includes('/_drafts/') && !path.startsWith('_drafts/') && !path.startsWith('blocks/_drafts/')) score += 10;
+  if (path.startsWith('domains/') || path.startsWith('blocks/')) score += 5;
+  return score;
 }
 
 // ---- Business View Scanning ----

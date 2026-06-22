@@ -1,7 +1,7 @@
 import { mkdtempSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { LocalAppStorage } from './local-app-storage.js';
 
 let dir: string;
@@ -13,6 +13,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  vi.useRealTimers();
   store.close();
   rmSync(dir, { recursive: true, force: true });
 });
@@ -118,6 +119,14 @@ describe('LocalAppStorage', () => {
       driverCards: [{ title: 'Enterprise', contribution: '-5' }],
       resultPreviews: [{ result: { columns: ['segment', 'revenue'], rows: [{ segment: 'Enterprise', revenue: 10 }] } }],
       evidence: { trustStatus: { uncertified: true } },
+      reportSections: [{
+        id: 'executive-answer',
+        kind: 'executive_answer',
+        title: 'Executive answer',
+        body: 'Enterprise renewals explain the drop.',
+        tone: 'answer',
+        bullets: ['Delta is -5'],
+      }],
       lastRunAt: '2026-02-01T00:00:00.000Z',
     });
 
@@ -125,9 +134,102 @@ describe('LocalAppStorage', () => {
     expect(updated?.metrics).toMatchObject({ delta: -5 });
     expect(updated?.driverCards).toHaveLength(1);
     expect(updated?.resultPreviews).toHaveLength(1);
+    expect(updated?.reportSections?.[0]).toMatchObject({
+      kind: 'executive_answer',
+      title: 'Executive answer',
+      body: 'Enterprise renewals explain the drop.',
+    });
 
     const pinned = store.markAppInvestigationPinned(created.id, 'pin_revenue_drop');
     expect(pinned?.pinnedAiPinId).toBe('pin_revenue_drop');
     expect(store.listAppInvestigations('executive-cockpit', 'bank-overview')[0].sourceBlockId).toBe('monthly_revenue');
+  });
+
+  it('finds reusable App investigations for the same question and stable context', () => {
+    const created = store.createAppInvestigation({
+      appId: 'executive-cockpit',
+      dashboardId: 'bank-overview',
+      sourceTileId: 'revenue-trend',
+      sourceBlockId: 'monthly_revenue',
+      question: 'Why did revenue drop in February?',
+      intent: 'diagnose_change',
+      context: {
+        updatedAt: '2026-01-01T00:00:00.000Z',
+        activeFilters: { segment: 'enterprise', period: '2026-02' },
+        selectedBlock: { rowCount: 3, blockId: 'monthly_revenue' },
+      },
+    });
+
+    const reusable = store.findReusableAppInvestigation({
+      appId: 'executive-cockpit',
+      dashboardId: 'bank-overview',
+      sourceTileId: 'revenue-trend',
+      sourceBlockId: 'monthly_revenue',
+      question: '  Why did revenue   drop in February? ',
+      intent: 'diagnose_change',
+      context: {
+        selectedBlock: { blockId: 'monthly_revenue', rowCount: 3 },
+        activeFilters: { period: '2026-02', segment: 'enterprise' },
+        updatedAt: '2026-02-01T00:00:00.000Z',
+      },
+    });
+
+    expect(reusable?.id).toBe(created.id);
+
+    const differentFilter = store.findReusableAppInvestigation({
+      appId: 'executive-cockpit',
+      dashboardId: 'bank-overview',
+      sourceTileId: 'revenue-trend',
+      sourceBlockId: 'monthly_revenue',
+      question: 'Why did revenue drop in February?',
+      intent: 'diagnose_change',
+      context: {
+        activeFilters: { period: '2026-03', segment: 'enterprise' },
+        selectedBlock: { blockId: 'monthly_revenue', rowCount: 3 },
+      },
+    });
+
+    expect(differentFilter).toBeNull();
+  });
+
+  it('collapses duplicate App investigation rows on list reads without deleting history rows', () => {
+    vi.useFakeTimers();
+    const input = {
+      appId: 'executive-cockpit',
+      dashboardId: 'bank-overview',
+      sourceTileId: 'revenue-trend',
+      sourceBlockId: 'monthly_revenue',
+      question: 'Why did revenue drop in February?',
+      intent: 'diagnose_change' as const,
+      context: {
+        activeFilters: { period: '2026-02', segment: 'enterprise' },
+        selectedBlock: { blockId: 'monthly_revenue', rowCount: 3 },
+      },
+    };
+    vi.setSystemTime(new Date('2026-02-01T00:00:00.000Z'));
+    store.createAppInvestigation(input);
+    vi.setSystemTime(new Date('2026-02-01T00:01:00.000Z'));
+    const duplicate = store.createAppInvestigation({
+      ...input,
+      title: 'Updated title from rerun',
+    });
+    vi.setSystemTime(new Date('2026-02-01T00:02:00.000Z'));
+    store.createAppInvestigation({
+      ...input,
+      question: 'Why did revenue drop in March?',
+      context: {
+        activeFilters: { period: '2026-03', segment: 'enterprise' },
+        selectedBlock: { blockId: 'monthly_revenue', rowCount: 3 },
+      },
+    });
+
+    const listed = store.listAppInvestigations('executive-cockpit', 'bank-overview');
+
+    expect(listed).toHaveLength(2);
+    expect(listed.find((item) => item.question === 'Why did revenue drop in February?')?.id).toBe(duplicate.id);
+    expect(listed.map((item) => item.question)).toEqual(expect.arrayContaining([
+      'Why did revenue drop in February?',
+      'Why did revenue drop in March?',
+    ]));
   });
 });

@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { CSSProperties, PointerEvent as ReactPointerEvent } from 'react';
-import { AlertTriangle, BarChart3, Bot, GitBranch, GripVertical, LineChart, Maximize2, PieChart, Plus, ShieldCheck, SlidersHorizontal, Sparkles, Send, Table2, Trash2, Wand2, X } from 'lucide-react';
+import { AlertTriangle, BarChart3, Bot, GitBranch, GripVertical, LineChart, Maximize2, PieChart, Plus, ShieldCheck, SlidersHorizontal, Sparkles, Table2, Trash2, Wand2 } from 'lucide-react';
 import { api, type AppBlockRecommendation, type DashboardDocumentResponse, type DashboardRunResponse } from '../../api/client';
 import { useNotebook } from '../../store/NotebookStore';
 import type { CellChartConfig, QueryResult, ThemeMode } from '../../store/types';
@@ -14,6 +14,15 @@ import { NODE_TYPE_COLORS, TYPE_LABELS, TYPE_TITLES } from '../lineage/lineage-c
 import { themes, type ThemeMode as NotebookThemeMode } from '../../themes/notebook-theme';
 
 type DashboardLayoutItem = DashboardDocumentResponse['dashboard']['layout']['items'][number];
+type DashboardRunTile = DashboardRunResponse['tiles'][number];
+type DashboardStory = {
+  title: string;
+  summary: string;
+  sourceTitle: string;
+  trust: string | null;
+  filters: Array<{ label: string; value: string }>;
+  chips: string[];
+};
 
 const SIDE_PANEL_HEIGHT = 'clamp(320px, calc(100vh - 220px), 760px)';
 const APP_CHART_TYPE_OPTIONS: Array<{ value: ChartType; label: string }> = [
@@ -113,6 +122,20 @@ export function DashboardRenderer({
     for (const tile of run?.tiles ?? []) map.set(tile.tileId, tile);
     return map;
   }, [run]);
+  const baseVisibleItems = useMemo(
+    () => editable ? dashboard.layout.items : dashboard.layout.items.filter((item) => !isStakeholderHiddenReviewTile(item)),
+    [dashboard.layout.items, editable],
+  );
+  const visibleItems = useMemo(
+    () => editable ? baseVisibleItems : prepareStakeholderItems(baseVisibleItems, tileResults, cols),
+    [baseVisibleItems, cols, editable, tileResults],
+  );
+  const hiddenReviewTileCount = dashboard.layout.items.length - baseVisibleItems.length;
+  const hiddenPresentationTileCount = baseVisibleItems.length - visibleItems.length;
+  const dashboardStory = useMemo(
+    () => editable ? null : buildDashboardStory(visibleItems, tileResults, runVariables),
+    [editable, runVariables, tileResults, visibleItems],
+  );
 
   useEffect(() => {
     let cancelled = false;
@@ -215,17 +238,31 @@ export function DashboardRenderer({
 
   const addBlockTile = useCallback(async (block: AppBlockRecommendation) => {
     const vizType = normalizeViz(block.chartType);
+    const recommendation = await api.recommendDashboardTile(appId, dashboard.id, {
+      blockRef: block.name,
+      appAudience: dashboard.metadata.audience,
+      prompt: `${dashboard.metadata.title} ${block.name} ${block.description}`,
+      defaultVisualization: vizType,
+    });
     const size = autoTileSizeForViz(vizType, cols);
     const tile = {
       i: nextTileId(dashboard, block.name),
       ...nextTilePosition(dashboard, size),
       block: { blockId: block.name },
       viz: { type: vizType },
+      ...(recommendation.ok ? {
+        display: recommendation.display,
+        filterBindings: 'filterBindings' in recommendation ? recommendation.filterBindings : undefined,
+        parameterBindings: 'parameterBindings' in recommendation ? recommendation.parameterBindings : undefined,
+        sourceEvidence: 'sourceEvidence' in recommendation ? recommendation.sourceEvidence : undefined,
+        trustState: 'trustState' in recommendation ? recommendation.trustState : recommendation.display.trustState,
+        reviewStatus: 'reviewStatus' in recommendation ? recommendation.reviewStatus : recommendation.display.reviewStatus,
+      } : {}),
       title: block.name,
     };
     await saveItems([...dashboard.layout.items, tile]);
     setCatalogOpen(false);
-  }, [cols, dashboard, saveItems]);
+  }, [appId, cols, dashboard, saveItems]);
 
   const addTextTile = useCallback(async () => {
     setTextDialogKind('text');
@@ -438,9 +475,11 @@ export function DashboardRenderer({
         )}
       </div>
       )}
-      {editable && <div style={dashboardEditHintStyle}>Drag tiles, select a block to research it, or use the tile controls for sizing and chart settings.</div>}
+      {editable && <div style={dashboardEditHintStyle}>Drag tiles, select a block for Copilot context, or use the tile controls for sizing and chart settings.</div>}
 
-      {dashboard.layout.items.length === 0 ? (
+      {dashboardStory ? <DashboardStoryStrip story={dashboardStory} /> : null}
+
+      {visibleItems.length === 0 ? (
         <div
           style={{
             border: '1px dashed var(--border-color, rgba(0,0,0,0.15))',
@@ -455,9 +494,15 @@ export function DashboardRenderer({
             justifyContent: 'center',
           }}
         >
-          <div style={{ fontSize: 16, fontWeight: 700, marginBottom: 6 }}>Build this dashboard page</div>
+          <div style={{ fontSize: 16, fontWeight: 700, marginBottom: 6 }}>
+            {hiddenReviewTileCount > 0 || hiddenPresentationTileCount > 0 ? 'No stakeholder-ready tiles yet' : 'Build this dashboard page'}
+          </div>
           <div style={{ maxWidth: 520, opacity: 0.68, lineHeight: 1.45 }}>
-            Add certified domain blocks, narrative text, or use the scoped AI drawer and pin an answer into this layout.
+            {hiddenReviewTileCount > 0
+              ? 'Generated analysis and trust placeholders are hidden from the stakeholder view. Open Customize or Analysis to review them, then add certified blocks or pinned insights.'
+              : hiddenPresentationTileCount > 0
+                ? 'Static duplicate tiles are hidden from the stakeholder view because a filter-aware certified tile can answer the same question.'
+              : 'Add certified domain blocks, narrative text, or use the scoped AI drawer and pin an answer into this layout.'}
           </div>
           <div style={{ marginTop: 18, display: 'flex', gap: 8, flexWrap: 'wrap', justifyContent: 'center' }}>
             <AddTileMenu
@@ -505,7 +550,7 @@ export function DashboardRenderer({
               }}
             />
           )}
-          {dashboard.layout.items.map((item) => (
+          {visibleItems.map((item) => (
             <DashboardTile
               key={item.i}
               item={item}
@@ -616,7 +661,6 @@ function DashboardTile({
   const tileRef = useRef<HTMLDivElement | null>(null);
   const [dragOffset, setDragOffset] = useState<{ x: number; y: number } | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
-  const [askOpen, setAskOpen] = useState(false);
   const blockId = getDashboardItemBlockId(item);
   const canAsk = Boolean(!editable && blockId && onAskBlock);
   const blockRef = blockId
@@ -637,6 +681,7 @@ function DashboardTile({
   const [hovered, setHovered] = useState(false);
   const showEditChrome = editable && (hovered || selected || settingsOpen);
   const generatedVizOptions = getGeneratedVizOptions(item, genUi);
+  const showAskHint = Boolean(canAsk && (hovered || selected));
   const switchGeneratedViz = (chart: ChartType) => {
     const dashboardViz = chartToDashboardViz(chart);
     const options = item.viz.options ?? {};
@@ -654,21 +699,6 @@ function DashboardTile({
       display: displayWithVisualization(item, dashboardViz, currentGenUi),
     });
   };
-  useEffect(() => {
-    if (!askOpen) return;
-    const onKey = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') setAskOpen(false);
-    };
-    const onPointerDown = (event: MouseEvent) => {
-      if (tileRef.current && !tileRef.current.contains(event.target as Node)) setAskOpen(false);
-    };
-    window.addEventListener('keydown', onKey);
-    document.addEventListener('mousedown', onPointerDown);
-    return () => {
-      window.removeEventListener('keydown', onKey);
-      document.removeEventListener('mousedown', onPointerDown);
-    };
-  }, [askOpen]);
   const startDrag = (event: ReactPointerEvent<HTMLElement>) => {
     if (narrow) return;
     const tileEl = tileRef.current;
@@ -732,6 +762,7 @@ function DashboardTile({
             : '1px solid var(--dql-app-line, var(--border-color, rgba(0,0,0,0.08)))',
         borderRadius: 8,
         padding: isCompactMetric ? 12 : 14,
+        paddingBottom: showAskHint ? (isCompactMetric ? 42 : 46) : (isCompactMetric ? 12 : 14),
         display: 'flex',
         flexDirection: 'column',
         gap: isCompactMetric ? 4 : isGeneratedUi ? 10 : 6,
@@ -744,29 +775,19 @@ function DashboardTile({
         transition: dragOffset ? undefined : 'box-shadow 120ms ease, transform 120ms ease',
       }}
     >
-      {canAsk && (hovered || selected) && !askOpen ? (
+      {showAskHint ? (
         <button
           type="button"
           style={askHintStyle}
           onClick={(event) => {
             event.stopPropagation();
             if (blockId) onFocusBlock?.(blockId);
-            setAskOpen((value) => !value);
+            if (blockId) onAskBlock?.(blockId, defaultTileCopilotQuestion(item.title ?? blockId));
           }}
-          title="Ask AI about this tile"
+          title="Open app Copilot for this tile"
         >
           <Sparkles size={11} strokeWidth={2} /> Ask AI
         </button>
-      ) : null}
-      {askOpen && blockId ? (
-        <TileAskPopover
-          title={item.title ?? blockId}
-          onAsk={(question) => {
-            onAskBlock?.(blockId, question);
-            setAskOpen(false);
-          }}
-          onClose={() => setAskOpen(false)}
-        />
       ) : null}
       {editable && !narrow ? (
         <div
@@ -948,6 +969,35 @@ function TrustPill({ trust }: { trust: string }) {
   );
 }
 
+function DashboardStoryStrip({ story }: { story: DashboardStory }): JSX.Element {
+  return (
+    <section style={dashboardStoryStripStyle} aria-label="Current dashboard story">
+      <div style={dashboardStoryHeaderStyle}>
+        <div style={dashboardStoryIconStyle}>
+          <Sparkles size={15} strokeWidth={2.2} />
+        </div>
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <div style={dashboardStoryKickerStyle}>Story from current results</div>
+          <h3 style={dashboardStoryTitleStyle}>{story.title}</h3>
+        </div>
+        {story.trust ? <TrustPill trust={story.trust} /> : null}
+      </div>
+      <p style={dashboardStorySummaryStyle}>{story.summary}</p>
+      <div style={dashboardStoryChipRowStyle}>
+        <span style={dashboardStorySourceChipStyle}>{story.sourceTitle}</span>
+        {story.filters.map((filter) => (
+          <span key={`${filter.label}:${filter.value}`} style={dashboardStoryChipStyle}>
+            {filter.label}: {filter.value}
+          </span>
+        ))}
+        {story.chips.map((chip) => (
+          <span key={chip} style={dashboardStoryChipStyle}>{chip}</span>
+        ))}
+      </div>
+    </section>
+  );
+}
+
 const askHintStyle: CSSProperties = {
   position: 'absolute',
   bottom: 10,
@@ -968,107 +1018,8 @@ const askHintStyle: CSSProperties = {
   fontFamily: 'inherit',
 };
 
-function TileAskPopover({
-  title,
-  onAsk,
-  onClose,
-}: {
-  title: string;
-  onAsk: (question: string) => void;
-  onClose: () => void;
-}): JSX.Element {
-  const [value, setValue] = useState('');
-  return (
-    <div
-      onClick={(event) => event.stopPropagation()}
-      style={{
-        position: 'absolute',
-        top: 12,
-        left: 12,
-        right: 12,
-        zIndex: 40,
-        maxWidth: 360,
-        background: 'var(--dql-app-surface, var(--surface, #fff))',
-        border: '1px solid var(--dql-app-line, var(--border-color, rgba(0,0,0,0.12)))',
-        borderRadius: 12,
-        boxShadow: '0 18px 48px rgba(0,0,0,0.24)',
-        padding: 12,
-        display: 'flex',
-        flexDirection: 'column',
-        gap: 8,
-        cursor: 'auto',
-      }}
-    >
-      <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-        <Sparkles size={13} strokeWidth={2} style={{ color: 'var(--dql-app-accent, #4f46e5)' }} />
-        <span style={{ fontSize: 12, fontWeight: 800, flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-          Ask about {title}
-        </span>
-        <button type="button" onClick={onClose} title="Close" style={askIconButtonStyle}>
-          <X size={13} />
-        </button>
-      </div>
-      <form
-        onSubmit={(event) => {
-          event.preventDefault();
-          const text = value.trim();
-          if (text) onAsk(text);
-        }}
-        style={{ display: 'flex', gap: 6, alignItems: 'center' }}
-      >
-        <input
-          autoFocus
-          value={value}
-          onChange={(event) => setValue(event.target.value)}
-          placeholder="Ask a follow-up..."
-          style={{
-            flex: 1,
-            minWidth: 0,
-            height: 32,
-            border: '1px solid var(--dql-app-line, rgba(0,0,0,0.14))',
-            borderRadius: 8,
-            background: 'var(--dql-app-control, var(--surface, #fff))',
-            color: 'inherit',
-            padding: '0 9px',
-            fontSize: 12,
-          }}
-        />
-        <button type="submit" disabled={!value.trim()} title="Ask" style={askSubmitStyle(Boolean(value.trim()))}>
-          <Send size={13} />
-        </button>
-      </form>
-    </div>
-  );
-}
-
-const askIconButtonStyle: CSSProperties = {
-  width: 24,
-  height: 24,
-  border: 0,
-  borderRadius: 6,
-  background: 'transparent',
-  color: 'inherit',
-  cursor: 'pointer',
-  display: 'inline-flex',
-  alignItems: 'center',
-  justifyContent: 'center',
-  flexShrink: 0,
-};
-
-function askSubmitStyle(active: boolean): CSSProperties {
-  return {
-    width: 32,
-    height: 32,
-    flexShrink: 0,
-    border: '1px solid var(--dql-app-accent, #4f46e5)',
-    borderRadius: 8,
-    background: active ? 'var(--dql-app-accent, #4f46e5)' : 'var(--dql-app-accent-soft, rgba(79,70,229,0.12))',
-    color: active ? '#fff' : 'var(--dql-app-accent, #4f46e5)',
-    cursor: active ? 'pointer' : 'default',
-    display: 'inline-flex',
-    alignItems: 'center',
-    justifyContent: 'center',
-  };
+function defaultTileCopilotQuestion(title: string): string {
+  return `/ask Explain ${title} for a stakeholder. Start with the business meaning, current result, active filters, caveats, and recommended next action.`;
 }
 
 function TileBody({
@@ -1100,8 +1051,8 @@ function TileBody({
     }
     return <MarkdownTile markdown={tile.text?.markdown ?? ''} variant={tile.viz?.type === 'heading' ? 'heading' : 'text'} themeMode={themeMode} />;
   }
-  if (tile?.tileType === 'aiPin' && tile.aiPin && !tile.result) {
-    return <AiPinSummary pin={tile.aiPin} />;
+  if (tile?.tileType === 'aiPin' && tile.aiPin) {
+    return <AiPinSummary pin={tile.aiPin} result={tile.result} themeMode={themeMode} />;
   }
   if (error && !tile) return <span>{error}</span>;
   if (!tile) return <span>No run result.</span>;
@@ -1473,7 +1424,7 @@ function AddTileMenu({
           <AddTileMenuItem title="Certified block" description="Chart, table, or KPI from this App domain" onClick={onCertifiedBlock} />
           <AddTileMenuItem title="Text / summary" description="Narrative, notes, caveats, or CXO context" onClick={onText} />
           <AddTileMenuItem title="Section heading" description="Separate an App page into readable groups" onClick={onHeading} />
-          <AddTileMenuItem title="AI answer" description="Open scoped AI, then pin the answer to this App" onClick={onAi} />
+          <AddTileMenuItem title="Copilot insight" description="Open scoped AI, then pin the reviewed answer to this App" onClick={onAi} />
         </div>
       )}
     </div>
@@ -1634,8 +1585,17 @@ function MarkdownTile({ markdown, variant = 'text', themeMode }: { markdown: str
   );
 }
 
-function AiPinSummary({ pin }: { pin: NonNullable<DashboardRunResponse['tiles'][number]['aiPin']> }) {
+function AiPinSummary({
+  pin,
+  result,
+  themeMode,
+}: {
+  pin: NonNullable<DashboardRunResponse['tiles'][number]['aiPin']>;
+  result?: QueryResult;
+  themeMode: ThemeMode;
+}) {
   const [message, setMessage] = useState<string | null>(null);
+  const theme = themes[themeMode as NotebookThemeMode] ?? themes.light;
   const refresh = async () => {
     setMessage('Refreshing...');
     const result = await api.refreshAiPin(pin.appId, pin.id);
@@ -1649,11 +1609,17 @@ function AiPinSummary({ pin }: { pin: NonNullable<DashboardRunResponse['tiles'][
     window.dispatchEvent(new CustomEvent('dql-app-dashboard-updated', { detail: { appId: pin.appId, dashboardId: pin.dashboardId } }));
   };
   return (
-    <div style={{ width: '100%', alignSelf: 'stretch', overflow: 'auto', fontStyle: 'normal', lineHeight: 1.45 }}>
-      <div style={{ fontSize: 11, fontWeight: 700, color: pin.certification === 'certified' ? '#3fb950' : '#f0883e', marginBottom: 6 }}>
-        {pin.certification === 'certified' ? 'Certified' : 'AI generated / needs review'}
+    <div style={{ width: '100%', alignSelf: 'stretch', overflow: 'auto', fontStyle: 'normal', lineHeight: 1.5, display: 'grid', gap: 10 }}>
+      <div style={{ display: 'flex', gap: 6, alignItems: 'center', flexWrap: 'wrap' }}>
+        <span style={{ fontSize: 10.5, fontWeight: 800, color: pin.certification === 'certified' ? '#15803d' : '#b45309', background: pin.certification === 'certified' ? 'rgba(22,163,74,0.1)' : 'rgba(245,158,11,0.12)', border: `1px solid ${pin.certification === 'certified' ? 'rgba(22,163,74,0.22)' : 'rgba(245,158,11,0.24)'}`, borderRadius: 999, padding: '3px 7px' }}>
+          {pin.certification === 'certified' ? 'Certified' : 'Review required'}
+        </span>
+        <span style={{ fontSize: 10.5, color: 'var(--color-text-muted, rgba(0,0,0,0.58))' }}>Pinned report insight</span>
       </div>
-      <div style={{ whiteSpace: 'pre-wrap' }}>{pin.answer}</div>
+      <div style={{ minWidth: 0 }}>
+        {renderMarkdown(pin.answer, theme)}
+      </div>
+      {result?.rows?.length ? <AiPinEvidencePreview result={result} /> : null}
       <div style={{ display: 'flex', gap: 6, marginTop: 8, flexWrap: 'wrap' }}>
         {pin.sql && <button type="button" onClick={() => void refresh()} style={miniButtonStyle}>Refresh</button>}
         {pin.sql && pin.reviewStatus === 'needs_review' && <button type="button" onClick={() => void promote()} style={miniButtonStyle}>Promote</button>}
@@ -1661,6 +1627,41 @@ function AiPinSummary({ pin }: { pin: NonNullable<DashboardRunResponse['tiles'][
       </div>
       {message && <div style={{ marginTop: 6, fontSize: 11, opacity: 0.72 }}>{message}</div>}
       {pin.lastRefreshError && <div style={{ marginTop: 8, color: '#f85149' }}>{pin.lastRefreshError}</div>}
+    </div>
+  );
+}
+
+function AiPinEvidencePreview({ result }: { result: QueryResult }) {
+  const columns = (result.columns?.length ? result.columns : Object.keys(result.rows?.[0] ?? {})).slice(0, 4);
+  const rows = (result.rows ?? []).slice(0, 3);
+  if (!columns.length || !rows.length) return null;
+  return (
+    <div style={{ display: 'grid', gap: 6 }}>
+      <div style={{ color: 'var(--color-text-muted, rgba(0,0,0,0.58))', fontSize: 11, fontWeight: 750 }}>Supporting rows</div>
+      <div style={{ overflow: 'auto', border: '1px solid var(--border-color, rgba(0,0,0,0.08))', borderRadius: 6 }}>
+        <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 11 }}>
+          <thead>
+            <tr>
+              {columns.map((column) => (
+                <th key={column} style={{ textAlign: 'left', padding: '5px 7px', borderBottom: '1px solid var(--border-color, rgba(0,0,0,0.08))', color: 'var(--color-text-muted, rgba(0,0,0,0.58))' }}>
+                  {formatGenUiLabel(column)}
+                </th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((row, index) => (
+              <tr key={index}>
+                {columns.map((column) => (
+                  <td key={column} style={{ padding: '5px 7px', borderBottom: index === rows.length - 1 ? 'none' : '1px solid var(--border-color, rgba(0,0,0,0.06))' }}>
+                    {formatEvidenceValue(row[column])}
+                  </td>
+                ))}
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
     </div>
   );
 }
@@ -1992,6 +1993,328 @@ function roleForDisplayComponent(component?: string): string | undefined {
   return component ? 'evidence' : undefined;
 }
 
+function isStakeholderHiddenReviewTile(item: DashboardLayoutItem): boolean {
+  if (getDashboardItemBlockId(item) || item.aiPin) return false;
+  const genUi = getDqlGenUi(item);
+  const component = genUi?.component ?? item.display?.component;
+  const role = genUi?.role ?? roleForDisplayComponent(component);
+  const trustState = coerceTrustState(String(genUi?.trustState ?? item.display?.trustState ?? 'review_required'));
+  if (component === 'TrustCallout' || component === 'ResearchActions' || role === 'trust' || role === 'research') return true;
+  if (component !== 'NarrativePanel' && component !== 'BusinessBrief') return false;
+  if (trustState === 'certified') return false;
+  const text = [
+    item.title,
+    item.text?.markdown,
+    item.display?.rationale,
+    genUi?.rationale,
+    genUi?.insightTitle,
+  ].filter(Boolean).join(' ').toLowerCase();
+  return /\b(draft ready|review-required|review required|missing evidence|missing proof|trust gap|research drilldown|promote to a certified block|generated review placeholder|generated section)\b/.test(text);
+}
+
+function prepareStakeholderItems(
+  items: DashboardLayoutItem[],
+  tileResults: Map<string, DashboardRunTile>,
+  cols: number,
+): DashboardLayoutItem[] {
+  const deduped = items.filter((item) => {
+    return !isReviewRequiredAiPinStakeholderTile(item, tileResults.get(item.i))
+      && !isRedundantStaticStakeholderTile(item, items, tileResults)
+      && !isDuplicateAiPinStakeholderTile(item, items, tileResults);
+  });
+  const ranked = [...deduped].sort((a, b) => {
+    const priority = stakeholderTilePriority(b, tileResults.get(b.i), cols) - stakeholderTilePriority(a, tileResults.get(a.i), cols);
+    return priority !== 0 ? priority : layoutScore(a, cols) - layoutScore(b, cols);
+  });
+  return packDashboardItems(ranked, cols);
+}
+
+function isReviewRequiredAiPinStakeholderTile(item: DashboardLayoutItem, tile?: DashboardRunTile): boolean {
+  if (!item.aiPin) return false;
+  const certification = tile?.aiPin?.certification;
+  const reviewStatus = tile?.aiPin?.reviewStatus;
+  return certification !== 'certified' && reviewStatus !== 'certified';
+}
+
+function isDuplicateAiPinStakeholderTile(
+  item: DashboardLayoutItem,
+  items: DashboardLayoutItem[],
+  tileResults: Map<string, DashboardRunTile>,
+): boolean {
+  if (!item.aiPin) return false;
+  const fingerprint = aiPinStakeholderFingerprint(item, tileResults.get(item.i));
+  if (!fingerprint) return false;
+  const index = items.findIndex((candidate) => candidate.i === item.i);
+  return items.some((candidate, candidateIndex) => {
+    if (candidate.i === item.i || candidateIndex >= index || !candidate.aiPin) return false;
+    return aiPinStakeholderFingerprint(candidate, tileResults.get(candidate.i)) === fingerprint;
+  });
+}
+
+function aiPinStakeholderFingerprint(item: DashboardLayoutItem, tile?: DashboardRunTile): string {
+  const pin = tile?.aiPin;
+  const plan = pin?.analysisPlan && typeof pin.analysisPlan === 'object'
+    ? pin.analysisPlan as Record<string, unknown>
+    : null;
+  const question = normalizeAiPinText(pin?.question) || normalizeAiPinText(item.title);
+  const sourceBlock = normalizeAiPinText(plan?.sourceBlockId);
+  const sourceTile = normalizeAiPinText(plan?.sourceTileId);
+  const result = pin?.result ? aiPinResultFingerprint(pin.result) : '';
+  if (!question && !sourceBlock && !sourceTile) return '';
+  return [question, sourceBlock, sourceTile, result].filter(Boolean).join('|');
+}
+
+function normalizeAiPinText(value: unknown): string {
+  return String(value ?? '')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function aiPinResultFingerprint(result: unknown): string {
+  if (!result || typeof result !== 'object') return '';
+  const record = result as { columns?: unknown; rows?: unknown };
+  const columns = Array.isArray(record.columns) ? record.columns.map((column) => String(column).toLowerCase()).join(',') : '';
+  const rows = Array.isArray(record.rows) ? record.rows.slice(0, 8).map((row) => stableFingerprintValue(row)).join(';') : '';
+  return columns || rows ? `${columns}:${rows}` : '';
+}
+
+function stableFingerprintValue(value: unknown): string {
+  if (value === null || value === undefined) return '';
+  if (typeof value !== 'object') return String(value);
+  if (Array.isArray(value)) return `[${value.map(stableFingerprintValue).join(',')}]`;
+  const record = value as Record<string, unknown>;
+  return `{${Object.keys(record).sort().map((key) => `${key}:${stableFingerprintValue(record[key])}`).join(',')}}`;
+}
+
+function stakeholderTilePriority(item: DashboardLayoutItem, tile: DashboardRunTile | undefined, cols: number): number {
+  let score = 0;
+  if (item.parameterBindings?.length) score += 5000;
+  if (tile?.filters?.applied?.length) score += 4000;
+  if (tile?.certificationStatus === 'certified') score += 1800;
+  if (getDashboardItemBlockId(item)) score += 900;
+  if (tile?.status === 'ok' && tile.result?.rows?.length) score += 500;
+  score -= autoLayoutRank(item) * 80;
+  score -= layoutScore(item, cols) / 1000;
+  return score;
+}
+
+function isRedundantStaticStakeholderTile(
+  item: DashboardLayoutItem,
+  items: DashboardLayoutItem[],
+  tileResults: Map<string, DashboardRunTile>,
+): boolean {
+  if (item.parameterBindings?.length || item.aiPin || !getDashboardItemBlockId(item)) return false;
+  const tile = tileResults.get(item.i);
+  const fingerprint = tile?.result ? stakeholderResultFingerprint(tile.result) : null;
+  if (!fingerprint) return false;
+  return items.some((candidate) => {
+    if (candidate.i === item.i || !isFilterAwareStakeholderItem(candidate, tileResults.get(candidate.i))) return false;
+    const candidateTile = tileResults.get(candidate.i);
+    const candidateFingerprint = candidateTile?.result ? stakeholderResultFingerprint(candidateTile.result) : null;
+    return Boolean(candidateFingerprint && sameStakeholderFingerprint(fingerprint, candidateFingerprint));
+  });
+}
+
+function isFilterAwareStakeholderItem(item: DashboardLayoutItem, tile?: DashboardRunTile): boolean {
+  return Boolean(item.parameterBindings?.length || tile?.filters?.applied?.length);
+}
+
+function stakeholderResultFingerprint(result: QueryResult): { columns: string; label: string; metric: string; metricValue: string } | null {
+  const rows = result.rows ?? [];
+  if (!rows.length) return null;
+  const columns = result.columns?.length ? result.columns : Object.keys(rows[0] ?? {});
+  if (!columns.length) return null;
+  const labelColumn = pickStoryLabelColumn(columns, rows);
+  const metricColumn = pickStoryMetricColumn(columns, rows);
+  const first = rows[0];
+  return {
+    columns: columns.map((column) => column.toLowerCase()).sort().join('|'),
+    label: labelColumn ? canonicalStakeholderValue(first[labelColumn]) : '',
+    metric: metricColumn?.toLowerCase() ?? '',
+    metricValue: metricColumn ? canonicalStakeholderValue(first[metricColumn]) : '',
+  };
+}
+
+function sameStakeholderFingerprint(
+  left: NonNullable<ReturnType<typeof stakeholderResultFingerprint>>,
+  right: NonNullable<ReturnType<typeof stakeholderResultFingerprint>>,
+): boolean {
+  return left.columns === right.columns
+    && left.label === right.label
+    && left.metric === right.metric
+    && left.metricValue === right.metricValue;
+}
+
+function canonicalStakeholderValue(value: unknown): string {
+  if (value === null || value === undefined) return '';
+  if (typeof value === 'number') return Number.isFinite(value) ? String(value) : '';
+  return String(value).trim().toLowerCase().replace(/\s+/g, ' ');
+}
+
+function buildDashboardStory(
+  items: DashboardLayoutItem[],
+  tileResults: Map<string, DashboardRunTile>,
+  variables: Record<string, unknown>,
+): DashboardStory | null {
+  const candidate = items
+    .map((item, index) => ({ item, tile: tileResults.get(item.i), index }))
+    .filter((entry): entry is { item: DashboardLayoutItem; tile: DashboardRunTile; index: number } => {
+      return entry.tile?.status === 'ok'
+        && Boolean(entry.tile.result)
+        && Array.isArray(entry.tile.result?.rows)
+        && entry.tile.result.rows.length > 0;
+    })
+    .sort((a, b) => {
+      const scoreA = storyTileScore(a.item, a.tile, a.index);
+      const scoreB = storyTileScore(b.item, b.tile, b.index);
+      return scoreB - scoreA;
+    })[0];
+  if (!candidate?.tile.result) return null;
+
+  const result = candidate.tile.result;
+  const rows = result.rows;
+  const columns = result.columns ?? Object.keys(rows[0] ?? {});
+  if (!columns.length) return null;
+
+  const genUi = getDqlGenUi(candidate.item);
+  const labelColumn = pickStoryLabelColumn(columns, rows, genUi?.fieldHints?.label);
+  const metricColumn = pickStoryMetricColumn(columns, rows, genUi?.fieldHints?.value ?? genUi?.fieldHints?.y);
+  const first = rows[0];
+  const second = rows[1];
+  const firstLabel = labelColumn ? formatEvidenceValue(first[labelColumn]) : 'The leading result';
+  const secondLabel = second && labelColumn ? formatEvidenceValue(second[labelColumn]) : null;
+  const firstMetric = metricColumn ? toStoryNumber(first[metricColumn]) : null;
+  const secondMetric = metricColumn && second ? toStoryNumber(second[metricColumn]) : null;
+  const metricLabel = metricColumn ? storyMetricLabel(metricColumn) : null;
+  const filters = storyFilterChips(variables);
+  const filterPhrase = filters.length ? 'under the selected app filters' : 'in the current dashboard view';
+  const sourceTitle = candidate.item.title ?? candidate.tile.title ?? getDashboardItemBlockId(candidate.item) ?? 'Dashboard result';
+  const rowCount = result.rowCount ?? rows.length;
+  const trust = candidate.tile.certificationStatus === 'certified'
+    ? 'certified'
+    : coerceTrustState(String(candidate.item.display?.trustState ?? genUi?.trustState ?? 'review_required'));
+  const title = metricLabel ? `${formatGenUiLabel(metricLabel)} snapshot` : 'Dashboard snapshot';
+
+  let summary: string;
+  if (metricLabel && firstMetric !== null) {
+    const leading = `${firstLabel} leads ${metricLabel} with ${formatEvidenceValue(firstMetric)}`;
+    if (secondLabel && secondMetric !== null && Number.isFinite(firstMetric - secondMetric)) {
+      const gap = Math.abs(firstMetric - secondMetric);
+      summary = `${leading}, ahead of ${secondLabel} by ${formatEvidenceValue(gap)} ${filterPhrase}.`;
+    } else {
+      summary = `${leading} ${filterPhrase}.`;
+    }
+  } else {
+    summary = `${sourceTitle} returned ${rowCount} ${rowCount === 1 ? 'row' : 'rows'} ${filterPhrase}.`;
+  }
+
+  return {
+    title,
+    summary,
+    sourceTitle,
+    trust,
+    filters,
+    chips: [
+      `${rowCount} ${rowCount === 1 ? 'row' : 'rows'}`,
+      columns.length ? `${columns.length} fields` : '',
+    ].filter(Boolean),
+  };
+}
+
+function storyTileScore(item: DashboardLayoutItem, tile: DashboardRunTile, index: number): number {
+  const genUi = getDqlGenUi(item);
+  const component = genUi?.component ?? item.display?.component;
+  const result = tile.result;
+  let score = 1000 - index;
+  if (tile.certificationStatus === 'certified') score += 500;
+  if (getDashboardItemBlockId(item)) score += 180;
+  if (tile.filters?.applied?.length) score += 260;
+  if (item.parameterBindings?.length) score += 220;
+  if (component === 'RankingPanel' || component === 'EvidenceTable' || component === 'KpiMetric') score += 120;
+  if (item.viz.type === 'table' || item.viz.type === 'bar' || item.viz.type === 'kpi') score += 70;
+  if (result && pickStoryMetricColumn(result.columns, result.rows)) score += 80;
+  if (result && pickStoryLabelColumn(result.columns, result.rows)) score += 50;
+  return score;
+}
+
+function pickStoryLabelColumn(columns: string[], rows: QueryResult['rows'], hint?: string): string | undefined {
+  const hinted = pickHintedColumn(columns, hint);
+  if (hinted) return hinted;
+  return columns.find((column) => /\b(player|customer|account|team|segment|category|name|label|title|entity)\b/i.test(column))
+    ?? columns.find((column) => !isNumericColumn(column, rows) && !/\b(date|time|year|month|id)\b/i.test(column))
+    ?? columns.find((column) => !isNumericColumn(column, rows));
+}
+
+function pickStoryMetricColumn(columns: string[], rows: QueryResult['rows'], hint?: string): string | undefined {
+  const hinted = pickHintedColumn(columns, hint);
+  if (hinted && isNumericColumn(hinted, rows)) return hinted;
+  return columns
+    .filter((column) => isNumericColumn(column, rows))
+    .sort((a, b) => storyMetricRank(a) - storyMetricRank(b))[0];
+}
+
+function pickHintedColumn(columns: string[], hint?: string): string | undefined {
+  const normalizedHint = hint?.toLowerCase().trim();
+  if (!normalizedHint) return undefined;
+  return columns.find((column) => {
+    const lower = column.toLowerCase();
+    return lower === normalizedHint || lower.includes(normalizedHint) || normalizedHint.includes(lower);
+  });
+}
+
+function storyMetricRank(column: string): number {
+  const lower = column.toLowerCase();
+  if (/(total|revenue|amount|points|score|value|sales|arr|mrr)/.test(lower)) return 1;
+  if (/(count|orders|games|customers|rows|volume)/.test(lower)) return 2;
+  if (/(rate|pct|percent|ratio|margin|average|avg)/.test(lower)) return 3;
+  if (/(rank|position|index)/.test(lower)) return 20;
+  if (/(date|year|month|day|week|id)/.test(lower)) return 90;
+  return 30;
+}
+
+function storyMetricLabel(column: string): string {
+  return formatGenUiLabel(column).toLowerCase();
+}
+
+function storyFilterChips(variables: Record<string, unknown>): Array<{ label: string; value: string }> {
+  return Object.entries(variables)
+    .filter(([key, value]) => {
+      if (/^(smartView|persona|dashboardId|appId)$/i.test(key)) return false;
+      if (key.startsWith('__')) return false;
+      if (value === null || value === undefined || value === '') return false;
+      if (Array.isArray(value) && value.length === 0) return false;
+      return typeof value !== 'object' || Array.isArray(value);
+    })
+    .slice(0, 6)
+    .map(([key, value]) => ({
+      label: formatGenUiLabel(key),
+      value: Array.isArray(value) ? value.map((entry) => formatStoryFilterValue(key, entry)).join(', ') : formatStoryFilterValue(key, value),
+    }));
+}
+
+function formatStoryFilterValue(key: string, value: unknown): string {
+  const numeric = typeof value === 'number'
+    ? value
+    : typeof value === 'string' && value.trim() !== ''
+      ? Number(value)
+      : NaN;
+  if (/(season|year)/i.test(key) && Number.isInteger(numeric) && numeric >= 1900 && numeric <= 2200) {
+    return String(numeric);
+  }
+  return formatEvidenceValue(value);
+}
+
+function toStoryNumber(value: unknown): number | null {
+  if (typeof value === 'number' && Number.isFinite(value)) return value;
+  if (typeof value === 'string' && value.trim() !== '') {
+    const numeric = Number(value);
+    return Number.isFinite(numeric) ? numeric : null;
+  }
+  return null;
+}
+
 function coerceLayoutIntent(value?: string): NonNullable<DashboardLayoutItem['display']>['layoutIntent'] {
   return value === 'compact' || value === 'standard' || value === 'wide' || value === 'tall' || value === 'full' || value === 'auto'
     ? value
@@ -2063,7 +2386,7 @@ function componentLabelForGenUi(genUi: DqlGenUiMetadata): string {
     case 'TrustCallout':
       return 'Trust';
     case 'ResearchActions':
-      return 'Research';
+      return 'Analysis';
     case 'NarrativePanel':
       return 'Narrative';
     default:
@@ -2177,6 +2500,88 @@ const dashboardEditHintStyle: CSSProperties = {
   color: 'var(--dql-app-muted, var(--color-text-secondary, rgba(0,0,0,0.64)))',
   fontSize: 12,
   lineHeight: 1.45,
+};
+
+const dashboardStoryStripStyle: CSSProperties = {
+  border: '1px solid var(--dql-app-line-2, var(--border-color, rgba(15,23,42,0.10)))',
+  borderRadius: 10,
+  background: 'linear-gradient(180deg, rgba(255,255,255,0.96), rgba(248,250,252,0.88))',
+  boxShadow: '0 8px 24px rgba(15,23,42,0.05)',
+  padding: 14,
+  marginBottom: 12,
+  display: 'grid',
+  gap: 9,
+};
+
+const dashboardStoryHeaderStyle: CSSProperties = {
+  display: 'flex',
+  alignItems: 'flex-start',
+  gap: 10,
+  minWidth: 0,
+};
+
+const dashboardStoryIconStyle: CSSProperties = {
+  width: 30,
+  height: 30,
+  borderRadius: 8,
+  background: 'var(--dql-app-accent-soft, rgba(79,70,229,0.10))',
+  color: 'var(--dql-app-accent, #4f46e5)',
+  display: 'inline-flex',
+  alignItems: 'center',
+  justifyContent: 'center',
+  flexShrink: 0,
+};
+
+const dashboardStoryKickerStyle: CSSProperties = {
+  fontSize: 10.5,
+  fontWeight: 820,
+  letterSpacing: 0,
+  textTransform: 'uppercase',
+  color: 'var(--dql-app-muted, rgba(15,23,42,0.58))',
+};
+
+const dashboardStoryTitleStyle: CSSProperties = {
+  margin: '2px 0 0',
+  fontSize: 15,
+  lineHeight: 1.25,
+  fontWeight: 820,
+  color: 'var(--dql-app-text, inherit)',
+};
+
+const dashboardStorySummaryStyle: CSSProperties = {
+  margin: 0,
+  fontSize: 13.5,
+  lineHeight: 1.48,
+  color: 'var(--dql-app-muted, rgba(15,23,42,0.72))',
+};
+
+const dashboardStoryChipRowStyle: CSSProperties = {
+  display: 'flex',
+  alignItems: 'center',
+  gap: 6,
+  flexWrap: 'wrap',
+};
+
+const dashboardStoryChipStyle: CSSProperties = {
+  border: '1px solid var(--dql-app-line, var(--border-color, rgba(15,23,42,0.10)))',
+  borderRadius: 999,
+  background: 'var(--dql-app-surface, rgba(255,255,255,0.78))',
+  color: 'var(--dql-app-muted, rgba(15,23,42,0.68))',
+  padding: '3px 8px',
+  fontSize: 11,
+  fontWeight: 720,
+  lineHeight: 1.2,
+  maxWidth: '100%',
+  overflow: 'hidden',
+  textOverflow: 'ellipsis',
+  whiteSpace: 'nowrap',
+};
+
+const dashboardStorySourceChipStyle: CSSProperties = {
+  ...dashboardStoryChipStyle,
+  color: 'var(--dql-app-accent, #4f46e5)',
+  borderColor: 'rgba(79,70,229,0.22)',
+  background: 'var(--dql-app-accent-soft, rgba(79,70,229,0.08))',
 };
 
 function dashboardChatDrawerStyle(expanded: boolean): CSSProperties {

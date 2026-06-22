@@ -104,6 +104,46 @@ describe('parseDashboardDocument', () => {
     });
   });
 
+  it('preserves app filter, parameter, evidence, and trust metadata on tiles', () => {
+    const doc = {
+      ...minimal,
+      filters: [{ id: 'season', type: 'select', options: ['2016', '2017'], bindsTo: 'game_date_est' }],
+      layout: {
+        ...minimal.layout,
+        items: [
+          {
+            i: 'scorers',
+            x: 0, y: 0, w: 8, h: 4,
+            block: { blockId: 'top_scorers' },
+            viz: { type: 'bar' },
+            filterBindings: [
+              { filter: 'season', binding: 'game_date_est', mode: 'parameter', paramNames: ['season_year'], required: true },
+            ],
+            parameterBindings: [
+              { param: 'season_year', source: 'dashboard_filter', filter: 'season' },
+            ],
+            sourceEvidence: [
+              { source: 'block:top_scorers', reason: 'Certified scorer ranking block.', kind: 'block', trustState: 'certified' },
+            ],
+            trustState: 'certified',
+            reviewStatus: 'certified',
+          },
+        ],
+      },
+    };
+
+    const { document, errors } = parseDashboardDocument(JSON.stringify(doc));
+
+    expect(errors).toEqual([]);
+    expect(document?.layout.items[0]).toMatchObject({
+      filterBindings: [{ filter: 'season', binding: 'game_date_est', mode: 'parameter', paramNames: ['season_year'], required: true }],
+      parameterBindings: [{ param: 'season_year', source: 'dashboard_filter', filter: 'season' }],
+      sourceEvidence: [{ source: 'block:top_scorers', reason: 'Certified scorer ranking block.', kind: 'block', trustState: 'certified' }],
+      trustState: 'certified',
+      reviewStatus: 'certified',
+    });
+  });
+
   it('errors on unknown viz type', () => {
     const bad = {
       ...minimal,

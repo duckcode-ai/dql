@@ -10,10 +10,10 @@
  * Subcommands:
  *   dql app new <id> --domain <domain> [--owner <user>]
  *   dql app generate "<prompt>" [--domain <domain>] [--owner <user>] [--ai-layout]
- *   dql app ls
- *   dql app show <id>
- *   dql app build [--app <id>]
- *   dql app reindex [--app <id>]   (no-op until the agent KG package lands; aliased)
+ *   dql app ls [path]
+ *   dql app show <id> [path]
+ *   dql app build [path]
+ *   dql app reindex [path]
  */
 
 import {
@@ -23,7 +23,7 @@ import {
   readFileSync,
   writeFileSync,
 } from "node:fs";
-import { join, relative } from "node:path";
+import { join, relative, resolve } from "node:path";
 import { resolveDbtManifestPath } from "@duckcodeailabs/dql-core";
 import {
   buildManifest,
@@ -53,22 +53,22 @@ export async function runApp(
       return runAppGenerate(rest, flags);
     case "ls":
     case "list":
-      return runAppList(flags);
+      return runAppList(rest[0] ?? null, flags);
     case "show":
       return runAppShow(rest, flags);
     case "build":
-      return runAppBuild(flags);
+      return runAppBuild(rest[0] ?? null, flags);
     case "reindex":
-      return runAppReindex(flags);
+      return runAppReindex(rest[0] ?? null, flags);
     default:
       throw new Error(
         "Usage: dql app <new|ls|show|build|reindex> [args]\n" +
           "  dql app new <id> --domain <domain> [--owner <user>]\n" +
           '  dql app generate "<prompt>" [--domain <domain>] [--owner <user>] [--ai-layout]\n' +
-          "  dql app ls\n" +
-          "  dql app show <id>\n" +
-          "  dql app build\n" +
-          "  dql app reindex",
+          "  dql app ls [path]\n" +
+          "  dql app show <id> [path]\n" +
+          "  dql app build [path]\n" +
+          "  dql app reindex [path]",
       );
   }
 }
@@ -285,8 +285,8 @@ async function runAppGenerate(rest: string[], flags: CLIFlags): Promise<void> {
 
 // ---- ls ----
 
-async function runAppList(flags: CLIFlags): Promise<void> {
-  const projectRoot = findProjectRoot(process.cwd());
+async function runAppList(targetPath: string | null, flags: CLIFlags): Promise<void> {
+  const projectRoot = resolveAppProjectRoot(targetPath);
   const apps = collectApps(projectRoot);
 
   if ((flags as { format?: string }).format === "json") {
@@ -313,7 +313,7 @@ async function runAppList(flags: CLIFlags): Promise<void> {
 async function runAppShow(rest: string[], flags: CLIFlags): Promise<void> {
   const id = rest[0];
   if (!id) throw new Error("Usage: dql app show <id>");
-  const projectRoot = findProjectRoot(process.cwd());
+  const projectRoot = resolveAppProjectRoot(rest[1] ?? null);
   const apps = collectApps(projectRoot);
   const app = apps.find((a) => a.id === id);
   if (!app) throw new Error(`No app named "${id}" under apps/ or domains/<domain>/apps/`);
@@ -340,8 +340,8 @@ async function runAppShow(rest: string[], flags: CLIFlags): Promise<void> {
 
 // ---- build ----
 
-async function runAppBuild(flags: CLIFlags): Promise<void> {
-  const projectRoot = findProjectRoot(process.cwd());
+async function runAppBuild(targetPath: string | null, flags: CLIFlags): Promise<void> {
+  const projectRoot = resolveAppProjectRoot(targetPath);
   // Build the manifest with dbt import resolved the same way `dql compile`
   // does, so `dql app build` produces an identical on-disk artifact.
   const dbtManifestPath = resolveDbtManifestPath(projectRoot) ?? undefined;
@@ -410,9 +410,9 @@ async function runAppBuild(flags: CLIFlags): Promise<void> {
 
 // ---- reindex (alias hook for the agent KG package) ----
 
-async function runAppReindex(flags: CLIFlags): Promise<void> {
+async function runAppReindex(targetPath: string | null, flags: CLIFlags): Promise<void> {
   const { reindexProject } = await import("@duckcodeailabs/dql-agent");
-  const projectRoot = findProjectRoot(process.cwd());
+  const projectRoot = resolveAppProjectRoot(targetPath);
   const stats = await reindexProject(projectRoot);
   if ((flags as { format?: string }).format === "json") {
     console.log(JSON.stringify({ ok: true, ...stats }, null, 2));
@@ -436,6 +436,10 @@ async function readPrompt(rest: string[], flags: CLIFlags): Promise<string> {
 function cleanOptional(value?: string): string | undefined {
   const cleaned = value?.trim();
   return cleaned || undefined;
+}
+
+function resolveAppProjectRoot(targetPath: string | null): string {
+  return findProjectRoot(resolve(targetPath || process.cwd()));
 }
 
 interface ResolvedApp extends Omit<ManifestApp, "dashboards"> {

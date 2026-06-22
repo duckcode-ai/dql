@@ -24,6 +24,25 @@ export type LocalAppInvestigationIntent =
   | 'trust_gap_review';
 export type LocalAppInvestigationStatus = 'draft' | 'running' | 'ready' | 'error';
 export type LocalAppInvestigationReviewStatus = LocalAiPinReviewStatus;
+export type LocalAppInvestigationReportSectionKind =
+  | 'executive_answer'
+  | 'business_interpretation'
+  | 'key_numbers'
+  | 'recommended_next_step'
+  | 'review_boundary'
+  | 'validation'
+  | 'reusable_logic'
+  | 'custom';
+
+export interface LocalAppInvestigationReportSection {
+  id: string;
+  kind: LocalAppInvestigationReportSectionKind;
+  title: string;
+  body: string;
+  tone?: 'answer' | 'insight' | 'warning' | 'review' | 'neutral';
+  bullets?: string[];
+  evidenceRefs?: string[];
+}
 
 export interface LocalAppConversationContext {
   activeSurface?: string;
@@ -148,6 +167,7 @@ export interface LocalAppInvestigation {
   driverCards?: unknown[];
   resultPreviews?: unknown[];
   evidence?: unknown;
+  reportSections?: LocalAppInvestigationReportSection[];
   generatedSql?: string;
   reviewStatus: LocalAppInvestigationReviewStatus;
   error?: string;
@@ -170,6 +190,11 @@ export interface CreateLocalAppInvestigationInput {
   generatedSql?: string;
 }
 
+export type FindReusableLocalAppInvestigationInput = Pick<
+  CreateLocalAppInvestigationInput,
+  'appId' | 'dashboardId' | 'sourceTileId' | 'sourceBlockId' | 'question' | 'intent' | 'context'
+>;
+
 export interface UpdateLocalAppInvestigationInput {
   dashboardId?: string;
   sourceTileId?: string;
@@ -185,6 +210,7 @@ export interface UpdateLocalAppInvestigationInput {
   driverCards?: unknown[];
   resultPreviews?: unknown[];
   evidence?: unknown;
+  reportSections?: LocalAppInvestigationReportSection[];
   generatedSql?: string;
   reviewStatus?: LocalAppInvestigationReviewStatus;
   error?: string;
@@ -334,9 +360,9 @@ export class LocalAppStorage {
       INSERT INTO app_investigations (
         id, app_id, dashboard_id, source_tile_id, source_block_id, title, question,
         intent, context, status, summary, recommendation, metrics, driver_cards,
-        result_previews, evidence, generated_sql, review_status, error, pinned_ai_pin_id,
+        result_previews, evidence, report_sections, generated_sql, review_status, error, pinned_ai_pin_id,
         created_at, updated_at, last_run_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       investigation.id,
       investigation.appId,
@@ -348,6 +374,7 @@ export class LocalAppStorage {
       investigation.intent,
       json(investigation.context),
       investigation.status,
+      null,
       null,
       null,
       null,
@@ -366,6 +393,10 @@ export class LocalAppStorage {
   }
 
   listAppInvestigations(appId: string, dashboardId?: string): LocalAppInvestigation[] {
+    return dedupeAppInvestigations(this.listRawAppInvestigations(appId, dashboardId));
+  }
+
+  private listRawAppInvestigations(appId: string, dashboardId?: string): LocalAppInvestigation[] {
     const params: unknown[] = [appId];
     const dashboardClause = dashboardId ? ' AND dashboard_id = ?' : '';
     if (dashboardId) params.push(dashboardId);
@@ -375,6 +406,15 @@ export class LocalAppStorage {
       ORDER BY updated_at DESC
     `).all(...params) as Record<string, unknown>[];
     return rows.map(rowToInvestigation);
+  }
+
+  findReusableAppInvestigation(input: FindReusableLocalAppInvestigationInput): LocalAppInvestigation | null {
+    const target = appInvestigationReuseFingerprint(input);
+    const candidates = this.listRawAppInvestigations(input.appId, cleanOptionalString(input.dashboardId));
+    return candidates.find((item) => {
+      if (item.reviewStatus === 'rejected') return false;
+      return appInvestigationReuseFingerprint(item) === target;
+    }) ?? null;
   }
 
   getAppInvestigation(id: string): LocalAppInvestigation | null {
@@ -390,7 +430,7 @@ export class LocalAppStorage {
       UPDATE app_investigations
       SET dashboard_id = ?, source_tile_id = ?, source_block_id = ?, title = ?, question = ?,
           intent = ?, context = ?, status = ?, summary = ?, recommendation = ?, metrics = ?,
-          driver_cards = ?, result_previews = ?, evidence = ?, generated_sql = ?, review_status = ?,
+          driver_cards = ?, result_previews = ?, evidence = ?, report_sections = ?, generated_sql = ?, review_status = ?,
           error = ?, pinned_ai_pin_id = ?, updated_at = ?, last_run_at = ?
       WHERE id = ?
     `).run(
@@ -408,6 +448,7 @@ export class LocalAppStorage {
       input.driverCards === undefined ? json(current.driverCards ?? []) : json(input.driverCards ?? []),
       input.resultPreviews === undefined ? json(current.resultPreviews ?? []) : json(input.resultPreviews ?? []),
       input.evidence === undefined ? json(current.evidence) : json(input.evidence),
+      input.reportSections === undefined ? json(current.reportSections ?? []) : json(normalizeReportSections(input.reportSections)),
       input.generatedSql === undefined ? (current.generatedSql ?? null) : (cleanOptionalString(input.generatedSql) ?? null),
       input.reviewStatus ?? current.reviewStatus,
       input.error === undefined ? (current.error ?? null) : (cleanOptionalString(input.error) ?? null),
@@ -579,6 +620,7 @@ export class LocalAppStorage {
         driver_cards TEXT,
         result_previews TEXT,
         evidence TEXT,
+        report_sections TEXT,
         generated_sql TEXT,
         review_status TEXT NOT NULL,
         error TEXT,
@@ -626,6 +668,7 @@ export class LocalAppStorage {
     this.ensureColumn('app_investigations', 'result_previews', 'TEXT');
     this.ensureColumn('app_investigations', 'generated_sql', 'TEXT');
     this.ensureColumn('app_investigations', 'pinned_ai_pin_id', 'TEXT');
+    this.ensureColumn('app_investigations', 'report_sections', 'TEXT');
     this.ensureColumn('app_conversations', 'context', 'TEXT');
   }
 
@@ -749,6 +792,7 @@ function rowToInvestigation(row: Record<string, unknown>): LocalAppInvestigation
     driverCards: (parseJson(row.driver_cards) as unknown[] | undefined) ?? [],
     resultPreviews: (parseJson(row.result_previews) as unknown[] | undefined) ?? [],
     evidence: parseJson(row.evidence),
+    reportSections: normalizeReportSections(parseJson(row.report_sections)),
     generatedSql: optionalString(row.generated_sql),
     reviewStatus: parseReviewStatus(row.review_status),
     error: optionalString(row.error),
@@ -757,6 +801,51 @@ function rowToInvestigation(row: Record<string, unknown>): LocalAppInvestigation
     updatedAt: String(row.updated_at),
     lastRunAt: optionalString(row.last_run_at),
   };
+}
+
+function normalizeReportSections(value: unknown): LocalAppInvestigationReportSection[] {
+  if (!Array.isArray(value)) return [];
+  const sections: LocalAppInvestigationReportSection[] = [];
+  for (const raw of value) {
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) continue;
+    const record = raw as Record<string, unknown>;
+    const title = cleanOptionalString(record.title);
+    const body = cleanOptionalString(record.body);
+    if (!title || !body) continue;
+    const id = cleanOptionalString(record.id) ?? slugForReportSection(title, sections.length);
+    sections.push({
+      id,
+      kind: parseReportSectionKind(record.kind),
+      title,
+      body,
+      tone: parseReportSectionTone(record.tone),
+      bullets: Array.isArray(record.bullets)
+        ? record.bullets.map(cleanOptionalString).filter((item): item is string => Boolean(item))
+        : undefined,
+      evidenceRefs: Array.isArray(record.evidenceRefs)
+        ? record.evidenceRefs.map(cleanOptionalString).filter((item): item is string => Boolean(item))
+        : undefined,
+    });
+  }
+  return sections;
+}
+
+function parseReportSectionKind(value: unknown): LocalAppInvestigationReportSectionKind {
+  if (
+    value === 'executive_answer'
+    || value === 'business_interpretation'
+    || value === 'key_numbers'
+    || value === 'recommended_next_step'
+    || value === 'review_boundary'
+    || value === 'validation'
+    || value === 'reusable_logic'
+  ) return value;
+  return 'custom';
+}
+
+function parseReportSectionTone(value: unknown): LocalAppInvestigationReportSection['tone'] | undefined {
+  if (value === 'answer' || value === 'insight' || value === 'warning' || value === 'review' || value === 'neutral') return value;
+  return undefined;
 }
 
 function parseReviewStatus(value: unknown): LocalAiPinReviewStatus {
@@ -789,6 +878,11 @@ function cleanOptionalString(value: unknown): string | undefined {
   return typeof value === 'string' && value.trim().length > 0 ? value.trim() : undefined;
 }
 
+function slugForReportSection(title: string, index: number): string {
+  const slug = title.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
+  return slug ? `${slug}-${index + 1}` : `section-${index + 1}`;
+}
+
 function titleFromMessages(messages: CreateLocalAppConversationInput['messages']): string | undefined {
   const firstUserMessage = messages?.find((message) => message.role === 'user' && message.content.trim());
   if (!firstUserMessage) return undefined;
@@ -797,6 +891,53 @@ function titleFromMessages(messages: CreateLocalAppConversationInput['messages']
 
 function titleFromQuestion(question: string): string {
   return question.trim().replace(/\s+/g, ' ').slice(0, 90) || 'Research investigation';
+}
+
+function appInvestigationReuseFingerprint(input: FindReusableLocalAppInvestigationInput): string {
+  return [
+    normalizeFingerprintString(input.appId),
+    normalizeFingerprintString(input.dashboardId),
+    normalizeFingerprintString(input.sourceTileId),
+    normalizeFingerprintString(input.sourceBlockId),
+    normalizeFingerprintString(input.question),
+    normalizeFingerprintString(input.intent ?? 'driver_breakdown'),
+    stableFingerprintValue(input.context),
+  ].join('|');
+}
+
+function dedupeAppInvestigations(items: LocalAppInvestigation[]): LocalAppInvestigation[] {
+  const seen = new Set<string>();
+  const out: LocalAppInvestigation[] = [];
+  for (const item of items) {
+    const fingerprint = appInvestigationReuseFingerprint(item);
+    if (seen.has(fingerprint)) continue;
+    seen.add(fingerprint);
+    out.push(item);
+  }
+  return out;
+}
+
+function normalizeFingerprintString(value: unknown): string {
+  return typeof value === 'string' ? value.trim().replace(/\s+/g, ' ').toLowerCase() : '';
+}
+
+function stableFingerprintValue(value: unknown): string {
+  if (value === undefined || value === null) return '';
+  return JSON.stringify(stableFingerprintObject(value));
+}
+
+function stableFingerprintObject(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(stableFingerprintObject);
+  if (!value || typeof value !== 'object') {
+    return typeof value === 'string' ? value.trim().replace(/\s+/g, ' ') : value;
+  }
+  const record = value as Record<string, unknown>;
+  const out: Record<string, unknown> = {};
+  for (const key of Object.keys(record).sort()) {
+    if (/^(nonce|timestamp|createdAt|updatedAt|lastRunAt)$/i.test(key)) continue;
+    out[key] = stableFingerprintObject(record[key]);
+  }
+  return out;
 }
 
 function json(value: unknown): string | null {

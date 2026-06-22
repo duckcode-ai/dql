@@ -68,4 +68,49 @@ describe('runApp', () => {
       filePath: 'domains/customer/apps/customer-360',
     });
   });
+
+  it('lists apps from an explicit project path', async () => {
+    const projectRoot = mkdtempSync(join(tmpdir(), 'dql-app-list-path-'));
+    tempDirs.push(projectRoot);
+    writeFileSync(join(projectRoot, 'dql.config.json'), JSON.stringify({ project: 'demo' }), 'utf-8');
+    mkdirSync(join(projectRoot, 'apps', 'nba-performance', 'dashboards'), { recursive: true });
+    writeFileSync(join(projectRoot, 'apps', 'nba-performance', 'dql.app.json'), JSON.stringify({
+      version: 1,
+      id: 'nba-performance',
+      name: 'NBA Performance',
+      domain: 'nba',
+      visibility: 'shared',
+      lifecycle: 'draft',
+      owners: ['sports-analytics@local'],
+      members: [],
+      roles: [],
+      policies: [],
+      rlsBindings: [],
+      schedules: [],
+      homepage: { type: 'dashboard', id: 'overview' },
+    }, null, 2), 'utf-8');
+    writeFileSync(join(projectRoot, 'apps', 'nba-performance', 'dashboards', 'overview.dqld'), JSON.stringify({
+      version: 1,
+      id: 'overview',
+      metadata: {
+        title: 'Overview',
+        domain: 'nba',
+        visibility: 'shared',
+        lifecycle: 'draft',
+      },
+      layout: { kind: 'grid', cols: 12, rowHeight: 80, items: [] },
+    }, null, 2), 'utf-8');
+
+    const log = vi.spyOn(console, 'log').mockImplementation(() => undefined);
+    await runApp('ls', [projectRoot], flags());
+
+    const payload = JSON.parse(String(log.mock.calls.at(-1)?.[0] ?? '{}'));
+    expect(payload.apps).toHaveLength(1);
+    expect(payload.apps[0]).toMatchObject({
+      id: 'nba-performance',
+      domain: 'nba',
+      filePath: 'apps/nba-performance',
+      dashboards: [{ id: 'overview', title: 'Overview' }],
+    });
+  });
 });

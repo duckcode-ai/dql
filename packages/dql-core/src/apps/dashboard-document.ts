@@ -94,6 +94,40 @@ export type DashboardDisplayMetadata = {
   reviewStatus: DashboardDisplayReviewStatus;
 };
 
+export type DashboardTileFilterBinding = {
+  /** Dashboard/app filter id such as `period`, `region`, or `season`. */
+  filter: string;
+  /** Physical column/expression or semantic field this filter can bind to. */
+  binding?: string;
+  /** Whether this becomes a block parameter or an outer predicate at execution time. */
+  mode?: 'parameter' | 'predicate';
+  /** Block parameter names controlled by this app filter. */
+  paramNames?: string[];
+  /** If true, the tile should warn when the filter is missing. */
+  required?: boolean;
+  /** Populated when a global filter intentionally does not apply to this tile. */
+  unsupportedReason?: string;
+};
+
+export type DashboardTileParameterBinding = {
+  /** Block parameter name. */
+  param: string;
+  /** Where the parameter value comes from on the consumption surface. */
+  source: 'dashboard_filter' | 'constant' | 'persona' | 'variable';
+  filter?: string;
+  field?: string;
+  value?: unknown;
+};
+
+export type DashboardTileSourceEvidence = {
+  source: string;
+  reason: string;
+  kind?: string;
+  nodeId?: string;
+  path?: string;
+  trustState?: DashboardDisplayTrustState;
+};
+
 export type DashboardTextTile = {
   markdown: string;
 };
@@ -118,6 +152,16 @@ export type DashboardGridItem = {
   viz: DashboardVizConfig;
   /** Governed GenUI/display contract for this specific App or notebook tile. */
   display?: DashboardDisplayMetadata;
+  /** App-level filter compatibility and binding metadata for this tile. */
+  filterBindings?: DashboardTileFilterBinding[];
+  /** Runtime parameter binding metadata for this tile. */
+  parameterBindings?: DashboardTileParameterBinding[];
+  /** Evidence used by AI/App Builder to choose this tile and presentation. */
+  sourceEvidence?: DashboardTileSourceEvidence[];
+  /** Denormalized trust marker for stakeholder and source-control surfaces. */
+  trustState?: DashboardDisplayTrustState;
+  /** Denormalized review marker for stakeholder and source-control surfaces. */
+  reviewStatus?: DashboardDisplayReviewStatus;
   /** Optional human-readable title shown in the tile header. */
   title?: string;
 };
@@ -457,6 +501,11 @@ function readLayout(raw: unknown, err: (m: string) => void): DashboardDocument['
     }
 
     const display = readDisplayMetadata(it.display, i, allowedViz, err);
+    const filterBindings = readTileFilterBindings(it.filterBindings, i, err);
+    const parameterBindings = readTileParameterBindings(it.parameterBindings, i, err);
+    const sourceEvidence = readTileSourceEvidence(it.sourceEvidence, i, err);
+    const trustState = enumOrUndefined(it.trustState, `layout.items[${i}].trustState`, ['certified', 'review_required', 'draft_ready'] as const, err);
+    const reviewStatus = enumOrUndefined(it.reviewStatus, `layout.items[${i}].reviewStatus`, ['certified', 'draft_ready', 'review_required'] as const, err);
 
     items.push({
       i: it.i,
@@ -466,6 +515,11 @@ function readLayout(raw: unknown, err: (m: string) => void): DashboardDocument['
       ...(aiPin ? { aiPin } : {}),
       viz: { type: vizRaw.type as DashboardVizConfig['type'], options: opts },
       ...(display ? { display } : {}),
+      ...(filterBindings.length > 0 ? { filterBindings } : {}),
+      ...(parameterBindings.length > 0 ? { parameterBindings } : {}),
+      ...(sourceEvidence.length > 0 ? { sourceEvidence } : {}),
+      ...(trustState ? { trustState } : {}),
+      ...(reviewStatus ? { reviewStatus } : {}),
       title: typeof it.title === 'string' ? it.title : undefined,
     });
   }
@@ -541,6 +595,116 @@ function readDisplayMetadata(
     trustState,
     reviewStatus,
   };
+}
+
+function readTileFilterBindings(
+  raw: unknown,
+  index: number,
+  err: (m: string) => void,
+): DashboardTileFilterBinding[] {
+  if (raw === undefined) return [];
+  if (!Array.isArray(raw)) {
+    err(`layout.items[${index}].filterBindings must be an array`);
+    return [];
+  }
+  const out: DashboardTileFilterBinding[] = [];
+  for (let i = 0; i < raw.length; i += 1) {
+    const item = raw[i];
+    if (typeof item !== 'object' || item === null || Array.isArray(item)) {
+      err(`layout.items[${index}].filterBindings[${i}] must be an object`);
+      continue;
+    }
+    const record = item as Record<string, unknown>;
+    if (typeof record.filter !== 'string' || record.filter.length === 0) {
+      err(`layout.items[${index}].filterBindings[${i}].filter must be a non-empty string`);
+      continue;
+    }
+    const mode = enumOrUndefined(record.mode, `layout.items[${index}].filterBindings[${i}].mode`, ['parameter', 'predicate'] as const, err);
+    const paramNames = stringArrayOrUndefined(record.paramNames, `layout.items[${index}].filterBindings[${i}].paramNames`, err);
+    out.push({
+      filter: record.filter,
+      binding: typeof record.binding === 'string' ? record.binding : undefined,
+      ...(mode ? { mode } : {}),
+      ...(paramNames ? { paramNames } : {}),
+      required: typeof record.required === 'boolean' ? record.required : undefined,
+      unsupportedReason: typeof record.unsupportedReason === 'string' ? record.unsupportedReason : undefined,
+    });
+  }
+  return out;
+}
+
+function readTileParameterBindings(
+  raw: unknown,
+  index: number,
+  err: (m: string) => void,
+): DashboardTileParameterBinding[] {
+  if (raw === undefined) return [];
+  if (!Array.isArray(raw)) {
+    err(`layout.items[${index}].parameterBindings must be an array`);
+    return [];
+  }
+  const out: DashboardTileParameterBinding[] = [];
+  for (let i = 0; i < raw.length; i += 1) {
+    const item = raw[i];
+    if (typeof item !== 'object' || item === null || Array.isArray(item)) {
+      err(`layout.items[${index}].parameterBindings[${i}] must be an object`);
+      continue;
+    }
+    const record = item as Record<string, unknown>;
+    if (typeof record.param !== 'string' || record.param.length === 0) {
+      err(`layout.items[${index}].parameterBindings[${i}].param must be a non-empty string`);
+      continue;
+    }
+    const source = enumValue(record.source, ['dashboard_filter', 'constant', 'persona', 'variable'] as const, `layout.items[${index}].parameterBindings[${i}].source`, err);
+    if (!source) continue;
+    out.push({
+      param: record.param,
+      source,
+      filter: typeof record.filter === 'string' ? record.filter : undefined,
+      field: typeof record.field === 'string' ? record.field : undefined,
+      value: record.value,
+    });
+  }
+  return out;
+}
+
+function readTileSourceEvidence(
+  raw: unknown,
+  index: number,
+  err: (m: string) => void,
+): DashboardTileSourceEvidence[] {
+  if (raw === undefined) return [];
+  if (!Array.isArray(raw)) {
+    err(`layout.items[${index}].sourceEvidence must be an array`);
+    return [];
+  }
+  const out: DashboardTileSourceEvidence[] = [];
+  for (let i = 0; i < raw.length; i += 1) {
+    const item = raw[i];
+    if (typeof item !== 'object' || item === null || Array.isArray(item)) {
+      err(`layout.items[${index}].sourceEvidence[${i}] must be an object`);
+      continue;
+    }
+    const record = item as Record<string, unknown>;
+    if (typeof record.source !== 'string' || record.source.length === 0) {
+      err(`layout.items[${index}].sourceEvidence[${i}].source must be a non-empty string`);
+      continue;
+    }
+    if (typeof record.reason !== 'string' || record.reason.length === 0) {
+      err(`layout.items[${index}].sourceEvidence[${i}].reason must be a non-empty string`);
+      continue;
+    }
+    const trustState = enumOrUndefined(record.trustState, `layout.items[${index}].sourceEvidence[${i}].trustState`, ['certified', 'review_required', 'draft_ready'] as const, err);
+    out.push({
+      source: record.source,
+      reason: record.reason,
+      kind: typeof record.kind === 'string' ? record.kind : undefined,
+      nodeId: typeof record.nodeId === 'string' ? record.nodeId : undefined,
+      path: typeof record.path === 'string' ? record.path : undefined,
+      ...(trustState ? { trustState } : {}),
+    });
+  }
+  return out;
 }
 
 function enumValue<T extends readonly string[]>(

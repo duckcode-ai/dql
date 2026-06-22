@@ -26,9 +26,11 @@ import {
   LocalAppStorage,
   personaFromMember,
   type ActivePersona,
+  type LocalAiPin,
   type LocalAppConversationContext,
   type LocalAppInvestigation,
   type LocalAppInvestigationIntent,
+  type LocalAppInvestigationReportSection,
 } from '@duckcodeailabs/dql-project';
 
 interface Ctx {
@@ -93,6 +95,32 @@ export async function handleAppsApi(ctx: Ctx): Promise<boolean> {
     return true;
   }
 
+  if (req.method === 'POST' && path === '/api/apps/ai-builds') {
+    try {
+      const body = await readJson<AppGenerateRequest>(req);
+      const result = await createAppAiBuildSession(projectRoot, body);
+      if (result.status === 'error') {
+        sendJson(res, 400, { ok: false, session: result, error: result.error });
+        return true;
+      }
+      sendJson(res, 201, { ok: true, session: result });
+    } catch (err) {
+      sendJson(res, 500, { ok: false, error: (err as Error).message });
+    }
+    return true;
+  }
+
+  let m = path.match(/^\/api\/apps\/ai-builds\/([^/]+)$/);
+  if (m && req.method === 'GET') {
+    const session = getAppAiBuildSession(projectRoot, decodeURIComponent(m[1]));
+    if (!session) {
+      sendJson(res, 404, { ok: false, error: `AI build session "${decodeURIComponent(m[1])}" not found` });
+      return true;
+    }
+    sendJson(res, 200, { ok: true, session });
+    return true;
+  }
+
   if (req.method === 'POST' && path === '/api/apps') {
     try {
       const body = await readJson<AppCreateRequest>(req);
@@ -109,7 +137,42 @@ export async function handleAppsApi(ctx: Ctx): Promise<boolean> {
     return true;
   }
 
-  let m = path.match(/^\/api\/apps\/([^/]+)\/editor\/catalog$/);
+  m = path.match(/^\/api\/apps\/([^/]+)\/ask$/);
+  if (m && req.method === 'POST') {
+    const appId = decodeURIComponent(m[1]);
+    try {
+      const body = await readJson<AppAskRequest>(req);
+      const result = await askAppQuestion(ctx, appId, body);
+      if (!result.ok) {
+        sendJson(res, 400, result);
+        return true;
+      }
+      sendJson(res, 200, result);
+    } catch (err) {
+      sendJson(res, 500, { ok: false, error: (err as Error).message });
+    }
+    return true;
+  }
+
+  m = path.match(/^\/api\/apps\/([^/]+)\/promote$/);
+  if (m && req.method === 'POST') {
+    const appId = decodeURIComponent(m[1]);
+    try {
+      const body = await readJson<AppPromoteRequest>(req);
+      const result = promoteAppForStakeholders(projectRoot, appId, body);
+      if (!result.ok) {
+        sendJson(res, 400, result);
+        return true;
+      }
+      await refreshGeneratedMetadata(projectRoot);
+      sendJson(res, 200, result);
+    } catch (err) {
+      sendJson(res, 500, { ok: false, error: (err as Error).message });
+    }
+    return true;
+  }
+
+  m = path.match(/^\/api\/apps\/([^/]+)\/editor\/catalog$/);
   if (m && req.method === 'GET') {
     const appId = decodeURIComponent(m[1]);
     const app = loadAppById(projectRoot, appId)?.app;
@@ -335,7 +398,7 @@ export async function handleAppsApi(ctx: Ctx): Promise<boolean> {
     try {
       if (req.method === 'GET') {
         const dashboardId = ctx.url.searchParams.get('dashboardId') ?? undefined;
-        sendJson(res, 200, { investigations: storage.listAppInvestigations(appId, dashboardId) });
+        sendJson(res, 200, { investigations: dedupeAppInvestigationsForDisplay(storage.listAppInvestigations(appId, dashboardId)) });
         return true;
       }
       if (req.method === 'POST') {
@@ -345,7 +408,7 @@ export async function handleAppsApi(ctx: Ctx): Promise<boolean> {
           sendJson(res, 400, { error: 'question is required' });
           return true;
         }
-        let investigation = storage.createAppInvestigation({
+        let investigation = createOrReuseAppInvestigation(storage, {
           appId,
           dashboardId: body.dashboardId,
           sourceTileId: body.sourceTileId ?? selectedContextString(body.context, 'tileId'),
@@ -357,7 +420,12 @@ export async function handleAppsApi(ctx: Ctx): Promise<boolean> {
           generatedSql: body.generatedSql,
         });
         if (body.run !== false) {
-          investigation = await runAppInvestigation(ctx, storage, investigation, body);
+          investigation = storage.updateAppInvestigation(investigation.id, {
+            status: 'running',
+            reviewStatus: 'needs_review',
+            error: '',
+          }) ?? investigation;
+          scheduleAppInvestigationRun(ctx, appId, investigation.id, body);
         }
         sendJson(res, 201, { ok: true, investigation });
         return true;
@@ -436,7 +504,7 @@ export async function handleAppsApi(ctx: Ctx): Promise<boolean> {
       const created = createAiPinTile(projectRoot, appId, {
         dashboardId,
         title: cleanString(body.title) || investigation.title,
-        answer: investigation.summary ?? investigation.recommendation ?? investigation.title,
+        answer: investigationNarrativeAnswer(investigation),
         question: investigation.question,
         sql: investigation.generatedSql,
         sourceTier: 'metadata_research',
@@ -563,6 +631,24 @@ export async function handleAppsApi(ctx: Ctx): Promise<boolean> {
       sendJson(res, 200, result);
     } catch (err) {
       sendJson(res, 500, { error: (err as Error).message });
+    }
+    return true;
+  }
+
+  m = path.match(/^\/api\/apps\/([^/]+)\/dashboards\/([^/]+)\/tiles\/recommend$/);
+  if (m && req.method === 'POST') {
+    const appId = decodeURIComponent(m[1]);
+    const dashboardId = decodeURIComponent(m[2]);
+    try {
+      const body = await readJson<DashboardTileRecommendationRequest>(req);
+      const result = recommendDashboardTile(projectRoot, appId, dashboardId, body);
+      if (!result.ok) {
+        sendJson(res, 400, result);
+        return true;
+      }
+      sendJson(res, 200, result);
+    } catch (err) {
+      sendJson(res, 500, { ok: false, error: (err as Error).message });
     }
     return true;
   }
@@ -776,6 +862,60 @@ interface AppGenerateRequest {
   force?: boolean;
   selectedBlockIds?: string[];
   plannerMode?: 'deterministic' | 'ai_assisted';
+  audience?: string;
+  notebookPath?: string;
+  existingAppId?: string;
+}
+
+interface AppAiBuildSession {
+  id: string;
+  status: 'ready' | 'error';
+  createdAt: string;
+  updatedAt: string;
+  prompt: string;
+  appId?: string;
+  dashboardId?: string | null;
+  generatedPaths: string[];
+  plan?: unknown;
+  validation?: unknown;
+  warnings: string[];
+  reviewTasks: string[];
+  inputs: {
+    domain?: string;
+    owner?: string;
+    audience?: string;
+    notebookPath?: string;
+    existingAppId?: string;
+    selectedBlockIds: string[];
+  };
+  error?: string;
+}
+
+interface AppAskRequest {
+  question?: string;
+  dashboardId?: string;
+  tileId?: string;
+  blockId?: string;
+  variables?: Record<string, unknown>;
+  context?: unknown;
+  runInvestigation?: boolean;
+}
+
+interface AppAskDecision {
+  mode: 'answer' | 'analysis' | 'app_change' | 'metadata';
+  reason: string;
+  nextAction: string;
+  requiresContext: boolean;
+  usesCertifiedResult: boolean;
+  confidence: number;
+}
+
+interface AppPromoteRequest {
+  lifecycle?: AppDocument['lifecycle'];
+}
+
+interface DashboardTileRecommendationRequest extends VisualizationRecommendationRequest {
+  tileId?: string;
 }
 
 interface AiPinCreateRequest {
@@ -845,6 +985,7 @@ interface AppInvestigationRunRequest {
   intent?: LocalAppInvestigationIntent;
   context?: unknown;
   generatedSql?: string;
+  repairMode?: 'rebuild_from_certified';
 }
 
 interface AppInvestigationPinRequest {
@@ -862,6 +1003,16 @@ interface AppInvestigationGenerationRequest {
   question: string;
   intent: LocalAppInvestigationIntent;
   context?: unknown;
+  mode?: 'sql_and_memo' | 'memo_only';
+  generatedSql?: string;
+  metrics?: Record<string, unknown>;
+  drivers?: Array<Record<string, unknown>>;
+  resultPreviews?: unknown[];
+  summaryHint?: string;
+  recommendationHint?: string;
+  sqlError?: string;
+  sqlErrorKind?: SqlPreviewErrorKind;
+  hasReportEvidence?: boolean;
 }
 
 interface AppInvestigationGenerationResult {
@@ -895,9 +1046,9 @@ interface BlockCandidate {
 export function recommendBlocks(projectRoot: string, input: AppRecommendationRequest): BlockCandidate[] {
   const domain = cleanString(input.domain).toLowerCase();
   const tags = normalizeTags(input.tags ?? []);
-  const text = [input.purpose, input.audience, ...(input.tags ?? [])].map((v) => cleanString(v).toLowerCase()).filter(Boolean);
+  const terms = appRecommendationTerms([input.purpose, input.audience, ...(input.tags ?? [])]);
   const certifiedOnly = input.certifiedOnly !== false;
-  const hasCriteria = Boolean(domain || tags.length > 0 || text.length > 0);
+  const hasCriteria = Boolean(domain || tags.length > 0 || terms.length > 0);
 
   return collectBlockCandidates(projectRoot)
     .map((block) => {
@@ -923,11 +1074,15 @@ export function recommendBlocks(projectRoot: string, input: AppRecommendationReq
       const haystack = [block.name, block.description, block.owner ?? '', block.llmContext ?? '', ...block.tags]
         .join(' ')
         .toLowerCase();
-      const textHits = text.filter((term) => term && haystack.includes(term));
+      const textHits = terms.filter((term) => term && haystack.includes(term));
       if (textHits.length > 0) {
         score += textHits.length * 6;
         criteriaScore += textHits.length * 6;
         reasons.push('context match');
+      }
+      if (!hasCriteria && block.status === 'certified') {
+        criteriaScore += 1;
+        reasons.push('generic prompt fallback');
       }
       if (score === 0 && !domain && tags.length === 0 && !certifiedOnly) score = 1;
       if (hasCriteria && criteriaScore === 0) return null;
@@ -937,6 +1092,19 @@ export function recommendBlocks(projectRoot: string, input: AppRecommendationReq
     .filter((block): block is BlockCandidate => Boolean(block))
     .sort((a, b) => b.score - a.score || new Date(b.lastModified).getTime() - new Date(a.lastModified).getTime())
     .slice(0, 50);
+}
+
+function appRecommendationTerms(values: Array<unknown>): string[] {
+  const stop = new Set([
+    'a', 'an', 'and', 'app', 'apps', 'analytics', 'available', 'block', 'blocks', 'build', 'certified',
+    'dashboard', 'dashboards', 'data', 'dql', 'from', 'for', 'governed', 'my', 'of', 'on', 'stakeholder',
+    'stakeholders', 'table', 'tables', 'the', 'to', 'using', 'view', 'warehouse', 'with',
+  ]);
+  const terms = values
+    .flatMap((value) => cleanString(value).toLowerCase().match(/[a-z][a-z0-9_]{2,}/g) ?? [])
+    .filter((term) => !stop.has(term))
+    .slice(0, 40);
+  return unique(terms);
 }
 
 export function recommendVisualization(
@@ -1053,11 +1221,21 @@ export async function generateAppPackage(
       prompt,
       kg,
       domain: cleanString(input.domain) || undefined,
+      audience: cleanString(input.audience) || undefined,
       owner: cleanString(input.owner) || undefined,
       preferredBlockIds: selectedBlockIds,
       plannerMode: input.plannerMode === 'ai_assisted' ? 'ai_assisted' : 'deterministic',
     });
     const validation = validateAppPlan(plan, kg);
+    const certifiedTiles = typeof (validation as { certifiedTiles?: unknown }).certifiedTiles === 'number'
+      ? (validation as { certifiedTiles: number }).certifiedTiles
+      : 0;
+    if (certifiedTiles === 0) {
+      return {
+        ok: false,
+        error: appBuildBlockedMessage(validation, plan as unknown as Record<string, unknown>),
+      };
+    }
     const generated = generateAppFromPlan(projectRoot, plan, kg, {
       overwrite: Boolean(input.force),
     });
@@ -1076,6 +1254,852 @@ export async function generateAppPackage(
   } finally {
     kg.close();
   }
+}
+
+export async function createAppAiBuildSession(
+  projectRoot: string,
+  input: AppGenerateRequest,
+): Promise<AppAiBuildSession> {
+  const now = new Date().toISOString();
+  const id = `app_build_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+  const selectedBlockIds = unique((input.selectedBlockIds ?? []).map(cleanString).filter(Boolean));
+  const base: AppAiBuildSession = {
+    id,
+    status: 'ready',
+    createdAt: now,
+    updatedAt: now,
+    prompt: cleanString(input.prompt),
+    generatedPaths: [],
+    warnings: [],
+    reviewTasks: [],
+    inputs: {
+      domain: cleanString(input.domain) || undefined,
+      owner: cleanString(input.owner) || undefined,
+      audience: cleanString(input.audience) || undefined,
+      notebookPath: cleanString(input.notebookPath) || undefined,
+      existingAppId: cleanString(input.existingAppId) || undefined,
+      selectedBlockIds,
+    },
+  };
+  if (!base.prompt) {
+    const session = { ...base, status: 'error' as const, error: 'prompt is required' };
+    writeAppAiBuildSession(projectRoot, session);
+    return session;
+  }
+
+  const result = await generateAppPackage(projectRoot, {
+    ...input,
+    selectedBlockIds,
+  });
+  if (!result.ok) {
+    const session = {
+      ...base,
+      status: 'error' as const,
+      error: result.error,
+      warnings: [result.error],
+    };
+    writeAppAiBuildSession(projectRoot, session);
+    return session;
+  }
+
+  const plan = result.plan as Record<string, unknown>;
+  const session: AppAiBuildSession = {
+    ...base,
+    appId: typeof plan.appId === 'string' ? plan.appId : result.app?.id,
+    dashboardId: result.dashboardId,
+    generatedPaths: result.generated.paths,
+    plan: result.plan,
+    validation: result.validation,
+    warnings: appBuildWarnings(result.validation, plan),
+    reviewTasks: reviewTasksFromPlan(plan),
+  };
+  writeAppAiBuildSession(projectRoot, session);
+  return session;
+}
+
+export function getAppAiBuildSession(projectRoot: string, id: string): AppAiBuildSession | null {
+  const clean = cleanString(id);
+  if (!clean || !/^[a-z0-9_:-]+$/i.test(clean)) return null;
+  const path = join(appAiBuildSessionDir(projectRoot), `${clean}.json`);
+  if (!existsSync(path)) return null;
+  try {
+    return JSON.parse(readFileSync(path, 'utf-8')) as AppAiBuildSession;
+  } catch {
+    return null;
+  }
+}
+
+async function askAppQuestion(
+  ctx: Ctx,
+  appId: string,
+  input: AppAskRequest,
+): Promise<
+  | {
+      ok: true;
+      route: 'certified_answer' | 'investigation' | 'app_change_proposal' | 'metadata_answer';
+      answer: string;
+      trustState: 'certified' | 'review_required' | 'draft_ready';
+      reviewStatus: 'certified' | 'review_required' | 'draft_ready';
+      citations: Array<{ kind: string; name: string; path?: string }>;
+      followUps: string[];
+      decision: AppAskDecision;
+      investigation?: LocalAppInvestigation;
+      proposal?: unknown;
+    }
+  | { ok: false; error: string }
+> {
+  const loaded = loadAppById(ctx.projectRoot, appId);
+  if (!loaded) return { ok: false, error: `App "${appId}" not found` };
+  const question = cleanString(input.question);
+  if (!question) return { ok: false, error: 'question is required' };
+
+  const dashboardId = cleanString(input.dashboardId)
+    || (loaded.app.homepage?.type === 'dashboard' ? loaded.app.homepage.id : undefined)
+    || loaded.dashboards[0]?.id;
+  const dashboard = dashboardId ? loadDashboardForApp(ctx.projectRoot, appId, dashboardId)?.dashboard : null;
+  const tile = dashboard?.layout.items.find((item) =>
+    item.i === input.tileId ||
+    (input.blockId && item.block && 'blockId' in item.block && item.block.blockId === input.blockId),
+  );
+  const blockId = cleanString(input.blockId) || (tile?.block && 'blockId' in tile.block ? tile.block.blockId : undefined);
+  const citations = [
+    { kind: 'app', name: loaded.app.name, path: loaded.appPath },
+    ...(dashboard ? [{ kind: 'dashboard', name: dashboard.metadata.title, path: `${loaded.appPath}/dashboards/${dashboard.id}.dqld` }] : []),
+    ...(blockId ? [{ kind: 'block', name: blockId }] : []),
+  ];
+
+  if (isAppChangeQuestion(question)) {
+    const decision = buildAppAskDecision('app_change_proposal', {
+      question,
+      blockId,
+      selected: selectedBlockContext(input.context),
+      appName: loaded.app.name,
+    });
+    return {
+      ok: true,
+      route: 'app_change_proposal',
+      answer: `I can update the app presentation, but this should remain a reviewed app change. Suggested action: ${appChangeSuggestion(question)}.`,
+      trustState: 'review_required',
+      reviewStatus: 'review_required',
+      citations,
+      followUps: ['Review this app change', 'Open Build mode', 'Create analysis before changing logic'],
+      decision,
+      proposal: {
+        type: 'app_change',
+        dashboardId,
+        tileId: input.tileId,
+        blockId,
+        question,
+        reviewRequired: true,
+      },
+    };
+  }
+
+  if (shouldRouteAppQuestionToInvestigation(question)) {
+    const decision = buildAppAskDecision('investigation', {
+      question,
+      blockId,
+      selected: selectedBlockContext(input.context),
+      appName: loaded.app.name,
+    });
+    const investigationProposal = {
+      type: 'research_investigation',
+      dashboardId,
+      tileId: cleanString(input.tileId) || undefined,
+      blockId,
+      question,
+      intent: normalizeInvestigationIntent(undefined, question, input.context),
+      title: titleFromInvestigation(question, selectedBlockContext(input.context)),
+      requiredContext: true,
+      reviewRequired: true,
+      suggestedContext: {
+        appId,
+        appName: loaded.app.name,
+        dashboardId,
+        tileId: input.tileId,
+        blockId,
+        variables: input.variables,
+        selectedTile: tile ? appAskTileContext(tile) : undefined,
+        userContext: input.context,
+      },
+    };
+
+    if (input.runInvestigation === false) {
+      return {
+        ok: true,
+        route: 'investigation',
+        answer: 'This needs a scoped analysis memo. Add the comparison, filters, timeframe, and decision context before DQL writes SQL or runs a preview.',
+        trustState: 'draft_ready',
+        reviewStatus: 'draft_ready',
+        citations,
+        followUps: ['Add analysis context', 'Check proof', 'Create block draft'],
+        decision,
+        proposal: investigationProposal,
+      };
+    }
+
+    const storage = new LocalAppStorage(defaultLocalAppsDbPath(ctx.projectRoot));
+    try {
+      let investigation = createOrReuseAppInvestigation(storage, {
+        appId,
+        dashboardId,
+        sourceTileId: cleanString(input.tileId) || undefined,
+        sourceBlockId: blockId,
+        title: titleFromInvestigation(question, selectedBlockContext(input.context)),
+        question,
+        intent: normalizeInvestigationIntent(undefined, question, input.context),
+        context: {
+          appId,
+          appName: loaded.app.name,
+          dashboardId,
+          tileId: input.tileId,
+          blockId,
+          variables: input.variables,
+          selectedTile: tile ? appAskTileContext(tile) : undefined,
+          userContext: input.context,
+          routeDecision: decision,
+        },
+      });
+      investigation = await runAppInvestigation(ctx, storage, investigation, { context: investigation.context });
+      return {
+        ok: true,
+        route: 'investigation',
+        answer: 'I opened a review-required analysis memo for this follow-up. Review the numbers, caveats, SQL appendix, and source proof before adding it to the app or drafting reusable logic.',
+        trustState: 'draft_ready',
+        reviewStatus: 'draft_ready',
+        citations,
+        followUps: ['Review the memo', 'Add reviewed result to this app', 'Create a draft DQL block'],
+        decision,
+        investigation,
+      };
+    } finally {
+      storage.close();
+    }
+  }
+
+  if (blockId) {
+    const selected = selectedBlockContext(input.context);
+    const answer = buildCertifiedAppAnswer({
+      app: loaded.app,
+      dashboard: dashboard ?? null,
+      blockId,
+      question,
+      selected,
+      variables: input.variables,
+    });
+    return {
+      ok: true,
+      route: 'certified_answer',
+      answer,
+      trustState: tile?.trustState === 'certified' || tile?.display?.trustState === 'certified' ? 'certified' : 'review_required',
+      reviewStatus: tile?.reviewStatus === 'certified' || tile?.display?.reviewStatus === 'certified' ? 'certified' : 'review_required',
+      citations,
+      followUps: ['Explain the visible result', 'Investigate drivers', 'Create block draft from this result'],
+      decision: buildAppAskDecision('certified_answer', {
+        question,
+        blockId,
+        selected,
+        appName: loaded.app.name,
+      }),
+    };
+  }
+
+  return {
+    ok: true,
+    route: 'metadata_answer',
+    answer: `${loaded.app.name} is a ${loaded.app.domain} app for ${loaded.app.audience ?? 'stakeholders'}. It has ${loaded.dashboards.length} dashboard page${loaded.dashboards.length === 1 ? '' : 's'}, ${loaded.aiPins.length} pinned insight${loaded.aiPins.length === 1 ? '' : 's'}, and ${loaded.investigations.length} analysis item${loaded.investigations.length === 1 ? '' : 's'}. Ask about a tile for a certified answer, or ask a why/change/drilldown question to create analysis.`,
+    trustState: 'draft_ready',
+    reviewStatus: 'draft_ready',
+    citations,
+    followUps: ['Ask about a specific tile', 'Find trust gaps', 'Start driver analysis'],
+    decision: buildAppAskDecision('metadata_answer', {
+      question,
+      appName: loaded.app.name,
+    }),
+  };
+}
+
+function buildAppAskDecision(
+  route: 'certified_answer' | 'investigation' | 'app_change_proposal' | 'metadata_answer',
+  input: {
+    question: string;
+    blockId?: string;
+    selected?: Record<string, unknown> | null;
+    appName?: string;
+  },
+): AppAskDecision {
+  const selected = input.selected ?? null;
+  const sourceName = selectedString(selected, 'title')
+    || cleanString(input.blockId)
+    || cleanString(input.appName)
+    || 'this app';
+  if (route === 'certified_answer') {
+    return {
+      mode: 'answer',
+      reason: `The question can be answered from the selected certified result: ${sourceName}.`,
+      nextAction: 'Use the answer directly, or request deeper analysis when you need a new comparison, grain, or reusable logic.',
+      requiresContext: false,
+      usesCertifiedResult: true,
+      confidence: hasSelectedRows(selected) ? 0.9 : 0.74,
+    };
+  }
+  if (route === 'investigation') {
+    const intent = normalizeInvestigationIntent(undefined, input.question, selected);
+    return {
+      mode: 'analysis',
+      reason: appAskInvestigationReason(intent),
+      nextAction: 'Add the exact comparison, filters, and proof focus before DQL writes SQL or opens the main-canvas analysis.',
+      requiresContext: true,
+      usesCertifiedResult: Boolean(input.blockId || input.selected),
+      confidence: 0.82,
+    };
+  }
+  if (route === 'app_change_proposal') {
+    return {
+      mode: 'app_change',
+      reason: 'The question asks to change presentation or layout, not business logic.',
+      nextAction: 'Review the proposed app change in Build mode and keep certified block logic unchanged.',
+      requiresContext: false,
+      usesCertifiedResult: Boolean(input.blockId || input.selected),
+      confidence: 0.78,
+    };
+  }
+  return {
+    mode: 'metadata',
+    reason: 'No specific certified tile was selected, so DQL answered from app metadata.',
+    nextAction: 'Select a tile for a trusted answer, or ask for deeper analysis with a clear comparison and filter scope.',
+    requiresContext: false,
+    usesCertifiedResult: false,
+    confidence: 0.62,
+  };
+}
+
+function appAskInvestigationReason(intent: LocalAppInvestigationIntent): string {
+  if (intent === 'diagnose_change') return 'The question asks why something changed, which needs a comparison window or baseline beyond the visible certified result.';
+  if (intent === 'segment_compare') return 'The question asks for a comparison across segments, cohorts, or groups, which needs scoped analysis before promotion.';
+  if (intent === 'entity_drilldown') return 'The question asks for entity-level drilldown, which needs reviewed grain, joins, and identifiers.';
+  if (intent === 'anomaly_investigation') return 'The question asks about an exception or outlier, which needs baseline proof before stakeholder use.';
+  if (intent === 'trust_gap_review') return 'The question asks about proof, caveats, lineage, or trust gaps, which should be reviewed as an evidence brief.';
+  return 'The question asks for drivers or decomposition, which needs scoped analysis before creating or changing reusable logic.';
+}
+
+function appAnalysisRouteDecisionFromContext(
+  context: unknown,
+  intent: LocalAppInvestigationIntent,
+  selected: Record<string, unknown> | null,
+  question: string,
+): AppAskDecision {
+  const root = asRecord(context);
+  const rawDecision = asRecord(root?.routeDecision) ?? asRecord(asRecord(root?.originatingAnswer)?.decision);
+  if (rawDecision) {
+    return normalizeAppAskDecision(rawDecision, intent, selected, question);
+  }
+  return buildAppAskDecision('investigation', {
+    question,
+    blockId: selectedString(selected, 'blockId'),
+    selected,
+    appName: cleanString(root?.appName),
+  });
+}
+
+function normalizeAppAskDecision(
+  value: Record<string, unknown>,
+  intent: LocalAppInvestigationIntent,
+  selected: Record<string, unknown> | null,
+  question: string,
+): AppAskDecision {
+  const mode = value.mode === 'answer' || value.mode === 'analysis' || value.mode === 'app_change' || value.mode === 'metadata'
+    ? value.mode
+    : 'analysis';
+  const reason = cleanString(value.reason) || appAskInvestigationReason(intent);
+  const nextAction = cleanString(value.nextAction)
+    || 'Review the generated analysis, validate proof, then pin or promote only after approval.';
+  const confidence = typeof value.confidence === 'number' && Number.isFinite(value.confidence)
+    ? Math.max(0, Math.min(1, value.confidence))
+    : hasSelectedRows(selected) ? 0.82 : 0.68;
+  return {
+    mode,
+    reason,
+    nextAction,
+    requiresContext: typeof value.requiresContext === 'boolean' ? value.requiresContext : mode === 'analysis',
+    usesCertifiedResult: typeof value.usesCertifiedResult === 'boolean'
+      ? value.usesCertifiedResult
+      : Boolean(selectedString(selected, 'blockId') || selectedString(selected, 'certificationStatus')),
+    confidence,
+  };
+}
+
+function buildCertifiedAppAnswer(input: {
+  app: AppDocument;
+  dashboard: DashboardDocument | null;
+  blockId: string;
+  question: string;
+  selected: Record<string, unknown> | null;
+  variables?: Record<string, unknown>;
+}): string {
+  const rows = selectedRows(input.selected);
+  const columns = selectedColumns(input.selected, rows);
+  const metrics = buildMetricSnapshot(input.selected);
+  const currentValue = typeofNumber(metrics.currentValue);
+  const baselineValue = typeofNumber(metrics.baselineValue);
+  const deltaValue = typeofNumber(metrics.delta);
+  const metricName = cleanString(metrics.metric) || preferredMeasureColumn(columns, rows) || 'selected metric';
+  const firstRow = rows[0];
+  const labelColumn = preferredLabelColumn(columns, rows);
+  const label = labelColumn && firstRow ? cleanString(firstRow[labelColumn]) : '';
+  const filterSummary = formatAppAskVariables(input.variables);
+  const resultTitle = cleanString(input.selected?.title)
+    || cleanString(input.dashboard?.metadata.title)
+    || input.app.name;
+  const currentLine = currentValue !== null
+    ? `${label ? `${label} is the leading visible row and ` : 'The current visible result '}shows ${formatMetricValue(currentValue)} for ${formatBusinessColumn(metricName)}${baselineValue !== null ? ` versus ${formatMetricValue(baselineValue)} for the next comparison` : ''}${deltaValue !== null ? `, a gap of ${formatMetricValue(deltaValue)}` : ''}.`
+    : rows.length > 0
+      ? `The certified result is loaded with ${rows.length} sampled row${rows.length === 1 ? '' : 's'} across ${columns.length} field${columns.length === 1 ? '' : 's'}.`
+      : 'The certified block is selected, but this request did not include result rows for a numeric summary.';
+  const rowDetails = firstRow && columns.length
+    ? columns
+      .slice(0, 5)
+      .map((column) => `${formatBusinessColumn(column)}: ${formatAskValue(firstRow[column])}`)
+      .join('; ')
+    : '';
+  const nextStep = /\bwhy|driver|change|changed|compare|segment|drill|root cause|because\b/i.test(input.question)
+    ? 'This question asks for explanation beyond the current certified result. Use the copilot analysis flow with the exact comparison, timeframe, and segment so DQL can create review-required analysis.'
+    : 'Use deeper analysis only when you need a new grain, driver breakdown, segment comparison, or reusable block that this certified tile does not already cover.';
+
+  return [
+    `## Answer`,
+    `For **${resultTitle}**${filterSummary ? ` with ${filterSummary}` : ''}, ${currentLine}`,
+    rowDetails ? `Visible row detail: ${rowDetails}.` : '',
+    `## Trusted source`,
+    `This answer is grounded in certified DQL block **${input.blockId}**. The app can present this result directly; new SQL or new business logic still needs review before promotion.`,
+    `## Next step`,
+    nextStep,
+  ].filter(Boolean).join('\n\n');
+}
+
+function preferredLabelColumn(columns: string[], rows: Array<Record<string, unknown>>): string | undefined {
+  return columns.find((column) => /\b(name|player|customer|account|team|segment|category|label)\b/i.test(column) && rows.some((row) => cleanString(row[column])))
+    ?? columns.find((column) => rows.some((row) => typeof row[column] === 'string' && cleanString(row[column])));
+}
+
+function preferredMeasureColumn(columns: string[], rows: Array<Record<string, unknown>>): string | undefined {
+  return columns.find((column) => /\b(total|points?|revenue|score|amount|count|games?|orders?|value|delta|change)\b/i.test(column) && rows.some((row) => typeofNumber(row[column]) !== null))
+    ?? columns.find((column) => rows.some((row) => typeofNumber(row[column]) !== null));
+}
+
+function formatAppAskVariables(variables?: Record<string, unknown>): string {
+  if (!variables) return '';
+  return Object.entries(variables)
+    .filter(([key, value]) => key !== 'smartView' && value !== undefined && value !== null && String(value).trim() !== '')
+    .slice(0, 6)
+    .map(([key, value]) => `${formatBusinessColumn(key)} ${formatAskVariableValue(key, value)}`)
+    .join(', ');
+}
+
+function formatBusinessColumn(value: string): string {
+  return value.replace(/[_-]+/g, ' ').replace(/\s+/g, ' ').trim();
+}
+
+function formatAskValue(value: unknown): string {
+  if (Array.isArray(value)) return value.map(formatAskValue).join(', ');
+  if (typeof value === 'number') return Number.isInteger(value) ? value.toLocaleString() : Number(value.toFixed(2)).toLocaleString();
+  if (value === null || value === undefined) return 'not set';
+  if (typeof value === 'object') return JSON.stringify(value);
+  return String(value);
+}
+
+function formatAskVariableValue(key: string, value: unknown): string {
+  if (Array.isArray(value)) return value.map((item) => formatAskVariableValue(key, item)).join(', ');
+  const numeric = typeof value === 'number'
+    ? value
+    : typeof value === 'string' && value.trim() && Number.isFinite(Number(value))
+      ? Number(value)
+      : null;
+  if (numeric !== null && /(season|year)/i.test(key) && Number.isInteger(numeric) && numeric >= 1900 && numeric <= 2200) {
+    return String(numeric);
+  }
+  return formatAskValue(value);
+}
+
+export function recommendDashboardTile(
+  projectRoot: string,
+  appId: string,
+  dashboardId: string,
+  input: DashboardTileRecommendationRequest,
+): { ok: true; display: DashboardDisplayMetadata; filterBindings: DashboardGridItem['filterBindings']; parameterBindings: DashboardGridItem['parameterBindings']; sourceEvidence: DashboardGridItem['sourceEvidence']; trustState: NonNullable<DashboardGridItem['trustState']>; reviewStatus: NonNullable<DashboardGridItem['reviewStatus']>; evidence: Array<{ source: string; reason: string }>; warnings: string[] } | { ok: false; error: string } {
+  const loaded = loadDashboardForApp(projectRoot, appId, dashboardId);
+  if (!loaded) return { ok: false, error: `Dashboard "${dashboardId}" not found in app "${appId}"` };
+  const recommendation = recommendVisualization(projectRoot, input);
+  if (!recommendation.ok) return recommendation;
+  const block = input.blockRef
+    ? collectBlockCandidates(projectRoot).find((candidate) =>
+        candidate.id === input.blockRef ||
+        candidate.name === input.blockRef ||
+        candidate.path === input.blockRef ||
+        candidate.path.endsWith(`/${input.blockRef}`),
+      )
+    : undefined;
+  const filterBindings = block ? filterBindingsForBlockSource(projectRoot, block) : [];
+  const parameterBindings = filterBindings
+    .filter((entry) => entry.mode === 'parameter' && entry.paramNames?.length)
+    .flatMap((entry) => (entry.paramNames ?? []).map((param) => ({ param, source: 'dashboard_filter' as const, filter: entry.filter, field: entry.binding })));
+  const sourceEvidence = [
+    ...recommendation.evidence.map((entry) => ({
+      source: entry.source,
+      reason: entry.reason,
+      kind: entry.source === 'result_schema' ? 'result_schema' : 'metadata',
+      trustState: recommendation.display.trustState,
+    })),
+    ...(block ? [{
+      source: `block:${block.name}`,
+      reason: block.status === 'certified' ? 'Certified block can back this app tile.' : 'Block is not certified; keep review-required.',
+      kind: 'block',
+      path: block.path,
+      trustState: block.status === 'certified' ? 'certified' as const : 'review_required' as const,
+    }] : []),
+  ];
+  return {
+    ok: true,
+    display: recommendation.display,
+    filterBindings,
+    parameterBindings,
+    sourceEvidence,
+    trustState: recommendation.display.trustState,
+    reviewStatus: recommendation.display.reviewStatus,
+    evidence: recommendation.evidence,
+    warnings: recommendation.warnings,
+  };
+}
+
+export function promoteAppForStakeholders(
+  projectRoot: string,
+  appId: string,
+  input: AppPromoteRequest = {},
+): { ok: true; app: AppDocument; paths: string[]; removedLocalTiles: number } | { ok: false; error: string } {
+  const loaded = loadAppById(projectRoot, appId);
+  if (!loaded) return { ok: false, error: `App "${appId}" not found` };
+  const lifecycle = input.lifecycle === 'certified' || input.lifecycle === 'deprecated' ? input.lifecycle : 'review';
+  const app: AppDocument = {
+    ...loaded.app,
+    visibility: 'shared',
+    lifecycle,
+  };
+  const appPath = join(loaded.appDir, 'dql.app.json');
+  const parsedApp = parseAppDocument(JSON.stringify(app), appPath);
+  if (!parsedApp.document) return { ok: false, error: parsedApp.errors.map((err) => err.message).join('; ') };
+  writeFileSync(appPath, JSON.stringify(parsedApp.document, null, 2) + '\n', 'utf-8');
+
+  let removedLocalTiles = 0;
+  const paths = [relative(projectRoot, appPath)];
+  for (const dashboardPath of findDashboardsForApp(loaded.appDir)) {
+    const loadedDashboard = loadDashboardDocument(dashboardPath).document;
+    if (!loadedDashboard) continue;
+    const items = loadedDashboard.layout.items
+      .filter((item) => {
+        if (item.aiPin) {
+          removedLocalTiles += 1;
+          return false;
+        }
+        return true;
+      })
+      .map((item) => promoteSharedDashboardItem(item));
+    const dashboard: DashboardDocument = {
+      ...loadedDashboard,
+      metadata: {
+        ...loadedDashboard.metadata,
+        visibility: 'shared',
+        lifecycle,
+      },
+      layout: {
+        ...loadedDashboard.layout,
+        items,
+      },
+    };
+    const parsed = parseDashboardDocument(JSON.stringify(dashboard), dashboardPath);
+    if (!parsed.document) return { ok: false, error: parsed.errors.map((err) => err.message).join('; ') };
+    writeFileSync(dashboardPath, JSON.stringify(parsed.document, null, 2) + '\n', 'utf-8');
+    paths.push(relative(projectRoot, dashboardPath));
+  }
+  return { ok: true, app: parsedApp.document, paths, removedLocalTiles };
+}
+
+function appAiBuildSessionDir(projectRoot: string): string {
+  return join(projectRoot, '.dql', 'local', 'app-ai-builds');
+}
+
+function writeAppAiBuildSession(projectRoot: string, session: AppAiBuildSession): void {
+  const dir = appAiBuildSessionDir(projectRoot);
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, `${session.id}.json`), JSON.stringify(session, null, 2) + '\n', 'utf-8');
+}
+
+function appBuildWarnings(validation: unknown, plan: Record<string, unknown>): string[] {
+  const issues = Array.isArray((validation as { issues?: unknown[] } | undefined)?.issues)
+    ? (validation as { issues: Array<{ level?: string; message?: string }> }).issues
+    : [];
+  const warnings = issues
+    .filter((issue) => issue.level === 'warning')
+    .map((issue) => cleanString(issue.message))
+    .filter(Boolean);
+  const missing = Array.isArray(plan.missingEvidence) ? plan.missingEvidence.map(cleanString).filter(Boolean) : [];
+  return unique([...warnings, ...missing]);
+}
+
+function appBuildBlockedMessage(validation: unknown, plan: Record<string, unknown>): string {
+  const warnings = appBuildWarnings(validation, plan).slice(0, 4);
+  const reviewTasks = reviewTasksFromPlan(plan).slice(0, 4);
+  return [
+    'No certified DQL blocks matched strongly enough to create a stakeholder app.',
+    'DQL did not write an empty dashboard. Create or certify reusable blocks first, or select certified blocks explicitly.',
+    warnings.length ? `Missing proof: ${warnings.join(' | ')}` : '',
+    reviewTasks.length ? `Next review tasks: ${reviewTasks.join(' | ')}` : '',
+  ].filter(Boolean).join(' ');
+}
+
+function reviewTasksFromPlan(plan: Record<string, unknown>): string[] {
+  const tasks = Array.isArray(plan.reviewTasks) ? plan.reviewTasks.map(cleanString).filter(Boolean) : [];
+  const scopedReports = Array.isArray(plan.scopedReports) ? plan.scopedReports : [];
+  const planning = plan.planning && typeof plan.planning === 'object' ? plan.planning as { scopedReports?: unknown[] } : {};
+  const planningReports = Array.isArray(planning.scopedReports) ? planning.scopedReports : [];
+  const reportTasks = [...scopedReports, ...planningReports].flatMap((report) => {
+    if (!report || typeof report !== 'object') return [];
+    const record = report as { title?: unknown; question?: unknown; evidenceNeeded?: unknown[] };
+    const title = cleanString(record.title) || 'Scoped analysis';
+    const question = cleanString(record.question);
+    const evidence = Array.isArray(record.evidenceNeeded)
+      ? record.evidenceNeeded.map(cleanString).filter(Boolean).join(', ')
+      : '';
+    return [
+      `Scoped analysis "${title}": ${question || 'Review the analysis question before running it.'}`,
+      evidence ? `Scoped analysis "${title}" evidence needed: ${evidence}` : '',
+    ].filter(Boolean);
+  });
+  const pages = Array.isArray(plan.pages) ? plan.pages : [];
+  const tileTasks = pages.flatMap((page) => {
+    if (!page || typeof page !== 'object') return [];
+    const tiles = Array.isArray((page as { tiles?: unknown[] }).tiles) ? (page as { tiles: unknown[] }).tiles : [];
+    return tiles.flatMap((tile) => {
+      if (!tile || typeof tile !== 'object') return [];
+      const record = tile as { title?: unknown; reviewTasks?: unknown[] };
+      const title = cleanString(record.title) || 'Tile';
+      return Array.isArray(record.reviewTasks)
+        ? record.reviewTasks.map((task) => `${title}: ${cleanString(task)}`).filter((task) => !task.endsWith(': '))
+        : [];
+    });
+  });
+  return unique([...tasks, ...reportTasks, ...tileTasks]).slice(0, 20);
+}
+
+function shouldRouteAppQuestionToInvestigation(question: string): boolean {
+  return /\b(why|changed|change|drop|decline|increase|decrease|driver|drill|break\s*down|segment|cohort|compare|versus| vs |anomal|outlier|spike|dip|root cause)\b/i.test(question);
+}
+
+function isAppChangeQuestion(question: string): boolean {
+  return /\b(add|remove|change|update|replace|resize|move|create|build|show|switch)\b.*\b(tile|chart|page|dashboard|app|layout|visual|view)\b/i.test(question);
+}
+
+function appChangeSuggestion(question: string): string {
+  if (/\b(chart|visual|bar|line|table|pivot|kpi)\b/i.test(question)) return 'recommend a governed tile display change and save it in Build mode';
+  if (/\b(page|dashboard)\b/i.test(question)) return 'create or update a dashboard page as a reviewed app artifact';
+  if (/\b(filter|parameter|param)\b/i.test(question)) return 'bind the filter to compatible certified block parameters only';
+  return 'prepare a reviewed app layout change';
+}
+
+function appAskTileContext(tile: DashboardGridItem): Record<string, unknown> {
+  return {
+    tileId: tile.i,
+    title: tile.title,
+    blockId: tile.block && 'blockId' in tile.block ? tile.block.blockId : undefined,
+    viz: tile.viz.type,
+    trustState: tile.trustState ?? tile.display?.trustState,
+    reviewStatus: tile.reviewStatus ?? tile.display?.reviewStatus,
+    filterBindings: tile.filterBindings,
+    parameterBindings: tile.parameterBindings,
+    sourceEvidence: tile.sourceEvidence,
+  };
+}
+
+function filterBindingsForBlockSource(projectRoot: string, block: BlockCandidate): NonNullable<DashboardGridItem['filterBindings']> {
+  const absPath = join(projectRoot, block.path);
+  if (!existsSync(absPath)) return [];
+  const source = readFileSync(absPath, 'utf-8');
+  const filterSection = sectionBody(source, 'filterBindings');
+  const parameterSection = sectionBody(source, 'parameterPolicy');
+  const bindings = Array.from(filterSection.matchAll(/^\s*([A-Za-z_][\w-]*)\s*=\s*"([^"]+)"/gm))
+    .map((match) => ({ filter: match[1], binding: match[2], mode: 'predicate' as const }));
+  const parameterNames = Array.from(parameterSection.matchAll(/^\s*([A-Za-z_][\w-]*)\s*=\s*"dynamic"/gm))
+    .map((match) => match[1]);
+  const parameterBindings = parameterNames.map((param) => ({
+    filter: param,
+    binding: param,
+    mode: 'parameter' as const,
+    paramNames: [param],
+  }));
+  return uniqueFilterBindings([...bindings, ...parameterBindings]);
+}
+
+function sectionBody(source: string, sectionName: string): string {
+  const match = new RegExp(`${sectionName}\\s*\\{([\\s\\S]*?)\\n\\s*\\}`, 'm').exec(source);
+  return match?.[1] ?? '';
+}
+
+function buildInvestigationSqlTemplateValues(
+  projectRoot: string,
+  context: unknown,
+  selected: Record<string, unknown> | null,
+  sourceBlockId?: string,
+): Record<string, unknown> {
+  const values: Record<string, unknown> = {};
+  const block = resolveSelectedBlock(projectRoot, selected, sourceBlockId);
+  if (block) {
+    const absPath = join(projectRoot, block.path);
+    if (existsSync(absPath)) {
+      Object.assign(values, parseDqlParams(readFileSync(absPath, 'utf-8')));
+    }
+  }
+
+  const root = asRecord(context);
+  const selectedRecord = asRecord(selected);
+  mergeTemplateRecord(values, root?.activeFilters);
+  mergeTemplateRecord(values, root?.filters);
+  mergeTemplateRecord(values, root?.variables);
+  mergeTemplateRecord(values, root?.parameters);
+  mergeTemplateRecord(values, root?.parameterValues);
+  mergeTemplateRecord(values, selectedRecord?.activeFilters);
+  mergeTemplateRecord(values, selectedRecord?.variables);
+  mergeTemplateRecord(values, selectedRecord?.parameters);
+  return values;
+}
+
+function mergeTemplateRecord(target: Record<string, unknown>, value: unknown): void {
+  const record = asRecord(value);
+  if (!record) return;
+  for (const [key, entry] of Object.entries(record)) {
+    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(key)) continue;
+    if (entry === undefined || entry === null || entry === '') continue;
+    target[key] = entry;
+  }
+}
+
+function parseDqlParams(source: string): Record<string, unknown> {
+  const body = sectionBody(source, 'params');
+  const values: Record<string, unknown> = {};
+  for (const match of body.matchAll(/^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.+?)\s*$/gm)) {
+    const name = match[1];
+    const value = parseDqlLiteral(match[2]);
+    if (value !== undefined) values[name] = value;
+  }
+  return values;
+}
+
+function parseDqlLiteral(raw: string): unknown {
+  const trimmed = raw
+    .replace(/\s+#.*$/g, '')
+    .replace(/\s+\/\/.*$/g, '')
+    .replace(/,\s*$/g, '')
+    .trim();
+  if (!trimmed) return undefined;
+  if (/^-?\d+(?:\.\d+)?$/.test(trimmed)) return Number(trimmed);
+  if (/^(true|false)$/i.test(trimmed)) return /^true$/i.test(trimmed);
+  const quoted = /^"((?:[^"\\]|\\.)*)"$/s.exec(trimmed) ?? /^'((?:[^'\\]|\\.)*)'$/s.exec(trimmed);
+  if (quoted) return quoted[1].replace(/\\(["'\\])/g, '$1');
+  if (trimmed.startsWith('[') && trimmed.endsWith(']')) {
+    const items = splitDqlArrayValues(trimmed.slice(1, -1))
+      .map(parseDqlLiteral)
+      .filter((item) => item !== undefined);
+    return items;
+  }
+  return trimmed;
+}
+
+function splitDqlArrayValues(value: string): string[] {
+  const out: string[] = [];
+  let current = '';
+  let quote: '"' | "'" | null = null;
+  for (let index = 0; index < value.length; index += 1) {
+    const char = value[index];
+    if (quote) {
+      current += char;
+      if (char === quote && value[index - 1] !== '\\') quote = null;
+      continue;
+    }
+    if (char === '"' || char === "'") {
+      quote = char;
+      current += char;
+      continue;
+    }
+    if (char === ',') {
+      if (current.trim()) out.push(current.trim());
+      current = '';
+      continue;
+    }
+    current += char;
+  }
+  if (current.trim()) out.push(current.trim());
+  return out;
+}
+
+function renderSqlTemplateParams(
+  sql: string,
+  values: Record<string, unknown>,
+): { sql: string; unresolved: string[] } {
+  const rendered = sql.replace(/\$\{([A-Za-z_][A-Za-z0-9_]*)\}/g, (match, name: string) => {
+    if (!Object.prototype.hasOwnProperty.call(values, name)) return match;
+    const literal = sqlTemplateLiteral(values[name]);
+    return literal ?? match;
+  });
+  return { sql: rendered, unresolved: unresolvedSqlTemplateParams(rendered) };
+}
+
+function sqlTemplateLiteral(value: unknown): string | undefined {
+  if (value === undefined || value === null || value === '') return undefined;
+  if (typeof value === 'number') return Number.isFinite(value) ? String(value) : undefined;
+  if (typeof value === 'boolean') return value ? 'TRUE' : 'FALSE';
+  if (Array.isArray(value)) {
+    const rendered = value.map(sqlTemplateLiteral).filter((item): item is string => Boolean(item));
+    return rendered.length > 0 ? rendered.join(', ') : undefined;
+  }
+  const stringValue = String(value).trim();
+  if (!stringValue) return undefined;
+  if (/^-?\d+(?:\.\d+)?$/.test(stringValue)) return stringValue;
+  if (/^(true|false)$/i.test(stringValue)) return /^true$/i.test(stringValue) ? 'TRUE' : 'FALSE';
+  return sqlStringLiteral(stringValue);
+}
+
+function unresolvedSqlTemplateParams(sql: string): string[] {
+  const names = Array.from(sql.matchAll(/\$\{([A-Za-z_][A-Za-z0-9_]*)\}/g), (match) => match[1]);
+  if (/\{\{[\s\S]*?\}\}/.test(sql)) names.push('jinja_template');
+  return Array.from(new Set(names)).sort((a, b) => a.localeCompare(b));
+}
+
+function uniqueFilterBindings(bindings: NonNullable<DashboardGridItem['filterBindings']>): NonNullable<DashboardGridItem['filterBindings']> {
+  const seen = new Set<string>();
+  const out: NonNullable<DashboardGridItem['filterBindings']> = [];
+  for (const binding of bindings) {
+    const key = `${binding.filter}:${binding.binding ?? ''}:${binding.mode ?? ''}:${(binding.paramNames ?? []).join(',')}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(binding);
+  }
+  return out;
+}
+
+function promoteSharedDashboardItem(item: DashboardGridItem): DashboardGridItem {
+  const trustState = item.trustState ?? item.display?.trustState ?? (item.block ? 'certified' : 'review_required');
+  const reviewStatus = item.reviewStatus ?? item.display?.reviewStatus ?? (trustState === 'certified' ? 'certified' : 'review_required');
+  const display = item.display
+    ? {
+        ...item.display,
+        trustState,
+        reviewStatus,
+      }
+    : undefined;
+  return {
+    ...item,
+    ...(display ? { display } : {}),
+    trustState,
+    reviewStatus,
+  };
 }
 
 export function createAppPackage(
@@ -1326,7 +2350,7 @@ function displayForAiPin(
     defaultVisualization: chartType,
     allowedVisualizations: allowedVisualizationsForComponent(component, chartType),
     layoutIntent: layoutIntentForComponent(component),
-    rationale: 'AI-generated research pin saved as governed presentation metadata; promote the SQL to a draft block before treating it as reusable logic.',
+    rationale: 'AI-generated analysis pin saved as governed presentation metadata; promote the SQL to a draft block before treating it as reusable logic.',
     trustState: certified ? 'certified' : 'review_required',
     reviewStatus: certified ? 'certified' : 'review_required',
   };
@@ -1606,8 +2630,12 @@ async function runAppInvestigation(
 ): Promise<LocalAppInvestigation> {
   const question = cleanString(input.question) || investigation.question;
   const context = input.context === undefined ? investigation.context : input.context;
-  const intent = normalizeInvestigationIntent(input.intent, question, context);
-  let generatedSql = cleanString(input.generatedSql) || investigation.generatedSql;
+  const intent = normalizeInvestigationIntent('intent' in input ? input.intent : investigation.intent, question, context);
+  const title = cleanString('title' in input ? input.title : undefined)
+    || cleanString(investigation.title)
+    || titleFromInvestigation(question, selectedBlockContext(context));
+  const rebuildFromCertified = 'repairMode' in input && input.repairMode === 'rebuild_from_certified';
+  let generatedSql = cleanString(input.generatedSql) || (rebuildFromCertified ? undefined : investigation.generatedSql);
   const lastRunAt = new Date().toISOString();
   storage.updateAppInvestigation(investigation.id, {
     question,
@@ -1628,6 +2656,11 @@ async function runAppInvestigation(
     const baselineGap = intent === 'diagnose_change' && hasSelectedRows(selected) && !hasComparableTimeBaseline(selected);
     const sourceTileId = investigation.sourceTileId ?? selectedContextString(context, 'tileId');
     const sourceBlockId = investigation.sourceBlockId ?? selectedContextString(context, 'blockId');
+    const routeDecision = appAnalysisRouteDecisionFromContext(context, intent, selected, question);
+    const sqlTemplateValues = buildInvestigationSqlTemplateValues(ctx.projectRoot, context, selected, sourceBlockId);
+    if (generatedSql) {
+      generatedSql = renderSqlTemplateParams(generatedSql, sqlTemplateValues).sql;
+    }
     const deterministicGeneration = generatedSql || baselineGap
       ? undefined
       : buildDeterministicInvestigationSql(ctx.projectRoot, {
@@ -1635,11 +2668,12 @@ async function runAppInvestigation(
           intent,
           selected,
           sourceBlockId,
+          context,
         });
     generatedSql = generatedSql || deterministicGeneration?.sql;
-    const agentGeneration = generatedSql || baselineGap
-      ? undefined
-      : await generateInvestigationSql(ctx, {
+    let agentGeneration: AppInvestigationGenerationResult | undefined;
+    if (!generatedSql && !baselineGap) {
+      agentGeneration = await generateInvestigationSql(ctx, {
           appId: investigation.appId,
           dashboardId: investigation.dashboardId ?? selectedString(context, 'dashboardId'),
           sourceTileId,
@@ -1648,18 +2682,62 @@ async function runAppInvestigation(
           question,
           intent,
           context,
+          mode: 'sql_and_memo',
         });
+    }
     generatedSql = generatedSql || cleanString(agentGeneration?.sql);
     const generationError = cleanString(agentGeneration?.executionError);
     const sqlEvidence = agentGeneration?.result
       ? { preview: buildGeneratedSqlPreview(agentGeneration.result, generatedSql), error: generationError || undefined }
       : await runGeneratedSqlPreview(ctx, generatedSql);
     const sqlError = sqlEvidence.error ?? generationError;
+    const sqlErrorKind = classifySqlPreviewError(sqlError);
     if (sqlEvidence.preview) {
       previews.unshift(sqlEvidence.preview);
       metricSnapshot = buildPreviewMetricSnapshot(sqlEvidence.preview, selectedString(selected, 'title'));
       driverCards = buildPreviewDriverCards(sqlEvidence.preview, intent);
     }
+    const hasReportEvidence = previews.length > 0 || driverCards.length > 0 || Object.keys(metricSnapshot).length > 0;
+    const reportSqlError = shouldSurfaceSqlPreviewIssue({
+      sqlError,
+      sqlErrorKind,
+      generatedSql,
+      hasReportEvidence,
+    }) ? sqlError : undefined;
+    const fallbackSummary = baselineGap
+      ? buildMissingBaselineSummary(question, selected)
+      : buildInvestigationSummary(intent, question, selected, metricSnapshot, driverCards);
+    const recommendation = baselineGap
+      ? buildMissingBaselineRecommendation(selected)
+      : buildInvestigationRecommendation(intent, selected, reportSqlError, sqlErrorKind);
+    const memoGeneration = !baselineGap && shouldRequestProviderMemo({
+      ctx,
+      generatedSql,
+      agentGeneration,
+      hasReportEvidence,
+    })
+      ? await generateInvestigationSql(ctx, {
+          appId: investigation.appId,
+          dashboardId: investigation.dashboardId ?? selectedString(context, 'dashboardId'),
+          sourceTileId,
+          sourceBlockId,
+          title: investigation.title,
+          question,
+          intent,
+          context,
+          mode: 'memo_only',
+          generatedSql,
+          metrics: metricSnapshot,
+          drivers: driverCards,
+          resultPreviews: previews.slice(0, 4),
+          summaryHint: fallbackSummary,
+          recommendationHint: recommendation,
+          sqlError: reportSqlError,
+          sqlErrorKind,
+          hasReportEvidence,
+        })
+      : undefined;
+    const narrativeGeneration = cleanString(memoGeneration?.answer) ? memoGeneration : agentGeneration;
     const evidence = {
       trustStatus: buildInvestigationTrust(investigation, selected, sqlError),
       planner: {
@@ -1669,11 +2747,16 @@ async function runAppInvestigation(
         generatedSql: generatedSql || undefined,
         sqlExecuted: Boolean(sqlEvidence.preview),
         sqlError,
+        sqlErrorKind,
         generationSource: baselineGap ? 'missing_baseline' : deterministicGeneration ? 'selected_block_metadata' : agentGeneration?.providerUsed ? 'ai_provider' : generatedSql ? 'provided_sql' : 'context_only',
+        repairMode: rebuildFromCertified ? 'rebuild_from_certified' : undefined,
         baselineGap,
         sourceBlockPath: deterministicGeneration?.sourceBlockPath,
         sourceBlockName: deterministicGeneration?.sourceBlockName,
         providerUsed: agentGeneration?.providerUsed,
+        memoProviderUsed: memoGeneration?.providerUsed,
+        memoSource: cleanString(narrativeGeneration?.answer) ? 'ai_provider' : 'deterministic_template',
+        routeDecision,
       },
       certifiedContext: {
         appId: investigation.appId,
@@ -1685,36 +2768,48 @@ async function runAppInvestigation(
         sourceBlockPath: deterministicGeneration?.sourceBlockPath ?? selectedString(selected, 'blockPath'),
         certificationStatus: selectedString(selected, 'certificationStatus'),
       },
+      routeDecision,
       assumptions: [
         ...investigationAssumptions(intent, selected, generatedSql, sqlError),
         ...(baselineGap ? ['The selected tile sample does not include at least two comparable time values, so DQL did not invent a change query from an unrelated table.'] : []),
       ],
       context,
-      agentEvidence: agentGeneration?.evidence,
-      analysisPlan: agentGeneration?.analysisPlan,
-      citations: agentGeneration?.citations,
+      agentEvidence: narrativeGeneration?.evidence ?? agentGeneration?.evidence,
+      analysisPlan: narrativeGeneration?.analysisPlan ?? agentGeneration?.analysisPlan,
+      citations: narrativeGeneration?.citations ?? agentGeneration?.citations,
     };
-    const summary = cleanString(agentGeneration?.answer) || (baselineGap
-      ? buildMissingBaselineSummary(question, selected)
-      : buildInvestigationSummary(intent, question, selected, metricSnapshot, driverCards));
-    const recommendation = baselineGap
-      ? buildMissingBaselineRecommendation(selected)
-      : buildInvestigationRecommendation(intent, selected, sqlError);
+    const summary = cleanString(narrativeGeneration?.answer) || fallbackSummary;
+    const reportSections = buildInvestigationReportSections({
+      intent,
+      question,
+      context,
+      selected,
+      metrics: metricSnapshot,
+      drivers: driverCards,
+      summary,
+      recommendation,
+      agentAnswer: narrativeGeneration?.answer,
+      hasReportEvidence,
+      sqlError: reportSqlError,
+      sqlErrorKind,
+      baselineGap,
+    });
     return storage.updateAppInvestigation(investigation.id, {
-      title: cleanString(input.question) ? titleFromInvestigation(question, selected) : investigation.title,
+      title,
       question,
       intent,
       context,
-      status: sqlEvidence.fatal ? 'error' : 'ready',
+      status: sqlEvidence.fatal && !hasReportEvidence ? 'error' : 'ready',
       summary,
       recommendation,
       metrics: metricSnapshot,
       driverCards,
       resultPreviews: previews,
       evidence,
+      reportSections,
       generatedSql,
       reviewStatus: 'needs_review',
-      error: sqlError ?? '',
+      error: reportSqlError ?? '',
       lastRunAt,
     }) ?? investigation;
   } catch (err) {
@@ -1725,6 +2820,130 @@ async function runAppInvestigation(
       lastRunAt,
     }) ?? investigation;
   }
+}
+
+function scheduleAppInvestigationRun(
+  ctx: Ctx,
+  appId: string,
+  investigationId: string,
+  input: AppInvestigationRunRequest | AppInvestigationCreateRequest,
+): void {
+  const runContext: Ctx = { ...ctx };
+  setTimeout(() => {
+    void (async () => {
+      const storage = new LocalAppStorage(defaultLocalAppsDbPath(runContext.projectRoot));
+      try {
+        const current = storage.getAppInvestigation(investigationId);
+        if (!current || current.appId !== appId) return;
+        await runAppInvestigation(runContext, storage, current, input);
+      } finally {
+        storage.close();
+      }
+    })();
+  }, 0);
+}
+
+function createOrReuseAppInvestigation(
+  storage: LocalAppStorage,
+  input: AppInvestigationCreateRequest & {
+    appId: string;
+    question: string;
+    sourceTileId?: string;
+    sourceBlockId?: string;
+    intent?: LocalAppInvestigationIntent;
+  },
+): LocalAppInvestigation {
+  if (!cleanString(input.generatedSql)) {
+    const reusable = findReusableAppInvestigation(storage, {
+      appId: input.appId,
+      dashboardId: input.dashboardId,
+      sourceTileId: input.sourceTileId,
+      sourceBlockId: input.sourceBlockId,
+      question: input.question,
+      intent: input.intent,
+      context: input.context,
+    });
+    if (reusable) {
+      return storage.updateAppInvestigation(reusable.id, {
+        title: input.title ?? reusable.title,
+        question: input.question,
+        intent: input.intent ?? reusable.intent,
+        context: input.context,
+        dashboardId: input.dashboardId,
+        sourceTileId: input.sourceTileId,
+        sourceBlockId: input.sourceBlockId,
+      }) ?? reusable;
+    }
+  }
+  return storage.createAppInvestigation(input);
+}
+
+function findReusableAppInvestigation(
+  storage: LocalAppStorage,
+  input: {
+    appId: string;
+    dashboardId?: string;
+    sourceTileId?: string;
+    sourceBlockId?: string;
+    question: string;
+    intent?: LocalAppInvestigationIntent;
+    context?: unknown;
+  },
+): LocalAppInvestigation | null {
+  const storageWithMethod = storage as LocalAppStorage & {
+    findReusableAppInvestigation?: (value: typeof input) => LocalAppInvestigation | null;
+  };
+  if (typeof storageWithMethod.findReusableAppInvestigation === 'function') {
+    return storageWithMethod.findReusableAppInvestigation(input);
+  }
+  const target = appInvestigationReuseFingerprint(input);
+  return storage.listAppInvestigations(input.appId, input.dashboardId).find((item) => {
+    if (item.reviewStatus === 'rejected') return false;
+    return appInvestigationReuseFingerprint(item) === target;
+  }) ?? null;
+}
+
+function appInvestigationReuseFingerprint(input: {
+  appId: string;
+  dashboardId?: string;
+  sourceTileId?: string;
+  sourceBlockId?: string;
+  question: string;
+  intent?: LocalAppInvestigationIntent;
+  context?: unknown;
+}): string {
+  return [
+    normalizeFingerprintString(input.appId),
+    normalizeFingerprintString(input.dashboardId),
+    normalizeFingerprintString(input.sourceTileId),
+    normalizeFingerprintString(input.sourceBlockId),
+    normalizeFingerprintString(input.question),
+    normalizeFingerprintString(input.intent ?? 'driver_breakdown'),
+    stableInvestigationFingerprintValue(input.context),
+  ].join('|');
+}
+
+function normalizeFingerprintString(value: unknown): string {
+  return typeof value === 'string' ? value.trim().replace(/\s+/g, ' ').toLowerCase() : '';
+}
+
+function stableInvestigationFingerprintValue(value: unknown): string {
+  if (value === undefined || value === null) return '';
+  return JSON.stringify(stableInvestigationFingerprintObject(value));
+}
+
+function stableInvestigationFingerprintObject(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(stableInvestigationFingerprintObject);
+  if (!value || typeof value !== 'object') {
+    return typeof value === 'string' ? value.trim().replace(/\s+/g, ' ') : value;
+  }
+  const record = value as Record<string, unknown>;
+  const out: Record<string, unknown> = {};
+  for (const key of Object.keys(record).sort()) {
+    if (/^(nonce|timestamp|createdAt|updatedAt|lastRunAt)$/i.test(key)) continue;
+    out[key] = stableInvestigationFingerprintObject(record[key]);
+  }
+  return out;
 }
 
 function normalizeInvestigationIntent(
@@ -1809,14 +3028,25 @@ function buildMetricSnapshot(selected: Record<string, unknown> | null): Record<s
       context: 'Metric values were not available in the selected tile sample.',
     };
   }
-  const baselineValue = typeofNumber(rows[0]?.[metricColumn]);
-  const currentValue = typeofNumber(rows[rows.length - 1]?.[metricColumn]) ?? baselineValue;
+  const topRow = rows.find((row) => typeofNumber(row[metricColumn]) !== null);
+  const comparisonRow = rows.slice(1).find((row) => typeofNumber(row[metricColumn]) !== null);
+  const dimensionColumn = columns.find((column) => column !== metricColumn && rows.some((row) => typeof row[column] === 'string'));
+  const currentValue = typeofNumber(topRow?.[metricColumn]);
+  const baselineValue = typeofNumber(comparisonRow?.[metricColumn]);
   const delta = currentValue !== null && baselineValue !== null ? currentValue - baselineValue : undefined;
+  const topLabel = dimensionColumn && topRow ? cleanString(topRow[dimensionColumn]) : '';
+  const comparisonLabel = dimensionColumn && comparisonRow ? cleanString(comparisonRow[dimensionColumn]) : '';
   return {
     metric: metricColumn,
     currentValue,
     baselineValue,
     delta,
+    currentLabel: 'Top value',
+    baselineLabel: 'Next comparison',
+    deltaLabel: 'Top gap',
+    currentDetail: topLabel ? `${topLabel} / ${metricColumn}` : 'highest ranked evidence row',
+    baselineDetail: comparisonLabel ? `${comparisonLabel} / ${metricColumn}` : 'next comparable evidence row',
+    deltaDetail: comparisonLabel ? `difference between ${topLabel || 'top row'} and ${comparisonLabel}` : 'difference to next comparison',
     rowsReviewed: rows.length,
     context: selectedString(selected, 'title') ?? 'Selected dashboard tile',
   };
@@ -1992,14 +3222,21 @@ function buildDeterministicInvestigationSql(
     intent: LocalAppInvestigationIntent;
     selected: Record<string, unknown> | null;
     sourceBlockId?: string;
+    context?: unknown;
   },
 ): { sql: string; sourceBlockPath: string; sourceBlockName: string } | undefined {
   if (input.intent === 'trust_gap_review') return undefined;
   const block = resolveSelectedBlock(projectRoot, input.selected, input.sourceBlockId);
   if (!block) return undefined;
   const source = readFileSync(join(projectRoot, block.path), 'utf-8');
-  const blockSql = extractDqlQuery(source);
-  if (!blockSql || /\{\{/.test(blockSql) || !isReadOnlySql(blockSql)) return undefined;
+  const rawBlockSql = extractDqlQuery(source);
+  if (!rawBlockSql) return undefined;
+  const rendered = renderSqlTemplateParams(
+    rawBlockSql,
+    buildInvestigationSqlTemplateValues(projectRoot, input.context, input.selected, input.sourceBlockId),
+  );
+  const blockSql = rendered.sql;
+  if (rendered.unresolved.length > 0 || /\{\{/.test(blockSql) || !isReadOnlySql(blockSql)) return undefined;
   const rows = selectedRows(input.selected);
   const columns = selectedColumns(input.selected, rows);
   const sourceSql = stripTopLevelOrderAndLimit(blockSql);
@@ -2246,12 +3483,30 @@ async function generateInvestigationSql(
 ): Promise<AppInvestigationGenerationResult | undefined> {
   if (!ctx.generateInvestigationSql) return undefined;
   try {
-    return await ctx.generateInvestigationSql(input);
+    const timeoutMs = appResearchAiTimeoutMs();
+    const result = await boundedPromise(ctx.generateInvestigationSql(input), timeoutMs);
+    if (result.timedOut) {
+      return {
+        executionError: `AI SQL generation timed out after ${Math.round(timeoutMs / 1000)}s. DQL continued with deterministic app evidence and kept the analysis review-required.`,
+      };
+    }
+    return result.value;
   } catch (err) {
     return {
       executionError: err instanceof Error ? err.message : String(err),
     };
   }
+}
+
+function shouldRequestProviderMemo(input: {
+  ctx: Ctx;
+  generatedSql?: string;
+  agentGeneration?: AppInvestigationGenerationResult;
+  hasReportEvidence: boolean;
+}): boolean {
+  if (!input.ctx.generateInvestigationSql) return false;
+  if (cleanString(input.agentGeneration?.answer)) return false;
+  return input.hasReportEvidence || Boolean(cleanString(input.generatedSql));
 }
 
 async function runGeneratedSqlPreview(
@@ -2260,6 +3515,13 @@ async function runGeneratedSqlPreview(
 ): Promise<{ preview?: Record<string, unknown>; error?: string; fatal?: boolean }> {
   const sql = cleanString(generatedSql);
   if (!sql) return {};
+  const unresolved = unresolvedSqlTemplateParams(sql);
+  if (unresolved.length > 0) {
+    return {
+      error: `Generated SQL was not run because unresolved DQL parameters remain: ${unresolved.join(', ')}.`,
+      fatal: false,
+    };
+  }
   if (!isReadOnlySql(sql)) {
     return {
       error: 'Generated SQL was not run because it was not a read-only SELECT or WITH query.',
@@ -2273,14 +3535,24 @@ async function runGeneratedSqlPreview(
     };
   }
   try {
-    const result = await ctx.executeSql(boundedPreviewSql(sql));
+    const timeoutMs = appResearchPreviewTimeoutMs();
+    const result = await boundedPromise(
+      ctx.executeSql(boundedPreviewSql(sql)),
+      timeoutMs,
+    );
+    if (result.timedOut) {
+      return {
+        error: `Generated SQL preview timed out after ${Math.round(timeoutMs / 1000)}s. The analysis was created from selected app evidence; review or simplify the SQL before promotion.`,
+        fatal: false,
+      };
+    }
     return {
       preview: {
         id: 'generated-sql-preview',
         title: 'Generated SQL preview',
         kind: 'table',
         reviewRequired: true,
-        result,
+        result: result.value,
       },
     };
   } catch (err) {
@@ -2289,6 +3561,32 @@ async function runGeneratedSqlPreview(
       fatal: true,
     };
   }
+}
+
+async function boundedPromise<T>(promise: Promise<T>, timeoutMs: number): Promise<{ timedOut: false; value: T } | { timedOut: true }> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      promise.then((value) => ({ timedOut: false as const, value })),
+      new Promise<{ timedOut: true }>((resolve) => {
+        timer = setTimeout(() => resolve({ timedOut: true }), timeoutMs);
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
+function appResearchPreviewTimeoutMs(): number {
+  const raw = Number(process.env.DQL_APP_RESEARCH_PREVIEW_TIMEOUT_MS);
+  if (Number.isFinite(raw) && raw >= 500) return Math.min(raw, 120000);
+  return 12000;
+}
+
+function appResearchAiTimeoutMs(): number {
+  const raw = Number(process.env.DQL_APP_RESEARCH_AI_TIMEOUT_MS);
+  if (Number.isFinite(raw) && raw >= 500) return Math.min(raw, 120000);
+  return 12000;
 }
 
 function buildGeneratedSqlPreview(result: unknown, generatedSql?: string): Record<string, unknown> {
@@ -2319,6 +3617,43 @@ function buildGeneratedSqlPreview(result: unknown, generatedSql?: string): Recor
       executionTime: typeof record?.executionTime === 'number' ? record.executionTime : undefined,
     },
   };
+}
+
+type SqlPreviewErrorKind = 'runtime_unavailable' | 'ai_generation_timeout' | 'timeout' | 'sql_repair' | 'safety' | 'unknown';
+
+function classifySqlPreviewError(error?: string): SqlPreviewErrorKind | undefined {
+  const value = cleanString(error);
+  if (!value) return undefined;
+  if (/\bAI SQL generation timed out\b/i.test(value)) return 'ai_generation_timeout';
+  if (/\b(warehouse|suspended|resume|authenticat|permission|privilege|network|connection|connect|host cannot execute|cannot execute|not configured)\b/i.test(value)) {
+    return 'runtime_unavailable';
+  }
+  if (/\b(timed out|timeout)\b/i.test(value)) return 'timeout';
+  if (/\b(not a read-only|not read-only|insert|update|delete|drop|alter|create|merge|truncate|grant|revoke)\b/i.test(value)) {
+    return 'safety';
+  }
+  if (/\b(unresolved|parameter|invalid identifier|syntax|compilation|parse|unknown column|does not exist|ambiguous|not found)\b/i.test(value)) {
+    return 'sql_repair';
+  }
+  return 'unknown';
+}
+
+function shouldSurfaceSqlPreviewIssue(input: {
+  sqlError?: string;
+  sqlErrorKind?: SqlPreviewErrorKind;
+  generatedSql?: string;
+  hasReportEvidence: boolean;
+}): boolean {
+  const error = cleanString(input.sqlError);
+  if (!error) return false;
+  if (
+    input.hasReportEvidence &&
+    !cleanString(input.generatedSql) &&
+    (input.sqlErrorKind === 'unknown' || /\bAI provider did not return a governed answer\b/i.test(error))
+  ) {
+    return false;
+  }
+  return true;
 }
 
 function isReadOnlySql(sql: string): boolean {
@@ -2352,21 +3687,21 @@ function buildInvestigationTrust(
   sqlError?: string,
 ): Record<string, unknown> {
   return {
-    label: 'AI-generated research',
+    label: 'AI-generated analysis',
     uncertified: true,
     reviewStatus: 'needs_review',
     certifiedContext: selectedString(selected, 'certificationStatus') === 'certified' ? 'selected tile is certified' : 'selected tile certification needs review',
     sourceBlockId: investigation.sourceBlockId ?? selectedString(selected, 'blockId'),
     sourceTileId: investigation.sourceTileId ?? selectedString(selected, 'tileId'),
     caveats: [
-      'Investigation output is not certified until a reviewer promotes or certifies the generated block.',
+      'Analysis output is not certified until a reviewer promotes or certifies the generated block.',
       ...(sqlError ? [`SQL preview caveat: ${sqlError}`] : []),
     ],
   };
 }
 
 function investigationSteps(intent: LocalAppInvestigationIntent): string[] {
-  const common = ['trust check', 'evidence capture'];
+  const common = ['trust check', 'proof capture'];
   if (intent === 'trust_gap_review') return ['certification review', 'lineage review', 'owner and caveat check', ...common];
   if (intent === 'entity_drilldown') return ['entity value match', 'metric trend', 'exception rows', ...common];
   if (intent === 'segment_compare') return ['segment grouping', 'baseline comparison', 'top movers', ...common];
@@ -2397,12 +3732,41 @@ function buildInvestigationSummary(
   drivers: Array<Record<string, unknown>>,
 ): string {
   const target = selectedString(selected, 'title') ?? 'this dashboard question';
-  const delta = typeof metrics.delta === 'number' ? ` Delta from the sampled baseline is ${formatContribution(metrics.delta)}.` : '';
+  const cleanQuestion = cleanInvestigationQuestion(question);
+  const metricName = cleanString(metrics.metric) || 'selected metric';
+  const currentValue = typeofNumber(metrics.currentValue);
+  const baselineValue = typeofNumber(metrics.baselineValue);
+  const deltaValue = typeofNumber(metrics.delta);
+  const currentDetail = cleanString(metrics.currentDetail);
+  const baselineDetail = cleanString(metrics.baselineDetail);
+  const currentLabel = currentDetail ? currentDetail.replace(/\s*\/\s*[^/]+$/, '') : cleanString(metrics.currentLabel) || 'Current result';
+  const baselineLabel = baselineDetail ? baselineDetail.replace(/\s*\/\s*[^/]+$/, '') : cleanString(metrics.baselineLabel) || 'comparison';
+  const valueSentence = currentValue !== null
+    ? `${currentLabel} leads on ${metricName} with ${formatMetricValue(currentValue)}${baselineValue !== null ? ` versus ${formatMetricValue(baselineValue)} for ${baselineLabel}` : ''}${deltaValue !== null ? `, a gap of ${formatMetricValue(deltaValue)}` : ''}.`
+    : '';
   if (intent === 'trust_gap_review') {
-    return `This tile can be used as certified context only where its source block and lineage are certified. The deeper answer is AI-generated research and needs review before leaders rely on it.${delta}`;
+    return `This tile can be used as certified context only where its source block and lineage are certified. ${valueSentence || 'The deeper answer is AI-generated analysis and needs review before leaders rely on it.'}`;
   }
-  const driver = drivers[0]?.title ? ` Top visible driver in the current evidence is ${drivers[0].title}.` : '';
-  return `DQL opened a review-required investigation for ${target}: ${question}.${delta}${driver}`;
+  const driverTitle = cleanString(drivers[0]?.title);
+  const driver = driverTitle && driverTitle !== currentLabel
+    ? ` ${driverTitle} is the strongest visible driver in the bounded preview.`
+    : '';
+  const reviewBoundary = ' This remains review-required until SQL, grain, filters, and lineage are confirmed.';
+  if (valueSentence) {
+    return `${valueSentence}${driver}${reviewBoundary}`.trim();
+  }
+  const fallbackSubject = cleanQuestion || target;
+  return `This analysis investigates ${fallbackSubject}. The preview is bounded to the selected app context and needs analyst review before it becomes governed business logic.`;
+}
+
+function cleanInvestigationQuestion(value: string): string {
+  return cleanString(value)
+    .replace(/^\/(ask|research|report|analy[sz]e|analysis|proof|evidence|validate|verify|add\s+block|create\s+block|draft\s+block|block)\b/i, '')
+    .replace(/^(Analysis goal|Analysis question|Research question|Evidence question|Validation question|Reusable block goal|Business question|Question):\s*/i, '')
+    .replace(/\bCurrent app filters:\s*[\s\S]*$/i, '')
+    .replace(/\s+/g, ' ')
+    .replace(/\s*[.?!]+$/, '')
+    .trim();
 }
 
 function buildMissingBaselineSummary(
@@ -2410,23 +3774,463 @@ function buildMissingBaselineSummary(
   selected: Record<string, unknown> | null,
 ): string {
   const target = selectedString(selected, 'title') ?? 'the selected tile';
-  return `DQL opened a review-required investigation for ${target}: ${question}. The selected tile shows the current certified result, but its sample does not include a comparable prior period or historical snapshot, so DQL cannot calculate what changed without guessing.`;
+  return `DQL opened review-required analysis for ${target}: ${question}. The selected tile shows the current certified result, but its sample does not include a comparable prior period or historical snapshot, so DQL cannot calculate what changed without guessing.`;
 }
 
 function buildMissingBaselineRecommendation(selected: Record<string, unknown> | null): string {
   const target = selectedString(selected, 'title') ?? 'this tile';
-  return `Use ${target} as current-state evidence. To explain change, add or select a block with a time grain, snapshot date, or prior-period baseline, then rerun the investigation.`;
+  return `Use ${target} as current-state evidence. To explain change, add or select a block with a time grain, snapshot date, or prior-period baseline, then rerun the analysis.`;
 }
 
 function buildInvestigationRecommendation(
   intent: LocalAppInvestigationIntent,
   selected: Record<string, unknown> | null,
   sqlError?: string,
+  sqlErrorKind?: SqlPreviewErrorKind,
 ): string {
+  if (sqlErrorKind === 'runtime_unavailable') return 'Resume or choose an active warehouse, then refresh the analysis. Keep the generated SQL review-required until a preview runs successfully.';
+  if (sqlErrorKind === 'ai_generation_timeout') return 'Use the certified app result as the current answer, then retry AI SQL generation or draft the scoped SQL manually before promotion.';
+  if (sqlErrorKind === 'timeout') return 'Simplify the generated SQL or narrow the app filters, then refresh the bounded preview before promotion.';
+  if (sqlErrorKind === 'safety') return 'Rewrite the SQL as a read-only SELECT/WITH query before any preview or promotion.';
   if (sqlError) return 'Review the generated SQL or add a certified drilldown block before promoting this result.';
-  if (intent === 'trust_gap_review') return 'Use the certified tile for reporting, and promote only the reviewed gaps into a draft block.';
+  if (intent === 'trust_gap_review') return 'Use the certified tile for stakeholder reporting, and promote only the reviewed gaps into a draft block.';
   if (!selected) return 'Select a dashboard tile or provide SQL so DQL can rank drivers with stronger evidence.';
   return 'Review the driver evidence, then pin the useful answer or promote the SQL path into a draft DQL block.';
+}
+
+function buildInvestigationReportSections(input: {
+  intent: LocalAppInvestigationIntent;
+  question: string;
+  context: unknown;
+  selected: Record<string, unknown> | null;
+  metrics: Record<string, unknown>;
+  drivers: Array<Record<string, unknown>>;
+  summary: string;
+  recommendation: string;
+  agentAnswer?: string;
+  hasReportEvidence?: boolean;
+  sqlError?: string;
+  sqlErrorKind?: SqlPreviewErrorKind;
+  baselineGap?: boolean;
+}): LocalAppInvestigationReportSection[] {
+  const actionMode = cleanString(asRecord(input.context)?.actionMode);
+  const sourceName = selectedString(input.selected, 'title') ?? selectedString(input.selected, 'blockId') ?? 'selected app result';
+  const topNumber = reportMetricBullet(input.metrics, 'current');
+  const comparison = reportMetricBullet(input.metrics, 'baseline');
+  const delta = reportMetricBullet(input.metrics, 'delta');
+  const keyBullets = [topNumber, comparison, delta].filter((item): item is string => Boolean(item));
+  const driver = cleanString(input.drivers[0]?.title);
+  const driverValue = cleanString(input.drivers[0]?.contribution ?? input.drivers[0]?.value ?? input.drivers[0]?.metric);
+  const nextDriver = cleanString(input.drivers[1]?.title);
+  const interpretation = reportInterpretationForIntent({
+    intent: input.intent,
+    actionMode,
+    sourceName,
+    driver,
+    driverValue,
+    nextDriver,
+    baselineGap: input.baselineGap,
+  });
+  const interpretationMeta = reportInterpretationMeta(input.intent, actionMode);
+  const providerSections = extractProviderReportSections(input.agentAnswer);
+  if (providerSections.length >= 2) {
+    const sections = [...providerSections];
+    if (keyBullets.length > 0 && !hasReportSection(sections, /\b(number|metric|kpi|value)\b/i)) {
+      sections.push({
+        id: 'key-numbers',
+        kind: 'key_numbers',
+        title: keyNumbersTitleForIntent(input.intent),
+        body: keyNumbersBodyForIntent(input.intent),
+        tone: 'insight',
+        bullets: keyBullets,
+        evidenceRefs: reportEvidenceRefs(input.selected),
+      });
+    }
+    if (input.baselineGap && !hasReportSection(sections, /\b(missing|baseline|comparison)\b/i)) {
+      sections.push({
+        id: 'missing-comparison',
+        kind: 'custom',
+        title: 'Missing comparison',
+        body: 'The selected dashboard sample does not contain a second comparable period or baseline. DQL preserved the current certified result and stopped short of inventing a change explanation from unrelated data.',
+        tone: 'warning',
+        evidenceRefs: reportEvidenceRefs(input.selected),
+      });
+    }
+    const previewIssue = input.hasReportEvidence && input.sqlErrorKind === 'runtime_unavailable'
+      ? undefined
+      : reportPreviewIssue(input.sqlError, input.sqlErrorKind);
+    if (previewIssue && !hasReportSection(sections, /\b(sql|preview|repair|warehouse|runtime)\b/i)) {
+      sections.push({
+        id: previewIssue.id,
+        kind: 'custom',
+        title: previewIssue.title,
+        body: previewIssue.body,
+        tone: previewIssue.tone,
+      });
+    }
+    if (!hasReportSection(sections, /\b(next|recommend|action)\b/i)) {
+      sections.push({
+        id: 'recommended-next-step',
+        kind: 'recommended_next_step',
+        title: 'Recommended next step',
+        body: input.recommendation,
+        tone: input.sqlError ? 'warning' : 'neutral',
+      });
+    }
+    if (!hasReportSection(sections, /\b(review boundary|review-required|governed boundary|trust boundary)\b/i)) {
+      sections.push({
+        id: 'review-boundary',
+        kind: 'review_boundary',
+        title: 'Review boundary',
+        body: 'This analysis is AI-generated and review-required. Use it to guide decisions, then validate SQL, grain, filters, joins, and source proof before pinning it to the app or turning it into a reusable DQL block.',
+        tone: 'review',
+      });
+    }
+    return sections.filter((section) => cleanString(section.body));
+  }
+  const sections: LocalAppInvestigationReportSection[] = [
+    {
+      id: 'executive-answer',
+      kind: 'executive_answer',
+      title: 'Executive answer',
+      body: input.summary,
+      tone: 'answer',
+      evidenceRefs: reportEvidenceRefs(input.selected),
+    },
+    {
+      id: interpretationMeta.id,
+      kind: interpretationMeta.kind,
+      title: interpretationMeta.title,
+      body: interpretation,
+      tone: interpretationMeta.tone,
+      evidenceRefs: reportEvidenceRefs(input.selected),
+    },
+  ];
+
+  if (keyBullets.length > 0) {
+    sections.push({
+      id: 'key-numbers',
+      kind: 'key_numbers',
+      title: keyNumbersTitleForIntent(input.intent),
+      body: keyNumbersBodyForIntent(input.intent),
+      tone: 'insight',
+      bullets: keyBullets,
+      evidenceRefs: reportEvidenceRefs(input.selected),
+    });
+  }
+
+  if (input.baselineGap) {
+    sections.push({
+      id: 'missing-comparison',
+      kind: 'custom',
+      title: 'Missing comparison',
+      body: 'The selected dashboard sample does not contain a second comparable period or baseline. DQL preserved the current certified result and stopped short of inventing a change explanation from unrelated data.',
+      tone: 'warning',
+      evidenceRefs: reportEvidenceRefs(input.selected),
+    });
+  }
+
+  const previewIssue = input.hasReportEvidence && input.sqlErrorKind === 'runtime_unavailable'
+    ? undefined
+    : reportPreviewIssue(input.sqlError, input.sqlErrorKind);
+  if (previewIssue) {
+    sections.push({
+      id: previewIssue.id,
+      kind: 'custom',
+      title: previewIssue.title,
+      body: previewIssue.body,
+      tone: previewIssue.tone,
+    });
+  }
+
+  sections.push(
+    {
+      id: 'recommended-next-step',
+      kind: 'recommended_next_step',
+      title: 'Recommended next step',
+      body: input.recommendation,
+      tone: input.sqlError ? 'warning' : 'neutral',
+    },
+    {
+      id: 'review-boundary',
+      kind: 'review_boundary',
+      title: 'Review boundary',
+      body: 'This analysis is AI-generated and review-required. Use it to guide decisions, then validate SQL, grain, filters, joins, and source proof before pinning it to the app or turning it into a reusable DQL block.',
+      tone: 'review',
+    },
+  );
+
+  return sections.filter((section) => cleanString(section.body));
+}
+
+function extractProviderReportSections(answer?: string): LocalAppInvestigationReportSection[] {
+  const raw = cleanString(answer);
+  if (!raw) return [];
+  const text = raw
+    .replace(/```[\s\S]*?```/g, '')
+    .replace(/^\s*(SQL|Query)\s*:.*$/gim, '')
+    .trim();
+  const matches = Array.from(text.matchAll(/^#{2,4}\s+(.+)$/gm));
+  if (matches.length < 2) return [];
+  const sections: LocalAppInvestigationReportSection[] = [];
+  const seen = new Set<string>();
+  for (let index = 0; index < matches.length; index += 1) {
+    const match = matches[index];
+    const title = cleanProviderReportTitle(match[1]);
+    const next = matches[index + 1];
+    const bodyText = text.slice((match.index ?? 0) + match[0].length, next?.index ?? text.length).trim();
+    if (!title || !bodyText || isTraceOnlyProviderSection(title)) continue;
+    const id = slugify(title) || `section-${index + 1}`;
+    if (seen.has(id)) continue;
+    seen.add(id);
+    const parsed = parseProviderSectionBody(bodyText);
+    if (!parsed.body) continue;
+    sections.push({
+      id,
+      kind: providerReportKind(title),
+      title,
+      body: parsed.body,
+      bullets: parsed.bullets,
+      tone: providerReportTone(title),
+    });
+  }
+  return sections.slice(0, 8);
+}
+
+function cleanProviderReportTitle(value: string): string {
+  return cleanString(value)
+    .replace(/\*\*/g, '')
+    .replace(/[:：]\s*$/, '')
+    .replace(/^\d+[.)]\s*/, '')
+    .trim()
+    .slice(0, 90);
+}
+
+function isTraceOnlyProviderSection(title: string): boolean {
+  return /\b(sql|query|raw trace|appendix|implementation detail)\b/i.test(title);
+}
+
+function parseProviderSectionBody(value: string): { body: string; bullets?: string[] } {
+  const lines = value
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .filter((line) => !/^#{1,6}\s+/.test(line));
+  const bullets: string[] = [];
+  const prose: string[] = [];
+  for (const line of lines) {
+    const bullet = /^[-*]\s+(.+)$/.exec(line)?.[1]?.trim();
+    if (bullet) {
+      bullets.push(bullet);
+      continue;
+    }
+    prose.push(line);
+  }
+  const body = prose.join('\n\n') || bullets.slice(0, 3).join(' ');
+  return {
+    body: cleanString(body),
+    bullets: bullets.length ? bullets.slice(0, 8) : undefined,
+  };
+}
+
+function providerReportKind(title: string): LocalAppInvestigationReportSection['kind'] {
+  if (/\b(executive|answer|summary|decision)\b/i.test(title)) return 'executive_answer';
+  if (/\b(number|metric|kpi|value)\b/i.test(title)) return 'key_numbers';
+  if (/\b(driver|why|interpret|segment|movement|trend|entity|anomaly)\b/i.test(title)) return 'business_interpretation';
+  if (/\b(proof|validate|evidence|trust)\b/i.test(title)) return 'validation';
+  if (/\b(block|logic|reuse|contract)\b/i.test(title)) return 'reusable_logic';
+  if (/\b(next|recommend|action)\b/i.test(title)) return 'recommended_next_step';
+  if (/\b(caveat|review|boundary|risk|assumption)\b/i.test(title)) return 'review_boundary';
+  return 'custom';
+}
+
+function providerReportTone(title: string): LocalAppInvestigationReportSection['tone'] {
+  if (/\b(executive|answer|summary|decision)\b/i.test(title)) return 'answer';
+  if (/\b(driver|why|interpret|segment|movement|trend|number|metric|kpi|value)\b/i.test(title)) return 'insight';
+  if (/\b(caveat|warning|risk|missing|error|unavailable|anomaly)\b/i.test(title)) return 'warning';
+  if (/\b(proof|validate|evidence|trust|review|boundary|block|logic|reuse)\b/i.test(title)) return 'review';
+  return 'neutral';
+}
+
+function hasReportSection(
+  sections: LocalAppInvestigationReportSection[],
+  pattern: RegExp,
+): boolean {
+  return sections.some((section) => pattern.test(section.title) || pattern.test(section.kind));
+}
+
+function reportPreviewIssue(
+  sqlError?: string,
+  sqlErrorKind?: SqlPreviewErrorKind,
+): Pick<LocalAppInvestigationReportSection, 'id' | 'title' | 'body' | 'tone'> | undefined {
+  if (!sqlError) return undefined;
+  if (sqlErrorKind === 'runtime_unavailable') {
+    return {
+      id: 'preview-unavailable',
+      title: 'Preview unavailable',
+      body: 'The generated SQL was not proven because the warehouse or execution runtime is unavailable. Resume or choose an active warehouse, then refresh the analysis. Do not edit business logic just to fix an infrastructure issue.',
+      tone: 'warning',
+    };
+  }
+  if (sqlErrorKind === 'ai_generation_timeout') {
+    return {
+      id: 'ai-generation-timeout',
+      title: 'AI SQL generation timed out',
+      body: 'DQL did not receive generated SQL inside the bounded AI window. The memo uses certified app evidence only; retry AI generation, provide reviewed SQL, or draft reusable logic manually before promoting this analysis.',
+      tone: 'warning',
+    };
+  }
+  if (sqlErrorKind === 'timeout') {
+    return {
+      id: 'preview-timeout',
+      title: 'Preview timed out',
+      body: 'The generated SQL did not finish inside the bounded preview window. Narrow the filters, simplify the SQL, or rerun when the warehouse is responsive before promoting this analysis.',
+      tone: 'warning',
+    };
+  }
+  if (sqlErrorKind === 'safety') {
+    return {
+      id: 'sql-safety-check',
+      title: 'SQL safety check',
+      body: 'DQL blocked the preview because the SQL was not a read-only SELECT/WITH statement. Rewrite it as safe analytical SQL before running, pinning, or promoting.',
+      tone: 'warning',
+    };
+  }
+  return {
+    id: 'sql-repair-path',
+    title: 'SQL repair path',
+    body: 'The generated SQL preview needs review before this analysis can be promoted. Open the trace appendix, edit the SQL against the selected block context, rerun the preview, then pin or draft reusable logic only after the row sample matches the business question.',
+    tone: 'warning',
+  };
+}
+
+function reportInterpretationMeta(
+  intent: LocalAppInvestigationIntent,
+  actionMode?: string,
+): Pick<LocalAppInvestigationReportSection, 'id' | 'kind' | 'title' | 'tone'> {
+  if (actionMode === 'block') {
+    return { id: 'reusable-logic', kind: 'reusable_logic', title: 'Reusable logic decision', tone: 'review' };
+  }
+  if (actionMode === 'evidence' || intent === 'trust_gap_review') {
+    return { id: 'validation-result', kind: 'validation', title: 'Validation result', tone: 'review' };
+  }
+  if (intent === 'diagnose_change') {
+    return { id: 'change-explanation', kind: 'business_interpretation', title: 'Change explanation', tone: 'insight' };
+  }
+  if (intent === 'segment_compare') {
+    return { id: 'segment-readout', kind: 'business_interpretation', title: 'Segment readout', tone: 'insight' };
+  }
+  if (intent === 'entity_drilldown') {
+    return { id: 'entity-drilldown', kind: 'business_interpretation', title: 'Entity drilldown', tone: 'insight' };
+  }
+  if (intent === 'anomaly_investigation') {
+    return { id: 'anomaly-readout', kind: 'business_interpretation', title: 'Anomaly readout', tone: 'warning' };
+  }
+  return { id: 'driver-readout', kind: 'business_interpretation', title: 'Driver readout', tone: 'insight' };
+}
+
+function reportInterpretationForIntent(input: {
+  intent: LocalAppInvestigationIntent;
+  actionMode?: string;
+  sourceName: string;
+  driver?: string;
+  driverValue?: string;
+  nextDriver?: string;
+  baselineGap?: boolean;
+}): string {
+  if (input.baselineGap) {
+    return 'This is a current-state answer, not a completed change explanation. The analysis has enough proof to show the selected result, but it does not have a comparable prior period or baseline needed to explain movement responsibly.';
+  }
+  if (input.actionMode === 'block') {
+    return 'This is a reusable-logic candidate. Preserve the business question, parameters, allowed filters, output grain, source proof, and review path before certification.';
+  }
+  if (input.actionMode === 'evidence' || input.intent === 'trust_gap_review') {
+    return `This validation is bounded to ${input.sourceName}. Treat the claim as trusted only after source block, lineage, filters, and preview rows are reviewed.`;
+  }
+  if (input.driver) {
+    const driverSentence = `${input.driver} is the strongest visible driver${input.driverValue ? ` (${input.driverValue})` : ''}.`;
+    const comparisonSentence = input.nextDriver ? ` The next visible comparison is ${input.nextDriver}.` : '';
+    const reviewSentence = ' Treat the interpretation as directional until a reviewer confirms SQL, grain, filters, joins, and lineage.';
+    if (input.intent === 'segment_compare') return `${driverSentence}${comparisonSentence} Use this as a segment readout only after confirming the grouping field and filter bindings.${reviewSentence}`;
+    if (input.intent === 'entity_drilldown') return `${driverSentence}${comparisonSentence} Use this as an entity drilldown only after confirming the entity identifier and output grain.${reviewSentence}`;
+    if (input.intent === 'anomaly_investigation') return `${driverSentence}${comparisonSentence} Review the baseline, outlier rows, and time grain before treating this as an anomaly narrative.${reviewSentence}`;
+    if (input.intent === 'diagnose_change') return `${driverSentence}${comparisonSentence} Confirm a comparable baseline or prior period before treating this as a causal change explanation.${reviewSentence}`;
+    return `${driverSentence}${comparisonSentence}${reviewSentence}`;
+  }
+  if (input.intent === 'diagnose_change') {
+    return 'The analysis does not yet have a comparable baseline or ranked drivers. Add a time grain, prior-period block, or segment field before treating the change explanation as complete.';
+  }
+  if (input.intent === 'segment_compare') {
+    return 'The analysis does not yet have a clear segment grouping. Add a segment field or certified breakdown block before using this as a stakeholder segment comparison.';
+  }
+  if (input.intent === 'entity_drilldown') {
+    return 'The analysis does not yet have a stable entity identifier. Add the entity key and output grain before using this as a stakeholder drilldown.';
+  }
+  return 'The analysis does not yet have ranked drivers. Add a clearer metric, time grain, or segment field before treating it as complete.';
+}
+
+function keyNumbersTitleForIntent(intent: LocalAppInvestigationIntent): string {
+  if (intent === 'diagnose_change') return 'Movement numbers';
+  if (intent === 'segment_compare') return 'Segment numbers';
+  if (intent === 'entity_drilldown') return 'Entity numbers';
+  if (intent === 'anomaly_investigation') return 'Anomaly numbers';
+  if (intent === 'trust_gap_review') return 'Validation numbers';
+  return 'Key numbers';
+}
+
+function keyNumbersBodyForIntent(intent: LocalAppInvestigationIntent): string {
+  if (intent === 'diagnose_change') return 'The bounded preview includes the values DQL can prove for this movement question. Use them for stakeholder framing, but validate the baseline and time grain before promotion.';
+  if (intent === 'segment_compare') return 'The bounded preview includes the segment values DQL can compare from the selected context. Confirm the grouping field and filters before promotion.';
+  if (intent === 'entity_drilldown') return 'The bounded preview includes entity-level values from the selected context. Confirm the entity key and grain before promotion.';
+  if (intent === 'anomaly_investigation') return 'The bounded preview includes values that may explain the exception. Confirm the baseline, threshold, and time grain before promotion.';
+  if (intent === 'trust_gap_review') return 'The bounded preview includes values available for validation. Confirm source proof, lineage, and owner review before promotion.';
+  return 'The bounded preview includes the following decision-relevant values. These are useful for stakeholder framing but still require source validation before promotion.';
+}
+
+function investigationNarrativeAnswer(investigation: LocalAppInvestigation): string {
+  const sections = Array.isArray(investigation.reportSections)
+    ? investigation.reportSections
+      .filter((section) => cleanString(section?.title) && cleanString(section?.body))
+      .slice(0, 8)
+    : [];
+  if (!sections.length) {
+    return cleanString(investigation.summary)
+      || cleanString(investigation.recommendation)
+      || cleanString(investigation.title)
+      || 'Review-required app analysis.';
+  }
+
+  const stakeholderSections = sections
+    .filter((section) => {
+      if (section.kind === 'review_boundary') return false;
+      return !/\b(sql|query|appendix|technical|repair|preview error)\b/i.test(section.title);
+    })
+    .slice(0, 5);
+
+  return (stakeholderSections.length ? stakeholderSections : sections.slice(0, 3)).map((section) => {
+    const bullets = Array.isArray(section.bullets) && section.bullets.length
+      ? `\n${section.bullets.filter(Boolean).slice(0, 8).map((bullet) => `- ${bullet}`).join('\n')}`
+      : '';
+    return `## ${section.title.trim()}\n${section.body.trim()}${bullets}`;
+  }).join('\n\n');
+}
+
+function reportMetricBullet(metrics: Record<string, unknown>, role: 'current' | 'baseline' | 'delta'): string | undefined {
+  const prefix = role === 'current' ? 'current' : role === 'baseline' ? 'baseline' : 'delta';
+  const label = cleanString(metrics[`${prefix}Label`])
+    || (role === 'current' ? 'Top value' : role === 'baseline' ? 'Next comparison' : 'Gap');
+  const value = typeofNumber(metrics[role === 'current' ? 'currentValue' : role === 'baseline' ? 'baselineValue' : 'delta']);
+  if (value === null) return undefined;
+  const detail = cleanString(metrics[`${prefix}Detail`]);
+  return `${label}: ${formatMetricValue(value)}${detail ? ` (${detail})` : ''}`;
+}
+
+function reportEvidenceRefs(selected: Record<string, unknown> | null): string[] {
+  return [
+    selectedString(selected, 'blockId') ? `block:${selectedString(selected, 'blockId')}` : '',
+    selectedString(selected, 'tileId') ? `tile:${selectedString(selected, 'tileId')}` : '',
+    selectedString(selected, 'blockPath') ?? '',
+  ].filter(Boolean);
 }
 
 function investigationPreviewResult(investigation: LocalAppInvestigation): unknown {
@@ -2488,6 +4292,12 @@ function typeofNumber(value: unknown): number | null {
 function formatContribution(value: number): string {
   const rounded = Math.abs(value) >= 100 ? Math.round(value).toLocaleString() : Number(value.toFixed(2)).toLocaleString();
   return value >= 0 ? `+${rounded}` : `-${rounded.replace(/^-/, '')}`;
+}
+
+function formatMetricValue(value: number): string {
+  const absolute = Math.abs(value);
+  if (absolute >= 100) return Math.round(value).toLocaleString();
+  return Number(value.toFixed(2)).toLocaleString();
 }
 
 function asRecord(value: unknown): Record<string, unknown> | null {
@@ -2619,7 +4429,7 @@ function createAiPinTile(
   projectRoot: string,
   appId: string,
   input: AiPinCreateRequest,
-): { ok: true; pin: unknown; dashboard?: DashboardDocument; tile?: DashboardGridItem } | { ok: false; error: string } {
+): { ok: true; pin: unknown; dashboard?: DashboardDocument; tile?: DashboardGridItem; deduped?: boolean } | { ok: false; error: string } {
   const dashboardId = cleanString(input.dashboardId);
   if (!dashboardId) return { ok: false, error: 'dashboardId is required' };
   const loaded = loadDashboardForApp(projectRoot, appId, dashboardId);
@@ -2628,6 +4438,10 @@ function createAiPinTile(
   const tileId = cleanString(input.tileId) || nextTileId(loaded.dashboard, slugify(title) || 'ai-pin');
   const storage = new LocalAppStorage(defaultLocalAppsDbPath(projectRoot));
   try {
+    const existing = findExistingAiPinTile(storage, loaded.dashboard, appId, dashboardId, title, input);
+    if (existing) {
+      return { ok: true, pin: existing.pin, dashboard: loaded.dashboard, tile: existing.tile, deduped: true };
+    }
     const pin = storage.createAiPin({
       appId,
       dashboardId,
@@ -2671,6 +4485,69 @@ function createAiPinTile(
   } finally {
     storage.close();
   }
+}
+
+function findExistingAiPinTile(
+  storage: LocalAppStorage,
+  dashboard: DashboardDocument,
+  appId: string,
+  dashboardId: string,
+  title: string,
+  input: AiPinCreateRequest,
+): { pin: LocalAiPin; tile: DashboardGridItem } | null {
+  const requested = aiPinDedupeFingerprint(title, input.question, input.analysisPlan, input.result);
+  if (!requested) return null;
+  const pins = storage.listAiPins(appId, dashboardId);
+  for (const pin of pins) {
+    const existing = aiPinDedupeFingerprint(pin.title, pin.question, pin.analysisPlan, pin.result);
+    if (!existing || existing !== requested) continue;
+    const tile = dashboard.layout.items.find((item) => item.aiPin?.id === pin.id || (pin.tileId && item.i === pin.tileId));
+    if (tile) return { pin, tile };
+  }
+  return null;
+}
+
+function aiPinDedupeFingerprint(
+  title: string | undefined,
+  question: unknown,
+  analysisPlan: unknown,
+  result: unknown,
+): string {
+  const plan = asRecord(analysisPlan);
+  const sourceBlock = cleanString(plan?.sourceBlockId);
+  const sourceTile = cleanString(plan?.sourceTileId);
+  const questionKey = normalizeAiPinDedupeText(question) || normalizeAiPinDedupeText(title);
+  if (!questionKey && !sourceBlock && !sourceTile) return '';
+  return [
+    questionKey,
+    sourceBlock,
+    sourceTile,
+    aiPinResultFingerprint(result),
+  ].filter(Boolean).join('|');
+}
+
+function normalizeAiPinDedupeText(value: unknown): string {
+  return cleanString(value)
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function aiPinResultFingerprint(result: unknown): string {
+  const record = asRecord(result);
+  if (!record) return '';
+  const columns = Array.isArray(record.columns) ? record.columns.map((column) => String(column).toLowerCase()).join(',') : '';
+  const rows = Array.isArray(record.rows) ? record.rows.slice(0, 8).map((row) => stableFingerprintValue(row)).join(';') : '';
+  return columns || rows ? `${columns}:${rows}` : '';
+}
+
+function stableFingerprintValue(value: unknown): string {
+  if (value === null || value === undefined) return '';
+  if (typeof value !== 'object') return String(value);
+  if (Array.isArray(value)) return `[${value.map(stableFingerprintValue).join(',')}]`;
+  const record = value as Record<string, unknown>;
+  return `{${Object.keys(record).sort().map((key) => `${key}:${stableFingerprintValue(record[key])}`).join(',')}}`;
 }
 
 function promoteAiPinToDraftBlock(
@@ -3106,7 +4983,7 @@ function listAiPins(projectRoot: string, appId: string): unknown[] {
   try {
     const storage = new LocalAppStorage(dbPath);
     try {
-      return storage.listAiPins(appId);
+      return dedupeLocalAiPins(storage.listAiPins(appId));
     } finally {
       storage.close();
     }
@@ -3117,19 +4994,43 @@ function listAiPins(projectRoot: string, appId: string): unknown[] {
   }
 }
 
+function dedupeLocalAiPins(pins: LocalAiPin[]): LocalAiPin[] {
+  const seen = new Set<string>();
+  const out: LocalAiPin[] = [];
+  for (const pin of pins) {
+    const fingerprint = aiPinDedupeFingerprint(pin.title, pin.question, pin.analysisPlan, pin.result) || pin.id;
+    if (seen.has(fingerprint)) continue;
+    seen.add(fingerprint);
+    out.push(pin);
+  }
+  return out;
+}
+
 function listAppInvestigations(projectRoot: string, appId: string): unknown[] {
   const dbPath = defaultLocalAppsDbPath(projectRoot);
   if (!existsSync(dbPath)) return [];
   try {
     const storage = new LocalAppStorage(dbPath);
     try {
-      return storage.listAppInvestigations(appId);
+      return dedupeAppInvestigationsForDisplay(storage.listAppInvestigations(appId));
     } finally {
       storage.close();
     }
   } catch {
     return [];
   }
+}
+
+function dedupeAppInvestigationsForDisplay(investigations: LocalAppInvestigation[]): LocalAppInvestigation[] {
+  const seen = new Set<string>();
+  const out: LocalAppInvestigation[] = [];
+  for (const investigation of investigations) {
+    const fingerprint = appInvestigationReuseFingerprint(investigation);
+    if (seen.has(fingerprint)) continue;
+    seen.add(fingerprint);
+    out.push(investigation);
+  }
+  return out;
 }
 
 function listDashboardsFor(projectRoot: string, id: string) {
@@ -3244,10 +5145,23 @@ async function readJson<T = Record<string, unknown>>(req: IncomingMessage): Prom
 }
 
 export const __test__ = {
+  buildMetricSnapshot,
   buildPreviewDriverCards,
   buildPreviewMetricSnapshot,
   buildDeterministicInvestigationSql,
+  buildInvestigationSummary,
+  buildInvestigationReportSections,
+  classifySqlPreviewError,
+  investigationNarrativeAnswer,
+  createAiPinTile,
+  runGeneratedSqlPreview,
+  renderSqlTemplateParams,
+  unresolvedSqlTemplateParams,
   selectedBlockContext,
+  runAppInvestigation,
+  askAppQuestion,
+  collectAppsList,
+  loadAppById,
 };
 
 // reference unused parseAppDocument/readFileSync to keep import stable for forward use

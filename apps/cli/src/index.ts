@@ -41,8 +41,8 @@ const HELP = `
     dql new <type> <name>           Create a domain, block, semantic block, view, term, dashboard, or workbook
     dql build <file.dql>            Compile a DQL file to a static HTML bundle
     dql doctor [path]               Run local setup checks for a DQL project
-    dql doctor scale                Report enterprise-scale manifest/cache/index health
-    dql doctor git-hygiene          Flag tracked local/generated files that create noisy commits
+    dql doctor scale [path]         Report enterprise-scale manifest/cache/index health
+    dql doctor git-hygiene [path]   Flag tracked local/generated files that create noisy commits
     dql preview <file.dql>          Render a local browser preview for a DQL file
     dql serve [directory]           Serve a built DQL bundle locally
     dql parse <file.dql>            Parse and analyze a DQL file
@@ -79,11 +79,11 @@ const HELP = `
     dql mcp [--http]                Run the DQL MCP server (stdio by default; --http = loopback)
     dql mcp test [path]             Check whether DQL MCP can load this project
     dql connect <target> [path]     Configure Codex, Claude Code, Claude Desktop, or Cursor MCP
-    dql app new|generate|ls|show|build|reindex <name>
+    dql app new|generate|ls|show|build|reindex <name-or-path>
                                     Manage App artifacts (metadata, policies, dashboards, schedules)
     dql schedule list|run|start|status  Local scheduler for @schedule'd blocks (alerts + notifications)
       dql agent ask "<question>"      Block-first agent loop (certified blocks → fallback LLM SQL)
-      dql agent reindex               Rebuild .dql/cache/agent-kg.sqlite and metadata.sqlite
+      dql agent reindex [path]        Rebuild .dql/cache/agent-kg.sqlite and metadata.sqlite
       dql agent feedback up|down      Record thumbs-up/down feedback for self-learning
       dql agent eval agent-evals.yml  Measure certified/follow-up/refusal accuracy
     dql slack serve                 Slack slash-command bot (forwards to the answer loop)
@@ -154,10 +154,10 @@ const COMMAND_HELP: Record<string, string> = {
   Usage:
     dql app new <name>
     dql app generate "<prompt>" [--domain <domain>] [--owner <user>] [--ai-layout]
-    dql app ls
-    dql app show <name>
-    dql app build <name>
-    dql app reindex
+    dql app ls [path]
+    dql app show <name> [path]
+    dql app build [path]
+    dql app reindex [path]
 
   Notes:
     --ai-layout stores DQL-native GenUI metadata for dynamic visualization and
@@ -178,8 +178,8 @@ const COMMAND_HELP: Record<string, string> = {
   Usage:
     dql doctor [path] [--format json]
     dql doctor [path] --ai
-    dql doctor scale [--format json]
-    dql doctor git-hygiene [--format json]
+    dql doctor scale [path] [--format json]
+    dql doctor git-hygiene [path] [--format json]
 
   Prints setup checks and the next local-first commands to run.
   `,
@@ -287,7 +287,7 @@ async function main() {
         await runBuild(file!, flags);
         break;
       case "doctor":
-        await runDoctor(file, flags);
+        await runDoctor(file, flags, rest);
         break;
       case "parse":
         await runParse(file!, flags);

@@ -434,6 +434,42 @@ describe('buildManifest block extraction', () => {
     expect(manifest.diagnostics?.filter((diag) => diag.severity === 'error')).toEqual([]);
   });
 
+  it('keeps certified canonical blocks ahead of draft duplicates', () => {
+    mkdirSync(join(tmpDir, 'blocks', 'nba'), { recursive: true });
+    mkdirSync(join(tmpDir, 'blocks', '_drafts', 'nba'), { recursive: true });
+    writeFileSync(join(tmpDir, 'blocks', 'nba', 'top_players.dql'), `block "Top Players" {
+  domain = "nba"
+  status = "certified"
+  owner = "sports-analytics"
+  description = "Certified reusable top players block."
+  allowedFilters = ["season_start", "season_end", "top_n"]
+  parameterPolicy {
+    season_start = "dynamic"
+    season_end = "dynamic"
+    top_n = "dynamic"
+  }
+  query = """SELECT player_name, SUM(points) AS total_points FROM fct_player_performance GROUP BY player_name"""
+}`);
+    writeFileSync(join(tmpDir, 'blocks', '_drafts', 'nba', 'top_players.dql'), `block "Top Players" {
+  domain = "nba"
+  status = "draft"
+  owner = "sports-analytics"
+  description = "Draft duplicate should not hide the certified block."
+  query = """SELECT player_name, points FROM raw_player_points"""
+}`);
+
+    const manifest = buildManifest({ projectRoot: tmpDir, dqlVersion: 'test' });
+
+    expect(manifest.blocks['Top Players']).toMatchObject({
+      status: 'certified',
+      filePath: 'blocks/nba/top_players.dql',
+      allowedFilters: ['season_start', 'season_end', 'top_n'],
+    });
+    expect(manifest.diagnostics.some((diagnostic) =>
+      diagnostic.message.includes('duplicate block "Top Players"'),
+    )).toBe(true);
+  });
+
   it('resolves domain display names, folder slugs, and lowercase references as one domain', () => {
     mkdirSync(join(tmpDir, 'domains', 'nba', 'blocks'), { recursive: true });
     writeFileSync(join(tmpDir, 'domains', 'nba', 'domain.dql'), `domain "NBA" {

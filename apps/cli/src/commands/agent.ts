@@ -7,7 +7,7 @@
  *     [--domain growth]         (scopes KG search)
  *     [--format json]           (emits structured JSON instead of prose)
  *
- *   dql agent reindex
+ *   dql agent reindex [path]
  *     Rebuilds .dql/cache/agent-kg.sqlite and metadata.sqlite from the
  *     project's manifest + Skills folder. Equivalent to `dql app reindex`.
  *
@@ -16,7 +16,7 @@
  */
 
 import { existsSync, readFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import { load as loadYaml } from 'js-yaml';
 import {
   KGStore,
@@ -50,7 +50,7 @@ export async function runAgent(
     case 'ask':
       return runAsk(rest, flags);
     case 'reindex':
-      return runReindex(flags);
+      return runReindex(rest, flags);
     case 'feedback':
       return runFeedback(rest, flags);
     case 'eval':
@@ -59,7 +59,7 @@ export async function runAgent(
       throw new Error(
         'Usage: dql agent <ask|reindex|feedback|eval> [args]\n' +
             '  dql agent ask "<question>" [--provider claude|openai|gemini|ollama] [--user <id>] [--domain <d>]\n' +
-      '  dql agent reindex\n' +
+      '  dql agent reindex [path]\n' +
       '  dql agent feedback up|down --block <id> --question "..."\n' +
       '  dql agent eval agent-evals.yml [--provider claude|openai|gemini|ollama] [--execute] [--save]',
         );
@@ -261,8 +261,8 @@ function recordCliQueryRun(
   }
 }
 
-async function runReindex(flags: CLIFlags): Promise<void> {
-  const projectRoot = findProjectRoot(process.cwd());
+async function runReindex(rest: string[], flags: CLIFlags): Promise<void> {
+  const projectRoot = findProjectRoot(resolve(rest[0] ?? process.cwd()));
   const stats = await reindexProject(projectRoot);
   if ((flags as { format?: string }).format === 'json') {
     console.log(JSON.stringify({ ok: true, ...stats }, null, 2));

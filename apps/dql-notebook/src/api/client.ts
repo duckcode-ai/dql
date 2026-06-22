@@ -114,6 +114,32 @@ export type DashboardDisplayMetadata = {
   reviewStatus: 'certified' | 'draft_ready' | 'review_required';
 };
 
+export type DashboardTileFilterBinding = {
+  filter: string;
+  binding?: string;
+  mode?: 'parameter' | 'predicate';
+  paramNames?: string[];
+  required?: boolean;
+  unsupportedReason?: string;
+};
+
+export type DashboardTileParameterBinding = {
+  param: string;
+  source: 'dashboard_filter' | 'constant' | 'persona' | 'variable';
+  filter?: string;
+  field?: string;
+  value?: unknown;
+};
+
+export type DashboardTileSourceEvidence = {
+  source: string;
+  reason: string;
+  kind?: string;
+  nodeId?: string;
+  path?: string;
+  trustState?: DashboardDisplayMetadata['trustState'];
+};
+
 export type VisualizationRecommendationResponse =
   | {
       ok: true;
@@ -505,6 +531,11 @@ export interface DashboardDocumentResponse {
         aiPin?: { id: string };
         viz: { type: string; options?: Record<string, unknown> };
         display?: DashboardDisplayMetadata;
+        filterBindings?: DashboardTileFilterBinding[];
+        parameterBindings?: DashboardTileParameterBinding[];
+        sourceEvidence?: DashboardTileSourceEvidence[];
+        trustState?: DashboardDisplayMetadata['trustState'];
+        reviewStatus?: DashboardDisplayMetadata['reviewStatus'];
         title?: string;
       }>;
     };
@@ -597,6 +628,7 @@ export interface GeneratedAppPlan {
     domain: string;
     certifiedContext: Array<{ nodeId: string; name: string; kind: string; reason: string }>;
     missingEvidence: string[];
+    scopedReports?: GeneratedAppScopedReport[];
     displayStrategy: string;
     layoutRationale: string;
     handoffPlan: string[];
@@ -605,9 +637,15 @@ export interface GeneratedAppPlan {
   domain: string;
   audience: string;
   businessGoal: string;
+  stakeholderSummary?: string;
   owner: string;
   lifecycle: 'draft' | 'review';
   tags: string[];
+  appSections?: Array<{ id: string; title: string; purpose: string; reviewStatus: 'certified' | 'draft_ready' | 'review_required' }>;
+  globalFilters?: Array<{ id: string; label: string; type: string; default?: unknown; bindsTo?: string }>;
+  selectedEvidence?: Array<{ source: string; reason: string; kind?: string; nodeId?: string; trustState: string }>;
+  missingEvidence?: string[];
+  scopedReports?: GeneratedAppScopedReport[];
   pages: Array<{
     id: string;
     title: string;
@@ -623,6 +661,10 @@ export interface GeneratedAppPlan {
       viz: string;
       certification: 'certified' | 'uncertified';
       reviewStatus: 'certified' | 'draft_ready' | 'review_required';
+      trustState?: 'certified' | 'draft_ready' | 'review_required';
+      filterBindings?: DashboardTileFilterBinding[];
+      parameterBindings?: DashboardTileParameterBinding[];
+      sourceEvidence?: DashboardTileSourceEvidence[];
       rationale?: string;
       caveats?: string[];
       reviewTasks?: string[];
@@ -656,6 +698,18 @@ export interface GeneratedAppPlan {
   reviewTasks: string[];
 }
 
+export interface GeneratedAppScopedReport {
+  id: string;
+  title: string;
+  question: string;
+  description: string;
+  intent: string;
+  reviewStatus: 'draft_ready' | 'review_required';
+  source: string;
+  evidenceNeeded: string[];
+  suggestedActions: string[];
+}
+
 export interface GenerateAppResponse {
   ok: true;
   plan: GeneratedAppPlan;
@@ -669,6 +723,52 @@ export interface GenerateAppResponse {
   app: AppSummary | null;
   dashboardId: string | null;
 }
+
+export interface AppAiBuildSession {
+  id: string;
+  status: 'ready' | 'error';
+  createdAt: string;
+  updatedAt: string;
+  prompt: string;
+  appId?: string;
+  dashboardId?: string | null;
+  generatedPaths: string[];
+  plan?: GeneratedAppPlan;
+  validation?: GenerateAppResponse['validation'];
+  warnings: string[];
+  reviewTasks: string[];
+  inputs: {
+    domain?: string;
+    owner?: string;
+    audience?: string;
+    notebookPath?: string;
+    existingAppId?: string;
+    selectedBlockIds: string[];
+  };
+  error?: string;
+}
+
+export type AppAskResponse =
+  | {
+      ok: true;
+      route: 'certified_answer' | 'investigation' | 'app_change_proposal' | 'metadata_answer';
+      answer: string;
+      trustState: DashboardDisplayMetadata['trustState'];
+      reviewStatus: DashboardDisplayMetadata['reviewStatus'];
+      citations: Array<{ kind: string; name: string; path?: string }>;
+      followUps: string[];
+      decision: {
+        mode: 'answer' | 'analysis' | 'app_change' | 'metadata';
+        reason: string;
+        nextAction: string;
+        requiresContext: boolean;
+        usesCertifiedResult: boolean;
+        confidence: number;
+      };
+      investigation?: LocalAppInvestigation;
+      proposal?: unknown;
+    }
+  | { ok: false; error: string };
 
 export interface AppEditorCatalogResponse {
   appId: string;
@@ -720,6 +820,15 @@ export interface LocalAppInvestigation {
   driverCards?: unknown[];
   resultPreviews?: unknown[];
   evidence?: unknown;
+  reportSections?: Array<{
+    id: string;
+    kind: 'executive_answer' | 'business_interpretation' | 'key_numbers' | 'recommended_next_step' | 'review_boundary' | 'validation' | 'reusable_logic' | 'custom';
+    title: string;
+    body: string;
+    tone?: 'answer' | 'insight' | 'warning' | 'review' | 'neutral';
+    bullets?: string[];
+    evidenceRefs?: string[];
+  }>;
   generatedSql?: string;
   reviewStatus: 'needs_review' | 'draft_created' | 'certified' | 'rejected';
   error?: string;
@@ -2764,6 +2873,28 @@ export const api = {
     }
   },
 
+  async createAppAiBuild(input: GenerateAppRequest): Promise<{ ok: true; session: AppAiBuildSession } | { ok: false; error: string; session?: AppAiBuildSession }> {
+    try {
+      return await request(
+        '/api/apps/ai-builds',
+        { method: 'POST', body: JSON.stringify(input) },
+      );
+    } catch (e) {
+      return { ok: false, error: e instanceof Error ? e.message : String(e) };
+    }
+  },
+
+  async getAppAiBuild(id: string): Promise<AppAiBuildSession | null> {
+    try {
+      const { session } = await request<{ ok: true; session: AppAiBuildSession }>(
+        `/api/apps/ai-builds/${encodeURIComponent(id)}`,
+      );
+      return session;
+    } catch {
+      return null;
+    }
+  },
+
   async getApp(id: string): Promise<AppDocumentSummary | null> {
     try {
       return await request<AppDocumentSummary>(`/api/apps/${encodeURIComponent(id)}`);
@@ -2955,6 +3086,7 @@ export const api = {
     intent?: LocalAppInvestigation['intent'];
     context?: unknown;
     generatedSql?: string;
+    repairMode?: 'rebuild_from_certified';
   }): Promise<{ ok: true; investigation: LocalAppInvestigation } | { ok: false; error: string }> {
     try {
       return await request(
@@ -3031,6 +3163,36 @@ export const api = {
     }
   },
 
+  async askApp(appId: string, input: {
+    question: string;
+    dashboardId?: string;
+    tileId?: string;
+    blockId?: string;
+    variables?: Record<string, unknown>;
+    context?: unknown;
+    runInvestigation?: boolean;
+  }): Promise<AppAskResponse> {
+    try {
+      return await request(
+        `/api/apps/${encodeURIComponent(appId)}/ask`,
+        { method: 'POST', body: JSON.stringify(input) },
+      );
+    } catch (e) {
+      return { ok: false, error: e instanceof Error ? e.message : String(e) };
+    }
+  },
+
+  async promoteApp(appId: string, input?: { lifecycle?: 'draft' | 'review' | 'certified' | 'deprecated' }): Promise<{ ok: true; app: AppDocumentSummary['app']; paths: string[]; removedLocalTiles: number } | { ok: false; error: string }> {
+    try {
+      return await request(
+        `/api/apps/${encodeURIComponent(appId)}/promote`,
+        { method: 'POST', body: JSON.stringify(input ?? {}) },
+      );
+    } catch (e) {
+      return { ok: false, error: e instanceof Error ? e.message : String(e) };
+    }
+  },
+
   async recommendVisualization(input: {
     blockRef?: string;
     resultSchema?: unknown;
@@ -3044,6 +3206,37 @@ export const api = {
     try {
       return await request(
         '/api/visualizations/recommend',
+        { method: 'POST', body: JSON.stringify(input) },
+      );
+    } catch (e) {
+      return { ok: false, error: e instanceof Error ? e.message : String(e) };
+    }
+  },
+
+  async recommendDashboardTile(appId: string, dashboardId: string, input: {
+    tileId?: string;
+    blockRef?: string;
+    resultSchema?: unknown;
+    rowSample?: Array<Record<string, unknown>>;
+    appAudience?: string;
+    prompt?: string;
+    allowedVisualizations?: string[];
+    component?: DashboardDisplayMetadata['component'];
+    defaultVisualization?: string;
+  }): Promise<VisualizationRecommendationResponse | {
+    ok: true;
+    display: DashboardDisplayMetadata;
+    filterBindings?: DashboardTileFilterBinding[];
+    parameterBindings?: DashboardTileParameterBinding[];
+    sourceEvidence?: DashboardTileSourceEvidence[];
+    trustState: DashboardDisplayMetadata['trustState'];
+    reviewStatus: DashboardDisplayMetadata['reviewStatus'];
+    evidence: Array<{ source: string; reason: string }>;
+    warnings: string[];
+  }> {
+    try {
+      return await request(
+        `/api/apps/${encodeURIComponent(appId)}/dashboards/${encodeURIComponent(dashboardId)}/tiles/recommend`,
         { method: 'POST', body: JSON.stringify(input) },
       );
     } catch (e) {

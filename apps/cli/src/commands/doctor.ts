@@ -23,13 +23,13 @@ interface Check {
   detail: string;
 }
 
-export async function runDoctor(targetPath: string | null, flags: CLIFlags): Promise<void> {
+export async function runDoctor(targetPath: string | null, flags: CLIFlags, rest: string[] = []): Promise<void> {
   if (targetPath === 'scale') {
-    await runDoctorScale(null, flags);
+    await runDoctorScale(rest[0] ?? null, flags);
     return;
   }
   if (targetPath === 'git-hygiene') {
-    runDoctorGitHygiene(flags);
+    runDoctorGitHygiene(rest[0] ?? null, flags);
     return;
   }
 
@@ -158,8 +158,8 @@ interface GitHygieneReport {
   };
 }
 
-function runDoctorGitHygiene(flags: CLIFlags): void {
-  const projectRoot = findProjectRoot(resolve('.'));
+function runDoctorGitHygiene(targetPath: string | null, flags: CLIFlags): void {
+  const projectRoot = findProjectRoot(resolve(targetPath || '.'));
   const tracked = listTrackedGitFiles(projectRoot);
   const issues = tracked.flatMap((path) => classifyGitHygieneIssue(path));
   const report: GitHygieneReport = {
@@ -298,6 +298,10 @@ async function runDoctorScale(targetPath: string | null, flags: CLIFlags): Promi
   const started = Date.now();
   const dbtManifestPath = resolveDbtManifestPath(projectRoot) ?? undefined;
   const manifest = buildManifest({ projectRoot, dbtManifestPath });
+  const semanticCounts = resolveDoctorSemanticCounts(projectRoot, {
+    manifestMetrics: Object.keys(manifest.metrics ?? {}).length,
+    manifestDimensions: Object.keys(manifest.dimensions ?? {}).length,
+  });
   const inputFiles = collectInputFiles({ projectRoot, dbtManifestPath });
   const manifestPath = join(projectRoot, 'dql-manifest.json');
   const manifestFresh = isManifestFresh(manifestPath, inputFiles);
@@ -417,8 +421,8 @@ async function runDoctorScale(targetPath: string | null, flags: CLIFlags): Promi
       businessViews: Object.keys(manifest.businessViews ?? {}).length,
       apps: Object.keys(manifest.apps ?? {}).length,
       dashboards: Object.keys(manifest.dashboards ?? {}).length,
-      semanticMetrics: Object.keys(manifest.metrics ?? {}).length,
-      semanticDimensions: Object.keys(manifest.dimensions ?? {}).length,
+      semanticMetrics: semanticCounts.metrics,
+      semanticDimensions: semanticCounts.dimensions,
       dbtModels: manifest.dbtImport?.dbtDag?.models?.length ?? 0,
       dbtSources: manifest.dbtImport?.sourcesImported ?? 0,
       lineageNodes: manifest.lineage.nodes.length,
@@ -478,6 +482,31 @@ async function runDoctorScale(targetPath: string | null, flags: CLIFlags): Promi
     }
   }
   console.log('');
+}
+
+function resolveDoctorSemanticCounts(
+  projectRoot: string,
+  fallback: { manifestMetrics: number; manifestDimensions: number },
+): { metrics: number; dimensions: number } {
+  try {
+    const config = loadProjectConfig(projectRoot);
+    const result = resolveSemanticLayerWithDiagnostics(
+      resolveProjectSemanticConfig(config, projectRoot) as Parameters<typeof resolveSemanticLayerWithDiagnostics>[0],
+      projectRoot,
+    );
+    if (result.layer) {
+      return {
+        metrics: result.layer.listMetrics().length,
+        dimensions: result.layer.listDimensions().length,
+      };
+    }
+  } catch {
+    // Fall back to compiled manifest counts so doctor scale remains diagnostic-only.
+  }
+  return {
+    metrics: fallback.manifestMetrics,
+    dimensions: fallback.manifestDimensions,
+  };
 }
 
 function isManifestFresh(manifestPath: string, inputFiles: string[]): boolean {

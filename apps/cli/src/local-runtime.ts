@@ -139,6 +139,7 @@ import {
 } from './metricflow.js';
 
 const NOTEBOOK_EXECUTE_PREVIEW_ROW_LIMIT = 500;
+const NOTEBOOK_FAVICON_SVG = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32"><rect width="32" height="32" rx="7" fill="#6d5dfc"/><path d="M9 9h14v14H9z" fill="none" stroke="#fff" stroke-width="2"/><path d="M13 13h6M13 17h6M13 21h4" stroke="#fff" stroke-width="2" stroke-linecap="round"/></svg>';
 
 export interface ProjectConfig {
   project?: string;
@@ -535,6 +536,16 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
     question: string;
     intent: string;
     context?: unknown;
+    mode?: 'sql_and_memo' | 'memo_only';
+    generatedSql?: string;
+    metrics?: Record<string, unknown>;
+    drivers?: Array<Record<string, unknown>>;
+    resultPreviews?: unknown[];
+    summaryHint?: string;
+    recommendationHint?: string;
+    sqlError?: string;
+    sqlErrorKind?: string;
+    hasReportEvidence?: boolean;
   }): Promise<{
     sql?: string;
     answer?: string;
@@ -554,22 +565,51 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
 
     let governedAnswer: AgentAnswer | undefined;
     let providerError: string | undefined;
+    const memoOnly = input.mode === 'memo_only';
     const contextEnvelope = {
       mode: 'app_research',
+      generationMode: input.mode ?? 'sql_and_memo',
       intent: input.intent,
       appId: input.appId,
       dashboardId: input.dashboardId,
       sourceTileId: input.sourceTileId,
       sourceBlockId: input.sourceBlockId,
       title: input.title,
-      instruction: 'Generate review-required read-only SQL when certified blocks do not exactly answer the requested research grain. Execute only through the bounded generated SQL preview path.',
+      instruction: [
+        'Answer as an app-scoped analyst. Start from certified block/result context, active filters, dbt/semantic metadata, and schema evidence.',
+        memoOnly
+          ? 'Write the stakeholder memo from the supplied selected result, preview rows, generated SQL, metrics, drivers, filters, and caveats. Do not generate replacement SQL unless the user explicitly asks to fix SQL.'
+          : 'Generate review-required read-only SQL only when the certified result does not exactly answer the requested analysis grain. Execute only through the bounded generated SQL preview path.',
+        'In the natural-language answer, write a stakeholder analysis memo, not a generic chat answer. Use Markdown headings chosen for the question, usually Executive answer, Key numbers, Drivers or Business readout, Caveats, and Next action.',
+        'Use concrete numbers from the selected result or preview when available. If baseline, segment, grain, lineage, or source proof is missing, say that explicitly instead of inventing a driver story.',
+        'Keep raw SQL in proposedSql/sql. Do not put SQL code fences or implementation trace in the memo body.',
+      ].join(' '),
+      generatedSql: input.generatedSql,
+      metrics: input.metrics,
+      drivers: input.drivers,
+      resultPreviews: input.resultPreviews,
+      summaryHint: input.summaryHint,
+      recommendationHint: input.recommendationHint,
+      sqlError: input.sqlError,
+      sqlErrorKind: input.sqlErrorKind,
+      hasReportEvidence: input.hasReportEvidence,
       context: input.context,
     };
     const controller = new AbortController();
     await runner.run(
       {
         provider: resolvedProvider,
-        messages: [{ role: 'user', content: input.question }],
+        messages: [{
+          role: 'user',
+          content: memoOnly
+            ? [
+                `Research question: ${input.question}`,
+                'Write the business memo now using only the evidence envelope supplied as upstream context.',
+                'Return Markdown sections. Keep SQL, query text, implementation trace, and raw routing details out of the memo body.',
+                'If the evidence is insufficient, state the gap and the next reviewer action instead of filling the story with generic text.',
+              ].join('\n')
+            : input.question,
+        }],
         upstream: {
           cellId: `app-research:${input.appId}:${input.dashboardId ?? 'app'}`,
           sql: JSON.stringify(contextEnvelope, null, 2),
@@ -595,7 +635,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
     }
 
     return {
-      sql: governedAnswer.proposedSql ?? governedAnswer.sql,
+      sql: memoOnly ? undefined : governedAnswer.proposedSql ?? governedAnswer.sql,
       answer: governedAnswer.answer ?? governedAnswer.text,
       result: governedAnswer.result,
       analysisPlan: governedAnswer.analysisPlan,
@@ -1426,6 +1466,15 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
     if (req.method === 'GET' && path === '/api/health') {
       res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
       res.end(serializeJSON({ status: 'ok' }));
+      return;
+    }
+
+    if (req.method === 'GET' && path === '/favicon.ico') {
+      res.writeHead(200, {
+        'Content-Type': 'image/svg+xml',
+        'Cache-Control': 'public, max-age=86400',
+      });
+      res.end(NOTEBOOK_FAVICON_SVG);
       return;
     }
 

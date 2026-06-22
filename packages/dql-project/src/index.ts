@@ -34,6 +34,8 @@ export type {
   CreateLocalAppInvestigationInput,
   UpdateLocalAppInvestigationInput,
   LocalAppInvestigationIntent,
+  LocalAppInvestigationReportSection,
+  LocalAppInvestigationReportSectionKind,
   LocalAppInvestigationStatus,
   LocalAppInvestigationReviewStatus,
   LocalAiPinRefreshCadence,

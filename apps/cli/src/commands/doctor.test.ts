@@ -131,6 +131,57 @@ describe('runDoctor', () => {
     expect(report.issues.some((issue: { code: string }) => issue.code === 'metadata_catalog_missing')).toBe(true);
   });
 
+  it('runs scale checks against an explicit project path', async () => {
+    const projectDir = makeProject('dql-doctor-scale-explicit-');
+    mkdirSync(join(projectDir, 'domains', 'revenue', 'blocks'), { recursive: true });
+    mkdirSync(join(projectDir, 'semantic-layer', 'dimensions'), { recursive: true });
+    writeFileSync(join(projectDir, 'dql.config.json'), JSON.stringify({ project: 'demo' }));
+    writeFileSync(join(projectDir, 'semantic-layer', 'dimensions', 'account.yaml'), `name: account_id
+label: Account Id
+table: revenue_snapshot
+sql: account_id
+type: string
+`);
+    writeFileSync(join(projectDir, 'domains', 'revenue', 'domain.dql'), `domain "Revenue" {
+  owner = "finance-analytics"
+}`);
+    writeFileSync(join(projectDir, 'domains', 'revenue', 'blocks', 'arr.dql'), `block "ARR Snapshot" {
+  domain = "Revenue"
+  type = "custom"
+  status = "certified"
+  pattern = "metric_wrapper"
+  grain = "account_id"
+  outputs = ["account_id", "arr"]
+  query = """SELECT account_id, arr FROM revenue_snapshot"""
+}`);
+
+    const spy = vi.spyOn(console, 'log').mockImplementation(() => {});
+    await runDoctor('scale', {
+      check: false,
+      chart: '',
+      domain: '',
+      format: 'json',
+      help: false,
+      open: null,
+      input: '',
+      outDir: '',
+      owner: '',
+      port: null,
+      queryOnly: false,
+      template: '',
+      connection: '',
+      verbose: false,
+      skipTests: false, version: false,
+    }, [projectDir]);
+
+    const report = JSON.parse(String(spy.mock.calls.at(-1)?.[0] ?? '{}'));
+    expect(report.projectRoot).toBe(projectDir);
+    expect(report.counts.domains).toBe(1);
+    expect(report.counts.blocks).toBe(1);
+    expect(report.counts.certifiedBlocks).toBe(1);
+    expect(report.counts.semanticDimensions).toBe(1);
+  });
+
   it('does not report missing domain declarations for display-name and folder-slug aliases', async () => {
     const projectDir = makeProject('dql-doctor-scale-domain-alias-');
     mkdirSync(join(projectDir, 'domains', 'nba', 'blocks'), { recursive: true });
@@ -276,5 +327,36 @@ describe('runDoctor', () => {
       'cache_tracked',
       'database_file_tracked',
     ]));
+  });
+
+  it('runs git hygiene checks against an explicit project path', async () => {
+    const projectDir = makeProject('dql-doctor-git-hygiene-explicit-');
+    writeFileSync(join(projectDir, 'dql.config.json'), JSON.stringify({ project: 'demo' }));
+    writeFileSync(join(projectDir, 'dql-manifest.json'), JSON.stringify({ generated: true }));
+    execFileSync('git', ['init'], { cwd: projectDir });
+    execFileSync('git', ['add', '.'], { cwd: projectDir });
+
+    const spy = vi.spyOn(console, 'log').mockImplementation(() => {});
+    await runDoctor('git-hygiene', {
+      check: false,
+      chart: '',
+      domain: '',
+      format: 'json',
+      help: false,
+      open: null,
+      input: '',
+      outDir: '',
+      owner: '',
+      port: null,
+      queryOnly: false,
+      template: '',
+      connection: '',
+      verbose: false,
+      skipTests: false, version: false,
+    }, [projectDir]);
+
+    const report = JSON.parse(String(spy.mock.calls.at(-1)?.[0] ?? '{}'));
+    expect(report.projectRoot).toBe(projectDir);
+    expect(report.issues.map((issue: { code: string }) => issue.code)).toContain('compiled_manifest_tracked');
   });
 });

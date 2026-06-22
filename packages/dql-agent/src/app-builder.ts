@@ -7,6 +7,9 @@ import {
   type AppDocument,
   type DashboardDisplayMetadata,
   type DashboardDocument,
+  type DashboardTileFilterBinding,
+  type DashboardTileParameterBinding,
+  type DashboardTileSourceEvidence,
   type DashboardGridItem,
   type DashboardVizConfig,
 } from "@duckcodeailabs/dql-core";
@@ -102,8 +105,9 @@ export interface AppPlanGenUi {
 export interface AppPlanFilter {
   id: string;
   label: string;
-  type: "date" | "daterange" | "select" | "string";
+  type: "date" | "daterange" | "select" | "string" | "number";
   default?: unknown;
+  options?: string[];
   bindsTo?: string;
 }
 
@@ -117,6 +121,10 @@ export interface AppPlanTile {
   viz: DashboardVizConfig["type"];
   certification: "certified" | "uncertified";
   reviewStatus: "certified" | "draft_ready" | "review_required";
+  filterBindings?: DashboardTileFilterBinding[];
+  parameterBindings?: DashboardTileParameterBinding[];
+  sourceEvidence?: DashboardTileSourceEvidence[];
+  trustState?: AppPlanTrustState;
   rationale?: string;
   caveats?: string[];
   reviewTasks?: string[];
@@ -138,6 +146,25 @@ export interface AppPlanPage {
   description?: string;
   filters: AppPlanFilter[];
   tiles: AppPlanTile[];
+}
+
+export interface AppPlanSection {
+  id: string;
+  title: string;
+  purpose: string;
+  reviewStatus: "certified" | "draft_ready" | "review_required";
+}
+
+export interface AppPlanScopedReport {
+  id: string;
+  title: string;
+  question: string;
+  description: string;
+  intent: AppPlanAnalysisIntent | "proof_review";
+  reviewStatus: "draft_ready" | "review_required";
+  source: "app_builder";
+  evidenceNeeded: string[];
+  suggestedActions: AppPlanFollowUpAction[];
 }
 
 export interface AppBuilderSkill {
@@ -164,6 +191,7 @@ export interface AppPlan {
       reason: string;
     }>;
     missingEvidence: string[];
+    scopedReports: AppPlanScopedReport[];
     displayStrategy: string;
     layoutRationale: string;
     handoffPlan: string[];
@@ -172,9 +200,21 @@ export interface AppPlan {
   domain: string;
   audience: string;
   businessGoal: string;
+  stakeholderSummary: string;
   owner: string;
   lifecycle: "draft" | "review";
   tags: string[];
+  appSections: AppPlanSection[];
+  globalFilters: AppPlanFilter[];
+  selectedEvidence: Array<{
+    source: string;
+    reason: string;
+    kind?: string;
+    nodeId?: string;
+    trustState: AppPlanTrustState;
+  }>;
+  missingEvidence: string[];
+  scopedReports: AppPlanScopedReport[];
   pages: AppPlanPage[];
   caveats: string[];
   reviewTasks: string[];
@@ -184,6 +224,7 @@ export interface PlanAppFromPromptInput {
   prompt: string;
   kg: KGStore;
   domain?: string;
+  audience?: string;
   owner?: string;
   preferredBlockIds?: string[];
   maxCertifiedTiles?: number;
@@ -240,15 +281,15 @@ export const APP_BUILDER_SKILLS: AppBuilderSkill[] = [
   },
   {
     id: "draft_missing_sections",
-    title: "Draft missing sections",
+    title: "Scope report gaps",
     description:
-      "Create clearly marked draft tiles when a needed explanation, drilldown, or metric is not certified yet.",
+      "Turn missing explanations, drilldowns, and metrics into scoped analyst reports instead of dashboard placeholders.",
   },
   {
     id: "route_review",
     title: "Route review",
     description:
-      "Keep generated sections uncertified and attach concrete review tasks before stakeholder use.",
+      "Keep generated analysis review-required and attach concrete next steps before stakeholder use.",
   },
 ];
 
@@ -257,11 +298,12 @@ export function planAppFromPrompt(input: PlanAppFromPromptInput): AppPlan {
   if (!prompt) throw new Error("prompt is required");
   const domain =
     normalizeToken(input.domain) ?? inferDomain(prompt) ?? "general";
-  const audience = inferAudience(prompt) ?? inferDefaultAudience(prompt);
+  const audience = input.audience?.trim() || inferAudience(prompt) || inferDefaultAudience(prompt);
   const analysisIntent = inferAnalysisIntent(prompt);
   const appName = titleForPrompt(prompt, inferFallbackName(prompt, domain));
   const appId = suggestAppId(appName);
   const maxCertifiedTiles = input.maxCertifiedTiles ?? 4;
+  const targetCertifiedTiles = Math.max(maxCertifiedTiles, input.preferredBlockIds?.length ?? 0);
   const preferredNodes = findPreferredCertifiedBlockNodes(
     input.kg,
     input.preferredBlockIds ?? [],
@@ -270,72 +312,47 @@ export function planAppFromPrompt(input: PlanAppFromPromptInput): AppPlan {
     input.kg,
     prompt,
     domain,
-    Math.max(maxCertifiedTiles, preferredNodes.length),
+    Math.max(targetCertifiedTiles * 3, preferredNodes.length),
   );
-  const certifiedNodes = mergeCertifiedBlockNodes(
-    preferredNodes,
-    matchedNodes,
-  ).slice(0, Math.max(maxCertifiedTiles, preferredNodes.length));
+  const certifiedNodes = dedupeCertifiedBlockNodes(
+    mergeCertifiedBlockNodes(preferredNodes, matchedNodes),
+    new Set(preferredNodes.map((node) => node.nodeId)),
+  ).slice(0, targetCertifiedTiles);
   const contextNodes = findCertifiedContextNodes(input.kg, prompt, domain, 6);
   const filters = inferFilters(prompt);
 
   const certifiedTiles = certifiedNodes.map((node, index) =>
-    tileFromCertifiedNode(node, index, analysisIntent),
+    tileFromCertifiedNode(node, index, analysisIntent, filters),
   );
-  const draftTiles = inferDraftTiles(prompt, domain, analysisIntent, certifiedNodes).map(
-    (tile, index): AppPlanTile => ({
-      id: slugify(tile.title) || `draft-${index + 1}`,
-      title: tile.title,
-      kind: "draft_placeholder",
-      description: tile.description,
-      viz: tile.viz,
-      certification: "uncertified",
-      reviewStatus: "draft_ready",
-      display: displayForDraftTile(tile.title, tile.viz, index),
-      rationale:
-        "No certified block was selected for this generated app section.",
-      reviewTasks: [
-        "Validate metric definition, grain, filters, and source tables.",
-        "Promote to a certified block before treating this tile as governed.",
-      ],
-    }),
+  const scopedReports = inferScopedReports(
+    prompt,
+    domain,
+    analysisIntent,
+    certifiedNodes,
   );
 
-  const narrativeTile: AppPlanTile = {
-    id: "business-brief",
-    title: "Business brief",
-    kind: "narrative",
-    description: businessBriefDescription(prompt, audience, analysisIntent),
-    viz: "text",
-    certification: "uncertified",
-    reviewStatus: "review_required",
-    display: {
-      role: "business_summary",
-      recommendedDisplayType: "text",
-      layoutPriority: 0,
-      expectedGrain: "app",
-      trustState: "review_required",
-      followUpActions: ["ask_follow_up", "review_trust"],
-      rationale:
-        "Compact business brief keeps the app goal visible without dominating the dashboard.",
-      genUi: buildGenUiContract({
-        title: "Business brief",
-        role: "business_summary",
-        viz: "text",
-        text: prompt,
-        trustState: "review_required",
-        reviewStatus: "review_required",
-        followUpActions: ["ask_follow_up", "review_trust"],
-        rationale:
-          "Compact business brief keeps the app goal visible without dominating the dashboard.",
-      }),
-    },
-    rationale:
-      "Narrative text is generated scaffolding and should be reviewed with the app.",
-    reviewTasks: [
-      "Confirm the audience, business goal, caveats, and review cadence.",
-    ],
-  };
+  const certifiedContextSummary = summarizeCertifiedContext([
+    ...certifiedNodes,
+    ...contextNodes,
+  ]);
+  const missingEvidence = Array.from(new Set([
+    ...missingEvidenceForPlan(
+      prompt,
+      analysisIntent,
+      certifiedNodes,
+      contextNodes,
+    ),
+    ...scopedReports.map((report) => `${report.title}: ${report.description}`),
+  ]));
+  const stakeholderSummary = stakeholderSummaryForPlan({
+    prompt,
+    appName,
+    audience,
+    domain,
+    analysisIntent,
+    certifiedTiles: certifiedTiles.length,
+    scopedReports: scopedReports.length,
+  });
 
   return {
     version: 1,
@@ -348,29 +365,23 @@ export function planAppFromPrompt(input: PlanAppFromPromptInput): AppPlan {
       analysisIntent,
       audience,
       domain,
-      certifiedContext: summarizeCertifiedContext([
-        ...certifiedNodes,
-        ...contextNodes,
-      ]),
-      missingEvidence: missingEvidenceForPlan(
-        prompt,
-        analysisIntent,
-        certifiedNodes,
-        contextNodes,
-      ),
+      certifiedContext: certifiedContextSummary,
+      missingEvidence,
+      scopedReports,
       displayStrategy: displayStrategyForIntent(analysisIntent),
       layoutRationale:
-        "Business-first layout: certified KPIs, trends, breakdowns, and evidence tiles only; generated gaps stay in the review backlog until promoted.",
+        "Business-first layout: certified KPIs, trends, breakdowns, and proof-backed tiles only; generated gaps stay as scoped analysis memos until promoted.",
       handoffPlan: [
         "Use certified block tiles as the governed dashboard surface.",
-        "Keep generated narrative, trust gaps, and drilldown ideas in the review backlog.",
-        "Use app chat and Research to run additional SQL, inspect previews, then pin or promote reviewed results into the app.",
+        "Keep generated narrative, trust gaps, and drilldown ideas as scoped analysis memos until reviewed.",
+        "Use app Copilot analysis to run additional SQL, inspect previews, then pin or promote reviewed results into the app.",
       ],
     },
     skills: APP_BUILDER_SKILLS,
     domain,
     audience,
     businessGoal: prompt,
+    stakeholderSummary,
     owner: input.owner?.trim() || `${process.env.USER ?? "owner"}@local`,
     lifecycle: "draft",
     tags: Array.from(
@@ -380,23 +391,50 @@ export function planAppFromPrompt(input: PlanAppFromPromptInput): AppPlan {
         `audience:${slugify(audience)}`,
       ]),
     ),
+    appSections: [
+      {
+        id: "dashboard",
+        title: "Stakeholder view",
+        purpose: "Clean dashboard pages backed by certified blocks and active filters.",
+        reviewStatus: certifiedTiles.length > 0 ? "certified" : "draft_ready",
+      },
+      {
+        id: "research",
+        title: "Analysis",
+        purpose: "Review-required analyst memos for follow-up questions that need new SQL or deeper analysis.",
+        reviewStatus: "draft_ready",
+      },
+    ],
+    globalFilters: filters,
+    selectedEvidence: certifiedContextSummary.map((item) => ({
+      source: `${item.kind}:${item.name}`,
+      reason: item.reason,
+      kind: item.kind,
+      nodeId: item.nodeId,
+      trustState: "certified" as const,
+    })),
+    missingEvidence,
+    scopedReports,
     pages: [
       {
         id: "overview",
         title: inferDashboardTitle(prompt, domain, appName),
-        description: `Certified app surface for ${audience}. Draft gaps stay in Research until reviewed.`,
+        description: `Certified app surface for ${audience}. Draft gaps stay in reports until reviewed.`,
         filters,
-        tiles: [narrativeTile, ...certifiedTiles, ...draftTiles],
+        tiles: certifiedTiles,
       },
     ],
     caveats: [
       "Generated app plans are local draft artifacts until reviewed.",
-      "Generated dashboards render certified block tiles only; draft and narrative suggestions require analyst review before they become app tiles.",
+        "Generated dashboards render certified block tiles only; draft narrative, proof, and analysis suggestions stay as scoped memos, Copilot answers, or promoted reviewed insights.",
     ],
     reviewTasks: [
-      "Review every backlog item before stakeholder use.",
+      "Review every scoped analysis memo before stakeholder use.",
+      ...scopedReports.map((report) =>
+        `Run scoped analysis "${report.title}" from app Copilot with the stakeholder question and active filters, then pin or promote only after review.`,
+      ),
       "Run dql app build after accepting the generated files.",
-      "Use app chat or Research for additional questions, then promote reviewed SQL results to draft or certified blocks.",
+      "Use app Copilot analysis for additional questions, then promote reviewed SQL results to draft or certified blocks.",
     ],
   };
 }
@@ -462,6 +500,12 @@ export function validateAppPlan(
         }
       } else {
         draftTiles += 1;
+        issues.push(
+          error(
+            path,
+            "stakeholder dashboard tiles must be certified blocks; route generated story, trust, and analysis work through scoped reports or Copilot investigations",
+          ),
+        );
         if (tile.certification === "certified") {
           issues.push(
             error(path, "non-block generated tiles cannot be marked certified"),
@@ -483,7 +527,7 @@ export function validateAppPlan(
     issues.push(
       warn(
         "pages",
-        "no certified blocks matched; generated app will contain only draft/review tiles",
+        "no certified blocks matched; generated dashboard has no governed result tiles yet",
       ),
     );
   }
@@ -604,6 +648,7 @@ export function generateAppFromPlan(
         id: filter.id,
         type: filter.type,
         default: filter.default,
+        ...(filter.options?.length ? { options: filter.options } : {}),
         bindsTo: filter.bindsTo,
       })),
       layout: {
@@ -735,6 +780,133 @@ function mergeCertifiedBlockNodes(
   return merged;
 }
 
+function dedupeCertifiedBlockNodes(
+  nodes: KGNode[],
+  preferredNodeIds = new Set<string>(),
+): KGNode[] {
+  const selected: KGNode[] = [];
+  const signatureIndex = new Map<string, number>();
+
+  for (const node of nodes) {
+    const signatures = certifiedBlockDuplicateSignatures(node);
+    let duplicateIndex = -1;
+    for (const signature of signatures) {
+      const existing = signatureIndex.get(signature);
+      if (existing !== undefined) {
+        duplicateIndex = existing;
+        break;
+      }
+    }
+
+    if (duplicateIndex < 0) {
+      signatureIndex.set(node.nodeId, selected.length);
+      for (const signature of signatures) signatureIndex.set(signature, selected.length);
+      selected.push(node);
+      continue;
+    }
+
+    const current = selected[duplicateIndex];
+    if (certifiedBlockSelectionScore(node, preferredNodeIds) > certifiedBlockSelectionScore(current, preferredNodeIds)) {
+      selected[duplicateIndex] = node;
+      signatureIndex.set(node.nodeId, duplicateIndex);
+      for (const signature of signatures) signatureIndex.set(signature, duplicateIndex);
+    }
+  }
+
+  return selected;
+}
+
+function certifiedBlockDuplicateSignatures(node: KGNode): string[] {
+  const signatures = new Set<string>([node.nodeId]);
+  if (node.sqlFingerprints?.exact) signatures.add(`sql:${node.sqlFingerprints.exact}`);
+  if (node.sqlFingerprints?.parameterized) signatures.add(`sqlp:${node.sqlFingerprints.parameterized}`);
+  if (node.businessFingerprint?.hash) signatures.add(`business:${node.businessFingerprint.hash}`);
+  const topic = certifiedBlockTopicSignature(node);
+  if (topic) signatures.add(`topic:${topic}`);
+  return Array.from(signatures);
+}
+
+function certifiedBlockTopicSignature(node: KGNode): string {
+  const text = [
+    node.name,
+    node.description,
+    node.llmContext,
+    node.businessOutcome,
+    node.decisionUse,
+    node.grain,
+    ...(node.tags ?? []),
+    ...(node.entities ?? []),
+    ...(node.declaredOutputs ?? []),
+    ...(node.dimensions ?? []),
+    ...(node.allowedFilters ?? []),
+    ...(node.businessFingerprint?.tokens ?? []),
+  ].join(" ").toLowerCase();
+  const sources = normalizedTopicTokens([
+    ...(node.sourceSystems ?? []),
+    ...(node.businessFingerprint?.tokens ?? [])
+      .filter((token) => /^(source|system):/i.test(token))
+      .map((token) => token.replace(/^(source|system):/i, "")),
+    ...Array.from(text.matchAll(/\b(?:from|join)\s+([a-z0-9_.]+)/gi)).map((match) => match[1]),
+    ...Array.from(text.matchAll(/\b([a-z0-9_]*int_player_stats|[a-z0-9_]*fct_[a-z0-9_]+|[a-z0-9_]*dim_[a-z0-9_]+)\b/gi)).map((match) => match[1]),
+  ]);
+  const entity = firstTopicFamily(text, [
+    ["player", /\b(player|players|scorer|scorers|athlete)\b/],
+    ["customer", /\b(customer|account|user|subscriber)\b/],
+    ["order", /\b(order|orders|purchase)\b/],
+    ["product", /\b(product|sku|item)\b/],
+    ["team", /\b(team|teams)\b/],
+  ]);
+  const intent = firstTopicFamily(text, [
+    ["availability", /\b(availability|freshness|record count|records|quality|coverage)\b/],
+    ["ranking", /\b(top|bottom|rank|ranking|leader|leaderboard|scorer|scorers)\b/],
+    ["trend", /\b(trend|weekly|monthly|daily|time series|over time)\b/],
+    ["segment", /\b(segment|breakdown|split|by segment|cohort|region|channel)\b/],
+    ["profile", /\b(profile|360|detail|drilldown)\b/],
+    ["kpi", /\b(kpi|metric|total|summary|scorecard)\b/],
+  ]);
+  const metric = firstTopicFamily(text, [
+    ["points", /\b(point|points|pts|score|scoring|scorer|scorers)\b/],
+    ["revenue", /\b(revenue|arr|sales|amount|bookings)\b/],
+    ["count", /\b(count|records|games played|orders|users)\b/],
+    ["quality", /\b(availability|freshness|quality|coverage)\b/],
+    ["conversion", /\b(conversion|rate|pct|percent|ratio)\b/],
+  ]);
+  if (!sources.length || !intent || !metric) return "";
+  return [sources.slice(0, 3).join("+"), entity, intent, metric].filter(Boolean).join("|");
+}
+
+function normalizedTopicTokens(values: string[]): string[] {
+  return Array.from(new Set(values
+    .map((value) => value.toLowerCase().replace(/[^a-z0-9_]+/g, "_").replace(/^_+|_+$/g, ""))
+    .map((value) => value
+      .replace(/^.*\./, "")
+      .replace(/^transformed_/, "")
+      .replace(/^nba_analytics_/, ""))
+    .filter(Boolean)))
+    .sort();
+}
+
+function firstTopicFamily(text: string, patterns: Array<[string, RegExp]>): string {
+  return patterns.find(([, pattern]) => pattern.test(text))?.[0] ?? "";
+}
+
+function certifiedBlockSelectionScore(node: KGNode, preferredNodeIds: Set<string>): number {
+  let score = preferredNodeIds.has(node.nodeId) ? 10000 : 0;
+  score += (node.declaredOutputs?.length ?? 0) * 70;
+  score += (node.allowedFilters?.length ?? 0) * 45;
+  score += (node.parameterPolicy?.length ?? 0) * 45;
+  score += (node.entities?.length ?? 0) * 35;
+  score += (node.businessFingerprint?.tokens?.length ?? 0) * 8;
+  if (node.grain) score += 90;
+  if (node.pattern) score += 60;
+  if (node.sqlFingerprints?.parameterized) score += 40;
+  if (node.description && node.description.length > 80) score += 25;
+  const text = [node.name, node.description, node.llmContext, ...(node.tags ?? [])].join(" ").toLowerCase();
+  if (/\b(raw-sql|imported|codex-e2e|test)\b/.test(text)) score -= 80;
+  if (/\breview required\b/.test(text)) score -= 10;
+  return score;
+}
+
 function findCertifiedContextNodes(
   kg: KGStore,
   prompt: string,
@@ -794,17 +966,22 @@ function normalizeGoal(prompt: string): string {
     .replace(/\.$/, "");
 }
 
-function businessBriefDescription(
-  prompt: string,
-  audience: string,
-  intent: AppPlanAnalysisIntent,
-): string {
-  return [
-    `Generated from prompt: ${normalizeGoal(prompt)}.`,
-    `Audience: ${audience}.`,
-    `Intent: ${titleCase(intent.replace(/_/g, " "))}.`,
-    "Use certified tiles as governed evidence; review generated guidance before stakeholder use.",
-  ].join("\n\n");
+function stakeholderSummaryForPlan(input: {
+  prompt: string;
+  appName: string;
+  audience: string;
+  domain: string;
+  analysisIntent: AppPlanAnalysisIntent;
+  certifiedTiles: number;
+  scopedReports: number;
+}): string {
+  const coverage = input.certifiedTiles > 0
+    ? `${input.certifiedTiles} certified tile${input.certifiedTiles === 1 ? "" : "s"} anchor the app.`
+    : "No certified tiles matched strongly enough yet.";
+  const review = input.scopedReports > 0
+    ? `${input.scopedReports} scoped analysis memo${input.scopedReports === 1 ? "" : "s"} capture questions that need deeper review.`
+    : "No scoped analysis memos were needed.";
+  return `${input.appName} is a ${titleCase(input.domain)} decision room for ${input.audience}. ${coverage} ${review} Intent: ${titleCase(input.analysisIntent.replace(/_/g, " "))}.`;
 }
 
 function summarizeCertifiedContext(nodes: KGNode[]): AppPlan["planning"]["certifiedContext"] {
@@ -837,13 +1014,13 @@ function missingEvidenceForPlan(
   const lower = prompt.toLowerCase();
   const missing = new Set<string>();
   if (certifiedNodes.length === 0) {
-    missing.add("No certified block matched strongly enough for the primary dashboard evidence.");
+    missing.add("No certified block matched strongly enough for the primary dashboard proof.");
   }
   if (contextNodes.length === 0) {
-    missing.add("No certified business view, term, semantic object, or dbt context was matched for extra explanation.");
+    missing.add("No certified business view, term, semantic object, or dbt context was matched for supporting explanation.");
   }
   if (intent === "driver_analysis" || /\bwhy|driver|break\s*down/.test(lower)) {
-    missing.add("Driver analysis should be opened as review-required Research until a certified drilldown block exists.");
+    missing.add("Driver analysis should be opened as a review-required report until a certified drilldown block exists.");
   }
   if (intent === "trust_review" || /\btrust|rely|lineage/.test(lower)) {
     missing.add("Leadership trust checks need lineage, owner, caveats, and review cadence confirmation.");
@@ -857,19 +1034,19 @@ function missingEvidenceForPlan(
 function displayStrategyForIntent(intent: AppPlanAnalysisIntent): string {
   switch (intent) {
     case "driver_analysis":
-      return "Lead with certified summary evidence, then expose breakdown and Research actions for root-cause analysis.";
+      return "Lead with certified summary proof, then route root-cause questions into Copilot reports.";
     case "entity_drilldown":
       return "Lead with entity context and certified performance blocks, then provide drilldown and trust review paths.";
     case "trust_review":
       return "Lead with certification, lineage, caveats, and review tasks before any generated interpretation.";
     case "data_quality":
-      return "Lead with availability/freshness evidence, then list gaps and review actions.";
+      return "Lead with availability and freshness proof, then list gaps and review actions.";
     case "experiment_readout":
       return "Lead with KPI impact, guardrails, segment readout, and decision caveats.";
     case "metric_monitoring":
       return "Lead with KPIs, trends, and breakdowns for recurring operating review.";
     default:
-      return "Lead with the business brief, certified metrics, supporting breakdowns, then trust and Research actions.";
+      return "Lead with the business brief, certified metrics, supporting breakdowns, then proof and report paths.";
   }
 }
 
@@ -896,7 +1073,7 @@ function displayForCertifiedNode(
           ? "evidence"
           : /\btop\s*\d+|rank|ranking|leader|leaderboard|scorer|score|goal|segment|breakdown|split|driver|player|customer|account|region|channel\b/.test(text)
           ? "breakdown"
-          : "evidence";
+          : "breakdown";
   const followUpActions: AppPlanFollowUpAction[] = [
     "ask_follow_up",
     "open_research",
@@ -947,7 +1124,7 @@ function displayForDraftTile(
     "create_draft_block",
   ];
   const rationale =
-    "Generated section captures missing evidence or review work without implying certification.";
+    "Generated section captures missing proof or review work without implying certification.";
   return {
     role,
     recommendedDisplayType: viz,
@@ -1080,8 +1257,8 @@ function insightTitleForPresentation(
   component: AppPlanGenUiComponent,
 ): string {
   if (component === "BusinessBrief") return "Business context";
-  if (component === "TrustCallout") return "Trust and evidence";
-  if (component === "ResearchActions") return "Follow-up research";
+  if (component === "TrustCallout") return "Proof and lineage";
+  if (component === "ResearchActions") return "Follow-up analysis";
   if (role === "kpi") return title;
   if (component === "RankingPanel") return title;
   if (component === "TrendPanel") return title;
@@ -1102,9 +1279,12 @@ function tileFromCertifiedNode(
   node: KGNode,
   index: number,
   intent: AppPlanAnalysisIntent,
+  globalFilters: AppPlanFilter[] = [],
 ): AppPlanTile {
   const blockId = node.name;
   const viz = inferVizForNode(node, index);
+  const filterBindings = filterBindingsForCertifiedNode(node, globalFilters);
+  const parameterBindings = parameterBindingsForCertifiedNode(node, filterBindings);
   return {
     id: slugify(blockId) || `certified-${index + 1}`,
     title: node.name,
@@ -1115,6 +1295,21 @@ function tileFromCertifiedNode(
     viz,
     certification: "certified",
     reviewStatus: "certified",
+    trustState: "certified",
+    ...(filterBindings.length ? { filterBindings } : {}),
+    ...(parameterBindings.length ? { parameterBindings } : {}),
+    sourceEvidence: [{
+      source: node.nodeId,
+      reason:
+        node.decisionUse ??
+        node.businessOutcome ??
+        node.description ??
+        "Certified DQL block matched the app prompt.",
+      kind: node.kind,
+      nodeId: node.nodeId,
+      path: node.sourcePath,
+      trustState: "certified",
+    }],
     display: displayForCertifiedNode(node, viz, index, intent),
     rationale:
       node.decisionUse ??
@@ -1127,11 +1322,114 @@ function tileFromCertifiedNode(
   };
 }
 
+function filterBindingsForCertifiedNode(
+  node: KGNode,
+  globalFilters: AppPlanFilter[],
+): DashboardTileFilterBinding[] {
+  const bindings: DashboardTileFilterBinding[] = (node.filterBindings ?? []).map((entry) => ({
+    filter: entry.filter,
+    binding: entry.binding,
+    mode: "predicate" as const,
+  }));
+  const dynamicParams = new Set(
+    (node.parameterPolicy ?? [])
+      .filter((entry) => entry.policy === "dynamic")
+      .map((entry) => entry.name),
+  );
+  const allowedFilters = new Set((node.allowedFilters ?? []).map((entry) => entry.toLowerCase()));
+  for (const filter of globalFilters) {
+    if (bindings.some((entry) => entry.filter === filter.id)) continue;
+    if (dynamicParams.has(filter.id)) {
+      bindings.push({
+        filter: filter.id,
+        binding: filter.bindsTo ?? filter.id,
+        mode: "parameter",
+        paramNames: [filter.id],
+      });
+      continue;
+    }
+    const matchingParam = parameterForFilter(filter, dynamicParams);
+    if (matchingParam) {
+      bindings.push({
+        filter: filter.id,
+        binding: filter.bindsTo ?? matchingParam,
+        mode: "parameter",
+        paramNames: [matchingParam],
+      });
+      continue;
+    }
+    if (filter.bindsTo && allowedFilters.has(filter.bindsTo.toLowerCase())) {
+      bindings.push({
+        filter: filter.id,
+        binding: filter.bindsTo,
+        mode: "predicate",
+      });
+      continue;
+    }
+    if (filter.id && allowedFilters.has(filter.id.toLowerCase())) {
+      bindings.push({
+        filter: filter.id,
+        binding: filter.bindsTo ?? filter.id,
+        mode: "predicate",
+      });
+      continue;
+    }
+    if (filter.id) {
+      bindings.push({
+        filter: filter.id,
+        binding: filter.bindsTo,
+        unsupportedReason: "No matching certified block parameter or allowed filter was declared.",
+      });
+    }
+  }
+  return uniqueTileFilterBindings(bindings);
+}
+
+function parameterBindingsForCertifiedNode(
+  node: KGNode,
+  filterBindings: DashboardTileFilterBinding[],
+): DashboardTileParameterBinding[] {
+  const dynamicParams = (node.parameterPolicy ?? [])
+    .filter((entry) => entry.policy === "dynamic")
+    .map((entry) => entry.name);
+  return dynamicParams.map((param) => {
+    const filterBinding = filterBindings.find((entry) => entry.paramNames?.includes(param) || entry.filter === param);
+    return {
+      param,
+      source: filterBinding ? "dashboard_filter" as const : "variable" as const,
+      ...(filterBinding?.filter ? { filter: filterBinding.filter } : {}),
+      field: filterBinding?.binding ?? param,
+    };
+  });
+}
+
+function parameterForFilter(filter: AppPlanFilter, dynamicParams: Set<string>): string | null {
+  const candidates: string[] = [];
+  if (filter.id === "season") candidates.push("season", "season_year", "year");
+  if (filter.id === "season_start") candidates.push("season_start", "start_year", "from_year");
+  if (filter.id === "season_end") candidates.push("season_end", "end_year", "to_year");
+  if (filter.id === "top_n") candidates.push("top_n", "limit", "n");
+  candidates.push(filter.id);
+  return candidates.find((candidate) => dynamicParams.has(candidate)) ?? null;
+}
+
+function uniqueTileFilterBindings(bindings: DashboardTileFilterBinding[]): DashboardTileFilterBinding[] {
+  const seen = new Set<string>();
+  const out: DashboardTileFilterBinding[] = [];
+  for (const binding of bindings) {
+    const key = `${binding.filter}:${binding.binding ?? ""}:${binding.mode ?? ""}:${(binding.paramNames ?? []).join(",")}:${binding.unsupportedReason ?? ""}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(binding);
+  }
+  return out;
+}
+
 function buildLayoutItems(tiles: AppPlanTile[]): DashboardGridItem[] {
   let x = 0;
   let y = 0;
   let rowH = 0;
-  const orderedTiles = [...tiles].sort((a, b) => {
+  const orderedTiles = [...tiles].filter(isDashboardTile).sort((a, b) => {
     const priorityA = a.display?.layoutPriority ?? 50;
     const priorityB = b.display?.layoutPriority ?? 50;
     return priorityA - priorityB;
@@ -1168,6 +1466,11 @@ function buildLayoutItems(tiles: AppPlanTile[]): DashboardGridItem[] {
         },
       },
       display: displayMetadataForTile(tile, genUi),
+      ...(tile.filterBindings?.length ? { filterBindings: tile.filterBindings } : {}),
+      ...(tile.parameterBindings?.length ? { parameterBindings: tile.parameterBindings } : {}),
+      ...(tile.sourceEvidence?.length ? { sourceEvidence: tile.sourceEvidence } : {}),
+      trustState: tile.trustState ?? tile.display?.trustState ?? (tile.certification === "certified" ? "certified" : "draft_ready"),
+      reviewStatus: tile.reviewStatus,
     };
     if (isDashboardTile(tile)) {
       item.block = { blockId: tile.blockId };
@@ -1212,8 +1515,26 @@ function appPlanReadme(
   plan: AppPlan,
   validation: AppPlanValidationResult,
 ): string {
+  const reviewDashboardItems = plan.pages.flatMap((page) =>
+    page.tiles
+      .filter((tile) => !isDashboardTile(tile))
+      .map((tile) => `- ${tile.title}: ${tile.description ?? tile.rationale ?? "Review before adding to the app."}`),
+  );
+  const scopedReports = plan.scopedReports.length > 0
+    ? plan.scopedReports.map((report) => [
+        `- ${report.title}: ${report.description}`,
+        `  - Question: ${report.question}`,
+        `  - Evidence needed: ${report.evidenceNeeded.join(", ")}`,
+      ].join("\n"))
+    : reviewDashboardItems.length > 0
+      ? reviewDashboardItems
+    : plan.missingEvidence.length > 0
+      ? plan.missingEvidence.map((item) => `- ${item}`)
+      : ["- No scoped analysis memos were suggested. Use app Copilot for follow-up questions."];
   return [
     `# ${plan.name}`,
+    "",
+    plan.stakeholderSummary,
     "",
     plan.businessGoal,
     "",
@@ -1223,8 +1544,10 @@ function appPlanReadme(
     `- Domain: ${plan.domain}`,
     `- Audience: ${plan.audience}`,
     `- Lifecycle: ${plan.lifecycle}`,
-    `- Certified tiles: ${validation.certifiedTiles}`,
-    `- Review backlog items: ${validation.draftTiles}`,
+    `- Certified dashboard tiles: ${validation.certifiedTiles}`,
+    `- Review-required dashboard tiles: ${validation.draftTiles}`,
+    `- Scoped analysis memos: ${plan.scopedReports.length}`,
+    `- Global filters: ${plan.globalFilters.map((filter) => filter.id).join(", ") || "none"}`,
     "",
     "## Planner brief",
     "",
@@ -1240,19 +1563,15 @@ function appPlanReadme(
         )
       : ["- No certified context matched strongly enough."]),
     "",
-    "## Missing evidence",
+    "## Missing proof",
     "",
     ...(plan.planning.missingEvidence.length
       ? plan.planning.missingEvidence.map((item) => `- ${item}`)
-      : ["- No missing evidence was identified by the deterministic planner."]),
+      : ["- No missing proof was identified by the deterministic planner."]),
     "",
-    "## Review backlog",
+    "## Scoped analysis memos",
     "",
-    ...plan.pages.flatMap((page) =>
-      page.tiles
-        .filter((tile) => !isDashboardTile(tile))
-        .map((tile) => `- ${tile.title}: ${tile.description ?? tile.rationale ?? "Review before adding to the app."}`),
-    ),
+    ...scopedReports,
     "",
     "## Agent skills applied",
     "",
@@ -1326,80 +1645,102 @@ function inferTags(prompt: string, domain: string): string[] {
   return Array.from(tags).filter(Boolean);
 }
 
-function inferDraftTiles(
+function inferScopedReports(
   prompt: string,
   domain: string,
   intent: AppPlanAnalysisIntent,
   certifiedNodes: KGNode[],
-): Array<{
-  title: string;
-  description: string;
-  viz: DashboardVizConfig["type"];
-}> {
+): AppPlanScopedReport[] {
   const lower = prompt.toLowerCase();
   const domainLabel = titleCase(domain);
-  const tiles: Array<{
+  const reports: Array<{
     title: string;
     description: string;
-    viz: DashboardVizConfig["type"];
+    question: string;
+    intent: AppPlanScopedReport["intent"];
+    evidenceNeeded: string[];
   }> = [
     {
-      title: `${domainLabel} decision story`,
+      title: `${domainLabel} decision story report`,
+      question: `What is the decision story behind "${normalizeGoal(prompt)}"?`,
       description:
-        "Compact draft explanation of the business story, decision context, and caveats inferred from the prompt.",
-      viz: "text",
+        "Analyst narrative that ties certified results to the business decision, caveats, and recommended next action.",
+      intent,
+      evidenceNeeded: ["certified block results", "active filters", "lineage and owner context"],
     },
   ];
 
   if (intent === "driver_analysis" || /\bwhy|driver|break\s*down|root cause\b/.test(lower)) {
-    tiles.push({
-      title: "Research drilldowns to review",
+    reports.push({
+      title: "Driver analysis report",
+      question: "Which drivers, segments, or entities explain the movement?",
       description:
-        "Open review-required investigations for drivers, exceptions, segment comparison, and entity drilldown.",
-      viz: "table",
+        "Review-required report for drivers, exceptions, segment comparison, and entity drilldown.",
+      intent: "driver_analysis",
+      evidenceNeeded: ["comparison period", "segment fields", "metric definition", "previewed SQL"],
     });
   } else if (/\brisk|caveat|issue|anomal|quality\b/.test(lower)) {
-    tiles.push({
-      title: "Open risks and caveats",
+    reports.push({
+      title: "Risk and caveat report",
+      question: "Which caveats or quality risks should stakeholders understand before using this app?",
       description:
-        "Generated review checklist for risks that need certified evidence before stakeholder use.",
-      viz: "table",
+        "Review checklist for risks that need certified evidence before stakeholder use.",
+      intent: "data_quality",
+      evidenceNeeded: ["freshness checks", "row counts", "known caveats", "owner review"],
     });
   } else if (/\bsegment|cohort|region|location|product|channel|customer\b/.test(lower)) {
-    tiles.push({
-      title: "Missing drilldowns to certify",
+    reports.push({
+      title: "Drilldown certification report",
+      question: "Which slices or drilldowns should become reusable certified blocks?",
       description:
         "Candidate slices and drilldowns the agent could not fully back with certified blocks yet.",
-      viz: "table",
+      intent: "entity_drilldown",
+      evidenceNeeded: ["slice dimensions", "grain", "allowed filters", "previewed SQL"],
     });
   } else {
-    tiles.push({
-      title: "Trust and evidence gaps",
+    reports.push({
+      title: "Proof and lineage gaps",
+      question: "What proof is still missing before this app can be treated as governed?",
       description:
-        "Open evidence, lineage, and review tasks to complete before this app is governed.",
-      viz: "table",
+        "Open proof, lineage, and review tasks to complete before this app is governed.",
+      intent: "proof_review",
+      evidenceNeeded: ["lineage", "certification state", "tests", "review cadence"],
     });
   }
 
   if (certifiedNodes.length === 0) {
-    tiles.push({
+    reports.push({
       title: "Certified block search",
+      question: "Which existing or new DQL blocks should support this app?",
       description:
         "No certified blocks matched strongly enough; review suggested sources and create certified blocks.",
-      viz: "table",
+      intent: "proof_review",
+      evidenceNeeded: ["candidate dbt models", "semantic metrics", "business terms", "draft block plan"],
     });
   }
 
-  if (!tiles.some((tile) => /\btrust|evidence|risk|caveat|gap/.test(tile.title.toLowerCase()))) {
-    tiles.push({
-      title: "Trust and evidence gaps",
+  if (!reports.some((report) => /\btrust|evidence|risk|caveat|gap|proof/.test(report.title.toLowerCase()))) {
+    reports.push({
+      title: "Proof and lineage gaps",
+      question: "What lineage and certification proof should be reviewed?",
       description:
         "Certification, lineage, caveats, and review actions that must be confirmed before stakeholder use.",
-      viz: "table",
+      intent: "proof_review",
+      evidenceNeeded: ["lineage", "certification state", "owner", "tests"],
     });
   }
 
-  return tiles;
+  return reports.map((report, index) => ({
+    id: slugify(report.title) || `scoped-report-${index + 1}`,
+    title: report.title,
+    question: report.question,
+    description: report.description,
+    intent: report.intent,
+    reviewStatus: "draft_ready",
+    source: "app_builder",
+    evidenceNeeded: report.evidenceNeeded,
+    suggestedActions: ["open_research", "review_trust", "create_draft_block"],
+  }));
 }
 
 function inferDomain(prompt: string): string | undefined {
@@ -1427,6 +1768,12 @@ function inferAudience(prompt: string): string | undefined {
 function inferFilters(prompt: string): AppPlanFilter[] {
   const filters: AppPlanFilter[] = [];
   const lower = prompt.toLowerCase();
+  const wantsSeasonStart = /\bseason[_\s-]*start\b/.test(lower);
+  const wantsSeasonEnd = /\bseason[_\s-]*end\b/.test(lower);
+  const wantsTopN = /\btop[_\s-]*n\b/.test(lower);
+  const years = Array.from(new Set(Array.from(prompt.matchAll(/\b(20\d{2}|19\d{2})\b/g)).map((match) => Number(match[1]))))
+    .filter((year) => Number.isFinite(year))
+    .sort((a, b) => a - b);
   if (/\bweekly|week|last week|this week\b/.test(lower)) {
     filters.push({
       id: "week",
@@ -1442,6 +1789,46 @@ function inferFilters(prompt: string): AppPlanFilter[] {
       bindsTo: "date",
     });
   }
+  if (wantsSeasonStart || wantsSeasonEnd || /\bseason|year|annual|nba\b/.test(lower) || years.length > 0) {
+    if (years.length >= 2 || wantsSeasonStart || wantsSeasonEnd) {
+      filters.push({
+        id: "season_start",
+        label: "Season start",
+        type: "select",
+        ...(years[0] ? { default: years[0] } : {}),
+        ...(years.length ? { options: years.map(String) } : {}),
+        bindsTo: "game_date_est.year",
+      } as AppPlanFilter & { options: string[] });
+      filters.push({
+        id: "season_end",
+        label: "Season end",
+        type: "select",
+        ...(years[years.length - 1] ? { default: years[years.length - 1] } : {}),
+        ...(years.length ? { options: years.map(String) } : {}),
+        bindsTo: "game_date_est.year",
+      } as AppPlanFilter & { options: string[] });
+    } else {
+      filters.push({
+        id: "season",
+        label: "Season",
+        type: "select",
+        ...(years[0] ? { default: years[0] } : {}),
+        ...(years.length ? { options: years.map(String) } : {}),
+        bindsTo: "game_date_est.year",
+      } as AppPlanFilter & { options?: string[] });
+    }
+  }
+  const topN = /\btop(?:[_\s-]*n)?\s+(\d+)\b/i.exec(prompt)?.[1]
+    ?? /\btop[_\s-]*n\s*[=:]?\s*(\d+)\b/i.exec(prompt)?.[1];
+  if (topN || wantsTopN) {
+    filters.push({
+      id: "top_n",
+      label: "Top N",
+      type: "number" as AppPlanFilter["type"],
+      ...(topN ? { default: Number(topN) } : {}),
+      bindsTo: "limit",
+    });
+  }
   if (/\benterprise|segment|smb|mid-market\b/.test(lower)) {
     filters.push({
       id: "segment",
@@ -1450,7 +1837,18 @@ function inferFilters(prompt: string): AppPlanFilter[] {
       bindsTo: "segment",
     });
   }
-  return filters;
+  return uniquePlanFilters(filters);
+}
+
+function uniquePlanFilters(filters: AppPlanFilter[]): AppPlanFilter[] {
+  const seen = new Set<string>();
+  const out: AppPlanFilter[] = [];
+  for (const filter of filters) {
+    if (seen.has(filter.id)) continue;
+    seen.add(filter.id);
+    out.push(filter);
+  }
+  return out;
 }
 
 function inferReviewCadence(prompt: string): string {

@@ -1,0 +1,2054 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>DQL App Builder Clean Flow Prototype</title>
+  <style>
+    :root {
+      --bg: #f7f7fb;
+      --surface: #ffffff;
+      --surface-2: #fbfbfd;
+      --line: #e5e7ef;
+      --line-strong: #d7d9e5;
+      --text: #171923;
+      --muted: #606575;
+      --faint: #8b91a3;
+      --purple: #5b4be7;
+      --purple-2: #edeafd;
+      --green: #137a4f;
+      --green-bg: #e9f8f0;
+      --amber: #a15c00;
+      --amber-bg: #fff4de;
+      --danger: #b42318;
+      --shadow: 0 20px 60px rgba(27, 31, 45, 0.08);
+      --radius: 8px;
+      --font: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      --mono: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+    }
+
+    * { box-sizing: border-box; }
+
+    html,
+    body {
+      min-height: 100%;
+      margin: 0;
+      background: var(--bg);
+      color: var(--text);
+      font-family: var(--font);
+      letter-spacing: 0;
+    }
+
+    button,
+    input,
+    select,
+    textarea {
+      font: inherit;
+    }
+
+    button {
+      cursor: pointer;
+    }
+
+    .prototype {
+      min-height: 100vh;
+      display: grid;
+      grid-template-rows: 56px 1fr;
+    }
+
+    .topbar {
+      display: flex;
+      align-items: center;
+      gap: 14px;
+      padding: 0 18px;
+      border-bottom: 1px solid var(--line);
+      background: rgba(255, 255, 255, 0.92);
+      backdrop-filter: blur(16px);
+      position: sticky;
+      top: 0;
+      z-index: 20;
+    }
+
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      min-width: 178px;
+      font-weight: 850;
+    }
+
+    .mark {
+      width: 34px;
+      height: 34px;
+      display: inline-grid;
+      place-items: center;
+      border-radius: 7px;
+      color: white;
+      background: linear-gradient(135deg, #6e5cff, #4a39cf);
+      box-shadow: 0 10px 24px rgba(91, 75, 231, 0.25);
+      font-weight: 900;
+      font-size: 12px;
+    }
+
+    .app-name {
+      flex: 1;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      min-width: 0;
+      font-size: 13px;
+      color: var(--muted);
+    }
+
+    .app-name b {
+      color: var(--text);
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .top-actions {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .shell {
+      display: grid;
+      grid-template-columns: 52px 1fr;
+      min-height: 0;
+    }
+
+    .rail {
+      border-right: 1px solid var(--line);
+      background: var(--surface);
+      padding: 12px 8px;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      align-items: center;
+    }
+
+    .rail button {
+      width: 34px;
+      height: 34px;
+      border: 0;
+      border-radius: 7px;
+      background: transparent;
+      color: var(--muted);
+      font-weight: 850;
+      font-size: 11px;
+    }
+
+    .rail button.active,
+    .rail button:hover {
+      color: var(--purple);
+      background: var(--purple-2);
+    }
+
+    .rail-spacer {
+      flex: 1;
+    }
+
+    .badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      min-height: 22px;
+      padding: 2px 8px;
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      color: var(--muted);
+      background: var(--surface);
+      font-weight: 850;
+      font-size: 10px;
+      text-transform: uppercase;
+      white-space: nowrap;
+    }
+
+    .badge.certified {
+      color: var(--green);
+      background: var(--green-bg);
+      border-color: #bdebd4;
+    }
+
+    .badge.review {
+      color: var(--amber);
+      background: var(--amber-bg);
+      border-color: #f7d99d;
+    }
+
+    .badge.ai {
+      color: var(--purple);
+      background: var(--purple-2);
+      border-color: #d7d0ff;
+    }
+
+    .btn {
+      border: 1px solid var(--line);
+      border-radius: 7px;
+      background: var(--surface);
+      color: var(--text);
+      min-height: 34px;
+      padding: 0 12px;
+      font-weight: 800;
+      font-size: 12px;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 8px;
+    }
+
+    .btn:hover {
+      border-color: #c9cce0;
+      box-shadow: 0 6px 18px rgba(27, 31, 45, 0.06);
+    }
+
+    .btn.primary {
+      border-color: transparent;
+      color: white;
+      background: linear-gradient(135deg, #6b5cff, #4c3ed0);
+      box-shadow: 0 16px 34px rgba(91, 75, 231, 0.25);
+    }
+
+    .btn.line-purple {
+      border-color: #c6bcff;
+      color: var(--purple);
+      background: white;
+    }
+
+    .btn.ghost {
+      border-color: transparent;
+      background: transparent;
+      color: var(--muted);
+    }
+
+    .flow {
+      min-width: 0;
+      min-height: 0;
+      position: relative;
+    }
+
+    .screen {
+      display: none;
+      min-height: calc(100vh - 56px);
+    }
+
+    .screen.active {
+      display: block;
+    }
+
+    .build-screen {
+      padding: 34px;
+    }
+
+    .build-grid {
+      max-width: 1120px;
+      margin: 0 auto;
+      display: grid;
+      grid-template-columns: minmax(420px, 1.08fr) minmax(320px, 0.92fr);
+      gap: 24px;
+      align-items: start;
+    }
+
+    .hero-copy {
+      margin: 24px 0 22px;
+    }
+
+    .hero-copy h1 {
+      margin: 0 0 8px;
+      font-size: clamp(30px, 4vw, 54px);
+      line-height: 0.96;
+      letter-spacing: 0;
+      max-width: 780px;
+    }
+
+    .hero-copy p {
+      margin: 0;
+      max-width: 620px;
+      color: var(--muted);
+      font-size: 15px;
+      line-height: 1.6;
+    }
+
+    .prompt-card {
+      background: var(--surface);
+      border: 1px solid #d7d0ff;
+      border-radius: 12px;
+      box-shadow: var(--shadow);
+      overflow: hidden;
+    }
+
+    .prompt-input {
+      display: grid;
+      grid-template-columns: 1fr auto;
+      gap: 12px;
+      padding: 22px;
+      align-items: end;
+    }
+
+    .prompt-input textarea {
+      min-height: 116px;
+      border: 0;
+      outline: 0;
+      resize: none;
+      color: var(--text);
+      font-size: 18px;
+      line-height: 1.45;
+      background: transparent;
+    }
+
+    .send-circle {
+      width: 48px;
+      height: 48px;
+      border: 0;
+      border-radius: 999px;
+      color: white;
+      background: var(--purple);
+      display: grid;
+      place-items: center;
+      font-weight: 900;
+      box-shadow: 0 16px 34px rgba(91, 75, 231, 0.25);
+    }
+
+    .build-controls {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 12px;
+      padding: 0 22px 22px;
+    }
+
+    .field {
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--surface-2);
+      padding: 10px 12px;
+    }
+
+    .field label {
+      display: block;
+      color: var(--faint);
+      font-size: 10px;
+      font-weight: 850;
+      text-transform: uppercase;
+      margin-bottom: 5px;
+    }
+
+    .field select,
+    .field input {
+      width: 100%;
+      border: 0;
+      outline: 0;
+      background: transparent;
+      color: var(--text);
+      font-weight: 800;
+      min-width: 0;
+    }
+
+    .context-panel {
+      background: var(--surface);
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      box-shadow: 0 12px 36px rgba(27, 31, 45, 0.05);
+      padding: 18px;
+    }
+
+    .panel-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      margin-bottom: 14px;
+    }
+
+    .panel-head h2,
+    .panel-head h3 {
+      margin: 0;
+      font-size: 15px;
+      line-height: 1.2;
+    }
+
+    .panel-head span {
+      color: var(--faint);
+      font-size: 12px;
+      font-weight: 700;
+    }
+
+    .evidence-list {
+      display: grid;
+      gap: 10px;
+    }
+
+    .evidence-row {
+      display: grid;
+      grid-template-columns: 34px 1fr auto;
+      gap: 10px;
+      align-items: start;
+      padding: 12px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--surface-2);
+    }
+
+    .block-icon {
+      width: 34px;
+      height: 34px;
+      display: grid;
+      place-items: center;
+      border-radius: 7px;
+      color: var(--purple);
+      background: var(--purple-2);
+      font-size: 10px;
+      font-weight: 900;
+    }
+
+    .evidence-row b {
+      display: block;
+      margin-bottom: 4px;
+      font-size: 13px;
+    }
+
+    .evidence-row small {
+      display: block;
+      color: var(--muted);
+      line-height: 1.45;
+    }
+
+    .build-summary {
+      display: grid;
+      gap: 14px;
+    }
+
+    .filter-preview {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 10px;
+    }
+
+    .mini-card {
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--surface);
+      padding: 12px;
+      min-height: 76px;
+    }
+
+    .mini-card span {
+      display: block;
+      color: var(--faint);
+      font-size: 10px;
+      font-weight: 850;
+      text-transform: uppercase;
+      margin-bottom: 8px;
+    }
+
+    .mini-card b {
+      font-size: 20px;
+      color: var(--purple);
+    }
+
+    .gaps {
+      display: grid;
+      gap: 8px;
+      padding: 0;
+      margin: 0;
+      list-style: none;
+    }
+
+    .gaps li {
+      display: flex;
+      gap: 8px;
+      color: var(--muted);
+      font-size: 13px;
+      line-height: 1.35;
+    }
+
+    .gaps li::before {
+      content: "";
+      width: 7px;
+      height: 7px;
+      margin-top: 5px;
+      border-radius: 999px;
+      background: var(--amber);
+      flex: none;
+    }
+
+    .build-footer {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 12px;
+      border-top: 1px solid var(--line);
+      margin-top: 16px;
+      padding-top: 16px;
+    }
+
+    .advanced {
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 800;
+    }
+
+    .app-screen {
+      grid-template-columns: minmax(0, 1fr) 396px;
+      min-height: calc(100vh - 56px);
+    }
+
+    .app-screen.active {
+      display: grid;
+    }
+
+    .app-main {
+      min-width: 0;
+      display: grid;
+      grid-template-rows: auto 1fr;
+      border-right: 1px solid var(--line);
+    }
+
+    .filterbar {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 12px 18px;
+      border-bottom: 1px solid var(--line);
+      background: rgba(255, 255, 255, 0.88);
+      position: sticky;
+      top: 56px;
+      z-index: 12;
+    }
+
+    .filterbar .field {
+      width: 140px;
+      padding: 7px 10px;
+      background: white;
+    }
+
+    .filterbar .field label {
+      margin-bottom: 2px;
+      font-size: 9px;
+    }
+
+    .filterbar .field select,
+    .filterbar .field input {
+      font-size: 13px;
+    }
+
+    .canvas {
+      min-width: 0;
+      padding: 22px 24px 34px;
+      overflow: auto;
+    }
+
+    .canvas-inner {
+      max-width: 1040px;
+      margin: 0 auto;
+    }
+
+    .section-title {
+      margin-bottom: 18px;
+      display: flex;
+      align-items: end;
+      justify-content: space-between;
+      gap: 16px;
+    }
+
+    .section-title h1 {
+      margin: 0 0 5px;
+      font-size: 28px;
+      line-height: 1.1;
+    }
+
+    .section-title p {
+      margin: 0;
+      color: var(--muted);
+      line-height: 1.5;
+      font-size: 13px;
+    }
+
+    .tabs {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      background: white;
+      border: 1px solid var(--line);
+      border-radius: 9px;
+      padding: 4px;
+    }
+
+    .tabs button {
+      border: 0;
+      border-radius: 6px;
+      background: transparent;
+      color: var(--muted);
+      padding: 7px 10px;
+      font-size: 12px;
+      font-weight: 850;
+    }
+
+    .tabs button.active {
+      color: var(--purple);
+      background: var(--purple-2);
+    }
+
+    .dashboard-grid {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr);
+      gap: 14px;
+    }
+
+    .card {
+      background: var(--surface);
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      box-shadow: 0 10px 30px rgba(27, 31, 45, 0.04);
+    }
+
+    .table-card {
+      overflow: hidden;
+    }
+
+    .card-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: start;
+      gap: 14px;
+      padding: 16px 16px 10px;
+    }
+
+    .card-header h2 {
+      margin: 0 0 7px;
+      font-size: 17px;
+      line-height: 1.2;
+    }
+
+    .source-line {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 8px;
+      color: var(--muted);
+      font-size: 12px;
+    }
+
+    .table-tools {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      padding: 0 16px 10px;
+      color: var(--muted);
+      font-size: 12px;
+    }
+
+    .searchbox {
+      width: min(260px, 50%);
+      border: 1px solid var(--line);
+      border-radius: 7px;
+      background: var(--surface-2);
+      min-height: 32px;
+      padding: 0 10px;
+      color: var(--muted);
+      display: flex;
+      align-items: center;
+    }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 13px;
+    }
+
+    th,
+    td {
+      padding: 13px 16px;
+      border-top: 1px solid var(--line);
+      text-align: left;
+      white-space: nowrap;
+    }
+
+    th {
+      color: var(--muted);
+      font-size: 10px;
+      font-weight: 900;
+      text-transform: uppercase;
+      background: var(--surface-2);
+    }
+
+    td.num,
+    th.num {
+      text-align: right;
+      font-variant-numeric: tabular-nums;
+    }
+
+    tbody tr:hover td {
+      background: #fafaff;
+    }
+
+    .story-card {
+      padding: 16px;
+    }
+
+    .story-copy {
+      color: #313544;
+      line-height: 1.65;
+      font-size: 14px;
+      max-width: 860px;
+    }
+
+    .story-copy b {
+      color: var(--text);
+    }
+
+    .metric-row {
+      display: grid;
+      grid-template-columns: repeat(5, 1fr);
+      gap: 10px;
+      margin-top: 16px;
+    }
+
+    .metric {
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--surface-2);
+      padding: 12px;
+    }
+
+    .metric b {
+      display: block;
+      color: var(--purple);
+      font-size: 24px;
+      line-height: 1;
+      margin-bottom: 7px;
+    }
+
+    .metric span {
+      color: var(--muted);
+      font-size: 11px;
+      line-height: 1.35;
+    }
+
+    .citations {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin-top: 14px;
+    }
+
+    .citation {
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      padding: 6px 9px;
+      color: var(--muted);
+      background: white;
+      font-size: 11px;
+      font-weight: 800;
+    }
+
+    .copilot {
+      background: var(--surface);
+      min-width: 0;
+      display: grid;
+      grid-template-rows: auto minmax(0, 1fr) auto;
+      min-height: 0;
+      box-shadow: -18px 0 44px rgba(27, 31, 45, 0.04);
+    }
+
+    .copilot-head {
+      padding: 18px 18px 14px;
+      border-bottom: 1px solid var(--line);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+    }
+
+    .copilot-head h2 {
+      margin: 0;
+      font-size: 16px;
+    }
+
+    .copilot-subhead {
+      margin: 4px 0 0;
+      color: var(--muted);
+      font-size: 12px;
+      line-height: 1.45;
+    }
+
+    .copilot-body {
+      padding: 16px;
+      overflow: auto;
+      display: grid;
+      align-content: start;
+      gap: 12px;
+      background:
+        linear-gradient(180deg, #ffffff 0%, rgba(251, 251, 253, 0.96) 100%);
+    }
+
+    .chat-card {
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--surface-2);
+      padding: 13px;
+    }
+
+    .chat-card.user {
+      justify-self: end;
+      width: 92%;
+      background: #f2f0ff;
+      border-color: #d7d0ff;
+      color: #2c266a;
+    }
+
+    .chat-card h3 {
+      margin: 0 0 8px;
+      font-size: 13px;
+    }
+
+    .chat-card p {
+      margin: 0 0 10px;
+      color: #3a3f50;
+      line-height: 1.5;
+      font-size: 13px;
+    }
+
+    .chat-card ul {
+      margin: 0 0 12px 18px;
+      padding: 0;
+      color: #3a3f50;
+      line-height: 1.55;
+      font-size: 12px;
+    }
+
+    .copilot-actions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+    }
+
+    .context-composer {
+      border: 1px solid #d7d0ff;
+      border-radius: 10px;
+      background: white;
+      box-shadow: 0 18px 42px rgba(91, 75, 231, 0.12);
+      padding: 13px;
+      display: grid;
+      gap: 10px;
+    }
+
+    .composer-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+    }
+
+    .context-composer h3 {
+      margin: 0;
+      font-size: 14px;
+      line-height: 1.25;
+    }
+
+    .context-composer p {
+      margin: 0;
+      color: var(--muted);
+      font-size: 12px;
+      line-height: 1.5;
+    }
+
+    .context-composer textarea {
+      width: 100%;
+      min-height: 130px;
+      resize: vertical;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--surface-2);
+      color: var(--text);
+      padding: 10px;
+      outline: 0;
+      font-size: 13px;
+      line-height: 1.5;
+    }
+
+    .context-composer textarea:focus {
+      border-color: #b9aeff;
+      box-shadow: 0 0 0 3px rgba(91, 75, 231, 0.12);
+    }
+
+    .context-chips {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+    }
+
+    .context-chip {
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      background: var(--surface-2);
+      color: var(--muted);
+      padding: 5px 8px;
+      font-size: 10px;
+      font-weight: 850;
+      line-height: 1;
+      white-space: nowrap;
+    }
+
+    .composer-actions {
+      display: flex;
+      justify-content: flex-end;
+      gap: 8px;
+    }
+
+    .context-error {
+      display: none;
+      color: var(--danger);
+      font-size: 12px;
+      font-weight: 800;
+    }
+
+    .context-error.visible {
+      display: block;
+    }
+
+    .copilot-input {
+      border-top: 1px solid var(--line);
+      padding: 14px;
+      display: grid;
+      grid-template-columns: 1fr 40px;
+      gap: 8px;
+      background: white;
+    }
+
+    .copilot-input input {
+      border: 1px solid var(--line);
+      border-radius: 9px;
+      background: var(--surface-2);
+      padding: 0 12px;
+      outline: 0;
+      min-width: 0;
+      min-height: 40px;
+    }
+
+    .round {
+      width: 40px;
+      height: 40px;
+      border-radius: 999px;
+      border: 0;
+      color: white;
+      background: var(--purple);
+      font-weight: 900;
+    }
+
+    .report-view {
+      display: none;
+    }
+
+    .canvas.report-mode .dashboard-view {
+      display: none;
+    }
+
+    .canvas.report-mode .report-view {
+      display: block;
+    }
+
+    .report-layout {
+      display: grid;
+      grid-template-columns: minmax(0, 830px) 260px;
+      gap: 18px;
+      align-items: start;
+    }
+
+    .report-document {
+      background: var(--surface);
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      box-shadow: 0 18px 50px rgba(27, 31, 45, 0.06);
+      padding: 30px;
+    }
+
+    .report-eyebrow {
+      display: flex;
+      align-items: center;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin-bottom: 14px;
+    }
+
+    .report-document h1 {
+      margin: 0 0 14px;
+      font-size: 30px;
+      line-height: 1.1;
+    }
+
+    .report-lede {
+      margin: 0 0 20px;
+      color: #2f3444;
+      font-size: 17px;
+      line-height: 1.72;
+    }
+
+    .report-section {
+      padding: 22px 0 0;
+      margin-top: 22px;
+      border-top: 1px solid var(--line);
+    }
+
+    .report-section h2 {
+      margin: 0 0 10px;
+      font-size: 17px;
+    }
+
+    .report-section p,
+    .report-document p {
+      color: #343948;
+      line-height: 1.7;
+      font-size: 14px;
+    }
+
+    .report-section ul {
+      margin: 12px 0 0 18px;
+      padding: 0;
+      color: #343948;
+      line-height: 1.65;
+      font-size: 14px;
+    }
+
+    .research-context-note {
+      margin: 16px 0;
+      border: 1px solid #d7d0ff;
+      border-left: 4px solid var(--purple);
+      border-radius: 8px;
+      background: #faf9ff;
+      padding: 12px 14px;
+    }
+
+    .research-context-note b {
+      display: block;
+      margin-bottom: 6px;
+      font-size: 12px;
+      text-transform: uppercase;
+      color: var(--purple);
+    }
+
+    .research-context-note p {
+      margin: 0;
+      color: #2f3344;
+      font-size: 13px;
+      line-height: 1.55;
+    }
+
+    .report-grid {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 10px;
+      margin: 14px 0;
+    }
+
+    .chart {
+      height: 270px;
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      background:
+        linear-gradient(to top, rgba(91, 75, 231, 0.08), rgba(91, 75, 231, 0)),
+        repeating-linear-gradient(to top, transparent 0, transparent 47px, #eceef6 48px);
+      display: flex;
+      align-items: end;
+      gap: 26px;
+      padding: 24px 26px 30px;
+    }
+
+    .bar {
+      flex: 1;
+      min-width: 42px;
+      max-width: 120px;
+      background: linear-gradient(180deg, #7567ff, #4f42cf);
+      border-radius: 8px 8px 3px 3px;
+      position: relative;
+      box-shadow: 0 18px 28px rgba(91, 75, 231, 0.18);
+    }
+
+    .bar span {
+      position: absolute;
+      left: 50%;
+      bottom: -24px;
+      transform: translateX(-50%);
+      white-space: nowrap;
+      color: var(--muted);
+      font-size: 11px;
+      font-weight: 800;
+    }
+
+    .bar b {
+      position: absolute;
+      left: 50%;
+      top: -22px;
+      transform: translateX(-50%);
+      color: var(--text);
+      font-size: 12px;
+      font-variant-numeric: tabular-nums;
+    }
+
+    .driver-list {
+      display: grid;
+      gap: 10px;
+    }
+
+    .driver {
+      padding: 12px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--surface-2);
+    }
+
+    .driver b {
+      display: flex;
+      justify-content: space-between;
+      gap: 8px;
+      font-size: 13px;
+      margin-bottom: 6px;
+    }
+
+    .driver p {
+      margin: 0;
+      color: var(--muted);
+      font-size: 12px;
+      line-height: 1.5;
+    }
+
+    .code {
+      white-space: pre-wrap;
+      background: #171923;
+      color: #f6f7fb;
+      border-radius: 10px;
+      padding: 14px;
+      font-family: var(--mono);
+      font-size: 12px;
+      line-height: 1.55;
+      overflow: auto;
+    }
+
+    .report-outline {
+      display: grid;
+      gap: 12px;
+      position: sticky;
+      top: 126px;
+    }
+
+    .aside-card {
+      padding: 14px;
+    }
+
+    .aside-card h3 {
+      margin: 0 0 10px;
+      font-size: 14px;
+    }
+
+    .aside-card p,
+    .aside-card li {
+      color: var(--muted);
+      font-size: 12px;
+      line-height: 1.55;
+    }
+
+    .aside-card ul {
+      margin: 0;
+      padding-left: 18px;
+    }
+
+    .report-actions {
+      display: grid;
+      gap: 8px;
+    }
+
+    .hidden {
+      display: none !important;
+    }
+
+    @media (max-width: 1180px) {
+      .build-grid,
+      .app-screen.active,
+      .report-layout {
+        grid-template-columns: 1fr;
+      }
+
+      .copilot {
+        border-top: 1px solid var(--line);
+        min-height: 520px;
+      }
+
+      .metric-row,
+      .filter-preview,
+      .report-grid {
+        grid-template-columns: repeat(2, 1fr);
+      }
+    }
+
+    @media (max-width: 720px) {
+      .topbar {
+        padding: 0 10px;
+      }
+
+      .brand span:not(.mark),
+      .app-name,
+      .top-actions .btn:not(.primary) {
+        display: none;
+      }
+
+      .shell {
+        grid-template-columns: 1fr;
+      }
+
+      .rail {
+        display: none;
+      }
+
+      .build-screen,
+      .canvas {
+        padding: 16px;
+      }
+
+      .build-controls,
+      .filterbar,
+      .metric-row,
+      .filter-preview,
+      .report-grid {
+        grid-template-columns: 1fr;
+      }
+
+      .filterbar {
+        display: grid;
+        position: static;
+      }
+
+      .filterbar .field {
+        width: 100%;
+      }
+
+      .section-title {
+        align-items: start;
+        flex-direction: column;
+      }
+
+      .table-tools {
+        align-items: stretch;
+        flex-direction: column;
+      }
+
+      .searchbox {
+        width: 100%;
+      }
+
+      th,
+      td {
+        padding: 10px 9px;
+        font-size: 12px;
+      }
+
+      table {
+        table-layout: fixed;
+      }
+
+      th:first-child,
+      td:first-child {
+        display: none;
+      }
+
+      th:nth-child(2),
+      td:nth-child(2) {
+        width: 45%;
+      }
+
+      th:nth-child(3),
+      td:nth-child(3) {
+        width: 30%;
+      }
+
+      th:nth-child(4),
+      td:nth-child(4) {
+        width: 25%;
+      }
+
+      th {
+        font-size: 9px;
+      }
+
+      .hero-copy h1 {
+        font-size: 34px;
+      }
+    }
+  </style>
+</head>
+<body>
+  <div class="prototype">
+    <header class="topbar">
+      <div class="brand">
+        <span class="mark">DQL</span>
+        <span>DQL Workbench</span>
+      </div>
+      <div class="app-name">
+        <b id="topAppName">Build an app with certified DQL blocks</b>
+        <span class="badge certified hidden" id="topCertified">Certified</span>
+        <span class="badge review hidden" id="topReview">Analysis open</span>
+      </div>
+      <div class="top-actions">
+        <button class="btn">View as Owner</button>
+        <button class="btn">Share</button>
+        <button class="btn ghost">More</button>
+      </div>
+    </header>
+
+    <main class="shell">
+      <nav class="rail" aria-label="Prototype navigation">
+        <button class="active" title="Apps">A</button>
+        <button title="Blocks">B</button>
+        <button title="Notebooks">N</button>
+        <button title="Dashboards">D</button>
+        <button title="Analysis">A</button>
+        <button title="Catalog">C</button>
+        <button title="Metrics">M</button>
+        <button title="Data">DB</button>
+        <span class="rail-spacer"></span>
+        <button title="Help">?</button>
+      </nav>
+
+      <section class="flow">
+        <section class="screen build-screen active" id="buildScreen">
+          <div class="build-grid">
+            <div>
+              <div class="hero-copy">
+                <h1>Start with one AI input.</h1>
+                <p>DQL finds certified blocks, detects reusable filters, and generates a reviewable app without opening a second AI workspace.</p>
+              </div>
+
+              <div class="prompt-card">
+                <div class="prompt-input">
+                  <textarea id="buildPrompt">Build an NBA player performance app for stakeholders</textarea>
+                  <button class="send-circle" id="quickBuild" title="Build app">Go</button>
+                </div>
+                <div class="build-controls">
+                  <div class="field">
+                    <label>Domain</label>
+                    <select>
+                      <option>NBA</option>
+                      <option>Revenue</option>
+                      <option>Customer</option>
+                    </select>
+                  </div>
+                  <div class="field">
+                    <label>Audience</label>
+                    <select>
+                      <option>Stakeholders</option>
+                      <option>Executive team</option>
+                      <option>Analysts</option>
+                    </select>
+                  </div>
+                  <div class="field">
+                    <label>Owner</label>
+                    <select>
+                      <option>Analytics</option>
+                      <option>Sports analytics</option>
+                    </select>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <aside class="build-summary">
+              <section class="context-panel">
+                <div class="panel-head">
+                  <h2>Certified blocks found</h2>
+                  <span>4 matches</span>
+                </div>
+                <div class="evidence-list">
+                  <div class="evidence-row">
+                    <span class="block-icon">DQL</span>
+                    <span>
+                      <b>Top Players By Total Points 2016 2017</b>
+                      <small>DQL block from transformed.int_player_stats. Ranks players by total points.</small>
+                    </span>
+                    <span class="badge certified">Certified</span>
+                  </div>
+                  <div class="evidence-row">
+                    <span class="block-icon">DQL</span>
+                    <span>
+                      <b>Player Game Logs 2016 2017</b>
+                      <small>Game-level player stats available for review-required analysis.</small>
+                    </span>
+                    <span class="badge certified">Certified</span>
+                  </div>
+                  <div class="evidence-row">
+                    <span class="block-icon">DQL</span>
+                    <span>
+                      <b>NBA Teams And Seasons</b>
+                      <small>Team, season, and conference reference data.</small>
+                    </span>
+                    <span class="badge certified">Certified</span>
+                  </div>
+                </div>
+              </section>
+
+              <section class="context-panel">
+                <div class="panel-head">
+                  <h2>Detected app filters</h2>
+                  <span>Bound to block params</span>
+                </div>
+                <div class="filter-preview">
+                  <div class="mini-card"><span>Season start</span><b>2016</b></div>
+                  <div class="mini-card"><span>Season end</span><b>2017</b></div>
+                  <div class="mini-card"><span>Top N</span><b>5</b></div>
+                </div>
+              </section>
+
+              <section class="context-panel">
+                <div class="panel-head">
+                  <h2>Analysis gaps</h2>
+                  <span>Hidden from dashboard</span>
+                </div>
+                <ul class="gaps">
+                  <li>Why the top player changed requires review-required analysis.</li>
+                  <li>Player bio, team assignment, and minutes context are not in the certified scorer block.</li>
+                  <li>Efficiency and availability should be investigated before adding a stakeholder claim.</li>
+                </ul>
+                <div class="build-footer">
+                  <span class="advanced">Advanced controls collapsed</span>
+                  <button class="btn primary" id="buildApp">Build app</button>
+                </div>
+              </section>
+            </aside>
+          </div>
+        </section>
+
+        <section class="screen app-screen" id="appScreen">
+          <section class="app-main">
+            <div class="filterbar">
+              <div class="field">
+                <label>Season Start</label>
+                <select id="seasonStart">
+                  <option value="2016">2016</option>
+                  <option value="2017">2017</option>
+                </select>
+              </div>
+              <div class="field">
+                <label>Season End</label>
+                <select id="seasonEnd">
+                  <option value="2017">2017</option>
+                  <option value="2016">2016</option>
+                </select>
+              </div>
+              <div class="field">
+                <label>Top N</label>
+                <input id="topN" type="number" min="1" max="5" value="5" />
+              </div>
+              <button class="btn primary" id="applyFilters">Apply</button>
+              <button class="btn ghost" id="backToBuild">Back to build input</button>
+            </div>
+
+            <div class="canvas" id="canvas">
+              <div class="canvas-inner dashboard-view">
+                <div class="section-title">
+                  <div>
+                    <h1>NBA Overview</h1>
+                    <p>Certified results with a grounded story. Follow-up analysis starts in Copilot and opens only after the user adds context.</p>
+                  </div>
+                  <div class="tabs">
+                    <button class="active">Dashboard</button>
+                    <button>Analysis <span id="researchCount">0</span></button>
+                  </div>
+                </div>
+
+                <div class="dashboard-grid">
+                  <section class="card table-card">
+                    <div class="card-header">
+                      <div>
+                        <h2>Top Players By Total Points 2016-2017</h2>
+                        <div class="source-line">
+                          <span class="badge certified">Certified</span>
+                          <span>DQL Block: Top Players By Total Points 2016 2017</span>
+                        </div>
+                      </div>
+                      <button class="btn line-purple" id="askAboutTile">Ask AI</button>
+                    </div>
+                    <div class="table-tools">
+                      <div class="searchbox">Filter players...</div>
+                      <span><b id="rowCount">5</b> rows</span>
+                    </div>
+                    <table>
+                      <thead>
+                        <tr>
+                          <th>#</th>
+                          <th>Player Name</th>
+                          <th class="num">Total Points</th>
+                          <th class="num">Games Played</th>
+                        </tr>
+                      </thead>
+                      <tbody id="playerRows"></tbody>
+                    </table>
+                  </section>
+
+                  <section class="card story-card">
+                    <div class="panel-head">
+                      <h2>Grounded story</h2>
+                      <span class="badge certified">Certified source</span>
+                    </div>
+                    <div class="story-copy" id="storyCopy"></div>
+                    <div class="metric-row">
+                      <div class="metric"><b id="metricLeaderPoints">1,179</b><span>Total points by leader</span></div>
+                      <div class="metric"><b id="metricPpg">17.34</b><span>Points per game</span></div>
+                      <div class="metric"><b id="metricGap">761</b><span>Point gap vs 2nd place</span></div>
+                      <div class="metric"><b id="metricCombined">2,447</b><span>Top selected combined</span></div>
+                      <div class="metric"><b id="metricAverage">489.4</b><span>Average points per player</span></div>
+                    </div>
+                    <div class="citations">
+                      <span class="citation">blocks/nba/top-players-by-total-points-2016-2017.dql</span>
+                      <span class="citation">NBA_ANALYTICS.TRANSFORMED.int_player_stats</span>
+                      <span class="citation">Filter params: season_start, season_end, top_n</span>
+                    </div>
+                  </section>
+                </div>
+              </div>
+
+              <div class="canvas-inner report-view">
+                <div class="section-title">
+                  <div>
+                    <h1>Analysis memo</h1>
+                    <p>A review-required memo written from the user's question, active filters, certified block evidence, and optional SQL preview.</p>
+                  </div>
+                  <button class="btn" id="backToDashboard">Back to dashboard</button>
+                </div>
+
+                <div class="report-layout">
+                  <article class="report-document">
+                    <div class="report-eyebrow">
+                      <span class="badge review" id="reportStatusBadge">Review-required</span>
+                      <span class="badge ai" id="reportModeBadge">Analysis</span>
+                      <span class="badge certified">Certified scorer block used</span>
+                    </div>
+                    <h1 id="reportTitle">Why did the top player change?</h1>
+                    <p class="report-lede" id="reportLede">The certified scorer block proves Grant Jerrett led the selected 2016-2017 window with <b>1,179 total points across 68 games</b>. The explanation remains review-required until the generated SQL, grain, and any added team or efficiency joins are reviewed.</p>
+                    <div class="research-context-note">
+                      <b>User-provided context</b>
+                      <p id="researchContextText">No memo has been started yet. Use the AI Copilot to define the exact question, comparison, or proof focus first.</p>
+                    </div>
+
+                    <div class="report-grid">
+                      <div class="metric"><b>1,179</b><span>Certified total points</span></div>
+                      <div class="metric"><b>68</b><span>Games in selected window</span></div>
+                      <div class="metric"><b>17.34</b><span>Points per game</span></div>
+                    </div>
+
+                    <section class="report-section">
+                      <h2 id="answerSectionTitle">Executive answer</h2>
+                      <p id="answerSectionBody">For the active 2016-2017 filter, the top scorer result is trusted because it comes from a certified block. The “why” story needs analysis because it compares drivers: game availability, scoring rate, efficiency, and role context.</p>
+                    </section>
+
+                    <section class="report-section">
+                      <h2 id="numbersSectionTitle">Key numbers</h2>
+                      <p id="numbersSectionBody">Grant Jerrett scored 1,179 points over 68 games. Gary Harris scored 418 over 58 games, and Emmanuel Mudiay scored 348 over 56 games. The gap is large enough that availability alone does not explain the result; scoring rate and role should be reviewed.</p>
+                      <div class="chart" aria-label="Bar chart prototype">
+                        <div class="bar" style="height: 92%"><b>1,179</b><span>Jerrett</span></div>
+                        <div class="bar" style="height: 33%"><b>418</b><span>Harris</span></div>
+                        <div class="bar" style="height: 28%"><b>348</b><span>Mudiay</span></div>
+                      </div>
+                    </section>
+
+                    <section class="report-section">
+                      <h2 id="driverSectionTitle">Interpretation</h2>
+                      <p id="driverSectionBody">The likely story is a combination of usage and availability. The certified block can support who led and by how much. Any claim about team role, scoring efficiency, injuries, or roster context must come from additional reviewed blocks or a promoted investigation.</p>
+                      <ul id="driverBullets">
+                        <li>Availability gives the leader more scoring opportunities: 68 games in the selected window.</li>
+                        <li>Scoring efficiency needs reviewed SQL across field goals, free throws, and three-point attempts.</li>
+                        <li>Team role and roster context are missing from the certified scorer block.</li>
+                      </ul>
+                    </section>
+
+                    <section class="report-section">
+                      <h2>Review appendix</h2>
+                      <p>The SQL remains available for analyst review, but it is not the stakeholder-facing story. A reviewer should validate filters, grain, joins, and metric definition before promotion.</p>
+                      <div class="code">WITH player_period_totals AS (
+  SELECT player_id, player_name,
+         SUM(COALESCE(pts, 0)) AS total_points,
+         COUNT(DISTINCT details_game_id) AS games_played
+  FROM TRANSFORMED.int_player_stats
+  WHERE EXTRACT(YEAR FROM game_date_est) BETWEEN 2016 AND 2017
+  GROUP BY player_id, player_name
+)
+SELECT *
+FROM player_period_totals
+ORDER BY total_points DESC
+LIMIT 20;</div>
+                    </section>
+
+                    <section class="report-section">
+                      <h2>Review boundary</h2>
+                      <p id="reviewBoundaryText">This memo can be added as review-required context. It should become certified only after the SQL is reviewed, the grain is confirmed, and any new reusable logic is promoted into a DQL block.</p>
+                    </section>
+                  </article>
+
+                  <aside class="report-outline">
+                    <section class="card aside-card">
+                      <h3>What this memo can do</h3>
+                      <ul>
+                        <li>Tell the stakeholder story with numbers.</li>
+                        <li>Show which claims are certified versus review-required.</li>
+                        <li>Create a clean path to app tile or draft block.</li>
+                      </ul>
+                    </section>
+
+                    <section class="card aside-card">
+                      <h3>Proof</h3>
+                      <ul>
+                        <li>Certified DQL scorer block.</li>
+                        <li>Active app filters.</li>
+                        <li>Review appendix for generated SQL.</li>
+                      </ul>
+                    </section>
+
+                    <section class="card aside-card">
+                      <h3>Actions</h3>
+                      <div class="report-actions">
+                        <button class="btn primary">Add insight to app</button>
+                        <button class="btn line-purple">Add story tile</button>
+                        <button class="btn" id="createDraftFromReport">Create block draft</button>
+                      </div>
+                    </section>
+                  </aside>
+                </div>
+              </div>
+            </div>
+          </section>
+
+          <aside class="copilot">
+            <div class="copilot-head">
+              <div>
+                <h2>AI Copilot</h2>
+                <p class="copilot-subhead">Ask, investigate, add a reviewed insight, or create block-draft logic from the current app context.</p>
+              </div>
+              <span class="badge ai">One AI</span>
+            </div>
+            <div class="copilot-body">
+              <div class="chat-card user">
+                <h3>Current question</h3>
+                <p id="questionText">Why did the top player change?</p>
+              </div>
+
+              <div class="chat-card" id="copilotAnswer">
+                <span class="badge review" id="copilotStateBadge">Needs context</span>
+                <h3 id="copilotStateTitle">Certified answer is partial</h3>
+                <p id="copilotStateBody">The certified block answers who led the selected period. A deeper explanation needs the user to scope the question before DQL writes a memo, creates SQL, or proposes a block.</p>
+                <ul id="copilotStateList">
+                  <li><b>/ask</b> returns a concise answer from current proof.</li>
+                  <li><b>/research</b> opens a context box, then writes a full memo in the main canvas.</li>
+                  <li><b>/add block</b> collects reusable logic requirements before drafting DQL.</li>
+                </ul>
+                <div class="copilot-actions">
+                  <button class="btn primary" id="runResearch">Add context</button>
+                  <button class="btn" id="createDraftFromCopilot">Create block draft</button>
+                </div>
+              </div>
+
+              <div class="context-composer hidden" id="contextComposer">
+                <div class="composer-head">
+                  <span class="badge ai" id="composerMode">Analysis context</span>
+                  <button class="btn ghost" id="closeComposer">Close</button>
+                </div>
+                <h3 id="composerTitle">Add analysis context</h3>
+                <p id="composerHelp">Tell DQL exactly what to compare, explain, or validate before any memo is written. This keeps output tied to the user question, not random generated content.</p>
+                <textarea id="contextText"></textarea>
+                <div class="context-chips">
+                  <span class="context-chip" id="contextFilterChip">Filters: 2016-2017, Top N 5</span>
+                  <span class="context-chip">Certified block: Top Players By Total Points</span>
+                  <span class="context-chip">Source: TRANSFORMED.int_player_stats</span>
+                </div>
+                <span class="context-error" id="contextError">Add the question or analysis context first.</span>
+                <div class="composer-actions">
+                  <button class="btn" id="cancelContext">Cancel</button>
+                  <button class="btn primary" id="submitContext">Create memo</button>
+                </div>
+              </div>
+            </div>
+            <div class="copilot-input">
+              <input id="askInput" value="Why did the top player change?" aria-label="Ask AI or use commands like /ask, /analyze, and /add block" />
+              <button class="round" id="askButton">Go</button>
+            </div>
+          </aside>
+        </section>
+      </section>
+    </main>
+  </div>
+
+  <script>
+    const players = [
+      { name: "Grant Jerrett", points: 1179, games: 68 },
+      { name: "Gary Harris", points: 418, games: 58 },
+      { name: "Emmanuel Mudiay", points: 348, games: 56 },
+      { name: "Isaiah Briscoe", points: 259, games: 32 },
+      { name: "Cartier Martin", points: 243, games: 16 }
+    ];
+
+    const buildScreen = document.getElementById("buildScreen");
+    const appScreen = document.getElementById("appScreen");
+    const canvas = document.getElementById("canvas");
+    const playerRows = document.getElementById("playerRows");
+    const topN = document.getElementById("topN");
+    const rowCount = document.getElementById("rowCount");
+    const storyCopy = document.getElementById("storyCopy");
+    const questionText = document.getElementById("questionText");
+    const askInput = document.getElementById("askInput");
+    const researchCount = document.getElementById("researchCount");
+    const contextComposer = document.getElementById("contextComposer");
+    const contextText = document.getElementById("contextText");
+    const contextError = document.getElementById("contextError");
+    const composerMode = document.getElementById("composerMode");
+    const composerTitle = document.getElementById("composerTitle");
+    const composerHelp = document.getElementById("composerHelp");
+    const submitContext = document.getElementById("submitContext");
+    const contextFilterChip = document.getElementById("contextFilterChip");
+    const researchContextText = document.getElementById("researchContextText");
+    const reportTitle = document.getElementById("reportTitle");
+    const reportModeBadge = document.getElementById("reportModeBadge");
+    const reportLede = document.getElementById("reportLede");
+    const answerSectionTitle = document.getElementById("answerSectionTitle");
+    const answerSectionBody = document.getElementById("answerSectionBody");
+    const numbersSectionTitle = document.getElementById("numbersSectionTitle");
+    const numbersSectionBody = document.getElementById("numbersSectionBody");
+    const driverSectionTitle = document.getElementById("driverSectionTitle");
+    const driverSectionBody = document.getElementById("driverSectionBody");
+    const driverBullets = document.getElementById("driverBullets");
+    const reviewBoundaryText = document.getElementById("reviewBoundaryText");
+    const copilotStateBadge = document.getElementById("copilotStateBadge");
+    const copilotStateTitle = document.getElementById("copilotStateTitle");
+    const copilotStateBody = document.getElementById("copilotStateBody");
+    const copilotStateList = document.getElementById("copilotStateList");
+    const runResearchButton = document.getElementById("runResearch");
+    let pendingAction = "research";
+
+    function showApp() {
+      buildScreen.classList.remove("active");
+      appScreen.classList.add("active");
+      canvas.classList.remove("report-mode");
+      document.getElementById("topReview").classList.add("hidden");
+      document.getElementById("topAppName").textContent = "nba-player-performance-stakeholders-using-certified";
+      document.getElementById("topCertified").classList.remove("hidden");
+      renderDashboard();
+      if (window.location.hash !== "#app-preview") {
+        history.replaceState(null, "", "#app-preview");
+      }
+      window.scrollTo({ top: 0, behavior: "auto" });
+    }
+
+    function showBuild() {
+      appScreen.classList.remove("active");
+      buildScreen.classList.add("active");
+      canvas.classList.remove("report-mode");
+      document.getElementById("topAppName").textContent = "Build an app with certified DQL blocks";
+      document.getElementById("topCertified").classList.add("hidden");
+      document.getElementById("topReview").classList.add("hidden");
+      if (window.location.hash !== "#build") {
+        history.replaceState(null, "", "#build");
+      }
+      window.scrollTo({ top: 0, behavior: "auto" });
+    }
+
+    function selectedPlayers() {
+      const count = Math.max(1, Math.min(5, Number(topN.value || 5)));
+      topN.value = String(count);
+      return players.slice(0, count);
+    }
+
+    function formatNumber(value) {
+      return new Intl.NumberFormat("en-US", { maximumFractionDigits: 2 }).format(value);
+    }
+
+    function renderDashboard() {
+      const rows = selectedPlayers();
+      playerRows.innerHTML = rows.map((row, index) => `
+        <tr>
+          <td>${index + 1}</td>
+          <td><b>${row.name}</b></td>
+          <td class="num">${formatNumber(row.points)}</td>
+          <td class="num">${formatNumber(row.games)}</td>
+        </tr>
+      `).join("");
+      rowCount.textContent = String(rows.length);
+
+      const leader = rows[0];
+      const second = rows[1] || rows[0];
+      const combined = rows.reduce((sum, row) => sum + row.points, 0);
+      const average = combined / rows.length;
+      const gap = leader.points - second.points;
+      const ppg = leader.points / leader.games;
+
+      storyCopy.innerHTML = `
+        <p><b>${leader.name}</b> led the ${document.getElementById("seasonStart").value}-${document.getElementById("seasonEnd").value} window with <b>${formatNumber(leader.points)} total points</b> across <b>${formatNumber(leader.games)} games</b>, averaging <b>${formatNumber(ppg)}</b> points per game. The selected top ${rows.length} players combined for <b>${formatNumber(combined)}</b> points.</p>
+      `;
+      document.getElementById("metricLeaderPoints").textContent = formatNumber(leader.points);
+      document.getElementById("metricPpg").textContent = formatNumber(ppg);
+      document.getElementById("metricGap").textContent = formatNumber(gap);
+      document.getElementById("metricCombined").textContent = formatNumber(combined);
+      document.getElementById("metricAverage").textContent = formatNumber(average);
+    }
+
+    function askAi() {
+      const rawQuestion = askInput.value.trim() || "Why did the top player change?";
+      const command = parseCopilotCommand(rawQuestion);
+
+      if (command.mode !== "ask") {
+        if (command.context) {
+          questionText.textContent = command.context;
+        }
+        openContextComposer(command.mode, command.context);
+        return;
+      }
+
+      const question = command.context || rawQuestion;
+      questionText.textContent = question;
+      hideContextComposer();
+      document.getElementById("copilotAnswer").scrollIntoView({ behavior: "smooth", block: "nearest" });
+    }
+
+    function parseCopilotCommand(value) {
+      const trimmed = value.trim();
+      const commandPatterns = [
+        { mode: "research", pattern: /^\/report\b/i },
+        { mode: "research", pattern: /^\/research\b/i },
+        { mode: "research", pattern: /^\/analy[sz]e\b/i },
+        { mode: "research", pattern: /^\/analysis\b/i },
+        { mode: "evidence", pattern: /^\/proof\b/i },
+        { mode: "evidence", pattern: /^\/evidence\b/i },
+        { mode: "block", pattern: /^\/add\s+block\b/i },
+        { mode: "block", pattern: /^\/create\s+block\b/i },
+        { mode: "ask", pattern: /^\/ask\b/i }
+      ];
+
+      for (const command of commandPatterns) {
+        if (command.pattern.test(trimmed)) {
+          return {
+            mode: command.mode,
+            context: trimmed.replace(command.pattern, "").trim()
+          };
+        }
+      }
+
+      return { mode: "ask", context: trimmed };
+    }
+
+    function activeFilterContext() {
+      return `${document.getElementById("seasonStart").value}-${document.getElementById("seasonEnd").value}, Top N ${topN.value}`;
+    }
+
+    function defaultContextFor(mode, seedContext = "") {
+      const baseQuestion = seedContext || questionText.textContent || askInput.value || "Why did the top player change?";
+      const filterContext = activeFilterContext();
+      const instructions = {
+        research: "Analysis question",
+        evidence: "Proof focus",
+        block: "Draft block purpose"
+      };
+
+      return `${instructions[mode]}: ${baseQuestion}
+Current app filters: ${filterContext}
+Certified block to start from: Top Players By Total Points 2016 2017
+User intent: explain this for stakeholders using reviewed SQL, clear numbers, caveats, and proof.`;
+    }
+
+    function openContextComposer(mode, seedContext = "") {
+      pendingAction = mode;
+      contextError.classList.remove("visible");
+      contextFilterChip.textContent = `Filters: ${activeFilterContext()}`;
+
+      const labels = {
+        research: {
+          mode: "Analysis context",
+          title: "Add analysis context",
+          help: "DQL will not write open-ended analysis. Describe exactly what to compare, explain, segment, or validate.",
+          submit: "Create memo"
+        },
+        evidence: {
+          mode: "Proof context",
+          title: "Choose the proof focus",
+          help: "Tell DQL which claim, number, field, filter, or source table proof you want inspected.",
+          submit: "Write proof brief"
+        },
+        block: {
+          mode: "Draft block context",
+          title: "Describe the reusable block",
+          help: "Explain the business logic, dynamic filters, output grain, and why this should become a reusable DQL block.",
+          submit: "Create block draft"
+        }
+      };
+
+      const selected = labels[mode] || labels.research;
+      composerMode.textContent = selected.mode;
+      composerTitle.textContent = selected.title;
+      composerHelp.textContent = selected.help;
+      submitContext.textContent = selected.submit;
+      contextText.value = defaultContextFor(mode, seedContext);
+      contextComposer.classList.remove("hidden");
+      contextComposer.scrollIntoView({ behavior: "smooth", block: "nearest" });
+      contextText.focus();
+    }
+
+    function hideContextComposer() {
+      contextComposer.classList.add("hidden");
+      contextError.classList.remove("visible");
+    }
+
+    function titleFromContext(mode, userContext) {
+      const firstLine = userContext.split("\n").find(Boolean) || "Review requested context";
+      const cleaned = firstLine
+        .replace(/^(Analysis goal|Analysis question|Report question|Research question|Proof focus|Evidence focus|Draft block purpose):\s*/i, "")
+        .replace(/\.\s+(Use|Keep|Include|Mark|Compare)\b[\s\S]*$/i, ".")
+        .trim();
+      const shortTitle = cleaned.length > 58 ? `${cleaned.slice(0, 55).replace(/\s+\S*$/, "")}...` : cleaned;
+      const prefixes = {
+        research: "Analysis",
+        evidence: "Proof Brief",
+        block: "Draft Block Plan"
+      };
+
+      return `${prefixes[mode] || prefixes.research}: ${shortTitle}`;
+    }
+
+    function submitContextAndOpen() {
+      const userContext = contextText.value.trim();
+      if (!userContext) {
+        contextError.classList.add("visible");
+        contextText.focus();
+        return;
+      }
+
+      renderReportFromContext(pendingAction, userContext);
+      hideContextComposer();
+      openResearch();
+    }
+
+    function renderReportFromContext(mode, userContext) {
+      reportTitle.textContent = titleFromContext(mode, userContext);
+      researchContextText.textContent = userContext;
+
+      const reportCopy = {
+        research: {
+          badge: "Analysis",
+          lede: "DQL starts from the certified scorer block, then writes a review-required memo using the user’s scoped question, active filters, and optional SQL appendix. The stakeholder claim stays provisional until the analysis is reviewed.",
+          answerTitle: "Executive answer",
+          answer: "Grant Jerrett is the certified leader for the active 2016-2017 window. The likely explanation should be reviewed across availability, scoring rate, efficiency, and team role before it becomes a governed app claim.",
+          numbersTitle: "Key numbers",
+          numbers: "Grant Jerrett scored 1,179 points over 68 games. Gary Harris scored 418 over 58 games, and Emmanuel Mudiay scored 348 over 56 games. The gap is large enough that the memo should inspect both opportunity and scoring rate.",
+          driverTitle: "Interpretation",
+          driver: "The analyst story should separate certified facts from open hypotheses. The ranking is certified; the causal explanation requires reviewed evidence from game logs and any additional role or roster data.",
+          bullets: [
+            "Availability gives the leader more scoring opportunities: 68 games in the selected window.",
+            "Scoring efficiency should be reviewed across field goals, free throws, and three-point attempts.",
+            "Team role and roster context need either existing certified blocks or a new promoted investigation."
+          ],
+          boundary: "This memo can be added to the app as review-required context. It should become certified only after the SQL, grain, filters, and added joins are reviewed."
+        },
+        evidence: {
+          badge: "Proof brief",
+          lede: "This proof brief narrows the user’s claim into verifiable evidence: what the certified block proves, what the SQL preview can validate, and what remains outside the current governed layer.",
+          answerTitle: "Claim under review",
+          answer: "The certified scorer block proves the ranking and total points for the active filters. It does not prove why the result changed, nor does it certify team role, injury, bio, or minutes context.",
+          numbersTitle: "Verified evidence",
+          numbers: "The trusted evidence is the scorer result: 1,179 total points, 68 games, and 17.34 points per game for Grant Jerrett in the selected filter window.",
+          driverTitle: "Evidence gaps",
+          driver: "The missing proof should be made explicit before adding the claim to a stakeholder app. If those gaps matter repeatedly, the proof path should become a reusable DQL block.",
+          bullets: [
+            "Certified: player ranking, total points, games played, active filter bindings.",
+            "Review-required: generated SQL that compares drivers or joins extra context.",
+            "Missing: player bio, role, roster, or injury datasets if the question needs them."
+          ],
+          boundary: "A proof brief can support review, but it should not certify new business logic. Promote only after the proof is encoded and tested as DQL."
+        },
+        block: {
+          badge: "Draft block plan",
+          lede: "This draft plan converts the user’s follow-up into reusable DQL logic. It keeps parameterized filters, declares the grain, and separates certified source blocks from new review-required SQL.",
+          answerTitle: "Reusable logic goal",
+          answer: "Create a reusable player performance explanation block with season_start, season_end, and top_n parameters instead of hard-coded years or one-off app logic.",
+          numbersTitle: "Starting evidence",
+          numbers: "The NBA scorer block provides the seed output: player_name, total_points, games_played, and ranking for the active filter window.",
+          driverTitle: "Block contract shape",
+          driver: "The draft block should declare player grain, allowed filters, output columns, source systems, tests, lineage, and review cadence before certification.",
+          bullets: [
+            "Parameters: season_start, season_end, top_n, optional player_id or team filter.",
+            "Outputs: player_id, player_name, scoring_rank, total_points, games_played, points_per_game.",
+            "Tests: row count, unique rank within filter window, non-null player and positive games."
+          ],
+          boundary: "AI may draft this block, but certification requires a human review of grain, filters, tests, lineage, and business description."
+        }
+      };
+
+      const copy = reportCopy[mode] || reportCopy.research;
+      reportModeBadge.textContent = copy.badge;
+      reportLede.textContent = copy.lede;
+      answerSectionTitle.textContent = copy.answerTitle;
+      answerSectionBody.textContent = copy.answer;
+      numbersSectionTitle.textContent = copy.numbersTitle;
+      numbersSectionBody.textContent = copy.numbers;
+      driverSectionTitle.textContent = copy.driverTitle;
+      driverSectionBody.textContent = copy.driver;
+      driverBullets.innerHTML = copy.bullets.map((item) => `<li>${item}</li>`).join("");
+      reviewBoundaryText.textContent = copy.boundary;
+      copilotStateBadge.textContent = mode === "block" ? "Draft plan ready" : "Analysis open";
+      copilotStateTitle.textContent = mode === "block" ? "Reusable block plan opened" : "Main canvas memo is ready";
+      copilotStateBody.textContent = mode === "block"
+        ? "The main canvas now shows a review-required block plan. Keep refining the business logic, parameters, grain, outputs, and tests before drafting DQL."
+        : "The main canvas now has the memo. The dashboard remains clean while the copilot can refine the question, add proof, or turn repeated logic into a draft block.";
+      copilotStateList.innerHTML = mode === "block"
+        ? "<li>Review the proposed parameters and outputs.</li><li>Confirm source tables, grain, tests, and owner.</li><li>Promote only after human review.</li>"
+        : "<li>Use /ask for a shorter stakeholder answer.</li><li>Use /analyze with more context to rewrite the memo.</li><li>Use /add block when the logic should become reusable.</li>";
+      runResearchButton.textContent = "Refine analysis scope";
+    }
+
+    function openResearch() {
+      canvas.classList.add("report-mode");
+      researchCount.textContent = "1";
+      document.getElementById("topReview").classList.remove("hidden");
+      if (window.location.hash !== "#research-report") {
+        history.replaceState(null, "", "#research-report");
+      }
+      canvas.scrollTo({ top: 0, behavior: "auto" });
+      window.scrollTo({ top: 0, behavior: "auto" });
+    }
+
+    function closeResearch() {
+      canvas.classList.remove("report-mode");
+      if (appScreen.classList.contains("active") && window.location.hash !== "#app-preview") {
+        history.replaceState(null, "", "#app-preview");
+      }
+      canvas.scrollTo({ top: 0, behavior: "auto" });
+    }
+
+    document.getElementById("buildApp").addEventListener("click", showApp);
+    document.getElementById("quickBuild").addEventListener("click", showApp);
+    document.getElementById("backToBuild").addEventListener("click", showBuild);
+    document.getElementById("applyFilters").addEventListener("click", renderDashboard);
+    document.getElementById("topN").addEventListener("change", renderDashboard);
+    document.getElementById("askAboutTile").addEventListener("click", askAi);
+    document.getElementById("askButton").addEventListener("click", askAi);
+    document.getElementById("runResearch").addEventListener("click", () => openContextComposer("research"));
+    document.getElementById("createDraftFromCopilot").addEventListener("click", () => openContextComposer("block"));
+    document.getElementById("createDraftFromReport").addEventListener("click", () => openContextComposer("block", researchContextText.textContent));
+    document.getElementById("closeComposer").addEventListener("click", hideContextComposer);
+    document.getElementById("cancelContext").addEventListener("click", hideContextComposer);
+    document.getElementById("submitContext").addEventListener("click", submitContextAndOpen);
+    askInput.addEventListener("keydown", (event) => {
+      if (event.key === "Enter") {
+        askAi();
+      }
+    });
+    document.getElementById("backToDashboard").addEventListener("click", closeResearch);
+
+    const initialHash = window.location.hash;
+    if (initialHash === "#app-preview" || initialHash === "#research-report") {
+      showApp();
+      if (initialHash === "#research-report") {
+        renderReportFromContext("research", defaultContextFor("research"));
+        openResearch();
+      }
+    } else {
+      history.replaceState(null, "", "#build");
+    }
+
+    renderDashboard();
+  </script>
+</body>
+</html>

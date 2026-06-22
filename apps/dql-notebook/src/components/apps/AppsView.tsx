@@ -3,6 +3,7 @@ import type { CSSProperties, ReactNode } from 'react';
 import {
   ArrowLeft,
   ArrowRight,
+  AlertTriangle,
   BarChart3,
   Blocks,
   BookOpenText,
@@ -17,7 +18,6 @@ import {
   LineChart,
   MapPin,
   MessageSquareText,
-  PieChart,
   Pencil,
   Plus,
   Search,
@@ -27,7 +27,6 @@ import {
   Star,
   Share2,
   Table2,
-  Users,
   Workflow,
 } from 'lucide-react';
 import { useNotebook } from '../../store/NotebookStore';
@@ -37,14 +36,15 @@ import {
   type AppDocumentSummary,
   type DashboardDocumentResponse,
   type DashboardRunResponse,
+  type AppAiBuildSession,
   type GenerateAppResponse,
   type GeneratedAppPlan,
+  type AppAskResponse,
   type LocalAppInvestigation,
 } from '../../api/client';
 import type { AppSummary, AppWorkspaceExperience, AppWorkspaceSection } from '../../store/types';
 import { themes, type ThemeMode } from '../../themes/notebook-theme';
-import { AgentChatPanel } from '../agent/AgentChatPanel';
-import { StructuredAnswerText, type AgentAnswerInvestigationRequest } from '../agent/AgentAnswerCard';
+import { StructuredAnswerText } from '../agent/AgentAnswerCard';
 import { DashboardRenderer } from './DashboardRenderer';
 import { PersonaSwitcher } from './PersonaSwitcher';
 
@@ -53,6 +53,17 @@ type AppExperience = AppWorkspaceExperience;
 type BuilderMode = 'ai' | 'classic';
 type AppSection = AppWorkspaceSection;
 type LibraryFilter = 'all' | 'mine' | 'shared' | 'fav' | 'review';
+type DashboardFilter = NonNullable<DashboardDocumentResponse['dashboard']['filters']>[number];
+type DashboardLayoutItem = DashboardDocumentResponse['dashboard']['layout']['items'][number];
+type AppAskDecision = Extract<AppAskResponse, { ok: true }>['decision'];
+type AppAnalysisHandoff = {
+  mode: 'research' | 'evidence' | 'block';
+  question: string;
+  context: string;
+  decision?: Partial<AppAskDecision> & { reason?: string; nextAction?: string };
+};
+type AppCopilotRoute = 'certified_answer' | 'investigation' | 'app_change_proposal' | 'metadata_answer';
+type AppCopilotBlockTile = { blockId: string; title: string; viz: string; tileId: string };
 
 interface AppResearchSeed {
   question: string;
@@ -164,20 +175,19 @@ export function AppsView(): JSX.Element {
   const [builderMode, setBuilderMode] = useState<BuilderMode>('ai');
   const [builderPrompt, setBuilderPrompt] = useState(DEFAULT_PROMPT);
   const [builderName, setBuilderName] = useState('Business Analytics');
-  const [builderDomain, setBuilderDomain] = useState('Business');
+  const [builderDomain, setBuilderDomain] = useState('');
   const [builderOwner, setBuilderOwner] = useState('analytics');
   const [catalog, setCatalog] = useState<AppBlockRecommendation[]>([]);
   const [catalogLoading, setCatalogLoading] = useState(false);
   const [selectedBlocks, setSelectedBlocks] = useState<Set<string>>(() => new Set());
   const [generated, setGenerated] = useState<GenerateAppResponse | null>(null);
+  const [buildSession, setBuildSession] = useState<AppAiBuildSession | null>(null);
   const [builderError, setBuilderError] = useState<string | null>(null);
   const [builderSaving, setBuilderSaving] = useState(false);
   const [addPageOpen, setAddPageOpen] = useState(false);
   const [addPageTitle, setAddPageTitle] = useState('');
   const [addPageError, setAddPageError] = useState<string | null>(null);
-  const [period, setPeriod] = useState('last_12_months');
-  const [segment, setSegment] = useState('all_customers');
-  const [region, setRegion] = useState('all');
+  const [dashboardFilterValues, setDashboardFilterValues] = useState<Record<string, unknown>>({});
   const [smartView, setSmartView] = useState(false);
   const [explainOpen, setExplainOpen] = useState(false);
 
@@ -243,6 +253,26 @@ export function AppsView(): JSX.Element {
     };
   }, [state.activeAppId, state.activeDashboardId, surface]);
 
+  const dashboardFilterKey = useMemo(
+    () => JSON.stringify(deriveDashboardFilters(dashboardDoc?.dashboard ?? null)),
+    [dashboardDoc?.dashboard],
+  );
+  const dashboardFilters = useMemo(
+    () => deriveDashboardFilters(dashboardDoc?.dashboard ?? null),
+    [dashboardDoc?.dashboard, dashboardFilterKey],
+  );
+
+  useEffect(() => {
+    const filters = dashboardFilters;
+    setDashboardFilterValues((current) => {
+      const next: Record<string, unknown> = {};
+      for (const filter of filters) {
+        next[filter.id] = current[filter.id] ?? defaultDashboardFilterValue(filter);
+      }
+      return shallowEqualRecords(current, next) ? current : next;
+    });
+  }, [dashboardDoc?.dashboard.id, dashboardFilterKey, dashboardFilters]);
+
   const refreshApps = async (
     openAppId?: string | null,
     dashboardId?: string | null,
@@ -301,10 +331,11 @@ export function AppsView(): JSX.Element {
   const startAiBuilder = (prompt = builderPrompt, domain?: string) => {
     setBuilderMode('ai');
     setBuilderPrompt(prompt);
-    if (domain) setBuilderDomain(domain);
+    setBuilderDomain(domain ?? '');
     setSelectedBlocks(new Set());
     setBuilderError(null);
     setGenerated(null);
+    setBuildSession(null);
     setSurface('create');
   };
 
@@ -312,6 +343,7 @@ export function AppsView(): JSX.Element {
     setBuilderMode('classic');
     setBuilderError(null);
     setGenerated(null);
+    setBuildSession(null);
     setSurface('create');
   };
 
@@ -332,22 +364,43 @@ export function AppsView(): JSX.Element {
     }
     setBuilderSaving(true);
     setBuilderError(null);
-    const result = await api.generateApp({
+    const preferredBlockIds = builderMode === 'classic'
+      ? Array.from(selectedBlocks)
+      : Array.from(new Set([
+          ...Array.from(selectedBlocks),
+          ...catalog
+            .filter((block) => block.status === 'certified')
+            .slice(0, 6)
+            .map((block) => block.id),
+        ]));
+    const sessionResult = await api.createAppAiBuild({
       prompt,
       domain: builderDomain.trim() || undefined,
       owner: builderOwner.trim() || undefined,
       force: false,
-      selectedBlockIds: Array.from(selectedBlocks),
+      selectedBlockIds: preferredBlockIds,
       plannerMode: 'ai_assisted',
     });
     setBuilderSaving(false);
-    if (!result.ok) {
-      setBuilderError(result.error);
+    if (!sessionResult.ok) {
+      setBuilderError(sessionResult.error);
+      if (sessionResult.session) setBuildSession(sessionResult.session);
       return;
     }
+    const session = sessionResult.session;
+    setBuildSession(session);
+    const result: GenerateAppResponse = {
+      ok: true,
+      plan: session.plan as GeneratedAppPlan,
+      validation: session.validation as GenerateAppResponse['validation'],
+      generated: { paths: session.generatedPaths },
+      app: state.apps.find((app) => app.id === session.appId) ?? null,
+      dashboardId: session.dashboardId ?? null,
+    };
     setGenerated(result);
     setBuilderName(result.plan.name);
-    await refreshApps(result.app?.id ?? result.plan.appId, result.dashboardId, 'create');
+    setExplainOpen(true);
+    await refreshApps(result.app?.id ?? result.plan.appId, result.dashboardId, 'workspace', { experience: 'view', section: 'dashboards' });
   };
 
   const runClassicCreate = async () => {
@@ -389,34 +442,6 @@ export function AppsView(): JSX.Element {
     setSurface('workspace');
   };
 
-  const updateGeneratedTileViz = useCallback(async (tileId: string, viz: string) => {
-    const appId = generated?.app?.id ?? generated?.plan.appId;
-    const dashboardId = generated?.dashboardId ?? generated?.plan.pages[0]?.id;
-    setGenerated((current) => current ? updateGeneratedPlanTileViz(current, tileId, viz) : current);
-    if (!appId || !dashboardId) return;
-    const dashboard = await api.getDashboard(appId, dashboardId);
-    const layout = dashboard?.dashboard.layout;
-    if (!layout) return;
-    const nextItems = layout.items.map((item) => {
-      if (item.i !== tileId) return item;
-      const options = item.viz.options ?? {};
-      const genUi = asUiRecord(options.dqlGenUi);
-      return {
-        ...item,
-        viz: {
-          ...item.viz,
-          type: viz,
-          options: {
-            ...options,
-            ...(Object.keys(genUi).length ? { dqlGenUi: { ...genUi, defaultVisualization: viz } } : {}),
-          },
-        },
-      };
-    });
-    const result = await api.patchDashboardLayout(appId, dashboardId, { ...layout, items: nextItems });
-    if (!result.ok) setBuilderError(result.error);
-  }, [generated]);
-
   const createDashboardPage = async () => {
     if (!state.activeAppId) return;
     const title = addPageTitle.trim();
@@ -443,11 +468,16 @@ export function AppsView(): JSX.Element {
   };
 
   const dashboardVariables = useMemo(() => ({
-    period,
-    segment,
-    region,
+    ...dashboardFilterValues,
     smartView,
-  }), [period, region, segment, smartView]);
+  }), [dashboardFilterValues, smartView]);
+
+  const handleDashboardFilterChange = useCallback((filter: DashboardFilter, value: unknown) => {
+    setDashboardFilterValues((current) => ({
+      ...current,
+      [filter.id]: coerceDashboardFilterValue(filter, value),
+    }));
+  }, []);
 
   return (
     <div className={`dql-apps-waterline dql-apps-theme-${appTheme}`}>
@@ -486,6 +516,7 @@ export function AppsView(): JSX.Element {
           catalogLoading={catalogLoading}
           selectedBlocks={selectedBlocks}
           generated={generated}
+          buildSession={buildSession}
           saving={builderSaving}
           error={builderError}
           onBack={() => setSurface('library')}
@@ -500,7 +531,6 @@ export function AppsView(): JSX.Element {
           onToggleBlock={toggleSelectedBlock}
           onBuild={() => builderMode === 'ai' ? void runGenerate() : void runClassicCreate()}
           onOpenGenerated={openGeneratedWorkspace}
-          onTileVizChange={(tileId, viz) => void updateGeneratedTileViz(tileId, viz)}
         />
       ) : (
         <AppWorkspaceSurface
@@ -511,18 +541,15 @@ export function AppsView(): JSX.Element {
           experience={experience}
           section={section}
           explainOpen={explainOpen}
-          period={period}
-          segment={segment}
-          region={region}
+          dashboardFilters={dashboardFilters}
+          dashboardFilterValues={dashboardFilterValues}
           smartView={smartView}
           themeMode={state.themeMode}
           variables={dashboardVariables}
           onBack={() => setSurface('library')}
           onExperienceChange={setExperience}
           onSectionChange={setSection}
-          onPeriodChange={setPeriod}
-          onSegmentChange={setSegment}
-          onRegionChange={setRegion}
+          onDashboardFilterChange={handleDashboardFilterChange}
           onSmartViewChange={setSmartView}
           onExplainChange={setExplainOpen}
           onAddPage={() => setAddPageOpen(true)}
@@ -594,29 +621,50 @@ function AppLibrarySurface({
   onOpenApp: (app: AppSummary, experience?: AppExperience) => void;
 }) {
   const counts = libraryCounts(allApps, favorites);
+  const [draftPrompt, setDraftPrompt] = useState(DEFAULT_PROMPT);
+  const submitPrompt = () => {
+    const trimmed = draftPrompt.trim();
+    if (!trimmed) return;
+    onStartAi(trimmed);
+  };
   return (
     <main className="dql-apps-wrap">
       <section className="dql-apps-createhead">
         <h1>Build an app</h1>
-        <p>Create governed analytics apps from certified DQL assets.</p>
+        <p>Start with one stakeholder request. DQL finds certified blocks, app filters, and analysis gaps before opening the generated app view.</p>
       </section>
 
-      <div className="dql-apps-startgrid">
-        <StartOption
-          icon={<Sparkles size={17} strokeWidth={1.9} />}
-          title="Build with AI"
-          description="Let AI draft the app."
-          action="Start"
-          onClick={() => onStartAi(DEFAULT_PROMPT)}
-        />
-        <StartOption
-          icon={<LayoutDashboard size={17} strokeWidth={1.9} />}
-          title="Classic APP"
-          description="Build from certified blocks."
-          action="Open"
-          onClick={onStartClassic}
-        />
-      </div>
+      <section className="dql-apps-ai-entry" aria-label="Build an app with AI">
+        <div className="dql-apps-ai-entry-head">
+          <span><Sparkles size={14} /> AI app builder</span>
+          <b>Certified blocks first</b>
+        </div>
+        <div className="dql-apps-ai-entry-box">
+          <textarea
+            value={draftPrompt}
+            onChange={(event) => setDraftPrompt(event.target.value)}
+            rows={3}
+            aria-label="App build request"
+            placeholder="Build an NBA player performance app for stakeholders..."
+          />
+          <button type="button" onClick={submitPrompt} disabled={!draftPrompt.trim()} title="Review matched context">
+            <Send size={16} /> Continue
+          </button>
+        </div>
+        <div className="dql-apps-ai-entry-foot">
+          <div>
+            {APP_PROMPT_EXAMPLES.slice(0, 3).map((item) => (
+              <button key={item.title} type="button" onClick={() => setDraftPrompt(item.prompt)}>
+                {item.title}
+              </button>
+            ))}
+          </div>
+          <button type="button" className="dql-apps-ai-entry-secondary" onClick={onStartClassic}>
+            <LayoutDashboard size={14} /> Create blank
+            <ArrowRight size={13} />
+          </button>
+        </div>
+      </section>
 
       <div className="dql-apps-sectionhead">
         <span>App library</span>
@@ -659,31 +707,6 @@ function AppLibrarySurface({
   );
 }
 
-function StartOption({
-  icon,
-  title,
-  description,
-  action,
-  onClick,
-}: {
-  icon: ReactNode;
-  title: string;
-  description: string;
-  action: string;
-  onClick: () => void;
-}) {
-  return (
-    <button type="button" className="dql-apps-start-option" onClick={onClick}>
-      <span className="dql-apps-option-icon">{icon}</span>
-      <span className="dql-apps-option-copy">
-        <strong>{title}</strong>
-        <p>{description}</p>
-      </span>
-      <span className="dql-apps-option-meta"><b>{action} <ArrowRight size={13} /></b></span>
-    </button>
-  );
-}
-
 function AppCard({
   app,
   favorite,
@@ -721,7 +744,7 @@ function AppCard({
           {certified ? 'certified' : draftCount > 0 ? 'mixed' : app.lifecycle ?? 'draft'}
         </StatusSeal>
         <h3>{app.name}</h3>
-        <p>{app.description || `${app.name} consumption surface for ${app.domain}.`}</p>
+        <p>{cleanStakeholderCopy(app.description || `${app.name} consumption surface for ${app.domain}.`)}</p>
         <div className="dql-app-card-mini">
           <MiniMetric label="Pages" value={String(app.dashboards.length)} />
           <MiniMetric label="Books" value={String(app.notebooks?.length ?? 0)} />
@@ -729,8 +752,8 @@ function AppCard({
         </div>
         <div className="dql-app-card-signals">
           <span><ShieldCheck size={13} /> {trustLabel}</span>
-          <span><Search size={13} /> {researchCount} research</span>
-          <span><Sparkles size={13} /> {aiPinCount} AI pins</span>
+          <span><Search size={13} /> {researchCount} analysis</span>
+          <span><Sparkles size={13} /> {aiPinCount} local insights</span>
         </div>
       </div>
       <div className="dql-app-card-depth">
@@ -752,6 +775,7 @@ function AppCreateSurface({
   catalogLoading,
   selectedBlocks,
   generated,
+  buildSession,
   saving,
   error,
   onBack,
@@ -763,7 +787,6 @@ function AppCreateSurface({
   onToggleBlock,
   onBuild,
   onOpenGenerated,
-  onTileVizChange,
 }: {
   mode: BuilderMode;
   appName: string;
@@ -775,6 +798,7 @@ function AppCreateSurface({
   catalogLoading: boolean;
   selectedBlocks: Set<string>;
   generated: GenerateAppResponse | null;
+  buildSession: AppAiBuildSession | null;
   saving: boolean;
   error: string | null;
   onBack: () => void;
@@ -786,7 +810,6 @@ function AppCreateSurface({
   onToggleBlock: (blockId: string) => void;
   onBuild: () => void;
   onOpenGenerated: () => void;
-  onTileVizChange: (tileId: string, viz: string) => void;
 }) {
   const selected = catalog.filter((block) => selectedBlocks.has(block.id));
   const contextDomainLabel = domain.trim() || 'Auto domain';
@@ -794,13 +817,8 @@ function AppCreateSurface({
   const plan = generated?.plan ?? planFromSelection(appName, prompt, domain, owner, selected);
   const planTiles = plan.pages[0]?.tiles ?? [];
   const certifiedPlanTiles = planTiles.filter(isCertifiedPlanTile);
-  const reviewPlanTiles = planTiles.filter((tile) => !isCertifiedPlanTile(tile));
-  const validation = generated?.validation ?? {
-    ok: selected.length > 0,
-    certifiedTiles: selected.length,
-    draftTiles: mode === 'ai' ? 2 : 0,
-    issues: [],
-  };
+  const sessionWarnings = buildSession?.warnings ?? [];
+  const scopedReportCount = planScopedReportCount(plan);
   return (
     <div className="dql-app-create-shell">
       <div className="dql-app-buildbar">
@@ -814,7 +832,7 @@ function AppCreateSurface({
         <StatusSeal tone={generated ? 'agentic' : 'draft'}>{generated ? 'generated' : 'draft'}</StatusSeal>
         <div className="dql-app-mode-seg">
           <button type="button" className={mode === 'ai' ? 'on' : ''} onClick={() => onModeChange('ai')}>
-            <Sparkles size={15} /> Ask AI
+            <Sparkles size={15} /> Build AI
           </button>
           <button type="button" className={mode === 'classic' ? 'on' : ''} onClick={() => onModeChange('classic')}>
             <Blocks size={15} /> Classic
@@ -822,140 +840,139 @@ function AppCreateSurface({
         </div>
         <div className="dql-app-build-actions">
           <span className="dql-app-persona"><b>CFO</b> CFO</span>
-          {generated ? <button type="button" className="dql-apps-btn dql-apps-btn-line" onClick={onOpenGenerated}>Preview</button> : null}
+          {generated ? <button type="button" className="dql-apps-btn dql-apps-btn-line" onClick={onOpenGenerated}>Open app</button> : null}
           <button type="button" className="dql-apps-btn dql-apps-btn-primary" onClick={onBuild} disabled={saving}>
-            {saving ? 'Building...' : mode === 'ai' ? 'Send to AI' : 'Create app'}
+            {saving ? 'Building...' : mode === 'ai' ? 'Generate app' : 'Create app'}
           </button>
         </div>
       </div>
 
-      <div className={`dql-app-create-workspace ${mode === 'classic' ? 'classic' : 'ai'}`}>
-        <section className={`dql-app-panel dql-app-agent-panel ${mode === 'ai' ? 'ai-clean' : ''}`}>
-          <PanelHead title={mode === 'ai' ? 'Build with the agent' : 'Palette'} meta={mode === 'ai' ? 'local ledger-grounded' : 'certified blocks'} />
-          {mode === 'ai' ? (
-            <>
-              <div className="dql-app-ai-brief">
-                <span><Sparkles size={15} /> AI App Builder</span>
-                <p>Describe the app outcome. DQL finds certified context and drafts review gaps.</p>
-                {generated ? (
-                  <div className="dql-app-ai-result">
-                    Generated <b>{generated.plan.name}</b> with {generated.validation.certifiedTiles} certified app tile
-                    {generated.validation.certifiedTiles === 1 ? '' : 's'} and {generated.validation.draftTiles} review backlog item
-                    {generated.validation.draftTiles === 1 ? '' : 's'}.
-                  </div>
+      <div className={`dql-app-create-workspace clean ${mode === 'classic' ? 'classic' : 'ai'}`}>
+        <section className="dql-app-ai-start">
+          <div className="dql-app-ai-start-main">
+            <div className="dql-app-ai-start-copy">
+              <h1>Start with one AI input.</h1>
+              <p>DQL finds certified blocks, detects app filters, and opens the generated app in a clean stakeholder view.</p>
+            </div>
+
+            <div className="dql-app-ai-start-card">
+              <textarea
+                value={prompt}
+                onChange={(event) => onPromptChange(event.target.value)}
+                rows={5}
+                aria-label="App request"
+                placeholder="Build an NBA player performance app for stakeholders..."
+              />
+              <button type="button" className="dql-app-ai-start-send" onClick={onBuild} disabled={saving || !prompt.trim()} title="Build app">
+                {saving ? <Workflow size={19} /> : <Send size={19} />}
+              </button>
+            </div>
+
+            <div className="dql-app-suggestions dql-app-ai-start-examples" aria-label="Prompt examples">
+              <span>Examples</span>
+              {promptExamples.slice(0, 4).map((item) => (
+                <button key={item.title} type="button" onClick={() => {
+                  onPromptChange(item.prompt);
+                  onDomainChange(item.domain);
+                }}>
+                  {item.title}
+                </button>
+              ))}
+            </div>
+
+            <details className="dql-app-ai-context dql-app-ai-start-advanced">
+              <summary>
+                <span>Advanced controls</span>
+                <b>{contextDomainLabel} / {contextOwnerLabel}</b>
+                <ChevronDown size={14} />
+              </summary>
+              <div className="dql-app-ai-context-grid">
+                <label>Domain<input value={domain} onChange={(event) => onDomainChange(event.target.value)} /></label>
+                <label>Owner<input value={owner} onChange={(event) => onOwnerChange(event.target.value)} /></label>
+                <label>Build mode
+                  <select value={mode} onChange={(event) => onModeChange(event.target.value as BuilderMode)}>
+                    <option value="ai">AI first</option>
+                    <option value="classic">Manual block selection</option>
+                  </select>
+                </label>
+              </div>
+              {mode === 'classic' ? (
+                <BlockIndex
+                  title="Manual certified block selection"
+                  subtitle={`${selectedBlocks.size} selected`}
+                  catalog={catalog}
+                  loading={catalogLoading}
+                  selectedBlocks={selectedBlocks}
+                  onToggleBlock={onToggleBlock}
+                />
+              ) : null}
+            </details>
+
+            {generated ? (
+              <div className="dql-app-ai-result dql-app-ai-start-result">
+                Generated <b>{generated.plan.name}</b> with {generated.validation.certifiedTiles} certified app tile
+                {generated.validation.certifiedTiles === 1 ? '' : 's'} and {scopedReportCount} scoped report
+                {scopedReportCount === 1 ? '' : 's'}.
+                {buildSession ? <small>Session {buildSession.id}</small> : null}
+              </div>
+            ) : null}
+
+            {error ? <div className="dql-app-error">{error}</div> : null}
+          </div>
+
+          <aside className="dql-app-ai-start-context">
+            <section className="dql-app-ai-context-card">
+              <PanelHead title="Certified blocks found" meta={`${certifiedPlanTiles.length || catalog.length} matches`} />
+              <div className="dql-app-ai-evidence-list">
+                {(certifiedPlanTiles.length ? certifiedPlanTiles : catalog.slice(0, 4)).map((item, index) => (
+                  'name' in item ? (
+                    <div key={`catalog-${item.id}-${index}`} className="dql-app-ai-evidence-row">
+                      <span><ShieldCheck size={14} /></span>
+                      <div><b>{item.name}</b><small>{item.description}</small></div>
+                      <StatusSeal tone={item.status === 'certified' ? 'certified' : 'draft'}>{item.status}</StatusSeal>
+                    </div>
+                  ) : (
+                    <div key={`plan-${item.id}-${index}`} className="dql-app-ai-evidence-row">
+                      <span><ShieldCheck size={14} /></span>
+                      <div><b>{item.title}</b><small>{item.description ?? item.rationale ?? 'Certified DQL block'}</small></div>
+                      <StatusSeal tone="certified">Certified</StatusSeal>
+                    </div>
+                  )
+                ))}
+                {!certifiedPlanTiles.length && !catalog.length ? <EmptyPanel title="No matches yet." detail="Enter a prompt to retrieve certified blocks." compact /> : null}
+              </div>
+            </section>
+
+            <section className="dql-app-ai-context-card">
+              <PanelHead title="Detected app filters" meta="bound to block params" />
+              <div className="dql-app-ai-filter-preview">
+                {(plan.globalFilters?.length ? plan.globalFilters : plan.pages[0]?.filters ?? []).slice(0, 4).map((filter) => (
+                  <span key={filter.id}><small>{filter.label}</small><b>{formatVariableValue(filter.default ?? 'Any')}</b></span>
+                ))}
+                {!(plan.globalFilters?.length || plan.pages[0]?.filters?.length) ? (
+                  <>
+                    <span><small>Domain</small><b>{contextDomainLabel}</b></span>
+                    <span><small>Owner</small><b>{contextOwnerLabel}</b></span>
+                    <span><small>Top N</small><b>Any</b></span>
+                  </>
                 ) : null}
               </div>
-              <div className="dql-app-composer ai-clean">
-                <textarea
-                  value={prompt}
-                  onChange={(event) => onPromptChange(event.target.value)}
-                  rows={4}
-                  aria-label="App request"
-                  placeholder="Ask DQL to build a stakeholder app from certified blocks and business context..."
-                />
-                <div className="dql-app-suggestions" aria-label="Prompt examples">
-                  <span>Examples</span>
-                  {promptExamples.slice(0, 4).map((item) => (
-                    <button key={item.title} type="button" onClick={() => {
-                      onPromptChange(item.prompt);
-                      onDomainChange(item.domain);
-                    }}>
-                      {item.title}
-                    </button>
-                  ))}
-                </div>
-                <details className="dql-app-ai-context">
-                  <summary>
-                    <span>Context</span>
-                    <b>{contextDomainLabel} / {contextOwnerLabel}</b>
-                    <ChevronDown size={14} />
-                  </summary>
-                  <div className="dql-app-ai-context-grid">
-                    <label>Domain<input value={domain} onChange={(event) => onDomainChange(event.target.value)} /></label>
-                    <label>Owner<input value={owner} onChange={(event) => onOwnerChange(event.target.value)} /></label>
-                  </div>
-                </details>
-                <div className="dql-app-ai-send-row">
-                  <span><ShieldCheck size={13} /> Certified context first</span>
-                  <button type="button" className="dql-apps-btn dql-apps-btn-primary" onClick={onBuild} disabled={saving}>
-                    <Send size={13} /> {saving ? 'Building...' : 'Send to AI'}
-                  </button>
-                </div>
+            </section>
+
+            <section className="dql-app-ai-context-card">
+              <PanelHead title="Possible deeper analysis" meta="Copilot asks for context first" />
+              <div className="dql-app-ai-gap-list">
+                {(plan.missingEvidence?.length ? plan.missingEvidence : sessionWarnings).slice(0, 4).map((warning, index) => (
+                  <span key={`${warning}-${index}`}><AlertTriangle size={13} /> {warning}</span>
+                ))}
+                {!plan.missingEvidence?.length && !sessionWarnings.length ? (
+                    <span><AlertTriangle size={13} /> Driver explanations, new grains, and reusable block proposals require typed context before DQL creates SQL.</span>
+                ) : null}
               </div>
-            </>
-          ) : (
-            <BlockIndex
-              title="Certified blocks"
-              subtitle={`${selectedBlocks.size} selected`}
-              catalog={catalog}
-              loading={catalogLoading}
-              selectedBlocks={selectedBlocks}
-              onToggleBlock={onToggleBlock}
-            />
-          )}
+            </section>
+          </aside>
         </section>
 
-        <section className="dql-app-panel dql-app-preview-panel">
-          <PanelHead title={mode === 'ai' ? 'Generated layout' : 'Canvas'} meta={planTiles.length ? `${certifiedPlanTiles.length} certified / ${reviewPlanTiles.length} review` : 'empty'} />
-          <div className="dql-app-preview-scroll">
-            <div className="dql-app-preview-card">
-              <div className="dql-app-preview-head">
-                <h2>{generated?.plan.name ?? appName}</h2>
-                <StatusSeal tone={generated ? 'agentic' : 'draft'}>{generated ? 'ready to refine' : 'ready when you are'}</StatusSeal>
-              </div>
-              <div className="dql-app-preview-filters">
-                <span>Last 12 months <ChevronDown size={12} /></span>
-                <span>All customers <ChevronDown size={12} /></span>
-                <span>All regions <ChevronDown size={12} /></span>
-              </div>
-              <div className="dql-app-preview-grid">
-                {planTiles.length ? (
-                  planTiles.map((tile) => (
-                    <PreviewTile
-                      key={tile.id}
-                      tile={tile}
-                      generated={Boolean(generated)}
-                      onVizChange={(viz) => onTileVizChange(tile.id, viz)}
-                    />
-                  ))
-                ) : (
-                  <div className="dql-app-preview-empty">
-                    <LayoutDashboard size={38} strokeWidth={1.4} />
-                    <div>{mode === 'ai' ? 'Run AI to generate certified and review-needed sections.' : 'Select blocks to compose the app.'}</div>
-                  </div>
-                )}
-              </div>
-              {reviewPlanTiles.length ? <ReviewBacklog tiles={reviewPlanTiles} /> : null}
-            </div>
-          </div>
-        </section>
-
-        <section className="dql-app-panel dql-app-plan-panel">
-          <PanelHead title="Build plan" meta={generated ? generated.plan.appId : 'draft'} />
-          <div className="dql-app-plan-list">
-            {plan.planning ? <PlannerFlow planning={plan.planning} /> : null}
-            {certifiedPlanTiles.length ? <PlanGroupLabel label="Certified app tiles" /> : null}
-            {certifiedPlanTiles.map((tile) => <PlanItem key={tile.id} tile={tile} />)}
-            {reviewPlanTiles.length ? <PlanGroupLabel label="Needs review before adding" /> : null}
-            {reviewPlanTiles.map((tile) => <PlanItem key={tile.id} tile={tile} />)}
-            {planTiles.length === 0 ? <EmptyPanel title="No plan yet." detail="Run the builder to create a plan." compact /> : null}
-          </div>
-          <div className="dql-app-plan-foot">
-            <Leader label="app tiles traced to ledger" value={`${validation.certifiedTiles} / ${certifiedPlanTiles.length}`} />
-            <Leader label="certified" value={String(validation.certifiedTiles)} tone="certified" />
-            <Leader label="review backlog" value={String(validation.draftTiles)} tone="draft" />
-            {error ? <div className="dql-app-error">{error}</div> : null}
-            {generated ? (
-              <button type="button" className="dql-apps-btn dql-apps-btn-dark" onClick={onOpenGenerated}>
-                Open and refine app
-              </button>
-            ) : (
-              <button type="button" className="dql-apps-btn dql-apps-btn-dark" onClick={onBuild} disabled={saving}>
-                {saving ? 'Building...' : mode === 'ai' ? 'Generate plan' : 'Create from selected blocks'}
-              </button>
-            )}
-          </div>
-        </section>
       </div>
     </div>
   );
@@ -969,18 +986,15 @@ function AppWorkspaceSurface({
   experience,
   section,
   explainOpen,
-  period,
-  segment,
-  region,
+  dashboardFilters,
+  dashboardFilterValues,
   smartView,
   themeMode,
   variables,
   onBack,
   onExperienceChange,
   onSectionChange,
-  onPeriodChange,
-  onSegmentChange,
-  onRegionChange,
+  onDashboardFilterChange,
   onSmartViewChange,
   onExplainChange,
   onAddPage,
@@ -996,18 +1010,15 @@ function AppWorkspaceSurface({
   experience: AppExperience;
   section: AppSection;
   explainOpen: boolean;
-  period: string;
-  segment: string;
-  region: string;
+  dashboardFilters: DashboardFilter[];
+  dashboardFilterValues: Record<string, unknown>;
   smartView: boolean;
   themeMode: ThemeMode;
   variables: Record<string, unknown>;
   onBack: () => void;
   onExperienceChange: (experience: AppExperience) => void;
   onSectionChange: (section: AppSection) => void;
-  onPeriodChange: (value: string) => void;
-  onSegmentChange: (value: string) => void;
-  onRegionChange: (value: string) => void;
+  onDashboardFilterChange: (filter: DashboardFilter, value: unknown) => void;
   onSmartViewChange: (value: boolean) => void;
   onExplainChange: (value: boolean) => void;
   onAddPage: () => void;
@@ -1019,17 +1030,18 @@ function AppWorkspaceSurface({
   const certifiedCount = dashboardDoc?.dashboard.layout.items.filter((item) => Boolean(item.block)).length ?? 0;
   const draftCount = appDoc?.drafts?.length ?? 0;
   const dashboardBlockIds = useMemo(() => {
-    return dashboardDoc?.dashboard.layout.items
-      .map((item) => getDashboardItemBlockId(item))
-      .filter((value): value is string => Boolean(value)) ?? [];
+    return getCopilotBlockTiles(dashboardDoc?.dashboard ?? null).map((item) => item.blockId);
   }, [dashboardDoc]);
   const dashboardBlockKey = dashboardBlockIds.join('|');
   const [selectedBlockId, setSelectedBlockId] = useState<string | null>(dashboardBlockIds[0] ?? null);
   const [dashboardRun, setDashboardRun] = useState<DashboardRunResponse | null>(null);
   const [askSeed, setAskSeed] = useState<{ text: string; nonce: number } | null>(null);
   const [researchSeed, setResearchSeed] = useState<AppResearchSeed | null>(null);
+  const [activeInvestigation, setActiveInvestigation] = useState<LocalAppInvestigation | null>(null);
   const [shareStatus, setShareStatus] = useState<'idle' | 'copied' | 'downloaded' | 'ready'>('idle');
   const [shareText, setShareText] = useState('');
+  const [promoteStatus, setPromoteStatus] = useState<'idle' | 'running' | 'done' | 'error'>('idle');
+  const [promoteMessage, setPromoteMessage] = useState('');
   const handleDashboardRunChange = useCallback((run: DashboardRunResponse | null) => {
     setDashboardRun(run);
   }, []);
@@ -1038,11 +1050,24 @@ function AppWorkspaceSurface({
     onSectionChange('research');
     onExplainChange(true);
   }, [onExplainChange, onSectionChange]);
+  const handleActiveInvestigationChange = useCallback((investigation: LocalAppInvestigation | null) => {
+    setActiveInvestigation(investigation);
+  }, []);
+  const handleResearchSeedHandled = useCallback(() => {
+    setResearchSeed(null);
+  }, []);
   const handleAskBlock = useCallback((blockId: string, question: string) => {
     setSelectedBlockId(blockId);
     onExplainChange(true);
     setAskSeed({ text: question, nonce: Date.now() });
   }, [onExplainChange]);
+
+  useEffect(() => {
+    if (experience !== 'view') return;
+    if (section === 'notebooks' || section === 'ai' || section === 'drafts' || section === 'settings') {
+      onSectionChange('dashboards');
+    }
+  }, [experience, section, onSectionChange]);
 
   useEffect(() => {
     if (dashboardBlockIds.length === 0) {
@@ -1055,6 +1080,7 @@ function AppWorkspaceSurface({
   }, [dashboardBlockIds, dashboardBlockKey, selectedBlockId]);
   useEffect(() => {
     setDashboardRun(null);
+    setActiveInvestigation(null);
   }, [app?.id, dashboardDoc?.dashboard.id]);
   const copilotAvailable = Boolean(app && dashboardDoc && (section === 'dashboards' || section === 'research'));
   const copilotVisible = copilotAvailable && explainOpen;
@@ -1100,6 +1126,20 @@ function AppWorkspaceSurface({
     URL.revokeObjectURL(url);
     markAction('downloaded');
   };
+  const promoteApp = async () => {
+    if (!app?.id) return;
+    setPromoteStatus('running');
+    setPromoteMessage('');
+    const result = await api.promoteApp(app.id, { lifecycle: 'review' });
+    if (!result.ok) {
+      setPromoteStatus('error');
+      setPromoteMessage(result.error);
+      return;
+    }
+    setPromoteStatus('done');
+    setPromoteMessage(`${result.paths.length} shared files updated${result.removedLocalTiles ? `, ${result.removedLocalTiles} local AI tile removed` : ''}.`);
+    window.setTimeout(() => setPromoteStatus('idle'), 2400);
+  };
   const onDashboards = section === 'dashboards' && Boolean(dashboardDoc);
   return (
     <div className="dql-app-workspace">
@@ -1112,25 +1152,11 @@ function AppWorkspaceSurface({
         <span className="dql-app-topbar-divider" aria-hidden="true" />
 
         <div className="dql-app-topbar-filters">
-          <FilterSelect icon={<CalendarDays size={13} />} label="Period" value={period} onChange={onPeriodChange} options={[
-            ['last_30_days', 'Last 30 days'],
-            ['last_quarter', 'Last quarter'],
-            ['last_12_months', 'Last 12 months'],
-            ['year_to_date', 'Year to date'],
-          ]} />
-          <FilterSelect icon={<Users size={13} />} label="Segment" value={segment} onChange={onSegmentChange} options={[
-            ['all_customers', 'All customers'],
-            ['new', 'New'],
-            ['returning', 'Returning'],
-            ['enterprise', 'Enterprise'],
-          ]} />
-          <FilterSelect icon={<MapPin size={13} />} label="Region" value={region} onChange={onRegionChange} options={[
-            ['all', 'All'],
-            ['north', 'North'],
-            ['south', 'South'],
-            ['east', 'East'],
-            ['west', 'West'],
-          ]} />
+          <DashboardFilterControls
+            filters={dashboardFilters}
+            values={dashboardFilterValues}
+            onChange={onDashboardFilterChange}
+          />
           <Toggle label="Smart view" checked={smartView} onChange={onSmartViewChange} />
         </div>
 
@@ -1144,6 +1170,11 @@ function AppWorkspaceSurface({
           >
             {experience === 'build' ? <><Check size={14} /> Done</> : <><Pencil size={14} /> Customize</>}
           </button>
+          {experience === 'build' ? (
+            <button type="button" className="dql-apps-btn dql-apps-btn-line" onClick={() => void promoteApp()} disabled={promoteStatus === 'running'}>
+              <ShieldCheck size={14} /> {promoteStatus === 'running' ? 'Promoting' : 'Promote'}
+            </button>
+          ) : null}
           <button type="button" className="dql-apps-btn dql-apps-btn-line dql-apps-btn-icon" title={shareStatus === 'copied' ? 'Copied handoff' : 'Share local app handoff'} onClick={() => void copyShareLink()}>
             {shareStatus === 'copied' ? <Check size={15} /> : <Share2 size={15} />}
           </button>
@@ -1154,6 +1185,11 @@ function AppWorkspaceSurface({
             <div className="dql-app-share-popover">
               <b>Local handoff</b>
               <textarea readOnly value={shareText} onFocus={(event) => event.currentTarget.select()} />
+            </div>
+          ) : null}
+          {promoteStatus === 'done' || promoteStatus === 'error' ? (
+            <div className={`dql-app-promote-popover ${promoteStatus === 'error' ? 'error' : ''}`}>
+              {promoteMessage}
             </div>
           ) : null}
         </div>
@@ -1168,7 +1204,7 @@ function AppWorkspaceSurface({
               {experience === 'build' ? <StatusSeal tone="draft">Customizing</StatusSeal> : null}
             </div>
             <h1>{tidyTitle(onDashboards ? dashboardDoc?.dashboard.metadata.title : app?.name) || 'App'}</h1>
-            <p>{(onDashboards ? dashboardDoc?.dashboard.metadata.description : app?.description) ?? 'Local DQL App'}</p>
+            <p>{cleanStakeholderCopy((onDashboards ? dashboardDoc?.dashboard.metadata.description : app?.description) ?? 'Local DQL App')}</p>
           </div>
           <div className="dql-app-nav-row">
             <AppWorkspaceTabs
@@ -1239,9 +1275,10 @@ function AppWorkspaceSurface({
                 dashboardDoc={dashboardDoc}
                 seed={researchSeed}
                 themeMode={themeMode}
-                onSeedHandled={() => setResearchSeed(null)}
+                onSeedHandled={handleResearchSeedHandled}
                 onDashboardChanged={onDashboardChanged}
                 onInvestigationsChanged={onInvestigationsChanged}
+                onActiveInvestigationChange={handleActiveInvestigationChange}
               />
             ) : section === 'ai' ? (
               <AiPinsPanel appDoc={appDoc} />
@@ -1259,8 +1296,10 @@ function AppWorkspaceSurface({
               appDoc={appDoc}
               dashboardDoc={dashboardDoc}
               dashboardRun={dashboardRun}
+              variables={variables}
               selectedBlockId={selectedBlockId}
               askSeed={askSeed}
+              activeInvestigation={section === 'research' ? activeInvestigation : null}
               themeMode={themeMode}
               onSelectBlock={setSelectedBlockId}
               onStartResearch={handleStartResearch}
@@ -1316,10 +1355,10 @@ function BlockIndex({
       </label>
       {loading ? <EmptyPanel title="Loading blocks..." detail="Finding certified blocks for this domain." compact /> : null}
       {!loading && blocks.length === 0 ? <EmptyPanel title="No blocks found." detail="Try another domain or search term." compact /> : null}
-      {blocks.slice(0, 24).map((block) => {
+      {blocks.slice(0, 24).map((block, index) => {
         const selected = selectedBlocks.has(block.id);
         return (
-          <button key={block.id} type="button" className={selected ? 'selected' : ''} onClick={() => onToggleBlock(block.id)}>
+          <button key={`${block.id}-${index}`} type="button" className={selected ? 'selected' : ''} onClick={() => onToggleBlock(block.id)}>
             <span className="dql-app-palette-icon"><LineChart size={14} /></span>
             <span>
               <b>{block.name}</b>
@@ -1345,22 +1384,29 @@ function AppWorkspaceTabs({
   experience: AppExperience;
   onChange: (section: AppSection) => void;
 }) {
-  const tabs: Array<{ id: AppSection; label: string; count?: number; icon: ReactNode }> = [
-    { id: 'dashboards', label: 'Dashboards', count: appDoc?.dashboards.length ?? 0, icon: <LayoutDashboard size={14} /> },
-    { id: 'notebooks', label: 'Notebooks', count: appDoc?.notebooks?.length ?? appDoc?.app.notebooks?.length ?? 0, icon: <BookOpenText size={14} /> },
-    { id: 'research', label: 'Research', count: appDoc?.investigations?.length ?? 0, icon: <Search size={14} /> },
-    { id: 'ai', label: 'AI', count: appDoc?.aiPins?.length ?? 0, icon: <Bot size={14} /> },
-    ...(experience === 'build' ? [
-      { id: 'drafts' as const, label: 'Drafts', count: appDoc?.drafts?.length ?? 0, icon: <FileText size={14} /> },
-      { id: 'settings' as const, label: 'Settings', icon: <Workflow size={14} /> },
-    ] : []),
-  ];
+  const reportCount = appDoc?.investigations?.length ?? 0;
+  const tabs: Array<{ id: AppSection; label: string; count?: number; icon: ReactNode }> = experience === 'view'
+    ? [
+      { id: 'dashboards', label: 'App', count: appDoc?.dashboards.length ?? 0, icon: <LayoutDashboard size={14} /> },
+      ...(reportCount > 0 || section === 'research' ? [
+        { id: 'research' as const, label: 'Analysis', count: reportCount, icon: <Search size={14} /> },
+      ] : []),
+    ]
+    : [
+      { id: 'dashboards', label: 'App', count: appDoc?.dashboards.length ?? 0, icon: <LayoutDashboard size={14} /> },
+      { id: 'research', label: 'Analysis', count: reportCount, icon: <Search size={14} /> },
+      { id: 'notebooks', label: 'Notebooks', count: appDoc?.notebooks?.length ?? appDoc?.app.notebooks?.length ?? 0, icon: <BookOpenText size={14} /> },
+      { id: 'ai', label: 'Pins', count: appDoc?.aiPins?.length ?? 0, icon: <Bot size={14} /> },
+      { id: 'drafts', label: 'Drafts', count: appDoc?.drafts?.length ?? 0, icon: <FileText size={14} /> },
+      { id: 'settings', label: 'Settings', icon: <Workflow size={14} /> },
+    ];
   return (
     <nav className="dql-app-section-tabs" aria-label="App sections">
       {tabs.map((tab) => (
         <button
           key={tab.id}
           className={section === tab.id ? 'on' : ''}
+          data-app-section={tab.id}
           onClick={() => onChange(tab.id)}
           title={tab.label}
           aria-label={`${tab.label}${tab.count !== undefined ? ` ${tab.count}` : ''}`}
@@ -1416,8 +1462,10 @@ function AppCopilotPanel({
   appDoc,
   dashboardDoc,
   dashboardRun,
+  variables,
   selectedBlockId,
   askSeed,
+  activeInvestigation,
   themeMode,
   onSelectBlock,
   onStartResearch,
@@ -1426,32 +1474,39 @@ function AppCopilotPanel({
   appDoc: AppDocumentSummary | null;
   dashboardDoc: DashboardDocumentResponse | null;
   dashboardRun: DashboardRunResponse | null;
+  variables: Record<string, unknown>;
   selectedBlockId: string | null;
   askSeed?: { text: string; nonce: number } | null;
+  activeInvestigation?: LocalAppInvestigation | null;
   themeMode: ThemeMode;
   onSelectBlock: (blockId: string | null) => void;
   onStartResearch: (seed: Omit<AppResearchSeed, 'nonce'>) => void;
 }) {
   const [evidenceOpen, setEvidenceOpen] = useState(false);
+  const [directQuestion, setDirectQuestion] = useState('');
+  const [directBusy, setDirectBusy] = useState(false);
+  const [directAnswer, setDirectAnswer] = useState<Awaited<ReturnType<typeof api.askApp>> | null>(null);
+  const [directError, setDirectError] = useState<string | null>(null);
+  const [submittedQuestion, setSubmittedQuestion] = useState('');
+  const [pendingAction, setPendingAction] = useState<{
+    mode: 'research' | 'evidence' | 'block';
+    question: string;
+    title: string;
+    submitLabel: string;
+    help: string;
+  } | null>(null);
+  const [analysisHandoff, setAnalysisHandoff] = useState<AppAnalysisHandoff | null>(null);
+  const [contextDraft, setContextDraft] = useState('');
+  const [contextError, setContextError] = useState<string | null>(null);
+  const answerTheme = themes[themeMode];
   const blockTiles = useMemo(() => {
-    return dashboardDoc?.dashboard.layout.items
-      .map((item) => {
-        const blockId = getDashboardItemBlockId(item);
-        if (!blockId) return null;
-        return {
-          blockId,
-          title: item.title ?? blockId,
-          viz: item.viz.type,
-          tileId: item.i,
-        };
-      })
-      .filter((item): item is { blockId: string; title: string; viz: string; tileId: string } => Boolean(item)) ?? [];
-  }, [dashboardDoc]);
+    return getCopilotBlockTiles(dashboardDoc?.dashboard ?? null, dashboardRun);
+  }, [dashboardDoc, dashboardRun]);
   const selectedBlock = blockTiles.find((item) => item.blockId === selectedBlockId) ?? blockTiles[0] ?? null;
-  const tileRunFor = (block: { blockId: string; tileId: string } | null | undefined) => block
+  const tileRunFor = (block: Pick<AppCopilotBlockTile, 'blockId' | 'tileId'> | null | undefined) => block
     ? dashboardRun?.tiles.find((tile) => tile.tileId === block.tileId || tile.blockId === block.blockId)
     : null;
-  const contextForBlock = (block: { blockId: string; title: string; viz: string; tileId: string } | null) => {
+  const contextForBlock = (block: AppCopilotBlockTile | null) => {
     if (!block) return null;
     const tileRun = tileRunFor(block);
     return {
@@ -1466,6 +1521,9 @@ function AppCopilotPanel({
   };
   const selectedTileRun = tileRunFor(selectedBlock);
   const selectedBlockContext = contextForBlock(selectedBlock);
+  const activeAnalysisHandoff = useMemo(() => (
+    activeInvestigation ? appAnalysisHandoffFromInvestigation(activeInvestigation) : null
+  ), [activeInvestigation]);
 
   const dashboardMeta = dashboardDoc?.dashboard.metadata;
   const domainLabel = formatBusinessLabel(app?.domain ?? dashboardMeta?.domain ?? 'Business');
@@ -1491,8 +1549,8 @@ function AppCopilotPanel({
           ? 'Waiting for result'
           : 'Ready to ask';
   const focusDetail = selectedBlock
-    ? 'The selected tile is context only. New questions still search the full app and metadata.'
-    : 'Ask across the dashboard. The copilot will answer in business language first, then expose evidence when you need the trace.';
+    ? 'The selected tile grounds the answer. Deeper analysis still needs typed business context before SQL is created.'
+    : 'Ask across the dashboard. The copilot answers in business language first and keeps source trace in the appendix.';
   const businessFacts = [
     { label: 'Audience', value: audience },
     { label: 'Owner', value: owner },
@@ -1502,6 +1560,10 @@ function AppCopilotPanel({
   const focusMetric = typeof selectedRows === 'number'
     ? `${selectedRows.toLocaleString()} rows${selectedColumns ? ` / ${selectedColumns} fields` : ''}`
     : focusStatus;
+  const activeFilters = useMemo(() => Object.entries(variables ?? {})
+    .filter(([key]) => key !== 'smartView')
+    .map(([key, value]) => `${formatBusinessLabel(key)}: ${formatVariableEntryValue(key, value)}`), [variables]);
+  const activeFilterSummary = activeFilters.length ? activeFilters.join(', ') : 'No dashboard filters set';
 
   const availableBlockContext = blockTiles.map((block) => ({
     blockId: block.blockId,
@@ -1520,7 +1582,7 @@ function AppCopilotPanel({
     responseStyle: {
       audience: 'CXO and business stakeholder',
       firstResponse: 'Start with a plain-language business answer and recommended action.',
-      evidenceRule: 'Keep block ids, SQL, lineage, and implementation details in evidence sections unless the user asks for them.',
+      evidenceRule: 'Keep block ids, SQL, lineage, and implementation details in proof sections unless the user asks for them.',
     },
     appId: app?.id,
     appName: app?.name,
@@ -1532,76 +1594,245 @@ function AppCopilotPanel({
     audience,
     owner,
     reviewCadence: cadence,
+    activeFilters: variables,
     focusBlock: blockContext,
     availableBlocks: availableBlockContext,
   });
-  const contextPayload = buildContextPayload();
-  const contextJson = JSON.stringify(contextPayload, null, 2);
-  const startInvestigationFromAnswer = (request: AgentAnswerInvestigationRequest) => {
-    const question = request.question.trim() || 'Investigate this answer';
-    const answerBlock = blockForInvestigationRequest(blockTiles, request);
-    const researchBlock = answerBlock ?? (request.blockName ? selectedBlock : null);
-    const researchBlockContext = contextForBlock(researchBlock);
-    const researchContextPayload = buildContextPayload(researchBlockContext);
-    onStartResearch({
+  const parseCopilotCommand = (value: string): { mode: 'ask' | 'research' | 'evidence' | 'block'; context: string } => {
+    const trimmed = value.trim();
+    const commands: Array<{ mode: 'ask' | 'research' | 'evidence' | 'block'; pattern: RegExp }> = [
+      { mode: 'research', pattern: /^\/research\b/i },
+      { mode: 'research', pattern: /^\/report\b/i },
+      { mode: 'research', pattern: /^\/analy[sz]e\b/i },
+      { mode: 'research', pattern: /^\/analysis\b/i },
+      { mode: 'evidence', pattern: /^\/validate\b/i },
+      { mode: 'evidence', pattern: /^\/verify\b/i },
+      { mode: 'evidence', pattern: /^\/evidence\b/i },
+      { mode: 'evidence', pattern: /^\/proof\b/i },
+      { mode: 'block', pattern: /^\/add\s+block\b/i },
+      { mode: 'block', pattern: /^\/create\s+block\b/i },
+      { mode: 'block', pattern: /^\/draft\s+block\b/i },
+      { mode: 'block', pattern: /^\/block\b/i },
+      { mode: 'ask', pattern: /^\/ask\b/i },
+    ];
+
+    for (const command of commands) {
+      if (command.pattern.test(trimmed)) {
+        return { mode: command.mode, context: trimmed.replace(command.pattern, '').trim() };
+      }
+    }
+
+    return { mode: 'ask', context: trimmed };
+  };
+  const defaultContextForAction = (mode: 'research' | 'evidence' | 'block', question: string): string => {
+    if (mode === 'block') {
+      return `Reusable block goal: ${question}
+Parameters or filters:
+Output grain:
+Business use:`;
+    }
+    if (mode === 'evidence') {
+      return `Proof question: ${question}
+Claim or number to validate:
+Accepted filters:
+Decision that depends on this proof:`;
+    }
+    return `Analysis goal: ${question}
+Comparison or segment:
+Timeframe:
+Decision this should support:`;
+  };
+  const actionComposerConfig = (mode: 'research' | 'evidence' | 'block') => ({
+    research: {
+      title: 'Add analysis context',
+      submitLabel: 'Create memo',
+      help: 'Add the comparison, segment, timeframe, or decision context. DQL opens a main-canvas analyst memo with numbers and narrative, with SQL and trace details kept in the appendix.',
+    },
+    evidence: {
+      title: 'Add proof context',
+      submitLabel: 'Create proof brief',
+      help: 'Name the claim, number, filter, or source you want checked. The answer stays narrative-first, with SQL and trace details kept in the appendix.',
+    },
+    block: {
+      title: 'Describe reusable logic',
+      submitLabel: 'Create logic brief',
+      help: 'Describe the reusable business question, dynamic filters, output grain, and why this should become a DQL block.',
+    },
+  }[mode]);
+  const openContextComposer = (
+    mode: 'research' | 'evidence' | 'block',
+    questionOverride?: string,
+    options?: { preserveAnswer?: boolean },
+  ) => {
+    const question = (questionOverride ?? directQuestion).trim()
+      || (directAnswer?.ok ? directAnswer.followUps[0] : '')
+      || 'Investigate this app result';
+    if (!options?.preserveAnswer) {
+      setDirectAnswer(null);
+      setAnalysisHandoff(null);
+      setDirectError(null);
+      setSubmittedQuestion('');
+    }
+    const config = actionComposerConfig(mode);
+    setPendingAction({ mode, question, ...config });
+    setContextDraft(defaultContextForAction(mode, question));
+    setContextError(null);
+  };
+  const closeContextComposer = () => {
+    setPendingAction(null);
+    setContextError(null);
+  };
+  const askAppDirect = async (questionOverride?: string) => {
+    const rawQuestion = (questionOverride ?? directQuestion).trim();
+    if (!rawQuestion || !app?.id) return;
+    const command = parseCopilotCommand(rawQuestion);
+    if (command.mode !== 'ask') {
+      openContextComposer(command.mode, command.context || rawQuestion);
+      return;
+    }
+    const question = command.context || rawQuestion;
+    setDirectBusy(true);
+    setDirectError(null);
+    setAnalysisHandoff(null);
+    setSubmittedQuestion(question);
+    const response = await api.askApp(app.id, {
       question,
-      title: researchBlock ? `${researchBlock.title}: ${question}` : request.title ?? question,
       dashboardId: dashboardDoc?.dashboard.id,
-      sourceTileId: researchBlock?.tileId,
-      sourceBlockId: request.blockName ?? researchBlock?.blockId,
+      tileId: selectedBlock?.tileId,
+      blockId: selectedBlock?.blockId,
+      context: buildContextPayload(selectedBlockContext),
+      variables,
+      runInvestigation: false,
+    });
+    setDirectBusy(false);
+    setDirectAnswer(response);
+    setPendingAction(null);
+    if (!response.ok) {
+      setDirectError(response.error);
+      return;
+    }
+    if (response.route === 'investigation') {
+      const config = actionComposerConfig('research');
+      setPendingAction({ mode: 'research', question, ...config });
+      setContextDraft(defaultContextForAction('research', question));
+      setContextError(null);
+    }
+  };
+  useEffect(() => {
+    if (!askSeed?.text) return;
+    setDirectQuestion(askSeed.text);
+    void askAppDirect(askSeed.text);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [askSeed?.nonce]);
+  const submitContextualAction = () => {
+    if (!pendingAction) return;
+    const userContext = contextDraft.trim();
+    if (!userContext) {
+      setContextError('Add the question or analysis context first.');
+      return;
+    }
+    const researchBlockContext = selectedBlockContext;
+    const researchContextPayload = buildContextPayload(researchBlockContext);
+    const modeIntent = pendingAction.mode === 'evidence' ? 'trust_gap_review' : researchIntentFromPrompt(userContext);
+    onStartResearch({
+      question: pendingAction.question,
+      title: reportTitleForAction(pendingAction.mode, pendingAction.question),
+      dashboardId: dashboardDoc?.dashboard.id,
+      sourceTileId: selectedBlock?.tileId,
+      sourceBlockId: selectedBlock?.blockId,
       context: {
         ...researchContextPayload,
-        originatingAnswer: {
-          question,
-          summary: request.answerSummary,
-          blockName: request.blockName,
-          hasSql: Boolean(request.sql),
-          evidence: request.evidence,
-        },
+        actionMode: pendingAction.mode,
+        userProvidedContext: userContext,
+        activeFilterSummary,
+        originatingAnswer: directAnswer?.ok ? {
+          route: directAnswer.route,
+          answer: directAnswer.answer,
+          followUps: directAnswer.followUps,
+          citations: directAnswer.citations,
+          decision: directAnswer.decision,
+        } : undefined,
+        routeDecision: directAnswer?.ok ? directAnswer.decision : undefined,
       },
-      intent: researchIntentFromPrompt(question),
-      generatedSql: request.sql,
+      intent: modeIntent,
     });
+    setAnalysisHandoff({
+      mode: pendingAction.mode,
+      question: pendingAction.question,
+      context: userContext,
+      decision: directAnswer?.ok ? directAnswer.decision : undefined,
+    });
+    setSubmittedQuestion(pendingAction.question);
+    setDirectAnswer(null);
+    closeContextComposer();
   };
   const promptStarters = [
     {
-      label: 'Explain impact',
+      label: 'Explain',
+      mode: 'ask' as const,
       icon: <MessageSquareText size={14} />,
       prompt: selectedBlock
-        ? `Explain ${selectedBlock.title} for an executive audience. Start with the business meaning, decision relevance, and recommended action. Keep technical evidence secondary.`
-        : 'Explain this dashboard for an executive audience. Start with the business story, decision impact, and recommended action. Keep technical evidence secondary.',
+        ? `/ask Explain ${selectedBlock.title} for an executive audience. Start with the business meaning, decision relevance, and recommended action.`
+        : '/ask Explain this dashboard for an executive audience. Start with the business story, decision impact, and recommended action.',
     },
     {
-      label: 'Drill into drivers',
+      label: 'Investigate',
+      mode: 'research' as const,
       icon: <LineChart size={14} />,
       prompt: selectedBlock
-        ? `Drill into the main drivers behind ${selectedBlock.title}. Use the current result sample and return the clearest business breakdown before any technical details.`
-        : 'Drill into the main drivers behind this dashboard. Use current result samples and return the clearest business breakdown before any technical details.',
+        ? `Drill into the main drivers behind ${selectedBlock.title}. Use current app filters and compare the top contributing fields.`
+        : 'Drill into the main drivers behind this dashboard. Use current filters and compare the top contributing fields.',
     },
     {
-      label: 'Improve story',
-      icon: <Sparkles size={14} />,
-      prompt: selectedBlock
-        ? `Suggest how to make ${selectedBlock.title} easier for leadership to read, decide from, and trust.`
-        : 'Suggest how to make this dashboard easier for leadership to read, decide from, and trust.',
-    },
-    {
-      label: 'Find trust gaps',
+      label: 'Create block draft',
+      mode: 'block' as const,
       icon: <ShieldCheck size={14} />,
       prompt: selectedBlock
-        ? `What business context, data quality, certification, or review gaps should we fix before leaders rely on ${selectedBlock.title}?`
-        : 'What business context, data quality, certification, or review gaps should we fix before leaders rely on this app?',
+        ? `Turn ${selectedBlock.title} into a reusable parameterized DQL block if the analysis validates the logic.`
+        : 'Create a reusable parameterized DQL block from the reviewed app analysis.',
     },
   ];
+  const answerFollowUps = directAnswer?.ok
+    ? (directAnswer.route === 'investigation' || directAnswer.route === 'app_change_proposal'
+      ? ['Add analysis context', 'Check proof', 'Create block draft']
+      : directAnswer.followUps.slice(0, 3))
+    : [];
+  const handleAnswerFollowUp = (followUp: string) => {
+    if (!directAnswer?.ok) return;
+    if (directAnswer.route === 'certified_answer' || directAnswer.route === 'metadata_answer') {
+      setDirectQuestion(followUp);
+      void askAppDirect(followUp);
+      return;
+    }
+    const mode = /validate|proof|evidence/i.test(followUp)
+      ? 'evidence'
+      : /draft|block|logic/i.test(followUp)
+        ? 'block'
+        : 'research';
+    openContextComposer(mode, followUp, { preserveAnswer: true });
+  };
+  const visibleAnalysisHandoff = analysisHandoff ?? activeAnalysisHandoff;
   return (
     <aside className="dql-app-explain-panel dql-app-assistant-panel">
       <div className="dql-app-assistant-top">
-        <div className="dql-app-assistant-icon"><Bot size={15} /></div>
-        <div className="dql-app-assistant-heading">
-          <span className="dql-app-assistant-kicker">AI assistant</span>
-          <h3 title={focusTitle}>{focusTitle}</h3>
+        <div className="dql-app-assistant-title-row">
+          <div className="dql-app-assistant-icon"><Bot size={15} /></div>
+          <div className="dql-app-assistant-heading">
+            <span className="dql-app-assistant-kicker">App Copilot</span>
+            <h3 title={app?.name ?? dashboardMeta?.title ?? focusTitle}>{formatBusinessLabel(app?.name ?? dashboardMeta?.title ?? 'App workspace')}</h3>
+          </div>
+          <button
+            type="button"
+            className={`dql-app-assistant-context-btn ${evidenceOpen ? 'on' : ''}`}
+            onClick={() => setEvidenceOpen((value) => !value)}
+            title="Show app grounding context"
+          >
+            Context
+            <ChevronDown size={13} />
+          </button>
         </div>
-        <div className="dql-app-assistant-focus">
+        <label className="dql-app-assistant-focus">
+          <span>Focus</span>
           <select
             value={selectedBlock?.blockId ?? ''}
             onChange={(event) => onSelectBlock(event.target.value || null)}
@@ -1614,16 +1845,7 @@ function AppCopilotPanel({
               </option>
             ))}
           </select>
-        </div>
-        <button
-          type="button"
-          className={`dql-app-assistant-context-btn ${evidenceOpen ? 'on' : ''}`}
-          onClick={() => setEvidenceOpen((value) => !value)}
-          title="Show business context"
-        >
-          Context
-          <ChevronDown size={13} />
-        </button>
+        </label>
       </div>
 
       {evidenceOpen ? (
@@ -1633,29 +1855,157 @@ function AppCopilotPanel({
           <div>
             {businessFacts.map((item) => <KeyValueInline key={item.label} label={item.label} value={item.value} />)}
             <KeyValueInline label="Result" value={focusMetric} />
-            <KeyValueInline label="Evidence" value={focusDetail} />
+            <KeyValueInline label="Trace rule" value={focusDetail} />
             <KeyValueInline label="Drafts" value={String(draftCount)} />
           </div>
         </div>
       ) : null}
 
-      <div className="dql-app-assistant-chat">
-        <AgentChatPanel
-          title={selectedBlock ? selectedBlock.title : 'Ask the app copilot'}
-          scopeHint="Business answer first"
-          upstreamContext={contextJson}
-          themeMode={themeMode}
-          suggestions={promptStarters}
-          autoAsk={askSeed ?? undefined}
-          emptyHint="Ask a question or request deeper research from the current context."
-          inputPlaceholder="Ask a business question..."
-          onInvestigate={startInvestigationFromAnswer}
-          variant="executive"
-          embedded
-          showHeader={false}
-          addToAppTarget={app && dashboardDoc ? { appId: app.id, dashboardId: dashboardDoc.dashboard.id } : undefined}
-          conversationTarget={app && dashboardDoc ? { appId: app.id, dashboardId: dashboardDoc.dashboard.id } : undefined}
-        />
+      <div className={`dql-app-one-ai-panel ${pendingAction ? 'is-framing' : ''}`}>
+        <div className="dql-app-one-ai-status">
+          <span><ShieldCheck size={13} /> Context</span>
+          <div>
+            <b>{activeFilterSummary}</b>
+            <b>{selectedBlock?.title ?? 'Whole dashboard'}</b>
+            <b>{focusMetric}</b>
+          </div>
+        </div>
+
+        <div className="dql-app-copilot-thread">
+          {!directAnswer && !visibleAnalysisHandoff && !pendingAction ? (
+            <div className="dql-app-copilot-welcome">
+              <span>Ask in plain language</span>
+              <p>Short follow-ups answer here. Driver, comparison, validation, and reusable-logic questions ask for your scope first, then open a full memo in the main canvas.</p>
+            </div>
+          ) : null}
+
+          {submittedQuestion && !pendingAction ? (
+            <div className="dql-app-user-message">
+              <span>You</span>
+              <p>{submittedQuestion}</p>
+            </div>
+          ) : null}
+
+          {directAnswer?.ok && !pendingAction ? (
+            <div className="dql-app-direct-answer">
+              <div>
+                <StatusSeal tone={directAnswer.trustState === 'certified' ? 'certified' : 'draft'}>{formatCopilotRouteLabel(directAnswer.route)}</StatusSeal>
+                <span>{formatBusinessLabel(directAnswer.reviewStatus)}</span>
+              </div>
+              <StructuredAnswerText text={directAnswer.answer} t={answerTheme} compact />
+              {answerFollowUps.length ? (
+                <div className="dql-app-direct-followups">
+                  {answerFollowUps.map((followUp) => (
+                    <button key={followUp} type="button" onClick={() => handleAnswerFollowUp(followUp)}>
+                      {followUp}
+                    </button>
+                  ))}
+                </div>
+              ) : null}
+              {directAnswer.route === 'investigation' || directAnswer.route === 'app_change_proposal' ? (
+                <div className="dql-app-copilot-next-step">
+                  <span>{directAnswer.decision.mode === 'app_change' ? 'App change proposal' : 'Add context first'}</span>
+                  <p>{directAnswer.decision.reason} {directAnswer.decision.nextAction}</p>
+                  <button type="button" className="dql-apps-btn dql-apps-btn-primary" onClick={() => openContextComposer(directAnswer.decision.mode === 'app_change' ? 'evidence' : 'research', undefined, { preserveAnswer: true })}>
+                    <Search size={13} /> {directAnswer.decision.mode === 'app_change' ? 'Check change' : 'Add context'}
+                  </button>
+                  {directAnswer.decision.mode !== 'app_change' ? (
+                    <button type="button" className="dql-apps-btn dql-apps-btn-line" onClick={() => openContextComposer('block', undefined, { preserveAnswer: true })}>
+                      <FileText size={13} /> Create block draft
+                    </button>
+                  ) : null}
+                </div>
+              ) : null}
+            </div>
+          ) : null}
+
+          {visibleAnalysisHandoff && !pendingAction ? (
+            <div className="dql-app-analysis-handoff">
+              <span>{visibleAnalysisHandoff.mode === 'block' ? 'Logic brief opened' : visibleAnalysisHandoff.mode === 'evidence' ? 'Proof brief opened' : 'Analysis memo opened'}</span>
+              <p>{visibleAnalysisHandoff.decision?.reason ?? 'The main canvas is using the typed context, active filters, certified result, and proof boundary for this analysis.'}</p>
+              <small>{visibleAnalysisHandoff.decision?.nextAction ?? 'Review the main-canvas memo, then pin the insight or create a draft block only after validation.'}</small>
+              <div>
+                <button type="button" className="dql-apps-btn dql-apps-btn-line" onClick={() => {
+                  openContextComposer(visibleAnalysisHandoff.mode, visibleAnalysisHandoff.question);
+                  setContextDraft(visibleAnalysisHandoff.context);
+                }}>
+                  Refine context
+                </button>
+                {visibleAnalysisHandoff.mode !== 'block' ? (
+                  <button type="button" className="dql-apps-btn dql-apps-btn-line" onClick={() => openContextComposer('block', visibleAnalysisHandoff.question)}>
+                    Create block draft
+                  </button>
+                ) : null}
+              </div>
+            </div>
+          ) : null}
+
+          {pendingAction ? (
+            <div className="dql-app-context-composer">
+              <div className="dql-app-context-composer-head">
+                <StatusSeal tone="agentic">{formatActionBriefLabel(pendingAction.mode)}</StatusSeal>
+                <button type="button" className="dql-apps-btn dql-apps-btn-line" onClick={closeContextComposer}>Close</button>
+              </div>
+              <h4>{pendingAction.title}</h4>
+              <p>{pendingAction.help}</p>
+              <textarea
+                value={contextDraft}
+                onChange={(event) => {
+                  setContextDraft(event.target.value);
+                  if (contextError) setContextError(null);
+                }}
+                rows={7}
+                aria-label={`${formatActionBriefLabel(pendingAction.mode)} context`}
+              />
+              <div className="dql-app-context-chips">
+                <span>{activeFilterSummary}</span>
+                <span>{selectedBlock?.title ?? 'Whole dashboard'}</span>
+                <span>{focusMetric}</span>
+              </div>
+              {contextError ? <div className="dql-app-error">{contextError}</div> : null}
+              <div className="dql-app-context-actions">
+                <button type="button" className="dql-apps-btn dql-apps-btn-line" onClick={closeContextComposer}>Cancel</button>
+                <button type="button" className="dql-apps-btn dql-apps-btn-primary" onClick={submitContextualAction}>
+                  {pendingAction.submitLabel}
+                </button>
+              </div>
+            </div>
+          ) : null}
+        </div>
+
+        <div className="dql-app-direct-ask">
+          <div className="dql-app-direct-ask-row">
+            <textarea
+              value={directQuestion}
+              onChange={(event) => setDirectQuestion(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key === 'Enter' && !event.shiftKey) {
+                  event.preventDefault();
+                  void askAppDirect();
+                }
+              }}
+              rows={2}
+              placeholder="Ask a follow-up. Use /ask for a short answer, /research for an analyst memo, or /block for reusable logic..."
+            />
+            <button type="button" onClick={() => void askAppDirect()} disabled={directBusy || !directQuestion.trim()}>
+              <Send size={13} /> {directBusy ? 'Asking' : 'Ask'}
+            </button>
+          </div>
+          <div className="dql-app-direct-quick">
+            {promptStarters.map((starter) => (
+              <button key={starter.label} type="button" onClick={() => {
+                if (starter.mode === 'ask') {
+                  setDirectQuestion(starter.prompt);
+                  return;
+                }
+                openContextComposer(starter.mode, starter.prompt);
+              }}>
+                {starter.icon}{starter.label}
+              </button>
+            ))}
+          </div>
+          {directError ? <div className="dql-app-error">{directError}</div> : null}
+        </div>
       </div>
     </aside>
   );
@@ -1669,6 +2019,7 @@ function ResearchPanel({
   onSeedHandled,
   onDashboardChanged,
   onInvestigationsChanged,
+  onActiveInvestigationChange,
 }: {
   appDoc: AppDocumentSummary | null;
   dashboardDoc: DashboardDocumentResponse | null;
@@ -1677,6 +2028,7 @@ function ResearchPanel({
   onSeedHandled: () => void;
   onDashboardChanged: (dashboard: DashboardDocumentResponse['dashboard']) => void;
   onInvestigationsChanged: (investigations: LocalAppInvestigation[]) => void;
+  onActiveInvestigationChange: (investigation: LocalAppInvestigation | null) => void;
 }) {
   const appId = appDoc?.app.id;
   const activeDashboardId = dashboardDoc?.dashboard.id;
@@ -1688,6 +2040,9 @@ function ResearchPanel({
   const [error, setError] = useState<string | null>(null);
   const [evidenceTab, setEvidenceTab] = useState<'preview' | 'sql' | 'assumptions' | 'context'>('preview');
   const [sqlDraft, setSqlDraft] = useState('');
+  const [showResearchHistory, setShowResearchHistory] = useState(false);
+  const [reportNavigatorOpen, setReportNavigatorOpen] = useState(false);
+  const [pendingAnalysisTitle, setPendingAnalysisTitle] = useState<string | null>(null);
 
   useEffect(() => {
     if (!appId) {
@@ -1699,16 +2054,21 @@ function ResearchPanel({
     setLoading(true);
     void api.listAppInvestigations(appId).then((investigations) => {
       if (cancelled) return;
+      setError(null);
       setItems(investigations);
-      onInvestigationsChanged(investigations);
-      setSelectedId((current) => current ?? investigations[0]?.id ?? null);
+      const sorted = sortResearchInvestigations(investigations);
+      setSelectedId((current) => current ?? sorted.find((item) => item.status === 'ready')?.id ?? sorted[0]?.id ?? null);
     }).finally(() => {
       if (!cancelled) setLoading(false);
     });
     return () => {
       cancelled = true;
     };
-  }, [appId, onInvestigationsChanged]);
+  }, [appId]);
+
+  useEffect(() => {
+    onInvestigationsChanged(items);
+  }, [items, onInvestigationsChanged]);
 
   useEffect(() => {
     if (!seed || !appId) return;
@@ -1724,9 +2084,11 @@ function ResearchPanel({
       generatedSql: seed.generatedSql,
       run: true,
     };
+    const pendingTitle = cleanResearchScopeText(seed.title ?? seed.question) || 'requested follow-up';
     const seedKey = `${appId}:${JSON.stringify(investigationInput)}`;
     const create = async () => {
       setBusy('create');
+      setPendingAnalysisTitle(pendingTitle);
       setError(null);
       let request = inFlightResearchSeedRequests.get(seedKey);
       if (!request) {
@@ -1741,25 +2103,71 @@ function ResearchPanel({
       setBusy(null);
       if (!result.ok) {
         setError(result.error);
+        setPendingAnalysisTitle(null);
+        onSeedHandled();
         return;
       }
-      setItems((current) => {
-        const next = upsertInvestigation(current, result.investigation);
-        onInvestigationsChanged(next);
-        return next;
-      });
-      setSelectedId(result.investigation.id);
-      setEvidenceTab('preview');
+      const created = result.investigation;
+      const applyInvestigation = (investigation: LocalAppInvestigation) => {
+        setItems((current) => upsertInvestigation(current, investigation));
+        setSelectedId(investigation.id);
+        setEvidenceTab('preview');
+        setReportNavigatorOpen(false);
+        if (investigation.status !== 'draft' && investigation.status !== 'running') {
+          setPendingAnalysisTitle(null);
+        }
+      };
+      applyInvestigation(created);
+      if (created.status !== 'draft' && created.status !== 'running') {
+        onSeedHandled();
+        return;
+      }
+      setBusy(created.id);
+      for (let attempt = 0; attempt < 20; attempt += 1) {
+        await new Promise<void>((resolve) => {
+          window.setTimeout(resolve, 1000);
+        });
+        if (cancelled) return;
+        const refreshed = await api.getAppInvestigation(appId, created.id);
+        if (cancelled) return;
+        if (refreshed && refreshed.status !== 'draft' && refreshed.status !== 'running') {
+          setBusy(null);
+          applyInvestigation(refreshed);
+          onSeedHandled();
+          return;
+        }
+      }
       onSeedHandled();
+      setBusy(null);
+      setPendingAnalysisTitle(null);
+      setError('Analysis is still running. Reopen it or refresh to load the latest proof.');
     };
     const timer = window.setTimeout(() => void create(), 0);
     return () => {
       cancelled = true;
       window.clearTimeout(timer);
     };
-  }, [seed?.nonce, appId, activeDashboardId, onInvestigationsChanged, onSeedHandled]);
+  }, [seed?.nonce, appId, activeDashboardId, onSeedHandled]);
 
-  const selected = items.find((item) => item.id === selectedId) ?? items[0] ?? null;
+  const sortedItems = useMemo(() => sortResearchInvestigations(items), [items]);
+  const selected = sortedItems.find((item) => item.id === selectedId)
+    ?? sortedItems.find((item) => item.status === 'ready')
+    ?? sortedItems[0]
+    ?? null;
+  useEffect(() => {
+    onActiveInvestigationChange(selected);
+    return () => onActiveInvestigationChange(null);
+  }, [selected, onActiveInvestigationChange]);
+  const recentHistory = sortedItems
+    .filter((item) => item.id !== selected?.id)
+    .filter((item) => showResearchHistory || item.status !== 'error')
+    .slice(0, showResearchHistory ? 40 : 5);
+  const hiddenHistoryCount = Math.max(0, sortedItems.length - (selected ? 1 : 0) - recentHistory.length);
+  const selectedReport = selected ? buildResearchReport(selected) : null;
+  const selectedMemo = selectedReport ? buildResearchMemo(selectedReport) : '';
+  const creatingReport = busy === 'create' || Boolean(pendingAnalysisTitle);
+  const pendingReportVisible = creatingReport && Boolean(pendingAnalysisTitle);
+  const creatingInitialReport = creatingReport && !selected;
 
   useEffect(() => {
     setSqlDraft(selected?.generatedSql ?? '');
@@ -1776,12 +2184,23 @@ function ResearchPanel({
       setError(result.error);
       return null;
     }
-    setItems((current) => {
-      const next = upsertInvestigation(current, result.investigation);
-      onInvestigationsChanged(next);
-      return next;
-    });
+    setItems((current) => upsertInvestigation(current, result.investigation));
     setEvidenceTab('preview');
+    return result.investigation;
+  };
+
+  const rebuildResearchSql = async (investigation: LocalAppInvestigation): Promise<LocalAppInvestigation | null> => {
+    if (!appId) return null;
+    setBusy(`rebuild:${investigation.id}`);
+    setError(null);
+    const result = await api.runAppInvestigation(appId, investigation.id, { repairMode: 'rebuild_from_certified' });
+    setBusy(null);
+    if (!result.ok) {
+      setError(result.error);
+      return null;
+    }
+    setItems((current) => upsertInvestigation(current, result.investigation));
+    setEvidenceTab(result.investigation.error ? 'sql' : 'preview');
     return result.investigation;
   };
 
@@ -1798,11 +2217,7 @@ function ResearchPanel({
       setError(result.error);
       return null;
     }
-    setItems((current) => {
-      const next = upsertInvestigation(current, result.investigation);
-      onInvestigationsChanged(next);
-      return next;
-    });
+    setItems((current) => upsertInvestigation(current, result.investigation));
     setSelectedId(result.investigation.id);
     if (result.dashboard) onDashboardChanged(result.dashboard);
     return result.investigation;
@@ -1851,137 +2266,271 @@ function ResearchPanel({
     return pinResearch(target);
   };
 
-  if (!appDoc) return <EmptyPanel title="No App selected." detail="Choose an App before starting research." />;
+  if (!appDoc) return <EmptyPanel title="No App selected." detail="Choose an App before writing analysis." />;
 
   return (
-    <div className="dql-app-research-shell">
+    <div className={`dql-app-research-shell ${reportNavigatorOpen || (!selected && !creatingInitialReport) ? 'history-open' : 'history-collapsed'}`}>
       <section className="dql-app-research-list">
         <div className="dql-app-research-head">
-          <span><Search size={14} /> Research</span>
-          <b>{items.length}</b>
+          <span><Search size={14} /> Analysis</span>
+          <div>
+            <b>{items.length}</b>
+            {selected ? (
+              <button type="button" onClick={() => setReportNavigatorOpen(false)} title="Close analysis history">
+                Close
+              </button>
+            ) : null}
+          </div>
         </div>
-        {loading ? <EmptyPanel title="Loading research..." detail="Reading local investigations." compact /> : null}
+        {loading ? <EmptyPanel title="Loading analysis..." detail="Reading local app analysis." compact /> : null}
+        {error ? <div className="dql-app-error">{error}</div> : null}
         {!loading && items.length === 0 ? (
-          <EmptyPanel title="No research yet." detail="Start from the assistant so the research keeps the original question and context." compact />
+          <EmptyPanel title="No analysis yet." detail="Start from Copilot so the analysis keeps the original question, filters, and selected result context." compact />
         ) : null}
         <div className="dql-app-research-items">
-          {items.map((item) => (
-            <button
+          {selected ? (
+            <>
+              <div className="dql-app-research-group-label">Current analysis</div>
+              <ResearchListButton
+                item={selected}
+                selected
+                onClick={() => {
+                  setError(null);
+                  setSelectedId(selected.id);
+                  setEvidenceTab('preview');
+                  setReportNavigatorOpen(false);
+                }}
+              />
+            </>
+          ) : null}
+          {recentHistory.length ? (
+            <div className="dql-app-research-group-label">Recent history</div>
+          ) : null}
+          {recentHistory.map((item) => (
+            <ResearchListButton
               key={item.id}
-              type="button"
-              className={selected?.id === item.id ? 'on' : ''}
+              item={item}
+              selected={selected?.id === item.id}
               onClick={() => {
+                setError(null);
                 setSelectedId(item.id);
                 setEvidenceTab('preview');
+                setReportNavigatorOpen(false);
               }}
-            >
-              <span>{formatBusinessLabel(item.title)}</span>
-              <small>{formatBusinessLabel(item.intent)} / {formatBusinessLabel(item.status)}</small>
-            </button>
+            />
           ))}
+          {hiddenHistoryCount > 0 ? (
+            <button
+              type="button"
+              className="dql-app-research-history-toggle"
+              onClick={() => setShowResearchHistory((value) => !value)}
+            >
+              <span>{showResearchHistory ? 'Hide older runs' : `Show ${hiddenHistoryCount} older run${hiddenHistoryCount === 1 ? '' : 's'}`}</span>
+              <small>{showResearchHistory ? 'Keep the current analysis focused' : 'Includes failed and superseded analysis attempts'}</small>
+            </button>
+          ) : null}
         </div>
       </section>
 
       <section className="dql-app-research-detail">
-        {selected ? (
+        {pendingReportVisible ? (
           <>
-            {busy === 'create' ? (
-              <div className="dql-app-research-status">
+            <div className="dql-app-report-toolbar">
+              <div>
+                <span>New memo</span>
+                <b>{pendingAnalysisTitle}</b>
+              </div>
+              {items.length ? (
+                <button type="button" className="dql-apps-btn dql-apps-btn-line" onClick={() => setReportNavigatorOpen((value) => !value)}>
+                  <Search size={13} /> {reportNavigatorOpen ? 'Hide history' : `Analysis history (${items.length})`}
+                </button>
+              ) : null}
+            </div>
+            {error ? <div className="dql-app-error">{error}</div> : null}
+            <div className="dql-app-research-creating active">
+              <Workflow size={24} />
+              <span>Preparing business memo</span>
+              <h2>Writing business memo...</h2>
+              <p>DQL is opening a scoped memo for "{pendingAnalysisTitle}". The previous memo stays in history while this answer is built from the typed context, active filters, certified block evidence, and preview proof.</p>
+              <div className="dql-app-research-creating-steps">
+                <small>Reading current filters</small>
+                <small>Checking certified block context</small>
+                <small>Building narrative and proof appendix</small>
+              </div>
+            </div>
+          </>
+        ) : selected && selectedReport ? (
+          <>
+            <div className="dql-app-report-toolbar">
+              <div>
+                <span>Current memo</span>
+                <b>{formatResearchListTitle(selected)}</b>
+              </div>
+              <button type="button" className="dql-apps-btn dql-apps-btn-line" onClick={() => setReportNavigatorOpen((value) => !value)}>
+                <Search size={13} /> {reportNavigatorOpen ? 'Hide history' : `Memo history (${items.length})`}
+              </button>
+            </div>
+            {creatingReport || busy === selected.id || selected.status === 'running' ? (
+              <div className={`dql-app-research-status ${creatingReport ? 'opening' : ''}`}>
                 <Workflow size={14} />
-                <span>Running research with bounded SQL preview and evidence capture...</span>
+                <div>
+                  <span>{creatingReport ? 'Opening a new business memo...' : 'Refreshing the memo from certified evidence, active filters, and optional preview proof...'}</span>
+                  {pendingAnalysisTitle ? <small>{pendingAnalysisTitle}</small> : null}
+                </div>
               </div>
             ) : null}
-            <div className="dql-app-research-titlebar">
-              <div>
-                <span className="dql-app-assistant-kicker">Investigation</span>
-                <h2>{formatBusinessLabel(selected.title)}</h2>
-              </div>
-              <div className="dql-app-research-actions">
-                <StatusSeal tone={selected.status === 'error' ? 'draft' : 'agentic'}>{selected.reviewStatus}</StatusSeal>
-                <button type="button" className="dql-apps-btn dql-apps-btn-line" onClick={() => void rerunResearch(selected, sqlDraft)} disabled={busy === selected.id}>
-                  <Workflow size={13} /> {busy === selected.id ? 'Running...' : 'Run'}
-                </button>
-                <button type="button" className="dql-apps-btn dql-apps-btn-line" onClick={() => void pinReviewedResearch(selected)} disabled={busy === `pin:${selected.id}`}>
-                  <MapPin size={13} /> {selected.pinnedAiPinId ? 'Added to app' : 'Add to app'}
-                </button>
-                <button type="button" className="dql-apps-btn dql-apps-btn-primary" onClick={() => void promoteReviewedResearch(selected)} disabled={!(sqlDraft.trim() || selected.generatedSql) || busy === `promote:${selected.id}`}>
-                  <FileText size={13} /> {busy === `promote:${selected.id}` ? 'Creating...' : 'Create draft block'}
-                </button>
-              </div>
-            </div>
-
             {error ? <div className="dql-app-error">{error}</div> : null}
-            {selected.error ? <div className="dql-app-error">{selected.error}</div> : null}
-            <div className="dql-app-research-path">
-              <span><Search size={13} /> Review-required research</span>
-              <span><Table2 size={13} /> Preview rows</span>
-              <span><MapPin size={13} /> Add result to app</span>
-              <span><FileText size={13} /> Create draft block</span>
-            </div>
 
-            <div className="dql-app-research-grid">
-              <section className="dql-app-research-answer">
-                <PanelHead title="Business answer" meta={formatBusinessLabel(selected.intent)} />
-                <div className="dql-app-research-markdown">
-                  <StructuredAnswerText text={selected.summary ?? 'Run this investigation to generate the business answer.'} t={t} compact />
+            <article className="dql-app-research-report">
+              <header className="dql-app-report-hero">
+                <div className="dql-app-report-status-row">
+                  <span><Search size={13} /> Business memo</span>
+                  <StatusSeal tone={selected.status === 'error' ? 'draft' : 'agentic'}>{selected.reviewStatus}</StatusSeal>
                 </div>
-                <div className="dql-app-research-callout">
-                  <StructuredAnswerText text={selected.recommendation ?? 'Review the evidence before promoting this result.'} t={t} compact />
-                </div>
-              </section>
-
-              <section className="dql-app-research-metrics">
-                <PanelHead title="Metric context" meta={selected.dashboardId ?? activeDashboardId ?? 'app'} />
-                <ResearchMetricStrip investigation={selected} />
-              </section>
-            </div>
-
-            <section className="dql-app-research-section">
-              <PanelHead title="Top drivers" meta={`${(selected.driverCards ?? []).length} ranked`} />
-              <div className="dql-app-research-drivers">
-                {(selected.driverCards ?? []).slice(0, 6).map((driver, index) => {
-                  const record = asUiRecord(driver);
-                  return (
-                    <div key={index} className="dql-app-research-driver">
-                      <b>{String(record.title ?? `Driver ${index + 1}`)}</b>
-                      <span>{String(record.contribution ?? record.value ?? 'Evidence')}</span>
-                      <p>{String(record.explanation ?? 'Review this driver with the supporting evidence.')}</p>
-                    </div>
-                  );
-                })}
-              </div>
-            </section>
-
-            <section className="dql-app-research-section">
-              <div className="dql-app-research-evidence-head">
-                <PanelHead title="Evidence" meta="review-required" />
-                <div className="dql-app-research-tabs">
-                  {(['preview', 'sql', 'assumptions', 'context'] as const).map((tab) => (
-                    <button key={tab} type="button" className={evidenceTab === tab ? 'on' : ''} onClick={() => setEvidenceTab(tab)}>
-                      {formatBusinessLabel(tab)}
-                    </button>
+                <h2>{selectedReport.title}</h2>
+                <p>{selectedReport.scope}</p>
+                <div className="dql-app-report-context-line">
+                  {selectedReport.contextFacts.map((fact) => (
+                    <span key={fact.label}><b>{fact.label}</b>{fact.value}</span>
                   ))}
                 </div>
-              </div>
-              <ResearchEvidence
-                investigation={selected}
-                tab={evidenceTab}
-                sqlDraft={sqlDraft}
-                onSqlDraftChange={setSqlDraft}
-              />
-            </section>
+                <div className="dql-app-report-actions">
+                  <button type="button" className="dql-apps-btn dql-apps-btn-line" onClick={() => void pinReviewedResearch(selected)} disabled={busy === `pin:${selected.id}`}>
+                    <MapPin size={13} /> {selected.pinnedAiPinId ? 'Pinned to app' : 'Pin insight'}
+                  </button>
+                  <button type="button" className="dql-apps-btn dql-apps-btn-primary" onClick={() => void promoteReviewedResearch(selected)} disabled={!(sqlDraft.trim() || selected.generatedSql) || busy === `promote:${selected.id}`}>
+                    <FileText size={13} /> {busy === `promote:${selected.id}` ? 'Drafting...' : 'Create draft block'}
+                  </button>
+                  <details className="dql-app-report-review-actions">
+                    <summary>Reviewer tools</summary>
+                    <div>
+                      <button type="button" className="dql-apps-btn dql-apps-btn-line" onClick={() => void rerunResearch(selected, sqlDraft)} disabled={busy === selected.id}>
+                        <Workflow size={13} /> {busy === selected.id ? 'Refreshing...' : 'Refresh memo'}
+                      </button>
+                      {selectedReport.previewIssue?.canRebuild ? (
+                        <button type="button" className="dql-apps-btn dql-apps-btn-line" onClick={() => void rebuildResearchSql(selected)} disabled={busy === `rebuild:${selected.id}`}>
+                          <Workflow size={13} /> {busy === `rebuild:${selected.id}` ? 'Rebuilding...' : 'Rebuild SQL'}
+                        </button>
+                      ) : null}
+                    </div>
+                  </details>
+                </div>
+                {selectedReport.previewIssue ? (
+                  <div className="dql-app-report-warning">
+                    <AlertTriangle size={14} />
+                    <span>{selectedReport.previewIssue.message}</span>
+                  </div>
+                ) : null}
+              </header>
+
+              <section className="dql-app-report-section dql-app-report-paper">
+                {selectedReport.sections.length ? (
+                  <ResearchReportSections sections={selectedReport.sections} />
+                ) : (
+                  <StructuredAnswerText text={selectedMemo} t={t} compact />
+                )}
+              </section>
+
+              {selectedReport.keyNumbers.length || selectedReport.drivers.length ? (
+                <section className={`dql-app-report-section dql-app-report-evidence-story ${selectedReport.keyNumbers.length && selectedReport.drivers.length ? '' : 'single'}`}>
+                  {selectedReport.keyNumbers.length ? (
+                    <div>
+                      <h3>{selectedReport.intent === 'segment_compare' ? 'Segment numbers' : selectedReport.intent === 'diagnose_change' ? 'Movement numbers' : 'Key numbers'}</h3>
+                      <div className="dql-app-report-numbers">
+                        {selectedReport.keyNumbers.map((metric) => (
+                          <div key={metric.label} className="dql-app-report-number">
+                            <span>{metric.label}</span>
+                            <b>{metric.value}</b>
+                            <small>{metric.detail}</small>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  ) : null}
+                  {selectedReport.drivers.length ? (
+                    <div>
+                      <h3>{selectedReport.intent === 'anomaly_investigation' ? 'Exception view' : selectedReport.intent === 'entity_drilldown' ? 'Entity view' : 'Driver view'}</h3>
+                      <ResearchDriverChart drivers={selectedReport.drivers} />
+                    </div>
+                  ) : null}
+                </section>
+              ) : null}
+
+              <details className="dql-app-report-section dql-app-report-appendix">
+                <summary>
+                  <span>Technical appendix</span>
+                  <small>SQL, preview rows, caveats, routing, and source context for analyst review</small>
+                  <ChevronDown size={15} />
+                </summary>
+                <div className="dql-app-research-evidence-head">
+                  <div>
+                    <h3>SQL and proof</h3>
+                    <p>Use this appendix only when you need to inspect routing, repair generated SQL, or validate source context before pinning this memo to the app.</p>
+                  </div>
+                  <div className="dql-app-research-tabs">
+                    {(['preview', 'sql', 'assumptions', 'context'] as const).map((tab) => (
+                      <button key={tab} type="button" className={evidenceTab === tab ? 'on' : ''} onClick={() => setEvidenceTab(tab)}>
+                        {tab === 'assumptions' ? 'Caveats' : formatBusinessLabel(tab)}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+                <ResearchEvidence
+                  investigation={selected}
+                  tab={evidenceTab}
+                  sqlDraft={sqlDraft}
+                  onSqlDraftChange={setSqlDraft}
+                />
+              </details>
+            </article>
           </>
         ) : (
-          <EmptyPanel title="Start research from the assistant." detail="Ask a follow-up, then keep the evidence review here." />
+          <>
+            {error ? <div className="dql-app-error">{error}</div> : null}
+            {creatingInitialReport ? (
+              <div className="dql-app-research-creating">
+                <Workflow size={22} />
+                <span>Preparing business memo</span>
+                <h2>Writing business memo...</h2>
+                <p>{pendingAnalysisTitle ? `DQL is opening a scoped memo for "${pendingAnalysisTitle}".` : 'DQL is using the Copilot context, active filters, certified block evidence, and any available preview proof to create the main-canvas memo.'}</p>
+              </div>
+            ) : (
+              <EmptyPanel title="Start analysis from Copilot." detail="Ask a follow-up, add context, then review the analysis here." />
+            )}
+          </>
         )}
       </section>
     </div>
   );
 }
 
+function ResearchListButton({
+  item,
+  selected,
+  onClick,
+}: {
+  item: LocalAppInvestigation;
+  selected: boolean;
+  onClick: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      className={[
+        selected ? 'on' : '',
+        `status-${item.status}`,
+      ].filter(Boolean).join(' ')}
+      onClick={onClick}
+    >
+      <span>{formatResearchListTitle(item)}</span>
+      <small>{formatResearchListMeta(item)}</small>
+    </button>
+  );
+}
+
 function NotebookListPanel({ appDoc }: { appDoc: AppDocumentSummary | null }) {
   const notebooks = appDoc?.notebooks ?? appDoc?.app.notebooks ?? [];
-  if (!notebooks.length) return <EmptyPanel title="No notebooks attached." detail="Attach analysis notebooks in Build mode when this App needs supporting research." />;
+  if (!notebooks.length) return <EmptyPanel title="No notebooks attached." detail="Attach analysis notebooks in Build mode when this App needs supporting work." />;
   return (
     <div className="dql-app-simple-list">
       {notebooks.map((notebook) => (
@@ -1996,7 +2545,7 @@ function NotebookListPanel({ appDoc }: { appDoc: AppDocumentSummary | null }) {
 
 function AiPinsPanel({ appDoc }: { appDoc: AppDocumentSummary | null }) {
   const pins = appDoc?.aiPins ?? [];
-  if (!pins.length) return <EmptyPanel title="No AI pins yet." detail="Ask AI from a dashboard page and pin useful answers into this App." />;
+  if (!pins.length) return <EmptyPanel title="No pinned insights yet." detail="Use Copilot from a dashboard page, create analysis, then add useful reviewed insights to this App." />;
   return (
     <div className="dql-app-simple-list">
       {pins.map((pin) => (
@@ -2051,151 +2600,191 @@ function isCertifiedPlanTile(tile: GeneratedPlanTile): boolean {
   return tile.kind === 'certified_block' && tile.certification === 'certified';
 }
 
-function PreviewTile({
-  tile,
-  generated,
-  onVizChange,
+function planScopedReportCount(plan: GeneratedAppPlan): number {
+  const rootReports = Array.isArray(plan.scopedReports) ? plan.scopedReports.length : 0;
+  const planningReports = Array.isArray(plan.planning?.scopedReports) ? plan.planning.scopedReports.length : 0;
+  if (rootReports > 0 || planningReports > 0) return Math.max(rootReports, planningReports);
+  return Array.isArray(plan.missingEvidence) ? plan.missingEvidence.length : 0;
+}
+
+function DashboardFilterControls({
+  filters,
+  values,
+  onChange,
 }: {
-  tile: GeneratedPlanTile;
-  generated: boolean;
-  onVizChange: (viz: string) => void;
+  filters: DashboardFilter[];
+  values: Record<string, unknown>;
+  onChange: (filter: DashboardFilter, value: unknown) => void;
 }) {
-  const genUi = tile.display?.genUi;
-  const wide = genUi?.layoutIntent === 'wide' || genUi?.layoutIntent === 'full' || tile.viz === 'line' || tile.viz === 'bar';
-  const component = genUi?.component ?? (tile.kind === 'narrative' ? 'NarrativePanel' : 'EvidenceTable');
-  const vizChoices = buildPreviewVizChoices(tile);
-  const displayLabel = previewDisplayLabel(tile, component);
-  const detail = tile.description ?? tile.rationale ?? 'Certified data block';
+  if (filters.length === 0) {
+    return <span className="dql-app-filter-empty">No filters</span>;
+  }
   return (
-    <div className={`dql-app-preview-tile ${tile.certification === 'uncertified' ? 'draft' : ''} ${wide ? 'wide' : ''}`}>
-      <div className="dql-app-preview-tile-head">
-        <b>{genUi?.insightTitle ?? tile.title}</b>
-        <span>{component.replace(/([a-z])([A-Z])/g, '$1 $2')}</span>
-      </div>
-      <div className="dql-app-preview-tile-body">
-        <div className="dql-app-preview-source">
-          <span>{previewVizIcon(tile.viz)}</span>
-          <div>
-            <b>{displayLabel}</b>
-            <p>{detail}</p>
-          </div>
-        </div>
-      </div>
-      {vizChoices.length > 1 ? (
-        <div className="dql-app-preview-viz-row" aria-label={`${tile.title} visualization choices`}>
-          {vizChoices.map((viz) => (
-            <button
-              key={viz}
-              type="button"
-              className={normalizePreviewViz(tile.viz) === normalizePreviewViz(viz) ? 'on' : ''}
-              title={formatBusinessLabel(viz)}
-              disabled={!generated}
-              onClick={() => onVizChange(viz)}
-            >
-              {previewVizIcon(viz)}
-            </button>
-          ))}
-        </div>
-      ) : null}
-      <div className="dql-app-preview-tile-foot">
-        <span>{genUi?.layoutIntent ?? tile.kind.replace(/_/g, ' ')}</span>
-        <b>{tile.certification === 'certified' ? 'certified' : 'draft'}</b>
-      </div>
-    </div>
+    <>
+      {filters.map((filter) => (
+        <DashboardFilterInput
+          key={filter.id}
+          filter={filter}
+          value={values[filter.id] ?? defaultDashboardFilterValue(filter)}
+          onChange={(value) => onChange(filter, value)}
+        />
+      ))}
+    </>
   );
 }
 
-function ReviewBacklog({ tiles }: { tiles: GeneratedPlanTile[] }) {
+function DashboardFilterInput({
+  filter,
+  value,
+  onChange,
+}: {
+  filter: DashboardFilter;
+  value: unknown;
+  onChange: (value: unknown) => void;
+}) {
+  const label = formatBusinessLabel(filter.id);
+  const valueText = filterInputValue(filter, value);
+  if (filter.type === 'select') {
+    return (
+      <FilterSelect
+        icon={filterIconForDashboardFilter(filter)}
+        label={label}
+        value={valueText}
+        onChange={onChange}
+        options={filterOptions(filter)}
+      />
+    );
+  }
+  if (filter.type === 'boolean') {
+    return (
+      <FilterSelect
+        icon={filterIconForDashboardFilter(filter)}
+        label={label}
+        value={String(Boolean(value))}
+        onChange={(next) => onChange(next === 'true')}
+        options={[
+          ['true', 'Yes'],
+          ['false', 'No'],
+        ]}
+      />
+    );
+  }
   return (
-    <div className="dql-app-review-backlog">
-      <div className="dql-app-review-backlog-head">
-        <span><Search size={13} /> Needs review before adding</span>
-        <b>{tiles.length}</b>
-      </div>
-      <div className="dql-app-review-backlog-grid">
-        {tiles.map((tile) => {
-          const actions = tile.display?.followUpActions ?? [];
-          return (
-            <div key={tile.id} className="dql-app-review-backlog-item">
-              <div>
-                <b>{tile.title}</b>
-                <p>{tile.description ?? tile.rationale ?? 'Review this item before it becomes an app tile.'}</p>
-              </div>
-              {actions.length ? (
-                <div>
-                  {actions.slice(0, 3).map((action) => (
-                    <span key={action}>{formatBusinessLabel(action)}</span>
-                  ))}
-                </div>
-              ) : null}
-            </div>
-          );
-        })}
-      </div>
-    </div>
+    <label className="dql-app-filter-select" title={filter.bindsTo ? `${label} -> ${filter.bindsTo}` : label} aria-label={label}>
+      <span className="dql-app-filter-icon">{filterIconForDashboardFilter(filter)}</span>
+      <input
+        type={filter.type === 'number' ? 'number' : filter.type === 'date' ? 'date' : 'text'}
+        value={valueText}
+        placeholder={label}
+        onChange={(event) => onChange(event.target.value)}
+      />
+    </label>
   );
 }
 
-function PlannerFlow({ planning }: { planning: NonNullable<GeneratedAppPlan['planning']> }) {
-  return (
-    <div className="dql-app-planner-flow">
-      <div className="dql-app-planner-flow-title">
-        <Sparkles size={13} />
-        <span>{formatBusinessLabel(planning.analysisIntent)}</span>
-      </div>
-      <p>{planning.displayStrategy}</p>
-      <div className="dql-app-planner-flow-steps">
-        {planning.handoffPlan.slice(0, 3).map((step, index) => (
-          <span key={step}><b>{index + 1}</b>{step}</span>
-        ))}
-      </div>
-    </div>
-  );
-}
-
-function PlanGroupLabel({ label }: { label: string }) {
-  return <div className="dql-app-plan-group-label">{label}</div>;
-}
-
-function PlanItem({ tile }: { tile: GeneratedPlanTile }) {
-  const genUi = tile.display?.genUi;
-  return (
-    <div className="dql-app-plan-item">
-      <i className={tile.certification === 'uncertified' ? 'draft' : ''} />
-      <span><b>{tile.title}</b><small>{tile.rationale ?? tile.description ?? tile.kind.replace(/_/g, ' ')}</small></span>
-      <em>{genUi ? `${genUi.component.replace(/([a-z])([A-Z])/g, '$1 $2')} / ${genUi.layoutIntent}` : tile.viz}</em>
-    </div>
-  );
-}
-
-function buildPreviewVizChoices(tile: GeneratedPlanTile): string[] {
-  const choices = new Set<string>([
-    tile.viz,
-    ...(tile.display?.genUi?.allowedVisualizations ?? []),
-  ]);
-  return Array.from(choices)
-    .map(normalizePreviewViz)
-    .filter((value, index, values) => Boolean(value) && values.indexOf(value) === index)
-    .slice(0, 5);
-}
-
-function previewDisplayLabel(tile: GeneratedPlanTile, component: string): string {
-  if (component === 'TrustCallout') return 'Review path';
-  const normalized = normalizePreviewViz(tile.viz);
-  if (normalized === 'single_value') return 'KPI';
-  return formatBusinessLabel(normalized);
-}
-
-function normalizePreviewViz(value: string): string {
-  return value.toLowerCase().replace(/-/g, '_');
-}
-
-function previewVizIcon(viz: string): JSX.Element {
-  const normalized = normalizePreviewViz(viz);
-  if (normalized === 'line' || normalized === 'area') return <LineChart size={13} />;
-  if (normalized === 'pie' || normalized === 'donut') return <PieChart size={13} />;
-  if (normalized === 'table' || normalized === 'pivot') return <Table2 size={13} />;
+function filterIconForDashboardFilter(filter: DashboardFilter): ReactNode {
+  if (filter.type === 'date' || filter.type === 'daterange' || /season|year|date|time|period/i.test(filter.id)) {
+    return <CalendarDays size={13} />;
+  }
   return <BarChart3 size={13} />;
+}
+
+function deriveDashboardFilters(dashboard: DashboardDocumentResponse['dashboard'] | null): DashboardFilter[] {
+  if (!dashboard) return [];
+  const filters = new Map<string, DashboardFilter>();
+  for (const filter of dashboard.filters ?? []) {
+    if (isUsefulDashboardFilter(filter)) filters.set(filter.id, filter);
+  }
+  for (const item of dashboard.layout.items ?? []) {
+    for (const binding of item.parameterBindings ?? []) {
+      const id = binding.filter || binding.field || binding.param;
+      if (!id || filters.has(id) || isCoveredByExistingDashboardFilter(filters, binding)) continue;
+      filters.set(id, filterFromParameterBinding(binding));
+    }
+  }
+  return Array.from(filters.values());
+}
+
+function isUsefulDashboardFilter(filter: DashboardFilter): boolean {
+  if (filter.type === 'select' && !filter.options?.length && filter.default === undefined) return false;
+  return true;
+}
+
+function filterFromParameterBinding(
+  binding: NonNullable<DashboardLayoutItem['parameterBindings']>[number],
+): DashboardFilter {
+  const id = binding.filter || binding.field || binding.param;
+  return {
+    id,
+    type: parameterFilterType(id),
+    default: defaultParameterFilterValue(id),
+    bindsTo: binding.param,
+  };
+}
+
+function isCoveredByExistingDashboardFilter(
+  filters: Map<string, DashboardFilter>,
+  binding: NonNullable<DashboardLayoutItem['parameterBindings']>[number],
+): boolean {
+  return Array.from(filters.values()).some((filter) => {
+    if (binding.filter && filter.id === binding.filter) return true;
+    if (binding.field && filter.bindsTo === binding.field) return true;
+    return Boolean(binding.param && filter.bindsTo === binding.param);
+  });
+}
+
+function parameterFilterType(id: string): DashboardFilter['type'] {
+  if (/(top[_-]?n|limit|count|number|start|end|year|season)/i.test(id)) return 'number';
+  if (/date/i.test(id)) return 'date';
+  return 'text';
+}
+
+function defaultParameterFilterValue(id: string): unknown {
+  const normalized = id.toLowerCase();
+  if (/(top[_-]?n|limit)/.test(normalized)) return 5;
+  if (/(season|year).*start|start.*(season|year)/.test(normalized)) return 2016;
+  if (/(season|year).*end|end.*(season|year)/.test(normalized)) return 2017;
+  return '';
+}
+
+function filterOptions(filter: DashboardFilter): Array<[string, string]> {
+  const options = filter.options?.length ? filter.options : [filter.default].filter((value) => value !== undefined);
+  return options.map((option) => [String(option), formatBusinessLabel(String(option))]);
+}
+
+function defaultDashboardFilterValue(filter: DashboardFilter): unknown {
+  if (filter.default !== undefined) return filter.default;
+  if (filter.type === 'number') return defaultParameterFilterValue(filter.id);
+  if (filter.type === 'boolean') return false;
+  if (filter.type === 'select') return filter.options?.[0] ?? '';
+  return '';
+}
+
+function filterInputValue(filter: DashboardFilter, value: unknown): string {
+  if (value === undefined || value === null) return String(defaultDashboardFilterValue(filter) ?? '');
+  if (filter.type === 'daterange' && typeof value === 'object') return JSON.stringify(value);
+  return String(value);
+}
+
+function coerceDashboardFilterValue(filter: DashboardFilter, value: unknown): unknown {
+  if (filter.type === 'number') {
+    if (typeof value === 'string' && value.trim() === '') return '';
+    const numeric = Number(value);
+    return Number.isFinite(numeric) ? numeric : value;
+  }
+  if (filter.type === 'boolean') return value === true || value === 'true';
+  if (filter.type === 'select' && typeof filter.default === 'number') {
+    const numeric = Number(value);
+    return Number.isFinite(numeric) ? numeric : value;
+  }
+  return value;
+}
+
+function shallowEqualRecords(left: Record<string, unknown>, right: Record<string, unknown>): boolean {
+  const leftKeys = Object.keys(left);
+  const rightKeys = Object.keys(right);
+  if (leftKeys.length !== rightKeys.length) return false;
+  return leftKeys.every((key) => Object.is(left[key], right[key]));
 }
 
 function FilterSelect({
@@ -2234,6 +2823,131 @@ function getDashboardItemBlockId(item: DashboardDocumentResponse['dashboard']['l
   return 'blockId' in item.block ? item.block.blockId ?? null : item.block.ref ?? null;
 }
 
+function getCopilotBlockTiles(
+  dashboard: DashboardDocumentResponse['dashboard'] | null,
+  run?: DashboardRunResponse | null,
+): AppCopilotBlockTile[] {
+  if (!dashboard) return [];
+  const runByTile = new Map((run?.tiles ?? []).map((tile) => [tile.tileId, tile]));
+  const runByBlock = new Map((run?.tiles ?? []).filter((tile) => tile.blockId).map((tile) => [tile.blockId, tile]));
+  const preferredTopics = new Set(dashboard.layout.items
+    .filter((item) => getDashboardItemBlockId(item) && isPreferredCopilotContextItem(item))
+    .map((item) => copilotBusinessTopicSignature(`${item.title ?? ''} ${getDashboardItemBlockId(item) ?? ''}`))
+    .filter(Boolean));
+  const ranked = dashboard.layout.items
+    .map((item, index) => {
+      const blockId = getDashboardItemBlockId(item);
+      if (!blockId) return null;
+      const topicKey = copilotBusinessTopicSignature(`${item.title ?? ''} ${blockId}`);
+      if (topicKey && preferredTopics.has(topicKey) && !isPreferredCopilotContextItem(item)) return null;
+      const tileRun = runByTile.get(item.i) ?? runByBlock.get(blockId);
+      return {
+        block: {
+          blockId,
+          title: item.title ?? blockId,
+          viz: item.viz.type,
+          tileId: item.i,
+        },
+        duplicateKeys: copilotBlockTileDuplicateKeys(item, tileRun, blockId),
+        score: copilotBlockTileScore(item, tileRun, index),
+      };
+    })
+    .filter((item): item is { block: AppCopilotBlockTile; duplicateKeys: string[]; score: number } => Boolean(item))
+    .sort((left, right) => right.score - left.score);
+
+  const seen = new Set<string>();
+  const blocks: AppCopilotBlockTile[] = [];
+  for (const item of ranked) {
+    if (item.duplicateKeys.some((key) => seen.has(key))) continue;
+    for (const key of item.duplicateKeys) seen.add(key);
+    blocks.push(item.block);
+  }
+  return blocks;
+}
+
+function isPreferredCopilotContextItem(item: DashboardLayoutItem): boolean {
+  if (item.parameterBindings?.length) return true;
+  return Boolean(item.filterBindings?.some((binding) =>
+    !binding.unsupportedReason && (binding.mode === 'parameter' || binding.mode === 'predicate' || Boolean(binding.binding)),
+  ));
+}
+
+function copilotBlockTileDuplicateKeys(
+  item: DashboardLayoutItem,
+  tile: DashboardRunResponse['tiles'][number] | undefined,
+  blockId: string,
+): string[] {
+  const keys = [`block:${blockId}`];
+  const resultKey = copilotResultFingerprint(tile?.result);
+  if (resultKey) keys.push(`result:${resultKey}`);
+  const topicKey = copilotBusinessTopicSignature(`${item.title ?? ''} ${blockId}`);
+  if (topicKey) keys.push(`topic:${topicKey}`);
+  return keys;
+}
+
+function copilotResultFingerprint(result: DashboardRunResponse['tiles'][number]['result'] | undefined): string {
+  if (!result?.columns?.length || !result.rows?.length) return '';
+  const columns = result.columns.slice(0, 6).map((column) => column.toLowerCase());
+  const rowValues = result.rows.slice(0, 3).map((row) =>
+    columns.map((column) => formatCopilotFingerprintValue(row[column] ?? row[result.columns.find((candidate) => candidate.toLowerCase() === column) ?? column])).join(','),
+  );
+  return [...columns, ...rowValues].join('|');
+}
+
+function formatCopilotFingerprintValue(value: unknown): string {
+  if (value === null || value === undefined) return '';
+  if (typeof value === 'number') return Number.isFinite(value) ? String(Math.round(value * 1000) / 1000) : '';
+  return String(value).toLowerCase().replace(/\s+/g, ' ').trim().slice(0, 80);
+}
+
+function copilotBusinessTopicSignature(value: string): string {
+  const text = value
+    .toLowerCase()
+    .replace(/\b(codex|e2e|qa|draft|imported|pasted|raw|sql|block)\b/g, ' ')
+    .replace(/\b20\d{10,}\b/g, ' ');
+  const entity = /\b(player|players|scorer|scorers|athlete)\b/.test(text)
+    ? 'player'
+    : /\b(customer|account|user)\b/.test(text)
+      ? 'customer'
+      : /\b(team|teams)\b/.test(text)
+        ? 'team'
+        : '';
+  const intent = /\b(top|bottom|rank|ranking|leader|leaderboard|scorer|scorers)\b/.test(text)
+    ? 'ranking'
+    : /\b(availability|freshness|record|records|quality|coverage)\b/.test(text)
+      ? 'availability'
+      : /\b(trend|weekly|monthly|daily|over time)\b/.test(text)
+        ? 'trend'
+        : '';
+  const metric = /\b(point|points|pts|score|scoring|scorer|scorers)\b/.test(text)
+    ? 'points'
+    : /\b(field goal|fgm|fga|field-goal|field_goals?)\b/.test(text)
+      ? 'field_goals'
+      : /\b(count|records|games played)\b/.test(text)
+        ? 'count'
+        : /\b(availability|freshness|quality|coverage)\b/.test(text)
+          ? 'quality'
+          : '';
+  if (!entity || !intent || !metric) return '';
+  return `${entity}|${intent}|${metric}`;
+}
+
+function copilotBlockTileScore(
+  item: DashboardLayoutItem,
+  tile: DashboardRunResponse['tiles'][number] | undefined,
+  index: number,
+): number {
+  let score = 10000 - index;
+  if (item.parameterBindings?.length) score += 50000;
+  if (item.filterBindings?.length) score += 20000;
+  if (tile?.status === 'ok') score += 15000;
+  if (tile?.result?.rows?.length) score += 8000;
+  if (tile?.certificationStatus === 'certified') score += 5000;
+  if (String(item.trustState ?? item.display?.trustState ?? '').toLowerCase() === 'certified') score += 3000;
+  if (/codex\s+e2e|test|pasted/i.test(String(item.title ?? ''))) score -= 6000;
+  return score;
+}
+
 function sampleDashboardRows(rows?: Array<Record<string, unknown>>, columns?: string[]): Array<Record<string, unknown>> | undefined {
   if (!Array.isArray(rows) || rows.length === 0) return undefined;
   const selectedColumns = Array.isArray(columns) && columns.length > 0 ? columns.slice(0, 8) : Object.keys(rows[0] ?? {}).slice(0, 8);
@@ -2258,6 +2972,61 @@ function formatBusinessLabel(value?: string | null): string {
     if (lower === 'vs' || lower === 'vs.') return 'vs.';
     return `${word.charAt(0).toUpperCase()}${word.slice(1)}`;
   }).join(' ');
+}
+
+function cleanStakeholderCopy(value: string): string {
+  return value
+    .replace(/\bDraft gaps stay in Research until reviewed\.?/gi, 'Follow-up analysis stays out of the stakeholder view until reviewed.')
+    .replace(/\bresearch path\b/gi, 'analysis path')
+    .replace(/\bresearch suggestions\b/gi, 'analysis suggestions')
+    .replace(/\bfollow-up research\b/gi, 'follow-up analysis')
+    .replace(/\bevidence chips\b/gi, 'proof chips')
+    .replace(/\bevidence, lineage\b/gi, 'proof and lineage')
+    .replace(/\bevidence and lineage\b/gi, 'proof and lineage')
+    .replace(/\bsource evidence\b/gi, 'source proof')
+    .replace(/\bOpen Research\b/g, 'Open Analysis')
+    .replace(/\bResearch\b/g, 'Analysis');
+}
+
+function formatCopilotRouteLabel(route: AppCopilotRoute): string {
+  if (route === 'certified_answer') return 'Answered from trusted logic';
+  if (route === 'investigation') return 'Needs analysis';
+  if (route === 'app_change_proposal') return 'App change idea';
+  if (route === 'metadata_answer') return 'Metadata answer';
+  return formatBusinessLabel(String(route));
+}
+
+function formatActionBriefLabel(mode: 'research' | 'evidence' | 'block'): string {
+  if (mode === 'evidence') return 'Proof request';
+  if (mode === 'block') return 'Reusable logic';
+  return 'Business memo';
+}
+
+function reportTitleForAction(mode: 'research' | 'evidence' | 'block', question: string): string {
+  const label = mode === 'evidence' ? 'Proof' : mode === 'block' ? 'Reusable Logic' : 'Business Memo';
+  return `${label}: ${question}`;
+}
+
+function formatVariableValue(value: unknown): string {
+  if (value === null || value === undefined || value === '') return 'All';
+  if (Array.isArray(value)) return value.map(formatVariableValue).join(', ');
+  if (typeof value === 'boolean') return value ? 'On' : 'Off';
+  if (typeof value === 'number') return value.toLocaleString();
+  if (typeof value === 'object') return JSON.stringify(value);
+  return String(value);
+}
+
+function formatVariableEntryValue(key: string, value: unknown): string {
+  if (Array.isArray(value)) return value.map((item) => formatVariableEntryValue(key, item)).join(', ');
+  const numeric = typeof value === 'number'
+    ? value
+    : typeof value === 'string' && value.trim() !== ''
+      ? Number(value)
+      : NaN;
+  if (/(season|year)/i.test(key) && Number.isInteger(numeric) && numeric >= 1900 && numeric <= 2200) {
+    return String(numeric);
+  }
+  return formatVariableValue(value);
 }
 
 function buildAppShareText(
@@ -2317,7 +3086,7 @@ function buildAppBriefMarkdown(
     '## Supporting Assets',
     '',
     `- Notebooks: ${notebooks.length}`,
-    `- AI pins: ${aiPins.length}`,
+    `- Pinned insights: ${aiPins.length}`,
     `- Drafts needing review: ${drafts.length}`,
     '',
   ];
@@ -2332,14 +3101,6 @@ function MiniMetric({ label, value }: { label: string; value: string }) {
   return <span><small>{label}</small><b>{value}</b></span>;
 }
 
-function Leader({ label, value, tone }: { label: string; value: string; tone?: 'certified' | 'draft' }) {
-  return (
-    <div className={`dql-app-leader ${tone ?? ''}`}>
-      <span>{label}</span><i /><b>{value}</b>
-    </div>
-  );
-}
-
 function KeyValueInline({ label, value }: { label: string; value: string }) {
   return (
     <div className="dql-app-keyvalue-inline">
@@ -2349,16 +3110,484 @@ function KeyValueInline({ label, value }: { label: string; value: string }) {
   );
 }
 
-function ResearchMetricStrip({ investigation }: { investigation: LocalAppInvestigation }) {
+function researchScopeFromContext(rawContext: unknown, fallbackQuestion: string): string {
+  const fallback = cleanResearchScopeText(fallbackQuestion) || 'Review this app result.';
+  const text = typeof rawContext === 'string' ? rawContext.trim() : '';
+  if (!text) return fallback;
+
+  const labeledScope = extractLabeledResearchScope(text);
+  if (labeledScope) return labeledScope;
+
+  const withoutMetadata = text
+    .replace(/\bCurrent app filters:\s*[\s\S]*$/i, '')
+    .replace(/\bCertified block to start from:\s*[\s\S]*$/i, '')
+    .replace(/\bSource result:\s*[\s\S]*$/i, '')
+    .replace(/\bUser intent:\s*[\s\S]*$/i, '');
+  return cleanResearchScopeText(withoutMetadata) || fallback;
+}
+
+function extractLabeledResearchScope(text: string): string {
+  const labelPattern = /(?:^|\n)\s*(Analysis goal|Analysis question|Report question|Research question|Proof question|Evidence question|Validation question|Reusable block goal|Business question|Question):\s*/i;
+  const match = labelPattern.exec(text);
+  if (!match) return '';
+  const start = (match.index ?? 0) + match[0].length;
+  const rest = text.slice(start);
+  const stop = rest.search(/(?:^|\n)\s*(Current app filters|Certified block to start from|Source result|User intent|Review status|Trust status):/i);
+  const scope = stop >= 0 ? rest.slice(0, stop) : rest;
+  return cleanResearchScopeText(scope);
+}
+
+function cleanResearchScopeText(value: string): string {
+  const cleaned = value
+    .replace(/^\/(ask|research|report|analy[sz]e|analysis|proof|evidence|validate|verify|add\s+block|create\s+block|draft\s+block|block)\b/i, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+  if (cleaned.length <= 280) return cleaned;
+  const clipped = cleaned.slice(0, 280).replace(/\s+\S*$/, '').trim();
+  return clipped ? `${clipped}...` : cleaned.slice(0, 280);
+}
+
+function buildResearchReport(investigation: LocalAppInvestigation) {
   const metrics = asUiRecord(investigation.metrics);
+  const context = asUiRecord(investigation.context);
+  const evidence = asUiRecord(investigation.evidence);
+  const planner = asUiRecord(evidence.planner);
+  const routeDecision = analysisRouteDecisionForReport(context, evidence, planner);
+  const focusBlock = asUiRecord(context.focusBlock);
+  const preview = firstResearchPreview(investigation);
+  const previewResult = asUiRecord(preview?.result);
+  const previewRows = Array.isArray(previewResult.rows) ? previewResult.rows.length : 0;
+  const contextQuestion = researchScopeFromContext(context.userProvidedContext, investigation.question);
+  const actionMode = typeof context.actionMode === 'string' ? context.actionMode : undefined;
+  const sourceName = String(metrics.context ?? focusBlock.title ?? investigation.sourceBlockId ?? 'selected app result');
+  const activeFilters = String(context.activeFilterSummary ?? formatActiveFilterContext(asUiRecord(context.activeFilters)));
+  const reportType = researchIntentTitle(investigation.intent, actionMode);
+  const title = researchReportDisplayTitle(investigation, contextQuestion, actionMode, sourceName);
+  const scope = researchReportScopeLine(reportType, contextQuestion, sourceName, activeFilters);
+  const summary = investigation.summary?.trim()
+    || `DQL wrote review-required analysis for ${sourceName}: ${investigation.question}. The selected app result is available, but this analysis still needs human review before it becomes governed business logic.`;
+  const recommendation = investigation.recommendation?.trim()
+    || 'Use this as analyst-reviewed analysis first. Confirm the metric grain, filters, source tables, and caveats before adding it to the app or drafting a reusable DQL block.';
+  const keyNumbers = [
+    {
+      label: String(metrics.currentLabel ?? 'Current'),
+      value: formatResearchValue(metrics.currentValue),
+      detail: String(metrics.currentDetail ?? 'current selected result'),
+    },
+    {
+      label: String(metrics.baselineLabel ?? 'Baseline'),
+      value: formatResearchValue(metrics.baselineValue),
+      detail: String(metrics.baselineDetail ?? 'comparison or prior value'),
+    },
+    {
+      label: String(metrics.deltaLabel ?? 'Delta'),
+      value: formatResearchValue(metrics.delta),
+      detail: String(metrics.deltaDetail ?? 'change or gap to explain'),
+    },
+    { label: 'Preview', value: previewRows ? `${previewRows} rows` : 'not captured', detail: 'bounded preview sample' },
+  ].filter(isMeaningfulReportMetric);
+  const drivers = buildResearchReportDrivers(investigation);
+  const hasReportEvidence = previewRows > 0 || keyNumbers.length > 0 || drivers.length > 0 || Object.keys(metrics).length > 0;
+  const normalizedSections = normalizeResearchReportSections(investigation.reportSections)
+    .filter((section) => shouldShowResearchReportSection(section, investigation.error, hasReportEvidence));
+  return {
+    title,
+    intent: investigation.intent,
+    actionMode,
+    scope,
+    summary,
+    recommendation,
+    routeDecision,
+    sections: normalizedSections,
+    previewIssue: previewIssueForReport(investigation.error, typeof planner.sqlErrorKind === 'string' ? planner.sqlErrorKind : undefined, hasReportEvidence),
+    contextFacts: [
+      { label: 'Type', value: reportType },
+      { label: 'Source', value: sourceName },
+      { label: 'Filters', value: activeFilters },
+      { label: 'Review', value: formatBusinessLabel(investigation.reviewStatus) },
+    ],
+    keyNumbers,
+    drivers,
+  };
+}
+
+function analysisRouteDecisionForReport(
+  context: Record<string, unknown>,
+  evidence: Record<string, unknown>,
+  planner: Record<string, unknown>,
+): { mode: string; reason: string; nextAction: string; confidence?: number } | null {
+  const originatingAnswer = asUiRecord(context.originatingAnswer);
+  const raw = asUiRecord(context.routeDecision);
+  const fallback = asUiRecord(originatingAnswer.decision);
+  const evidenceDecision = asUiRecord(evidence.routeDecision);
+  const plannerDecision = asUiRecord(planner.routeDecision);
+  const decision = Object.keys(raw).length ? raw
+    : Object.keys(fallback).length ? fallback
+      : Object.keys(evidenceDecision).length ? evidenceDecision
+        : Object.keys(plannerDecision).length ? plannerDecision
+          : {};
+  const reason = typeof decision.reason === 'string' ? decision.reason.trim() : '';
+  const nextAction = typeof decision.nextAction === 'string' ? decision.nextAction.trim() : '';
+  if (!reason && !nextAction) return null;
+  const mode = typeof decision.mode === 'string' && decision.mode.trim()
+    ? formatBusinessLabel(decision.mode)
+    : 'Analysis';
+  const confidence = typeof decision.confidence === 'number' && Number.isFinite(decision.confidence)
+    ? Math.round(Math.max(0, Math.min(1, decision.confidence)) * 100)
+    : undefined;
+  return { mode, reason, nextAction, confidence };
+}
+
+function appAnalysisHandoffFromInvestigation(investigation: LocalAppInvestigation): AppAnalysisHandoff {
+  const context = asUiRecord(investigation.context);
+  const evidence = asUiRecord(investigation.evidence);
+  const planner = asUiRecord(evidence.planner);
+  const routeDecision = analysisRouteDecisionForReport(context, evidence, planner);
+  const actionMode = context.actionMode === 'block'
+    ? 'block'
+    : context.actionMode === 'evidence'
+      ? 'evidence'
+      : 'research';
+  const userContext = typeof context.userProvidedContext === 'string' && context.userProvidedContext.trim()
+    ? context.userProvidedContext.trim()
+    : investigation.question;
+  const question = researchScopeFromContext(userContext, investigation.question)
+    || stripResearchTitlePrefix(investigation.title)
+    || stripResearchTitlePrefix(investigation.question)
+    || 'Refine this analysis';
+  return {
+    mode: actionMode,
+    question,
+    context: userContext,
+    decision: routeDecision
+      ? {
+        reason: routeDecision.reason,
+        nextAction: routeDecision.nextAction,
+      }
+      : undefined,
+  };
+}
+
+function previewIssueForReport(error?: string, kind?: string, hasCertifiedEvidence = false): { message: string; canRebuild: boolean } | null {
+  const detail = error?.trim();
+  if (!detail) return null;
+  if (hasCertifiedEvidence && (kind === 'runtime_unavailable' || kind === 'unknown' || /\bAI provider did not return a governed answer\b/i.test(detail))) {
+    return null;
+  }
+  if (kind === 'runtime_unavailable') {
+    return {
+      message: 'Preview could not run because the warehouse or execution runtime is unavailable. Resume or choose an active warehouse, then refresh the report. The SQL may not need to change.',
+      canRebuild: false,
+    };
+  }
+  if (kind === 'timeout') {
+    return {
+      message: 'Preview timed out. Narrow filters or simplify the SQL in the trace appendix, then refresh before promoting this report.',
+      canRebuild: false,
+    };
+  }
+  if (kind === 'safety') {
+    return {
+      message: 'DQL blocked this preview because the SQL is not safe read-only analytical SQL. Rebuild from the certified block or edit it as a SELECT/WITH query before refreshing.',
+      canRebuild: true,
+    };
+  }
+  return {
+    message: 'SQL preview needs review. Edit the SQL in the trace appendix or rebuild it from the certified block context before promoting this report.',
+    canRebuild: true,
+  };
+}
+
+function shouldShowResearchReportSection(
+  section: NonNullable<LocalAppInvestigation['reportSections']>[number],
+  error: string | undefined,
+  hasReportEvidence: boolean,
+): boolean {
+  const sectionId = String(section.id ?? '').toLowerCase();
+  if (section.kind === 'review_boundary' || sectionId === 'review-boundary') {
+    return false;
+  }
+  if (sectionId === 'preview-unavailable' && hasReportEvidence) {
+    return false;
+  }
+  if (
+    sectionId === 'sql-repair-path' &&
+    hasReportEvidence &&
+    /\bAI provider did not return a governed answer\b/i.test(error ?? '')
+  ) {
+    return false;
+  }
+  return true;
+}
+
+function isMeaningfulReportMetric(metric: { label: string; value: string; detail: string }): boolean {
+  const value = metric.value.trim().toLowerCase();
+  return Boolean(value) && value !== 'n/a' && value !== 'not captured' && value !== 'not available';
+}
+
+function researchReportDisplayTitle(
+  investigation: LocalAppInvestigation,
+  contextQuestion: string,
+  actionMode: string | undefined,
+  sourceName: string,
+): string {
+  const cleanQuestion = stripResearchTitlePrefix(contextQuestion)
+    || stripResearchTitlePrefix(investigation.title)
+    || stripResearchTitlePrefix(investigation.question);
+  const label = actionMode === 'block'
+    ? 'Reusable logic'
+    : actionMode === 'evidence'
+      ? 'Proof brief'
+      : 'Analysis';
+  const fallback = formatBusinessLabel(sourceName);
+  const core = cleanQuestion || fallback;
+  return `${label}: ${truncateReportTitle(core)}`;
+}
+
+function researchReportScopeLine(
+  reportType: string,
+  contextQuestion: string,
+  sourceName: string,
+  activeFilters: string,
+): string {
+  const question = stripResearchTitlePrefix(contextQuestion);
+  const parts = [
+    question ? `Question: ${question}` : '',
+    `Source: ${sourceName}`,
+    activeFilters && activeFilters !== 'No app filters set' ? `Filters: ${activeFilters}` : '',
+    `Status: ${reportType} / review-required`,
+  ].filter(Boolean);
+  return parts.join(' · ');
+}
+
+function stripResearchTitlePrefix(value?: string | null): string {
+  return cleanResearchScopeText(String(value ?? ''))
+    .replace(/^(analysis|report|research|proof|proof brief|reusable logic|reusable logic brief|change analysis|driver analysis|segment comparison|entity drilldown|anomaly review|validation result)\s*:\s*/i, '')
+    .replace(/^(analysis goal|analysis question|report question|research question|proof question|evidence question|validation question|reusable block goal|business question|question)\s*:\s*/i, '')
+    .trim();
+}
+
+function truncateReportTitle(value: string): string {
+  const clean = value.replace(/\s+/g, ' ').trim();
+  if (clean.length <= 96) return clean;
+  const clipped = clean.slice(0, 96).replace(/\s+\S*$/, '').trim();
+  return `${clipped || clean.slice(0, 96)}...`;
+}
+
+function researchIntentTitle(intent: LocalAppInvestigation['intent'], actionMode?: string): string {
+  if (actionMode === 'evidence') return 'Proof Brief';
+  if (actionMode === 'block') return 'Reusable Logic Brief';
+  if (intent === 'diagnose_change') return 'Change Analysis';
+  if (intent === 'segment_compare') return 'Segment Comparison';
+  if (intent === 'entity_drilldown') return 'Entity Drilldown';
+  if (intent === 'anomaly_investigation') return 'Anomaly Review';
+  if (intent === 'trust_gap_review') return 'Proof Review';
+  return 'Driver Analysis';
+}
+
+function buildResearchReportDrivers(investigation: LocalAppInvestigation): Array<{ title: string; value: string; explanation: string }> {
+  const cards = (investigation.driverCards ?? [])
+    .map(asUiRecord)
+    .filter((item) => Object.keys(item).length > 0);
+  if (cards.length) {
+    return cards.slice(0, 8).map((record, index) => ({
+      title: String(record.title ?? `Driver ${index + 1}`),
+      value: String(record.contribution ?? record.value ?? record.metric ?? 'Proof'),
+      explanation: String(record.explanation ?? 'Review this driver against the source rows and metric grain.'),
+    }));
+  }
+  const preview = firstResearchPreview(investigation);
+  const result = asUiRecord(preview?.result);
+  const rows = Array.isArray(result.rows) ? result.rows.map(asUiRecord).filter((row) => Object.keys(row).length > 0) : [];
+  return rows.slice(0, 5).map((row, index) => {
+    const keys = Object.keys(row);
+    const titleKey = keys.find((key) => /name|player|customer|account|segment|team/i.test(key)) ?? keys[0] ?? `row_${index + 1}`;
+    const valueKey = keys.find((key) => /point|revenue|total|score|value|delta|count/i.test(key) && key !== titleKey) ?? keys[1] ?? titleKey;
+    return {
+      title: String(row[titleKey] ?? `Preview row ${index + 1}`),
+      value: formatResearchValue(row[valueKey]),
+      explanation: `This row is part of the bounded preview sample for ${formatBusinessLabel(valueKey)}.`,
+    };
+  });
+}
+
+function buildResearchMemo(report: ReturnType<typeof buildResearchReport>): string {
+  if (report.sections.length > 0) {
+    return report.sections.map((section) => {
+      const bullets = section.bullets?.length
+        ? `\n\n${section.bullets.map((bullet) => `- ${bullet}`).join('\n')}`
+        : '';
+      return `## ${section.title}\n${section.body}${bullets}`;
+    }).join('\n\n');
+  }
+  const topNumber = report.keyNumbers.find((metric) => metric.value !== 'not available' && metric.label !== 'Preview');
+  const comparison = report.keyNumbers.find((metric) => /baseline|comparison|next/i.test(metric.label) && metric.value !== 'not available');
+  const gap = report.keyNumbers.find((metric) => /delta|gap|change/i.test(metric.label) && metric.value !== 'not available');
+  const leadDriver = report.drivers[0];
+  const nextDriver = report.drivers[1];
+  const source = report.contextFacts.find((fact) => fact.label === 'Source')?.value;
+  const filters = report.contextFacts.find((fact) => fact.label === 'Filters')?.value;
+  const evidenceLine = [
+    topNumber ? `${topNumber.label}: ${topNumber.value} (${topNumber.detail})` : '',
+    comparison ? `${comparison.label}: ${comparison.value} (${comparison.detail})` : '',
+    gap ? `${gap.label}: ${gap.value} (${gap.detail})` : '',
+  ].filter(Boolean).join('; ');
+  const driverLine = leadDriver
+    ? `${leadDriver.title} is the strongest visible driver in this bounded preview${leadDriver.value ? ` (${leadDriver.value})` : ''}.${nextDriver ? ` The next visible comparison is ${nextDriver.title}${nextDriver.value ? ` (${nextDriver.value})` : ''}.` : ''}`
+    : 'The report does not yet have ranked drivers. Add a clearer metric, time grain, or segment field before treating the analysis as complete.';
+  const contextLine = [
+    source ? `source: ${source}` : '',
+    filters ? `filters: ${filters}` : '',
+  ].filter(Boolean).join('; ');
+  const decisionHeading = report.actionMode === 'block'
+    ? '## Reusable logic decision'
+    : report.actionMode === 'evidence' || report.intent === 'trust_gap_review'
+      ? '## Validation result'
+      : '## Business interpretation';
+  const decisionText = report.actionMode === 'block'
+    ? 'This is a candidate reusable block design, not a certified answer yet. Preserve the business question, parameter defaults, allowed filters, output grain, and proof path before certification.'
+    : report.actionMode === 'evidence' || report.intent === 'trust_gap_review'
+      ? `The claim should be treated as validated only inside this bounded analysis context${contextLine ? ` (${contextLine})` : ''}. Use the appendix when a reviewer needs SQL, preview rows, caveats, or source trace.`
+      : `${driverLine} Treat the conclusion as a directional stakeholder explanation until the analyst confirms SQL, grain, filters, joins, and lineage.`;
+  const sections: string[] = [
+    '## Executive answer',
+    report.summary,
+    decisionHeading,
+    decisionText,
+  ];
+  if (evidenceLine) {
+    sections.push('## Key numbers', `The bounded preview shows ${evidenceLine}. These numbers are useful for review and stakeholder framing but still need source validation before promotion.`);
+  }
+  sections.push(
+    '## Recommended next step',
+    report.recommendation,
+    '## Review boundary',
+    'This report is AI-generated and review-required. Use it to guide analysis, then validate SQL, grain, filters, joins, and source proof before pinning it to the app or turning it into a reusable DQL block.',
+  );
+  return sections.join('\n\n');
+}
+
+function ResearchReportSections({
+  sections,
+}: {
+  sections: ReturnType<typeof buildResearchReport>['sections'];
+}) {
   return (
-    <div className="dql-app-research-metricstrip">
-      <MiniMetric label="Current" value={formatResearchValue(metrics.currentValue)} />
-      <MiniMetric label="Baseline" value={formatResearchValue(metrics.baselineValue)} />
-      <MiniMetric label="Delta" value={formatResearchValue(metrics.delta)} />
-      <MiniMetric label="Context" value={String(metrics.context ?? investigation.sourceBlockId ?? 'Tile')} />
+    <div className="dql-app-report-dynamic-sections">
+      {sections.map((section) => (
+        <section key={section.id} className={`dql-app-report-dynamic-section tone-${section.tone ?? 'neutral'}`}>
+          <div className="dql-app-report-dynamic-head">
+            <span>{reportSectionKicker(section)}</span>
+            <h3>{section.title}</h3>
+          </div>
+          <MemoSectionBody text={section.body} />
+          {section.bullets?.length ? (
+            <ul>
+              {section.bullets.map((bullet) => <li key={bullet}>{bullet}</li>)}
+            </ul>
+          ) : null}
+        </section>
+      ))}
     </div>
   );
+}
+
+function MemoSectionBody({ text }: { text: string }) {
+  const paragraphs = text
+    .split(/\n{2,}/)
+    .map((paragraph) => paragraph.replace(/\s*\n\s*/g, ' ').trim())
+    .filter(Boolean);
+  if (!paragraphs.length) return null;
+  return (
+    <div className="dql-app-report-memo-body">
+      {paragraphs.map((paragraph) => <p key={paragraph}>{paragraph}</p>)}
+    </div>
+  );
+}
+
+function reportSectionKicker(section: NonNullable<LocalAppInvestigation['reportSections']>[number]): string {
+  switch (section.kind) {
+    case 'executive_answer':
+      return 'Answer';
+    case 'business_interpretation':
+      return 'Interpretation';
+    case 'key_numbers':
+      return 'Numbers';
+    case 'validation':
+      return 'Proof';
+    case 'reusable_logic':
+      return 'Reusable logic';
+    case 'recommended_next_step':
+      return 'Next step';
+    case 'review_boundary':
+      return 'Review boundary';
+    default:
+      if (/focus/i.test(section.title)) return 'Scope';
+      if (/repair|preview|sql/i.test(section.title)) return 'Appendix note';
+      return 'Report note';
+  }
+}
+
+function normalizeResearchReportSections(value: LocalAppInvestigation['reportSections']): Array<NonNullable<LocalAppInvestigation['reportSections']>[number]> {
+  if (!Array.isArray(value)) return [];
+  return value
+    .filter((section): section is NonNullable<LocalAppInvestigation['reportSections']>[number] => {
+      return Boolean(section)
+        && typeof section.title === 'string'
+        && section.title.trim().length > 0
+        && typeof section.body === 'string'
+        && section.body.trim().length > 0;
+    })
+    .slice(0, 8)
+    .map((section, index) => ({
+      ...section,
+      id: section.id || `section-${index + 1}`,
+      title: section.title.trim(),
+      body: section.body.trim(),
+      bullets: Array.isArray(section.bullets) ? section.bullets.filter(Boolean).slice(0, 8) : undefined,
+      evidenceRefs: Array.isArray(section.evidenceRefs) ? section.evidenceRefs.filter(Boolean).slice(0, 8) : undefined,
+    }));
+}
+
+function ResearchDriverChart({ drivers }: { drivers: Array<{ title: string; value: string; explanation: string }> }) {
+  if (!drivers.length) {
+    return <p className="dql-app-report-muted">No ranked drivers are available yet. Refresh the report after adding a clearer metric, time grain, or comparison group.</p>;
+  }
+  const rows = drivers.slice(0, 6).map((driver) => ({
+    ...driver,
+    numericValue: Math.abs(numberFromReportValue(driver.value)),
+  }));
+  const maxValue = Math.max(...rows.map((row) => row.numericValue), 0);
+  return (
+    <div className="dql-app-report-driver-chart" aria-label="Report driver chart">
+      {rows.map((driver, index) => {
+        const width = maxValue > 0 ? Math.max(8, Math.round((driver.numericValue / maxValue) * 100)) : 28;
+        return (
+          <div key={`${driver.title}-${index}`} className="dql-app-report-driver-bar">
+            <div>
+              <b>{driver.title}</b>
+              <span>{driver.value}</span>
+            </div>
+            <i style={{ '--driver-width': `${width}%` } as CSSProperties} />
+            <p>{driver.explanation}</p>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+function numberFromReportValue(value: string): number {
+  const match = value.replace(/,/g, '').match(/-?\+?\d+(?:\.\d+)?/);
+  if (!match) return 0;
+  const number = Number(match[0].replace(/^\+/, ''));
+  return Number.isFinite(number) ? number : 0;
+}
+
+function formatActiveFilterContext(filters: Record<string, unknown>): string {
+  const entries = Object.entries(filters).filter(([key]) => key !== 'smartView');
+  if (!entries.length) return 'No app filters set';
+  return entries.map(([key, value]) => `${formatBusinessLabel(key)} ${formatVariableEntryValue(key, value)}`).join(', ');
 }
 
 function ResearchEvidence({
@@ -2391,8 +3620,8 @@ function ResearchEvidence({
     const trust = asUiRecord(evidence.trustStatus);
     return (
       <div className="dql-app-research-assumptions">
-        {assumptions.length ? assumptions.map((item, index) => <p key={index}>{String(item)}</p>) : <p>Run the investigation to capture assumptions.</p>}
-        <KeyValueInline label="Trust" value={String(trust.label ?? 'AI-generated research')} />
+        {assumptions.length ? assumptions.map((item, index) => <p key={index}>{String(item)}</p>) : <p>Refresh the report to capture assumptions.</p>}
+        <KeyValueInline label="Trust" value={String(trust.label ?? 'AI-generated report')} />
         <KeyValueInline label="Review" value={investigation.reviewStatus} />
       </div>
     );
@@ -2413,11 +3642,11 @@ function ResearchEvidence({
 
 function ResearchPreviewTable({ investigation }: { investigation: LocalAppInvestigation }) {
   const preview = firstResearchPreview(investigation);
-  if (!preview) return <EmptyPanel title="No preview rows yet." detail="Run the investigation with SQL or selected tile results to capture evidence." compact />;
+  if (!preview) return <EmptyPanel title="No preview rows yet." detail="Refresh the report with SQL or selected tile results to capture proof." compact />;
   const result = asUiRecord(preview.result);
   const rows = Array.isArray(result.rows) ? result.rows.map(asUiRecord).filter((row): row is Record<string, unknown> => Boolean(row)).slice(0, 8) : [];
   const columns = Array.isArray(result.columns) ? result.columns.map(String).slice(0, 8) : Object.keys(rows[0] ?? {}).slice(0, 8);
-  if (!rows.length || !columns.length) return <EmptyPanel title="No preview rows yet." detail="The investigation captured evidence, but no row preview was available." compact />;
+  if (!rows.length || !columns.length) return <EmptyPanel title="No preview rows yet." detail="The report captured proof, but no row preview was available." compact />;
   return (
     <div className="dql-app-research-table">
       <table>
@@ -2443,7 +3672,53 @@ function firstResearchPreview(investigation: LocalAppInvestigation): Record<stri
 
 function upsertInvestigation(items: LocalAppInvestigation[], next: LocalAppInvestigation): LocalAppInvestigation[] {
   const without = items.filter((item) => item.id !== next.id);
-  return [next, ...without].sort((a, b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime());
+  return sortResearchInvestigations([next, ...without]);
+}
+
+function sortResearchInvestigations(items: LocalAppInvestigation[]): LocalAppInvestigation[] {
+  return [...items].sort((a, b) => researchTimestamp(b) - researchTimestamp(a));
+}
+
+function researchTimestamp(item: LocalAppInvestigation): number {
+  const value = new Date(item.updatedAt || item.lastRunAt || item.createdAt).getTime();
+  return Number.isFinite(value) ? value : 0;
+}
+
+function formatResearchListTitle(item: LocalAppInvestigation): string {
+  const cleaned = item.title
+    .replace(/^\s*(write\s+the\s+report\s+brief|the\s+research\s+question|research\s+question)\s*:\s*/i, '')
+    .replace(/^\s*research\b/i, 'Analysis')
+    .replace(/^\s*report\b/i, 'Analysis')
+    .trim();
+  const title = formatBusinessLabel(cleaned || item.title);
+  if (title.length <= 64) return title;
+  return `${title.slice(0, 61).trim()}...`;
+}
+
+function formatResearchListMeta(item: LocalAppInvestigation): string {
+  const status = item.status === 'error'
+    ? 'Needs SQL review'
+    : item.status === 'ready'
+      ? 'Ready'
+      : item.status === 'running'
+        ? 'Running'
+        : 'Draft';
+  const time = formatResearchAge(item.updatedAt || item.lastRunAt || item.createdAt);
+  return `${formatBusinessLabel(item.intent)} / ${status}${time ? ` / ${time}` : ''}`;
+}
+
+function formatResearchAge(value?: string): string {
+  if (!value) return '';
+  const time = new Date(value).getTime();
+  if (!Number.isFinite(time)) return '';
+  const diff = Math.max(0, Date.now() - time);
+  const minutes = Math.floor(diff / 60000);
+  if (minutes < 1) return 'just now';
+  if (minutes < 60) return `${minutes}m ago`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours}h ago`;
+  const days = Math.floor(hours / 24);
+  return `${days}d ago`;
 }
 
 function researchIntentFromPrompt(text: string): LocalAppInvestigation['intent'] {
@@ -2454,32 +3729,6 @@ function researchIntentFromPrompt(text: string): LocalAppInvestigation['intent']
   if (/\b(customer|account|user|client|alice|johnson|entity)\b/.test(value)) return 'entity_drilldown';
   if (/\b(why|changed|change|drop|decline|increase|decrease)\b/.test(value)) return 'diagnose_change';
   return 'driver_breakdown';
-}
-
-function blockForInvestigationRequest<T extends { blockId: string; title: string }>(
-  blocks: T[],
-  request: AgentAnswerInvestigationRequest,
-): T | null {
-  const explicitName = normalizeSearchText(request.blockName);
-  if (explicitName) {
-    const exact = blocks.find((block) => normalizeSearchText(block.blockId) === explicitName || normalizeSearchText(block.title) === explicitName);
-    if (exact) return exact;
-  }
-  const question = normalizeSearchText(request.question);
-  if (!question) return null;
-  return [...blocks]
-    .sort((a, b) => b.title.length - a.title.length)
-    .find((block) => {
-      const title = normalizeSearchText(block.title);
-      const blockId = normalizeSearchText(block.blockId);
-      return Boolean((title && question.includes(title)) || (blockId && question.includes(blockId)));
-    }) ?? null;
-}
-
-function normalizeSearchText(value: unknown): string {
-  return typeof value === 'string'
-    ? value.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim()
-    : '';
 }
 
 function formatResearchValue(value: unknown): string {
@@ -2590,41 +3839,6 @@ function planFromSelection(
   };
 }
 
-function updateGeneratedPlanTileViz(
-  current: GenerateAppResponse,
-  tileId: string,
-  viz: string,
-): GenerateAppResponse {
-  return {
-    ...current,
-    plan: {
-      ...current.plan,
-      pages: current.plan.pages.map((page) => ({
-        ...page,
-        tiles: page.tiles.map((tile) => {
-          if (tile.id !== tileId) return tile;
-          return {
-            ...tile,
-            viz,
-            display: tile.display
-              ? {
-                  ...tile.display,
-                  recommendedDisplayType: viz,
-                  genUi: tile.display.genUi
-                    ? {
-                        ...tile.display.genUi,
-                        defaultVisualization: viz,
-                      }
-                    : tile.display.genUi,
-                }
-              : tile.display,
-          };
-        }),
-      })),
-    },
-  };
-}
-
 function libraryCounts(apps: AppSummary[], favorites: Set<string>): Record<LibraryFilter, number> {
   return {
     all: apps.length,
@@ -2673,7 +3887,8 @@ const APP_STYLES = `
   --border-color: var(--dql-app-line);
   flex: 1;
   min-height: 0;
-  overflow: auto;
+  overflow-x: hidden;
+  overflow-y: auto;
   background: var(--dql-app-canvas);
   color: var(--dql-app-ink);
   font-family: var(--font-ui);
@@ -2773,63 +3988,122 @@ const APP_STYLES = `
 .dql-apps-btn-icon.on { color: var(--dql-app-accent); border-color: rgba(79, 99, 215, 0.34); background: var(--dql-app-accent-soft); }
 .dql-apps-btn-dark { width: 100%; background: var(--dql-app-deep); border-color: #1f2937; color: #fff; margin-top: 12px; }
 
-.dql-apps-startgrid {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 10px;
-  margin-top: 16px;
-}
-
-.dql-apps-start-option {
-  min-height: 72px;
-  text-align: left;
-  display: grid;
-  grid-template-columns: 34px minmax(0, 1fr) auto;
-  align-items: center;
-  gap: 10px;
-  border: 1px solid var(--dql-app-line);
-  border-radius: 8px;
+.dql-apps-ai-entry {
+  margin-top: 18px;
+  border: 1px solid rgba(79, 99, 215, 0.26);
+  border-radius: 12px;
   background: var(--dql-app-surface);
   box-shadow: var(--dql-app-shadow);
-  padding: 12px;
-  cursor: pointer;
-  color: var(--dql-app-ink);
+  padding: 16px;
+  display: grid;
+  gap: 12px;
 }
 
-.dql-apps-start-option:hover { border-color: var(--dql-app-accent); transform: translateY(-1px); }
-.dql-apps-start-option strong { display: block; font-size: 13px; line-height: 1.2; }
-.dql-apps-start-option p { margin: 3px 0 0; color: var(--dql-app-muted); font-size: 11.5px; line-height: 1.35; }
-.dql-apps-option-icon {
-  width: 34px;
-  height: 34px;
-  border-radius: 7px;
+.dql-apps-ai-entry-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.dql-apps-ai-entry-head span,
+.dql-apps-ai-entry-head b {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font: 850 11px var(--font-ui);
+}
+
+.dql-apps-ai-entry-head span {
+  color: var(--dql-app-accent);
+}
+
+.dql-apps-ai-entry-head b {
+  color: var(--dql-app-green);
+}
+
+.dql-apps-ai-entry-box {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: end;
+  gap: 12px;
+}
+
+.dql-apps-ai-entry-box textarea {
+  width: 100%;
+  min-height: 112px;
+  resize: vertical;
+  border: 1px solid var(--dql-app-line-2);
+  border-radius: 10px;
+  background: var(--dql-app-control);
+  color: var(--dql-app-ink);
+  outline: 0;
+  padding: 13px 14px;
+  font: 540 15px/1.5 var(--font-ui);
+}
+
+.dql-apps-ai-entry-box textarea:focus {
+  border-color: rgba(79, 99, 215, 0.52);
+  box-shadow: 0 0 0 3px rgba(79, 99, 215, 0.1);
+}
+
+.dql-apps-ai-entry-box button {
+  height: 46px;
+  border: 0;
+  border-radius: 10px;
+  background: var(--dql-app-accent);
+  color: #fff;
+  padding: 0 16px;
   display: inline-flex;
   align-items: center;
   justify-content: center;
+  gap: 7px;
+  font: 800 12.5px var(--font-ui);
+  cursor: pointer;
+  box-shadow: 0 12px 26px rgba(79, 99, 215, 0.2);
+}
+
+.dql-apps-ai-entry-box button:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.dql-apps-ai-entry-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.dql-apps-ai-entry-foot > div {
+  min-width: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.dql-apps-ai-entry-foot button {
+  border: 1px solid var(--dql-app-line);
+  border-radius: 999px;
+  background: var(--dql-app-surface);
+  color: var(--dql-app-muted);
+  padding: 6px 9px;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font: 750 11.5px var(--font-ui);
+  cursor: pointer;
+}
+
+.dql-apps-ai-entry-foot button:hover {
   color: var(--dql-app-accent);
+  border-color: rgba(79, 99, 215, 0.32);
   background: var(--dql-app-accent-soft);
 }
 
-.dql-apps-option-copy {
-  min-width: 0;
-}
-
-.dql-apps-option-meta {
-  display: flex;
-  align-items: center;
-  justify-content: flex-end;
-  gap: 6px;
-  font-size: 11px;
-  color: var(--dql-app-faint);
-}
-
-.dql-apps-option-meta b {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  color: var(--dql-app-accent);
-  font-size: 11.5px;
-  white-space: nowrap;
+.dql-apps-ai-entry-secondary {
+  flex: none;
+  color: var(--dql-app-ink) !important;
 }
 
 .dql-apps-sectionhead {
@@ -3233,6 +4507,27 @@ const APP_STYLES = `
   box-sizing: border-box;
 }
 
+.dql-app-promote-popover {
+  position: absolute;
+  right: 0;
+  top: calc(100% + 8px);
+  z-index: 21;
+  max-width: min(360px, 80vw);
+  border: 1px solid rgba(22, 163, 74, 0.28);
+  border-radius: 8px;
+  background: var(--dql-app-green-soft);
+  color: var(--dql-app-ink);
+  box-shadow: var(--dql-app-shadow);
+  padding: 10px 12px;
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.dql-app-promote-popover.error {
+  border-color: rgba(202, 138, 4, 0.28);
+  background: var(--dql-app-orange-soft);
+}
+
 .dql-app-persona {
   display: inline-flex;
   align-items: center;
@@ -3263,6 +4558,261 @@ const APP_STYLES = `
 }
 
 .dql-app-create-workspace.classic { grid-template-columns: 286px minmax(420px, 1fr) 320px; }
+.dql-app-create-workspace.clean {
+  display: block;
+  min-height: calc(100vh - 56px);
+  overflow: auto;
+  padding: 26px;
+  background: var(--dql-app-canvas);
+}
+
+.dql-app-ai-start {
+  max-width: 1260px;
+  margin: 0 auto;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(320px, 380px);
+  gap: 18px;
+  align-items: start;
+}
+
+.dql-app-ai-start-main {
+  min-width: 0;
+  display: grid;
+  gap: 14px;
+}
+
+.dql-app-ai-start-copy h1 {
+  margin: 0 0 7px;
+  color: var(--dql-app-ink);
+  font-size: clamp(30px, 4vw, 52px);
+  line-height: 0.98;
+  letter-spacing: 0;
+}
+
+.dql-app-ai-start-copy p {
+  margin: 0;
+  max-width: 650px;
+  color: var(--dql-app-muted);
+  font-size: 14px;
+  line-height: 1.55;
+}
+
+.dql-app-ai-start-card {
+  position: relative;
+  border: 1px solid rgba(79, 99, 215, 0.32);
+  border-radius: 12px;
+  background: var(--dql-app-surface);
+  box-shadow: var(--dql-app-shadow);
+  padding: 18px 76px 18px 18px;
+}
+
+.dql-app-ai-start-card textarea {
+  width: 100%;
+  min-height: 124px;
+  resize: vertical;
+  border: 0;
+  outline: 0;
+  background: transparent;
+  color: var(--dql-app-ink);
+  padding: 0;
+  font: 520 18px/1.45 var(--font-ui);
+}
+
+.dql-app-ai-start-send {
+  position: absolute;
+  right: 18px;
+  bottom: 18px;
+  width: 46px;
+  height: 46px;
+  border: 0;
+  border-radius: 999px;
+  background: var(--dql-app-accent);
+  color: white;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  box-shadow: 0 14px 30px rgba(79, 99, 215, 0.24);
+}
+
+.dql-app-ai-start-send:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.dql-app-ai-start-examples {
+  padding-left: 2px;
+}
+
+.dql-app-ai-start-advanced {
+  border: 1px solid var(--dql-app-line);
+  border-radius: 8px;
+  background: var(--dql-app-surface);
+  padding: 0 12px;
+}
+
+.dql-app-ai-start-advanced .dql-app-palette {
+  max-height: 340px;
+  margin: 0 0 12px;
+}
+
+.dql-app-ai-start-result {
+  margin: 0;
+}
+
+.dql-app-ai-start-context {
+  display: grid;
+  gap: 12px;
+}
+
+.dql-app-ai-context-card {
+  border: 1px solid var(--dql-app-line);
+  border-radius: 10px;
+  background: var(--dql-app-surface);
+  box-shadow: 0 10px 30px rgba(15, 23, 42, 0.04);
+  overflow: hidden;
+}
+
+.dql-app-ai-evidence-list {
+  display: grid;
+  gap: 8px;
+  padding: 12px;
+}
+
+.dql-app-ai-evidence-row {
+  display: grid;
+  grid-template-columns: 30px minmax(0, 1fr) auto;
+  gap: 9px;
+  align-items: start;
+  border: 1px solid var(--dql-app-line);
+  border-radius: 8px;
+  background: var(--dql-app-surface-muted);
+  padding: 10px;
+}
+
+.dql-app-ai-evidence-row > span:first-child {
+  width: 30px;
+  height: 30px;
+  border-radius: 8px;
+  background: var(--dql-app-green-soft);
+  color: var(--dql-app-green);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.dql-app-ai-evidence-row b {
+  display: block;
+  color: var(--dql-app-ink);
+  font-size: 12px;
+  line-height: 1.25;
+}
+
+.dql-app-ai-evidence-row small {
+  display: block;
+  margin-top: 3px;
+  color: var(--dql-app-muted);
+  font-size: 11px;
+  line-height: 1.35;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.dql-app-ai-filter-preview {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+  padding: 12px;
+}
+
+.dql-app-ai-filter-preview span {
+  min-height: 70px;
+  border: 1px solid var(--dql-app-line);
+  border-radius: 8px;
+  background: var(--dql-app-surface-muted);
+  padding: 10px;
+}
+
+.dql-app-ai-filter-preview small {
+  display: block;
+  color: var(--dql-app-faint);
+  font: 800 9.5px var(--font-mono);
+  text-transform: uppercase;
+  margin-bottom: 8px;
+}
+
+.dql-app-ai-filter-preview b {
+  color: var(--dql-app-accent);
+  font-size: 18px;
+  line-height: 1.1;
+}
+
+.dql-app-ai-gap-list {
+  display: grid;
+  gap: 8px;
+  padding: 12px;
+}
+
+.dql-app-ai-gap-list span {
+  display: flex;
+  gap: 8px;
+  color: var(--dql-app-muted);
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.dql-app-ai-gap-list svg {
+  flex: 0 0 auto;
+  margin-top: 1px;
+  color: var(--dql-app-orange);
+}
+
+.dql-app-ai-generated-section {
+  max-width: 1260px;
+  margin: 18px auto 0;
+  display: grid;
+  gap: 12px;
+}
+
+.dql-app-ai-generated-head {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 14px;
+}
+
+.dql-app-ai-generated-head h2 {
+  margin: 0;
+  color: var(--dql-app-ink);
+  font-size: 20px;
+}
+
+.dql-app-ai-generated-head p {
+  margin: 4px 0 0;
+  color: var(--dql-app-muted);
+  font-size: 12.5px;
+}
+
+.dql-app-ai-generated-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(280px, 340px);
+  gap: 14px;
+  align-items: start;
+}
+
+.dql-app-ai-plan-compact {
+  border: 1px solid var(--dql-app-line);
+  border-radius: 10px;
+  background: var(--dql-app-surface);
+  overflow: hidden;
+  box-shadow: 0 10px 30px rgba(15, 23, 42, 0.04);
+}
+
+.dql-app-plan-list.compact {
+  max-height: 520px;
+}
 .dql-app-panel {
   min-height: 0;
   display: flex;
@@ -3325,6 +4875,13 @@ const APP_STYLES = `
   padding: 8px 10px;
   font-size: 12px;
   line-height: 1.45;
+}
+
+.dql-app-ai-result small {
+  display: block;
+  margin-top: 3px;
+  color: var(--dql-app-muted);
+  font: 700 10px var(--font-mono);
 }
 
 .dql-app-composer {
@@ -3790,6 +5347,41 @@ const APP_STYLES = `
 .dql-app-plan-item small { display: block; color: var(--dql-app-faint); font-size: 10px; margin-top: 1px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .dql-app-plan-item em { color: var(--dql-app-faint); font: 700 9px var(--font-mono); text-transform: uppercase; font-style: normal; }
 
+.dql-app-plan-session,
+.dql-app-plan-warning,
+.dql-app-plan-task {
+  border: 1px solid var(--dql-app-line);
+  border-radius: 7px;
+  padding: 8px 9px;
+  background: var(--dql-app-surface-muted);
+  color: var(--dql-app-muted);
+  font-size: 11.5px;
+  line-height: 1.35;
+}
+
+.dql-app-plan-session span {
+  display: block;
+  color: var(--dql-app-ink);
+  font-weight: 800;
+}
+
+.dql-app-plan-session small {
+  display: block;
+  margin-top: 2px;
+  color: var(--dql-app-faint);
+}
+
+.dql-app-plan-warning {
+  border-color: rgba(202, 138, 4, 0.24);
+  background: var(--dql-app-orange-soft);
+}
+
+.dql-app-plan-task {
+  display: flex;
+  align-items: flex-start;
+  gap: 7px;
+}
+
 .dql-app-plan-foot {
   margin-top: auto;
   padding: 14px;
@@ -3916,11 +5508,13 @@ const APP_STYLES = `
   padding: 8px 0 2px;
 }
 
-.dql-app-view-topbar { position: sticky; top: 0; z-index: 4; }
+.dql-app-view-topbar { position: relative; z-index: 4; }
 .dql-app-view-topbar {
   min-height: 48px;
   padding: 7px 22px;
   box-shadow: 0 1px 0 var(--dql-app-line);
+  background: var(--dql-app-surface);
+  backdrop-filter: blur(10px);
 }
 
 .dql-app-crumb { color: var(--dql-app-muted); font: 700 11.5px var(--font-mono); }
@@ -3955,12 +5549,24 @@ const APP_STYLES = `
   text-transform: uppercase;
 }
 
-.dql-app-filter-select select {
+.dql-app-filter-select select,
+.dql-app-filter-select input {
   border: 0;
   background: transparent;
   color: var(--dql-app-ink);
   outline: 0;
   font: 750 12.5px var(--font-ui);
+  min-width: 0;
+  max-width: 110px;
+}
+
+.dql-app-filter-select input[type="number"] {
+  width: 64px;
+}
+
+.dql-app-filter-empty {
+  color: var(--dql-app-faint);
+  font: 750 11px var(--font-ui);
 }
 
 .dql-app-filter-note {
@@ -4216,18 +5822,17 @@ const APP_STYLES = `
 .dql-app-explain-panel {
   position: sticky;
   top: 110px;
-  width: clamp(340px, 27vw, 450px);
-  min-width: 320px;
-  max-width: min(540px, 42vw);
-  min-height: 520px;
-  height: min(680px, calc(100vh - 176px));
-  max-height: calc(100vh - 176px);
-  resize: both;
+  width: clamp(420px, 29vw, 500px);
+  min-width: 390px;
+  max-width: min(520px, 40vw);
+  min-height: 580px;
+  height: calc(100vh - 142px);
+  max-height: calc(100vh - 142px);
   border: 1px solid var(--dql-app-line);
-  border-radius: 8px;
+  border-radius: 16px;
   background: var(--dql-app-surface);
-  overflow: auto;
-  box-shadow: var(--dql-app-shadow);
+  overflow: hidden;
+  box-shadow: 0 20px 60px rgba(15, 23, 42, 0.14);
 }
 
 .dql-app-copilot-panel {
@@ -4239,23 +5844,33 @@ const APP_STYLES = `
 .dql-app-assistant-panel {
   display: flex;
   flex-direction: column;
+  min-height: 0;
   overflow: hidden;
-  background: var(--dql-app-surface);
+  background: linear-gradient(180deg, var(--dql-app-surface), var(--dql-app-surface-muted));
 }
 
 .dql-app-assistant-top {
-  display: flex;
+  display: grid;
+  gap: 11px;
+  padding: 15px 16px;
+  border-bottom: 1px solid var(--dql-app-line);
+  flex: none;
+  background: var(--dql-app-surface);
+}
+
+.dql-app-assistant-title-row {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
   align-items: center;
   gap: 10px;
-  padding: 11px 14px;
-  border-bottom: 1px solid var(--dql-app-line);
 }
 
 .dql-app-assistant-icon {
   flex: none;
-  width: 30px;
-  height: 30px;
-  border-radius: 9px;
+  width: 34px;
+  height: 34px;
+  border-radius: 11px;
   background: var(--dql-app-accent-soft);
   border: 1px solid rgba(79, 99, 215, 0.28);
   color: var(--dql-app-accent);
@@ -4275,14 +5890,14 @@ const APP_STYLES = `
 .dql-app-assistant-kicker {
   color: var(--dql-app-muted);
   font: 800 9px var(--font-mono);
-  letter-spacing: 0.04em;
+  letter-spacing: 0;
   text-transform: uppercase;
 }
 
 .dql-app-assistant-heading h3 {
   margin: 0;
   color: var(--dql-app-ink);
-  font-size: 14px;
+  font-size: 15px;
   line-height: 1.2;
   white-space: nowrap;
   overflow: hidden;
@@ -4290,19 +5905,27 @@ const APP_STYLES = `
 }
 
 .dql-app-assistant-focus {
-  flex: none;
   min-width: 0;
+  display: grid;
+  gap: 5px;
+}
+
+.dql-app-assistant-focus span {
+  color: var(--dql-app-muted);
+  font: 800 9.5px var(--font-mono);
+  letter-spacing: 0;
+  text-transform: uppercase;
 }
 
 .dql-app-assistant-focus select {
-  max-width: 150px;
-  height: 30px;
+  width: 100%;
+  height: 36px;
   border: 1px solid var(--dql-app-line-2);
   border-radius: 8px;
   background: var(--dql-app-surface);
   color: var(--dql-app-ink);
-  padding: 0 8px;
-  font: 700 11.5px var(--font-ui);
+  padding: 0 10px;
+  font: 750 12px var(--font-ui);
   cursor: pointer;
 }
 
@@ -4350,17 +5973,396 @@ const APP_STYLES = `
   gap: 6px;
 }
 
-.dql-app-assistant-chat {
-  flex: 1;
-  min-height: 260px;
-  display: flex;
-  flex-direction: column;
-  padding: 0 16px 14px;
-}
-
-.dql-app-assistant-chat > div {
+.dql-app-one-ai-panel {
   flex: 1;
   min-height: 0;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  padding: 0;
+  background: var(--dql-app-surface);
+}
+
+.dql-app-one-ai-status {
+  margin: 0;
+  display: grid;
+  gap: 6px;
+  padding: 10px 16px;
+  border-bottom: 1px solid var(--dql-app-line);
+  background: color-mix(in srgb, var(--dql-app-surface-muted) 72%, var(--dql-app-surface));
+  flex: none;
+}
+
+.dql-app-one-ai-status span {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--dql-app-green);
+  font: 850 11px var(--font-ui);
+}
+
+.dql-app-one-ai-status > div {
+  display: flex;
+  flex-wrap: nowrap;
+  gap: 6px;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+
+.dql-app-one-ai-status > div::-webkit-scrollbar {
+  display: none;
+}
+
+.dql-app-one-ai-status b {
+  flex: none;
+  min-width: 0;
+  max-width: 190px;
+  border: 1px solid var(--dql-app-line);
+  border-radius: 999px;
+  background: var(--dql-app-surface);
+  color: var(--dql-app-faint);
+  font: 750 10.5px var(--font-ui);
+  padding: 4px 8px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.dql-app-copilot-thread {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  padding: 16px 0 20px;
+}
+
+.dql-app-direct-ask {
+  margin-top: 0;
+  z-index: 4;
+  border-top: 1px solid var(--dql-app-line);
+  padding: 14px 16px 16px;
+  display: grid;
+  gap: 8px;
+  flex: none;
+  background: color-mix(in srgb, var(--dql-app-surface) 92%, transparent);
+  backdrop-filter: blur(10px);
+  box-shadow: 0 -12px 28px rgba(15, 23, 42, 0.05);
+}
+
+.dql-app-direct-ask-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+  align-items: end;
+}
+
+.dql-app-direct-ask-row textarea {
+  width: 100%;
+  min-height: 96px;
+  max-height: 150px;
+  resize: vertical;
+  border: 1px solid var(--dql-app-line-2);
+  border-radius: 12px;
+  background: var(--dql-app-surface);
+  color: var(--dql-app-ink);
+  padding: 12px 13px;
+  font: 500 13.5px/1.45 var(--font-ui);
+  outline: none;
+}
+
+.dql-app-direct-ask-row textarea:focus {
+  border-color: rgba(79, 99, 215, 0.48);
+  box-shadow: 0 0 0 3px rgba(79, 99, 215, 0.1);
+}
+
+.dql-app-direct-ask-row button,
+.dql-app-direct-quick button {
+  border: 1px solid var(--dql-app-line-2);
+  border-radius: 12px;
+  background: var(--dql-app-surface);
+  color: var(--dql-app-ink);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 8px 10px;
+  font-weight: 750;
+}
+
+.dql-app-direct-ask-row button {
+  min-height: 48px;
+  padding-inline: 13px;
+  background: var(--dql-app-accent);
+  border-color: var(--dql-app-accent);
+  color: #fff;
+}
+
+.dql-app-direct-ask-row button:disabled {
+  opacity: 0.55;
+}
+
+.dql-app-direct-quick {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 6px;
+}
+
+.dql-app-direct-quick button {
+  color: var(--dql-app-muted);
+  font-size: 11.5px;
+  padding: 7px 9px;
+  white-space: nowrap;
+  width: 100%;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.dql-app-copilot-welcome {
+  margin: 2px 16px 0;
+  border: 1px dashed var(--dql-app-line-2);
+  border-radius: 12px;
+  background: var(--dql-app-surface);
+  padding: 12px;
+  display: grid;
+  gap: 6px;
+}
+
+.dql-app-user-message {
+  align-self: flex-end;
+  max-width: calc(100% - 42px);
+  margin: 0 16px 0 42px;
+  border: 1px solid rgba(79, 99, 215, 0.28);
+  border-radius: 14px 14px 5px 14px;
+  background: var(--dql-app-accent);
+  color: #fff;
+  padding: 10px 12px;
+  box-shadow: 0 10px 28px rgba(79, 99, 215, 0.16);
+}
+
+.dql-app-user-message span {
+  display: block;
+  font: 850 9.5px var(--font-mono);
+  letter-spacing: 0;
+  text-transform: uppercase;
+  opacity: .72;
+}
+
+.dql-app-user-message p {
+  margin: 4px 0 0;
+  color: inherit;
+  font-size: 12.5px;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
+.dql-app-copilot-welcome span {
+  color: var(--dql-app-accent);
+  font: 850 10.5px var(--font-mono);
+  letter-spacing: 0;
+  text-transform: uppercase;
+}
+
+.dql-app-copilot-welcome p {
+  margin: 0;
+  color: var(--dql-app-muted);
+  font-size: 12.5px;
+  line-height: 1.48;
+}
+
+.dql-app-direct-answer {
+  border: 1px solid var(--dql-app-line);
+  border-radius: 14px 14px 14px 5px;
+  background: var(--dql-app-surface);
+  margin: 0 42px 0 16px;
+  padding: 12px;
+  box-shadow: 0 10px 30px rgba(15, 23, 42, 0.05);
+}
+
+.dql-app-direct-answer > div:first-child {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+
+.dql-app-direct-answer p {
+  margin: 0;
+  color: var(--dql-app-ink);
+  font-size: 12.5px;
+  line-height: 1.45;
+}
+
+.dql-app-direct-followups {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.dql-app-direct-followups span,
+.dql-app-direct-followups button {
+  border: 1px solid var(--dql-app-line);
+  border-radius: 999px;
+  padding: 3px 7px;
+  color: var(--dql-app-muted);
+  font-size: 10.5px;
+  background: var(--dql-app-surface);
+}
+
+.dql-app-direct-followups button {
+  cursor: pointer;
+  font-weight: 750;
+}
+
+.dql-app-direct-followups button:hover {
+  color: var(--dql-app-accent);
+  border-color: rgba(79, 99, 215, 0.34);
+  background: var(--dql-app-accent-soft);
+}
+
+.dql-app-copilot-action-grid {
+  display: grid;
+  gap: 7px;
+  margin-top: 10px;
+}
+
+.dql-app-copilot-next-step {
+  display: grid;
+  gap: 8px;
+  margin-top: 12px;
+  border: 1px solid rgba(79, 99, 215, 0.18);
+  border-radius: 11px;
+  background: color-mix(in srgb, var(--dql-app-accent-soft) 58%, var(--dql-app-surface));
+  padding: 10px;
+}
+
+.dql-app-copilot-next-step > span {
+  color: var(--dql-app-accent);
+  font: 850 10.5px var(--font-mono);
+  text-transform: uppercase;
+}
+
+.dql-app-copilot-next-step p {
+  margin: 0;
+  color: var(--dql-app-muted);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.dql-app-analysis-handoff {
+  margin: 0 16px;
+  border: 1px solid rgba(22, 163, 74, 0.2);
+  border-radius: 12px;
+  background: rgba(22, 163, 74, 0.06);
+  padding: 12px;
+  display: grid;
+  gap: 7px;
+}
+
+.dql-app-analysis-handoff > span {
+  color: #15803d;
+  font: 850 10.5px var(--font-mono);
+  letter-spacing: .02em;
+  text-transform: uppercase;
+}
+
+.dql-app-analysis-handoff p {
+  margin: 0;
+  color: var(--dql-app-ink);
+  font-size: 12.5px;
+  line-height: 1.45;
+}
+
+.dql-app-analysis-handoff small {
+  color: var(--dql-app-muted);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.dql-app-analysis-handoff > div {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
+  margin-top: 2px;
+}
+
+.dql-app-context-composer {
+  margin: 0 16px;
+  border: 1px solid rgba(79, 99, 215, 0.28);
+  border-radius: 14px;
+  background: var(--dql-app-surface);
+  box-shadow: 0 16px 44px rgba(79, 99, 215, 0.11);
+  padding: 12px;
+  display: grid;
+  gap: 9px;
+}
+
+.dql-app-context-composer-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.dql-app-context-composer h4 {
+  margin: 0;
+  color: var(--dql-app-ink);
+  font-size: 14px;
+  line-height: 1.25;
+}
+
+.dql-app-context-composer p {
+  margin: 0;
+  color: var(--dql-app-muted);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.dql-app-context-composer textarea {
+  width: 100%;
+  min-height: 158px;
+  resize: vertical;
+  border: 1px solid var(--dql-app-line-2);
+  border-radius: 8px;
+  background: var(--dql-app-control);
+  color: var(--dql-app-ink);
+  outline: 0;
+  padding: 10px;
+  font: 12.5px/1.5 var(--font-ui);
+}
+
+.dql-app-context-composer textarea:focus {
+  border-color: rgba(79, 99, 215, 0.54);
+  box-shadow: 0 0 0 3px rgba(79, 99, 215, 0.1);
+}
+
+.dql-app-context-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.dql-app-context-chips span {
+  min-width: 0;
+  max-width: 100%;
+  border: 1px solid var(--dql-app-line);
+  border-radius: 999px;
+  background: var(--dql-app-surface-muted);
+  color: var(--dql-app-muted);
+  padding: 4px 8px;
+  font: 750 10px var(--font-ui);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.dql-app-context-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
 }
 
 .dql-app-copilot-hero {
@@ -4816,13 +6818,23 @@ const APP_STYLES = `
 .dql-app-gapcard p { margin: 6px 0 0; color: var(--dql-app-muted); font-size: 11.5px; line-height: 1.45; }
 .dql-app-research-shell {
   display: grid;
-  grid-template-columns: minmax(220px, 280px) minmax(0, 1fr);
   gap: 14px;
   min-height: 620px;
 }
 
-.dql-app-research-list,
-.dql-app-research-detail {
+.dql-app-research-shell.history-open {
+  grid-template-columns: minmax(220px, 280px) minmax(0, 1fr);
+}
+
+.dql-app-research-shell.history-collapsed {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.dql-app-research-shell.history-collapsed .dql-app-research-list {
+  display: none;
+}
+
+.dql-app-research-list {
   border: 1px solid var(--dql-app-line);
   border-radius: 8px;
   background: var(--dql-app-surface);
@@ -4837,9 +6849,10 @@ const APP_STYLES = `
 }
 
 .dql-app-research-detail {
-  padding: 16px;
+  padding: 0;
   min-width: 0;
-  overflow: hidden;
+  overflow: auto;
+  background: transparent;
 }
 
 .dql-app-research-head,
@@ -4858,10 +6871,33 @@ const APP_STYLES = `
   font-weight: 850;
 }
 
+.dql-app-research-head > div {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+}
+
 .dql-app-research-head b {
   color: var(--dql-app-faint);
   font-family: var(--font-mono);
   font-size: 10px;
+}
+
+.dql-app-research-head button {
+  height: 26px;
+  border: 1px solid var(--dql-app-line);
+  border-radius: 999px;
+  background: var(--dql-app-surface-muted);
+  color: var(--dql-app-muted);
+  padding: 0 9px;
+  cursor: pointer;
+  font: 800 10px var(--font-ui);
+}
+
+.dql-app-research-head button:hover {
+  color: var(--dql-app-accent);
+  border-color: rgba(79, 99, 215, 0.34);
+  background: var(--dql-app-accent-soft);
 }
 
 .dql-app-research-new {
@@ -4880,6 +6916,13 @@ const APP_STYLES = `
 
 .dql-app-research-new:disabled { opacity: 0.65; cursor: not-allowed; }
 .dql-app-research-items { display: grid; gap: 6px; overflow: auto; }
+.dql-app-research-group-label {
+  margin: 4px 2px 1px;
+  color: var(--dql-app-faint);
+  font: 850 9.5px var(--font-mono);
+  letter-spacing: 0;
+  text-transform: uppercase;
+}
 .dql-app-research-items button {
   border: 1px solid transparent;
   border-radius: 7px;
@@ -4895,6 +6938,25 @@ const APP_STYLES = `
 .dql-app-research-items button:hover {
   border-color: var(--dql-app-line);
   background: var(--dql-app-control);
+}
+
+.dql-app-research-items button.status-error:not(.on) {
+  color: var(--dql-app-muted);
+  opacity: 0.72;
+}
+
+.dql-app-research-items button.status-error small {
+  color: var(--dql-app-orange);
+}
+
+.dql-app-research-items button.status-ready small {
+  color: var(--dql-app-green);
+}
+
+.dql-app-research-history-toggle {
+  border-style: dashed !important;
+  background: var(--dql-app-surface-muted) !important;
+  color: var(--dql-app-muted) !important;
 }
 
 .dql-app-research-items span,
@@ -4915,135 +6977,667 @@ const APP_STYLES = `
 }
 
 .dql-app-research-status {
-  margin-bottom: 10px;
+  margin: 0 0 12px;
   border: 1px solid rgba(37, 99, 235, 0.26);
   border-radius: 8px;
   background: var(--dql-app-accent-soft);
   color: var(--dql-app-accent);
-  padding: 8px 10px;
+  padding: 10px 12px;
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   gap: 8px;
   font: 800 12px var(--font-ui);
 }
 
-.dql-app-research-path {
-  margin: -2px 0 12px;
-  display: flex;
-  flex-wrap: wrap;
-  gap: 7px;
+.dql-app-research-status.opening {
+  border-color: rgba(79, 99, 215, 0.28);
+  background: color-mix(in srgb, var(--dql-app-accent-soft) 72%, var(--dql-app-surface));
 }
 
-.dql-app-research-path span {
-  border: 1px solid var(--dql-app-line);
-  border-radius: 999px;
-  background: var(--dql-app-control);
-  color: var(--dql-app-muted);
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-  padding: 5px 8px;
-  font: 800 10.5px var(--font-ui);
-}
-
-.dql-app-research-actions {
-  display: flex;
-  align-items: center;
-  gap: 7px;
-  flex-wrap: wrap;
-  justify-content: flex-end;
-}
-
-.dql-app-research-grid {
+.dql-app-research-status > div {
+  min-width: 0;
   display: grid;
-  grid-template-columns: minmax(0, 1.35fr) minmax(260px, 0.65fr);
+  gap: 3px;
+}
+
+.dql-app-research-status small {
+  color: var(--dql-app-muted);
+  font: 700 11px/1.35 var(--font-ui);
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.dql-app-report-toolbar {
+  max-width: 1120px;
+  margin: 0 auto 12px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
   gap: 12px;
 }
 
-.dql-app-research-answer,
-.dql-app-research-metrics,
-.dql-app-research-section {
+.dql-app-report-toolbar > div {
+  min-width: 0;
+  display: grid;
+  gap: 3px;
+}
+
+.dql-app-report-toolbar span {
+  color: var(--dql-app-faint);
+  font: 850 9.5px var(--font-mono);
+  text-transform: uppercase;
+}
+
+.dql-app-report-toolbar b {
+  min-width: 0;
+  color: var(--dql-app-ink);
+  font-size: 13px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.dql-app-research-creating {
+  max-width: 760px;
+  min-height: 340px;
+  margin: 40px auto;
   border: 1px solid var(--dql-app-line);
-  border-radius: 8px;
-  background: var(--dql-app-surface-muted);
-  padding: 13px;
-  min-width: 0;
-}
-
-.dql-app-research-section { margin-top: 12px; }
-
-.dql-app-research-markdown {
-  margin-top: 10px;
-  min-width: 0;
-}
-
-.dql-app-research-callout {
-  margin-top: 10px;
-  border-left: 3px solid var(--dql-app-accent);
-  padding: 8px 10px;
+  border-radius: 12px;
   background: var(--dql-app-surface);
+  box-shadow: var(--dql-app-shadow);
+  color: var(--dql-app-muted);
+  padding: 42px;
+  display: grid;
+  place-items: center;
+  align-content: center;
+  gap: 12px;
+  text-align: center;
+}
+
+.dql-app-research-creating.active {
+  max-width: 920px;
+  min-height: 420px;
+  border-color: rgba(79, 99, 215, 0.24);
+  background:
+    linear-gradient(180deg, color-mix(in srgb, var(--dql-app-accent-soft) 24%, var(--dql-app-surface)), var(--dql-app-surface) 48%),
+    var(--dql-app-surface);
+}
+
+.dql-app-research-creating svg {
+  color: var(--dql-app-accent);
+}
+
+.dql-app-research-creating > span {
+  color: var(--dql-app-accent);
+  font: 850 10.5px var(--font-mono);
+  letter-spacing: 0;
+  text-transform: uppercase;
+}
+
+.dql-app-research-creating h2 {
+  margin: 0;
+  color: var(--dql-app-ink);
+  font-size: 24px;
+}
+
+.dql-app-research-creating p {
+  margin: 0;
+  max-width: 520px;
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+.dql-app-research-creating-steps {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 8px;
+  margin-top: 4px;
+  max-width: 680px;
+}
+
+.dql-app-research-creating-steps small {
+  border: 1px solid var(--dql-app-line);
+  border-radius: 999px;
+  background: var(--dql-app-surface-muted);
+  color: var(--dql-app-muted);
+  padding: 5px 9px;
+  font: 750 11px var(--font-ui);
+}
+
+.dql-app-research-report {
+  max-width: 1040px;
+  margin: 0 auto;
+  border: 0;
+  border-radius: 0;
+  background: var(--dql-app-surface);
+  box-shadow: none;
+  overflow: visible;
+}
+
+.dql-app-report-hero {
+  padding: 26px 34px 20px;
+  border-bottom: 0;
+  background: var(--dql-app-surface);
+}
+
+.dql-app-report-status-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+}
+
+.dql-app-report-status-row > span {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  color: var(--dql-app-muted);
+  font: 850 10px var(--font-mono);
+  text-transform: uppercase;
+}
+
+.dql-app-report-hero h2 {
+  margin: 18px 0 0;
+  color: var(--dql-app-ink);
+  font-size: clamp(25px, 2.4vw, 34px);
+  line-height: 1.08;
+  max-width: 860px;
+  text-wrap: balance;
+}
+
+.dql-app-report-hero p {
+  margin: 14px 0 0;
+  color: var(--dql-app-muted);
+  font-size: 14px;
+  line-height: 1.6;
+  max-width: 850px;
+}
+
+.dql-app-report-context-line {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 18px;
+}
+
+.dql-app-report-context-line span {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border: 1px solid var(--dql-app-line);
+  border-radius: 999px;
+  background: var(--dql-app-surface);
+  color: var(--dql-app-muted);
+  padding: 6px 10px;
+  font-size: 11.5px;
+  max-width: 100%;
+}
+
+.dql-app-report-context-line b {
+  color: var(--dql-app-ink);
+  font-weight: 850;
+}
+
+.dql-app-report-route {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  margin-top: 14px;
+  border: 1px solid rgba(79, 99, 215, 0.18);
+  border-radius: 10px;
+  background: rgba(79, 99, 215, 0.055);
+  padding: 10px 12px;
+  max-width: 900px;
+}
+
+.dql-app-report-route > svg {
+  color: var(--dql-app-accent);
+  flex: 0 0 auto;
+  margin-top: 2px;
+}
+
+.dql-app-report-route span {
+  display: block;
+  color: var(--dql-app-accent);
+  font: 850 10.5px var(--font-mono);
+  letter-spacing: .02em;
+  text-transform: uppercase;
+}
+
+.dql-app-report-route p {
+  margin: 5px 0 0;
+  color: var(--dql-app-ink);
+  font-size: 12.5px;
+  line-height: 1.45;
+}
+
+.dql-app-report-route small {
+  display: block;
+  margin-top: 5px;
   color: var(--dql-app-muted);
   font-size: 12px;
   line-height: 1.45;
 }
 
-.dql-app-research-metricstrip {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+.dql-app-report-actions {
+  display: flex;
+  flex-wrap: wrap;
   gap: 8px;
-  margin-top: 10px;
+  margin-top: 18px;
 }
 
-.dql-app-research-metricstrip > span {
-  border-radius: 7px;
-  background: var(--dql-app-surface);
-  border: 1px solid var(--dql-app-line);
-  padding: 8px;
-  min-width: 0;
+.dql-app-report-review-actions {
+  position: relative;
 }
 
-.dql-app-research-metricstrip small {
-  display: block;
-  color: var(--dql-app-muted);
-  font-family: var(--font-mono);
-  font-size: 8px;
-  text-transform: uppercase;
-}
-
-.dql-app-research-metricstrip b {
-  display: block;
-  margin-top: 2px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.dql-app-research-drivers {
-  display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 8px;
-  margin-top: 10px;
-}
-
-.dql-app-research-driver {
+.dql-app-report-review-actions summary {
+  list-style: none;
+  height: 32px;
   border: 1px solid var(--dql-app-line);
   border-radius: 8px;
   background: var(--dql-app-surface);
-  padding: 10px;
+  color: var(--dql-app-muted);
+  padding: 0 10px;
+  display: inline-flex;
+  align-items: center;
+  cursor: pointer;
+  font: 800 11.5px var(--font-ui);
+}
+
+.dql-app-report-review-actions summary::-webkit-details-marker {
+  display: none;
+}
+
+.dql-app-report-review-actions[open] summary,
+.dql-app-report-review-actions summary:hover {
+  color: var(--dql-app-accent);
+  border-color: rgba(79, 99, 215, 0.34);
+  background: var(--dql-app-accent-soft);
+}
+
+.dql-app-report-review-actions > div {
+  position: absolute;
+  z-index: 5;
+  right: 0;
+  top: calc(100% + 6px);
+  min-width: 220px;
+  border: 1px solid var(--dql-app-line);
+  border-radius: 10px;
+  background: var(--dql-app-surface);
+  box-shadow: var(--dql-app-shadow);
+  padding: 8px;
+  display: grid;
+  gap: 7px;
+}
+
+.dql-app-report-review-actions > div .dql-apps-btn {
+  justify-content: flex-start;
+  width: 100%;
+}
+
+.dql-app-report-warning {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  margin-top: 14px;
+  border: 1px solid rgba(217, 119, 6, 0.24);
+  border-radius: 9px;
+  background: rgba(251, 191, 36, 0.12);
+  color: #92400e;
+  padding: 10px 12px;
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.dql-app-report-warning svg {
+  flex: none;
+  margin-top: 1px;
+}
+
+.dql-app-report-section {
+  padding: 24px 34px;
+  border-bottom: 0;
+}
+
+.dql-app-report-section:last-child {
+  border-bottom: 0;
+}
+
+.dql-app-report-section h3 {
+  margin: 0 0 12px;
+  color: var(--dql-app-ink);
+  font-size: 17px;
+  line-height: 1.25;
+}
+
+.dql-app-report-paper {
+  color: var(--dql-app-ink);
+  font-size: 14.5px;
+  line-height: 1.78;
+  padding: 26px 54px 20px;
+}
+
+.dql-app-report-paper h2,
+.dql-app-report-paper h3 {
+  margin: 18px 0 8px;
+  color: var(--dql-app-ink);
+  font-size: 18px;
+  line-height: 1.22;
+}
+
+.dql-app-report-paper h2:first-child,
+.dql-app-report-paper h3:first-child {
+  margin-top: 0;
+}
+
+.dql-app-report-paper p,
+.dql-app-report-paper ul,
+.dql-app-report-paper ol {
+  max-width: 900px;
+}
+
+.dql-app-report-dynamic-sections {
+  display: grid;
+  gap: 30px;
+}
+
+.dql-app-report-dynamic-section {
+  border-left: 0;
+  padding: 0;
+  display: grid;
+  gap: 10px;
+}
+
+.dql-app-report-dynamic-head {
+  display: grid;
+  gap: 5px;
+}
+
+.dql-app-report-dynamic-head span {
+  color: var(--dql-app-muted);
+  font: 850 9.5px var(--font-mono);
+  letter-spacing: 0;
+  text-transform: uppercase;
+}
+
+.dql-app-report-dynamic-head h3 {
+  margin: 0;
+  font-size: 20px;
+  line-height: 1.18;
+}
+
+.dql-app-report-memo-body {
+  display: grid;
+  gap: 10px;
+  max-width: 900px;
+}
+
+.dql-app-report-memo-body p {
+  margin: 0;
+  color: var(--dql-app-ink);
+  font-size: 14.5px;
+  line-height: 1.72;
+}
+
+.dql-app-report-dynamic-section ul {
+  margin: 4px 0 0;
+  padding-left: 20px;
+  display: grid;
+  gap: 7px;
+  max-width: 820px;
+}
+
+.dql-app-report-dynamic-section li {
+  color: var(--dql-app-ink);
+  font-size: 14.5px;
+  line-height: 1.6;
+}
+
+.dql-app-report-evidence-story {
+  display: grid;
+  grid-template-columns: minmax(280px, 0.9fr) minmax(360px, 1.1fr);
+  gap: 24px;
+  align-items: start;
+  margin: 6px 34px 12px;
+  border: 1px solid color-mix(in srgb, var(--dql-app-line) 75%, transparent);
+  border-radius: 12px;
+  background: linear-gradient(180deg, color-mix(in srgb, var(--dql-app-surface-muted) 64%, var(--dql-app-surface)), var(--dql-app-surface));
+}
+
+.dql-app-report-evidence-story.single {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.dql-app-report-evidence-story .dql-app-report-numbers {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.dql-app-report-prose {
+  font-size: 14px;
+  line-height: 1.65;
+}
+
+.dql-app-report-callout {
+  margin-top: 16px;
+  border-left: 3px solid var(--dql-app-accent);
+  background: var(--dql-app-surface-muted);
+  padding: 12px 14px;
+  color: var(--dql-app-muted);
+}
+
+.dql-app-report-numbers {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.dql-app-report-number {
+  border: 1px solid var(--dql-app-line);
+  border-radius: 9px;
+  background: var(--dql-app-surface);
+  padding: 13px;
   min-width: 0;
 }
 
-.dql-app-research-driver b,
-.dql-app-research-driver span {
+.dql-app-report-number span,
+.dql-app-report-number small {
   display: block;
+  color: var(--dql-app-muted);
+}
+
+.dql-app-report-number span {
+  font: 850 9.5px var(--font-mono);
+  letter-spacing: 0;
+  text-transform: uppercase;
+}
+
+.dql-app-report-number b {
+  display: block;
+  margin-top: 7px;
+  color: var(--dql-app-ink);
+  font-size: 23px;
+  line-height: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.dql-app-report-number small {
+  margin-top: 7px;
+  font-size: 11.5px;
+  line-height: 1.35;
+}
+
+.dql-app-report-drivers {
+  display: grid;
+  gap: 12px;
+}
+
+.dql-app-report-driver {
+  display: grid;
+  grid-template-columns: 34px minmax(0, 1fr);
+  gap: 12px;
+  align-items: start;
+  padding: 13px 0;
+  border-bottom: 1px solid var(--dql-app-line);
+}
+
+.dql-app-report-driver:last-child { border-bottom: 0; }
+
+.dql-app-report-driver > span {
+  width: 28px;
+  height: 28px;
+  border-radius: 999px;
+  background: var(--dql-app-accent-soft);
+  color: var(--dql-app-accent);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font: 850 12px var(--font-mono);
+}
+
+.dql-app-report-driver b {
+  display: inline;
+  color: var(--dql-app-ink);
+  font-size: 14px;
+}
+
+.dql-app-report-driver em {
+  margin-left: 8px;
+  color: var(--dql-app-accent);
+  font: 850 12px var(--font-mono);
+  font-style: normal;
+}
+
+.dql-app-report-driver p,
+.dql-app-report-muted {
+  margin: 7px 0 0;
+  color: var(--dql-app-muted);
+  font-size: 13px;
+  line-height: 1.55;
+}
+
+.dql-app-report-driver-chart {
+  display: grid;
+  gap: 13px;
+}
+
+.dql-app-report-driver-bar {
+  display: grid;
+  gap: 7px;
+}
+
+.dql-app-report-driver-bar > div {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.dql-app-report-driver-bar b {
+  min-width: 0;
+  color: var(--dql-app-ink);
+  font-size: 13.5px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.dql-app-research-driver b { font-size: 12px; }
-.dql-app-research-driver span { margin-top: 4px; color: var(--dql-app-accent); font: 800 12px var(--font-mono); }
-.dql-app-research-driver p { margin: 7px 0 0; color: var(--dql-app-muted); font-size: 11px; line-height: 1.4; }
+.dql-app-report-driver-bar span {
+  flex: none;
+  color: var(--dql-app-accent);
+  font: 850 11px var(--font-mono);
+}
+
+.dql-app-report-driver-bar i {
+  display: block;
+  width: var(--driver-width);
+  min-width: 28px;
+  height: 9px;
+  border-radius: 999px;
+  background: linear-gradient(90deg, var(--dql-app-accent), rgba(79, 99, 215, 0.42));
+}
+
+.dql-app-report-driver-bar p {
+  margin: 0;
+  color: var(--dql-app-muted);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.dql-app-report-appendix {
+  padding: 0;
+}
+
+.dql-app-report-appendix summary {
+  list-style: none;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 4px 14px;
+  align-items: center;
+  cursor: pointer;
+  padding: 18px 30px;
+}
+
+.dql-app-report-appendix summary::-webkit-details-marker {
+  display: none;
+}
+
+.dql-app-report-appendix summary span {
+  color: var(--dql-app-ink);
+  font: 850 14px var(--font-ui);
+}
+
+.dql-app-report-appendix summary small {
+  grid-column: 1 / 2;
+  color: var(--dql-app-muted);
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.dql-app-report-appendix summary svg {
+  grid-row: 1 / span 2;
+  grid-column: 2;
+  color: var(--dql-app-muted);
+  transition: transform 140ms ease;
+}
+
+.dql-app-report-appendix[open] summary {
+  border-bottom: 1px solid var(--dql-app-line);
+}
+
+.dql-app-report-appendix[open] summary svg {
+  transform: rotate(180deg);
+}
+
+.dql-app-report-appendix .dql-app-research-evidence-head {
+  align-items: flex-start;
+  margin: 18px 30px 10px;
+}
+
+.dql-app-report-appendix .dql-app-research-evidence-head h3 {
+  margin-bottom: 4px;
+}
+
+.dql-app-report-appendix .dql-app-research-evidence-head p {
+  margin: 0;
+  color: var(--dql-app-muted);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.dql-app-report-appendix .dql-app-research-table,
+.dql-app-report-appendix .dql-app-research-sql-review,
+.dql-app-report-appendix .dql-app-research-assumptions,
+.dql-app-report-appendix .dql-app-research-code {
+  margin-left: 30px;
+  margin-right: 30px;
+}
+
+.dql-app-report-appendix > :last-child {
+  margin-bottom: 24px;
+}
+
 .dql-app-research-tabs {
   display: flex;
   gap: 4px;
@@ -5228,8 +7822,7 @@ const APP_STYLES = `
 .dql-app-modal > div:last-child { display: flex; justify-content: flex-end; gap: 8px; }
 
 @media (max-width: 1120px) {
-  .dql-apps-grid,
-  .dql-apps-startgrid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .dql-apps-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .dql-app-create-workspace,
   .dql-app-create-workspace.classic {
     grid-template-columns: 1fr;
@@ -5240,6 +7833,10 @@ const APP_STYLES = `
     min-height: auto;
     border-right: 0;
     border-bottom: 1px solid var(--dql-app-line);
+  }
+  .dql-app-ai-start,
+  .dql-app-ai-generated-grid {
+    grid-template-columns: 1fr;
   }
   .dql-app-filterbar {
     flex-wrap: nowrap;
@@ -5270,10 +7867,6 @@ const APP_STYLES = `
     gap: 6px;
     font-weight: 750;
   }
-  .dql-app-research-grid,
-  .dql-app-research-drivers {
-    grid-template-columns: 1fr;
-  }
   .dql-app-review-backlog-grid {
     grid-template-columns: 1fr;
   }
@@ -5281,8 +7874,33 @@ const APP_STYLES = `
 
 @media (max-width: 900px) {
   .dql-app-view-layout { grid-template-columns: 1fr; }
+  .dql-app-view-topbar {
+    align-content: flex-start;
+    align-items: flex-start;
+    min-height: 132px;
+    row-gap: 8px;
+  }
+  .dql-app-topbar-divider {
+    display: none;
+  }
+  .dql-app-topbar-filters {
+    flex: 1 1 100%;
+    order: 2;
+  }
+  .dql-app-view-actions {
+    flex: 1 1 100%;
+    justify-content: flex-start;
+    margin-left: 0;
+    order: 3;
+  }
   .dql-app-research-shell {
     grid-template-columns: 1fr;
+  }
+  .dql-app-research-detail {
+    order: 1;
+  }
+  .dql-app-research-list {
+    order: 2;
   }
   .dql-app-explain-panel {
     position: static;
@@ -5296,7 +7914,12 @@ const APP_STYLES = `
 
 @media (max-width: 760px) {
   .dql-apps-wrap,
-  .dql-app-view-wrap { width: min(100% - 20px, 560px); }
+  .dql-app-view-wrap {
+    width: min(100% - 16px, calc(100vw - 104px));
+    max-width: calc(100vw - 104px);
+    margin: 0 auto;
+    padding-bottom: 48px;
+  }
   .dql-apps-libbar,
   .dql-app-buildbar,
   .dql-app-view-topbar,
@@ -5313,23 +7936,145 @@ const APP_STYLES = `
     gap: 6px;
     font-size: 11px;
   }
-  .dql-apps-startgrid,
   .dql-apps-grid,
   .dql-app-form-grid.two,
-  .dql-app-settings-grid { grid-template-columns: 1fr; }
+  .dql-app-settings-grid,
+  .dql-app-ai-filter-preview { grid-template-columns: 1fr; }
+  .dql-apps-ai-entry-box {
+    grid-template-columns: 1fr;
+  }
+  .dql-apps-ai-entry-box button {
+    width: 100%;
+  }
+  .dql-apps-ai-entry-foot {
+    align-items: stretch;
+    flex-direction: column;
+  }
+  .dql-apps-ai-entry-secondary {
+    justify-content: center;
+  }
+  .dql-app-create-workspace.clean {
+    padding: 16px;
+  }
+  .dql-app-ai-start-card {
+    padding: 15px;
+  }
+  .dql-app-ai-start-card textarea {
+    min-height: 150px;
+    font-size: 15px;
+    padding-bottom: 48px;
+  }
+  .dql-app-ai-start-send {
+    right: 14px;
+    bottom: 14px;
+  }
+  .dql-app-ai-generated-head {
+    align-items: stretch;
+    flex-direction: column;
+  }
   .dql-app-mode-seg { margin: 0; width: 100%; }
   .dql-app-mode-seg button { flex: 1; }
   .dql-app-build-actions,
   .dql-app-view-actions { margin-left: 0; width: 100%; flex-wrap: wrap; }
-  .dql-app-research-titlebar {
-    align-items: stretch;
+  .dql-app-nav-row {
+    width: 100%;
+    justify-content: flex-start;
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    padding-bottom: 2px;
+  }
+  .dql-app-section-tabs {
+    flex: 0 0 auto;
+    max-width: none;
+  }
+  .dql-app-section-tabs button {
+    min-width: auto;
+    white-space: nowrap;
+  }
+  .dql-app-section-tabs .dql-app-tab-label {
+    display: inline;
+  }
+  .dql-app-explain-panel {
+    order: -1;
+    min-width: 0;
+    height: min(620px, calc(100vh - 160px));
+    min-height: 420px;
+    margin-bottom: 12px;
+  }
+  .dql-app-assistant-top {
+    align-items: flex-start;
+    flex-wrap: wrap;
+  }
+  .dql-app-assistant-heading {
+    flex: 1 1 calc(100% - 46px);
+  }
+  .dql-app-assistant-focus {
+    flex: 1 1 100%;
+  }
+  .dql-app-assistant-focus select {
+    width: 100%;
+    max-width: none;
+  }
+  .dql-app-assistant-context-btn {
+    position: static;
+    justify-self: end;
+  }
+  .dql-app-direct-ask-row {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .dql-app-direct-ask-row button {
+    width: 100%;
+  }
+  .dql-app-page-picker {
+    flex: 0 0 min(100%, 360px);
+  }
+  .dql-app-page-picker select { min-width: 0; max-width: 100%; }
+  .dql-app-report-hero {
+    padding: 18px 16px 16px;
+  }
+  .dql-app-report-status-row {
+    align-items: flex-start;
     flex-direction: column;
   }
-  .dql-app-research-actions {
-    justify-content: flex-start;
+  .dql-app-report-hero h2 {
+    font-size: 26px;
+    line-height: 1.08;
+    overflow-wrap: anywhere;
   }
-  .dql-app-nav-row { width: 100%; justify-content: flex-start; }
-  .dql-app-page-picker select { min-width: 0; max-width: 100%; }
+  .dql-app-report-section {
+    padding: 18px 16px;
+  }
+  .dql-app-report-paper {
+    padding: 18px 18px 14px;
+  }
+  .dql-app-report-evidence-story {
+    margin: 4px 16px 10px;
+  }
+  .dql-app-report-appendix {
+    padding: 0;
+  }
+  .dql-app-report-appendix summary {
+    padding: 16px;
+  }
+  .dql-app-report-appendix .dql-app-research-evidence-head,
+  .dql-app-report-appendix .dql-app-research-table,
+  .dql-app-report-appendix .dql-app-research-sql-review,
+  .dql-app-report-appendix .dql-app-research-assumptions,
+  .dql-app-report-appendix .dql-app-research-code {
+    margin-left: 16px;
+    margin-right: 16px;
+  }
+  .dql-app-direct-quick,
+  .dql-app-report-evidence-story,
+  .dql-app-report-numbers {
+    grid-template-columns: 1fr;
+  }
+  .dql-app-report-evidence-story .dql-app-report-numbers {
+    grid-template-columns: 1fr;
+  }
+  .dql-app-report-context-line span {
+    white-space: normal;
+  }
   .dql-app-preview-tile,
   .dql-app-preview-tile.wide { grid-column: 1 / -1; }
   .dql-app-drilldown-grid {
