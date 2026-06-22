@@ -1,0 +1,97 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1800" height="980" viewBox="0 0 1800 980" role="img" aria-labelledby="title desc">
+  <title id="title">DQL architecture flow</title>
+  <desc id="desc">DQL syncs dbt context, optionally resolves DataLex contracts, creates certified blocks, compiles a manifest, and serves apps, notebooks, agents, and CI verification.</desc>
+  <defs>
+    <style>
+      .bg { fill: #fbfaf7; }
+      .title { fill: #111827; font: 700 44px system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+      .subtitle { fill: #475569; font: 400 24px system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+      .section { fill: #334155; font: 700 18px system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; letter-spacing: 1px; }
+      .box { stroke-width: 3; rx: 22; }
+      .source { fill: #fff7ed; stroke: #d97706; }
+      .contract { fill: #eef2ff; stroke: #4f46e5; }
+      .dql { fill: #ecfdf5; stroke: #059669; }
+      .draft { fill: #fffbeb; stroke: #f59e0b; }
+      .gate { fill: #f8fafc; stroke: #64748b; }
+      .boxTitle { fill: #111827; font: 700 25px system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+      .boxText { fill: #334155; font: 400 20px system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+      .caption { fill: #334155; font: 500 22px system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+      .captionStrong { fill: #111827; font: 700 22px system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+      .arrow { stroke: #64748b; stroke-width: 4; fill: none; marker-end: url(#arrowhead); }
+      .lane { fill: none; stroke: #e2e8f0; stroke-width: 2; stroke-dasharray: 10 10; rx: 28; }
+    </style>
+    <marker id="arrowhead" markerWidth="14" markerHeight="14" refX="10" refY="5" orient="auto">
+      <path d="M0,0 L10,5 L0,10 Z" fill="#64748b"/>
+    </marker>
+  </defs>
+  <rect class="bg" width="1800" height="980"/>
+
+  <text x="80" y="86" class="title">DQL: governed analytics files that serve humans and agents</text>
+  <text x="80" y="128" class="subtitle">Certified blocks answer first. Notebook and AI drafts stay review-required until promoted.</text>
+
+  <rect x="54" y="176" width="470" height="560" class="lane"/>
+  <rect x="562" y="176" width="520" height="560" class="lane"/>
+  <rect x="1120" y="176" width="626" height="560" class="lane"/>
+  <text x="80" y="214" class="section">INPUT CONTEXT</text>
+  <text x="588" y="214" class="section">GOVERNED DQL CORE</text>
+  <text x="1146" y="214" class="section">CONSUMPTION SURFACES</text>
+
+  <rect x="94" y="270" width="352" height="166" class="box source"/>
+  <text x="126" y="320" class="boxTitle">dbt project</text>
+  <text x="126" y="360" class="boxText">models, metrics</text>
+  <text x="126" y="394" class="boxText">lineage, profiles</text>
+
+  <rect x="94" y="512" width="352" height="166" class="box contract"/>
+  <text x="126" y="562" class="boxTitle">DataLex manifest</text>
+  <text x="126" y="602" class="boxText">optional contract ids</text>
+  <text x="126" y="636" class="boxText">for certified blocks</text>
+
+  <rect x="606" y="270" width="386" height="166" class="box dql"/>
+  <text x="638" y="320" class="boxTitle">DQL sync</text>
+  <text x="638" y="360" class="boxText">imports dbt context</text>
+  <text x="638" y="394" class="boxText">and warehouse shape</text>
+
+  <rect x="606" y="512" width="386" height="166" class="box dql"/>
+  <text x="638" y="562" class="boxTitle">Certified blocks</text>
+  <text x="638" y="602" class="boxText">SQL, owner, tests</text>
+  <text x="638" y="636" class="boxText">terms, AI context</text>
+
+  <rect x="1162" y="270" width="250" height="166" class="box dql"/>
+  <text x="1194" y="320" class="boxTitle">Apps</text>
+  <text x="1194" y="360" class="boxText">stakeholder</text>
+  <text x="1194" y="394" class="boxText">dashboards</text>
+
+  <rect x="1452" y="270" width="250" height="166" class="box dql"/>
+  <text x="1484" y="320" class="boxTitle">Notebooks</text>
+  <text x="1484" y="360" class="boxText">research and</text>
+  <text x="1484" y="394" class="boxText">promotion</text>
+
+  <rect x="1162" y="512" width="250" height="166" class="box dql"/>
+  <text x="1194" y="562" class="boxTitle">Agent + MCP</text>
+  <text x="1194" y="602" class="boxText">certified answers</text>
+  <text x="1194" y="636" class="boxText">first</text>
+
+  <rect x="1452" y="512" width="250" height="166" class="box gate"/>
+  <text x="1484" y="562" class="boxTitle">CI verify</text>
+  <text x="1484" y="602" class="boxText">manifest drift</text>
+  <text x="1484" y="636" class="boxText">and trust gates</text>
+
+  <rect x="770" y="748" width="360" height="120" class="box draft"/>
+  <text x="802" y="796" class="boxTitle">Review-required drafts</text>
+  <text x="802" y="836" class="boxText">AI SQL and notebook work</text>
+
+  <path class="arrow" d="M446 353 L606 353"/>
+  <path class="arrow" d="M446 595 L606 595"/>
+  <path class="arrow" d="M799 436 L799 512"/>
+  <path class="arrow" d="M992 595 L1162 353"/>
+  <path class="arrow" d="M992 595 L1452 353"/>
+  <path class="arrow" d="M992 595 L1162 595"/>
+  <path class="arrow" d="M1412 595 L1452 595"/>
+  <path class="arrow" d="M1577 436 L1577 512"/>
+  <path class="arrow" d="M1452 353 C1300 470 1170 660 1130 786"/>
+  <path class="arrow" d="M950 748 L870 678"/>
+
+  <rect x="80" y="900" width="1640" height="52" rx="20" fill="#ffffff" stroke="#e2e8f0" stroke-width="2"/>
+  <text x="116" y="934" class="captionStrong">Key idea:</text>
+  <text x="224" y="934" class="caption">DQL keeps analytics work in Git, serves certified blocks first, and labels new analysis until it is reviewed.</text>
+</svg>

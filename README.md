@@ -18,26 +18,14 @@ DQL turns governed analytics work into executable, reviewable files. Certified
 blocks serve trusted answers first; notebooks and AI-generated SQL stay
 review-required until promoted.
 
-```mermaid
-flowchart LR
-  dbt["dbt project<br/>models, metrics, lineage"] --> sync["DQL sync<br/>import dbt context"]
-  datalex["Optional DataLex manifest<br/>certified business contracts"] --> blocks
-  sync --> blocks["Certified .dql blocks<br/>SQL, owner, tests, context"]
-  blocks --> manifest["dql-manifest.json<br/>lineage and trust graph"]
-  manifest --> apps["Apps<br/>stakeholder dashboards"]
-  manifest --> notebooks["Notebooks<br/>research and promotion"]
-  manifest --> mcp["Agent and MCP<br/>certified answers first"]
-  notebooks --> drafts["Review-required drafts"]
-  drafts --> blocks
-  manifest --> ci["CI verify<br/>drift and contract gates"]
+> Click the diagram to open the full-size SVG in a browser tab, where you can
+> zoom or use full-screen mode.
 
-  classDef source fill:#fef3c7,stroke:#d97706,color:#1f2937
-  classDef dql fill:#ecfdf5,stroke:#059669,color:#1f2937
-  classDef trust fill:#eef2ff,stroke:#4f46e5,color:#1f2937
-  class dbt,datalex source
-  class sync,blocks,manifest,apps,notebooks,mcp,drafts dql
-  class ci trust
-```
+<p align="center">
+  <a href="docs/assets/architecture/dql-flow.svg">
+    <img src="docs/assets/architecture/dql-flow.svg" alt="DQL architecture flow from dbt and optional DataLex context to certified blocks, manifest, apps, notebooks, agents, review drafts, and CI" width="100%" />
+  </a>
+</p>
 
 **Why users care:** DQL makes dashboards, notebook research, and AI answers use
 the same reviewed assets, with clear labels when analysis is still draft.
