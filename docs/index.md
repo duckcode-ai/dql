@@ -58,7 +58,7 @@ npm run lineage
 ```
 
 To see a finished DataLex + DQL example, use the separate
-[jaffle-shop-duckdb tutorial](https://github.com/duckcode-ai/jaffle-shop-duckdb/blob/main/TUTORIAL.md).
+[jaffle-shop-duckdb tutorial](https://github.com/duckcode-ai/jaffle-shop-duckdb/blob/main/docs/tutorials/jaffle/README.md).
 
 ## Why DQL
 

@@ -29,9 +29,8 @@ Use
 when you want the full DataLex + DQL flow with concrete files, screenshots, and
 video planning:
 
-- [Jaffle Shop tutorial](https://github.com/duckcode-ai/jaffle-shop-duckdb/blob/main/TUTORIAL.md)
+- [Jaffle Shop tutorial](https://github.com/duckcode-ai/jaffle-shop-duckdb/blob/main/docs/tutorials/jaffle/README.md)
 - [DQL half of the tutorial](https://github.com/duckcode-ai/jaffle-shop-duckdb/blob/main/dql/TUTORIAL.md)
-- [YouTube storyboard](https://github.com/duckcode-ai/jaffle-shop-duckdb/blob/main/YOUTUBE.md)
 
 Stuck? See the [troubleshooting guide](../guides/troubleshooting.md).
 

@@ -115,7 +115,7 @@ and CI while the DataLex and DQL repos stay focused on product docs.
    questions are review-required drafts.
 
 Start with the example repo's
-[Jaffle Shop tutorial](https://github.com/duckcode-ai/jaffle-shop-duckdb/blob/main/TUTORIAL.md).
+[Jaffle Shop tutorial](https://github.com/duckcode-ai/jaffle-shop-duckdb/blob/main/docs/tutorials/jaffle/README.md).
 
 ---
 

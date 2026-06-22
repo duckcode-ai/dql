@@ -72,7 +72,7 @@ What to check first:
 4. Lineage shows how sources, dbt models, blocks, dashboards, and Apps connect.
 
 Follow the example repo's
-[Jaffle Shop tutorial](https://github.com/duckcode-ai/jaffle-shop-duckdb/blob/main/TUTORIAL.md)
+[Jaffle Shop tutorial](https://github.com/duckcode-ai/jaffle-shop-duckdb/blob/main/docs/tutorials/jaffle/README.md)
 for the full DataLex + DQL story.
 
 ### Path 2: Add DQL to your own dbt repo
@@ -262,7 +262,7 @@ All docs live in [`docs/`](./docs/). Start with these:
 - [Connectors](./docs/reference/connectors.md)
 - [CLI reference](./docs/reference/cli.md)
 - [Troubleshooting](./docs/guides/troubleshooting.md)
-- [End-to-end Jaffle Shop example](https://github.com/duckcode-ai/jaffle-shop-duckdb/blob/main/TUTORIAL.md)
+- [End-to-end Jaffle Shop example](https://github.com/duckcode-ai/jaffle-shop-duckdb/blob/main/docs/tutorials/jaffle/README.md)
 
 ## What is included in OSS
 

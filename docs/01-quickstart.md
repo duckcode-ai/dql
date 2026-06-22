@@ -11,7 +11,7 @@ hosted account, SSO, or team RBAC is required.
 > **Just want to see it running?** Use the separate
 > [jaffle-shop-duckdb](https://github.com/duckcode-ai/jaffle-shop-duckdb)
 > example and follow its
-> [Jaffle Shop tutorial](https://github.com/duckcode-ai/jaffle-shop-duckdb/blob/main/TUTORIAL.md).
+> [Jaffle Shop tutorial](https://github.com/duckcode-ai/jaffle-shop-duckdb/blob/main/docs/tutorials/jaffle/README.md).
 > The rest of this page builds a DQL workspace from scratch on your repo.
 
 ## 1. Make your dbt manifest fresh
