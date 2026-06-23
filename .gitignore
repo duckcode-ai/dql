@@ -6,6 +6,8 @@ dist
 .DS_Store
 *.vsix
 COMMERCIAL-PLAN.md
+docs/90-DAY-PROMOTION-PLAN.md
+docs/OSS-PROMOTION-PLAN.md
 .env
 .env.*
 *.log
