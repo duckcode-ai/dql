@@ -10,6 +10,18 @@ lineage, and governed agent answers run on your laptop.
 
 DQL sits between **dbt** (modeling) and your BI tool (reporting). Every analytics answer — SQL, chart, params, tests, owner — lives in a single `.dql` file tracked in git. No more query sprawl, no more broken charts, no more lost work.
 
+## DuckCode Analytics Platform
+
+DQL is the analytics layer of the **[DuckCode Analytics Platform](https://duckcode.ai)** — a three-layer governed stack built on dbt, running on Snowflake, Databricks, and DuckDB.
+
+| Layer | Tool | Role |
+|-------|------|------|
+| Domain contracts | [DataLex](https://github.com/duckcode-ai/DataLex) | AI proposes domain contracts from dbt evidence; humans certify; publishes `datalex-manifest.json` |
+| Transformation | dbt | SQL models, tests, semantic metrics, physical contracts — source of truth |
+| Analytics & AI | **DQL** ← you are here | Certified blocks reference DataLex contracts; lineage, dashboards, governed AI answers on Snowflake, Databricks, and DuckDB |
+
+**Full platform demo:** [jaffle-shop-duckdb](https://github.com/duckcode-ai/jaffle-shop-duckdb) — DataLex + dbt + DQL end-to-end walkthrough.
+
 ## Highlights
 
 **OSS Apps for decision work** — package dashboard pages, notebooks, AI pins,
