@@ -34,5 +34,7 @@ export default defineConfig({
       },
     },
   },
-  base: '/',
+  // Relative base so the build works both standalone and when embedded under
+  // /embed/dql/ in the cloud shell. Safe because the app is hash-routed.
+  base: './',
 })
