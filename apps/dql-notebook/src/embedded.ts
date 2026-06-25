@@ -137,11 +137,13 @@ if (isEmbedded) {
     const isCloudApi =
       url.startsWith("/v1/") ||
       url.startsWith(`${window.location.origin}/v1/`);
-    if ((!isApi && !isCloudApi) || !bearerToken) {
+    if (!isApi && !isCloudApi) {
       return realFetch(input as RequestInfo, init);
     }
     const headers = new Headers(init?.headers ?? {});
-    if (!headers.has("authorization")) {
+    // Identify this app to the cloud gateway so it routes to the DQL backend.
+    headers.set("x-oss-app", "dql");
+    if (bearerToken && !headers.has("authorization")) {
       headers.set("authorization", `Bearer ${bearerToken}`);
     }
     return realFetch(input as RequestInfo, { ...init, headers });
