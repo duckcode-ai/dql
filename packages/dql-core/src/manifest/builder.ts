@@ -170,7 +170,7 @@ export function buildManifest(options: ManifestBuildOptions): DQLManifest {
     for (const message of datalexRegistry.loadDiagnostics()) {
       diagnostics.push({
         kind: 'datalex',
-        filePath: datalexManifestPath,
+        filePath: datalexManifestPath ?? undefined,
         severity: 'warning',
         message,
       });
