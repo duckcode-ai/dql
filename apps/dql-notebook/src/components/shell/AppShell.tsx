@@ -296,6 +296,8 @@ export function AppShell() {
               objectKey={cloudRoute.objectKey}
               label={cloudRoute.label}
             />
+          ) : cloudMode && cloudRoute.kind === 'apps' ? (
+            <AppsView />
           ) : cloudBuildMode ? (
             <>
               <CloudWorkbenchToolbar />

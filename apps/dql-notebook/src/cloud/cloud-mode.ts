@@ -2,6 +2,7 @@ export type CloudContextTab = 'notebooks' | 'semantic' | 'schema' | 'contracts' 
 
 export type DqlCloudRoute =
   | { kind: 'workbench' }
+  | { kind: 'apps' }
   | { kind: 'notebook'; path: string; name?: string | null }
   | { kind: 'lineage'; focus?: string | null; focusType?: string | null; focusKey?: string | null }
   | { kind: 'block'; path: string; name?: string | null }
@@ -84,6 +85,9 @@ export function getDqlCloudRoute(): DqlCloudRoute {
   if (typeof window === 'undefined') return { kind: 'workbench' };
   const raw = window.location.hash.replace(/^#/, '') || '/notebooks';
   const [pathname, query = ''] = raw.split('?');
+  if (pathname === '/apps') {
+    return { kind: 'apps' };
+  }
   if (pathname === '/lineage') {
     const params = new URLSearchParams(query);
     return {
