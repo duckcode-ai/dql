@@ -16,8 +16,6 @@ interface SaveAsBlockModalProps {
   initialDomain?: string;
   initialOwner?: string;
   initialTags?: string[];
-  initialDomain?: string;
-  initialOwner?: string;
 }
 
 function RequiredMark() {
