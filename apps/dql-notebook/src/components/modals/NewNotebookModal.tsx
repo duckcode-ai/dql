@@ -4,6 +4,8 @@ import { useNotebook, makeCell } from '../../store/NotebookStore';
 import { themes } from '../../themes/notebook-theme';
 import { api } from '../../api/client';
 import type { NotebookFile, Cell } from '../../store/types';
+import { isDqlCloudMode, postDqlCloudEvent } from '../../cloud/cloud-mode';
+import { serializeDqlNotebook } from '../../utils/parse-workbook';
 
 interface NewNotebookModalProps {
   onFileOpened: (file: NotebookFile) => void;
@@ -36,6 +38,12 @@ function validateName(name: string): string | null {
   if (!name.trim()) return 'Name is required.';
   if (!/^[a-zA-Z0-9\-_ ]+$/.test(name)) return 'Only letters, numbers, hyphens, underscores, and spaces allowed.';
   return null;
+}
+
+function requestId(): string {
+  return typeof crypto !== 'undefined' && 'randomUUID' in crypto
+    ? crypto.randomUUID()
+    : `${Date.now()}-${Math.random().toString(36).slice(2)}`;
 }
 
 function buildTemplateCells(template: Template): Cell[] {
@@ -117,6 +125,20 @@ export function NewNotebookModal({ onFileOpened }: NewNotebookModalProps) {
       });
       dispatch({ type: 'CLOSE_NEW_NOTEBOOK_MODAL' });
       onFileOpened(file);
+      if (isDqlCloudMode()) {
+        postDqlCloudEvent('dql.notebook.created', {
+          request_id: requestId(),
+          name: name.trim(),
+          path: result.path,
+          content: serializeDqlNotebook(name.trim(), cells, { description: '' }),
+          visibility: 'private',
+          description: '',
+        });
+        postDqlCloudEvent('dql.artifact.saved', {
+          path: result.path,
+          kind: 'notebook',
+        });
+      }
     } catch {
       // Server not available — create locally
       const path = `notebooks/${slug}.dqlnb`;
@@ -136,6 +158,16 @@ export function NewNotebookModal({ onFileOpened }: NewNotebookModalProps) {
       });
       dispatch({ type: 'CLOSE_NEW_NOTEBOOK_MODAL' });
       onFileOpened(file);
+      if (isDqlCloudMode()) {
+        postDqlCloudEvent('dql.notebook.created', {
+          request_id: requestId(),
+          name: name.trim(),
+          path,
+          content: serializeDqlNotebook(name.trim(), cells, { description: '' }),
+          visibility: 'private',
+          description: '',
+        });
+      }
     } finally {
       setCreating(false);
     }

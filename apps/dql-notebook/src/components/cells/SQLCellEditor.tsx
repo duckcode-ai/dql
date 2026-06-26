@@ -25,6 +25,10 @@ import {
   closeBracketsKeymap,
   autocompletion,
   completionKeymap,
+  type Completion,
+  type CompletionContext,
+  type CompletionResult,
+  type CompletionSource,
 } from '@codemirror/autocomplete';
 import { search, searchKeymap } from '@codemirror/search';
 import { themes, type ThemeMode } from '../../themes/notebook-theme';
@@ -115,6 +119,142 @@ const errorDecoField = StateField.define({
   },
   provide: (f) => EditorView.decorations.from(f),
 });
+
+const SQL_KEYWORDS = [
+  'SELECT',
+  'FROM',
+  'WHERE',
+  'JOIN',
+  'LEFT JOIN',
+  'RIGHT JOIN',
+  'INNER JOIN',
+  'FULL OUTER JOIN',
+  'ON',
+  'GROUP BY',
+  'ORDER BY',
+  'HAVING',
+  'LIMIT',
+  'WITH',
+  'AS',
+  'CASE',
+  'WHEN',
+  'THEN',
+  'ELSE',
+  'END',
+  'DISTINCT',
+  'UNION ALL',
+  'DATE_TRUNC',
+  'CURRENT_DATE',
+];
+
+const SQL_FUNCTIONS = [
+  'COUNT(*)',
+  'COUNT(DISTINCT )',
+  'SUM()',
+  'AVG()',
+  'MIN()',
+  'MAX()',
+  'ROUND()',
+  'COALESCE()',
+  'NULLIF()',
+  'CAST()',
+  'DATE_TRUNC(\'month\', )',
+  'DATE_TRUNC(\'week\', )',
+  'EXTRACT()',
+  'ROW_NUMBER() OVER ()',
+  'RANK() OVER ()',
+];
+
+function normalizeIdent(value: string): string {
+  return value.replace(/^["'`[]|["'`\]]$/g, '').toLowerCase();
+}
+
+function lastWordBefore(context: CompletionContext): { from: number; word: string } | null {
+  const word = context.matchBefore(/[A-Za-z_][\w$]*/);
+  if (word) return { from: word.from, word: word.text };
+  if (context.explicit) return { from: context.pos, word: '' };
+  return null;
+}
+
+function buildAliasMap(sqlText: string): Map<string, string> {
+  const aliases = new Map<string, string>();
+  const relationPattern = /\b(?:from|join)\s+([`"\[]?[\w.]+[`"\]]?)(?:\s+(?:as\s+)?([A-Za-z_][\w$]*))?/gi;
+  let match: RegExpExecArray | null;
+  while ((match = relationPattern.exec(sqlText))) {
+    const table = match[1];
+    const alias = match[2];
+    const normalizedTable = normalizeIdent(table);
+    aliases.set(normalizedTable, table);
+    aliases.set(normalizedTable.split('.').pop() ?? normalizedTable, table);
+    if (alias && !SQL_KEYWORDS.includes(alias.toUpperCase())) aliases.set(normalizeIdent(alias), table);
+  }
+  return aliases;
+}
+
+function tableColumns(schema: Record<string, string[]> | undefined, tableName: string): string[] {
+  if (!schema) return [];
+  const normalized = normalizeIdent(tableName);
+  const direct = Object.entries(schema).find(([table]) => normalizeIdent(table) === normalized);
+  if (direct) return direct[1];
+  const byShortName = Object.entries(schema).find(([table]) => normalizeIdent(table).split('.').pop() === normalized);
+  return byShortName?.[1] ?? [];
+}
+
+function makeSqlCompletionSource(schemaRef: React.MutableRefObject<Record<string, string[]> | undefined>): CompletionSource {
+  return (context: CompletionContext): CompletionResult | null => {
+    const schema = schemaRef.current;
+    const before = context.state.sliceDoc(Math.max(0, context.pos - 600), context.pos);
+    const dotMatch = /([A-Za-z_][\w$]*)\.\s*([A-Za-z_][\w$]*)?$/.exec(before);
+    if (dotMatch) {
+      const alias = dotMatch[1];
+      const partial = dotMatch[2] ?? '';
+      const aliases = buildAliasMap(context.state.sliceDoc(0, context.pos));
+      const table = aliases.get(normalizeIdent(alias)) ?? alias;
+      const columns = tableColumns(schema, table);
+      return {
+        from: context.pos - partial.length,
+        options: columns.map((column): Completion => ({
+          label: column,
+          type: 'property',
+          detail: `column from ${table}`,
+        })),
+        validFor: /^[\w$]*$/,
+      };
+    }
+
+    const word = lastWordBefore(context);
+    if (!word) return null;
+    if (!context.explicit && word.word.length === 0) return null;
+
+    const relationContext = /\b(from|join|update|into|table)\s+[A-Za-z_][\w$.]*$/i.test(before);
+    const tables = Object.keys(schema ?? {}).map((table): Completion => ({
+      label: table,
+      type: 'class',
+      detail: 'table',
+    }));
+    const columns = Array.from(new Set(Object.values(schema ?? {}).flat())).map((column): Completion => ({
+      label: column,
+      type: 'property',
+      detail: 'column',
+    }));
+    const keywords = SQL_KEYWORDS.map((keyword): Completion => ({
+      label: keyword,
+      type: 'keyword',
+      boost: keyword === 'SELECT' ? 5 : 0,
+    }));
+    const functions = SQL_FUNCTIONS.map((fn): Completion => ({
+      label: fn,
+      type: 'function',
+      apply: fn,
+    }));
+
+    return {
+      from: word.from,
+      options: relationContext ? tables : [...keywords, ...functions, ...tables, ...columns],
+      validFor: /^[\w$.\s]*$/,
+    };
+  };
+}
 
 // Luna-token syntax palette. Colors resolve from CSS vars on the active
 // data-theme, so the same HighlightStyle re-skins for obsidian/paper/white
@@ -263,10 +403,12 @@ export function SQLCellEditor({
   const [dragActive, setDragActive] = useState(false);
   const onRunRef = useRef(onRun);
   const onChangeRef = useRef(onChange);
+  const schemaRef = useRef(schema);
   // Compartment lets us swap SQL language/schema without destroying the editor
   const schemaCompartment = useRef(new Compartment());
   onRunRef.current = onRun;
   onChangeRef.current = onChange;
+  schemaRef.current = schema;
 
   // Expose imperative handle for undo/redo/reset
   useEffect(() => {
@@ -358,7 +500,11 @@ export function SQLCellEditor({
       baseTheme,
       // Language wrapped in compartment for hot-swapping schema
       schemaCompartment.current.of(initialSqlLang),
-      autocompletion({ closeOnBlur: false, override: [semanticCompletionSource] }),
+      autocompletion({
+        closeOnBlur: false,
+        activateOnTyping: true,
+        override: [semanticCompletionSource, makeSqlCompletionSource(schemaRef)],
+      }),
       // Undo/redo history — history() provides the state machine, historyKeymap binds Cmd+Z / Cmd+Shift+Z
       history(),
       // Developer experience extensions

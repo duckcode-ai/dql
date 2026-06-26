@@ -3,6 +3,7 @@ import { useNotebook } from '../../store/NotebookStore';
 import { themes } from '../../themes/notebook-theme';
 import { api } from '../../api/client';
 import type { Cell } from '../../store/types';
+import { isDqlCloudMode, postDqlCloudEvent } from '../../cloud/cloud-mode';
 
 interface SaveAsBlockModalProps {
   cell: Cell;
@@ -12,6 +13,8 @@ interface SaveAsBlockModalProps {
   initialContent?: string;
   initialName?: string;
   initialDescription?: string;
+  initialDomain?: string;
+  initialOwner?: string;
   initialTags?: string[];
   initialDomain?: string;
   initialOwner?: string;
@@ -46,9 +49,9 @@ export function SaveAsBlockModal({
   initialContent,
   initialName,
   initialDescription,
-  initialTags,
   initialDomain,
   initialOwner,
+  initialTags,
 }: SaveAsBlockModalProps) {
   const { state, dispatch } = useNotebook();
   const t = themes[state.themeMode];
@@ -142,8 +145,25 @@ export function SaveAsBlockModal({
       if (!state.files.some((existing) => existing.path === result.path)) {
         dispatch({ type: 'FILE_ADDED', file });
       }
-      const payload = await api.openBlockStudio(result.path);
-      dispatch({ type: 'OPEN_BLOCK_STUDIO', file, payload });
+      const cloudMode = isDqlCloudMode();
+      if (!cloudMode) {
+        const payload = await api.openBlockStudio(result.path);
+        dispatch({ type: 'OPEN_BLOCK_STUDIO', file, payload });
+      } else {
+        postDqlCloudEvent('dql.block.saved', {
+          name: name.trim(),
+          path: result.path,
+          content: result.content,
+          domain: domain.trim() || undefined,
+          owner: owner.trim() || undefined,
+          status: 'draft',
+          notebook_path: state.activeFile?.path ?? null,
+        });
+        postDqlCloudEvent('dql.artifact.saved', {
+          path: result.path,
+          kind: 'block',
+        });
+      }
       onSaved?.({ ...result, name: name.trim() });
       onClose();
     } catch (err) {

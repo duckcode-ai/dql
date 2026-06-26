@@ -307,7 +307,7 @@ export function LineageDAG() {
 
   const focusNode = useCallback(async (nodeId: string) => {
     const result = await api.queryLineage({ focus: nodeId });
-    setGraphData(result.graph ?? { nodes: [], edges: [] });
+    setGraphData(result.focalNode ? (result.graph ?? { nodes: [], edges: [] }) : { nodes: [], edges: [] });
     setFocalNode(result.focalNode ?? null);
     setSelectedNode(result.focalNode ?? null);
     dispatch({ type: 'SET_LINEAGE_FOCUS', nodeId });
@@ -344,6 +344,14 @@ export function LineageDAG() {
 
   if (fullGraph.nodes.length === 0) {
     return <div style={{ padding: 16, color: t.textMuted, fontSize: 12 }}>No lineage graph available yet.</div>;
+  }
+
+  if (state.lineageFocusNodeId && graphData.nodes.length === 0) {
+    return (
+      <div style={{ padding: 16, color: t.textMuted, fontSize: 12 }}>
+        No focused lineage was found for {state.lineageFocusNodeId}. Save or compile the related notebook/block, then try again.
+      </div>
+    );
   }
 
   return (

@@ -1865,6 +1865,43 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
       return;
     }
 
+    if (req.method === 'GET' && path === '/api/notebooks/list') {
+      const items = scanNotebookFiles(projectRoot)
+        .filter((file) => file.type === 'notebook' || file.type === 'workbook')
+        .map((file) => {
+          const absPath = safeJoin(projectRoot, file.path);
+          let body: Record<string, unknown> = { version: 1, cells: [] };
+          let description: string | null = null;
+          let updated_at: string | undefined;
+          if (absPath && existsSync(absPath)) {
+            try {
+              const content = readFileSync(absPath, 'utf-8');
+              const parsed = deserializeNotebook(content);
+              body = {
+                version: 1,
+                metadata: parsed.metadata,
+                cells: parsed.cells,
+              } as Record<string, unknown>;
+              description = typeof parsed.metadata?.description === 'string' ? parsed.metadata.description : null;
+              updated_at = statSync(absPath).mtime.toISOString();
+            } catch {
+              // Keep a minimal body so Cloud can still list the artifact.
+            }
+          }
+          return {
+            id: file.path,
+            path: file.path,
+            name: file.name,
+            description,
+            body,
+            updated_at,
+          };
+        });
+      res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+      res.end(serializeJSON({ items }));
+      return;
+    }
+
     if (req.method === 'GET' && path === '/api/notebook-content') {
       const filePath = url.searchParams.get('path');
       if (!filePath) {
@@ -2716,6 +2753,55 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           res.end(serializeJSON({ error: error.message, code: 'unauthorized' }));
           return;
         }
+        res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({ error: error instanceof Error ? error.message : String(error) }));
+      }
+      return;
+    }
+
+    if (req.method === 'GET' && path === '/api/blocks/list') {
+      try {
+        const blocksDir = join(projectRoot, 'blocks');
+        const items: Array<{
+          name: string;
+          domain: string | null;
+          description: string | null;
+          owner: string | null;
+          status: string;
+          tags: string[];
+          llmContext: string | null;
+          body_text: string;
+        }> = [];
+        if (existsSync(blocksDir)) {
+          const scanDir = (dir: string) => {
+            for (const entry of readdirSync(dir, { withFileTypes: true })) {
+              const filePath = join(dir, entry.name);
+              if (entry.isDirectory()) {
+                scanDir(filePath);
+                continue;
+              }
+              if (!entry.isFile() || !entry.name.endsWith('.dql')) continue;
+              try {
+                const source = readFileSync(filePath, 'utf-8');
+                const parsed = parseBlockSourceMetadata(source);
+                items.push({
+                  name: parsed.name || entry.name.replace(/\.dql$/i, ''),
+                  domain: parsed.domain || null,
+                  description: parsed.description || null,
+                  owner: parsed.owner || null,
+                  status: parsed.status || 'draft',
+                  tags: parsed.tags,
+                  llmContext: parseBlockStudioStringField(source, 'llmContext') ?? null,
+                  body_text: source,
+                });
+              } catch { /* skip unreadable files */ }
+            }
+          };
+          scanDir(blocksDir);
+        }
+        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({ items }));
+      } catch (error) {
         res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' });
         res.end(serializeJSON({ error: error instanceof Error ? error.message : String(error) }));
       }

@@ -26,19 +26,52 @@ import { useKeyboardShortcuts } from '../../hooks/useKeyboardShortcuts';
 import { useRunSnapshotAutosave } from '../../hooks/useRunSnapshotAutosave';
 import type { NotebookFile } from '../../store/types';
 import { LineageNodeIcon } from '@duckcodeailabs/dql-ui/icons';
+import type { CloudContextTab } from '../../cloud/cloud-mode';
+import {
+  getDqlCloudRoute,
+  isDqlCloudBuildMode,
+  isDqlCloudMode,
+  type DqlCloudRoute,
+} from '../../cloud/cloud-mode';
+import { CloudWorkbenchToolbar } from '../cloud/CloudWorkbenchToolbar';
+import { CloudContextDrawer } from '../cloud/CloudContextDrawer';
+import { CloudFocusHeader } from '../cloud/CloudFocusHeader';
+import { CloudBlockViewer } from '../cloud/CloudBlockViewer';
+import { CloudObjectDetail } from '../cloud/CloudObjectDetail';
+import { LineageDAG } from '../panels/LineageDAG';
 
 export function AppShell() {
   const { state, dispatch } = useNotebook();
   const t = themes[state.themeMode];
   const cellRefs = useRef<Record<string, HTMLDivElement>>({});
   const blockWorkspaceOpen = state.mainView === 'block_studio' || state.mainView === 'imports';
+  const openedCloudNotebookRef = useRef<string | null>(null);
+  const cloudMode = isDqlCloudMode();
+  const [cloudRoute, setCloudRoute] = useState<DqlCloudRoute>(() => getDqlCloudRoute());
+  const cloudBuildMode =
+    isDqlCloudBuildMode() && (cloudRoute.kind === 'workbench' || cloudRoute.kind === 'notebook');
 
   const [paletteOpen, setPaletteOpen] = useState(false);
+  const [cloudContextOpen, setCloudContextOpen] = useState(false);
+  const [cloudContextTab, setCloudContextTab] = useState<CloudContextTab>('semantic');
 
   // Global keyboard shortcuts
   useKeyboardShortcuts();
   // Debounced autosave of cell results to <notebook>.run.json
   useRunSnapshotAutosave();
+
+  useEffect(() => {
+    if (!cloudMode) return;
+    const updateRoute = () => setCloudRoute(getDqlCloudRoute());
+    updateRoute();
+    window.addEventListener('hashchange', updateRoute);
+    return () => window.removeEventListener('hashchange', updateRoute);
+  }, [cloudMode]);
+
+  useEffect(() => {
+    if (!cloudMode || cloudRoute.kind !== 'lineage') return;
+    dispatch({ type: 'SET_LINEAGE_FOCUS', nodeId: cloudRoute.focus ?? cloudRoute.focusKey ?? null });
+  }, [cloudMode, cloudRoute, dispatch]);
 
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
@@ -54,6 +87,44 @@ export function AppShell() {
     document.addEventListener('keydown', handler);
     return () => document.removeEventListener('keydown', handler);
   }, [dispatch]);
+
+  useEffect(() => {
+    if (!cloudBuildMode) return;
+    if (state.mainView !== 'notebook') dispatch({ type: 'SET_MAIN_VIEW', view: 'notebook' });
+    if (state.sidebarPanel !== 'files') dispatch({ type: 'SET_SIDEBAR_PANEL', panel: 'files' });
+    if (!state.sidebarOpen) dispatch({ type: 'TOGGLE_SIDEBAR' });
+    if (state.devPanelOpen) dispatch({ type: 'TOGGLE_DEV_PANEL' });
+  }, [cloudBuildMode, dispatch, state.devPanelOpen, state.mainView, state.sidebarOpen, state.sidebarPanel]);
+
+  useEffect(() => {
+    if (!cloudBuildMode) return;
+    if (state.schemaTables.length === 0 && !state.schemaLoading) {
+      dispatch({ type: 'SET_SCHEMA_LOADING', loading: true });
+      void api.getSchema()
+        .then((tables) => dispatch({ type: 'SET_SCHEMA', tables }))
+        .catch((error) => console.warn('Cloud schema preload failed:', error))
+        .finally(() => dispatch({ type: 'SET_SCHEMA_LOADING', loading: false }));
+    }
+    if (!state.semanticLayer.available && !state.semanticLayer.loading) {
+      dispatch({ type: 'SET_SEMANTIC_LOADING', loading: true });
+      void api.getSemanticLayer()
+        .then((layer) => dispatch({ type: 'SET_SEMANTIC_LAYER', layer }))
+        .catch((error) => console.warn('Cloud semantic preload failed:', error))
+        .finally(() => dispatch({ type: 'SET_SEMANTIC_LOADING', loading: false }));
+    }
+  }, [
+    cloudBuildMode,
+    dispatch,
+    state.schemaLoading,
+    state.schemaTables.length,
+    state.semanticLayer.available,
+    state.semanticLayer.loading,
+  ]);
+
+  const openCloudContext = useCallback((tab: CloudContextTab) => {
+    setCloudContextTab(tab);
+    setCloudContextOpen(true);
+  }, []);
 
   const handleOpenFile = useCallback(
     async (file: NotebookFile) => {
@@ -138,6 +209,19 @@ export function AppShell() {
     [dispatch, state.sidebarPanel]
   );
 
+  useEffect(() => {
+    if (!cloudMode || cloudRoute.kind !== 'notebook' || !cloudRoute.path) return;
+    if (openedCloudNotebookRef.current === cloudRoute.path) return;
+    openedCloudNotebookRef.current = cloudRoute.path;
+    const fallbackName = cloudRoute.path.split('/').pop() || 'Notebook';
+    void handleOpenFile({
+      name: cloudRoute.name || fallbackName,
+      path: cloudRoute.path,
+      type: 'notebook',
+      folder: 'notebooks',
+    });
+  }, [cloudMode, cloudRoute, handleOpenFile]);
+
   const handleNavigateToCell = useCallback((cellId: string) => {
     const el = cellRefs.current[cellId];
     if (el) {
@@ -166,15 +250,22 @@ export function AppShell() {
         overflow: 'hidden',
       }}
     >
-      {/* Header spans full width */}
-      <Header />
+      {/* Header spans full width. Cloud Build uses a purpose-built workbench toolbar instead. */}
+      {!cloudMode && <Header />}
 
       {/* Body row: ActivityBar + Sidebar + Main.
           v1.3 Track 5 — ActivityBar + Sidebar hidden in App mode. */}
       <div style={{ flex: 1, display: 'flex', overflow: 'hidden' }}>
-        {state.appMode === 'studio' && <ActivityBar />}
+        {state.appMode === 'studio' && !cloudMode && <ActivityBar />}
 
-        {state.appMode === 'studio' && state.sidebarOpen && !blockWorkspaceOpen && (
+        {cloudBuildMode && (
+          <Sidebar
+            fixed
+            onOpenFile={handleOpenFile}
+          />
+        )}
+
+        {state.appMode === 'studio' && state.sidebarOpen && !blockWorkspaceOpen && !cloudMode && (
           <Sidebar
             onOpenFile={handleOpenFile}
           />
@@ -190,7 +281,40 @@ export function AppShell() {
             minWidth: 0,
           }}
         >
-          {state.mainView === 'home' ? (
+          {cloudMode && cloudRoute.kind === 'lineage' ? (
+            <>
+              <CloudFocusHeader
+                title="Lineage"
+                subtitle={cloudRoute.focus ? `Focused lineage for ${cloudRoute.focus}.` : 'Focused DQL lineage from the connected Cloud project.'}
+                themeMode={state.themeMode}
+              />
+              <div style={{ flex: 1, minHeight: 0, overflow: 'hidden' }}>
+                <LineageDAG />
+              </div>
+            </>
+          ) : cloudMode && cloudRoute.kind === 'block' ? (
+            <CloudBlockViewer
+              path={cloudRoute.path}
+              name={cloudRoute.name}
+              themeMode={state.themeMode}
+            />
+          ) : cloudMode && cloudRoute.kind === 'object' ? (
+            <CloudObjectDetail
+              objectType={cloudRoute.objectType}
+              objectKey={cloudRoute.objectKey}
+              label={cloudRoute.label}
+            />
+          ) : cloudMode && cloudRoute.kind === 'apps' ? (
+            <AppsView />
+          ) : cloudBuildMode ? (
+            <>
+              <CloudWorkbenchToolbar />
+              <NotebookEditor
+                onOpenFile={handleOpenFile}
+                registerCellRef={registerCellRef}
+              />
+            </>
+          ) : state.mainView === 'home' ? (
             <HomePage />
           ) : state.mainView === 'business_artifact' ? (
             <BusinessArtifactView />
@@ -230,11 +354,20 @@ export function AppShell() {
           )}
         </div>
 
-        {state.appMode === 'studio' && state.lineageDrawerOpen && !state.lineageFullscreen && !state.dashboardMode && (
+        {cloudBuildMode && (
+          <CloudContextDrawer
+            open={cloudContextOpen}
+            activeTab={cloudContextTab}
+            onTabChange={setCloudContextTab}
+            onClose={() => setCloudContextOpen(false)}
+          />
+        )}
+
+        {state.appMode === 'studio' && !cloudMode && state.lineageDrawerOpen && !state.lineageFullscreen && !state.dashboardMode && (
           <LineageDrawer />
         )}
 
-        {state.appMode === 'studio' && state.inspectorOpen && !state.lineageFullscreen && !state.lineageDrawerOpen && !state.dashboardMode && (
+        {state.appMode === 'studio' && !cloudMode && state.inspectorOpen && !state.lineageFullscreen && !state.lineageDrawerOpen && !state.dashboardMode && (
           <InspectorPanel />
         )}
 
