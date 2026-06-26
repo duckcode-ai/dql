@@ -93,7 +93,7 @@ if (isEmbedded) {
 
   // 2. Theme bridge — apply tokens posted by the parent.
   window.addEventListener("message", (ev: MessageEvent) => {
-    const data = ev.data as { type?: string; tokens?: Record<string, string>; config?: DqlCloudEmbedConfig };
+    const data = ev.data as { type?: string; tokens?: Record<string, string>; mode?: string; config?: DqlCloudEmbedConfig };
     if (data?.type === "dql.cloud.context" && data.config) {
       window.__DATALEX_CLOUD_EMBED__ = data.config;
       document.documentElement.dataset.datalexCloudKind = "dql";
@@ -108,6 +108,13 @@ if (isEmbedded) {
     if (tokens.bg) root.style.setProperty("--dql-color-bg", tokens.bg);
     if (tokens.surface) root.style.setProperty("--dql-color-surface", tokens.surface);
     if (tokens.border) root.style.setProperty("--dql-color-border", tokens.border);
+    // Switch DQL's own theme MODE to match the cloud (paper/white). The store
+    // listens for a `dql-theme` storage event; same-frame writes don't fire it,
+    // so we dispatch a synthetic one — this is what actually flips light/dark.
+    if (data.mode === "paper" || data.mode === "white" || data.mode === "obsidian") {
+      try { window.localStorage.setItem("dql-theme", data.mode); } catch { /* ignore */ }
+      window.dispatchEvent(new StorageEvent("storage", { key: "dql-theme", newValue: data.mode }));
+    }
   });
 
   // 3. Auth pass-through. The parent posts the bearer token after
