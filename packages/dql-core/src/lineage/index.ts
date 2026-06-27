@@ -76,3 +76,12 @@ export {
   type DomainImpact,
   type DomainFlow,
 } from './domain-lineage.js';
+
+export {
+  buildDerivationWalk,
+  type DerivationWalk,
+  type DerivationStep,
+  type DerivationStepKind,
+  type DerivationFocusBlock,
+  type BuildDerivationWalkInput,
+} from './derivation.js';

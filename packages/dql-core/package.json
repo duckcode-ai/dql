@@ -14,6 +14,10 @@
     "./format": {
       "types": "./dist/format/index.d.ts",
       "import": "./dist/format/index.js"
+    },
+    "./lineage": {
+      "types": "./dist/lineage/index.d.ts",
+      "import": "./dist/lineage/index.js"
     }
   },
   "scripts": {
