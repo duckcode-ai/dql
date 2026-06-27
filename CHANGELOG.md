@@ -61,6 +61,22 @@ results as certified. Everything here is OSS and local-first.
 
 ### Fixed
 
+- **`dql propose` is now business-first and selective (was a `SELECT *`-per-model
+  dump).** A convention-agnostic classifier (dbt `meta` → exposures → semantic
+  manifest → folder/path → tags → name, configurable via a `propose` block in
+  `dql.config.json`) splits the warehouse into a business layer and excluded
+  plumbing, ranks cheaply across all models but runs inference + the Certifier only
+  on a bounded per-domain selection (scales to thousands of models), and generates
+  **real aggregation SQL** for semantic-metric models / narrowed projections for
+  entity marts — never a passthrough per model. Get Started now shows a deterministic
+  **plan** (domains, "will generate N / skip M", per-candidate evidence) that writes
+  nothing until you **Approve & Generate** the scope you pick. On jaffle: 13 scanned →
+  7 business, 6 staging excluded, 19 metrics detected.
+- **The Review & Certify queue lists draft blocks (was always empty).** It read only
+  `apps/*.dql-app` apps, so the standalone draft blocks `dql propose` writes never
+  appeared ("No Apps or drafts are waiting for review"). It now lists every draft /
+  in-review governance block with its status, and each row opens that block in Block
+  Studio to preview, edit, run tests, and certify. Nothing certifies automatically.
 - **`dql agent ask` starts its own runtime.** It no longer assumes a notebook server
   on a hardcoded `127.0.0.1:3474` (which collides with unrelated services — e.g.
   Docker, whose health check returns `{"status":"ok"}` — producing a misleading "no
