@@ -195,13 +195,15 @@ function inferEntities(model: DbtModelNode, grain: string | undefined): string[]
 }
 
 /**
- * Build provably-safe invariants only. We never assert business semantics we
- * can't verify; we limit ourselves to "row_count >= 0" (always safe) and, when
- * an obvious non-negative measure exists, a `>= 0` guard the reviewer can keep
- * or drop.
+ * Build provably-safe, *column-checkable* invariants only. The runtime invariant
+ * evaluator only sees a query's result columns, so a `row_count >= 0` invariant is
+ * "uncheckable" there (it surfaces as a warning) even though the generated test
+ * assertion covers it. We therefore emit only column predicates the evaluator can
+ * actually check — when an obvious non-negative measure exists, a `>= 0` guard the
+ * reviewer can keep or drop. (Row-count coverage lives in the block's tests.)
  */
 function inferInvariants(columns: DbtColumn[]): string[] {
-  const invariants = ['row_count >= 0'];
+  const invariants: string[] = [];
   const countLike = columns.find((c) => /(^|_)(count|qty|quantity|num_|n_)/i.test(c.name));
   if (countLike) invariants.push(`${countLike.name} >= 0`);
   return invariants;
@@ -218,9 +220,27 @@ function buildLlmContext(model: DbtModelNode, columns: DbtColumn[], grain: strin
     ? `${desc}${grainSentence}`.trim()
     : undefined;
 
+  // Prefer concrete business questions (better agent grounding + a real eval set)
+  // over a generic "what does this contain?". Derived only from observable evidence
+  // — the grain entity and an obvious measure column — so we never invent semantics.
   const examples: Array<{ question: string; sql?: string }> = [];
-  if (desc) {
-    examples.push({ question: `What does the ${model.name} model contain?` });
+  const entity = singularize(
+    ((grain ? grain.replace(/_id$/i, '') : '') || stripModelPrefix(model.name)),
+  ).replace(/_/g, ' ').trim();
+  const measureColumn =
+    columns.find((c) => /(amount|spend|revenue|sales|price|value|cost|total)/i.test(c.name)) ??
+    columns.find((c) => /(^|_)(count|qty|quantity|num_|n_)/i.test(c.name));
+  const measurePhrase = measureColumn ? measureColumn.name.replace(/_/g, ' ') : undefined;
+
+  if (grain && entity) {
+    examples.push({ question: `How many ${pluralize(entity)} are there?` });
+    if (measurePhrase) {
+      examples.push({ question: `What is the total ${measurePhrase} per ${entity}?` });
+    }
+  } else if (measurePhrase) {
+    examples.push({ question: `What is the total ${measurePhrase}?` });
+  } else if (desc) {
+    examples.push({ question: `What does the ${stripModelPrefix(model.name).replace(/_/g, ' ')} data cover?` });
   }
   return { llmContext, examples };
 }
@@ -486,4 +506,10 @@ function singularize(word: string): string {
   if (/ses$/i.test(word)) return word.replace(/es$/i, '');
   if (/s$/i.test(word) && !/ss$/i.test(word)) return word.replace(/s$/i, '');
   return word;
+}
+
+function pluralize(word: string): string {
+  if (/[^aeiou]y$/i.test(word)) return word.replace(/y$/i, 'ies');
+  if (/(s|x|z|ch|sh)$/i.test(word)) return `${word}es`;
+  return `${word}s`;
 }

@@ -61,6 +61,22 @@ results as certified. Everything here is OSS and local-first.
 
 ### Fixed
 
+- **`dql agent ask` starts its own runtime.** It no longer assumes a notebook server
+  on a hardcoded `127.0.0.1:3474` (which collides with unrelated services — e.g.
+  Docker, whose health check returns `{"status":"ok"}` — producing a misleading "no
+  database connection" error). With no `--runtime-url`/`DQL_RUNTIME_URL` it now starts
+  an ephemeral runtime bound to the project on a free port and closes it on exit; an
+  explicit runtime URL is validated as a real DQL runtime before use.
+- **Lineage no longer self-references a block that wraps its own dbt model.** A block
+  named after the dbt model it `ref()`s (e.g. `block "customers"` →
+  `ref('customers')`) used to appear as its own upstream and downstream, distorting
+  `dql lineage --impact` and risking false cycles. The dependency now resolves to the
+  dbt-model node (`dbt_model:customers → block:customers`).
+- **`dql propose` drafts are sharper.** Generated `examples` are now concrete business
+  questions ("How many customers are there?", "What is the total <measure> per
+  <entity>?") instead of a generic "What does X contain?", and the uncheckable
+  `row_count >= 0` invariant is no longer emitted (row-count coverage lives in the
+  block's tests; the runtime invariant evaluator only sees result columns).
 - **Notebook no longer crashes (OOM) on every query.** The DQL parser could
   infinite-loop on input it didn't recognize — including the raw SQL the cell
   executor feeds it (e.g. `SELECT COUNT(*) …`) — exhausting the heap and killing the

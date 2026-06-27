@@ -186,7 +186,14 @@ describe('dql propose engine', () => {
     expect(dim.inference.grain).toBe('customer_id');
     expect(dim.inference.pattern).toBe('entity_profile');
     expect(dim.inference.declaredOutputs).toEqual(['customer_id', 'customer_name']);
-    expect(dim.inference.invariants).toContain('row_count >= 0');
+    // We no longer emit the uncheckable `row_count >= 0` invariant: the runtime
+    // evaluator only sees result columns (row_count is covered by the block's tests).
+    // dim_customers has no measure column, so it gets no column invariant.
+    expect(dim.inference.invariants).not.toContain('row_count >= 0');
+    expect(dim.inference.invariants).toEqual([]);
+    // Examples are concrete business questions, not the generic "what does it contain?".
+    expect(dim.inference.examples.map((example) => example.question)).toContain('How many customers are there?');
+    expect(dim.inference.examples.every((example) => !/model contain/i.test(example.question))).toBe(true);
 
     const fct = summary.proposals.find((p) => p.model === 'fct_orders')!;
     expect(fct.inference.grain).toBe('order_id');

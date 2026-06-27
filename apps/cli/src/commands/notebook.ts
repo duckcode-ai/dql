@@ -1,4 +1,5 @@
 import { existsSync } from 'node:fs';
+import type { Server } from 'node:http';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { QueryExecutor } from '@duckcodeailabs/dql-connectors';
@@ -24,6 +25,47 @@ export function resolveNotebookConnection(config: ProjectConfig, projectRoot: st
     : null;
 }
 
+export interface ProjectRuntimeHandle {
+  port: number;
+  url: string;
+  /** Stop the HTTP listener so the process can exit (no-op if already closed). */
+  close: () => Promise<void>;
+}
+
+/**
+ * Start the local notebook/runtime HTTP server for a project and return a handle.
+ * Shared by `dql notebook` (long-running) and `dql agent ask` (which starts an
+ * ephemeral runtime on a free port — `preferredPort: 0` — and closes it after).
+ */
+export async function startProjectRuntime(
+  projectRoot: string,
+  opts: { preferredPort?: number; host?: string } = {},
+): Promise<ProjectRuntimeHandle> {
+  const config = loadProjectConfig(projectRoot);
+  const executor = new QueryExecutor();
+  const connection = resolveNotebookConnection(config, projectRoot);
+  const host = opts.host ?? process.env.DQL_HOST ?? '127.0.0.1';
+  let server: Server | undefined;
+  const port = await startLocalServer({
+    rootDir: NOTEBOOK_APP_DIR,
+    projectRoot,
+    executor,
+    connection,
+    preferredPort: opts.preferredPort ?? 0,
+    host,
+    captureServer: (created) => { server = created; },
+  });
+  const printHost = host === '0.0.0.0' ? '127.0.0.1' : host;
+  return {
+    port,
+    url: `http://${printHost}:${port}`,
+    close: () => new Promise<void>((resolveClose) => {
+      if (!server) return resolveClose();
+      server.close(() => resolveClose());
+    }),
+  };
+}
+
 export async function runNotebook(targetArg: string | null, flags: CLIFlags): Promise<void> {
   const baseDir = resolve(targetArg ?? '.');
   const projectRoot = findProjectRoot(baseDir);
@@ -33,23 +75,11 @@ export async function runNotebook(targetArg: string | null, flags: CLIFlags): Pr
     );
   }
   const config = loadProjectConfig(projectRoot);
-  const executor = new QueryExecutor();
-  const connection = resolveNotebookConnection(config, projectRoot);
-
   const host = flags.host ?? process.env.DQL_HOST ?? '127.0.0.1';
-  const port = await startLocalServer({
-    rootDir: NOTEBOOK_APP_DIR,
-    projectRoot,
-    executor,
-    connection,
+  const { port, url } = await startProjectRuntime(projectRoot, {
     preferredPort: flags.port ?? config.preview?.port ?? 3474,
     host,
   });
-
-  // When binding 0.0.0.0 (typical for Docker) the URL we print should be
-  // something the user can actually click. Show 127.0.0.1 in that case.
-  const printHost = host === '0.0.0.0' ? '127.0.0.1' : host;
-  const url = `http://${printHost}:${port}`;
 
   // Auto-open only on loopback. In a container or on a remote host, opening
   // the host's browser is either useless or wrong.

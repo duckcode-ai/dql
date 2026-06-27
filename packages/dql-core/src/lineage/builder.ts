@@ -364,6 +364,18 @@ export function buildLineageGraph(
 
     // ref() calls → block-to-block edges
     for (const ref of parseResult.refs) {
+      // A block that ref()s its OWN name is wrapping the same-named dbt model
+      // (e.g. block "customers" with `ref('customers')`), not depending on itself.
+      // Resolve it to the dbt-model node so the upstream dependency is preserved,
+      // and never emit a block self-loop (mirrors the `resolved !== block.name`
+      // guard in the table-reference branch below).
+      if (ref === block.name) {
+        const dbtResolved = dbtNodeMap.get(ref.toLowerCase());
+        if (dbtResolved) {
+          graph.addEdge({ source: dbtResolved, target: blockNodeId, type: 'reads_from' });
+        }
+        continue;
+      }
       if (blockNames.has(ref)) {
         graph.addEdge({
           source: `block:${ref}`,

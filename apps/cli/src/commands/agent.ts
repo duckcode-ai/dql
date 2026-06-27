@@ -40,6 +40,50 @@ import {
 import { buildManifest, resolveDbtManifestPath } from '@duckcodeailabs/dql-core';
 import type { CLIFlags } from '../args.js';
 import { findProjectRoot } from '../local-runtime.js';
+import { startProjectRuntime } from './notebook.js';
+
+/**
+ * Resolve the runtime the agent posts certified blocks / generated SQL to.
+ *
+ * If the caller pinned one (`--runtime-url` / `DQL_RUNTIME_URL`) we validate it is
+ * actually a reachable DQL runtime — a bare `/api/health` is not enough, since
+ * unrelated servers (e.g. Docker on :3474) answer `{"status":"ok"}` and would then
+ * swallow the block with a misleading "no connection" error. Otherwise we start an
+ * ephemeral runtime bound to THIS project on a free port and close it when done, so
+ * there is no hardcoded-port collision and the runtime always matches the project.
+ */
+async function resolveAgentRuntime(
+  projectRoot: string,
+  flags: CLIFlags,
+): Promise<{ runtimeBase: string; close: () => Promise<void> }> {
+  const explicit = (flags as { runtimeUrl?: string; runtime?: string }).runtimeUrl
+    ?? (flags as { runtime?: string }).runtime
+    ?? process.env.DQL_RUNTIME_URL;
+  if (explicit) {
+    const base = explicit.replace(/\/$/, '');
+    if (!(await isDqlRuntime(base))) {
+      throw new Error(
+        `No DQL runtime is reachable at ${base}. Start one with \`dql notebook\`, or omit ` +
+          `--runtime-url / DQL_RUNTIME_URL to let \`dql agent ask\` start an ephemeral runtime.`,
+      );
+    }
+    return { runtimeBase: base, close: async () => {} };
+  }
+  const handle = await startProjectRuntime(projectRoot, { preferredPort: 0 });
+  return { runtimeBase: handle.url, close: handle.close };
+}
+
+/** A DQL runtime answers `/api/connections` with a connector/connection payload. */
+async function isDqlRuntime(base: string): Promise<boolean> {
+  try {
+    const response = await fetch(`${base}/api/connections`, { signal: AbortSignal.timeout(2500) });
+    if (!response.ok) return false;
+    const body = (await response.json()) as Record<string, unknown>;
+    return 'connectorStatus' in body || 'dbtProfiles' in body || 'connections' in body;
+  } catch {
+    return false;
+  }
+}
 
 export async function runAgent(
   sub: string | null,
@@ -84,6 +128,7 @@ async function runAsk(rest: string[], flags: CLIFlags): Promise<void> {
   const memory = new MemoryStore(defaultMemoryPath(projectRoot));
   const { skills } = loadSkills(projectRoot);
 
+  let closeRuntime: (() => Promise<void>) | undefined;
   try {
     const memoryContext = memory.search({
       query: question,
@@ -92,10 +137,8 @@ async function runAsk(rest: string[], flags: CLIFlags): Promise<void> {
     });
     const contextPack = await buildLocalContextPack(projectRoot, { question, limit: 80 }).catch(() => undefined);
     const manifest = buildManifest({ projectRoot, dbtManifestPath: resolveDbtManifestPath(projectRoot) ?? undefined });
-    const runtimeBase = (flags as { runtimeUrl?: string; runtime?: string }).runtimeUrl
-      ?? (flags as { runtime?: string }).runtime
-      ?? process.env.DQL_RUNTIME_URL
-      ?? 'http://127.0.0.1:3474';
+    const { runtimeBase, close } = await resolveAgentRuntime(projectRoot, flags);
+    closeRuntime = close;
     const result = await answer({
       question,
       provider,
@@ -239,6 +282,7 @@ async function runAsk(rest: string[], flags: CLIFlags): Promise<void> {
   } finally {
     kg.close();
     memory.close();
+    if (closeRuntime) await closeRuntime();
   }
 }
 

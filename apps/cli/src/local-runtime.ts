@@ -233,6 +233,12 @@ export interface LocalServerOptions {
    * port is reachable from the host. Honours `DQL_HOST` env var when unset.
    */
   host?: string;
+  /**
+   * Receives the underlying HTTP server once created, so short-lived callers
+   * (e.g. `dql agent ask` starting an ephemeral runtime) can `close()` it and
+   * let the process exit instead of hanging on an open listener.
+   */
+  captureServer?: (server: import('node:http').Server) => void;
 }
 
 export async function startLocalServer(opts: LocalServerOptions): Promise<number> {
@@ -5303,6 +5309,8 @@ table: ${table}${tagList}
     res.writeHead(200, { 'Content-Type': contentTypeFor(filePath) });
     res.end(content);
   });
+
+  opts.captureServer?.(server);
 
   return new Promise<number>((resolvePromise, reject) => {
     let retriedWithRandomPort = false;

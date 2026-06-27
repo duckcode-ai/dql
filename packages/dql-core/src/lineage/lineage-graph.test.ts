@@ -240,6 +240,41 @@ describe('buildLineageGraph', () => {
     // ancestors of dashboard should include the block
     expect(graph.ancestors('dashboard:Customer Notebook').map((n) => n.id)).toContain('block:customer_summary');
   });
+
+  it('does not create a block self-loop when a block ref()s its own dbt model name (regression)', () => {
+    // `dql propose` names a block after the dbt model it wraps, so a mart block
+    // "customers" whose query is `SELECT * FROM ref('customers')` used to depend on
+    // itself (block:customers as its own up/downstream), distorting impact analysis.
+    const graph = buildLineageGraph(
+      [
+        {
+          name: 'customers',
+          sql: "SELECT * FROM ref('customers')",
+          domain: 'marts',
+          status: 'certified',
+          owner: 'analytics',
+          chartType: 'table',
+        },
+      ],
+      [],
+      [],
+      {
+        dbtModels: [
+          { name: 'customers', uniqueId: 'model.jaffle_shop.customers', type: 'model', dependsOn: [] },
+        ],
+      },
+    );
+
+    const incoming = graph.getIncomingEdges('block:customers');
+    const outgoing = graph.getOutgoingEdges('block:customers');
+    // No self-loop in either direction.
+    expect(incoming.some((edge) => edge.source === 'block:customers')).toBe(false);
+    expect(outgoing.some((edge) => edge.target === 'block:customers')).toBe(false);
+    // The self-named ref resolves to the wrapped dbt model instead.
+    expect(
+      incoming.some((edge) => edge.source === 'dbt_model:customers' && edge.type === 'reads_from'),
+    ).toBe(true);
+  });
 });
 
 describe('Domain Lineage', () => {
