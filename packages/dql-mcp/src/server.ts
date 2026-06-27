@@ -27,6 +27,14 @@ import {
   inspectDqlProject,
   inspectDqlProjectInput,
 } from './tools/workflows.js';
+import {
+  approveHint,
+  approveHintInput,
+  listHints,
+  listHintsInput,
+  recordCorrection,
+  recordCorrectionInput,
+} from './tools/hints.js';
 
 export interface CreateServerOptions {
   projectRoot?: string;
@@ -60,7 +68,13 @@ export const DQL_MCP_INSTRUCTIONS =
   'drafts with certified tiles plus review-only gaps, `certify` for governance, ' +
   '`lineage_impact` for dependencies, `kg_search` for the knowledge graph, and ' +
   '`feedback_record` for answer quality. Never present generated SQL or draft ' +
-  'output as certified.';
+  'output as certified.\n' +
+  'Correction memory: when an analyst corrects a Tier-2 answer, call ' +
+  '`record_correction` with the scope (metric/dbt model/domain/dialect). It ' +
+  'creates a scoped CANDIDATE hint that is NOT used until a human runs ' +
+  '`approve_hint`. Approved hints are folded into matching future Tier-2 drafts ' +
+  'AFTER certified routing (never overriding certified answers) and are cited. ' +
+  'Use `list_hints` to review pending corrections.';
 
 export function createDQLMCPServer(options: CreateServerOptions = {}): McpServer {
   const projectRoot = options.projectRoot ?? findProjectRoot(process.cwd());
@@ -191,6 +205,33 @@ export function createDQLMCPServer(options: CreateServerOptions = {}): McpServer
     'feedback_record',
     { description: 'Record thumbs-up/down feedback on an answer; feeds self-learning + promotion suggestions.', inputSchema: feedbackRecordInput },
     async (args) => wrap(feedbackRecord(ctx, args)),
+  );
+  server.registerTool(
+    'record_correction',
+    {
+      description:
+        'Capture an analyst correction of a Tier-2 generated answer as a scoped, Git-versioned CANDIDATE hint (not used until approved). Writes a trace + hint under .dql/ and reindexes the local cache.',
+      inputSchema: recordCorrectionInput,
+    },
+    async (args) => wrap(recordCorrection(ctx, args)),
+  );
+  server.registerTool(
+    'approve_hint',
+    {
+      description:
+        'Human review of a candidate correction hint. Approving makes the scoped hint usable in future Tier-2 drafts (after certified routing, never overriding it). Updates .dql/ and the local index.',
+      inputSchema: approveHintInput,
+    },
+    async (args) => wrap(approveHint(ctx, args)),
+  );
+  server.registerTool(
+    'list_hints',
+    {
+      description:
+        'List scoped correction hints (optionally filtered by status/domain/metric) for review. Approved hints are the ones folded into future answers.',
+      inputSchema: listHintsInput,
+    },
+    async (args) => wrap(listHints(ctx, args)),
   );
 
   return server;

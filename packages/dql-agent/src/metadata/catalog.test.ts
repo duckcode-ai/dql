@@ -13,6 +13,7 @@ import {
 } from './catalog.js';
 import { buildBlockBusinessFingerprint, buildBlockSqlFingerprints } from './block-fingerprints.js';
 import { resolveSemanticLayerWithDiagnostics } from '@duckcodeailabs/dql-core';
+import { recordCorrectionTrace, reviewHint } from '../hints/git-store.js';
 
 describe('local metadata catalog', () => {
   let projectRoot: string;
@@ -689,6 +690,42 @@ describe('local metadata catalog', () => {
         }),
       ]),
     );
+  });
+
+  it('folds an approved, scoped correction hint into a matching Tier-2 context pack (cited)', async () => {
+    // No hints yet → backward compatible (empty applied set).
+    const before = await buildLocalContextPack(projectRoot, {
+      question: 'Show NBA player points by season',
+      limit: 40,
+    });
+    expect(before.appliedHints).toEqual([]);
+
+    // Record + approve a correction scoped to the nba domain.
+    const { hint } = recordCorrectionTrace(projectRoot, {
+      question: 'Show NBA player points by season',
+      scope: { domain: 'nba' },
+      wrongAnswer: 'SELECT player_name, points FROM fct_player_performance',
+      correction: 'Always SUM points and GROUP BY player_name, season for season totals.',
+      author: 'analyst@nba.test',
+    });
+
+    // Candidate must NOT be applied (approved-only).
+    const candidatePack = await buildLocalContextPack(projectRoot, {
+      question: 'Show NBA player points by season',
+      limit: 40,
+    });
+    expect(candidatePack.appliedHints).toEqual([]);
+
+    reviewHint(projectRoot, { hintId: hint.id, decision: 'approved', reviewer: 'lead@nba.test' });
+
+    // In-scope Tier-2 question → hint is applied and cited.
+    const matched = await buildLocalContextPack(projectRoot, {
+      question: 'Show NBA player points by season',
+      limit: 40,
+    });
+    expect(matched.appliedHints.map((h) => h.hintId)).toContain(hint.id);
+    expect(matched.appliedHints[0].guidance).toContain('SUM points');
+    expect(matched.appliedHints[0].scopeReason).toContain('domain=nba');
   });
 });
 

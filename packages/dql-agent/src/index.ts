@@ -23,6 +23,7 @@ import { loadSkills } from "./skills/loader.js";
 import type { Skill } from "./skills/loader.js";
 import type { KGEdge, KGNode } from "./kg/types.js";
 import { ensureMetadataCatalogFresh } from "./metadata/catalog.js";
+import { reindexHints } from "./hints/git-store.js";
 
 export { KGStore } from "./kg/sqlite-fts.js";
 export type {
@@ -204,6 +205,69 @@ export type {
   GeneratedDraftBlock,
   GeneratedDraftRecord,
 } from "./metadata/drafts.js";
+// --- Scoped correction memory (hints) ---
+export {
+  HintStore,
+} from "./hints/store.js";
+export type {
+  SearchApprovedHintsOptions,
+} from "./hints/store.js";
+export {
+  recordCorrectionTrace,
+  reviewHint,
+  reindexHints,
+  listHintsFromGit,
+  getHintFromGit,
+  writeHintFile,
+  readHintFile,
+  hintsDir,
+  tracesDir,
+  reviewsDir,
+  defaultHintIndexPath,
+} from "./hints/git-store.js";
+export type {
+  RecordCorrectionTraceInput,
+  RecordCorrectionTraceResult,
+  ReviewHintInput,
+  ReviewHintResult,
+} from "./hints/git-store.js";
+export {
+  retrieveScopedHints,
+} from "./hints/retrieval.js";
+export type {
+  AppliedHint,
+  HintRetrievalResult,
+  RetrieveScopedHintsOptions,
+} from "./hints/retrieval.js";
+export {
+  hintAppliesToScope,
+  hintsConflict,
+} from "./hints/types.js";
+export type {
+  CorrectionTrace,
+  Hint,
+  HintReview,
+  HintScope,
+  HintStatus,
+  QuestionScope,
+  ScopedHintMatch,
+} from "./hints/types.js";
+// --- Pluggable semantic retrieval (embeddings) ---
+export {
+  HashedTokenEmbeddingProvider,
+  defaultEmbeddingProvider,
+  cosineSimilarity,
+  hybridRank,
+} from "./embeddings/provider.js";
+export type {
+  EmbeddingProvider,
+  HybridRankItem,
+  HybridRankOptions,
+  HybridRanked,
+} from "./embeddings/provider.js";
+export type {
+  AppliedContextHint,
+} from "./metadata/catalog.js";
 export {
   ClaudeProvider,
   OpenAIProvider,
@@ -281,6 +345,13 @@ export async function reindexProject(
     semanticLayer,
     force: true,
   });
+  // Rebuild the approved-hint index (Git authoritative; SQLite is a view). Safe
+  // when no hints exist — yields an empty index.
+  try {
+    reindexHints(projectRoot, opts.kgPath ?? defaultKgPath(projectRoot));
+  } catch {
+    // Hint indexing is advisory; never fail a reindex over it.
+  }
   return { nodes: nodes.length, edges: edges.length, skills: skills.length };
 }
 

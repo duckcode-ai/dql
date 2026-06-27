@@ -43,6 +43,19 @@ import {
   requestedGrainFromPlan,
   type GrainGateResult,
 } from './grain-gate.js';
+import { retrieveScopedHints } from '../hints/retrieval.js';
+import type { QuestionScope } from '../hints/types.js';
+
+/** An approved scoped hint folded into a context pack (after certified routing). */
+export interface AppliedContextHint {
+  hintId: string;
+  title: string;
+  guidance: string;
+  scopeReason: string;
+  score: number;
+  correctedSql?: string;
+  traceId?: string;
+}
 
 const require = createRequire(import.meta.url);
 let databaseCtor: typeof Database | null = null;
@@ -342,6 +355,14 @@ export interface LocalContextPack {
   allowedSqlContext: MetadataAllowedSqlContext;
   missingContext: MetadataMissingContext[];
   conflicts: MetadataCandidateConflict[];
+  /**
+   * Approved, scoped correction hints folded into the context AFTER certified
+   * routing (never overriding it). Empty when no hints exist or none are in
+   * scope. Each hint is cited so the agent can attribute the guidance.
+   */
+  appliedHints: AppliedContextHint[];
+  /** Conflicting approved hints surfaced for review (advisory). */
+  hintConflicts: Array<{ hintIds: [string, string]; titles: [string, string]; reason: string }>;
   retrievalDiagnostics: {
     strategy: 'sqlite_fts';
     selectedObjects: number;
@@ -621,6 +642,16 @@ export async function buildLocalContextPack(
       compileConflicts,
       rankedObjects: reranked.ranked,
     });
+
+    // Approved scoped correction hints — folded in AFTER certified routing so
+    // they never override a certified answer. On the `certified` route we still
+    // surface in-scope hints as advisory context, but never to change the route.
+    const questionScope = deriveQuestionScope(request, questionPlan, objects, routeDecision);
+    const hintResult = await retrieveScopedHints(projectRoot, {
+      questionScope,
+      limit: 6,
+    }).catch(() => ({ applied: [], conflicts: [] }));
+
     const payload: LocalContextPack = {
       id: '',
       question: request.question,
@@ -640,6 +671,8 @@ export async function buildLocalContextPack(
       allowedSqlContext,
       missingContext: routeDecision.missingContext,
       conflicts,
+      appliedHints: hintResult.applied,
+      hintConflicts: hintResult.conflicts,
       retrievalDiagnostics: {
         strategy: 'sqlite_fts',
         selectedObjects: objects.length,
@@ -2125,6 +2158,59 @@ function addProjectDiagnostics(
       message: 'No semantic metrics or dimensions were found. Agents can use DQL/dbt/warehouse metadata, but semantic metric answers require metric definitions.',
     });
   }
+}
+
+/**
+ * Resolve the question's scope (metric / dbt model / domain / term / block) for
+ * scoped-hint matching. Drawn from the route's chosen objects + question plan so
+ * a hint only applies inside the same metric/model/domain it was approved for.
+ * Dialect is intentionally left undefined here (unknown at this layer); the hint
+ * scope matcher tolerates an unknown question dialect.
+ */
+function deriveQuestionScope(
+  request: BuildLocalContextPackRequest,
+  questionPlan: AnalysisQuestionPlan,
+  objects: MetadataObject[],
+  routeDecision: MetadataRouteDecision,
+): QuestionScope {
+  const focusKey = routeDecision.exactObjectKey ?? request.focusObjectKey;
+  const focus = focusKey ? objects.find((object) => object.objectKey === focusKey) : undefined;
+  const topByType = (type: string): MetadataObject | undefined =>
+    objects.find((object) => object.objectType === type);
+
+  const metricObject =
+    (focus && (focus.objectType === 'semantic_metric' || focus.objectType === 'dql_block') ? focus : undefined) ??
+    topByType('semantic_metric');
+  const dbtObject = topByType('dbt_model');
+
+  const metric = firstNonEmpty(
+    metricObject?.objectType === 'semantic_metric' ? metricObject.name : undefined,
+    questionPlan.metricTerms[0],
+  );
+  const domain = firstNonEmpty(focus?.domain, metricObject?.domain, dbtObject?.domain, ...objects.map((o) => o.domain));
+  const dbtModel = dbtObject?.name;
+  const block = focus?.objectType === 'dql_block' ? focus.name : undefined;
+  const term = focus?.objectType === 'dql_term' ? focus.name : topByType('dql_term')?.name;
+
+  return {
+    metric: lowerOrUndef(metric),
+    dbtModel: lowerOrUndef(dbtModel),
+    domain: lowerOrUndef(domain),
+    term: lowerOrUndef(term),
+    block,
+    text: request.question,
+  };
+}
+
+function firstNonEmpty(...values: Array<string | undefined>): string | undefined {
+  for (const value of values) {
+    if (value && value.trim().length > 0) return value;
+  }
+  return undefined;
+}
+
+function lowerOrUndef(value: string | undefined): string | undefined {
+  return value ? value.trim().toLowerCase() : undefined;
 }
 
 function planContextPackRoute(input: {
