@@ -5,6 +5,7 @@ import {
   buildAgentPreviewSql,
   buildAgentSchemaContext,
   buildDbtStatus,
+  buildProposeReadiness,
   buildSemanticLayerDiagnostics,
   createBlockArtifacts,
   createDqlGenerationSessionForProject,
@@ -38,7 +39,7 @@ import {
   saveProviderSettings,
 } from './settings/provider-settings.js';
 import { afterEach } from 'vitest';
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { SemanticLayer } from '@duckcodeailabs/dql-core';
@@ -1604,5 +1605,135 @@ describe('block invariant evaluation (run-time wiring)', () => {
     });
     expect(out!.invariantViolation).toBe(true);
     expect(out!.invariantResults.find((entry) => entry.expr === 'approval_rate_pct <= 100')?.passed).toBe(false);
+  });
+});
+
+describe('buildProposeReadiness (/api/propose handler core)', () => {
+  // Minimal synthetic dbt manifest at <projectRoot>/target/manifest.json so the
+  // readiness handler resolves it via the same lookup the local runtime uses.
+  function writeManifest(projectRoot: string): void {
+    const targetDir = join(projectRoot, 'target');
+    mkdirSync(targetDir, { recursive: true });
+    writeFileSync(join(targetDir, 'manifest.json'), JSON.stringify({
+      metadata: { project_name: 'jaffle_shop' },
+      nodes: {
+        'model.jaffle_shop.stg_orders': {
+          resource_type: 'model',
+          name: 'stg_orders',
+          schema: 'staging',
+          database: 'analytics',
+          description: '',
+          original_file_path: 'models/staging/stg_orders.sql',
+          config: { materialized: 'view' },
+          tags: [],
+          depends_on: { nodes: ['source.jaffle_shop.raw.orders'] },
+          columns: { order_id: { name: 'order_id' } },
+          meta: {},
+        },
+        'model.jaffle_shop.dim_customers': {
+          resource_type: 'model',
+          name: 'dim_customers',
+          schema: 'marts',
+          database: 'analytics',
+          description: 'One row per customer with lifetime attributes.',
+          original_file_path: 'models/marts/dim_customers.sql',
+          config: { materialized: 'table' },
+          tags: ['core'],
+          depends_on: { nodes: ['model.jaffle_shop.stg_orders'] },
+          columns: {
+            customer_id: { name: 'customer_id', description: 'Customer surrogate key.' },
+            customer_name: { name: 'customer_name' },
+          },
+          meta: {},
+        },
+        'model.jaffle_shop.fct_orders': {
+          resource_type: 'model',
+          name: 'fct_orders',
+          schema: 'marts',
+          database: 'analytics',
+          description: 'Order-grain fact with amounts.',
+          original_file_path: 'models/marts/fct_orders.sql',
+          config: { materialized: 'table' },
+          tags: ['core'],
+          depends_on: { nodes: ['model.jaffle_shop.stg_orders', 'model.jaffle_shop.dim_customers'] },
+          columns: {
+            order_id: { name: 'order_id' },
+            order_date: { name: 'order_date' },
+            amount: { name: 'amount' },
+          },
+          meta: {},
+        },
+      },
+      sources: {
+        'source.jaffle_shop.raw.orders': {
+          name: 'orders',
+          identifier: 'orders',
+          schema: 'raw',
+          database: 'analytics',
+          tags: [],
+        },
+      },
+    }), 'utf-8');
+  }
+
+  it('returns a not-ready readiness result when no dbt manifest is present', () => {
+    const projectRoot = mkdtempSync(join(tmpdir(), 'dql-propose-readiness-empty-'));
+    tempDirs.push(projectRoot);
+    writeFileSync(join(projectRoot, 'dql.config.json'), JSON.stringify({ project: 'p' }), 'utf-8');
+
+    const result = buildProposeReadiness(projectRoot);
+
+    expect(result.ready).toBe(false);
+    expect(result.reason).toMatch(/dbt manifest/i);
+    expect(result.proposals).toEqual([]);
+    expect(result.summary.modelsScanned).toBe(0);
+    expect(result.summary.proposalsRanked).toBe(0);
+  });
+
+  it('returns ranked DRAFT proposals with stored certifier verdicts (nothing certified)', () => {
+    const projectRoot = mkdtempSync(join(tmpdir(), 'dql-propose-readiness-'));
+    tempDirs.push(projectRoot);
+    writeFileSync(join(projectRoot, 'dql.config.json'), JSON.stringify({ project: 'p' }), 'utf-8');
+    writeManifest(projectRoot);
+
+    const result = buildProposeReadiness(projectRoot, undefined, { owner: 'me@example.com' });
+
+    expect(result.ready).toBe(true);
+    expect(result.summary.projectName).toBe('jaffle_shop');
+    expect(result.summary.modelsScanned).toBe(3);
+    expect(result.summary.proposalsRanked).toBe(3);
+    expect(result.proposals).toHaveLength(3);
+
+    // Every proposal is a DRAFT and carries a Certifier verdict; none certified.
+    for (const proposal of result.proposals) {
+      expect(proposal.certification.certified).toBe(false);
+      expect(Array.isArray(proposal.certification.errors)).toBe(true);
+      expect(Array.isArray(proposal.certification.warnings)).toBe(true);
+    }
+
+    // Ranked: scores are non-increasing across the queue.
+    const scores = result.proposals.map((p) => p.ranking.score);
+    expect([...scores].sort((a, b) => b - a)).toEqual(scores);
+
+    // Summary aggregates mirror the per-proposal certifier counts.
+    const blocking = result.proposals.reduce((sum, p) => sum + p.certification.errors.length, 0);
+    const warnings = result.proposals.reduce((sum, p) => sum + p.certification.warnings.length, 0);
+    expect(result.summary.blockingTotal).toBe(blocking);
+    expect(result.summary.warningTotal).toBe(warnings);
+    expect(result.summary.readyForReview).toBe(
+      result.proposals.filter((p) => p.certification.errors.length === 0).length,
+    );
+  });
+
+  it('does not write any draft files (dryRun preview only)', () => {
+    const projectRoot = mkdtempSync(join(tmpdir(), 'dql-propose-readiness-dryrun-'));
+    tempDirs.push(projectRoot);
+    writeFileSync(join(projectRoot, 'dql.config.json'), JSON.stringify({ project: 'p' }), 'utf-8');
+    writeManifest(projectRoot);
+
+    buildProposeReadiness(projectRoot);
+
+    // The readiness preview must never mutate the project with draft blocks.
+    expect(existsSync(join(projectRoot, 'blocks', '_drafts'))).toBe(false);
   });
 });

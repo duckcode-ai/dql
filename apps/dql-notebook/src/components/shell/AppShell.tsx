@@ -17,6 +17,8 @@ import { LineageDetailView } from '../panels/LineageDetailView';
 import { ConnectionPanel } from '../panels/ConnectionPanel';
 import { ReferencePanel } from '../panels/ReferencePanel';
 import { GitPage } from '../git/GitPage';
+import { ReadinessPage } from '../readiness/ReadinessPage';
+import { ReviewPage } from '../review/ReviewPage';
 import { AppsView } from '../apps/AppsView';
 import { LineageDrawer } from '../lineage/LineageDrawer';
 import { api } from '../../api/client';
@@ -211,6 +213,15 @@ export function AppShell() {
             </FullPageSection>
           ) : state.mainView === 'git' ? (
             <GitPage />
+          ) : state.mainView === 'readiness' ? (
+            <ReadinessPage />
+          ) : state.mainView === 'review' ? (
+            <FullPageSection
+              title="Review & Certify"
+              description="Human review queue for draft and AI-Generated proposals. Promote the ones you trust — nothing is certified automatically."
+            >
+              <ReviewPage />
+            </FullPageSection>
           ) : state.mainView === 'apps' ? (
             <AppsView />
           ) : (

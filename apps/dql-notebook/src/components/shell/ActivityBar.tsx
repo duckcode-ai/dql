@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { Home } from 'lucide-react';
+import { Home, Sparkles } from 'lucide-react';
 import { Tooltip } from '@duckcodeailabs/dql-ui';
 import {
   FileText,
@@ -129,7 +129,7 @@ export function ActivityBar() {
       dispatch({ type: 'SET_SIDEBAR_PANEL', panel: 'lineage' });
       return;
     }
-    const fullPagePanel = panel === 'connection' || panel === 'reference' || panel === 'git' || panel === 'apps' || panel === 'settings';
+    const fullPagePanel = panel === 'connection' || panel === 'reference' || panel === 'git' || panel === 'apps' || panel === 'readiness' || panel === 'settings';
     if (fullPagePanel) {
       dispatch({ type: 'SET_SIDEBAR_PANEL', panel });
       return;
@@ -152,6 +152,12 @@ export function ActivityBar() {
       title: 'Home',
       icon: <Home size={16} strokeWidth={1.75} />,
       active: state.mainView === 'home',
+    },
+    {
+      key: 'readiness',
+      title: 'Get Started',
+      icon: <Sparkles size={16} strokeWidth={1.75} />,
+      active: state.mainView === 'readiness' || state.mainView === 'review',
     },
     {
       key: 'apps',

@@ -72,6 +72,7 @@ import {
   defaultMemoryPath,
   ensureDefaultMemoryFiles,
   ensureMetadataCatalogFresh,
+  propose,
   recordQueryRun,
   recordRuntimeSchemaSnapshot,
   type AgentAnswer,
@@ -81,6 +82,8 @@ import {
   type LocalContextPack,
   type MetadataObject,
   type KGNode,
+  type ProposeSummary,
+  type ProposalResult,
 } from '@duckcodeailabs/dql-agent';
 import { handleAppsApi, recommendVisualization } from './apps-api.js';
 import {
@@ -1495,6 +1498,36 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
     if (req.method === 'GET' && path === '/api/health') {
       res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
       res.end(serializeJSON({ status: 'ok' }));
+      return;
+    }
+
+    // Readiness → propose backbone. Returns a readiness summary plus the ranked
+    // DRAFT proposals (each with its stored Certifier verdict) so the notebook
+    // "Get Started" surface can route them into human review. dryRun preview —
+    // nothing is written or certified by this call.
+    if ((req.method === 'GET' || req.method === 'POST') && path === '/api/propose') {
+      try {
+        let owner: string | undefined;
+        let limit: number | undefined;
+        if (req.method === 'POST') {
+          const body = await readJSON(req).catch(() => ({}));
+          if (typeof body?.owner === 'string') owner = body.owner;
+          if (typeof body?.limit === 'number' && Number.isFinite(body.limit) && body.limit > 0) {
+            limit = body.limit;
+          }
+        } else {
+          const ownerParam = url.searchParams.get('owner');
+          if (ownerParam) owner = ownerParam;
+          const limitParam = Number(url.searchParams.get('limit'));
+          if (Number.isFinite(limitParam) && limitParam > 0) limit = limitParam;
+        }
+        const readiness = buildProposeReadiness(projectRoot, loadProjectConfig(projectRoot), { owner, limit });
+        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON(readiness));
+      } catch (error) {
+        res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({ error: error instanceof Error ? error.message : String(error) }));
+      }
       return;
     }
 
@@ -5647,6 +5680,106 @@ export function loadProjectConfig(projectRoot: string): ProjectConfig {
   }
 
   return config;
+}
+
+/**
+ * Shape returned by `/api/propose`. Drives the notebook Readiness surface:
+ * a readiness summary plus a ranked queue of DRAFT proposals, each carrying its
+ * stored Certifier verdict ("what's missing to certify"). The endpoint NEVER
+ * certifies — proposals always render as AI-Generated drafts and route into the
+ * existing human review/certify flow.
+ */
+export interface ProposeReadinessResult {
+  /** True when a dbt manifest was found and the engine ran. */
+  ready: boolean;
+  /**
+   * Why the engine could not run (no dbt manifest). Present only when
+   * `ready === false`; the UI shows this as a "what to do next" hint.
+   */
+  reason?: string;
+  summary: {
+    projectName?: string;
+    /** dbt models the engine scanned. */
+    modelsScanned: number;
+    /** Proposable items the engine ranked. */
+    proposalsRanked: number;
+    /** Drafts already written to the project (skipped on re-run). */
+    draftsExisting: number;
+    /** Proposals with zero blocking certifier errors (closest to certifiable). */
+    readyForReview: number;
+    /** Total blocking certifier errors across the queue. */
+    blockingTotal: number;
+    /** Total certifier warnings across the queue. */
+    warningTotal: number;
+  };
+  /** Ranked DRAFT proposals (engine order preserved). */
+  proposals: ProposalResult[];
+}
+
+/**
+ * Core of the `/api/propose` endpoint, factored out as a pure function so it can
+ * be unit-tested without standing up an HTTP server.
+ *
+ * It reuses the existing `propose` engine from `@duckcodeailabs/dql-agent`
+ * verbatim (no inference/ranking logic is duplicated here) in `dryRun` mode so a
+ * readiness preview never mutates the project. Every returned proposal is a
+ * `status: draft` block with the engine's stored Certifier verdict attached.
+ */
+export function buildProposeReadiness(
+  projectRoot: string,
+  projectConfig: ProjectConfig = loadProjectConfig(projectRoot),
+  options: { owner?: string; limit?: number } = {},
+): ProposeReadinessResult {
+  const manifestPath = resolveDbtManifestPath(projectRoot, projectConfig);
+  if (!manifestPath) {
+    return {
+      ready: false,
+      reason:
+        'No dbt manifest found. Run `dbt parse` (or `dbt compile`) in your dbt project, then reopen Get Started.',
+      summary: {
+        modelsScanned: 0,
+        proposalsRanked: 0,
+        draftsExisting: 0,
+        readyForReview: 0,
+        blockingTotal: 0,
+        warningTotal: 0,
+      },
+      proposals: [],
+    };
+  }
+
+  // dryRun: rank + certify only. Never writes drafts from a readiness preview.
+  const summary: ProposeSummary = propose({
+    projectRoot,
+    dbtManifestPath: manifestPath,
+    owner: options.owner || undefined,
+    limit: options.limit,
+    dryRun: true,
+  });
+
+  let readyForReview = 0;
+  let blockingTotal = 0;
+  let warningTotal = 0;
+  for (const proposal of summary.proposals) {
+    blockingTotal += proposal.certification.errors.length;
+    warningTotal += proposal.certification.warnings.length;
+    if (proposal.certification.errors.length === 0) readyForReview += 1;
+  }
+
+  return {
+    ready: true,
+    summary: {
+      projectName: summary.projectName,
+      modelsScanned: summary.modelsScanned,
+      proposalsRanked: summary.proposalsRanked,
+      // In dryRun the engine marks already-present blocks as skipped.
+      draftsExisting: summary.draftsSkipped,
+      readyForReview,
+      blockingTotal,
+      warningTotal,
+    },
+    proposals: summary.proposals,
+  };
 }
 
 function getProjectConnectionsForApi(config: ProjectConfig | Record<string, unknown>): Record<string, unknown> {

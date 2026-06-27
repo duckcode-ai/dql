@@ -139,9 +139,9 @@ export interface ParamConfig {
   defaultValue: string;
   options?: string[];
 }
-export type SidebarPanel = 'files' | 'schema' | 'block_library' | 'connection' | 'reference' | 'lineage' | 'git' | 'apps' | 'settings' | null;
+export type SidebarPanel = 'files' | 'schema' | 'block_library' | 'connection' | 'reference' | 'lineage' | 'git' | 'apps' | 'readiness' | 'settings' | null;
 export type DevPanelTab = 'logs' | 'errors';
-export type MainView = 'home' | 'notebook' | 'business_artifact' | 'lineage' | 'lineage_detail' | 'block_studio' | 'imports' | 'connection' | 'reference' | 'git' | 'apps' | 'review' | 'settings';
+export type MainView = 'home' | 'notebook' | 'business_artifact' | 'lineage' | 'lineage_detail' | 'block_studio' | 'imports' | 'connection' | 'reference' | 'git' | 'apps' | 'readiness' | 'review' | 'settings';
 export type AppWorkspaceExperience = 'view' | 'build';
 export type AppWorkspaceSection = 'dashboards' | 'notebooks' | 'research' | 'ai' | 'drafts' | 'settings';
 export type LineageReturnTarget =
@@ -185,6 +185,66 @@ export interface AppSummary {
   aiPins?: number;
   investigations?: number;
   homepage?: { type: 'dashboard'; id: string } | { type: 'notebook'; path: string };
+}
+
+// ── Readiness / Propose backbone ("AI drafts, humans certify") ─────────────
+// Mirrors the `/api/propose` (buildProposeReadiness) response from the CLI
+// local runtime. Each proposal is a DRAFT block with a stored Certifier verdict;
+// nothing here is ever certified — promotion is a separate human action.
+
+export interface ProposalCertifierNote {
+  rule: string;
+  message: string;
+}
+
+export interface ProposalCertification {
+  certified: false;
+  errors: ProposalCertifierNote[];
+  warnings: ProposalCertifierNote[];
+}
+
+export interface ProposalRanking {
+  fanOut: number;
+  exposureLinked: boolean;
+  runCount: number;
+  score: number;
+}
+
+export interface ReadinessProposal {
+  model: string;
+  slug: string;
+  domain: string;
+  inference: {
+    pattern: string;
+    grain?: string;
+    declaredOutputs: string[];
+    entities: string[];
+    invariants: string[];
+    tags: string[];
+  };
+  ranking: ProposalRanking;
+  /** Path of an already-written draft, when one exists. */
+  path?: string;
+  /** Why a draft was skipped on a previous run (already exists, etc.). */
+  skipped?: string;
+  certification: ProposalCertification;
+}
+
+export interface ProposeReadinessSummary {
+  projectName?: string;
+  modelsScanned: number;
+  proposalsRanked: number;
+  draftsExisting: number;
+  readyForReview: number;
+  blockingTotal: number;
+  warningTotal: number;
+}
+
+export interface ProposeReadiness {
+  ready: boolean;
+  reason?: string;
+  summary: ProposeReadinessSummary;
+  proposals: ReadinessProposal[];
 }
 
 export interface ActivePersona {

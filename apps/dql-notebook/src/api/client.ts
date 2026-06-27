@@ -33,6 +33,7 @@ import type {
   SemanticLayerDiagnostics,
   AppSummary,
   ActivePersona,
+  ProposeReadiness,
 } from '../store/types';
 
 // ── Apps API types ───────────────────────────────────────────────────────
@@ -1369,6 +1370,33 @@ export const api = {
       return await request<{ groups: SettingsEnvGroup[] }>('/api/settings/env-status');
     } catch {
       return { groups: [] };
+    }
+  },
+
+  /**
+   * Fetch the readiness summary + ranked DRAFT proposals from the propose
+   * engine. Read-only preview: the server does not write or certify anything.
+   */
+  async getProposeReadiness(input?: { owner?: string; limit?: number }): Promise<ProposeReadiness> {
+    try {
+      return await request<ProposeReadiness>('/api/propose', {
+        method: 'POST',
+        body: JSON.stringify(input ?? {}),
+      });
+    } catch {
+      return {
+        ready: false,
+        reason: 'Unable to reach the propose engine. Is the local DQL server running?',
+        summary: {
+          modelsScanned: 0,
+          proposalsRanked: 0,
+          draftsExisting: 0,
+          readyForReview: 0,
+          blockingTotal: 0,
+          warningTotal: 0,
+        },
+        proposals: [],
+      };
     }
   },
 
