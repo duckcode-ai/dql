@@ -1801,13 +1801,14 @@ describe('buildProposeReadiness (/api/propose handler core)', () => {
     expect(existsSync(join(projectRoot, 'blocks', '_drafts'))).toBe(false);
   });
 
-  it('generateProposeDrafts writes ONLY the approved scope (business-only)', () => {
+  it('generateProposeDrafts writes ONLY the approved scope (business-only)', async () => {
     const projectRoot = mkdtempSync(join(tmpdir(), 'dql-propose-generate-'));
     tempDirs.push(projectRoot);
-    writeFileSync(join(projectRoot, 'dql.config.json'), JSON.stringify({ project: 'p' }), 'utf-8');
+    // aiEnrichment off → deterministic + offline (no provider ping in tests).
+    writeFileSync(join(projectRoot, 'dql.config.json'), JSON.stringify({ project: 'p', propose: { aiEnrichment: 'off' } }), 'utf-8');
     writeManifest(projectRoot);
 
-    const result = generateProposeDrafts(projectRoot, ['dim_customers'], undefined, { owner: 'me@example.com' });
+    const result = await generateProposeDrafts(projectRoot, ['dim_customers'], undefined, { owner: 'me@example.com' });
 
     expect(result.ready).toBe(true);
     expect(result.draftsWritten).toBe(1);
@@ -1822,13 +1823,13 @@ describe('buildProposeReadiness (/api/propose handler core)', () => {
     expect(source).not.toContain('status = "certified"');
   });
 
-  it('generateProposeDrafts never writes a plumbing model even if explicitly requested', () => {
+  it('generateProposeDrafts never writes a plumbing model even if explicitly requested', async () => {
     const projectRoot = mkdtempSync(join(tmpdir(), 'dql-propose-generate-plumbing-'));
     tempDirs.push(projectRoot);
-    writeFileSync(join(projectRoot, 'dql.config.json'), JSON.stringify({ project: 'p' }), 'utf-8');
+    writeFileSync(join(projectRoot, 'dql.config.json'), JSON.stringify({ project: 'p', propose: { aiEnrichment: 'off' } }), 'utf-8');
     writeManifest(projectRoot);
 
-    const result = generateProposeDrafts(projectRoot, ['stg_orders']);
+    const result = await generateProposeDrafts(projectRoot, ['stg_orders']);
     expect(result.draftsWritten).toBe(0);
     expect(existsSync(join(projectRoot, 'blocks', '_drafts', 'stg_orders.dql'))).toBe(false);
   });

@@ -42,6 +42,7 @@ import {
   type ProposeConfigInput,
 } from './config.js';
 import { buildBusinessQuery } from './generate-sql.js';
+import type { EnrichedContent } from './enrich.js';
 
 export interface ProposeOptions {
   projectRoot: string;
@@ -76,6 +77,14 @@ export interface ProposeOptions {
    * same bounded-selection path otherwise.
    */
   onlySlugs?: string[];
+  /**
+   * Optional pre-computed AI enrichment (keyed by slug), produced asynchronously
+   * by the generate path. When present for a slug, its `description`/`llmContext`/
+   * `examples` override the deterministic dbt-derived content. The engine never
+   * calls a provider itself — enrichment is consumed here as plain data, so
+   * `propose()` stays sync, deterministic, and offline-safe.
+   */
+  enrichedBySlug?: Map<string, EnrichedContent>;
 }
 
 export type ProposedPattern =
@@ -610,21 +619,31 @@ export function propose(options: ProposeOptions): ProposeSummary {
     }
 
     const model = scan.artifacts.models.find((m) => m.name === proposal.model)!;
+    // Optional AI enrichment overrides only human-facing content; structure
+    // (sql/grain/outputs/invariants) stays deterministic. Falls back to dbt content.
+    const enriched = options.enrichedBySlug?.get(proposal.slug);
+    const enrichedExamples = enriched?.examples?.length
+      ? enriched.examples.map((question) => ({ question }))
+      : undefined;
     const draftRecord: ProposedDraftRecord = {
       slug: proposal.slug,
       domain: proposal.domain,
       owner: owner || proposal.owner || '',
+      // A human-authored dbt description is authoritative; AI only fills the gap
+      // when dbt has none. (llmContext/examples are templated deterministically, so
+      // AI enrichment improves on them when available.)
       description:
         model.description?.trim() ||
+        enriched?.description?.trim() ||
         `Draft governance block proposed from dbt model ${proposal.model}.`,
       sql: buildBusinessQuery(model, proposal.inference, scan.artifacts),
       pattern: proposal.inference.pattern,
       grain: proposal.inference.grain,
       entities: proposal.inference.entities,
       declaredOutputs: proposal.inference.declaredOutputs,
-      llmContext: proposal.inference.llmContext,
+      llmContext: enriched?.llmContext ?? proposal.inference.llmContext,
       invariants: proposal.inference.invariants,
-      examples: proposal.inference.examples,
+      examples: enrichedExamples ?? proposal.inference.examples,
       tags: proposal.inference.tags,
       sourceModel: proposal.model,
       sourceSystems: [model.schema, model.database].filter((v): v is string => Boolean(v)),

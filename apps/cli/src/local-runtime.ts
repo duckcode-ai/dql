@@ -74,6 +74,9 @@ import {
   ensureMetadataCatalogFresh,
   propose,
   proposePlan,
+  pickProvider,
+  enrichProposals,
+  resolveProposeConfig,
   recordQueryRun,
   recordRuntimeSchemaSnapshot,
   type AgentAnswer,
@@ -87,6 +90,8 @@ import {
   type ProposalResult,
   type ProposePlan,
   type ProposeConfigInput,
+  type EnrichFacts,
+  type EnrichedContent,
 } from '@duckcodeailabs/dql-agent';
 import { handleAppsApi, recommendVisualization } from './apps-api.js';
 import {
@@ -1586,7 +1591,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           return;
         }
         const owner = typeof body?.owner === 'string' ? body.owner : undefined;
-        const result = generateProposeDrafts(projectRoot, slugs, config, { owner });
+        const result = await generateProposeDrafts(projectRoot, slugs, config, { owner });
         res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
         res.end(serializeJSON(result));
       } catch (error) {
@@ -1608,7 +1613,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           return;
         }
         const owner = typeof body?.owner === 'string' ? body.owner : undefined;
-        const result = generateProposeDrafts(projectRoot, [slug], loadProjectConfig(projectRoot), { owner });
+        const result = await generateProposeDrafts(projectRoot, [slug], loadProjectConfig(projectRoot), { owner });
         res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
         res.end(serializeJSON(result));
       } catch (error) {
@@ -5922,12 +5927,12 @@ export interface ProposeGenerateResult {
   proposals: ProposalResult[];
 }
 
-export function generateProposeDrafts(
+export async function generateProposeDrafts(
   projectRoot: string,
   slugs: string[],
   projectConfig: ProjectConfig = loadProjectConfig(projectRoot),
   options: { owner?: string } = {},
-): ProposeGenerateResult {
+): Promise<ProposeGenerateResult> {
   const manifestPath = resolveDbtManifestPath(projectRoot, projectConfig);
   if (!manifestPath) {
     return {
@@ -5938,12 +5943,24 @@ export function generateProposeDrafts(
       proposals: [],
     };
   }
+
+  // Structure deterministic, content AI-optional: optionally pre-compute AI
+  // enrichment (description / llmContext / examples) for the approved slugs, then
+  // hand it to the deterministic engine as data. Best-effort — any failure or a
+  // missing provider falls back to dbt-derived content.
+  let enrichedBySlug: Map<string, EnrichedContent> | undefined;
+  const proposeConfig = resolveProposeConfig(projectConfig.propose);
+  if (proposeConfig.aiEnrichment !== 'off' && slugs.length > 0) {
+    enrichedBySlug = await enrichApprovedDrafts(projectRoot, manifestPath, projectConfig, slugs).catch(() => undefined);
+  }
+
   const summary = propose({
     projectRoot,
     dbtManifestPath: manifestPath,
     owner: options.owner || undefined,
     config: projectConfig.propose,
     onlySlugs: slugs,
+    enrichedBySlug,
   });
   return {
     ready: true,
@@ -5951,6 +5968,33 @@ export function generateProposeDrafts(
     draftsSkipped: summary.draftsSkipped,
     proposals: summary.proposals,
   };
+}
+
+/** Best-effort AI enrichment for the approved slugs (empty/undefined on any miss). */
+async function enrichApprovedDrafts(
+  projectRoot: string,
+  manifestPath: string,
+  projectConfig: ProjectConfig,
+  slugs: string[],
+): Promise<Map<string, EnrichedContent> | undefined> {
+  const provider = await pickProvider();
+  if (!(await provider.available())) return undefined;
+  // dryRun gives us the deterministic facts for the bounded selection (no write).
+  const preview = propose({ projectRoot, dbtManifestPath: manifestPath, dryRun: true, config: projectConfig.propose });
+  const wanted = new Set(slugs);
+  const facts: EnrichFacts[] = preview.proposals
+    .filter((proposal) => wanted.has(proposal.slug))
+    .map((proposal) => ({
+      slug: proposal.slug,
+      model: proposal.model,
+      domain: proposal.domain,
+      grain: proposal.inference.grain,
+      pattern: proposal.inference.pattern,
+      columns: proposal.inference.declaredOutputs,
+      entities: proposal.inference.entities,
+    }));
+  if (facts.length === 0) return undefined;
+  return enrichProposals(facts, provider, { timeoutMs: 25_000, concurrency: 4 });
 }
 
 function getProjectConnectionsForApi(config: ProjectConfig | Record<string, unknown>): Record<string, unknown> {

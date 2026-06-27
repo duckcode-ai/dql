@@ -295,6 +295,33 @@ describe('dql propose engine', () => {
     expect(summary.draftsWritten).toBe(0);
     expect(summary.proposals).toEqual([]);
   });
+
+  it('applies AI enrichment (enrichedBySlug) over deterministic content; structure stays deterministic', () => {
+    const enrichedBySlug = new Map([
+      ['dim_customers', {
+        description: 'Curated customer profile for revenue questions.',
+        llmContext: 'AI-written: use for customer-grain questions; one row per customer.',
+        examples: ['How many active customers are there?', 'Top customers by lifetime value?'],
+      }],
+    ]);
+    const summary = propose({
+      projectRoot,
+      dbtManifestPath: manifestPath,
+      onlySlugs: ['dim_customers'],
+      enrichedBySlug,
+    });
+    const dim = summary.proposals.find((p) => p.model === 'dim_customers')!;
+    const source = readFileSync(join(projectRoot, dim.path!), 'utf-8');
+    // llmContext + examples are enriched (they're only templated deterministically).
+    expect(source).toContain('AI-written: use for customer-grain questions');
+    expect(source).toContain('How many active customers are there?');
+    // But a real dbt description is authoritative — it wins over the AI one.
+    expect(source).toContain('One row per customer with lifetime attributes');
+    expect(source).not.toContain('Curated customer profile for revenue questions.');
+    // Structure is still deterministic (grain/status unchanged).
+    expect(source).toContain('grain = "customer_id"');
+    expect(source).toContain('status = "draft"');
+  });
 });
 
 describe('classifier cascade precedence', () => {

@@ -158,6 +158,8 @@ export {
   DEFAULT_PROPOSE_CONFIG,
   classifyModel,
   resolveDomain,
+  enrichProposal,
+  enrichProposals,
 } from "./propose/index.js";
 export type {
   ProposeOptions,
@@ -180,6 +182,9 @@ export type {
   DbtModelNode,
   DbtSourceNode,
   DbtColumn,
+  EnrichFacts,
+  EnrichedContent,
+  EnrichOptions,
 } from "./propose/index.js";
 export type {
   BuildLocalContextPackRequest,

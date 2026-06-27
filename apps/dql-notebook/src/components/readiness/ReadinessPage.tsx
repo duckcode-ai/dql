@@ -153,7 +153,7 @@ export function ReadinessPage(): JSX.Element {
                   style={{ ...approveBtnStyle, opacity: generating || selected.size === 0 ? 0.6 : 1 }}
                 >
                   {generating ? <Loader2 size={13} className="spin" /> : <ShieldCheck size={13} />}
-                  Approve &amp; Generate {selected.size > 0 ? `(${selected.size})` : ''}
+                  {generating ? 'Generating…' : <>Approve &amp; Generate {selected.size > 0 ? `(${selected.size})` : ''}</>}
                 </button>
               </div>
             </div>

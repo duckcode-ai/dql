@@ -38,3 +38,5 @@ export {
   blockSlug,
 } from './write-draft.js';
 export type { ProposedDraftRecord, WrittenDraft } from './write-draft.js';
+export { enrichProposal, enrichProposals } from './enrich.js';
+export type { EnrichFacts, EnrichedContent, EnrichOptions } from './enrich.js';

@@ -72,6 +72,13 @@ results as certified. Everything here is OSS and local-first.
   **plan** (domains, "will generate N / skip M", per-candidate evidence) that writes
   nothing until you **Approve & Generate** the scope you pick. On jaffle: 13 scanned →
   7 business, 6 staging excluded, 19 metrics detected.
+- **Optional AI enrichment for proposed drafts (content only).** When "Approve &
+  Generate" runs with an AI provider configured (`propose.aiEnrichment`), each
+  drafted block's `llmContext` and example questions are written by the model, and a
+  `description` is generated for models dbt left undescribed — a real human-authored
+  dbt `description` always wins. Structure (classification, grain, outputs, SQL,
+  invariants) stays fully deterministic; enrichment is best-effort with a timeout and
+  falls back to dbt-derived content offline, so nothing requires a provider.
 - **The Review & Certify queue lists draft blocks (was always empty).** It read only
   `apps/*.dql-app` apps, so the standalone draft blocks `dql propose` writes never
   appeared ("No Apps or drafts are waiting for review"). It now lists every draft /
