@@ -25,6 +25,8 @@ export type {
   ManifestLineageEdge,
   ManifestDbtImport,
   ManifestDiagnostic,
+  ManifestConflictDetail,
+  ManifestConflictSide,
   ManifestApp,
   ManifestDashboard,
 } from './types.js';

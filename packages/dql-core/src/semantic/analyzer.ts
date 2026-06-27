@@ -829,3 +829,12 @@ export function analyze(program: ProgramNode, options: SemanticAnalyzerOptions =
   const analyzer = new SemanticAnalyzer(options);
   return analyzer.analyze(program);
 }
+
+/**
+ * Cross-artifact trust-conflict detection. The per-file analyzer above cannot
+ * see two files at once, so conflict detection (two certified terms / blocks
+ * claiming the same concept but disagreeing) is a manifest-level pass. It is
+ * surfaced here so semantic analysis has one entry point. See
+ * `semantic/conflicts.ts` for the conservative heuristic.
+ */
+export { detectTrustConflicts } from './conflicts.js';
