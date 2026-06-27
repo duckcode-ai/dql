@@ -96,6 +96,8 @@ export function buildKGFromManifest(manifest: DQLManifest): {
       datalexContract: block.datalexContract,
       businessRules: block.businessRules ?? block.invariants,
       caveats: block.caveats,
+      dataState: block.dataState,
+      dataStateDetail: block.dataStateDetail,
       sourcePath: block.filePath,
       sourceTier: 'certified_artifact',
       certification: block.status === 'certified' ? 'certified' : 'analyst_review_required',

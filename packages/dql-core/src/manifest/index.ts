@@ -11,6 +11,12 @@ export {
 } from './builder.js';
 
 export { detectOutputDrift } from './output-drift.js';
+export {
+  loadDbtRunState,
+  applyBlockDataState,
+  worseDataState,
+  type DbtRunStateIndex,
+} from './dbt-freshness.js';
 
 export type {
   DQLManifest,
@@ -32,4 +38,6 @@ export type {
   ManifestDriftDetail,
   ManifestApp,
   ManifestDashboard,
+  DbtDataState,
+  DbtRunState,
 } from './types.js';

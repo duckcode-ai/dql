@@ -148,6 +148,43 @@ export interface ManifestConflictSide {
   businessRules?: string[];
 }
 
+// ---- Data freshness / health (freshness-aware trust) ----
+
+/**
+ * Health/freshness of the data behind a block's upstream dbt models, derived
+ * from dbt's `run_results.json` (last-run status/time per model) and, when
+ * present, source-freshness output. This is the **data** axis of trust, distinct
+ * from **certification** (logic reviewed):
+ *
+ * - `fresh`   — last run succeeded and (if a freshness window is declared) the
+ *               data is within it.
+ * - `stale`   — last run succeeded but the data is past its freshness window.
+ * - `failed`  — last run errored / the model is in a failed or skipped state.
+ * - `unknown` — no run_results / freshness artifact available to judge.
+ *
+ * Additive and backward-compatible: manifests built without `run_results.json`
+ * leave every `dataState` undefined, which consumers treat as `unknown`.
+ */
+export type DbtDataState = 'fresh' | 'stale' | 'failed' | 'unknown';
+
+/**
+ * Last-run / freshness facts for a single dbt model or source, read from
+ * `run_results.json` (+ source freshness). Attached additively to imported dbt
+ * nodes so consumers can fold data health into the effective trust label.
+ */
+export interface DbtRunState {
+  /** Derived data health for this node (see {@link DbtDataState}). */
+  dataState: DbtDataState;
+  /** Raw dbt run-result status, e.g. "success", "error", "skipped", "pass". */
+  lastRunStatus?: string;
+  /** ISO 8601 completion time of the last run, when available. */
+  lastRunCompletedAt?: string;
+  /** Source-freshness verdict when a freshness check ran, e.g. "pass", "warn", "error". */
+  freshnessStatus?: string;
+  /** ISO 8601 timestamp of the newest loaded record, from source freshness. */
+  maxLoadedAt?: string;
+}
+
 // ---- Blocks ----
 
 export interface ManifestBlock {
@@ -279,6 +316,19 @@ export interface ManifestBlock {
    * build). See `detectOutputDrift` in manifest/output-drift.
    */
   outputContract?: Array<{ name: string; type?: string; role?: string }>;
+  /**
+   * Freshness-aware trust — effective data health for this block, computed from
+   * the health of its transitive dbt upstreams (their `run_results.json` /
+   * source-freshness state). `'fresh'` when every upstream is fresh, otherwise
+   * the worst upstream state (`failed` > `stale` > `unknown` > `fresh`).
+   *
+   * This is the **data** axis, orthogonal to `status` (the **certification**
+   * axis). A `certified` block with `dataState: 'failed'` is "Certified ·
+   * upstream failed". Undefined when no dbt run_results were imported.
+   */
+  dataState?: DbtDataState;
+  /** One-line plain-language explanation of `dataState` (which upstream + why). */
+  dataStateDetail?: string;
 }
 
 export interface ManifestBlockDisplayHints {
@@ -441,6 +491,12 @@ export interface ManifestSource {
     materializedAs?: string;
     description?: string;
     columns?: Record<string, { name: string; description?: string; type?: string }>;
+    /**
+     * Freshness-aware trust — last-run/freshness facts for this dbt node, read
+     * additively from `run_results.json` (+ source freshness) during import.
+     * Undefined when no run_results artifact was found.
+     */
+    runState?: DbtRunState;
   };
 }
 
@@ -617,7 +673,18 @@ export interface ManifestDbtImport {
       database?: string;
       materialized?: string;
       description?: string;
+      /**
+       * Freshness-aware trust — last-run/freshness facts for this DAG node, read
+       * additively from `run_results.json` (+ source freshness). Undefined when
+       * no run_results artifact was found alongside the dbt manifest.
+       */
+      runState?: DbtRunState;
     }>;
     edges: Array<{ source: string; target: string }>;
   };
+  /**
+   * Freshness-aware trust — path to the `run_results.json` that was read for
+   * last-run/freshness state, when one was found alongside the manifest.
+   */
+  runResultsPath?: string;
 }

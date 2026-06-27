@@ -2633,3 +2633,68 @@ describe("parseProposal", () => {
     expect(parsed.text).toBe("I refuse");
   });
 });
+
+describe("answer — freshness-aware trust", () => {
+  function certifiedBlockWithDataState(
+    dataState: "fresh" | "stale" | "failed" | undefined,
+  ): KGNode {
+    return {
+      nodeId: "block:orders_total",
+      kind: "block",
+      name: "orders_total",
+      domain: "sales",
+      status: "certified",
+      description: "Total orders KPI.",
+      tags: ["orders", "kpi"],
+      sourceTier: "certified_artifact",
+      certification: "certified",
+      provenance: "DQL block",
+      dataState,
+      dataStateDetail:
+        dataState === "failed"
+          ? 'Upstream dbt model "orders_raw" last run failed (status: error).'
+          : dataState === "stale"
+            ? 'Upstream data from "orders_raw" is past its freshness window.'
+            : undefined,
+    };
+  }
+
+  it('labels a certified block with a failed upstream "Certified · upstream failed" and caveats the answer', async () => {
+    kg.rebuild([certifiedBlockWithDataState("failed")], []);
+    const provider = new StubProvider("should not be called");
+    const result = await answer({ question: "What is total orders?", provider, kg });
+
+    expect(result.kind).toBe("certified");
+    expect(result.trustLabelInfo?.display).toBe("Certified · upstream failed");
+    expect(result.text).toMatch(/upstream dbt model.*last run failed/i);
+  });
+
+  it('labels a certified block with stale upstream data "Certified · stale data"', async () => {
+    kg.rebuild([certifiedBlockWithDataState("stale")], []);
+    const provider = new StubProvider("should not be called");
+    const result = await answer({ question: "What is total orders?", provider, kg });
+
+    expect(result.kind).toBe("certified");
+    expect(result.trustLabelInfo?.display).toBe("Certified · stale data");
+    expect(result.text).toMatch(/stale/i);
+  });
+
+  it('leaves a certified block with fresh upstreams as plain "Certified" with no caveat', async () => {
+    kg.rebuild([certifiedBlockWithDataState("fresh")], []);
+    const provider = new StubProvider("should not be called");
+    const result = await answer({ question: "What is total orders?", provider, kg });
+
+    expect(result.kind).toBe("certified");
+    expect(result.trustLabelInfo?.display).toBe("Certified");
+    expect(result.text).not.toMatch(/Data caveat/i);
+  });
+
+  it("is backward compatible: no dataState → plain Certified (degrades to unknown)", async () => {
+    kg.rebuild([certifiedBlockWithDataState(undefined)], []);
+    const provider = new StubProvider("should not be called");
+    const result = await answer({ question: "What is total orders?", provider, kg });
+
+    expect(result.kind).toBe("certified");
+    expect(result.trustLabelInfo?.display).toBe("Certified");
+  });
+});
