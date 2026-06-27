@@ -41,6 +41,7 @@ import {
   type ProposeConfig,
   type ProposeConfigInput,
 } from './config.js';
+import { buildBusinessQuery } from './generate-sql.js';
 
 export interface ProposeOptions {
   projectRoot: string;
@@ -321,11 +322,6 @@ function rankModel(
   // Marts/answer-surface models surface first within their domain (nudge only).
   if (model.folder === 'marts' || /^(fct_|dim_|mart_|rpt_)/i.test(model.name)) score += 15;
   return { fanOut, exposureLinked, runCount, score };
-}
-
-/** Build the wrapping SQL for a model via `{{ ref('<model>') }}`. */
-function buildQuery(model: DbtModelNode): string {
-  return `SELECT * FROM {{ ref('${model.name}') }}`;
 }
 
 /** Map our inference into a BlockRecord for the Certifier (status always draft). */
@@ -621,7 +617,7 @@ export function propose(options: ProposeOptions): ProposeSummary {
       description:
         model.description?.trim() ||
         `Draft governance block proposed from dbt model ${proposal.model}.`,
-      sql: buildQuery(model),
+      sql: buildBusinessQuery(model, proposal.inference, scan.artifacts),
       pattern: proposal.inference.pattern,
       grain: proposal.inference.grain,
       entities: proposal.inference.entities,

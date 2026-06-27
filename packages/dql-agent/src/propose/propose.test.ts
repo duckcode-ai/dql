@@ -627,3 +627,128 @@ describe('large synthetic manifest — bounded + cheap', () => {
     expect(existsSync(join(projectRoot, 'blocks'))).toBe(false);
   });
 });
+
+describe('Slice 2 — business-block SQL generation', () => {
+  let projectRoot: string;
+
+  beforeEach(() => {
+    projectRoot = mkdtempSync(join(tmpdir(), 'dql-propose-gen-'));
+    writeFileSync(join(projectRoot, 'dql.config.json'), JSON.stringify({ project: 'p' }), 'utf-8');
+  });
+  afterEach(() => rmSync(projectRoot, { recursive: true, force: true }));
+
+  /**
+   * A metric-backed mart (`orders` with a `revenue` SUM measure + a time
+   * dimension and primary entity) and a plain dimension mart (`dim_customers`).
+   * Semantic metrics/models use the ARRAY shape of semantic_manifest.json.
+   */
+  function writeSemanticManifest(): string {
+    const targetDir = join(projectRoot, 'target');
+    mkdirSync(targetDir, { recursive: true });
+
+    const manifest = {
+      metadata: { project_name: 'sem' },
+      nodes: {
+        'model.sem.orders': {
+          resource_type: 'model',
+          name: 'orders',
+          original_file_path: 'models/marts/orders.sql',
+          config: {},
+          tags: [],
+          depends_on: { nodes: [] },
+          columns: {
+            order_id: { name: 'order_id' },
+            order_date: { name: 'order_date' },
+            revenue: { name: 'revenue' },
+          },
+          meta: {},
+        },
+        'model.sem.dim_customers': {
+          resource_type: 'model',
+          name: 'dim_customers',
+          original_file_path: 'models/marts/dim_customers.sql',
+          config: {},
+          tags: [],
+          depends_on: { nodes: [] },
+          columns: {
+            customer_id: { name: 'customer_id' },
+            customer_name: { name: 'customer_name' },
+            customer_type: { name: 'customer_type' },
+          },
+          meta: {},
+        },
+      },
+      sources: {},
+      exposures: {},
+    };
+    writeFileSync(join(targetDir, 'manifest.json'), JSON.stringify(manifest), 'utf-8');
+
+    const semantic = {
+      semantic_models: [
+        {
+          name: 'orders',
+          node_relation: { alias: 'orders' },
+          entities: [{ name: 'order_id', type: 'primary' }],
+          dimensions: [{ name: 'order_date', type: 'time' }],
+          measures: [{ name: 'revenue', agg: 'sum', expr: 'revenue' }],
+        },
+      ],
+      metrics: [
+        {
+          name: 'total_revenue',
+          description: 'Total order revenue.',
+          type: 'simple',
+          type_params: { measure: { name: 'revenue' } },
+        },
+      ],
+    };
+    writeFileSync(join(targetDir, 'semantic_manifest.json'), JSON.stringify(semantic), 'utf-8');
+    return join(targetDir, 'manifest.json');
+  }
+
+  it('metric-backed model yields an AGGREGATION block (not SELECT *)', () => {
+    const manifestPath = writeSemanticManifest();
+    const summary = propose({ projectRoot, dbtManifestPath: manifestPath });
+
+    const orders = summary.proposals.find((p) => p.model === 'orders')!;
+    expect(orders.classification).toBe('business');
+    expect(orders.inference.pattern).toBe('metric_wrapper');
+    expect(summary.metricsFound).toBe(1);
+
+    const source = readFileSync(join(projectRoot, orders.path!), 'utf-8');
+    // Aggregation: references the measure aggregation + the declared grain/dim.
+    expect(source).toMatch(/SUM\(revenue\)\s+AS\s+revenue/i);
+    expect(source).toMatch(/GROUP BY/i);
+    expect(source).toContain('order_date'); // declared time dimension
+    expect(source).toContain('order_id'); // primary entity grain
+    // Must NOT be a bare passthrough.
+    expect(source).not.toMatch(/SELECT \* FROM/i);
+  });
+
+  it('entity/dim mart yields a NARROWED projection (not SELECT *)', () => {
+    const manifestPath = writeSemanticManifest();
+    const summary = propose({ projectRoot, dbtManifestPath: manifestPath });
+
+    const dim = summary.proposals.find((p) => p.model === 'dim_customers')!;
+    const source = readFileSync(join(projectRoot, dim.path!), 'utf-8');
+    // Narrowed projection over the declared outputs, grain first.
+    expect(source).not.toMatch(/SELECT \* FROM/i);
+    expect(source).toContain('customer_id');
+    expect(source).toContain('customer_name');
+    expect(source).toContain('customer_type');
+    // Grain column leads the projection.
+    expect(source).toMatch(/SELECT\s+customer_id/);
+  });
+
+  it('generated business blocks still parse + compile', () => {
+    const manifestPath = writeSemanticManifest();
+    const summary = propose({ projectRoot, dbtManifestPath: manifestPath });
+
+    for (const proposal of summary.proposals) {
+      const source = readFileSync(join(projectRoot, proposal.path!), 'utf-8');
+      expect(() => parse(source)).not.toThrow();
+    }
+    const manifest = buildManifest({ projectRoot, dqlVersion: 'test' });
+    expect(manifest.diagnostics?.filter((d) => d.kind === 'parse')).toEqual([]);
+  });
+});

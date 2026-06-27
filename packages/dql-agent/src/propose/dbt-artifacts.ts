@@ -77,6 +77,8 @@ export interface DbtArtifacts {
   hasSemantic: boolean;
   /** Semantic metric names keyed by the model they bind to (best-effort). */
   semanticMetrics: SemanticMetricRef[];
+  /** Semantic models keyed by bound dbt model name (for entity/agg generation). */
+  semanticModels: Map<string, SemanticModelRef>;
 }
 
 export interface SemanticMetricRef {
@@ -84,6 +86,28 @@ export interface SemanticMetricRef {
   description?: string;
   /** Model name the metric's measure resolves to, when derivable. */
   model?: string;
+  /** Underlying measure name (MetricFlow). */
+  measure?: string;
+  /** Aggregation type for the measure (sum, count_distinct, average, …). */
+  agg?: string;
+  /** The column/expr the measure aggregates over, when declared. */
+  expr?: string;
+  /** Metric type from the semantic manifest (simple, ratio, derived, …). */
+  metricType?: string;
+}
+
+/** A semantic model's queryable shape (for entity/aggregation generation). */
+export interface SemanticModelRef {
+  /** Bound dbt model name (node_relation.alias, else the semantic model name). */
+  model: string;
+  /** Dimension column names declared on the semantic model. */
+  dimensions: string[];
+  /** Primary entity column name, when one is declared. */
+  primaryEntity?: string;
+  /** All entity column names. */
+  entities: string[];
+  /** Time dimension column names. */
+  timeDimensions: string[];
 }
 
 function asRecord(value: unknown): Record<string, unknown> {
@@ -280,7 +304,11 @@ function loadRunResults(runResultsPath: string): Map<string, number> {
 function loadSemantic(
   manifest: Record<string, unknown>,
   semanticManifestPath: string,
-): { hasSemantic: boolean; semanticMetrics: SemanticMetricRef[] } {
+): {
+  hasSemantic: boolean;
+  semanticMetrics: SemanticMetricRef[];
+  semanticModels: Map<string, SemanticModelRef>;
+} {
   let source: Record<string, unknown> | null = null;
   if (existsSync(semanticManifestPath)) {
     source = readJson(semanticManifestPath);
@@ -292,20 +320,53 @@ function loadSemantic(
   const semanticModelsList = collectionValues(source?.semantic_models ?? manifest.semantic_models);
 
   // measure name -> model name, so a metric referencing a measure can resolve a
-  // model. A semantic model's underlying dbt model is its `name`, or the alias
-  // in its `node_relation` (MetricFlow shape).
+  // model. A semantic model's underlying dbt model is the alias in its
+  // `node_relation` (MetricFlow shape), else its `name`. Also collect the
+  // measure's agg + expr so a metric can build real aggregation SQL.
   const measureToModel = new Map<string, string>();
+  const measureMeta = new Map<string, { agg?: string; expr?: string }>();
+  const semanticModels = new Map<string, SemanticModelRef>();
+
   for (const raw of semanticModelsList) {
     const semanticModel = asRecord(raw);
-    const modelName =
-      firstString(
-        asRecord(semanticModel.node_relation).alias,
-        semanticModel.name,
-      ) ?? undefined;
+    const modelName = firstString(asRecord(semanticModel.node_relation).alias, semanticModel.name);
     if (!modelName) continue;
+
+    const entities = (Array.isArray(semanticModel.entities) ? semanticModel.entities : [])
+      .map((e) => asRecord(e));
+    const entityNames = entities
+      .map((e) => firstString(e.expr, e.name))
+      .filter((v): v is string => Boolean(v));
+    const primaryEntity = firstString(
+      ...entities.filter((e) => e.type === 'primary').map((e) => firstString(e.expr, e.name) ?? ''),
+    );
+    const dimensions = (Array.isArray(semanticModel.dimensions) ? semanticModel.dimensions : [])
+      .map((d) => asRecord(d));
+    const dimensionNames = dimensions
+      .map((d) => firstString(d.name))
+      .filter((v): v is string => Boolean(v));
+    const timeDimensions = dimensions
+      .filter((d) => d.type === 'time')
+      .map((d) => firstString(d.name))
+      .filter((v): v is string => Boolean(v));
+
+    semanticModels.set(modelName, {
+      model: modelName,
+      dimensions: dimensionNames,
+      primaryEntity: primaryEntity || undefined,
+      entities: entityNames,
+      timeDimensions,
+    });
+
     for (const measureRaw of Array.isArray(semanticModel.measures) ? semanticModel.measures : []) {
-      const measureName = firstString(asRecord(measureRaw).name);
-      if (measureName) measureToModel.set(measureName, modelName);
+      const measure = asRecord(measureRaw);
+      const measureName = firstString(measure.name);
+      if (!measureName) continue;
+      measureToModel.set(measureName, modelName);
+      measureMeta.set(measureName, {
+        agg: firstString(measure.agg),
+        expr: firstString(measure.expr),
+      });
     }
   }
 
@@ -317,16 +378,22 @@ function loadSemantic(
     const typeParams = asRecord(metric.type_params);
     // `type_params.measure` is sometimes a string, sometimes an object { name }.
     const measure = firstString(typeParams.measure, asRecord(typeParams.measure).name);
+    const meta = measure ? measureMeta.get(measure) : undefined;
     semanticMetrics.push({
       name,
       description: firstString(metric.description),
       model: measure ? measureToModel.get(measure) : undefined,
+      measure,
+      agg: meta?.agg,
+      expr: meta?.expr,
+      metricType: firstString(metric.type),
     });
   }
 
   return {
     hasSemantic: semanticMetrics.length > 0 || semanticModelsList.length > 0,
     semanticMetrics,
+    semanticModels,
   };
 }
 

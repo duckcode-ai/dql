@@ -28,7 +28,10 @@ export type {
   DbtModelNode,
   DbtSourceNode,
   DbtColumn,
+  SemanticMetricRef,
+  SemanticModelRef,
 } from './dbt-artifacts.js';
+export { buildBusinessQuery } from './generate-sql.js';
 export {
   upsertProposedDraft,
   renderProposedDraft,
