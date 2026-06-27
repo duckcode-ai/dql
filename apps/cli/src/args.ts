@@ -49,6 +49,12 @@ export interface CLIFlags {
   block?: string;
   question?: string;
   comment?: string;
+  /** `dql eval --min-route-accuracy <0..1>` — fail CI below this route accuracy. */
+  minRouteAccuracy?: number;
+  /** `dql eval --min-refusal <0..1>` — fail CI below this refusal recall. */
+  minRefusal?: number;
+  /** `dql eval --no-examples` — skip manifest block examples, score yaml cases only. */
+  noExamples?: boolean;
 }
 
 export interface ParsedArgs {
@@ -168,6 +174,14 @@ export function parseArgs(argv: string[]): ParsedArgs {
       flags.question = argv[++i];
     } else if (arg === '--comment' && i + 1 < argv.length) {
       flags.comment = argv[++i];
+    } else if (arg === '--min-route-accuracy' && i + 1 < argv.length) {
+      const value = Number(argv[++i]);
+      if (Number.isFinite(value) && value >= 0 && value <= 1) flags.minRouteAccuracy = value;
+    } else if (arg === '--min-refusal' && i + 1 < argv.length) {
+      const value = Number(argv[++i]);
+      if (Number.isFinite(value) && value >= 0 && value <= 1) flags.minRefusal = value;
+    } else if (arg === '--no-examples') {
+      flags.noExamples = true;
     } else if (!command) {
       command = arg;
     } else if (!file) {
