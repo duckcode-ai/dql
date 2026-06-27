@@ -32,6 +32,7 @@ import { runVerify } from "./commands/verify.js";
 import { runImport } from "./commands/import.js";
 import { runConnect } from "./commands/connect.js";
 import { runPromote } from "./commands/promote.js";
+import { runEval } from "./commands/eval.js";
 
 const HELP = `
   dql — DQL CLI
@@ -88,6 +89,8 @@ const HELP = `
       dql agent eval agent-evals.yml  Measure certified/follow-up/refusal accuracy
     dql slack serve                 Slack slash-command bot (forwards to the answer loop)
     dql verify                      Verify dql-manifest.json is reproducible from source
+    dql eval [path]                 Replay block examples + eval/*.yaml through the agent
+                                    router and score routing accuracy (CI-gateable)
     dql --version                    Show version
     dql --help                      Show this help
 
@@ -214,6 +217,26 @@ const COMMAND_HELP: Record<string, string> = {
     dql semantic validate [path]
     dql semantic query <metrics> [dimensions]
   `,
+  eval: `
+  dql eval — Score the answer agent's routing accuracy
+
+  Usage:
+    dql eval [path] [--format json]
+    dql eval [path] --min-route-accuracy <0..1> --min-refusal <0..1>
+    dql eval [path] --no-examples
+
+  Replays every certified block's examples[].question plus any eval/*.yaml
+  cases through the existing agent router (no warehouse, no LLM judging) and
+  scores route accuracy, block selection, grain match, and refusal precision/
+  recall. Exits non-zero below the configured thresholds, so it is CI-gateable.
+
+  eval/*.yaml cases:
+    - question: "..."
+      expectRoute: certified | generated | missing_context | research
+      expectBlock: "<block name>"   # optional
+      expectGrain: "<grain>"        # optional
+      expectRefuse: true            # optional; shorthand for missing_context
+  `,
   verify: `
   dql verify — Verify dql-manifest.json is reproducible
 
@@ -267,6 +290,7 @@ async function main() {
     command === "promote" ||
     command === "schedule" ||
     command === "verify" ||
+    command === "eval" ||
     (command === "certify" && Boolean(flags.fromDraft));
   if (!file && !commandAllowsNoFile) {
     console.error(
@@ -360,6 +384,9 @@ async function main() {
         break;
       case "verify":
         await runVerify(file, rest, flags);
+        break;
+      case "eval":
+        await runEval(file, rest, flags);
         break;
       default:
         console.error(
