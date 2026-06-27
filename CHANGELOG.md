@@ -6,6 +6,77 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 
 ---
 
+## v1.7.0 - 2026-06-27
+
+### Governed agentic analytics: AI-drafts/human-certify onboarding, enforced trust, and data freshness
+
+This release makes DQL a governed agentic-analytics layer end to end: AI proposes
+draft analytics from your dbt evidence, humans certify, and the agent answers
+certified-first with honest trust labels — never presenting generated or stale
+results as certified. Everything here is OSS and local-first.
+
+### Added
+
+- **`dql propose` — AI drafts, humans certify.** Scans your dbt evidence
+  (`manifest.json`, `catalog.json`, semantic metrics) and generates a value-ranked
+  queue of **draft** blocks with inferred grain, pattern, outputs, and `llmContext`.
+  Every proposal is run through the certifier and stored as `draft` — nothing is
+  ever auto-certified.
+- **Get Started onboarding flow** in the notebook — a readiness scan that surfaces
+  the ranked draft proposals with trust badges and a per-draft "what's missing to
+  certify" summary, routing each into the existing Review & Certify queue.
+- **`dql eval` — routing-accuracy harness.** Replays each block's `examples` (plus
+  optional `eval/*.yaml`) through the agent router and scores route, block
+  selection, and grain match across the certified / generated / insufficient-context
+  / conflict / wrong-grain cases. CI-gateable.
+- **Canonical trust-label vocabulary** — `Certified`, `Reviewed`, `AI-Generated`,
+  `Insufficient-Context`, and `Conflict`, modeled as a base label plus optional
+  qualifier and consumed consistently across the MCP server, agent, and UI.
+- **Definition-conflict detection** — two certified terms or blocks that claim the
+  same concept/grain but disagree are flagged at compile time and routed as a
+  `conflict` (the agent surfaces both definitions and asks, instead of guessing).
+- **Runtime invariant enforcement** — a block's declared `invariants` now execute
+  against results at run and certification time. A violation blocks certification
+  and downgrades the label to "Certified · invariant violated".
+- **Grain / contract gate** — the agent refuses to serve a near-miss certified block
+  whose grain doesn't match the question, demoting to a labeled generated query
+  instead of a confidently-wrong governed answer.
+- **Show-your-work** — a consumer-facing derivation walk (value → block →
+  metric/term → dbt model → owner / review cadence / freshness), with depth hidden
+  by default.
+- **Freshness-aware trust** — folds dbt `run_results.json` and source freshness into
+  a block's effective trust: a certified block over a failed or stale upstream shows
+  "Certified · upstream failed" / "Certified · stale data".
+- **Output-contract drift detection** — a new additive `outputContract` field;
+  `dql compile`/`dql doctor` **warn** (never block) when a block `ref()`s a child
+  column that no longer exists, keeping freeform composition safe.
+- **Impact & re-cert gate** — `dql diff --impact` reports a changed block's full
+  transitive downstream, the affected cross-domain edges, the `domainTrust` delta,
+  and the certified artifacts that need re-certification; exits non-zero in CI when
+  certified downstream is invalidated.
+- **Scoped correction memory** — Git-versioned, approved-only hints (scoped to a
+  metric / model / domain / dialect) compiled into the agent knowledge graph, so
+  reviewed corrections improve future drafts without weakening certification. Plus a
+  pluggable `EmbeddingProvider` (offline default) for hybrid retrieval.
+
+### Fixed
+
+- **dbt import + freshness on the standard staging + mart layout.** The selective
+  dbt import anchored **0 models** when a staging model's role-prefix-stripped alias
+  (`stg_customers` → `customers`) collided with a same-named mart, which also
+  prevented freshness-aware trust from surfacing. Anchor resolution now prefers exact
+  model names; freshness resolution matches schema-qualified block refs
+  (`dev.customers`) and treats upstream nodes with no run record (e.g. raw sources)
+  as neutral rather than `unknown`.
+
+### Notes
+
+- Certification remains a **local** trust label. Organization-wide approval
+  workflows, audit logs, and permission-aware retrieval are part of the commercial
+  cloud product, not OSS.
+
+---
+
 ## v1.6.17 - 2026-06-18
 
 ### Notebook startup patch
