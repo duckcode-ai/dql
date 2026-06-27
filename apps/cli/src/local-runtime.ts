@@ -74,8 +74,6 @@ import {
   ensureMetadataCatalogFresh,
   propose,
   proposePlan,
-  pickProvider,
-  enrichProposals,
   resolveProposeConfig,
   recordQueryRun,
   recordRuntimeSchemaSnapshot,
@@ -90,9 +88,9 @@ import {
   type ProposalResult,
   type ProposePlan,
   type ProposeConfigInput,
-  type EnrichFacts,
   type EnrichedContent,
 } from '@duckcodeailabs/dql-agent';
+import { gatherProposeEnrichment } from './propose-enrich.js';
 import { handleAppsApi, recommendVisualization } from './apps-api.js';
 import {
   getActiveProvider,
@@ -5951,7 +5949,7 @@ export async function generateProposeDrafts(
   let enrichedBySlug: Map<string, EnrichedContent> | undefined;
   const proposeConfig = resolveProposeConfig(projectConfig.propose);
   if (proposeConfig.aiEnrichment !== 'off' && slugs.length > 0) {
-    enrichedBySlug = await enrichApprovedDrafts(projectRoot, manifestPath, projectConfig, slugs).catch(() => undefined);
+    enrichedBySlug = await gatherProposeEnrichment(projectRoot, manifestPath, projectConfig.propose, slugs).catch(() => undefined);
   }
 
   const summary = propose({
@@ -5970,33 +5968,6 @@ export async function generateProposeDrafts(
   };
 }
 
-/** Best-effort AI enrichment for the approved slugs (empty/undefined on any miss). */
-async function enrichApprovedDrafts(
-  projectRoot: string,
-  manifestPath: string,
-  projectConfig: ProjectConfig,
-  slugs: string[],
-): Promise<Map<string, EnrichedContent> | undefined> {
-  const provider = await pickProvider();
-  if (!(await provider.available())) return undefined;
-  // dryRun gives us the deterministic facts for the bounded selection (no write).
-  const preview = propose({ projectRoot, dbtManifestPath: manifestPath, dryRun: true, config: projectConfig.propose });
-  const wanted = new Set(slugs);
-  const facts: EnrichFacts[] = preview.proposals
-    .filter((proposal) => wanted.has(proposal.slug))
-    .map((proposal) => ({
-      slug: proposal.slug,
-      model: proposal.model,
-      domain: proposal.domain,
-      grain: proposal.inference.grain,
-      pattern: proposal.inference.pattern,
-      columns: proposal.inference.declaredOutputs,
-      entities: proposal.inference.entities,
-    }));
-  if (facts.length === 0) return undefined;
-  return enrichProposals(facts, provider, { timeoutMs: 25_000, concurrency: 4 });
-}
-
 function getProjectConnectionsForApi(config: ProjectConfig | Record<string, unknown>): Record<string, unknown> {
   const connections = getStoredConnections(config as Record<string, unknown>);
   if (Object.keys(connections).length === 0 && isConnectionLike((config as ProjectConfig).defaultConnection)) {
@@ -6010,10 +5981,12 @@ const CONNECTOR_INSTALLS: Record<string, Omit<ConnectorInstallStatus, 'installed
     driver: 'duckdb',
     label: 'DuckDB',
     packageName: 'duckdb',
-    // Pinned: duckdb 1.2.x+/1.4.x hard-crash (native BIGINT serialization) on any
-    // COUNT(*)/SUM/id result, which kills the notebook runtime. 1.1.3 is the last
-    // verified-good release on the local DuckDB path. See enhancements/e2e-test-report.md.
-    packageSpec: 'duckdb@1.1.3',
+    // Latest 1.x. An earlier pin to 1.1.3 worked around a BIGINT serialization crash,
+    // but that only bites a naive `JSON.stringify` — the DQL driver
+    // (`normalizeDuckDBValue`) coerces BIGINT→number before marshaling and
+    // `serializeJSON` has a BigInt replacer, so 1.4.x is verified-good on the local
+    // DuckDB path (COUNT/AVG/SELECT * over UUID/BIGINT/decimal/datetime on real data).
+    packageSpec: 'duckdb@^1.1.0',
     builtIn: false,
   },
   snowflake: {

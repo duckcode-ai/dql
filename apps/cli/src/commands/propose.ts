@@ -14,14 +14,17 @@
  *   dql propose --limit <n>                 Cap drafts written this run
  *   dql propose --plan                      Show the deterministic PLAN; write nothing
  *   dql propose --dry-run                   Rank only; write nothing
+ *   dql propose --enrich                    AI-enrich content (llmContext/examples/
+ *                                           descriptions) via the configured provider
  *   dql propose --format json               Machine-readable output
  */
 
 import { existsSync } from 'node:fs';
 import { join, relative, resolve } from 'node:path';
 import { loadProjectConfig, resolveDbtManifestPath } from '@duckcodeailabs/dql-core';
-import { propose, proposePlan, type ProposeSummary, type ProposePlan } from '@duckcodeailabs/dql-agent';
+import { propose, proposePlan, type ProposeSummary, type ProposePlan, type EnrichedContent } from '@duckcodeailabs/dql-agent';
 import type { CLIFlags } from '../args.js';
+import { gatherProposeEnrichment } from '../propose-enrich.js';
 
 export async function runPropose(
   fileArg: string | null,
@@ -90,6 +93,15 @@ export async function runPropose(
     return;
   }
 
+  // --enrich: opt-in AI enrichment (CLI is deterministic by default for CI
+  // reproducibility). Best-effort; no provider → deterministic dbt-derived content.
+  const enrich = Boolean((flags as { enrich?: boolean }).enrich) || rest.includes('--enrich');
+  let enrichedBySlug: Map<string, EnrichedContent> | undefined;
+  if (enrich && !flags.dryRun) {
+    if (flags.format !== 'json') console.log('\n  Enriching draft content with AI (best-effort)…');
+    enrichedBySlug = await gatherProposeEnrichment(projectRoot, resolved, proposeConfig).catch(() => undefined);
+  }
+
   let summary: ProposeSummary;
   try {
     summary = propose({
@@ -99,6 +111,7 @@ export async function runPropose(
       limit,
       dryRun: Boolean(flags.dryRun),
       config: proposeConfig,
+      enrichedBySlug,
     });
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);

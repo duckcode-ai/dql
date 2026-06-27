@@ -79,6 +79,15 @@ results as certified. Everything here is OSS and local-first.
   dbt `description` always wins. Structure (classification, grain, outputs, SQL,
   invariants) stays fully deterministic; enrichment is best-effort with a timeout and
   falls back to dbt-derived content offline, so nothing requires a provider.
+- **`dql propose --enrich`** brings the same AI enrichment to the CLI (off by default
+  so CLI runs stay deterministic/CI-reproducible).
+- **`dql init` auto-wires the DuckDB connection from the dbt project dir.** When the
+  `.duckdb` lives next to `dbt_project.yml` a level up from the DQL workspace (the
+  common layout), init now finds it and writes a workspace-relative connection
+  (e.g. `../warehouse.duckdb`) instead of reporting "DuckDB file: none".
+- **Clearer error when a query hits a missing table.** A DuckDB "table does not
+  exist" / catalog error now appends a hint that the database may be empty or the
+  connection may point at the wrong `.duckdb` file (run `dbt build` to populate it).
 - **The Review & Certify queue lists draft blocks (was always empty).** It read only
   `apps/*.dql-app` apps, so the standalone draft blocks `dql propose` writes never
   appeared ("No Apps or drafts are waiting for review"). It now lists every draft /
@@ -105,10 +114,11 @@ results as certified. Everything here is OSS and local-first.
   executor feeds it (e.g. `SELECT COUNT(*) …`) — exhausting the heap and killing the
   notebook runtime. The parser now guarantees forward progress and terminates on any
   input; a regression test exercises raw SQL and non-DQL text.
-- **Local DuckDB connector pinned to a non-crashing release.** `duckdb` 1.2.x+/1.4.x
-  hard-crash (native `BIGINT` serialization) on any `COUNT(*)`/`SUM`/id result, which
-  are ubiquitous; the connector install and docs now pin `duckdb@1.1.3`, the last
-  verified-good version on the local DuckDB path.
+- **Local DuckDB connector works on the latest `duckdb` (1.4.x).** `COUNT(*)`/`SUM`/id
+  results come back as `BIGINT`; the driver coerces them to numbers before marshaling
+  and `serializeJSON` carries a BigInt replacer, so the full local path is BigInt-safe
+  (verified on real data across UUID/BIGINT/decimal/datetime columns). The install spec
+  is unpinned (`duckdb@^1.1.0`, latest 1.x) — no version pin needed.
 - **dbt-profile DuckDB path now resolves against the dbt project, not the DQL
   workspace.** A relative `path:` in `profiles.yml` (e.g. `jaffle_shop.duckdb`) was
   resolved against the DQL workspace dir, so DuckDB silently opened/created an empty

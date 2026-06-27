@@ -68,7 +68,7 @@ and Snowflake use project-local drivers. See
 Install only the driver your project uses:
 
 ```bash
-npm install --prefix .dql/connectors duckdb@1.1.3          # DuckDB and local files
+npm install --prefix .dql/connectors duckdb          # DuckDB and local files
 # npm install --prefix .dql/connectors snowflake-sdk # Snowflake
 # Databricks does not need an extra package.
 ```

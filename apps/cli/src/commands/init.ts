@@ -43,8 +43,9 @@ export async function runInit(targetArg: string | null, flags: CLIFlags): Promis
     ? containsDbtSemanticDefinitions(join(dbtProjectDir, 'models'))
     : false;
 
-  // Detect DuckDB file in the directory
-  const duckdbPath = detectDuckDBFile(targetDir);
+  // Detect DuckDB file — in the workspace OR the dbt project dir (common layout:
+  // the .duckdb lives next to dbt_project.yml, a level up from the DQL workspace).
+  const duckdbPath = detectDuckDBFile(targetDir, dbtProjectDir);
 
   // Don't overwrite existing dql.config.json
   const configPath = join(targetDir, 'dql.config.json');
@@ -208,7 +209,7 @@ function containsDbtSemanticDefinitions(root: string): boolean {
   return false;
 }
 
-function detectDuckDBFile(dir: string): string | null {
+function detectDuckDBFile(workspaceDir: string, dbtProjectDir: string | null): string | null {
   // Common DuckDB file locations in dbt projects
   const candidates = [
     'jaffle_shop.duckdb',
@@ -219,16 +220,30 @@ function detectDuckDBFile(dir: string): string | null {
     'target/jaffle_shop.duckdb',
     'reports/jaffle_shop.duckdb',
   ];
+  // 1. The DQL workspace itself — store a bare relative path.
   for (const candidate of candidates) {
-    if (existsSync(join(dir, candidate))) {
-      return candidate;
-    }
+    if (existsSync(join(workspaceDir, candidate))) return candidate;
   }
-  // Search root directory for any .duckdb file
+  const inWorkspace = firstDuckDBIn(workspaceDir);
+  if (inWorkspace) return inWorkspace;
+
+  // 2. The dbt project dir (often a level up). Store the path RELATIVE TO THE
+  // workspace (e.g. `../jaffle_shop.duckdb`) so the stored connection — which
+  // resolves relative filepaths against the workspace — opens the real file.
+  if (dbtProjectDir && resolve(dbtProjectDir) !== resolve(workspaceDir)) {
+    for (const candidate of candidates) {
+      const abs = join(dbtProjectDir, candidate);
+      if (existsSync(abs)) return relative(workspaceDir, abs) || candidate;
+    }
+    const inDbt = firstDuckDBIn(dbtProjectDir);
+    if (inDbt) return relative(workspaceDir, join(dbtProjectDir, inDbt)) || inDbt;
+  }
+  return null;
+}
+
+function firstDuckDBIn(dir: string): string | null {
   try {
-    const entries = readdirSync(dir);
-    const duckdb = entries.find((e: string) => e.endsWith('.duckdb'));
-    return duckdb ?? null;
+    return readdirSync(dir).find((entry: string) => entry.endsWith('.duckdb')) ?? null;
   } catch {
     return null;
   }

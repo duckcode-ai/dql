@@ -35,7 +35,7 @@ npm run sync                     # import dbt models + lineage
 npm run notebook                 # http://127.0.0.1:3474
 
 # Optional, only before running queries with these drivers:
-# npm install --prefix .dql/connectors duckdb@1.1.3        # DuckDB/local files
+# npm install --prefix .dql/connectors duckdb        # DuckDB/local files
 # npm install --prefix .dql/connectors snowflake-sdk # Snowflake
 # Databricks does not need an extra package.
 ```

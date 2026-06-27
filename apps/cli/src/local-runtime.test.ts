@@ -381,8 +381,8 @@ describe('getConnectorInstallStatuses', () => {
 
     expect(statuses.find((status) => status.driver === 'duckdb')).toMatchObject({
       packageName: 'duckdb',
-      // Pinned to the last release without the native BIGINT-serialization crash.
-      packageSpec: 'duckdb@1.1.3',
+      // Latest 1.x — the driver normalizes BIGINT, so no version pin is needed.
+      packageSpec: 'duckdb@^1.1.0',
       builtIn: false,
       installPath: '/tmp/demo-project/.dql/connectors',
     });

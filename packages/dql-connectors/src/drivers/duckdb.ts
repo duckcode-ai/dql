@@ -37,7 +37,7 @@ export class DuckDBConnector implements DatabaseConnector {
         const executionTimeMs = performance.now() - startTime;
 
         if (err) {
-          reject(new Error(`DuckDB query failed: ${err.message}`));
+          reject(new Error(`DuckDB query failed: ${withMissingTableHint(err.message)}`));
           return;
         }
 
@@ -163,6 +163,18 @@ export function resolveDuckDBModule(module: unknown): { Database: new (path: str
   }
 
   return candidate as { Database: new (path: string, callback: (err: Error | null) => void) => any };
+}
+
+/**
+ * When a query fails because a table/catalog is missing, the most common cause is
+ * an empty database or a connection pointed at the wrong `.duckdb` file. Append a
+ * one-line hint so the user isn't left guessing.
+ */
+function withMissingTableHint(message: string): string {
+  if (/does not exist|Catalog Error|Table with name|Referenced table/i.test(message)) {
+    return `${message}\nHint: that table isn't in this database — it may be empty or the connection may point at the wrong .duckdb file. Build your dbt models (e.g. \`dbt build\`) to populate it, then retry.`;
+  }
+  return message;
 }
 
 export function normalizeDuckDBRow(row: Row): Row {
