@@ -99,7 +99,13 @@ import {
 } from './governance-runtime.js';
 import { LocalAppStorage, LocalNotebookResearchStorage, defaultLocalAppsDbPath, defaultNotebookResearchDbPath } from '@duckcodeailabs/dql-project';
 import type { BlockRecord, NotebookResearchDqlPromotion, NotebookResearchDqlPromotionAction, NotebookResearchIntent, NotebookResearchNextActionFilter, NotebookResearchPlan, NotebookResearchReadinessFilter, NotebookResearchRun, NotebookResearchRunListResult, NotebookResearchSort, NotebookResearchSourceCellInput, TestAssertionResult, TestResultSummary } from '@duckcodeailabs/dql-project';
-import { Certifier, ENTERPRISE_RULES } from '@duckcodeailabs/dql-governance';
+import {
+  Certifier,
+  ENTERPRISE_RULES,
+  evaluateInvariants,
+  hasInvariantViolation,
+  type InvariantResult,
+} from '@duckcodeailabs/dql-governance';
 import {
   buildSemanticObjectDetail,
   buildSemanticTree,
@@ -1436,7 +1442,22 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
       createdAt: new Date(),
       updatedAt: new Date(),
     };
-    const certification = new Certifier(options.enterprise ? ENTERPRISE_RULES : undefined).evaluate(record, testResults ?? undefined);
+    // Evaluate declared invariants against the preview result so the
+    // `invariants-hold` certifier rule can enforce them. Best-effort: when the
+    // preview failed there is no result to check, and the rule then blocks
+    // certification (in enterprise mode) because the guarantees are unverified.
+    const invariantEval = preview
+      ? evaluateBlockInvariants(source, {
+          columns: preview.result.columns,
+          rows: preview.result.rows,
+        })
+      : null;
+    record.invariants = extractBlockInvariants(source);
+    const certification = new Certifier(options.enterprise ? ENTERPRISE_RULES : undefined).evaluate(
+      record,
+      testResults ?? undefined,
+      invariantEval ? { invariantResults: invariantEval.invariantResults } : undefined,
+    );
     const checklist = buildBlockStudioCertificationChecklist({
       source,
       validation,
@@ -1445,7 +1466,15 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
       certificationErrors: certification.errors,
       extraBlockers: blockers,
     });
-    return { certification, checklist, validation, preview, testResults };
+    return {
+      certification,
+      checklist,
+      validation,
+      preview,
+      testResults,
+      invariantResults: invariantEval?.invariantResults ?? [],
+      invariantViolation: invariantEval?.invariantViolation ?? false,
+    };
   };
 
   const server = createServer(async (req, res) => {
@@ -5119,6 +5148,14 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           prepared.connection,
         );
         const normalized = normalizeQueryResult(rawResult);
+        // Enforce the block's declared invariants against the result set. This
+        // is additive: blocks without invariants produce `null` and the
+        // response is unchanged. The agent surface (`query_via_block`) reads
+        // these fields to downgrade the trust label on violation.
+        const invariants = evaluateBlockInvariants(executableCell.source || cell.source || '', {
+          columns: normalized.columns,
+          rows: normalized.rows,
+        });
         if (execContext) {
           recordNotebookQueryRun(projectRoot, {
             notebookPath: execContext.notebookPath!,
@@ -5147,6 +5184,12 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           chartConfig: plan.chartConfig,
           tests: plan.tests,
           result: normalized,
+          ...(invariants
+            ? {
+                invariantResults: invariants.invariantResults,
+                invariantViolation: invariants.invariantViolation,
+              }
+            : {}),
         }));
       } catch (error) {
         if (execContext) {
@@ -7718,6 +7761,42 @@ function readBlockCompanionFile(projectRoot: string, relativePath: string) {
   } catch {
     return null;
   }
+}
+
+/**
+ * Extract the declared `invariants` from a block's DQL source using the core
+ * parser (the same path that populates the manifest). Returns an empty array
+ * when the source has no invariants or cannot be parsed — invariant evaluation
+ * is best-effort and must never break a run.
+ */
+export function extractBlockInvariants(source: string): string[] {
+  try {
+    const ast = new Parser(source).parse();
+    const block = ast.statements.find((statement: any) => statement.kind === 'BlockDecl') as
+      | { invariants?: string[] }
+      | undefined;
+    return Array.isArray(block?.invariants) ? block!.invariants! : [];
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Evaluate a block's declared invariants against a normalized query result.
+ * Returns `null` when the block declares no invariants so callers can omit the
+ * field entirely (blocks without invariants behave exactly as before).
+ */
+export function evaluateBlockInvariants(
+  source: string,
+  result: { columns: string[]; rows: Array<Record<string, unknown>> },
+): { invariantResults: InvariantResult[]; invariantViolation: boolean } | null {
+  const invariants = extractBlockInvariants(source);
+  if (invariants.length === 0) return null;
+  const invariantResults = evaluateInvariants(invariants, {
+    columns: result.columns,
+    rows: result.rows,
+  });
+  return { invariantResults, invariantViolation: hasInvariantViolation(invariantResults) };
 }
 
 export function parseBlockSourceMetadata(source: string): {

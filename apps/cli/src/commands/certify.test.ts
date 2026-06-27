@@ -187,6 +187,53 @@ describe('runCertify', () => {
     expect(process.exitCode).toBeUndefined();
   });
 
+  it('blocks enterprise certification when declared invariants cannot be evaluated (no run result)', async () => {
+    // Without a usable DB connection the block cannot run, so its declared
+    // invariants are unverified. In enterprise mode `invariants-hold` is an
+    // error, so certification must be blocked rather than passing on unproven
+    // guarantees. This exercises the certify -> invariants-hold wiring without
+    // depending on an installed warehouse driver.
+    const projectDir = makeProject('dql-certify-invariant-unverified-');
+    writeFileSync(join(projectDir, 'dql.config.json'), JSON.stringify({ project: 'demo' }));
+    mkdirSync(join(projectDir, 'blocks'), { recursive: true });
+    const blockPath = join(projectDir, 'blocks', 'approval.dql');
+    writeFileSync(blockPath, `block "Approval Rate" {
+  domain = "ops"
+  type = "custom"
+  status = "draft"
+  description = "Approval rate."
+  owner = "ops"
+  tags = ["ops"]
+  pattern = "metric_wrapper"
+  grain = "day"
+  entities = []
+  outputs = ["approval_rate_pct"]
+  metric = "approval_rate_pct"
+  sourceSystems = ["ops.events"]
+  reviewCadence = "quarterly"
+  allowedFilters = ["day"]
+  filterBindings {
+    day = "day"
+  }
+  query = """SELECT 80 AS approval_rate_pct"""
+  invariants = ["approval_rate_pct <= 100"]
+}`);
+    const spy = vi.spyOn(console, 'log').mockImplementation(() => {});
+    const previousCwd = process.cwd();
+    try {
+      process.chdir(projectDir);
+      // No connection => block does not run => invariants unverified.
+      await runCertify(blockPath, flags({ enterprise: true, connection: '' } as Partial<CLIFlags>));
+    } finally {
+      process.chdir(previousCwd);
+    }
+
+    const payload = lastJsonLog(spy);
+    expect(payload.certified).toBe(false);
+    expect(payload.errors.some((error: { rule: string }) => error.rule === 'Declared invariants hold')).toBe(true);
+    expect(process.exitCode).toBe(1);
+  });
+
   it('promotes OSS drafts from domain-first paths as structured JSON', async () => {
     const projectDir = makeProject('dql-certify-promote-json-');
     writeFileSync(join(projectDir, 'dql.config.json'), JSON.stringify({ project: 'demo' }));

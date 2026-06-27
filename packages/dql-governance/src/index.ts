@@ -2,7 +2,20 @@ export { TestRunner } from './test-runner.js';
 export type { BlockTestAssertion, QueryExecutor } from './test-runner.js';
 
 export { Certifier, BUILTIN_RULES, ENTERPRISE_RULES, PROMOTABLE_RULES } from './certifier.js';
-export type { CertificationRule, CertificationCheckResult, CertificationResult } from './certifier.js';
+export type {
+  CertificationRule,
+  CertificationCheckResult,
+  CertificationResult,
+  CertificationContext,
+} from './certifier.js';
+
+export {
+  parseInvariant,
+  evaluateInvariant,
+  evaluateInvariants,
+  hasInvariantViolation,
+} from './invariant-evaluator.js';
+export type { InvariantResult, InvariantResultSet } from './invariant-evaluator.js';
 
 export { CostEstimator } from './cost-estimator.js';
 export type { CostEstimate, CostFactor } from './cost-estimator.js';

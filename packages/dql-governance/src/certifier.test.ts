@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import type { BlockRecord, TestResultSummary } from '@duckcodeailabs/dql-project';
-import { Certifier, ENTERPRISE_RULES } from './certifier.js';
+import { Certifier, BUILTIN_RULES, ENTERPRISE_RULES } from './certifier.js';
+import type { InvariantResult } from './invariant-evaluator.js';
 
 function block(overrides: Partial<BlockRecord> = {}): BlockRecord {
   return {
@@ -171,5 +172,75 @@ describe('Certifier enterprise rules', () => {
       'Parameter policies are valid',
       'Filter bindings map declared filters',
     ]));
+  });
+});
+
+function passingInvariant(expr: string): InvariantResult {
+  return { expr, passed: true, detail: 'Holds.' };
+}
+
+function failingInvariant(expr: string): InvariantResult {
+  return { expr, passed: false, detail: 'Violated: out of range.' };
+}
+
+function uncheckableInvariant(expr: string): InvariantResult {
+  return { expr, passed: true, uncheckable: true, detail: 'Uncheckable invariant.' };
+}
+
+describe('Certifier invariants-hold rule', () => {
+  it('does not affect blocks without invariants', () => {
+    const result = new Certifier(BUILTIN_RULES).evaluate(block(), passingTests);
+    expect(result.errors.map((e) => e.rule)).not.toContain('Declared invariants hold');
+    expect(result.warnings.map((w) => w.rule)).not.toContain('Declared invariants hold');
+  });
+
+  it('warns in base mode when an invariant is violated, but does not block', () => {
+    const result = new Certifier(BUILTIN_RULES).evaluate(
+      block({ invariants: ['approval_rate_pct <= 100'] }),
+      passingTests,
+      { invariantResults: [failingInvariant('approval_rate_pct <= 100')] },
+    );
+    expect(result.warnings.map((w) => w.rule)).toContain('Declared invariants hold');
+    expect(result.errors.map((e) => e.rule)).not.toContain('Declared invariants hold');
+  });
+
+  it('blocks certification in enterprise mode when an invariant is violated', () => {
+    const result = new Certifier(ENTERPRISE_RULES).evaluate(
+      block({ invariants: ['approval_rate_pct <= 100'] }),
+      passingTests,
+      { invariantResults: [failingInvariant('approval_rate_pct <= 100')] },
+    );
+    expect(result.certified).toBe(false);
+    expect(result.errors.map((e) => e.rule)).toContain('Declared invariants hold');
+  });
+
+  it('certifies in enterprise mode when invariants pass', () => {
+    const result = new Certifier(ENTERPRISE_RULES).evaluate(
+      block({ invariants: ['arr >= 0'] }),
+      passingTests,
+      { invariantResults: [passingInvariant('arr >= 0')] },
+    );
+    expect(result.certified).toBe(true);
+    expect(result.errors.map((e) => e.rule)).not.toContain('Declared invariants hold');
+  });
+
+  it('does not fail on uncheckable invariants (they only warn at evaluation time)', () => {
+    const result = new Certifier(ENTERPRISE_RULES).evaluate(
+      block({ invariants: ['rate is mostly fine'] }),
+      passingTests,
+      { invariantResults: [uncheckableInvariant('rate is mostly fine')] },
+    );
+    expect(result.certified).toBe(true);
+    expect(result.errors.map((e) => e.rule)).not.toContain('Declared invariants hold');
+  });
+
+  it('blocks enterprise certification when invariants are declared but no run results exist', () => {
+    const result = new Certifier(ENTERPRISE_RULES).evaluate(
+      block({ invariants: ['arr >= 0'] }),
+      passingTests,
+      // no invariantResults
+    );
+    expect(result.certified).toBe(false);
+    expect(result.errors.map((e) => e.rule)).toContain('Declared invariants hold');
   });
 });
