@@ -32,6 +32,7 @@ import { runVerify } from "./commands/verify.js";
 import { runImport } from "./commands/import.js";
 import { runConnect } from "./commands/connect.js";
 import { runPromote } from "./commands/promote.js";
+import { runPropose } from "./commands/propose.js";
 
 const HELP = `
   dql — DQL CLI
@@ -61,6 +62,10 @@ const HELP = `
                                     Preview or apply legacy-to-domain folder moves
     dql import sql <path>           Generate AI import drafts from SQL files/folders
     dql import sql <path> --save    Compatibility alias; drafts autosave before certification
+    dql propose [path]              Draft a ranked governance layer from dbt evidence
+                                    (one DRAFT block per high-value model; never
+                                     auto-certified — humans certify)
+    dql propose --dry-run           Rank dbt models without writing any drafts
     dql promote notebook <path> --to shared
                                     Strip local run/UI state and mark a notebook shared
     dql promote app <app-id> --to shared
@@ -147,6 +152,23 @@ const COMMAND_HELP: Record<string, string> = {
     Import creates AI-first draft blocks under _drafts, parameterizes safe
     runtime literals, checks for similar certified blocks, and never certifies
     generated DQL automatically.
+  `,
+  propose: `
+  dql propose — Draft a governance layer from dbt evidence
+
+  Usage:
+    dql propose [path] [--dbt-manifest <path>] [--owner <name>] [--limit <n>]
+    dql propose [path] --dry-run [--format json]
+
+  Reads dbt artifacts (manifest.json, catalog.json, semantic_manifest.json,
+  run_results.json) and emits one DRAFT block per high-value model, inferring
+  grain / pattern / outputs / llmContext conservatively. Each draft is born
+  status="draft", checked by the Certifier (verdict stored in the file), and
+  ranked by downstream fan-out, exposure linkage, and run frequency.
+
+  Nothing is ever auto-certified. Re-running is idempotent — existing drafts
+  and already-promoted blocks are never overwritten or duplicated. Promote a
+  reviewed draft with: dql certify --from-draft <path> --owner you@example.com
   `,
   app: `
   dql app — Manage local App artifacts
@@ -267,6 +289,7 @@ async function main() {
     command === "promote" ||
     command === "schedule" ||
     command === "verify" ||
+    command === "propose" ||
     (command === "certify" && Boolean(flags.fromDraft));
   if (!file && !commandAllowsNoFile) {
     console.error(
@@ -312,6 +335,9 @@ async function main() {
         break;
       case "import":
         await runImport(file!, rest, flags);
+        break;
+      case "propose":
+        await runPropose(file, rest, flags);
         break;
       case "fmt":
         await runFmt(file!, flags);

@@ -1,0 +1,322 @@
+/**
+ * Read-only readers for dbt build artifacts used by `dql propose`.
+ *
+ * These parse the raw JSON shapes that dbt writes to `target/`:
+ *   - `manifest.json`        — models, sources, depends_on, tags, schema, description
+ *   - `catalog.json`         — column names + types (from the warehouse)
+ *   - `semantic_manifest.json` (or manifest.json semantic nodes) — metrics/dimensions
+ *   - `run_results.json`     — per-node execution records (used for run-frequency ranking)
+ *
+ * We deliberately do NOT reuse the manifest builder's `importDbtManifest`: that
+ * function is private and tightly coupled to a full DQL project scan (it walks
+ * the DQL-referenced anchor set). `dql propose` runs *before* a DQL layer
+ * exists, so it reads the dbt artifacts directly. The field shapes mirror those
+ * the builder consumes, so the two stay aligned.
+ */
+
+import { existsSync, readFileSync } from 'node:fs';
+import { join } from 'node:path';
+
+export interface DbtColumn {
+  name: string;
+  type?: string;
+  description?: string;
+}
+
+export interface DbtModelNode {
+  uniqueId: string;
+  name: string;
+  resourceType: 'model';
+  schema?: string;
+  database?: string;
+  description?: string;
+  materialized?: string;
+  tags: string[];
+  /** Folder segment after `models/`, e.g. `marts` or `staging`. */
+  folder?: string;
+  /** Domain hint from meta/group/fqn/package. */
+  domainHint?: string;
+  /** Upstream uniqueIds. */
+  dependsOn: string[];
+  /** Columns declared in the dbt model YAML (name + description; type may be empty). */
+  columns: DbtColumn[];
+  /** dbt model config + meta, kept for grain/primary-key inference. */
+  meta: Record<string, unknown>;
+  config: Record<string, unknown>;
+  /** Path relative to the dbt project root. */
+  path?: string;
+}
+
+export interface DbtSourceNode {
+  uniqueId: string;
+  name: string;
+  resourceType: 'source';
+  schema?: string;
+  database?: string;
+  description?: string;
+  tags: string[];
+}
+
+export interface DbtExposureNode {
+  uniqueId: string;
+  name: string;
+  /** Downstream node uniqueIds this exposure depends on. */
+  dependsOn: string[];
+}
+
+export interface DbtArtifacts {
+  projectName?: string;
+  models: DbtModelNode[];
+  sources: DbtSourceNode[];
+  exposures: DbtExposureNode[];
+  /** model uniqueId -> column metadata from catalog.json (richer types). */
+  catalogColumns: Map<string, DbtColumn[]>;
+  /** node uniqueId -> number of recorded runs in run_results.json. */
+  runCounts: Map<string, number>;
+  /** Whether a semantic manifest with metrics/saved-queries was present. */
+  hasSemantic: boolean;
+  /** Semantic metric names keyed by the model they bind to (best-effort). */
+  semanticMetrics: SemanticMetricRef[];
+}
+
+export interface SemanticMetricRef {
+  name: string;
+  description?: string;
+  /** Model name the metric's measure resolves to, when derivable. */
+  model?: string;
+}
+
+function asRecord(value: unknown): Record<string, unknown> {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return {};
+  return value as Record<string, unknown>;
+}
+
+function firstString(...values: unknown[]): string | undefined {
+  for (const value of values) {
+    if (typeof value === 'string' && value.trim()) return value.trim();
+  }
+  return undefined;
+}
+
+function readJson(path: string): Record<string, unknown> | null {
+  try {
+    return JSON.parse(readFileSync(path, 'utf-8')) as Record<string, unknown>;
+  } catch {
+    return null;
+  }
+}
+
+/** Derive the `models/<folder>/...` segment from a node path, e.g. `marts`. */
+function folderFromPath(path: string | undefined): string | undefined {
+  if (!path) return undefined;
+  const normalized = path.replace(/\\/g, '/');
+  const match = normalized.match(/(?:^|\/)models\/([^/]+)\//);
+  if (match) return match[1];
+  // No `models/` prefix (e.g. already relative) — take the leading segment.
+  const parts = normalized.split('/').filter(Boolean);
+  return parts.length > 1 ? parts[0] : undefined;
+}
+
+/** Best-effort domain label from a dbt model node. */
+function domainFromNode(node: Record<string, unknown>, folder?: string): string | undefined {
+  const meta = asRecord(node.meta);
+  const config = asRecord(node.config);
+  const configMeta = asRecord(config.meta);
+  const fqn = Array.isArray(node.fqn) ? (node.fqn as unknown[]) : [];
+  return firstString(
+    meta.domain,
+    meta.group,
+    configMeta.domain,
+    configMeta.group,
+    config.group,
+    folder && folder !== 'marts' && folder !== 'staging' && folder !== 'intermediate' ? folder : undefined,
+    fqn.length > 1 ? fqn[1] : undefined,
+  );
+}
+
+function readColumns(node: Record<string, unknown>): DbtColumn[] {
+  const columns = asRecord(node.columns);
+  const out: DbtColumn[] = [];
+  for (const [key, raw] of Object.entries(columns)) {
+    const col = asRecord(raw);
+    const name = firstString(col.name, key);
+    if (!name) continue;
+    out.push({
+      name,
+      type: firstString(col.data_type),
+      description: firstString(col.description),
+    });
+  }
+  return out;
+}
+
+/**
+ * Load all dbt artifacts that live alongside `manifest.json` (same `target/`
+ * directory). Only `manifest.json` is required; the rest are optional and the
+ * loader degrades gracefully when they are missing.
+ */
+export function loadDbtArtifacts(manifestPath: string): DbtArtifacts {
+  const manifest = readJson(manifestPath);
+  if (!manifest) {
+    throw new Error(`Could not read or parse dbt manifest at ${manifestPath}`);
+  }
+
+  const targetDir = manifestPath.replace(/[\\/][^\\/]+$/, '');
+  const projectName = firstString(asRecord(manifest.metadata).project_name);
+
+  const models: DbtModelNode[] = [];
+  const sources: DbtSourceNode[] = [];
+  const exposures: DbtExposureNode[] = [];
+
+  for (const [uniqueId, raw] of Object.entries(asRecord(manifest.nodes))) {
+    const node = asRecord(raw);
+    if (node.resource_type !== 'model') continue;
+    const name = firstString(node.alias, node.name);
+    if (!name) continue;
+    const path = firstString(node.original_file_path, node.path);
+    const folder = folderFromPath(path);
+    const dependsOn = Array.isArray(asRecord(node.depends_on).nodes)
+      ? (asRecord(node.depends_on).nodes as unknown[]).filter((n): n is string => typeof n === 'string')
+      : [];
+    models.push({
+      uniqueId,
+      name,
+      resourceType: 'model',
+      schema: firstString(node.schema),
+      database: firstString(node.database),
+      description: firstString(node.description),
+      materialized: firstString(asRecord(node.config).materialized),
+      tags: Array.isArray(node.tags) ? (node.tags as unknown[]).map(String) : [],
+      folder,
+      domainHint: domainFromNode(node, folder),
+      dependsOn,
+      columns: readColumns(node),
+      meta: asRecord(node.meta),
+      config: asRecord(node.config),
+      path,
+    });
+  }
+
+  for (const [uniqueId, raw] of Object.entries(asRecord(manifest.sources))) {
+    const node = asRecord(raw);
+    const name = firstString(node.identifier, node.name);
+    if (!name) continue;
+    sources.push({
+      uniqueId,
+      name,
+      resourceType: 'source',
+      schema: firstString(node.schema),
+      database: firstString(node.database),
+      description: firstString(node.description),
+      tags: Array.isArray(node.tags) ? (node.tags as unknown[]).map(String) : [],
+    });
+  }
+
+  for (const [uniqueId, raw] of Object.entries(asRecord(manifest.exposures))) {
+    const node = asRecord(raw);
+    const dependsOn = Array.isArray(asRecord(node.depends_on).nodes)
+      ? (asRecord(node.depends_on).nodes as unknown[]).filter((n): n is string => typeof n === 'string')
+      : [];
+    exposures.push({
+      uniqueId,
+      name: firstString(node.name) ?? uniqueId,
+      dependsOn,
+    });
+  }
+
+  return {
+    projectName,
+    models,
+    sources,
+    exposures,
+    catalogColumns: loadCatalog(join(targetDir, 'catalog.json')),
+    runCounts: loadRunResults(join(targetDir, 'run_results.json')),
+    ...loadSemantic(manifest, join(targetDir, 'semantic_manifest.json')),
+  };
+}
+
+/** catalog.json carries warehouse-resolved column types keyed by node uniqueId. */
+function loadCatalog(catalogPath: string): Map<string, DbtColumn[]> {
+  const out = new Map<string, DbtColumn[]>();
+  if (!existsSync(catalogPath)) return out;
+  const catalog = readJson(catalogPath);
+  if (!catalog) return out;
+  for (const [uniqueId, raw] of Object.entries(asRecord(catalog.nodes))) {
+    const node = asRecord(raw);
+    const columns = asRecord(node.columns);
+    const cols: DbtColumn[] = [];
+    for (const [key, colRaw] of Object.entries(columns)) {
+      const col = asRecord(colRaw);
+      const name = firstString(col.name, key);
+      if (!name) continue;
+      cols.push({ name, type: firstString(col.type), description: firstString(col.comment) });
+    }
+    if (cols.length > 0) out.set(uniqueId, cols);
+  }
+  return out;
+}
+
+/** run_results.json lists one result per executed node; count occurrences. */
+function loadRunResults(runResultsPath: string): Map<string, number> {
+  const out = new Map<string, number>();
+  if (!existsSync(runResultsPath)) return out;
+  const runResults = readJson(runResultsPath);
+  if (!runResults) return out;
+  const results = Array.isArray(runResults.results) ? runResults.results : [];
+  for (const raw of results) {
+    const result = asRecord(raw);
+    const uniqueId = firstString(result.unique_id);
+    if (!uniqueId) continue;
+    out.set(uniqueId, (out.get(uniqueId) ?? 0) + 1);
+  }
+  return out;
+}
+
+/**
+ * Load semantic metric references, preferring `semantic_manifest.json` and
+ * falling back to semantic nodes embedded in `manifest.json`. Returns a flag so
+ * the caller can decide whether to attempt metric-wrapper drafts.
+ */
+function loadSemantic(
+  manifest: Record<string, unknown>,
+  semanticManifestPath: string,
+): { hasSemantic: boolean; semanticMetrics: SemanticMetricRef[] } {
+  let source: Record<string, unknown> | null = null;
+  if (existsSync(semanticManifestPath)) {
+    source = readJson(semanticManifestPath);
+  }
+  // Fall back to semantic_models/metrics inlined in manifest.json.
+  const metricsRaw = asRecord(source?.metrics ?? manifest.metrics);
+  const semanticModelsRaw = asRecord(source?.semantic_models ?? manifest.semantic_models);
+
+  // measure name -> model name, so a metric referencing a measure can resolve a model.
+  const measureToModel = new Map<string, string>();
+  for (const raw of Object.values(semanticModelsRaw)) {
+    const model = asRecord(raw);
+    const modelName = firstString(model.name);
+    if (!modelName) continue;
+    for (const measureRaw of Array.isArray(model.measures) ? model.measures : []) {
+      const measureName = firstString(asRecord(measureRaw).name);
+      if (measureName) measureToModel.set(measureName, modelName);
+    }
+  }
+
+  const semanticMetrics: SemanticMetricRef[] = [];
+  for (const raw of Object.values(metricsRaw)) {
+    const metric = asRecord(raw);
+    const name = firstString(metric.name);
+    if (!name) continue;
+    const typeParams = asRecord(metric.type_params);
+    const measure = firstString(typeParams.measure, asRecord(typeParams.measure).name);
+    semanticMetrics.push({
+      name,
+      description: firstString(metric.description),
+      model: measure ? measureToModel.get(measure) : undefined,
+    });
+  }
+
+  return {
+    hasSemantic: semanticMetrics.length > 0 || Object.keys(semanticModelsRaw).length > 0,
+    semanticMetrics,
+  };
+}

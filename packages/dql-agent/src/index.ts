@@ -137,6 +137,27 @@ export {
   deriveGeneratedDraftSlug,
   upsertGeneratedDraft,
 } from "./metadata/drafts.js";
+export {
+  propose,
+  loadDbtArtifacts,
+  upsertProposedDraft,
+  renderProposedDraft,
+  blockSlug,
+} from "./propose/index.js";
+export type {
+  ProposeOptions,
+  ProposeSummary,
+  ProposalResult,
+  ProposalInference,
+  ProposalRanking,
+  ProposedPattern,
+  ProposedDraftRecord,
+  WrittenDraft,
+  DbtArtifacts,
+  DbtModelNode,
+  DbtSourceNode,
+  DbtColumn,
+} from "./propose/index.js";
 export type {
   BuildLocalContextPackRequest,
   EnsureMetadataCatalogOptions,
