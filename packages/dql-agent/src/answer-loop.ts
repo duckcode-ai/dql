@@ -15,6 +15,11 @@
  * full pipeline.
  */
 
+import {
+  resolveTrustLabel,
+  type ResolvedTrustLabel,
+  type TrustLabelId,
+} from '@duckcodeailabs/dql-core';
 import type { KGStore } from './kg/sqlite-fts.js';
 import type { KGNode, KGNodeKind, KGSearchHit } from './kg/types.js';
 import type { AgentProvider, AgentMessage } from './providers/types.js';
@@ -207,7 +212,15 @@ export interface AgentAnswer {
   draftBlockId?: string;
   draftBlock?: GeneratedDraftBlock;
   promoteCommand?: string;
+  /** Legacy free-form trust label string, retained for backward compatibility. */
   trustLabel?: string;
+  /**
+   * Canonical trust label (base + optional qualifier) drawn from the one shared
+   * vocabulary in dql-core, derived from this answer's source tier and review
+   * state. Lets every surface render the same label set as the MCP answer
+   * contract and the UI badge.
+   */
+  trustLabelInfo?: ResolvedTrustLabel;
   sourceCertifiedBlock?: string;
   contextPackId?: string;
   validationWarnings?: string[];
@@ -304,7 +317,34 @@ const ARTIFACT_KINDS: KGNodeKind[] = [...EXECUTABLE_ARTIFACT_KINDS, ...BUSINESS_
 const SEMANTIC_KINDS: KGNodeKind[] = ['metric', 'dimension', 'measure', 'entity', 'semantic_model', 'saved_query'];
 const MANIFEST_KINDS: KGNodeKind[] = ['dbt_model', 'dbt_source'];
 
+/**
+ * Map an answer-loop result's source tier + certification + review state to a
+ * canonical trust-label id from the one shared vocabulary in dql-core.
+ * Additive and lenient — keeps the legacy `trustLabel` string untouched.
+ */
+function canonicalTrustLabelId(result: AgentAnswer): TrustLabelId {
+  if (result.kind === 'no_answer') return 'insufficient_context';
+  if (result.certification === 'certified' || result.kind === 'certified') return 'certified';
+  if (result.sourceTier === 'business_context' && result.reviewStatus === 'certified') return 'reviewed';
+  if (
+    result.certification === 'ai_generated' ||
+    result.certification === 'analyst_review_required' ||
+    result.reviewStatus === 'analyst_review_required' ||
+    result.reviewStatus === 'draft_ready'
+  ) {
+    return 'ai_generated';
+  }
+  return 'insufficient_context';
+}
+
 export async function answer(input: AnswerLoopInput): Promise<AgentAnswer> {
+  const result = await runAnswerLoop(input);
+  // Attach the canonical trust label once, at the single exit point, so every
+  // return site inside runAnswerLoop stays untouched and backward compatible.
+  return { ...result, trustLabelInfo: resolveTrustLabel(canonicalTrustLabelId(result)) };
+}
+
+async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
   const { question, userId, domain, provider, kg, skills = [], blockHints = [] } = input;
   const effectiveBlockHints = Array.from(new Set([
     ...blockHints,

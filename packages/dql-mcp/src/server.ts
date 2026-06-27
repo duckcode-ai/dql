@@ -48,6 +48,14 @@ export const DQL_MCP_INSTRUCTIONS =
   '`uncertified: true`, the trust status, and draft path verbatim.\n' +
   'Tier 3 missing context: if metadata does not identify a safe table, metric, ' +
   'dimension, or grain, refuse and ask for what is missing.\n' +
+  'Trust labels are one canonical vocabulary: Certified, Reviewed, ' +
+  'AI-Generated, Insufficient-Context, Conflict (a base label plus an optional ' +
+  'qualifier, e.g. "Certified · invariant violated"). Report the trust label ' +
+  'verbatim and never upgrade it.\n' +
+  'Conflict route: when two certified terms or blocks claim the same concept ' +
+  'but disagree, `ask_dql` returns route `conflict` with BOTH definitions and ' +
+  'owners. Present both sides and ask the user which is authoritative — never ' +
+  'silently pick one.\n' +
   'Use `build_dql_block` for reusable draft blocks, `build_dql_app` for app ' +
   'drafts with certified tiles plus review-only gaps, `certify` for governance, ' +
   '`lineage_impact` for dependencies, `kg_search` for the knowledge graph, and ' +

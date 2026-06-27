@@ -9,7 +9,7 @@
 import { readdirSync, readFileSync, existsSync, statSync } from 'node:fs';
 import { join, extname, relative } from 'node:path';
 import { Parser } from '../parser/index.js';
-import { analyze } from '../semantic/index.js';
+import { analyze, detectTrustConflicts } from '../semantic/index.js';
 import { extractTablesFromSql } from '../lineage/sql-parser.js';
 import { extractColumnLineage } from '../lineage/column-lineage.js';
 import { buildLineageGraph } from '../lineage/builder.js';
@@ -224,6 +224,11 @@ export function buildManifest(options: ManifestBuildOptions): DQLManifest {
   validateDomains(domains, blocks, businessViews, terms, diagnostics);
   validateBusinessViews(businessViews, blocks, diagnostics);
   validateTermRefs(terms, blocks, businessViews, diagnostics);
+
+  // Cross-artifact trust-conflict detection: two certified terms / blocks that
+  // claim the same concept/grain but disagree. Additive `kind: 'conflict'`
+  // diagnostics; conservative heuristics avoid false positives.
+  diagnostics.push(...detectTrustConflicts(terms, blocks));
 
   // Load semantic layer
   const semanticDir = resolveSemanticPath(projectRoot, config);

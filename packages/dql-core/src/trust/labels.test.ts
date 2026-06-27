@@ -1,0 +1,73 @@
+import { describe, it, expect } from 'vitest';
+import {
+  TRUST_LABELS,
+  TRUST_LABEL_ORDER,
+  TRUST_QUALIFIER_INVARIANT_VIOLATED,
+  DEFAULT_TRUST_LABEL_ID,
+  resolveTrustLabel,
+  trustLabelIdForRoute,
+  trustLabelIdForStatus,
+  type TrustLabelId,
+} from './labels.js';
+
+describe('canonical trust-label vocabulary', () => {
+  it('defines exactly the five canonical base labels', () => {
+    expect(TRUST_LABEL_ORDER).toEqual([
+      'certified',
+      'reviewed',
+      'ai_generated',
+      'insufficient_context',
+      'conflict',
+    ]);
+    expect(Object.keys(TRUST_LABELS).sort()).toEqual([...TRUST_LABEL_ORDER].sort());
+    expect(TRUST_LABELS.certified.base).toBe('Certified');
+    expect(TRUST_LABELS.reviewed.base).toBe('Reviewed');
+    expect(TRUST_LABELS.ai_generated.base).toBe('AI-Generated');
+    expect(TRUST_LABELS.insufficient_context.base).toBe('Insufficient-Context');
+    expect(TRUST_LABELS.conflict.base).toBe('Conflict');
+  });
+
+  it('composes base + optional qualifier into a display string', () => {
+    expect(resolveTrustLabel('certified').display).toBe('Certified');
+    expect(
+      resolveTrustLabel('certified', TRUST_QUALIFIER_INVARIANT_VIOLATED).display,
+    ).toBe('Certified · invariant violated');
+    const resolved = resolveTrustLabel('certified', TRUST_QUALIFIER_INVARIANT_VIOLATED);
+    expect(resolved.base).toBe('Certified');
+    expect(resolved.qualifier).toBe('invariant violated');
+  });
+
+  it('degrades an unknown label id to the safe default rather than throwing', () => {
+    expect(DEFAULT_TRUST_LABEL_ID).toBe('insufficient_context');
+    const resolved = resolveTrustLabel('totally_made_up');
+    expect(resolved.id).toBe('insufficient_context');
+    expect(resolved.display).toBe('Insufficient-Context');
+    expect(resolveTrustLabel(undefined).id).toBe('insufficient_context');
+  });
+
+  it('maps every agent/MCP route to a canonical label id', () => {
+    const map: Record<string, TrustLabelId> = {
+      certified: 'certified',
+      research: 'reviewed',
+      generated_sql: 'ai_generated',
+      clarify: 'insufficient_context',
+      conflict: 'conflict',
+    };
+    for (const [route, id] of Object.entries(map)) {
+      expect(trustLabelIdForRoute(route)).toBe(id);
+    }
+    // Unknown route degrades safely.
+    expect(trustLabelIdForRoute('something_else')).toBe('insufficient_context');
+  });
+
+  it('maps legacy status strings to canonical labels, additively', () => {
+    expect(trustLabelIdForStatus('certified')).toBe('certified');
+    expect(trustLabelIdForStatus('approved')).toBe('certified');
+    expect(trustLabelIdForStatus('draft')).toBe('ai_generated');
+    expect(trustLabelIdForStatus('conflict')).toBe('conflict');
+    expect(trustLabelIdForStatus('uncertified')).toBe('insufficient_context');
+    // Unknown status degrades safely (backward compatible).
+    expect(trustLabelIdForStatus('brand_new_status')).toBe('insufficient_context');
+    expect(trustLabelIdForStatus(undefined)).toBe('insufficient_context');
+  });
+});

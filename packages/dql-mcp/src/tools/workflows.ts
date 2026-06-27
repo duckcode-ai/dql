@@ -12,6 +12,7 @@ import {
   type MetadataAllowedSqlContext,
   type MetadataObject,
 } from '@duckcodeailabs/dql-agent';
+import { resolveTrustLabel, trustLabelIdForRoute } from '@duckcodeailabs/dql-core';
 import { suggestBlock, suggestBlockInput } from './suggest-block.js';
 
 export const askDqlInput = {
@@ -51,18 +52,28 @@ export async function askDql(
     .slice(0, 8)
     .map(summarizeObject);
 
+  // Canonical trust label (base + optional qualifier) — one vocabulary shared
+  // with the agent answer-loop and the UI badge. Derived from the route so MCP
+  // clients always see the same label set.
+  const trustLabel = resolveTrustLabel(trustLabelIdForRoute(route.route));
+
   return {
     question: args.question,
     contextPackId: planned.contextPackId,
     route: route.route,
     intent: route.intent,
+    /** Legacy field retained for backward compatibility. */
     trustStatus: route.trustLabel,
+    /** Canonical trust label: { id, base, qualifier?, severity, color, display }. */
+    trustLabel,
     reviewStatus: route.reviewStatus,
     reason: route.reason,
     recommendedAction: recommendedAction(route.route),
     nextTool: nextTool(route.route),
     exactCertifiedBlock: exact && exact.objectType === 'dql_block' ? summarizeObject(exact) : undefined,
     certifiedCandidates,
+    // Conflict route: surface BOTH sides + owners + the disambiguation prompt.
+    conflict: route.routeConflict,
     selectedEvidence: route.selectedEvidence,
     allowedSqlContext: summarizeAllowedSqlContext(planned.allowedSqlContext),
     missingContext: planned.missingContext,
@@ -81,7 +92,9 @@ export async function askDql(
         'draftPathWhenGenerated',
         'nextReviewAction',
       ],
-      rule: 'Never present generated SQL or Tier-2 preview rows as certified.',
+      // Canonical vocabulary the answer must report under `trustStatus`.
+      trustLabels: ['Certified', 'Reviewed', 'AI-Generated', 'Insufficient-Context', 'Conflict'],
+      rule: 'Never present generated SQL or Tier-2 preview rows as certified. On a Conflict route, present BOTH conflicting definitions with their owners and ask the user to choose — never silently pick one.',
     },
   };
 }
@@ -204,6 +217,7 @@ function recommendedAction(route: string): string {
   if (route === 'certified') return 'Use query_via_block only if the certified grain exactly answers the question.';
   if (route === 'generated_sql') return 'Generate one read-only SELECT/WITH query from the allowed SQL context, then call query_via_metadata.';
   if (route === 'research') return 'Use lineage, proposals, and metadata evidence before creating or promoting any app tile.';
+  if (route === 'conflict') return 'Do not answer. Present both conflicting definitions with their owners and ask the user which one is authoritative.';
   return 'Ask for the missing business object, metric, table, filter, or grain before writing SQL.';
 }
 
@@ -211,6 +225,7 @@ function nextTool(route: string): string {
   if (route === 'certified') return 'query_via_block';
   if (route === 'generated_sql') return 'query_via_metadata';
   if (route === 'research') return 'inspect_metadata_context';
+  if (route === 'conflict') return 'ask_user_clarifying_question';
   return 'ask_user_clarifying_question';
 }
 

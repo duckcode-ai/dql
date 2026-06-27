@@ -21,6 +21,7 @@ import {
   resolveSemanticLayerWithDiagnostics,
   type DataLexManifest,
   type DQLManifest,
+  type ManifestConflictDetail,
   type ManifestDiagnostic,
   type SemanticLayer,
 } from '@duckcodeailabs/dql-core';
@@ -46,7 +47,7 @@ function loadDatabase(): typeof Database {
   return databaseCtor;
 }
 
-export type MetadataTrustLabel = 'certified' | 'mixed' | 'draft' | 'unknown';
+export type MetadataTrustLabel = 'certified' | 'mixed' | 'draft' | 'unknown' | 'conflict';
 
 export interface MetadataObject {
   objectKey: string;
@@ -87,6 +88,13 @@ export interface MetadataSnapshot {
   objects: MetadataObject[];
   edges: MetadataEdge[];
   diagnostics: MetadataDiagnostic[];
+  /**
+   * Structured compile-time trust conflicts (two certified terms/blocks that
+   * claim the same concept but disagree). Carried separately from
+   * `diagnostics` because they retain the both-sides + owners payload the
+   * `conflict` route needs; persisted as a JSON state blob.
+   */
+  compileConflicts: ManifestConflictDetail[];
   fingerprint: string;
   generatedAt: string;
 }
@@ -158,7 +166,7 @@ export type MetadataAgentIntent =
   | 'trust_gap_review'
   | 'clarify';
 
-export type MetadataAnswerRoute = 'certified' | 'generated_sql' | 'research' | 'clarify';
+export type MetadataAnswerRoute = 'certified' | 'generated_sql' | 'research' | 'clarify' | 'conflict';
 
 export type MetadataEvidenceRole =
   | 'exact_certified_answer'
@@ -225,7 +233,7 @@ export interface MetadataRouteDecision {
   intent: MetadataAgentIntent;
   reason: string;
   trustLabel: MetadataTrustLabel;
-  reviewStatus: 'certified' | 'draft_ready' | 'needs_review' | 'none';
+  reviewStatus: 'certified' | 'draft_ready' | 'needs_review' | 'none' | 'conflict';
   exactObjectKey?: string;
   certifiedApplicability?: CertifiedBlockApplicability;
   selectedEvidence: Array<{
@@ -237,6 +245,28 @@ export interface MetadataRouteDecision {
   }>;
   missingContext: MetadataMissingContext[];
   followUps: string[];
+  /**
+   * Present only on the `conflict` route. Two certified governance artifacts
+   * claim the same concept/grain but disagree; the agent must surface BOTH
+   * sides + owners and a disambiguation prompt instead of silently picking one.
+   */
+  routeConflict?: MetadataRouteConflict;
+}
+
+/** Route-time conflict surfaced when top candidates include a conflicting pair. */
+export interface MetadataRouteConflict {
+  objectType: 'term' | 'block';
+  concept: string;
+  reason: string;
+  prompt: string;
+  sides: Array<{
+    name: string;
+    owner?: string;
+    domain?: string;
+    filePath?: string;
+    definition?: string;
+    businessRules?: string[];
+  }>;
 }
 
 export interface PlanAgentAnswerResult {
@@ -553,6 +583,7 @@ export async function buildLocalContextPack(
       limit: request.limit ?? 120,
     });
     const conflicts = buildCandidateConflicts(reranked.ranked);
+    const compileConflicts = catalog.compileConflicts();
     const routeDecision = planContextPackRoute({
       request,
       objects,
@@ -561,6 +592,8 @@ export async function buildLocalContextPack(
       diagnostics,
       trustLabel,
       questionPlan,
+      compileConflicts,
+      rankedObjects: reranked.ranked,
     });
     const payload: LocalContextPack = {
       id: '',
@@ -704,12 +737,18 @@ export function buildMetadataSnapshot(
 
   addProjectDiagnostics(manifest, semanticLayer, diagnostics);
 
+  const compileConflicts = (manifest.diagnostics ?? [])
+    .filter((diagnostic): diagnostic is ManifestDiagnostic & { conflict: ManifestConflictDetail } =>
+      diagnostic.kind === 'conflict' && Boolean(diagnostic.conflict))
+    .map((diagnostic) => diagnostic.conflict);
+
   const snapshot = {
     projectRoot,
     manifest,
     objects: Array.from(objects.values()).sort((a, b) => a.objectKey.localeCompare(b.objectKey)),
     edges: Array.from(edges.values()).sort((a, b) => `${a.edgeType}|${a.fromKey}|${a.toKey}`.localeCompare(`${b.edgeType}|${b.fromKey}|${b.toKey}`)),
     diagnostics,
+    compileConflicts,
     generatedAt: new Date().toISOString(),
     fingerprint: '',
   };
@@ -961,6 +1000,7 @@ export class MetadataCatalog {
       setState.run('source_fingerprint_count', String(sourceFingerprints.length));
       setState.run('domain_shard_count', String(domainShards.length));
       setState.run('diagnostics_json', JSON.stringify(snapshot.diagnostics));
+      setState.run('compile_conflicts_json', JSON.stringify(snapshot.compileConflicts ?? []));
       setState.run('manifest_generated_at', snapshot.manifest.generatedAt);
     });
     txn();
@@ -1236,6 +1276,14 @@ export class MetadataCatalog {
       objectKey: row.object_key ?? undefined,
       filePath: row.file_path ?? undefined,
     }));
+  }
+
+  /** Structured compile-time trust conflicts persisted with the last rebuild. */
+  compileConflicts(): ManifestConflictDetail[] {
+    const raw = this.state('compile_conflicts_json');
+    if (!raw) return [];
+    const parsed = safeJson<ManifestConflictDetail[] | null>(raw, null);
+    return Array.isArray(parsed) ? parsed : [];
   }
 
   sourceFingerprints(limit = 500): MetadataSourceFingerprint[] {
@@ -2061,8 +2109,37 @@ function planContextPackRoute(input: {
   diagnostics: MetadataDiagnostic[];
   trustLabel: MetadataTrustLabel;
   questionPlan: AnalysisQuestionPlan;
+  compileConflicts?: ManifestConflictDetail[];
+  rankedObjects?: RankedMetadataObject[];
 }): MetadataRouteDecision {
   const intent = input.request.intent ?? input.questionPlan.routeIntent ?? classifyMetadataIntent(input.request.question, input.request.followUp);
+
+  // Conflict route (additive, evaluated first): if the question's top governed
+  // candidates include BOTH sides of a compile-time trust conflict, refuse to
+  // silently pick one. Surface both definitions + owners + a disambiguation
+  // prompt. Only fires when both conflicting sides are actually among the
+  // selected candidates for THIS question, so non-conflicting asks are
+  // unaffected even when a conflict exists elsewhere in the project.
+  const routeConflict = pickRouteConflict(input.compileConflicts ?? [], input.rankedObjects ?? [], input.objects);
+  if (routeConflict) {
+    const selectedEvidenceForConflict = input.evidenceRoles.slice(0, 16);
+    return {
+      route: 'conflict',
+      intent,
+      reason: `Two certified ${routeConflict.objectType}s claim "${routeConflict.concept}" but disagree (${routeConflict.reason}). DQL refuses to guess which is authoritative.`,
+      trustLabel: 'conflict',
+      reviewStatus: 'conflict',
+      selectedEvidence: selectedEvidenceForConflict,
+      missingContext: [{
+        kind: 'metadata',
+        severity: 'blocking',
+        message: routeConflict.prompt,
+      }],
+      followUps: [routeConflict.prompt],
+      routeConflict,
+    };
+  }
+
   const applicabilityByKey = certifiedApplicabilities(input.objects, input.questionPlan);
   const exactByApplicability = [...applicabilityByKey.values()]
     .filter((item) => item.kind === 'exact_answer' || item.kind === 'safe_parameterized')
@@ -3672,6 +3749,57 @@ function buildCandidateConflicts(ranked: RankedMetadataObject[]): MetadataCandid
 
 function isGovernedCandidate(row: MetadataObject): boolean {
   return row.status === 'certified' || row.status === 'approved';
+}
+
+/**
+ * Select a compile-time trust conflict to route on, but only when BOTH of its
+ * sides appear among the question's top candidates. This keeps the conflict
+ * route scoped to questions the conflicting pair actually answers — a conflict
+ * elsewhere in the project never hijacks an unrelated question.
+ */
+function pickRouteConflict(
+  compileConflicts: ManifestConflictDetail[],
+  rankedObjects: RankedMetadataObject[],
+  fallbackObjects: MetadataObject[],
+): MetadataRouteConflict | undefined {
+  if (compileConflicts.length === 0) return undefined;
+
+  // Names of the top candidate objects for this question (bounded — only the
+  // strongest matches count as "top candidates").
+  const topNames = new Set<string>();
+  const ordered = rankedObjects.length > 0
+    ? rankedObjects.slice(0, 12).map((item) => item.row)
+    : fallbackObjects.slice(0, 12);
+  for (const row of ordered) {
+    const norm = normalizeConflictName(row.name);
+    if (norm) topNames.add(norm);
+  }
+
+  for (const conflict of compileConflicts) {
+    const sideNames = conflict.sides.map((side) => normalizeConflictName(side.name)).filter(Boolean);
+    if (sideNames.length < 2) continue;
+    const presentSides = sideNames.filter((name) => topNames.has(name));
+    if (presentSides.length < 2) continue;
+    return {
+      objectType: conflict.objectType,
+      concept: conflict.concept,
+      reason: conflict.reason,
+      prompt: conflict.prompt,
+      sides: conflict.sides.map((side) => ({
+        name: side.name,
+        owner: side.owner,
+        domain: side.domain,
+        filePath: side.filePath,
+        definition: side.definition,
+        businessRules: side.businessRules,
+      })),
+    };
+  }
+  return undefined;
+}
+
+function normalizeConflictName(value: string | undefined): string {
+  return (value ?? '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
 }
 
 function tokenize(text: string): string[] {

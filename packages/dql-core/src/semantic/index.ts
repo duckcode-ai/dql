@@ -1,4 +1,4 @@
-export { SemanticAnalyzer, analyze } from './analyzer.js';
+export { SemanticAnalyzer, analyze, detectTrustConflicts } from './analyzer.js';
 export {
   SemanticLayer,
   parseMetricDefinition,

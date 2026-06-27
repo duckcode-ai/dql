@@ -64,12 +64,56 @@ export interface DQLManifest {
 }
 
 export interface ManifestDiagnostic {
-  /** 'parse' | 'resolve' | 'dbt' | 'semantic' | 'config' */
+  /**
+   * 'parse' | 'resolve' | 'dbt' | 'semantic' | 'config' | 'conflict'
+   *
+   * `conflict` (additive) flags two certified governance artifacts — two terms
+   * or two certified blocks — that target the same concept/identifier/grain but
+   * disagree on their definition, business rules, or SQL semantics. A governed
+   * system must surface this rather than silently pick one; see
+   * `detectTrustConflicts` in semantic/conflicts and the agent's `conflict`
+   * route. Conflict diagnostics carry an optional `conflict` payload so
+   * consumers can route on the two sides without re-parsing the message.
+   */
   kind: string;
   /** Relative path to the offending file, if any */
   filePath?: string;
   severity: 'error' | 'warning';
   message: string;
+  /**
+   * Present only on `kind: 'conflict'` diagnostics. Names the conflicting
+   * governance pair so route-time consumers can present both sides + owners.
+   */
+  conflict?: ManifestConflictDetail;
+}
+
+/**
+ * Structured detail for a `kind: 'conflict'` diagnostic: the two governed
+ * artifacts that claim the same concept but disagree, plus the disambiguation
+ * prompt a human (or the agent's `conflict` route) should surface.
+ */
+export interface ManifestConflictDetail {
+  /** The kind of governed object in conflict. */
+  objectType: 'term' | 'block';
+  /** The shared concept key (identifier + grain) that both sides claim. */
+  concept: string;
+  /** Why the two sides are considered divergent. */
+  reason: string;
+  /** A ready-to-show disambiguation prompt naming both sides. */
+  prompt: string;
+  /** The two (or more) conflicting sides, each with its owner + definition. */
+  sides: ManifestConflictSide[];
+}
+
+export interface ManifestConflictSide {
+  name: string;
+  filePath?: string;
+  owner?: string;
+  domain?: string;
+  /** The definition/description text that diverges. */
+  definition?: string;
+  /** The business rules that diverge. */
+  businessRules?: string[];
 }
 
 // ---- Blocks ----
