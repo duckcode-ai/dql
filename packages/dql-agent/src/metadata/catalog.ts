@@ -38,6 +38,11 @@ import {
   type CertifiedBlockApplicability,
 } from './analysis-planner.js';
 import { extractSimpleSelectShape, sourceSqlShapeColumns } from './sql-shape.js';
+import {
+  grainMatches,
+  requestedGrainFromPlan,
+  type GrainGateResult,
+} from './grain-gate.js';
 
 const require = createRequire(import.meta.url);
 let databaseCtor: typeof Database | null = null;
@@ -228,10 +233,31 @@ export interface MetadataAllowedSqlContext {
   }>;
 }
 
+export interface GrainGateRouteInfo {
+  /** Block the gate evaluated. */
+  blockObjectKey: string;
+  blockName: string;
+  /** Whether the block was allowed to serve as a Tier-1 certified answer. */
+  allow: boolean;
+  kind: GrainGateResult['kind'];
+  requestedGrain: string;
+  blockGrain: string;
+  reason: string;
+}
+
 export interface MetadataRouteDecision {
   route: MetadataAnswerRoute;
   intent: MetadataAgentIntent;
   reason: string;
+  /**
+   * Short machine/agent-facing explanation of a routing *decision* that demoted
+   * or held a candidate — distinct from `reason`, which describes the chosen
+   * route. Currently set by the grain gate, e.g.
+   * `"certified block grain=account_id ≠ requested grain=region → Tier 2"`.
+   */
+  routeReason?: string;
+  /** Structured grain-gate verdict for the best-matching certified candidate, when evaluated. */
+  grainGate?: GrainGateRouteInfo;
   trustLabel: MetadataTrustLabel;
   reviewStatus: 'certified' | 'draft_ready' | 'needs_review' | 'none' | 'conflict';
   exactObjectKey?: string;
@@ -2157,7 +2183,37 @@ function planContextPackRoute(input: {
   const missingContext = buildMissingContext(input.request, intent, input.objects, input.allowedSqlContext);
   const selectedEvidence = input.evidenceRoles.slice(0, 16);
 
-  if (exact && (
+  // Grain / contract gate (refinement of the existing certified→generated
+  // demotion). The candidate certified block is only served at Tier 1 when its
+  // declared grain actually satisfies the question's requested grain. An
+  // explicit example/name match bypasses the gate — the user is naming the
+  // block directly, so grain is implicitly accepted.
+  const requestedGrain = requestedGrainFromPlan(input.questionPlan);
+  const grainGate = exact && !exactExampleMatch && intent !== 'definition_lookup'
+    ? grainMatches(exact, requestedGrain)
+    : undefined;
+  const grainGateInfo: GrainGateRouteInfo | undefined = exact && grainGate
+    ? {
+      blockObjectKey: exact.objectKey,
+      blockName: exact.name,
+      allow: grainGate.allow,
+      kind: grainGate.kind,
+      requestedGrain: grainGate.requestedGrainLabel,
+      blockGrain: grainGate.blockGrainLabel,
+      reason: grainGate.reason,
+    }
+    : undefined;
+  // A genuine grain/entity mismatch demotes the candidate to Tier 2 — but only
+  // when generated SQL is actually possible. If nothing else can answer, we do
+  // not strand the user; the existing certified fallback still applies (and
+  // query_via_block enforces the gate defensively at execution time).
+  const canGenerateFromContext =
+    input.allowedSqlContext.relations.length > 0 ||
+    input.allowedSqlContext.sourceBlockSql.length > 0 ||
+    input.objects.some((object) => object.objectType.startsWith('semantic_'));
+  const grainGateDemotes = Boolean(grainGate && !grainGate.allow && canGenerateFromContext);
+
+  if (!grainGateDemotes && exact && (
     certifiedApplicability?.kind === 'exact_answer'
     || certifiedApplicability?.kind === 'safe_parameterized'
     || intent === 'exact_certified_lookup'
@@ -2169,6 +2225,8 @@ function planContextPackRoute(input: {
       route: 'certified',
       intent,
       reason: `Certified ${exact.objectType.replace(/_/g, ' ')} "${exact.name}" exactly matches the requested artifact, definition, or direct KPI grain.`,
+      routeReason: grainGateInfo?.reason,
+      grainGate: grainGateInfo,
       trustLabel: 'certified',
       reviewStatus: 'certified',
       exactObjectKey: exact.objectKey,
@@ -2176,6 +2234,27 @@ function planContextPackRoute(input: {
       selectedEvidence,
       missingContext: [],
       followUps: buildMetadataFollowUps(intent, input.allowedSqlContext),
+    };
+  }
+
+  // Grain-gated demotion: the best certified candidate is close but answers a
+  // different grain. Serve Tier 2 (generated from context) with the block kept
+  // as context only, instead of a confidently-wrong governed answer.
+  if (grainGateDemotes && exact && grainGate) {
+    return {
+      route: 'generated_sql',
+      intent: isGeneratedMetadataIntent(intent) ? intent : 'ad_hoc_ranking',
+      reason: `Certified block "${exact.name}" is close but answers a different grain than the question, so it is context only and SQL is generated for the requested grain.`,
+      routeReason: grainGate.reason,
+      grainGate: grainGateInfo,
+      trustLabel: input.trustLabel === 'certified' ? 'mixed' : input.trustLabel,
+      reviewStatus: 'draft_ready',
+      certifiedApplicability: certifiedApplicability
+        ? { ...certifiedApplicability, kind: 'context_only' }
+        : contextApplicability,
+      selectedEvidence,
+      missingContext,
+      followUps: buildMetadataFollowUps(isGeneratedMetadataIntent(intent) ? intent : 'ad_hoc_ranking', input.allowedSqlContext),
     };
   }
 

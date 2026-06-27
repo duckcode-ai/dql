@@ -303,3 +303,113 @@ describe('queryViaBlock — DataLex contract enforcement (Phase 2.1 wedge)', () 
     expect((result as { block?: string }).block).toBe('My Block');
   });
 });
+
+describe('queryViaBlock — grain gate (defense in depth)', () => {
+  let originalFetch: typeof globalThis.fetch;
+
+  beforeEach(() => {
+    originalFetch = globalThis.fetch;
+  });
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
+    vi.clearAllMocks();
+  });
+
+  function okFetch() {
+    return vi.fn(async () => ({
+      ok: true,
+      json: async () => ({ result: { columns: [], rows: [{ x: 1 }], executionTime: 1 } }),
+    } as unknown as Response)) as unknown as typeof fetch;
+  }
+
+  it('refuses a grain-mismatched block even when called directly', async () => {
+    const ctx = makeCtx({
+      'Account Revenue': makeManifestBlock({
+        name: 'Account Revenue',
+        grain: 'account_id',
+        entities: ['Account'],
+        declaredOutputs: ['account_id', 'total_revenue'],
+      }),
+    });
+    globalThis.fetch = okFetch();
+
+    const result = await queryViaBlock(ctx, {
+      name: 'Account Revenue',
+      question: 'Show revenue by region',
+    });
+    expect((result as { error?: string }).error).toMatch(/failed the grain gate/i);
+    expect((result as { error?: string }).error).toMatch(/account.*region.*Tier 2/i);
+    expect((result as { grainGate?: { allow: boolean } }).grainGate?.allow).toBe(false);
+    expect(globalThis.fetch).not.toHaveBeenCalled();
+  });
+
+  it('serves an exact-grain block when the question matches the declared grain', async () => {
+    const ctx = makeCtx({
+      'Region Revenue': makeManifestBlock({
+        name: 'Region Revenue',
+        grain: 'region',
+        entities: ['Region'],
+        declaredOutputs: ['region', 'total_revenue'],
+      }),
+    });
+    globalThis.fetch = okFetch();
+
+    const result = await queryViaBlock(ctx, {
+      name: 'Region Revenue',
+      question: 'Show revenue by region',
+    });
+    expect((result as { block?: string }).block).toBe('Region Revenue');
+    expect(globalThis.fetch).toHaveBeenCalled();
+  });
+
+  it('serves a finer-grain block that can roll up to the requested grain', async () => {
+    const ctx = makeCtx({
+      'Daily Revenue': makeManifestBlock({
+        name: 'Daily Revenue',
+        grain: 'day',
+        declaredOutputs: ['day', 'total_revenue'],
+      }),
+    });
+    globalThis.fetch = okFetch();
+
+    const result = await queryViaBlock(ctx, {
+      name: 'Daily Revenue',
+      question: 'Show revenue by week',
+    });
+    expect((result as { block?: string }).block).toBe('Daily Revenue');
+    expect(globalThis.fetch).toHaveBeenCalled();
+  });
+
+  it('does not gate when no question is supplied (backward compatible)', async () => {
+    const ctx = makeCtx({
+      'Account Revenue': makeManifestBlock({
+        name: 'Account Revenue',
+        grain: 'account_id',
+        entities: ['Account'],
+      }),
+    });
+    globalThis.fetch = okFetch();
+
+    const result = await queryViaBlock(ctx, { name: 'Account Revenue' });
+    expect((result as { block?: string }).block).toBe('Account Revenue');
+    expect(globalThis.fetch).toHaveBeenCalled();
+  });
+
+  it('does not gate when the question carries no extractable grain', async () => {
+    const ctx = makeCtx({
+      'Account Revenue': makeManifestBlock({
+        name: 'Account Revenue',
+        grain: 'account_id',
+        entities: ['Account'],
+      }),
+    });
+    globalThis.fetch = okFetch();
+
+    const result = await queryViaBlock(ctx, {
+      name: 'Account Revenue',
+      question: 'Run Account Revenue',
+    });
+    expect((result as { block?: string }).block).toBe('Account Revenue');
+    expect(globalThis.fetch).toHaveBeenCalled();
+  });
+});

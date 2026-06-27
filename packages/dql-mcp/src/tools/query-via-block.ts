@@ -2,11 +2,23 @@ import { z } from 'zod';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { InvariantResult } from '@duckcodeailabs/dql-governance';
+import {
+  buildAnalysisQuestionPlan,
+  grainMatches,
+  requestedGrainFromPlan,
+  type MetadataObject,
+} from '@duckcodeailabs/dql-agent';
 import type { DQLContext } from '../context.js';
 
 export const queryViaBlockInput = {
   name: z.string().describe('Certified block to execute.'),
   limit: z.number().int().min(1).max(10000).optional().describe('Max rows to return.'),
+  question: z
+    .string()
+    .optional()
+    .describe(
+      'Original question this block is being served for. When provided, query_via_block re-checks the block grain against the requested grain (defense in depth) and refuses on a genuine grain mismatch.',
+    ),
   serverUrl: z
     .string()
     .optional()
@@ -22,7 +34,7 @@ export const queryViaBlockInput = {
  */
 export async function queryViaBlock(
   ctx: DQLContext,
-  args: { name: string; limit?: number; serverUrl?: string },
+  args: { name: string; limit?: number; question?: string; serverUrl?: string },
 ) {
   const block = ctx.manifest.blocks[args.name];
   if (!block) return { error: `No block named "${args.name}".` };
@@ -30,6 +42,30 @@ export async function queryViaBlock(
     return {
       error: `Block "${args.name}" is "${block.status ?? 'draft'}" — only certified blocks can be executed via MCP.`,
     };
+  }
+
+  // Grain-gate defense in depth. When a question is provided, re-run the same
+  // grain check the router uses before serving this certified block. A genuine
+  // grain/entity mismatch is refused here even if the tool was called directly,
+  // so a near-miss certified block can never be served as a confidently-wrong
+  // governed answer. Behavior is unchanged when no question is supplied or when
+  // the block / question carries no clearly-extractable grain.
+  if (args.question) {
+    const plan = buildAnalysisQuestionPlan(args.question);
+    const requestedGrain = requestedGrainFromPlan(plan);
+    const gate = grainMatches(blockToGrainObject(block), requestedGrain);
+    if (!gate.allow) {
+      return {
+        error: `Block "${args.name}" failed the grain gate: ${gate.reason}. Refusing to serve a near-miss certified answer; generate SQL for the requested grain instead.`,
+        routeReason: gate.reason,
+        grainGate: {
+          allow: gate.allow,
+          kind: gate.kind,
+          requestedGrain: gate.requestedGrainLabel,
+          blockGrain: gate.blockGrainLabel,
+        },
+      };
+    }
   }
 
   // v1.6 — DataLex contract enforcement (the wedge).
@@ -117,5 +153,28 @@ export async function queryViaBlock(
     durationMs: payload.result?.executionTime ?? null,
     columns: payload.result?.columns ?? [],
     rows: args.limit ? rows.slice(0, args.limit) : rows,
+  };
+}
+
+/**
+ * Adapt a manifest block into the minimal `MetadataObject` shape the grain gate
+ * reads (it only inspects `payload.grain`, `payload.declaredOutputs`, and
+ * `payload.entities`).
+ */
+function blockToGrainObject(block: {
+  name: string;
+  grain?: string;
+  declaredOutputs?: string[];
+  entities?: string[];
+}): MetadataObject {
+  return {
+    objectKey: `dql:block:${block.name}`,
+    objectType: 'dql_block',
+    name: block.name,
+    payload: {
+      grain: block.grain,
+      declaredOutputs: block.declaredOutputs ?? [],
+      entities: block.entities ?? [],
+    },
   };
 }
