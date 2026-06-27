@@ -59,6 +59,8 @@ export async function askDql(
     trustStatus: route.trustLabel,
     reviewStatus: route.reviewStatus,
     reason: route.reason,
+    routeReason: route.routeReason,
+    grainGate: route.grainGate,
     recommendedAction: recommendedAction(route.route),
     nextTool: nextTool(route.route),
     exactCertifiedBlock: exact && exact.objectType === 'dql_block' ? summarizeObject(exact) : undefined,

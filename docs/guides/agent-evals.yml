@@ -32,3 +32,15 @@ cases:
     expected:
       route: clarify
       missingContextKind: baseline
+
+  # wrong-grain category: the best-matching certified block answers a different
+  # grain than the question (e.g. a player/account-grain block for a team/region
+  # question). The grain gate must demote this to Tier 2 (generated_sql) instead
+  # of serving a near-miss certified answer. With the gate OFF this would route
+  # `certified` (a confidently-wrong governed answer); with it ON it routes
+  # `generated_sql`, improving grain-match precision.
+  - name: wrong-grain certified demotion
+    question: "Show total points by team"
+    expected:
+      route: generated_sql
+      reviewStatus: draft_ready

@@ -131,6 +131,15 @@ export type {
   CertifiedBlockApplicability,
 } from "./metadata/analysis-planner.js";
 export {
+  grainMatches,
+  requestedGrainFromPlan,
+} from "./metadata/grain-gate.js";
+export type {
+  GrainGateKind,
+  GrainGateResult,
+  RequestedGrain,
+} from "./metadata/grain-gate.js";
+export {
   validateSqlAgainstLocalContext,
 } from "./metadata/sql-context-validation.js";
 export {
@@ -154,6 +163,7 @@ export type {
   MetadataMissingContext,
   MetadataObject,
   MetadataRouteDecision,
+  GrainGateRouteInfo,
   MetadataDomainShard,
   MetadataSourceFingerprint,
   MetadataSnapshot,

@@ -288,6 +288,97 @@ describe('local metadata catalog', () => {
     });
   });
 
+  it('grain gate: demotes a wrong-grain certified block to generated SQL (Tier 2)', async () => {
+    // A player-grain certified block exists; the question asks for a team grain.
+    // Retrieval surfaces the player block as the best certified candidate, but
+    // its declared grain does not satisfy the requested grain, so the answer is
+    // demoted to Tier 2 instead of served as a near-miss certified answer.
+    addGrainedTeamScoringModel(projectRoot);
+    writeFileSync(
+      join(projectRoot, 'blocks', 'player_scoring_leaders.dql'),
+      `block "Player Scoring Leaders" {
+  domain = "nba"
+  type = "custom"
+  status = "certified"
+  owner = "analytics@example.com"
+  description = "Certified ranking of player scoring leaders by total points."
+  tags = ["nba", "player", "points", "scoring"]
+  grain = "player_id"
+  entities = ["Player"]
+  outputs = ["player_name", "total_points"]
+  query = """
+    SELECT player_name, SUM(points) AS total_points
+    FROM fct_player_performance
+    GROUP BY 1
+    ORDER BY total_points DESC
+  """
+}`,
+      'utf-8',
+    );
+    await ensureMetadataCatalogFresh(projectRoot, { force: true });
+
+    const plan = await planAgentAnswer(projectRoot, {
+      question: 'Show total points by team',
+      limit: 30,
+    });
+
+    expect(plan.routeDecision.route).toBe('generated_sql');
+    expect(plan.routeDecision.routeReason).toMatch(/player.*team.*Tier 2/i);
+    expect(plan.routeDecision.grainGate).toMatchObject({
+      allow: false,
+      kind: 'mismatch',
+      blockName: 'Player Scoring Leaders',
+    });
+  });
+
+  it('grain gate: keeps an exact-grain certified question on Tier 1 (no regression)', async () => {
+    writeFileSync(
+      join(projectRoot, 'blocks', 'player_scoring_leaders.dql'),
+      `block "Player Scoring Leaders" {
+  domain = "nba"
+  type = "custom"
+  status = "certified"
+  owner = "analytics@example.com"
+  description = "Certified ranking of player scoring leaders by total points."
+  tags = ["nba", "player", "points", "scoring"]
+  grain = "player_id"
+  entities = ["Player"]
+  outputs = ["player_name", "total_points"]
+  examples = [{ question = "Show total points by player" }]
+  query = """
+    SELECT player_name, SUM(points) AS total_points
+    FROM fct_player_performance
+    GROUP BY 1
+    ORDER BY total_points DESC
+  """
+}`,
+      'utf-8',
+    );
+    await ensureMetadataCatalogFresh(projectRoot, { force: true });
+
+    const plan = await planAgentAnswer(projectRoot, {
+      question: 'Show total points by player',
+      limit: 30,
+    });
+
+    expect(plan.routeDecision.route).toBe('certified');
+    expect(plan.routeDecision.exactObjectKey).toBe('dql:block:Player Scoring Leaders');
+  });
+
+  it('grain gate: does not demote certified routes for grain-free questions (no regression)', async () => {
+    const plan = await planAgentAnswer(projectRoot, {
+      question: 'Who were the top scorers?',
+      limit: 20,
+    });
+
+    expect(plan.routeDecision).toMatchObject({
+      route: 'certified',
+      exactObjectKey: 'dql:block:Top 10 Goal Scorers',
+    });
+    // grain gate must be a no-op when the question carries no extractable grain.
+    expect(plan.routeDecision.grainGate?.allow).not.toBe(false);
+  });
+
   it('routes direct KPI value questions to certified blocks without requiring an example', async () => {
     const plan = await planAgentAnswer(projectRoot, {
       question: 'What was revenue last week?',
@@ -779,6 +870,31 @@ function addGenericAthleteBoxScoreModel(root: string, modelName = 'athlete_box_s
         data_type: 'number',
         description: 'Rebounds recorded.',
       },
+    },
+  };
+  writeFileSync(path, JSON.stringify(manifest), 'utf-8');
+}
+
+function addGrainedTeamScoringModel(root: string): void {
+  const path = join(root, 'target', 'manifest.json');
+  const manifest = JSON.parse(readFileSync(path, 'utf-8')) as {
+    nodes: Record<string, Record<string, unknown>>;
+  };
+  manifest.nodes['model.nba_analysis.fct_team_scoring'] = {
+    resource_type: 'model',
+    name: 'fct_team_scoring',
+    alias: 'fct_team_scoring',
+    database: 'NBA_DB',
+    schema: 'ANALYTICS',
+    description: 'Team scoring fact table with total points at team grain.',
+    depends_on: { nodes: [] },
+    tags: ['nba', 'team', 'points'],
+    original_file_path: 'models/marts/fct_team_scoring.sql',
+    config: { materialized: 'table' },
+    columns: {
+      team_name: { name: 'team_name', data_type: 'text', description: 'Team name.' },
+      season: { name: 'season', data_type: 'number', description: 'NBA season year.' },
+      total_points: { name: 'total_points', data_type: 'number', description: 'Total team points.' },
     },
   };
   writeFileSync(path, JSON.stringify(manifest), 'utf-8');
