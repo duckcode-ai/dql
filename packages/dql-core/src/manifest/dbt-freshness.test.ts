@@ -134,6 +134,59 @@ describe('dbt freshness — block dataState from run_results', () => {
     expect(manifest.sources['orders']?.dbtModel?.runState?.lastRunStatus).toBe('error');
     expect(manifest.dbtImport?.runResultsPath).toContain('run_results.json');
   });
+
+  it('disambiguates a mart from a colliding staging model (stg_orders → orders)', () => {
+    // Standard dbt layout: a `stg_orders` staging model and an `orders` mart.
+    // dbt role-prefix stripping makes both claim the lookup key `orders`; the
+    // selective importer must still anchor a block referencing `orders` to the
+    // mart (exact name) and import it — otherwise 0 models import and freshness
+    // never surfaces (the real-world bug this guards against).
+    mkdirSync(join(tmpDir, 'blocks'), { recursive: true });
+    writeFileSync(
+      join(tmpDir, 'blocks', 'orders.dql'),
+      `block "Orders" {
+  domain = "sales"
+  type = "custom"
+  status = "certified"
+  query = """
+    SELECT * FROM orders
+  """
+}`,
+    );
+    const target = join(tmpDir, 'target');
+    mkdirSync(target, { recursive: true });
+    const manifest = {
+      nodes: {
+        'model.demo.orders': {
+          resource_type: 'model', name: 'orders', alias: 'orders', schema: 'dev', database: 'db',
+          depends_on: { nodes: ['model.demo.stg_orders'] }, tags: [],
+        },
+        'model.demo.stg_orders': {
+          resource_type: 'model', name: 'stg_orders', alias: 'stg_orders', schema: 'dev', database: 'db',
+          depends_on: { nodes: [] }, tags: [],
+        },
+      },
+      sources: {},
+      metadata: { project_name: 'demo' },
+    };
+    const manifestPath = join(target, 'manifest.json');
+    writeFileSync(manifestPath, JSON.stringify(manifest), 'utf-8');
+    writeFileSync(
+      join(target, 'run_results.json'),
+      JSON.stringify({
+        metadata: { generated_at: '2026-06-26T10:00:00Z' },
+        results: [
+          { unique_id: 'model.demo.orders', status: 'success', timing: [{ name: 'execute', completed_at: '2026-06-26T09:59:00Z' }] },
+          { unique_id: 'model.demo.stg_orders', status: 'success', timing: [{ name: 'execute', completed_at: '2026-06-26T09:58:00Z' }] },
+        ],
+      }),
+      'utf-8',
+    );
+
+    const result = buildManifest({ projectRoot: tmpDir, dbtManifestPath: manifestPath });
+    expect(result.dbtImport?.modelsImported ?? 0).toBeGreaterThan(0);
+    expect(result.blocks['Orders'].dataState).toBe('fresh');
+  });
 });
 
 /** Source-freshness ("dbt source freshness" → sources.json) maps to "stale". */
@@ -243,5 +296,57 @@ describe('applyBlockDataState — transitive rollup', () => {
     };
     applyBlockDataState(blocks, {}, undefined, { byUniqueId: new Map() });
     expect(blocks['Orders'].dataState).toBeUndefined();
+  });
+
+  it('resolves a schema-qualified block ref (dev.orders) to a bare-named dbt model source', () => {
+    // Real dbt projects: blocks reference `dev.orders` (schema-qualified) while
+    // the imported dbt model source is named bare `orders`. The dbtModel schema
+    // must be used to index the schema-qualified alias so the block resolves.
+    const blocks: Record<string, ManifestBlock> = {
+      Orders: {
+        name: 'Orders', filePath: 'blocks/orders.dql', status: 'certified', sql: '',
+        rawTableRefs: [], tableDependencies: ['dev.orders'], refDependencies: [],
+        allDependencies: ['dev.orders'], tests: [],
+      },
+    };
+    const sources: Record<string, ManifestSource> = {
+      orders: {
+        name: 'orders', origin: 'dbt', referencedBy: ['block:Orders'],
+        dbtModel: { uniqueId: 'model.demo.orders', schema: 'dev', database: 'db' },
+      },
+    };
+    const dbtDag = { models: [{ uniqueId: 'model.demo.orders' }], edges: [] };
+    const runState = {
+      byUniqueId: new Map([['model.demo.orders', { dataState: 'failed' as const, lastRunStatus: 'error' }]]),
+      runResultsPath: '/tmp/run_results.json',
+    };
+    applyBlockDataState(blocks, sources, dbtDag, runState);
+    expect(blocks['Orders'].dataState).toBe('failed');
+  });
+
+  it('upstream nodes with no run record are neutral (do not drag a fresh block to "unknown")', () => {
+    // `orders` (fresh) depends on a raw source that has NO run_results entry —
+    // sources never "run". The block must stay "fresh", not become "unknown".
+    const blocks: Record<string, ManifestBlock> = {
+      Orders: {
+        name: 'Orders', filePath: 'blocks/orders.dql', status: 'certified', sql: '',
+        rawTableRefs: [], tableDependencies: ['orders'], refDependencies: [],
+        allDependencies: ['orders'], tests: [],
+      },
+    };
+    const sources: Record<string, ManifestSource> = {
+      orders: { name: 'orders', origin: 'dbt', referencedBy: ['block:Orders'], dbtModel: { uniqueId: 'model.demo.orders' } },
+    };
+    const dbtDag = {
+      models: [{ uniqueId: 'model.demo.orders' }, { uniqueId: 'source.demo.raw.orders' }],
+      edges: [{ source: 'source.demo.raw.orders', target: 'model.demo.orders' }],
+    };
+    const runState = {
+      // Only the model has a run record; the raw source does not.
+      byUniqueId: new Map([['model.demo.orders', { dataState: 'fresh' as const, lastRunStatus: 'success' }]]),
+      runResultsPath: '/tmp/run_results.json',
+    };
+    applyBlockDataState(blocks, sources, dbtDag, runState);
+    expect(blocks['Orders'].dataState).toBe('fresh');
   });
 });

@@ -1281,6 +1281,13 @@ interface DbtIndexEntry {
   dependsOn: string[];   // upstream uniqueIds
   /** Normalised lookup names (name, schema.name, db.schema.name) */
   lookupKeys: string[];
+  /**
+   * Lookup names built from the model's EXACT name only (no dbt role-prefix
+   * stripping). Tried first during anchor resolution so a block ref like
+   * `dev.customers` resolves to the `customers` mart instead of colliding with
+   * the stripped alias of `stg_customers`.
+   */
+  primaryLookupKeys: string[];
   /** dbt tags (for `tag:<name>` filters) */
   tags: string[];
   /** File path relative to dbt project root (for `path:<prefix>` filters) */
@@ -1331,9 +1338,10 @@ function importDbtManifest(
     const database: string | undefined = node.database;
     const dependsOn: string[] = Array.isArray(node.depends_on?.nodes) ? node.depends_on.nodes : [];
     const lookupKeys = buildLookupKeys(name, schema, database);
+    const primaryLookupKeys = buildPrimaryLookupKeys(name, schema, database);
     const tags = Array.isArray(node.tags) ? (node.tags as string[]) : [];
     const path = (node.original_file_path ?? node.path) as string | undefined;
-    index.set(uniqueId, { uniqueId, name, type: 'model', schema, database, dependsOn, lookupKeys, tags, path, raw: node });
+    index.set(uniqueId, { uniqueId, name, type: 'model', schema, database, dependsOn, lookupKeys, primaryLookupKeys, tags, path, raw: node });
   }
 
   const rawSources: Record<string, any> = manifest.sources ?? {};
@@ -1343,9 +1351,10 @@ function importDbtManifest(
     const schema: string | undefined = src.schema;
     const database: string | undefined = src.database;
     const lookupKeys = buildLookupKeys(name, schema, database);
+    const primaryLookupKeys = buildPrimaryLookupKeys(name, schema, database);
     const tags = Array.isArray(src.tags) ? (src.tags as string[]) : [];
     const path = (src.original_file_path ?? src.path) as string | undefined;
-    index.set(uniqueId, { uniqueId, name, type: 'source', schema, database, dependsOn: [], lookupKeys, tags, path, raw: src });
+    index.set(uniqueId, { uniqueId, name, type: 'source', schema, database, dependsOn: [], lookupKeys, primaryLookupKeys, tags, path, raw: src });
   }
 
   const totalDbtModels = [...index.values()].filter((e) => e.type === 'model').length;
@@ -1368,20 +1377,29 @@ function importDbtManifest(
     // Multiple dbt nodes may share a short alias, so short-name matches are
     // used only when they resolve unambiguously.
     const nameToIds = new Map<string, Set<string>>();
-    const addNameLookup = (key: string, uniqueId: string) => {
+    const primaryNameToIds = new Map<string, Set<string>>();
+    const addTo = (map: Map<string, Set<string>>, key: string, uniqueId: string) => {
       const normalized = key.toLowerCase();
-      const existing = nameToIds.get(normalized);
+      const existing = map.get(normalized);
       if (existing) existing.add(uniqueId);
-      else nameToIds.set(normalized, new Set([uniqueId]));
+      else map.set(normalized, new Set([uniqueId]));
     };
     for (const entry of index.values()) {
-      for (const key of entry.lookupKeys) {
-        addNameLookup(key, entry.uniqueId);
-      }
+      for (const key of entry.lookupKeys) addTo(nameToIds, key, entry.uniqueId);
+      for (const key of entry.primaryLookupKeys) addTo(primaryNameToIds, key, entry.uniqueId);
     }
 
     const resolveDbtAnchor = (ref: string): string | undefined => {
-      for (const key of buildReferencedTableLookupKeys(ref)) {
+      const refKeys = buildReferencedTableLookupKeys(ref);
+      // Prefer an unambiguous match on EXACT model names before falling back to
+      // dbt role-prefix-stripped aliases — otherwise `dev.customers` is ambiguous
+      // between the `customers` mart and the stripped alias of `stg_customers`,
+      // and the anchor (and its whole upstream subgraph) is silently skipped.
+      for (const key of refKeys) {
+        const ids = primaryNameToIds.get(key);
+        if (ids?.size === 1) return [...ids][0];
+      }
+      for (const key of refKeys) {
         const ids = nameToIds.get(key);
         if (ids?.size === 1) return [...ids][0];
       }
@@ -1549,6 +1567,18 @@ function importDbtManifest(
 }
 
 /** Build all normalised lookup keys for a dbt node name. */
+/**
+ * Lookup keys from a dbt node's EXACT name (no role-prefix stripping), so a
+ * mart `customers` and a staging `stg_customers` never collide on the same key.
+ */
+function buildPrimaryLookupKeys(name: string, schema?: string, database?: string): string[] {
+  const alias = name.toLowerCase();
+  const keys = new Set<string>([alias]);
+  if (schema) keys.add(`${schema}.${alias}`.toLowerCase());
+  if (schema && database) keys.add(`${database}.${schema}.${alias}`.toLowerCase());
+  return [...keys];
+}
+
 function buildLookupKeys(name: string, schema?: string, database?: string): string[] {
   const aliases = new Set([name.toLowerCase()]);
   const stripped = stripDbtRolePrefix(name);

@@ -202,25 +202,43 @@ export function applyBlockDataState(
     upstream.set(edge.target, list);
   }
 
-  // table name -> dbt uniqueId, via the sources map.
+  // table name -> dbt uniqueId, via the sources map. Block table refs may be
+  // schema-qualified (`dev.customers`) while the dbt-model source is named bare
+  // (`customers`), so index every alias: the source name plus the model's
+  // bare / schema-qualified / db-qualified names derived from its dbt metadata.
   const tableToUniqueId = new Map<string, string>();
+  const addTableKey = (key: string | undefined, uid: string) => {
+    if (!key) return;
+    const k = key.toLowerCase();
+    if (!tableToUniqueId.has(k)) tableToUniqueId.set(k, uid);
+  };
   for (const source of Object.values(sources)) {
-    const uid = source.dbtModel?.uniqueId;
-    if (uid) tableToUniqueId.set(source.name.toLowerCase(), uid);
+    const dm = source.dbtModel;
+    if (!dm?.uniqueId) continue;
+    addTableKey(source.name, dm.uniqueId);
+    const bare = dm.uniqueId.split('.').pop();
+    addTableKey(bare, dm.uniqueId);
+    if (dm.schema && bare) addTableKey(`${dm.schema}.${bare}`, dm.uniqueId);
+    if (dm.database && dm.schema && bare) addTableKey(`${dm.database}.${dm.schema}.${bare}`, dm.uniqueId);
   }
 
-  const stateFor = (uid: string): DbtDataState =>
-    runState.byUniqueId.get(uid)?.dataState ?? 'unknown';
+  // A node's own state, or `undefined` when dbt produced no run/freshness result
+  // for it (e.g. raw sources never "run"). Unstated nodes are NEUTRAL — being in
+  // a block's lineage must not drag it to "unknown" just because a source has no
+  // run record.
+  const stateFor = (uid: string): DbtDataState | undefined =>
+    runState.byUniqueId.get(uid)?.dataState;
 
-  // Memoised worst-state over the transitive upstream closure of a node.
-  const closureCache = new Map<string, DbtDataState>();
-  const worstUpstream = (uid: string, seen = new Set<string>()): DbtDataState => {
-    if (closureCache.has(uid)) return closureCache.get(uid)!;
+  // Memoised worst KNOWN state over the transitive upstream closure of a node.
+  const closureCache = new Map<string, DbtDataState | undefined>();
+  const worstUpstream = (uid: string, seen = new Set<string>()): DbtDataState | undefined => {
+    if (closureCache.has(uid)) return closureCache.get(uid);
     if (seen.has(uid)) return stateFor(uid);
     seen.add(uid);
     let worst = stateFor(uid);
     for (const up of upstream.get(uid) ?? []) {
-      worst = worseDataState(worst, worstUpstream(up, seen));
+      const s = worstUpstream(up, seen);
+      if (s !== undefined) worst = worst === undefined ? s : worseDataState(worst, s);
     }
     closureCache.set(uid, worst);
     return worst;
@@ -229,20 +247,23 @@ export function applyBlockDataState(
   for (const block of Object.values(blocks)) {
     const upstreamUids: string[] = [];
     for (const table of block.tableDependencies ?? []) {
-      const uid = tableToUniqueId.get(table.toLowerCase());
+      const lower = table.toLowerCase();
+      const uid = tableToUniqueId.get(lower) ?? tableToUniqueId.get(lower.split('.').pop() ?? lower);
       if (uid) upstreamUids.push(uid);
     }
     if (upstreamUids.length === 0) continue;
 
-    let worst: DbtDataState = 'fresh';
+    let worst: DbtDataState | undefined;
     let worstUid: string | undefined;
     for (const uid of upstreamUids) {
       const state = worstUpstream(uid);
-      if (STATE_SEVERITY[state] > STATE_SEVERITY[worst]) {
+      if (state === undefined) continue;
+      if (worst === undefined || STATE_SEVERITY[state] > STATE_SEVERITY[worst]) {
         worst = state;
         worstUid = uid;
       }
     }
+    if (worst === undefined) continue;
 
     block.dataState = worst;
     block.dataStateDetail = describeBlockDataState(worst, worstUid, runState);
