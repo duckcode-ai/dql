@@ -1,4 +1,18 @@
 import type { BlockRecord, TestResultSummary } from '@duckcodeailabs/dql-project';
+import { hasInvariantViolation, type InvariantResult } from './invariant-evaluator.js';
+
+/**
+ * Extra signals a certification rule can read beyond the block + test results.
+ * Additive and optional so existing rules and callers are unaffected.
+ */
+export interface CertificationContext {
+  /**
+   * Results of evaluating the block's declared invariants against the most
+   * recent run's result set. Undefined when no run was performed; an empty
+   * array means the block declares no invariants.
+   */
+  invariantResults?: InvariantResult[];
+}
 
 /**
  * Certification rule that a block must pass to be certified.
@@ -8,7 +22,11 @@ export interface CertificationRule {
   name: string;
   description: string;
   severity: 'error' | 'warning';
-  check: (block: BlockRecord, testResults?: TestResultSummary) => CertificationCheckResult;
+  check: (
+    block: BlockRecord,
+    testResults?: TestResultSummary,
+    context?: CertificationContext,
+  ) => CertificationCheckResult;
 }
 
 export interface CertificationCheckResult {
@@ -111,6 +129,40 @@ export const BUILTIN_RULES: CertificationRule[] = [
       const executedCount = testResults?.assertions.length ?? 0;
       if (declaredCount === 0 && executedCount === 0) {
         return { passed: false, message: 'No test assertions defined' };
+      }
+      return { passed: true };
+    },
+  },
+  {
+    id: 'invariants-hold',
+    name: 'Declared invariants hold',
+    description:
+      "A block's declared invariants must hold against its most recent run's result. " +
+      'Warning by default; an error in enterprise mode. Complements tests — does not replace them.',
+    severity: 'warning',
+    check: (block, _testResults, context) => {
+      const declared = block.invariants ?? [];
+      if (declared.length === 0) {
+        // Blocks without invariants are unaffected — nothing to enforce.
+        return { passed: true };
+      }
+      const results = context?.invariantResults;
+      if (!results || results.length === 0) {
+        // Invariants are declared but no run produced results to check them
+        // against. We cannot assert the guarantees hold, so block certification.
+        return {
+          passed: false,
+          message: 'Invariants are declared but no run result was available to evaluate them',
+        };
+      }
+      const violations = results.filter((entry) => !entry.passed && !entry.uncheckable);
+      if (violations.length > 0) {
+        return {
+          passed: false,
+          message: violations
+            .map((entry) => `${entry.expr} — ${entry.detail}`)
+            .join('; '),
+        };
       }
       return { passed: true };
     },
@@ -425,6 +477,7 @@ const ENTERPRISE_REQUIRED_RULE_IDS = new Set([
   'has-domain',
   'tests-pass',
   'has-tests',
+  'invariants-hold',
   'declares-grain',
   'declares-outputs',
   'declares-review-cadence',
@@ -525,12 +578,13 @@ export class Certifier {
   evaluate(
     block: BlockRecord,
     testResults?: TestResultSummary,
+    context?: CertificationContext,
   ): CertificationResult {
     const errors: Array<{ rule: string; message: string }> = [];
     const warnings: Array<{ rule: string; message: string }> = [];
 
     for (const rule of this.rules) {
-      const result = rule.check(block, testResults);
+      const result = rule.check(block, testResults, context);
       if (!result.passed) {
         const entry = { rule: rule.name, message: result.message ?? rule.description };
         if (rule.severity === 'error') {

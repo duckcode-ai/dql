@@ -108,6 +108,63 @@ describe('queryViaBlock — certified-only enforcement (the wedge)', () => {
     expect(result).toEqual({ error: 'Compile failed: column ordered_at not found' });
   });
 
+  it('reports passing invariants and a clean "Certified" trust label', async () => {
+    const ctx = makeCtx({
+      'My Block': makeManifestBlock({ invariants: ['arr >= 0'] }),
+    });
+    globalThis.fetch = vi.fn(async () => ({
+      ok: true,
+      json: async () => ({
+        result: { columns: [{ name: 'arr' }], rows: [{ arr: 42 }], executionTime: 3 },
+        invariantResults: [{ expr: 'arr >= 0', passed: true, detail: 'Holds.' }],
+        invariantViolation: false,
+      }),
+    } as unknown as Response)) as unknown as typeof fetch;
+
+    const result = await queryViaBlock(ctx, { name: 'My Block' });
+    expect(result).toMatchObject({
+      block: 'My Block',
+      trustLabel: 'Certified',
+      invariantViolation: false,
+    });
+    expect((result as { invariantResults: unknown[] }).invariantResults).toHaveLength(1);
+  });
+
+  it('downgrades the trust label when an invariant is violated, even for a certified block', async () => {
+    const ctx = makeCtx({
+      'My Block': makeManifestBlock({ invariants: ['approval_rate_pct <= 100'] }),
+    });
+    globalThis.fetch = vi.fn(async () => ({
+      ok: true,
+      json: async () => ({
+        result: { columns: [{ name: 'approval_rate_pct' }], rows: [{ approval_rate_pct: 137 }], executionTime: 3 },
+        invariantResults: [{ expr: 'approval_rate_pct <= 100', passed: false, detail: 'Violated: 137 <= 100 is false' }],
+        invariantViolation: true,
+      }),
+    } as unknown as Response)) as unknown as typeof fetch;
+
+    const result = await queryViaBlock(ctx, { name: 'My Block' });
+    expect(result).toMatchObject({
+      block: 'My Block',
+      trustLabel: 'Certified · invariant violated',
+      invariantViolation: true,
+    });
+  });
+
+  it('omits invariantResults for blocks that declare none (unchanged behavior)', async () => {
+    const ctx = makeCtx({ 'My Block': makeManifestBlock() });
+    globalThis.fetch = vi.fn(async () => ({
+      ok: true,
+      json: async () => ({
+        result: { columns: [], rows: [{ foo: 1 }], executionTime: 1 },
+      }),
+    } as unknown as Response)) as unknown as typeof fetch;
+
+    const result = await queryViaBlock(ctx, { name: 'My Block' });
+    expect(result).toMatchObject({ block: 'My Block', trustLabel: 'Certified', invariantViolation: false });
+    expect((result as Record<string, unknown>).invariantResults).toBeUndefined();
+  });
+
   it('respects DQL_RUNTIME_URL when no serverUrl is passed', async () => {
     const ctx = makeCtx({ 'My Block': makeManifestBlock() });
     process.env.DQL_RUNTIME_URL = 'http://example.test:9999';

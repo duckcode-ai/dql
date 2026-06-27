@@ -8,7 +8,7 @@ import {
   resolveSemanticLayerWithDiagnostics,
   type Diagnostic as CoreDiagnostic,
 } from '@duckcodeailabs/dql-core';
-import { Certifier, ENTERPRISE_RULES } from '@duckcodeailabs/dql-governance';
+import { Certifier, ENTERPRISE_RULES, evaluateInvariants, type InvariantResult } from '@duckcodeailabs/dql-governance';
 import type { BlockRecord, TestResultSummary, TestAssertionResult } from '@duckcodeailabs/dql-project';
 import { QueryExecutor, type ConnectionConfig } from '@duckcodeailabs/dql-connectors';
 import { buildExecutionPlan, type NotebookCell } from '@duckcodeailabs/dql-notebook';
@@ -80,20 +80,30 @@ function skippedTestSummary(assertions: string[]): TestResultSummary {
   };
 }
 
+interface BlockRunOutcome {
+  testResults: TestResultSummary | null;
+  invariantResults: InvariantResult[];
+}
+
 async function runBlockTests(
   b: any,
   source: string,
   flags: CLIFlags,
   projectConfig: ProjectConfig,
-): Promise<TestResultSummary | null> {
+): Promise<BlockRunOutcome> {
   const tests: any[] = b.tests ?? [];
-  if (tests.length === 0) return null;
+  const invariants: string[] = Array.isArray(b.invariants) ? b.invariants : [];
+  // Nothing to execute when the block declares neither tests nor invariants.
+  if (tests.length === 0 && invariants.length === 0) {
+    return { testResults: null, invariantResults: [] };
+  }
 
   const projectRoot = process.cwd();
   const connection = resolveConnection(flags, projectConfig);
   const executor = new QueryExecutor();
   const start = Date.now();
   const assertions: TestAssertionResult[] = [];
+  let invariantResults: InvariantResult[] = [];
   let passed = 0;
   let failed = 0;
 
@@ -109,16 +119,19 @@ async function runBlockTests(
     const plan = buildExecutionPlan(cell, { semanticLayer, driver: connection.driver, tableMapping });
     if (!plan) {
       return {
-        passed: 0,
-        failed: tests.length,
-        skipped: 0,
-        duration: Date.now() - start,
-        assertions: tests.map((t: any) => ({
-          name: `assert ${t.field} ${t.operator} ${formatExpected(t.expected)}`,
-          passed: false,
-          error: 'Could not build execution plan for block',
-        })),
-        runAt: new Date(),
+        testResults: tests.length === 0 ? null : {
+          passed: 0,
+          failed: tests.length,
+          skipped: 0,
+          duration: Date.now() - start,
+          assertions: tests.map((t: any) => ({
+            name: `assert ${t.field} ${t.operator} ${formatExpected(t.expected)}`,
+            passed: false,
+            error: 'Could not build execution plan for block',
+          })),
+          runAt: new Date(),
+        },
+        invariantResults: [],
       };
     }
 
@@ -130,6 +143,9 @@ async function runBlockTests(
       : [];
     const rows = Array.isArray(rawResult?.rows) ? rawResult.rows : [];
     const rowCount = rows.length;
+
+    // Evaluate declared invariants against the same result the tests run on.
+    invariantResults = evaluateInvariants(invariants, { columns, rows });
 
     for (const test of plan.tests) {
       const name = `assert ${test.field} ${test.operator} ${formatExpected(test.expected)}`;
@@ -172,15 +188,27 @@ async function runBlockTests(
       });
       failed++;
     }
+    // The block did not run, so its invariants are unverified. Surface each as
+    // a violation so certification cannot pass on unproven guarantees.
+    if (invariants.length > 0 && invariantResults.length === 0) {
+      invariantResults = invariants.map((expr) => ({
+        expr,
+        passed: false,
+        detail: `Could not evaluate — block run failed: ${msg}`,
+      }));
+    }
   }
 
   return {
-    passed,
-    failed,
-    skipped: 0,
-    duration: Date.now() - start,
-    assertions,
-    runAt: new Date(),
+    testResults: tests.length === 0 ? null : {
+      passed,
+      failed,
+      skipped: 0,
+      duration: Date.now() - start,
+      assertions,
+      runAt: new Date(),
+    },
+    invariantResults,
   };
 }
 
@@ -291,23 +319,31 @@ export async function runCertify(filePath: string, flags: CLIFlags): Promise<voi
       testAssertions,
     };
 
-    // Run tests unless --skip-tests is set
+    // Run tests unless --skip-tests is set. Invariants run alongside tests on
+    // the same block result; a block may declare invariants without tests.
+    const declaredInvariants: string[] = Array.isArray(b.invariants) ? b.invariants : [];
     let testResults: TestResultSummary | null = null;
+    let invariantResults: InvariantResult[] = [];
     const hasConnection = !!flags.connection || !!projectConfig.defaultConnection;
     if (flags.skipTests && testAssertions.length > 0) {
       testResults = skippedTestSummary(testAssertions);
-    } else if (testAssertions.length > 0) {
+    } else if (testAssertions.length > 0 || declaredInvariants.length > 0) {
       if (!hasConnection) {
         if (flags.format !== 'json') {
           console.log(`\n  Block: "${record.name}"`);
-          console.log('  ⚠ Tests skipped: no database connection. Add defaultConnection to dql.config.json or use --connection.');
+          const what = testAssertions.length > 0 && declaredInvariants.length > 0
+            ? 'Tests and invariants'
+            : testAssertions.length > 0 ? 'Tests' : 'Invariants';
+          console.log(`  ⚠ ${what} skipped: no database connection. Add defaultConnection to dql.config.json or use --connection.`);
         }
       } else {
-        testResults = await runBlockTests(b, source, flags, projectConfig);
+        const outcome = await runBlockTests(b, source, flags, projectConfig);
+        testResults = outcome.testResults;
+        invariantResults = outcome.invariantResults;
       }
     }
 
-    const result = certifier.evaluate(record, testResults ?? undefined);
+    const result = certifier.evaluate(record, testResults ?? undefined, { invariantResults });
     const blockDataLexDiagnostics = datalexDiagnostics.filter((diag) =>
       diag.message.includes(`Block "${record.name}"`) || !diag.message.startsWith('Block "'),
     );
@@ -325,7 +361,7 @@ export async function runCertify(filePath: string, flags: CLIFlags): Promise<voi
     }
 
     if (flags.format === 'json') {
-      console.log(JSON.stringify({ ...result, testResults, datalexDiagnostics: blockDataLexDiagnostics }, null, 2));
+      console.log(JSON.stringify({ ...result, testResults, invariantResults, datalexDiagnostics: blockDataLexDiagnostics }, null, 2));
       continue;
     }
 
@@ -345,6 +381,21 @@ export async function runCertify(filePath: string, flags: CLIFlags): Promise<voi
           console.log(`    ✓ ${a.name}${actual}`);
         } else {
           console.log(`    ✗ ${a.name}${a.error ? ` — ${a.error}` : ''}`);
+          anyFailed = true;
+        }
+      }
+    }
+
+    // Print invariant results
+    if (invariantResults.length > 0) {
+      console.log(`\n  Invariants (${invariantResults.length}):`);
+      for (const inv of invariantResults) {
+        if (inv.uncheckable) {
+          console.log(`    ⚠ ${inv.expr} — ${inv.detail}`);
+        } else if (inv.passed) {
+          console.log(`    ✓ ${inv.expr}`);
+        } else {
+          console.log(`    ✗ ${inv.expr} — ${inv.detail}`);
           anyFailed = true;
         }
       }

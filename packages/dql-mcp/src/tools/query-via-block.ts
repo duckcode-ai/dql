@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
+import type { InvariantResult } from '@duckcodeailabs/dql-governance';
 import type { DQLContext } from '../context.js';
 
 export const queryViaBlockInput = {
@@ -88,14 +89,30 @@ export async function queryViaBlock(
       rows?: unknown[];
       executionTime?: number;
     };
+    invariantResults?: InvariantResult[];
+    invariantViolation?: boolean;
     error?: string;
   };
   if (payload.error) return { error: payload.error };
   const rows = payload.result?.rows ?? [];
 
+  // Invariant enforcement: the runtime evaluates the block's declared
+  // invariants against this run's result. A real violation downgrades the
+  // trust label even though the block is certified — "certified" means the
+  // logic was reviewed, not that today's data honors every stated guarantee.
+  const invariantResults = payload.invariantResults ?? [];
+  const invariantViolation = Boolean(payload.invariantViolation);
+  const declaredInvariants = block.invariants ?? [];
+  const trustLabel = invariantViolation ? 'Certified · invariant violated' : 'Certified';
+
   return {
     block: args.name,
     blockPath: block.filePath,
+    trustLabel,
+    invariantViolation,
+    ...(declaredInvariants.length > 0 || invariantResults.length > 0
+      ? { invariantResults }
+      : {}),
     rowCount: rows.length,
     durationMs: payload.result?.executionTime ?? null,
     columns: payload.result?.columns ?? [],

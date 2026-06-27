@@ -10,7 +10,9 @@ import {
   createDqlGenerationSessionForProject,
   createSemanticBuilderBlock,
   discoverDbtProfileConnections,
+  evaluateBlockInvariants,
   extractAgentValueSearchTerms,
+  extractBlockInvariants,
   formatLocalQueryRuntimeError,
   getConnectorInstallStatuses,
   loadProjectConfig,
@@ -1543,5 +1545,64 @@ SELECT @metric(missing_metric)
 
     expect(validation.valid).toBe(false);
     expect(validation.diagnostics.some((item) => item.code === 'semantic_ref' && item.message.includes('missing_metric'))).toBe(true);
+  });
+});
+
+describe('block invariant evaluation (run-time wiring)', () => {
+  const blockWithInvariants = `block "Approval Rate" {
+  domain = "ops"
+  type = "custom"
+  description = "Approval rate."
+  owner = "ops@example.com"
+  query = """SELECT 1"""
+  invariants = ["approval_rate_pct <= 100", "arr >= 0"]
+}`;
+
+  it('extracts declared invariants from block source', () => {
+    expect(extractBlockInvariants(blockWithInvariants)).toEqual([
+      'approval_rate_pct <= 100',
+      'arr >= 0',
+    ]);
+  });
+
+  it('returns an empty array for a block with no invariants', () => {
+    const source = `block "Plain" {
+  domain = "ops"
+  type = "custom"
+  description = ""
+  owner = ""
+  query = """SELECT 1"""
+}`;
+    expect(extractBlockInvariants(source)).toEqual([]);
+  });
+
+  it('returns null for blocks without invariants so the run output is unchanged', () => {
+    const source = `block "Plain" {
+  domain = "ops"
+  type = "custom"
+  description = ""
+  owner = ""
+  query = """SELECT 1"""
+}`;
+    expect(evaluateBlockInvariants(source, { columns: ['x'], rows: [{ x: 1 }] })).toBeNull();
+  });
+
+  it('passes when the result honors every invariant', () => {
+    const out = evaluateBlockInvariants(blockWithInvariants, {
+      columns: ['approval_rate_pct', 'arr'],
+      rows: [{ approval_rate_pct: 80, arr: 1000 }],
+    });
+    expect(out).not.toBeNull();
+    expect(out!.invariantViolation).toBe(false);
+    expect(out!.invariantResults.every((entry) => entry.passed)).toBe(true);
+  });
+
+  it('flags a violation when the result breaks an invariant', () => {
+    const out = evaluateBlockInvariants(blockWithInvariants, {
+      columns: ['approval_rate_pct', 'arr'],
+      rows: [{ approval_rate_pct: 137, arr: 1000 }],
+    });
+    expect(out!.invariantViolation).toBe(true);
+    expect(out!.invariantResults.find((entry) => entry.expr === 'approval_rate_pct <= 100')?.passed).toBe(false);
   });
 });
