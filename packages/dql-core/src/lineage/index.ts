@@ -85,3 +85,19 @@ export {
   type DerivationFocusBlock,
   type BuildDerivationWalkInput,
 } from './derivation.js';
+
+export {
+  classifyBlockChange,
+  changedBlocksFromDiff,
+  computeImpact,
+  computeImpactFromDiff,
+  renderImpactText,
+  type ChangedBlock,
+  type SemanticVerdict,
+  type ImpactReport,
+  type ImpactedNode,
+  type CrossDomainImpact,
+  type DomainTrustDelta,
+  type RecertItem,
+  type ComputeImpactOptions,
+} from './impact.js';

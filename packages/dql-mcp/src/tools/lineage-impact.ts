@@ -1,5 +1,10 @@
 import { z } from 'zod';
-import { queryLineage, queryCompleteLineagePaths } from '@duckcodeailabs/dql-core';
+import {
+  queryLineage,
+  queryCompleteLineagePaths,
+  computeImpact,
+  type ChangedBlock,
+} from '@duckcodeailabs/dql-core';
 import type { DQLContext } from '../context.js';
 
 export const lineageImpactInput = {
@@ -10,6 +15,21 @@ export const lineageImpactInput = {
     .boolean()
     .optional()
     .describe('When true, include full source→leaf paths (slower on large graphs).'),
+  recert: z
+    .boolean()
+    .optional()
+    .describe(
+      'When true, treat `focus` as a changed block and return the re-cert impact: ' +
+        'full transitive downstream, invalidated cross-domain edges, domainTrust delta, ' +
+        'and the certified artifacts that require re-certification.',
+    ),
+  nonSemantic: z
+    .boolean()
+    .optional()
+    .describe(
+      'When true with `recert`, treats the change as non-semantic (description/comment/tag only) ' +
+        'so no re-cert is required. Default false (conservative: assume semantic).',
+    ),
 };
 
 export function lineageImpact(
@@ -19,6 +39,8 @@ export function lineageImpact(
     upstreamDepth?: number;
     downstreamDepth?: number;
     paths?: boolean;
+    recert?: boolean;
+    nonSemantic?: boolean;
   },
 ) {
   const graph = ctx.lineageGraph;
@@ -47,6 +69,32 @@ export function lineageImpact(
       response.downstreamPaths = paths.downstreamPaths.map(formatPath);
       response.layerSummary = paths.layerSummary;
     }
+  }
+
+  // Re-cert impact: treat the focal block as changed and compute the
+  // downstream invalidation + required re-cert list. Mirrors the
+  // `dql diff --impact` CLI gate, surfaced structurally for agents.
+  if (args.recert) {
+    const blockName =
+      result.focalNode.type === 'block'
+        ? result.focalNode.name
+        : result.focalNode.id.replace(/^block:/, '');
+    const changed: ChangedBlock = {
+      name: blockName,
+      verdict: args.nonSemantic ? 'non-semantic' : 'semantic',
+      changedFields: [],
+      structural: false,
+    };
+    const impact = computeImpact(graph, [changed]);
+    response.impact = {
+      changedBlocks: impact.changedBlocks,
+      semanticChanges: impact.semanticChanges,
+      downstream: impact.downstream,
+      crossDomainImpacts: impact.crossDomainImpacts,
+      requiresRecert: impact.requiresRecert,
+      domainTrustDelta: impact.domainTrustDelta,
+      hasCertifiedInvalidation: impact.hasCertifiedInvalidation,
+    };
   }
 
   return response;

@@ -55,6 +55,8 @@ export interface CLIFlags {
   minRefusal?: number;
   /** `dql eval --no-examples` — skip manifest block examples, score yaml cases only. */
   noExamples?: boolean;
+  /** `dql diff --impact` — compute downstream impact + re-cert gate for changed blocks. */
+  impact?: boolean;
 }
 
 export interface ParsedArgs {
@@ -182,6 +184,8 @@ export function parseArgs(argv: string[]): ParsedArgs {
       if (Number.isFinite(value) && value >= 0 && value <= 1) flags.minRefusal = value;
     } else if (arg === '--no-examples') {
       flags.noExamples = true;
+    } else if (arg === '--impact') {
+      flags.impact = true;
     } else if (!command) {
       command = arg;
     } else if (!file) {
