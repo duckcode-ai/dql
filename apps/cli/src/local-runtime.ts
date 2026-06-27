@@ -73,6 +73,7 @@ import {
   ensureDefaultMemoryFiles,
   ensureMetadataCatalogFresh,
   propose,
+  proposePlan,
   recordQueryRun,
   recordRuntimeSchemaSnapshot,
   type AgentAnswer,
@@ -84,6 +85,8 @@ import {
   type KGNode,
   type ProposeSummary,
   type ProposalResult,
+  type ProposePlan,
+  type ProposeConfigInput,
 } from '@duckcodeailabs/dql-agent';
 import { handleAppsApi, recommendVisualization } from './apps-api.js';
 import {
@@ -166,6 +169,8 @@ export interface ProjectConfig {
     theme?: string;
     open?: boolean;
   };
+  /** Optional `dql propose` conventions (classifier + bounded selection). */
+  propose?: ProposeConfigInput;
 }
 
 export function resolveProjectSemanticConfig(
@@ -1530,6 +1535,82 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
         const readiness = buildProposeReadiness(projectRoot, loadProjectConfig(projectRoot), { owner, limit });
         res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
         res.end(serializeJSON(readiness));
+      } catch (error) {
+        res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({ error: error instanceof Error ? error.message : String(error) }));
+      }
+      return;
+    }
+
+    // Deterministic PLAN only (classify → plan). Writes NOTHING. Same data the
+    // readiness endpoint embeds, exposed standalone for the approve gate.
+    if (req.method === 'POST' && path === '/api/propose/plan') {
+      try {
+        const readiness = buildProposeReadiness(projectRoot, loadProjectConfig(projectRoot));
+        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON(readiness.ready ? readiness.plan : { ready: false, reason: readiness.reason }));
+      } catch (error) {
+        res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({ error: error instanceof Error ? error.message : String(error) }));
+      }
+      return;
+    }
+
+    // Materialize drafts for an APPROVED scope { slugs } (or { domains }).
+    // This is the only propose endpoint that writes — and only for the approved,
+    // business-only selection. Nothing is ever certified.
+    if (req.method === 'POST' && path === '/api/propose/generate') {
+      try {
+        const body = (await readJSON(req).catch(() => ({}))) as {
+          slugs?: unknown;
+          domains?: unknown;
+          owner?: unknown;
+        };
+        const config = loadProjectConfig(projectRoot);
+        let slugs = Array.isArray(body?.slugs)
+          ? body.slugs.filter((s): s is string => typeof s === 'string')
+          : [];
+        // { domains } → resolve to the plan's slugs for those domains.
+        if (slugs.length === 0 && Array.isArray(body?.domains)) {
+          const wanted = new Set(body.domains.filter((d): d is string => typeof d === 'string'));
+          const readiness = buildProposeReadiness(projectRoot, config);
+          slugs = readiness.ready
+            ? readiness.plan.domains
+                .filter((d) => wanted.has(d.name))
+                .flatMap((d) => d.candidates.map((c) => c.slug))
+            : [];
+        }
+        if (slugs.length === 0) {
+          res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
+          res.end(serializeJSON({ error: 'Provide a non-empty { slugs } or { domains } scope to generate.' }));
+          return;
+        }
+        const owner = typeof body?.owner === 'string' ? body.owner : undefined;
+        const result = generateProposeDrafts(projectRoot, slugs, config, { owner });
+        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON(result));
+      } catch (error) {
+        res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({ error: error instanceof Error ? error.message : String(error) }));
+      }
+      return;
+    }
+
+    // Materialize a single approved draft { slug } and return it. Convenience for
+    // the per-block "Review & Certify" affordance.
+    if (req.method === 'POST' && path === '/api/propose/draft') {
+      try {
+        const body = (await readJSON(req).catch(() => ({}))) as { slug?: unknown; owner?: unknown };
+        const slug = typeof body?.slug === 'string' ? body.slug : '';
+        if (!slug) {
+          res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
+          res.end(serializeJSON({ error: 'Provide { slug } to draft.' }));
+          return;
+        }
+        const owner = typeof body?.owner === 'string' ? body.owner : undefined;
+        const result = generateProposeDrafts(projectRoot, [slug], loadProjectConfig(projectRoot), { owner });
+        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON(result));
       } catch (error) {
         res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' });
         res.end(serializeJSON({ error: error instanceof Error ? error.message : String(error) }));
@@ -5707,9 +5788,15 @@ export interface ProposeReadinessResult {
   reason?: string;
   summary: {
     projectName?: string;
-    /** dbt models the engine scanned. */
+    /** dbt models the engine scanned (whole manifest). */
     modelsScanned: number;
-    /** Proposable items the engine ranked. */
+    /** Models classified `business` by the cascade. */
+    businessModels: number;
+    /** Models classified `plumbing` and excluded from generation. */
+    plumbingExcluded: number;
+    /** Semantic metrics discovered in the manifest. */
+    metricsFound: number;
+    /** Selected (bounded, business-only) proposals the engine ranked. */
     proposalsRanked: number;
     /** Drafts already written to the project (skipped on re-run). */
     draftsExisting: number;
@@ -5720,7 +5807,12 @@ export interface ProposeReadinessResult {
     /** Total certifier warnings across the queue. */
     warningTotal: number;
   };
-  /** Ranked DRAFT proposals (engine order preserved). */
+  /**
+   * Deterministic PLAN of the bounded, business-only seed (writes nothing).
+   * Drives the plan/approve gate in the Get Started flow.
+   */
+  plan: ProposePlan;
+  /** Ranked DRAFT proposals for the selected scope (engine order preserved). */
   proposals: ProposalResult[];
 }
 
@@ -5746,23 +5838,45 @@ export function buildProposeReadiness(
         'No dbt manifest found. Run `dbt parse` (or `dbt compile`) in your dbt project, then reopen Get Started.',
       summary: {
         modelsScanned: 0,
+        businessModels: 0,
+        plumbingExcluded: 0,
+        metricsFound: 0,
         proposalsRanked: 0,
         draftsExisting: 0,
         readyForReview: 0,
         blockingTotal: 0,
         warningTotal: 0,
       },
+      plan: {
+        totals: { modelsScanned: 0, businessModels: 0, plumbingExcluded: 0, metricsFound: 0 },
+        willGenerate: 0,
+        willSkip: 0,
+        domains: [],
+        config: {
+          businessLayers: [],
+          excludeLayers: [],
+          maxPerDomain: 0,
+          minScore: 0,
+          aiEnrichment: 'auto',
+        },
+      },
       proposals: [],
     };
   }
 
-  // dryRun: rank + certify only. Never writes drafts from a readiness preview.
+  const proposeConfig: ProposeConfigInput | undefined = projectConfig.propose;
+
+  // PLAN: deterministic, business-only, bounded. Writes nothing.
+  const plan: ProposePlan = proposePlan(projectRoot, manifestPath, { config: proposeConfig });
+
+  // dryRun: rank + certify the selected scope only. Never writes from a preview.
   const summary: ProposeSummary = propose({
     projectRoot,
     dbtManifestPath: manifestPath,
     owner: options.owner || undefined,
     limit: options.limit,
     dryRun: true,
+    config: proposeConfig,
   });
 
   let readyForReview = 0;
@@ -5779,6 +5893,9 @@ export function buildProposeReadiness(
     summary: {
       projectName: summary.projectName,
       modelsScanned: summary.modelsScanned,
+      businessModels: summary.businessModels,
+      plumbingExcluded: summary.plumbingExcluded,
+      metricsFound: summary.metricsFound,
       proposalsRanked: summary.proposalsRanked,
       // In dryRun the engine marks already-present blocks as skipped.
       draftsExisting: summary.draftsSkipped,
@@ -5786,6 +5903,52 @@ export function buildProposeReadiness(
       blockingTotal,
       warningTotal,
     },
+    plan,
+    proposals: summary.proposals,
+  };
+}
+
+/**
+ * Materialize drafts for an APPROVED scope (selected slugs / domains). Reuses
+ * the propose engine's `onlySlugs` path + the draft writer. Plumbing is never
+ * generated even if an approved slug names a plumbing model. Returns the written
+ * summary so the caller can route into the per-block review flow.
+ */
+export interface ProposeGenerateResult {
+  ready: boolean;
+  reason?: string;
+  draftsWritten: number;
+  draftsSkipped: number;
+  proposals: ProposalResult[];
+}
+
+export function generateProposeDrafts(
+  projectRoot: string,
+  slugs: string[],
+  projectConfig: ProjectConfig = loadProjectConfig(projectRoot),
+  options: { owner?: string } = {},
+): ProposeGenerateResult {
+  const manifestPath = resolveDbtManifestPath(projectRoot, projectConfig);
+  if (!manifestPath) {
+    return {
+      ready: false,
+      reason: 'No dbt manifest found. Run `dbt parse` (or `dbt compile`) first.',
+      draftsWritten: 0,
+      draftsSkipped: 0,
+      proposals: [],
+    };
+  }
+  const summary = propose({
+    projectRoot,
+    dbtManifestPath: manifestPath,
+    owner: options.owner || undefined,
+    config: projectConfig.propose,
+    onlySlugs: slugs,
+  });
+  return {
+    ready: true,
+    draftsWritten: summary.draftsWritten,
+    draftsSkipped: summary.draftsSkipped,
     proposals: summary.proposals,
   };
 }

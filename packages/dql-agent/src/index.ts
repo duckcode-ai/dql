@@ -149,10 +149,15 @@ export {
 } from "./metadata/drafts.js";
 export {
   propose,
+  proposePlan,
   loadDbtArtifacts,
   upsertProposedDraft,
   renderProposedDraft,
   blockSlug,
+  resolveProposeConfig,
+  DEFAULT_PROPOSE_CONFIG,
+  classifyModel,
+  resolveDomain,
 } from "./propose/index.js";
 export type {
   ProposeOptions,
@@ -161,6 +166,14 @@ export type {
   ProposalInference,
   ProposalRanking,
   ProposedPattern,
+  ProposePlan,
+  ProposePlanOptions,
+  ProposePlanDomain,
+  ProposePlanCandidate,
+  ProposeConfig,
+  ProposeConfigInput,
+  Classification,
+  ClassificationResult,
   ProposedDraftRecord,
   WrittenDraft,
   DbtArtifacts,

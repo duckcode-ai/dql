@@ -31,6 +31,16 @@ import {
   blockSlug,
   type ProposedDraftRecord,
 } from './write-draft.js';
+import {
+  classifyModel,
+  type Classification,
+  type ClassifierContext,
+} from './classify.js';
+import {
+  resolveProposeConfig,
+  type ProposeConfig,
+  type ProposeConfigInput,
+} from './config.js';
 
 export interface ProposeOptions {
   projectRoot: string;
@@ -52,6 +62,19 @@ export interface ProposeOptions {
    * Injectable for tests.
    */
   existingBlockSlugs?: Set<string>;
+  /**
+   * Optional `propose` config block (from `dql.config.json`). Refines the
+   * classifier conventions, bounded selection, and AI-enrichment toggle.
+   * Defaults apply for every field when omitted.
+   */
+  config?: ProposeConfigInput | null;
+  /**
+   * When provided, restrict generation to exactly these block slugs (the human
+   * "approved scope"). Pass 1 classification still scans all models; only the
+   * selected, approved slugs are inferred + certified + written. Reuses the
+   * same bounded-selection path otherwise.
+   */
+  onlySlugs?: string[];
 }
 
 export type ProposedPattern =
@@ -87,6 +110,12 @@ export interface ProposalResult {
   model: string;
   slug: string;
   domain: string;
+  /** Deterministic business-layer classification (business | plumbing | niche). */
+  classification: Classification;
+  /** Human-readable signals that drove the classification + selection. */
+  evidence: string[];
+  /** Owner derived from dbt meta, if present. */
+  owner?: string;
   inference: ProposalInference;
   ranking: ProposalRanking;
   /** Path written (relative to projectRoot), or undefined when skipped/dry-run. */
@@ -104,25 +133,23 @@ export interface ProposalResult {
 export interface ProposeSummary {
   projectName?: string;
   modelsScanned: number;
+  /** Models classified `business` by the cascade. */
+  businessModels: number;
+  /** Models classified `plumbing` and excluded from generation. */
+  plumbingExcluded: number;
+  /** Semantic metrics discovered in the manifest. */
+  metricsFound: number;
   proposalsRanked: number;
   draftsWritten: number;
   draftsSkipped: number;
+  /** Resolved propose config used for this run. */
+  config: ProposeConfig;
   proposals: ProposalResult[];
 }
 
 const TIME_COLUMN_RE = /(^|_)(date|day|week|month|quarter|year|period|ts|time|timestamp|datetime|created_at|updated_at)($|_)/i;
 const ID_COLUMN_RE = /(_id|_key|_pk|_sk)$/i;
 const MEASURE_COLUMN_RE = /(amount|amt|total|count|qty|quantity|revenue|cost|price|sum|avg|score|value|balance|rate|pct|percent)/i;
-
-/** Slugify a domain label to the folder-safe form draft writers expect. */
-function normalizeDomain(value: string | undefined): string {
-  const safe = (value ?? '')
-    .trim()
-    .toLowerCase()
-    .replace(/[^a-z0-9/_-]+/g, '-')
-    .replace(/^[-/]+|[-/]+$/g, '');
-  return safe || 'uncategorized';
-}
 
 /** Choose the effective columns for a model: catalog (typed) ∪ manifest YAML. */
 function effectiveColumns(model: DbtModelNode, artifacts: DbtArtifacts): DbtColumn[] {
@@ -274,8 +301,13 @@ function buildInference(
 }
 
 /**
- * Score a model by demand: downstream fan-out (primary), exposure linkage, and
- * run frequency. Staging/seed-tier models score lower so marts surface first.
+ * Score a model by DEMAND only: downstream fan-out (primary), exposure linkage,
+ * and run frequency. Layer exclusion is now the classifier's job (plumbing is
+ * dropped, not penalized), so the score is a non-negative demand signal used to
+ * order + cap the selection — folder/name no longer *penalize* the score, which
+ * would otherwise push a legitimately-business model below `minScore`. A small
+ * positive nudge for mart-style models keeps the most answer-shaped models on
+ * top within a domain.
  */
 function rankModel(
   model: DbtModelNode,
@@ -286,10 +318,8 @@ function rankModel(
   let score = fanOut * 10;
   if (exposureLinked) score += 50;
   score += Math.min(runCount, 20) * 2;
-  // Marts are the high-value answer surface; nudge them up, staging down.
+  // Marts/answer-surface models surface first within their domain (nudge only).
   if (model.folder === 'marts' || /^(fct_|dim_|mart_|rpt_)/i.test(model.name)) score += 15;
-  if (model.folder === 'staging' || /^stg_/i.test(model.name)) score -= 20;
-  if (model.folder === 'intermediate' || /^int_/i.test(model.name)) score -= 10;
   return { fanOut, exposureLinked, runCount, score };
 }
 
@@ -358,12 +388,41 @@ function deriveExistingSlugs(projectRoot: string, slugs: string[]): Set<string> 
 }
 
 /**
- * Run the proposal engine end to end: load artifacts, infer, rank, write drafts,
- * and store Certifier verdicts. Returns a deterministic, ranked summary.
+ * A model after the CHEAP pass: classified, domain-assigned, demand-scored.
+ * No column inference and no Certifier yet — those are deferred to the bounded
+ * selection so a 10k-model manifest costs O(N) cheap work, not O(N) certifies.
  */
-export function propose(options: ProposeOptions): ProposeSummary {
-  const { projectRoot, dbtManifestPath } = options;
-  const owner = options.owner ?? '';
+interface ScoredCandidate {
+  model: DbtModelNode;
+  slug: string;
+  domain: string;
+  owner?: string;
+  classification: Classification;
+  evidence: string[];
+  ranking: ProposalRanking;
+}
+
+/** Result of the cheap scan: candidates + the shared signal maps + totals. */
+interface ScanResult {
+  artifacts: DbtArtifacts;
+  config: ProposeConfig;
+  metricModels: Set<string>;
+  scored: ScoredCandidate[];
+  totals: {
+    modelsScanned: number;
+    businessModels: number;
+    plumbingExcluded: number;
+    nicheExcluded: number;
+    metricsFound: number;
+  };
+}
+
+/**
+ * PASS 1 (cheap, ALL models, O(N), NO Certifier, NO column inference): load
+ * artifacts, build the fan-out / exposure / semantic signal maps, then classify
+ * + assign domain + score every model. Deterministic and reproducible.
+ */
+function scanModels(dbtManifestPath: string, config: ProposeConfig): ScanResult {
   const artifacts = loadDbtArtifacts(dbtManifestPath);
 
   // Downstream fan-out: count edges pointing *into* each model.
@@ -378,37 +437,144 @@ export function propose(options: ProposeOptions): ProposeSummary {
   for (const exposure of artifacts.exposures) {
     for (const dep of exposure.dependsOn) exposureLinked.add(dep);
   }
-  // Models bound to a semantic metric → eligible for metric_wrapper.
+  // Models bound to a semantic metric → business + eligible for metric_wrapper.
   const metricModels = new Set<string>();
   for (const metric of artifacts.semanticMetrics) {
     if (metric.model) metricModels.add(metric.model.toLowerCase());
   }
 
-  const certifier = new Certifier();
-  const proposals: ProposalResult[] = [];
+  const classifierCtx: ClassifierContext = { exposureLinked, metricModels, config };
+
+  let businessModels = 0;
+  let plumbingExcluded = 0;
+  let nicheExcluded = 0;
+  const scored: ScoredCandidate[] = [];
 
   for (const model of artifacts.models) {
-    const slug = blockSlug(model.name);
-    const domain = normalizeDomain(model.domainHint);
-    const inference = buildInference(model, artifacts, metricModels.has(model.name.toLowerCase()));
+    const { classification, domain, owner, evidence } = classifyModel(model, classifierCtx);
+    if (classification === 'business') businessModels++;
+    else if (classification === 'plumbing') plumbingExcluded++;
+    else nicheExcluded++;
+
     const ranking = rankModel(
       model,
       fanOut.get(model.uniqueId) ?? 0,
       exposureLinked.has(model.uniqueId),
       artifacts.runCounts.get(model.uniqueId) ?? 0,
     );
+    scored.push({
+      model,
+      slug: blockSlug(model.name),
+      domain,
+      owner,
+      classification,
+      evidence: enrichEvidence(model, ranking, evidence),
+      ranking,
+    });
+  }
+
+  return {
+    artifacts,
+    config,
+    metricModels,
+    scored,
+    totals: {
+      modelsScanned: artifacts.models.length,
+      businessModels,
+      plumbingExcluded,
+      nicheExcluded,
+      metricsFound: artifacts.semanticMetrics.length,
+    },
+  };
+}
+
+/** Add demand signals to the evidence chain for the plan view. */
+function enrichEvidence(model: DbtModelNode, ranking: ProposalRanking, evidence: string[]): string[] {
+  const out = [...evidence];
+  if (ranking.fanOut > 0) out.push(`feeds ${ranking.fanOut} downstream model${ranking.fanOut === 1 ? '' : 's'}`);
+  if (ranking.runCount > 0) out.push(`${ranking.runCount} recorded run${ranking.runCount === 1 ? '' : 's'}`);
+  return out;
+}
+
+/**
+ * Select the bounded seed deterministically: business-classified, score ≥
+ * minScore, then the top `maxPerDomain` per domain. `niche`/`plumbing` are never
+ * selected. When `onlySlugs` is provided, restrict to that approved scope (still
+ * business-only — plumbing is never generated even if explicitly requested).
+ * Returns selected candidates in stable rank order (score desc, fan-out desc,
+ * slug asc) across all domains.
+ */
+function selectBounded(scan: ScanResult, onlySlugs?: string[]): ScoredCandidate[] {
+  const approved = onlySlugs ? new Set(onlySlugs) : undefined;
+  const eligible = scan.scored.filter(
+    (c) =>
+      c.classification === 'business' &&
+      c.ranking.score >= scan.config.minScore &&
+      (!approved || approved.has(c.slug)),
+  );
+
+  // Deterministic order within each domain bucket.
+  const ordered = [...eligible].sort(compareCandidates);
+  const perDomain = new Map<string, number>();
+  const selected: ScoredCandidate[] = [];
+  for (const candidate of ordered) {
+    const count = perDomain.get(candidate.domain) ?? 0;
+    if (count >= scan.config.maxPerDomain) continue;
+    perDomain.set(candidate.domain, count + 1);
+    selected.push(candidate);
+  }
+  return selected;
+}
+
+function compareCandidates(a: ScoredCandidate, b: ScoredCandidate): number {
+  if (b.ranking.score !== a.ranking.score) return b.ranking.score - a.ranking.score;
+  if (b.ranking.fanOut !== a.ranking.fanOut) return b.ranking.fanOut - a.ranking.fanOut;
+  return a.slug.localeCompare(b.slug);
+}
+
+/**
+ * Run the proposal engine end to end: load artifacts, classify (cheap pass),
+ * select a bounded business-only seed, then — for the selection ONLY — infer
+ * grain/pattern/outputs/invariants and run the Certifier, write drafts, and
+ * store verdicts. Returns a deterministic, ranked summary.
+ *
+ * Plumbing/niche models are EXCLUDED from generation (never written), and the
+ * expensive Pass-2 work (inference + Certifier) runs only on the bounded
+ * selection — at 10k models this is hundreds of inferences, not thousands.
+ */
+export function propose(options: ProposeOptions): ProposeSummary {
+  const { projectRoot, dbtManifestPath } = options;
+  const owner = options.owner ?? '';
+  const config = resolveProposeConfig(options.config);
+
+  // ── Pass 1: cheap classify + score over ALL models ───────────────────────
+  const scan = scanModels(dbtManifestPath, config);
+
+  // Bounded, business-only selection (honors onlySlugs / approved scope).
+  const selection = selectBounded(scan, options.onlySlugs);
+
+  // ── Pass 2: expensive inference + Certifier on the SELECTION only ─────────
+  const certifier = new Certifier();
+  const proposals: ProposalResult[] = [];
+
+  for (const candidate of selection) {
+    const { model, slug, domain, owner: metaOwner, classification, evidence } = candidate;
+    const inference = buildInference(model, scan.artifacts, scan.metricModels.has(model.name.toLowerCase()));
 
     // Build the would-be draft path (matches the draft-writer's resolution).
     const draftRelPath = resolveDraftRelPath(projectRoot, domain, slug);
-    const record = toBlockRecord(slug, domain, owner, model, inference, draftRelPath);
+    const record = toBlockRecord(slug, domain, owner || metaOwner || '', model, inference, draftRelPath);
     const verdict = certifier.evaluate(record);
 
     proposals.push({
       model: model.name,
       slug,
       domain,
+      classification,
+      evidence,
+      owner: metaOwner,
       inference,
-      ranking,
+      ranking: candidate.ranking,
       certification: {
         certified: false,
         errors: verdict.errors,
@@ -447,11 +613,11 @@ export function propose(options: ProposeOptions): ProposeSummary {
       continue;
     }
 
-    const model = artifacts.models.find((m) => m.name === proposal.model)!;
+    const model = scan.artifacts.models.find((m) => m.name === proposal.model)!;
     const draftRecord: ProposedDraftRecord = {
       slug: proposal.slug,
       domain: proposal.domain,
-      owner,
+      owner: owner || proposal.owner || '',
       description:
         model.description?.trim() ||
         `Draft governance block proposed from dbt model ${proposal.model}.`,
@@ -478,13 +644,136 @@ export function propose(options: ProposeOptions): ProposeSummary {
   }
 
   return {
-    projectName: artifacts.projectName,
-    modelsScanned: artifacts.models.length,
+    projectName: scan.artifacts.projectName,
+    modelsScanned: scan.totals.modelsScanned,
+    businessModels: scan.totals.businessModels,
+    plumbingExcluded: scan.totals.plumbingExcluded,
+    metricsFound: scan.totals.metricsFound,
     proposalsRanked: proposals.length,
     draftsWritten,
     draftsSkipped,
+    config,
     proposals,
   };
+}
+
+// ─── Deterministic PLAN (classify → plan → approve) ─────────────────────────
+
+export interface ProposePlanCandidate {
+  model: string;
+  slug: string;
+  score: number;
+  classification: Classification;
+  owner?: string;
+  /** Human-readable signals (e.g. "feeds 2 exposures", "marts/ folder"). */
+  evidence: string[];
+  /** Optional cheap-pass grain/pattern hints (may be omitted in the plan). */
+  grain?: string;
+  pattern?: ProposedPattern;
+}
+
+export interface ProposePlanDomain {
+  name: string;
+  owner?: string;
+  modelCount: number;
+  candidates: ProposePlanCandidate[];
+}
+
+export interface ProposePlan {
+  totals: {
+    modelsScanned: number;
+    businessModels: number;
+    plumbingExcluded: number;
+    metricsFound: number;
+  };
+  willGenerate: number;
+  willSkip: number;
+  domains: ProposePlanDomain[];
+  /** Resolved propose config used to build the plan. */
+  config: ProposeConfig;
+}
+
+export interface ProposePlanOptions {
+  config?: ProposeConfigInput | null;
+  /** When true, omit cheap grain/pattern hints (pure classify-only plan). */
+  skipHints?: boolean;
+}
+
+/**
+ * Build a deterministic PLAN of what `propose` WOULD generate — and writes
+ * NOTHING. Reuses the cheap Pass-1 scan + bounded selection so the plan is an
+ * exact preview of the generated scope. Grain/pattern hints are cheap and
+ * optional (folder/column heuristics, no Certifier). Same input → same plan.
+ */
+export function proposePlan(
+  projectRoot: string,
+  dbtManifestPath: string,
+  options: ProposePlanOptions = {},
+): ProposePlan {
+  void projectRoot; // reserved for future per-project overrides; plan writes nothing.
+  const config = resolveProposeConfig(options.config);
+  const scan = scanModels(dbtManifestPath, config);
+  const selection = selectBounded(scan);
+
+  // Group selection into domains (stable order: by domain name asc).
+  const byDomain = new Map<string, ScoredCandidate[]>();
+  for (const candidate of selection) {
+    const list = byDomain.get(candidate.domain) ?? [];
+    list.push(candidate);
+    byDomain.set(candidate.domain, list);
+  }
+
+  const domains: ProposePlanDomain[] = [...byDomain.entries()]
+    .sort(([a], [b]) => a.localeCompare(b))
+    .map(([name, candidates]) => {
+      const ordered = [...candidates].sort(compareCandidates);
+      const owner = ordered.find((c) => c.owner)?.owner;
+      return {
+        name,
+        owner,
+        modelCount: ordered.length,
+        candidates: ordered.map((c) => toPlanCandidate(c, scan, options.skipHints)),
+      };
+    });
+
+  return {
+    totals: {
+      modelsScanned: scan.totals.modelsScanned,
+      businessModels: scan.totals.businessModels,
+      plumbingExcluded: scan.totals.plumbingExcluded,
+      metricsFound: scan.totals.metricsFound,
+    },
+    willGenerate: selection.length,
+    // What we scanned but won't seed: everything that isn't in the bounded
+    // selection (plumbing + niche + business beyond the per-domain cap).
+    willSkip: scan.totals.modelsScanned - selection.length,
+    domains,
+    config,
+  };
+}
+
+/** Cheap plan candidate. Grain/pattern are optional, derived without Certifier. */
+function toPlanCandidate(
+  candidate: ScoredCandidate,
+  scan: ScanResult,
+  skipHints?: boolean,
+): ProposePlanCandidate {
+  const base: ProposePlanCandidate = {
+    model: candidate.model.name,
+    slug: candidate.slug,
+    score: candidate.ranking.score,
+    classification: candidate.classification,
+    owner: candidate.owner,
+    evidence: candidate.evidence,
+  };
+  if (skipHints) return base;
+
+  // Cheap hints: grain from columns + pattern from semantic/folder heuristics.
+  const columns = effectiveColumns(candidate.model, scan.artifacts);
+  const grain = inferGrain(candidate.model, columns);
+  const hasMetric = scan.metricModels.has(candidate.model.name.toLowerCase());
+  const pattern = inferPattern(candidate.model, columns, grain, hasMetric);
+  return { ...base, grain, pattern };
 }
 
 /** Mirror of the draft-writer's path resolution (for the certifier gitPath). */

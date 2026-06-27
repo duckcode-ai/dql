@@ -9,6 +9,8 @@ export interface CLIFlags {
   outDir: string;
   to?: string;
   dryRun?: boolean;
+  /** `dql propose --plan` — print the deterministic plan; write nothing. */
+  plan?: boolean;
   port: number | null;
   /** HTTP bind host. Defaults to 127.0.0.1; set to 0.0.0.0 inside containers. */
   host?: string | null;
@@ -119,6 +121,8 @@ export function parseArgs(argv: string[]): ParsedArgs {
       flags.to = argv[++i];
     } else if (arg === '--dry-run') {
       flags.dryRun = true;
+    } else if (arg === '--plan') {
+      flags.plan = true;
     } else if (arg === '--port' && i + 1 < argv.length) {
       const value = Number(argv[++i]);
       if (Number.isFinite(value) && value > 0) {

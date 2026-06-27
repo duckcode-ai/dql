@@ -341,6 +341,22 @@ interface ProjectConfig {
     /** Path to datalex-manifest.json, absolute or relative to projectRoot */
     manifestPath?: string;
   };
+  /**
+   * Optional `dql propose` conventions. Refines the convention-agnostic
+   * classifier + bounded selection. All fields are optional; defaults apply.
+   */
+  propose?: {
+    /** Folders/tags that mean business (default ["marts","core","reporting"]). */
+    businessLayers?: string[];
+    /** Folders/tags that mean plumbing (default ["staging","intermediate","base"]). */
+    excludeLayers?: string[];
+    /** Max candidates generated per domain (default 8). */
+    maxPerDomain?: number;
+    /** Minimum demand score a candidate needs to be selected (default 0). */
+    minScore?: number;
+    /** Optional AI enrichment toggle (default "auto"). */
+    aiEnrichment?: 'auto' | 'on' | 'off';
+  };
 }
 
 /**

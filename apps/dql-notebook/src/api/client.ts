@@ -34,7 +34,22 @@ import type {
   AppSummary,
   ActivePersona,
   ProposeReadiness,
+  ProposeGenerateResult,
 } from '../store/types';
+
+const EMPTY_PLAN = {
+  totals: { modelsScanned: 0, businessModels: 0, plumbingExcluded: 0, metricsFound: 0 },
+  willGenerate: 0,
+  willSkip: 0,
+  domains: [],
+  config: {
+    businessLayers: [],
+    excludeLayers: [],
+    maxPerDomain: 0,
+    minScore: 0,
+    aiEnrichment: 'auto' as const,
+  },
+};
 
 // ── Apps API types ───────────────────────────────────────────────────────
 
@@ -1389,12 +1404,42 @@ export const api = {
         reason: 'Unable to reach the propose engine. Is the local DQL server running?',
         summary: {
           modelsScanned: 0,
+          businessModels: 0,
+          plumbingExcluded: 0,
+          metricsFound: 0,
           proposalsRanked: 0,
           draftsExisting: 0,
           readyForReview: 0,
           blockingTotal: 0,
           warningTotal: 0,
         },
+        plan: EMPTY_PLAN,
+        proposals: [],
+      };
+    }
+  },
+
+  /**
+   * Materialize DRAFT blocks for an APPROVED scope (selected slugs / domains).
+   * The only propose call that writes — and only for the business-only selection
+   * the human approved. Nothing is ever certified.
+   */
+  async generateProposeDrafts(input: {
+    slugs?: string[];
+    domains?: string[];
+    owner?: string;
+  }): Promise<ProposeGenerateResult> {
+    try {
+      return await request<ProposeGenerateResult>('/api/propose/generate', {
+        method: 'POST',
+        body: JSON.stringify(input),
+      });
+    } catch (error) {
+      return {
+        ready: false,
+        reason: error instanceof Error ? error.message : 'Unable to reach the propose engine.',
+        draftsWritten: 0,
+        draftsSkipped: 0,
         proposals: [],
       };
     }

@@ -6,6 +6,7 @@ import {
   buildAgentSchemaContext,
   buildDbtStatus,
   buildProposeReadiness,
+  generateProposeDrafts,
   buildSemanticLayerDiagnostics,
   createBlockArtifacts,
   createDqlGenerationSessionForProject,
@@ -1754,9 +1755,18 @@ describe('buildProposeReadiness (/api/propose handler core)', () => {
 
     expect(result.ready).toBe(true);
     expect(result.summary.projectName).toBe('jaffle_shop');
+    // All 3 models are scanned, but staging is plumbing → only 2 business models
+    // are selected/ranked. The plan reflects the business-only scope.
     expect(result.summary.modelsScanned).toBe(3);
-    expect(result.summary.proposalsRanked).toBe(3);
-    expect(result.proposals).toHaveLength(3);
+    expect(result.summary.businessModels).toBe(2);
+    expect(result.summary.plumbingExcluded).toBe(1);
+    expect(result.summary.proposalsRanked).toBe(2);
+    expect(result.proposals).toHaveLength(2);
+    expect(result.proposals.every((p) => p.model !== 'stg_orders')).toBe(true);
+
+    // The PLAN is present, business-only, and bounded — and writes nothing.
+    expect(result.plan.willGenerate).toBe(2);
+    expect(result.plan.domains.flatMap((d) => d.candidates).map((c) => c.model)).not.toContain('stg_orders');
 
     // Every proposal is a DRAFT and carries a Certifier verdict; none certified.
     for (const proposal of result.proposals) {
@@ -1789,5 +1799,37 @@ describe('buildProposeReadiness (/api/propose handler core)', () => {
 
     // The readiness preview must never mutate the project with draft blocks.
     expect(existsSync(join(projectRoot, 'blocks', '_drafts'))).toBe(false);
+  });
+
+  it('generateProposeDrafts writes ONLY the approved scope (business-only)', () => {
+    const projectRoot = mkdtempSync(join(tmpdir(), 'dql-propose-generate-'));
+    tempDirs.push(projectRoot);
+    writeFileSync(join(projectRoot, 'dql.config.json'), JSON.stringify({ project: 'p' }), 'utf-8');
+    writeManifest(projectRoot);
+
+    const result = generateProposeDrafts(projectRoot, ['dim_customers'], undefined, { owner: 'me@example.com' });
+
+    expect(result.ready).toBe(true);
+    expect(result.draftsWritten).toBe(1);
+    expect(result.proposals.map((p) => p.model)).toEqual(['dim_customers']);
+    expect(existsSync(join(projectRoot, 'blocks', '_drafts', 'dim_customers.dql'))).toBe(true);
+    // The unselected business model and the plumbing model are not written.
+    expect(existsSync(join(projectRoot, 'blocks', '_drafts', 'fct_orders.dql'))).toBe(false);
+    expect(existsSync(join(projectRoot, 'blocks', '_drafts', 'stg_orders.dql'))).toBe(false);
+
+    const source = readFileSync(join(projectRoot, 'blocks', '_drafts', 'dim_customers.dql'), 'utf-8');
+    expect(source).toContain('status = "draft"');
+    expect(source).not.toContain('status = "certified"');
+  });
+
+  it('generateProposeDrafts never writes a plumbing model even if explicitly requested', () => {
+    const projectRoot = mkdtempSync(join(tmpdir(), 'dql-propose-generate-plumbing-'));
+    tempDirs.push(projectRoot);
+    writeFileSync(join(projectRoot, 'dql.config.json'), JSON.stringify({ project: 'p' }), 'utf-8');
+    writeManifest(projectRoot);
+
+    const result = generateProposeDrafts(projectRoot, ['stg_orders']);
+    expect(result.draftsWritten).toBe(0);
+    expect(existsSync(join(projectRoot, 'blocks', '_drafts', 'stg_orders.dql'))).toBe(false);
   });
 });

@@ -210,10 +210,15 @@ export interface ProposalRanking {
   score: number;
 }
 
+export type ProposeClassification = 'business' | 'plumbing' | 'niche';
+
 export interface ReadinessProposal {
   model: string;
   slug: string;
   domain: string;
+  classification?: ProposeClassification;
+  evidence?: string[];
+  owner?: string;
   inference: {
     pattern: string;
     grain?: string;
@@ -233,6 +238,9 @@ export interface ReadinessProposal {
 export interface ProposeReadinessSummary {
   projectName?: string;
   modelsScanned: number;
+  businessModels: number;
+  plumbingExcluded: number;
+  metricsFound: number;
   proposalsRanked: number;
   draftsExisting: number;
   readyForReview: number;
@@ -240,10 +248,61 @@ export interface ProposeReadinessSummary {
   warningTotal: number;
 }
 
+// ── Deterministic PLAN (classify → plan → approve) ─────────────────────────
+
+export interface ProposePlanCandidate {
+  model: string;
+  slug: string;
+  score: number;
+  classification: ProposeClassification;
+  owner?: string;
+  evidence: string[];
+  grain?: string;
+  pattern?: string;
+}
+
+export interface ProposePlanDomain {
+  name: string;
+  owner?: string;
+  modelCount: number;
+  candidates: ProposePlanCandidate[];
+}
+
+export interface ProposePlanConfig {
+  businessLayers: string[];
+  excludeLayers: string[];
+  maxPerDomain: number;
+  minScore: number;
+  aiEnrichment: 'auto' | 'on' | 'off';
+}
+
+export interface ProposePlan {
+  totals: {
+    modelsScanned: number;
+    businessModels: number;
+    plumbingExcluded: number;
+    metricsFound: number;
+  };
+  willGenerate: number;
+  willSkip: number;
+  domains: ProposePlanDomain[];
+  config: ProposePlanConfig;
+}
+
 export interface ProposeReadiness {
   ready: boolean;
   reason?: string;
   summary: ProposeReadinessSummary;
+  plan: ProposePlan;
+  proposals: ReadinessProposal[];
+}
+
+/** Result of materializing approved drafts via POST /api/propose/generate. */
+export interface ProposeGenerateResult {
+  ready: boolean;
+  reason?: string;
+  draftsWritten: number;
+  draftsSkipped: number;
   proposals: ReadinessProposal[];
 }
 

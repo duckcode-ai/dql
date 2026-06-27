@@ -12,6 +12,7 @@
  *   dql propose --dbt-manifest <path>       Explicit manifest.json path
  *   dql propose --owner <name>              Default owner stamped on drafts
  *   dql propose --limit <n>                 Cap drafts written this run
+ *   dql propose --plan                      Show the deterministic PLAN; write nothing
  *   dql propose --dry-run                   Rank only; write nothing
  *   dql propose --format json               Machine-readable output
  */
@@ -19,7 +20,7 @@
 import { existsSync } from 'node:fs';
 import { join, relative, resolve } from 'node:path';
 import { loadProjectConfig, resolveDbtManifestPath } from '@duckcodeailabs/dql-core';
-import { propose, type ProposeSummary } from '@duckcodeailabs/dql-agent';
+import { propose, proposePlan, type ProposeSummary, type ProposePlan } from '@duckcodeailabs/dql-agent';
 import type { CLIFlags } from '../args.js';
 
 export async function runPropose(
@@ -66,6 +67,29 @@ export async function runPropose(
     return;
   }
 
+  const cfg = loadProjectConfig(projectRoot);
+  const proposeConfig = cfg.propose;
+
+  // --plan: deterministic preview (classify → plan). Writes NOTHING.
+  const planOnly = Boolean(flags.plan) || rest.includes('--plan');
+  if (planOnly) {
+    let plan: ProposePlan;
+    try {
+      plan = proposePlan(projectRoot, resolved, { config: proposeConfig });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      console.error(`\n  ✗ Plan failed: ${msg}\n`);
+      process.exitCode = 1;
+      return;
+    }
+    if (flags.format === 'json') {
+      console.log(JSON.stringify(plan, null, 2));
+      return;
+    }
+    printPlan(plan);
+    return;
+  }
+
   let summary: ProposeSummary;
   try {
     summary = propose({
@@ -74,6 +98,7 @@ export async function runPropose(
       owner: flags.owner || undefined,
       limit,
       dryRun: Boolean(flags.dryRun),
+      config: proposeConfig,
     });
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
@@ -90,9 +115,10 @@ export async function runPropose(
   const dryRun = Boolean(flags.dryRun);
   console.log('\n  DQL Propose — drafts from dbt evidence');
   console.log('  ' + '='.repeat(50));
-  if (summary.projectName) console.log(`  dbt project:   ${summary.projectName}`);
+  if (summary.projectName) console.log(`  dbt project:    ${summary.projectName}`);
   console.log(`  Models scanned: ${summary.modelsScanned}`);
-  console.log(`  Ranked:         ${summary.proposalsRanked}`);
+  console.log(`  Business:       ${summary.businessModels}  (plumbing excluded: ${summary.plumbingExcluded}, metrics: ${summary.metricsFound})`);
+  console.log(`  Selected:       ${summary.proposalsRanked}  (≤ ${summary.config.maxPerDomain} per domain)`);
   console.log(`  Drafts ${dryRun ? 'to write' : 'written'}:  ${summary.draftsWritten}`);
   console.log(`  Skipped:        ${summary.draftsSkipped}`);
   console.log('');
@@ -118,5 +144,35 @@ export async function runPropose(
   console.log('');
   console.log('  Next: review the top drafts under blocks/_drafts (or domains/<d>/blocks/_drafts),');
   console.log('  then `dql certify --from-draft <path> --owner you@example.com` to promote.');
+  console.log('');
+}
+
+/** Pretty-print the deterministic PLAN (classify → plan, writes nothing). */
+function printPlan(plan: ProposePlan): void {
+  console.log('\n  DQL Propose — PLAN (nothing written)');
+  console.log('  ' + '='.repeat(50));
+  console.log(`  Models scanned:    ${plan.totals.modelsScanned}`);
+  console.log(`  Business models:   ${plan.totals.businessModels}`);
+  console.log(`  Plumbing excluded: ${plan.totals.plumbingExcluded}`);
+  console.log(`  Metrics found:     ${plan.totals.metricsFound}`);
+  console.log(`  Will generate:     ${plan.willGenerate}   (≤ ${plan.config.maxPerDomain} per domain)`);
+  console.log(`  Will skip:         ${plan.willSkip}`);
+  console.log('');
+  console.log('  Selective, business-only seed. Plumbing/niche models are excluded.');
+  console.log('  Approve the scope, then generate drafts for review (AI drafts, humans certify).');
+  console.log('');
+
+  for (const domain of plan.domains) {
+    const owner = domain.owner ? ` · owner ${domain.owner}` : '';
+    console.log(`  ▸ ${domain.name}  (${domain.modelCount})${owner}`);
+    for (const c of domain.candidates) {
+      const grain = c.grain ? ` · grain ${c.grain}` : '';
+      const pattern = c.pattern ? ` [${c.pattern}]` : '';
+      console.log(`    • ${c.model}${pattern}  score ${c.score}${grain}`);
+      if (c.evidence.length > 0) console.log(`      why: ${c.evidence.join('; ')}`);
+    }
+    console.log('');
+  }
+  console.log('  Run `dql propose` (without --plan) to write the drafts for this scope.');
   console.log('');
 }

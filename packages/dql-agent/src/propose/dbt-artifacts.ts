@@ -285,28 +285,37 @@ function loadSemantic(
   if (existsSync(semanticManifestPath)) {
     source = readJson(semanticManifestPath);
   }
-  // Fall back to semantic_models/metrics inlined in manifest.json.
-  const metricsRaw = asRecord(source?.metrics ?? manifest.metrics);
-  const semanticModelsRaw = asRecord(source?.semantic_models ?? manifest.semantic_models);
+  // `semantic_manifest.json` carries metrics/semantic_models as ARRAYS, while
+  // the inline `manifest.json` carries them as keyed RECORDS — normalize both to
+  // a flat list of nodes so the loader works on either source.
+  const metricsList = collectionValues(source?.metrics ?? manifest.metrics);
+  const semanticModelsList = collectionValues(source?.semantic_models ?? manifest.semantic_models);
 
-  // measure name -> model name, so a metric referencing a measure can resolve a model.
+  // measure name -> model name, so a metric referencing a measure can resolve a
+  // model. A semantic model's underlying dbt model is its `name`, or the alias
+  // in its `node_relation` (MetricFlow shape).
   const measureToModel = new Map<string, string>();
-  for (const raw of Object.values(semanticModelsRaw)) {
-    const model = asRecord(raw);
-    const modelName = firstString(model.name);
+  for (const raw of semanticModelsList) {
+    const semanticModel = asRecord(raw);
+    const modelName =
+      firstString(
+        asRecord(semanticModel.node_relation).alias,
+        semanticModel.name,
+      ) ?? undefined;
     if (!modelName) continue;
-    for (const measureRaw of Array.isArray(model.measures) ? model.measures : []) {
+    for (const measureRaw of Array.isArray(semanticModel.measures) ? semanticModel.measures : []) {
       const measureName = firstString(asRecord(measureRaw).name);
       if (measureName) measureToModel.set(measureName, modelName);
     }
   }
 
   const semanticMetrics: SemanticMetricRef[] = [];
-  for (const raw of Object.values(metricsRaw)) {
+  for (const raw of metricsList) {
     const metric = asRecord(raw);
     const name = firstString(metric.name);
     if (!name) continue;
     const typeParams = asRecord(metric.type_params);
+    // `type_params.measure` is sometimes a string, sometimes an object { name }.
     const measure = firstString(typeParams.measure, asRecord(typeParams.measure).name);
     semanticMetrics.push({
       name,
@@ -316,7 +325,14 @@ function loadSemantic(
   }
 
   return {
-    hasSemantic: semanticMetrics.length > 0 || Object.keys(semanticModelsRaw).length > 0,
+    hasSemantic: semanticMetrics.length > 0 || semanticModelsList.length > 0,
     semanticMetrics,
   };
+}
+
+/** Flatten a metrics/semantic_models collection that may be an array OR a record. */
+function collectionValues(value: unknown): unknown[] {
+  if (Array.isArray(value)) return value;
+  if (value && typeof value === 'object') return Object.values(value as Record<string, unknown>);
+  return [];
 }
