@@ -338,6 +338,8 @@ function rowToNode(row: {
     primaryTerms: metadata.primaryTerms,
     businessRules: metadata.businessRules,
     caveats: metadata.caveats,
+    dataState: metadata.dataState,
+    dataStateDetail: metadata.dataStateDetail,
   };
 }
 
@@ -369,6 +371,8 @@ function nodeMetadata(node: KGNode): Partial<KGNode> {
     'primaryTerms',
     'businessRules',
     'caveats',
+    'dataState',
+    'dataStateDetail',
   ] as const) {
     const value = node[key];
     if (value !== undefined) {

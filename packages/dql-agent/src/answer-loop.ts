@@ -17,8 +17,10 @@
 
 import {
   resolveTrustLabel,
+  composeEffectiveTrust,
   type ResolvedTrustLabel,
   type TrustLabelId,
+  type DataStateLike,
 } from '@duckcodeailabs/dql-core';
 import type { KGStore } from './kg/sqlite-fts.js';
 import type { KGNode, KGNodeKind, KGSearchHit } from './kg/types.js';
@@ -341,7 +343,19 @@ export async function answer(input: AnswerLoopInput): Promise<AgentAnswer> {
   const result = await runAnswerLoop(input);
   // Attach the canonical trust label once, at the single exit point, so every
   // return site inside runAnswerLoop stays untouched and backward compatible.
-  return { ...result, trustLabelInfo: resolveTrustLabel(canonicalTrustLabelId(result)) };
+  // Freshness-aware trust: for a certified answer, fold the source block's data
+  // health (stale/failed upstream) into the label so it reads "Certified ·
+  // stale data" / "Certified · upstream failed". Non-certified or fresh answers
+  // are unaffected.
+  const id = canonicalTrustLabelId(result);
+  const dataState =
+    id === 'certified'
+      ? ((result.block as { dataState?: DataStateLike } | undefined)?.dataState)
+      : undefined;
+  return {
+    ...result,
+    trustLabelInfo: composeEffectiveTrust({ id, dataState }),
+  };
 }
 
 async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
@@ -3374,8 +3388,30 @@ function composeCertifiedAnswer(
       : artifact.kind === 'block'
         ? 'Governed execution was not requested by this host.'
         : `Matched certified ${artifact.kind.replace('_', ' ')} context.`;
+  // Freshness-aware trust: the block's logic is certified, but its upstream
+  // data may be stale or its last dbt run may have failed. Caveat the answer so
+  // a consumer can weigh it — "certified" is not the same as "fresh".
+  const freshnessCaveat = certifiedFreshnessCaveat(artifact);
   return `Outcome: Reuse certified block\n\nAnswered by certified ${artifact.kind.replace('_', ' ')} **${artifact.name}**${tag}.\n\n${desc ? `${desc}\n\n${resultText}` : resultText}`
+    + (freshnessCaveat ? `\n\n${freshnessCaveat}` : '')
     + `\n\n_Question:_ ${question}`;
+}
+
+/**
+ * Build a one-line data-freshness caveat for a certified answer, or `undefined`
+ * when the upstream data is fresh / un-instrumented. Stale and failed upstreams
+ * are surfaced so a certified-but-stale answer is never presented as if its data
+ * were current.
+ */
+function certifiedFreshnessCaveat(artifact: KGNode): string | undefined {
+  switch (artifact.dataState) {
+    case 'failed':
+      return `⚠️ Data caveat: an upstream dbt model's last run failed, so this certified result may be missing or out of date.${artifact.dataStateDetail ? ` ${artifact.dataStateDetail}` : ''}`;
+    case 'stale':
+      return `⚠️ Data caveat: upstream data is past its freshness window, so this certified result may be stale.${artifact.dataStateDetail ? ` ${artifact.dataStateDetail}` : ''}`;
+    default:
+      return undefined;
+  }
 }
 
 function mergeHits(...groups: KGSearchHit[][]): KGSearchHit[] {

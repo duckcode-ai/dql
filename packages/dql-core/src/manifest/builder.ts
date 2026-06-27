@@ -54,6 +54,7 @@ import {
   type AppDocument,
   type DashboardDocument,
 } from '../apps/index.js';
+import { loadDbtRunState, applyBlockDataState, type DbtRunStateIndex } from './dbt-freshness.js';
 
 // ---- Public API ----
 
@@ -256,11 +257,19 @@ export function buildManifest(options: ManifestBuildOptions): DQLManifest {
   let dbtImport: ManifestDbtImport | undefined;
   if (options.dbtManifestPath) {
     const filters = options.dbtImportFilters ?? config.dbtImport;
+    // Freshness-aware trust — read dbt's run artifacts (run_results.json + source
+    // freshness) alongside the manifest, READ-ONLY. Empty/absent → every node is
+    // `unknown` and blocks are left untouched (additive, backward compatible).
+    const runState = loadDbtRunState(options.dbtManifestPath);
     dbtImport = importDbtManifest(options.dbtManifestPath, sources, referencedTables, {
       maxHops: options.maxDbtHops,
       selectiveThreshold: options.selectiveDbtThreshold ?? 200,
       filters,
+      runState,
     });
+    // Roll up per-model run state into each certified block's effective
+    // `dataState` via its transitive dbt upstreams.
+    applyBlockDataState(blocks, sources, dbtImport.dbtDag, runState);
   }
 
   // Apps & dashboards (consumption layer). Scanned after blocks/notebooks
@@ -1245,6 +1254,12 @@ interface DbtImportOptions {
   selectiveThreshold?: number;
   /** Tag/path/name filters for selective import. */
   filters?: DbtImportFilters;
+  /**
+   * Freshness-aware trust — per-uniqueId last-run/freshness state read from
+   * `run_results.json`. Attached additively to emitted dbt nodes. Optional;
+   * when absent no run-state is attached.
+   */
+  runState?: DbtRunStateIndex;
 }
 
 /**
@@ -1443,6 +1458,7 @@ function importDbtManifest(
           }))
         : undefined;
 
+      const modelRunState = opts.runState?.byUniqueId.get(uid);
       if (!sources[tableName]) {
         sources[tableName] = { name: tableName, origin: 'dbt', referencedBy: [] };
       }
@@ -1460,6 +1476,7 @@ function importDbtManifest(
               ]),
             )
           : undefined,
+        runState: modelRunState,
       };
       if (sources[tableName].origin === 'sql') sources[tableName].origin = 'dbt';
 
@@ -1475,6 +1492,7 @@ function importDbtManifest(
         database: entry.database,
         materialized: node.config?.materialized,
         description: node.description,
+        runState: modelRunState,
       });
       for (const dep of selectedDeps) {
         dbtDagEdges.push({ source: dep, target: uid });
@@ -1488,11 +1506,13 @@ function importDbtManifest(
       if (!sources[tableName]) {
         sources[tableName] = { name: tableName, origin: 'dbt', referencedBy: [] };
       }
+      const sourceRunState = opts.runState?.byUniqueId.get(uid);
       sources[tableName].dbtModel = {
         uniqueId: uid,
         database: entry.database,
         schema: entry.schema,
         description: src.description,
+        runState: sourceRunState,
       };
       dbtDagModels.push({
         uniqueId: uid,
@@ -1502,6 +1522,7 @@ function importDbtManifest(
         schema: entry.schema,
         database: entry.database,
         description: src.description,
+        runState: sourceRunState,
       });
       sourcesImported++;
     }
@@ -1517,6 +1538,7 @@ function importDbtManifest(
     maxHops: opts.maxHops,
     importedAt: new Date().toISOString(),
     dbtDag: { models: dbtDagModels, edges: dbtDagEdges },
+    runResultsPath: opts.runState?.runResultsPath,
   };
 }
 

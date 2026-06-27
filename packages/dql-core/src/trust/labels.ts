@@ -119,6 +119,60 @@ export const TRUST_LABEL_ORDER: TrustLabelId[] = [
 /** Convenience display qualifier shown when a certified artifact is downgraded. */
 export const TRUST_QUALIFIER_INVARIANT_VIOLATED = 'invariant violated';
 
+/**
+ * Freshness-aware-trust qualifiers. These compose with a base label exactly
+ * like {@link TRUST_QUALIFIER_INVARIANT_VIOLATED}: a certified block whose
+ * upstream data is stale renders "Certified · stale data"; one whose upstream
+ * dbt run failed renders "Certified · upstream failed".
+ *
+ * `data freshness unknown` is intentionally NOT surfaced as a downgrade — a
+ * missing `run_results.json` should degrade silently to the plain base label
+ * (see {@link dataStateQualifier}), so projects that have not wired dbt run
+ * artifacts keep showing "Certified".
+ */
+export const TRUST_QUALIFIER_STALE_DATA = 'stale data';
+export const TRUST_QUALIFIER_UPSTREAM_FAILED = 'upstream failed';
+
+/** The data-health axis, mirrored from `manifest/types.ts` `DbtDataState`. */
+export type DataStateLike = 'fresh' | 'stale' | 'failed' | 'unknown' | undefined;
+
+/**
+ * Map a data-health state to its trust qualifier, or `undefined` when the data
+ * axis should not downgrade the label. `fresh` and `unknown` both return
+ * `undefined` so a healthy (or un-instrumented) block shows the plain base
+ * label; only `stale` and `failed` produce a visible "· …" qualifier.
+ */
+export function dataStateQualifier(dataState: DataStateLike): string | undefined {
+  switch (dataState) {
+    case 'failed':
+      return TRUST_QUALIFIER_UPSTREAM_FAILED;
+    case 'stale':
+      return TRUST_QUALIFIER_STALE_DATA;
+    default:
+      return undefined;
+  }
+}
+
+/**
+ * Compose the effective trust label for an artifact, folding the data-freshness
+ * axis into a base trust label. When `dataState` is `stale`/`failed` the
+ * returned label is `<base> · <freshness qualifier>`; otherwise it is the base
+ * label unchanged. An explicit `existingQualifier` (e.g. "invariant violated")
+ * takes precedence so the two downgrade features never fight over the one
+ * qualifier slot — invariant violations are a stronger signal than staleness.
+ *
+ * Pure and dependency-free; safe to call from any surface (MCP, agent, UI).
+ */
+export function composeEffectiveTrust(input: {
+  id: string | undefined;
+  dataState?: DataStateLike;
+  existingQualifier?: string;
+}): ResolvedTrustLabel {
+  const qualifier =
+    input.existingQualifier?.trim() || dataStateQualifier(input.dataState);
+  return resolveTrustLabel(input.id, qualifier);
+}
+
 /** The safe default for any unknown/unmapped label id. */
 export const DEFAULT_TRUST_LABEL_ID: TrustLabelId = 'insufficient_context';
 

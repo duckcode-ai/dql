@@ -86,6 +86,15 @@ export interface DerivationFocusBlock {
   /** Business outcome / decision the block supports. */
   businessOutcome?: string;
   decisionUse?: string;
+  /**
+   * Freshness-aware trust — effective data health rolled up from the block's
+   * transitive dbt upstreams (`ManifestBlock.dataState`). When present and not
+   * `fresh`, the walk's `freshness` marker is derived from it so "show your
+   * work" reflects stale/failed upstream data, not just certification.
+   */
+  dataState?: 'fresh' | 'stale' | 'failed' | 'unknown';
+  /** Plain-language explanation of `dataState`. */
+  dataStateDetail?: string;
 }
 
 export interface BuildDerivationWalkInput {
@@ -197,9 +206,33 @@ export function buildDerivationWalk(input: BuildDerivationWalkInput): Derivation
     summary: buildSummary({ focus, blockOwner, reviewCadence, generated, sourceAssets }),
     steps,
     trustLabel: input.trustLabel ?? (generated ? 'review_required' : undefined),
-    freshness: input.freshness ?? metadataString(focus.metadata, 'freshness'),
+    // Explicit `freshness` input wins; otherwise derive a marker from the
+    // block's upstream data health, then fall back to any focus metadata.
+    freshness:
+      input.freshness ??
+      freshnessFromDataState(block?.dataState, block?.dataStateDetail) ??
+      metadataString(focus.metadata, 'freshness'),
     caveats: caveats.length > 0 ? caveats : undefined,
   };
+}
+
+/**
+ * Render a derivation-walk freshness marker from a block's `dataState`. Returns
+ * `undefined` for `fresh`/`unknown`/missing so a healthy or un-instrumented
+ * block shows no freshness downgrade.
+ */
+function freshnessFromDataState(
+  dataState: DerivationFocusBlock['dataState'],
+  detail?: string,
+): string | undefined {
+  switch (dataState) {
+    case 'failed':
+      return detail ? `upstream failed — ${detail}` : 'upstream failed';
+    case 'stale':
+      return detail ? `stale data — ${detail}` : 'stale data';
+    default:
+      return undefined;
+  }
 }
 
 function blockDetail(input: {

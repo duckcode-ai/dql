@@ -10,6 +10,13 @@ export {
   type DbtImportFilters,
 } from './builder.js';
 
+export {
+  loadDbtRunState,
+  applyBlockDataState,
+  worseDataState,
+  type DbtRunStateIndex,
+} from './dbt-freshness.js';
+
 export type {
   DQLManifest,
   ManifestBlock,
@@ -29,4 +36,6 @@ export type {
   ManifestConflictSide,
   ManifestApp,
   ManifestDashboard,
+  DbtDataState,
+  DbtRunState,
 } from './types.js';

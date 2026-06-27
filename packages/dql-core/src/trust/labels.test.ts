@@ -3,10 +3,14 @@ import {
   TRUST_LABELS,
   TRUST_LABEL_ORDER,
   TRUST_QUALIFIER_INVARIANT_VIOLATED,
+  TRUST_QUALIFIER_STALE_DATA,
+  TRUST_QUALIFIER_UPSTREAM_FAILED,
   DEFAULT_TRUST_LABEL_ID,
   resolveTrustLabel,
   trustLabelIdForRoute,
   trustLabelIdForStatus,
+  dataStateQualifier,
+  composeEffectiveTrust,
   type TrustLabelId,
 } from './labels.js';
 
@@ -69,5 +73,46 @@ describe('canonical trust-label vocabulary', () => {
     // Unknown status degrades safely (backward compatible).
     expect(trustLabelIdForStatus('brand_new_status')).toBe('insufficient_context');
     expect(trustLabelIdForStatus(undefined)).toBe('insufficient_context');
+  });
+});
+
+describe('freshness-aware trust qualifiers', () => {
+  it('maps only stale/failed data states to a qualifier', () => {
+    expect(dataStateQualifier('failed')).toBe(TRUST_QUALIFIER_UPSTREAM_FAILED);
+    expect(dataStateQualifier('stale')).toBe(TRUST_QUALIFIER_STALE_DATA);
+    // fresh / unknown / undefined never downgrade the label.
+    expect(dataStateQualifier('fresh')).toBeUndefined();
+    expect(dataStateQualifier('unknown')).toBeUndefined();
+    expect(dataStateQualifier(undefined)).toBeUndefined();
+  });
+
+  it('composes "Certified · upstream failed" for a failed upstream', () => {
+    const resolved = composeEffectiveTrust({ id: 'certified', dataState: 'failed' });
+    expect(resolved.display).toBe('Certified · upstream failed');
+    expect(resolved.base).toBe('Certified');
+    expect(resolved.qualifier).toBe('upstream failed');
+  });
+
+  it('composes "Certified · stale data" for stale upstream data', () => {
+    expect(composeEffectiveTrust({ id: 'certified', dataState: 'stale' }).display).toBe(
+      'Certified · stale data',
+    );
+  });
+
+  it('leaves a fresh certified block as plain "Certified"', () => {
+    expect(composeEffectiveTrust({ id: 'certified', dataState: 'fresh' }).display).toBe('Certified');
+    expect(composeEffectiveTrust({ id: 'certified' }).display).toBe('Certified');
+    expect(composeEffectiveTrust({ id: 'certified', dataState: 'unknown' }).display).toBe('Certified');
+  });
+
+  it('lets an explicit invariant qualifier win over the freshness axis', () => {
+    // Both an invariant violation and a stale upstream apply: the stronger
+    // invariant signal keeps the single qualifier slot.
+    const resolved = composeEffectiveTrust({
+      id: 'certified',
+      dataState: 'stale',
+      existingQualifier: TRUST_QUALIFIER_INVARIANT_VIOLATED,
+    });
+    expect(resolved.display).toBe('Certified · invariant violated');
   });
 });

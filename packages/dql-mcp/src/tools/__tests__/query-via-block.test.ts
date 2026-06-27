@@ -165,6 +165,69 @@ describe('queryViaBlock — certified-only enforcement (the wedge)', () => {
     expect((result as Record<string, unknown>).invariantResults).toBeUndefined();
   });
 
+  it('returns dataState "unknown" and plain "Certified" when no run_results were imported', async () => {
+    const ctx = makeCtx({ 'My Block': makeManifestBlock() });
+    globalThis.fetch = vi.fn(async () => ({
+      ok: true,
+      json: async () => ({ result: { columns: [], rows: [{ foo: 1 }], executionTime: 1 } }),
+    } as unknown as Response)) as unknown as typeof fetch;
+
+    const result = await queryViaBlock(ctx, { name: 'My Block' });
+    expect(result).toMatchObject({ trustLabel: 'Certified', dataState: 'unknown' });
+  });
+
+  it('downgrades a certified block to "Certified · upstream failed" when its upstream dbt run failed', async () => {
+    const ctx = makeCtx({
+      'My Block': makeManifestBlock({
+        dataState: 'failed',
+        dataStateDetail: 'Upstream dbt model "orders_raw" last run failed (status: error).',
+      }),
+    });
+    globalThis.fetch = vi.fn(async () => ({
+      ok: true,
+      json: async () => ({ result: { columns: [], rows: [{ foo: 1 }], executionTime: 1 } }),
+    } as unknown as Response)) as unknown as typeof fetch;
+
+    const result = await queryViaBlock(ctx, { name: 'My Block' });
+    expect(result).toMatchObject({
+      trustLabel: 'Certified · upstream failed',
+      dataState: 'failed',
+    });
+    expect((result as { dataStateDetail?: string }).dataStateDetail).toMatch(/failed/i);
+  });
+
+  it('downgrades a certified block to "Certified · stale data" when its upstream is past its freshness window', async () => {
+    const ctx = makeCtx({ 'My Block': makeManifestBlock({ dataState: 'stale' }) });
+    globalThis.fetch = vi.fn(async () => ({
+      ok: true,
+      json: async () => ({ result: { columns: [], rows: [{ foo: 1 }], executionTime: 1 } }),
+    } as unknown as Response)) as unknown as typeof fetch;
+
+    const result = await queryViaBlock(ctx, { name: 'My Block' });
+    expect(result).toMatchObject({ trustLabel: 'Certified · stale data', dataState: 'stale' });
+  });
+
+  it('keeps the stronger invariant qualifier when both an invariant violation and stale data apply', async () => {
+    const ctx = makeCtx({
+      'My Block': makeManifestBlock({ invariants: ['arr >= 0'], dataState: 'stale' }),
+    });
+    globalThis.fetch = vi.fn(async () => ({
+      ok: true,
+      json: async () => ({
+        result: { columns: [{ name: 'arr' }], rows: [{ arr: -1 }], executionTime: 3 },
+        invariantResults: [{ expr: 'arr >= 0', passed: false, detail: 'Violated' }],
+        invariantViolation: true,
+      }),
+    } as unknown as Response)) as unknown as typeof fetch;
+
+    const result = await queryViaBlock(ctx, { name: 'My Block' });
+    expect(result).toMatchObject({
+      trustLabel: 'Certified · invariant violated',
+      invariantViolation: true,
+      dataState: 'stale',
+    });
+  });
+
   it('respects DQL_RUNTIME_URL when no serverUrl is passed', async () => {
     const ctx = makeCtx({ 'My Block': makeManifestBlock() });
     process.env.DQL_RUNTIME_URL = 'http://example.test:9999';

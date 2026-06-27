@@ -8,6 +8,11 @@ import {
   requestedGrainFromPlan,
   type MetadataObject,
 } from '@duckcodeailabs/dql-agent';
+import {
+  composeEffectiveTrust,
+  TRUST_QUALIFIER_INVARIANT_VIOLATED,
+  type DataStateLike,
+} from '@duckcodeailabs/dql-core';
 import type { DQLContext } from '../context.js';
 
 export const queryViaBlockInput = {
@@ -139,13 +144,31 @@ export async function queryViaBlock(
   const invariantResults = payload.invariantResults ?? [];
   const invariantViolation = Boolean(payload.invariantViolation);
   const declaredInvariants = block.invariants ?? [];
-  const trustLabel = invariantViolation ? 'Certified · invariant violated' : 'Certified';
+
+  // Freshness-aware trust: "certified" is the logic axis; the data axis is the
+  // health of the block's upstream dbt models (last-run status + freshness),
+  // computed at build time into `block.dataState`. A certified block whose
+  // upstream failed/is stale is downgraded to "Certified · upstream failed" /
+  // "Certified · stale data". An invariant violation is a stronger signal, so
+  // it keeps the qualifier slot when both apply (composeEffectiveTrust honors
+  // the existing qualifier first). Missing run_results → undefined dataState →
+  // plain "Certified" (backward compatible).
+  const dataState = (block as { dataState?: DataStateLike }).dataState;
+  const effectiveTrust = composeEffectiveTrust({
+    id: 'certified',
+    dataState,
+    existingQualifier: invariantViolation ? TRUST_QUALIFIER_INVARIANT_VIOLATED : undefined,
+  });
 
   return {
     block: args.name,
     blockPath: block.filePath,
-    trustLabel,
+    trustLabel: effectiveTrust.display,
     invariantViolation,
+    dataState: dataState ?? 'unknown',
+    ...((block as { dataStateDetail?: string }).dataStateDetail
+      ? { dataStateDetail: (block as { dataStateDetail?: string }).dataStateDetail }
+      : {}),
     ...(declaredInvariants.length > 0 || invariantResults.length > 0
       ? { invariantResults }
       : {}),

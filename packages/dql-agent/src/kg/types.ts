@@ -62,6 +62,16 @@ export interface KGNode {
   provenance?: string;
   /** ISO timestamp or source freshness marker when available. */
   freshness?: string;
+  /**
+   * Freshness-aware trust — effective data health rolled up from the block's
+   * transitive dbt upstreams (`run_results.json` + source freshness). `'fresh'`
+   * when all upstreams are healthy; `'stale'`/`'failed'`/`'unknown'` otherwise.
+   * Mirrors `ManifestBlock.dataState`. Undefined for non-block nodes or when no
+   * dbt run artifacts were imported.
+   */
+  dataState?: 'fresh' | 'stale' | 'failed' | 'unknown';
+  /** Plain-language explanation of `dataState` (which upstream + why). */
+  dataStateDetail?: string;
   /** Business outcome the artifact or semantic object is meant to support. */
   businessOutcome?: string;
   /** Business owner for the outcome, when distinct from the technical owner. */
