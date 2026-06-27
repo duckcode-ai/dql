@@ -5,7 +5,8 @@ import { themes, type Theme, type ThemeMode } from '../../themes/notebook-theme'
 import { api } from '../../api/client';
 import { ChartOutput, resolveChartType } from '../output/ChartOutput';
 import { TableOutput } from '../output/TableOutput';
-import { TrustBadge, type TrustState } from '@duckcodeailabs/dql-ui';
+import { TrustBadge, DerivationWalkPanel, type TrustState } from '@duckcodeailabs/dql-ui';
+import { buildDerivationWalk, type Business360ResultV2, type DerivationWalk } from '@duckcodeailabs/dql-core/lineage';
 
 type AnswerTab = 'answer' | 'visual' | 'data' | 'lineage' | 'context' | 'sql' | 'review';
 type AddToAppMode = 'auto' | 'chart' | 'data' | 'both';
@@ -426,6 +427,8 @@ export function AgentAnswerCard({
       return (
         <AnswerPanel
           summary={summary}
+          answer={answer}
+          blockName={blockName}
           evidence={answer.evidence}
           analysisPlan={analysisPlan}
           result={result}
@@ -744,8 +747,117 @@ function outcomeToneColor(tone: AgentOutcome['tone'], t: Theme): string {
   }
 }
 
+/**
+ * Consumer-facing "Why?" affordance. Lazily fetches the business-360 payload
+ * for the answer's source block and assembles a plain-language derivation walk
+ * (value → block → term/metric → dbt model/source). It deliberately reuses
+ * `queryBusiness360` (via the runtime route) plus the answer's evidence/citations
+ * and never renders the raw lineage graph. Collapsed by default; additive — if
+ * the fetch fails or returns nothing, nothing is shown.
+ */
+function WhyDerivation({ answer, blockName }: { answer: AgentAnswerEnvelope; blockName: string }) {
+  const [walk, setWalk] = useState<DerivationWalk | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [requested, setRequested] = useState(false);
+
+  const loadWalk = React.useCallback(async () => {
+    if (requested) return;
+    setRequested(true);
+    setLoading(true);
+    try {
+      const business360 = (await api.fetchBusiness360(blockName)) as Business360ResultV2 | null;
+      if (!business360) {
+        setWalk(null);
+        return;
+      }
+      const outcome = answer.evidence?.outcome;
+      const metricRefs = collectSemanticNames(answer, 'metric');
+      const dimensionRefs = collectSemanticNames(answer, 'dimension');
+      const generated = answer.certification !== 'certified' && answer.kind !== 'certified';
+      const assembled = buildDerivationWalk({
+        business360,
+        block: {
+          name: blockName,
+          owner: outcome?.owner,
+          status: answer.block?.status ?? answer.certification,
+          reviewCadence: outcome?.reviewCadence,
+          caveats: outcome?.caveats,
+          decisionUse: outcome?.decisionUse,
+          metricRefs,
+          dimensionRefs,
+        },
+        value: extractHeadlineValue(answer),
+        generated,
+        trustLabel: answer.trustLabel,
+      });
+      setWalk(assembled);
+    } catch {
+      setWalk(null);
+    } finally {
+      setLoading(false);
+    }
+  }, [answer, blockName, requested]);
+
+  // The DerivationWalkPanel owns the open/closed state; we trigger the lazy
+  // fetch the first time the consumer expands it via a wrapper button.
+  if (!requested) {
+    return (
+      <button
+        type="button"
+        onClick={() => void loadWalk()}
+        aria-expanded={false}
+        style={{
+          alignSelf: 'flex-start',
+          border: 0,
+          background: 'transparent',
+          color: 'var(--accent, inherit)',
+          cursor: 'pointer',
+          padding: '4px 0',
+          fontSize: 12,
+          fontWeight: 700,
+          textDecoration: 'underline',
+          textUnderlineOffset: 3,
+        }}
+      >
+        Why? Show how this was derived
+      </button>
+    );
+  }
+  if (loading) {
+    return <div style={{ fontSize: 11.5, color: 'var(--text-tertiary, inherit)' }}>Assembling derivation…</div>;
+  }
+  if (!walk) return null;
+  return <DerivationWalkPanel walk={walk} defaultOpen />;
+}
+
+function collectSemanticNames(answer: AgentAnswerEnvelope, kind: 'metric' | 'dimension'): string[] {
+  const fromEvidence = (answer.evidence?.semanticObjects ?? [])
+    .filter((asset) => asset.kind === kind)
+    .map((asset) => asset.name)
+    .filter((name): name is string => Boolean(name));
+  if (fromEvidence.length > 0) return fromEvidence;
+  const plan = answer.analysisPlan ?? answer.evidence?.analysisPlan;
+  return (kind === 'metric' ? plan?.measures : plan?.dimensions) ?? [];
+}
+
+function extractHeadlineValue(answer: AgentAnswerEnvelope): string | undefined {
+  const result = answer.result;
+  if (result && Array.isArray(result.rows) && result.rows.length === 1) {
+    const row = result.rows[0];
+    if (row && typeof row === 'object' && !Array.isArray(row)) {
+      const values = Object.values(row as Record<string, unknown>);
+      if (values.length === 1 && (typeof values[0] === 'number' || typeof values[0] === 'string')) {
+        return String(values[0]);
+      }
+    }
+  }
+  return undefined;
+}
+
 function AnswerPanel({
   summary,
+  answer,
+  blockName,
   evidence,
   analysisPlan,
   result,
@@ -754,6 +866,8 @@ function AnswerPanel({
   t,
 }: {
   summary: string;
+  answer?: AgentAnswerEnvelope;
+  blockName?: string;
   evidence?: AgentEvidence;
   analysisPlan?: AgentAnalysisPlan;
   result: QueryResult | null;
@@ -769,6 +883,7 @@ function AnswerPanel({
       ) : (
         <div style={{ fontSize: 12, color: t.textMuted }}>No summary text was returned.</div>
       )}
+      {answer && blockName && <WhyDerivation answer={answer} blockName={blockName} />}
       {compact ? (
         <div style={{ fontSize: 11.5, color: t.textMuted, display: 'flex', flexWrap: 'wrap', gap: 6, alignItems: 'center' }}>
           {[

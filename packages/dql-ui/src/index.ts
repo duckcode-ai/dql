@@ -89,6 +89,15 @@ export {
 // TrustBadge (v1.3 Track 4 — v1.4 plug slot)
 export { TrustBadge, type TrustBadgeProps, type TrustState } from './primitives/TrustBadge.js';
 
+// DerivationWalkPanel — consumer-facing "Why?" / show-your-work derivation panel
+export {
+  DerivationWalkPanel,
+  type DerivationWalkPanelProps,
+  type DerivationWalk,
+  type DerivationStep,
+  type DerivationStepKind,
+} from './primitives/DerivationWalkPanel.js';
+
 // CellChrome (v1.3 Track 6 — Hex-style cell card wrapper)
 export { CellChrome, type CellChromeProps } from './primitives/CellChrome.js';
 
