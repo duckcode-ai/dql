@@ -10,9 +10,11 @@ export {
 
 export {
   extractColumnLineage,
+  extractRefColumnUsage,
   type ColumnLineageEntry,
   type ColumnLineageResult,
   type ColumnSource,
+  type RefColumnUsage,
 } from './column-lineage.js';
 
 export {

@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { extractColumnLineage } from './column-lineage.js';
+import { extractColumnLineage, extractRefColumnUsage } from './column-lineage.js';
 
 describe('extractColumnLineage — Phase 2.4', () => {
   it('reports plain SELECT * as a single unresolved entry', () => {
@@ -138,5 +138,61 @@ describe('extractColumnLineage — Phase 2.4', () => {
     ]);
     const customerIdEntry = result.columns.find((c) => c.name === 'customer_id');
     expect(customerIdEntry?.sources[0].table).toBe('dim_customers');
+  });
+});
+
+describe('extractRefColumnUsage — parent → child ref() column usage', () => {
+  const sortUsage = (usages: ReturnType<typeof extractRefColumnUsage>) =>
+    usages
+      .map((u) => ({ block: u.block, columns: [...u.columns].sort() }))
+      .sort((a, b) => a.block.localeCompare(b.block));
+
+  it('maps an aliased ref() to the columns the parent references', () => {
+    const usage = extractRefColumnUsage(
+      `SELECT c.approval_rate_pct, c.region FROM ref("child") c WHERE c.region = 'US'`,
+    );
+    expect(sortUsage(usage)).toEqual([
+      { block: 'child', columns: ['approval_rate_pct', 'region'] },
+    ]);
+  });
+
+  it('attributes unqualified columns to a sole ref() source', () => {
+    const usage = extractRefColumnUsage(`SELECT approval_rate_pct, region FROM ref('child')`);
+    expect(sortUsage(usage)).toEqual([
+      { block: 'child', columns: ['approval_rate_pct', 'region'] },
+    ]);
+  });
+
+  it('handles multiple ref() sources joined together', () => {
+    // Columns in the JOIN ... ON condition live inside the FROM subtree and are
+    // intentionally skipped; only projection/WHERE columns are attributed.
+    const usage = extractRefColumnUsage(
+      `SELECT a.x, b.y FROM ref("child_a") a JOIN ref("child_b") b ON a.id = b.id WHERE b.active`,
+    );
+    expect(sortUsage(usage)).toEqual([
+      { block: 'child_a', columns: ['x'] },
+      { block: 'child_b', columns: ['active', 'y'] },
+    ]);
+  });
+
+  it('returns nothing for SELECT * (no specific columns referenced)', () => {
+    expect(extractRefColumnUsage(`SELECT * FROM ref("child")`)).toEqual([]);
+  });
+
+  it('does not attribute unqualified columns when a non-ref table is also present', () => {
+    // Ambiguous: `status` could come from either source, so we stay silent.
+    const usage = extractRefColumnUsage(
+      `SELECT something FROM ref("child") c JOIN raw_table r ON c.id = r.id`,
+    );
+    // Only qualified ref columns (here only c.id) are attributed.
+    expect(usage.every((u) => !u.columns.includes('something'))).toBe(true);
+  });
+
+  it('returns nothing when there is no ref() in the FROM clause', () => {
+    expect(extractRefColumnUsage(`SELECT a, b FROM plain_table`)).toEqual([]);
+  });
+
+  it('returns nothing for unparseable SQL rather than throwing', () => {
+    expect(extractRefColumnUsage(`this is not sql ;;;`)).toEqual([]);
   });
 });

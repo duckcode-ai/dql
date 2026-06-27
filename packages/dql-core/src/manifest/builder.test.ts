@@ -809,3 +809,150 @@ block "Notebook Revenue" {
     expect(messages.some((message) => message.includes('business_view "Customer 360" in domain "Customer" includes block "Revenue Total" from domain "Revenue"'))).toBe(true);
   });
 });
+
+describe('buildManifest — output-contract drift detection', () => {
+  let tmpDir: string;
+
+  beforeEach(() => {
+    tmpDir = mkdtempSync(join(tmpdir(), 'dql-drift-'));
+    writeFileSync(join(tmpDir, 'dql.config.json'), '{"project":"drift-demo"}');
+    mkdirSync(join(tmpDir, 'blocks'), { recursive: true });
+  });
+
+  afterEach(() => {
+    rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  const driftDiagnostics = (manifest: ReturnType<typeof buildManifest>) =>
+    (manifest.diagnostics ?? []).filter((d) => d.kind === 'drift');
+
+  it('populates an additive outputContract without touching outputs', () => {
+    writeFileSync(join(tmpDir, 'blocks', 'child.dql'), `block "child_metrics" {
+  domain = "ops"
+  type = "custom"
+  query = """
+    SELECT region, SUM(amount) AS total_amount FROM fct_sales GROUP BY region
+  """
+}`);
+
+    const manifest = buildManifest({ projectRoot: tmpDir, dqlVersion: 'test' });
+    const child = manifest.blocks['child_metrics'];
+
+    // outputContract is additive + derived from resolved column lineage.
+    expect(child.outputContract).toEqual([
+      { name: 'region', role: undefined },
+      { name: 'total_amount', role: 'metric' },
+    ]);
+    // The existing `outputs` (column-lineage shaped) is untouched and distinct.
+    expect(child.outputs?.map((o) => o.name)).toEqual(['region', 'total_amount']);
+    expect(child.outputs?.[1]).toMatchObject({ name: 'total_amount', isAggregate: true, aggregateFn: 'SUM' });
+  });
+
+  it('prefers declaredOutputs for the contract when present, enriching role from lineage', () => {
+    writeFileSync(join(tmpDir, 'blocks', 'declared.dql'), `block "declared_child" {
+  domain = "ops"
+  type = "custom"
+  outputs = ["region", "total_amount"]
+  query = """
+    SELECT region, SUM(amount) AS total_amount FROM fct_tx GROUP BY region
+  """
+}`);
+
+    const manifest = buildManifest({ projectRoot: tmpDir, dqlVersion: 'test' });
+    const child = manifest.blocks['declared_child'];
+
+    expect(child.declaredOutputs).toEqual(['region', 'total_amount']);
+    // Names come from declaredOutputs (author-committed contract); role is
+    // enriched from column lineage (the aggregate output is a 'metric').
+    expect(child.outputContract).toEqual([
+      { name: 'region', role: undefined },
+      { name: 'total_amount', role: 'metric' },
+    ]);
+  });
+
+  it('warns (not errors) when a parent references a column the child renamed away', () => {
+    writeFileSync(join(tmpDir, 'blocks', 'child.dql'), `block "child_metrics" {
+  domain = "ops"
+  type = "custom"
+  outputs = ["region", "approval_rate_pct"]
+  query = """
+    SELECT region, ROUND(100.0 * AVG(flag), 2) AS approval_rate_pct FROM fct_tx GROUP BY region
+  """
+}`);
+    // Parent still references the OLD name "approval_pct" (drift).
+    writeFileSync(join(tmpDir, 'blocks', 'parent.dql'), `block "parent_summary" {
+  domain = "ops"
+  type = "custom"
+  query = """
+    SELECT c.region, c.approval_pct FROM ref("child_metrics") c
+  """
+}`);
+
+    const manifest = buildManifest({ projectRoot: tmpDir, dqlVersion: 'test' });
+    const drift = driftDiagnostics(manifest);
+
+    // Exactly one drift warning; build still succeeds (no error severity).
+    expect(drift).toHaveLength(1);
+    const d = drift[0];
+    expect(d.severity).toBe('warning');
+    expect(d.kind).toBe('drift');
+    // Names both blocks + the drifted column.
+    expect(d.message).toContain('parent_summary');
+    expect(d.message).toContain('child_metrics');
+    expect(d.message).toContain('approval_pct');
+    expect(d.drift).toMatchObject({
+      parentBlock: 'parent_summary',
+      childBlock: 'child_metrics',
+      column: 'approval_pct',
+      availableColumns: ['region', 'approval_rate_pct'],
+    });
+    // The build did NOT fail: no error-severity diagnostics introduced by drift.
+    expect((manifest.diagnostics ?? []).some((x) => x.kind === 'drift' && x.severity === 'error')).toBe(false);
+    // And the manifest is fully populated (blocks present).
+    expect(Object.keys(manifest.blocks)).toContain('parent_summary');
+  });
+
+  it('does not warn when the child adds NEW columns (additive change)', () => {
+    // Child gains "new_col" but keeps the two columns the parent references.
+    writeFileSync(join(tmpDir, 'blocks', 'child.dql'), `block "child_metrics" {
+  domain = "ops"
+  type = "custom"
+  outputs = ["region", "approval_rate_pct", "new_col"]
+  query = """
+    SELECT region, approval_rate_pct, new_col FROM fct_tx
+  """
+}`);
+    writeFileSync(join(tmpDir, 'blocks', 'parent.dql'), `block "parent_summary" {
+  domain = "ops"
+  type = "custom"
+  query = """
+    SELECT c.region, c.approval_rate_pct FROM ref("child_metrics") c
+  """
+}`);
+
+    const manifest = buildManifest({ projectRoot: tmpDir, dqlVersion: 'test' });
+    expect(driftDiagnostics(manifest)).toHaveLength(0);
+  });
+
+  it('stays silent when the child output schema is open (SELECT *)', () => {
+    // Child projects a star → unknown schema → no contract → no false drift.
+    writeFileSync(join(tmpDir, 'blocks', 'child.dql'), `block "child_star" {
+  domain = "ops"
+  type = "custom"
+  query = """
+    SELECT * FROM fct_tx
+  """
+}`);
+    writeFileSync(join(tmpDir, 'blocks', 'parent.dql'), `block "parent_star" {
+  domain = "ops"
+  type = "custom"
+  query = """
+    SELECT c.anything_goes FROM ref("child_star") c
+  """
+}`);
+
+    const manifest = buildManifest({ projectRoot: tmpDir, dqlVersion: 'test' });
+    expect(manifest.blocks['child_star'].outputContract).toBeUndefined();
+    expect(driftDiagnostics(manifest)).toHaveLength(0);
+  });
+});

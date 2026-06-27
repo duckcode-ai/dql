@@ -11,7 +11,8 @@ import { join, extname, relative } from 'node:path';
 import { Parser } from '../parser/index.js';
 import { analyze, detectTrustConflicts } from '../semantic/index.js';
 import { extractTablesFromSql } from '../lineage/sql-parser.js';
-import { extractColumnLineage } from '../lineage/column-lineage.js';
+import { extractColumnLineage, type ColumnLineageResult } from '../lineage/column-lineage.js';
+import { detectOutputDrift } from './output-drift.js';
 import { buildLineageGraph } from '../lineage/builder.js';
 import { detectDomainFlows, getDomainTrustOverview } from '../lineage/domain-lineage.js';
 import { loadSemanticLayerFromDir } from '../semantic/index.js';
@@ -229,6 +230,11 @@ export function buildManifest(options: ManifestBuildOptions): DQLManifest {
   // claim the same concept/grain but disagree. Additive `kind: 'conflict'`
   // diagnostics; conservative heuristics avoid false positives.
   diagnostics.push(...detectTrustConflicts(terms, blocks));
+
+  // Output-contract drift detection: a parent block `ref()`s a child and
+  // references a column the child no longer outputs. Additive `kind: 'drift'`
+  // warnings — never fails the build; freeform composition stays unrestricted.
+  diagnostics.push(...detectOutputDrift(blocks));
 
   // Load semantic layer
   const semanticDir = resolveSemanticPath(projectRoot, config);
@@ -2127,7 +2133,67 @@ function blockDeclToManifestBlock(block: any, filePath: string): ManifestBlock {
           unresolved: c.unresolved,
         }))
       : undefined,
+    outputContract: buildOutputContract(
+      Array.isArray(block.outputs) ? block.outputs : undefined,
+      columnLineage,
+    ),
   };
+}
+
+/**
+ * Build a block's typed `outputContract` — the columns a parent that `ref()`s
+ * this block can rely on. Additive and distinct from `outputs` (column-lineage
+ * shaped). Source of truth, in priority order:
+ *
+ *   1. `declaredOutputs` (reviewer-declared field names) when present. These
+ *      are the contract the block author committed to, so they win. Column
+ *      lineage is used only to enrich `role`/`type` for matching names.
+ *   2. Otherwise, the resolved column-lineage output columns — but only when
+ *      the projection is fully resolved (no `*`/unresolved entries). A star or
+ *      unparsed projection means the schema is open, so we emit no contract and
+ *      drift detection stays silent for this block (conservative).
+ *
+ * Returns undefined when neither source yields a usable schema, keeping the
+ * field optional and backward-compatible.
+ */
+function buildOutputContract(
+  declaredOutputs: string[] | undefined,
+  columnLineage: ColumnLineageResult | null,
+): Array<{ name: string; type?: string; role?: string }> | undefined {
+  const roleByName = new Map<string, string>();
+  if (columnLineage?.parsed) {
+    for (const col of columnLineage.columns) {
+      if (col.isAggregate) roleByName.set(col.name.toLowerCase(), 'metric');
+    }
+  }
+
+  if (Array.isArray(declaredOutputs) && declaredOutputs.length > 0) {
+    const seen = new Set<string>();
+    const contract: Array<{ name: string; type?: string; role?: string }> = [];
+    for (const raw of declaredOutputs) {
+      const name = typeof raw === 'string' ? raw.trim() : '';
+      if (!name || seen.has(name.toLowerCase())) continue;
+      seen.add(name.toLowerCase());
+      contract.push({ name, role: roleByName.get(name.toLowerCase()) });
+    }
+    return contract.length > 0 ? contract : undefined;
+  }
+
+  if (!columnLineage?.parsed || columnLineage.columns.length === 0) return undefined;
+  // Only emit a derived contract when every output column is resolved — a star
+  // or unresolved entry means we cannot enumerate the real output schema.
+  if (columnLineage.columns.some((c) => c.unresolved || c.name === '*' || c.name.endsWith('.*'))) {
+    return undefined;
+  }
+  const seen = new Set<string>();
+  const contract: Array<{ name: string; type?: string; role?: string }> = [];
+  for (const col of columnLineage.columns) {
+    const name = col.name?.trim();
+    if (!name || seen.has(name.toLowerCase())) continue;
+    seen.add(name.toLowerCase());
+    contract.push({ name, role: col.isAggregate ? 'metric' : undefined });
+  }
+  return contract.length > 0 ? contract : undefined;
 }
 
 function domainDeclToManifestDomain(domain: any, filePath: string): ManifestDomain {

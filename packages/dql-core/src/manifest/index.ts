@@ -10,6 +10,8 @@ export {
   type DbtImportFilters,
 } from './builder.js';
 
+export { detectOutputDrift } from './output-drift.js';
+
 export type {
   DQLManifest,
   ManifestBlock,
@@ -27,6 +29,7 @@ export type {
   ManifestDiagnostic,
   ManifestConflictDetail,
   ManifestConflictSide,
+  ManifestDriftDetail,
   ManifestApp,
   ManifestDashboard,
 } from './types.js';

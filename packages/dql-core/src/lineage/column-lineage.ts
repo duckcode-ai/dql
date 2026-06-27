@@ -277,6 +277,160 @@ function readFunctionName(expr: Record<string, unknown>): string {
   return '';
 }
 
+// ---- ref()-aware parent → child column usage (output-contract drift) ----
+
+/**
+ * Per-child-block column usage discovered in a parent block's SQL. `block` is
+ * the child block name (the `ref()` argument); `columns` are the child columns
+ * the parent references — qualified (`alias.col`) or, when the parent's only
+ * source is a single `ref()`, unqualified columns too.
+ */
+export interface RefColumnUsage {
+  block: string;
+  columns: string[];
+}
+
+/**
+ * Extract, per `ref()`'d child block, the columns a parent block's SQL
+ * references. Powers output-contract drift detection: each returned column is
+ * checked against the child block's current output schema.
+ *
+ * In DQL, `ref("child")` appears in a FROM/JOIN clause and parses (via
+ * node-sql-parser) as a *function* call — not a `table` node — so the standard
+ * column-lineage table resolver does not see it. This walker special-cases
+ * that shape: it maps each `ref(...)` source to its alias, then attributes
+ * column references back to the child block by alias. Unqualified columns are
+ * attributed only when there is exactly one `ref()` source and no other table
+ * in the FROM clause (so we never guess wrong on joins).
+ *
+ * Conservative by design: anything ambiguous yields no usage rather than a
+ * false-positive drift warning. Returns one entry per distinct child block.
+ */
+export function extractRefColumnUsage(sql: string, dialect = DEFAULT_DIALECT): RefColumnUsage[] {
+  const parser = new Parser();
+  let astRoot: unknown;
+  try {
+    astRoot = parser.astify(sql, { database: DIALECT_MAP[dialect.toLowerCase()] ?? 'postgresql' });
+  } catch {
+    return [];
+  }
+
+  const stmts = Array.isArray(astRoot) ? astRoot : [astRoot];
+  const select = stmts.find((s): s is Record<string, unknown> => isSelectNode(s));
+  if (!select) return [];
+
+  // Map ref-alias -> child block name. Also track non-ref relations so we know
+  // whether unqualified columns can be safely attributed to a single ref.
+  const aliasToBlock = new Map<string, string>();
+  let nonRefRelationCount = 0;
+  const fromList = select.from;
+  if (Array.isArray(fromList)) {
+    for (const entry of fromList) {
+      if (!entry || typeof entry !== 'object') continue;
+      const e = entry as Record<string, unknown>;
+      const childBlock = readRefFunctionArg(e.expr);
+      if (childBlock) {
+        const alias = typeof e.as === 'string' && e.as ? e.as : childBlock;
+        aliasToBlock.set(alias, childBlock);
+      } else if (typeof e.table === 'string' && e.table) {
+        nonRefRelationCount += 1;
+      }
+    }
+  }
+
+  if (aliasToBlock.size === 0) return [];
+
+  const soleRefBlock =
+    aliasToBlock.size === 1 && nonRefRelationCount === 0
+      ? [...aliasToBlock.values()][0]
+      : undefined;
+
+  // Collect column refs across the whole statement (SELECT list, WHERE, etc.),
+  // skipping the FROM clause so the ref() argument string is not counted.
+  const usage = new Map<string, Set<string>>();
+  const ensure = (block: string): Set<string> => {
+    let set = usage.get(block);
+    if (!set) {
+      set = new Set<string>();
+      usage.set(block, set);
+    }
+    return set;
+  };
+
+  const visit = (value: unknown, insideFrom: boolean): void => {
+    if (!value || typeof value !== 'object') return;
+    if (Array.isArray(value)) {
+      for (const item of value) visit(item, insideFrom);
+      return;
+    }
+    const obj = value as Record<string, unknown>;
+    if (!insideFrom && obj.type === 'column_ref') {
+      const column = readColumnRefName(obj);
+      if (column && column !== '*') {
+        const tableAlias = (obj.table as string | null | undefined) ?? null;
+        if (tableAlias && aliasToBlock.has(tableAlias)) {
+          ensure(aliasToBlock.get(tableAlias)!).add(column);
+        } else if (!tableAlias && soleRefBlock) {
+          ensure(soleRefBlock).add(column);
+        }
+      }
+      return;
+    }
+    for (const [key, child] of Object.entries(obj)) {
+      visit(child, insideFrom || key === 'from');
+    }
+  };
+
+  visit(select, false);
+
+  return [...usage.entries()].map(([block, columns]) => ({
+    block,
+    columns: [...columns],
+  }));
+}
+
+/**
+ * If `expr` is a `ref('name')` / `ref("name")` function call in a FROM clause,
+ * return the referenced block name; otherwise undefined. node-sql-parser
+ * encodes the string argument either as a quoted-string literal or as a
+ * `column_ref` whose column expr holds the value.
+ */
+function readRefFunctionArg(expr: unknown): string | undefined {
+  if (!expr || typeof expr !== 'object') return undefined;
+  const e = expr as Record<string, unknown>;
+  if (e.type !== 'function') return undefined;
+  if (readCallName(e.name).toLowerCase() !== 'ref') return undefined;
+  const args = e.args as Record<string, unknown> | undefined;
+  const list = (args?.value ?? args) as unknown;
+  const first = Array.isArray(list) ? (list[0] as Record<string, unknown> | undefined) : undefined;
+  if (!first) return undefined;
+  // Quoted-string literal form: { type: 'single_quote_string', value: 'name' }
+  if (typeof first.value === 'string') return first.value;
+  // column_ref form: { type: 'column_ref', column: { expr: { value: 'name' } } }
+  if (first.type === 'column_ref') {
+    const name = readColumnRefName(first);
+    if (name) return name;
+  }
+  return undefined;
+}
+
+/**
+ * Read a function/relation call name across node-sql-parser shapes. FROM-clause
+ * function relations wrap the name as `{ name: [{ value: 'ref' }] }` (an object
+ * around the array), distinct from the bare-string / bare-array forms handled
+ * by `readFunctionName`. Normalise all three to a plain string.
+ */
+function readCallName(name: unknown): string {
+  if (typeof name === 'string') return name;
+  if (Array.isArray(name)) return readFunctionName({ name });
+  if (name && typeof name === 'object') {
+    const inner = (name as { name?: unknown }).name;
+    if (Array.isArray(inner)) return readFunctionName({ name: inner });
+    if (typeof inner === 'string') return inner;
+  }
+  return '';
+}
+
 function collectColumnRefs(
   node: unknown,
   aliasToTable: Record<string, string>,

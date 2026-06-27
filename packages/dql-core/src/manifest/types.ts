@@ -65,7 +65,7 @@ export interface DQLManifest {
 
 export interface ManifestDiagnostic {
   /**
-   * 'parse' | 'resolve' | 'dbt' | 'semantic' | 'config' | 'conflict'
+   * 'parse' | 'resolve' | 'dbt' | 'semantic' | 'config' | 'conflict' | 'drift'
    *
    * `conflict` (additive) flags two certified governance artifacts — two terms
    * or two certified blocks — that target the same concept/identifier/grain but
@@ -74,6 +74,15 @@ export interface ManifestDiagnostic {
    * `detectTrustConflicts` in semantic/conflicts and the agent's `conflict`
    * route. Conflict diagnostics carry an optional `conflict` payload so
    * consumers can route on the two sides without re-parsing the message.
+   *
+   * `drift` (additive, always `severity: 'warning'`) flags output-contract
+   * drift in the intentionally freeform `ref()` composition model: a parent
+   * block P references a column on child block C via `ref()`, but that column
+   * is no longer part of C's current output schema (renamed or removed).
+   * DQL does not restrict composition, so this is surfaced as a *warning* —
+   * it never fails the build. Drift diagnostics carry an optional `drift`
+   * payload naming P, C, and the missing column. See `detectOutputDrift` in
+   * manifest/output-drift and `outputContract` on `ManifestBlock`.
    */
   kind: string;
   /** Relative path to the offending file, if any */
@@ -85,6 +94,29 @@ export interface ManifestDiagnostic {
    * governance pair so route-time consumers can present both sides + owners.
    */
   conflict?: ManifestConflictDetail;
+  /**
+   * Present only on `kind: 'drift'` diagnostics. Names the parent block, the
+   * child block, and the drifted (missing/renamed) column so consumers can
+   * route without re-parsing the message.
+   */
+  drift?: ManifestDriftDetail;
+}
+
+/**
+ * Structured detail for a `kind: 'drift'` diagnostic. The parent block
+ * references `column` on the child block via `ref()`, but `column` is no
+ * longer present in the child's `outputContract`. `availableColumns` lists the
+ * child's current output columns so a consumer can suggest the likely rename.
+ */
+export interface ManifestDriftDetail {
+  /** The block that does the `ref()` and references the drifted column. */
+  parentBlock: string;
+  /** The referenced (child) block whose output schema changed. */
+  childBlock: string;
+  /** The referenced column that is no longer in the child's output. */
+  column: string;
+  /** The child's current output column names, for rename suggestions. */
+  availableColumns: string[];
 }
 
 /**
@@ -232,6 +264,21 @@ export interface ManifestBlock {
     sources: Array<{ table: string; column: string }>;
     unresolved?: boolean;
   }>;
+  /**
+   * Typed output contract — the columns a parent that `ref()`s this block can
+   * rely on. Additive and distinct from `outputs` (which is column-lineage
+   * shaped); do NOT conflate the two. Populated from `declaredOutputs` (the
+   * reviewer-declared field names) merged with column-lineage extraction. Each
+   * entry names a column and, when known, its `type` and reuse `role`
+   * (e.g. 'metric', 'dimension', 'grain'). Consumers and existing manifests
+   * that predate this field stay valid — it is always optional.
+   *
+   * Drives compile-time output-contract drift detection: when this block's
+   * output schema changes, a parent referencing a now-missing column produces
+   * a `kind: 'drift'`, `severity: 'warning'` diagnostic (never fails the
+   * build). See `detectOutputDrift` in manifest/output-drift.
+   */
+  outputContract?: Array<{ name: string; type?: string; role?: string }>;
 }
 
 export interface ManifestBlockDisplayHints {

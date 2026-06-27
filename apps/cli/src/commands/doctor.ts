@@ -92,6 +92,7 @@ export async function runDoctor(targetPath: string | null, flags: CLIFlags, rest
   ];
 
   checks.push(checkNotebookAssets());
+  checks.push(checkOutputContractDrift(projectRoot));
 
   if (defaultConnection?.driver === 'file' || defaultConnection?.driver === 'duckdb') {
     checks.push(checkDuckDBDependency(projectRoot));
@@ -693,6 +694,43 @@ function checkSemanticLayer(semanticConfig: unknown, projectRoot: string): Check
       name: 'Semantic layer',
       ok: false,
       detail: err instanceof Error ? err.message : String(err),
+    };
+  }
+}
+
+/**
+ * Surface output-contract drift: a parent block `ref()`s a child and
+ * references a column the child no longer outputs. These are always warnings —
+ * DQL keeps composition freeform and never fails the build on drift — so the
+ * check stays `ok` while still listing each drift so reviewers see it.
+ */
+function checkOutputContractDrift(projectRoot: string): Check {
+  try {
+    const dbtManifestPath = resolveDbtManifestPath(projectRoot) ?? undefined;
+    const manifest = buildManifest({ projectRoot, dbtManifestPath });
+    const drift = (manifest.diagnostics ?? []).filter((d) => d.kind === 'drift');
+    if (drift.length === 0) {
+      return {
+        name: 'Output-contract drift',
+        ok: true,
+        detail: 'no drift detected — referenced ref() columns match child output contracts',
+      };
+    }
+    const lines = drift.map((d) => {
+      const where = d.filePath ? `${d.filePath}: ` : '';
+      return `⚠ ${where}${d.message}`;
+    });
+    return {
+      name: 'Output-contract drift',
+      // Warning, not failure — drift never blocks. Reported so it is visible.
+      ok: true,
+      detail: `${drift.length} drift warning(s):\n    ${lines.join('\n    ')}`,
+    };
+  } catch (err) {
+    return {
+      name: 'Output-contract drift',
+      ok: true,
+      detail: `not checked: ${err instanceof Error ? err.message : String(err)}`,
     };
   }
 }
