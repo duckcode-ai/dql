@@ -63,7 +63,7 @@ Install only the database driver your project uses:
 | Database | Extra install before running queries | Notes |
 | --- | --- | --- |
 | Databricks SQL | none | Built into DQL through HTTPS |
-| DuckDB or local CSV/Parquet/JSON files | `npm install --prefix .dql/connectors duckdb` | Needed for `duckdb` and `file` connections |
+| DuckDB or local CSV/Parquet/JSON files | `npm install --prefix .dql/connectors duckdb@1.1.3` | Needed for `duckdb` and `file` connections |
 | Snowflake | `npm install --prefix .dql/connectors snowflake-sdk` | Needed for Snowflake connections |
 
 The notebook Connections page can also install DuckDB or Snowflake into

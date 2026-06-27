@@ -12,7 +12,7 @@ No. DQL supports local DuckDB and file queries. Install the project-local
 DuckDB driver, then query CSV, Parquet, or JSON files from the notebook:
 
 ```bash
-npm install --prefix .dql/connectors duckdb
+npm install --prefix .dql/connectors duckdb@1.1.3
 ```
 
 Databricks SQL is built in. Snowflake uses a project-local `snowflake-sdk`

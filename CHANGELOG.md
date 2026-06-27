@@ -61,6 +61,21 @@ results as certified. Everything here is OSS and local-first.
 
 ### Fixed
 
+- **Notebook no longer crashes (OOM) on every query.** The DQL parser could
+  infinite-loop on input it didn't recognize — including the raw SQL the cell
+  executor feeds it (e.g. `SELECT COUNT(*) …`) — exhausting the heap and killing the
+  notebook runtime. The parser now guarantees forward progress and terminates on any
+  input; a regression test exercises raw SQL and non-DQL text.
+- **Local DuckDB connector pinned to a non-crashing release.** `duckdb` 1.2.x+/1.4.x
+  hard-crash (native `BIGINT` serialization) on any `COUNT(*)`/`SUM`/id result, which
+  are ubiquitous; the connector install and docs now pin `duckdb@1.1.3`, the last
+  verified-good version on the local DuckDB path.
+- **dbt-profile DuckDB path now resolves against the dbt project, not the DQL
+  workspace.** A relative `path:` in `profiles.yml` (e.g. `jaffle_shop.duckdb`) was
+  resolved against the DQL workspace dir, so DuckDB silently opened/created an empty
+  database and every query failed "table does not exist". The imported connection now
+  resolves to an absolute path under the dbt project dir and warns when the file
+  doesn't exist yet.
 - **dbt import + freshness on the standard staging + mart layout.** The selective
   dbt import anchored **0 models** when a staging model's role-prefix-stripped alias
   (`stg_customers` → `customers`) collided with a same-named mart, which also

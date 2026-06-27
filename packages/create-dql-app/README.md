@@ -6,7 +6,7 @@ The fastest way to start a DQL project.
 npx create-dql-app@latest my-analytics
 cd my-analytics
 npm install
-npm install --prefix .dql/connectors duckdb       # DuckDB/local files only
+npm install --prefix .dql/connectors duckdb@1.1.3       # DuckDB/local files only
 # npm install --prefix .dql/connectors snowflake-sdk  # Snowflake only
 # Databricks does not need an extra package.
 npm run notebook
@@ -26,7 +26,7 @@ Database drivers are project-local so the base install stays fast:
 | Database | Extra install | Notes |
 | --- | --- | --- |
 | Databricks SQL | none | Built into DQL through HTTPS |
-| DuckDB or local files | `npm install --prefix .dql/connectors duckdb` | Needed for DuckDB, CSV, Parquet, and JSON |
+| DuckDB or local files | `npm install --prefix .dql/connectors duckdb@1.1.3` | Needed for DuckDB, CSV, Parquet, and JSON |
 | Snowflake | `npm install --prefix .dql/connectors snowflake-sdk` | Needed for Snowflake connections |
 
 You can also install DuckDB or Snowflake from the notebook Connections page.

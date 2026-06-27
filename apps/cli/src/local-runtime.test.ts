@@ -380,7 +380,8 @@ describe('getConnectorInstallStatuses', () => {
 
     expect(statuses.find((status) => status.driver === 'duckdb')).toMatchObject({
       packageName: 'duckdb',
-      packageSpec: 'duckdb@^1.1.0',
+      // Pinned to the last release without the native BIGINT-serialization crash.
+      packageSpec: 'duckdb@1.1.3',
       builtIn: false,
       installPath: '/tmp/demo-project/.dql/connectors',
     });
@@ -503,12 +504,65 @@ describe('discoverDbtProfileConnections', () => {
     const candidate = candidates.find((item) => item.path === profilePath && item.profileName === 'banking' && item.targetName === 'local');
 
     expect(candidate).toBeDefined();
+    // The duckdb `path` is relative to the dbt project dir; we resolve it to an absolute
+    // path so the imported connection opens the real warehouse, not an empty db elsewhere.
     expect(candidate?.connection).toMatchObject({
       driver: 'duckdb',
-      filepath: 'banking.duckdb',
+      filepath: join(projectRoot, 'banking.duckdb'),
     });
     expect(candidate?.warnings).toContain('Not the default dbt target "dev".');
     expect(candidates.some((item) => item.adapter === 'postgres')).toBe(false);
+  });
+
+  it('resolves a relative duckdb path against the dbt project dir, not the DQL workspace (regression)', () => {
+    // Workspace layout: DQL workspace at projectRoot, dbt project in a sibling-style subdir.
+    // A new user with a standard dbt+duckdb repo had the relative `path` resolved against the
+    // DQL workspace, so DuckDB silently created an EMPTY db there and every query failed.
+    const projectRoot = mkdtempSync(join(tmpdir(), 'dql-dbt-duckdb-path-'));
+    tempDirs.push(projectRoot);
+    const dbtDir = join(projectRoot, 'analytics');
+    mkdirSync(dbtDir, { recursive: true });
+    writeFileSync(join(dbtDir, 'dbt_project.yml'), 'name: jaffle\nprofile: jaffle\n', 'utf-8');
+    writeFileSync(join(dbtDir, 'profiles.yml'), [
+      'jaffle:',
+      '  target: dev',
+      '  outputs:',
+      '    dev:',
+      '      type: duckdb',
+      '      path: jaffle_shop.duckdb',
+    ].join('\n'), 'utf-8');
+    // The real warehouse lives next to dbt_project.yml.
+    writeFileSync(join(dbtDir, 'jaffle_shop.duckdb'), '', 'utf-8');
+
+    const candidates = discoverDbtProfileConnections(projectRoot, { dbt: { projectDir: 'analytics' } });
+    const candidate = candidates.find((item) => item.targetName === 'dev' && item.adapter === 'duckdb');
+
+    expect(candidate).toBeDefined();
+    // Resolved against the dbt dir, NOT projectRoot, and NOT left relative.
+    expect(candidate?.connection.filepath).toBe(join(dbtDir, 'jaffle_shop.duckdb'));
+    expect(candidate?.connection.filepath).not.toBe(join(projectRoot, 'jaffle_shop.duckdb'));
+    // The file exists, so no "not found" warning.
+    expect(candidate?.warnings.some((w) => w.includes('DuckDB file not found'))).toBe(false);
+  });
+
+  it('warns when the resolved duckdb file does not exist instead of failing silently (regression)', () => {
+    const projectRoot = mkdtempSync(join(tmpdir(), 'dql-dbt-duckdb-missing-'));
+    tempDirs.push(projectRoot);
+    writeFileSync(join(projectRoot, 'dbt_project.yml'), 'name: jaffle\nprofile: jaffle\n', 'utf-8');
+    writeFileSync(join(projectRoot, 'profiles.yml'), [
+      'jaffle:',
+      '  target: dev',
+      '  outputs:',
+      '    dev:',
+      '      type: duckdb',
+      '      path: not_built_yet.duckdb',
+    ].join('\n'), 'utf-8');
+
+    const candidates = discoverDbtProfileConnections(projectRoot, {});
+    const candidate = candidates.find((item) => item.targetName === 'dev' && item.adapter === 'duckdb');
+
+    expect(candidate?.connection.filepath).toBe(join(projectRoot, 'not_built_yet.duckdb'));
+    expect(candidate?.warnings.some((w) => w.includes('DuckDB file not found'))).toBe(true);
   });
 
   it('maps Snowflake dbt key-pair profiles from inline keys and key files', () => {

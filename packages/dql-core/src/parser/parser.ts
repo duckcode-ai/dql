@@ -89,6 +89,7 @@ export class Parser {
     const statements: StatementNode[] = [];
 
     while (!this.isAtEnd()) {
+      const posBefore = this.pos;
       try {
         const stmt = this.parseStatement();
         if (stmt) {
@@ -97,6 +98,13 @@ export class Parser {
       } catch (e) {
         // Skip to next statement-level token on error
         this.synchronize();
+      }
+      // Safety net: if neither parseStatement nor synchronize() advanced the
+      // cursor, force-advance. Without this, unrecognized input (e.g. a raw SQL
+      // cell mistakenly handed to the DQL parser) spins this loop forever and
+      // OOM-crashes the process.
+      if (this.pos === posBefore && !this.isAtEnd()) {
+        this.advance();
       }
     }
 

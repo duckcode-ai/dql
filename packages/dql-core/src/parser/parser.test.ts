@@ -884,4 +884,28 @@ describe('Block declarations — Phase A schema enforcement', () => {
       expect(block.blockType).toBe('custom');
     }
   });
+
+  // Regression: the parser used to infinite-loop on input it could not recognize
+  // (no forward-progress guard), which OOM-crashed the notebook runtime on EVERY
+  // raw-SQL query passed through the cell executor. It must always terminate —
+  // returning or throwing — never hang. A hang fails this test via the timeout.
+  it('terminates on non-DQL / raw SQL input instead of looping forever', () => {
+    const samples = [
+      'SELECT COUNT(*) AS n FROM dev.customers',
+      'WITH x AS (SELECT 1) SELECT * FROM x',
+      'select 1 as n',
+      '@@@ not dql at all %%% ;;;',
+      '}{)(',
+      '',
+    ];
+    for (const source of samples) {
+      // Throwing is acceptable; spinning forever is the bug under test.
+      try {
+        parse(source);
+      } catch {
+        /* a parse error is fine — reaching this line proves termination */
+      }
+    }
+    expect(true).toBe(true);
+  }, 5000);
 });

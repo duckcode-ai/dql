@@ -5795,7 +5795,10 @@ const CONNECTOR_INSTALLS: Record<string, Omit<ConnectorInstallStatus, 'installed
     driver: 'duckdb',
     label: 'DuckDB',
     packageName: 'duckdb',
-    packageSpec: 'duckdb@^1.1.0',
+    // Pinned: duckdb 1.2.x+/1.4.x hard-crash (native BIGINT serialization) on any
+    // COUNT(*)/SUM/id result, which kills the notebook runtime. 1.1.3 is the last
+    // verified-good release on the local DuckDB path. See enhancements/e2e-test-report.md.
+    packageSpec: 'duckdb@1.1.3',
     builtIn: false,
   },
   snowflake: {
@@ -7903,6 +7906,11 @@ function readBlockCompanionFile(projectRoot: string, relativePath: string) {
  * is best-effort and must never break a run.
  */
 export function extractBlockInvariants(source: string): string[] {
+  // Only DQL block sources declare invariants. Never hand a non-DQL cell source
+  // (e.g. a raw SQL notebook cell like "SELECT 1") to the DQL parser: it can loop
+  // on input it doesn't recognize and OOM-crash the runtime on every execute.
+  // Require a `block "..."` declaration before parsing.
+  if (!/(?:^|\n)\s*block\s+["']/.test(source)) return [];
   try {
     const ast = new Parser(source).parse();
     const block = ast.statements.find((statement: any) => statement.kind === 'BlockDecl') as
@@ -9946,6 +9954,23 @@ export function discoverDbtProfileConnections(projectRoot: string, projectConfig
         if (!output || typeof output !== 'object') continue;
         const mapped = mapDbtProfileOutput(output);
         if (!mapped) continue;
+        // dbt resolves a relative duckdb `path` against the dbt project dir (where it runs),
+        // NOT the DQL workspace. Resolve to an absolute path here so the imported connection
+        // opens the real warehouse instead of silently creating an empty db next to dql.config.json.
+        if (
+          mapped.adapter === 'duckdb' &&
+          mapped.connection.filepath &&
+          mapped.connection.filepath !== ':memory:'
+        ) {
+          if (!isAbsoluteLikePath(mapped.connection.filepath)) {
+            mapped.connection.filepath = resolve(dbtProjectPath, mapped.connection.filepath);
+          }
+          if (!existsSync(mapped.connection.filepath)) {
+            mapped.warnings.push(
+              `DuckDB file not found at ${mapped.connection.filepath} — run \`dbt build\` (or \`dbt seed\`) to create it before querying.`,
+            );
+          }
+        }
         const warnings = [...mapped.warnings];
         if (targetName !== defaultTarget) {
           warnings.push(`Not the default dbt target "${defaultTarget}".`);

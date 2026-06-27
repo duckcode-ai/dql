@@ -59,7 +59,7 @@ Databricks does not need an extra package.
 CLI equivalents:
 
 ```bash
-npm install --prefix .dql/connectors duckdb          # DuckDB and local files
+npm install --prefix .dql/connectors duckdb@1.1.3          # DuckDB and local files
 npm install --prefix .dql/connectors snowflake-sdk   # Snowflake
 ```
 
