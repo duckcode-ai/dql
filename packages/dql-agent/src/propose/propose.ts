@@ -41,7 +41,7 @@ import {
   type ProposeConfig,
   type ProposeConfigInput,
 } from './config.js';
-import { buildBusinessQuery } from './generate-sql.js';
+import { buildBusinessQuery, buildMetricWrapperBlocks } from './generate-sql.js';
 import type { EnrichedContent } from './enrich.js';
 
 export interface ProposeOptions {
@@ -625,6 +625,54 @@ export function propose(options: ProposeOptions): ProposeSummary {
     const enrichedExamples = enriched?.examples?.length
       ? enriched.examples.map((question) => ({ question }))
       : undefined;
+
+    // Metric-backed model → emit ONE metric-bound (semantic) block per governed
+    // metric it backs, so proposed blocks actually reference the semantic layer
+    // (type=semantic + metric=<name> + a pre-compiled, runnable query). Falls back
+    // to the custom block below when a model backs no usable measures.
+    const metricBlocks = proposal.inference.pattern === 'metric_wrapper'
+      ? buildMetricWrapperBlocks(model, scan.artifacts)
+      : [];
+    if (metricBlocks.length > 0) {
+      let firstPath: string | undefined;
+      let wroteAny = false;
+      for (const mb of metricBlocks) {
+        const slug = blockSlug(mb.metricName);
+        if (existingSlugs.has(slug)) { draftsSkipped++; continue; }
+        const metricRecord: ProposedDraftRecord = {
+          slug,
+          domain: proposal.domain,
+          owner: owner || proposal.owner || '',
+          description: mb.description?.trim() || `Governed "${mb.metricName}" metric from dbt model ${proposal.model}.`,
+          sql: mb.sql,
+          blockType: 'semantic',
+          metricRef: mb.metricName,
+          dimensions: mb.dimensions,
+          pattern: 'metric_wrapper',
+          grain: mb.dimensions.length > 0 ? mb.dimensions.join(' + ') : proposal.inference.grain,
+          entities: proposal.inference.entities,
+          declaredOutputs: [...mb.dimensions, mb.alias],
+          llmContext: `Wraps the governed semantic metric "${mb.metricName}". Use this for "${mb.metricName.replace(/_/g, ' ')}" questions.`,
+          invariants: [],
+          examples: [{ question: `What is ${mb.metricName.replace(/_/g, ' ')}?` }],
+          tags: ['proposed', 'from-dbt', 'metric'],
+          reviewCadence: 'quarterly',
+          sourceModel: proposal.model,
+          sourceSystems: [model.schema, model.database].filter((v): v is string => Boolean(v)),
+          certification: { certified: false, errors: [], warnings: [] },
+        };
+        const written = upsertProposedDraft(projectRoot, metricRecord);
+        existingSlugs.add(slug);
+        if (written.created) { draftsWritten++; wroteAny = true; firstPath ??= written.path; }
+      }
+      proposal.path = firstPath;
+      if (!wroteAny) {
+        proposal.skipped = 'Metric blocks for this model already exist; not overwriting.';
+        draftsSkipped++;
+      }
+      continue;
+    }
+
     const draftRecord: ProposedDraftRecord = {
       slug: proposal.slug,
       domain: proposal.domain,

@@ -131,3 +131,60 @@ export function buildBusinessQuery(
   }
   return buildProjection(model, inference);
 }
+
+/** One metric-bound (semantic) block: the governed metric + its pre-compiled query. */
+export interface MetricWrapperBlock {
+  /** Governed metric name to bind via `metric = "<name>"`. */
+  metricName: string;
+  /** Output column the aggregate is aliased to. */
+  alias: string;
+  /** Pre-compiled, runnable query (import-adapter shape). */
+  sql: string;
+  /** Group-by dimensions, surfaced as the block's `dimensions`. */
+  dimensions: string[];
+  /** Metric description from the semantic manifest, when present. */
+  description?: string;
+}
+
+/**
+ * Build ONE semantic block per governed metric a model backs. Each block binds the
+ * metric (`metric = "<name>"`) and carries the metric's own aggregate as a
+ * pre-compiled `query`, so it references the semantic layer AND runs offline. This
+ * is what makes proposed metric_wrapper blocks actually use the governed metrics
+ * instead of an unbound hand-rolled aggregation.
+ */
+export function buildMetricWrapperBlocks(model: DbtModelNode, artifacts: DbtArtifacts): MetricWrapperBlock[] {
+  const metrics = artifacts.semanticMetrics.filter(
+    (m) => m.model && m.model.toLowerCase() === model.name.toLowerCase() && (m.measure || m.expr),
+  );
+  if (metrics.length === 0) return [];
+
+  const semanticModel = artifacts.semanticModels.get(model.name);
+  // Group a metric ONLY by time dimensions (e.g. daily revenue) — NOT by the
+  // primary entity id. Grouping a measure by its own grain (order_item_id) is
+  // degenerate (SUM over one row = the row's value), which made the metric blocks
+  // meaningless. No time dimension → no GROUP BY → the metric's grand total.
+  const groupCols: string[] = [];
+  if (semanticModel) {
+    for (const dim of semanticModel.timeDimensions) {
+      if (!groupCols.includes(dim)) groupCols.push(dim);
+    }
+  }
+  const ref = `{{ ref('${model.name}') }}`;
+
+  const seen = new Set<string>();
+  const blocks: MetricWrapperBlock[] = [];
+  for (const metric of metrics) {
+    if (seen.has(metric.name)) continue;
+    seen.add(metric.name);
+    const expr = metric.expr || metric.measure!;
+    const alias = aliasFor(metric.measure || metric.name);
+    const selectLines = [...groupCols, `${aggToSql(metric.agg, expr)} AS ${alias}`];
+    let sql = `SELECT\n${selectLines.map((line) => `  ${line}`).join(',\n')}\nFROM ${ref}`;
+    if (groupCols.length > 0) {
+      sql += `\nGROUP BY ${groupCols.map((_, i) => i + 1).join(', ')}`;
+    }
+    blocks.push({ metricName: metric.name, alias, sql, dimensions: groupCols, description: metric.description });
+  }
+  return blocks;
+}

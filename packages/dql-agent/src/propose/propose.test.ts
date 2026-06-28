@@ -794,7 +794,7 @@ describe('Slice 2 — business-block SQL generation', () => {
     return join(targetDir, 'manifest.json');
   }
 
-  it('metric-backed model yields an AGGREGATION block (not SELECT *)', () => {
+  it('metric-backed model yields a metric-bound SEMANTIC block (not SELECT *)', () => {
     const manifestPath = writeSemanticManifest();
     const summary = propose({ projectRoot, dbtManifestPath: manifestPath });
 
@@ -804,12 +804,14 @@ describe('Slice 2 — business-block SQL generation', () => {
     expect(summary.metricsFound).toBe(1);
 
     const source = readFileSync(join(projectRoot, orders.path!), 'utf-8');
-    // Aggregation: references the measure aggregation + the declared grain/dim.
+    // Metric-bound semantic block: binds the governed metric (provenance) AND carries
+    // a runnable aggregate grouped by the TIME dimension only — grouping a measure by
+    // its own entity grain (order_id) would be degenerate, so it's intentionally absent.
+    expect(source).toMatch(/type\s*=\s*"semantic"/i);
+    expect(source).toMatch(/metric\s*=\s*"total_revenue"/i);
     expect(source).toMatch(/SUM\(revenue\)\s+AS\s+revenue/i);
     expect(source).toMatch(/GROUP BY/i);
-    expect(source).toContain('order_date'); // declared time dimension
-    expect(source).toContain('order_id'); // primary entity grain
-    // Must NOT be a bare passthrough.
+    expect(source).toContain('order_date'); // grouped by the declared time dimension
     expect(source).not.toMatch(/SELECT \* FROM/i);
   });
 
