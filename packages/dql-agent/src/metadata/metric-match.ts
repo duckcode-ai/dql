@@ -221,3 +221,55 @@ function clamp01(value: number): number {
   if (!Number.isFinite(value)) return 0;
   return Math.max(0, Math.min(1, value));
 }
+
+/**
+ * Parse a metric KG node's governed definition: the aggregate `sql:` expression
+ * and its `table:` relation, stored on `llmContext`. Returns undefined when the
+ * `sql:` is not an aggregate expression (a bare metric-name reference) or there is
+ * no table — those are not directly executable.
+ */
+export function parseMetricDefinition(metric: KGNode): { expr: string; table: string } | undefined {
+  const context = metric.llmContext ?? '';
+  const expr = context.match(/(?:^|\n)\s*sql:\s*(.+?)\s*(?:\n|$)/i)?.[1]?.trim();
+  const table = context.match(/(?:^|\n)\s*table:\s*(.+?)\s*(?:\n|$)/i)?.[1]?.trim();
+  if (!expr || !table || !/[()]/.test(expr)) return undefined;
+  return { expr, table };
+}
+
+/**
+ * Deterministic, offline-safe governed SQL for a matched metric (spec 17, part C):
+ * a single read-only `SELECT <expr> AS <alias> FROM <table>` synthesised from the
+ * metric's governed definition. Returns undefined when the definition is too thin
+ * to execute, preserving honest refusal.
+ */
+export function metricToGovernedSql(metric: KGNode): string | undefined {
+  const def = parseMetricDefinition(metric);
+  if (!def) return undefined;
+  const alias = metric.name.replace(/[^a-zA-Z0-9_]+/g, '_').replace(/^_+|_+$/g, '') || 'metric_value';
+  return `SELECT ${def.expr} AS ${alias}\nFROM ${def.table}`;
+}
+
+/**
+ * Resolve a matched metric to executable governed SQL. dbt's semantic layer splits
+ * a metric from its measure: a derived MetricFlow metric (e.g. `revenue`, type=simple
+ * over measure `revenue`) carries no `table:`/`sql:` of its own — the aggregate lives
+ * on the backing measure node (`order_item.revenue` → `SUM(product_price)` over
+ * `order_items`). When the matched metric is itself synthesizable we use it directly;
+ * otherwise we fall back to a sibling whose LEAF name matches (`revenue` ⇒
+ * `<model>.revenue`). No fuzzy family guessing — precise resolution or nothing.
+ */
+export function resolveGovernedMetricSql(
+  metric: KGNode,
+  pool: KGNode[],
+): { sql: string; metric: KGNode } | undefined {
+  const direct = metricToGovernedSql(metric);
+  if (direct) return { sql: direct, metric };
+  const leaf = metric.name.split('.').pop()?.toLowerCase();
+  if (!leaf) return undefined;
+  const leafSibling = pool
+    .filter((node) => node.nodeId !== metric.nodeId && node.name.split('.').pop()?.toLowerCase() === leaf)
+    .sort((a, b) => a.name.length - b.name.length)
+    .find((node) => metricToGovernedSql(node));
+  if (leafSibling) return { sql: metricToGovernedSql(leafSibling)!, metric: leafSibling };
+  return undefined;
+}

@@ -30,7 +30,7 @@ import { buildSkillBlockHints, buildSkillsPrompt, selectRelevantSkills } from '.
 import type { AgentMemory } from './memory/sqlite-memory.js';
 import type { LocalContextPack, MetadataAgentIntent, MetadataRouteDecision } from './metadata/catalog.js';
 import type { GeneratedDraftBlock } from './metadata/drafts.js';
-import { matchSemanticMetric, type MetricMatch } from './metadata/metric-match.js';
+import { matchSemanticMetric, metricToGovernedSql, resolveGovernedMetricSql, type MetricMatch } from './metadata/metric-match.js';
 import { validateSqlAgainstLocalContext } from './metadata/sql-context-validation.js';
 import { buildGroundingFromRuntimeRelations, resolveRelationsInSql, validateSqlAgainstGrounding, type SchemaGrounding } from './metadata/sql-grounding.js';
 import {
@@ -3660,56 +3660,6 @@ function collectMetricCandidates(
   return Array.from(byId.values());
 }
 
-/**
- * Deterministic, offline-safe governed SQL for a matched metric (spec 17, part
- * C). The metric KG node stores `sql:` (the aggregate expression) and `table:`
- * (the relation) on its `llmContext`. When the model declines to propose SQL but
- * a metric matched confidently, this synthesises a single read-only SELECT from
- * the governed metric definition so the answer routes to `semantic_metric`
- * instead of refusing. Returns undefined when the definition is too thin to be
- * safe (e.g. no expression/table), preserving honest refusal.
- */
-function metricToGovernedSql(metric: KGNode): string | undefined {
-  const context = metric.llmContext ?? '';
-  const sqlExpr = context.match(/(?:^|\n)\s*sql:\s*(.+?)\s*(?:\n|$)/i)?.[1]?.trim();
-  const table = context.match(/(?:^|\n)\s*table:\s*(.+?)\s*(?:\n|$)/i)?.[1]?.trim();
-  // A `sql:` that is just an identifier (a metric reference like `cumulative_revenue`,
-  // not an aggregate expression) with no `table:` cannot be executed directly.
-  if (!sqlExpr || !table || !/[()]/.test(sqlExpr)) return undefined;
-  const alias = metric.name.replace(/[^a-zA-Z0-9_]+/g, '_').replace(/^_+|_+$/g, '') || 'metric_value';
-  return `SELECT ${sqlExpr} AS ${alias}\nFROM ${table}`;
-}
-
-/**
- * Resolve a matched metric to executable governed SQL (spec 17, part C). dbt's
- * semantic layer splits a metric from its measure: a derived MetricFlow metric
- * (e.g. `revenue`, type=simple over measure `revenue`) carries no `table:`/`sql:`
- * of its own — the aggregate definition lives on the backing measure node
- * (`order_item.revenue` → `table: order_items`, `sql: SUM(product_price)`). When
- * the matched metric is itself synthesizable we use it directly; otherwise we
- * deterministically fall back to a sibling candidate whose leaf name matches
- * (`revenue` ⇒ `<model>.revenue`) and which carries an executable definition.
- * Returns the SQL plus the metric we actually answered from (for the route badge).
- */
-function resolveGovernedMetricSql(
-  metric: KGNode,
-  pool: KGNode[],
-): { sql: string; metric: KGNode } | undefined {
-  const direct = metricToGovernedSql(metric);
-  if (direct) return { sql: direct, metric };
-  // Exact leaf-name measure only (`revenue` ⇒ `<model>.revenue`). We deliberately
-  // do NOT fuzzy-match by measure family here: a thin metric like `orders` has many
-  // candidate measures on its table (count, cost, total, tax) and guessing would
-  // answer the WRONG measure. Precise resolution or nothing — honest over confident.
-  const leaf = metric.name.split('.').pop()?.toLowerCase();
-  if (!leaf) return undefined;
-  const leafSibling = pool
-    .filter((node) => node.nodeId !== metric.nodeId && node.name.split('.').pop()?.toLowerCase() === leaf)
-    .sort((a, b) => a.name.length - b.name.length)
-    .find((node) => metricToGovernedSql(node));
-  if (leafSibling) return { sql: metricToGovernedSql(leafSibling)!, metric: leafSibling };
-  return undefined;
-}
 
 function buildCertifiedEvidence(input: {
   question: string;

@@ -27,10 +27,17 @@
 
 import { existsSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
+import { createRequire } from 'node:module';
 import { Certifier } from '@duckcodeailabs/dql-governance';
 import type { BlockRecord, BlockStatus } from '@duckcodeailabs/dql-project';
 import { deriveSemanticDraftName } from '../metadata/drafts.js';
 import { resolveLocalOwner } from '../metadata/identity.js';
+import {
+  matchSemanticMetric,
+  resolveGovernedMetricSql,
+  parseMetricDefinition,
+} from '../metadata/metric-match.js';
+import type { KGNode } from '../kg/types.js';
 import {
   buildSchemaGrounding,
   renderGroundingForPrompt,
@@ -241,6 +248,78 @@ function asStringArray(value: unknown, max = 12): string[] {
     .slice(0, max);
 }
 
+/**
+ * A governed semantic metric matched to the build request (spec 17, part C — now
+ * applied to the Build path, not just Ask). When a metric like `average_tax_rate`
+ * already exists, the block should be built ON its governed definition instead of
+ * the model inventing a different formula.
+ */
+interface MatchedGovernedMetric {
+  /** Display name the user recognizes, e.g. "average_tax_rate". */
+  name: string;
+  /** Governed aggregate expression, e.g. "AVG(tax_rate)". */
+  expr: string;
+  /** Base relation, e.g. "locations". */
+  table: string;
+  /** Deterministic governed SELECT (fallback if the model declines SQL). */
+  sql: string;
+}
+
+const requireForBuild = createRequire(import.meta.url);
+
+/** Load metric KG nodes (read-only, best-effort) so the Build path can reuse the
+ * same governed-metric matching the Ask path uses. Returns [] when no KG exists. */
+function loadSemanticMetrics(projectRoot: string): KGNode[] {
+  const dbPath = join(projectRoot, '.dql', 'cache', 'agent-kg.sqlite');
+  if (!existsSync(dbPath)) return [];
+  try {
+    const Database = requireForBuild('better-sqlite3');
+    const db = new Database(dbPath, { readonly: true, fileMustExist: true });
+    try {
+      const rows = db
+        .prepare("SELECT node_id, name, domain, description, llm_context, tags_json FROM kg_nodes WHERE kind = 'metric' LIMIT 400")
+        .all() as Array<{ node_id: string; name: string; domain: string | null; description: string | null; llm_context: string | null; tags_json: string | null }>;
+      return rows.map((r): KGNode => ({
+        nodeId: r.node_id,
+        kind: 'metric',
+        name: r.name,
+        domain: r.domain ?? undefined,
+        description: r.description ?? undefined,
+        llmContext: r.llm_context ?? undefined,
+        tags: safeJsonArray(r.tags_json),
+      }));
+    } finally {
+      db.close();
+    }
+  } catch {
+    return [];
+  }
+}
+
+function safeJsonArray(raw: string | null): string[] {
+  if (!raw) return [];
+  try {
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed.filter((v): v is string => typeof v === 'string') : [];
+  } catch {
+    return [];
+  }
+}
+
+/** Match the request to a governed metric and resolve its executable definition. */
+async function matchGovernedMetric(projectRoot: string, prompt: string): Promise<MatchedGovernedMetric | undefined> {
+  const metrics = loadSemanticMetrics(projectRoot);
+  if (metrics.length === 0) return undefined;
+  const match = await matchSemanticMetric(prompt, metrics).catch(() => null);
+  if (!match) return undefined;
+  const resolved = resolveGovernedMetricSql(match.metric, metrics);
+  if (!resolved) return undefined;
+  const def = parseMetricDefinition(resolved.metric);
+  if (!def) return undefined;
+  // Display the metric the USER recognizes; use the resolved measure's executable def.
+  return { name: match.metric.name, expr: def.expr, table: def.table, sql: resolved.sql };
+}
+
 /** Output column names that name a non-negative measure (safe for a `>= 0` guard). */
 const NON_NEGATIVE_MEASURE_RE = /(revenue|sales|income|count|total|amount|sum|qty|quantity|value|price|profit|cost|spend|orders?|tax)\b/i;
 
@@ -378,13 +457,16 @@ async function buildCell(
   provider: AgentProvider | undefined,
   skillsPrompt: string,
   appliedSkills: AppliedSkill[],
+  matchedMetric?: MatchedGovernedMetric,
 ): Promise<BuildCellResult> {
   if (!provider) {
+    // No provider — prefer the governed metric definition over a blank starter.
     return {
       target: 'cell',
-      sql: fallbackCellSql(grounding, options.context),
-      explanation:
-        'No AI provider is configured. Returned a starter query — edit it, or set a provider to generate SQL from your prompt.',
+      sql: matchedMetric?.sql ?? fallbackCellSql(grounding, options.context),
+      explanation: matchedMetric
+        ? `Used the governed metric \`${matchedMetric.name}\` (${matchedMetric.expr}). Set a provider to tailor it further.`
+        : 'No AI provider is configured. Returned a starter query — edit it, or set a provider to generate SQL from your prompt.',
       appliedSkills,
     };
   }
@@ -392,6 +474,9 @@ async function buildCell(
   const userPrompt = [
     skillsPrompt || null,
     `Request: ${options.prompt}`,
+    matchedMetric
+      ? `GOVERNED METRIC — \`${matchedMetric.name}\` is defined as ${matchedMetric.expr} over ${matchedMetric.table}. Build the SQL USING this governed expression (do not invent a different formula); apply any requested grouping on top of it.`
+      : null,
     options.context?.cellSql ? `Current cell SQL:\n${options.context.cellSql}` : null,
     options.context?.selection ? `Selected fragment:\n${options.context.selection}` : null,
     `Grounded schema:\n${renderGroundingForPrompt(grounding, 'cell')}`,
@@ -437,8 +522,10 @@ async function buildCell(
 
   return {
     target: 'cell',
-    sql: fallbackCellSql(grounding, options.context),
-    explanation: 'Could not generate SQL from the prompt; returned a starter query to refine.',
+    sql: matchedMetric?.sql ?? fallbackCellSql(grounding, options.context),
+    explanation: matchedMetric
+      ? `Answered from the governed metric \`${matchedMetric.name}\` (${matchedMetric.expr}).`
+      : 'Could not generate SQL from the prompt; returned a starter query to refine.',
     appliedSkills,
   };
 }
@@ -462,10 +549,16 @@ async function generateBlockContent(
   grounding: SchemaGrounding,
   provider: AgentProvider | undefined,
   skillsPrompt: string,
+  matchedMetric?: MatchedGovernedMetric,
 ): Promise<{ content: BlockDraftContent; userPrompt: string }> {
   const userPrompt = [
     skillsPrompt || null,
     `Request: ${options.prompt}`,
+    // Authoritative: a governed metric already defines this measure — use ITS
+    // expression, do not re-derive a different formula.
+    matchedMetric
+      ? `GOVERNED METRIC — a certified semantic metric already exists for this request: \`${matchedMetric.name}\` is defined as ${matchedMetric.expr} over ${matchedMetric.table}. Build the SQL USING this exact governed expression (do not invent a different formula); apply any requested grouping or grain on top of it.`
+      : null,
     options.context?.cellSql ? `Reference SQL:\n${options.context.cellSql}` : null,
     `Grounded schema:\n${renderGroundingForPrompt(grounding, 'block')}`,
     workedExample(grounding, 'ref') || null,
@@ -562,12 +655,13 @@ async function buildBlock(
   provider: AgentProvider | undefined,
   skillsPrompt: string,
   appliedSkills: AppliedSkill[],
+  matchedMetric?: MatchedGovernedMetric,
 ): Promise<BuildBlockResult> {
   const { projectRoot } = options;
   const owner = resolveLocalOwner(projectRoot, { explicit: options.owner });
   const domain = (options.domain ?? 'misc').trim() || 'misc';
 
-  const { content, userPrompt } = await generateBlockContent(options, grounding, provider, skillsPrompt);
+  const { content, userPrompt } = await generateBlockContent(options, grounding, provider, skillsPrompt, matchedMetric);
 
   // Semantic name: provider suggestion → rule-based → legacy tokenizer (never the raw prompt).
   const existingSlugs = collectExistingSlugs(projectRoot);
@@ -577,12 +671,14 @@ async function buildBlock(
     existingSlugs,
   });
 
-  // SQL: provider SQL (grounded + repaired) → reference cell SQL → deterministic
-  // templated SELECT. Block SQL references relations via {{ ref() }}.
+  // SQL: provider SQL → governed metric definition (when a metric matched and the
+  // model declined) → reference cell SQL → deterministic templated SELECT. All go
+  // through grounding so relations become `{{ ref() }}` forms.
   let sql: string;
-  if (content.sql) {
+  const initialSql = content.sql || (matchedMetric ? matchedMetric.sql : undefined);
+  if (initialSql) {
     const grounded = await groundAndRepairSql({
-      initialSql: content.sql,
+      initialSql,
       grounding,
       prefer: 'ref',
       provider,
@@ -597,8 +693,12 @@ async function buildBlock(
       resolveRelationsInSql(fallbackCellSql(grounding, options.context), grounding, { prefer: 'ref' }).sql;
   }
 
-  const description =
+  const baseDescription =
     content.description || `Draft block built from prompt: "${options.prompt.slice(0, 160)}".`;
+  // When built on a governed metric, make that provenance explicit in the description.
+  const description = matchedMetric
+    ? `${baseDescription} Built on the governed metric \`${matchedMetric.name}\` (${matchedMetric.expr}).`
+    : baseDescription;
   const outputs = content.outputs;
   const examples = content.examples;
   const entities = content.entities;
@@ -640,7 +740,7 @@ async function buildBlock(
     owner,
     description,
     sql,
-    pattern: 'custom',
+    pattern: matchedMetric ? 'metric_wrapper' : 'custom',
     grain,
     entities,
     declaredOutputs: outputs,
@@ -673,7 +773,9 @@ async function buildBlock(
     certifierVerdict: verdict,
     appliedSkills,
     edited: false,
-    route: { tier: 'generated_sql', label: `Drafted new block ${name}`, ref: name },
+    route: matchedMetric
+      ? { tier: 'semantic_metric', label: `Based on governed metric ${matchedMetric.name}`, ref: matchedMetric.name }
+      : { tier: 'generated_sql', label: `Drafted new block ${name}`, ref: name },
   };
 }
 
@@ -909,13 +1011,20 @@ export async function buildFromPrompt(options: BuildFromPromptOptions): Promise<
   const skillsPrompt = buildSkillsPrompt(selectedSkills, options.userId ?? null);
   const appliedSkills: AppliedSkill[] = selectedSkills.map((s) => ({ id: s.id, description: s.description }));
 
+  // Semantic-metric routing (spec 17, part C) for the Build path: if a governed
+  // metric already answers this request, build ON its certified definition instead
+  // of letting the model invent a formula. Skipped for edit mode (a different intent).
+  const matchedMetric = options.mode === 'edit'
+    ? undefined
+    : await matchGovernedMetric(options.projectRoot, options.prompt);
+
   if (options.target === 'cell') {
-    return buildCell(options, grounding, provider, skillsPrompt, appliedSkills);
+    return buildCell(options, grounding, provider, skillsPrompt, appliedSkills, matchedMetric);
   }
   // target: 'block' — edit an existing block in place, or create a new draft.
   return options.mode === 'edit'
     ? editBlock(options, grounding, provider, skillsPrompt, appliedSkills)
-    : buildBlock(options, grounding, provider, skillsPrompt, appliedSkills);
+    : buildBlock(options, grounding, provider, skillsPrompt, appliedSkills, matchedMetric);
 }
 
 // Re-export so callers can reuse the slugifier when needed.
