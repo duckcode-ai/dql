@@ -80,6 +80,11 @@ import {
   resolveProposeConfig,
   recordQueryRun,
   recordRuntimeSchemaSnapshot,
+  loadSkills,
+  writeSkill,
+  deleteSkill,
+  type Skill,
+  type WriteSkillInput,
   type AgentAnswer,
   type AgentResultPayload,
   type AgentProvider,
@@ -1682,12 +1687,20 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           selection: typeof body?.context?.selection === 'string' ? body.context.selection : undefined,
         };
         const owner = typeof body?.owner === 'string' ? body.owner : undefined;
+        const userId = typeof (body as { userId?: unknown })?.userId === 'string'
+          ? (body as { userId?: string }).userId
+          : undefined;
+        // Inject user-authored Skills as business context; the engine selects the
+        // relevant subset and stamps `appliedSkills` on the result.
+        const skills = loadSkills(projectRoot).skills;
         const result: BuildFromPromptResult = await buildFromPrompt({
           projectRoot,
           prompt,
           context,
           target,
           owner,
+          userId,
+          skills,
           dbtManifestPath: resolveDbtManifestPath(projectRoot, loadProjectConfig(projectRoot)),
         });
         res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
@@ -1705,6 +1718,93 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
       try {
         res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
         res.end(serializeJSON({ owner: resolveLocalOwner(projectRoot) }));
+      } catch (error) {
+        res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({ error: error instanceof Error ? error.message : String(error) }));
+      }
+      return;
+    }
+
+    // ── Skills (spec 16) — user-authored business context. AI drafts, humans
+    //    certify; skills never carry certification. PROJECT skills (user empty)
+    //    are shared; PERSONAL skills (user set) are user-bound. ────────────────
+    if (req.method === 'GET' && path === '/api/skills') {
+      try {
+        const skills = loadSkills(projectRoot).skills.map(serializeSkill);
+        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({ skills }));
+      } catch (error) {
+        res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({ error: error instanceof Error ? error.message : String(error) }));
+      }
+      return;
+    }
+
+    // Form pickers: metrics from the semantic layer + certified block ids.
+    if (req.method === 'GET' && path === '/api/skills/options') {
+      try {
+        const metrics = semanticLayer
+          ? semanticLayer.listMetrics().map((m) => m.name).sort()
+          : [];
+        const manifest = buildManifest({ projectRoot, dqlVersion: 'notebook' });
+        const blocks = Object.values(manifest.blocks)
+          .filter((b) => b.status === 'certified')
+          .map((b) => b.name)
+          .sort();
+        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({ metrics, blocks }));
+      } catch (error) {
+        res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({ error: error instanceof Error ? error.message : String(error) }));
+      }
+      return;
+    }
+
+    if (req.method === 'POST' && path === '/api/skills') {
+      try {
+        const body = (await readJSON(req).catch(() => ({}))) as { skill?: unknown };
+        const input = parseSkillInput(body?.skill);
+        if (!input) {
+          res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
+          res.end(serializeJSON({ error: 'Provide { skill } with id, scope, and body.' }));
+          return;
+        }
+        const skill = writeSkill(projectRoot, input);
+        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({ skill: serializeSkill(skill) }));
+      } catch (error) {
+        res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({ error: error instanceof Error ? error.message : String(error) }));
+      }
+      return;
+    }
+
+    if (req.method === 'PUT' && path.startsWith('/api/skills/')) {
+      try {
+        const id = decodeURIComponent(path.slice('/api/skills/'.length));
+        const body = (await readJSON(req).catch(() => ({}))) as { skill?: unknown };
+        const input = parseSkillInput(body?.skill, id);
+        if (!input) {
+          res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
+          res.end(serializeJSON({ error: 'Provide { skill } with scope and body.' }));
+          return;
+        }
+        const skill = writeSkill(projectRoot, input);
+        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({ skill: serializeSkill(skill) }));
+      } catch (error) {
+        res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({ error: error instanceof Error ? error.message : String(error) }));
+      }
+      return;
+    }
+
+    if (req.method === 'DELETE' && path.startsWith('/api/skills/')) {
+      try {
+        const id = decodeURIComponent(path.slice('/api/skills/'.length));
+        deleteSkill(projectRoot, id);
+        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({ ok: true }));
       } catch (error) {
         res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' });
         res.end(serializeJSON({ error: error instanceof Error ? error.message : String(error) }));
@@ -5785,6 +5885,69 @@ export function serializeJSON(value: unknown): string {
     }
     return current;
   });
+}
+
+/** Serialize a Skill to the shared API contract shape (spec 16). */
+function serializeSkill(skill: Skill): {
+  id: string;
+  scope: 'project' | 'personal';
+  user?: string;
+  description?: string;
+  body: string;
+  preferredMetrics: string[];
+  preferredBlocks: string[];
+  vocabulary: Record<string, string>;
+  sourcePath: string;
+  isStarter?: boolean;
+} {
+  return {
+    id: skill.id,
+    scope: skill.scope,
+    user: skill.user,
+    description: skill.description,
+    body: skill.body,
+    preferredMetrics: skill.preferredMetrics,
+    preferredBlocks: skill.preferredBlocks,
+    vocabulary: skill.vocabulary,
+    sourcePath: skill.sourcePath,
+    isStarter: skill.isStarter,
+  };
+}
+
+/**
+ * Validate + normalize an inbound `{ skill }` body into a WriteSkillInput.
+ * `id` + `scope` + `body` are required; `fallbackId` supplies the id on PUT
+ * (from the URL). Returns null when the payload is invalid.
+ */
+function parseSkillInput(raw: unknown, fallbackId?: string): WriteSkillInput | null {
+  if (!raw || typeof raw !== 'object') return null;
+  const skill = raw as Record<string, unknown>;
+  const id = typeof skill.id === 'string' && skill.id.trim() ? skill.id.trim() : fallbackId;
+  if (!id) return null;
+  const scope = skill.scope === 'personal' ? 'personal' : skill.scope === 'project' ? 'project' : undefined;
+  if (!scope) return null;
+  if (typeof skill.body !== 'string') return null;
+  const asStrings = (value: unknown): string[] =>
+    Array.isArray(value) ? value.filter((v): v is string => typeof v === 'string') : [];
+  const asMap = (value: unknown): Record<string, string> => {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return {};
+    const out: Record<string, string> = {};
+    for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
+      if (typeof v === 'string') out[k] = v;
+    }
+    return out;
+  };
+  return {
+    id,
+    scope,
+    user: scope === 'personal' && typeof skill.user === 'string' ? skill.user : undefined,
+    description: typeof skill.description === 'string' ? skill.description : undefined,
+    body: skill.body,
+    preferredMetrics: asStrings(skill.preferredMetrics),
+    preferredBlocks: asStrings(skill.preferredBlocks),
+    vocabulary: asMap(skill.vocabulary),
+    isStarter: skill.isStarter === true ? true : undefined,
+  };
 }
 
 async function refreshLocalMetadataCatalog(projectRoot: string): Promise<void> {

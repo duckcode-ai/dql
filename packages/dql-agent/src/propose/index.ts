@@ -24,6 +24,7 @@ export type {
   BuildCellResult,
   BuildBlockResult,
   CertifierVerdict,
+  AppliedSkill,
 } from './build-from-prompt.js';
 export {
   resolveProposeConfig,
@@ -32,7 +33,7 @@ export {
 export type { ProposeConfig, ProposeConfigInput } from './config.js';
 export { classifyModel, resolveDomain } from './classify.js';
 export type { Classification, ClassificationResult } from './classify.js';
-export { loadDbtArtifacts } from './dbt-artifacts.js';
+export { loadDbtArtifacts, buildQualifiedRelation } from './dbt-artifacts.js';
 export type {
   DbtArtifacts,
   DbtModelNode,

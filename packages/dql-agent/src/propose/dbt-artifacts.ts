@@ -29,6 +29,17 @@ export interface DbtModelNode {
   resourceType: 'model';
   schema?: string;
   database?: string;
+  /** dbt `alias` (the warehouse relation name), when it differs from `name`. */
+  alias?: string;
+  /**
+   * Fully-qualified warehouse relation `database.schema.alias` (e.g.
+   * `dev.order_items`), built from the existing manifest fields. This is the
+   * REAL relation a `FROM` clause in an ad-hoc cell must reference — never the
+   * bare model name. Falls back to the most-qualified form available.
+   */
+  qualifiedRelation: string;
+  /** The dbt `{{ ref('<name>') }}` form for governed BLOCK SQL. */
+  refForm: string;
   description?: string;
   materialized?: string;
   tags: string[];
@@ -53,8 +64,29 @@ export interface DbtSourceNode {
   resourceType: 'source';
   schema?: string;
   database?: string;
+  /** Fully-qualified warehouse relation `database.schema.identifier`. */
+  qualifiedRelation: string;
+  /** The dbt `{{ source('<source>', '<table>') }}` form, when derivable. */
+  refForm?: string;
   description?: string;
   tags: string[];
+}
+
+/**
+ * Build the fully-qualified warehouse relation for a node from its
+ * `database` / `schema` / relation-name fields. Returns the most-qualified
+ * dotted form available (`db.schema.name` → `schema.name` → `name`) so a
+ * `FROM` clause always references the REAL relation, never a bare model name.
+ */
+export function buildQualifiedRelation(parts: {
+  database?: string;
+  schema?: string;
+  name: string;
+}): string {
+  return [parts.database, parts.schema, parts.name]
+    .map((part) => (typeof part === 'string' ? part.trim() : ''))
+    .filter((part) => part.length > 0)
+    .join('.');
 }
 
 export interface DbtExposureNode {
@@ -195,8 +227,16 @@ export function loadDbtArtifacts(manifestPath: string): DbtArtifacts {
   for (const [uniqueId, raw] of Object.entries(asRecord(manifest.nodes))) {
     const node = asRecord(raw);
     if (node.resource_type !== 'model') continue;
-    const name = firstString(node.alias, node.name);
+    // `name` is the logical model name (used by `{{ ref() }}`); `alias` is the
+    // warehouse relation name. They are usually equal, but when an `alias` is
+    // declared the qualified relation must use it, not the model name.
+    const modelName = firstString(node.name);
+    const alias = firstString(node.alias);
+    const name = alias ?? modelName;
     if (!name) continue;
+    const refName = modelName ?? name;
+    const schema = firstString(node.schema);
+    const database = firstString(node.database);
     const path = firstString(node.original_file_path, node.path);
     const folder = folderFromPath(path);
     const dependsOn = Array.isArray(asRecord(node.depends_on).nodes)
@@ -206,8 +246,11 @@ export function loadDbtArtifacts(manifestPath: string): DbtArtifacts {
       uniqueId,
       name,
       resourceType: 'model',
-      schema: firstString(node.schema),
-      database: firstString(node.database),
+      schema,
+      database,
+      alias: alias && alias !== modelName ? alias : undefined,
+      qualifiedRelation: buildQualifiedRelation({ database, schema, name }),
+      refForm: `{{ ref('${refName}') }}`,
       description: firstString(node.description),
       materialized: firstString(asRecord(node.config).materialized),
       tags: Array.isArray(node.tags) ? (node.tags as unknown[]).map(String) : [],
@@ -223,14 +266,19 @@ export function loadDbtArtifacts(manifestPath: string): DbtArtifacts {
 
   for (const [uniqueId, raw] of Object.entries(asRecord(manifest.sources))) {
     const node = asRecord(raw);
-    const name = firstString(node.identifier, node.name);
-    if (!name) continue;
+    const identifier = firstString(node.identifier, node.name);
+    if (!identifier) continue;
+    const schema = firstString(node.schema);
+    const database = firstString(node.database);
+    const sourceName = firstString(node.source_name);
     sources.push({
       uniqueId,
-      name,
+      name: identifier,
       resourceType: 'source',
-      schema: firstString(node.schema),
-      database: firstString(node.database),
+      schema,
+      database,
+      qualifiedRelation: buildQualifiedRelation({ database, schema, name: identifier }),
+      refForm: sourceName ? `{{ source('${sourceName}', '${firstString(node.name) ?? identifier}') }}` : undefined,
       description: firstString(node.description),
       tags: Array.isArray(node.tags) ? (node.tags as unknown[]).map(String) : [],
     });

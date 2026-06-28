@@ -1,7 +1,7 @@
 import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs';
 import { basename, join, relative, resolve } from 'node:path';
 import { createWelcomeNotebook, serializeNotebook } from '@duckcodeailabs/dql-notebook';
-import { resolveLocalOwner } from '@duckcodeailabs/dql-agent';
+import { resolveLocalOwner, seedDefaultSkills } from '@duckcodeailabs/dql-agent';
 import type { CLIFlags } from '../args.js';
 import { performSemanticImport } from '../semantic-import.js';
 import { runNotebook } from './notebook.js';
@@ -109,6 +109,16 @@ export async function runInit(targetArg: string | null, flags: CLIFlags): Promis
     importedSemanticCatalog = true;
   }
 
+  // Seed the three editable starter Skills into .dql/skills/ (idempotent — never
+  // clobbers user edits). The metrics glossary reflects the semantic layer, so
+  // this runs AFTER any semantic import above.
+  let seededSkills = 0;
+  try {
+    seededSkills = seedDefaultSkills(targetDir).created.length;
+  } catch {
+    // Skill seeding is best-effort; never fail `dql init` over it.
+  }
+
   // Output
   if (flags.format === 'json') {
     console.log(JSON.stringify({
@@ -117,6 +127,7 @@ export async function runInit(targetArg: string | null, flags: CLIFlags): Promis
       created: true,
       dbt: isDbt,
       duckdb: duckdbPath ?? null,
+      seededSkills,
     }, null, 2));
     return;
   }
@@ -144,6 +155,9 @@ export async function runInit(targetArg: string | null, flags: CLIFlags): Promis
   console.log('    notebooks/welcome.dqlnb');
   if (importedSemanticCatalog) {
     console.log('    semantic-layer/ (imported local semantic catalog)');
+  }
+  if (seededSkills > 0) {
+    console.log(`    .dql/skills/ (${seededSkills} editable starter skill${seededSkills === 1 ? '' : 's'})`);
   }
   console.log('');
   console.log('  Next steps:');
