@@ -30,6 +30,12 @@ import { join } from 'node:path';
 import { createRequire } from 'node:module';
 import { Certifier } from '@duckcodeailabs/dql-governance';
 import type { BlockRecord, BlockStatus } from '@duckcodeailabs/dql-project';
+import {
+  reflectAndReviseBlock,
+  type ExecutionProbe,
+  type BlockReflection,
+  type ReflectableDraft,
+} from './reflect-block.js';
 import { deriveSemanticDraftName } from '../metadata/drafts.js';
 import { resolveLocalOwner } from '../metadata/identity.js';
 import {
@@ -123,6 +129,13 @@ export interface BuildFromPromptOptions {
    * an execution error triggers the same repair loop a validation miss does.
    */
   executeSql?: (sql: string) => Promise<unknown>;
+  /**
+   * Optional execution probe for the reflect-before-certify loop (P2). When
+   * supplied, the agent runs the block's SQL to learn its REAL output columns and
+   * evaluates the declared invariants, so the reflection can reconcile the output
+   * contract and produce a grounded tests verdict before a human reviews it.
+   */
+  executionProbe?: (input: { sql: string; invariants: string[] }) => Promise<ExecutionProbe>;
 }
 
 /** The Skills that shaped this build (stamped on both targets). */
@@ -160,6 +173,11 @@ export interface BuildBlockResult {
   route?: BuildRoute;
   /** True when this result updated an existing block in place (edit mode). */
   edited?: boolean;
+  /**
+   * Reflect-before-certify report (P2): what the agent self-checked, what it
+   * auto-fixed (output contract, governance gaps), and what remains for the human.
+   */
+  reflection?: BlockReflection;
 }
 
 export type BuildFromPromptResult = BuildCellResult | BuildBlockResult;
@@ -716,10 +734,14 @@ async function buildBlock(
   // so the lineage warning is pre-satisfied (reviewer can refine).
   const sourceSystems = ['dbt'];
 
-  // Certifier verdict (stored, never used to flip status). Build a BlockRecord
-  // mirroring what the draft will declare so the verdict matches the file.
   const draftRelPath = resolveDraftRelPath(projectRoot, domain, name);
-  const record = toBlockRecord({
+  const blockType: 'custom' | 'semantic' = matchedMetric ? 'semantic' : 'custom';
+  const pattern = matchedMetric ? 'metric_wrapper' : 'custom';
+
+  // Reflect-before-certify (P2): build → run the verifier → auto-revise what is
+  // SAFE (the output contract via the execution probe, governance gaps) → report
+  // the rest for the human. Owner accountability stays the human gate.
+  const reflectable: ReflectableDraft = {
     slug: name,
     domain,
     owner,
@@ -729,44 +751,61 @@ async function buildBlock(
     entities,
     invariants,
     llmContext: content.llmContext,
+    reviewCadence: 'quarterly',
     tags,
+    sourceSystems,
     gitPath: draftRelPath,
-    blockType: matchedMetric ? 'semantic' : 'custom',
-    pattern: matchedMetric ? 'metric_wrapper' : 'custom',
+    blockType,
+    pattern,
     metricRef: matchedMetric?.name,
+  };
+  let probe: ExecutionProbe | undefined;
+  if (options.executionProbe) {
+    // Best-effort: a probe failure falls back to a static (governance-only) reflection.
+    try {
+      probe = await options.executionProbe({ sql, invariants });
+    } catch {
+      probe = undefined;
+    }
+  }
+  const reflection = reflectAndReviseBlock(reflectable, probe);
+  const revised = reflection.revised;
+  const verdict = verdictFrom({
+    errors: reflection.certification.errors,
+    warnings: reflection.certification.warnings,
   });
-  const evaluation = new Certifier().evaluate(record);
-  const verdict = verdictFrom(evaluation);
 
   const draft: ProposedDraftRecord = {
     slug: name,
     domain,
     owner,
-    description,
+    description: revised.description,
     sql,
     // Metric-bound (semantic) block when a governed metric drove this build, so it
     // references the semantic layer instead of re-deriving the formula in raw SQL.
-    blockType: matchedMetric ? 'semantic' : 'custom',
-    metricRef: matchedMetric?.name,
-    pattern: matchedMetric ? 'metric_wrapper' : 'custom',
-    grain,
-    entities,
-    declaredOutputs: outputs,
+    blockType: revised.blockType ?? blockType,
+    metricRef: revised.metricRef,
+    pattern: revised.pattern ?? pattern,
+    grain: revised.grain,
+    entities: revised.entities,
+    // Reflected outputs: reconciled against the SQL's real columns when probed.
+    declaredOutputs: revised.outputs,
     // App-ready: the block's output columns become dashboard filters.
-    ...deriveBlockFilters(outputs),
-    llmContext: content.llmContext,
-    invariants,
+    ...deriveBlockFilters(revised.outputs),
+    llmContext: revised.llmContext,
+    invariants: revised.invariants,
     examples: examples.map((question) => ({ question })),
-    tags,
-    reviewCadence: 'quarterly',
+    tags: revised.tags,
+    reviewCadence: revised.reviewCadence,
     sourceModel: '(ai-build prompt)',
-    sourceSystems,
-    // Store the same verdict the record produced so the review header is accurate.
+    sourceSystems: revised.sourceSystems,
+    // The reflected verdict — the review header reflects what the agent already fixed.
     certification: {
       certified: false,
-      errors: evaluation.errors,
-      warnings: evaluation.warnings,
+      errors: reflection.certification.errors,
+      warnings: reflection.certification.warnings,
     },
+    reflectionFixes: reflection.fixesApplied.map((f) => `${f.rule}: ${f.action}`),
   };
 
   const written = upsertProposedDraft(projectRoot, draft);
@@ -776,11 +815,12 @@ async function buildBlock(
     path: written.path,
     name,
     sqlPreview: sql,
-    description,
-    grain,
-    outputs,
+    description: revised.description,
+    grain: revised.grain,
+    outputs: revised.outputs,
     examples,
     certifierVerdict: verdict,
+    reflection,
     appliedSkills,
     edited: false,
     route: matchedMetric

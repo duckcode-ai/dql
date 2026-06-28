@@ -59,3 +59,10 @@ export {
 export type { ProposedDraftRecord, WrittenDraft } from './write-draft.js';
 export { enrichProposal, enrichProposals } from './enrich.js';
 export type { EnrichFacts, EnrichedContent, EnrichOptions } from './enrich.js';
+export { reflectAndReviseBlock } from './reflect-block.js';
+export type {
+  ReflectableDraft,
+  ExecutionProbe,
+  BlockReflection,
+  ReflectionFix,
+} from './reflect-block.js';

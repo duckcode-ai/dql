@@ -1750,6 +1750,33 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           userId,
           skills,
           dbtManifestPath: resolveDbtManifestPath(projectRoot, loadProjectConfig(projectRoot)),
+          // Reflect-before-certify probe (P2): run the candidate block's SQL to learn
+          // its REAL output columns and evaluate the declared invariants, so the agent
+          // can reconcile the output contract + produce a grounded verdict before a
+          // human reviews. Best-effort — buildFromPrompt falls back to a static reflection.
+          executionProbe: async ({ sql, invariants }) => {
+            const activeConnection = requireActiveConnection();
+            const prepared = prepareLocalExecution(sql, activeConnection, projectRoot, projectConfig);
+            const probeSql = `SELECT * FROM (${stripSqlTerminator(prepared.sql)}) _dql_probe LIMIT 2000`;
+            const probeResult = await executor.executeQuery(probeSql, [], runtimeVariables({}), prepared.connection);
+            const rows = (Array.isArray(probeResult?.rows) ? probeResult.rows : []) as Array<Record<string, unknown>>;
+            const rawColumns = Array.isArray((probeResult as { columns?: unknown })?.columns)
+              ? (probeResult as { columns: unknown[] }).columns
+              : [];
+            const actualColumns = rawColumns.length > 0
+              ? rawColumns.map((c) => (typeof c === 'string' ? c : (c as { name?: string })?.name ?? String(c)))
+              : (rows[0] ? Object.keys(rows[0]) : []);
+            const invariantResults = evaluateInvariants(invariants, { columns: actualColumns, rows });
+            const passed = invariantResults.filter((r) => r.passed && !r.uncheckable).length;
+            const failed = invariantResults.filter((r) => !r.passed && !r.uncheckable).length;
+            return {
+              actualColumns,
+              invariantResults,
+              tests: invariants.length > 0
+                ? { passed, failed, assertionCount: invariantResults.length }
+                : undefined,
+            };
+          },
         });
         res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
         res.end(serializeJSON(result));

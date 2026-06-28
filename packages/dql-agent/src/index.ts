@@ -257,7 +257,12 @@ export type {
   EnrichFacts,
   EnrichedContent,
   EnrichOptions,
+  ReflectableDraft,
+  ExecutionProbe,
+  BlockReflection,
+  ReflectionFix,
 } from "./propose/index.js";
+export { reflectAndReviseBlock } from "./propose/index.js";
 export type {
   BuildLocalContextPackRequest,
   EnsureMetadataCatalogOptions,
