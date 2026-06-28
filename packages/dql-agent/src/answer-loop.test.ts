@@ -2698,3 +2698,79 @@ describe("answer — freshness-aware trust", () => {
     expect(result.trustLabelInfo?.display).toBe("Certified");
   });
 });
+
+describe("answer route exposure + semantic-metric routing (spec 17, part C)", () => {
+  function revenueMetric(name: string, description: string): KGNode {
+    return {
+      nodeId: `metric:${name}`,
+      kind: "metric",
+      name,
+      domain: "finance",
+      description,
+      tags: ["revenue"],
+      llmContext: `sql: SUM(amount)\ntable: dev.order_items`,
+      sourceTier: "semantic_layer",
+      certification: "ai_generated",
+      provenance: "semantic layer",
+    };
+  }
+
+  function seedMetricsKg(): void {
+    kg.rebuild(
+      [
+        revenueMetric("cumulative_revenue", "Running total of recognized revenue"),
+        revenueMetric("food_revenue", "Revenue from food line items"),
+        revenueMetric("drink_revenue", "Revenue from drink line items"),
+      ],
+      [],
+    );
+  }
+
+  it("routes a clear metric question to semantic_metric with a metric ref (the reported miss)", async () => {
+    seedMetricsKg();
+    const provider = new StubProvider(
+      "Total revenue from the governed metric.\n\n```sql\nSELECT SUM(amount) AS revenue FROM dev.order_items\n```\n\nViz: single_value",
+    );
+    const result = await answer({ question: "what is our total revenue", provider, kg });
+    expect(result.kind).not.toBe("no_answer");
+    expect(result.route?.tier).toBe("semantic_metric");
+    expect(result.route?.ref).toMatch(/revenue/);
+    expect(result.route?.label).toContain("metric");
+  });
+
+  it("answers a metric question deterministically even when the model declines SQL", async () => {
+    seedMetricsKg();
+    // A provider that returns prose with no SQL block would normally refuse; the
+    // matched governed metric must still answer (offline-safe metric SQL).
+    const provider = new StubProvider("I am not sure how to write that SQL.");
+    const result = await answer({ question: "show me total revenue", provider, kg });
+    expect(result.route?.tier).toBe("semantic_metric");
+    expect(result.proposedSql ?? result.sql ?? "").toMatch(/SUM\(amount\)/i);
+  });
+
+  it("routes an ad-hoc analytical question to generated_sql", async () => {
+    seedMetricsKg();
+    const provider = new StubProvider(
+      "Median order value by region.\n\n```sql\nSELECT region, MEDIAN(amount) FROM dev.order_items GROUP BY region\n```\n\nViz: bar",
+    );
+    const result = await answer({ question: "median order value by region", provider, kg });
+    expect(result.route?.tier).toBe("generated_sql");
+  });
+
+  it("preserves certified-first routing (certified_block route)", async () => {
+    // Uses the top-level beforeEach KG with block:revenue_total certified.
+    const provider = new StubProvider("should not be called");
+    const result = await answer({ question: "What was revenue this quarter?", provider, kg });
+    expect(result.kind).toBe("certified");
+    expect(result.route?.tier).toBe("certified_block");
+    expect(result.route?.ref).toBe("revenue_total");
+  });
+
+  it("keeps an honest refusal as no_answer when nothing fits", async () => {
+    kg.rebuild([], []);
+    const provider = new StubProvider("I cannot answer that.");
+    const result = await answer({ question: "qwfp zxcv asdf", provider, kg });
+    expect(result.kind).toBe("no_answer");
+    expect(result.route?.tier).toBe("no_answer");
+  });
+});

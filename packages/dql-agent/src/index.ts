@@ -73,7 +73,11 @@ export type {
   AgentSchemaTable,
   AnswerKind,
   AnswerLoopInput,
+  AiRoute,
+  AiRouteTier,
 } from "./answer-loop.js";
+export { matchSemanticMetric } from "./metadata/metric-match.js";
+export type { MetricMatch, MatchSemanticMetricOptions } from "./metadata/metric-match.js";
 export {
   APP_BUILDER_SKILLS,
   planAppFromPrompt,
@@ -226,6 +230,8 @@ export type {
   BuildFromPromptResult,
   BuildCellResult,
   BuildBlockResult,
+  BuildMode,
+  BuildRoute,
   CertifierVerdict,
   ProposeConfig,
   ProposeConfigInput,

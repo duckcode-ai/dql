@@ -29,6 +29,8 @@ export interface Skill {
   scope: 'project' | 'personal';
   /** Optional user this skill is bound to. Empty = project-level skill. */
   user?: string;
+  /** Optional domain this skill belongs to (spec 17, part B). */
+  domain?: string;
   description?: string;
   preferredMetrics: string[];
   preferredBlocks: string[];
@@ -98,6 +100,7 @@ export function parseSkill(raw: string, path: string): Skill | null {
     id,
     scope: user ? 'personal' : 'project',
     user,
+    domain: pickString(meta.domain),
     description: pickString(meta.description),
     preferredMetrics: pickStringArray(meta.preferred_metrics),
     preferredBlocks: pickStringArray(meta.preferred_blocks),
@@ -148,6 +151,7 @@ export function renderSkill(skill: Skill): string {
   if (skill.scope === 'personal' && skill.user) {
     lines.push(`user: ${quoteIfNeeded(skill.user)}`);
   }
+  if (skill.domain) lines.push(`domain: ${quoteIfNeeded(skill.domain)}`);
   if (skill.description) lines.push(`description: ${quoteIfNeeded(skill.description)}`);
   if (skill.preferredMetrics.length > 0) {
     lines.push(`preferred_metrics: [${skill.preferredMetrics.map(quoteIfNeeded).join(', ')}]`);
@@ -172,6 +176,7 @@ export interface WriteSkillInput {
   id: string;
   scope: 'project' | 'personal';
   user?: string;
+  domain?: string;
   description?: string;
   preferredMetrics?: string[];
   preferredBlocks?: string[];
@@ -187,6 +192,7 @@ function toSkill(projectRoot: string, input: WriteSkillInput): Skill {
     id: input.id,
     scope,
     user: scope === 'personal' ? (input.user || undefined) : undefined,
+    domain: input.domain || undefined,
     description: input.description,
     preferredMetrics: input.preferredMetrics ?? [],
     preferredBlocks: input.preferredBlocks ?? [],

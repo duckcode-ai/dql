@@ -1,0 +1,138 @@
+/**
+ * Domain declaration writer (spec 17, part B).
+ *
+ * `scanDomains` reads first-class `domain "<Name>" { ... }` declarations and
+ * `dql doctor` warns when a used domain has no such declaration — but until now
+ * there was no way to AUTHOR one. This module emits a `domain` declaration in
+ * the EXACT format the parser (`parseDomainDecl`) + `scanDomains` accept, and
+ * resolves the canonical on-disk location for it.
+ *
+ * Convention (matches `scanDomains` + the "domain-first folders" test):
+ *   domains/<slug>/domain.dql      ← when a domain folder exists or is chosen
+ *   domains/<slug>/domain.dql      ← created if absent (the writer makes the dir)
+ *
+ * A domain authored here is `name`, `owner`, `boundedContext`, `sourceSystems`,
+ * `description`. `reviewCadence` is included with a sensible default so the
+ * doctor's "missing reviewCadence" warning is also satisfied.
+ */
+
+import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { dirname, join, relative } from 'node:path';
+
+/** A domain authored through the writer (spec 17, part B). */
+export interface DomainInput {
+  name: string;
+  owner?: string;
+  boundedContext?: string;
+  sourceSystems?: string[];
+  description?: string;
+  /** Optional review cadence; defaults to "quarterly" so doctor stays quiet. */
+  reviewCadence?: string;
+}
+
+export interface WrittenDomain {
+  /** Project-relative path of the written `domain.dql`. */
+  path: string;
+  /** Absolute path on disk. */
+  absPath: string;
+  /** The folder slug under `domains/`. */
+  slug: string;
+}
+
+function escapeString(value: string): string {
+  return value.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+}
+
+/** Normalize a domain name/id into a folder slug under `domains/`. */
+export function domainFolderSlug(value: string): string {
+  return (
+    value
+      .trim()
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, '-')
+      .replace(/^-+|-+$/g, '') || 'domain'
+  );
+}
+
+function stringArrayField(name: string, values: string[] | undefined): string {
+  if (!values || values.length === 0) return '';
+  return `\n  ${name} = [${values.map((v) => `"${escapeString(v)}"`).join(', ')}]`;
+}
+
+/**
+ * Render a first-class `domain` declaration that `scanDomains` reads back. The
+ * field order + syntax mirror the parser's accepted set so a round-trip is
+ * lossless for the authored fields.
+ */
+export function renderDomainDeclaration(domain: DomainInput): string {
+  const reviewCadence = domain.reviewCadence?.trim() || 'quarterly';
+  const lines = [`domain "${escapeString(domain.name)}" {`];
+  if (domain.owner) lines.push(`  owner = "${escapeString(domain.owner)}"`);
+  if (domain.boundedContext) lines.push(`  boundedContext = "${escapeString(domain.boundedContext)}"`);
+  lines.push(`  reviewCadence = "${escapeString(reviewCadence)}"`);
+  let body = lines.join('\n');
+  body += stringArrayField('sourceSystems', domain.sourceSystems);
+  if (domain.description) body += `\n  description = "${escapeString(domain.description)}"`;
+  body += '\n}\n';
+  return body;
+}
+
+/**
+ * Resolve the canonical `domains/<slug>/domain.dql` path for a domain. Honors an
+ * EXISTING `domain.dql` anywhere under `domains/<slug>/` (so a PUT/DELETE finds
+ * the file `scanDomains` actually read), else falls back to the canonical path.
+ */
+export function resolveDomainDeclPath(
+  projectRoot: string,
+  nameOrSlug: string,
+): { absPath: string; relativePath: string; slug: string } {
+  const slug = domainFolderSlug(nameOrSlug);
+  const domainDir = join(projectRoot, 'domains', slug);
+  // Prefer an existing declaration file (any `*.dql` that declares this domain).
+  const existing = findExistingDomainFile(domainDir);
+  const absPath = existing ?? join(domainDir, 'domain.dql');
+  return { absPath, relativePath: relative(projectRoot, absPath), slug };
+}
+
+/** Find an existing `.dql` file under a domain folder that declares a domain. */
+function findExistingDomainFile(domainDir: string): string | undefined {
+  if (!existsSync(domainDir)) return undefined;
+  try {
+    for (const entry of readdirSync(domainDir, { withFileTypes: true })) {
+      if (!entry.isFile() || !entry.name.endsWith('.dql')) continue;
+      const file = join(domainDir, entry.name);
+      const source = readFileSync(file, 'utf-8');
+      if (/(^|\n)\s*domain\s+"/.test(source)) return file;
+    }
+  } catch {
+    // Best-effort.
+  }
+  return undefined;
+}
+
+/**
+ * Write (create or overwrite) a first-class domain declaration. Returns the path
+ * written. The folder is created so subsequent block authoring can place blocks
+ * under `domains/<slug>/blocks/`.
+ */
+export function writeDomainDeclaration(projectRoot: string, domain: DomainInput): WrittenDomain {
+  if (!domain.name || !domain.name.trim()) {
+    throw new Error('writeDomainDeclaration requires a non-empty domain name.');
+  }
+  const { absPath, relativePath, slug } = resolveDomainDeclPath(projectRoot, domain.name);
+  mkdirSync(dirname(absPath), { recursive: true });
+  writeFileSync(absPath, renderDomainDeclaration(domain), 'utf-8');
+  return { path: relativePath, absPath, slug };
+}
+
+/**
+ * Delete a domain declaration file. Returns true when a file was removed. Only
+ * the declaration `.dql` is removed — authored blocks/terms under the folder are
+ * left untouched.
+ */
+export function deleteDomainDeclaration(projectRoot: string, nameOrSlug: string): boolean {
+  const { absPath } = resolveDomainDeclPath(projectRoot, nameOrSlug);
+  if (!existsSync(absPath)) return false;
+  rmSync(absPath, { force: true });
+  return true;
+}
