@@ -82,10 +82,13 @@ export function AiBuildDialog(): JSX.Element | null {
           </div>
           <div style={{ flex: 1, minWidth: 0 }}>
             <div style={{ fontSize: 14, fontWeight: 850, color: t.textPrimary, fontFamily: t.font }}>
-              Ask AI to build a block
+              {request.mode === 'edit' ? 'Ask AI to modify a block' : 'Ask AI to build a block'}
             </div>
             <div style={{ fontSize: 11.5, color: t.textMuted, fontFamily: t.font, marginTop: 1 }}>
-              {request.sourceLabel ?? 'Generate a draft from your dbt + semantic context. Nothing is certified.'}
+              {request.sourceLabel
+                ?? (request.mode === 'edit'
+                  ? 'Describe the change and review a before/after diff. Nothing is certified.'
+                  : 'Generate a draft from your dbt + semantic context. Nothing is certified.')}
             </div>
           </div>
           <button
@@ -110,12 +113,14 @@ export function AiBuildDialog(): JSX.Element | null {
         </div>
         <div style={{ flex: 1, minHeight: 0, overflow: 'auto' }}>
           <AiBuildResult
-            key={`${request.target}:${request.prompt ?? ''}:${request.sourceLabel ?? ''}`}
+            key={`${request.target}:${request.mode ?? 'create'}:${request.blockPath ?? ''}:${request.prompt ?? ''}:${request.sourceLabel ?? ''}`}
             themeMode={state.themeMode}
             initialTarget={request.target}
             lockTarget={request.lockTarget}
             initialPrompt={request.prompt}
             context={request.context}
+            initialMode={request.mode}
+            initialBlockPath={request.blockPath}
             onInsertCell={insertCell}
             onOpenBlock={openBlock}
           />

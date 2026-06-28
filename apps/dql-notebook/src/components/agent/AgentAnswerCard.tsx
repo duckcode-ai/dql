@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import type { AgentTurn } from '../../llm/types';
-import type { CellChartConfig, QueryResult } from '../../store/types';
+import type { AiRoute, CellChartConfig, QueryResult } from '../../store/types';
 import { themes, type Theme, type ThemeMode } from '../../themes/notebook-theme';
 import { api } from '../../api/client';
 import { ChartOutput, resolveChartType } from '../output/ChartOutput';
@@ -8,7 +8,7 @@ import { TableOutput } from '../output/TableOutput';
 import { TrustBadge, DerivationWalkPanel, type TrustState } from '@duckcodeailabs/dql-ui';
 import { buildDerivationWalk, type Business360ResultV2, type DerivationWalk } from '@duckcodeailabs/dql-core/lineage';
 import { useNotebook } from '../../store/NotebookStore';
-import { GuidedBySkills } from './AiBuildResult';
+import { GuidedBySkills, RouteBadge } from './AiBuildResult';
 
 type AnswerTab = 'answer' | 'visual' | 'data' | 'lineage' | 'context' | 'sql' | 'review';
 type AddToAppMode = 'auto' | 'chart' | 'data' | 'both';
@@ -131,6 +131,8 @@ export interface AgentAnswerEnvelope {
   promoteCommand?: string;
   // Spec 16 — business-context skills that guided this answer (backend-populated).
   appliedSkills?: Array<{ id: string; description?: string }>;
+  // Spec 17 (part C) — how this answer was reached (backend-populated).
+  route?: AiRoute;
 }
 
 export function extractGovernedAnswer(events: AgentTurn[]): AgentAnswerEnvelope | null {
@@ -468,6 +470,7 @@ export function AgentAnswerCard({
     <div style={{ display: 'flex', flexDirection: 'column', gap: compact ? 8 : 10, whiteSpace: 'normal' }}>
       <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
         <TrustBadge state={trustState} />
+        <RouteBadge t={t} route={answer.route} />
         {!compact && blockName && (
           <span style={{ fontSize: 12, fontFamily: t.fontMono, color: t.textSecondary }}>
             block: {blockName}

@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { Home, Sparkles, GraduationCap } from 'lucide-react';
+import { Home, Sparkles, GraduationCap, Boxes } from 'lucide-react';
 import { Tooltip } from '@duckcodeailabs/dql-ui';
 import {
   FileText,
@@ -129,7 +129,7 @@ export function ActivityBar() {
       dispatch({ type: 'SET_SIDEBAR_PANEL', panel: 'lineage' });
       return;
     }
-    const fullPagePanel = panel === 'connection' || panel === 'reference' || panel === 'git' || panel === 'apps' || panel === 'readiness' || panel === 'skills' || panel === 'settings';
+    const fullPagePanel = panel === 'connection' || panel === 'reference' || panel === 'git' || panel === 'apps' || panel === 'readiness' || panel === 'skills' || panel === 'domains' || panel === 'settings';
     if (fullPagePanel) {
       dispatch({ type: 'SET_SIDEBAR_PANEL', panel });
       return;
@@ -202,6 +202,12 @@ export function ActivityBar() {
       title: 'Connections',
       icon: <Database size={16} strokeWidth={1.75} />,
       active: state.mainView === 'connection',
+    },
+    {
+      key: 'domains',
+      title: 'Domains',
+      icon: <Boxes size={16} strokeWidth={1.75} />,
+      active: state.mainView === 'domains',
     },
     {
       key: 'skills',

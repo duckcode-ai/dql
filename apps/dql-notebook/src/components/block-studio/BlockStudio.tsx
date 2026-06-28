@@ -923,6 +923,22 @@ export function BlockStudio() {
                   sourceLabel: activeBlockName ? `Building from ${activeBlockName}` : 'Describe the reusable block you need.',
                 })}
               />
+              {/* Spec 17 (part A) — open AI Build straight into "Modify existing"
+                  for the block currently in the editor. */}
+              {state.activeBlockPath && (
+                <TemplateButton
+                  label="Modify with AI"
+                  Icon={Sparkles}
+                  onClick={() => openAiBuild({
+                    target: 'block',
+                    lockTarget: true,
+                    mode: 'edit',
+                    blockPath: state.activeBlockPath ?? undefined,
+                    context: state.blockStudioDraft.trim() ? { cellSql: state.blockStudioDraft } : undefined,
+                    sourceLabel: activeBlockName ? `Modifying ${activeBlockName}` : 'Describe the change you want.',
+                  })}
+                />
+              )}
               <TemplateButton label="Run" onClick={() => void handleRun()} busy={running} />
               <TemplateButton label="Save" onClick={() => void handleSave()} busy={saving} />
             </>

@@ -139,9 +139,9 @@ export interface ParamConfig {
   defaultValue: string;
   options?: string[];
 }
-export type SidebarPanel = 'files' | 'schema' | 'block_library' | 'connection' | 'reference' | 'lineage' | 'git' | 'apps' | 'readiness' | 'skills' | 'settings' | null;
+export type SidebarPanel = 'files' | 'schema' | 'block_library' | 'connection' | 'reference' | 'lineage' | 'git' | 'apps' | 'readiness' | 'skills' | 'domains' | 'settings' | null;
 export type DevPanelTab = 'logs' | 'errors';
-export type MainView = 'home' | 'notebook' | 'business_artifact' | 'lineage' | 'lineage_detail' | 'block_studio' | 'imports' | 'connection' | 'reference' | 'git' | 'apps' | 'readiness' | 'review' | 'skills' | 'settings';
+export type MainView = 'home' | 'notebook' | 'business_artifact' | 'lineage' | 'lineage_detail' | 'block_studio' | 'imports' | 'connection' | 'reference' | 'git' | 'apps' | 'readiness' | 'review' | 'skills' | 'domains' | 'settings';
 export type AppWorkspaceExperience = 'view' | 'build';
 export type AppWorkspaceSection = 'dashboards' | 'notebooks' | 'research' | 'ai' | 'drafts' | 'settings';
 export type LineageReturnTarget =
@@ -289,6 +289,8 @@ export type AiBuildResult =
       explanation?: string;
       // Spec 16 — skills that guided this build (backend-populated).
       appliedSkills?: Array<{ id: string; description?: string }>;
+      // Spec 17 (part C) — how the answer was reached (backend-populated).
+      route?: AiRoute;
     }
   | {
       target: 'block';
@@ -302,9 +304,44 @@ export type AiBuildResult =
       certifierVerdict: AiBuildCertifierVerdict;
       // Spec 16 — skills that guided this build (backend-populated).
       appliedSkills?: Array<{ id: string; description?: string }>;
+      // Spec 17 (part A) — the block's SQL before an edit-mode build, for a
+      // before/after diff. Present only when mode:'edit' was requested.
+      previousSql?: string;
+      // Spec 17 (part C) — how the answer was reached (backend-populated).
+      route?: AiRoute;
     };
 
 export type AiBuildTarget = AiBuildResult['target'];
+
+// ── Spec 17 (part A) — Flexible authoring: create vs edit an existing block ───
+export type AiBuildMode = 'create' | 'edit';
+
+// ── Spec 17 (part C) — Smart routing: how an AI answer was reached ───────────
+// A subtle, consumer-facing badge on AI results. `tier` is the route the
+// backend took; `label` is a ready-to-render sentence; `ref` is the metric or
+// block name the answer came from (when applicable).
+export interface AiRoute {
+  tier: 'certified_block' | 'semantic_metric' | 'generated_sql' | 'business_context' | 'no_answer';
+  label: string;
+  ref?: string;
+}
+
+// ── Spec 17 (part B) — Domains: the top of the domain→term→block hierarchy ────
+// A first-class domain authored on the Domains page. Counts are backend-
+// populated rollups; everything but id/name is optional so a freshly-created
+// domain renders cleanly.
+export interface Domain {
+  id: string;
+  name: string;
+  owner?: string;
+  boundedContext?: string;
+  sourceSystems?: string[];
+  description?: string;
+  sourcePath?: string;
+  blockCount?: number;
+  skillCount?: number;
+  termCount?: number;
+}
 
 // ── Spec 16 — Skills authoring & management ─────────────────────────────────
 // A "skill" is a business-context file (`.dql/skills/*.skill.md`) the agent
@@ -329,6 +366,8 @@ export interface Skill {
   sourcePath: string;
   /** A dbt-seeded editable starter ("starter — edit me"). */
   isStarter?: boolean;
+  /** Spec 17 (part B) — the domain this skill belongs to (domain id). */
+  domain?: string;
 }
 
 /** Skills that shaped an AI answer — surfaced as the "guided by" line. */

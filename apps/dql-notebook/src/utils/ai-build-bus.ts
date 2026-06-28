@@ -9,7 +9,7 @@
 // dialog subscribes via `subscribeAiBuild`. Decoupling through a bus avoids
 // threading a callback through every intermediate view/store.
 
-import type { AiBuildTarget } from '../store/types';
+import type { AiBuildTarget, AiBuildMode } from '../store/types';
 
 export interface AiBuildLaunchRequest {
   target: AiBuildTarget;
@@ -21,6 +21,11 @@ export interface AiBuildLaunchRequest {
   context?: { cellSql?: string; selection?: string };
   /** Human label for the surface that opened it (shown in the dialog header). */
   sourceLabel?: string;
+  // ── Spec 17 (part A) — open straight into "Modify existing block" ──────────
+  /** 'edit' rewrites the block at `blockPath`; 'create' (default) makes new. */
+  mode?: AiBuildMode;
+  /** The block path to modify, when `mode: 'edit'`. */
+  blockPath?: string;
 }
 
 const EVENT = 'dql:ai-build-open';

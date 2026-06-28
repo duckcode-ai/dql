@@ -20,6 +20,7 @@ import { GitPage } from '../git/GitPage';
 import { ReadinessPage } from '../readiness/ReadinessPage';
 import { ReviewPage } from '../review/ReviewPage';
 import { SkillsPage } from '../skills/SkillsPage';
+import { DomainsPage } from '../domains/DomainsPage';
 import { AppsView } from '../apps/AppsView';
 import { LineageDrawer } from '../lineage/LineageDrawer';
 import { AiBuildDialog } from '../agent/AiBuildDialog';
@@ -219,6 +220,8 @@ export function AppShell() {
             <ReadinessPage />
           ) : state.mainView === 'skills' ? (
             <SkillsPage />
+          ) : state.mainView === 'domains' ? (
+            <DomainsPage />
           ) : state.mainView === 'review' ? (
             <FullPageSection
               title="Review & Certify"
