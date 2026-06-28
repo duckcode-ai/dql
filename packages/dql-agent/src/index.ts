@@ -61,6 +61,15 @@ export type {
   SeedDefaultSkillsResult,
 } from "./skills/defaults.js";
 export { answer, parseProposal } from "./answer-loop.js";
+export {
+  decideAgentAction,
+  looksLikeComposeApp,
+  looksLikeFollowUp,
+  type AgentAction,
+  type IntentDecision,
+  type IntentDecisionInput,
+  type IntentSignals,
+} from "./intent-controller.js";
 export type {
   AgentAnalysisPlan,
   AgentAnswer,
