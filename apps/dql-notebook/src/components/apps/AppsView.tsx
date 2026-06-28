@@ -2669,6 +2669,25 @@ function DashboardFilterInput({
       />
     );
   }
+  if (filter.type === 'daterange') {
+    const range = value && typeof value === 'object' && !Array.isArray(value)
+      ? (value as { start?: unknown; end?: unknown })
+      : {};
+    const start = typeof range.start === 'string' ? range.start : '';
+    const end = typeof range.end === 'string' ? range.end : '';
+    // Emit a range ONLY when both ends are set (runtime needs both for BETWEEN);
+    // a partial range is sent as undefined so the filter is simply skipped.
+    const emit = (nextStart: string, nextEnd: string) =>
+      onChange(nextStart && nextEnd ? { start: nextStart, end: nextEnd } : undefined);
+    return (
+      <label className="dql-app-filter-select dql-app-filter-range" title={filter.bindsTo ? `${label} -> ${filter.bindsTo}` : label} aria-label={label}>
+        <span className="dql-app-filter-icon">{filterIconForDashboardFilter(filter)}</span>
+        <input type="date" value={start} aria-label={`${label} from`} onChange={(event) => emit(event.target.value, end)} />
+        <span className="dql-app-filter-range-sep">–</span>
+        <input type="date" value={end} aria-label={`${label} to`} onChange={(event) => emit(start, event.target.value)} />
+      </label>
+    );
+  }
   return (
     <label className="dql-app-filter-select" title={filter.bindsTo ? `${label} -> ${filter.bindsTo}` : label} aria-label={label}>
       <span className="dql-app-filter-icon">{filterIconForDashboardFilter(filter)}</span>
@@ -2735,7 +2754,9 @@ function isCoveredByExistingDashboardFilter(
 
 function parameterFilterType(id: string): DashboardFilter['type'] {
   if (/(top[_-]?n|limit|count|number|start|end|year|season)/i.test(id)) return 'number';
-  if (/date/i.test(id)) return 'date';
+  // Time-ish columns get a date-RANGE picker (the runtime applies BETWEEN). Covers
+  // the common dbt/warehouse naming (`ordered_at`, `_at`, `_date`, `_time`, `_ts`).
+  if (/(_at$|_date$|_time$|_ts$|date|time|day|week|month|quarter|period)/i.test(id)) return 'daterange';
   return 'text';
 }
 

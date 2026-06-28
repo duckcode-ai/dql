@@ -6940,6 +6940,9 @@ function buildDashboardFilterPredicate(input: {
     const end = addDashboardFilterParam(input, 'end', range.end);
     return `${input.expression} BETWEEN $${start.position} AND $${end.position}`;
   }
+  // A daterange with only one bound set is incomplete — skip it rather than binding
+  // the partial object as a scalar equality (which would produce invalid SQL).
+  if (input.filterType === 'daterange') return null;
   const values = Array.isArray(input.value) ? input.value.filter((item) => !isEmptyDashboardFilterValue(item)) : [input.value];
   if (values.length === 0) return null;
   if (values.length === 1) {
