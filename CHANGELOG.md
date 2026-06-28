@@ -61,6 +61,20 @@ results as certified. Everything here is OSS and local-first.
 
 ### Fixed
 
+- **AI-generated SQL is grounded in the real warehouse.** Generated SQL used bare
+  table names (`FROM order_items`) that don't exist (`Catalog Error … did you mean
+  "dev.order_items"?`). Both SQL paths now share one grounding layer: tables are
+  presented as their qualified relation (`db.schema.table`) and `{{ ref() }}` form
+  with real columns + join keys, only the relevant tables are retrieved, a
+  deterministic resolver rewrites any bare name to its real relation, and the result
+  is validated + repaired (re-prompted on a miss) before it runs — so the build path
+  gets the validation the governed answer-loop already had.
+- **Skills — teach the AI your business context.** A new **Skills** page lets you add,
+  edit, and delete project-wide and personal "skills" (definitions, rules, vocabulary,
+  preferred metrics/blocks) saved as Git-versioned `.dql/skills/*.skill.md`. `dql init`
+  seeds three editable starters (a metrics glossary from your semantic layer, SQL
+  conventions, and a domain-rules template). The agent applies the relevant skills per
+  question and shows "guided by <skills>" on its answers.
 - **Proposals show their work before you approve.** Each Get Started proposal now
   expands to the **SQL it will run**, its output columns, example questions, and a
   plain "what's missing to certify" — fetched on demand. You approve what you can
