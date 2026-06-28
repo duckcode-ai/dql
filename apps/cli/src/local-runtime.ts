@@ -104,6 +104,8 @@ import {
   type ProposeConfigInput,
   type EnrichedContent,
   type BuildFromPromptResult,
+  reindexProject,
+  defaultKgPath,
 } from '@duckcodeailabs/dql-agent';
 import { gatherProposeEnrichment } from './propose-enrich.js';
 import { handleAppsApi, recommendVisualization } from './apps-api.js';
@@ -1706,6 +1708,16 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
           res.end(serializeJSON({ error: "Edit mode requires target 'block' and a { blockPath }." }));
           return;
+        }
+        // Ensure the agent knowledge graph is built before generating, so the Build
+        // path's semantic-metric routing sees the governed metrics on the very first
+        // call (a cold Build-before-Ask otherwise reads an unbuilt KG and misses them).
+        // Mirrors what the Ask path does; reindex is idempotent and closes its write
+        // connection, so the read-only metric load observes committed data.
+        try {
+          await reindexProject(projectRoot, { kgPath: defaultKgPath(projectRoot) });
+        } catch {
+          // Best-effort: a failed reindex falls back to whatever KG exists (or none).
         }
         // Inject user-authored Skills as business context; the engine selects the
         // relevant subset and stamps `appliedSkills` on the result.
@@ -8367,7 +8379,7 @@ export function saveBlockStudioArtifacts(
     };
   },
 ): string {
-  const slug = options.name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '') || 'block';
+  const slug = options.name.toLowerCase().replace(/[^a-z0-9_]+/g, '-').replace(/^[-_]+|[-_]+$/g, '') || 'block';
   const safeDomain = (options.domain ?? '')
     .trim()
     .toLowerCase()
@@ -8429,7 +8441,7 @@ export function saveBlockStudioDraftArtifacts(
     stableSuffix?: string;
   },
 ): string {
-  const slug = options.name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '') || 'block';
+  const slug = options.name.toLowerCase().replace(/[^a-z0-9_]+/g, '-').replace(/^[-_]+|[-_]+$/g, '') || 'block';
   const safeDomain = (options.domain ?? '')
     .trim()
     .toLowerCase()
@@ -8646,7 +8658,11 @@ export function parseBlockSourceMetadata(source: string): {
   replacementFor: string[];
   reviewCadence: string;
 } {
-  const name = source.match(/^\s*block\s+"([^"]+)"/i)?.[1] ?? '';
+  // Multiline: a `.dql` typically opens with a comment header (e.g. a proposed-draft
+  // banner), so the `block "<name>"` declaration is NOT at the start of the string.
+  // Without `m` the name parsed empty and every certified block was saved as the
+  // generic `block.dql` (slug fallback) — colliding on the 2nd certify (BLOCK_EXISTS).
+  const name = source.match(/^\s*block\s+"([^"]+)"/im)?.[1] ?? '';
   const extractString = (key: string) => source.match(new RegExp(`\\b${key}\\s*=\\s*"([^"]*)"`, 'i'))?.[1] ?? '';
   const extractStringArray = (key: string) => {
     const match = source.match(new RegExp(`\\b${key}\\s*=\\s*\\[([^\\]]*)\\]`, 'i'));
@@ -10019,7 +10035,7 @@ export function createBlockArtifacts(
     gitMetadata?: BlockGitMetadata | null;
   },
 ): { path: string; content: string; companionPath: string } {
-  const slug = options.name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '') || 'block';
+  const slug = options.name.toLowerCase().replace(/[^a-z0-9_]+/g, '-').replace(/^[-_]+|[-_]+$/g, '') || 'block';
   const safeDomain = (options.domain ?? '')
     .trim()
     .toLowerCase()
@@ -10094,7 +10110,7 @@ export function createSemanticBuilderBlock(
     provider: string;
   },
 ): { path: string; content: string; companionPath: string } {
-  const slug = options.name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '') || 'block';
+  const slug = options.name.toLowerCase().replace(/[^a-z0-9_]+/g, '-').replace(/^[-_]+|[-_]+$/g, '') || 'block';
   const safeDomain = (options.domain ?? '')
     .trim()
     .toLowerCase()
