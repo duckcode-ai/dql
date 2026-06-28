@@ -57,6 +57,21 @@ const MEASURE_FAMILIES: Record<string, string[]> = {
   aov: ['aov', 'basket'],
 };
 
+/**
+ * Row/record-listing intent. A question asking to ENUMERATE rows or identifiers
+ * ("list the 5 most recent orders with their ids") is not a metric question even
+ * though it names a measure entity ("orders") — it wants raw rows, so it should
+ * fall through to grounded generated SQL, not a governed aggregate. Conservative:
+ * only the clearest listing signals, so true aggregate questions ("how many
+ * orders", "total revenue", "average order value") are never suppressed.
+ */
+const ROW_REQUEST_RE = /\b(list|listing|rows?|records?|individual|line[\s-]?items?|ids?)\b/i;
+const RECENCY_RE = /\b(most\s+recent|latest|newest|oldest|last\s+\d+)\b/i;
+
+function looksLikeRowRequest(question: string): boolean {
+  return ROW_REQUEST_RE.test(question) || RECENCY_RE.test(question);
+}
+
 function tokenize(text: string): string[] {
   return (text.toLowerCase().match(TOKEN_RE) ?? []).filter((t) => t.length > 1);
 }
@@ -87,6 +102,24 @@ function metricSearchText(metric: KGNode): string {
   ]
     .filter(Boolean)
     .join(' ');
+}
+
+/**
+ * Text used ONLY for measure-FAMILY detection: the metric's name + description +
+ * tags, but NOT its `llmContext`. The llmContext carries `table:`/`sql:` lines, so
+ * including it wrongly assigns a metric to the family of its backing TABLE (a
+ * `tax_paid` measure on the `orders` table would falsely read as the "orders"
+ * family). Family must reflect what the metric MEASURES, i.e. its name/label.
+ */
+function metricFamilyText(metric: KGNode): string {
+  return [metric.name, metric.name.replace(/[_.]+/g, ' '), metric.description ?? '', ...(metric.tags ?? [])]
+    .filter(Boolean)
+    .join(' ');
+}
+
+/** The measure families a metric KG node resolves to (revenue, orders, ...). */
+export function metricFamilies(metric: KGNode): Set<string> {
+  return familiesFor(contentTokens(metricFamilyText(metric)));
 }
 
 export interface MetricMatch {
@@ -129,6 +162,10 @@ export async function matchSemanticMetric(
   const candidates = metrics.filter((m) => m.kind === 'metric');
   if (candidates.length === 0) return null;
 
+  // A row/record-listing question wants raw rows, not a governed aggregate —
+  // let it fall through to grounded generated SQL even if it names a measure.
+  if (looksLikeRowRequest(question)) return null;
+
   const threshold = options.threshold ?? 0.34;
   const qContent = new Set(contentTokens(question));
   if (qContent.size === 0) return null;
@@ -139,8 +176,9 @@ export async function matchSemanticMetric(
   const items = candidates.map((metric) => {
     const text = metricSearchText(metric).toLowerCase();
     const nameTokens = new Set(tokenize(metric.name));
-    const metricWords = new Set(contentTokens(text));
-    const metricFamilies = familiesFor(metricWords);
+    // Family is derived from the metric's name/label only (not its `table:`), so a
+    // measure is never mis-assigned to the family of the relation it sits on.
+    const metricFams = familiesFor(contentTokens(metricFamilyText(metric)));
 
     let overlap = 0;
     let nameHit = 0;
@@ -155,7 +193,7 @@ export async function matchSemanticMetric(
 
     let sharedFamily: string | undefined;
     for (const family of qFamilies) {
-      if (metricFamilies.has(family)) {
+      if (metricFams.has(family)) {
         sharedFamily = family;
         break;
       }

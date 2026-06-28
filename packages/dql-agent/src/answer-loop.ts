@@ -32,7 +32,7 @@ import type { LocalContextPack, MetadataAgentIntent, MetadataRouteDecision } fro
 import type { GeneratedDraftBlock } from './metadata/drafts.js';
 import { matchSemanticMetric, type MetricMatch } from './metadata/metric-match.js';
 import { validateSqlAgainstLocalContext } from './metadata/sql-context-validation.js';
-import { buildGroundingFromRuntimeRelations, resolveRelationsInSql } from './metadata/sql-grounding.js';
+import { buildGroundingFromRuntimeRelations, resolveRelationsInSql, validateSqlAgainstGrounding, type SchemaGrounding } from './metadata/sql-grounding.js';
 import {
   compactSqlSnippet,
   extractSimpleSelectShape,
@@ -577,7 +577,17 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
     };
   }
 
-  if (intent === 'clarify' || catalogRoute?.route === 'clarify') {
+  // Spec 17, part C — SEMANTIC-METRIC MATCHING. Must run BEFORE the clarify
+  // short-circuit: FTS alone misses clear metric questions ("total revenue" never
+  // literally names a metric), so a clarify route would otherwise refuse a question
+  // a governed metric can answer. Match by name + synonyms + measure family + hybrid
+  // rank over the FTS semantic hits, then ALL metric KG nodes (revenue ⇄
+  // cumulative_revenue). Certified-first is still preserved (checked above).
+  const semanticMetricNodes = collectMetricCandidates(semanticHits, considered, kg);
+  let semanticMetricMatch = await matchSemanticMetric(question, semanticMetricNodes).catch(() => null);
+
+  // Clarify only when there is ALSO no confident governed-metric match.
+  if ((intent === 'clarify' || catalogRoute?.route === 'clarify') && !semanticMetricMatch) {
     const text = composeCatalogClarificationText(question, catalogRoute) ?? composeClarificationText(question, considered, schemaContext);
     const analysisPlan = buildAnalysisPlan({
       question,
@@ -616,16 +626,6 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
       providerUsed: provider.name,
     };
   }
-
-  // Spec 17, part C — SEMANTIC-METRIC MATCHING. FTS alone misses clear metric
-  // questions ("total revenue" never literally names a metric), so match the
-  // question to governed metrics by name + synonyms + measure family + hybrid
-  // rank. We consider the FTS semantic hits first, then fall back to ALL metric
-  // KG nodes so a confident family match (revenue ⇄ cumulative_revenue) is found
-  // even when FTS returned nothing. Certified-first routing is preserved — this
-  // only runs after the certified/clarify checks above.
-  const semanticMetricNodes = collectMetricCandidates(semanticHits, considered, kg);
-  const semanticMetricMatch = await matchSemanticMetric(question, semanticMetricNodes).catch(() => null);
 
   // Stage 2/3: generate only after certified artifacts miss. Semantic context
   // wins over raw dbt manifest context; memory is appended last as advisory.
@@ -734,19 +734,32 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
 
     parsed = parseProposal(proposed);
   }
+  // True when `parsed.sql` was synthesized deterministically from a governed
+  // semantic-layer metric (not the LLM). Such SQL is trusted and grounded against
+  // the runtime schema, so it skips the hallucination-guard context validation
+  // that exists to catch model-invented relations/columns.
+  let governedMetricAnswer = false;
   if (!parsed.sql) {
     // Spec 17, part C — if a governed metric matched confidently but the model
     // declined SQL, answer from the metric definition (deterministic, offline)
-    // rather than refusing. The semantic tier is the governed answer here.
-    const metricSql = activeTier === 'semantic_layer' && semanticMetricMatch
-      ? metricToGovernedSql(semanticMetricMatch.metric)
+    // rather than refusing. The semantic tier is the governed answer here. A
+    // derived MetricFlow metric (e.g. `revenue`) often carries no executable
+    // definition itself — its `table:`/`sql:` live on the backing measure node
+    // (`order_item.revenue`). resolveGovernedMetricSql resolves a thin metric to
+    // that synthesizable sibling so the route lands on a real number, not refusal.
+    const resolved = activeTier === 'semantic_layer' && semanticMetricMatch
+      ? resolveGovernedMetricSql(semanticMetricMatch.metric, semanticMetricNodes)
       : undefined;
-    if (metricSql) {
+    if (resolved) {
+      // Point the match at the metric we actually answered from so the route
+      // badge, citation, and carrier all reflect the executable definition used.
+      semanticMetricMatch = { ...semanticMetricMatch!, metric: resolved.metric };
+      governedMetricAnswer = true;
       parsed = {
-        sql: metricSql,
+        sql: resolved.sql,
         text:
           parsed.text ||
-          `Answered from the governed metric ${semanticMetricMatch!.metric.name}. This result is uncertified until reviewed and promoted.`,
+          `Answered from the governed metric ${resolved.metric.name}. This result is uncertified until reviewed and promoted.`,
         viz: parsed.viz ?? 'single_value',
       };
     }
@@ -783,8 +796,9 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
   // model emitted to its real warehouse relation from the runtime schema BEFORE
   // governance validation. Same resolver the build path uses — one grounding,
   // no weak path. `allowedSqlContext` relations are already qualified.
+  let grounding: SchemaGrounding | undefined;
   if (parsed.sql && schemaContext.length > 0) {
-    const grounding = buildGroundingFromRuntimeRelations(
+    grounding = buildGroundingFromRuntimeRelations(
       schemaContext.map((table) => ({
         relation: table.relation,
         name: table.name,
@@ -794,11 +808,56 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
     parsed.sql = resolveRelationsInSql(parsed.sql, grounding, { prefer: 'qualified' }).sql;
   }
 
-  const contextValidation = validateSqlAgainstLocalContext(parsed.sql, input.contextPack, {
-    question,
-    intent,
-    filterValues: input.followUp?.filters,
-  });
+  // Validation gate. Governed metric SQL synthesized from the semantic layer is
+  // already trusted (deterministic + grounded); model SQL is validated against the
+  // inspected context to catch hallucinated relations/columns.
+  const semanticMetricRoute = activeTier === 'semantic_layer' && Boolean(semanticMetricMatch);
+  type AnswerValidation = { ok: true; warnings: string[] } | { ok: false; error: string; warnings: string[] };
+  let contextValidation: AnswerValidation;
+  if (governedMetricAnswer) {
+    contextValidation = { ok: true, warnings: [] };
+  } else {
+    const c = validateSqlAgainstLocalContext(parsed.sql, input.contextPack, {
+      question,
+      intent,
+      filterValues: input.followUp?.filters,
+    });
+    contextValidation = c.ok
+      ? { ok: true, warnings: c.warnings }
+      : { ok: false, error: c.error, warnings: c.warnings };
+  }
+
+  // Spec 17, part C — semantic-metric route recovery. A metric question is often
+  // catalog-routed to clarify, leaving a thin contextPack that rejects otherwise-valid
+  // SQL. Rather than refuse, recover in two steps:
+  //   1) Re-judge the model's own SQL against the RUNTIME grounding. If it references
+  //      real relations/columns it is valid (the contextPack rejection was a false
+  //      negative) — keep the model SQL so a precise answer like `count(*) FROM orders`
+  //      stands instead of guessing a measure.
+  //   2) Otherwise fall back to a CLEAN governed-metric definition (direct or exact
+  //      leaf-measure; no fuzzy family guess that could answer the wrong measure).
+  if (!contextValidation.ok && semanticMetricRoute && semanticMetricMatch) {
+    const grounded = grounding ? validateSqlAgainstGrounding(parsed.sql, grounding) : undefined;
+    if (grounded?.ok) {
+      contextValidation = { ok: true, warnings: grounded.warnings };
+    } else {
+      const recovered = resolveGovernedMetricSql(semanticMetricMatch.metric, semanticMetricNodes);
+      if (recovered) {
+        semanticMetricMatch = { ...semanticMetricMatch, metric: recovered.metric };
+        parsed.sql = grounding
+          ? resolveRelationsInSql(recovered.sql, grounding, { prefer: 'qualified' }).sql
+          : recovered.sql;
+        parsed.viz = parsed.viz ?? 'single_value';
+        parsed.text = parsed.text
+          || `Answered from the governed metric ${recovered.metric.name}. This result is uncertified until reviewed and promoted.`;
+        governedMetricAnswer = true;
+        contextValidation = {
+          ok: true,
+          warnings: ['Generated SQL failed context validation; answered from the governed metric definition instead.'],
+        };
+      }
+    }
+  }
   if (!contextValidation.ok) {
     const text = `I could not safely prepare this generated SQL from the inspected context. ${contextValidation.error}`;
     const analysisPlan = buildAnalysisPlan({
@@ -3614,9 +3673,42 @@ function metricToGovernedSql(metric: KGNode): string | undefined {
   const context = metric.llmContext ?? '';
   const sqlExpr = context.match(/(?:^|\n)\s*sql:\s*(.+?)\s*(?:\n|$)/i)?.[1]?.trim();
   const table = context.match(/(?:^|\n)\s*table:\s*(.+?)\s*(?:\n|$)/i)?.[1]?.trim();
-  if (!sqlExpr || !table) return undefined;
+  // A `sql:` that is just an identifier (a metric reference like `cumulative_revenue`,
+  // not an aggregate expression) with no `table:` cannot be executed directly.
+  if (!sqlExpr || !table || !/[()]/.test(sqlExpr)) return undefined;
   const alias = metric.name.replace(/[^a-zA-Z0-9_]+/g, '_').replace(/^_+|_+$/g, '') || 'metric_value';
   return `SELECT ${sqlExpr} AS ${alias}\nFROM ${table}`;
+}
+
+/**
+ * Resolve a matched metric to executable governed SQL (spec 17, part C). dbt's
+ * semantic layer splits a metric from its measure: a derived MetricFlow metric
+ * (e.g. `revenue`, type=simple over measure `revenue`) carries no `table:`/`sql:`
+ * of its own — the aggregate definition lives on the backing measure node
+ * (`order_item.revenue` → `table: order_items`, `sql: SUM(product_price)`). When
+ * the matched metric is itself synthesizable we use it directly; otherwise we
+ * deterministically fall back to a sibling candidate whose leaf name matches
+ * (`revenue` ⇒ `<model>.revenue`) and which carries an executable definition.
+ * Returns the SQL plus the metric we actually answered from (for the route badge).
+ */
+function resolveGovernedMetricSql(
+  metric: KGNode,
+  pool: KGNode[],
+): { sql: string; metric: KGNode } | undefined {
+  const direct = metricToGovernedSql(metric);
+  if (direct) return { sql: direct, metric };
+  // Exact leaf-name measure only (`revenue` ⇒ `<model>.revenue`). We deliberately
+  // do NOT fuzzy-match by measure family here: a thin metric like `orders` has many
+  // candidate measures on its table (count, cost, total, tax) and guessing would
+  // answer the WRONG measure. Precise resolution or nothing — honest over confident.
+  const leaf = metric.name.split('.').pop()?.toLowerCase();
+  if (!leaf) return undefined;
+  const leafSibling = pool
+    .filter((node) => node.nodeId !== metric.nodeId && node.name.split('.').pop()?.toLowerCase() === leaf)
+    .sort((a, b) => a.name.length - b.name.length)
+    .find((node) => metricToGovernedSql(node));
+  if (leafSibling) return { sql: metricToGovernedSql(leafSibling)!, metric: leafSibling };
+  return undefined;
 }
 
 function buildCertifiedEvidence(input: {
