@@ -139,9 +139,9 @@ export interface ParamConfig {
   defaultValue: string;
   options?: string[];
 }
-export type SidebarPanel = 'files' | 'schema' | 'block_library' | 'connection' | 'reference' | 'lineage' | 'git' | 'apps' | 'readiness' | 'settings' | null;
+export type SidebarPanel = 'files' | 'schema' | 'block_library' | 'connection' | 'reference' | 'lineage' | 'git' | 'apps' | 'readiness' | 'skills' | 'settings' | null;
 export type DevPanelTab = 'logs' | 'errors';
-export type MainView = 'home' | 'notebook' | 'business_artifact' | 'lineage' | 'lineage_detail' | 'block_studio' | 'imports' | 'connection' | 'reference' | 'git' | 'apps' | 'readiness' | 'review' | 'settings';
+export type MainView = 'home' | 'notebook' | 'business_artifact' | 'lineage' | 'lineage_detail' | 'block_studio' | 'imports' | 'connection' | 'reference' | 'git' | 'apps' | 'readiness' | 'review' | 'skills' | 'settings';
 export type AppWorkspaceExperience = 'view' | 'build';
 export type AppWorkspaceSection = 'dashboards' | 'notebooks' | 'research' | 'ai' | 'drafts' | 'settings';
 export type LineageReturnTarget =
@@ -283,7 +283,13 @@ export interface ProposePlanCandidate {
 // it never routes through the Q&A answer-loop, so the result is a discriminated
 // union over the target the user picked — a notebook CELL or a draft BLOCK.
 export type AiBuildResult =
-  | { target: 'cell'; sql: string; explanation?: string }
+  | {
+      target: 'cell';
+      sql: string;
+      explanation?: string;
+      // Spec 16 — skills that guided this build (backend-populated).
+      appliedSkills?: Array<{ id: string; description?: string }>;
+    }
   | {
       target: 'block';
       path: string;
@@ -294,9 +300,42 @@ export type AiBuildResult =
       outputs: string[];
       examples: string[];
       certifierVerdict: AiBuildCertifierVerdict;
+      // Spec 16 — skills that guided this build (backend-populated).
+      appliedSkills?: Array<{ id: string; description?: string }>;
     };
 
 export type AiBuildTarget = AiBuildResult['target'];
+
+// ── Spec 16 — Skills authoring & management ─────────────────────────────────
+// A "skill" is a business-context file (`.dql/skills/*.skill.md`) the agent
+// applies per question: definitions, rules, vocabulary, and preferred
+// metrics/blocks. Project skills are shared across everyone's AI; personal
+// skills are bound to one user. Three dbt-seeded starters ship editable
+// (Metrics glossary, SQL conventions, Domain rules) — flagged via `isStarter`.
+export interface Skill {
+  id: string;
+  scope: 'project' | 'personal';
+  user?: string;
+  description?: string;
+  /** Business-context guidance prose the agent follows. */
+  body: string;
+  /** Metric names the AI should prefer when answering. */
+  preferredMetrics: string[];
+  /** Block names the AI should prefer when answering. */
+  preferredBlocks: string[];
+  /** Term → target map, e.g. `arr` → `metric:arr`, `revenue` → `block:revenue_by_region`. */
+  vocabulary: Record<string, string>;
+  /** On-disk source, e.g. `.dql/skills/metrics-glossary.skill.md`. */
+  sourcePath: string;
+  /** A dbt-seeded editable starter ("starter — edit me"). */
+  isStarter?: boolean;
+}
+
+/** Skills that shaped an AI answer — surfaced as the "guided by" line. */
+export interface AppliedSkill {
+  id: string;
+  description?: string;
+}
 
 export interface ProposePlanDomain {
   name: string;

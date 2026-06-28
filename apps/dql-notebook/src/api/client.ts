@@ -38,6 +38,7 @@ import type {
   ProposePlanCandidate,
   AiBuildResult,
   AiBuildTarget,
+  Skill,
 } from '../store/types';
 
 const EMPTY_PLAN = {
@@ -3492,5 +3493,45 @@ export const api = {
     } catch {
       // best-effort; UI restores owner default on next refresh
     }
+  },
+
+  // ── Spec 16 — Skills authoring & management ───────────────────────────────
+  // Business-context "skills" the agent applies per question. Project skills are
+  // shared; personal skills are bound to one user. These methods are coded to
+  // the shared contract — the backend implements the same endpoints. Errors
+  // surface to the page (which renders graceful empty/error states), so we do
+  // NOT swallow them here.
+
+  /** List all skills (project + personal). → GET /api/skills */
+  async getSkills(): Promise<{ skills: Skill[] }> {
+    return request<{ skills: Skill[] }>('/api/skills');
+  },
+
+  /** Multi-select options for the preferred metrics/blocks fields. → GET /api/skills/options */
+  async getSkillOptions(): Promise<{ metrics: string[]; blocks: string[] }> {
+    return request<{ metrics: string[]; blocks: string[] }>('/api/skills/options');
+  },
+
+  /** Create a new skill. → POST /api/skills  body { skill } */
+  async createSkill(skill: Skill): Promise<{ skill: Skill }> {
+    return request<{ skill: Skill }>('/api/skills', {
+      method: 'POST',
+      body: JSON.stringify({ skill }),
+    });
+  },
+
+  /** Update an existing skill. → PUT /api/skills/:id  body { skill } */
+  async updateSkill(id: string, skill: Skill): Promise<{ skill: Skill }> {
+    return request<{ skill: Skill }>(`/api/skills/${encodeURIComponent(id)}`, {
+      method: 'PUT',
+      body: JSON.stringify({ skill }),
+    });
+  },
+
+  /** Delete a skill. → DELETE /api/skills/:id */
+  async deleteSkill(id: string): Promise<{ ok: true }> {
+    return request<{ ok: true }>(`/api/skills/${encodeURIComponent(id)}`, {
+      method: 'DELETE',
+    });
   },
 };
