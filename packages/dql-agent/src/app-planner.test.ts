@@ -56,3 +56,31 @@ describe('planApp', () => {
     expect(plan.sections.some((s) => s.dimension === 'region')).toBe(true);
   });
 });
+
+describe('planApp — global filter bar (P3 dynamic dashboard semantics)', () => {
+  it('prescribes a control per shared dimension, typed for the filter engine', async () => {
+    const plan = await planApp({ goal: 'revenue by region', metrics: [revenueMetric], blocks: [revenueBlock] });
+    const byDim = new Map(plan.globalFilters.map((f) => [f.dimension, f]));
+    expect(byDim.get('ordered_at')?.control).toBe('daterange'); // time → date range
+    expect(byDim.get('region')?.control).toBe('select');        // categorical → dropdown
+  });
+
+  it('lists the exact tiles each control refreshes (covered, declaring blocks)', async () => {
+    const plan = await planApp({ goal: 'revenue by region', metrics: [revenueMetric], blocks: [revenueBlock] });
+    const ordered = plan.globalFilters.find((f) => f.dimension === 'ordered_at');
+    // The revenue block declares ordered_at, so the date control refreshes KPI + trend + breakdown.
+    expect(ordered?.refreshes).toContain('Total revenue');
+    expect(ordered?.refreshes).toContain('revenue over time');
+  });
+
+  it('a control over an uncovered dimension refreshes nothing (flags a needed block)', async () => {
+    // The block declares ordered_at + region but NOT product_category.
+    const plan = await planApp({
+      goal: 'revenue by product_category',
+      metrics: [revenueMetric],
+      blocks: [revenueBlock],
+    });
+    const cat = plan.globalFilters.find((f) => f.dimension === 'product_category');
+    expect(cat?.refreshes).toHaveLength(0);
+  });
+});

@@ -40,6 +40,20 @@ export interface AppPlanSection {
   covered: boolean;
 }
 
+/**
+ * A global dashboard control the plan prescribes (P3: dynamic dashboard semantics).
+ * One control drives many tiles — `refreshes` is the explicit set of section
+ * questions it re-runs, so the dashboard knows exactly what a filter change updates.
+ */
+export interface AppPlanFilter {
+  /** The dimension the control filters on. */
+  dimension: string;
+  /** UI control kind, matching the runtime's filter engine. */
+  control: 'daterange' | 'select' | 'number' | 'text';
+  /** The section questions (tiles) this one control refreshes. */
+  refreshes: string[];
+}
+
 export interface AppPlan {
   title: string;
   /** Headline narrative — what the app shows and why (the "value", not just charts). */
@@ -47,6 +61,11 @@ export interface AppPlan {
   sections: AppPlanSection[];
   /** Dimensions surfaced as shared filters that refresh every tile that shares them. */
   sharedFilters: string[];
+  /**
+   * The global filter bar the dashboard should render — each control with its kind
+   * and the explicit set of tiles it refreshes (dynamic dashboard semantics).
+   */
+  globalFilters: AppPlanFilter[];
   /** Questions with no certified block — candidates for the build-and-certify loop. */
   gaps: string[];
   /** Fraction of sections covered by a certified block, 0..1. */
@@ -54,6 +73,15 @@ export interface AppPlan {
 }
 
 const TIME_DIM_RE = /(_at$|_date$|_time$|_ts$|^date$|^month$|^week$|^day$|ordered_at|created)/i;
+const NUMERIC_CONTROL_RE = /(top[_-]?n|limit|count|number|amount|year|season|score)/i;
+
+/** Classify a dimension into the dashboard control kind the filter engine renders. */
+function classifyControl(dimension: string): AppPlanFilter['control'] {
+  if (TIME_DIM_RE.test(dimension)) return 'daterange';
+  if (NUMERIC_CONTROL_RE.test(dimension)) return 'number';
+  // A categorical dimension renders as a dropdown the filter-options endpoint fills.
+  return 'select';
+}
 
 function humanize(name: string): string {
   return name.replace(/[_.]+/g, ' ').replace(/\s+/g, ' ').trim();
@@ -167,6 +195,23 @@ export async function planApp(input: {
   const gaps = sections.filter((s) => !s.covered).map((s) => s.question);
   const dimsText = sharedFilters.map(humanize).join(', ');
 
+  // Global filter bar (P3): one control per shared dimension, with the EXPLICIT set
+  // of covered tiles it refreshes (a covered section whose backing block declares the
+  // dimension). A control that refreshes nothing flags a filter waiting on a block.
+  const blockByName = new Map(metricBlocks.map((b) => [b.name, b] as const));
+  const declaresFilter = (section: AppPlanSection, dim: string): boolean => {
+    const block = section.blockName ? blockByName.get(section.blockName) : undefined;
+    if (!block) return false;
+    return (block.allowedFilters ?? []).includes(dim) || (block.dimensions ?? []).includes(dim);
+  };
+  const globalFilters: AppPlanFilter[] = sharedFilters.map((dimension) => ({
+    dimension,
+    control: classifyControl(dimension),
+    refreshes: sections
+      .filter((s) => s.covered && declaresFilter(s, dimension))
+      .map((s) => s.question),
+  }));
+
   return {
     title: `${label} overview`,
     narrative:
@@ -176,6 +221,7 @@ export async function planApp(input: {
       ` One filter set refreshes every tile.`,
     sections,
     sharedFilters,
+    globalFilters,
     gaps,
     coverage: sections.length > 0 ? covered / sections.length : 0,
   };
