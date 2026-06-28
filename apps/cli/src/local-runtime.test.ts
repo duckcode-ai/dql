@@ -1922,3 +1922,63 @@ describe('buildProposeCandidatePreview (/api/propose/preview handler core)', () 
     expect(await buildProposeCandidatePreview(projectRoot, 'no_such')).toBeUndefined();
   });
 });
+
+describe('domains API (spec 17, part B)', () => {
+  it('lists authored domains with per-domain block + skill + term counts', async () => {
+    const { listDomains, parseDomainInput } = await import('./local-runtime.js');
+    const { writeDomainDeclaration } = await import('@duckcodeailabs/dql-core');
+    const { upsertSkill } = await import('@duckcodeailabs/dql-agent');
+    const projectRoot = mkdtempSync(join(tmpdir(), 'dql-domains-api-'));
+    tempDirs.push(projectRoot);
+    writeFileSync(join(projectRoot, 'dql.config.json'), JSON.stringify({ project: 'p' }), 'utf-8');
+
+    // Author a domain, plus a block, term, and skill that belong to it.
+    const input = parseDomainInput({ name: 'Sales', owner: 'sales@x.com', sourceSystems: ['orders'] });
+    expect(input).not.toBeNull();
+    writeDomainDeclaration(projectRoot, input!);
+
+    mkdirSync(join(projectRoot, 'blocks'), { recursive: true });
+    writeFileSync(
+      join(projectRoot, 'blocks', 'orders.dql'),
+      `block "orders" {\n  type = "custom"\n  domain = "Sales"\n  status = "draft"\n  query = """\n    SELECT 1 AS x\n  """\n}\n`,
+      'utf-8',
+    );
+    mkdirSync(join(projectRoot, 'terms'), { recursive: true });
+    writeFileSync(
+      join(projectRoot, 'terms', 'order.dql'),
+      `term "Order" {\n  domain = "Sales"\n  type = "entity"\n}\n`,
+      'utf-8',
+    );
+    upsertSkill(projectRoot, { id: 'sales-review', scope: 'project', domain: 'Sales', body: 'Sales review.' });
+
+    const domains = listDomains(projectRoot);
+    const sales = domains.find((d) => d.name === 'Sales');
+    expect(sales).toMatchObject({
+      id: 'Sales',
+      owner: 'sales@x.com',
+      sourceSystems: ['orders'],
+      blockCount: 1,
+      termCount: 1,
+      skillCount: 1,
+    });
+    expect(sales?.sourcePath).toBe('domains/sales/domain.dql');
+  });
+
+  it('parseDomainInput rejects a body with no name', async () => {
+    const { parseDomainInput } = await import('./local-runtime.js');
+    expect(parseDomainInput({})).toBeNull();
+    expect(parseDomainInput({ owner: 'x' })).toBeNull();
+    expect(parseDomainInput({ id: 'Finance' })?.name).toBe('Finance');
+  });
+});
+
+describe('skills carry an optional domain (spec 17, part B)', () => {
+  it('round-trips skill.domain through write + load', async () => {
+    const { upsertSkill, loadSkills } = await import('@duckcodeailabs/dql-agent');
+    const projectRoot = mkdtempSync(join(tmpdir(), 'dql-skill-domain-'));
+    tempDirs.push(projectRoot);
+    upsertSkill(projectRoot, { id: 'cxo-review', scope: 'project', domain: 'Finance', body: 'Board review.' });
+    const reloaded = loadSkills(projectRoot).skills.find((s) => s.id === 'cxo-review');
+    expect(reloaded?.domain).toBe('Finance');
+  });
+});

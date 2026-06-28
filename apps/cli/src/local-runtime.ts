@@ -53,6 +53,11 @@ import {
   canonicalizeNotebook,
   diffDQL,
   diffNotebook,
+  writeDomainDeclaration,
+  deleteDomainDeclaration,
+  domainFolderSlug,
+  type DomainInput,
+  type ManifestDomain,
   type DiffReport,
 } from '@duckcodeailabs/dql-core';
 import { load as loadYaml } from 'js-yaml';
@@ -1669,6 +1674,8 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           context?: { cellSql?: unknown; selection?: unknown };
           target?: unknown;
           owner?: unknown;
+          mode?: unknown;
+          blockPath?: unknown;
         };
         const prompt = typeof body?.prompt === 'string' ? body.prompt.trim() : '';
         if (!prompt) {
@@ -1690,6 +1697,16 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
         const userId = typeof (body as { userId?: unknown })?.userId === 'string'
           ? (body as { userId?: string }).userId
           : undefined;
+        // Edit mode (spec 17, part A): modify the block at `blockPath` in place.
+        const mode = body?.mode === 'edit' ? 'edit' : 'create';
+        const blockPath = typeof body?.blockPath === 'string' && body.blockPath.trim()
+          ? body.blockPath.trim()
+          : undefined;
+        if (mode === 'edit' && (target !== 'block' || !blockPath)) {
+          res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
+          res.end(serializeJSON({ error: "Edit mode requires target 'block' and a { blockPath }." }));
+          return;
+        }
         // Inject user-authored Skills as business context; the engine selects the
         // relevant subset and stamps `appliedSkills` on the result.
         const skills = loadSkills(projectRoot).skills;
@@ -1698,6 +1715,8 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           prompt,
           context,
           target,
+          mode,
+          blockPath,
           owner,
           userId,
           skills,
@@ -1803,6 +1822,81 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
       try {
         const id = decodeURIComponent(path.slice('/api/skills/'.length));
         deleteSkill(projectRoot, id);
+        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({ ok: true }));
+      } catch (error) {
+        res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({ error: error instanceof Error ? error.message : String(error) }));
+      }
+      return;
+    }
+
+    // ── Domains (spec 17, part B) — first-class business domain declarations.
+    //    Authoring here satisfies `dql doctor`'s "missing domain declaration"
+    //    warning. AI drafts, humans certify; domains carry no certification. ────
+    if (req.method === 'GET' && path === '/api/domains') {
+      try {
+        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({ domains: listDomains(projectRoot) }));
+      } catch (error) {
+        res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({ error: error instanceof Error ? error.message : String(error) }));
+      }
+      return;
+    }
+
+    if (req.method === 'POST' && path === '/api/domains') {
+      try {
+        const body = (await readJSON(req).catch(() => ({}))) as { domain?: unknown };
+        const input = parseDomainInput(body?.domain);
+        if (!input) {
+          res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
+          res.end(serializeJSON({ error: 'Provide { domain } with a non-empty name.' }));
+          return;
+        }
+        writeDomainDeclaration(projectRoot, input);
+        await refreshLocalMetadataCatalog(projectRoot);
+        const domain = findDomain(projectRoot, input.name);
+        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({ domain }));
+      } catch (error) {
+        res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({ error: error instanceof Error ? error.message : String(error) }));
+      }
+      return;
+    }
+
+    if (req.method === 'PUT' && path.startsWith('/api/domains/')) {
+      try {
+        const id = decodeURIComponent(path.slice('/api/domains/'.length));
+        const body = (await readJSON(req).catch(() => ({}))) as { domain?: unknown };
+        const input = parseDomainInput(body?.domain, id);
+        if (!input) {
+          res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
+          res.end(serializeJSON({ error: 'Provide { domain } with a name.' }));
+          return;
+        }
+        // If the name changed, remove the old declaration so we never orphan one.
+        if (domainFolderSlug(id) !== domainFolderSlug(input.name)) {
+          deleteDomainDeclaration(projectRoot, id);
+        }
+        writeDomainDeclaration(projectRoot, input);
+        await refreshLocalMetadataCatalog(projectRoot);
+        const domain = findDomain(projectRoot, input.name);
+        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({ domain }));
+      } catch (error) {
+        res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({ error: error instanceof Error ? error.message : String(error) }));
+      }
+      return;
+    }
+
+    if (req.method === 'DELETE' && path.startsWith('/api/domains/')) {
+      try {
+        const id = decodeURIComponent(path.slice('/api/domains/'.length));
+        deleteDomainDeclaration(projectRoot, id);
+        await refreshLocalMetadataCatalog(projectRoot);
         res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
         res.end(serializeJSON({ ok: true }));
       } catch (error) {
@@ -5892,6 +5986,7 @@ function serializeSkill(skill: Skill): {
   id: string;
   scope: 'project' | 'personal';
   user?: string;
+  domain?: string;
   description?: string;
   body: string;
   preferredMetrics: string[];
@@ -5904,6 +5999,7 @@ function serializeSkill(skill: Skill): {
     id: skill.id,
     scope: skill.scope,
     user: skill.user,
+    domain: skill.domain,
     description: skill.description,
     body: skill.body,
     preferredMetrics: skill.preferredMetrics,
@@ -5941,12 +6037,117 @@ function parseSkillInput(raw: unknown, fallbackId?: string): WriteSkillInput | n
     id,
     scope,
     user: scope === 'personal' && typeof skill.user === 'string' ? skill.user : undefined,
+    domain: typeof skill.domain === 'string' && skill.domain.trim() ? skill.domain.trim() : undefined,
     description: typeof skill.description === 'string' ? skill.description : undefined,
     body: skill.body,
     preferredMetrics: asStrings(skill.preferredMetrics),
     preferredBlocks: asStrings(skill.preferredBlocks),
     vocabulary: asMap(skill.vocabulary),
     isStarter: skill.isStarter === true ? true : undefined,
+  };
+}
+
+// ── Domains (spec 17, part B) ────────────────────────────────────────────────
+
+/** The Domain shape the frontend codes to (spec 17 shared contract). */
+interface DomainDto {
+  id: string;
+  name: string;
+  owner?: string;
+  boundedContext?: string;
+  sourceSystems?: string[];
+  description?: string;
+  sourcePath?: string;
+  blockCount?: number;
+  skillCount?: number;
+  termCount?: number;
+}
+
+/** Loose, case/slug-insensitive domain key for counting membership. */
+function domainKey(value: string | undefined): string {
+  if (!value) return '';
+  return value.trim().toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
+}
+
+function manifestDomainToDto(
+  domain: ManifestDomain,
+  counts: { blockCount: number; skillCount: number; termCount: number },
+): DomainDto {
+  return {
+    id: domain.name,
+    name: domain.name,
+    owner: domain.owner,
+    boundedContext: domain.boundedContext,
+    sourceSystems: domain.sourceSystems,
+    description: domain.description,
+    sourcePath: domain.filePath,
+    blockCount: counts.blockCount,
+    skillCount: counts.skillCount,
+    termCount: counts.termCount,
+  };
+}
+
+/** List authored domains with per-domain block/skill/term counts. */
+export function listDomains(projectRoot: string): DomainDto[] {
+  const manifest = buildManifest({ projectRoot, dqlVersion: 'notebook' });
+  const domains = manifest.domains ?? {};
+  const skills = loadSkills(projectRoot).skills;
+
+  const blockCounts = new Map<string, number>();
+  for (const block of Object.values(manifest.blocks)) {
+    const key = domainKey(block.domain);
+    if (key) blockCounts.set(key, (blockCounts.get(key) ?? 0) + 1);
+  }
+  const termCounts = new Map<string, number>();
+  for (const term of Object.values(manifest.terms ?? {})) {
+    const key = domainKey(term.domain);
+    if (key) termCounts.set(key, (termCounts.get(key) ?? 0) + 1);
+  }
+  const skillCounts = new Map<string, number>();
+  for (const skill of skills) {
+    const key = domainKey(skill.domain);
+    if (key) skillCounts.set(key, (skillCounts.get(key) ?? 0) + 1);
+  }
+
+  return Object.values(domains)
+    .map((domain) => {
+      const key = domainKey(domain.name);
+      return manifestDomainToDto(domain, {
+        blockCount: blockCounts.get(key) ?? 0,
+        skillCount: skillCounts.get(key) ?? 0,
+        termCount: termCounts.get(key) ?? 0,
+      });
+    })
+    .sort((a, b) => a.name.localeCompare(b.name));
+}
+
+/** Find a single authored domain by name/id (case/slug-insensitive). */
+function findDomain(projectRoot: string, nameOrId: string): DomainDto | undefined {
+  const key = domainKey(nameOrId);
+  return listDomains(projectRoot).find((domain) => domainKey(domain.name) === key);
+}
+
+/** Validate + normalize an inbound `{ domain }` body into a DomainInput. */
+export function parseDomainInput(raw: unknown, fallbackId?: string): DomainInput | null {
+  if (!raw || typeof raw !== 'object') return null;
+  const domain = raw as Record<string, unknown>;
+  const name =
+    typeof domain.name === 'string' && domain.name.trim()
+      ? domain.name.trim()
+      : typeof domain.id === 'string' && domain.id.trim()
+        ? domain.id.trim()
+        : fallbackId;
+  if (!name) return null;
+  const asStrings = (value: unknown): string[] | undefined =>
+    Array.isArray(value)
+      ? value.filter((v): v is string => typeof v === 'string' && v.trim().length > 0)
+      : undefined;
+  return {
+    name,
+    owner: typeof domain.owner === 'string' ? domain.owner : undefined,
+    boundedContext: typeof domain.boundedContext === 'string' ? domain.boundedContext : undefined,
+    sourceSystems: asStrings(domain.sourceSystems),
+    description: typeof domain.description === 'string' ? domain.description : undefined,
   };
 }
 

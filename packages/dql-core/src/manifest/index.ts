@@ -12,6 +12,15 @@ export {
 
 export { detectOutputDrift } from './output-drift.js';
 export {
+  writeDomainDeclaration,
+  deleteDomainDeclaration,
+  renderDomainDeclaration,
+  resolveDomainDeclPath,
+  domainFolderSlug,
+  type DomainInput,
+  type WrittenDomain,
+} from './domain-writer.js';
+export {
   loadDbtRunState,
   applyBlockDataState,
   worseDataState,
@@ -21,6 +30,7 @@ export {
 export type {
   DQLManifest,
   ManifestBlock,
+  ManifestDomain,
   ManifestTerm,
   ManifestBusinessView,
   ManifestNotebook,

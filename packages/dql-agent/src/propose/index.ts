@@ -23,9 +23,17 @@ export type {
   BuildFromPromptResult,
   BuildCellResult,
   BuildBlockResult,
+  BuildMode,
+  BuildRoute,
   CertifierVerdict,
   AppliedSkill,
 } from './build-from-prompt.js';
+export {
+  loadBlockForEdit,
+  renderEditedBlock,
+  resolveEditedStatus,
+} from './edit-block.js';
+export type { LoadedBlock, EditedBlockFields } from './edit-block.js';
 export {
   resolveProposeConfig,
   DEFAULT_PROPOSE_CONFIG,

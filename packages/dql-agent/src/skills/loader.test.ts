@@ -168,6 +168,23 @@ describe('writeSkill / round-trip (spec 16)', () => {
     });
   });
 
+  it('round-trips an optional domain (spec 17, part B)', () => {
+    const skill = writeSkill(root, {
+      id: 'sales-review',
+      scope: 'project',
+      domain: 'Sales',
+      body: 'Sales monthly review.',
+    });
+    expect(skill.domain).toBe('Sales');
+    expect(renderSkill(skill)).toContain('domain: Sales');
+    const reparsed = parseSkill(renderSkill(skill), skill.sourcePath);
+    expect(reparsed?.domain).toBe('Sales');
+    // A skill without a domain stays undefined and omits the frontmatter key.
+    const noDomain = writeSkill(root, { id: 'plain', scope: 'project', body: 'No domain.' });
+    expect(noDomain.domain).toBeUndefined();
+    expect(renderSkill(noDomain)).not.toContain('domain:');
+  });
+
   it('project skills omit user; personal skills bind to a user', () => {
     const project = writeSkill(root, { id: 'house-rules', scope: 'project', body: 'Shared.' });
     expect(project.scope).toBe('project');

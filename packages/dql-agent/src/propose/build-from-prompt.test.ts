@@ -283,3 +283,144 @@ describe('buildFromPrompt (spec 15) — grounded SQL accuracy', () => {
     expect(result.target).toBe('block');
   });
 });
+
+describe('buildFromPrompt (spec 17, part A) — edit an existing block', () => {
+  let projectRoot: string;
+  let manifestPath: string;
+
+  beforeEach(() => {
+    projectRoot = mkdtempSync(join(tmpdir(), 'dql-edit-block-'));
+    writeFileSync(
+      join(projectRoot, 'dql.config.json'),
+      JSON.stringify({ project: 'p', identity: { owner: 'owner@example.com' } }),
+      'utf-8',
+    );
+    manifestPath = writeDbtManifest(join(projectRoot, 'target'));
+    mkdirSync(join(projectRoot, 'blocks'), { recursive: true });
+  });
+
+  afterEach(() => {
+    rmSync(projectRoot, { recursive: true, force: true });
+  });
+
+  function writeDraftBlock(relPath: string): string {
+    const file = join(projectRoot, relPath);
+    mkdirSync(join(projectRoot, relPath, '..'), { recursive: true });
+    writeFileSync(
+      file,
+      `// dql-format: 1
+block "orders_summary" {
+  type = "custom"
+  domain = "sales"
+  status = "draft"
+  description = "Order counts."
+  owner = "owner@example.com"
+  grain = "one row per day"
+  outputs = ["order_count"]
+
+  query = """
+    SELECT COUNT(*) AS order_count FROM {{ ref('fct_orders') }}
+  """
+}
+`,
+      'utf-8',
+    );
+    return file;
+  }
+
+  it('edits in place: writes back to the SAME path, returns previousSql, no new draft', async () => {
+    const relPath = 'blocks/orders_summary.dql';
+    writeDraftBlock(relPath);
+    const before = readdirSync(join(projectRoot, 'blocks'));
+
+    const provider = scriptedProvider([
+      JSON.stringify({
+        sql: "SELECT COUNT(*) AS order_count, SUM(amount) AS revenue FROM {{ ref('fct_orders') }}",
+        description: 'Order counts and revenue.',
+        grain: 'one row per day',
+        outputs: ['order_count', 'revenue'],
+      }),
+    ]);
+
+    const result = (await buildFromPrompt({
+      projectRoot,
+      prompt: 'also include total revenue',
+      target: 'block',
+      mode: 'edit',
+      blockPath: relPath,
+      provider,
+      dbtManifestPath: manifestPath,
+    })) as BuildBlockResult;
+
+    // Same path, marked edited, previousSql for the diff.
+    expect(result.path).toBe(relPath);
+    expect(result.edited).toBe(true);
+    expect(result.previousSql).toMatch(/COUNT\(\*\) AS order_count/);
+    expect(result.previousSql).not.toMatch(/revenue/i);
+
+    // The change was applied + grounded to {{ ref() }}.
+    const source = readFileSync(join(projectRoot, relPath), 'utf-8');
+    expect(source).toMatch(/revenue/i);
+    expect(source).toContain("{{ ref('fct_orders') }}");
+    expect(() => parse(source)).not.toThrow();
+
+    // Status preserved as draft; never certified by edit.
+    expect(source).toContain('status = "draft"');
+    expect(source).not.toContain('status = "certified"');
+
+    // No NEW file forked — the blocks dir has exactly the same entries.
+    expect(readdirSync(join(projectRoot, 'blocks'))).toEqual(before);
+    expect(readdirSync(join(projectRoot, 'blocks'))).not.toContain('_drafts');
+  });
+
+  it('preserves a certified block as certified (requires re-cert, never auto-downgrades)', async () => {
+    const relPath = 'blocks/certified_block.dql';
+    const file = join(projectRoot, relPath);
+    writeFileSync(
+      file,
+      `// dql-format: 1
+block "certified_block" {
+  type = "custom"
+  domain = "sales"
+  status = "certified"
+  description = "Certified orders."
+  owner = "owner@example.com"
+
+  query = """
+    SELECT COUNT(*) AS order_count FROM {{ ref('fct_orders') }}
+  """
+}
+`,
+      'utf-8',
+    );
+
+    const result = (await buildFromPrompt({
+      projectRoot,
+      prompt: 'add revenue',
+      target: 'block',
+      mode: 'edit',
+      blockPath: relPath,
+      offline: true,
+      dbtManifestPath: manifestPath,
+    })) as BuildBlockResult;
+
+    expect(result.path).toBe(relPath);
+    const source = readFileSync(file, 'utf-8');
+    // Certified stays certified — the human must re-certify after the edit.
+    expect(source).toContain('status = "certified"');
+  });
+
+  it('throws when the block to edit does not exist', async () => {
+    await expect(
+      buildFromPrompt({
+        projectRoot,
+        prompt: 'edit it',
+        target: 'block',
+        mode: 'edit',
+        blockPath: 'blocks/missing.dql',
+        offline: true,
+        dbtManifestPath: manifestPath,
+      }),
+    ).rejects.toThrow(/not found/i);
+  });
+});

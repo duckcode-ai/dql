@@ -30,6 +30,7 @@ import { buildSkillBlockHints, buildSkillsPrompt, selectRelevantSkills } from '.
 import type { AgentMemory } from './memory/sqlite-memory.js';
 import type { LocalContextPack, MetadataAgentIntent, MetadataRouteDecision } from './metadata/catalog.js';
 import type { GeneratedDraftBlock } from './metadata/drafts.js';
+import { matchSemanticMetric, type MetricMatch } from './metadata/metric-match.js';
 import { validateSqlAgainstLocalContext } from './metadata/sql-context-validation.js';
 import { buildGroundingFromRuntimeRelations, resolveRelationsInSql } from './metadata/sql-grounding.js';
 import {
@@ -40,6 +41,25 @@ import {
 
 export type AnswerKind = 'certified' | 'uncertified' | 'no_answer';
 export type AnswerSourceTier = 'certified_artifact' | 'business_context' | 'semantic_layer' | 'dbt_manifest' | 'no_answer';
+
+/**
+ * The chosen route, surfaced on EVERY AI result (spec 17, part C) so the UI can
+ * show "where the answer came from". `tier` is the coarse route bucket; `ref`
+ * names the governed artifact/metric used (e.g. `cumulative_revenue`); `label`
+ * is a ready-to-render sentence.
+ */
+export type AiRouteTier =
+  | 'certified_block'
+  | 'semantic_metric'
+  | 'generated_sql'
+  | 'business_context'
+  | 'no_answer';
+
+export interface AiRoute {
+  tier: AiRouteTier;
+  label: string;
+  ref?: string;
+}
 export type AnswerCertification = 'certified' | 'ai_generated' | 'analyst_review_required';
 export type AnswerReviewStatus = 'none' | 'draft_ready' | 'analyst_review_required' | 'certified';
 export type AgentIntent = MetadataAgentIntent | 'ad_hoc_analysis' | 'drillthrough';
@@ -243,6 +263,19 @@ export interface AgentAnswer {
   considered: KGSearchHit[];
   /** The Skills that shaped this answer (selected, not all), for transparency. */
   appliedSkills?: Array<{ id: string; description?: string }>;
+  /**
+   * The chosen route (spec 17, part C). Surfaced on every result so the UI can
+   * show which tier answered (certified block, governed semantic metric,
+   * generated SQL, business context, or an honest refusal). Computed once at the
+   * single exit point in `answer()`.
+   */
+  route?: AiRoute;
+  /**
+   * Internal: the governed metric the semantic tier matched (spec 17, part C).
+   * Used only to build `route` at the `answer()` exit point; not part of the
+   * stable public payload.
+   */
+  _semanticMetricMatch?: MetricMatch;
 }
 
 export interface AgentResultPayload {
@@ -355,8 +388,9 @@ export async function answer(input: AnswerLoopInput): Promise<AgentAnswer> {
     id === 'certified'
       ? ((result.block as { dataState?: DataStateLike } | undefined)?.dataState)
       : undefined;
+  const { _semanticMetricMatch, ...publicResult } = result;
   return {
-    ...result,
+    ...publicResult,
     trustLabelInfo: composeEffectiveTrust({ id, dataState }),
     // Stamp the SELECTED skills that shaped the answer (transparency). Computed
     // here so every return site inside runAnswerLoop stays untouched.
@@ -366,7 +400,46 @@ export async function answer(input: AnswerLoopInput): Promise<AgentAnswer> {
         id: s.id,
         description: s.description,
       })),
+    // Stamp the chosen route once, at the single exit point, so every return
+    // site inside runAnswerLoop stays untouched (spec 17, part C).
+    route: result.route ?? deriveAiRoute(result, _semanticMetricMatch),
   };
+}
+
+/**
+ * Derive the UI-facing route from a finished answer (spec 17, part C). The
+ * semantic-metric tier is named explicitly when the loop matched a governed
+ * metric; otherwise the route is mapped from the answer's source tier / kind.
+ */
+function deriveAiRoute(result: AgentAnswer, metricMatch?: MetricMatch): AiRoute {
+  if (result.kind === 'no_answer') {
+    return { tier: 'no_answer', label: 'No governed answer — needs more context or review.' };
+  }
+  if (result.kind === 'certified') {
+    if (result.sourceTier === 'business_context') {
+      const ref = result.citations[0]?.name;
+      return {
+        tier: 'business_context',
+        label: ref ? `Answered from certified business context ${ref}` : 'Answered from certified business context',
+        ref,
+      };
+    }
+    const ref = result.sourceCertifiedBlock ?? result.block?.name ?? result.citations[0]?.name;
+    return {
+      tier: 'certified_block',
+      label: ref ? `Answered from certified block ${ref}` : 'Answered from a certified block',
+      ref,
+    };
+  }
+  // Uncertified: a governed metric matched → semantic_metric; else generated SQL.
+  if (result.sourceTier === 'semantic_layer' && metricMatch) {
+    return {
+      tier: 'semantic_metric',
+      label: `Answered from metric ${metricMatch.metric.name}`,
+      ref: metricMatch.metric.name,
+    };
+  }
+  return { tier: 'generated_sql', label: 'Answered with generated SQL (review required).' };
 }
 
 async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
@@ -544,13 +617,26 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
     };
   }
 
+  // Spec 17, part C — SEMANTIC-METRIC MATCHING. FTS alone misses clear metric
+  // questions ("total revenue" never literally names a metric), so match the
+  // question to governed metrics by name + synonyms + measure family + hybrid
+  // rank. We consider the FTS semantic hits first, then fall back to ALL metric
+  // KG nodes so a confident family match (revenue ⇄ cumulative_revenue) is found
+  // even when FTS returned nothing. Certified-first routing is preserved — this
+  // only runs after the certified/clarify checks above.
+  const semanticMetricNodes = collectMetricCandidates(semanticHits, considered, kg);
+  const semanticMetricMatch = await matchSemanticMetric(question, semanticMetricNodes).catch(() => null);
+
   // Stage 2/3: generate only after certified artifacts miss. Semantic context
   // wins over raw dbt manifest context; memory is appended last as advisory.
-  const activeTier: AnswerSourceTier = sourceTierFromContextPack(input.contextPack) ?? (semanticHits.length > 0
-    ? 'semantic_layer'
-    : manifestHits.length > 0
-      ? 'dbt_manifest'
-      : 'dbt_manifest');
+  // A confident metric match forces the semantic tier even when FTS returned no
+  // semantic hits, so the governed metric (not refusal) answers the question.
+  const activeTier: AnswerSourceTier = sourceTierFromContextPack(input.contextPack)
+    ?? (semanticHits.length > 0 || semanticMetricMatch
+      ? 'semantic_layer'
+      : manifestHits.length > 0
+        ? 'dbt_manifest'
+        : 'dbt_manifest');
   const reviewRequiredArtifactHits = artifactHits
     .filter((hit) => hit.score >= CERTIFIED_HIT_THRESHOLD && !isCertifiedHit(hit, kg))
     .slice(0, 4);
@@ -561,8 +647,13 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
   )
     .filter((hit) => !excludedArtifactIds?.has(hit.node.nodeId))
     .slice(0, 5);
+  // When a governed metric matched (spec 17, part C), pin it at the front of the
+  // semantic context so the generated SQL is grounded on the metric definition.
+  const matchedMetricHit: KGSearchHit[] = semanticMetricMatch
+    ? [{ node: semanticMetricMatch.metric, score: Math.max(semanticMetricMatch.score, CERTIFIED_HIT_THRESHOLD) }]
+    : [];
   const contextHits = activeTier === 'semantic_layer'
-    ? [...trustedArtifactContext, ...reviewRequiredArtifactHits, ...businessHits.slice(0, 4), ...semanticHits, ...manifestHits].slice(0, 14)
+    ? [...matchedMetricHit, ...trustedArtifactContext, ...reviewRequiredArtifactHits, ...businessHits.slice(0, 4), ...semanticHits, ...manifestHits].slice(0, 14)
     : [...trustedArtifactContext, ...reviewRequiredArtifactHits, ...businessHits.slice(0, 4), ...manifestHits].slice(0, 14);
   const contextNodes = mergeNodes(
     followUpSourceBlock && input.followUp?.kind === 'drilldown' ? [followUpSourceBlock] : [],
@@ -642,6 +733,23 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
     }
 
     parsed = parseProposal(proposed);
+  }
+  if (!parsed.sql) {
+    // Spec 17, part C — if a governed metric matched confidently but the model
+    // declined SQL, answer from the metric definition (deterministic, offline)
+    // rather than refusing. The semantic tier is the governed answer here.
+    const metricSql = activeTier === 'semantic_layer' && semanticMetricMatch
+      ? metricToGovernedSql(semanticMetricMatch.metric)
+      : undefined;
+    if (metricSql) {
+      parsed = {
+        sql: metricSql,
+        text:
+          parsed.text ||
+          `Answered from the governed metric ${semanticMetricMatch!.metric.name}. This result is uncertified until reviewed and promoted.`,
+        viz: parsed.viz ?? 'single_value',
+      };
+    }
   }
   if (!parsed.sql) {
     const text = parsed.text || 'No answer (the model declined to propose SQL).';
@@ -903,6 +1011,9 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
     contextPack: input.contextPack,
     considered,
     providerUsed: localProposal ? 'schema_planner' : provider.name,
+    // Carry the governed metric match so the exit point can name a
+    // `semantic_metric` route (spec 17, part C).
+    _semanticMetricMatch: activeTier === 'semantic_layer' ? semanticMetricMatch ?? undefined : undefined,
   };
 }
 
@@ -3463,6 +3574,49 @@ function mergeNodes(...groups: KGNode[][]): KGNode[] {
     }
   }
   return Array.from(byId.values());
+}
+
+/**
+ * Candidate metric KG nodes for semantic-metric matching (spec 17, part C).
+ * Starts with the FTS semantic + considered hits, then folds in EVERY metric
+ * node from the KG so a confident measure-family match is found even when FTS
+ * surfaced no metric at all (the "total revenue" miss). Bounded for safety.
+ */
+function collectMetricCandidates(
+  semanticHits: KGSearchHit[],
+  considered: KGSearchHit[],
+  kg: KGStore,
+): KGNode[] {
+  const byId = new Map<string, KGNode>();
+  for (const hit of [...semanticHits, ...considered]) {
+    if (hit.node.kind === 'metric') byId.set(hit.node.nodeId, hit.node);
+  }
+  try {
+    for (const node of kg.getNodesByKind('metric', 200)) {
+      if (!byId.has(node.nodeId)) byId.set(node.nodeId, node);
+    }
+  } catch {
+    // Best-effort: a KG without a getNodesByKind still matches the FTS hits.
+  }
+  return Array.from(byId.values());
+}
+
+/**
+ * Deterministic, offline-safe governed SQL for a matched metric (spec 17, part
+ * C). The metric KG node stores `sql:` (the aggregate expression) and `table:`
+ * (the relation) on its `llmContext`. When the model declines to propose SQL but
+ * a metric matched confidently, this synthesises a single read-only SELECT from
+ * the governed metric definition so the answer routes to `semantic_metric`
+ * instead of refusing. Returns undefined when the definition is too thin to be
+ * safe (e.g. no expression/table), preserving honest refusal.
+ */
+function metricToGovernedSql(metric: KGNode): string | undefined {
+  const context = metric.llmContext ?? '';
+  const sqlExpr = context.match(/(?:^|\n)\s*sql:\s*(.+?)\s*(?:\n|$)/i)?.[1]?.trim();
+  const table = context.match(/(?:^|\n)\s*table:\s*(.+?)\s*(?:\n|$)/i)?.[1]?.trim();
+  if (!sqlExpr || !table) return undefined;
+  const alias = metric.name.replace(/[^a-zA-Z0-9_]+/g, '_').replace(/^_+|_+$/g, '') || 'metric_value';
+  return `SELECT ${sqlExpr} AS ${alias}\nFROM ${table}`;
 }
 
 function buildCertifiedEvidence(input: {

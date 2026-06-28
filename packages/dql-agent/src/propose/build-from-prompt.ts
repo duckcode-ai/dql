@@ -45,6 +45,13 @@ import { pickProvider } from '../providers/index.js';
 import type { AgentProvider } from '../providers/types.js';
 import { loadDbtArtifacts, type DbtArtifacts } from './dbt-artifacts.js';
 import { blockSlug, upsertProposedDraft, type ProposedDraftRecord } from './write-draft.js';
+import {
+  loadBlockForEdit,
+  renderEditedBlock,
+  resolveEditedStatus,
+  writeEditedBlock,
+  type LoadedBlock,
+} from './edit-block.js';
 
 export interface BuildFromPromptContext {
   /** Current SQL in the focused cell (for refine/extend prompts). */
@@ -53,11 +60,33 @@ export interface BuildFromPromptContext {
   selection?: string;
 }
 
+/** Build mode (spec 17, part A). `edit` updates an existing block in place. */
+export type BuildMode = 'create' | 'edit';
+
+/** The chosen route surfaced on the build response (spec 17, part C). */
+export interface BuildRoute {
+  tier: 'certified_block' | 'semantic_metric' | 'generated_sql' | 'business_context' | 'no_answer';
+  label: string;
+  ref?: string;
+}
+
 export interface BuildFromPromptOptions {
   projectRoot: string;
   prompt: string;
   context?: BuildFromPromptContext;
   target: 'cell' | 'block';
+  /**
+   * Build mode (spec 17, part A). `'create'` (default) writes a NEW deduped
+   * draft. `'edit'` loads the existing block at `blockPath`, applies the user's
+   * change, and writes back to the SAME path. Edit mode is only meaningful for
+   * `target: 'block'`.
+   */
+  mode?: BuildMode;
+  /**
+   * Project-relative (or absolute) path of the block to edit. REQUIRED in edit
+   * mode. The updated block is written back to exactly this path.
+   */
+  blockPath?: string;
   /** Explicit owner; when absent the local OSS owner is resolved + stamped. */
   owner?: string;
   /**
@@ -114,6 +143,15 @@ export interface BuildBlockResult {
   certifierVerdict: CertifierVerdict;
   /** Skills that shaped the answer, for UI transparency. */
   appliedSkills?: AppliedSkill[];
+  /**
+   * Edit mode only (spec 17, part A): the block's SQL BEFORE the change, so the
+   * UI can render a diff. Absent on a freshly created draft.
+   */
+  previousSql?: string;
+  /** The chosen route for this build (spec 17, part C). */
+  route?: BuildRoute;
+  /** True when this result updated an existing block in place (edit mode). */
+  edited?: boolean;
 }
 
 export type BuildFromPromptResult = BuildCellResult | BuildBlockResult;
@@ -610,6 +648,8 @@ async function buildBlock(
     examples,
     certifierVerdict: verdict,
     appliedSkills,
+    edited: false,
+    route: { tier: 'generated_sql', label: `Drafted new block ${name}`, ref: name },
   };
 }
 
@@ -669,10 +709,159 @@ function toBlockRecord(input: BlockRecordInput): BlockRecord {
   };
 }
 
+// ─── mode: edit (spec 17, part A) ─────────────────────────────────────────────
+
+const EDIT_BLOCK_SYSTEM_PROMPT =
+  'You modify an EXISTING governed analytics block. You are given the block\'s ' +
+  'current SQL + metadata and a change request (e.g. add a missed table/column, ' +
+  'change the grain). Apply ONLY the requested change; preserve everything else. ' +
+  'Use ONLY the relations and columns provided in the grounded schema; do not ' +
+  "invent tables or columns. Reference each table by its {{ ref('<model>') }} " +
+  'form EXACTLY as shown. Respond with ONLY a JSON object — no prose, no fences.';
+
+/**
+ * Edit an existing block in place (spec 17, part A). Loads the block at
+ * `blockPath`, asks the model for the UPDATED SQL/metadata applying the user's
+ * change, re-grounds + validates + repairs the SQL via spec-15, and writes the
+ * result BACK to the SAME path. Never forks a new draft. Returns `previousSql`
+ * for a diff and preserves the block's status (certified stays certified).
+ */
+async function editBlock(
+  options: BuildFromPromptOptions,
+  grounding: SchemaGrounding,
+  provider: AgentProvider | undefined,
+  skillsPrompt: string,
+  appliedSkills: AppliedSkill[],
+): Promise<BuildBlockResult> {
+  if (!options.blockPath) {
+    throw new Error("Edit mode requires { blockPath } to the block being modified.");
+  }
+  const existing: LoadedBlock = loadBlockForEdit(options.projectRoot, options.blockPath);
+  const previousSql = existing.sql;
+
+  const userPrompt = [
+    skillsPrompt || null,
+    `Change request: ${options.prompt}`,
+    `Existing block "${existing.name}" (status: ${existing.status ?? 'draft'}, domain: ${existing.domain ?? 'misc'}):`,
+    existing.description ? `Description: ${existing.description}` : null,
+    existing.grain ? `Grain: ${existing.grain}` : null,
+    existing.outputs?.length ? `Outputs: ${existing.outputs.join(', ')}` : null,
+    `Current SQL:\n${previousSql || '(empty)'}`,
+    `Grounded schema:\n${renderGroundingForPrompt(grounding, 'block')}`,
+    workedExample(grounding, 'ref') || null,
+    'Produce JSON with keys:',
+    '- "sql": the UPDATED read-only SELECT/WITH query with the change applied, ' +
+      "referencing each table by its {{ ref('<model>') }} form and only grounded columns.",
+    '- "description": the updated one/two-sentence description (or the existing one if unchanged).',
+    '- "grain": the row grain, only if the change alters it; else repeat the existing grain or "".',
+    '- "outputs": the full array of output column names the updated query returns.',
+  ]
+    .filter(Boolean)
+    .join('\n');
+
+  // Generate the updated SQL/metadata (optional; offline keeps the existing SQL).
+  let newSql = previousSql;
+  let description = existing.description;
+  let grain = existing.grain;
+  let outputs = existing.outputs ?? [];
+  if (provider) {
+    try {
+      const response = await provider.generate(
+        [
+          { role: 'system', content: EDIT_BLOCK_SYSTEM_PROMPT },
+          { role: 'user', content: userPrompt },
+        ],
+        { maxTokens: 900, temperature: 0.1, signal: AbortSignal.timeout(25_000) },
+      );
+      const parsed = extractJson(response);
+      if (parsed) {
+        newSql = asString(parsed.sql) ?? newSql;
+        description = asString(parsed.description) ?? description;
+        grain = asString(parsed.grain) ?? grain;
+        const parsedOutputs = asStringArray(parsed.outputs, 30);
+        if (parsedOutputs.length > 0) outputs = parsedOutputs;
+      }
+    } catch {
+      // Offline-safe: keep the existing SQL/metadata on any provider failure.
+    }
+  }
+
+  // Re-ground + validate + repair the updated SQL (spec 15). Block SQL uses ref().
+  const grounded = await groundAndRepairSql({
+    initialSql: newSql,
+    grounding,
+    prefer: 'ref',
+    provider,
+    systemPrompt: EDIT_BLOCK_SYSTEM_PROMPT,
+    userPrompt,
+    maxRepairs: 2,
+  });
+
+  // Preserve name/owner/domain/grain + status policy; write BACK to same path.
+  const status = resolveEditedStatus(existing.status);
+  const content = renderEditedBlock({
+    name: existing.name,
+    blockType: existing.blockType,
+    status,
+    domain: existing.domain,
+    owner: existing.owner,
+    description,
+    grain,
+    pattern: existing.pattern,
+    entities: existing.entities,
+    outputs,
+    tags: existing.tags,
+    llmContext: existing.llmContext,
+    invariants: existing.invariants,
+    sourceSystems: existing.sourceSystems,
+    sql: grounded.sql,
+  });
+  writeEditedBlock(existing.absPath, content);
+
+  // Stored verdict mirrors the edited block (never used to flip status).
+  const record = toBlockRecord({
+    slug: existing.name,
+    domain: existing.domain ?? 'misc',
+    owner: existing.owner ?? resolveLocalOwner(options.projectRoot, { explicit: options.owner }),
+    description: description ?? `Block "${existing.name}".`,
+    grain,
+    outputs,
+    entities: existing.entities ?? [],
+    invariants: existing.invariants ?? [],
+    llmContext: existing.llmContext,
+    tags: existing.tags ?? ['ai-build'],
+    gitPath: existing.requestedPath,
+  });
+  const evaluation = new Certifier().evaluate(record);
+
+  return {
+    target: 'block',
+    path: existing.requestedPath,
+    name: existing.name,
+    sqlPreview: grounded.sql,
+    description: description ?? `Block "${existing.name}".`,
+    grain,
+    outputs,
+    examples: [],
+    certifierVerdict: verdictFrom(evaluation),
+    appliedSkills,
+    previousSql,
+    edited: true,
+    route: {
+      tier: 'generated_sql',
+      label: `Updated block ${existing.name} in place`,
+      ref: existing.name,
+    },
+  };
+}
+
 /**
  * Build from a natural-language prompt. ONE engine, two targets:
  *   - 'cell'  → returns SQL (writes nothing).
  *   - 'block' → writes a complete DRAFT and returns its path + preview fields.
+ *
+ * `mode: 'edit'` (block target only) updates the existing block at `blockPath`
+ * in place instead of forking a new draft (spec 17, part A).
  */
 export async function buildFromPrompt(options: BuildFromPromptOptions): Promise<BuildFromPromptResult> {
   if (!options.prompt || !options.prompt.trim()) {
@@ -696,8 +885,12 @@ export async function buildFromPrompt(options: BuildFromPromptOptions): Promise<
   const skillsPrompt = buildSkillsPrompt(selectedSkills, options.userId ?? null);
   const appliedSkills: AppliedSkill[] = selectedSkills.map((s) => ({ id: s.id, description: s.description }));
 
-  return options.target === 'cell'
-    ? buildCell(options, grounding, provider, skillsPrompt, appliedSkills)
+  if (options.target === 'cell') {
+    return buildCell(options, grounding, provider, skillsPrompt, appliedSkills);
+  }
+  // target: 'block' — edit an existing block in place, or create a new draft.
+  return options.mode === 'edit'
+    ? editBlock(options, grounding, provider, skillsPrompt, appliedSkills)
     : buildBlock(options, grounding, provider, skillsPrompt, appliedSkills);
 }
 
