@@ -35,6 +35,9 @@ import type {
   ActivePersona,
   ProposeReadiness,
   ProposeGenerateResult,
+  ProposePlanCandidate,
+  AiBuildResult,
+  AiBuildTarget,
 } from '../store/types';
 
 const EMPTY_PLAN = {
@@ -1443,6 +1446,46 @@ export const api = {
         proposals: [],
       };
     }
+  },
+
+  /**
+   * Spec 14 (part A) — lazily fetch the transparent preview for a single
+   * planned proposal slug: the SQL the draft would run, declared outputs,
+   * example questions, and a plain-language Certifier verdict. Read-only;
+   * generates/writes nothing. Used by the expandable Get Started rows.
+   */
+  async proposePreview(slug: string): Promise<{ candidate: ProposePlanCandidate }> {
+    return request<{ candidate: ProposePlanCandidate }>(
+      `/api/propose/preview?slug=${encodeURIComponent(slug)}`,
+    );
+  },
+
+  /**
+   * Spec 14 (part B) — unified AI Build. Generates SQL/DQL for the user's
+   * prompt and returns a clean ARTIFACT, never the Q&A answer loop's internals.
+   * The result is discriminated on `target`: a notebook CELL (SQL) or a draft
+   * BLOCK (saved at `path`, with metadata + Certifier verdict). Nothing is
+   * certified — drafts await a human.
+   */
+  async aiBuild(input: {
+    prompt: string;
+    context?: { cellSql?: string; selection?: string };
+    target: AiBuildTarget;
+    owner?: string;
+  }): Promise<AiBuildResult> {
+    return request<AiBuildResult>('/api/ai/build', {
+      method: 'POST',
+      body: JSON.stringify(input),
+    });
+  },
+
+  /**
+   * Spec 14 (part D) — who is drafting. Best-effort identity used to show
+   * "drafting as <owner>" where drafts are created. Callers should not block
+   * on it (fall back to nothing on failure).
+   */
+  async getIdentity(): Promise<{ owner: string }> {
+    return request<{ owner: string }>('/api/identity');
   },
 
   async getProviderSettings(): Promise<{ providers: ProviderSettings[] }> {

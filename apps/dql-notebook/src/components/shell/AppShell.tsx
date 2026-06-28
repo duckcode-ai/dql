@@ -21,6 +21,7 @@ import { ReadinessPage } from '../readiness/ReadinessPage';
 import { ReviewPage } from '../review/ReviewPage';
 import { AppsView } from '../apps/AppsView';
 import { LineageDrawer } from '../lineage/LineageDrawer';
+import { AiBuildDialog } from '../agent/AiBuildDialog';
 import { api } from '../../api/client';
 import { parseNotebookFile } from '../../utils/parse-workbook';
 import { makeCell } from '../../store/NotebookStore';
@@ -255,6 +256,8 @@ export function AppShell() {
       {state.newNotebookModalOpen && <NewNotebookModal onFileOpened={handleOpenFile} />}
       {state.newBlockModalOpen && <NewBlockModal onFileOpened={handleOpenFile} />}
       <CommandPalette open={paletteOpen} onClose={() => setPaletteOpen(false)} />
+      {/* Spec 14 — shared AI Build surface for the non-notebook front doors. */}
+      <AiBuildDialog />
     </div>
   );
 }

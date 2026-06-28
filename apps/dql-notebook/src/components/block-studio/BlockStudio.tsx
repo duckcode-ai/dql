@@ -28,6 +28,7 @@ import { SemanticSearchBar } from '../panels/SemanticSearchBar';
 import { SemanticTreeNode as TreeRow } from '../panels/SemanticTreeNode';
 import { AiSqlDraftDialog, type AiSqlDraftMeta } from '../agent/AiSqlDraftDialog';
 import { AgentChatPanel } from '../agent/AgentChatPanel';
+import { openAiBuild } from '../../utils/ai-build-bus';
 import {
   appendSemanticRefToQuery,
   buildSemanticRef,
@@ -911,7 +912,17 @@ export function BlockStudio() {
           <div style={{ flex: 1 }} />
           {hasActiveDraft && (
             <>
-              <TemplateButton label="Build DQL" Icon={Bot} variant="primary" onClick={() => { setResultTab('results'); setAiSqlOpen(true); }} />
+              <TemplateButton
+                label="Ask AI"
+                Icon={Sparkles}
+                variant="primary"
+                onClick={() => openAiBuild({
+                  target: 'block',
+                  lockTarget: true,
+                  context: state.blockStudioDraft.trim() ? { cellSql: state.blockStudioDraft } : undefined,
+                  sourceLabel: activeBlockName ? `Building from ${activeBlockName}` : 'Describe the reusable block you need.',
+                })}
+              />
               <TemplateButton label="Run" onClick={() => void handleRun()} busy={running} />
               <TemplateButton label="Save" onClick={() => void handleSave()} busy={saving} />
             </>
@@ -935,10 +946,11 @@ export function BlockStudio() {
               onCreateSql={() => dispatch({ type: 'OPEN_NEW_BLOCK_MODAL', blockType: 'custom' })}
               onCreateSemantic={() => dispatch({ type: 'OPEN_NEW_BLOCK_MODAL', blockType: 'semantic' })}
               onImport={() => dispatch({ type: 'OPEN_BLOCK_IMPORT' })}
-              onBuildDql={() => {
-                setResultTab('results');
-                setAiSqlOpen(true);
-              }}
+              onBuildDql={() => openAiBuild({
+                target: 'block',
+                lockTarget: true,
+                sourceLabel: 'Describe the reusable block you need.',
+              })}
               onAskAi={() => {
                 setResultTab('results');
                 setAiAskOpen(true);
