@@ -77,6 +77,12 @@ export {
   type AppPlanFilter as AgentAppPlanFilter,
   type PlanBlock,
 } from "./app-planner.js";
+export {
+  planResearch,
+  type ResearchPlan,
+  type ResearchStep,
+  type ResearchFollowUp,
+} from "./research-loop.js";
 export { loadSemanticMetrics } from "./propose/build-from-prompt.js";
 export type {
   AgentAnalysisPlan,

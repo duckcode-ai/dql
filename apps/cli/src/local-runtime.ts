@@ -107,6 +107,7 @@ import {
   reindexProject,
   defaultKgPath,
   planApp,
+  planResearch,
   loadSemanticMetrics,
   type PlanBlock,
 } from '@duckcodeailabs/dql-agent';
@@ -3477,6 +3478,41 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
         const plan = await planApp({ goal, metrics, blocks });
         res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
         res.end(serializeJSON({ plan, blockCount: blocks.length, metricCount: metrics.length, certifiedOnly }));
+      } catch (error) {
+        res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({ error: error instanceof Error ? error.message : String(error) }));
+      }
+      return;
+    }
+
+    // ── Research / follow-up planning (P4: ReAct over the catalog) ─────────
+    // Decide whether to answer, research across grounded steps, or ask a smart
+    // follow-up — so the agent behaves like a real assistant instead of always
+    // generating one query. Every step + option is bound to a real metric/block.
+    if (req.method === 'POST' && path === '/api/research-plan') {
+      try {
+        const body = await readJSON(req);
+        const question = typeof body.question === 'string' ? body.question.trim() : '';
+        if (!question) {
+          res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
+          res.end(serializeJSON({ error: 'question is required' }));
+          return;
+        }
+        const metrics = loadSemanticMetrics(projectRoot);
+        let blocks = collectPlanBlocks(projectRoot, { certifiedOnly: true });
+        if (blocks.length === 0) blocks = collectPlanBlocks(projectRoot, { certifiedOnly: false });
+        const plan = await planResearch({
+          question,
+          metrics,
+          blocks,
+          intent: typeof body.intent === 'string'
+            ? (body.intent as Parameters<typeof planResearch>[0]['intent'])
+            : undefined,
+          isFollowUp: body.isFollowUp === true,
+          history: Array.isArray(body.history) ? body.history : undefined,
+        });
+        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({ plan, blockCount: blocks.length, metricCount: metrics.length }));
       } catch (error) {
         res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' });
         res.end(serializeJSON({ error: error instanceof Error ? error.message : String(error) }));
