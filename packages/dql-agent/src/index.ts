@@ -70,6 +70,8 @@ export {
   type IntentDecisionInput,
   type IntentSignals,
 } from "./intent-controller.js";
+export { planApp, type AppPlan as AgentAppPlan, type AppPlanSection, type PlanBlock } from "./app-planner.js";
+export { loadSemanticMetrics } from "./propose/build-from-prompt.js";
 export type {
   AgentAnalysisPlan,
   AgentAnswer,

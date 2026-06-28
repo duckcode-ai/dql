@@ -106,6 +106,9 @@ import {
   type BuildFromPromptResult,
   reindexProject,
   defaultKgPath,
+  planApp,
+  loadSemanticMetrics,
+  type PlanBlock,
 } from '@duckcodeailabs/dql-agent';
 import { gatherProposeEnrichment } from './propose-enrich.js';
 import { handleAppsApi, recommendVisualization } from './apps-api.js';
@@ -3417,6 +3420,36 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           .map((value: any) => String(value));
         res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
         res.end(serializeJSON({ column, options, truncated }));
+      } catch (error) {
+        res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({ error: error instanceof Error ? error.message : String(error) }));
+      }
+      return;
+    }
+
+    // ── Plan an app from a goal (P1: plan → critique → show gaps) ──────────
+    // The agent decomposes the goal into the questions an app should answer
+    // (KPI + trend + breakdowns), matches each to a CERTIFIED block, derives the
+    // shared filters that refresh every tile, and reports coverage + gaps BEFORE
+    // anything is built — so the human reviews the plan, not a blank canvas.
+    if (req.method === 'POST' && path === '/api/app-plan') {
+      try {
+        const body = await readJSON(req);
+        const goal = typeof body.goal === 'string' ? body.goal.trim() : '';
+        if (!goal) {
+          res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
+          res.end(serializeJSON({ error: 'goal is required' }));
+          return;
+        }
+        const certifiedOnly = body.certifiedOnly !== false;
+        const metrics = loadSemanticMetrics(projectRoot);
+        let blocks = collectPlanBlocks(projectRoot, { certifiedOnly });
+        // If nothing is certified yet, fall back to all drafts so the plan still
+        // shows what COULD be assembled (every section then reads as a gap to certify).
+        if (blocks.length === 0 && certifiedOnly) blocks = collectPlanBlocks(projectRoot, { certifiedOnly: false });
+        const plan = await planApp({ goal, metrics, blocks });
+        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({ plan, blockCount: blocks.length, metricCount: metrics.length, certifiedOnly }));
       } catch (error) {
         res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' });
         res.end(serializeJSON({ error: error instanceof Error ? error.message : String(error) }));
@@ -8758,6 +8791,42 @@ function resolveBlockPathById(projectRoot: string, blockId: string): string | nu
     }
   }
   return nameMatch;
+}
+
+/**
+ * Collect the workspace's blocks as the App planner needs to see them (name +
+ * governed metric + filterable dimensions). Walks blocks/ and domains/, parsing
+ * each `.dql`. Certified-only by default — the planner builds an app from trusted
+ * material and reports the rest as gaps.
+ */
+function collectPlanBlocks(projectRoot: string, opts: { certifiedOnly?: boolean } = {}): PlanBlock[] {
+  const out: PlanBlock[] = [];
+  const seen = new Set<string>();
+  const stack = ['blocks', 'domains'].map((dir) => join(projectRoot, dir));
+  while (stack.length > 0) {
+    const dir = stack.pop()!;
+    if (!existsSync(dir)) continue;
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      const filePath = join(dir, entry.name);
+      if (entry.isDirectory()) { stack.push(filePath); continue; }
+      if (!entry.name.endsWith('.dql')) continue;
+      let source: string;
+      try { source = readFileSync(filePath, 'utf-8'); } catch { continue; }
+      const meta = parseBlockSourceMetadata(source);
+      if (!meta.name || seen.has(meta.name)) continue;
+      if (opts.certifiedOnly && meta.status !== 'certified') continue;
+      seen.add(meta.name);
+      out.push({
+        name: meta.name,
+        domain: meta.domain || undefined,
+        description: meta.description || undefined,
+        metricRef: meta.metricRef || meta.metricsRef[0] || undefined,
+        allowedFilters: meta.allowedFilters,
+        dimensions: meta.dimensions,
+      });
+    }
+  }
+  return out;
 }
 
 export function parseBlockSourceMetadata(source: string): {

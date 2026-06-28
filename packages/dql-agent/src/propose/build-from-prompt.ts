@@ -270,7 +270,7 @@ const requireForBuild = createRequire(import.meta.url);
 
 /** Load metric KG nodes (read-only, best-effort) so the Build path can reuse the
  * same governed-metric matching the Ask path uses. Returns [] when no KG exists. */
-function loadSemanticMetrics(projectRoot: string): KGNode[] {
+export function loadSemanticMetrics(projectRoot: string): KGNode[] {
   const dbPath = join(projectRoot, '.dql', 'cache', 'agent-kg.sqlite');
   if (!existsSync(dbPath)) return [];
   try {
