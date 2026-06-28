@@ -6,6 +6,7 @@ import {
   buildAgentSchemaContext,
   buildDbtStatus,
   buildProposeReadiness,
+  buildProposeCandidatePreview,
   generateProposeDrafts,
   buildSemanticLayerDiagnostics,
   createBlockArtifacts,
@@ -1832,5 +1833,92 @@ describe('buildProposeReadiness (/api/propose handler core)', () => {
     const result = await generateProposeDrafts(projectRoot, ['stg_orders']);
     expect(result.draftsWritten).toBe(0);
     expect(existsSync(join(projectRoot, 'blocks', '_drafts', 'stg_orders.dql'))).toBe(false);
+  });
+});
+
+describe('buildProposeCandidatePreview (/api/propose/preview handler core)', () => {
+  function writeManifest(projectRoot: string): void {
+    const targetDir = join(projectRoot, 'target');
+    mkdirSync(targetDir, { recursive: true });
+    writeFileSync(join(targetDir, 'manifest.json'), JSON.stringify({
+      metadata: { project_name: 'jaffle_shop' },
+      nodes: {
+        'model.jaffle_shop.dim_customers': {
+          resource_type: 'model',
+          name: 'dim_customers',
+          schema: 'marts',
+          database: 'analytics',
+          description: 'One row per customer.',
+          original_file_path: 'models/marts/dim_customers.sql',
+          config: { materialized: 'table' },
+          tags: ['core'],
+          depends_on: { nodes: [] },
+          columns: {
+            customer_id: { name: 'customer_id', description: 'Customer surrogate key.' },
+            customer_name: { name: 'customer_name' },
+          },
+          meta: {},
+        },
+        'model.jaffle_shop.stg_orders': {
+          resource_type: 'model',
+          name: 'stg_orders',
+          schema: 'staging',
+          database: 'analytics',
+          description: '',
+          original_file_path: 'models/staging/stg_orders.sql',
+          config: { materialized: 'view' },
+          tags: [],
+          depends_on: { nodes: [] },
+          columns: { order_id: { name: 'order_id' } },
+          meta: {},
+        },
+      },
+      sources: {},
+    }), 'utf-8');
+  }
+
+  it('fills the preview fields for one slug (real SQL + certifier verdict), writing nothing', async () => {
+    const projectRoot = mkdtempSync(join(tmpdir(), 'dql-preview-'));
+    tempDirs.push(projectRoot);
+    // aiEnrichment off → deterministic + offline (no provider ping in tests).
+    writeFileSync(
+      join(projectRoot, 'dql.config.json'),
+      JSON.stringify({ project: 'p', propose: { aiEnrichment: 'off' }, identity: { owner: 'me@example.com' } }),
+      'utf-8',
+    );
+    writeManifest(projectRoot);
+
+    const candidate = await buildProposeCandidatePreview(projectRoot, 'dim_customers');
+
+    expect(candidate).toBeDefined();
+    expect(candidate!.slug).toBe('dim_customers');
+    // Real narrowed projection SQL — not select-*.
+    expect(candidate!.sqlPreview).toContain('customer_id');
+    expect(candidate!.sqlPreview).not.toMatch(/SELECT \* FROM/i);
+    expect(candidate!.outputs).toEqual(['customer_id', 'customer_name']);
+    expect(candidate!.certifierVerdict).toMatchObject({
+      blocking: expect.any(Array),
+      warnings: expect.any(Array),
+      ready: expect.any(Boolean),
+    });
+    // Owner stamped from identity → "Missing owner" is not blocking.
+    expect(candidate!.certifierVerdict!.blocking).not.toContain('Missing owner');
+
+    // Preview writes NOTHING.
+    expect(existsSync(join(projectRoot, 'blocks'))).toBe(false);
+  });
+
+  it('returns undefined for a plumbing/unknown slug', async () => {
+    const projectRoot = mkdtempSync(join(tmpdir(), 'dql-preview-miss-'));
+    tempDirs.push(projectRoot);
+    writeFileSync(
+      join(projectRoot, 'dql.config.json'),
+      JSON.stringify({ project: 'p', propose: { aiEnrichment: 'off' } }),
+      'utf-8',
+    );
+    writeManifest(projectRoot);
+
+    expect(await buildProposeCandidatePreview(projectRoot, 'stg_orders')).toBeUndefined();
+    expect(await buildProposeCandidatePreview(projectRoot, 'no_such')).toBeUndefined();
   });
 });

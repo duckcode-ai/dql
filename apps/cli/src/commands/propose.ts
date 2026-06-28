@@ -22,7 +22,7 @@
 import { existsSync } from 'node:fs';
 import { join, relative, resolve } from 'node:path';
 import { loadProjectConfig, resolveDbtManifestPath } from '@duckcodeailabs/dql-core';
-import { propose, proposePlan, type ProposeSummary, type ProposePlan, type EnrichedContent } from '@duckcodeailabs/dql-agent';
+import { propose, proposePlan, resolveLocalOwner, type ProposeSummary, type ProposePlan, type EnrichedContent } from '@duckcodeailabs/dql-agent';
 import type { CLIFlags } from '../args.js';
 import { gatherProposeEnrichment } from '../propose-enrich.js';
 
@@ -102,12 +102,16 @@ export async function runPropose(
     enrichedBySlug = await gatherProposeEnrichment(projectRoot, resolved, proposeConfig).catch(() => undefined);
   }
 
+  // Stamp the resolved local OSS owner when --owner is absent so drafts are not
+  // born with a "Missing owner" Certifier strike. A dry-run must not persist.
+  const owner = flags.owner || resolveLocalOwner(projectRoot, { persist: !flags.dryRun });
+
   let summary: ProposeSummary;
   try {
     summary = propose({
       projectRoot,
       dbtManifestPath: resolved,
-      owner: flags.owner || undefined,
+      owner,
       limit,
       dryRun: Boolean(flags.dryRun),
       config: proposeConfig,
