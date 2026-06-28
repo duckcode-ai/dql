@@ -25,6 +25,15 @@ export interface ProposedDraftRecord {
   description: string;
   /** Block body SQL (wraps the dbt model via `{{ ref('...') }}`). */
   sql: string;
+  /**
+   * 'semantic' for a metric-bound block (import-adapter shape: `metric` + a
+   * pre-compiled `query` that runs offline), else 'custom'. Defaults to 'custom'.
+   */
+  blockType?: 'custom' | 'semantic';
+  /** Governed metric this block wraps (semantic blocks). Satisfies metric_wrapper. */
+  metricRef?: string;
+  /** Semantic dimensions the metric is grouped by (semantic blocks). */
+  dimensions?: string[];
   pattern: string;
   grain?: string;
   entities: string[];
@@ -140,14 +149,21 @@ export function renderProposedDraft(rec: ProposedDraftRecord, draftPath: string)
   const examplesBlock = renderExamples(rec.examples);
   const testsBlock = renderTests(rec.invariants);
   const ownerLine = rec.owner ? `\n  owner = "${escapeString(rec.owner)}"` : '';
+  // Semantic (metric-bound) block: declare the governed metric + dimensions. The
+  // pre-compiled `query` below keeps it runnable offline (import-adapter shape).
+  const blockType = rec.blockType ?? 'custom';
+  const metricLine = blockType === 'semantic' && rec.metricRef
+    ? `\n  metric = "${escapeString(rec.metricRef)}"`
+    : '';
+  const dimensionsLine = stringArray('dimensions', rec.dimensions ?? []);
 
   return `// dql-format: 1
 ${header}block "${rec.slug}" {
   domain = "${escapeString(rec.domain)}"
-  type = "custom"
+  type = "${blockType}"
   status = "draft"
-  description = "${escapeString(rec.description)}"${ownerLine}
-  pattern = "${escapeString(rec.pattern)}"${grainLine}${entitiesLine}${outputsLine}${sourceSystemsLine}${tagsLine}${llmContextLine}${reviewCadenceLine}${invariantsLine}
+  description = "${escapeString(rec.description)}"${ownerLine}${metricLine}
+  pattern = "${escapeString(rec.pattern)}"${grainLine}${entitiesLine}${outputsLine}${dimensionsLine}${sourceSystemsLine}${tagsLine}${llmContextLine}${reviewCadenceLine}${invariantsLine}
 
   query = """
 ${indent(rec.sql, 4)}

@@ -730,6 +730,9 @@ async function buildBlock(
     llmContext: content.llmContext,
     tags,
     gitPath: draftRelPath,
+    blockType: matchedMetric ? 'semantic' : 'custom',
+    pattern: matchedMetric ? 'metric_wrapper' : 'custom',
+    metricRef: matchedMetric?.name,
   });
   const evaluation = new Certifier().evaluate(record);
   const verdict = verdictFrom(evaluation);
@@ -740,6 +743,10 @@ async function buildBlock(
     owner,
     description,
     sql,
+    // Metric-bound (semantic) block when a governed metric drove this build, so it
+    // references the semantic layer instead of re-deriving the formula in raw SQL.
+    blockType: matchedMetric ? 'semantic' : 'custom',
+    metricRef: matchedMetric?.name,
     pattern: matchedMetric ? 'metric_wrapper' : 'custom',
     grain,
     entities,
@@ -804,6 +811,9 @@ interface BlockRecordInput {
   llmContext?: string;
   tags: string[];
   gitPath: string;
+  blockType?: 'custom' | 'semantic';
+  pattern?: string;
+  metricRef?: string;
 }
 
 function toBlockRecord(input: BlockRecordInput): BlockRecord {
@@ -812,7 +822,7 @@ function toBlockRecord(input: BlockRecordInput): BlockRecord {
     id: input.slug,
     name: input.slug,
     domain: input.domain,
-    type: 'custom',
+    type: input.blockType ?? 'custom',
     version: '0.1.0',
     status: 'draft' as BlockStatus,
     gitRepo: '',
@@ -827,7 +837,8 @@ function toBlockRecord(input: BlockRecordInput): BlockRecord {
     updatedAt: now,
     llmContext: input.llmContext,
     invariants: input.invariants,
-    pattern: 'custom',
+    pattern: input.pattern ?? 'custom',
+    metricRef: input.metricRef,
     grain: input.grain,
     entities: input.entities.length > 0 ? input.entities : undefined,
     declaredOutputs: input.outputs.length > 0 ? input.outputs : undefined,

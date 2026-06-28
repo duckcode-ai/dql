@@ -1318,7 +1318,19 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
       return { passed: 0, failed: 0, skipped: 0, duration: Date.now() - start, assertions: [], runAt: new Date() };
     }
 
-    const prepared = prepareLocalExecution(plan.sql, activeConnection, projectRoot, projectConfig);
+    // Run tests against the SAME SQL the preview runs: for a semantic block with a
+    // pre-compiled query, that's the query (not a recompiled metric), so the test's
+    // output columns match the block's declared outputs.
+    const semanticCompose = semanticLayer
+      ? composeSemanticBlockSql(source, semanticLayer, {
+          driver: activeConnection.driver,
+          tableMapping,
+          projectRoot,
+          projectConfig,
+          detectedProvider: semanticDetectedProvider,
+        })
+      : null;
+    const prepared = prepareLocalExecution(semanticCompose?.sql ?? plan.sql, activeConnection, projectRoot, projectConfig);
     const rawResult = await executor.executeQuery(
       prepared.sql,
       plan.sqlParams ?? [],
@@ -1471,6 +1483,8 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
       sourceSystems: parsed.sourceSystems,
       replacementFor: parsed.replacementFor,
       reviewCadence: parsed.reviewCadence,
+      metricRef: parsed.metricRef || undefined,
+      metricsRef: parsed.metricsRef.length > 0 ? parsed.metricsRef : undefined,
       dependencies: [],
       usedInCount: 0,
       createdAt: new Date(),
@@ -7971,6 +7985,17 @@ function composeSemanticBlockSql(
     return { sql: null, diagnostics, semanticRefs };
   }
 
+  // Import-adapter shape: a semantic block may carry a pre-compiled `query` (the
+  // governed metric already expanded to runnable SQL). When present, RUN THAT —
+  // the `metric` field is provenance/governance, not something to recompile. This
+  // keeps metric-bound blocks runnable offline (the full MetricFlow engine may be
+  // unavailable). We still validated the metric exists above. Returning the query
+  // as the composed SQL lets the normal {{ ref() }} resolution + execution apply.
+  const precompiledQuery = extractBlockStudioSql(source);
+  if (precompiledQuery) {
+    return { sql: precompiledQuery, diagnostics, semanticRefs };
+  }
+
   let composed: { sql: string; joins: string[]; tables: string[] } | null;
   try {
     composed = options?.projectRoot && options.projectConfig
@@ -8657,6 +8682,8 @@ export function parseBlockSourceMetadata(source: string): {
   sourceSystems: string[];
   replacementFor: string[];
   reviewCadence: string;
+  metricRef: string;
+  metricsRef: string[];
 } {
   // Multiline: a `.dql` typically opens with a comment header (e.g. a proposed-draft
   // banner), so the `block "<name>"` declaration is NOT at the start of the string.
@@ -8702,6 +8729,8 @@ export function parseBlockSourceMetadata(source: string): {
     sourceSystems: extractStringArray('sourceSystems'),
     replacementFor: extractStringArray('replacementFor'),
     reviewCadence: extractString('reviewCadence'),
+    metricRef: extractString('metric'),
+    metricsRef: extractStringArray('metrics'),
   };
 }
 
