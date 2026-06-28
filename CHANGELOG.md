@@ -61,6 +61,22 @@ results as certified. Everything here is OSS and local-first.
 
 ### Fixed
 
+- **Proposals show their work before you approve.** Each Get Started proposal now
+  expands to the **SQL it will run**, its output columns, example questions, and a
+  plain "what's missing to certify" — fetched on demand. You approve what you can
+  see, not a checkbox.
+- **One AI "Build", two destinations — and no more confusing AI dump.** "Ask AI to
+  build a block" no longer routes through the governed Q&A answer-loop (which leaked
+  its internal self-correction, evidence tiers, review-status churn, and named blocks
+  after the literal question). Build is now its own surface: describe what you want →
+  a clean result card with a **Cell ⇄ Block** toggle. Cell inserts SQL into the
+  notebook; Block writes a complete, **semantically-named** draft
+  (`orders_by_location_daily`, not `can_you_build_the_total_orders…`) with grain,
+  outputs, examples, and "what's missing", then opens in Block Studio. The Notebook AI
+  panel keeps **Ask** (governed Q&A) and **Build** as distinct modes.
+- **A local owner identity, so nothing is born "missing owner".** A default owner is
+  resolved once (git `user.email` → OS user → `guest@local`) and stamped on every
+  draft (`propose`, generate, AI build); the UI shows "drafting as <owner>".
 - **`dql propose` is now business-first and selective (was a `SELECT *`-per-model
   dump).** A convention-agnostic classifier (dbt `meta` → exposures → semantic
   manifest → folder/path → tags → name, configurable via a `propose` block in
