@@ -36,7 +36,30 @@ import {
   semanticCompletionSource,
   setActiveSemanticEditor,
 } from '../../editor/semantic-completions';
+import { dqlBlockCompletionSource } from '../../editor/dql-completions';
 import { api } from '../../api/client';
+
+/**
+ * Build the SQL language extension with IDE-style completion wired through
+ * language data (NOT `autocompletion({ override })`, which would suppress
+ * lang-sql's own table/column completion). With `schema`, typing a table name
+ * suggests tables and `table.` suggests its columns; the semantic source adds
+ * `@metric/@dim`; in `dqlMode` the block-DSL source adds field/enum/snippet
+ * completion for the `.dql` metadata. SQL keyword completion comes from lang-sql.
+ */
+function buildSqlLanguage(schema: Record<string, string[]> | undefined, dqlMode: boolean) {
+  const lang = schema
+    ? sql({ schema, upperCaseKeywords: false })
+    : sql({ upperCaseKeywords: false });
+  const exts = [
+    lang,
+    lang.language.data.of({ autocomplete: semanticCompletionSource }),
+  ];
+  if (dqlMode) {
+    exts.push(lang.language.data.of({ autocomplete: dqlBlockCompletionSource }));
+  }
+  return exts;
+}
 
 export interface SQLCellEditorHandle {
   undo: () => void;
@@ -58,6 +81,9 @@ interface SQLCellEditorProps {
   // pane is narrow.
   wrap?: boolean;
   fillHeight?: boolean;
+  // Block Studio edits a full `.dql` (block DSL + embedded SQL). When true, the
+  // editor adds DQL field/enum/snippet completion on top of SQL completion.
+  dqlMode?: boolean;
 }
 
 /**
@@ -256,6 +282,7 @@ export function SQLCellEditor({
   editorRef,
   wrap = true,
   fillHeight = false,
+  dqlMode = false,
 }: SQLCellEditorProps) {
   const t = themes[themeMode];
   const containerRef = useRef<HTMLDivElement>(null);
@@ -346,10 +373,10 @@ export function SQLCellEditor({
       '.cm-foldGutter': { cursor: 'pointer' },
     });
 
-    // Initial SQL language with current schema (wrapped in compartment)
-    const initialSqlLang = schema
-      ? sql({ schema, upperCaseKeywords: false })
-      : sql({ upperCaseKeywords: false });
+    // Initial SQL language + completion sources (wrapped in compartment for
+    // hot-swapping schema). Completion is registered via language data, so SQL
+    // table/column completion runs alongside the semantic + DQL sources.
+    const initialSqlLang = buildSqlLanguage(schema, dqlMode);
 
     const extensions = [
       runKeymap,
@@ -358,7 +385,7 @@ export function SQLCellEditor({
       baseTheme,
       // Language wrapped in compartment for hot-swapping schema
       schemaCompartment.current.of(initialSqlLang),
-      autocompletion({ closeOnBlur: false, override: [semanticCompletionSource] }),
+      autocompletion({ closeOnBlur: false }),
       // Undo/redo history — history() provides the state machine, historyKeymap binds Cmd+Z / Cmd+Shift+Z
       history(),
       // Developer experience extensions
@@ -401,13 +428,10 @@ export function SQLCellEditor({
   useEffect(() => {
     const view = viewRef.current;
     if (!view) return;
-    const newSqlLang = schema
-      ? sql({ schema, upperCaseKeywords: false })
-      : sql({ upperCaseKeywords: false });
     view.dispatch({
-      effects: schemaCompartment.current.reconfigure(newSqlLang),
+      effects: schemaCompartment.current.reconfigure(buildSqlLanguage(schema, dqlMode)),
     });
-  }, [schema]);
+  }, [schema, dqlMode]);
 
   // Sync external value changes without recreating the editor
   useEffect(() => {

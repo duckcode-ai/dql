@@ -57,6 +57,14 @@ const TREE_OVERSCAN = 10;
 export function BlockStudio() {
   const { state, dispatch } = useNotebook();
   const t = themes[state.themeMode];
+  // Real tables→columns for IDE-style SQL completion inside the block's query body.
+  const editorSchema = useMemo(
+    () =>
+      state.schemaTables.length > 0
+        ? Object.fromEntries(state.schemaTables.map((tbl) => [tbl.name, tbl.columns.map((c) => c.name)]))
+        : undefined,
+    [state.schemaTables],
+  );
   const [explorerTab, setExplorerTab] = useState<ExplorerTab>('blocks');
   const [resultTab, setResultTab] = useState<ResultTab>('results');
   const [query, setQuery] = useState('');
@@ -1007,6 +1015,8 @@ export function BlockStudio() {
                   autoFocus
                   wrap={false}
                   fillHeight
+                  schema={editorSchema}
+                  dqlMode
                   errorMessage={state.blockStudioValidation?.diagnostics.find((item) => item.severity === 'error')?.message}
                 />
               </div>
