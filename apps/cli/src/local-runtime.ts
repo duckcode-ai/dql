@@ -3353,6 +3353,77 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
       return;
     }
 
+    // ── Distinct values for a block column → app/dashboard filter dropdowns ──
+    if (req.method === 'GET' && path === '/api/dashboard/filter-options') {
+      try {
+        const blockIdParam = url.searchParams.get('block');
+        const blockPath = url.searchParams.get('path')
+          ?? (blockIdParam ? resolveBlockPathById(projectRoot, blockIdParam) : null);
+        const column = (url.searchParams.get('column') ?? '').trim();
+        const limit = Math.min(Math.max(Number(url.searchParams.get('limit') ?? 50) || 50, 1), 200);
+        if (!blockPath || !column || !/^[A-Za-z_][A-Za-z0-9_]*$/.test(column)) {
+          res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
+          res.end(serializeJSON({ error: 'path and a valid column are required' }));
+          return;
+        }
+        const absolutePath = resolve(projectRoot, blockPath);
+        if (!absolutePath.startsWith(projectRoot + '/') && absolutePath !== projectRoot) {
+          res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
+          res.end(serializeJSON({ error: 'path escapes project root' }));
+          return;
+        }
+        if (!existsSync(absolutePath)) {
+          res.writeHead(404, { 'Content-Type': 'application/json; charset=utf-8' });
+          res.end(serializeJSON({ error: 'block not found' }));
+          return;
+        }
+        const source = readFileSync(absolutePath, 'utf-8');
+        // Only expose distinct values for a DECLARED output column — keeps the probe
+        // inside the governed block contract (no arbitrary column scanning).
+        const parsedMeta = parseBlockSourceMetadata(source);
+        if (parsedMeta.outputs.length > 0 && !parsedMeta.outputs.includes(column)) {
+          res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
+          res.end(serializeJSON({ error: `"${column}" is not a declared output of this block` }));
+          return;
+        }
+        const activeConnection = requireActiveConnection();
+        const tableMapping = await resolveSemanticTableMapping(executor, activeConnection, semanticLayer);
+        const semanticCompose = semanticLayer
+          ? composeSemanticBlockSql(source, semanticLayer, {
+              driver: activeConnection.driver,
+              tableMapping,
+              projectRoot,
+              projectConfig,
+              detectedProvider: semanticDetectedProvider,
+            })
+          : null;
+        const validation = validateBlockStudioSource(source, semanticLayer);
+        const baseSql = semanticCompose?.sql ?? validation.executableSql;
+        if (!baseSql) {
+          res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
+          res.end(serializeJSON({ error: 'block has no executable SQL' }));
+          return;
+        }
+        const prepared = prepareLocalExecution(baseSql, activeConnection, projectRoot, projectConfig);
+        const q = quoteAgentIdentifier(column, prepared.connection);
+        const wrapped = `SELECT DISTINCT ${q} AS value FROM (${stripSqlTerminator(prepared.sql)}) _dql_opt WHERE ${q} IS NOT NULL ORDER BY 1 LIMIT ${limit + 1}`;
+        const result = await executor.executeQuery(wrapped, [], runtimeVariables({}), prepared.connection);
+        const rows = Array.isArray(result?.rows) ? result.rows : [];
+        const truncated = rows.length > limit;
+        const options = rows
+          .slice(0, limit)
+          .map((row: any) => row?.value)
+          .filter((value: any) => value !== null && value !== undefined)
+          .map((value: any) => String(value));
+        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({ column, options, truncated }));
+      } catch (error) {
+        res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({ error: error instanceof Error ? error.message : String(error) }));
+      }
+      return;
+    }
+
     // ── Run block tests ────────────────────────────────────────────────
     if (req.method === 'POST' && path === '/api/blocks/run-tests') {
       try {
@@ -8663,6 +8734,30 @@ export function evaluateBlockInvariants(
     rows: result.rows,
   });
   return { invariantResults, invariantViolation: hasInvariantViolation(invariantResults) };
+}
+
+/** Resolve a block id/slug to its `.dql` path (filename slug first, then `block "<id>"`). */
+function resolveBlockPathById(projectRoot: string, blockId: string): string | null {
+  const wanted = blockId.trim().toLowerCase();
+  if (!wanted) return null;
+  const leaf = wanted.split('.').pop() ?? wanted;
+  const escaped = leaf.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const nameRe = new RegExp(`^\\s*block\\s+"${escaped}"`, 'im');
+  const stack = ['blocks', 'domains'].map((dir) => join(projectRoot, dir));
+  let nameMatch: string | null = null;
+  while (stack.length > 0) {
+    const dir = stack.pop()!;
+    if (!existsSync(dir)) continue;
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      const filePath = join(dir, entry.name);
+      if (entry.isDirectory()) { stack.push(filePath); continue; }
+      if (!entry.name.endsWith('.dql')) continue;
+      const rel = relative(projectRoot, filePath).replaceAll('\\', '/');
+      if (entry.name.replace(/\.dql$/, '').toLowerCase() === leaf) return rel; // fast path: filename slug
+      if (!nameMatch) { try { if (nameRe.test(readFileSync(filePath, 'utf-8'))) nameMatch = rel; } catch { /* skip */ } }
+    }
+  }
+  return nameMatch;
 }
 
 export function parseBlockSourceMetadata(source: string): {

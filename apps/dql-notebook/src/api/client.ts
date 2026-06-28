@@ -3248,6 +3248,16 @@ export const api = {
     }
   },
 
+  /** Distinct values for a block column → categorical dashboard-filter dropdowns. */
+  async dashboardFilterOptions(block: string, column: string): Promise<{ options: string[]; truncated: boolean } | null> {
+    try {
+      const search = new URLSearchParams({ block, column });
+      return await request<{ options: string[]; truncated: boolean }>(`/api/dashboard/filter-options?${search.toString()}`);
+    } catch {
+      return null;
+    }
+  },
+
   async getAppEditorCatalog(appId: string, params?: { domain?: string; certifiedOnly?: boolean }): Promise<AppEditorCatalogResponse | null> {
     try {
       const search = new URLSearchParams();
