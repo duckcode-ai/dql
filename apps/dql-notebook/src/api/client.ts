@@ -38,7 +38,9 @@ import type {
   ProposePlanCandidate,
   AiBuildResult,
   AiBuildTarget,
+  AiBuildMode,
   Skill,
+  Domain,
 } from '../store/types';
 
 const EMPTY_PLAN = {
@@ -1473,6 +1475,12 @@ export const api = {
     context?: { cellSql?: string; selection?: string };
     target: AiBuildTarget;
     owner?: string;
+    // Spec 17 (part A) — 'edit' rewrites an existing block at `blockPath`
+    // (so the result can show a before/after diff); 'create' (default) makes a
+    // new one. `domain` scopes the build to a first-class domain (part B).
+    mode?: AiBuildMode;
+    blockPath?: string;
+    domain?: string;
   }): Promise<AiBuildResult> {
     return request<AiBuildResult>('/api/ai/build', {
       method: 'POST',
@@ -3531,6 +3539,45 @@ export const api = {
   /** Delete a skill. → DELETE /api/skills/:id */
   async deleteSkill(id: string): Promise<{ ok: true }> {
     return request<{ ok: true }>(`/api/skills/${encodeURIComponent(id)}`, {
+      method: 'DELETE',
+    });
+  },
+
+  // ── Spec 17 (part B) — Domains CRUD ────────────────────────────────────────
+  // A domain is the top of the domain→term→block hierarchy. These are coded to
+  // the shared contract — the backend implements the same endpoints. Errors
+  // surface to the page (which renders graceful empty/error states), so we do
+  // NOT swallow them on create/update/delete. The list call is best-effort so
+  // pickers that read it never block their host form.
+
+  /** List all domains with rollup counts. → GET /api/domains */
+  async getDomains(): Promise<{ domains: Domain[] }> {
+    try {
+      return await request<{ domains: Domain[] }>('/api/domains');
+    } catch {
+      return { domains: [] };
+    }
+  },
+
+  /** Create a new domain. → POST /api/domains  body { domain } */
+  async createDomain(domain: Domain): Promise<{ domain: Domain }> {
+    return request<{ domain: Domain }>('/api/domains', {
+      method: 'POST',
+      body: JSON.stringify({ domain }),
+    });
+  },
+
+  /** Update an existing domain. → PUT /api/domains/:id  body { domain } */
+  async updateDomain(id: string, domain: Domain): Promise<{ domain: Domain }> {
+    return request<{ domain: Domain }>(`/api/domains/${encodeURIComponent(id)}`, {
+      method: 'PUT',
+      body: JSON.stringify({ domain }),
+    });
+  },
+
+  /** Delete a domain. → DELETE /api/domains/:id */
+  async deleteDomain(id: string): Promise<{ ok: true }> {
+    return request<{ ok: true }>(`/api/domains/${encodeURIComponent(id)}`, {
       method: 'DELETE',
     });
   },

@@ -23,14 +23,19 @@ import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
   AlertTriangle,
   Blocks,
+  BadgeCheck,
   CheckCircle2,
   ChevronDown,
   ChevronRight,
+  FileCode2,
+  GitCompareArrows,
   GraduationCap,
   Hammer,
   Loader2,
   RotateCcw,
+  Search,
   Sparkles,
+  SquarePen,
   SquarePlus,
   Trash2,
   UserRound,
@@ -38,7 +43,7 @@ import {
 import { api } from '../../api/client';
 import { useNotebook } from '../../store/NotebookStore';
 import { themes, type Theme, type ThemeMode } from '../../themes/notebook-theme';
-import type { AiBuildResult as AiBuildResultPayload, AiBuildTarget, NotebookFile } from '../../store/types';
+import type { AiBuildResult as AiBuildResultPayload, AiBuildTarget, AiBuildMode, AiRoute, Domain, NotebookFile } from '../../store/types';
 
 interface AiBuildResultProps {
   themeMode: ThemeMode;
@@ -59,6 +64,11 @@ interface AiBuildResultProps {
    * target (e.g. "Build DQL block" → 'block'); clicking runs the build.
    */
   quickActions?: Array<{ label: string; prompt: string; target?: AiBuildTarget }>;
+  // ── Spec 17 (part A) — open straight into "Modify existing block" ──────────
+  /** Initial block-build mode: 'create' (default) or 'edit'. */
+  initialMode?: AiBuildMode;
+  /** Pre-selected block path to modify (used with initialMode:'edit'). */
+  initialBlockPath?: string;
 }
 
 type BuildPhase = 'idle' | 'building' | 'ready' | 'error';
@@ -77,11 +87,15 @@ export function AiBuildResult({
   onInsertCell,
   onOpenBlock,
   quickActions,
+  initialMode = 'create',
+  initialBlockPath,
 }: AiBuildResultProps): JSX.Element {
   const t = themes[themeMode];
   const { dispatch } = useNotebook();
   const openSkills = useCallback(() => { dispatch({ type: 'SET_MAIN_VIEW', view: 'skills' }); }, [dispatch]);
-  const [target, setTarget] = useState<AiBuildTarget>(initialTarget);
+  // An edit request can arrive for either target; coerce to Block since editing
+  // an existing block is a block-target operation.
+  const [target, setTarget] = useState<AiBuildTarget>(initialMode === 'edit' ? 'block' : initialTarget);
   const [prompt, setPrompt] = useState(initialPrompt);
   const [phase, setPhase] = useState<BuildPhase>('idle');
   const [result, setResult] = useState<AiBuildResultPayload | null>(null);
@@ -89,6 +103,12 @@ export function AiBuildResult({
   const [owner, setOwner] = useState<string | null>(null);
   const [inserted, setInserted] = useState(false);
   const lastPromptRef = useRef('');
+
+  // Spec 17 (part A) — New block vs. Modify existing.
+  const [blockMode, setBlockMode] = useState<AiBuildMode>(initialMode);
+  const [blockPath, setBlockPath] = useState<string | undefined>(initialBlockPath);
+  // Spec 17 (part B) — domain this build is scoped to (id of a first-class domain).
+  const [domain, setDomain] = useState<string | undefined>(undefined);
 
   // "drafting as <owner>" — best-effort, never blocks (spec part D).
   useEffect(() => {
@@ -102,6 +122,9 @@ export function AiBuildResult({
   const runBuild = useCallback(async (text: string, buildTarget: AiBuildTarget) => {
     const trimmed = text.trim();
     if (!trimmed) return;
+    // "Modify existing" requires a chosen block before it can run.
+    const editing = buildTarget === 'block' && blockMode === 'edit';
+    if (editing && !blockPath) return;
     lastPromptRef.current = trimmed;
     setPhase('building');
     setErrorText(null);
@@ -112,6 +135,9 @@ export function AiBuildResult({
         context,
         target: buildTarget,
         ...(owner ? { owner } : {}),
+        ...(buildTarget === 'block' ? { mode: blockMode } : {}),
+        ...(editing && blockPath ? { blockPath } : {}),
+        ...(domain ? { domain } : {}),
       });
       setResult(built);
       setPhase('ready');
@@ -121,7 +147,7 @@ export function AiBuildResult({
       setResult(null);
       setPhase('error');
     }
-  }, [context, owner]);
+  }, [context, owner, blockMode, blockPath, domain]);
 
   const onSubmit = useCallback(() => { void runBuild(prompt, target); }, [prompt, runBuild, target]);
 
@@ -149,6 +175,8 @@ export function AiBuildResult({
   }, []);
 
   const building = phase === 'building';
+  const editingBlock = target === 'block' && blockMode === 'edit';
+  const editMissingBlock = editingBlock && !blockPath;
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', minHeight: 0, height: '100%', overflow: 'auto' }}>
@@ -174,7 +202,11 @@ export function AiBuildResult({
             })}
           </div>
           <span style={{ fontSize: 11, color: t.textMuted, fontFamily: t.font }}>
-            {target === 'cell' ? 'Generate SQL into a notebook cell.' : 'Generate a reusable draft DQL block.'}
+            {target === 'cell'
+              ? 'Generate SQL into a notebook cell.'
+              : blockMode === 'edit'
+                ? 'Rewrite an existing draft DQL block.'
+                : 'Generate a reusable draft DQL block.'}
           </span>
           {owner && (
             <span
@@ -186,6 +218,41 @@ export function AiBuildResult({
             </span>
           )}
         </div>
+
+        {/* Spec 17 (part B) — domain picker (block builds only) */}
+        {target === 'block' ? (
+          <DomainPicker t={t} value={domain} onChange={setDomain} />
+        ) : null}
+
+        {/* Spec 17 (part A) — New block vs. Modify existing (block builds only) */}
+        {target === 'block' ? (
+          <div style={{ display: 'grid', gap: 8 }}>
+            <div role="group" aria-label="Block build mode" style={segmentGroupStyle(t)}>
+              {(['create', 'edit'] as AiBuildMode[]).map((value) => {
+                const active = blockMode === value;
+                return (
+                  <button
+                    key={value}
+                    type="button"
+                    onClick={() => {
+                      setBlockMode(value);
+                      onDiscard();
+                      if (value === 'create') setBlockPath(undefined);
+                    }}
+                    aria-pressed={active}
+                    style={segmentButtonStyle(t, active, false)}
+                  >
+                    {value === 'create' ? <SquarePlus size={13} strokeWidth={2} /> : <SquarePen size={13} strokeWidth={2} />}
+                    {value === 'create' ? 'New block' : 'Modify existing'}
+                  </button>
+                );
+              })}
+            </div>
+            {blockMode === 'edit' ? (
+              <BlockPicker t={t} selectedPath={blockPath} onSelect={(path) => { setBlockPath(path); onDiscard(); }} />
+            ) : null}
+          </div>
+        ) : null}
 
         {/* Quick actions (preset prompts) */}
         {quickActions && quickActions.length > 0 ? (
@@ -218,7 +285,9 @@ export function AiBuildResult({
             rows={3}
             placeholder={target === 'cell'
               ? 'Describe the SQL you want, e.g. "monthly revenue by region for the last 12 months".'
-              : 'Describe the reusable block, e.g. "active customers by signup cohort".'}
+              : blockMode === 'edit'
+                ? 'Describe the change, e.g. "add a 12-month trailing window and exclude test accounts".'
+                : 'Describe the reusable block, e.g. "active customers by signup cohort".'}
             style={textareaStyle(t)}
           />
           {context?.cellSql ? (
@@ -226,15 +295,20 @@ export function AiBuildResult({
               Using the active SQL cell{context.selection ? ' and your selection' : ''} as context.
             </div>
           ) : null}
+          {editMissingBlock ? (
+            <div style={{ fontSize: 10.5, color: t.textMuted, fontFamily: t.font }}>
+              Pick the block you want to modify above.
+            </div>
+          ) : null}
           <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8 }}>
             <button
               type="button"
               onClick={onSubmit}
-              disabled={building || !prompt.trim()}
-              style={{ ...primaryButtonStyle(t), opacity: building || !prompt.trim() ? 0.6 : 1 }}
+              disabled={building || !prompt.trim() || editMissingBlock}
+              style={{ ...primaryButtonStyle(t), opacity: building || !prompt.trim() || editMissingBlock ? 0.6 : 1 }}
             >
               {building ? <Loader2 size={13} strokeWidth={2} /> : <Hammer size={13} strokeWidth={2} />}
-              {building ? 'Building…' : 'Build'}
+              {building ? (editingBlock ? 'Updating…' : 'Building…') : editingBlock ? 'Update block' : 'Build'}
             </button>
           </div>
         </div>
@@ -249,6 +323,7 @@ export function AiBuildResult({
             sql={result.sql}
             explanation={result.explanation}
             appliedSkills={result.appliedSkills}
+            route={result.route}
             inserted={inserted}
             onInsert={() => { onInsertCell?.(result.sql); setInserted(true); }}
             onRefine={onRefine}
@@ -261,6 +336,7 @@ export function AiBuildResult({
             t={t}
             result={result}
             owner={owner}
+            editing={editingBlock}
             onOpen={() => onOpenBlock?.(result.path, result.name)}
             onRefine={onRefine}
             onDiscard={onDiscard}
@@ -279,6 +355,7 @@ function CellResultCard({
   sql,
   explanation,
   appliedSkills,
+  route,
   inserted,
   onInsert,
   onRefine,
@@ -289,6 +366,7 @@ function CellResultCard({
   sql: string;
   explanation?: string;
   appliedSkills?: Array<{ id: string; description?: string }>;
+  route?: AiRoute;
   inserted: boolean;
   onInsert: () => void;
   onRefine: () => void;
@@ -297,10 +375,11 @@ function CellResultCard({
 }): JSX.Element {
   return (
     <section style={cardStyle(t)}>
-      <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
         <Sparkles size={14} strokeWidth={2} color={t.accent} />
         <div style={{ fontSize: 12.5, fontWeight: 800, color: t.textPrimary, fontFamily: t.font }}>Generated SQL</div>
         <span style={aiDraftBadgeStyle(t)}>AI-generated</span>
+        <RouteBadge t={t} route={route} />
       </div>
       {explanation ? (
         <div style={{ fontSize: 12, color: t.textSecondary, lineHeight: 1.5, fontFamily: t.font }}>{explanation}</div>
@@ -329,6 +408,7 @@ function BlockResultCard({
   t,
   result,
   owner,
+  editing,
   onOpen,
   onRefine,
   onDiscard,
@@ -337,33 +417,43 @@ function BlockResultCard({
   t: Theme;
   result: Extract<AiBuildResultPayload, { target: 'block' }>;
   owner: string | null;
+  editing: boolean;
   onOpen: () => void;
   onRefine: () => void;
   onDiscard: () => void;
   onOpenSkills: () => void;
 }): JSX.Element {
   const [sqlOpen, setSqlOpen] = useState(false);
-  const { name, description, sqlPreview, grain, outputs, examples, certifierVerdict, appliedSkills } = result;
+  const { name, description, sqlPreview, grain, outputs, examples, certifierVerdict, appliedSkills, route, previousSql } = result;
+  // Spec 17 (part A) — an edit shows a before/after diff instead of a single
+  // SQL pane. We treat the build as an edit when the backend returned the
+  // block's prior SQL (or when the surface launched in edit mode).
+  const isEdit = editing || typeof previousSql === 'string';
   return (
     <section style={cardStyle(t)}>
       <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
         <Blocks size={14} strokeWidth={2} color={t.accent} />
         <div style={{ fontSize: 13, fontWeight: 850, color: t.textPrimary, fontFamily: t.font }}>{name}</div>
-        <span style={aiDraftBadgeStyle(t)}>AI-generated · draft</span>
+        <span style={aiDraftBadgeStyle(t)}>{isEdit ? 'AI-edited · draft' : 'AI-generated · draft'}</span>
         {grain ? <span style={metaPillStyle(t)}>grain {grain}</span> : null}
+        <RouteBadge t={t} route={route} />
       </div>
       {description ? (
         <div style={{ fontSize: 12, color: t.textSecondary, lineHeight: 1.5, fontFamily: t.font }}>{description}</div>
       ) : null}
 
-      {/* Collapsible SQL */}
-      <div>
-        <button type="button" onClick={() => setSqlOpen((open) => !open)} style={disclosureToggleStyle(t)}>
-          {sqlOpen ? <ChevronDown size={13} strokeWidth={2} /> : <ChevronRight size={13} strokeWidth={2} />}
-          {sqlOpen ? 'Hide SQL this block will run' : 'Show SQL this block will run'}
-        </button>
-        {sqlOpen ? <div style={{ marginTop: 7 }}><CodeBlock t={t} code={sqlPreview} /></div> : null}
-      </div>
+      {/* SQL — a before/after diff for edits, a single pane for new blocks. */}
+      {isEdit && typeof previousSql === 'string' ? (
+        <SqlDiffBlock t={t} previousSql={previousSql} nextSql={sqlPreview} />
+      ) : (
+        <div>
+          <button type="button" onClick={() => setSqlOpen((open) => !open)} style={disclosureToggleStyle(t)}>
+            {sqlOpen ? <ChevronDown size={13} strokeWidth={2} /> : <ChevronRight size={13} strokeWidth={2} />}
+            {sqlOpen ? 'Hide SQL this block will run' : 'Show SQL this block will run'}
+          </button>
+          {sqlOpen ? <div style={{ marginTop: 7 }}><CodeBlock t={t} code={sqlPreview} /></div> : null}
+        </div>
+      )}
 
       {outputs.length > 0 ? (
         <div style={{ display: 'grid', gap: 5 }}>
@@ -397,7 +487,8 @@ function BlockResultCard({
 
       <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
         <button type="button" onClick={onOpen} style={primaryButtonStyle(t)}>
-          <Blocks size={13} strokeWidth={2} /> Open in Block Studio
+          {isEdit ? <SquarePen size={13} strokeWidth={2} /> : <Blocks size={13} strokeWidth={2} />}
+          {isEdit ? 'Update block in Block Studio' : 'Open in Block Studio'}
         </button>
         <button type="button" onClick={onRefine} style={ghostButtonStyle(t)}>
           <RotateCcw size={13} strokeWidth={2} /> Refine
@@ -407,6 +498,98 @@ function BlockResultCard({
         </button>
       </div>
     </section>
+  );
+}
+
+// ── Spec 17 (part A) — before/after SQL diff ─────────────────────────────────
+// A simple, readable two-pane line diff. We don't pull in a diff library; we
+// classify each line as added / removed / unchanged with a longest-common-
+// subsequence walk so the "what changed" reads cleanly for a SQL block.
+
+interface DiffLine {
+  kind: 'context' | 'add' | 'remove';
+  text: string;
+}
+
+function computeLineDiff(before: string, after: string): DiffLine[] {
+  const a = before.replace(/\s+$/g, '').split('\n');
+  const b = after.replace(/\s+$/g, '').split('\n');
+  const n = a.length;
+  const m = b.length;
+  // LCS table.
+  const lcs: number[][] = Array.from({ length: n + 1 }, () => new Array<number>(m + 1).fill(0));
+  for (let i = n - 1; i >= 0; i--) {
+    for (let j = m - 1; j >= 0; j--) {
+      lcs[i][j] = a[i] === b[j] ? lcs[i + 1][j + 1] + 1 : Math.max(lcs[i + 1][j], lcs[i][j + 1]);
+    }
+  }
+  const lines: DiffLine[] = [];
+  let i = 0;
+  let j = 0;
+  while (i < n && j < m) {
+    if (a[i] === b[j]) {
+      lines.push({ kind: 'context', text: a[i] });
+      i++; j++;
+    } else if (lcs[i + 1][j] >= lcs[i][j + 1]) {
+      lines.push({ kind: 'remove', text: a[i] });
+      i++;
+    } else {
+      lines.push({ kind: 'add', text: b[j] });
+      j++;
+    }
+  }
+  while (i < n) { lines.push({ kind: 'remove', text: a[i] }); i++; }
+  while (j < m) { lines.push({ kind: 'add', text: b[j] }); j++; }
+  return lines;
+}
+
+function SqlDiffBlock({ t, previousSql, nextSql }: { t: Theme; previousSql: string; nextSql: string }): JSX.Element {
+  const [open, setOpen] = useState(true);
+  const diff = React.useMemo(() => computeLineDiff(previousSql.trim(), nextSql.trim()), [previousSql, nextSql]);
+  const added = diff.filter((line) => line.kind === 'add').length;
+  const removed = diff.filter((line) => line.kind === 'remove').length;
+  const unchanged = added === 0 && removed === 0;
+  return (
+    <div style={{ display: 'grid', gap: 7 }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+        <button type="button" onClick={() => setOpen((value) => !value)} style={disclosureToggleStyle(t)}>
+          {open ? <ChevronDown size={13} strokeWidth={2} /> : <ChevronRight size={13} strokeWidth={2} />}
+          <GitCompareArrows size={13} strokeWidth={2} />
+          {open ? 'Hide what changed' : 'Show what changed'}
+        </button>
+        {unchanged ? (
+          <span style={{ fontSize: 11, color: t.textMuted, fontFamily: t.font }}>No SQL changes.</span>
+        ) : (
+          <span style={{ fontSize: 11, color: t.textMuted, fontFamily: t.font }}>
+            <span style={{ color: t.success, fontWeight: 700 }}>+{added}</span>{' '}
+            <span style={{ color: t.error, fontWeight: 700 }}>-{removed}</span> line{added + removed === 1 ? '' : 's'}
+          </span>
+        )}
+      </div>
+      {open ? (
+        <pre style={{ ...codeBlockStyle(t), padding: 0 }}>
+          <code style={{ display: 'block', fontFamily: t.fontMono, fontSize: 11.5, whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>
+            {diff.map((line, index) => (
+              <span
+                key={index}
+                style={{
+                  display: 'block',
+                  padding: '0 11px',
+                  color: line.kind === 'add' ? t.success : line.kind === 'remove' ? t.error : t.textPrimary,
+                  background:
+                    line.kind === 'add' ? `${t.success}14` : line.kind === 'remove' ? `${t.error}14` : 'transparent',
+                }}
+              >
+                <span aria-hidden style={{ userSelect: 'none', opacity: 0.7 }}>
+                  {line.kind === 'add' ? '+ ' : line.kind === 'remove' ? '- ' : '  '}
+                </span>
+                {line.text || ' '}
+              </span>
+            ))}
+          </code>
+        </pre>
+      ) : null}
+    </div>
   );
 }
 
@@ -502,6 +685,260 @@ export function GuidedBySkills({
           </button>
         </React.Fragment>
       ))}
+    </div>
+  );
+}
+
+// ── Spec 17 (part C) — route badge ───────────────────────────────────────────
+// Subtle, consumer-facing "how this answer was reached" badge. Renders only
+// when `route` is present and the tier carries a message. Reused by the cell +
+// block build cards and by AgentAnswerCard.
+
+const ROUTE_TIER_STYLE: Record<AiRoute['tier'], { tone: keyof Theme; icon: typeof BadgeCheck } | null> = {
+  certified_block: { tone: 'success', icon: BadgeCheck },
+  semantic_metric: { tone: 'accent', icon: Sparkles },
+  generated_sql: { tone: 'textMuted', icon: FileCode2 },
+  business_context: { tone: 'accent', icon: GraduationCap },
+  no_answer: null,
+};
+
+export function RouteBadge({ t, route }: { t: Theme; route?: AiRoute }): JSX.Element | null {
+  if (!route) return null;
+  const config = ROUTE_TIER_STYLE[route.tier];
+  if (!config) return null; // no_answer → render nothing special
+  const Icon = config.icon;
+  const tone = (t[config.tone] as string) ?? t.textMuted;
+  const label = route.label?.trim() || defaultRouteLabel(route);
+  return (
+    <span
+      title={route.ref ? `${label} (${route.ref})` : label}
+      style={{
+        display: 'inline-flex',
+        alignItems: 'center',
+        gap: 5,
+        fontSize: 10.5,
+        fontWeight: 700,
+        color: tone,
+        background: `${tone}14`,
+        border: `1px solid ${tone}3a`,
+        borderRadius: 999,
+        padding: '2px 9px',
+        fontFamily: t.font,
+        maxWidth: '100%',
+      }}
+    >
+      <Icon size={11} strokeWidth={2.2} style={{ flexShrink: 0 }} />
+      <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{label}</span>
+    </span>
+  );
+}
+
+/** Fallback label when the backend left `label` empty. */
+function defaultRouteLabel(route: AiRoute): string {
+  switch (route.tier) {
+    case 'certified_block':
+      return route.ref ? `Certified block ${route.ref}` : 'Certified block';
+    case 'semantic_metric':
+      return route.ref ? `Answered from metric ${route.ref}` : 'Answered from metric';
+    case 'generated_sql':
+      return 'Generated SQL';
+    case 'business_context':
+      return 'From business context';
+    default:
+      return '';
+  }
+}
+
+// ── Spec 17 (part A) — block picker ("Modify existing") ──────────────────────
+// Lists the block library (reusing api.getBlockLibrary) with a filter box, so
+// the user can choose which block to rewrite. Graceful empty/error states —
+// the library endpoint may be absent, in which case the user can still type a
+// path manually.
+
+function BlockPicker({
+  t,
+  selectedPath,
+  onSelect,
+}: {
+  t: Theme;
+  selectedPath?: string;
+  onSelect: (path: string) => void;
+}): JSX.Element {
+  const [blocks, setBlocks] = useState<Array<{ name: string; domain: string; path: string }>>([]);
+  const [loading, setLoading] = useState(true);
+  const [query, setQuery] = useState('');
+
+  useEffect(() => {
+    let cancelled = false;
+    setLoading(true);
+    api.getBlockLibrary()
+      .then((res) => {
+        if (cancelled) return;
+        setBlocks(Array.isArray(res?.blocks) ? res.blocks.map((b) => ({ name: b.name, domain: b.domain, path: b.path })) : []);
+      })
+      .catch(() => { if (!cancelled) setBlocks([]); })
+      .finally(() => { if (!cancelled) setLoading(false); });
+    return () => { cancelled = true; };
+  }, []);
+
+  const filtered = blocks
+    .filter((b) => {
+      if (!query.trim()) return true;
+      const q = query.toLowerCase();
+      return b.name.toLowerCase().includes(q) || b.path.toLowerCase().includes(q) || (b.domain ?? '').toLowerCase().includes(q);
+    })
+    .slice(0, 40);
+  const selected = blocks.find((b) => b.path === selectedPath);
+
+  return (
+    <div style={{ display: 'grid', gap: 7, border: `1px solid ${t.cellBorder}`, borderRadius: 8, background: t.cellBg, padding: 9 }}>
+      <div style={{ position: 'relative' }}>
+        <Search size={13} strokeWidth={2} color={t.textMuted} style={{ position: 'absolute', left: 9, top: '50%', transform: 'translateY(-50%)' }} />
+        <input
+          type="text"
+          value={query}
+          onChange={(event) => setQuery(event.target.value)}
+          placeholder={selected ? `Modifying ${selected.name} — search to change` : 'Search blocks to modify…'}
+          style={{
+            width: '100%',
+            border: `1px solid ${t.btnBorder}`,
+            borderRadius: 7,
+            background: t.appBg,
+            color: t.textPrimary,
+            fontSize: 12,
+            fontFamily: t.font,
+            padding: '7px 9px 7px 28px',
+            boxSizing: 'border-box',
+          }}
+        />
+      </div>
+      {loading ? (
+        <div style={{ display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: 11.5, color: t.textMuted, fontFamily: t.font, padding: '4px 2px' }}>
+          <Loader2 size={12} strokeWidth={2} /> Loading blocks…
+        </div>
+      ) : blocks.length === 0 ? (
+        <div style={{ fontSize: 11.5, color: t.textMuted, fontFamily: t.font, padding: '2px 2px', lineHeight: 1.45 }}>
+          No blocks found. Type the block file path you want to modify, then press Enter.
+          <input
+            type="text"
+            defaultValue={selectedPath ?? ''}
+            onKeyDown={(event) => {
+              if (event.key === 'Enter') {
+                const value = (event.target as HTMLInputElement).value.trim();
+                if (value) onSelect(value);
+              }
+            }}
+            placeholder="blocks/revenue_by_region.dql"
+            style={{
+              marginTop: 6,
+              width: '100%',
+              border: `1px solid ${t.btnBorder}`,
+              borderRadius: 7,
+              background: t.appBg,
+              color: t.textPrimary,
+              fontSize: 12,
+              fontFamily: t.fontMono,
+              padding: '7px 9px',
+              boxSizing: 'border-box',
+            }}
+          />
+        </div>
+      ) : (
+        <div style={{ display: 'grid', gap: 3, maxHeight: 184, overflow: 'auto' }}>
+          {filtered.length === 0 ? (
+            <div style={{ fontSize: 11.5, color: t.textMuted, fontFamily: t.font, padding: '4px 2px' }}>No blocks match “{query}”.</div>
+          ) : filtered.map((block) => {
+            const active = block.path === selectedPath;
+            return (
+              <button
+                key={block.path}
+                type="button"
+                onClick={() => onSelect(block.path)}
+                style={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: 8,
+                  textAlign: 'left',
+                  width: '100%',
+                  border: `1px solid ${active ? t.accent : 'transparent'}`,
+                  background: active ? `${t.accent}14` : 'transparent',
+                  borderRadius: 6,
+                  padding: '6px 8px',
+                  cursor: 'pointer',
+                }}
+              >
+                <FileCode2 size={13} strokeWidth={2} color={active ? t.accent : t.textMuted} style={{ flexShrink: 0 }} />
+                <span style={{ minWidth: 0, display: 'grid', gap: 1 }}>
+                  <span style={{ fontSize: 12, fontWeight: 700, color: t.textPrimary, fontFamily: t.fontMono, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{block.name}</span>
+                  <span style={{ fontSize: 10.5, color: t.textMuted, fontFamily: t.font, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                    {block.domain ? `${block.domain} · ` : ''}{block.path}
+                  </span>
+                </span>
+                {active ? <CheckCircle2 size={14} strokeWidth={2} color={t.accent} style={{ marginLeft: 'auto', flexShrink: 0 }} /> : null}
+              </button>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ── Spec 17 (part B) — domain picker ─────────────────────────────────────────
+// A "Domain: [pick ▾ / + new]" control populated from api.getDomains. Choosing
+// "+ new domain" jumps to the Domains page. Best-effort: an empty/failed list
+// just shows "No domains yet".
+
+function DomainPicker({
+  t,
+  value,
+  onChange,
+}: {
+  t: Theme;
+  value?: string;
+  onChange: (next: string | undefined) => void;
+}): JSX.Element {
+  const { dispatch } = useNotebook();
+  const [domains, setDomains] = useState<Domain[]>([]);
+
+  useEffect(() => {
+    let cancelled = false;
+    api.getDomains()
+      .then((res) => { if (!cancelled) setDomains(Array.isArray(res?.domains) ? res.domains : []); })
+      .catch(() => { if (!cancelled) setDomains([]); });
+    return () => { cancelled = true; };
+  }, []);
+
+  return (
+    <div style={{ display: 'inline-flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+      <span style={{ fontSize: 11, fontWeight: 700, color: t.textSecondary, fontFamily: t.font }}>Domain</span>
+      <select
+        value={value ?? ''}
+        onChange={(event) => onChange(event.target.value || undefined)}
+        style={{
+          border: `1px solid ${t.btnBorder}`,
+          borderRadius: 7,
+          background: t.btnBg,
+          color: value ? t.textPrimary : t.textMuted,
+          fontSize: 12,
+          fontFamily: t.font,
+          padding: '5px 9px',
+          cursor: 'pointer',
+        }}
+      >
+        <option value="">{domains.length === 0 ? 'No domains yet' : 'No domain'}</option>
+        {domains.map((domain) => (
+          <option key={domain.id} value={domain.id}>{domain.name}</option>
+        ))}
+      </select>
+      <button
+        type="button"
+        onClick={() => dispatch({ type: 'SET_MAIN_VIEW', view: 'domains' })}
+        style={ghostButtonStyle(t)}
+        title="Create a new domain on the Domains page"
+      >
+        <SquarePlus size={12} strokeWidth={2} /> New
+      </button>
     </div>
   );
 }

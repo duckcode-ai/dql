@@ -1,8 +1,10 @@
 import React, { useEffect, useState } from 'react';
+import { Sparkles } from 'lucide-react';
 import { PanelFrame, PanelEmpty, StatusPill } from '@duckcodeailabs/dql-ui';
 import { api } from '../../api/client';
 import { useNotebook } from '../../store/NotebookStore';
 import { themes } from '../../themes/notebook-theme';
+import { openAiBuild } from '../../utils/ai-build-bus';
 import { STATUS_COLORS, type BlockEntry } from '../blocks/block-types';
 
 const STATUS_TONE: Record<string, 'success' | 'warning' | 'accent' | 'neutral' | 'error'> = {
@@ -127,11 +129,20 @@ export function BlockLibraryPanel() {
       ) : (
         <>
           {visibleBlocks.map((block) => (
-            <button
+            <div
               key={block.path}
+              role="button"
+              tabIndex={0}
               onClick={() => handleOpen(block)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter' || e.key === ' ') {
+                  e.preventDefault();
+                  handleOpen(block);
+                }
+              }}
+              className="dql-block-row"
               style={{
-                display: 'block', width: '100%', textAlign: 'left',
+                display: 'block', width: '100%', textAlign: 'left', boxSizing: 'border-box',
                 background: 'transparent', border: 'none', borderBottom: `1px solid ${t.cellBorder}`,
                 cursor: 'pointer', padding: '10px 12px',
                 transition: 'background 0.1s',
@@ -146,6 +157,33 @@ export function BlockLibraryPanel() {
                 <StatusPill tone={STATUS_TONE[block.status] ?? 'neutral'}>
                   {block.status}
                 </StatusPill>
+                {/* Spec 17 (part A) — modify this block with AI (edit mode). */}
+                <button
+                  type="button"
+                  title="Modify with AI"
+                  aria-label={`Modify ${block.name} with AI`}
+                  className="dql-block-row-modify"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    openAiBuild({
+                      target: 'block',
+                      lockTarget: true,
+                      mode: 'edit',
+                      blockPath: block.path,
+                      sourceLabel: `Modifying ${block.name}`,
+                    });
+                  }}
+                  style={{
+                    marginLeft: 'auto',
+                    display: 'inline-flex', alignItems: 'center', gap: 4,
+                    border: `1px solid ${t.btnBorder}`, borderRadius: 6,
+                    background: t.btnBg, color: t.accent,
+                    cursor: 'pointer', padding: '2px 7px',
+                    fontSize: 10, fontWeight: 700, fontFamily: t.font,
+                  }}
+                >
+                  <Sparkles size={11} strokeWidth={2.2} /> Modify
+                </button>
               </div>
               {block.description && (
                 <div style={{
@@ -172,7 +210,7 @@ export function BlockLibraryPanel() {
                   {new Date(block.lastModified).toLocaleDateString()}
                 </span>
               </div>
-            </button>
+            </div>
           ))}
           {!showAll && !search && filtered.length > 10 && (
             <button

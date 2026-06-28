@@ -1,38 +1,38 @@
-// Spec 16 — Skills authoring & management.
+// Spec 17 (part B) — Domains authoring & management.
 //
-// A "skill" is a business-context file (`.dql/skills/*.skill.md`) the agent
-// applies per question: definitions ("revenue = recognized, not bookings"),
-// rules ("always exclude test accounts"), vocabulary, and preferred
-// metrics/blocks. This page lets users author them without touching raw
-// markdown, and tags each as Project (shared) or Personal (me).
+// A "domain" is the top of the domain→term→block hierarchy: a first-class
+// business area (e.g. "Revenue", "Customer", "Marketing") that owns terms,
+// skills, and blocks. This page lets users author domains without touching
+// raw files, and surfaces rollup counts of the blocks/skills/terms inside each.
 //
-// The page calls the shared Skills CRUD contract via `api.*`. The endpoints may
-// not exist in every build — every load/save path degrades gracefully to an
-// inline message and never crashes.
+// The page calls the shared Domains CRUD contract via `api.*`. The endpoints
+// may not exist in every build — every load/save path degrades gracefully to an
+// inline message and never crashes. The style mirrors the Skills page so the
+// two read as a pair.
 
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import type { CSSProperties } from 'react';
 import {
-  GraduationCap,
+  Boxes,
   Plus,
   Pencil,
   Trash2,
   X,
-  Users,
-  UserRound,
-  Sparkles,
   Loader2,
   AlertTriangle,
   RefreshCw,
-  BookMarked,
+  Blocks as BlocksIcon,
+  GraduationCap,
   Tags,
+  UserRound,
+  Layers,
 } from 'lucide-react';
 import { api } from '../../api/client';
 import { useNotebook } from '../../store/NotebookStore';
 import { themes, type Theme } from '../../themes/notebook-theme';
-import type { Skill, Domain } from '../../store/types';
+import type { Domain } from '../../store/types';
 
-type FormMode = { kind: 'create' } | { kind: 'edit'; skill: Skill };
+type FormMode = { kind: 'create' } | { kind: 'edit'; domain: Domain };
 
 function slugify(value: string): string {
   return value
@@ -43,31 +43,26 @@ function slugify(value: string): string {
     .slice(0, 64);
 }
 
-function emptyDraft(): Skill {
+function emptyDraft(): Domain {
   return {
     id: '',
-    scope: 'project',
+    name: '',
+    owner: '',
+    boundedContext: '',
+    sourceSystems: [],
     description: '',
-    body: '',
-    preferredMetrics: [],
-    preferredBlocks: [],
-    vocabulary: {},
-    sourcePath: '',
   };
 }
 
-export function SkillsPage(): JSX.Element {
+export function DomainsPage(): JSX.Element {
   const { state } = useNotebook();
   const t = themes[state.themeMode];
 
-  const [skills, setSkills] = useState<Skill[]>([]);
+  const [domains, setDomains] = useState<Domain[]>([]);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
-  const [options, setOptions] = useState<{ metrics: string[]; blocks: string[] }>({ metrics: [], blocks: [] });
-  // Spec 17 (part B) — domains feed the form's domain picker. Best-effort.
-  const [domains, setDomains] = useState<Domain[]>([]);
   const [form, setForm] = useState<FormMode | null>(null);
-  const [pendingDelete, setPendingDelete] = useState<Skill | null>(null);
+  const [pendingDelete, setPendingDelete] = useState<Domain | null>(null);
   const [deleting, setDeleting] = useState(false);
   const [deleteError, setDeleteError] = useState<string | null>(null);
 
@@ -76,44 +71,22 @@ export function SkillsPage(): JSX.Element {
     setLoading(true);
     setLoadError(null);
     void api
-      .getSkills()
+      .getDomains()
       .then((res) => {
         if (cancelled) return;
-        setSkills(Array.isArray(res?.skills) ? res.skills : []);
+        setDomains(Array.isArray(res?.domains) ? res.domains : []);
       })
       .catch((error: unknown) => {
         if (cancelled) return;
-        setSkills([]);
+        setDomains([]);
         setLoadError(
           error instanceof Error && error.message
             ? error.message
-            : 'Could not load skills. Is the local DQL server running?',
+            : 'Could not load domains. Is the local DQL server running?',
         );
       })
       .finally(() => {
         if (!cancelled) setLoading(false);
-      });
-    // Options are best-effort — a failure just leaves the multi-selects empty.
-    void api
-      .getSkillOptions()
-      .then((res) => {
-        if (cancelled) return;
-        setOptions({
-          metrics: Array.isArray(res?.metrics) ? res.metrics : [],
-          blocks: Array.isArray(res?.blocks) ? res.blocks : [],
-        });
-      })
-      .catch(() => {
-        if (!cancelled) setOptions({ metrics: [], blocks: [] });
-      });
-    // Domains are best-effort — a failure just leaves the picker with no options.
-    void api
-      .getDomains()
-      .then((res) => {
-        if (!cancelled) setDomains(Array.isArray(res?.domains) ? res.domains : []);
-      })
-      .catch(() => {
-        if (!cancelled) setDomains([]);
       });
     return () => {
       cancelled = true;
@@ -122,20 +95,11 @@ export function SkillsPage(): JSX.Element {
 
   useEffect(() => load(), [load]);
 
-  // Project skills first, then personal; stable alphabetical within each group.
-  const sorted = useMemo(() => {
-    return [...skills].sort((a, b) => {
-      if (a.scope !== b.scope) return a.scope === 'project' ? -1 : 1;
-      return a.id.localeCompare(b.id);
-    });
-  }, [skills]);
+  const sorted = useMemo(() => [...domains].sort((a, b) => a.name.localeCompare(b.name)), [domains]);
 
-  const projectCount = useMemo(() => skills.filter((s) => s.scope === 'project').length, [skills]);
-  const personalCount = skills.length - projectCount;
-
-  const handleSaved = useCallback((saved: Skill) => {
-    setSkills((prev) => {
-      const idx = prev.findIndex((s) => s.id === saved.id);
+  const handleSaved = useCallback((saved: Domain) => {
+    setDomains((prev) => {
+      const idx = prev.findIndex((d) => d.id === saved.id);
       if (idx === -1) return [...prev, saved];
       const next = [...prev];
       next[idx] = saved;
@@ -149,11 +113,11 @@ export function SkillsPage(): JSX.Element {
     setDeleting(true);
     setDeleteError(null);
     try {
-      await api.deleteSkill(pendingDelete.id);
-      setSkills((prev) => prev.filter((s) => s.id !== pendingDelete.id));
+      await api.deleteDomain(pendingDelete.id);
+      setDomains((prev) => prev.filter((d) => d.id !== pendingDelete.id));
       setPendingDelete(null);
     } catch (error) {
-      setDeleteError(error instanceof Error && error.message ? error.message : 'Could not delete this skill.');
+      setDeleteError(error instanceof Error && error.message ? error.message : 'Could not delete this domain.');
     } finally {
       setDeleting(false);
     }
@@ -166,12 +130,12 @@ export function SkillsPage(): JSX.Element {
         <div style={{ display: 'flex', alignItems: 'flex-end', justifyContent: 'space-between', gap: 18, marginBottom: 18 }}>
           <div style={{ minWidth: 0 }}>
             <div style={{ display: 'flex', alignItems: 'center', gap: 9 }}>
-              <GraduationCap size={20} strokeWidth={1.9} color={t.accent} />
-              <div style={{ fontSize: 22, fontWeight: 700, color: t.textPrimary }}>Skills</div>
+              <Boxes size={20} strokeWidth={1.9} color={t.accent} />
+              <div style={{ fontSize: 22, fontWeight: 700, color: t.textPrimary }}>Domains</div>
             </div>
             <div style={{ fontSize: 13, color: t.textMuted, marginTop: 6, maxWidth: 680, lineHeight: 1.5 }}>
-              Teach the AI your business context — definitions, rules, vocabulary, and the metrics and blocks it should
-              prefer. Project skills are shared with everyone; personal skills are just for you.
+              Domains are the top of your business model — each one owns the terms, skills, and blocks beneath it. Name
+              the business area, who owns it, the bounded context, and the source systems it draws from.
             </div>
           </div>
           <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexShrink: 0 }}>
@@ -179,23 +143,15 @@ export function SkillsPage(): JSX.Element {
               <RefreshCw size={13} strokeWidth={2} /> Refresh
             </button>
             <button type="button" onClick={() => setForm({ kind: 'create' })} style={primaryButton(t)}>
-              <Plus size={14} strokeWidth={2.2} /> Add skill
+              <Plus size={14} strokeWidth={2.2} /> Add domain
             </button>
           </div>
         </div>
 
-        {/* Scope summary */}
-        {!loading && !loadError && skills.length > 0 ? (
-          <div style={{ display: 'flex', gap: 8, marginBottom: 16, flexWrap: 'wrap' }}>
-            <ScopeBadge scope="project" t={t} count={projectCount} />
-            <ScopeBadge scope="personal" t={t} count={personalCount} />
-          </div>
-        ) : null}
-
         {/* Body states */}
         {loading ? (
           <div style={{ display: 'flex', alignItems: 'center', gap: 8, color: t.textMuted, fontSize: 13, padding: '40px 0' }}>
-            <Loader2 size={15} strokeWidth={2} /> Loading skills…
+            <Loader2 size={15} strokeWidth={2} /> Loading domains…
           </div>
         ) : loadError ? (
           <ErrorPanel t={t} message={loadError} onRetry={() => load()} />
@@ -203,15 +159,15 @@ export function SkillsPage(): JSX.Element {
           <EmptyState t={t} onAdd={() => setForm({ kind: 'create' })} />
         ) : (
           <div style={{ display: 'grid', gap: 10 }}>
-            {sorted.map((skill) => (
-              <SkillRow
-                key={skill.id}
-                skill={skill}
+            {sorted.map((domain) => (
+              <DomainRow
+                key={domain.id}
+                domain={domain}
                 t={t}
-                onEdit={() => setForm({ kind: 'edit', skill })}
+                onEdit={() => setForm({ kind: 'edit', domain })}
                 onDelete={() => {
                   setDeleteError(null);
-                  setPendingDelete(skill);
+                  setPendingDelete(domain);
                 }}
               />
             ))}
@@ -221,11 +177,9 @@ export function SkillsPage(): JSX.Element {
 
       {/* Add / Edit drawer */}
       {form ? (
-        <SkillFormDrawer
+        <DomainFormDrawer
           mode={form}
-          options={options}
-          domains={domains}
-          existingIds={skills.map((s) => s.id)}
+          existingIds={domains.map((d) => d.id)}
           t={t}
           onClose={() => setForm(null)}
           onSaved={handleSaved}
@@ -235,7 +189,7 @@ export function SkillsPage(): JSX.Element {
       {/* Delete confirm */}
       {pendingDelete ? (
         <ConfirmDeleteDialog
-          skill={pendingDelete}
+          domain={pendingDelete}
           t={t}
           deleting={deleting}
           error={deleteError}
@@ -251,18 +205,18 @@ export function SkillsPage(): JSX.Element {
 
 // ── List row ─────────────────────────────────────────────────────────────────
 
-function SkillRow({
-  skill,
+function DomainRow({
+  domain,
   t,
   onEdit,
   onDelete,
 }: {
-  skill: Skill;
+  domain: Domain;
   t: Theme;
   onEdit: () => void;
   onDelete: () => void;
 }): JSX.Element {
-  const vocabCount = Object.keys(skill.vocabulary ?? {}).length;
+  const sources = domain.sourceSystems ?? [];
   return (
     <section
       style={{
@@ -277,33 +231,41 @@ function SkillRow({
     >
       <div style={{ flex: 1, minWidth: 0 }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
-          <span style={{ fontSize: 13.5, fontWeight: 750, color: t.textPrimary, fontFamily: t.fontMono }}>{skill.id}</span>
-          <ScopeBadge scope={skill.scope} t={t} />
-          {skill.isStarter ? (
-            <span style={starterBadge(t)} title="A dbt-seeded starter — edit it to make it yours">
-              <Sparkles size={10} strokeWidth={2.2} /> starter — edit me
+          <span style={{ fontSize: 13.5, fontWeight: 750, color: t.textPrimary }}>{domain.name}</span>
+          {domain.owner ? (
+            <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4, fontSize: 11, color: t.textMuted }}>
+              <UserRound size={11} strokeWidth={2} /> {domain.owner}
             </span>
           ) : null}
-          {skill.scope === 'personal' && skill.user ? (
-            <span style={{ fontSize: 11, color: t.textMuted }}>· {skill.user}</span>
+          {domain.boundedContext ? (
+            <span style={contextBadge(t)} title="Bounded context">
+              <Layers size={10} strokeWidth={2.2} /> {domain.boundedContext}
+            </span>
           ) : null}
         </div>
-        {skill.description ? (
-          <div style={{ fontSize: 12.5, color: t.textSecondary, marginTop: 5, lineHeight: 1.5 }}>{skill.description}</div>
+        {domain.description ? (
+          <div style={{ fontSize: 12.5, color: t.textSecondary, marginTop: 5, lineHeight: 1.5 }}>{domain.description}</div>
         ) : (
           <div style={{ fontSize: 12, color: t.textMuted, marginTop: 5, fontStyle: 'italic' }}>No description yet.</div>
         )}
+        {sources.length > 0 ? (
+          <div style={{ display: 'flex', gap: 5, marginTop: 9, flexWrap: 'wrap' }}>
+            {sources.map((source) => (
+              <span key={source} style={sourceChip(t)}>{source}</span>
+            ))}
+          </div>
+        ) : null}
         <div style={{ display: 'flex', gap: 7, marginTop: 9, flexWrap: 'wrap' }}>
-          <CountPill t={t} icon={<BookMarked size={11} strokeWidth={2} />} label="metrics" count={skill.preferredMetrics?.length ?? 0} />
-          <CountPill t={t} icon={<BookMarked size={11} strokeWidth={2} />} label="blocks" count={skill.preferredBlocks?.length ?? 0} />
-          <CountPill t={t} icon={<Tags size={11} strokeWidth={2} />} label="vocabulary" count={vocabCount} />
+          <CountPill t={t} icon={<BlocksIcon size={11} strokeWidth={2} />} label="blocks" count={domain.blockCount ?? 0} />
+          <CountPill t={t} icon={<GraduationCap size={11} strokeWidth={2} />} label="skills" count={domain.skillCount ?? 0} />
+          <CountPill t={t} icon={<Tags size={11} strokeWidth={2} />} label="terms" count={domain.termCount ?? 0} />
         </div>
       </div>
       <div style={{ display: 'flex', gap: 6, flexShrink: 0 }}>
-        <button type="button" onClick={onEdit} style={iconButton(t)} title="Edit skill">
+        <button type="button" onClick={onEdit} style={iconButton(t)} title="Edit domain">
           <Pencil size={13} strokeWidth={2} />
         </button>
-        <button type="button" onClick={onDelete} style={iconButton(t)} title="Delete skill">
+        <button type="button" onClick={onDelete} style={iconButton(t)} title="Delete domain">
           <Trash2 size={13} strokeWidth={2} />
         </button>
       </div>
@@ -313,60 +275,59 @@ function SkillRow({
 
 // ── Form drawer (add / edit) ─────────────────────────────────────────────────
 
-function SkillFormDrawer({
+function DomainFormDrawer({
   mode,
-  options,
-  domains,
   existingIds,
   t,
   onClose,
   onSaved,
 }: {
   mode: FormMode;
-  options: { metrics: string[]; blocks: string[] };
-  domains: Domain[];
   existingIds: string[];
   t: Theme;
   onClose: () => void;
-  onSaved: (skill: Skill) => void;
+  onSaved: (domain: Domain) => void;
 }): JSX.Element {
-  const { dispatch } = useNotebook();
   const editing = mode.kind === 'edit';
-  const [draft, setDraft] = useState<Skill>(() => (mode.kind === 'edit' ? { ...mode.skill } : emptyDraft()));
-  // Track whether the user has manually edited the id slug so name→slug
-  // auto-fill stops once they take control (create only).
+  const [draft, setDraft] = useState<Domain>(() => (mode.kind === 'edit' ? { ...mode.domain } : emptyDraft()));
+  // Track whether the user took control of the id slug so name→slug auto-fill
+  // stops once they edit it directly (create only).
   const [idTouched, setIdTouched] = useState(editing);
-  const [name, setName] = useState(() => (mode.kind === 'edit' ? mode.skill.id : ''));
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const set = useCallback(<K extends keyof Skill>(key: K, value: Skill[K]) => {
+  const set = useCallback(<K extends keyof Domain>(key: K, value: Domain[K]) => {
     setDraft((prev) => ({ ...prev, [key]: value }));
   }, []);
 
   const onNameChange = (value: string) => {
-    setName(value);
-    if (!editing && !idTouched) set('id', slugify(value));
+    setDraft((prev) => ({
+      ...prev,
+      name: value,
+      ...(!editing && !idTouched ? { id: slugify(value) } : {}),
+    }));
   };
 
   const idCollision = !editing && draft.id.length > 0 && existingIds.includes(draft.id);
-  const canSave = draft.id.trim().length > 0 && draft.body.trim().length > 0 && !idCollision && !saving;
+  const canSave = draft.id.trim().length > 0 && draft.name.trim().length > 0 && !idCollision && !saving;
 
   const onSave = useCallback(async () => {
-    const payload: Skill = {
+    const payload: Domain = {
       ...draft,
       id: draft.id.trim(),
+      name: draft.name.trim(),
+      owner: draft.owner?.trim() ? draft.owner.trim() : undefined,
+      boundedContext: draft.boundedContext?.trim() ? draft.boundedContext.trim() : undefined,
       description: draft.description?.trim() ? draft.description.trim() : undefined,
-      body: draft.body,
-      domain: draft.domain?.trim() ? draft.domain.trim() : undefined,
+      sourceSystems: (draft.sourceSystems ?? []).map((s) => s.trim()).filter(Boolean),
     };
     setSaving(true);
     setError(null);
     try {
-      const res = editing ? await api.updateSkill(payload.id, payload) : await api.createSkill(payload);
-      onSaved(res.skill ?? payload);
+      const res = editing ? await api.updateDomain(payload.id, payload) : await api.createDomain(payload);
+      onSaved(res.domain ?? payload);
     } catch (err) {
-      setError(err instanceof Error && err.message ? err.message : 'Could not save this skill. Try again.');
+      setError(err instanceof Error && err.message ? err.message : 'Could not save this domain. Try again.');
     } finally {
       setSaving(false);
     }
@@ -378,9 +339,9 @@ function SkillFormDrawer({
         {/* Drawer header */}
         <div style={drawerHeader(t)}>
           <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-            <GraduationCap size={16} strokeWidth={2} color={t.accent} />
+            <Boxes size={16} strokeWidth={2} color={t.accent} />
             <div style={{ fontSize: 15, fontWeight: 700, color: t.textPrimary }}>
-              {editing ? 'Edit skill' : 'New skill'}
+              {editing ? 'Edit domain' : 'New domain'}
             </div>
           </div>
           <button type="button" onClick={() => !saving && onClose()} style={iconButton(t)} title="Close">
@@ -391,16 +352,16 @@ function SkillFormDrawer({
         {/* Drawer body */}
         <div style={{ flex: 1, minHeight: 0, overflow: 'auto', padding: '16px 18px', display: 'grid', gap: 16 }}>
           {/* Name + id */}
-          <Field label="Name" t={t} hint={editing ? undefined : 'A short, human label for this skill.'}>
+          <Field label="Name" t={t} hint={editing ? undefined : 'A short, human label for this business area.'}>
             <input
               type="text"
-              value={name}
+              value={draft.name}
               onChange={(e) => onNameChange(e.target.value)}
-              placeholder="Metrics glossary"
+              placeholder="Revenue"
               style={inputStyle(t)}
             />
           </Field>
-          <Field label="ID (slug)" t={t} hint="Used as the file name. Letters, numbers, and dashes.">
+          <Field label="ID (slug)" t={t} hint="Used as the on-disk identifier. Letters, numbers, and dashes.">
             <input
               type="text"
               value={draft.id}
@@ -409,105 +370,53 @@ function SkillFormDrawer({
                 setIdTouched(true);
                 set('id', slugify(e.target.value));
               }}
-              placeholder="metrics-glossary"
+              placeholder="revenue"
               style={{ ...inputStyle(t), fontFamily: t.fontMono, opacity: editing ? 0.7 : 1 }}
             />
-            {idCollision ? <InlineNote t={t} tone="error">A skill with this id already exists.</InlineNote> : null}
+            {idCollision ? <InlineNote t={t} tone="error">A domain with this id already exists.</InlineNote> : null}
           </Field>
 
-          {/* Description */}
-          <Field label="Description" t={t} hint="One line shown in the list and in the 'guided by' note on AI results.">
+          {/* Owner */}
+          <Field label="Owner" t={t} hint="The team or person accountable for this domain.">
             <input
               type="text"
-              value={draft.description ?? ''}
-              onChange={(e) => set('description', e.target.value)}
-              placeholder="How we define and name our core revenue metrics."
+              value={draft.owner ?? ''}
+              onChange={(e) => set('owner', e.target.value)}
+              placeholder="finance-analytics"
               style={inputStyle(t)}
             />
           </Field>
 
-          {/* Scope toggle */}
-          <Field label="Scope" t={t} hint="Project skills are shared with everyone; personal skills are just for you.">
-            <div role="group" aria-label="Skill scope" style={segmentGroup(t)}>
-              <button
-                type="button"
-                onClick={() => set('scope', 'project')}
-                aria-pressed={draft.scope === 'project'}
-                style={segmentButton(t, draft.scope === 'project')}
-              >
-                <Users size={13} strokeWidth={2} /> Project
-              </button>
-              <button
-                type="button"
-                onClick={() => set('scope', 'personal')}
-                aria-pressed={draft.scope === 'personal'}
-                style={segmentButton(t, draft.scope === 'personal')}
-              >
-                <UserRound size={13} strokeWidth={2} /> Personal — me
-              </button>
-            </div>
+          {/* Bounded context */}
+          <Field label="Bounded context" t={t} hint="The conceptual boundary this domain owns, e.g. 'recognized revenue and invoicing'.">
+            <input
+              type="text"
+              value={draft.boundedContext ?? ''}
+              onChange={(e) => set('boundedContext', e.target.value)}
+              placeholder="Recognized revenue and invoicing"
+              style={inputStyle(t)}
+            />
           </Field>
 
-          {/* Domain picker (Spec 17 part B) */}
-          <Field label="Domain" t={t} hint="Which business domain this skill belongs to. Domains are the top of the hierarchy.">
-            <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
-              <select
-                value={draft.domain ?? ''}
-                onChange={(e) => set('domain', e.target.value || undefined)}
-                style={{ ...inputStyle(t), flex: 1, cursor: 'pointer', color: draft.domain ? t.textPrimary : t.textMuted }}
-              >
-                <option value="">{domains.length === 0 ? 'No domains yet' : 'No domain'}</option>
-                {domains.map((domain) => (
-                  <option key={domain.id} value={domain.id}>{domain.name}</option>
-                ))}
-              </select>
-              <button
-                type="button"
-                onClick={() => dispatch({ type: 'SET_MAIN_VIEW', view: 'domains' })}
-                style={ghostButton(t)}
-                title="Create a new domain on the Domains page"
-              >
-                <Plus size={12} strokeWidth={2.2} /> New domain
-              </button>
-            </div>
+          {/* Source systems */}
+          <Field label="Source systems" t={t} hint="The upstream systems this domain draws from — type a name and press Enter.">
+            <TagInput
+              t={t}
+              values={draft.sourceSystems ?? []}
+              onChange={(next) => set('sourceSystems', next)}
+              placeholder="Add a source system…"
+            />
           </Field>
 
-          {/* Business-context body */}
-          <Field label="Business context" t={t} hint="The guidance the AI follows — definitions, rules, and how to interpret a question.">
+          {/* Description */}
+          <Field label="Description" t={t} hint="What this domain covers and how it's used.">
             <textarea
-              value={draft.body}
-              onChange={(e) => set('body', e.target.value)}
-              rows={7}
-              placeholder={'e.g. "Revenue means recognized revenue, not bookings. Always exclude test accounts (account_type = \'test\'). When someone asks for ARR, use the arr metric."'}
+              value={draft.description ?? ''}
+              onChange={(e) => set('description', e.target.value)}
+              rows={5}
+              placeholder="All recognized-revenue metrics and the blocks that report them, sourced from the billing warehouse."
               style={textareaStyle(t)}
             />
-          </Field>
-
-          {/* Preferred metrics + blocks */}
-          <Field label="Preferred metrics" t={t} hint="Metrics the AI should reach for first when answering.">
-            <MultiSelect
-              t={t}
-              options={options.metrics}
-              selected={draft.preferredMetrics}
-              onChange={(next) => set('preferredMetrics', next)}
-              placeholder="Add a metric…"
-              emptyOptionsHint="No metrics available from the project yet."
-            />
-          </Field>
-          <Field label="Preferred blocks" t={t} hint="Certified blocks the AI should prefer to reuse.">
-            <MultiSelect
-              t={t}
-              options={options.blocks}
-              selected={draft.preferredBlocks}
-              onChange={(next) => set('preferredBlocks', next)}
-              placeholder="Add a block…"
-              emptyOptionsHint="No blocks available from the project yet."
-            />
-          </Field>
-
-          {/* Vocabulary editor */}
-          <Field label="Vocabulary" t={t} hint="Map your terms to a target, e.g. arr → metric:arr or revenue → block:revenue_by_region.">
-            <VocabularyEditor t={t} value={draft.vocabulary} onChange={(next) => set('vocabulary', next)} />
           </Field>
 
           {error ? <InlineNote t={t} tone="error">{error}</InlineNote> : null}
@@ -520,7 +429,7 @@ function SkillFormDrawer({
           </button>
           <button type="button" onClick={onSave} disabled={!canSave} style={{ ...primaryButton(t), opacity: canSave ? 1 : 0.55 }}>
             {saving ? <Loader2 size={13} strokeWidth={2} /> : null}
-            {saving ? 'Saving…' : editing ? 'Save changes' : 'Create skill'}
+            {saving ? 'Saving…' : editing ? 'Save changes' : 'Create domain'}
           </button>
         </div>
       </div>
@@ -528,50 +437,36 @@ function SkillFormDrawer({
   );
 }
 
-// ── Multi-select (preferred metrics / blocks) ────────────────────────────────
+// ── Tag input (source systems) ───────────────────────────────────────────────
 
-function MultiSelect({
+function TagInput({
   t,
-  options,
-  selected,
+  values,
   onChange,
   placeholder,
-  emptyOptionsHint,
 }: {
   t: Theme;
-  options: string[];
-  selected: string[];
+  values: string[];
   onChange: (next: string[]) => void;
   placeholder: string;
-  emptyOptionsHint: string;
 }): JSX.Element {
   const [query, setQuery] = useState('');
-  const available = useMemo(
-    () =>
-      options
-        .filter((o) => !selected.includes(o))
-        .filter((o) => (query ? o.toLowerCase().includes(query.toLowerCase()) : true))
-        .slice(0, 8),
-    [options, selected, query],
-  );
-
   const add = (value: string) => {
     const v = value.trim();
-    if (!v || selected.includes(v)) return;
-    onChange([...selected, v]);
+    if (!v || values.includes(v)) return;
+    onChange([...values, v]);
     setQuery('');
   };
-
   return (
     <div style={{ display: 'grid', gap: 7 }}>
-      {selected.length > 0 ? (
+      {values.length > 0 ? (
         <div style={{ display: 'flex', flexWrap: 'wrap', gap: 5 }}>
-          {selected.map((value) => (
+          {values.map((value) => (
             <span key={value} style={selectedChip(t)}>
               {value}
               <button
                 type="button"
-                onClick={() => onChange(selected.filter((s) => s !== value))}
+                onClick={() => onChange(values.filter((s) => s !== value))}
                 style={chipRemoveButton(t)}
                 title="Remove"
               >
@@ -594,83 +489,6 @@ function MultiSelect({
         placeholder={placeholder}
         style={inputStyle(t)}
       />
-      {available.length > 0 ? (
-        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 5 }}>
-          {available.map((option) => (
-            <button key={option} type="button" onClick={() => add(option)} style={suggestionChip(t)}>
-              <Plus size={10} strokeWidth={2.4} /> {option}
-            </button>
-          ))}
-        </div>
-      ) : options.length === 0 ? (
-        <div style={{ fontSize: 11, color: t.textMuted }}>{emptyOptionsHint} You can still type a value and press Enter.</div>
-      ) : null}
-    </div>
-  );
-}
-
-// ── Vocabulary editor (term → target rows) ───────────────────────────────────
-
-function VocabularyEditor({
-  t,
-  value,
-  onChange,
-}: {
-  t: Theme;
-  value: Record<string, string>;
-  onChange: (next: Record<string, string>) => void;
-}): JSX.Element {
-  // Edit as an ordered row list so empty/duplicate terms don't collapse while typing.
-  const [rows, setRows] = useState<Array<{ term: string; target: string }>>(() =>
-    Object.entries(value ?? {}).map(([term, target]) => ({ term, target })),
-  );
-
-  const commit = (next: Array<{ term: string; target: string }>) => {
-    setRows(next);
-    const map: Record<string, string> = {};
-    for (const row of next) {
-      const term = row.term.trim();
-      if (term) map[term] = row.target.trim();
-    }
-    onChange(map);
-  };
-
-  const update = (index: number, patch: Partial<{ term: string; target: string }>) => {
-    commit(rows.map((row, i) => (i === index ? { ...row, ...patch } : row)));
-  };
-
-  return (
-    <div style={{ display: 'grid', gap: 7 }}>
-      {rows.map((row, index) => (
-        <div key={index} style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
-          <input
-            type="text"
-            value={row.term}
-            onChange={(e) => update(index, { term: e.target.value })}
-            placeholder="arr"
-            style={{ ...inputStyle(t), flex: 1 }}
-          />
-          <span style={{ color: t.textMuted, fontSize: 13 }}>→</span>
-          <input
-            type="text"
-            value={row.target}
-            onChange={(e) => update(index, { target: e.target.value })}
-            placeholder="metric:arr"
-            style={{ ...inputStyle(t), flex: 1.3, fontFamily: t.fontMono }}
-          />
-          <button
-            type="button"
-            onClick={() => commit(rows.filter((_, i) => i !== index))}
-            style={iconButton(t)}
-            title="Remove row"
-          >
-            <X size={13} strokeWidth={2} />
-          </button>
-        </div>
-      ))}
-      <button type="button" onClick={() => setRows([...rows, { term: '', target: '' }])} style={{ ...ghostButton(t), justifySelf: 'start' }}>
-        <Plus size={12} strokeWidth={2.2} /> Add term
-      </button>
     </div>
   );
 }
@@ -703,15 +521,15 @@ function EmptyState({ t, onAdd }: { t: Theme; onAdd: () => void }): JSX.Element 
           justifyContent: 'center',
         }}
       >
-        <GraduationCap size={22} strokeWidth={1.9} />
+        <Boxes size={22} strokeWidth={1.9} />
       </div>
-      <div style={{ fontSize: 15, fontWeight: 700, color: t.textPrimary }}>Teach the AI your business rules</div>
+      <div style={{ fontSize: 15, fontWeight: 700, color: t.textPrimary }}>Name your business domains</div>
       <div style={{ fontSize: 13, color: t.textMuted, maxWidth: 460, lineHeight: 1.55 }}>
-        Skills are the definitions, rules, and vocabulary the AI follows when it answers — like "revenue = recognized,
-        not bookings" or "always exclude test accounts." Add your first one to start guiding every answer.
+        Domains organize everything below them — terms, skills, and blocks. Add your first one, like "Revenue" or
+        "Customer", and you'll be able to pick it when authoring blocks and skills.
       </div>
       <button type="button" onClick={onAdd} style={{ ...primaryButton(t), marginTop: 4 }}>
-        <Plus size={14} strokeWidth={2.2} /> Add your first skill
+        <Plus size={14} strokeWidth={2.2} /> Add your first domain
       </button>
     </div>
   );
@@ -732,7 +550,7 @@ function ErrorPanel({ t, message, onRetry }: { t: Theme; message: string; onRetr
     >
       <AlertTriangle size={16} strokeWidth={2} color={t.warning} style={{ marginTop: 1, flexShrink: 0 }} />
       <div style={{ flex: 1, minWidth: 0 }}>
-        <div style={{ fontSize: 13, fontWeight: 650, color: t.textPrimary }}>Skills are not available right now</div>
+        <div style={{ fontSize: 13, fontWeight: 650, color: t.textPrimary }}>Domains are not available right now</div>
         <div style={{ fontSize: 12.5, color: t.textSecondary, marginTop: 4, lineHeight: 1.5 }}>{message}</div>
         <button type="button" onClick={onRetry} style={{ ...ghostButton(t), marginTop: 10 }}>
           <RefreshCw size={13} strokeWidth={2} /> Retry
@@ -745,14 +563,14 @@ function ErrorPanel({ t, message, onRetry }: { t: Theme; message: string; onRetr
 // ── Delete confirm dialog ────────────────────────────────────────────────────
 
 function ConfirmDeleteDialog({
-  skill,
+  domain,
   t,
   deleting,
   error,
   onCancel,
   onConfirm,
 }: {
-  skill: Skill;
+  domain: Domain;
   t: Theme;
   deleting: boolean;
   error: string | null;
@@ -764,11 +582,11 @@ function ConfirmDeleteDialog({
       <div style={modalCard(t)} onClick={(e) => e.stopPropagation()}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 9 }}>
           <Trash2 size={16} strokeWidth={2} color={t.error} />
-          <div style={{ fontSize: 15, fontWeight: 700, color: t.textPrimary }}>Delete this skill?</div>
+          <div style={{ fontSize: 15, fontWeight: 700, color: t.textPrimary }}>Delete this domain?</div>
         </div>
         <div style={{ fontSize: 13, color: t.textSecondary, lineHeight: 1.55 }}>
-          <span style={{ fontFamily: t.fontMono, color: t.textPrimary }}>{skill.id}</span> will be removed and the AI
-          will stop following it. This can't be undone.
+          <span style={{ fontWeight: 700, color: t.textPrimary }}>{domain.name}</span> will be removed. Blocks, skills,
+          and terms that referenced it will become unassigned. This can't be undone.
         </div>
         {error ? <InlineNote t={t} tone="error">{error}</InlineNote> : null}
         <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8, marginTop: 4 }}>
@@ -786,32 +604,6 @@ function ConfirmDeleteDialog({
 }
 
 // ── Small shared pieces ──────────────────────────────────────────────────────
-
-function ScopeBadge({ scope, t, count }: { scope: Skill['scope']; t: Theme; count?: number }): JSX.Element {
-  const project = scope === 'project';
-  const color = project ? t.accent : t.textSecondary;
-  return (
-    <span
-      style={{
-        display: 'inline-flex',
-        alignItems: 'center',
-        gap: 5,
-        fontSize: 10.5,
-        fontWeight: 700,
-        letterSpacing: '0.02em',
-        color,
-        background: project ? `${t.accent}16` : t.btnBg,
-        border: `1px solid ${project ? `${t.accent}40` : t.btnBorder}`,
-        borderRadius: 999,
-        padding: '2px 9px',
-      }}
-    >
-      {project ? <Users size={11} strokeWidth={2.2} /> : <UserRound size={11} strokeWidth={2.2} />}
-      {project ? 'Project' : 'Personal'}
-      {typeof count === 'number' ? <span style={{ opacity: 0.7 }}>· {count}</span> : null}
-    </span>
-  );
-}
 
 function CountPill({ t, icon, label, count }: { t: Theme; icon: React.ReactNode; label: string; count: number }): JSX.Element {
   return (
@@ -860,7 +652,7 @@ function InlineNote({ t, tone, children }: { t: Theme; tone: 'error' | 'muted'; 
   return <div style={{ fontSize: 11.5, color, lineHeight: 1.45 }}>{children}</div>;
 }
 
-// ── Styles ───────────────────────────────────────────────────────────────────
+// ── Styles (mirrors SkillsPage) ──────────────────────────────────────────────
 
 function primaryButton(t: Theme): CSSProperties {
   return {
@@ -952,48 +744,31 @@ function textareaStyle(t: Theme): CSSProperties {
   };
 }
 
-function segmentGroup(t: Theme): CSSProperties {
-  return {
-    display: 'inline-flex',
-    padding: 2,
-    gap: 2,
-    border: `1px solid ${t.btnBorder}`,
-    borderRadius: 8,
-    background: t.btnBg,
-    alignSelf: 'start',
-  };
-}
-
-function segmentButton(t: Theme, active: boolean): CSSProperties {
-  return {
-    display: 'inline-flex',
-    alignItems: 'center',
-    gap: 5,
-    padding: '6px 12px',
-    borderRadius: 6,
-    border: '1px solid transparent',
-    background: active ? t.accent : 'transparent',
-    color: active ? '#ffffff' : t.textSecondary,
-    fontSize: 12,
-    fontWeight: active ? 750 : 600,
-    fontFamily: t.font,
-    cursor: 'pointer',
-  };
-}
-
-function starterBadge(t: Theme): CSSProperties {
+function contextBadge(t: Theme): CSSProperties {
   return {
     display: 'inline-flex',
     alignItems: 'center',
     gap: 4,
-    fontSize: 10,
+    fontSize: 10.5,
     fontWeight: 700,
-    letterSpacing: '0.02em',
-    color: t.warning,
-    background: `${t.warning}16`,
-    border: `1px solid ${t.warning}40`,
+    color: t.accent,
+    background: `${t.accent}14`,
+    border: `1px solid ${t.accent}38`,
     borderRadius: 999,
     padding: '2px 8px',
+  };
+}
+
+function sourceChip(t: Theme): CSSProperties {
+  return {
+    fontSize: 11,
+    fontWeight: 600,
+    color: t.textSecondary,
+    background: t.btnBg,
+    border: `1px solid ${t.btnBorder}`,
+    borderRadius: 6,
+    padding: '3px 8px',
+    fontFamily: t.fontMono,
   };
 }
 
@@ -1024,23 +799,6 @@ function chipRemoveButton(t: Theme): CSSProperties {
     cursor: 'pointer',
     padding: 2,
     borderRadius: 4,
-  };
-}
-
-function suggestionChip(t: Theme): CSSProperties {
-  return {
-    display: 'inline-flex',
-    alignItems: 'center',
-    gap: 4,
-    fontSize: 11,
-    fontWeight: 600,
-    color: t.textSecondary,
-    background: t.btnBg,
-    border: `1px solid ${t.btnBorder}`,
-    borderRadius: 6,
-    padding: '3px 8px',
-    cursor: 'pointer',
-    fontFamily: t.fontMono,
   };
 }
 
