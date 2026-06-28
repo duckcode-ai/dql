@@ -132,6 +132,26 @@ export function buildBusinessQuery(
   return buildProjection(model, inference);
 }
 
+/**
+ * Derive App-ready filters for a block from its filterable columns (output
+ * dimensions — NOT measures). Each becomes an `allowedFilter` with an identity
+ * `filterBinding` (business filter name = physical column), which the runtime
+ * injects as a safe bound WHERE wrapper. This is what makes a generated block
+ * immediately drivable by a dashboard control without re-authoring SQL.
+ */
+export function deriveBlockFilters(
+  filterColumns: string[],
+): { allowedFilters: string[]; filterBindings: Array<{ filter: string; binding: string }> } {
+  const cols = filterColumns
+    .map((c) => c.trim())
+    .filter((c, i, arr) => c && /^[A-Za-z_][A-Za-z0-9_]*$/.test(c) && arr.indexOf(c) === i)
+    .slice(0, 6);
+  return {
+    allowedFilters: cols,
+    filterBindings: cols.map((c) => ({ filter: c, binding: c })),
+  };
+}
+
 /** One metric-bound (semantic) block: the governed metric + its pre-compiled query. */
 export interface MetricWrapperBlock {
   /** Governed metric name to bind via `metric = "<name>"`. */

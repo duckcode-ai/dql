@@ -38,6 +38,7 @@ import {
   parseMetricDefinition,
 } from '../metadata/metric-match.js';
 import type { KGNode } from '../kg/types.js';
+import { deriveBlockFilters } from './generate-sql.js';
 import {
   buildSchemaGrounding,
   renderGroundingForPrompt,
@@ -751,6 +752,8 @@ async function buildBlock(
     grain,
     entities,
     declaredOutputs: outputs,
+    // App-ready: the block's output columns become dashboard filters.
+    ...deriveBlockFilters(outputs),
     llmContext: content.llmContext,
     invariants,
     examples: examples.map((question) => ({ question })),

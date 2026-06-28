@@ -38,6 +38,10 @@ export interface ProposedDraftRecord {
   grain?: string;
   entities: string[];
   declaredOutputs: string[];
+  /** Business filters an app/dashboard may apply (output dimension columns). */
+  allowedFilters?: string[];
+  /** Maps each allowed filter to the physical column/expression it binds to. */
+  filterBindings?: Array<{ filter: string; binding: string }>;
   llmContext?: string;
   /** Review cadence (e.g. "quarterly"); AI-defaulted so the cadence warning is pre-satisfied. */
   reviewCadence?: string;
@@ -156,6 +160,11 @@ export function renderProposedDraft(rec: ProposedDraftRecord, draftPath: string)
     ? `\n  metric = "${escapeString(rec.metricRef)}"`
     : '';
   const dimensionsLine = stringArray('dimensions', rec.dimensions ?? []);
+  // App-readiness: declare which business filters a dashboard may apply and map each
+  // to its physical column. The runtime injects these as a safe, bound WHERE wrapper
+  // — so the same certified block powers many filtered views without re-authoring.
+  const allowedFiltersLine = stringArray('allowedFilters', rec.allowedFilters ?? []);
+  const filterBindingsBlock = renderFilterBindings(rec.filterBindings ?? []);
 
   return `// dql-format: 1
 ${header}block "${rec.slug}" {
@@ -163,13 +172,22 @@ ${header}block "${rec.slug}" {
   type = "${blockType}"
   status = "draft"
   description = "${escapeString(rec.description)}"${ownerLine}${metricLine}
-  pattern = "${escapeString(rec.pattern)}"${grainLine}${entitiesLine}${outputsLine}${dimensionsLine}${sourceSystemsLine}${tagsLine}${llmContextLine}${reviewCadenceLine}${invariantsLine}
+  pattern = "${escapeString(rec.pattern)}"${grainLine}${entitiesLine}${outputsLine}${dimensionsLine}${allowedFiltersLine}${sourceSystemsLine}${tagsLine}${llmContextLine}${reviewCadenceLine}${invariantsLine}${filterBindingsBlock}
 
   query = """
 ${indent(rec.sql, 4)}
   """${examplesBlock}${testsBlock}
 }
 `;
+}
+
+/** Emit a `filterBindings { <filter> = "<column>" }` block, or '' when none. */
+function renderFilterBindings(bindings: Array<{ filter: string; binding: string }>): string {
+  if (bindings.length === 0) return '';
+  const lines = bindings
+    .map((entry) => `    ${entry.filter} = "${escapeString(entry.binding)}"`)
+    .join('\n');
+  return `\n\n  filterBindings {\n${lines}\n  }`;
 }
 
 /**

@@ -41,7 +41,7 @@ import {
   type ProposeConfig,
   type ProposeConfigInput,
 } from './config.js';
-import { buildBusinessQuery, buildMetricWrapperBlocks } from './generate-sql.js';
+import { buildBusinessQuery, buildMetricWrapperBlocks, deriveBlockFilters } from './generate-sql.js';
 import type { EnrichedContent } from './enrich.js';
 
 export interface ProposeOptions {
@@ -652,6 +652,8 @@ export function propose(options: ProposeOptions): ProposeSummary {
           grain: mb.dimensions.length > 0 ? mb.dimensions.join(' + ') : proposal.inference.grain,
           entities: proposal.inference.entities,
           declaredOutputs: [...mb.dimensions, mb.alias],
+          // App-ready: the metric's dimensions become dashboard filters.
+          ...deriveBlockFilters(mb.dimensions),
           llmContext: `Wraps the governed semantic metric "${mb.metricName}". Use this for "${mb.metricName.replace(/_/g, ' ')}" questions.`,
           invariants: [],
           examples: [{ question: `What is ${mb.metricName.replace(/_/g, ' ')}?` }],
@@ -689,6 +691,8 @@ export function propose(options: ProposeOptions): ProposeSummary {
       grain: proposal.inference.grain,
       entities: proposal.inference.entities,
       declaredOutputs: proposal.inference.declaredOutputs,
+      // App-ready: a flat/entity block can be filtered by any of its output columns.
+      ...deriveBlockFilters(proposal.inference.declaredOutputs),
       llmContext: enriched?.llmContext ?? proposal.inference.llmContext,
       invariants: proposal.inference.invariants,
       examples: enrichedExamples ?? proposal.inference.examples,
