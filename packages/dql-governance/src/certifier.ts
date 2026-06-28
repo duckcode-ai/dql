@@ -50,8 +50,10 @@ export const BUILTIN_RULES: CertificationRule[] = [
   {
     id: 'has-description',
     name: 'Block has description',
-    description: 'Every block must have a non-empty description',
-    severity: 'error',
+    description:
+      'Blocks should have a business-facing description. The AI drafts one at build time and the ' +
+      'reviewer can edit it — so this is advisory, not a hard gate. Owner accountability is the gate.',
+    severity: 'warning',
     check: (block) => ({
       passed: !!block.description && block.description.trim().length > 0,
       message: block.description ? undefined : 'Missing description',
@@ -60,7 +62,7 @@ export const BUILTIN_RULES: CertificationRule[] = [
   {
     id: 'has-owner',
     name: 'Block has owner',
-    description: 'Every block must have an assigned owner',
+    description: 'Every block must have an accountable owner — the one field a human must confirm to certify',
     severity: 'error',
     check: (block) => ({
       passed: !!block.owner && block.owner.trim().length > 0,
@@ -70,8 +72,10 @@ export const BUILTIN_RULES: CertificationRule[] = [
   {
     id: 'has-domain',
     name: 'Block has domain',
-    description: 'Every block must belong to a domain',
-    severity: 'error',
+    description:
+      'Blocks should belong to a domain. The draft pipeline assigns one from context (default "misc"), ' +
+      'so this is advisory — the reviewer can reassign it without blocking certification.',
+    severity: 'warning',
     check: (block) => ({
       passed: !!block.domain && block.domain.trim().length > 0,
       message: block.domain ? undefined : 'Missing domain',

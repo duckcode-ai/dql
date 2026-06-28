@@ -1,11 +1,14 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
+import { resolveLocalOwner } from './identity.js';
 
 export interface GeneratedDraftRecord {
   slug: string;
   question: string;
   proposedSql: string;
   proposedContractId: string;
+  /** Accountable owner; defaults to the resolved local owner so a draft is never owner-less. */
+  owner?: string;
   proposedDomain?: string;
   proposedEntity?: string;
   upstreamRefs?: string[];
@@ -180,15 +183,22 @@ export function upsertGeneratedDraft(
   rec: GeneratedDraftRecord,
 ): GeneratedDraftBlock {
   const { filePath, relativePath } = resolveGeneratedDraftPath(projectRoot, rec);
+  // Owner is the one field a human must confirm to certify — never let a captured
+  // draft be born owner-less (it would hard-block certification for no reason).
+  const owner = rec.owner?.trim() || resolveLocalOwner(projectRoot);
 
   if (existsSync(filePath)) {
     const existing = readFileSync(filePath, 'utf-8');
     const m = existing.match(/asked_times\s*=\s*(\d+)/);
     const prev = m ? Number.parseInt(m[1], 10) : 1;
     const next = Number.isFinite(prev) ? prev + 1 : 2;
-    const updated = m
+    let updated = m
       ? existing.replace(/asked_times\s*=\s*\d+/, `asked_times = ${next}`)
       : existing.replace(/\n\s*query\s*=/, `\n    asked_times = ${next}\n\n    query =`);
+    // Backfill owner on older owner-less drafts so re-asking makes them certifiable.
+    if (!/\n\s*owner\s*=/.test(updated)) {
+      updated = updated.replace(/(\n\s*status\s*=\s*"draft")/, `$1\n    owner = "${escapeDqlString(owner)}"`);
+    }
     writeFileSync(filePath, stampLastAsked(updated));
     return {
       path: relativePath,
@@ -198,7 +208,7 @@ export function upsertGeneratedDraft(
   }
 
   mkdirSync(dirname(filePath), { recursive: true });
-  writeFileSync(filePath, renderGeneratedDraft(rec, relativePath));
+  writeFileSync(filePath, renderGeneratedDraft({ ...rec, owner }, relativePath));
   return {
     path: relativePath,
     askedTimes: 1,
@@ -232,6 +242,7 @@ function renderGeneratedDraft(rec: GeneratedDraftRecord, draftPath: string): str
     domain = "${escapeDqlString(rec.proposedDomain ?? 'misc')}"
     type = "custom"
     status = "draft"
+    owner = "${escapeDqlString(rec.owner ?? '')}"
     description = """${rec.question.replace(/"""/g, '\\"\\"\\"')}"""
 
     // Tier-2 generated proposal. This block is NOT certified.

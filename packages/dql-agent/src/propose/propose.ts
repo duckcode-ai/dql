@@ -645,6 +645,7 @@ export function propose(options: ProposeOptions): ProposeSummary {
       invariants: proposal.inference.invariants,
       examples: enrichedExamples ?? proposal.inference.examples,
       tags: proposal.inference.tags,
+      reviewCadence: 'quarterly',
       sourceModel: proposal.model,
       sourceSystems: [model.schema, model.database].filter((v): v is string => Boolean(v)),
       certification: proposal.certification,

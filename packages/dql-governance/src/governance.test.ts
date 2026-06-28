@@ -154,12 +154,26 @@ describe('Certifier', () => {
     expect(result.errors).toHaveLength(0);
   });
 
-  it('rejects block without description', () => {
+  it('treats a missing description as a warning, not a hard gate (AI drafts it; owner is the gate)', () => {
     const certifier = new Certifier();
     const block = makeBlock({ description: undefined });
     const result = certifier.evaluate(block);
+    // Description is advisory now — it must NOT appear as a blocking error.
+    expect(result.errors.some((e) => e.rule === 'Block has description')).toBe(false);
+    expect(result.warnings.some((w) => w.rule === 'Block has description')).toBe(true);
+  });
+
+  it('rejects a block without an owner (owner is the one required field)', () => {
+    const certifier = new Certifier();
+    const block = makeBlock({ description: 'Test', owner: undefined });
+    const testResults: TestResultSummary = {
+      passed: 1, failed: 0, skipped: 0, duration: 10,
+      assertions: [{ name: 'test1', passed: true }],
+      runAt: new Date(),
+    };
+    const result = certifier.evaluate(block, testResults);
     expect(result.certified).toBe(false);
-    expect(result.errors.some((e) => e.rule === 'Block has description')).toBe(true);
+    expect(result.errors.some((e) => e.rule === 'Block has owner')).toBe(true);
   });
 
   it('rejects block with failing tests', () => {

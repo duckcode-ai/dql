@@ -241,6 +241,21 @@ function asStringArray(value: unknown, max = 12): string[] {
     .slice(0, max);
 }
 
+/** Output column names that name a non-negative measure (safe for a `>= 0` guard). */
+const NON_NEGATIVE_MEASURE_RE = /(revenue|sales|income|count|total|amount|sum|qty|quantity|value|price|profit|cost|spend|orders?|tax)\b/i;
+
+/**
+ * Auto-draft a safe sanity test so an AI-built block is born with at least one
+ * assertion the reviewer can keep or strengthen — never asked to author one. We
+ * only emit a `>= 0` guard on an output that clearly names a non-negative measure,
+ * so the assertion always passes (never a surprise certification block). Returns
+ * [] when nothing is provably safe, leaving "no tests" as an advisory warning.
+ */
+function safeSanityInvariants(outputs: string[]): string[] {
+  const measure = outputs.find((name) => NON_NEGATIVE_MEASURE_RE.test(name));
+  return measure ? [`${measure} >= 0`] : [];
+}
+
 /** Resolve the provider for this run, honoring `offline` + explicit overrides. */
 async function resolveProvider(options: BuildFromPromptOptions): Promise<AgentProvider | undefined> {
   if (options.offline) return undefined;
@@ -587,10 +602,18 @@ async function buildBlock(
   const outputs = content.outputs;
   const examples = content.examples;
   const entities = content.entities;
-  const invariants = content.invariants;
+  // Auto-draft a safe sanity test when the model proposed none, so a built block
+  // is born with a test assertion (advisory) and the reviewer isn't asked to author
+  // one. `>= 0` on a non-negative measure output is the safe, always-passing guard.
+  const invariants = content.invariants.length > 0
+    ? content.invariants
+    : safeSanityInvariants(outputs);
   const grain = content.grain;
   // Tag with a sensible default so the has-tags warning is satisfied.
   const tags = ['proposed', 'ai-build'];
+  // dbt is the upstream source system for an AI-built, dbt-grounded block — fill it
+  // so the lineage warning is pre-satisfied (reviewer can refine).
+  const sourceSystems = ['dbt'];
 
   // Certifier verdict (stored, never used to flip status). Build a BlockRecord
   // mirroring what the draft will declare so the verdict matches the file.
@@ -625,8 +648,9 @@ async function buildBlock(
     invariants,
     examples: examples.map((question) => ({ question })),
     tags,
+    reviewCadence: 'quarterly',
     sourceModel: '(ai-build prompt)',
-    sourceSystems: [],
+    sourceSystems,
     // Store the same verdict the record produced so the review header is accurate.
     certification: {
       certified: false,

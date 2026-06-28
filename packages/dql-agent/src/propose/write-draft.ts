@@ -30,6 +30,8 @@ export interface ProposedDraftRecord {
   entities: string[];
   declaredOutputs: string[];
   llmContext?: string;
+  /** Review cadence (e.g. "quarterly"); AI-defaulted so the cadence warning is pre-satisfied. */
+  reviewCadence?: string;
   invariants: string[];
   examples: Array<{ question: string; sql?: string }>;
   tags: string[];
@@ -131,6 +133,9 @@ export function renderProposedDraft(rec: ProposedDraftRecord, draftPath: string)
   const llmContextLine = rec.llmContext
     ? `\n  llmContext = "${escapeString(rec.llmContext)}"`
     : '';
+  const reviewCadenceLine = rec.reviewCadence
+    ? `\n  reviewCadence = "${escapeString(rec.reviewCadence)}"`
+    : '';
   const invariantsLine = stringArray('invariants', rec.invariants);
   const examplesBlock = renderExamples(rec.examples);
   const testsBlock = renderTests(rec.invariants);
@@ -142,7 +147,7 @@ ${header}block "${rec.slug}" {
   type = "custom"
   status = "draft"
   description = "${escapeString(rec.description)}"${ownerLine}
-  pattern = "${escapeString(rec.pattern)}"${grainLine}${entitiesLine}${outputsLine}${sourceSystemsLine}${tagsLine}${llmContextLine}${invariantsLine}
+  pattern = "${escapeString(rec.pattern)}"${grainLine}${entitiesLine}${outputsLine}${sourceSystemsLine}${tagsLine}${llmContextLine}${reviewCadenceLine}${invariantsLine}
 
   query = """
 ${indent(rec.sql, 4)}

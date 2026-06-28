@@ -3365,7 +3365,11 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           res.end(serializeJSON({ error: 'source is required' }));
           return;
         }
-        const result = await certifyBlockStudioSource(source, blockPath, { enterprise: body.enterprise !== false });
+        // OSS local-first certifies in non-enterprise mode: owner + passing tests +
+        // a successful run are the gate; grain/outputs/pattern/lineage/cadence are
+        // AI-filled advisory warnings, not hard blockers. Enterprise-grade certification
+        // (all of those required) is an opt-in for the cloud tier — request it explicitly.
+        const result = await certifyBlockStudioSource(source, blockPath, { enterprise: body.enterprise === true });
         const blockers = Array.from(new Set(result.checklist.blockers));
         if (!result.certification.certified || blockers.length > 0) {
           res.writeHead(422, { 'Content-Type': 'application/json; charset=utf-8' });
@@ -3524,7 +3528,8 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
             return;
           }
           const certifiedSource = setBlockStudioSourceStatus(readiness.candidate.dqlSource, 'certified');
-          const certification = await certifyBlockStudioSource(certifiedSource, readiness.candidate.savedPath, { enterprise: true });
+          // OSS certify = non-enterprise (owner-gated); enterprise depth is the cloud tier.
+          const certification = await certifyBlockStudioSource(certifiedSource, readiness.candidate.savedPath, { enterprise: false });
           const blockers = Array.from(new Set(certification.checklist.blockers));
           if (!certification.certification.certified || blockers.length > 0) {
             const savedDraft = saveDqlGenerationDraft(importId, readiness.candidate);
@@ -8733,12 +8738,15 @@ function buildBlockStudioCertificationChecklist(input: {
   for (const error of input.certificationErrors) blockers.add(`${error.rule}: ${error.message}`);
   for (const blocker of input.extraBlockers ?? []) blockers.add(blocker);
   if (!input.previewSucceeded) blockers.add('Block has not run successfully');
-  if (!input.testResults || input.testResults.failed > 0) blockers.add('Tests must pass before certification');
-  if (!input.testResults || input.testResults.assertions.length === 0) blockers.add('At least one test assertion is required before certification');
-  if (!input.validation.chartConfig?.chart) blockers.add('Visualization config is missing');
+  // Only a REAL test failure blocks. "No tests" and "no chart" are advisory review
+  // items the AI fills at draft time — never hard gates (owner is the gate). This is
+  // what keeps "build a DQL" from demanding ~13 fields per block at 300-query scale.
+  if (input.testResults && input.testResults.failed > 0) blockers.add('Tests must pass before certification');
 
   return {
-    metadata: Boolean(parsed.domain.trim() && parsed.owner.trim() && parsed.description.trim()),
+    // The metadata tab is green once the one required field (owner) is present.
+    // Description/domain are AI-filled + editable and surface as review items, not gates.
+    metadata: Boolean(parsed.owner.trim()),
     validation: input.validation.diagnostics.every((diagnostic) => diagnostic.severity !== 'error'),
     run: input.previewSucceeded,
     tests: Boolean(input.testResults && input.testResults.failed === 0 && input.testResults.assertions.length > 0),
