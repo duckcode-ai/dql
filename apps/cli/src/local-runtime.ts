@@ -2322,6 +2322,13 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           executeSql: executeLocalSqlForStoredResult,
           generateInvestigationSql: generateInvestigationSqlForApp,
           runNotebook: (appId, notebookPath) => runNotebookForApp(appId, notebookPath),
+          // P4: give the App ask lane a grounded research planner over the catalog.
+          planResearch: async ({ question, isFollowUp }) => {
+            const metrics = loadSemanticMetrics(projectRoot);
+            let blocks = collectPlanBlocks(projectRoot, { certifiedOnly: true });
+            if (blocks.length === 0) blocks = collectPlanBlocks(projectRoot, { certifiedOnly: false });
+            return planResearch({ question, metrics, blocks, isFollowUp });
+          },
         });
         if (handled) return;
       } catch (err) {

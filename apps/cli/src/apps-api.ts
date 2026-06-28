@@ -7,6 +7,7 @@
 import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync, type Dirent, type Stats } from 'node:fs';
 import { join, dirname, relative, basename } from 'node:path';
 import type { IncomingMessage, ServerResponse } from 'node:http';
+import type { ResearchPlan as AppResearchPlan } from '@duckcodeailabs/dql-agent';
 import {
   loadAppDocument,
   findAppDocuments,
@@ -42,6 +43,9 @@ interface Ctx {
   executeSql?: (sql: string) => Promise<unknown>;
   generateInvestigationSql?: (input: AppInvestigationGenerationRequest) => Promise<AppInvestigationGenerationResult>;
   runNotebook?: (appId: string, notebookPath: string) => Promise<void>;
+  /** Grounded ReAct research planner (P4) — supplied by the runtime, which holds the
+   *  metric/block catalog. Lets the App ask lane decide + offer real follow-ups. */
+  planResearch?: (input: { question: string; isFollowUp?: boolean }) => Promise<AppResearchPlan>;
 }
 
 export async function handleAppsApi(ctx: Ctx): Promise<boolean> {
@@ -1329,25 +1333,52 @@ export function getAppAiBuildSession(projectRoot: string, id: string): AppAiBuil
   }
 }
 
-async function askAppQuestion(
+interface AppAskSuccess {
+  ok: true;
+  route: 'certified_answer' | 'investigation' | 'app_change_proposal' | 'metadata_answer';
+  answer: string;
+  trustState: 'certified' | 'review_required' | 'draft_ready';
+  reviewStatus: 'certified' | 'review_required' | 'draft_ready';
+  citations: Array<{ kind: string; name: string; path?: string }>;
+  followUps: string[];
+  decision: AppAskDecision;
+  investigation?: LocalAppInvestigation;
+  proposal?: unknown;
+  /** Grounded ReAct research plan (P4): the decision, steps, and follow-up options. */
+  researchPlan?: AppResearchPlan;
+}
+
+type AppAskResult = AppAskSuccess | { ok: false; error: string };
+
+/**
+ * Ask the App a question. Routes to the right lane (certified answer / investigation /
+ * app change / metadata) and — when the runtime supplies a research planner — enriches
+ * the result with a grounded ReAct plan + smart follow-up options (the P4 loop), so the
+ * panel can DECIDE and offer real next steps instead of generic strings.
+ */
+async function askAppQuestion(ctx: Ctx, appId: string, input: AppAskRequest): Promise<AppAskResult> {
+  const result = await routeAppAskQuestion(ctx, appId, input);
+  if (!result.ok || !ctx.planResearch) return result;
+  try {
+    const research = await ctx.planResearch({
+      question: cleanString(input.question),
+      isFollowUp: result.route === 'investigation' || result.route === 'app_change_proposal',
+    });
+    // A clarify decision means "ask before researching" — surface the real options.
+    const followUps = research.decision === 'clarify' && research.followUp
+      ? [research.followUp.question, ...research.followUp.options].slice(0, 5)
+      : result.followUps;
+    return { ...result, researchPlan: research, followUps };
+  } catch {
+    return result; // best-effort: research enrichment never blocks the answer
+  }
+}
+
+async function routeAppAskQuestion(
   ctx: Ctx,
   appId: string,
   input: AppAskRequest,
-): Promise<
-  | {
-      ok: true;
-      route: 'certified_answer' | 'investigation' | 'app_change_proposal' | 'metadata_answer';
-      answer: string;
-      trustState: 'certified' | 'review_required' | 'draft_ready';
-      reviewStatus: 'certified' | 'review_required' | 'draft_ready';
-      citations: Array<{ kind: string; name: string; path?: string }>;
-      followUps: string[];
-      decision: AppAskDecision;
-      investigation?: LocalAppInvestigation;
-      proposal?: unknown;
-    }
-  | { ok: false; error: string }
-> {
+): Promise<AppAskResult> {
   const loaded = loadAppById(ctx.projectRoot, appId);
   if (!loaded) return { ok: false, error: `App "${appId}" not found` };
   const question = cleanString(input.question);

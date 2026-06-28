@@ -922,7 +922,12 @@ function AppCreateSurface({
 
           <aside className="dql-app-ai-start-context">
             <section className="dql-app-ai-context-card">
-              <PanelHead title="Certified blocks found" meta={`${certifiedPlanTiles.length || catalog.length} matches`} />
+              <PanelHead
+                title="Certified blocks found"
+                meta={plan.coverage
+                  ? `${plan.coverage.certifiedTiles} certified · ${plan.coverage.gaps} gap${plan.coverage.gaps === 1 ? '' : 's'}`
+                  : `${certifiedPlanTiles.length || catalog.length} matches`}
+              />
               <div className="dql-app-ai-evidence-list">
                 {(certifiedPlanTiles.length ? certifiedPlanTiles : catalog.slice(0, 4)).map((item, index) => (
                   'name' in item ? (

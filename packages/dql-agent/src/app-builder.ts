@@ -218,6 +218,12 @@ export interface AppPlan {
   pages: AppPlanPage[];
   caveats: string[];
   reviewTasks: string[];
+  /** Plan-preview summary: how much of the app is certified vs. left as gaps. */
+  coverage: {
+    certifiedTiles: number;
+    gaps: number;
+    ratio: number;
+  };
 }
 
 export interface PlanAppFromPromptInput {
@@ -319,7 +325,12 @@ export function planAppFromPrompt(input: PlanAppFromPromptInput): AppPlan {
     new Set(preferredNodes.map((node) => node.nodeId)),
   ).slice(0, targetCertifiedTiles);
   const contextNodes = findCertifiedContextNodes(input.kg, prompt, domain, 6);
-  const filters = inferFilters(prompt);
+  // Bind the global filter bar to what the certified tiles actually accept (their
+  // declared allowedFilters), not prompt words — falling back to prompt inference
+  // only when no tile declares any filter. Keeps the dashboard's filters dynamic.
+  const promptFilters = inferFilters(prompt);
+  const blockFilters = filtersFromCertifiedNodes(certifiedNodes);
+  const filters = blockFilters.length > 0 ? mergeAppFilters(blockFilters, promptFilters) : promptFilters;
 
   const certifiedTiles = certifiedNodes.map((node, index) =>
     tileFromCertifiedNode(node, index, analysisIntent, filters),
@@ -352,6 +363,8 @@ export function planAppFromPrompt(input: PlanAppFromPromptInput): AppPlan {
     analysisIntent,
     certifiedTiles: certifiedTiles.length,
     scopedReports: scopedReports.length,
+    certifiedNames: certifiedNodes.map((node) => node.name),
+    filterLabels: filters.map((filter) => filter.label),
   });
 
   return {
@@ -436,6 +449,14 @@ export function planAppFromPrompt(input: PlanAppFromPromptInput): AppPlan {
       "Run dql app build after accepting the generated files.",
       "Use app Copilot analysis for additional questions, then promote reviewed SQL results to draft or certified blocks.",
     ],
+    coverage: {
+      certifiedTiles: certifiedTiles.length,
+      gaps: scopedReports.length,
+      ratio:
+        certifiedTiles.length + scopedReports.length > 0
+          ? certifiedTiles.length / (certifiedTiles.length + scopedReports.length)
+          : 0,
+    },
   };
 }
 
@@ -974,14 +995,24 @@ function stakeholderSummaryForPlan(input: {
   analysisIntent: AppPlanAnalysisIntent;
   certifiedTiles: number;
   scopedReports: number;
+  certifiedNames?: string[];
+  filterLabels?: string[];
 }): string {
+  // Ground the narrative in the actual certified blocks + filter bar — the assets the
+  // app is built on — not just the prompt echo.
+  const built = input.certifiedNames && input.certifiedNames.length > 0
+    ? ` Built on ${input.certifiedNames.slice(0, 3).join(", ")}${input.certifiedNames.length > 3 ? ", …" : ""}.`
+    : "";
   const coverage = input.certifiedTiles > 0
     ? `${input.certifiedTiles} certified tile${input.certifiedTiles === 1 ? "" : "s"} anchor the app.`
     : "No certified tiles matched strongly enough yet.";
+  const filterLine = input.filterLabels && input.filterLabels.length > 0
+    ? ` One filter set — ${input.filterLabels.slice(0, 4).join(", ")} — refreshes every tile that shares it.`
+    : "";
   const review = input.scopedReports > 0
     ? `${input.scopedReports} scoped analysis memo${input.scopedReports === 1 ? "" : "s"} capture questions that need deeper review.`
     : "No scoped analysis memos were needed.";
-  return `${input.appName} is a ${titleCase(input.domain)} decision room for ${input.audience}. ${coverage} ${review} Intent: ${titleCase(input.analysisIntent.replace(/_/g, " "))}.`;
+  return `${input.appName} is a ${titleCase(input.domain)} decision room for ${input.audience}.${built} ${coverage}${filterLine} ${review} Intent: ${titleCase(input.analysisIntent.replace(/_/g, " "))}.`;
 }
 
 function summarizeCertifiedContext(nodes: KGNode[]): AppPlan["planning"]["certifiedContext"] {
@@ -1849,6 +1880,77 @@ function uniquePlanFilters(filters: AppPlanFilter[]): AppPlanFilter[] {
     out.push(filter);
   }
   return out;
+}
+
+const APP_FILTER_TIME_RE = /(_at$|_date$|_time$|_ts$|^date$|^month$|^week$|^day$|ordered_at|created)/i;
+const APP_FILTER_NUMBER_RE = /(top[_-]?n|limit|count|amount|year|score|rank)/i;
+
+/** Map a block filter column to the dashboard control the runtime filter engine renders. */
+function controlTypeForColumn(column: string): AppPlanFilter["type"] {
+  if (APP_FILTER_TIME_RE.test(column)) return "daterange";
+  if (APP_FILTER_NUMBER_RE.test(column)) return "number";
+  return "select"; // categorical → dropdown (options filled by /api/dashboard/filter-options)
+}
+
+/**
+ * Derive the global filter bar from what the certified tiles ACTUALLY accept — the
+ * union of their declared `allowedFilters` (a block's governed, app-safe filters) —
+ * instead of guessing from prompt words. Each control binds to a real column, so the
+ * existing tile-binding logic refreshes exactly the tiles that declare it.
+ */
+function filtersFromCertifiedNodes(nodes: KGNode[]): AppPlanFilter[] {
+  const seen = new Set<string>();
+  const filters: AppPlanFilter[] = [];
+  for (const node of nodes) {
+    for (const column of node.allowedFilters ?? []) {
+      const key = column.toLowerCase();
+      if (!column.trim() || seen.has(key)) continue;
+      seen.add(key);
+      filters.push({
+        id: column,
+        label: titleCase(column.replace(/[_.]+/g, " ")),
+        type: controlTypeForColumn(column),
+        bindsTo: column,
+      });
+    }
+  }
+  return filters;
+}
+
+/**
+ * Merge the block-derived bar (authoritative) with prompt-inferred filters: copy a
+ * prompt default/options onto a matching column control, keep prompt-only PARAM
+ * controls (e.g. top_n → LIMIT), and DROP prompt column filters no tile supports.
+ */
+function mergeAppFilters(blockFilters: AppPlanFilter[], promptFilters: AppPlanFilter[]): AppPlanFilter[] {
+  const merged = blockFilters.map((f) => ({ ...f }));
+  // Match by exact id first (a prompt filter for the same governed filter), else by a
+  // prompt filter that binds to a column which IS a block filter. Avoid matching on a
+  // shared physical bindsTo — that collides once two filters resolve to the same column.
+  const matchOf = (pf: AppPlanFilter) =>
+    merged.find((bf) => bf.id.toLowerCase() === pf.id.toLowerCase()) ??
+    (pf.bindsTo
+      ? merged.find((bf) => bf.id.toLowerCase() === pf.bindsTo!.toLowerCase())
+      : undefined);
+  for (const pf of promptFilters) {
+    const match = matchOf(pf);
+    if (match) {
+      if (pf.default !== undefined && match.default === undefined) match.default = pf.default;
+      if (pf.options && !match.options) match.options = pf.options;
+      // Prefer the prompt's more specific physical binding when the block filter only
+      // self-binds (bindsTo === id) and the prompt resolved an actual column/expression.
+      if (pf.bindsTo && (!match.bindsTo || match.bindsTo.toLowerCase() === match.id.toLowerCase())) {
+        match.bindsTo = pf.bindsTo;
+      }
+      continue;
+    }
+    // A param-style control (LIMIT, not a column predicate) is always useful — keep it.
+    if (pf.bindsTo === "limit" || /^(top_n|limit)$/i.test(pf.id)) {
+      merged.push({ ...pf });
+    }
+    // else: a prompt column filter that no certified tile accepts — drop it (no orphans).
+  }
+  return uniquePlanFilters(merged);
 }
 
 function inferReviewCadence(prompt: string): string {
