@@ -31,9 +31,19 @@ import { Certifier } from '@duckcodeailabs/dql-governance';
 import type { BlockRecord, BlockStatus } from '@duckcodeailabs/dql-project';
 import { deriveSemanticDraftName } from '../metadata/drafts.js';
 import { resolveLocalOwner } from '../metadata/identity.js';
+import {
+  buildSchemaGrounding,
+  renderGroundingForPrompt,
+  resolveRelationsInSql,
+  validateSqlAgainstGrounding,
+  type SchemaGrounding,
+} from '../metadata/sql-grounding.js';
+import { selectRelevantModels } from '../metadata/sql-retrieval.js';
+import type { Skill } from '../skills/loader.js';
+import { buildSkillsPrompt, loadSkills, selectRelevantSkills } from '../skills/loader.js';
 import { pickProvider } from '../providers/index.js';
 import type { AgentProvider } from '../providers/types.js';
-import { loadDbtArtifacts, type DbtArtifacts, type DbtModelNode } from './dbt-artifacts.js';
+import { loadDbtArtifacts, type DbtArtifacts } from './dbt-artifacts.js';
 import { blockSlug, upsertProposedDraft, type ProposedDraftRecord } from './write-draft.js';
 
 export interface BuildFromPromptContext {
@@ -64,12 +74,32 @@ export interface BuildFromPromptOptions {
   dbtManifestPath?: string;
   /** Domain for a built block draft. Defaults to `misc`. */
   domain?: string;
+  /** Active user, for personal-skill selection. */
+  userId?: string;
+  /**
+   * Project + user Skills to inject as business context. When omitted the
+   * engine loads them from `.dql/skills/` itself.
+   */
+  skills?: Skill[];
+  /**
+   * Optional executor for a bounded preview of generated SQL. When supplied,
+   * an execution error triggers the same repair loop a validation miss does.
+   */
+  executeSql?: (sql: string) => Promise<unknown>;
+}
+
+/** The Skills that shaped this build (stamped on both targets). */
+export interface AppliedSkill {
+  id: string;
+  description?: string;
 }
 
 export interface BuildCellResult {
   target: 'cell';
   sql: string;
   explanation?: string;
+  /** Skills that shaped the answer, for UI transparency. */
+  appliedSkills?: AppliedSkill[];
 }
 
 export interface BuildBlockResult {
@@ -82,6 +112,8 @@ export interface BuildBlockResult {
   outputs: string[];
   examples: string[];
   certifierVerdict: CertifierVerdict;
+  /** Skills that shaped the answer, for UI transparency. */
+  appliedSkills?: AppliedSkill[];
 }
 
 export type BuildFromPromptResult = BuildCellResult | BuildBlockResult;
@@ -94,12 +126,18 @@ export interface CertifierVerdict {
 
 const CELL_SYSTEM_PROMPT =
   'You are a SQL generator for an analytics notebook. Given a request and the ' +
-  'available schema, return ONE read-only SQL query (SELECT/WITH only). ' +
+  'grounded schema, return ONE read-only SQL query (SELECT/WITH only). ' +
+  'Use ONLY the relations and columns provided. Reference each table by its ' +
+  'fully-qualified relation (database.schema.table) EXACTLY as shown — never a ' +
+  'bare model name, never a table or column not in the grounding. Use the ' +
+  'listed join keys to connect tables. ' +
   'Respond with ONLY a JSON object — no prose, no markdown fences.';
 
 const BLOCK_SYSTEM_PROMPT =
   'You design a reusable, governed analytics block from a natural-language request. ' +
-  'Use only the schema provided; do not invent tables or columns. ' +
+  'Use ONLY the relations and columns provided; do not invent tables or columns. ' +
+  "Reference each table by its {{ ref('<model>') }} form EXACTLY as shown (DQL " +
+  'resolves it at execution). Use the listed join keys to connect tables. ' +
   'Respond with ONLY a JSON object — no prose, no markdown fences.';
 
 /** Best-effort load of dbt artifacts for schema grounding. Never throws. */
@@ -119,23 +157,6 @@ function tryLoadArtifacts(projectRoot: string, manifestPath?: string): DbtArtifa
     }
   }
   return undefined;
-}
-
-/** Compact schema text (model → columns) the provider can ground SQL on. */
-function schemaSummary(artifacts: DbtArtifacts | undefined, limit = 40): string {
-  if (!artifacts || artifacts.models.length === 0) return '(no schema available)';
-  const lines: string[] = [];
-  for (const model of artifacts.models.slice(0, limit)) {
-    const cols = effectiveColumnNames(model, artifacts).slice(0, 24);
-    lines.push(`- ${model.name}(${cols.join(', ')})`);
-  }
-  return lines.join('\n');
-}
-
-function effectiveColumnNames(model: DbtModelNode, artifacts: DbtArtifacts): string[] {
-  const catalog = artifacts.catalogColumns.get(model.uniqueId) ?? [];
-  if (catalog.length > 0) return catalog.map((c) => c.name);
-  return model.columns.map((c) => c.name);
 }
 
 /** Pull the first balanced JSON object out of a model response. */
@@ -192,11 +213,15 @@ async function resolveProvider(options: BuildFromPromptOptions): Promise<AgentPr
   return (await provider.available().catch(() => false)) ? provider : undefined;
 }
 
-/** Deterministic, offline-safe templated SQL when no provider is available. */
-function fallbackCellSql(artifacts: DbtArtifacts | undefined, context?: BuildFromPromptContext): string {
+/**
+ * Deterministic, offline-safe templated SQL when no provider is available.
+ * Grounds the starter query on the REAL qualified relation (e.g.
+ * `dev.order_items`), never a bare model name.
+ */
+function fallbackCellSql(grounding: SchemaGrounding, context?: BuildFromPromptContext): string {
   if (context?.cellSql?.trim()) return context.cellSql.trim();
-  const first = artifacts?.models[0];
-  if (first) return `SELECT *\nFROM ${first.name}\nLIMIT 100`;
+  const first = grounding.tables[0];
+  if (first) return `SELECT *\nFROM ${first.qualifiedRelation}\nLIMIT 100`;
   return 'SELECT 1 AS placeholder';
 }
 
@@ -207,42 +232,151 @@ function cleanSql(raw: string): string {
   return sql.trim();
 }
 
+/** A worked example clause appended to grounding so the model has a pattern. */
+function workedExample(grounding: SchemaGrounding, prefer: 'qualified' | 'ref'): string {
+  const first = grounding.tables[0];
+  if (!first) return '';
+  const rel = prefer === 'ref' && first.refForm ? first.refForm : first.qualifiedRelation;
+  return `Worked example — count rows in ${first.name}:\nSELECT count(*) AS row_count FROM ${rel}`;
+}
+
+/**
+ * Ground generated SQL: deterministically qualify bare relations, then validate
+ * against the grounding. On a validation miss (or execution error when an
+ * executor is supplied) re-prompt the model with the specific error, bounded to
+ * `maxRepairs` attempts. Returns the best SQL we could ground, plus a flag for
+ * whether it ultimately validated. Never throws; the offline path is safe.
+ */
+async function groundAndRepairSql(input: {
+  initialSql: string;
+  grounding: SchemaGrounding;
+  prefer: 'qualified' | 'ref';
+  provider: AgentProvider | undefined;
+  systemPrompt: string;
+  userPrompt: string;
+  maxRepairs?: number;
+  executeSql?: (sql: string) => Promise<unknown>;
+}): Promise<{ sql: string; validated: boolean; message?: string }> {
+  const { grounding, prefer, provider, systemPrompt, userPrompt } = input;
+  const maxRepairs = input.maxRepairs ?? 2;
+
+  let current = resolveRelationsInSql(cleanSql(input.initialSql), grounding, { prefer }).sql;
+  let lastError: string | undefined;
+
+  for (let attempt = 0; attempt <= maxRepairs; attempt += 1) {
+    const validation = validateSqlAgainstGrounding(current, grounding);
+    let errorForRepair: string | undefined = validation.ok ? undefined : validation.error;
+
+    // When valid and an executor is available, run a bounded preview; a runtime
+    // error is just another repairable miss.
+    if (!errorForRepair && input.executeSql) {
+      try {
+        await input.executeSql(current);
+      } catch (err) {
+        errorForRepair = err instanceof Error ? err.message : String(err);
+      }
+    }
+
+    if (!errorForRepair) return { sql: current, validated: true };
+    lastError = errorForRepair;
+
+    if (attempt === maxRepairs || !provider) break;
+
+    try {
+      const repaired = await provider.generate(
+        [
+          { role: 'system', content: systemPrompt },
+          { role: 'user', content: userPrompt },
+          { role: 'assistant', content: JSON.stringify({ sql: current }) },
+          {
+            role: 'user',
+            content: [
+              'That SQL was rejected by grounding validation.',
+              `Error: ${errorForRepair}`,
+              'Return corrected JSON with a "sql" key that references ONLY the grounded relations and columns shown above.',
+            ].join('\n'),
+          },
+        ],
+        { maxTokens: 700, temperature: 0.1, signal: AbortSignal.timeout(25_000) },
+      );
+      const parsed = extractJson(repaired);
+      const next = parsed ? asString(parsed.sql) : undefined;
+      if (!next) break;
+      current = resolveRelationsInSql(cleanSql(next), grounding, { prefer }).sql;
+    } catch {
+      break;
+    }
+  }
+
+  return {
+    sql: current,
+    validated: false,
+    message: lastError
+      ? `The generated SQL referenced relations or columns outside the grounded schema (${lastError}). Returned the best grounded attempt for review.`
+      : undefined,
+  };
+}
+
 // ─── target: cell ───────────────────────────────────────────────────────────
 
 async function buildCell(
   options: BuildFromPromptOptions,
-  artifacts: DbtArtifacts | undefined,
+  grounding: SchemaGrounding,
   provider: AgentProvider | undefined,
+  skillsPrompt: string,
+  appliedSkills: AppliedSkill[],
 ): Promise<BuildCellResult> {
   if (!provider) {
     return {
       target: 'cell',
-      sql: fallbackCellSql(artifacts, options.context),
+      sql: fallbackCellSql(grounding, options.context),
       explanation:
         'No AI provider is configured. Returned a starter query — edit it, or set a provider to generate SQL from your prompt.',
+      appliedSkills,
     };
   }
 
-  const parts = [
+  const userPrompt = [
+    skillsPrompt || null,
     `Request: ${options.prompt}`,
     options.context?.cellSql ? `Current cell SQL:\n${options.context.cellSql}` : null,
     options.context?.selection ? `Selected fragment:\n${options.context.selection}` : null,
-    `Available schema:\n${schemaSummary(artifacts)}`,
+    `Grounded schema:\n${renderGroundingForPrompt(grounding, 'cell')}`,
+    workedExample(grounding, 'qualified') || null,
     'Produce JSON with keys: "sql" (one read-only SELECT/WITH query) and optional "explanation" (one sentence).',
-  ].filter(Boolean);
+  ]
+    .filter(Boolean)
+    .join('\n\n');
 
   try {
     const response = await provider.generate(
       [
         { role: 'system', content: CELL_SYSTEM_PROMPT },
-        { role: 'user', content: parts.join('\n\n') },
+        { role: 'user', content: userPrompt },
       ],
       { maxTokens: 600, temperature: 0.1, signal: AbortSignal.timeout(25_000) },
     );
     const parsed = extractJson(response);
     const sql = parsed ? asString(parsed.sql) : undefined;
     if (sql) {
-      return { target: 'cell', sql: cleanSql(sql), explanation: parsed ? asString(parsed.explanation) : undefined };
+      const grounded = await groundAndRepairSql({
+        initialSql: sql,
+        grounding,
+        prefer: 'qualified',
+        provider,
+        systemPrompt: CELL_SYSTEM_PROMPT,
+        userPrompt,
+        maxRepairs: 2,
+        executeSql: options.executeSql,
+      });
+      return {
+        target: 'cell',
+        sql: grounded.sql,
+        explanation: grounded.validated
+          ? (parsed ? asString(parsed.explanation) : undefined)
+          : grounded.message,
+        appliedSkills,
+      };
     }
   } catch {
     // Fall through to the deterministic fallback below.
@@ -250,8 +384,9 @@ async function buildCell(
 
   return {
     target: 'cell',
-    sql: fallbackCellSql(artifacts, options.context),
+    sql: fallbackCellSql(grounding, options.context),
     explanation: 'Could not generate SQL from the prompt; returned a starter query to refine.',
+    appliedSkills,
   };
 }
 
@@ -271,18 +406,19 @@ interface BlockDraftContent {
 
 async function generateBlockContent(
   options: BuildFromPromptOptions,
-  artifacts: DbtArtifacts | undefined,
+  grounding: SchemaGrounding,
   provider: AgentProvider | undefined,
-): Promise<BlockDraftContent> {
-  if (!provider) return { outputs: [], examples: [], entities: [], invariants: [] };
-
-  const parts = [
+  skillsPrompt: string,
+): Promise<{ content: BlockDraftContent; userPrompt: string }> {
+  const userPrompt = [
+    skillsPrompt || null,
     `Request: ${options.prompt}`,
     options.context?.cellSql ? `Reference SQL:\n${options.context.cellSql}` : null,
-    `Available schema:\n${schemaSummary(artifacts)}`,
+    `Grounded schema:\n${renderGroundingForPrompt(grounding, 'block')}`,
+    workedExample(grounding, 'ref') || null,
     'Produce JSON with keys:',
     '- "name": a short snake_case block name (entity + key dimension + grain), e.g. "orders_by_region_daily".',
-    '- "sql": one read-only SELECT/WITH query answering the request, using only the schema above.',
+    "- \"sql\": one read-only SELECT/WITH query answering the request, referencing each table by its {{ ref('<model>') }} form and only the grounded columns.",
     '- "description": one or two business-facing sentences.',
     '- "grain": the row grain (e.g. "one row per customer per day"), or "".',
     '- "outputs": array of output column names the query returns.',
@@ -290,31 +426,38 @@ async function generateBlockContent(
     '- "examples": array of up to 3 business questions this block answers.',
     '- "entities": array of business entities (e.g. ["order"]).',
     '- "invariants": array of simple column predicates that should hold (e.g. ["order_count >= 0"]), or [].',
-  ].filter(Boolean);
+  ]
+    .filter(Boolean)
+    .join('\n');
+
+  if (!provider) return { content: { outputs: [], examples: [], entities: [], invariants: [] }, userPrompt };
 
   try {
     const response = await provider.generate(
       [
         { role: 'system', content: BLOCK_SYSTEM_PROMPT },
-        { role: 'user', content: parts.join('\n') },
+        { role: 'user', content: userPrompt },
       ],
       { maxTokens: 900, temperature: 0.2, signal: AbortSignal.timeout(25_000) },
     );
     const parsed = extractJson(response);
-    if (!parsed) return { outputs: [], examples: [], entities: [], invariants: [] };
+    if (!parsed) return { content: { outputs: [], examples: [], entities: [], invariants: [] }, userPrompt };
     return {
-      name: asString(parsed.name),
-      sql: asString(parsed.sql),
-      description: asString(parsed.description),
-      grain: asString(parsed.grain),
-      outputs: asStringArray(parsed.outputs, 30),
-      llmContext: asString(parsed.llmContext),
-      examples: asStringArray(parsed.examples, 3),
-      entities: asStringArray(parsed.entities, 6),
-      invariants: asStringArray(parsed.invariants, 6),
+      content: {
+        name: asString(parsed.name),
+        sql: asString(parsed.sql),
+        description: asString(parsed.description),
+        grain: asString(parsed.grain),
+        outputs: asStringArray(parsed.outputs, 30),
+        llmContext: asString(parsed.llmContext),
+        examples: asStringArray(parsed.examples, 3),
+        entities: asStringArray(parsed.entities, 6),
+        invariants: asStringArray(parsed.invariants, 6),
+      },
+      userPrompt,
     };
   } catch {
-    return { outputs: [], examples: [], entities: [], invariants: [] };
+    return { content: { outputs: [], examples: [], entities: [], invariants: [] }, userPrompt };
   }
 }
 
@@ -362,14 +505,16 @@ function verdictFrom(result: { errors: Array<{ message: string }>; warnings: Arr
 
 async function buildBlock(
   options: BuildFromPromptOptions,
-  artifacts: DbtArtifacts | undefined,
+  grounding: SchemaGrounding,
   provider: AgentProvider | undefined,
+  skillsPrompt: string,
+  appliedSkills: AppliedSkill[],
 ): Promise<BuildBlockResult> {
   const { projectRoot } = options;
   const owner = resolveLocalOwner(projectRoot, { explicit: options.owner });
   const domain = (options.domain ?? 'misc').trim() || 'misc';
 
-  const content = await generateBlockContent(options, artifacts, provider);
+  const { content, userPrompt } = await generateBlockContent(options, grounding, provider, skillsPrompt);
 
   // Semantic name: provider suggestion → rule-based → legacy tokenizer (never the raw prompt).
   const existingSlugs = collectExistingSlugs(projectRoot);
@@ -379,11 +524,25 @@ async function buildBlock(
     existingSlugs,
   });
 
-  // SQL: provider SQL → reference cell SQL → deterministic templated SELECT.
-  const sql =
-    (content.sql && cleanSql(content.sql)) ||
-    (options.context?.cellSql?.trim()) ||
-    fallbackCellSql(artifacts, options.context);
+  // SQL: provider SQL (grounded + repaired) → reference cell SQL → deterministic
+  // templated SELECT. Block SQL references relations via {{ ref() }}.
+  let sql: string;
+  if (content.sql) {
+    const grounded = await groundAndRepairSql({
+      initialSql: content.sql,
+      grounding,
+      prefer: 'ref',
+      provider,
+      systemPrompt: BLOCK_SYSTEM_PROMPT,
+      userPrompt,
+      maxRepairs: 2,
+    });
+    sql = grounded.sql;
+  } else {
+    sql =
+      options.context?.cellSql?.trim() ||
+      resolveRelationsInSql(fallbackCellSql(grounding, options.context), grounding, { prefer: 'ref' }).sql;
+  }
 
   const description =
     content.description || `Draft block built from prompt: "${options.prompt.slice(0, 160)}".`;
@@ -450,6 +609,7 @@ async function buildBlock(
     outputs,
     examples,
     certifierVerdict: verdict,
+    appliedSkills,
   };
 }
 
@@ -521,9 +681,24 @@ export async function buildFromPrompt(options: BuildFromPromptOptions): Promise<
   const artifacts = tryLoadArtifacts(options.projectRoot, options.dbtManifestPath);
   const provider = await resolveProvider(options);
 
+  // Retrieval (spec 15.3): pick the RELEVANT tables for this request, not all of
+  // them. Deterministic + offline by default.
+  const relevantModels = await selectRelevantModels(artifacts, options.prompt, { topK: 12 });
+
+  // Shared grounding (spec 15.2): qualified relations + {{ ref() }} forms +
+  // columns/types + join keys. Used by BOTH targets.
+  const grounding = buildSchemaGrounding(artifacts, relevantModels, { limit: 12 });
+
+  // Skills (spec 16): select the SELECTED skills (not all), inject as context,
+  // and record which applied. Project (pinned) skills always kept.
+  const allSkills = options.skills ?? loadSkills(options.projectRoot).skills;
+  const selectedSkills = selectRelevantSkills(allSkills, options.prompt, { userId: options.userId ?? null });
+  const skillsPrompt = buildSkillsPrompt(selectedSkills, options.userId ?? null);
+  const appliedSkills: AppliedSkill[] = selectedSkills.map((s) => ({ id: s.id, description: s.description }));
+
   return options.target === 'cell'
-    ? buildCell(options, artifacts, provider)
-    : buildBlock(options, artifacts, provider);
+    ? buildCell(options, grounding, provider, skillsPrompt, appliedSkills)
+    : buildBlock(options, grounding, provider, skillsPrompt, appliedSkills);
 }
 
 // Re-export so callers can reuse the slugifier when needed.

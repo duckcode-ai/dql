@@ -3,7 +3,62 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { buildManifest, parse } from '@duckcodeailabs/dql-core';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import type { AgentMessage, AgentProvider } from '../providers/types.js';
 import { buildFromPrompt, type BuildBlockResult, type BuildCellResult } from './build-from-prompt.js';
+
+/** A scripted provider that returns each queued response in order. */
+function scriptedProvider(responses: string[]): AgentProvider & { calls: AgentMessage[][] } {
+  const calls: AgentMessage[][] = [];
+  let index = 0;
+  return {
+    name: 'openai',
+    calls,
+    available: async () => true,
+    generate: async (messages: AgentMessage[]) => {
+      calls.push(messages);
+      const response = responses[Math.min(index, responses.length - 1)] ?? '{}';
+      index += 1;
+      return response;
+    },
+  };
+}
+
+/** A two-model manifest where order_items lives at dev.order_items. */
+function writeBugManifest(targetDir: string): string {
+  mkdirSync(targetDir, { recursive: true });
+  const manifest = {
+    metadata: { project_name: 'jaffle_shop' },
+    nodes: {
+      'model.jaffle_shop.order_items': {
+        resource_type: 'model',
+        name: 'order_items',
+        schema: 'dev',
+        original_file_path: 'models/marts/order_items.sql',
+        config: { materialized: 'table' },
+        tags: [],
+        depends_on: { nodes: ['model.jaffle_shop.stg_orders'] },
+        columns: { order_id: { name: 'order_id' }, amount: { name: 'amount' } },
+        meta: {},
+      },
+      'model.jaffle_shop.stg_orders': {
+        resource_type: 'model',
+        name: 'stg_orders',
+        schema: 'dev',
+        original_file_path: 'models/staging/stg_orders.sql',
+        config: { materialized: 'view' },
+        tags: [],
+        depends_on: { nodes: [] },
+        columns: { order_id: { name: 'order_id' }, customer_id: { name: 'customer_id' } },
+        meta: {},
+      },
+    },
+    sources: {},
+    exposures: {},
+  };
+  const path = join(targetDir, 'manifest.json');
+  writeFileSync(path, JSON.stringify(manifest), 'utf-8');
+  return path;
+}
 
 /** Minimal dbt manifest so the engine has schema to ground offline fallbacks on. */
 function writeDbtManifest(targetDir: string): string {
@@ -139,5 +194,92 @@ describe('buildFromPrompt (spec 14, part B) — offline / deterministic', () => 
     await expect(
       buildFromPrompt({ projectRoot, prompt: '   ', target: 'cell', offline: true }),
     ).rejects.toThrow(/non-empty prompt/);
+  });
+});
+
+describe('buildFromPrompt (spec 15) — grounded SQL accuracy', () => {
+  let projectRoot: string;
+  let manifestPath: string;
+
+  beforeEach(() => {
+    projectRoot = mkdtempSync(join(tmpdir(), 'dql-build-grounding-'));
+    writeFileSync(
+      join(projectRoot, 'dql.config.json'),
+      JSON.stringify({ project: 'p', identity: { owner: 'owner@example.com' } }),
+      'utf-8',
+    );
+    manifestPath = writeBugManifest(join(projectRoot, 'target'));
+  });
+
+  afterEach(() => {
+    rmSync(projectRoot, { recursive: true, force: true });
+  });
+
+  it("cell: rewrites bare names to qualified relations (the FROM order_items bug)", async () => {
+    // The model emits the reported bad SQL with BARE names.
+    const provider = scriptedProvider([
+      JSON.stringify({ sql: 'SELECT oi.amount FROM order_items oi JOIN stg_orders o ON oi.order_id = o.order_id' }),
+    ]);
+    const result = (await buildFromPrompt({
+      projectRoot,
+      prompt: 'total amount per order joining order_items and stg_orders',
+      target: 'cell',
+      provider,
+      dbtManifestPath: manifestPath,
+    })) as BuildCellResult;
+
+    // The resolver qualified both bare relations; validation passed in one shot.
+    expect(result.sql).toContain('FROM dev.order_items');
+    expect(result.sql).toContain('JOIN dev.stg_orders');
+    expect(result.sql).not.toMatch(/FROM order_items\b/);
+    // Only the initial generation call — no repair needed.
+    expect(provider.calls.length).toBe(1);
+  });
+
+  it('cell: repairs a deliberate bare-name/unknown-column miss with a re-prompt', async () => {
+    // First response references a column that does not exist; second fixes it.
+    const provider = scriptedProvider([
+      JSON.stringify({ sql: 'SELECT made_up_column FROM order_items' }),
+      JSON.stringify({ sql: 'SELECT amount FROM order_items' }),
+    ]);
+    const result = (await buildFromPrompt({
+      projectRoot,
+      prompt: 'show order amounts',
+      target: 'cell',
+      provider,
+      dbtManifestPath: manifestPath,
+    })) as BuildCellResult;
+
+    // The repair re-prompt ran, and the corrected SQL is grounded + qualified.
+    expect(provider.calls.length).toBeGreaterThanOrEqual(2);
+    expect(result.sql).toContain('FROM dev.order_items');
+    expect(result.sql).toContain('amount');
+    expect(result.sql).not.toContain('made_up_column');
+  });
+
+  it('block: grounds SQL on {{ ref() }} form and passes validation', async () => {
+    const provider = scriptedProvider([
+      JSON.stringify({
+        name: 'order_amounts',
+        sql: 'SELECT order_id, amount FROM order_items',
+        description: 'Amounts per order.',
+        outputs: ['order_id', 'amount'],
+        examples: ['What is the amount per order?'],
+        entities: ['order'],
+        invariants: [],
+      }),
+    ]);
+    const result = (await buildFromPrompt({
+      projectRoot,
+      prompt: 'amount per order',
+      target: 'block',
+      provider,
+      dbtManifestPath: manifestPath,
+    })) as BuildBlockResult;
+
+    // Block SQL references the relation via the {{ ref() }} form.
+    expect(result.sqlPreview).toContain("{{ ref('order_items') }}");
+    expect(result.sqlPreview).not.toMatch(/FROM order_items\b/);
+    expect(result.target).toBe('block');
   });
 });

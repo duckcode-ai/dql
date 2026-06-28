@@ -26,11 +26,12 @@ import type { KGStore } from './kg/sqlite-fts.js';
 import type { KGNode, KGNodeKind, KGSearchHit } from './kg/types.js';
 import type { AgentProvider, AgentMessage } from './providers/types.js';
 import type { Skill } from './skills/loader.js';
-import { buildSkillBlockHints, buildSkillsPrompt } from './skills/loader.js';
+import { buildSkillBlockHints, buildSkillsPrompt, selectRelevantSkills } from './skills/loader.js';
 import type { AgentMemory } from './memory/sqlite-memory.js';
 import type { LocalContextPack, MetadataAgentIntent, MetadataRouteDecision } from './metadata/catalog.js';
 import type { GeneratedDraftBlock } from './metadata/drafts.js';
 import { validateSqlAgainstLocalContext } from './metadata/sql-context-validation.js';
+import { buildGroundingFromRuntimeRelations, resolveRelationsInSql } from './metadata/sql-grounding.js';
 import {
   compactSqlSnippet,
   extractSimpleSelectShape,
@@ -240,6 +241,8 @@ export interface AgentAnswer {
   contextPack?: LocalContextPack;
   /** Top KG hits the loop considered, useful for the UI's "we considered" panel. */
   considered: KGSearchHit[];
+  /** The Skills that shaped this answer (selected, not all), for transparency. */
+  appliedSkills?: Array<{ id: string; description?: string }>;
 }
 
 export interface AgentResultPayload {
@@ -355,11 +358,23 @@ export async function answer(input: AnswerLoopInput): Promise<AgentAnswer> {
   return {
     ...result,
     trustLabelInfo: composeEffectiveTrust({ id, dataState }),
+    // Stamp the SELECTED skills that shaped the answer (transparency). Computed
+    // here so every return site inside runAnswerLoop stays untouched.
+    appliedSkills:
+      result.appliedSkills ??
+      selectRelevantSkills(input.skills ?? [], input.question, { userId: input.userId ?? null }).map((s) => ({
+        id: s.id,
+        description: s.description,
+      })),
   };
 }
 
 async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
   const { question, userId, domain, provider, kg, skills = [], blockHints = [] } = input;
+  // Select the RELEVANT skills (not all) for this question; keep pinned project
+  // skills (SQL conventions). Block hints still come from the full set so a
+  // preferred-block mapping is never lost.
+  const selectedSkills = selectRelevantSkills(skills, question, { userId: userId ?? null });
   const effectiveBlockHints = Array.from(new Set([
     ...blockHints,
     ...buildSkillBlockHints(skills, userId ?? null),
@@ -560,7 +575,7 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
   const messages: AgentMessage[] = [
     { role: 'system', content: SYSTEM_PROMPT },
   ];
-  const skillsPrompt = buildSkillsPrompt(skills, userId ?? null);
+  const skillsPrompt = buildSkillsPrompt(selectedSkills, userId ?? null);
   if (skillsPrompt) messages.push({ role: 'system', content: skillsPrompt });
 
   messages.push({
@@ -654,6 +669,21 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
       considered,
       providerUsed: provider.name,
     };
+  }
+
+  // Shared grounding (spec 15): deterministically qualify any bare relation the
+  // model emitted to its real warehouse relation from the runtime schema BEFORE
+  // governance validation. Same resolver the build path uses — one grounding,
+  // no weak path. `allowedSqlContext` relations are already qualified.
+  if (parsed.sql && schemaContext.length > 0) {
+    const grounding = buildGroundingFromRuntimeRelations(
+      schemaContext.map((table) => ({
+        relation: table.relation,
+        name: table.name,
+        columns: table.columns.map((column) => ({ name: column.name, type: column.type, description: column.description })),
+      })),
+    );
+    parsed.sql = resolveRelationsInSql(parsed.sql, grounding, { prefer: 'qualified' }).sql;
   }
 
   const contextValidation = validateSqlAgainstLocalContext(parsed.sql, input.contextPack, {

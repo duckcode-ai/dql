@@ -35,6 +35,14 @@ import {
   recordCorrection,
   recordCorrectionInput,
 } from './tools/hints.js';
+import {
+  getTableSchema,
+  getTableSchemaInput,
+  searchMetadata,
+  searchMetadataInput,
+  validateSql,
+  validateSqlInput,
+} from './tools/metadata.js';
 
 export interface CreateServerOptions {
   projectRoot?: string;
@@ -191,6 +199,33 @@ export function createDQLMCPServer(options: CreateServerOptions = {}): McpServer
     'kg_search',
     { description: 'Search the agent knowledge graph (FTS5) over terms, business views, blocks, metrics, dimensions, dashboards, apps, notebooks, and dbt/source metadata.', inputSchema: kgSearchInput },
     async (args) => wrap(await kgSearch(ctx, args)),
+  );
+  server.registerTool(
+    'search_metadata',
+    {
+      description:
+        'Grounded-SQL retrieval: rank dbt tables relevant to a request and return each table\'s fully-qualified warehouse relation (database.schema.table) and {{ ref() }} form. Use before writing SQL so you reference the REAL relation, never a bare model name.',
+      inputSchema: searchMetadataInput,
+    },
+    async (args) => wrap(await searchMetadata(ctx, args)),
+  );
+  server.registerTool(
+    'get_table_schema',
+    {
+      description:
+        'Return the qualified relation, {{ ref() }} form, real columns + types, and inferred join keys for a dbt table (by model name, alias, or qualified relation).',
+      inputSchema: getTableSchemaInput,
+    },
+    async (args) => wrap(getTableSchema(ctx, args)),
+  );
+  server.registerTool(
+    'validate_sql',
+    {
+      description:
+        'Validate that a read-only SELECT/WITH query references ONLY relations and columns that exist in the dbt schema. Returns the precise offending table/column on a miss so you can correct it.',
+      inputSchema: validateSqlInput,
+    },
+    async (args) => wrap(await validateSql(ctx, args)),
   );
   server.registerTool(
     'inspect_metadata_context',

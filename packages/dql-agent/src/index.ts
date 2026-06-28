@@ -40,9 +40,26 @@ export {
   buildSkillBlockHints,
   loadSkills,
   parseSkill,
+  renderSkill,
   buildSkillsPrompt,
+  selectRelevantSkills,
+  writeSkill,
+  upsertSkill,
+  deleteSkill,
+  skillsDir,
+  skillPath,
 } from "./skills/loader.js";
-export type { Skill, SkillLoadResult } from "./skills/loader.js";
+export type {
+  Skill,
+  SkillLoadResult,
+  WriteSkillInput,
+  SelectRelevantSkillsOptions,
+} from "./skills/loader.js";
+export { seedDefaultSkills } from "./skills/defaults.js";
+export type {
+  SeedDefaultSkillsOptions,
+  SeedDefaultSkillsResult,
+} from "./skills/defaults.js";
 export { answer, parseProposal } from "./answer-loop.js";
 export type {
   AgentAnalysisPlan,
@@ -143,6 +160,27 @@ export type {
 export {
   validateSqlAgainstLocalContext,
 } from "./metadata/sql-context-validation.js";
+export {
+  buildSchemaGrounding,
+  buildGroundingFromRuntimeRelations,
+  renderGroundingForPrompt,
+  resolveRelationsInSql,
+  validateSqlAgainstGrounding,
+  relationKeys,
+} from "./metadata/sql-grounding.js";
+export type {
+  SchemaGrounding,
+  GroundedTable,
+  GroundedColumn,
+  GroundedJoinKey,
+  BuildSchemaGroundingOptions,
+  RuntimeRelationInput,
+  RelationResolution,
+  GroundingValidationCode,
+  GroundingValidationResult,
+} from "./metadata/sql-grounding.js";
+export { selectRelevantModels } from "./metadata/sql-retrieval.js";
+export type { SelectRelevantModelsOptions } from "./metadata/sql-retrieval.js";
 export {
   deriveGeneratedDraftSlug,
   deriveSemanticDraftName,

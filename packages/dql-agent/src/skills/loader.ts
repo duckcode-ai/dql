@@ -16,11 +16,17 @@
  * key/value, list-of-strings, and one-level objects (good enough for skills).
  */
 
-import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { join, basename } from 'node:path';
 
 export interface Skill {
   id: string;
+  /**
+   * Skill scope. PROJECT skills (`user` empty) are shared with everyone;
+   * PERSONAL skills (`user` set) are bound to a single user. Derived from
+   * `user` on parse; persisted faithfully on write.
+   */
+  scope: 'project' | 'personal';
   /** Optional user this skill is bound to. Empty = project-level skill. */
   user?: string;
   description?: string;
@@ -30,6 +36,8 @@ export interface Skill {
   /** Markdown body (everything after the closing `---`). */
   body: string;
   sourcePath: string;
+  /** True for the editable starter skills seeded by `seedDefaultSkills`. */
+  isStarter?: boolean;
 }
 
 export interface SkillLoadResult {
@@ -84,16 +92,134 @@ export function parseSkill(raw: string, path: string): Skill | null {
   const meta = parseMiniYaml(front);
 
   const id = pickString(meta.id) ?? basename(path).replace(/\.skill\.md$|\.md$/, '');
+  const user = pickString(meta.user);
+  const starter = pickString(meta.starter);
   return {
     id,
-    user: pickString(meta.user),
+    scope: user ? 'personal' : 'project',
+    user,
     description: pickString(meta.description),
     preferredMetrics: pickStringArray(meta.preferred_metrics),
     preferredBlocks: pickStringArray(meta.preferred_blocks),
     vocabulary: pickStringMap(meta.vocabulary),
     body,
     sourcePath: path,
+    isStarter: starter === 'true' || starter === 'yes' ? true : undefined,
   };
+}
+
+// ─── Serialization + CRUD (spec 16) ──────────────────────────────────────────
+
+/** Skills directory for a project. */
+export function skillsDir(projectRoot: string): string {
+  return join(projectRoot, '.dql', 'skills');
+}
+
+/** Resolve the `.skill.md` path a skill should be written to. */
+export function skillPath(projectRoot: string, id: string): string {
+  return join(skillsDir(projectRoot), `${sanitizeSkillId(id)}.skill.md`);
+}
+
+function sanitizeSkillId(id: string): string {
+  return id
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9_-]+/g, '-')
+    .replace(/^-+|-+$/g, '') || 'skill';
+}
+
+/** Does a frontmatter value need quoting (any whitespace, colons, specials)? */
+function needsQuote(value: string): boolean {
+  return /[\s:#"'\[\]{}]|^[&*!|>%@`-]/.test(value) || value === '';
+}
+
+function quoteIfNeeded(value: string): string {
+  if (!needsQuote(value)) return value;
+  return `"${value.replace(/"/g, '\\"')}"`;
+}
+
+/**
+ * Render a Skill back to the EXACT `.skill.md` format `parseSkill` consumes, so
+ * `parseSkill(renderSkill(s))` round-trips. Only emits keys that have content.
+ */
+export function renderSkill(skill: Skill): string {
+  const lines: string[] = ['---', `id: ${quoteIfNeeded(skill.id)}`];
+  // PERSONAL skills carry a `user:`; PROJECT skills omit it.
+  if (skill.scope === 'personal' && skill.user) {
+    lines.push(`user: ${quoteIfNeeded(skill.user)}`);
+  }
+  if (skill.description) lines.push(`description: ${quoteIfNeeded(skill.description)}`);
+  if (skill.preferredMetrics.length > 0) {
+    lines.push(`preferred_metrics: [${skill.preferredMetrics.map(quoteIfNeeded).join(', ')}]`);
+  }
+  if (skill.preferredBlocks.length > 0) {
+    lines.push(`preferred_blocks: [${skill.preferredBlocks.map(quoteIfNeeded).join(', ')}]`);
+  }
+  const vocabEntries = Object.entries(skill.vocabulary);
+  if (vocabEntries.length > 0) {
+    lines.push('vocabulary:');
+    for (const [key, value] of vocabEntries) {
+      lines.push(`  ${quoteIfNeeded(key)}: ${quoteIfNeeded(value)}`);
+    }
+  }
+  if (skill.isStarter) lines.push('starter: true');
+  lines.push('---');
+  const body = skill.body.trim();
+  return `${lines.join('\n')}\n${body ? `${body}\n` : ''}`;
+}
+
+export interface WriteSkillInput {
+  id: string;
+  scope: 'project' | 'personal';
+  user?: string;
+  description?: string;
+  preferredMetrics?: string[];
+  preferredBlocks?: string[];
+  vocabulary?: Record<string, string>;
+  body?: string;
+  isStarter?: boolean;
+}
+
+/** Normalize a partial input into a full Skill (with a resolved sourcePath). */
+function toSkill(projectRoot: string, input: WriteSkillInput): Skill {
+  const scope = input.scope === 'personal' ? 'personal' : 'project';
+  return {
+    id: input.id,
+    scope,
+    user: scope === 'personal' ? (input.user || undefined) : undefined,
+    description: input.description,
+    preferredMetrics: input.preferredMetrics ?? [],
+    preferredBlocks: input.preferredBlocks ?? [],
+    vocabulary: input.vocabulary ?? {},
+    body: input.body ?? '',
+    sourcePath: skillPath(projectRoot, input.id),
+    isStarter: input.isStarter,
+  };
+}
+
+/**
+ * Write a skill to `.dql/skills/<id>.skill.md` (overwriting if present). Returns
+ * the persisted Skill as re-read from disk so callers see the canonical form.
+ */
+export function writeSkill(projectRoot: string, input: WriteSkillInput): Skill {
+  const skill = toSkill(projectRoot, input);
+  const dir = skillsDir(projectRoot);
+  if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+  writeFileSync(skill.sourcePath, renderSkill(skill), 'utf-8');
+  return parseSkill(readFileSync(skill.sourcePath, 'utf-8'), skill.sourcePath) ?? skill;
+}
+
+/** Alias for `writeSkill` — create-or-update by id. */
+export function upsertSkill(projectRoot: string, input: WriteSkillInput): Skill {
+  return writeSkill(projectRoot, input);
+}
+
+/** Delete `.dql/skills/<id>.skill.md`. Returns true when a file was removed. */
+export function deleteSkill(projectRoot: string, id: string): boolean {
+  const path = skillPath(projectRoot, id);
+  if (!existsSync(path)) return false;
+  rmSync(path, { force: true });
+  return true;
 }
 
 function pickString(v: unknown): string | undefined {
@@ -226,4 +352,87 @@ function normalizeBlockHint(value: string): string | undefined {
   if (!trimmed) return undefined;
   const match = trimmed.match(/^block:(.+)$/i);
   return (match ? match[1] : trimmed).trim() || undefined;
+}
+
+// ─── Skill selection (spec 16) ────────────────────────────────────────────────
+
+export interface SelectRelevantSkillsOptions {
+  /** Active user — gates personal skills (only this user's are eligible). */
+  userId?: string | null;
+  /** Max skills to return after pinned ones. Default 6. */
+  budget?: number;
+  /**
+   * Skill ids that are ALWAYS kept regardless of match (e.g. SQL conventions).
+   * Defaults to the seeded `sql-conventions` starter. Pinned skills are only
+   * kept when they are in-scope for the active user.
+   */
+  pinnedIds?: string[];
+}
+
+const DEFAULT_PINNED_SKILL_IDS = ['sql-conventions'];
+
+const SKILL_TOKEN_RE = /[\p{L}\p{N}_]+/gu;
+
+function skillTokens(text: string): string[] {
+  return (text.toLowerCase().match(SKILL_TOKEN_RE) ?? []).filter((t) => t.length > 1);
+}
+
+/** Searchable text for a skill: id, description, vocabulary keys/values, body. */
+function skillSearchText(skill: Skill): string {
+  return [
+    skill.id,
+    skill.description ?? '',
+    ...skill.preferredMetrics,
+    ...skill.preferredBlocks,
+    ...Object.keys(skill.vocabulary),
+    ...Object.values(skill.vocabulary),
+    skill.body,
+  ]
+    .filter(Boolean)
+    .join(' ');
+}
+
+/**
+ * Rank in-scope skills by topic/vocabulary match to `question` and return the
+ * SELECTED subset the answer-loop / build engine should inject — not all skills.
+ * Pinned project skills (SQL conventions by default) are always kept. The rest
+ * are ordered by lexical overlap (vocabulary + description + body) and capped to
+ * the budget. Deterministic and offline.
+ */
+export function selectRelevantSkills(
+  skills: Skill[],
+  question: string,
+  options: SelectRelevantSkillsOptions = {},
+): Skill[] {
+  const inScope = activeSkills(skills, options.userId ?? null);
+  if (inScope.length === 0) return [];
+  const budget = Math.max(1, options.budget ?? 6);
+  const pinnedIds = new Set((options.pinnedIds ?? DEFAULT_PINNED_SKILL_IDS).map((id) => id.toLowerCase()));
+  const queryTokens = new Set(skillTokens(question));
+
+  const pinned: Skill[] = [];
+  const rest: Array<{ skill: Skill; score: number }> = [];
+  for (const skill of inScope) {
+    if (pinnedIds.has(skill.id.toLowerCase())) {
+      pinned.push(skill);
+      continue;
+    }
+    const textTokens = skillTokens(skillSearchText(skill));
+    let hits = 0;
+    for (const token of textTokens) {
+      if (queryTokens.has(token)) hits += 1;
+    }
+    rest.push({ skill, score: hits });
+  }
+
+  // Keep only skills with at least one topical hit; ordered by score desc, then
+  // stable by original order. Pinned skills are prepended and never dropped.
+  const ranked = rest
+    .map((entry, index) => ({ ...entry, index }))
+    .filter((entry) => entry.score > 0)
+    .sort((a, b) => (b.score - a.score) || (a.index - b.index))
+    .map((entry) => entry.skill);
+
+  const remainingBudget = Math.max(0, budget - pinned.length);
+  return [...pinned, ...ranked.slice(0, remainingBudget)];
 }

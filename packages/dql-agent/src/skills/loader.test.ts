@@ -1,8 +1,19 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { loadSkills, parseSkill, buildSkillsPrompt, buildSkillBlockHints } from './loader.js';
+import {
+  loadSkills,
+  parseSkill,
+  renderSkill,
+  buildSkillsPrompt,
+  buildSkillBlockHints,
+  writeSkill,
+  deleteSkill,
+  selectRelevantSkills,
+  skillPath,
+  type Skill,
+} from './loader.js';
 
 let root: string;
 
@@ -67,9 +78,9 @@ describe('loadSkills', () => {
 });
 
 describe('buildSkillsPrompt', () => {
-  const skills = [
-    { id: 'shared', preferredMetrics: ['arr'], preferredBlocks: ['revenue_total'], vocabulary: {}, body: 'Shared body', sourcePath: '' },
-    { id: 'alice', user: 'alice@acme.com', preferredMetrics: [], preferredBlocks: [], vocabulary: { ARR: 'metric:arr' }, body: 'Alice body', sourcePath: '' },
+  const skills: Skill[] = [
+    { id: 'shared', scope: 'project', preferredMetrics: ['arr'], preferredBlocks: ['revenue_total'], vocabulary: {}, body: 'Shared body', sourcePath: '' },
+    { id: 'alice', scope: 'personal', user: 'alice@acme.com', preferredMetrics: [], preferredBlocks: [], vocabulary: { ARR: 'metric:arr' }, body: 'Alice body', sourcePath: '' },
   ];
   it('filters to skills matching the active user (or unscoped)', () => {
     const prompt = buildSkillsPrompt(skills, 'alice@acme.com');
@@ -96,6 +107,7 @@ describe('buildSkillBlockHints', () => {
     const hints = buildSkillBlockHints([
       {
         id: 'shared',
+        scope: 'project',
         preferredMetrics: [],
         preferredBlocks: ['revenue_total'],
         vocabulary: { bookings: 'block:bookings_by_month', arr: 'metric:arr' },
@@ -104,6 +116,7 @@ describe('buildSkillBlockHints', () => {
       },
       {
         id: 'alice',
+        scope: 'personal',
         user: 'alice@acme.com',
         preferredMetrics: [],
         preferredBlocks: ['private_revenue'],
@@ -113,5 +126,99 @@ describe('buildSkillBlockHints', () => {
       },
     ], null);
     expect(hints).toEqual(['revenue_total', 'bookings_by_month']);
+  });
+});
+
+describe('writeSkill / round-trip (spec 16)', () => {
+  let root: string;
+  beforeEach(() => {
+    root = mkdtempSync(join(tmpdir(), 'skills-crud-'));
+  });
+  afterEach(() => {
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  it('round-trips through parseSkill (renderSkill ↔ parseSkill)', () => {
+    const skill = writeSkill(root, {
+      id: 'cxo-review',
+      scope: 'personal',
+      user: 'alice@acme.com',
+      description: "Alice's review",
+      preferredMetrics: ['arr', 'nrr'],
+      preferredBlocks: ['revenue_total'],
+      vocabulary: { ARR: 'metric:arr', 'logo churn': 'metric:logo_churn' },
+      body: 'Body content.',
+    });
+    expect(skill.scope).toBe('personal');
+    expect(skill.user).toBe('alice@acme.com');
+    expect(skill.preferredMetrics).toEqual(['arr', 'nrr']);
+    expect(skill.vocabulary).toEqual({ ARR: 'metric:arr', 'logo churn': 'metric:logo_churn' });
+    expect(skill.body).toBe('Body content.');
+
+    // The persisted file parses back to the same Skill.
+    const reparsed = parseSkill(renderSkill(skill), skill.sourcePath);
+    expect(reparsed).toMatchObject({
+      id: 'cxo-review',
+      scope: 'personal',
+      user: 'alice@acme.com',
+      preferredMetrics: ['arr', 'nrr'],
+      preferredBlocks: ['revenue_total'],
+      vocabulary: { ARR: 'metric:arr', 'logo churn': 'metric:logo_churn' },
+      body: 'Body content.',
+    });
+  });
+
+  it('project skills omit user; personal skills bind to a user', () => {
+    const project = writeSkill(root, { id: 'house-rules', scope: 'project', body: 'Shared.' });
+    expect(project.scope).toBe('project');
+    expect(project.user).toBeUndefined();
+    expect(renderSkill(project)).not.toContain('user:');
+
+    const personal = writeSkill(root, { id: 'mine', scope: 'personal', user: 'bob@acme.com', body: 'Mine.' });
+    expect(renderSkill(personal)).toContain('user: bob@acme.com');
+  });
+
+  it('deleteSkill removes the file', () => {
+    writeSkill(root, { id: 'temp', scope: 'project', body: 'x' });
+    expect(existsSync(skillPath(root, 'temp'))).toBe(true);
+    expect(deleteSkill(root, 'temp')).toBe(true);
+    expect(existsSync(skillPath(root, 'temp'))).toBe(false);
+    expect(deleteSkill(root, 'temp')).toBe(false);
+  });
+});
+
+describe('selectRelevantSkills (spec 16)', () => {
+  const sqlConventions: Skill = {
+    id: 'sql-conventions', scope: 'project', preferredMetrics: [], preferredBlocks: [],
+    vocabulary: {}, body: 'Prefer ref and qualified relations.', sourcePath: '',
+  };
+  const revenue: Skill = {
+    id: 'revenue-glossary', scope: 'project', description: 'Revenue and ARR terms',
+    preferredMetrics: ['arr'], preferredBlocks: [], vocabulary: { ARR: 'metric:arr' },
+    body: 'Revenue, ARR, bookings, churn.', sourcePath: '',
+  };
+  const ops: Skill = {
+    id: 'ops-glossary', scope: 'project', description: 'Operations terms',
+    preferredMetrics: [], preferredBlocks: [], vocabulary: {}, body: 'Shipping, fulfillment, warehouse.', sourcePath: '',
+  };
+
+  it('ranks a matching skill first and keeps pinned conventions', () => {
+    const selected = selectRelevantSkills([ops, revenue, sqlConventions], 'what is our ARR and revenue?');
+    const ids = selected.map((s) => s.id);
+    // Pinned SQL conventions always present; the revenue glossary is selected; ops (no match) dropped.
+    expect(ids).toContain('sql-conventions');
+    expect(ids).toContain('revenue-glossary');
+    expect(ids).not.toContain('ops-glossary');
+  });
+
+  it('respects personal scope — other users do not see a personal skill', () => {
+    const personal: Skill = {
+      id: 'alice-arr', scope: 'personal', user: 'alice@acme.com', description: 'arr',
+      preferredMetrics: [], preferredBlocks: [], vocabulary: {}, body: 'arr revenue', sourcePath: '',
+    };
+    const forAlice = selectRelevantSkills([personal], 'arr revenue', { userId: 'alice@acme.com' });
+    expect(forAlice.map((s) => s.id)).toContain('alice-arr');
+    const forBob = selectRelevantSkills([personal], 'arr revenue', { userId: 'bob@acme.com' });
+    expect(forBob.map((s) => s.id)).not.toContain('alice-arr');
   });
 });

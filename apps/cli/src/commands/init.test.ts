@@ -69,6 +69,14 @@ describe('runInit', () => {
 
     const notebook = readFileSync(join(projectDir, 'notebooks', 'welcome.dqlnb'), 'utf-8');
     expect(notebook).toContain('DQL');
+
+    // `dql init` seeds the three editable starter skills (spec 16).
+    const skillFiles = readdirSync(join(projectDir, '.dql', 'skills'));
+    expect(skillFiles.sort()).toEqual([
+      'domain-rules.skill.md',
+      'metrics-glossary.skill.md',
+      'sql-conventions.skill.md',
+    ]);
   });
 
   it('detects a Jaffle Shop-style dbt project and DuckDB file', async () => {
