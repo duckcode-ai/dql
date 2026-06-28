@@ -145,11 +145,21 @@ export {
 } from "./metadata/sql-context-validation.js";
 export {
   deriveGeneratedDraftSlug,
+  deriveSemanticDraftName,
   upsertGeneratedDraft,
 } from "./metadata/drafts.js";
+export type { SemanticDraftNameInput } from "./metadata/drafts.js";
+export {
+  persistOwner,
+  readPersistedOwner,
+  resolveLocalOwner,
+} from "./metadata/identity.js";
+export type { ResolveOwnerOptions } from "./metadata/identity.js";
 export {
   propose,
   proposePlan,
+  buildProposePreview,
+  buildFromPrompt,
   loadDbtArtifacts,
   upsertProposedDraft,
   renderProposedDraft,
@@ -172,6 +182,13 @@ export type {
   ProposePlanOptions,
   ProposePlanDomain,
   ProposePlanCandidate,
+  ProposePreviewOptions,
+  BuildFromPromptOptions,
+  BuildFromPromptContext,
+  BuildFromPromptResult,
+  BuildCellResult,
+  BuildBlockResult,
+  CertifierVerdict,
   ProposeConfig,
   ProposeConfigInput,
   Classification,

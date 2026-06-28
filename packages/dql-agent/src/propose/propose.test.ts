@@ -10,7 +10,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { buildManifest, parse } from '@duckcodeailabs/dql-core';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { propose, proposePlan } from './propose.js';
+import { buildProposePreview, propose, proposePlan } from './propose.js';
 
 /**
  * Small synthetic dbt project: a staging model, a customer dimension, an orders
@@ -558,6 +558,67 @@ describe('proposePlan (deterministic, writes nothing)', () => {
     const a = proposePlan(projectRoot, manifestPath);
     const b = proposePlan(projectRoot, manifestPath);
     expect(JSON.stringify(a)).toBe(JSON.stringify(b));
+  });
+});
+
+describe('buildProposePreview (spec 14, part A — transparent preview)', () => {
+  let projectRoot: string;
+  let manifestPath: string;
+
+  beforeEach(() => {
+    projectRoot = mkdtempSync(join(tmpdir(), 'dql-propose-preview-'));
+    writeFileSync(join(projectRoot, 'dql.config.json'), JSON.stringify({ project: 'p' }), 'utf-8');
+    manifestPath = writeDbtArtifacts(join(projectRoot, 'target'));
+  });
+  afterEach(() => rmSync(projectRoot, { recursive: true, force: true }));
+
+  it('fills the preview fields for a single slug with REAL SQL (not select-*)', () => {
+    const candidate = buildProposePreview(projectRoot, manifestPath, 'dim_customers', {
+      owner: 'owner@example.com',
+    });
+    expect(candidate).toBeDefined();
+    // Real narrowed projection over declared outputs — grain column leads.
+    expect(candidate!.sqlPreview).toBeDefined();
+    expect(candidate!.sqlPreview).toContain('customer_id');
+    expect(candidate!.sqlPreview).not.toMatch(/SELECT \* FROM/i);
+    expect(candidate!.outputs).toEqual(['customer_id', 'customer_name']);
+    expect(candidate!.grain).toBe('customer_id');
+    expect(typeof candidate!.description).toBe('string');
+    expect(Array.isArray(candidate!.examples)).toBe(true);
+  });
+
+  it('returns a certifierVerdict of the contract shape with owner stamped', () => {
+    const candidate = buildProposePreview(projectRoot, manifestPath, 'fct_orders', {
+      owner: 'owner@example.com',
+    });
+    expect(candidate!.certifierVerdict).toMatchObject({
+      blocking: expect.any(Array),
+      warnings: expect.any(Array),
+      ready: expect.any(Boolean),
+    });
+    // Owner stamped → "Missing owner" is never a blocking strike.
+    expect(candidate!.certifierVerdict!.blocking).not.toContain('Missing owner');
+  });
+
+  it('writes NOTHING (preview only)', () => {
+    buildProposePreview(projectRoot, manifestPath, 'fct_orders', { owner: 'o@e.com' });
+    expect(existsSync(join(projectRoot, 'blocks'))).toBe(false);
+    expect(existsSync(join(projectRoot, 'blocks', '_drafts'))).toBe(false);
+  });
+
+  it('returns undefined for a slug outside the bounded business selection', () => {
+    // stg_orders is plumbing — never part of the selection.
+    expect(buildProposePreview(projectRoot, manifestPath, 'stg_orders')).toBeUndefined();
+    expect(buildProposePreview(projectRoot, manifestPath, 'no_such_model')).toBeUndefined();
+  });
+
+  it('produces a metric/aggregation-shaped SQL for a metric-backed model', () => {
+    // agg_daily_revenue has a measure column + time → trend projection over outputs.
+    const candidate = buildProposePreview(projectRoot, manifestPath, 'agg_daily_revenue', {
+      owner: 'o@e.com',
+    });
+    expect(candidate!.sqlPreview).toContain('total_revenue');
+    expect(candidate!.sqlPreview).not.toMatch(/SELECT \* FROM/i);
   });
 });
 

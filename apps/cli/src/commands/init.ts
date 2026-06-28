@@ -1,6 +1,7 @@
 import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs';
 import { basename, join, relative, resolve } from 'node:path';
 import { createWelcomeNotebook, serializeNotebook } from '@duckcodeailabs/dql-notebook';
+import { resolveLocalOwner } from '@duckcodeailabs/dql-agent';
 import type { CLIFlags } from '../args.js';
 import { performSemanticImport } from '../semantic-import.js';
 import { runNotebook } from './notebook.js';
@@ -50,7 +51,10 @@ export async function runInit(targetArg: string | null, flags: CLIFlags): Promis
   // Don't overwrite existing dql.config.json
   const configPath = join(targetDir, 'dql.config.json');
   if (!existsSync(configPath)) {
-    const config = buildConfig(projectName, isDbt, duckdbPath, dbtProjectDir, targetDir);
+    // Resolve the local OSS owner up front (git user.email → $USER → guest@local)
+    // and persist it as identity.owner so drafts are never born "Missing owner".
+    const owner = resolveLocalOwner(targetDir, { persist: false });
+    const config = buildConfig(projectName, isDbt, duckdbPath, dbtProjectDir, targetDir, owner);
     writeFileSync(configPath, JSON.stringify(config, null, 2) + '\n');
   }
 
@@ -255,10 +259,17 @@ function buildConfig(
   duckdbPath: string | null,
   dbtProjectDir: string | null,
   projectRoot: string,
+  owner?: string,
 ): Record<string, unknown> {
   const config: Record<string, unknown> = {
     project: projectName,
   };
+
+  // Persist the resolved local owner so AI-drafted blocks pass the Certifier's
+  // owner rule out of the box (humans still certify).
+  if (owner && owner.trim()) {
+    config.identity = { owner: owner.trim() };
+  }
 
   if (duckdbPath) {
     config.defaultConnectionName = 'default';

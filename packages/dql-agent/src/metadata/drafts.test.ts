@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { buildManifest, parse } from '@duckcodeailabs/dql-core';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { upsertGeneratedDraft } from './drafts.js';
+import { deriveGeneratedDraftSlug, deriveSemanticDraftName, upsertGeneratedDraft } from './drafts.js';
 
 describe('generated draft blocks', () => {
   let projectRoot: string;
@@ -83,5 +83,54 @@ describe('generated draft blocks', () => {
     const manifest = buildManifest({ projectRoot, dqlVersion: 'test' });
     expect(manifest.blocks.enterprise_revenue_by_week?.filePath).toBe(draft.path);
     expect(manifest.blocks.enterprise_revenue_by_week?.draftMetadata?.askedTimes).toBe(1);
+  });
+});
+
+describe('semantic draft naming (spec 14, part D)', () => {
+  const QUESTION = 'Can you build the total orders by geography at the daily level?';
+
+  it('never names a block after the literal question', () => {
+    const name = deriveSemanticDraftName({ question: QUESTION });
+    expect(name).not.toBe(deriveGeneratedDraftSlug(QUESTION));
+    expect(name).not.toContain('can_you_build');
+    expect(name).toMatch(/^[a-z][a-z0-9_]*$/);
+  });
+
+  it('rule-based extraction yields entity + key dimension + grain', () => {
+    const name = deriveSemanticDraftName({ question: QUESTION });
+    expect(name).toBe('orders_by_geography_daily');
+  });
+
+  it('prefers a valid provider-suggested snake_case name', () => {
+    const name = deriveSemanticDraftName({
+      question: QUESTION,
+      providerName: 'orders_by_region_daily',
+    });
+    expect(name).toBe('orders_by_region_daily');
+  });
+
+  it('coerces a loosely-formatted provider name into snake_case', () => {
+    const name = deriveSemanticDraftName({
+      question: QUESTION,
+      providerName: 'Orders By Region',
+    });
+    expect(name).toBe('orders_by_region');
+  });
+
+  it('dedupes against existing slugs', () => {
+    const name = deriveSemanticDraftName({
+      question: QUESTION,
+      providerName: 'orders_by_region_daily',
+      existingSlugs: ['orders_by_region_daily'],
+    });
+    expect(name).toBe('orders_by_region_daily_2');
+  });
+
+  it('falls back to the legacy tokenizer only when no entity is recognizable', () => {
+    const question = 'Give me a widget breakdown by sprocket';
+    const name = deriveSemanticDraftName({ question });
+    // No recognized entity → legacy tokenizer, but still valid + deduped.
+    expect(name).toMatch(/^[a-z][a-z0-9_]*$/);
+    expect(name.length).toBeGreaterThan(0);
   });
 });

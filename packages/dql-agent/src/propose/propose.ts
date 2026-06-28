@@ -685,6 +685,19 @@ export interface ProposePlanCandidate {
   /** Optional cheap-pass grain/pattern hints (may be omitted in the plan). */
   grain?: string;
   pattern?: ProposedPattern;
+  /**
+   * OPTIONAL "transparent preview" fields (spec 14, part A). Left undefined by
+   * the cheap `proposePlan()` so the plan stays O(N) and Certifier-free for all
+   * candidates. The `/api/propose/preview?slug=` endpoint fills them for ONE
+   * candidate by running real SQL generation + the Certifier + (best-effort) AI
+   * enrichment, so the UI can show the actual SQL/logic before a human commits.
+   */
+  sqlPreview?: string;
+  description?: string;
+  llmContext?: string;
+  examples?: string[];
+  outputs?: string[];
+  certifierVerdict?: { blocking: string[]; warnings: string[]; ready: boolean };
 }
 
 export interface ProposePlanDomain {
@@ -797,6 +810,89 @@ function resolveDraftRelPath(projectRoot: string, domain: string, slug: string):
     return `domains/${domain}/blocks/_drafts/${slug}.dql`;
   }
   return `blocks/_drafts/${slug}.dql`;
+}
+
+// ─── Transparent PLAN PREVIEW for ONE candidate (spec 14, part A) ───────────
+
+export interface ProposePreviewOptions {
+  config?: ProposeConfigInput | null;
+  /** Default owner for the Certifier verdict (so "Missing owner" is suppressed). */
+  owner?: string;
+  /**
+   * Optional pre-computed AI enrichment for this slug. When present, its
+   * description/llmContext/examples override the deterministic dbt-derived
+   * content. The engine never calls a provider itself.
+   */
+  enriched?: EnrichedContent;
+}
+
+/**
+ * Build the FILLED preview for a single candidate slug: real aggregation/
+ * projection SQL (via `buildBusinessQuery`, NOT select-*), declared outputs,
+ * description, llmContext, examples, and the Certifier verdict
+ * ({ blocking, warnings, ready }). Writes NOTHING.
+ *
+ * This is the lazy/expensive path: `proposePlan()` stays cheap for all
+ * candidates; this runs inference + SQL generation + the Certifier for ONE slug
+ * only. Returns `undefined` when the slug is not part of the bounded,
+ * business-only selection (so the caller can 404).
+ */
+export function buildProposePreview(
+  projectRoot: string,
+  dbtManifestPath: string,
+  slug: string,
+  options: ProposePreviewOptions = {},
+): ProposePlanCandidate | undefined {
+  const config = resolveProposeConfig(options.config);
+  const scan = scanModels(dbtManifestPath, config);
+  const selection = selectBounded(scan);
+  const candidate = selection.find((c) => c.slug === slug);
+  if (!candidate) return undefined;
+
+  const { model, domain, owner: metaOwner, classification, evidence, ranking } = candidate;
+  const hasMetric = scan.metricModels.has(model.name.toLowerCase());
+  const inference = buildInference(model, scan.artifacts, hasMetric);
+
+  // Real SQL (aggregation for metric-backed models, narrowed projection otherwise).
+  const sqlPreview = buildBusinessQuery(model, inference, scan.artifacts);
+
+  // Certifier verdict for the would-be draft (owner stamped so "Missing owner"
+  // is not a phantom strike when an owner is resolvable).
+  const draftRelPath = resolveDraftRelPath(projectRoot, domain, slug);
+  const owner = options.owner || metaOwner || '';
+  const record = toBlockRecord(slug, domain, owner, model, inference, draftRelPath);
+  const verdict = new Certifier().evaluate(record);
+
+  // Content: AI enrichment overrides best-effort; else deterministic dbt-derived.
+  const description =
+    model.description?.trim() ||
+    options.enriched?.description?.trim() ||
+    `Draft governance block proposed from dbt model ${model.name}.`;
+  const llmContext = options.enriched?.llmContext ?? inference.llmContext;
+  const examples = options.enriched?.examples?.length
+    ? options.enriched.examples
+    : inference.examples.map((ex) => ex.question);
+
+  return {
+    model: model.name,
+    slug,
+    score: ranking.score,
+    classification,
+    owner: metaOwner,
+    evidence,
+    grain: inference.grain,
+    pattern: inference.pattern,
+    sqlPreview,
+    description,
+    llmContext,
+    examples,
+    outputs: inference.declaredOutputs,
+    certifierVerdict: {
+      blocking: verdict.errors.map((e) => e.message),
+      warnings: verdict.warnings.map((w) => w.message),
+      ready: verdict.errors.length === 0,
+    },
+  };
 }
 
 // ---- small word helpers (intentionally minimal — no NLP dependency) ----

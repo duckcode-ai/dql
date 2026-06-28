@@ -74,6 +74,9 @@ import {
   ensureMetadataCatalogFresh,
   propose,
   proposePlan,
+  buildProposePreview,
+  buildFromPrompt,
+  resolveLocalOwner,
   resolveProposeConfig,
   recordQueryRun,
   recordRuntimeSchemaSnapshot,
@@ -87,8 +90,10 @@ import {
   type ProposeSummary,
   type ProposalResult,
   type ProposePlan,
+  type ProposePlanCandidate,
   type ProposeConfigInput,
   type EnrichedContent,
+  type BuildFromPromptResult,
 } from '@duckcodeailabs/dql-agent';
 import { gatherProposeEnrichment } from './propose-enrich.js';
 import { handleAppsApi, recommendVisualization } from './apps-api.js';
@@ -1614,6 +1619,92 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
         const result = await generateProposeDrafts(projectRoot, [slug], loadProjectConfig(projectRoot), { owner });
         res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
         res.end(serializeJSON(result));
+      } catch (error) {
+        res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({ error: error instanceof Error ? error.message : String(error) }));
+      }
+      return;
+    }
+
+    // Transparent PLAN PREVIEW for ONE candidate (spec 14, part A). Lazy +
+    // expensive: builds the real SQL + Certifier verdict + best-effort AI
+    // enrichment for a single slug, so the UI shows the actual logic before a
+    // human commits. Writes NOTHING.
+    if (req.method === 'GET' && path === '/api/propose/preview') {
+      try {
+        const slug = url.searchParams.get('slug')?.trim();
+        if (!slug) {
+          res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
+          res.end(serializeJSON({ error: 'Provide a ?slug= query parameter.' }));
+          return;
+        }
+        const candidate = await buildProposeCandidatePreview(projectRoot, slug, url.searchParams.get('owner') ?? undefined);
+        if (!candidate) {
+          res.writeHead(404, { 'Content-Type': 'application/json; charset=utf-8' });
+          res.end(serializeJSON({ error: `No proposed candidate found for slug "${slug}".` }));
+          return;
+        }
+        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({ candidate }));
+      } catch (error) {
+        res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({ error: error instanceof Error ? error.message : String(error) }));
+      }
+      return;
+    }
+
+    // Unified AI BUILD (spec 14, part B). ONE engine, two targets:
+    //   target:'cell'  → generate SQL from the prompt (+ context). Writes nothing.
+    //   target:'block' → assemble a COMPLETE draft, WRITE it, return preview fields.
+    // Never routes through the governed Q&A answer-loop.
+    if (req.method === 'POST' && path === '/api/ai/build') {
+      try {
+        const body = (await readJSON(req).catch(() => ({}))) as {
+          prompt?: unknown;
+          context?: { cellSql?: unknown; selection?: unknown };
+          target?: unknown;
+          owner?: unknown;
+        };
+        const prompt = typeof body?.prompt === 'string' ? body.prompt.trim() : '';
+        if (!prompt) {
+          res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
+          res.end(serializeJSON({ error: 'Provide a non-empty { prompt }.' }));
+          return;
+        }
+        const target = body?.target === 'cell' || body?.target === 'block' ? body.target : undefined;
+        if (!target) {
+          res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
+          res.end(serializeJSON({ error: "Provide { target: 'cell' | 'block' }." }));
+          return;
+        }
+        const context = {
+          cellSql: typeof body?.context?.cellSql === 'string' ? body.context.cellSql : undefined,
+          selection: typeof body?.context?.selection === 'string' ? body.context.selection : undefined,
+        };
+        const owner = typeof body?.owner === 'string' ? body.owner : undefined;
+        const result: BuildFromPromptResult = await buildFromPrompt({
+          projectRoot,
+          prompt,
+          context,
+          target,
+          owner,
+          dbtManifestPath: resolveDbtManifestPath(projectRoot, loadProjectConfig(projectRoot)),
+        });
+        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON(result));
+      } catch (error) {
+        res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({ error: error instanceof Error ? error.message : String(error) }));
+      }
+      return;
+    }
+
+    // Resolved local OSS owner (spec 14, part C). Stamps drafts so a new block is
+    // never born with a "Missing owner" Certifier strike.
+    if (req.method === 'GET' && path === '/api/identity') {
+      try {
+        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({ owner: resolveLocalOwner(projectRoot) }));
       } catch (error) {
         res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' });
         res.end(serializeJSON({ error: error instanceof Error ? error.message : String(error) }));
@@ -5873,10 +5964,13 @@ export function buildProposeReadiness(
   const plan: ProposePlan = proposePlan(projectRoot, manifestPath, { config: proposeConfig });
 
   // dryRun: rank + certify the selected scope only. Never writes from a preview.
+  // Stamp the resolved local OSS owner when none was passed so the stored verdict
+  // does not carry a phantom "Missing owner" strike. Read-only resolution — the
+  // preview must not mutate the project.
   const summary: ProposeSummary = propose({
     projectRoot,
     dbtManifestPath: manifestPath,
-    owner: options.owner || undefined,
+    owner: options.owner || resolveLocalOwner(projectRoot, { persist: false }),
     limit: options.limit,
     dryRun: true,
     config: proposeConfig,
@@ -5955,7 +6049,9 @@ export async function generateProposeDrafts(
   const summary = propose({
     projectRoot,
     dbtManifestPath: manifestPath,
-    owner: options.owner || undefined,
+    // Stamp the resolved local OSS owner when none was passed so drafts are not
+    // born with a "Missing owner" Certifier strike.
+    owner: options.owner || resolveLocalOwner(projectRoot),
     config: projectConfig.propose,
     onlySlugs: slugs,
     enrichedBySlug,
@@ -5966,6 +6062,38 @@ export async function generateProposeDrafts(
     draftsSkipped: summary.draftsSkipped,
     proposals: summary.proposals,
   };
+}
+
+/**
+ * Build the FILLED transparent preview for ONE proposed candidate slug (spec 14,
+ * part A). Reuses the deterministic `buildProposePreview` engine (real SQL +
+ * Certifier verdict) and best-effort AI enrichment (description/llmContext/
+ * examples) when a provider is available. Writes NOTHING. Returns `undefined`
+ * when the slug is not part of the bounded, business-only selection.
+ */
+export async function buildProposeCandidatePreview(
+  projectRoot: string,
+  slug: string,
+  owner?: string,
+  projectConfig: ProjectConfig = loadProjectConfig(projectRoot),
+): Promise<ProposePlanCandidate | undefined> {
+  const manifestPath = resolveDbtManifestPath(projectRoot, projectConfig);
+  if (!manifestPath) return undefined;
+
+  // Best-effort AI enrichment for this one slug (content only). Any miss falls
+  // back to the deterministic dbt-derived content inside buildProposePreview.
+  let enriched: EnrichedContent | undefined;
+  const proposeConfig = resolveProposeConfig(projectConfig.propose);
+  if (proposeConfig.aiEnrichment !== 'off') {
+    const map = await gatherProposeEnrichment(projectRoot, manifestPath, projectConfig.propose, [slug]).catch(() => undefined);
+    enriched = map?.get(slug);
+  }
+
+  return buildProposePreview(projectRoot, manifestPath, slug, {
+    config: projectConfig.propose,
+    owner: owner || resolveLocalOwner(projectRoot),
+    enriched,
+  });
 }
 
 function getProjectConnectionsForApi(config: ProjectConfig | Record<string, unknown>): Record<string, unknown> {

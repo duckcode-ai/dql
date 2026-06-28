@@ -2,7 +2,7 @@
  * `dql propose` — turn dbt evidence into a ranked queue of DRAFT blocks.
  * AI drafts, humans certify. Nothing here is ever written as certified.
  */
-export { propose, proposePlan } from './propose.js';
+export { propose, proposePlan, buildProposePreview } from './propose.js';
 export type {
   ProposeOptions,
   ProposeSummary,
@@ -14,7 +14,17 @@ export type {
   ProposePlanOptions,
   ProposePlanDomain,
   ProposePlanCandidate,
+  ProposePreviewOptions,
 } from './propose.js';
+export { buildFromPrompt } from './build-from-prompt.js';
+export type {
+  BuildFromPromptOptions,
+  BuildFromPromptContext,
+  BuildFromPromptResult,
+  BuildCellResult,
+  BuildBlockResult,
+  CertifierVerdict,
+} from './build-from-prompt.js';
 export {
   resolveProposeConfig,
   DEFAULT_PROPOSE_CONFIG,
