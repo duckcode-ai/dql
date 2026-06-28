@@ -26,6 +26,7 @@ import {
   Blocks,
   Wand2,
   UserRound,
+  GraduationCap,
 } from 'lucide-react';
 import { TrustBadge } from '@duckcodeailabs/dql-ui';
 import { api } from '../../api/client';
@@ -155,6 +156,27 @@ export function ReadinessPage(): JSX.Element {
               <UserRound size={12} /> drafting as {owner}
             </div>
           ) : null}
+          {/* Spec 16 — discoverability nudge: teach the AI your business rules. */}
+          <button
+            type="button"
+            onClick={() => dispatch({ type: 'SET_MAIN_VIEW', view: 'skills' })}
+            style={{
+              display: 'inline-flex',
+              alignItems: 'center',
+              gap: 6,
+              alignSelf: 'start',
+              marginTop: 2,
+              padding: 0,
+              border: 'none',
+              background: 'transparent',
+              color: 'var(--color-accent-blue, #6b5dd3)',
+              fontSize: 12,
+              fontWeight: 650,
+              cursor: 'pointer',
+            }}
+          >
+            <GraduationCap size={13} /> Teach the AI your business rules →
+          </button>
         </header>
 
         {loading ? (

@@ -7,6 +7,8 @@ import { ChartOutput, resolveChartType } from '../output/ChartOutput';
 import { TableOutput } from '../output/TableOutput';
 import { TrustBadge, DerivationWalkPanel, type TrustState } from '@duckcodeailabs/dql-ui';
 import { buildDerivationWalk, type Business360ResultV2, type DerivationWalk } from '@duckcodeailabs/dql-core/lineage';
+import { useNotebook } from '../../store/NotebookStore';
+import { GuidedBySkills } from './AiBuildResult';
 
 type AnswerTab = 'answer' | 'visual' | 'data' | 'lineage' | 'context' | 'sql' | 'review';
 type AddToAppMode = 'auto' | 'chart' | 'data' | 'both';
@@ -127,6 +129,8 @@ export interface AgentAnswerEnvelope {
   draftBlockId?: string;
   draftBlock?: { path?: string; name?: string };
   promoteCommand?: string;
+  // Spec 16 — business-context skills that guided this answer (backend-populated).
+  appliedSkills?: Array<{ id: string; description?: string }>;
 }
 
 export function extractGovernedAnswer(events: AgentTurn[]): AgentAnswerEnvelope | null {
@@ -261,6 +265,7 @@ export function AgentAnswerCard({
   onCreateBlock?: (sql: string, meta: { title?: string; description?: string; tags?: string[] }) => void;
 }) {
   const t = themes[themeMode];
+  const { dispatch } = useNotebook();
   const result = normalizeAgentResult(answer);
   const chartConfig = normalizeChartConfig(answer.result?.chartConfig, answer);
   const hasChart = Boolean(result && resolveChartType(result, chartConfig) !== 'table');
@@ -597,6 +602,11 @@ export function AgentAnswerCard({
           </div>
         )}
         <ProvenanceFooter items={provenance} t={t} accent={trustAccent} />
+        <GuidedBySkills
+          t={t}
+          skills={answer.appliedSkills}
+          onOpenSkills={() => dispatch({ type: 'SET_MAIN_VIEW', view: 'skills' })}
+        />
       </div>
     </div>
   );

@@ -26,6 +26,7 @@ import {
   CheckCircle2,
   ChevronDown,
   ChevronRight,
+  GraduationCap,
   Hammer,
   Loader2,
   RotateCcw,
@@ -78,6 +79,8 @@ export function AiBuildResult({
   quickActions,
 }: AiBuildResultProps): JSX.Element {
   const t = themes[themeMode];
+  const { dispatch } = useNotebook();
+  const openSkills = useCallback(() => { dispatch({ type: 'SET_MAIN_VIEW', view: 'skills' }); }, [dispatch]);
   const [target, setTarget] = useState<AiBuildTarget>(initialTarget);
   const [prompt, setPrompt] = useState(initialPrompt);
   const [phase, setPhase] = useState<BuildPhase>('idle');
@@ -245,10 +248,12 @@ export function AiBuildResult({
             t={t}
             sql={result.sql}
             explanation={result.explanation}
+            appliedSkills={result.appliedSkills}
             inserted={inserted}
             onInsert={() => { onInsertCell?.(result.sql); setInserted(true); }}
             onRefine={onRefine}
             onDiscard={onDiscard}
+            onOpenSkills={openSkills}
           />
         )}
         {phase === 'ready' && result?.target === 'block' && (
@@ -259,6 +264,7 @@ export function AiBuildResult({
             onOpen={() => onOpenBlock?.(result.path, result.name)}
             onRefine={onRefine}
             onDiscard={onDiscard}
+            onOpenSkills={openSkills}
           />
         )}
       </div>
@@ -272,18 +278,22 @@ function CellResultCard({
   t,
   sql,
   explanation,
+  appliedSkills,
   inserted,
   onInsert,
   onRefine,
   onDiscard,
+  onOpenSkills,
 }: {
   t: Theme;
   sql: string;
   explanation?: string;
+  appliedSkills?: Array<{ id: string; description?: string }>;
   inserted: boolean;
   onInsert: () => void;
   onRefine: () => void;
   onDiscard: () => void;
+  onOpenSkills: () => void;
 }): JSX.Element {
   return (
     <section style={cardStyle(t)}>
@@ -296,6 +306,7 @@ function CellResultCard({
         <div style={{ fontSize: 12, color: t.textSecondary, lineHeight: 1.5, fontFamily: t.font }}>{explanation}</div>
       ) : null}
       <CodeBlock t={t} code={sql} />
+      <GuidedBySkills t={t} skills={appliedSkills} onOpenSkills={onOpenSkills} />
       <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
         <button type="button" onClick={onInsert} disabled={inserted} style={{ ...primaryButtonStyle(t), opacity: inserted ? 0.65 : 1 }}>
           {inserted ? <CheckCircle2 size={13} strokeWidth={2} /> : <SquarePlus size={13} strokeWidth={2} />}
@@ -321,6 +332,7 @@ function BlockResultCard({
   onOpen,
   onRefine,
   onDiscard,
+  onOpenSkills,
 }: {
   t: Theme;
   result: Extract<AiBuildResultPayload, { target: 'block' }>;
@@ -328,9 +340,10 @@ function BlockResultCard({
   onOpen: () => void;
   onRefine: () => void;
   onDiscard: () => void;
+  onOpenSkills: () => void;
 }): JSX.Element {
   const [sqlOpen, setSqlOpen] = useState(false);
-  const { name, description, sqlPreview, grain, outputs, examples, certifierVerdict } = result;
+  const { name, description, sqlPreview, grain, outputs, examples, certifierVerdict, appliedSkills } = result;
   return (
     <section style={cardStyle(t)}>
       <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
@@ -373,6 +386,8 @@ function BlockResultCard({
       ) : null}
 
       <CertifierVerdictBlock t={t} verdict={certifierVerdict} />
+
+      <GuidedBySkills t={t} skills={appliedSkills} onOpenSkills={onOpenSkills} />
 
       {owner ? (
         <div style={{ display: 'inline-flex', alignItems: 'center', gap: 5, fontSize: 11, color: t.textMuted, fontFamily: t.font }}>
@@ -430,6 +445,63 @@ export function CertifierVerdictBlock({
           ) : null}
         </div>
       )}
+    </div>
+  );
+}
+
+// ── Spec 16 — "guided by" transparency line ──────────────────────────────────
+// Renders a subtle line crediting the business-context skills that shaped this
+// result. Only renders when `appliedSkills` is non-empty (the backend populates
+// it). Each skill links to the Skills page so users can see/edit the guidance.
+
+export function GuidedBySkills({
+  t,
+  skills,
+  onOpenSkills,
+}: {
+  t: Theme;
+  skills?: Array<{ id: string; description?: string }>;
+  onOpenSkills: () => void;
+}): JSX.Element | null {
+  if (!skills || skills.length === 0) return null;
+  return (
+    <div
+      style={{
+        display: 'flex',
+        alignItems: 'center',
+        flexWrap: 'wrap',
+        gap: 5,
+        fontSize: 11,
+        color: t.textMuted,
+        fontFamily: t.font,
+      }}
+    >
+      <GraduationCap size={12} strokeWidth={2} />
+      <span>guided by</span>
+      {skills.map((skill, index) => (
+        <React.Fragment key={skill.id}>
+          {index > 0 ? <span aria-hidden style={{ color: t.textMuted }}>,</span> : null}
+          <button
+            type="button"
+            onClick={onOpenSkills}
+            title={skill.description ?? `Open the ${skill.id} skill`}
+            style={{
+              padding: 0,
+              border: 'none',
+              background: 'transparent',
+              color: t.accent,
+              fontSize: 11,
+              fontWeight: 700,
+              fontFamily: t.font,
+              cursor: 'pointer',
+              textDecoration: 'underline',
+              textUnderlineOffset: 2,
+            }}
+          >
+            {skill.id}
+          </button>
+        </React.Fragment>
+      ))}
     </div>
   );
 }

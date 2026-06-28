@@ -19,6 +19,7 @@ import { ReferencePanel } from '../panels/ReferencePanel';
 import { GitPage } from '../git/GitPage';
 import { ReadinessPage } from '../readiness/ReadinessPage';
 import { ReviewPage } from '../review/ReviewPage';
+import { SkillsPage } from '../skills/SkillsPage';
 import { AppsView } from '../apps/AppsView';
 import { LineageDrawer } from '../lineage/LineageDrawer';
 import { AiBuildDialog } from '../agent/AiBuildDialog';
@@ -216,6 +217,8 @@ export function AppShell() {
             <GitPage />
           ) : state.mainView === 'readiness' ? (
             <ReadinessPage />
+          ) : state.mainView === 'skills' ? (
+            <SkillsPage />
           ) : state.mainView === 'review' ? (
             <FullPageSection
               title="Review & Certify"

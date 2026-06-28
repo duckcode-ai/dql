@@ -192,7 +192,7 @@ function notebookReducer(state: NotebookState, action: NotebookAction): Notebook
           mainView: 'lineage',
         };
       }
-      const fullPagePanels = ['connection', 'reference', 'git', 'apps', 'readiness', 'settings'] as const;
+      const fullPagePanels = ['connection', 'reference', 'git', 'apps', 'readiness', 'skills', 'settings'] as const;
       const isFullPage = (action.panel as string | null) !== null
         && (fullPagePanels as readonly string[]).includes(action.panel as string);
       return {
@@ -213,6 +213,8 @@ function notebookReducer(state: NotebookState, action: NotebookAction): Notebook
                   ? 'apps'
                   : action.panel === 'readiness'
                     ? 'readiness'
+                    : action.panel === 'skills'
+                    ? 'skills'
                     : action.panel === 'settings'
                     ? 'connection'
                     : action.panel === 'files'
