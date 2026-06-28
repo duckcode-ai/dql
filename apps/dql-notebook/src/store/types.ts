@@ -250,6 +250,13 @@ export interface ProposeReadinessSummary {
 
 // ── Deterministic PLAN (classify → plan → approve) ─────────────────────────
 
+/** Plain-language Certifier verdict shared by the propose preview and AI Build. */
+export interface AiBuildCertifierVerdict {
+  blocking: string[];
+  warnings: string[];
+  ready: boolean;
+}
+
 export interface ProposePlanCandidate {
   model: string;
   slug: string;
@@ -259,7 +266,37 @@ export interface ProposePlanCandidate {
   evidence: string[];
   grain?: string;
   pattern?: string;
+  // ── Spec 14 (part A) — OPTIONAL transparent-proposal preview fields.
+  // Lazily fetched per-row via GET /api/propose/preview?slug=… so the Get
+  // Started rows can show the artifact (SQL + outputs + examples + verdict)
+  // instead of bare counts. All optional: a row renders fine without them.
+  sqlPreview?: string;
+  description?: string;
+  llmContext?: string;
+  examples?: string[];
+  outputs?: string[];
+  certifierVerdict?: AiBuildCertifierVerdict;
 }
+
+// ── Spec 14 (part B) — Unified AI Build result ─────────────────────────────
+// The clean ARTIFACT returned by POST /api/ai/build. Build is split from Ask:
+// it never routes through the Q&A answer-loop, so the result is a discriminated
+// union over the target the user picked — a notebook CELL or a draft BLOCK.
+export type AiBuildResult =
+  | { target: 'cell'; sql: string; explanation?: string }
+  | {
+      target: 'block';
+      path: string;
+      name: string;
+      sqlPreview: string;
+      description: string;
+      grain?: string;
+      outputs: string[];
+      examples: string[];
+      certifierVerdict: AiBuildCertifierVerdict;
+    };
+
+export type AiBuildTarget = AiBuildResult['target'];
 
 export interface ProposePlanDomain {
   name: string;

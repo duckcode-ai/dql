@@ -12,19 +12,59 @@
 
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import type { CSSProperties } from 'react';
-import { ShieldCheck, Sparkles, ArrowRight, AlertTriangle, RefreshCw, Filter, Loader2 } from 'lucide-react';
+import {
+  ShieldCheck,
+  Sparkles,
+  ArrowRight,
+  AlertTriangle,
+  RefreshCw,
+  Filter,
+  Loader2,
+  ChevronRight,
+  ChevronDown,
+  CheckCircle2,
+  Blocks,
+  Wand2,
+  UserRound,
+} from 'lucide-react';
 import { TrustBadge } from '@duckcodeailabs/dql-ui';
 import { api } from '../../api/client';
 import { useNotebook } from '../../store/NotebookStore';
-import type { ProposeReadiness, ProposePlanDomain, ProposePlanCandidate } from '../../store/types';
+import { openAiBuild } from '../../utils/ai-build-bus';
+import type { ProposeReadiness, ProposePlanDomain, ProposePlanCandidate, NotebookFile } from '../../store/types';
 
 export function ReadinessPage(): JSX.Element {
-  const { dispatch } = useNotebook();
+  const { state, dispatch } = useNotebook();
   const [readiness, setReadiness] = useState<ProposeReadiness | null>(null);
   const [loading, setLoading] = useState(true);
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [generating, setGenerating] = useState(false);
   const [generateError, setGenerateError] = useState<string | null>(null);
+  const [owner, setOwner] = useState<string | null>(null);
+
+  // "drafting as <owner>" — best-effort, never blocks (spec part D).
+  useEffect(() => {
+    let cancelled = false;
+    api.getIdentity()
+      .then((id) => { if (!cancelled && id?.owner) setOwner(id.owner); })
+      .catch(() => { /* identity is optional */ });
+    return () => { cancelled = true; };
+  }, []);
+
+  // Open a draft block in Block Studio via the canonical OPEN_BLOCK_STUDIO flow.
+  const openInBlockStudio = useCallback(async (path: string, name: string) => {
+    const file: NotebookFile = {
+      name: path.split('/').pop() ?? `${name}.dql`,
+      path,
+      type: 'block',
+      folder: 'blocks',
+    };
+    if (!state.files.some((f) => f.path === path)) {
+      dispatch({ type: 'FILE_ADDED', file });
+    }
+    const payload = await api.openBlockStudio(path);
+    dispatch({ type: 'OPEN_BLOCK_STUDIO', file, payload });
+  }, [dispatch, state.files]);
 
   const load = useCallback(() => {
     let cancelled = false;
@@ -95,14 +135,26 @@ export function ReadinessPage(): JSX.Element {
         <header style={{ display: 'grid', gap: 6 }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
             <Sparkles size={20} />
-            <div style={{ fontSize: 22, fontWeight: 750 }}>Get Started</div>
+            <div style={{ fontSize: 22, fontWeight: 750 }}>Get started</div>
+            <div style={{ flex: 1 }} />
+            <button
+              type="button"
+              onClick={() => openAiBuild({ target: 'block', lockTarget: true, sourceLabel: 'Describe a block to draft from your project context.' })}
+              style={askAiButtonStyle}
+            >
+              <Wand2 size={14} /> Ask AI to build a block
+            </button>
           </div>
-          <div style={{ fontSize: 13, opacity: 0.72, maxWidth: 720, lineHeight: 1.55 }}>
-            AI drafts, humans certify. We classified your dbt models and planned a small,
-            business-focused seed of governance blocks — plumbing and low-value models are
-            excluded. Review the plan, approve the scope, and we'll draft only what you pick.
-            Nothing is generated or certified until you say so.
+          <div style={{ fontSize: 13, opacity: 0.72, maxWidth: 760, lineHeight: 1.55 }}>
+            {summary?.modelsScanned
+              ? `I scanned your dbt project and found ${summary.businessModels} ${summary.businessModels === 1 ? 'thing' : 'things'} worth governing — here's what each one does. Expand a row to see the SQL it would run and what's still missing to certify. Plumbing and low-value models are left out. Nothing is drafted or certified until you approve it.`
+              : "I scanned your dbt project for the business models worth governing — here's what each one does. Expand a row to see the SQL it would run and what's still missing to certify. Nothing is drafted or certified until you approve it."}
           </div>
+          {owner ? (
+            <div style={{ display: 'inline-flex', alignItems: 'center', gap: 5, fontSize: 11.5, opacity: 0.62 }}>
+              <UserRound size={12} /> drafting as {owner}
+            </div>
+          ) : null}
         </header>
 
         {loading ? (
@@ -153,7 +205,7 @@ export function ReadinessPage(): JSX.Element {
                   style={{ ...approveBtnStyle, opacity: generating || selected.size === 0 ? 0.6 : 1 }}
                 >
                   {generating ? <Loader2 size={13} className="spin" /> : <ShieldCheck size={13} />}
-                  {generating ? 'Generating…' : <>Approve &amp; Generate {selected.size > 0 ? `(${selected.size})` : ''}</>}
+                  {generating ? 'Generating…' : <>Approve &amp; generate {selected.size > 0 ? `(${selected.size})` : ''}</>}
                 </button>
               </div>
             </div>
@@ -179,6 +231,7 @@ export function ReadinessPage(): JSX.Element {
                     selected={selected}
                     onToggleSlug={toggleSlug}
                     onToggleDomain={toggleDomain}
+                    onOpenInBlockStudio={openInBlockStudio}
                   />
                 ))
               )}
@@ -201,11 +254,13 @@ function DomainGroup({
   selected,
   onToggleSlug,
   onToggleDomain,
+  onOpenInBlockStudio,
 }: {
   domain: ProposePlanDomain;
   selected: Set<string>;
   onToggleSlug: (slug: string) => void;
   onToggleDomain: (domain: ProposePlanDomain) => void;
+  onOpenInBlockStudio: (path: string, name: string) => Promise<void>;
 }): JSX.Element {
   const slugs = domain.candidates.map((c) => c.slug);
   const allOn = slugs.every((s) => selected.has(s));
@@ -236,6 +291,7 @@ function DomainGroup({
             candidate={candidate}
             checked={selected.has(candidate.slug)}
             onToggle={() => onToggleSlug(candidate.slug)}
+            onOpenInBlockStudio={onOpenInBlockStudio}
           />
         ))}
       </div>
@@ -243,35 +299,244 @@ function DomainGroup({
   );
 }
 
+// Spec 14 (part A) — each proposal row is a DISCLOSURE: the collapsed row shows
+// the checkbox + model name + AI-generated pill + pattern + grain + a "why:"
+// line + a Show/Hide toggle. Expanding lazily fetches api.proposePreview(slug)
+// once and reveals the artifact: the SQL the draft would run, declared outputs,
+// example questions, a plain-language "what's missing to certify" verdict, and
+// per-row actions (Open in Block Studio · Refine with AI).
 function CandidateRow({
   candidate,
   checked,
   onToggle,
+  onOpenInBlockStudio,
 }: {
   candidate: ProposePlanCandidate;
   checked: boolean;
   onToggle: () => void;
+  onOpenInBlockStudio: (path: string, name: string) => Promise<void>;
 }): JSX.Element {
   const evidence = useMemo(() => candidate.evidence.slice(0, 3), [candidate.evidence]);
+  const [expanded, setExpanded] = useState(false);
+  const [preview, setPreview] = useState<ProposePlanCandidate | null>(null);
+  const [previewLoading, setPreviewLoading] = useState(false);
+  const [previewError, setPreviewError] = useState<string | null>(null);
+  const [opening, setOpening] = useState(false);
+  const [openError, setOpenError] = useState<string | null>(null);
+
+  // Lazy-load the preview the first time the row is expanded.
+  const toggleExpanded = useCallback(() => {
+    setExpanded((prev) => {
+      const next = !prev;
+      if (next && !preview && !previewLoading) {
+        setPreviewLoading(true);
+        setPreviewError(null);
+        api.proposePreview(candidate.slug)
+          .then((res) => setPreview(res.candidate))
+          .catch((err) => setPreviewError(err instanceof Error ? err.message : 'Could not load the preview.'))
+          .finally(() => setPreviewLoading(false));
+      }
+      return next;
+    });
+  }, [candidate.slug, preview, previewLoading]);
+
+  // Merge the lazily-fetched preview over the base candidate so the expanded
+  // body shows full detail while the collapsed header always renders.
+  const detail = preview ?? candidate;
+  const sqlPreview = detail.sqlPreview;
+  const outputs = detail.outputs ?? [];
+  const examples = detail.examples ?? [];
+  const verdict = detail.certifierVerdict;
+  const description = detail.description;
+
+  const openInStudio = useCallback(async () => {
+    setOpening(true);
+    setOpenError(null);
+    try {
+      // The draft may not exist yet; generate this single slug first, then open
+      // the written draft path. generateProposeDrafts is idempotent (skips
+      // existing drafts) and returns the proposal with its path.
+      const result = await api.generateProposeDrafts({ slugs: [candidate.slug] });
+      const proposal = result.proposals.find((p) => p.slug === candidate.slug) ?? result.proposals[0];
+      const path = proposal?.path;
+      if (!path) {
+        setOpenError('No draft path was returned for this model yet.');
+        return;
+      }
+      await onOpenInBlockStudio(path, candidate.model);
+    } catch (err) {
+      setOpenError(err instanceof Error ? err.message : 'Could not open this draft.');
+    } finally {
+      setOpening(false);
+    }
+  }, [candidate.model, candidate.slug, onOpenInBlockStudio]);
+
+  const refineWithAi = useCallback(() => {
+    openAiBuild({
+      target: 'block',
+      lockTarget: true,
+      prompt: `Refine the "${candidate.model}" block: ${description ?? `a ${candidate.pattern ?? 'business'} model${candidate.grain ? ` at ${candidate.grain} grain` : ''}`}.`,
+      sourceLabel: `Refining ${candidate.model}`,
+    });
+  }, [candidate.grain, candidate.model, candidate.pattern, description]);
+
   return (
-    <label style={{ ...rowStyle, opacity: checked ? 1 : 0.62 }}>
-      <input type="checkbox" checked={checked} onChange={onToggle} style={{ marginTop: 3 }} />
-      <div style={{ display: 'grid', gap: 4, minWidth: 0 }}>
-        <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
-          <span style={{ fontSize: 14, fontWeight: 700 }}>{candidate.model}</span>
-          <TrustBadge state="ai_generated" />
-          {candidate.pattern ? <Pill>{candidate.pattern}</Pill> : null}
-          <span style={{ fontSize: 11, opacity: 0.6 }}>score {candidate.score}</span>
-          {candidate.grain ? <span style={{ fontSize: 11, opacity: 0.6 }}>grain {candidate.grain}</span> : null}
-        </div>
-        {evidence.length > 0 ? (
-          <div style={{ fontSize: 11, opacity: 0.66 }}>
-            <span style={{ opacity: 0.8 }}>why: </span>
-            {evidence.join(' · ')}
+    <div style={{ ...rowCardStyle, opacity: checked ? 1 : 0.7 }}>
+      {/* Collapsed header */}
+      <div style={{ display: 'grid', gridTemplateColumns: 'auto minmax(0, 1fr) auto', gap: 10, alignItems: 'start' }}>
+        <input
+          type="checkbox"
+          checked={checked}
+          onChange={onToggle}
+          style={{ marginTop: 3 }}
+          aria-label={`Include ${candidate.model}`}
+        />
+        <div style={{ display: 'grid', gap: 4, minWidth: 0 }}>
+          <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+            <span style={{ fontSize: 14, fontWeight: 700 }}>{candidate.model}</span>
+            <TrustBadge state="ai_generated" />
+            {candidate.pattern ? <Pill>{candidate.pattern}</Pill> : null}
+            {candidate.grain ? <span style={{ fontSize: 11, opacity: 0.6 }}>grain {candidate.grain}</span> : null}
           </div>
-        ) : null}
+          {evidence.length > 0 ? (
+            <div style={{ fontSize: 11, opacity: 0.66 }}>
+              <span style={{ opacity: 0.8 }}>why: </span>
+              {evidence.join(' · ')}
+            </div>
+          ) : null}
+        </div>
+        <button type="button" onClick={toggleExpanded} aria-expanded={expanded} style={disclosureToggleStyle}>
+          {expanded ? <ChevronDown size={13} /> : <ChevronRight size={13} />}
+          {expanded ? 'Hide' : 'Details'}
+        </button>
       </div>
-    </label>
+
+      {/* Expanded body */}
+      {expanded ? (
+        <div style={expandedBodyStyle}>
+          {previewLoading ? (
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 12, opacity: 0.75 }}>
+              <Loader2 size={13} className="spin" /> Loading the generated SQL and verdict…
+            </div>
+          ) : previewError ? (
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 12, color: 'var(--status-error, #cf222e)' }}>
+              <AlertTriangle size={14} /> {previewError}
+            </div>
+          ) : (
+            <>
+              {description ? <div style={{ fontSize: 12, opacity: 0.82, lineHeight: 1.5 }}>{description}</div> : null}
+
+              <div style={{ display: 'grid', gap: 5 }}>
+                <SectionLabel>SQL this block will run</SectionLabel>
+                {sqlPreview ? (
+                  <pre style={codeBlockStyle}>
+                    <code style={{ fontFamily: 'var(--font-mono, monospace)', fontSize: 11.5, whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>
+                      {sqlPreview.trim()}
+                    </code>
+                  </pre>
+                ) : (
+                  <div style={{ fontSize: 11.5, opacity: 0.6 }}>The generated SQL is not available for this model yet.</div>
+                )}
+              </div>
+
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: 12 }}>
+                <div style={{ display: 'grid', gap: 5, alignContent: 'start' }}>
+                  <SectionLabel>Outputs</SectionLabel>
+                  {outputs.length > 0 ? (
+                    <div style={{ display: 'flex', flexWrap: 'wrap', gap: 5 }}>
+                      {outputs.map((output) => <Chip key={output}>{output}</Chip>)}
+                    </div>
+                  ) : (
+                    <div style={{ fontSize: 11, opacity: 0.6 }}>No declared outputs yet.</div>
+                  )}
+                </div>
+                <div style={{ display: 'grid', gap: 5, alignContent: 'start' }}>
+                  <SectionLabel>Answers questions like</SectionLabel>
+                  {examples.length > 0 ? (
+                    <ul style={{ margin: 0, padding: '0 0 0 16px', display: 'grid', gap: 3 }}>
+                      {examples.slice(0, 3).map((example) => (
+                        <li key={example} style={{ fontSize: 11.5, opacity: 0.82, lineHeight: 1.45 }}>{example}</li>
+                      ))}
+                    </ul>
+                  ) : (
+                    <div style={{ fontSize: 11, opacity: 0.6 }}>No example questions yet.</div>
+                  )}
+                </div>
+              </div>
+
+              <CertifierVerdict verdict={verdict} />
+
+              <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+                <button type="button" onClick={() => void openInStudio()} disabled={opening} style={{ ...primaryRowButtonStyle, opacity: opening ? 0.65 : 1 }}>
+                  {opening ? <Loader2 size={13} className="spin" /> : <Blocks size={13} />}
+                  {opening ? 'Opening…' : 'Open in Block Studio'}
+                </button>
+                <button type="button" onClick={refineWithAi} style={ghostRowButtonStyle}>
+                  <Wand2 size={13} /> Refine with AI
+                </button>
+              </div>
+              {openError ? (
+                <div style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 11.5, color: 'var(--status-error, #cf222e)' }}>
+                  <AlertTriangle size={13} /> {openError}
+                </div>
+              ) : null}
+            </>
+          )}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+function CertifierVerdict({ verdict }: { verdict?: { blocking: string[]; warnings: string[]; ready: boolean } }): JSX.Element {
+  const ready = Boolean(verdict?.ready && verdict.blocking.length === 0);
+  const notes = verdict ? [...verdict.blocking, ...verdict.warnings] : [];
+  return (
+    <div style={{ display: 'grid', gap: 5 }}>
+      <SectionLabel>What's missing to certify</SectionLabel>
+      {ready ? (
+        <div style={{ display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: 12, color: 'var(--status-success, #1f883d)' }}>
+          <CheckCircle2 size={14} /> Grain, outputs, and context are set.
+        </div>
+      ) : (
+        <div style={{ display: 'grid', gap: 4 }}>
+          <div style={{ display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: 12, color: 'var(--status-warning, #9a6700)' }}>
+            <AlertTriangle size={14} /> Needs an owner and passing tests before it can be certified.
+          </div>
+          {notes.length > 0 ? (
+            <ul style={{ margin: 0, padding: '0 0 0 16px', display: 'grid', gap: 2 }}>
+              {notes.map((note) => <li key={note} style={{ fontSize: 11, opacity: 0.78, lineHeight: 1.4 }}>{note}</li>)}
+            </ul>
+          ) : !verdict ? (
+            <div style={{ fontSize: 11, opacity: 0.6 }}>Expand to load the Certifier verdict.</div>
+          ) : null}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function SectionLabel({ children }: { children: React.ReactNode }): JSX.Element {
+  return (
+    <div style={{ fontSize: 10, fontWeight: 800, letterSpacing: '0.05em', textTransform: 'uppercase', opacity: 0.55 }}>
+      {children}
+    </div>
+  );
+}
+
+function Chip({ children }: { children: React.ReactNode }): JSX.Element {
+  return (
+    <span style={{
+      fontSize: 11,
+      fontWeight: 600,
+      padding: '3px 8px',
+      borderRadius: 6,
+      border: '1px solid var(--border-color, rgba(0,0,0,0.12))',
+      background: 'var(--surface-hover, rgba(0,0,0,0.04))',
+      fontFamily: 'var(--font-mono, monospace)',
+    }}>
+      {children}
+    </span>
   );
 }
 
@@ -310,7 +575,7 @@ const domainHeaderStyle: CSSProperties = {
   borderBottom: '1px solid var(--border-color, rgba(0,0,0,0.08))',
 };
 
-const rowStyle: CSSProperties = {
+const rowCardStyle: CSSProperties = {
   width: '100%',
   border: '1px solid var(--border-color, rgba(0,0,0,0.10))',
   borderLeft: '3px solid var(--status-warning, #9a6700)',
@@ -318,10 +583,86 @@ const rowStyle: CSSProperties = {
   background: 'var(--surface, rgba(0,0,0,0.02))',
   padding: 10,
   display: 'grid',
-  gridTemplateColumns: 'auto minmax(0, 1fr)',
   gap: 10,
-  alignItems: 'start',
+};
+
+const expandedBodyStyle: CSSProperties = {
+  borderTop: '1px solid var(--border-color, rgba(0,0,0,0.08))',
+  paddingTop: 10,
+  marginLeft: 26,
+  display: 'grid',
+  gap: 12,
+};
+
+const disclosureToggleStyle: CSSProperties = {
+  display: 'inline-flex',
+  alignItems: 'center',
+  gap: 4,
+  padding: '4px 8px',
+  borderRadius: 6,
+  border: '1px solid var(--border-color, rgba(0,0,0,0.12))',
+  background: 'transparent',
+  color: 'inherit',
+  fontSize: 11,
+  fontWeight: 600,
   cursor: 'pointer',
+  whiteSpace: 'nowrap',
+  alignSelf: 'start',
+};
+
+const codeBlockStyle: CSSProperties = {
+  margin: 0,
+  border: '1px solid var(--border-color, rgba(0,0,0,0.12))',
+  borderRadius: 8,
+  background: 'var(--color-bg-primary, rgba(0,0,0,0.03))',
+  padding: '9px 11px',
+  overflow: 'auto',
+  maxHeight: 280,
+};
+
+const primaryRowButtonStyle: CSSProperties = {
+  display: 'inline-flex',
+  alignItems: 'center',
+  gap: 6,
+  padding: '6px 11px',
+  borderRadius: 6,
+  border: '1px solid var(--color-accent-blue, #6b5dd3)',
+  background: 'var(--color-accent-blue, #6b5dd3)',
+  color: '#fff',
+  fontSize: 12,
+  fontWeight: 650,
+  cursor: 'pointer',
+  whiteSpace: 'nowrap',
+};
+
+const ghostRowButtonStyle: CSSProperties = {
+  display: 'inline-flex',
+  alignItems: 'center',
+  gap: 6,
+  padding: '6px 11px',
+  borderRadius: 6,
+  border: '1px solid var(--border-color, rgba(0,0,0,0.12))',
+  background: 'transparent',
+  color: 'inherit',
+  fontSize: 12,
+  fontWeight: 600,
+  cursor: 'pointer',
+  whiteSpace: 'nowrap',
+};
+
+const askAiButtonStyle: CSSProperties = {
+  display: 'inline-flex',
+  alignItems: 'center',
+  gap: 6,
+  padding: '7px 13px',
+  borderRadius: 7,
+  border: '1px solid var(--color-clay, #b4593f)',
+  background: 'var(--color-clay, #b4593f)',
+  color: '#fff',
+  fontSize: 12.5,
+  fontWeight: 700,
+  cursor: 'pointer',
+  whiteSpace: 'nowrap',
 };
 
 const statStyle: CSSProperties = {

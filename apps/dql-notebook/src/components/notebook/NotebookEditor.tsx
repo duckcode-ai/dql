@@ -1,6 +1,6 @@
 import type { Theme } from '../../themes/notebook-theme';
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
-import { Clock3, History, Sparkles, X } from 'lucide-react';
+import { Clock3, Hammer, History, Sparkles, X } from 'lucide-react';
 import { makeCell, useNotebook } from '../../store/NotebookStore';
 import { themes } from '../../themes/notebook-theme';
 import { api, type NotebookResearchRun } from '../../api/client';
@@ -9,8 +9,10 @@ import { CellList } from './CellList';
 import { DashboardView } from './DashboardView';
 import { DocumentMetadataRow } from './DocumentMetadataRow';
 import { AgentChatPanel, type AgentAnswerCompletePayload } from '../agent/AgentChatPanel';
+import { AiBuildResult, useOpenBlockInStudio } from '../agent/AiBuildResult';
 import { SaveAsBlockModal } from '../modals/SaveAsBlockModal';
 import type { AgentAnswerEnvelope } from '../agent/AgentAnswerCard';
+import type { AiBuildTarget } from '../../store/types';
 import {
   emitNotebookResearchChanged,
   notebookResearchSourceCellOption,
@@ -120,6 +122,21 @@ export function NotebookEditor({ onOpenFile, registerCellRef }: NotebookEditorPr
     setAiSourceCellId(cell.id);
     setAiOpen(true);
   }, [aiSourceCellId, dispatch]);
+
+  // Build(target:'cell') → insert/replace the active SQL cell's source. If the
+  // source cell is a SQL cell, replace it in place; otherwise add a new cell.
+  const insertOrReplaceCellSql = useCallback((sql: string) => {
+    const trimmed = sql.trim();
+    if (!trimmed) return;
+    if (aiSourceCell && aiSourceCell.type === 'sql') {
+      dispatch({ type: 'UPDATE_CELL', id: aiSourceCell.id, updates: { content: trimmed } });
+      return;
+    }
+    const cell = makeCell('sql', trimmed);
+    cell.name = safeCellName('AI SQL draft');
+    dispatch({ type: 'ADD_CELL', cell, afterId: aiSourceCellId ?? undefined });
+    setAiSourceCellId(cell.id);
+  }, [aiSourceCell, aiSourceCellId, dispatch]);
 
   const createAiBlockDraft = useCallback((sql: string, meta: { title?: string; description?: string; tags?: string[] }) => {
     const trimmed = sql.trim();
@@ -275,6 +292,7 @@ export function NotebookEditor({ onOpenFile, registerCellRef }: NotebookEditorPr
             onClose={() => setAiOpen(false)}
             onToggleHistory={() => setAiHistoryOpen((open) => !open)}
             onInsertSql={insertAiSqlCell}
+            onInsertCellSql={insertOrReplaceCellSql}
             onCreateBlock={createAiBlockDraft}
             onAnswerComplete={saveAiHistory}
             onAskFromHistory={askFromHistory}
@@ -439,6 +457,7 @@ function NotebookAiDrawer({
   onClose,
   onToggleHistory,
   onInsertSql,
+  onInsertCellSql,
   onCreateBlock,
   onAnswerComplete,
   onAskFromHistory,
@@ -454,11 +473,16 @@ function NotebookAiDrawer({
   onClose: () => void;
   onToggleHistory: () => void;
   onInsertSql: (sql: string, title?: string) => void;
+  onInsertCellSql: (sql: string) => void;
   onCreateBlock: (sql: string, meta: { title?: string; description?: string; tags?: string[] }) => void;
   onAnswerComplete: (payload: AgentAnswerCompletePayload) => void | Promise<void>;
   onAskFromHistory: (run: NotebookResearchRun) => void;
 }) {
   const { state } = useNotebook();
+  // Spec 14 — two intents, separated: Ask (governed Q&A) vs Build (clean
+  // artifact). The toggle never blends them; Build mounts AiBuildResult.
+  const [mode, setMode] = useState<'ask' | 'build'>('ask');
+  const openBlockInStudio = useOpenBlockInStudio();
   const sourceTitle = sourceCell
     ? `${sourceCell.type.toUpperCase()} cell${sourceCell.name ? ` · ${sourceCell.name}` : ''}`
     : 'Whole notebook';
@@ -466,6 +490,19 @@ function NotebookAiDrawer({
     ? 'This cell + dbt, semantic metadata, certified blocks, prior AI history'
     : 'Whole notebook + dbt, semantic metadata, certified blocks, prior AI history';
   const promptSet = notebookAiSuggestions(sourceCell);
+  const buildContext = sourceCell?.type === 'sql' && sourceCell.content.trim()
+    ? { cellSql: sourceCell.content }
+    : undefined;
+  const buildQuickActions: Array<{ label: string; prompt: string; target?: AiBuildTarget }> = sourceCell
+    ? [
+        { label: 'Build SQL', prompt: 'Generate SQL for this cell using dbt, semantic metadata, certified blocks, and warehouse schema as context.', target: 'cell' },
+        { label: 'Improve SQL', prompt: 'Improve this SQL: fix correctness, tighten grain and filters, and make reusable parameters explicit. Return read-only SQL.', target: 'cell' },
+        { label: 'Build DQL block', prompt: 'Turn this analysis into a reusable draft DQL block with a clear grain, declared outputs, and parameters.', target: 'block' },
+      ]
+    : [
+        { label: 'Build SQL', prompt: 'Generate a new SQL cell for this notebook using dbt, semantic metadata, certified blocks, and warehouse schema as context.', target: 'cell' },
+        { label: 'Build DQL block', prompt: 'Draft a reusable DQL block for this notebook with a clear grain, declared outputs, and parameters.', target: 'block' },
+      ];
 
   return (
     <aside
@@ -533,6 +570,50 @@ function NotebookAiDrawer({
         </button>
       </div>
 
+      {/* Ask ⇄ Build mode toggle — two intents, never blended. */}
+      <div
+        style={{
+          padding: '8px 12px',
+          borderBottom: `1px solid ${t.headerBorder}`,
+          display: 'flex',
+          gap: 6,
+        }}
+      >
+        <div role="group" aria-label="AI mode" style={{ display: 'inline-flex', padding: 2, gap: 2, border: `1px solid ${t.btnBorder}`, borderRadius: 8, background: t.btnBg }}>
+          {(['ask', 'build'] as const).map((value) => {
+            const active = mode === value;
+            return (
+              <button
+                key={value}
+                type="button"
+                onClick={() => setMode(value)}
+                aria-pressed={active}
+                style={{
+                  display: 'inline-flex',
+                  alignItems: 'center',
+                  gap: 5,
+                  padding: '5px 12px',
+                  borderRadius: 6,
+                  border: '1px solid transparent',
+                  background: active ? t.accent : 'transparent',
+                  color: active ? '#ffffff' : t.textSecondary,
+                  fontSize: 12,
+                  fontWeight: active ? 800 : 600,
+                  fontFamily: t.font,
+                  cursor: 'pointer',
+                }}
+              >
+                {value === 'ask' ? <Sparkles size={13} strokeWidth={2} /> : <Hammer size={13} strokeWidth={2} />}
+                {value === 'ask' ? 'Ask' : 'Build'}
+              </button>
+            );
+          })}
+        </div>
+        <span style={{ fontSize: 11, color: t.textMuted, fontFamily: t.font, alignSelf: 'center' }}>
+          {mode === 'ask' ? 'Answer a question' : 'Generate a cell or block'}
+        </span>
+      </div>
+
       {historyOpen && (
         <NotebookAiHistoryPanel
           t={t}
@@ -544,26 +625,38 @@ function NotebookAiDrawer({
       )}
 
       <div style={{ flex: 1, minHeight: 0 }}>
-        <AgentChatPanel
-          key={`${notebookPath ?? 'notebook'}:${sourceCell?.id ?? 'all'}`}
-          title="Notebook AI"
-          scopeHint={scopeHint}
-          upstreamContext={upstreamContext}
-          themeMode={state.themeMode}
-          initialInput={initialInput}
-          autoAsk={autoAsk}
-          emptyHint={sourceCell
-            ? 'Ask about this cell, build or fix SQL, find existing DQL reuse, inspect lineage, or prepare the next DQL draft step.'
-            : 'Ask across the notebook, review SQL readiness, find existing DQL reuse, summarize findings, or plan the next cells.'}
-          inputPlaceholder={sourceCell ? 'Ask about this cell...' : 'Ask about this notebook...'}
-          suggestions={promptSet}
-          embedded
-          showHeader={false}
-          collapseInputAfterAnswer
-          onInsertSql={onInsertSql}
-          onCreateBlock={onCreateBlock}
-          onAnswerComplete={onAnswerComplete}
-        />
+        {mode === 'build' ? (
+          <AiBuildResult
+            key={`build:${notebookPath ?? 'notebook'}:${sourceCell?.id ?? 'all'}`}
+            themeMode={state.themeMode}
+            initialTarget="cell"
+            context={buildContext}
+            quickActions={buildQuickActions}
+            onInsertCell={onInsertCellSql}
+            onOpenBlock={(path, name) => { void openBlockInStudio(path, name); }}
+          />
+        ) : (
+          <AgentChatPanel
+            key={`${notebookPath ?? 'notebook'}:${sourceCell?.id ?? 'all'}`}
+            title="Notebook AI"
+            scopeHint={scopeHint}
+            upstreamContext={upstreamContext}
+            themeMode={state.themeMode}
+            initialInput={initialInput}
+            autoAsk={autoAsk}
+            emptyHint={sourceCell
+              ? 'Ask about this cell, find existing DQL reuse, inspect lineage, or summarize findings. Switch to Build to generate a cell or block.'
+              : 'Ask across the notebook, review SQL readiness, find existing DQL reuse, or summarize findings. Switch to Build to generate a cell or block.'}
+            inputPlaceholder={sourceCell ? 'Ask about this cell...' : 'Ask about this notebook...'}
+            suggestions={promptSet}
+            embedded
+            showHeader={false}
+            collapseInputAfterAnswer
+            onInsertSql={onInsertSql}
+            onCreateBlock={onCreateBlock}
+            onAnswerComplete={onAnswerComplete}
+          />
+        )}
       </div>
     </aside>
   );
