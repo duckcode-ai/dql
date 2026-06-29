@@ -11,6 +11,9 @@ import { makeCtx } from './_helpers.js';
 const FIXTURE = fileURLToPath(
   new URL('./fixtures/enterprise-modeling-foundation.datalex-manifest.json', import.meta.url),
 );
+const JAFFLE_FIXTURE = fileURLToPath(
+  new URL('./fixtures/jaffle-shop.datalex-manifest.json', import.meta.url),
+);
 
 type GuidanceRegistry = Parameters<typeof buildDataLexJoinGuidance>[0];
 
@@ -92,6 +95,30 @@ describe('buildDataLexJoinGuidance — real enterprise-modeling-foundation manif
       on: 'Order.customer_id = Customer.customer_id',
     });
     expect(joinGuidance.guidance).toMatch(/without fan-out/);
+  });
+});
+
+describe('buildDataLexJoinGuidance — physical-anchored (jaffle-shop diagram-only manifest)', () => {
+  const registry = new DataLexContractRegistry({ manifestPath: JAFFLE_FIXTURE });
+
+  it('resolves dbt-table refs to grain-safe guidance even with no logical<->physical links', () => {
+    // jaffle authors its model only as diagrams; the physical tables anchor the
+    // conformance concepts directly (DimCustomers -> dim_customers, etc.).
+    const guidance = buildDataLexJoinGuidance(registry, ['dim_customers', 'fct_orders']);
+    expect(guidance).toBeDefined();
+
+    const byConcept = Object.fromEntries(guidance!.entities.map((e) => [e.concept, e]));
+    expect(byConcept.DimCustomers).toMatchObject({ canonicalKey: ['customer_id'], physical: ['dim_customers'] });
+    expect(byConcept.FctOrders).toMatchObject({ canonicalKey: ['order_id'], physical: ['fct_orders'] });
+
+    const join = guidance!.joins.find((j) => j.from === 'FctOrders' && j.to === 'DimCustomers');
+    expect(join).toMatchObject({
+      from: 'FctOrders',
+      to: 'DimCustomers',
+      cardinality: 'many_to_one',
+      fansOut: false,
+      on: 'FctOrders.customer_id = DimCustomers.customer_id',
+    });
   });
 });
 

@@ -1,0 +1,751 @@
+{
+  "manifestSpecVersion": "1.0.0",
+  "datalexVersion": "1.11.0",
+  "generatedAt": "2026-06-29T05:08:30Z",
+  "project": {
+    "name": "jaffle_shop_datalex"
+  },
+  "domains": [
+    {
+      "name": "commerce",
+      "entities": [
+        {
+          "name": "Customer",
+          "description": "Person or organization that places jaffle shop orders."
+        },
+        {
+          "name": "Customer",
+          "description": "Customer business entity with lifecycle attributes.",
+          "fields": [
+            {
+              "name": "customer_email",
+              "type": "string",
+              "tags": [
+                "pii"
+              ]
+            },
+            {
+              "name": "customer_key",
+              "type": "number",
+              "primary_key": true,
+              "nullable": false
+            },
+            {
+              "name": "customer_name",
+              "type": "string",
+              "nullable": false
+            },
+            {
+              "name": "customer_type",
+              "type": "string"
+            }
+          ]
+        },
+        {
+          "name": "DimCustomers",
+          "description": "Customer dimension with order history and lifetime value. dbt YAML: models/marts/core/dim_customers.yml",
+          "tags": [
+            "dbt",
+            "mart",
+            "dimension"
+          ],
+          "fields": [
+            {
+              "name": "customer_id",
+              "type": "integer",
+              "primary_key": true,
+              "nullable": false
+            },
+            {
+              "name": "customer_name",
+              "type": "varchar",
+              "nullable": false
+            },
+            {
+              "name": "first_order_at",
+              "type": "timestamp"
+            },
+            {
+              "name": "lifetime_value",
+              "type": "double"
+            },
+            {
+              "name": "most_recent_order_at",
+              "type": "timestamp"
+            },
+            {
+              "name": "number_of_orders",
+              "type": "integer"
+            }
+          ],
+          "binding": {
+            "kind": "table",
+            "ref": "dim_customers"
+          }
+        },
+        {
+          "name": "FctOrders",
+          "description": "Order fact table at one row per customer order. dbt YAML: models/marts/core/fct_orders.yml",
+          "tags": [
+            "dbt",
+            "mart",
+            "fact"
+          ],
+          "fields": [
+            {
+              "name": "customer_id",
+              "type": "integer",
+              "nullable": false
+            },
+            {
+              "name": "order_cost",
+              "type": "double"
+            },
+            {
+              "name": "order_id",
+              "type": "integer",
+              "primary_key": true,
+              "nullable": false
+            },
+            {
+              "name": "order_margin",
+              "type": "double"
+            },
+            {
+              "name": "order_total",
+              "type": "double"
+            },
+            {
+              "name": "ordered_at",
+              "type": "timestamp",
+              "nullable": false
+            },
+            {
+              "name": "tax_paid",
+              "type": "double"
+            }
+          ],
+          "binding": {
+            "kind": "table",
+            "ref": "fct_orders"
+          }
+        },
+        {
+          "name": "Order",
+          "description": "Commercial event where a customer buys one or more products."
+        },
+        {
+          "name": "OrderItem",
+          "description": "A single product purchased as part of an order."
+        },
+        {
+          "name": "OrderItems",
+          "description": "Order line bridge that resolves orders to products. dbt YAML: models/marts/core/order_items.yml",
+          "tags": [
+            "dbt",
+            "mart",
+            "bridge"
+          ],
+          "fields": [
+            {
+              "name": "item_price",
+              "type": "double"
+            },
+            {
+              "name": "order_id",
+              "type": "integer",
+              "nullable": false
+            },
+            {
+              "name": "order_item_id",
+              "type": "varchar",
+              "primary_key": true,
+              "nullable": false
+            },
+            {
+              "name": "product_id",
+              "type": "varchar",
+              "nullable": false
+            },
+            {
+              "name": "quantity",
+              "type": "integer",
+              "nullable": false
+            },
+            {
+              "name": "supply_cost",
+              "type": "double"
+            }
+          ],
+          "binding": {
+            "kind": "table",
+            "ref": "order_items"
+          }
+        },
+        {
+          "name": "OrderLine",
+          "description": "Associative entity resolving the many-to-many relationship between orders and products.",
+          "fields": [
+            {
+              "name": "order_key",
+              "type": "number",
+              "nullable": false
+            },
+            {
+              "name": "order_line_key",
+              "type": "number",
+              "primary_key": true,
+              "nullable": false
+            },
+            {
+              "name": "product_key",
+              "type": "string",
+              "nullable": false
+            },
+            {
+              "name": "product_price",
+              "type": "money"
+            },
+            {
+              "name": "supply_cost",
+              "type": "money"
+            }
+          ]
+        },
+        {
+          "name": "OrderPlaced",
+          "description": "An order was recorded against the customer (past tense fact)."
+        },
+        {
+          "name": "PaymentReceived",
+          "description": "Funds cleared for this order."
+        },
+        {
+          "name": "PlaceOrder",
+          "description": "Customer's intent to buy \u2014 a basket of items + payment details."
+        },
+        {
+          "name": "Product",
+          "description": "Sellable jaffle or beverage in the product catalog."
+        },
+        {
+          "name": "Product",
+          "description": "Product catalog entity for menu items.",
+          "fields": [
+            {
+              "name": "product_key",
+              "type": "string",
+              "primary_key": true,
+              "nullable": false
+            },
+            {
+              "name": "product_name",
+              "type": "string",
+              "nullable": false
+            },
+            {
+              "name": "product_price",
+              "type": "money"
+            },
+            {
+              "name": "product_type",
+              "type": "string"
+            }
+          ]
+        },
+        {
+          "name": "SalesOrder",
+          "description": "Header-level order event placed by a customer.",
+          "fields": [
+            {
+              "name": "customer_key",
+              "type": "number",
+              "nullable": false
+            },
+            {
+              "name": "location_key",
+              "type": "number"
+            },
+            {
+              "name": "order_key",
+              "type": "number",
+              "primary_key": true,
+              "nullable": false
+            },
+            {
+              "name": "order_total",
+              "type": "money"
+            },
+            {
+              "name": "ordered_at",
+              "type": "timestamp"
+            },
+            {
+              "name": "tax_paid",
+              "type": "money"
+            }
+          ]
+        },
+        {
+          "name": "SendOrderConfirmation",
+          "description": "When OrderPlaced and PaymentReceived have both fired, dispatch the confirmation email and trigger fulfillment."
+        },
+        {
+          "name": "StgProducts",
+          "description": "Cleaned product staging model from the raw product seed. dbt YAML: models/staging/jaffle_shop/stg_products.yml",
+          "tags": [
+            "dbt",
+            "staging"
+          ],
+          "fields": [
+            {
+              "name": "product_id",
+              "type": "varchar",
+              "primary_key": true,
+              "nullable": false
+            },
+            {
+              "name": "product_name",
+              "type": "varchar",
+              "nullable": false
+            },
+            {
+              "name": "product_price",
+              "type": "double"
+            },
+            {
+              "name": "product_type",
+              "type": "varchar"
+            }
+          ],
+          "binding": {
+            "kind": "table",
+            "ref": "stg_products"
+          }
+        },
+        {
+          "name": "Supply",
+          "description": "Ingredient or packaging cost component required to fulfill products."
+        },
+        {
+          "name": "SupplyComponent",
+          "description": "Supply component and cost used by products.",
+          "fields": [
+            {
+              "name": "is_perishable_supply",
+              "type": "boolean"
+            },
+            {
+              "name": "product_key",
+              "type": "string",
+              "nullable": false
+            },
+            {
+              "name": "supply_component_key",
+              "type": "string",
+              "primary_key": true,
+              "nullable": false
+            },
+            {
+              "name": "supply_cost",
+              "type": "money"
+            },
+            {
+              "name": "supply_id",
+              "type": "number"
+            },
+            {
+              "name": "supply_name",
+              "type": "string"
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "relationships": [
+    {
+      "name": "customer_issues_place_order",
+      "type": "reference",
+      "layer": "conceptual",
+      "from": {
+        "domain": "commerce",
+        "entity": "Customer"
+      },
+      "to": {
+        "domain": "commerce",
+        "entity": "PlaceOrder"
+      },
+      "cardinality": "one_to_many",
+      "description": "Customers issue PlaceOrder commands when they check out."
+    },
+    {
+      "name": "customer_places_order",
+      "type": "reference",
+      "layer": "conceptual",
+      "from": {
+        "domain": "commerce",
+        "entity": "Customer"
+      },
+      "to": {
+        "domain": "commerce",
+        "entity": "Order"
+      },
+      "cardinality": "one_to_many",
+      "description": "A customer can place many orders; each order is placed by one customer."
+    },
+    {
+      "name": "customer_places_sales_order",
+      "type": "reference",
+      "layer": "logical",
+      "from": {
+        "domain": "commerce",
+        "entity": "SalesOrder",
+        "column": "customer_key"
+      },
+      "to": {
+        "domain": "commerce",
+        "entity": "Customer",
+        "column": "customer_key"
+      },
+      "cardinality": "many_to_one",
+      "description": "Every sales order belongs to one customer; customers can place many orders."
+    },
+    {
+      "name": "fct_orders_customer_fk",
+      "type": "reference",
+      "layer": "physical",
+      "from": {
+        "domain": "commerce",
+        "entity": "FctOrders",
+        "column": "customer_id"
+      },
+      "to": {
+        "domain": "commerce",
+        "entity": "DimCustomers",
+        "column": "customer_id"
+      },
+      "cardinality": "many_to_one",
+      "optional": false
+    },
+    {
+      "name": "order_contains_order_item",
+      "type": "reference",
+      "layer": "conceptual",
+      "from": {
+        "domain": "commerce",
+        "entity": "Order"
+      },
+      "to": {
+        "domain": "commerce",
+        "entity": "OrderItem"
+      },
+      "cardinality": "one_to_many",
+      "description": "An order contains one or more order items."
+    },
+    {
+      "name": "order_emits_order_placed",
+      "type": "reference",
+      "layer": "conceptual",
+      "from": {
+        "domain": "commerce",
+        "entity": "Order"
+      },
+      "to": {
+        "domain": "commerce",
+        "entity": "OrderPlaced"
+      },
+      "cardinality": "one_to_many",
+      "description": "A successful PlaceOrder produces an OrderPlaced event."
+    },
+    {
+      "name": "order_emits_payment_received",
+      "type": "reference",
+      "layer": "conceptual",
+      "from": {
+        "domain": "commerce",
+        "entity": "Order"
+      },
+      "to": {
+        "domain": "commerce",
+        "entity": "PaymentReceived"
+      },
+      "cardinality": "one_to_many",
+      "description": "When the payment processor reports a clear, the aggregate emits PaymentReceived."
+    },
+    {
+      "name": "order_item_describes_product",
+      "type": "reference",
+      "layer": "conceptual",
+      "from": {
+        "domain": "commerce",
+        "entity": "OrderItem"
+      },
+      "to": {
+        "domain": "commerce",
+        "entity": "Product"
+      },
+      "cardinality": "many_to_one",
+      "description": "Each order item identifies the product that was purchased."
+    },
+    {
+      "name": "order_items_order_fk",
+      "type": "reference",
+      "layer": "physical",
+      "from": {
+        "domain": "commerce",
+        "entity": "OrderItems",
+        "column": "order_id"
+      },
+      "to": {
+        "domain": "commerce",
+        "entity": "FctOrders",
+        "column": "order_id"
+      },
+      "cardinality": "many_to_one",
+      "optional": false
+    },
+    {
+      "name": "order_items_product_fk",
+      "type": "reference",
+      "layer": "physical",
+      "from": {
+        "domain": "commerce",
+        "entity": "OrderItems",
+        "column": "product_id"
+      },
+      "to": {
+        "domain": "commerce",
+        "entity": "StgProducts",
+        "column": "product_id"
+      },
+      "cardinality": "many_to_one",
+      "optional": false
+    },
+    {
+      "name": "order_line_identifies_product",
+      "type": "reference",
+      "layer": "logical",
+      "from": {
+        "domain": "commerce",
+        "entity": "OrderLine",
+        "column": "product_key"
+      },
+      "to": {
+        "domain": "commerce",
+        "entity": "Product",
+        "column": "product_key"
+      },
+      "cardinality": "many_to_one"
+    },
+    {
+      "name": "order_placed_triggers_policy",
+      "type": "reference",
+      "layer": "conceptual",
+      "from": {
+        "domain": "commerce",
+        "entity": "OrderPlaced"
+      },
+      "to": {
+        "domain": "commerce",
+        "entity": "SendOrderConfirmation"
+      },
+      "cardinality": "one_to_many",
+      "description": "OrderPlaced wakes the SendOrderConfirmation policy."
+    },
+    {
+      "name": "payment_received_triggers_policy",
+      "type": "reference",
+      "layer": "conceptual",
+      "from": {
+        "domain": "commerce",
+        "entity": "PaymentReceived"
+      },
+      "to": {
+        "domain": "commerce",
+        "entity": "SendOrderConfirmation"
+      },
+      "cardinality": "one_to_many",
+      "description": "PaymentReceived also feeds the SendOrderConfirmation policy; both events must arrive before it fires."
+    },
+    {
+      "name": "place_order_handled_by_order",
+      "type": "reference",
+      "layer": "conceptual",
+      "from": {
+        "domain": "commerce",
+        "entity": "PlaceOrder"
+      },
+      "to": {
+        "domain": "commerce",
+        "entity": "Order"
+      },
+      "cardinality": "many_to_one",
+      "description": "The Order aggregate handles PlaceOrder and decides whether it succeeds."
+    },
+    {
+      "name": "product_consumes_supply",
+      "type": "reference",
+      "layer": "conceptual",
+      "from": {
+        "domain": "commerce",
+        "entity": "Product"
+      },
+      "to": {
+        "domain": "commerce",
+        "entity": "Supply"
+      },
+      "cardinality": "one_to_many",
+      "description": "Products consume one or more supply components for fulfillment."
+    },
+    {
+      "name": "sales_order_contains_order_line",
+      "type": "reference",
+      "layer": "logical",
+      "from": {
+        "domain": "commerce",
+        "entity": "OrderLine",
+        "column": "order_key"
+      },
+      "to": {
+        "domain": "commerce",
+        "entity": "SalesOrder",
+        "column": "order_key"
+      },
+      "cardinality": "many_to_one",
+      "identifying": true
+    },
+    {
+      "name": "supply_component_belongs_to_product",
+      "type": "reference",
+      "layer": "logical",
+      "from": {
+        "domain": "commerce",
+        "entity": "SupplyComponent",
+        "column": "product_key"
+      },
+      "to": {
+        "domain": "commerce",
+        "entity": "Product",
+        "column": "product_key"
+      },
+      "cardinality": "many_to_one"
+    }
+  ],
+  "conformance": [
+    {
+      "concept": "Customer",
+      "domain": "commerce",
+      "layer": "logical",
+      "canonical_key": [
+        "customer_key"
+      ],
+      "business_key": [
+        "customer_name"
+      ]
+    },
+    {
+      "concept": "OrderLine",
+      "domain": "commerce",
+      "layer": "logical",
+      "canonical_key": [
+        "order_line_key"
+      ]
+    },
+    {
+      "concept": "Product",
+      "domain": "commerce",
+      "layer": "logical",
+      "canonical_key": [
+        "product_key"
+      ],
+      "business_key": [
+        "product_key"
+      ]
+    },
+    {
+      "concept": "SalesOrder",
+      "domain": "commerce",
+      "layer": "logical",
+      "canonical_key": [
+        "order_key"
+      ]
+    },
+    {
+      "concept": "SupplyComponent",
+      "domain": "commerce",
+      "layer": "logical",
+      "canonical_key": [
+        "supply_component_key"
+      ]
+    },
+    {
+      "concept": "DimCustomers",
+      "domain": "commerce",
+      "layer": "physical",
+      "canonical_key": [
+        "customer_id"
+      ],
+      "physical": [
+        {
+          "entity": "DimCustomers",
+          "binding": {
+            "kind": "table",
+            "ref": "dim_customers"
+          }
+        }
+      ]
+    },
+    {
+      "concept": "FctOrders",
+      "domain": "commerce",
+      "layer": "physical",
+      "canonical_key": [
+        "order_id"
+      ],
+      "physical": [
+        {
+          "entity": "FctOrders",
+          "binding": {
+            "kind": "table",
+            "ref": "fct_orders"
+          }
+        }
+      ]
+    },
+    {
+      "concept": "OrderItems",
+      "domain": "commerce",
+      "layer": "physical",
+      "canonical_key": [
+        "order_item_id"
+      ],
+      "physical": [
+        {
+          "entity": "OrderItems",
+          "binding": {
+            "kind": "table",
+            "ref": "order_items"
+          }
+        }
+      ]
+    },
+    {
+      "concept": "StgProducts",
+      "domain": "commerce",
+      "layer": "physical",
+      "canonical_key": [
+        "product_id"
+      ],
+      "physical": [
+        {
+          "entity": "StgProducts",
+          "binding": {
+            "kind": "table",
+            "ref": "stg_products"
+          }
+        }
+      ]
+    }
+  ]
+}
