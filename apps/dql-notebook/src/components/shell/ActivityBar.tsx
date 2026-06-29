@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { Home, Sparkles, GraduationCap, Boxes, MessageCircle } from 'lucide-react';
+import { GraduationCap, Boxes, MessageCircle, Settings, ListChecks } from 'lucide-react';
 import { Tooltip } from '@duckcodeailabs/dql-ui';
 import {
   FileText,
@@ -141,85 +141,36 @@ export function ActivityBar() {
     }
   }
 
-  const items: Array<{
-    key: SidebarPanel | 'home' | 'ask';
-    title: string;
-    icon: React.ReactNode;
-    active: boolean;
+  // Grouped, labelled navigation: Insights (deliver/consume) → Build (analyst
+  // create/explore) → Govern (configure/control). Home + Get Started moved into
+  // the onboarding flow (Settings → Setup); the app lands on Apps.
+  const navGroups: Array<{
+    label: string;
+    items: Array<{ key: SidebarPanel | 'ask'; title: string; icon: React.ReactNode; active: boolean }>;
   }> = [
     {
-      key: 'home',
-      title: 'Home',
-      icon: <Home size={16} strokeWidth={1.75} />,
-      active: state.mainView === 'home',
+      label: 'Insights',
+      items: [
+        { key: 'apps', title: 'Apps', icon: <Package size={16} strokeWidth={1.75} />, active: state.mainView === 'apps' },
+        { key: 'ask', title: 'Ask', icon: <MessageCircle size={16} strokeWidth={1.75} />, active: state.mainView === 'ask' },
+      ],
     },
     {
-      key: 'ask',
-      title: 'Ask',
-      icon: <MessageCircle size={16} strokeWidth={1.75} />,
-      active: state.mainView === 'ask',
+      label: 'Build',
+      items: [
+        { key: 'files', title: 'Notebooks', icon: <FileText size={16} strokeWidth={1.75} />, active: state.sidebarPanel === 'files' && state.sidebarOpen },
+        { key: 'block_library', title: 'Blocks', icon: <BlockIcon size={16} />, active: state.sidebarPanel === 'block_library' && state.sidebarOpen },
+        { key: 'lineage', title: 'Lineage', icon: <LineageNodeIcon size={16} />, active: state.mainView === 'lineage' || state.mainView === 'lineage_detail' },
+      ],
     },
     {
-      key: 'readiness',
-      title: 'Get Started',
-      icon: <Sparkles size={16} strokeWidth={1.75} />,
-      active: state.mainView === 'readiness' || state.mainView === 'review',
-    },
-    {
-      key: 'apps',
-      title: 'Apps',
-      icon: <Package size={16} strokeWidth={1.75} />,
-      active: state.mainView === 'apps',
-    },
-    {
-      key: 'files',
-      title: 'Notebooks',
-      icon: <FileText size={16} strokeWidth={1.75} />,
-      active: state.sidebarPanel === 'files' && state.sidebarOpen,
-    },
-    {
-      key: 'block_library',
-      title: 'Blocks',
-      icon: <BlockIcon size={16} />,
-      active: state.sidebarPanel === 'block_library' && state.sidebarOpen,
-    },
-  ];
-
-  const secondaryItems: Array<{
-    key: SidebarPanel;
-    title: string;
-    icon: React.ReactNode;
-    active: boolean;
-  }> = [
-    {
-      key: 'lineage',
-      title: 'Lineage',
-      icon: <LineageNodeIcon size={16} />,
-      active: state.mainView === 'lineage' || state.mainView === 'lineage_detail',
-    },
-    {
-      key: 'git',
-      title: 'Source control',
-      icon: <GitBranch size={16} strokeWidth={1.75} />,
-      active: state.mainView === 'git',
-    },
-    {
-      key: 'connection',
-      title: 'Connections',
-      icon: <Database size={16} strokeWidth={1.75} />,
-      active: state.mainView === 'connection',
-    },
-    {
-      key: 'domains',
-      title: 'Domains',
-      icon: <Boxes size={16} strokeWidth={1.75} />,
-      active: state.mainView === 'domains',
-    },
-    {
-      key: 'skills',
-      title: 'Skills',
-      icon: <GraduationCap size={16} strokeWidth={1.75} />,
-      active: state.mainView === 'skills',
+      label: 'Govern',
+      items: [
+        { key: 'connection', title: 'Connections', icon: <Database size={16} strokeWidth={1.75} />, active: state.mainView === 'connection' },
+        { key: 'domains', title: 'Domains', icon: <Boxes size={16} strokeWidth={1.75} />, active: state.mainView === 'domains' },
+        { key: 'skills', title: 'Skills', icon: <GraduationCap size={16} strokeWidth={1.75} />, active: state.mainView === 'skills' },
+        { key: 'git', title: 'Source control', icon: <GitBranch size={16} strokeWidth={1.75} />, active: state.mainView === 'git' },
+      ],
     },
   ];
 
@@ -230,6 +181,20 @@ export function ActivityBar() {
     active: boolean;
     onClick: () => void;
   }> = [
+    {
+      key: 'setup',
+      title: 'Setup',
+      icon: <ListChecks size={16} strokeWidth={1.75} />,
+      active: state.mainView === 'home' || state.mainView === 'readiness',
+      onClick: () => dispatch({ type: 'SET_MAIN_VIEW', view: 'home' }),
+    },
+    {
+      key: 'settings',
+      title: 'Settings',
+      icon: <Settings size={16} strokeWidth={1.75} />,
+      active: state.mainView === 'settings' || state.mainView === 'connection',
+      onClick: () => handlePanelClick('settings'),
+    },
     {
       key: 'reference',
       title: 'Reference',
@@ -304,30 +269,28 @@ export function ActivityBar() {
         </Tooltip>
       </div>
 
-      {items.map((item) => (
-        <RailItem
-          key={item.key}
-          title={item.title}
-          icon={item.icon}
-          active={item.active}
-          expanded={expanded}
-          onClick={() => handlePanelClick(item.key)}
-          t={t}
-        />
-      ))}
-
-      <div style={{ height: 1, margin: expanded ? '6px 10px' : '6px 12px', background: t.headerBorder }} />
-
-      {secondaryItems.map((item) => (
-        <RailItem
-          key={item.key ?? item.title}
-          title={item.title}
-          icon={item.icon}
-          active={item.active}
-          expanded={expanded}
-          onClick={() => handlePanelClick(item.key)}
-          t={t}
-        />
+      {navGroups.map((group, groupIndex) => (
+        <React.Fragment key={group.label}>
+          {groupIndex > 0 ? (
+            <div style={{ height: 1, margin: expanded ? '8px 10px 2px' : '8px 12px', background: t.headerBorder }} />
+          ) : null}
+          {expanded ? (
+            <div style={{ fontSize: 10, fontWeight: 600, color: t.textMuted, letterSpacing: '0.04em', padding: '4px 12px 2px' }}>
+              {group.label}
+            </div>
+          ) : null}
+          {group.items.map((item) => (
+            <RailItem
+              key={item.key}
+              title={item.title}
+              icon={item.icon}
+              active={item.active}
+              expanded={expanded}
+              onClick={() => handlePanelClick(item.key)}
+              t={t}
+            />
+          ))}
+        </React.Fragment>
       ))}
 
       <div style={{ flex: 1 }} />

@@ -44,7 +44,7 @@ function readInitialThemeMode(): 'obsidian' | 'paper' | 'white' {
 }
 
 const initialState: NotebookState = {
-  mainView: 'home',
+  mainView: 'apps',
   themeMode: readInitialThemeMode(),
   appMode: readInitialAppMode(),
   sidebarPanel: null,

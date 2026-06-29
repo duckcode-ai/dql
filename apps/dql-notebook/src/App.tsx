@@ -1,4 +1,4 @@
-import React, { useEffect } from 'react';
+import React, { useEffect, useRef } from 'react';
 import { ThemeProvider, TooltipProvider } from '@duckcodeailabs/dql-ui';
 import { NotebookProvider, useNotebook } from './store/NotebookStore';
 import { AppShell } from './components/shell/AppShell';
@@ -60,12 +60,20 @@ function AppInner() {
     document.documentElement.setAttribute('data-theme', luna);
   }, [state.themeMode]);
 
-  // Load notebooks on mount
+  // Load notebooks on mount + decide the initial landing once files are known.
+  const didLand = useRef(false);
   useEffect(() => {
     dispatch({ type: 'SET_FILES_LOADING', loading: true });
     api.listNotebooks().then((files) => {
       dispatch({ type: 'SET_FILES', files });
       dispatch({ type: 'SET_FILES_LOADING', loading: false });
+      // A set-up project stays on the default Apps view; a project with no
+      // governed blocks yet is routed into the onboarding flow.
+      if (!didLand.current) {
+        didLand.current = true;
+        const hasBlocks = files.some((file) => file.type === 'block');
+        if (!hasBlocks) dispatch({ type: 'SET_MAIN_VIEW', view: 'home' });
+      }
     });
   }, [dispatch]);
 
