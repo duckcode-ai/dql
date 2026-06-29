@@ -136,12 +136,28 @@ describe('agent run runtime API', () => {
       expect(blocked.run.status).toBe('blocked');
       expect(blocked.run.evaluations[0]?.id).toBe('executor-error');
 
+      const streamResponse = await fetch(`${base}/api/agent-runs?stream=1`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          question: 'Research churn by plan',
+          requestedMode: 'research',
+          selectedObject: { kind: 'notebook', path: 'notebooks/customer.dqlnb' },
+        }),
+      });
+      expect(streamResponse.status).toBe(200);
+      expect(streamResponse.headers.get('content-type')).toContain('text/event-stream');
+      const streamText = await streamResponse.text();
+      expect(streamText).toContain('event: agent-run-event');
+      expect(streamText).toContain('event: agent-run-complete');
+
       const listResponse = await fetch(`${base}/api/agent-runs?limit=5`);
       expect(listResponse.status).toBe(200);
       const listed = await listResponse.json() as { runs: any[]; total: number };
-      expect(listed.total).toBe(2);
+      expect(listed.total).toBe(3);
       expect(listed.runs.some((run) => run.id === created.run.id)).toBe(true);
       expect(listed.runs.some((run) => run.id === blocked.run.id)).toBe(true);
+      expect(readFileSync(join(projectRoot, '.dql', 'local', 'agent-runs.json'), 'utf-8')).toContain(created.run.id);
     } finally {
       await new Promise<void>((resolve) => {
         if (!server) {

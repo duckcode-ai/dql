@@ -514,6 +514,10 @@ export interface AgentRunListResponse {
   limit: number;
 }
 
+export type AgentRunStreamMessage =
+  | { kind: 'event'; event: AgentRunEvent }
+  | { kind: 'complete'; run: AgentRun };
+
 export interface NotebookResearchDiagnostics {
   counts: {
     totalRuns: number;
@@ -1151,6 +1155,55 @@ async function request<T>(path: string, options?: RequestInit): Promise<T> {
   return res.json() as Promise<T>;
 }
 
+async function streamAgentRunResponse(
+  res: Response,
+  onMessage: (message: AgentRunStreamMessage) => void,
+): Promise<AgentRun> {
+  if (!res.body) throw new Error('Agent run stream is not available in this browser.');
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = '';
+  let completed: AgentRun | undefined;
+
+  const consumeBlock = (block: string) => {
+    const lines = block.split(/\r?\n/);
+    let eventName = 'message';
+    const dataLines: string[] = [];
+    for (const line of lines) {
+      if (line.startsWith('event:')) eventName = line.slice(6).trim();
+      if (line.startsWith('data:')) dataLines.push(line.slice(5).trimStart());
+    }
+    if (dataLines.length === 0) return;
+    const payload = JSON.parse(dataLines.join('\n'));
+    if (eventName === 'agent-run-event') {
+      onMessage({ kind: 'event', event: payload as AgentRunEvent });
+    } else if (eventName === 'agent-run-complete') {
+      completed = payload as AgentRun;
+      onMessage({ kind: 'complete', run: completed });
+    } else if (eventName === 'agent-run-error') {
+      throw new Error(typeof payload?.error === 'string' ? payload.error : 'Agent run failed.');
+    }
+  };
+
+  while (true) {
+    const { value, done } = await reader.read();
+    if (value) {
+      buffer += decoder.decode(value, { stream: !done });
+      let separator = buffer.search(/\r?\n\r?\n/);
+      while (separator >= 0) {
+        const block = buffer.slice(0, separator);
+        buffer = buffer.slice(buffer[separator] === '\r' ? separator + 4 : separator + 2);
+        consumeBlock(block);
+        separator = buffer.search(/\r?\n\r?\n/);
+      }
+    }
+    if (done) break;
+  }
+  if (buffer.trim()) consumeBlock(buffer);
+  if (!completed) throw new Error('Agent run stream ended before completion.');
+  return completed;
+}
+
 function normalizeQueryResultPayload(raw: any): QueryResult {
   const columns: string[] = Array.isArray(raw?.columns)
     ? raw.columns.map((c: unknown) =>
@@ -1620,6 +1673,31 @@ export const api = {
       body: JSON.stringify(input),
     });
     return raw.run;
+  },
+
+  async createAgentRunStream(
+    input: CreateAgentRunInput,
+    onMessage: (message: AgentRunStreamMessage) => void,
+    signal?: AbortSignal,
+  ): Promise<AgentRun> {
+    let res: Response;
+    try {
+      res = await fetch(`${BASE}/api/agent-runs?stream=1`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(input),
+        signal,
+      });
+    } catch (error) {
+      if (signal?.aborted) throw error;
+      const detail = error instanceof Error && error.message ? ` ${error.message}` : '';
+      throw new Error(`Unable to reach the local DQL notebook server. Check that it is still running, then retry.${detail}`);
+    }
+    if (!res.ok) {
+      const text = await res.text().catch(() => '');
+      throw new Error(formatRequestError(res, text));
+    }
+    return streamAgentRunResponse(res, onMessage);
   },
 
   async listAgentRuns(input?: { limit?: number }): Promise<AgentRunListResponse> {

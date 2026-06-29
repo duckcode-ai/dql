@@ -80,9 +80,10 @@ import {
   propose,
   proposePlan,
   AgentRunEngine,
-  InMemoryAgentRunStore,
+  FileAgentRunStore,
   buildProposePreview,
   buildFromPrompt,
+  defaultAgentRunStorePath,
   resolveLocalOwner,
   resolveProposeConfig,
   recordQueryRun,
@@ -114,6 +115,7 @@ import {
   type AgentRun,
   type AgentRunArtifact,
   type AgentRunEvaluation,
+  type AgentRunEvent,
   type AgentRunExecutors,
   type AgentRunNextAction,
   type AgentRunRequest,
@@ -126,7 +128,7 @@ import {
   type PlanBlock,
 } from '@duckcodeailabs/dql-agent';
 import { gatherProposeEnrichment } from './propose-enrich.js';
-import { handleAppsApi, recommendVisualization } from './apps-api.js';
+import { createAppAiBuildSession, handleAppsApi, recommendVisualization } from './apps-api.js';
 import {
   getActiveProvider,
   getEffectiveProviderConfig,
@@ -142,7 +144,7 @@ import {
   runtimeVariables,
 } from './governance-runtime.js';
 import { LocalAppStorage, LocalNotebookResearchStorage, defaultLocalAppsDbPath, defaultNotebookResearchDbPath } from '@duckcodeailabs/dql-project';
-import type { BlockRecord, NotebookResearchDqlPromotion, NotebookResearchDqlPromotionAction, NotebookResearchIntent, NotebookResearchNextActionFilter, NotebookResearchPlan, NotebookResearchReadinessFilter, NotebookResearchRun, NotebookResearchRunListResult, NotebookResearchSort, NotebookResearchSourceCellInput, TestAssertionResult, TestResultSummary } from '@duckcodeailabs/dql-project';
+import type { BlockRecord, NotebookResearchDiagnostics, NotebookResearchDqlPromotion, NotebookResearchDqlPromotionAction, NotebookResearchIntent, NotebookResearchNextActionFilter, NotebookResearchPlan, NotebookResearchReadinessFilter, NotebookResearchRun, NotebookResearchRunListResult, NotebookResearchSort, NotebookResearchSourceCellInput, TestAssertionResult, TestResultSummary } from '@duckcodeailabs/dql-project';
 import {
   Certifier,
   ENTERPRISE_RULES,
@@ -466,6 +468,72 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
     return agentRunString(workspace[key]) ?? (nested ? agentRunString(nested[key]) : undefined);
   };
 
+  const agentRunNotebookPath = (request: AgentRunRequest, runId: string): string => (
+    agentRunWorkspaceValue(request, 'notebookPath')
+    ?? (request.selectedObject?.kind === 'notebook' || request.selectedObject?.kind === 'cell' ? request.selectedObject.path : undefined)
+    ?? `notebooks/agent-research/${runId}.dqlnb`
+  );
+
+  const agentRunResearchIntent = (request: AgentRunRequest): NotebookResearchIntent => {
+    switch (request.intent) {
+      case 'diagnose_change':
+        return 'diagnose_change';
+      case 'driver_breakdown':
+        return 'driver_breakdown';
+      case 'segment_compare':
+        return 'segment_compare';
+      case 'entity_drilldown':
+        return 'entity_drilldown';
+      case 'anomaly_investigation':
+        return 'anomaly_investigation';
+      case 'trust_gap_review':
+        return 'trust_gap_review';
+      default:
+        if (/\b(driver|why|cause|contributor|breakdown)\b/i.test(request.question)) return 'driver_breakdown';
+        if (/\b(anomaly|spike|drop|outlier)\b/i.test(request.question)) return 'anomaly_investigation';
+        if (/\b(compare|segment|cohort)\b/i.test(request.question)) return 'segment_compare';
+        return 'ad_hoc_analysis';
+    }
+  };
+
+  const agentRunSourceCell = (request: AgentRunRequest): NotebookResearchSourceCellInput | undefined => {
+    const sourceCellId = agentRunWorkspaceValue(request, 'sourceCellId') ?? request.selectedObject?.id;
+    if (!sourceCellId) return undefined;
+    return {
+      id: sourceCellId,
+      sourceCellId,
+      name: agentRunWorkspaceValue(request, 'sourceCellName') ?? request.selectedObject?.title,
+      sourceCellName: agentRunWorkspaceValue(request, 'sourceCellName') ?? request.selectedObject?.title,
+      type: agentRunWorkspaceValue(request, 'sourceCellType'),
+      sql: agentRunWorkspaceValue(request, 'cellSql'),
+      fingerprint: agentRunWorkspaceValue(request, 'sourceCellFingerprint'),
+    };
+  };
+
+  const agentRunTitle = (question: string, fallback: string): string => {
+    const cleaned = question.replace(/\s+/g, ' ').trim();
+    if (!cleaned) return fallback;
+    return cleaned.length > 90 ? `${cleaned.slice(0, 87)}...` : cleaned;
+  };
+
+  const parseAgentRunSelectedBlockIds = (request: AgentRunRequest): string[] => {
+    const workspace = request.workspaceContext ?? {};
+    const value = workspace.selectedBlockIds ?? workspace.blockIds;
+    if (!Array.isArray(value)) return [];
+    return Array.from(new Set(value.flatMap((item) => {
+      const id = agentRunString(item);
+      return id ? [id] : [];
+    })));
+  };
+
+  const formatNotebookResearchStorageError = (error: unknown): string => {
+    const message = error instanceof Error ? error.message : String(error);
+    if (/Could not locate the bindings file/i.test(message) || /better[-_]sqlite3/i.test(message)) {
+      return 'Notebook research storage is unavailable because the local SQLite native bindings are not installed for this Node.js runtime.';
+    }
+    return message;
+  };
+
   const buildAgentPromptArtifact = async (request: AgentRunRequest, target: 'cell' | 'block'): Promise<BuildFromPromptResult> => {
     try {
       await reindexProject(projectRoot, { kgPath: defaultKgPath(projectRoot) });
@@ -509,11 +577,12 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
     title: string,
     payload: unknown,
     ref?: string,
+    trustState: AgentRunTrustState = 'review_required',
   ): AgentRunArtifact => ({
     id: `${kind}:${Date.now()}`,
     kind,
     title,
-    trustState: 'review_required',
+    trustState,
     ref,
     payload,
   });
@@ -593,7 +662,13 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
       stopReason,
       artifacts: needsClarification
         ? []
-        : [agentRunArtifact('answer', isCertified ? 'Certified answer' : 'Review-required answer', governedAnswer, governedAnswer.sourceCertifiedBlock ?? governedAnswer.block?.name)],
+        : [agentRunArtifact(
+            'answer',
+            isCertified ? 'Certified answer' : 'Review-required answer',
+            governedAnswer,
+            governedAnswer.sourceCertifiedBlock ?? governedAnswer.block?.name,
+            isCertified ? 'certified' : 'review_required',
+          )],
       evaluations: [
         agentRunEvaluation('route-decision', 'Route decision', true, 'info', routeDecision?.reason ?? 'Routed request to governed answer.'),
         agentRunEvaluation(
@@ -619,11 +694,16 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
   const agentRunExecutors: AgentRunExecutors = {
     certified_answer: answerRunExecutor,
     generated_answer: answerRunExecutor,
-    research: async ({ request, routeDecision }) => {
+    research: async ({ runId, request, routeDecision, emit }) => {
       const metrics = loadSemanticMetrics(projectRoot);
       let blocks = collectPlanBlocks(projectRoot, { certifiedOnly: true });
       const usedCertifiedOnly = blocks.length > 0;
       if (blocks.length === 0) blocks = collectPlanBlocks(projectRoot, { certifiedOnly: false });
+      emit({
+        type: 'executor.started',
+        message: 'Building catalog-grounded research plan.',
+        route: 'research',
+      });
       const plan = await planResearch({
         question: request.question,
         metrics,
@@ -633,14 +713,82 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
         history: request.history,
       });
       const needsClarification = Boolean(plan.followUp);
+      const notebookPath = agentRunNotebookPath(request, runId);
+      const researchIntent = agentRunResearchIntent(request);
+      let researchRun: ReturnType<typeof withNotebookResearchChecklist> | undefined;
+      let researchWorkspaceError: string | undefined;
+      if (!needsClarification) {
+        try {
+          const storage = openNotebookResearchStorage();
+          try {
+            const sourceCell = agentRunSourceCell(request);
+            const sourceCellId = notebookResearchSourceCellId(sourceCell);
+            const sourceCellName = notebookResearchSourceCellName(sourceCell);
+            const sourceCellFingerprint = notebookResearchSourceCellFingerprint(sourceCell);
+            const created = storage.createRun({
+              notebookPath,
+              title: agentRunTitle(request.question, 'Agent research'),
+              question: request.question,
+              sourceCell,
+              sourceCellId,
+              sourceCellName,
+              sourceCellFingerprint,
+              intent: researchIntent,
+              domain: agentRunWorkspaceValue(request, 'domain'),
+              owner: agentRunWorkspaceValue(request, 'owner'),
+              context: {
+                surface: 'unified_agent_run',
+                agentRunId: runId,
+                routeDecision,
+                selectedObject: request.selectedObject,
+                workspaceContext: request.workspaceContext,
+                plan,
+              },
+            });
+            emit({
+              type: 'artifact.created',
+              message: 'Saved notebook research workspace record.',
+              route: 'research',
+              trustState: 'review_required',
+              payload: { researchRunId: created.id, notebookPath },
+            });
+            const executed = await runNotebookResearch(storage, created, {
+              domain: agentRunWorkspaceValue(request, 'domain'),
+              owner: agentRunWorkspaceValue(request, 'owner'),
+              sourceCellFingerprint,
+              question: request.question,
+              intent: researchIntent,
+              context: {
+                surface: 'unified_agent_run',
+                agentRunId: runId,
+                routeDecision,
+                selectedObject: request.selectedObject,
+                workspaceContext: request.workspaceContext,
+                plan,
+              },
+            });
+            researchRun = withNotebookResearchChecklist(executed);
+          } finally {
+            storage.close();
+          }
+        } catch (error) {
+          researchWorkspaceError = formatNotebookResearchStorageError(error);
+        }
+      }
       const summary = needsClarification
         ? 'Needs clarification before running deeper research.'
-        : plan.done
-          ? 'Prepared a direct grounded-answer plan.'
-          : 'Prepared a grounded research plan over real DQL assets.';
+        : researchRun?.status === 'ready'
+          ? 'Saved a grounded research dossier with context evidence and next review actions.'
+          : researchRun?.status === 'error'
+            ? 'Saved a research dossier, but the preview needs review before promotion.'
+            : researchWorkspaceError
+              ? 'Prepared a grounded research plan; durable research storage is unavailable in this runtime.'
+            : plan.done
+              ? 'Prepared a direct grounded-answer plan.'
+              : 'Prepared a grounded research plan over real DQL assets.';
       return {
         summary,
-        answer: plan.followUp?.question,
+        answer: plan.followUp?.question ?? researchRun?.summary,
         status: needsClarification ? 'needs_clarification' : 'needs_review',
         trustState: needsClarification ? 'not_applicable' : 'review_required',
         stopReason: needsClarification ? 'needs_clarification' : 'human_review_required',
@@ -648,28 +796,45 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           ? []
           : [agentRunArtifact('research_run', 'Research plan', {
               plan,
+              researchRun,
+              researchRunId: researchRun?.id,
+              notebookPath,
+              workspaceError: researchWorkspaceError,
               routeDecision,
               blockCount: blocks.length,
               metricCount: metrics.length,
               certifiedOnly: usedCertifiedOnly,
-            })],
+            }, researchRun?.id)],
         evaluations: [
           agentRunEvaluation('route-decision', 'Route decision', true, 'info', routeDecision?.reason ?? 'Routed request to research.'),
           agentRunEvaluation(
             'catalog-grounding',
             'Catalog grounding',
-            plan.sources.length > 0,
-            plan.sources.length > 0 ? 'info' : 'warning',
-            plan.sources.length > 0
-              ? 'Research plan is grounded to catalog sources.'
+            plan.sources.length > 0 || Boolean(researchRun?.evidence),
+            plan.sources.length > 0 || Boolean(researchRun?.evidence) ? 'info' : 'warning',
+            plan.sources.length > 0 || Boolean(researchRun?.evidence)
+              ? 'Research dossier is grounded to catalog or context-pack evidence.'
               : 'No certified catalog source was found; output remains exploratory.',
-            { sources: plan.sources },
+            { sources: plan.sources, researchRunId: researchRun?.id, evidence: researchRun?.evidence },
+          ),
+          agentRunEvaluation(
+            'research-workspace',
+            'Research workspace',
+            Boolean(researchRun?.id),
+            researchRun?.id ? 'info' : 'warning',
+            researchRun?.id
+              ? 'A durable notebook research record was saved for review and DQL promotion.'
+              : researchWorkspaceError
+                ? 'Research workspace storage is unavailable; the plan remains available in this agent run.'
+                : 'No durable research record was created because the run needs clarification first.',
+            { notebookPath, researchRunId: researchRun?.id, error: researchWorkspaceError },
           ),
         ],
         nextActions: needsClarification
           ? [{ id: 'answer-follow-up', label: 'Answer follow-up', route: 'research' }]
           : [
-              { id: 'insert-sql', label: 'Insert SQL cell', route: 'sql_cell', artifactKind: 'sql_cell' },
+              ...(researchRun?.id ? [{ id: 'open-research', label: 'Open research dossier', artifactKind: 'research_run' as const }] : []),
+              ...(researchRun?.generatedSql || researchRun?.reviewedSql ? [{ id: 'insert-sql', label: 'Insert SQL cell', route: 'sql_cell' as const, artifactKind: 'sql_cell' as const }] : []),
               { id: 'create-block', label: 'Create DQL draft', route: 'dql_block_draft', artifactKind: 'dql_block_draft' },
             ],
       };
@@ -722,41 +887,65 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
         ],
       };
     },
-    app_build: async ({ request, routeDecision }) => {
-      const metrics = loadSemanticMetrics(projectRoot);
-      let blocks = collectPlanBlocks(projectRoot, { certifiedOnly: true });
-      const usedCertifiedOnly = blocks.length > 0;
-      if (blocks.length === 0) blocks = collectPlanBlocks(projectRoot, { certifiedOnly: false });
-      const plan = await planApp({ goal: request.question, metrics, blocks });
+    app_build: async ({ request, routeDecision, emit }) => {
+      emit({
+        type: 'executor.started',
+        message: 'Creating app build session from governed app builder.',
+        route: 'app_build',
+      });
+      const session = await createAppAiBuildSession(projectRoot, {
+        prompt: request.question,
+        domain: agentRunWorkspaceValue(request, 'domain'),
+        owner: agentRunWorkspaceValue(request, 'owner'),
+        notebookPath: agentRunWorkspaceValue(request, 'notebookPath') ?? request.selectedObject?.path,
+        selectedBlockIds: parseAgentRunSelectedBlockIds(request),
+        plannerMode: 'deterministic',
+      });
+      const ready = session.status === 'ready';
+      const sessionPlan = agentRunRecord(session.plan);
+      const appTitle = agentRunString(sessionPlan?.name) ?? 'App draft';
       return {
-        summary: 'Created a review-required app plan from governed DQL assets.',
-        artifacts: [agentRunArtifact('app_draft', plan.title, {
-          plan,
-          blockCount: blocks.length,
-          metricCount: metrics.length,
-          certifiedOnly: usedCertifiedOnly,
-        })],
+        summary: ready
+          ? 'Created a review-required app draft session from certified DQL assets.'
+          : 'App build needs more certified DQL coverage before files can be generated.',
+        status: ready ? 'needs_review' : 'blocked',
+        trustState: ready ? 'review_required' : 'blocked',
+        stopReason: ready ? 'human_review_required' : 'blocked',
+        artifacts: ready ? [agentRunArtifact('app_draft', appTitle, {
+          session,
+          sessionId: session.id,
+          appId: session.appId,
+          dashboardId: session.dashboardId,
+          generatedPaths: session.generatedPaths,
+          plan: session.plan,
+          validation: session.validation,
+        }, session.appId)] : [],
         evaluations: [
           agentRunEvaluation('route-decision', 'Route decision', true, 'info', routeDecision?.reason ?? 'Routed request to app build.'),
           agentRunEvaluation(
             'app-coverage',
             'Certified coverage',
-            plan.coverage >= 1,
-            plan.coverage >= 1 ? 'info' : 'warning',
-            plan.coverage >= 1
-              ? 'Every planned app section is covered by certified blocks.'
-              : 'Some app sections are gaps and need draft/certification work.',
-            { coverage: plan.coverage, gaps: plan.gaps },
+            ready,
+            ready ? 'info' : 'blocking',
+            ready
+              ? 'Generated app files are backed by certified block tiles and saved as a draft app session.'
+              : session.error ?? 'No certified app tiles matched the request.',
+            session,
           ),
         ],
-        nextActions: [
-          { id: 'open-app', label: 'Open app draft', artifactKind: 'app_draft' },
-          { id: 'create-gap-blocks', label: 'Create DQL drafts for gaps', route: 'dql_block_draft', artifactKind: 'dql_block_draft' },
-        ],
+        nextActions: ready
+          ? [
+              { id: 'open-app', label: 'Open app draft', artifactKind: 'app_draft' },
+              { id: 'create-gap-blocks', label: 'Create DQL drafts for gaps', route: 'dql_block_draft', artifactKind: 'dql_block_draft' },
+            ]
+          : [
+              { id: 'research-coverage', label: 'Research missing coverage', route: 'research', artifactKind: 'research_run' },
+              { id: 'create-gap-blocks', label: 'Create DQL drafts for gaps', route: 'dql_block_draft', artifactKind: 'dql_block_draft' },
+            ],
       };
     },
   };
-  const agentRunStore = new InMemoryAgentRunStore();
+  const agentRunStore = new FileAgentRunStore({ path: defaultAgentRunStorePath(projectRoot) });
   const agentRunEngine = new AgentRunEngine({ store: agentRunStore, executors: agentRunExecutors });
 
   const runNotebookForApp = async (appId: string, notebookPath: string): Promise<void> => {
@@ -1102,6 +1291,89 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
   };
 
   const openNotebookResearchStorage = () => new LocalNotebookResearchStorage(defaultNotebookResearchDbPath(projectRoot));
+  const notebookResearchStorageUnavailableMessage = 'Notebook research storage is unavailable because the local SQLite native bindings are not installed for this Node.js runtime.';
+  const notebookResearchNextActionFilters: NotebookResearchNextActionFilter[] = [
+    'fix_blockers',
+    'review_sql',
+    'review_context',
+    'run_preview',
+    'reuse_existing',
+    'create_dql_draft',
+    'open_certification',
+    'complete_review',
+    'continue_review',
+  ];
+  const isNotebookResearchStorageUnavailable = (error: unknown): boolean => {
+    const message = error instanceof Error ? error.message : String(error);
+    return /better[-_]sqlite3/i.test(message) || /Could not locate the bindings file/i.test(message);
+  };
+  const emptyNotebookResearchNextActionCounts = (): Record<NotebookResearchNextActionFilter, number> => Object.fromEntries(
+    notebookResearchNextActionFilters.map((action) => [action, 0]),
+  ) as Record<NotebookResearchNextActionFilter, number>;
+  const emptyNotebookResearchListPage = (input: { limit?: number; offset?: number } = {}): NotebookResearchRunListResult => ({
+    runs: [],
+    total: 0,
+    domains: [],
+    owners: [],
+    intents: [],
+    notebooks: [],
+    counts: {
+      total: 0,
+      ready: 0,
+      needsReview: 0,
+      dqlDrafts: 0,
+      errors: 0,
+      reuseExisting: 0,
+      extendExisting: 0,
+      replacements: 0,
+      createNew: 0,
+      draftReady: 0,
+      certificationReady: 0,
+      blocked: 0,
+      staleOpen: 0,
+      expiredOpen: 0,
+      sourceLinked: 0,
+      nextActions: emptyNotebookResearchNextActionCounts(),
+    },
+    groupCounts: {
+      domains: 0,
+      owners: 0,
+      intents: 0,
+      notebooks: 0,
+    },
+    limit: input.limit,
+    offset: input.offset ?? 0,
+  });
+  const emptyNotebookResearchDiagnostics = (): NotebookResearchDiagnostics => ({
+    counts: {
+      totalRuns: 0,
+      activeRuns: 0,
+      closedRuns: 0,
+      notebooks: 0,
+      domains: 0,
+      owners: 0,
+      sourceLinkedRuns: 0,
+    },
+    health: {
+      staleOpenRuns: 0,
+      expiredOpenRuns: 0,
+      staleThresholdDays: 7,
+      expiredThresholdDays: 30,
+    },
+    search: {
+      indexed: false,
+      indexRows: 0,
+      stale: false,
+    },
+    updatedAt: {},
+    limits: {
+      pageSize: 50,
+      maxPageSize: 500,
+      sourceCoverageLimit: 10_000,
+      seedCellLimit: 1000,
+    },
+    warnings: [notebookResearchStorageUnavailableMessage],
+  });
 
   const runNotebookResearch = async (
     storage: LocalNotebookResearchStorage,
@@ -1939,6 +2211,15 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
     };
   };
 
+  const writeAgentRunSse = (
+    response: ServerResponse,
+    event: string,
+    data: AgentRun | AgentRunEvent | { error: string },
+  ) => {
+    response.write(`event: ${event}\n`);
+    response.write(`data: ${serializeJSON(data)}\n\n`);
+  };
+
   const server = createServer(async (req, res) => {
     const requestUrl = req.url || '/';
     const url = new URL(requestUrl, 'http://127.0.0.1');
@@ -1983,12 +2264,33 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           res.end(serializeJSON({ error: parsed.error ?? 'Invalid agent run request.' }));
           return;
         }
+        const wantsStream = url.searchParams.get('stream') === '1' || url.searchParams.get('stream') === 'true';
+        if (wantsStream) {
+          res.writeHead(200, {
+            'Content-Type': 'text/event-stream; charset=utf-8',
+            'Cache-Control': 'no-cache',
+            'Connection': 'keep-alive',
+            'X-Accel-Buffering': 'no',
+          });
+          const run = await agentRunEngine.run(parsed.request, (event) => {
+            writeAgentRunSse(res as unknown as ServerResponse, 'agent-run-event', event);
+          });
+          writeAgentRunSse(res as unknown as ServerResponse, 'agent-run-complete', run);
+          res.end();
+          return;
+        }
         const run = await agentRunEngine.run(parsed.request);
         res.writeHead(201, { 'Content-Type': 'application/json; charset=utf-8' });
         res.end(serializeJSON({ run }));
       } catch (error) {
-        res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' });
-        res.end(serializeJSON({ error: error instanceof Error ? error.message : String(error) }));
+        const message = error instanceof Error ? error.message : String(error);
+        if (res.headersSent) {
+          writeAgentRunSse(res as unknown as ServerResponse, 'agent-run-error', { error: message });
+          res.end();
+        } else {
+          res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' });
+          res.end(serializeJSON({ error: message }));
+        }
       }
       return;
     }
@@ -2912,8 +3214,11 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
     }
 
     if (req.method === 'GET' && path === '/api/notebook/research') {
-      const storage = openNotebookResearchStorage();
+      let storage: LocalNotebookResearchStorage | undefined;
+      const limit = notebookResearchInteger(url.searchParams.get('limit'), 50, 1, 500);
+      const offset = notebookResearchInteger(url.searchParams.get('offset'), 0, 0, Number.MAX_SAFE_INTEGER);
       try {
+        storage = openNotebookResearchStorage();
         const notebookPath = notebookResearchString(url.searchParams.get('path'));
         const sourceCellId = notebookResearchString(url.searchParams.get('sourceCellId') ?? url.searchParams.get('cellId'));
         const domain = notebookResearchString(url.searchParams.get('domain'));
@@ -2929,23 +3234,27 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
         const activeOnlyParam = url.searchParams.get('activeOnly') ?? url.searchParams.get('active');
         const activeOnly = activeOnlyParam === 'true' || activeOnlyParam === '1';
         const sort = notebookResearchSort(url.searchParams.get('sort'));
-        const limit = notebookResearchInteger(url.searchParams.get('limit'), 50, 1, 500);
-        const offset = notebookResearchInteger(url.searchParams.get('offset'), 0, 0, Number.MAX_SAFE_INTEGER);
         const page = storage.listRunsPage({ notebookPath, sourceCellId, domain, owner, intent, search, status, reviewStatus, promotionAction, readiness, age, nextAction, activeOnly, sort, limit, offset });
         res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
         res.end(serializeJSON(withNotebookResearchChecklistPage(page)));
       } catch (error) {
+        if (isNotebookResearchStorageUnavailable(error)) {
+          res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+          res.end(serializeJSON(withNotebookResearchChecklistPage(emptyNotebookResearchListPage({ limit, offset }))));
+          return;
+        }
         res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' });
         res.end(serializeJSON({ error: error instanceof Error ? error.message : String(error) }));
       } finally {
-        storage.close();
+        storage?.close();
       }
       return;
     }
 
     if (req.method === 'POST' && path === '/api/notebook/research') {
-      const storage = openNotebookResearchStorage();
+      let storage: LocalNotebookResearchStorage | undefined;
       try {
+        storage = openNotebookResearchStorage();
 	        const body = await readJSON(req);
 	        const notebookPath = notebookResearchString(body.notebookPath) ?? notebookResearchString(body.path);
 	        const question = notebookResearchString(body.question);
@@ -2990,7 +3299,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
         res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' });
         res.end(serializeJSON({ error: error instanceof Error ? error.message : String(error) }));
       } finally {
-        storage.close();
+        storage?.close();
       }
       return;
     }
@@ -3036,8 +3345,9 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
     }
 
     if (req.method === 'POST' && path === '/api/notebook/research/seed-cells') {
-      const storage = openNotebookResearchStorage();
+      let storage: LocalNotebookResearchStorage | undefined;
       try {
+        storage = openNotebookResearchStorage();
         const body = await readJSON(req);
         const notebookPath = notebookResearchString(body.notebookPath) ?? notebookResearchString(body.path);
         if (!notebookPath) {
@@ -3086,13 +3396,15 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
         res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' });
         res.end(serializeJSON({ error: error instanceof Error ? error.message : String(error) }));
       } finally {
-        storage.close();
+        storage?.close();
       }
       return;
     }
 
     if (req.method === 'POST' && path === '/api/notebook/research/source-coverage') {
-      const storage = openNotebookResearchStorage();
+      let storage: LocalNotebookResearchStorage | undefined;
+      let requestedSourceCellCount = 0;
+      let limit = 10_000;
       try {
         const body = await readJSON(req);
         const notebookPath = notebookResearchString(body.notebookPath) ?? notebookResearchString(body.path);
@@ -3134,15 +3446,16 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
 	            .map((id: unknown) => notebookResearchString(id))
 	            .filter((id: string | undefined): id is string => Boolean(id)),
 	        ));
-	        const requestedSourceCellCount = new Set([
+	        requestedSourceCellCount = new Set([
 	          ...sourceCellIds,
 	          ...sourceCells
 	            .map((cell: NotebookResearchSourceCellInput) => notebookResearchSourceCellId(cell))
 	            .filter((id: string | undefined): id is string => Boolean(id)),
 	        ]).size;
-        const limit = typeof body.limit === 'number' && Number.isFinite(body.limit)
+        limit = typeof body.limit === 'number' && Number.isFinite(body.limit)
           ? Math.max(1, Math.min(10_000, Math.floor(body.limit)))
           : 10_000;
+        storage = openNotebookResearchStorage();
 	        const linkedRuns = storage.listLatestRunsBySourceCell({
 	          notebookPath,
 	          sourceCellIds,
@@ -3164,24 +3477,40 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
 	          limitApplied: requestedSourceCellCount > limit,
 	        }));
       } catch (error) {
+        if (isNotebookResearchStorageUnavailable(error)) {
+          res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+          res.end(serializeJSON({
+            runs: [],
+            requestedCount: requestedSourceCellCount,
+            matchedCount: 0,
+            limitApplied: requestedSourceCellCount > limit,
+          }));
+          return;
+        }
         res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' });
         res.end(serializeJSON({ error: error instanceof Error ? error.message : String(error) }));
       } finally {
-        storage.close();
+        storage?.close();
       }
       return;
     }
 
     if (req.method === 'GET' && path === '/api/notebook/research/diagnostics') {
-      const storage = openNotebookResearchStorage();
+      let storage: LocalNotebookResearchStorage | undefined;
       try {
+        storage = openNotebookResearchStorage();
         res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
         res.end(serializeJSON(storage.getDiagnostics()));
       } catch (error) {
+        if (isNotebookResearchStorageUnavailable(error)) {
+          res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+          res.end(serializeJSON(emptyNotebookResearchDiagnostics()));
+          return;
+        }
         res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' });
         res.end(serializeJSON({ error: error instanceof Error ? error.message : String(error) }));
       } finally {
-        storage.close();
+        storage?.close();
       }
       return;
     }
@@ -3190,8 +3519,9 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
     if (notebookResearchMatch) {
       const id = decodeURIComponent(notebookResearchMatch[1]);
       const action = notebookResearchMatch[2];
-      const storage = openNotebookResearchStorage();
+      let storage: LocalNotebookResearchStorage | undefined;
       try {
+        storage = openNotebookResearchStorage();
         const run = storage.getRun(id);
         if (!run) {
           res.writeHead(404, { 'Content-Type': 'application/json; charset=utf-8' });
@@ -3295,7 +3625,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
         res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' });
         res.end(serializeJSON({ error: error instanceof Error ? error.message : String(error) }));
       } finally {
-        storage.close();
+        storage?.close();
       }
       return;
     }

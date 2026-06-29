@@ -53,6 +53,7 @@ export type {
   UpdateNotebookResearchRunInput,
   ListNotebookResearchRunsQuery,
   NotebookResearchRunListResult,
+  NotebookResearchDiagnostics,
   NotebookResearchSeedCellInput,
   NotebookResearchSeedCellsInput,
   NotebookResearchSeedCellsResult,

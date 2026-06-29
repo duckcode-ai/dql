@@ -16,6 +16,7 @@ import {
   api,
   type AgentRun,
   type AgentRunArtifact,
+  type AgentRunEvent,
   type AgentRunRequestedMode,
   type AgentRunRoute,
   type AgentRunSelectedObject,
@@ -35,8 +36,10 @@ interface UnifiedAgentRunPanelProps {
   workspaceContext?: Record<string, unknown>;
   initialMode?: AgentRunRequestedMode;
   initialInput?: string;
+  autoRun?: { text: string; mode?: AgentRunRequestedMode; nonce: number };
   onInsertSql?: (sql: string, title?: string) => void;
   onOpenBlock?: (path: string, name?: string) => void;
+  onOpenResearch?: (id: string, notebookPath?: string) => void;
 }
 
 const MODE_OPTIONS: Array<{ value: AgentRunRequestedMode; label: string; icon: React.ReactNode }> = [
@@ -68,17 +71,22 @@ export function UnifiedAgentRunPanel({
   workspaceContext,
   initialMode = 'auto',
   initialInput = '',
+  autoRun,
   onInsertSql,
   onOpenBlock,
+  onOpenResearch,
 }: UnifiedAgentRunPanelProps): JSX.Element {
   const t = themes[themeMode];
   const [mode, setMode] = useState<AgentRunRequestedMode>(initialMode);
   const [input, setInput] = useState(initialInput);
   const [items, setItems] = useState<ThreadItem[]>([]);
+  const [runningEvents, setRunningEvents] = useState<AgentRunEvent[]>([]);
   const [running, setRunning] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const inputRef = useRef<HTMLTextAreaElement | null>(null);
   const lastInitialInputRef = useRef(initialInput);
+  const lastAutoRunNonceRef = useRef<number | null>(null);
+  const abortRef = useRef<AbortController | null>(null);
 
   useEffect(() => {
     if (!initialInput || running) return;
@@ -105,25 +113,49 @@ export function UnifiedAgentRunPanel({
     setInput('');
     setError(null);
     setRunning(true);
+    setRunningEvents([]);
+    const controller = new AbortController();
+    abortRef.current = controller;
     try {
-      const run = await api.createAgentRun({
+      const runInput = {
         question: text,
         requestedMode: activeMode,
-        selectedObject: selectedObject ?? (notebookPath ? { kind: 'notebook', path: notebookPath } : undefined),
+        selectedObject: selectedObject ?? (notebookPath ? { kind: 'notebook' as const, path: notebookPath } : undefined),
         workspaceContext: {
           ...(workspaceContext ?? {}),
           ...(notebookPath ? { notebookPath } : {}),
         },
         history,
-      });
+      };
+      const run = await api.createAgentRunStream(runInput, (message) => {
+        if (message.kind === 'event') {
+          setRunningEvents((current) => [...current, message.event].slice(-8));
+        } else {
+          setRunningEvents(message.run.events.slice(-8));
+        }
+      }, controller.signal);
       setItems((current) => [...current, { kind: 'run', id: run.id, run }]);
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
-      setInput(text);
+      if (!controller.signal.aborted) {
+        setError(err instanceof Error ? err.message : String(err));
+        setInput(text);
+      }
     } finally {
+      if (abortRef.current === controller) abortRef.current = null;
       setRunning(false);
     }
   };
+
+  useEffect(() => {
+    if (!autoRun?.text || running) return;
+    if (lastAutoRunNonceRef.current === autoRun.nonce) return;
+    lastAutoRunNonceRef.current = autoRun.nonce;
+    void submit(autoRun.text, autoRun.mode ?? initialMode);
+  }, [autoRun?.nonce, autoRun?.text, autoRun?.mode, initialMode, running]);
+
+  useEffect(() => () => {
+    abortRef.current?.abort();
+  }, []);
 
   const handleNextAction = (run: AgentRun, route?: AgentRunRoute) => {
     const nextMode = routeToMode(route);
@@ -183,14 +215,22 @@ export function UnifiedAgentRunPanel({
             t={t}
             onInsertSql={onInsertSql}
             onOpenBlock={onOpenBlock}
+            onOpenResearch={onOpenResearch}
             onNextAction={(route) => handleNextAction(item.run, route)}
           />
         ))}
 
         {running && (
           <div style={assistantBubbleStyle(t)}>
-            <Loader2 size={14} style={{ animation: 'dql-agent-run-spin 0.8s linear infinite' }} />
-            <span>Running route and checks...</span>
+            <Loader2 size={14} style={{ animation: 'dql-agent-run-spin 0.8s linear infinite', flex: '0 0 auto' }} />
+            <div style={{ display: 'grid', gap: 4, minWidth: 0 }}>
+              <span>Running route and checks...</span>
+              {runningEvents.slice(-4).map((event) => (
+                <span key={event.id} style={{ fontSize: 11, color: t.textMuted, lineHeight: 1.35 }}>
+                  {event.message}
+                </span>
+              ))}
+            </div>
           </div>
         )}
       </div>
@@ -226,12 +266,14 @@ function RunCard({
   t,
   onInsertSql,
   onOpenBlock,
+  onOpenResearch,
   onNextAction,
 }: {
   run: AgentRun;
   t: Theme;
   onInsertSql?: (sql: string, title?: string) => void;
   onOpenBlock?: (path: string, name?: string) => void;
+  onOpenResearch?: (id: string, notebookPath?: string) => void;
   onNextAction: (route?: AgentRunRoute) => void;
 }) {
   return (
@@ -257,6 +299,7 @@ function RunCard({
               t={t}
               onInsertSql={onInsertSql}
               onOpenBlock={onOpenBlock}
+              onOpenResearch={onOpenResearch}
             />
           ))}
         </div>
@@ -291,11 +334,13 @@ function ArtifactView({
   t,
   onInsertSql,
   onOpenBlock,
+  onOpenResearch,
 }: {
   artifact: AgentRunArtifact;
   t: Theme;
   onInsertSql?: (sql: string, title?: string) => void;
   onOpenBlock?: (path: string, name?: string) => void;
+  onOpenResearch?: (id: string, notebookPath?: string) => void;
 }) {
   const payload = artifact.payload && typeof artifact.payload === 'object' ? artifact.payload as Record<string, unknown> : {};
   const sql = typeof payload.sql === 'string'
@@ -310,6 +355,15 @@ function ArtifactView({
   const plan = payload.plan && typeof payload.plan === 'object' ? payload.plan as Record<string, unknown> : undefined;
   const steps = Array.isArray(plan?.steps) ? plan.steps as Array<Record<string, unknown>> : [];
   const gaps = Array.isArray(plan?.gaps) ? plan.gaps.map(String) : [];
+  const researchRunId = typeof payload.researchRunId === 'string'
+    ? payload.researchRunId
+    : artifact.kind === 'research_run' && typeof artifact.ref === 'string'
+      ? artifact.ref
+      : undefined;
+  const notebookPath = typeof payload.notebookPath === 'string' ? payload.notebookPath : undefined;
+  const generatedPaths = Array.isArray(payload.generatedPaths)
+    ? payload.generatedPaths.filter((item): item is string => typeof item === 'string')
+    : [];
 
   return (
     <div style={artifactStyle(t)}>
@@ -334,7 +388,15 @@ function ArtifactView({
           Gaps: {gaps.slice(0, 3).join(', ')}
         </div>
       ) : null}
+      {generatedPaths.length > 0 ? (
+        <div style={{ fontSize: 11.5, color: t.textSecondary, lineHeight: 1.4 }}>
+          Files: {generatedPaths.slice(0, 3).join(', ')}
+        </div>
+      ) : null}
       <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+        {researchRunId && onOpenResearch ? (
+          <button type="button" onClick={() => onOpenResearch(researchRunId, notebookPath)} style={smallButtonStyle(t)}>Open research</button>
+        ) : null}
         {sql && onInsertSql ? (
           <button type="button" onClick={() => onInsertSql(sql, name)} style={smallButtonStyle(t)}>Insert SQL</button>
         ) : null}

@@ -72,9 +72,12 @@ export {
 } from "./intent-controller.js";
 export {
   AgentRunEngine,
+  FileAgentRunStore,
   InMemoryAgentRunStore,
+  defaultAgentRunStorePath,
   selectRoute,
 } from "./agent-run-engine.js";
+export type { FileAgentRunStoreOptions } from "./agent-run-engine.js";
 export type {
   AgentRouteExecutionContext,
   AgentRouteExecutor,

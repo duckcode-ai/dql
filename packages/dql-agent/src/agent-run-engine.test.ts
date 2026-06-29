@@ -1,7 +1,12 @@
 import { describe, expect, it } from "vitest";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import {
   AgentRunEngine,
+  FileAgentRunStore,
   InMemoryAgentRunStore,
+  defaultAgentRunStorePath,
   selectRoute,
   type AgentRunEvent,
 } from "./agent-run-engine.js";
@@ -172,6 +177,31 @@ describe("AgentRunEngine", () => {
       message: "warehouse unavailable",
     });
     expect(run.events.at(-1)?.type).toBe("run.failed");
+  });
+
+  it("persists runs to a project-local file store", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "dql-agent-run-store-"));
+    try {
+      const path = defaultAgentRunStorePath(dir);
+      const store = new FileAgentRunStore({ path });
+      const engine = new AgentRunEngine({
+        store,
+        idGenerator: () => "run-file-store",
+        now: fixedClock(),
+      });
+
+      const run = await engine.run({
+        question: "create a SQL cell for revenue",
+        requestedMode: "sql",
+      });
+      const reloaded = new FileAgentRunStore({ path });
+
+      expect(reloaded.get(run.id)?.route).toBe("sql_cell");
+      expect(reloaded.list().map((item) => item.id)).toEqual(["run-file-store"]);
+      expect(readFileSync(path, "utf-8")).toContain('"version": 1');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });
 

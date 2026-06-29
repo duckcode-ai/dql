@@ -1,6 +1,6 @@
 import type { Theme } from '../../themes/notebook-theme';
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
-import { Clock3, Hammer, History, Route, Sparkles, X } from 'lucide-react';
+import { Clock3, History, Sparkles, X } from 'lucide-react';
 import { makeCell, useNotebook } from '../../store/NotebookStore';
 import { themes } from '../../themes/notebook-theme';
 import { api, type NotebookResearchRun } from '../../api/client';
@@ -8,15 +8,10 @@ import { WelcomeScreen } from './WelcomeScreen';
 import { CellList } from './CellList';
 import { DashboardView } from './DashboardView';
 import { DocumentMetadataRow } from './DocumentMetadataRow';
-import { AgentChatPanel, type AgentAnswerCompletePayload } from '../agent/AgentChatPanel';
-import { AiBuildResult, useOpenBlockInStudio } from '../agent/AiBuildResult';
+import { useOpenBlockInStudio } from '../agent/AiBuildResult';
 import { UnifiedAgentRunPanel } from '../agent/UnifiedAgentRunPanel';
-import { SaveAsBlockModal } from '../modals/SaveAsBlockModal';
-import type { AgentAnswerEnvelope } from '../agent/AgentAnswerCard';
-import type { AiBuildTarget } from '../../store/types';
 import {
   emitNotebookResearchChanged,
-  notebookResearchSourceCellOption,
 } from '../../utils/notebook-research';
 import type { Cell, NotebookFile } from '../../store/types';
 
@@ -37,13 +32,6 @@ const EMPTY_AI_HISTORY_BADGE: AiHistoryBadge = {
   blocked: 0,
 };
 
-type AiBlockDraft = {
-  cell: Cell;
-  title?: string;
-  description?: string;
-  tags?: string[];
-};
-
 export function NotebookEditor({ onOpenFile, registerCellRef }: NotebookEditorProps) {
   const { state, dispatch } = useNotebook();
   const t = themes[state.themeMode];
@@ -54,7 +42,6 @@ export function NotebookEditor({ onOpenFile, registerCellRef }: NotebookEditorPr
   const [aiAutoAsk, setAiAutoAsk] = useState<{ text: string; nonce: number } | undefined>(undefined);
   const [aiHistoryRefreshKey, setAiHistoryRefreshKey] = useState(0);
   const [aiHistoryBadge, setAiHistoryBadge] = useState<AiHistoryBadge>(EMPTY_AI_HISTORY_BADGE);
-  const [aiBlockDraft, setAiBlockDraft] = useState<AiBlockDraft | null>(null);
   const activeNotebookPath = state.activeFile?.path;
 
   const aiSourceCell = useMemo(
@@ -124,81 +111,6 @@ export function NotebookEditor({ onOpenFile, registerCellRef }: NotebookEditorPr
     setAiOpen(true);
   }, [aiSourceCellId, dispatch]);
 
-  // Build(target:'cell') → insert/replace the active SQL cell's source. If the
-  // source cell is a SQL cell, replace it in place; otherwise add a new cell.
-  const insertOrReplaceCellSql = useCallback((sql: string) => {
-    const trimmed = sql.trim();
-    if (!trimmed) return;
-    if (aiSourceCell && aiSourceCell.type === 'sql') {
-      dispatch({ type: 'UPDATE_CELL', id: aiSourceCell.id, updates: { content: trimmed } });
-      return;
-    }
-    const cell = makeCell('sql', trimmed);
-    cell.name = safeCellName('AI SQL draft');
-    dispatch({ type: 'ADD_CELL', cell, afterId: aiSourceCellId ?? undefined });
-    setAiSourceCellId(cell.id);
-  }, [aiSourceCell, aiSourceCellId, dispatch]);
-
-  const createAiBlockDraft = useCallback((sql: string, meta: { title?: string; description?: string; tags?: string[] }) => {
-    const trimmed = sql.trim();
-    if (!trimmed) return;
-    const cell = makeCell('sql', trimmed);
-    cell.name = safeCellName(meta.title ?? 'AI SQL draft');
-    setAiBlockDraft({
-      cell,
-      title: meta.title,
-      description: meta.description,
-      tags: meta.tags,
-    });
-  }, []);
-
-  const saveAiHistory = useCallback(async (payload: AgentAnswerCompletePayload) => {
-    if (!activeNotebookPath) return;
-    const sourceCell = aiSourceCell ? notebookResearchSourceCellOption(aiSourceCell) : null;
-    const generatedSql = answerSql(payload.answer);
-    const title = answerTitle(payload.question, payload.answer);
-    try {
-      const created = await api.createNotebookResearch({
-        notebookPath: activeNotebookPath,
-        title,
-        question: payload.question,
-        sourceCell: sourceCell ? {
-          id: sourceCell.id,
-          name: sourceCell.name,
-          type: sourceCell.type,
-          sql: sourceCell.sql,
-          fingerprint: sourceCell.fingerprint,
-        } : undefined,
-        generatedSql,
-        context: {
-          surface: 'notebook_ai',
-          answerSummary: compactText(payload.content, 1200),
-          sourceCellId: sourceCell?.id,
-        },
-        run: false,
-      });
-      await api.updateNotebookResearch(created.id, {
-        generatedSql,
-        evidence: payload.answer?.evidence,
-        contextPackId: payload.answer?.contextPackId,
-        routeDecision: payload.answer?.analysisPlan ?? payload.answer?.evidence?.analysisPlan,
-        warnings: payload.answer?.validationWarnings ?? [],
-        reviewStatus: notebookAiReviewStatus(payload.answer, payload.content),
-        dqlPromotionAction: notebookAiPromotionAction(payload.answer, payload.content),
-        recommendation: notebookAiRecommendation(payload.answer, payload.content),
-      });
-      emitNotebookResearchChanged({
-        notebookPath: activeNotebookPath,
-        sourceCellId: sourceCell?.id,
-        runId: created.id,
-        reason: 'notebook-ai-answer',
-      });
-      setAiHistoryRefreshKey(Date.now());
-    } catch {
-      // Notebook AI history is best-effort; the answer is still useful if local audit storage is unavailable.
-    }
-  }, [activeNotebookPath, aiSourceCell]);
-
   const askFromHistory = useCallback((run: NotebookResearchRun) => {
     setAiSourceCellId(run.sourceCellId ?? null);
     setAiInitialInput(run.question);
@@ -206,6 +118,34 @@ export function NotebookEditor({ onOpenFile, registerCellRef }: NotebookEditorPr
     setAiHistoryOpen(false);
     setAiOpen(true);
   }, []);
+
+  const openResearchFromAgentRun = useCallback(async (runId: string, notebookPath?: string) => {
+    if (notebookPath && notebookPath !== activeNotebookPath) {
+      const file = state.files.find((candidate) => candidate.path === notebookPath);
+      if (file) onOpenFile(file);
+    }
+    try {
+      const run = await api.getNotebookResearch(runId);
+      setAiSourceCellId(run.sourceCellId ?? null);
+      setAiInitialInput(run.question);
+      emitNotebookResearchChanged({
+        notebookPath: run.notebookPath,
+        sourceCellId: run.sourceCellId,
+        runId: run.id,
+        reason: 'agent-run-open-research',
+      });
+    } catch {
+      emitNotebookResearchChanged({
+        notebookPath,
+        runId,
+        reason: 'agent-run-open-research',
+      });
+    }
+    setAiAutoAsk(undefined);
+    setAiHistoryRefreshKey(Date.now());
+    setAiHistoryOpen(true);
+    setAiOpen(true);
+  }, [activeNotebookPath, onOpenFile, state.files]);
 
   if (!state.activeFile) {
     return <WelcomeScreen onOpenFile={onOpenFile} onOpenResearchFile={openFileForAiHistory} />;
@@ -244,18 +184,6 @@ export function NotebookEditor({ onOpenFile, registerCellRef }: NotebookEditorPr
         }}
       />
 
-      {aiBlockDraft && (
-        <SaveAsBlockModal
-          cell={aiBlockDraft.cell}
-          initialContent={aiBlockDraft.cell.content}
-          initialName={aiBlockDraft.title}
-          initialDescription={aiBlockDraft.description}
-          initialTags={aiBlockDraft.tags}
-          onClose={() => setAiBlockDraft(null)}
-          onSaved={() => setAiHistoryRefreshKey(Date.now())}
-        />
-      )}
-
       <div
         style={{
           flex: 1,
@@ -293,10 +221,8 @@ export function NotebookEditor({ onOpenFile, registerCellRef }: NotebookEditorPr
             onClose={() => setAiOpen(false)}
             onToggleHistory={() => setAiHistoryOpen((open) => !open)}
             onInsertSql={insertAiSqlCell}
-            onInsertCellSql={insertOrReplaceCellSql}
-            onCreateBlock={createAiBlockDraft}
-            onAnswerComplete={saveAiHistory}
             onAskFromHistory={askFromHistory}
+            onOpenResearch={openResearchFromAgentRun}
           />
         )}
       </div>
@@ -458,10 +384,8 @@ function NotebookAiDrawer({
   onClose,
   onToggleHistory,
   onInsertSql,
-  onInsertCellSql,
-  onCreateBlock,
-  onAnswerComplete,
   onAskFromHistory,
+  onOpenResearch,
 }: {
   t: Theme;
   notebookPath?: string;
@@ -474,26 +398,17 @@ function NotebookAiDrawer({
   onClose: () => void;
   onToggleHistory: () => void;
   onInsertSql: (sql: string, title?: string) => void;
-  onInsertCellSql: (sql: string) => void;
-  onCreateBlock: (sql: string, meta: { title?: string; description?: string; tags?: string[] }) => void;
-  onAnswerComplete: (payload: AgentAnswerCompletePayload) => void | Promise<void>;
   onAskFromHistory: (run: NotebookResearchRun) => void;
+  onOpenResearch: (id: string, notebookPath?: string) => void | Promise<void>;
 }) {
   const { state } = useNotebook();
-  // Auto uses the governed run orchestrator. Ask and Build preserve the
-  // existing specialized surfaces while the unified flow proves out.
-  const [mode, setMode] = useState<'auto' | 'ask' | 'build'>('auto');
   const openBlockInStudio = useOpenBlockInStudio();
-  useEffect(() => {
-    if (autoAsk) setMode('ask');
-  }, [autoAsk?.nonce]);
   const sourceTitle = sourceCell
     ? `${sourceCell.type.toUpperCase()} cell${sourceCell.name ? ` · ${sourceCell.name}` : ''}`
     : 'Whole notebook';
   const scopeHint = sourceCell
     ? 'This cell + dbt, semantic metadata, certified blocks, prior AI history'
     : 'Whole notebook + dbt, semantic metadata, certified blocks, prior AI history';
-  const promptSet = notebookAiSuggestions(sourceCell);
   const buildContext = sourceCell?.type === 'sql' && sourceCell.content.trim()
     ? { cellSql: sourceCell.content }
     : undefined;
@@ -510,16 +425,6 @@ function NotebookAiDrawer({
     sourceCellName: sourceCell?.name,
     sourceCellType: sourceCell?.type,
   };
-  const buildQuickActions: Array<{ label: string; prompt: string; target?: AiBuildTarget }> = sourceCell
-    ? [
-        { label: 'Build SQL', prompt: 'Generate SQL for this cell using dbt, semantic metadata, certified blocks, and warehouse schema as context.', target: 'cell' },
-        { label: 'Improve SQL', prompt: 'Improve this SQL: fix correctness, tighten grain and filters, and make reusable parameters explicit. Return read-only SQL.', target: 'cell' },
-        { label: 'Build DQL block', prompt: 'Turn this analysis into a reusable draft DQL block with a clear grain, declared outputs, and parameters.', target: 'block' },
-      ]
-    : [
-        { label: 'Build SQL', prompt: 'Generate a new SQL cell for this notebook using dbt, semantic metadata, certified blocks, and warehouse schema as context.', target: 'cell' },
-        { label: 'Build DQL block', prompt: 'Draft a reusable DQL block for this notebook with a clear grain, declared outputs, and parameters.', target: 'block' },
-      ];
 
   return (
     <aside
@@ -587,54 +492,6 @@ function NotebookAiDrawer({
         </button>
       </div>
 
-      {/* Auto routes through the governed run engine; Ask and Build remain explicit lanes. */}
-      <div
-        style={{
-          padding: '8px 12px',
-          borderBottom: `1px solid ${t.headerBorder}`,
-          display: 'flex',
-          gap: 6,
-        }}
-      >
-        <div role="group" aria-label="AI mode" style={{ display: 'inline-flex', padding: 2, gap: 2, border: `1px solid ${t.btnBorder}`, borderRadius: 8, background: t.btnBg }}>
-          {(['auto', 'ask', 'build'] as const).map((value) => {
-            const active = mode === value;
-            return (
-              <button
-                key={value}
-                type="button"
-                onClick={() => setMode(value)}
-                aria-pressed={active}
-                style={{
-                  display: 'inline-flex',
-                  alignItems: 'center',
-                  gap: 5,
-                  padding: '5px 12px',
-                  borderRadius: 6,
-                  border: '1px solid transparent',
-                  background: active ? t.accent : 'transparent',
-                  color: active ? '#ffffff' : t.textSecondary,
-                  fontSize: 12,
-                  fontWeight: active ? 800 : 600,
-                  fontFamily: t.font,
-                  cursor: 'pointer',
-                }}
-              >
-                {value === 'auto'
-                  ? <Route size={13} strokeWidth={2} />
-                  : value === 'ask'
-                    ? <Sparkles size={13} strokeWidth={2} />
-                    : <Hammer size={13} strokeWidth={2} />}
-                {value === 'auto' ? 'Auto' : value === 'ask' ? 'Ask' : 'Build'}
-              </button>
-            );
-          })}
-        </div>
-        <span style={{ fontSize: 11, color: t.textMuted, fontFamily: t.font, alignSelf: 'center' }}>
-          {mode === 'auto' ? 'Route and execute' : mode === 'ask' ? 'Answer a question' : 'Generate a cell or block'}
-        </span>
-      </div>
-
       {historyOpen && (
         <NotebookAiHistoryPanel
           t={t}
@@ -646,52 +503,21 @@ function NotebookAiDrawer({
       )}
 
       <div style={{ flex: 1, minHeight: 0 }}>
-        {mode === 'build' ? (
-          <AiBuildResult
-            key={`build:${notebookPath ?? 'notebook'}:${sourceCell?.id ?? 'all'}`}
-            themeMode={state.themeMode}
-            initialTarget="cell"
-            context={buildContext}
-            quickActions={buildQuickActions}
-            onInsertCell={onInsertCellSql}
-            onOpenBlock={(path, name) => { void openBlockInStudio(path, name); }}
-          />
-        ) : mode === 'auto' ? (
-          <UnifiedAgentRunPanel
-            key={`auto:${notebookPath ?? 'notebook'}:${sourceCell?.id ?? 'all'}`}
-            themeMode={state.themeMode}
-            title="Notebook AI"
-            scopeHint={scopeHint}
-            notebookPath={notebookPath}
-            selectedObject={agentRunSelectedObject}
-            workspaceContext={agentRunWorkspaceContext}
-            initialMode="auto"
-            initialInput={initialInput}
-            onInsertSql={onInsertSql}
-            onOpenBlock={(path, name) => { void openBlockInStudio(path, name ?? path); }}
-          />
-        ) : (
-          <AgentChatPanel
-            key={`${notebookPath ?? 'notebook'}:${sourceCell?.id ?? 'all'}`}
-            title="Notebook AI"
-            scopeHint={scopeHint}
-            upstreamContext={upstreamContext}
-            themeMode={state.themeMode}
-            initialInput={initialInput}
-            autoAsk={autoAsk}
-            emptyHint={sourceCell
-              ? 'Ask about this cell, find existing DQL reuse, inspect lineage, or summarize findings. Switch to Build to generate a cell or block.'
-              : 'Ask across the notebook, review SQL readiness, find existing DQL reuse, or summarize findings. Switch to Build to generate a cell or block.'}
-            inputPlaceholder={sourceCell ? 'Ask about this cell...' : 'Ask about this notebook...'}
-            suggestions={promptSet}
-            embedded
-            showHeader={false}
-            collapseInputAfterAnswer
-            onInsertSql={onInsertSql}
-            onCreateBlock={onCreateBlock}
-            onAnswerComplete={onAnswerComplete}
-          />
-        )}
+        <UnifiedAgentRunPanel
+          key={`auto:${notebookPath ?? 'notebook'}:${sourceCell?.id ?? 'all'}`}
+          themeMode={state.themeMode}
+          title="Notebook AI"
+          scopeHint={scopeHint}
+          notebookPath={notebookPath}
+          selectedObject={agentRunSelectedObject}
+          workspaceContext={agentRunWorkspaceContext}
+          initialMode="auto"
+          initialInput={autoAsk ? '' : initialInput}
+          autoRun={autoAsk ? { text: autoAsk.text, mode: 'ask', nonce: autoAsk.nonce } : undefined}
+          onInsertSql={onInsertSql}
+          onOpenBlock={(path, name) => { void openBlockInStudio(path, name ?? path); }}
+          onOpenResearch={(id, path) => { void onOpenResearch(id, path); }}
+        />
       </div>
     </aside>
   );
@@ -845,149 +671,6 @@ function buildNotebookAiContext(input: {
     }
   }
   return lines.join('\n\n');
-}
-
-function notebookAiSuggestions(sourceCell: Cell | null): Array<{ label: string; prompt: string; icon?: React.ReactNode }> {
-  const icon = <Sparkles size={13} />;
-  if (!sourceCell) {
-    return [
-      {
-        label: 'Review notebook',
-        prompt: 'Review this notebook for DQL readiness. Summarize the business goal, SQL cells, existing DQL reuse opportunities, missing evidence, and next actions.',
-        icon,
-      },
-      {
-        label: 'Plan next SQL',
-        prompt: 'Plan the next SQL cell for this notebook using certified DQL, dbt, semantic metadata, and schema first. If an existing block can answer it, recommend reuse instead.',
-        icon,
-      },
-      {
-        label: 'Find reuse',
-        prompt: 'Check the notebook against existing certified and draft DQL blocks. Identify duplicates, similar business logic, replacement candidates, and what should become a new DQL block.',
-        icon,
-      },
-    ];
-  }
-  const suggestions = [
-    {
-      label: 'Find reuse',
-      prompt: 'Check whether this SQL or business logic already exists as a certified or draft DQL block. Return the best reuse/new decision, evidence, lineage, parameters, and next action.',
-      icon,
-    },
-    {
-      label: 'Build DQL plan',
-      prompt: 'Analyze this cell as a candidate DQL block. Explain business purpose, grain, parameters, source lineage, duplicate risk, preview status, and the exact next step before certification.',
-      icon,
-    },
-    {
-      label: 'Improve SQL',
-      prompt: 'Review this SQL for correctness, reusable parameterization, grain, filters, joins, and DQL readiness. If needed, propose corrected read-only SQL and explain why.',
-      icon,
-    },
-  ];
-  if (sourceCell.error) {
-    return [
-      {
-        label: 'Fix error',
-        prompt: buildCellSqlFixPrompt(sourceCell),
-        icon,
-      },
-      ...suggestions.slice(0, 2),
-    ];
-  }
-  return suggestions;
-}
-
-function buildCellSqlFixPrompt(cell: Cell): string {
-  return [
-    'Fix this SQL cell error using the selected SQL, dbt/semantic metadata, warehouse schema, and certified DQL evidence first.',
-    'If an existing DQL block should be reused instead of repairing raw SQL, say that clearly.',
-    'Return corrected read-only SQL only when SQL repair is appropriate, plus business purpose, lineage, parameters, and next action.',
-    cell.error ? `Current error: ${cell.error}` : '',
-  ].filter(Boolean).join('\n');
-}
-
-function notebookAiPromotionAction(answer?: AgentAnswerEnvelope | null, content = ''): NotebookResearchRun['dqlPromotionAction'] | undefined {
-  const plainOutcome = extractNotebookAiOutcome(content);
-  if (plainOutcome === 'reuse') return 'reuse_existing';
-  if (plainOutcome === 'draft' || plainOutcome === 'generate_sql') return 'create_new';
-  if (plainOutcome === 'fix' || plainOutcome === 'blocked' || plainOutcome === 'review') return 'review_required';
-  if (!answer) return undefined;
-  if (answer.certification === 'certified' || answer.kind === 'certified' || answer.sourceCertifiedBlock || answer.result?.blockName || answer.block?.name) {
-    return 'reuse_existing';
-  }
-  if (answer.draftBlock?.path || answer.draftBlockId) return 'create_new';
-  if (answer.sql || answer.proposedSql || answer.result?.sql || answer.analysisPlan?.sql || answer.evidence?.analysisPlan?.sql) return 'create_new';
-  return 'review_required';
-}
-
-function notebookAiReviewStatus(answer?: AgentAnswerEnvelope | null, content = ''): NotebookResearchRun['reviewStatus'] {
-  const plainOutcome = extractNotebookAiOutcome(content);
-  if (plainOutcome === 'reuse') return 'completed';
-  if (plainOutcome === 'draft') return 'draft_created';
-  if (plainOutcome === 'generate_sql' || plainOutcome === 'fix' || plainOutcome === 'blocked' || plainOutcome === 'review') return 'needs_review';
-  if (!answer) return 'needs_review';
-  if (answer.certification === 'certified' || answer.kind === 'certified') return 'completed';
-  if (answer.draftBlock?.path || answer.draftBlockId) return 'draft_created';
-  return 'needs_review';
-}
-
-function notebookAiRecommendation(answer: AgentAnswerEnvelope | null | undefined, content: string): string {
-  const outcomeLine = findNotebookAiOutcomeText(content);
-  if (!answer) return outcomeLine ? compactText(`${outcomeLine}. ${content}`, 400) : compactText(content, 400);
-  if (answer.certification === 'certified' || answer.kind === 'certified') {
-    const block = answer.sourceCertifiedBlock ?? answer.result?.blockName ?? answer.block?.name;
-    return block ? `Reuse certified DQL block: ${block}.` : 'Reuse certified DQL context.';
-  }
-  if (answer.executionError) return `Fix SQL before DQL promotion: ${answer.executionError}`;
-  if (answer.draftBlock?.path || answer.draftBlockId) return `Review generated DQL draft: ${answer.draftBlock?.path ?? answer.draftBlockId}.`;
-  if (answer.sql || answer.proposedSql || answer.result?.sql) return 'Review generated SQL, run preview, then decide whether to create a DQL draft.';
-  return compactText(answer.answer ?? answer.text ?? content, 400);
-}
-
-function extractNotebookAiOutcome(content: string): 'reuse' | 'draft' | 'generate_sql' | 'fix' | 'blocked' | 'review' | undefined {
-  const lower = content.toLowerCase();
-  const outcome = findNotebookAiOutcomeText(content)?.toLowerCase() ?? '';
-  const source = outcome || lower.slice(0, 600);
-  if (source.includes('reuse') || source.includes('certified block')) return 'reuse';
-  if (source.includes('existing draft') || (source.includes('create') && source.includes('dql draft'))) return 'draft';
-  if (source.includes('generate sql') || source.includes('sql cell')) return 'generate_sql';
-  if (source.includes('fix sql') || source.includes('repair')) return 'fix';
-  if (source.includes('cannot answer') || source.includes('insufficient')) return 'blocked';
-  if (source.includes('needs review') || source.includes('review-required')) return 'review';
-  return undefined;
-}
-
-function findNotebookAiOutcomeText(content: string): string | undefined {
-  for (const line of content.split(/\r?\n/)) {
-    const clean = line
-      .replace(/^\s*(?:#{1,6}\s*)?(?:[-*]\s*)?/, '')
-      .replace(/\*\*/g, '')
-      .trim();
-    const match = clean.match(/^Outcome\s*:\s*(.+)$/i);
-    const outcome = match?.[1]?.replace(/[.:;]+$/, '').trim();
-    if (outcome) return outcome;
-  }
-  return undefined;
-}
-
-function answerSql(answer?: AgentAnswerEnvelope | null): string | undefined {
-  return answer?.sql
-    ?? answer?.result?.sql
-    ?? answer?.proposedSql
-    ?? answer?.analysisPlan?.sql
-    ?? answer?.evidence?.analysisPlan?.sql;
-}
-
-function answerTitle(question: string, answer?: AgentAnswerEnvelope | null): string {
-  return compactText(
-    answer?.result?.blockName
-    ?? answer?.block?.name
-    ?? answer?.analysisPlan?.question
-    ?? question
-    ?? 'Notebook AI answer',
-    90,
-  );
 }
 
 function compactText(value: string | undefined, limit: number): string {

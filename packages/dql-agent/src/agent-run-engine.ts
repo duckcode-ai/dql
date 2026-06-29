@@ -1,4 +1,6 @@
 import { randomUUID } from "node:crypto";
+import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { dirname, join } from "node:path";
 import {
   decideAgentAction,
   looksLikeComposeApp,
@@ -153,6 +155,7 @@ export type AgentRunExecutors = Partial<Record<AgentRunRoute, AgentRouteExecutor
 export interface AgentRunStore {
   save(run: AgentRun): void | Promise<void>;
   get(id: string): AgentRun | undefined | Promise<AgentRun | undefined>;
+  list?(): AgentRun[] | Promise<AgentRun[]>;
 }
 
 export interface AgentRunEngineOptions {
@@ -180,6 +183,74 @@ export class InMemoryAgentRunStore implements AgentRunStore {
   list(): AgentRun[] {
     return [...this.runs.values()];
   }
+}
+
+export interface FileAgentRunStoreOptions {
+  path: string;
+  maxRuns?: number;
+}
+
+export class FileAgentRunStore implements AgentRunStore {
+  private readonly path: string;
+  private readonly maxRuns: number;
+
+  constructor(options: FileAgentRunStoreOptions) {
+    this.path = options.path;
+    this.maxRuns = options.maxRuns ?? 500;
+  }
+
+  save(run: AgentRun): void {
+    const runs = this.list();
+    const index = runs.findIndex((candidate) => candidate.id === run.id);
+    if (index >= 0) {
+      runs[index] = run;
+    } else {
+      runs.push(run);
+    }
+    const pruned = runs
+      .sort((a, b) => b.startedAt.localeCompare(a.startedAt))
+      .slice(0, this.maxRuns);
+    this.write(pruned);
+  }
+
+  get(id: string): AgentRun | undefined {
+    return this.list().find((run) => run.id === id);
+  }
+
+  list(): AgentRun[] {
+    if (!existsSync(this.path)) return [];
+    try {
+      const parsed = JSON.parse(readFileSync(this.path, "utf-8")) as {
+        runs?: unknown;
+      };
+      if (!Array.isArray(parsed.runs)) return [];
+      return parsed.runs.flatMap((run) => isAgentRunRecord(run) ? [run] : []);
+    } catch {
+      return [];
+    }
+  }
+
+  private write(runs: AgentRun[]): void {
+    mkdirSync(dirname(this.path), { recursive: true });
+    const tmpPath = `${this.path}.tmp`;
+    writeFileSync(tmpPath, JSON.stringify({ version: 1, runs }, null, 2) + "\n", "utf-8");
+    renameSync(tmpPath, this.path);
+  }
+}
+
+export function defaultAgentRunStorePath(projectRoot: string): string {
+  return join(projectRoot, ".dql", "local", "agent-runs.json");
+}
+
+function isAgentRunRecord(value: unknown): value is AgentRun {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const record = value as Record<string, unknown>;
+  return typeof record.id === "string"
+    && typeof record.question === "string"
+    && typeof record.route === "string"
+    && Array.isArray(record.events)
+    && Array.isArray(record.artifacts)
+    && Array.isArray(record.evaluations);
 }
 
 export class AgentRunEngine {
