@@ -19,6 +19,7 @@ import { themes } from '../../themes/notebook-theme';
 import type { BlockStudioDbtStatus, NotebookFile, SemanticLayerState, SidebarPanel } from '../../store/types';
 import { api } from '../../api/client';
 import { SetupWizard } from '../modals/SetupWizard';
+import { StarterBlocks } from './StarterBlocks';
 
 type StepState = 'ready' | 'active' | 'waiting';
 
@@ -312,6 +313,15 @@ export function HomePage() {
         {focusStep && (
           <section className="dql-home-fade" style={{ animationDelay: '120ms' }}>
             <StepFocusCard step={focusStep} t={t} />
+          </section>
+        )}
+
+        {/* First-run teaching: when the user is on the "build blocks" step and has
+            no blocks yet, show a few AI-drafted starter blocks inline so they can
+            learn the concept by example before building their own. */}
+        {focusStep?.id === 'build' && !dqlReady && (
+          <section className="dql-home-fade" style={{ animationDelay: '150ms' }}>
+            <StarterBlocks t={t} />
           </section>
         )}
 
