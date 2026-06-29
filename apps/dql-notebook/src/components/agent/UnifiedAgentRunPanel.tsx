@@ -19,6 +19,7 @@ import {
   api,
   type AgentRun,
   type AgentRunArtifact,
+  type AgentRunAudience,
   type AgentRunEvent,
   type AgentRunRequestedMode,
   type AgentRunRoute,
@@ -41,18 +42,28 @@ interface UnifiedAgentRunPanelProps {
   workspaceContext?: Record<string, unknown>;
   initialMode?: AgentRunRequestedMode;
   initialInput?: string;
+  /** 'stakeholder' (consumption-only) hides authoring modes + adds the certify handoff. */
+  audience?: AgentRunAudience;
   autoRun?: { text: string; mode?: AgentRunRequestedMode; nonce: number };
   onInsertSql?: (sql: string, title?: string) => void;
   onOpenBlock?: (path: string, name?: string) => void;
   onOpenResearch?: (id: string, notebookPath?: string) => void;
 }
 
-const MODE_OPTIONS: Array<{ value: AgentRunRequestedMode; label: string; icon: React.ReactNode }> = [
+const ANALYST_MODE_OPTIONS: Array<{ value: AgentRunRequestedMode; label: string; icon: React.ReactNode }> = [
   { value: 'auto', label: 'Auto', icon: <Route size={13} /> },
   { value: 'ask', label: 'Ask', icon: <Sparkles size={13} /> },
   { value: 'research', label: 'Research', icon: <FileSearch size={13} /> },
   { value: 'sql', label: 'SQL', icon: <Code2 size={13} /> },
   { value: 'block', label: 'Block', icon: <Blocks size={13} /> },
+  { value: 'app', label: 'App', icon: <LayoutDashboard size={13} /> },
+];
+
+// Stakeholders never author SQL/blocks — only consumption routes.
+const STAKEHOLDER_MODE_OPTIONS: Array<{ value: AgentRunRequestedMode; label: string; icon: React.ReactNode }> = [
+  { value: 'auto', label: 'Auto', icon: <Route size={13} /> },
+  { value: 'ask', label: 'Ask', icon: <Sparkles size={13} /> },
+  { value: 'research', label: 'Research', icon: <FileSearch size={13} /> },
   { value: 'app', label: 'App', icon: <LayoutDashboard size={13} /> },
 ];
 
@@ -76,13 +87,16 @@ export function UnifiedAgentRunPanel({
   workspaceContext,
   initialMode = 'auto',
   initialInput = '',
+  audience = 'analyst',
   autoRun,
   onInsertSql,
   onOpenBlock,
   onOpenResearch,
 }: UnifiedAgentRunPanelProps): JSX.Element {
   const t = themes[themeMode];
+  const modeOptions = audience === 'stakeholder' ? STAKEHOLDER_MODE_OPTIONS : ANALYST_MODE_OPTIONS;
   const [mode, setMode] = useState<AgentRunRequestedMode>(initialMode);
+  const [certifying, setCertifying] = useState<Record<string, 'pending' | 'sent' | 'error'>>({});
   const [input, setInput] = useState(initialInput);
   const [items, setItems] = useState<ThreadItem[]>([]);
   const [runningEvents, setRunningEvents] = useState<AgentRunEvent[]>([]);
@@ -125,6 +139,7 @@ export function UnifiedAgentRunPanel({
       const runInput = {
         question: text,
         requestedMode: activeMode,
+        audience,
         selectedObject: selectedObject ?? (notebookPath ? { kind: 'notebook' as const, path: notebookPath } : undefined),
         workspaceContext: {
           ...(workspaceContext ?? {}),
@@ -162,10 +177,31 @@ export function UnifiedAgentRunPanel({
     abortRef.current?.abort();
   }, []);
 
-  const handleNextAction = (run: AgentRun, route?: AgentRunRoute) => {
-    const nextMode = routeToMode(route);
+  const requestCertification = async (run: AgentRun) => {
+    if (certifying[run.id] === 'pending' || certifying[run.id] === 'sent') return;
+    setCertifying((current) => ({ ...current, [run.id]: 'pending' }));
+    try {
+      const sql = answerSqlFromRun(run);
+      const result = await api.requestCertification({
+        question: run.question,
+        generatedSql: sql,
+        notebookPath: typeof workspaceContext?.notebookPath === 'string' ? workspaceContext.notebookPath : notebookPath,
+        context: { agentRunId: run.id, route: run.route, selectedObject: run.selectedObject },
+      });
+      setCertifying((current) => ({ ...current, [run.id]: result.ok ? 'sent' : 'error' }));
+    } catch {
+      setCertifying((current) => ({ ...current, [run.id]: 'error' }));
+    }
+  };
+
+  const handleNextAction = (run: AgentRun, action: AgentRun['nextActions'][number]) => {
+    if (action.id === 'request-certification') {
+      void requestCertification(run);
+      return;
+    }
+    const nextMode = routeToMode(action.route);
     if (nextMode) setMode(nextMode);
-    setInput(nextPromptFor(run, route));
+    setInput(nextPromptFor(run, action.route));
     requestAnimationFrame(() => inputRef.current?.focus());
   };
 
@@ -183,7 +219,7 @@ export function UnifiedAgentRunPanel({
           </div>
         </div>
         <div role="group" aria-label="Copilot route" style={{ display: 'flex', gap: 4, flexWrap: 'wrap' }}>
-          {MODE_OPTIONS.map((option) => {
+          {modeOptions.map((option) => {
             const active = mode === option.value;
             return (
               <button
@@ -218,10 +254,11 @@ export function UnifiedAgentRunPanel({
             key={item.id}
             run={item.run}
             t={t}
+            certifyState={certifying[item.run.id]}
             onInsertSql={onInsertSql}
             onOpenBlock={onOpenBlock}
             onOpenResearch={onOpenResearch}
-            onNextAction={(route) => handleNextAction(item.run, route)}
+            onNextAction={(action) => handleNextAction(item.run, action)}
           />
         ))}
 
@@ -269,6 +306,7 @@ export function UnifiedAgentRunPanel({
 function RunCard({
   run,
   t,
+  certifyState,
   onInsertSql,
   onOpenBlock,
   onOpenResearch,
@@ -276,14 +314,16 @@ function RunCard({
 }: {
   run: AgentRun;
   t: Theme;
+  certifyState?: 'pending' | 'sent' | 'error';
   onInsertSql?: (sql: string, title?: string) => void;
   onOpenBlock?: (path: string, name?: string) => void;
   onOpenResearch?: (id: string, notebookPath?: string) => void;
-  onNextAction: (route?: AgentRunRoute) => void;
+  onNextAction: (action: AgentRun['nextActions'][number]) => void;
 }) {
   const steps = run.steps ?? [];
   const multiStep = steps.length > 1;
   const isLlmPlan = run.plan?.source === 'llm';
+  const evidence = evidenceFromRun(run);
   return (
     <div style={runCardStyle(t)}>
       <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
@@ -305,6 +345,18 @@ function RunCard({
 
       <div style={{ fontSize: 12.5, lineHeight: 1.45, color: t.textSecondary }}>{run.summary}</div>
       {run.answer ? <div style={answerBoxStyle(t)}>{run.answer}</div> : null}
+
+      {evidence.length > 0 ? (
+        <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', alignItems: 'center' }}>
+          <span style={{ fontSize: 11, color: t.textMuted }}>Evidence:</span>
+          {evidence.map((ev) => (
+            <span key={ev.label} style={evidenceChipStyle(t, ev.certified)}>
+              {ev.certified ? <ShieldCheck size={11} /> : <FileSearch size={11} />}
+              <span>{ev.label}</span>
+            </span>
+          ))}
+        </div>
+      ) : null}
 
       {run.artifacts.length > 0 ? (
         <div style={{ display: 'grid', gap: 8 }}>
@@ -333,11 +385,28 @@ function RunCard({
 
       {run.nextActions.length > 0 ? (
         <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
-          {run.nextActions.map((action) => (
-            <button key={action.id} type="button" onClick={() => onNextAction(action.route)} style={smallButtonStyle(t)}>
-              {action.label}
-            </button>
-          ))}
+          {run.nextActions.map((action) => {
+            const isCertify = action.id === 'request-certification';
+            const label = isCertify && certifyState === 'sent'
+              ? 'Sent to analyst'
+              : isCertify && certifyState === 'pending'
+                ? 'Sending…'
+                : isCertify && certifyState === 'error'
+                  ? 'Retry request'
+                  : action.label;
+            return (
+              <button
+                key={action.id}
+                type="button"
+                onClick={() => onNextAction(action)}
+                disabled={isCertify && (certifyState === 'pending' || certifyState === 'sent')}
+                style={isCertify ? certifyButtonStyle(t, certifyState) : smallButtonStyle(t)}
+              >
+                {isCertify && certifyState === 'sent' ? <CheckCircle2 size={11} /> : isCertify ? <ShieldCheck size={11} /> : null}
+                {label}
+              </button>
+            );
+          })}
         </div>
       ) : null}
     </div>
@@ -379,6 +448,11 @@ function ArtifactView({
   const generatedPaths = Array.isArray(payload.generatedPaths)
     ? payload.generatedPaths.filter((item): item is string => typeof item === 'string')
     : [];
+  const narration = payload.narration && typeof payload.narration === 'object' ? payload.narration as Record<string, unknown> : undefined;
+  const keyFindings = Array.isArray(narration?.keyFindings)
+    ? narration.keyFindings.filter((item): item is string => typeof item === 'string')
+    : [];
+  const recommendation = typeof narration?.recommendation === 'string' ? narration.recommendation : undefined;
 
   return (
     <div style={artifactStyle(t)}>
@@ -388,7 +462,16 @@ function ArtifactView({
           {artifact.title}
         </div>
       </div>
-      {steps.length > 0 ? (
+      {keyFindings.length > 0 ? (
+        <div style={{ display: 'grid', gap: 4 }}>
+          <div style={{ fontSize: 11, fontWeight: 800, color: t.textSecondary }}>Key findings</div>
+          {keyFindings.slice(0, 4).map((finding, index) => (
+            <div key={index} style={{ fontSize: 11.5, color: t.textSecondary, lineHeight: 1.4, display: 'flex', gap: 6 }}>
+              <span style={{ color: t.accent }}>•</span><span>{finding}</span>
+            </div>
+          ))}
+        </div>
+      ) : steps.length > 0 ? (
         <div style={{ display: 'grid', gap: 5 }}>
           {steps.slice(0, 4).map((step, index) => (
             <div key={index} style={{ fontSize: 11.5, color: t.textSecondary, lineHeight: 1.35 }}>
@@ -397,7 +480,19 @@ function ArtifactView({
           ))}
         </div>
       ) : null}
-      {sql ? <pre style={codeStyle(t)}>{sql}</pre> : null}
+      {recommendation ? (
+        <div style={{ fontSize: 11.5, color: t.textPrimary, lineHeight: 1.4, display: 'flex', gap: 6 }}>
+          <span style={{ color: t.accent }}>→</span><span>{recommendation}</span>
+        </div>
+      ) : null}
+      {sql ? (
+        <details>
+          <summary style={{ cursor: 'pointer', fontSize: 11, color: t.textSecondary, listStyle: 'none', display: 'flex', alignItems: 'center', gap: 5 }}>
+            <Code2 size={12} /><span>View query</span>
+          </summary>
+          <pre style={{ ...codeStyle(t), marginTop: 6 }}>{sql}</pre>
+        </details>
+      ) : null}
       {gaps.length > 0 ? (
         <div style={{ fontSize: 11.5, color: t.textSecondary, lineHeight: 1.4 }}>
           Gaps: {gaps.slice(0, 3).join(', ')}
@@ -550,6 +645,76 @@ function nextPromptFor(run: AgentRun, route?: AgentRunRoute): string {
 
 function makeId(prefix: string): string {
   return `${prefix}_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+}
+
+function payloadOf(artifact: AgentRunArtifact): Record<string, unknown> {
+  return artifact.payload && typeof artifact.payload === 'object' && !Array.isArray(artifact.payload)
+    ? artifact.payload as Record<string, unknown>
+    : {};
+}
+
+/** Governed sources behind a run, surfaced as trust chips (manifest grounding). */
+function evidenceFromRun(run: AgentRun): Array<{ label: string; certified: boolean }> {
+  const out: Array<{ label: string; certified: boolean }> = [];
+  const seen = new Set<string>();
+  const certifiedRun = run.trustState === 'certified';
+  const push = (label: unknown, certified: boolean) => {
+    if (typeof label !== 'string' || !label.trim() || seen.has(label)) return;
+    seen.add(label);
+    out.push({ label, certified });
+  };
+  for (const artifact of run.artifacts) {
+    const payload = payloadOf(artifact);
+    if (artifact.ref) push(artifact.ref, certifiedRun);
+    const plan = payload.plan && typeof payload.plan === 'object' ? payload.plan as Record<string, unknown> : undefined;
+    if (Array.isArray(plan?.sources)) plan.sources.forEach((source) => push(source, certifiedRun));
+    push((payload.sourceCertifiedBlock as string), true);
+  }
+  return out.slice(0, 4);
+}
+
+/** Best-effort SQL behind a run, for the certification handoff. */
+function answerSqlFromRun(run: AgentRun): string | undefined {
+  for (const artifact of run.artifacts) {
+    const payload = payloadOf(artifact);
+    const researchRun = payload.researchRun && typeof payload.researchRun === 'object' ? payload.researchRun as Record<string, unknown> : undefined;
+    const sql = payload.proposedSql ?? payload.sql ?? payload.sqlPreview ?? researchRun?.generatedSql ?? researchRun?.reviewedSql;
+    if (typeof sql === 'string' && sql.trim()) return sql;
+  }
+  return undefined;
+}
+
+function evidenceChipStyle(t: Theme, certified: boolean): React.CSSProperties {
+  return {
+    display: 'inline-flex',
+    alignItems: 'center',
+    gap: 4,
+    fontSize: 10.5,
+    padding: '2px 7px',
+    borderRadius: 999,
+    background: certified ? `${t.success}14` : t.cellBg,
+    color: certified ? t.success : t.textMuted,
+    border: `1px solid ${certified ? `${t.success}44` : t.headerBorder}`,
+  };
+}
+
+function certifyButtonStyle(t: Theme, state?: 'pending' | 'sent' | 'error'): React.CSSProperties {
+  const sent = state === 'sent';
+  const color = sent ? t.success : t.accent;
+  return {
+    display: 'inline-flex',
+    alignItems: 'center',
+    gap: 4,
+    border: `1px solid ${color}`,
+    background: `${color}14`,
+    color,
+    borderRadius: 7,
+    padding: '5px 8px',
+    fontSize: 11,
+    fontWeight: 800,
+    fontFamily: t.font,
+    cursor: sent || state === 'pending' ? 'default' : 'pointer',
+  };
 }
 
 function iconShellStyle(t: Theme): React.CSSProperties {

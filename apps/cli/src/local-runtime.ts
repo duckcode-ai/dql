@@ -2463,6 +2463,53 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
       return;
     }
 
+    // Stakeholder → analyst handoff: turn a review-required output into a draft
+    // research run in the analyst notebook queue (no authoring by the stakeholder).
+    if (req.method === 'POST' && path === '/api/agent-runs/request-certification') {
+      try {
+        const body = await readJSON(req).catch(() => null);
+        const record = agentRunRecord(body);
+        const question = record ? agentRunString(record.question) : undefined;
+        if (!question) {
+          res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
+          res.end(serializeJSON({ ok: false, error: 'question is required.' }));
+          return;
+        }
+        const notebookPath = (record && agentRunString(record.notebookPath))
+          ?? `notebooks/certification-requests/${Date.now()}.dqlnb`;
+        const generatedSql = record ? agentRunString(record.generatedSql) : undefined;
+        try {
+          const storage = openNotebookResearchStorage();
+          try {
+            const created = storage.createRun({
+              notebookPath,
+              title: agentRunTitle(question, 'Certification request'),
+              question,
+              intent: 'ad_hoc_analysis',
+              domain: record ? agentRunString(record.domain) : undefined,
+              owner: record ? agentRunString(record.owner) : undefined,
+              generatedSql,
+              context: {
+                surface: 'stakeholder_request_certification',
+                requestedContext: agentRunRecord(record?.context) ?? null,
+              },
+            });
+            res.writeHead(201, { 'Content-Type': 'application/json; charset=utf-8' });
+            res.end(serializeJSON({ ok: true, researchRunId: created.id, notebookPath }));
+          } finally {
+            storage.close();
+          }
+        } catch (error) {
+          res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+          res.end(serializeJSON({ ok: false, error: formatNotebookResearchStorageError(error) }));
+        }
+      } catch (error) {
+        res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({ ok: false, error: error instanceof Error ? error.message : String(error) }));
+      }
+      return;
+    }
+
     const agentRunMatch = /^\/api\/agent-runs\/([^/]+)$/.exec(path);
     if (req.method === 'GET' && agentRunMatch) {
       const id = decodeURIComponent(agentRunMatch[1]);

@@ -544,10 +544,13 @@ export interface AgentRun {
   repairAttempts: number;
 }
 
+export type AgentRunAudience = 'stakeholder' | 'analyst';
+
 export interface CreateAgentRunInput {
   question: string;
   requestedMode?: AgentRunRequestedMode;
   mode?: AgentRunRequestedMode;
+  audience?: AgentRunAudience;
   intent?: string;
   signals?: Record<string, unknown>;
   selectedObject?: AgentRunSelectedObject;
@@ -555,6 +558,22 @@ export interface CreateAgentRunInput {
   context?: Record<string, unknown>;
   history?: Array<{ role: 'user' | 'assistant'; text: string }>;
   runId?: string;
+}
+
+export interface RequestCertificationInput {
+  question: string;
+  generatedSql?: string;
+  notebookPath?: string;
+  domain?: string;
+  owner?: string;
+  context?: Record<string, unknown>;
+}
+
+export interface RequestCertificationResult {
+  ok: boolean;
+  researchRunId?: string;
+  notebookPath?: string;
+  error?: string;
 }
 
 export interface AgentRunListResponse {
@@ -1761,6 +1780,17 @@ export const api = {
   async getAgentRun(id: string): Promise<AgentRun> {
     const raw = await request<{ run: AgentRun }>(`/api/agent-runs/${encodeURIComponent(id)}`);
     return raw.run;
+  },
+
+  /**
+   * Stakeholder → analyst handoff: drop a review-required output into the analyst
+   * notebook queue as a draft research run for them to build/certify.
+   */
+  async requestCertification(input: RequestCertificationInput): Promise<RequestCertificationResult> {
+    return request<RequestCertificationResult>('/api/agent-runs/request-certification', {
+      method: 'POST',
+      body: JSON.stringify(input),
+    });
   },
 
   /**

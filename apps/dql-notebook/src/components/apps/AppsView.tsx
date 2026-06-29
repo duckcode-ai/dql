@@ -1032,6 +1032,7 @@ function AppWorkspaceSurface({
   onInvestigationsChanged: (investigations: LocalAppInvestigation[]) => void;
   onOpenLineageNode: (nodeId: string) => void;
 }) {
+  const { dispatch } = useNotebook();
   const certifiedCount = dashboardDoc?.dashboard.layout.items.filter((item) => Boolean(item.block)).length ?? 0;
   const draftCount = appDoc?.drafts?.length ?? 0;
   const dashboardBlockIds = useMemo(() => {
@@ -1063,9 +1064,30 @@ function AppWorkspaceSurface({
   }, []);
   const handleAskBlock = useCallback((blockId: string, question: string) => {
     setSelectedBlockId(blockId);
+    // Stakeholder view: route tile follow-up through the governed agent loop in the
+    // global right rail (deep research, repair, escalation). Build/analyst keeps the
+    // in-app copilot shim.
+    if (experience === 'view') {
+      dispatch({
+        type: 'OPEN_GLOBAL_AI',
+        audience: 'stakeholder',
+        context: {
+          title: 'App copilot',
+          scopeHint: tidyTitle(app?.name) ? `Follow up on ${tidyTitle(app?.name)}` : 'Follow up on this tile',
+          selectedObject: { kind: 'block', id: blockId, title: dashboardDoc?.dashboard.metadata.title },
+          workspaceContext: {
+            appId: app?.id,
+            dashboardId: dashboardDoc?.dashboard.id,
+            blockId,
+          },
+        },
+        autoRun: { text: question, mode: 'auto' },
+      });
+      return;
+    }
     onExplainChange(true);
     setAskSeed({ text: question, nonce: Date.now() });
-  }, [onExplainChange]);
+  }, [dispatch, experience, app?.id, app?.name, dashboardDoc?.dashboard.id, dashboardDoc?.dashboard.metadata.title, onExplainChange]);
 
   useEffect(() => {
     if (experience !== 'view') return;
@@ -1392,10 +1414,9 @@ function AppWorkspaceTabs({
   const reportCount = appDoc?.investigations?.length ?? 0;
   const tabs: Array<{ id: AppSection; label: string; count?: number; icon: ReactNode }> = experience === 'view'
     ? [
+      // Stakeholder view = just the dashboard story + tiles. Follow-up and research
+      // happen in the global right-rail copilot, not in-app tabs.
       { id: 'dashboards', label: 'App', count: appDoc?.dashboards.length ?? 0, icon: <LayoutDashboard size={14} /> },
-      ...(reportCount > 0 || section === 'research' ? [
-        { id: 'research' as const, label: 'Analysis', count: reportCount, icon: <Search size={14} /> },
-      ] : []),
     ]
     : [
       { id: 'dashboards', label: 'App', count: appDoc?.dashboards.length ?? 0, icon: <LayoutDashboard size={14} /> },

@@ -141,7 +141,30 @@ export interface ParamConfig {
 }
 export type SidebarPanel = 'files' | 'schema' | 'block_library' | 'connection' | 'reference' | 'lineage' | 'git' | 'apps' | 'readiness' | 'skills' | 'domains' | 'settings' | null;
 export type DevPanelTab = 'logs' | 'errors';
-export type MainView = 'home' | 'notebook' | 'business_artifact' | 'lineage' | 'lineage_detail' | 'block_studio' | 'imports' | 'connection' | 'reference' | 'git' | 'apps' | 'readiness' | 'review' | 'skills' | 'domains' | 'settings';
+export type MainView = 'home' | 'ask' | 'notebook' | 'business_artifact' | 'lineage' | 'lineage_detail' | 'block_studio' | 'imports' | 'connection' | 'reference' | 'git' | 'apps' | 'readiness' | 'review' | 'skills' | 'domains' | 'settings';
+
+export type GlobalAiAudience = 'stakeholder' | 'analyst';
+
+export interface GlobalAiSelectedObject {
+  kind: 'notebook' | 'cell' | 'block' | 'app' | 'dashboard' | 'research' | 'workspace';
+  id?: string;
+  title?: string;
+  path?: string;
+}
+
+export interface GlobalAiContext {
+  selectedObject?: GlobalAiSelectedObject;
+  workspaceContext?: Record<string, unknown>;
+  scopeHint?: string;
+  title?: string;
+}
+
+export interface GlobalAiState {
+  open: boolean;
+  audience: GlobalAiAudience;
+  context: GlobalAiContext;
+  autoRun?: { text: string; mode?: string; nonce: number };
+}
 export type AppWorkspaceExperience = 'view' | 'build';
 export type AppWorkspaceSection = 'dashboards' | 'notebooks' | 'research' | 'ai' | 'drafts' | 'settings';
 export type LineageReturnTarget =
@@ -1058,6 +1081,8 @@ export interface NotebookState {
   activeAppExperience: AppWorkspaceExperience;
   activeAppSection: AppWorkspaceSection;
   activePersona: ActivePersona | null;
+  // Global, context-aware AI right rail (stakeholder copilot across surfaces).
+  globalAi: GlobalAiState;
 }
 
 export type InspectorContext =
@@ -1135,4 +1160,9 @@ export type NotebookAction =
     }
   | { type: 'OPEN_DASHBOARD'; dashboardId: string }
   | { type: 'SET_APP_WORKSPACE_STATE'; experience?: AppWorkspaceExperience; section?: AppWorkspaceSection }
-  | { type: 'SET_ACTIVE_PERSONA'; persona: ActivePersona | null };
+  | { type: 'SET_ACTIVE_PERSONA'; persona: ActivePersona | null }
+  // Global AI right rail
+  | { type: 'OPEN_GLOBAL_AI'; context?: GlobalAiContext; audience?: GlobalAiAudience; autoRun?: { text: string; mode?: string } }
+  | { type: 'CLOSE_GLOBAL_AI' }
+  | { type: 'TOGGLE_GLOBAL_AI'; context?: GlobalAiContext; audience?: GlobalAiAudience }
+  | { type: 'SET_GLOBAL_AI_CONTEXT'; context: GlobalAiContext; audience?: GlobalAiAudience };

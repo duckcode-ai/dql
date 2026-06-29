@@ -110,6 +110,7 @@ const initialState: NotebookState = {
   activeAppExperience: 'view',
   activeAppSection: 'dashboards',
   activePersona: null,
+  globalAi: { open: false, audience: 'stakeholder', context: {} },
 };
 
 /**
@@ -546,6 +547,41 @@ function notebookReducer(state: NotebookState, action: NotebookAction): Notebook
 
     case 'SET_BLOCK_STUDIO_DBT_STATUS':
       return { ...state, blockStudioDbtStatus: action.status };
+
+    case 'OPEN_GLOBAL_AI':
+      return {
+        ...state,
+        globalAi: {
+          open: true,
+          audience: action.audience ?? state.globalAi.audience,
+          context: action.context ?? state.globalAi.context,
+          autoRun: action.autoRun ? { ...action.autoRun, nonce: Date.now() } : state.globalAi.autoRun,
+        },
+      };
+
+    case 'CLOSE_GLOBAL_AI':
+      return { ...state, globalAi: { ...state.globalAi, open: false } };
+
+    case 'TOGGLE_GLOBAL_AI':
+      return {
+        ...state,
+        globalAi: {
+          ...state.globalAi,
+          open: !state.globalAi.open,
+          audience: action.audience ?? state.globalAi.audience,
+          context: action.context ?? state.globalAi.context,
+        },
+      };
+
+    case 'SET_GLOBAL_AI_CONTEXT':
+      return {
+        ...state,
+        globalAi: {
+          ...state.globalAi,
+          context: action.context,
+          audience: action.audience ?? state.globalAi.audience,
+        },
+      };
 
     case 'TOGGLE_INSPECTOR':
       return { ...state, inspectorOpen: !state.inspectorOpen };

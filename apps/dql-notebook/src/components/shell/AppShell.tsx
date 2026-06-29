@@ -8,6 +8,8 @@ import { Sidebar } from './Sidebar';
 import { Header } from './Header';
 import { DevPanel } from './DevPanel';
 import { HomePage } from '../home/HomePage';
+import { AnalyticsHome } from '../home/AnalyticsHome';
+import { GlobalAiRail } from '../agent/GlobalAiRail';
 import { NotebookEditor } from '../notebook/NotebookEditor';
 import { NewNotebookModal } from '../modals/NewNotebookModal';
 import { NewBlockModal } from '../modals/NewBlockModal';
@@ -197,6 +199,8 @@ export function AppShell() {
         >
           {state.mainView === 'home' ? (
             <HomePage />
+          ) : state.mainView === 'ask' ? (
+            <AnalyticsHome />
           ) : state.mainView === 'business_artifact' ? (
             <BusinessArtifactView />
           ) : state.mainView === 'lineage' ? (
@@ -255,6 +259,9 @@ export function AppShell() {
         {state.appMode === 'studio' && state.inspectorOpen && !state.lineageFullscreen && !state.lineageDrawerOpen && !state.dashboardMode && (
           <InspectorPanel />
         )}
+
+        {/* Global, context-aware stakeholder copilot — persists across surfaces. */}
+        {state.globalAi.open && <GlobalAiRail />}
 
       </div>
 

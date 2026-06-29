@@ -925,8 +925,57 @@ function DashboardTile({
       >
         <TileBody item={item} tile={tile} loading={loading} error={error} themeMode={themeMode} genUi={genUi} />
       </div>
+      {!editable ? <TileInsightCaption tile={tile} themeMode={themeMode} /> : null}
     </div>
   );
+}
+
+/** Data-driven one-line insight under a tile (leader + share), computed from results. */
+function TileInsightCaption({ tile, themeMode }: { tile?: DashboardRunResponse['tiles'][number]; themeMode: ThemeMode }): JSX.Element | null {
+  const t = themes[themeMode];
+  const caption = useMemo(() => computeTileInsight(tile), [tile]);
+  if (!caption) return null;
+  return (
+    <div style={{ padding: '4px 10px 8px', fontSize: 11.5, color: t.textMuted, lineHeight: 1.4, display: 'flex', gap: 5, alignItems: 'baseline' }}>
+      <span style={{ color: t.accent }}>•</span>
+      <span>{caption}</span>
+    </div>
+  );
+}
+
+function computeTileInsight(tile?: DashboardRunResponse['tiles'][number]): string | null {
+  const rows = tile?.result?.rows;
+  const columns = tile?.result?.columns;
+  if (!Array.isArray(rows) || rows.length === 0 || !Array.isArray(columns) || columns.length === 0) return null;
+  const sample = rows[0] as Record<string, unknown>;
+  const toNum = (v: unknown): number | undefined => {
+    if (typeof v === 'number' && Number.isFinite(v)) return v;
+    if (typeof v === 'string') { const n = Number(v.replace(/[$,%\s]/g, '')); return Number.isFinite(n) && v.trim() ? n : undefined; }
+    return undefined;
+  };
+  const valueCol = columns.find((c) => toNum(sample?.[c]) !== undefined);
+  const labelCol = columns.find((c) => c !== valueCol && typeof sample?.[c] === 'string');
+  if (!valueCol) return null;
+  if (rows.length === 1) {
+    const v = toNum((rows[0] as Record<string, unknown>)[valueCol]);
+    return v !== undefined ? `${valueCol}: ${fmtNum(v)}.` : null;
+  }
+  const ranked = (rows as Array<Record<string, unknown>>)
+    .map((r) => ({ label: labelCol ? String(r[labelCol] ?? '—') : 'top', value: toNum(r[valueCol]) ?? 0 }))
+    .sort((a, b) => b.value - a.value);
+  const total = ranked.reduce((s, e) => s + e.value, 0);
+  const top = ranked[0];
+  if (!top) return null;
+  return total > 0
+    ? `${top.label} leads ${valueCol} at ${fmtNum(top.value)} (${Math.round((top.value / total) * 100)}%).`
+    : `${top.label} leads ${valueCol} at ${fmtNum(top.value)}.`;
+}
+
+function fmtNum(value: number): string {
+  const abs = Math.abs(value);
+  if (abs >= 1_000_000) return `${(value / 1_000_000).toFixed(1)}M`;
+  if (abs >= 1_000) return `${(value / 1_000).toFixed(1)}K`;
+  return Number.isInteger(value) ? String(value) : value.toFixed(2);
 }
 
 function GeneratedVizSwitcher({

@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { Home, Sparkles, GraduationCap, Boxes } from 'lucide-react';
+import { Home, Sparkles, GraduationCap, Boxes, MessageCircle } from 'lucide-react';
 import { Tooltip } from '@duckcodeailabs/dql-ui';
 import {
   FileText,
@@ -118,8 +118,8 @@ export function ActivityBar() {
     persistExpanded(expanded);
   }, [expanded]);
 
-  function handlePanelClick(panel: SidebarPanel | 'home') {
-    if (panel === 'home') {
+  function handlePanelClick(panel: SidebarPanel | 'home' | 'ask') {
+    if (panel === 'home' || panel === 'ask') {
       dispatch({ type: 'SET_MAIN_VIEW', view: panel });
       return;
     }
@@ -142,7 +142,7 @@ export function ActivityBar() {
   }
 
   const items: Array<{
-    key: SidebarPanel | 'home';
+    key: SidebarPanel | 'home' | 'ask';
     title: string;
     icon: React.ReactNode;
     active: boolean;
@@ -152,6 +152,12 @@ export function ActivityBar() {
       title: 'Home',
       icon: <Home size={16} strokeWidth={1.75} />,
       active: state.mainView === 'home',
+    },
+    {
+      key: 'ask',
+      title: 'Ask',
+      icon: <MessageCircle size={16} strokeWidth={1.75} />,
+      active: state.mainView === 'ask',
     },
     {
       key: 'readiness',
