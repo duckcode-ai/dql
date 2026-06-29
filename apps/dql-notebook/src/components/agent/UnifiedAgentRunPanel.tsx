@@ -344,7 +344,7 @@ function RunCard({
       ) : null}
 
       <div style={{ fontSize: 12.5, lineHeight: 1.45, color: t.textSecondary }}>{run.summary}</div>
-      {run.answer ? <div style={answerBoxStyle(t)}>{run.answer}</div> : null}
+      {run.answer ? <div style={answerBoxStyle(t)}>{cleanAnswerText(run.answer)}</div> : null}
 
       {evidence.length > 0 ? (
         <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', alignItems: 'center' }}>
@@ -645,6 +645,18 @@ function nextPromptFor(run: AgentRun, route?: AgentRunRoute): string {
 
 function makeId(prefix: string): string {
   return `${prefix}_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+}
+
+/** Strip the internal "Outcome: <reuse|draft|fix|...>" routing line meant for the
+ *  notebook parser, plus markdown emphasis markers — stakeholders should see clean
+ *  prose, not pipeline jargon or literal asterisks/backticks. */
+function cleanAnswerText(answer: string): string {
+  return answer
+    .replace(/^\s*Outcome\s*:\s*[^\n]*\n+/i, '')
+    .replace(/\*\*(.+?)\*\*/g, '$1')
+    .replace(/`([^`]+)`/g, '$1')
+    .replace(/^_(.+?)_$/gm, '$1')
+    .trim();
 }
 
 function payloadOf(artifact: AgentRunArtifact): Record<string, unknown> {

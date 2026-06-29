@@ -320,6 +320,22 @@ export function constrainRouteForAudience(route: AgentRunRoute, audience: AgentR
   return route;
 }
 
+/**
+ * "Answer anyway, labeled" — a stakeholder should get a best-effort governed answer
+ * rather than a dead-end clarify, UNLESS the catalog explicitly flagged missing
+ * context. The answer loop does its own grounding/retrieval and can still return a
+ * needs-clarification result if it genuinely can't proceed.
+ */
+export function answerAnywayRoute(
+  route: AgentRunRoute,
+  request: AgentRunRequest,
+  audience: AgentRunAudience,
+): AgentRunRoute {
+  if (audience !== "stakeholder" || route !== "clarify") return route;
+  const explicitMissing = (request.signals?.missingContext?.length ?? 0) > 0;
+  return explicitMissing ? "clarify" : "generated_answer";
+}
+
 /** Audience-aware escalation target: stakeholders never escalate into authoring. */
 export function escalationRouteFor(route: AgentRunRoute, audience: AgentRunAudience): AgentRunRoute | undefined {
   const target = AGENT_RUN_ESCALATION_MAP[route];
@@ -499,7 +515,11 @@ export class AgentRunEngine {
 
     const audience = resolveAudience(request);
     const routeDecision = buildIntentDecision(request);
-    const defaultRoute = constrainRouteForAudience(selectRoute(request, routeDecision), audience);
+    const defaultRoute = answerAnywayRoute(
+      constrainRouteForAudience(selectRoute(request, routeDecision), audience),
+      request,
+      audience,
+    );
 
     try {
       const plan = await this.planner.plan({
@@ -517,7 +537,13 @@ export class AgentRunEngine {
       });
 
       const executedSteps: AgentRunStep[] = [];
-      const queue: AgentRunPlannedStep[] = [...plan.steps];
+      // Normalize planned routes to the audience (works for LLM and deterministic
+      // plans alike): stakeholders never author and never dead-end on clarify
+      // without explicit missing context.
+      const queue: AgentRunPlannedStep[] = plan.steps.map((step) => ({
+        ...step,
+        route: answerAnywayRoute(constrainRouteForAudience(step.route, audience), request, audience),
+      }));
       let repairAttemptsTotal = 0;
       let stepCount = 0;
       let finalStep: AgentRunStep | undefined;

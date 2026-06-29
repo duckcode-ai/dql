@@ -386,6 +386,29 @@ describe("AgentRunEngine audience", () => {
     expect(run.route).toBe("research");
   });
 
+  it("answers anyway for a stakeholder instead of dead-ending on clarify", async () => {
+    const engine = new AgentRunEngine({ idGenerator: () => "run-anyway", now: fixedClock() });
+    const run = await engine.run({ question: "what is total revenue?", intent: "ad_hoc_ranking", audience: "stakeholder" });
+    expect(run.route).toBe("generated_answer");
+  });
+
+  it("still clarifies for a stakeholder when the catalog flags missing context", async () => {
+    const engine = new AgentRunEngine({ idGenerator: () => "run-missing", now: fixedClock() });
+    const run = await engine.run({
+      question: "show me the thing",
+      intent: "ad_hoc_ranking",
+      audience: "stakeholder",
+      signals: { missingContext: ["Which measure should I use?"] },
+    });
+    expect(run.route).toBe("clarify");
+  });
+
+  it("keeps the analyst default (clarify) untouched", async () => {
+    const engine = new AgentRunEngine({ idGenerator: () => "run-analyst-clarify", now: fixedClock() });
+    const run = await engine.run({ question: "what is total revenue?", intent: "ad_hoc_ranking", audience: "analyst" });
+    expect(run.route).toBe("clarify");
+  });
+
   it("strips analyst next-actions from a stakeholder run", async () => {
     const engine = new AgentRunEngine({
       idGenerator: () => "run-sh-na",
