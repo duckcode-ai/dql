@@ -61,6 +61,29 @@ export type {
   SeedDefaultSkillsResult,
 } from "./skills/defaults.js";
 export { answer, parseProposal } from "./answer-loop.js";
+export {
+  decideAgentAction,
+  looksLikeComposeApp,
+  looksLikeFollowUp,
+  type AgentAction,
+  type IntentDecision,
+  type IntentDecisionInput,
+  type IntentSignals,
+} from "./intent-controller.js";
+export {
+  planApp,
+  type AppPlan as AgentAppPlan,
+  type AppPlanSection,
+  type AppPlanFilter as AgentAppPlanFilter,
+  type PlanBlock,
+} from "./app-planner.js";
+export {
+  planResearch,
+  type ResearchPlan,
+  type ResearchStep,
+  type ResearchFollowUp,
+} from "./research-loop.js";
+export { loadSemanticMetrics } from "./propose/build-from-prompt.js";
 export type {
   AgentAnalysisPlan,
   AgentAnswer,
@@ -246,7 +269,12 @@ export type {
   EnrichFacts,
   EnrichedContent,
   EnrichOptions,
+  ReflectableDraft,
+  ExecutionProbe,
+  BlockReflection,
+  ReflectionFix,
 } from "./propose/index.js";
+export { reflectAndReviseBlock } from "./propose/index.js";
 export type {
   BuildLocalContextPackRequest,
   EnsureMetadataCatalogOptions,

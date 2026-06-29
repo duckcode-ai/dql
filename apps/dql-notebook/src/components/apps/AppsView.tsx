@@ -922,7 +922,12 @@ function AppCreateSurface({
 
           <aside className="dql-app-ai-start-context">
             <section className="dql-app-ai-context-card">
-              <PanelHead title="Certified blocks found" meta={`${certifiedPlanTiles.length || catalog.length} matches`} />
+              <PanelHead
+                title="Certified blocks found"
+                meta={plan.coverage
+                  ? `${plan.coverage.certifiedTiles} certified · ${plan.coverage.gaps} gap${plan.coverage.gaps === 1 ? '' : 's'}`
+                  : `${certifiedPlanTiles.length || catalog.length} matches`}
+              />
               <div className="dql-app-ai-evidence-list">
                 {(certifiedPlanTiles.length ? certifiedPlanTiles : catalog.slice(0, 4)).map((item, index) => (
                   'name' in item ? (
@@ -2644,6 +2649,31 @@ function DashboardFilterInput({
 }) {
   const label = formatBusinessLabel(filter.id);
   const valueText = filterInputValue(filter, value);
+  // Categorical filters bound to a tile: fetch the column's distinct values and
+  // upgrade the free-text box to a real dropdown (low-cardinality only).
+  const sourceBlockId = (filter as { sourceBlockId?: string }).sourceBlockId;
+  const column = filter.bindsTo || filter.id;
+  const wantsOptions = (filter.type === 'text' || filter.type === 'select') && Boolean(sourceBlockId) && !filter.options?.length;
+  const [fetchedOptions, setFetchedOptions] = useState<string[] | null>(null);
+  useEffect(() => {
+    if (!wantsOptions || !sourceBlockId) return;
+    let cancelled = false;
+    void api.dashboardFilterOptions(sourceBlockId, column).then((res) => {
+      if (!cancelled && res && res.options.length > 0 && !res.truncated) setFetchedOptions(res.options);
+    });
+    return () => { cancelled = true; };
+  }, [sourceBlockId, column, wantsOptions]);
+  if (fetchedOptions && fetchedOptions.length > 0) {
+    return (
+      <FilterSelect
+        icon={filterIconForDashboardFilter(filter)}
+        label={label}
+        value={valueText}
+        onChange={onChange}
+        options={[['', `All ${label.toLowerCase()}`], ...fetchedOptions.map((opt) => [opt, opt] as [string, string])]}
+      />
+    );
+  }
   if (filter.type === 'select') {
     return (
       <FilterSelect
@@ -2712,13 +2742,25 @@ function deriveDashboardFilters(dashboard: DashboardDocumentResponse['dashboard'
   if (!dashboard) return [];
   const filters = new Map<string, DashboardFilter>();
   for (const filter of dashboard.filters ?? []) {
-    if (isUsefulDashboardFilter(filter)) filters.set(filter.id, filter);
+    if (isUsefulDashboardFilter(filter)) filters.set(filter.id, { ...filter });
   }
+  const blockIdOf = (item: DashboardLayoutItem): string | undefined =>
+    item.block?.blockId ?? item.block?.ref;
   for (const item of dashboard.layout.items ?? []) {
+    const bid = blockIdOf(item);
     for (const binding of item.parameterBindings ?? []) {
       const id = binding.filter || binding.field || binding.param;
-      if (!id || filters.has(id) || isCoveredByExistingDashboardFilter(filters, binding)) continue;
-      filters.set(id, filterFromParameterBinding(binding));
+      if (!id) continue;
+      const existing = filters.get(id);
+      if (existing) {
+        // Remember a tile that backs this filter, so its values can be fetched.
+        if (bid && !(existing as { sourceBlockId?: string }).sourceBlockId) {
+          (existing as { sourceBlockId?: string }).sourceBlockId = bid;
+        }
+        continue;
+      }
+      if (isCoveredByExistingDashboardFilter(filters, binding)) continue;
+      filters.set(id, { ...filterFromParameterBinding(binding), sourceBlockId: bid } as DashboardFilter);
     }
   }
   return Array.from(filters.values());

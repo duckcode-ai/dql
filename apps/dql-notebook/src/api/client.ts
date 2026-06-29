@@ -668,6 +668,8 @@ export interface GeneratedAppPlan {
   selectedEvidence?: Array<{ source: string; reason: string; kind?: string; nodeId?: string; trustState: string }>;
   missingEvidence?: string[];
   scopedReports?: GeneratedAppScopedReport[];
+  /** Plan-preview coverage: how much of the app is certified vs. left as gaps. */
+  coverage?: { certifiedTiles: number; gaps: number; ratio: number };
   pages: Array<{
     id: string;
     title: string;
@@ -789,6 +791,16 @@ export type AppAskResponse =
       };
       investigation?: LocalAppInvestigation;
       proposal?: unknown;
+      /** Grounded ReAct research plan (P4): the decision, steps, and follow-up options. */
+      researchPlan?: {
+        decision: 'answer' | 'clarify' | 'investigate' | 'compose_app';
+        confidence: number;
+        rationale: string;
+        steps: Array<{ thought: string; action: { kind: string; target: string }; expectation: string }>;
+        followUp?: { question: string; options: string[] };
+        sources: string[];
+        done: boolean;
+      };
     }
   | { ok: false; error: string };
 
@@ -3243,6 +3255,16 @@ export const api = {
       return await request<DashboardDocumentResponse>(
         `/api/apps/${encodeURIComponent(appId)}/dashboards/${encodeURIComponent(dashboardId)}`,
       );
+    } catch {
+      return null;
+    }
+  },
+
+  /** Distinct values for a block column → categorical dashboard-filter dropdowns. */
+  async dashboardFilterOptions(block: string, column: string): Promise<{ options: string[]; truncated: boolean } | null> {
+    try {
+      const search = new URLSearchParams({ block, column });
+      return await request<{ options: string[]; truncated: boolean }>(`/api/dashboard/filter-options?${search.toString()}`);
     } catch {
       return null;
     }

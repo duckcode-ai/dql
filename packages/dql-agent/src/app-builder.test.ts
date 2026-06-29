@@ -119,6 +119,57 @@ const nbaNodes: KGNode[] = [
   },
 ];
 
+const jaffleNode: KGNode = {
+  nodeId: "block:revenue",
+  kind: "block",
+  name: "revenue",
+  domain: "marts",
+  status: "certified",
+  description: "Total product revenue",
+  llmContext: "Wraps the governed semantic metric revenue.",
+  tags: ["revenue", "metric"],
+  sourceTier: "certified_artifact",
+  certification: "certified",
+  declaredOutputs: ["ordered_at", "revenue"],
+  dimensions: ["ordered_at"],
+  allowedFilters: ["ordered_at", "region"],
+};
+
+describe("planAppFromPrompt — convergence (filters bound to real blocks)", () => {
+  it("derives the global filter bar from the block's allowedFilters, not prompt words", () =>
+    withKg([jaffleNode], (kg) => {
+      // The prompt never says "region", but the certified block declares it.
+      const plan = planAppFromPrompt({ prompt: "revenue app", kg, domain: "marts" });
+      const ids = plan.globalFilters.map((f) => f.id);
+      expect(ids).toContain("ordered_at");
+      expect(ids).toContain("region"); // surfaced from the block, not the prompt
+      const ordered = plan.globalFilters.find((f) => f.id === "ordered_at");
+      const region = plan.globalFilters.find((f) => f.id === "region");
+      expect(ordered?.type).toBe("daterange"); // time → date range
+      expect(region?.type).toBe("select");     // categorical → dropdown
+      expect(region?.bindsTo).toBe("region");
+    }));
+
+  it("drops a prompt-inferred filter no certified tile supports (no orphans)", () =>
+    withKg([jaffleNode], (kg) => {
+      // "season"/years would inject season filters under the old prompt-only logic.
+      const plan = planAppFromPrompt({ prompt: "revenue by season 2016 2017", kg, domain: "marts" });
+      const ids = plan.globalFilters.map((f) => f.id);
+      expect(ids).not.toContain("season");
+      expect(ids).not.toContain("season_start");
+      expect(ids).toContain("ordered_at"); // the real, supported filter remains
+    }));
+
+  it("grounds the narrative in the certified block + filter bar and reports coverage", () =>
+    withKg([jaffleNode], (kg) => {
+      const plan = planAppFromPrompt({ prompt: "revenue app", kg, domain: "marts" });
+      expect(plan.stakeholderSummary).toContain("revenue");      // names the block
+      expect(plan.stakeholderSummary.toLowerCase()).toContain("filter");
+      expect(plan.coverage.certifiedTiles).toBeGreaterThan(0);
+      expect(plan.coverage.ratio).toBeGreaterThan(0);
+    }));
+});
+
 describe("planAppFromPrompt", () => {
   it("builds a reviewable local app plan from certified DQL context", () =>
     withKg(revenueNodes, (kg) => {

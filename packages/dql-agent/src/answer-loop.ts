@@ -31,6 +31,7 @@ import type { AgentMemory } from './memory/sqlite-memory.js';
 import type { LocalContextPack, MetadataAgentIntent, MetadataRouteDecision } from './metadata/catalog.js';
 import type { GeneratedDraftBlock } from './metadata/drafts.js';
 import { matchSemanticMetric, metricToGovernedSql, resolveGovernedMetricSql, type MetricMatch } from './metadata/metric-match.js';
+import { decideAgentAction, type IntentDecision } from './intent-controller.js';
 import { validateSqlAgainstLocalContext } from './metadata/sql-context-validation.js';
 import { buildGroundingFromRuntimeRelations, resolveRelationsInSql, validateSqlAgainstGrounding, type SchemaGrounding } from './metadata/sql-grounding.js';
 import {
@@ -215,6 +216,12 @@ export interface AgentAnswer {
   certification?: AnswerCertification;
   reviewStatus?: AnswerReviewStatus;
   confidence?: number;
+  /**
+   * P0 intent controller — the high-level action the agent decided this turn
+   * deserves (answer / clarify / investigate / compose_app) with a rationale.
+   * Advisory: callers route on it (compose_app → app build, investigate → research).
+   */
+  intentDecision?: IntentDecision;
   /** Final answer text (NL summary). */
   text: string;
   /** Alias for UI envelopes. */
@@ -389,8 +396,25 @@ export async function answer(input: AnswerLoopInput): Promise<AgentAnswer> {
       ? ((result.block as { dataState?: DataStateLike } | undefined)?.dataState)
       : undefined;
   const { _semanticMetricMatch, ...publicResult } = result;
+  const chosenRoute = result.route ?? deriveAiRoute(result, _semanticMetricMatch);
+  // P0 — record the high-level action this turn warranted, so callers can route
+  // (compose_app → app build, investigate → research) and the UI can show the
+  // agent's reasoning. Computed once at the single exit from the finished answer.
+  const tier = chosenRoute?.tier;
+  const intentDecision = decideAgentAction({
+    question: input.question,
+    intent: tier === 'no_answer' ? 'clarify' : 'ad_hoc_ranking',
+    signals: {
+      certifiedScore: tier === 'certified_block' ? 0.9 : 0,
+      metricScore: tier === 'semantic_metric' ? 0.9 : 0,
+      hasRetrieval: (result.considered?.length ?? 0) > 0,
+      missingContext: tier === 'no_answer' ? ['Need a clearer business object, measure, or grain before answering.'] : [],
+    },
+    isFollowUp: Boolean(input.followUp),
+  });
   return {
     ...publicResult,
+    intentDecision,
     trustLabelInfo: composeEffectiveTrust({ id, dataState }),
     // Stamp the SELECTED skills that shaped the answer (transparency). Computed
     // here so every return site inside runAnswerLoop stays untouched.
@@ -402,7 +426,7 @@ export async function answer(input: AnswerLoopInput): Promise<AgentAnswer> {
       })),
     // Stamp the chosen route once, at the single exit point, so every return
     // site inside runAnswerLoop stays untouched (spec 17, part C).
-    route: result.route ?? deriveAiRoute(result, _semanticMetricMatch),
+    route: chosenRoute,
   };
 }
 

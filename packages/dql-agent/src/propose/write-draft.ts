@@ -57,6 +57,12 @@ export interface ProposedDraftRecord {
     errors: Array<{ rule: string; message: string }>;
     warnings: Array<{ rule: string; message: string }>;
   };
+  /**
+   * What the reflect-before-certify loop auto-fixed (P2), rendered in the review
+   * header so the human sees what the agent already corrected (e.g. reconciled the
+   * output contract, inferred grain) before they review.
+   */
+  reflectionFixes?: string[];
 }
 
 export interface WrittenDraft {
@@ -202,6 +208,12 @@ function renderReviewHeader(rec: ProposedDraftRecord, draftPath: string): string
     `//`,
     `// Certifier verdict at proposal time: NOT certifiable.`,
   ];
+  if (rec.reflectionFixes && rec.reflectionFixes.length > 0) {
+    lines.push(`// Auto-fixed during review (${rec.reflectionFixes.length}):`);
+    for (const fix of rec.reflectionFixes) {
+      lines.push(`//   - ${fix}`);
+    }
+  }
   if (rec.certification.errors.length > 0) {
     lines.push(`// Blocking (${rec.certification.errors.length}):`);
     for (const err of rec.certification.errors) {
