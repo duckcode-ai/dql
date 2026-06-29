@@ -9,8 +9,10 @@ import {
   LayoutDashboard,
   ListTree,
   Loader2,
+  Pin,
   Route,
   Send,
+  ShieldAlert,
   ShieldCheck,
   Sparkles,
   Wrench,
@@ -97,6 +99,7 @@ export function UnifiedAgentRunPanel({
   const modeOptions = audience === 'stakeholder' ? STAKEHOLDER_MODE_OPTIONS : ANALYST_MODE_OPTIONS;
   const [mode, setMode] = useState<AgentRunRequestedMode>(initialMode);
   const [certifying, setCertifying] = useState<Record<string, 'pending' | 'sent' | 'error'>>({});
+  const [pinning, setPinning] = useState<Record<string, 'pending' | 'sent' | 'error'>>({});
   const [input, setInput] = useState(initialInput);
   const [items, setItems] = useState<ThreadItem[]>([]);
   const [runningEvents, setRunningEvents] = useState<AgentRunEvent[]>([]);
@@ -194,9 +197,38 @@ export function UnifiedAgentRunPanel({
     }
   };
 
+  const appId = typeof workspaceContext?.appId === 'string' ? workspaceContext.appId : undefined;
+  const dashboardId = typeof workspaceContext?.dashboardId === 'string' ? workspaceContext.dashboardId : undefined;
+  const canPin = Boolean(appId && dashboardId);
+
+  const pinToApp = async (run: AgentRun) => {
+    if (!appId || !dashboardId) return;
+    if (pinning[run.id] === 'pending' || pinning[run.id] === 'sent') return;
+    setPinning((current) => ({ ...current, [run.id]: 'pending' }));
+    try {
+      const cleanTitle = run.question.replace(/^\/\w+\s+/, '').slice(0, 80);
+      const result = await api.createAiPin(appId, {
+        dashboardId,
+        title: cleanTitle,
+        answer: run.answer ?? run.summary,
+        question: run.question,
+        sql: answerSqlFromRun(run),
+        certification: run.trustState === 'certified' ? 'certified' : 'ai_generated',
+        reviewStatus: run.trustState === 'certified' ? 'certified' : 'needs_review',
+      });
+      setPinning((current) => ({ ...current, [run.id]: result.ok ? 'sent' : 'error' }));
+    } catch {
+      setPinning((current) => ({ ...current, [run.id]: 'error' }));
+    }
+  };
+
   const handleNextAction = (run: AgentRun, action: AgentRun['nextActions'][number]) => {
     if (action.id === 'request-certification') {
       void requestCertification(run);
+      return;
+    }
+    if (action.id === 'pin-to-app') {
+      void pinToApp(run);
       return;
     }
     const nextMode = routeToMode(action.route);
@@ -207,7 +239,7 @@ export function UnifiedAgentRunPanel({
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0, background: t.cellBg }}>
-      <style>{`@keyframes dql-agent-run-spin { to { transform: rotate(360deg); } }`}</style>
+      <style>{`@keyframes dql-agent-run-spin { to { transform: rotate(360deg); } } @keyframes dql-agent-pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.4; } } @keyframes dql-agent-dots { 0% { content: ''; } 25% { content: '.'; } 50% { content: '..'; } 75% { content: '...'; } } .dql-agent-dots::after { content: ''; animation: dql-agent-dots 1.4s steps(1) infinite; }`}</style>
       <div style={{ padding: '10px 12px', borderBottom: `1px solid ${t.headerBorder}`, display: 'grid', gap: 8 }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 9 }}>
           <div style={iconShellStyle(t)}><Bot size={16} /></div>
@@ -255,6 +287,8 @@ export function UnifiedAgentRunPanel({
             run={item.run}
             t={t}
             certifyState={certifying[item.run.id]}
+            pinState={pinning[item.run.id]}
+            canPin={canPin}
             onInsertSql={onInsertSql}
             onOpenBlock={onOpenBlock}
             onOpenResearch={onOpenResearch}
@@ -262,19 +296,7 @@ export function UnifiedAgentRunPanel({
           />
         ))}
 
-        {running && (
-          <div style={assistantBubbleStyle(t)}>
-            <Loader2 size={14} style={{ animation: 'dql-agent-run-spin 0.8s linear infinite', flex: '0 0 auto' }} />
-            <div style={{ display: 'grid', gap: 4, minWidth: 0 }}>
-              <span>Running route and checks...</span>
-              {runningEvents.slice(-4).map((event) => (
-                <span key={event.id} style={{ fontSize: 11, color: t.textMuted, lineHeight: 1.35 }}>
-                  {event.message}
-                </span>
-              ))}
-            </div>
-          </div>
-        )}
+        {running && <RunProgress events={runningEvents} t={t} />}
       </div>
 
       {error ? <div style={{ margin: '0 12px 8px', color: t.error, fontSize: 12 }}>{error}</div> : null}
@@ -303,10 +325,104 @@ export function UnifiedAgentRunPanel({
   );
 }
 
+type ProgressPhase = 'plan' | 'work' | 'check' | 'done';
+
+const PROGRESS_PHASES: Array<{ key: ProgressPhase; label: string }> = [
+  { key: 'plan', label: 'Plan' },
+  { key: 'work', label: 'Work' },
+  { key: 'check', label: 'Check' },
+];
+
+function routeActionLabel(route?: AgentRunRoute): string {
+  switch (route) {
+    case 'research': return 'Researching across governed data';
+    case 'certified_answer':
+    case 'generated_answer': return 'Finding the answer';
+    case 'app_build': return 'Assembling the app';
+    case 'sql_cell': return 'Writing the query';
+    case 'dql_block_draft': return 'Drafting the block';
+    default: return 'Working';
+  }
+}
+
+function currentActionLabel(events: AgentRunEvent[]): string {
+  for (let i = events.length - 1; i >= 0; i -= 1) {
+    const event = events[i];
+    switch (event.type) {
+      case 'repair.attempted': return 'Refining the result';
+      case 'escalated': return 'Switching to a deeper approach';
+      case 'evaluation.recorded': return 'Checking grounding and trust';
+      case 'executor.started':
+      case 'route.decided': return routeActionLabel(event.route);
+      case 'step.started': {
+        const goal = (event.payload as { goal?: string } | undefined)?.goal;
+        return goal ? `Working on: ${goal}` : 'Working';
+      }
+      case 'plan.created': return 'Planning the approach';
+      case 'run.started': return 'Starting';
+      default: break;
+    }
+  }
+  return 'Working';
+}
+
+function phaseReached(events: AgentRunEvent[], phase: ProgressPhase): 'done' | 'active' | 'pending' {
+  const types = new Set(events.map((event) => event.type));
+  const planned = types.has('plan.created');
+  const worked = types.has('executor.started');
+  const checked = types.has('evaluation.recorded');
+  if (phase === 'plan') return planned ? 'done' : 'active';
+  if (phase === 'work') return checked ? 'done' : worked ? 'active' : planned ? 'active' : 'pending';
+  if (phase === 'check') return checked ? 'active' : 'pending';
+  return 'pending';
+}
+
+/** Clean, animated, staged progress — replaces the raw event dump. */
+function RunProgress({ events, t }: { events: AgentRunEvent[]; t: Theme }) {
+  return (
+    <div style={{ ...assistantBubbleStyle(t), alignItems: 'stretch', flexDirection: 'column', gap: 9, maxWidth: '100%' }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+        <Loader2 size={14} style={{ animation: 'dql-agent-run-spin 0.8s linear infinite', flex: '0 0 auto', color: t.accent }} />
+        <span className="dql-agent-dots" style={{ fontSize: 12.5, fontWeight: 800, color: t.textPrimary }}>{currentActionLabel(events)}</span>
+      </div>
+      <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
+        {PROGRESS_PHASES.map((phase, index) => {
+          const state = phaseReached(events, phase.key);
+          const color = state === 'done' ? t.success : state === 'active' ? t.accent : t.textMuted;
+          return (
+            <React.Fragment key={phase.key}>
+              <span style={{
+                display: 'inline-flex', alignItems: 'center', gap: 4, fontSize: 10.5, fontWeight: 700, color,
+                animation: state === 'active' ? 'dql-agent-pulse 1.2s ease-in-out infinite' : undefined,
+              }}>
+                {state === 'done' ? <CheckCircle2 size={11} /> : <span style={{ width: 7, height: 7, borderRadius: 999, background: color, display: 'inline-block' }} />}
+                {phase.label}
+              </span>
+              {index < PROGRESS_PHASES.length - 1 ? <span style={{ flex: 1, height: 1, background: t.headerBorder }} /> : null}
+            </React.Fragment>
+          );
+        })}
+      </div>
+      {events.length > 0 ? (
+        <details>
+          <summary style={{ cursor: 'pointer', fontSize: 10.5, color: t.textMuted, listStyle: 'none' }}>Details</summary>
+          <div style={{ display: 'grid', gap: 3, marginTop: 5 }}>
+            {events.slice(-6).map((event) => (
+              <span key={event.id} style={{ fontSize: 10.5, color: t.textMuted, lineHeight: 1.35 }}>{event.message}</span>
+            ))}
+          </div>
+        </details>
+      ) : null}
+    </div>
+  );
+}
+
 function RunCard({
   run,
   t,
   certifyState,
+  pinState,
+  canPin,
   onInsertSql,
   onOpenBlock,
   onOpenResearch,
@@ -315,6 +431,8 @@ function RunCard({
   run: AgentRun;
   t: Theme;
   certifyState?: 'pending' | 'sent' | 'error';
+  pinState?: 'pending' | 'sent' | 'error';
+  canPin?: boolean;
   onInsertSql?: (sql: string, title?: string) => void;
   onOpenBlock?: (path: string, name?: string) => void;
   onOpenResearch?: (id: string, notebookPath?: string) => void;
@@ -324,6 +442,10 @@ function RunCard({
   const multiStep = steps.length > 1;
   const isLlmPlan = run.plan?.source === 'llm';
   const evidence = evidenceFromRun(run);
+  const trustNote = trustExplainer(run);
+  // Pin only a result worth pinning (an answer/research artifact), in an app context.
+  const pinnable = Boolean(canPin) && run.status !== 'blocked' && run.status !== 'needs_clarification'
+    && (Boolean(run.answer) || run.artifacts.some((a) => a.kind === 'answer' || a.kind === 'research_run'));
   return (
     <div style={runCardStyle(t)}>
       <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
@@ -334,6 +456,13 @@ function RunCard({
         </div>
         <TrustBadge run={run} t={t} />
       </div>
+
+      {trustNote ? (
+        <div style={{ display: 'flex', gap: 6, alignItems: 'flex-start', fontSize: 11, color: t.textMuted, lineHeight: 1.4 }}>
+          {run.trustState === 'certified' ? <ShieldCheck size={12} color={t.success} style={{ flex: '0 0 auto', marginTop: 1 }} /> : <ShieldAlert size={12} color={t.warning} style={{ flex: '0 0 auto', marginTop: 1 }} />}
+          <span>{trustNote}</span>
+        </div>
+      ) : null}
 
       {(isLlmPlan || multiStep || run.repairAttempts > 0) ? (
         <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
@@ -383,7 +512,7 @@ function RunCard({
         </div>
       )}
 
-      {run.nextActions.length > 0 ? (
+      {(run.nextActions.length > 0 || pinnable) ? (
         <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
           {run.nextActions.map((action) => {
             const isCertify = action.id === 'request-certification';
@@ -407,10 +536,30 @@ function RunCard({
               </button>
             );
           })}
+          {pinnable ? (
+            <button
+              type="button"
+              onClick={() => onNextAction({ id: 'pin-to-app', label: 'Pin to app' })}
+              disabled={pinState === 'pending' || pinState === 'sent'}
+              style={certifyButtonStyle(t, pinState)}
+              title="Add this insight to the current app dashboard"
+            >
+              {pinState === 'sent' ? <CheckCircle2 size={11} /> : <Pin size={11} />}
+              {pinState === 'sent' ? 'Pinned to app' : pinState === 'pending' ? 'Pinning…' : pinState === 'error' ? 'Retry pin' : 'Pin to app'}
+            </button>
+          ) : null}
         </div>
       ) : null}
     </div>
   );
+}
+
+/** Plain-English trust line so a stakeholder knows what they can rely on. */
+function trustExplainer(run: AgentRun): string | null {
+  if (run.trustState === 'certified') return 'Certified — answered from a governed metric you can trust.';
+  if (run.trustState === 'review_required') return 'Review-required — generated from governed data; not a certified metric yet.';
+  if (run.trustState === 'blocked') return null;
+  return null;
 }
 
 function ArtifactView({
