@@ -260,9 +260,10 @@ export function AppShell() {
           <InspectorPanel />
         )}
 
-        {/* Global, context-aware stakeholder copilot — persists across surfaces, but
-            never on the Ask page (which is itself the full chat) to avoid two AIs. */}
-        {state.globalAi.open && state.mainView !== 'ask' && <GlobalAiRail />}
+        {/* App copilot rail — only on the Apps surface (tile follow-up). Analyst
+            surfaces (Notebook, Block Studio) have their own AI; Ask is its own chat.
+            Scoping here avoids a redundant second AI on those pages. */}
+        {state.globalAi.open && state.mainView === 'apps' && <GlobalAiRail />}
 
       </div>
 
