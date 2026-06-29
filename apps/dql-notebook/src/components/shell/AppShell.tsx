@@ -260,8 +260,9 @@ export function AppShell() {
           <InspectorPanel />
         )}
 
-        {/* Global, context-aware stakeholder copilot — persists across surfaces. */}
-        {state.globalAi.open && <GlobalAiRail />}
+        {/* Global, context-aware stakeholder copilot — persists across surfaces, but
+            never on the Ask page (which is itself the full chat) to avoid two AIs. */}
+        {state.globalAi.open && state.mainView !== 'ask' && <GlobalAiRail />}
 
       </div>
 
