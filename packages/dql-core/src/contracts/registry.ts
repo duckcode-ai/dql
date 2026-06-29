@@ -19,8 +19,13 @@ import {
   type ContractId,
   type ContractRef,
   type ContractResolution,
+  type DataLexConformance,
   type DataLexContract,
   type DataLexManifest,
+  type DataLexRelationship,
+  type DataLexRelationshipEndpoint,
+  type JoinPathResolution,
+  type RelationshipCardinality,
   parseContractRef,
 } from './types.js';
 
@@ -38,6 +43,8 @@ interface IndexedContract {
 export class DataLexContractRegistry {
   private readonly byId = new Map<ContractId, IndexedContract[]>();
   private readonly diagnostics: string[] = [];
+  private readonly relationshipList: DataLexRelationship[] = [];
+  private readonly conformanceList: DataLexConformance[] = [];
 
   constructor(private readonly source: { manifestPath?: string; manifest?: DataLexManifest } = {}) {
     this.reload();
@@ -47,6 +54,8 @@ export class DataLexContractRegistry {
   reload(): void {
     this.byId.clear();
     this.diagnostics.length = 0;
+    this.relationshipList.length = 0;
+    this.conformanceList.length = 0;
 
     let manifest: DataLexManifest | null = null;
     if (this.source.manifest) {
@@ -137,6 +146,100 @@ export class DataLexContractRegistry {
     return [...this.diagnostics];
   }
 
+  /** All typed relationships from the manifest (any layer), in load order. */
+  relationships(): DataLexRelationship[] {
+    return [...this.relationshipList];
+  }
+
+  /** All concept-to-physical conformance records from the manifest. */
+  conformance(): DataLexConformance[] {
+    return [...this.conformanceList];
+  }
+
+  /**
+   * Conformance record for a business concept (e.g. "Customer"), so a consumer
+   * can resolve its canonical join key and the physical models that realize it.
+   * Matches case-insensitively on concept name, and on domain when provided.
+   */
+  conformanceFor(concept: string, domain?: string): DataLexConformance | undefined {
+    const want = concept.toLowerCase();
+    return this.conformanceList.find(
+      (c) =>
+        c.concept.toLowerCase() === want &&
+        (domain === undefined || (c.domain ?? '').toLowerCase() === domain.toLowerCase()),
+    );
+  }
+
+  /**
+   * Resolve a grain-safe join path between two entities. Returns the connecting
+   * relationship oriented base -> target, with `fansOut` set when joining
+   * `target` onto `base` can multiply base rows. Column-carrying (logical /
+   * physical) relationships are preferred over column-less conceptual ones.
+   */
+  joinPath(
+    baseEntity: string,
+    targetEntity: string,
+    opts: { baseDomain?: string; targetDomain?: string } = {},
+  ): JoinPathResolution {
+    const matches = this.relationshipList.filter((rel) => {
+      const direct =
+        this.endpointMatches(rel.from, baseEntity, opts.baseDomain) &&
+        this.endpointMatches(rel.to, targetEntity, opts.targetDomain);
+      const reverse =
+        this.endpointMatches(rel.from, targetEntity, opts.targetDomain) &&
+        this.endpointMatches(rel.to, baseEntity, opts.baseDomain);
+      return direct || reverse;
+    });
+    if (matches.length === 0) {
+      return {
+        ok: false,
+        reason: 'no_relationship',
+        message: `No DataLex relationship connects "${baseEntity}" and "${targetEntity}".`,
+      };
+    }
+    const withColumns = matches.filter((r) => r.from.column && r.to.column);
+    const candidates = withColumns.length > 0 ? withColumns : matches;
+    if (candidates.length > 1) {
+      return {
+        ok: false,
+        reason: 'ambiguous',
+        message: `Multiple relationships connect "${baseEntity}" and "${targetEntity}"; pin one by name.`,
+      };
+    }
+    const rel = candidates[0];
+    const directBase = this.endpointMatches(rel.from, baseEntity, opts.baseDomain);
+    const base = directBase ? rel.from : rel.to;
+    const target = directBase ? rel.to : rel.from;
+    const cardinality = directBase ? rel.cardinality : this.invertCardinality(rel.cardinality);
+    const fansOut = cardinality === 'one_to_many' || cardinality === 'many_to_many';
+    return { ok: true, relationship: rel, base, target, cardinality, fansOut };
+  }
+
+  private endpointMatches(
+    ep: DataLexRelationshipEndpoint,
+    entity: string,
+    domain?: string,
+  ): boolean {
+    if (ep.entity.toLowerCase() !== entity.toLowerCase()) return false;
+    if (domain !== undefined && ep.domain !== undefined) {
+      return ep.domain.toLowerCase() === domain.toLowerCase();
+    }
+    return true;
+  }
+
+  private invertCardinality(
+    cardinality?: RelationshipCardinality,
+  ): RelationshipCardinality | undefined {
+    switch (cardinality) {
+      case 'one_to_many':
+        return 'many_to_one';
+      case 'many_to_one':
+        return 'one_to_many';
+      default:
+        return cardinality;
+    }
+  }
+
   private loadFromDisk(path: string): DataLexManifest | null {
     if (!existsSync(path)) {
       this.diagnostics.push(`DataLex manifest not found at ${path}.`);
@@ -167,16 +270,31 @@ export class DataLexContractRegistry {
   }
 
   private indexManifest(manifest: DataLexManifest): void {
-    if (!Array.isArray(manifest.domains)) return;
-    for (const domain of manifest.domains) {
-      if (!domain || !Array.isArray(domain.entities)) continue;
-      for (const entity of domain.entities) {
-        if (!entity || !Array.isArray(entity.contracts)) continue;
-        for (const contract of entity.contracts) {
-          if (!contract || typeof contract.id !== 'string') continue;
-          const list = this.byId.get(contract.id) ?? [];
-          list.push({ contract, domain: domain.name, entity: entity.name });
-          this.byId.set(contract.id, list);
+    if (Array.isArray(manifest.domains)) {
+      for (const domain of manifest.domains) {
+        if (!domain || !Array.isArray(domain.entities)) continue;
+        for (const entity of domain.entities) {
+          if (!entity || !Array.isArray(entity.contracts)) continue;
+          for (const contract of entity.contracts) {
+            if (!contract || typeof contract.id !== 'string') continue;
+            const list = this.byId.get(contract.id) ?? [];
+            list.push({ contract, domain: domain.name, entity: entity.name });
+            this.byId.set(contract.id, list);
+          }
+        }
+      }
+    }
+    if (Array.isArray(manifest.relationships)) {
+      for (const rel of manifest.relationships) {
+        if (rel && typeof rel.name === 'string' && rel.from?.entity && rel.to?.entity) {
+          this.relationshipList.push(rel);
+        }
+      }
+    }
+    if (Array.isArray(manifest.conformance)) {
+      for (const record of manifest.conformance) {
+        if (record && typeof record.concept === 'string') {
+          this.conformanceList.push(record);
         }
       }
     }

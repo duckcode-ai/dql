@@ -214,3 +214,92 @@ describe('DataLexContractRegistry — filesystem manifest', () => {
     }
   });
 });
+
+describe('DataLexContractRegistry — relationships and conformance', () => {
+  function relManifest(): DataLexManifest {
+    return {
+      ...tinyManifest(),
+      relationships: [
+        {
+          name: 'customer_places_order',
+          type: 'reference',
+          layer: 'conceptual',
+          from: { domain: 'sales', entity: 'Customer' },
+          to: { domain: 'sales', entity: 'Order' },
+          cardinality: 'one_to_many',
+        },
+        {
+          name: 'order_customer_fk',
+          type: 'reference',
+          layer: 'logical',
+          from: { domain: 'sales', entity: 'Order', column: 'customer_id' },
+          to: { domain: 'sales', entity: 'Customer', column: 'customer_id' },
+          cardinality: 'many_to_one',
+        },
+      ],
+      conformance: [
+        {
+          concept: 'Customer',
+          domain: 'sales',
+          layer: 'logical',
+          canonical_key: ['customer_id'],
+          business_key: ['email'],
+          implements: ['customer'],
+          physical: [{ entity: 'DimCustomer', binding: { kind: 'table', ref: 'dim_customer' } }],
+        },
+      ],
+    };
+  }
+
+  it('indexes relationships and conformance from the manifest', () => {
+    const registry = new DataLexContractRegistry({ manifest: relManifest() });
+    expect(registry.relationships()).toHaveLength(2);
+    expect(registry.conformance()).toHaveLength(1);
+  });
+
+  it('resolves conformance for a concept (case-insensitive, domain-scoped)', () => {
+    const registry = new DataLexContractRegistry({ manifest: relManifest() });
+    const customer = registry.conformanceFor('customer', 'sales');
+    expect(customer?.canonical_key).toEqual(['customer_id']);
+    expect(customer?.physical?.[0]?.binding?.ref).toBe('dim_customer');
+  });
+
+  it('joins Order -> Customer without fan-out, preferring the column-carrying relationship', () => {
+    const registry = new DataLexContractRegistry({ manifest: relManifest() });
+    const path = registry.joinPath('Order', 'Customer');
+    expect(path.ok).toBe(true);
+    if (path.ok) {
+      expect(path.relationship.name).toBe('order_customer_fk');
+      expect(path.cardinality).toBe('many_to_one');
+      expect(path.fansOut).toBe(false);
+      expect(path.base.column).toBe('customer_id');
+      expect(path.target.column).toBe('customer_id');
+    }
+  });
+
+  it('flags fan-out when joining Customer -> Order (one_to_many)', () => {
+    const registry = new DataLexContractRegistry({ manifest: relManifest() });
+    const path = registry.joinPath('Customer', 'Order');
+    expect(path.ok).toBe(true);
+    if (path.ok) {
+      expect(path.cardinality).toBe('one_to_many');
+      expect(path.fansOut).toBe(true);
+    }
+  });
+
+  it('returns no_relationship for unconnected entities', () => {
+    const registry = new DataLexContractRegistry({ manifest: relManifest() });
+    const path = registry.joinPath('Order', 'Channel');
+    expect(path.ok).toBe(false);
+    if (!path.ok) expect(path.reason).toBe('no_relationship');
+  });
+
+  it('serves relationships and join paths even when no certified contracts exist', () => {
+    const registry = new DataLexContractRegistry({
+      manifest: { ...relManifest(), domains: [] },
+    });
+    expect(registry.isLoaded()).toBe(false);
+    expect(registry.relationships()).toHaveLength(2);
+    expect(registry.joinPath('Order', 'Customer').ok).toBe(true);
+  });
+});

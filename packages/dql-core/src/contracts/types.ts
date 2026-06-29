@@ -94,6 +94,48 @@ export interface DataLexDiagnostic {
   code?: string;
 }
 
+export interface DataLexRelationshipEndpoint {
+  domain?: string;
+  entity: string;
+  column?: string;
+  role?: string;
+}
+
+export type RelationshipCardinality =
+  | 'one_to_one'
+  | 'one_to_many'
+  | 'many_to_one'
+  | 'many_to_many';
+
+export interface DataLexRelationship {
+  name: string;
+  type?: 'reference' | 'associative' | 'subtype' | 'supertype';
+  layer?: 'conceptual' | 'logical' | 'physical';
+  from: DataLexRelationshipEndpoint;
+  to: DataLexRelationshipEndpoint;
+  cardinality?: RelationshipCardinality;
+  optional?: boolean;
+  identifying?: boolean;
+  verb?: string;
+  role_name?: string;
+  description?: string;
+}
+
+export interface DataLexConformancePhysical {
+  entity: string;
+  binding?: DataLexBinding;
+}
+
+export interface DataLexConformance {
+  concept: string;
+  domain?: string;
+  layer?: 'conceptual' | 'logical';
+  canonical_key?: string[];
+  business_key?: string[];
+  implements?: string[];
+  physical?: DataLexConformancePhysical[];
+}
+
 export interface DataLexManifest {
   /** Manifest spec major.minor.patch this artifact validates against (v1.x). */
   manifestSpecVersion: string;
@@ -103,6 +145,10 @@ export interface DataLexManifest {
   generatedAt: string;
   project: DataLexManifestProject;
   domains: DataLexDomain[];
+  /** Typed cross-entity relationships (any layer) for grain-safe join planning. */
+  relationships?: DataLexRelationship[];
+  /** Concept-to-physical conformance records (canonical key + realizing models). */
+  conformance?: DataLexConformance[];
   diagnostics?: DataLexDiagnostic[];
 }
 
@@ -125,6 +171,27 @@ export type ContractResolution =
       requestedRef: ContractRef;
       requestedVersion?: number;
       availableVersions?: number[];
+    };
+
+/**
+ * Result of resolving a grain-safe join path between two entities, oriented so
+ * `base` is the grain to preserve and `target` is the entity being joined in.
+ * `fansOut` is true when the join can multiply base rows (one_to_many /
+ * many_to_many) — the signal Tier-2 SQL generation needs to stay grain-safe.
+ */
+export type JoinPathResolution =
+  | {
+      ok: true;
+      relationship: DataLexRelationship;
+      base: DataLexRelationshipEndpoint;
+      target: DataLexRelationshipEndpoint;
+      cardinality?: RelationshipCardinality;
+      fansOut: boolean;
+    }
+  | {
+      ok: false;
+      reason: 'no_relationship' | 'ambiguous';
+      message: string;
     };
 
 /** Parse a contract reference like `domain.Entity.contract@1` into its parts. */

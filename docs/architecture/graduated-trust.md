@@ -45,10 +45,15 @@ flowchart TD
 
 ## Tier 1 — certified DQL context
 
-For data answers, the wedge proper is `query_via_block`. It refuses anything that isn't:
+For data answers, the wedge proper is `query_via_block`. It always refuses anything that isn't
+`status = "certified"`. The DataLex contract gate is layered on top and is conditional:
 
-- `status = "certified"`, AND
-- `datalex_contract` resolves to a contract in the loaded `datalex-manifest.json`.
+- When the project has a DataLex manifest configured, a certified block that declares a
+  `datalex_contract` must also resolve that contract in the loaded `datalex-manifest.json` —
+  otherwise it is refused.
+- Projects that have not adopted DataLex still serve certified blocks; the contract gate is simply
+  skipped (`query_via_block` only checks it when the registry `isLoaded()`). The analyzer surfaces a
+  compile-time warning so the skipped check is visible.
 
 Agents ALWAYS try certified project context first. Business terms and
 business views can be selected as certified context for definition-style

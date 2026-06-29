@@ -16,6 +16,8 @@ export {
   type ContractResolution,
   type ContractSignature,
   type DataLexBinding,
+  type DataLexConformance,
+  type DataLexConformancePhysical,
   type DataLexContract,
   type DataLexDiagnostic,
   type DataLexDomain,
@@ -24,4 +26,8 @@ export {
   type DataLexGlossaryTerm,
   type DataLexManifest,
   type DataLexManifestProject,
+  type DataLexRelationship,
+  type DataLexRelationshipEndpoint,
+  type JoinPathResolution,
+  type RelationshipCardinality,
 } from './types.js';
