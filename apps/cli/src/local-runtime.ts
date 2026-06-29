@@ -115,9 +115,14 @@ import {
   type AgentRunArtifact,
   type AgentRunEvaluation,
   type AgentRunExecutors,
+  type AgentRunNextAction,
   type AgentRunRequest,
   type AgentRunRequestedMode,
   type AgentRunSelectedObject,
+  type AgentRunStatus,
+  type AgentRunStopReason,
+  type AgentRunTrustState,
+  type AgentRouteExecutor,
   type PlanBlock,
 } from '@duckcodeailabs/dql-agent';
 import { gatherProposeEnrichment } from './propose-enrich.js';
@@ -513,7 +518,107 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
     payload,
   });
 
+  async function runGovernedAgentAnswerForRun(request: AgentRunRequest): Promise<AgentAnswer> {
+    const resolvedProvider = resolveDefaultLLMProvider(projectRoot);
+    const runner = resolvedProvider ? getLLMRunner(resolvedProvider) : null;
+    if (!resolvedProvider || !runner) {
+      throw new Error('No AI provider is configured. Configure OpenAI, Gemini, Ollama, or a custom OpenAI-compatible endpoint in Settings.');
+    }
+    let governedAnswer: AgentAnswer | undefined;
+    let providerError: string | undefined;
+    const contextEnvelope = {
+      mode: 'agent_run',
+      selectedObject: request.selectedObject,
+      workspaceContext: request.workspaceContext,
+      instruction: [
+        'Route through the governed DQL answer loop.',
+        'Prefer certified DQL blocks when they exactly cover the question.',
+        'Generated SQL remains review-required and must use the bounded preview executor.',
+        'If the question needs investigation, return the clearest answer and next review action without certifying generated work.',
+      ].join(' '),
+    };
+    const controller = new AbortController();
+    await runner.run(
+      {
+        provider: resolvedProvider,
+        messages: [
+          ...(request.history ?? []).map((message) => ({ role: message.role, content: message.text })),
+          { role: 'user', content: request.question },
+        ],
+        upstream: {
+          cellId: `agent-run:${request.selectedObject?.kind ?? 'workspace'}:${request.selectedObject?.id ?? request.runId ?? 'auto'}`,
+          sql: JSON.stringify(contextEnvelope, null, 2),
+        },
+        projectRoot,
+        executeCertifiedBlock: executeCertifiedBlockForAgent,
+        executeGeneratedSql: executeGeneratedSqlForAgent,
+        getSchemaContext: getSchemaContextForAgent,
+      },
+      (turn) => {
+        if (turn.kind === 'tool_result' && turn.id === 'governed_answer') {
+          governedAnswer = turn.output as AgentAnswer;
+        }
+        if (turn.kind === 'error') {
+          providerError = turn.message;
+        }
+      },
+      controller.signal,
+    );
+    if (!governedAnswer) {
+      throw new Error(providerError ?? 'The AI provider did not return a governed answer.');
+    }
+    return governedAnswer;
+  }
+
+  const answerRunExecutor: AgentRouteExecutor = async ({ request, routeDecision }) => {
+    const governedAnswer = await runGovernedAgentAnswerForRun(request);
+    const isCertified = governedAnswer.certification === 'certified' || governedAnswer.kind === 'certified';
+    const needsClarification = governedAnswer.kind === 'no_answer';
+    const sql = governedAnswer.proposedSql ?? governedAnswer.sql;
+    const status: AgentRunStatus = needsClarification ? 'needs_clarification' : isCertified ? 'completed' : 'needs_review';
+    const trustState: AgentRunTrustState = needsClarification ? 'not_applicable' : isCertified ? 'certified' : 'review_required';
+    const stopReason: AgentRunStopReason = needsClarification ? 'needs_clarification' : isCertified ? 'certified_answer_found' : 'human_review_required';
+    const nextActions: AgentRunNextAction[] = needsClarification
+      ? [{ id: 'clarify', label: 'Clarify question', route: 'generated_answer' }]
+      : [
+          ...(sql ? [{ id: 'insert-sql', label: 'Insert SQL cell', route: 'sql_cell' as const, artifactKind: 'sql_cell' as const }] : []),
+          { id: 'research-gap', label: 'Research deeper', route: 'research' },
+          { id: 'create-block', label: 'Create DQL draft', route: 'dql_block_draft', artifactKind: 'dql_block_draft' },
+        ];
+    return {
+      summary: governedAnswer.route?.label ?? (isCertified ? 'Answered from certified DQL context.' : 'Answered with review-required generated analysis.'),
+      answer: governedAnswer.answer ?? governedAnswer.text,
+      status,
+      trustState,
+      stopReason,
+      artifacts: needsClarification
+        ? []
+        : [agentRunArtifact('answer', isCertified ? 'Certified answer' : 'Review-required answer', governedAnswer, governedAnswer.sourceCertifiedBlock ?? governedAnswer.block?.name)],
+      evaluations: [
+        agentRunEvaluation('route-decision', 'Route decision', true, 'info', routeDecision?.reason ?? 'Routed request to governed answer.'),
+        agentRunEvaluation(
+          'trust-boundary',
+          'Trust boundary',
+          isCertified,
+          isCertified ? 'info' : 'warning',
+          isCertified
+            ? 'The answer came from certified DQL context.'
+            : needsClarification
+              ? 'The answer loop needs more context before producing a governed answer.'
+              : 'The answer is generated or semantic-layer backed and remains review-required.',
+          governedAnswer.route,
+        ),
+        ...(governedAnswer.executionError ? [
+          agentRunEvaluation('execution-error', 'Execution error', false, 'warning', governedAnswer.executionError),
+        ] : []),
+      ],
+      nextActions,
+    };
+  };
+
   const agentRunExecutors: AgentRunExecutors = {
+    certified_answer: answerRunExecutor,
+    generated_answer: answerRunExecutor,
     research: async ({ request, routeDecision }) => {
       const metrics = loadSemanticMetrics(projectRoot);
       let blocks = collectPlanBlocks(projectRoot, { certifiedOnly: true });

@@ -123,11 +123,25 @@ describe('agent run runtime API', () => {
       const fetched = await getResponse.json() as { run: any };
       expect(fetched.run.id).toBe(created.run.id);
 
+      const askResponse = await fetch(`${base}/api/agent-runs`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          question: 'What is customer revenue?',
+          requestedMode: 'ask',
+        }),
+      });
+      expect(askResponse.status).toBe(201);
+      const blocked = await askResponse.json() as { run: any };
+      expect(blocked.run.status).toBe('blocked');
+      expect(blocked.run.evaluations[0]?.id).toBe('executor-error');
+
       const listResponse = await fetch(`${base}/api/agent-runs?limit=5`);
       expect(listResponse.status).toBe(200);
       const listed = await listResponse.json() as { runs: any[]; total: number };
-      expect(listed.total).toBe(1);
-      expect(listed.runs[0].id).toBe(created.run.id);
+      expect(listed.total).toBe(2);
+      expect(listed.runs.some((run) => run.id === created.run.id)).toBe(true);
+      expect(listed.runs.some((run) => run.id === blocked.run.id)).toBe(true);
     } finally {
       await new Promise<void>((resolve) => {
         if (!server) {

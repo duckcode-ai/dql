@@ -302,7 +302,9 @@ function ArtifactView({
     ? payload.sql
     : typeof payload.sqlPreview === 'string'
       ? payload.sqlPreview
-      : undefined;
+      : typeof payload.proposedSql === 'string'
+        ? payload.proposedSql
+        : undefined;
   const name = typeof payload.name === 'string' ? payload.name : artifact.title;
   const path = typeof payload.path === 'string' ? payload.path : artifact.ref;
   const plan = payload.plan && typeof payload.plan === 'object' ? payload.plan as Record<string, unknown> : undefined;
