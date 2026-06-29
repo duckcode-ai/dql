@@ -1,0 +1,347 @@
+{
+  "manifestSpecVersion": "1.0.0",
+  "datalexVersion": "1.11.0",
+  "generatedAt": "2026-06-29T04:44:31Z",
+  "project": {
+    "name": "enterprise_modeling_foundation",
+    "description": "Small enterprise modeling fixture for conceptual, logical, physical, and semantic modeling.",
+    "dialect": "postgres"
+  },
+  "domains": [
+    {
+      "name": "commerce",
+      "entities": [
+        {
+          "name": "FctOrder",
+          "contracts": [
+            {
+              "id": "commerce.FctOrder.commerce_core_certification",
+              "name": "commerce Core Certification Pack",
+              "version": 1,
+              "description": "Draft proposal for the core certification of the 'fct_order' model. The model represents a foundational fact table for order transactions, and its inclusion in the commerce domain is based on the presence of order-related metrics and identifiers.",
+              "owner": "analytics",
+              "grain": "one row per order_id",
+              "source": {
+                "kind": "dbt_model",
+                "ref": "yaml.model.fct_order"
+              },
+              "dbt_contract": {
+                "model": "fct_order",
+                "unique_id": "yaml.model.fct_order",
+                "enforced": false,
+                "source_of_truth": true
+              },
+              "evidence": {
+                "source_models": [
+                  "fct_order"
+                ],
+                "columns": [
+                  "order_id",
+                  "customer_id",
+                  "order_date",
+                  "total_amount"
+                ],
+                "tests": [
+                  "order_id:not_null",
+                  "order_id:unique",
+                  "customer_id:not_null",
+                  "customer_id:relationships"
+                ],
+                "semantic_metrics": [],
+                "inferred_grain": "one row per order_id",
+                "assumptions": [
+                  "AI proposed business domain 'commerce' from dbt evidence; source inventory group was 'unassigned'.",
+                  "The 'commerce' domain is inferred from the 'fct_order' model name and its associated columns (order_id, total_amount).",
+                  "dbt remains the physical source of truth for SQL and YAML definitions.",
+                  "A focused draft proposal pack is generated based on available evidence."
+                ],
+                "confidence": 0.84,
+                "open_questions": [
+                  "Confirm the domain owner for the commerce domain.",
+                  "Confirm if there are specific business rules for handling cancelled orders or tax calculations in 'total_amount'."
+                ]
+              },
+              "dimensions": [
+                "order_id",
+                "customer_id",
+                "order_date"
+              ],
+              "required_tests": [
+                "order_id:not_null",
+                "order_id:unique",
+                "customer_id:not_null",
+                "customer_id:relationships"
+              ],
+              "review": {
+                "cadence": "git_review",
+                "reviewers": [],
+                "last_reviewed_at": "2026-06-29T02:45:37.733Z"
+              }
+            }
+          ],
+          "binding": {
+            "kind": "dbt_model",
+            "ref": "yaml.model.fct_order"
+          }
+        }
+      ],
+      "description": "Business domain generated from dbt evidence for Draft proposal for the core certification of the 'fct_order' model. The model represents a foundational fact table for order transactions, and its inclusion in the commerce domain is based on the presence of order-related metrics and identifiers..",
+      "owners": [
+        "analytics"
+      ],
+      "metrics": [
+        {
+          "id": "commerce.metric.commerce_metrics",
+          "name": "Commerce Metrics",
+          "description": "Certified metric family generated from dbt semantic metric evidence: review required.",
+          "owner": "analytics",
+          "formula": "Review semantic metric formula before publishing.",
+          "grain": "one row per order_id",
+          "dependencies": [
+            "fct_order"
+          ],
+          "source": {
+            "kind": "semantic_metric",
+            "ref": "family:commerce"
+          },
+          "evidence": {
+            "source_models": [
+              "fct_order"
+            ],
+            "columns": [
+              "order_id",
+              "customer_id",
+              "order_date",
+              "total_amount"
+            ],
+            "tests": [
+              "order_id:not_null",
+              "order_id:unique",
+              "customer_id:not_null",
+              "customer_id:relationships"
+            ],
+            "semantic_metrics": [],
+            "inferred_grain": "one row per order_id",
+            "assumptions": [
+              "AI proposed business domain 'commerce' from dbt evidence; source inventory group was 'unassigned'.",
+              "The 'commerce' domain is inferred from the 'fct_order' model name and its associated columns (order_id, total_amount).",
+              "dbt remains the physical source of truth for SQL and YAML definitions.",
+              "A focused draft proposal pack is generated based on available evidence."
+            ],
+            "confidence": 0.84,
+            "open_questions": [
+              "Confirm the domain owner for the commerce domain.",
+              "Confirm if there are specific business rules for handling cancelled orders or tax calculations in 'total_amount'."
+            ]
+          },
+          "tags": [
+            "ai-generated",
+            "enterprise-workflow"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "sales",
+      "entities": [
+        {
+          "name": "Customer",
+          "description": "A person or organization that can place orders and generate revenue.",
+          "tags": [
+            "core"
+          ]
+        },
+        {
+          "name": "Customer",
+          "description": "Customer master record with stable business identifiers.",
+          "fields": [
+            {
+              "name": "customer_id",
+              "type": "identifier",
+              "description": "Stable customer identifier.",
+              "nullable": false
+            },
+            {
+              "name": "customer_name",
+              "type": "string",
+              "description": "Display name for the customer.",
+              "nullable": false
+            },
+            {
+              "name": "email",
+              "type": "email",
+              "description": "Customer email address.",
+              "nullable": false
+            }
+          ]
+        },
+        {
+          "name": "DimCustomer",
+          "description": "Physical customer dimension generated from the logical customer model.",
+          "fields": [
+            {
+              "name": "customer_id",
+              "type": "bigint",
+              "primary_key": true,
+              "nullable": false
+            },
+            {
+              "name": "customer_name",
+              "type": "varchar(255)",
+              "nullable": false
+            },
+            {
+              "name": "email",
+              "type": "varchar(320)",
+              "nullable": false
+            }
+          ],
+          "binding": {
+            "kind": "table",
+            "ref": "dim_customer"
+          }
+        },
+        {
+          "name": "FctOrder",
+          "description": "Physical order fact generated from the logical order model.",
+          "fields": [
+            {
+              "name": "customer_id",
+              "type": "bigint",
+              "nullable": false
+            },
+            {
+              "name": "order_amount",
+              "type": "decimal(18,2)",
+              "nullable": false
+            },
+            {
+              "name": "order_id",
+              "type": "bigint",
+              "primary_key": true,
+              "nullable": false
+            }
+          ],
+          "binding": {
+            "kind": "table",
+            "ref": "fct_order"
+          }
+        },
+        {
+          "name": "Order",
+          "description": "A commercial commitment made by a customer for one or more products.",
+          "tags": [
+            "core"
+          ]
+        },
+        {
+          "name": "Order",
+          "description": "Customer order with one row per commercial transaction.",
+          "fields": [
+            {
+              "name": "customer_id",
+              "type": "identifier",
+              "description": "Customer that placed the order.",
+              "nullable": false
+            },
+            {
+              "name": "order_amount",
+              "type": "money",
+              "description": "Total order value.",
+              "nullable": false
+            },
+            {
+              "name": "order_id",
+              "type": "identifier",
+              "description": "Stable order identifier.",
+              "nullable": false
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "relationships": [
+    {
+      "name": "customer_places_order",
+      "type": "reference",
+      "layer": "conceptual",
+      "from": {
+        "domain": "sales",
+        "entity": "Customer"
+      },
+      "to": {
+        "domain": "sales",
+        "entity": "Order"
+      },
+      "cardinality": "one_to_many",
+      "verb": "places",
+      "role_name": "places",
+      "description": "A customer may place many orders; every order is placed by one customer."
+    },
+    {
+      "name": "order_customer_fk",
+      "type": "reference",
+      "layer": "logical",
+      "from": {
+        "domain": "sales",
+        "entity": "Order",
+        "column": "customer_id"
+      },
+      "to": {
+        "domain": "sales",
+        "entity": "Customer",
+        "column": "customer_id"
+      },
+      "cardinality": "many_to_one",
+      "role_name": "ordered_by",
+      "description": "Every logical order belongs to one logical customer.",
+      "identifying": false
+    }
+  ],
+  "conformance": [
+    {
+      "concept": "Customer",
+      "domain": "sales",
+      "layer": "logical",
+      "canonical_key": [
+        "customer_id"
+      ],
+      "business_key": [
+        "email"
+      ],
+      "implements": [
+        "customer"
+      ],
+      "physical": [
+        {
+          "entity": "DimCustomer",
+          "binding": {
+            "kind": "table",
+            "ref": "dim_customer"
+          }
+        }
+      ]
+    },
+    {
+      "concept": "Order",
+      "domain": "sales",
+      "layer": "logical",
+      "canonical_key": [
+        "order_id"
+      ],
+      "implements": [
+        "order"
+      ],
+      "physical": [
+        {
+          "entity": "FctOrder",
+          "binding": {
+            "kind": "table",
+            "ref": "fct_order"
+          }
+        }
+      ]
+    }
+  ]
+}

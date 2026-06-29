@@ -8,6 +8,11 @@ import {
   validateSqlAgainstLocalContext,
   type LocalContextPack,
 } from '@duckcodeailabs/dql-agent';
+import type {
+  DataLexConformance,
+  DataLexRelationship,
+  JoinPathResolution,
+} from '@duckcodeailabs/dql-core';
 
 export const queryViaMetadataInput = {
   question: z
@@ -129,6 +134,12 @@ export async function queryViaMetadata(
   const intent = normalizeMetadataResearchIntent(args.intent, args.question);
   const contextPack = await buildTier2ContextPack(ctx.projectRoot, args.question, args.contextPackId, args.followUp);
   const hasInspectedContext = hasInspectedMetadataContext(contextPack);
+  // DataLex modeled join semantics (canonical keys + grain-safe orientation) for
+  // the entities this question touches. Undefined when no manifest is loaded.
+  const datalexJoinGuidance = buildDataLexJoinGuidance(ctx.datalexRegistry, [
+    ...(args.upstreamRefs ?? []),
+    ...(args.proposedEntity ? [args.proposedEntity] : []),
+  ]);
   const contextNeedsClarification = hasInspectedContext && contextPack?.routeDecision.route === 'clarify';
   if (contextNeedsClarification || !args.proposedSql?.trim()) {
     recordTier2QueryRun(ctx.projectRoot, {
@@ -144,6 +155,7 @@ export async function queryViaMetadata(
       reviewStatus: 'none',
       planningOnly: true,
       contextPack,
+      datalexJoinGuidance,
       routeDecision: contextPack?.routeDecision,
       allowedSqlContext: contextPack?.allowedSqlContext,
       selectedRelations: contextPack?.retrievalDiagnostics.selectedRelations?.slice(0, 12) ?? [],
@@ -225,6 +237,7 @@ export async function queryViaMetadata(
       trustStatus: metadataTrustStatus('draft_ready', intent, draftBlock, undefined, contextValidation.warnings),
       evidence: metadataEvidence(intent, args, { status: 'dry_run', draftBlock, validationWarnings: contextValidation.warnings }, contextPack),
       contextPack,
+      datalexJoinGuidance,
       reason: 'dryRun=true; SQL not executed. Returned proposal only.',
       proposedSql,
       draftBlock,
@@ -326,6 +339,7 @@ export async function queryViaMetadata(
       validationWarnings: contextValidation.warnings,
     }, contextPack),
     contextPack,
+    datalexJoinGuidance,
     reason: 'no certified block matched the question; result derived from manifest + dbt schema',
     question: args.question,
     rowCount: rows.length,
@@ -342,6 +356,145 @@ export async function queryViaMetadata(
 }
 
 // -- helpers ---------------------------------------------------------------
+
+export interface DataLexJoinGuidance {
+  source: 'datalex_manifest';
+  note: string;
+  entities: Array<{
+    concept: string;
+    domain?: string;
+    canonicalKey?: string[];
+    physical: string[];
+  }>;
+  joins: Array<{
+    from: string;
+    to: string;
+    on?: string;
+    cardinality?: string;
+    fansOut: boolean;
+    guidance: string;
+  }>;
+  unresolved?: Array<{ from: string; to: string; reason: string; message: string }>;
+}
+
+interface JoinGuidanceRegistry {
+  conformance(): DataLexConformance[];
+  relationships(): DataLexRelationship[];
+  joinPath(
+    base: string,
+    target: string,
+    opts?: { baseDomain?: string; targetDomain?: string },
+  ): JoinPathResolution;
+}
+
+/**
+ * Build grain-safe join guidance from the DataLex manifest for the entities a
+ * Tier-2 question touches. This is what turns conformance + typed relationships
+ * into something the agent can act on BEFORE it writes SQL: the canonical key to
+ * join each business concept on, and — for each pair — whether joining one onto
+ * the other fans out (and therefore needs aggregation to stay grain-safe).
+ *
+ * `refs` are the tables/entities the agent thinks are involved; physical model
+ * names (`dim_customer`), physical entity names (`DimCustomer`), and concept
+ * names (`Customer`) all resolve. With none resolved we surface the whole
+ * (small) conformance map so the agent still sees the modeled joins.
+ *
+ * Returns undefined when no DataLex manifest is loaded — Tier-2 must keep working
+ * for projects that never adopted DataLex (graduated trust).
+ */
+export function buildDataLexJoinGuidance(
+  registry: JoinGuidanceRegistry,
+  refs: string[],
+): DataLexJoinGuidance | undefined {
+  // Gate on conformance, NOT registry.isLoaded() — that's contracts-based, and a
+  // modeling-primary manifest carries conformance + relationships with zero
+  // contracts. No conformance (or no manifest) => no guidance; Tier-2 still runs.
+  const conformance = registry.conformance();
+  if (conformance.length === 0) return undefined;
+
+  const conceptByKey = new Map<string, DataLexConformance>();
+  for (const c of conformance) {
+    conceptByKey.set(c.concept.toLowerCase(), c);
+    for (const p of c.physical ?? []) {
+      if (p.entity) conceptByKey.set(p.entity.toLowerCase(), c);
+      if (p.binding?.ref) conceptByKey.set(p.binding.ref.toLowerCase(), c);
+    }
+  }
+
+  const involved: DataLexConformance[] = [];
+  const seen = new Set<string>();
+  for (const ref of refs) {
+    const c = conceptByKey.get(String(ref ?? '').toLowerCase());
+    if (c && !seen.has(c.concept.toLowerCase())) {
+      seen.add(c.concept.toLowerCase());
+      involved.push(c);
+    }
+  }
+  // Scope to the involved concepts; with none resolved, fall back to the whole
+  // (bounded) conformance map so the agent still gets the modeled join keys.
+  const concepts = involved.length > 0 ? involved : conformance.slice(0, 12);
+
+  const entities = concepts.map((c) => ({
+    concept: c.concept,
+    domain: c.domain,
+    canonicalKey: c.canonical_key,
+    physical: (c.physical ?? [])
+      .map((p) => p.binding?.ref)
+      .filter((r): r is string => Boolean(r)),
+  }));
+
+  const joins: DataLexJoinGuidance['joins'] = [];
+  const unresolved: NonNullable<DataLexJoinGuidance['unresolved']> = [];
+  for (let i = 0; i < concepts.length; i += 1) {
+    for (let j = i + 1; j < concepts.length; j += 1) {
+      const a = concepts[i];
+      const b = concepts[j];
+      let jp = registry.joinPath(a.concept, b.concept, {
+        baseDomain: a.domain,
+        targetDomain: b.domain,
+      });
+      // Prefer the non-fanning orientation (join the "one" side onto the "many"
+      // side, i.e. the dimension onto the fact) so the primary guidance is the
+      // grain-safe join; the fan-out direction is still called out in the text.
+      if (jp.ok && jp.fansOut) {
+        const flipped = registry.joinPath(b.concept, a.concept, {
+          baseDomain: b.domain,
+          targetDomain: a.domain,
+        });
+        if (flipped.ok && !flipped.fansOut) jp = flipped;
+      }
+      if (!jp.ok) {
+        if (jp.reason === 'ambiguous') {
+          unresolved.push({ from: a.concept, to: b.concept, reason: jp.reason, message: jp.message });
+        }
+        // 'no_relationship' is expected for unrelated pairs — skip quietly.
+        continue;
+      }
+      const on =
+        jp.base.column && jp.target.column
+          ? `${jp.base.entity}.${jp.base.column} = ${jp.target.entity}.${jp.target.column}`
+          : undefined;
+      joins.push({
+        from: jp.base.entity,
+        to: jp.target.entity,
+        on,
+        cardinality: jp.cardinality,
+        fansOut: jp.fansOut,
+        guidance: jp.fansOut
+          ? `${jp.base.entity} ↔ ${jp.target.entity} is ${jp.cardinality}; either direction can multiply rows — aggregate to one grain (GROUP BY the canonical key) before joining.`
+          : `Each ${jp.base.entity} has one ${jp.target.entity}: join ${jp.target.entity} onto ${jp.base.entity}${on ? ` on ${on}` : ''} without fan-out. Aggregating ${jp.base.entity} per ${jp.target.entity} fans out — GROUP BY the ${jp.target.entity} key.`,
+      });
+    }
+  }
+
+  return {
+    source: 'datalex_manifest',
+    note: 'Modeled join semantics from DataLex. Join each concept on its canonical key and respect fan-out to keep results grain-safe.',
+    entities,
+    joins: joins.slice(0, 25),
+    ...(unresolved.length > 0 ? { unresolved } : {}),
+  };
+}
 
 type MetadataResearchIntent =
   | 'diagnose_change'

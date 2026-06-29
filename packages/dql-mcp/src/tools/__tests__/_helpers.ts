@@ -25,6 +25,11 @@ const skipRegistry = {
   list: () => [],
   reload: () => undefined,
   loadDiagnostics: () => [],
+  // Mirror the conformance/relationship surface the real registry exposes, which
+  // Tier-2 (query-via-metadata) now consults for grain-safe join guidance.
+  conformance: () => [],
+  relationships: () => [],
+  joinPath: () => ({ ok: false, reason: 'no_relationship', message: '' }),
 };
 
 export function makeCtx(blocks: Record<string, unknown> = {}, extra: Partial<DQLContext> = {}): DQLContext {
