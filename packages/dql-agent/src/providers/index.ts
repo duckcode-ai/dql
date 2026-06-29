@@ -7,13 +7,13 @@
  */
 
 import type { AgentProvider, ProviderName } from './types.js';
-import { ClaudeProvider } from './claude.js';
+import { ClaudeProvider, normalizeAnthropicBaseUrl } from './claude.js';
 import { OpenAIProvider } from './openai.js';
-import { GeminiProvider } from './gemini.js';
+import { GeminiProvider, normalizeGeminiBaseUrl } from './gemini.js';
 import { OllamaProvider } from './ollama.js';
 
 export type { AgentProvider, AgentMessage, ProviderName, ProviderRunOptions } from './types.js';
-export { ClaudeProvider, OpenAIProvider, GeminiProvider, OllamaProvider };
+export { ClaudeProvider, OpenAIProvider, GeminiProvider, OllamaProvider, normalizeAnthropicBaseUrl, normalizeGeminiBaseUrl };
 
 const FALLBACK_ORDER: ProviderName[] = ['claude', 'openai', 'gemini', 'ollama'];
 

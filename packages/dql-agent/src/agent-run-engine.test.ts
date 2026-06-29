@@ -348,6 +348,67 @@ describe("AgentRunEngine loop (plan → build → evaluate → modify)", () => {
   });
 });
 
+describe("AgentRunEngine audience", () => {
+  it("collapses a stakeholder authoring request to a governed answer + certification handoff", async () => {
+    const engine = new AgentRunEngine({ idGenerator: () => "run-sh", now: fixedClock() });
+    const run = await engine.run({ question: "create a sql cell for revenue", requestedMode: "sql", audience: "stakeholder" });
+    expect(run.route).toBe("generated_answer");
+    expect(run.status).toBe("needs_review");
+    expect(run.nextActions.some((action) => action.id === "request-certification")).toBe(true);
+    expect(run.nextActions.some((action) => action.route === "sql_cell" || action.route === "dql_block_draft")).toBe(false);
+  });
+
+  it("keeps authoring routes for an analyst", async () => {
+    const engine = new AgentRunEngine({ idGenerator: () => "run-an", now: fixedClock() });
+    const run = await engine.run({ question: "create a sql cell for revenue", requestedMode: "sql", audience: "analyst" });
+    expect(run.route).toBe("sql_cell");
+  });
+
+  it("escalates a stakeholder app-coverage gap to research, not a block draft", async () => {
+    const engine = new AgentRunEngine({
+      idGenerator: () => "run-sh-app",
+      now: fixedClock(),
+      gates: defaultAgentRunGates,
+      executors: {
+        app_build: () => ({
+          artifacts: [{ id: "a1", kind: "app_draft", title: "App", trustState: "review_required", payload: { session: { status: "needs_coverage" } } }],
+        }),
+        research: () => ({
+          summary: "Grounded research instead.",
+          artifacts: [{ id: "r1", kind: "research_run", title: "Research", trustState: "review_required", payload: {} }],
+          evaluations: [{ id: "catalog-grounding", label: "Catalog grounding", passed: true, severity: "info", message: "Grounded." }],
+        }),
+      },
+    });
+    const run = await engine.run({ question: "build a revenue dashboard", requestedMode: "app", audience: "stakeholder" });
+    expect(run.steps[0]?.route).toBe("app_build");
+    expect(run.steps[0]?.status).toBe("escalated");
+    expect(run.route).toBe("research");
+  });
+
+  it("strips analyst next-actions from a stakeholder run", async () => {
+    const engine = new AgentRunEngine({
+      idGenerator: () => "run-sh-na",
+      now: fixedClock(),
+      executors: {
+        research: () => ({
+          summary: "Research.",
+          status: "needs_review",
+          artifacts: [{ id: "r1", kind: "research_run", title: "Research", trustState: "review_required", payload: {} }],
+          nextActions: [
+            { id: "create-block", label: "Create DQL draft", route: "dql_block_draft", artifactKind: "dql_block_draft" },
+            { id: "drill", label: "Drill down", route: "research" },
+          ],
+        }),
+      },
+    });
+    const run = await engine.run({ question: "why is revenue down?", requestedMode: "research", audience: "stakeholder" });
+    expect(run.nextActions.some((action) => action.id === "create-block")).toBe(false);
+    expect(run.nextActions.some((action) => action.id === "drill")).toBe(true);
+    expect(run.nextActions.some((action) => action.id === "request-certification")).toBe(true);
+  });
+});
+
 describe("selectRoute", () => {
   it("uses explicit mode before heuristics", () => {
     const decision = decideAgentAction({

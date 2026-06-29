@@ -13,6 +13,24 @@ import { themes, type Theme } from '../../themes/notebook-theme';
 
 const PROVIDER_ORDER: ProviderSettingsId[] = ['anthropic', 'openai', 'gemini', 'ollama', 'custom-openai'];
 
+// Base URL is supported for every provider so enterprise deployments can route
+// through a gateway/proxy. Empty = use the provider's public default.
+function baseUrlPlaceholder(id: ProviderSettingsId): string {
+  switch (id) {
+    case 'ollama':
+      return 'http://host.docker.internal:11434 or http://127.0.0.1:11434';
+    case 'anthropic':
+      return 'Base URL (optional) — e.g. https://api.anthropic.com or your gateway';
+    case 'gemini':
+      return 'Base URL (optional) — e.g. https://generativelanguage.googleapis.com/v1beta or your gateway';
+    case 'openai':
+      return 'Base URL (optional) — e.g. https://api.openai.com/v1 or your gateway';
+    case 'custom-openai':
+    default:
+      return 'Base URL — e.g. https://your-gateway/v1';
+  }
+}
+
 export function SettingsPage() {
   return <ConnectionRuntimeSettings includeMemory />;
 }
@@ -529,14 +547,12 @@ function ProviderCard({
             style={inputStyle(t)}
           />
         )}
-        {(provider.id === 'openai' || provider.id === 'ollama' || provider.id === 'custom-openai') && (
-          <input
-            value={baseUrl}
-            onChange={(e) => setBaseUrl(e.target.value)}
-            placeholder={provider.id === 'ollama' ? 'http://host.docker.internal:11434 or http://127.0.0.1:11434' : 'Base URL'}
-            style={inputStyle(t)}
-          />
-        )}
+        <input
+          value={baseUrl}
+          onChange={(e) => setBaseUrl(e.target.value)}
+          placeholder={baseUrlPlaceholder(provider.id)}
+          style={inputStyle(t)}
+        />
         <input
           value={model}
           onChange={(e) => setModel(e.target.value)}

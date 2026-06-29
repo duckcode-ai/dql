@@ -41,9 +41,9 @@ interface StoredProviderState {
 }
 
 const PROVIDER_META: Record<ProviderSettingsId, { label: string; keyEnv?: string; modelEnv?: string; baseUrlEnv?: string }> = {
-  anthropic: { label: 'Anthropic Claude', keyEnv: 'ANTHROPIC_API_KEY', modelEnv: 'ANTHROPIC_MODEL' },
+  anthropic: { label: 'Anthropic Claude', keyEnv: 'ANTHROPIC_API_KEY', modelEnv: 'ANTHROPIC_MODEL', baseUrlEnv: 'ANTHROPIC_BASE_URL' },
   openai: { label: 'OpenAI', keyEnv: 'OPENAI_API_KEY', modelEnv: 'OPENAI_MODEL', baseUrlEnv: 'OPENAI_BASE_URL' },
-  gemini: { label: 'Google Gemini', keyEnv: 'GEMINI_API_KEY', modelEnv: 'GEMINI_MODEL' },
+  gemini: { label: 'Google Gemini', keyEnv: 'GEMINI_API_KEY', modelEnv: 'GEMINI_MODEL', baseUrlEnv: 'GEMINI_BASE_URL' },
   ollama: { label: 'Ollama', modelEnv: 'OLLAMA_MODEL', baseUrlEnv: 'OLLAMA_BASE_URL' },
   'custom-openai': { label: 'Custom OpenAI-compatible', keyEnv: 'DQL_OPENAI_COMPAT_API_KEY', modelEnv: 'DQL_OPENAI_COMPAT_MODEL', baseUrlEnv: 'DQL_OPENAI_COMPAT_BASE_URL' },
 };

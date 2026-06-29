@@ -83,6 +83,11 @@ import {
   FileAgentRunStore,
   defaultAgentRunGates,
   createLlmAgentRunPlanner,
+  narrateResult,
+  type NarrateInput,
+  type NarrateResult,
+  type NarrateResultData,
+  normalizeAnthropicBaseUrl,
   buildProposePreview,
   buildFromPrompt,
   defaultAgentRunStorePath,
@@ -347,10 +352,14 @@ function parseAgentRunRequestBody(body: unknown): { request?: AgentRunRequest; e
   const workspaceContext = agentRunRecord(record.workspaceContext) ?? agentRunRecord(record.context);
   const signals = agentRunRecord(record.signals);
   const requestedMode = parseAgentRunRequestedMode(record.requestedMode) ?? parseAgentRunRequestedMode(record.mode);
+  const audience = record.audience === 'stakeholder' || record.audience === 'analyst'
+    ? record.audience
+    : undefined;
   return {
     request: {
       question,
       requestedMode,
+      audience,
       intent: agentRunString(record.intent) as AgentRunRequest['intent'],
       signals: signals as AgentRunRequest['signals'],
       selectedObject,
@@ -604,6 +613,30 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
     payload,
   });
 
+  const coerceNarrateResultData = (value: unknown): NarrateResultData | undefined => {
+    const record = agentRunRecord(value);
+    if (!record) return undefined;
+    const columns = Array.isArray(record.columns)
+      ? record.columns.map((c) => (typeof c === 'string' ? c : (agentRunRecord(c)?.name as string) ?? String(c)))
+      : [];
+    const rows = Array.isArray(record.rows) ? record.rows.filter((r): r is Record<string, unknown> => Boolean(agentRunRecord(r))) : [];
+    if (rows.length === 0) return undefined;
+    return { columns: columns.length > 0 ? columns : Object.keys(rows[0]), rows };
+  };
+
+  // Provider-backed narration for stakeholder stories. Reuses the same provider
+  // adapter as the planner; narrateResult always returns (deterministic fallback).
+  const narrateForAgentRun = async (input: NarrateInput): Promise<NarrateResult> => narrateResult(input, {
+    complete: async ({ system, user, signal }) => {
+      const provider = await createBlockStudioAssistProvider(projectRoot);
+      if (!provider) throw new Error('No AI provider configured for narration.');
+      return provider.generate(
+        [{ role: 'system', content: system }, { role: 'user', content: user }],
+        { maxTokens: 600, temperature: 0.2, signal },
+      );
+    },
+  });
+
   async function runGovernedAgentAnswerForRun(
     request: AgentRunRequest,
     repair?: { attempt: number; repairHint?: string },
@@ -823,9 +856,20 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           researchWorkspaceError = formatNotebookResearchStorageError(error);
         }
       }
+      const researchResultData = coerceNarrateResultData((researchRun as { resultPreview?: unknown })?.resultPreview);
+      const narration = !needsClarification && researchResultData
+        ? await narrateForAgentRun({
+            question: request.question,
+            intent: request.intent,
+            result: researchResultData,
+            evidence: plan.sources,
+            reviewRequired: true,
+          })
+        : undefined;
       const summary = needsClarification
         ? 'Needs clarification before running deeper research.'
-        : researchRun?.status === 'ready'
+        : narration?.summary
+          ?? (researchRun?.status === 'ready'
           ? 'Saved a grounded research dossier with context evidence and next review actions.'
           : researchRun?.status === 'error'
             ? 'Saved a research dossier, but the preview needs review before promotion.'
@@ -833,10 +877,10 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
               ? 'Prepared a grounded research plan; durable research storage is unavailable in this runtime.'
             : plan.done
               ? 'Prepared a direct grounded-answer plan.'
-              : 'Prepared a grounded research plan over real DQL assets.';
+              : 'Prepared a grounded research plan over real DQL assets.');
       return {
         summary,
-        answer: plan.followUp?.question ?? researchRun?.summary,
+        answer: plan.followUp?.question ?? narration?.summary ?? researchRun?.summary,
         status: needsClarification ? 'needs_clarification' : 'needs_review',
         trustState: needsClarification ? 'not_applicable' : 'review_required',
         stopReason: needsClarification ? 'needs_clarification' : 'human_review_required',
@@ -849,6 +893,8 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
               notebookPath,
               workspaceError: researchWorkspaceError,
               routeDecision,
+              narration,
+              resultPreview: researchResultData,
               blockCount: blocks.length,
               metricCount: metrics.length,
               certifiedOnly: usedCertifiedOnly,
@@ -11042,13 +11088,13 @@ async function createBlockStudioAssistProvider(
   let provider: AgentProvider;
   switch (selected.id) {
     case 'anthropic':
-      provider = new ClaudeProvider({ apiKey: config.apiKey, model: config.model });
+      provider = new ClaudeProvider({ apiKey: config.apiKey, baseUrl: config.baseUrl, model: config.model });
       break;
     case 'openai':
       provider = new OpenAIProvider({ apiKey: config.apiKey, baseUrl: config.baseUrl, model: config.model });
       break;
     case 'gemini':
-      provider = new GeminiProvider({ apiKey: config.apiKey, model: config.model });
+      provider = new GeminiProvider({ apiKey: config.apiKey, baseUrl: config.baseUrl, model: config.model });
       break;
     case 'ollama':
       provider = new OllamaProvider({ baseUrl: config.baseUrl, model: config.model });
@@ -13042,7 +13088,7 @@ async function testProviderConfig(projectRoot: string, id: ProviderSettingsId): 
   let provider: AgentProvider;
   switch (id) {
     case 'gemini':
-      provider = new GeminiProvider({ apiKey: config.apiKey, model: config.model });
+      provider = new GeminiProvider({ apiKey: config.apiKey, baseUrl: config.baseUrl, model: config.model });
       break;
     case 'ollama':
       provider = new OllamaProvider({ baseUrl: config.baseUrl, model: config.model });
@@ -13111,7 +13157,10 @@ async function testAnthropicProviderConfig(
     return { ok: false, message: `${label} is not configured${details}. Add an API key in Settings or ANTHROPIC_API_KEY.` };
   }
   try {
-    const client = new Anthropic({ apiKey: config.apiKey });
+    const client = new Anthropic({
+      apiKey: config.apiKey,
+      ...(config.baseUrl ? { baseURL: normalizeAnthropicBaseUrl(config.baseUrl) } : {}),
+    });
     const response = await client.messages.create({
       model: config.model ?? 'claude-opus-4-8',
       max_tokens: 16,

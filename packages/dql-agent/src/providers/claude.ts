@@ -4,8 +4,25 @@ import type {
   ProviderRunOptions,
 } from './types.js';
 
+const DEFAULT_ANTHROPIC_BASE_URL = 'https://api.anthropic.com';
+
 /**
- * Anthropic Claude provider via the Messages API. Reads ANTHROPIC_API_KEY.
+ * Normalize an Anthropic base URL to the SDK's "root" convention: the host (and
+ * optional gateway path) that `/v1/messages` is appended to. Trailing slashes and
+ * a trailing `/v1` are stripped so both `https://gw/anthropic` and
+ * `https://gw/anthropic/v1` resolve to the same endpoint. Enterprise gateways
+ * (LiteLLM, Portkey, Cloudflare AI Gateway, internal proxies) mirror this path.
+ */
+export function normalizeAnthropicBaseUrl(baseUrl?: string): string {
+  const raw = (baseUrl ?? '').trim();
+  if (!raw) return DEFAULT_ANTHROPIC_BASE_URL;
+  return raw.replace(/\/+$/, '').replace(/\/v1$/, '');
+}
+
+/**
+ * Anthropic Claude provider via the Messages API. Reads ANTHROPIC_API_KEY and an
+ * optional ANTHROPIC_BASE_URL (or an explicit baseUrl) so enterprise deployments
+ * can route through a gateway/proxy.
  *
  * We deliberately avoid `@anthropic-ai/sdk` to keep dql-agent zero-dep —
  * the existing `apps/cli/src/llm/providers/claude-agent-sdk.ts` already
@@ -15,10 +32,12 @@ import type {
 export class ClaudeProvider implements AgentProvider {
   readonly name = 'claude' as const;
   private readonly apiKey?: string;
+  private readonly baseUrl: string;
   private readonly defaultModel: string;
 
-  constructor(opts: { apiKey?: string; model?: string } = {}) {
+  constructor(opts: { apiKey?: string; baseUrl?: string; model?: string } = {}) {
     this.apiKey = opts.apiKey ?? process.env.ANTHROPIC_API_KEY;
+    this.baseUrl = normalizeAnthropicBaseUrl(opts.baseUrl ?? process.env.ANTHROPIC_BASE_URL);
     this.defaultModel = opts.model ?? 'claude-opus-4-7';
   }
 
@@ -35,7 +54,7 @@ export class ClaudeProvider implements AgentProvider {
       .filter((m) => m.role !== 'system')
       .map((m) => ({ role: m.role, content: m.content }));
 
-    const res = await fetch('https://api.anthropic.com/v1/messages', {
+    const res = await fetch(`${this.baseUrl}/v1/messages`, {
       method: 'POST',
       headers: {
         'x-api-key': this.apiKey,

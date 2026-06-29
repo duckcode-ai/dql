@@ -8,6 +8,7 @@ function planInput(overrides: Partial<AgentRunPlanInput> = {}): AgentRunPlanInpu
     routeDecision: { action: "investigate", confidence: 0.7, reason: "Open-ended analytical question.", followsUp: false },
     defaultRoute: "research",
     maxSteps: 4,
+    audience: "analyst",
     ...overrides,
   };
 }
@@ -138,6 +139,24 @@ describe("createLlmAgentRunPlanner", () => {
     // The failing eval carries an escalate repairAction, so deterministic escalates.
     const decision = await planner.replan(replanInput());
     expect(decision.decision).toBe("escalate");
+  });
+
+  it("collapses authoring steps to a governed answer for a stakeholder", async () => {
+    const complete = vi.fn().mockResolvedValue(JSON.stringify({
+      rationale: "x",
+      steps: [
+        { route: "research", goal: "find drivers" },
+        { route: "dql_block_draft", goal: "draft a block" },
+        { route: "sql_cell", goal: "write sql" },
+      ],
+    }));
+    const planner = createLlmAgentRunPlanner({ complete });
+
+    const plan = await planner.plan(planInput({
+      request: { question: "why is revenue down?", requestedMode: "auto", audience: "stakeholder" },
+      audience: "stakeholder",
+    }));
+    expect(plan.steps.map((step) => step.route)).toEqual(["research", "generated_answer", "generated_answer"]);
   });
 
   it("passes catalog context into the plan prompt", async () => {

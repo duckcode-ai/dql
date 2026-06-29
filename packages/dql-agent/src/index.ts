@@ -88,6 +88,7 @@ export type {
   AgentRun,
   AgentRunArtifact,
   AgentRunArtifactKind,
+  AgentRunAudience,
   AgentRunEngineOptions,
   AgentRunEvaluation,
   AgentRunEvaluationSeverity,
@@ -117,6 +118,15 @@ export type {
   AgentRunTrustState,
 } from "./agent-run-engine.js";
 export { defaultAgentRunGates } from "./agent-run-gates.js";
+export {
+  narrateResult,
+  type NarrateInput,
+  type NarrateItem,
+  type NarrateResult,
+  type NarrateResultData,
+  type NarrateCompletion,
+  type NarrateOptions,
+} from "./narrate.js";
 export {
   createLlmAgentRunPlanner,
   type AgentRunPlannerCompletion,
@@ -434,6 +444,8 @@ export {
   OllamaProvider,
   pickProvider,
   buildProvider,
+  normalizeAnthropicBaseUrl,
+  normalizeGeminiBaseUrl,
 } from "./providers/index.js";
 export type {
   AgentProvider,

@@ -14,6 +14,7 @@ import {
   AGENT_RUN_ESCALATION_MAP,
   createDeterministicAgentRunPlanner,
   defaultSuccessCriteria,
+  type AgentRunAudience,
   type AgentRunEvaluation,
   type AgentRunPlan,
   type AgentRunPlanInput,
@@ -74,11 +75,11 @@ export function createLlmAgentRunPlanner(options: LlmAgentRunPlannerOptions): Ag
           ? await options.getCatalogContext(input.request)
           : undefined;
         const raw = await options.complete({
-          system: buildPlanSystemPrompt(input.maxSteps),
+          system: buildPlanSystemPrompt(input.maxSteps, input.audience),
           user: buildPlanUserPrompt(input, catalogContext),
           signal: options.signal,
         });
-        const parsed = parsePlan(raw, input.maxSteps);
+        const parsed = parsePlan(raw, input.maxSteps, input.audience);
         if (parsed && parsed.steps.length > 0) {
           return parsed;
         }
@@ -108,22 +109,27 @@ export function createLlmAgentRunPlanner(options: LlmAgentRunPlannerOptions): Ag
   };
 }
 
-function buildPlanSystemPrompt(maxSteps: number): string {
-  return [
+function buildPlanSystemPrompt(maxSteps: number, audience: AgentRunAudience): string {
+  const lines = [
     "You are the planner for DQL, a governed analytics agent.",
     `Decompose the user's request into an ordered list of 1 to ${maxSteps} steps. Prefer the fewest steps.`,
     "Each step picks exactly one route:",
     "- certified_answer: a certified DQL block/governed metric clearly covers the question.",
     "- generated_answer: ad-hoc question answerable with review-required generated SQL.",
     "- research: why / root-cause / driver / breakdown / comparison / anomaly investigations.",
-    "- sql_cell: the user wants a SQL notebook cell / query.",
-    "- dql_block_draft: create or revise a governed DQL block.",
     "- app_build: assemble a dashboard / app / standing view.",
     "- clarify: a required business object, measure, or grain is missing — ask ONE sharp question.",
-    "Governance: generated SQL and drafts are always review-required; never claim work is certified.",
-    "Respond with ONLY a JSON object, no prose, no code fences:",
-    '{"rationale": string, "steps": [{"route": string, "goal": string, "successCriteria": string[]}]}',
-  ].join("\n");
+  ];
+  if (audience === "analyst") {
+    lines.push("- sql_cell: the user wants a SQL notebook cell / query.");
+    lines.push("- dql_block_draft: create or revise a governed DQL block.");
+  } else {
+    lines.push("Audience is a stakeholder (consumer). Do NOT use authoring routes (sql_cell, dql_block_draft); answer or research instead — certification is a separate handoff.");
+  }
+  lines.push("Governance: generated SQL and analysis are always review-required; never claim work is certified.");
+  lines.push("Respond with ONLY a JSON object, no prose, no code fences:");
+  lines.push('{"rationale": string, "steps": [{"route": string, "goal": string, "successCriteria": string[]}]}');
+  return lines.join("\n");
 }
 
 function buildPlanUserPrompt(input: AgentRunPlanInput, catalogContext?: string): string {
@@ -222,7 +228,9 @@ function asRoute(value: unknown): AgentRunRoute | undefined {
     : undefined;
 }
 
-function parsePlan(raw: string, maxSteps: number): AgentRunPlan | undefined {
+const STAKEHOLDER_BLOCKED_ROUTES = new Set<AgentRunRoute>(["sql_cell", "dql_block_draft"]);
+
+function parsePlan(raw: string, maxSteps: number, audience: AgentRunAudience): AgentRunPlan | undefined {
   const parsed = extractJsonObject(raw);
   if (!parsed || typeof parsed !== "object") return undefined;
   const record = parsed as Record<string, unknown>;
@@ -232,8 +240,10 @@ function parsePlan(raw: string, maxSteps: number): AgentRunPlan | undefined {
     if (steps.length >= maxSteps) break;
     if (!item || typeof item !== "object") continue;
     const stepRecord = item as Record<string, unknown>;
-    const route = asRoute(stepRecord.route);
+    let route = asRoute(stepRecord.route);
     if (!route) continue;
+    // Stakeholders never author — collapse any authoring step to a governed answer.
+    if (audience === "stakeholder" && STAKEHOLDER_BLOCKED_ROUTES.has(route)) route = "generated_answer";
     const goal = typeof stepRecord.goal === "string" && stepRecord.goal.trim().length > 0
       ? stepRecord.goal.trim()
       : `Run ${route.replaceAll("_", " ")}.`;

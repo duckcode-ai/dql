@@ -2,6 +2,7 @@ import Anthropic from '@anthropic-ai/sdk';
 import OpenAI from 'openai';
 import {
   defaultKgPath,
+  normalizeAnthropicBaseUrl,
   reindexProject,
 } from '@duckcodeailabs/dql-agent';
 import { DQLContext } from '@duckcodeailabs/dql-mcp';
@@ -70,7 +71,10 @@ export const anthropicSdkRunner: AgentRunner = {
       emit({ kind: 'error', message: 'Anthropic API key is missing. Configure Anthropic in Settings or set ANTHROPIC_API_KEY.' });
       return;
     }
-    const client = new Anthropic({ apiKey: config.apiKey });
+    const client = new Anthropic({
+      apiKey: config.apiKey,
+      ...(config.baseUrl ? { baseURL: normalizeAnthropicBaseUrl(config.baseUrl) } : {}),
+    });
     await runAnthropicMessagesAgent({
       client,
       model: config.model ?? 'claude-opus-4-8',

@@ -11,6 +11,17 @@ import type { MetadataAgentIntent } from "./metadata/catalog.js";
 
 export type AgentRunRequestedMode = "auto" | "ask" | "research" | "sql" | "block" | "app";
 
+/**
+ * Who the run serves. `analyst` (the Notebook) keeps every route, including
+ * authoring (sql_cell, dql_block_draft). `stakeholder` (Chat / Apps / Research)
+ * is consumption-only: authoring routes collapse to a governed answer and the
+ * run offers a "request certification" handoff instead of inline authoring.
+ */
+export type AgentRunAudience = "stakeholder" | "analyst";
+
+/** Routes a stakeholder may never land on (analyst authoring lives in the Notebook). */
+const ANALYST_ONLY_ROUTES = new Set<AgentRunRoute>(["sql_cell", "dql_block_draft"]);
+
 export type AgentRunRoute =
   | "certified_answer"
   | "generated_answer"
@@ -94,6 +105,8 @@ export interface AgentRunSelectedObject {
 export interface AgentRunRequest {
   question: string;
   requestedMode?: AgentRunRequestedMode;
+  /** Defaults to "analyst" (Notebook). Stakeholder surfaces pass "stakeholder". */
+  audience?: AgentRunAudience;
   intent?: MetadataAgentIntent;
   signals?: IntentSignals;
   selectedObject?: AgentRunSelectedObject;
@@ -241,6 +254,7 @@ export interface AgentRunPlanInput {
   routeDecision: IntentDecision;
   defaultRoute: AgentRunRoute;
   maxSteps: number;
+  audience: AgentRunAudience;
 }
 
 export interface AgentRunReplanInput {
@@ -294,6 +308,51 @@ export const AGENT_RUN_ESCALATION_MAP: Partial<Record<AgentRunRoute, AgentRunRou
   generated_answer: "research",
   app_build: "dql_block_draft",
 };
+
+/** Resolve the request's audience, defaulting to analyst (Notebook) for back-compat. */
+export function resolveAudience(request: AgentRunRequest): AgentRunAudience {
+  return request.audience ?? "analyst";
+}
+
+/** A stakeholder may never land on an authoring route — collapse it to a governed answer. */
+export function constrainRouteForAudience(route: AgentRunRoute, audience: AgentRunAudience): AgentRunRoute {
+  if (audience === "stakeholder" && ANALYST_ONLY_ROUTES.has(route)) return "generated_answer";
+  return route;
+}
+
+/** Audience-aware escalation target: stakeholders never escalate into authoring. */
+export function escalationRouteFor(route: AgentRunRoute, audience: AgentRunAudience): AgentRunRoute | undefined {
+  const target = AGENT_RUN_ESCALATION_MAP[route];
+  if (!target) return undefined;
+  if (audience === "stakeholder" && ANALYST_ONLY_ROUTES.has(target)) return "research";
+  return target;
+}
+
+/** The handoff action shown on a stakeholder's review-required output. */
+function requestCertificationAction(): AgentRunNextAction {
+  return { id: "request-certification", label: "Request certification" };
+}
+
+/**
+ * For stakeholders, strip analyst-authoring next actions and, on review-required
+ * output, offer the certification handoff. Analysts keep their actions untouched.
+ */
+function applyAudienceToNextActions(
+  actions: AgentRunNextAction[],
+  audience: AgentRunAudience,
+  status: AgentRunStatus,
+): AgentRunNextAction[] {
+  if (audience !== "stakeholder") return actions;
+  const consumption = actions.filter((action) =>
+    !ANALYST_ONLY_ROUTES.has(action.route ?? "clarify")
+    && action.artifactKind !== "sql_cell"
+    && action.artifactKind !== "dql_block_draft"
+    && !/insert-sql|create-block|promote|open-review|draft/i.test(action.id));
+  if (status === "needs_review" && !consumption.some((action) => action.id === "request-certification")) {
+    consumption.push(requestCertificationAction());
+  }
+  return consumption;
+}
 
 export class InMemoryAgentRunStore implements AgentRunStore {
   private readonly runs = new Map<string, AgentRun>();
@@ -438,8 +497,9 @@ export class AgentRunEngine {
       },
     });
 
+    const audience = resolveAudience(request);
     const routeDecision = buildIntentDecision(request);
-    const defaultRoute = selectRoute(request, routeDecision);
+    const defaultRoute = constrainRouteForAudience(selectRoute(request, routeDecision), audience);
 
     try {
       const plan = await this.planner.plan({
@@ -447,6 +507,7 @@ export class AgentRunEngine {
         routeDecision,
         defaultRoute,
         maxSteps: this.maxSteps,
+        audience,
       });
       emit({
         type: "plan.created",
@@ -826,7 +887,11 @@ export class AgentRunEngine {
       artifacts,
       evaluations: finalStep.evaluations,
       events: input.events,
-      nextActions: finalResult.nextActions ?? defaultNextActions(route, finalOutcome.status),
+      nextActions: applyAudienceToNextActions(
+        finalResult.nextActions ?? defaultNextActions(route, finalOutcome.status),
+        resolveAudience(input.request),
+        finalOutcome.status,
+      ),
       repairAttempts: finalResult.repairAttempts ?? input.repairAttemptsTotal,
     };
   }
@@ -921,13 +986,17 @@ export function createDeterministicAgentRunPlanner(): AgentRunPlanner {
         }],
       };
     },
-    replan({ currentStep, attemptsUsed, maxRepairAttempts }) {
+    replan({ request, currentStep, attemptsUsed, maxRepairAttempts }) {
       const failing = currentStep.evaluations.find((evaluation) => !evaluation.passed && evaluation.suggestedRepair);
       if (!failing) return { decision: "accept" };
+      const audience = resolveAudience(request);
       const action = failing.repairAction;
-      const escalationRoute = action?.kind === "escalate"
-        ? action.route ?? AGENT_RUN_ESCALATION_MAP[currentStep.route]
-        : AGENT_RUN_ESCALATION_MAP[currentStep.route];
+      const requested = action?.kind === "escalate" ? action.route : undefined;
+      // Honor an explicit escalate target, else the route's default — then clamp for the audience.
+      const rawEscalation = requested ?? AGENT_RUN_ESCALATION_MAP[currentStep.route];
+      const escalationRoute = rawEscalation
+        ? (audience === "stakeholder" && ANALYST_ONLY_ROUTES.has(rawEscalation) ? "research" : rawEscalation)
+        : undefined;
       const hint = action?.hint ?? failing.suggestedRepair ?? "Revise and retry.";
 
       if (action?.kind === "escalate" && escalationRoute) {

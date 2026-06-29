@@ -36,7 +36,7 @@ const SPECS: Record<SimpleProviderId, ProviderSpec> = {
     setup: 'Configure Anthropic in Settings or set ANTHROPIC_API_KEY. Optional: ANTHROPIC_MODEL.',
     create: (projectRoot) => {
       const config = getEffectiveProviderConfig(projectRoot, 'anthropic');
-      return new ClaudeProvider({ apiKey: config.apiKey, model: config.model });
+      return new ClaudeProvider({ apiKey: config.apiKey, baseUrl: config.baseUrl, model: config.model });
     },
   },
   openai: {
@@ -52,7 +52,7 @@ const SPECS: Record<SimpleProviderId, ProviderSpec> = {
     setup: 'Configure Gemini in Settings or set GEMINI_API_KEY. Optional: GEMINI_MODEL.',
     create: (projectRoot) => {
       const config = getEffectiveProviderConfig(projectRoot, 'gemini');
-      return new GeminiProvider({ apiKey: config.apiKey, model: config.model });
+      return new GeminiProvider({ apiKey: config.apiKey, baseUrl: config.baseUrl, model: config.model });
     },
   },
   ollama: {
