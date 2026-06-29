@@ -79,6 +79,8 @@ import {
   ensureMetadataCatalogFresh,
   propose,
   proposePlan,
+  AgentRunEngine,
+  InMemoryAgentRunStore,
   buildProposePreview,
   buildFromPrompt,
   resolveLocalOwner,
@@ -109,6 +111,13 @@ import {
   planApp,
   planResearch,
   loadSemanticMetrics,
+  type AgentRun,
+  type AgentRunArtifact,
+  type AgentRunEvaluation,
+  type AgentRunExecutors,
+  type AgentRunRequest,
+  type AgentRunRequestedMode,
+  type AgentRunSelectedObject,
   type PlanBlock,
 } from '@duckcodeailabs/dql-agent';
 import { gatherProposeEnrichment } from './propose-enrich.js';
@@ -270,6 +279,79 @@ export interface LocalServerOptions {
   captureServer?: (server: import('node:http').Server) => void;
 }
 
+const AGENT_RUN_REQUESTED_MODES = new Set<AgentRunRequestedMode>(['auto', 'ask', 'research', 'sql', 'block', 'app']);
+const AGENT_RUN_SELECTED_OBJECT_KINDS = new Set<AgentRunSelectedObject['kind']>([
+  'notebook',
+  'cell',
+  'block',
+  'app',
+  'dashboard',
+  'research',
+  'workspace',
+]);
+
+function agentRunRecord(value: unknown): Record<string, unknown> | undefined {
+  return value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : undefined;
+}
+
+function agentRunString(value: unknown): string | undefined {
+  return typeof value === 'string' && value.trim().length > 0 ? value.trim() : undefined;
+}
+
+function parseAgentRunRequestedMode(value: unknown): AgentRunRequestedMode | undefined {
+  return typeof value === 'string' && AGENT_RUN_REQUESTED_MODES.has(value as AgentRunRequestedMode)
+    ? value as AgentRunRequestedMode
+    : undefined;
+}
+
+function parseAgentRunSelectedObject(value: unknown): AgentRunSelectedObject | undefined {
+  const record = agentRunRecord(value);
+  if (!record) return undefined;
+  const kind = agentRunString(record.kind);
+  if (!kind || !AGENT_RUN_SELECTED_OBJECT_KINDS.has(kind as AgentRunSelectedObject['kind'])) return undefined;
+  return {
+    kind: kind as AgentRunSelectedObject['kind'],
+    id: agentRunString(record.id),
+    title: agentRunString(record.title),
+    path: agentRunString(record.path),
+  };
+}
+
+function parseAgentRunHistory(value: unknown): AgentRunRequest['history'] {
+  if (!Array.isArray(value)) return undefined;
+  const history = value.flatMap((item): NonNullable<AgentRunRequest['history']>[number][] => {
+    const record = agentRunRecord(item);
+    if (!record) return [];
+    const role = record.role === 'user' || record.role === 'assistant' ? record.role : undefined;
+    const text = agentRunString(record.text) ?? agentRunString(record.content);
+    return role && text ? [{ role, text }] : [];
+  });
+  return history.length > 0 ? history.slice(-20) : undefined;
+}
+
+function parseAgentRunRequestBody(body: unknown): { request?: AgentRunRequest; error?: string } {
+  const record = agentRunRecord(body);
+  if (!record) return { error: 'Invalid JSON body.' };
+  const question = agentRunString(record.question) ?? agentRunString(record.prompt) ?? agentRunString(record.message);
+  if (!question) return { error: 'question is required.' };
+  const selectedObject = parseAgentRunSelectedObject(record.selectedObject);
+  const workspaceContext = agentRunRecord(record.workspaceContext) ?? agentRunRecord(record.context);
+  const signals = agentRunRecord(record.signals);
+  const requestedMode = parseAgentRunRequestedMode(record.requestedMode) ?? parseAgentRunRequestedMode(record.mode);
+  return {
+    request: {
+      question,
+      requestedMode,
+      intent: agentRunString(record.intent) as AgentRunRequest['intent'],
+      signals: signals as AgentRunRequest['signals'],
+      selectedObject,
+      workspaceContext,
+      history: parseAgentRunHistory(record.history),
+      runId: agentRunString(record.runId),
+    },
+  };
+}
+
 export async function startLocalServer(opts: LocalServerOptions): Promise<number> {
   const { rootDir, executor, connection: rawConnection, preferredPort, projectRoot = process.cwd() } = opts;
   const bindHost = opts.host ?? process.env.DQL_HOST ?? '127.0.0.1';
@@ -348,6 +430,229 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
     );
     return normalizeQueryResult(result, semantic.semanticRefs);
   };
+
+  const runBlockReflectionProbe = async ({ sql, invariants }: { sql: string; invariants: string[] }) => {
+    const activeConnection = requireActiveConnection();
+    const prepared = prepareLocalExecution(sql, activeConnection, projectRoot, projectConfig);
+    const probeSql = `SELECT * FROM (${stripSqlTerminator(prepared.sql)}) _dql_probe LIMIT 2000`;
+    const probeResult = await executor.executeQuery(probeSql, [], runtimeVariables({}), prepared.connection);
+    const rows = (Array.isArray(probeResult?.rows) ? probeResult.rows : []) as Array<Record<string, unknown>>;
+    const rawColumns = Array.isArray((probeResult as { columns?: unknown })?.columns)
+      ? (probeResult as { columns: unknown[] }).columns
+      : [];
+    const actualColumns = rawColumns.length > 0
+      ? rawColumns.map((c) => (typeof c === 'string' ? c : (c as { name?: string })?.name ?? String(c)))
+      : (rows[0] ? Object.keys(rows[0]) : []);
+    const invariantResults = evaluateInvariants(invariants, { columns: actualColumns, rows });
+    const passed = invariantResults.filter((r) => r.passed && !r.uncheckable).length;
+    const failed = invariantResults.filter((r) => !r.passed && !r.uncheckable).length;
+    return {
+      actualColumns,
+      invariantResults,
+      tests: invariants.length > 0
+        ? { passed, failed, assertionCount: invariantResults.length }
+        : undefined,
+    };
+  };
+
+  const agentRunWorkspaceValue = (request: AgentRunRequest, key: string): string | undefined => {
+    const workspace = request.workspaceContext ?? {};
+    const nested = agentRunRecord(workspace.context);
+    return agentRunString(workspace[key]) ?? (nested ? agentRunString(nested[key]) : undefined);
+  };
+
+  const buildAgentPromptArtifact = async (request: AgentRunRequest, target: 'cell' | 'block'): Promise<BuildFromPromptResult> => {
+    try {
+      await reindexProject(projectRoot, { kgPath: defaultKgPath(projectRoot) });
+    } catch {
+      // Best-effort: buildFromPrompt can still use any existing KG/cache state.
+    }
+    const skills = loadSkills(projectRoot).skills;
+    const mode = target === 'block' && agentRunWorkspaceValue(request, 'mode') === 'edit' ? 'edit' : 'create';
+    return buildFromPrompt({
+      projectRoot,
+      prompt: request.question,
+      context: {
+        cellSql: agentRunWorkspaceValue(request, 'cellSql'),
+        selection: agentRunWorkspaceValue(request, 'selection'),
+      },
+      target,
+      mode,
+      blockPath: target === 'block'
+        ? agentRunWorkspaceValue(request, 'blockPath') ?? request.selectedObject?.path
+        : undefined,
+      owner: agentRunWorkspaceValue(request, 'owner'),
+      domain: target === 'block' ? agentRunWorkspaceValue(request, 'domain') : undefined,
+      userId: agentRunWorkspaceValue(request, 'userId'),
+      skills,
+      dbtManifestPath: resolveDbtManifestPath(projectRoot, projectConfig),
+      executionProbe: target === 'block' ? runBlockReflectionProbe : undefined,
+    });
+  };
+
+  const agentRunEvaluation = (
+    id: string,
+    label: string,
+    passed: boolean,
+    severity: AgentRunEvaluation['severity'],
+    message: string,
+    evidence?: unknown,
+  ): AgentRunEvaluation => ({ id, label, passed, severity, message, evidence });
+
+  const agentRunArtifact = (
+    kind: AgentRunArtifact['kind'],
+    title: string,
+    payload: unknown,
+    ref?: string,
+  ): AgentRunArtifact => ({
+    id: `${kind}:${Date.now()}`,
+    kind,
+    title,
+    trustState: 'review_required',
+    ref,
+    payload,
+  });
+
+  const agentRunExecutors: AgentRunExecutors = {
+    research: async ({ request, routeDecision }) => {
+      const metrics = loadSemanticMetrics(projectRoot);
+      let blocks = collectPlanBlocks(projectRoot, { certifiedOnly: true });
+      const usedCertifiedOnly = blocks.length > 0;
+      if (blocks.length === 0) blocks = collectPlanBlocks(projectRoot, { certifiedOnly: false });
+      const plan = await planResearch({
+        question: request.question,
+        metrics,
+        blocks,
+        intent: request.intent,
+        isFollowUp: Boolean(request.history?.length),
+        history: request.history,
+      });
+      const needsClarification = Boolean(plan.followUp);
+      const summary = needsClarification
+        ? 'Needs clarification before running deeper research.'
+        : plan.done
+          ? 'Prepared a direct grounded-answer plan.'
+          : 'Prepared a grounded research plan over real DQL assets.';
+      return {
+        summary,
+        answer: plan.followUp?.question,
+        status: needsClarification ? 'needs_clarification' : 'needs_review',
+        trustState: needsClarification ? 'not_applicable' : 'review_required',
+        stopReason: needsClarification ? 'needs_clarification' : 'human_review_required',
+        artifacts: needsClarification
+          ? []
+          : [agentRunArtifact('research_run', 'Research plan', {
+              plan,
+              routeDecision,
+              blockCount: blocks.length,
+              metricCount: metrics.length,
+              certifiedOnly: usedCertifiedOnly,
+            })],
+        evaluations: [
+          agentRunEvaluation('route-decision', 'Route decision', true, 'info', routeDecision?.reason ?? 'Routed request to research.'),
+          agentRunEvaluation(
+            'catalog-grounding',
+            'Catalog grounding',
+            plan.sources.length > 0,
+            plan.sources.length > 0 ? 'info' : 'warning',
+            plan.sources.length > 0
+              ? 'Research plan is grounded to catalog sources.'
+              : 'No certified catalog source was found; output remains exploratory.',
+            { sources: plan.sources },
+          ),
+        ],
+        nextActions: needsClarification
+          ? [{ id: 'answer-follow-up', label: 'Answer follow-up', route: 'research' }]
+          : [
+              { id: 'insert-sql', label: 'Insert SQL cell', route: 'sql_cell', artifactKind: 'sql_cell' },
+              { id: 'create-block', label: 'Create DQL draft', route: 'dql_block_draft', artifactKind: 'dql_block_draft' },
+            ],
+      };
+    },
+    sql_cell: async ({ request, routeDecision }) => {
+      const result = await buildAgentPromptArtifact(request, 'cell');
+      return {
+        summary: 'Created a review-required SQL cell draft.',
+        answer: result.target === 'cell' ? result.explanation : undefined,
+        artifacts: [agentRunArtifact('sql_cell', 'Generated SQL cell', result)],
+        evaluations: [
+          agentRunEvaluation('route-decision', 'Route decision', true, 'info', routeDecision?.reason ?? 'Routed request to SQL cell generation.'),
+          agentRunEvaluation('review-boundary', 'Review boundary', true, 'warning', 'Generated SQL must be reviewed before it becomes certified analytics.'),
+        ],
+        nextActions: [
+          { id: 'insert-sql', label: 'Insert SQL cell', artifactKind: 'sql_cell' },
+          { id: 'create-block', label: 'Promote to DQL draft', route: 'dql_block_draft', artifactKind: 'dql_block_draft' },
+        ],
+      };
+    },
+    dql_block_draft: async ({ request, routeDecision }) => {
+      const result = await buildAgentPromptArtifact(request, 'block');
+      const ready = result.target === 'block' ? result.certifierVerdict.ready : false;
+      return {
+        summary: ready
+          ? 'Created a DQL block draft that is ready for human certification review.'
+          : 'Created a DQL block draft with review blockers or warnings.',
+        artifacts: [agentRunArtifact(
+          'dql_block_draft',
+          result.target === 'block' ? result.name : 'DQL block draft',
+          result,
+          result.target === 'block' ? result.path : undefined,
+        )],
+        evaluations: [
+          agentRunEvaluation('route-decision', 'Route decision', true, 'info', routeDecision?.reason ?? 'Routed request to DQL block draft generation.'),
+          agentRunEvaluation(
+            'certification-boundary',
+            'Certification boundary',
+            ready,
+            'warning',
+            ready
+              ? 'The draft has no automatic certifier blockers, but certification still requires human review.'
+              : 'The draft has certifier blockers that must be resolved before certification review.',
+            result,
+          ),
+        ],
+        nextActions: [
+          { id: 'open-review', label: 'Open review checklist', artifactKind: 'dql_block_draft' },
+          { id: 'build-app', label: 'Build app from block', route: 'app_build', artifactKind: 'app_draft' },
+        ],
+      };
+    },
+    app_build: async ({ request, routeDecision }) => {
+      const metrics = loadSemanticMetrics(projectRoot);
+      let blocks = collectPlanBlocks(projectRoot, { certifiedOnly: true });
+      const usedCertifiedOnly = blocks.length > 0;
+      if (blocks.length === 0) blocks = collectPlanBlocks(projectRoot, { certifiedOnly: false });
+      const plan = await planApp({ goal: request.question, metrics, blocks });
+      return {
+        summary: 'Created a review-required app plan from governed DQL assets.',
+        artifacts: [agentRunArtifact('app_draft', plan.title, {
+          plan,
+          blockCount: blocks.length,
+          metricCount: metrics.length,
+          certifiedOnly: usedCertifiedOnly,
+        })],
+        evaluations: [
+          agentRunEvaluation('route-decision', 'Route decision', true, 'info', routeDecision?.reason ?? 'Routed request to app build.'),
+          agentRunEvaluation(
+            'app-coverage',
+            'Certified coverage',
+            plan.coverage >= 1,
+            plan.coverage >= 1 ? 'info' : 'warning',
+            plan.coverage >= 1
+              ? 'Every planned app section is covered by certified blocks.'
+              : 'Some app sections are gaps and need draft/certification work.',
+            { coverage: plan.coverage, gaps: plan.gaps },
+          ),
+        ],
+        nextActions: [
+          { id: 'open-app', label: 'Open app draft', artifactKind: 'app_draft' },
+          { id: 'create-gap-blocks', label: 'Create DQL drafts for gaps', route: 'dql_block_draft', artifactKind: 'dql_block_draft' },
+        ],
+      };
+    },
+  };
+  const agentRunStore = new InMemoryAgentRunStore();
+  const agentRunEngine = new AgentRunEngine({ store: agentRunStore, executors: agentRunExecutors });
 
   const runNotebookForApp = async (appId: string, notebookPath: string): Promise<void> => {
     const absPath = safeJoin(projectRoot, notebookPath);
@@ -1547,6 +1852,53 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
     if (req.method === 'GET' && path === '/api/health') {
       res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
       res.end(serializeJSON({ status: 'ok' }));
+      return;
+    }
+
+    if (req.method === 'GET' && path === '/api/agent-runs') {
+      const rawLimit = Number(url.searchParams.get('limit'));
+      const limit = Number.isFinite(rawLimit) && rawLimit > 0
+        ? Math.min(200, Math.floor(rawLimit))
+        : 50;
+      const runs = agentRunStore
+        .list()
+        .sort((a: AgentRun, b: AgentRun) => b.startedAt.localeCompare(a.startedAt))
+        .slice(0, limit);
+      res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+      res.end(serializeJSON({ runs, total: agentRunStore.list().length, limit }));
+      return;
+    }
+
+    if (req.method === 'POST' && path === '/api/agent-runs') {
+      try {
+        const body = await readJSON(req).catch(() => null);
+        const parsed = parseAgentRunRequestBody(body);
+        if (!parsed.request) {
+          res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
+          res.end(serializeJSON({ error: parsed.error ?? 'Invalid agent run request.' }));
+          return;
+        }
+        const run = await agentRunEngine.run(parsed.request);
+        res.writeHead(201, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({ run }));
+      } catch (error) {
+        res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({ error: error instanceof Error ? error.message : String(error) }));
+      }
+      return;
+    }
+
+    const agentRunMatch = /^\/api\/agent-runs\/([^/]+)$/.exec(path);
+    if (req.method === 'GET' && agentRunMatch) {
+      const id = decodeURIComponent(agentRunMatch[1]);
+      const run = await agentRunStore.get(id);
+      if (!run) {
+        res.writeHead(404, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({ error: 'Agent run not found.' }));
+        return;
+      }
+      res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+      res.end(serializeJSON({ run }));
       return;
     }
 

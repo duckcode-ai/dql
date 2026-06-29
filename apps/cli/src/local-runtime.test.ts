@@ -31,6 +31,7 @@ import {
   saveBlockStudioDraftArtifacts,
   setBlockStudioStatus,
   serializeJSON,
+  startLocalServer,
   validateBlockStudioSource,
   validateConnectionForTest,
 } from './local-runtime.js';
@@ -44,8 +45,9 @@ import { afterEach } from 'vitest';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
+import type { Server } from 'node:http';
 import { SemanticLayer } from '@duckcodeailabs/dql-core';
-import type { DatabaseConnector, QueryResult } from '@duckcodeailabs/dql-connectors';
+import type { DatabaseConnector, QueryExecutor, QueryResult } from '@duckcodeailabs/dql-connectors';
 
 const tempDirs: string[] = [];
 
@@ -79,6 +81,62 @@ describe('serializeJSON', () => {
   it('serializes unsafe bigint values as strings', () => {
     const value = BigInt(Number.MAX_SAFE_INTEGER) + 1n;
     expect(serializeJSON({ revenue: value })).toBe(`{"revenue":"${value.toString()}"}`);
+  });
+});
+
+describe('agent run runtime API', () => {
+  it('creates, stores, and reads a governed agent run', async () => {
+    const projectRoot = mkdtempSync(join(tmpdir(), 'dql-agent-run-api-'));
+    tempDirs.push(projectRoot);
+    let server: Server | undefined;
+
+    try {
+      const port = await startLocalServer({
+        rootDir: projectRoot,
+        projectRoot,
+        executor: {} as QueryExecutor,
+        preferredPort: 0,
+        captureServer: (created) => {
+          server = created;
+        },
+      });
+      const base = `http://127.0.0.1:${port}`;
+
+      const createResponse = await fetch(`${base}/api/agent-runs`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          question: 'Research customer revenue by segment',
+          requestedMode: 'research',
+          selectedObject: { kind: 'notebook', path: 'notebooks/customer.dqlnb' },
+        }),
+      });
+      expect(createResponse.status).toBe(201);
+      const created = await createResponse.json() as { run: any };
+      expect(created.run.route).toBe('research');
+      expect(created.run.status).toBe('needs_review');
+      expect(created.run.artifacts[0]?.kind).toBe('research_run');
+      expect(created.run.events.map((event: any) => event.type)).toContain('route.decided');
+
+      const getResponse = await fetch(`${base}/api/agent-runs/${encodeURIComponent(created.run.id)}`);
+      expect(getResponse.status).toBe(200);
+      const fetched = await getResponse.json() as { run: any };
+      expect(fetched.run.id).toBe(created.run.id);
+
+      const listResponse = await fetch(`${base}/api/agent-runs?limit=5`);
+      expect(listResponse.status).toBe(200);
+      const listed = await listResponse.json() as { runs: any[]; total: number };
+      expect(listed.total).toBe(1);
+      expect(listed.runs[0].id).toBe(created.run.id);
+    } finally {
+      await new Promise<void>((resolve) => {
+        if (!server) {
+          resolve();
+          return;
+        }
+        server.close(() => resolve());
+      });
+    }
   });
 });
 

@@ -400,6 +400,120 @@ export interface NotebookResearchListResponse {
   offset: number;
 }
 
+export type AgentRunRequestedMode = 'auto' | 'ask' | 'research' | 'sql' | 'block' | 'app';
+export type AgentRunRoute =
+  | 'certified_answer'
+  | 'generated_answer'
+  | 'research'
+  | 'sql_cell'
+  | 'dql_block_draft'
+  | 'app_build'
+  | 'clarify'
+  | 'blocked';
+export type AgentRunStatus = 'completed' | 'needs_review' | 'needs_clarification' | 'blocked';
+export type AgentRunTrustState = 'certified' | 'review_required' | 'blocked' | 'not_applicable';
+export type AgentRunStopReason =
+  | 'certified_answer_found'
+  | 'generated_review_required'
+  | 'artifact_created'
+  | 'needs_clarification'
+  | 'human_review_required'
+  | 'blocked';
+export type AgentRunArtifactKind = 'answer' | 'research_run' | 'sql_cell' | 'dql_block_draft' | 'app_draft';
+export type AgentRunEvaluationSeverity = 'info' | 'warning' | 'blocking';
+
+export interface AgentRunSelectedObject {
+  kind: 'notebook' | 'cell' | 'block' | 'app' | 'dashboard' | 'research' | 'workspace';
+  id?: string;
+  title?: string;
+  path?: string;
+}
+
+export interface AgentRunEvaluation {
+  id: string;
+  label: string;
+  passed: boolean;
+  severity: AgentRunEvaluationSeverity;
+  message: string;
+  evidence?: unknown;
+  suggestedRepair?: string;
+}
+
+export interface AgentRunArtifact {
+  id: string;
+  kind: AgentRunArtifactKind;
+  title: string;
+  trustState: AgentRunTrustState;
+  ref?: string;
+  payload?: unknown;
+}
+
+export interface AgentRunNextAction {
+  id: string;
+  label: string;
+  route?: AgentRunRoute;
+  artifactKind?: AgentRunArtifactKind;
+}
+
+export interface AgentRunEvent {
+  id: string;
+  runId: string;
+  type:
+    | 'run.started'
+    | 'route.decided'
+    | 'executor.started'
+    | 'evaluation.recorded'
+    | 'artifact.created'
+    | 'run.completed'
+    | 'run.failed';
+  at: string;
+  message: string;
+  route?: AgentRunRoute;
+  status?: AgentRunStatus;
+  trustState?: AgentRunTrustState;
+  payload?: unknown;
+}
+
+export interface AgentRun {
+  id: string;
+  question: string;
+  requestedMode: AgentRunRequestedMode;
+  route: AgentRunRoute;
+  status: AgentRunStatus;
+  trustState: AgentRunTrustState;
+  stopReason: AgentRunStopReason;
+  startedAt: string;
+  completedAt: string;
+  selectedObject?: AgentRunSelectedObject;
+  routeDecision?: unknown;
+  summary: string;
+  answer?: string;
+  artifacts: AgentRunArtifact[];
+  evaluations: AgentRunEvaluation[];
+  events: AgentRunEvent[];
+  nextActions: AgentRunNextAction[];
+  repairAttempts: number;
+}
+
+export interface CreateAgentRunInput {
+  question: string;
+  requestedMode?: AgentRunRequestedMode;
+  mode?: AgentRunRequestedMode;
+  intent?: string;
+  signals?: Record<string, unknown>;
+  selectedObject?: AgentRunSelectedObject;
+  workspaceContext?: Record<string, unknown>;
+  context?: Record<string, unknown>;
+  history?: Array<{ role: 'user' | 'assistant'; text: string }>;
+  runId?: string;
+}
+
+export interface AgentRunListResponse {
+  runs: AgentRun[];
+  total: number;
+  limit: number;
+}
+
 export interface NotebookResearchDiagnostics {
   counts: {
     totalRuns: number;
@@ -1498,6 +1612,28 @@ export const api = {
       method: 'POST',
       body: JSON.stringify(input),
     });
+  },
+
+  async createAgentRun(input: CreateAgentRunInput): Promise<AgentRun> {
+    const raw = await request<{ run: AgentRun }>('/api/agent-runs', {
+      method: 'POST',
+      body: JSON.stringify(input),
+    });
+    return raw.run;
+  },
+
+  async listAgentRuns(input?: { limit?: number }): Promise<AgentRunListResponse> {
+    const params = new URLSearchParams();
+    if (typeof input?.limit === 'number' && Number.isFinite(input.limit)) {
+      params.set('limit', String(input.limit));
+    }
+    const suffix = params.toString() ? `?${params.toString()}` : '';
+    return request<AgentRunListResponse>(`/api/agent-runs${suffix}`);
+  },
+
+  async getAgentRun(id: string): Promise<AgentRun> {
+    const raw = await request<{ run: AgentRun }>(`/api/agent-runs/${encodeURIComponent(id)}`);
+    return raw.run;
   },
 
   /**
