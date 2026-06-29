@@ -1,6 +1,6 @@
 import type { Theme } from '../../themes/notebook-theme';
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
-import { Clock3, Hammer, History, Sparkles, X } from 'lucide-react';
+import { Clock3, Hammer, History, Route, Sparkles, X } from 'lucide-react';
 import { makeCell, useNotebook } from '../../store/NotebookStore';
 import { themes } from '../../themes/notebook-theme';
 import { api, type NotebookResearchRun } from '../../api/client';
@@ -10,6 +10,7 @@ import { DashboardView } from './DashboardView';
 import { DocumentMetadataRow } from './DocumentMetadataRow';
 import { AgentChatPanel, type AgentAnswerCompletePayload } from '../agent/AgentChatPanel';
 import { AiBuildResult, useOpenBlockInStudio } from '../agent/AiBuildResult';
+import { UnifiedAgentRunPanel } from '../agent/UnifiedAgentRunPanel';
 import { SaveAsBlockModal } from '../modals/SaveAsBlockModal';
 import type { AgentAnswerEnvelope } from '../agent/AgentAnswerCard';
 import type { AiBuildTarget } from '../../store/types';
@@ -479,10 +480,13 @@ function NotebookAiDrawer({
   onAskFromHistory: (run: NotebookResearchRun) => void;
 }) {
   const { state } = useNotebook();
-  // Spec 14 — two intents, separated: Ask (governed Q&A) vs Build (clean
-  // artifact). The toggle never blends them; Build mounts AiBuildResult.
-  const [mode, setMode] = useState<'ask' | 'build'>('ask');
+  // Auto uses the governed run orchestrator. Ask and Build preserve the
+  // existing specialized surfaces while the unified flow proves out.
+  const [mode, setMode] = useState<'auto' | 'ask' | 'build'>('auto');
   const openBlockInStudio = useOpenBlockInStudio();
+  useEffect(() => {
+    if (autoAsk) setMode('ask');
+  }, [autoAsk?.nonce]);
   const sourceTitle = sourceCell
     ? `${sourceCell.type.toUpperCase()} cell${sourceCell.name ? ` · ${sourceCell.name}` : ''}`
     : 'Whole notebook';
@@ -493,6 +497,19 @@ function NotebookAiDrawer({
   const buildContext = sourceCell?.type === 'sql' && sourceCell.content.trim()
     ? { cellSql: sourceCell.content }
     : undefined;
+  const agentRunSelectedObject = sourceCell
+    ? { kind: 'cell' as const, id: sourceCell.id, title: sourceCell.name, path: notebookPath }
+    : notebookPath
+      ? { kind: 'notebook' as const, path: notebookPath, title: state.notebookTitle || 'Notebook' }
+      : undefined;
+  const agentRunWorkspaceContext = {
+    ...(buildContext ?? {}),
+    notebookPath,
+    notebookTitle: state.notebookTitle,
+    sourceCellId: sourceCell?.id,
+    sourceCellName: sourceCell?.name,
+    sourceCellType: sourceCell?.type,
+  };
   const buildQuickActions: Array<{ label: string; prompt: string; target?: AiBuildTarget }> = sourceCell
     ? [
         { label: 'Build SQL', prompt: 'Generate SQL for this cell using dbt, semantic metadata, certified blocks, and warehouse schema as context.', target: 'cell' },
@@ -570,7 +587,7 @@ function NotebookAiDrawer({
         </button>
       </div>
 
-      {/* Ask ⇄ Build mode toggle — two intents, never blended. */}
+      {/* Auto routes through the governed run engine; Ask and Build remain explicit lanes. */}
       <div
         style={{
           padding: '8px 12px',
@@ -580,7 +597,7 @@ function NotebookAiDrawer({
         }}
       >
         <div role="group" aria-label="AI mode" style={{ display: 'inline-flex', padding: 2, gap: 2, border: `1px solid ${t.btnBorder}`, borderRadius: 8, background: t.btnBg }}>
-          {(['ask', 'build'] as const).map((value) => {
+          {(['auto', 'ask', 'build'] as const).map((value) => {
             const active = mode === value;
             return (
               <button
@@ -603,14 +620,18 @@ function NotebookAiDrawer({
                   cursor: 'pointer',
                 }}
               >
-                {value === 'ask' ? <Sparkles size={13} strokeWidth={2} /> : <Hammer size={13} strokeWidth={2} />}
-                {value === 'ask' ? 'Ask' : 'Build'}
+                {value === 'auto'
+                  ? <Route size={13} strokeWidth={2} />
+                  : value === 'ask'
+                    ? <Sparkles size={13} strokeWidth={2} />
+                    : <Hammer size={13} strokeWidth={2} />}
+                {value === 'auto' ? 'Auto' : value === 'ask' ? 'Ask' : 'Build'}
               </button>
             );
           })}
         </div>
         <span style={{ fontSize: 11, color: t.textMuted, fontFamily: t.font, alignSelf: 'center' }}>
-          {mode === 'ask' ? 'Answer a question' : 'Generate a cell or block'}
+          {mode === 'auto' ? 'Route and execute' : mode === 'ask' ? 'Answer a question' : 'Generate a cell or block'}
         </span>
       </div>
 
@@ -634,6 +655,20 @@ function NotebookAiDrawer({
             quickActions={buildQuickActions}
             onInsertCell={onInsertCellSql}
             onOpenBlock={(path, name) => { void openBlockInStudio(path, name); }}
+          />
+        ) : mode === 'auto' ? (
+          <UnifiedAgentRunPanel
+            key={`auto:${notebookPath ?? 'notebook'}:${sourceCell?.id ?? 'all'}`}
+            themeMode={state.themeMode}
+            title="Notebook AI"
+            scopeHint={scopeHint}
+            notebookPath={notebookPath}
+            selectedObject={agentRunSelectedObject}
+            workspaceContext={agentRunWorkspaceContext}
+            initialMode="auto"
+            initialInput={initialInput}
+            onInsertSql={onInsertSql}
+            onOpenBlock={(path, name) => { void openBlockInStudio(path, name ?? path); }}
           />
         ) : (
           <AgentChatPanel
