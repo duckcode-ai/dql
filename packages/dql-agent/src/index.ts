@@ -71,6 +71,32 @@ export {
   type IntentSignals,
 } from "./intent-controller.js";
 export {
+  AgentRunEngine,
+  InMemoryAgentRunStore,
+  selectRoute,
+} from "./agent-run-engine.js";
+export type {
+  AgentRouteExecutionContext,
+  AgentRouteExecutor,
+  AgentRouteExecutorResult,
+  AgentRun,
+  AgentRunArtifact,
+  AgentRunArtifactKind,
+  AgentRunEvaluation,
+  AgentRunEvaluationSeverity,
+  AgentRunEvent,
+  AgentRunExecutors,
+  AgentRunNextAction,
+  AgentRunRequest,
+  AgentRunRequestedMode,
+  AgentRunRoute,
+  AgentRunSelectedObject,
+  AgentRunStatus,
+  AgentRunStopReason,
+  AgentRunStore,
+  AgentRunTrustState,
+} from "./agent-run-engine.js";
+export {
   planApp,
   type AppPlan as AgentAppPlan,
   type AppPlanSection,
