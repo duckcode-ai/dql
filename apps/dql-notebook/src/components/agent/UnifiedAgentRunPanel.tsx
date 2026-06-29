@@ -5,12 +5,15 @@ import {
   CheckCircle2,
   Code2,
   FileSearch,
+  GitBranch,
   LayoutDashboard,
+  ListTree,
   Loader2,
   Route,
   Send,
   ShieldCheck,
   Sparkles,
+  Wrench,
 } from 'lucide-react';
 import {
   api,
@@ -20,6 +23,8 @@ import {
   type AgentRunRequestedMode,
   type AgentRunRoute,
   type AgentRunSelectedObject,
+  type AgentRunStep,
+  type AgentRunStepStatus,
 } from '../../api/client';
 import { themes, type Theme, type ThemeMode } from '../../themes/notebook-theme';
 
@@ -276,6 +281,9 @@ function RunCard({
   onOpenResearch?: (id: string, notebookPath?: string) => void;
   onNextAction: (route?: AgentRunRoute) => void;
 }) {
+  const steps = run.steps ?? [];
+  const multiStep = steps.length > 1;
+  const isLlmPlan = run.plan?.source === 'llm';
   return (
     <div style={runCardStyle(t)}>
       <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
@@ -286,6 +294,14 @@ function RunCard({
         </div>
         <TrustBadge run={run} t={t} />
       </div>
+
+      {(isLlmPlan || multiStep || run.repairAttempts > 0) ? (
+        <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+          {isLlmPlan ? <MetaChip t={t} icon={<ListTree size={11} />} label="AI plan" tone="accent" /> : null}
+          {multiStep ? <MetaChip t={t} icon={<Route size={11} />} label={`${steps.length} steps`} tone="muted" /> : null}
+          {run.repairAttempts > 0 ? <MetaChip t={t} icon={<Wrench size={11} />} label={`${run.repairAttempts} repair${run.repairAttempts > 1 ? 's' : ''}`} tone="warning" /> : null}
+        </div>
+      ) : null}
 
       <div style={{ fontSize: 12.5, lineHeight: 1.45, color: t.textSecondary }}>{run.summary}</div>
       {run.answer ? <div style={answerBoxStyle(t)}>{run.answer}</div> : null}
@@ -305,16 +321,15 @@ function RunCard({
         </div>
       ) : null}
 
-      <div style={{ display: 'grid', gap: 5 }}>
-        {run.evaluations.map((evaluation) => (
-          <div key={evaluation.id} style={{ display: 'flex', gap: 7, alignItems: 'flex-start', fontSize: 11.5, color: t.textSecondary }}>
-            <span style={{ color: evaluation.passed ? t.success : evaluation.severity === 'blocking' ? t.error : t.warning, lineHeight: '16px' }}>
-              {evaluation.passed ? 'OK' : evaluation.severity === 'blocking' ? 'Stop' : 'Review'}
-            </span>
-            <span style={{ lineHeight: 1.4 }}>{evaluation.message}</span>
-          </div>
-        ))}
-      </div>
+      {multiStep ? (
+        <StepTrace steps={steps} t={t} />
+      ) : (
+        <div style={{ display: 'grid', gap: 5 }}>
+          {run.evaluations.map((evaluation) => (
+            <EvaluationRow key={evaluation.id} evaluation={evaluation} t={t} />
+          ))}
+        </div>
+      )}
 
       {run.nextActions.length > 0 ? (
         <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
@@ -435,6 +450,84 @@ function TrustBadge({ run, t }: { run: AgentRun; t: Theme }) {
     <span style={{ border: `1px solid ${color}55`, color, background: `${color}12`, borderRadius: 999, padding: '3px 7px', fontSize: 10, fontWeight: 850 }}>
       {run.trustState.split('_').join(' ')}
     </span>
+  );
+}
+
+function EvaluationRow({ evaluation, t }: { evaluation: AgentRun['evaluations'][number]; t: Theme }) {
+  const color = evaluation.passed ? t.success : evaluation.severity === 'blocking' ? t.error : t.warning;
+  return (
+    <div style={{ display: 'flex', gap: 7, alignItems: 'flex-start', fontSize: 11.5, color: t.textSecondary }}>
+      <span style={{ color, lineHeight: '16px', flex: '0 0 auto', fontWeight: 800 }}>
+        {evaluation.passed ? 'OK' : evaluation.severity === 'blocking' ? 'Stop' : 'Review'}
+      </span>
+      <span style={{ lineHeight: 1.4 }}>
+        {evaluation.message}
+        {!evaluation.passed && evaluation.suggestedRepair ? (
+          <span style={{ display: 'block', color: t.textMuted, marginTop: 1 }}>↳ {evaluation.suggestedRepair}</span>
+        ) : null}
+      </span>
+    </div>
+  );
+}
+
+function MetaChip({ t, icon, label, tone }: { t: Theme; icon: React.ReactNode; label: string; tone: 'accent' | 'muted' | 'warning' }) {
+  const color = tone === 'accent' ? t.accent : tone === 'warning' ? t.warning : t.textMuted;
+  return (
+    <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4, border: `1px solid ${color}44`, color, background: `${color}10`, borderRadius: 999, padding: '2px 7px', fontSize: 10, fontWeight: 800 }}>
+      {icon}
+      <span>{label}</span>
+    </span>
+  );
+}
+
+function stepStatusColor(status: AgentRunStepStatus, t: Theme): string {
+  switch (status) {
+    case 'passed':
+      return t.success;
+    case 'repaired':
+      return t.accent;
+    case 'escalated':
+      return t.accent;
+    case 'blocked':
+      return t.error;
+    default:
+      return t.warning;
+  }
+}
+
+function StepTrace({ steps, t }: { steps: AgentRunStep[]; t: Theme }) {
+  return (
+    <details style={{ border: `1px solid ${t.headerBorder}`, background: t.cellBg, borderRadius: 8, padding: '6px 9px' }}>
+      <summary style={{ cursor: 'pointer', fontSize: 11.5, fontWeight: 800, color: t.textSecondary, listStyle: 'none', display: 'flex', alignItems: 'center', gap: 6 }}>
+        <ListTree size={13} />
+        <span>Plan trace · {steps.length} steps</span>
+      </summary>
+      <div style={{ display: 'grid', gap: 10, marginTop: 8 }}>
+        {steps.map((step) => {
+          const color = stepStatusColor(step.status, t);
+          return (
+            <div key={step.id} style={{ display: 'grid', gap: 4, paddingLeft: 8, borderLeft: `2px solid ${color}55` }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
+                <span style={{ fontSize: 11.5, fontWeight: 850, color: t.textPrimary }}>{step.index}. {ROUTE_LABEL[step.route]}</span>
+                <span style={{ border: `1px solid ${color}55`, color, background: `${color}12`, borderRadius: 999, padding: '1px 6px', fontSize: 9.5, fontWeight: 850, display: 'inline-flex', alignItems: 'center', gap: 3 }}>
+                  {step.status === 'escalated' ? <GitBranch size={10} /> : step.status === 'repaired' ? <Wrench size={10} /> : null}
+                  {step.status.split('_').join(' ')}
+                </span>
+                {step.attempts > 1 ? <span style={{ fontSize: 10, color: t.textMuted }}>{step.attempts} attempts</span> : null}
+              </div>
+              {step.goal ? <div style={{ fontSize: 11, color: t.textMuted, lineHeight: 1.35 }}>{step.goal}</div> : null}
+              {step.evaluations.length > 0 ? (
+                <div style={{ display: 'grid', gap: 4 }}>
+                  {step.evaluations.map((evaluation) => (
+                    <EvaluationRow key={evaluation.id} evaluation={evaluation} t={t} />
+                  ))}
+                </div>
+              ) : null}
+            </div>
+          );
+        })}
+      </div>
+    </details>
   );
 }
 

@@ -81,6 +81,8 @@ import {
   proposePlan,
   AgentRunEngine,
   FileAgentRunStore,
+  defaultAgentRunGates,
+  createLlmAgentRunPlanner,
   buildProposePreview,
   buildFromPrompt,
   defaultAgentRunStorePath,
@@ -538,17 +540,28 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
     formatAgentRunInfrastructureError(error, 'Notebook research storage')
   );
 
-  const buildAgentPromptArtifact = async (request: AgentRunRequest, target: 'cell' | 'block'): Promise<BuildFromPromptResult> => {
+  const buildAgentPromptArtifact = async (
+    request: AgentRunRequest,
+    target: 'cell' | 'block',
+    repair?: { attempt: number; repairHint?: string },
+  ): Promise<BuildFromPromptResult> => {
     try {
       await reindexProject(projectRoot, { kgPath: defaultKgPath(projectRoot) });
     } catch {
       // Best-effort: buildFromPrompt can still use any existing KG/cache state.
     }
     const skills = loadSkills(projectRoot).skills;
-    const mode = target === 'block' && agentRunWorkspaceValue(request, 'mode') === 'edit' ? 'edit' : 'create';
+    // On a repair re-run, target the prior failure and (for blocks) revise in place.
+    const isRepair = (repair?.attempt ?? 0) > 0 && Boolean(repair?.repairHint);
+    const mode = target === 'block' && (isRepair || agentRunWorkspaceValue(request, 'mode') === 'edit')
+      ? 'edit'
+      : 'create';
+    const prompt = isRepair
+      ? `${request.question}\n\nFix the previous attempt: ${repair?.repairHint}`
+      : request.question;
     return buildFromPrompt({
       projectRoot,
-      prompt: request.question,
+      prompt,
       context: {
         cellSql: agentRunWorkspaceValue(request, 'cellSql'),
         selection: agentRunWorkspaceValue(request, 'selection'),
@@ -591,7 +604,10 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
     payload,
   });
 
-  async function runGovernedAgentAnswerForRun(request: AgentRunRequest): Promise<AgentAnswer> {
+  async function runGovernedAgentAnswerForRun(
+    request: AgentRunRequest,
+    repair?: { attempt: number; repairHint?: string },
+  ): Promise<AgentAnswer> {
     const resolvedProvider = resolveDefaultLLMProvider(projectRoot);
     const runner = resolvedProvider ? getLLMRunner(resolvedProvider) : null;
     if (!resolvedProvider || !runner) {
@@ -599,6 +615,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
     }
     let governedAnswer: AgentAnswer | undefined;
     let providerError: string | undefined;
+    const isRepair = (repair?.attempt ?? 0) > 0 && Boolean(repair?.repairHint);
     const contextEnvelope = {
       mode: 'agent_run',
       selectedObject: request.selectedObject,
@@ -608,6 +625,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
         'Prefer certified DQL blocks when they exactly cover the question.',
         'Generated SQL remains review-required and must use the bounded preview executor.',
         'If the question needs investigation, return the clearest answer and next review action without certifying generated work.',
+        ...(isRepair ? [`This is a repair attempt — fix the previous failure: ${repair?.repairHint}`] : []),
       ].join(' '),
     };
     const controller = new AbortController();
@@ -616,7 +634,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
         provider: resolvedProvider,
         messages: [
           ...(request.history ?? []).map((message) => ({ role: message.role, content: message.text })),
-          { role: 'user', content: request.question },
+          { role: 'user', content: isRepair ? `${request.question}\n\nFix the previous attempt: ${repair?.repairHint}` : request.question },
         ],
         upstream: {
           cellId: `agent-run:${request.selectedObject?.kind ?? 'workspace'}:${request.selectedObject?.id ?? request.runId ?? 'auto'}`,
@@ -643,10 +661,10 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
     return governedAnswer;
   }
 
-  const answerRunExecutor: AgentRouteExecutor = async ({ request, routeDecision }) => {
+  const answerRunExecutor: AgentRouteExecutor = async ({ request, routeDecision, attempt, repairHint }) => {
     let governedAnswer: AgentAnswer;
     try {
-      governedAnswer = await runGovernedAgentAnswerForRun(request);
+      governedAnswer = await runGovernedAgentAnswerForRun(request, { attempt, repairHint });
     } catch (error) {
       const message = formatAgentRunInfrastructureError(error, 'AI answer provider');
       return {
@@ -869,8 +887,8 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
             ],
       };
     },
-    sql_cell: async ({ request, routeDecision }) => {
-      const result = await buildAgentPromptArtifact(request, 'cell');
+    sql_cell: async ({ request, routeDecision, attempt, repairHint }) => {
+      const result = await buildAgentPromptArtifact(request, 'cell', { attempt, repairHint });
       return {
         summary: 'Created a review-required SQL cell draft.',
         answer: result.target === 'cell' ? result.explanation : undefined,
@@ -885,8 +903,8 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
         ],
       };
     },
-    dql_block_draft: async ({ request, routeDecision }) => {
-      const result = await buildAgentPromptArtifact(request, 'block');
+    dql_block_draft: async ({ request, routeDecision, attempt, repairHint }) => {
+      const result = await buildAgentPromptArtifact(request, 'block', { attempt, repairHint });
       const ready = result.target === 'block' ? result.certifierVerdict.ready : false;
       return {
         summary: ready
@@ -960,13 +978,15 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
       const ready = session.status === 'ready';
       const sessionPlan = agentRunRecord(session.plan);
       const appTitle = agentRunString(sessionPlan?.name) ?? 'App draft';
+      // A coverage gap is NOT terminal — leave status open so the gate can escalate to
+      // drafting the missing blocks. Only genuine infra errors (the catch above) block.
       return {
         summary: ready
           ? 'Created a review-required app draft session from certified DQL assets.'
           : 'App build needs more certified DQL coverage before files can be generated.',
-        status: ready ? 'needs_review' : 'blocked',
-        trustState: ready ? 'review_required' : 'blocked',
-        stopReason: ready ? 'human_review_required' : 'blocked',
+        status: ready ? 'needs_review' : undefined,
+        trustState: ready ? 'review_required' : undefined,
+        stopReason: ready ? 'human_review_required' : undefined,
         artifacts: ready ? [agentRunArtifact('app_draft', appTitle, {
           session,
           sessionId: session.id,
@@ -1001,8 +1021,54 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
       };
     },
   };
+  // Compact, catalog-grounded context the LLM planner decomposes `auto` turns against.
+  const buildAgentRunCatalogContext = (): string => {
+    try {
+      const blocks = collectPlanBlocks(projectRoot, { certifiedOnly: true });
+      const sourceBlocks = blocks.length > 0 ? blocks : collectPlanBlocks(projectRoot, { certifiedOnly: false });
+      const blockLines = sourceBlocks.slice(0, 24).map((block) => {
+        const domain = block.domain ? ` [${block.domain}]` : '';
+        const detail = block.description ? `: ${block.description}` : '';
+        return `- ${block.name}${domain}${detail}`;
+      });
+      const metrics = loadSemanticMetrics(projectRoot).slice(0, 24);
+      const metricLines = metrics.map((metric) => {
+        const node = metric as { name?: string; label?: string; id?: string };
+        return `- ${node.name ?? node.label ?? node.id ?? 'metric'}`;
+      });
+      return [
+        blockLines.length > 0 ? `Available DQL blocks:\n${blockLines.join('\n')}` : 'Available DQL blocks: none',
+        metricLines.length > 0 ? `Governed metrics:\n${metricLines.join('\n')}` : '',
+      ].filter(Boolean).join('\n\n');
+    } catch {
+      return '';
+    }
+  };
+
+  // Provider-agnostic completion the planner injects. Reuses the configured provider
+  // adapter; throwing here makes the planner fall back to its deterministic path.
+  const agentRunPlanner = createLlmAgentRunPlanner({
+    complete: async ({ system, user, signal }) => {
+      const provider = await createBlockStudioAssistProvider(projectRoot);
+      if (!provider) throw new Error('No AI provider configured for planning.');
+      return provider.generate(
+        [
+          { role: 'system', content: system },
+          { role: 'user', content: user },
+        ],
+        { maxTokens: 700, temperature: 0.1, signal },
+      );
+    },
+    getCatalogContext: buildAgentRunCatalogContext,
+  });
+
   const agentRunStore = new FileAgentRunStore({ path: defaultAgentRunStorePath(projectRoot) });
-  const agentRunEngine = new AgentRunEngine({ store: agentRunStore, executors: agentRunExecutors });
+  const agentRunEngine = new AgentRunEngine({
+    store: agentRunStore,
+    executors: agentRunExecutors,
+    gates: defaultAgentRunGates,
+    planner: agentRunPlanner,
+  });
 
   const runNotebookForApp = async (appId: string, notebookPath: string): Promise<void> => {
     const absPath = safeJoin(projectRoot, notebookPath);

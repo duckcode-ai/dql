@@ -8,8 +8,11 @@ import {
   InMemoryAgentRunStore,
   defaultAgentRunStorePath,
   selectRoute,
+  type AgentRouteExecutorResult,
   type AgentRunEvent,
+  type AgentRunPlanner,
 } from "./agent-run-engine.js";
+import { defaultAgentRunGates } from "./agent-run-gates.js";
 import { decideAgentAction } from "./intent-controller.js";
 
 describe("AgentRunEngine", () => {
@@ -51,10 +54,13 @@ describe("AgentRunEngine", () => {
     expect(run.artifacts[0]).toMatchObject({ kind: "answer", trustState: "certified" });
     expect(events.map((event) => event.type)).toEqual([
       "run.started",
+      "plan.created",
+      "step.started",
       "route.decided",
       "executor.started",
       "evaluation.recorded",
       "artifact.created",
+      "step.completed",
       "run.completed",
     ]);
     expect(store.get("run-certified")?.route).toBe("certified_answer");
@@ -202,6 +208,143 @@ describe("AgentRunEngine", () => {
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
+  });
+});
+
+describe("AgentRunEngine loop (plan → build → evaluate → modify)", () => {
+  it("repairs a failing gate and accepts the repaired result", async () => {
+    const events: AgentRunEvent[] = [];
+    let calls = 0;
+    const engine = new AgentRunEngine({
+      idGenerator: () => "run-repair",
+      now: fixedClock(),
+      gates: defaultAgentRunGates,
+      executors: {
+        sql_cell: () => {
+          calls += 1;
+          // First build has no SQL (gate fails → retry); the repair produces SQL.
+          const payload = calls === 1 ? {} : { sql: "select 1" };
+          return { artifacts: [{ id: `sql:${calls}`, kind: "sql_cell", title: "Cell", trustState: "review_required", payload }] };
+        },
+      },
+    });
+
+    const run = await engine.run({ question: "create a sql cell", requestedMode: "sql" }, (event) => events.push(event));
+
+    expect(calls).toBe(2);
+    expect(run.route).toBe("sql_cell");
+    expect(run.status).toBe("needs_review");
+    expect(run.repairAttempts).toBe(1);
+    expect(run.steps[0]?.attempts).toBe(2);
+    expect(run.steps[0]?.status).toBe("repaired");
+    expect(events.map((event) => event.type)).toContain("repair.attempted");
+  });
+
+  it("escalates a generated answer with no grounding to research", async () => {
+    const events: AgentRunEvent[] = [];
+    const engine = new AgentRunEngine({
+      idGenerator: () => "run-escalate",
+      now: fixedClock(),
+      gates: defaultAgentRunGates,
+      executors: {
+        generated_answer: () => ({ answer: "", artifacts: [] }),
+        research: () => ({
+          summary: "Grounded research dossier.",
+          artifacts: [{ id: "r1", kind: "research_run", title: "Research", trustState: "review_required", payload: {} }],
+          evaluations: [{ id: "catalog-grounding", label: "Catalog grounding", passed: true, severity: "info", message: "Grounded." }],
+        }),
+      },
+    });
+
+    const run = await engine.run({
+      question: "show me something ungrounded",
+      intent: "ad_hoc_ranking",
+      signals: { certifiedScore: 0.1, hasRetrieval: true },
+    }, (event) => events.push(event));
+
+    expect(run.route).toBe("research");
+    expect(run.steps).toHaveLength(2);
+    expect(run.steps[0]?.status).toBe("escalated");
+    expect(run.steps[1]?.route).toBe("research");
+    expect(run.repairAttempts).toBe(1);
+    expect(events.map((event) => event.type)).toContain("escalated");
+  });
+
+  it("escalates an app build with no certified coverage to a block draft", async () => {
+    const engine = new AgentRunEngine({
+      idGenerator: () => "run-app-escalate",
+      now: fixedClock(),
+      gates: defaultAgentRunGates,
+      executors: {
+        app_build: () => ({
+          artifacts: [{ id: "a1", kind: "app_draft", title: "App", trustState: "review_required", payload: { session: { status: "needs_coverage" } } }],
+        }),
+        dql_block_draft: () => ({
+          summary: "Drafted the gap block.",
+          artifacts: [{ id: "b1", kind: "dql_block_draft", title: "Gap block", trustState: "review_required", payload: { certifierVerdict: { ready: true } } }],
+        }),
+      },
+    });
+
+    const run = await engine.run({ question: "build a revenue dashboard", requestedMode: "app" });
+
+    expect(run.steps[0]?.route).toBe("app_build");
+    expect(run.steps[0]?.status).toBe("escalated");
+    expect(run.route).toBe("dql_block_draft");
+  });
+
+  it("stops repairing once the modify budget is exhausted and finishes review-required", async () => {
+    let calls = 0;
+    const engine = new AgentRunEngine({
+      idGenerator: () => "run-budget",
+      now: fixedClock(),
+      maxRepairAttempts: 1,
+      gates: defaultAgentRunGates,
+      executors: {
+        sql_cell: () => {
+          calls += 1;
+          return { artifacts: [{ id: `sql:${calls}`, kind: "sql_cell", title: "Cell", trustState: "review_required", payload: {} }] };
+        },
+      },
+    });
+
+    const run = await engine.run({ question: "create a sql cell", requestedMode: "sql" });
+
+    expect(calls).toBe(2); // initial build + one repair, then budget exhausted
+    expect(run.repairAttempts).toBe(1);
+    expect(run.status).toBe("needs_review");
+  });
+
+  it("runs a multi-step plan and aggregates artifacts across steps", async () => {
+    const planner: AgentRunPlanner = {
+      plan: () => ({
+        source: "llm",
+        rationale: "Investigate, then draft a governed block.",
+        steps: [
+          { id: "s1", route: "research", goal: "Investigate drivers", successCriteria: [] },
+          { id: "s2", route: "dql_block_draft", goal: "Draft the metric block", successCriteria: [] },
+        ],
+      }),
+      replan: () => ({ decision: "accept" }),
+    };
+    const executors = {
+      research: (): AgentRouteExecutorResult => ({
+        summary: "Research done.",
+        artifacts: [{ id: "r1", kind: "research_run" as const, title: "Research", trustState: "review_required" as const, payload: {} }],
+      }),
+      dql_block_draft: (): AgentRouteExecutorResult => ({
+        summary: "Draft done.",
+        artifacts: [{ id: "b1", kind: "dql_block_draft" as const, title: "Block", trustState: "review_required" as const, payload: { certifierVerdict: { ready: true } } }],
+      }),
+    };
+    const engine = new AgentRunEngine({ idGenerator: () => "run-multi", now: fixedClock(), planner, gates: defaultAgentRunGates, executors });
+
+    const run = await engine.run({ question: "why is revenue down, then make a block" });
+
+    expect(run.plan?.source).toBe("llm");
+    expect(run.steps.map((step) => step.route)).toEqual(["research", "dql_block_draft"]);
+    expect(run.route).toBe("dql_block_draft");
+    expect(run.artifacts.map((artifact) => artifact.kind)).toEqual(["research_run", "dql_block_draft"]);
   });
 });
 

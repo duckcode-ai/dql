@@ -429,6 +429,12 @@ export interface AgentRunSelectedObject {
   path?: string;
 }
 
+export interface AgentRunRepairAction {
+  kind: 'retry' | 'escalate';
+  route?: AgentRunRoute;
+  hint?: string;
+}
+
 export interface AgentRunEvaluation {
   id: string;
   label: string;
@@ -437,6 +443,41 @@ export interface AgentRunEvaluation {
   message: string;
   evidence?: unknown;
   suggestedRepair?: string;
+  repairAction?: AgentRunRepairAction;
+}
+
+export type AgentRunStepStatus =
+  | 'passed'
+  | 'repaired'
+  | 'needs_review'
+  | 'escalated'
+  | 'clarify'
+  | 'blocked';
+
+export interface AgentRunPlannedStep {
+  id: string;
+  route: AgentRunRoute;
+  goal: string;
+  successCriteria: string[];
+}
+
+export interface AgentRunPlan {
+  source: 'llm' | 'deterministic';
+  rationale: string;
+  steps: AgentRunPlannedStep[];
+}
+
+export interface AgentRunStep {
+  id: string;
+  index: number;
+  route: AgentRunRoute;
+  goal: string;
+  successCriteria: string[];
+  status: AgentRunStepStatus;
+  attempts: number;
+  summary?: string;
+  evaluations: AgentRunEvaluation[];
+  artifacts: AgentRunArtifact[];
 }
 
 export interface AgentRunArtifact {
@@ -460,10 +501,16 @@ export interface AgentRunEvent {
   runId: string;
   type:
     | 'run.started'
+    | 'plan.created'
+    | 'step.started'
     | 'route.decided'
     | 'executor.started'
     | 'evaluation.recorded'
+    | 'replan.decided'
+    | 'repair.attempted'
+    | 'escalated'
     | 'artifact.created'
+    | 'step.completed'
     | 'run.completed'
     | 'run.failed';
   at: string;
@@ -486,6 +533,8 @@ export interface AgentRun {
   completedAt: string;
   selectedObject?: AgentRunSelectedObject;
   routeDecision?: unknown;
+  plan?: AgentRunPlan;
+  steps: AgentRunStep[];
   summary: string;
   answer?: string;
   artifacts: AgentRunArtifact[];

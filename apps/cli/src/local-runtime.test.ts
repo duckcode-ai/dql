@@ -132,11 +132,16 @@ describe('agent run runtime API', () => {
         }),
       });
       expect(askResponse.status).toBe(201);
-      const blocked = await askResponse.json() as { run: any };
-      expect(blocked.run.route).not.toBe('blocked');
-      expect(blocked.run.status).toBe('blocked');
-      expect(blocked.run.evaluations.some((evaluation: any) => evaluation.id === 'ai-provider')).toBe(true);
-      expect(blocked.run.summary).not.toContain('Could not locate the bindings file');
+      const ask = await askResponse.json() as { run: any };
+      // Routing is deterministic regardless of provider availability.
+      expect(ask.run.route).toBe('generated_answer');
+      // Without a reachable provider the run is cleanly blocked (ai-provider eval); with one
+      // it returns a governed / needs-clarification result. Either way, no raw infra leak.
+      expect(['blocked', 'needs_review', 'needs_clarification', 'completed']).toContain(ask.run.status);
+      if (ask.run.status === 'blocked') {
+        expect(ask.run.evaluations.some((evaluation: any) => evaluation.id === 'ai-provider')).toBe(true);
+      }
+      expect(ask.run.summary).not.toContain('Could not locate the bindings file');
 
       const appResponse = await fetch(`${base}/api/agent-runs`, {
         method: 'POST',
@@ -149,8 +154,10 @@ describe('agent run runtime API', () => {
       });
       expect(appResponse.status).toBe(201);
       const appRun = await appResponse.json() as { run: any };
-      expect(appRun.run.route).toBe('app_build');
-      expect(['blocked', 'needs_review']).toContain(appRun.run.status);
+      // With no certified coverage the loop escalates app_build → dql_block_draft (drafting
+      // the missing block); if no provider is reachable it stays blocked. Never a raw infra leak.
+      expect(['app_build', 'dql_block_draft', 'blocked']).toContain(appRun.run.route);
+      expect(['blocked', 'needs_review', 'needs_clarification']).toContain(appRun.run.status);
       expect(appRun.run.summary).not.toContain('Could not locate the bindings file');
 
       const streamResponse = await fetch(`${base}/api/agent-runs?stream=1`, {
@@ -173,7 +180,7 @@ describe('agent run runtime API', () => {
       const listed = await listResponse.json() as { runs: any[]; total: number };
       expect(listed.total).toBe(4);
       expect(listed.runs.some((run) => run.id === created.run.id)).toBe(true);
-      expect(listed.runs.some((run) => run.id === blocked.run.id)).toBe(true);
+      expect(listed.runs.some((run) => run.id === ask.run.id)).toBe(true);
       expect(listed.runs.some((run) => run.id === appRun.run.id)).toBe(true);
       expect(readFileSync(join(projectRoot, '.dql', 'local', 'agent-runs.json'), 'utf-8')).toContain(created.run.id);
     } finally {

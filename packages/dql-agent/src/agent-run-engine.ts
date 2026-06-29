@@ -41,6 +41,20 @@ export type AgentRunArtifactKind =
 
 export type AgentRunEvaluationSeverity = "info" | "warning" | "blocking";
 
+/**
+ * How the loop should react when an evaluation fails.
+ * - `retry`   → re-run the same route with the repair hint (the executor owns
+ *   the actual repair, e.g. the answer-loop SQL repair or reflect-before-certify).
+ * - `escalate`→ switch to a different route (e.g. answer that can't be grounded
+ *   escalates to research; an app build with no coverage escalates to a block draft).
+ * When omitted, a failing evaluation is terminal for its severity.
+ */
+export interface AgentRunRepairAction {
+  kind: "retry" | "escalate";
+  route?: AgentRunRoute;
+  hint?: string;
+}
+
 export interface AgentRunEvaluation {
   id: string;
   label: string;
@@ -48,7 +62,10 @@ export interface AgentRunEvaluation {
   severity: AgentRunEvaluationSeverity;
   message: string;
   evidence?: unknown;
+  /** Human-facing repair suggestion; presence also marks the eval as actionable. */
   suggestedRepair?: string;
+  /** Machine-facing remediation the engine loop should attempt. */
+  repairAction?: AgentRunRepairAction;
 }
 
 export interface AgentRunArtifact {
@@ -90,10 +107,16 @@ export interface AgentRunEvent {
   runId: string;
   type:
     | "run.started"
+    | "plan.created"
+    | "step.started"
     | "route.decided"
     | "executor.started"
     | "evaluation.recorded"
+    | "replan.decided"
+    | "repair.attempted"
+    | "escalated"
     | "artifact.created"
+    | "step.completed"
     | "run.completed"
     | "run.failed";
   at: string;
@@ -102,6 +125,44 @@ export interface AgentRunEvent {
   status?: AgentRunStatus;
   trustState?: AgentRunTrustState;
   payload?: unknown;
+}
+
+/** A single planned step (the plan is an ordered list of these). */
+export interface AgentRunPlannedStep {
+  id: string;
+  route: AgentRunRoute;
+  goal: string;
+  successCriteria: string[];
+}
+
+export type AgentRunPlanSource = "llm" | "deterministic";
+
+export interface AgentRunPlan {
+  source: AgentRunPlanSource;
+  rationale: string;
+  steps: AgentRunPlannedStep[];
+}
+
+export type AgentRunStepStatus =
+  | "passed"
+  | "repaired"
+  | "needs_review"
+  | "escalated"
+  | "clarify"
+  | "blocked";
+
+/** A step after it has executed — carries its evaluations + artifacts for the trace. */
+export interface AgentRunStep {
+  id: string;
+  index: number;
+  route: AgentRunRoute;
+  goal: string;
+  successCriteria: string[];
+  status: AgentRunStepStatus;
+  attempts: number;
+  summary?: string;
+  evaluations: AgentRunEvaluation[];
+  artifacts: AgentRunArtifact[];
 }
 
 export interface AgentRun {
@@ -116,6 +177,8 @@ export interface AgentRun {
   completedAt: string;
   selectedObject?: AgentRunSelectedObject;
   routeDecision?: IntentDecision;
+  plan?: AgentRunPlan;
+  steps: AgentRunStep[];
   summary: string;
   answer?: string;
   artifacts: AgentRunArtifact[];
@@ -131,6 +194,14 @@ export interface AgentRouteExecutionContext {
   route: AgentRunRoute;
   routeDecision?: IntentDecision;
   maxRepairAttempts: number;
+  /** 0 on the first build of a step; increments on each repair re-run. */
+  attempt: number;
+  /** The goal the planner assigned to this step. */
+  stepGoal?: string;
+  /** Evaluations from the previous attempt (so executors can target the repair). */
+  priorEvaluations?: AgentRunEvaluation[];
+  /** The repair hint the loop wants this re-run to act on. */
+  repairHint?: string;
   emit: (event: Omit<AgentRunEvent, "id" | "runId" | "at">) => void;
 }
 
@@ -152,6 +223,47 @@ export type AgentRouteExecutor = (
 
 export type AgentRunExecutors = Partial<Record<AgentRunRoute, AgentRouteExecutor>>;
 
+/** A gate evaluates an executed step's result and returns authoritative evaluations. */
+export interface AgentRunGateContext {
+  route: AgentRunRoute;
+  request: AgentRunRequest;
+  routeDecision?: IntentDecision;
+  result: AgentRouteExecutorResult;
+  attempt: number;
+}
+
+export type AgentRunGate = (context: AgentRunGateContext) => AgentRunEvaluation[];
+
+export type AgentRunGates = Partial<Record<AgentRunRoute, AgentRunGate>>;
+
+export interface AgentRunPlanInput {
+  request: AgentRunRequest;
+  routeDecision: IntentDecision;
+  defaultRoute: AgentRunRoute;
+  maxSteps: number;
+}
+
+export interface AgentRunReplanInput {
+  request: AgentRunRequest;
+  plan: AgentRunPlan;
+  currentStep: AgentRunStep;
+  remainingSteps: AgentRunPlannedStep[];
+  attemptsUsed: number;
+  repairAttemptsUsed: number;
+  maxRepairAttempts: number;
+}
+
+export type AgentRunReplanDecision =
+  | { decision: "accept" }
+  | { decision: "repair"; repairHint: string }
+  | { decision: "escalate"; route: AgentRunRoute; goal?: string; repairHint?: string }
+  | { decision: "clarify"; question?: string };
+
+export interface AgentRunPlanner {
+  plan(input: AgentRunPlanInput): AgentRunPlan | Promise<AgentRunPlan>;
+  replan(input: AgentRunReplanInput): AgentRunReplanDecision | Promise<AgentRunReplanDecision>;
+}
+
 export interface AgentRunStore {
   save(run: AgentRun): void | Promise<void>;
   get(id: string): AgentRun | undefined | Promise<AgentRun | undefined>;
@@ -160,14 +272,28 @@ export interface AgentRunStore {
 
 export interface AgentRunEngineOptions {
   executors?: AgentRunExecutors;
+  gates?: AgentRunGates;
+  planner?: AgentRunPlanner;
   store?: AgentRunStore;
   idGenerator?: () => string;
   now?: () => Date;
   maxRepairAttempts?: number;
+  maxSteps?: number;
 }
 
 const DEFAULT_MAX_REPAIR_ATTEMPTS = 2;
+const DEFAULT_MAX_STEPS = 4;
 const CERTIFIED_MATCH_THRESHOLD = 0.5;
+
+/**
+ * Routes whose gate failure is better answered by switching routes than by
+ * re-running the same executor (repair can't add what the route can't produce).
+ */
+export const AGENT_RUN_ESCALATION_MAP: Partial<Record<AgentRunRoute, AgentRunRoute>> = {
+  certified_answer: "research",
+  generated_answer: "research",
+  app_build: "dql_block_draft",
+};
 
 export class InMemoryAgentRunStore implements AgentRunStore {
   private readonly runs = new Map<string, AgentRun>();
@@ -253,19 +379,34 @@ function isAgentRunRecord(value: unknown): value is AgentRun {
     && Array.isArray(record.evaluations);
 }
 
+/** Outcome of a single accepted step (status/trust/artifacts derived from evaluations). */
+interface StepOutcome {
+  status: AgentRunStatus;
+  trustState: AgentRunTrustState;
+  artifacts: AgentRunArtifact[];
+  stopReason: AgentRunStopReason;
+  summary: string;
+}
+
 export class AgentRunEngine {
   private readonly executors: AgentRunExecutors;
+  private readonly gates: AgentRunGates;
+  private readonly planner: AgentRunPlanner;
   private readonly store?: AgentRunStore;
   private readonly idGenerator: () => string;
   private readonly now: () => Date;
   private readonly maxRepairAttempts: number;
+  private readonly maxSteps: number;
 
   constructor(options: AgentRunEngineOptions = {}) {
     this.executors = options.executors ?? {};
+    this.gates = options.gates ?? {};
+    this.planner = options.planner ?? createDeterministicAgentRunPlanner();
     this.store = options.store;
     this.idGenerator = options.idGenerator ?? randomUUID;
     this.now = options.now ?? (() => new Date());
     this.maxRepairAttempts = options.maxRepairAttempts ?? DEFAULT_MAX_REPAIR_ATTEMPTS;
+    this.maxSteps = Math.max(1, options.maxSteps ?? DEFAULT_MAX_STEPS);
   }
 
   async run(
@@ -298,83 +439,278 @@ export class AgentRunEngine {
     });
 
     const routeDecision = buildIntentDecision(request);
-    const route = selectRoute(request, routeDecision);
-    emit({
-      type: "route.decided",
-      message: routeDecision.reason,
-      route,
-      payload: routeDecision,
-    });
+    const defaultRoute = selectRoute(request, routeDecision);
 
     try {
-      emit({
-        type: "executor.started",
-        message: `Running ${route.replaceAll("_", " ")} executor.`,
-        route,
+      const plan = await this.planner.plan({
+        request,
+        routeDecision,
+        defaultRoute,
+        maxSteps: this.maxSteps,
       });
-      const executorResult = await this.executeRoute({
+      emit({
+        type: "plan.created",
+        message: plan.rationale,
+        route: plan.steps[0]?.route,
+        payload: plan,
+      });
+
+      const executedSteps: AgentRunStep[] = [];
+      const queue: AgentRunPlannedStep[] = [...plan.steps];
+      let repairAttemptsTotal = 0;
+      let stepCount = 0;
+      let finalStep: AgentRunStep | undefined;
+      let finalResult: AgentRouteExecutorResult | undefined;
+      let finalOutcome: StepOutcome | undefined;
+      let clarifyOutcome: { step: AgentRunStep; question?: string } | undefined;
+
+      while (queue.length > 0 && stepCount < this.maxSteps) {
+        const planned = queue.shift()!;
+        stepCount += 1;
+        const route = planned.route;
+        const stepId = `${runId}:step:${stepCount}`;
+
+        emit({
+          type: "step.started",
+          message: `Step ${stepCount}: ${planned.goal}`,
+          route,
+          payload: { stepId, index: stepCount, goal: planned.goal, successCriteria: planned.successCriteria },
+        });
+        emit({
+          type: "route.decided",
+          message: stepCount === 1
+            ? routeDecision.reason
+            : `Routed step ${stepCount} to ${route.replaceAll("_", " ")}.`,
+          route,
+          payload: stepCount === 1 ? routeDecision : { route, goal: planned.goal },
+        });
+
+        let attempt = 0;
+        let repairHint: string | undefined;
+        let priorEvaluations: AgentRunEvaluation[] | undefined;
+        let result: AgentRouteExecutorResult = {};
+        let evaluations: AgentRunEvaluation[] = [];
+        let escalation: { route: AgentRunRoute; goal?: string; hint?: string } | undefined;
+        let stepStatus: AgentRunStepStatus = "needs_review";
+        let clarifyQuestion: string | undefined;
+        let isClarify = false;
+
+        // Build → evaluate → modify loop for this step.
+        for (;;) {
+          emit({
+            type: "executor.started",
+            message: attempt === 0
+              ? `Running ${route.replaceAll("_", " ")} executor.`
+              : `Re-running ${route.replaceAll("_", " ")} executor (repair attempt ${attempt}).`,
+            route,
+          });
+          result = await this.executeRoute({
+            runId,
+            request,
+            route,
+            routeDecision,
+            maxRepairAttempts: this.maxRepairAttempts,
+            attempt,
+            stepGoal: planned.goal,
+            priorEvaluations,
+            repairHint,
+            emit,
+          });
+
+          evaluations = this.evaluate({ route, request, routeDecision, result, attempt });
+          for (const evaluation of evaluations) {
+            emit({
+              type: "evaluation.recorded",
+              message: evaluation.message,
+              route,
+              payload: evaluation,
+            });
+          }
+
+          // An executor that explicitly self-declares blocked is terminal (infra blocker).
+          if (result.status === "blocked") {
+            stepStatus = "blocked";
+            break;
+          }
+
+          const failing = evaluations.find((evaluation) => !evaluation.passed && evaluation.suggestedRepair);
+          if (!failing) {
+            stepStatus = attempt > 0 ? "repaired" : "passed";
+            break;
+          }
+
+          // Out of modify budget — accept the best result we have.
+          if (repairAttemptsTotal >= this.maxRepairAttempts) {
+            stepStatus = "needs_review";
+            break;
+          }
+
+          const currentStep: AgentRunStep = {
+            id: stepId,
+            index: stepCount,
+            route,
+            goal: planned.goal,
+            successCriteria: planned.successCriteria,
+            status: "needs_review",
+            attempts: attempt + 1,
+            summary: result.summary,
+            evaluations,
+            artifacts: result.artifacts ?? [],
+          };
+          const decision = await this.planner.replan({
+            request,
+            plan,
+            currentStep,
+            remainingSteps: queue,
+            attemptsUsed: attempt,
+            repairAttemptsUsed: repairAttemptsTotal,
+            maxRepairAttempts: this.maxRepairAttempts,
+          });
+          emit({
+            type: "replan.decided",
+            message: describeReplan(decision),
+            route,
+            payload: decision,
+          });
+
+          if (decision.decision === "repair") {
+            repairAttemptsTotal += 1;
+            attempt += 1;
+            repairHint = decision.repairHint || failing.suggestedRepair;
+            priorEvaluations = evaluations;
+            emit({
+              type: "repair.attempted",
+              message: `Repairing ${route.replaceAll("_", " ")}: ${repairHint}`,
+              route,
+              payload: { attempt, repairHint },
+            });
+            continue;
+          }
+          if (decision.decision === "escalate") {
+            repairAttemptsTotal += 1;
+            escalation = { route: decision.route, goal: decision.goal, hint: decision.repairHint || failing.suggestedRepair };
+            stepStatus = "escalated";
+            emit({
+              type: "escalated",
+              message: `Escalating ${route.replaceAll("_", " ")} → ${decision.route.replaceAll("_", " ")}.`,
+              route,
+              payload: decision,
+            });
+            break;
+          }
+          if (decision.decision === "clarify") {
+            isClarify = true;
+            clarifyQuestion = decision.question;
+            stepStatus = "clarify";
+            break;
+          }
+          // "accept"
+          stepStatus = "needs_review";
+          break;
+        }
+
+        // Escalated steps are recorded in the trace but their output is superseded.
+        if (escalation) {
+          executedSteps.push({
+            id: stepId,
+            index: stepCount,
+            route,
+            goal: planned.goal,
+            successCriteria: planned.successCriteria,
+            status: "escalated",
+            attempts: attempt + 1,
+            summary: result.summary,
+            evaluations,
+            artifacts: [],
+          });
+          emit({
+            type: "step.completed",
+            message: `Step ${stepCount} escalated to ${escalation.route.replaceAll("_", " ")}.`,
+            route,
+            payload: { stepId, status: "escalated" },
+          });
+          queue.unshift({
+            id: `${stepId}:escalation`,
+            route: escalation.route,
+            goal: escalation.goal ?? `Escalated from ${route} to ${escalation.route}.`,
+            successCriteria: [],
+          });
+          continue;
+        }
+
+        const outcome = computeStepOutcome(route, result, evaluations, request, isClarify, clarifyQuestion);
+        const step: AgentRunStep = {
+          id: stepId,
+          index: stepCount,
+          route,
+          goal: planned.goal,
+          successCriteria: planned.successCriteria,
+          status: outcome.status === "blocked" ? "blocked" : stepStatus,
+          attempts: attempt + 1,
+          summary: outcome.summary,
+          evaluations,
+          artifacts: outcome.artifacts,
+        };
+        executedSteps.push(step);
+
+        for (const artifact of outcome.artifacts) {
+          emit({
+            type: "artifact.created",
+            message: `Created ${artifact.kind.replaceAll("_", " ")} artifact.`,
+            route,
+            trustState: artifact.trustState,
+            payload: artifact,
+          });
+        }
+        emit({
+          type: "step.completed",
+          message: `Step ${stepCount} ${step.status}.`,
+          route,
+          status: outcome.status,
+          trustState: outcome.trustState,
+          payload: { stepId, status: step.status },
+        });
+
+        if (isClarify) {
+          clarifyOutcome = { step, question: clarifyQuestion };
+          finalStep = step;
+          finalResult = result;
+          finalOutcome = outcome;
+          break;
+        }
+
+        finalStep = step;
+        finalResult = result;
+        finalOutcome = outcome;
+
+        if (outcome.status === "blocked") break;
+        if (isTerminalSuccess(route, outcome)) break;
+        // Otherwise continue to the next planned step (if any remain).
+      }
+
+      const run = this.finalizeRun({
         runId,
         request,
-        route,
+        requestedMode,
+        startedAt,
         routeDecision,
-        maxRepairAttempts: this.maxRepairAttempts,
-        emit,
+        plan,
+        steps: executedSteps,
+        finalStep,
+        finalResult,
+        finalOutcome,
+        clarifyOutcome,
+        repairAttemptsTotal,
+        events,
       });
-      const evaluations = executorResult.evaluations ?? defaultEvaluations(route, request, routeDecision);
-      for (const evaluation of evaluations) {
-        emit({
-          type: "evaluation.recorded",
-          message: evaluation.message,
-          route,
-          payload: evaluation,
-        });
-      }
-      const fallback = defaultOutcome(route);
-      const status = executorResult.status ?? statusFromEvaluations(route, evaluations, fallback.status);
-      const trustState = executorResult.trustState ?? trustStateFromEvaluations(route, evaluations, fallback.trustState);
-      const artifacts = status === "blocked"
-        ? []
-        : executorResult.artifacts ?? defaultArtifacts(route, executorResult, request);
-      for (const artifact of artifacts) {
-        emit({
-          type: "artifact.created",
-          message: `Created ${artifact.kind.replaceAll("_", " ")} artifact.`,
-          route,
-          trustState: artifact.trustState,
-          payload: artifact,
-        });
-      }
-
-      const stopReason = executorResult.stopReason ?? stopReasonFor(route, status, trustState, artifacts);
-      const completedAt = this.timestamp();
       emit({
         type: "run.completed",
-        message: `Agent run completed with status ${status}.`,
-        route,
-        status,
-        trustState,
+        message: `Agent run completed with status ${run.status}.`,
+        route: run.route,
+        status: run.status,
+        trustState: run.trustState,
       });
-
-      const run: AgentRun = {
-        id: runId,
-        question: request.question,
-        requestedMode,
-        route,
-        status,
-        trustState,
-        stopReason,
-        startedAt,
-        completedAt,
-        selectedObject: request.selectedObject,
-        routeDecision,
-        summary: executorResult.summary ?? fallback.summary,
-        answer: executorResult.answer,
-        artifacts,
-        evaluations,
-        events,
-        nextActions: executorResult.nextActions ?? defaultNextActions(route, status),
-        repairAttempts: executorResult.repairAttempts ?? 0,
-      };
+      run.completedAt = this.timestamp();
       await this.store?.save(run);
       return run;
     } catch (err) {
@@ -382,7 +718,7 @@ export class AgentRunEngine {
       emit({
         type: "run.failed",
         message,
-        route,
+        route: "blocked",
         status: "blocked",
         trustState: "blocked",
       });
@@ -398,6 +734,7 @@ export class AgentRunEngine {
         completedAt: this.timestamp(),
         selectedObject: request.selectedObject,
         routeDecision,
+        steps: [],
         summary: message,
         artifacts: [],
         evaluations: [{
@@ -416,6 +753,91 @@ export class AgentRunEngine {
     }
   }
 
+  private finalizeRun(input: {
+    runId: string;
+    request: AgentRunRequest;
+    requestedMode: AgentRunRequestedMode;
+    startedAt: string;
+    routeDecision: IntentDecision;
+    plan: AgentRunPlan;
+    steps: AgentRunStep[];
+    finalStep?: AgentRunStep;
+    finalResult?: AgentRouteExecutorResult;
+    finalOutcome?: StepOutcome;
+    clarifyOutcome?: { step: AgentRunStep; question?: string };
+    repairAttemptsTotal: number;
+    events: AgentRunEvent[];
+  }): AgentRun {
+    const { finalStep, finalResult, finalOutcome } = input;
+    const completedAt = this.timestamp();
+
+    if (!finalStep || !finalResult || !finalOutcome) {
+      // No step produced a usable result (e.g. an empty plan). Treat as blocked.
+      return {
+        id: input.runId,
+        question: input.request.question,
+        requestedMode: input.requestedMode,
+        route: "blocked",
+        status: "blocked",
+        trustState: "blocked",
+        stopReason: "blocked",
+        startedAt: input.startedAt,
+        completedAt,
+        selectedObject: input.request.selectedObject,
+        routeDecision: input.routeDecision,
+        plan: input.plan,
+        steps: input.steps,
+        summary: "The agent run produced no executable step.",
+        artifacts: [],
+        evaluations: [{
+          id: "empty-plan",
+          label: "Empty plan",
+          passed: false,
+          severity: "blocking",
+          message: "The planner returned no runnable steps.",
+        }],
+        events: input.events,
+        nextActions: [],
+        repairAttempts: input.repairAttemptsTotal,
+      };
+    }
+
+    const route = finalStep.route;
+    // Aggregate artifacts across every accepted step so a multi-step plan
+    // (e.g. research → block draft) surfaces all of its durable work, while the
+    // status/trust/answer reflect the final step.
+    const artifacts = input.steps.flatMap((step) => step.artifacts);
+    return {
+      id: input.runId,
+      question: input.request.question,
+      requestedMode: input.requestedMode,
+      route,
+      status: finalOutcome.status,
+      trustState: finalOutcome.trustState,
+      stopReason: finalOutcome.stopReason,
+      startedAt: input.startedAt,
+      completedAt,
+      selectedObject: input.request.selectedObject,
+      routeDecision: input.routeDecision,
+      plan: input.plan,
+      steps: input.steps,
+      summary: finalOutcome.summary,
+      answer: input.clarifyOutcome?.question ?? finalResult.answer,
+      artifacts,
+      evaluations: finalStep.evaluations,
+      events: input.events,
+      nextActions: finalResult.nextActions ?? defaultNextActions(route, finalOutcome.status),
+      repairAttempts: finalResult.repairAttempts ?? input.repairAttemptsTotal,
+    };
+  }
+
+  private evaluate(context: AgentRunGateContext): AgentRunEvaluation[] {
+    const gate = this.gates[context.route];
+    if (gate) return gate(context);
+    return context.result.evaluations
+      ?? defaultEvaluations(context.route, context.request, context.routeDecision);
+  }
+
   private async executeRoute(context: AgentRouteExecutionContext): Promise<AgentRouteExecutorResult> {
     const executor = this.executors[context.route];
     if (executor) return executor(context);
@@ -424,6 +846,122 @@ export class AgentRunEngine {
 
   private timestamp(): string {
     return this.now().toISOString();
+  }
+}
+
+function computeStepOutcome(
+  route: AgentRunRoute,
+  result: AgentRouteExecutorResult,
+  evaluations: AgentRunEvaluation[],
+  request: AgentRunRequest,
+  isClarify: boolean,
+  clarifyQuestion?: string,
+): StepOutcome {
+  const fallback = defaultOutcome(route);
+  if (isClarify) {
+    return {
+      status: "needs_clarification",
+      trustState: "not_applicable",
+      artifacts: [],
+      stopReason: "needs_clarification",
+      summary: result.summary ?? clarifyQuestion ?? fallback.summary,
+    };
+  }
+  const status = result.status ?? statusFromEvaluations(route, evaluations, fallback.status);
+  const trustState = result.trustState ?? trustStateFromEvaluations(route, evaluations, fallback.trustState);
+  const artifacts = status === "blocked"
+    ? []
+    : result.artifacts ?? defaultArtifacts(route, result, request);
+  const stopReason = result.stopReason ?? stopReasonFor(route, status, trustState, artifacts);
+  return {
+    status,
+    trustState,
+    artifacts,
+    stopReason,
+    summary: result.summary ?? fallback.summary,
+  };
+}
+
+function isTerminalSuccess(route: AgentRunRoute, outcome: StepOutcome): boolean {
+  // A completed certified answer is the terminal success — no further steps add trust.
+  // Every other accepted step falls through so a multi-step plan can keep going; the
+  // run loop ends naturally when the planned queue empties or maxSteps is hit.
+  return route === "certified_answer" && outcome.status === "completed";
+}
+
+function describeReplan(decision: AgentRunReplanDecision): string {
+  switch (decision.decision) {
+    case "repair":
+      return `Repairing the current route: ${decision.repairHint}`;
+    case "escalate":
+      return `Escalating to ${decision.route.replaceAll("_", " ")}.`;
+    case "clarify":
+      return decision.question ?? "Needs a clarifying question before continuing.";
+    default:
+      return "Accepting the current result.";
+  }
+}
+
+/**
+ * The default, fully deterministic planner. Produces a single-step plan from the
+ * existing route selection and drives repair/escalation from failing evaluations.
+ * Used when no LLM planner is injected — keeps the engine offline + testable.
+ */
+export function createDeterministicAgentRunPlanner(): AgentRunPlanner {
+  return {
+    plan({ request, routeDecision, defaultRoute }) {
+      return {
+        source: "deterministic",
+        rationale: routeDecision.reason,
+        steps: [{
+          id: "step-1",
+          route: defaultRoute,
+          goal: request.question,
+          successCriteria: defaultSuccessCriteria(defaultRoute),
+        }],
+      };
+    },
+    replan({ currentStep, attemptsUsed, maxRepairAttempts }) {
+      const failing = currentStep.evaluations.find((evaluation) => !evaluation.passed && evaluation.suggestedRepair);
+      if (!failing) return { decision: "accept" };
+      const action = failing.repairAction;
+      const escalationRoute = action?.kind === "escalate"
+        ? action.route ?? AGENT_RUN_ESCALATION_MAP[currentStep.route]
+        : AGENT_RUN_ESCALATION_MAP[currentStep.route];
+      const hint = action?.hint ?? failing.suggestedRepair ?? "Revise and retry.";
+
+      if (action?.kind === "escalate" && escalationRoute) {
+        return { decision: "escalate", route: escalationRoute, goal: hint, repairHint: hint };
+      }
+      if (attemptsUsed < maxRepairAttempts) {
+        return { decision: "repair", repairHint: hint };
+      }
+      if (escalationRoute) {
+        return { decision: "escalate", route: escalationRoute, goal: hint, repairHint: hint };
+      }
+      return { decision: "accept" };
+    },
+  };
+}
+
+export function defaultSuccessCriteria(route: AgentRunRoute): string[] {
+  switch (route) {
+    case "certified_answer":
+      return ["Answer is backed by a certified DQL block or governed metric."];
+    case "generated_answer":
+      return ["Answer is grounded in governed context and marked review-required."];
+    case "research":
+      return ["Research dossier is grounded in catalog or context-pack evidence."];
+    case "sql_cell":
+      return ["Generated SQL executes against the preview without errors."];
+    case "dql_block_draft":
+      return ["Draft passes the certifier with no blockers (still human-reviewed)."];
+    case "app_build":
+      return ["App tiles are backed by certified blocks."];
+    case "clarify":
+      return ["A single sharp clarifying question is returned."];
+    default:
+      return [];
   }
 }
 
