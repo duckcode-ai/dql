@@ -241,7 +241,7 @@ export function UnifiedAgentRunPanel({
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0, flex: 1, minWidth: 0, width: '100%', background: t.cellBg }}>
-      <style>{`@keyframes dql-agent-run-spin { to { transform: rotate(360deg); } } @keyframes dql-agent-pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.4; } } @keyframes dql-agent-dots { 0% { content: ''; } 25% { content: '.'; } 50% { content: '..'; } 75% { content: '...'; } } .dql-agent-dots::after { content: ''; animation: dql-agent-dots 1.4s steps(1) infinite; }`}</style>
+      <style>{`@keyframes dql-agent-run-spin { to { transform: rotate(360deg); } } @keyframes dql-agent-dots { 0% { content: ''; } 25% { content: '.'; } 50% { content: '..'; } 75% { content: '...'; } } .dql-agent-dots::after { content: ''; animation: dql-agent-dots 1.4s steps(1) infinite; } @keyframes dql-agent-sweep { 0% { transform: translateX(-130%); } 100% { transform: translateX(330%); } } @keyframes dql-agent-fadein { from { opacity: 0; transform: translateY(2px); } to { opacity: 1; transform: none; } } @keyframes dql-agent-pulse { 0%,100% { opacity: 1; transform: scale(1); } 50% { opacity: 0.35; transform: scale(0.8); } }`}</style>
 
       <div style={{ flex: 1, minHeight: 0, overflow: 'auto', padding: '14px 16px', display: 'flex', flexDirection: 'column', gap: 12 }}>
         {items.length === 0 && !running ? (
@@ -333,14 +333,6 @@ const EXAMPLE_PROMPTS = [
   'Build a revenue overview app',
 ];
 
-type ProgressPhase = 'plan' | 'work' | 'check' | 'done';
-
-const PROGRESS_PHASES: Array<{ key: ProgressPhase; label: string }> = [
-  { key: 'plan', label: 'Plan' },
-  { key: 'work', label: 'Work' },
-  { key: 'check', label: 'Check' },
-];
-
 function routeActionLabel(route?: AgentRunRoute): string {
   switch (route) {
     case 'research': return 'Researching across governed data';
@@ -374,42 +366,17 @@ function currentActionLabel(events: AgentRunEvent[]): string {
   return 'Working';
 }
 
-function phaseReached(events: AgentRunEvent[], phase: ProgressPhase): 'done' | 'active' | 'pending' {
-  const types = new Set(events.map((event) => event.type));
-  const planned = types.has('plan.created');
-  const worked = types.has('executor.started');
-  const checked = types.has('evaluation.recorded');
-  if (phase === 'plan') return planned ? 'done' : 'active';
-  if (phase === 'work') return checked ? 'done' : worked ? 'active' : planned ? 'active' : 'pending';
-  if (phase === 'check') return checked ? 'active' : 'pending';
-  return 'pending';
-}
-
-/** Clean, animated, staged progress — replaces the raw event dump. */
+/** Clean, animated progress — a current-action label + an indeterminate sweep bar. */
 function RunProgress({ events, t }: { events: AgentRunEvent[]; t: Theme }) {
+  const action = currentActionLabel(events);
   return (
-    <div style={{ ...assistantBubbleStyle(t), alignItems: 'stretch', flexDirection: 'column', gap: 9, maxWidth: '100%' }}>
+    <div style={{ ...assistantBubbleStyle(t), alignItems: 'stretch', flexDirection: 'column', gap: 8, maxWidth: '100%' }}>
       <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-        <Loader2 size={14} style={{ animation: 'dql-agent-run-spin 0.8s linear infinite', flex: '0 0 auto', color: t.accent }} />
-        <span className="dql-agent-dots" style={{ fontSize: 12.5, fontWeight: 800, color: t.textPrimary }}>{currentActionLabel(events)}</span>
+        <span style={{ width: 7, height: 7, borderRadius: 999, background: t.accent, flex: '0 0 auto', animation: 'dql-agent-pulse 1.2s ease-in-out infinite' }} />
+        <span key={action} className="dql-agent-dots" style={{ fontSize: 12.5, fontWeight: 800, color: t.textPrimary, animation: 'dql-agent-fadein 0.25s ease-out' }}>{action}</span>
       </div>
-      <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
-        {PROGRESS_PHASES.map((phase, index) => {
-          const state = phaseReached(events, phase.key);
-          const color = state === 'done' ? t.success : state === 'active' ? t.accent : t.textMuted;
-          return (
-            <React.Fragment key={phase.key}>
-              <span style={{
-                display: 'inline-flex', alignItems: 'center', gap: 4, fontSize: 10.5, fontWeight: 700, color,
-                animation: state === 'active' ? 'dql-agent-pulse 1.2s ease-in-out infinite' : undefined,
-              }}>
-                {state === 'done' ? <CheckCircle2 size={11} /> : <span style={{ width: 7, height: 7, borderRadius: 999, background: color, display: 'inline-block' }} />}
-                {phase.label}
-              </span>
-              {index < PROGRESS_PHASES.length - 1 ? <span style={{ flex: 1, height: 1, background: t.headerBorder }} /> : null}
-            </React.Fragment>
-          );
-        })}
+      <div style={{ position: 'relative', height: 4, borderRadius: 999, background: `${t.accent}1f`, overflow: 'hidden' }}>
+        <div style={{ position: 'absolute', top: 0, bottom: 0, width: '38%', borderRadius: 999, background: t.accent, animation: 'dql-agent-sweep 1.25s cubic-bezier(0.4,0,0.2,1) infinite' }} />
       </div>
       {events.length > 0 ? (
         <details>
