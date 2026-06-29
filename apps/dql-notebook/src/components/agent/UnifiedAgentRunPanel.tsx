@@ -1,7 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   Blocks,
-  Bot,
   CheckCircle2,
   Code2,
   FileSearch,
@@ -30,6 +29,9 @@ import {
   type AgentRunStepStatus,
 } from '../../api/client';
 import { themes, type Theme, type ThemeMode } from '../../themes/notebook-theme';
+import { ChartOutput } from '../output/ChartOutput';
+import { TableOutput } from '../output/TableOutput';
+import type { QueryResult } from '../../store/types';
 
 type ThreadItem =
   | { kind: 'user'; id: string; text: string }
@@ -238,43 +240,22 @@ export function UnifiedAgentRunPanel({
   };
 
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0, background: t.cellBg }}>
+    <div style={{ display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0, flex: 1, minWidth: 0, width: '100%', background: t.cellBg }}>
       <style>{`@keyframes dql-agent-run-spin { to { transform: rotate(360deg); } } @keyframes dql-agent-pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.4; } } @keyframes dql-agent-dots { 0% { content: ''; } 25% { content: '.'; } 50% { content: '..'; } 75% { content: '...'; } } .dql-agent-dots::after { content: ''; animation: dql-agent-dots 1.4s steps(1) infinite; }`}</style>
-      <div style={{ padding: '10px 12px', borderBottom: `1px solid ${t.headerBorder}`, display: 'grid', gap: 8 }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 9 }}>
-          <div style={iconShellStyle(t)}><Bot size={16} /></div>
-          <div style={{ minWidth: 0, flex: 1 }}>
-            <div style={{ fontSize: 13, fontWeight: 850, color: t.textPrimary }}>{title}</div>
-            <div style={{ fontSize: 11, color: t.textMuted, marginTop: 2, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-              {scopeHint}
-            </div>
-          </div>
-        </div>
-        <div role="group" aria-label="Copilot route" style={{ display: 'flex', gap: 4, flexWrap: 'wrap' }}>
-          {modeOptions.map((option) => {
-            const active = mode === option.value;
-            return (
-              <button
-                key={option.value}
-                type="button"
-                onClick={() => setMode(option.value)}
-                aria-pressed={active}
-                style={modeButtonStyle(t, active)}
-              >
-                {option.icon}
-                <span>{option.label}</span>
-              </button>
-            );
-          })}
-        </div>
-      </div>
 
-      <div style={{ flex: 1, minHeight: 0, overflow: 'auto', padding: 12, display: 'flex', flexDirection: 'column', gap: 10 }}>
+      <div style={{ flex: 1, minHeight: 0, overflow: 'auto', padding: '14px 16px', display: 'flex', flexDirection: 'column', gap: 12 }}>
         {items.length === 0 && !running ? (
-          <div style={{ margin: 'auto 0', display: 'grid', gap: 12, justifyItems: 'center', textAlign: 'center', color: t.textSecondary }}>
+          <div style={{ margin: 'auto 0', display: 'grid', gap: 14, justifyItems: 'center', textAlign: 'center', color: t.textSecondary }}>
             <div style={largeIconShellStyle(t)}><Sparkles size={20} /></div>
-            <div style={{ fontSize: 12.5, lineHeight: 1.5, maxWidth: 330 }}>
-              No runs yet.
+            <div style={{ fontSize: 13, lineHeight: 1.5, maxWidth: 380, color: t.textSecondary }}>
+              Ask a question, request deep research, or build an app — grounded in your certified metrics.
+            </div>
+            <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', justifyContent: 'center', maxWidth: 520 }}>
+              {EXAMPLE_PROMPTS.map((ex) => (
+                <button key={ex} type="button" onClick={() => { setInput(ex); requestAnimationFrame(() => inputRef.current?.focus()); }} style={suggestionChipStyle(t)}>
+                  {ex}
+                </button>
+              ))}
             </div>
           </div>
         ) : null}
@@ -286,6 +267,7 @@ export function UnifiedAgentRunPanel({
             key={item.id}
             run={item.run}
             t={t}
+            themeMode={themeMode}
             certifyState={certifying[item.run.id]}
             pinState={pinning[item.run.id]}
             canPin={canPin}
@@ -299,31 +281,57 @@ export function UnifiedAgentRunPanel({
         {running && <RunProgress events={runningEvents} t={t} />}
       </div>
 
-      {error ? <div style={{ margin: '0 12px 8px', color: t.error, fontSize: 12 }}>{error}</div> : null}
+      {error ? <div style={{ margin: '0 16px 8px', color: t.error, fontSize: 12 }}>{error}</div> : null}
 
-      <div style={{ padding: 12, borderTop: `1px solid ${t.headerBorder}`, display: 'flex', gap: 8, alignItems: 'flex-end' }}>
-        <textarea
-          ref={inputRef}
-          value={input}
-          onChange={(event) => setInput(event.target.value)}
-          rows={3}
-          placeholder={mode === 'auto' ? 'Ask or describe what to build...' : `Ask in ${mode} mode...`}
-          onKeyDown={(event) => {
-            if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) {
-              event.preventDefault();
-              void submit();
-            }
-          }}
-          style={inputStyle(t)}
-        />
-        <button type="button" onClick={() => void submit()} disabled={!input.trim() || running} style={sendButtonStyle(t, Boolean(input.trim()) && !running)}>
-          {running ? <Loader2 size={14} style={{ animation: 'dql-agent-run-spin 0.8s linear infinite' }} /> : <Send size={14} />}
-          <span>Run</span>
-        </button>
+      <div style={{ padding: '10px 16px 14px', borderTop: `1px solid ${t.headerBorder}`, display: 'grid', gap: 8 }}>
+        <div role="group" aria-label="Copilot mode" style={{ display: 'flex', gap: 4, flexWrap: 'wrap' }}>
+          {modeOptions.map((option) => {
+            const active = mode === option.value;
+            return (
+              <button
+                key={option.value}
+                type="button"
+                onClick={() => setMode(option.value)}
+                aria-pressed={active}
+                style={modeChipStyle(t, active)}
+              >
+                {option.icon}
+                <span>{option.label}</span>
+              </button>
+            );
+          })}
+        </div>
+        <div style={{ display: 'flex', gap: 8, alignItems: 'flex-end' }}>
+          <textarea
+            ref={inputRef}
+            value={input}
+            onChange={(event) => setInput(event.target.value)}
+            rows={2}
+            placeholder={mode === 'auto' ? 'Ask anything about your data…' : `Ask in ${mode} mode…`}
+            onKeyDown={(event) => {
+              if (event.key === 'Enter' && !event.shiftKey) {
+                event.preventDefault();
+                void submit();
+              }
+            }}
+            style={inputStyle(t)}
+          />
+          <button type="button" onClick={() => void submit()} disabled={!input.trim() || running} style={sendButtonStyle(t, Boolean(input.trim()) && !running)}>
+            {running ? <Loader2 size={14} style={{ animation: 'dql-agent-run-spin 0.8s linear infinite' }} /> : <Send size={14} />}
+            <span>Run</span>
+          </button>
+        </div>
       </div>
     </div>
   );
 }
+
+const EXAMPLE_PROMPTS = [
+  'What is total revenue?',
+  'Why is revenue down by region?',
+  'Top customers by revenue this quarter',
+  'Build a revenue overview app',
+];
 
 type ProgressPhase = 'plan' | 'work' | 'check' | 'done';
 
@@ -420,6 +428,7 @@ function RunProgress({ events, t }: { events: AgentRunEvent[]; t: Theme }) {
 function RunCard({
   run,
   t,
+  themeMode,
   certifyState,
   pinState,
   canPin,
@@ -430,6 +439,7 @@ function RunCard({
 }: {
   run: AgentRun;
   t: Theme;
+  themeMode: ThemeMode;
   certifyState?: 'pending' | 'sent' | 'error';
   pinState?: 'pending' | 'sent' | 'error';
   canPin?: boolean;
@@ -494,6 +504,7 @@ function RunCard({
               key={artifact.id}
               artifact={artifact}
               t={t}
+              themeMode={themeMode}
               onInsertSql={onInsertSql}
               onOpenBlock={onOpenBlock}
               onOpenResearch={onOpenResearch}
@@ -565,17 +576,20 @@ function trustExplainer(run: AgentRun): string | null {
 function ArtifactView({
   artifact,
   t,
+  themeMode,
   onInsertSql,
   onOpenBlock,
   onOpenResearch,
 }: {
   artifact: AgentRunArtifact;
   t: Theme;
+  themeMode: ThemeMode;
   onInsertSql?: (sql: string, title?: string) => void;
   onOpenBlock?: (path: string, name?: string) => void;
   onOpenResearch?: (id: string, notebookPath?: string) => void;
 }) {
   const payload = artifact.payload && typeof artifact.payload === 'object' ? artifact.payload as Record<string, unknown> : {};
+  const resultData = extractResult(payload);
   const sql = typeof payload.sql === 'string'
     ? payload.sql
     : typeof payload.sqlPreview === 'string'
@@ -634,6 +648,7 @@ function ArtifactView({
           <span style={{ color: t.accent }}>→</span><span>{recommendation}</span>
         </div>
       ) : null}
+      {resultData ? <ResultView result={resultData} themeMode={themeMode} t={t} /> : null}
       {sql ? (
         <details>
           <summary style={{ cursor: 'pointer', fontSize: 11, color: t.textSecondary, listStyle: 'none', display: 'flex', alignItems: 'center', gap: 5 }}>
@@ -808,6 +823,51 @@ function cleanAnswerText(answer: string): string {
     .trim();
 }
 
+/** Pull a QueryResult (columns/rows) out of an artifact payload, for visualization. */
+function extractResult(payload: Record<string, unknown>): QueryResult | undefined {
+  const candidates: unknown[] = [
+    payload.result,
+    payload.resultPreview,
+    (payload.researchRun as { resultPreview?: unknown } | undefined)?.resultPreview,
+    (payload.result as { result?: unknown } | undefined)?.result,
+  ];
+  for (const candidate of candidates) {
+    if (!candidate || typeof candidate !== 'object') continue;
+    const record = candidate as Record<string, unknown>;
+    const rows = Array.isArray(record.rows) ? record.rows.filter((r): r is Record<string, unknown> => Boolean(r && typeof r === 'object')) : [];
+    if (rows.length === 0) continue;
+    const columns = Array.isArray(record.columns) && record.columns.length > 0
+      ? record.columns.map((c) => (typeof c === 'string' ? c : (c as { name?: string })?.name ?? String(c)))
+      : Object.keys(rows[0]);
+    return { columns, rows, rowCount: typeof record.rowCount === 'number' ? record.rowCount : rows.length } as QueryResult;
+  }
+  return undefined;
+}
+
+/** Notebook-cell-style result view: chart + table toggle, reusing the same renderers. */
+function ResultView({ result, themeMode, t }: { result: QueryResult; themeMode: ThemeMode; t: Theme }) {
+  const [view, setView] = useState<'chart' | 'table'>('chart');
+  const tabStyle = (active: boolean): React.CSSProperties => ({
+    border: 'none', background: 'transparent', cursor: 'pointer', fontFamily: t.font,
+    fontSize: 11, fontWeight: 700, padding: '2px 4px', color: active ? t.accent : t.textMuted,
+    borderBottom: `2px solid ${active ? t.accent : 'transparent'}`,
+  });
+  return (
+    <div style={{ border: `1px solid ${t.headerBorder}`, background: t.cellBg, borderRadius: 8, overflow: 'hidden' }}>
+      <div style={{ display: 'flex', gap: 8, padding: '5px 9px', borderBottom: `1px solid ${t.headerBorder}` }}>
+        <button type="button" onClick={() => setView('chart')} style={tabStyle(view === 'chart')}>Chart</button>
+        <button type="button" onClick={() => setView('table')} style={tabStyle(view === 'table')}>Table</button>
+        <span style={{ marginLeft: 'auto', fontSize: 10.5, color: t.textMuted, alignSelf: 'center' }}>{result.rowCount ?? result.rows.length} rows</span>
+      </div>
+      <div style={{ padding: 8, minHeight: view === 'chart' ? 200 : undefined, maxHeight: 320, overflow: 'auto' }}>
+        {view === 'chart'
+          ? <ChartOutput result={result} themeMode={themeMode} />
+          : <TableOutput result={result} themeMode={themeMode} />}
+      </div>
+    </div>
+  );
+}
+
 function payloadOf(artifact: AgentRunArtifact): Record<string, unknown> {
   return artifact.payload && typeof artifact.payload === 'object' && !Array.isArray(artifact.payload)
     ? artifact.payload as Record<string, unknown>
@@ -897,18 +957,32 @@ function largeIconShellStyle(t: Theme): React.CSSProperties {
   return { ...iconShellStyle(t), width: 40, height: 40 };
 }
 
-function modeButtonStyle(t: Theme, active: boolean): React.CSSProperties {
+function modeChipStyle(t: Theme, active: boolean): React.CSSProperties {
   return {
     border: `1px solid ${active ? t.accent : t.btnBorder}`,
-    background: active ? `${t.accent}18` : t.btnBg,
-    color: active ? t.accent : t.textSecondary,
-    borderRadius: 7,
-    padding: '5px 8px',
+    background: active ? `${t.accent}14` : 'transparent',
+    color: active ? t.accent : t.textMuted,
+    borderRadius: 999,
+    padding: '3px 9px',
     display: 'inline-flex',
     alignItems: 'center',
-    gap: 5,
+    gap: 4,
     fontSize: 11,
-    fontWeight: 800,
+    fontWeight: 700,
+    fontFamily: t.font,
+    cursor: 'pointer',
+  };
+}
+
+function suggestionChipStyle(t: Theme): React.CSSProperties {
+  return {
+    border: `1px solid ${t.btnBorder}`,
+    background: t.btnBg,
+    color: t.textSecondary,
+    borderRadius: 999,
+    padding: '6px 11px',
+    fontSize: 12,
+    fontWeight: 600,
     fontFamily: t.font,
     cursor: 'pointer',
   };
