@@ -526,13 +526,17 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
     })));
   };
 
-  const formatNotebookResearchStorageError = (error: unknown): string => {
+  const formatAgentRunInfrastructureError = (error: unknown, scope: string): string => {
     const message = error instanceof Error ? error.message : String(error);
     if (/Could not locate the bindings file/i.test(message) || /better[-_]sqlite3/i.test(message)) {
-      return 'Notebook research storage is unavailable because the local SQLite native bindings are not installed for this Node.js runtime.';
+      return `${scope} is unavailable because the local SQLite native bindings are not installed for this Node.js runtime.`;
     }
     return message;
   };
+
+  const formatNotebookResearchStorageError = (error: unknown): string => (
+    formatAgentRunInfrastructureError(error, 'Notebook research storage')
+  );
 
   const buildAgentPromptArtifact = async (request: AgentRunRequest, target: 'cell' | 'block'): Promise<BuildFromPromptResult> => {
     try {
@@ -640,7 +644,33 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
   }
 
   const answerRunExecutor: AgentRouteExecutor = async ({ request, routeDecision }) => {
-    const governedAnswer = await runGovernedAgentAnswerForRun(request);
+    let governedAnswer: AgentAnswer;
+    try {
+      governedAnswer = await runGovernedAgentAnswerForRun(request);
+    } catch (error) {
+      const message = formatAgentRunInfrastructureError(error, 'AI answer provider');
+      return {
+        summary: message,
+        status: 'blocked',
+        trustState: 'blocked',
+        stopReason: 'blocked',
+        evaluations: [
+          agentRunEvaluation('route-decision', 'Route decision', true, 'info', routeDecision?.reason ?? 'Routed request to governed answer.'),
+          agentRunEvaluation(
+            'ai-provider',
+            'AI provider',
+            false,
+            'blocking',
+            message,
+            { originalErrorType: error instanceof Error ? error.name : typeof error },
+          ),
+        ],
+        nextActions: [
+          { id: 'retry-ask-after-provider', label: 'Retry after provider setup', route: 'generated_answer' },
+          { id: 'research-without-answer', label: 'Research with available metadata', route: 'research', artifactKind: 'research_run' },
+        ],
+      };
+    }
     const isCertified = governedAnswer.certification === 'certified' || governedAnswer.kind === 'certified';
     const needsClarification = governedAnswer.kind === 'no_answer';
     const sql = governedAnswer.proposedSql ?? governedAnswer.sql;
@@ -893,14 +923,40 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
         message: 'Creating app build session from governed app builder.',
         route: 'app_build',
       });
-      const session = await createAppAiBuildSession(projectRoot, {
-        prompt: request.question,
-        domain: agentRunWorkspaceValue(request, 'domain'),
-        owner: agentRunWorkspaceValue(request, 'owner'),
-        notebookPath: agentRunWorkspaceValue(request, 'notebookPath') ?? request.selectedObject?.path,
-        selectedBlockIds: parseAgentRunSelectedBlockIds(request),
-        plannerMode: 'deterministic',
-      });
+      let session: Awaited<ReturnType<typeof createAppAiBuildSession>>;
+      try {
+        session = await createAppAiBuildSession(projectRoot, {
+          prompt: request.question,
+          domain: agentRunWorkspaceValue(request, 'domain'),
+          owner: agentRunWorkspaceValue(request, 'owner'),
+          notebookPath: agentRunWorkspaceValue(request, 'notebookPath') ?? request.selectedObject?.path,
+          selectedBlockIds: parseAgentRunSelectedBlockIds(request),
+          plannerMode: 'deterministic',
+        });
+      } catch (error) {
+        const message = formatAgentRunInfrastructureError(error, 'App build storage');
+        return {
+          summary: message,
+          status: 'blocked',
+          trustState: 'blocked',
+          stopReason: 'blocked',
+          evaluations: [
+            agentRunEvaluation('route-decision', 'Route decision', true, 'info', routeDecision?.reason ?? 'Routed request to app build.'),
+            agentRunEvaluation(
+              'app-build-storage',
+              'App build storage',
+              false,
+              'blocking',
+              message,
+              { originalErrorType: error instanceof Error ? error.name : typeof error },
+            ),
+          ],
+          nextActions: [
+            { id: 'research-coverage', label: 'Research missing coverage', route: 'research', artifactKind: 'research_run' },
+            { id: 'create-gap-blocks', label: 'Create DQL drafts for gaps', route: 'dql_block_draft', artifactKind: 'dql_block_draft' },
+          ],
+        };
+      }
       const ready = session.status === 'ready';
       const sessionPlan = agentRunRecord(session.plan);
       const appTitle = agentRunString(sessionPlan?.name) ?? 'App draft';

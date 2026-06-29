@@ -133,8 +133,25 @@ describe('agent run runtime API', () => {
       });
       expect(askResponse.status).toBe(201);
       const blocked = await askResponse.json() as { run: any };
+      expect(blocked.run.route).not.toBe('blocked');
       expect(blocked.run.status).toBe('blocked');
-      expect(blocked.run.evaluations[0]?.id).toBe('executor-error');
+      expect(blocked.run.evaluations.some((evaluation: any) => evaluation.id === 'ai-provider')).toBe(true);
+      expect(blocked.run.summary).not.toContain('Could not locate the bindings file');
+
+      const appResponse = await fetch(`${base}/api/agent-runs`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          question: 'Build an app for customer revenue',
+          requestedMode: 'app',
+          selectedObject: { kind: 'notebook', path: 'notebooks/customer.dqlnb' },
+        }),
+      });
+      expect(appResponse.status).toBe(201);
+      const appRun = await appResponse.json() as { run: any };
+      expect(appRun.run.route).toBe('app_build');
+      expect(['blocked', 'needs_review']).toContain(appRun.run.status);
+      expect(appRun.run.summary).not.toContain('Could not locate the bindings file');
 
       const streamResponse = await fetch(`${base}/api/agent-runs?stream=1`, {
         method: 'POST',
@@ -154,9 +171,10 @@ describe('agent run runtime API', () => {
       const listResponse = await fetch(`${base}/api/agent-runs?limit=5`);
       expect(listResponse.status).toBe(200);
       const listed = await listResponse.json() as { runs: any[]; total: number };
-      expect(listed.total).toBe(3);
+      expect(listed.total).toBe(4);
       expect(listed.runs.some((run) => run.id === created.run.id)).toBe(true);
       expect(listed.runs.some((run) => run.id === blocked.run.id)).toBe(true);
+      expect(listed.runs.some((run) => run.id === appRun.run.id)).toBe(true);
       expect(readFileSync(join(projectRoot, '.dql', 'local', 'agent-runs.json'), 'utf-8')).toContain(created.run.id);
     } finally {
       await new Promise<void>((resolve) => {
