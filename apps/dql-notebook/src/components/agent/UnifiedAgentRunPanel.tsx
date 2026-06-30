@@ -2,10 +2,13 @@ import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   Blocks,
   CheckCircle2,
+  ChevronDown,
+  ChevronUp,
   Code2,
   FileSearch,
   GitBranch,
   LayoutDashboard,
+  Lightbulb,
   ListTree,
   Loader2,
   Pin,
@@ -464,6 +467,8 @@ function RunCard({
         </div>
       ) : null}
 
+      <AppliedLearnings run={run} t={t} />
+
       {run.artifacts.length > 0 ? (
         <div style={{ display: 'grid', gap: 8 }}>
           {run.artifacts.map((artifact) => (
@@ -842,6 +847,85 @@ function payloadOf(artifact: AgentRunArtifact): Record<string, unknown> {
 }
 
 /** Governed sources behind a run, surfaced as trust chips (manifest grounding). */
+type AppliedLearning = { kind: 'memory' | 'hint'; id?: string; label: string; detail?: string };
+
+// Pull the memories + approved Hint-Graph corrections that shaped this answer out
+// of the answer artifact payload, for the transparency chip.
+function appliedLearningsFromRun(run: AgentRun): AppliedLearning[] {
+  const out: AppliedLearning[] = [];
+  const seen = new Set<string>();
+  for (const artifact of run.artifacts) {
+    const payload = payloadOf(artifact);
+    const memories = Array.isArray(payload.memoryContext) ? payload.memoryContext : [];
+    for (const raw of memories) {
+      if (!raw || typeof raw !== 'object') continue;
+      const m = raw as { id?: unknown; title?: unknown; content?: unknown };
+      const label = typeof m.title === 'string' ? m.title.trim() : '';
+      if (!label || seen.has(`m:${label}`)) continue;
+      seen.add(`m:${label}`);
+      out.push({ kind: 'memory', id: typeof m.id === 'string' ? m.id : undefined, label, detail: typeof m.content === 'string' ? m.content : undefined });
+    }
+    const hints = Array.isArray(payload.appliedHints) ? payload.appliedHints : [];
+    for (const raw of hints) {
+      if (!raw || typeof raw !== 'object') continue;
+      const h = raw as { title?: unknown; guidance?: unknown };
+      const label = typeof h.title === 'string' ? h.title.trim() : '';
+      if (!label || seen.has(`h:${label}`)) continue;
+      seen.add(`h:${label}`);
+      out.push({ kind: 'hint', label, detail: typeof h.guidance === 'string' ? h.guidance : undefined });
+    }
+  }
+  return out.slice(0, 6);
+}
+
+// Transparency + control: shows which learned memories/hints the agent recalled
+// for this answer, and lets the user stop using a bad auto-captured memory inline.
+function AppliedLearnings({ run, t }: { run: AgentRun; t: Theme }) {
+  const [open, setOpen] = useState(false);
+  const [dismissed, setDismissed] = useState<Set<string>>(new Set());
+  const items = useMemo(
+    () => appliedLearningsFromRun(run).filter((it) => !it.id || !dismissed.has(it.id)),
+    [run, dismissed],
+  );
+  if (items.length === 0) return null;
+  const stopUsing = async (id: string) => {
+    try {
+      await api.deleteAgentMemory(id);
+      setDismissed((prev) => new Set(prev).add(id));
+    } catch {
+      /* best-effort — leave it shown if the delete fails */
+    }
+  };
+  return (
+    <div style={{ display: 'grid', gap: 6 }}>
+      <button type="button" onClick={() => setOpen((v) => !v)} style={appliedChipStyle(t)}>
+        <Lightbulb size={11} />
+        <span>Applied {items.length} learning{items.length > 1 ? 's' : ''}</span>
+        {open ? <ChevronUp size={11} /> : <ChevronDown size={11} />}
+      </button>
+      {open ? (
+        <div style={appliedListStyle(t)}>
+          {items.map((it) => (
+            <div key={`${it.kind}:${it.label}`} style={{ display: 'flex', gap: 8, alignItems: 'flex-start' }}>
+              <span style={appliedTagStyle(t, it.kind)}>{it.kind === 'hint' ? 'correction' : 'memory'}</span>
+              <div style={{ minWidth: 0, flex: 1 }}>
+                <div style={{ fontSize: 11.5, fontWeight: 650, color: t.textPrimary }}>{it.label}</div>
+                {it.detail ? <div style={{ fontSize: 11, color: t.textMuted, lineHeight: 1.4, marginTop: 1 }}>{it.detail}</div> : null}
+              </div>
+              {it.kind === 'memory' && it.id ? (
+                <button type="button" onClick={() => void stopUsing(it.id!)} style={appliedStopStyle(t)}>Stop using</button>
+              ) : null}
+            </div>
+          ))}
+          <div style={{ fontSize: 10.5, color: t.textMuted }}>
+            Advisory only — learnings never override a certified answer. Manage them under Settings → Agent learning.
+          </div>
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
 function evidenceFromRun(run: AgentRun): Array<{ label: string; certified: boolean }> {
   const out: Array<{ label: string; certified: boolean }> = [];
   const seen = new Set<string>();
@@ -883,6 +967,63 @@ function evidenceChipStyle(t: Theme, certified: boolean): React.CSSProperties {
     background: certified ? `${t.success}14` : t.cellBg,
     color: certified ? t.success : t.textMuted,
     border: `1px solid ${certified ? `${t.success}44` : t.headerBorder}`,
+  };
+}
+
+function appliedChipStyle(t: Theme): React.CSSProperties {
+  return {
+    display: 'inline-flex',
+    alignItems: 'center',
+    gap: 5,
+    alignSelf: 'flex-start',
+    fontSize: 10.5,
+    fontWeight: 600,
+    padding: '2px 8px',
+    borderRadius: 999,
+    background: `${t.accent}14`,
+    color: t.accent,
+    border: `1px solid ${t.accent}33`,
+    cursor: 'pointer',
+  };
+}
+
+function appliedListStyle(t: Theme): React.CSSProperties {
+  return {
+    display: 'grid',
+    gap: 8,
+    padding: 10,
+    borderRadius: 8,
+    background: t.cellBg,
+    border: `1px solid ${t.headerBorder}`,
+  };
+}
+
+function appliedTagStyle(t: Theme, kind: 'memory' | 'hint'): React.CSSProperties {
+  const accent = kind === 'hint';
+  return {
+    flex: '0 0 auto',
+    fontSize: 9,
+    fontWeight: 700,
+    textTransform: 'uppercase',
+    letterSpacing: '0.04em',
+    padding: '2px 6px',
+    borderRadius: 4,
+    marginTop: 1,
+    background: accent ? `${t.accent}1f` : `${t.textMuted}1f`,
+    color: accent ? t.accent : t.textMuted,
+  };
+}
+
+function appliedStopStyle(t: Theme): React.CSSProperties {
+  return {
+    flex: '0 0 auto',
+    fontSize: 10.5,
+    border: `1px solid ${t.headerBorder}`,
+    background: 'transparent',
+    color: t.textMuted,
+    borderRadius: 6,
+    padding: '2px 7px',
+    cursor: 'pointer',
   };
 }
 

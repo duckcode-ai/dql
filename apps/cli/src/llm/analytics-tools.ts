@@ -115,6 +115,12 @@ export function buildAnalyticsAgentTools(ctx: DQLContext, req: AgentRunRequest):
   ];
 }
 
+// Defensively bound carried-forward conversation text so a long multi-turn chat
+// can't grow the system prompt unbounded.
+function clampPromptText(value: string, max = 240): string {
+  return value.length > max ? `${value.slice(0, max).trimEnd()}…` : value;
+}
+
 export function analyticsSystemPrompt(ctx: DQLContext, req: AgentRunRequest): string {
   const domains = Array.from(new Set(Object.values(ctx.manifest.blocks).map((block) => block.domain).filter(Boolean))).sort();
   const upstream = req.upstream?.sql?.trim();
@@ -135,10 +141,10 @@ export function analyticsSystemPrompt(ctx: DQLContext, req: AgentRunRequest): st
     `Project context: ${Object.keys(ctx.manifest.blocks).length} blocks. Domains: ${domains.join(', ') || '(none yet)'}.`,
     upstream ? `Current UI/app context:\n${upstream}` : '',
     context?.sourceCertifiedBlock ? `Selected/source certified block: ${context.sourceCertifiedBlock}` : '',
-    context?.sourceQuestion ? `Prior question: ${context.sourceQuestion}` : '',
-    context?.sourceAnswerSummary ? `Prior answer summary: ${context.sourceAnswerSummary}` : '',
-    context?.requestedFilters?.length ? `Remembered filters: ${context.requestedFilters.join(', ')}` : '',
-    context?.requestedDimensions?.length ? `Remembered dimensions: ${context.requestedDimensions.join(', ')}` : '',
+    context?.sourceQuestion ? `Prior question: ${clampPromptText(context.sourceQuestion, 200)}` : '',
+    context?.sourceAnswerSummary ? `Prior answer summary: ${clampPromptText(context.sourceAnswerSummary)}` : '',
+    context?.requestedFilters?.length ? `Remembered filters: ${context.requestedFilters.slice(0, 8).join(', ')}` : '',
+    context?.requestedDimensions?.length ? `Remembered dimensions: ${context.requestedDimensions.slice(0, 8).join(', ')}` : '',
   ];
   return lines.filter(Boolean).join('\n');
 }

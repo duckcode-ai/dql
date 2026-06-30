@@ -1961,7 +1961,7 @@ describe("answer (block-first loop)", () => {
     const prompt = provider.messages.map((message) => message.content).join("\n\n");
     expect(result.kind).toBe("uncertified");
     expect(provider.calls).toHaveLength(1);
-    expect(prompt).toContain("Certified source SQL shape context");
+    expect(prompt).toContain("Worked examples from certified blocks");
     expect(prompt).toContain("relation: NBA_GAMES.RAW.fct_player_performance");
     expect(prompt).toContain("projected columns: player_name, team_name, season, total_points");
     expect(result.validationWarnings ?? []).not.toEqual(

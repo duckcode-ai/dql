@@ -80,9 +80,9 @@ export function ConnectionRuntimeSettings({
     <div style={{ padding: embedded ? 0 : 24, maxWidth: embedded ? undefined : 1180 }}>
       <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 16 }}>
         <div>
-          <div style={{ fontSize: 18, fontWeight: 700 }}>AI providers and MCP connections</div>
+          <div style={{ fontSize: 18, fontWeight: 700 }}>AI providers, memory &amp; connections</div>
           <div style={{ color: t.textSecondary, fontSize: 13, marginTop: 6, lineHeight: 1.5, maxWidth: 820 }}>
-            Connect model providers, MCP servers, OpenAI connectors, and runtime checks used by governed analytics chat. Secrets stay under <code>.dql/</code> and are never returned raw.
+            Connect a model provider, manage the agent's learning &amp; memory, and (optionally) attach MCP servers. Secrets stay under <code>.dql/</code> and are never returned raw.
           </div>
         </div>
         <SummaryCard
@@ -121,19 +121,13 @@ export function ConnectionRuntimeSettings({
             </div>
           </section>
 
-          <section style={{ marginTop: 22 }}>
-            <SectionTitle title="MCP servers and connectors" detail="Remote MCP servers can be attached to OpenAI and Claude SDK chat. OpenAI hosted connectors are OpenAI-only." t={t} />
-            <McpConnectionsEditor
-              settings={mcpSettings}
-              t={t}
-              onChange={setMcpSettings}
-              onStatus={setStatus}
-            />
-          </section>
-
           {includeMemory && (
             <section style={{ marginTop: 22 }}>
-              <SectionTitle title="Agent memory" detail="Optional local context for business language. It never overrides certified metadata." t={t} />
+              <SectionTitle
+                title="Agent learning & memory"
+                detail="Durable business context the agent now reads on every question — your glossary, rules, and the lessons it learns when you correct or certify a draft. Advisory only: it never overrides certified metadata or routing."
+                t={t}
+              />
               <MemoryEditor
                 memories={memories}
                 t={t}
@@ -143,14 +137,32 @@ export function ConnectionRuntimeSettings({
             </section>
           )}
 
-          <section style={{ marginTop: 22 }}>
-            <SectionTitle title="Runtime status" detail="Environment variables remain supported for Docker, CI, and shell-based setup." t={t} />
-            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(320px, 1fr))', gap: 14 }}>
-              {groups.map((group) => (
-                <EnvGroupCard key={group.id} group={group} t={t} />
-              ))}
+          <details style={{ marginTop: 22, border: `1px solid ${t.headerBorder}`, borderRadius: 10, background: t.cellBg, overflow: 'hidden' }}>
+            <summary style={{ cursor: 'pointer', padding: '13px 16px', fontSize: 13, fontWeight: 650, listStyle: 'none', color: t.textPrimary }}>
+              Advanced — MCP connections &amp; runtime status
+              <span style={{ color: t.textMuted, fontWeight: 400, marginLeft: 8, fontSize: 12 }}>optional for most users</span>
+            </summary>
+            <div style={{ padding: '4px 16px 18px' }}>
+              <section style={{ marginTop: 14 }}>
+                <SectionTitle title="MCP servers and connectors" detail="Remote MCP servers can be attached to OpenAI and Claude SDK chat. OpenAI hosted connectors are OpenAI-only." t={t} />
+                <McpConnectionsEditor
+                  settings={mcpSettings}
+                  t={t}
+                  onChange={setMcpSettings}
+                  onStatus={setStatus}
+                />
+              </section>
+
+              <section style={{ marginTop: 22 }}>
+                <SectionTitle title="Runtime status" detail="Environment variables remain supported for Docker, CI, and shell-based setup." t={t} />
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(320px, 1fr))', gap: 14 }}>
+                  {groups.map((group) => (
+                    <EnvGroupCard key={group.id} group={group} t={t} />
+                  ))}
+                </div>
+              </section>
             </div>
-          </section>
+          </details>
         </>
       )}
     </div>
@@ -651,18 +663,33 @@ function MemoryEditor({
 
       <section style={{ border: `1px solid ${t.headerBorder}`, borderRadius: 8, background: t.cellBg, overflow: 'hidden' }}>
         {memories.length === 0 ? (
-          <div style={{ padding: 14, color: t.textSecondary, fontSize: 12 }}>No local memory yet.</div>
-        ) : memories.slice(0, 20).map((memory) => (
-          <div key={memory.id} style={{ padding: 12, borderBottom: `1px solid ${t.headerBorder}` }}>
-            <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
-              <span style={{ fontSize: 10, fontFamily: t.fontMono, color: t.accent, textTransform: 'uppercase' }}>{memory.scope}</span>
-              <strong style={{ fontSize: 13 }}>{memory.title}</strong>
-              <button type="button" onClick={() => remove(memory.id)} style={{ marginLeft: 'auto', border: 0, background: 'transparent', color: t.textMuted, cursor: 'pointer' }}>Delete</button>
-            </div>
-            <div style={{ marginTop: 6, fontSize: 12, color: t.textSecondary, whiteSpace: 'pre-wrap', lineHeight: 1.45 }}>{memory.content}</div>
-            {memory.tags.length > 0 && <div style={{ marginTop: 6, fontSize: 11, color: t.textMuted }}>{memory.tags.join(', ')}</div>}
+          <div style={{ padding: 14, color: t.textSecondary, fontSize: 12 }}>
+            No memory yet. Add business context by hand, or correct/certify a draft and the agent will
+            remember it here automatically.
           </div>
-        ))}
+        ) : memories.slice(0, 20).map((memory) => {
+          const learned = !['settings-ui', 'manual', ''].includes(memory.source);
+          return (
+            <div key={memory.id} style={{ padding: 12, borderBottom: `1px solid ${t.headerBorder}` }}>
+              <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+                <span style={{ fontSize: 10, fontFamily: t.fontMono, color: t.accent, textTransform: 'uppercase' }}>{memory.scope}</span>
+                <strong style={{ fontSize: 13 }}>{memory.title}</strong>
+                <span
+                  title={learned ? `Learned from ${memory.source}` : 'Added by hand'}
+                  style={{ fontSize: 10, fontWeight: 600, padding: '1px 6px', borderRadius: 4, background: learned ? `${t.accent}1f` : `${t.textMuted}1f`, color: learned ? t.accent : t.textMuted }}
+                >
+                  {learned ? 'learned' : 'manual'}
+                </span>
+                {typeof memory.confidence === 'number' && (
+                  <span style={{ fontSize: 10, color: t.textMuted }}>{Math.round(memory.confidence * 100)}%</span>
+                )}
+                <button type="button" onClick={() => remove(memory.id)} style={{ marginLeft: 'auto', border: 0, background: 'transparent', color: t.textMuted, cursor: 'pointer' }}>Delete</button>
+              </div>
+              <div style={{ marginTop: 6, fontSize: 12, color: t.textSecondary, whiteSpace: 'pre-wrap', lineHeight: 1.45 }}>{memory.content}</div>
+              {memory.tags.length > 0 && <div style={{ marginTop: 6, fontSize: 11, color: t.textMuted }}>{memory.tags.join(', ')}</div>}
+            </div>
+          );
+        })}
       </section>
     </div>
   );

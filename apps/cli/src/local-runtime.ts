@@ -79,6 +79,8 @@ import {
   ensureMetadataCatalogFresh,
   propose,
   proposePlan,
+  recordCorrectionTrace,
+  reviewHint,
   AgentRunEngine,
   FileAgentRunStore,
   defaultAgentRunGates,
@@ -698,6 +700,11 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
     let governedAnswer: AgentAnswer;
     try {
       governedAnswer = await runGovernedAgentAnswerForRun(request, { attempt, repairHint });
+      // Surface the approved Hint-Graph corrections that shaped this answer so the
+      // UI can show an "applied learnings" chip (memoryContext is already on the answer).
+      if (!governedAnswer.appliedHints) {
+        governedAnswer.appliedHints = governedAnswer.contextPack?.appliedHints;
+      }
     } catch (error) {
       const message = formatAgentRunInfrastructureError(error, 'AI answer provider');
       return {
@@ -3088,6 +3095,79 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
       return;
     }
 
+    // Local learning loop (OSS): record an analyst's wrong→right correction as a
+    // scope-matched Hint-Graph hint plus an advisory memory, so future similar
+    // questions avoid the same mistake. Single-user self-serve — the correction IS
+    // the approval, so the derived candidate is approved immediately unless the
+    // caller opts out. Advisory only: never overrides certified routing. The
+    // multi-tenant review workflow + automated distillation stay a cloud feature.
+    if (req.method === 'POST' && path === '/api/agent/learnings/correction') {
+      const body = await readJSON(req).catch(() => null);
+      const question = body && typeof body.question === 'string' ? body.question.trim() : '';
+      const correctedSql = body && typeof body.correctedSql === 'string' ? body.correctedSql.trim() : '';
+      if (!body || !question || !correctedSql) {
+        res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({ error: 'question and correctedSql are required.' }));
+        return;
+      }
+      const rawScope = body.scope && typeof body.scope === 'object' ? body.scope as Record<string, unknown> : {};
+      const scopeStr = (key: string): string | undefined => (typeof rawScope[key] === 'string' && (rawScope[key] as string).trim() ? (rawScope[key] as string).trim() : undefined);
+      const scope = {
+        metric: scopeStr('metric'),
+        dbtModel: scopeStr('dbtModel'),
+        domain: scopeStr('domain'),
+        dialect: scopeStr('dialect'),
+        term: scopeStr('term'),
+        block: scopeStr('block'),
+      };
+      const wrongSql = typeof body.wrongSql === 'string' ? body.wrongSql.trim() : '';
+      const rationale = typeof body.rationale === 'string' && body.rationale.trim() ? body.rationale.trim() : undefined;
+      const author = typeof body.author === 'string' ? body.author : (resolveLocalOwner(projectRoot) ?? undefined);
+      try {
+        const { trace, hint } = recordCorrectionTrace(projectRoot, {
+          question,
+          scope,
+          wrongAnswer: wrongSql || '(no prior SQL captured)',
+          correction: correctedSql,
+          correctedSql,
+          rationale,
+          author,
+          hintTitle: typeof body.title === 'string' && body.title.trim() ? body.title.trim() : undefined,
+          hintGuidance: typeof body.guidance === 'string' && body.guidance.trim() ? body.guidance.trim() : undefined,
+          tags: Array.isArray(body.tags) ? body.tags.map(String) : undefined,
+        });
+        let approvedHint = hint;
+        if (body.approve !== false) {
+          reviewHint(projectRoot, { hintId: hint.id, decision: 'approved', reviewer: author ?? 'local', note: 'Self-approved (OSS single-user).' });
+          approvedHint = { ...hint, status: 'approved' as const };
+        }
+        // Plain-language advisory memory mirroring the lesson, for transparency + recall.
+        try {
+          const memory = new MemoryStore(defaultMemoryPath(projectRoot));
+          memory.upsert({
+            id: `mem_${hint.id}`,
+            scope: 'project',
+            title: approvedHint.title,
+            content: `${approvedHint.guidance}${rationale ? ` (${rationale})` : ''}`,
+            tags: [scope.metric, scope.domain, scope.dbtModel].filter((x): x is string => Boolean(x)),
+            source: 'correction',
+            confidence: 0.9,
+            importance: 0.85,
+            enabled: true,
+          });
+          memory.close();
+        } catch {
+          /* best-effort */
+        }
+        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({ ok: true, trace, hint: approvedHint }));
+      } catch (error) {
+        res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({ error: error instanceof Error ? error.message : String(error) }));
+      }
+      return;
+    }
+
     const appDashRun = path.match(/^\/api\/apps\/([^/]+)\/dashboards\/([^/]+)\/run$/);
     if (req.method === 'POST' && appDashRun) {
       try {
@@ -4598,6 +4678,31 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
             setBlockStudioStatus(projectRoot, normalizedBlockPath, 'certified');
             certifiedPayload = openBlockStudioDocument(projectRoot, normalizedBlockPath, semanticLayer);
           }
+        }
+        // Auto-capture (OSS local learning loop): certifying a block teaches the
+        // agent to prefer it. Write a scoped, advisory project memory — deterministic,
+        // best-effort, and it never blocks certification.
+        try {
+          const learned = parseBlockSourceMetadata(certifiedSource);
+          if (learned.name) {
+            const learnedOutputs = Array.isArray(learned.outputs)
+              ? learned.outputs.filter((o): o is string => typeof o === 'string')
+              : [];
+            const memory = new MemoryStore(defaultMemoryPath(projectRoot));
+            memory.upsert({
+              id: `mem_certify_${learned.name}`,
+              scope: 'project',
+              title: `Certified block: ${learned.name}`,
+              content: `Prefer the certified block "${learned.name}" for ${learned.description?.trim() || `questions in the ${learned.domain ?? 'analytics'} domain`}.${learned.grain ? ` Grain: ${learned.grain}.` : ''}${learnedOutputs.length ? ` Outputs: ${learnedOutputs.slice(0, 8).join(', ')}.` : ''} It is the trusted source — reuse it instead of generating new SQL.`,
+              tags: [learned.domain, learned.name, ...learnedOutputs.slice(0, 4)].filter((x): x is string => Boolean(x)),
+              source: 'certify',
+              confidence: 0.95,
+              importance: 0.85,
+              enabled: true,
+            });
+          }
+        } catch {
+          /* best-effort: learning capture must never block certification */
         }
         await refreshLocalMetadataCatalog(projectRoot);
         res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });

@@ -258,6 +258,8 @@ export interface AgentAnswer {
   citations: AgentCitation[];
   /** Relevant local memory supplied as advisory context. */
   memoryContext?: AgentMemory[];
+  /** Approved Hint-Graph corrections that were applied to this answer (for transparency). */
+  appliedHints?: LocalContextPack['appliedHints'];
   /** Evidence path connecting the question to metadata, SQL/block execution, and review state. */
   evidence?: AgentEvidence;
   /** Business-facing plan the agent used to answer the question. */
@@ -1186,6 +1188,17 @@ function renderContextPrompt(
         .map((m) => `- ${m.scope}${m.scopeId ? `:${m.scopeId}` : ''} \`${m.title}\` (${m.source}, confidence ${m.confidence}): ${m.content}`)
         .join('\n')}`
     : '';
+  // Approved, scope-matched correction hints from the Hint Graph. These are
+  // human-reviewed lessons (often from a prior wrong→right SQL correction), so
+  // they carry more weight than advisory memory when generating SQL — but they
+  // still must NOT override a certified artifact that already answers exactly.
+  const appliedHints = contextPack?.appliedHints ?? [];
+  const hintsSection = appliedHints.length > 0
+    ? `\n\n## Applied governed hints (human-approved corrections)\n\nReviewed, scope-matched corrections from your team. Apply them when generating SQL to avoid known mistakes; they refine generated SQL but MUST NOT override a certified artifact that already answers the question.\n${appliedHints
+        .slice(0, 6)
+        .map((h) => `- \`${h.title}\`: ${h.guidance}${h.correctedSql ? `\n  corrected SQL pattern: ${h.correctedSql.replace(/\s+/g, ' ').trim().slice(0, 240)}` : ''}`)
+        .join('\n')}`
+    : '';
   const extraSection = extraContext?.trim()
     ? `\n\n## Current notebook/app context\n\nThis context may help interpret the user's request, but it MUST NOT override certified artifacts, semantic metrics, dbt metadata, or generated SQL validation.\n\n${extraContext.trim()}`
     : '';
@@ -1195,7 +1208,7 @@ function renderContextPrompt(
   const contextPackSection = contextPack
     ? `\n\n## Local metadata context pack\n\n${renderContextPackForPrompt(contextPack)}`
     : '';
-  return `${intentSection}\n\n${blockSection}${businessSection}${otherSection}${schemaSection}${contextPackSection}${memorySection}${extraSection}${followUpSection}`;
+  return `${intentSection}\n\n${blockSection}${businessSection}${otherSection}${schemaSection}${contextPackSection}${memorySection}${hintsSection}${extraSection}${followUpSection}`;
 }
 
 function renderContextPackForPrompt(contextPack: LocalContextPack): string {
@@ -1318,14 +1331,19 @@ function renderSourceBlockSqlContext(contextPack: LocalContextPack): string {
           .join(', ')
       : '';
     const snippet = compactSqlSnippet(source.sql, 280);
+    // Pair each certified block's SQL with the natural-language question it
+    // answers so it reads as a question→SQL few-shot exemplar (DAIL-SQL).
+    const anchorRaw = source.exampleQuestion ?? source.description;
+    const anchor = anchorRaw ? anchorRaw.replace(/\s+/g, ' ').trim().slice(0, 160) : '';
     return [
-      `- ${source.name}${source.status ? ` (${source.status})` : ''}`,
+      `- ${source.name}${source.status ? ` (${source.status})` : ''}${source.grain ? ` — grain: ${source.grain}` : ''}`,
+      anchor ? `  answers: ${anchor}` : '',
       shape?.relation ? `  relation: ${shape.relation}` : '',
       projectedColumns ? `  projected columns: ${projectedColumns}` : '',
       snippet ? `  sql: ${snippet}` : '',
     ].filter(Boolean).join('\n');
   });
-  return `Certified source SQL shape context:\n${lines.join('\n')}`;
+  return `## Worked examples from certified blocks (few-shot patterns)\n\nThese certified blocks already answer similar questions. Learn their join paths, grain, and filters and ADAPT them to the question — do not copy blindly, and do not relabel generated SQL as certified.\n${lines.join('\n')}`;
 }
 
 function contextPackCitations(contextPack: LocalContextPack | undefined, limit: number): AgentCitation[] {

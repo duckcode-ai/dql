@@ -126,9 +126,12 @@ export function createDqlAgentProviderRunner(id: SimpleProviderId): AgentRunner 
         const memory = new MemoryStore(defaultMemoryPath(req.projectRoot));
         const kg = new KGStore(kgPath);
         try {
+          // Retrieve durable learnings only — notebook/project/user/artifact scope.
+          // `thread` (per-conversation) memory is intentionally excluded: it is
+          // raw-chat residue, not a governed learning, and bloats the prompt.
           const memoryContext = memory.search({
             query: question,
-            scopes: ['thread', 'notebook', 'project', 'user', 'artifact'],
+            scopes: ['notebook', 'project', 'user', 'artifact'],
             scopeId: req.upstream?.cellId,
             limit: 6,
           });
@@ -207,7 +210,11 @@ export function createDqlAgentProviderRunner(id: SimpleProviderId): AgentRunner 
           } else {
             emitProposalFromText(result.text, emit);
           }
-          persistThreadMemory(memory, req, question, result);
+          // NOTE: we deliberately do NOT persist a per-turn chat summary into
+          // memory. Raw chat is not a correctness signal; auto-capturing it
+          // pollutes the store and bloats every later prompt. Durable learning
+          // comes only from governed deltas (certify/correct). Conversation
+          // continuity is carried per-request via conversationContext instead.
         } finally {
           kg.close();
           memory.close();
@@ -246,17 +253,23 @@ function renderExtraContext(req: AgentRunRequest, followUp?: AgentFollowUpContex
   }
   const context = req.conversationContext;
   if (context) {
+    // Bound the carried-forward "conversation memory" defensively: only the most
+    // recent turn's signals, with hard caps on the summary length and list sizes
+    // so prompts don't grow across a long multi-turn chat.
+    const clampText = (value: string, max = 240): string =>
+      value.length > max ? `${value.slice(0, max).trimEnd()}…` : value;
+    const clampList = (values: string[], max = 8): string => values.slice(0, max).join(', ');
     const contextLines = [
       context.sourceCertifiedBlock ? `source certified block: ${context.sourceCertifiedBlock}` : '',
-      context.sourceQuestion ? `source question: ${context.sourceQuestion}` : '',
-      context.sourceAnswerSummary ? `source answer summary: ${context.sourceAnswerSummary}` : '',
+      context.sourceQuestion ? `source question: ${clampText(context.sourceQuestion, 200)}` : '',
+      context.sourceAnswerSummary ? `source answer summary: ${clampText(context.sourceAnswerSummary)}` : '',
       context.contextPackId ? `context pack: ${context.contextPackId}` : '',
       context.trustLabel ? `trust label: ${context.trustLabel}` : '',
       context.reviewStatus ? `review status: ${context.reviewStatus}` : '',
       context.draftBlockPath ? `draft block: ${context.draftBlockPath}` : '',
-      context.requestedFilters?.length ? `remembered filters: ${context.requestedFilters.join(', ')}` : '',
-      context.requestedDimensions?.length ? `remembered dimensions: ${context.requestedDimensions.join(', ')}` : '',
-      context.outputColumns?.length ? `prior output columns: ${context.outputColumns.join(', ')}` : '',
+      context.requestedFilters?.length ? `remembered filters: ${clampList(context.requestedFilters)}` : '',
+      context.requestedDimensions?.length ? `remembered dimensions: ${clampList(context.requestedDimensions)}` : '',
+      context.outputColumns?.length ? `prior output columns: ${clampList(context.outputColumns)}` : '',
     ].filter(Boolean);
     if (contextLines.length > 0) {
       parts.push(`Conversation memory:\n${contextLines.join('\n')}`);
@@ -552,29 +565,6 @@ function inferProposalDomain(result: AgentAnswer): string | undefined {
     ...(evidence?.sourceTables ?? []),
   ];
   return candidates.find((asset) => typeof asset.domain === 'string' && asset.domain.trim())?.domain?.trim();
-}
-
-function persistThreadMemory(memory: MemoryStore, req: AgentRunRequest, question: string, result: AgentAnswer): void {
-  const cellId = req.upstream?.cellId;
-  if (!cellId) return;
-  memory.upsert({
-    id: `thread:${cellId}`,
-    scope: 'thread',
-    scopeId: cellId,
-    title: 'Notebook chat summary',
-    content: [
-      `Latest question: ${question}`,
-      `Latest route: ${result.sourceTier ?? 'unknown'} / ${result.certification ?? 'unknown'}`,
-      result.sourceCertifiedBlock ? `Latest source block: ${result.sourceCertifiedBlock}` : '',
-      result.contextPackId ? `Latest context pack: ${result.contextPackId}` : '',
-      result.draftBlockId ? `Latest draft block: ${result.draftBlockId}` : '',
-      `Latest answer: ${result.text.slice(0, 500)}`,
-    ].filter(Boolean).join('\n'),
-    tags: ['chat', result.sourceTier ?? 'unknown', result.certification ?? 'unknown'],
-    source: 'notebook-chat',
-    confidence: result.confidence ?? 0.5,
-    importance: 0.45,
-  });
 }
 
 function slugify(input: string): string {

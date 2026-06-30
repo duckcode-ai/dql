@@ -569,7 +569,7 @@ function contextFromGovernedAnswer(
     route: cleanOptionalString(answer.kind) ?? previous?.route,
     contextPackId,
     draftBlockPath,
-    selectedEvidence: Array.isArray(answer.selectedEvidence) ? answer.selectedEvidence.slice(0, 16) : previous?.selectedEvidence,
+    selectedEvidence: Array.isArray(answer.selectedEvidence) ? answer.selectedEvidence.slice(0, 8) : previous?.selectedEvidence,
     updatedAt: new Date().toISOString(),
   };
 }
@@ -580,7 +580,10 @@ function summarizeAnswer(text: string): string | undefined {
     .replace(/Proposed SQL:[\s\S]*$/i, '')
     .replace(/\s+/g, ' ')
     .trim();
-  return clean ? clean.slice(0, 600) : undefined;
+  // Keep the carried-forward "conversation memory" lean: a one/two-sentence
+  // gist, not the whole prior answer. A larger cap compounds across turns and
+  // bloats every subsequent prompt.
+  return clean ? clean.slice(0, 240) : undefined;
 }
 
 function normalizeOutputColumns(columns: unknown): string[] {
@@ -625,7 +628,9 @@ function mergeTextArrays(...groups: Array<unknown[] | undefined>): string[] | un
     .flatMap((group) => group ?? [])
     .map((value) => cleanOptionalString(value))
     .filter((value): value is string => Boolean(value));
-  const unique = Array.from(new Set(values)).slice(0, 24);
+  // Keep only the most-recent unique values so remembered filters/dimensions
+  // don't accumulate unbounded across a long multi-turn conversation.
+  const unique = Array.from(new Set(values)).slice(-8);
   return unique.length > 0 ? unique : undefined;
 }
 

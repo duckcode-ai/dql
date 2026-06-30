@@ -243,6 +243,10 @@ export interface MetadataAllowedSqlContext {
     name: string;
     status?: string;
     sql: string;
+    /** NL anchor for few-shot example-retrieval (DAIL-SQL): what this block answers. */
+    description?: string;
+    exampleQuestion?: string;
+    grain?: string;
   }>;
 }
 
@@ -3079,8 +3083,25 @@ function buildAllowedSqlContext(objects: MetadataObject[], edges: MetadataEdge[]
         name: object.name,
         status: object.status,
         sql: String(object.payload?.sql ?? ''),
+        description: typeof object.payload?.description === 'string' ? object.payload.description : undefined,
+        exampleQuestion: firstExampleQuestion(object.payload?.examples),
+        grain: typeof object.payload?.grain === 'string' ? object.payload.grain : undefined,
       })),
   };
+}
+
+// Pull the first natural-language example question off a block payload so the
+// certified block can serve as a question→SQL few-shot exemplar.
+function firstExampleQuestion(examples: unknown): string | undefined {
+  if (!Array.isArray(examples)) return undefined;
+  for (const example of examples) {
+    if (typeof example === 'string' && example.trim()) return example.trim();
+    if (example && typeof example === 'object') {
+      const question = (example as { question?: unknown }).question;
+      if (typeof question === 'string' && question.trim()) return question.trim();
+    }
+  }
+  return undefined;
 }
 
 function buildSelectedJoinPaths(
