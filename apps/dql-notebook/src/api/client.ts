@@ -1823,11 +1823,19 @@ export const api = {
     });
   },
 
-  async testProviderSettings(id: ProviderSettingsId): Promise<{ ok: boolean; message: string }> {
-    return request('/api/settings/providers/test', {
-      method: 'POST',
-      body: JSON.stringify({ id }),
-    });
+  async testProviderSettings(
+    id: ProviderSettingsId,
+    overrides?: { apiKey?: string; baseUrl?: string; model?: string },
+  ): Promise<{ ok: boolean; message: string }> {
+    // Never throw: a failed test is a normal result the UI shows inline.
+    try {
+      return await request<{ ok: boolean; message: string }>('/api/settings/providers/test', {
+        method: 'POST',
+        body: JSON.stringify({ id, ...overrides }),
+      });
+    } catch (error) {
+      return { ok: false, message: error instanceof Error ? error.message : String(error) };
+    }
   },
 
   async getRemoteMcpSettings(): Promise<{ settings: RemoteMcpSettings }> {

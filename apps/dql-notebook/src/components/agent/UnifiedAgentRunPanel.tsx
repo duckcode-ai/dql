@@ -251,7 +251,7 @@ export function UnifiedAgentRunPanel({
           <div style={{ margin: 'auto 0', display: 'grid', gap: 14, justifyItems: 'center', textAlign: 'center', color: t.textSecondary }}>
             <div style={largeIconShellStyle(t)}><Sparkles size={20} /></div>
             <div style={{ fontSize: 13, lineHeight: 1.5, maxWidth: 380, color: t.textSecondary }}>
-              Ask a question, request deep research, or build an app — grounded in your certified metrics.
+              Ask a question or dig deeper with research — every answer is grounded in your certified metrics and dbt lineage.
             </div>
             <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', justifyContent: 'center', maxWidth: 520 }}>
               {EXAMPLE_PROMPTS.map((ex) => (
@@ -333,7 +333,7 @@ const EXAMPLE_PROMPTS = [
   'What is total revenue?',
   'Why is revenue down by region?',
   'Top customers by revenue this quarter',
-  'Build a revenue overview app',
+  'How have orders trended over the last 6 months?',
 ];
 
 function routeActionLabel(route?: AgentRunRoute): string {

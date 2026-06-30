@@ -23,15 +23,19 @@ describe('seedDefaultSkills (spec 16)', () => {
     rmSync(root, { recursive: true, force: true });
   });
 
-  it('writes the three editable starters', () => {
+  it('writes the editable starters', () => {
     const result = seedDefaultSkills(root, { semanticLayer: stubSemanticLayer([]) });
-    expect(result.created.map((s) => s.id).sort()).toEqual(['domain-rules', 'metrics-glossary', 'sql-conventions']);
+    expect(result.created.map((s) => s.id).sort()).toEqual(['block-authoring', 'domain-rules', 'metrics-glossary', 'sql-conventions']);
     const { skills } = loadSkills(root);
     expect(skills.every((s) => s.isStarter)).toBe(true);
     // SQL conventions encodes the house grounding rules.
     const conventions = skills.find((s) => s.id === 'sql-conventions');
     expect(conventions?.body).toMatch(/\{\{ ref/);
     expect(conventions?.body).toMatch(/qualified relation/i);
+    // Block authoring guides the agent to build meaningful, metric-first blocks.
+    const authoring = skills.find((s) => s.id === 'block-authoring');
+    expect(authoring?.body).toMatch(/semantic metric/i);
+    expect(authoring?.body).toMatch(/grain/i);
   });
 
   it('metrics glossary reflects the semantic-layer metrics', () => {
@@ -56,7 +60,7 @@ describe('seedDefaultSkills (spec 16)', () => {
 
     const second = seedDefaultSkills(root, { semanticLayer: stubSemanticLayer([]) });
     expect(second.created).toEqual([]);
-    expect(second.skipped.sort()).toEqual(['domain-rules', 'metrics-glossary', 'sql-conventions']);
+    expect(second.skipped.sort()).toEqual(['block-authoring', 'domain-rules', 'metrics-glossary', 'sql-conventions']);
     // The edit survived.
     expect(readFileSync(conventionsPath, 'utf-8')).toContain('MY EDITS');
   });

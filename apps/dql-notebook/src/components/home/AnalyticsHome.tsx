@@ -35,7 +35,7 @@ export function AnalyticsHome() {
           <div>
             <div style={{ fontSize: 18, fontWeight: 700, color: t.textPrimary }}>Ask your data</div>
             <div style={{ fontSize: 12.5, color: t.textMuted, marginTop: 2 }}>
-              Governed answers, deep research, and apps — grounded in your certified metrics and dbt lineage.
+              Governed answers and deep research — grounded in your certified metrics and dbt lineage.
             </div>
           </div>
         </div>
@@ -45,7 +45,7 @@ export function AnalyticsHome() {
           <UnifiedAgentRunPanel
             themeMode={state.themeMode}
             title="Analytics copilot"
-            scopeHint="Ask a question, request research, or build an app"
+            scopeHint="Ask a question or request deep research"
             audience="stakeholder"
             initialMode="auto"
             onOpenResearch={openResearch}

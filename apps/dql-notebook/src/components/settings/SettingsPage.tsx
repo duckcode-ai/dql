@@ -510,12 +510,15 @@ function ProviderCard({
   const [baseUrl, setBaseUrl] = useState(provider.baseUrl ?? '');
   const [model, setModel] = useState(provider.model ?? '');
   const [busy, setBusy] = useState(false);
+  const [testing, setTesting] = useState(false);
+  const [testResult, setTestResult] = useState<{ ok: boolean; message: string } | null>(null);
 
   useEffect(() => {
     setEnabled(provider.enabled);
     setBaseUrl(provider.baseUrl ?? '');
     setModel(provider.model ?? '');
     setApiKey('');
+    setTestResult(null);
   }, [provider.id, provider.enabled, provider.baseUrl, provider.model]);
 
   const save = async () => {
@@ -538,15 +541,20 @@ function ProviderCard({
   };
 
   const test = async () => {
-    setBusy(true);
-    try {
-      const result = await api.testProviderSettings(provider.id);
-      onStatus(result.message);
-    } catch (error) {
-      onStatus(error instanceof Error ? error.message : String(error));
-    } finally {
-      setBusy(false);
-    }
+    setTesting(true);
+    setTestResult(null);
+    // Test exactly what's in the form (key/base URL/model) so it works before Save.
+    const result = await api.testProviderSettings(provider.id, {
+      apiKey: apiKey || undefined,
+      baseUrl: baseUrl || undefined,
+      model: model || undefined,
+    });
+    const ok = result.ok !== false;
+    setTestResult({
+      ok,
+      message: result.message || (ok ? `${provider.label} is reachable.` : `${provider.label} test failed.`),
+    });
+    setTesting(false);
   };
 
   return (
@@ -593,11 +601,35 @@ function ProviderCard({
       </div>
 
       <div style={{ display: 'flex', gap: 8, marginTop: 12 }}>
-        <button type="button" onClick={save} disabled={busy} style={buttonStyle(t, true)}>
+        <button type="button" onClick={save} disabled={busy || testing} style={buttonStyle(t, true)}>
           {provider.active ? 'Save active provider' : 'Save and use'}
         </button>
-        <button type="button" onClick={test} disabled={busy} style={buttonStyle(t, false)}>Test</button>
+        <button type="button" onClick={test} disabled={busy || testing} style={buttonStyle(t, false)}>
+          {testing ? 'Testing…' : 'Test'}
+        </button>
       </div>
+
+      {testResult && (
+        <div
+          role="status"
+          style={{
+            marginTop: 10,
+            display: 'flex',
+            alignItems: 'flex-start',
+            gap: 7,
+            fontSize: 12,
+            lineHeight: 1.45,
+            padding: '8px 10px',
+            borderRadius: 7,
+            color: testResult.ok ? t.success : t.error,
+            background: `${testResult.ok ? t.success : t.error}12`,
+            border: `1px solid ${testResult.ok ? t.success : t.error}40`,
+          }}
+        >
+          <span style={{ flexShrink: 0, fontWeight: 700 }}>{testResult.ok ? '✓' : '✗'}</span>
+          <span>{testResult.message}</span>
+        </div>
+      )}
 
       {provider.envVars.length > 0 && (
         <div style={{ marginTop: 10, color: t.textSecondary, fontSize: 11, lineHeight: 1.4 }}>

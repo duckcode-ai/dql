@@ -41,6 +41,12 @@ export interface EnrichOptions {
   timeoutMs?: number;
   /** Max concurrent provider calls (default 4). */
   concurrency?: number;
+  /**
+   * Editable team guidance (the `block-authoring` skill body) the agent should
+   * follow when writing block metadata — e.g. prefer semantic metrics, name by
+   * business term, declare grain. Advisory: it never lets the agent invent facts.
+   */
+  guidance?: string;
 }
 
 const SYSTEM_PROMPT =
@@ -48,7 +54,7 @@ const SYSTEM_PROMPT =
   'You are given deterministic facts; do not invent columns, grains, or metrics that are not listed. ' +
   'Respond with ONLY a JSON object — no prose, no markdown fences.';
 
-function buildUserPrompt(facts: EnrichFacts): string {
+function buildUserPrompt(facts: EnrichFacts, guidance?: string): string {
   const lines = [
     `Model: ${facts.model}`,
     `Domain: ${facts.domain}`,
@@ -59,8 +65,12 @@ function buildUserPrompt(facts: EnrichFacts): string {
     `Columns: ${facts.columns.slice(0, 30).join(', ') || '(unknown)'}`,
     facts.entities.length ? `Entities: ${facts.entities.join(', ')}` : null,
   ].filter(Boolean);
+  const guidanceBlock = guidance?.trim()
+    ? `Team block-authoring guidance (follow it for naming, framing, and which questions matter; never invent facts not listed above):\n${guidance.trim().slice(0, 1500)}\n\n`
+    : '';
   return (
     `${lines.join('\n')}\n\n` +
+    guidanceBlock +
     'Produce JSON with exactly these keys:\n' +
     '- "description": one or two sentences, business-facing, what this block answers.\n' +
     '- "llmContext": one to three sentences telling an AI agent when to use this block, its grain, and any caveat.\n' +
@@ -127,7 +137,7 @@ export async function enrichProposal(
     const response = await provider.generate(
       [
         { role: 'system', content: SYSTEM_PROMPT },
-        { role: 'user', content: buildUserPrompt(facts) },
+        { role: 'user', content: buildUserPrompt(facts, options.guidance) },
       ],
       { maxTokens: 400, temperature: 0.2, signal: AbortSignal.timeout(timeoutMs) },
     );

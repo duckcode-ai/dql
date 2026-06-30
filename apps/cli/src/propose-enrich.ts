@@ -13,6 +13,7 @@ import {
   propose,
   pickProvider,
   enrichProposals,
+  loadSkills,
   type EnrichFacts,
   type EnrichedContent,
   type ProposeConfigInput,
@@ -41,5 +42,8 @@ export async function gatherProposeEnrichment(
       entities: proposal.inference.entities,
     }));
   if (facts.length === 0) return undefined;
-  return enrichProposals(facts, provider, { timeoutMs: 25_000, concurrency: 4 });
+  // Let the agent act with the editable `block-authoring` skill so drafts follow
+  // the team's conventions (semantic-metric-first, business naming, grain, …).
+  const guidance = loadSkills(projectRoot).skills.find((skill) => skill.id === 'block-authoring')?.body?.trim() || undefined;
+  return enrichProposals(facts, provider, { timeoutMs: 25_000, concurrency: 4, guidance });
 }

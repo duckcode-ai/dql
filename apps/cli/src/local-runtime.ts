@@ -2997,7 +2997,11 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           res.end(serializeJSON({ ok: false, error: 'Unknown provider id.' }));
           return;
         }
-        const ok = await testProviderConfig(projectRoot, body.id);
+        const ok = await testProviderConfig(projectRoot, body.id, {
+          apiKey: typeof body.apiKey === 'string' && body.apiKey ? body.apiKey : undefined,
+          baseUrl: typeof body.baseUrl === 'string' && body.baseUrl ? body.baseUrl : undefined,
+          model: typeof body.model === 'string' && body.model ? body.model : undefined,
+        });
         res.writeHead(ok.ok ? 200 : 400, { 'Content-Type': 'application/json; charset=utf-8' });
         res.end(serializeJSON(ok));
       } catch (error) {
@@ -13227,12 +13231,26 @@ function isDeterministicDqlGenerationProvider(value: unknown): boolean {
   return value === 'none' || value === 'deterministic' || value === 'local-deterministic';
 }
 
-async function testProviderConfig(projectRoot: string, id: ProviderSettingsId): Promise<{ ok: boolean; message: string }> {
-  const config = getEffectiveProviderConfig(projectRoot, id);
+async function testProviderConfig(
+  projectRoot: string,
+  id: ProviderSettingsId,
+  overrides?: { apiKey?: string; baseUrl?: string; model?: string },
+): Promise<{ ok: boolean; message: string }> {
+  const base = getEffectiveProviderConfig(projectRoot, id);
+  // When the user supplies inline values (testing what they typed before saving),
+  // merge them over the saved config and test reachability regardless of enabled.
+  const inline = Boolean(overrides && (overrides.apiKey || overrides.baseUrl || overrides.model));
+  const config = {
+    ...base,
+    ...(overrides?.apiKey ? { apiKey: overrides.apiKey } : {}),
+    ...(overrides?.baseUrl ? { baseUrl: overrides.baseUrl } : {}),
+    ...(overrides?.model ? { model: overrides.model } : {}),
+    ...(inline ? { enabled: true } : {}),
+  };
   const label = providerSettingsLabel(id);
   const details = providerConfigDetails(id, config);
   if (!config.enabled) {
-    return { ok: false, message: `${label} is disabled in Settings.` };
+    return { ok: false, message: `${label} is disabled. Enable it (or Save) before testing.` };
   }
   if (id === 'openai') return testOpenAIProviderConfig(config, label, details);
   if (id === 'anthropic') return testAnthropicProviderConfig(config, label, details);
