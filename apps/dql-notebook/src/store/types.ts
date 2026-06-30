@@ -1030,8 +1030,12 @@ export interface BlockStudioOpenPayload {
   validation: BlockStudioValidation;
 }
 
+export type SettingsTab = 'database' | 'ai' | 'memory';
+
 export interface NotebookState {
   mainView: MainView;
+  /** Active tab on the Settings page (Database / AI providers / Agentic memory). */
+  settingsTab: SettingsTab;
   themeMode: ThemeMode;
   appMode: AppMode;
   sidebarPanel: SidebarPanel;
@@ -1092,6 +1096,7 @@ export type InspectorContext =
 
 export type NotebookAction =
   | { type: 'SET_MAIN_VIEW'; view: MainView }
+  | { type: 'SET_SETTINGS_TAB'; tab: SettingsTab }
   | { type: 'SET_THEME'; mode: ThemeMode }
   | { type: 'SET_APP_MODE'; mode: AppMode }
   | { type: 'SET_SIDEBAR_PANEL'; panel: SidebarPanel }

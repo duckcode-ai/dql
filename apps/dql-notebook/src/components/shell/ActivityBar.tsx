@@ -3,7 +3,6 @@ import { GraduationCap, Boxes, MessageCircle, Settings, ListChecks } from 'lucid
 import { Tooltip } from '@duckcodeailabs/dql-ui';
 import {
   FileText,
-  Database,
   GitBranch,
   BookOpen,
   HelpCircle,
@@ -166,7 +165,6 @@ export function ActivityBar() {
     {
       label: 'Govern',
       items: [
-        { key: 'connection', title: 'Connections', icon: <Database size={16} strokeWidth={1.75} />, active: state.mainView === 'connection' },
         { key: 'domains', title: 'Domains', icon: <Boxes size={16} strokeWidth={1.75} />, active: state.mainView === 'domains' },
         { key: 'skills', title: 'Skills', icon: <GraduationCap size={16} strokeWidth={1.75} />, active: state.mainView === 'skills' },
         { key: 'git', title: 'Source control', icon: <GitBranch size={16} strokeWidth={1.75} />, active: state.mainView === 'git' },

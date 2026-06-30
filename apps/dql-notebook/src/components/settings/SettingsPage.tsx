@@ -38,9 +38,12 @@ export function SettingsPage() {
 export function ConnectionRuntimeSettings({
   includeMemory = true,
   embedded = false,
+  section,
 }: {
   includeMemory?: boolean;
   embedded?: boolean;
+  /** When set, render only this section (for the tabbed Settings page). */
+  section?: 'providers' | 'memory' | 'advanced';
 }) {
   const { state } = useNotebook();
   const t = themes[state.themeMode];
@@ -78,20 +81,22 @@ export function ConnectionRuntimeSettings({
 
   return (
     <div style={{ padding: embedded ? 0 : 24, maxWidth: embedded ? undefined : 1180 }}>
-      <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 16 }}>
-        <div>
-          <div style={{ fontSize: 18, fontWeight: 700 }}>AI providers, memory &amp; connections</div>
-          <div style={{ color: t.textSecondary, fontSize: 13, marginTop: 6, lineHeight: 1.5, maxWidth: 820 }}>
-            Connect a model provider, manage the agent's learning &amp; memory, and (optionally) attach MCP servers. Secrets stay under <code>.dql/</code> and are never returned raw.
+      {!section && (
+        <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 16 }}>
+          <div>
+            <div style={{ fontSize: 18, fontWeight: 700 }}>AI providers, memory &amp; connections</div>
+            <div style={{ color: t.textSecondary, fontSize: 13, marginTop: 6, lineHeight: 1.5, maxWidth: 820 }}>
+              Connect a model provider, manage the agent's learning &amp; memory, and (optionally) attach MCP servers. Secrets stay under <code>.dql/</code> and are never returned raw.
+            </div>
           </div>
+          <SummaryCard
+            configured={configured}
+            total={providers.length || PROVIDER_ORDER.length}
+            activeLabel={activeProvider?.label}
+            t={t}
+          />
         </div>
-        <SummaryCard
-          configured={configured}
-          total={providers.length || PROVIDER_ORDER.length}
-          activeLabel={activeProvider?.label}
-          t={t}
-        />
-      </div>
+      )}
 
       {status && (
         <div style={{ marginTop: 14, border: `1px solid ${t.headerBorder}`, borderRadius: 8, padding: '10px 12px', fontSize: 12, color: t.textSecondary, background: t.cellBg }}>
@@ -103,8 +108,19 @@ export function ConnectionRuntimeSettings({
         <div style={{ marginTop: 24, color: t.textSecondary }}>Loading settings...</div>
       ) : (
         <>
-          <section style={{ marginTop: 22 }}>
-            <SectionTitle title="Model providers" detail="Use environment variables or save project-local provider settings for OpenAI, Anthropic, Gemini, Ollama, or compatible endpoints." t={t} />
+          {(!section || section === 'providers') && (
+          <section style={{ marginTop: section ? 0 : 22 }}>
+            {section === 'providers' && (
+              <div style={{ display: 'flex', justifyContent: 'flex-end', marginBottom: 12 }}>
+                <SummaryCard
+                  configured={configured}
+                  total={providers.length || PROVIDER_ORDER.length}
+                  activeLabel={activeProvider?.label}
+                  t={t}
+                />
+              </div>
+            )}
+            <SectionTitle title="Model providers" detail="Connect at least one AI provider — it powers governed answers, block suggestions, and research. Use environment variables or save project-local settings for OpenAI, Anthropic, Gemini, Ollama, or a compatible endpoint." t={t} />
             <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(320px, 1fr))', gap: 14 }}>
               {PROVIDER_ORDER.map((id) => {
                 const provider = providers.find((p) => p.id === id);
@@ -120,9 +136,10 @@ export function ConnectionRuntimeSettings({
               })}
             </div>
           </section>
+          )}
 
-          {includeMemory && (
-            <section style={{ marginTop: 22 }}>
+          {(!section || section === 'memory') && includeMemory && (
+            <section style={{ marginTop: section ? 0 : 22 }}>
               <SectionTitle
                 title="Agent learning & memory"
                 detail="Durable business context the agent now reads on every question — your glossary, rules, and the lessons it learns when you correct or certify a draft. Advisory only: it never overrides certified metadata or routing."
@@ -137,6 +154,7 @@ export function ConnectionRuntimeSettings({
             </section>
           )}
 
+          {(!section || section === 'providers') && (
           <details style={{ marginTop: 22, border: `1px solid ${t.headerBorder}`, borderRadius: 10, background: t.cellBg, overflow: 'hidden' }}>
             <summary style={{ cursor: 'pointer', padding: '13px 16px', fontSize: 13, fontWeight: 650, listStyle: 'none', color: t.textPrimary }}>
               Advanced — MCP connections &amp; runtime status
@@ -163,6 +181,7 @@ export function ConnectionRuntimeSettings({
               </section>
             </div>
           </details>
+          )}
         </>
       )}
     </div>

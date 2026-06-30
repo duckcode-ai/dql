@@ -11,12 +11,13 @@ import {
   Network,
   Play,
   ShieldCheck,
+  Sparkles,
   Workflow,
   type LucideIcon,
 } from 'lucide-react';
 import { useNotebook } from '../../store/NotebookStore';
 import { themes } from '../../themes/notebook-theme';
-import type { BlockStudioDbtStatus, NotebookFile, SemanticLayerState, SidebarPanel } from '../../store/types';
+import type { BlockStudioDbtStatus, NotebookFile, SemanticLayerState, SettingsTab, SidebarPanel } from '../../store/types';
 import { api } from '../../api/client';
 import { SetupWizard } from '../modals/SetupWizard';
 import { StarterBlocks } from './StarterBlocks';
@@ -67,6 +68,7 @@ export function HomePage() {
   const schemaCounts = countSchema(state.schemaTables);
 
   const [connections, setConnections] = useState<ConnectionInfo | null>(null);
+  const [aiReady, setAiReady] = useState(false);
   const [setupWizardOpen, setSetupWizardOpen] = useState(false);
   const [selectedStepId, setSelectedStepId] = useState<string | null>(null);
 
@@ -76,6 +78,14 @@ export function HomePage() {
     void api.getConnections().then((info) => {
       if (!cancelled) setConnections(info as ConnectionInfo);
     });
+
+    // AI provider config gates the whole product — a provider counts as ready
+    // when it's enabled and either has a key or is Ollama (which needs none).
+    void api.getProviderSettings()
+      .then((res) => {
+        if (!cancelled) setAiReady(res.providers.some((p) => p.enabled && (p.hasApiKey || p.id === 'ollama')));
+      })
+      .catch(() => { /* leave aiReady false */ });
 
     void api.getBlockStudioDbtStatus()
       .then((status: BlockStudioDbtStatus) => {
@@ -124,12 +134,19 @@ export function HomePage() {
     ? 'source'
     : !connectionReady
       ? 'connection'
-      : !dqlReady
-        ? 'build'
-        : 'notebook';
+      : !aiReady
+        ? 'ai'
+        : !dqlReady
+          ? 'build'
+          : 'notebook';
 
   const openPanel = (panel: SidebarPanel) => {
     dispatch({ type: 'SET_SIDEBAR_PANEL', panel });
+  };
+
+  const openSettingsTab = (tab: SettingsTab) => {
+    dispatch({ type: 'SET_SETTINGS_TAB', tab });
+    dispatch({ type: 'SET_MAIN_VIEW', view: 'settings' });
   };
 
   const openSemanticBlock = () => {
@@ -182,9 +199,9 @@ export function HomePage() {
       state: connectionReady ? 'ready' : currentStep === 'connection' ? 'active' : 'waiting',
       Icon: Database,
       primaryLabel: connectionReady ? 'Manage connections' : 'Add database connection',
-      onPrimary: () => openPanel('connection'),
+      onPrimary: () => openSettingsTab('database'),
       secondaryLabel: 'Open connections',
-      onSecondary: () => openPanel('connection'),
+      onSecondary: () => openSettingsTab('database'),
       evidence: [
         `${connectionCount} connection${connectionCount === 1 ? '' : 's'}`,
         `${dbtProfileCount} dbt profile target${dbtProfileCount === 1 ? '' : 's'}`,
@@ -193,8 +210,23 @@ export function HomePage() {
       ],
     },
     {
-      id: 'build',
+      id: 'ai',
       number: '3',
+      title: 'Connect an AI provider',
+      body: 'AI powers everything here — governed answers, AI block suggestions, and research. Without it you only get a static catalog. Add a provider (OpenAI, Anthropic, Gemini, or a local Ollama) and set the active one.',
+      state: aiReady ? 'ready' : currentStep === 'ai' ? 'active' : 'waiting',
+      Icon: Sparkles,
+      primaryLabel: aiReady ? 'Manage AI providers' : 'Connect AI provider',
+      onPrimary: () => openSettingsTab('ai'),
+      secondaryLabel: 'Open settings',
+      onSecondary: () => openSettingsTab('ai'),
+      evidence: [
+        aiReady ? 'AI provider ready' : 'No AI provider configured',
+      ],
+    },
+    {
+      id: 'build',
+      number: '4',
       title: 'Build governed blocks',
       body: 'Let AI suggest certified-ready DQL blocks from your dbt and semantic context — review the samples and what each means, then certify the ones you trust. Or build one by hand in Block Studio.',
       state: dqlReady ? 'ready' : currentStep === 'build' ? 'active' : 'waiting',
@@ -211,7 +243,7 @@ export function HomePage() {
     },
     {
       id: 'notebook',
-      number: '4',
+      number: '5',
       title: 'Analyze in notebooks and publish to Apps',
       body: 'Search, add, and edit notebooks around reviewed blocks. When the answer is ready, promote it into an App for stakeholder consumption.',
       state: notebookReady || appReady ? 'ready' : currentStep === 'notebook' ? 'active' : 'waiting',
@@ -230,6 +262,7 @@ export function HomePage() {
       ],
     },
   ], [
+    aiReady,
     appReady,
     connectionCount,
     connectionReady,
@@ -321,7 +354,7 @@ export function HomePage() {
             learn the concept by example before building their own. */}
         {focusStep?.id === 'build' && !dqlReady && (
           <section className="dql-home-fade" style={{ animationDelay: '150ms' }}>
-            <StarterBlocks t={t} />
+            <StarterBlocks t={t} aiReady={aiReady} onSetupAi={() => openSettingsTab('ai')} />
           </section>
         )}
 
@@ -528,6 +561,7 @@ function ProgressRing({ ready, total, t }: { ready: number; total: number; t: Th
 function nextActionShort(currentStep: string): string {
   if (currentStep === 'source') return 'Connect a dbt or semantic source';
   if (currentStep === 'connection') return 'Add and test a database';
+  if (currentStep === 'ai') return 'Connect an AI provider';
   if (currentStep === 'build') return 'Build your first DQL block';
   return 'Open notebooks and publish an App';
 }

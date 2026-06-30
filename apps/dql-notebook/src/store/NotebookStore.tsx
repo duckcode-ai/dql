@@ -45,6 +45,7 @@ function readInitialThemeMode(): 'obsidian' | 'paper' | 'white' {
 
 const initialState: NotebookState = {
   mainView: 'apps',
+  settingsTab: 'database',
   themeMode: readInitialThemeMode(),
   appMode: readInitialAppMode(),
   sidebarPanel: null,
@@ -148,6 +149,9 @@ function notebookReducer(state: NotebookState, action: NotebookAction): Notebook
         };
       }
       return { ...state, mainView: action.view, lineageFullscreen: false, lineageFocusNodeId: null, lineageReturnTarget: null };
+
+    case 'SET_SETTINGS_TAB':
+      return { ...state, settingsTab: action.tab };
 
     case 'SET_THEME': {
       // Sync the data-theme attribute BEFORE React re-renders. Inline-style

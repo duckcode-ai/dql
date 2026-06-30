@@ -202,6 +202,7 @@ export function NotebookEditor({ onOpenFile, registerCellRef }: NotebookEditorPr
           }}
         >
           <DocumentMetadataRow />
+          <NotebookDataPanel t={t} />
           <CellList
             registerCellRef={registerCellRef}
             researchRefreshKey={aiHistoryRefreshKey}
@@ -226,6 +227,60 @@ export function NotebookEditor({ onOpenFile, registerCellRef }: NotebookEditorPr
           />
         )}
       </div>
+    </div>
+  );
+}
+
+// Discoverability: notebook users don't open Block Studio, so surface what they
+// can actually query — warehouse tables + governed semantic metrics/dimensions —
+// in a collapsible panel above the cells. Reads existing store state only.
+function NotebookDataPanel({ t }: { t: Theme }) {
+  const { state } = useNotebook();
+  const tables = state.schemaTables ?? [];
+  const metrics = state.semanticLayer?.metrics ?? [];
+  const dimensions = [
+    ...(state.semanticLayer?.dimensions ?? []),
+    ...(state.semanticLayer?.timeDimensions ?? []),
+  ];
+  if (tables.length + metrics.length + dimensions.length === 0) return null;
+  return (
+    <details style={{ margin: '12px 24px 0', border: `1px solid ${t.cellBorder}`, borderRadius: 10, background: t.cellBg, overflow: 'hidden' }}>
+      <summary style={{ cursor: 'pointer', listStyle: 'none', padding: '10px 14px', fontSize: 12.5, fontWeight: 650, color: t.textPrimary, display: 'flex', alignItems: 'center', gap: 8 }}>
+        Available data
+        <span style={{ fontWeight: 400, color: t.textMuted, fontSize: 11.5 }}>
+          {tables.length} table{tables.length === 1 ? '' : 's'} · {metrics.length} metric{metrics.length === 1 ? '' : 's'} · {dimensions.length} dimension{dimensions.length === 1 ? '' : 's'}
+        </span>
+      </summary>
+      <div style={{ padding: '4px 14px 14px', display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: 16 }}>
+        <NotebookDataColumn t={t} title="Database objects" empty="Connect a database to see tables."
+          items={tables.map((tb) => ({ name: tb.name, meta: `${tb.columns.length} col${tb.columns.length === 1 ? '' : 's'}` }))} />
+        <NotebookDataColumn t={t} title="Semantic metrics" empty="No metrics imported yet."
+          items={metrics.map((m) => ({ name: m.name, meta: m.label && m.label !== m.name ? m.label : undefined }))} />
+        <NotebookDataColumn t={t} title="Dimensions" empty="No dimensions imported yet."
+          items={dimensions.map((d) => ({ name: d.name }))} />
+      </div>
+    </details>
+  );
+}
+
+function NotebookDataColumn({ t, title, items, empty }: { t: Theme; title: string; items: Array<{ name: string; meta?: string }>; empty: string }) {
+  return (
+    <div style={{ display: 'grid', gap: 6, alignContent: 'start' }}>
+      <div style={{ fontSize: 9.5, fontWeight: 800, letterSpacing: '0.05em', textTransform: 'uppercase', color: t.textMuted }}>
+        {title}{items.length > 0 ? ` (${items.length})` : ''}
+      </div>
+      {items.length === 0 ? (
+        <div style={{ fontSize: 11, color: t.textMuted }}>{empty}</div>
+      ) : (
+        <div style={{ display: 'grid', gap: 3, maxHeight: 220, overflow: 'auto' }}>
+          {items.slice(0, 80).map((it) => (
+            <div key={it.name} style={{ display: 'flex', justifyContent: 'space-between', gap: 8, fontSize: 11.5, alignItems: 'baseline' }}>
+              <span style={{ color: t.textSecondary, fontFamily: t.fontMono, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{it.name}</span>
+              {it.meta ? <span style={{ color: t.textMuted, flexShrink: 0, fontSize: 10.5 }}>{it.meta}</span> : null}
+            </div>
+          ))}
+        </div>
+      )}
     </div>
   );
 }

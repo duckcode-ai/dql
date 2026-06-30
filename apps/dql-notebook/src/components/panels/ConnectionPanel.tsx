@@ -6,6 +6,7 @@ import { api } from '../../api/client';
 import { PanelFrame } from '@duckcodeailabs/dql-ui';
 import { DriverLogo } from './DriverLogo';
 import { ConnectionRuntimeSettings } from '../settings/SettingsPage';
+import type { SettingsTab } from '../../store/types';
 
 interface ConnectorFieldSchema {
   key: string;
@@ -317,7 +318,7 @@ function chooseFallbackDefault(connections: Record<string, any>): string | undef
 }
 
 export function ConnectionPanel({ variant = 'panel' }: { variant?: 'panel' | 'page' } = {}) {
-  const { state } = useNotebook();
+  const { state, dispatch } = useNotebook();
   const t = themes[state.themeMode];
   const isPage = variant === 'page';
 
@@ -947,25 +948,68 @@ export function ConnectionPanel({ variant = 'panel' }: { variant?: 'panel' | 'pa
       boxShadow: '0 1px 2px rgba(0, 0, 0, 0.03)',
     };
 
+    const activeTab = state.settingsTab;
+    const tabs: Array<{ id: SettingsTab; label: string; hint: string }> = [
+      { id: 'database', label: 'Database connection', hint: 'Warehouse credentials and schema' },
+      { id: 'ai', label: 'AI providers', hint: 'The model that powers everything' },
+      { id: 'memory', label: 'Agentic memory', hint: 'What the agent has learned' },
+    ];
+
     return (
       <>
         <style>{CONNECTION_PAGE_STYLES}</style>
         <div className="dql-connection-page-stack">
-          <div className="dql-connection-page-grid">
-            <section style={panelSurface}>
-              {connectionListSection}
-              {dbtProfilesSection}
-              {quickConnectSection}
-            </section>
-            <aside style={panelSurface}>
-              <div style={{ ...sectionLabel, marginBottom: 8 }}>Database setup</div>
-              {addConnectionSection}
-              {saveMessageSection}
-              {testConnectionSection}
-              {catalogSection}
-            </aside>
+          <div role="tablist" aria-label="Settings sections" style={{ display: 'flex', gap: 4, borderBottom: `1px solid ${t.cellBorder}`, marginBottom: 4 }}>
+            {tabs.map((tab) => {
+              const active = activeTab === tab.id;
+              return (
+                <button
+                  key={tab.id}
+                  role="tab"
+                  aria-selected={active}
+                  onClick={() => dispatch({ type: 'SET_SETTINGS_TAB', tab: tab.id })}
+                  title={tab.hint}
+                  style={{
+                    appearance: 'none',
+                    border: 'none',
+                    background: 'transparent',
+                    cursor: 'pointer',
+                    padding: '9px 14px',
+                    marginBottom: -1,
+                    fontSize: 13,
+                    fontWeight: active ? 700 : 500,
+                    fontFamily: t.font,
+                    color: active ? t.accent : t.textSecondary,
+                    borderBottom: `2px solid ${active ? t.accent : 'transparent'}`,
+                    transition: 'color 0.15s, border-color 0.15s',
+                  }}
+                >
+                  {tab.label}
+                </button>
+              );
+            })}
           </div>
-          <ConnectionRuntimeSettings embedded includeMemory />
+
+          {activeTab === 'database' ? (
+            <div className="dql-connection-page-grid">
+              <section style={panelSurface}>
+                {connectionListSection}
+                {dbtProfilesSection}
+                {quickConnectSection}
+              </section>
+              <aside style={panelSurface}>
+                <div style={{ ...sectionLabel, marginBottom: 8 }}>Database setup</div>
+                {addConnectionSection}
+                {saveMessageSection}
+                {testConnectionSection}
+                {catalogSection}
+              </aside>
+            </div>
+          ) : activeTab === 'ai' ? (
+            <ConnectionRuntimeSettings embedded section="providers" />
+          ) : (
+            <ConnectionRuntimeSettings embedded section="memory" />
+          )}
         </div>
       </>
     );

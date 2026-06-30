@@ -33,12 +33,25 @@ import type { ProposeReadiness, ProposePlanCandidate } from '../../store/types';
 
 const MAX_STARTERS = 3;
 
-export function StarterBlocks({ t }: { t: Theme }): JSX.Element {
+export function StarterBlocks({
+  t,
+  aiReady = true,
+  onSetupAi,
+}: {
+  t: Theme;
+  aiReady?: boolean;
+  onSetupAi?: () => void;
+}): JSX.Element {
   const { dispatch } = useNotebook();
   const [readiness, setReadiness] = useState<ProposeReadiness | null>(null);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
+    // Block suggestions come from the AI provider — don't fetch until it's on.
+    if (!aiReady) {
+      setLoading(false);
+      return;
+    }
     let cancelled = false;
     setLoading(true);
     void api
@@ -55,7 +68,7 @@ export function StarterBlocks({ t }: { t: Theme }): JSX.Element {
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [aiReady]);
 
   // Pick the few highest-value candidates across domains as teaching examples.
   const starters = useMemo<ProposePlanCandidate[]>(() => {
@@ -71,6 +84,48 @@ export function StarterBlocks({ t }: { t: Theme }): JSX.Element {
   const buildOwn = useCallback(() => {
     dispatch({ type: 'SET_MAIN_VIEW', view: 'block_studio' });
   }, [dispatch]);
+
+  // AI is the engine for block suggestions. Without a provider configured, don't
+  // show a deterministic catalog that looks random — guide the user to set up AI.
+  if (!aiReady) {
+    return (
+      <div style={panelStyle(t)}>
+        <style>{STARTER_STYLES}</style>
+        <div style={headStyle}>
+          <span style={headIconStyle(t)}>
+            <Sparkles size={16} strokeWidth={2} aria-hidden="true" />
+          </span>
+          <div style={{ minWidth: 0 }}>
+            <div style={{ fontSize: 14, fontWeight: 760, color: t.textPrimary }}>
+              Turn on AI to generate starter blocks
+            </div>
+            <p style={{ margin: '3px 0 0', fontSize: 12.5, lineHeight: 1.5, color: t.textSecondary }}>
+              Block suggestions are drafted by <strong>your AI provider</strong> from your dbt models and
+              data — that's where the value is. Connect a provider (OpenAI, Anthropic, Gemini, or a local
+              Ollama) and DQL will propose a few important blocks you can learn from and certify.
+            </p>
+          </div>
+        </div>
+        <div style={footerStyle(t)}>
+          <span style={{ fontSize: 12, color: t.textMuted }}>
+            AI also powers governed answers and research — it's the heart of DQL.
+          </span>
+          <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+            {onSetupAi ? (
+              <button type="button" onClick={onSetupAi} style={primaryBtnStyle(t)}>
+                Connect an AI provider
+                <ArrowRight size={14} strokeWidth={2.2} aria-hidden="true" />
+              </button>
+            ) : null}
+            <button type="button" onClick={buildOwn} style={ghostBtnStyle(t)}>
+              <BlocksIcon size={14} strokeWidth={2} aria-hidden="true" />
+              Build one by hand
+            </button>
+          </div>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div style={panelStyle(t)}>
