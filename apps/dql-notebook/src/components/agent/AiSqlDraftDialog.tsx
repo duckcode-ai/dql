@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { Bot, CheckCircle2, Send, Sparkles, X } from 'lucide-react';
+import { CheckCircle2, Send, Sparkles, X } from 'lucide-react';
 import { api } from '../../api/client';
 import { runAgent } from '../../llm/client';
 import type { AgentTurn, BlockProposal } from '../../llm/types';
@@ -241,7 +241,7 @@ export function AiSqlDraftDialog({
     >
       <div style={dialogStyle(t)}>
         <div style={headerStyle(t)}>
-          <div style={iconWrapStyle(t)}><Bot size={17} /></div>
+          <div style={iconWrapStyle(t)}><Sparkles size={17} strokeWidth={2} /></div>
           <div style={{ flex: 1, minWidth: 0 }}>
             <div style={{ fontSize: 15, fontWeight: 800, color: t.textPrimary }}>
               {isBlockMode ? 'Build DQL block' : isRepairMode ? 'Fix SQL draft' : 'Build SQL draft'}
