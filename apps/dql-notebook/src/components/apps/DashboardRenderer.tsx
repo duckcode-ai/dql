@@ -1,12 +1,12 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { CSSProperties, PointerEvent as ReactPointerEvent } from 'react';
-import { AlertTriangle, BarChart3, Bot, GitBranch, GripVertical, LineChart, Maximize2, PieChart, Plus, ShieldCheck, SlidersHorizontal, Sparkles, Table2, Trash2, Wand2 } from 'lucide-react';
+import { AlertTriangle, BarChart3, Bot, GitBranch, GripVertical, LineChart, Maximize2, PieChart, Plus, ShieldCheck, SlidersHorizontal, Sparkles, Table2, Trash2, Wand2, X } from 'lucide-react';
 import { api, type AppBlockRecommendation, type DashboardDocumentResponse, type DashboardRunResponse } from '../../api/client';
 import { useNotebook } from '../../store/NotebookStore';
 import type { CellChartConfig, QueryResult, ThemeMode } from '../../store/types';
 import { ChartOutput, CHART_TYPE_OPTIONS, type ChartType } from '../output/ChartOutput';
 import { TableOutput } from '../output/TableOutput';
-import { AgentChatPanel } from '../agent/AgentChatPanel';
+import { UnifiedAgentRunPanel } from '../agent/UnifiedAgentRunPanel';
 import { renderMarkdown } from '../cells/MarkdownCellEditor';
 import { inferColumnKind, columnKindToChartRole, type ChartColumnRole } from '../../utils/column-kind';
 import { classifyColumns } from '../../utils/semantic-fields';
@@ -582,21 +582,31 @@ export function DashboardRenderer({
 
       {chatOpen && !onCopilotChange && (
         <aside style={dashboardChatDrawerStyle(chatExpanded)}>
-          <AgentChatPanel
-            title="Dashboard AI"
-            scopeHint="Scoped to this App dashboard first"
-            upstreamContext={chatContext}
-            themeMode={state.themeMode}
-            hideSqlByDefault
-            addToAppTarget={{ appId, dashboardId: dashboard.id }}
-            conversationTarget={{ appId, dashboardId: dashboard.id }}
-            expanded={chatExpanded}
-            onToggleExpanded={() => setChatExpanded((value) => !value)}
-            onClose={() => {
-              setChatOpen(false);
-              setChatExpanded(false);
-            }}
-          />
+          <div style={{ display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0 }}>
+            <div style={dashboardChatHeaderStyle}>
+              <div style={dashboardChatHeaderIconStyle}><Sparkles size={14} strokeWidth={2} /></div>
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <div style={{ fontSize: 13, fontWeight: 800, color: 'var(--dql-app-text, #0f172a)' }}>Dashboard AI</div>
+                <div style={{ fontSize: 11, color: 'var(--dql-app-text-muted, #64748b)', marginTop: 1 }}>Scoped to this App dashboard first</div>
+              </div>
+              <button type="button" onClick={() => setChatExpanded((value) => !value)} title={chatExpanded ? 'Collapse' : 'Expand'} style={dashboardChatIconBtnStyle}>
+                <Maximize2 size={14} strokeWidth={2} />
+              </button>
+              <button type="button" onClick={() => { setChatOpen(false); setChatExpanded(false); }} title="Close" style={dashboardChatIconBtnStyle}>
+                <X size={15} strokeWidth={2} />
+              </button>
+            </div>
+            <div style={{ flex: 1, minHeight: 0, display: 'flex' }}>
+              <UnifiedAgentRunPanel
+                themeMode={state.themeMode}
+                title="Dashboard AI"
+                scopeHint="Scoped to this App dashboard first"
+                audience="stakeholder"
+                workspaceContext={{ appId, dashboardId: dashboard.id, dashboardContext: chatContext }}
+                initialMode="auto"
+              />
+            </div>
+          </div>
         </aside>
       )}
 
@@ -2649,6 +2659,39 @@ function dashboardChatDrawerStyle(expanded: boolean): CSSProperties {
     background: 'var(--dql-app-surface, var(--color-bg, #fff))',
   };
 }
+
+const dashboardChatHeaderStyle: CSSProperties = {
+  display: 'flex',
+  alignItems: 'center',
+  gap: 10,
+  padding: '10px 12px',
+  borderBottom: '1px solid var(--dql-app-line-2, var(--border-color, rgba(0,0,0,0.1)))',
+  flexShrink: 0,
+};
+
+const dashboardChatHeaderIconStyle: CSSProperties = {
+  width: 26,
+  height: 26,
+  borderRadius: 7,
+  display: 'inline-flex',
+  alignItems: 'center',
+  justifyContent: 'center',
+  background: 'var(--dql-app-accent-soft, rgba(37,99,235,0.1))',
+  color: 'var(--dql-app-accent, #2563eb)',
+  flexShrink: 0,
+};
+
+const dashboardChatIconBtnStyle: CSSProperties = {
+  border: 'none',
+  background: 'transparent',
+  color: 'var(--dql-app-text-muted, #64748b)',
+  cursor: 'pointer',
+  display: 'inline-flex',
+  alignItems: 'center',
+  padding: 5,
+  borderRadius: 6,
+  flexShrink: 0,
+};
 
 const dialogInputStyle: CSSProperties = {
   width: '100%',

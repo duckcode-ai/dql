@@ -129,6 +129,13 @@ export interface ChatCellConfig {
   history: ChatMessage[];
   upstream?: string;
   lastProposal?: ChatBlockProposalSnapshot;
+  /**
+   * Unified-panel thread (ThreadItem[]) for chat cells running on the governed
+   * agent-run panel. Typed as `unknown[]` so `store/types` stays free of any
+   * component import; `ChatCell` casts it to `ThreadItem[]`. The legacy
+   * `history` field is retained for backward-compatible reads of older cells.
+   */
+  thread?: unknown[];
 }
 
 export type ParamType = 'text' | 'select' | 'date' | 'number';

@@ -27,7 +27,7 @@ import { MetricDetailPanel } from '../panels/MetricDetailPanel';
 import { SemanticSearchBar } from '../panels/SemanticSearchBar';
 import { SemanticTreeNode as TreeRow } from '../panels/SemanticTreeNode';
 import { AiSqlDraftDialog, type AiSqlDraftMeta } from '../agent/AiSqlDraftDialog';
-import { AgentChatPanel } from '../agent/AgentChatPanel';
+import { UnifiedAgentRunPanel } from '../agent/UnifiedAgentRunPanel';
 import { openAiBuild } from '../../utils/ai-build-bus';
 import {
   appendSemanticRefToQuery,
@@ -1192,33 +1192,19 @@ export function BlockStudio() {
               <X size={15} strokeWidth={2} />
             </button>
           </div>
-          <div style={{ flex: 1, minHeight: 0, padding: '0 16px 16px' }}>
-            <AgentChatPanel
+          <div style={{ flex: 1, minHeight: 0, display: 'flex' }}>
+            <UnifiedAgentRunPanel
+              themeMode={state.themeMode}
               title="Ask AI"
               scopeHint={activeBlockName ? `Current block: ${activeBlockName}` : 'Block Studio project context'}
-              upstreamContext={state.blockStudioDraft}
-              themeMode={state.themeMode}
-              hideSqlByDefault
-              embedded
-              showHeader={false}
+              workspaceContext={{ blockStudioDraft: state.blockStudioDraft, activeBlockPath: state.activeBlockPath }}
+              initialMode="auto"
+              onInsertSql={(sql, title) => handleAiSqlInsert(sql, { question: title ?? activeBlockName ?? 'analysis', title })}
               emptyHint="Ask whether a block already exists, what domain it belongs in, which parameters should stay dynamic, or what evidence is missing before certification."
-              inputPlaceholder="Ask about reusable blocks, semantic metrics, domains, lineage, or certification gaps..."
-              suggestions={[
-                {
-                  label: 'Find reusable blocks',
-                  prompt: 'Which certified DQL blocks already answer this kind of analysis, and what should be reused instead of duplicated?',
-                  icon: <Blocks size={12} strokeWidth={2} />,
-                },
-                {
-                  label: 'Choose domain',
-                  prompt: 'Based on the dbt and semantic metadata, which domain should this analysis belong to and why?',
-                  icon: <ShieldCheck size={12} strokeWidth={2} />,
-                },
-                {
-                  label: 'Review parameters',
-                  prompt: 'Which filters in this analysis should be dynamic parameters, static defaults, or business-controlled parameters?',
-                  icon: <Sparkles size={12} strokeWidth={2} />,
-                },
+              examplePrompts={[
+                { label: 'Find reusable blocks', prompt: 'Which certified DQL blocks already answer this kind of analysis, and what should be reused instead of duplicated?' },
+                { label: 'Choose domain', prompt: 'Based on the dbt and semantic metadata, which domain should this analysis belong to and why?' },
+                { label: 'Review parameters', prompt: 'Which filters in this analysis should be dynamic parameters, static defaults, or business-controlled parameters?' },
               ]}
             />
           </div>

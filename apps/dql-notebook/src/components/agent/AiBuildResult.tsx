@@ -1,7 +1,7 @@
 // Spec 14 (part B) — the unified AI BUILD surface.
 //
 // Build is split from Ask. Ask answers a question through the governed Q&A
-// loop (`AgentChatPanel`, unchanged). Build *generates* SQL/DQL and renders a
+// loop (`UnifiedAgentRunPanel`). Build *generates* SQL/DQL and renders a
 // clean ARTIFACT CARD — never a chat transcript, never the answer loop's
 // internals. This component owns:
 //   • a target toggle  Cell ⇄ Block

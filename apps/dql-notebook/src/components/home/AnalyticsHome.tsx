@@ -193,8 +193,8 @@ export function AnalyticsHome() {
             </div>
           </div>
         </div>
-        <div style={{ flex: 1, minHeight: 0, display: 'flex', justifyContent: 'center' }}>
-          <div style={{ width: 'min(860px, 100%)', minHeight: 0, display: 'flex' }}>
+        <div style={{ flex: 1, minHeight: 0, display: 'flex', justifyContent: 'flex-start', padding: '0 24px' }}>
+          <div style={{ width: 'min(1080px, 100%)', minHeight: 0, display: 'flex' }}>
             <UnifiedAgentRunPanel
               key={activeId}
               themeMode={state.themeMode}

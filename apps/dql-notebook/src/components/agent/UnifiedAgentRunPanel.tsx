@@ -41,10 +41,17 @@ export type ThreadItem =
   | { kind: 'user'; id: string; text: string }
   | { kind: 'run'; id: string; run: AgentRun };
 
+/** An empty-state suggestion chip: the label is shown, the prompt is submitted. */
+export type ExamplePrompt = { label: string; prompt: string };
+
 interface UnifiedAgentRunPanelProps {
   themeMode: ThemeMode;
   title?: string;
   scopeHint?: string;
+  /** Override the empty-state suggestion chips so a surface can offer tailored prompts. */
+  examplePrompts?: ExamplePrompt[];
+  /** Override the empty-state hint line above the suggestion chips. */
+  emptyHint?: string;
   notebookPath?: string;
   selectedObject?: AgentRunSelectedObject;
   workspaceContext?: Record<string, unknown>;
@@ -90,6 +97,8 @@ export function UnifiedAgentRunPanel({
   themeMode,
   title = 'AI Copilot',
   scopeHint = 'Auto routes to answer, research, SQL, block, or app',
+  examplePrompts,
+  emptyHint,
   notebookPath,
   selectedObject,
   workspaceContext,
@@ -267,6 +276,7 @@ export function UnifiedAgentRunPanel({
         .dql-hover:hover { filter: brightness(1.07); }
         .dql-hover:active { transform: translateY(0.5px); }
         .dql-lift:hover { transform: translateY(-1px); }
+        details > summary::-webkit-details-marker { display: none; }
       `}</style>
 
       <div style={{ flex: 1, minHeight: 0, overflow: 'auto', padding: '14px 16px', display: 'flex', flexDirection: 'column', gap: 12 }}>
@@ -274,12 +284,12 @@ export function UnifiedAgentRunPanel({
           <div style={{ margin: 'auto 0', display: 'grid', gap: 14, justifyItems: 'center', textAlign: 'center', color: t.textSecondary }}>
             <div style={largeIconShellStyle(t)}><Sparkles size={20} /></div>
             <div style={{ fontSize: 13, lineHeight: 1.5, maxWidth: 380, color: t.textSecondary }}>
-              Ask a question or dig deeper with research — every answer is grounded in your certified metrics and dbt lineage.
+              {emptyHint ?? DEFAULT_EMPTY_HINT}
             </div>
             <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', justifyContent: 'center', maxWidth: 520 }}>
-              {EXAMPLE_PROMPTS.map((ex) => (
-                <button key={ex} type="button" className="dql-hover dql-lift" onClick={() => { setInput(ex); requestAnimationFrame(() => inputRef.current?.focus()); }} style={suggestionChipStyle(t)}>
-                  {ex}
+              {(examplePrompts ?? EXAMPLE_PROMPTS).map((ex) => (
+                <button key={ex.label} type="button" className="dql-hover dql-lift" onClick={() => { setInput(ex.prompt); requestAnimationFrame(() => inputRef.current?.focus()); }} style={suggestionChipStyle(t)}>
+                  {ex.label}
                 </button>
               ))}
             </div>
@@ -378,11 +388,12 @@ export function UnifiedAgentRunPanel({
   );
 }
 
-const EXAMPLE_PROMPTS = [
-  'What is total revenue?',
-  'Why is revenue down by region?',
-  'Top customers by revenue this quarter',
-  'How have orders trended over the last 6 months?',
+const DEFAULT_EMPTY_HINT = 'Ask a question or dig deeper with research — every answer is grounded in your certified metrics and dbt lineage.';
+const EXAMPLE_PROMPTS: ExamplePrompt[] = [
+  { label: 'What is total revenue?', prompt: 'What is total revenue?' },
+  { label: 'Why is revenue down by region?', prompt: 'Why is revenue down by region?' },
+  { label: 'Top customers by revenue this quarter', prompt: 'Top customers by revenue this quarter' },
+  { label: 'How have orders trended over the last 6 months?', prompt: 'How have orders trended over the last 6 months?' },
 ];
 
 function routeActionLabel(route?: AgentRunRoute): string {
@@ -609,7 +620,9 @@ function RunCard({
         </div>
       ) : null}
 
-      <div style={{ fontSize: 12.5, lineHeight: 1.45, color: t.textSecondary }}>{run.summary}</div>
+      {run.summary && !(run.answer && sameText(run.summary, cleanAnswerText(run.answer))) ? (
+        <div style={{ fontSize: 12.5, lineHeight: 1.45, color: t.textSecondary }}>{run.summary}</div>
+      ) : null}
       {run.answer ? <div style={answerBoxStyle(t)}>{cleanAnswerText(run.answer)}</div> : null}
 
       {evidence.length > 0 ? (
@@ -645,11 +658,7 @@ function RunCard({
       {multiStep ? (
         <StepTrace steps={steps} t={t} />
       ) : (
-        <div style={{ display: 'grid', gap: 5 }}>
-          {run.evaluations.map((evaluation) => (
-            <EvaluationRow key={evaluation.id} evaluation={evaluation} t={t} />
-          ))}
-        </div>
+        <VerificationChecks evaluations={run.evaluations} t={t} />
       )}
 
       {(pinnable || showResearchDeeper || run.nextActions.length > 0) ? (
@@ -1047,6 +1056,41 @@ function TrustBadge({ run, t }: { run: AgentRun; t: Theme }) {
   );
 }
 
+/**
+ * Verification checks for a single-step run. The governance proof matters, but a
+ * stack of green "OK" lines clutters the stakeholder view. Any *flagged* check
+ * (review / blocking) stays inline so the reason is visible; the passed checks
+ * fold into one quiet, collapsed "N checks verified" disclosure.
+ */
+function VerificationChecks({ evaluations, t }: { evaluations: AgentRun['evaluations']; t: Theme }) {
+  if (evaluations.length === 0) return null;
+  const flagged = evaluations.filter((evaluation) => !evaluation.passed);
+  const passed = evaluations.filter((evaluation) => evaluation.passed);
+  return (
+    <div style={{ display: 'grid', gap: 6 }}>
+      {flagged.map((evaluation) => (
+        <EvaluationRow key={evaluation.id} evaluation={evaluation} t={t} />
+      ))}
+      {passed.length > 0 ? (
+        <details>
+          <summary
+            className="dql-hover"
+            style={{ cursor: 'pointer', listStyle: 'none', display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: 11, fontWeight: 700, color: t.textMuted, width: 'fit-content' }}
+          >
+            <ShieldCheck size={12} color={t.success} />
+            <span>{passed.length} check{passed.length > 1 ? 's' : ''} verified</span>
+          </summary>
+          <div style={{ display: 'grid', gap: 5, marginTop: 7 }}>
+            {passed.map((evaluation) => (
+              <EvaluationRow key={evaluation.id} evaluation={evaluation} t={t} />
+            ))}
+          </div>
+        </details>
+      ) : null}
+    </div>
+  );
+}
+
 function EvaluationRow({ evaluation, t }: { evaluation: AgentRun['evaluations'][number]; t: Theme }) {
   const color = evaluation.passed ? t.success : evaluation.severity === 'blocking' ? t.error : t.warning;
   return (
@@ -1156,6 +1200,12 @@ function cleanAnswerText(answer: string): string {
     .replace(/`([^`]+)`/g, '$1')
     .replace(/^_(.+?)_$/gm, '$1')
     .trim();
+}
+
+/** True when two strings say the same thing modulo whitespace/punctuation/case. */
+function sameText(a: string, b: string): boolean {
+  const norm = (s: string) => s.toLowerCase().replace(/[\s.,!?'"()`*_-]+/g, ' ').trim();
+  return norm(a) === norm(b);
 }
 
 /** Pull a QueryResult (columns/rows) out of an artifact payload, for visualization. */
