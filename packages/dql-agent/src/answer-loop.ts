@@ -956,6 +956,9 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
   let result: AgentResultPayload | undefined;
   let executionError: string | undefined;
   let repairAttempts = 0;
+  // The repair turn returns error-recovery prose ("the column X was not recognized…"),
+  // NOT a user-facing answer. Keep it for the trace only — never as the answer text.
+  let repairNarrative: string | undefined;
   if (input.executeGeneratedSql) {
     try {
       result = await input.executeGeneratedSql(parsed.sql);
@@ -986,7 +989,8 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
           const repaired = parseProposal(repairedRaw);
           if (repaired.sql) {
             repairAttempts += 1;
-            parsed.text = repaired.text || parsed.text;
+            // Adopt the corrected SQL, but do NOT let the repair prose become the answer.
+            repairNarrative = repaired.text?.trim() || undefined;
             parsed.sql = repaired.sql;
             parsed.viz = repaired.viz ?? parsed.viz;
             try {
@@ -1013,6 +1017,7 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
     assumptions: [
       'Generated SQL is an uncertified preview until an analyst reviews and promotes it.',
       ...(localProposal ? ['A local metadata planner selected a review-required SQL grain before provider generation.'] : []),
+      ...(repairNarrative ? [`Auto-corrected the query after an execution error: ${repairNarrative}`] : []),
       ...contextValidation.warnings,
       ...(executionError ? ['The preview execution error must be reviewed before reuse.'] : []),
     ],
@@ -1114,7 +1119,11 @@ Rules:
    grains, generate review-required SQL from supplied metadata and cite
    certified context as evidence.
 3. If you must generate SQL, return it inside a single \`\`\`sql code block.
-4. Provide a one-paragraph natural-language summary BEFORE the SQL block.
+4. Provide a one-paragraph natural-language summary BEFORE the SQL block. In it,
+   state your QUERY PLAN first: the grain (one row per WHAT), the measures and how
+   they aggregate, the dimensions/filters, and the exact join path + join keys
+   between the grounded tables. Then write SQL that matches that plan — an explicit
+   grain and join path prevents wrong-grain answers and fan-out (row-multiplying) joins.
 5. Suggest a visualization type from this list, on a line starting with "Viz:":
    line, bar, area, pie, single_value, table, pivot, kpi.
 6. NEVER fabricate column names that are not present in the supplied schema,

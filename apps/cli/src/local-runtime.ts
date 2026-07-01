@@ -799,6 +799,8 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
         intent: request.intent,
         isFollowUp: Boolean(request.history?.length),
         history: request.history,
+        // When the user explicitly picked research, investigate — don't collapse to one step.
+        forceInvestigate: request.requestedMode === 'research',
       });
       const needsClarification = Boolean(plan.followUp);
       const notebookPath = agentRunNotebookPath(request, runId);
@@ -864,6 +866,8 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
         }
       }
       const researchResultData = coerceNarrateResultData((researchRun as { resultPreview?: unknown })?.resultPreview);
+      // Executed cleanly against real data (rows present, no workspace/exec error) → grounded, not review-required.
+      const researchExecutedCleanly = Boolean(researchResultData) && !researchWorkspaceError && researchRun?.status !== 'error';
       const narration = !needsClarification && researchResultData
         ? await narrateForAgentRun({
             question: request.question,
@@ -889,7 +893,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
         summary,
         answer: plan.followUp?.question ?? narration?.summary ?? researchRun?.summary,
         status: needsClarification ? 'needs_clarification' : 'needs_review',
-        trustState: needsClarification ? 'not_applicable' : 'review_required',
+        trustState: needsClarification ? 'not_applicable' : (researchExecutedCleanly ? 'grounded' : 'review_required'),
         stopReason: needsClarification ? 'needs_clarification' : 'human_review_required',
         artifacts: needsClarification
           ? []
@@ -929,6 +933,16 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
                 ? 'Research workspace storage is unavailable; the plan remains available in this agent run.'
                 : 'No durable research record was created because the run needs clarification first.',
             { notebookPath, researchRunId: researchRun?.id, error: researchWorkspaceError },
+          ),
+          agentRunEvaluation(
+            'result-executed',
+            'Executed against data',
+            researchExecutedCleanly,
+            researchExecutedCleanly ? 'info' : 'warning',
+            researchExecutedCleanly
+              ? 'The query executed cleanly against real data and returned rows.'
+              : 'No executed result rows were available; the output stays exploratory pending review.',
+            { rowCount: researchResultData && typeof researchResultData === 'object' && Array.isArray((researchResultData as { rows?: unknown[] }).rows) ? (researchResultData as { rows: unknown[] }).rows.length : 0 },
           ),
         ],
         nextActions: needsClarification

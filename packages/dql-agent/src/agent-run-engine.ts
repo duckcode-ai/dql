@@ -33,7 +33,7 @@ export type AgentRunRoute =
   | "blocked";
 
 export type AgentRunStatus = "completed" | "needs_review" | "needs_clarification" | "blocked";
-export type AgentRunTrustState = "certified" | "review_required" | "blocked" | "not_applicable";
+export type AgentRunTrustState = "certified" | "grounded" | "review_required" | "blocked" | "not_applicable";
 
 export type AgentRunStopReason =
   | "certified_answer_found"
@@ -1219,6 +1219,13 @@ function trustStateFromEvaluations(
   if (evaluations.some((evaluation) => !evaluation.passed && evaluation.severity === "blocking")) return "blocked";
   if (route === "certified_answer") return "certified";
   if (route === "clarify") return "not_applicable";
+  // A generated/research answer that grounded to the catalog AND executed cleanly against
+  // real data is "grounded" — honest verification pending human certification (never auto-certified).
+  if (route === "research" || route === "generated_answer") {
+    const grounded = evaluations.find((evaluation) => evaluation.id === "catalog-grounding")?.passed;
+    const executed = evaluations.find((evaluation) => evaluation.id === "result-executed")?.passed;
+    if (grounded && executed) return "grounded";
+  }
   return fallback;
 }
 

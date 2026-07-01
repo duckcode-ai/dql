@@ -105,6 +105,8 @@ export async function planResearch(input: {
   intent?: MetadataAgentIntent;
   isFollowUp?: boolean;
   history?: Array<{ role: 'user' | 'assistant'; text: string }>;
+  /** The user explicitly asked to research/dig deeper — don't collapse to a single-step answer. */
+  forceInvestigate?: boolean;
 }): Promise<ResearchPlan> {
   // Prefer a metric that already has certified blocks (so the research plan can use
   // its time/breakdown dimensions), falling back to the best overall match.
@@ -128,19 +130,26 @@ export async function planResearch(input: {
     intent: input.intent ?? 'definition_lookup',
     signals: {
       metricScore: match?.score,
-      certifiedScore: metricBlocks.length > 0 ? 0.85 : undefined,
+      // Derive from the actual match, not a flat 0.85 that asserts certainty just
+      // because a block exists (that silently downgraded forced research to a single answer).
+      certifiedScore: metricBlocks.length > 0 ? (match?.score ?? undefined) : undefined,
       hasRetrieval: input.metrics.length > 0 || input.blocks.length > 0,
     },
     isFollowUp: input.isFollowUp,
     history: input.history,
   });
 
+  // When the user explicitly forced research, don't collapse to the single-step "answer"
+  // path — investigate. (clarify / compose_app remain honored — they are genuinely different.)
+  const action: typeof decision.action =
+    input.forceInvestigate && decision.action === 'answer' ? 'investigate' : decision.action;
+
   const sources = new Set<string>();
   if (metricName) sources.add(metricName);
   for (const b of metricBlocks) sources.add(b.name);
 
   // ── compose_app: hand off to the app planner (P1). ───────────────────────────
-  if (decision.action === 'compose_app') {
+  if (action === 'compose_app') {
     return {
       decision: 'compose_app',
       confidence: decision.confidence,
@@ -156,7 +165,7 @@ export async function planResearch(input: {
   }
 
   // ── clarify: ask before researching, with concrete options. ──────────────────
-  if (decision.action === 'clarify') {
+  if (action === 'clarify') {
     const followUp = buildFollowUp(input, match, metricBlocks, decision.clarifyingQuestion);
     return {
       decision: 'clarify',
@@ -170,7 +179,7 @@ export async function planResearch(input: {
   }
 
   // ── investigate: a grounded, multi-step ReAct research trace. ────────────────
-  if (decision.action === 'investigate') {
+  if (action === 'investigate') {
     const steps: ResearchStep[] = [];
     const label = metricName ? humanize(metricName) : humanize(input.question);
     if (metricName) {

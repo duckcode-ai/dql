@@ -230,6 +230,72 @@ export class KGStore {
     return rows.map((r) => rowToNode(r));
   }
 
+  /**
+   * Adjacent nodes to `nodeId` over `kg_edges` (both directions by default). This is
+   * the traversal API the cross-domain reasoning tool uses to relate entities/models
+   * across domains — the lineage graph existed but had no agent-facing traversal.
+   */
+  neighbors(
+    nodeId: string,
+    options: { edgeKinds?: KGEdge['kind'][]; direction?: 'out' | 'in' | 'both'; limit?: number } = {},
+  ): Array<{ node: KGNode; edge: KGEdge; direction: 'out' | 'in' }> {
+    const { edgeKinds, direction = 'both', limit = 50 } = options;
+    const kindFilter = edgeKinds && edgeKinds.length > 0
+      ? ` AND kind IN (${edgeKinds.map(() => '?').join(', ')})`
+      : '';
+    type Neighbor = { node: KGNode; edge: KGEdge; direction: 'out' | 'in' };
+    const collect = (dir: 'out' | 'in'): Neighbor[] => {
+      const column = dir === 'out' ? 'src' : 'dst';
+      const rows = this.db.prepare(
+        `SELECT src, dst, kind, weight FROM kg_edges WHERE ${column} = ?${kindFilter} LIMIT ?`,
+      ).all(nodeId, ...(edgeKinds ?? []), limit) as Array<{ src: string; dst: string; kind: string; weight: number }>;
+      const out: Neighbor[] = [];
+      for (const r of rows) {
+        const node = this.getNode(dir === 'out' ? r.dst : r.src);
+        if (node) out.push({ node, edge: { src: r.src, dst: r.dst, kind: r.kind as KGEdge['kind'], weight: r.weight }, direction: dir });
+      }
+      return out;
+    };
+    const outEdges = direction === 'in' ? [] : collect('out');
+    const inEdges = direction === 'out' ? [] : collect('in');
+    // Interleave so a hub node's inbound (cross-domain bridge) edges are never starved
+    // by a large outbound fan-out when the combined result is capped at `limit`.
+    const merged: Neighbor[] = [];
+    for (let i = 0; i < Math.max(outEdges.length, inEdges.length); i += 1) {
+      if (i < outEdges.length) merged.push(outEdges[i]);
+      if (i < inEdges.length) merged.push(inEdges[i]);
+    }
+    return merged.slice(0, limit);
+  }
+
+  /**
+   * Shortest edge path between two nodes (bounded BFS over `kg_edges`, undirected).
+   * Returns the node-id path or null if none within `maxDepth`. Used to discover a
+   * cross-domain join route (e.g. revenue → orders → customers → support tickets).
+   */
+  findJoinPath(fromNodeId: string, toNodeId: string, maxDepth = 4): string[] | null {
+    if (fromNodeId === toNodeId) return [fromNodeId];
+    const visited = new Set<string>([fromNodeId]);
+    let frontier: Array<{ id: string; path: string[] }> = [{ id: fromNodeId, path: [fromNodeId] }];
+    for (let depth = 0; depth < maxDepth && frontier.length > 0; depth += 1) {
+      const next: Array<{ id: string; path: string[] }> = [];
+      for (const { id, path } of frontier) {
+        const rows = this.db.prepare(
+          'SELECT dst AS other FROM kg_edges WHERE src = ? UNION SELECT src AS other FROM kg_edges WHERE dst = ?',
+        ).all(id, id) as Array<{ other: string }>;
+        for (const { other } of rows) {
+          if (other === toNodeId) return [...path, other];
+          if (!visited.has(other)) {
+            visited.add(other);
+            next.push({ id: other, path: [...path, other] });
+          }
+        }
+      }
+      frontier = next;
+    }
+    return null;
+  }
+
   recordFeedback(row: KGFeedbackRow): void {
     this.db.prepare(`
       INSERT INTO kg_feedback (id, ts, user, question, answer_kind, block_id, rating, comment)

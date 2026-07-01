@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { KGStore } from './sqlite-fts.js';
-import type { KGNode } from './types.js';
+import type { KGNode, KGEdge } from './types.js';
 
 function nodes(): KGNode[] {
   return [
@@ -150,6 +150,52 @@ describe('KGStore', () => {
     kg.rebuild(nodes(), []);
     const hits = kg.search({ query: 'Explain this current query' });
     expect(hits).toHaveLength(0);
+    kg.close();
+  });
+});
+
+describe('KGStore cross-domain traversal', () => {
+  it('finds neighbors and a cross-domain join path over kg_edges', () => {
+    const kg = new KGStore(dbPath);
+    // growth: arr -> revenue_total ; retention: churn_logo ; bridged by a shared entity.
+    kg.rebuild(nodes(), [
+      { src: 'metric:arr', dst: 'block:revenue_total', kind: 'defines' },
+      { src: 'block:revenue_total', dst: 'entity:customer', kind: 'reads_from' },
+      { src: 'block:churn_logo', dst: 'entity:customer', kind: 'reads_from' },
+    ]);
+
+    const neighbors = kg.neighbors('block:revenue_total');
+    const neighborIds = neighbors.map((n) => n.node.nodeId).sort();
+    // both the inbound 'defines' (metric:arr) and outbound 'reads_from' (entity:customer)
+    expect(neighborIds).toContain('metric:arr');
+
+    const outOnly = kg.neighbors('block:revenue_total', { direction: 'out' }).map((n) => n.node.nodeId);
+    expect(outOnly).not.toContain('metric:arr');
+
+    // cross-domain join: growth revenue_total <-> retention churn_logo via the shared customer entity.
+    const path = kg.findJoinPath('block:revenue_total', 'block:churn_logo');
+    expect(path).toEqual(['block:revenue_total', 'entity:customer', 'block:churn_logo']);
+
+    expect(kg.findJoinPath('metric:arr', 'metric:arr')).toEqual(['metric:arr']);
+    expect(kg.findJoinPath('block:revenue_total', 'metric:nonexistent')).toBeNull();
+    kg.close();
+  });
+
+  it('does not starve inbound edges when outbound edges exceed the limit', () => {
+    const kg = new KGStore(dbPath);
+    const hubNodes: KGNode[] = [
+      { nodeId: 'entity:customer', kind: 'entity', name: 'customer', domain: 'shared' },
+      { nodeId: 'block:churn', kind: 'block', name: 'churn', domain: 'retention' },
+      ...Array.from({ length: 5 }, (_, i) => ({ nodeId: `block:out${i}`, kind: 'block' as const, name: `out${i}`, domain: 'growth' })),
+    ];
+    const edges: KGEdge[] = [
+      { src: 'block:churn', dst: 'entity:customer', kind: 'reads_from' }, // the lone inbound (cross-domain) edge
+      ...Array.from({ length: 5 }, (_, i) => ({ src: 'entity:customer', dst: `block:out${i}`, kind: 'reads_from' as const })),
+    ];
+    kg.rebuild(hubNodes, edges);
+    // With a tight limit, the 5 outbound edges must NOT starve the single inbound bridge.
+    const ids = kg.neighbors('entity:customer', { limit: 4 }).map((n) => n.node.nodeId);
+    expect(ids).toContain('block:churn');
     kg.close();
   });
 });
