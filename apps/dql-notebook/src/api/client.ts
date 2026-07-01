@@ -411,7 +411,7 @@ export type AgentRunRoute =
   | 'clarify'
   | 'blocked';
 export type AgentRunStatus = 'completed' | 'needs_review' | 'needs_clarification' | 'blocked';
-export type AgentRunTrustState = 'certified' | 'review_required' | 'blocked' | 'not_applicable';
+export type AgentRunTrustState = 'certified' | 'grounded' | 'review_required' | 'blocked' | 'not_applicable';
 export type AgentRunStopReason =
   | 'certified_answer_found'
   | 'generated_review_required'
@@ -3273,6 +3273,12 @@ export const api = {
     } catch {
       return [];
     }
+  },
+
+  /** Like listApps but throws on failure, so callers can tell "no apps" from "load failed". */
+  async listAppsStrict(): Promise<AppSummary[]> {
+    const { apps } = await request<{ apps: AppSummary[] }>('/api/apps');
+    return apps;
   },
 
   async recommendAppBlocks(input: {

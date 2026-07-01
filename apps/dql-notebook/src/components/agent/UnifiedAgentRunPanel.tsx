@@ -1,5 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
+  ArrowRight,
   Blocks,
   CheckCircle2,
   ChevronDown,
@@ -11,7 +12,7 @@ import {
   Lightbulb,
   ListTree,
   Loader2,
-  Pin,
+  Plus,
   Route,
   Send,
   ShieldAlert,
@@ -34,9 +35,9 @@ import {
 import { themes, type Theme, type ThemeMode } from '../../themes/notebook-theme';
 import { ChartOutput } from '../output/ChartOutput';
 import { TableOutput } from '../output/TableOutput';
-import type { QueryResult } from '../../store/types';
+import type { QueryResult, AppSummary } from '../../store/types';
 
-type ThreadItem =
+export type ThreadItem =
   | { kind: 'user'; id: string; text: string }
   | { kind: 'run'; id: string; run: AgentRun };
 
@@ -49,12 +50,20 @@ interface UnifiedAgentRunPanelProps {
   workspaceContext?: Record<string, unknown>;
   initialMode?: AgentRunRequestedMode;
   initialInput?: string;
+  /** Seed the thread (for resuming a saved conversation). */
+  initialItems?: ThreadItem[];
+  /** Fires whenever the thread changes, so a host can persist the conversation. */
+  onItemsChange?: (items: ThreadItem[]) => void;
   /** 'stakeholder' (consumption-only) hides authoring modes + adds the certify handoff. */
   audience?: AgentRunAudience;
   autoRun?: { text: string; mode?: AgentRunRequestedMode; nonce: number };
   onInsertSql?: (sql: string, title?: string) => void;
   onOpenBlock?: (path: string, name?: string) => void;
   onOpenResearch?: (id: string, notebookPath?: string) => void;
+  /** Navigate into an app/dashboard (used by the "Added to app" success link). */
+  onOpenApp?: (appId: string, dashboardId?: string) => void;
+  /** Reports whether a run is in flight, so a host can avoid unmounting mid-run. */
+  onRunningChange?: (running: boolean) => void;
 }
 
 const ANALYST_MODE_OPTIONS: Array<{ value: AgentRunRequestedMode; label: string; icon: React.ReactNode }> = [
@@ -63,14 +72,6 @@ const ANALYST_MODE_OPTIONS: Array<{ value: AgentRunRequestedMode; label: string;
   { value: 'research', label: 'Research', icon: <FileSearch size={13} /> },
   { value: 'sql', label: 'SQL', icon: <Code2 size={13} /> },
   { value: 'block', label: 'Block', icon: <Blocks size={13} /> },
-  { value: 'app', label: 'App', icon: <LayoutDashboard size={13} /> },
-];
-
-// Stakeholders never author SQL/blocks — only consumption routes.
-const STAKEHOLDER_MODE_OPTIONS: Array<{ value: AgentRunRequestedMode; label: string; icon: React.ReactNode }> = [
-  { value: 'auto', label: 'Auto', icon: <Route size={13} /> },
-  { value: 'ask', label: 'Ask', icon: <Sparkles size={13} /> },
-  { value: 'research', label: 'Research', icon: <FileSearch size={13} /> },
   { value: 'app', label: 'App', icon: <LayoutDashboard size={13} /> },
 ];
 
@@ -94,19 +95,25 @@ export function UnifiedAgentRunPanel({
   workspaceContext,
   initialMode = 'auto',
   initialInput = '',
+  initialItems,
+  onItemsChange,
   audience = 'analyst',
   autoRun,
   onInsertSql,
   onOpenBlock,
   onOpenResearch,
+  onOpenApp,
+  onRunningChange,
 }: UnifiedAgentRunPanelProps): JSX.Element {
   const t = themes[themeMode];
-  const modeOptions = audience === 'stakeholder' ? STAKEHOLDER_MODE_OPTIONS : ANALYST_MODE_OPTIONS;
+  // Stakeholders get a single auto-routed box (no mode chips); analysts keep the modes.
+  const isStakeholder = audience === 'stakeholder';
+  const modeOptions = ANALYST_MODE_OPTIONS;
   const [mode, setMode] = useState<AgentRunRequestedMode>(initialMode);
+  const [deepResearch, setDeepResearch] = useState(false);
   const [certifying, setCertifying] = useState<Record<string, 'pending' | 'sent' | 'error'>>({});
-  const [pinning, setPinning] = useState<Record<string, 'pending' | 'sent' | 'error'>>({});
   const [input, setInput] = useState(initialInput);
-  const [items, setItems] = useState<ThreadItem[]>([]);
+  const [items, setItems] = useState<ThreadItem[]>(initialItems ?? []);
   const [runningEvents, setRunningEvents] = useState<AgentRunEvent[]>([]);
   const [running, setRunning] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -130,6 +137,14 @@ export function UnifiedAgentRunPanel({
     )).slice(-12),
     [items],
   );
+
+  // Report thread changes to a host (for conversation persistence) without
+  // re-subscribing when the callback identity changes each render.
+  const onItemsChangeRef = useRef(onItemsChange);
+  onItemsChangeRef.current = onItemsChange;
+  useEffect(() => {
+    onItemsChangeRef.current?.(items);
+  }, [items]);
 
   const submit = async (textOverride?: string, modeOverride?: AgentRunRequestedMode) => {
     const text = (textOverride ?? input).trim();
@@ -174,6 +189,20 @@ export function UnifiedAgentRunPanel({
     }
   };
 
+  // Submit the box; only clear the one-shot deep-research toggle when a run will
+  // actually start (mirror the send button's guard so a no-op Enter can't lose it).
+  const handleSubmit = () => {
+    const willRun = Boolean(input.trim()) && !running;
+    void submit(undefined, isStakeholder && deepResearch ? 'research' : undefined);
+    if (willRun && deepResearch) setDeepResearch(false);
+  };
+
+  const onRunningChangeRef = useRef(onRunningChange);
+  onRunningChangeRef.current = onRunningChange;
+  useEffect(() => {
+    onRunningChangeRef.current?.(running);
+  }, [running]);
+
   useEffect(() => {
     if (!autoRun?.text || running) return;
     if (lastAutoRunNonceRef.current === autoRun.nonce) return;
@@ -202,29 +231,11 @@ export function UnifiedAgentRunPanel({
     }
   };
 
-  const appId = typeof workspaceContext?.appId === 'string' ? workspaceContext.appId : undefined;
-  const dashboardId = typeof workspaceContext?.dashboardId === 'string' ? workspaceContext.dashboardId : undefined;
-  const canPin = Boolean(appId && dashboardId);
-
-  const pinToApp = async (run: AgentRun) => {
-    if (!appId || !dashboardId) return;
-    if (pinning[run.id] === 'pending' || pinning[run.id] === 'sent') return;
-    setPinning((current) => ({ ...current, [run.id]: 'pending' }));
-    try {
-      const cleanTitle = run.question.replace(/^\/\w+\s+/, '').slice(0, 80);
-      const result = await api.createAiPin(appId, {
-        dashboardId,
-        title: cleanTitle,
-        answer: run.answer ?? run.summary,
-        question: run.question,
-        sql: answerSqlFromRun(run),
-        certification: run.trustState === 'certified' ? 'certified' : 'ai_generated',
-        reviewStatus: run.trustState === 'certified' ? 'certified' : 'needs_review',
-      });
-      setPinning((current) => ({ ...current, [run.id]: result.ok ? 'sent' : 'error' }));
-    } catch {
-      setPinning((current) => ({ ...current, [run.id]: 'error' }));
-    }
+  // Pre-selected app target when the panel is opened inside an app (the global
+  // rail); on the Ask home there is none and the picker lists/creates apps.
+  const appContext = {
+    appId: typeof workspaceContext?.appId === 'string' ? workspaceContext.appId : undefined,
+    dashboardId: typeof workspaceContext?.dashboardId === 'string' ? workspaceContext.dashboardId : undefined,
   };
 
   const handleNextAction = (run: AgentRun, action: AgentRun['nextActions'][number]) => {
@@ -232,8 +243,8 @@ export function UnifiedAgentRunPanel({
       void requestCertification(run);
       return;
     }
-    if (action.id === 'pin-to-app') {
-      void pinToApp(run);
+    if (action.id === 'research-deeper') {
+      void submit(run.question, 'research');
       return;
     }
     const nextMode = routeToMode(action.route);
@@ -244,7 +255,19 @@ export function UnifiedAgentRunPanel({
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0, flex: 1, minWidth: 0, width: '100%', background: t.cellBg }}>
-      <style>{`@keyframes dql-agent-run-spin { to { transform: rotate(360deg); } } @keyframes dql-agent-dots { 0% { content: ''; } 25% { content: '.'; } 50% { content: '..'; } 75% { content: '...'; } } .dql-agent-dots::after { content: ''; animation: dql-agent-dots 1.4s steps(1) infinite; } @keyframes dql-agent-sweep { 0% { transform: translateX(-130%); } 100% { transform: translateX(330%); } } @keyframes dql-agent-fadein { from { opacity: 0; transform: translateY(2px); } to { opacity: 1; transform: none; } } @keyframes dql-agent-pulse { 0%,100% { opacity: 1; transform: scale(1); } 50% { opacity: 0.35; transform: scale(0.8); } }`}</style>
+      <style>{`
+        @keyframes dql-agent-run-spin { to { transform: rotate(360deg); } }
+        @keyframes dql-agent-fadein { from { opacity: 0; transform: translateY(3px); } to { opacity: 1; transform: none; } }
+        @keyframes dql-shimmer { 0% { background-position: 200% 0; } 100% { background-position: -200% 0; } }
+        @keyframes dql-orb { 0%, 100% { box-shadow: 0 0 0 0 ${t.accent}00; } 50% { box-shadow: 0 0 13px 1px ${t.accent}66; } }
+        @keyframes dql-pip { 0%, 100% { transform: scale(1); opacity: 1; } 50% { transform: scale(1.55); opacity: 0.5; } }
+        @keyframes dql-step-in { from { opacity: 0; transform: translateY(2px); } to { opacity: 1; transform: none; } }
+        @keyframes dql-glyph { 0%, 100% { transform: scale(1); } 50% { transform: scale(1.12); } }
+        .dql-hover { transition: filter .15s ease, transform .12s ease, box-shadow .15s ease, background .15s ease, color .15s ease, border-color .15s ease; }
+        .dql-hover:hover { filter: brightness(1.07); }
+        .dql-hover:active { transform: translateY(0.5px); }
+        .dql-lift:hover { transform: translateY(-1px); }
+      `}</style>
 
       <div style={{ flex: 1, minHeight: 0, overflow: 'auto', padding: '14px 16px', display: 'flex', flexDirection: 'column', gap: 12 }}>
         {items.length === 0 && !running ? (
@@ -255,7 +278,7 @@ export function UnifiedAgentRunPanel({
             </div>
             <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', justifyContent: 'center', maxWidth: 520 }}>
               {EXAMPLE_PROMPTS.map((ex) => (
-                <button key={ex} type="button" onClick={() => { setInput(ex); requestAnimationFrame(() => inputRef.current?.focus()); }} style={suggestionChipStyle(t)}>
+                <button key={ex} type="button" className="dql-hover dql-lift" onClick={() => { setInput(ex); requestAnimationFrame(() => inputRef.current?.focus()); }} style={suggestionChipStyle(t)}>
                   {ex}
                 </button>
               ))}
@@ -272,8 +295,8 @@ export function UnifiedAgentRunPanel({
             t={t}
             themeMode={themeMode}
             certifyState={certifying[item.run.id]}
-            pinState={pinning[item.run.id]}
-            canPin={canPin}
+            appContext={appContext}
+            onOpenApp={onOpenApp}
             onInsertSql={onInsertSql}
             onOpenBlock={onOpenBlock}
             onOpenResearch={onOpenResearch}
@@ -287,41 +310,67 @@ export function UnifiedAgentRunPanel({
       {error ? <div style={{ margin: '0 16px 8px', color: t.error, fontSize: 12 }}>{error}</div> : null}
 
       <div style={{ padding: '10px 16px 14px', borderTop: `1px solid ${t.headerBorder}`, display: 'grid', gap: 8 }}>
-        <div role="group" aria-label="Copilot mode" style={{ display: 'flex', gap: 4, flexWrap: 'wrap' }}>
-          {modeOptions.map((option) => {
-            const active = mode === option.value;
-            return (
-              <button
-                key={option.value}
-                type="button"
-                onClick={() => setMode(option.value)}
-                aria-pressed={active}
-                style={modeChipStyle(t, active)}
-              >
-                {option.icon}
-                <span>{option.label}</span>
-              </button>
-            );
-          })}
-        </div>
+        {isStakeholder ? (
+          <div style={{ display: 'flex', alignItems: 'center', gap: 9 }}>
+            <button
+              type="button"
+              className="dql-hover"
+              aria-pressed={deepResearch}
+              onClick={() => setDeepResearch((v) => !v)}
+              style={digDeeperStyle(t, deepResearch)}
+              title="Run a slower, multi-step investigation instead of a quick answer."
+            >
+              <FileSearch size={13} />
+              <span>Dig deeper</span>
+            </button>
+            <span style={{ fontSize: 11, color: t.textMuted }}>
+              {deepResearch ? 'Your next question runs a deep investigation.' : 'Auto-routes to the best answer — research, metric, or app.'}
+            </span>
+          </div>
+        ) : (
+          <div role="group" aria-label="Copilot mode" style={{ display: 'flex', gap: 4, flexWrap: 'wrap' }}>
+            {modeOptions.map((option) => {
+              const active = mode === option.value;
+              return (
+                <button
+                  key={option.value}
+                  type="button"
+                  className="dql-hover"
+                  onClick={() => setMode(option.value)}
+                  aria-pressed={active}
+                  style={modeChipStyle(t, active)}
+                >
+                  {option.icon}
+                  <span>{option.label}</span>
+                </button>
+              );
+            })}
+          </div>
+        )}
         <div style={{ display: 'flex', gap: 8, alignItems: 'flex-end' }}>
           <textarea
             ref={inputRef}
             value={input}
             onChange={(event) => setInput(event.target.value)}
             rows={2}
-            placeholder={mode === 'auto' ? 'Ask anything about your data…' : `Ask in ${mode} mode…`}
+            placeholder={isStakeholder || mode === 'auto' ? 'Ask anything about your data…' : `Ask in ${mode} mode…`}
             onKeyDown={(event) => {
               if (event.key === 'Enter' && !event.shiftKey) {
                 event.preventDefault();
-                void submit();
+                handleSubmit();
               }
             }}
             style={inputStyle(t)}
           />
-          <button type="button" onClick={() => void submit()} disabled={!input.trim() || running} style={sendButtonStyle(t, Boolean(input.trim()) && !running)}>
-            {running ? <Loader2 size={14} style={{ animation: 'dql-agent-run-spin 0.8s linear infinite' }} /> : <Send size={14} />}
-            <span>Run</span>
+          <button
+            type="button"
+            className="dql-hover dql-lift"
+            onClick={handleSubmit}
+            disabled={!input.trim() || running}
+            style={sendButtonStyle(t, Boolean(input.trim()) && !running)}
+          >
+            {running ? <Loader2 size={15} style={{ animation: 'dql-agent-run-spin 0.8s linear infinite' }} /> : <Send size={15} />}
+            <span>{running ? 'Working' : isStakeholder ? 'Ask' : 'Run'}</span>
           </button>
         </div>
       </div>
@@ -369,28 +418,132 @@ function currentActionLabel(events: AgentRunEvent[]): string {
   return 'Working';
 }
 
-/** Clean, animated progress — a current-action label + an indeterminate sweep bar. */
+const ACTIVITY_STAGES: Array<{ key: 'plan' | 'work' | 'verify'; label: string }> = [
+  { key: 'plan', label: 'Plan' },
+  { key: 'work', label: 'Work' },
+  { key: 'verify', label: 'Verify' },
+];
+
+/** Which high-level stage the agent is in (0 plan → 1 work → 2 verify). */
+function deriveStage(events: AgentRunEvent[]): number {
+  let stage = 0;
+  for (const event of events) {
+    switch (event.type) {
+      case 'route.decided':
+      case 'executor.started':
+      case 'step.started':
+      case 'repair.attempted':
+      case 'escalated':
+        stage = Math.max(stage, 1);
+        break;
+      case 'evaluation.recorded':
+        stage = Math.max(stage, 2);
+        break;
+      default:
+        break;
+    }
+  }
+  return stage;
+}
+
+/** An icon matching what the agent is doing right now. */
+function phaseIconFor(events: AgentRunEvent[]): typeof Sparkles {
+  for (let i = events.length - 1; i >= 0; i -= 1) {
+    const event = events[i];
+    switch (event.type) {
+      case 'evaluation.recorded': return ShieldCheck;
+      case 'repair.attempted':
+      case 'escalated': return Wrench;
+      case 'executor.started':
+      case 'route.decided':
+        switch (event.route) {
+          case 'research': return FileSearch;
+          case 'sql_cell': return Code2;
+          case 'app_build': return LayoutDashboard;
+          case 'dql_block_draft': return Blocks;
+          case 'certified_answer':
+          case 'generated_answer': return Sparkles;
+          default: return Sparkles;
+        }
+      case 'plan.created': return Lightbulb;
+      default: break;
+    }
+  }
+  return Sparkles;
+}
+
+/**
+ * Live agent activity — boxless. A spinning halo + phase icon, a shimmering
+ * action headline, a Plan→Work→Verify tracker, and the latest step line.
+ * Expresses *what the agent is doing* rather than a generic progress bar.
+ */
 function RunProgress({ events, t }: { events: AgentRunEvent[]; t: Theme }) {
   const action = currentActionLabel(events);
+  const stage = deriveStage(events);
+  const Icon = phaseIconFor(events);
+  const latest = events.length ? events[events.length - 1].message : '';
   return (
-    <div style={{ ...assistantBubbleStyle(t), alignItems: 'stretch', flexDirection: 'column', gap: 8, maxWidth: '100%' }}>
-      <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-        <span style={{ width: 7, height: 7, borderRadius: 999, background: t.accent, flex: '0 0 auto', animation: 'dql-agent-pulse 1.2s ease-in-out infinite' }} />
-        <span key={action} className="dql-agent-dots" style={{ fontSize: 12.5, fontWeight: 800, color: t.textPrimary, animation: 'dql-agent-fadein 0.25s ease-out' }}>{action}</span>
+    <div style={{ alignSelf: 'stretch', display: 'flex', gap: 12, padding: '4px 2px 8px', animation: 'dql-agent-fadein 0.3s ease-out' }}>
+      <div style={{ position: 'relative', width: 34, height: 34, flex: '0 0 auto' }}>
+        <span
+          style={{
+            position: 'absolute', inset: -3, borderRadius: '50%',
+            background: `conic-gradient(from 0deg, ${t.accent}00 0%, ${t.accent}00 55%, ${t.accent} 100%)`,
+            WebkitMask: 'radial-gradient(farthest-side, transparent calc(100% - 2px), #000 calc(100% - 2px))',
+            mask: 'radial-gradient(farthest-side, transparent calc(100% - 2px), #000 calc(100% - 2px))',
+            animation: 'dql-agent-run-spin 1s linear infinite',
+          }}
+        />
+        <span
+          style={{
+            position: 'absolute', inset: 0, borderRadius: '50%',
+            background: `${t.accent}14`, border: `1px solid ${t.accent}33`, color: t.accent,
+            display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+            animation: 'dql-orb 1.8s ease-in-out infinite',
+          }}
+        >
+          <span style={{ display: 'inline-flex', animation: 'dql-glyph 1.8s ease-in-out infinite' }}><Icon size={15} /></span>
+        </span>
       </div>
-      <div style={{ position: 'relative', height: 4, borderRadius: 999, background: `${t.accent}1f`, overflow: 'hidden' }}>
-        <div style={{ position: 'absolute', top: 0, bottom: 0, width: '38%', borderRadius: 999, background: t.accent, animation: 'dql-agent-sweep 1.25s cubic-bezier(0.4,0,0.2,1) infinite' }} />
+
+      <div style={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', gap: 6, paddingTop: 1 }}>
+        <span
+          key={action}
+          style={{
+            fontSize: 13.5, fontWeight: 750, letterSpacing: '-0.01em',
+            backgroundImage: `linear-gradient(100deg, ${t.textPrimary} 25%, ${t.accent} 50%, ${t.textPrimary} 75%)`,
+            backgroundSize: '220% 100%', WebkitBackgroundClip: 'text', backgroundClip: 'text',
+            color: 'transparent', WebkitTextFillColor: 'transparent',
+            animation: 'dql-shimmer 2.4s linear infinite',
+          }}
+        >
+          {action}
+        </span>
+
+        <div style={{ display: 'flex', alignItems: 'center', gap: 7 }}>
+          {ACTIVITY_STAGES.map((s, i) => {
+            const done = i < stage;
+            const active = i === stage;
+            return (
+              <React.Fragment key={s.key}>
+                {i > 0 ? <span style={{ width: 13, height: 1.5, borderRadius: 2, background: done || active ? `${t.accent}66` : t.cellBorder }} /> : null}
+                <span style={{ display: 'inline-flex', alignItems: 'center', gap: 5, fontSize: 10.5, fontWeight: 700, letterSpacing: '0.02em', color: done ? t.accent : active ? t.textPrimary : t.textMuted }}>
+                  {done ? (
+                    <CheckCircle2 size={11} />
+                  ) : (
+                    <span style={{ width: 6, height: 6, borderRadius: 999, background: active ? t.accent : t.cellBorder, animation: active ? 'dql-pip 1s ease-in-out infinite' : 'none' }} />
+                  )}
+                  {s.label}
+                </span>
+              </React.Fragment>
+            );
+          })}
+        </div>
+
+        {latest ? (
+          <span key={latest} style={{ fontSize: 11, color: t.textMuted, lineHeight: 1.4, animation: 'dql-step-in 0.3s ease-out' }}>{latest}</span>
+        ) : null}
       </div>
-      {events.length > 0 ? (
-        <details>
-          <summary style={{ cursor: 'pointer', fontSize: 10.5, color: t.textMuted, listStyle: 'none' }}>Details</summary>
-          <div style={{ display: 'grid', gap: 3, marginTop: 5 }}>
-            {events.slice(-6).map((event) => (
-              <span key={event.id} style={{ fontSize: 10.5, color: t.textMuted, lineHeight: 1.35 }}>{event.message}</span>
-            ))}
-          </div>
-        </details>
-      ) : null}
     </div>
   );
 }
@@ -400,8 +553,8 @@ function RunCard({
   t,
   themeMode,
   certifyState,
-  pinState,
-  canPin,
+  appContext,
+  onOpenApp,
   onInsertSql,
   onOpenBlock,
   onOpenResearch,
@@ -411,8 +564,8 @@ function RunCard({
   t: Theme;
   themeMode: ThemeMode;
   certifyState?: 'pending' | 'sent' | 'error';
-  pinState?: 'pending' | 'sent' | 'error';
-  canPin?: boolean;
+  appContext?: { appId?: string; dashboardId?: string };
+  onOpenApp?: (appId: string, dashboardId?: string) => void;
   onInsertSql?: (sql: string, title?: string) => void;
   onOpenBlock?: (path: string, name?: string) => void;
   onOpenResearch?: (id: string, notebookPath?: string) => void;
@@ -423,9 +576,13 @@ function RunCard({
   const isLlmPlan = run.plan?.source === 'llm';
   const evidence = evidenceFromRun(run);
   const trustNote = trustExplainer(run);
-  // Pin only a result worth pinning (an answer/research artifact), in an app context.
-  const pinnable = Boolean(canPin) && run.status !== 'blocked' && run.status !== 'needs_clarification'
+  // A result worth saving: a real answer or research artifact (not blocked/clarify).
+  const pinnable = run.status !== 'blocked' && run.status !== 'needs_clarification'
     && (Boolean(run.answer) || run.artifacts.some((a) => a.kind === 'answer' || a.kind === 'research_run'));
+  // Offer a one-click deepening on quick answers (unless the agent already routed deep).
+  const isAnswer = run.route === 'certified_answer' || run.route === 'generated_answer';
+  const hasResearchAction = run.nextActions.some((a) => a.route === 'research');
+  const showResearchDeeper = isAnswer && pinnable && !hasResearchAction;
   return (
     <div style={runCardStyle(t)}>
       <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
@@ -439,7 +596,7 @@ function RunCard({
 
       {trustNote ? (
         <div style={{ display: 'flex', gap: 6, alignItems: 'flex-start', fontSize: 11, color: t.textMuted, lineHeight: 1.4 }}>
-          {run.trustState === 'certified' ? <ShieldCheck size={12} color={t.success} style={{ flex: '0 0 auto', marginTop: 1 }} /> : <ShieldAlert size={12} color={t.warning} style={{ flex: '0 0 auto', marginTop: 1 }} />}
+          {run.trustState === 'certified' ? <ShieldCheck size={12} color={t.success} style={{ flex: '0 0 auto', marginTop: 1 }} /> : run.trustState === 'grounded' ? <ShieldCheck size={12} color={t.accent} style={{ flex: '0 0 auto', marginTop: 1 }} /> : <ShieldAlert size={12} color={t.warning} style={{ flex: '0 0 auto', marginTop: 1 }} />}
           <span>{trustNote}</span>
         </div>
       ) : null}
@@ -495,9 +652,22 @@ function RunCard({
         </div>
       )}
 
-      {(run.nextActions.length > 0 || pinnable) ? (
-        <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
-          {run.nextActions.map((action) => {
+      {(pinnable || showResearchDeeper || run.nextActions.length > 0) ? (
+        <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', alignItems: 'center' }}>
+          {pinnable ? <AddToAppButton run={run} t={t} appContext={appContext} onOpenApp={onOpenApp} /> : null}
+          {showResearchDeeper ? (
+            <button
+              type="button"
+              className="dql-hover"
+              onClick={() => onNextAction({ id: 'research-deeper', label: 'Research this deeper', route: 'research' })}
+              style={smallButtonStyle(t)}
+              title="Run a slower, multi-step investigation on this question"
+            >
+              <FileSearch size={11} />
+              Research this deeper
+            </button>
+          ) : null}
+          {run.nextActions.filter((a) => a.id !== 'pin-to-app' && a.id !== 'research-deeper').map((action) => {
             const isCertify = action.id === 'request-certification';
             const label = isCertify && certifyState === 'sent'
               ? 'Sent to analyst'
@@ -510,6 +680,7 @@ function RunCard({
               <button
                 key={action.id}
                 type="button"
+                className="dql-hover"
                 onClick={() => onNextAction(action)}
                 disabled={isCertify && (certifyState === 'pending' || certifyState === 'sent')}
                 style={isCertify ? certifyButtonStyle(t, certifyState) : smallButtonStyle(t)}
@@ -519,19 +690,206 @@ function RunCard({
               </button>
             );
           })}
-          {pinnable ? (
-            <button
-              type="button"
-              onClick={() => onNextAction({ id: 'pin-to-app', label: 'Pin to app' })}
-              disabled={pinState === 'pending' || pinState === 'sent'}
-              style={certifyButtonStyle(t, pinState)}
-              title="Add this insight to the current app dashboard"
-            >
-              {pinState === 'sent' ? <CheckCircle2 size={11} /> : <Pin size={11} />}
-              {pinState === 'sent' ? 'Pinned to app' : pinState === 'pending' ? 'Pinning…' : pinState === 'error' ? 'Retry pin' : 'Pin to app'}
-            </button>
-          ) : null}
         </div>
+      ) : null}
+    </div>
+  );
+}
+
+function defaultAppName(question: string): string {
+  const cleaned = question.replace(/^\/\w+\s+/, '').trim().replace(/[?.!]+$/, '');
+  const title = cleaned ? cleaned.charAt(0).toUpperCase() + cleaned.slice(1) : 'New app';
+  return title.slice(0, 60);
+}
+
+/**
+ * Hero "Add to app" action. Always available on a pinnable result: opens a small
+ * picker to choose an existing app (one click) or create a new one, resolves the
+ * target dashboard, then writes the AI pin. Composed entirely from existing APIs.
+ */
+function AddToAppButton({
+  run,
+  t,
+  appContext,
+  onOpenApp,
+}: {
+  run: AgentRun;
+  t: Theme;
+  appContext?: { appId?: string; dashboardId?: string };
+  onOpenApp?: (appId: string, dashboardId?: string) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const [apps, setApps] = useState<AppSummary[] | null>(null); // null = loading
+  const [loadError, setLoadError] = useState(false);
+  const [view, setView] = useState<'list' | 'new'>('list');
+  const [newName, setNewName] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [done, setDone] = useState<{ appId: string; dashboardId?: string; name: string } | null>(null);
+  // Remember an app created this session so a failed-pin retry reuses it (no orphans).
+  const createdRef = useRef<{ appId: string; dashboardId: string } | null>(null);
+
+  const loadApps = async () => {
+    setApps(null);
+    setLoadError(false);
+    try {
+      const list = await api.listAppsStrict();
+      setApps(list);
+      if (list.length === 0) setView('new');
+    } catch {
+      // A failed load must NOT look like "you have no apps" (would cause duplicates).
+      setApps([]);
+      setLoadError(true);
+    }
+  };
+
+  const openPicker = () => {
+    setOpen(true);
+    setError(null);
+    setView('list');
+    createdRef.current = null;
+    setNewName(defaultAppName(run.question));
+    void loadApps();
+  };
+
+  const closePicker = () => {
+    if (busy) return; // don't dismiss mid-write (would hide the error/result)
+    setOpen(false);
+    setError(null);
+  };
+
+  const pinTo = async (appId: string, dashboardId: string, name: string) => {
+    const result = await api.createAiPin(appId, {
+      dashboardId,
+      title: defaultAppName(run.question),
+      answer: run.answer ?? run.summary,
+      question: run.question,
+      sql: answerSqlFromRun(run),
+      certification: run.trustState === 'certified' ? 'certified' : 'ai_generated',
+      reviewStatus: run.trustState === 'certified' ? 'certified' : 'needs_review',
+    });
+    if (!result.ok) throw new Error('Could not add to app.');
+    setDone({ appId, dashboardId, name });
+    setOpen(false);
+  };
+
+  const addToExisting = async (app: AppSummary) => {
+    if (busy) return;
+    setBusy(true);
+    setError(null);
+    try {
+      let dashboardId = appContext?.appId === app.id ? appContext.dashboardId : undefined;
+      if (!dashboardId) {
+        const doc = await api.getApp(app.id);
+        const home = doc?.app?.homepage;
+        dashboardId = home?.type === 'dashboard' ? home.id : doc?.dashboards?.[0]?.id;
+        if (!dashboardId) {
+          const created = await api.createAppDashboard(app.id, { title: 'Overview' });
+          if (!created.ok) throw new Error(created.error);
+          dashboardId = created.dashboard.id;
+        }
+      }
+      await pinTo(app.id, dashboardId, app.name);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Could not add to app.');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const createAndAdd = async () => {
+    if (busy) return;
+    const name = newName.trim() || defaultAppName(run.question);
+    setBusy(true);
+    setError(null);
+    try {
+      // Reuse an app already created this session if the prior pin failed.
+      if (!createdRef.current) {
+        const created = await api.createApp({ name, domain: 'general', dashboardTitle: 'Overview', tags: [], owners: [], selectedBlockIds: [] });
+        createdRef.current = { appId: created.app.id, dashboardId: created.dashboardId };
+      }
+      await pinTo(createdRef.current.appId, createdRef.current.dashboardId, name);
+      createdRef.current = null;
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Could not create the app.');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div style={{ position: 'relative', display: 'inline-flex', alignItems: 'center', gap: 6 }}>
+      {done ? (
+        <button
+          type="button"
+          className="dql-hover"
+          onClick={() => onOpenApp?.(done.appId, done.dashboardId)}
+          style={{ ...heroAddButtonStyle(t), background: `${t.success}1a`, color: t.success, border: `1px solid ${t.success}55`, boxShadow: 'none', cursor: onOpenApp ? 'pointer' : 'default' }}
+          title={onOpenApp ? 'Open the app' : undefined}
+        >
+          <CheckCircle2 size={13} />
+          Added to {done.name}
+          {onOpenApp ? <ArrowRight size={13} /> : null}
+        </button>
+      ) : null}
+      <button type="button" className="dql-hover dql-lift" onClick={openPicker} style={done ? smallButtonStyle(t) : heroAddButtonStyle(t)}>
+        <LayoutDashboard size={13} />
+        {done ? 'Add to another' : 'Add to app'}
+      </button>
+      {open ? (
+        <>
+          <div onClick={closePicker} style={{ position: 'fixed', inset: 0, zIndex: 40 }} />
+          <div style={addPopoverStyle(t)}>
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 8 }}>
+              <span style={{ fontSize: 12, fontWeight: 700, color: t.textPrimary }}>{view === 'new' ? 'Name the new app' : 'Add to an app'}</span>
+              <button type="button" onClick={closePicker} style={{ border: 'none', background: 'transparent', color: t.textMuted, cursor: 'pointer', fontSize: 15, lineHeight: 1 }}>×</button>
+            </div>
+            {error ? <div style={{ fontSize: 11, color: t.error, marginBottom: 7, lineHeight: 1.4 }}>{error}</div> : null}
+            {view === 'new' ? (
+              <div style={{ display: 'grid', gap: 8 }}>
+                <input
+                  autoFocus
+                  value={newName}
+                  onChange={(e) => setNewName(e.target.value)}
+                  onKeyDown={(e) => { if (e.key === 'Enter') void createAndAdd(); }}
+                  placeholder="App name"
+                  style={pickerInputStyle(t)}
+                />
+                <div style={{ display: 'flex', gap: 6 }}>
+                  {apps && apps.length > 0 ? <button type="button" className="dql-hover" onClick={() => setView('list')} style={smallButtonStyle(t)}>Back</button> : null}
+                  <button type="button" className="dql-hover" disabled={busy || !newName.trim()} onClick={() => void createAndAdd()} style={{ ...heroAddButtonStyle(t), flex: 1, justifyContent: 'center' }}>
+                    {busy ? <Loader2 size={13} style={{ animation: 'dql-agent-run-spin 0.8s linear infinite' }} /> : <Plus size={13} />}
+                    Create &amp; add
+                  </button>
+                </div>
+              </div>
+            ) : apps === null ? (
+              <div style={{ fontSize: 11.5, color: t.textMuted, padding: '8px 2px' }}>Loading apps…</div>
+            ) : loadError ? (
+              <div style={{ display: 'grid', gap: 8 }}>
+                <div style={{ fontSize: 11.5, color: t.error, lineHeight: 1.4 }}>Couldn't load your apps.</div>
+                <div style={{ display: 'flex', gap: 6 }}>
+                  <button type="button" className="dql-hover" onClick={() => void loadApps()} style={smallButtonStyle(t)}>Retry</button>
+                  <button type="button" className="dql-hover" onClick={() => setView('new')} style={{ ...newAppRowStyle(t), width: 'auto', flex: 1, marginBottom: 0, justifyContent: 'center' }}>
+                    <Plus size={13} /> New app…
+                  </button>
+                </div>
+              </div>
+            ) : (
+              <div style={{ display: 'grid', gap: 3, maxHeight: 244, overflow: 'auto' }}>
+                <button type="button" className="dql-hover" onClick={() => setView('new')} style={newAppRowStyle(t)}>
+                  <Plus size={13} /> New app…
+                </button>
+                {apps.map((app) => (
+                  <button key={app.id} type="button" className="dql-hover" disabled={busy} onClick={() => void addToExisting(app)} style={appRowStyle(t)}>
+                    <LayoutDashboard size={13} style={{ flex: '0 0 auto', opacity: 0.7 }} />
+                    <span style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', textAlign: 'left' }}>{app.name}</span>
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
+        </>
       ) : null}
     </div>
   );
@@ -540,6 +898,7 @@ function RunCard({
 /** Plain-English trust line so a stakeholder knows what they can rely on. */
 function trustExplainer(run: AgentRun): string | null {
   if (run.trustState === 'certified') return 'Certified — answered from a governed metric you can trust.';
+  if (run.trustState === 'grounded') return 'Verified against your data — grounded and executed cleanly. Review to certify as a governed metric.';
   if (run.trustState === 'review_required') return 'Review-required — generated from governed data; not a certified metric yet.';
   if (run.trustState === 'blocked') return null;
   return null;
@@ -656,6 +1015,7 @@ function ArtifactView({
 
 function StatusIcon({ run }: { run: AgentRun }) {
   if (run.trustState === 'certified') return <ShieldCheck size={16} color="#16a34a" />;
+  if (run.trustState === 'grounded') return <ShieldCheck size={16} color="#2563eb" />;
   if (run.status === 'completed') return <CheckCircle2 size={16} color="#16a34a" />;
   if (run.status === 'blocked') return <Route size={16} color="#ef4444" />;
   return <Route size={16} color="#d97706" />;
@@ -672,14 +1032,17 @@ function ArtifactIcon({ kind }: { kind: AgentRunArtifact['kind'] }) {
 function TrustBadge({ run, t }: { run: AgentRun; t: Theme }) {
   const color = run.trustState === 'certified'
     ? t.success
-    : run.trustState === 'blocked'
-      ? t.error
-      : run.trustState === 'not_applicable'
-        ? t.textMuted
-        : t.warning;
+    : run.trustState === 'grounded'
+      ? t.accent
+      : run.trustState === 'blocked'
+        ? t.error
+        : run.trustState === 'not_applicable'
+          ? t.textMuted
+          : t.warning;
+  const label = run.trustState === 'grounded' ? 'verified' : run.trustState.split('_').join(' ');
   return (
     <span style={{ border: `1px solid ${color}55`, color, background: `${color}12`, borderRadius: 999, padding: '3px 7px', fontSize: 10, fontWeight: 850 }}>
-      {run.trustState.split('_').join(' ')}
+      {label}
     </span>
   );
 }
@@ -1068,17 +1431,18 @@ function largeIconShellStyle(t: Theme): React.CSSProperties {
 function modeChipStyle(t: Theme, active: boolean): React.CSSProperties {
   return {
     border: `1px solid ${active ? t.accent : t.btnBorder}`,
-    background: active ? `${t.accent}14` : 'transparent',
-    color: active ? t.accent : t.textMuted,
+    background: active ? t.accent : 'transparent',
+    color: active ? '#fff' : t.textMuted,
     borderRadius: 999,
-    padding: '3px 9px',
+    padding: '4px 11px',
     display: 'inline-flex',
     alignItems: 'center',
-    gap: 4,
-    fontSize: 11,
-    fontWeight: 700,
+    gap: 5,
+    fontSize: 11.5,
+    fontWeight: 650,
     fontFamily: t.font,
     cursor: 'pointer',
+    boxShadow: active ? `0 1px 4px ${t.accent}4d` : 'none',
   };
 }
 
@@ -1088,9 +1452,9 @@ function suggestionChipStyle(t: Theme): React.CSSProperties {
     background: t.btnBg,
     color: t.textSecondary,
     borderRadius: 999,
-    padding: '6px 11px',
-    fontSize: 12,
-    fontWeight: 600,
+    padding: '7px 13px',
+    fontSize: 12.5,
+    fontWeight: 550,
     fontFamily: t.font,
     cursor: 'pointer',
   };
@@ -1101,14 +1465,14 @@ function inputStyle(t: Theme): React.CSSProperties {
     flex: 1,
     minHeight: 54,
     maxHeight: 140,
-    resize: 'vertical',
+    resize: 'none',
     border: `1px solid ${t.btnBorder}`,
     background: t.inputBg,
     color: t.textPrimary,
-    borderRadius: 8,
-    padding: '9px 10px',
-    fontSize: 12.5,
-    lineHeight: 1.4,
+    borderRadius: 12,
+    padding: '11px 13px',
+    fontSize: 13,
+    lineHeight: 1.45,
     fontFamily: t.font,
     outline: 'none',
   };
@@ -1116,19 +1480,122 @@ function inputStyle(t: Theme): React.CSSProperties {
 
 function sendButtonStyle(t: Theme, enabled: boolean): React.CSSProperties {
   return {
-    border: `1px solid ${enabled ? t.accent : t.btnBorder}`,
+    border: 'none',
     background: enabled ? t.accent : t.btnBg,
     color: enabled ? '#fff' : t.textMuted,
+    borderRadius: 12,
+    height: 54,
+    padding: '0 17px',
+    display: 'inline-flex',
+    alignItems: 'center',
+    gap: 7,
+    fontSize: 12.5,
+    fontWeight: 700,
+    fontFamily: t.font,
+    cursor: enabled ? 'pointer' : 'not-allowed',
+    boxShadow: enabled ? `0 2px 9px ${t.accent}59` : 'none',
+  };
+}
+
+function digDeeperStyle(t: Theme, active: boolean): React.CSSProperties {
+  return {
+    border: `1px solid ${active ? t.accent : t.btnBorder}`,
+    background: active ? `${t.accent}14` : 'transparent',
+    color: active ? t.accent : t.textMuted,
+    borderRadius: 999,
+    padding: '5px 11px',
+    display: 'inline-flex',
+    alignItems: 'center',
+    gap: 6,
+    fontSize: 11.5,
+    fontWeight: 650,
+    fontFamily: t.font,
+    cursor: 'pointer',
+  };
+}
+
+function heroAddButtonStyle(t: Theme): React.CSSProperties {
+  return {
+    border: 'none',
+    background: t.accent,
+    color: '#fff',
     borderRadius: 8,
-    height: 38,
-    padding: '0 12px',
+    padding: '7px 13px',
     display: 'inline-flex',
     alignItems: 'center',
     gap: 6,
     fontSize: 12,
-    fontWeight: 850,
+    fontWeight: 700,
     fontFamily: t.font,
-    cursor: enabled ? 'pointer' : 'not-allowed',
+    cursor: 'pointer',
+    boxShadow: `0 1px 5px ${t.accent}4d`,
+  };
+}
+
+function addPopoverStyle(t: Theme): React.CSSProperties {
+  return {
+    position: 'absolute',
+    bottom: 'calc(100% + 6px)',
+    left: 0,
+    zIndex: 41,
+    width: 264,
+    background: t.cellBg,
+    border: `1px solid ${t.headerBorder}`,
+    borderRadius: 10,
+    boxShadow: '0 12px 32px rgba(0,0,0,0.2)',
+    padding: 10,
+  };
+}
+
+function appRowStyle(t: Theme): React.CSSProperties {
+  return {
+    display: 'flex',
+    alignItems: 'center',
+    gap: 8,
+    width: '100%',
+    padding: '8px 9px',
+    borderRadius: 7,
+    border: 'none',
+    background: 'transparent',
+    color: t.textSecondary,
+    fontSize: 12.5,
+    fontWeight: 550,
+    fontFamily: t.font,
+    cursor: 'pointer',
+  };
+}
+
+function newAppRowStyle(t: Theme): React.CSSProperties {
+  return {
+    display: 'flex',
+    alignItems: 'center',
+    gap: 8,
+    width: '100%',
+    padding: '8px 9px',
+    borderRadius: 7,
+    border: `1px dashed ${t.accent}66`,
+    background: `${t.accent}0d`,
+    color: t.accent,
+    fontSize: 12.5,
+    fontWeight: 650,
+    fontFamily: t.font,
+    cursor: 'pointer',
+    marginBottom: 2,
+  };
+}
+
+function pickerInputStyle(t: Theme): React.CSSProperties {
+  return {
+    width: '100%',
+    boxSizing: 'border-box',
+    border: `1px solid ${t.btnBorder}`,
+    background: t.inputBg,
+    color: t.textPrimary,
+    borderRadius: 8,
+    padding: '8px 10px',
+    fontSize: 12.5,
+    fontFamily: t.font,
+    outline: 'none',
   };
 }
 
