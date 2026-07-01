@@ -9,10 +9,8 @@ import {
   OpenAIProvider,
   answer,
   buildLocalContextPack,
-  deriveGeneratedDraftSlug,
   loadSkills,
   reindexProject,
-  upsertGeneratedDraft,
   type AgentAnswer,
   type AgentFollowUpContext,
   type AgentProvider,
@@ -182,26 +180,9 @@ export function createDqlAgentProviderRunner(id: SimpleProviderId): AgentRunner 
             signal,
             executeCertifiedBlock: req.executeCertifiedBlock,
             executeGeneratedSql: req.executeGeneratedSql,
-            captureGeneratedDraft: ({ question: draftQuestion, sql, intent, followUp: draftFollowUp, contextPack: draftContextPack, sourceBlock, validationWarnings }) => {
-              if (!sql.trim()) return undefined;
-              const slug = deriveGeneratedDraftSlug(draftQuestion);
-              const domain = sourceBlock?.domain ?? draftContextPack?.objects.find((object) => object.domain)?.domain ?? 'misc';
-              return upsertGeneratedDraft(req.projectRoot, {
-                slug,
-                question: draftQuestion,
-                proposedSql: sql,
-                proposedContractId: `${domain}.Unknown.${slug}`,
-                proposedDomain: domain,
-                sourceQuestion: draftFollowUp?.sourceQuestion,
-                sourceBlock: draftFollowUp?.sourceBlockName ?? sourceBlock?.name,
-                followupKind: draftFollowUp?.kind,
-                requestedFilters: draftFollowUp?.filters,
-                requestedDimensions: draftFollowUp?.dimensions,
-                contextPackId: draftContextPack?.id,
-                routeIntent: String(intent),
-                validationWarnings,
-              });
-            },
+            // NOTE: no captureGeneratedDraft here — a plain answer/research question must NOT
+            // auto-write a draft into the blocks space. A draft is created only when the user
+            // explicitly acts (the "Create DQL draft" action → the dql_block_draft route).
           });
           emit({ kind: 'tool_result', id: 'governed_answer', output: result });
           emit({ kind: 'text', text: formatAgentAnswer(result) });
