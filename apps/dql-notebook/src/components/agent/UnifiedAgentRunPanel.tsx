@@ -73,15 +73,6 @@ interface UnifiedAgentRunPanelProps {
   onRunningChange?: (running: boolean) => void;
 }
 
-const ANALYST_MODE_OPTIONS: Array<{ value: AgentRunRequestedMode; label: string; icon: React.ReactNode }> = [
-  { value: 'auto', label: 'Auto', icon: <Route size={13} /> },
-  { value: 'ask', label: 'Ask', icon: <Sparkles size={13} /> },
-  { value: 'research', label: 'Research', icon: <FileSearch size={13} /> },
-  { value: 'sql', label: 'SQL', icon: <Code2 size={13} /> },
-  { value: 'block', label: 'Block', icon: <Blocks size={13} /> },
-  { value: 'app', label: 'App', icon: <LayoutDashboard size={13} /> },
-];
-
 const ROUTE_LABEL: Record<AgentRunRoute, string> = {
   certified_answer: 'Certified answer',
   generated_answer: 'Generated answer',
@@ -115,10 +106,13 @@ export function UnifiedAgentRunPanel({
   onRunningChange,
 }: UnifiedAgentRunPanelProps): JSX.Element {
   const t = themes[themeMode];
-  // Stakeholders get a single auto-routed box (no mode chips); analysts keep the modes.
-  const isStakeholder = audience === 'stakeholder';
-  const modeOptions = ANALYST_MODE_OPTIONS;
-  const [mode, setMode] = useState<AgentRunRequestedMode>(initialMode);
+  // One clean composer everywhere: an auto-routed box + a "Dig deeper" toggle — no
+  // mode chips. Capability still varies server-side by `audience` (analyst keeps the
+  // authoring routes so SQL/blocks generate; stakeholder is consumption-only), but
+  // the chrome is uniform. A next-action can pre-route the *next* question (e.g.
+  // "Draft this as a block") via this one-shot ref: consumed once at submit and cleared
+  // the moment the user edits the prefilled prompt. The default is always auto.
+  const pendingModeRef = useRef<AgentRunRequestedMode | undefined>(undefined);
   const [deepResearch, setDeepResearch] = useState(false);
   const [certifying, setCertifying] = useState<Record<string, 'pending' | 'sent' | 'error'>>({});
   const [input, setInput] = useState(initialInput);
@@ -158,7 +152,8 @@ export function UnifiedAgentRunPanel({
   const submit = async (textOverride?: string, modeOverride?: AgentRunRequestedMode) => {
     const text = (textOverride ?? input).trim();
     if (!text || running) return;
-    const activeMode = modeOverride ?? mode;
+    const activeMode = modeOverride ?? pendingModeRef.current ?? initialMode;
+    pendingModeRef.current = undefined;
     const userItem: ThreadItem = { kind: 'user', id: makeId('user'), text };
     setItems((current) => [...current, userItem]);
     setInput('');
@@ -202,7 +197,7 @@ export function UnifiedAgentRunPanel({
   // actually start (mirror the send button's guard so a no-op Enter can't lose it).
   const handleSubmit = () => {
     const willRun = Boolean(input.trim()) && !running;
-    void submit(undefined, isStakeholder && deepResearch ? 'research' : undefined);
+    void submit(undefined, deepResearch ? 'research' : undefined);
     if (willRun && deepResearch) setDeepResearch(false);
   };
 
@@ -256,8 +251,7 @@ export function UnifiedAgentRunPanel({
       void submit(run.question, 'research');
       return;
     }
-    const nextMode = routeToMode(action.route);
-    if (nextMode) setMode(nextMode);
+    pendingModeRef.current = routeToMode(action.route);
     setInput(nextPromptFor(run, action.route));
     requestAnimationFrame(() => inputRef.current?.focus());
   };
@@ -320,50 +314,29 @@ export function UnifiedAgentRunPanel({
       {error ? <div style={{ margin: '0 16px 8px', color: t.error, fontSize: 12 }}>{error}</div> : null}
 
       <div style={{ padding: '10px 16px 14px', borderTop: `1px solid ${t.headerBorder}`, display: 'grid', gap: 8 }}>
-        {isStakeholder ? (
-          <div style={{ display: 'flex', alignItems: 'center', gap: 9 }}>
-            <button
-              type="button"
-              className="dql-hover"
-              aria-pressed={deepResearch}
-              onClick={() => setDeepResearch((v) => !v)}
-              style={digDeeperStyle(t, deepResearch)}
-              title="Run a slower, multi-step investigation instead of a quick answer."
-            >
-              <FileSearch size={13} />
-              <span>Dig deeper</span>
-            </button>
-            <span style={{ fontSize: 11, color: t.textMuted }}>
-              {deepResearch ? 'Your next question runs a deep investigation.' : 'Auto-routes to the best answer — research, metric, or app.'}
-            </span>
-          </div>
-        ) : (
-          <div role="group" aria-label="Copilot mode" style={{ display: 'flex', gap: 4, flexWrap: 'wrap' }}>
-            {modeOptions.map((option) => {
-              const active = mode === option.value;
-              return (
-                <button
-                  key={option.value}
-                  type="button"
-                  className="dql-hover"
-                  onClick={() => setMode(option.value)}
-                  aria-pressed={active}
-                  style={modeChipStyle(t, active)}
-                >
-                  {option.icon}
-                  <span>{option.label}</span>
-                </button>
-              );
-            })}
-          </div>
-        )}
+        <div style={{ display: 'flex', alignItems: 'center', gap: 9 }}>
+          <button
+            type="button"
+            className="dql-hover"
+            aria-pressed={deepResearch}
+            onClick={() => setDeepResearch((v) => !v)}
+            style={digDeeperStyle(t, deepResearch)}
+            title="Run a slower, multi-step investigation instead of a quick answer."
+          >
+            <FileSearch size={13} />
+            <span>Dig deeper</span>
+          </button>
+          <span style={{ fontSize: 11, color: t.textMuted }}>
+            {deepResearch ? 'Your next question runs a deep investigation.' : 'Auto-routes to the best answer for your question.'}
+          </span>
+        </div>
         <div style={{ display: 'flex', gap: 8, alignItems: 'flex-end' }}>
           <textarea
             ref={inputRef}
             value={input}
-            onChange={(event) => setInput(event.target.value)}
+            onChange={(event) => { setInput(event.target.value); pendingModeRef.current = undefined; }}
             rows={2}
-            placeholder={isStakeholder || mode === 'auto' ? 'Ask anything about your data…' : `Ask in ${mode} mode…`}
+            placeholder="Ask anything about your data…"
             onKeyDown={(event) => {
               if (event.key === 'Enter' && !event.shiftKey) {
                 event.preventDefault();
@@ -380,7 +353,7 @@ export function UnifiedAgentRunPanel({
             style={sendButtonStyle(t, Boolean(input.trim()) && !running)}
           >
             {running ? <Loader2 size={15} style={{ animation: 'dql-agent-run-spin 0.8s linear infinite' }} /> : <Send size={15} />}
-            <span>{running ? 'Working' : isStakeholder ? 'Ask' : 'Run'}</span>
+            <span>{running ? 'Working' : 'Ask'}</span>
           </button>
         </div>
       </div>
@@ -1476,24 +1449,6 @@ function iconShellStyle(t: Theme): React.CSSProperties {
 
 function largeIconShellStyle(t: Theme): React.CSSProperties {
   return { ...iconShellStyle(t), width: 40, height: 40 };
-}
-
-function modeChipStyle(t: Theme, active: boolean): React.CSSProperties {
-  return {
-    border: `1px solid ${active ? t.accent : t.btnBorder}`,
-    background: active ? t.accent : 'transparent',
-    color: active ? '#fff' : t.textMuted,
-    borderRadius: 999,
-    padding: '4px 11px',
-    display: 'inline-flex',
-    alignItems: 'center',
-    gap: 5,
-    fontSize: 11.5,
-    fontWeight: 650,
-    fontFamily: t.font,
-    cursor: 'pointer',
-    boxShadow: active ? `0 1px 4px ${t.accent}4d` : 'none',
-  };
 }
 
 function suggestionChipStyle(t: Theme): React.CSSProperties {
