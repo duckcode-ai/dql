@@ -1,6 +1,6 @@
 {
   "name": "@duckcodeailabs/dql-notebook",
-  "version": "1.6.26",
+  "version": "1.6.27",
   "description": "Notebook document model and execution helpers for DQL",
   "license": "Apache-2.0",
   "type": "module",

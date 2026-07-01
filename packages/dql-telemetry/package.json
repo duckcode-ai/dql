@@ -1,6 +1,6 @@
 {
   "name": "@duckcodeailabs/dql-telemetry",
-  "version": "1.6.26",
+  "version": "1.6.27",
   "description": "Opt-in, privacy-first usage telemetry for DQL.",
   "license": "MIT",
   "type": "module",
