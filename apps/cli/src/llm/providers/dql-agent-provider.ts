@@ -197,6 +197,7 @@ export function createDqlAgentProviderRunner(id: SimpleProviderId): AgentRunner 
             schemaContext,
             contextPack,
             signal,
+            reasoningEffort: req.reasoningEffort,
             executeCertifiedBlock: req.executeCertifiedBlock,
             executeGeneratedSql: req.executeGeneratedSql,
             // NOTE: no captureGeneratedDraft here — a plain answer/research question must NOT

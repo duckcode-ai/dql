@@ -126,6 +126,9 @@ import {
   planApp,
   planResearch,
   loadSemanticMetrics,
+  routeReasoningEffort,
+  clampReasoningEffort,
+  bumpReasoningEffort,
   type AgentRun,
   type AgentRunArtifact,
   type AgentRunEvaluation,
@@ -134,6 +137,7 @@ import {
   type AgentRunNextAction,
   type AgentRunRequest,
   type AgentRunRequestedMode,
+  type AgentRunRoute,
   type AgentRunSelectedObject,
   type AgentRunStatus,
   type AgentRunStopReason,
@@ -141,6 +145,7 @@ import {
   type AgentRouteExecutor,
   type ConversationalKind,
   type PlanBlock,
+  type ReasoningEffort,
 } from '@duckcodeailabs/dql-agent';
 import { gatherProposeEnrichment } from './propose-enrich.js';
 import { handleAppsApi, proposeAppAiBuild, recommendVisualization } from './apps-api.js';
@@ -650,6 +655,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
   async function runGovernedAgentAnswerForRun(
     request: AgentRunRequest,
     repair?: { attempt: number; repairHint?: string },
+    route: AgentRunRoute = 'generated_answer',
   ): Promise<AgentAnswer> {
     const governed = resolveGovernedAnswerRunner(projectRoot);
     const resolvedProvider = governed?.provider ?? null;
@@ -660,6 +666,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
     let governedAnswer: AgentAnswer | undefined;
     let providerError: string | undefined;
     const isRepair = (repair?.attempt ?? 0) > 0 && Boolean(repair?.repairHint);
+    const reasoningEffort = resolveRunReasoningEffort(projectRoot, resolvedProvider, route, isRepair);
     const contextEnvelope = {
       mode: 'agent_run',
       selectedObject: request.selectedObject,
@@ -684,6 +691,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           cellId: `agent-run:${request.selectedObject?.kind ?? 'workspace'}:${request.selectedObject?.id ?? request.runId ?? 'auto'}`,
           sql: JSON.stringify(contextEnvelope, null, 2),
         },
+        reasoningEffort,
         projectRoot,
         executeCertifiedBlock: executeCertifiedBlockForAgent,
         executeGeneratedSql: executeGeneratedSqlForAgent,
@@ -705,10 +713,10 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
     return governedAnswer;
   }
 
-  const answerRunExecutor: AgentRouteExecutor = async ({ request, routeDecision, attempt, repairHint, emitAnswerDelta }) => {
+  const answerRunExecutor: AgentRouteExecutor = async ({ request, route, routeDecision, attempt, repairHint, emitAnswerDelta }) => {
     let governedAnswer: AgentAnswer;
     try {
-      governedAnswer = await runGovernedAgentAnswerForRun(request, { attempt, repairHint });
+      governedAnswer = await runGovernedAgentAnswerForRun(request, { attempt, repairHint }, route);
       // Surface the approved Hint-Graph corrections that shaped this answer so the
       // UI can show an "applied learnings" chip (memoryContext is already on the answer).
       if (!governedAnswer.appliedHints) {
@@ -1534,6 +1542,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
     let governedAnswer: AgentAnswer | undefined;
     let providerError: string | undefined;
     const memoOnly = input.mode === 'memo_only';
+    const reasoningEffort = resolveRunReasoningEffort(projectRoot, resolvedProvider, 'research', false);
     const contextEnvelope = {
       mode: 'app_research',
       generationMode: input.mode ?? 'sql_and_memo',
@@ -1582,6 +1591,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           cellId: `app-research:${input.appId}:${input.dashboardId ?? 'app'}`,
           sql: JSON.stringify(contextEnvelope, null, 2),
         },
+        reasoningEffort,
         projectRoot,
         executeCertifiedBlock: executeCertifiedBlockForAgent,
         executeGeneratedSql: executeGeneratedSqlForAgent,
@@ -1792,6 +1802,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
                     context,
                   }, null, 2),
                 },
+                reasoningEffort: resolveRunReasoningEffort(projectRoot, resolvedProvider, 'research', false),
                 projectRoot,
                 executeCertifiedBlock: executeCertifiedBlockForAgent,
                 executeGeneratedSql: executeGeneratedSqlForAgent,
@@ -3155,6 +3166,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           apiKey: typeof body.apiKey === 'string' ? body.apiKey : undefined,
           baseUrl: typeof body.baseUrl === 'string' ? body.baseUrl : undefined,
           model: typeof body.model === 'string' ? body.model : undefined,
+          reasoningEffort: isReasoningEffortSetting(body.reasoningEffort) ? body.reasoningEffort : undefined,
         });
         res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
         res.end(serializeJSON({ ok: true, providers }));
@@ -6307,6 +6319,10 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
             conversationContext: conversationContext && typeof conversationContext === 'object' && !Array.isArray(conversationContext)
               ? conversationContext as AgentConversationContext
               : undefined,
+            // Intentionally NOT threading a route effort here: this raw block/chat
+            // authoring endpoint keeps each SDK runner's own tuned default (the
+            // claude-agent-sdk runs `xhigh` for deep authoring). Governed answer /
+            // research paths carry task-adaptive effort; this one shouldn't cap it.
             projectRoot,
             executeCertifiedBlock: executeCertifiedBlockForAgent,
             executeGeneratedSql: executeGeneratedSqlForAgent,
@@ -7439,6 +7455,34 @@ function resolveGovernedAnswerRunner(projectRoot: string): { provider: ProviderI
   if (!resolved) return null;
   const runner = getLLMRunner(resolved);
   return runner ? { provider: resolved, runner } : null;
+}
+
+/** Map a runner provider id to the settings id whose reasoning ceiling applies. */
+function reasoningSettingsIdFor(provider: ProviderId): ProviderSettingsId {
+  return provider === 'claude-agent-sdk' ? 'anthropic' : (provider as ProviderSettingsId);
+}
+
+/** Type-guard for the reasoning-effort settings value from an untrusted request body. */
+function isReasoningEffortSetting(value: unknown): value is 'auto' | ReasoningEffort {
+  return value === 'auto' || value === 'low' || value === 'medium' || value === 'high';
+}
+
+/**
+ * Resolve the concrete reasoning effort for a run: the route's task-adaptive
+ * effort (bumped one level on a repair attempt), clamped by the provider's
+ * Settings ceiling (`auto` = no cap). Providers no-op when their model has no
+ * reasoning surface, so returning a concrete level here is always safe.
+ */
+function resolveRunReasoningEffort(
+  projectRoot: string,
+  provider: ProviderId,
+  route: AgentRunRoute | undefined,
+  isRepair: boolean,
+): ReasoningEffort {
+  const ceiling = getEffectiveProviderConfig(projectRoot, reasoningSettingsIdFor(provider)).reasoningEffort;
+  let desired: ReasoningEffort = route ? routeReasoningEffort(route) : 'medium';
+  if (isRepair) desired = bumpReasoningEffort(desired);
+  return ceiling ? clampReasoningEffort(desired, ceiling) : desired;
 }
 
 function loadAppDashboard(

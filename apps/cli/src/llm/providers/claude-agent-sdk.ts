@@ -94,6 +94,7 @@ async function runToolLoop(
   initialMessages: Array<{ role: 'user' | 'assistant'; content: unknown }>,
   emit: (turn: AgentTurn) => void,
   signal: AbortSignal,
+  effort: 'low' | 'medium' | 'high' | 'xhigh' = 'xhigh',
 ): Promise<void> {
   const messages = [...initialMessages];
   const toolDefs = tools.map((t) => ({ name: t.name, description: t.description, input_schema: t.inputSchema }));
@@ -108,7 +109,7 @@ async function runToolLoop(
       model: MODEL,
       max_tokens: 8192,
       thinking: { type: 'adaptive', display: 'summarized' },
-      output_config: { effort: 'xhigh' },
+      output_config: { effort },
       system,
       tools: toolDefs,
       messages,
@@ -196,8 +197,10 @@ export const claudeAgentSdkRunner: AgentRunner = {
     const tools = buildAgentTools(ctx);
     const system = systemPrompt(ctx, req.upstream?.sql);
     const messages = req.messages.map((m) => ({ role: m.role, content: m.content }));
+    // Block authoring is a deep task — default to `xhigh`, but honor an explicit
+    // per-request effort when the engine routes one in.
     try {
-      await runToolLoop(client, tools, system, messages, emit, signal);
+      await runToolLoop(client, tools, system, messages, emit, signal, req.reasoningEffort ?? 'xhigh');
     } catch (err) {
       emit({ kind: 'error', message: err instanceof Error ? err.message : String(err) });
     }

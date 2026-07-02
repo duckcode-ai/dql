@@ -3,8 +3,27 @@ import type {
   AgentMessage,
   ProviderRunOptions,
 } from './types.js';
+import { geminiReasoningStyle, effortToThinkingBudget } from './reasoning-effort.js';
 
 const DEFAULT_GEMINI_BASE_URL = 'https://generativelanguage.googleapis.com/v1beta';
+
+/**
+ * Translate reasoning effort into Gemini's `thinkingConfig`. Gemini 2.5 takes a
+ * token `thinkingBudget`; Gemini 3.x takes a `thinkingLevel` effort string.
+ * Models with no thinking surface get an empty spread.
+ */
+function geminiThinkingConfig(model: string, options: ProviderRunOptions): Record<string, unknown> {
+  if (!options.reasoningEffort) return {};
+  const style = geminiReasoningStyle(model);
+  if (style === 'budget') {
+    // Keep the thinking budget from exceeding an explicit output cap (headroom for the answer).
+    return { thinkingConfig: { thinkingBudget: effortToThinkingBudget(options.reasoningEffort, options.maxTokens) } };
+  }
+  if (style === 'level') {
+    return { thinkingConfig: { thinkingLevel: options.reasoningEffort } };
+  }
+  return {};
+}
 
 /**
  * Normalize a Gemini base URL to the path that `/models/<model>:generateContent`
@@ -76,6 +95,7 @@ export class GeminiProvider implements AgentProvider {
         generationConfig: {
           temperature: options.temperature ?? 0.2,
           maxOutputTokens: options.maxTokens ?? 1024,
+          ...geminiThinkingConfig(model, options),
         },
       }),
       signal: options.signal,

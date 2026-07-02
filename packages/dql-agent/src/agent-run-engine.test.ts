@@ -8,12 +8,33 @@ import {
   InMemoryAgentRunStore,
   defaultAgentRunStorePath,
   selectRoute,
+  routeReasoningEffort,
   type AgentRouteExecutorResult,
   type AgentRunEvent,
   type AgentRunPlanner,
 } from "./agent-run-engine.js";
 import { defaultAgentRunGates } from "./agent-run-gates.js";
 import { decideAgentAction } from "./intent-controller.js";
+
+describe("routeReasoningEffort", () => {
+  it("runs cheap/mechanical routes at low effort", () => {
+    expect(routeReasoningEffort("conversation")).toBe("low");
+    expect(routeReasoningEffort("clarify")).toBe("low");
+    expect(routeReasoningEffort("certified_answer")).toBe("low");
+    expect(routeReasoningEffort("blocked")).toBe("low");
+  });
+
+  it("runs correctness-critical generation/investigation routes at high effort", () => {
+    expect(routeReasoningEffort("generated_answer")).toBe("high");
+    expect(routeReasoningEffort("research")).toBe("high");
+    expect(routeReasoningEffort("sql_cell")).toBe("high");
+    expect(routeReasoningEffort("dql_block_draft")).toBe("high");
+  });
+
+  it("runs app assembly at medium effort (gap-fill sub-answers escalate on their own)", () => {
+    expect(routeReasoningEffort("app_build")).toBe("medium");
+  });
+});
 
 describe("AgentRunEngine", () => {
   it("routes a confident certified match to a completed certified answer run", async () => {

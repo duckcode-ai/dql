@@ -4,6 +4,7 @@ import {
   defaultKgPath,
   normalizeAnthropicBaseUrl,
   reindexProject,
+  supportsReasoningEffort,
 } from '@duckcodeailabs/dql-agent';
 import { DQLContext } from '@duckcodeailabs/dql-mcp';
 import { existsSync } from 'node:fs';
@@ -138,6 +139,9 @@ async function runOpenAIResponsesAgent(input: {
       tools: sdkTools,
       previous_response_id: previousResponseId,
       parallel_tool_calls: false,
+      ...(req.reasoningEffort && supportsReasoningEffort('openai', model)
+        ? { reasoning: { effort: req.reasoningEffort } }
+        : {}),
     } as never, { signal } as never) as unknown as OpenAIResponseLike;
 
     emitOpenAIResponseItems(response, emit);
@@ -219,6 +223,9 @@ async function runAnthropicMessagesAgent(input: {
       system,
       tools: toolDefs,
       messages,
+      ...(req.reasoningEffort && supportsReasoningEffort('claude', model)
+        ? { output_config: { effort: req.reasoningEffort } }
+        : {}),
       ...(mcp.mcpServers.length > 0 ? { mcp_servers: mcp.mcpServers, betas: ['mcp-client-2025-11-20'] } : {}),
     };
     const api = mcp.mcpServers.length > 0

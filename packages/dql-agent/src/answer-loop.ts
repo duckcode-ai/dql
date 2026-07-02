@@ -25,6 +25,7 @@ import {
 import type { KGStore } from './kg/sqlite-fts.js';
 import type { KGNode, KGNodeKind, KGSearchHit } from './kg/types.js';
 import type { AgentProvider, AgentMessage } from './providers/types.js';
+import type { ReasoningEffort } from './providers/reasoning-effort.js';
 import type { Skill } from './skills/loader.js';
 import { buildSkillBlockHints, buildSkillsPrompt, selectRelevantSkills } from './skills/loader.js';
 import type { AgentMemory } from './memory/sqlite-memory.js';
@@ -329,6 +330,12 @@ export interface AnswerLoopInput {
   memoryContext?: AgentMemory[];
   /** Optional AbortSignal forwarded to the provider. */
   signal?: AbortSignal;
+  /**
+   * Reasoning effort for the provider calls in this run (low/medium/high). The
+   * host resolves it (engine per-route effort clamped by the Settings ceiling)
+   * and the answer loop forwards it verbatim; providers no-op when unsupported.
+   */
+  reasoningEffort?: ReasoningEffort;
   /**
    * Governed block executor supplied by the CLI/UI/Slack host. The answer loop
    * keeps retrieval deterministic, while hosts enforce persona/RBAC/RLS in the
@@ -729,7 +736,7 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
     parsed = localProposal;
   } else {
     try {
-      proposed = await provider.generate(messages, { signal: input.signal });
+      proposed = await provider.generate(messages, { signal: input.signal, reasoningEffort: input.reasoningEffort });
     } catch (err) {
       const text = `Provider error: ${(err as Error).message}`;
       return {
@@ -985,6 +992,7 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
             executionError,
             schemaContext,
             signal: input.signal,
+            reasoningEffort: input.reasoningEffort,
           });
           const repaired = parseProposal(repairedRaw);
           if (repaired.sql) {
@@ -3559,6 +3567,7 @@ async function requestSqlRepair(input: {
   executionError: string;
   schemaContext: AgentSchemaTable[];
   signal?: AbortSignal;
+  reasoningEffort?: ReasoningEffort;
 }): Promise<string> {
   const schema = input.schemaContext.length > 0
     ? input.schemaContext
@@ -3582,7 +3591,14 @@ async function requestSqlRepair(input: {
         schema,
       ].join('\n\n'),
     },
-  ], { signal: input.signal });
+  ], {
+    signal: input.signal,
+    // Reuse the run's already-ceiling-clamped effort. We deliberately do NOT bump
+    // here: the effort was clamped to the user's Settings ceiling upstream, and
+    // bumping would let an internal preview-repair exceed that cap. Escalation-level
+    // repairs bump-then-clamp in the host (resolveRunReasoningEffort).
+    reasoningEffort: input.reasoningEffort,
+  });
 }
 
 function isRetryableGeneratedSqlError(error: string): boolean {

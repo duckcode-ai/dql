@@ -1182,6 +1182,9 @@ export interface SettingsEnvGroup {
 export type ProviderSettingsId = 'anthropic' | 'openai' | 'gemini' | 'ollama' | 'custom-openai' | 'claude-code' | 'codex';
 export type ProviderAuthMode = 'api_key' | 'local' | 'subscription_cli';
 
+/** Reasoning-effort ceiling. `'auto'` = agent picks per task up to high; a level caps it. */
+export type ReasoningEffortSetting = 'auto' | 'low' | 'medium' | 'high';
+
 export interface ProviderSettings {
   id: ProviderSettingsId;
   label: string;
@@ -1197,6 +1200,10 @@ export interface ProviderSettings {
   authMode?: ProviderAuthMode;
   /** For subscription_cli providers: the CLI binary to install + log into. */
   command?: string;
+  /** Reasoning-effort ceiling (`'auto'` when unset). */
+  reasoningEffort?: ReasoningEffortSetting;
+  /** Whether the configured model exposes a reasoning surface (drives showing the control). */
+  supportsReasoningEffort?: boolean;
 }
 
 /** Live detection for a subscription-CLI provider. */
@@ -1892,6 +1899,7 @@ export const api = {
     apiKey?: string;
     baseUrl?: string;
     model?: string;
+    reasoningEffort?: ReasoningEffortSetting;
   }): Promise<{ ok: boolean; providers: ProviderSettings[] }> {
     return request('/api/settings/providers', {
       method: 'POST',

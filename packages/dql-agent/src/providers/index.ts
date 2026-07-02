@@ -15,6 +15,17 @@ import { OllamaProvider } from './ollama.js';
 export type { AgentProvider, AgentMessage, ProviderName, ProviderRunOptions } from './types.js';
 export { streamOrGenerate } from './types.js';
 export { ClaudeProvider, OpenAIProvider, GeminiProvider, OllamaProvider, normalizeAnthropicBaseUrl, normalizeGeminiBaseUrl };
+export type { ReasoningEffort, GeminiReasoningStyle } from './reasoning-effort.js';
+export {
+  REASONING_EFFORTS,
+  isReasoningEffort,
+  coerceReasoningEffort,
+  clampReasoningEffort,
+  bumpReasoningEffort,
+  supportsReasoningEffort,
+  geminiReasoningStyle,
+  effortToThinkingBudget,
+} from './reasoning-effort.js';
 
 const FALLBACK_ORDER: ProviderName[] = ['claude', 'openai', 'gemini', 'ollama'];
 

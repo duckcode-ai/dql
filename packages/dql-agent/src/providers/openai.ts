@@ -4,6 +4,17 @@ import type {
   ProviderRunOptions,
 } from './types.js';
 import { consumeSse } from './claude.js';
+import { supportsReasoningEffort } from './reasoning-effort.js';
+
+/**
+ * Translate reasoning effort into the Chat Completions `reasoning_effort` param.
+ * Only o-series / gpt-5 models accept it; everything else (e.g. gpt-4.1-mini)
+ * would reject the field, so we gate on capability and emit an empty spread.
+ */
+function openaiReasoning(model: string, options: ProviderRunOptions): Record<string, unknown> {
+  if (!options.reasoningEffort || !supportsReasoningEffort('openai', model)) return {};
+  return { reasoning_effort: options.reasoningEffort };
+}
 
 /**
  * OpenAI / Chat Completions-compatible provider. Reads OPENAI_API_KEY plus
@@ -38,6 +49,7 @@ export class OpenAIProvider implements AgentProvider {
     const bodyBase = {
       model,
       messages: messages.map((m) => ({ role: m.role, content: m.content })),
+      ...openaiReasoning(model, options),
     };
     let useMaxCompletionTokens = false;
     let includeTemperature = true;
@@ -93,6 +105,7 @@ export class OpenAIProvider implements AgentProvider {
         max_tokens: options.maxTokens ?? 1024,
         temperature: options.temperature ?? 0.2,
         stream: true,
+        ...openaiReasoning(options.model ?? this.defaultModel, options),
       }),
       signal: options.signal,
     });

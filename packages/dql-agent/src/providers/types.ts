@@ -26,6 +26,12 @@ export interface ProviderRunOptions {
   maxTokens?: number;
   /** Sampling temperature (0..1). */
   temperature?: number;
+  /**
+   * Reasoning effort (low/medium/high). Providers with a reasoning surface
+   * translate it into their native param; the rest ignore it. See
+   * `./reasoning-effort.ts`.
+   */
+  reasoningEffort?: import('./reasoning-effort.js').ReasoningEffort;
   /** Caller-supplied AbortSignal — providers honor it. */
   signal?: AbortSignal;
 }

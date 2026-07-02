@@ -1,7 +1,19 @@
 import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
+import {
+  coerceReasoningEffort,
+  supportsReasoningEffort as providerSupportsReasoningEffort,
+  type ReasoningEffort,
+} from '@duckcodeailabs/dql-agent';
 
 export type ProviderSettingsId = 'anthropic' | 'openai' | 'gemini' | 'ollama' | 'custom-openai' | 'claude-code' | 'codex';
+
+/**
+ * Reasoning-effort ceiling for a provider. `'auto'` (the default when unset)
+ * lets the agent pick effort per task/route up to `high`; an explicit level caps
+ * it there. See `@duckcodeailabs/dql-agent`'s reasoning-effort helpers.
+ */
+export type ReasoningEffortSetting = ReasoningEffort | 'auto';
 
 /**
  * How a provider authenticates:
@@ -18,10 +30,14 @@ export interface ProviderSettingsInput {
   apiKey?: string;
   baseUrl?: string;
   model?: string;
+  /** Reasoning-effort ceiling. `'auto'` clears it; omitted leaves it unchanged. */
+  reasoningEffort?: ReasoningEffortSetting;
 }
 
 export interface StoredProviderSettings extends ProviderSettingsInput {
   updatedAt: string;
+  /** Persisted ceiling — `'auto'` is normalized to `undefined` on write. */
+  reasoningEffort?: ReasoningEffort;
 }
 
 export interface RedactedProviderSettings {
@@ -39,6 +55,10 @@ export interface RedactedProviderSettings {
   authMode: ProviderAuthMode;
   /** For subscription_cli providers: the CLI binary the user must install + log into. */
   command?: string;
+  /** Reasoning-effort ceiling (`'auto'` when unset). Only meaningful for reasoning-capable providers. */
+  reasoningEffort: ReasoningEffortSetting;
+  /** Whether this provider has a reasoning surface at all (drives whether the UI shows the control). */
+  supportsReasoningEffort: boolean;
 }
 
 export interface EffectiveProviderConfig {
@@ -46,6 +66,8 @@ export interface EffectiveProviderConfig {
   baseUrl?: string;
   model?: string;
   enabled: boolean;
+  /** Resolved ceiling (local → env), `undefined` means auto (no cap). */
+  reasoningEffort?: ReasoningEffort;
 }
 
 interface StoredProviderState {
@@ -53,15 +75,44 @@ interface StoredProviderState {
   providers: Partial<Record<ProviderSettingsId, StoredProviderSettings>>;
 }
 
-const PROVIDER_META: Record<ProviderSettingsId, { label: string; authMode: ProviderAuthMode; command?: string; keyEnv?: string; modelEnv?: string; baseUrlEnv?: string }> = {
-  anthropic: { label: 'Anthropic Claude', authMode: 'api_key', keyEnv: 'ANTHROPIC_API_KEY', modelEnv: 'ANTHROPIC_MODEL', baseUrlEnv: 'ANTHROPIC_BASE_URL' },
-  openai: { label: 'OpenAI', authMode: 'api_key', keyEnv: 'OPENAI_API_KEY', modelEnv: 'OPENAI_MODEL', baseUrlEnv: 'OPENAI_BASE_URL' },
-  gemini: { label: 'Google Gemini', authMode: 'api_key', keyEnv: 'GEMINI_API_KEY', modelEnv: 'GEMINI_MODEL', baseUrlEnv: 'GEMINI_BASE_URL' },
-  ollama: { label: 'Ollama', authMode: 'local', modelEnv: 'OLLAMA_MODEL', baseUrlEnv: 'OLLAMA_BASE_URL' },
-  'custom-openai': { label: 'Custom OpenAI-compatible', authMode: 'api_key', keyEnv: 'DQL_OPENAI_COMPAT_API_KEY', modelEnv: 'DQL_OPENAI_COMPAT_MODEL', baseUrlEnv: 'DQL_OPENAI_COMPAT_BASE_URL' },
-  'claude-code': { label: 'Claude subscription (Claude Code CLI)', authMode: 'subscription_cli', command: 'claude', modelEnv: 'CLAUDE_CODE_MODEL' },
-  codex: { label: 'ChatGPT subscription (Codex CLI)', authMode: 'subscription_cli', command: 'codex', modelEnv: 'CODEX_MODEL' },
+type ProviderMeta = {
+  label: string;
+  authMode: ProviderAuthMode;
+  command?: string;
+  keyEnv?: string;
+  modelEnv?: string;
+  baseUrlEnv?: string;
+  /** Env override for the reasoning-effort ceiling (reasoning-capable providers only). */
+  reasoningEffortEnv?: string;
+  /**
+   * The low-level provider family whose reasoning-effort translation this
+   * settings id maps to (`null` = no reasoning surface). Used to decide whether
+   * the UI shows a reasoning-effort control for the configured model.
+   */
+  reasoningFamily?: 'claude' | 'openai' | 'gemini' | null;
 };
+
+const PROVIDER_META: Record<ProviderSettingsId, ProviderMeta> = {
+  anthropic: { label: 'Anthropic Claude', authMode: 'api_key', keyEnv: 'ANTHROPIC_API_KEY', modelEnv: 'ANTHROPIC_MODEL', baseUrlEnv: 'ANTHROPIC_BASE_URL', reasoningEffortEnv: 'ANTHROPIC_REASONING_EFFORT', reasoningFamily: 'claude' },
+  openai: { label: 'OpenAI', authMode: 'api_key', keyEnv: 'OPENAI_API_KEY', modelEnv: 'OPENAI_MODEL', baseUrlEnv: 'OPENAI_BASE_URL', reasoningEffortEnv: 'OPENAI_REASONING_EFFORT', reasoningFamily: 'openai' },
+  gemini: { label: 'Google Gemini', authMode: 'api_key', keyEnv: 'GEMINI_API_KEY', modelEnv: 'GEMINI_MODEL', baseUrlEnv: 'GEMINI_BASE_URL', reasoningEffortEnv: 'GEMINI_REASONING_EFFORT', reasoningFamily: 'gemini' },
+  ollama: { label: 'Ollama', authMode: 'local', modelEnv: 'OLLAMA_MODEL', baseUrlEnv: 'OLLAMA_BASE_URL', reasoningFamily: null },
+  'custom-openai': { label: 'Custom OpenAI-compatible', authMode: 'api_key', keyEnv: 'DQL_OPENAI_COMPAT_API_KEY', modelEnv: 'DQL_OPENAI_COMPAT_MODEL', baseUrlEnv: 'DQL_OPENAI_COMPAT_BASE_URL', reasoningEffortEnv: 'DQL_OPENAI_COMPAT_REASONING_EFFORT', reasoningFamily: 'openai' },
+  'claude-code': { label: 'Claude subscription (Claude Code CLI)', authMode: 'subscription_cli', command: 'claude', modelEnv: 'CLAUDE_CODE_MODEL', reasoningFamily: null },
+  codex: { label: 'ChatGPT subscription (Codex CLI)', authMode: 'subscription_cli', command: 'codex', modelEnv: 'CODEX_MODEL', reasoningFamily: null },
+};
+
+/**
+ * Does the provider's currently-configured model expose a reasoning surface?
+ * Reasoning-family providers with an unset model default to `true` (the user
+ * will typically pick an o-series/gpt-5/Opus/2.5 model); a set model is checked
+ * against the family's capability so we never show a control that no-ops.
+ */
+function providerReasoningSupported(meta: ProviderMeta, model: string | undefined): boolean {
+  if (meta.authMode !== 'api_key' || !meta.reasoningFamily) return false;
+  if (!model) return true;
+  return providerSupportsReasoningEffort(meta.reasoningFamily, model);
+}
 
 export function providerSettingsPath(projectRoot: string): string {
   return join(projectRoot, '.dql', 'provider-settings.json');
@@ -93,8 +144,11 @@ export function listProviderSettings(projectRoot: string): RedactedProviderSetti
         envVars: [meta.modelEnv].filter(Boolean) as string[],
         authMode: meta.authMode,
         command: meta.command,
+        reasoningEffort: 'auto',
+        supportsReasoningEffort: false,
       };
     }
+    const resolvedModel = local?.model || (meta.modelEnv ? process.env[meta.modelEnv] : undefined);
     return {
       id,
       label: meta.label,
@@ -103,13 +157,25 @@ export function listProviderSettings(projectRoot: string): RedactedProviderSetti
       hasApiKey: hasLocalKey || hasEnvKey || hasNoAuthEndpoint || id === 'ollama',
       apiKeyPreview: hasLocalKey ? previewSecret(local!.apiKey!) : hasEnvKey ? `${meta.keyEnv}=set` : undefined,
       baseUrl: local?.baseUrl || (meta.baseUrlEnv ? process.env[meta.baseUrlEnv] : undefined),
-      model: local?.model || (meta.modelEnv ? process.env[meta.modelEnv] : undefined),
+      model: resolvedModel,
       source: hasLocalKey || local?.baseUrl || local?.model ? 'local' : hasEnvKey || envHas(meta) ? 'env' : 'none',
-      envVars: [meta.keyEnv, meta.modelEnv, meta.baseUrlEnv].filter(Boolean) as string[],
+      envVars: [meta.keyEnv, meta.modelEnv, meta.baseUrlEnv, meta.reasoningEffortEnv].filter(Boolean) as string[],
       authMode: meta.authMode,
       command: meta.command,
+      reasoningEffort: resolveReasoningEffortSetting(local, meta) ?? 'auto',
+      supportsReasoningEffort: providerReasoningSupported(meta, resolvedModel),
     };
   });
+}
+
+/** Resolve a provider's stored/env reasoning-effort ceiling, or `undefined` for auto. */
+function resolveReasoningEffortSetting(
+  local: StoredProviderSettings | undefined,
+  meta: ProviderMeta,
+): ReasoningEffort | undefined {
+  if (local?.reasoningEffort) return local.reasoningEffort;
+  if (meta.reasoningEffortEnv) return coerceReasoningEffort(process.env[meta.reasoningEffortEnv]);
+  return undefined;
 }
 
 export function getEffectiveProviderConfig(projectRoot: string, id: ProviderSettingsId): EffectiveProviderConfig {
@@ -120,6 +186,7 @@ export function getEffectiveProviderConfig(projectRoot: string, id: ProviderSett
     baseUrl: stored?.baseUrl || (meta.baseUrlEnv ? process.env[meta.baseUrlEnv] : undefined),
     model: stored?.model || (meta.modelEnv ? process.env[meta.modelEnv] : undefined),
     enabled: stored?.enabled ?? true,
+    reasoningEffort: resolveReasoningEffortSetting(stored, meta),
   };
 }
 
@@ -137,6 +204,12 @@ export function saveProviderSettings(projectRoot: string, input: ProviderSetting
     apiKey: input.apiKey === undefined ? existing?.apiKey : input.apiKey.trim() || undefined,
     baseUrl: input.baseUrl === undefined ? existing?.baseUrl : input.baseUrl.trim() || undefined,
     model: input.model === undefined ? existing?.model : input.model.trim() || undefined,
+    // `undefined` = leave unchanged; `'auto'` = clear the ceiling; a level = set it.
+    reasoningEffort: input.reasoningEffort === undefined
+      ? existing?.reasoningEffort
+      : input.reasoningEffort === 'auto'
+        ? undefined
+        : coerceReasoningEffort(input.reasoningEffort),
     updatedAt: new Date().toISOString(),
   };
   stored[input.id] = next;

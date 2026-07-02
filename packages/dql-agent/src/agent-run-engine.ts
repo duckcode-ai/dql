@@ -8,6 +8,7 @@ import {
   type IntentSignals,
 } from "./intent-controller.js";
 import type { MetadataAgentIntent } from "./metadata/catalog.js";
+import type { ReasoningEffort } from "./providers/reasoning-effort.js";
 
 export type AgentRunRequestedMode = "auto" | "ask" | "research" | "sql" | "block" | "app";
 
@@ -367,6 +368,33 @@ export function answerAnywayRoute(
   if (audience !== "stakeholder" || route !== "clarify") return route;
   const explicitMissing = (request.signals?.missingContext?.length ?? 0) > 0;
   return explicitMissing ? "clarify" : "generated_answer";
+}
+
+/**
+ * Task-adaptive reasoning effort per route — the DQL differentiator. Cheap,
+ * mechanical routes (chat, clarify, blocked, a pre-written certified lookup) run
+ * `low`; correctness-critical routes that generate/validate SQL or investigate
+ * run `high`; app assembly sits at `medium` (its gap-fill sub-answers route
+ * through `generated_answer` and pick up `high` on their own). The host clamps
+ * this by the provider's Settings ceiling before sending it to the model.
+ */
+export function routeReasoningEffort(route: AgentRunRoute): ReasoningEffort {
+  switch (route) {
+    case "conversation":
+    case "clarify":
+    case "certified_answer":
+    case "blocked":
+      return "low";
+    case "app_build":
+      return "medium";
+    case "generated_answer":
+    case "research":
+    case "sql_cell":
+    case "dql_block_draft":
+      return "high";
+    default:
+      return "medium";
+  }
 }
 
 /** Audience-aware escalation target: stakeholders never escalate into authoring. */

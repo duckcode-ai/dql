@@ -3,8 +3,50 @@ import type {
   AgentMessage,
   ProviderRunOptions,
 } from './types.js';
+import { supportsReasoningEffort } from './reasoning-effort.js';
 
 const DEFAULT_ANTHROPIC_BASE_URL = 'https://api.anthropic.com';
+
+/**
+ * Translate the abstract reasoning effort into Anthropic's `output_config.effort`
+ * — the same mechanism the chat-cell agent loop already uses. Emits an empty
+ * object (spread-friendly) when no effort is set or the model can't reason, so it
+ * never sends an unsupported field to older Claude models or plain gateways.
+ */
+function anthropicReasoning(model: string, options: ProviderRunOptions): Record<string, unknown> {
+  if (!options.reasoningEffort || !supportsReasoningEffort('claude', model)) return {};
+  return { output_config: { effort: options.reasoningEffort } };
+}
+
+/** A 400 whose body implicates the effort/output_config field — safe to retry without it. */
+function isEffortRejection(status: number, body: string): boolean {
+  return status === 400 && /output_config|effort|unexpected|unsupported|unrecognized|not\s+supported/i.test(body);
+}
+
+/**
+ * POST to the Messages API with a defensive effort fallback: if the request
+ * carried `output_config.effort` and the API 400s implicating it (a model or
+ * gateway that doesn't accept it despite our capability gate), retry once WITHOUT
+ * the effort field so the turn degrades gracefully instead of failing.
+ */
+async function postMessages(
+  url: string,
+  headers: Record<string, string>,
+  baseBody: Record<string, unknown>,
+  reasoning: Record<string, unknown>,
+  signal: AbortSignal | undefined,
+): Promise<Response> {
+  const res = await fetch(url, {
+    method: 'POST',
+    headers,
+    body: JSON.stringify({ ...baseBody, ...reasoning }),
+    signal,
+  });
+  if (res.ok || Object.keys(reasoning).length === 0) return res;
+  const peek = await res.clone().text().catch(() => '');
+  if (!isEffortRejection(res.status, peek)) return res;
+  return fetch(url, { method: 'POST', headers, body: JSON.stringify(baseBody), signal });
+}
 
 /**
  * Normalize an Anthropic base URL to the SDK's "root" convention: the host (and
@@ -54,22 +96,24 @@ export class ClaudeProvider implements AgentProvider {
       .filter((m) => m.role !== 'system')
       .map((m) => ({ role: m.role, content: m.content }));
 
-    const res = await fetch(`${this.baseUrl}/v1/messages`, {
-      method: 'POST',
-      headers: {
+    const model = options.model ?? this.defaultModel;
+    const res = await postMessages(
+      `${this.baseUrl}/v1/messages`,
+      {
         'x-api-key': this.apiKey,
         'anthropic-version': '2023-06-01',
         'content-type': 'application/json',
       },
-      body: JSON.stringify({
-        model: options.model ?? this.defaultModel,
+      {
+        model,
         max_tokens: options.maxTokens ?? 1024,
         temperature: options.temperature ?? 0.2,
         system: system || undefined,
         messages: turns,
-      }),
-      signal: options.signal,
-    });
+      },
+      anthropicReasoning(model, options),
+      options.signal,
+    );
     if (!res.ok) {
       const body = await res.text().catch(() => res.statusText);
       throw new Error(`claude: ${res.status} ${body}`);
@@ -92,23 +136,25 @@ export class ClaudeProvider implements AgentProvider {
     }
     const system = messages.filter((m) => m.role === 'system').map((m) => m.content).join('\n\n');
     const turns = messages.filter((m) => m.role !== 'system').map((m) => ({ role: m.role, content: m.content }));
-    const res = await fetch(`${this.baseUrl}/v1/messages`, {
-      method: 'POST',
-      headers: {
+    const model = options.model ?? this.defaultModel;
+    const res = await postMessages(
+      `${this.baseUrl}/v1/messages`,
+      {
         'x-api-key': this.apiKey,
         'anthropic-version': '2023-06-01',
         'content-type': 'application/json',
       },
-      body: JSON.stringify({
-        model: options.model ?? this.defaultModel,
+      {
+        model,
         max_tokens: options.maxTokens ?? 1024,
         temperature: options.temperature ?? 0.2,
         system: system || undefined,
         messages: turns,
         stream: true,
-      }),
-      signal: options.signal,
-    });
+      },
+      anthropicReasoning(model, options),
+      options.signal,
+    );
     if (!res.ok || !res.body) {
       const body = await res.text().catch(() => res.statusText);
       throw new Error(`claude: ${res.status} ${body}`);

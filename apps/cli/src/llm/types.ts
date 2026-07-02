@@ -1,4 +1,4 @@
-import type { AgentResultPayload, AgentSchemaTable, KGNode } from '@duckcodeailabs/dql-agent';
+import type { AgentResultPayload, AgentSchemaTable, KGNode, ReasoningEffort } from '@duckcodeailabs/dql-agent';
 
 export type ProviderId = 'anthropic' | 'claude-agent-sdk' | 'claude-code' | 'codex' | 'openai' | 'gemini' | 'ollama' | 'custom-openai';
 
@@ -56,6 +56,12 @@ export interface AgentRunRequest {
   messages: ChatTurn[];
   upstream?: { cellId?: string; sql?: string; preview?: unknown };
   conversationContext?: AgentConversationContext;
+  /**
+   * Reasoning effort for this run (low/medium/high). Resolved upstream from the
+   * engine's per-route effort clamped by the provider's Settings ceiling; the
+   * SDK runners translate it into their native param and no-op when unsupported.
+   */
+  reasoningEffort?: ReasoningEffort;
   projectRoot: string;
   executeCertifiedBlock?: (block: KGNode) => Promise<AgentResultPayload>;
   executeGeneratedSql?: (sql: string) => Promise<AgentResultPayload>;

@@ -5,6 +5,7 @@ import {
   type ProviderCliStatus,
   type ProviderSettings,
   type ProviderSettingsId,
+  type ReasoningEffortSetting,
   type RemoteMcpEntry,
   type RemoteMcpSettings,
   type SettingsEnvGroup,
@@ -590,19 +591,23 @@ function ProviderCard({
   const [apiKey, setApiKey] = useState('');
   const [baseUrl, setBaseUrl] = useState(provider.baseUrl ?? '');
   const [model, setModel] = useState(provider.model ?? '');
+  const [reasoningEffort, setReasoningEffort] = useState<ReasoningEffortSetting>(provider.reasoningEffort ?? 'auto');
   const [busy, setBusy] = useState(false);
   const [testing, setTesting] = useState(false);
   const [testResult, setTestResult] = useState<{ ok: boolean; message: string } | null>(null);
   const isSubscription = provider.authMode === 'subscription_cli';
   const loginCmd = provider.id === 'claude-code' ? '/login' : 'login';
+  // Show the reasoning-effort control only for reasoning-capable models.
+  const showReasoning = provider.supportsReasoningEffort === true && !isSubscription && provider.id !== 'ollama';
 
   useEffect(() => {
     setEnabled(provider.enabled);
     setBaseUrl(provider.baseUrl ?? '');
     setModel(provider.model ?? '');
+    setReasoningEffort(provider.reasoningEffort ?? 'auto');
     setApiKey('');
     setTestResult(null);
-  }, [provider.id, provider.enabled, provider.baseUrl, provider.model]);
+  }, [provider.id, provider.enabled, provider.baseUrl, provider.model, provider.reasoningEffort]);
 
   const save = async () => {
     setBusy(true);
@@ -613,6 +618,7 @@ function ProviderCard({
         apiKey: apiKey || undefined,
         baseUrl,
         model,
+        reasoningEffort,
       });
       onSaved(result.providers);
       onStatus(`${provider.label} settings saved.`);
@@ -693,6 +699,26 @@ function ProviderCard({
           placeholder={isSubscription ? 'Default model (optional — e.g. sonnet, opus)' : 'Default model'}
           style={inputStyle(t)}
         />
+        {showReasoning && (
+          <div style={{ display: 'grid', gap: 4 }}>
+            <label style={{ fontSize: 11, color: t.textSecondary, fontWeight: 600 }}>Reasoning effort</label>
+            <select
+              value={reasoningEffort}
+              onChange={(e) => setReasoningEffort(e.target.value as ReasoningEffortSetting)}
+              style={inputStyle(t)}
+            >
+              <option value="auto">Auto — pick per task (up to High)</option>
+              <option value="low">Low — fastest, cheapest</option>
+              <option value="medium">Medium</option>
+              <option value="high">High — deepest reasoning</option>
+            </select>
+            <div style={{ fontSize: 11, color: t.textSecondary, lineHeight: 1.4 }}>
+              {reasoningEffort === 'auto'
+                ? 'The agent spends more reasoning on SQL generation, gates, and repairs, and less on chat.'
+                : `Caps every request at ${reasoningEffort} reasoning.`}
+            </div>
+          </div>
+        )}
       </div>
 
       <div style={{ display: 'flex', gap: 8, marginTop: 12 }}>

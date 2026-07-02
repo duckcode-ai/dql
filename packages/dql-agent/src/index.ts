@@ -81,6 +81,7 @@ export {
   InMemoryAgentRunStore,
   defaultAgentRunStorePath,
   selectRoute,
+  routeReasoningEffort,
 } from "./agent-run-engine.js";
 export type { FileAgentRunStoreOptions } from "./agent-run-engine.js";
 export type {
@@ -467,12 +468,22 @@ export {
   streamOrGenerate,
   normalizeAnthropicBaseUrl,
   normalizeGeminiBaseUrl,
+  REASONING_EFFORTS,
+  isReasoningEffort,
+  coerceReasoningEffort,
+  clampReasoningEffort,
+  bumpReasoningEffort,
+  supportsReasoningEffort,
+  geminiReasoningStyle,
+  effortToThinkingBudget,
 } from "./providers/index.js";
 export type {
   AgentProvider,
   AgentMessage,
   ProviderName,
   ProviderRunOptions,
+  ReasoningEffort,
+  GeminiReasoningStyle,
 } from "./providers/index.js";
 
 /**
