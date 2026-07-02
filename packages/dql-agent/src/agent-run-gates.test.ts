@@ -91,6 +91,53 @@ describe("defaultAgentRunGates", () => {
     }
   });
 
+  it("auto-escalates a DEEP analytical ask that returned a single scalar to research", () => {
+    const gate = defaultAgentRunGates.generated_answer!;
+    const context: AgentRunGateContext = {
+      route: "generated_answer",
+      request: { question: "why is revenue down this quarter?" },
+      routeDecision: { action: "answer", confidence: 0.7, reason: "r", depth: "deep", followsUp: false },
+      result: {
+        answer: "Revenue is $2.1M.",
+        artifacts: [{ id: "a", kind: "answer", title: "Answer", trustState: "review_required", payload: { answer: "Revenue is $2.1M.", result: { columns: ["revenue"], rows: [{ revenue: 2.1 }], rowCount: 1 } } }],
+      },
+      attempt: 0,
+    };
+    const completeness = gate(context).find((evaluation) => evaluation.id === "answer-completeness");
+    expect(completeness?.passed).toBe(false);
+    expect(completeness?.repairAction).toMatchObject({ kind: "escalate", route: "research" });
+  });
+
+  it("does NOT escalate a deep ask that already returned a multi-row breakdown", () => {
+    const gate = defaultAgentRunGates.generated_answer!;
+    const context: AgentRunGateContext = {
+      route: "generated_answer",
+      request: { question: "why is revenue down by region?" },
+      routeDecision: { action: "answer", confidence: 0.7, reason: "r", depth: "deep", followsUp: false },
+      result: {
+        answer: "Regional breakdown.",
+        artifacts: [{ id: "a", kind: "answer", title: "Answer", trustState: "review_required", payload: { answer: "x", result: { columns: ["region", "rev"], rows: [{ region: "A", rev: 1 }, { region: "B", rev: 2 }], rowCount: 2 } } }],
+      },
+      attempt: 0,
+    };
+    expect(gate(context).find((evaluation) => evaluation.id === "answer-completeness")).toBeUndefined();
+  });
+
+  it("does NOT escalate a QUICK lookup that returned a single scalar", () => {
+    const gate = defaultAgentRunGates.generated_answer!;
+    const context: AgentRunGateContext = {
+      route: "generated_answer",
+      request: { question: "what is total revenue?" },
+      routeDecision: { action: "answer", confidence: 0.7, reason: "r", depth: "quick", followsUp: false },
+      result: {
+        answer: "Revenue is $2.1M.",
+        artifacts: [{ id: "a", kind: "answer", title: "Answer", trustState: "review_required", payload: { answer: "Revenue is $2.1M.", result: { columns: ["revenue"], rows: [{ revenue: 2.1 }], rowCount: 1 } } }],
+      },
+      attempt: 0,
+    };
+    expect(gate(context).find((evaluation) => evaluation.id === "answer-completeness")).toBeUndefined();
+  });
+
   it("semantic gate does NOT second-guess a certified answer resolved via the generated_answer route", () => {
     const gate = defaultAgentRunGates.generated_answer!;
     const context: AgentRunGateContext = {

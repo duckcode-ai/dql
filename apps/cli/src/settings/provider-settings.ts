@@ -1,7 +1,16 @@
 import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 
-export type ProviderSettingsId = 'anthropic' | 'openai' | 'gemini' | 'ollama' | 'custom-openai';
+export type ProviderSettingsId = 'anthropic' | 'openai' | 'gemini' | 'ollama' | 'custom-openai' | 'claude-code' | 'codex';
+
+/**
+ * How a provider authenticates:
+ * - `api_key`: paste an API key (or set the env var).
+ * - `local`: a local daemon, no credential (Ollama).
+ * - `subscription_cli`: authenticated by an installed coding CLI's own login
+ *   (Claude Code / Codex) — no API key; usability is "installed + logged in".
+ */
+export type ProviderAuthMode = 'api_key' | 'local' | 'subscription_cli';
 
 export interface ProviderSettingsInput {
   id: ProviderSettingsId;
@@ -26,6 +35,10 @@ export interface RedactedProviderSettings {
   model?: string;
   source: 'local' | 'env' | 'none';
   envVars: string[];
+  /** How this provider authenticates (drives the settings UI). */
+  authMode: ProviderAuthMode;
+  /** For subscription_cli providers: the CLI binary the user must install + log into. */
+  command?: string;
 }
 
 export interface EffectiveProviderConfig {
@@ -40,12 +53,14 @@ interface StoredProviderState {
   providers: Partial<Record<ProviderSettingsId, StoredProviderSettings>>;
 }
 
-const PROVIDER_META: Record<ProviderSettingsId, { label: string; keyEnv?: string; modelEnv?: string; baseUrlEnv?: string }> = {
-  anthropic: { label: 'Anthropic Claude', keyEnv: 'ANTHROPIC_API_KEY', modelEnv: 'ANTHROPIC_MODEL', baseUrlEnv: 'ANTHROPIC_BASE_URL' },
-  openai: { label: 'OpenAI', keyEnv: 'OPENAI_API_KEY', modelEnv: 'OPENAI_MODEL', baseUrlEnv: 'OPENAI_BASE_URL' },
-  gemini: { label: 'Google Gemini', keyEnv: 'GEMINI_API_KEY', modelEnv: 'GEMINI_MODEL', baseUrlEnv: 'GEMINI_BASE_URL' },
-  ollama: { label: 'Ollama', modelEnv: 'OLLAMA_MODEL', baseUrlEnv: 'OLLAMA_BASE_URL' },
-  'custom-openai': { label: 'Custom OpenAI-compatible', keyEnv: 'DQL_OPENAI_COMPAT_API_KEY', modelEnv: 'DQL_OPENAI_COMPAT_MODEL', baseUrlEnv: 'DQL_OPENAI_COMPAT_BASE_URL' },
+const PROVIDER_META: Record<ProviderSettingsId, { label: string; authMode: ProviderAuthMode; command?: string; keyEnv?: string; modelEnv?: string; baseUrlEnv?: string }> = {
+  anthropic: { label: 'Anthropic Claude', authMode: 'api_key', keyEnv: 'ANTHROPIC_API_KEY', modelEnv: 'ANTHROPIC_MODEL', baseUrlEnv: 'ANTHROPIC_BASE_URL' },
+  openai: { label: 'OpenAI', authMode: 'api_key', keyEnv: 'OPENAI_API_KEY', modelEnv: 'OPENAI_MODEL', baseUrlEnv: 'OPENAI_BASE_URL' },
+  gemini: { label: 'Google Gemini', authMode: 'api_key', keyEnv: 'GEMINI_API_KEY', modelEnv: 'GEMINI_MODEL', baseUrlEnv: 'GEMINI_BASE_URL' },
+  ollama: { label: 'Ollama', authMode: 'local', modelEnv: 'OLLAMA_MODEL', baseUrlEnv: 'OLLAMA_BASE_URL' },
+  'custom-openai': { label: 'Custom OpenAI-compatible', authMode: 'api_key', keyEnv: 'DQL_OPENAI_COMPAT_API_KEY', modelEnv: 'DQL_OPENAI_COMPAT_MODEL', baseUrlEnv: 'DQL_OPENAI_COMPAT_BASE_URL' },
+  'claude-code': { label: 'Claude subscription (Claude Code CLI)', authMode: 'subscription_cli', command: 'claude', modelEnv: 'CLAUDE_CODE_MODEL' },
+  codex: { label: 'ChatGPT subscription (Codex CLI)', authMode: 'subscription_cli', command: 'codex', modelEnv: 'CODEX_MODEL' },
 };
 
 export function providerSettingsPath(projectRoot: string): string {
@@ -62,6 +77,24 @@ export function listProviderSettings(projectRoot: string): RedactedProviderSetti
     const hasLocalKey = Boolean(local?.apiKey?.trim());
     const hasEnvKey = Boolean(envKey?.trim());
     const hasNoAuthEndpoint = id === 'custom-openai' && Boolean(local?.baseUrl?.trim());
+    // Subscription CLI providers carry no API key — their usability is "installed +
+    // logged in", checked at runtime. In settings they're simply on/off (default off).
+    if (meta.authMode === 'subscription_cli') {
+      const enabled = local?.enabled ?? false;
+      return {
+        id,
+        label: meta.label,
+        enabled,
+        active: state.activeProvider === id,
+        hasApiKey: false,
+        baseUrl: undefined,
+        model: local?.model || (meta.modelEnv ? process.env[meta.modelEnv] : undefined),
+        source: enabled ? 'local' : 'none',
+        envVars: [meta.modelEnv].filter(Boolean) as string[],
+        authMode: meta.authMode,
+        command: meta.command,
+      };
+    }
     return {
       id,
       label: meta.label,
@@ -73,6 +106,8 @@ export function listProviderSettings(projectRoot: string): RedactedProviderSetti
       model: local?.model || (meta.modelEnv ? process.env[meta.modelEnv] : undefined),
       source: hasLocalKey || local?.baseUrl || local?.model ? 'local' : hasEnvKey || envHas(meta) ? 'env' : 'none',
       envVars: [meta.keyEnv, meta.modelEnv, meta.baseUrlEnv].filter(Boolean) as string[],
+      authMode: meta.authMode,
+      command: meta.command,
     };
   });
 }
@@ -153,6 +188,9 @@ function envHas(meta: { modelEnv?: string; baseUrlEnv?: string }): boolean {
 function providerCanBeActive(id: ProviderSettingsId, stored: StoredProviderSettings): boolean {
   if (stored.enabled === true) return true;
   const meta = PROVIDER_META[id];
+  // Subscription CLI providers need no key/URL — an explicit `enabled: true` (handled
+  // above) is the only way to auto-activate them; reaching here means not enabled.
+  if (meta.authMode === 'subscription_cli') return false;
   const hasKey = Boolean(stored.apiKey?.trim() || (meta.keyEnv && process.env[meta.keyEnv]?.trim()));
   const hasBaseUrl = Boolean(stored.baseUrl?.trim() || (meta.baseUrlEnv && process.env[meta.baseUrlEnv]?.trim()));
   const hasModel = Boolean(stored.model?.trim() || (meta.modelEnv && process.env[meta.modelEnv]?.trim()));
@@ -166,7 +204,9 @@ function isProviderSettingsId(value: unknown): value is ProviderSettingsId {
     || value === 'openai'
     || value === 'gemini'
     || value === 'ollama'
-    || value === 'custom-openai';
+    || value === 'custom-openai'
+    || value === 'claude-code'
+    || value === 'codex';
 }
 
 function previewSecret(secret: string): string {

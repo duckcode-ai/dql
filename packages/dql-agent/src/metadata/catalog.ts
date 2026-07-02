@@ -2452,7 +2452,7 @@ function clarifyDecision(
   };
 }
 
-function classifyMetadataIntent(question: string, followUp?: unknown): MetadataAgentIntent {
+export function classifyMetadataIntent(question: string, followUp?: unknown): MetadataAgentIntent {
   const follow = followUp && typeof followUp === 'object' ? followUp as Record<string, unknown> : null;
   if (follow?.kind === 'drilldown') return 'entity_drilldown';
   const lower = question.toLowerCase();
@@ -2460,6 +2460,17 @@ function classifyMetadataIntent(question: string, followUp?: unknown): MetadataA
   if (/\b(define|definition|meaning of|what is|what are|what does .+ mean)\b/.test(lower)) return 'definition_lookup';
   if (/\b(anomal|exception|outlier|spike|dip)\b/.test(lower)) return 'anomaly_investigation';
   if (/\b(compare|versus|vs\.?|segment|cohort)\b/.test(lower)) return 'segment_compare';
+  // Ranking / superlative asks ("top N", "who performed most", "best/worst by X") are
+  // lookups, not change-diagnosis — classify them as ranking so they don't wrongly hit
+  // the diagnose "baseline period" gate. Skip this when the ask is genuinely about a
+  // change over time, or is a driver/breakdown question (which owns "top movers").
+  {
+    const asksAboutChange = /\b(why|what happened|changed?|dropp|declin|increas|decreas|delta|variance|month over month|year over year|over time|trend)\b/.test(lower);
+    const asksDriver = /\b(driver|drivers|drove|break\s*down|breakdown|contribut|movers?)\b/.test(lower);
+    if (!asksAboutChange && !asksDriver && /\b(top|bottom|best|worst|highest|lowest|least|fewest|rank|ranking|most)\b/.test(lower)) {
+      return 'ad_hoc_ranking';
+    }
+  }
   if (/\b(why|changed?|change|drop|dropped|decline|declined|increase|increased|decrease|decreased|delta|variance|what happened)\b/.test(lower)) return 'diagnose_change';
   if (/\b(driver|drivers|drove|break\s*down|breakdown|contribute|contribution|top movers?)\b/.test(lower)) return 'driver_breakdown';
   if (isEntityQuestion(question)) return 'entity_drilldown';

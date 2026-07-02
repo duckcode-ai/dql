@@ -1393,11 +1393,24 @@ function certifiedHitFromContextPack(contextPack: LocalContextPack | undefined, 
   return node ? { node, score: 1, snippet: object.snippet } : null;
 }
 
+/**
+ * Reduce a possibly-composed prompt to the user's actual question for display.
+ * Callers (e.g. the Build-SQL-draft modal) sometimes prepend a multi-line instruction
+ * and end with "User question: <q>" / "User request: <q>"; echoing the whole blob in a
+ * clarify message leaks the system prompt. Extract the trailing question, collapse
+ * whitespace, and bound the length so clarify text is always a clean one-liner.
+ */
+export function extractUserQuestion(raw: string): string {
+  const marker = /(?:^|\n)\s*user (?:question|request)\s*:\s*([\s\S]+)$/i.exec(raw);
+  const picked = (marker ? marker[1] : raw).replace(/\s+/g, ' ').trim();
+  return picked.length > 160 ? `${picked.slice(0, 157)}…` : picked;
+}
+
 function composeCatalogClarificationText(question: string, route: MetadataRouteDecision | undefined): string | undefined {
   if (!route?.missingContext.length) return undefined;
   const missing = route.missingContext.map((item) => item.message).join(' ');
   const followUp = route.followUps[0] ? ` ${route.followUps[0]}?` : '';
-  return `I need one more detail before querying "${question}". ${missing}${followUp}`;
+  return `I need one more detail before querying "${extractUserQuestion(question)}". ${missing}${followUp}`;
 }
 
 function sourceTierFromContextPack(contextPack: LocalContextPack | undefined): AnswerSourceTier | undefined {
@@ -3535,7 +3548,7 @@ function composeClarificationText(question: string, considered: KGSearchHit[], s
   const context = considered.slice(0, 3).map((hit) => hit.node.name).join(', ');
   const tables = schemaContext.slice(0, 3).map((table) => table.relation).join(', ');
   const available = [context ? `matched context: ${context}` : '', tables ? `available tables: ${tables}` : ''].filter(Boolean).join('; ');
-  return `I need one more detail before querying: which metric or business object should define the answer for "${question}"?${available ? ` I found ${available}, but not enough to choose a safe grain.` : ''}`;
+  return `I need one more detail before querying: which metric or business object should define the answer for "${extractUserQuestion(question)}"?${available ? ` I found ${available}, but not enough to choose a safe grain.` : ''}`;
 }
 
 async function requestSqlRepair(input: {

@@ -67,7 +67,9 @@ export function createLlmAgentRunPlanner(options: LlmAgentRunPlannerOptions): Ag
 
   return {
     async plan(input: AgentRunPlanInput): Promise<AgentRunPlan> {
-      if (!usesLlm(input.request)) {
+      // A conversational turn is a single deterministic step — never pay the
+      // planner LLM call to "plan" a greeting.
+      if (input.defaultRoute === "conversation" || !usesLlm(input.request)) {
         return deterministic.plan(input);
       }
       try {

@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { decideAgentAction, looksLikeComposeApp, looksLikeFollowUp } from './intent-controller.js';
+import { classifyConversationalTurn, decideAgentAction, looksLikeComposeApp, looksLikeFollowUp } from './intent-controller.js';
 
 describe('decideAgentAction', () => {
   it('composes an app when asked to build a dashboard, regardless of match', () => {
@@ -62,6 +62,58 @@ describe('decideAgentAction', () => {
     for (const intent of ['exact_certified_lookup', 'clarify', 'driver_breakdown'] as const) {
       expect(decideAgentAction({ question: 'q', intent }).reason.length).toBeGreaterThan(10);
     }
+  });
+});
+
+describe('classifyConversationalTurn', () => {
+  it('classifies greetings', () => {
+    for (const q of ['hi', 'hey', 'hello', 'hey!', 'good morning', 'hi there', 'yo']) {
+      expect(classifyConversationalTurn(q)).toBe('greeting');
+    }
+  });
+
+  it('classifies gratitude / acknowledgement', () => {
+    for (const q of ['thanks', 'thank you', 'thanks!', 'got it', 'perfect', 'cheers', 'ok']) {
+      expect(classifyConversationalTurn(q)).toBe('gratitude');
+    }
+  });
+
+  it('classifies meta / capability questions', () => {
+    for (const q of ['what can you do?', 'who are you', 'what is DQL', 'how do you work', 'how can you help']) {
+      expect(classifyConversationalTurn(q)).toBe('meta_capability');
+    }
+  });
+
+  it('does NOT claim a real data question, even with a polite opener', () => {
+    expect(classifyConversationalTurn('hi, what is total revenue?')).toBeUndefined();
+    expect(classifyConversationalTurn('thanks — now break it down by region')).toBeUndefined();
+    expect(classifyConversationalTurn('show me top customers')).toBeUndefined();
+    expect(classifyConversationalTurn('why is revenue down?')).toBeUndefined();
+  });
+
+  it('does NOT treat a long sentence starting with hi as a greeting', () => {
+    expect(classifyConversationalTurn('hi can you compute the churn rate for enterprise accounts')).toBeUndefined();
+  });
+});
+
+describe('decideAgentAction — conversational tier', () => {
+  it('routes greetings/thanks/meta to converse before data routing', () => {
+    expect(decideAgentAction({ question: 'hi', intent: 'clarify' }).action).toBe('converse');
+    expect(decideAgentAction({ question: 'thanks!', intent: 'clarify' }).action).toBe('converse');
+    const meta = decideAgentAction({ question: 'what can you do?', intent: 'clarify' });
+    expect(meta.action).toBe('converse');
+    expect(meta.category).toBe('capability');
+  });
+
+  it('carries the conversational kind and heuristic source', () => {
+    const d = decideAgentAction({ question: 'hello', intent: 'clarify' });
+    expect(d.conversationalKind).toBe('greeting');
+    expect(d.source).toBe('heuristic');
+  });
+
+  it('still routes a data question with a polite opener through the data cascade', () => {
+    const d = decideAgentAction({ question: 'hi, what is total revenue?', intent: 'exact_certified_lookup', signals: { metricScore: 0.8 } });
+    expect(d.action).toBe('answer');
   });
 });
 

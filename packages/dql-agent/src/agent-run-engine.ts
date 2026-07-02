@@ -23,6 +23,7 @@ export type AgentRunAudience = "stakeholder" | "analyst";
 const ANALYST_ONLY_ROUTES = new Set<AgentRunRoute>(["sql_cell", "dql_block_draft"]);
 
 export type AgentRunRoute =
+  | "conversation"
   | "certified_answer"
   | "generated_answer"
   | "research"
@@ -32,10 +33,19 @@ export type AgentRunRoute =
   | "clarify"
   | "blocked";
 
+/**
+ * How the run's answer should be read for trust. `governed` is the default (a
+ * data answer grounded in certified/generated SQL). `conversational` and
+ * `general_knowledge` mark replies that do NOT come from the warehouse — the UI
+ * renders them as plain chat and never attaches a data-trust badge.
+ */
+export type AgentRunAnswerKind = "governed" | "conversational" | "general_knowledge";
+
 export type AgentRunStatus = "completed" | "needs_review" | "needs_clarification" | "blocked";
 export type AgentRunTrustState = "certified" | "grounded" | "review_required" | "blocked" | "not_applicable";
 
 export type AgentRunStopReason =
+  | "conversational_reply"
   | "certified_answer_found"
   | "generated_review_required"
   | "artifact_created"
@@ -196,6 +206,8 @@ export interface AgentRun {
   steps: AgentRunStep[];
   summary: string;
   answer?: string;
+  /** How to read `answer` for trust; defaults to "governed". */
+  answerKind?: AgentRunAnswerKind;
   artifacts: AgentRunArtifact[];
   evaluations: AgentRunEvaluation[];
   events: AgentRunEvent[];
@@ -218,11 +230,19 @@ export interface AgentRouteExecutionContext {
   /** The repair hint the loop wants this re-run to act on. */
   repairHint?: string;
   emit: (event: Omit<AgentRunEvent, "id" | "runId" | "at">) => void;
+  /**
+   * Stream answer text to the client as it is generated. Deltas are transient
+   * (never persisted on the run) — the final `answer` remains authoritative.
+   * A no-op when the host did not wire streaming.
+   */
+  emitAnswerDelta?: (delta: string) => void;
 }
 
 export interface AgentRouteExecutorResult {
   summary?: string;
   answer?: string;
+  /** How to read `answer` for trust; defaults to "governed". */
+  answerKind?: AgentRunAnswerKind;
   status?: AgentRunStatus;
   trustState?: AgentRunTrustState;
   stopReason?: AgentRunStopReason;
@@ -286,10 +306,21 @@ export interface AgentRunStore {
   list?(): AgentRun[] | Promise<AgentRun[]>;
 }
 
+/**
+ * An injectable router that decides the high-level action for a request. When
+ * present the engine awaits it instead of the built-in deterministic decision;
+ * a forced `requestedMode` still bypasses routing entirely. The router itself is
+ * responsible for its own fallback (heuristics) when an LLM is unavailable.
+ */
+export interface AgentRouter {
+  decide(request: AgentRunRequest): IntentDecision | Promise<IntentDecision>;
+}
+
 export interface AgentRunEngineOptions {
   executors?: AgentRunExecutors;
   gates?: AgentRunGates;
   planner?: AgentRunPlanner;
+  router?: AgentRouter;
   store?: AgentRunStore;
   idGenerator?: () => string;
   now?: () => Date;
@@ -469,6 +500,7 @@ export class AgentRunEngine {
   private readonly executors: AgentRunExecutors;
   private readonly gates: AgentRunGates;
   private readonly planner: AgentRunPlanner;
+  private readonly router?: AgentRouter;
   private readonly store?: AgentRunStore;
   private readonly idGenerator: () => string;
   private readonly now: () => Date;
@@ -479,6 +511,7 @@ export class AgentRunEngine {
     this.executors = options.executors ?? {};
     this.gates = options.gates ?? {};
     this.planner = options.planner ?? createDeterministicAgentRunPlanner();
+    this.router = options.router;
     this.store = options.store;
     this.idGenerator = options.idGenerator ?? randomUUID;
     this.now = options.now ?? (() => new Date());
@@ -486,9 +519,27 @@ export class AgentRunEngine {
     this.maxSteps = Math.max(1, options.maxSteps ?? DEFAULT_MAX_STEPS);
   }
 
+  /**
+   * Decide the high-level action. A forced `requestedMode` bypasses routing.
+   * Otherwise an injected router (LLM-assisted) wins; failing that, the built-in
+   * deterministic decision. The router owns its own fallback to heuristics.
+   */
+  private async decideRoute(request: AgentRunRequest): Promise<IntentDecision> {
+    if (requestedModeToAction(request.requestedMode)) return buildIntentDecision(request);
+    if (this.router) {
+      try {
+        return await this.router.decide(request);
+      } catch {
+        // Router failed entirely — fall back to deterministic routing.
+      }
+    }
+    return buildIntentDecision(request);
+  }
+
   async run(
     request: AgentRunRequest,
     onEvent?: (event: AgentRunEvent) => void,
+    onAnswerDelta?: (delta: string) => void,
   ): Promise<AgentRun> {
     const runId = request.runId ?? this.idGenerator();
     const startedAt = this.timestamp();
@@ -516,7 +567,7 @@ export class AgentRunEngine {
     });
 
     const audience = resolveAudience(request);
-    const routeDecision = buildIntentDecision(request);
+    const routeDecision = await this.decideRoute(request);
     const defaultRoute = answerAnywayRoute(
       constrainRouteForAudience(selectRoute(request, routeDecision), audience),
       request,
@@ -604,6 +655,7 @@ export class AgentRunEngine {
             priorEvaluations,
             repairHint,
             emit,
+            emitAnswerDelta: onAnswerDelta,
           });
 
           evaluations = this.evaluate({ route, request, routeDecision, result, attempt });
@@ -912,6 +964,7 @@ export class AgentRunEngine {
       steps: input.steps,
       summary: finalOutcome.summary,
       answer: input.clarifyOutcome?.question ?? finalResult.answer,
+      answerKind: finalResult.answerKind ?? "governed",
       artifacts,
       evaluations: finalStep.evaluations,
       events: input.events,
@@ -977,8 +1030,10 @@ function computeStepOutcome(
 
 function isTerminalSuccess(route: AgentRunRoute, outcome: StepOutcome): boolean {
   // A completed certified answer is the terminal success — no further steps add trust.
+  // A conversational reply is likewise terminal (there is no data work to chain).
   // Every other accepted step falls through so a multi-step plan can keep going; the
   // run loop ends naturally when the planned queue empties or maxSteps is hit.
+  if (route === "conversation" && outcome.status === "completed") return true;
   return route === "certified_answer" && outcome.status === "completed";
 }
 
@@ -1043,6 +1098,8 @@ export function createDeterministicAgentRunPlanner(): AgentRunPlanner {
 
 export function defaultSuccessCriteria(route: AgentRunRoute): string[] {
   switch (route) {
+    case "conversation":
+      return ["A direct, friendly reply — no data routing needed."];
     case "certified_answer":
       return ["Answer is backed by a certified DQL block or governed metric."];
     case "generated_answer":
@@ -1095,6 +1152,10 @@ export function selectRoute(request: AgentRunRequest, decision: IntentDecision):
   if (mode === "block") return "dql_block_draft";
   if (mode === "app") return "app_build";
 
+  // A conversational turn is decided first — before the authoring/app regexes —
+  // so a greeting never trips "create a … block" style matches.
+  if (decision.action === "converse") return "conversation";
+
   const question = request.question;
   if (looksLikeDqlBlockRequest(question)) return "dql_block_draft";
   if (looksLikeSqlCellRequest(question)) return "sql_cell";
@@ -1133,6 +1194,12 @@ function defaultExecutorResult(
 
 function defaultOutcome(route: AgentRunRoute): Pick<AgentRun, "status" | "trustState" | "summary"> {
   switch (route) {
+    case "conversation":
+      return {
+        status: "completed",
+        trustState: "not_applicable",
+        summary: "Replied conversationally.",
+      };
     case "certified_answer":
       return {
         status: "completed",
@@ -1165,6 +1232,8 @@ function defaultEvaluations(
   request: AgentRunRequest,
   decision?: IntentDecision,
 ): AgentRunEvaluation[] {
+  // A conversational reply carries no governance checks — it renders as plain chat.
+  if (route === "conversation") return [];
   const base: AgentRunEvaluation[] = [{
     id: "route-decision",
     label: "Route decision",
@@ -1209,6 +1278,7 @@ function statusFromEvaluations(
 ): AgentRunStatus {
   if (evaluations.some((evaluation) => !evaluation.passed && evaluation.severity === "blocking")) return "blocked";
   if (route === "clarify") return "needs_clarification";
+  if (route === "conversation") return "completed";
   if (route === "certified_answer") return "completed";
   return fallback;
 }
@@ -1220,7 +1290,7 @@ function trustStateFromEvaluations(
 ): AgentRunTrustState {
   if (evaluations.some((evaluation) => !evaluation.passed && evaluation.severity === "blocking")) return "blocked";
   if (route === "certified_answer") return "certified";
-  if (route === "clarify") return "not_applicable";
+  if (route === "clarify" || route === "conversation") return "not_applicable";
   // A generated/research answer that grounded to the catalog AND executed cleanly against
   // real data is "grounded" — honest verification pending human certification (never auto-certified).
   if (route === "research" || route === "generated_answer") {
@@ -1291,6 +1361,7 @@ function stopReasonFor(
   artifacts: AgentRunArtifact[],
 ): AgentRunStopReason {
   if (status === "blocked" || trustState === "blocked") return "blocked";
+  if (route === "conversation") return "conversational_reply";
   if (status === "needs_clarification") return "needs_clarification";
   if (route === "certified_answer") return "certified_answer_found";
   if (artifacts.length > 0 && route !== "generated_answer") return "artifact_created";

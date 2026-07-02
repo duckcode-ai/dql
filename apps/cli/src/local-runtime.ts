@@ -63,7 +63,8 @@ import {
 import { load as loadYaml } from 'js-yaml';
 import { listBlockTemplates } from './block-templates.js';
 import { getRunner as getLLMRunner } from './llm/index.js';
-import type { AgentConversationContext, ProviderId } from './llm/types.js';
+import { createDqlAgentProviderRunner } from './llm/providers/dql-agent-provider.js';
+import type { AgentConversationContext, AgentRunner as LLMAgentRunner, ProviderId } from './llm/types.js';
 import { listRemoteMcpSettings, saveRemoteMcpSettings } from './llm/mcp-config.js';
 import {
   ClaudeProvider,
@@ -85,6 +86,10 @@ import {
   FileAgentRunStore,
   defaultAgentRunGates,
   createLlmAgentRunPlanner,
+  createHybridRouter,
+  synthesizeAnswer,
+  streamOrGenerate,
+  type SynthesizeResultPreview,
   narrateResult,
   type NarrateInput,
   type NarrateResult,
@@ -134,6 +139,7 @@ import {
   type AgentRunStopReason,
   type AgentRunTrustState,
   type AgentRouteExecutor,
+  type ConversationalKind,
   type PlanBlock,
 } from '@duckcodeailabs/dql-agent';
 import { gatherProposeEnrichment } from './propose-enrich.js';
@@ -144,7 +150,9 @@ import {
   listProviderSettings,
   saveProviderSettings,
   type ProviderSettingsId,
+  type RedactedProviderSettings,
 } from './settings/provider-settings.js';
+import { ClaudeCodeCliProvider, CodexCliProvider } from './providers/subscription-cli.js';
 import {
   DQLAccessDeniedError,
   activePersonaAppId,
@@ -643,10 +651,11 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
     request: AgentRunRequest,
     repair?: { attempt: number; repairHint?: string },
   ): Promise<AgentAnswer> {
-    const resolvedProvider = resolveDefaultLLMProvider(projectRoot);
-    const runner = resolvedProvider ? getLLMRunner(resolvedProvider) : null;
+    const governed = resolveGovernedAnswerRunner(projectRoot);
+    const resolvedProvider = governed?.provider ?? null;
+    const runner = governed?.runner ?? null;
     if (!resolvedProvider || !runner) {
-      throw new Error('No AI provider is configured. Configure OpenAI, Gemini, Ollama, or a custom OpenAI-compatible endpoint in Settings.');
+      throw new Error('No AI provider is configured. Configure a subscription (Claude Code / Codex), OpenAI, Gemini, Ollama, or a custom OpenAI-compatible endpoint in Settings.');
     }
     let governedAnswer: AgentAnswer | undefined;
     let providerError: string | undefined;
@@ -696,7 +705,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
     return governedAnswer;
   }
 
-  const answerRunExecutor: AgentRouteExecutor = async ({ request, routeDecision, attempt, repairHint }) => {
+  const answerRunExecutor: AgentRouteExecutor = async ({ request, routeDecision, attempt, repairHint, emitAnswerDelta }) => {
     let governedAnswer: AgentAnswer;
     try {
       governedAnswer = await runGovernedAgentAnswerForRun(request, { attempt, repairHint });
@@ -732,6 +741,44 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
     const isCertified = governedAnswer.certification === 'certified' || governedAnswer.kind === 'certified';
     const needsClarification = governedAnswer.kind === 'no_answer';
     const sql = governedAnswer.proposedSql ?? governedAnswer.sql;
+    // Synthesis: for a genuinely generated (non-certified) answer, compose an
+    // adaptive, well-formatted reply over the executed rows — streamed — instead of
+    // the loop's raw draft. Certified answers keep their fast path (no extra call).
+    let synthesizedAnswer: string | undefined;
+    if (!needsClarification && !isCertified) {
+      try {
+        const provider = await createBlockStudioAssistProvider(projectRoot);
+        if (provider) {
+          const preview = agentResultToSynthesisPreview(governedAnswer.result);
+          const draft = governedAnswer.answer ?? governedAnswer.text;
+          const result = await synthesizeAnswer(
+            {
+              question: request.question,
+              category: routeDecision?.category,
+              audience: request.audience ?? 'analyst',
+              resultPreview: preview,
+              sql: sql,
+              draftText: draft,
+              gaps: governedAnswer.validationWarnings,
+            },
+            {
+              onDelta: emitAnswerDelta,
+              complete: ({ system, user, signal, onDelta }) =>
+                streamOrGenerate(
+                  provider,
+                  [{ role: 'system', content: system }, { role: 'user', content: user }],
+                  { maxTokens: 350, temperature: 0.3, signal },
+                  onDelta ?? (() => {}),
+                ),
+            },
+          );
+          if (result.text) synthesizedAnswer = result.text;
+        }
+      } catch {
+        // Keep the governed draft on any synthesis failure.
+        synthesizedAnswer = undefined;
+      }
+    }
     const status: AgentRunStatus = needsClarification ? 'needs_clarification' : isCertified ? 'completed' : 'needs_review';
     const trustState: AgentRunTrustState = needsClarification ? 'not_applicable' : isCertified ? 'certified' : 'review_required';
     const stopReason: AgentRunStopReason = needsClarification ? 'needs_clarification' : isCertified ? 'certified_answer_found' : 'human_review_required';
@@ -744,7 +791,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
         ];
     return {
       summary: governedAnswer.route?.label ?? (isCertified ? 'Answered from certified DQL context.' : 'Answered with review-required generated analysis.'),
-      answer: governedAnswer.answer ?? governedAnswer.text,
+      answer: synthesizedAnswer ?? governedAnswer.answer ?? governedAnswer.text,
       status,
       trustState,
       stopReason,
@@ -779,7 +826,55 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
     };
   };
 
+  const conversationRunExecutor: AgentRouteExecutor = async ({ request, routeDecision, emitAnswerDelta }) => {
+    const kind = routeDecision?.conversationalKind ?? 'smalltalk';
+    const isGeneralKnowledge = routeDecision?.category === 'general_knowledge';
+    const answerKind = isGeneralKnowledge ? 'general_knowledge' : 'conversational';
+    const catalogContext = buildAgentRunCatalogContext();
+    const suggestions = buildConversationSuggestions(projectRoot, kind);
+    const nextActions: AgentRunNextAction[] = suggestions.map((prompt, index) => ({
+      id: `suggest-question-${index + 1}`,
+      label: prompt,
+    }));
+
+    let text: string | undefined;
+    try {
+      const provider = await createBlockStudioAssistProvider(projectRoot);
+      if (provider) {
+        const system = buildConversationSystemPrompt(kind, isGeneralKnowledge, catalogContext, request.audience ?? 'analyst');
+        const messages = [
+          { role: 'system' as const, content: system },
+          ...(request.history ?? []).slice(-6).map((message) => ({ role: message.role, content: message.text })),
+          { role: 'user' as const, content: request.question },
+        ];
+        text = (await provider.generate(messages, { maxTokens: 320, temperature: 0.6 })).trim();
+        // Perceived-latency: surface the reply as one delta for surfaces wired to stream.
+        if (text) emitAnswerDelta?.(text);
+      }
+    } catch {
+      // Provider unavailable / errored — fall through to the deterministic reply.
+      text = undefined;
+    }
+    if (!text) {
+      text = buildConversationalFallback(kind, isGeneralKnowledge, request.question, suggestions);
+      emitAnswerDelta?.(text);
+    }
+
+    return {
+      summary: 'Replied conversationally.',
+      answer: text,
+      answerKind,
+      status: 'completed',
+      trustState: 'not_applicable',
+      stopReason: 'conversational_reply',
+      artifacts: [],
+      evaluations: [],
+      nextActions,
+    };
+  };
+
   const agentRunExecutors: AgentRunExecutors = {
+    conversation: conversationRunExecutor,
     certified_answer: answerRunExecutor,
     generated_answer: answerRunExecutor,
     research: async ({ runId, request, routeDecision, emit }) => {
@@ -1149,12 +1244,32 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
     getCatalogContext: buildAgentRunCatalogContext,
   });
 
+  // Hybrid router: keep the deterministic decision when it is confident (certified
+  // fast paths + greetings stay 0-LLM); spend one cheap classification call only for
+  // the ambiguous middle so Auto reliably picks quick-answer vs deep research without
+  // the user clicking "Dig deeper". Same provider completion as the planner.
+  const agentRunRouter = createHybridRouter({
+    complete: async ({ system, user, signal }) => {
+      const provider = await createBlockStudioAssistProvider(projectRoot);
+      if (!provider) throw new Error('No AI provider configured for routing.');
+      return provider.generate(
+        [
+          { role: 'system', content: system },
+          { role: 'user', content: user },
+        ],
+        { maxTokens: 250, temperature: 0, signal },
+      );
+    },
+    getCatalogContext: () => buildAgentRunCatalogContext(),
+  });
+
   const agentRunStore = new FileAgentRunStore({ path: defaultAgentRunStorePath(projectRoot) });
   const agentRunEngine = new AgentRunEngine({
     store: agentRunStore,
     executors: agentRunExecutors,
     gates: defaultAgentRunGates,
     planner: agentRunPlanner,
+    router: agentRunRouter,
   });
 
   const runNotebookForApp = async (appId: string, notebookPath: string): Promise<void> => {
@@ -1409,10 +1524,11 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
     executionError?: string;
     providerUsed?: string;
   }> => {
-    const resolvedProvider = resolveDefaultLLMProvider(projectRoot);
-    const runner = resolvedProvider ? getLLMRunner(resolvedProvider) : null;
+    const governed = resolveGovernedAnswerRunner(projectRoot);
+    const resolvedProvider = governed?.provider ?? null;
+    const runner = governed?.runner ?? null;
     if (!resolvedProvider || !runner) {
-      throw new Error('No AI provider is configured. Configure OpenAI, Gemini, Ollama, or a custom OpenAI-compatible endpoint in Settings.');
+      throw new Error('No AI provider is configured. Configure a subscription (Claude Code / Codex), OpenAI, Gemini, Ollama, or a custom OpenAI-compatible endpoint in Settings.');
     }
 
     let governedAnswer: AgentAnswer | undefined;
@@ -1650,8 +1766,9 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
       let providerError: string | undefined;
       const generationWarnings: string[] = [];
       if (!generatedSql && !reviewedSql) {
-        const resolvedProvider = resolveDefaultLLMProvider(projectRoot);
-        const runner = resolvedProvider ? getLLMRunner(resolvedProvider) : null;
+        const governedResearch = resolveGovernedAnswerRunner(projectRoot);
+        const resolvedProvider = governedResearch?.provider ?? null;
+        const runner = governedResearch?.runner ?? null;
         if (!resolvedProvider || !runner) {
           generationWarnings.push('No AI provider is configured. Metadata context was saved as a research plan; paste SQL or configure an AI provider to generate candidate SQL.');
         } else {
@@ -2423,7 +2540,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
   const writeAgentRunSse = (
     response: ServerResponse,
     event: string,
-    data: AgentRun | AgentRunEvent | { error: string },
+    data: AgentRun | AgentRunEvent | { error: string } | { runId?: string; delta: string },
   ) => {
     response.write(`event: ${event}\n`);
     response.write(`data: ${serializeJSON(data)}\n\n`);
@@ -2473,6 +2590,11 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           res.end(serializeJSON({ error: parsed.error ?? 'Invalid agent run request.' }));
           return;
         }
+        // The UI does not send retrieval signals; probe the local catalog so the
+        // router can short-circuit obvious governed matches without an LLM call.
+        if (!parsed.request.signals && !parsed.request.requestedMode) {
+          parsed.request.signals = computeAgentRunSignals(projectRoot, parsed.request.question);
+        }
         const wantsStream = url.searchParams.get('stream') === '1' || url.searchParams.get('stream') === 'true';
         if (wantsStream) {
           res.writeHead(200, {
@@ -2483,6 +2605,8 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           });
           const run = await agentRunEngine.run(parsed.request, (event) => {
             writeAgentRunSse(res as unknown as ServerResponse, 'agent-run-event', event);
+          }, (delta) => {
+            writeAgentRunSse(res as unknown as ServerResponse, 'agent-run-answer-delta', { runId: parsed.request!.runId, delta });
           });
           writeAgentRunSse(res as unknown as ServerResponse, 'agent-run-complete', run);
           res.end();
@@ -2996,6 +3120,24 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
     if (req.method === 'GET' && path === '/api/settings/providers') {
       res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
       res.end(serializeJSON({ providers: listProviderSettings(projectRoot) }));
+      return;
+    }
+
+    // Live detection for subscription-CLI providers: is the CLI installed and logged
+    // in, and (for Claude) which account/plan. Lets Settings show real status instead
+    // of a static hint. Spawns the CLIs, so it's a separate async call from the list.
+    if (req.method === 'GET' && path === '/api/settings/providers/cli-status') {
+      try {
+        const [claudeCode, codex] = await Promise.all([
+          ClaudeCodeCliProvider.detect(),
+          CodexCliProvider.detect(),
+        ]);
+        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({ status: { 'claude-code': claudeCode, codex } }));
+      } catch (error) {
+        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({ status: {}, error: error instanceof Error ? error.message : String(error) }));
+      }
       return;
     }
 
@@ -7258,6 +7400,7 @@ function isLLMProviderId(value: unknown): value is ProviderId {
   return value === 'anthropic'
     || value === 'claude-agent-sdk'
     || value === 'claude-code'
+    || value === 'codex'
     || value === 'openai'
     || value === 'gemini'
     || value === 'ollama'
@@ -7269,7 +7412,9 @@ export function resolveDefaultLLMProvider(projectRoot: string): ProviderId | nul
   const activeProvider = getActiveProvider(projectRoot);
   if (activeProvider) {
     const active = settings.find((item) => item.id === activeProvider);
-    if (active?.enabled) return activeProvider;
+    // Only return it for the chat-cell runner path if it's a runner provider id
+    // (subscription-only ids like `codex` aren't runners; they fall through).
+    if (active?.enabled && isLLMProviderId(activeProvider)) return activeProvider;
   }
   const preferred: ProviderId[] = ['openai', 'gemini', 'anthropic', 'custom-openai', 'ollama'];
   for (const id of preferred) {
@@ -7277,6 +7422,23 @@ export function resolveDefaultLLMProvider(projectRoot: string): ProviderId | nul
     if (provider?.enabled && provider.hasApiKey) return id;
   }
   return null;
+}
+
+/**
+ * Resolve the runner that produces a GOVERNED answer (answer-loop with a completion
+ * provider). Subscription CLI providers (Claude Code / Codex) are forced through the
+ * answer-loop runner — never the MCP `claudeCodeRunner`, which doesn't emit a governed
+ * answer envelope. Everything else uses the Settings-resolved default runner.
+ */
+function resolveGovernedAnswerRunner(projectRoot: string): { provider: ProviderId; runner: LLMAgentRunner } | null {
+  const active = getActiveProvider(projectRoot);
+  if (active === 'claude-code' || active === 'codex') {
+    return { provider: active, runner: createDqlAgentProviderRunner(active) };
+  }
+  const resolved = resolveDefaultLLMProvider(projectRoot);
+  if (!resolved) return null;
+  const runner = getLLMRunner(resolved);
+  return runner ? { provider: resolved, runner } : null;
 }
 
 function loadAppDashboard(
@@ -11275,10 +11437,14 @@ async function createBlockStudioAssistProvider(
 ): Promise<AgentProvider | null> {
   const settings = listProviderSettings(projectRoot);
   const activeProvider = getActiveProvider(projectRoot);
+  // Subscription CLI providers (Claude Code / Codex) carry no API key — they're
+  // usable when enabled; their real "installed + logged in" check runs in available().
+  const isUsable = (provider: RedactedProviderSettings): boolean =>
+    provider.enabled && (provider.hasApiKey || provider.authMode === 'subscription_cli');
   const selected = requestedProvider
-    ? settings.find((provider) => provider.id === requestedProvider && provider.enabled && provider.hasApiKey)
+    ? settings.find((provider) => provider.id === requestedProvider && isUsable(provider))
     : settings.find((provider) => provider.id === activeProvider && provider.enabled)
-      ?? settings.find((provider) => provider.enabled && provider.hasApiKey);
+      ?? settings.find(isUsable);
   if (!selected) return null;
   const config = getEffectiveProviderConfig(projectRoot, selected.id);
   let provider: AgentProvider;
@@ -11298,10 +11464,180 @@ async function createBlockStudioAssistProvider(
     case 'custom-openai':
       provider = new OpenAIProvider({ apiKey: config.apiKey, baseUrl: config.baseUrl, model: config.model, allowNoApiKey: true });
       break;
+    case 'claude-code':
+      provider = new ClaudeCodeCliProvider({ model: config.model });
+      break;
+    case 'codex':
+      provider = new CodexCliProvider({ model: config.model });
+      break;
     default:
       return null;
   }
   return await provider.available() ? provider : null;
+}
+
+/** Convert a governed answer's result payload into a bounded synthesis preview. */
+function agentResultToSynthesisPreview(result: AgentAnswer['result']): SynthesizeResultPreview | undefined {
+  if (!result) return undefined;
+  const columns = Array.isArray(result.columns)
+    ? result.columns.map((col) => typeof col === 'string' ? col : (col as { name?: string })?.name ?? String(col))
+    : [];
+  const rawRows = Array.isArray(result.rows) ? result.rows.slice(0, 20) : [];
+  const rows = rawRows.map((row) => {
+    if (row && typeof row === 'object' && !Array.isArray(row)) return row as Record<string, unknown>;
+    // Array-shaped rows → zip with column names.
+    if (Array.isArray(row)) {
+      const obj: Record<string, unknown> = {};
+      row.forEach((value, index) => { obj[columns[index] ?? `col${index}`] = value; });
+      return obj;
+    }
+    return { value: row } as Record<string, unknown>;
+  });
+  return {
+    columns: columns.length > 0 ? columns : Object.keys(rows[0] ?? {}),
+    rows,
+    rowCount: typeof result.rowCount === 'number' ? result.rowCount : rows.length,
+  };
+}
+
+const SIGNAL_STOPWORDS = new Set([
+  'the', 'a', 'an', 'of', 'for', 'to', 'by', 'in', 'on', 'and', 'or', 'is', 'are', 'was', 'were',
+  'what', 'which', 'how', 'show', 'me', 'my', 'our', 'this', 'that', 'top', 'give', 'get', 'list',
+]);
+
+function signalTokens(text: string): Set<string> {
+  return new Set(
+    text.toLowerCase().replace(/[^a-z0-9\s]/g, ' ').split(/\s+/)
+      .filter((token) => token.length > 2 && !SIGNAL_STOPWORDS.has(token)),
+  );
+}
+
+/** Best token-overlap ratio between the question and any candidate name/description. */
+function bestOverlap(questionTokens: Set<string>, candidates: string[]): number {
+  if (questionTokens.size === 0) return 0;
+  let best = 0;
+  for (const candidate of candidates) {
+    const candTokens = signalTokens(candidate);
+    if (candTokens.size === 0) continue;
+    let hits = 0;
+    for (const token of candTokens) if (questionTokens.has(token)) hits += 1;
+    if (hits === 0) continue;
+    // Ratio of the candidate's tokens the question covers — rewards a tight match.
+    const ratio = hits / Math.min(candTokens.size, questionTokens.size);
+    if (ratio > best) best = ratio;
+  }
+  return Math.min(1, best);
+}
+
+/**
+ * Cheap, offline retrieval-signal probe. Fills certifiedScore/metricScore/hasRetrieval
+ * from local catalog name/description overlap so the deterministic router can reach
+ * confidence (and skip the LLM) on obvious governed matches. Best-effort — any failure
+ * yields empty signals and the router simply leans on its LLM classification.
+ */
+function computeAgentRunSignals(projectRoot: string, question: string): { certifiedScore: number; metricScore: number; hasRetrieval: boolean } {
+  try {
+    const tokens = signalTokens(question);
+    if (tokens.size === 0) return { certifiedScore: 0, metricScore: 0, hasRetrieval: false };
+    const certifiedBlocks = collectPlanBlocks(projectRoot, { certifiedOnly: true });
+    const blockStrings = certifiedBlocks.flatMap((block) => [block.name, block.description ?? ''].filter(Boolean));
+    const metrics = loadSemanticMetrics(projectRoot);
+    const metricStrings = metrics.map((metric) => {
+      const node = metric as { name?: string; label?: string; id?: string };
+      return node.name ?? node.label ?? node.id ?? '';
+    }).filter(Boolean);
+    const certifiedScore = bestOverlap(tokens, blockStrings);
+    const metricScore = bestOverlap(tokens, metricStrings);
+    return { certifiedScore, metricScore, hasRetrieval: certifiedScore > 0 || metricScore > 0 };
+  } catch {
+    return { certifiedScore: 0, metricScore: 0, hasRetrieval: false };
+  }
+}
+
+/** Up to three example questions built from real catalog blocks (falls back to generic asks). */
+function buildConversationSuggestions(projectRoot: string, kind: ConversationalKind): string[] {
+  if (kind === 'gratitude') return [];
+  let names: string[] = [];
+  try {
+    let blocks = collectPlanBlocks(projectRoot, { certifiedOnly: true });
+    if (blocks.length === 0) blocks = collectPlanBlocks(projectRoot, { certifiedOnly: false });
+    names = blocks.slice(0, 3).map((block) => block.name).filter(Boolean);
+  } catch {
+    names = [];
+  }
+  if (names.length === 0) {
+    return [
+      'What is total revenue?',
+      'Top customers by revenue this quarter',
+      'Why is revenue down by region?',
+    ];
+  }
+  const humanize = (name: string): string =>
+    name.replace(/[_-]+/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase());
+  return names.map((name) => `Show me ${humanize(name)}`);
+}
+
+/** The system prompt for a conversational reply — persona + capability card + catalog. */
+function buildConversationSystemPrompt(
+  kind: ConversationalKind,
+  isGeneralKnowledge: boolean,
+  catalogContext: string,
+  audience: 'analyst' | 'stakeholder',
+): string {
+  const capabilities = audience === 'stakeholder'
+    ? [
+        'answer questions about their data, grounded in certified metrics and dbt lineage',
+        'run a deeper investigation when a question needs it ("dig deeper")',
+      ]
+    : [
+        'answer questions about their data, grounded in certified metrics and dbt lineage',
+        'run a deeper multi-step investigation ("dig deeper")',
+        'draft SQL cells and DQL blocks for review',
+        'build dashboards and apps from certified blocks',
+      ];
+  const lines = [
+    'You are DQL\'s assistant inside a governed analytics notebook. Be warm, concise, and helpful.',
+    `You can: ${capabilities.map((c) => `(${c})`).join(', ')}.`,
+    'Reply in at most 2-3 short sentences. Do NOT invent data values, metrics, or numbers.',
+    'If the user seems to want data, invite them to ask — their question will run through the governed loop.',
+  ];
+  if (isGeneralKnowledge) {
+    lines.push(
+      'This is a general-knowledge question. Answer from your own knowledge, plainly and briefly.',
+      'Do NOT imply the answer comes from the user\'s data or warehouse. If it relates to their work, offer to look at their governed data next.',
+    );
+  } else if (kind === 'meta_capability') {
+    lines.push('The user is asking what you can do — briefly describe your capabilities and suggest a concrete first question.');
+  }
+  if (catalogContext) {
+    lines.push('', 'When suggesting example questions, prefer these real objects in their workspace:', catalogContext);
+  }
+  return lines.join('\n');
+}
+
+/** Deterministic, warm reply when no AI provider is configured — never governance-speak. */
+function buildConversationalFallback(
+  kind: ConversationalKind,
+  isGeneralKnowledge: boolean,
+  question: string,
+  suggestions: string[],
+): string {
+  const examples = suggestions.length > 0
+    ? ` For example: ${suggestions.map((s) => `"${s}"`).join(', ')}.`
+    : '';
+  if (isGeneralKnowledge) {
+    return `That's a general-knowledge question, so I can't answer it from your governed data. Ask me about your metrics or dbt models and I'll ground the answer in your workspace.${examples}`;
+  }
+  switch (kind) {
+    case 'greeting':
+      return `Hi! I'm your DQL assistant — I answer questions about your data, grounded in your certified metrics and dbt lineage.${examples}`;
+    case 'gratitude':
+      return "You're welcome! Ask me anything else about your data whenever you're ready.";
+    case 'meta_capability':
+      return `I can answer questions about your data (grounded in certified metrics and dbt lineage), dig deeper with a multi-step investigation, draft SQL and DQL blocks, and build apps from certified blocks.${examples}`;
+    default:
+      return `I'm here to help you explore your data. Ask me a question and I'll ground the answer in your certified metrics and dbt models.${examples}`;
+  }
 }
 
 function buildDeterministicAiAssistSummary(
@@ -13289,7 +13625,10 @@ async function testProviderConfig(
   };
   const label = providerSettingsLabel(id);
   const details = providerConfigDetails(id, config);
-  if (!config.enabled) {
+  const isSubscriptionCli = id === 'claude-code' || id === 'codex';
+  // Subscription CLI providers are always testable — detection (installed + logged in)
+  // needs no saved config; the others require enabling/saving first.
+  if (!config.enabled && !isSubscriptionCli) {
     return { ok: false, message: `${label} is disabled. Enable it (or Save) before testing.` };
   }
   if (id === 'openai') return testOpenAIProviderConfig(config, label, details);
@@ -13303,6 +13642,12 @@ async function testProviderConfig(
     case 'ollama':
       provider = new OllamaProvider({ baseUrl: config.baseUrl, model: config.model });
       break;
+    case 'claude-code':
+      provider = new ClaudeCodeCliProvider({ model: config.model });
+      break;
+    case 'codex':
+      provider = new CodexCliProvider({ model: config.model });
+      break;
     case 'custom-openai':
     default:
       provider = new OpenAIProvider({ apiKey: config.apiKey, baseUrl: config.baseUrl, model: config.model, allowNoApiKey: true });
@@ -13310,9 +13655,12 @@ async function testProviderConfig(
   }
   const available = await provider.available().catch(() => false);
   if (!available) {
+    const cli = id === 'claude-code' ? 'claude' : 'codex';
     return {
       ok: false,
-      message: `${label} is not configured or reachable${details}. Check API key, base URL, and local service state.`,
+      message: isSubscriptionCli
+        ? `${label} is not ready. Install the \`${cli}\` CLI and run \`${cli} ${id === 'claude-code' ? '/login' : 'login'}\` with your subscription, then test again.`
+        : `${label} is not configured or reachable${details}. Check API key, base URL, and local service state.`,
     };
   }
   try {
@@ -13397,6 +13745,8 @@ function providerSettingsLabel(id: ProviderSettingsId): string {
     case 'gemini': return 'Gemini';
     case 'ollama': return 'Ollama';
     case 'custom-openai': return 'Custom OpenAI-compatible provider';
+    case 'claude-code': return 'Claude subscription (Claude Code CLI)';
+    case 'codex': return 'ChatGPT subscription (Codex CLI)';
   }
 }
 

@@ -19,8 +19,17 @@ import {
 import { existsSync } from 'node:fs';
 import type { AgentRunRequest, AgentRunner, AgentTurn, BlockProposal, ProviderId } from '../types.js';
 import { getEffectiveProviderConfig } from '../../settings/provider-settings.js';
+import { ClaudeCodeCliProvider, CodexCliProvider } from '../../providers/subscription-cli.js';
 
-type SimpleProviderId = Extract<ProviderId, 'anthropic' | 'openai' | 'gemini' | 'ollama' | 'custom-openai'>;
+/**
+ * Providers the governed answer-loop runner can drive. Beyond the API-key/local
+ * providers this includes the subscription CLI providers (`claude-code`, `codex`) —
+ * used as plain completion backends here, distinct from the MCP `claudeCodeRunner`.
+ */
+type SimpleProviderId =
+  | Extract<ProviderId, 'anthropic' | 'openai' | 'gemini' | 'ollama' | 'custom-openai'>
+  | 'claude-code'
+  | 'codex';
 
 interface ProviderSpec {
   label: string;
@@ -69,6 +78,16 @@ const SPECS: Record<SimpleProviderId, ProviderSpec> = {
       return new OpenAIProvider({ apiKey: config.apiKey, model: config.model, baseUrl: config.baseUrl, allowNoApiKey: true });
     },
   },
+  'claude-code': {
+    label: 'Claude subscription (Claude Code CLI)',
+    setup: 'Install the `claude` CLI and run `claude /login` with your Claude subscription.',
+    create: (projectRoot) => new ClaudeCodeCliProvider({ model: getEffectiveProviderConfig(projectRoot, 'claude-code').model }),
+  },
+  codex: {
+    label: 'ChatGPT subscription (Codex CLI)',
+    setup: 'Install the `codex` CLI and run `codex login` with your ChatGPT plan.',
+    create: (projectRoot) => new CodexCliProvider({ model: getEffectiveProviderConfig(projectRoot, 'codex').model }),
+  },
 };
 
 function emitProposalFromText(text: string, emit: (turn: AgentTurn) => void): void {
@@ -115,7 +134,7 @@ export function createDqlAgentProviderRunner(id: SimpleProviderId): AgentRunner 
         }
         await reindexProject(req.projectRoot, { kgPath });
 
-        const question = lastUserMessage(req);
+        const question = resolveEffectiveQuestion(req);
         if (!question) {
           emit({ kind: 'error', message: 'No user question found.' });
           return;
@@ -221,6 +240,37 @@ function lastUserMessage(req: AgentRunRequest): string {
     if (msg.role === 'user' && msg.content.trim()) return msg.content.trim();
   }
   return '';
+}
+
+/** Did the assistant's previous turn ask the user a clarifying question? */
+const CLARIFY_MARKER_RE =
+  /one more detail|needs clarification|which (?:business object|metric|table|certified block)|what (?:grain|filter|time period)|baseline period|should define the answer|before (?:i can|it can) (?:safely )?(?:answer|generate)/i;
+
+/**
+ * When the prior assistant turn was a clarifying question and this turn is the user's
+ * answer, the answer alone is too vague to route — re-classifying it just re-clarifies.
+ * Fold the ORIGINAL question together with the clarification answer so the loop has
+ * enough to proceed. Returns the current message unchanged when this isn't a clarify
+ * follow-up.
+ */
+export function resolveEffectiveQuestion(req: AgentRunRequest): string {
+  const msgs = req.messages;
+  const current = lastUserMessage(req);
+  if (!current) return current;
+  // The current user turn is the last message; find the assistant turn before it.
+  let assistantIdx = -1;
+  for (let i = msgs.length - 2; i >= 0; i--) {
+    if (msgs[i].role === 'assistant') { assistantIdx = i; break; }
+  }
+  if (assistantIdx < 0) return current;
+  if (!CLARIFY_MARKER_RE.test(msgs[assistantIdx].content)) return current;
+  // Find the original user question that prompted the clarification.
+  let original = '';
+  for (let i = assistantIdx - 1; i >= 0; i--) {
+    if (msgs[i].role === 'user' && msgs[i].content.trim()) { original = msgs[i].content.trim(); break; }
+  }
+  if (!original || original === current) return current;
+  return `${original} — clarification: ${current}`;
 }
 
 function renderExtraContext(req: AgentRunRequest, followUp?: AgentFollowUpContext): string | undefined {

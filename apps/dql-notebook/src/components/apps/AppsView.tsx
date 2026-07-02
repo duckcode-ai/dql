@@ -63,7 +63,7 @@ type AppAnalysisHandoff = {
   context: string;
   decision?: Partial<AppAskDecision> & { reason?: string; nextAction?: string };
 };
-type AppCopilotRoute = 'certified_answer' | 'investigation' | 'app_change_proposal' | 'metadata_answer';
+type AppCopilotRoute = 'certified_answer' | 'generated_answer' | 'investigation' | 'app_change_proposal' | 'metadata_answer';
 type AppCopilotBlockTile = { blockId: string; title: string; viz: string; tileId: string };
 
 interface AppResearchSeed {
@@ -3141,6 +3141,7 @@ function cleanStakeholderCopy(value: string): string {
 
 function formatCopilotRouteLabel(route: AppCopilotRoute): string {
   if (route === 'certified_answer') return 'Answered from trusted logic';
+  if (route === 'generated_answer') return 'Generated — review required';
   if (route === 'investigation') return 'Needs analysis';
   if (route === 'app_change_proposal') return 'App change idea';
   if (route === 'metadata_answer') return 'Metadata answer';

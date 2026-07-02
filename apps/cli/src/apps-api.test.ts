@@ -609,6 +609,84 @@ describe('Apps command center API helpers', () => {
     });
   });
 
+  it('routes an OFF-tile question through the governed answer loop, not the focused tile', async () => {
+    const root = createProject();
+    writeBlock(root, 'nba/top-scorers.dql', {
+      name: 'Top Scorers', domain: 'nba', status: 'certified', tags: ['nba'],
+      description: 'Top NBA player scoring output', chart: 'bar',
+      query: 'SELECT player_name, total_points FROM NBA_GAMES.RAW.fct_player_performance',
+    });
+    const appResult = createAppPackage(root, {
+      name: 'NBA Performance', domain: 'nba', dashboardTitle: 'NBA Overview',
+      selectedBlockIds: ['Top Scorers'], owners: ['owner@local'],
+    });
+    expect(appResult.ok).toBe(true);
+    if (!appResult.ok) return;
+
+    let governedCalls = 0;
+    const ctx = {
+      projectRoot: root, req: {} as any, res: {} as any,
+      url: new URL('http://local.test/api/apps/nba-performance/ask'),
+      path: '/api/apps/nba-performance/ask',
+      // Governed loop returns a DIFFERENT answer than the focused-tile narration.
+      generateGovernedAnswer: async (_q: string) => {
+        governedCalls += 1;
+        return {
+          kind: 'uncertified', certification: 'ai_generated', reviewStatus: 'draft_ready',
+          text: 'Assists leader: Chris Paul with 892 assists.',
+          answer: 'Assists leader: Chris Paul with 892 assists.',
+          citations: [{ kind: 'block', name: 'assists_by_player' }],
+        } as any;
+      },
+    };
+
+    // A tile is focused ("Top Scorers"), but the question is about a different metric.
+    const result = await __test__.askAppQuestion(ctx, 'nba-performance', {
+      question: 'who are the players with the most assists?',
+      dashboardId: 'nba-overview',
+      blockId: 'Top Scorers',
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(governedCalls).toBe(1);
+    expect(result.route).toBe('generated_answer');
+    expect(result.answer).toContain('Chris Paul');
+    expect(result.trustState).toBe('review_required');
+  });
+
+  it('narrates the focused tile ONLY for questions about it, without calling the governed loop', async () => {
+    const root = createProject();
+    writeBlock(root, 'nba/top-scorers.dql', {
+      name: 'Top Scorers', domain: 'nba', status: 'certified', tags: ['nba'],
+      description: 'Top NBA player scoring output', chart: 'bar',
+      query: 'SELECT player_name, total_points FROM NBA_GAMES.RAW.fct_player_performance',
+    });
+    const appResult = createAppPackage(root, {
+      name: 'NBA Performance', domain: 'nba', dashboardTitle: 'NBA Overview',
+      selectedBlockIds: ['Top Scorers'], owners: ['owner@local'],
+    });
+    expect(appResult.ok).toBe(true);
+    if (!appResult.ok) return;
+
+    let governedCalls = 0;
+    const ctx = {
+      projectRoot: root, req: {} as any, res: {} as any,
+      url: new URL('http://local.test/api/apps/nba-performance/ask'),
+      path: '/api/apps/nba-performance/ask',
+      generateGovernedAnswer: async (_q: string) => { governedCalls += 1; return { kind: 'no_answer', text: '' } as any; },
+    };
+
+    const result = await __test__.askAppQuestion(ctx, 'nba-performance', {
+      question: 'explain this result',
+      dashboardId: 'nba-overview',
+      blockId: 'Top Scorers',
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(governedCalls).toBe(0);
+    expect(result.route).toBe('certified_answer');
+  });
+
   it('reuses an existing App report for the same follow-up question and context', async () => {
     const root = createProject();
     writeBlock(root, 'nba/top-scorers.dql', {

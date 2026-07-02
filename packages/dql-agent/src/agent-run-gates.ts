@@ -142,6 +142,33 @@ const answerGate: AgentRunGate = ({ result }: AgentRunGateContext): AgentRunEval
 };
 
 /**
+ * Auto-escalation safety net: when the router judged a turn "deep" (an analytical
+ * ask) but it still landed on a direct answer that came back as a single scalar,
+ * escalate to research instead of relying on the user clicking "Dig deeper".
+ * Only fires for genuinely generated (non-certified) answers with a real answer
+ * present — a missing answer is already escalated by {@link answerGate}.
+ */
+function deepAnswerCompletenessEvaluation(
+  context: AgentRunGateContext,
+): AgentRunEvaluation | undefined {
+  if (context.routeDecision?.depth !== "deep") return undefined;
+  const payload = primaryArtifactPayload(context.result);
+  const hasAnswer = nonEmptyString(context.result.answer) ?? nonEmptyString(payload?.answer) ?? nonEmptyString(payload?.text);
+  if (!hasAnswer) return undefined; // answerGate already escalates an empty answer.
+  const rowCount = resultRowCount(payload);
+  if (rowCount !== undefined && rowCount > 1) return undefined; // a real breakdown — leave it.
+  return {
+    id: "answer-completeness",
+    label: "Depth of answer",
+    passed: false,
+    severity: "warning",
+    message: "This looks like an analytical question, but the answer is a single value — a deeper investigation will explain the drivers.",
+    suggestedRepair: "Investigate the drivers and breakdown across governed metrics and lineage.",
+    repairAction: { kind: "escalate", route: "research", hint: "Investigate the drivers behind this analytical question." },
+  };
+}
+
+/**
  * Generated answers get the liveness checks (execution error / grounding) PLUS a
  * semantic-correctness check: a scalar question that returned many rows is repaired.
  */
@@ -153,6 +180,8 @@ const generatedAnswerGate: AgentRunGate = (context: AgentRunGateContext): AgentR
   if (!certified) {
     const semantic = semanticCorrectnessEvaluation(context.request.question, primaryArtifactPayload(context.result));
     if (semantic) evaluations = upsert(evaluations, semantic);
+    const completeness = deepAnswerCompletenessEvaluation(context);
+    if (completeness) evaluations = upsert(evaluations, completeness);
   }
   return evaluations;
 };

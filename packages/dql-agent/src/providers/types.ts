@@ -37,6 +37,35 @@ export interface AgentProvider {
    * Throws on transport / API errors.
    */
   generate(messages: AgentMessage[], options?: ProviderRunOptions): Promise<string>;
+  /**
+   * Optional token streaming. Calls `onDelta` with each text chunk as it arrives
+   * and resolves with the full concatenated text. Providers that omit this fall
+   * back to `generate()` via {@link streamOrGenerate}.
+   */
+  generateStream?(
+    messages: AgentMessage[],
+    options: ProviderRunOptions,
+    onDelta: (delta: string) => void,
+  ): Promise<string>;
   /** True if this provider has all the credentials/binaries it needs. */
   available(): Promise<boolean>;
+}
+
+/**
+ * Stream if the provider supports it, else generate once and emit the whole text
+ * as a single delta. Degradation is structural — callers always get the full text
+ * and at least one delta.
+ */
+export async function streamOrGenerate(
+  provider: AgentProvider,
+  messages: AgentMessage[],
+  options: ProviderRunOptions,
+  onDelta: (delta: string) => void,
+): Promise<string> {
+  if (provider.generateStream) {
+    return provider.generateStream(messages, options, onDelta);
+  }
+  const text = await provider.generate(messages, options);
+  if (text) onDelta(text);
+  return text;
 }

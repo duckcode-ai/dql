@@ -13,6 +13,7 @@ import { GeminiProvider, normalizeGeminiBaseUrl } from './gemini.js';
 import { OllamaProvider } from './ollama.js';
 
 export type { AgentProvider, AgentMessage, ProviderName, ProviderRunOptions } from './types.js';
+export { streamOrGenerate } from './types.js';
 export { ClaudeProvider, OpenAIProvider, GeminiProvider, OllamaProvider, normalizeAnthropicBaseUrl, normalizeGeminiBaseUrl };
 
 const FALLBACK_ORDER: ProviderName[] = ['claude', 'openai', 'gemini', 'ollama'];

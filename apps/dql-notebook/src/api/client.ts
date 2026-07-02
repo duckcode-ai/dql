@@ -402,6 +402,7 @@ export interface NotebookResearchListResponse {
 
 export type AgentRunRequestedMode = 'auto' | 'ask' | 'research' | 'sql' | 'block' | 'app';
 export type AgentRunRoute =
+  | 'conversation'
   | 'certified_answer'
   | 'generated_answer'
   | 'research'
@@ -410,9 +411,11 @@ export type AgentRunRoute =
   | 'app_build'
   | 'clarify'
   | 'blocked';
+export type AgentRunAnswerKind = 'governed' | 'conversational' | 'general_knowledge';
 export type AgentRunStatus = 'completed' | 'needs_review' | 'needs_clarification' | 'blocked';
 export type AgentRunTrustState = 'certified' | 'grounded' | 'review_required' | 'blocked' | 'not_applicable';
 export type AgentRunStopReason =
+  | 'conversational_reply'
   | 'certified_answer_found'
   | 'generated_review_required'
   | 'artifact_created'
@@ -537,6 +540,7 @@ export interface AgentRun {
   steps: AgentRunStep[];
   summary: string;
   answer?: string;
+  answerKind?: AgentRunAnswerKind;
   artifacts: AgentRunArtifact[];
   evaluations: AgentRunEvaluation[];
   events: AgentRunEvent[];
@@ -584,6 +588,7 @@ export interface AgentRunListResponse {
 
 export type AgentRunStreamMessage =
   | { kind: 'event'; event: AgentRunEvent }
+  | { kind: 'answer-delta'; delta: string }
   | { kind: 'complete'; run: AgentRun };
 
 export interface NotebookResearchDiagnostics {
@@ -1005,7 +1010,7 @@ export interface AppAiBuildSession {
 export type AppAskResponse =
   | {
       ok: true;
-      route: 'certified_answer' | 'investigation' | 'app_change_proposal' | 'metadata_answer';
+      route: 'certified_answer' | 'generated_answer' | 'investigation' | 'app_change_proposal' | 'metadata_answer';
       answer: string;
       trustState: DashboardDisplayMetadata['trustState'];
       reviewStatus: DashboardDisplayMetadata['reviewStatus'];
@@ -1174,7 +1179,8 @@ export interface SettingsEnvGroup {
   vars: SettingsEnvVar[];
 }
 
-export type ProviderSettingsId = 'anthropic' | 'openai' | 'gemini' | 'ollama' | 'custom-openai';
+export type ProviderSettingsId = 'anthropic' | 'openai' | 'gemini' | 'ollama' | 'custom-openai' | 'claude-code' | 'codex';
+export type ProviderAuthMode = 'api_key' | 'local' | 'subscription_cli';
 
 export interface ProviderSettings {
   id: ProviderSettingsId;
@@ -1187,6 +1193,20 @@ export interface ProviderSettings {
   model?: string;
   source: 'local' | 'env' | 'none';
   envVars: string[];
+  /** How the provider authenticates (drives the settings card). */
+  authMode?: ProviderAuthMode;
+  /** For subscription_cli providers: the CLI binary to install + log into. */
+  command?: string;
+}
+
+/** Live detection for a subscription-CLI provider. */
+export interface ProviderCliStatus {
+  installed: boolean;
+  loggedIn: boolean;
+  authMethod?: string;
+  subscriptionType?: string;
+  email?: string;
+  detail?: string;
 }
 
 export interface RemoteMcpEntry {
@@ -1289,6 +1309,9 @@ async function streamAgentRunResponse(
     const payload = JSON.parse(dataLines.join('\n'));
     if (eventName === 'agent-run-event') {
       onMessage({ kind: 'event', event: payload as AgentRunEvent });
+    } else if (eventName === 'agent-run-answer-delta') {
+      const delta = typeof payload?.delta === 'string' ? payload.delta : '';
+      if (delta) onMessage({ kind: 'answer-delta', delta });
     } else if (eventName === 'agent-run-complete') {
       completed = payload as AgentRun;
       onMessage({ kind: 'complete', run: completed });
@@ -1851,6 +1874,15 @@ export const api = {
       return await request<{ providers: ProviderSettings[] }>('/api/settings/providers');
     } catch {
       return { providers: [] };
+    }
+  },
+
+  /** Live install/login detection for subscription-CLI providers (Claude Code / Codex). */
+  async getProviderCliStatus(): Promise<{ status: Partial<Record<ProviderSettingsId, ProviderCliStatus>> }> {
+    try {
+      return await request<{ status: Partial<Record<ProviderSettingsId, ProviderCliStatus>> }>('/api/settings/providers/cli-status');
+    } catch {
+      return { status: {} };
     }
   },
 

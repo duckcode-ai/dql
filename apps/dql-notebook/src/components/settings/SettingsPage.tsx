@@ -2,6 +2,7 @@ import React, { useEffect, useMemo, useState } from 'react';
 import {
   api,
   type AgentMemory,
+  type ProviderCliStatus,
   type ProviderSettings,
   type ProviderSettingsId,
   type RemoteMcpEntry,
@@ -11,7 +12,11 @@ import {
 import { useNotebook } from '../../store/NotebookStore';
 import { themes, type Theme } from '../../themes/notebook-theme';
 
-const PROVIDER_ORDER: ProviderSettingsId[] = ['anthropic', 'openai', 'gemini', 'ollama', 'custom-openai'];
+const PROVIDER_ORDER: ProviderSettingsId[] = ['claude-code', 'codex', 'anthropic', 'openai', 'gemini', 'ollama', 'custom-openai'];
+// Subscription providers (log in with an installed CLI) render as their own group,
+// separate from API-key / local providers.
+const SUBSCRIPTION_PROVIDER_ORDER: ProviderSettingsId[] = ['claude-code', 'codex'];
+const KEY_PROVIDER_ORDER: ProviderSettingsId[] = ['anthropic', 'openai', 'gemini', 'ollama', 'custom-openai'];
 
 // Base URL is supported for every provider so enterprise deployments can route
 // through a gateway/proxy. Empty = use the provider's public default.
@@ -49,6 +54,7 @@ export function ConnectionRuntimeSettings({
   const t = themes[state.themeMode];
   const [groups, setGroups] = useState<SettingsEnvGroup[]>([]);
   const [providers, setProviders] = useState<ProviderSettings[]>([]);
+  const [cliStatus, setCliStatus] = useState<Partial<Record<ProviderSettingsId, ProviderCliStatus>>>({});
   const [mcpSettings, setMcpSettings] = useState<RemoteMcpSettings>({ path: '', entries: [], warnings: [] });
   const [memories, setMemories] = useState<AgentMemory[]>([]);
   const [loading, setLoading] = useState(true);
@@ -76,7 +82,18 @@ export function ConnectionRuntimeSettings({
     void refresh();
   }, []);
 
-  const configured = useMemo(() => providers.filter((p) => p.enabled && (p.hasApiKey || p.id === 'ollama')).length, [providers]);
+  // Detect installed/logged-in subscription CLIs separately — it spawns the CLIs,
+  // so it must not block the main settings load.
+  useEffect(() => {
+    if (loading) return;
+    let cancelled = false;
+    void api.getProviderCliStatus().then((res) => {
+      if (!cancelled) setCliStatus(res.status ?? {});
+    });
+    return () => { cancelled = true; };
+  }, [loading]);
+
+  const configured = useMemo(() => providers.filter((p) => p.enabled && (p.hasApiKey || p.id === 'ollama' || p.authMode === 'subscription_cli')).length, [providers]);
   const activeProvider = providers.find((provider) => provider.active);
 
   return (
@@ -120,9 +137,36 @@ export function ConnectionRuntimeSettings({
                 />
               </div>
             )}
-            <SectionTitle title="Model providers" detail="Connect at least one AI provider — it powers governed answers, block suggestions, and research. Use environment variables or save project-local settings for OpenAI, Anthropic, Gemini, Ollama, or a compatible endpoint." t={t} />
+            <SectionTitle title="Model providers" detail="Connect at least one AI provider — it powers governed answers, block suggestions, and research. Sign in with a Claude or ChatGPT subscription, or use an API key / local model." t={t} />
+
+            <GroupLabel
+              title="Use your subscription"
+              detail="No API key — sign in with the provider's CLI. DQL runs each request through it using your plan."
+              t={t}
+            />
             <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(320px, 1fr))', gap: 14 }}>
-              {PROVIDER_ORDER.map((id) => {
+              {SUBSCRIPTION_PROVIDER_ORDER.map((id) => {
+                const provider = providers.find((p) => p.id === id);
+                return provider ? (
+                  <ProviderCard
+                    key={id}
+                    provider={provider}
+                    cliStatus={cliStatus[id]}
+                    t={t}
+                    onSaved={(next) => setProviders(next)}
+                    onStatus={setStatus}
+                  />
+                ) : null;
+              })}
+            </div>
+
+            <GroupLabel
+              title="API key & local providers"
+              detail="Paste an API key (or set the env var), point at a gateway, or run a local model with Ollama."
+              t={t}
+            />
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(320px, 1fr))', gap: 14 }}>
+              {KEY_PROVIDER_ORDER.map((id) => {
                 const provider = providers.find((p) => p.id === id);
                 return provider ? (
                   <ProviderCard
@@ -494,13 +538,50 @@ function McpCompatibilityCard({
   );
 }
 
+function CliStatusLine({ status, command, loginCmd, t }: { status?: ProviderCliStatus; command?: string; loginCmd: string; t: Theme }) {
+  let tone = t.textMuted;
+  let dot = t.textMuted;
+  let text: React.ReactNode = 'Checking for the CLI…';
+  if (status) {
+    if (!status.installed) {
+      tone = t.warning; dot = t.warning;
+      text = <><code>{command}</code> CLI not found on this machine — install it, then sign in.</>;
+    } else if (!status.loggedIn) {
+      tone = t.warning; dot = t.warning;
+      text = <>Installed but not signed in — run <code>{command} {loginCmd}</code>.</>;
+    } else {
+      tone = t.success; dot = t.success;
+      const who = [status.email, status.subscriptionType ? `${status.subscriptionType} plan` : status.authMethod]
+        .filter(Boolean).join(' · ');
+      text = <>Signed in{who ? <> — {who}</> : ''}. Ready to use.</>;
+    }
+  }
+  return (
+    <div style={{ display: 'flex', alignItems: 'center', gap: 7, fontSize: 12, color: tone }}>
+      <span style={{ width: 7, height: 7, borderRadius: '50%', background: dot, flex: '0 0 auto' }} />
+      <span>{text}</span>
+    </div>
+  );
+}
+
+function GroupLabel({ title, detail, t }: { title: string; detail: string; t: Theme }) {
+  return (
+    <div style={{ margin: '20px 0 10px' }}>
+      <div style={{ fontSize: 12.5, fontWeight: 750, color: t.textPrimary, letterSpacing: '-0.01em' }}>{title}</div>
+      <div style={{ fontSize: 11.5, color: t.textSecondary, marginTop: 2, lineHeight: 1.45 }}>{detail}</div>
+    </div>
+  );
+}
+
 function ProviderCard({
   provider,
+  cliStatus,
   t,
   onSaved,
   onStatus,
 }: {
   provider: ProviderSettings;
+  cliStatus?: ProviderCliStatus;
   t: Theme;
   onSaved: (providers: ProviderSettings[]) => void;
   onStatus: (message: string | null) => void;
@@ -512,6 +593,8 @@ function ProviderCard({
   const [busy, setBusy] = useState(false);
   const [testing, setTesting] = useState(false);
   const [testResult, setTestResult] = useState<{ ok: boolean; message: string } | null>(null);
+  const isSubscription = provider.authMode === 'subscription_cli';
+  const loginCmd = provider.id === 'claude-code' ? '/login' : 'login';
 
   useEffect(() => {
     setEnabled(provider.enabled);
@@ -577,25 +660,37 @@ function ProviderCard({
       </div>
 
       <div style={{ display: 'grid', gap: 8, marginTop: 12 }}>
-        {provider.id !== 'ollama' && (
-          <input
-            value={apiKey}
-            onChange={(e) => setApiKey(e.target.value)}
-            type="password"
-            placeholder={provider.hasApiKey ? 'Leave blank to keep existing key' : 'API key'}
-            style={inputStyle(t)}
-          />
+        {isSubscription ? (
+          <div style={{ display: 'grid', gap: 8 }}>
+            <CliStatusLine status={cliStatus} command={provider.command} loginCmd={loginCmd} t={t} />
+            <div style={{ fontSize: 12, color: t.textSecondary, lineHeight: 1.5, background: t.appBg, border: `1px solid ${t.headerBorder}`, borderRadius: 6, padding: '9px 11px' }}>
+              No API key needed — this uses your subscription via the <code>{provider.command}</code> CLI.
+              Install it and run <code>{provider.command} {loginCmd}</code> to sign in, then Enable and Save here.
+            </div>
+          </div>
+        ) : (
+          <>
+            {provider.id !== 'ollama' && (
+              <input
+                value={apiKey}
+                onChange={(e) => setApiKey(e.target.value)}
+                type="password"
+                placeholder={provider.hasApiKey ? 'Leave blank to keep existing key' : 'API key'}
+                style={inputStyle(t)}
+              />
+            )}
+            <input
+              value={baseUrl}
+              onChange={(e) => setBaseUrl(e.target.value)}
+              placeholder={baseUrlPlaceholder(provider.id)}
+              style={inputStyle(t)}
+            />
+          </>
         )}
-        <input
-          value={baseUrl}
-          onChange={(e) => setBaseUrl(e.target.value)}
-          placeholder={baseUrlPlaceholder(provider.id)}
-          style={inputStyle(t)}
-        />
         <input
           value={model}
           onChange={(e) => setModel(e.target.value)}
-          placeholder="Default model"
+          placeholder={isSubscription ? 'Default model (optional — e.g. sonnet, opus)' : 'Default model'}
           style={inputStyle(t)}
         />
       </div>

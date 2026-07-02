@@ -3,6 +3,7 @@ import type {
   AgentMessage,
   ProviderRunOptions,
 } from './types.js';
+import { consumeSse } from './claude.js';
 
 /**
  * OpenAI / Chat Completions-compatible provider. Reads OPENAI_API_KEY plus
@@ -71,6 +72,50 @@ export class OpenAIProvider implements AgentProvider {
       if (!retry) break;
     }
     throw new Error(`openai: ${lastStatus} ${lastBody}`);
+  }
+
+  async generateStream(
+    messages: AgentMessage[],
+    options: ProviderRunOptions,
+    onDelta: (delta: string) => void,
+  ): Promise<string> {
+    if (!this.apiKey && !this.allowNoApiKey) {
+      throw new Error('openai: OPENAI_API_KEY is not set');
+    }
+    const headers: Record<string, string> = { 'content-type': 'application/json' };
+    if (this.apiKey) headers.Authorization = `Bearer ${this.apiKey}`;
+    const res = await fetch(`${this.baseUrl}/chat/completions`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({
+        model: options.model ?? this.defaultModel,
+        messages: messages.map((m) => ({ role: m.role, content: m.content })),
+        max_tokens: options.maxTokens ?? 1024,
+        temperature: options.temperature ?? 0.2,
+        stream: true,
+      }),
+      signal: options.signal,
+    });
+    if (!res.ok || !res.body) {
+      const body = await res.text().catch(() => res.statusText);
+      // Streaming can be rejected for param reasons (max_completion_tokens, temperature);
+      // fall back to the robust non-streaming path rather than failing the turn.
+      throw new Error(`openai: ${res.status} ${body}`);
+    }
+    let full = '';
+    await consumeSse(res.body, (data) => {
+      try {
+        const event = JSON.parse(data) as { choices?: Array<{ delta?: { content?: string } }> };
+        const delta = event.choices?.[0]?.delta?.content;
+        if (delta) {
+          full += delta;
+          onDelta(delta);
+        }
+      } catch {
+        // ignore non-JSON keep-alive lines
+      }
+    });
+    return full;
   }
 }
 

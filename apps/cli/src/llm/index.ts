@@ -23,6 +23,10 @@ const RUNNERS: Record<ProviderId, AgentRunner> = {
   anthropic: anthropicSdkRunner,
   'claude-agent-sdk': claudeAgentSdkRunner,
   'claude-code': claudeCodeRunner,
+  // `codex` (ChatGPT subscription) runs through the governed answer-loop as a plain
+  // completion backend. `claude-code` keeps the MCP runner here for the explicit
+  // chat-cell path; its governed answers are routed via createDqlAgentProviderRunner.
+  codex: createDqlAgentProviderRunner('codex'),
   openai: openAiSdkRunner,
   gemini: createDqlAgentProviderRunner('gemini'),
   ollama: createDqlAgentProviderRunner('ollama'),

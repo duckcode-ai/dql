@@ -62,6 +62,66 @@ export class OllamaProvider implements AgentProvider {
     throw new Error(`ollama: no reachable endpoint. Tried ${this.baseUrls.join(', ')}. ${errors.join(' | ')}`);
   }
 
+  async generateStream(
+    messages: AgentMessage[],
+    options: ProviderRunOptions,
+    onDelta: (delta: string) => void,
+  ): Promise<string> {
+    const errors: string[] = [];
+    for (const baseUrl of await this.orderedBaseUrls()) {
+      try {
+        const res = await fetch(`${baseUrl}/api/chat`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({
+            model: options.model ?? this.defaultModel,
+            messages: messages.map((m) => ({ role: m.role, content: m.content })),
+            stream: true,
+            think: false,
+            options: { temperature: options.temperature ?? 0.2, num_predict: options.maxTokens ?? 1024 },
+          }),
+          signal: options.signal,
+        });
+        if (!res.ok || !res.body) {
+          const body = await res.text().catch(() => res.statusText);
+          errors.push(`${baseUrl}: ${res.status} ${body}`);
+          continue;
+        }
+        this.resolvedBaseUrl = baseUrl;
+        // Ollama streams newline-delimited JSON, one object per chunk.
+        const reader = res.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = '';
+        let full = '';
+        for (;;) {
+          const { value, done } = await reader.read();
+          if (value) {
+            buffer += decoder.decode(value, { stream: !done });
+            let nl = buffer.indexOf('\n');
+            while (nl >= 0) {
+              const line = buffer.slice(0, nl).trim();
+              buffer = buffer.slice(nl + 1);
+              if (line) {
+                try {
+                  const obj = JSON.parse(line) as { message?: { content?: string } };
+                  const delta = obj.message?.content;
+                  if (delta) { full += delta; onDelta(delta); }
+                } catch { /* ignore partial line */ }
+              }
+              nl = buffer.indexOf('\n');
+            }
+          }
+          if (done) break;
+        }
+        return full;
+      } catch (err) {
+        if (options.signal?.aborted) throw err;
+        errors.push(`${baseUrl}: ${err instanceof Error ? err.message : String(err)}`);
+      }
+    }
+    throw new Error(`ollama: no reachable endpoint. Tried ${this.baseUrls.join(', ')}. ${errors.join(' | ')}`);
+  }
+
   private async resolveBaseUrl(): Promise<string | null> {
     if (this.resolvedBaseUrl && await canReachOllama(this.resolvedBaseUrl)) {
       return this.resolvedBaseUrl;

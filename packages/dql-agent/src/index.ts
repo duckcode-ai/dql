@@ -63,9 +63,11 @@ export type {
 export { answer, parseProposal } from "./answer-loop.js";
 export {
   decideAgentAction,
+  classifyConversationalTurn,
   looksLikeComposeApp,
   looksLikeFollowUp,
   type AgentAction,
+  type ConversationalKind,
   type IntentDecision,
   type IntentDecisionInput,
   type IntentSignals,
@@ -85,7 +87,9 @@ export type {
   AgentRouteExecutionContext,
   AgentRouteExecutor,
   AgentRouteExecutorResult,
+  AgentRouter,
   AgentRun,
+  AgentRunAnswerKind,
   AgentRunArtifact,
   AgentRunArtifactKind,
   AgentRunAudience,
@@ -132,6 +136,22 @@ export {
   type AgentRunPlannerCompletion,
   type LlmAgentRunPlannerOptions,
 } from "./agent-run-planner.js";
+export {
+  createHybridRouter,
+  type RouterClassification,
+  type RouterCompletion,
+  type HybridRouterOptions,
+} from "./router.js";
+export {
+  synthesizeAnswer,
+  inferFormat,
+  type SynthesizeInput,
+  type SynthesizeOptions,
+  type SynthesizeResult,
+  type SynthesizeCompletion,
+  type SynthesisFormat,
+  type SynthesizeResultPreview,
+} from "./synthesize.js";
 export {
   planApp,
   type AppPlan as AgentAppPlan,
@@ -444,6 +464,7 @@ export {
   OllamaProvider,
   pickProvider,
   buildProvider,
+  streamOrGenerate,
   normalizeAnthropicBaseUrl,
   normalizeGeminiBaseUrl,
 } from "./providers/index.js";

@@ -34,6 +34,7 @@ import {
   type AppBuildProposal,
 } from '../../api/client';
 import { themes, type Theme, type ThemeMode } from '../../themes/notebook-theme';
+import { StructuredAnswerText } from './AgentAnswerCard';
 import { AppBuildProposalPanel, defaultProposalSelection } from '../apps/AppBuildProposalPanel';
 import { ChartOutput } from '../output/ChartOutput';
 import { TableOutput } from '../output/TableOutput';
@@ -76,6 +77,7 @@ interface UnifiedAgentRunPanelProps {
 }
 
 const ROUTE_LABEL: Record<AgentRunRoute, string> = {
+  conversation: 'Chat',
   certified_answer: 'Certified answer',
   generated_answer: 'Generated answer',
   research: 'Research plan',
@@ -120,6 +122,7 @@ export function UnifiedAgentRunPanel({
   const [input, setInput] = useState(initialInput);
   const [items, setItems] = useState<ThreadItem[]>(initialItems ?? []);
   const [runningEvents, setRunningEvents] = useState<AgentRunEvent[]>([]);
+  const [streamingAnswer, setStreamingAnswer] = useState('');
   const [running, setRunning] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const inputRef = useRef<HTMLTextAreaElement | null>(null);
@@ -162,6 +165,7 @@ export function UnifiedAgentRunPanel({
     setError(null);
     setRunning(true);
     setRunningEvents([]);
+    setStreamingAnswer('');
     const controller = new AbortController();
     abortRef.current = controller;
     try {
@@ -179,11 +183,14 @@ export function UnifiedAgentRunPanel({
       const run = await api.createAgentRunStream(runInput, (message) => {
         if (message.kind === 'event') {
           setRunningEvents((current) => [...current, message.event].slice(-8));
+        } else if (message.kind === 'answer-delta') {
+          setStreamingAnswer((current) => current + message.delta);
         } else {
           setRunningEvents(message.run.events.slice(-8));
         }
       }, controller.signal);
       setItems((current) => [...current, { kind: 'run', id: run.id, run }]);
+      setStreamingAnswer('');
     } catch (err) {
       if (!controller.signal.aborted) {
         setError(err instanceof Error ? err.message : String(err));
@@ -253,6 +260,11 @@ export function UnifiedAgentRunPanel({
       void submit(run.question, 'research');
       return;
     }
+    // A conversational suggestion chip carries the whole question as its label — run it.
+    if (action.id.startsWith('suggest-question')) {
+      void submit(action.label, 'auto');
+      return;
+    }
     pendingModeRef.current = routeToMode(action.route);
     setInput(nextPromptFor(run, action.route));
     requestAnimationFrame(() => inputRef.current?.focus());
@@ -310,7 +322,7 @@ export function UnifiedAgentRunPanel({
           />
         ))}
 
-        {running && <RunProgress events={runningEvents} t={t} />}
+        {running && <RunProgress events={runningEvents} t={t} streamingAnswer={streamingAnswer} />}
       </div>
 
       {error ? <div style={{ margin: '0 16px 8px', color: t.error, fontSize: 12 }}>{error}</div> : null}
@@ -373,14 +385,23 @@ const EXAMPLE_PROMPTS: ExamplePrompt[] = [
 
 function routeActionLabel(route?: AgentRunRoute): string {
   switch (route) {
+    case 'conversation': return 'Replying';
     case 'research': return 'Researching across governed data';
-    case 'certified_answer':
+    case 'certified_answer': return 'Checking certified blocks';
     case 'generated_answer': return 'Finding the answer';
     case 'app_build': return 'Assembling the app';
     case 'sql_cell': return 'Writing the query';
     case 'dql_block_draft': return 'Drafting the block';
     default: return 'Working';
   }
+}
+
+/** The route of the latest routed step, if any (drives conversation-aware chrome). */
+function latestRoute(events: AgentRunEvent[]): AgentRunRoute | undefined {
+  for (let i = events.length - 1; i >= 0; i -= 1) {
+    if (events[i].route) return events[i].route;
+  }
+  return undefined;
 }
 
 function currentActionLabel(events: AgentRunEvent[]): string {
@@ -463,11 +484,30 @@ function phaseIconFor(events: AgentRunEvent[]): typeof Sparkles {
  * action headline, a Plan→Work→Verify tracker, and the latest step line.
  * Expresses *what the agent is doing* rather than a generic progress bar.
  */
-function RunProgress({ events, t }: { events: AgentRunEvent[]; t: Theme }) {
+function RunProgress({ events, t, streamingAnswer }: { events: AgentRunEvent[]; t: Theme; streamingAnswer?: string }) {
   const action = currentActionLabel(events);
   const stage = deriveStage(events);
   const Icon = phaseIconFor(events);
   const latest = events.length ? events[events.length - 1].message : '';
+  // A conversational turn has no Plan/Work/Verify work to show — just a light
+  // "Replying…" line, and the streamed text as it arrives.
+  const isConversation = latestRoute(events) === 'conversation';
+  if (isConversation) {
+    return (
+      <div style={{ alignSelf: 'stretch', display: 'flex', gap: 12, padding: '4px 2px 8px', animation: 'dql-agent-fadein 0.3s ease-out' }}>
+        <div style={{ position: 'relative', width: 34, height: 34, flex: '0 0 auto' }}>
+          <span style={{ position: 'absolute', inset: 0, borderRadius: '50%', background: `${t.accent}14`, border: `1px solid ${t.accent}33`, color: t.accent, display: 'inline-flex', alignItems: 'center', justifyContent: 'center', animation: 'dql-orb 1.8s ease-in-out infinite' }}>
+            <Sparkles size={15} />
+          </span>
+        </div>
+        <div style={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', gap: 6, paddingTop: 6 }}>
+          {streamingAnswer
+            ? <div style={{ fontSize: 13.5, lineHeight: 1.55, color: t.textPrimary, whiteSpace: 'pre-wrap' }}>{streamingAnswer}</div>
+            : <span style={{ fontSize: 13.5, fontWeight: 650, color: t.textSecondary }}>Replying…</span>}
+        </div>
+      </div>
+    );
+  }
   return (
     <div style={{ alignSelf: 'stretch', display: 'flex', gap: 12, padding: '4px 2px 8px', animation: 'dql-agent-fadein 0.3s ease-out' }}>
       <div style={{ position: 'relative', width: 34, height: 34, flex: '0 0 auto' }}>
@@ -526,11 +566,40 @@ function RunProgress({ events, t }: { events: AgentRunEvent[]; t: Theme }) {
           })}
         </div>
 
-        {latest ? (
+        {streamingAnswer ? (
+          <div style={{ fontSize: 13, lineHeight: 1.55, color: t.textPrimary, whiteSpace: 'pre-wrap', marginTop: 2 }}>{streamingAnswer}</div>
+        ) : latest ? (
           <span key={latest} style={{ fontSize: 11, color: t.textMuted, lineHeight: 1.4, animation: 'dql-step-in 0.3s ease-out' }}>{latest}</span>
         ) : null}
       </div>
     </div>
+  );
+}
+
+/** Render a capped list with a "Show all (N)" toggle instead of silently clipping. */
+function ExpandableList<T>({ items, t, renderItem, cap = 4 }: {
+  items: T[];
+  t: Theme;
+  renderItem: (item: T, index: number) => React.ReactNode;
+  cap?: number;
+}): JSX.Element {
+  const [expanded, setExpanded] = useState(false);
+  const shown = expanded ? items : items.slice(0, cap);
+  return (
+    <>
+      {shown.map((item, index) => renderItem(item, index))}
+      {items.length > cap ? (
+        <button
+          type="button"
+          className="dql-hover"
+          onClick={() => setExpanded((v) => !v)}
+          style={{ alignSelf: 'flex-start', background: 'none', border: 'none', cursor: 'pointer', color: t.accent, fontSize: 11, padding: '2px 0', display: 'inline-flex', alignItems: 'center', gap: 4 }}
+        >
+          {expanded ? <ChevronUp size={11} /> : <ChevronDown size={11} />}
+          {expanded ? 'Show less' : `Show all (${items.length})`}
+        </button>
+      ) : null}
+    </>
   );
 }
 
@@ -557,6 +626,41 @@ function RunCard({
   onOpenResearch?: (id: string, notebookPath?: string) => void;
   onNextAction: (action: AgentRun['nextActions'][number]) => void;
 }) {
+  // A conversational reply renders as a plain assistant bubble — no route label,
+  // trust badge, checks, or evidence. Just the answer + optional suggestion chips.
+  if (run.route === 'conversation') {
+    const isGeneralKnowledge = run.answerKind === 'general_knowledge';
+    return (
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 8, animation: 'dql-agent-fadein 0.3s ease-out' }}>
+        <div style={assistantBubbleStyle(t)}>
+          {isGeneralKnowledge ? (
+            <div style={{ display: 'inline-flex', alignItems: 'center', gap: 5, fontSize: 10.5, color: t.textMuted, marginBottom: 6, fontWeight: 650 }}>
+              <Lightbulb size={11} /> General knowledge — not from your data
+            </div>
+          ) : null}
+          <div style={{ fontSize: 13.5, lineHeight: 1.55, color: t.textPrimary }}>
+            {run.answer ? <StructuredAnswerText text={cleanAnswerText(run.answer)} t={t} /> : run.summary}
+          </div>
+        </div>
+        {run.nextActions.length > 0 ? (
+          <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+            {run.nextActions.map((action) => (
+              <button
+                key={action.id}
+                type="button"
+                className="dql-hover dql-lift"
+                onClick={() => onNextAction(action)}
+                style={suggestionChipStyle(t)}
+              >
+                {action.label}
+              </button>
+            ))}
+          </div>
+        ) : null}
+      </div>
+    );
+  }
+
   const steps = run.steps ?? [];
   const multiStep = steps.length > 1;
   const isLlmPlan = run.plan?.source === 'llm';
@@ -598,7 +702,7 @@ function RunCard({
       {run.summary && !(run.answer && sameText(run.summary, cleanAnswerText(run.answer))) ? (
         <div style={{ fontSize: 12.5, lineHeight: 1.45, color: t.textSecondary }}>{run.summary}</div>
       ) : null}
-      {run.answer ? <div style={answerBoxStyle(t)}>{cleanAnswerText(run.answer)}</div> : null}
+      {run.answer ? <div style={answerBoxStyle(t)}><StructuredAnswerText text={cleanAnswerText(run.answer)} t={t} /></div> : null}
 
       {evidence.length > 0 ? (
         <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', alignItems: 'center' }}>
@@ -1047,19 +1151,27 @@ function ArtifactView({
       {keyFindings.length > 0 ? (
         <div style={{ display: 'grid', gap: 4 }}>
           <div style={{ fontSize: 11, fontWeight: 800, color: t.textSecondary }}>Key findings</div>
-          {keyFindings.slice(0, 4).map((finding, index) => (
-            <div key={index} style={{ fontSize: 11.5, color: t.textSecondary, lineHeight: 1.4, display: 'flex', gap: 6 }}>
-              <span style={{ color: t.accent }}>•</span><span>{finding}</span>
-            </div>
-          ))}
+          <ExpandableList
+            items={keyFindings}
+            t={t}
+            renderItem={(finding, index) => (
+              <div key={index} style={{ fontSize: 11.5, color: t.textSecondary, lineHeight: 1.4, display: 'flex', gap: 6 }}>
+                <span style={{ color: t.accent }}>•</span><span>{finding}</span>
+              </div>
+            )}
+          />
         </div>
       ) : steps.length > 0 ? (
         <div style={{ display: 'grid', gap: 5 }}>
-          {steps.slice(0, 4).map((step, index) => (
-            <div key={index} style={{ fontSize: 11.5, color: t.textSecondary, lineHeight: 1.35 }}>
-              {index + 1}. {String(step.thought ?? step.expectation ?? 'Research step')}
-            </div>
-          ))}
+          <ExpandableList
+            items={steps}
+            t={t}
+            renderItem={(step, index) => (
+              <div key={index} style={{ fontSize: 11.5, color: t.textSecondary, lineHeight: 1.35 }}>
+                {index + 1}. {String((step as { thought?: unknown; expectation?: unknown }).thought ?? (step as { expectation?: unknown }).expectation ?? 'Research step')}
+              </div>
+            )}
+          />
         </div>
       ) : null}
       {recommendation ? (
@@ -1078,12 +1190,12 @@ function ArtifactView({
       ) : null}
       {gaps.length > 0 ? (
         <div style={{ fontSize: 11.5, color: t.textSecondary, lineHeight: 1.4 }}>
-          Gaps: {gaps.slice(0, 3).join(', ')}
+          Gaps: {gaps.join(', ')}
         </div>
       ) : null}
       {generatedPaths.length > 0 ? (
         <div style={{ fontSize: 11.5, color: t.textSecondary, lineHeight: 1.4 }}>
-          Files: {generatedPaths.slice(0, 3).join(', ')}
+          Files: {generatedPaths.join(', ')}
         </div>
       ) : null}
       <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
@@ -1727,15 +1839,12 @@ function userBubbleStyle(t: Theme): React.CSSProperties {
 function assistantBubbleStyle(t: Theme): React.CSSProperties {
   return {
     alignSelf: 'flex-start',
-    display: 'inline-flex',
-    alignItems: 'center',
-    gap: 7,
-    color: t.textSecondary,
-    fontSize: 12.5,
+    maxWidth: '92%',
+    color: t.textPrimary,
     border: `1px solid ${t.cellBorder}`,
     background: t.appBg,
-    borderRadius: 8,
-    padding: '8px 10px',
+    borderRadius: 10,
+    padding: '10px 12px',
   };
 }
 

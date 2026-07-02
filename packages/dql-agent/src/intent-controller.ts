@@ -18,7 +18,14 @@
 import type { MetadataAgentIntent } from './metadata/catalog.js';
 
 /** The high-level action the agent will take for a turn. */
-export type AgentAction = 'answer' | 'clarify' | 'investigate' | 'compose_app';
+export type AgentAction = 'answer' | 'clarify' | 'investigate' | 'compose_app' | 'converse';
+
+/**
+ * Conversational turn kinds that deserve a plain, warm reply instead of the data
+ * routing cascade. Deliberately narrow — anything with data vocabulary falls
+ * through to the analytics cascade so we never chit-chat a real question away.
+ */
+export type ConversationalKind = 'greeting' | 'gratitude' | 'meta_capability' | 'smalltalk';
 
 export interface IntentSignals {
   /** Best certified-artifact match score (0..1), if any. */
@@ -52,6 +59,22 @@ export interface IntentDecision {
   clarifyingQuestion?: string;
   /** True when the turn references prior context ("it", "that", "why", "more"). */
   followsUp: boolean;
+  /** For converse: which conversational kind was detected. */
+  conversationalKind?: ConversationalKind;
+  /** Requested analysis depth — set by the hybrid router; drives quick vs deep. */
+  depth?: 'quick' | 'deep';
+  /** Fine-grained category from the hybrid router (superset of AgentAction intent). */
+  category?:
+    | 'conversational'
+    | 'capability'
+    | 'general_knowledge'
+    | 'data_lookup'
+    | 'data_analysis'
+    | 'authoring'
+    | 'app'
+    | 'unclear';
+  /** Where the decision came from: fast heuristics, the LLM router, or its cache. */
+  source?: 'heuristic' | 'llm' | 'cache';
 }
 
 /** A confident match means a certified block or governed metric clearly fits. */
@@ -94,6 +117,49 @@ const DIRECT_ANSWER_INTENTS = new Set<MetadataAgentIntent>([
   'ad_hoc_ranking',
 ]);
 
+/**
+ * Data vocabulary — if any of this shows up, the turn is about the warehouse and
+ * must go through the governed cascade even if it opens with "hi" or "thanks".
+ */
+const DATA_VOCAB_RE =
+  /\b(revenue|sales|orders?|customers?|users?|churn|retention|revenue|profit|margin|arpu|ltv|cac|mrr|arr|conversion|metric|kpi|dashboard|report|table|column|schema|dbt|model|query|sql|block|certified|rows?|count|sum|avg|average|total|top|bottom|rank|trend|breakdown|compare|segment|cohort|by (region|segment|month|day|week|category|product|location|type)|why|drivers?|anomal|forecast)\b/i;
+
+/** Greetings / openers. */
+const GREETING_RE =
+  /^\s*(hi|hey|hello|yo|howdy|hiya|heya|good\s+(morning|afternoon|evening)|greetings|sup|what'?s\s+up|gm|hi\s+there|hello\s+there)\b[\s!.,]*$/i;
+/** Gratitude / acknowledgement / closers. */
+const GRATITUDE_RE =
+  /^\s*(thanks?|thank\s+you|thx|ty|cheers|nice|cool|awesome|great|perfect|got\s+it|makes\s+sense|ok(ay)?|sounds?\s+good|bye|goodbye|see\s+ya|later)\b[\s!.,]*$/i;
+/** Meta / capability questions about the assistant itself. */
+const META_CAPABILITY_RE =
+  /\b(what\s+can\s+you\s+do|what\s+do\s+you\s+do|how\s+do\s+(you|i)\s+(work|use)|who\s+are\s+you|what\s+are\s+you|what\s+is\s+dql|help\s+me\s+get\s+started|how\s+can\s+you\s+help|what\s+should\s+i\s+ask|how\s+does\s+this\s+work|are\s+you\s+(an?\s+)?(ai|bot|llm))\b/i;
+
+/**
+ * Classify a turn as conversational (greeting / gratitude / meta-capability /
+ * light small talk) when it deserves a plain reply rather than data routing.
+ * Deliberately narrow and offline: returns undefined the moment data vocabulary
+ * appears, so "hi, what is total revenue?" flows to the analytics cascade.
+ */
+export function classifyConversationalTurn(
+  question: string,
+  hasHistory = false,
+): ConversationalKind | undefined {
+  const trimmed = question.trim();
+  if (!trimmed) return undefined;
+  // Any real data ask wins, regardless of a polite opener.
+  if (DATA_VOCAB_RE.test(trimmed)) return undefined;
+  const words = trimmed.split(/\s+/).length;
+
+  if (META_CAPABILITY_RE.test(trimmed)) return 'meta_capability';
+  // Short openers/closers only — a long sentence starting with "hi" is likely a real ask.
+  if (words <= 6 && GREETING_RE.test(trimmed)) return 'greeting';
+  if (words <= 6 && GRATITUDE_RE.test(trimmed)) return 'gratitude';
+  // Deliberately no generic "small talk" catch-all: a vague-but-real data ask
+  // ("show me the numbers", "widgets") must still fall through to the data cascade
+  // and clarify. The `smalltalk` kind is reserved for the LLM router (Phase 2).
+  return undefined;
+}
+
 /** Heuristic: does the question explicitly ask to build a dashboard/app? */
 export function looksLikeComposeApp(question: string): boolean {
   return COMPOSE_APP_RE.test(question) || MONITOR_RE.test(question);
@@ -120,6 +186,21 @@ export function decideAgentAction(input: IntentDecisionInput): IntentDecision {
   const bestMatch = Math.max(certified, metric);
   const hasMissing = (signals.missingContext?.length ?? 0) > 0;
   const followsUp = input.isFollowUp ?? looksLikeFollowUp(question, (input.history?.length ?? 0) > 0);
+
+  // 0) Conversational turn (greeting / thanks / "what can you do?") → reply plainly,
+  //    no data routing. Narrow by design: any data vocabulary skips this entirely.
+  const conversationalKind = classifyConversationalTurn(question, (input.history?.length ?? 0) > 0);
+  if (conversationalKind) {
+    return {
+      action: 'converse',
+      confidence: 0.95,
+      reason: 'Conversational turn — I will reply directly without running the data loop.',
+      conversationalKind,
+      category: conversationalKind === 'meta_capability' ? 'capability' : 'conversational',
+      source: 'heuristic',
+      followsUp,
+    };
+  }
 
   // 1) Explicit "build me a dashboard/app" → compose an app, regardless of match.
   if (looksLikeComposeApp(question)) {

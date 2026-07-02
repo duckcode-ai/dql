@@ -1,6 +1,6 @@
 import type { AgentResultPayload, AgentSchemaTable, KGNode } from '@duckcodeailabs/dql-agent';
 
-export type ProviderId = 'anthropic' | 'claude-agent-sdk' | 'claude-code' | 'openai' | 'gemini' | 'ollama' | 'custom-openai';
+export type ProviderId = 'anthropic' | 'claude-agent-sdk' | 'claude-code' | 'codex' | 'openai' | 'gemini' | 'ollama' | 'custom-openai';
 
 export interface ChatTurn {
   role: 'user' | 'assistant';

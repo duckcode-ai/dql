@@ -127,9 +127,15 @@ export function AiSqlDraftDialog({
     let latestProposal: BlockProposal | null = null;
     try {
       const repairError = previewError?.trim() || initialError?.trim();
+      // Send the user's actual question — NOT a composed instruction. The governed
+      // answer loop applies its own system prompt/rules, and passing the instruction
+      // as the "question" leaks it into clarify text and skews intent routing.
+      // Block mode still needs the block-structure instruction; SQL mode does not.
       const prompt = isRepairMode && activeSql.trim() && repairError
         ? buildSqlRepairPrompt(trimmed, activeSql.trim(), repairError, mode)
-        : buildSqlDraftPrompt(trimmed, mode);
+        : mode === 'block'
+          ? buildSqlDraftPrompt(trimmed, mode)
+          : trimmed;
       await runAgent(
         {
           messages: [{ role: 'user', content: prompt }],

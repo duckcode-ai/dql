@@ -81,4 +81,78 @@ export class ClaudeProvider implements AgentProvider {
       .map((b) => b.text ?? '')
       .join('');
   }
+
+  async generateStream(
+    messages: AgentMessage[],
+    options: ProviderRunOptions,
+    onDelta: (delta: string) => void,
+  ): Promise<string> {
+    if (!this.apiKey) {
+      throw new Error('claude: ANTHROPIC_API_KEY is not set');
+    }
+    const system = messages.filter((m) => m.role === 'system').map((m) => m.content).join('\n\n');
+    const turns = messages.filter((m) => m.role !== 'system').map((m) => ({ role: m.role, content: m.content }));
+    const res = await fetch(`${this.baseUrl}/v1/messages`, {
+      method: 'POST',
+      headers: {
+        'x-api-key': this.apiKey,
+        'anthropic-version': '2023-06-01',
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({
+        model: options.model ?? this.defaultModel,
+        max_tokens: options.maxTokens ?? 1024,
+        temperature: options.temperature ?? 0.2,
+        system: system || undefined,
+        messages: turns,
+        stream: true,
+      }),
+      signal: options.signal,
+    });
+    if (!res.ok || !res.body) {
+      const body = await res.text().catch(() => res.statusText);
+      throw new Error(`claude: ${res.status} ${body}`);
+    }
+    let full = '';
+    await consumeSse(res.body, (data) => {
+      try {
+        const event = JSON.parse(data) as { type?: string; delta?: { type?: string; text?: string } };
+        if (event.type === 'content_block_delta' && event.delta?.type === 'text_delta' && event.delta.text) {
+          full += event.delta.text;
+          onDelta(event.delta.text);
+        }
+      } catch {
+        // ignore keep-alive / non-JSON lines
+      }
+    });
+    return full;
+  }
+}
+
+/** Consume an SSE stream, invoking `onData` with each `data:` payload (skips [DONE]). */
+export async function consumeSse(
+  body: ReadableStream<Uint8Array>,
+  onData: (data: string) => void,
+): Promise<void> {
+  const reader = body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = '';
+  for (;;) {
+    const { value, done } = await reader.read();
+    if (value) {
+      buffer += decoder.decode(value, { stream: !done });
+      let sep = buffer.search(/\r?\n\r?\n/);
+      while (sep >= 0) {
+        const block = buffer.slice(0, sep);
+        buffer = buffer.slice(buffer[sep] === '\r' ? sep + 4 : sep + 2);
+        for (const line of block.split(/\r?\n/)) {
+          if (!line.startsWith('data:')) continue;
+          const data = line.slice(5).trim();
+          if (data && data !== '[DONE]') onData(data);
+        }
+        sep = buffer.search(/\r?\n\r?\n/);
+      }
+    }
+    if (done) break;
+  }
 }

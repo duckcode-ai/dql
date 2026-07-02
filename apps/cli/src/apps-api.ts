@@ -1910,7 +1910,7 @@ export async function commitAppAiBuild(
 
 interface AppAskSuccess {
   ok: true;
-  route: 'certified_answer' | 'investigation' | 'app_change_proposal' | 'metadata_answer';
+  route: 'certified_answer' | 'generated_answer' | 'investigation' | 'app_change_proposal' | 'metadata_answer';
   answer: string;
   trustState: 'certified' | 'review_required' | 'draft_ready';
   reviewStatus: 'certified' | 'review_required' | 'draft_ready';
@@ -2090,12 +2090,14 @@ async function routeAppAskQuestion(
     }
   }
 
-  if (blockId) {
+  // The focused tile narrates ONLY questions that are actually about it ("explain this",
+  // "what does this chart show"). Everything else routes through the shared governed loop.
+  const focusTileAnswer = (): AppAskSuccess => {
     const selected = selectedBlockContext(input.context);
     const answer = buildCertifiedAppAnswer({
       app: loaded.app,
       dashboard: dashboard ?? null,
-      blockId,
+      blockId: blockId!,
       question,
       selected,
       variables: input.variables,
@@ -2108,14 +2110,23 @@ async function routeAppAskQuestion(
       reviewStatus: tile?.reviewStatus === 'certified' || tile?.display?.reviewStatus === 'certified' ? 'certified' : 'review_required',
       citations,
       followUps: ['Explain the visible result', 'Investigate drivers', 'Create block draft from this result'],
-      decision: buildAppAskDecision('certified_answer', {
-        question,
-        blockId,
-        selected,
-        appName: loaded.app.name,
-      }),
+      decision: buildAppAskDecision('certified_answer', { question, blockId, selected, appName: loaded.app.name }),
     };
+  };
+
+  if (blockId && questionIsAboutFocusedTile(question)) {
+    return focusTileAnswer();
   }
+
+  // Route the QUESTION through the same governed answer loop the Notebook and Ask
+  // surfaces use: question-first retrieval finds the best-matching certified block
+  // across the app, generates review-required SQL, or digs deeper — instead of
+  // narrating whichever tile happens to be focused.
+  const governed = await tryGovernedAppAnswer(ctx, question, { blockId, appName: loaded.app.name, citations });
+  if (governed) return governed;
+
+  // Offline / no AI provider: keep the focused tile as a graceful fallback.
+  if (blockId) return focusTileAnswer();
 
   return {
     ok: true,
@@ -2133,7 +2144,7 @@ async function routeAppAskQuestion(
 }
 
 function buildAppAskDecision(
-  route: 'certified_answer' | 'investigation' | 'app_change_proposal' | 'metadata_answer',
+  route: 'certified_answer' | 'generated_answer' | 'investigation' | 'app_change_proposal' | 'metadata_answer',
   input: {
     question: string;
     blockId?: string;
@@ -2154,6 +2165,16 @@ function buildAppAskDecision(
       requiresContext: false,
       usesCertifiedResult: true,
       confidence: hasSelectedRows(selected) ? 0.9 : 0.74,
+    };
+  }
+  if (route === 'generated_answer') {
+    return {
+      mode: 'answer',
+      reason: 'Answered by routing the question through the governed answer loop (best-matching certified block, or review-required generated SQL).',
+      nextAction: 'Review the result; promote to a certified block when it should be reused.',
+      requiresContext: false,
+      usesCertifiedResult: false,
+      confidence: 0.7,
     };
   }
   if (route === 'investigation') {
@@ -2185,6 +2206,72 @@ function buildAppAskDecision(
     usesCertifiedResult: false,
     confidence: 0.62,
   };
+}
+
+/**
+ * True only when the question is genuinely ABOUT the focused tile ("explain this",
+ * "what does this chart show") — deictic/explanatory and not asking for other data.
+ * Any other question (rankings, other entities, drilldowns, "why") must route through
+ * the shared governed loop instead of narrating the focused tile.
+ */
+function questionIsAboutFocusedTile(question: string): boolean {
+  const lower = question.toLowerCase();
+  if (!/\b(this|that|it|these|those|the (?:chart|graph|result|tile|number|value|visual|figure)|visible|current (?:tile|block|metric|result)|selected (?:tile|block|metric)|explain)\b/.test(lower)) {
+    return false;
+  }
+  if (/\b(top|bottom|best|worst|highest|lowest|least|fewest|most|rank|ranking|customers?|products?|orders?|revenue|sales|spend|by\s+[a-z]|compare|versus|vs\.?|break\s*down|drill|why|driver|segment|cohort|trend|forecast|list|who|where|which)\b/.test(lower)) {
+    return false;
+  }
+  return true;
+}
+
+/** Map a governed AgentAnswer into the App Copilot's response shape. */
+function mapGovernedToAppAsk(
+  governed: AgentAnswer,
+  input: { question: string; blockId?: string; appName: string; citations: Array<{ kind: string; name: string; path?: string }> },
+): AppAskSuccess {
+  const isCertified = governed.certification === 'certified' || governed.kind === 'certified';
+  const noAnswer = governed.kind === 'no_answer';
+  const answer = cleanString(governed.answer) || cleanString(governed.text) || 'No governed answer was available for this question.';
+  const route: AppAskSuccess['route'] = noAnswer ? 'metadata_answer' : isCertified ? 'certified_answer' : 'generated_answer';
+  const trustState: AppAskSuccess['trustState'] = noAnswer ? 'draft_ready' : isCertified ? 'certified' : 'review_required';
+  const govCitations = Array.isArray(governed.citations)
+    ? governed.citations.map((c) => ({ kind: String((c as { kind?: unknown }).kind ?? 'source'), name: String((c as { name?: unknown }).name ?? '') })).filter((c) => c.name)
+    : [];
+  const seen = new Set<string>();
+  const citations = [...input.citations, ...govCitations].filter((c) => {
+    const key = `${c.kind}:${c.name}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  }).slice(0, 8);
+  return {
+    ok: true,
+    route,
+    answer,
+    trustState,
+    reviewStatus: trustState,
+    citations,
+    followUps: noAnswer
+      ? ['Name the metric and grain', 'Pick a certified tile', 'Start driver analysis']
+      : ['Investigate drivers', 'Break this down further', 'Create a draft DQL block'],
+    decision: buildAppAskDecision(route, { question: input.question, blockId: input.blockId, appName: input.appName }),
+  };
+}
+
+/** Route the question through the shared governed answer loop; null if unavailable. */
+async function tryGovernedAppAnswer(
+  ctx: Ctx,
+  question: string,
+  input: { blockId?: string; appName: string; citations: Array<{ kind: string; name: string; path?: string }> },
+): Promise<AppAskSuccess | null> {
+  if (!ctx.generateGovernedAnswer) return null;
+  try {
+    const governed = await ctx.generateGovernedAnswer(question);
+    return governed ? mapGovernedToAppAsk(governed, { question, ...input }) : null;
+  } catch {
+    return null; // no provider / transient — caller falls back to tile or metadata
+  }
 }
 
 function appAskInvestigationReason(intent: LocalAppInvestigationIntent): string {

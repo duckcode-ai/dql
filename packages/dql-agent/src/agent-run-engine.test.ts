@@ -441,6 +441,88 @@ describe("selectRoute", () => {
     });
     expect(selectRoute({ question: "build a dashboard but just give SQL", requestedMode: "sql" }, decision)).toBe("sql_cell");
   });
+
+  it("routes a conversational turn to the conversation route before authoring regexes", () => {
+    const decision = decideAgentAction({ question: "hi", intent: "clarify" });
+    expect(decision.action).toBe("converse");
+    expect(selectRoute({ question: "hi" }, decision)).toBe("conversation");
+  });
+});
+
+describe("AgentRunEngine — conversation route", () => {
+  it("completes a conversational run with no governance chrome and no trust badge", async () => {
+    const store = new InMemoryAgentRunStore();
+    const engine = new AgentRunEngine({
+      store,
+      idGenerator: () => "run-converse",
+      now: fixedClock(),
+      executors: {
+        conversation: () => ({
+          answer: "Hi! I answer questions about your data.",
+          answerKind: "conversational",
+          status: "completed",
+          trustState: "not_applicable",
+          stopReason: "conversational_reply",
+          artifacts: [],
+          evaluations: [],
+          nextActions: [{ id: "suggest-question-1", label: "What is total revenue?" }],
+        }),
+      },
+    });
+    const run = await engine.run({ question: "hi" });
+    expect(run).toMatchObject({
+      route: "conversation",
+      status: "completed",
+      trustState: "not_applicable",
+      stopReason: "conversational_reply",
+      answerKind: "conversational",
+      answer: "Hi! I answer questions about your data.",
+    });
+    expect(run.artifacts).toHaveLength(0);
+    expect(run.evaluations).toHaveLength(0);
+    expect(run.nextActions[0]).toMatchObject({ id: "suggest-question-1" });
+  });
+
+  it("passes conversation through for a stakeholder audience", async () => {
+    const engine = new AgentRunEngine({
+      idGenerator: () => "run-converse-stakeholder",
+      now: fixedClock(),
+      executors: {
+        conversation: () => ({ answer: "Hello!", answerKind: "conversational", status: "completed", trustState: "not_applicable", evaluations: [] }),
+      },
+    });
+    const run = await engine.run({ question: "hello", audience: "stakeholder" });
+    expect(run.route).toBe("conversation");
+    expect(run.status).toBe("completed");
+  });
+
+  it("prefers an injected router decision over the deterministic path", async () => {
+    const engine = new AgentRunEngine({
+      idGenerator: () => "run-router",
+      now: fixedClock(),
+      router: { decide: () => ({ action: "converse", confidence: 0.99, reason: "router says hi", conversationalKind: "greeting", followsUp: false }) },
+      executors: {
+        conversation: () => ({ answer: "routed reply", answerKind: "conversational", status: "completed", trustState: "not_applicable", evaluations: [] }),
+      },
+    });
+    // A question the deterministic tier would send to the data cascade, forced to converse by the router.
+    const run = await engine.run({ question: "what is total revenue?", signals: { certifiedScore: 0.9 } });
+    expect(run.route).toBe("conversation");
+    expect(run.answer).toBe("routed reply");
+  });
+
+  it("falls back to deterministic routing when the router throws", async () => {
+    const engine = new AgentRunEngine({
+      idGenerator: () => "run-router-throws",
+      now: fixedClock(),
+      router: { decide: () => { throw new Error("router down"); } },
+      executors: {
+        conversation: () => ({ answer: "hi", answerKind: "conversational", status: "completed", trustState: "not_applicable", evaluations: [] }),
+      },
+    });
+    const run = await engine.run({ question: "hi" });
+    expect(run.route).toBe("conversation");
+  });
 });
 
 function fixedClock(): () => Date {
