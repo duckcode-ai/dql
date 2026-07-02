@@ -54,7 +54,7 @@
     "vitest": "^3.0.0"
   },
   "engines": {
-    "node": ">=20 <23"
+    "node": ">=20"
   },
   "dependencies": {
     "js-yaml": "^4.1.1",

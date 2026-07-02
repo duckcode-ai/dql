@@ -31,7 +31,7 @@
   },
   "dependencies": {
     "@duckcodeailabs/dql-core": "workspace:*",
-    "better-sqlite3": "^11.7.0"
+    "better-sqlite3": "^12.11.1"
   },
   "devDependencies": {
     "@types/better-sqlite3": "^7.6.0",
@@ -39,6 +39,6 @@
     "vitest": "^3.0.0"
   },
   "engines": {
-    "node": ">=20 <23"
+    "node": ">=20"
   }
 }
