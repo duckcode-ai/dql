@@ -164,6 +164,22 @@ export type DashboardGridItem = {
   reviewStatus?: DashboardDisplayReviewStatus;
   /** Optional human-readable title shown in the tile header. */
   title?: string;
+  /** Story layout: which dashboard section this tile belongs to (optional, additive). */
+  sectionId?: string;
+};
+
+/**
+ * Story-layout section (optional, additive): groups tiles into a narrated flow —
+ * executive summary → KPI band → per-question insights → review appendix.
+ * Dashboards without sections render as the classic grid.
+ */
+export type DashboardSection = {
+  id: string;
+  title: string;
+  kind: 'exec_summary' | 'kpi_band' | 'insight' | 'appendix';
+  /** Narrated intro for the section (real numbers from executed results). */
+  narrative?: string;
+  order: number;
 };
 
 export interface DashboardDocument {
@@ -188,6 +204,8 @@ export interface DashboardDocument {
   };
   params?: DashboardParam[];
   filters?: DashboardFilter[];
+  /** Story layout sections (optional). Old dashboards simply have none. */
+  sections?: DashboardSection[];
   layout: {
     kind: 'grid';
     cols: number;
@@ -305,6 +323,7 @@ function validateDashboardDocument(raw: unknown, path: string): DashboardLoadRes
   const metadata = readMetadata(obj.metadata, err);
   const params = readParams(obj.params, err);
   const filters = readFilters(obj.filters, err);
+  const sections = readSections(obj.sections, err);
   const layout = readLayout(obj.layout, err);
 
   if (errors.length > 0) {
@@ -318,10 +337,38 @@ function validateDashboardDocument(raw: unknown, path: string): DashboardLoadRes
       metadata,
       params: params.length > 0 ? params : undefined,
       filters: filters.length > 0 ? filters : undefined,
+      sections: sections.length > 0 ? sections : undefined,
       layout,
     },
     errors: [],
   };
+}
+
+/** Story sections are optional and additive — absent/invalid entries are skipped
+ *  (a malformed section must never brick an otherwise valid dashboard). */
+function readSections(raw: unknown, err: (m: string) => void): DashboardSection[] {
+  if (raw === undefined) return [];
+  if (!Array.isArray(raw)) {
+    err('sections must be an array when present');
+    return [];
+  }
+  const kinds = ['exec_summary', 'kpi_band', 'insight', 'appendix'] as const;
+  const sections: DashboardSection[] = [];
+  raw.forEach((entry, index) => {
+    if (typeof entry !== 'object' || entry === null) return;
+    const section = entry as Record<string, unknown>;
+    if (typeof section.id !== 'string' || section.id.length === 0) return;
+    if (typeof section.title !== 'string') return;
+    if (typeof section.kind !== 'string' || !kinds.includes(section.kind as typeof kinds[number])) return;
+    sections.push({
+      id: section.id,
+      title: section.title,
+      kind: section.kind as DashboardSection['kind'],
+      narrative: typeof section.narrative === 'string' ? section.narrative : undefined,
+      order: typeof section.order === 'number' ? section.order : index,
+    });
+  });
+  return sections;
 }
 
 function readMetadata(raw: unknown, err: (m: string) => void): DashboardDocument['metadata'] {
@@ -521,6 +568,7 @@ function readLayout(raw: unknown, err: (m: string) => void): DashboardDocument['
       ...(trustState ? { trustState } : {}),
       ...(reviewStatus ? { reviewStatus } : {}),
       title: typeof it.title === 'string' ? it.title : undefined,
+      ...(typeof it.sectionId === 'string' && it.sectionId ? { sectionId: it.sectionId } : {}),
     });
   }
 

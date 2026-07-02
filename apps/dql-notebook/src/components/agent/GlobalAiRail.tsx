@@ -50,6 +50,12 @@ export function GlobalAiRail() {
           audience={audience}
           selectedObject={selectedObject}
           workspaceContext={context.workspaceContext}
+          examplePrompts={Array.isArray(context.suggestedQuestions) && context.suggestedQuestions.length > 0
+            ? context.suggestedQuestions
+                .filter((question): question is string => typeof question === 'string')
+                .slice(0, 4)
+                .map((question) => ({ label: question, prompt: question }))
+            : undefined}
           autoRun={state.globalAi.autoRun
             ? { text: state.globalAi.autoRun.text, mode: state.globalAi.autoRun.mode as never, nonce: state.globalAi.autoRun.nonce }
             : undefined}

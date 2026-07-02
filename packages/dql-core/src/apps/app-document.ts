@@ -114,6 +114,9 @@ export interface AppDocument {
   schedules?: AppSchedule[];
   /** What stakeholders see when they open the App. */
   homepage?: AppHomepage;
+  /** Copilot hints (optional, additive): suggested questions the app's AI surfaces
+   *  offer — e.g. uncovered analysis gaps captured at AI-build time. */
+  copilot?: { suggestedQuestions: string[] };
 }
 
 export interface AppDocumentParseError {
@@ -277,6 +280,7 @@ function validateAppDocument(raw: unknown, path: string): AppDocumentLoadResult 
   const schedules = readSchedules(obj.schedules, err);
   const notebooks = readNotebookRefs(obj.notebooks, err);
   const homepage = readHomepage(obj.homepage, err);
+  const copilot = readCopilot(obj.copilot);
 
   // Cross-checks: every member role must be defined; every policy role must be defined
   const declaredRoles = new Set(roles.map((r) => r.id));
@@ -324,8 +328,21 @@ function validateAppDocument(raw: unknown, path: string): AppDocumentLoadResult 
     rlsBindings: rlsBindings.length > 0 ? rlsBindings : undefined,
     schedules: schedules.length > 0 ? schedules : undefined,
     homepage,
+    copilot,
   };
   return { document: doc, errors: [] };
+}
+
+/** Copilot hints are additive and best-effort — malformed entries are dropped,
+ *  never an app-document error. */
+function readCopilot(raw: unknown): AppDocument['copilot'] {
+  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) return undefined;
+  const o = raw as Record<string, unknown>;
+  if (!Array.isArray(o.suggestedQuestions)) return undefined;
+  const suggestedQuestions = o.suggestedQuestions
+    .filter((entry): entry is string => typeof entry === 'string' && entry.trim().length > 0)
+    .slice(0, 8);
+  return suggestedQuestions.length > 0 ? { suggestedQuestions } : undefined;
 }
 
 function enumField<T extends readonly string[]>(

@@ -224,21 +224,31 @@ const blockDraftGate: AgentRunGate = ({ result }: AgentRunGateContext): AgentRun
 const appBuildGate: AgentRunGate = ({ result }: AgentRunGateContext): AgentRunEvaluation[] => {
   const evaluations = baseEvaluations(result);
   const payload = primaryArtifactPayload(result);
+  const coverageIssue: AgentRunEvaluation = {
+    id: "app-coverage",
+    label: "Certified coverage",
+    passed: false,
+    severity: "blocking",
+    message: "No certified app tiles matched the request, so the app cannot be assembled yet.",
+    suggestedRepair: "Create certified DQL drafts for the missing tiles, then rebuild the app.",
+    repairAction: { kind: "escalate", route: "dql_block_draft", hint: "Draft the missing certified blocks." },
+  };
+  // Two-phase build: a proposal needs at least one CERTIFIED tile to be a real app —
+  // an app must have a certified anchor (commit rejects a certified-less selection),
+  // so an AI-generated-only proposal escalates to drafting blocks instead of a dead end.
+  const proposal = asRecord(payload?.proposal);
+  const proposalTiles = Array.isArray(proposal?.tiles) ? (proposal.tiles as Array<Record<string, unknown>>) : null;
+  if (proposalTiles) {
+    const hasCertified = proposalTiles.some((tile) => tile.certification === "certified" && !tile.error);
+    return hasCertified ? evaluations : upsert(evaluations, coverageIssue);
+  }
   const session = asRecord(payload?.session) ?? payload;
   // Prefer the build session's own status; fall back to the executor's app-coverage eval.
   const coverageFailed = session?.status !== undefined
-    ? session.status !== "ready"
+    ? session.status !== "ready" && session.status !== "proposed"
     : evaluations.some((evaluation) => evaluation.id === "app-coverage" && !evaluation.passed);
   if (coverageFailed) {
-    return upsert(evaluations, {
-      id: "app-coverage",
-      label: "Certified coverage",
-      passed: false,
-      severity: "blocking",
-      message: "No certified app tiles matched the request, so the app cannot be assembled yet.",
-      suggestedRepair: "Create certified DQL drafts for the missing tiles, then rebuild the app.",
-      repairAction: { kind: "escalate", route: "dql_block_draft", hint: "Draft the missing certified blocks." },
-    });
+    return upsert(evaluations, coverageIssue);
   }
   return evaluations;
 };

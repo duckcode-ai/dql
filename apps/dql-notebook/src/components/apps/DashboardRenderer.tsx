@@ -132,9 +132,25 @@ export function DashboardRenderer({
   );
   const hiddenReviewTileCount = dashboard.layout.items.length - baseVisibleItems.length;
   const hiddenPresentationTileCount = baseVisibleItems.length - visibleItems.length;
+  // Server-narrated story sections (AI-built apps). In view mode they replace both
+  // the client-computed story strip and the flat grid; edit mode keeps the classic
+  // grid so drag/drop tooling is untouched. Old dashboards have no sections.
+  const storySections = useMemo(
+    () => (!editable && dashboard.sections && dashboard.sections.length > 0
+      ? [...dashboard.sections].sort((a, b) => a.order - b.order)
+      : null),
+    [dashboard.sections, editable],
+  );
+  // Story mode intentionally SHOWS review-required tiles: the appendix exists to
+  // surface AI-generated analysis, clearly badged — so it bypasses the stakeholder
+  // review-tile hiding that governs classic grids.
+  const storyItems = useMemo(
+    () => (storySections ? dashboard.layout.items : null),
+    [dashboard.layout.items, storySections],
+  );
   const dashboardStory = useMemo(
-    () => editable ? null : buildDashboardStory(visibleItems, tileResults, runVariables),
-    [editable, runVariables, tileResults, visibleItems],
+    () => (editable || storySections ? null : buildDashboardStory(visibleItems, tileResults, runVariables)),
+    [editable, runVariables, storySections, tileResults, visibleItems],
   );
 
   useEffect(() => {
@@ -525,6 +541,76 @@ export function DashboardRenderer({
               onAi={openCopilot}
             />
           </div>
+        </div>
+      ) : storySections ? (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 22 }}>
+          {storySections.map((section) => {
+            const appendixSectionId = storySections.find((entry) => entry.kind === 'appendix')?.id;
+            const insightFallbackId = storySections.find((entry) => entry.kind === 'insight')?.id ?? storySections[0].id;
+            const resolveSection = (item: typeof dashboard.layout.items[number]) => {
+              if (item.sectionId && storySections.some((entry) => entry.id === item.sectionId)) return item.sectionId;
+              // An untagged review-required tile must never land in the exec/insight
+              // sections — route it to the review appendix (or fall back to insight).
+              if ((item.trustState === 'review_required' || item.reviewStatus === 'review_required') && appendixSectionId) {
+                return appendixSectionId;
+              }
+              return insightFallbackId;
+            };
+            const sectionItems = (storyItems ?? visibleItems).filter((item) => resolveSection(item) === section.id);
+            if (sectionItems.length === 0) return null;
+            // Re-anchor this section's rows at 0 so each section is its own grid.
+            const minY = Math.min(...sectionItems.map((item) => item.y));
+            const isAppendix = section.kind === 'appendix';
+            return (
+              <section key={section.id} aria-label={section.title}>
+                {section.kind !== 'exec_summary' ? (
+                  <div style={{ marginBottom: 10 }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                      <h3 style={{ margin: 0, fontSize: 15, fontWeight: 800, color: 'var(--dql-app-text, #0f172a)' }}>{section.title}</h3>
+                      {isAppendix ? (
+                        <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4, border: '1px solid rgba(217,119,6,0.4)', color: '#b45309', background: 'rgba(217,119,6,0.08)', borderRadius: 999, padding: '1px 8px', fontSize: 10, fontWeight: 800 }}>
+                          needs review
+                        </span>
+                      ) : null}
+                    </div>
+                    {section.narrative ? (
+                      <p style={{ margin: '4px 0 0', fontSize: 12.5, lineHeight: 1.5, color: 'var(--dql-app-text-muted, #64748b)', maxWidth: 860 }}>{section.narrative}</p>
+                    ) : null}
+                  </div>
+                ) : null}
+                <div
+                  style={{
+                    display: 'grid',
+                    gridTemplateColumns: narrowGrid ? 'minmax(0, 1fr)' : `repeat(${cols}, 1fr)`,
+                    gridAutoRows: narrowGrid ? 'auto' : `${rowHeight}px`,
+                    gap: 12,
+                    ...(isAppendix ? { opacity: 0.96 } : {}),
+                  }}
+                >
+                  {sectionItems.map((item) => (
+                    <DashboardTile
+                      key={item.i}
+                      item={{ ...item, y: item.y - minY }}
+                      tile={tileResults.get(item.i)}
+                      loading={loading}
+                      error={error}
+                      themeMode={state.themeMode}
+                      editable={false}
+                      narrow={narrowGrid}
+                      cols={cols}
+                      selected={Boolean(getDashboardItemBlockId(item) && getDashboardItemBlockId(item) === selectedBlockId)}
+                      onFocusBlock={onBlockFocus}
+                      onAskBlock={onAskBlock}
+                      onMove={() => undefined}
+                      onDragMove={() => undefined}
+                      onDragEnd={() => undefined}
+                      onPatch={(patch) => void patchTile(item.i, patch)}
+                    />
+                  ))}
+                </div>
+              </section>
+            );
+          })}
         </div>
       ) : (
         <div

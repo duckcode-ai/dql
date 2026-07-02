@@ -36,6 +36,53 @@ describe('parseDashboardDocument', () => {
     const { document, errors } = parseDashboardDocument(JSON.stringify(minimal));
     expect(errors).toEqual([]);
     expect(document?.layout.items).toHaveLength(2);
+    // Docs without sections stay section-free (old dashboards unaffected).
+    expect(document?.sections).toBeUndefined();
+    expect(document?.layout.items.every((item) => item.sectionId === undefined)).toBe(true);
+  });
+
+  it('round-trips story sections and tile section membership', () => {
+    const story: DashboardDocument = {
+      ...minimal,
+      sections: [
+        { id: 'exec_summary', title: 'Executive summary', kind: 'exec_summary', narrative: 'Revenue is up 12%.', order: 0 },
+        { id: 'kpi_band', title: 'Key metrics', kind: 'kpi_band', order: 1 },
+        { id: 'appendix', title: 'AI-generated analysis — needs review', kind: 'appendix', order: 2 },
+      ],
+      layout: {
+        ...minimal.layout,
+        items: minimal.layout.items.map((item, index) => ({
+          ...item,
+          sectionId: index === 0 ? 'kpi_band' : 'appendix',
+        })),
+      },
+    };
+    const { document, errors } = parseDashboardDocument(JSON.stringify(story));
+    expect(errors).toEqual([]);
+    expect(document?.sections).toHaveLength(3);
+    expect(document?.sections?.[0]).toMatchObject({ id: 'exec_summary', kind: 'exec_summary', narrative: 'Revenue is up 12%.', order: 0 });
+    expect(document?.layout.items[0]?.sectionId).toBe('kpi_band');
+    expect(document?.layout.items[1]?.sectionId).toBe('appendix');
+    // Full round-trip: serialize the parsed doc and parse again.
+    const again = parseDashboardDocument(JSON.stringify(document));
+    expect(again.errors).toEqual([]);
+    expect(again.document?.sections).toEqual(document?.sections);
+  });
+
+  it('skips malformed sections instead of failing the dashboard', () => {
+    const messy = {
+      ...minimal,
+      sections: [
+        { id: 'ok', title: 'Fine', kind: 'insight', order: 0 },
+        { id: '', title: 'missing id', kind: 'insight' },
+        { id: 'bad-kind', title: 'nope', kind: 'hero' },
+        'not-an-object',
+      ],
+    };
+    const { document, errors } = parseDashboardDocument(JSON.stringify(messy));
+    expect(errors).toEqual([]);
+    expect(document?.sections).toHaveLength(1);
+    expect(document?.sections?.[0]?.id).toBe('ok');
   });
 
   it('parses OSS metadata and notebook-style chart options', () => {

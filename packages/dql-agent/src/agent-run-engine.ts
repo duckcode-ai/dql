@@ -48,7 +48,9 @@ export type AgentRunArtifactKind =
   | "research_run"
   | "sql_cell"
   | "dql_block_draft"
-  | "app_draft";
+  | "app_draft"
+  /** Two-phase app build: the confirmable pre-create content list. */
+  | "app_proposal";
 
 export type AgentRunEvaluationSeverity = "info" | "warning" | "blocking";
 

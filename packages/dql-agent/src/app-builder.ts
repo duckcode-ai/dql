@@ -7,6 +7,7 @@ import {
   type AppDocument,
   type DashboardDisplayMetadata,
   type DashboardDocument,
+  type DashboardSection,
   type DashboardTileFilterBinding,
   type DashboardTileParameterBinding,
   type DashboardTileSourceEvidence,
@@ -15,6 +16,7 @@ import {
 } from "@duckcodeailabs/dql-core";
 import type { KGNode } from "./kg/types.js";
 import type { KGStore } from "./kg/sqlite-fts.js";
+import type { NarrateResult } from "./narrate.js";
 
 export type AppBuilderSkillId =
   | "interpret_business_intent"
@@ -252,6 +254,12 @@ export interface AppPlanValidationResult {
 
 export interface GenerateAppFromPlanOptions {
   overwrite?: boolean;
+  /** Story narration (from `narrateResult`) — when present, the first dashboard is
+   *  written as a narrated story layout: exec-summary section + KPI band + insight
+   *  sections + review appendix, with real numbers in the prose. */
+  narration?: NarrateResult;
+  /** Suggested questions for the app copilot (e.g. uncovered analysis gaps). */
+  copilotQuestions?: string[];
 }
 
 export interface GeneratedAppPackage {
@@ -645,12 +653,19 @@ export function generateAppFromPlan(
     rlsBindings: [],
     schedules: [],
     homepage: { type: "dashboard", id: dashboardId },
+    ...(options.copilotQuestions?.length
+      ? { copilot: { suggestedQuestions: options.copilotQuestions.slice(0, 8) } }
+      : {}),
   };
 
   const dashboards = plan.pages.map(
-    (page): DashboardDocument => ({
+    (page, pageIndex): DashboardDocument => ({
       version: 1,
       id: page.id,
+      // Story layout on the primary page when a narration was supplied.
+      ...(options.narration && pageIndex === 0
+        ? { sections: buildStorySections(page.tiles, options.narration) }
+        : {}),
       metadata: {
         title: page.title,
         description: page.description ?? plan.planning.displayStrategy,
@@ -676,7 +691,9 @@ export function generateAppFromPlan(
         kind: "grid",
         cols: 12,
         rowHeight: 80,
-        items: buildLayoutItems(page.tiles),
+        items: options.narration && pageIndex === 0
+          ? buildStoryLayoutItems(page.tiles, options.narration)
+          : buildLayoutItems(page.tiles),
       },
     }),
   );
@@ -1454,6 +1471,91 @@ function uniqueTileFilterBindings(bindings: DashboardTileFilterBinding[]): Dashb
     out.push(binding);
   }
   return out;
+}
+
+/** Which story section a plan tile belongs to. KPI-shaped proof leads; gaps land
+ *  in the appendix; everything else is a narrated insight. */
+function storySectionForTile(tile: AppPlanTile): DashboardSection["kind"] {
+  if (tile.kind === "draft_placeholder") return "appendix";
+  const role = tile.display?.genUi?.role ?? tile.display?.role;
+  if (role === "kpi" || tile.viz === "single_value" || tile.viz === "kpi" || tile.viz === "gauge") {
+    return "kpi_band";
+  }
+  return "insight";
+}
+
+/** The narrated story sections for the primary dashboard page. Only sections that
+ *  actually have content are emitted; the appendix also hosts AI-generated tiles
+ *  the commit step attaches. */
+function buildStorySections(tiles: AppPlanTile[], narration: NarrateResult): DashboardSection[] {
+  const kinds = new Set(tiles.filter(isDashboardTile).map(storySectionForTile));
+  const sections: DashboardSection[] = [
+    {
+      id: "exec_summary",
+      title: "Executive summary",
+      kind: "exec_summary",
+      narrative: narration.summary,
+      order: 0,
+    },
+  ];
+  if (kinds.has("kpi_band")) {
+    sections.push({ id: "kpi_band", title: "Key metrics", kind: "kpi_band", order: 1 });
+  }
+  if (kinds.has("insight")) {
+    sections.push({
+      id: "insight",
+      title: "What the data shows",
+      kind: "insight",
+      narrative: narration.recommendation,
+      order: 2,
+    });
+  }
+  if (kinds.has("appendix")) {
+    sections.push({
+      id: "appendix",
+      title: "AI-generated analysis — needs review",
+      kind: "appendix",
+      order: 3,
+    });
+  }
+  return sections;
+}
+
+/** Full-width narrated exec-summary tile: the story's opening, with real numbers
+ *  from executed results (the deterministic narrate fallback guarantees this offline). */
+function execSummaryStoryTile(narration: NarrateResult): DashboardGridItem {
+  const lines = [narration.summary.trim()];
+  if (narration.keyFindings.length > 0) {
+    lines.push("", ...narration.keyFindings.slice(0, 4).map((finding) => `- ${finding}`));
+  }
+  if (narration.recommendation) {
+    lines.push("", `**Next:** ${narration.recommendation}`);
+  }
+  return {
+    i: "story-exec-summary",
+    x: 0,
+    y: 0,
+    w: 12,
+    h: 3,
+    text: { markdown: lines.join("\n") },
+    viz: { type: "table" },
+    title: "Executive summary",
+    sectionId: "exec_summary",
+  };
+}
+
+/** Story variant of the grid layout: same tiles + positions, tagged by section and
+ *  led by the narrated exec-summary tile. The renderer groups by section. */
+function buildStoryLayoutItems(tiles: AppPlanTile[], narration: NarrateResult): DashboardGridItem[] {
+  const dashboardTiles = tiles.filter(isDashboardTile);
+  const sectionById = new Map<string, DashboardSection["kind"]>(
+    dashboardTiles.map((tile) => [tile.id, storySectionForTile(tile)]),
+  );
+  const items = buildLayoutItems(tiles).map((item) => ({
+    ...item,
+    sectionId: sectionById.get(item.i) ?? "insight",
+  }));
+  return [execSummaryStoryTile(narration), ...items];
 }
 
 function buildLayoutItems(tiles: AppPlanTile[]): DashboardGridItem[] {

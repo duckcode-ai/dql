@@ -7,7 +7,7 @@
 import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync, type Dirent, type Stats } from 'node:fs';
 import { join, dirname, relative, basename } from 'node:path';
 import type { IncomingMessage, ServerResponse } from 'node:http';
-import type { ResearchPlan as AppResearchPlan } from '@duckcodeailabs/dql-agent';
+import type { AgentAnswer, AgentResultPayload, AppPlan, NarrateInput, NarrateItem, NarrateResult, ResearchPlan as AppResearchPlan } from '@duckcodeailabs/dql-agent';
 import {
   loadAppDocument,
   findAppDocuments,
@@ -46,6 +46,24 @@ interface Ctx {
   /** Grounded ReAct research planner (P4) — supplied by the runtime, which holds the
    *  metric/block catalog. Lets the App ask lane decide + offer real follow-ups. */
   planResearch?: (input: { question: string; isFollowUp?: boolean }) => Promise<AppResearchPlan>;
+  /** Governed answer generator — supplied by the runtime. Lets the two-phase app
+   *  build fill coverage gaps with bounded, review-required generated SQL. */
+  generateGovernedAnswer?: (question: string) => Promise<AgentAnswer>;
+  /** Story narrator — supplied by the runtime (LLM-backed with a deterministic
+   *  fallback). Commit uses it to write the app's narrated story sections. */
+  narrate?: (input: NarrateInput) => Promise<NarrateResult>;
+}
+
+/** Runtime hooks the two-phase app build can use during propose (all optional —
+ *  without them, gaps stay listed as uncovered research questions). */
+export interface AppBuildHooks {
+  generateGovernedAnswer?: (question: string) => Promise<AgentAnswer>;
+}
+
+/** Runtime hooks for the commit step (all optional — commit falls back to the
+ *  deterministic narrator so story sections exist even offline). */
+export interface AppBuildCommitHooks {
+  narrate?: (input: NarrateInput) => Promise<NarrateResult>;
 }
 
 export async function handleAppsApi(ctx: Ctx): Promise<boolean> {
@@ -108,6 +126,43 @@ export async function handleAppsApi(ctx: Ctx): Promise<boolean> {
         return true;
       }
       sendJson(res, 201, { ok: true, session: result });
+    } catch (err) {
+      sendJson(res, 500, { ok: false, error: (err as Error).message });
+    }
+    return true;
+  }
+
+  // Two-phase AI build: propose (plan + confirmable content list, no files) …
+  if (req.method === 'POST' && path === '/api/apps/ai-builds/propose') {
+    try {
+      const body = await readJson<AppGenerateRequest>(req);
+      const result = await proposeAppAiBuild(projectRoot, body, {
+        generateGovernedAnswer: ctx.generateGovernedAnswer,
+      });
+      if (result.status === 'error') {
+        sendJson(res, 400, { ok: false, session: result, error: result.error });
+        return true;
+      }
+      sendJson(res, 201, { ok: true, session: result });
+    } catch (err) {
+      sendJson(res, 500, { ok: false, error: (err as Error).message });
+    }
+    return true;
+  }
+
+  // … then commit (user confirmed the selection → write the app files).
+  const commitMatch = path.match(/^\/api\/apps\/ai-builds\/([^/]+)\/commit$/);
+  if (commitMatch && req.method === 'POST') {
+    try {
+      const body = await readJson<CommitAppAiBuildInput>(req);
+      const result = await commitAppAiBuild(projectRoot, decodeURIComponent(commitMatch[1]), body, {
+        narrate: ctx.narrate,
+      });
+      if (!result.ok) {
+        sendJson(res, result.status ?? 400, { ok: false, error: result.error });
+        return true;
+      }
+      sendJson(res, 201, { ok: true, session: result.session, app: result.app, dashboardId: result.dashboardId });
     } catch (err) {
       sendJson(res, 500, { ok: false, error: (err as Error).message });
     }
@@ -869,11 +924,14 @@ interface AppGenerateRequest {
   audience?: string;
   notebookPath?: string;
   existingAppId?: string;
+  /** Gap-fill budget: how many uncovered questions may get generated SQL (default 3, hard cap 5). */
+  maxGeneratedTiles?: number;
 }
 
 interface AppAiBuildSession {
   id: string;
-  status: 'ready' | 'error';
+  /** 'proposed' = plan + proposal saved, NO app files written yet (awaiting confirm). */
+  status: 'proposed' | 'ready' | 'error';
   createdAt: string;
   updatedAt: string;
   prompt: string;
@@ -882,6 +940,10 @@ interface AppAiBuildSession {
   generatedPaths: string[];
   plan?: unknown;
   validation?: unknown;
+  /** The reviewable content list shown to the user before commit. */
+  proposal?: AppBuildProposal;
+  /** Tile ids the user confirmed at commit time (audit trail). */
+  committedTileIds?: string[];
   warnings: string[];
   reviewTasks: string[];
   inputs: {
@@ -893,6 +955,42 @@ interface AppAiBuildSession {
     selectedBlockIds: string[];
   };
   error?: string;
+}
+
+/** One confirmable entry in the pre-create proposal list. */
+export interface AppBuildProposalTile {
+  id: string;
+  source: 'certified_block' | 'ai_generated';
+  title: string;
+  description?: string;
+  /** Certified tiles reference an existing block. */
+  blockId?: string;
+  /** AI-generated candidates carry the question + generated SQL (Phase 2). */
+  question?: string;
+  sql?: string;
+  answer?: string;
+  viz: string;
+  certification: 'certified' | 'ai_generated';
+  /** Bounded preview rows from executing the generated SQL (Phase 2). */
+  preview?: { columns: string[]; rows: Array<Record<string, unknown>>; rowCount?: number };
+  /** Generation failed — listed for transparency, not selectable. */
+  error?: string;
+  selectedByDefault: boolean;
+  followUps?: string[];
+}
+
+/** Questions the plan could not cover; Phase 2 upgrades these into generated tiles. */
+export interface AppBuildProposalGap {
+  id: string;
+  question: string;
+  reason: string;
+}
+
+export interface AppBuildProposal {
+  tiles: AppBuildProposalTile[];
+  gaps: AppBuildProposalGap[];
+  followUps: string[];
+  coverage: { certifiedTiles: number; generatedTiles: number; gaps: number };
 }
 
 interface AppAskRequest {
@@ -1333,6 +1431,483 @@ export function getAppAiBuildSession(projectRoot: string, id: string): AppAiBuil
   }
 }
 
+/** Derive the confirmable proposal list from a plan: certified tiles are selectable
+ *  (default on); uncovered questions are listed as gaps (Phase 2 fills them with
+ *  bounded AI-generated candidates). Narrative/placeholder tiles are structural and
+ *  not part of the confirm list. */
+function buildAppProposal(plan: AppPlan): AppBuildProposal {
+  const tiles: AppBuildProposalTile[] = [];
+  for (const page of plan.pages) {
+    for (const tile of page.tiles) {
+      if (tile.kind !== 'certified_block') continue;
+      tiles.push({
+        id: tile.id,
+        source: 'certified_block',
+        title: tile.title,
+        description: tile.description,
+        blockId: tile.blockId,
+        viz: tile.viz,
+        certification: 'certified',
+        selectedByDefault: true,
+      });
+    }
+  }
+  const gaps: AppBuildProposalGap[] = [];
+  const seenGap = new Set<string>();
+  for (const report of plan.scopedReports) {
+    const question = cleanString(report.question) || report.title;
+    if (!question || seenGap.has(question.toLowerCase())) continue;
+    seenGap.add(question.toLowerCase());
+    gaps.push({ id: report.id, question, reason: report.description || 'No certified block covers this question.' });
+  }
+  for (const evidence of plan.missingEvidence) {
+    const question = cleanString(evidence);
+    if (!question || seenGap.has(question.toLowerCase())) continue;
+    seenGap.add(question.toLowerCase());
+    gaps.push({ id: `gap_${gaps.length + 1}`, question, reason: 'No certified block covers this question.' });
+  }
+  return {
+    tiles,
+    gaps,
+    followUps: gaps.map((gap) => gap.question).slice(0, 4),
+    coverage: {
+      certifiedTiles: tiles.filter((tile) => tile.certification === 'certified').length,
+      generatedTiles: tiles.filter((tile) => tile.certification === 'ai_generated').length,
+      gaps: gaps.length,
+    },
+  };
+}
+
+/** Bounded preview rows stored in the session file (the UI shows fewer). */
+const PROPOSAL_PREVIEW_ROW_CAP = 50;
+const GENERATED_TILE_DEFAULT = 3;
+const GENERATED_TILE_HARD_CAP = 5;
+
+const GENERATED_VIZ_TYPES = new Set([
+  'single_value', 'grouped_bar', 'stacked_bar', 'line', 'bar', 'area', 'pie', 'donut',
+  'scatter', 'heatmap', 'histogram', 'waterfall', 'gauge', 'table', 'pivot', 'map', 'funnel', 'kpi',
+]);
+
+function normalizeGeneratedViz(viz: unknown): string {
+  const clean = typeof viz === 'string' ? viz.trim().toLowerCase() : '';
+  return GENERATED_VIZ_TYPES.has(clean) ? clean : 'table';
+}
+
+function titleForGapQuestion(question: string): string {
+  const clean = question.trim().replace(/[?.!]+$/, '');
+  const title = clean.charAt(0).toUpperCase() + clean.slice(1);
+  return title.length > 72 ? `${title.slice(0, 69)}…` : title;
+}
+
+/** Normalize an executed agent result into the proposal's bounded preview shape.
+ *  Columns may arrive as strings or {name} objects; rows as objects or arrays. */
+function previewFromAgentResult(result: AgentResultPayload | undefined): AppBuildProposalTile['preview'] {
+  if (!result || !Array.isArray(result.columns) || !Array.isArray(result.rows)) return undefined;
+  const columns = result.columns.map((column) => {
+    if (typeof column === 'string') return column;
+    const record = column as Record<string, unknown> | null;
+    return typeof record?.name === 'string' ? record.name : String(column);
+  });
+  if (columns.length === 0) return undefined;
+  const rows = result.rows.slice(0, PROPOSAL_PREVIEW_ROW_CAP).map((row) => {
+    if (Array.isArray(row)) {
+      const entry: Record<string, unknown> = {};
+      columns.forEach((column, index) => { entry[column] = row[index]; });
+      return entry;
+    }
+    return (row ?? {}) as Record<string, unknown>;
+  });
+  return { columns, rows, rowCount: typeof result.rowCount === 'number' ? result.rowCount : rows.length };
+}
+
+/**
+ * Fill coverage gaps with bounded, review-required generated answers. Sequential
+ * on purpose (provider rate limits); every failure is listed for transparency, not
+ * thrown; and nothing here can certify — pass-through of a certified block match is
+ * the only way a candidate keeps a 'certified' label.
+ */
+async function fillProposalGaps(
+  proposal: AppBuildProposal,
+  hooks: AppBuildHooks | undefined,
+  maxGeneratedTiles: number | undefined,
+): Promise<void> {
+  if (!hooks?.generateGovernedAnswer || proposal.gaps.length === 0) return;
+  const cap = Math.min(Math.max(1, maxGeneratedTiles ?? GENERATED_TILE_DEFAULT), GENERATED_TILE_HARD_CAP);
+  const toFill = proposal.gaps.slice(0, cap);
+  const remaining = proposal.gaps.slice(cap);
+  let providerUnavailable = false;
+  for (const gap of toFill) {
+    if (providerUnavailable) {
+      remaining.push(gap);
+      continue;
+    }
+    try {
+      const answer = await hooks.generateGovernedAnswer(gap.question);
+      const sql = cleanString(answer.sql ?? answer.proposedSql ?? answer.result?.sql ?? '');
+      if (!sql) {
+        remaining.push(gap);
+        continue;
+      }
+      // Gap-fill tiles are AI-generated by definition (they answer questions the
+      // certified blocks did NOT cover). They are ALWAYS ai_generated / review-
+      // required — never auto-certified, even if the governed loop happened to
+      // touch a certified block. The AI never certifies its own output.
+      proposal.tiles.push({
+        id: `gen_${gap.id}`,
+        source: 'ai_generated',
+        title: titleForGapQuestion(gap.question),
+        question: gap.question,
+        sql,
+        answer: cleanString(answer.answer ?? answer.text ?? '') || undefined,
+        viz: normalizeGeneratedViz(answer.suggestedViz),
+        certification: 'ai_generated',
+        preview: previewFromAgentResult(answer.result),
+        selectedByDefault: true,
+      });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      // Offline degradation: without a configured provider, keep everything as
+      // plain research gaps instead of listing one error tile per question.
+      if (/no ai provider/i.test(message)) {
+        providerUnavailable = true;
+        remaining.push(gap);
+        continue;
+      }
+      proposal.tiles.push({
+        id: `gen_${gap.id}`,
+        source: 'ai_generated',
+        title: titleForGapQuestion(gap.question),
+        question: gap.question,
+        viz: 'table',
+        certification: 'ai_generated',
+        error: message,
+        selectedByDefault: false,
+      });
+    }
+  }
+  proposal.gaps = remaining;
+  proposal.followUps = remaining.map((gap) => gap.question).slice(0, 4);
+  proposal.coverage = {
+    certifiedTiles: proposal.tiles.filter((tile) => tile.certification === 'certified' && !tile.error).length,
+    generatedTiles: proposal.tiles.filter((tile) => tile.certification === 'ai_generated' && !tile.error).length,
+    gaps: remaining.length,
+  };
+}
+
+/**
+ * Phase 1 of the two-phase app build: plan + validate + build the confirmable
+ * proposal, persist the session with status 'proposed'. Writes NO app files —
+ * `commitAppAiBuild` does that after the user confirms the selection.
+ */
+export async function proposeAppAiBuild(
+  projectRoot: string,
+  input: AppGenerateRequest,
+  hooks?: AppBuildHooks,
+): Promise<AppAiBuildSession> {
+  const now = new Date().toISOString();
+  const id = `app_build_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+  const selectedBlockIds = unique((input.selectedBlockIds ?? []).map(cleanString).filter(Boolean));
+  const base: AppAiBuildSession = {
+    id,
+    status: 'proposed',
+    createdAt: now,
+    updatedAt: now,
+    prompt: cleanString(input.prompt),
+    generatedPaths: [],
+    warnings: [],
+    reviewTasks: [],
+    inputs: {
+      domain: cleanString(input.domain) || undefined,
+      owner: cleanString(input.owner) || undefined,
+      audience: cleanString(input.audience) || undefined,
+      notebookPath: cleanString(input.notebookPath) || undefined,
+      existingAppId: cleanString(input.existingAppId) || undefined,
+      selectedBlockIds,
+    },
+  };
+  if (!base.prompt) {
+    const session = { ...base, status: 'error' as const, error: 'prompt is required' };
+    writeAppAiBuildSession(projectRoot, session);
+    return session;
+  }
+
+  const {
+    KGStore,
+    defaultKgPath,
+    planAppFromPrompt,
+    reindexProject,
+    validateAppPlan,
+  } = await import('@duckcodeailabs/dql-agent');
+  const kgPath = defaultKgPath(projectRoot);
+  await reindexProject(projectRoot, { kgPath });
+  const kg = new KGStore(kgPath);
+  try {
+    const plan = planAppFromPrompt({
+      prompt: base.prompt,
+      kg,
+      domain: base.inputs.domain,
+      audience: base.inputs.audience,
+      owner: base.inputs.owner,
+      preferredBlockIds: selectedBlockIds,
+      plannerMode: input.plannerMode === 'ai_assisted' ? 'ai_assisted' : 'deterministic',
+    });
+    const validation = validateAppPlan(plan, kg);
+    const proposal = buildAppProposal(plan);
+    // Fill uncovered questions with bounded, review-required generated SQL when the
+    // runtime supplied a governed answer hook; offline the gaps stay listed as-is.
+    await fillProposalGaps(proposal, hooks, input.maxGeneratedTiles);
+    const session: AppAiBuildSession = {
+      ...base,
+      appId: plan.appId,
+      dashboardId: plan.pages[0]?.id ?? null,
+      plan,
+      validation,
+      proposal,
+      warnings: appBuildWarnings(validation, plan as unknown as Record<string, unknown>),
+      reviewTasks: reviewTasksFromPlan(plan as unknown as Record<string, unknown>),
+    };
+    writeAppAiBuildSession(projectRoot, session);
+    return session;
+  } catch (err) {
+    const session = {
+      ...base,
+      status: 'error' as const,
+      error: err instanceof Error ? err.message : String(err),
+    };
+    writeAppAiBuildSession(projectRoot, session);
+    return session;
+  } finally {
+    kg.close();
+  }
+}
+
+/**
+ * Persist selected AI-generated candidates as aiPins (certification preserved,
+ * never upgraded; review-required) and append them as dashboard tiles below the
+ * certified layout. The dashboard doc was just written by generateAppFromPlan, so
+ * this rewrites it with the extra items — the renderer already badges aiPin tiles.
+ */
+function attachGeneratedTiles(
+  projectRoot: string,
+  plan: AppPlan,
+  generatedPaths: string[],
+  candidates: AppBuildProposalTile[],
+): void {
+  const dashboardId = plan.pages[0]?.id ?? 'overview';
+  const dashboardPath = generatedPaths.find((path) => path.endsWith(`${dashboardId}.dqld`))
+    ?? generatedPaths.find((path) => path.endsWith('.dqld'));
+  if (!dashboardPath) return;
+  const absolutePath = join(projectRoot, dashboardPath);
+  if (!existsSync(absolutePath)) return;
+  const doc = JSON.parse(readFileSync(absolutePath, 'utf-8')) as DashboardDocument;
+  // Story layout: generated tiles live in the review appendix. Classic grids
+  // (no sections) just append at the bottom, untagged.
+  const storyMode = Array.isArray(doc.sections) && doc.sections.length > 0;
+  if (storyMode && !doc.sections!.some((section) => section.kind === 'appendix')) {
+    doc.sections!.push({
+      id: 'appendix',
+      title: 'AI-generated analysis — needs review',
+      kind: 'appendix',
+      order: doc.sections!.length,
+    });
+  }
+  const storage = new LocalAppStorage(defaultLocalAppsDbPath(projectRoot));
+  try {
+    let y = doc.layout.items.reduce((max, item) => Math.max(max, item.y + item.h), 0);
+    let x = 0;
+    for (const tile of candidates) {
+      const certified = tile.certification === 'certified';
+      const pin = storage.createAiPin({
+        appId: plan.appId,
+        dashboardId: doc.id,
+        title: tile.title,
+        answer: tile.answer ?? tile.question ?? tile.title,
+        question: tile.question,
+        sql: tile.sql,
+        certification: certified ? 'certified' : 'ai_generated',
+        reviewStatus: certified ? 'certified' : 'needs_review',
+        refreshCadence: 'none',
+        result: tile.preview,
+        followUps: tile.followUps ?? [],
+      });
+      const item: DashboardGridItem = {
+        i: `aipin_${pin.id}`,
+        x,
+        y,
+        w: 6,
+        h: 4,
+        aiPin: { id: pin.id },
+        viz: { type: normalizeGeneratedViz(tile.viz) as DashboardGridItem['viz']['type'] },
+        title: tile.title,
+        trustState: certified ? 'certified' : 'review_required',
+        reviewStatus: certified ? 'certified' : 'review_required',
+        ...(storyMode ? { sectionId: 'appendix' } : {}),
+      };
+      doc.layout.items.push(item);
+      if (x === 0) {
+        x = 6;
+      } else {
+        x = 0;
+        y += 4;
+      }
+    }
+    writeFileSync(absolutePath, JSON.stringify(doc, null, 2) + '\n', 'utf-8');
+  } finally {
+    storage.close();
+  }
+}
+
+export interface CommitAppAiBuildInput {
+  /** Proposal tile ids to include; omitted = everything selectable. */
+  selectedTileIds?: string[];
+  force?: boolean;
+}
+
+/**
+ * Phase 2 of the two-phase app build: the user confirmed the proposal — filter the
+ * plan to the selected tiles, re-validate (fail closed on drift), write the app
+ * files, and mark the session ready.
+ */
+export async function commitAppAiBuild(
+  projectRoot: string,
+  sessionId: string,
+  input: CommitAppAiBuildInput = {},
+  hooks?: AppBuildCommitHooks,
+): Promise<
+  | { ok: true; session: AppAiBuildSession; app: ReturnType<typeof collectAppsList>[number] | null; dashboardId: string | null }
+  | { ok: false; error: string; status?: number }
+> {
+  const session = getAppAiBuildSession(projectRoot, sessionId);
+  if (!session) return { ok: false, error: `AI build session "${sessionId}" not found`, status: 404 };
+  if (session.status === 'ready') return { ok: false, error: 'This app build was already created.', status: 409 };
+  if (session.status !== 'proposed' || !session.plan || !session.proposal) {
+    return { ok: false, error: session.error ?? 'Session has no proposal to commit.', status: 400 };
+  }
+
+  const plan = session.plan as AppPlan;
+  const proposal = session.proposal;
+  const selectable = new Set(proposal.tiles.filter((tile) => !tile.error).map((tile) => tile.id));
+  const selected = new Set(
+    (input.selectedTileIds ?? Array.from(selectable)).filter((tileId) => selectable.has(tileId)),
+  );
+  if (selected.size === 0) {
+    return { ok: false, error: 'Select at least one tile to create the app.', status: 400 };
+  }
+
+  // Filter the plan's certified tiles down to the confirmed selection; structural
+  // tiles (narrative, draft placeholders) stay — they document the story + gaps.
+  const committedPlan: AppPlan = {
+    ...plan,
+    pages: plan.pages.map((page) => ({
+      ...page,
+      tiles: page.tiles.filter((tile) => tile.kind !== 'certified_block' || selected.has(tile.id)),
+    })),
+  };
+
+  const {
+    KGStore,
+    defaultKgPath,
+    ensureMetadataCatalogFresh,
+    generateAppFromPlan,
+    narrateResult,
+    validateAppPlan,
+  } = await import('@duckcodeailabs/dql-agent');
+  const kg = new KGStore(defaultKgPath(projectRoot));
+  try {
+    // Re-validate against the live catalog: blocks may have changed since propose.
+    const validation = validateAppPlan(committedPlan, kg);
+    if (validation.certifiedTiles === 0) {
+      return { ok: false, error: appBuildBlockedMessage(validation, committedPlan as unknown as Record<string, unknown>), status: 409 };
+    }
+    // Narrate the story from the confirmed content (generated candidates carry
+    // executed previews, so real numbers reach the prose). The LLM-backed hook is
+    // optional — the deterministic narrator guarantees a story offline.
+    const narrateInput: NarrateInput = {
+      question: committedPlan.prompt,
+      items: [
+        ...proposal.tiles
+          .filter((tile) => tile.source === 'certified_block' && selected.has(tile.id))
+          .map((tile): NarrateItem => ({ id: tile.id, title: tile.title })),
+        ...proposal.tiles
+          .filter((tile) => tile.source === 'ai_generated' && !tile.error && selected.has(tile.id))
+          .map((tile): NarrateItem => ({
+            id: tile.id,
+            title: tile.title,
+            result: tile.preview ? { columns: tile.preview.columns, rows: tile.preview.rows } : undefined,
+          })),
+      ],
+      reviewRequired: proposal.tiles.some((tile) => tile.source === 'ai_generated' && !tile.error && selected.has(tile.id)),
+    };
+    let narration: NarrateResult | undefined;
+    try {
+      narration = hooks?.narrate ? await hooks.narrate(narrateInput) : await narrateResult(narrateInput);
+    } catch {
+      try {
+        narration = await narrateResult(narrateInput);
+      } catch {
+        narration = undefined; // Narration is enhancement, never a commit blocker.
+      }
+    }
+    // Honesty caveat: when the story is built partly from AI-generated (review-
+    // required) figures, say so in the executive summary — the headline must not
+    // present uncertified numbers as trusted.
+    if (narration && narrateInput.reviewRequired) {
+      narration = {
+        ...narration,
+        summary: `${narration.summary}\n\n_Some figures draw on AI-generated analysis that is pending review — see the review appendix._`,
+      };
+    }
+    // Copilot follow-ups the created app carries: still-uncovered gaps first, then
+    // the questions behind any candidates the user chose to leave out.
+    const copilotQuestions = unique([
+      ...proposal.gaps.map((gap) => gap.question),
+      ...proposal.tiles
+        .filter((tile) => tile.source === 'ai_generated' && !selected.has(tile.id) && tile.question)
+        .map((tile) => tile.question as string),
+    ]).slice(0, 4);
+    let generated: ReturnType<typeof generateAppFromPlan>;
+    try {
+      generated = generateAppFromPlan(projectRoot, committedPlan, kg, { overwrite: Boolean(input.force), narration, copilotQuestions });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      return { ok: false, error: message, status: message.includes('already exists') ? 409 : 400 };
+    }
+    // Selected AI-generated candidates become aiPin tiles: stored in local app
+    // storage with their review-required status, then appended to the dashboard.
+    // The certified app is already valid on disk — attaching the extra pins must
+    // NOT be able to fail the commit and orphan the app, so it is best-effort.
+    const generatedCandidates = proposal.tiles.filter(
+      (tile) => tile.source === 'ai_generated' && !tile.error && selected.has(tile.id) && tile.sql,
+    );
+    const attachWarnings: string[] = [];
+    if (generatedCandidates.length > 0) {
+      try {
+        attachGeneratedTiles(projectRoot, committedPlan, generated.paths, generatedCandidates);
+      } catch (err) {
+        attachWarnings.push(`Some AI-generated tiles could not be attached: ${err instanceof Error ? err.message : String(err)}`);
+      }
+    }
+    await ensureMetadataCatalogFresh(projectRoot, { force: true });
+    const app = collectAppsList(projectRoot).find((entry) => entry.id === committedPlan.appId) ?? null;
+    const next: AppAiBuildSession = {
+      ...session,
+      status: 'ready',
+      updatedAt: new Date().toISOString(),
+      appId: committedPlan.appId,
+      dashboardId: committedPlan.pages[0]?.id ?? app?.dashboards[0]?.id ?? null,
+      plan: committedPlan,
+      validation,
+      generatedPaths: generated.paths,
+      committedTileIds: Array.from(selected),
+      warnings: [...session.warnings, ...attachWarnings],
+    };
+    writeAppAiBuildSession(projectRoot, next);
+    return { ok: true, session: next, app, dashboardId: next.dashboardId ?? null };
+  } finally {
+    kg.close();
+  }
+}
+
 interface AppAskSuccess {
   ok: true;
   route: 'certified_answer' | 'investigation' | 'app_change_proposal' | 'metadata_answer';
@@ -1357,8 +1932,15 @@ type AppAskResult = AppAskSuccess | { ok: false; error: string };
  * panel can DECIDE and offer real next steps instead of generic strings.
  */
 async function askAppQuestion(ctx: Ctx, appId: string, input: AppAskRequest): Promise<AppAskResult> {
-  const result = await routeAppAskQuestion(ctx, appId, input);
-  if (!result.ok || !ctx.planResearch) return result;
+  const routed = await routeAppAskQuestion(ctx, appId, input);
+  if (!routed.ok) return routed;
+  // Blend in the app's own suggested questions (uncovered analysis gaps captured
+  // at AI-build time) so follow-ups point at what the app can't answer yet.
+  const appCopilotQuestions = loadAppById(ctx.projectRoot, appId)?.app.copilot?.suggestedQuestions ?? [];
+  const result: AppAskSuccess = appCopilotQuestions.length > 0
+    ? { ...routed, followUps: unique([...routed.followUps, ...appCopilotQuestions]).slice(0, 5) }
+    : routed;
+  if (!ctx.planResearch) return result;
   try {
     const research = await ctx.planResearch({
       question: cleanString(input.question),

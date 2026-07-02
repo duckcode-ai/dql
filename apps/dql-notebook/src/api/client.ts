@@ -419,7 +419,7 @@ export type AgentRunStopReason =
   | 'needs_clarification'
   | 'human_review_required'
   | 'blocked';
-export type AgentRunArtifactKind = 'answer' | 'research_run' | 'sql_cell' | 'dql_block_draft' | 'app_draft';
+export type AgentRunArtifactKind = 'answer' | 'research_run' | 'sql_cell' | 'dql_block_draft' | 'app_draft' | 'app_proposal';
 export type AgentRunEvaluationSeverity = 'info' | 'warning' | 'blocking';
 
 export interface AgentRunSelectedObject {
@@ -727,6 +727,14 @@ export interface DashboardDocumentResponse {
     };
     params?: Array<{ id: string; type: string; default?: unknown; description?: string }>;
     filters?: Array<{ id: string; type: string; default?: unknown; options?: string[]; bindsTo?: string }>;
+    /** Story layout sections (optional) — narrated flow for AI-built apps. */
+    sections?: Array<{
+      id: string;
+      title: string;
+      kind: 'exec_summary' | 'kpi_band' | 'insight' | 'appendix';
+      narrative?: string;
+      order: number;
+    }>;
     layout: {
       kind: 'grid';
       cols: number;
@@ -745,6 +753,8 @@ export interface DashboardDocumentResponse {
         trustState?: DashboardDisplayMetadata['trustState'];
         reviewStatus?: DashboardDisplayMetadata['reviewStatus'];
         title?: string;
+        /** Story layout: section membership (optional). */
+        sectionId?: string;
       }>;
     };
   };
@@ -934,9 +944,41 @@ export interface GenerateAppResponse {
   dashboardId: string | null;
 }
 
+/** One confirmable entry in the pre-create app proposal list. */
+export interface AppBuildProposalTile {
+  id: string;
+  source: 'certified_block' | 'ai_generated';
+  title: string;
+  description?: string;
+  blockId?: string;
+  question?: string;
+  sql?: string;
+  answer?: string;
+  viz: string;
+  certification: 'certified' | 'ai_generated';
+  preview?: { columns: string[]; rows: Array<Record<string, unknown>>; rowCount?: number };
+  error?: string;
+  selectedByDefault: boolean;
+  followUps?: string[];
+}
+
+export interface AppBuildProposalGap {
+  id: string;
+  question: string;
+  reason: string;
+}
+
+export interface AppBuildProposal {
+  tiles: AppBuildProposalTile[];
+  gaps: AppBuildProposalGap[];
+  followUps: string[];
+  coverage: { certifiedTiles: number; generatedTiles: number; gaps: number };
+}
+
 export interface AppAiBuildSession {
   id: string;
-  status: 'ready' | 'error';
+  /** 'proposed' = plan + proposal saved, no app files yet (awaiting confirm). */
+  status: 'proposed' | 'ready' | 'error';
   createdAt: string;
   updatedAt: string;
   prompt: string;
@@ -945,6 +987,8 @@ export interface AppAiBuildSession {
   generatedPaths: string[];
   plan?: GeneratedAppPlan;
   validation?: GenerateAppResponse['validation'];
+  proposal?: AppBuildProposal;
+  committedTileIds?: string[];
   warnings: string[];
   reviewTasks: string[];
   inputs: {
@@ -3336,6 +3380,32 @@ export const api = {
       return session;
     } catch {
       return null;
+    }
+  },
+
+  /** Two-phase build, step 1: plan + confirmable content list. Writes no app files. */
+  async proposeAppAiBuild(input: GenerateAppRequest): Promise<{ ok: true; session: AppAiBuildSession } | { ok: false; error: string; session?: AppAiBuildSession }> {
+    try {
+      return await request(
+        '/api/apps/ai-builds/propose',
+        { method: 'POST', body: JSON.stringify(input) },
+      );
+    } catch (e) {
+      return { ok: false, error: e instanceof Error ? e.message : String(e) };
+    }
+  },
+
+  /** Two-phase build, step 2: the user confirmed — create the app from the selection. */
+  async commitAppAiBuild(sessionId: string, input: { selectedTileIds?: string[]; force?: boolean } = {}): Promise<
+    { ok: true; session: AppAiBuildSession; app: AppSummary | null; dashboardId: string | null } | { ok: false; error: string }
+  > {
+    try {
+      return await request(
+        `/api/apps/ai-builds/${encodeURIComponent(sessionId)}/commit`,
+        { method: 'POST', body: JSON.stringify(input) },
+      );
+    } catch (e) {
+      return { ok: false, error: e instanceof Error ? e.message : String(e) };
     }
   },
 

@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import { defaultLocalAppsDbPath, LocalAppStorage } from '@duckcodeailabs/dql-project';
 import {
   __test__,
+  commitAppAiBuild,
   createAppAiBuildSession,
   createAppPackage,
   createDashboardForApp,
@@ -13,6 +14,7 @@ import {
   getAppAiBuildSession,
   promoteAppForStakeholders,
   previewNotebookForApp,
+  proposeAppAiBuild,
   recommendBlocks,
   recommendDashboardTile,
   recommendVisualization,
@@ -317,6 +319,241 @@ describe('Apps command center API helpers', () => {
     expect(session.warnings.join(' ')).toContain('No certified DQL blocks matched strongly enough');
     const loaded = getAppAiBuildSession(root, session.id);
     expect(loaded?.status).toBe('error');
+  });
+
+  it('proposes an app build with a confirmable tile list and writes no app files', async () => {
+    const root = createProject();
+    writeBlock(root, 'revenue/total_revenue.dql', {
+      name: 'Total Revenue',
+      domain: 'revenue',
+      status: 'certified',
+      tags: ['revenue', 'kpi'],
+      description: 'Executive revenue KPI',
+      chart: 'single_value',
+    });
+
+    const session = await proposeAppAiBuild(root, {
+      prompt: 'Build a revenue app for leadership.',
+      domain: 'revenue',
+      owner: 'owner@local',
+    });
+
+    expect(session.status).toBe('proposed');
+    expect(session.generatedPaths).toEqual([]);
+    expect(session.proposal).toBeTruthy();
+    expect(session.proposal!.tiles.length).toBeGreaterThan(0);
+    expect(session.proposal!.tiles.every((tile) => tile.certification === 'certified')).toBe(true);
+    expect(session.proposal!.tiles.every((tile) => tile.selectedByDefault)).toBe(true);
+    // Nothing on disk yet: the plan's app dir must not exist until commit.
+    expect(existsSync(join(root, 'apps'))).toBe(false);
+    const loaded = getAppAiBuildSession(root, session.id);
+    expect(loaded?.status).toBe('proposed');
+  });
+
+  it('commits a confirmed proposal into app files and marks the session ready', async () => {
+    const root = createProject();
+    writeBlock(root, 'revenue/total_revenue.dql', {
+      name: 'Total Revenue',
+      domain: 'revenue',
+      status: 'certified',
+      tags: ['revenue', 'kpi'],
+      description: 'Executive revenue KPI',
+      chart: 'single_value',
+    });
+
+    const session = await proposeAppAiBuild(root, {
+      prompt: 'Build a revenue app for leadership.',
+      domain: 'revenue',
+      owner: 'owner@local',
+    });
+    expect(session.status).toBe('proposed');
+    const selected = session.proposal!.tiles.map((tile) => tile.id);
+
+    const committed = await commitAppAiBuild(root, session.id, { selectedTileIds: selected });
+    expect(committed.ok).toBe(true);
+    if (!committed.ok) return;
+    expect(committed.session.status).toBe('ready');
+    expect(committed.session.committedTileIds).toEqual(selected);
+    expect(committed.session.generatedPaths.some((path) => path.endsWith('dql.app.json'))).toBe(true);
+    for (const path of committed.session.generatedPaths) {
+      expect(existsSync(join(root, path))).toBe(true);
+    }
+
+    // Double-commit is refused — the app already exists.
+    const again = await commitAppAiBuild(root, session.id, { selectedTileIds: selected });
+    expect(again.ok).toBe(false);
+    if (!again.ok) expect(again.status).toBe(409);
+  });
+
+  it('fills coverage gaps with bounded review-required generated tiles and commits them as aiPins', async () => {
+    const root = createProject();
+    writeBlock(root, 'revenue/total_revenue.dql', {
+      name: 'Total Revenue',
+      domain: 'revenue',
+      status: 'certified',
+      tags: ['revenue', 'kpi'],
+      description: 'Executive revenue KPI',
+      chart: 'single_value',
+    });
+
+    const asked: string[] = [];
+    const session = await proposeAppAiBuild(root, {
+      // "why" guarantees a driver-analysis coverage gap from the deterministic planner.
+      prompt: 'Build a revenue app for leadership and explain why revenue is changing.',
+      domain: 'revenue',
+      owner: 'owner@local',
+    }, {
+      generateGovernedAnswer: async (question) => {
+        asked.push(question);
+        // Governance: even when the governed loop reports a CERTIFIED match, a
+        // gap-fill tile must NOT inherit the certified label — it is new AI output.
+        return {
+          kind: 'certified_metric',
+          text: `Generated answer for: ${question}`,
+          sql: 'SELECT region, revenue FROM analytics.revenue_by_region',
+          suggestedViz: 'bar',
+          certification: 'certified',
+          block: { nodeId: 'block:some_certified', name: 'Some Certified Block' },
+          result: {
+            columns: ['region', 'revenue'],
+            rows: [{ region: 'NA', revenue: 100 }, { region: 'EU', revenue: 80 }],
+            rowCount: 2,
+          },
+        } as never;
+      },
+    });
+
+    expect(session.status).toBe('proposed');
+    expect(asked.length).toBeGreaterThan(0);
+    expect(asked.length).toBeLessThanOrEqual(3);
+    const generatedTiles = session.proposal!.tiles.filter((tile) => tile.source === 'ai_generated');
+    expect(generatedTiles.length).toBe(asked.length);
+    // AI never auto-certifies: gap-fill tiles stay ai_generated regardless of match.
+    expect(generatedTiles.every((tile) => tile.certification === 'ai_generated')).toBe(true);
+    expect(generatedTiles.every((tile) => Boolean(tile.sql) && Boolean(tile.preview))).toBe(true);
+    expect(session.proposal!.coverage.generatedTiles).toBe(generatedTiles.length);
+
+    const selected = session.proposal!.tiles.filter((tile) => !tile.error).map((tile) => tile.id);
+    const committed = await commitAppAiBuild(root, session.id, { selectedTileIds: selected });
+    expect(committed.ok).toBe(true);
+    if (!committed.ok) return;
+
+    const dashboardPath = committed.session.generatedPaths.find((path) => path.endsWith('.dqld'));
+    expect(dashboardPath).toBeTruthy();
+    const doc = JSON.parse(readFileSync(join(root, dashboardPath!), 'utf-8')) as {
+      sections?: Array<{ id: string; kind: string; narrative?: string }>;
+      layout: { items: Array<{ aiPin?: { id: string }; text?: { markdown: string }; sectionId?: string; trustState?: string; reviewStatus?: string }> };
+    };
+    const aiPinItems = doc.layout.items.filter((item) => item.aiPin);
+    expect(aiPinItems.length).toBe(generatedTiles.length);
+    expect(aiPinItems.every((item) => item.trustState === 'review_required' && item.reviewStatus === 'review_required')).toBe(true);
+
+    // Story layout: deterministic narration guarantees sections + a narrated
+    // exec-summary tile even without an LLM; generated tiles land in the appendix.
+    expect(doc.sections?.some((section) => section.kind === 'exec_summary')).toBe(true);
+    expect(doc.sections?.some((section) => section.kind === 'appendix')).toBe(true);
+    const execTile = doc.layout.items.find((item) => item.sectionId === 'exec_summary');
+    expect(execTile?.text?.markdown).toBeTruthy();
+    expect(aiPinItems.every((item) => item.sectionId === 'appendix')).toBe(true);
+
+    const storage = new LocalAppStorage(defaultLocalAppsDbPath(root));
+    try {
+      const pin = storage.getAiPin(aiPinItems[0]!.aiPin!.id);
+      expect(pin?.certification).toBe('ai_generated');
+      expect(pin?.reviewStatus).toBe('needs_review');
+      expect(pin?.sql).toContain('revenue_by_region');
+    } finally {
+      storage.close();
+    }
+  });
+
+  it('keeps gaps as research questions when no provider is available and lists other failures transparently', async () => {
+    const root = createProject();
+    writeBlock(root, 'revenue/total_revenue.dql', {
+      name: 'Total Revenue',
+      domain: 'revenue',
+      status: 'certified',
+      tags: ['revenue', 'kpi'],
+      description: 'Executive revenue KPI',
+      chart: 'single_value',
+    });
+
+    // No provider configured → gaps stay research questions, no error-tile noise.
+    const offline = await proposeAppAiBuild(root, {
+      prompt: 'Build a revenue app for leadership and explain why revenue is changing.',
+      domain: 'revenue',
+      owner: 'owner@local',
+    }, {
+      generateGovernedAnswer: async () => {
+        throw new Error('No AI provider is configured. Configure one in Settings.');
+      },
+    });
+    expect(offline.status).toBe('proposed');
+    expect(offline.proposal!.tiles.some((tile) => tile.error)).toBe(false);
+    expect(offline.proposal!.gaps.length).toBeGreaterThan(0);
+
+    // A genuine generation failure IS listed (not thrown), unselectable.
+    const failed = await proposeAppAiBuild(root, {
+      prompt: 'Build a revenue app for leadership and explain why revenue is changing.',
+      domain: 'revenue',
+      owner: 'owner@local',
+    }, {
+      generateGovernedAnswer: async () => {
+        throw new Error('model timed out');
+      },
+    });
+    expect(failed.status).toBe('proposed');
+    const errorTiles = failed.proposal!.tiles.filter((tile) => tile.error);
+    expect(errorTiles.length).toBeGreaterThan(0);
+    expect(errorTiles.every((tile) => !tile.selectedByDefault)).toBe(true);
+  });
+
+  it('refuses to commit a proposal with no certified tiles (apps need a certified anchor)', async () => {
+    const root = createProject();
+    // No certified blocks in the project → the proposal has 0 certified tiles.
+    const session = await proposeAppAiBuild(root, {
+      prompt: 'Build a leadership app about revenue with no certified coverage.',
+      domain: 'revenue',
+      owner: 'owner@local',
+    });
+    // Propose still succeeds (it can surface gaps), but with zero certified tiles.
+    if (session.status === 'proposed') {
+      expect(session.proposal!.coverage.certifiedTiles).toBe(0);
+      const certifiedIds = session.proposal!.tiles.filter((tile) => tile.certification === 'certified').map((tile) => tile.id);
+      expect(certifiedIds).toEqual([]);
+      const committed = await commitAppAiBuild(root, session.id, {
+        selectedTileIds: session.proposal!.tiles.filter((tile) => !tile.error).map((tile) => tile.id),
+      });
+      // Rejected either way (no selectable tiles → 400, or the certified-coverage
+      // guard → 409). What matters: no certified-less app is ever created.
+      expect(committed.ok).toBe(false);
+      if (!committed.ok) expect([400, 409]).toContain(committed.status);
+    } else {
+      // Or propose itself reports the coverage error — either way, no app is created.
+      expect(session.status).toBe('error');
+    }
+    expect(existsSync(join(root, 'apps'))).toBe(false);
+  });
+
+  it('refuses to commit an empty selection', async () => {
+    const root = createProject();
+    writeBlock(root, 'revenue/total_revenue.dql', {
+      name: 'Total Revenue',
+      domain: 'revenue',
+      status: 'certified',
+      tags: ['revenue', 'kpi'],
+      description: 'Executive revenue KPI',
+      chart: 'single_value',
+    });
+
+    const session = await proposeAppAiBuild(root, {
+      prompt: 'Build a revenue app for leadership.',
+      domain: 'revenue',
+      owner: 'owner@local',
+    });
+    const rejected = await commitAppAiBuild(root, session.id, { selectedTileIds: [] });
+    expect(rejected.ok).toBe(false);
+    if (!rejected.ok) expect(rejected.error).toContain('at least one tile');
   });
 
   it('returns a research proposal without creating an investigation when context is required', async () => {

@@ -45,6 +45,7 @@ import {
 import type { AppSummary, AppWorkspaceExperience, AppWorkspaceSection } from '../../store/types';
 import { themes, type ThemeMode } from '../../themes/notebook-theme';
 import { StructuredAnswerText } from '../agent/AgentAnswerCard';
+import { AppBuildProposalPanel, defaultProposalSelection } from './AppBuildProposalPanel';
 import { DashboardRenderer } from './DashboardRenderer';
 import { PersonaSwitcher } from './PersonaSwitcher';
 
@@ -182,6 +183,8 @@ export function AppsView(): JSX.Element {
   const [selectedBlocks, setSelectedBlocks] = useState<Set<string>>(() => new Set());
   const [generated, setGenerated] = useState<GenerateAppResponse | null>(null);
   const [buildSession, setBuildSession] = useState<AppAiBuildSession | null>(null);
+  const [proposalSelection, setProposalSelection] = useState<Set<string>>(new Set());
+  const [committing, setCommitting] = useState(false);
   const [builderError, setBuilderError] = useState<string | null>(null);
   const [builderSaving, setBuilderSaving] = useState(false);
   const [addPageOpen, setAddPageOpen] = useState(false);
@@ -373,7 +376,9 @@ export function AppsView(): JSX.Element {
             .slice(0, 6)
             .map((block) => block.id),
         ]));
-    const sessionResult = await api.createAppAiBuild({
+    // Two-phase build: propose first (no files) — the user reviews the content
+    // list with per-tile toggles and confirms before anything is created.
+    const sessionResult = await api.proposeAppAiBuild({
       prompt,
       domain: builderDomain.trim() || undefined,
       owner: builderOwner.trim() || undefined,
@@ -389,18 +394,46 @@ export function AppsView(): JSX.Element {
     }
     const session = sessionResult.session;
     setBuildSession(session);
-    const result: GenerateAppResponse = {
+    setGenerated(null);
+    setProposalSelection(session.proposal ? defaultProposalSelection(session.proposal) : new Set());
+    const planName = (session.plan as GeneratedAppPlan | undefined)?.name;
+    if (planName) setBuilderName(planName);
+  };
+
+  const toggleProposalTile = (tileId: string) => {
+    setProposalSelection((current) => {
+      const next = new Set(current);
+      if (next.has(tileId)) next.delete(tileId);
+      else next.add(tileId);
+      return next;
+    });
+  };
+
+  const runCommitProposal = async () => {
+    if (!buildSession || buildSession.status !== 'proposed') return;
+    setCommitting(true);
+    setBuilderError(null);
+    const result = await api.commitAppAiBuild(buildSession.id, {
+      selectedTileIds: Array.from(proposalSelection),
+    });
+    setCommitting(false);
+    if (!result.ok) {
+      setBuilderError(result.error);
+      return;
+    }
+    const session = result.session;
+    setBuildSession(session);
+    const response: GenerateAppResponse = {
       ok: true,
       plan: session.plan as GeneratedAppPlan,
       validation: session.validation as GenerateAppResponse['validation'],
       generated: { paths: session.generatedPaths },
-      app: state.apps.find((app) => app.id === session.appId) ?? null,
-      dashboardId: session.dashboardId ?? null,
+      app: result.app,
+      dashboardId: result.dashboardId,
     };
-    setGenerated(result);
-    setBuilderName(result.plan.name);
+    setGenerated(response);
     setExplainOpen(true);
-    await refreshApps(result.app?.id ?? result.plan.appId, result.dashboardId, 'workspace', { experience: 'view', section: 'dashboards' });
+    await refreshApps(result.app?.id ?? response.plan.appId, result.dashboardId, 'workspace', { experience: 'view', section: 'dashboards' });
   };
 
   const runClassicCreate = async () => {
@@ -517,6 +550,11 @@ export function AppsView(): JSX.Element {
           selectedBlocks={selectedBlocks}
           generated={generated}
           buildSession={buildSession}
+          proposalSelection={proposalSelection}
+          committing={committing}
+          themeMode={state.themeMode}
+          onToggleProposalTile={toggleProposalTile}
+          onCommitProposal={() => void runCommitProposal()}
           saving={builderSaving}
           error={builderError}
           onBack={() => setSurface('library')}
@@ -776,6 +814,11 @@ function AppCreateSurface({
   selectedBlocks,
   generated,
   buildSession,
+  proposalSelection,
+  committing,
+  themeMode,
+  onToggleProposalTile,
+  onCommitProposal,
   saving,
   error,
   onBack,
@@ -799,6 +842,11 @@ function AppCreateSurface({
   selectedBlocks: Set<string>;
   generated: GenerateAppResponse | null;
   buildSession: AppAiBuildSession | null;
+  proposalSelection: Set<string>;
+  committing: boolean;
+  themeMode: ThemeMode;
+  onToggleProposalTile: (tileId: string) => void;
+  onCommitProposal: () => void;
   saving: boolean;
   error: string | null;
   onBack: () => void;
@@ -814,7 +862,10 @@ function AppCreateSurface({
   const selected = catalog.filter((block) => selectedBlocks.has(block.id));
   const contextDomainLabel = domain.trim() || 'Auto domain';
   const contextOwnerLabel = owner.trim() || 'Local owner';
-  const plan = generated?.plan ?? planFromSelection(appName, prompt, domain, owner, selected);
+  const proposal = buildSession?.status === 'proposed' ? buildSession.proposal : undefined;
+  const plan = generated?.plan
+    ?? (buildSession?.plan as GeneratedAppPlan | undefined)
+    ?? planFromSelection(appName, prompt, domain, owner, selected);
   const planTiles = plan.pages[0]?.tiles ?? [];
   const certifiedPlanTiles = planTiles.filter(isCertifiedPlanTile);
   const sessionWarnings = buildSession?.warnings ?? [];
@@ -907,6 +958,20 @@ function AppCreateSurface({
                 />
               ) : null}
             </details>
+
+            {proposal && !generated ? (
+              <div style={{ border: `1px solid ${themes[themeMode].cellBorder}`, background: themes[themeMode].appBg, borderRadius: 10, padding: 14 }}>
+                <AppBuildProposalPanel
+                  proposal={proposal}
+                  t={themes[themeMode]}
+                  selected={proposalSelection}
+                  onToggle={onToggleProposalTile}
+                  onCreate={onCommitProposal}
+                  busy={committing}
+                  error={null}
+                />
+              </div>
+            ) : null}
 
             {generated ? (
               <div className="dql-app-ai-result dql-app-ai-start-result">
@@ -1080,6 +1145,8 @@ function AppWorkspaceSurface({
             dashboardId: dashboardDoc?.dashboard.id,
             blockId,
           },
+          // The app's own suggested questions (uncovered gaps from the AI build).
+          suggestedQuestions: (dashboardDoc?.app as { copilot?: { suggestedQuestions?: string[] } } | undefined)?.copilot?.suggestedQuestions,
         },
         autoRun: { text: question, mode: 'auto' },
       });

@@ -648,4 +648,52 @@ describe("generateAppFromPlan", () => {
       expect(parseAppDocument(readFileSync(join(projectRoot, generated.paths[0]), "utf-8")).errors).toEqual([]);
       expect(parseDashboardDocument(readFileSync(join(projectRoot, generated.paths[1]), "utf-8")).errors).toEqual([]);
     }));
+
+  it("writes a narrated story layout when a narration is supplied — with real numbers in the exec summary", () =>
+    withKg(revenueNodes, (kg, dir) => {
+      const projectRoot = join(dir, "project");
+      const plan = planAppFromPrompt({
+        prompt: "Build a weekly revenue health app for the COO",
+        kg,
+        owner: "ops@example.com",
+      });
+
+      const generated = generateAppFromPlan(projectRoot, plan, kg, {
+        narration: {
+          summary: "Weekly revenue reached $57,335 across 62 orders, led by returning customers.",
+          keyFindings: [
+            "Top customer lifetime spend is $57,335 across 62 orders.",
+            "Returning customers drive the majority of revenue.",
+          ],
+          recommendation: "Review the returning-customer cohort before certifying.",
+          source: "deterministic",
+        },
+      });
+
+      const dashboardText = readFileSync(join(projectRoot, generated.paths[1]), "utf-8");
+      const parsed = parseDashboardDocument(dashboardText);
+      expect(parsed.errors).toEqual([]);
+      const doc = parsed.document!;
+
+      // Story sections exist and start with the exec summary.
+      expect(doc.sections?.length).toBeGreaterThan(0);
+      expect(doc.sections?.[0]).toMatchObject({ kind: "exec_summary", narrative: expect.stringContaining("$57,335") });
+
+      // The narrated exec-summary tile leads the layout, full width, with the numbers.
+      const execTile = doc.layout.items.find((item) => item.sectionId === "exec_summary");
+      expect(execTile?.text?.markdown).toContain("$57,335");
+      expect(execTile?.text?.markdown).toContain("**Next:**");
+      expect(execTile?.w).toBe(12);
+
+      // Every other tile is tagged into a real section.
+      const sectionIds = new Set(doc.sections!.map((section) => section.id));
+      expect(doc.layout.items.every((item) => item.sectionId && sectionIds.has(item.sectionId))).toBe(true);
+
+      // Without narration the classic layout is unchanged (no sections at all).
+      const plainPlan = { ...plan, appId: `${plan.appId}-plain` };
+      const plain = generateAppFromPlan(projectRoot, plainPlan, kg);
+      const plainDoc = parseDashboardDocument(readFileSync(join(projectRoot, plain.paths[1]), "utf-8")).document!;
+      expect(plainDoc.sections).toBeUndefined();
+      expect(plainDoc.layout.items.every((item) => item.sectionId === undefined)).toBe(true);
+    }));
 });

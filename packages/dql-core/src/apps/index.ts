@@ -54,4 +54,5 @@ export type {
   DashboardGridItem,
   DashboardLoadResult,
   DashboardParseError,
+  DashboardSection,
 } from './dashboard-document.js';

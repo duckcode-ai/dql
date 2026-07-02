@@ -164,6 +164,8 @@ export interface GlobalAiContext {
   workspaceContext?: Record<string, unknown>;
   scopeHint?: string;
   title?: string;
+  /** Contextual suggested questions (e.g. the app's uncovered analysis gaps). */
+  suggestedQuestions?: string[];
 }
 
 export interface GlobalAiState {

@@ -137,7 +137,7 @@ import {
   type PlanBlock,
 } from '@duckcodeailabs/dql-agent';
 import { gatherProposeEnrichment } from './propose-enrich.js';
-import { createAppAiBuildSession, handleAppsApi, recommendVisualization } from './apps-api.js';
+import { handleAppsApi, proposeAppAiBuild, recommendVisualization } from './apps-api.js';
 import {
   getActiveProvider,
   getEffectiveProviderConfig,
@@ -1005,18 +1005,29 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
     app_build: async ({ request, routeDecision, emit }) => {
       emit({
         type: 'executor.started',
-        message: 'Creating app build session from governed app builder.',
+        message: 'Planning the app: matching certified blocks and finding coverage gaps.',
         route: 'app_build',
       });
-      let session: Awaited<ReturnType<typeof createAppAiBuildSession>>;
+      // Two-phase build: this run only PROPOSES the content list (no files). The
+      // user confirms the selection and the UI calls the commit endpoint directly.
+      let session: Awaited<ReturnType<typeof proposeAppAiBuild>>;
       try {
-        session = await createAppAiBuildSession(projectRoot, {
+        session = await proposeAppAiBuild(projectRoot, {
           prompt: request.question,
           domain: agentRunWorkspaceValue(request, 'domain'),
           owner: agentRunWorkspaceValue(request, 'owner'),
           notebookPath: agentRunWorkspaceValue(request, 'notebookPath') ?? request.selectedObject?.path,
           selectedBlockIds: parseAgentRunSelectedBlockIds(request),
           plannerMode: 'deterministic',
+        }, {
+          generateGovernedAnswer: async (question) => {
+            emit({
+              type: 'executor.started',
+              message: `Generating review-required SQL for an uncovered question: ${question}`,
+              route: 'app_build',
+            });
+            return runGovernedAgentAnswerForRun({ question } as AgentRunRequest);
+          },
         });
       } catch (error) {
         const message = formatAgentRunInfrastructureError(error, 'App build storage');
@@ -1042,44 +1053,53 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           ],
         };
       }
-      const ready = session.status === 'ready';
+      const proposal = session.status === 'proposed' ? session.proposal : undefined;
+      // A real app needs a certified anchor: only offer confirmation when at least
+      // one certified tile is present. Otherwise fall through to the escalate path
+      // (research / draft the missing blocks) so the user isn't sent to a dead end.
+      const proposed = Boolean(proposal && proposal.tiles.some((tile) => tile.certification === 'certified' && !tile.error));
       const sessionPlan = agentRunRecord(session.plan);
-      const appTitle = agentRunString(sessionPlan?.name) ?? 'App draft';
+      const appTitle = agentRunString(sessionPlan?.name) ?? 'App proposal';
+      const certifiedCount = proposal?.coverage.certifiedTiles ?? 0;
+      const generatedCount = proposal?.coverage.generatedTiles ?? 0;
+      const gapCount = proposal?.coverage.gaps ?? 0;
       // A coverage gap is NOT terminal — leave status open so the gate can escalate to
       // drafting the missing blocks. Only genuine infra errors (the catch above) block.
       return {
-        summary: ready
-          ? 'Created a review-required app draft session from certified DQL assets.'
-          : 'App build needs more certified DQL coverage before files can be generated.',
-        status: ready ? 'needs_review' : undefined,
-        trustState: ready ? 'review_required' : undefined,
-        stopReason: ready ? 'human_review_required' : undefined,
-        artifacts: ready ? [agentRunArtifact('app_draft', appTitle, {
-          session,
+        summary: proposed
+          ? `Proposed ${certifiedCount} certified tile${certifiedCount === 1 ? '' : 's'}`
+            + (generatedCount > 0 ? ` + ${generatedCount} AI-generated (review required)` : '')
+            + (gapCount > 0 ? `; ${gapCount} question${gapCount === 1 ? '' : 's'} still uncovered` : '')
+            + '. Review the list and confirm to create the app.'
+          : 'App build needs more certified DQL coverage before a proposal can be assembled.',
+        status: proposed ? 'needs_review' : undefined,
+        trustState: proposed ? 'review_required' : undefined,
+        stopReason: proposed ? 'human_review_required' : undefined,
+        artifacts: proposed ? [agentRunArtifact('app_proposal', appTitle, {
           sessionId: session.id,
           appId: session.appId,
           dashboardId: session.dashboardId,
-          generatedPaths: session.generatedPaths,
           plan: session.plan,
-          validation: session.validation,
+          proposal,
+          warnings: session.warnings,
         }, session.appId)] : [],
         evaluations: [
           agentRunEvaluation('route-decision', 'Route decision', true, 'info', routeDecision?.reason ?? 'Routed request to app build.'),
           agentRunEvaluation(
             'app-coverage',
             'Certified coverage',
-            ready,
-            ready ? 'info' : 'blocking',
-            ready
-              ? 'Generated app files are backed by certified block tiles and saved as a draft app session.'
+            proposed,
+            proposed ? 'info' : 'blocking',
+            proposed
+              ? `Proposal is backed by ${certifiedCount} certified tile${certifiedCount === 1 ? '' : 's'}; nothing is created until you confirm.`
               : session.error ?? 'No certified app tiles matched the request.',
             session,
           ),
         ],
-        nextActions: ready
+        nextActions: proposed
           ? [
-              { id: 'open-app', label: 'Open app draft', artifactKind: 'app_draft' },
-              { id: 'create-gap-blocks', label: 'Create DQL drafts for gaps', route: 'dql_block_draft', artifactKind: 'dql_block_draft' },
+              { id: 'confirm-app-build', label: 'Create this app', artifactKind: 'app_proposal' },
+              { id: 'adjust-app-build', label: 'Adjust the plan', route: 'app_build', artifactKind: 'app_proposal' },
             ]
           : [
               { id: 'research-coverage', label: 'Research missing coverage', route: 'research', artifactKind: 'research_run' },
@@ -3401,6 +3421,12 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
             if (blocks.length === 0) blocks = collectPlanBlocks(projectRoot, { certifiedOnly: false });
             return planResearch({ question, metrics, blocks, isFollowUp });
           },
+          // Two-phase app build gap-fill: bounded governed answers for uncovered
+          // questions. Throws when no provider is configured — propose degrades
+          // gracefully by listing the gap instead.
+          generateGovernedAnswer: (question) => runGovernedAgentAnswerForRun({ question } as AgentRunRequest),
+          // Story narration for commit — LLM-backed with deterministic fallback.
+          narrate: narrateForAgentRun,
         });
         if (handled) return;
       } catch (err) {

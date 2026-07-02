@@ -31,8 +31,10 @@ import {
   type AgentRunSelectedObject,
   type AgentRunStep,
   type AgentRunStepStatus,
+  type AppBuildProposal,
 } from '../../api/client';
 import { themes, type Theme, type ThemeMode } from '../../themes/notebook-theme';
+import { AppBuildProposalPanel, defaultProposalSelection } from '../apps/AppBuildProposalPanel';
 import { ChartOutput } from '../output/ChartOutput';
 import { TableOutput } from '../output/TableOutput';
 import type { QueryResult, AppSummary } from '../../store/types';
@@ -623,6 +625,7 @@ function RunCard({
               onInsertSql={onInsertSql}
               onOpenBlock={onOpenBlock}
               onOpenResearch={onOpenResearch}
+              onOpenApp={onOpenApp}
             />
           ))}
         </div>
@@ -649,7 +652,8 @@ function RunCard({
               Research this deeper
             </button>
           ) : null}
-          {run.nextActions.filter((a) => a.id !== 'pin-to-app' && a.id !== 'research-deeper').map((action) => {
+          {/* confirm-app-build is owned by the proposal card itself, not a composer action. */}
+          {run.nextActions.filter((a) => a.id !== 'pin-to-app' && a.id !== 'research-deeper' && a.id !== 'confirm-app-build').map((action) => {
             const isCertify = action.id === 'request-certification';
             const label = isCertify && certifyState === 'sent'
               ? 'Sent to analyst'
@@ -886,6 +890,102 @@ function trustExplainer(run: AgentRun): string | null {
   return null;
 }
 
+/**
+ * The `app_proposal` artifact card: the confirmable pre-create content list from the
+ * two-phase app build. Owns the whole confirm flow — per-tile toggles, the Create
+ * call to the commit endpoint (a plain REST call keyed by sessionId, same pattern as
+ * AddToAppButton), and the created-app success state with an Open link.
+ */
+function AppProposalArtifact({
+  artifact,
+  payload,
+  t,
+  onOpenApp,
+}: {
+  artifact: AgentRunArtifact;
+  payload: Record<string, unknown>;
+  t: Theme;
+  onOpenApp?: (appId: string, dashboardId?: string) => void;
+}) {
+  const sessionId = typeof payload.sessionId === 'string' ? payload.sessionId : undefined;
+  const proposal = payload.proposal && typeof payload.proposal === 'object'
+    ? payload.proposal as AppBuildProposal
+    : undefined;
+  const [selected, setSelected] = useState<Set<string>>(() => (proposal ? defaultProposalSelection(proposal) : new Set()));
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [created, setCreated] = useState<{ appId: string; dashboardId?: string; name: string } | null>(null);
+
+  if (!proposal || !sessionId) {
+    return (
+      <div style={artifactStyle(t)}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+          <ArtifactIcon kind={artifact.kind} />
+          <div style={{ fontSize: 12, fontWeight: 800, color: t.textPrimary }}>{artifact.title}</div>
+        </div>
+        <div style={{ fontSize: 11.5, color: t.textMuted }}>This proposal is no longer available. Ask again to rebuild it.</div>
+      </div>
+    );
+  }
+
+  const commit = async () => {
+    setBusy(true);
+    setError(null);
+    const result = await api.commitAppAiBuild(sessionId, { selectedTileIds: Array.from(selected) });
+    setBusy(false);
+    if (!result.ok) {
+      setError(result.error);
+      return;
+    }
+    setCreated({
+      appId: result.app?.id ?? result.session.appId ?? '',
+      dashboardId: result.dashboardId ?? undefined,
+      name: result.app?.name ?? artifact.title,
+    });
+  };
+
+  return (
+    <div style={artifactStyle(t)}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+        <ArtifactIcon kind={artifact.kind} />
+        <div style={{ fontSize: 12, fontWeight: 800, color: t.textPrimary, flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+          {artifact.title}
+        </div>
+      </div>
+      {created ? (
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+          <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6, color: t.success, fontSize: 12, fontWeight: 750 }}>
+            <CheckCircle2 size={13} /> Created {created.name}
+          </span>
+          {created.appId && onOpenApp ? (
+            <button type="button" className="dql-hover" onClick={() => onOpenApp(created.appId, created.dashboardId)} style={smallButtonStyle(t)}>
+              Open app
+            </button>
+          ) : null}
+        </div>
+      ) : (
+        <AppBuildProposalPanel
+          proposal={proposal}
+          t={t}
+          selected={selected}
+          onToggle={(tileId) => {
+            setSelected((current) => {
+              const next = new Set(current);
+              if (next.has(tileId)) next.delete(tileId);
+              else next.add(tileId);
+              return next;
+            });
+          }}
+          onCreate={() => void commit()}
+          busy={busy}
+          error={error}
+          compact
+        />
+      )}
+    </div>
+  );
+}
+
 function ArtifactView({
   artifact,
   t,
@@ -893,6 +993,7 @@ function ArtifactView({
   onInsertSql,
   onOpenBlock,
   onOpenResearch,
+  onOpenApp,
 }: {
   artifact: AgentRunArtifact;
   t: Theme;
@@ -900,8 +1001,13 @@ function ArtifactView({
   onInsertSql?: (sql: string, title?: string) => void;
   onOpenBlock?: (path: string, name?: string) => void;
   onOpenResearch?: (id: string, notebookPath?: string) => void;
+  onOpenApp?: (appId: string, dashboardId?: string) => void;
 }) {
   const payload = artifact.payload && typeof artifact.payload === 'object' ? artifact.payload as Record<string, unknown> : {};
+  // Two-phase app build: the proposal card owns the confirm flow (toggles + Create).
+  if (artifact.kind === 'app_proposal') {
+    return <AppProposalArtifact artifact={artifact} payload={payload} t={t} onOpenApp={onOpenApp} />;
+  }
   const resultData = extractResult(payload);
   const sql = typeof payload.sql === 'string'
     ? payload.sql
@@ -1006,7 +1112,7 @@ function StatusIcon({ run }: { run: AgentRun }) {
 function ArtifactIcon({ kind }: { kind: AgentRunArtifact['kind'] }) {
   if (kind === 'sql_cell') return <Code2 size={14} />;
   if (kind === 'dql_block_draft') return <Blocks size={14} />;
-  if (kind === 'app_draft') return <LayoutDashboard size={14} />;
+  if (kind === 'app_draft' || kind === 'app_proposal') return <LayoutDashboard size={14} />;
   if (kind === 'research_run') return <FileSearch size={14} />;
   return <Sparkles size={14} />;
 }
