@@ -11,7 +11,7 @@ open the notebook, and see end-to-end lineage.
 
 ## Prerequisites
 
-- **Node.js** 20 or 22 LTS (check: `node --version`)
+- **Node.js** 20 or newer — 20, 22, or 24 LTS (check: `node --version`)
 - **git** (any modern version)
 - A dbt project with `target/manifest.json`
 - Optional for tutorial 04: `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`,

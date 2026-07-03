@@ -1,6 +1,6 @@
 # Connectors
 
-DQL `1.6.17` uses a flat install. The CLI installs quickly and does not bundle
+DQL uses a flat install. The CLI installs quickly and does not bundle
 every database driver. Configure connections in `dql.config.json` or through
 the notebook connection panel.
 
@@ -14,7 +14,7 @@ the notebook connection panel.
 | Snowflake | `snowflake` | Project-local install | Supports password, key pair, SSO, OAuth, PAT, MFA, and workload identity fields |
 
 Other warehouse connectors are planned/legacy code paths, but they are not
-active in the lightweight `1.6.17` package.
+active in the lightweight package.
 
 ## Project-local driver install
 

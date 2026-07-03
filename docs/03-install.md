@@ -27,7 +27,7 @@ docker compose --profile slack  up   # adds the bot on :3479
 docker compose --profile ollama up   # adds local Ollama on :11434
 ```
 
-## Option B — npm (Node 20 or 22 LTS) · 2 minutes
+## Option B — npm (Node 20+; 20, 22, or 24 LTS) · 2 minutes
 
 If you already have Node, scaffold a project and run the notebook with the
 project-local DQL CLI:
@@ -155,19 +155,61 @@ Works on macOS, Linux, and Windows.
 
 ```bash
 dql --version
-# dql 1.6.17 or later
+# dql 1.6.30 or later
 ```
 
 If you see the version number, jump to the [Quickstart →](01-quickstart.md).
 
+## Upgrade
+
+DQL ships as regular npm packages, so upgrading is a normal `npm install` of the
+latest version — no separate updater.
+
+**Global CLI:**
+
+```bash
+npm i -g @duckcodeailabs/dql-cli@latest
+dql --version        # should print the new version
+```
+
+**Project-local CLI** (the recommended install — avoids stale global CLIs):
+
+```bash
+npm i -D @duckcodeailabs/dql-cli@latest
+npx dql --version
+```
+
+> **Upgrading from a version older than 1.6.30?** Older releases could fail to
+> install on Node 23/24 (the current LTS is Node 24), which left users with no
+> working `dql`. **1.6.30+ installs on Node 20, 22, and 24.** Just run the
+> upgrade command above on any supported Node — you don't need a working `dql`
+> to upgrade, and you don't need to downgrade Node.
+
+If `dql --version` still shows the old version (or `command not found`) after
+upgrading, see the two bullets below.
+
 ## Troubleshooting
 
-- **`command not found: dql`** — use `npm run notebook` inside a scaffolded
-  project, `npx dql ...` when the CLI is installed locally, or add your global
-  npm bin (`npm prefix -g`/bin) to `$PATH`.
-- **Node version errors** — DQL requires Node 20 or 22 LTS. Node 23 is not
-  supported for native local drivers. Install via
-  [nvm](https://github.com/nvm-sh/nvm) or [fnm](https://github.com/Schniz/fnm).
+- **`command not found: dql` (or `dql --version` shows an old version)** — the
+  quickest fix works with no PATH setup at all:
+  ```bash
+  npx @duckcodeailabs/dql-cli@latest notebook   # always runs the latest, ignores PATH
+  ```
+  To fix a global install so plain `dql` works, walk these in order:
+  ```bash
+  which -a dql                 # any stale copy (Homebrew, a venv, an old global) shadowing it?
+  hash -r                      # clear the shell's cached command path (or open a new terminal)
+  npm ls -g @duckcodeailabs/dql-cli   # is it actually installed globally?
+  npm prefix -g                # your global prefix; ensure "<prefix>/bin" is on $PATH
+  npm i -g @duckcodeailabs/dql-cli@latest   # reinstall if a prior install had failed
+  ```
+  A failed `npm i -g` (common on Node 23/24 before 1.6.30) never links the `dql`
+  binary, which shows up as `command not found` — reinstalling `@latest` fixes it.
+  In a scaffolded project you can always use `npm run notebook` / `npx dql ...`
+  instead of a global command.
+- **Node version** — DQL needs Node 20 or newer (20, 22, or 24 LTS). As of
+  **1.6.30** the native local drivers install on Node 23 and 24 too. Manage Node
+  with [nvm](https://github.com/nvm-sh/nvm) or [fnm](https://github.com/Schniz/fnm).
 - **Port already in use** — edit `docker-compose.yml` and change
   `127.0.0.1:3474:3474` to map a different host port (e.g. `:3475:3474`).
 - **Container can't see your project** — confirm `volumes: ./:/workspace`

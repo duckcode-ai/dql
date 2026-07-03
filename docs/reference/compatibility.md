@@ -2,7 +2,8 @@
 
 ## Runtime
 
-- **Node.js** — 20 or 22 LTS. Node 23 is not supported for native local drivers.
+- **Node.js** — 20 or newer (20, 22, or 24 LTS). As of **1.6.30** the native
+  local drivers install on Node 23 and 24 too (earlier releases capped at 22).
 - **Package managers** — npm, pnpm, yarn all work for consuming published packages
 - **OS** — macOS, Linux, Windows
 

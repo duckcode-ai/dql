@@ -8,7 +8,7 @@ Real fixes for the things that bite people first.
 
 ### `dql` says "command not found"
 
-In a scaffolded project the CLI is a local dev dependency, exposed through
+**In a scaffolded project** the CLI is a local dev dependency, exposed through
 npm scripts (`npm run notebook`, `npm run compile`, …). For ad-hoc commands
 use `npx`:
 
@@ -19,6 +19,40 @@ npx dql certify blocks/revenue_by_month.dql
 
 If `npx dql` still fails, re-run `npm install` — the dependency link
 probably broke.
+
+**With a global install** (`npm i -g @duckcodeailabs/dql-cli`), a bare `dql`
+that reports "command not found" almost always means one of three things:
+
+```bash
+npx @duckcodeailabs/dql-cli@latest --version   # escape hatch: no PATH needed at all
+which -a dql            # a stale Homebrew / venv / old global copy shadowing it?
+hash -r                 # clear the shell's cached path, or just open a new terminal
+npm prefix -g           # ensure "<that path>/bin" is on your $PATH
+npm i -g @duckcodeailabs/dql-cli@latest   # a failed earlier install never links the bin
+```
+
+The last one is the usual culprit for existing users: before **1.6.30**, a
+global install could **fail on Node 23/24** (the current LTS is Node 24). A
+failed `npm i -g` never creates the `dql` symlink, so the command is missing
+even though "install" appeared to run. Reinstalling `@latest` on any Node ≥20
+fixes it — see [How do I upgrade DQL?](#how-do-i-upgrade-dql) below.
+
+### How do I upgrade DQL?
+
+DQL is plain npm packages — upgrading is just installing the latest version.
+
+```bash
+# Global CLI
+npm i -g @duckcodeailabs/dql-cli@latest && dql --version
+
+# Project-local CLI (recommended)
+npm i -D @duckcodeailabs/dql-cli@latest && npx dql --version
+```
+
+You do **not** need a working `dql` to upgrade, and you do **not** need to
+downgrade Node — 1.6.30+ installs on Node 20, 22, and 24. If `dql --version`
+still shows the old number afterward, run `hash -r` (or open a new shell) and
+check `which -a dql` for a shadowing copy.
 
 ### `dql --version` works, but `cd dql` says "no such file or directory"
 
@@ -39,7 +73,7 @@ root.
 DuckDB and Snowflake drivers are installed project-locally when needed. If the
 connection panel says a driver package is missing, install it from the panel or
 run the printed project-local install command. If a native package fails to
-build on a fresh OS install, check Node `20` or `22` LTS and local build tools.
+build on a fresh OS install, check Node `20`, `22`, or `24` LTS and local build tools.
 
 ```bash
 node -v
