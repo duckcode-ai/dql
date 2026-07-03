@@ -20,6 +20,8 @@ import { existsSync } from 'node:fs';
 import type { AgentRunRequest, AgentRunner, AgentTurn, BlockProposal, ProviderId } from '../types.js';
 import { getEffectiveProviderConfig } from '../../settings/provider-settings.js';
 import { ClaudeCodeCliProvider, CodexCliProvider } from '../../providers/subscription-cli.js';
+import { ClaudeOAuthProvider, claudeOAuthConnected } from '../../providers/oauth/claude-oauth.js';
+import { CodexOAuthProvider, codexOAuthConnected } from '../../providers/oauth/codex-oauth.js';
 
 /**
  * Providers the governed answer-loop runner can drive. Beyond the API-key/local
@@ -79,14 +81,25 @@ const SPECS: Record<SimpleProviderId, ProviderSpec> = {
     },
   },
   'claude-code': {
-    label: 'Claude subscription (Claude Code CLI)',
-    setup: 'Install the `claude` CLI and run `claude /login` with your Claude subscription.',
-    create: (projectRoot) => new ClaudeCodeCliProvider({ model: getEffectiveProviderConfig(projectRoot, 'claude-code').model }),
+    label: 'Claude subscription',
+    setup: 'Open Settings → Claude subscription and click "Sign in with Claude" (or install the `claude` CLI and run `claude /login`).',
+    // OAuth-first: use the browser-login token when connected; fall back to the CLI-passthrough otherwise.
+    create: (projectRoot) => {
+      const model = getEffectiveProviderConfig(projectRoot, 'claude-code').model;
+      return claudeOAuthConnected(projectRoot)
+        ? new ClaudeOAuthProvider({ projectRoot, model })
+        : new ClaudeCodeCliProvider({ model });
+    },
   },
   codex: {
-    label: 'ChatGPT subscription (Codex CLI)',
-    setup: 'Install the `codex` CLI and run `codex login` with your ChatGPT plan.',
-    create: (projectRoot) => new CodexCliProvider({ model: getEffectiveProviderConfig(projectRoot, 'codex').model }),
+    label: 'ChatGPT subscription',
+    setup: 'Open Settings → ChatGPT subscription and click "Sign in with ChatGPT" (or install the `codex` CLI and run `codex login`).',
+    create: (projectRoot) => {
+      const model = getEffectiveProviderConfig(projectRoot, 'codex').model;
+      return codexOAuthConnected(projectRoot)
+        ? new CodexOAuthProvider({ projectRoot, model })
+        : new CodexCliProvider({ model });
+    },
   },
 };
 

@@ -1,7 +1,9 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   api,
   type AgentMemory,
+  type OAuthProviderId,
+  type OAuthStatus,
   type ProviderCliStatus,
   type ProviderSettings,
   type ProviderSettingsId,
@@ -574,6 +576,142 @@ function GroupLabel({ title, detail, t }: { title: string; detail: string; t: Th
   );
 }
 
+/** Map a subscription settings id to its OAuth provider id. */
+function oauthProviderFor(id: ProviderSettingsId): OAuthProviderId {
+  return id === 'codex' ? 'codex' : 'claude';
+}
+
+/**
+ * Browser sign-in for a subscription provider (Claude Pro/Max, ChatGPT Plus/Pro).
+ * "Sign in" opens the provider's OAuth page in a new tab; the local callback
+ * captures the redirect and stores the token, and we poll until connected —
+ * then auto-activate with the subscription's default model. Falls back to a note
+ * about the CLI path.
+ */
+function SubscriptionOAuthPanel({
+  oauthProvider,
+  label,
+  model,
+  setModel,
+  cliStatus,
+  command,
+  loginCmd,
+  t,
+  onStatus,
+  onConnected,
+}: {
+  oauthProvider: OAuthProviderId;
+  label: string;
+  model: string;
+  setModel: (m: string) => void;
+  cliStatus?: ProviderCliStatus;
+  command?: string;
+  loginCmd: string;
+  t: Theme;
+  onStatus: (message: string | null) => void;
+  onConnected: (defaultModel: string) => void;
+}) {
+  const [status, setStatus] = useState<OAuthStatus | null>(null);
+  const [busy, setBusy] = useState(false);
+  const pollRef = useRef<number | null>(null);
+  const mountedRef = useRef(true);
+  const brand = oauthProvider === 'codex' ? 'ChatGPT' : 'Claude';
+
+  const stopPolling = useCallback(() => {
+    if (pollRef.current !== null) {
+      window.clearInterval(pollRef.current);
+      pollRef.current = null;
+    }
+  }, []);
+
+  useEffect(() => {
+    mountedRef.current = true;
+    api.getOAuthStatus(oauthProvider).then((s) => { if (mountedRef.current) setStatus(s); }).catch(() => { /* offline */ });
+    return () => { mountedRef.current = false; stopPolling(); };
+  }, [oauthProvider, stopPolling]);
+
+  const signIn = async () => {
+    setBusy(true);
+    try {
+      const res = await api.startOAuth(oauthProvider);
+      setStatus(res);
+      window.open(res.url, '_blank', 'noopener,noreferrer');
+      onStatus(`Opened your browser to sign in to ${brand}. Complete it there — this updates automatically.`);
+      const started = Date.now();
+      stopPolling();
+      pollRef.current = window.setInterval(async () => {
+        const s = await api.getOAuthStatus(oauthProvider).catch(() => null);
+        if (!mountedRef.current) { stopPolling(); return; }
+        if (s) setStatus(s);
+        if (s?.connected) {
+          stopPolling();
+          setBusy(false);
+          onConnected(s.defaultModel);
+        } else if (Date.now() - started > 5 * 60 * 1000) {
+          stopPolling();
+          setBusy(false);
+          onStatus(`${brand} sign-in timed out. Try again.`);
+        }
+      }, 2500);
+    } catch (error) {
+      setBusy(false);
+      onStatus(error instanceof Error ? error.message : String(error));
+    }
+  };
+
+  const signOut = async () => {
+    setBusy(true);
+    stopPolling();
+    try {
+      setStatus(await api.signOutOAuth(oauthProvider));
+      onStatus(`Signed out of ${brand}.`);
+    } catch (error) {
+      onStatus(error instanceof Error ? error.message : String(error));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  if (status?.connected) {
+    const models = status.models.length > 0 ? status.models : [status.defaultModel];
+    return (
+      <div style={{ display: 'grid', gap: 8 }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 12.5 }}>
+          <span style={{ color: '#16a34a', fontWeight: 700 }}>✓ Signed in to {brand}</span>
+          {status.email ? <span style={{ color: t.textSecondary }}>as {status.email}</span> : null}
+        </div>
+        <label style={{ fontSize: 11, color: t.textSecondary, fontWeight: 600 }}>Model</label>
+        <select value={model || status.defaultModel} onChange={(e) => setModel(e.target.value)} style={inputStyle(t)}>
+          {models.map((m) => <option key={m} value={m}>{m}</option>)}
+        </select>
+        <div>
+          <button type="button" onClick={signOut} disabled={busy} style={buttonStyle(t, false)}>Sign out</button>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div style={{ display: 'grid', gap: 8 }}>
+      <button type="button" onClick={signIn} disabled={busy} style={buttonStyle(t, true)}>
+        {busy || status?.pending ? `Waiting for ${brand}…` : `Sign in with ${brand}`}
+      </button>
+      <div style={{ fontSize: 12, color: t.textSecondary, lineHeight: 1.5 }}>
+        No API key needed — signs in with your {brand} subscription in the browser.
+      </div>
+      <details>
+        <summary style={{ fontSize: 11.5, color: t.textSecondary, cursor: 'pointer' }}>Prefer the CLI?</summary>
+        <div style={{ marginTop: 6, display: 'grid', gap: 6 }}>
+          <CliStatusLine status={cliStatus} command={command} loginCmd={loginCmd} t={t} />
+          <div style={{ fontSize: 11.5, color: t.textSecondary, lineHeight: 1.5 }}>
+            Or install the <code>{command}</code> CLI and run <code>{command} {loginCmd}</code>, then Enable + Save.
+          </div>
+        </div>
+      </details>
+    </div>
+  );
+}
+
 function ProviderCard({
   provider,
   cliStatus,
@@ -646,6 +784,21 @@ function ProviderCard({
     setTesting(false);
   };
 
+  // On a successful subscription sign-in: enable + activate this provider with the
+  // subscription's default model, so it's ready to use with no extra Save click.
+  const handleOAuthConnected = async (defaultModel: string) => {
+    const chosen = model || defaultModel;
+    setModel(chosen);
+    setEnabled(true);
+    try {
+      const result = await api.saveProviderSettings({ id: provider.id, enabled: true, model: chosen });
+      onSaved(result.providers);
+      onStatus(`${provider.label} connected and activated.`);
+    } catch (error) {
+      onStatus(error instanceof Error ? error.message : String(error));
+    }
+  };
+
   return (
     <section style={{ border: `1px solid ${t.headerBorder}`, borderRadius: 8, background: t.cellBg, padding: 14 }}>
       <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
@@ -667,13 +820,18 @@ function ProviderCard({
 
       <div style={{ display: 'grid', gap: 8, marginTop: 12 }}>
         {isSubscription ? (
-          <div style={{ display: 'grid', gap: 8 }}>
-            <CliStatusLine status={cliStatus} command={provider.command} loginCmd={loginCmd} t={t} />
-            <div style={{ fontSize: 12, color: t.textSecondary, lineHeight: 1.5, background: t.appBg, border: `1px solid ${t.headerBorder}`, borderRadius: 6, padding: '9px 11px' }}>
-              No API key needed — this uses your subscription via the <code>{provider.command}</code> CLI.
-              Install it and run <code>{provider.command} {loginCmd}</code> to sign in, then Enable and Save here.
-            </div>
-          </div>
+          <SubscriptionOAuthPanel
+            oauthProvider={oauthProviderFor(provider.id)}
+            label={provider.label}
+            model={model}
+            setModel={setModel}
+            cliStatus={cliStatus}
+            command={provider.command}
+            loginCmd={loginCmd}
+            t={t}
+            onStatus={onStatus}
+            onConnected={handleOAuthConnected}
+          />
         ) : (
           <>
             {provider.id !== 'ollama' && (
@@ -693,12 +851,14 @@ function ProviderCard({
             />
           </>
         )}
-        <input
-          value={model}
-          onChange={(e) => setModel(e.target.value)}
-          placeholder={isSubscription ? 'Default model (optional — e.g. sonnet, opus)' : 'Default model'}
-          style={inputStyle(t)}
-        />
+        {!isSubscription && (
+          <input
+            value={model}
+            onChange={(e) => setModel(e.target.value)}
+            placeholder="Default model"
+            style={inputStyle(t)}
+          />
+        )}
         {showReasoning && (
           <div style={{ display: 'grid', gap: 4 }}>
             <label style={{ fontSize: 11, color: t.textSecondary, fontWeight: 600 }}>Reasoning effort</label>

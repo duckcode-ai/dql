@@ -159,6 +159,18 @@ import {
 } from './settings/provider-settings.js';
 import { ClaudeCodeCliProvider, CodexCliProvider } from './providers/subscription-cli.js';
 import {
+  ClaudeOAuthManager,
+  claudeOAuthConnected,
+  CLAUDE_OAUTH_MODELS,
+  CLAUDE_OAUTH_DEFAULT_MODEL,
+} from './providers/oauth/claude-oauth.js';
+import {
+  CodexOAuthManager,
+  codexOAuthConnected,
+  CODEX_OAUTH_MODELS,
+  CODEX_OAUTH_DEFAULT_MODEL,
+} from './providers/oauth/codex-oauth.js';
+import {
   DQLAccessDeniedError,
   activePersonaAppId,
   assertAppAccess,
@@ -3175,6 +3187,60 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
         res.end(serializeJSON({ error: error instanceof Error ? error.message : String(error) }));
       }
       return;
+    }
+
+    // ── Subscription OAuth (Claude Pro/Max, ChatGPT Plus/Pro) ──────────────
+    {
+      const authMatch = path.match(/^\/api\/auth\/(claude|codex)\/(start|status|signout)$/);
+      if (authMatch) {
+        const oauthProvider = authMatch[1] as 'claude' | 'codex';
+        const action = authMatch[2] as 'start' | 'status' | 'signout';
+        const info = oauthProvider === 'claude'
+          ? { models: CLAUDE_OAUTH_MODELS as readonly string[], defaultModel: CLAUDE_OAUTH_DEFAULT_MODEL }
+          : { models: CODEX_OAUTH_MODELS as readonly string[], defaultModel: CODEX_OAUTH_DEFAULT_MODEL };
+        const manager = getOAuthManager(projectRoot, oauthProvider);
+        const statusPayload = () => {
+          const connected = oauthProvider === 'claude' ? claudeOAuthConnected(projectRoot) : codexOAuthConnected(projectRoot);
+          return {
+            provider: oauthProvider,
+            connected,
+            email: connected ? manager.getEmail() : null,
+            models: info.models,
+            defaultModel: info.defaultModel,
+            pending: manager.isPending(),
+          };
+        };
+        try {
+          if (action === 'status' && req.method === 'GET') {
+            res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+            res.end(serializeJSON(statusPayload()));
+            return;
+          }
+          if (action === 'signout' && req.method === 'POST') {
+            manager.signOut();
+            res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+            res.end(serializeJSON(statusPayload()));
+            return;
+          }
+          if (action === 'start' && req.method === 'POST') {
+            // Begin a fresh flow: build the authorize URL and start the loopback
+            // callback server. The client opens the URL; the server captures the
+            // redirect and persists tokens. The pending state lives on the manager,
+            // so a superseded flow settles cleanly. Errors surface on the next poll.
+            const url = manager.startAuthorizationFlow();
+            void manager.waitForCallback().catch(() => { /* timeout/denied/superseded — status stays disconnected */ });
+            res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+            res.end(serializeJSON({ url, ...statusPayload() }));
+            return;
+          }
+          res.writeHead(405, { 'Content-Type': 'application/json; charset=utf-8' });
+          res.end(serializeJSON({ error: 'Method not allowed' }));
+        } catch (error) {
+          res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' });
+          res.end(serializeJSON({ error: error instanceof Error ? error.message : String(error) }));
+        }
+        return;
+      }
     }
 
     if (req.method === 'POST' && path === '/api/settings/providers/test') {
@@ -7465,6 +7531,24 @@ function reasoningSettingsIdFor(provider: ProviderId): ProviderSettingsId {
 /** Type-guard for the reasoning-effort settings value from an untrusted request body. */
 function isReasoningEffortSetting(value: unknown): value is 'auto' | ReasoningEffort {
   return value === 'auto' || value === 'low' || value === 'medium' || value === 'high';
+}
+
+// Per-project singleton OAuth managers — they hold pending-auth state that must
+// survive between the `/start` request and the loopback callback. Keyed by
+// project root. "Pending" is derived from the manager itself (isPending) so a
+// superseded double-start can't desync a separate flag.
+const claudeOAuthManagers = new Map<string, ClaudeOAuthManager>();
+const codexOAuthManagers = new Map<string, CodexOAuthManager>();
+
+function getOAuthManager(projectRoot: string, provider: 'claude' | 'codex'): ClaudeOAuthManager | CodexOAuthManager {
+  if (provider === 'claude') {
+    let m = claudeOAuthManagers.get(projectRoot);
+    if (!m) { m = new ClaudeOAuthManager(projectRoot); claudeOAuthManagers.set(projectRoot, m); }
+    return m;
+  }
+  let m = codexOAuthManagers.get(projectRoot);
+  if (!m) { m = new CodexOAuthManager(projectRoot); codexOAuthManagers.set(projectRoot, m); }
+  return m;
 }
 
 /**

@@ -1206,6 +1206,19 @@ export interface ProviderSettings {
   supportsReasoningEffort?: boolean;
 }
 
+/** Subscription providers that support browser OAuth sign-in. */
+export type OAuthProviderId = 'claude' | 'codex';
+
+/** Connection state for a subscription OAuth provider (Claude Pro/Max, ChatGPT Plus/Pro). */
+export interface OAuthStatus {
+  provider: OAuthProviderId;
+  connected: boolean;
+  email: string | null;
+  models: string[];
+  defaultModel: string;
+  pending: boolean;
+}
+
 /** Live detection for a subscription-CLI provider. */
 export interface ProviderCliStatus {
   installed: boolean;
@@ -1905,6 +1918,18 @@ export const api = {
       method: 'POST',
       body: JSON.stringify(input),
     });
+  },
+
+  async startOAuth(provider: OAuthProviderId): Promise<OAuthStatus & { url: string }> {
+    return request(`/api/auth/${provider}/start`, { method: 'POST' });
+  },
+
+  async getOAuthStatus(provider: OAuthProviderId): Promise<OAuthStatus> {
+    return request(`/api/auth/${provider}/status`);
+  },
+
+  async signOutOAuth(provider: OAuthProviderId): Promise<OAuthStatus> {
+    return request(`/api/auth/${provider}/signout`, { method: 'POST' });
   },
 
   async testProviderSettings(
