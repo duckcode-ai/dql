@@ -3,7 +3,7 @@
 [![CI](https://github.com/duckcode-ai/dql/actions/workflows/ci.yml/badge.svg)](https://github.com/duckcode-ai/dql/actions/workflows/ci.yml)
 [![npm](https://img.shields.io/npm/v/@duckcodeailabs/dql-cli?label=dql-cli)](https://www.npmjs.com/package/@duckcodeailabs/dql-cli)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue)](./LICENSE)
-[![Node](https://img.shields.io/badge/node-20%20%7C%2022%20LTS-green)](https://nodejs.org)
+[![Node](https://img.shields.io/badge/node-20%20%7C%2022%20%7C%2024%20LTS-green)](https://nodejs.org)
 
 **DQL, Domain Query Language, is a Git-versioned analytics layer for dbt teams.**
 
@@ -114,9 +114,35 @@ dql sync dbt
 dql notebook
 ```
 
+## Install and upgrade the CLI
+
+DQL is plain npm packages. Most users install the CLI project-locally (via
+`create-dql-app`, above), but you can also install it globally:
+
+```bash
+npm i -g @duckcodeailabs/dql-cli        # install
+dql --version
+```
+
+Upgrading is just re-installing the latest — there is no separate updater:
+
+```bash
+npm i -g @duckcodeailabs/dql-cli@latest # global
+npm i -D @duckcodeailabs/dql-cli@latest # project-local (then: npx dql --version)
+```
+
+> **Stuck on `dql: command not found` after installing?** Before **1.6.30** a
+> global install could fail on Node 23/24 (the current LTS is Node 24), and a
+> failed `npm i -g` never links the `dql` binary. Just reinstall `@latest` on any
+> Node ≥20 — you don't need a working `dql` or an older Node. The escape hatch
+> that needs no PATH setup at all is `npx @duckcodeailabs/dql-cli@latest notebook`.
+> More in the [install guide](docs/03-install.md#upgrade) and
+> [troubleshooting](docs/guides/troubleshooting.md#dql-says-command-not-found).
+
 ## Before you install
 
-- Use Node `20` or `22` LTS. Avoid Node `23` or `24`.
+- Use Node `20` or newer — `20`, `22`, or `24` LTS. (Releases before 1.6.30
+  capped at Node 22; 1.6.30+ installs on Node 23 and 24 too.)
 - Use npm `10+`.
 - Use a dbt project if you want dbt import and lineage.
 - Python and native build tools are only needed when native database packages
